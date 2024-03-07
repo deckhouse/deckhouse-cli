@@ -5,7 +5,13 @@ builds:
   binary: d8
   goos:
   - linux
+  - darwin
+  # - windows
   goarch:
   - amd64
+  - arm64
+  ignore:
+  - goos: linux
+    goarch: arm64
 checksum:
   name_template: "checksums.txt"
