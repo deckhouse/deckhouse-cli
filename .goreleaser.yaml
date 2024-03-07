@@ -1,0 +1,11 @@
+builds:
+- env:
+  - GODEBUG=cgocheck=0
+  main: main.go
+  binary: d8
+  goos:
+  - linux
+  goarch:
+  - amd64
+checksum:
+  name_template: "checksums.txt"
