@@ -1,0 +1,42 @@
+version: '3'
+
+vars:
+  buildDate:
+    sh: date -u +'%Y-%m-%dT%H:%M:%SZ'
+  version:
+    sh: git describe --tags
+  ldFlags: -X 'github.com/deckhouse/deckhouse-cli/cmd.Version={{ .version }}'
+  kubectlVersion: v1.28.2
+  kubectlLDFlags:
+    sh: |
+      buildDate="{{ .buildDate }}"
+      gitCommit="0000000000000000000000000000000000000000"
+      gitTreeState="archive"
+      gitVersion="{{ .kubectlVersion }}"
+      _strippedGitVersion="${gitVersion#[vV]}"
+      gitMajor="$(cut -d. -f1 <<< "$_strippedGitVersion")"
+      gitMinor="$(cut -d. -f2 <<< "$_strippedGitVersion")"
+
+      declare -a ldflags
+      function add_ldflag() {
+        local key=${1}
+        local val=${2}
+        ldflags+=(
+            "-X 'k8s.io/client-go/pkg/version.${key}=${val}'"
+            "-X 'k8s.io/component-base/version.${key}=${val}'"
+        )
+      }
+
+      for ldflag in buildDate gitCommit gitTreeState gitVersion gitMajor gitMinor; do
+        add_ldflag "${ldflag}" "${!ldflag}"
+      done
+
+      echo "${ldflags[*]-}"
+
+
+
+tasks:
+  build:
+    desc: Build d8 binary
+    cmds:
+      - go build -o d8 -ldflags="{{ .ldFlags }} {{ .kubectlLDFlags }}" main.go

@@ -6,9 +6,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var Version string
+
 var rootCmd = &cobra.Command{
-	Use:   "d8",
-	Short: "d8 controls the Deckhouse Kubernetes Platform",
+	Use:     "d8",
+	Short:   "d8 controls the Deckhouse Kubernetes Platform",
+	Version: Version,
 }
 
 func Execute() {
