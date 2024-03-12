@@ -1,11 +1,10 @@
-version: '3'
+version: "3"
 
 vars:
   buildDate:
     sh: date -u +'%Y-%m-%dT%H:%M:%SZ'
   version:
     sh: git describe --tags
-  ldFlags: -X 'github.com/deckhouse/deckhouse-cli/cmd.Version={{ .version }}'
   kubectlVersion: v1.28.2
   kubectlLDFlags:
     sh: |
@@ -32,11 +31,62 @@ vars:
       done
 
       echo "${ldflags[*]-}"
-
-
+  ldFlags: -s -w -extldflags=-static -X 'github.com/deckhouse/deckhouse-cli/cmd.Version={{ .version }}' {{ .kubectlLDFlags }}
 
 tasks:
-  build:
-    desc: Build d8 binary
+  _build:dist:
+    internal: true
     cmds:
-      - go build -o d8 -ldflags="{{ .ldFlags }} {{ .kubectlLDFlags }}" main.go
+      - go build -o "{{ .outputDir | default (printf "./dist/%s/%s-%s" .version .targetOS .targetArch) }}/d8"
+        -ldflags="{{ .ldFlags }}" {{ .CLI_ARGS }} main.go
+    env:
+      CGO_ENABLED: "0"
+      GOOS: "{{ .targetOS }}"
+      GOARCH: "{{ .targetArch }}"
+
+  build:
+    desc: Build d8 binary for personal usage
+    run: once
+    cmds:
+      - task: build:dist:{{ OS }}:{{ ARCH }}
+        vars:
+          outputDir: "."
+
+  build:dist:all:
+    desc: Build all d8 release binaries in parallel
+    deps:
+      - build:dist:linux:amd64
+      - build:dist:darwin:amd64
+      - build:dist:darwin:arm64
+
+  build:dist:linux:amd64:
+    desc: Build d8 release binary for linux/amd64
+    cmds:
+      - task: _build:dist
+        vars:
+          targetOS: "linux"
+          targetArch: "amd64"
+          outputDir: "{{ .outputDir }}"
+
+  build:dist:darwin:amd64:
+    desc: Build d8 release binary for darwin/amd64
+    cmds:
+      - task: _build:dist
+        vars:
+          targetOS: "darwin"
+          targetArch: "amd64"
+          outputDir: "{{ .outputDir }}"
+
+  build:dist:darwin:arm64:
+    desc: Build d8 release binary for darwin/arm64
+    cmds:
+      - task: _build:dist
+        vars:
+          targetOS: "darwin"
+          targetArch: "arm64"
+          outputDir: "{{ .outputDir }}"
+
+  clean:
+    desc: Clean all binaries
+    cmds:
+      - rm -rf ./dist ./d8
