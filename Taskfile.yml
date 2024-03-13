@@ -86,6 +86,60 @@ tasks:
           targetArch: "arm64"
           outputDir: "{{ .outputDir }}"
 
+  _package:dist:
+    internal: true
+    dir: dist/{{ .version }}
+    cmds:
+      - cp ../../LICENSE ../../README.md {{ .target }}
+      - tar -zcf d8-{{ .version }}-{{ .target }}.tar.gz {{ .target }}
+
+  package:dist:all:
+    desc: Package all release assets in parallel
+    deps:
+      - package:dist:linux:amd64
+      - package:dist:darwin:amd64
+      - package:dist:darwin:arm64
+
+  package:dist:linux:amd64:
+    desc: Package release asset for linux/amd64
+    dir: dist/{{ .version }}
+    cmds:
+      - task: _package:dist
+        vars:
+          target: "linux-amd64"
+
+  package:dist:darwin:amd64:
+    desc: Package release asset for darwin/amd64
+    dir: dist/{{ .version }}
+    cmds:
+      - task: _package:dist
+        vars:
+          target: "darwin-amd64"
+
+  package:dist:darwin:arm64:
+    desc: Package release asset for darwin/arm64
+    dir: dist/{{ .version }}
+    cmds:
+      - task: _package:dist
+        vars:
+          target: "darwin-arm64"
+
+  checksum:
+    desc: Calculate sha256 checksum for release assets
+    dir: dist/{{ .version }}
+    cmds:
+      - |
+        for asset in *.tar.gz; do
+          shasum -a 256 "${asset}" > "${asset}".sha256sum
+        done
+
+  build-and-package:
+    desc: Build and package all d8 binaries
+    cmds:
+      - task: build:dist:all
+      - task: package:dist:all
+      - task: checksum
+
   clean:
     desc: Clean all binaries
     cmds:

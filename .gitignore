@@ -31,5 +31,6 @@ out/
 # Dev environment
 bin/
 
+# Release assets
 d8
-build/
+dist/
