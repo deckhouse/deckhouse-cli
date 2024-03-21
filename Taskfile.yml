@@ -1,6 +1,9 @@
 version: "3"
 
 vars:
+  os: "{{OS}}"
+  mode: '{{ternary "cgo" "go" (eq .os "linux")}}'
+  arch: '{{ternary "arm64" ARCH (eq ARCH "arm")}}'
   buildDate:
     sh: date -u +'%Y-%m-%dT%H:%M:%SZ'
   version:
@@ -31,26 +34,89 @@ vars:
       done
 
       echo "${ldflags[*]-}"
-  ldFlags: -s -w -extldflags=-static -X 'github.com/deckhouse/deckhouse-cli/cmd.Version={{ .version }}' {{ .kubectlLDFlags }}
+
+  cgoTags: "dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp osusergo exclude_graphdriver_devicemapper netgo no_devmapper static_build"
+  goTags: "dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp"
+
+  cgoDevLDFlags: "-linkmode external -extldflags=-static"
+  goDevLDFlags: ""
+
+  cgoReleaseLDFlags: "-linkmode external -extldflags=-static -s -w -X 'github.com/deckhouse/deckhouse-cli/cmd.Version={{ .version }}' {{ .kubectlLDFlags }}"
+  goReleaseLDFlags: "-s -w -X 'github.com/deckhouse/deckhouse-cli/cmd.Version={{ .version }}' {{ .kubectlLDFlags }}"
 
 tasks:
-  _build:dist:
-    internal: true
+  _build:cgo:dev:
     cmds:
-      - go build -o "{{ .outputDir | default (printf "./dist/%s/%s-%s" .version .targetOS .targetArch) }}/d8"
-        -ldflags="{{ .ldFlags }}" {{ .CLI_ARGS }} main.go
+      - go build -o "{{.outputDir | default (printf "./build/%s-%s" .targetOS .targetArch)}}/d8"
+        -compiler gc -ldflags="{{.cgoDevLDFlags}}" -tags="{{.cgoTags}}" {{.CLI_ARGS}} main.go
+    env:
+      CGO_ENABLED: "1"
+      GOOS: "{{.targetOS}}"
+      GOARCH: "{{.targetArch}}"
+      CC: "{{.cc}}"
+
+  _build:cgo:dist:
+    cmds:
+      - go build -o "{{.outputDir | default (printf "./dist/%s/%s-%s/bin" .version .targetOS .targetArch)}}/d8"
+        -compiler gc -ldflags="{{.cgoReleaseLDFlags}}" -tags="{{.cgoTags}}" {{.CLI_ARGS}} main.go
+    env:
+      CGO_ENABLED: "1"
+      GOOS: "{{.targetOS}}"
+      GOARCH: "{{.targetArch}}"
+      CC: "{{.cc}}"
+
+  _build:go:dev:
+    cmds:
+      - go build -o "{{.outputDir | default (printf "./build/%s-%s" .targetOS .targetArch)}}/d8"
+        -ldflags="{{.goDevLDFlags}}" -tags="{{.goTags}}" {{.CLI_ARGS}} main.go
     env:
       CGO_ENABLED: "0"
-      GOOS: "{{ .targetOS }}"
-      GOARCH: "{{ .targetArch }}"
+      GOOS: "{{.targetOS}}"
+      GOARCH: "{{.targetArch}}"
+
+  _build:go:dist:
+    cmds:
+      - go build -o "{{.outputDir | default (printf "./dist/%s/%s-%s/bin" .version .targetOS .targetArch)}}/d8"
+        -ldflags="{{.goReleaseLDFlags}}" -tags="{{.goTags}}" {{.CLI_ARGS}} main.go
+    env:
+      CGO_ENABLED: "0"
+      GOOS: "{{.targetOS}}"
+      GOARCH: "{{.targetArch}}"
 
   build:
     desc: Build d8 binary for personal usage
     run: once
     cmds:
-      - task: build:dist:{{ OS }}:{{ ARCH }}
+      - task: build:dev:{{ .os }}:{{ .arch }}
         vars:
           outputDir: "."
+
+  build:dev:linux:amd64:
+    desc: Build d8 dev binary for linux/amd64
+    cmds:
+      - task: _build:cgo:dev
+        vars:
+          targetOS: "linux"
+          targetArch: "amd64"
+          outputDir: "{{.outputDir}}"
+
+  build:dev:darwin:amd64:
+    desc: Build d8 dev binary for darwin/amd64
+    cmds:
+      - task: _build:go:dev
+        vars:
+          targetOS: "darwin"
+          targetArch: "amd64"
+          outputDir: "{{.outputDir}}"
+
+  build:dev:darwin:arm64:
+    desc: Build d8 dev binary for darwin/arm64
+    cmds:
+      - task: _build:go:dev
+        vars:
+          targetOS: "darwin"
+          targetArch: "arm64"
+          outputDir: "{{.outputDir}}"
 
   build:dist:all:
     desc: Build all d8 release binaries in parallel
@@ -62,7 +128,7 @@ tasks:
   build:dist:linux:amd64:
     desc: Build d8 release binary for linux/amd64
     cmds:
-      - task: _build:dist
+      - task: _build:cgo:dist
         vars:
           targetOS: "linux"
           targetArch: "amd64"
@@ -71,7 +137,7 @@ tasks:
   build:dist:darwin:amd64:
     desc: Build d8 release binary for darwin/amd64
     cmds:
-      - task: _build:dist
+      - task: _build:go:dist
         vars:
           targetOS: "darwin"
           targetArch: "amd64"
@@ -80,7 +146,7 @@ tasks:
   build:dist:darwin:arm64:
     desc: Build d8 release binary for darwin/arm64
     cmds:
-      - task: _build:dist
+      - task: _build:go:dist
         vars:
           targetOS: "darwin"
           targetArch: "arm64"
