@@ -20,19 +20,19 @@ Initially copied from https://github.com/kubevirt/kubevirt/blob/main/pkg/virtctl
 package virtualization
 
 import (
-	"github.com/deckhouse/deckhouse-cli/pkg/virtualization/cmd/console"
-	"github.com/deckhouse/deckhouse-cli/pkg/virtualization/cmd/portforward"
-	"github.com/deckhouse/deckhouse-cli/pkg/virtualization/cmd/scp"
-	"github.com/deckhouse/deckhouse-cli/pkg/virtualization/cmd/ssh"
-	"github.com/deckhouse/deckhouse-cli/pkg/virtualization/cmd/vnc"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/console"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/portforward"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/scp"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/ssh"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/vnc"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/component-base/logs"
 	"os"
 	"strings"
 
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
 	"github.com/deckhouse/virtualization/api/client/kubecli"
-	"github.com/deckhouse/deckhouse-cli/pkg/virtualization/templates"
 )
 
 func NewCommand(programName string) (*cobra.Command, clientcmd.ClientConfig) {

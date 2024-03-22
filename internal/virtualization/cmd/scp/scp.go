@@ -24,8 +24,8 @@ import (
 
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/virtualization/cmd/ssh"
-	"github.com/deckhouse/deckhouse-cli/pkg/virtualization/templates"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/ssh"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
 )
 
 const (

@@ -21,7 +21,7 @@ package ssh
 
 import (
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/pkg/virtualization/templates"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"k8s.io/client-go/tools/clientcmd"
