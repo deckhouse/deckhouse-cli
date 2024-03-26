@@ -34,3 +34,4 @@ bin/
 # Release assets
 d8
 dist/
+build/
