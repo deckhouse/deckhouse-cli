@@ -17,7 +17,8 @@ func init() {
 		werfcommon.TerminateWithError(err.Error(), 1)
 	}
 
-	werfRootCmd.Use = "delivery"
+	werfRootCmd.Use = "d"
+	werfRootCmd.Aliases = []string{"delivery"}
 	removeKubectlCmd(werfRootCmd)
 
 	rootCmd.AddCommand(werfRootCmd)
