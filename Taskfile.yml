@@ -1,9 +1,8 @@
 version: "3"
 
 vars:
-  os: "{{OS}}"
-  mode: '{{ternary "cgo" "go" (eq .os "linux")}}'
-  arch: '{{ternary "arm64" ARCH (eq ARCH "arm")}}'
+  mode: '{{ ternary "cgo" "go" (eq OS "linux") }}'
+  arch: '{{ ternary "arm64" ARCH (eq ARCH "arm") }}'
   buildDate:
     sh: date -u +'%Y-%m-%dT%H:%M:%SZ'
   version:
@@ -47,47 +46,45 @@ vars:
 tasks:
   _build:cgo:dev:
     cmds:
-      - go build -o "{{.outputDir | default (printf "./build/%s-%s" .targetOS .targetArch)}}/d8"
-        -compiler gc -ldflags="{{.cgoDevLDFlags}}" -tags="{{.cgoTags}}" {{.CLI_ARGS}} main.go
+      - go build -o "{{ .outputDir | default (printf "./build/%s-%s" .targetOS .targetArch) }}/d8"
+        -compiler gc -ldflags="{{ .cgoDevLDFlags }}" -tags="{{ .cgoTags }}" {{ .CLI_ARGS }} main.go
     env:
       CGO_ENABLED: "1"
-      GOOS: "{{.targetOS}}"
-      GOARCH: "{{.targetArch}}"
-      CC: "{{.cc}}"
+      GOOS: "{{ .targetOS }}"
+      GOARCH: "{{ .targetArch }}"
 
   _build:cgo:dist:
     cmds:
-      - go build -o "{{.outputDir | default (printf "./dist/%s/%s-%s/bin" .version .targetOS .targetArch)}}/d8"
-        -compiler gc -ldflags="{{.cgoReleaseLDFlags}}" -tags="{{.cgoTags}}" {{.CLI_ARGS}} main.go
+      - go build -o "{{ .outputDir | default (printf "./dist/%s/%s-%s" .version .targetOS .targetArch) }}/d8"
+        -compiler gc -ldflags="{{ .cgoReleaseLDFlags }}" -tags="{{ .cgoTags }}" {{ .CLI_ARGS }} main.go
     env:
       CGO_ENABLED: "1"
-      GOOS: "{{.targetOS}}"
-      GOARCH: "{{.targetArch}}"
-      CC: "{{.cc}}"
+      GOOS: "{{ .targetOS }}"
+      GOARCH: "{{ .targetArch }}"
 
   _build:go:dev:
     cmds:
-      - go build -o "{{.outputDir | default (printf "./build/%s-%s" .targetOS .targetArch)}}/d8"
-        -ldflags="{{.goDevLDFlags}}" -tags="{{.goTags}}" {{.CLI_ARGS}} main.go
+      - go build -o "{{ .outputDir | default (printf "./build/%s-%s" .targetOS .targetArch) }}/d8"
+        -ldflags="{{ .goDevLDFlags }}" -tags="{{ .goTags }}" {{ .CLI_ARGS }} main.go
     env:
       CGO_ENABLED: "0"
-      GOOS: "{{.targetOS}}"
-      GOARCH: "{{.targetArch}}"
+      GOOS: "{{ .targetOS }}"
+      GOARCH: "{{ .targetArch }}"
 
   _build:go:dist:
     cmds:
-      - go build -o "{{.outputDir | default (printf "./dist/%s/%s-%s/bin" .version .targetOS .targetArch)}}/d8"
-        -ldflags="{{.goReleaseLDFlags}}" -tags="{{.goTags}}" {{.CLI_ARGS}} main.go
+      - go build -o "{{ .outputDir | default (printf "./dist/%s/%s-%s" .version .targetOS .targetArch) }}/d8"
+        -ldflags="{{ .goReleaseLDFlags }}" -tags="{{ .goTags }}" {{ .CLI_ARGS }} main.go
     env:
       CGO_ENABLED: "0"
-      GOOS: "{{.targetOS}}"
-      GOARCH: "{{.targetArch}}"
+      GOOS: "{{ .targetOS }}"
+      GOARCH: "{{ .targetArch }}"
 
   build:
     desc: Build d8 binary for personal usage
     run: once
     cmds:
-      - task: build:dev:{{ .os }}:{{ .arch }}
+      - task: build:dev:{{ OS }}:{{ .arch }}
         vars:
           outputDir: "."
 
@@ -98,7 +95,7 @@ tasks:
         vars:
           targetOS: "linux"
           targetArch: "amd64"
-          outputDir: "{{.outputDir}}"
+          outputDir: "{{ .outputDir }}"
 
   build:dev:darwin:amd64:
     desc: Build d8 dev binary for darwin/amd64
@@ -107,7 +104,7 @@ tasks:
         vars:
           targetOS: "darwin"
           targetArch: "amd64"
-          outputDir: "{{.outputDir}}"
+          outputDir: "{{ .outputDir }}"
 
   build:dev:darwin:arm64:
     desc: Build d8 dev binary for darwin/arm64
@@ -116,7 +113,7 @@ tasks:
         vars:
           targetOS: "darwin"
           targetArch: "arm64"
-          outputDir: "{{.outputDir}}"
+          outputDir: "{{ .outputDir }}"
 
   build:dist:all:
     desc: Build all d8 release binaries in parallel
@@ -153,7 +150,6 @@ tasks:
           outputDir: "{{ .outputDir }}"
 
   _package:dist:
-    internal: true
     dir: dist/{{ .version }}
     cmds:
       - cp ../../LICENSE ../../README.md {{ .target }}
@@ -209,4 +205,4 @@ tasks:
   clean:
     desc: Clean all binaries
     cmds:
-      - rm -rf ./dist ./d8
+      - rm -rf ./build ./dist ./d8
