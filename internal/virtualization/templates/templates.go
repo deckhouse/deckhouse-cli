@@ -75,19 +75,20 @@ func OptionsUsageTemplate() string {
 // ExactArgs validate the number of input parameters
 func ExactArgs(nameOfCommand string, n int) cobra.PositionalArgs {
 	return func(cmd *cobra.Command, args []string) error {
-		if len(args) != n {
-			err := errors.New("argument validation failed")
-			_, e := fmt.Fprintf(os.Stderr, "fatal: Number of input parameters is incorrect, %s accepts %d arg(s), received %d\n\n", nameOfCommand, n, len(args))
-			if e != nil {
-				err = errors.Join(err, e)
-			}
-			e = cmd.Help()
-			if e != nil {
-				err = errors.Join(err, e)
-			}
-			return err
+		if len(args) == n {
+			return nil
 		}
-		return nil
+		err := errors.New("argument validation failed")
+		_, e := fmt.Fprintf(os.Stderr, "fatal: Number of input parameters is incorrect, %s accepts %d arg(s), received %d\n\n", nameOfCommand, n, len(args))
+		if e != nil {
+			err = errors.Join(err, e)
+		}
+		e = cmd.Help()
+		if e != nil {
+			err = errors.Join(err, e)
+		}
+		return err
+
 	}
 }
 
