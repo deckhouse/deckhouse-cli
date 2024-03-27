@@ -24,8 +24,8 @@ import (
 
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/ssh"
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
+	"kubevirt.io/kubevirt/pkg/virtctl/ssh"
+	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
 const (
@@ -41,8 +41,8 @@ func NewCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 	c.options.LocalClientName = "scp"
 
 	cmd := &cobra.Command{
-		Use:     "scp VirtualMachine)",
-		Short:   "SCP files from/to a virtual machine.",
+		Use:     "scp (VM|VMI)",
+		Short:   "SCP files from/to a virtual machine instance.",
 		Example: usage(),
 		Args:    templates.ExactArgs("scp", 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -74,7 +74,7 @@ func (o *SCP) Run(cmd *cobra.Command, args []string) error {
 
 	if o.options.WrapLocalSSH {
 		clientArgs := o.buildSCPTarget(local, remote, toRemote)
-		return ssh.RunLocalClient(cmd, remote.Namespace, remote.Name, &o.options, clientArgs)
+		return ssh.RunLocalClient(remote.Kind, remote.Namespace, remote.Name, &o.options, clientArgs)
 	}
 
 	return o.nativeSCP(local, remote, toRemote)
@@ -101,18 +101,18 @@ func PrepareCommand(cmd *cobra.Command, clientConfig clientcmd.ClientConfig, opt
 }
 
 func usage() string {
-	return `  # Copy a file to the remote home folder of user "user"
-  {{ProgramName}} scp myfile.bin user@myvm:myfile.bin
+	return `  # Copy a file to the remote home folder of user jdoe
+  {{ProgramName}} scp myfile.bin jdoe@testvmi:myfile.bin
 
-  # Copy a directory to the remote home folder of user "user"
-  {{ProgramName}} scp --recursive ~/mydir/ user@myvm:./mydir
+  # Copy a directory to the remote home folder of user jdoe
+  {{ProgramName}} scp --recursive ~/mydir/ jdoe@testvmi:./mydir
 
-  # Copy a file to the remote home folder of user "user" without specifying a file name on the target
-  {{ProgramName}} scp myfile.bin user@myvm:.
+  # Copy a file to the remote home folder of user jdoe without specifying a file name on the target
+  {{ProgramName}} scp myfile.bin jdoe@testvmi:.
 
-  # Copy a file to 'myvm' in 'mynamespace' namespace
-  {{ProgramName}} scp myfile.bin user@myvm.mynamespace:myfile.bin
+  # Copy a file to 'testvm' in 'mynamespace' namespace
+  {{ProgramName}} scp myfile.bin jdoe@testvmi.mynamespace:myfile.bin
 
   # Copy a file from the remote location to a local folder
-  {{ProgramName}} scp user@myvm:myfile.bin ~/myfile.bin`
+  {{ProgramName}} scp jdoe@testvmi:myfile.bin ~/myfile.bin`
 }

@@ -22,17 +22,17 @@ package portforward
 import (
 	"errors"
 	"fmt"
-	"github.com/deckhouse/virtualization/api/client/kubeclient"
-	"k8s.io/klog/v2"
 	"net"
 	"os"
 	"os/signal"
 
+	"github.com/golang/glog"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
-	"github.com/deckhouse/virtualization/api/subresources/v1alpha2"
+	"kubevirt.io/client-go/kubecli"
+
+	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
 const (
@@ -42,24 +42,21 @@ const (
 
 var (
 	forwardToStdio bool
-	address        = "127.0.0.1"
+	address        string = "127.0.0.1"
 )
 
 func NewCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "port-forward name[.namespace] [protocol/]localPort[:targetPort]...",
-		Short:   "Forward local ports to a virtual machine",
+		Use:     "port-forward [kind/]name[.namespace] [protocol/]localPort[:targetPort]...",
+		Short:   "Forward local ports to a virtualmachine or virtualmachineinstance.",
 		Long:    usage(),
 		Example: examples(),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if n := len(args); n < 2 {
-				klog.Errorf("fatal: Number of input parameters is incorrect, portforward requires at least 2 arg(s), received %d", n)
+				glog.Errorf("fatal: Number of input parameters is incorrect, portforward requires at least 2 arg(s), received %d", n)
 				// always write to stderr on failures to ensure they get printed in stdio mode
 				cmd.SetOut(os.Stderr)
-				err := cmd.Help()
-				if err != nil {
-					return err
-				}
+				cmd.Help()
 				return errors.New("argument validation failed")
 			}
 			return nil
@@ -85,12 +82,12 @@ type PortForward struct {
 
 func (o *PortForward) Run(cmd *cobra.Command, args []string) error {
 	setOutput(cmd)
-	namespace, name, ports, err := o.prepareCommand(args)
+	kind, namespace, name, ports, err := o.prepareCommand(args)
 	if err != nil {
 		return err
 	}
 
-	if err := o.setResource(namespace); err != nil {
+	if err := o.setResource(kind, namespace); err != nil {
 		return err
 	}
 
@@ -106,7 +103,7 @@ func (o *PortForward) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := o.startPortForwards(namespace, name, ports); err != nil {
+	if err := o.startPortForwards(kind, namespace, name, ports); err != nil {
 		return err
 	}
 
@@ -117,8 +114,8 @@ func (o *PortForward) Run(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func (o *PortForward) prepareCommand(args []string) (namespace, name string, ports []forwardedPort, err error) {
-	namespace, name, err = templates.ParseTarget(args[0])
+func (o *PortForward) prepareCommand(args []string) (kind string, namespace string, name string, ports []forwardedPort, err error) {
+	kind, namespace, name, err = templates.ParseTarget(args[0])
 	if err != nil {
 		return
 	}
@@ -138,23 +135,31 @@ func (o *PortForward) prepareCommand(args []string) (namespace, name string, por
 	return
 }
 
-func (o *PortForward) setResource(namespace string) error {
-	client, err := kubeclient.GetClientFromClientConfig(o.clientConfig)
+func (o *PortForward) setResource(kind, namespace string) error {
+	client, err := kubecli.GetKubevirtClientFromClientConfig(o.clientConfig)
 	if err != nil {
 		return err
 	}
-	o.resource = client.VirtualMachines(namespace)
+
+	if templates.KindIsVMI(kind) {
+		o.resource = client.VirtualMachineInstance(namespace)
+	} else if templates.KindIsVM(kind) {
+		o.resource = client.VirtualMachine(namespace)
+	} else {
+		return errors.New("unsupported resource kind " + kind)
+	}
+
 	return nil
 }
 
 func (o *PortForward) startStdoutStream(namespace, name string, port forwardedPort) error {
-	streamer, err := o.resource.PortForward(name, v1alpha2.VirtualMachinePortForward{Port: port.remote, Protocol: port.protocol})
+	streamer, err := o.resource.PortForward(name, port.remote, port.protocol)
 	if err != nil {
 		return err
 	}
 
-	klog.V(3).Infof("forwarding to %s/%s:%d", namespace, name, port.remote)
-	if err := streamer.Stream(kubeclient.StreamOptions{
+	glog.V(3).Infof("forwarding to %s/%s:%d", namespace, name, port.remote)
+	if err := streamer.Stream(kubecli.StreamOptions{
 		In:  os.Stdin,
 		Out: os.Stdout,
 	}); err != nil {
@@ -164,9 +169,10 @@ func (o *PortForward) startStdoutStream(namespace, name string, port forwardedPo
 	return nil
 }
 
-func (o *PortForward) startPortForwards(namespace, name string, ports []forwardedPort) error {
+func (o *PortForward) startPortForwards(kind, namespace, name string, ports []forwardedPort) error {
 	for _, port := range ports {
 		forwarder := portForwarder{
+			kind:      kind,
 			namespace: namespace,
 			name:      name,
 			resource:  o.resource,
@@ -189,7 +195,11 @@ func setOutput(cmd *cobra.Command) {
 }
 
 func usage() string {
-	return `Forward local ports to a virtualmachine.
+	return `Forward local ports to a virtualmachine or virtualmachineinstance.
+	
+The target argument supports the syntax kind/name.namespace with kind/ and .namespace as optional fields.
+Kind accepts any of vmi (default), vmis, vm, vms, virtualmachineinstance, virtualmachine, virtualmachineinstances, virtualmachines.
+
 The port argument supports the syntax protocol/localPort:targetPort with protocol/ and :targetPort as optional fields.
 Protocol supports TCP (default) and UDP.
 
@@ -199,20 +209,28 @@ Usage can be restricted by the cluster administrator through the /portforward su
 }
 
 func examples() string {
-	return `  #Forward the local port 8080 to the vm port
-  {{ProgramName}} port-forward myvm 8080
+	return `  # Forward the local port 8080 to the vmi port:
+  {{ProgramName}} port-forward vmi/testvmi 8080
+
+  # Forward the local port 8080 to the vmi port 9090:
+  {{ProgramName}} port-forward vmi/testvmi 8080:9090
+
+  # Forward the local port 8080 to the vmi port 9090 as a UDP connection:
+  {{ProgramName}} port-forward vmi/testvmi.mynamespace udp/8080:9090
+
+  # Forward the local port 8080 to the vm port
+  {{ProgramName}} port-forward vm/testvm 8080
 
   # Forward the local port 8080 to the vm port in mynamespace
-  {{ProgramName}} port-forward myvm.mynamespace 8080
-  {{ProgramName}} port-forward myvm 8080 -n mynamespace
+  {{ProgramName}} port-forward vm/testvm.mynamespace 8080
 
-  # Note: {{ProgramName}} port-forward sends all traffic over the Kubernetes API Server.
+  # Note: {{ProgramName}} port-forward sends all traffic over the Kubernetes API Server. 
   # This means any traffic will add additional pressure to the control plane.
-  # For continuous traffic intensive connections, consider using a dedicated Kubernetes Service.
+  # For continous traffic intensive connections, consider using a dedicated Kubernetes Service.
 
   # Open an SSH connection using PortForward and ProxyCommand:
-  ssh -o 'ProxyCommand={{ProgramName}} port-forward --stdio=true myvm.mynamespace 22' user@myvm.mynamespace
+  ssh -o 'ProxyCommand={{ProgramName}} port-forward --stdio=true testvmi.mynamespace 22' user@testvmi.mynamespace
 
   # Use as SCP ProxyCommand:
-  scp -o 'ProxyCommand={{ProgramName}} port-forward --stdio=true myvm.mynamespace 22' local.file user@myvm.mynamespace`
+  scp -o 'ProxyCommand={{ProgramName}} port-forward --stdio=true testvmi.mynamespace 22' local.file user@testvmi.mynamespace`
 }

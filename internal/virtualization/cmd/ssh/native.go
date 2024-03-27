@@ -22,27 +22,37 @@ package ssh
 import (
 	"errors"
 	"fmt"
-	"github.com/deckhouse/virtualization/api/client/kubeclient"
-	"github.com/deckhouse/virtualization/api/subresources/v1alpha2"
+	"net"
+	"os"
+
+	"github.com/golang/glog"
+	"github.com/spf13/pflag"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
+
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/klog/v2"
-	"net"
-	"os"
+
+	"kubevirt.io/client-go/kubecli"
 )
 
-func (o *SSH) nativeSSH(namespace, name string) error {
-	conn := NativeSSHConnection{
-		ClientConfig: o.clientConfig,
-		Options:      o.options,
-	}
-	client, err := conn.PrepareSSHClient(namespace, name)
-	if err != nil {
-		return err
-	}
-	return conn.StartSession(client, o.command)
+const (
+	wrapLocalSSHDefault = false
+)
+
+func additionalUsage() string {
+	return fmt.Sprintf(`
+	# Connect to 'testvmi' using the local ssh binary found in $PATH:
+	{{ProgramName}} ssh --%s=true jdoe@testvmi`,
+		wrapLocalSSHFlag,
+	)
+}
+
+func addAdditionalCommandlineArgs(flagset *pflag.FlagSet, opts *SSHOptions) {
+	flagset.StringArrayVarP(&opts.AdditionalSSHLocalOptions, additionalOpts, additionalOptsShort, opts.AdditionalSSHLocalOptions,
+		fmt.Sprintf(`--%s="-o StrictHostKeyChecking=no" : Additional options to be passed to the local ssh. This is applied only if local-ssh=true`, additionalOpts))
+	flagset.BoolVar(&opts.WrapLocalSSH, wrapLocalSSHFlag, opts.WrapLocalSSH,
+		fmt.Sprintf("--%s=true: Set this to true to use the SSH/SCP client available on your system by using this command as ProxyCommand; If set to false, this will establish a SSH/SCP connection with limited capabilities provided by this client", wrapLocalSSHFlag))
 }
 
 type NativeSSHConnection struct {
@@ -50,15 +60,27 @@ type NativeSSHConnection struct {
 	Options      SSHOptions
 }
 
-func (o *NativeSSHConnection) PrepareSSHClient(namespace, name string) (*ssh.Client, error) {
-	streamer, err := o.prepareSSHTunnel(namespace, name)
+func (o *SSH) nativeSSH(kind, namespace, name string) error {
+	conn := NativeSSHConnection{
+		ClientConfig: o.clientConfig,
+		Options:      o.options,
+	}
+	client, err := conn.PrepareSSHClient(kind, namespace, name)
+	if err != nil {
+		return err
+	}
+	return conn.StartSession(client, o.command)
+}
+
+func (o *NativeSSHConnection) PrepareSSHClient(kind, namespace, name string) (*ssh.Client, error) {
+	streamer, err := o.prepareSSHTunnel(kind, namespace, name)
 	if err != nil {
 		return nil, err
 	}
 
 	conn := streamer.AsConn()
-	addr := fmt.Sprintf("%s.%s:%d", name, namespace, o.Options.SSHPort)
-	authMethods := o.getAuthMethods(namespace, name)
+	addr := fmt.Sprintf("%s/%s.%s:%d", kind, name, namespace, o.Options.SSHPort)
+	authMethods := o.getAuthMethods(kind, namespace, name)
 
 	hostKeyCallback := ssh.InsecureIgnoreHostKey()
 	if len(o.Options.KnownHostsFilePath) > 0 {
@@ -85,14 +107,14 @@ func (o *NativeSSHConnection) PrepareSSHClient(namespace, name string) (*ssh.Cli
 	return ssh.NewClient(sshConn, chans, reqs), nil
 }
 
-func (o *NativeSSHConnection) getAuthMethods(namespace, name string) []ssh.AuthMethod {
+func (o *NativeSSHConnection) getAuthMethods(kind, namespace, name string) []ssh.AuthMethod {
 	var methods []ssh.AuthMethod
 
 	methods = o.trySSHAgent(methods)
 	methods = o.tryPrivateKey(methods)
 
 	methods = append(methods, ssh.PasswordCallback(func() (secret string, err error) {
-		password, err := readPassword(fmt.Sprintf("%s@%s.%s's password: ", o.Options.SSHUsername, name, namespace))
+		password, err := readPassword(fmt.Sprintf("%s@%s/%s.%s's password: ", o.Options.SSHUsername, kind, name, namespace))
 		fmt.Println()
 		return string(password), err
 	}))
@@ -107,7 +129,7 @@ func (o *NativeSSHConnection) trySSHAgent(methods []ssh.AuthMethod) []ssh.AuthMe
 	}
 	conn, err := net.Dial("unix", socket)
 	if err != nil {
-		klog.Error("no connection to ssh agent, skipping agent authentication:", err)
+		glog.Error("no connection to ssh agent, skipping agent authentication:", err)
 		return methods
 	}
 	agentClient := agent.NewClient(conn)
@@ -120,7 +142,7 @@ func (o *NativeSSHConnection) tryPrivateKey(methods []ssh.AuthMethod) []ssh.Auth
 	// not explicitly provided, don't add the authentication mechanism.
 	if !o.Options.IdentityFilePathProvided {
 		if _, err := os.Stat(o.Options.IdentityFilePath); errors.Is(err, os.ErrNotExist) {
-			klog.V(3).Infof("No ssh key at the default location %q found, skipping RSA authentication.", o.Options.IdentityFilePath)
+			glog.V(3).Infof("No ssh key at the default location %q found, skipping RSA authentication.", o.Options.IdentityFilePath)
 			return methods
 		}
 	}
@@ -132,11 +154,9 @@ func (o *NativeSSHConnection) tryPrivateKey(methods []ssh.AuthMethod) []ssh.Auth
 		}
 
 		signer, err := ssh.ParsePrivateKey(key)
-		var passphraseMissingError *ssh.PassphraseMissingError
-		if errors.As(err, &passphraseMissingError) {
+		if _, isPassErr := err.(*ssh.PassphraseMissingError); isPassErr {
 			signer, err = o.parsePrivateKeyWithPassphrase(key)
 		}
-
 		if err != nil {
 			return nil, err
 		}
@@ -194,25 +214,29 @@ func (o *NativeSSHConnection) StartSession(client *ssh.Client, command string) e
 	}
 
 	err = session.Wait()
-	var exitError *ssh.ExitError
-	if !errors.As(err, &exitError) {
+	if _, exited := err.(*ssh.ExitError); !exited {
 		return err
 	}
 	return nil
 }
 
-func (o *NativeSSHConnection) prepareSSHTunnel(namespace, name string) (kubeclient.StreamInterface, error) {
-	virtCli, err := kubeclient.GetClientFromClientConfig(o.ClientConfig)
+func (o *NativeSSHConnection) prepareSSHTunnel(kind, namespace, name string) (kubecli.StreamInterface, error) {
+	virtCli, err := kubecli.GetKubevirtClientFromClientConfig(o.ClientConfig)
 	if err != nil {
 		return nil, err
 	}
-	opts := v1alpha2.VirtualMachinePortForward{
-		Port:     o.Options.SSHPort,
-		Protocol: "tcp",
-	}
-	stream, err := virtCli.VirtualMachines(namespace).PortForward(name, opts)
-	if err != nil {
-		return nil, fmt.Errorf("can't access VM %s: %w", name, err)
+
+	var stream kubecli.StreamInterface
+	if kind == "vmi" {
+		stream, err = virtCli.VirtualMachineInstance(namespace).PortForward(name, o.Options.SSHPort, "tcp")
+		if err != nil {
+			return nil, fmt.Errorf("can't access VMI %s: %w", name, err)
+		}
+	} else if kind == "vm" {
+		stream, err = virtCli.VirtualMachine(namespace).PortForward(name, o.Options.SSHPort, "tcp")
+		if err != nil {
+			return nil, fmt.Errorf("can't access VM %s: %w", name, err)
+		}
 	}
 
 	return stream, nil

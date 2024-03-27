@@ -27,8 +27,8 @@ import (
 
 	"github.com/povsister/scp"
 
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/ssh"
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
+	"kubevirt.io/kubevirt/pkg/virtctl/ssh"
+	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
 func (o *SCP) nativeSCP(local templates.LocalSCPArgument, remote templates.RemoteSCPArgument, toRemote bool) error {
@@ -36,7 +36,7 @@ func (o *SCP) nativeSCP(local templates.LocalSCPArgument, remote templates.Remot
 		ClientConfig: o.clientConfig,
 		Options:      o.options,
 	}
-	client, err := sshClient.PrepareSSHClient(remote.Namespace, remote.Name)
+	client, err := sshClient.PrepareSSHClient(remote.Kind, remote.Namespace, remote.Name)
 	if err != nil {
 		return err
 	}

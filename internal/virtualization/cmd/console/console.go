@@ -30,17 +30,18 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/util"
-	"github.com/deckhouse/virtualization/api/client/kubeclient"
+	"kubevirt.io/client-go/kubecli"
+
+	"kubevirt.io/kubevirt/pkg/virtctl/templates"
+	"kubevirt.io/kubevirt/pkg/virtctl/utils"
 )
 
 var timeout int
 
 func NewCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "console (VirtualMachine)",
-		Short:   "Connect to a console of a virtual machine.",
+		Use:     "console (VMI)",
+		Short:   "Connect to a console of a virtual machine instance.",
 		Example: usage(),
 		Args:    templates.ExactArgs("console", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -49,7 +50,7 @@ func NewCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().IntVar(&timeout, "timeout", 5, "The number of minutes to wait for the virtual machine to be ready.")
+	cmd.Flags().IntVar(&timeout, "timeout", 5, "The number of minutes to wait for the virtual machine instance to be ready.")
 	cmd.SetUsageTemplate(templates.UsageTemplate())
 	return cmd
 }
@@ -59,29 +60,23 @@ type Console struct {
 }
 
 func usage() string {
-	usage := `  # Connect to the console on VirtualMachine 'myvm':
-  {{ProgramName}} console myvm
-  {{ProgramName}} console myvm.mynamespace
-  {{ProgramName}} console myvm -n mynamespace
+	usage := `  # Connect to the console on VirtualMachineInstance 'myvmi':
+  {{ProgramName}} console myvmi
   # Configure one minute timeout (default 5 minutes)
-  {{ProgramName}} console --timeout=1 myvm`
+  {{ProgramName}} console --timeout=1 myvmi`
 
 	return usage
 }
 
 func (c *Console) Run(args []string) error {
-	namespace, name, err := templates.ParseTarget(args[0])
+	namespace, _, err := c.clientConfig.Namespace()
 	if err != nil {
 		return err
 	}
-	if namespace == "" {
-		namespace, _, err = c.clientConfig.Namespace()
-		if err != nil {
-			return err
-		}
-	}
 
-	virtCli, err := kubeclient.GetClientFromClientConfig(c.clientConfig)
+	vmi := args[0]
+
+	virtCli, err := kubecli.GetKubevirtClientFromClientConfig(c.clientConfig)
 	if err != nil {
 		return err
 	}
@@ -98,14 +93,14 @@ func (c *Console) Run(args []string) error {
 	signal.Notify(waitInterrupt, os.Interrupt)
 
 	go func() {
-		con, err := virtCli.VirtualMachines(namespace).SerialConsole(name, &kubeclient.SerialConsoleOptions{ConnectionTimeout: time.Duration(timeout) * time.Minute})
+		con, err := virtCli.VirtualMachineInstance(namespace).SerialConsole(vmi, &kubecli.SerialConsoleOptions{ConnectionTimeout: time.Duration(timeout) * time.Minute})
 		runningChan <- err
 
 		if err != nil {
 			return
 		}
 
-		resChan <- con.Stream(kubeclient.StreamOptions{
+		resChan <- con.Stream(kubecli.StreamOptions{
 			In:  stdinReader,
 			Out: stdoutWriter,
 		})
@@ -121,8 +116,8 @@ func (c *Console) Run(args []string) error {
 			return err
 		}
 	}
-	err = util.AttachConsole(stdinReader, stdoutReader, stdinWriter, stdoutWriter,
-		fmt.Sprint("Successfully connected to ", name, " console. The escape sequence is ^]\n"),
+	err = utils.AttachConsole(stdinReader, stdoutReader, stdinWriter, stdoutWriter,
+		fmt.Sprint("Successfully connected to ", vmi, " console. The escape sequence is ^]\n"),
 		resChan)
 
 	if err != nil {

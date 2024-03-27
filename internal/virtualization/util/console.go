@@ -28,6 +28,9 @@ import (
 	"golang.org/x/term"
 )
 
+// AttachConsole attaches stdin and stdout to the console
+// in -> stdinWriter | stdinReader -> console
+// out <- stdoutReader | stdoutWriter <- console
 func AttachConsole(stdinReader, stdoutReader *io.PipeReader, stdinWriter, stdoutWriter *io.PipeWriter, message string, resChan <-chan error) (err error) {
 	stopChan := make(chan struct{}, 1)
 	writeStop := make(chan error)
@@ -35,7 +38,7 @@ func AttachConsole(stdinReader, stdoutReader *io.PipeReader, stdinWriter, stdout
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		state, err := term.MakeRaw(int(os.Stdin.Fd()))
 		if err != nil {
-			return fmt.Errorf("make raw terminal failed: %w", err)
+			return fmt.Errorf("Make raw terminal failed: %s", err)
 		}
 		defer term.Restore(int(os.Stdin.Fd()), state)
 	}
@@ -58,7 +61,7 @@ func AttachConsole(stdinReader, stdoutReader *io.PipeReader, stdinWriter, stdout
 
 	go func() {
 		defer close(writeStop)
-		buf := make([]byte, 1024)
+		buf := make([]byte, 1024, 1024)
 		for {
 			// reading from stdin
 			n, err := in.Read(buf)

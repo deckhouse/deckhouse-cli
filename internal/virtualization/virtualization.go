@@ -20,23 +20,47 @@ Initially copied from https://github.com/kubevirt/kubevirt/blob/main/pkg/virtctl
 package virtualization
 
 import (
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/console"
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/portforward"
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/scp"
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/ssh"
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/vnc"
-	"github.com/spf13/cobra"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/component-base/logs"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
-	"github.com/deckhouse/virtualization/api/client/kubeclient"
+	"github.com/spf13/cobra"
+
+	"k8s.io/client-go/tools/clientcmd"
+
+	"kubevirt.io/client-go/kubecli"
+	"kubevirt.io/client-go/log"
+
+	"kubevirt.io/kubevirt/pkg/virtctl/adm"
+	"kubevirt.io/kubevirt/pkg/virtctl/configuration"
+	"kubevirt.io/kubevirt/pkg/virtctl/console"
+	"kubevirt.io/kubevirt/pkg/virtctl/create"
+	"kubevirt.io/kubevirt/pkg/virtctl/credentials"
+	"kubevirt.io/kubevirt/pkg/virtctl/expose"
+	"kubevirt.io/kubevirt/pkg/virtctl/guestfs"
+	"kubevirt.io/kubevirt/pkg/virtctl/imageupload"
+	"kubevirt.io/kubevirt/pkg/virtctl/memorydump"
+	"kubevirt.io/kubevirt/pkg/virtctl/pause"
+	"kubevirt.io/kubevirt/pkg/virtctl/portforward"
+	"kubevirt.io/kubevirt/pkg/virtctl/scp"
+	"kubevirt.io/kubevirt/pkg/virtctl/softreboot"
+	"kubevirt.io/kubevirt/pkg/virtctl/ssh"
+	"kubevirt.io/kubevirt/pkg/virtctl/templates"
+	"kubevirt.io/kubevirt/pkg/virtctl/usbredir"
+	"kubevirt.io/kubevirt/pkg/virtctl/version"
+	"kubevirt.io/kubevirt/pkg/virtctl/vm"
+	"kubevirt.io/kubevirt/pkg/virtctl/vmexport"
+	"kubevirt.io/kubevirt/pkg/virtctl/vnc"
 )
 
-func NewCommand(programName string) (*cobra.Command, clientcmd.ClientConfig) {
-	// programName used in cobra templates to display either `d8 virtualization` or `d8vctl`
+var programName string
+
+func NewVirtctlCommand() (*cobra.Command, clientcmd.ClientConfig) {
+
+	programName := GetProgramName(filepath.Base(os.Args[0]))
+
+	// used in cobra templates to display either `kubectl virt` or `virtctl`
 	cobra.AddTemplateFunc(
 		"ProgramName", func() string {
 			return programName
@@ -46,12 +70,13 @@ func NewCommand(programName string) (*cobra.Command, clientcmd.ClientConfig) {
 	// used to enable replacement of `ProgramName` placeholder for cobra.Example, which has no template support
 	cobra.AddTemplateFunc(
 		"prepare", func(s string) string {
+			// order matters!
 			result := strings.Replace(s, "{{ProgramName}}", programName, -1)
 			return result
 		},
 	)
 
-	virtCmd := &cobra.Command{
+	rootCmd := &cobra.Command{
 		Use:           programName,
 		Short:         programName + " controls virtual machine related operations on your kubernetes cluster.",
 		SilenceUsage:  true,
@@ -61,11 +86,6 @@ func NewCommand(programName string) (*cobra.Command, clientcmd.ClientConfig) {
 		},
 	}
 
-	logs.AddFlags(virtCmd.PersistentFlags())
-
-	virtCmd.SetUsageTemplate(templates.MainUsageTemplate())
-	virtCmd.SetOut(os.Stdout)
-
 	optionsCmd := &cobra.Command{
 		Use:    "options",
 		Hidden: true,
@@ -73,17 +93,67 @@ func NewCommand(programName string) (*cobra.Command, clientcmd.ClientConfig) {
 			cmd.Printf(cmd.UsageString())
 		},
 	}
-
 	optionsCmd.SetUsageTemplate(templates.OptionsUsageTemplate())
-
-	clientConfig := kubeclient.DefaultClientConfig(virtCmd.PersistentFlags())
-	virtCmd.AddCommand(
+	//TODO: Add a ClientConfigFactory which allows substituting the KubeVirt client with a mock for unit testing
+	clientConfig := kubecli.DefaultClientConfig(rootCmd.PersistentFlags())
+	AddGlogFlags(rootCmd.PersistentFlags())
+	rootCmd.SetUsageTemplate(templates.MainUsageTemplate())
+	rootCmd.SetOut(os.Stdout)
+	rootCmd.AddCommand(
+		configuration.NewListPermittedDevices(clientConfig),
 		console.NewCommand(clientConfig),
+		usbredir.NewCommand(clientConfig),
 		vnc.NewCommand(clientConfig),
-		portforward.NewCommand(clientConfig),
-		ssh.NewCommand(clientConfig),
 		scp.NewCommand(clientConfig),
+		ssh.NewCommand(clientConfig),
+		portforward.NewCommand(clientConfig),
+		vm.NewStartCommand(clientConfig),
+		vm.NewStopCommand(clientConfig),
+		vm.NewRestartCommand(clientConfig),
+		vm.NewMigrateCommand(clientConfig),
+		vm.NewMigrateCancelCommand(clientConfig),
+		vm.NewGuestOsInfoCommand(clientConfig),
+		vm.NewUserListCommand(clientConfig),
+		vm.NewFSListCommand(clientConfig),
+		vm.NewAddVolumeCommand(clientConfig),
+		vm.NewRemoveVolumeCommand(clientConfig),
+		vm.NewExpandCommand(clientConfig),
+		memorydump.NewMemoryDumpCommand(clientConfig),
+		pause.NewPauseCommand(clientConfig),
+		pause.NewUnpauseCommand(clientConfig),
+		softreboot.NewSoftRebootCommand(clientConfig),
+		expose.NewExposeCommand(clientConfig),
+		version.VersionCommand(clientConfig),
+		imageupload.NewImageUploadCommand(clientConfig),
+		guestfs.NewGuestfsShellCommand(clientConfig),
+		vmexport.NewVirtualMachineExportCommand(clientConfig),
+		create.NewCommand(clientConfig),
+		credentials.NewCommand(clientConfig),
+		adm.NewCommand(clientConfig),
 		optionsCmd,
 	)
-	return virtCmd, clientConfig
+	return rootCmd, clientConfig
+}
+
+// GetProgramName returns the command name to display in help texts.
+// If `virtctl` is installed via krew to be used as a kubectl plugin, it's run via a symlink, so the basename then
+// is `kubectl-virt`. In this case we want to accommodate the user by adjusting the help text (usage, examples and
+// the like) by displaying `kubectl virt <command>` instead of `virtctl <command>`.
+// see https://github.com/kubevirt/kubevirt/issues/2356 for more details
+// see also templates.go
+func GetProgramName(binary string) string {
+	if strings.HasSuffix(binary, "-virt") {
+		return fmt.Sprintf("%s virt", strings.TrimSuffix(binary, "-virt"))
+	}
+	return "virtctl"
+}
+
+func Execute() {
+	log.InitializeLogging(programName)
+	cmd, clientConfig := NewVirtctlCommand()
+	if err := cmd.Execute(); err != nil {
+		version.CheckClientServerVersion(&clientConfig)
+		fmt.Fprintln(cmd.Root().ErrOrStderr(), strings.TrimSpace(err.Error()))
+		os.Exit(1)
+	}
 }

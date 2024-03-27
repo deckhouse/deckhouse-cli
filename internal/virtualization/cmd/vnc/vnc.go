@@ -23,12 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
-	"github.com/deckhouse/virtualization/api/client/kubeclient"
-	"github.com/spf13/cobra"
 	"io"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/klog/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -36,42 +31,46 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/golang/glog"
+	"github.com/spf13/cobra"
+	"k8s.io/client-go/tools/clientcmd"
+
+	"kubevirt.io/client-go/kubecli"
+
+	"kubevirt.io/kubevirt/pkg/virtctl/templates"
+	"kubevirt.io/kubevirt/pkg/virtctl/vnc/screenshot"
 )
 
 const (
-	ListenTimeout = 60 * time.Second
+	LISTEN_TIMEOUT = 60 * time.Second
 
-	// MACOSTigerVNCPATTERN
-	// #### Tiger VNC ####
-	// https://github.com/TigerVNC/tigervnc/releases
+	//#### Tiger VNC ####
+	//# https://github.com/TigerVNC/tigervnc/releases
 	// Compatible with multiple Tiger VNC versions
-	MACOSTigerVNCPATTERN = `/Applications/TigerVNC Viewer*.app/Contents/MacOS/TigerVNC Viewer`
+	MACOS_TIGER_VNC_PATTERN = `/Applications/TigerVNC Viewer*.app/Contents/MacOS/TigerVNC Viewer`
 
-	// MACOSChickenVNC #### Chicken VNC ####
+	//#### Chicken VNC ####
 	//# https://sourceforge.net/projects/chicken/
-	MACOSChickenVNC = "/Applications/Chicken.app/Contents/MacOS/Chicken"
+	MACOS_CHICKEN_VNC = "/Applications/Chicken.app/Contents/MacOS/Chicken"
 
-	// MACOSRealVNC
-	// #### Real VNC ####
-	// https://www.realvnc.com/en/connect/download/viewer/macos/
-	MACOSRealVNC = "/Applications/VNC Viewer.app/Contents/MacOS/vncviewer"
+	//####  Real VNC ####
+	//# https://www.realvnc.com/en/connect/download/viewer/macos/
+	MACOS_REAL_VNC = "/Applications/VNC Viewer.app/Contents/MacOS/vncviewer"
 
-	RemoteViewer = "remote-viewer"
-	TigerVNC     = "vncviewer"
+	REMOTE_VIEWER = "remote-viewer"
+	TIGER_VNC     = "vncviewer"
 )
 
 var listenAddressFmt string
-
-var (
-	listenAddress = "127.0.0.1"
-	proxyOnly     bool
-	customPort    = 0
-)
+var listenAddress = "127.0.0.1"
+var proxyOnly bool
+var customPort = 0
 
 func NewCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "vnc VirtualMachine",
-		Short:   "Open a vnc connection to a virtual machine.",
+		Use:     "vnc (VMI)",
+		Short:   "Open a vnc connection to a virtual machine instance.",
 		Example: usage(),
 		Args:    templates.ExactArgs("vnc", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -80,10 +79,11 @@ func NewCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&listenAddress, "address", listenAddress, "--address=127.0.0.1: Setting this will change the listening address of the VNC server. Example: --address=0.0.0.0 will make the server listen on all interfaces.")
-	cmd.Flags().BoolVar(&proxyOnly, "proxy-only", proxyOnly, "--proxy-only=false: Setting this true will run only the vnc proxy and show the port where VNC viewers can connect")
+	cmd.Flags().BoolVar(&proxyOnly, "proxy-only", proxyOnly, "--proxy-only=false: Setting this true will run only the virtctl vnc proxy and show the port where VNC viewers can connect")
 	cmd.Flags().IntVar(&customPort, "port", customPort,
 		"--port=0: Assigning a port value to this will try to run the proxy on the given port if the port is accessible; If unassigned, the proxy will run on a random port")
 	cmd.SetUsageTemplate(templates.UsageTemplate())
+	cmd.AddCommand(screenshot.NewScreenshotCommand(clientConfig))
 	return cmd
 }
 
@@ -92,43 +92,39 @@ type VNC struct {
 }
 
 func (o *VNC) Run(cmd *cobra.Command, args []string) error {
-	namespace, vmName, err := templates.ParseTarget(args[0])
+	namespace, _, err := o.clientConfig.Namespace()
 	if err != nil {
 		return err
 	}
-	if namespace == "" {
-		namespace, _, err = o.clientConfig.Namespace()
-		if err != nil {
-			return err
-		}
-	}
 
-	virtCli, err := kubeclient.GetClientFromClientConfig(o.clientConfig)
+	vmi := args[0]
+
+	virtCli, err := kubecli.GetKubevirtClientFromClientConfig(o.clientConfig)
 	if err != nil {
 		return err
 	}
 
 	// setup connection with VM
-	vnc, err := virtCli.VirtualMachines(namespace).VNC(vmName)
+	vnc, err := virtCli.VirtualMachineInstance(namespace).VNC(vmi)
 	if err != nil {
-		return fmt.Errorf("can't access VM %s: %s", vmName, err.Error())
+		return fmt.Errorf("Can't access VMI %s: %s", vmi, err.Error())
 	}
 	// Format the listening address to account for the port (ex: 127.0.0.0:5900)
 	// Set listenAddress to localhost if proxy-only flag is not set
 	if !proxyOnly {
 		listenAddress = "127.0.0.1"
-		klog.V(2).Infof("--proxy-only is set to false, listening on %s\n", listenAddress)
+		glog.V(2).Infof("--proxy-only is set to false, listening on %s\n", listenAddress)
 	}
 	listenAddressFmt = listenAddress + ":%d"
 	lnAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf(listenAddressFmt, customPort))
 	if err != nil {
-		return fmt.Errorf("can't resolve the address: %s", err.Error())
+		return fmt.Errorf("Can't resolve the address: %s", err.Error())
 	}
 
 	// The local tcp server is used to proxy the podExec websock connection to vnc client
 	ln, err := net.ListenTCP("tcp", lnAddr)
 	if err != nil {
-		return fmt.Errorf("can't listen on unix socket: %s", err.Error())
+		return fmt.Errorf("Can't listen on unix socket: %s", err.Error())
 	}
 	// End of pre-flight checks. Everything looks good, we can start
 	// the goroutines and let the data flow
@@ -149,7 +145,7 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 
 	go func() {
 		// transfer data from/to the VM
-		k8ResChan <- vnc.Stream(kubeclient.StreamOptions{
+		k8ResChan <- vnc.Stream(kubecli.StreamOptions{
 			In:  pipeInReader,
 			Out: pipeOutWriter,
 		})
@@ -158,24 +154,21 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 	// wait for vnc client to connect to our local proxy server
 	go func() {
 		start := time.Now()
-		klog.Infof("connection timeout: %v", ListenTimeout)
+		glog.Infof("connection timeout: %v", LISTEN_TIMEOUT)
 		// Don't set deadline if only proxy is running and VNC is to be connected manually
 		if !proxyOnly {
 			// exit early if spawning vnc client fails
-			err := ln.SetDeadline(time.Now().Add(ListenTimeout))
-			if err != nil {
-				listenResChan <- err
-			}
+			ln.SetDeadline(time.Now().Add(LISTEN_TIMEOUT))
 		}
 		fd, err := ln.Accept()
 		if err != nil {
-			klog.V(2).Infof("Failed to accept unix sock connection. %s", err.Error())
+			glog.V(2).Infof("Failed to accept unix sock connection. %s", err.Error())
 			listenResChan <- err
 		}
 		defer fd.Close()
 
-		klog.V(2).Infof("VNC Client connected in %v", time.Since(start))
-		templates.PrintWarningForPausedVM(virtCli, vmName, namespace)
+		glog.V(2).Infof("VNC Client connected in %v", time.Now().Sub(start))
+		templates.PrintWarningForPausedVMI(virtCli, vmi, namespace)
 
 		// write to FD <- pipeOutReader
 		go func() {
@@ -202,7 +195,7 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 			Port int `json:"port"`
 		}{port})
 		if err != nil {
-			return fmt.Errorf("error encountered: %s", err.Error())
+			return fmt.Errorf("Error encountered: %s", err.Error())
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), string(optionString))
 	} else {
@@ -227,7 +220,7 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	if err != nil {
-		return fmt.Errorf("error encountered: %s", err.Error())
+		return fmt.Errorf("Error encountered: %s", err.Error())
 	}
 	return nil
 }
@@ -241,43 +234,43 @@ func checkAndRunVNCViewer(doneChan chan struct{}, viewResChan chan error, port i
 	osType := runtime.GOOS
 	switch osType {
 	case "darwin":
-		if matches, err := filepath.Glob(MACOSTigerVNCPATTERN); err == nil && len(matches) > 0 {
+		if matches, err := filepath.Glob(MACOS_TIGER_VNC_PATTERN); err == nil && len(matches) > 0 {
 			// Always use the latest version
 			vncBin = matches[len(matches)-1]
 			args = tigerVncArgs(port)
-		} else if errors.Is(err, filepath.ErrBadPattern) {
+		} else if err == filepath.ErrBadPattern {
 			viewResChan <- err
 			return
-		} else if _, err := os.Stat(MACOSChickenVNC); err == nil {
-			vncBin = MACOSChickenVNC
+		} else if _, err := os.Stat(MACOS_CHICKEN_VNC); err == nil {
+			vncBin = MACOS_CHICKEN_VNC
 			args = chickenVncArgs(port)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			viewResChan <- err
 			return
-		} else if _, err := os.Stat(MACOSRealVNC); err == nil {
-			vncBin = MACOSRealVNC
+		} else if _, err := os.Stat(MACOS_REAL_VNC); err == nil {
+			vncBin = MACOS_REAL_VNC
 			args = realVncArgs(port)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			viewResChan <- err
 			return
-		} else if _, err := exec.LookPath(RemoteViewer); err == nil {
+		} else if _, err := exec.LookPath(REMOTE_VIEWER); err == nil {
 			// fall back to user supplied script/binary in path
-			vncBin = RemoteViewer
+			vncBin = REMOTE_VIEWER
 			args = remoteViewerArgs(port)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			viewResChan <- err
 			return
 		}
 	case "linux", "windows":
-		if _, err := exec.LookPath(RemoteViewer); err == nil {
-			vncBin = RemoteViewer
+		if _, err := exec.LookPath(REMOTE_VIEWER); err == nil {
+			vncBin = REMOTE_VIEWER
 			args = remoteViewerArgs(port)
-		} else if _, err := exec.LookPath(TigerVNC); err == nil {
-			vncBin = TigerVNC
+		} else if _, err := exec.LookPath(TIGER_VNC); err == nil {
+			vncBin = TIGER_VNC
 			args = tigerVncArgs(port)
 		} else {
 			viewResChan <- fmt.Errorf("could not find %s or %s binary in $PATH",
-				RemoteViewer, TigerVNC)
+				REMOTE_VIEWER, TIGER_VNC)
 			viewResChan <- err
 			return
 		}
@@ -287,17 +280,19 @@ func checkAndRunVNCViewer(doneChan chan struct{}, viewResChan chan error, port i
 	}
 
 	if vncBin == "" {
-		klog.Errorf("No supported VNC app found in %s", osType)
-		err = fmt.Errorf("no supported VNC app found in %s", osType)
+		glog.Errorf("No supported VNC app found in %s", osType)
+		err = fmt.Errorf("No supported VNC app found in %s", osType)
 	} else {
-		klog.V(4).Infof("Executing commandline: '%s %v'", vncBin, args)
+		if glog.V(4) {
+			glog.Infof("Executing commandline: '%s %v'", vncBin, args)
+		}
 		// #nosec No risk for attacket injection. vncBin and args include predefined strings
-		cmd := exec.Command(vncBin, args...)
-		output, err := cmd.CombinedOutput()
+		cmnd := exec.Command(vncBin, args...)
+		output, err := cmnd.CombinedOutput()
 		if err != nil {
-			klog.Errorf("%s execution failed: %v, output: %v", vncBin, err, string(output))
+			glog.Errorf("%s execution failed: %v, output: %v", vncBin, err, string(output))
 		} else {
-			klog.V(2).Infof("%v output: %v", vncBin, string(output))
+			glog.V(2).Infof("%v output: %v", vncBin, string(output))
 		}
 	}
 	viewResChan <- err
@@ -305,7 +300,7 @@ func checkAndRunVNCViewer(doneChan chan struct{}, viewResChan chan error, port i
 
 func tigerVncArgs(port int) (args []string) {
 	args = append(args, fmt.Sprintf(listenAddressFmt, port))
-	if klog.V(4).Enabled() {
+	if glog.V(4) {
 		args = append(args, "Log=*:stderr:100")
 	}
 	return
@@ -321,7 +316,7 @@ func realVncArgs(port int) (args []string) {
 	args = append(args, "-WarnUnencrypted=0")
 	args = append(args, "-Shared=0")
 	args = append(args, "-ShareFiles=0")
-	if klog.V(4).Enabled() {
+	if glog.V(4) {
 		args = append(args, "-log=*:stderr:100")
 	}
 	return
@@ -329,15 +324,13 @@ func realVncArgs(port int) (args []string) {
 
 func remoteViewerArgs(port int) (args []string) {
 	args = append(args, fmt.Sprintf("vnc://127.0.0.1:%d", port))
-	if klog.V(4).Enabled() {
+	if glog.V(4) {
 		args = append(args, "--debug")
 	}
 	return
 }
 
 func usage() string {
-	return `  # Connect to 'testvm' via remote-viewer:
-   {{ProgramName}} vnc myvm
-   {{ProgramName}} vnc myvm.mynamespace
-   {{ProgramName}} vnc myvm -n mynamespace`
+	return `  # Connect to 'testvmi' via remote-viewer:
+   {{ProgramName}} vnc testvmi`
 }

@@ -22,7 +22,7 @@ package scp
 import (
 	"strings"
 
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
+	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
 func (o *SCP) buildSCPTarget(local templates.LocalSCPArgument, remote templates.RemoteSCPArgument, toRemote bool) (opts []string) {

@@ -26,10 +26,12 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/deckhouse/virtualization/api/client/kubeclient"
-	virtv2 "github.com/deckhouse/virtualization/api/core/v1alpha2"
+	v1 "kubevirt.io/api/core/v1"
+	"kubevirt.io/client-go/kubecli"
+
+	"kubevirt.io/kubevirt/pkg/controller"
 )
 
 // UsageTemplate returns the usage template for all subcommands
@@ -76,28 +78,22 @@ func OptionsUsageTemplate() string {
 func ExactArgs(nameOfCommand string, n int) cobra.PositionalArgs {
 	return func(cmd *cobra.Command, args []string) error {
 		if len(args) != n {
-			err := errors.New("argument validation failed")
-			_, e := fmt.Fprintf(os.Stderr, "fatal: Number of input parameters is incorrect, %s accepts %d arg(s), received %d\n\n", nameOfCommand, n, len(args))
-			if e != nil {
-				err = errors.Join(err, e)
-			}
-			e = cmd.Help()
-			if e != nil {
-				err = errors.Join(err, e)
-			}
-			return err
+			fmt.Fprintf(os.Stderr, "fatal: Number of input parameters is incorrect, %s accepts %d arg(s), received %d\n\n", nameOfCommand, n, len(args))
+			cmd.Help()
+			return errors.New("argument validation failed")
 		}
 		return nil
 	}
 }
 
-// PrintWarningForPausedVM prints warning message if VM is paused
-func PrintWarningForPausedVM(virtCli kubeclient.Client, vmName, namespace string) {
-	vm, err := virtCli.VirtualMachines(namespace).Get(context.Background(), vmName, metav1.GetOptions{})
+// PrintWarningForPausedVMI prints warning message if VMI is paused
+func PrintWarningForPausedVMI(virtCli kubecli.KubevirtClient, vmiName string, namespace string) {
+	vmi, err := virtCli.VirtualMachineInstance(namespace).Get(context.Background(), vmiName, k8smetav1.GetOptions{})
 	if err != nil {
 		return
 	}
-	if vm.Status.Phase == virtv2.MachinePause {
-		fmt.Fprintf(os.Stderr, "\rWarning: %s is paused. Console will be active after unpause.\n", vmName)
+	condManager := controller.NewVirtualMachineInstanceConditionManager()
+	if condManager.HasCondition(vmi, v1.VirtualMachineInstancePaused) {
+		fmt.Fprintf(os.Stderr, "\rWarning: %s is paused. Console will be active after unpause.\n", vmiName)
 	}
 }

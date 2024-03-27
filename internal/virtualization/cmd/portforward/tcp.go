@@ -21,10 +21,9 @@ package portforward
 
 import (
 	"io"
-	"k8s.io/klog/v2"
 	"net"
 
-	"github.com/deckhouse/virtualization/api/subresources/v1alpha2"
+	"github.com/golang/glog"
 )
 
 func (p *portForwarder) startForwardingTCP(address *net.IPAddr, port forwardedPort) error {
@@ -48,13 +47,13 @@ func (p *portForwarder) waitForConnection(listener net.Listener, port forwardedP
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			klog.Errorln("error accepting connection:", err)
+			glog.Errorln("error accepting connection:", err)
 			return
 		}
-		klog.Infof("opening new tcp tunnel to %d", port.remote)
-		stream, err := p.resource.PortForward(p.name, v1alpha2.VirtualMachinePortForward{Port: port.remote, Protocol: port.protocol})
+		glog.Infof("opening new tcp tunnel to %d", port.remote)
+		stream, err := p.resource.PortForward(p.name, port.remote, port.protocol)
 		if err != nil {
-			klog.Errorf("can't access vm/%s.%s: %v", p.name, p.namespace, err)
+			glog.Errorf("can't access %s/%s.%s: %v", p.kind, p.name, p.namespace, err)
 			return
 		}
 		go p.handleConnection(conn, stream.AsConn(), port)
@@ -64,7 +63,7 @@ func (p *portForwarder) waitForConnection(listener net.Listener, port forwardedP
 // handleConnection copies data between the local connection and the stream to
 // the remote server.
 func (p *portForwarder) handleConnection(local, remote net.Conn, port forwardedPort) {
-	klog.Infof("handling tcp connection for %d", port.local)
+	glog.Infof("handling tcp connection for %d", port.local)
 	errs := make(chan error)
 	go func() {
 		_, err := io.Copy(remote, local)

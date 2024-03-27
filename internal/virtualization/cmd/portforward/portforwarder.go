@@ -21,26 +21,25 @@ package portforward
 
 import (
 	"errors"
-	"k8s.io/klog/v2"
 	"net"
 	"strings"
 
-	"github.com/deckhouse/virtualization/api/client/kubeclient"
-	"github.com/deckhouse/virtualization/api/subresources/v1alpha2"
+	"github.com/golang/glog"
+
+	"kubevirt.io/client-go/kubecli"
 )
 
 type portForwarder struct {
-	namespace string
-	name      string
-	resource  portforwardableResource
+	kind, namespace, name string
+	resource              portforwardableResource
 }
 
 type portforwardableResource interface {
-	PortForward(name string, options v1alpha2.VirtualMachinePortForward) (kubeclient.StreamInterface, error)
+	PortForward(name string, port int, protocol string) (kubecli.StreamInterface, error)
 }
 
 func (p *portForwarder) startForwarding(address *net.IPAddr, port forwardedPort) error {
-	klog.Infof("forwarding %s %s:%d to %d", port.protocol, address, port.local, port.remote)
+	glog.Infof("forwarding %s %s:%d to %d", port.protocol, address, port.local, port.remote)
 	if port.protocol == protocolUDP {
 		return p.startForwardingUDP(address, port)
 	}
@@ -54,6 +53,6 @@ func (p *portForwarder) startForwarding(address *net.IPAddr, port forwardedPort)
 
 func handleConnectionError(err error, port forwardedPort) {
 	if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
-		klog.Errorf("error handling connection for %d: %v", port.local, err)
+		glog.Errorf("error handling connection for %d: %v", port.local, err)
 	}
 }
