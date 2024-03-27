@@ -3,7 +3,7 @@ module github.com/deckhouse/deckhouse-cli
 go 1.22.0
 
 require (
-	github.com/deckhouse/virtualization/api v0.0.0-20240321122416-1576d18b955c
+	github.com/deckhouse/virtualization/api v0.0.0-20240326113112-979c4f4f17b9
 	github.com/gorilla/websocket v1.5.0
 	github.com/int128/kubelogin v1.28.0
 	github.com/povsister/scp v0.0.0-20210427074412-33febfd9f13e

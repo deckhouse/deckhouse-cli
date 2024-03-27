@@ -25,7 +25,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/deckhouse/virtualization/api/client/kubecli"
+	"github.com/deckhouse/virtualization/api/client/kubeclient"
 	"github.com/deckhouse/virtualization/api/subresources/v1alpha2"
 )
 
@@ -36,7 +36,7 @@ type portForwarder struct {
 }
 
 type portforwardableResource interface {
-	PortForward(name string, options v1alpha2.VirtualMachinePortForward) (kubecli.StreamInterface, error)
+	PortForward(name string, options v1alpha2.VirtualMachinePortForward) (kubeclient.StreamInterface, error)
 }
 
 func (p *portForwarder) startForwarding(address *net.IPAddr, port forwardedPort) error {

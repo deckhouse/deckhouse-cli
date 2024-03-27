@@ -32,7 +32,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/util"
-	"github.com/deckhouse/virtualization/api/client/kubecli"
+	"github.com/deckhouse/virtualization/api/client/kubeclient"
 )
 
 var timeout int
@@ -81,7 +81,7 @@ func (c *Console) Run(args []string) error {
 		}
 	}
 
-	virtCli, err := kubecli.GetClientFromClientConfig(c.clientConfig)
+	virtCli, err := kubeclient.GetClientFromClientConfig(c.clientConfig)
 	if err != nil {
 		return err
 	}
@@ -98,14 +98,14 @@ func (c *Console) Run(args []string) error {
 	signal.Notify(waitInterrupt, os.Interrupt)
 
 	go func() {
-		con, err := virtCli.VirtualMachines(namespace).SerialConsole(name, &kubecli.SerialConsoleOptions{ConnectionTimeout: time.Duration(timeout) * time.Minute})
+		con, err := virtCli.VirtualMachines(namespace).SerialConsole(name, &kubeclient.SerialConsoleOptions{ConnectionTimeout: time.Duration(timeout) * time.Minute})
 		runningChan <- err
 
 		if err != nil {
 			return
 		}
 
-		resChan <- con.Stream(kubecli.StreamOptions{
+		resChan <- con.Stream(kubeclient.StreamOptions{
 			In:  stdinReader,
 			Out: stdoutWriter,
 		})

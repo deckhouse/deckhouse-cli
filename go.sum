@@ -72,6 +72,8 @@ github.com/daviddengcn/go-colortext v1.0.0 h1:ANqDyC0ys6qCSvuEK7l3g5RaehL/Xck9EX
 github.com/daviddengcn/go-colortext v1.0.0/go.mod h1:zDqEI5NVUop5QPpVJUxE9UO10hRnmkD5G4Pmri9+m4c=
 github.com/deckhouse/virtualization/api v0.0.0-20240321122416-1576d18b955c h1:3SqlzxDvC96EWiR0RGy2ixWYy1AmaKOiqz9691qzAJ0=
 github.com/deckhouse/virtualization/api v0.0.0-20240321122416-1576d18b955c/go.mod h1:1tfoFeZmlKqq6jEuSfIpdrxsBpOcMajYaCbO94pVQLs=
+github.com/deckhouse/virtualization/api v0.0.0-20240326113112-979c4f4f17b9 h1:UoyY1oAqGNp7UKi1x7UKYJKUDl3SQgNT1aAN2G01osA=
+github.com/deckhouse/virtualization/api v0.0.0-20240326113112-979c4f4f17b9/go.mod h1:1tfoFeZmlKqq6jEuSfIpdrxsBpOcMajYaCbO94pVQLs=
 github.com/distribution/reference v0.5.0 h1:/FUIFXtfc/x2gpa5/VGfiGLuOIdYa1t65IKK2OFGvA0=
 github.com/distribution/reference v0.5.0/go.mod h1:BbU0aIcezP1/5jX/8MP0YiH4SdvB5Y4f/wlDRiLyi3E=
 github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815/go.mod h1:WwZ+bS3ebgob9U8Nd0kOddGdZWjyMGR8Wziv+TBNwSE=

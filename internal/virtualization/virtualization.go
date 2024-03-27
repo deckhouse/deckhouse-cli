@@ -32,7 +32,7 @@ import (
 	"strings"
 
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
-	"github.com/deckhouse/virtualization/api/client/kubecli"
+	"github.com/deckhouse/virtualization/api/client/kubeclient"
 )
 
 func NewCommand(programName string) (*cobra.Command, clientcmd.ClientConfig) {
@@ -76,7 +76,7 @@ func NewCommand(programName string) (*cobra.Command, clientcmd.ClientConfig) {
 
 	optionsCmd.SetUsageTemplate(templates.OptionsUsageTemplate())
 
-	clientConfig := kubecli.DefaultClientConfig(virtCmd.PersistentFlags())
+	clientConfig := kubeclient.DefaultClientConfig(virtCmd.PersistentFlags())
 	virtCmd.AddCommand(
 		console.NewCommand(clientConfig),
 		vnc.NewCommand(clientConfig),

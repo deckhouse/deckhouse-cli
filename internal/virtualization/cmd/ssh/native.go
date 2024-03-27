@@ -22,7 +22,7 @@ package ssh
 import (
 	"errors"
 	"fmt"
-	"github.com/deckhouse/virtualization/api/client/kubecli"
+	"github.com/deckhouse/virtualization/api/client/kubeclient"
 	"github.com/deckhouse/virtualization/api/subresources/v1alpha2"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -201,8 +201,8 @@ func (o *NativeSSHConnection) StartSession(client *ssh.Client, command string) e
 	return nil
 }
 
-func (o *NativeSSHConnection) prepareSSHTunnel(namespace, name string) (kubecli.StreamInterface, error) {
-	virtCli, err := kubecli.GetClientFromClientConfig(o.ClientConfig)
+func (o *NativeSSHConnection) prepareSSHTunnel(namespace, name string) (kubeclient.StreamInterface, error) {
+	virtCli, err := kubeclient.GetClientFromClientConfig(o.ClientConfig)
 	if err != nil {
 		return nil, err
 	}

@@ -28,7 +28,7 @@ import (
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/deckhouse/virtualization/api/client/kubecli"
+	"github.com/deckhouse/virtualization/api/client/kubeclient"
 	virtv2 "github.com/deckhouse/virtualization/api/core/v1alpha2"
 )
 
@@ -92,7 +92,7 @@ func ExactArgs(nameOfCommand string, n int) cobra.PositionalArgs {
 }
 
 // PrintWarningForPausedVM prints warning message if VM is paused
-func PrintWarningForPausedVM(virtCli kubecli.Client, vmName, namespace string) {
+func PrintWarningForPausedVM(virtCli kubeclient.Client, vmName, namespace string) {
 	vm, err := virtCli.VirtualMachines(namespace).Get(context.Background(), vmName, metav1.GetOptions{})
 	if err != nil {
 		return

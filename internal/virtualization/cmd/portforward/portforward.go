@@ -22,6 +22,7 @@ package portforward
 import (
 	"errors"
 	"fmt"
+	"github.com/deckhouse/virtualization/api/client/kubeclient"
 	"k8s.io/klog/v2"
 	"net"
 	"os"
@@ -31,7 +32,6 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
-	"github.com/deckhouse/virtualization/api/client/kubecli"
 	"github.com/deckhouse/virtualization/api/subresources/v1alpha2"
 )
 
@@ -139,7 +139,7 @@ func (o *PortForward) prepareCommand(args []string) (namespace, name string, por
 }
 
 func (o *PortForward) setResource(namespace string) error {
-	client, err := kubecli.GetClientFromClientConfig(o.clientConfig)
+	client, err := kubeclient.GetClientFromClientConfig(o.clientConfig)
 	if err != nil {
 		return err
 	}
@@ -154,7 +154,7 @@ func (o *PortForward) startStdoutStream(namespace, name string, port forwardedPo
 	}
 
 	klog.V(3).Infof("forwarding to %s/%s:%d", namespace, name, port.remote)
-	if err := streamer.Stream(kubecli.StreamOptions{
+	if err := streamer.Stream(kubeclient.StreamOptions{
 		In:  os.Stdin,
 		Out: os.Stdout,
 	}); err != nil {

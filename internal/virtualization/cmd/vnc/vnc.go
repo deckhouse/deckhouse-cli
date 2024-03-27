@@ -24,7 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
-	"github.com/deckhouse/virtualization/api/client/kubecli"
+	"github.com/deckhouse/virtualization/api/client/kubeclient"
 	"github.com/spf13/cobra"
 	"io"
 	"k8s.io/client-go/tools/clientcmd"
@@ -103,7 +103,7 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	virtCli, err := kubecli.GetClientFromClientConfig(o.clientConfig)
+	virtCli, err := kubeclient.GetClientFromClientConfig(o.clientConfig)
 	if err != nil {
 		return err
 	}
@@ -149,7 +149,7 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 
 	go func() {
 		// transfer data from/to the VM
-		k8ResChan <- vnc.Stream(kubecli.StreamOptions{
+		k8ResChan <- vnc.Stream(kubeclient.StreamOptions{
 			In:  pipeInReader,
 			Out: pipeOutWriter,
 		})
