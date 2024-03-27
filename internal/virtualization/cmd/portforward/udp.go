@@ -20,10 +20,11 @@ Initially copied from https://github.com/kubevirt/kubevirt/blob/main/pkg/virtctl
 package portforward
 
 import (
+	"k8s.io/klog/v2"
 	"net"
 	"sync"
 
-	"github.com/golang/glog"
+	"github.com/deckhouse/virtualization/api/subresources/v1alpha2"
 )
 
 const bufSize = 1500
@@ -44,10 +45,10 @@ func (p *portForwarder) startForwardingUDP(address *net.IPAddr, port forwardedPo
 	proxy := udpProxy{
 		listener: listener,
 		remoteDialer: func() (net.Conn, error) {
-			glog.Infof("opening new udp tunnel to %d", port.remote)
-			stream, err := p.resource.PortForward(p.name, port.remote, port.protocol)
+			klog.Infof("opening new udp tunnel to %d", port.remote)
+			stream, err := p.resource.PortForward(p.name, v1alpha2.VirtualMachinePortForward{Port: port.remote, Protocol: port.protocol})
 			if err != nil {
-				glog.Errorf("can't access %s/%s.%s: %v", p.kind, p.name, p.namespace, err)
+				klog.Errorf("can't access vm/%s.%s: %v", p.name, p.namespace, err)
 				return nil, err
 			}
 			return stream.AsConn(), nil
@@ -72,7 +73,7 @@ func (p *udpProxy) Run() {
 	buf := make([]byte, bufSize)
 	for {
 		if err := p.handleRead(buf); err != nil {
-			glog.Errorln(err)
+			klog.Errorln(err)
 		}
 	}
 }
@@ -129,7 +130,7 @@ func (c *udpProxyConn) handleRemoteReads() {
 	buf := make([]byte, bufSize)
 	for {
 		if err := c.handleRemoteRead(buf); err != nil {
-			glog.Errorf("closing client: %v\n", err)
+			klog.Errorf("closing client: %v\n", err)
 			return
 		}
 	}

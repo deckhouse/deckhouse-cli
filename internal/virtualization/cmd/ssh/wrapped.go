@@ -21,21 +21,25 @@ package ssh
 
 import (
 	"fmt"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	"k8s.io/klog/v2"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
-
-	"github.com/golang/glog"
 )
 
-var runCommand = func(cmd *exec.Cmd) error {
-	return cmd.Run()
+func addAdditionalCommandlineArgs(flagset *pflag.FlagSet, opts *SSHOptions) {
+	flagset.StringArrayVarP(&opts.AdditionalSSHLocalOptions, additionalOpts, additionalOptsShort, opts.AdditionalSSHLocalOptions,
+		fmt.Sprintf(`--%s="-o StrictHostKeyChecking=no" : Additional options to be passed to the local ssh. This is applied only if local-ssh=true`, additionalOpts))
+	flagset.BoolVar(&opts.WrapLocalSSH, wrapLocalSSHFlag, opts.WrapLocalSSH,
+		fmt.Sprintf("--%s=true: Set this to true to use the SSH/SCP client available on your system by using this command as ProxyCommand; If set to false, this will establish a SSH/SCP connection with limited capabilities provided by this client", wrapLocalSSHFlag))
 }
 
-func RunLocalClient(kind, namespace, name string, options *SSHOptions, clientArgs []string) error {
+func RunLocalClient(cmd *cobra.Command, namespace, name string, options *SSHOptions, clientArgs []string) error {
 	args := []string{"-o"}
-	args = append(args, buildProxyCommandOption(kind, namespace, name, options.SSHPort))
+	args = append(args, buildProxyCommandOption(cmd, namespace, name, options.SSHPort))
 
 	if len(options.AdditionalSSHLocalOptions) > 0 {
 		args = append(args, options.AdditionalSSHLocalOptions...)
@@ -46,21 +50,38 @@ func RunLocalClient(kind, namespace, name string, options *SSHOptions, clientArg
 
 	args = append(args, clientArgs...)
 
-	cmd := exec.Command(options.LocalClientName, args...)
-	glog.V(3).Info("running: ", cmd)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
+	command := exec.Command(options.LocalClientName, args...)
+	klog.V(3).Info("running: ", command)
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	command.Stdin = os.Stdin
 
-	return runCommand(cmd)
+	return command.Run()
 }
 
-func buildProxyCommandOption(kind, namespace, name string, port int) string {
+func buildProxyCommandOption(cmd *cobra.Command, namespace, name string, port int) string {
+	parents := make([]string, 0, 2)
+	for {
+		if !cmd.HasParent() {
+			break
+		}
+		cmd = cmd.Parent()
+		parents = append(parents, cmd.Name())
+	}
+	parents[len(parents)-1] = os.Args[0]
+	pcmd := strings.Builder{}
+
+	for i := 1; i <= len(parents); i++ {
+		pcmd.WriteString(parents[len(parents)-i])
+		pcmd.WriteString(" ")
+
+	}
+
 	proxyCommand := strings.Builder{}
 	proxyCommand.WriteString("ProxyCommand=")
-	proxyCommand.WriteString(os.Args[0])
-	proxyCommand.WriteString(" port-forward --stdio=true ")
-	proxyCommand.WriteString(fmt.Sprintf("%s/%s.%s", kind, name, namespace))
+	proxyCommand.WriteString(pcmd.String())
+	proxyCommand.WriteString("port-forward --stdio=true ")
+	proxyCommand.WriteString(fmt.Sprintf("%s.%s", name, namespace))
 	proxyCommand.WriteString(" ")
 
 	proxyCommand.WriteString(strconv.Itoa(port))
@@ -68,14 +89,12 @@ func buildProxyCommandOption(kind, namespace, name string, port int) string {
 	return proxyCommand.String()
 }
 
-func (o *SSH) buildSSHTarget(kind, namespace, name string) (opts []string) {
+func (o *SSH) buildSSHTarget(namespace, name string) (opts []string) {
 	target := strings.Builder{}
 	if len(o.options.SSHUsername) > 0 {
 		target.WriteString(o.options.SSHUsername)
 		target.WriteRune('@')
 	}
-	target.WriteString(kind)
-	target.WriteRune('/')
 	target.WriteString(name)
 	target.WriteRune('.')
 	target.WriteString(namespace)
