@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"k8s.io/component-base/logs"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -15,6 +16,8 @@ var rootCmd = &cobra.Command{
 }
 
 func Execute() {
+	logs.InitLogs()
+	defer logs.FlushLogs()
 	err := rootCmd.Execute()
 	if err != nil {
 		os.Exit(1)

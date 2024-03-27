@@ -16,8 +16,6 @@ func init() {
 	kubectlCmd.Use = "k"
 	kubectlCmd.Aliases = []string{"kubectl"}
 
-	logs.InitLogs()
-	defer logs.FlushLogs()
 	kubectlCmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 	logs.AddFlags(kubectlCmd.PersistentFlags())
 
