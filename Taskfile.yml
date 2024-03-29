@@ -34,7 +34,7 @@ vars:
 
       echo "${ldflags[*]-}"
 
-  cgoTags: "dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp osusergo exclude_graphdriver_devicemapper netgo no_devmapper static_build"
+  cgoTags: "dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp osusergo exclude_graphdriver_devicemapper netgo no_devmapper static_build cni"
   goTags: "dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp"
 
   cgoDevLDFlags: "-linkmode external -extldflags=-static"
