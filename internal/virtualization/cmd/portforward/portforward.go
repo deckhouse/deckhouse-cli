@@ -22,11 +22,12 @@ package portforward
 import (
 	"errors"
 	"fmt"
-	"github.com/deckhouse/virtualization/api/client/kubeclient"
-	"k8s.io/klog/v2"
 	"net"
 	"os"
 	"os/signal"
+
+	"github.com/deckhouse/virtualization/api/client/kubeclient"
+	"k8s.io/klog/v2"
 
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/clientcmd"

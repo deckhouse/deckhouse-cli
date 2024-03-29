@@ -23,12 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
-	"github.com/deckhouse/virtualization/api/client/kubeclient"
-	"github.com/spf13/cobra"
 	"io"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/klog/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -36,6 +31,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
+	"github.com/deckhouse/virtualization/api/client/kubeclient"
+	"github.com/spf13/cobra"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/klog/v2"
 )
 
 const (

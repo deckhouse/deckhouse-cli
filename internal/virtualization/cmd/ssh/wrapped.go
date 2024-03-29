@@ -21,13 +21,14 @@ package ssh
 
 import (
 	"fmt"
-	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
-	"k8s.io/klog/v2"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	"k8s.io/klog/v2"
 )
 
 func addAdditionalCommandlineArgs(flagset *pflag.FlagSet, opts *SSHOptions) {

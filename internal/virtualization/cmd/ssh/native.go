@@ -22,6 +22,9 @@ package ssh
 import (
 	"errors"
 	"fmt"
+	"net"
+	"os"
+
 	"github.com/deckhouse/virtualization/api/client/kubeclient"
 	"github.com/deckhouse/virtualization/api/subresources/v1alpha2"
 	"golang.org/x/crypto/ssh"
@@ -29,8 +32,6 @@ import (
 	"golang.org/x/term"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
-	"net"
-	"os"
 )
 
 func (o *SSH) nativeSSH(namespace, name string) error {

@@ -20,6 +20,9 @@ Initially copied from https://github.com/kubevirt/kubevirt/blob/main/pkg/virtctl
 package virtualization
 
 import (
+	"os"
+	"strings"
+
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/console"
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/portforward"
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/scp"
@@ -28,8 +31,6 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/component-base/logs"
-	"os"
-	"strings"
 
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
 	"github.com/deckhouse/virtualization/api/client/kubeclient"

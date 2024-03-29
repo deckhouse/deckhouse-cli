@@ -21,9 +21,10 @@ package portforward
 
 import (
 	"errors"
-	"k8s.io/klog/v2"
 	"net"
 	"strings"
+
+	"k8s.io/klog/v2"
 
 	"github.com/deckhouse/virtualization/api/client/kubeclient"
 	"github.com/deckhouse/virtualization/api/subresources/v1alpha2"

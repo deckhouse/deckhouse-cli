@@ -21,13 +21,14 @@ package ssh
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
-	"os"
-	"path/filepath"
 )
 
 const (

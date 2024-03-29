@@ -21,8 +21,9 @@ package portforward
 
 import (
 	"io"
-	"k8s.io/klog/v2"
 	"net"
+
+	"k8s.io/klog/v2"
 
 	"github.com/deckhouse/virtualization/api/subresources/v1alpha2"
 )

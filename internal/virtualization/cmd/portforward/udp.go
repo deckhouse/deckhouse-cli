@@ -20,9 +20,10 @@ Initially copied from https://github.com/kubevirt/kubevirt/blob/main/pkg/virtctl
 package portforward
 
 import (
-	"k8s.io/klog/v2"
 	"net"
 	"sync"
+
+	"k8s.io/klog/v2"
 
 	"github.com/deckhouse/virtualization/api/subresources/v1alpha2"
 )
