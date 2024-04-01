@@ -58,7 +58,7 @@ func NewCommand(programName string) (*cobra.Command, clientcmd.ClientConfig) {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Run: func(cmd *cobra.Command, args []string) {
-			cmd.Printf(cmd.UsageString())
+			cmd.Help()
 		},
 	}
 

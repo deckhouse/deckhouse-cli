@@ -4,11 +4,16 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	helm_v3 "helm.sh/helm/v3/cmd/helm"
+
+	cliflag "k8s.io/component-base/cli/flag"
+	"k8s.io/component-base/logs"
 
 	"github.com/werf/logboek"
 	"github.com/werf/nelm/pkg/resrcchangcalc"
@@ -24,10 +29,19 @@ var rootCmd = &cobra.Command{
 	Version:       Version,
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	Run: func(cmd *cobra.Command, args []string) {
+		cmd.Help()
+	},
 }
 
 func Execute() {
 	ctx := rootCmd.Context()
+
+	rand.Seed(time.Now().UnixNano())
+	defer logs.FlushLogs()
+
+	// It is supposed to be executed against the kubectl command, but we want to use this normalization globally.
+	rootCmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 
 	if shouldTerminate, err := werfcommon.ContainerBackendProcessStartupHook(); err != nil {
 		werfcommon.TerminateWithError(err.Error(), 1)
