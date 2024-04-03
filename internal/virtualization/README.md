@@ -12,26 +12,26 @@ Manages virtual machine-related operations in your Kubernetes cluster.
 ### Examples
 #### console
 ```shell
-d8 virtualziation console myvm
-d8 virtualziation console myvm.mynamespace
+d8 virtualization console myvm
+d8 virtualization console myvm.mynamespace
 ```
 #### port-forward
 ```shell
-d8 virtualziation port-forward myvm tcp/8080:8080
-d8 virtualziation port-forward --stdio=true myvm.mynamespace 22
+d8 virtualization port-forward myvm tcp/8080:8080
+d8 virtualization port-forward --stdio=true myvm.mynamespace 22
 ```
 #### scp
 ```shell
-d8 virtualziation scp myfile.bin user@myvm:myfile.bin
-d8 virtualziation scp user@myvm:myfile.bin ~/myfile.bin
+d8 virtualization scp myfile.bin user@myvm:myfile.bin
+d8 virtualization scp user@myvm:myfile.bin ~/myfile.bin
 ```
 #### ssh
 ```shell
-d8 virtualziation --identity-file=/path/to/ssh_key ssh user@myvm.mynamespace
-d8 virtualziation ssh --local-ssh=true --namespace=mynamespace --username=user myvm
+d8 virtualization --identity-file=/path/to/ssh_key ssh user@myvm.mynamespace
+d8 virtualization ssh --local-ssh=true --namespace=mynamespace --username=user myvm
 ```
 #### vnc
 ```shell
-d8 virtualziation vnc myvm.mynamespace
-d8 virtualziation vnc myvm -n mynamespace
+d8 virtualization vnc myvm.mynamespace
+d8 virtualization vnc myvm -n mynamespace
 ```
