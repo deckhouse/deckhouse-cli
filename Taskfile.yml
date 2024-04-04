@@ -45,6 +45,7 @@ vars:
 
 tasks:
   _build:cgo:dev:
+    internal: true
     cmds:
       - go build -o "{{ .outputDir | default (printf "./build/%s-%s" .targetOS .targetArch) }}/d8"
         -compiler gc -ldflags="{{ .cgoDevLDFlags }}" -tags="{{ .cgoTags }}" {{ .CLI_ARGS }} main.go
@@ -54,6 +55,7 @@ tasks:
       GOARCH: "{{ .targetArch }}"
 
   _build:cgo:dist:
+    internal: true
     cmds:
       - go build -o "{{ .outputDir | default (printf "./dist/%s/%s-%s" .version .targetOS .targetArch) }}/d8"
         -compiler gc -ldflags="{{ .cgoReleaseLDFlags }}" -tags="{{ .cgoTags }}" {{ .CLI_ARGS }} main.go
@@ -63,6 +65,7 @@ tasks:
       GOARCH: "{{ .targetArch }}"
 
   _build:go:dev:
+    internal: true
     cmds:
       - go build -o "{{ .outputDir | default (printf "./build/%s-%s" .targetOS .targetArch) }}/d8"
         -ldflags="{{ .goDevLDFlags }}" -tags="{{ .goTags }}" {{ .CLI_ARGS }} main.go
@@ -72,6 +75,7 @@ tasks:
       GOARCH: "{{ .targetArch }}"
 
   _build:go:dist:
+    internal: true
     cmds:
       - go build -o "{{ .outputDir | default (printf "./dist/%s/%s-%s" .version .targetOS .targetArch) }}/d8"
         -ldflags="{{ .goReleaseLDFlags }}" -tags="{{ .goTags }}" {{ .CLI_ARGS }} main.go
