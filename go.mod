@@ -12,8 +12,8 @@ require (
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/pflag v1.0.5
 	github.com/werf/logboek v0.6.1
-	github.com/werf/nelm v0.0.0-20240329141953-5464969595e3
-	github.com/werf/werf v1.2.302-0.20240329144057-9d1d7a99c3aa
+	github.com/werf/nelm v0.0.0-20240409125451-b3f238780b01
+	github.com/werf/werf v1.2.308-0.20240411153803-0f37b66b1e68
 	golang.org/x/crypto v0.21.0
 	golang.org/x/sys v0.18.0
 	golang.org/x/term v0.18.0
@@ -378,6 +378,6 @@ replace (
 	github.com/deislabs/oras => github.com/werf/3p-oras v0.9.1-0.20240115121544-03962ecbd40a // upstream not maintained
 	github.com/helm/helm-2to3 => github.com/werf/3p-helm-2to3 v0.0.0-20230313155428-cf9dd655c0e3 // upstream not maintained, switch back to upstream when merged: https://github.com/helm/helm-2to3/pull/224
 	github.com/jaguilar/vt100 => github.com/tonistiigi/vt100 v0.0.0-20190402012908-ad4c4a574305 // upstream not maintained
-	helm.sh/helm/v3 => github.com/werf/3p-helm/v3 v3.0.0-20240329141800-4c8eab12ee45 // helm 3
+	helm.sh/helm/v3 => github.com/werf/3p-helm/v3 v3.0.0-20240405163812-3dc7244388e5 // helm 3
 	k8s.io/helm => github.com/werf/3p-helm v0.0.0-20210202111118-81e74d46da0f // helm 2
 )
