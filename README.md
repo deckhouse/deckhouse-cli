@@ -6,9 +6,9 @@ Deckhouse Client (d8) is a command-line client for Deckhouse.
 
 To install the `d8` binary from the provided GitHub release link, follow these steps:
 
-1. **Define variables** (`darwin/amd64` in this case, release v0.0.3):
+1. **Define variables** (`darwin/amd64` in this case, release v0.0.5):
    ```bash
-   RELEASE_VERSION=0.0.3
+   RELEASE_VERSION=0.0.5
    OS=darwin
    ARCH=amd64
 
