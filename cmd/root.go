@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -20,6 +21,16 @@ import (
 	werfcommon "github.com/werf/werf/cmd/werf/common"
 	"github.com/werf/werf/pkg/process_exterminator"
 )
+
+func ReplaceCommandName(from, to string, c *cobra.Command) *cobra.Command {
+	c.Example = strings.Replace(c.Example, from, to, -1)
+	// Need some investigation about links
+	// c.Long = strings.Replace(c.Long, from, to, -1)
+	for _, sub := range c.Commands() {
+		ReplaceCommandName(from, to, sub)
+	}
+	return c
+}
 
 var Version string
 

@@ -1,22 +1,11 @@
 package cmd
 
 import (
-	"strings"
-
 	"github.com/spf13/cobra"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
 	kubecmd "k8s.io/kubectl/pkg/cmd"
 )
-
-func ReplaceCommandName(from, to string, c *cobra.Command) *cobra.Command {
-	c.Example = strings.Replace(c.Example, from, to, -1)
-	c.Long = strings.Replace(c.Long, from, to, -1)
-	for _, sub := range c.Commands() {
-		ReplaceCommandName(from, to, sub)
-	}
-	return c
-}
 
 func init() {
 	kubectlCmd := kubecmd.NewDefaultKubectlCommand()

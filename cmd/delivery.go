@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"strings"
+
 	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 
@@ -19,6 +21,10 @@ func init() {
 
 	werfRootCmd.Use = "d"
 	werfRootCmd.Aliases = []string{"delivery"}
+	werfRootCmd = ReplaceCommandName("werf", "d8 d", werfRootCmd)
+	werfRootCmd.Short = strings.Replace(werfRootCmd.Short, "werf", "d8 d", 1)
+	werfRootCmd.Long = strings.Replace(werfRootCmd.Long, "werf", "d8 d", 1)
+
 	removeKubectlCmd(werfRootCmd)
 
 	rootCmd.AddCommand(werfRootCmd)
