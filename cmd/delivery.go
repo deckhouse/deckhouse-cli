@@ -8,9 +8,12 @@ import (
 
 	werfcommon "github.com/werf/werf/cmd/werf/common"
 	werfroot "github.com/werf/werf/cmd/werf/root"
+	"github.com/werf/werf/pkg/storage"
 )
 
 func init() {
+	storage.DefaultHttpSynchronizationServer = "https://delivery-sync.deckhouse.ru"
+
 	ctx := werfcommon.GetContextWithLogger()
 
 	werfRootCmd, err := werfroot.ConstructRootCmd(ctx)
@@ -24,6 +27,11 @@ func init() {
 	werfRootCmd = ReplaceCommandName("werf", "d8 d", werfRootCmd)
 	werfRootCmd.Short = strings.Replace(werfRootCmd.Short, "werf", "d8 d", 1)
 	werfRootCmd.Long = strings.Replace(werfRootCmd.Long, "werf", "d8 d", 1)
+	werfRootCmd.Long = werfRootCmd.Long + `
+
+LICENSE NOTE: The d8 delivery functionality is exclusively available to users holding a valid license for any commercial version of the Deckhouse Kubernetes Platform.
+
+© Flant JSC 2024`
 
 	removeKubectlCmd(werfRootCmd)
 
