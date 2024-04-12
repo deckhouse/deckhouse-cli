@@ -18,7 +18,6 @@ func init() {
 
 	werfRootCmd, err := werfroot.ConstructRootCmd(ctx)
 	if err != nil {
-		werfcommon.ShutdownTelemetry(ctx, 1)
 		werfcommon.TerminateWithError(err.Error(), 1)
 	}
 
