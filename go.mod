@@ -13,7 +13,7 @@ require (
 	github.com/spf13/pflag v1.0.5
 	github.com/werf/logboek v0.6.1
 	github.com/werf/nelm v0.0.0-20240409125451-b3f238780b01
-	github.com/werf/werf v1.2.308-0.20240411153803-0f37b66b1e68
+	github.com/werf/werf v1.2.308-0.20240412120428-f9e84f4ffd44
 	golang.org/x/crypto v0.21.0
 	golang.org/x/sys v0.18.0
 	golang.org/x/term v0.18.0
