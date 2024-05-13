@@ -28,7 +28,7 @@ import (
 	mirrorlib "github.com/deckhouse/deckhouse-cli/internal/mirror/contexts"
 )
 
-var digestRegex = regexp.MustCompile(`@sha256:([a-f0-9]{64})`)
+var digestRegex = regexp.MustCompile(`sha256:([a-f0-9]{64})`)
 
 func ExtractDigestsFromJSONFile(digestsFile []byte) []string {
 	return digestRegex.FindAllString(string(digestsFile), -1)
