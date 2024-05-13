@@ -36,7 +36,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/images"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/manifests"
-	modules2 "github.com/deckhouse/deckhouse-cli/internal/mirror/modules" // todo
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/log"
@@ -280,11 +280,11 @@ func PullDeckhouseToLocalFS(
 	versions []semver.Version,
 ) error {
 	var err error
-	modules := make([]modules2.Module, 0)
+	modulesData := make([]modules.Module, 0)
 
 	if !pullCtx.SkipModulesPull {
 		log.InfoF("Fetching Deckhouse external modules list...\t")
-		modules, err = modules2.GetDeckhouseExternalModules(pullCtx)
+		modulesData, err = modules.GetDeckhouseExternalModules(pullCtx)
 		if err != nil {
 			return fmt.Errorf("get Deckhouse modules: %w", err)
 		}
@@ -292,7 +292,7 @@ func PullDeckhouseToLocalFS(
 	}
 
 	log.InfoF("Creating OCI Image Layouts...\t")
-	imageLayouts, err := layouts.CreateOCIImageLayoutsForDeckhouse(pullCtx.UnpackedImagesPath, modules)
+	imageLayouts, err := layouts.CreateOCIImageLayoutsForDeckhouse(pullCtx.UnpackedImagesPath, modulesData)
 	if err != nil {
 		return fmt.Errorf("create OCI Image Layouts: %w", err)
 	}
