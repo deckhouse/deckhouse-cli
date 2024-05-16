@@ -23,7 +23,7 @@ func addFlags(flagSet *pflag.FlagSet) {
 		&ModulesDirectory,
 		"modules-dir",
 		"d",
-		"./modules",
+		"./d8-modules",
 		"Path to modules directory.",
 	)
 	flagSet.StringVarP(

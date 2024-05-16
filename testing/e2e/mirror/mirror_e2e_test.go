@@ -66,7 +66,7 @@ func TestMirrorE2E(t *testing.T) {
 	targetHost, targetRepoPath, targetBlobHandler := setupEmptyRegistryRepo(false)
 
 	createDeckhouseControllersAndInstallersInRegistry(t, sourceHost+sourceRepoPath)
-	createTrivyVulnerabilityDatabaseInRegistry(t, sourceHost+sourceRepoPath, true, false)
+	createTrivyVulnerabilityDatabasesInRegistry(t, sourceHost+sourceRepoPath, true, false)
 	createDeckhouseReleaseChannelsInRegistry(t, sourceHost+sourceRepoPath)
 
 	pullCtx := &contexts.PullContext{
@@ -141,16 +141,23 @@ func createDeckhouseReleaseChannelsInRegistry(t *testing.T, repo string) {
 	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", "v1.56.5", "v1.56.5")
 }
 
-func createTrivyVulnerabilityDatabaseInRegistry(t *testing.T, repo string, insecure, useTLS bool) {
+func createTrivyVulnerabilityDatabasesInRegistry(t *testing.T, repo string, insecure, useTLS bool) {
 	t.Helper()
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authn.Anonymous, insecure, useTLS)
 
-	trivyDBImageTag := repo + "/security/trivy-db:2"
-	ref, err := name.ParseReference(trivyDBImageTag, nameOpts...)
-	require.NoError(t, err)
-	wantImage, err := random.Image(256, 1)
-	require.NoError(t, err)
-	require.NoError(t, remote.Write(ref, wantImage, remoteOpts...))
+	images := []string{
+		repo + "/security/trivy-db:2",
+		repo + "/security/trivy-bdu:1",
+		repo + "/security/trivy-java-db:1",
+	}
+
+	for _, image := range images {
+		ref, err := name.ParseReference(image, nameOpts...)
+		require.NoError(t, err)
+		wantImage, err := random.Image(256, 1)
+		require.NoError(t, err)
+		require.NoError(t, remote.Write(ref, wantImage, remoteOpts...))
+	}
 }
 
 func createDeckhouseControllersAndInstallersInRegistry(t *testing.T, repo string) {

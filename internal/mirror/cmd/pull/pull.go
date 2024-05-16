@@ -68,7 +68,7 @@ valid license for any commercial version of the Deckhouse Kubernetes Platform.
 func NewCommand() *cobra.Command {
 	pullCmd := &cobra.Command{
 		Use:           "pull <images-bundle-path>",
-		Short:         "Copy Deckhouse Kubernetes Platform distribution to the third-party registry",
+		Short:         "Copy Deckhouse Kubernetes Platform distribution to the local filesystem",
 		Long:          pullLong,
 		ValidArgs:     []string{"images-bundle-path"},
 		SilenceErrors: true,
@@ -298,7 +298,7 @@ func PullDeckhouseToLocalFS(
 	}
 	log.InfoLn("✅")
 
-	layouts.FillLayoutsImages(pullCtx, imageLayouts, versions)
+	layouts.FillLayoutsWithBasicDeckhouseImages(pullCtx, imageLayouts, versions)
 	if err = imageLayouts.TagsResolver.ResolveTagsDigestsForImageLayouts(&pullCtx.BaseContext, imageLayouts); err != nil {
 		return fmt.Errorf("Resolve images tags to digests: %w", err)
 	}
@@ -335,11 +335,11 @@ func PullDeckhouseToLocalFS(
 		return fmt.Errorf("pull Deckhouse: %w", err)
 	}
 
-	log.InfoLn("Pulling Trivy vulnerability database...\n")
-	if err = layouts.PullTrivyVulnerabilityDatabaseImageToLayout(pullCtx, imageLayouts.Security); err != nil {
+	log.InfoLn("Pulling Trivy vulnerability databases...\n")
+	if err = layouts.PullTrivyVulnerabilityDatabasesImages(pullCtx, imageLayouts); err != nil {
 		return fmt.Errorf("pull vulnerability database: %w", err)
 	}
-	log.InfoLn("Trivy vulnerability database pulled")
+	log.InfoLn("Trivy vulnerability databases pulled")
 
 	if !pullCtx.SkipModulesPull {
 		log.InfoF("Searching for Deckhouse external modules images...\t")

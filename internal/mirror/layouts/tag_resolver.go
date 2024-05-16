@@ -36,6 +36,7 @@ func NewTagsResolver() *TagsResolver {
 	return &TagsResolver{tagsDigestsMapping: make(map[string]v1.Hash)}
 }
 
+// TODO no-op must be the default, this should not exist
 func NopTagToDigestMappingFunc(_ string) *v1.Hash {
 	return nil
 }

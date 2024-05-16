@@ -16,6 +16,19 @@ package errorutil
 
 import "strings"
 
+const CustomTrivyMediaTypesWarning = `` +
+	"It looks like you are using Project Quay registry and it is not configured correctly for hosting Deckhouse.\n" +
+	"See the docs at https://deckhouse.io/documentation/v1/supported_versions.html#container-registry for more details.\n\n" +
+	"TL;DR: You should retry push after allowing some additional types of OCI artifacts in your config.yaml as follows:\n" +
+	`FEATURE_GENERAL_OCI_SUPPORT: true
+ALLOWED_OCI_ARTIFACT_TYPES:
+  "application/vnd.aquasec.trivy.config.v1+json":
+    - "application/vnd.aquasec.trivy.db.layer.v1.tar+gzip"
+  "application/octet-stream":
+    - "application/deckhouse.io.bdu.layer.v1.tar+gzip"
+  "application/vnd.oci.empty.v1+json":
+    - "application/vnd.aquasec.trivy.javadb.layer.v1.tar+gzip"`
+
 func IsImageNotFoundError(err error) bool {
 	if err == nil {
 		return false

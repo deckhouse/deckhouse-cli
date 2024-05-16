@@ -15,6 +15,8 @@
 package push
 
 import (
+	"os"
+
 	"github.com/spf13/pflag"
 )
 
@@ -30,20 +32,20 @@ func addFlags(flagSet *pflag.FlagSet) {
 		"registry",
 		"r",
 		"",
-		"Push Deckhouse images to your private registry, specified as registry-host[:port]/path. Conflicts with --license.",
+		"Push Deckhouse images to your private registry, specified as registry-host[:port]/path.",
 	)
 	flagSet.StringVarP(
 		&RegistryUsername,
 		"registry-login",
 		"u",
-		"",
+		os.Getenv("D8_MIRROR_REGISTRY_LOGIN"),
 		"Username to log into your registry.",
 	)
 	flagSet.StringVarP(
 		&RegistryPassword,
 		"registry-password",
 		"p",
-		"",
+		os.Getenv("D8_MIRROR_REGISTRY_PASSWORD"),
 		"Password to log into your registry.",
 	)
 	flagSet.BoolVar(
