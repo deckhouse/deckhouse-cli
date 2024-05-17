@@ -1,16 +1,18 @@
-// Copyright 2023 Flant JSC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+Copyright 2024 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package bundle
 
@@ -66,10 +68,10 @@ func Unpack(mirrorCtx *contexts.BaseContext) error {
 			mirrorCtx.UnpackedImagesPath,
 			filepath.Clean(tarHdr.Name),
 		)
-		if err = os.MkdirAll(filepath.Dir(writePath), 0755); err != nil {
+		if err = os.MkdirAll(filepath.Dir(writePath), 0o755); err != nil {
 			return fmt.Errorf("setup dir tree: %w", err)
 		}
-		bundleFile, err := os.OpenFile(writePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+		bundleFile, err := os.OpenFile(writePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
 		if err != nil {
 			return fmt.Errorf("create file: %w", err)
 		}
@@ -113,7 +115,6 @@ func Pack(mirrorCtx *contexts.PullContext) error {
 	}
 
 	return nil
-
 }
 
 func packFunc(mirrorCtx *contexts.BaseContext, out *tar.Writer) filepath.WalkFunc {

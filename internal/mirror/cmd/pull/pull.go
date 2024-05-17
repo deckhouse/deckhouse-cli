@@ -1,16 +1,18 @@
-// Copyright 2024 Flant JSC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+Copyright 2024 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package pull
 
@@ -241,7 +243,7 @@ func computeGOSTDigest(mirrorCtx *contexts.BaseContext) error {
 	if err != nil {
 		return fmt.Errorf("Calculate GOST Checksum: %w", err)
 	}
-	if err = os.WriteFile(mirrorCtx.BundlePath+".gostsum", []byte(gostDigest), 0666); err != nil {
+	if err = os.WriteFile(mirrorCtx.BundlePath+".gostsum", []byte(gostDigest), 0o666); err != nil {
 		return fmt.Errorf("Write GOST Checksum: %w", err)
 	}
 	log.InfoF("Digest: %s\nWritten to %s\n", gostDigest, mirrorCtx.BundlePath+".gostsum")
