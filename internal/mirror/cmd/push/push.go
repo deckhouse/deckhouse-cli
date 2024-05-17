@@ -55,15 +55,6 @@ valid license for any commercial version of the Deckhouse Kubernetes Platform.
 
 © Flant JSC 2024`)
 
-const customTrivyMediaTypesWarning = `` +
-	"It looks like you are using Project Quay registry and it is not configured correctly for hosting Deckhouse.\n" +
-	"See the docs at https://deckhouse.io/documentation/v1/supported_versions.html#container-registry for more details.\n\n" +
-	"TL;DR: You should retry push after allowing some additional types of OCI artifacts in your config.yaml as follows:\n" +
-	`FEATURE_GENERAL_OCI_SUPPORT: true
-ALLOWED_OCI_ARTIFACT_TYPES:
-  "application/vnd.aquasec.trivy.config.v1+json":
-    - "application/vnd.aquasec.trivy.db.layer.v1.tar+gzip"`
-
 func NewCommand() *cobra.Command {
 	pushCmd := &cobra.Command{
 		Use:           "push <images-bundle-path> <registry>",
@@ -207,7 +198,7 @@ func PushDeckhouseToRegistry(mirrorCtx *contexts.PushContext) error {
 			).Run(func() error {
 				if err = remote.Write(ref, img, remoteOpts...); err != nil {
 					if errorutil.IsTrivyMediaTypeNotAllowedError(err) {
-						log.WarnLn(customTrivyMediaTypesWarning)
+						log.WarnLn(errorutil.CustomTrivyMediaTypesWarning)
 						os.Exit(1)
 					}
 					return fmt.Errorf("write %s to registry: %w", ref.String(), err)
@@ -272,12 +263,16 @@ func findLayoutsToPush(mirrorCtx *contexts.PushContext) (map[string]layout.Path,
 	deckhouseIndexRef := mirrorCtx.RegistryHost + mirrorCtx.RegistryPath
 	installersIndexRef := filepath.Join(deckhouseIndexRef, "install")
 	releasesIndexRef := filepath.Join(deckhouseIndexRef, "release-channel")
-	securityIndexRef := filepath.Join(deckhouseIndexRef, "security", "trivy-db")
+	trivyDBIndexRef := filepath.Join(deckhouseIndexRef, "security", "trivy-db")
+	trivyBDUIndexRef := filepath.Join(deckhouseIndexRef, "security", "trivy-bdu")
+	trivyJavaDBIndexRef := filepath.Join(deckhouseIndexRef, "security", "trivy-java-db")
 
 	deckhouseLayoutPath := mirrorCtx.UnpackedImagesPath
 	installersLayoutPath := filepath.Join(mirrorCtx.UnpackedImagesPath, "install")
 	releasesLayoutPath := filepath.Join(mirrorCtx.UnpackedImagesPath, "release-channel")
-	securityLayoutPath := filepath.Join(mirrorCtx.UnpackedImagesPath, "security", "trivy-db")
+	trivyDBLayoutPath := filepath.Join(mirrorCtx.UnpackedImagesPath, "security", "trivy-db")
+	trivyBDULayoutPath := filepath.Join(mirrorCtx.UnpackedImagesPath, "security", "trivy-bdu")
+	trivyJavaDBLayoutPath := filepath.Join(mirrorCtx.UnpackedImagesPath, "security", "trivy-java-db")
 
 	deckhouseLayout, err := layout.FromPath(deckhouseLayoutPath)
 	if err != nil {
@@ -291,17 +286,27 @@ func findLayoutsToPush(mirrorCtx *contexts.PushContext) (map[string]layout.Path,
 	if err != nil {
 		return nil, nil, err
 	}
-	securityLayout, err := layout.FromPath(securityLayoutPath)
+	trivyDBLayout, err := layout.FromPath(trivyDBLayoutPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	trivyBDULayout, err := layout.FromPath(trivyBDULayoutPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	trivyJavaDBLayout, err := layout.FromPath(trivyJavaDBLayoutPath)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	modulesPath := filepath.Join(mirrorCtx.UnpackedImagesPath, "modules")
 	ociLayouts := map[string]layout.Path{
-		deckhouseIndexRef:  deckhouseLayout,
-		installersIndexRef: installersLayout,
-		releasesIndexRef:   releasesLayout,
-		securityIndexRef:   securityLayout,
+		deckhouseIndexRef:   deckhouseLayout,
+		installersIndexRef:  installersLayout,
+		releasesIndexRef:    releasesLayout,
+		trivyDBIndexRef:     trivyDBLayout,
+		trivyBDUIndexRef:    trivyBDULayout,
+		trivyJavaDBIndexRef: trivyJavaDBLayout,
 	}
 
 	modulesNames := make([]string, 0)

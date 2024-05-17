@@ -29,6 +29,7 @@ import (
 	"k8s.io/component-base/logs"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/layouts"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/log"
 )
@@ -125,12 +126,12 @@ func pushModulesToRegistry(
 			return fmt.Errorf("Module %s: Read OCI layout: %w", moduleName, err)
 		}
 
-		if err = pushLayoutToRepo(moduleLayout, moduleRegistryPath, authProvider, insecure, skipVerifyTLS); err != nil {
+		if err = layouts.PushLayoutToRepo(moduleLayout, moduleRegistryPath, authProvider, insecure, skipVerifyTLS); err != nil {
 			return fmt.Errorf("Push module to registry: %w", err)
 		}
 
 		log.InfoF("Pushing releases for module %s...\n", moduleName)
-		if err = pushLayoutToRepo(moduleReleasesLayout, moduleReleasesRegistryPath, authProvider, insecure, skipVerifyTLS); err != nil {
+		if err = layouts.PushLayoutToRepo(moduleReleasesLayout, moduleReleasesRegistryPath, authProvider, insecure, skipVerifyTLS); err != nil {
 			return fmt.Errorf("Push module to registry: %w", err)
 		}
 
@@ -151,48 +152,6 @@ func pushModulesToRegistry(
 		}
 
 		log.InfoF("✅Module %s pushed successfully\n", moduleName)
-	}
-
-	return nil
-}
-
-func pushLayoutToRepo(
-	imagesLayout layout.Path,
-	registryRepo string,
-	authProvider authn.Authenticator,
-	insecure, skipVerifyTLS bool,
-) error {
-	refOpts, remoteOpts := mirror.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
-
-	index, err := imagesLayout.ImageIndex()
-	if err != nil {
-		return fmt.Errorf("Read OCI Image Index: %w", err)
-	}
-	indexManifest, err := index.IndexManifest()
-	if err != nil {
-		return fmt.Errorf("Parse OCI Image Index Manifest: %w", err)
-	}
-
-	pushCount := 1
-	for _, imageDesc := range indexManifest.Manifests {
-		tag := imageDesc.Annotations["io.deckhouse.image.short_tag"]
-		imageRef := registryRepo + ":" + tag
-
-		log.InfoF("[%d / %d] Pushing image %s...\t", pushCount, len(indexManifest.Manifests), imageRef)
-		img, err := index.Image(imageDesc.Digest)
-		if err != nil {
-			return fmt.Errorf("Read image: %w", err)
-		}
-
-		ref, err := name.ParseReference(imageRef, refOpts...)
-		if err != nil {
-			return fmt.Errorf("Parse image reference: %w", err)
-		}
-		if err = remote.Write(ref, img, remoteOpts...); err != nil {
-			return fmt.Errorf("Write %s to registry: %w", ref.String(), err)
-		}
-		log.InfoLn("✅")
-		pushCount += 1
 	}
 
 	return nil

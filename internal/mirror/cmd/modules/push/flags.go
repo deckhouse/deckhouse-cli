@@ -15,6 +15,8 @@
 package push
 
 import (
+	"os"
+
 	"github.com/spf13/pflag"
 )
 
@@ -37,14 +39,14 @@ func addFlags(flagSet *pflag.FlagSet) {
 		&MirrorModulesRegistryUsername,
 		"registry-login",
 		"u",
-		"",
+		os.Getenv("D8_MIRROR_REGISTRY_LOGIN"),
 		"Username to log into your registry",
 	)
 	flagSet.StringVarP(
 		&MirrorModulesRegistryPassword,
 		"registry-password",
 		"p",
-		"",
+		os.Getenv("D8_MIRROR_REGISTRY_PASSWORD"),
 		"Password to log into your registry",
 	)
 	flagSet.BoolVar(

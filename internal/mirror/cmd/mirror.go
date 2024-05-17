@@ -22,6 +22,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/push"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/vulndb"
 )
 
 var (
@@ -50,6 +51,7 @@ func NewCommand() *cobra.Command {
 		pull.NewCommand(),
 		push.NewCommand(),
 		modules.NewCommand(),
+		vulndb.NewCommand(),
 	)
 
 	logs.AddFlags(mirrorCmd.PersistentFlags())

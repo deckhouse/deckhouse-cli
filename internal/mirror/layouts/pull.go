@@ -100,21 +100,32 @@ func PullModules(mirrorCtx *contexts.PullContext, layouts *ImageLayouts) error {
 	return nil
 }
 
-func PullTrivyVulnerabilityDatabaseImageToLayout(
+func PullTrivyVulnerabilityDatabasesImages(
 	pullCtx *contexts.PullContext,
-	targetLayout layout.Path,
+	layouts *ImageLayouts,
 ) error {
-	nameOpts, _ := auth.MakeRemoteRegistryRequestOptions(pullCtx.RegistryAuth, pullCtx.Insecure, pullCtx.SkipTLSVerification)
+	nameOpts, _ := auth.MakeRemoteRegistryRequestOptionsFromMirrorContext(&pullCtx.BaseContext)
 
-	trivyDBPath := path.Join(pullCtx.DeckhouseRegistryRepo, "security", "trivy-db:2")
-	ref, err := name.ParseReference(trivyDBPath, nameOpts...)
-	if err != nil {
-		return fmt.Errorf("parse trivy-db reference: %w", err)
+	dbImages := map[layout.Path]string{
+		layouts.TrivyDB:     path.Join(pullCtx.DeckhouseRegistryRepo, "security", "trivy-db:2"),
+		layouts.TrivyBDU:    path.Join(pullCtx.DeckhouseRegistryRepo, "security", "trivy-bdu:1"),
+		layouts.TrivyJavaDB: path.Join(pullCtx.DeckhouseRegistryRepo, "security", "trivy-java-db:1"),
 	}
 
-	images := map[string]struct{}{ref.String(): {}}
-	if err = PullImageSet(pullCtx, targetLayout, images, WithTagToDigestMapper(NopTagToDigestMappingFunc)); err != nil {
-		return fmt.Errorf("pull vulnerability database: %w", err)
+	for dbImageLayout, imageRef := range dbImages {
+		ref, err := name.ParseReference(imageRef, nameOpts...)
+		if err != nil {
+			return fmt.Errorf("parse trivy-db reference %q: %w", imageRef, err)
+		}
+
+		if err = PullImageSet(
+			pullCtx,
+			dbImageLayout,
+			map[string]struct{}{ref.String(): {}},
+			WithTagToDigestMapper(NopTagToDigestMappingFunc),
+		); err != nil {
+			return fmt.Errorf("pull vulnerability database: %w", err)
+		}
 	}
 
 	return nil
@@ -140,8 +151,10 @@ func PullImageSet(
 		// If we already know the digest of the tagged image, we should pull it by this digest instead of pulling by tag
 		// to avoid race-conditions between mirroring and releasing new builds on release channels.
 		pullReference := imageReferenceString
-		if mapping := pullOpts.tagToDigestMapper(imageReferenceString); mapping != nil {
-			pullReference = imageRepo + "@" + mapping.String()
+		if pullOpts.tagToDigestMapper != nil {
+			if mapping := pullOpts.tagToDigestMapper(imageReferenceString); mapping != nil {
+				pullReference = imageRepo + "@" + mapping.String()
+			}
 		}
 
 		ref, err := name.ParseReference(pullReference, nameOpts...)

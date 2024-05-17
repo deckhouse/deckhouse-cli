@@ -15,17 +15,12 @@
 package pull
 
 import (
+	"os"
+
 	"github.com/spf13/pflag"
 )
 
 func addFlags(flagSet *pflag.FlagSet) {
-	flagSet.Int64VarP(
-		&ImagesBundleChunkSizeGB,
-		"images-bundle-chunk-size",
-		"c",
-		0,
-		"Split resulting bundle file into chunks of 'size' GB",
-	)
 	flagSet.StringVar(
 		&SourceRegistryRepo,
 		"source",
@@ -35,20 +30,20 @@ func addFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringVar(
 		&SourceRegistryLogin,
 		"source-login",
-		"",
+		os.Getenv("D8_MIRROR_SOURCE_LOGIN"),
 		"Source registry login.",
 	)
 	flagSet.StringVar(
 		&SourceRegistryPassword,
 		"source-password",
-		"",
+		os.Getenv("D8_MIRROR_SOURCE_PASSWORD"),
 		"Source registry password.",
 	)
 	flagSet.StringVarP(
 		&DeckhouseLicenseToken,
 		"license",
 		"l",
-		"",
+		os.Getenv("D8_MIRROR_LICENSE_TOKEN"),
 		"Pull Deckhouse images to local machine using license key. Shortcut for --source-login=license-token --source-password=<>.",
 	)
 	flagSet.StringVarP(
@@ -63,6 +58,13 @@ func addFlags(flagSet *pflag.FlagSet) {
 		"release",
 		"",
 		"Specific Deckhouse release to copy. Conflicts with --min-version.",
+	)
+	flagSet.Int64VarP(
+		&ImagesBundleChunkSizeGB,
+		"images-bundle-chunk-size",
+		"c",
+		0,
+		"Split resulting bundle file into chunks of 'size' GB",
 	)
 	flagSet.BoolVar(
 		&DoGOSTDigest,

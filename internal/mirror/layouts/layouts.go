@@ -45,8 +45,12 @@ type ImageLayouts struct {
 	ReleaseChannel       layout.Path
 	ReleaseChannelImages map[string]struct{}
 
-	Security       layout.Path
-	SecurityImages map[string]struct{}
+	TrivyDB           layout.Path
+	TrivyDBImages     map[string]struct{}
+	TrivyBDU          layout.Path
+	TrivyBDUImages    map[string]struct{}
+	TrivyJavaDB       layout.Path
+	TrivyJavaDBImages map[string]struct{}
 
 	Modules map[string]ModuleImageLayout
 
@@ -75,7 +79,9 @@ func CreateOCIImageLayoutsForDeckhouse(
 		&layouts.Deckhouse:      rootFolder,
 		&layouts.Install:        filepath.Join(rootFolder, "install"),
 		&layouts.ReleaseChannel: filepath.Join(rootFolder, "release-channel"),
-		&layouts.Security:       filepath.Join(rootFolder, "security", "trivy-db"),
+		&layouts.TrivyDB:        filepath.Join(rootFolder, "security", "trivy-db"),
+		&layouts.TrivyBDU:       filepath.Join(rootFolder, "security", "trivy-bdu"),
+		&layouts.TrivyJavaDB:    filepath.Join(rootFolder, "security", "trivy-java-db"),
 	}
 	for layoutPtr, fsPath := range fsPaths {
 		*layoutPtr, err = CreateEmptyImageLayoutAtPath(fsPath)
@@ -156,7 +162,7 @@ type ociLayout struct {
 	ImageLayoutVersion string `json:"imageLayoutVersion"`
 }
 
-func FillLayoutsImages(
+func FillLayoutsWithBasicDeckhouseImages(
 	mirrorCtx *contexts.PullContext,
 	layouts *ImageLayouts,
 	deckhouseVersions []semver.Version,
@@ -164,8 +170,10 @@ func FillLayoutsImages(
 	layouts.DeckhouseImages = map[string]struct{}{}
 	layouts.InstallImages = map[string]struct{}{}
 	layouts.ReleaseChannelImages = map[string]struct{}{}
-	layouts.SecurityImages = map[string]struct{}{
-		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-db:2": {},
+	layouts.TrivyDBImages = map[string]struct{}{
+		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-db:2":      {},
+		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-bdu:1":     {},
+		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-java-db:1": {},
 	}
 
 	for _, version := range deckhouseVersions {
