@@ -20,10 +20,10 @@ require (
 	github.com/werf/nelm v0.0.0-20240409125451-b3f238780b01
 	github.com/werf/werf v1.2.308-0.20240412125023-1fb29c861fab
 	go.cypherpunks.ru/gogost/v5 v5.13.0
-	golang.org/x/crypto v0.21.0
+	golang.org/x/crypto v0.23.0
 	golang.org/x/exp v0.0.0-20240325151524-a685a6edb6d8
-	golang.org/x/sys v0.18.0
-	golang.org/x/term v0.18.0
+	golang.org/x/sys v0.20.0
+	golang.org/x/term v0.20.0
 	helm.sh/helm/v3 v3.14.3
 	k8s.io/apimachinery v0.29.3
 	k8s.io/client-go v0.29.3
@@ -334,7 +334,7 @@ require (
 	golang.org/x/net v0.23.0 // indirect
 	golang.org/x/oauth2 v0.18.0 // indirect
 	golang.org/x/sync v0.6.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/text v0.15.0 // indirect
 	golang.org/x/time v0.5.0 // indirect
 	golang.org/x/tools v0.19.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
