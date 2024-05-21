@@ -97,7 +97,7 @@ require (
 	github.com/containernetworking/plugins v1.4.1 // indirect
 	github.com/containers/buildah v1.35.1 // indirect
 	github.com/containers/common v0.58.1 // indirect
-	github.com/containers/image/v5 v5.30.0 // indirect
+	github.com/containers/image/v5 v5.30.1 // indirect
 	github.com/containers/libtrust v0.0.0-20230121012942-c1716e8a8d01 // indirect
 	github.com/containers/luksy v0.0.0-20240312134643-3d2cf0e19c84 // indirect
 	github.com/containers/ocicrypt v1.1.10 // indirect
