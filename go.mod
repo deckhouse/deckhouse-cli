@@ -25,7 +25,7 @@ require (
 	golang.org/x/sys v0.18.0
 	golang.org/x/term v0.18.0
 	helm.sh/helm/v3 v3.14.3
-	k8s.io/apimachinery v0.29.3
+	k8s.io/apimachinery v0.30.1
 	k8s.io/client-go v0.29.3
 	k8s.io/component-base v0.29.3
 	k8s.io/klog/v2 v2.120.1
@@ -359,7 +359,7 @@ require (
 	k8s.io/component-helpers v0.29.3 // indirect
 	k8s.io/helm v2.17.0+incompatible // indirect
 	k8s.io/klog v1.0.0 // indirect
-	k8s.io/kube-openapi v0.0.0-20240105020646-a37d4de58910 // indirect
+	k8s.io/kube-openapi v0.0.0-20240228011516-70dd3763d340 // indirect
 	k8s.io/metrics v0.29.3 // indirect
 	k8s.io/utils v0.0.0-20240310230437-4693a0247e57 // indirect
 	kubevirt.io/api v1.2.0 // indirect
