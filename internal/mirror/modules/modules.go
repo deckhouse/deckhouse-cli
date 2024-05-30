@@ -17,7 +17,9 @@ limitations under the License.
 package modules
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -155,8 +157,11 @@ func FindExternalModuleImages(
 		}
 
 		imagesDigestsJSON, err := images.ExtractFileFromImage(img, "images_digests.json")
-		if err != nil {
-			return nil, nil, fmt.Errorf("Get digests for %q version: %w", imageTag, err)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			continue
+		case err != nil:
+			return nil, nil, fmt.Errorf("Extract digests for %q version: %w", imageTag, err)
 		}
 
 		digests := images.ExtractDigestsFromJSONFile(imagesDigestsJSON.Bytes())

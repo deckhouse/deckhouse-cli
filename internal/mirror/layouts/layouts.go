@@ -18,7 +18,9 @@ package layouts
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -249,8 +251,11 @@ func FindDeckhouseModulesImages(mirrorCtx *contexts.PullContext, layouts *ImageL
 			}
 
 			imagesDigestsJSON, err := images.ExtractFileFromImage(img, "images_digests.json")
-			if err != nil {
-				return fmt.Errorf("get digests for %q version: %w", imageTag, err)
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+				continue
+			case err != nil:
+				return fmt.Errorf("extract digests for %q version: %w", imageTag, err)
 			}
 
 			digests := images.ExtractDigestsFromJSONFile(imagesDigestsJSON.Bytes())
