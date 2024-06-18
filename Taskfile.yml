@@ -67,7 +67,7 @@ tasks:
   _build:go:dev:
     internal: true
     cmds:
-      - go build -o "{{ .outputDir | default (printf "./build/%s-%s" .targetOS .targetArch) }}/d8"
+      - go build -o "{{ .outputDir | default (printf "./build/%s-%s" .targetOS .targetArch) }}/d8{{ if (eq .targetOS "windows") }}.exe{{ end }}"
         -ldflags="{{ .goDevLDFlags }}" -tags="{{ .goTags }}" {{ .CLI_ARGS }} main.go
     env:
       CGO_ENABLED: "0"
@@ -77,7 +77,7 @@ tasks:
   _build:go:dist:
     internal: true
     cmds:
-      - go build -o "{{ .outputDir | default (printf "./dist/%s/%s-%s" .version .targetOS .targetArch) }}/d8"
+      - go build -o "{{ .outputDir | default (printf "./dist/%s/%s-%s" .version .targetOS .targetArch) }}/d8{{ if (eq .targetOS "windows") }}.exe{{ end }}"
         -ldflags="{{ .goReleaseLDFlags }}" -tags="{{ .goTags }}" {{ .CLI_ARGS }} main.go
     env:
       CGO_ENABLED: "0"
@@ -119,12 +119,22 @@ tasks:
           targetArch: "arm64"
           outputDir: "{{ .outputDir }}"
 
+  build:dev:windows:amd64:
+    desc: Build d8 dev binary for windows/amd64
+    cmds:
+      - task: _build:go:dev
+        vars:
+          targetOS: "windows"
+          targetArch: "amd64"
+          outputDir: "{{.outputDir}}"
+
   build:dist:all:
     desc: Build all d8 release binaries in parallel
     deps:
       - build:dist:linux:amd64
       - build:dist:darwin:amd64
       - build:dist:darwin:arm64
+      - build:dist:windows:amd64
 
   build:dist:linux:amd64:
     desc: Build d8 release binary for linux/amd64
@@ -153,6 +163,15 @@ tasks:
           targetArch: "arm64"
           outputDir: "{{ .outputDir }}"
 
+  build:dist:windows:amd64:
+    desc: Build d8 release binary for windows/amd64
+    cmds:
+      - task: _build:go:dist
+        vars:
+          targetOS: "windows"
+          targetArch: "amd64"
+          outputDir: "{{ .outputDir }}"
+
   _package:dist:
     dir: dist/{{ .version }}
     cmds:
@@ -165,6 +184,7 @@ tasks:
       - package:dist:linux:amd64
       - package:dist:darwin:amd64
       - package:dist:darwin:arm64
+      - package:dist:windows:amd64
 
   package:dist:linux:amd64:
     desc: Package release asset for linux/amd64
@@ -189,6 +209,14 @@ tasks:
       - task: _package:dist
         vars:
           target: "darwin-arm64"
+
+  package:dist:windows:amd64:
+    desc: Package release asset for windows/amd64
+    dir: dist/{{ .version }}
+    cmds:
+      - task: _package:dist
+        vars:
+          target: "windows-amd64"
 
   checksum:
     desc: Calculate sha256 checksum for release assets
