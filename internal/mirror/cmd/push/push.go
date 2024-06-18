@@ -263,11 +263,11 @@ func pushModulesTags(mirrorCtx *contexts.BaseContext, modulesList []string) erro
 
 func findLayoutsToPush(mirrorCtx *contexts.PushContext) (map[string]layout.Path, []string, error) {
 	deckhouseIndexRef := mirrorCtx.RegistryHost + mirrorCtx.RegistryPath
-	installersIndexRef := filepath.Join(deckhouseIndexRef, "install")
-	releasesIndexRef := filepath.Join(deckhouseIndexRef, "release-channel")
-	trivyDBIndexRef := filepath.Join(deckhouseIndexRef, "security", "trivy-db")
-	trivyBDUIndexRef := filepath.Join(deckhouseIndexRef, "security", "trivy-bdu")
-	trivyJavaDBIndexRef := filepath.Join(deckhouseIndexRef, "security", "trivy-java-db")
+	installersIndexRef := path.Join(deckhouseIndexRef, "install")
+	releasesIndexRef := path.Join(deckhouseIndexRef, "release-channel")
+	trivyDBIndexRef := path.Join(deckhouseIndexRef, "security", "trivy-db")
+	trivyBDUIndexRef := path.Join(deckhouseIndexRef, "security", "trivy-bdu")
+	trivyJavaDBIndexRef := path.Join(deckhouseIndexRef, "security", "trivy-java-db")
 
 	deckhouseLayoutPath := mirrorCtx.UnpackedImagesPath
 	installersLayoutPath := filepath.Join(mirrorCtx.UnpackedImagesPath, "install")
@@ -327,8 +327,8 @@ func findLayoutsToPush(mirrorCtx *contexts.PushContext) (map[string]layout.Path,
 
 		moduleName := dir.Name()
 		modulesNames = append(modulesNames, moduleName)
-		moduleRef := filepath.Join(mirrorCtx.RegistryHost+mirrorCtx.RegistryPath, "modules", moduleName)
-		moduleReleasesRef := filepath.Join(mirrorCtx.DeckhouseRegistryRepo, "modules", moduleName, "release")
+		moduleRef := path.Join(mirrorCtx.RegistryHost+mirrorCtx.RegistryPath, "modules", moduleName)
+		moduleReleasesRef := path.Join(mirrorCtx.DeckhouseRegistryRepo, "modules", moduleName, "release")
 		moduleLayout, err := layout.FromPath(filepath.Join(modulesPath, moduleName))
 		if err != nil {
 			return nil, nil, fmt.Errorf("create module layout from path: %w", err)
