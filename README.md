@@ -4,7 +4,7 @@ Deckhouse Client (d8) is a command-line client for Deckhouse.
 
 ## How to install?
 
-### From install script
+### From install script (Linux or macOS)
 
 The install script will automatically grab the latest version of `d8` and install it locally.
 
