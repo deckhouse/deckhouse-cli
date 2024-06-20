@@ -17,11 +17,7 @@ limitations under the License.
 package tomb
 
 import (
-	"fmt"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/log"
 )
@@ -91,19 +87,6 @@ func (c *teardownCallbacks) wait() {
 	<-c.waitCh
 }
 
-func RegisterOnShutdown(process string, cb func()) {
-	callbacks.registerOnShutdown(process, cb)
-}
-
-func Shutdown(code int) {
-	callbacks.shutdown(code)
-}
-
-func WaitShutdown() int {
-	callbacks.wait()
-	return callbacks.exitCode
-}
-
 func IsInterrupted() bool {
 	select {
 	case <-callbacks.interruptedCh:
@@ -111,61 +94,4 @@ func IsInterrupted() bool {
 	default:
 	}
 	return false
-}
-
-func WithoutInterruptions(fn func()) {
-	callbacks.notInterruptable = true
-	defer func() { callbacks.notInterruptable = false }()
-	fn()
-}
-
-func WaitForProcessInterruption() {
-	interruptCh := make(chan os.Signal, 1)
-	signal.Notify(interruptCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
-
-	for {
-		s, ok := <-interruptCh
-		if !ok {
-			return
-		}
-
-		var exitCode int
-		switch s {
-		case syscall.SIGUSR1:
-			exitCode = 1
-		case syscall.SIGTERM, syscall.SIGINT:
-			exitCode = 0
-		default:
-			os.Exit(1)
-			return
-		}
-
-		if callbacks.notInterruptable {
-			continue
-		}
-
-		graceShutdownForSignal(interruptCh, exitCode, s)
-		return
-	}
-}
-
-func graceShutdownForSignal(interruptCh <-chan os.Signal, exitCode int, s os.Signal) {
-	// Wait for the second signal to kill the main process immediately.
-	go func() {
-		<-interruptCh
-		log.ErrorLn("Killed by signal twice.")
-		os.Exit(1)
-	}()
-
-	// Close interrupted channel to signal interruptable loops to stop.
-	close(callbacks.interruptedCh)
-
-	// Run all registered teardown callbacks and print an explanation at the end.
-	callbacks.data = append([]callback{{
-		Name: "Shutdown message",
-		Do: func() {
-			log.WarnLn(fmt.Sprintf("Graceful shutdown by %q signal ...", s.String()))
-		},
-	}}, callbacks.data...)
-	Shutdown(exitCode)
 }

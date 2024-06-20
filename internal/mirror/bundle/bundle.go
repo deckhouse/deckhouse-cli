@@ -25,6 +25,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/contexts"
@@ -131,12 +132,9 @@ func packFunc(mirrorCtx *contexts.BaseContext, out *tar.Writer) filepath.WalkFun
 			return fmt.Errorf("read file: %w", err)
 		}
 
-		pathInTar, err := filepath.Rel(mirrorCtx.UnpackedImagesPath, path)
-		if err != nil {
-			return fmt.Errorf("build file path within bundle: %w", err)
-		}
+		pathInTar := strings.TrimPrefix(path, mirrorCtx.UnpackedImagesPath+string(os.PathSeparator))
 		err = out.WriteHeader(&tar.Header{
-			Name:    pathInTar,
+			Name:    filepath.ToSlash(pathInTar),
 			Size:    info.Size(),
 			Mode:    int64(info.Mode()),
 			ModTime: info.ModTime(),
