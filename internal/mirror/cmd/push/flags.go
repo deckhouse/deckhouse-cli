@@ -23,32 +23,19 @@ import (
 )
 
 func addFlags(flagSet *pflag.FlagSet) {
-	flagSet.StringVar(
-		&SourceRegistryRepo,
-		"source",
-		enterpriseEditionRepo,
-		"Source repository from which Deckhouse images were pulled.",
-	)
-	flagSet.StringVarP(
-		&registry,
-		"registry",
-		"r",
-		"",
-		"Push Deckhouse images to your private registry, specified as registry-host[:port]/path.",
-	)
 	flagSet.StringVarP(
 		&RegistryUsername,
 		"registry-login",
 		"u",
 		os.Getenv("D8_MIRROR_REGISTRY_LOGIN"),
-		"Username to log into your registry.",
+		"Username to log into the target registry.",
 	)
 	flagSet.StringVarP(
 		&RegistryPassword,
 		"registry-password",
 		"p",
 		os.Getenv("D8_MIRROR_REGISTRY_PASSWORD"),
-		"Password to log into your registry.",
+		"Password to log into the target registry.",
 	)
 	flagSet.BoolVar(
 		&TLSSkipVerify,

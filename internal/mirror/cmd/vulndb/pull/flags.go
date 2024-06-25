@@ -27,7 +27,7 @@ func addFlags(flagSet *pflag.FlagSet) {
 		&SourceRegistryRepo,
 		"source",
 		enterpriseEditionRepo,
-		"Pull Deckhouse images from source registry. This is the default mode of operation.",
+		"Source registry to pull Deckhouse images from.",
 	)
 	flagSet.StringVar(
 		&SourceRegistryLogin,

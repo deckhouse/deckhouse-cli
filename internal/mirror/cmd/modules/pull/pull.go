@@ -40,9 +40,7 @@ import (
 )
 
 var pullLong = templates.LongDesc(`
-Download Deckhouse modules images from ModuleSource to local filesystem and to third-party registry.
-		
-This command is used to manually upload Deckhouse modules images to an air-gapped registry.
+Download Deckhouse modules images from ModuleSource to local filesystem.
 
 For more information on how to use it, consult the docs at 
 https://deckhouse.io/documentation/v1/deckhouse-faq.html#manually-uploading-images-of-deckhouse-modules-into-an-isolated-private-registry

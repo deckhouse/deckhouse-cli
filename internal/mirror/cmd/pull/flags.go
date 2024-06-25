@@ -27,7 +27,7 @@ func addFlags(flagSet *pflag.FlagSet) {
 		&SourceRegistryRepo,
 		"source",
 		enterpriseEditionRepo,
-		"Pull Deckhouse images from source registry. This is the default mode of operation.",
+		"Source registry to pull Deckhouse images from.",
 	)
 	flagSet.StringVar(
 		&SourceRegistryLogin,
@@ -46,27 +46,27 @@ func addFlags(flagSet *pflag.FlagSet) {
 		"license",
 		"l",
 		os.Getenv("D8_MIRROR_LICENSE_TOKEN"),
-		"Pull Deckhouse images to local machine using license key. Shortcut for --source-login=license-token --source-password=<>.",
+		"Deckhouse license key. Shortcut for --source-login=license-token --source-password=<>.",
 	)
 	flagSet.StringVarP(
 		&minVersionString,
 		"min-version",
 		"m",
 		"",
-		"Minimal Deckhouse release to copy. Cannot be above current Rock Solid release.",
+		"Minimal Deckhouse release to copy. Ignored if above current Rock Solid release. Conflicts with --release.",
 	)
 	flagSet.StringVar(
 		&specificReleaseString,
 		"release",
 		"",
-		"Specific Deckhouse release to copy. Conflicts with --min-version.",
+		"Specific Deckhouse release to copy. Conflicts with --min-version. WARNING!: Clusters installed with this option will not be able to automatically update due to lack of release-channels information in bundle and, as such, will require special attention and manual intervention during updates.",
 	)
 	flagSet.Int64VarP(
 		&ImagesBundleChunkSizeGB,
 		"images-bundle-chunk-size",
 		"c",
 		0,
-		"Split resulting bundle file into chunks of 'size' GB",
+		"Split resulting bundle file into chunks of at most N gigabytes",
 	)
 	flagSet.BoolVar(
 		&DoGOSTDigest,
@@ -78,7 +78,7 @@ func addFlags(flagSet *pflag.FlagSet) {
 		&DontContinuePartialPull,
 		"no-pull-resume",
 		false,
-		"Do not continue last unfinished pull operation.",
+		"Do not continue last unfinished pull operation and start from scratch.",
 	)
 	flagSet.BoolVar(
 		&NoModules,
