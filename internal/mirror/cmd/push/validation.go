@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -66,12 +67,12 @@ func validateRegistryCredentials() error {
 }
 
 func parseAndValidateRegistryURLArg(args []string) error {
-	registry = args[1]
+	registry := strings.NewReplacer("http://", "", "https://", "").Replace(args[1])
 	if registry == "" {
 		return errors.New("<registry> argument is empty")
 	}
 
-	registryUrl, err := url.Parse("docker://" + registry)
+	registryUrl, err := url.ParseRequestURI("docker://" + registry)
 	if err != nil {
 		return fmt.Errorf("Validate registry address: %w", err)
 	}
