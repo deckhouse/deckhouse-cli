@@ -23,17 +23,20 @@ import (
 	"os"
 	"strings"
 
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/console"
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/portforward"
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/scp"
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/ssh"
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/vnc"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/component-base/logs"
 
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/console"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/portforward"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/powerstate"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/scp"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/ssh"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/vnc"
+
 	"github.com/deckhouse/virtualization/api/client/kubeclient"
+
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
 )
 
 func NewCommand(programName string) (*cobra.Command, clientcmd.ClientConfig) {
@@ -84,6 +87,9 @@ func NewCommand(programName string) (*cobra.Command, clientcmd.ClientConfig) {
 		portforward.NewCommand(clientConfig),
 		ssh.NewCommand(clientConfig),
 		scp.NewCommand(clientConfig),
+		powerstate.NewStartCommand(clientConfig),
+		powerstate.NewStopCommand(clientConfig),
+		powerstate.NewRestartCommand(clientConfig),
 		optionsCmd,
 	)
 	return virtCmd, clientConfig
