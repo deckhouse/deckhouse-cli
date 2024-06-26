@@ -87,13 +87,12 @@ const (
 var (
 	TempDir = filepath.Join(os.TempDir(), "mirror")
 
-	registry         string
 	RegistryHost     string
 	RegistryPath     string
 	RegistryUsername string
 	RegistryPassword string
 
-	SourceRegistryRepo string
+	SourceRegistryRepo = enterpriseEditionRepo
 
 	Insecure         bool
 	TLSSkipVerify    bool

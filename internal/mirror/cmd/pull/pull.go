@@ -127,7 +127,7 @@ func buildPullContext() *contexts.PullContext {
 			),
 		},
 
-		BundleChunkSize: ImagesBundleChunkSizeGB * 1024 * 1024 * 1024,
+		BundleChunkSize: ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
 
 		DoGOSTDigests:   DoGOSTDigest,
 		SkipModulesPull: NoModules,
