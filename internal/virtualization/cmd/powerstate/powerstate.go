@@ -77,7 +77,7 @@ func DefaultOptions() Options {
 	return Options{
 		Force:   false,
 		Wait:    false,
-		Timeout: 30 * time.Second,
+		Timeout: 5 * time.Minute,
 	}
 }
 

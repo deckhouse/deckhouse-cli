@@ -67,14 +67,23 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 
 	sb := strings.Builder{}
 	sb.WriteString(fmt.Sprintf("VirtualMachine %q ", vmKey.String()))
-	switch vmop.Spec.Type {
-	case v1alpha2.VMOPOperationTypeStart:
-		sb.WriteString("started. ")
-	case v1alpha2.VMOPOperationTypeStop:
-		sb.WriteString("stopped. ")
-	case v1alpha2.VMOPOperationTypeRestart:
-		sb.WriteString("restarted. ")
+
+	if v.isFinished(vmop) {
+		if !v.isCompleted(vmop) {
+			sb.WriteString("was not ")
+		}
+		switch vmop.Spec.Type {
+		case v1alpha2.VMOPOperationTypeStart:
+			sb.WriteString("started. ")
+		case v1alpha2.VMOPOperationTypeStop:
+			sb.WriteString("stopped. ")
+		case v1alpha2.VMOPOperationTypeRestart:
+			sb.WriteString("restarted. ")
+		}
+	} else {
+		sb.WriteString("in progress. ")
 	}
+
 	sb.WriteString(fmt.Sprintf("VirtualMachineOperation %q ", key.String()))
 	switch phase {
 	case v1alpha2.VMOPPhaseCompleted:
@@ -82,7 +91,7 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 	case v1alpha2.VMOPPhaseFailed:
 		sb.WriteString(fmt.Sprintf("failed. reason=%q, message=%q.", vmop.Status.FailureReason, vmop.Status.FailureMessage))
 	default:
-		sb.WriteString(fmt.Sprintf("did not finished. phase=%q.", phase))
+		sb.WriteString(fmt.Sprintf("was not finished. phase=%q.", phase))
 	}
 	sb.WriteString("\n")
 	return sb.String()
@@ -128,6 +137,13 @@ func (v VirtualMachineOperation) wait(ctx context.Context, name, namespace strin
 		return nil, context.DeadlineExceeded
 	}
 	return vmop, nil
+}
+
+func (v VirtualMachineOperation) isCompleted(vmop *v1alpha2.VirtualMachineOperation) bool {
+	if vmop == nil {
+		return false
+	}
+	return vmop.Status.Phase == v1alpha2.VMOPPhaseCompleted
 }
 
 func (v VirtualMachineOperation) isFinished(vmop *v1alpha2.VirtualMachineOperation) bool {
