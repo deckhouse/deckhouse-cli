@@ -19,6 +19,7 @@ package vmop
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/deckhouse/virtualization/api/client/kubeclient"
 	"github.com/deckhouse/virtualization/api/core/v1alpha2"
@@ -61,11 +62,30 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 		return ""
 	}
 	key := types.NamespacedName{Namespace: vmop.GetNamespace(), Name: vmop.GetName()}
+	vmKey := types.NamespacedName{Namespace: vmop.GetNamespace(), Name: vmop.Spec.VirtualMachineName}
 	phase := vmop.Status.Phase
-	if !v.isCompleted(vmop) {
-		return fmt.Sprintf("VirtualMachineOperation %q did not complete. phase=%q\n", key.String(), phase)
+
+	sb := strings.Builder{}
+	sb.WriteString(fmt.Sprintf("VirtualMachine %q ", vmKey.String()))
+	switch vmop.Spec.Type {
+	case v1alpha2.VMOPOperationTypeStart:
+		sb.WriteString("started. ")
+	case v1alpha2.VMOPOperationTypeStop:
+		sb.WriteString("stopped. ")
+	case v1alpha2.VMOPOperationTypeRestart:
+		sb.WriteString("restarted. ")
 	}
-	return fmt.Sprintf("VirtualMachineOperation %q compleated. phase=%q, reason=%q, message=%q\n", key.String(), phase, vmop.Status.FailureReason, vmop.Status.FailureMessage)
+	sb.WriteString(fmt.Sprintf("VirtualMachineOperation %q ", key.String()))
+	switch phase {
+	case v1alpha2.VMOPPhaseCompleted:
+		sb.WriteString("completed.")
+	case v1alpha2.VMOPPhaseFailed:
+		sb.WriteString(fmt.Sprintf("failed. reason=%q, message=%q.", vmop.Status.FailureReason, vmop.Status.FailureMessage))
+	default:
+		sb.WriteString(fmt.Sprintf("did not finished. phase=%q.", phase))
+	}
+	sb.WriteString("\n")
+	return sb.String()
 }
 
 func (v VirtualMachineOperation) createAndWait(ctx context.Context, vmop *v1alpha2.VirtualMachineOperation) (*v1alpha2.VirtualMachineOperation, error) {
@@ -73,7 +93,7 @@ func (v VirtualMachineOperation) createAndWait(ctx context.Context, vmop *v1alph
 	if err != nil {
 		return nil, err
 	}
-	if v.isCompleted(vmop) {
+	if v.isFinished(vmop) {
 		return vmop, nil
 	}
 	return v.wait(ctx, vmop.GetName(), vmop.GetNamespace())
@@ -99,18 +119,18 @@ func (v VirtualMachineOperation) wait(ctx context.Context, name, namespace strin
 		if !ok {
 			continue
 		}
-		if v.isCompleted(op) {
+		if v.isFinished(op) {
 			vmop = op
 			break
 		}
 	}
-	if !v.isCompleted(vmop) {
+	if !v.isFinished(vmop) {
 		return nil, context.DeadlineExceeded
 	}
 	return vmop, nil
 }
 
-func (v VirtualMachineOperation) isCompleted(vmop *v1alpha2.VirtualMachineOperation) bool {
+func (v VirtualMachineOperation) isFinished(vmop *v1alpha2.VirtualMachineOperation) bool {
 	if vmop == nil {
 		return false
 	}
