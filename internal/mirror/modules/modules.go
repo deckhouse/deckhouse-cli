@@ -125,6 +125,7 @@ func FindExternalModuleImages(
 	if skipReleaseChannels {
 		for _, tag := range mod.Releases {
 			moduleImages[mod.RegistryPath+":"+tag] = struct{}{}
+			releaseImages[mod.RegistryPath+"/release:"+tag] = struct{}{}
 		}
 	} else {
 		releaseImages, err = getAvailableReleaseChannelsImagesForModule(mod, nameOpts, remoteOpts)
