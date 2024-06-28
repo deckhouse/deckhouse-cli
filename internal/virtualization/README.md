@@ -8,6 +8,9 @@ Manages virtual machine-related operations in your Kubernetes cluster.
 * scp          - SCP files from/to a virtual machine.
 * ssh          - Open an ssh connection to a virtual machine.
 * vnc          - Open a vnc connection to a virtual machine.
+* start        - Start a virtual machine.
+* stop         - Stop a virtual machine.
+* restart      - Restart a virtual machine.
 
 ### Examples
 #### console
@@ -34,4 +37,19 @@ d8 virtualization ssh --local-ssh=true --namespace=mynamespace --username=user m
 ```shell
 d8 virtualization vnc myvm.mynamespace
 d8 virtualization vnc myvm -n mynamespace
+```
+#### start
+```shell
+d8 virtualization start myvm.mynamespace --wait 
+d8 virtualization start myvm -n mynamespace
+```
+#### stop
+```shell
+d8 virtualization stop myvm.mynamespace --force 
+d8 virtualization stop myvm -n mynamespace 
+```
+#### restart
+```shell
+d8 virtualization restart myvm.mynamespace --timeout=1m
+d8 virtualization restart myvm -n mynamespace
 ```
