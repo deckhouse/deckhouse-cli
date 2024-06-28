@@ -94,8 +94,6 @@ func pullExternalModulesToLocalFS(
 		return fmt.Errorf("Read ModuleSource: %w", err)
 	}
 
-	filter := modfilter.ParseModuleFilterString(moduleFilterExpression)
-
 	insecure := strings.ToUpper(src.Spec.Registry.Scheme) == "HTTP"
 	authProvider, err := findRegistryAuthCredentials(src)
 	if err != nil {
@@ -113,7 +111,7 @@ func pullExternalModulesToLocalFS(
 	}
 
 	tagsResolver := layouts.NewTagsResolver()
-
+	filter := modfilter.ParseModuleFilterString(moduleFilterExpression)
 	for i, module := range modulesFromRepo {
 		if !filter.Match(module) {
 			continue
