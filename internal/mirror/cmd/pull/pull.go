@@ -146,8 +146,15 @@ func pull(_ *cobra.Command, _ []string) error {
 		}
 	}
 
+	accessValidationTag := "alpha"
+	if mirrorCtx.SpecificVersion != nil {
+		major := mirrorCtx.SpecificVersion.Major()
+		minor := mirrorCtx.SpecificVersion.Minor()
+		patch := mirrorCtx.SpecificVersion.Patch()
+		accessValidationTag = fmt.Sprintf("v%d.%d.%d", major, minor, patch)
+	}
 	if err := auth.ValidateReadAccessForImage(
-		mirrorCtx.DeckhouseRegistryRepo+":alpha",
+		mirrorCtx.DeckhouseRegistryRepo+":"+accessValidationTag,
 		mirrorCtx.RegistryAuth,
 		mirrorCtx.Insecure,
 		mirrorCtx.SkipTLSVerification,
