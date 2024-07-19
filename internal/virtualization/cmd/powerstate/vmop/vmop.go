@@ -93,7 +93,7 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 
 	sb.WriteString(fmt.Sprintf("VirtualMachineOperation %q ", key.String()))
 	switch phase {
-	case v1alpha2.VMOPPhasePenging:
+	case v1alpha2.VMOPPhasePending:
 		sb.WriteString("pending.")
 	case v1alpha2.VMOPPhaseInProgress:
 		sb.WriteString("in progress.")
