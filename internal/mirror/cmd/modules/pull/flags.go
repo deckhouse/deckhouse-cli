@@ -40,7 +40,7 @@ func addFlags(flagSet *pflag.FlagSet) {
 		"filter",
 		"f",
 		"",
-		"Filter which modules to pull. Format is \"moduleName:v1.2.3\" or \"moduleName:release-channel\", separated by ';'.",
+		"Filter which modules starting with which version to pull. Format is \"moduleName@v1.2.3\" separated by ';' where version after @ is the earliest pulled version of the module.",
 	)
 	flagSet.BoolVar(
 		&SkipTLSVerify,

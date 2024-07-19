@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/fs"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -114,33 +115,36 @@ func getModulesForRepo(
 
 func FindExternalModuleImages(
 	mod *Module,
+	filter Filter,
 	authProvider authn.Authenticator,
-	skipReleaseChannels, insecure, skipVerifyTLS bool,
+	insecure, skipVerifyTLS bool,
 ) (moduleImages, releaseImages map[string]struct{}, err error) {
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
 
 	moduleImages = map[string]struct{}{}
 	releaseImages = map[string]struct{}{}
 
-	if skipReleaseChannels {
-		for _, tag := range mod.Releases {
-			moduleImages[mod.RegistryPath+":"+tag] = struct{}{}
-			releaseImages[mod.RegistryPath+"/release:"+tag] = struct{}{}
-		}
-	} else {
-		releaseImages, err = getAvailableReleaseChannelsImagesForModule(mod, nameOpts, remoteOpts)
-		if err != nil {
-			return nil, nil, fmt.Errorf("Get available release channels of module: %w", err)
-		}
+	releaseImages, err = getAvailableReleaseChannelsImagesForModule(mod, nameOpts, remoteOpts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Get available release channels of module: %w", err)
+	}
 
-		releaseChannelVersions, err := releases.FetchVersionsFromModuleReleaseChannels(releaseImages, authProvider, insecure, skipVerifyTLS)
-		if err != nil {
-			return nil, nil, fmt.Errorf("Fetch versions from %q release channels: %w", mod.Name, err)
+	releaseChannelVersions, err := releases.FetchVersionsFromModuleReleaseChannels(releaseImages, authProvider, insecure, skipVerifyTLS)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Fetch versions from %q release channels: %w", mod.Name, err)
+	}
+
+	minVersion, hasMinVersion := filter[mod.Name]
+	for _, tag := range mod.Releases {
+		version, err := semver.NewVersion(tag)
+		if err == nil && hasMinVersion && minVersion.Compare(version) <= 0 {
+			releaseImages[mod.RegistryPath+"/release:"+tag] = struct{}{}
+			moduleImages[mod.RegistryPath+":"+tag] = struct{}{}
 		}
-		for _, versionTag := range releaseChannelVersions {
-			moduleImages[mod.RegistryPath+":"+versionTag] = struct{}{}
-			releaseImages[mod.RegistryPath+"/release:"+versionTag] = struct{}{}
-		}
+	}
+	for _, versionTag := range releaseChannelVersions {
+		moduleImages[mod.RegistryPath+":"+versionTag] = struct{}{}
+		releaseImages[mod.RegistryPath+"/release:"+versionTag] = struct{}{}
 	}
 
 	for _, imageTag := range maps.Keys(moduleImages) {
