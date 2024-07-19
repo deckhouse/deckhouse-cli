@@ -81,7 +81,14 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 			sb.WriteString("restarted. ")
 		}
 	} else {
-		sb.WriteString("in progress. ")
+		switch vmop.Spec.Type {
+		case v1alpha2.VMOPOperationTypeStart:
+			sb.WriteString("starting. ")
+		case v1alpha2.VMOPOperationTypeStop:
+			sb.WriteString("stopping. ")
+		case v1alpha2.VMOPOperationTypeRestart:
+			sb.WriteString("restarting. ")
+		}
 	}
 
 	sb.WriteString(fmt.Sprintf("VirtualMachineOperation %q ", key.String()))
