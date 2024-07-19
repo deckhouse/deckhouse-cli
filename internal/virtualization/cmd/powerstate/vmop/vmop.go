@@ -93,12 +93,16 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 
 	sb.WriteString(fmt.Sprintf("VirtualMachineOperation %q ", key.String()))
 	switch phase {
+	case v1alpha2.VMOPPhasePenging:
+		sb.WriteString("pending.")
+	case v1alpha2.VMOPPhaseInProgress:
+		sb.WriteString("in progress.")
 	case v1alpha2.VMOPPhaseCompleted:
 		sb.WriteString("completed.")
 	case v1alpha2.VMOPPhaseFailed:
 		sb.WriteString(fmt.Sprintf("failed. reason=%q, message=%q.", vmop.Status.FailureReason, vmop.Status.FailureMessage))
 	default:
-		sb.WriteString(fmt.Sprintf("was not finished. phase=%q.", phase))
+		sb.WriteString(fmt.Sprintf(" phase=%q.", phase))
 	}
 	sb.WriteString("\n")
 	return sb.String()
