@@ -17,14 +17,18 @@ limitations under the License.
 package mirror
 
 import (
+	"os"
+	"strconv"
+
+	"github.com/google/go-containerregistry/pkg/logs"
 	"github.com/spf13/cobra"
-	"k8s.io/component-base/logs"
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/push"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/vulndb"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/log"
 )
 
 var mirrorLong = templates.LongDesc(`
@@ -54,6 +58,22 @@ func NewCommand() *cobra.Command {
 		vulndb.NewCommand(),
 	)
 
-	logs.AddFlags(mirrorCmd.PersistentFlags())
+	debugLogStr := os.Getenv("MIRROR_DEBUG_LOG")
+	if debugLogStr != "" {
+		debugLogLevel, err := strconv.Atoi(debugLogStr)
+		if err != nil {
+			log.WarnF("Invalid $MIRROR_DEBUG_LOG: %v\nUse 1 for progress logging, 2 for warnings or 3 for connection logging. Each level also enables previous ones.\n", err)
+		}
+
+		switch {
+		case debugLogLevel >= 3:
+			logs.Debug.SetOutput(os.Stderr)
+		case debugLogLevel >= 2:
+			logs.Warn.SetOutput(os.Stderr)
+		case debugLogLevel >= 1:
+			logs.Progress.SetOutput(os.Stderr)
+		}
+	}
+
 	return mirrorCmd
 }
