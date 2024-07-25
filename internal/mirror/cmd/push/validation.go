@@ -53,10 +53,19 @@ func validateImagesBundlePathArg(args []string) error {
 		return errors.New("images-bundle-path argument should be a path to tar archive (.tar) or a directory containing unpacked bundle")
 	}
 
-	_, err := os.Stat(ImagesBundlePath)
+	stat, err := os.Stat(ImagesBundlePath)
 	if err != nil {
 		return fmt.Errorf("invalid --images-bundle-path: %w", err)
 	}
+
+	if bundleExtension == ".tar" && stat.IsDir() {
+		return fmt.Errorf("%s: is a directory", ImagesBundlePath)
+	}
+
+	if bundleExtension == "" && !stat.Mode().IsRegular() {
+		return fmt.Errorf("%s: is not a regular file", ImagesBundlePath)
+	}
+
 	return nil
 }
 
