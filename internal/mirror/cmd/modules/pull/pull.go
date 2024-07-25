@@ -36,7 +36,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/log"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/modfilter"
 )
 
 var pullLong = templates.LongDesc(`
@@ -104,21 +103,30 @@ func pullExternalModulesToLocalFS(
 	if err != nil {
 		return fmt.Errorf("Get external modules from %q: %w", src.Spec.Registry.Repo, err)
 	}
-
 	if len(modulesFromRepo) == 0 {
 		log.WarnLn("No modules found in ModuleSource")
 		return nil
 	}
 
-	tagsResolver := layouts.NewTagsResolver()
-	filter := modfilter.ParseModuleFilterString(moduleFilterExpression)
-	for i, module := range modulesFromRepo {
-		if !filter.Match(module) {
-			continue
+	modulesFilter, err := modules.NewFilter(moduleFilterExpression)
+	if err != nil {
+		return fmt.Errorf("Bad modules filter: %w", err)
+	}
+	if len(modulesFilter) > 0 {
+		filteredModules := make([]modules.Module, 0)
+		for _, moduleData := range modulesFromRepo {
+			if !modulesFilter.MatchesFilter(&moduleData) {
+				continue
+			}
+
+			modulesFilter.FilterReleases(&moduleData)
+			filteredModules = append(filteredModules, moduleData)
 		}
+		modulesFromRepo = filteredModules
+	}
 
-		filter.FilterModuleReleases(&module)
-
+	tagsResolver := layouts.NewTagsResolver()
+	for i, module := range modulesFromRepo {
 		log.InfoF("[%d / %d] Pulling module %s...\n", i+1, len(modulesFromRepo), module.RegistryPath)
 
 		moduleLayout, err := layouts.CreateEmptyImageLayoutAtPath(filepath.Join(mirrorDirectoryPath, module.Name))
@@ -130,7 +138,7 @@ func pullExternalModulesToLocalFS(
 			return fmt.Errorf("Create module OCI Layouts: %w", err)
 		}
 
-		moduleImageSet, releasesImageSet, err := modules.FindExternalModuleImages(&module, authProvider, filter != nil, insecure, skipVerifyTLS)
+		moduleImageSet, releasesImageSet, err := modules.FindExternalModuleImages(&module, modulesFilter, authProvider, insecure, skipVerifyTLS)
 		if err != nil {
 			return fmt.Errorf("Find external module images`: %w", err)
 		}
@@ -147,11 +155,6 @@ func pullExternalModulesToLocalFS(
 				SkipTLSVerification: skipVerifyTLS,
 				RegistryAuth:        authProvider,
 			},
-			DoGOSTDigests:   false,
-			SkipModulesPull: false,
-			BundleChunkSize: 0,
-			MinVersion:      nil,
-			SpecificVersion: nil,
 		}
 
 		log.InfoLn("Beginning to pull module contents")

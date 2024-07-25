@@ -36,7 +36,7 @@ func validateModuleFilterFormat() error {
 		return nil
 	}
 
-	if !regexp.MustCompile(`([a-zA-Z0-9-_]+:(v\d+\.\d+\.\d+|[a-zA-Z0-9_\-]+));?`).MatchString(ModulesFilter) {
+	if !regexp.MustCompile(`([a-zA-Z0-9-_]+@(v?\d+\.\d+\.\d+));?`).MatchString(ModulesFilter) {
 		return errors.New("Invalid filter pattern")
 	}
 
