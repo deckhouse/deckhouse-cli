@@ -62,8 +62,12 @@ func validateImagesBundlePathArg(args []string) error {
 		return fmt.Errorf("%s: is a directory", ImagesBundlePath)
 	}
 
-	if bundleExtension == "" && !stat.Mode().IsRegular() {
+	if bundleExtension == ".tar" && !stat.Mode().IsRegular() {
 		return fmt.Errorf("%s: is not a regular file", ImagesBundlePath)
+	}
+
+	if bundleExtension == "" && !stat.IsDir() {
+		return fmt.Errorf("%s: not a directory", ImagesBundlePath)
 	}
 
 	return nil
