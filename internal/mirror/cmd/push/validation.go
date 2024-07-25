@@ -48,14 +48,28 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 
 func validateImagesBundlePathArg(args []string) error {
 	ImagesBundlePath = filepath.Clean(args[0])
-	if filepath.Ext(ImagesBundlePath) != ".tar" {
-		return errors.New("--images-bundle-path should be a path to tar archive (.tar)")
+	bundleExtension := filepath.Ext(ImagesBundlePath)
+	if bundleExtension != ".tar" && bundleExtension != "" {
+		return errors.New("images-bundle-path argument should be a path to tar archive (.tar) or a directory containing unpacked bundle")
 	}
 
-	_, err := os.Stat(ImagesBundlePath)
+	stat, err := os.Stat(ImagesBundlePath)
 	if err != nil {
 		return fmt.Errorf("invalid --images-bundle-path: %w", err)
 	}
+
+	if bundleExtension == ".tar" && stat.IsDir() {
+		return fmt.Errorf("%s: is a directory", ImagesBundlePath)
+	}
+
+	if bundleExtension == ".tar" && !stat.Mode().IsRegular() {
+		return fmt.Errorf("%s: is not a regular file", ImagesBundlePath)
+	}
+
+	if bundleExtension == "" && !stat.IsDir() {
+		return fmt.Errorf("%s: not a directory", ImagesBundlePath)
+	}
+
 	return nil
 }
 

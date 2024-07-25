@@ -109,8 +109,6 @@ func push(_ *cobra.Command, _ []string) error {
 		})
 	}
 
-	defer os.RemoveAll(mirrorCtx.UnpackedImagesPath)
-
 	if err := auth.ValidateWriteAccessForRepo(
 		mirrorCtx.RegistryHost+mirrorCtx.RegistryPath,
 		mirrorCtx.RegistryAuth,
@@ -122,14 +120,23 @@ func push(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	err := log.Process("mirror", "Unpacking Deckhouse bundle", func() error {
-		return bundle.Unpack(&mirrorCtx.BaseContext)
-	})
-	if err != nil {
-		return err
+	if filepath.Ext(mirrorCtx.BundlePath) == ".tar" {
+		err := log.Process("mirror", "Unpacking Deckhouse bundle", func() error {
+			return bundle.Unpack(&mirrorCtx.BaseContext)
+		})
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(mirrorCtx.UnpackedImagesPath)
+	} else {
+		log.InfoLn("Using bundle at", mirrorCtx.BundlePath)
+		mirrorCtx.UnpackedImagesPath = mirrorCtx.BundlePath
+		if err := validateUnpackedBundle(mirrorCtx); err != nil {
+			return fmt.Errorf("Invalid bundle: %w", err)
+		}
 	}
 
-	err = log.Process("mirror", "Push Deckhouse images to registry", func() error {
+	err := log.Process("mirror", "Push Deckhouse images to registry", func() error {
 		return PushDeckhouseToRegistry(mirrorCtx)
 	})
 	if err != nil {
@@ -340,4 +347,37 @@ func findLayoutsToPush(mirrorCtx *contexts.PushContext) (map[string]layout.Path,
 		ociLayouts[moduleReleasesRef] = moduleReleaseLayout
 	}
 	return ociLayouts, modulesNames, nil
+}
+
+func validateUnpackedBundle(mirrorCtx *contexts.PushContext) error {
+	mandatoryLayouts := map[string]string{
+		"root layout":                mirrorCtx.UnpackedImagesPath,
+		"installers layout":          filepath.Join(mirrorCtx.UnpackedImagesPath, "install"),
+		"release channels layout":    filepath.Join(mirrorCtx.UnpackedImagesPath, "release-channel"),
+		"trivy database layout":      filepath.Join(mirrorCtx.UnpackedImagesPath, "security", "trivy-db"),
+		"trivy bdu layout":           filepath.Join(mirrorCtx.UnpackedImagesPath, "security", "trivy-bdu"),
+		"trivy java database layout": filepath.Join(mirrorCtx.UnpackedImagesPath, "security", "trivy-java-db"),
+	}
+
+	for layoutDescription, fsPath := range mandatoryLayouts {
+		l, err := layout.FromPath(fsPath)
+		if err != nil {
+			return fmt.Errorf("%s: %w", layoutDescription, err)
+		}
+		index, err := l.ImageIndex()
+		if err != nil {
+			return fmt.Errorf("%s image index: %w", layoutDescription, err)
+		}
+
+		indexManifest, err := index.IndexManifest()
+		if err != nil {
+			return fmt.Errorf("%s image index manifest: %w", layoutDescription, err)
+		}
+
+		if len(indexManifest.Manifests) == 0 {
+			return fmt.Errorf("No images in %s", layoutDescription)
+		}
+	}
+
+	return nil
 }
