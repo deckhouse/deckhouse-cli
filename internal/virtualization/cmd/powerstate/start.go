@@ -17,9 +17,9 @@ limitations under the License.
 package powerstate
 
 import (
-	"strings"
-
 	"github.com/spf13/cobra"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
@@ -30,7 +30,7 @@ func NewStartCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 	start := string(Start)
 	cmd := &cobra.Command{
 		Use:     start + " (VirtualMachine)",
-		Short:   strings.Title(start) + " a virtual machine.",
+		Short:   cases.Title(language.English).String(start) + " a virtual machine.",
 		Example: ps.Usage(),
 		Args:    templates.ExactArgs(start, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
