@@ -16,15 +16,16 @@ require (
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.9.0
+	github.com/werf/3p-helm v0.0.0-20240806141915-3137f4cc1557
 	github.com/werf/logboek v0.6.1
-	github.com/werf/nelm v0.0.0-20240409125451-b3f238780b01
-	github.com/werf/werf v1.2.308-0.20240412125023-1fb29c861fab
+	github.com/werf/nelm v0.0.0-20240806160049-119410ac7901
+	github.com/werf/werf/v2 v2.10.1-0.20240806161101-2bc58b7bad1c
 	go.cypherpunks.ru/gogost/v5 v5.13.0
 	golang.org/x/crypto v0.21.0
 	golang.org/x/exp v0.0.0-20240325151524-a685a6edb6d8
 	golang.org/x/sys v0.18.0
 	golang.org/x/term v0.18.0
-	helm.sh/helm/v3 v3.14.3
+	golang.org/x/text v0.14.0
 	k8s.io/apimachinery v0.29.3
 	k8s.io/client-go v0.29.3
 	k8s.io/component-base v0.29.3
@@ -171,7 +172,6 @@ require (
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/google/wire v0.5.0 // indirect
-	github.com/gophercloud/gophercloud v1.11.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/gosuri/uitable v0.0.4 // indirect
 	github.com/gregjones/httpcache v0.0.0-20190611155906-901d90724c79 // indirect
@@ -183,7 +183,6 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/hashicorp/go-version v1.6.0 // indirect
 	github.com/hashicorp/hcl/v2 v2.19.1 // indirect
-	github.com/helm/helm-2to3 v0.10.3 // indirect
 	github.com/huandu/xstrings v1.4.0 // indirect
 	github.com/imdario/mergo v0.3.16 // indirect
 	github.com/in-toto/in-toto-golang v0.9.0 // indirect
@@ -195,6 +194,7 @@ require (
 	github.com/jedib0t/go-pretty/v6 v6.5.5 // indirect
 	github.com/jellydator/ttlcache/v3 v3.1.1 // indirect
 	github.com/jinzhu/copier v0.4.0 // indirect
+	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/jmoiron/sqlx v1.3.5 // indirect
 	github.com/jonboulle/clockwork v0.4.0 // indirect
@@ -209,6 +209,7 @@ require (
 	github.com/lib/pq v1.10.9 // indirect
 	github.com/liggitt/tabwriter v0.0.0-20181228230101-89fcab3d43de // indirect
 	github.com/lithammer/dedent v1.1.0 // indirect
+	github.com/looplab/fsm v1.0.2 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/manifoldco/promptui v0.9.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
@@ -300,7 +301,7 @@ require (
 	github.com/vishvananda/netns v0.0.4 // indirect
 	github.com/wI2L/jsondiff v0.5.0 // indirect
 	github.com/werf/copy-recurse v0.2.7 // indirect
-	github.com/werf/kubedog v0.12.4-0.20240329141850-9e5c458d11bb // indirect
+	github.com/werf/kubedog v0.12.4-0.20240625172905-6d4f29eae23b // indirect
 	github.com/werf/lockgate v0.1.1 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	github.com/xeipuuv/gojsonpointer v0.0.0-20190905194746-02993c407bfb // indirect
@@ -334,7 +335,6 @@ require (
 	golang.org/x/net v0.23.0 // indirect
 	golang.org/x/oauth2 v0.18.0 // indirect
 	golang.org/x/sync v0.6.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/time v0.5.0 // indirect
 	golang.org/x/tools v0.19.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
@@ -357,7 +357,6 @@ require (
 	k8s.io/apiserver v0.29.3 // indirect
 	k8s.io/cli-runtime v0.29.3 // indirect
 	k8s.io/component-helpers v0.29.3 // indirect
-	k8s.io/helm v2.17.0+incompatible // indirect
 	k8s.io/klog v1.0.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20240105020646-a37d4de58910 // indirect
 	k8s.io/metrics v0.29.3 // indirect
@@ -377,9 +376,6 @@ require (
 
 replace (
 	github.com/deislabs/oras => github.com/werf/3p-oras v0.9.1-0.20240115121544-03962ecbd40a // upstream not maintained
-	github.com/helm/helm-2to3 => github.com/werf/3p-helm-2to3 v0.0.0-20230313155428-cf9dd655c0e3 // upstream not maintained, switch back to upstream when merged: https://github.com/helm/helm-2to3/pull/224
 	github.com/jaguilar/vt100 => github.com/tonistiigi/vt100 v0.0.0-20190402012908-ad4c4a574305 // upstream not maintained
 	go.cypherpunks.ru/gogost/v5 v5.13.0 => github.com/flant/gogost/v5 v5.13.0
-	helm.sh/helm/v3 => github.com/werf/3p-helm/v3 v3.0.0-20240405163812-3dc7244388e5 // helm 3
-	k8s.io/helm => github.com/werf/3p-helm v0.0.0-20210202111118-81e74d46da0f // helm 2
 )

@@ -27,16 +27,17 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+
+	helm_v3 "github.com/werf/3p-helm/cmd/helm"
 	"github.com/werf/logboek/pkg/level"
-	helm_v3 "helm.sh/helm/v3/cmd/helm"
 
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
 
 	"github.com/werf/logboek"
 	"github.com/werf/nelm/pkg/resrcchangcalc"
-	werfcommon "github.com/werf/werf/cmd/werf/common"
-	"github.com/werf/werf/pkg/process_exterminator"
+	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
+	"github.com/werf/werf/v2/pkg/process_exterminator"
 
 	mirrorLog "github.com/deckhouse/deckhouse-cli/internal/mirror/util/log"
 )
