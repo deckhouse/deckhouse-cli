@@ -22,9 +22,9 @@ import (
 	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 
-	werfcommon "github.com/werf/werf/cmd/werf/common"
-	werfroot "github.com/werf/werf/cmd/werf/root"
-	"github.com/werf/werf/pkg/storage"
+	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
+	werfroot "github.com/werf/werf/v2/cmd/werf/root"
+	"github.com/werf/werf/v2/pkg/storage"
 )
 
 func init() {
