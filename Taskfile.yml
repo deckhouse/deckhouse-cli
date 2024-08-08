@@ -34,14 +34,16 @@ vars:
 
       echo "${ldflags[*]-}"
 
+  ciliumCLIVersion: v0.15.22
+
   cgoTags: "dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp osusergo exclude_graphdriver_devicemapper netgo no_devmapper static_build cni"
   goTags: "dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp"
 
   cgoDevLDFlags: "-linkmode external -extldflags=-static"
   goDevLDFlags: ""
 
-  cgoReleaseLDFlags: "-linkmode external -extldflags=-static -s -w -X 'github.com/deckhouse/deckhouse-cli/cmd.Version={{ .version }}' -X github.com/werf/werf/pkg/werf.Version={{ .version }} {{ .kubectlLDFlags }}"
-  goReleaseLDFlags: "-s -w -X 'github.com/deckhouse/deckhouse-cli/cmd.Version={{ .version }}' -X github.com/werf/werf/pkg/werf.Version={{ .version }} {{ .kubectlLDFlags }}"
+  cgoReleaseLDFlags: "-linkmode external -extldflags=-static -s -w -X 'github.com/deckhouse/deckhouse-cli/cmd.Version={{ .version }}' -X 'github.com/cilium/cilium-cli/cli.Version={{ .ciliumCLIVersion }}' -X github.com/werf/werf/pkg/werf.Version={{ .version }} {{ .kubectlLDFlags }}"
+  goReleaseLDFlags: "-s -w -X 'github.com/deckhouse/deckhouse-cli/cmd.Version={{ .version }}' -X 'github.com/cilium/cilium-cli/cli.Version={{ .ciliumCLIVersion }}' -X github.com/werf/werf/pkg/werf.Version={{ .version }} {{ .kubectlLDFlags }}"
 
 tasks:
   _build:cgo:dev:
@@ -135,6 +137,15 @@ tasks:
       - build:dist:darwin:amd64
       - build:dist:darwin:arm64
       - build:dist:windows:amd64
+
+  build:dist:linux:amd64:wocgo:
+    desc: Build d8 release binary for linux/amd64 w/o cgo
+    cmds:
+      - task: _build:go:dist
+        vars:
+          targetOS: "linux"
+          targetArch: "amd64"
+          outputDir: "{{ .outputDir }}"
 
   build:dist:linux:amd64:
     desc: Build d8 release binary for linux/amd64
@@ -238,3 +249,37 @@ tasks:
     desc: Clean all binaries
     cmds:
       - rm -rf ./build ./dist ./d8
+
+  _cilium:clone:
+    desc: Clone cilium-cli
+    cmds:
+      - mkdir -p internal/cilium-cli
+      - git clone --depth 1 --branch v{{ .CILIUM_CLI_VERSION }} {{ .SOURCE_REPO }}/cilium/cilium-cli.git internal/cilium-cli
+    vars:
+      CILIUM_CLI_VERSION: "0.15.22"
+      SOURCE_REPO: "https://github.com"
+
+  _cilium:patch:
+    desc: Patch cilium-cli
+    cmds:
+      - cd internal/cilium-cli
+      - find /patches -name '*.patch' | xargs git apply --verbose --allow-empty
+
+  _cilium:gomod-replace:
+    desc: Add replace to go.mod
+    cmds:
+      - go mod edit -replace github.com/cilium/cilium-cli=internal/cilium-cli
+
+  _cilium:original-build:
+    desc: Build cilium-cli
+    cmds:
+      - cd internal/cilium-cli
+      - make install
+
+  build-d8-w-cilium:
+    desc: Build and package all d8 binaries
+    cmds:
+      - task: _cilium:clone
+      - task: _cilium:patch
+      - task: _cilium:gomod-replace
+      - task: build:dist:linux:amd64
