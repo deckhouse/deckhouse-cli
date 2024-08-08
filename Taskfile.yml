@@ -263,7 +263,7 @@ tasks:
     desc: Patch cilium-cli
     cmds:
       - cd internal/cilium-cli
-      - find /patches -name '*.patch' | xargs git apply --verbose --allow-empty
+      - find /patches/cilium-cli -name '*.patch' | xargs git apply --verbose --allow-empty
 
   _cilium:gomod-replace:
     desc: Add replace to go.mod
