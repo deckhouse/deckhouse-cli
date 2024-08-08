@@ -261,14 +261,15 @@ tasks:
 
   _cilium:patch:
     desc: Patch cilium-cli
+    dir: internal/cilium-cli
     cmds:
-      - cd internal/cilium-cli
-      - find ../../patches/cilium-cli -name '*.patch' | xargs git apply --verbose --allow-empty
+      - find ../../patches/cilium-cli -name '*.patch' | xargs git apply --verbose
 
   _cilium:gomod-replace:
     desc: Add replace to go.mod
     cmds:
-      - go mod edit -replace github.com/cilium/cilium-cli=internal/cilium-cli
+      - go mod edit -replace github.com/cilium/cilium-cli=./internal/cilium-cli
+      - go mod tidy
 
   _cilium:original-build:
     desc: Build cilium-cli
