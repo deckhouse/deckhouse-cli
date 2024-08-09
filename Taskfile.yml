@@ -34,7 +34,7 @@ vars:
 
       echo "${ldflags[*]-}"
 
-  ciliumCLIVersion: v0.15.22
+  ciliumCLIVersion: "0.15.22"
 
   cgoTags: "dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp osusergo exclude_graphdriver_devicemapper netgo no_devmapper static_build cni"
   goTags: "dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp"
@@ -42,8 +42,8 @@ vars:
   cgoDevLDFlags: "-linkmode external -extldflags=-static"
   goDevLDFlags: ""
 
-  cgoReleaseLDFlags: "-linkmode external -extldflags=-static -s -w -X 'github.com/deckhouse/deckhouse-cli/cmd.Version={{ .version }}' -X 'github.com/cilium/cilium-cli/cli.Version={{ .ciliumCLIVersion }}' -X github.com/werf/werf/pkg/werf.Version={{ .version }} {{ .kubectlLDFlags }}"
-  goReleaseLDFlags: "-s -w -X 'github.com/deckhouse/deckhouse-cli/cmd.Version={{ .version }}' -X 'github.com/cilium/cilium-cli/cli.Version={{ .ciliumCLIVersion }}' -X github.com/werf/werf/pkg/werf.Version={{ .version }} {{ .kubectlLDFlags }}"
+  cgoReleaseLDFlags: "-linkmode external -extldflags=-static -s -w -X 'github.com/deckhouse/deckhouse-cli/cmd.Version={{ .version }}' -X 'github.com/cilium/cilium-cli/cli.Version=v{{ .ciliumCLIVersion }}' -X github.com/werf/werf/pkg/werf.Version={{ .version }} {{ .kubectlLDFlags }}"
+  goReleaseLDFlags: "-s -w -X 'github.com/deckhouse/deckhouse-cli/cmd.Version={{ .version }}' -X 'github.com/cilium/cilium-cli/cli.Version=v{{ .ciliumCLIVersion }}' -X github.com/werf/werf/pkg/werf.Version={{ .version }} {{ .kubectlLDFlags }}"
 
 tasks:
   _build:cgo:dev:
@@ -254,9 +254,8 @@ tasks:
     desc: Clone cilium-cli
     cmds:
       - mkdir -p internal/cilium-cli
-      - git clone --depth 1 --branch v{{ .CILIUM_CLI_VERSION }} {{ .SOURCE_REPO }}/cilium/cilium-cli.git internal/cilium-cli
+      - git clone --depth 1 --branch v{{ .ciliumCLIVersion }} {{ .SOURCE_REPO }}/cilium/cilium-cli.git internal/cilium-cli
     vars:
-      CILIUM_CLI_VERSION: "0.15.22"
       SOURCE_REPO: "https://github.com"
 
   _cilium:patch:
@@ -273,9 +272,14 @@ tasks:
 
   _cilium:original-build:
     desc: Build cilium-cli
+    dir: internal/cilium-cli
     cmds:
-      - cd internal/cilium-cli
       - make install
+
+  _cilium:clean:
+    desc: Clean cilium dir
+    cmds:
+      - rm -rf internal/cilium-cli
 
   build-d8-w-cilium:
     desc: Build and package all d8 binaries

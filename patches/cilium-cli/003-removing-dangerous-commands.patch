@@ -1,0 +1,84 @@
+diff --git a/internal/cli/cmd/cmd.go b/internal/cli/cmd/cmd.go
+index a04fccb7..8062bc6c 100644
+--- a/internal/cli/cmd/cmd.go
++++ b/internal/cli/cmd/cmd.go
+@@ -9,7 +9,6 @@ import (
+
+ 	"github.com/spf13/cobra"
+
+-	"github.com/cilium/cilium-cli/internal/utils"
+ 	"github.com/cilium/cilium-cli/k8s"
+ )
+
+@@ -79,7 +78,6 @@ cilium connectivity test`,
+
+ 	cmd.AddCommand(
+ 		newCmdBgp(),
+-		newCmdClusterMesh(),
+ 		newCmdConfig(),
+ 		newCmdConnectivity(hooks),
+ 		newCmdContext(),
+@@ -89,19 +87,6 @@ cilium connectivity test`,
+ 		newCmdSysdump(hooks),
+ 		newCmdVersion(),
+ 	)
+-	if utils.IsInHelmMode() {
+-		cmd.AddCommand(
+-			newCmdInstallWithHelm(),
+-			newCmdUninstallWithHelm(),
+-			newCmdUpgradeWithHelm(),
+-		)
+-	} else {
+-		cmd.AddCommand(
+-			newCmdInstall(),
+-			newCmdUninstall(),
+-			newCmdUpgrade(),
+-		)
+-	}
+
+ 	cmd.SetOut(os.Stdout)
+ 	cmd.SetErr(os.Stderr)
+diff --git a/internal/cli/cmd/config.go b/internal/cli/cmd/config.go
+index 0920554c..9808bef6 100644
+--- a/internal/cli/cmd/config.go
++++ b/internal/cli/cmd/config.go
+@@ -22,8 +22,6 @@ func newCmdConfig() *cobra.Command {
+
+ 	cmd.AddCommand(
+ 		newCmdConfigView(),
+-		newCmdConfigSet(),
+-		newCmdConfigDelete(),
+ 	)
+
+ 	return cmd
+diff --git a/internal/cli/cmd/hubble.go b/internal/cli/cmd/hubble.go
+index d9f228df..d13a6402 100644
+--- a/internal/cli/cmd/hubble.go
++++ b/internal/cli/cmd/hubble.go
+@@ -9,7 +9,6 @@ import (
+
+ 	"github.com/cilium/cilium-cli/defaults"
+ 	"github.com/cilium/cilium-cli/hubble"
+-	"github.com/cilium/cilium-cli/internal/utils"
+
+ 	"github.com/spf13/cobra"
+ )
+@@ -25,17 +24,7 @@ func newCmdHubble() *cobra.Command {
+ 		newCmdPortForwardCommand(),
+ 		newCmdUI(),
+ 	)
+-	if utils.IsInHelmMode() {
+-		cmd.AddCommand(
+-			newCmdHubbleEnableWithHelm(),
+-			newCmdHubbleDisableWithHelm(),
+-		)
+-	} else {
+-		cmd.AddCommand(
+-			newCmdHubbleEnable(),
+-			newCmdHubbleDisable(),
+-		)
+-	}
++
+ 	return cmd
+ }
+
