@@ -183,6 +183,11 @@ func PushDeckhouseToRegistry(mirrorCtx *contexts.PushContext) error {
 			return fmt.Errorf("read index manifest: %w", err)
 		}
 
+		if len(indexManifest.Manifests) == 0 {
+			log.InfoLn("Skipped repo", originalRepo, "as it contains no images")
+			continue
+		}
+
 		repo := strings.Replace(originalRepo, mirrorCtx.DeckhouseRegistryRepo, mirrorCtx.RegistryHost+mirrorCtx.RegistryPath, 1)
 		pushCount := 1
 		for _, manifest := range indexManifest.Manifests {

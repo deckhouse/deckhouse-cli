@@ -125,6 +125,7 @@ func PullTrivyVulnerabilityDatabasesImages(
 			dbImageLayout,
 			map[string]struct{}{ref.String(): {}},
 			WithTagToDigestMapper(NopTagToDigestMappingFunc),
+			WithAllowMissingTags(true), // SE edition does not contain images for trivy
 		); err != nil {
 			return fmt.Errorf("pull vulnerability database: %w", err)
 		}
