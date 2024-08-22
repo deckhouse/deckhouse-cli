@@ -1,0 +1,13 @@
+diff --git a/connectivity/manifests/client-egress-to-fqdns-one-one-one-one.yaml b/connectivity/manifests/client-egress-to-fqdns-one-one-one-one.yaml
+index 60222425..f242a1f8 100644
+--- a/connectivity/manifests/client-egress-to-fqdns-one-one-one-one.yaml
++++ b/connectivity/manifests/client-egress-to-fqdns-one-one-one-one.yaml
+@@ -1,7 +1,7 @@
+ apiVersion: cilium.io/v2
+ kind: CiliumNetworkPolicy
+ metadata:
+-  name: client-egress-to-fqdns-{{.ExternalTarget}}
++  name: client-egress-to-fqdns-{{.ExternalTarget}}-z
+ spec:
+   endpointSelector:
+     matchLabels:
