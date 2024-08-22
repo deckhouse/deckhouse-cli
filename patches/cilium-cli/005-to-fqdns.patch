@@ -7,7 +7,7 @@ index 60222425..f242a1f8 100644
  kind: CiliumNetworkPolicy
  metadata:
 -  name: client-egress-to-fqdns-{{.ExternalTarget}}
-+  name: client-egress-to-fqdns-{{.ExternalTarget}}-z
++  name: client-egress-to-fqdns-{{.ExternalTarget}}zzz
  spec:
    endpointSelector:
      matchLabels:
