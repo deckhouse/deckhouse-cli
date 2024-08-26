@@ -57,5 +57,5 @@ jobs:
       - name: Setup Task
         uses: arduino/setup-task@v2
 
-      - name: Run tests
+      - name: Run testss
         run: task test
