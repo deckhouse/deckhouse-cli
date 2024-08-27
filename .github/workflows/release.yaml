@@ -46,6 +46,11 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # To use `git describe --tags`
+
       - name: Install dependency for linix-amd64 dist
         run: sudo apt-get install -y apt-utils libbtrfs-dev file
 
