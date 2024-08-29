@@ -84,6 +84,11 @@ tasks:
       GOOS: "{{ .targetOS }}"
       GOARCH: "{{ .targetArch }}"
 
+  _test:go:
+    internal: true
+    cmds:
+      - go test -tags="{{ .cgoTags }}" ./...
+
   build:
     desc: Build d8 binary for personal usage
     run: once
@@ -233,6 +238,11 @@ tasks:
       - task: build:dist:all
       - task: package:dist:all
       - task: checksum
+
+  test:
+    desc: Run go test for current project
+    cmds:
+      - task: _test:go
 
   clean:
     desc: Clean all binaries
