@@ -21,7 +21,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	golog "log"
+	"log/slog"
 	"math/rand"
 	"net/http/httptest"
 	"os"
@@ -44,19 +45,13 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/push"
-
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/contexts"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/auth"
-	logger "github.com/deckhouse/deckhouse-cli/internal/mirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 )
 
 func TestMirrorE2E(t *testing.T) {
-	logger.InitLoggerWithOptions("pretty", logger.LoggerOptions{
-		OutStream: os.Stdout,
-		IsDebug:   true,
-	})
-
 	tmpDir, err := os.MkdirTemp(os.TempDir(), "mirror_e2e")
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -71,8 +66,10 @@ func TestMirrorE2E(t *testing.T) {
 	createTrivyVulnerabilityDatabasesInRegistry(t, sourceHost+sourceRepoPath, true, false)
 	createDeckhouseReleaseChannelsInRegistry(t, sourceHost+sourceRepoPath)
 
+	testLogger := log.NewSLogger(slog.LevelDebug)
 	pullCtx := &contexts.PullContext{
 		BaseContext: contexts.BaseContext{
+			Logger:                testLogger,
 			Insecure:              true,
 			BundlePath:            filepath.Join(tmpDir, "d8.tar"),
 			DeckhouseRegistryRepo: sourceHost + sourceRepoPath,
@@ -81,6 +78,7 @@ func TestMirrorE2E(t *testing.T) {
 	}
 	pushCtx := &contexts.PushContext{
 		BaseContext: contexts.BaseContext{
+			Logger:                testLogger,
 			Insecure:              true,
 			DeckhouseRegistryRepo: sourceHost + sourceRepoPath,
 			RegistryHost:          targetHost,
@@ -101,7 +99,7 @@ func TestMirrorE2E(t *testing.T) {
 		require.DirExists(t, filepath.Join(pullCtx.UnpackedImagesPath, layoutName, "blobs"), "Blobs should exist after pull")
 	}
 
-	err = push.PushDeckhouseToRegistry(pushCtx)
+	err = operations.PushDeckhouseToRegistry(pushCtx)
 	require.NoError(t, err, "Push should be completed without errors")
 
 	require.Subset(t, sourceBlobHandler.ListBlobs(), targetBlobHandler.ListBlobs())
@@ -113,7 +111,7 @@ func setupEmptyRegistryRepo(useTLS bool) (host, repoPath string, blobHandler *Li
 		BlobHandler:    memBlobHandler,
 		BlobPutHandler: memBlobHandler.(registry.BlobPutHandler),
 	}
-	registryHandler := registry.New(registry.WithBlobHandler(bh), registry.Logger(log.New(io.Discard, "", 0)))
+	registryHandler := registry.New(registry.WithBlobHandler(bh), registry.Logger(golog.New(io.Discard, "", 0)))
 
 	server := httptest.NewUnstartedServer(registryHandler)
 	if useTLS {

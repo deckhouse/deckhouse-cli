@@ -18,7 +18,6 @@ package mirror
 
 import (
 	"os"
-	"strconv"
 
 	"github.com/google/go-containerregistry/pkg/logs"
 	"github.com/spf13/cobra"
@@ -28,7 +27,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/push"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/vulndb"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 )
 
 var mirrorLong = templates.LongDesc(`
@@ -58,21 +57,15 @@ func NewCommand() *cobra.Command {
 		vulndb.NewCommand(),
 	)
 
-	debugLogStr := os.Getenv("MIRROR_DEBUG_LOG")
-	if debugLogStr != "" {
-		debugLogLevel, err := strconv.Atoi(debugLogStr)
-		if err != nil {
-			log.WarnF("Invalid $MIRROR_DEBUG_LOG: %v\nUse 1 for progress logging, 2 for warnings or 3 for connection logging. Each level also enables previous ones.\n", err)
-		}
+	debugLogLevel := log.DebugLogLevel()
+	switch {
+	case debugLogLevel >= 4:
+		logs.Debug.SetOutput(os.Stderr)
+	case debugLogLevel >= 2:
+		logs.Warn.SetOutput(os.Stderr)
+	case debugLogLevel >= 1:
+		logs.Progress.SetOutput(os.Stderr)
 
-		switch {
-		case debugLogLevel >= 3:
-			logs.Debug.SetOutput(os.Stderr)
-		case debugLogLevel >= 2:
-			logs.Warn.SetOutput(os.Stderr)
-		case debugLogLevel >= 1:
-			logs.Progress.SetOutput(os.Stderr)
-		}
 	}
 
 	return mirrorCmd

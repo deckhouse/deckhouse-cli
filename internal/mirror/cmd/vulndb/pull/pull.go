@@ -18,6 +18,7 @@ package pull
 
 import (
 	"fmt"
+	"log/slog"
 	"path/filepath"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -25,8 +26,9 @@ import (
 	"k8s.io/component-base/logs"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/contexts"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/layouts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 )
 
 const (
@@ -75,8 +77,15 @@ var (
 )
 
 func pull(_ *cobra.Command, _ []string) error {
+	logLevel := slog.LevelInfo
+	if log.DebugLogLevel() >= 3 {
+		logLevel = slog.LevelDebug
+	}
+	logger := log.NewSLogger(logLevel)
+
 	pullContext := &contexts.PullContext{
 		BaseContext: contexts.BaseContext{
+			Logger:                logger,
 			RegistryAuth:          getSourceRegistryAuthProvider(),
 			DeckhouseRegistryRepo: SourceRegistryRepo,
 		},

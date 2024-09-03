@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -32,10 +33,10 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/api/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/contexts"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/layouts"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 )
 
 var pullLong = templates.LongDesc(`
@@ -76,7 +77,14 @@ var (
 )
 
 func pull(_ *cobra.Command, _ []string) error {
+	logLevel := slog.LevelInfo
+	if log.DebugLogLevel() >= 3 {
+		logLevel = slog.LevelDebug
+	}
+	logger := log.NewSLogger(logLevel)
+
 	return pullExternalModulesToLocalFS(
+		logger,
 		ModuleSourcePath,
 		ModulesDirectory,
 		ModulesFilter,
@@ -85,6 +93,7 @@ func pull(_ *cobra.Command, _ []string) error {
 }
 
 func pullExternalModulesToLocalFS(
+	logger contexts.Logger,
 	sourceYmlPath, mirrorDirectoryPath, moduleFilterExpression string,
 	skipVerifyTLS bool,
 ) error {
@@ -104,15 +113,15 @@ func pullExternalModulesToLocalFS(
 		return fmt.Errorf("Get external modules from %q: %w", src.Spec.Registry.Repo, err)
 	}
 	if len(modulesFromRepo) == 0 {
-		log.WarnLn("No modules found in ModuleSource")
+		logger.WarnLn("No modules found in ModuleSource")
 		return nil
 	}
 
-	modulesFilter, err := modules.NewFilter(moduleFilterExpression)
+	modulesFilter, err := modules.NewFilter(moduleFilterExpression, logger)
 	if err != nil {
 		return fmt.Errorf("Bad modules filter: %w", err)
 	}
-	if len(modulesFilter) > 0 {
+	if modulesFilter.Len() > 0 {
 		filteredModules := make([]modules.Module, 0)
 		for _, moduleData := range modulesFromRepo {
 			if !modulesFilter.MatchesFilter(&moduleData) {
@@ -127,7 +136,7 @@ func pullExternalModulesToLocalFS(
 
 	tagsResolver := layouts.NewTagsResolver()
 	for i, module := range modulesFromRepo {
-		log.InfoF("[%d / %d] Pulling module %s...\n", i+1, len(modulesFromRepo), module.RegistryPath)
+		logger.InfoF("[%d / %d] Pulling module %s ", i+1, len(modulesFromRepo), module.RegistryPath)
 
 		moduleLayout, err := layouts.CreateEmptyImageLayoutAtPath(filepath.Join(mirrorDirectoryPath, module.Name))
 		if err != nil {
@@ -151,25 +160,26 @@ func pullExternalModulesToLocalFS(
 
 		pullCtx := &contexts.PullContext{
 			BaseContext: contexts.BaseContext{
+				Logger:              logger,
 				Insecure:            insecure,
 				SkipTLSVerification: skipVerifyTLS,
 				RegistryAuth:        authProvider,
 			},
 		}
 
-		log.InfoLn("Beginning to pull module contents")
+		logger.InfoLn("Beginning to pull module contents")
 		err = layouts.PullImageSet(pullCtx, moduleLayout, moduleImageSet, layouts.WithTagToDigestMapper(tagsResolver.GetTagDigest))
 		if err != nil {
 			return fmt.Errorf("Pull images: %w", err)
 		}
-		log.InfoLn("✅ Module contents pulled successfully")
+		logger.InfoLn("✅ Module contents pulled successfully")
 
-		log.InfoLn("Beginning to pull releases for module")
+		logger.InfoLn("Beginning to pull releases for module")
 		err = layouts.PullImageSet(pullCtx, moduleReleasesLayout, releasesImageSet, layouts.WithTagToDigestMapper(tagsResolver.GetTagDigest))
 		if err != nil {
 			return fmt.Errorf("Pull images: %w", err)
 		}
-		log.InfoLn("✅ Releases for module pulled successfully")
+		logger.InfoLn("✅ Releases for module pulled successfully")
 	}
 
 	return nil

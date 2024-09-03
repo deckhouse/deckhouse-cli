@@ -21,6 +21,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -32,16 +33,16 @@ import (
 	"k8s.io/component-base/logs"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/bundle"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/contexts"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/gostsums"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/images"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/manifests"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/auth"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 )
 
 const (
@@ -113,8 +114,15 @@ var (
 )
 
 func buildPullContext() *contexts.PullContext {
+	logLevel := slog.LevelInfo
+	if log.DebugLogLevel() >= 3 {
+		logLevel = slog.LevelDebug
+	}
+	logger := log.NewSLogger(logLevel)
+
 	mirrorCtx := &contexts.PullContext{
 		BaseContext: contexts.BaseContext{
+			Logger:                logger,
 			Insecure:              Insecure,
 			SkipTLSVerification:   TLSSkipVerify,
 			DeckhouseRegistryRepo: SourceRegistryRepo,
@@ -139,6 +147,7 @@ func buildPullContext() *contexts.PullContext {
 
 func pull(_ *cobra.Command, _ []string) error {
 	mirrorCtx := buildPullContext()
+	logger := mirrorCtx.Logger
 
 	if DontContinuePartialPull || lastPullWasTooLongAgoToRetry(mirrorCtx) {
 		if err := os.RemoveAll(mirrorCtx.UnpackedImagesPath); err != nil {
@@ -166,10 +175,10 @@ func pull(_ *cobra.Command, _ []string) error {
 
 	var versionsToMirror []semver.Version
 	var err error
-	err = log.Process("mirror", "Looking for required Deckhouse releases", func() error {
+	err = logger.Process("Looking for required Deckhouse releases", func() error {
 		if mirrorCtx.SpecificVersion != nil {
 			versionsToMirror = append(versionsToMirror, *mirrorCtx.SpecificVersion)
-			log.InfoF("Skipped releases lookup as release %v is specifically requested with --release\n", mirrorCtx.SpecificVersion)
+			logger.InfoF("Skipped releases lookup as release %v is specifically requested with --release", mirrorCtx.SpecificVersion)
 			return nil
 		}
 
@@ -177,21 +186,21 @@ func pull(_ *cobra.Command, _ []string) error {
 		if err != nil {
 			return fmt.Errorf("Find versions to mirror: %w", err)
 		}
-		log.InfoF("Deckhouse releases to pull: %+v\n", versionsToMirror)
+		logger.InfoF("Deckhouse releases to pull: %+v", versionsToMirror)
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 
-	err = log.Process("mirror", "Pull images", func() error {
+	err = logger.Process("Pull images", func() error {
 		return PullDeckhouseToLocalFS(mirrorCtx, versionsToMirror)
 	})
 	if err != nil {
 		return err
 	}
 
-	err = log.Process("mirror", "Pack images", func() error {
+	err = logger.Process("Pack images", func() error {
 		return bundle.Pack(mirrorCtx)
 	})
 	if err != nil {
@@ -199,7 +208,7 @@ func pull(_ *cobra.Command, _ []string) error {
 	}
 
 	if mirrorCtx.DoGOSTDigests {
-		err = log.Process("mirror", "Compute GOST digest", func() error {
+		err = logger.Process("Compute GOST digest", func() error {
 			if err = computeGOSTDigest(&mirrorCtx.BaseContext); err != nil {
 				return fmt.Errorf("Compute GOST digest: %w", err)
 			}
@@ -253,7 +262,9 @@ func computeGOSTDigest(mirrorCtx *contexts.BaseContext) error {
 	if err = os.WriteFile(mirrorCtx.BundlePath+".gostsum", []byte(gostDigest), 0o666); err != nil {
 		return fmt.Errorf("Write GOST Checksum: %w", err)
 	}
-	log.InfoF("Digest: %s\nWritten to %s\n", gostDigest, mirrorCtx.BundlePath+".gostsum")
+
+	mirrorCtx.Logger.InfoF("Digest: %s", gostDigest)
+	mirrorCtx.Logger.InfoF("Written to %s", mirrorCtx.BundlePath+".gostsum")
 	return nil
 }
 
@@ -288,24 +299,25 @@ func PullDeckhouseToLocalFS(
 	pullCtx *contexts.PullContext,
 	versions []semver.Version,
 ) error {
+	logger := pullCtx.Logger
 	var err error
 	modulesData := make([]modules.Module, 0)
 
 	if !pullCtx.SkipModulesPull {
-		log.InfoF("Fetching Deckhouse external modules list...\t")
+		logger.InfoF("Fetching Deckhouse external modules list")
 		modulesData, err = modules.GetDeckhouseExternalModules(pullCtx)
 		if err != nil {
 			return fmt.Errorf("get Deckhouse modules: %w", err)
 		}
-		log.InfoLn("✅")
+		logger.InfoLn("✅")
 	}
 
-	log.InfoF("Creating OCI Image Layouts...\t")
+	logger.InfoF("Creating OCI Image Layouts")
 	imageLayouts, err := layouts.CreateOCIImageLayoutsForDeckhouse(pullCtx.UnpackedImagesPath, modulesData)
 	if err != nil {
 		return fmt.Errorf("create OCI Image Layouts: %w", err)
 	}
-	log.InfoLn("✅")
+	logger.InfoLn("Created OCI Image Layouts")
 
 	layouts.FillLayoutsWithBasicDeckhouseImages(pullCtx, imageLayouts, versions)
 	if err = imageLayouts.TagsResolver.ResolveTagsDigestsForImageLayouts(&pullCtx.BaseContext, imageLayouts); err != nil {
@@ -316,7 +328,7 @@ func PullDeckhouseToLocalFS(
 		return fmt.Errorf("pull installers: %w", err)
 	}
 
-	log.InfoF("Searching for Deckhouse built-in modules digests...\t")
+	logger.InfoF("Searching for Deckhouse built-in modules digests")
 	for imageTag := range imageLayouts.InstallImages {
 		digests, err := images.ExtractImageDigestsFromDeckhouseInstaller(pullCtx, imageTag, imageLayouts.Install)
 		if err != nil {
@@ -324,7 +336,7 @@ func PullDeckhouseToLocalFS(
 		}
 		maps.Copy(imageLayouts.DeckhouseImages, digests)
 	}
-	log.InfoLn("✅")
+	logger.InfoF("Found %d images", len(imageLayouts.DeckhouseImages))
 
 	if err = layouts.PullDeckhouseReleaseChannels(pullCtx, imageLayouts); err != nil {
 		return fmt.Errorf("pull release channels: %w", err)
@@ -332,30 +344,29 @@ func PullDeckhouseToLocalFS(
 
 	// We should not generate deckhousereleases.yaml manifest for single-release bundles
 	if pullCtx.SpecificVersion == nil {
-		log.InfoF("Generating DeckhouseRelease manifests...\t")
+		logger.InfoF("Generating DeckhouseRelease manifests")
 		deckhouseReleasesManifestFile := filepath.Join(filepath.Dir(pullCtx.BundlePath), "deckhousereleases.yaml")
 		if err = manifests.GenerateDeckhouseReleaseManifestsForVersions(versions, deckhouseReleasesManifestFile, imageLayouts.ReleaseChannel); err != nil {
 			return fmt.Errorf("Generate DeckhouseRelease manifests: %w", err)
 		}
-		log.InfoLn("✅")
 	}
 
 	if err = layouts.PullDeckhouseImages(pullCtx, imageLayouts); err != nil {
 		return fmt.Errorf("pull Deckhouse: %w", err)
 	}
 
-	log.InfoLn("Pulling Trivy vulnerability databases...\n")
+	logger.InfoLn("Pulling Trivy vulnerability databases")
 	if err = layouts.PullTrivyVulnerabilityDatabasesImages(pullCtx, imageLayouts); err != nil {
 		return fmt.Errorf("pull vulnerability database: %w", err)
 	}
-	log.InfoLn("Trivy vulnerability databases pulled")
+	logger.InfoLn("Trivy vulnerability databases pulled")
 
 	if !pullCtx.SkipModulesPull {
-		log.InfoF("Searching for Deckhouse external modules images...\t")
+		logger.InfoLn("Searching for Deckhouse external modules images")
 		if err = layouts.FindDeckhouseModulesImages(pullCtx, imageLayouts); err != nil {
 			return fmt.Errorf("find Deckhouse modules images: %w", err)
 		}
-		log.InfoLn("✅")
+
 		if err = layouts.PullModules(pullCtx, imageLayouts); err != nil {
 			return fmt.Errorf("pull Deckhouse modules: %w", err)
 		}

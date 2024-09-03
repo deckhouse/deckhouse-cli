@@ -18,6 +18,7 @@ package push
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -31,9 +32,10 @@ import (
 	"k8s.io/component-base/logs"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/layouts"
-	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/util/auth"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 )
 
 var pushLong = templates.LongDesc(`
@@ -78,6 +80,12 @@ var (
 )
 
 func push(_ *cobra.Command, _ []string) error {
+	logLevel := slog.LevelInfo
+	if log.DebugLogLevel() >= 3 {
+		logLevel = slog.LevelDebug
+	}
+	logger := log.NewSLogger(logLevel)
+
 	var authProvider authn.Authenticator = nil
 	if MirrorModulesRegistryUsername != "" {
 		authProvider = authn.FromConfig(authn.AuthConfig{
@@ -87,6 +95,7 @@ func push(_ *cobra.Command, _ []string) error {
 	}
 
 	return pushModulesToRegistry(
+		logger,
 		MirrorModulesDirectory,
 		MirrorModulesRegistry,
 		authProvider,
@@ -96,6 +105,7 @@ func push(_ *cobra.Command, _ []string) error {
 }
 
 func pushModulesToRegistry(
+	logger contexts.Logger,
 	modulesDir string,
 	registryPath string,
 	authProvider authn.Authenticator,
@@ -106,7 +116,7 @@ func pushModulesToRegistry(
 		return fmt.Errorf("Read modules directory: %w", err)
 	}
 
-	refOpts, remoteOpts := mirror.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
+	refOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
 
 	for i, entry := range dirEntries {
 		if !entry.IsDir() {
@@ -117,7 +127,7 @@ func pushModulesToRegistry(
 		moduleRegistryPath := path.Join(registryPath, moduleName)
 		moduleReleasesRegistryPath := path.Join(registryPath, moduleName, "release")
 
-		log.InfoF("Pushing module %s... [%d / %d]\n", moduleName, i+1, len(dirEntries))
+		logger.InfoF("Pushing module %s [%d / %d]", moduleName, i+1, len(dirEntries))
 
 		moduleLayout, err := layout.FromPath(filepath.Join(modulesDir, moduleName))
 		if err != nil {
@@ -128,16 +138,16 @@ func pushModulesToRegistry(
 			return fmt.Errorf("Module %s: Read OCI layout: %w", moduleName, err)
 		}
 
-		if err = layouts.PushLayoutToRepo(moduleLayout, moduleRegistryPath, authProvider, insecure, skipVerifyTLS); err != nil {
+		if err = layouts.PushLayoutToRepo(moduleLayout, moduleRegistryPath, authProvider, logger, insecure, skipVerifyTLS); err != nil {
 			return fmt.Errorf("Push module to registry: %w", err)
 		}
 
-		log.InfoF("Pushing releases for module %s...\n", moduleName)
-		if err = layouts.PushLayoutToRepo(moduleReleasesLayout, moduleReleasesRegistryPath, authProvider, insecure, skipVerifyTLS); err != nil {
+		logger.InfoF("Pushing releases for module %s", moduleName)
+		if err = layouts.PushLayoutToRepo(moduleReleasesLayout, moduleReleasesRegistryPath, authProvider, logger, insecure, skipVerifyTLS); err != nil {
 			return fmt.Errorf("Push module to registry: %w", err)
 		}
 
-		log.InfoF("Pushing index tag for module %s...\n", moduleName)
+		logger.InfoF("Pushing index tag for module %s", moduleName)
 
 		imageRef, err := name.ParseReference(registryPath+":"+moduleName, refOpts...)
 		if err != nil {
@@ -153,7 +163,7 @@ func pushModulesToRegistry(
 			return fmt.Errorf("Write module index tag: %w", err)
 		}
 
-		log.InfoF("✅Module %s pushed successfully\n", moduleName)
+		logger.InfoF("✅Module %s pushed successfully", moduleName)
 	}
 
 	return nil
