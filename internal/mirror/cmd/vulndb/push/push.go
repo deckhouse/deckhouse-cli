@@ -118,7 +118,6 @@ func push(_ *cobra.Command, _ []string) error {
 		}
 
 		logger.InfoLn("Repo", repo, "pushed successfully")
-		logger.InfoLn()
 	}
 
 	return nil
