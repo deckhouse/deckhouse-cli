@@ -30,8 +30,8 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/api/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/images"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/layouts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 )
 
 func GenerateDeckhouseReleaseManifestsForVersions(

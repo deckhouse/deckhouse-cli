@@ -29,8 +29,6 @@ import (
 	"github.com/spf13/cobra"
 
 	helm_v3 "github.com/werf/3p-helm/cmd/helm"
-	"github.com/werf/logboek/pkg/level"
-
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
 
@@ -38,8 +36,6 @@ import (
 	"github.com/werf/nelm/pkg/resrcchangcalc"
 	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
 	"github.com/werf/werf/v2/pkg/process_exterminator"
-
-	mirrorLog "github.com/deckhouse/deckhouse-cli/internal/mirror/util/log"
 )
 
 func ReplaceCommandName(from, to string, c *cobra.Command) *cobra.Command {
@@ -83,10 +79,6 @@ func Execute() {
 	werfcommon.EnableTerminationSignalsTrap()
 	log.SetOutput(logboek.OutStream())
 	logrus.StandardLogger().SetOutput(logboek.OutStream())
-	mirrorLog.InitLoggerWithOptions("pretty", mirrorLog.LoggerOptions{
-		OutStream: logboek.OutStream(),
-		IsDebug:   logboek.IsAcceptedLevel(level.Debug),
-	})
 
 	if err := process_exterminator.Init(); err != nil {
 		werfcommon.TerminateWithError(fmt.Sprintf("process exterminator initialization failed: %s", err), 1)

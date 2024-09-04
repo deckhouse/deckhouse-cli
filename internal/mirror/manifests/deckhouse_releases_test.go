@@ -31,7 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/yaml"
 
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/layouts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 )
 
 func TestGenerateDeckhouseReleaseManifests(t *testing.T) {

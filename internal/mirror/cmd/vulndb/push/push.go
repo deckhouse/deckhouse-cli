@@ -18,6 +18,7 @@ package push
 
 import (
 	"fmt"
+	"log/slog"
 	"path"
 	"path/filepath"
 
@@ -27,9 +28,9 @@ import (
 	"k8s.io/component-base/logs"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/contexts"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/layouts"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 )
 
 var pushLong = templates.LongDesc(`
@@ -72,8 +73,15 @@ var (
 )
 
 func push(_ *cobra.Command, _ []string) error {
+	logLevel := slog.LevelInfo
+	if log.DebugLogLevel() >= 3 {
+		logLevel = slog.LevelDebug
+	}
+	logger := log.NewSLogger(logLevel)
+
 	pushContext := &contexts.PushContext{
 		BaseContext: contexts.BaseContext{
+			Logger:                logger,
 			RegistryAuth:          getRegistryAuthProvider(),
 			RegistryHost:          RegistryHost,
 			RegistryPath:          RegistryPath,
@@ -90,7 +98,7 @@ func push(_ *cobra.Command, _ []string) error {
 	repoCount := 0
 	for repo, layoutPath := range layoutsPathsAndRepos {
 		repoCount++
-		log.InfoF("Pushing repo %d of %d at %s...\n", repoCount, len(layoutsPathsAndRepos), repo)
+		logger.InfoF("Pushing repo %d of %d at %s", repoCount, len(layoutsPathsAndRepos), repo)
 
 		ociLayout, err := layout.FromPath(layoutPath)
 		if err != nil {
@@ -101,6 +109,7 @@ func push(_ *cobra.Command, _ []string) error {
 			ociLayout,
 			repo,
 			pushContext.RegistryAuth,
+			pushContext.Logger,
 			pushContext.Insecure,
 			pushContext.SkipTLSVerification,
 		)
@@ -108,8 +117,7 @@ func push(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("failed to push vulnerability databases: %w", err)
 		}
 
-		log.InfoLn("Repo", repo, "pushed successfully")
-		log.InfoLn()
+		logger.InfoLn("Repo", repo, "pushed successfully")
 	}
 
 	return nil

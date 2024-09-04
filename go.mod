@@ -23,7 +23,7 @@ require (
 	go.cypherpunks.ru/gogost/v5 v5.13.0
 	golang.org/x/crypto v0.21.0
 	golang.org/x/exp v0.0.0-20240325151524-a685a6edb6d8
-	golang.org/x/sys v0.18.0
+	golang.org/x/sys v0.24.0
 	golang.org/x/term v0.18.0
 	golang.org/x/text v0.14.0
 	k8s.io/apimachinery v0.29.3
@@ -310,6 +310,7 @@ require (
 	github.com/xlab/treeprint v1.2.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/zclconf/go-cty v1.14.1 // indirect
+	gitlab.com/greyxor/slogor v1.2.11 // indirect
 	go.etcd.io/bbolt v1.3.9 // indirect
 	go.mongodb.org/mongo-driver v1.14.0 // indirect
 	go.mozilla.org/pkcs7 v0.0.0-20210826202110-33d05740a352 // indirect

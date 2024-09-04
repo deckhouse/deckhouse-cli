@@ -26,13 +26,13 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"golang.org/x/exp/maps"
 
-	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/contexts"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/images"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/auth"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/util/errorutil"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 )
 
-func VersionsToMirror(mirrorCtx *mirror.PullContext) ([]semver.Version, error) {
+func VersionsToMirror(mirrorCtx *contexts.PullContext) ([]semver.Version, error) {
 	releaseChannelsToCopy := []string{"alpha", "beta", "early-access", "stable", "rock-solid"}
 	releaseChannelsVersions := make([]*semver.Version, len(releaseChannelsToCopy))
 	for i, channel := range releaseChannelsToCopy {
@@ -70,7 +70,7 @@ func VersionsToMirror(mirrorCtx *mirror.PullContext) ([]semver.Version, error) {
 	return deduplicateVersions(append(releaseChannelsVersions, versionsAboveMinimal...)), nil
 }
 
-func getReleasedTagsFromRegistry(mirrorCtx *mirror.PullContext) ([]string, error) {
+func getReleasedTagsFromRegistry(mirrorCtx *contexts.PullContext) ([]string, error) {
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorContext(&mirrorCtx.BaseContext)
 	repo, err := name.NewRepository(mirrorCtx.DeckhouseRegistryRepo+"/release-channel", nameOpts...)
 	if err != nil {
@@ -117,7 +117,7 @@ func filterOnlyLatestPatches(versions []*semver.Version) []*semver.Version {
 	return topPatches
 }
 
-func getReleaseChannelVersionFromRegistry(mirrorCtx *mirror.PullContext, releaseChannel string) (*semver.Version, error) {
+func getReleaseChannelVersionFromRegistry(mirrorCtx *contexts.PullContext, releaseChannel string) (*semver.Version, error) {
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorContext(&mirrorCtx.BaseContext)
 	nameOpts = append(nameOpts, name.StrictValidation)
 
