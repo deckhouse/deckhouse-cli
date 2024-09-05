@@ -48,6 +48,20 @@ func PullInstallers(mirrorCtx *contexts.PullContext, layouts *ImageLayouts) erro
 	return nil
 }
 
+func PullInstallersStandalone(mirrorCtx *contexts.PullContext, layouts *ImageLayouts) error {
+	log.InfoLn("Beginning to pull installers")
+	if err := PullImageSet(
+		mirrorCtx,
+		layouts.InstallStandalone,
+		layouts.InstallStandaloneImages,
+		WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
+	); err != nil {
+		return err
+	}
+	log.InfoLn("✅ All required installers are pulled!")
+	return nil
+}
+
 func PullDeckhouseReleaseChannels(mirrorCtx *contexts.PullContext, layouts *ImageLayouts) error {
 	log.InfoLn("Beginning to pull Deckhouse release channels information")
 	if err := PullImageSet(
