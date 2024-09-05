@@ -1,0 +1,28 @@
+diff --git a/connectivity/check/deployment.go b/connectivity/check/deployment.go
+index 128bf772..259f0205 100644
+--- a/connectivity/check/deployment.go
++++ b/connectivity/check/deployment.go
+@@ -120,6 +120,11 @@ func newDeployment(p deploymentParameters) *appsv1.Deployment {
+ 	if p.Replicas == 0 {
+ 		p.Replicas = 1
+ 	}
++	if p.Tolerations == nil || len(p.Tolerations) == 0 {
++		p.Tolerations = []corev1.Toleration{
++			{Operator: corev1.TolerationOpExists},
++		}
++	}
+ 	replicas32 := int32(p.Replicas)
+ 	dep := &appsv1.Deployment{
+ 		ObjectMeta: metav1.ObjectMeta{
+@@ -243,6 +248,11 @@ type daemonSetParameters struct {
+ }
+
+ func newDaemonSet(p daemonSetParameters) *appsv1.DaemonSet {
++	if p.Tolerations == nil || len(p.Tolerations) == 0 {
++		p.Tolerations = []corev1.Toleration{
++			{Operator: corev1.TolerationOpExists},
++		}
++	}
+ 	ds := &appsv1.DaemonSet{
+ 		ObjectMeta: metav1.ObjectMeta{
+ 			Name: p.Name,

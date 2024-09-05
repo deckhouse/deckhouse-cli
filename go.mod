@@ -4,6 +4,7 @@ go 1.22.0
 
 require (
 	github.com/Masterminds/semver/v3 v3.2.1
+	github.com/cilium/cilium-cli v0.15.22
 	github.com/deckhouse/virtualization/api v0.0.0-20240326113112-979c4f4f17b9
 	github.com/google/go-containerregistry v0.19.1
 	github.com/gookit/color v1.5.4
@@ -14,7 +15,7 @@ require (
 	github.com/samber/lo v1.39.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.8.0
-	github.com/spf13/pflag v1.0.5
+	github.com/spf13/pflag v1.0.6-0.20210604193023-d5e0c0615ace
 	github.com/stretchr/testify v1.9.0
 	github.com/werf/3p-helm v0.0.0-20240806141915-3137f4cc1557
 	github.com/werf/logboek v0.6.1
@@ -129,7 +130,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.11.2 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
-	github.com/evanphx/json-patch v5.8.0+incompatible // indirect
+	github.com/evanphx/json-patch v5.9.0+incompatible // indirect
 	github.com/exponent-io/jsonpath v0.0.0-20210407135951-1de76d718b3f // indirect
 	github.com/fatih/camelcase v1.0.0 // indirect
 	github.com/fatih/color v1.16.0 // indirect
@@ -297,7 +298,7 @@ require (
 	github.com/ulikunitz/xz v0.5.11 // indirect
 	github.com/vbatts/tar-split v0.11.5 // indirect
 	github.com/vbauerster/mpb/v8 v8.7.2 // indirect
-	github.com/vishvananda/netlink v1.2.1-beta.2 // indirect
+	github.com/vishvananda/netlink v1.2.1-beta.2.0.20231127184239-0ced8385386a // indirect
 	github.com/vishvananda/netns v0.0.4 // indirect
 	github.com/wI2L/jsondiff v0.5.0 // indirect
 	github.com/werf/copy-recurse v0.2.7 // indirect

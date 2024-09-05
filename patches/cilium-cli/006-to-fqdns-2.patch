@@ -1,0 +1,32 @@
+diff --git a/connectivity/suite.go b/connectivity/suite.go
+index dbccd881..8e976089 100644
+--- a/connectivity/suite.go
++++ b/connectivity/suite.go
+@@ -1163,12 +1163,12 @@ func Run(ctx context.Context, ct *check.ConnectivityTest, extra Hooks) error {
+ 			tests.PodToWorld2(), // resolves cilium.io
+ 		).
+ 		WithExpectations(func(a *check.Action) (egress, ingress check.Result) {
+-			if a.Destination().Address(features.IPFamilyAny) == "cilium.io" {
++			if a.Destination().Address(features.IPFamilyAny) == "cilium.io." {
+ 				if a.Destination().Path() == "/" || a.Destination().Path() == "" {
+ 					egress = check.ResultDNSOK
+ 					egress.HTTP = check.HTTP{
+ 						Method: "GET",
+-						URL:    "https://cilium.io",
++						URL:    "https://cilium.io.",
+ 					}
+ 					// Expect packets for cilium.io / 104.198.14.52 to be dropped.
+ 					return check.ResultDropCurlTimeout, check.ResultNone
+diff --git a/connectivity/tests/world.go b/connectivity/tests/world.go
+index 3da51983..23be7214 100644
+--- a/connectivity/tests/world.go
++++ b/connectivity/tests/world.go
+@@ -86,7 +86,7 @@ func (s *podToWorld2) Name() string {
+ }
+
+ func (s *podToWorld2) Run(ctx context.Context, t *check.Test) {
+-	https := check.HTTPEndpoint("cilium-io-https", "https://cilium.io")
++	https := check.HTTPEndpoint("cilium-io-https", "https://cilium.io.")
+
+ 	fp := check.FlowParameters{
+ 		DNSRequired: true,
