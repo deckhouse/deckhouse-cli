@@ -73,7 +73,7 @@ func VersionsToMirror(mirrorCtx *mirror.PullContext) ([]semver.Version, error) {
 
 func getReleasedTagsFromRegistry(mirrorCtx *mirror.PullContext) ([]string, error) {
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorContext(&mirrorCtx.BaseContext)
-	repo, err := name.NewRepository(mirrorCtx.DeckhouseRegistryRepo+"/release-channel", nameOpts...)
+	repo, err := name.NewRepository(mirrorCtx.DeckhouseRegistryRepo+"/install-standalone", nameOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("parsing repo: %v", err)
 	}
