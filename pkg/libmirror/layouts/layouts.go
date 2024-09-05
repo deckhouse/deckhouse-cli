@@ -46,6 +46,9 @@ type ImageLayouts struct {
 	Install       layout.Path
 	InstallImages map[string]struct{}
 
+	InstallStandalone       layout.Path
+	InstallStandaloneImages map[string]struct{}
+
 	ReleaseChannel       layout.Path
 	ReleaseChannelImages map[string]struct{}
 
@@ -80,12 +83,13 @@ func CreateOCIImageLayoutsForDeckhouse(
 	}
 
 	fsPaths := map[*layout.Path]string{
-		&layouts.Deckhouse:      rootFolder,
-		&layouts.Install:        filepath.Join(rootFolder, "install"),
-		&layouts.ReleaseChannel: filepath.Join(rootFolder, "release-channel"),
-		&layouts.TrivyDB:        filepath.Join(rootFolder, "security", "trivy-db"),
-		&layouts.TrivyBDU:       filepath.Join(rootFolder, "security", "trivy-bdu"),
-		&layouts.TrivyJavaDB:    filepath.Join(rootFolder, "security", "trivy-java-db"),
+		&layouts.Deckhouse:         rootFolder,
+		&layouts.Install:           filepath.Join(rootFolder, "install"),
+		&layouts.InstallStandalone: filepath.Join(rootFolder, "install-standalone"),
+		&layouts.ReleaseChannel:    filepath.Join(rootFolder, "release-channel"),
+		&layouts.TrivyDB:           filepath.Join(rootFolder, "security", "trivy-db"),
+		&layouts.TrivyBDU:          filepath.Join(rootFolder, "security", "trivy-bdu"),
+		&layouts.TrivyJavaDB:       filepath.Join(rootFolder, "security", "trivy-java-db"),
 	}
 	for layoutPtr, fsPath := range fsPaths {
 		*layoutPtr, err = CreateEmptyImageLayoutAtPath(fsPath)
@@ -173,6 +177,7 @@ func FillLayoutsWithBasicDeckhouseImages(
 ) {
 	layouts.DeckhouseImages = map[string]struct{}{}
 	layouts.InstallImages = map[string]struct{}{}
+	layouts.InstallStandaloneImages = map[string]struct{}{}
 	layouts.ReleaseChannelImages = map[string]struct{}{}
 	layouts.TrivyDBImages = map[string]struct{}{
 		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-db:2":      {},
@@ -183,6 +188,7 @@ func FillLayoutsWithBasicDeckhouseImages(
 	for _, version := range deckhouseVersions {
 		layouts.DeckhouseImages[fmt.Sprintf("%s:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
 		layouts.InstallImages[fmt.Sprintf("%s/install:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
+		layouts.InstallStandaloneImages[fmt.Sprintf("%s/install-standalone:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
 		layouts.ReleaseChannelImages[fmt.Sprintf("%s/release-channel:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
 	}
 
@@ -202,6 +208,12 @@ func FillLayoutsWithBasicDeckhouseImages(
 	layouts.InstallImages[mirrorCtx.DeckhouseRegistryRepo+"/install:early-access"] = struct{}{}
 	layouts.InstallImages[mirrorCtx.DeckhouseRegistryRepo+"/install:stable"] = struct{}{}
 	layouts.InstallImages[mirrorCtx.DeckhouseRegistryRepo+"/install:rock-solid"] = struct{}{}
+
+	layouts.InstallStandaloneImages[mirrorCtx.DeckhouseRegistryRepo+"/install-standalone:alpha"] = struct{}{}
+	layouts.InstallStandaloneImages[mirrorCtx.DeckhouseRegistryRepo+"/install-standalone:beta"] = struct{}{}
+	layouts.InstallStandaloneImages[mirrorCtx.DeckhouseRegistryRepo+"/install-standalone:early-access"] = struct{}{}
+	layouts.InstallStandaloneImages[mirrorCtx.DeckhouseRegistryRepo+"/install-standalone:stable"] = struct{}{}
+	layouts.InstallStandaloneImages[mirrorCtx.DeckhouseRegistryRepo+"/install-standalone:rock-solid"] = struct{}{}
 
 	layouts.ReleaseChannelImages[mirrorCtx.DeckhouseRegistryRepo+"/release-channel:alpha"] = struct{}{}
 	layouts.ReleaseChannelImages[mirrorCtx.DeckhouseRegistryRepo+"/release-channel:beta"] = struct{}{}

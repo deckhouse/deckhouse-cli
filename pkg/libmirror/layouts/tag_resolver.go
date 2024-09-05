@@ -48,6 +48,7 @@ func (r *TagsResolver) ResolveTagsDigestsForImageLayouts(mirrorCtx *contexts.Bas
 		layouts.DeckhouseImages,
 		layouts.ReleaseChannelImages,
 		layouts.InstallImages,
+		layouts.InstallStandaloneImages,
 	}
 
 	for _, moduleImageLayout := range layouts.Modules {

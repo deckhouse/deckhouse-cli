@@ -137,6 +137,7 @@ func pushModulesTags(mirrorCtx *contexts.BaseContext, modulesList []string) erro
 func findLayoutsToPush(mirrorCtx *contexts.PushContext) (map[string]layout.Path, []string, error) {
 	deckhouseIndexRef := mirrorCtx.RegistryHost + mirrorCtx.RegistryPath
 	installersIndexRef := path.Join(deckhouseIndexRef, "install")
+	installersStandaloneIndexRef := path.Join(deckhouseIndexRef, "install-standalone")
 	releasesIndexRef := path.Join(deckhouseIndexRef, "release-channel")
 	trivyDBIndexRef := path.Join(deckhouseIndexRef, "security", "trivy-db")
 	trivyBDUIndexRef := path.Join(deckhouseIndexRef, "security", "trivy-bdu")
@@ -144,6 +145,7 @@ func findLayoutsToPush(mirrorCtx *contexts.PushContext) (map[string]layout.Path,
 
 	deckhouseLayoutPath := mirrorCtx.UnpackedImagesPath
 	installersLayoutPath := filepath.Join(mirrorCtx.UnpackedImagesPath, "install")
+	installersStandaloneLayoutPath := filepath.Join(mirrorCtx.UnpackedImagesPath, "install-standalone")
 	releasesLayoutPath := filepath.Join(mirrorCtx.UnpackedImagesPath, "release-channel")
 	trivyDBLayoutPath := filepath.Join(mirrorCtx.UnpackedImagesPath, "security", "trivy-db")
 	trivyBDULayoutPath := filepath.Join(mirrorCtx.UnpackedImagesPath, "security", "trivy-bdu")
@@ -154,6 +156,10 @@ func findLayoutsToPush(mirrorCtx *contexts.PushContext) (map[string]layout.Path,
 		return nil, nil, err
 	}
 	installersLayout, err := layout.FromPath(installersLayoutPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	installersStandaloneLayout, err := layout.FromPath(installersStandaloneLayoutPath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -176,12 +182,13 @@ func findLayoutsToPush(mirrorCtx *contexts.PushContext) (map[string]layout.Path,
 
 	modulesPath := filepath.Join(mirrorCtx.UnpackedImagesPath, "modules")
 	ociLayouts := map[string]layout.Path{
-		deckhouseIndexRef:   deckhouseLayout,
-		installersIndexRef:  installersLayout,
-		releasesIndexRef:    releasesLayout,
-		trivyDBIndexRef:     trivyDBLayout,
-		trivyBDUIndexRef:    trivyBDULayout,
-		trivyJavaDBIndexRef: trivyJavaDBLayout,
+		deckhouseIndexRef:            deckhouseLayout,
+		installersIndexRef:           installersLayout,
+		installersStandaloneIndexRef: installersStandaloneLayout,
+		releasesIndexRef:             releasesLayout,
+		trivyDBIndexRef:              trivyDBLayout,
+		trivyBDUIndexRef:             trivyBDULayout,
+		trivyJavaDBIndexRef:          trivyJavaDBLayout,
 	}
 
 	modulesNames := make([]string, 0)
