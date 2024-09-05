@@ -33,7 +33,8 @@ import (
 )
 
 func VersionsToMirror(mirrorCtx *mirror.PullContext) ([]semver.Version, error) {
-	releaseChannelsToCopy := []string{"alpha", "beta", "early-access", "stable", "rock-solid"}
+	//releaseChannelsToCopy := []string{"alpha", "beta", "early-access", "stable", "rock-solid"}
+	releaseChannelsToCopy := []string{"main"}
 	releaseChannelsVersions := make([]*semver.Version, len(releaseChannelsToCopy))
 	for i, channel := range releaseChannelsToCopy {
 		v, err := getReleaseChannelVersionFromRegistry(mirrorCtx, channel)
