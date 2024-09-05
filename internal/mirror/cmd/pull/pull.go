@@ -146,7 +146,7 @@ func pull(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	accessValidationTag := "alpha"
+	accessValidationTag := "main"
 	if mirrorCtx.SpecificVersion != nil {
 		major := mirrorCtx.SpecificVersion.Major()
 		minor := mirrorCtx.SpecificVersion.Minor()
