@@ -189,6 +189,12 @@ func createDeckhouseControllersAndInstallersInRegistry(t *testing.T, repo string
 
 		err = remote.Write(ref, installer, remoteOpts...)
 		require.NoError(t, err)
+
+		ref, err = name.ParseReference(repo+"/install-standalone:"+shortTag, nameOpts...)
+		require.NoError(t, err)
+
+		err = remote.Write(ref, installer, remoteOpts...)
+		require.NoError(t, err)
 	}
 }
 

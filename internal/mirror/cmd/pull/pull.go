@@ -328,6 +328,10 @@ func PullDeckhouseToLocalFS(
 		return fmt.Errorf("pull installers: %w", err)
 	}
 
+	if err = layouts.PullStandaloneInstallers(pullCtx, imageLayouts); err != nil {
+		return fmt.Errorf("pull standalone installers: %w", err)
+	}
+
 	logger.InfoF("Searching for Deckhouse built-in modules digests")
 	for imageTag := range imageLayouts.InstallImages {
 		digests, err := images.ExtractImageDigestsFromDeckhouseInstaller(pullCtx, imageTag, imageLayouts.Install)
