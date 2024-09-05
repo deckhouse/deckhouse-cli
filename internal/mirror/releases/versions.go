@@ -122,7 +122,7 @@ func getReleaseChannelVersionFromRegistry(mirrorCtx *mirror.PullContext, release
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorContext(&mirrorCtx.BaseContext)
 	nameOpts = append(nameOpts, name.StrictValidation)
 
-	ref, err := name.ParseReference(mirrorCtx.DeckhouseRegistryRepo+"/release-channel:"+releaseChannel, nameOpts...)
+	ref, err := name.ParseReference(mirrorCtx.DeckhouseRegistryRepo+"/install-standalone:"+releaseChannel, nameOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("parse rock solid release ref: %w", err)
 	}
