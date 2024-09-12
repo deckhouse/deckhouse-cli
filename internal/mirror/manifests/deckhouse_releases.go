@@ -23,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Masterminds/semver/v3"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,8 +33,8 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 )
 
-func GenerateDeckhouseReleaseManifestsForVersions(
-	versionsToMirror []semver.Version,
+func GenerateDeckhouseReleaseManifestsForVersion(
+	versionToMirror string,
 	pathToManifestYAML string,
 	releaseChannelsImagesLayout layout.Path,
 ) error {
@@ -44,20 +43,18 @@ func GenerateDeckhouseReleaseManifestsForVersions(
 	// I have no scientific reasoning to back this up.
 	manifests := &bytes.Buffer{}
 	manifests.Grow(4 * 1024)
-	for _, version := range versionsToMirror {
-		versionReleaseImage, err := layouts.FindImageByTag(releaseChannelsImagesLayout, "v"+version.String())
-		releaseData, err := extractReleaseInfoForDeckhouseRelease(versionReleaseImage)
-		if err != nil {
-			return fmt.Errorf("Build manifest for version %q: %w", version, err)
-		}
-
-		releaseManifest, err := generateDeckhouseRelease(version, releaseData)
-		if err != nil {
-			return fmt.Errorf("Build manifest for version %q: %w", version, err)
-		}
-
-		manifests.Write(releaseManifest)
+	versionReleaseImage, err := layouts.FindImageByTag(releaseChannelsImagesLayout, "v"+versionToMirror)
+	releaseData, err := extractReleaseInfoForDeckhouseRelease(versionReleaseImage)
+	if err != nil {
+		return fmt.Errorf("Build manifest for version %q: %w", versionToMirror, err)
 	}
+
+	releaseManifest, err := generateDeckhouseRelease(versionToMirror, releaseData)
+	if err != nil {
+		return fmt.Errorf("Build manifest for version %q: %w", versionToMirror, err)
+	}
+
+	manifests.Write(releaseManifest)
 
 	if err := os.MkdirAll(filepath.Dir(pathToManifestYAML), 0o775); err != nil {
 		return fmt.Errorf("Create DeckhouseReleases manifest file: %w", err)
@@ -81,13 +78,13 @@ func GenerateDeckhouseReleaseManifestsForVersions(
 	return nil
 }
 
-func generateDeckhouseRelease(version semver.Version, releaseInfo *releaseInfo) ([]byte, error) {
+func generateDeckhouseRelease(version string, releaseInfo *releaseInfo) ([]byte, error) {
 	const githubReleaseChangelogLinkBase = "https://github.com/deckhouse/deckhouse/releases/tag"
-	versionTag := "v" + version.String()
+	versionTag := "v" + version
 
 	var disruptions []string
 	if len(releaseInfo.Disruptions) > 0 {
-		disruptionsVersion := fmt.Sprintf("%d.%d", version.Major(), version.Minor())
+		disruptionsVersion := version
 		disruptions = releaseInfo.Disruptions[disruptionsVersion]
 	}
 

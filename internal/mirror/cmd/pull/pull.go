@@ -26,7 +26,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/spf13/cobra"
 	"golang.org/x/exp/maps"
@@ -35,7 +34,6 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/gostsums"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/manifests"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
@@ -97,11 +95,7 @@ var (
 	ImagesBundlePath        string
 	ImagesBundleChunkSizeGB int64
 
-	minVersionString string
-	MinVersion       *semver.Version
-
-	specificReleaseString string
-	SpecificRelease       *semver.Version
+	Version string
 
 	SourceRegistryRepo     = enterpriseEditionRepo // Fallback to EE if nothing was given as source.
 	SourceRegistryLogin    string
@@ -139,8 +133,7 @@ func buildPullContext() *contexts.PullContext {
 
 		DoGOSTDigests:   DoGOSTDigest,
 		SkipModulesPull: NoModules,
-		SpecificVersion: SpecificRelease,
-		MinVersion:      MinVersion,
+		Version:         Version,
 	}
 	return mirrorCtx
 }
@@ -155,15 +148,8 @@ func pull(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	accessValidationTag := "alpha"
-	if mirrorCtx.SpecificVersion != nil {
-		major := mirrorCtx.SpecificVersion.Major()
-		minor := mirrorCtx.SpecificVersion.Minor()
-		patch := mirrorCtx.SpecificVersion.Patch()
-		accessValidationTag = fmt.Sprintf("v%d.%d.%d", major, minor, patch)
-	}
 	if err := auth.ValidateReadAccessForImage(
-		mirrorCtx.DeckhouseRegistryRepo+":"+accessValidationTag,
+		mirrorCtx.DeckhouseRegistryRepo+":"+Version,
 		mirrorCtx.RegistryAuth,
 		mirrorCtx.Insecure,
 		mirrorCtx.SkipTLSVerification,
@@ -173,28 +159,8 @@ func pull(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	var versionsToMirror []semver.Version
-	var err error
-	err = logger.Process("Looking for required Deckhouse releases", func() error {
-		if mirrorCtx.SpecificVersion != nil {
-			versionsToMirror = append(versionsToMirror, *mirrorCtx.SpecificVersion)
-			logger.InfoF("Skipped releases lookup as release %v is specifically requested with --release", mirrorCtx.SpecificVersion)
-			return nil
-		}
-
-		versionsToMirror, err = releases.VersionsToMirror(mirrorCtx)
-		if err != nil {
-			return fmt.Errorf("Find versions to mirror: %w", err)
-		}
-		logger.InfoF("Deckhouse releases to pull: %+v", versionsToMirror)
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	err = logger.Process("Pull images", func() error {
-		return PullDeckhouseToLocalFS(mirrorCtx, versionsToMirror)
+	err := logger.Process("Pull images", func() error {
+		return PullDeckhouseToLocalFS(mirrorCtx, Version)
 	})
 	if err != nil {
 		return err
@@ -297,7 +263,7 @@ func getSourceRegistryAuthProvider() authn.Authenticator {
 
 func PullDeckhouseToLocalFS(
 	pullCtx *contexts.PullContext,
-	versions []semver.Version,
+	version string,
 ) error {
 	logger := pullCtx.Logger
 	var err error
@@ -319,7 +285,7 @@ func PullDeckhouseToLocalFS(
 	}
 	logger.InfoLn("Created OCI Image Layouts")
 
-	layouts.FillLayoutsWithBasicDeckhouseImages(pullCtx, imageLayouts, versions)
+	layouts.FillLayoutsWithBasicDeckhouseImages(pullCtx, imageLayouts, version)
 	if err = imageLayouts.TagsResolver.ResolveTagsDigestsForImageLayouts(&pullCtx.BaseContext, imageLayouts); err != nil {
 		return fmt.Errorf("Resolve images tags to digests: %w", err)
 	}
@@ -343,10 +309,10 @@ func PullDeckhouseToLocalFS(
 	}
 
 	// We should not generate deckhousereleases.yaml manifest for single-release bundles
-	if pullCtx.SpecificVersion == nil {
+	if pullCtx.Version == "" {
 		logger.InfoF("Generating DeckhouseRelease manifests")
 		deckhouseReleasesManifestFile := filepath.Join(filepath.Dir(pullCtx.BundlePath), "deckhousereleases.yaml")
-		if err = manifests.GenerateDeckhouseReleaseManifestsForVersions(versions, deckhouseReleasesManifestFile, imageLayouts.ReleaseChannel); err != nil {
+		if err = manifests.GenerateDeckhouseReleaseManifestsForVersion(version, deckhouseReleasesManifestFile, imageLayouts.ReleaseChannel); err != nil {
 			return fmt.Errorf("Generate DeckhouseRelease manifests: %w", err)
 		}
 	}

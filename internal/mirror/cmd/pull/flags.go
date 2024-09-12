@@ -48,18 +48,11 @@ func addFlags(flagSet *pflag.FlagSet) {
 		os.Getenv("D8_MIRROR_LICENSE_TOKEN"),
 		"Deckhouse license key. Shortcut for --source-login=license-token --source-password=<>.",
 	)
-	flagSet.StringVarP(
-		&minVersionString,
-		"min-version",
-		"m",
-		"",
-		"Minimal Deckhouse release to copy. Ignored if above current Rock Solid release. Conflicts with --release.",
-	)
 	flagSet.StringVar(
-		&specificReleaseString,
-		"release",
+		&Version,
+		"version",
 		"",
-		"Specific Deckhouse release to copy. Conflicts with --min-version. WARNING!: Clusters installed with this option will not be able to automatically update due to lack of release-channels information in bundle and, as such, will require special attention and manual intervention during updates.",
+		"Specific Deckhouse version to copy.",
 	)
 	flagSet.Int64VarP(
 		&ImagesBundleChunkSizeGB,

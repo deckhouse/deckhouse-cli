@@ -32,44 +32,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 )
 
-func VersionsToMirror(mirrorCtx *contexts.PullContext) ([]semver.Version, error) {
-	releaseChannelsToCopy := []string{"alpha", "beta", "early-access", "stable", "rock-solid"}
-	releaseChannelsVersions := make([]*semver.Version, len(releaseChannelsToCopy))
-	for i, channel := range releaseChannelsToCopy {
-		v, err := getReleaseChannelVersionFromRegistry(mirrorCtx, channel)
-		if err != nil {
-			return nil, fmt.Errorf("get %s release version from registry: %w", channel, err)
-		}
-		releaseChannelsVersions[i] = v
-	}
-
-	rockSolidVersion := releaseChannelsVersions[len(releaseChannelsToCopy)-1]
-	mirrorFromVersion := *rockSolidVersion
-	if mirrorCtx.MinVersion != nil {
-		mirrorFromVersion = *mirrorCtx.MinVersion
-		if rockSolidVersion.LessThan(mirrorCtx.MinVersion) {
-			mirrorFromVersion = *rockSolidVersion
-		}
-	}
-
-	tags, err := getReleasedTagsFromRegistry(mirrorCtx)
-	if err != nil {
-		return nil, fmt.Errorf("get releases from github: %w", err)
-	}
-
-	alphaChannelVersion := releaseChannelsVersions[0]
-	for i := range releaseChannelsToCopy {
-		if releaseChannelsToCopy[i] == "alpha" {
-			alphaChannelVersion = releaseChannelsVersions[i]
-			break
-		}
-	}
-	versionsAboveMinimal := parseAndFilterVersionsAboveMinimalAnbBelowAlpha(&mirrorFromVersion, tags, alphaChannelVersion)
-	versionsAboveMinimal = filterOnlyLatestPatches(versionsAboveMinimal)
-
-	return deduplicateVersions(append(releaseChannelsVersions, versionsAboveMinimal...)), nil
-}
-
 func getReleasedTagsFromRegistry(mirrorCtx *contexts.PullContext) ([]string, error) {
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorContext(&mirrorCtx.BaseContext)
 	repo, err := name.NewRepository(mirrorCtx.DeckhouseRegistryRepo+"/release-channel", nameOpts...)

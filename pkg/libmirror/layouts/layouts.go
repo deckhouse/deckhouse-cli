@@ -25,7 +25,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
@@ -169,7 +168,7 @@ type ociLayout struct {
 func FillLayoutsWithBasicDeckhouseImages(
 	mirrorCtx *contexts.PullContext,
 	layouts *ImageLayouts,
-	deckhouseVersions []semver.Version,
+	deckhouseVersion string,
 ) {
 	layouts.DeckhouseImages = map[string]struct{}{}
 	layouts.InstallImages = map[string]struct{}{}
@@ -180,14 +179,12 @@ func FillLayoutsWithBasicDeckhouseImages(
 		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-java-db:1": {},
 	}
 
-	for _, version := range deckhouseVersions {
-		layouts.DeckhouseImages[fmt.Sprintf("%s:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
-		layouts.InstallImages[fmt.Sprintf("%s/install:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
-		layouts.ReleaseChannelImages[fmt.Sprintf("%s/release-channel:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
-	}
+	layouts.DeckhouseImages[fmt.Sprintf("%s:%s", mirrorCtx.DeckhouseRegistryRepo, deckhouseVersion)] = struct{}{}
+	layouts.InstallImages[fmt.Sprintf("%s/install:%s", mirrorCtx.DeckhouseRegistryRepo, deckhouseVersion)] = struct{}{}
+	layouts.ReleaseChannelImages[fmt.Sprintf("%s/release-channel:%s", mirrorCtx.DeckhouseRegistryRepo, deckhouseVersion)] = struct{}{}
 
 	// If we are to pull only the specific requested version, we should not pull any release channels at all.
-	if mirrorCtx.SpecificVersion != nil {
+	if mirrorCtx.Version != "" {
 		return
 	}
 

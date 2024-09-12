@@ -16,10 +16,6 @@ limitations under the License.
 
 package contexts
 
-import (
-	"github.com/Masterminds/semver/v3"
-)
-
 // PullContext holds data related to pending mirroring-from-registry operation.
 type PullContext struct {
 	BaseContext
@@ -29,6 +25,5 @@ type PullContext struct {
 	BundleChunkSize int64 // Plain bytes
 
 	// Only one of those 2 is filled at a single time or none at all.
-	MinVersion      *semver.Version // --min-version
-	SpecificVersion *semver.Version // --release
+	Version string
 }

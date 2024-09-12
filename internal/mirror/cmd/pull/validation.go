@@ -23,15 +23,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/spf13/cobra"
 )
 
 func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 	var err error
-	if err = parseAndValidateVersionFlags(); err != nil {
-		return err
-	}
 	if err = validateImagesBundlePathArg(args); err != nil {
 		return err
 	}
@@ -65,28 +61,6 @@ func validateImagesBundlePathArg(args []string) error {
 		return err
 	case stats.IsDir() || filepath.Ext(ImagesBundlePath) != ".tar":
 		return fmt.Errorf("%s should be a tar archive", ImagesBundlePath)
-	}
-	return nil
-}
-
-func parseAndValidateVersionFlags() error {
-	if minVersionString != "" && specificReleaseString != "" {
-		return errors.New("Using both --release and --min-version at the same time is ambiguous.")
-	}
-
-	var err error
-	if minVersionString != "" {
-		MinVersion, err = semver.NewVersion(minVersionString)
-		if err != nil {
-			return fmt.Errorf("Parse minimal deckhouse version: %w", err)
-		}
-	}
-
-	if specificReleaseString != "" {
-		SpecificRelease, err = semver.NewVersion(specificReleaseString)
-		if err != nil {
-			return fmt.Errorf("Parse required deckhouse version: %w", err)
-		}
 	}
 	return nil
 }
