@@ -44,7 +44,7 @@ func PullInstallers(mirrorCtx *contexts.PullContext, layouts *ImageLayouts) erro
 	); err != nil {
 		return err
 	}
-	mirrorCtx.Logger.InfoLn("✅ All required installers are pulled!")
+	mirrorCtx.Logger.InfoLn("All required installers are pulled!")
 	return nil
 }
 
@@ -59,7 +59,7 @@ func PullDeckhouseReleaseChannels(mirrorCtx *contexts.PullContext, layouts *Imag
 	); err != nil {
 		return err
 	}
-	mirrorCtx.Logger.InfoLn("✅ Deckhouse release channels are pulled!")
+	mirrorCtx.Logger.InfoLn("Deckhouse release channels are pulled!")
 	return nil
 }
 
@@ -73,7 +73,7 @@ func PullDeckhouseImages(mirrorCtx *contexts.PullContext, layouts *ImageLayouts)
 	); err != nil {
 		return err
 	}
-	mirrorCtx.Logger.InfoLn("✅ All required Deckhouse images are pulled!")
+	mirrorCtx.Logger.InfoLn("All required Deckhouse images are pulled!")
 	return nil
 }
 
@@ -98,7 +98,7 @@ func PullModules(mirrorCtx *contexts.PullContext, layouts *ImageLayouts) error {
 			return fmt.Errorf("pull %q module release information: %w", moduleName, err)
 		}
 	}
-	mirrorCtx.Logger.InfoLn("✅ Deckhouse modules pulled!")
+	mirrorCtx.Logger.InfoLn("Deckhouse modules pulled!")
 	return nil
 }
 

@@ -163,7 +163,7 @@ func pushModulesToRegistry(
 			return fmt.Errorf("Write module index tag: %w", err)
 		}
 
-		logger.InfoF("✅Module %s pushed successfully", moduleName)
+		logger.InfoF("Module %s pushed successfully", moduleName)
 	}
 
 	return nil
