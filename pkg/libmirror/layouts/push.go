@@ -17,7 +17,10 @@ limitations under the License.
 package layouts
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -26,7 +29,12 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
 )
+
+var ErrEmptyLayout = errors.New("No images in layout")
 
 func PushLayoutToRepo(
 	imagesLayout layout.Path,
@@ -46,12 +54,15 @@ func PushLayoutToRepo(
 		return fmt.Errorf("Parse OCI Image Index Manifest: %w", err)
 	}
 
+	if len(indexManifest.Manifests) == 0 {
+		return fmt.Errorf("%s: %w", registryRepo, ErrEmptyLayout)
+	}
+
 	pushCount := 1
 	for _, imageDesc := range indexManifest.Manifests {
 		tag := imageDesc.Annotations["io.deckhouse.image.short_tag"]
 		imageRef := registryRepo + ":" + tag
 
-		logger.InfoF("[%d / %d] Pushing image %s ", pushCount, len(indexManifest.Manifests), imageRef)
 		img, err := index.Image(imageDesc.Digest)
 		if err != nil {
 			return fmt.Errorf("Read image: %w", err)
@@ -61,10 +72,24 @@ func PushLayoutToRepo(
 		if err != nil {
 			return fmt.Errorf("Parse image reference: %w", err)
 		}
-		if err = remote.Write(ref, img, remoteOpts...); err != nil {
-			return fmt.Errorf("Write %s to registry: %w", ref.String(), err)
+
+		err = retry.RunTask(
+			logger,
+			fmt.Sprintf("[%d / %d] Pushing image %s ", pushCount, len(indexManifest.Manifests), imageRef),
+			task.WithConstantRetries(19, 3*time.Second, func() error {
+				if err = remote.Write(ref, img, remoteOpts...); err != nil {
+					if errorutil.IsTrivyMediaTypeNotAllowedError(err) {
+						logger.WarnLn(errorutil.CustomTrivyMediaTypesWarning)
+						os.Exit(1)
+					}
+					return fmt.Errorf("Write %s to registry: %w", ref.String(), err)
+				}
+				return nil
+			}))
+		if err != nil {
+			return fmt.Errorf("Push image: %w", err)
 		}
-		logger.InfoLn("✅")
+
 		pushCount += 1
 	}
 

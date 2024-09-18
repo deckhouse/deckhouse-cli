@@ -69,13 +69,6 @@ func NewCommand() *cobra.Command {
 	return pushCmd
 }
 
-const (
-	deckhouseRegistryHost     = "registry.deckhouse.io"
-	enterpriseEditionRepoPath = "/deckhouse/ee"
-
-	enterpriseEditionRepo = deckhouseRegistryHost + enterpriseEditionRepoPath
-)
-
 var (
 	TempDir = filepath.Join(os.TempDir(), "mirror")
 
@@ -83,8 +76,6 @@ var (
 	RegistryPath     string
 	RegistryUsername string
 	RegistryPassword string
-
-	SourceRegistryRepo = enterpriseEditionRepo
 
 	Insecure         bool
 	TLSSkipVerify    bool
@@ -148,14 +139,13 @@ func buildPushContext() *contexts.PushContext {
 
 	mirrorCtx := &contexts.PushContext{
 		BaseContext: contexts.BaseContext{
-			Logger:                logger,
-			Insecure:              Insecure,
-			SkipTLSVerification:   TLSSkipVerify,
-			DeckhouseRegistryRepo: SourceRegistryRepo,
-			RegistryHost:          RegistryHost,
-			RegistryPath:          RegistryPath,
-			BundlePath:            ImagesBundlePath,
-			UnpackedImagesPath:    filepath.Join(TempDir, time.Now().Format("mirror_tmp_02-01-2006_15-04-05")),
+			Logger:              logger,
+			Insecure:            Insecure,
+			SkipTLSVerification: TLSSkipVerify,
+			RegistryHost:        RegistryHost,
+			RegistryPath:        RegistryPath,
+			BundlePath:          ImagesBundlePath,
+			UnpackedImagesPath:  filepath.Join(TempDir, time.Now().Format("mirror_tmp_02-01-2006_15-04-05")),
 		},
 	}
 	return mirrorCtx
