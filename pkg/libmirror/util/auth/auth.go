@@ -20,13 +20,13 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"net/http"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/hashicorp/go-cleanhttp"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
 )
@@ -51,7 +51,7 @@ func ValidateReadAccessForImage(imageTag string, authProvider authn.Authenticato
 
 func ValidateWriteAccessForRepo(repo string, authProvider authn.Authenticator, insecure, skipVerifyTLS bool) error {
 	nameOpts, remoteOpts := MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
-	ref, err := name.NewTag(repo+":dhctlWriteCheck", nameOpts...)
+	ref, err := name.NewTag(repo+":d8WriteCheck", nameOpts...)
 	if err != nil {
 		return err
 	}
@@ -77,7 +77,7 @@ func MakeRemoteRegistryRequestOptions(authProvider authn.Authenticator, insecure
 		r = append(r, remote.WithAuth(authProvider))
 	}
 	if skipTLSVerification {
-		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport := cleanhttp.DefaultTransport()
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 		r = append(r, remote.WithTransport(transport))
 	}
