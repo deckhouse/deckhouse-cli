@@ -167,19 +167,17 @@ func pullExternalModulesToLocalFS(
 			},
 		}
 
-		logger.InfoLn("Beginning to pull module contents")
+		logger.InfoLn("Pulling module contents")
 		err = layouts.PullImageSet(pullCtx, moduleLayout, moduleImageSet, layouts.WithTagToDigestMapper(tagsResolver.GetTagDigest))
 		if err != nil {
 			return fmt.Errorf("Pull images: %w", err)
 		}
-		logger.InfoLn("✅ Module contents pulled successfully")
 
-		logger.InfoLn("Beginning to pull releases for module")
+		logger.InfoLn("Pulling module release data")
 		err = layouts.PullImageSet(pullCtx, moduleReleasesLayout, releasesImageSet, layouts.WithTagToDigestMapper(tagsResolver.GetTagDigest))
 		if err != nil {
 			return fmt.Errorf("Pull images: %w", err)
 		}
-		logger.InfoLn("✅ Releases for module pulled successfully")
 	}
 
 	return nil

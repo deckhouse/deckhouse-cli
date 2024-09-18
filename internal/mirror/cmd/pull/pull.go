@@ -309,7 +309,6 @@ func PullDeckhouseToLocalFS(
 		if err != nil {
 			return fmt.Errorf("get Deckhouse modules: %w", err)
 		}
-		logger.InfoLn("✅")
 	}
 
 	logger.InfoF("Creating OCI Image Layouts")

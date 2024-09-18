@@ -10,7 +10,7 @@ import (
 	"gitlab.com/greyxor/slogor"
 )
 
-const processPrefix = ">"
+const processPrefix = "║"
 
 type SLogger struct {
 	delegate     *slog.Logger
@@ -51,16 +51,17 @@ func (s *SLogger) WarnLn(a ...any) {
 }
 
 func (s *SLogger) Process(topic string, run func() error) error {
-	s.delegate.Info(topic)
+	start := time.Now()
+	s.delegate.Info(strings.Repeat("║", s.processDepth) + "╔ " + topic)
 	s.processDepth += 1
 	defer func() { s.processDepth -= 1 }()
 	if err := run(); err != nil {
 		s.delegate.Error(
-			topic+" failed",
+			strings.Repeat("║", s.processDepth-1)+topic+" failed",
 			"error", err)
 		return err
 	}
-	s.delegate.Info(topic + " succeeded")
+	s.delegate.Info(strings.Repeat("║", s.processDepth-1) + "╚ " + topic + " succeeded in " + time.Since(start).String())
 	return nil
 }
 
