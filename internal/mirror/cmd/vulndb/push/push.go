@@ -110,6 +110,7 @@ func push(_ *cobra.Command, _ []string) error {
 			repo,
 			pushContext.RegistryAuth,
 			pushContext.Logger,
+			contexts.DefaultParallelism,
 			pushContext.Insecure,
 			pushContext.SkipTLSVerification,
 		)

@@ -17,25 +17,19 @@ limitations under the License.
 package mirror
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	golog "log"
 	"log/slog"
 	"math/rand"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
@@ -49,6 +43,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	mirrorTestUtils "github.com/deckhouse/deckhouse-cli/testing/util/mirror"
 )
 
 func TestMirrorE2E(t *testing.T) {
@@ -59,8 +54,8 @@ func TestMirrorE2E(t *testing.T) {
 	})
 	workingDir := filepath.Join(tmpDir, "pull")
 
-	sourceHost, sourceRepoPath, sourceBlobHandler := setupEmptyRegistryRepo(false)
-	targetHost, targetRepoPath, targetBlobHandler := setupEmptyRegistryRepo(false)
+	sourceHost, sourceRepoPath, sourceBlobHandler := mirrorTestUtils.SetupEmptyRegistryRepo(false)
+	targetHost, targetRepoPath, targetBlobHandler := mirrorTestUtils.SetupEmptyRegistryRepo(false)
 
 	createDeckhouseControllersAndInstallersInRegistry(t, sourceHost+sourceRepoPath)
 	createTrivyVulnerabilityDatabasesInRegistry(t, sourceHost+sourceRepoPath, true, false)
@@ -85,6 +80,8 @@ func TestMirrorE2E(t *testing.T) {
 			RegistryPath:          targetRepoPath,
 			UnpackedImagesPath:    workingDir,
 		},
+
+		Parallelism: contexts.DefaultParallelism,
 	}
 
 	versionsToPull := []semver.Version{
@@ -103,30 +100,6 @@ func TestMirrorE2E(t *testing.T) {
 	require.NoError(t, err, "Push should be completed without errors")
 
 	require.Subset(t, sourceBlobHandler.ListBlobs(), targetBlobHandler.ListBlobs())
-}
-
-func setupEmptyRegistryRepo(useTLS bool) (host, repoPath string, blobHandler *ListableBlobHandler) {
-	memBlobHandler := registry.NewInMemoryBlobHandler()
-	bh := &ListableBlobHandler{
-		BlobHandler:    memBlobHandler,
-		BlobPutHandler: memBlobHandler.(registry.BlobPutHandler),
-	}
-	registryHandler := registry.New(registry.WithBlobHandler(bh), registry.Logger(golog.New(io.Discard, "", 0)))
-
-	server := httptest.NewUnstartedServer(registryHandler)
-	if useTLS {
-		server.StartTLS()
-	} else {
-		server.Start()
-	}
-
-	host = strings.TrimPrefix(server.URL, "http://")
-	repoPath = "/deckhouse/ee"
-	if useTLS {
-		host = strings.TrimPrefix(server.URL, "https://")
-	}
-
-	return host, repoPath, bh
 }
 
 func createDeckhouseReleaseChannelsInRegistry(t *testing.T, repo string) {
@@ -324,24 +297,4 @@ status:
 
 	require.FileExists(t, deckhouseReleasesManifestsFilepath, "deckhousereleases.yaml should be generated next tar bundle")
 	require.YAMLEq(t, expectedManifests.String(), string(actualManifests))
-}
-
-type ListableBlobHandler struct {
-	registry.BlobHandler
-	registry.BlobPutHandler
-
-	mu            sync.Mutex
-	ingestedBlobs []string
-}
-
-func (h *ListableBlobHandler) Get(ctx context.Context, repo string, hash v1.Hash) (io.ReadCloser, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.ingestedBlobs = append(h.ingestedBlobs, hash.String())
-
-	return h.BlobHandler.Get(ctx, repo, hash)
-}
-
-func (h *ListableBlobHandler) ListBlobs() []string {
-	return h.ingestedBlobs
 }
