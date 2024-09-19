@@ -19,7 +19,6 @@ package layouts
 import (
 	"log/slog"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
@@ -63,9 +62,9 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessSkipTLS(t *testing.T) {
 	}
 
 	layouts := &ImageLayouts{
-		TrivyDB:     prepareEmptyOCILayout(t),
-		TrivyBDU:    prepareEmptyOCILayout(t),
-		TrivyJavaDB: prepareEmptyOCILayout(t),
+		TrivyDB:     createEmptyOCILayout(t),
+		TrivyBDU:    createEmptyOCILayout(t),
+		TrivyJavaDB: createEmptyOCILayout(t),
 	}
 
 	err := PullTrivyVulnerabilityDatabasesImages(
@@ -116,9 +115,9 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessInsecure(t *testing.T) {
 	}
 
 	layouts := &ImageLayouts{
-		TrivyDB:     prepareEmptyOCILayout(t),
-		TrivyBDU:    prepareEmptyOCILayout(t),
-		TrivyJavaDB: prepareEmptyOCILayout(t),
+		TrivyDB:     createEmptyOCILayout(t),
+		TrivyBDU:    createEmptyOCILayout(t),
+		TrivyJavaDB: createEmptyOCILayout(t),
 	}
 
 	err := PullTrivyVulnerabilityDatabasesImages(
@@ -160,15 +159,10 @@ func layoutByIndex(t *testing.T, layouts *ImageLayouts, idx int) layout.Path {
 	}
 }
 
-func prepareEmptyOCILayout(t *testing.T) layout.Path {
+func createEmptyOCILayout(t *testing.T) layout.Path {
 	t.Helper()
-	p, err := os.MkdirTemp(os.TempDir(), "trivy_pull_test")
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = os.RemoveAll(p)
-	})
 
-	l, err := CreateEmptyImageLayoutAtPath(p)
+	l, err := CreateEmptyImageLayoutAtPath(t.TempDir())
 	require.NoError(t, err)
 	return l
 }

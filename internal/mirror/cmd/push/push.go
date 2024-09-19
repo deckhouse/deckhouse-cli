@@ -147,6 +147,11 @@ func buildPushContext() *contexts.PushContext {
 			BundlePath:          ImagesBundlePath,
 			UnpackedImagesPath:  filepath.Join(TempDir, time.Now().Format("mirror_tmp_02-01-2006_15-04-05")),
 		},
+
+		Parallelism: contexts.ParallelismConfig{
+			Blobs:  4,
+			Images: 10,
+		},
 	}
 	return mirrorCtx
 }

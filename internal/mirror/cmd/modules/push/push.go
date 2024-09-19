@@ -138,12 +138,28 @@ func pushModulesToRegistry(
 			return fmt.Errorf("Module %s: Read OCI layout: %w", moduleName, err)
 		}
 
-		if err = layouts.PushLayoutToRepo(moduleLayout, moduleRegistryPath, authProvider, logger, insecure, skipVerifyTLS); err != nil {
+		if err = layouts.PushLayoutToRepo(
+			moduleLayout,
+			moduleRegistryPath,
+			authProvider,
+			logger,
+			contexts.DefaultParallelism,
+			insecure,
+			skipVerifyTLS,
+		); err != nil {
 			return fmt.Errorf("Push module to registry: %w", err)
 		}
 
 		logger.InfoF("Pushing releases for module %s", moduleName)
-		if err = layouts.PushLayoutToRepo(moduleReleasesLayout, moduleReleasesRegistryPath, authProvider, logger, insecure, skipVerifyTLS); err != nil {
+		if err = layouts.PushLayoutToRepo(
+			moduleReleasesLayout,
+			moduleReleasesRegistryPath,
+			authProvider,
+			logger,
+			contexts.DefaultParallelism,
+			insecure,
+			skipVerifyTLS,
+		); err != nil {
 			return fmt.Errorf("Push module to registry: %w", err)
 		}
 

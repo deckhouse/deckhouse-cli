@@ -32,6 +32,7 @@ func PushDeckhouseToRegistry(mirrorCtx *contexts.PushContext) error {
 			ociLayout, repo,
 			mirrorCtx.RegistryAuth,
 			mirrorCtx.Logger,
+			mirrorCtx.Parallelism,
 			mirrorCtx.Insecure,
 			mirrorCtx.SkipTLSVerification,
 		)
@@ -97,7 +98,6 @@ func findLayoutsToPush(mirrorCtx *contexts.PushContext) (map[string]layout.Path,
 	bundlePaths := [][]string{
 		{""}, // Root contains main deckhouse repo
 		{"install"},
-		{"install-standalone"},
 		{"release-channel"},
 		{"security", "trivy-db"},
 		{"security", "trivy-bdu"},
