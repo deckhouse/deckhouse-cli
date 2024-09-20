@@ -149,8 +149,8 @@ func buildPushContext() *contexts.PushContext {
 		},
 
 		Parallelism: contexts.ParallelismConfig{
-			Blobs:  4,
-			Images: 10,
+			Blobs:  2,
+			Images: 5,
 		},
 	}
 	return mirrorCtx
