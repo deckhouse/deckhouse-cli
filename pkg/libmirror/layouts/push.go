@@ -69,7 +69,7 @@ func PushLayoutToRepo(
 	batchesCount, imagesCount := 1, 1
 
 	for _, manifestSet := range batches {
-		if len(manifestSet) == 1 {
+		if parallelismConfig.Images == 1 {
 			tag := manifestSet[0].Annotations["io.deckhouse.image.short_tag"]
 			imageRef := registryRepo + ":" + tag
 			logger.InfoF("[%d / %d] Pushing image %s", imagesCount, len(indexManifest.Manifests), imageRef)
@@ -81,9 +81,7 @@ func PushLayoutToRepo(
 		err = logger.Process(fmt.Sprintf("Pushing batch %d / %d", batchesCount, len(batches)), func() error {
 			logger.InfoLn("Images in batch:")
 			for _, manifest := range manifestSet {
-				tag := manifest.Annotations["io.deckhouse.image.short_tag"]
-				imageRef := registryRepo + ":" + tag
-				logger.InfoF("- %s", imageRef)
+				logger.InfoF("- %s", registryRepo+":"+manifest.Annotations["io.deckhouse.image.short_tag"])
 			}
 
 			parallel.ForEach(manifestSet, pushImage(logger, registryRepo, index, imagesCount, refOpts, remoteOpts))
@@ -94,6 +92,7 @@ func PushLayoutToRepo(
 			return fmt.Errorf("Push batch of images: %w", err)
 		}
 		batchesCount += 1
+		imagesCount += len(manifestSet)
 	}
 
 	return nil
