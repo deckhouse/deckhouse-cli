@@ -65,7 +65,7 @@ getLatestTag() {
 
 downloadRelease() {
   D8_DIST="d8-$TAG-$OS-$ARCH.tar.gz"
-  DOWNLOAD_URL="https://github.com/deckhouse/deckhouse-cli/releases/download/$TAG/$D8_DIST"
+  DOWNLOAD_URL="https://deckhouse.io/downloads/deckhouse-cli/$TAG/$D8_DIST"
   CHECKSUM_URL="$DOWNLOAD_URL.sha256sum"
 
   D8_TMP="$(mktemp -dt d8-installer-XXXXXX)"
@@ -86,7 +86,7 @@ downloadRelease() {
 verifyChecksum() {
   printf "Verifying checksum... "
   pushd "$D8_TMP" > /dev/null
-  shasum -a 256 -c "$D8_SUM_FILE"
+  sha256sum --check "$D8_SUM_FILE"
   popd > /dev/null
 }
 
