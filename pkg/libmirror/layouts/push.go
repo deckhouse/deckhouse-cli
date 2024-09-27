@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -65,37 +66,101 @@ func PushLayoutToRepo(
 		return fmt.Errorf("%s: %w", registryRepo, ErrEmptyLayout)
 	}
 
-	batches := lo.Chunk(indexManifest.Manifests, parallelismConfig.Images)
+	speedController := NewSpeedController(2, 8)
 	batchesCount, imagesCount := 1, 1
 
-	for _, manifestSet := range batches {
-		if parallelismConfig.Images == 1 {
-			tag := manifestSet[0].Annotations["io.deckhouse.image.short_tag"]
+	if parallelismConfig.Images == 1 {
+		for _, image := range indexManifest.Manifests {
+			tag := image.Annotations["io.deckhouse.image.short_tag"]
 			imageRef := registryRepo + ":" + tag
 			logger.InfoF("[%d / %d] Pushing image %s", imagesCount, len(indexManifest.Manifests), imageRef)
-			pushImage(logger, registryRepo, index, imagesCount, refOpts, remoteOpts)(manifestSet[0], 0)
+			pushImage(logger, registryRepo, index, imagesCount, refOpts, remoteOpts, speedController)(image, 0)
 			imagesCount += 1
 			continue
 		}
+		return nil
+	}
 
-		err = logger.Process(fmt.Sprintf("Pushing batch %d / %d", batchesCount, len(batches)), func() error {
+	batchSize := parallelismConfig.Images
+	totalImagesCount := len(indexManifest.Manifests)
+	for len(indexManifest.Manifests) > 0 {
+		batchSize = speedController.UpdateBatchSizeBySpeed(batchSize)
+		batchSize := lo.Min([]int{len(indexManifest.Manifests), batchSize})
+
+		imageBatch := indexManifest.Manifests[:batchSize]
+		err = logger.Process(fmt.Sprintf("Pushing batch %d", batchesCount), func() error {
 			logger.InfoLn("Images in batch:")
-			for _, manifest := range manifestSet {
-				logger.InfoF("- %s", registryRepo+":"+manifest.Annotations["io.deckhouse.image.short_tag"])
+			for _, manifest := range imageBatch {
+				tag := manifest.Annotations["io.deckhouse.image.short_tag"]
+				imageRef := registryRepo + ":" + tag
+				logger.InfoF("[%d / %d] Pushing image %s", imagesCount, totalImagesCount, imageRef)
+				imagesCount += 1
 			}
-
-			parallel.ForEach(manifestSet, pushImage(logger, registryRepo, index, imagesCount, refOpts, remoteOpts))
-
+			parallel.ForEach(imageBatch, pushImage(logger, registryRepo, index, imagesCount, refOpts, remoteOpts, speedController))
 			return nil
 		})
 		if err != nil {
 			return fmt.Errorf("Push batch of images: %w", err)
 		}
 		batchesCount += 1
-		imagesCount += len(manifestSet)
+		indexManifest.Manifests = indexManifest.Manifests[batchSize:]
+	}
+	return nil
+}
+
+type SpeedController struct {
+	previousSpeed float64
+	speeds        []float64
+	mu            sync.Mutex
+	minBatchSize  int
+	maxBatchSize  int
+}
+
+func NewSpeedController(minBatchSize, maxBatchSize int) *SpeedController {
+	return &SpeedController{
+		previousSpeed: 0,
+		speeds:        []float64{},
+		minBatchSize:  minBatchSize,
+		maxBatchSize:  maxBatchSize,
+	}
+}
+
+func (sc *SpeedController) RecordSpeed(newSpeed float64) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.speeds = append(sc.speeds, newSpeed)
+}
+
+func (sc *SpeedController) UpdateBatchSizeBySpeed(currentBatchSize int) int {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	if len(sc.speeds) == 0 {
+		return currentBatchSize
 	}
 
-	return nil
+	totalSpeed := lo.Sum(sc.speeds)
+
+	if sc.previousSpeed == 0 {
+		sc.previousSpeed = totalSpeed
+	}
+
+	if totalSpeed < sc.previousSpeed*0.9 {
+		currentBatchSize--
+	} else if totalSpeed > sc.previousSpeed*1.1 {
+		currentBatchSize++
+	}
+
+	if currentBatchSize < sc.minBatchSize {
+		currentBatchSize = sc.minBatchSize
+	}
+	if currentBatchSize > sc.maxBatchSize {
+		currentBatchSize = sc.maxBatchSize
+	}
+
+	sc.previousSpeed = totalSpeed
+	sc.speeds = []float64{}
+	return currentBatchSize
 }
 
 func pushImage(
@@ -105,6 +170,7 @@ func pushImage(
 	imagesCount int,
 	refOpts []name.Option,
 	remoteOpts []remote.Option,
+	speedController *SpeedController,
 ) func(v1.Descriptor, int) {
 	return func(manifest v1.Descriptor, _ int) {
 		tag := manifest.Annotations["io.deckhouse.image.short_tag"]
@@ -114,12 +180,14 @@ func pushImage(
 			logger.WarnF("Read image: %v", err)
 			os.Exit(1)
 		}
+		imgSize, _ := img.Size()
 		ref, err := name.ParseReference(imageRef, refOpts...)
 		if err != nil {
 			logger.WarnF("Parse image reference: %v", err)
 			os.Exit(1)
 		}
 
+		start := time.Now()
 		err = retry.RunTask(silentLogger{}, "", task.WithConstantRetries(19, 3*time.Second, func() error {
 			if err = remote.Write(ref, img, remoteOpts...); err != nil {
 				if errorutil.IsTrivyMediaTypeNotAllowedError(err) {
@@ -130,11 +198,14 @@ func pushImage(
 			}
 			return nil
 		}))
+		speed := float64(imgSize) / time.Since(start).Seconds()
 		if err != nil {
 			logger.WarnF("Push image: %v", err)
 			os.Exit(1)
 		}
-
+		if speed != 0 {
+			speedController.RecordSpeed(speed)
+		}
 		imagesCount += 1
 	}
 }
