@@ -11,6 +11,7 @@ Manages virtual machine-related operations in your Kubernetes cluster.
 * start        - Start a virtual machine.
 * stop         - Stop a virtual machine.
 * restart      - Restart a virtual machine.
+* migrate      - Migrate a virtual machine.
 
 ### Examples
 #### console
@@ -52,4 +53,9 @@ d8 virtualization stop myvm -n mynamespace
 ```shell
 d8 virtualization restart myvm.mynamespace --timeout=1m
 d8 virtualization restart myvm -n mynamespace
+```
+#### migrate
+```shell
+d8 virtualization migrate myvm.mynamespace
+d8 virtualization migrate myvm -n mynamespace
 ```
