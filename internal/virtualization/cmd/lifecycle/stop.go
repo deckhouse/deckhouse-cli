@@ -18,8 +18,6 @@ package lifecycle
 
 import (
 	"github.com/spf13/cobra"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
@@ -27,12 +25,11 @@ import (
 
 func NewStopCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 	lifecycle := NewLifecycle(Stop, clientConfig)
-	stop := string(Stop)
 	cmd := &cobra.Command{
-		Use:     stop + " (VirtualMachine)",
-		Short:   cases.Title(language.English).String(stop) + " a virtual machine.",
+		Use:     "stop (VirtualMachine)",
+		Short:   "Stop a virtual machine.",
 		Example: lifecycle.Usage(),
-		Args:    templates.ExactArgs(stop, 1),
+		Args:    templates.ExactArgs("stop", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return lifecycle.Run(args)
 		},

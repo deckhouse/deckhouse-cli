@@ -18,8 +18,6 @@ package lifecycle
 
 import (
 	"github.com/spf13/cobra"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
@@ -27,12 +25,11 @@ import (
 
 func NewRestartCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 	lifecycle := NewLifecycle(Restart, clientConfig)
-	restart := string(Restart)
 	cmd := &cobra.Command{
-		Use:     restart + " (VirtualMachine)",
-		Short:   cases.Title(language.English).String(restart) + " a virtual machine.",
+		Use:     "restart (VirtualMachine)",
+		Short:   "Restart a virtual machine.",
 		Example: lifecycle.Usage(),
-		Args:    templates.ExactArgs(restart, 1),
+		Args:    templates.ExactArgs("restart", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return lifecycle.Run(args)
 		},
