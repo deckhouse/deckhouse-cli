@@ -14,30 +14,27 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package powerstate
+package lifecycle
 
 import (
 	"github.com/spf13/cobra"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
 )
 
 func NewStartCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
-	ps := NewPowerState(Start, clientConfig)
-	start := string(Start)
+	lifecycle := NewLifecycle(Start, clientConfig)
 	cmd := &cobra.Command{
-		Use:     start + " (VirtualMachine)",
-		Short:   cases.Title(language.English).String(start) + " a virtual machine.",
-		Example: ps.Usage(),
-		Args:    templates.ExactArgs(start, 1),
+		Use:     "start (VirtualMachine)",
+		Short:   "Start a virtual machine.",
+		Example: lifecycle.Usage(),
+		Args:    templates.ExactArgs("start", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return ps.Run(args)
+			return lifecycle.Run(args)
 		},
 	}
-	AddCommandlineArgs(cmd.Flags(), &ps.opts)
+	AddCommandlineArgs(cmd.Flags(), &lifecycle.opts)
 	cmd.SetUsageTemplate(templates.UsageTemplate())
 	return cmd
 }

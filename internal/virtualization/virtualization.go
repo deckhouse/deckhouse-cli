@@ -28,8 +28,8 @@ import (
 	"k8s.io/component-base/logs"
 
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/console"
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/lifecycle"
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/portforward"
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/powerstate"
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/scp"
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/ssh"
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/vnc"
@@ -87,9 +87,10 @@ func NewCommand(programName string) (*cobra.Command, clientcmd.ClientConfig) {
 		portforward.NewCommand(clientConfig),
 		ssh.NewCommand(clientConfig),
 		scp.NewCommand(clientConfig),
-		powerstate.NewStartCommand(clientConfig),
-		powerstate.NewStopCommand(clientConfig),
-		powerstate.NewRestartCommand(clientConfig),
+		lifecycle.NewStartCommand(clientConfig),
+		lifecycle.NewStopCommand(clientConfig),
+		lifecycle.NewRestartCommand(clientConfig),
+		lifecycle.NewMigrateCommand(clientConfig),
 		optionsCmd,
 	)
 	return virtCmd, clientConfig
