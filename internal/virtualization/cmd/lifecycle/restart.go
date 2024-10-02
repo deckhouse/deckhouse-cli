@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package powerstate
+package lifecycle
 
 import (
 	"github.com/spf13/cobra"
@@ -25,19 +25,19 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
 )
 
-func NewStopCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
-	ps := NewPowerState(Stop, clientConfig)
-	stop := string(Stop)
+func NewRestartCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
+	lifecycle := NewLifecycle(Restart, clientConfig)
+	restart := string(Restart)
 	cmd := &cobra.Command{
-		Use:     stop + " (VirtualMachine)",
-		Short:   cases.Title(language.English).String(stop) + " a virtual machine.",
-		Example: ps.Usage(),
-		Args:    templates.ExactArgs(stop, 1),
+		Use:     restart + " (VirtualMachine)",
+		Short:   cases.Title(language.English).String(restart) + " a virtual machine.",
+		Example: lifecycle.Usage(),
+		Args:    templates.ExactArgs(restart, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return ps.Run(args)
+			return lifecycle.Run(args)
 		},
 	}
-	AddCommandlineArgs(cmd.Flags(), &ps.opts)
+	AddCommandlineArgs(cmd.Flags(), &lifecycle.opts)
 	cmd.SetUsageTemplate(templates.UsageTemplate())
 	return cmd
 }

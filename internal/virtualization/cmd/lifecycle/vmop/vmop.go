@@ -23,6 +23,7 @@ import (
 
 	"github.com/deckhouse/virtualization/api/client/kubeclient"
 	"github.com/deckhouse/virtualization/api/core/v1alpha2"
+	"github.com/deckhouse/virtualization/api/core/v1alpha2/vmopcondition"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
@@ -33,17 +34,22 @@ type VirtualMachineOperation struct {
 }
 
 func (v VirtualMachineOperation) Stop(ctx context.Context, vmName, vmNamespace string, wait, force bool) (msg string, err error) {
-	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPOperationTypeStop, force)
+	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeStop, force)
 	return v.do(ctx, vmop, wait)
 }
 
 func (v VirtualMachineOperation) Start(ctx context.Context, vmName, vmNamespace string, wait bool) (msg string, err error) {
-	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPOperationTypeStart, false)
+	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeStart, false)
 	return v.do(ctx, vmop, wait)
 }
 
 func (v VirtualMachineOperation) Restart(ctx context.Context, vmName, vmNamespace string, wait, force bool) (msg string, err error) {
-	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPOperationTypeRestart, force)
+	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeRestart, force)
+	return v.do(ctx, vmop, wait)
+}
+
+func (v VirtualMachineOperation) Migrate(ctx context.Context, vmName, vmNamespace string, wait bool) (msg string, err error) {
+	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeMigrate, false)
 	return v.do(ctx, vmop, wait)
 }
 
@@ -62,7 +68,7 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 		return ""
 	}
 	key := types.NamespacedName{Namespace: vmop.GetNamespace(), Name: vmop.GetName()}
-	vmKey := types.NamespacedName{Namespace: vmop.GetNamespace(), Name: vmop.Spec.VirtualMachineName}
+	vmKey := types.NamespacedName{Namespace: vmop.GetNamespace(), Name: vmop.Spec.VirtualMachine}
 	phase := vmop.Status.Phase
 
 	sb := strings.Builder{}
@@ -73,21 +79,25 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 			sb.WriteString("was not ")
 		}
 		switch vmop.Spec.Type {
-		case v1alpha2.VMOPOperationTypeStart:
+		case v1alpha2.VMOPTypeStart:
 			sb.WriteString("started. ")
-		case v1alpha2.VMOPOperationTypeStop:
+		case v1alpha2.VMOPTypeStop:
 			sb.WriteString("stopped. ")
-		case v1alpha2.VMOPOperationTypeRestart:
+		case v1alpha2.VMOPTypeRestart:
 			sb.WriteString("restarted. ")
+		case v1alpha2.VMOPTypeMigrate:
+			sb.WriteString("migrated.")
 		}
 	} else {
 		switch vmop.Spec.Type {
-		case v1alpha2.VMOPOperationTypeStart:
+		case v1alpha2.VMOPTypeStart:
 			sb.WriteString("starting. ")
-		case v1alpha2.VMOPOperationTypeStop:
+		case v1alpha2.VMOPTypeStop:
 			sb.WriteString("stopping. ")
-		case v1alpha2.VMOPOperationTypeRestart:
+		case v1alpha2.VMOPTypeRestart:
 			sb.WriteString("restarting. ")
+		case v1alpha2.VMOPTypeMigrate:
+			sb.WriteString("migrating.")
 		}
 	}
 
@@ -100,7 +110,8 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 	case v1alpha2.VMOPPhaseCompleted:
 		sb.WriteString("completed.")
 	case v1alpha2.VMOPPhaseFailed:
-		sb.WriteString(fmt.Sprintf("failed. reason=%q, message=%q.", vmop.Status.FailureReason, vmop.Status.FailureMessage))
+		cond, _ := getCondition(vmopcondition.TypeCompleted.String(), vmop.Status.Conditions)
+		sb.WriteString(fmt.Sprintf("failed. reason=%q, message=%q.", cond.Reason, cond.Message))
 	default:
 		sb.WriteString(fmt.Sprintf(" phase=%q.", phase))
 	}
@@ -164,7 +175,7 @@ func (v VirtualMachineOperation) isFinished(vmop *v1alpha2.VirtualMachineOperati
 	return vmop.Status.Phase == v1alpha2.VMOPPhaseCompleted || vmop.Status.Phase == v1alpha2.VMOPPhaseFailed
 }
 
-func (v VirtualMachineOperation) newVMOP(vmName, vmNamespace string, t v1alpha2.VMOPOperation, force bool) *v1alpha2.VirtualMachineOperation {
+func (v VirtualMachineOperation) newVMOP(vmName, vmNamespace string, t v1alpha2.VMOPType, force bool) *v1alpha2.VirtualMachineOperation {
 	return &v1alpha2.VirtualMachineOperation{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       v1alpha2.VMOPKind,
@@ -175,9 +186,9 @@ func (v VirtualMachineOperation) newVMOP(vmName, vmNamespace string, t v1alpha2.
 			Namespace:    vmNamespace,
 		},
 		Spec: v1alpha2.VirtualMachineOperationSpec{
-			Type:               t,
-			VirtualMachineName: vmName,
-			Force:              force,
+			Type:           t,
+			VirtualMachine: vmName,
+			Force:          force,
 		},
 	}
 }
@@ -186,4 +197,14 @@ func New(client kubeclient.Client) *VirtualMachineOperation {
 	return &VirtualMachineOperation{
 		client: client,
 	}
+}
+
+func getCondition(condType string, conds []metav1.Condition) (metav1.Condition, bool) {
+	for _, cond := range conds {
+		if cond.Type == condType {
+			return cond, true
+		}
+	}
+
+	return metav1.Condition{}, false
 }
