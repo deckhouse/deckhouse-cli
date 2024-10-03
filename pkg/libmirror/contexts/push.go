@@ -19,4 +19,16 @@ package contexts
 // PushContext holds data related to pending mirroring-to-registry operation.
 type PushContext struct {
 	BaseContext
+
+	Parallelism ParallelismConfig
+}
+
+type ParallelismConfig struct {
+	Blobs  int
+	Images int
+}
+
+var DefaultParallelism = ParallelismConfig{
+	Blobs:  4,
+	Images: 1,
 }
