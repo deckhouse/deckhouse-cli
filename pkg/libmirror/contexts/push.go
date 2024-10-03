@@ -30,5 +30,5 @@ type ParallelismConfig struct {
 
 var DefaultParallelism = ParallelismConfig{
 	Blobs:  4,
-	Images: 5,
+	Images: 1,
 }
