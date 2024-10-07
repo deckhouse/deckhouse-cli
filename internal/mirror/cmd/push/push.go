@@ -104,7 +104,12 @@ func push(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	if filepath.Ext(mirrorCtx.BundlePath) == ".tar" {
+	bundleStat, err := os.Stat(mirrorCtx.BundlePath)
+	if err != nil {
+		return err
+	}
+
+	if filepath.Ext(mirrorCtx.BundlePath) == ".tar" && bundleStat.Mode().IsRegular() {
 		err := logger.Process("Unpacking Deckhouse bundle", func() error {
 			return bundle.Unpack(&mirrorCtx.BaseContext)
 		})
@@ -112,15 +117,17 @@ func push(_ *cobra.Command, _ []string) error {
 			return err
 		}
 		defer os.RemoveAll(mirrorCtx.UnpackedImagesPath)
-	} else {
+	} else if bundleStat.IsDir() {
 		logger.InfoLn("Using bundle at", mirrorCtx.BundlePath)
 		mirrorCtx.UnpackedImagesPath = mirrorCtx.BundlePath
 		if err := bundle.ValidateUnpackedBundle(mirrorCtx); err != nil {
 			return fmt.Errorf("Invalid bundle: %w", err)
 		}
+	} else {
+		return fmt.Errorf("bundle is not a tarball or directory")
 	}
 
-	err := logger.Process("Push Deckhouse images to registry", func() error {
+	err = logger.Process("Push Deckhouse images to registry", func() error {
 		return operations.PushDeckhouseToRegistry(mirrorCtx)
 	})
 	if err != nil {
