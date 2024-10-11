@@ -34,9 +34,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/kubectl/pkg/util/templates"
+
+	"github.com/deckhouse/deckhouse-cli/internal/backup/utilk8s"
 )
 
 var etcdLong = templates.LongDesc(`
@@ -55,7 +56,7 @@ func NewCommand() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		PreRunE: func(cmd *cobra.Command, args []string) error {
-			return validateFlags()
+			return validateFlags(cmd)
 		},
 		RunE: etcd,
 	}
@@ -72,19 +73,23 @@ const (
 )
 
 var (
-	kubeconfigPath       string
 	requestedEtcdPodName string
 
 	verboseLog bool
 )
 
-func etcd(_ *cobra.Command, args []string) error {
+func etcd(cmd *cobra.Command, args []string) error {
 	log.SetFlags(log.LstdFlags)
 	if len(args) != 1 {
 		return fmt.Errorf("This command requires exactly 1 argument")
 	}
 
-	config, kubeCl, err := setupK8sClientset(kubeconfigPath)
+	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
@@ -232,21 +237,6 @@ func streamCommand(
 	}
 
 	return nil
-}
-
-func setupK8sClientset(kubeconfigPath string) (*rest.Config, *kubernetes.Clientset, error) {
-	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfigPath}, nil).ClientConfig()
-	if err != nil {
-		return nil, nil, fmt.Errorf("Reading kubeconfig file: %w", err)
-	}
-
-	kubeCl, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Constructing Kubernetes clientset: %w", err)
-	}
-
-	return config, kubeCl, nil
 }
 
 func findETCDPods(kubeCl kubernetes.Interface) ([]string, error) {

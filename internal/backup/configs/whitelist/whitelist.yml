@@ -1,0 +1,29 @@
+d8-system:
+  v1:
+    Secret:
+    - d8-cluster-terraform-state
+    - $regexp:^d8-node-terraform-state-(.*)$ # Regexp
+    - deckhouse-registry
+    ConfigMap:
+    - d8-deckhouse-version-info
+kube-system:
+  v1:
+    ConfigMap:
+    - d8-cluster-is-bootstraped
+    - d8-cluster-uuid
+    - extension-apiserver-authentication
+    Secret:
+    - d8-cloud-provider-discovery-data
+    - d8-cluster-configuration
+    - d8-cni-configuration
+    - d8-control-plane-manager-config
+    - d8-node-manager-cloud-provider
+    - d8-pki
+    - d8-provider-cluster-configuration
+    - d8-static-cluster-configuration
+    - d8-secret-encryption-key
+d8-cert-manager:
+  v1:
+    Secret:
+    - cert-manager-letsencrypt-private-key
+    - selfsigned-ca-key-pair
