@@ -1,0 +1,28 @@
+---
+- apiVersion: deckhouse.io/v1
+  kind: NodeGroup
+  name: master
+  namespace: namespaceName
+- apiVersion: deckhouse.io/v1
+  kind: StaticInstance
+  name: master-0
+  namespace: test
+- apiVersion: deckhouse.io/v1
+  kind: StaticInstance
+  name: master-1
+  namespace: namespaceName
+- apiVersion: deckhouse.io/v1
+  kind: StaticInstance
+  name: master-2
+  namespace: namespaceName
+
+---
+namespaceName:
+  deckhouse.io/v1:
+    StaticInstance:
+    - master-0
+    - master-1
+    - master-2
+    NodeGroup:
+    - master
+

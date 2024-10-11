@@ -20,21 +20,11 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
 
 func addFlags(flagSet *pflag.FlagSet) {
-	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
-	if p := os.Getenv("KUBECONFIG"); p != "" {
-		defaultKubeconfigPath = p
-	}
-
-	flagSet.StringVarP(
-		&kubeconfigPath,
-		"kubeconfig", "k",
-		defaultKubeconfigPath,
-		"KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)",
-	)
 	flagSet.StringVarP(
 		&requestedEtcdPodName,
 		"etcd-pod", "p",
@@ -49,7 +39,12 @@ func addFlags(flagSet *pflag.FlagSet) {
 	)
 }
 
-func validateFlags() error {
+func validateFlags(cmd *cobra.Command) error {
+	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
 	stats, err := os.Stat(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("Invalid --kubeconfig: %w", err)

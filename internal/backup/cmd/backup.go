@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	"github.com/deckhouse/deckhouse-cli/internal/backup/cmd/cluster-config"
 	"github.com/deckhouse/deckhouse-cli/internal/backup/cmd/etcd"
 )
 
@@ -35,8 +36,11 @@ func NewCommand() *cobra.Command {
 		Long:  backupLong,
 	}
 
+	addPersistentFlags(backupCmd.PersistentFlags())
+
 	backupCmd.AddCommand(
 		etcd.NewCommand(),
+		cluster_config.NewCommand(),
 	)
 
 	return backupCmd
