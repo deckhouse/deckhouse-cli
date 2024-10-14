@@ -93,6 +93,7 @@ func push(_ *cobra.Command, _ []string) error {
 		path.Join(RegistryRepo, "security", "trivy-db"):      filepath.Join(VulnerabilityDBPath, "trivy-db"),
 		path.Join(RegistryRepo, "security", "trivy-bdu"):     filepath.Join(VulnerabilityDBPath, "trivy-bdu"),
 		path.Join(RegistryRepo, "security", "trivy-java-db"): filepath.Join(VulnerabilityDBPath, "trivy-java-db"),
+		path.Join(RegistryRepo, "security", "trivy-checks"):  filepath.Join(VulnerabilityDBPath, "trivy-checks"),
 	}
 
 	repoCount := 0
