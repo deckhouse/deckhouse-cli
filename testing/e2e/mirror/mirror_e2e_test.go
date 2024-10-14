@@ -122,6 +122,7 @@ func createTrivyVulnerabilityDatabasesInRegistry(t *testing.T, repo string, inse
 		repo + "/security/trivy-db:2",
 		repo + "/security/trivy-bdu:1",
 		repo + "/security/trivy-java-db:1",
+		repo + "/security/trivy-checks:0",
 	}
 
 	for _, image := range images {

@@ -127,6 +127,7 @@ func PullTrivyVulnerabilityDatabasesImages(
 		layouts.TrivyDB:     path.Join(pullCtx.DeckhouseRegistryRepo, "security", "trivy-db:2"),
 		layouts.TrivyBDU:    path.Join(pullCtx.DeckhouseRegistryRepo, "security", "trivy-bdu:1"),
 		layouts.TrivyJavaDB: path.Join(pullCtx.DeckhouseRegistryRepo, "security", "trivy-java-db:1"),
+		layouts.TrivyChecks: path.Join(pullCtx.DeckhouseRegistryRepo, "security", "trivy-checks:0"),
 	}
 
 	for dbImageLayout, imageRef := range dbImages {

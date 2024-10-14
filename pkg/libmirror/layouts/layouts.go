@@ -58,6 +58,8 @@ type ImageLayouts struct {
 	TrivyBDUImages    map[string]struct{}
 	TrivyJavaDB       layout.Path
 	TrivyJavaDBImages map[string]struct{}
+	TrivyChecks       layout.Path
+	TrivyChecksImages map[string]struct{}
 
 	Modules map[string]ModuleImageLayout
 
@@ -90,6 +92,7 @@ func CreateOCIImageLayoutsForDeckhouse(
 		&layouts.TrivyDB:           filepath.Join(rootFolder, "security", "trivy-db"),
 		&layouts.TrivyBDU:          filepath.Join(rootFolder, "security", "trivy-bdu"),
 		&layouts.TrivyJavaDB:       filepath.Join(rootFolder, "security", "trivy-java-db"),
+		&layouts.TrivyChecks:       filepath.Join(rootFolder, "security", "trivy-checks"),
 	}
 	for layoutPtr, fsPath := range fsPaths {
 		*layoutPtr, err = CreateEmptyImageLayoutAtPath(fsPath)
@@ -183,6 +186,7 @@ func FillLayoutsWithBasicDeckhouseImages(
 		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-db:2":      {},
 		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-bdu:1":     {},
 		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-java-db:1": {},
+		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-checks:0":  {},
 	}
 
 	for _, version := range deckhouseVersions {

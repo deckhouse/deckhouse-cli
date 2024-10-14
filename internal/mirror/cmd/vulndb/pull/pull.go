@@ -106,6 +106,10 @@ func pull(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("creating java db layout: %w", err)
 	}
+	imageLayouts.TrivyChecks, err = layouts.CreateEmptyImageLayoutAtPath(filepath.Join(VulnerabilityDBPath, "trivy-checks"))
+	if err != nil {
+		return fmt.Errorf("creating java db layout: %w", err)
+	}
 
 	if err := layouts.PullTrivyVulnerabilityDatabasesImages(pullContext, imageLayouts); err != nil {
 		return fmt.Errorf("pull vulnerability databases: %w", err)

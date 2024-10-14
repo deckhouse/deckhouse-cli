@@ -103,6 +103,7 @@ func findLayoutsToPush(mirrorCtx *contexts.PushContext) (map[string]layout.Path,
 		{"security", "trivy-db"},
 		{"security", "trivy-bdu"},
 		{"security", "trivy-java-db"},
+		{"security", "trivy-checks"},
 	}
 
 	for _, bundlePath := range bundlePaths {
