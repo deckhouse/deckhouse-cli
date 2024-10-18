@@ -39,6 +39,9 @@ func (b *Backup) PutObject(object runtime.Object) error {
 
 	kind := object.GetObjectKind().GroupVersionKind().Kind
 	name, namespace := metadataAccessor.GetName(), metadataAccessor.GetNamespace()
+	if namespace == "" {
+		namespace = "Cluster-Wide Resources"
+	}
 
 	rawObject, err := yaml.Marshal(object)
 	if err != nil {
