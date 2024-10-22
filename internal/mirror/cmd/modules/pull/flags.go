@@ -40,7 +40,8 @@ func addFlags(flagSet *pflag.FlagSet) {
 		"filter",
 		"f",
 		"",
-		"Filter which modules starting with which version to pull. Format is \"moduleName@v1.2.3\" separated by ';' where version after @ is the earliest pulled version of the module.",
+		`Filter which modules starting with which version to pull. Format is "moduleName@v1.2.3" separated by ';' where version after @ is the earliest pulled version of the module.
+If the version of the module specified in the filter exceeds the version of the RockSolid channel of this module, then the version from RockSolid is considered as the filter version for the module.`,
 	)
 	flagSet.BoolVar(
 		&SkipTLSVerify,
