@@ -4,7 +4,7 @@ go 1.23.1
 
 require (
 	github.com/Masterminds/semver/v3 v3.3.0
-	github.com/deckhouse/virtualization/api v0.0.0-20240326113112-979c4f4f17b9
+	github.com/deckhouse/virtualization/api v0.0.0-20241101085803-1002322cdb92
 	github.com/google/go-containerregistry v0.20.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/hashicorp/go-cleanhttp v0.5.2
@@ -342,7 +342,7 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20240325203815-454cdb8f5daa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240325203815-454cdb8f5daa // indirect
 	google.golang.org/grpc v1.64.1 // indirect
-	google.golang.org/protobuf v1.34.1 // indirect
+	google.golang.org/protobuf v1.34.2 // indirect
 	gopkg.in/errgo.v2 v2.1.0 // indirect
 	gopkg.in/evanphx/json-patch.v5 v5.8.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
