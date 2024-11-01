@@ -41,14 +41,14 @@ const (
 	Stop    Command = "stop"
 	Start   Command = "start"
 	Restart Command = "restart"
-	Migrate Command = "migrate"
+	Evict   Command = "evict"
 )
 
 type Manager interface {
 	Stop(ctx context.Context, name, namespace string, wait, force bool) (msg string, err error)
 	Start(ctx context.Context, name, namespace string, wait bool) (msg string, err error)
 	Restart(ctx context.Context, name, namespace string, wait, force bool) (msg string, err error)
-	Migrate(ctx context.Context, name, namespace string, wait bool) (msg string, err error)
+	Evict(ctx context.Context, name, namespace string, wait bool) (msg string, err error)
 }
 
 type Type string
@@ -116,9 +116,9 @@ func (l *Lifecycle) Run(args []string) error {
 	case Restart:
 		fmt.Fprint(writer, fmt.Sprintf("Restarting virtual machine %q\n", key.String()))
 		msg, err = mgr.Restart(ctx, name, namespace, l.opts.Wait, l.opts.Force)
-	case Migrate:
-		fmt.Fprint(writer, fmt.Sprintf("Migrating virtual machine %q\n", key.String()))
-		msg, err = mgr.Migrate(ctx, name, namespace, l.opts.Wait)
+	case Evict:
+		fmt.Fprint(writer, fmt.Sprintf("Evicting virtual machine %q\n", key.String()))
+		msg, err = mgr.Evict(ctx, name, namespace, l.opts.Wait)
 	default:
 		return fmt.Errorf("invalid command %q", l.cmd)
 	}
@@ -139,7 +139,7 @@ func (l *Lifecycle) Usage() string {
   {{ProgramName}} {{operation}} --%s=1m myvm
   # Configure wait vm phase (default: wait=%v)
   {{ProgramName}} {{operation}} --%s myvm`, opts.Timeout, timeoutFlag, opts.Wait, waitFlag), "{{operation}}", string(l.cmd), -1)
-	if l.cmd != Start && l.cmd != Migrate {
+	if l.cmd != Start && l.cmd != Evict {
 		usage += fmt.Sprintf(`
   # Configure shutdown policy (default: force=%v)
   {{ProgramName}} %s --%s myvm`, opts.Force, l.cmd, forceFlag)

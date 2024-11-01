@@ -48,8 +48,8 @@ func (v VirtualMachineOperation) Restart(ctx context.Context, vmName, vmNamespac
 	return v.do(ctx, vmop, wait)
 }
 
-func (v VirtualMachineOperation) Migrate(ctx context.Context, vmName, vmNamespace string, wait bool) (msg string, err error) {
-	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeMigrate, false)
+func (v VirtualMachineOperation) Evict(ctx context.Context, vmName, vmNamespace string, wait bool) (msg string, err error) {
+	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeEvict, false)
 	return v.do(ctx, vmop, wait)
 }
 
@@ -85,8 +85,8 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 			sb.WriteString("stopped. ")
 		case v1alpha2.VMOPTypeRestart:
 			sb.WriteString("restarted. ")
-		case v1alpha2.VMOPTypeMigrate:
-			sb.WriteString("migrated.")
+		case v1alpha2.VMOPTypeEvict:
+			sb.WriteString("evicted.")
 		}
 	} else {
 		switch vmop.Spec.Type {
@@ -96,8 +96,8 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 			sb.WriteString("stopping. ")
 		case v1alpha2.VMOPTypeRestart:
 			sb.WriteString("restarting. ")
-		case v1alpha2.VMOPTypeMigrate:
-			sb.WriteString("migrating.")
+		case v1alpha2.VMOPTypeEvict:
+			sb.WriteString("evicting.")
 		}
 	}
 

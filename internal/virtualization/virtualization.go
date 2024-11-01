@@ -90,7 +90,7 @@ func NewCommand(programName string) (*cobra.Command, clientcmd.ClientConfig) {
 		lifecycle.NewStartCommand(clientConfig),
 		lifecycle.NewStopCommand(clientConfig),
 		lifecycle.NewRestartCommand(clientConfig),
-		lifecycle.NewMigrateCommand(clientConfig),
+		lifecycle.NewEvictCommand(clientConfig),
 		optionsCmd,
 	)
 	return virtCmd, clientConfig

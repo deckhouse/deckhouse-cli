@@ -7,13 +7,13 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
 )
 
-func NewMigrateCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
-	lifecycle := NewLifecycle(Migrate, clientConfig)
+func NewEvictCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
+	lifecycle := NewLifecycle(Evict, clientConfig)
 	cmd := &cobra.Command{
-		Use:     "migrate (VirtualMachine)",
-		Short:   "Migrate a virtual machine.",
+		Use:     "evict (VirtualMachine)",
+		Short:   "Evict a virtual machine.",
 		Example: lifecycle.Usage(),
-		Args:    templates.ExactArgs("migrate", 1),
+		Args:    templates.ExactArgs("evict", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return lifecycle.Run(args)
 		},
