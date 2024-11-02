@@ -17,6 +17,7 @@ limitations under the License.
 package push
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -146,6 +147,7 @@ func buildPushContext() *contexts.PushContext {
 
 	mirrorCtx := &contexts.PushContext{
 		BaseContext: contexts.BaseContext{
+			Ctx:                 context.TODO(),
 			Logger:              logger,
 			Insecure:            Insecure,
 			SkipTLSVerification: TLSSkipVerify,

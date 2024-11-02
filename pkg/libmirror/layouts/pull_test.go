@@ -17,6 +17,7 @@ limitations under the License.
 package layouts
 
 import (
+	"context"
 	"log/slog"
 	"net/http/httptest"
 	"strings"
@@ -71,6 +72,7 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessSkipTLS(t *testing.T) {
 
 	err := PullTrivyVulnerabilityDatabasesImages(
 		&contexts.PullContext{BaseContext: contexts.BaseContext{
+			Ctx:                   context.TODO(),
 			Logger:                testLogger,
 			RegistryAuth:          authn.Anonymous,
 			DeckhouseRegistryRepo: deckhouseRepo,
@@ -126,6 +128,7 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessInsecure(t *testing.T) {
 
 	err := PullTrivyVulnerabilityDatabasesImages(
 		&contexts.PullContext{BaseContext: contexts.BaseContext{
+			Ctx:                   context.TODO(),
 			Logger:                testLogger,
 			RegistryAuth:          authn.Anonymous,
 			DeckhouseRegistryRepo: deckhouseRepo,

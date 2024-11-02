@@ -17,6 +17,7 @@ limitations under the License.
 package mirror
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -64,6 +65,7 @@ func TestMirrorE2E(t *testing.T) {
 	testLogger := log.NewSLogger(slog.LevelDebug)
 	pullCtx := &contexts.PullContext{
 		BaseContext: contexts.BaseContext{
+			Ctx:                   context.TODO(),
 			Logger:                testLogger,
 			Insecure:              true,
 			BundlePath:            filepath.Join(tmpDir, "d8.tar"),
@@ -73,6 +75,7 @@ func TestMirrorE2E(t *testing.T) {
 	}
 	pushCtx := &contexts.PushContext{
 		BaseContext: contexts.BaseContext{
+			Ctx:                   context.TODO(),
 			Logger:                testLogger,
 			Insecure:              true,
 			DeckhouseRegistryRepo: sourceHost + sourceRepoPath,

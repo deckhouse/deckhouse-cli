@@ -17,6 +17,7 @@ limitations under the License.
 package pull
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -85,6 +86,7 @@ func pull(_ *cobra.Command, _ []string) error {
 
 	pullContext := &contexts.PullContext{
 		BaseContext: contexts.BaseContext{
+			Ctx:                   context.TODO(),
 			Logger:                logger,
 			RegistryAuth:          getSourceRegistryAuthProvider(),
 			DeckhouseRegistryRepo: SourceRegistryRepo,

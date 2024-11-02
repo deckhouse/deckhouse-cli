@@ -18,6 +18,7 @@ package pull
 
 import (
 	"bufio"
+	"context"
 	"crypto/md5"
 	"fmt"
 	"io"
@@ -122,6 +123,7 @@ func buildPullContext() *contexts.PullContext {
 
 	mirrorCtx := &contexts.PullContext{
 		BaseContext: contexts.BaseContext{
+			Ctx:                   context.TODO(),
 			Logger:                logger,
 			Insecure:              Insecure,
 			SkipTLSVerification:   TLSSkipVerify,

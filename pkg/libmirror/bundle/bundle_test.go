@@ -17,6 +17,7 @@ limitations under the License.
 package bundle
 
 import (
+	"context"
 	"crypto/rand"
 	"io"
 	"io/fs"
@@ -50,6 +51,7 @@ func TestBundlePackingAndUnpacking(t *testing.T) {
 
 	err = Pack(&contexts.PullContext{
 		BaseContext: contexts.BaseContext{
+			Ctx:                context.TODO(),
 			BundlePath:         tarBundlePath,
 			UnpackedImagesPath: packFromDir,
 		},
@@ -58,6 +60,7 @@ func TestBundlePackingAndUnpacking(t *testing.T) {
 	require.FileExists(t, tarBundlePath)
 
 	err = Unpack(&contexts.BaseContext{
+		Ctx:                context.TODO(),
 		BundlePath:         tarBundlePath,
 		UnpackedImagesPath: unpackToDir,
 	})
@@ -87,6 +90,7 @@ func TestChunkedBundlePackingAndUnpacking(t *testing.T) {
 
 	err = Pack(&contexts.PullContext{
 		BaseContext: contexts.BaseContext{
+			Ctx:                context.TODO(),
 			BundlePath:         bundlePath,
 			UnpackedImagesPath: packFromDir,
 		},
@@ -105,6 +109,7 @@ func TestChunkedBundlePackingAndUnpacking(t *testing.T) {
 	}
 
 	err = Unpack(&contexts.BaseContext{
+		Ctx:                context.TODO(),
 		BundlePath:         bundlePath,
 		UnpackedImagesPath: unpackToDir,
 	})

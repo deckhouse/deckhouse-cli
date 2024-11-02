@@ -17,9 +17,9 @@ limitations under the License.
 package layouts
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -28,11 +28,11 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/samber/lo"
-	"github.com/samber/lo/parallel"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/parallel"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
 )
@@ -40,6 +40,7 @@ import (
 var ErrEmptyLayout = errors.New("No images in layout")
 
 func PushLayoutToRepo(
+	ctx context.Context,
 	imagesLayout layout.Path,
 	registryRepo string,
 	authProvider authn.Authenticator,
@@ -73,7 +74,11 @@ func PushLayoutToRepo(
 			tag := manifestSet[0].Annotations["io.deckhouse.image.short_tag"]
 			imageRef := registryRepo + ":" + tag
 			logger.InfoF("[%d / %d] Pushing image %s", imagesCount, len(indexManifest.Manifests), imageRef)
-			pushImage(logger, registryRepo, index, imagesCount, refOpts, remoteOpts)(manifestSet[0], 0)
+
+			ctx, ctxCancel := context.WithCancel(ctx)
+			if err := pushImage(ctx, ctxCancel, logger, registryRepo, index, imagesCount, refOpts, remoteOpts)(manifestSet[0], 0); err != nil {
+				return err
+			}
 			imagesCount += 1
 			continue
 		}
@@ -84,9 +89,8 @@ func PushLayoutToRepo(
 				logger.InfoF("- %s", registryRepo+":"+manifest.Annotations["io.deckhouse.image.short_tag"])
 			}
 
-			parallel.ForEach(manifestSet, pushImage(logger, registryRepo, index, imagesCount, refOpts, remoteOpts))
-
-			return nil
+			ctx, ctxCancel := context.WithCancel(ctx)
+			return parallel.ForEachWithErrors(manifestSet, pushImage(ctx, ctxCancel, logger, registryRepo, index, imagesCount, refOpts, remoteOpts))
 		})
 		if err != nil {
 			return fmt.Errorf("Push batch of images: %w", err)
@@ -99,32 +103,39 @@ func PushLayoutToRepo(
 }
 
 func pushImage(
+	ctx context.Context,
+	ctxCancel context.CancelFunc,
 	logger contexts.Logger,
 	registryRepo string,
 	index v1.ImageIndex,
 	imagesCount int,
 	refOpts []name.Option,
 	remoteOpts []remote.Option,
-) func(v1.Descriptor, int) {
-	return func(manifest v1.Descriptor, _ int) {
+) func(v1.Descriptor, int) error {
+	return func(manifest v1.Descriptor, _ int) error {
 		tag := manifest.Annotations["io.deckhouse.image.short_tag"]
 		imageRef := registryRepo + ":" + tag
 		img, err := index.Image(manifest.Digest)
 		if err != nil {
 			logger.WarnF("Read image: %v", err)
-			os.Exit(1)
+			ctxCancel()
+			return err
 		}
 		ref, err := name.ParseReference(imageRef, refOpts...)
 		if err != nil {
 			logger.WarnF("Parse image reference: %v", err)
-			os.Exit(1)
+			ctxCancel()
+			return err
 		}
 
-		err = retry.RunTask(silentLogger{}, "", task.WithConstantRetries(19, 3*time.Second, func() error {
+		err = retry.RunTask(ctx, silentLogger{}, "", task.WithConstantRetries(19, 3*time.Second, func(ctx context.Context) error {
+			remoteOpts := remoteOpts
+			remoteOpts = append(remoteOpts, remote.WithContext(ctx))
 			if err = remote.Write(ref, img, remoteOpts...); err != nil {
 				if errorutil.IsTrivyMediaTypeNotAllowedError(err) {
 					logger.WarnLn(errorutil.CustomTrivyMediaTypesWarning)
-					os.Exit(1)
+					ctxCancel()
+					return err
 				}
 				return fmt.Errorf("Write %s to registry: %w", ref.String(), err)
 			}
@@ -132,10 +143,12 @@ func pushImage(
 		}))
 		if err != nil {
 			logger.WarnF("Push image: %v", err)
-			os.Exit(1)
+			ctxCancel()
+			return err
 		}
 
 		imagesCount += 1
+		return nil
 	}
 }
 

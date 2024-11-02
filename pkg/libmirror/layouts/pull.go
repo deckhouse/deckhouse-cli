@@ -17,6 +17,7 @@ limitations under the License.
 package layouts
 
 import (
+	"context"
 	"fmt"
 	"path"
 	"strings"
@@ -182,9 +183,10 @@ func PullImageSet(
 		}
 
 		err = retry.RunTask(
+			pullCtx.Ctx,
 			pullCtx.Logger,
 			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageReferenceString),
-			task.WithConstantRetries(5, 10*time.Second, func() error {
+			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
 				img, err := remote.Image(ref, remoteOpts...)
 				if err != nil {
 					if errorutil.IsImageNotFoundError(err) && pullOpts.allowMissingTags {

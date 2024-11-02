@@ -17,6 +17,8 @@ limitations under the License.
 package contexts
 
 import (
+	"context"
+
 	"github.com/google/go-containerregistry/pkg/authn"
 )
 
@@ -35,6 +37,8 @@ type Logger interface {
 
 // BaseContext hold data related to pending registry mirroring operation.
 type BaseContext struct {
+	Ctx context.Context
+
 	// --registry-login + --registry-password (can be nil in this case) or --license depending on the operation requested
 	RegistryAuth authn.Authenticator
 	RegistryHost string // --registry (FQDN with port, if one is provided)

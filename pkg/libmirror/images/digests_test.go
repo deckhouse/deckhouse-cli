@@ -17,6 +17,7 @@ limitations under the License.
 package images
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -43,7 +44,7 @@ func TestExtractImageDigestsFromDeckhouseInstaller(t *testing.T) {
 
 	installersLayout := createOCILayoutWithInstallerImage(t, "localhost:5001/deckhouse", installerTag, expectedImages)
 	images, err := ExtractImageDigestsFromDeckhouseInstaller(
-		&contexts.PullContext{BaseContext: contexts.BaseContext{DeckhouseRegistryRepo: "localhost:5001/deckhouse"}},
+		&contexts.PullContext{BaseContext: contexts.BaseContext{Ctx: context.TODO(), DeckhouseRegistryRepo: "localhost:5001/deckhouse"}},
 		installerTag,
 		installersLayout,
 	)

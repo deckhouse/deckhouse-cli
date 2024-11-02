@@ -17,6 +17,7 @@ limitations under the License.
 package push
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -139,6 +140,7 @@ func pushModulesToRegistry(
 		}
 
 		if err = layouts.PushLayoutToRepo(
+			context.TODO(),
 			moduleLayout,
 			moduleRegistryPath,
 			authProvider,
@@ -152,6 +154,7 @@ func pushModulesToRegistry(
 
 		logger.InfoF("Pushing releases for module %s", moduleName)
 		if err = layouts.PushLayoutToRepo(
+			context.TODO(),
 			moduleReleasesLayout,
 			moduleReleasesRegistryPath,
 			authProvider,

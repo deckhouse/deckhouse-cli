@@ -17,6 +17,7 @@ limitations under the License.
 package push
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"path"
@@ -81,6 +82,7 @@ func push(_ *cobra.Command, _ []string) error {
 
 	pushContext := &contexts.PushContext{
 		BaseContext: contexts.BaseContext{
+			Ctx:                   context.TODO(),
 			Logger:                logger,
 			RegistryAuth:          getRegistryAuthProvider(),
 			RegistryHost:          RegistryHost,
@@ -107,6 +109,7 @@ func push(_ *cobra.Command, _ []string) error {
 		}
 
 		err = layouts.PushLayoutToRepo(
+			pushContext.Ctx,
 			ociLayout,
 			repo,
 			pushContext.RegistryAuth,

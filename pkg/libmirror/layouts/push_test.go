@@ -1,6 +1,7 @@
 package layouts
 
 import (
+	"context"
 	"log/slog"
 	"math/rand/v2"
 	"testing"
@@ -20,6 +21,7 @@ import (
 )
 
 func TestPushLayoutToRepoWithParallelism(t *testing.T) {
+	ctx := context.TODO()
 	s := require.New(t)
 
 	const totalImages, layersPerImage = 10, 3
@@ -42,6 +44,7 @@ func TestPushLayoutToRepoWithParallelism(t *testing.T) {
 	}
 
 	err := PushLayoutToRepo(
+		ctx,
 		imagesLayout,
 		host+repoPath, // Images repo
 		authn.Anonymous,
@@ -70,6 +73,7 @@ func TestPushLayoutToRepoWithParallelism(t *testing.T) {
 }
 
 func TestPushLayoutToRepoWithoutParallelism(t *testing.T) {
+	ctx := context.TODO()
 	s := require.New(t)
 
 	const totalImages, layersPerImage = 10, 3
@@ -92,6 +96,7 @@ func TestPushLayoutToRepoWithoutParallelism(t *testing.T) {
 	}
 
 	err := PushLayoutToRepo(
+		ctx,
 		imagesLayout,
 		host+repoPath, // Images repo
 		authn.Anonymous,
@@ -120,11 +125,13 @@ func TestPushLayoutToRepoWithoutParallelism(t *testing.T) {
 }
 
 func TestPushEmptyLayoutToRepo(t *testing.T) {
+	ctx := context.TODO()
 	s := require.New(t)
 	host, repoPath, blobHandler := mirrorTestUtils.SetupEmptyRegistryRepo(false)
 
 	emptyLayout := createEmptyOCILayout(t)
 	err := PushLayoutToRepo(
+		ctx,
 		emptyLayout,
 		host+repoPath,
 		authn.Anonymous,

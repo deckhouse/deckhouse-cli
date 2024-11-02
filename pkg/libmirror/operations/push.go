@@ -29,6 +29,7 @@ func PushDeckhouseToRegistry(mirrorCtx *contexts.PushContext) error {
 	for repo, ociLayout := range ociLayouts {
 		logger.InfoLn("Mirroring", repo)
 		err = layouts.PushLayoutToRepo(
+			mirrorCtx.Ctx,
 			ociLayout, repo,
 			mirrorCtx.RegistryAuth,
 			mirrorCtx.Logger,
@@ -70,6 +71,7 @@ func pushModulesTags(mirrorCtx *contexts.BaseContext, modulesList []string) erro
 	logger := mirrorCtx.Logger
 
 	refOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorContext(mirrorCtx)
+	remoteOpts = append(remoteOpts, remote.WithContext(mirrorCtx.Ctx))
 	modulesRepo := path.Join(mirrorCtx.RegistryHost, mirrorCtx.RegistryPath, "modules")
 	pushCount := 1
 	for _, moduleName := range modulesList {

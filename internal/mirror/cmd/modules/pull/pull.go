@@ -17,6 +17,7 @@ limitations under the License.
 package pull
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -160,6 +161,7 @@ func pullExternalModulesToLocalFS(
 
 		pullCtx := &contexts.PullContext{
 			BaseContext: contexts.BaseContext{
+				Ctx:                 context.TODO(),
 				Logger:              logger,
 				Insecure:            insecure,
 				SkipTLSVerification: skipVerifyTLS,
