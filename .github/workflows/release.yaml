@@ -8,6 +8,10 @@ on:
     branches:
       - "main"
 
+env:
+  PRIVATE_REPO: fox.flant.com
+  PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
 permissions:
   contents: write
 
@@ -31,6 +35,9 @@ jobs:
 
       - name: Setup Task
         uses: arduino/setup-task@v2
+
+      - name: Setup private repo
+        run: git config --global url."https://gitlab-ci-token:${PRIVATE_REPO_TOKEN}@${PRIVATE_REPO}/".insteadOf https://${PRIVATE_REPO}/
 
       - name: Build and package
         run: task build-and-package
@@ -62,5 +69,8 @@ jobs:
       - name: Setup Task
         uses: arduino/setup-task@v2
 
-      - name: Run testss
+      - name: Setup private repo
+        run: git config --global url."https://gitlab-ci-token:${PRIVATE_REPO_TOKEN}@${PRIVATE_REPO}/".insteadOf https://${PRIVATE_REPO}/
+
+      - name: Run tests
         run: task test
