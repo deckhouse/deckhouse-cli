@@ -17,6 +17,9 @@ limitations under the License.
 package cmd
 
 import (
+	"os"
+	"strings"
+
 	vaultcommand "github.com/hashicorp/vault/command"
 	"github.com/spf13/cobra"
 )
@@ -26,7 +29,20 @@ type Commands struct {
 	Description string
 }
 
+func MapCustomEnvsToInternalEnvs(envNamePrefix string, envNameMapPrefix string) {
+	env := os.Environ()
+	for _, keyValue := range env {
+		parts := strings.SplitN(keyValue, "=", 2)
+		if strings.HasPrefix(parts[0], envNamePrefix) {
+			replacedEnvName := strings.Replace(parts[0], envNamePrefix, envNameMapPrefix, 1)
+			os.Setenv(replacedEnvName, parts[1])
+		}
+	}
+}
+
 func init() {
+
+	MapCustomEnvsToInternalEnvs("STRONGHOLD_", "VAULT_")
 
 	strongholdCommands := []Commands{
 		{"read", "Read data and retrieves secrets"},
