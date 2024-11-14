@@ -51,7 +51,14 @@ func validateImagesBundlePathArg(args []string) error {
 	bundleExtension := filepath.Ext(ImagesBundlePath)
 	stat, err := os.Stat(ImagesBundlePath)
 	if err != nil {
-		return fmt.Errorf("invalid --images-bundle-path: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			stat, err = os.Stat(ImagesBundlePath + ".0000.chunk")
+			if err != nil {
+				return fmt.Errorf("invalid images bundle path: %w", err)
+			}
+			return nil
+		}
+		return fmt.Errorf("invalid images bundle path: %w", err)
 	}
 
 	switch {
