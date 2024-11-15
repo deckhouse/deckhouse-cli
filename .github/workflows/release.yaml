@@ -9,6 +9,7 @@ on:
       - "main"
 
 env:
+  GOPRIVATE: fox.flant.com
   PRIVATE_REPO: fox.flant.com
   PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
