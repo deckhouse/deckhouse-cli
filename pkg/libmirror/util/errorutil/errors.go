@@ -24,12 +24,12 @@ const CustomTrivyMediaTypesWarning = `` +
 	"TL;DR: You should retry push after allowing some additional types of OCI artifacts in your config.yaml as follows:\n" +
 	`FEATURE_GENERAL_OCI_SUPPORT: true
 ALLOWED_OCI_ARTIFACT_TYPES:
-  "application/vnd.aquasec.trivy.config.v1+json":
-    - "application/vnd.aquasec.trivy.db.layer.v1.tar+gzip"
   "application/octet-stream":
     - "application/deckhouse.io.bdu.layer.v1.tar+gzip"
-  "application/vnd.oci.empty.v1+json":
-    - "application/vnd.aquasec.trivy.javadb.layer.v1.tar+gzip"`
+    - "application/vnd.cncf.openpolicyagent.layer.v1.tar+gzip"
+  "application/vnd.aquasec.trivy.config.v1+json":
+    - "application/vnd.aquasec.trivy.javadb.layer.v1.tar+gzip"
+    - "application/vnd.aquasec.trivy.db.layer.v1.tar+gzip"`
 
 func IsImageNotFoundError(err error) bool {
 	if err == nil {
@@ -55,5 +55,6 @@ func IsTrivyMediaTypeNotAllowedError(err error) bool {
 	}
 
 	errMsg := err.Error()
-	return strings.Contains(errMsg, "MANIFEST_INVALID") && strings.Contains(errMsg, "vnd.aquasec.trivy")
+	return strings.Contains(errMsg, "MANIFEST_INVALID") &&
+		(strings.Contains(errMsg, "vnd.aquasec.trivy") || strings.Contains(errMsg, "application/octet-stream"))
 }
