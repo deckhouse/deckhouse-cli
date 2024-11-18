@@ -87,7 +87,7 @@ tasks:
   _test:go:
     internal: true
     cmds:
-      - CGO_ENABLED=0 go test -tags="{{ .goTags }}" ./...
+      - go test -tags="{{ .cgoTags }}" ./...
 
   build:
     desc: Build d8 binary for personal usage
@@ -100,19 +100,10 @@ tasks:
   build:dev:linux:amd64:
     desc: Build d8 dev binary for linux/amd64
     cmds:
-      - task: _build:go:dev
+      - task: _build:cgo:dev
         vars:
           targetOS: "linux"
           targetArch: "amd64"
-          outputDir: "{{ .outputDir }}"
-
-  build:dev:linux:arm64:
-    desc: Build d8 dev binary for linux/arm64
-    cmds:
-      - task: _build:go:dev
-        vars:
-          targetOS: "linux"
-          targetArch: "arm64"
           outputDir: "{{ .outputDir }}"
 
   build:dev:darwin:amd64:
@@ -146,7 +137,6 @@ tasks:
     desc: Build all d8 release binaries in parallel
     deps:
       - build:dist:linux:amd64
-      - build:dist:linux:arm64
       - build:dist:darwin:amd64
       - build:dist:darwin:arm64
       - build:dist:windows:amd64
@@ -154,19 +144,10 @@ tasks:
   build:dist:linux:amd64:
     desc: Build d8 release binary for linux/amd64
     cmds:
-      - task: _build:go:dist
+      - task: _build:cgo:dist
         vars:
           targetOS: "linux"
           targetArch: "amd64"
-          outputDir: "{{ .outputDir }}"
-
-  build:dist:linux:arm64:
-    desc: Build d8 release binary for linux/arm64
-    cmds:
-      - task: _build:go:dist
-        vars:
-          targetOS: "linux"
-          targetArch: "arm64"
           outputDir: "{{ .outputDir }}"
 
   build:dist:darwin:amd64:
@@ -206,7 +187,6 @@ tasks:
     desc: Package all release assets in parallel
     deps:
       - package:dist:linux:amd64
-      - package:dist:linux:arm64
       - package:dist:darwin:amd64
       - package:dist:darwin:arm64
       - package:dist:windows:amd64
