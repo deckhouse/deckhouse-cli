@@ -130,9 +130,9 @@ func (v VirtualMachineOperation) createAndWait(ctx context.Context, vmop *v1alph
 
 	if waitCompleted {
 		return v.waitUntil(ctx, vmop.GetName(), vmop.GetNamespace(), v1alpha2.VMOPPhaseCompleted)
-	} else {
-		return v.waitUntil(ctx, vmop.GetName(), vmop.GetNamespace(), v1alpha2.VMOPPhaseInProgress)
 	}
+
+	return v.waitUntil(ctx, vmop.GetName(), vmop.GetNamespace(), v1alpha2.VMOPPhaseInProgress)
 }
 
 func (v VirtualMachineOperation) create(ctx context.Context, vmop *v1alpha2.VirtualMachineOperation) (*v1alpha2.VirtualMachineOperation, error) {
