@@ -23,15 +23,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deckhouse/virtualization/api/client/kubeclient"
 	"github.com/spf13/pflag"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/lifecycle/vmop"
+	"github.com/deckhouse/virtualization/api/client/kubeclient"
 
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/lifecycle/vmop"
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
 )
 
@@ -45,23 +45,10 @@ const (
 )
 
 type Manager interface {
-	Stop(ctx context.Context, name, namespace string, createOnly, waitCompleted, force bool) (msg string, err error)
-	Start(ctx context.Context, name, namespace string, createOnly, waitCompleted bool) (msg string, err error)
-	Restart(ctx context.Context, name, namespace string, createOnly, waitCompleted, force bool) (msg string, err error)
-	Evict(ctx context.Context, name, namespace string, createOnly, waitCompleted bool) (msg string, err error)
-}
-
-type Type string
-
-const TypeVirtualMachineOperation Type = "VirtualMachineOperation"
-
-func NewManager(t Type, client kubeclient.Client) (Manager, error) {
-	switch t {
-	case TypeVirtualMachineOperation:
-		return vmop.New(client), nil
-	default:
-		return nil, fmt.Errorf("invalid type %q", t)
-	}
+	Stop(ctx context.Context, name, namespace string) (msg string, err error)
+	Start(ctx context.Context, name, namespace string) (msg string, err error)
+	Restart(ctx context.Context, name, namespace string) (msg string, err error)
+	Evict(ctx context.Context, name, namespace string) (msg string, err error)
 }
 
 func NewLifecycle(cmd Command, clientConfig clientcmd.ClientConfig) *Lifecycle {
@@ -111,16 +98,16 @@ func (l *Lifecycle) Run(args []string) error {
 	switch l.cmd {
 	case Stop:
 		fmt.Fprintf(writer, "Stopping virtual machine %q\n", key.String())
-		msg, err = mgr.Stop(ctx, name, namespace, l.opts.CreateOnly, l.opts.WaitComplete, l.opts.Force)
+		msg, err = mgr.Stop(ctx, name, namespace)
 	case Start:
 		fmt.Fprintf(writer, "Starting virtual machine %q\n", key.String())
-		msg, err = mgr.Start(ctx, name, namespace, l.opts.CreateOnly, l.opts.WaitComplete)
+		msg, err = mgr.Start(ctx, name, namespace)
 	case Restart:
 		fmt.Fprintf(writer, "Restarting virtual machine %q\n", key.String())
-		msg, err = mgr.Restart(ctx, name, namespace, l.opts.CreateOnly, l.opts.WaitComplete, l.opts.Force)
+		msg, err = mgr.Restart(ctx, name, namespace)
 	case Evict:
 		fmt.Fprintf(writer, "Evicting virtual machine %q\n", key.String())
-		msg, err = mgr.Evict(ctx, name, namespace, l.opts.CreateOnly, l.opts.WaitComplete)
+		msg, err = mgr.Evict(ctx, name, namespace)
 	default:
 		return fmt.Errorf("invalid command %q", l.cmd)
 	}
@@ -168,7 +155,13 @@ func (l *Lifecycle) getManager() (Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewManager(TypeVirtualMachineOperation, virtCli)
+
+	return vmop.New(
+		virtCli,
+		vmop.WithCreateOnly(l.opts.CreateOnly),
+		vmop.WithWaitComplete(l.opts.WaitComplete),
+		vmop.WithForce(l.opts.Force),
+	), nil
 }
 
 const (

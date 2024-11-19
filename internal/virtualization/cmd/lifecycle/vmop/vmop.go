@@ -30,27 +30,65 @@ import (
 )
 
 type VirtualMachineOperation struct {
-	client kubeclient.Client
+	client  kubeclient.Client
+	options options
 }
 
-func (v VirtualMachineOperation) Stop(ctx context.Context, vmName, vmNamespace string, createOnly, waitCompleted, force bool) (msg string, err error) {
-	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeStop, force)
-	return v.do(ctx, vmop, createOnly, waitCompleted)
+type options struct {
+	force        bool
+	waitComplete bool
+	createOnly   bool
 }
 
-func (v VirtualMachineOperation) Start(ctx context.Context, vmName, vmNamespace string, createOnly, waitCompleted bool) (msg string, err error) {
+func New(client kubeclient.Client, opts ...func(*VirtualMachineOperation)) *VirtualMachineOperation {
+	vmop := &VirtualMachineOperation{
+		client:  client,
+		options: options{},
+	}
+
+	for _, opt := range opts {
+		opt(vmop)
+	}
+
+	return vmop
+}
+
+func WithForce(force bool) func(*VirtualMachineOperation) {
+	return func(o *VirtualMachineOperation) {
+		o.options.force = force
+	}
+}
+
+func WithWaitComplete(waitComplete bool) func(*VirtualMachineOperation) {
+	return func(o *VirtualMachineOperation) {
+		o.options.waitComplete = waitComplete
+	}
+}
+
+func WithCreateOnly(createOnly bool) func(*VirtualMachineOperation) {
+	return func(o *VirtualMachineOperation) {
+		o.options.createOnly = createOnly
+	}
+}
+
+func (v VirtualMachineOperation) Stop(ctx context.Context, vmName, vmNamespace string) (msg string, err error) {
+	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeStop, false)
+	return v.do(ctx, vmop, v.options.createOnly, v.options.waitComplete)
+}
+
+func (v VirtualMachineOperation) Start(ctx context.Context, vmName, vmNamespace string) (msg string, err error) {
 	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeStart, false)
-	return v.do(ctx, vmop, createOnly, waitCompleted)
+	return v.do(ctx, vmop, v.options.createOnly, v.options.waitComplete)
 }
 
-func (v VirtualMachineOperation) Restart(ctx context.Context, vmName, vmNamespace string, createOnly, waitCompleted, force bool) (msg string, err error) {
-	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeRestart, force)
-	return v.do(ctx, vmop, createOnly, waitCompleted)
+func (v VirtualMachineOperation) Restart(ctx context.Context, vmName, vmNamespace string) (msg string, err error) {
+	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeRestart, v.options.force)
+	return v.do(ctx, vmop, v.options.createOnly, v.options.waitComplete)
 }
 
-func (v VirtualMachineOperation) Evict(ctx context.Context, vmName, vmNamespace string, createOnly, waitCompleted bool) (msg string, err error) {
-	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeEvict, false)
-	return v.do(ctx, vmop, createOnly, waitCompleted)
+func (v VirtualMachineOperation) Evict(ctx context.Context, vmName, vmNamespace string) (msg string, err error) {
+	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeEvict, v.options.force)
+	return v.do(ctx, vmop, v.options.createOnly, v.options.waitComplete)
 }
 
 func (v VirtualMachineOperation) do(ctx context.Context, vmop *v1alpha2.VirtualMachineOperation, createOnly, waitCompleted bool) (msg string, err error) {
@@ -195,12 +233,6 @@ func (v VirtualMachineOperation) newVMOP(vmName, vmNamespace string, t v1alpha2.
 			VirtualMachine: vmName,
 			Force:          force,
 		},
-	}
-}
-
-func New(client kubeclient.Client) *VirtualMachineOperation {
-	return &VirtualMachineOperation{
-		client: client,
 	}
 }
 
