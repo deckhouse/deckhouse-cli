@@ -18,6 +18,7 @@ package pull
 
 import (
 	"bufio"
+	"context"
 	"crypto/md5"
 	"fmt"
 	"io"
@@ -162,16 +163,20 @@ func pull(_ *cobra.Command, _ []string) error {
 		patch := mirrorCtx.SpecificVersion.Patch()
 		accessValidationTag = fmt.Sprintf("v%d.%d.%d", major, minor, patch)
 	}
-	if err := auth.ValidateReadAccessForImage(
+	readAccessTimeoutCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	if err := auth.ValidateReadAccessForImageContext(
+		readAccessTimeoutCtx,
 		mirrorCtx.DeckhouseRegistryRepo+":"+accessValidationTag,
 		mirrorCtx.RegistryAuth,
 		mirrorCtx.Insecure,
 		mirrorCtx.SkipTLSVerification,
 	); err != nil {
+		cancel()
 		if os.Getenv("MIRROR_BYPASS_ACCESS_CHECKS") != "1" {
 			return fmt.Errorf("Source registry access validation failure: %w", err)
 		}
 	}
+	cancel()
 
 	var versionsToMirror []semver.Version
 	var err error

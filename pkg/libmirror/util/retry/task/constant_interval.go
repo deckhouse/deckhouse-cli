@@ -1,14 +1,17 @@
 package task
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type ConstantRetryIntervalTask struct {
 	maxRetries   uint
 	waitInterval time.Duration
-	payload      func() error
+	payload      func(context.Context) error
 }
 
-func WithConstantRetries(maxRetries uint, waitInterval time.Duration, payload func() error) *ConstantRetryIntervalTask {
+func WithConstantRetries(maxRetries uint, waitInterval time.Duration, payload func(ctx context.Context) error) *ConstantRetryIntervalTask {
 	task := &ConstantRetryIntervalTask{
 		maxRetries:   maxRetries,
 		waitInterval: waitInterval,
@@ -25,8 +28,8 @@ func WithConstantRetries(maxRetries uint, waitInterval time.Duration, payload fu
 	return task
 }
 
-func (s *ConstantRetryIntervalTask) Do(_ uint) error {
-	return s.payload()
+func (s *ConstantRetryIntervalTask) Do(ctx context.Context, _ uint) error {
+	return s.payload(ctx)
 }
 
 func (s *ConstantRetryIntervalTask) Interval(_ uint) time.Duration {

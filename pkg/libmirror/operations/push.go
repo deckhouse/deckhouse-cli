@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -19,17 +20,21 @@ import (
 )
 
 func PushDeckhouseToRegistry(mirrorCtx *contexts.PushContext) error {
+	return PushDeckhouseToRegistryContext(context.Background(), mirrorCtx)
+}
+
+func PushDeckhouseToRegistryContext(ctx context.Context, mirrorCtx *contexts.PushContext) error {
 	logger := mirrorCtx.Logger
 	logger.InfoF("Looking for Deckhouse images to push")
-	ociLayouts, modulesList, err := findLayoutsToPush(mirrorCtx)
+	ociLayouts, modulesList, err := findLayoutsToPush(ctx, mirrorCtx)
 	if err != nil {
 		return fmt.Errorf("Find OCI Image Layouts to push: %w", err)
 	}
 
 	for repo, ociLayout := range ociLayouts {
 		logger.InfoLn("Mirroring", repo)
-		err = layouts.PushLayoutToRepo(
-			ociLayout, repo,
+		err = layouts.PushLayoutToRepoContext(
+			ctx, ociLayout, repo,
 			mirrorCtx.RegistryAuth,
 			mirrorCtx.Logger,
 			mirrorCtx.Parallelism,
@@ -54,7 +59,7 @@ func PushDeckhouseToRegistry(mirrorCtx *contexts.PushContext) error {
 	}
 
 	logger.InfoLn("Pushing modules tags")
-	if err = pushModulesTags(&mirrorCtx.BaseContext, modulesList); err != nil {
+	if err = pushModulesTags(ctx, &mirrorCtx.BaseContext, modulesList); err != nil {
 		return fmt.Errorf("Push modules tags: %w", err)
 	}
 	logger.InfoF("All modules tags are pushed")
@@ -62,14 +67,14 @@ func PushDeckhouseToRegistry(mirrorCtx *contexts.PushContext) error {
 	return nil
 }
 
-func pushModulesTags(mirrorCtx *contexts.BaseContext, modulesList []string) error {
+func pushModulesTags(ctx context.Context, mirrorCtx *contexts.BaseContext, modulesList []string) error {
 	if len(modulesList) == 0 {
 		return nil
 	}
 
 	logger := mirrorCtx.Logger
-
 	refOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorContext(mirrorCtx)
+	remoteOpts = append(remoteOpts, remote.WithContext(ctx))
 	modulesRepo := path.Join(mirrorCtx.RegistryHost, mirrorCtx.RegistryPath, "modules")
 	pushCount := 1
 	for _, moduleName := range modulesList {
@@ -93,7 +98,7 @@ func pushModulesTags(mirrorCtx *contexts.BaseContext, modulesList []string) erro
 	return nil
 }
 
-func findLayoutsToPush(mirrorCtx *contexts.PushContext) (map[string]layout.Path, []string, error) {
+func findLayoutsToPush(ctx context.Context, mirrorCtx *contexts.PushContext) (map[string]layout.Path, []string, error) {
 	ociLayouts := make(map[string]layout.Path)
 	bundlePaths := [][]string{
 		{""}, // Root contains main deckhouse repo
@@ -107,6 +112,10 @@ func findLayoutsToPush(mirrorCtx *contexts.PushContext) (map[string]layout.Path,
 	}
 
 	for _, bundlePath := range bundlePaths {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+
 		indexRef := path.Join(append([]string{mirrorCtx.RegistryHost + mirrorCtx.RegistryPath}, bundlePath...)...)
 		layoutFileSystemPath := filepath.Join(append([]string{mirrorCtx.UnpackedImagesPath}, bundlePath...)...)
 		l, err := layout.FromPath(layoutFileSystemPath)
@@ -126,12 +135,16 @@ func findLayoutsToPush(mirrorCtx *contexts.PushContext) (map[string]layout.Path,
 		return nil, nil, err
 	}
 
-	for _, dir := range dirs {
-		if !dir.IsDir() {
+	for _, dirEntry := range dirs {
+		if err = ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+
+		if !dirEntry.IsDir() {
 			continue
 		}
 
-		moduleName := dir.Name()
+		moduleName := dirEntry.Name()
 		modulesNames = append(modulesNames, moduleName)
 		moduleRef := path.Join(mirrorCtx.RegistryHost+mirrorCtx.RegistryPath, "modules", moduleName)
 		moduleReleasesRef := path.Join(mirrorCtx.RegistryHost+mirrorCtx.RegistryPath, "modules", moduleName, "release")

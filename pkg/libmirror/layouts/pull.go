@@ -17,6 +17,7 @@ limitations under the License.
 package layouts
 
 import (
+	"context"
 	"fmt"
 	"path"
 	"strings"
@@ -184,8 +185,8 @@ func PullImageSet(
 		err = retry.RunTask(
 			pullCtx.Logger,
 			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageReferenceString),
-			task.WithConstantRetries(5, 10*time.Second, func() error {
-				img, err := remote.Image(ref, remoteOpts...)
+			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
+				img, err := remote.Image(ref, append(remoteOpts, remote.WithContext(ctx))...)
 				if err != nil {
 					if errorutil.IsImageNotFoundError(err) && pullOpts.allowMissingTags {
 						pullCtx.Logger.WarnLn("⚠️ Not found in registry, skipping pull")

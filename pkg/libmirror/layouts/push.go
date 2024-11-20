@@ -17,9 +17,10 @@ limitations under the License.
 package layouts
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"os"
+	"sync"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -27,6 +28,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/hashicorp/go-multierror"
 	"github.com/samber/lo"
 	"github.com/samber/lo/parallel"
 
@@ -40,6 +42,27 @@ import (
 var ErrEmptyLayout = errors.New("No images in layout")
 
 func PushLayoutToRepo(
+	imagesLayout layout.Path,
+	registryRepo string,
+	authProvider authn.Authenticator,
+	logger contexts.Logger,
+	parallelismConfig contexts.ParallelismConfig,
+	insecure, skipVerifyTLS bool,
+) error {
+	return PushLayoutToRepoContext(
+		context.Background(),
+		imagesLayout,
+		registryRepo,
+		authProvider,
+		logger,
+		parallelismConfig,
+		insecure,
+		skipVerifyTLS,
+	)
+}
+
+func PushLayoutToRepoContext(
+	ctx context.Context,
 	imagesLayout layout.Path,
 	registryRepo string,
 	authProvider authn.Authenticator,
@@ -73,7 +96,9 @@ func PushLayoutToRepo(
 			tag := manifestSet[0].Annotations["io.deckhouse.image.short_tag"]
 			imageRef := registryRepo + ":" + tag
 			logger.InfoF("[%d / %d] Pushing image %s", imagesCount, len(indexManifest.Manifests), imageRef)
-			pushImage(logger, registryRepo, index, imagesCount, refOpts, remoteOpts)(manifestSet[0], 0)
+			if err = pushImage(ctx, registryRepo, index, manifestSet[0], refOpts, remoteOpts); err != nil {
+				return fmt.Errorf("Push Image: %w", err)
+			}
 			imagesCount += 1
 			continue
 		}
@@ -84,59 +109,61 @@ func PushLayoutToRepo(
 				logger.InfoF("- %s", registryRepo+":"+manifest.Annotations["io.deckhouse.image.short_tag"])
 			}
 
-			parallel.ForEach(manifestSet, pushImage(logger, registryRepo, index, imagesCount, refOpts, remoteOpts))
+			errMu := &sync.Mutex{}
+			merr := &multierror.Error{}
+			parallel.ForEach(manifestSet, func(item v1.Descriptor, i int) {
+				if err = pushImage(ctx, registryRepo, index, item, refOpts, remoteOpts); err != nil {
+					errMu.Lock()
+					defer errMu.Unlock()
+					merr = multierror.Append(merr, err)
+				}
+			})
 
-			return nil
+			return merr.ErrorOrNil()
 		})
 		if err != nil {
 			return fmt.Errorf("Push batch of images: %w", err)
 		}
-		batchesCount += 1
-		imagesCount += len(manifestSet)
 	}
 
 	return nil
 }
 
 func pushImage(
-	logger contexts.Logger,
+	ctx context.Context,
 	registryRepo string,
 	index v1.ImageIndex,
-	imagesCount int,
+	manifest v1.Descriptor,
 	refOpts []name.Option,
 	remoteOpts []remote.Option,
-) func(v1.Descriptor, int) {
-	return func(manifest v1.Descriptor, _ int) {
-		tag := manifest.Annotations["io.deckhouse.image.short_tag"]
-		imageRef := registryRepo + ":" + tag
-		img, err := index.Image(manifest.Digest)
-		if err != nil {
-			logger.WarnF("Read image: %v", err)
-			os.Exit(1)
-		}
-		ref, err := name.ParseReference(imageRef, refOpts...)
-		if err != nil {
-			logger.WarnF("Parse image reference: %v", err)
-			os.Exit(1)
-		}
+) error {
+	tag := manifest.Annotations["io.deckhouse.image.short_tag"]
+	imageRef := registryRepo + ":" + tag
+	img, err := index.Image(manifest.Digest)
+	if err != nil {
+		return fmt.Errorf("Read image: %v", err)
+	}
+	ref, err := name.ParseReference(imageRef, refOpts...)
+	if err != nil {
+		return fmt.Errorf("Parse image reference: %v", err)
+	}
 
-		err = retry.RunTask(silentLogger{}, "", task.WithConstantRetries(19, 3*time.Second, func() error {
-			if err = remote.Write(ref, img, remoteOpts...); err != nil {
+	err = retry.RunTaskWithContext(
+		ctx, silentLogger{}, "push",
+		task.WithConstantRetries(4, 3*time.Second, func(ctx context.Context) error {
+			if err = remote.Write(ref, img, append(remoteOpts, remote.WithContext(ctx))...); err != nil {
 				if errorutil.IsTrivyMediaTypeNotAllowedError(err) {
-					logger.WarnLn(errorutil.CustomTrivyMediaTypesWarning)
-					os.Exit(1)
+					return fmt.Errorf(errorutil.CustomTrivyMediaTypesWarning)
 				}
 				return fmt.Errorf("Write %s to registry: %w", ref.String(), err)
 			}
 			return nil
-		}))
-		if err != nil {
-			logger.WarnF("Push image: %v", err)
-			os.Exit(1)
-		}
-
-		imagesCount += 1
+		}),
+	)
+	if err != nil {
+		return fmt.Errorf("Run push task: %v", err)
 	}
+	return nil
 }
 
 type silentLogger struct{}

@@ -1,6 +1,7 @@
 package retry
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"testing"
@@ -20,11 +21,13 @@ func TestRunSuccessfulTask(t *testing.T) {
 	require.Equalf(t, uint(1), task.runCount, "Task should only be called once")
 }
 
+var _ Task = &successfulTask{}
+
 type successfulTask struct {
 	runCount uint
 }
 
-func (s *successfulTask) Do(_ uint) error {
+func (s *successfulTask) Do(_ context.Context, _ uint) error {
 	s.runCount += 1
 	return nil
 }
@@ -44,12 +47,14 @@ func TestRunFailingTask(t *testing.T) {
 	require.Equalf(t, uint(4), task.reportedRetryCount, "Task should be retried 4 times")
 }
 
+var _ Task = &failingTask{}
+
 type failingTask struct {
 	runCount           uint
 	reportedRetryCount uint
 }
 
-func (s *failingTask) Do(retryCount uint) error {
+func (s *failingTask) Do(_ context.Context, retryCount uint) error {
 	s.runCount += 1
 	s.reportedRetryCount = retryCount
 	return errors.New("failing task")
@@ -69,11 +74,13 @@ func TestRunEventuallySuccessfulTask(t *testing.T) {
 	require.Equalf(t, uint(2), task.runCount, "Task should run 2 times")
 }
 
+var _ Task = &eventualSuccessTask{}
+
 type eventualSuccessTask struct {
 	runCount uint
 }
 
-func (s *eventualSuccessTask) Do(_ uint) error {
+func (s *eventualSuccessTask) Do(_ context.Context, _ uint) error {
 	s.runCount += 1
 	if s.runCount > 0 && s.runCount%2 == 0 {
 		return nil
