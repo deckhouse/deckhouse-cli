@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package provider_config
+package static_config
 
 import (
 	"os"
@@ -23,17 +23,15 @@ import (
 )
 
 func AddFlags(flagSet *pflag.FlagSet) {
+
 	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
 	if p := os.Getenv("KUBECONFIG"); p != "" {
 		defaultKubeconfigPath = p
 	}
 
-	editor := os.ExpandEnv("vi")
-	if editor == "" {
-		editor = os.Getenv("EDITOR")
-		if editor == "" {
-			editor = "vi"
-		}
+	defaultEditor := os.ExpandEnv("vi")
+	if e := os.Getenv("EDITOR"); e != "" {
+		defaultEditor = e
 	}
 
 	flagSet.StringP(
@@ -44,7 +42,7 @@ func AddFlags(flagSet *pflag.FlagSet) {
 
 	flagSet.StringP(
 		"editor", "e",
-		editor,
-		"Your favourite editor. (default is vi, if $EDITOR is not set.)",
+		defaultEditor,
+		"Your favourite editor. (default is $EDITOR when it is set)",
 	)
 }

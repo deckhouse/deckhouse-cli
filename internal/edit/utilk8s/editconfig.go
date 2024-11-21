@@ -16,6 +16,11 @@ import (
 func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 	log.Println("Edit in Kubernetes cluster", name)
 
+	editor, err := cmd.Flags().GetString("editor")
+	if err != nil {
+		return fmt.Errorf("Failed to open editor: %w", err)
+	}	
+	
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
@@ -66,16 +71,8 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 
 	fmt.Printf("Secret data saved to %s. Now you can edit it in vim.\n", tempFileName)
 
-	//editor := app.Editor
-	//if editor == "" {
-	//	editor = os.Getenv("EDITOR")
-	//	if editor == "" {
-	//		editor = "vi"
-	//	}
-	//}
-
 	// Open the file in vim for editing
-	cmd1 := exec.Command("vi", tempFileName.Name())
+	cmd1 := exec.Command(editor, tempFileName.Name())
 	cmd1.Stdin = os.Stdin
 	cmd1.Stdout = os.Stdout
 	cmd1.Stderr = os.Stderr
