@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cluster_config
+package static_config
 
 import (
 	"github.com/deckhouse/deckhouse-cli/internal/edit/utilk8s"
@@ -24,28 +24,28 @@ import (
 )
 
 // TODO texts
-var clusterConfigurationLong = templates.LongDesc(`
-Edit Deckhouse Kubernetes Platform cluster configuration.
+var staticClusterConfigurationLong = templates.LongDesc(`
+Edit Deckhouse Kubernetes Platform static cluster configuration.
 
 © Flant JSC 2024`)
 
 func NewCommand() *cobra.Command {
-	clusterConfigurationCmd := &cobra.Command{
-		Use:           "cluster-configuration",
-		Short:         "Edit Deckhouse Kubernetes Platform cluster configuration",
-		Long:          clusterConfigurationLong,
+	staticClusterConfigurationCmd := &cobra.Command{
+		Use:           "static-cluster-configuration",
+		Short:         "Edit Deckhouse Kubernetes Platform static cluster configuration",
+		Long:          staticClusterConfigurationLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		PreRunE:       ValidateParameters,
-		RunE:          editClusterConfig,
+		RunE:          editStaticClusterConfig,
 	}
 
-	addFlags(clusterConfigurationCmd.Flags())
-	return clusterConfigurationCmd
+	addFlags(staticClusterConfigurationCmd.Flags())
+	return staticClusterConfigurationCmd
 }
 
-func editClusterConfig(cmd *cobra.Command, _ []string) error {
-	err := utilk8s.BaseEditConfigCMD(cmd, "cluster-configuration", "d8-cluster-configuration", "cluster-configuration.yaml")
+func editStaticClusterConfig(cmd *cobra.Command, _ []string) error {
+	err := utilk8s.BaseEditConfigCMD(cmd, "static-cluster-configuration", "d8-static-cluster-configuration", "static-cluster-configuration.yaml")
 	if err != nil {
 		log.Fatalf("Error updating secret: %s", err.Error())
 	}

@@ -14,23 +14,27 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cluster_config
+package static_config
 
 import (
+	"fmt"
+	"github.com/spf13/cobra"
 	"os"
-
-	"github.com/spf13/pflag"
 )
 
-func addFlags(flagSet *pflag.FlagSet) {
-	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
-	if p := os.Getenv("KUBECONFIG"); p != "" {
-		defaultKubeconfigPath = p
+func ValidateParameters(cmd *cobra.Command, args []string) error {
+	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	flagSet.StringP(
-		"kubeconfig", "k",
-		defaultKubeconfigPath,
-		"KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)",
-	)
+	stats, err := os.Stat(kubeconfigPath)
+	if err != nil {
+		return fmt.Errorf("Invalid --kubeconfig: %w", err)
+	}
+	if !stats.Mode().IsRegular() {
+		return fmt.Errorf("Invalid --kubeconfig: %s is not a regular file", kubeconfigPath)
+	}
+
+	return nil
 }

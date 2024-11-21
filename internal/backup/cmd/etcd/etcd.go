@@ -137,6 +137,7 @@ func etcd(cmd *cobra.Command, args []string) error {
 			log.Printf("%s: Fail, %v\n", etcdPodName, err)
 			continue
 		}
+		fmt.Printf("%s: Fail, %v\n", etcdPodName)
 
 		snapshotStreamingSupported, err := checkEtcdInstanceSupportsSnapshotStreaming(kubeCl, config, etcdPodName)
 		if err != nil {

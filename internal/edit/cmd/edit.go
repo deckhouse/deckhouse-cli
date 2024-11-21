@@ -21,6 +21,8 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 
 	cluster_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/cluster-configuration"
+	provider_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/provider-cluster-configuration"
+	static_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/static-cluster-configuration"
 )
 
 // TODO texts
@@ -31,14 +33,14 @@ Edit cluster configuration
 
 func NewCommand() *cobra.Command {
 	editCmd := &cobra.Command{
-		Use:   "edit",
-		Short: "Edit cluster configuration",
-		Long:  editLong,
+		Use: "edit", Short: "Edit cluster configuration",
+		Long: editLong,
 	}
 
 	editCmd.AddCommand(
 		cluster_config.NewCommand(),
+		static_config.NewCommand(),
+		provider_config.NewCommand(),
 	)
-
 	return editCmd
 }
