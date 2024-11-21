@@ -17,7 +17,6 @@ limitations under the License.
 package static_config
 
 import (
-	edit "github.com/deckhouse/deckhouse-cli/internal/edit/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/edit/utilk8s"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
@@ -37,11 +36,11 @@ func NewCommand() *cobra.Command {
 		Long:          staticClusterConfigurationLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		PreRunE:       edit.ValidateParameters,
+		PreRunE:       ValidateParameters,
 		RunE:          editStaticClusterConfig,
 	}
 
-	edit.AddFlags(staticClusterConfigurationCmd.Flags())
+	AddFlags(staticClusterConfigurationCmd.Flags())
 	return staticClusterConfigurationCmd
 }
 

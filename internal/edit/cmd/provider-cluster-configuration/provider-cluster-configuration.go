@@ -17,7 +17,6 @@ limitations under the License.
 package provider_config
 
 import (
-	edit "github.com/deckhouse/deckhouse-cli/internal/edit/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/edit/utilk8s"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
@@ -37,11 +36,11 @@ func NewCommand() *cobra.Command {
 		Long:          providerClusterConfigurationLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		PreRunE:       edit.ValidateParameters,
+		PreRunE:       ValidateParameters,
 		RunE:          editProviderClusterConfig,
 	}
 
-	edit.AddFlags(providerClusterConfigurationCmd.Flags())
+	AddFlags(providerClusterConfigurationCmd.Flags())
 	return providerClusterConfigurationCmd
 }
 
