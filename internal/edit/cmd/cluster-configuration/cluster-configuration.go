@@ -17,6 +17,7 @@ limitations under the License.
 package cluster_config
 
 import (
+	"github.com/deckhouse/deckhouse-cli/internal/edit/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/edit/utilk8s"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
@@ -36,11 +37,11 @@ func NewCommand() *cobra.Command {
 		Long:          clusterConfigurationLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		PreRunE:       ValidateParameters,
+		PreRunE:       edit.ValidateParameters,
 		RunE:          editClusterConfig,
 	}
 
-	addFlags(clusterConfigurationCmd.Flags())
+	edit.AddFlags(clusterConfigurationCmd.Flags())
 	return clusterConfigurationCmd
 }
 

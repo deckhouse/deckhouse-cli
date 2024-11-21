@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cluster_config
+package edit
 
 import (
 	"os"
@@ -22,15 +22,29 @@ import (
 	"github.com/spf13/pflag"
 )
 
-func addFlags(flagSet *pflag.FlagSet) {
+func AddFlags(flagSet *pflag.FlagSet) {
 	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
 	if p := os.Getenv("KUBECONFIG"); p != "" {
 		defaultKubeconfigPath = p
+	}
+
+	editor := os.ExpandEnv("vi")
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+		if editor == "" {
+			editor = "vi"
+		}
 	}
 
 	flagSet.StringP(
 		"kubeconfig", "k",
 		defaultKubeconfigPath,
 		"KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)",
+	)
+
+	flagSet.StringP(
+		"editor", "e",
+		editor,
+		"Your favourite editor. (default is vi, if $EDITOR is not set.)",
 	)
 }
