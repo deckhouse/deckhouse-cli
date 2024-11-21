@@ -14,13 +14,11 @@ import (
 )
 
 func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
-	log.Println("Edit in Kubernetes cluster", name)
-
 	editor, err := cmd.Flags().GetString("editor")
 	if err != nil {
 		return fmt.Errorf("Failed to open editor: %w", err)
-	}	
-	
+	}
+
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
@@ -31,14 +29,12 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	// Fetch the current secret from the cluster
-	secret1, err := kubeCl.CoreV1().Secrets("kube-system").Get(context.Background(), secret, metav1.GetOptions{})
+	secretConfig, err := kubeCl.CoreV1().Secrets("kube-system").Get(context.Background(), secret, metav1.GetOptions{})
 	if err != nil {
 		log.Fatalf("Error fetching secret: %s", err.Error())
 	}
 
-	// Convert the secret into YAML
-	content, err := yaml.Marshal(secret1)
+	content, err := yaml.Marshal(secretConfig)
 	if err != nil {
 		log.Fatalf("Error marshaling secret to YAML: %s", err.Error())
 	}
@@ -69,29 +65,23 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 		log.Fatalf("Error writing decoded data to file: %s", err.Error())
 	}
 
-	fmt.Printf("Secret data saved to %s. Now you can edit it in vim.\n", tempFileName)
+	cmdExec := exec.Command(editor, tempFileName.Name())
+	cmdExec.Stdin = os.Stdin
+	cmdExec.Stdout = os.Stdout
+	cmdExec.Stderr = os.Stderr
 
-	// Open the file in vim for editing
-	cmd1 := exec.Command(editor, tempFileName.Name())
-	cmd1.Stdin = os.Stdin
-	cmd1.Stdout = os.Stdout
-	cmd1.Stderr = os.Stderr
-
-	err = cmd1.Run()
+	err = cmdExec.Run()
 	if err != nil {
-		log.Fatalf("Error opening vim: %s", err.Error())
+		log.Fatalf("Error opening in editor: %s", err.Error())
 	}
 
-	// After editing the file, read the updated content
 	updatedContent, err := os.ReadFile(tempFileName.Name())
 	if err != nil {
 		log.Fatalf("Error reading updated file: %s", err.Error())
 	}
+	secretConfig.Data[dataKey] = updatedContent
 
-	// Update the specific field in the secret with the re-encoded value
-	secret1.Data[dataKey] = updatedContent
-
-	_, err = kubeCl.CoreV1().Secrets("kube-system").Update(context.Background(), secret1, metav1.UpdateOptions{})
+	_, err = kubeCl.CoreV1().Secrets("kube-system").Update(context.Background(), secretConfig, metav1.UpdateOptions{})
 	if err != nil {
 		log.Fatalf("Error updating secret: %s", err.Error())
 	}
