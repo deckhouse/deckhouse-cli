@@ -48,7 +48,6 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 	if err != nil {
 		log.Fatalf("Error parsing YAML file: %v", err)
 	}
-
 	decodedValue, err := base64.StdEncoding.DecodeString(secretStruct.Data[dataKey])
 	if err != nil {
 		log.Fatalf("Error decoding base64 value for field '%s': %s", dataKey, err.Error())
@@ -59,7 +58,6 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 		log.Fatalf("can't save cluster configuration: %s\n", err)
 		return err
 	}
-
 	err = os.WriteFile(tempFileName.Name(), decodedValue, 0644)
 	if err != nil {
 		log.Fatalf("Error writing decoded data to file: %s", err.Error())
@@ -69,7 +67,6 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 	cmdExec.Stdin = os.Stdin
 	cmdExec.Stdout = os.Stdout
 	cmdExec.Stderr = os.Stderr
-
 	err = cmdExec.Run()
 	if err != nil {
 		log.Fatalf("Error opening in editor: %s", err.Error())
@@ -79,6 +76,13 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 	if err != nil {
 		log.Fatalf("Error reading updated file: %s", err.Error())
 	}
+
+	secretData := secretConfig.Data[dataKey]
+	if string(secretData) == string(updatedContent) {
+		fmt.Println("Configurations are equal. Nothing to update.")
+		return nil
+	}
+
 	secretConfig.Data[dataKey] = updatedContent
 
 	_, err = kubeCl.CoreV1().Secrets("kube-system").Update(context.Background(), secretConfig, metav1.UpdateOptions{})
@@ -87,5 +91,6 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 	}
 
 	fmt.Println("Secret updated successfully")
+
 	return err
 }
