@@ -49,7 +49,7 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 	}
 	decodedValue, err := base64.StdEncoding.DecodeString(secretStruct.Data[dataKey])
 	if err != nil {
-		return fmt.Errorf("Error decoding base64 value for field '%w': %w", dataKey, err)
+		return fmt.Errorf("Error decoding base64 value for field '%s': %w", dataKey, err)
 	}
 
 	tempFileName, err := os.CreateTemp(os.TempDir(), "secret.*.yaml")
