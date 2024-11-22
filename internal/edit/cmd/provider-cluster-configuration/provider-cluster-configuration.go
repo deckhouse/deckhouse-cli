@@ -23,16 +23,15 @@ import (
 	"log"
 )
 
-// TODO texts
 var providerClusterConfigurationLong = templates.LongDesc(`
-Edit Deckhouse Kubernetes Platform provider cluster configuration.
+Edit provider-cluster-configuration in Kubernetes cluster.
 
 © Flant JSC 2024`)
 
 func NewCommand() *cobra.Command {
 	providerClusterConfigurationCmd := &cobra.Command{
 		Use:           "provider-cluster-configuration",
-		Short:         "Edit Deckhouse Kubernetes Platform provider cluster configuration",
+		Short:         "Edit provider-cluster-configuration.",
 		Long:          providerClusterConfigurationLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,

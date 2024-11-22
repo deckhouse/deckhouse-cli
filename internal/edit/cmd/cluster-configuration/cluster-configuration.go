@@ -23,16 +23,15 @@ import (
 	"log"
 )
 
-// TODO texts
 var clusterConfigurationLong = templates.LongDesc(`
-Edit Deckhouse Kubernetes Platform cluster configuration.
+Edit cluster-configuration in Kubernetes cluster.
 
 © Flant JSC 2024`)
 
 func NewCommand() *cobra.Command {
 	clusterConfigurationCmd := &cobra.Command{
 		Use:           "cluster-configuration",
-		Short:         "Edit Deckhouse Kubernetes Platform cluster configuration",
+		Short:         "Edit cluster-configuration.",
 		Long:          clusterConfigurationLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,

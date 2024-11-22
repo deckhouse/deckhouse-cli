@@ -23,16 +23,15 @@ import (
 	"log"
 )
 
-// TODO texts
 var staticClusterConfigurationLong = templates.LongDesc(`
-Edit Deckhouse Kubernetes Platform static cluster configuration.
+Edit static-cluster-configuration in Kubernetes cluster.
 
 © Flant JSC 2024`)
 
 func NewCommand() *cobra.Command {
 	staticClusterConfigurationCmd := &cobra.Command{
 		Use:           "static-cluster-configuration",
-		Short:         "Edit Deckhouse Kubernetes Platform static cluster configuration",
+		Short:         "Edit static-cluster-configuration.",
 		Long:          staticClusterConfigurationLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,

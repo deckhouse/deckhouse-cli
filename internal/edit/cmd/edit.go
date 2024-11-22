@@ -25,15 +25,14 @@ import (
 	static_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/static-cluster-configuration"
 )
 
-// TODO texts
 var editLong = templates.LongDesc(`
-Edit cluster configuration
+Change configuration files in Kubernetes cluster conveniently and safely.
 
 © Flant JSC 2024`)
 
 func NewCommand() *cobra.Command {
 	editCmd := &cobra.Command{
-		Use: "edit", Short: "Edit cluster configuration",
+		Use: "edit", Short: "Edit configuration files",
 		Long: editLong,
 	}
 
