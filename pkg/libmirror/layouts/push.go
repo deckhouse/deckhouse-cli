@@ -124,6 +124,8 @@ func PushLayoutToRepoContext(
 		if err != nil {
 			return fmt.Errorf("Push batch of images: %w", err)
 		}
+		batchesCount += 1
+		imagesCount += len(manifestSet)
 	}
 
 	return nil
