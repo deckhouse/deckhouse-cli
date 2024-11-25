@@ -17,9 +17,9 @@ limitations under the License.
 package flags
 
 import (
+	"os"
 	"fmt"
 	"github.com/spf13/cobra"
-	"os"
 )
 
 func ValidateParameters(cmd *cobra.Command, args []string) error {

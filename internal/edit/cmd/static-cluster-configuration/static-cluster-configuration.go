@@ -17,11 +17,11 @@ limitations under the License.
 package static_config
 
 import (
-	"github.com/deckhouse/deckhouse-cli/pkg/utilk8s"
-	"github.com/deckhouse/deckhouse-cli/internal/edit/flags"
-	"github.com/spf13/cobra"
-	"k8s.io/kubectl/pkg/util/templates"
-	"log"
+        "log"
+        "k8s.io/kubectl/pkg/util/templates"
+        "github.com/spf13/cobra"
+        "github.com/deckhouse/deckhouse-cli/pkg/utilk8s"
+        "github.com/deckhouse/deckhouse-cli/internal/edit/flags"
 )
 
 var staticClusterConfigurationLong = templates.LongDesc(`
