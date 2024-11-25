@@ -19,6 +19,7 @@ package bundle
 import (
 	"archive/tar"
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +33,14 @@ import (
 )
 
 func Unpack(mirrorCtx *contexts.BaseContext) error {
+	return UnpackContext(context.Background(), mirrorCtx)
+}
+
+func UnpackContext(ctx context.Context, mirrorCtx *contexts.BaseContext) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	bundleDir := filepath.Dir(mirrorCtx.BundlePath)
 	catalog, err := os.ReadDir(bundleDir)
 	if err != nil {
@@ -39,6 +48,10 @@ func Unpack(mirrorCtx *contexts.BaseContext) error {
 	}
 	streams := make([]io.Reader, 0)
 	for _, entry := range catalog {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+
 		fileName := entry.Name()
 		if !entry.Type().IsRegular() || filepath.Ext(fileName) != ".chunk" {
 			continue
@@ -61,6 +74,10 @@ func Unpack(mirrorCtx *contexts.BaseContext) error {
 
 	tarReader := tar.NewReader(bundleStream)
 	for {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+
 		tarHdr, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
 			break

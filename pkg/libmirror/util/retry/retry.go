@@ -1,6 +1,7 @@
 package retry
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -8,23 +9,32 @@ import (
 )
 
 type Task interface {
-	Do(retryCount uint) error
+	Do(ctx context.Context, retryCount uint) error
 	Interval(retryCount uint) time.Duration
 	MaxRetries() uint
 }
 
 func RunTask(logger contexts.Logger, name string, task Task) error {
+	return RunTaskWithContext(context.Background(), logger, name, task)
+}
+
+func RunTaskWithContext(ctx context.Context, logger contexts.Logger, name string, task Task) error {
 	restarts := uint(0)
 	var lastErr error
 	for restarts < task.MaxRetries() {
 		if restarts > 0 {
 			interval := task.Interval(restarts)
 			logger.InfoF("%s failed, next retry in %v", name, interval)
-			time.Sleep(interval)
+			select {
+			case <-time.After(interval):
+				// Pause completed, proceed with next attempt
+			case <-ctx.Done():
+				return fmt.Errorf("%q: task cancelled during retry wait: %w", name, ctx.Err())
+			}
 		}
 
 		logger.InfoLn(name)
-		lastErr = task.Do(restarts)
+		lastErr = task.Do(ctx, restarts)
 		if lastErr == nil {
 			return nil
 		}

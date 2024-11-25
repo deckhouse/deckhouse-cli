@@ -20,7 +20,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -32,14 +31,21 @@ import (
 )
 
 func ValidateReadAccessForImage(imageTag string, authProvider authn.Authenticator, insecure, skipVerifyTLS bool) error {
+	return ValidateReadAccessForImageContext(context.Background(), imageTag, authProvider, insecure, skipVerifyTLS)
+}
+
+func ValidateReadAccessForImageContext(
+	ctx context.Context,
+	imageTag string,
+	authProvider authn.Authenticator,
+	insecure, skipVerifyTLS bool,
+) error {
 	nameOpts, remoteOpts := MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
 	ref, err := name.ParseReference(imageTag, nameOpts...)
 	if err != nil {
 		return fmt.Errorf("Parse registry address: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
 	remoteOpts = append(remoteOpts, remote.WithContext(ctx))
 	_, err = remote.Head(ref, remoteOpts...)
 	if err != nil {
@@ -50,7 +56,17 @@ func ValidateReadAccessForImage(imageTag string, authProvider authn.Authenticato
 }
 
 func ValidateWriteAccessForRepo(repo string, authProvider authn.Authenticator, insecure, skipVerifyTLS bool) error {
+	return ValidateWriteAccessForRepoContext(context.Background(), repo, authProvider, insecure, skipVerifyTLS)
+}
+
+func ValidateWriteAccessForRepoContext(
+	ctx context.Context,
+	repo string,
+	authProvider authn.Authenticator,
+	insecure, skipVerifyTLS bool,
+) error {
 	nameOpts, remoteOpts := MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
+	remoteOpts = append(remoteOpts, remote.WithContext(ctx))
 	ref, err := name.NewTag(repo+":d8WriteCheck", nameOpts...)
 	if err != nil {
 		return err
