@@ -17,7 +17,8 @@ limitations under the License.
 package cluster_config
 
 import (
-	"github.com/deckhouse/deckhouse-cli/internal/edit/utilk8s"
+        "github.com/deckhouse/deckhouse-cli/pkg/utilk8s"
+        "github.com/deckhouse/deckhouse-cli/internal/edit/flags"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 	"log"

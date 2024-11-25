@@ -17,6 +17,7 @@ limitations under the License.
 package edit
 
 import (
+	"os"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
@@ -24,6 +25,7 @@ import (
 	provider_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/provider-cluster-configuration"
 	static_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/static-cluster-configuration"
 )
+
 
 var editLong = templates.LongDesc(`
 Change configuration files in Kubernetes cluster conveniently and safely.
@@ -35,6 +37,13 @@ func NewCommand() *cobra.Command {
 		Use: "edit", Short: "Edit configuration files",
 		Long: editLong,
 	}
+
+        defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
+        if p := os.Getenv("KUBECONFIG"); p != "" {
+                defaultKubeconfigPath = p
+        }
+
+	editCmd.PersistentFlags().StringVarP(&defaultKubeconfigPath, "kubeconfig", "k", "", "KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)")
 
 	editCmd.AddCommand(
 		cluster_config.NewCommand(),
