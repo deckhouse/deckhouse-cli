@@ -37,17 +37,17 @@ func NewCommand() *cobra.Command {
 		Long: editLong,
 	}
 
+        editCmd.AddCommand(
+                cluster_config.NewCommand(),
+                static_config.NewCommand(),
+                provider_config.NewCommand(),
+        )
+
         defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
         if p := os.Getenv("KUBECONFIG"); p != "" {
                 defaultKubeconfigPath = p
         }
-
 	editCmd.PersistentFlags().StringVarP(&defaultKubeconfigPath, "kubeconfig", "k", "", "KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)")
 
-	editCmd.AddCommand(
-		cluster_config.NewCommand(),
-		static_config.NewCommand(),
-		provider_config.NewCommand(),
-	)
 	return editCmd
 }
