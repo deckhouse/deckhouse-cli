@@ -36,16 +36,16 @@ func NewCommand() *cobra.Command {
 		Long:          providerClusterConfigurationLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		PreRunE:       ValidateParameters,
+		PreRunE:       flags.validateParameters,
 		RunE:          editProviderClusterConfig,
 	}
 
-	AddFlags(providerClusterConfigurationCmd.Flags())
+	flags.addFlags(providerClusterConfigurationCmd.Flags())
 	return providerClusterConfigurationCmd
 }
 
 func editProviderClusterConfig(cmd *cobra.Command, _ []string) error {
-	err := utilk8s.BaseEditConfigCMD(cmd, "provider-cluster-configuration", "d8-provider-cluster-configuration", "provider-cluster-configuration.yaml")
+	err := utilk8s.baseEditConfigCMD(cmd, "provider-cluster-configuration", "d8-provider-cluster-configuration", "provider-cluster-configuration.yaml")
 	if err != nil {
 		log.Fatalf("Error updating secret: %s", err.Error())
 	}

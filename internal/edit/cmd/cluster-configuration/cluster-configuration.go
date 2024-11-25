@@ -36,16 +36,16 @@ func NewCommand() *cobra.Command {
 		Long:          clusterConfigurationLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		PreRunE:       ValidateParameters,
+		PreRunE:       flags.validateParameters,
 		RunE:          editClusterConfig,
 	}
 
-	AddFlags(clusterConfigurationCmd.Flags())
+	flags.addFlags(clusterConfigurationCmd.Flags())
 	return clusterConfigurationCmd
 }
 
 func editClusterConfig(cmd *cobra.Command, _ []string) error {
-	err := utilk8s.BaseEditConfigCMD(cmd, "cluster-configuration", "d8-cluster-configuration", "cluster-configuration.yaml")
+	err := utilk8s.baseEditConfigCMD(cmd, "cluster-configuration", "d8-cluster-configuration", "cluster-configuration.yaml")
 	if err != nil {
 		log.Fatalf("Error updating secret: %s", err.Error())
 	}

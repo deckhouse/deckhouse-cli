@@ -22,7 +22,7 @@ import (
 	"os"
 )
 
-func ValidateParameters(cmd *cobra.Command, args []string) error {
+func validateParameters(cmd *cobra.Command, args []string) error {
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)

@@ -22,7 +22,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-func AddFlags(flagSet *pflag.FlagSet) {
+func addFlags(flagSet *pflag.FlagSet) {
 
 //	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
 //	if p := os.Getenv("KUBECONFIG"); p != "" {
