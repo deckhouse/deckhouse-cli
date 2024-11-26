@@ -20,7 +20,7 @@ import (
 	"os"
 	"k8s.io/kubectl/pkg/util/templates"
 	"github.com/spf13/cobra"
-	module_switch "github.com/deckhouse/deckhouse-cli/internal/module/cmd/module-switch"
+	module_enable "github.com/deckhouse/deckhouse-cli/internal/module/cmd/module-enable"
 )
 
 
@@ -36,7 +36,7 @@ func NewCommand() *cobra.Command {
 	}
 
         moduleCmd.AddCommand(
-                module_switch.NewCommand(),
+                module_enable.NewCommand(),
         )
 
         defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
