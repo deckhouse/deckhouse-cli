@@ -1,0 +1,27 @@
+name: trdl-release
+on:
+  create:
+    tags:
+      - v*
+  pull_request:
+    branches:
+      - "main"
+
+jobs:
+  release:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    name: Perform deckhouse-cli release using trdl server
+    #    runs-on: [self-hosted, regular]
+    #    container:
+    #      image: ubuntu:22.04
+    runs-on: ubuntu-latest
+    steps:
+    - name: Release
+      uses: werf/trdl-vault-actions/release@main
+      with:
+        vault-addr: ${{ secrets.TRDL_VAULT_ADDR }}
+        project-name: deckhouse-cli
+        git-tag: ${{ github.event.ref }}
+        vault-auth-method: approle
+        vault-role-id: ${{ secrets.TRDL_VAULT_ROLE_ID }}
+        vault-secret-id: ${{ secrets.TRDL_VAULT_SECRET_ID }}
