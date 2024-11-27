@@ -30,34 +30,72 @@ import (
 )
 
 type VirtualMachineOperation struct {
-	client kubeclient.Client
+	client  kubeclient.Client
+	options options
 }
 
-func (v VirtualMachineOperation) Stop(ctx context.Context, vmName, vmNamespace string, wait, force bool) (msg string, err error) {
-	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeStop, force)
-	return v.do(ctx, vmop, wait)
+type options struct {
+	force        bool
+	waitComplete bool
+	createOnly   bool
 }
 
-func (v VirtualMachineOperation) Start(ctx context.Context, vmName, vmNamespace string, wait bool) (msg string, err error) {
+func New(client kubeclient.Client, opts ...func(*VirtualMachineOperation)) *VirtualMachineOperation {
+	vmop := &VirtualMachineOperation{
+		client:  client,
+		options: options{},
+	}
+
+	for _, opt := range opts {
+		opt(vmop)
+	}
+
+	return vmop
+}
+
+func WithForce(force bool) func(*VirtualMachineOperation) {
+	return func(o *VirtualMachineOperation) {
+		o.options.force = force
+	}
+}
+
+func WithWaitComplete(waitComplete bool) func(*VirtualMachineOperation) {
+	return func(o *VirtualMachineOperation) {
+		o.options.waitComplete = waitComplete
+	}
+}
+
+func WithCreateOnly(createOnly bool) func(*VirtualMachineOperation) {
+	return func(o *VirtualMachineOperation) {
+		o.options.createOnly = createOnly
+	}
+}
+
+func (v VirtualMachineOperation) Stop(ctx context.Context, vmName, vmNamespace string) (msg string, err error) {
+	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeStop, false)
+	return v.do(ctx, vmop, v.options.createOnly, v.options.waitComplete)
+}
+
+func (v VirtualMachineOperation) Start(ctx context.Context, vmName, vmNamespace string) (msg string, err error) {
 	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeStart, false)
-	return v.do(ctx, vmop, wait)
+	return v.do(ctx, vmop, v.options.createOnly, v.options.waitComplete)
 }
 
-func (v VirtualMachineOperation) Restart(ctx context.Context, vmName, vmNamespace string, wait, force bool) (msg string, err error) {
-	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeRestart, force)
-	return v.do(ctx, vmop, wait)
+func (v VirtualMachineOperation) Restart(ctx context.Context, vmName, vmNamespace string) (msg string, err error) {
+	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeRestart, v.options.force)
+	return v.do(ctx, vmop, v.options.createOnly, v.options.waitComplete)
 }
 
-func (v VirtualMachineOperation) Evict(ctx context.Context, vmName, vmNamespace string, wait bool) (msg string, err error) {
-	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeEvict, false)
-	return v.do(ctx, vmop, wait)
+func (v VirtualMachineOperation) Evict(ctx context.Context, vmName, vmNamespace string) (msg string, err error) {
+	vmop := v.newVMOP(vmName, vmNamespace, v1alpha2.VMOPTypeEvict, v.options.force)
+	return v.do(ctx, vmop, v.options.createOnly, v.options.waitComplete)
 }
 
-func (v VirtualMachineOperation) do(ctx context.Context, vmop *v1alpha2.VirtualMachineOperation, wait bool) (msg string, err error) {
-	if wait {
-		vmop, err = v.createAndWait(ctx, vmop)
-	} else {
+func (v VirtualMachineOperation) do(ctx context.Context, vmop *v1alpha2.VirtualMachineOperation, createOnly, waitCompleted bool) (msg string, err error) {
+	if createOnly {
 		vmop, err = v.create(ctx, vmop)
+	} else {
+		vmop, err = v.createAndWait(ctx, vmop, waitCompleted)
 	}
 	msg = v.generateMsg(vmop)
 	return msg, err
@@ -74,7 +112,7 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 	sb := strings.Builder{}
 	sb.WriteString(fmt.Sprintf("VirtualMachine %q ", vmKey.String()))
 
-	if v.isFinished(vmop) {
+	if v.isPhaseOrFailed(vmop, v1alpha2.VMOPPhaseCompleted) {
 		if !v.isCompleted(vmop) {
 			sb.WriteString("was not ")
 		}
@@ -111,7 +149,9 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 		sb.WriteString("completed.")
 	case v1alpha2.VMOPPhaseFailed:
 		cond, _ := getCondition(vmopcondition.TypeCompleted.String(), vmop.Status.Conditions)
-		sb.WriteString(fmt.Sprintf("failed. reason=%q, message=%q.", cond.Reason, cond.Message))
+		sb.WriteString(fmt.Sprintf("failed. type=%q reason=%q, message=%q.", cond.Type, cond.Reason, cond.Message))
+	case "":
+		sb.WriteString("created.")
 	default:
 		sb.WriteString(fmt.Sprintf(" phase=%q.", phase))
 	}
@@ -119,22 +159,27 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 	return sb.String()
 }
 
-func (v VirtualMachineOperation) createAndWait(ctx context.Context, vmop *v1alpha2.VirtualMachineOperation) (*v1alpha2.VirtualMachineOperation, error) {
+func (v VirtualMachineOperation) createAndWait(ctx context.Context, vmop *v1alpha2.VirtualMachineOperation, waitCompleted bool) (*v1alpha2.VirtualMachineOperation, error) {
 	vmop, err := v.create(ctx, vmop)
 	if err != nil {
 		return nil, err
 	}
-	if v.isFinished(vmop) {
+	if v.isPhaseOrFailed(vmop, v1alpha2.VMOPPhaseCompleted) {
 		return vmop, nil
 	}
-	return v.wait(ctx, vmop.GetName(), vmop.GetNamespace())
+
+	if waitCompleted {
+		return v.waitUntil(ctx, vmop.GetName(), vmop.GetNamespace(), v1alpha2.VMOPPhaseCompleted)
+	}
+
+	return v.waitUntil(ctx, vmop.GetName(), vmop.GetNamespace(), v1alpha2.VMOPPhaseInProgress)
 }
 
 func (v VirtualMachineOperation) create(ctx context.Context, vmop *v1alpha2.VirtualMachineOperation) (*v1alpha2.VirtualMachineOperation, error) {
 	return v.client.VirtualMachineOperations(vmop.GetNamespace()).Create(ctx, vmop, metav1.CreateOptions{})
 }
 
-func (v VirtualMachineOperation) wait(ctx context.Context, name, namespace string) (*v1alpha2.VirtualMachineOperation, error) {
+func (v VirtualMachineOperation) waitUntil(ctx context.Context, name, namespace string, phase v1alpha2.VMOPPhase) (*v1alpha2.VirtualMachineOperation, error) {
 	var vmop *v1alpha2.VirtualMachineOperation
 	selector, err := fields.ParseSelector(fmt.Sprintf("metadata.name=%s", name))
 	if err != nil {
@@ -150,12 +195,12 @@ func (v VirtualMachineOperation) wait(ctx context.Context, name, namespace strin
 		if !ok {
 			continue
 		}
-		if v.isFinished(op) {
+		if v.isPhaseOrFailed(op, phase) {
 			vmop = op
 			break
 		}
 	}
-	if !v.isFinished(vmop) {
+	if !v.isPhaseOrFailed(vmop, phase) {
 		return nil, context.DeadlineExceeded
 	}
 	return vmop, nil
@@ -168,11 +213,11 @@ func (v VirtualMachineOperation) isCompleted(vmop *v1alpha2.VirtualMachineOperat
 	return vmop.Status.Phase == v1alpha2.VMOPPhaseCompleted
 }
 
-func (v VirtualMachineOperation) isFinished(vmop *v1alpha2.VirtualMachineOperation) bool {
+func (v VirtualMachineOperation) isPhaseOrFailed(vmop *v1alpha2.VirtualMachineOperation, phase v1alpha2.VMOPPhase) bool {
 	if vmop == nil {
 		return false
 	}
-	return vmop.Status.Phase == v1alpha2.VMOPPhaseCompleted || vmop.Status.Phase == v1alpha2.VMOPPhaseFailed
+	return vmop.Status.Phase == phase || vmop.Status.Phase == v1alpha2.VMOPPhaseFailed
 }
 
 func (v VirtualMachineOperation) newVMOP(vmName, vmNamespace string, t v1alpha2.VMOPType, force bool) *v1alpha2.VirtualMachineOperation {
@@ -190,12 +235,6 @@ func (v VirtualMachineOperation) newVMOP(vmName, vmNamespace string, t v1alpha2.
 			VirtualMachine: vmName,
 			Force:          force,
 		},
-	}
-}
-
-func New(client kubeclient.Client) *VirtualMachineOperation {
-	return &VirtualMachineOperation{
-		client: client,
 	}
 }
 

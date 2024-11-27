@@ -23,15 +23,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deckhouse/virtualization/api/client/kubeclient"
 	"github.com/spf13/pflag"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/lifecycle/vmop"
+	"github.com/deckhouse/virtualization/api/client/kubeclient"
 
+	"github.com/deckhouse/deckhouse-cli/internal/virtualization/cmd/lifecycle/vmop"
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
 )
 
@@ -45,23 +45,10 @@ const (
 )
 
 type Manager interface {
-	Stop(ctx context.Context, name, namespace string, wait, force bool) (msg string, err error)
-	Start(ctx context.Context, name, namespace string, wait bool) (msg string, err error)
-	Restart(ctx context.Context, name, namespace string, wait, force bool) (msg string, err error)
-	Evict(ctx context.Context, name, namespace string, wait bool) (msg string, err error)
-}
-
-type Type string
-
-const TypeVirtualMachineOperation Type = "VirtualMachineOperation"
-
-func NewManager(t Type, client kubeclient.Client) (Manager, error) {
-	switch t {
-	case TypeVirtualMachineOperation:
-		return vmop.New(client), nil
-	default:
-		return nil, fmt.Errorf("invalid type %q", t)
-	}
+	Stop(ctx context.Context, name, namespace string) (msg string, err error)
+	Start(ctx context.Context, name, namespace string) (msg string, err error)
+	Restart(ctx context.Context, name, namespace string) (msg string, err error)
+	Evict(ctx context.Context, name, namespace string) (msg string, err error)
 }
 
 func NewLifecycle(cmd Command, clientConfig clientcmd.ClientConfig) *Lifecycle {
@@ -80,16 +67,18 @@ type Lifecycle struct {
 
 func DefaultOptions() Options {
 	return Options{
-		Force:   false,
-		Wait:    false,
-		Timeout: 5 * time.Minute,
+		Force:        false,
+		WaitComplete: false,
+		CreateOnly:   false,
+		Timeout:      5 * time.Minute,
 	}
 }
 
 type Options struct {
-	Force   bool
-	Wait    bool
-	Timeout time.Duration
+	Force        bool
+	WaitComplete bool
+	CreateOnly   bool
+	Timeout      time.Duration
 }
 
 func (l *Lifecycle) Run(args []string) error {
@@ -108,17 +97,17 @@ func (l *Lifecycle) Run(args []string) error {
 	var msg string
 	switch l.cmd {
 	case Stop:
-		fmt.Fprint(writer, fmt.Sprintf("Stopping virtual machine %q\n", key.String()))
-		msg, err = mgr.Stop(ctx, name, namespace, l.opts.Wait, l.opts.Force)
+		fmt.Fprintf(writer, "Stopping virtual machine %q\n", key.String())
+		msg, err = mgr.Stop(ctx, name, namespace)
 	case Start:
-		fmt.Fprint(writer, fmt.Sprintf("Starting virtual machine %q\n", key.String()))
-		msg, err = mgr.Start(ctx, name, namespace, l.opts.Wait)
+		fmt.Fprintf(writer, "Starting virtual machine %q\n", key.String())
+		msg, err = mgr.Start(ctx, name, namespace)
 	case Restart:
-		fmt.Fprint(writer, fmt.Sprintf("Restarting virtual machine %q\n", key.String()))
-		msg, err = mgr.Restart(ctx, name, namespace, l.opts.Wait, l.opts.Force)
+		fmt.Fprintf(writer, "Restarting virtual machine %q\n", key.String())
+		msg, err = mgr.Restart(ctx, name, namespace)
 	case Evict:
-		fmt.Fprint(writer, fmt.Sprintf("Evicting virtual machine %q\n", key.String()))
-		msg, err = mgr.Evict(ctx, name, namespace, l.opts.Wait)
+		fmt.Fprintf(writer, "Evicting virtual machine %q\n", key.String())
+		msg, err = mgr.Evict(ctx, name, namespace)
 	default:
 		return fmt.Errorf("invalid command %q", l.cmd)
 	}
@@ -138,7 +127,7 @@ func (l *Lifecycle) Usage() string {
   # Configure one minute timeout (default: timeout=%v)
   {{ProgramName}} {{operation}} --%s=1m myvm
   # Configure wait vm phase (default: wait=%v)
-  {{ProgramName}} {{operation}} --%s myvm`, opts.Timeout, timeoutFlag, opts.Wait, waitFlag), "{{operation}}", string(l.cmd), -1)
+  {{ProgramName}} {{operation}} --%s myvm`, opts.Timeout, timeoutFlag, opts.WaitComplete, waitFlag), "{{operation}}", string(l.cmd), -1)
 	if l.cmd != Start && l.cmd != Evict {
 		usage += fmt.Sprintf(`
   # Configure shutdown policy (default: force=%v)
@@ -166,21 +155,29 @@ func (l *Lifecycle) getManager() (Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewManager(TypeVirtualMachineOperation, virtCli)
+
+	return vmop.New(
+		virtCli,
+		vmop.WithCreateOnly(l.opts.CreateOnly),
+		vmop.WithWaitComplete(l.opts.WaitComplete),
+		vmop.WithForce(l.opts.Force),
+	), nil
 }
 
 const (
-	forceFlag, forceFlagShort     = "force", "f"
-	waitFlag, waitFlagShort       = "wait", "w"
-	timeoutFlag, timeoutFlagShort = "timeout", "t"
+	forceFlag, forceFlagShort           = "force", "f"
+	waitFlag, waitFlagShort             = "wait", "w"
+	createOnlyFlag, createOnlyFlagShort = "create-only", "c"
+	timeoutFlag, timeoutFlagShort       = "timeout", "t"
 )
 
 func AddCommandlineArgs(flagset *pflag.FlagSet, opts *Options) {
 	flagset.BoolVarP(&opts.Force, forceFlag, forceFlagShort, opts.Force,
 		fmt.Sprintf("--%s, -%s: Set this flag to force the operation.", forceFlag, forceFlagShort))
-	flagset.BoolVarP(&opts.Wait, waitFlag, waitFlagShort, opts.Wait,
+	flagset.BoolVarP(&opts.WaitComplete, waitFlag, waitFlagShort, opts.WaitComplete,
 		fmt.Sprintf("--%s, -%s: Set this flag to wait for the operation to complete.", waitFlag, waitFlagShort))
+	flagset.BoolVarP(&opts.CreateOnly, createOnlyFlag, createOnlyFlagShort, opts.CreateOnly,
+		fmt.Sprintf("--%s, -%s: Set this flag for create operation only.", createOnlyFlag, createOnlyFlagShort))
 	flagset.DurationVarP(&opts.Timeout, timeoutFlag, timeoutFlagShort, opts.Timeout,
 		fmt.Sprintf("--%s, -%s: Set this flag to change the timeout.", timeoutFlag, timeoutFlagShort))
-
 }
