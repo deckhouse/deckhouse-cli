@@ -150,6 +150,8 @@ func (v VirtualMachineOperation) generateMsg(vmop *v1alpha2.VirtualMachineOperat
 	case v1alpha2.VMOPPhaseFailed:
 		cond, _ := getCondition(vmopcondition.TypeCompleted.String(), vmop.Status.Conditions)
 		sb.WriteString(fmt.Sprintf("failed. type=%q reason=%q, message=%q.", cond.Type, cond.Reason, cond.Message))
+	case "":
+		sb.WriteString("created.")
 	default:
 		sb.WriteString(fmt.Sprintf(" phase=%q.", phase))
 	}
