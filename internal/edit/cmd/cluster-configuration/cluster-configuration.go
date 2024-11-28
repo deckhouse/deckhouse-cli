@@ -17,11 +17,11 @@ limitations under the License.
 package cluster_config
 
 import (
-	"log"
-	"k8s.io/kubectl/pkg/util/templates"
+	"github.com/deckhouse/deckhouse-cli/internal/edit"
+	"github.com/deckhouse/deckhouse-cli/internal/edit/flags"
 	"github.com/spf13/cobra"
-        "github.com/deckhouse/deckhouse-cli/pkg/utilk8s"
-        "github.com/deckhouse/deckhouse-cli/internal/edit/flags"
+	"k8s.io/kubectl/pkg/util/templates"
+	"log"
 )
 
 var clusterConfigurationLong = templates.LongDesc(`
@@ -45,7 +45,7 @@ func NewCommand() *cobra.Command {
 }
 
 func editClusterConfig(cmd *cobra.Command, _ []string) error {
-	err := utilk8s.BaseEditConfigCMD(cmd, "cluster-configuration", "d8-cluster-configuration", "cluster-configuration.yaml")
+	err := edit.BaseEditConfigCMD(cmd, "cluster-configuration", "d8-cluster-configuration", "cluster-configuration.yaml")
 	if err != nil {
 		log.Fatalf("Error updating secret: %s", err.Error())
 	}
