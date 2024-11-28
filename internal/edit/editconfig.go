@@ -3,16 +3,19 @@ package edit
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/backup/utilk8s"
-	"github.com/spf13/cobra"
 	"io"
+        "os"
+        "os/exec"
+	"encoding/base64"
+	"encoding/json"
+
+	"github.com/spf13/cobra"
+        "k8s.io/apimachinery/pkg/types"	
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"os"
-	"os/exec"
+
+        "github.com/deckhouse/deckhouse-cli/internal/backup/utilk8s"
 )
 
 func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
@@ -51,16 +54,12 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 	}
 
 	updatedContent, err := openSecretTmp(tempFile, secretConfig, dataKey)
-	patchBytes, err := json.Marshal(updatedContent)
-	if err != nil {
-		fmt.Errorf("Error convert to json updated data: %w", err)
-	}
+	encodedValue, err := encodeSecretTmp(updatedContent, dataKey)
 
-	_, err = kubeCl.CoreV1().Secrets("kube-system").Patch(context.TODO(), secret, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+	_, err = kubeCl.CoreV1().Secrets("kube-system").Patch(context.TODO(), secret, types.MergePatchType, encodedValue, metav1.PatchOptions{})
 	if err != nil {
 		return fmt.Errorf("Error updating secret: %w", err)
 	}
-
 	fmt.Println("Secret updated successfully")
 
 	return err
@@ -94,4 +93,20 @@ func openSecretTmp(tempFile *os.File, secretConfig *v1.Secret, dataKey string) (
 		return nil, err
 	}
 	return updatedContent, nil
+}
+
+func encodeSecretTmp(updatedContent []byte, dataKey string) ([]byte, error) {
+	encodedValue := base64.StdEncoding.EncodeToString(updatedContent)
+	patchData := map[string]interface{}{
+		"data": map[string]interface{}{
+			dataKey: encodedValue,
+		},
+	}
+
+	patchBytes, err := json.Marshal(patchData)
+	if err != nil {
+		fmt.Errorf("Error convert to json updated data: %w", err)
+	}
+
+	return patchBytes, nil
 }
