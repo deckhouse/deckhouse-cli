@@ -21,7 +21,7 @@ import (
 func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 	editor, err := cmd.Flags().GetString("editor")
 	if err != nil {
-		return fmt.Errorf("Failed to open editor: %w", err)
+		return fmt.Errorf("Failed to get editor from --editor flag: %w", err)
 	}
 
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
