@@ -18,7 +18,6 @@ package cluster_config
 
 import (
 	"github.com/deckhouse/deckhouse-cli/internal/edit"
-	"github.com/deckhouse/deckhouse-cli/internal/edit/flags"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 	"log"
@@ -36,11 +35,8 @@ func NewCommand() *cobra.Command {
 		Long:          clusterConfigurationLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		PreRunE:       flags.ValidateParameters,
 		RunE:          editClusterConfig,
 	}
-
-	flags.AddFlags(clusterConfigurationCmd.Flags())
 	return clusterConfigurationCmd
 }
 

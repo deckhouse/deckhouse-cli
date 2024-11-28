@@ -17,13 +17,17 @@ limitations under the License.
 package flags
 
 import (
-	"github.com/spf13/pflag"
+	"os"
+	"github.com/spf13/cobra"
 )
 
-func AddFlags(flagSet *pflag.FlagSet) {
-	flagSet.StringP(
-		"editor", "e",
-		"vi",
-		"Your favourite editor. (default is $EDITOR when it is set)",
-	)
+func AddPersistentFlags(cmd *cobra.Command) {
+	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
+	if p := os.Getenv("KUBECONFIG"); p != "" {
+		defaultKubeconfigPath = p
+	}
+	cmd.PersistentFlags().StringVarP(&defaultKubeconfigPath, "kubeconfig", "k", defaultKubeconfigPath, "KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)")
+
+	var editor string
+	cmd.PersistentFlags().StringVarP(&editor, "editor", "e", "vi", "Your favourite editor.")
 }

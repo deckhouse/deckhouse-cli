@@ -17,9 +17,9 @@ limitations under the License.
 package edit
 
 import (
-	"os"
 	"k8s.io/kubectl/pkg/util/templates"
 	"github.com/spf13/cobra"
+	"github.com/deckhouse/deckhouse-cli/internal/edit/flags"
 	cluster_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/cluster-configuration"
 	provider_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/provider-cluster-configuration"
 	static_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/static-cluster-configuration"
@@ -35,6 +35,7 @@ func NewCommand() *cobra.Command {
 	editCmd := &cobra.Command{
 		Use: "edit", Short: "Edit configuration files",
 		Long: editLong,
+		PreRunE: flags.ValidateParameters,
 	}
 
         editCmd.AddCommand(
@@ -43,11 +44,7 @@ func NewCommand() *cobra.Command {
                 provider_config.NewCommand(),
         )
 
-        defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
-        if p := os.Getenv("KUBECONFIG"); p != "" {
-                defaultKubeconfigPath = p
-        }
-	editCmd.PersistentFlags().StringVarP(&defaultKubeconfigPath, "kubeconfig", "k", "", "KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)")
+	flags.AddPersistentFlags(editCmd)
 
 	return editCmd
 }
