@@ -3,19 +3,20 @@ package edit
 import (
 	"bytes"
 	"context"
-	"fmt"
-	"io"
-        "os"
-        "os/exec"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
 
 	"github.com/spf13/cobra"
-        "k8s.io/apimachinery/pkg/types"	
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
-        "github.com/deckhouse/deckhouse-cli/internal/utilk8s"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
@@ -83,15 +84,29 @@ func openSecretTmp(tempFile *os.File, secretConfig *v1.Secret, dataKey string) (
 		return nil, fmt.Errorf("Error reading updated file: %w", err)
 	}
 
+	tempReadFile, err := os.ReadFile(tempFile.Name())
+	if err != nil {
+		return nil, fmt.Errorf("Error reading updated tempReadFile: %w", err)
+	}
+
 	updatedContent, err := io.ReadAll(tempFile)
 	if err != nil {
 		return nil, fmt.Errorf("Error reading updated file: %w", err)
 	}
 
+	fmt.Printf("%x", sha256.Sum256(tempReadFile))
+	fmt.Printf("%x", sha256.Sum256(updatedContent))
+
 	if bytes.Compare(secretConfig.Data[dataKey], bytes.TrimSpace(updatedContent)) == 0 {
 		fmt.Println("Configurations are equal. Nothing to update.")
 		return nil, err
 	}
+
+	//secretData := secretConfig.Data[dataKey]
+	//if secretData == updatedContent {
+	//	fmt.Println("Configurations are equal. Nothing to update.")
+	//	return nil, err
+	//}
 	return updatedContent, nil
 }
 

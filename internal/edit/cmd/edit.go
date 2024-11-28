@@ -17,14 +17,13 @@ limitations under the License.
 package edit
 
 import (
-	"k8s.io/kubectl/pkg/util/templates"
-	"github.com/spf13/cobra"
-	"github.com/deckhouse/deckhouse-cli/internal/edit/flags"
 	cluster_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/cluster-configuration"
 	provider_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/provider-cluster-configuration"
 	static_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/static-cluster-configuration"
+	"github.com/deckhouse/deckhouse-cli/internal/edit/flags"
+	"github.com/spf13/cobra"
+	"k8s.io/kubectl/pkg/util/templates"
 )
-
 
 var editLong = templates.LongDesc(`
 Change configuration files in Kubernetes cluster conveniently and safely.
@@ -34,15 +33,15 @@ Change configuration files in Kubernetes cluster conveniently and safely.
 func NewCommand() *cobra.Command {
 	editCmd := &cobra.Command{
 		Use: "edit", Short: "Edit configuration files",
-		Long: editLong,
+		Long:    editLong,
 		PreRunE: flags.ValidateParameters,
 	}
 
-        editCmd.AddCommand(
-                cluster_config.NewCommand(),
-                static_config.NewCommand(),
-                provider_config.NewCommand(),
-        )
+	editCmd.AddCommand(
+		cluster_config.NewCommand(),
+		static_config.NewCommand(),
+		provider_config.NewCommand(),
+	)
 
 	flags.AddPersistentFlags(editCmd)
 
