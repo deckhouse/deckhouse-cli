@@ -53,13 +53,21 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 		return fmt.Errorf("Error opening in editor: %w", err)
 	}
 
-	updatedContent, err := openSecretTmp(tempFile, secretConfig, dataKey)
-	encodedValue, err := encodeSecretTmp(updatedContent, dataKey)
+	updatedContent, contentNotChanged, err := openSecretTmp(tempFile, secretConfig, dataKey)
+	if err != nil {
+		return fmt.Errorf("Cannot open edited temp file: %w", err)
+	}
 
+	if contentNotChanged {
+		return nil
+	}
+
+	encodedValue, err := encodeSecretTmp(updatedContent, dataKey)
 	_, err = kubeCl.CoreV1().Secrets("kube-system").Patch(context.TODO(), secret, types.MergePatchType, encodedValue, metav1.PatchOptions{})
 	if err != nil {
 		return fmt.Errorf("Error updating secret: %w", err)
 	}
+
 	fmt.Println("Secret updated successfully")
 
 	return err
@@ -78,21 +86,21 @@ func writeSecretTmp(secretConfig *v1.Secret, dataKey string) (*os.File, error) {
 	return tempFile, nil
 }
 
-func openSecretTmp(tempFile *os.File, secretConfig *v1.Secret, dataKey string) ([]byte, error) {
+func openSecretTmp(tempFile *os.File, secretConfig *v1.Secret, dataKey string) ([]byte, bool, error) {
 	if _, err := tempFile.Seek(0, 0); err != nil {
-		return nil, fmt.Errorf("Error reading updated file: %w", err)
+		return nil, false, fmt.Errorf("Error reading updated file: %w", err)
 	}
 	updatedContent, err := io.ReadAll(tempFile)
 	if err != nil {
-		return nil, fmt.Errorf("Error reading updated file: %w", err)
+		return nil, false, fmt.Errorf("Error reading updated file: %w", err)
 	}
 
 	if fmt.Sprintf("%x", sha256.Sum256(secretConfig.Data[dataKey])) == fmt.Sprintf("%x", sha256.Sum256(updatedContent)) {
 		fmt.Println("Configurations are equal. Nothing to update.")
-		return nil, err
+		return nil, true, nil
 	}
 
-	return updatedContent, nil
+	return updatedContent, false, nil
 }
 
 func encodeSecretTmp(updatedContent []byte, dataKey string) ([]byte, error) {
