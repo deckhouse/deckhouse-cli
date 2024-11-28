@@ -1,7 +1,6 @@
 package edit
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -83,30 +82,16 @@ func openSecretTmp(tempFile *os.File, secretConfig *v1.Secret, dataKey string) (
 	if _, err := tempFile.Seek(0, 0); err != nil {
 		return nil, fmt.Errorf("Error reading updated file: %w", err)
 	}
-
-	tempReadFile, err := os.ReadFile(tempFile.Name())
-	if err != nil {
-		return nil, fmt.Errorf("Error reading updated tempReadFile: %w", err)
-	}
-
 	updatedContent, err := io.ReadAll(tempFile)
 	if err != nil {
 		return nil, fmt.Errorf("Error reading updated file: %w", err)
 	}
 
-	fmt.Printf("%x", sha256.Sum256(tempReadFile))
-	fmt.Printf("%x", sha256.Sum256(updatedContent))
-
-	if bytes.Compare(secretConfig.Data[dataKey], bytes.TrimSpace(updatedContent)) == 0 {
+	if fmt.Sprintf("%x", sha256.Sum256(secretConfig.Data[dataKey])) == fmt.Sprintf("%x", sha256.Sum256(updatedContent)) {
 		fmt.Println("Configurations are equal. Nothing to update.")
 		return nil, err
 	}
 
-	//secretData := secretConfig.Data[dataKey]
-	//if secretData == updatedContent {
-	//	fmt.Println("Configurations are equal. Nothing to update.")
-	//	return nil, err
-	//}
 	return updatedContent, nil
 }
 
