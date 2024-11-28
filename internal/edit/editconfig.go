@@ -43,6 +43,7 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 	if err != nil {
 		return err
 	}
+	defer os.Remove(tempFile.Name())
 
 	cmdExec := exec.Command(editor, tempFile.Name())
 	cmdExec.Stdin = os.Stdin
