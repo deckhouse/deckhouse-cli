@@ -24,7 +24,7 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 		return fmt.Errorf("Failed to get editor from --editor flag: %w", err)
 	}
 
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
+	kubeconfigPath, err := cmd.PersistentFlags().GetString("kubeconfig")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}

@@ -26,8 +26,6 @@ func AddPersistentFlags(cmd *cobra.Command) {
 	if p := os.Getenv("KUBECONFIG"); p != "" {
 		defaultKubeconfigPath = p
 	}
-	cmd.PersistentFlags().StringVarP(&defaultKubeconfigPath, "kubeconfig", "k", defaultKubeconfigPath, "KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)")
-
-	var editor string
-	cmd.PersistentFlags().StringVarP(&editor, "editor", "e", "vi", "Your favourite editor.")
+	cmd.PersistentFlags().StringP("kubeconfig", "k", defaultKubeconfigPath, "KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)")
+	cmd.PersistentFlags().StringP("editor", "e", "vi", "Your favourite editor.")
 }
