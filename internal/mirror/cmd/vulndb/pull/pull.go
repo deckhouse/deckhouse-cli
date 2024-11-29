@@ -88,6 +88,8 @@ func pull(_ *cobra.Command, _ []string) error {
 			Logger:                logger,
 			RegistryAuth:          getSourceRegistryAuthProvider(),
 			DeckhouseRegistryRepo: SourceRegistryRepo,
+			Insecure:              Insecure,
+			SkipTLSVerification:   TLSSkipVerify,
 		},
 	}
 
