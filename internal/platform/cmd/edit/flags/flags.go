@@ -17,25 +17,13 @@ limitations under the License.
 package flags
 
 import (
-	"fmt"
-	"os"
-
-	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
-func ValidateParameters(cmd *cobra.Command, args []string) error {
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
-	stats, err := os.Stat(kubeconfigPath)
-	if err != nil {
-		return fmt.Errorf("Invalid --kubeconfig: %w", err)
-	}
-	if !stats.Mode().IsRegular() {
-		return fmt.Errorf("Invalid --kubeconfig: %s is not a regular file", kubeconfigPath)
-	}
-
-	return nil
+func AddFlags(flagSet *pflag.FlagSet) {
+	flagSet.StringP(
+		"editor", "e",
+		"vi",
+		"Your favourite editor.",
+	)
 }

@@ -23,6 +23,7 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/editconfig"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 )
 
 var providerClusterConfigurationLong = templates.LongDesc(`
@@ -39,6 +40,7 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE:          editProviderClusterConfig,
 	}
+	flags.AddFlags(providerClusterConfigurationCmd.Flags())
 	return providerClusterConfigurationCmd
 }
 

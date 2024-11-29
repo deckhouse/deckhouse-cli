@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	cluster_config "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/cluster-configuration"
 	provider_config "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/provider-cluster-configuration"
 	static_config "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/static-cluster-configuration"
@@ -42,7 +43,7 @@ func NewCommand() *cobra.Command {
 		provider_config.NewCommand(),
 	)
 
-	addFlags(editCmd.Flags())
+	flags.AddFlags(editCmd.Flags())
 
 	return editCmd
 }
