@@ -17,8 +17,9 @@ limitations under the License.
 package flags
 
 import (
-	"github.com/spf13/cobra"
 	"os"
+
+	"github.com/spf13/cobra"
 )
 
 func AddPersistentFlags(cmd *cobra.Command) {
