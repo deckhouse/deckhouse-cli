@@ -17,12 +17,13 @@ limitations under the License.
 package edit
 
 import (
+	"github.com/spf13/cobra"
+	"k8s.io/kubectl/pkg/util/templates"
+
 	cluster_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/cluster-configuration"
 	provider_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/provider-cluster-configuration"
 	static_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/static-cluster-configuration"
 	"github.com/deckhouse/deckhouse-cli/internal/edit/flags"
-	"github.com/spf13/cobra"
-	"k8s.io/kubectl/pkg/util/templates"
 )
 
 var editLong = templates.LongDesc(`

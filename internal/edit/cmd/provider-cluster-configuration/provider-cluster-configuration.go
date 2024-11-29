@@ -18,9 +18,11 @@ package provider_config
 
 import (
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/edit"
+
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
+
+	"github.com/deckhouse/deckhouse-cli/internal/edit"
 )
 
 var providerClusterConfigurationLong = templates.LongDesc(`

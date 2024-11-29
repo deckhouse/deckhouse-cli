@@ -18,9 +18,11 @@ package static_config
 
 import (
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/edit"
+
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
+
+	"github.com/deckhouse/deckhouse-cli/internal/edit"
 )
 
 var staticClusterConfigurationLong = templates.LongDesc(`
@@ -43,7 +45,7 @@ func NewCommand() *cobra.Command {
 func editStaticClusterConfig(cmd *cobra.Command, _ []string) error {
 	err := edit.BaseEditConfigCMD(cmd, "static-cluster-configuration", "d8-static-cluster-configuration", "static-cluster-configuration.yaml")
 	if err != nil {
-                return fmt.Errorf("Error updating secret: %w", err)
+		return fmt.Errorf("Error updating secret: %w", err)
 	}
 	return err
 }

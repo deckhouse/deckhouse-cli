@@ -34,7 +34,9 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	secretConfig, err := kubeCl.CoreV1().Secrets("kube-system").Get(context.Background(), secret, metav1.GetOptions{})
+	secretConfig, err := kubeCl.CoreV1().
+		Secrets("kube-system").
+		Get(context.Background(), secret, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("Error fetching secret: %w", err)
 	}
@@ -64,13 +66,14 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 	}
 
 	encodedValue, err := encodeSecretTmp(updatedContent, dataKey)
-	_, err = kubeCl.CoreV1().Secrets("kube-system").Patch(context.TODO(), secret, types.MergePatchType, encodedValue, metav1.PatchOptions{})
+	_, err = kubeCl.CoreV1().
+		Secrets("kube-system").
+		Patch(context.TODO(), secret, types.MergePatchType, encodedValue, metav1.PatchOptions{})
 	if err != nil {
 		return fmt.Errorf("Error updating secret: %w", err)
 	}
 
 	fmt.Println("Secret updated successfully")
-
 	return err
 }
 
@@ -96,7 +99,7 @@ func openSecretTmp(tempFile *os.File, secretConfig *v1.Secret, dataKey string) (
 		return nil, false, fmt.Errorf("Error reading updated file: %w", err)
 	}
 
-	if fmt.Sprintf("%x", sha256.Sum256(secretConfig.Data[dataKey])) == fmt.Sprintf("%x", sha256.Sum256(updatedContent)) {
+	if sha256.Sum256(secretConfig.Data[dataKey]) == sha256.Sum256(updatedContent) {
 		fmt.Println("Configurations are equal. Nothing to update.")
 		return nil, true, nil
 	}
@@ -114,7 +117,7 @@ func encodeSecretTmp(updatedContent []byte, dataKey string) ([]byte, error) {
 
 	patchBytes, err := json.Marshal(patchData)
 	if err != nil {
-		fmt.Errorf("Error convert to json updated data: %w", err)
+		return nil, fmt.Errorf("Error convert to json updated data: %w", err)
 	}
 
 	return patchBytes, nil
