@@ -18,7 +18,6 @@ package vulndb
 
 import (
 	"github.com/spf13/cobra"
-	"k8s.io/component-base/logs"
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/vulndb/pull"
@@ -47,6 +46,5 @@ func NewCommand() *cobra.Command {
 		push.NewCommand(),
 	)
 
-	logs.AddFlags(trivyDBCmd.PersistentFlags())
 	return trivyDBCmd
 }
