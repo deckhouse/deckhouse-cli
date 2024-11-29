@@ -23,7 +23,6 @@ import (
 	cluster_config "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/cluster-configuration"
 	provider_config "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/provider-cluster-configuration"
 	static_config "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/static-cluster-configuration"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 )
 
 var editLong = templates.LongDesc(`
@@ -35,7 +34,6 @@ func NewCommand() *cobra.Command {
 	editCmd := &cobra.Command{
 		Use: "edit", Short: "Edit configuration files",
 		Long:    editLong,
-		PreRunE: flags.ValidateParameters,
 	}
 
 	editCmd.AddCommand(
@@ -44,7 +42,7 @@ func NewCommand() *cobra.Command {
 		provider_config.NewCommand(),
 	)
 
-	flags.AddPersistentFlags(editCmd)
+	addFlags(editCmd)
 
 	return editCmd
 }

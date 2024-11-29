@@ -14,12 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd
+package edit
 
 import (
-	platform "github.com/deckhouse/deckhouse-cli/internal/platform/cmd"
+	"github.com/spf13/cobra"
+	"os"
 )
 
-func init() {
-	rootCmd.AddCommand(platform.NewCommand())
+func addFlags(cmd *cobra.Command) {
+	flagSet.StringP(
+		"editor", "e",
+		"vi",
+		"Your favourite editor. (default is $EDITOR when it is set)",
+	)
 }

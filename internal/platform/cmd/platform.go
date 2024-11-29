@@ -21,9 +21,6 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 
         "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit"
-//	cluster_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/cluster-configuration"
-//	provider_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/provider-cluster-configuration"
-//	static_config "github.com/deckhouse/deckhouse-cli/internal/edit/cmd/static-cluster-configuration"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 )
 
@@ -41,9 +38,6 @@ func NewCommand() *cobra.Command {
 
 	platformCmd.AddCommand(
 		edit.NewCommand(),
-		//cluster_config.NewCommand(),
-		//static_config.NewCommand(),
-		//provider_config.NewCommand(),
 	)
 
 	flags.AddPersistentFlags(platformCmd)
