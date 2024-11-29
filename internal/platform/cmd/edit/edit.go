@@ -23,7 +23,7 @@ import (
 	cluster_config "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/cluster-configuration"
 	provider_config "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/provider-cluster-configuration"
 	static_config "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/static-cluster-configuration"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/edit/flags"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 )
 
 var editLong = templates.LongDesc(`
