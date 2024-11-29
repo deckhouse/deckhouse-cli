@@ -23,7 +23,6 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/spf13/cobra"
-	"k8s.io/component-base/logs"
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
@@ -60,7 +59,6 @@ func NewCommand() *cobra.Command {
 	}
 
 	addFlags(pullCmd.Flags())
-	logs.AddFlags(pullCmd.Flags())
 	return pullCmd
 }
 

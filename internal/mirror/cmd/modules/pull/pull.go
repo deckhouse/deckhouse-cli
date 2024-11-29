@@ -28,7 +28,6 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/spf13/cobra"
-	"k8s.io/component-base/logs"
 	"k8s.io/kubectl/pkg/util/templates"
 	"sigs.k8s.io/yaml"
 
@@ -63,8 +62,6 @@ func NewCommand() *cobra.Command {
 	}
 
 	addFlags(mirrorModulesCmd.Flags())
-	logs.AddFlags(mirrorModulesCmd.Flags())
-	logs.AddFlags(mirrorModulesCmd.PersistentFlags())
 	return mirrorModulesCmd
 }
 

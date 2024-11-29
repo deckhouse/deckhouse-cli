@@ -29,7 +29,6 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/spf13/cobra"
-	"k8s.io/component-base/logs"
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
@@ -64,7 +63,6 @@ func NewCommand() *cobra.Command {
 	}
 
 	addFlags(mirrorModulesCmd.PersistentFlags())
-	logs.AddFlags(mirrorModulesCmd.PersistentFlags())
 	return mirrorModulesCmd
 }
 
