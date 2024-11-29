@@ -86,6 +86,8 @@ func push(_ *cobra.Command, _ []string) error {
 			RegistryHost:          RegistryHost,
 			RegistryPath:          RegistryPath,
 			DeckhouseRegistryRepo: RegistryRepo,
+			Insecure:              Insecure,
+			SkipTLSVerification:   TLSSkipVerify,
 		},
 	}
 
