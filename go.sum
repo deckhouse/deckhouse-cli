@@ -394,6 +394,8 @@ github.com/daviddengcn/go-colortext v1.0.0 h1:ANqDyC0ys6qCSvuEK7l3g5RaehL/Xck9EX
 github.com/daviddengcn/go-colortext v1.0.0/go.mod h1:zDqEI5NVUop5QPpVJUxE9UO10hRnmkD5G4Pmri9+m4c=
 github.com/deckhouse/virtualization/api v0.0.0-20241101085803-1002322cdb92 h1:EeO0Ly13a3DhoY9Q/Fz39MdhE6q2A4+cLi/d3nAGjpQ=
 github.com/deckhouse/virtualization/api v0.0.0-20241101085803-1002322cdb92/go.mod h1:t+6i4NC43RfNLqcZqkEc5vxY1ypKceqmOOKlVEq0cYA=
+github.com/deckhouse/virtualization/api v0.0.0-20241205091855-6f05a202ade8 h1:GAz+0wP9q4iHs9ogHfNUApNCGlYsXomkRk7iKpx/fAg=
+github.com/deckhouse/virtualization/api v0.0.0-20241205091855-6f05a202ade8/go.mod h1:t+6i4NC43RfNLqcZqkEc5vxY1ypKceqmOOKlVEq0cYA=
 github.com/denisenkom/go-mssqldb v0.0.0-20191128021309-1d7a30a10f73/go.mod h1:xbL0rPBG9cCiLr28tMa8zpbdarY27NDyej4t/EjAShU=
 github.com/denisenkom/go-mssqldb v0.12.2 h1:1OcPn5GBIobjWNd+8yjfHNIaFX14B1pWI3F9HZy5KXw=
 github.com/denisenkom/go-mssqldb v0.12.2/go.mod h1:lnIw1mZukFRZDJYQ0Pb833QS2IaC3l5HkEfra2LJ+sk=

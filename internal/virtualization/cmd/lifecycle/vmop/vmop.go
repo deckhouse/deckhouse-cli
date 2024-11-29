@@ -223,7 +223,7 @@ func (v VirtualMachineOperation) isPhaseOrFailed(vmop *v1alpha2.VirtualMachineOp
 func (v VirtualMachineOperation) newVMOP(vmName, vmNamespace string, t v1alpha2.VMOPType, force bool) *v1alpha2.VirtualMachineOperation {
 	return &v1alpha2.VirtualMachineOperation{
 		TypeMeta: metav1.TypeMeta{
-			Kind:       v1alpha2.VMOPKind,
+			Kind:       v1alpha2.VirtualMachineOperationKind,
 			APIVersion: v1alpha2.Version,
 		},
 		ObjectMeta: metav1.ObjectMeta{

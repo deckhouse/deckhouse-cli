@@ -20,16 +20,17 @@ Initially copied from https://github.com/kubevirt/kubevirt/blob/main/pkg/virtctl
 package util
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 
 	"golang.org/x/term"
 )
 
-func AttachConsole(stdinReader, stdoutReader *io.PipeReader, stdinWriter, stdoutWriter *io.PipeWriter, message string, resChan <-chan error) (err error) {
-	stopChan := make(chan struct{}, 1)
+var ErrorInterrupt = errors.New("interrupt")
+
+func AttachConsole(stdinCh chan []byte, stdinReader, stdoutReader *io.PipeReader, stdinWriter, stdoutWriter *io.PipeWriter, name string, resChan <-chan error) (err error) {
 	writeStop := make(chan error)
 	readStop := make(chan error)
 	if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -39,43 +40,26 @@ func AttachConsole(stdinReader, stdoutReader *io.PipeReader, stdinWriter, stdout
 		}
 		defer term.Restore(int(os.Stdin.Fd()), state)
 	}
-	fmt.Fprint(os.Stderr, message)
 
-	in := os.Stdin
+	fmt.Fprintf(os.Stderr, "Successfully connected to %s console. The escape sequence is ^]\n", name)
+
 	out := os.Stdout
-
 	go func() {
-		interrupt := make(chan os.Signal, 1)
-		signal.Notify(interrupt, os.Interrupt)
-		<-interrupt
-		close(stopChan)
-	}()
-
-	go func() {
+		defer close(readStop)
 		_, err := io.Copy(out, stdoutReader)
 		readStop <- err
 	}()
 
 	go func() {
 		defer close(writeStop)
-		buf := make([]byte, 1024)
-		for {
-			// reading from stdin
-			n, err := in.Read(buf)
-			if err != nil && err != io.EOF {
-				writeStop <- err
-				return
-			}
-			if n == 0 && err == io.EOF {
-				return
-			}
 
-			// the escape sequence
-			if buf[0] == 29 {
-				return
-			}
-			// Writing out to the console connection
-			_, err = stdinWriter.Write(buf[0:n])
+		stdinWriter.Write([]byte("\r"))
+		if err == io.EOF {
+			return
+		}
+
+		for b := range stdinCh {
+			_, err = stdinWriter.Write(b)
 			if err == io.EOF {
 				return
 			}
@@ -83,11 +67,11 @@ func AttachConsole(stdinReader, stdoutReader *io.PipeReader, stdinWriter, stdout
 	}()
 
 	select {
-	case <-stopChan:
-	case err = <-readStop:
 	case err = <-writeStop:
+		return ErrorInterrupt
+	case err = <-readStop:
+		return ErrorInterrupt
 	case err = <-resChan:
+		return err
 	}
-
-	return err
 }
