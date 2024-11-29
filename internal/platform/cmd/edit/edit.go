@@ -42,7 +42,7 @@ func NewCommand() *cobra.Command {
 		provider_config.NewCommand(),
 	)
 
-	addFlags(editCmd)
+	addFlags(editCmd.Flags())
 
 	return editCmd
 }

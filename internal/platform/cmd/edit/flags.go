@@ -17,11 +17,10 @@ limitations under the License.
 package edit
 
 import (
-	"github.com/spf13/cobra"
-	"os"
+	"github.com/spf13/pflag"
 )
 
-func addFlags(cmd *cobra.Command) {
+func addFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringP(
 		"editor", "e",
 		"vi",
