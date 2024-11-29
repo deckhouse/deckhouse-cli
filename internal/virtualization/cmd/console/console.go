@@ -20,10 +20,11 @@ Initially copied from https://github.com/kubevirt/kubevirt/blob/main/pkg/virtctl
 package console
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -86,6 +87,65 @@ func (c *Console) Run(args []string) error {
 		return err
 	}
 
+	stdinCh := make(chan []byte)
+	go func() {
+		in := os.Stdin
+		defer close(stdinCh)
+		buf := make([]byte, 1024)
+		for {
+			// reading from stdin
+			n, err := in.Read(buf)
+			if err != nil && err != io.EOF {
+				return
+			}
+			if n == 0 && err == io.EOF {
+				return
+			}
+
+			// the escape sequence
+			if buf[0] == 29 {
+				return
+			}
+
+			stdinCh <- buf[0:n]
+		}
+	}()
+
+	go func() {
+		if _, ok := <-stdinCh; !ok {
+			os.Exit(0)
+		}
+	}()
+
+	for {
+		err := connect(name, namespace, virtCli, stdinCh)
+		if err != nil {
+			if errors.Is(err, util.ErrorInterrupt) || strings.Contains(err.Error(), "not found") {
+				return err
+			}
+
+			var e *websocket.CloseError
+			if errors.As(err, &e) {
+				switch e.Code {
+				case websocket.CloseGoingAway:
+					fmt.Fprint(os.Stderr, "\nYou were disconnected from the console. This has one of the following reasons:"+
+						"\n - another user connected to the console of the target vm\n")
+					return nil
+				case websocket.CloseAbnormalClosure:
+					fmt.Fprint(os.Stderr, "\nYou were disconnected from the console. This has one of the following reasons:"+
+						"\n - network issues"+
+						"\n - machine restart\n")
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "%s\n", err)
+			}
+
+			time.Sleep(time.Second)
+		}
+	}
+}
+
+func connect(name string, namespace string, virtCli kubeclient.Client, stdinCh chan []byte) error {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()
 
@@ -94,8 +154,6 @@ func (c *Console) Run(args []string) error {
 	// Wait until the virtual machine is in running phase, user interrupt or timeout
 	resChan := make(chan error)
 	runningChan := make(chan error)
-	waitInterrupt := make(chan os.Signal, 1)
-	signal.Notify(waitInterrupt, os.Interrupt)
 
 	go func() {
 		con, err := virtCli.VirtualMachines(namespace).SerialConsole(name, &kubeclient.SerialConsoleOptions{ConnectionTimeout: time.Duration(timeout) * time.Minute})
@@ -111,27 +169,11 @@ func (c *Console) Run(args []string) error {
 		})
 	}()
 
-	select {
-	case <-waitInterrupt:
-		// Make a new line in the terminal
-		fmt.Println()
-		return nil
-	case err = <-runningChan:
-		if err != nil {
-			return err
-		}
-	}
-	err = util.AttachConsole(stdinReader, stdoutReader, stdinWriter, stdoutWriter,
-		fmt.Sprint("Successfully connected to ", name, " console. The escape sequence is ^]\n"),
-		resChan)
-
+	err := <-runningChan
 	if err != nil {
-		if e, ok := err.(*websocket.CloseError); ok && e.Code == websocket.CloseAbnormalClosure {
-			fmt.Fprint(os.Stderr, "\nYou were disconnected from the console. This has one of the following reasons:"+
-				"\n - another user connected to the console of the target vm"+
-				"\n - network issues\n")
-		}
 		return err
 	}
-	return nil
+
+	err = util.AttachConsole(stdinCh, stdinReader, stdoutReader, stdinWriter, stdoutWriter, name, resChan)
+	return err
 }
