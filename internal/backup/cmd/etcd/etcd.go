@@ -37,7 +37,7 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/deckhouse/deckhouse-cli/internal/backup/utilk8s"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 var etcdLong = templates.LongDesc(`

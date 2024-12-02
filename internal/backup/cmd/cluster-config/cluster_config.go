@@ -27,7 +27,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/backup/configs/storageclasses"
 	"github.com/deckhouse/deckhouse-cli/internal/backup/configs/tarball"
 	"github.com/deckhouse/deckhouse-cli/internal/backup/configs/whitelist"
-	"github.com/deckhouse/deckhouse-cli/internal/backup/utilk8s"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 var clusterConfigLong = templates.LongDesc(`
