@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 
@@ -45,7 +44,10 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tempFile.Name())
+	defer func() {
+		_ = tempFile.Close()
+		_ = os.Remove(tempFile.Name())
+	}()
 
 	cmdExec := exec.Command(editor, tempFile.Name())
 	cmdExec.Stdin = os.Stdin
@@ -56,7 +58,7 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 		return fmt.Errorf("Error opening in editor: %w", err)
 	}
 
-	updatedContent, contentNotChanged, err := openSecretTmp(tempFile, secretConfig, dataKey)
+	updatedContent, contentNotChanged, err := compareEditedSecret(tempFile, secretConfig, dataKey)
 	if err != nil {
 		return fmt.Errorf("Cannot open edited temp file: %w", err)
 	}
@@ -87,14 +89,15 @@ func writeSecretTmp(secretConfig *v1.Secret, dataKey string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Error writing decoded data to file: %w", err)
 	}
+	if err = tempFile.Sync(); err != nil {
+		return nil, fmt.Errorf("Sync temp file buffers to disk: %w", err)
+	}
+
 	return tempFile, nil
 }
 
-func openSecretTmp(tempFile *os.File, secretConfig *v1.Secret, dataKey string) ([]byte, bool, error) {
-	if _, err := tempFile.Seek(0, 0); err != nil {
-		return nil, false, fmt.Errorf("Error reading updated file: %w", err)
-	}
-	updatedContent, err := io.ReadAll(tempFile)
+func compareEditedSecret(tempFile *os.File, secretConfig *v1.Secret, dataKey string) ([]byte, bool, error) {
+	updatedContent, err := os.ReadFile(tempFile.Name())
 	if err != nil {
 		return nil, false, fmt.Errorf("Error reading updated file: %w", err)
 	}
