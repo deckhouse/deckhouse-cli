@@ -14,38 +14,38 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cluster_config
+package disable
 
 import (
 	"fmt"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/switchmodule"
 
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
-
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/editconfig"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 )
 
-var clusterConfigurationLong = templates.LongDesc(`
+var disableLong = templates.LongDesc(`
 Edit cluster-configuration in Kubernetes cluster.
 
 © Flant JSC 2024`)
 
 func NewCommand() *cobra.Command {
-	clusterConfigurationCmd := &cobra.Command{
-		Use:           "cluster-configuration",
+	disableCmd := &cobra.Command{
+		Use:           "disable",
 		Short:         "Edit cluster-configuration.",
-		Long:          clusterConfigurationLong,
+		Long:          disableLong,
+		ValidArgs:     []string{"module_name"},
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		RunE:          editClusterConfig,
+		RunE:          disableModule,
 	}
-	flags.AddFlags(clusterConfigurationCmd.Flags())
-	return clusterConfigurationCmd
+	flags.AddFlags(disableCmd.Flags())
+	return disableCmd
 }
 
-func editClusterConfig(cmd *cobra.Command, _ []string) error {
-	err := edit.BaseEditConfigCMD(cmd, "cluster-configuration", "d8-cluster-configuration", "cluster-configuration.yaml")
+func disableModule(cmd *cobra.Command, moduleName []string) error {
+	err := switchmodule.OperateModule(cmd, moduleName[0], false)
 	if err != nil {
 		return fmt.Errorf("Error updating secret: %w", err)
 	}

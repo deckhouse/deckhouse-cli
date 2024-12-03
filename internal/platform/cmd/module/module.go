@@ -14,34 +14,34 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package edit
+package module
 
 import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
-	cluster_config "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/cluster-configuration"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/disable"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/enable"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/flags"
 )
 
-var editLong = templates.LongDesc(`
-Change configuration files in Kubernetes cluster conveniently and safely.
+var moduleLong = templates.LongDesc(`
+Module options for Deckhouse Kubernetes Platform.
 
 © Flant JSC 2024`)
 
 func NewCommand() *cobra.Command {
-	editCmd := &cobra.Command{
-		Use: "edit", Short: "Edit configuration files",
-		Long:    editLong,
+	moduleCmd := &cobra.Command{
+		Use: "module", Short: "Module options DKP",
+		Long: moduleLong,
 	}
 
-	editCmd.AddCommand(
-		cluster_config.NewCommand(),
-		static_config.NewCommand(),
-		provider_config.NewCommand(),
+	moduleCmd.AddCommand(
+		enable.NewCommand(),
+		disable.NewCommand(),
 	)
 
-	flags.AddFlags(editCmd.Flags())
+	flags.AddFlags(moduleCmd.Flags())
 
-	return editCmd
+	return moduleCmd
 }
