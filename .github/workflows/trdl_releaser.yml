@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Release
-      uses: werf/trdl-vault-actions/release@feature/d8-trdl
+      uses: werf/trdl-vault-actions/release@main
       with:
         vault-addr: https://trrr.flant.dev
         project-name: deckhouse-cli
