@@ -4,7 +4,7 @@ go 1.23.1
 
 require (
 	github.com/Masterminds/semver/v3 v3.3.0
-	github.com/deckhouse/virtualization/api v0.0.0-20241101085803-1002322cdb92
+	github.com/deckhouse/virtualization/api v0.0.0-20241205091855-6f05a202ade8
 	github.com/google/go-containerregistry v0.20.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/hashicorp/go-cleanhttp v0.5.2
