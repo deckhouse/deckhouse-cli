@@ -1,0 +1,7 @@
+groups:
+- name: "0"
+  channels:
+  - name: alpha
+    version: {{ .Tag }}
+  - name: stable
+    version: {{ .Tag }}
