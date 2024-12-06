@@ -2,6 +2,6 @@ groups:
 - name: "0"
   channels:
   - name: alpha
-    version: {{ .Tag }}
+    version: 0.7.1
   - name: stable
-    version: {{ .Tag }}
+    version: 0.7.1
