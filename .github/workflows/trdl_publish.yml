@@ -1,6 +1,6 @@
 name: trdl-publish
 on:
-  create:        
+  push:
     paths:
       - trdl_channels.yaml
 
