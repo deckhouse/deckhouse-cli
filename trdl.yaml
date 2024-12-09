@@ -1,3 +1,8 @@
-docker_image: ubuntu@sha256:0e5e4a57c2499249aafc3b40fcd541e9a456aab7296681a3994d631587203f97 
+docker_image: registry.deckhouse.io/base_images/golang:1.23.1-bullseye@sha256:a24507d1a36fce86431198a979435dadb187e8d0ce0b5c181f46d6788d84a40f 
 commands:
-- ./scripts/ci/release-build.sh {{ .Tag }} && cp -a release-build/{{ .Tag }}/* /result
+  - apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc
+  - sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/bin
+  - git config --global url."https://gitlab-ci-token:${{ secrets.FOX_PRIVATE_TOKEN }}@fox.flant.com/".insteadOf https://fox.flant.com/
+  - git config --global --add safe.directory '*'
+  - task -o group -p build:dist:all version={{ .Tag }}
+  - cp -a ./dist/{{ .Tag }}/* /result

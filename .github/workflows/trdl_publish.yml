@@ -16,8 +16,8 @@ jobs:
       - name: Publish
         uses: werf/trdl-vault-actions/publish@main
         with:
-          vault-addr: https://trrr.flant.dev
+          vault-addr: ${{ secrets.TRDL_VAULT_ADDR }}
           project-name: deckhouse-cli
           vault-auth-method: approle
-          vault-role-id: f1b89aca-a28b-04ed-1631-6413758a4ee3
-          vault-secret-id: dddec62a-39a9-71e2-fea4-f631cf399b09
+          vault-role-id: ${{ secrets.TRDL_VAULT_ROLE_ID }}
+          vault-secret-id: ${{ secrets.TRDL_VAULT_SECRET_ID }}
