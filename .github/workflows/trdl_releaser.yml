@@ -16,19 +16,6 @@ jobs:
     container:
       image: ubuntu:22.04    
     steps:
-    - name: Install dependency for linux-amd64 dist
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc
-
-    - name: Setup Task
-      uses: arduino/setup-task@v2
-
-    - name: Setup git
-      run: |
-        git config --global url."https://gitlab-ci-token:${PRIVATE_REPO_TOKEN}@${PRIVATE_REPO}/".insteadOf https://${PRIVATE_REPO}/
-        git config --global --add safe.directory '*'
-
     - name: Release
       uses: werf/trdl-vault-actions/release@main
       with:
@@ -38,4 +25,6 @@ jobs:
         vault-auth-method: approle
         vault-role-id: ${{ secrets.TRDL_VAULT_ROLE_ID }}
         vault-secret-id: ${{ secrets.TRDL_VAULT_SECRET_ID }}
-        
+      run: |
+        git config --global url."https://gitlab-ci-token:${PRIVATE_REPO_TOKEN}@${PRIVATE_REPO}/".insteadOf https://${PRIVATE_REPO}/
+        git config --global --add safe.directory '*'  
