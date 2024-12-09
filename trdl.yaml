@@ -2,3 +2,4 @@ docker_image: registry.deckhouse.io/base_images/golang:1.23.1-bullseye@sha256:a2
 commands:
   - ./scripts/ci/release-build.sh 
   - git config --list
+  - env
