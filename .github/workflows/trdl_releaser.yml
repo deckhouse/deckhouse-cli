@@ -19,6 +19,7 @@ jobs:
     - name: Release
       env:
         PRIVATE_REPO_TOKEN: ${{ secrets.FOX_PRIVATE_TOKEN }}
+        BLABLA: blabla
       uses: werf/trdl-vault-actions/release@main
       with:
         git-tag: ${{ github.event.ref }}
