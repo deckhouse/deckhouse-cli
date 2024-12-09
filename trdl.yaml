@@ -4,5 +4,4 @@ commands:
   - export $PRIVATE_REPO_TOKEN
   - env
   - git config --list
-  - task -o group -p build:dist:all version={{ .Tag }}
-  - cp -a ./dist/{{ .Tag }}/* /result
+  - cat ~/.gitconfig
