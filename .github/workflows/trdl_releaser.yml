@@ -17,6 +17,8 @@ jobs:
       image: ubuntu:22.04    
     steps:
     - name: Release
+      env:
+        PRIVATE_REPO_TOKEN: ${{ secrets.FOX_PRIVATE_TOKEN }}
       uses: werf/trdl-vault-actions/release@main
       with:
         git-tag: ${{ github.event.ref }}
