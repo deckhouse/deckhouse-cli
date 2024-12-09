@@ -2,24 +2,27 @@ name: trdl-release
 on:
   create:
 
+env:
+  PRIVATE_REPO_TOKEN: ${{ secrets.FOX_PRIVATE_TOKEN }}
+
 jobs:
   release:
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     name: Perform deckhouse-cli release using trdl server
     runs-on: ubuntu-latest
     steps:
-      - name: Install dependency for linux-amd64 dist
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc
+    - name: Install dependency for linux-amd64 dist
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc
 
-      - name: Setup Task
-        uses: arduino/setup-task@v2
+    - name: Setup Task
+      uses: arduino/setup-task@v2
 
-      - name: Setup git
-        run: |
-          git config --global url."https://gitlab-ci-token:${PRIVATE_REPO_TOKEN}@${PRIVATE_REPO}/".insteadOf https://${PRIVATE_REPO}/
-          git config --global --add safe.directory '*'
+    - name: Setup git
+      run: |
+        git config --global url."https://gitlab-ci-token:${PRIVATE_REPO_TOKEN}@${PRIVATE_REPO}/".insteadOf https://${PRIVATE_REPO}/
+        git config --global --add safe.directory '*'
 
     - name: Release
       uses: werf/trdl-vault-actions/release@main
