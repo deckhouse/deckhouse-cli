@@ -20,6 +20,7 @@ Initially copied from https://github.com/kubevirt/kubevirt/blob/main/pkg/virtctl
 package vnc
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,11 +31,15 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/deckhouse/deckhouse-cli/internal/virtualization/templates"
 	"github.com/deckhouse/virtualization/api/client/kubeclient"
+	"github.com/deckhouse/virtualization/api/core/v1alpha2"
+	"github.com/gorilla/websocket"
 	"github.com/spf13/cobra"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 )
@@ -109,11 +114,6 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// setup connection with VM
-	vnc, err := virtCli.VirtualMachines(namespace).VNC(vmName)
-	if err != nil {
-		return fmt.Errorf("can't access VM %s: %s", vmName, err.Error())
-	}
 	// Format the listening address to account for the port (ex: 127.0.0.0:5900)
 	// Set listenAddress to localhost if proxy-only flag is not set
 	if !proxyOnly {
@@ -133,6 +133,50 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 	}
 	// End of pre-flight checks. Everything looks good, we can start
 	// the goroutines and let the data flow
+
+	for {
+		err := connect(ln, virtCli, cmd, namespace, vmName)
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				return err
+			}
+
+			var e *websocket.CloseError
+			if errors.As(err, &e) {
+				switch e.Code {
+				case websocket.CloseGoingAway:
+					fmt.Fprint(os.Stderr, "\nYou were disconnected from the console. This has one of the following reasons:"+
+						"\n - another user connected to the console of the target vm\n")
+					return nil
+				case websocket.CloseAbnormalClosure:
+					fmt.Fprint(os.Stderr, "\nYou were disconnected from the console. This has one of the following reasons:"+
+						"\n - network issues"+
+						"\n - machine restart\n")
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "%s\n", err)
+			}
+
+			time.Sleep(time.Second)
+		}
+	}
+}
+
+func connect(ln *net.TCPListener, virtCli kubeclient.Client, cmd *cobra.Command, namespace, vmName string) (err error) {
+	vm, err := virtCli.VirtualMachines(namespace).Get(context.Background(), vmName, v1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	if vm.Status.Phase != v1alpha2.MachineRunning {
+		return errors.New("VM is not running")
+	}
+
+	// setup connection with VM
+	vnc, err := virtCli.VirtualMachines(namespace).VNC(vmName)
+	if err != nil {
+		return fmt.Errorf("can't access VM %s: %s", vmName, err.Error())
+	}
 
 	//                                       -> pipeInWriter  -> pipeInReader
 	// remote-viewer -> unix sock connection
@@ -197,6 +241,8 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 
 	port := ln.Addr().(*net.TCPAddr).Port
 
+	ctx, cancelCtx := context.WithCancel(context.Background())
+
 	if proxyOnly {
 		defer close(doneChan)
 		optionString, err := json.Marshal(struct {
@@ -208,7 +254,7 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.OutOrStdout(), string(optionString))
 	} else {
 		// execute VNC Viewer
-		go checkAndRunVNCViewer(doneChan, viewResChan, port)
+		go checkAndRunVNCViewer(ctx, doneChan, viewResChan, port)
 	}
 
 	go func() {
@@ -227,13 +273,12 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 	case err = <-listenResChan:
 	}
 
-	if err != nil {
-		return fmt.Errorf("error encountered: %s", err.Error())
-	}
-	return nil
+	cancelCtx()
+
+	return err
 }
 
-func checkAndRunVNCViewer(doneChan chan struct{}, viewResChan chan error, port int) {
+func checkAndRunVNCViewer(ctx context.Context, doneChan chan struct{}, viewResChan chan error, port int) {
 	defer close(doneChan)
 	var err error
 	args := []string{}
@@ -293,7 +338,7 @@ func checkAndRunVNCViewer(doneChan chan struct{}, viewResChan chan error, port i
 	} else {
 		klog.V(4).Infof("Executing commandline: '%s %v'", vncBin, args)
 		// #nosec No risk for attacket injection. vncBin and args include predefined strings
-		cmd := exec.Command(vncBin, args...)
+		cmd := exec.CommandContext(ctx, vncBin, args...)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			klog.Errorf("%s execution failed: %v, output: %v", vncBin, err, string(output))
