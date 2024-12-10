@@ -1,7 +1,4 @@
-docker_image: registry.deckhouse.io/base_images/golang:1.23.1-bullseye@sha256:a24507d1a36fce86431198a979435dadb187e8d0ce0b5c181f46d6788d84a40f 
+docker_image: golang-d8:1.23.1-local
 commands:
-  - ./scripts/ci/release-build.sh 
-  - export $PRIVATE_REPO_TOKEN
-  - env
-  - git config --list
-  - cat ~/.gitconfig
+  - task -o group -p build:dist:all version={{ .Tag }}
+  - cp -a ./dist/{{ .Tag }}/* /result
