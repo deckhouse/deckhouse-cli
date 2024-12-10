@@ -1,4 +1,4 @@
-docker_image: golang-d8:1.23.1-local
+docker_image: localhost:5000/golang-d8:1.23.2-local@sha256:9a4985ed749239bd60a35919265ae99183fcefb5545380b4bb9db1fa990c2b22
 commands:
   - task -o group -p build:dist:all version={{ .Tag }}
   - cp -a ./dist/{{ .Tag }}/* /result
