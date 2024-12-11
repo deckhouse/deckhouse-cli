@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
@@ -120,6 +121,11 @@ func findLayoutsToPush(ctx context.Context, mirrorCtx *contexts.PushContext) (ma
 		layoutFileSystemPath := filepath.Join(append([]string{mirrorCtx.UnpackedImagesPath}, bundlePath...)...)
 		l, err := layout.FromPath(layoutFileSystemPath)
 		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				// Older bundles may lack some of the paths, skip it if so
+				mirrorCtx.Logger.DebugF("Skipping push of %q as it is missing from bundle", strings.Join(bundlePath, "/"))
+				continue
+			}
 			return nil, nil, err
 		}
 		ociLayouts[indexRef] = l
