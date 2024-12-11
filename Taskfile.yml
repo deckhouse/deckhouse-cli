@@ -47,7 +47,7 @@ tasks:
   _build:cgo:dev:
     internal: true
     cmds:
-      - go build -o "{{ .outputDir | default (printf "./build/%s-%s" .targetOS .targetArch) }}/d8"
+      - go build -o "{{ .outputDir | default (printf "./build/%s-%s" .targetOS .targetArch) }}/bin/d8"
         -compiler gc -ldflags="{{ .cgoDevLDFlags }}" -tags="{{ .cgoTags }}" {{ .CLI_ARGS }} main.go
     env:
       CGO_ENABLED: "1"
@@ -57,7 +57,7 @@ tasks:
   _build:cgo:dist:
     internal: true
     cmds:
-      - go build -o "{{ .outputDir | default (printf "./dist/%s/%s-%s" .version .targetOS .targetArch) }}/d8"
+      - go build -o "{{ .outputDir | default (printf "./dist/%s/%s-%s" .version .targetOS .targetArch) }}/bin/d8"
         -compiler gc -ldflags="{{ .cgoReleaseLDFlags }}" -tags="{{ .cgoTags }}" {{ .CLI_ARGS }} main.go
     env:
       CGO_ENABLED: "1"
@@ -67,7 +67,7 @@ tasks:
   _build:go:dev:
     internal: true
     cmds:
-      - go build -o "{{ .outputDir | default (printf "./build/%s-%s" .targetOS .targetArch) }}/d8{{ if (eq .targetOS "windows") }}.exe{{ end }}"
+      - go build -o "{{ .outputDir | default (printf "./build/%s-%s" .targetOS .targetArch) }}/bin/d8{{ if (eq .targetOS "windows") }}.exe{{ end }}"
         -ldflags="{{ .goDevLDFlags }}" -tags="{{ .goTags }}" {{ .CLI_ARGS }} main.go
     env:
       CGO_ENABLED: "0"
@@ -77,7 +77,7 @@ tasks:
   _build:go:dist:
     internal: true
     cmds:
-      - go build -o "{{ .outputDir | default (printf "./dist/%s/%s-%s" .version .targetOS .targetArch) }}/d8{{ if (eq .targetOS "windows") }}.exe{{ end }}"
+      - go build -o "{{ .outputDir | default (printf "./dist/%s/%s-%s" .version .targetOS .targetArch) }}/bin/d8{{ if (eq .targetOS "windows") }}.exe{{ end }}"
         -ldflags="{{ .goReleaseLDFlags }}" -tags="{{ .goTags }}" {{ .CLI_ARGS }} main.go
     env:
       CGO_ENABLED: "0"
