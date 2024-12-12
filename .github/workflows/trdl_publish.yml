@@ -1,8 +1,11 @@
 name: trdl-publish
 on:
   push:
+    branches:
+      - main          
     paths:
       - trdl_channels.yaml
+  workflow_dispatch:        
 
 defaults:
   run:
