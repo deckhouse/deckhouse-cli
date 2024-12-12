@@ -40,7 +40,7 @@ Upload Deckhouse Kubernetes Platform distribution bundle to the third-party regi
 This command pushes the Deckhouse Kubernetes Platform distribution into the specified container registry.
 
 For more information on how to use it, consult the docs at 
-https://deckhouse.io/documentation/v1/deckhouse-faq.html#manually-uploading-images-to-an-air-gapped-registry
+https://deckhouse.io/products/kubernetes-platform/documentation/v1/deckhouse-faq.html#manually-uploading-images-to-an-air-gapped-registry
 
 LICENSE NOTE:
 The d8 mirror functionality is exclusively available to users holding a 

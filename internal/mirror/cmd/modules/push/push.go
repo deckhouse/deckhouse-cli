@@ -43,7 +43,7 @@ Upload Deckhouse modules images from ModuleSource to local filesystem and to thi
 This command is used to manually upload Deckhouse modules images to an air-gapped registry.
 
 For more information on how to use it, consult the docs at 
-https://deckhouse.io/documentation/v1/deckhouse-faq.html#manually-uploading-images-of-deckhouse-modules-into-an-isolated-private-registry
+https://deckhouse.io/products/kubernetes-platform/documentation/v1/deckhouse-faq.html#manually-uploading-images-of-deckhouse-modules-into-an-air-gapped-registry
 
 LICENSE NOTE:
 The d8 mirror functionality is exclusively available to users holding a 

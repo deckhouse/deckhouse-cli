@@ -20,7 +20,7 @@ import "strings"
 
 const CustomTrivyMediaTypesWarning = `` +
 	"It looks like you are using Project Quay registry and it is not configured correctly for hosting Deckhouse.\n" +
-	"See the docs at https://deckhouse.io/documentation/v1/supported_versions.html#container-registry for more details.\n\n" +
+	"See the docs at https://deckhouse.io/products/kubernetes-platform/documentation/v1/supported_versions.html#container-registry for more details.\n\n" +
 	"TL;DR: You should retry push after allowing some additional types of OCI artifacts in your config.yaml as follows:\n" +
 	`FEATURE_GENERAL_OCI_SUPPORT: true
 ALLOWED_OCI_ARTIFACT_TYPES:
