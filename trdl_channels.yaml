@@ -1,0 +1,7 @@
+groups:
+- name: "0"
+  channels:
+  - name: early-access
+    version: 0.7.1
+  - name: stable
+    version: 0.7.1

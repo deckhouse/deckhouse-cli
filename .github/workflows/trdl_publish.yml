@@ -1,0 +1,26 @@
+name: trdl-publish
+on:
+  push:
+    branches:
+      - main          
+    paths:
+      - trdl_channels.yaml
+  workflow_dispatch:        
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish:
+    name: Publish release channels using trdl server
+    runs-on: [self-hosted, regular]    
+    steps:
+      - name: Publish
+        uses: werf/trdl-vault-actions/publish@main
+        with:
+          vault-addr: ${{ secrets.TRDL_VAULT_ADDR }}
+          project-name: deckhouse-cli
+          vault-auth-method: approle
+          vault-role-id: ${{ secrets.TRDL_VAULT_ROLE_ID }}
+          vault-secret-id: ${{ secrets.TRDL_VAULT_SECRET_ID }}
