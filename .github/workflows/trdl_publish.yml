@@ -14,7 +14,7 @@ defaults:
 jobs:
   publish:
     name: Publish release channels using trdl server
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, regular]    
     steps:
       - name: Publish
         uses: werf/trdl-vault-actions/publish@main
