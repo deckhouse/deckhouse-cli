@@ -1,7 +1,7 @@
 groups:
 - name: "1"
   channels:
-  - name: early-access
+  - name: ea
     version: 0.7.1
   - name: stable
     version: 0.7.1
