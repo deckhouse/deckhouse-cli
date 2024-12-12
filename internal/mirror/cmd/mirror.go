@@ -35,7 +35,7 @@ Copy Deckhouse Kubernetes Platform distribution to the local filesystem or
 the air-gapped registries.
 
 For more information on how to use it, consult the docs at 
-https://deckhouse.io/documentation/v1/deckhouse-faq.html#manually-uploading-images-to-an-air-gapped-registry
+https://deckhouse.io/products/kubernetes-platform/documentation/v1/deckhouse-faq.html#manually-uploading-images-to-an-air-gapped-registry
 
 LICENSE NOTE:
 The d8 mirror functionality is exclusively available to users holding a 
