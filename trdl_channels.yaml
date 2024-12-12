@@ -1,5 +1,5 @@
 groups:
-- name: "0"
+- name: "1"
   channels:
   - name: early-access
     version: 0.7.1
