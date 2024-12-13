@@ -98,6 +98,7 @@ installBinary() {
   set +e
   local output
   local rc
+  echo $D8_TMP $OS $ARCH $INSTALL_DIR
   output=$(install "$D8_TMP/$OS-$ARCH/d8" "$INSTALL_DIR" 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ]; then
