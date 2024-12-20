@@ -42,7 +42,7 @@ func init() {
 	werfRootCmd.Long = werfRootCmd.Short + "."
 	werfRootCmd.Long = werfRootCmd.Long + `
 
-LICENSE NOTE: The Delivery Kit functionality is exclusively available to users holding a valid license for any commercial version of the Deckhouse Kubernetes Platform.
+LICENSE NOTE: The Deckhouse Delivery Kit functionality is exclusively available to users holding a valid license for any commercial version of the Deckhouse Kubernetes Platform.
 
 © Flant JSC 2024`
 
