@@ -98,13 +98,13 @@ installBinary() {
   set +e
   local output
   local rc
-  output=$(install "$D8_TMP/$OS-$ARCH/d8" "$INSTALL_DIR" 2>&1)
+  output=$(install "$D8_TMP/$OS-$ARCH/bin/d8" "$INSTALL_DIR" 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ]; then
     if grep -q "Permission denied" <<< "$output"; then
       echo "Got Permission denied error. Trying with sudo (you may need to enter sudo password)"
       set -e
-      sudo install "$D8_TMP/$OS-$ARCH/d8" "$INSTALL_DIR"
+      sudo install "$D8_TMP/$OS-$ARCH/bin/d8" "$INSTALL_DIR"
     else
       echo "Unexpected error during install: $output"
       set -e
