@@ -62,6 +62,8 @@ func init() {
 		{"transit", "Interact with Stronghold's Transit Secrets Engine"},
 		{"auth", "Interact with auth methods"},
 		{"print", "Prints runtime configurations"},
+		{"patch", "Patch data, configuration, and secrets"},
+		{"path-help", "Retrieve API help for paths"},
 	}
 
 	strongholdCmd := &cobra.Command{
