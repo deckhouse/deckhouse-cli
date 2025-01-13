@@ -35,7 +35,7 @@ Take a snapshot of cluster configuration.
 		
 This command creates a snapshot various kubernetes resources.
 
-© Flant JSC 2024`)
+© Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
 	etcdCmd := &cobra.Command{

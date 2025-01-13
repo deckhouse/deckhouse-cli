@@ -45,7 +45,7 @@ Take a snapshot of ETCD state.
 		
 This command creates a snapshot of the Kubernetes underlying key-value database ETCD.
 
-© Flant JSC 2024`)
+© Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
 	etcdCmd := &cobra.Command{
