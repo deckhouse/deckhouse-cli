@@ -27,7 +27,7 @@ import (
 var platformLong = templates.LongDesc(`
 Operate the Deckhouse Kubernetes Platform.
 
-© Flant JSC 2024`)
+© Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
 	platformCmd := &cobra.Command{

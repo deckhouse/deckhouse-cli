@@ -29,7 +29,7 @@ import (
 var providerClusterConfigurationLong = templates.LongDesc(`
 Edit provider-cluster-configuration in Kubernetes cluster.
 
-© Flant JSC 2024`)
+© Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
 	providerClusterConfigurationCmd := &cobra.Command{

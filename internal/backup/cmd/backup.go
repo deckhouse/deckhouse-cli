@@ -27,7 +27,7 @@ import (
 var backupLong = templates.LongDesc(`
 Backup various parts of Deckhouse Kubernetes Platform
 
-© Flant JSC 2024`)
+© Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
 	backupCmd := &cobra.Command{

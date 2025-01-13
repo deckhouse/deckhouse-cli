@@ -36,7 +36,7 @@ LICENSE NOTE:
 The d8 mirror functionality is exclusively available to users holding a 
 valid license for any commercial version of the Deckhouse Kubernetes Platform.
 
-© Flant JSC 2024`)
+© Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
 	mirrorModulesCmd := &cobra.Command{

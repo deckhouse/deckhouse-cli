@@ -20,8 +20,8 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	cluster_config "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/cluster-configuration"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	provider_config "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/provider-cluster-configuration"
 	static_config "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/static-cluster-configuration"
 )
@@ -29,12 +29,12 @@ import (
 var editLong = templates.LongDesc(`
 Change configuration files in Kubernetes cluster conveniently and safely.
 
-© Flant JSC 2024`)
+© Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
 	editCmd := &cobra.Command{
 		Use: "edit", Short: "Edit configuration files",
-		Long:    editLong,
+		Long: editLong,
 	}
 
 	editCmd.AddCommand(
