@@ -1,4 +1,4 @@
-package switchmodule
+package operatemodule
 
 import (
 	"context"

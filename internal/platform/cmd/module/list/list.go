@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package enable
+package list
 
 import (
 	"fmt"
@@ -25,27 +25,26 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 )
 
-var enableLong = templates.LongDesc(`
-Edit cluster-configuration in Kubernetes cluster.
+var listLong = templates.LongDesc(`
+List enabled modules in kubernetes cluster.
 
-© Flant JSC 2024`)
+© Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
-	enableCmd := &cobra.Command{
-		Use:           "enable",
-		Short:         "Edit cluster-configuration.",
-		Long:          enableLong,
-		ValidArgs:     []string{"module_name"},
+	listCmd := &cobra.Command{
+		Use:           "list",
+		Short:         "List enabled modules.",
+		Long:          listLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		RunE:          enableModule,
+		RunE:          listModule,
 	}
-	flags.AddFlags(enableCmd.Flags())
-	return enableCmd
+	flags.AddFlags(listCmd.Flags())
+	return listCmd
 }
 
-func enableModule(cmd *cobra.Command, moduleName []string) error {
-	err := operatemodule.OperateModule(cmd, moduleName[0], true)
+func listModule(cmd *cobra.Command) error {
+	err := operatemodule.ListModule(cmd)
 	if err != nil {
 		return fmt.Errorf("Error updating secret: %w", err)
 	}

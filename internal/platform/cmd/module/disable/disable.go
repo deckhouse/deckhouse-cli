@@ -18,7 +18,7 @@ package disable
 
 import (
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/switchmodule"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
 
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	"github.com/spf13/cobra"
@@ -45,7 +45,7 @@ func NewCommand() *cobra.Command {
 }
 
 func disableModule(cmd *cobra.Command, moduleName []string) error {
-	err := switchmodule.OperateModule(cmd, moduleName[0], false)
+	err := operatemodule.OperateModule(cmd, moduleName[0], false)
 	if err != nil {
 		return fmt.Errorf("Error updating secret: %w", err)
 	}
