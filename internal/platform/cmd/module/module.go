@@ -17,6 +17,7 @@ limitations under the License.
 package module
 
 import (
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/list"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
@@ -39,6 +40,7 @@ func NewCommand() *cobra.Command {
 	moduleCmd.AddCommand(
 		enable.NewCommand(),
 		disable.NewCommand(),
+		list.NewCommand(),
 	)
 
 	flags.AddFlags(moduleCmd.Flags())

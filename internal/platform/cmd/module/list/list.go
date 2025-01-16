@@ -43,7 +43,7 @@ func NewCommand() *cobra.Command {
 	return listCmd
 }
 
-func listModule(cmd *cobra.Command) error {
+func listModule(cmd *cobra.Command, args []string) error {
 	err := operatemodule.ListModule(cmd)
 	if err != nil {
 		return fmt.Errorf("Error updating secret: %w", err)
