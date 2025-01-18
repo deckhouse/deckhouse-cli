@@ -63,7 +63,7 @@ func ValuesModule(cmd *cobra.Command) error {
 	}
 
 	// Command to get the REST API URL from environment variable or file
-	getApi := []string{"curl", "http://127.0.0.1:9652/module/cni-cilium/values.json"} // Adjust based on where your URL is stored
+	getApi := []string{"curl", "http://127.0.0.1:9652/module/cni-cilium/values.yaml"} // Adjust based on where your URL is stored
 
 	//// Prepare the exec options
 	//execOptions := v1.PodExecOptions{
@@ -120,7 +120,6 @@ func ValuesModule(cmd *cobra.Command) error {
 
 	// Print the results
 	fmt.Printf("Command stdout: %s\n", stdout.String())
-	fmt.Printf("Command stderr: %s\n", stderr.String())
 
 	return err
 }
