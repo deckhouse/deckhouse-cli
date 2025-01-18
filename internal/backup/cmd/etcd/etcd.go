@@ -68,14 +68,12 @@ func NewCommand() *cobra.Command {
 const (
 	etcdPodNamespace      = "kube-system"
 	etcdPodsLabelSelector = "component=etcd"
-
-	bufferSize16MB = 16 * 1024 * 1024
+	bufferSize16MB        = 16 * 1024 * 1024
 )
 
 var (
 	requestedEtcdPodName string
-
-	verboseLog bool
+	verboseLog           bool
 )
 
 func etcd(cmd *cobra.Command, args []string) error {
