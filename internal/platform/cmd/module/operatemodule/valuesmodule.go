@@ -1,11 +1,11 @@
 package operatemodule
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
-	"io"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -14,7 +14,7 @@ import (
 	"os"
 )
 
-func ValuesModule(cmd *cobra.Command, args []string) error {
+func ValuesModule(cmd *cobra.Command) error {
 
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
@@ -61,10 +61,6 @@ func ValuesModule(cmd *cobra.Command, args []string) error {
 	//	TTY:     false,
 	//}
 
-	// Set up a buffer to capture the output
-	//var stdout bytes.Buffer
-	//var stderr bytes.Buffer
-
 	scheme := runtime.NewScheme()
 	parameterCodec := runtime.NewParameterCodec(scheme)
 	if err := v1.AddToScheme(scheme); err != nil {
@@ -86,8 +82,12 @@ func ValuesModule(cmd *cobra.Command, args []string) error {
 			TTY:     false,
 		}, parameterCodec)
 
+	// Set up a buffer to capture the output
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
 	// Set up the execution streams
-	var stdout, stderr io.Writer
+	//var stdout, stderr io.Writer
 
 	executor, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
 	if err != nil {
@@ -98,11 +98,15 @@ func ValuesModule(cmd *cobra.Command, args []string) error {
 	if err = executor.StreamWithContext(
 		context.Background(),
 		remotecommand.StreamOptions{
-			Stdout: stdout,
-			Stderr: stderr,
+			Stdout: &stdout,
+			Stderr: &stderr,
 		}); err != nil {
 		return err
 	}
+
+	// Print the results
+	fmt.Printf("Command stdout: %s\n", stdout.String())
+	fmt.Printf("Command stderr: %s\n", stderr.String())
 
 	return err
 }

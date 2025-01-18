@@ -18,6 +18,7 @@ package module
 
 import (
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/list"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/values"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
@@ -41,6 +42,7 @@ func NewCommand() *cobra.Command {
 		enable.NewCommand(),
 		disable.NewCommand(),
 		list.NewCommand(),
+		values.NewCommand(),
 	)
 
 	flags.AddFlags(moduleCmd.Flags())

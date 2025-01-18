@@ -14,11 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package list
+package values
 
 import (
 	"fmt"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 )
@@ -31,7 +32,7 @@ Module values by name in kubernetes cluster.
 func NewCommand() *cobra.Command {
 	listCmd := &cobra.Command{
 		Use:           "values",
-		Short:         "Module values by name.",
+		Short:         "Module values.",
 		Long:          valuesLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -42,7 +43,7 @@ func NewCommand() *cobra.Command {
 }
 
 func valuesModule(cmd *cobra.Command, args []string) error {
-	err := ValuesModule.ListModule(cmd)
+	err := operatemodule.ValuesModule(cmd)
 	if err != nil {
 		return fmt.Errorf("Error updating secret: %w", err)
 	}
