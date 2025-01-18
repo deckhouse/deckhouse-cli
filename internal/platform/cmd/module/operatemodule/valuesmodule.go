@@ -29,6 +29,7 @@ func ValuesModule(cmd *cobra.Command) error {
 	// Define label selector to identify the pod (you can modify the selector)
 	labelSelector := "leader=true"
 	namespace := "d8-system"
+	containerName := "deckhouse"
 
 	// Get list of pods based on label selector
 	pods, err := kubeCl.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
@@ -48,6 +49,18 @@ func ValuesModule(cmd *cobra.Command) error {
 	// Use the first pod found
 	pod := pods.Items[0]
 	podName := pod.Name
+
+	// Check if the container exists in the pod
+	containerFound := false
+	for _, c := range pod.Spec.Containers {
+		if c.Name == containerName {
+			containerFound = true
+			break
+		}
+	}
+	if !containerFound {
+		log.Printf("Container %q not found in pod %q", containerName, podName)
+	}
 
 	// Command to get the REST API URL from environment variable or file
 	getApi := []string{"curl", "http://127.0.0.1:9652/module/cni-cilium/values.json"} // Adjust based on where your URL is stored
@@ -75,11 +88,12 @@ func ValuesModule(cmd *cobra.Command) error {
 		Namespace(namespace).
 		SubResource("exec").
 		VersionedParams(&v1.PodExecOptions{
-			Command: getApi,
-			Stdin:   false,
-			Stdout:  true,
-			Stderr:  true,
-			TTY:     false,
+			Command:   getApi,
+			Container: containerName,
+			Stdin:     false,
+			Stdout:    true,
+			Stderr:    true,
+			TTY:       false,
 		}, parameterCodec)
 
 	// Set up a buffer to capture the output
