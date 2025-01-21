@@ -27,15 +27,16 @@ func ValuesModule(cmd *cobra.Command, name string) error {
 	}
 
 	const (
-		apiProtocol   = "http"
-		apiEndpoint   = "127.0.0.1"
-		apiPort       = "9652"
-		modulePath    = "module"
-		valuesPath    = "values.yaml"
-		labelSelector = "leader=true"
-		namespace     = "d8-system"
-		containerName = "deckhouse"
+		apiProtocol = "http"
+		apiEndpoint = "127.0.0.1"
+		apiPort     = "9652"
+		modulePath  = "module"
+		valuesPath  = "values.yaml"
 	)
+
+	labelSelector := "leader=true"
+	namespace := "d8-system"
+	containerName := "deckhouse"
 
 	// Get list of pods based on label selector
 	pods, err := kubeCl.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
