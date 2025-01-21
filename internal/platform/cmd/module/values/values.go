@@ -34,6 +34,7 @@ func NewCommand() *cobra.Command {
 		Use:           "values",
 		Short:         "Module values.",
 		Long:          valuesLong,
+		ValidArgs:     []string{"module_name"},
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE:          valuesModule,
@@ -42,8 +43,8 @@ func NewCommand() *cobra.Command {
 	return listCmd
 }
 
-func valuesModule(cmd *cobra.Command, args []string) error {
-	err := operatemodule.ValuesModule(cmd)
+func valuesModule(cmd *cobra.Command, moduleName []string) error {
+	err := operatemodule.ValuesModule(cmd, moduleName[0])
 	if err != nil {
 		return fmt.Errorf("Error updating secret: %w", err)
 	}

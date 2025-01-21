@@ -14,7 +14,7 @@ import (
 	"os"
 )
 
-func ValuesModule(cmd *cobra.Command) error {
+func ValuesModule(cmd *cobra.Command, name string) error {
 
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
@@ -26,10 +26,16 @@ func ValuesModule(cmd *cobra.Command) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	// Define label selector to identify the pod (you can modify the selector)
-	labelSelector := "leader=true"
-	namespace := "d8-system"
-	containerName := "deckhouse"
+	const (
+		apiProtocol   = "http"
+		apiEndpoint   = "127.0.0.1"
+		apiPort       = "9652"
+		modulePath    = "module"
+		valuesPath    = "values.yaml"
+		labelSelector = "leader=true"
+		namespace     = "d8-system"
+		containerName = "deckhouse"
+	)
 
 	// Get list of pods based on label selector
 	pods, err := kubeCl.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
@@ -59,20 +65,12 @@ func ValuesModule(cmd *cobra.Command) error {
 		}
 	}
 	if !containerFound {
-		log.Printf("Container %q not found in pod %q", containerName, podName)
+		fmt.Println("Container %q not found in pod %q", containerName, podName)
 	}
 
-	// Command to get the REST API URL from environment variable or file
-	getApi := []string{"curl", "http://127.0.0.1:9652/module/cni-cilium/values.yaml"} // Adjust based on where your URL is stored
+	endpointUrl := fmt.Sprintf("%s://%s/%s/%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, name, valuesPath)
 
-	//// Prepare the exec options
-	//execOptions := v1.PodExecOptions{
-	//	Command: getApi,
-	//	Stdin:   false,
-	//	Stdout:  true,
-	//	Stderr:  true,
-	//	TTY:     false,
-	//}
+	getApi := []string{"curl", endpointUrl}
 
 	scheme := runtime.NewScheme()
 	parameterCodec := runtime.NewParameterCodec(scheme)
@@ -99,9 +97,6 @@ func ValuesModule(cmd *cobra.Command) error {
 	// Set up a buffer to capture the output
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-
-	// Set up the execution streams
-	//var stdout, stderr io.Writer
 
 	executor, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
 	if err != nil {
