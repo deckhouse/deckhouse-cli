@@ -47,7 +47,7 @@ func NewCommand() *cobra.Command {
 func enableModule(cmd *cobra.Command, moduleName []string) error {
 	err := operatemodule.OperateModule(cmd, moduleName[0], true)
 	if err != nil {
-		return fmt.Errorf("Error updating secret: %w", err)
+		return fmt.Errorf("Error enable module: %w", err)
 	}
 	return err
 }

@@ -44,9 +44,9 @@ func NewCommand() *cobra.Command {
 }
 
 func valuesModule(cmd *cobra.Command, moduleName []string) error {
-	err := operatemodule.ValuesModule(cmd, moduleName[0])
+	err := operatemodule.OptionsModule(cmd, moduleName[0], "values.yaml")
 	if err != nil {
-		return fmt.Errorf("Error updating secret: %w", err)
+		return fmt.Errorf("Error print values: %w", err)
 	}
 	return err
 }

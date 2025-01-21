@@ -14,7 +14,7 @@ import (
 	"os"
 )
 
-func ValuesModule(cmd *cobra.Command, name string) error {
+func OptionsModule(cmd *cobra.Command, name string, valuesPath string) error {
 
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
@@ -31,13 +31,11 @@ func ValuesModule(cmd *cobra.Command, name string) error {
 		apiEndpoint   = "127.0.0.1"
 		apiPort       = "9652"
 		modulePath    = "module"
-		valuesPath    = "values.yaml"
 		labelSelector = "leader=true"
 		namespace     = "d8-system"
 		containerName = "deckhouse"
 	)
 
-	// Get list of pods based on label selector
 	pods, err := kubeCl.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
@@ -46,17 +44,14 @@ func ValuesModule(cmd *cobra.Command, name string) error {
 		os.Exit(1)
 	}
 
-	// Check if any pods are found
 	if len(pods.Items) == 0 {
 		fmt.Println("No pods found with the label:", labelSelector)
 		os.Exit(1)
 	}
 
-	// Use the first pod found
 	pod := pods.Items[0]
 	podName := pod.Name
 
-	// Check if the container exists in the pod
 	containerFound := false
 	for _, c := range pod.Spec.Containers {
 		if c.Name == containerName {
@@ -68,10 +63,8 @@ func ValuesModule(cmd *cobra.Command, name string) error {
 		fmt.Println("Container %q not found in pod %q", containerName, podName)
 	}
 
-	//endpointUrl := fmt.Sprintf("%s://%s/%s/%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, name, valuesPath)
-
-	//getApi := []string{"curl", endpointUrl}
-	getApi := []string{"curl", "http://127.0.0.1:9652/module/cni-cilium/values.yaml"}
+	endpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, name, valuesPath)
+	getApi := []string{"curl", endpointUrl}
 
 	scheme := runtime.NewScheme()
 	parameterCodec := runtime.NewParameterCodec(scheme)
@@ -79,7 +72,6 @@ func ValuesModule(cmd *cobra.Command, name string) error {
 		return fmt.Errorf("Failed to create parameter codec: %w", err)
 	}
 
-	// Execute the command in the pod
 	req := kubeCl.CoreV1().RESTClient().
 		Post().
 		Resource("pods").
@@ -95,7 +87,6 @@ func ValuesModule(cmd *cobra.Command, name string) error {
 			TTY:       false,
 		}, parameterCodec)
 
-	// Set up a buffer to capture the output
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -104,7 +95,6 @@ func ValuesModule(cmd *cobra.Command, name string) error {
 		log.Printf("Creating SPDY executor for Pod %s: %v", podName, err)
 	}
 
-	// Run the command
 	if err = executor.StreamWithContext(
 		context.Background(),
 		remotecommand.StreamOptions{
@@ -114,8 +104,6 @@ func ValuesModule(cmd *cobra.Command, name string) error {
 		return err
 	}
 
-	// Print the results
 	fmt.Printf("Command stdout: %s\n", stdout.String())
-
 	return err
 }

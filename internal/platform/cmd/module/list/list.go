@@ -44,9 +44,9 @@ func NewCommand() *cobra.Command {
 }
 
 func listModule(cmd *cobra.Command, args []string) error {
-	err := operatemodule.ListModule(cmd)
+	err := operatemodule.OptionsModule(cmd, "moc", "list.yaml")
 	if err != nil {
-		return fmt.Errorf("Error updating secret: %w", err)
+		return fmt.Errorf("Error list modules: %w", err)
 	}
 	return err
 }
