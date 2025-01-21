@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
@@ -136,6 +137,7 @@ func Pack(mirrorCtx *contexts.PullContext) error {
 }
 
 func packFunc(mirrorCtx *contexts.BaseContext, out *tar.Writer) filepath.WalkFunc {
+	unixEpochStart := time.Unix(0, 0)
 	return func(path string, info fs.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -151,10 +153,12 @@ func packFunc(mirrorCtx *contexts.BaseContext, out *tar.Writer) filepath.WalkFun
 
 		pathInTar := strings.TrimPrefix(path, mirrorCtx.UnpackedImagesPath+string(os.PathSeparator))
 		err = out.WriteHeader(&tar.Header{
-			Name:    filepath.ToSlash(pathInTar),
-			Size:    info.Size(),
-			Mode:    int64(info.Mode()),
-			ModTime: info.ModTime(),
+			Typeflag: tar.TypeReg,
+			Format:   tar.FormatGNU,
+			Name:     filepath.ToSlash(pathInTar),
+			Size:     info.Size(),
+			Mode:     0777,
+			ModTime:  unixEpochStart,
 		})
 		if err != nil {
 			return fmt.Errorf("write tar header: %w", err)
