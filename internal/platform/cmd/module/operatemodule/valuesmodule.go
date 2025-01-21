@@ -68,9 +68,10 @@ func ValuesModule(cmd *cobra.Command, name string) error {
 		fmt.Println("Container %q not found in pod %q", containerName, podName)
 	}
 
-	endpointUrl := fmt.Sprintf("%s://%s/%s/%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, name, valuesPath)
+	//endpointUrl := fmt.Sprintf("%s://%s/%s/%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, name, valuesPath)
 
-	getApi := []string{"curl", endpointUrl}
+	//getApi := []string{"curl", endpointUrl}
+	getApi := []string{"curl", "http://127.0.0.1:9652/module/cni-cilium/values.yaml"}
 
 	scheme := runtime.NewScheme()
 	parameterCodec := runtime.NewParameterCodec(scheme)
