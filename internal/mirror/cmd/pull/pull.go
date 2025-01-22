@@ -378,5 +378,13 @@ func PullDeckhouseToLocalFS(
 		}
 	}
 
+	logger.InfoLn("Processing image indexes")
+	for _, l := range imageLayouts.AllLayouts() {
+		err = layouts.SortIndexManifests(l)
+		if err != nil {
+			return fmt.Errorf("Sorting index manifests of %s: %w", l, err)
+		}
+	}
+
 	return nil
 }
