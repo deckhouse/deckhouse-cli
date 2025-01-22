@@ -39,6 +39,14 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 )
 
+type ModuleImageLayout struct {
+	ModuleLayout layout.Path
+	ModuleImages map[string]struct{}
+
+	ReleasesLayout layout.Path
+	ReleaseImages  map[string]struct{}
+}
+
 type ImageLayouts struct {
 	Deckhouse       layout.Path
 	DeckhouseImages map[string]struct{}
@@ -66,12 +74,22 @@ type ImageLayouts struct {
 	TagsResolver *TagsResolver
 }
 
-type ModuleImageLayout struct {
-	ModuleLayout layout.Path
-	ModuleImages map[string]struct{}
+func (l *ImageLayouts) AllLayouts() []layout.Path {
+	paths := []layout.Path{
+		l.Deckhouse,
+		l.Install,
+		l.InstallStandalone,
+		l.ReleaseChannel,
+		l.TrivyDB,
+		l.TrivyBDU,
+		l.TrivyJavaDB,
+		l.TrivyChecks,
+	}
+	for _, moduleImageLayout := range l.Modules {
+		paths = append(paths, moduleImageLayout.ModuleLayout, moduleImageLayout.ReleasesLayout)
+	}
 
-	ReleasesLayout layout.Path
-	ReleaseImages  map[string]struct{}
+	return paths
 }
 
 func CreateOCIImageLayoutsForDeckhouse(

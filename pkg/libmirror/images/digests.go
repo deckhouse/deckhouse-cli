@@ -92,13 +92,6 @@ func findDigestForInstallerTag(installerTag string, indexManifest *v1.IndexManif
 			tag := imageManifest.Digest
 			return &tag
 		}
-
-		// for key, value := range imageManifest.Annotations {
-		// 	if key == "org.opencontainers.image.ref.name" && value == installerTag {
-		// 		tag := imageManifest.Digest
-		// 		return &tag
-		// 	}
-		// }
 	}
 	return nil
 }
