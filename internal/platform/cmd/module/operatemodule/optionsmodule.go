@@ -39,7 +39,6 @@ func OptionsModule(cmd *cobra.Command, pathFromOption string) error {
 	fullEndpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, pathFromOption)
 	getApi := []string{"curl", fullEndpointUrl}
 	podName, err := getDeckhousePod(kubeCl, namespace, labelSelector, containerName)
-
 	executor, err := execInPod(config, kubeCl, getApi, podName, namespace, containerName)
 
 	var stdout bytes.Buffer

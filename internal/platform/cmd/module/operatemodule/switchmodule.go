@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // updates spec.enabled flag or creates a new ModuleConfig with spec.enabled flag.
@@ -30,39 +31,24 @@ func OperateModule(cmd *cobra.Command, name string, enabled bool) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	// CustomResource represents the CRD you're trying to fetch.
-	const customResourceGroup = "deckhouse.io"   // The group of your CRD
-	const customResourceVersion = "v1alpha1"     // The version of your CRD
-	const customResourcePlural = "moduleconfigs" // Plural name of your custom resource
-	const customResourceNamespace = "default"    // Namespace (can be empty for cluster-wide)
-
 	// Create a dynamic client
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		log.Fatalf("Failed to create dynamic client: %v", err)
 	}
 
-	// Fetch the custom resource using the dynamic client
 	resourceClient := dynamicClient.Resource(
 		schema.GroupVersionResource{
-			Group:    customResourceGroup,
-			Version:  customResourceVersion,
-			Resource: customResourcePlural,
+			Group:    "deckhouse.io",
+			Version:  "v1alpha1",
+			Resource: "moduleconfigs",
 		},
 	)
 
-	// Get the custom resource by name (or list them)
-	//customResourceName := "example-resource" // Name of the custom resource you want to fetch
-
 	customResource, err := resourceClient.Get(context.TODO(), name, metav1.GetOptions{})
-	if err != nil {
-		log.Fatalf("Failed to get custom resource: %v", err)
+	if client.IgnoreNotFound(err) != nil {
+		return fmt.Errorf("Failed to get moduleconfig %s: %v", name, err)
 	}
-
-	//unstructuredObj, err := kubeCl.dynamicClient().Resource(v1alpha1.ModuleConfigGVR).Get(context.TODO(), name, metav1.GetOptions{})
-	//if client.IgnoreNotFound(err) != nil {
-	//	return fmt.Errorf("failed to get the '%s' module config: %w", name, err)
-	//}
 
 	if customResource != nil {
 		if err = unstructured.SetNestedField(customResource.Object, enabled, "spec", "enabled"); err != nil {
@@ -87,8 +73,8 @@ func OperateModule(cmd *cobra.Command, name string, enabled bool) error {
 	// create new ModuleConfig if absent.
 	newCfg := &v1alpha1.ModuleConfig{
 		TypeMeta: metav1.TypeMeta{
-			Kind:       v1alpha1.ModuleConfigGVK.Kind,
-			APIVersion: v1alpha1.ModuleConfigGVK.GroupVersion().String(),
+			Kind:       "ModuleConfig",
+			APIVersion: "deckhouse_io",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -97,6 +83,12 @@ func OperateModule(cmd *cobra.Command, name string, enabled bool) error {
 			Enabled: ptr.To(enabled),
 		},
 	}
+
+	//// Create the custom resource
+	//createdResource, err := resource.Create(context.TODO(), customResource, v1.CreateOptions{})
+	//if err != nil {
+	//	log.Fatalf("Failed to create custom resource '%s': %v", name, err)
+	//}
 
 	obj, err := ToUnstructured(newCfg)
 	if err != nil {

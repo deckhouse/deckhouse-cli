@@ -25,9 +25,9 @@ var (
 	//	Resource: ModuleConfigResource,
 	//}
 	ModuleConfigGVK = schema.GroupVersionKind{
-		Group:   SchemeGroupVersion.Group,
-		Version: SchemeGroupVersion.Version,
-		Kind:    ModuleConfigKind,
+		Group:   "deckhouse_io",
+		Version: "Version",
+		Kind:    "ModuleConfig",
 	}
 )
 
@@ -38,10 +38,8 @@ type ModuleConfig struct {
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-
-	Spec ModuleConfigSpec `json:"spec"`
-
-	Status ModuleConfigStatus `json:"status,omitempty"`
+	Spec              ModuleConfigSpec   `json:"spec"`
+	Status            ModuleConfigStatus `json:"status,omitempty"`
 }
 
 type ModuleConfigSpec struct {
