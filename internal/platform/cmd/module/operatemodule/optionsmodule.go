@@ -37,7 +37,6 @@ func OptionsModule(cmd *cobra.Command, pathFromOption string) error {
 	)
 
 	fullEndpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, pathFromOption)
-	fmt.Printf("endpointUrl is %s", fullEndpointUrl)
 	getApi := []string{"curl", fullEndpointUrl}
 	podName, err := getDeckhousePod(kubeCl, namespace, labelSelector, containerName)
 
@@ -54,7 +53,7 @@ func OptionsModule(cmd *cobra.Command, pathFromOption string) error {
 		return err
 	}
 
-	fmt.Printf("Command stdout: %s\n", stdout.String())
+	fmt.Printf("%s\n", stdout.String())
 	return err
 }
 
