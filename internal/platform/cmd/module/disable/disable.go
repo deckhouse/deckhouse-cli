@@ -49,5 +49,6 @@ func disableModule(cmd *cobra.Command, moduleName []string) error {
 	if err != nil {
 		return fmt.Errorf("Error disable module: %w", err)
 	}
+	fmt.Printf("Module %s disabled", moduleName[0])
 	return err
 }
