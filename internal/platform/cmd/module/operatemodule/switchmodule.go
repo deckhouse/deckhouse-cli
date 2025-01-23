@@ -15,7 +15,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // updates spec.enabled flag or creates a new ModuleConfig with spec.enabled flag.
@@ -46,9 +45,12 @@ func OperateModule(cmd *cobra.Command, name string, enabled bool) error {
 	)
 
 	customResource, err := resourceClient.Get(context.TODO(), name, metav1.GetOptions{})
-	if client.IgnoreNotFound(err) != nil {
-		return fmt.Errorf("Failed to get moduleconfig %s: %v", name, err)
+	if err != nil {
+		fmt.Printf("Failed to get moduleconfig %s: %v", name, err)
 	}
+	//if errors.IsNotFound(err) {
+	//	return fmt.Errorf("Failed to get moduleconfig %s: %v", name, err)
+	//}
 
 	if customResource != nil {
 		if err = unstructured.SetNestedField(customResource.Object, enabled, "spec", "enabled"); err != nil {
@@ -71,7 +73,7 @@ func OperateModule(cmd *cobra.Command, name string, enabled bool) error {
 	//}
 
 	// create new ModuleConfig if absent.
-	newCfg := &v1alpha1.ModuleConfig{
+	newCfg := &v1alpha1.ModuleConfigMeta{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "ModuleConfig",
 			APIVersion: "deckhouse_io",
