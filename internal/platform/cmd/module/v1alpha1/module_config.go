@@ -7,12 +7,16 @@ import (
 // ModuleConfig is a configuration for module or for global config values.
 type ModuleConfig struct {
 	metav1.TypeMeta `json:",inline"`
+
 	// Standard object's metadata.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
 	// +optional
+
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              ModuleConfigSpec   `json:"spec"`
-	Status            ModuleConfigStatus `json:"status,omitempty"`
+
+	Spec ModuleConfigSpec `json:"spec"`
+
+	Status ModuleConfigStatus `json:"status,omitempty"`
 }
 
 type ModuleConfigSpec struct {
