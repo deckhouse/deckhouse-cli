@@ -2,33 +2,6 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-)
-
-const (
-	ModuleConfigResource = "moduleconfigs"
-	ModuleConfigKind     = "ModuleConfig"
-
-	ModuleConfigAnnotationAllowDisable = "modules.deckhouse.io/allow-disable"
-
-	ModuleConfigFinalizer = "modules.deckhouse.io/module-config"
-)
-
-// SchemeGroupVersion is group version used to register these objects
-var SchemeGroupVersion = schema.GroupVersion{Group: "deckhouse_io", Version: "Version"}
-
-var (
-	// ModuleConfigGVR GroupVersionResource
-	//ModuleConfigGVR = schema.GroupVersionResource{
-	//	Group:    SchemeGroupVersion.Group,
-	//	Version:  SchemeGroupVersion.Version,
-	//	Resource: ModuleConfigResource,
-	//}
-	ModuleConfigGVK = schema.GroupVersionKind{
-		Group:   "deckhouse_io",
-		Version: "Version",
-		Kind:    "ModuleConfig",
-	}
 )
 
 // ModuleConfig is a configuration for module or for global config values.
