@@ -38,6 +38,9 @@ func OperateModule(cmd *cobra.Command, name string, enabled bool) error {
 	)
 
 	customResource, err := resourceClient.Get(context.TODO(), name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("Error get options module '%s': %w", name, err)
+	}
 	if customResource != nil {
 		if err = unstructured.SetNestedField(customResource.Object, enabled, "spec", "enabled"); err != nil {
 			return fmt.Errorf("failed to change spec.enabled to %v in the '%s' module config: %w", enabled, name, err)

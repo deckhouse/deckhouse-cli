@@ -26,14 +26,14 @@ import (
 )
 
 var disableLong = templates.LongDesc(`
-Edit cluster-configuration in Kubernetes cluster.
+Disable module in the ModuleConfig resource.
 
-© Flant JSC 2024`)
+© Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
 	disableCmd := &cobra.Command{
 		Use:           "disable",
-		Short:         "Edit cluster-configuration.",
+		Short:         "Disable module.",
 		Long:          disableLong,
 		ValidArgs:     []string{"module_name"},
 		SilenceErrors: true,

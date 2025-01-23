@@ -26,7 +26,7 @@ import (
 )
 
 var listLong = templates.LongDesc(`
-List enabled modules in kubernetes cluster.
+List enabled modules in DKP.
 
 © Flant JSC 2025`)
 

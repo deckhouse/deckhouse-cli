@@ -26,7 +26,7 @@ import (
 )
 
 var snapshotsLong = templates.LongDesc(`
-Dump module snapshots for hooks in DKP.
+Dump module snapshots by name for hooks in DKP.
 
 © Flant JSC 2025`)
 

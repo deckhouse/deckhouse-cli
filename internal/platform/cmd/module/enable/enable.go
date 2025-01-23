@@ -26,14 +26,14 @@ import (
 )
 
 var enableLong = templates.LongDesc(`
-Edit cluster-configuration in Kubernetes cluster.
+Enable module in the ModuleConfig resource.
 
-© Flant JSC 2024`)
+© Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
 	enableCmd := &cobra.Command{
 		Use:           "enable",
-		Short:         "Edit cluster-configuration.",
+		Short:         "Enable module.",
 		Long:          enableLong,
 		ValidArgs:     []string{"module_name"},
 		SilenceErrors: true,

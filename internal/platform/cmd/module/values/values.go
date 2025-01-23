@@ -25,22 +25,22 @@ import (
 )
 
 var valuesLong = templates.LongDesc(`
-Module values by name in kubernetes cluster.
+Dump module values by name in DKP.
 
 © Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
-	listCmd := &cobra.Command{
+	valuesCmd := &cobra.Command{
 		Use:           "values",
-		Short:         "Module values.",
+		Short:         "Dump values",
 		Long:          valuesLong,
 		ValidArgs:     []string{"module_name"},
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE:          valuesModule,
 	}
-	flags.AddFlags(listCmd.Flags())
-	return listCmd
+	flags.AddFlags(valuesCmd.Flags())
+	return valuesCmd
 }
 
 func valuesModule(cmd *cobra.Command, moduleName []string) error {

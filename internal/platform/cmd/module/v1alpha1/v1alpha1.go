@@ -27,5 +27,4 @@ type ModuleConfigStatus struct {
 	Message string `json:"message"`
 }
 
-// SettingsValues empty interface in needed to handle DeepCopy generation. DeepCopy does not work with unnamed empty interfaces
 type SettingsValues map[string]interface{}
