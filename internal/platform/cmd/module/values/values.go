@@ -44,7 +44,8 @@ func NewCommand() *cobra.Command {
 }
 
 func valuesModule(cmd *cobra.Command, moduleName []string) error {
-	err := operatemodule.OptionsModule(cmd, moduleName[0], "values.yaml")
+	pathFromOption := fmt.Sprintf("%s/values.yaml", moduleName[0])
+	err := operatemodule.OptionsModule(cmd, pathFromOption)
 	if err != nil {
 		return fmt.Errorf("Error print values: %w", err)
 	}

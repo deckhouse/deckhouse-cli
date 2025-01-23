@@ -14,7 +14,7 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 )
 
-func OptionsModule(cmd *cobra.Command, name string, valuesPath string) error {
+func OptionsModule(cmd *cobra.Command, pathFromOption string) error {
 
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
@@ -36,9 +36,9 @@ func OptionsModule(cmd *cobra.Command, name string, valuesPath string) error {
 		containerName = "deckhouse"
 	)
 
-	endpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, name, valuesPath)
-	fmt.Printf("endpointUrl is %s", endpointUrl)
-	getApi := []string{"curl", endpointUrl}
+	fullEndpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, pathFromOption)
+	fmt.Printf("endpointUrl is %s", fullEndpointUrl)
+	getApi := []string{"curl", fullEndpointUrl}
 	podName, err := getDeckhousePod(kubeCl, namespace, labelSelector, containerName)
 
 	executor, err := execInPod(config, kubeCl, getApi, podName, namespace, containerName)
@@ -59,7 +59,6 @@ func OptionsModule(cmd *cobra.Command, name string, valuesPath string) error {
 }
 
 func getDeckhousePod(kubeCl *kubernetes.Clientset, namespace string, labelSelector string, containerName string) (string, error) {
-
 	pods, err := kubeCl.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
@@ -73,7 +72,6 @@ func getDeckhousePod(kubeCl *kubernetes.Clientset, namespace string, labelSelect
 
 	pod := pods.Items[0]
 	podName := pod.Name
-
 	var containerFound bool
 	for _, c := range pod.Spec.Containers {
 		if c.Name == containerName {
@@ -113,6 +111,5 @@ func execInPod(config *rest.Config, kubeCl *kubernetes.Clientset, getApi []strin
 	if err != nil {
 		return nil, fmt.Errorf("Creating SPDY executor for Pod %s: %v", podName, err)
 	}
-
 	return executor, nil
 }

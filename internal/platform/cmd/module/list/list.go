@@ -44,7 +44,7 @@ func NewCommand() *cobra.Command {
 }
 
 func listModule(cmd *cobra.Command, args []string) error {
-	err := operatemodule.OptionsModule(cmd, "moc", "list.yaml")
+	err := operatemodule.OptionsModule(cmd, "list.yaml")
 	if err != nil {
 		return fmt.Errorf("Error list modules: %w", err)
 	}
