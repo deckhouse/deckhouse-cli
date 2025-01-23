@@ -55,7 +55,7 @@ func OperateModule(cmd *cobra.Command, name string, enabled bool) error {
 	if _, err = resourceClient.Create(context.TODO(), obj, metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("failed to create the '%s' module config: %w", name, err)
 	}
-	return nil
+	return err
 }
 
 func createModuleConfig(name string, enabled bool) (*unstructured.Unstructured, error) {

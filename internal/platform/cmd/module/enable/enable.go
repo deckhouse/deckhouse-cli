@@ -49,6 +49,6 @@ func enableModule(cmd *cobra.Command, moduleName []string) error {
 	if err != nil {
 		return fmt.Errorf("Error enable module: %w", err)
 	}
-	fmt.Printf("Module %s enabled", moduleName[0])
+	fmt.Printf("Module %s enabled\n", moduleName[0])
 	return err
 }
