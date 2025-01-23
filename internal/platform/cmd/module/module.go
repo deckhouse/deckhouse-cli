@@ -19,6 +19,7 @@ package module
 import (
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/enable"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/list"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/snapshots"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/values"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
@@ -30,7 +31,7 @@ import (
 var moduleLong = templates.LongDesc(`
 Module options for Deckhouse Kubernetes Platform.
 
-© Flant JSC 2024`)
+© Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
 	moduleCmd := &cobra.Command{
@@ -43,6 +44,7 @@ func NewCommand() *cobra.Command {
 		disable.NewCommand(),
 		list.NewCommand(),
 		values.NewCommand(),
+		snapshots.NewCommand(),
 	)
 
 	flags.AddFlags(moduleCmd.Flags())
