@@ -12,7 +12,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
-	"os"
 )
 
 func OptionsModule(cmd *cobra.Command, name string, valuesPath string) error {
@@ -28,16 +27,19 @@ func OptionsModule(cmd *cobra.Command, name string, valuesPath string) error {
 	}
 
 	const (
-		apiProtocol = "http"
-		apiEndpoint = "127.0.0.1"
-		apiPort     = "9652"
-		modulePath  = "module"
-		namespace   = "d8-system"
+		apiProtocol   = "http"
+		apiEndpoint   = "127.0.0.1"
+		apiPort       = "9652"
+		modulePath    = "module"
+		labelSelector = "leader=true"
+		namespace     = "d8-system"
+		containerName = "deckhouse"
 	)
 
-	endpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, valuesPath)
+	endpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, name, valuesPath)
+	fmt.Printf("endpointUrl is %s", endpointUrl)
 	getApi := []string{"curl", endpointUrl}
-	podName, containerName, err := getDeckhousePod(kubeCl)
+	podName, err := getDeckhousePod(kubeCl, namespace, labelSelector, containerName)
 
 	executor, err := execInPod(config, kubeCl, getApi, podName, namespace, containerName)
 
@@ -56,24 +58,17 @@ func OptionsModule(cmd *cobra.Command, name string, valuesPath string) error {
 	return err
 }
 
-func getDeckhousePod(kubeCl *kubernetes.Clientset) (string, string, error) {
-	const (
-		labelSelector = "leader=true"
-		namespace     = "d8-system"
-		containerName = "deckhouse"
-	)
+func getDeckhousePod(kubeCl *kubernetes.Clientset, namespace string, labelSelector string, containerName string) (string, error) {
 
 	pods, err := kubeCl.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
 	if err != nil {
-		fmt.Errorf("Error listing pods:", err)
-		os.Exit(1)
+		return "", fmt.Errorf("Error listing pods: %w", err)
 	}
 
 	if len(pods.Items) == 0 {
-		fmt.Errorf("No pods found with the label:", labelSelector)
-		os.Exit(1)
+		return "", fmt.Errorf("No pods found with the label:", labelSelector)
 	}
 
 	pod := pods.Items[0]
@@ -87,9 +82,9 @@ func getDeckhousePod(kubeCl *kubernetes.Clientset) (string, string, error) {
 		}
 	}
 	if !containerFound {
-		fmt.Errorf("Container %q not found in pod %q", containerName, podName)
+		return "", fmt.Errorf("Container %q not found in pod %q", containerName, podName)
 	}
-	return podName, containerName, nil
+	return podName, nil
 }
 
 func execInPod(config *rest.Config, kubeCl *kubernetes.Clientset, getApi []string, podName string, namespace string, containerName string) (remotecommand.Executor, error) {
