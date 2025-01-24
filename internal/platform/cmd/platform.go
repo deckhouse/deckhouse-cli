@@ -21,25 +21,25 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 )
 
 var platformLong = templates.LongDesc(`
-Operate the Deckhouse Kubernetes Platform.
+Change configuration files in Kubernetes cluster conveniently and safely.
 
-© Flant JSC 2025`)
+© Flant JSC 2024`)
 
 func NewCommand() *cobra.Command {
 	platformCmd := &cobra.Command{
-		Use:     "platform <command>",
-		Short:   "Operate the Deckhouse Kubernetes Platform",
-		Aliases: []string{"p"},
+		Use: "platform", Short: "Edit configuration files",
 		Long:    platformLong,
 		PreRunE: flags.ValidateParameters,
 	}
 
 	platformCmd.AddCommand(
 		edit.NewCommand(),
+		module.NewCommand(),
 	)
 
 	flags.AddPersistentFlags(platformCmd)
