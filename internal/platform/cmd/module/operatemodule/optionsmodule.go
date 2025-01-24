@@ -65,7 +65,7 @@ func getDeckhousePod(kubeCl *kubernetes.Clientset, namespace string, labelSelect
 	}
 
 	if len(pods.Items) == 0 {
-		return "", fmt.Errorf("No pods found with the label: %w", labelSelector)
+		return "", fmt.Errorf("No pods found with the label: %s", labelSelector)
 	}
 
 	pod := pods.Items[0]
