@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Flant JSC
+Copyright 2025 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,18 +21,19 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 )
 
 var platformLong = templates.LongDesc(`
-Operate the Deckhouse Kubernetes Platform.
+Operate platform options in DKP.
 
 © Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
 	platformCmd := &cobra.Command{
 		Use:     "platform <command>",
-		Short:   "Operate the Deckhouse Kubernetes Platform",
+		Short:   "Operate platform options.",
 		Aliases: []string{"p"},
 		Long:    platformLong,
 		PreRunE: flags.ValidateParameters,
@@ -40,6 +41,7 @@ func NewCommand() *cobra.Command {
 
 	platformCmd.AddCommand(
 		edit.NewCommand(),
+		module.NewCommand(),
 	)
 
 	flags.AddPersistentFlags(platformCmd)
