@@ -31,6 +31,7 @@ func OptionsModule(cmd *cobra.Command, pathFromOption string) error {
 		apiEndpoint   = "127.0.0.1"
 		apiPort       = "9652"
 		modulePath    = "module"
+		
 		labelSelector = "leader=true"
 		namespace     = "d8-system"
 		containerName = "deckhouse"
