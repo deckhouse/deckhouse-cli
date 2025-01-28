@@ -31,7 +31,7 @@ func OperateModule(config *rest.Config, name string, enabled bool) error {
 
 	customResource, err := resourceClient.Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("Error get options module '%s': %w", name, err)
+		//fmt.Errorf("Error get options module '%s': %w", name, err)
 	}
 	patchSpec, err := patchSpec(enabled)
 	if customResource != nil {
