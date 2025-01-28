@@ -26,7 +26,7 @@ import (
 )
 
 var disableLong = templates.LongDesc(`
-Disable module in the ModuleConfig resource.
+Disable module using the ModuleConfig resource.
 
 © Flant JSC 2025`)
 
