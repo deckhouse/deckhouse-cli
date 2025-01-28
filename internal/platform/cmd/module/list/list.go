@@ -26,7 +26,7 @@ import (
 )
 
 var listLong = templates.LongDesc(`
-List enabled modules in DKP.
+List enabled Deckhouse Kubernetes Platform modules.
 
 © Flant JSC 2025`)
 
