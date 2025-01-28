@@ -26,7 +26,7 @@ func OptionsModule(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOp
 
 	fullEndpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, pathFromOption)
 	getApi := []string{"curl", fullEndpointUrl}
-	podName, err := getDeckhousePod(kubeCl, namespace, labelSelector, containerName)
+	podName, err := getDeckhousePod(kubeCl, namespace, labelSelector)
 	executor, err := execInPod(config, kubeCl, getApi, podName, namespace, containerName)
 
 	var stdout bytes.Buffer
@@ -44,7 +44,7 @@ func OptionsModule(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOp
 	return err
 }
 
-func getDeckhousePod(kubeCl *kubernetes.Clientset, namespace string, labelSelector string, containerName string) (string, error) {
+func getDeckhousePod(kubeCl *kubernetes.Clientset, namespace string, labelSelector string) (string, error) {
 	pods, err := kubeCl.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
@@ -58,16 +58,6 @@ func getDeckhousePod(kubeCl *kubernetes.Clientset, namespace string, labelSelect
 
 	pod := pods.Items[0]
 	podName := pod.Name
-	var containerFound bool
-	for _, c := range pod.Spec.Containers {
-		if c.Name == containerName {
-			containerFound = true
-			break
-		}
-	}
-	if !containerFound {
-		return "", fmt.Errorf("Container %q not found in pod %q", containerName, podName)
-	}
 	return podName, nil
 }
 
