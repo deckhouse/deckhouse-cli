@@ -35,7 +35,7 @@ Module options for Deckhouse Kubernetes Platform.
 
 func NewCommand() *cobra.Command {
 	moduleCmd := &cobra.Command{
-		Use: "module", Short: "Module options DKP",
+		Use: "module", Short: "Operate the Deckhouse Kubernetes Platform modules",
 		Long: moduleLong,
 	}
 
