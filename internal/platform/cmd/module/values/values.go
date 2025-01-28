@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 )
@@ -32,7 +33,7 @@ Dump module hooks values.
 func NewCommand() *cobra.Command {
 	valuesCmd := &cobra.Command{
 		Use:           "values",
-		Short:         "Dump values",
+		Short:         "Dump values.",
 		Long:          valuesLong,
 		ValidArgs:     []string{"module_name"},
 		SilenceErrors: true,
@@ -44,8 +45,18 @@ func NewCommand() *cobra.Command {
 }
 
 func valuesModule(cmd *cobra.Command, moduleName []string) error {
+	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
 	pathFromOption := fmt.Sprintf("%s/values.yaml", moduleName[0])
-	err := operatemodule.OptionsModule(cmd, pathFromOption)
+	err = operatemodule.OptionsModule(config, kubeCl, pathFromOption)
 	if err != nil {
 		return fmt.Errorf("Error print values: %w", err)
 	}

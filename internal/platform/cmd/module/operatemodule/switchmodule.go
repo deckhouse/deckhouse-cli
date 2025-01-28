@@ -4,26 +4,16 @@ import (
 	"context"
 	"fmt"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
-	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 )
 
-func OperateModule(cmd *cobra.Command, name string, enabled bool) error {
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
-	config, _, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
+func OperateModule(config *rest.Config, name string, enabled bool) error {
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return fmt.Errorf("Failed to create dynamic client: %v", err)

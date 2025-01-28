@@ -19,6 +19,7 @@ package disable
 import (
 	"fmt"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	"github.com/spf13/cobra"
@@ -45,7 +46,16 @@ func NewCommand() *cobra.Command {
 }
 
 func disableModule(cmd *cobra.Command, moduleName []string) error {
-	err := operatemodule.OperateModule(cmd, moduleName[0], false)
+	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	config, _, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+	err = operatemodule.OperateModule(config, moduleName[0], false)
 	if err != nil {
 		return fmt.Errorf("Error disable module: %w", err)
 	}

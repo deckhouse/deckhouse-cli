@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
-	"github.com/spf13/cobra"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -14,24 +12,13 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 )
 
-func OptionsModule(cmd *cobra.Command, pathFromOption string) error {
-
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
-	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
+func OptionsModule(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOption string) error {
 	const (
-		apiProtocol   = "http"
-		apiEndpoint   = "127.0.0.1"
-		apiPort       = "9652"
-		modulePath    = "module"
-		
+		apiProtocol = "http"
+		apiEndpoint = "127.0.0.1"
+		apiPort     = "9652"
+		modulePath  = "module"
+
 		labelSelector = "leader=true"
 		namespace     = "d8-system"
 		containerName = "deckhouse"

@@ -19,6 +19,7 @@ package list
 import (
 	"fmt"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	"github.com/spf13/cobra"
@@ -44,7 +45,17 @@ func NewCommand() *cobra.Command {
 }
 
 func listModule(cmd *cobra.Command, args []string) error {
-	err := operatemodule.OptionsModule(cmd, "list.yaml")
+	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	err = operatemodule.OptionsModule(config, kubeCl, "list.yaml")
 	if err != nil {
 		return fmt.Errorf("Error list modules: %w", err)
 	}
