@@ -2,12 +2,14 @@ package operatemodule
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
@@ -31,11 +33,12 @@ func OperateModule(config *rest.Config, name string, enabled bool) error {
 	if err != nil {
 		return fmt.Errorf("Error get options module '%s': %w", name, err)
 	}
+	patchSpec, err := patchSpec(enabled)
 	if customResource != nil {
 		if err = unstructured.SetNestedField(customResource.Object, enabled, "spec", "enabled"); err != nil {
 			return fmt.Errorf("failed to change spec.enabled to %v in the '%s' module config: %w", enabled, name, err)
 		}
-		if _, err = resourceClient.Update(context.TODO(), customResource, metav1.UpdateOptions{}); err != nil {
+		if _, err = resourceClient.Patch(context.TODO(), name, types.MergePatchType, patchSpec, metav1.PatchOptions{}); err != nil {
 			return fmt.Errorf("failed to update the '%s' module config: %w", name, err)
 		}
 		return nil
@@ -66,4 +69,19 @@ func createModuleConfig(name string, enabled bool) (*unstructured.Unstructured, 
 	}
 	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(newCfg)
 	return &unstructured.Unstructured{Object: content}, err
+}
+
+func patchSpec(enabled bool) ([]byte, error) {
+	patchData := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"enabled": enabled,
+		},
+	}
+
+	patchBytes, err := json.Marshal(patchData)
+	if err != nil {
+		return nil, fmt.Errorf("Error convert to json updated data: %w", err)
+	}
+
+	return patchBytes, nil
 }
