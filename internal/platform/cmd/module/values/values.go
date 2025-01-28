@@ -25,7 +25,7 @@ import (
 )
 
 var valuesLong = templates.LongDesc(`
-Dump module values by name in DKP.
+Dump module hooks values.
 
 © Flant JSC 2025`)
 
