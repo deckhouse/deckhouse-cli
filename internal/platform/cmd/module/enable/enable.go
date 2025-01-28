@@ -55,6 +55,7 @@ func enableModule(cmd *cobra.Command, moduleName []string) error {
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
+
 	err = operatemodule.OperateModule(config, moduleName[0], true)
 	if err != nil {
 		return fmt.Errorf("Error enable module: %w", err)

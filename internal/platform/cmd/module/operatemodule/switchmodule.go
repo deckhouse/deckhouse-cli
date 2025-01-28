@@ -15,7 +15,14 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-func OperateModule(config *rest.Config, name string, enabled bool) error {
+type ModuleState bool
+
+const (
+	ModuleEnabled  ModuleState = true
+	ModuleDisabled ModuleState = false
+)
+
+func OperateModule(config *rest.Config, name string, moduleState ModuleState) error {
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return fmt.Errorf("Failed to create dynamic client: %v", err)
@@ -33,10 +40,10 @@ func OperateModule(config *rest.Config, name string, enabled bool) error {
 	if err != nil {
 		//fmt.Errorf("Error get options module '%s': %w", name, err)
 	}
-	patchSpec, err := patchSpec(enabled)
+	patchSpec, err := patchSpec(moduleState)
 	if customResource != nil {
-		if err = unstructured.SetNestedField(customResource.Object, enabled, "spec", "enabled"); err != nil {
-			return fmt.Errorf("failed to change spec.enabled to %v in the '%s' module config: %w", enabled, name, err)
+		if err = unstructured.SetNestedField(customResource.Object, moduleState, "spec", "enabled"); err != nil {
+			return fmt.Errorf("failed to change spec.enabled to %v in the '%s' module config: %w", moduleState, name, err)
 		}
 		if _, err = resourceClient.Patch(context.TODO(), name, types.MergePatchType, patchSpec, metav1.PatchOptions{}); err != nil {
 			return fmt.Errorf("failed to update the '%s' module config: %w", name, err)
@@ -44,7 +51,7 @@ func OperateModule(config *rest.Config, name string, enabled bool) error {
 		return nil
 	}
 
-	obj, err := createModuleConfig(name, enabled)
+	obj, err := createModuleConfig(name, moduleState)
 	if err != nil {
 		return fmt.Errorf("failed to convert the '%s' module config: %w", name, err)
 	}
@@ -54,7 +61,7 @@ func OperateModule(config *rest.Config, name string, enabled bool) error {
 	return err
 }
 
-func createModuleConfig(name string, enabled bool) (*unstructured.Unstructured, error) {
+func createModuleConfig(name string, moduleState ModuleState) (*unstructured.Unstructured, error) {
 	newCfg := &v1alpha1.ModuleConfigMeta{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "ModuleConfig",
@@ -64,17 +71,17 @@ func createModuleConfig(name string, enabled bool) (*unstructured.Unstructured, 
 			Name: name,
 		},
 		Spec: v1alpha1.ModuleConfigSpec{
-			Enabled: ptr.To(enabled),
+			Enabled: (*bool)(ptr.To(moduleState)),
 		},
 	}
 	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(newCfg)
 	return &unstructured.Unstructured{Object: content}, err
 }
 
-func patchSpec(enabled bool) ([]byte, error) {
+func patchSpec(moduleState ModuleState) ([]byte, error) {
 	patchData := map[string]interface{}{
 		"spec": map[string]interface{}{
-			"enabled": enabled,
+			"enabled": moduleState,
 		},
 	}
 
