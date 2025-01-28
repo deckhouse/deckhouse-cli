@@ -55,7 +55,7 @@ func disableModule(cmd *cobra.Command, moduleName []string) error {
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
-	err = operatemodule.OperateModule(config, moduleName[0], false)
+	err = operatemodule.OperateModule(config, moduleName[0], operatemodule.ModuleDisabled)
 	if err != nil {
 		return fmt.Errorf("Error disable module: %w", err)
 	}
