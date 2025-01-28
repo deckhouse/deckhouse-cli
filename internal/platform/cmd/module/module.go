@@ -29,7 +29,7 @@ import (
 )
 
 var moduleLong = templates.LongDesc(`
-Module options for Deckhouse Kubernetes Platform.
+Operate the Deckhouse Kubernetes Platform modules.
 
 © Flant JSC 2025`)
 
