@@ -26,7 +26,7 @@ import (
 )
 
 var enableLong = templates.LongDesc(`
-Enable module in the ModuleConfig resource.
+Enable module using the ModuleConfig resource.
 
 © Flant JSC 2025`)
 
