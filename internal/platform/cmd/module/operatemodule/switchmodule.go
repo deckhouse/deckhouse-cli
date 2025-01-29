@@ -42,9 +42,9 @@ func OperateModule(config *rest.Config, name string, moduleState ModuleState) er
 	}
 	patchSpec, err := patchSpec(moduleState)
 	if customResource != nil {
-		if err = unstructured.SetNestedField(customResource.Object, moduleState == ModuleEnabled, "spec", "enabled"); err != nil {
-			return fmt.Errorf("failed to change spec.enabled to %v in the '%s' module config: %w", moduleState, name, err)
-		}
+		//if err = unstructured.SetNestedField(customResource.Object, moduleState == ModuleEnabled, "spec", "enabled"); err != nil {
+		//	return fmt.Errorf("failed to change spec.enabled to %v in the '%s' module config: %w", moduleState, name, err)
+		//}
 		if _, err = resourceClient.Patch(context.TODO(), name, types.MergePatchType, patchSpec, metav1.PatchOptions{}); err != nil {
 			return fmt.Errorf("failed to update the '%s' module config: %w", name, err)
 		}
@@ -81,7 +81,7 @@ func createModuleConfig(name string, moduleState ModuleState) (*unstructured.Uns
 func patchSpec(moduleState ModuleState) ([]byte, error) {
 	patchData := map[string]interface{}{
 		"spec": map[string]interface{}{
-			"enabled": moduleState,
+			"enabled": moduleState == ModuleEnabled,
 		},
 	}
 
