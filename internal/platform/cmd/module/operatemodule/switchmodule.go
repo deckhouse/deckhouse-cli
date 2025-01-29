@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 )
 
@@ -22,12 +22,7 @@ const (
 	ModuleDisabled ModuleState = "disabled"
 )
 
-func OperateModule(config *rest.Config, name string, moduleState ModuleState) error {
-	dynamicClient, err := dynamic.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("Failed to create dynamic client: %v", err)
-	}
-
+func OperateModule(dynamicClient dynamic.Interface, name string, moduleState ModuleState) error {
 	resourceClient := dynamicClient.Resource(
 		schema.GroupVersionResource{
 			Group:    "deckhouse.io",
@@ -37,15 +32,12 @@ func OperateModule(config *rest.Config, name string, moduleState ModuleState) er
 	)
 
 	customResource, err := resourceClient.Get(context.TODO(), name, metav1.GetOptions{})
-	if err != nil {
-		//fmt.Errorf("Error get options module '%s': %w", name, err)
+	if err != nil && !errors.IsNotFound(err) {
+		return err
 	}
-	patchSpec, err := patchSpec(moduleState)
+	enabledSpec, err := patchSpec(moduleState)
 	if customResource != nil {
-		//if err = unstructured.SetNestedField(customResource.Object, moduleState == ModuleEnabled, "spec", "enabled"); err != nil {
-		//	return fmt.Errorf("failed to change spec.enabled to %v in the '%s' module config: %w", moduleState, name, err)
-		//}
-		if _, err = resourceClient.Patch(context.TODO(), name, types.MergePatchType, patchSpec, metav1.PatchOptions{}); err != nil {
+		if _, err = resourceClient.Patch(context.TODO(), name, types.MergePatchType, enabledSpec, metav1.PatchOptions{}); err != nil {
 			return fmt.Errorf("failed to update the '%s' module config: %w", name, err)
 		}
 		return nil

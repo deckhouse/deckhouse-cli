@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
+	"k8s.io/client-go/dynamic"
 
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	"github.com/spf13/cobra"
@@ -55,7 +56,11 @@ func disableModule(cmd *cobra.Command, moduleName []string) error {
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
-	err = operatemodule.OperateModule(config, moduleName[0], operatemodule.ModuleDisabled)
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("Failed to create dynamic client: %v", err)
+	}
+	err = operatemodule.OperateModule(dynamicClient, moduleName[0], operatemodule.ModuleDisabled)
 	if err != nil {
 		return fmt.Errorf("Error disable module: %w", err)
 	}

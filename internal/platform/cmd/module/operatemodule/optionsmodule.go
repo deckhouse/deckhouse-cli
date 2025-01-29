@@ -12,7 +12,7 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 )
 
-func OptionsModule(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOption string) error {
+func OptionsModule(config *rest.Config, kubeCl kubernetes.Interface, pathFromOption string) error {
 	const (
 		apiProtocol = "http"
 		apiEndpoint = "127.0.0.1"
@@ -44,7 +44,7 @@ func OptionsModule(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOp
 	return err
 }
 
-func getDeckhousePod(kubeCl *kubernetes.Clientset, namespace string, labelSelector string) (string, error) {
+func getDeckhousePod(kubeCl kubernetes.Interface, namespace string, labelSelector string) (string, error) {
 	pods, err := kubeCl.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
@@ -61,7 +61,7 @@ func getDeckhousePod(kubeCl *kubernetes.Clientset, namespace string, labelSelect
 	return podName, nil
 }
 
-func execInPod(config *rest.Config, kubeCl *kubernetes.Clientset, getApi []string, podName string, namespace string, containerName string) (remotecommand.Executor, error) {
+func execInPod(config *rest.Config, kubeCl kubernetes.Interface, getApi []string, podName string, namespace string, containerName string) (remotecommand.Executor, error) {
 	scheme := runtime.NewScheme()
 	parameterCodec := runtime.NewParameterCodec(scheme)
 	if err := v1.AddToScheme(scheme); err != nil {
