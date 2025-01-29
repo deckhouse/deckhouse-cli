@@ -15,11 +15,11 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-type ModuleState bool
+type ModuleState string
 
 const (
-	ModuleEnabled  ModuleState = true
-	ModuleDisabled ModuleState = false
+	ModuleEnabled  ModuleState = "enabled"
+	ModuleDisabled ModuleState = "disabled"
 )
 
 func OperateModule(config *rest.Config, name string, moduleState ModuleState) error {
@@ -42,7 +42,7 @@ func OperateModule(config *rest.Config, name string, moduleState ModuleState) er
 	}
 	patchSpec, err := patchSpec(moduleState)
 	if customResource != nil {
-		if err = unstructured.SetNestedField(customResource.Object, moduleState, "spec", "enabled"); err != nil {
+		if err = unstructured.SetNestedField(customResource.Object, moduleState == ModuleEnabled, "spec", "enabled"); err != nil {
 			return fmt.Errorf("failed to change spec.enabled to %v in the '%s' module config: %w", moduleState, name, err)
 		}
 		if _, err = resourceClient.Patch(context.TODO(), name, types.MergePatchType, patchSpec, metav1.PatchOptions{}); err != nil {
@@ -71,7 +71,7 @@ func createModuleConfig(name string, moduleState ModuleState) (*unstructured.Uns
 			Name: name,
 		},
 		Spec: v1alpha1.ModuleConfigSpec{
-			Enabled: (*bool)(ptr.To(moduleState)),
+			Enabled: ptr.To(moduleState == ModuleEnabled),
 		},
 	}
 	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(newCfg)
