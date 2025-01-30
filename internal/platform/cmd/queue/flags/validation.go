@@ -17,20 +17,19 @@ limitations under the License.
 package flags
 
 import (
-	"os"
-
+	"fmt"
 	"github.com/spf13/cobra"
 )
 
-func AddPersistentFlags(cmd *cobra.Command) {
-	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
-	if p := os.Getenv("KUBECONFIG"); p != "" {
-		defaultKubeconfigPath = p
+func ValidateParameters(cmd *cobra.Command, args []string) error {
+	var allowedOutput = map[string]bool{
+		"json": true,
+		"yaml": true,
+		"text": true,
 	}
-	cmd.PersistentFlags().StringP(
-		"kubeconfig",
-		"k",
-		defaultKubeconfigPath,
-		"KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)",
-	)
+	outputFormat, _ := cmd.Flags().GetString("output")
+	if _, valid := allowedOutput[outputFormat]; !valid {
+		return fmt.Errorf("Please provide valid output: text, yaml, json. Got '%s', try --help\n", outputFormat)
+	}
+	return nil
 }

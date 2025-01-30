@@ -11,16 +11,12 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 )
 
-func GetDeckhousePod(kubeCl kubernetes.Interface, namespace string, labelSelector string) (string, error) {
-	pods, err := kubeCl.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
-		LabelSelector: labelSelector,
+func GetDeckhousePod(kubeCl kubernetes.Interface) (string, error) {
+	pods, err := kubeCl.CoreV1().Pods("d8-system").List(context.Background(), metav1.ListOptions{
+		LabelSelector: "leader=true",
 	})
 	if err != nil {
-		return "", fmt.Errorf("Error listing pods: %w", err)
-	}
-
-	if len(pods.Items) == 0 {
-		return "", fmt.Errorf("No pods found with the label: %s", labelSelector)
+		return "", fmt.Errorf("error listing pods: %w", err)
 	}
 
 	pod := pods.Items[0]

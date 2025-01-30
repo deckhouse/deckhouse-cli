@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2024 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,7 +25,6 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/disable"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/flags"
 )
 
 var moduleLong = templates.LongDesc(`
@@ -46,8 +45,6 @@ func NewCommand() *cobra.Command {
 		values.NewCommand(),
 		snapshots.NewCommand(),
 	)
-
-	flags.AddFlags(moduleCmd.Flags())
 
 	return moduleCmd
 }

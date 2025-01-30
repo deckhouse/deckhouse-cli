@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2024 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import (
 	collect_debug_info "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/collect-debug-info"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module"
+	queue "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/queue"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 )
 
@@ -44,6 +45,7 @@ func NewCommand() *cobra.Command {
 		edit.NewCommand(),
 		module.NewCommand(),
 		collect_debug_info.NewCommand(),
+		queue.NewCommand(),
 	)
 
 	flags.AddPersistentFlags(platformCmd)

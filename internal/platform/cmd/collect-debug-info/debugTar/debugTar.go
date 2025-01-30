@@ -160,7 +160,7 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface) error {
 		},
 	}
 
-	podName, err := operatepod.GetDeckhousePod(kubeCl, namespace, labelSelector)
+	podName, err := operatepod.GetDeckhousePod(kubeCl)
 
 	var stdout, stderr bytes.Buffer
 	gzipWriter := gzip.NewWriter(os.Stdout)

@@ -1,4 +1,4 @@
-package operatemodule
+package operatequeue
 
 import (
 	"bytes"
@@ -10,19 +10,19 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 )
 
-func OptionsModule(config *rest.Config, kubeCl kubernetes.Interface, pathFromOption string) error {
+func OperateQueue(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOption string) error {
 	const (
 		apiProtocol = "http"
 		apiEndpoint = "127.0.0.1"
 		apiPort     = "9652"
-		modulePath  = "module"
+		queuePath   = "queue"
 
 		labelSelector = "leader=true"
 		namespace     = "d8-system"
 		containerName = "deckhouse"
 	)
 
-	fullEndpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, pathFromOption)
+	fullEndpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, queuePath, pathFromOption)
 	getApi := []string{"curl", fullEndpointUrl}
 	podName, err := operatepod.GetDeckhousePod(kubeCl)
 	executor, err := operatepod.ExecInPod(config, kubeCl, getApi, podName, namespace, containerName)
