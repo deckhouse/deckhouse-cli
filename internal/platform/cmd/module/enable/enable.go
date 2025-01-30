@@ -22,7 +22,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"k8s.io/client-go/dynamic"
 
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 )
@@ -42,7 +41,6 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE:          enableModule,
 	}
-	flags.AddFlags(enableCmd.Flags())
 	return enableCmd
 }
 

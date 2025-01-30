@@ -21,7 +21,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 )
@@ -41,7 +40,6 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE:          snapshotsModule,
 	}
-	flags.AddFlags(snapshotsCmd.Flags())
 	return snapshotsCmd
 }
 

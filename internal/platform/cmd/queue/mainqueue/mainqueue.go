@@ -14,35 +14,38 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package values
+package mainqueue
 
 import (
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
+	"k8s.io/kubectl/pkg/util/templates"
+
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/queue/flags"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/queue/operatequeue"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
-	"k8s.io/kubectl/pkg/util/templates"
 )
 
-var valuesLong = templates.LongDesc(`
-Dump module hooks values.
+var mainQueueLong = templates.LongDesc(`
+Dump main Deckhouse Kubernetes Platform queues.
 
 © Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
-	valuesCmd := &cobra.Command{
-		Use:           "values",
-		Short:         "Dump values.",
-		Long:          valuesLong,
-		ValidArgs:     []string{"module_name"},
+	listCmd := &cobra.Command{
+		Use:           "main",
+		Short:         "Dump main queue.",
+		Long:          mainQueueLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		RunE:          valuesModule,
+		PreRunE:       flags.ValidateParameters,
+		RunE:          mainQueue,
 	}
-	return valuesCmd
+	flags.AddFlags(listCmd.Flags())
+	return listCmd
 }
 
-func valuesModule(cmd *cobra.Command, moduleName []string) error {
+func mainQueue(cmd *cobra.Command, args []string) error {
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
@@ -53,10 +56,16 @@ func valuesModule(cmd *cobra.Command, moduleName []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	pathFromOption := fmt.Sprintf("%s/values.yaml", moduleName[0])
-	err = operatemodule.OptionsModule(config, kubeCl, pathFromOption)
+	format, err := cmd.Flags().GetString("output")
 	if err != nil {
-		return fmt.Errorf("Error print values: %w", err)
+		return fmt.Errorf("Failed to get output format: %w", err)
+	}
+
+	pathFromOption := "main." + format
+
+	err = operatequeue.OperateQueue(config, kubeCl, pathFromOption)
+	if err != nil {
+		return fmt.Errorf("Error list main queue: %w", err)
 	}
 	return err
 }
