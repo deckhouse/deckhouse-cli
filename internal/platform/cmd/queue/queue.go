@@ -14,23 +14,30 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package flags
+package queue
 
 import (
-	"os"
-
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/queue/list"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/queue/mainqueue"
 	"github.com/spf13/cobra"
+	"k8s.io/kubectl/pkg/util/templates"
 )
 
-func AddPersistentFlags(cmd *cobra.Command) {
-	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
-	if p := os.Getenv("KUBECONFIG"); p != "" {
-		defaultKubeconfigPath = p
+var queueLong = templates.LongDesc(`
+Dump queues from Deckhouse Kubernetes Platform.
+
+© Flant JSC 2025`)
+
+func NewCommand() *cobra.Command {
+	queueCmd := &cobra.Command{
+		Use: "queue", Short: "Dump queues.",
+		Long: queueLong,
 	}
-	cmd.PersistentFlags().StringP(
-		"kubeconfig",
-		"k",
-		defaultKubeconfigPath,
-		"KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)",
+
+	queueCmd.AddCommand(
+		list.NewCommand(),
+		mainqueue.NewCommand(),
 	)
+
+	return queueCmd
 }
