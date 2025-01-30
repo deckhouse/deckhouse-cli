@@ -14,54 +14,58 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package disable
+package mainqueue
 
 import (
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
-	"k8s.io/client-go/dynamic"
-
-	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
+
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/queue/flags"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/queue/operatequeue"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
+	"github.com/spf13/cobra"
 )
 
-var disableLong = templates.LongDesc(`
-Disable module using the ModuleConfig resource.
+var mainQueueLong = templates.LongDesc(`
+Dump main Deckhouse Kubernetes Platform queues.
 
 © Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
-	disableCmd := &cobra.Command{
-		Use:           "disable",
-		Short:         "Disable module.",
-		Long:          disableLong,
-		ValidArgs:     []string{"module_name"},
+	listCmd := &cobra.Command{
+		Use:           "main",
+		Short:         "Dump main queue.",
+		Long:          mainQueueLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		RunE:          disableModule,
+		PreRunE:       flags.ValidateParameters,
+		RunE:          mainQueue,
 	}
-	return disableCmd
+	flags.AddFlags(listCmd.Flags())
+	return listCmd
 }
 
-func disableModule(cmd *cobra.Command, moduleName []string) error {
+func mainQueue(cmd *cobra.Command, args []string) error {
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	config, _, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
-	dynamicClient, err := dynamic.NewForConfig(config)
+
+	format, err := cmd.Flags().GetString("output")
 	if err != nil {
-		return fmt.Errorf("Failed to create dynamic client: %v", err)
+		return fmt.Errorf("Failed to get output format: %w", err)
 	}
-	err = operatemodule.OperateModule(dynamicClient, moduleName[0], operatemodule.ModuleDisabled)
+
+	pathFromOption := "main." + format
+
+	err = operatequeue.OperateQueue(config, kubeCl, pathFromOption)
 	if err != nil {
-		return fmt.Errorf("Error disable module: %w", err)
+		return fmt.Errorf("Error list main queue: %w", err)
 	}
-	fmt.Printf("Module %s disabled\n", moduleName[0])
 	return err
 }

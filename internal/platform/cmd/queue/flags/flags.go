@@ -17,20 +17,13 @@ limitations under the License.
 package flags
 
 import (
-	"os"
-
-	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
-func AddPersistentFlags(cmd *cobra.Command) {
-	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
-	if p := os.Getenv("KUBECONFIG"); p != "" {
-		defaultKubeconfigPath = p
-	}
-	cmd.PersistentFlags().StringP(
-		"kubeconfig",
-		"k",
-		defaultKubeconfigPath,
-		"KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)",
+func AddFlags(flagSet *pflag.FlagSet) {
+	flagSet.StringP(
+		"output", "o",
+		"text",
+		"Output format: json|yaml|text.",
 	)
 }

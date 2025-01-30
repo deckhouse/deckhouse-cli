@@ -18,29 +18,30 @@ package list
 
 import (
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/queue/flags"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/queue/operatequeue"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
-
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 )
 
 var listLong = templates.LongDesc(`
-List enabled Deckhouse Kubernetes Platform modules.
+Dump all Deckhouse Kubernetes Platform queues.
 
 © Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
 	listCmd := &cobra.Command{
 		Use:           "list",
-		Short:         "List enabled modules.",
+		Short:         "Dump all queues.",
 		Long:          listLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
+		PreRunE:       flags.ValidateParameters,
 		RunE:          listModule,
 	}
 	flags.AddFlags(listCmd.Flags())
+	AddFlags(listCmd.Flags())
 	return listCmd
 }
 
@@ -55,9 +56,24 @@ func listModule(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	err = operatemodule.OptionsModule(config, kubeCl, "list.yaml")
+	empty, err := cmd.Flags().GetBool("show-empty")
 	if err != nil {
-		return fmt.Errorf("Error list modules: %w", err)
+		return fmt.Errorf("Failed to show empty queues from flag: %w", err)
+	}
+
+	format, err := cmd.Flags().GetString("output")
+	if err != nil {
+		return fmt.Errorf("Failed to get output format: %w", err)
+	}
+
+	pathFromOption := "list." + format
+	if empty {
+		pathFromOption = pathFromOption + "?showEmpty=true"
+	}
+
+	err = operatequeue.OperateQueue(config, kubeCl, pathFromOption)
+	if err != nil {
+		return fmt.Errorf("Error list queues: %w", err)
 	}
 	return err
 }

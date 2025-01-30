@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2024 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"k8s.io/client-go/dynamic"
 
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 )
@@ -42,7 +41,6 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE:          enableModule,
 	}
-	flags.AddFlags(enableCmd.Flags())
 	return enableCmd
 }
 
