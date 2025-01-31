@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/spf13/cobra"
@@ -85,6 +86,11 @@ func parseAndValidateVersionFlags() error {
 	if specificReleaseString != "" {
 		SpecificRelease, err = semver.NewVersion(specificReleaseString)
 		if err != nil {
+			if strings.HasPrefix(specificReleaseString, "pr") {
+				prTag := fmt.Sprintf("0.0.0-%s", specificReleaseString)
+				SpecificRelease, err = semver.NewVersion(prTag)
+				return nil
+			}
 			return fmt.Errorf("Parse required deckhouse version: %w", err)
 		}
 	}
