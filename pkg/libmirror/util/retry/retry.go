@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
 type Task interface {
@@ -14,11 +14,11 @@ type Task interface {
 	MaxRetries() uint
 }
 
-func RunTask(logger contexts.Logger, name string, task Task) error {
+func RunTask(logger params.Logger, name string, task Task) error {
 	return RunTaskWithContext(context.Background(), logger, name, task)
 }
 
-func RunTaskWithContext(ctx context.Context, logger contexts.Logger, name string, task Task) error {
+func RunTaskWithContext(ctx context.Context, logger params.Logger, name string, task Task) error {
 	restarts := uint(0)
 	var lastErr error
 	for restarts < task.MaxRetries() {

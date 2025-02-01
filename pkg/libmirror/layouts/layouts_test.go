@@ -19,10 +19,8 @@ package layouts
 import (
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 
-	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,7 +31,7 @@ func TestCreateEmptyImageLayoutAtPath(t *testing.T) {
 		_ = os.RemoveAll(p)
 	})
 
-	_, err = CreateEmptyImageLayoutAtPath(p)
+	_, err = CreateEmptyImageLayout(p)
 	require.NoError(t, err)
 	require.DirExists(t, p)
 	require.FileExists(t, filepath.Join(p, "oci-layout"))
@@ -42,29 +40,22 @@ func TestCreateEmptyImageLayoutAtPath(t *testing.T) {
 
 func TestImagesLayoutsAllLayouts(t *testing.T) {
 	il := &ImageLayouts{
+		Deckhouse:         createEmptyOCILayout(t),
+		ReleaseChannel:    createEmptyOCILayout(t),
+		InstallStandalone: createEmptyOCILayout(t),
 		Modules: map[string]ModuleImageLayout{
 			"commander-agent": {ModuleLayout: createEmptyOCILayout(t), ReleasesLayout: createEmptyOCILayout(t)},
 			"commander":       {ModuleLayout: createEmptyOCILayout(t), ReleasesLayout: createEmptyOCILayout(t)},
 		},
 	}
 
-	v := reflect.ValueOf(il).Elem()
-	layoutPathType := reflect.TypeOf(layout.Path(""))
-	expectedLayouts := make([]layout.Path, 0)
-	for i := 0; i < v.NumField(); i++ {
-		if v.Field(i).Type() != layoutPathType {
-			continue
-		}
-
-		newLayout := string(createEmptyOCILayout(t))
-		v.Field(i).SetString(newLayout)
-		expectedLayouts = append(expectedLayouts, layout.Path(v.Field(i).String()))
-	}
-	for _, moduleImageLayout := range il.Modules {
-		expectedLayouts = append(expectedLayouts, moduleImageLayout.ModuleLayout, moduleImageLayout.ReleasesLayout)
-	}
-
-	layouts := il.AllLayouts()
-	require.Len(t, layouts, len(expectedLayouts), "AllLayouts should return exactly the number of layouts defined within it")
-	require.ElementsMatch(t, expectedLayouts, layouts, "AllLayouts should return every layout.Path value within it")
+	layouts := il.Layouts()
+	require.Len(t, layouts, 7, "Layouts should return exactly the number of non-empty layouts defined within it")
+	require.Contains(t, layouts, il.Deckhouse, "All non-empty layouts should be returned")
+	require.Contains(t, layouts, il.ReleaseChannel, "All non-empty layouts should be returned")
+	require.Contains(t, layouts, il.InstallStandalone, "All non-empty layouts should be returned")
+	require.Contains(t, layouts, il.Modules["commander"].ModuleLayout, "All non-empty layouts should be returned")
+	require.Contains(t, layouts, il.Modules["commander"].ReleasesLayout, "All non-empty layouts should be returned")
+	require.Contains(t, layouts, il.Modules["commander-agent"].ModuleLayout, "All non-empty layouts should be returned")
+	require.Contains(t, layouts, il.Modules["commander-agent"].ReleasesLayout, "All non-empty layouts should be returned")
 }

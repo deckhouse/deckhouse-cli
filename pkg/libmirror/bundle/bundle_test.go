@@ -17,6 +17,7 @@ limitations under the License.
 package bundle
 
 import (
+	"context"
 	"crypto/rand"
 	"io"
 	"io/fs"
@@ -26,8 +27,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
 )
 
 func TestBundlePackingAndUnpacking(t *testing.T) {
@@ -48,66 +47,18 @@ func TestBundlePackingAndUnpacking(t *testing.T) {
 	fillTestFileTree(t, packFromDir)
 	expectedFiles := findAllPaths(t, packFromDir)
 
-	err = Pack(&contexts.PullContext{
-		BaseContext: contexts.BaseContext{
-			BundlePath:         tarBundlePath,
-			UnpackedImagesPath: packFromDir,
-		},
-	})
+	tarFile, err := os.Create(tarBundlePath)
+	require.NoError(t, err)
+	err = Pack(context.TODO(), packFromDir, tarFile)
+	require.NoError(t, tarFile.Sync())
+	require.NoError(t, tarFile.Close())
+
 	require.NoError(t, err, "Packing should finish without errors")
 	require.FileExists(t, tarBundlePath)
 
-	err = Unpack(&contexts.BaseContext{
-		BundlePath:         tarBundlePath,
-		UnpackedImagesPath: unpackToDir,
-	})
-	require.NoError(t, err, "Unpacking should finish without errors")
-
-	resultingFiles := findAllPaths(t, unpackToDir)
-	require.Equal(t, expectedFiles, resultingFiles, "Expected to find same file trees under source and target dirs")
-}
-
-func TestChunkedBundlePackingAndUnpacking(t *testing.T) {
-	tmpDir := os.TempDir()
-	bundlePath := filepath.Join(tmpDir, "pack_test.tar")
-
-	packFromDir, err := os.MkdirTemp(os.TempDir(), "pack_test")
+	tarBundle, err := os.Open(tarBundlePath)
 	require.NoError(t, err)
-	unpackToDir, err := os.MkdirTemp(os.TempDir(), "unpack_test")
-	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		_ = os.RemoveAll(packFromDir)
-		_ = os.RemoveAll(unpackToDir)
-		_ = os.Remove(bundlePath)
-	})
-
-	fillTestFileTree(t, packFromDir)
-	expectedFiles := findAllPaths(t, packFromDir)
-
-	err = Pack(&contexts.PullContext{
-		BaseContext: contexts.BaseContext{
-			BundlePath:         bundlePath,
-			UnpackedImagesPath: packFromDir,
-		},
-		BundleChunkSize: 3 * 1024 * 1024,
-	})
-	require.NoError(t, err, "Packing should finish without errors")
-
-	expectedChunks := []string{
-		"pack_test.tar.0000.chunk",
-		"pack_test.tar.0001.chunk",
-		"pack_test.tar.0002.chunk",
-		"pack_test.tar.0003.chunk",
-	}
-	for _, chunkName := range expectedChunks {
-		require.FileExists(t, filepath.Join(filepath.Dir(bundlePath), chunkName))
-	}
-
-	err = Unpack(&contexts.BaseContext{
-		BundlePath:         bundlePath,
-		UnpackedImagesPath: unpackToDir,
-	})
+	err = Unpack(context.TODO(), tarBundle, unpackToDir)
 	require.NoError(t, err, "Unpacking should finish without errors")
 
 	resultingFiles := findAllPaths(t, unpackToDir)

@@ -12,7 +12,7 @@ import (
 // - 1 means crane progress logging to stderr;
 // - 2 means 1 + crane warnings are printed to stderr;
 // - 3 means 2 + mirror debug messages are printed to stdout;
-// - 4 means 3 + registry requests and responses are printing to stderr.
+// - 4 means 3 + registry requests and responses are printed to stderr.
 func DebugLogLevel() int {
 	debugLogStr := os.Getenv("MIRROR_DEBUG_LOG")
 	if debugLogStr == "" {

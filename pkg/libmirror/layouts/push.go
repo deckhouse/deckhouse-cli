@@ -32,7 +32,7 @@ import (
 	"github.com/samber/lo"
 	"github.com/samber/lo/parallel"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
@@ -45,8 +45,8 @@ func PushLayoutToRepo(
 	imagesLayout layout.Path,
 	registryRepo string,
 	authProvider authn.Authenticator,
-	logger contexts.Logger,
-	parallelismConfig contexts.ParallelismConfig,
+	logger params.Logger,
+	parallelismConfig params.ParallelismConfig,
 	insecure, skipVerifyTLS bool,
 ) error {
 	return PushLayoutToRepoContext(
@@ -66,8 +66,8 @@ func PushLayoutToRepoContext(
 	imagesLayout layout.Path,
 	registryRepo string,
 	authProvider authn.Authenticator,
-	logger contexts.Logger,
-	parallelismConfig contexts.ParallelismConfig,
+	logger params.Logger,
+	parallelismConfig params.ParallelismConfig,
 	insecure, skipVerifyTLS bool,
 ) error {
 	refOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
@@ -170,7 +170,7 @@ func pushImage(
 
 type silentLogger struct{}
 
-var _ contexts.Logger = silentLogger{}
+var _ params.Logger = silentLogger{}
 
 func (silentLogger) DebugF(_ string, _ ...interface{})      {}
 func (silentLogger) DebugLn(_ ...interface{})               {}

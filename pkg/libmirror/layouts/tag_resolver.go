@@ -24,8 +24,8 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 )
@@ -43,7 +43,7 @@ func NopTagToDigestMappingFunc(_ string) *v1.Hash {
 	return nil
 }
 
-func (r *TagsResolver) ResolveTagsDigestsForImageLayouts(mirrorCtx *contexts.BaseContext, layouts *ImageLayouts) error {
+func (r *TagsResolver) ResolveTagsDigestsForImageLayouts(mirrorCtx *params.BaseParams, layouts *ImageLayouts) error {
 	imageSets := []map[string]struct{}{
 		layouts.DeckhouseImages,
 		layouts.ReleaseChannelImages,

@@ -35,17 +35,13 @@ import (
 )
 
 func GenerateDeckhouseReleaseManifestsForVersions(
-	versionsToMirror []semver.Version,
+	versionTagsToMirror []string,
 	pathToManifestYAML string,
 	releaseChannelsImagesLayout layout.Path,
 ) error {
-	// It feels like most of the time manifests yaml length would not exceed the size of 4 KiB buffer,
-	// so let's preallocate that ahead of time to avoid reallocs.
-	// I have no scientific reasoning to back this up.
 	manifests := &bytes.Buffer{}
-	manifests.Grow(4 * 1024)
-	for _, version := range versionsToMirror {
-		versionReleaseImage, err := layouts.FindImageByTag(releaseChannelsImagesLayout, "v"+version.String())
+	for _, version := range versionTagsToMirror {
+		versionReleaseImage, err := layouts.FindImageByTag(releaseChannelsImagesLayout, version)
 		releaseData, err := extractReleaseInfoForDeckhouseRelease(versionReleaseImage)
 		if err != nil {
 			return fmt.Errorf("Build manifest for version %q: %w", version, err)
@@ -81,9 +77,12 @@ func GenerateDeckhouseReleaseManifestsForVersions(
 	return nil
 }
 
-func generateDeckhouseRelease(version semver.Version, releaseInfo *releaseInfo) ([]byte, error) {
+func generateDeckhouseRelease(versionTag string, releaseInfo *releaseInfo) ([]byte, error) {
 	const githubReleaseChangelogLinkBase = "https://github.com/deckhouse/deckhouse/releases/tag"
-	versionTag := "v" + version.String()
+	version, err := semver.NewVersion(versionTag)
+	if err != nil {
+		return nil, fmt.Errorf("Parse version tag %q: %w", versionTag, err)
+	}
 
 	var disruptions []string
 	if len(releaseInfo.Disruptions) > 0 {

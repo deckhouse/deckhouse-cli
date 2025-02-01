@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"path"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -28,7 +29,6 @@ import (
 	"golang.org/x/exp/maps"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
@@ -40,32 +40,9 @@ type Module struct {
 	Releases     []string
 }
 
-func GetDeckhouseExternalModules(mirrorCtx *contexts.PullContext) ([]Module, error) {
-	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorContext(&mirrorCtx.BaseContext)
-	repoPathBuildFuncForDeckhouseModule := func(repo, moduleName string) string {
-		return fmt.Sprintf("%s/modules/%s", mirrorCtx.DeckhouseRegistryRepo, moduleName)
-	}
-
-	result, err := getModulesForRepo(
-		mirrorCtx.DeckhouseRegistryRepo+"/modules",
-		repoPathBuildFuncForDeckhouseModule,
-		nameOpts,
-		remoteOpts,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("Get Deckhouse modules: %w", err)
-	}
-
-	return result, nil
-}
-
-func GetExternalModulesFromRepo(repo string, registryAuth authn.Authenticator, insecure, skipVerifyTLS bool) ([]Module, error) {
+func ForRepo(repo string, registryAuth authn.Authenticator, insecure, skipVerifyTLS bool) ([]Module, error) {
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(registryAuth, insecure, skipVerifyTLS)
-	repoPathBuildFuncForExternalModule := func(repo, moduleName string) string {
-		return fmt.Sprintf("%s/%s", repo, moduleName)
-	}
-
-	result, err := getModulesForRepo(repo, repoPathBuildFuncForExternalModule, nameOpts, remoteOpts)
+	result, err := getModulesForRepo(repo, nameOpts, remoteOpts)
 	if err != nil {
 		return nil, fmt.Errorf("Get external modules: %w", err)
 	}
@@ -75,7 +52,6 @@ func GetExternalModulesFromRepo(repo string, registryAuth authn.Authenticator, i
 
 func getModulesForRepo(
 	repo string,
-	repoPathBuildFunc func(repo, moduleName string) string,
 	nameOpts []name.Option,
 	remoteOpts []remote.Option,
 ) ([]Module, error) {
@@ -96,11 +72,11 @@ func getModulesForRepo(
 	for _, module := range modules {
 		m := Module{
 			Name:         module,
-			RegistryPath: repoPathBuildFunc(repo, module),
+			RegistryPath: path.Join(repo, module),
 			Releases:     []string{},
 		}
 
-		repo, err := name.NewRepository(m.RegistryPath+"/release", nameOpts...)
+		repo, err := name.NewRepository(path.Join(m.RegistryPath, "release"), nameOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("Parsing repo: %v", err)
 		}
@@ -138,13 +114,13 @@ func FindExternalModuleImages(
 	for _, tag := range mod.Releases {
 		version, err := semver.NewVersion(tag)
 		if err == nil && hasMinVersion && minVersion.Compare(version) <= 0 {
-			releaseImages[mod.RegistryPath+"/release:"+tag] = struct{}{}
+			releaseImages[path.Join(mod.RegistryPath, "release")+":"+tag] = struct{}{}
 			moduleImages[mod.RegistryPath+":"+tag] = struct{}{}
 		}
 	}
 	for _, versionTag := range releaseChannelVersions {
 		moduleImages[mod.RegistryPath+":"+versionTag] = struct{}{}
-		releaseImages[mod.RegistryPath+"/release:"+versionTag] = struct{}{}
+		releaseImages[path.Join(mod.RegistryPath, "release")+":"+versionTag] = struct{}{}
 	}
 
 	for _, imageTag := range maps.Keys(moduleImages) {
@@ -179,13 +155,14 @@ func FindExternalModuleImages(
 }
 
 func getAvailableReleaseChannelsImagesForModule(mod *Module, refOpts []name.Option, remoteOpts []remote.Option) (map[string]struct{}, error) {
+	releasesRegistryPath := path.Join(mod.RegistryPath, "release")
 	result := make(map[string]struct{})
 	for _, imageTag := range []string{
-		mod.RegistryPath + "/release:alpha",
-		mod.RegistryPath + "/release:beta",
-		mod.RegistryPath + "/release:early-access",
-		mod.RegistryPath + "/release:stable",
-		mod.RegistryPath + "/release:rock-solid",
+		releasesRegistryPath + ":alpha",
+		releasesRegistryPath + ":beta",
+		releasesRegistryPath + ":early-access",
+		releasesRegistryPath + ":stable",
+		releasesRegistryPath + ":rock-solid",
 	} {
 		imageRef, err := name.ParseReference(imageTag, refOpts...)
 		if err != nil {

@@ -13,7 +13,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/stretchr/testify/require"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 
 	mirrorTestUtils "github.com/deckhouse/deckhouse-cli/testing/util/mirror"
@@ -46,7 +46,7 @@ func TestPushLayoutToRepoWithParallelism(t *testing.T) {
 		host+repoPath, // Images repo
 		authn.Anonymous,
 		log.NewSLogger(slog.LevelDebug),
-		contexts.ParallelismConfig{
+		params.ParallelismConfig{
 			Blobs:  4,
 			Images: 5,
 		},
@@ -96,7 +96,7 @@ func TestPushLayoutToRepoWithoutParallelism(t *testing.T) {
 		host+repoPath, // Images repo
 		authn.Anonymous,
 		log.NewSLogger(slog.LevelDebug),
-		contexts.ParallelismConfig{
+		params.ParallelismConfig{
 			Blobs:  4,
 			Images: 1,
 		},
@@ -129,7 +129,7 @@ func TestPushEmptyLayoutToRepo(t *testing.T) {
 		host+repoPath,
 		authn.Anonymous,
 		log.NewSLogger(slog.LevelDebug),
-		contexts.DefaultParallelism,
+		params.DefaultParallelism,
 		true,  // Use plain insecure HTTP
 		false, // TLS verification irrelevant to HTTP requests
 	)

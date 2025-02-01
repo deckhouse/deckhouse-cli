@@ -27,7 +27,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
 var digestRegex = regexp.MustCompile(`sha256:([a-f0-9]{64})`)
@@ -41,7 +41,7 @@ func IsValidImageDigestString(digest string) bool {
 }
 
 func ExtractImageDigestsFromDeckhouseInstaller(
-	mirrorCtx *contexts.PullContext,
+	mirrorCtx *params.PullParams,
 	installerTag string,
 	installersLayout layout.Path,
 ) (map[string]struct{}, error) {

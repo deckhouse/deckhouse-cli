@@ -22,38 +22,51 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
-// Filter maps module names to minimal versions of these modules to be pulled
+type FilterType int
+
+const (
+	FilterTypeWhitelist FilterType = iota
+	FilterTypeBlacklist
+)
+
+// Filter for modules by black and whitelists. Maps module names to minimal versions of these modules to be pulled.
+// By default, this is a whitelist filter, but that can be changed via SetType.
 type Filter struct {
+	_type   FilterType
 	modules map[string]*semver.Version
-	logger  contexts.Logger
+	logger  params.Logger
 }
 
-func NewFilter(filterExpression string, logger contexts.Logger) (*Filter, error) {
-	filter := &Filter{
-		modules: make(map[string]*semver.Version),
-		logger:  logger,
+func NewFilter(filterExpressions []string, filterType FilterType) (*Filter, error) {
+	if filterType != FilterTypeWhitelist && filterType != FilterTypeBlacklist {
+		return nil, fmt.Errorf("unknown filter type: %v", filterType)
 	}
-	if filterExpression == "" {
+
+	filter := &Filter{
+		_type:   filterType,
+		modules: make(map[string]*semver.Version),
+	}
+	if len(filterExpressions) == 0 {
+		// Empty filter matches any module
+		filter._type = FilterTypeBlacklist
 		return filter, nil
 	}
 
-	filters := strings.Split(filterExpression, ";")
-	for _, filterExpr := range filters {
+	for _, filterExpr := range filterExpressions {
 		moduleName, moduleMinVersionString, validSplit := strings.Cut(strings.TrimSpace(filterExpr), "@")
-		if !validSplit {
-			logger.WarnF("Malformed filter %q is ignored: invalid filter syntax", filterExpr)
-			continue
-		}
-
 		moduleName = strings.TrimSpace(moduleName)
 		if moduleName == "" {
 			return nil, fmt.Errorf("Malformed filter expression %q: empty module name", filterExpr)
 		}
 		if _, moduleRedeclared := filter.modules[moduleName]; moduleRedeclared {
 			return nil, fmt.Errorf("Malformed filter expression: module %s is declared multiple times", moduleName)
+		}
+		if !validSplit {
+			filter.modules[moduleName] = semver.New(0, 0, 0, "", "")
+			continue
 		}
 
 		moduleMinVersion, err := semver.NewVersion(strings.TrimSpace(moduleMinVersionString))
@@ -67,13 +80,18 @@ func NewFilter(filterExpression string, logger contexts.Logger) (*Filter, error)
 	return filter, nil
 }
 
-func (f *Filter) MatchesFilter(mod *Module) bool {
-	_, hasMinVersion := f.modules[mod.Name]
-	if !hasMinVersion {
-		return false
+func (f *Filter) UseLogger(logger params.Logger) *Filter {
+	f.logger = logger
+	return f
+}
+
+func (f *Filter) Match(mod *Module) bool {
+	_, moduleInList := f.modules[mod.Name]
+	if f._type == FilterTypeWhitelist {
+		return moduleInList
 	}
 
-	return true
+	return !moduleInList
 }
 
 func (f *Filter) Len() int { return len(f.modules) }
@@ -93,7 +111,9 @@ func (f *Filter) FilterReleases(mod *Module) {
 	for _, tag := range mod.Releases {
 		v, err := semver.NewVersion(tag)
 		if err != nil {
-			f.logger.DebugLn("Failed to parse module release tag as semver", tag, err.Error())
+			if f.logger != nil {
+				f.logger.DebugLn("Failed to parse module release tag as semver", tag, err.Error())
+			}
 			filteredReleases = append(filteredReleases, tag) // This is probably a release channel, so just leave it
 			continue
 		}

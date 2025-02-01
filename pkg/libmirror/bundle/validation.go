@@ -5,20 +5,33 @@ import (
 	"path/filepath"
 
 	"github.com/google/go-containerregistry/pkg/v1/layout"
-
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
 )
 
-func ValidateUnpackedBundle(mirrorCtx *contexts.PushContext) error {
-	mandatoryLayouts := map[string]string{
-		"root layout":                mirrorCtx.UnpackedImagesPath,
-		"installers layout":          filepath.Join(mirrorCtx.UnpackedImagesPath, "install"),
-		"release channels layout":    filepath.Join(mirrorCtx.UnpackedImagesPath, "release-channel"),
-		"trivy database layout":      filepath.Join(mirrorCtx.UnpackedImagesPath, "security", "trivy-db"),
-		"trivy bdu layout":           filepath.Join(mirrorCtx.UnpackedImagesPath, "security", "trivy-bdu"),
-		"trivy java database layout": filepath.Join(mirrorCtx.UnpackedImagesPath, "security", "trivy-java-db"),
+func MandatoryLayoutsForPlatform(platformPkgDir string) map[string]string {
+	return map[string]string{
+		"root layout":             platformPkgDir,
+		"installers layout":       filepath.Join(platformPkgDir, "install"),
+		"release channels layout": filepath.Join(platformPkgDir, "release-channel"),
 	}
+}
 
+func MandatoryLayoutsForSecurityDatabase(securityDbPkgDir string) map[string]string {
+	return map[string]string{
+		"trivy database layout":      filepath.Join(securityDbPkgDir, "trivy-db"),
+		"trivy bdu layout":           filepath.Join(securityDbPkgDir, "trivy-bdu"),
+		"trivy java database layout": filepath.Join(securityDbPkgDir, "trivy-java-db"),
+		"trivy checks layout":        filepath.Join(securityDbPkgDir, "trivy-checks"),
+	}
+}
+
+func MandatoryLayoutsForModule(modulePkgDir string) map[string]string {
+	return map[string]string{
+		"module root layout":             filepath.Join(modulePkgDir),
+		"module release channels layout": filepath.Join(modulePkgDir, "release"),
+	}
+}
+
+func ValidateUnpackedPackage(mandatoryLayouts map[string]string) error {
 	for layoutDescription, fsPath := range mandatoryLayouts {
 		l, err := layout.FromPath(fsPath)
 		if err != nil {

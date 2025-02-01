@@ -28,31 +28,31 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
 )
 
-func PullInstallers(mirrorCtx *contexts.PullContext, layouts *ImageLayouts) error {
-	mirrorCtx.Logger.InfoLn("Beginning to pull installers")
+func PullInstallers(pullParams *params.PullParams, layouts *ImageLayouts) error {
+	pullParams.Logger.InfoLn("Beginning to pull installers")
 	if err := PullImageSet(
-		mirrorCtx,
+		pullParams,
 		layouts.Install,
 		layouts.InstallImages,
 		WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
 	); err != nil {
 		return err
 	}
-	mirrorCtx.Logger.InfoLn("All required installers are pulled!")
+	pullParams.Logger.InfoLn("All required installers are pulled!")
 	return nil
 }
 
-func PullStandaloneInstallers(mirrorCtx *contexts.PullContext, layouts *ImageLayouts) error {
-	mirrorCtx.Logger.InfoLn("Beginning to pull standalone installers")
+func PullStandaloneInstallers(pullParams *params.PullParams, layouts *ImageLayouts) error {
+	pullParams.Logger.InfoLn("Beginning to pull standalone installers")
 	if err := PullImageSet(
-		mirrorCtx,
+		pullParams,
 		layouts.InstallStandalone,
 		layouts.InstallStandaloneImages,
 		WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
@@ -60,52 +60,53 @@ func PullStandaloneInstallers(mirrorCtx *contexts.PullContext, layouts *ImageLay
 	); err != nil {
 		return err
 	}
-	mirrorCtx.Logger.InfoLn("✅ All required standalone installers are pulled!")
+	pullParams.Logger.InfoLn("All required standalone installers are pulled!")
 	return nil
 }
 
-func PullDeckhouseReleaseChannels(mirrorCtx *contexts.PullContext, layouts *ImageLayouts) error {
-	mirrorCtx.Logger.InfoLn("Beginning to pull Deckhouse release channels information")
+func PullDeckhouseReleaseChannels(pullParams *params.PullParams, layouts *ImageLayouts) error {
+	pullParams.Logger.InfoLn("Beginning to pull Deckhouse release channels information")
 	if err := PullImageSet(
-		mirrorCtx,
+		pullParams,
 		layouts.ReleaseChannel,
 		layouts.ReleaseChannelImages,
 		WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
-		WithAllowMissingTags(mirrorCtx.SpecificVersion != nil),
+		WithAllowMissingTags(pullParams.DeckhouseTag != ""),
 	); err != nil {
 		return err
 	}
-	mirrorCtx.Logger.InfoLn("Deckhouse release channels are pulled!")
+	pullParams.Logger.InfoLn("Deckhouse release channels are pulled!")
 	return nil
 }
 
-func PullDeckhouseImages(mirrorCtx *contexts.PullContext, layouts *ImageLayouts) error {
-	mirrorCtx.Logger.InfoLn("Beginning to pull Deckhouse, this may take a while")
+func PullDeckhouseImages(pullParams *params.PullParams, layouts *ImageLayouts) error {
+	pullParams.Logger.InfoLn("Beginning to pull Deckhouse, this may take a while")
 	if err := PullImageSet(
-		mirrorCtx,
+		pullParams,
 		layouts.Deckhouse,
 		layouts.DeckhouseImages,
 		WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
 	); err != nil {
 		return err
 	}
-	mirrorCtx.Logger.InfoLn("All required Deckhouse images are pulled!")
+	pullParams.Logger.InfoLn("All required Deckhouse images are pulled!")
 	return nil
 }
 
-func PullModules(mirrorCtx *contexts.PullContext, layouts *ImageLayouts) error {
-	mirrorCtx.Logger.InfoLn("Beginning to pull Deckhouse modules")
+func PullModules(pullParams *params.PullParams, layouts *ImageLayouts) error {
 	for moduleName, moduleData := range layouts.Modules {
+		pullParams.Logger.InfoLn(moduleName, "images")
 		if err := PullImageSet(
-			mirrorCtx,
+			pullParams,
 			moduleData.ModuleLayout,
 			moduleData.ModuleImages,
 			WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
 		); err != nil {
 			return fmt.Errorf("pull %q module: %w", moduleName, err)
 		}
+		pullParams.Logger.InfoLn(moduleName, "release channels")
 		if err := PullImageSet(
-			mirrorCtx,
+			pullParams,
 			moduleData.ReleasesLayout,
 			moduleData.ReleaseImages,
 			WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
@@ -114,21 +115,21 @@ func PullModules(mirrorCtx *contexts.PullContext, layouts *ImageLayouts) error {
 			return fmt.Errorf("pull %q module release information: %w", moduleName, err)
 		}
 	}
-	mirrorCtx.Logger.InfoLn("Deckhouse modules pulled!")
+	pullParams.Logger.InfoLn("Deckhouse modules pulled!")
 	return nil
 }
 
 func PullTrivyVulnerabilityDatabasesImages(
-	pullCtx *contexts.PullContext,
+	pullParams *params.PullParams,
 	layouts *ImageLayouts,
 ) error {
-	nameOpts, _ := auth.MakeRemoteRegistryRequestOptionsFromMirrorContext(&pullCtx.BaseContext)
+	nameOpts, _ := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&pullParams.BaseParams)
 
 	dbImages := map[layout.Path]string{
-		layouts.TrivyDB:     path.Join(pullCtx.DeckhouseRegistryRepo, "security", "trivy-db:2"),
-		layouts.TrivyBDU:    path.Join(pullCtx.DeckhouseRegistryRepo, "security", "trivy-bdu:1"),
-		layouts.TrivyJavaDB: path.Join(pullCtx.DeckhouseRegistryRepo, "security", "trivy-java-db:1"),
-		layouts.TrivyChecks: path.Join(pullCtx.DeckhouseRegistryRepo, "security", "trivy-checks:0"),
+		layouts.TrivyDB:     path.Join(pullParams.DeckhouseRegistryRepo, "security", "trivy-db:2"),
+		layouts.TrivyBDU:    path.Join(pullParams.DeckhouseRegistryRepo, "security", "trivy-bdu:1"),
+		layouts.TrivyJavaDB: path.Join(pullParams.DeckhouseRegistryRepo, "security", "trivy-java-db:1"),
+		layouts.TrivyChecks: path.Join(pullParams.DeckhouseRegistryRepo, "security", "trivy-checks:0"),
 	}
 
 	for dbImageLayout, imageRef := range dbImages {
@@ -138,7 +139,7 @@ func PullTrivyVulnerabilityDatabasesImages(
 		}
 
 		if err = PullImageSet(
-			pullCtx,
+			pullParams,
 			dbImageLayout,
 			map[string]struct{}{ref.String(): {}},
 			WithTagToDigestMapper(NopTagToDigestMappingFunc),
@@ -152,7 +153,7 @@ func PullTrivyVulnerabilityDatabasesImages(
 }
 
 func PullImageSet(
-	pullCtx *contexts.PullContext,
+	pullParams *params.PullParams,
 	targetLayout layout.Path,
 	imageSet map[string]struct{},
 	opts ...func(opts *pullImageSetOptions),
@@ -162,7 +163,11 @@ func PullImageSet(
 		o(pullOpts)
 	}
 
-	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(pullCtx.RegistryAuth, pullCtx.Insecure, pullCtx.SkipTLSVerification)
+	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(
+		pullParams.RegistryAuth,
+		pullParams.Insecure,
+		pullParams.SkipTLSVerification,
+	)
 
 	pullCount, totalCount := 1, len(imageSet)
 	for imageReferenceString := range imageSet {
@@ -183,13 +188,13 @@ func PullImageSet(
 		}
 
 		err = retry.RunTask(
-			pullCtx.Logger,
+			pullParams.Logger,
 			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageReferenceString),
 			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
 				img, err := remote.Image(ref, append(remoteOpts, remote.WithContext(ctx))...)
 				if err != nil {
 					if errorutil.IsImageNotFoundError(err) && pullOpts.allowMissingTags {
-						pullCtx.Logger.WarnLn("⚠️ Not found in registry, skipping pull")
+						pullParams.Logger.WarnLn("⚠️ Not found in registry, skipping pull")
 						return nil
 					}
 

@@ -23,10 +23,8 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/push"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/vulndb"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 )
 
@@ -53,8 +51,6 @@ func NewCommand() *cobra.Command {
 	mirrorCmd.AddCommand(
 		pull.NewCommand(),
 		push.NewCommand(),
-		modules.NewCommand(),
-		vulndb.NewCommand(),
 	)
 
 	debugLogLevel := log.DebugLogLevel()
@@ -65,7 +61,6 @@ func NewCommand() *cobra.Command {
 		logs.Warn.SetOutput(os.Stderr)
 	case debugLogLevel >= 1:
 		logs.Progress.SetOutput(os.Stderr)
-
 	}
 
 	return mirrorCmd
