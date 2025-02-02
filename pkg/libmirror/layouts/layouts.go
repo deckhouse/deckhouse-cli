@@ -194,7 +194,9 @@ type ociLayout struct {
 func FillLayoutsWithBasicDeckhouseImages(
 	mirrorCtx *contexts.PullContext,
 	layouts *ImageLayouts,
+	//deckhouseVersions []semver.Version,
 	deckhouseVersions []semver.Version,
+
 ) {
 	layouts.DeckhouseImages = map[string]struct{}{}
 	layouts.InstallImages = map[string]struct{}{}
@@ -207,11 +209,21 @@ func FillLayoutsWithBasicDeckhouseImages(
 		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-checks:0":  {},
 	}
 
-	for _, version := range deckhouseVersions {
-		layouts.DeckhouseImages[fmt.Sprintf("%s:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
-		layouts.InstallImages[fmt.Sprintf("%s/install:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
-		layouts.InstallStandaloneImages[fmt.Sprintf("%s/install-standalone:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
-		layouts.ReleaseChannelImages[fmt.Sprintf("%s/release-channel:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
+	if mirrorCtx.SpecificVersion.Prerelease() != "" {
+		for _, version := range deckhouseVersions {
+			layouts.DeckhouseImages[fmt.Sprintf("%s:%s", mirrorCtx.DeckhouseRegistryRepo, version.Prerelease())] = struct{}{}
+			layouts.InstallImages[fmt.Sprintf("%s/install:%s", mirrorCtx.DeckhouseRegistryRepo, version.Prerelease())] = struct{}{}
+			layouts.InstallStandaloneImages[fmt.Sprintf("%s/install-standalone:%s", mirrorCtx.DeckhouseRegistryRepo, version.Prerelease())] = struct{}{}
+			layouts.ReleaseChannelImages[fmt.Sprintf("%s/release-channel:%s", mirrorCtx.DeckhouseRegistryRepo, version.Prerelease())] = struct{}{}
+		}
+
+	} else {
+		for _, version := range deckhouseVersions {
+			layouts.DeckhouseImages[fmt.Sprintf("%s:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
+			layouts.InstallImages[fmt.Sprintf("%s/install:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
+			layouts.InstallStandaloneImages[fmt.Sprintf("%s/install-standalone:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
+			layouts.ReleaseChannelImages[fmt.Sprintf("%s/release-channel:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
+		}
 	}
 
 	// If we are to pull only the specific requested version, we should not pull any release channels at all.

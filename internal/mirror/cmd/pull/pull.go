@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/md5"
 	"fmt"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
 	"io"
 	"log/slog"
 	"os"
@@ -35,7 +36,6 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/gostsums"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/manifests"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
@@ -119,6 +119,11 @@ func buildPullContext() *contexts.PullContext {
 	}
 	logger := log.NewSLogger(logLevel)
 
+	//if SpecificVersion.Prerelease() != "" {
+	//	pr := mirrorCtx.SpecificVersion.Prerelease()
+	//	accessValidationTag = fmt.Sprintf("%s", pr)
+	//}
+
 	mirrorCtx := &contexts.PullContext{
 		BaseContext: contexts.BaseContext{
 			Logger:                logger,
@@ -153,13 +158,17 @@ func pull(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("Cleanup last unfinished pull data: %w", err)
 		}
 	}
-
 	accessValidationTag := "alpha"
 	if mirrorCtx.SpecificVersion != nil {
-		major := mirrorCtx.SpecificVersion.Major()
-		minor := mirrorCtx.SpecificVersion.Minor()
-		patch := mirrorCtx.SpecificVersion.Patch()
-		accessValidationTag = fmt.Sprintf("v%d.%d.%d", major, minor, patch)
+		if mirrorCtx.SpecificVersion.Prerelease() != "" {
+			pr := mirrorCtx.SpecificVersion.Prerelease()
+			accessValidationTag = fmt.Sprintf("%s", pr)
+		} else {
+			major := mirrorCtx.SpecificVersion.Major()
+			minor := mirrorCtx.SpecificVersion.Minor()
+			patch := mirrorCtx.SpecificVersion.Patch()
+			accessValidationTag = fmt.Sprintf("v%d.%d.%d", major, minor, patch)
+		}
 	}
 	readAccessTimeoutCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	if err := auth.ValidateReadAccessForImageContext(
@@ -176,13 +185,21 @@ func pull(_ *cobra.Command, _ []string) error {
 	}
 	cancel()
 
+	//var versionsToMirror []semver.Version
 	var versionsToMirror []semver.Version
 	var err error
 	err = logger.Process("Looking for required Deckhouse releases", func() error {
+
 		if mirrorCtx.SpecificVersion != nil {
-			versionsToMirror = append(versionsToMirror, *mirrorCtx.SpecificVersion)
-			logger.InfoF("Skipped releases lookup as release %v is specifically requested with --release", mirrorCtx.SpecificVersion)
-			return nil
+			if mirrorCtx.SpecificVersion.Prerelease() != "" {
+				versionsToMirror = append(versionsToMirror, *mirrorCtx.SpecificVersion)
+				logger.InfoF("Skipped releases lookup as release %v is specifically requested with --release", mirrorCtx.SpecificVersion.Prerelease())
+				return nil
+			} else {
+				versionsToMirror = append(versionsToMirror, *mirrorCtx.SpecificVersion)
+				logger.InfoF("Skipped releases lookup as release %v is specifically requested with --release", mirrorCtx.SpecificVersion)
+				return nil
+			}
 		}
 
 		versionsToMirror, err = releases.VersionsToMirror(mirrorCtx)
