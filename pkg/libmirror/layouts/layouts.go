@@ -22,10 +22,11 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"reflect"
 	"strings"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
@@ -33,9 +34,9 @@ import (
 	"golang.org/x/exp/maps"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 )
 
@@ -74,19 +75,36 @@ type ImageLayouts struct {
 	TagsResolver *TagsResolver
 }
 
-func (l *ImageLayouts) AllLayouts() []layout.Path {
-	paths := []layout.Path{
-		l.Deckhouse,
-		l.Install,
-		l.InstallStandalone,
-		l.ReleaseChannel,
-		l.TrivyDB,
-		l.TrivyBDU,
-		l.TrivyJavaDB,
-		l.TrivyChecks,
+func NewImageLayouts() *ImageLayouts {
+	return &ImageLayouts{
+		TagsResolver: NewTagsResolver(),
+		Modules:      make(map[string]ModuleImageLayout),
 	}
+}
+
+// Layouts returns a list of layout.Path's in it. Undefined path's are not included in the list.
+func (l *ImageLayouts) Layouts() []layout.Path {
+	layoutsValue := reflect.ValueOf(l).Elem()
+	layoutPathType := reflect.TypeOf(layout.Path(""))
+
+	paths := make([]layout.Path, 0)
+	for i := 0; i < layoutsValue.NumField(); i++ {
+		if layoutsValue.Field(i).Type() != layoutPathType {
+			continue
+		}
+
+		if pathValue := layoutsValue.Field(i).String(); pathValue != "" {
+			paths = append(paths, layout.Path(pathValue))
+		}
+	}
+
 	for _, moduleImageLayout := range l.Modules {
-		paths = append(paths, moduleImageLayout.ModuleLayout, moduleImageLayout.ReleasesLayout)
+		if moduleImageLayout.ModuleLayout != "" {
+			paths = append(paths, moduleImageLayout.ModuleLayout)
+		}
+		if moduleImageLayout.ReleasesLayout != "" {
+			paths = append(paths, moduleImageLayout.ReleasesLayout)
+		}
 	}
 
 	return paths
@@ -97,23 +115,16 @@ func CreateOCIImageLayoutsForDeckhouse(
 	modules []modules.Module,
 ) (*ImageLayouts, error) {
 	var err error
-	layouts := &ImageLayouts{
-		TagsResolver: NewTagsResolver(),
-		Modules:      map[string]ModuleImageLayout{},
-	}
+	layouts := NewImageLayouts()
 
 	fsPaths := map[*layout.Path]string{
 		&layouts.Deckhouse:         rootFolder,
 		&layouts.Install:           filepath.Join(rootFolder, "install"),
 		&layouts.InstallStandalone: filepath.Join(rootFolder, "install-standalone"),
 		&layouts.ReleaseChannel:    filepath.Join(rootFolder, "release-channel"),
-		&layouts.TrivyDB:           filepath.Join(rootFolder, "security", "trivy-db"),
-		&layouts.TrivyBDU:          filepath.Join(rootFolder, "security", "trivy-bdu"),
-		&layouts.TrivyJavaDB:       filepath.Join(rootFolder, "security", "trivy-java-db"),
-		&layouts.TrivyChecks:       filepath.Join(rootFolder, "security", "trivy-checks"),
 	}
 	for layoutPtr, fsPath := range fsPaths {
-		*layoutPtr, err = CreateEmptyImageLayoutAtPath(fsPath)
+		*layoutPtr, err = CreateEmptyImageLayout(fsPath)
 		if err != nil {
 			return nil, fmt.Errorf("create OCI Image Layout at %s: %w", fsPath, err)
 		}
@@ -121,13 +132,13 @@ func CreateOCIImageLayoutsForDeckhouse(
 
 	for _, module := range modules {
 		path := filepath.Join(rootFolder, "modules", module.Name)
-		moduleLayout, err := CreateEmptyImageLayoutAtPath(path)
+		moduleLayout, err := CreateEmptyImageLayout(path)
 		if err != nil {
 			return nil, fmt.Errorf("create OCI Image Layout at %s: %w", path, err)
 		}
 
 		path = filepath.Join(rootFolder, "modules", module.Name, "release")
-		moduleReleasesLayout, err := CreateEmptyImageLayoutAtPath(path)
+		moduleReleasesLayout, err := CreateEmptyImageLayout(path)
 		if err != nil {
 			return nil, fmt.Errorf("create OCI Image Layout at %s: %w", path, err)
 		}
@@ -143,7 +154,7 @@ func CreateOCIImageLayoutsForDeckhouse(
 	return layouts, nil
 }
 
-func CreateEmptyImageLayoutAtPath(path string) (layout.Path, error) {
+func CreateEmptyImageLayout(path string) (layout.Path, error) {
 	layoutFilePath := filepath.Join(path, "oci-layout")
 	indexFilePath := filepath.Join(path, "index.json")
 	blobsPath := filepath.Join(path, "blobs")
@@ -192,86 +203,97 @@ type ociLayout struct {
 }
 
 func FillLayoutsWithBasicDeckhouseImages(
-	mirrorCtx *contexts.PullContext,
+	pullParams *params.PullParams,
 	layouts *ImageLayouts,
-	deckhouseVersions []semver.Version,
+	deckhouseVersions []string,
 ) {
 	layouts.DeckhouseImages = map[string]struct{}{}
 	layouts.InstallImages = map[string]struct{}{}
 	layouts.InstallStandaloneImages = map[string]struct{}{}
 	layouts.ReleaseChannelImages = map[string]struct{}{}
+	// todo(mvasl) need to check if trivy must be here anymore
 	layouts.TrivyDBImages = map[string]struct{}{
-		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-db:2":      {},
-		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-bdu:1":     {},
-		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-java-db:1": {},
-		mirrorCtx.DeckhouseRegistryRepo + "/security/trivy-checks:0":  {},
+		pullParams.DeckhouseRegistryRepo + "/security/trivy-db:2":      {},
+		pullParams.DeckhouseRegistryRepo + "/security/trivy-bdu:1":     {},
+		pullParams.DeckhouseRegistryRepo + "/security/trivy-java-db:1": {},
+		pullParams.DeckhouseRegistryRepo + "/security/trivy-checks:0":  {},
 	}
 
 	for _, version := range deckhouseVersions {
-		layouts.DeckhouseImages[fmt.Sprintf("%s:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
-		layouts.InstallImages[fmt.Sprintf("%s/install:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
-		layouts.InstallStandaloneImages[fmt.Sprintf("%s/install-standalone:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
-		layouts.ReleaseChannelImages[fmt.Sprintf("%s/release-channel:v%s", mirrorCtx.DeckhouseRegistryRepo, version.String())] = struct{}{}
+		layouts.DeckhouseImages[fmt.Sprintf("%s:%s", pullParams.DeckhouseRegistryRepo, version)] = struct{}{}
+		layouts.InstallImages[fmt.Sprintf("%s/install:%s", pullParams.DeckhouseRegistryRepo, version)] = struct{}{}
+		layouts.InstallStandaloneImages[fmt.Sprintf("%s/install-standalone:%s", pullParams.DeckhouseRegistryRepo, version)] = struct{}{}
+		layouts.ReleaseChannelImages[fmt.Sprintf("%s/release-channel:%s", pullParams.DeckhouseRegistryRepo, version)] = struct{}{}
 	}
 
 	// If we are to pull only the specific requested version, we should not pull any release channels at all.
-	if mirrorCtx.SpecificVersion != nil {
+	if pullParams.DeckhouseTag != "" {
 		return
 	}
 
-	layouts.DeckhouseImages[mirrorCtx.DeckhouseRegistryRepo+":alpha"] = struct{}{}
-	layouts.DeckhouseImages[mirrorCtx.DeckhouseRegistryRepo+":beta"] = struct{}{}
-	layouts.DeckhouseImages[mirrorCtx.DeckhouseRegistryRepo+":early-access"] = struct{}{}
-	layouts.DeckhouseImages[mirrorCtx.DeckhouseRegistryRepo+":stable"] = struct{}{}
-	layouts.DeckhouseImages[mirrorCtx.DeckhouseRegistryRepo+":rock-solid"] = struct{}{}
+	layouts.DeckhouseImages[pullParams.DeckhouseRegistryRepo+":alpha"] = struct{}{}
+	layouts.DeckhouseImages[pullParams.DeckhouseRegistryRepo+":beta"] = struct{}{}
+	layouts.DeckhouseImages[pullParams.DeckhouseRegistryRepo+":early-access"] = struct{}{}
+	layouts.DeckhouseImages[pullParams.DeckhouseRegistryRepo+":stable"] = struct{}{}
+	layouts.DeckhouseImages[pullParams.DeckhouseRegistryRepo+":rock-solid"] = struct{}{}
 
-	layouts.InstallImages[mirrorCtx.DeckhouseRegistryRepo+"/install:alpha"] = struct{}{}
-	layouts.InstallImages[mirrorCtx.DeckhouseRegistryRepo+"/install:beta"] = struct{}{}
-	layouts.InstallImages[mirrorCtx.DeckhouseRegistryRepo+"/install:early-access"] = struct{}{}
-	layouts.InstallImages[mirrorCtx.DeckhouseRegistryRepo+"/install:stable"] = struct{}{}
-	layouts.InstallImages[mirrorCtx.DeckhouseRegistryRepo+"/install:rock-solid"] = struct{}{}
+	layouts.InstallImages[pullParams.DeckhouseRegistryRepo+"/install:alpha"] = struct{}{}
+	layouts.InstallImages[pullParams.DeckhouseRegistryRepo+"/install:beta"] = struct{}{}
+	layouts.InstallImages[pullParams.DeckhouseRegistryRepo+"/install:early-access"] = struct{}{}
+	layouts.InstallImages[pullParams.DeckhouseRegistryRepo+"/install:stable"] = struct{}{}
+	layouts.InstallImages[pullParams.DeckhouseRegistryRepo+"/install:rock-solid"] = struct{}{}
 
-	layouts.InstallStandaloneImages[mirrorCtx.DeckhouseRegistryRepo+"/install-standalone:alpha"] = struct{}{}
-	layouts.InstallStandaloneImages[mirrorCtx.DeckhouseRegistryRepo+"/install-standalone:beta"] = struct{}{}
-	layouts.InstallStandaloneImages[mirrorCtx.DeckhouseRegistryRepo+"/install-standalone:early-access"] = struct{}{}
-	layouts.InstallStandaloneImages[mirrorCtx.DeckhouseRegistryRepo+"/install-standalone:stable"] = struct{}{}
-	layouts.InstallStandaloneImages[mirrorCtx.DeckhouseRegistryRepo+"/install-standalone:rock-solid"] = struct{}{}
+	layouts.InstallStandaloneImages[pullParams.DeckhouseRegistryRepo+"/install-standalone:alpha"] = struct{}{}
+	layouts.InstallStandaloneImages[pullParams.DeckhouseRegistryRepo+"/install-standalone:beta"] = struct{}{}
+	layouts.InstallStandaloneImages[pullParams.DeckhouseRegistryRepo+"/install-standalone:early-access"] = struct{}{}
+	layouts.InstallStandaloneImages[pullParams.DeckhouseRegistryRepo+"/install-standalone:stable"] = struct{}{}
+	layouts.InstallStandaloneImages[pullParams.DeckhouseRegistryRepo+"/install-standalone:rock-solid"] = struct{}{}
 
-	layouts.ReleaseChannelImages[mirrorCtx.DeckhouseRegistryRepo+"/release-channel:alpha"] = struct{}{}
-	layouts.ReleaseChannelImages[mirrorCtx.DeckhouseRegistryRepo+"/release-channel:beta"] = struct{}{}
-	layouts.ReleaseChannelImages[mirrorCtx.DeckhouseRegistryRepo+"/release-channel:early-access"] = struct{}{}
-	layouts.ReleaseChannelImages[mirrorCtx.DeckhouseRegistryRepo+"/release-channel:stable"] = struct{}{}
-	layouts.ReleaseChannelImages[mirrorCtx.DeckhouseRegistryRepo+"/release-channel:rock-solid"] = struct{}{}
+	layouts.ReleaseChannelImages[pullParams.DeckhouseRegistryRepo+"/release-channel:alpha"] = struct{}{}
+	layouts.ReleaseChannelImages[pullParams.DeckhouseRegistryRepo+"/release-channel:beta"] = struct{}{}
+	layouts.ReleaseChannelImages[pullParams.DeckhouseRegistryRepo+"/release-channel:early-access"] = struct{}{}
+	layouts.ReleaseChannelImages[pullParams.DeckhouseRegistryRepo+"/release-channel:stable"] = struct{}{}
+	layouts.ReleaseChannelImages[pullParams.DeckhouseRegistryRepo+"/release-channel:rock-solid"] = struct{}{}
 }
 
-func FindDeckhouseModulesImages(mirrorCtx *contexts.PullContext, layouts *ImageLayouts) error {
+func FindDeckhouseModulesImages(params *params.PullParams, layouts *ImageLayouts) error {
 	modulesNames := maps.Keys(layouts.Modules)
 	for _, moduleName := range modulesNames {
 		moduleData := layouts.Modules[moduleName]
 		moduleData.ReleaseImages = map[string]struct{}{
-			mirrorCtx.DeckhouseRegistryRepo + "/modules/" + moduleName + "/release:alpha":        {},
-			mirrorCtx.DeckhouseRegistryRepo + "/modules/" + moduleName + "/release:beta":         {},
-			mirrorCtx.DeckhouseRegistryRepo + "/modules/" + moduleName + "/release:early-access": {},
-			mirrorCtx.DeckhouseRegistryRepo + "/modules/" + moduleName + "/release:stable":       {},
-			mirrorCtx.DeckhouseRegistryRepo + "/modules/" + moduleName + "/release:rock-solid":   {},
+			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, moduleName, "release") + ":alpha":        {},
+			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, moduleName, "release") + ":beta":         {},
+			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, moduleName, "release") + ":early-access": {},
+			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, moduleName, "release") + ":stable":       {},
+			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, moduleName, "release") + ":rock-solid":   {},
 		}
 
 		channelVersions, err := releases.FetchVersionsFromModuleReleaseChannels(
 			moduleData.ReleaseImages,
-			mirrorCtx.RegistryAuth,
-			mirrorCtx.Insecure,
-			mirrorCtx.SkipTLSVerification,
+			params.RegistryAuth,
+			params.Insecure,
+			params.SkipTLSVerification,
 		)
 		if err != nil {
 			return fmt.Errorf("fetch versions from %q release channels: %w", moduleName, err)
 		}
 
 		for _, moduleVersion := range channelVersions {
-			moduleData.ModuleImages[mirrorCtx.DeckhouseRegistryRepo+"/modules/"+moduleName+":"+moduleVersion] = struct{}{}
-			moduleData.ReleaseImages[mirrorCtx.DeckhouseRegistryRepo+"/modules/"+moduleName+"/release:"+moduleVersion] = struct{}{}
+			moduleData.ModuleImages[path.Join(
+				params.DeckhouseRegistryRepo,
+				params.ModulesPathSuffix,
+				moduleName,
+			)+":"+moduleVersion] = struct{}{}
+
+			moduleData.ReleaseImages[path.Join(
+				params.DeckhouseRegistryRepo,
+				params.ModulesPathSuffix,
+				moduleName,
+				"release",
+			)+":"+moduleVersion] = struct{}{}
 		}
 
-		nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorContext(&mirrorCtx.BaseContext)
+		nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&params.BaseParams)
 		fetchDigestsFrom := maps.Clone(moduleData.ModuleImages)
 		for imageTag := range fetchDigestsFrom {
 			ref, err := name.ParseReference(imageTag, nameOpts...)
@@ -294,7 +316,7 @@ func FindDeckhouseModulesImages(mirrorCtx *contexts.PullContext, layouts *ImageL
 
 			digests := images.ExtractDigestsFromJSONFile(imagesDigestsJSON.Bytes())
 			for _, digest := range digests {
-				moduleData.ModuleImages[mirrorCtx.DeckhouseRegistryRepo+"/modules/"+moduleName+"@"+digest] = struct{}{}
+				moduleData.ModuleImages[path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, moduleName)+"@"+digest] = struct{}{}
 			}
 		}
 

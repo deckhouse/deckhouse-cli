@@ -31,7 +31,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/stretchr/testify/require"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 )
@@ -70,7 +70,7 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessSkipTLS(t *testing.T) {
 	}
 
 	err := PullTrivyVulnerabilityDatabasesImages(
-		&contexts.PullContext{BaseContext: contexts.BaseContext{
+		&params.PullParams{BaseParams: params.BaseParams{
 			Logger:                testLogger,
 			RegistryAuth:          authn.Anonymous,
 			DeckhouseRegistryRepo: deckhouseRepo,
@@ -125,7 +125,7 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessInsecure(t *testing.T) {
 	}
 
 	err := PullTrivyVulnerabilityDatabasesImages(
-		&contexts.PullContext{BaseContext: contexts.BaseContext{
+		&params.PullParams{BaseParams: params.BaseParams{
 			Logger:                testLogger,
 			RegistryAuth:          authn.Anonymous,
 			DeckhouseRegistryRepo: deckhouseRepo,
@@ -168,7 +168,7 @@ func layoutByIndex(t *testing.T, layouts *ImageLayouts, idx int) layout.Path {
 func createEmptyOCILayout(t *testing.T) layout.Path {
 	t.Helper()
 
-	l, err := CreateEmptyImageLayoutAtPath(t.TempDir())
+	l, err := CreateEmptyImageLayout(t.TempDir())
 	require.NoError(t, err)
 	return l
 }

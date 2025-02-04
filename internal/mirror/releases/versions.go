@@ -26,17 +26,17 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"golang.org/x/exp/maps"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 )
 
-func VersionsToMirror(mirrorCtx *contexts.PullContext) ([]semver.Version, error) {
+func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
 	releaseChannelsToCopy := []string{"alpha", "beta", "early-access", "stable", "rock-solid"}
 	releaseChannelsVersions := make([]*semver.Version, len(releaseChannelsToCopy))
 	for i, channel := range releaseChannelsToCopy {
-		v, err := getReleaseChannelVersionFromRegistry(mirrorCtx, channel)
+		v, err := getReleaseChannelVersionFromRegistry(pullParams, channel)
 		if err != nil {
 			return nil, fmt.Errorf("get %s release version from registry: %w", channel, err)
 		}
@@ -45,14 +45,14 @@ func VersionsToMirror(mirrorCtx *contexts.PullContext) ([]semver.Version, error)
 
 	rockSolidVersion := releaseChannelsVersions[len(releaseChannelsToCopy)-1]
 	mirrorFromVersion := *rockSolidVersion
-	if mirrorCtx.MinVersion != nil {
-		mirrorFromVersion = *mirrorCtx.MinVersion
-		if rockSolidVersion.LessThan(mirrorCtx.MinVersion) {
+	if pullParams.SinceVersion != nil {
+		mirrorFromVersion = *pullParams.SinceVersion
+		if rockSolidVersion.LessThan(pullParams.SinceVersion) {
 			mirrorFromVersion = *rockSolidVersion
 		}
 	}
 
-	tags, err := getReleasedTagsFromRegistry(mirrorCtx)
+	tags, err := getReleasedTagsFromRegistry(pullParams)
 	if err != nil {
 		return nil, fmt.Errorf("get releases from github: %w", err)
 	}
@@ -70,9 +70,9 @@ func VersionsToMirror(mirrorCtx *contexts.PullContext) ([]semver.Version, error)
 	return deduplicateVersions(append(releaseChannelsVersions, versionsAboveMinimal...)), nil
 }
 
-func getReleasedTagsFromRegistry(mirrorCtx *contexts.PullContext) ([]string, error) {
-	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorContext(&mirrorCtx.BaseContext)
-	repo, err := name.NewRepository(mirrorCtx.DeckhouseRegistryRepo+"/release-channel", nameOpts...)
+func getReleasedTagsFromRegistry(pullParams *params.PullParams) ([]string, error) {
+	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&pullParams.BaseParams)
+	repo, err := name.NewRepository(pullParams.DeckhouseRegistryRepo+"/release-channel", nameOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("parsing repo: %v", err)
 	}
@@ -117,8 +117,8 @@ func filterOnlyLatestPatches(versions []*semver.Version) []*semver.Version {
 	return topPatches
 }
 
-func getReleaseChannelVersionFromRegistry(mirrorCtx *contexts.PullContext, releaseChannel string) (*semver.Version, error) {
-	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorContext(&mirrorCtx.BaseContext)
+func getReleaseChannelVersionFromRegistry(mirrorCtx *params.PullParams, releaseChannel string) (*semver.Version, error) {
+	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&mirrorCtx.BaseParams)
 	nameOpts = append(nameOpts, name.StrictValidation)
 
 	ref, err := name.ParseReference(mirrorCtx.DeckhouseRegistryRepo+"/release-channel:"+releaseChannel, nameOpts...)

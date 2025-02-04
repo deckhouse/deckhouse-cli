@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Flant JSC
+Copyright 2025 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@ package pull
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -44,50 +43,53 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 
 func validateImagesBundlePathArg(args []string) error {
 	if len(args) != 1 {
-		return errors.New("invalid number of arguments")
+		return errors.New("This command requires exactly 1 argument")
 	}
 
 	ImagesBundlePath = filepath.Clean(args[0])
-	if filepath.Ext(ImagesBundlePath) != ".tar" {
-		return errors.New("images-bundle-path argument should be a path to tar archive (.tar)")
+	pathInfo, err := os.Stat(ImagesBundlePath)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if err = os.MkdirAll(ImagesBundlePath, 0755); err != nil {
+			return fmt.Errorf("Create bundle directory at %s: %w", ImagesBundlePath, err)
+		}
+		return validateImagesBundlePathArg(args)
+	case err != nil:
+		return err
 	}
 
-	stats, err := os.Stat(ImagesBundlePath)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		// If only the file is not there it is fine, it will be created, but if directories on the path are also missing, this is bad.
-		tarBundleDir := filepath.Dir(ImagesBundlePath)
-		if _, err = os.Stat(tarBundleDir); err != nil {
-			return err
-		}
-		break
-	case err != nil && !errors.Is(err, fs.ErrNotExist):
-		return err
-	case stats.IsDir() || filepath.Ext(ImagesBundlePath) != ".tar":
-		return fmt.Errorf("%s should be a tar archive", ImagesBundlePath)
+	if !pathInfo.IsDir() {
+		return fmt.Errorf("%s is not a directory", ImagesBundlePath)
 	}
+
+	if ForcePull {
+		return nil
+	}
+
+	dirEntries, err := os.ReadDir(ImagesBundlePath)
+	if err != nil {
+		return fmt.Errorf("Read bundle directory: %w", err)
+	}
+	if len(dirEntries) > 0 {
+		return fmt.Errorf("%s is not empty, use --force to override", ImagesBundlePath)
+	}
+
 	return nil
 }
 
 func parseAndValidateVersionFlags() error {
-	if minVersionString != "" && specificReleaseString != "" {
-		return errors.New("Using both --release and --min-version at the same time is ambiguous.")
+	if sinceVersionString != "" && DeckhouseTag != "" {
+		return errors.New("Using both --deckhouse-tag and --since-version at the same time is ambiguous.")
 	}
 
 	var err error
-	if minVersionString != "" {
-		MinVersion, err = semver.NewVersion(minVersionString)
+	if sinceVersionString != "" {
+		SinceVersion, err = semver.NewVersion(sinceVersionString)
 		if err != nil {
 			return fmt.Errorf("Parse minimal deckhouse version: %w", err)
 		}
 	}
 
-	if specificReleaseString != "" {
-		SpecificRelease, err = semver.NewVersion(specificReleaseString)
-		if err != nil {
-			return fmt.Errorf("Parse required deckhouse version: %w", err)
-		}
-	}
 	return nil
 }
 

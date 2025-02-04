@@ -14,21 +14,25 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package contexts
+package params
 
 import (
 	"github.com/Masterminds/semver/v3"
 )
 
-// PullContext holds data related to pending mirroring-from-registry operation.
-type PullContext struct {
-	BaseContext
+// PullParams holds data related to pending mirroring-from-registry operation.
+type PullParams struct {
+	BaseParams
 
-	DoGOSTDigests   bool  // --gost-digest
-	SkipModulesPull bool  // --no-modules
-	BundleChunkSize int64 // Plain bytes
+	DoGOSTDigests         bool  // --gost-digest
+	SkipPlatform          bool  // --no-platform
+	SkipSecurityDatabases bool  // --no-security-db
+	SkipModules           bool  // --no-modules
+	BundleChunkSize       int64 // Plain bytes
 
 	// Only one of those 2 is filled at a single time or none at all.
-	MinVersion      *semver.Version // --min-version
-	SpecificVersion *semver.Version // --release
+	SinceVersion *semver.Version // --since-version
+	DeckhouseTag string          // --deckhouse-tag
+
+	ModulesPathSuffix string // --modules-path-suffix
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Flant JSC
+Copyright 2025 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 )
 
@@ -48,27 +49,31 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 
 func validateImagesBundlePathArg(args []string) error {
 	ImagesBundlePath = filepath.Clean(args[0])
-	bundleExtension := filepath.Ext(ImagesBundlePath)
-	stat, err := os.Stat(ImagesBundlePath)
+	s, err := os.Stat(ImagesBundlePath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			stat, err = os.Stat(ImagesBundlePath + ".0000.chunk")
-			if err != nil {
-				return fmt.Errorf("invalid images bundle path: %w", err)
-			}
-			return nil
-		}
-		return fmt.Errorf("invalid images bundle path: %w", err)
+		return fmt.Errorf("could not read images bundle: %w", err)
 	}
 
-	switch {
-	case bundleExtension != ".tar" && !stat.IsDir():
-		return errors.New("images-bundle-path argument should be a path to tar archive (.tar) or a directory containing unpacked bundle")
-	case bundleExtension == "" && !stat.IsDir():
-		return fmt.Errorf("%s: not a directory", ImagesBundlePath)
-	default:
+	if s.IsDir() {
+		dirEntries, err := os.ReadDir(ImagesBundlePath)
+		if err != nil {
+			return fmt.Errorf("could not list files in bundle directory: %w", err)
+		}
+		dirEntries = lo.Filter(dirEntries, func(item os.DirEntry, _ int) bool {
+			ext := filepath.Ext(item.Name())
+			return ext == ".tar" || ext == ".chunk"
+		})
+		if len(dirEntries) == 0 {
+			return errors.New("no packages found in bundle directory")
+		}
 		return nil
 	}
+
+	if bundleExtension := filepath.Ext(ImagesBundlePath); bundleExtension == ".tar" || bundleExtension == ".chunk" {
+		return nil
+	}
+
+	return fmt.Errorf("invalid images bundle: must be a directory, tar or a chunked package")
 }
 
 func validateRegistryCredentials() error {

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package contexts
+package params
 
 import (
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -33,17 +33,17 @@ type Logger interface {
 	Process(topic string, run func() error) error
 }
 
-// BaseContext hold data related to pending registry mirroring operation.
-type BaseContext struct {
-	// --registry-login + --registry-password (can be nil in this case) or --license depending on the operation requested
+// BaseParams hold data related to pending registry mirroring operation.
+type BaseParams struct {
+	// --registry-login + --registry-password (can be nil in this case, means anonymous) or --license depending on the operation requested
 	RegistryAuth authn.Authenticator
 	RegistryHost string // --registry (FQDN with port, if one is provided)
 	RegistryPath string // --registry (path)
 
-	DeckhouseRegistryRepo string // --source during pull, extracted from bundle data during push
+	DeckhouseRegistryRepo string // --source during pull
 
-	BundlePath         string // --images-bundle-path
-	UnpackedImagesPath string
+	BundleDir  string // images-bundle-path argument
+	WorkingDir string // Temporary directory to use for all intermediate operations on OCI layouts
 
 	Insecure            bool // --insecure
 	SkipTLSVerification bool // --skip-tls-verify

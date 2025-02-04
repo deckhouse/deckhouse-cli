@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/google/go-containerregistry/pkg/crane"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
@@ -41,15 +40,13 @@ func TestGenerateDeckhouseReleaseManifests(t *testing.T) {
 	})
 
 	tests := []struct {
-		name             string
-		versionsToMirror []semver.Version
-		want             string
+		name         string
+		tagsToMirror []string
+		want         string
 	}{
 		{
-			name: "one_release_without_disruptions",
-			versionsToMirror: []semver.Version{
-				*semver.MustParse("v1.57.3"),
-			},
+			name:         "one_release_without_disruptions",
+			tagsToMirror: []string{"v1.57.3"},
 			want: `
 apiVersion: deckhouse.io/v1alpha1
 approved: false
@@ -77,10 +74,8 @@ status:
 `,
 		},
 		{
-			name: "one_release_with_disruptions",
-			versionsToMirror: []semver.Version{
-				*semver.MustParse("v1.56.12"),
-			},
+			name:         "one_release_with_disruptions",
+			tagsToMirror: []string{"v1.56.12"},
 			want: `
 apiVersion: deckhouse.io/v1alpha1
 approved: false
@@ -110,12 +105,8 @@ status:
 `,
 		},
 		{
-			name: "many_releases",
-			versionsToMirror: []semver.Version{
-				*semver.MustParse("v1.56.12"),
-				*semver.MustParse("v1.57.5"),
-				*semver.MustParse("v1.58.1"),
-			},
+			name:         "many_releases",
+			tagsToMirror: []string{"v1.56.12", "v1.57.5", "v1.58.1"},
 			want: `---
 apiVersion: deckhouse.io/v1alpha1
 approved: false
@@ -197,21 +188,21 @@ status:
 		t.Run(tt.name, func(t *testing.T) {
 			expect := require.New(t)
 			pathToManifestFile := filepath.Join(testDir, tt.name, "releases.yaml")
-			releaseChannelsLayout, err := layouts.CreateEmptyImageLayoutAtPath(filepath.Join(testDir, tt.name, "layout"))
+			releaseChannelsLayout, err := layouts.CreateEmptyImageLayout(filepath.Join(testDir, tt.name, "layout"))
 			expect.NoError(err)
 
-			for _, version := range tt.versionsToMirror {
+			for _, version := range tt.tagsToMirror {
 				expect.NoError(
 					releaseChannelsLayout.AppendImage(
-						createDeckhouseReleaseChannelImage(t, version.String()),
+						createDeckhouseReleaseChannelImage(t, version[1:]),
 						layout.WithAnnotations(map[string]string{
-							"org.opencontainers.image.ref.name": "release-channel:v" + version.String(),
+							"org.opencontainers.image.ref.name": "release-channel:" + version,
 						}),
 					),
 				)
 			}
 
-			err = GenerateDeckhouseReleaseManifestsForVersions(tt.versionsToMirror, pathToManifestFile, releaseChannelsLayout)
+			err = GenerateDeckhouseReleaseManifestsForVersions(tt.tagsToMirror, pathToManifestFile, releaseChannelsLayout)
 			expect.NoError(err)
 			expect.FileExists(pathToManifestFile)
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Flant JSC
+Copyright 2025 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,11 +17,10 @@ limitations under the License.
 package pull
 
 import (
-	"bufio"
 	"context"
 	"crypto/md5"
+	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -29,27 +28,54 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/hashicorp/go-multierror"
+	"github.com/samber/lo"
+	"github.com/samber/lo/parallel"
 	"github.com/spf13/cobra"
-	"golang.org/x/exp/maps"
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/gostsums"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/manifests"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
 )
 
-const (
-	deckhouseRegistryHost     = "registry.deckhouse.io"
-	enterpriseEditionRepoPath = "/deckhouse/ee"
+var ErrPullFailed = errors.New("pull failed, see the log for details")
 
-	enterpriseEditionRepo = deckhouseRegistryHost + enterpriseEditionRepoPath
+// CLI Parameters
+var (
+	TempDir = filepath.Join(os.TempDir(), "mirror")
+
+	Insecure      bool
+	TLSSkipVerify bool
+	ForcePull     bool
+
+	ImagesBundlePath        string
+	ImagesBundleChunkSizeGB int64
+
+	sinceVersionString string
+	SinceVersion       *semver.Version
+
+	DeckhouseTag string
+
+	ModulesPathSuffix string
+	ModulesWhitelist  []string
+	ModulesBlacklist  []string
+
+	SourceRegistryRepo     = enterpriseEditionRepo // Fallback to EE if nothing was given as source.
+	SourceRegistryLogin    string
+	SourceRegistryPassword string
+	DeckhouseLicenseToken  string
+
+	DoGOSTDigest bool
+	NoPullResume bool
+
+	NoPlatform   bool
+	NoSecurityDB bool
+	NoModules    bool
 )
 
 var pullLong = templates.LongDesc(`
@@ -87,47 +113,145 @@ func NewCommand() *cobra.Command {
 	return pullCmd
 }
 
-var (
-	TempDir = filepath.Join(os.TempDir(), "mirror")
+func pull(cmd *cobra.Command, _ []string) error {
+	logger := setupLogger()
+	pullParams := buildPullParams(logger)
 
-	Insecure      bool
-	TLSSkipVerify bool
+	if NoPullResume || lastPullWasTooLongAgoToRetry(pullParams) {
+		if err := os.RemoveAll(pullParams.WorkingDir); err != nil {
+			return fmt.Errorf("Cleanup last unfinished pull data: %w", err)
+		}
+	}
 
-	ImagesBundlePath        string
-	ImagesBundleChunkSizeGB int64
+	ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
+	defer cancel()
+	if err := validateRegistryAccess(ctx, pullParams); err != nil && os.Getenv("MIRROR_BYPASS_ACCESS_CHECKS") != "1" {
+		return fmt.Errorf("Source registry access validation failure: %w", err)
+	}
 
-	minVersionString string
-	MinVersion       *semver.Version
+	if !pullParams.SkipPlatform {
+		if err := logger.Process("Pull Deckhouse Kubernetes Platform", func() error {
+			tagsToMirror, err := findTagsToMirror(pullParams, logger)
+			if err != nil {
+				return fmt.Errorf("Find tags to mirror: %w", err)
+			}
+			if err = operations.PullDeckhousePlatform(pullParams, tagsToMirror); err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
+			return ErrPullFailed
+		}
+	}
 
-	specificReleaseString string
-	SpecificRelease       *semver.Version
+	if !pullParams.SkipSecurityDatabases {
+		if err := logger.Process("Pull Security Databases", func() error {
+			if err := operations.PullSecurityDatabases(pullParams); err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
+			return ErrPullFailed
+		}
+	}
 
-	SourceRegistryRepo     = enterpriseEditionRepo // Fallback to EE if nothing was given as source.
-	SourceRegistryLogin    string
-	SourceRegistryPassword string
-	DeckhouseLicenseToken  string
+	if !pullParams.SkipModules {
+		if err := logger.Process("Pull Modules", func() error {
+			filterExpressions := ModulesBlacklist
+			filterType := modules.FilterTypeBlacklist
+			if ModulesWhitelist != nil {
+				filterExpressions = ModulesWhitelist
+				filterType = modules.FilterTypeWhitelist
+			}
 
-	DoGOSTDigest            bool
-	DontContinuePartialPull bool
-	NoModules               bool
-)
+			filter, err := modules.NewFilter(filterExpressions, filterType)
+			if err != nil {
+				return fmt.Errorf("Prepare module filter: %w", err)
+			}
+			return operations.PullModules(pullParams, filter)
+		}); err != nil {
+			return ErrPullFailed
+		}
+	}
 
-func buildPullContext() *contexts.PullContext {
+	if !DoGOSTDigest {
+		return nil
+	}
+
+	if err := logger.Process("Compute GOST digests for bundle", func() error {
+		bundleDirContents, err := os.ReadDir(pullParams.BundleDir)
+		if err != nil {
+			return fmt.Errorf("Read Deckhouse Kubernetes Platform distribution bundle: %w", err)
+		}
+
+		bundlePackages := lo.Filter(bundleDirContents, func(item os.DirEntry, _ int) bool {
+			ext := filepath.Ext(item.Name())
+			return ext == ".tar" || ext == ".chunk"
+		})
+
+		merr := &multierror.Error{}
+		parallel.ForEach(bundlePackages, func(bundlePackage os.DirEntry, _ int) {
+			file, err := os.Open(filepath.Join(pullParams.BundleDir, bundlePackage.Name()))
+			if err != nil {
+				merr = multierror.Append(merr, fmt.Errorf("Read Deckhouse Kubernetes Platform distribution bundle: %w", err))
+			}
+
+			digest, err := gostsums.CalculateBlobGostDigest(file)
+			if err != nil {
+				merr = multierror.Append(merr, fmt.Errorf("Calculate digest: %w", err))
+			}
+
+			if err = os.WriteFile(
+				filepath.Join(pullParams.BundleDir, bundlePackage.Name())+".gostsum",
+				[]byte(digest),
+				0644,
+			); err != nil {
+				merr = multierror.Append(merr, fmt.Errorf("Could not write digest to .gostsum file: %w", err))
+			}
+		})
+		return merr.ErrorOrNil()
+	}); err != nil {
+		return fmt.Errorf("Compute GOST digests for bundle: %w", err)
+	}
+
+	return nil
+}
+
+func setupLogger() *log.SLogger {
 	logLevel := slog.LevelInfo
 	if log.DebugLogLevel() >= 3 {
 		logLevel = slog.LevelDebug
 	}
-	logger := log.NewSLogger(logLevel)
+	return log.NewSLogger(logLevel)
+}
 
-	mirrorCtx := &contexts.PullContext{
-		BaseContext: contexts.BaseContext{
+func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger) ([]string, error) {
+	if pullParams.DeckhouseTag != "" {
+		logger.InfoF("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
+		return []string{pullParams.DeckhouseTag}, nil
+	}
+
+	versionsToMirror, err := releases.VersionsToMirror(pullParams)
+	if err != nil {
+		return nil, fmt.Errorf("Find versions to mirror: %w", err)
+	}
+	logger.InfoF("Deckhouse releases to pull: %+v", versionsToMirror)
+
+	return lo.Map(versionsToMirror, func(v semver.Version, index int) string {
+		return "v" + v.String()
+	}), nil
+}
+
+func buildPullParams(logger params.Logger) *params.PullParams {
+	mirrorCtx := &params.PullParams{
+		BaseParams: params.BaseParams{
 			Logger:                logger,
 			Insecure:              Insecure,
 			SkipTLSVerification:   TLSSkipVerify,
 			DeckhouseRegistryRepo: SourceRegistryRepo,
 			RegistryAuth:          getSourceRegistryAuthProvider(),
-			BundlePath:            ImagesBundlePath,
-			UnpackedImagesPath: filepath.Join(
+			BundleDir:             ImagesBundlePath,
+			WorkingDir: filepath.Join(
 				TempDir,
 				"pull",
 				fmt.Sprintf("%x", md5.Sum([]byte(SourceRegistryRepo))),
@@ -136,148 +260,16 @@ func buildPullContext() *contexts.PullContext {
 
 		BundleChunkSize: ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
 
-		DoGOSTDigests:   DoGOSTDigest,
-		SkipModulesPull: NoModules,
-		SpecificVersion: SpecificRelease,
-		MinVersion:      MinVersion,
+		ModulesPathSuffix: ModulesPathSuffix,
+
+		DoGOSTDigests:         DoGOSTDigest,
+		SkipPlatform:          NoPlatform,
+		SkipSecurityDatabases: NoSecurityDB,
+		SkipModules:           NoModules,
+		DeckhouseTag:          DeckhouseTag,
+		SinceVersion:          SinceVersion,
 	}
 	return mirrorCtx
-}
-
-func pull(_ *cobra.Command, _ []string) error {
-	mirrorCtx := buildPullContext()
-	logger := mirrorCtx.Logger
-
-	if DontContinuePartialPull || lastPullWasTooLongAgoToRetry(mirrorCtx) {
-		if err := os.RemoveAll(mirrorCtx.UnpackedImagesPath); err != nil {
-			return fmt.Errorf("Cleanup last unfinished pull data: %w", err)
-		}
-	}
-
-	accessValidationTag := "alpha"
-	if mirrorCtx.SpecificVersion != nil {
-		major := mirrorCtx.SpecificVersion.Major()
-		minor := mirrorCtx.SpecificVersion.Minor()
-		patch := mirrorCtx.SpecificVersion.Patch()
-		accessValidationTag = fmt.Sprintf("v%d.%d.%d", major, minor, patch)
-	}
-	readAccessTimeoutCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	if err := auth.ValidateReadAccessForImageContext(
-		readAccessTimeoutCtx,
-		mirrorCtx.DeckhouseRegistryRepo+":"+accessValidationTag,
-		mirrorCtx.RegistryAuth,
-		mirrorCtx.Insecure,
-		mirrorCtx.SkipTLSVerification,
-	); err != nil {
-		cancel()
-		if os.Getenv("MIRROR_BYPASS_ACCESS_CHECKS") != "1" {
-			return fmt.Errorf("Source registry access validation failure: %w", err)
-		}
-	}
-	cancel()
-
-	var versionsToMirror []semver.Version
-	var err error
-	err = logger.Process("Looking for required Deckhouse releases", func() error {
-		if mirrorCtx.SpecificVersion != nil {
-			versionsToMirror = append(versionsToMirror, *mirrorCtx.SpecificVersion)
-			logger.InfoF("Skipped releases lookup as release %v is specifically requested with --release", mirrorCtx.SpecificVersion)
-			return nil
-		}
-
-		versionsToMirror, err = releases.VersionsToMirror(mirrorCtx)
-		if err != nil {
-			return fmt.Errorf("Find versions to mirror: %w", err)
-		}
-		logger.InfoF("Deckhouse releases to pull: %+v", versionsToMirror)
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	err = logger.Process("Pull images", func() error {
-		return PullDeckhouseToLocalFS(mirrorCtx, versionsToMirror)
-	})
-	if err != nil {
-		return err
-	}
-
-	err = logger.Process("Pack images", func() error {
-		return bundle.Pack(mirrorCtx)
-	})
-	if err != nil {
-		return err
-	}
-
-	if mirrorCtx.DoGOSTDigests {
-		err = logger.Process("Compute GOST digest", func() error {
-			if err = computeGOSTDigest(&mirrorCtx.BaseContext); err != nil {
-				return fmt.Errorf("Compute GOST digest: %w", err)
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-	}
-
-	if err = os.RemoveAll(TempDir); err != nil {
-		return fmt.Errorf("Cleanup temporary data after mirroring: %w", err)
-	}
-
-	return nil
-}
-
-func computeGOSTDigest(mirrorCtx *contexts.BaseContext) error {
-	bundleDir := filepath.Dir(mirrorCtx.BundlePath)
-	catalog, err := os.ReadDir(bundleDir)
-	if err != nil {
-		return fmt.Errorf("read tar bundle directory: %w", err)
-	}
-	streams := make([]io.Reader, 0)
-	for _, entry := range catalog {
-		fileName := entry.Name()
-		if !entry.Type().IsRegular() || filepath.Ext(fileName) != ".chunk" {
-			continue
-		}
-		chunkStream, err := os.Open(filepath.Join(bundleDir, fileName))
-		if err != nil {
-			return fmt.Errorf("open bundle chunk for reading: %w", err)
-		}
-		defer chunkStream.Close() // nolint // defer in a loop is valid here as we need those streams to survive until everything is calculated at the end of this function
-		streams = append(streams, chunkStream)
-	}
-
-	bundleStream := io.NopCloser(io.MultiReader(streams...))
-	if len(streams) == 0 {
-		bundleStream, err = os.Open(mirrorCtx.BundlePath)
-		if err != nil {
-			return fmt.Errorf("read tar bundle: %w", err)
-		}
-	}
-	defer bundleStream.Close()
-
-	gostDigest, err := gostsums.CalculateBlobGostDigest(bufio.NewReaderSize(bundleStream, 512*1024))
-	if err != nil {
-		return fmt.Errorf("Calculate GOST Checksum: %w", err)
-	}
-	if err = os.WriteFile(mirrorCtx.BundlePath+".gostsum", []byte(gostDigest), 0o666); err != nil {
-		return fmt.Errorf("Write GOST Checksum: %w", err)
-	}
-
-	mirrorCtx.Logger.InfoF("Digest: %s", gostDigest)
-	mirrorCtx.Logger.InfoF("Written to %s", mirrorCtx.BundlePath+".gostsum")
-	return nil
-}
-
-func lastPullWasTooLongAgoToRetry(mirrorCtx *contexts.PullContext) bool {
-	s, err := os.Lstat(mirrorCtx.UnpackedImagesPath)
-	if err != nil {
-		return false
-	}
-
-	return time.Since(s.ModTime()) > 24*time.Hour
 }
 
 func getSourceRegistryAuthProvider() authn.Authenticator {
@@ -298,92 +290,35 @@ func getSourceRegistryAuthProvider() authn.Authenticator {
 	return authn.Anonymous
 }
 
-func PullDeckhouseToLocalFS(
-	pullCtx *contexts.PullContext,
-	versions []semver.Version,
-) error {
-	logger := pullCtx.Logger
-	var err error
-	modulesData := make([]modules.Module, 0)
-
-	if !pullCtx.SkipModulesPull {
-		logger.InfoF("Fetching Deckhouse external modules list")
-		modulesData, err = modules.GetDeckhouseExternalModules(pullCtx)
-		if err != nil {
-			return fmt.Errorf("get Deckhouse modules: %w", err)
-		}
-	}
-
-	logger.InfoF("Creating OCI Image Layouts")
-	imageLayouts, err := layouts.CreateOCIImageLayoutsForDeckhouse(pullCtx.UnpackedImagesPath, modulesData)
+func lastPullWasTooLongAgoToRetry(pullParams *params.PullParams) bool {
+	s, err := os.Lstat(pullParams.WorkingDir)
 	if err != nil {
-		return fmt.Errorf("create OCI Image Layouts: %w", err)
-	}
-	logger.InfoLn("Created OCI Image Layouts")
-
-	layouts.FillLayoutsWithBasicDeckhouseImages(pullCtx, imageLayouts, versions)
-	if err = imageLayouts.TagsResolver.ResolveTagsDigestsForImageLayouts(&pullCtx.BaseContext, imageLayouts); err != nil {
-		return fmt.Errorf("Resolve images tags to digests: %w", err)
+		return false
 	}
 
-	if err = layouts.PullInstallers(pullCtx, imageLayouts); err != nil {
-		return fmt.Errorf("pull installers: %w", err)
+	return time.Since(s.ModTime()) > 24*time.Hour
+}
+
+func validateRegistryAccess(ctx context.Context, pullParams *params.PullParams) error {
+	targetTag := "alpha"
+	if pullParams.DeckhouseTag != "" {
+		targetTag = pullParams.DeckhouseTag
 	}
 
-	if err = layouts.PullStandaloneInstallers(pullCtx, imageLayouts); err != nil {
-		return fmt.Errorf("pull standalone installers: %w", err)
+	opts := []validation.Option{
+		validation.UseAuthProvider(pullParams.RegistryAuth),
+	}
+	if pullParams.Insecure {
+		opts = append(opts, validation.UsePlainHTTP())
+	}
+	if pullParams.SkipTLSVerification {
+		opts = append(opts, validation.SkipTLSVerification())
 	}
 
-	logger.InfoF("Searching for Deckhouse built-in modules digests")
-	for imageTag := range imageLayouts.InstallImages {
-		digests, err := images.ExtractImageDigestsFromDeckhouseInstaller(pullCtx, imageTag, imageLayouts.Install)
-		if err != nil {
-			return fmt.Errorf("extract images digests: %w", err)
-		}
-		maps.Copy(imageLayouts.DeckhouseImages, digests)
-	}
-	logger.InfoF("Found %d images", len(imageLayouts.DeckhouseImages))
-
-	if err = layouts.PullDeckhouseReleaseChannels(pullCtx, imageLayouts); err != nil {
-		return fmt.Errorf("pull release channels: %w", err)
-	}
-
-	// We should not generate deckhousereleases.yaml manifest for single-release bundles
-	if pullCtx.SpecificVersion == nil {
-		logger.InfoF("Generating DeckhouseRelease manifests")
-		deckhouseReleasesManifestFile := filepath.Join(filepath.Dir(pullCtx.BundlePath), "deckhousereleases.yaml")
-		if err = manifests.GenerateDeckhouseReleaseManifestsForVersions(versions, deckhouseReleasesManifestFile, imageLayouts.ReleaseChannel); err != nil {
-			return fmt.Errorf("Generate DeckhouseRelease manifests: %w", err)
-		}
-	}
-
-	if err = layouts.PullDeckhouseImages(pullCtx, imageLayouts); err != nil {
-		return fmt.Errorf("pull Deckhouse: %w", err)
-	}
-
-	logger.InfoLn("Pulling Trivy vulnerability databases")
-	if err = layouts.PullTrivyVulnerabilityDatabasesImages(pullCtx, imageLayouts); err != nil {
-		return fmt.Errorf("pull vulnerability database: %w", err)
-	}
-	logger.InfoLn("Trivy vulnerability databases pulled")
-
-	if !pullCtx.SkipModulesPull {
-		logger.InfoLn("Searching for Deckhouse external modules images")
-		if err = layouts.FindDeckhouseModulesImages(pullCtx, imageLayouts); err != nil {
-			return fmt.Errorf("find Deckhouse modules images: %w", err)
-		}
-
-		if err = layouts.PullModules(pullCtx, imageLayouts); err != nil {
-			return fmt.Errorf("pull Deckhouse modules: %w", err)
-		}
-	}
-
-	logger.InfoLn("Processing image indexes")
-	for _, l := range imageLayouts.AllLayouts() {
-		err = layouts.SortIndexManifests(l)
-		if err != nil {
-			return fmt.Errorf("Sorting index manifests of %s: %w", l, err)
-		}
+	accessValidator := validation.NewRemoteRegistryAccessValidator()
+	err := accessValidator.ValidateReadAccessForImage(ctx, pullParams.DeckhouseRegistryRepo+":"+targetTag, opts...)
+	if err != nil {
+		return err
 	}
 
 	return nil

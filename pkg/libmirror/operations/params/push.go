@@ -14,31 +14,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package pull
+package params
 
-import (
-	"errors"
-	"regexp"
+// PushParams holds data related to pending mirroring-to-registry operation.
+type PushParams struct {
+	BaseParams
 
-	"github.com/spf13/cobra"
-)
-
-func parseAndValidateParameters(_ *cobra.Command, _ []string) error {
-	if err := validateModuleFilterFormat(); err != nil {
-		return err
-	}
-
-	return nil
+	Parallelism ParallelismConfig
 }
 
-func validateModuleFilterFormat() error {
-	if ModulesFilter == "" {
-		return nil
-	}
+type ParallelismConfig struct {
+	Blobs  int
+	Images int
+}
 
-	if !regexp.MustCompile(`([a-zA-Z0-9-_]+@(v?\d+\.\d+\.\d+));?`).MatchString(ModulesFilter) {
-		return errors.New("Invalid filter pattern")
-	}
-
-	return nil
+var DefaultParallelism = ParallelismConfig{
+	Blobs:  4,
+	Images: 1,
 }

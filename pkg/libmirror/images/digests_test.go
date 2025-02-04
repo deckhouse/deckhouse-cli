@@ -31,7 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/exp/maps"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/contexts"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
 func TestExtractImageDigestsFromDeckhouseInstaller(t *testing.T) {
@@ -43,7 +43,7 @@ func TestExtractImageDigestsFromDeckhouseInstaller(t *testing.T) {
 
 	installersLayout := createOCILayoutWithInstallerImage(t, "localhost:5001/deckhouse", installerTag, expectedImages)
 	images, err := ExtractImageDigestsFromDeckhouseInstaller(
-		&contexts.PullContext{BaseContext: contexts.BaseContext{DeckhouseRegistryRepo: "localhost:5001/deckhouse"}},
+		&params.PullParams{BaseParams: params.BaseParams{DeckhouseRegistryRepo: "localhost:5001/deckhouse"}},
 		installerTag,
 		installersLayout,
 	)
