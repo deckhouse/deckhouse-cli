@@ -149,6 +149,6 @@ func TestPushEmptyLayoutToRepo(t *testing.T) {
 		true,  // Use plain insecure HTTP
 		false, // TLS verification irrelevant to HTTP requests
 	)
-	s.ErrorIs(err, ErrEmptyLayout, "Push should fail with error about layout with no images")
+	s.NoError(err, "Push should not fail")
 	s.Len(blobHandler.ListBlobs(), 0, "No blobs should be pushed to registry")
 }

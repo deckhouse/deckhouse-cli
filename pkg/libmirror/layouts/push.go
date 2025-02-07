@@ -18,7 +18,6 @@ package layouts
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -38,8 +37,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
 )
-
-var ErrEmptyLayout = errors.New("No images in layout")
 
 func PushLayoutToRepo(
 	imagesLayout layout.Path,
@@ -85,7 +82,7 @@ func PushLayoutToRepoContext(
 	}
 
 	if len(indexManifest.Manifests) == 0 {
-		return fmt.Errorf("%s: %w", registryRepo, ErrEmptyLayout)
+		return nil
 	}
 
 	batches := lo.Chunk(indexManifest.Manifests, parallelismConfig.Images)
