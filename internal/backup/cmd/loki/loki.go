@@ -91,6 +91,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//loki.d8-monitoring.svc.cluster.local:3100
 
 	apiURL := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%d/proxy/", namespace, serviceName, servicePort)
+	fmt.Println("Response from service:\n", apiURL)
 	req := client.Get().RequestURI(apiURL)
 	resp, err := req.DoRaw(context.TODO())
 	if err != nil {
