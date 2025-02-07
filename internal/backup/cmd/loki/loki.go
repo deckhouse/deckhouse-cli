@@ -21,8 +21,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net/http"
-	"os"
-
 	//"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
@@ -96,13 +94,13 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	caCert, err := os.ReadFile(config.TLSClientConfig.CAFile)
-	if err != nil {
-		return fmt.Errorf("Failed to read CA file: %v", err)
-	}
+	//caCert, err := os.(config.TLSClientConfig.CAData)
+	//if err != nil {
+	//	return fmt.Errorf("Failed to read CA file: %v", err)
+	//}
 
 	caCertPool := x509.NewCertPool()
-	caCertPool.AppendCertsFromPEM(caCert)
+	caCertPool.AppendCertsFromPEM(config.TLSClientConfig.CAData)
 
 	//dynamicClient, err := dynamic.NewForConfig(config)
 	//if err != nil {
