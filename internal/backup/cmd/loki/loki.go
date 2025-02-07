@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/client-go/rest"
 
 	//"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
@@ -110,6 +111,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 	// Set GroupVersion (for Core API, use "")
 	config.GroupVersion = &schema.GroupVersion{Group: "", Version: "v1"}
+	config.NegotiatedSerializer = serializer.NewCodecFactory(nil).WithoutConversion()
 	//config.NegotiatedSerializer = rest.NewNegotiatedSerializer(
 	//	rest.SerializerNegotiation{AcceptContentTypes: "application/json"},
 	//)
