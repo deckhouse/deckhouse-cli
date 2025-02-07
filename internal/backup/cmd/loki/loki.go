@@ -65,17 +65,7 @@ func NewCommand() *cobra.Command {
 //)
 
 func backupLoki(cmd *cobra.Command, _ []string) error {
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
 
-	config, _, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
-	client, err := rest.RESTClientFor(config)
 	//req := client.Get().RequestURI("")
 
 	//err = createtarball.Tarball(config, kubeCl)
@@ -94,11 +84,26 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 	)
 	//loki.d8-monitoring.svc.cluster.local:3100
+	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	config, _, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	client, err := rest.RESTClientFor(config)
+	if err != nil {
+		return fmt.Errorf("client failed: %v", err)
+	}
 
 	apiURL := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%s/proxy/", namespace, serviceName, servicePort)
+
 	fmt.Println("Response from service:\n", apiURL)
+
 	req, err := client.Get().RequestURI(apiURL).DoRaw(context.TODO())
-	//resp, err := req.DoRaw(context.TODO())
 	if err != nil {
 		return fmt.Errorf("request failed: %v", err)
 	}
