@@ -121,7 +121,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//apiURL := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%s/proxy/", namespace, serviceName, servicePort)
 
 	apiProxyURL := fmt.Sprintf(
-		"%s/api/v1/namespaces/%s/services/%s:%d/proxy/",
+		"%s/api/v1/namespaces/%s/services/%s:%s/proxy/",
 		config.Host, namespace, serviceName, servicePort,
 	)
 
