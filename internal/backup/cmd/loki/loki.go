@@ -19,6 +19,7 @@ package loki
 import (
 	"context"
 	"fmt"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
 
 	//"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
@@ -94,6 +95,25 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
+	//dynamicClient, err := dynamic.NewForConfig(config)
+	//if err != nil {
+	//	return fmt.Errorf("Failed to create dynamic client: %v", err)
+	//}
+	//
+	//resourceClient := dynamicClient.Resource(
+	//	schema.GroupVersionResource{
+	//		Group:    "deckhouse.io",
+	//		//Version:  "v1alpha1",
+	//		//Resource: "services",
+	//	},
+	//)
+
+	// Set GroupVersion (for Core API, use "")
+	config.GroupVersion = &schema.GroupVersion{Group: "", Version: "v1"}
+	//config.NegotiatedSerializer = rest.NewNegotiatedSerializer(
+	//	rest.SerializerNegotiation{AcceptContentTypes: "application/json"},
+	//)
+
 	client, err := rest.RESTClientFor(config)
 	if err != nil {
 		return fmt.Errorf("client failed: %v", err)
@@ -104,6 +124,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	fmt.Println("Response from service:\n", apiURL)
 
 	req, err := client.Get().RequestURI(apiURL).DoRaw(context.TODO())
+	//req, err := resourceClient.Get().
 	if err != nil {
 		return fmt.Errorf("request failed: %v", err)
 	}
