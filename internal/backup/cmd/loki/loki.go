@@ -17,11 +17,8 @@ limitations under the License.
 package loki
 
 import (
-	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
-	"k8s.io/client-go/rest"
+	"net/http"
 
 	//"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
@@ -110,28 +107,45 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//)
 
 	// Set GroupVersion (for Core API, use "")
-	config.GroupVersion = &schema.GroupVersion{Group: "", Version: "v1"}
-	config.NegotiatedSerializer = serializer.NewCodecFactory(nil).WithoutConversion()
+	//config.GroupVersion = &schema.GroupVersion{Group: "", Version: "v1"}
+	//config.NegotiatedSerializer = serializer.NewCodecFactory(nil).WithoutConversion()
 	//config.NegotiatedSerializer = rest.NewNegotiatedSerializer(
 	//	rest.SerializerNegotiation{AcceptContentTypes: "application/json"},
 	//)
 
-	client, err := rest.RESTClientFor(config)
-	if err != nil {
-		return fmt.Errorf("client failed: %v", err)
-	}
+	//client, err := rest.RESTClientFor(config)
+	//if err != nil {
+	//	return fmt.Errorf("client failed: %v", err)
+	//}
 
-	apiURL := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%s/proxy/", namespace, serviceName, servicePort)
+	//apiURL := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%s/proxy/", namespace, serviceName, servicePort)
 
-	fmt.Println("Response from service:\n", apiURL)
+	apiProxyURL := fmt.Sprintf(
+		"%s/api/v1/namespaces/%s/services/%s:%d/proxy/",
+		config.Host, namespace, serviceName, servicePort,
+	)
 
-	req, err := client.Get().RequestURI(apiURL).DoRaw(context.TODO())
-	//req, err := resourceClient.Get().
+	fmt.Println("Response from service:\n", apiProxyURL)
+
+	req, err := http.NewRequest("GET", apiProxyURL, nil)
 	if err != nil {
 		return fmt.Errorf("request failed: %v", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+config.BearerToken)
+	//req, err := client.Get().RequestURI(apiURL).DoRaw(context.TODO())
+	////req, err := resourceClient.Get().
+	//if err != nil {
+	//	return fmt.Errorf("request failed: %v", err)
+	//}
 
-	fmt.Println("Response from service:\n", string(req))
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	fmt.Println("Response from service:\n", resp.Status)
 
 	return err
 }
