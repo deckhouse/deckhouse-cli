@@ -17,8 +17,11 @@ limitations under the License.
 package loki
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net/http"
+	"os"
 
 	//"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
@@ -93,6 +96,14 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
+	caCert, err := os.ReadFile(config.TLSClientConfig.CAFile)
+	if err != nil {
+		return fmt.Errorf("Failed to read CA file: %v", err)
+	}
+
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+
 	//dynamicClient, err := dynamic.NewForConfig(config)
 	//if err != nil {
 	//	return fmt.Errorf("Failed to create dynamic client: %v", err)
@@ -127,19 +138,19 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 	fmt.Println("Response from service:\n", apiProxyURL)
 
+	tlsConfig := &tls.Config{
+		RootCAs: caCertPool,
+	}
+	transport := &http.Transport{TLSClientConfig: tlsConfig}
+	httpClient := &http.Client{Transport: transport}
+
 	req, err := http.NewRequest("GET", apiProxyURL, nil)
 	if err != nil {
 		return fmt.Errorf("request failed: %v", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+config.BearerToken)
-	//req, err := client.Get().RequestURI(apiURL).DoRaw(context.TODO())
-	////req, err := resourceClient.Get().
-	//if err != nil {
-	//	return fmt.Errorf("request failed: %v", err)
-	//}
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %v", err)
 	}
