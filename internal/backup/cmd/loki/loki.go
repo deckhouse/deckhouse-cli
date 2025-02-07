@@ -92,13 +92,13 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 	apiURL := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%s/proxy/", namespace, serviceName, servicePort)
 	fmt.Println("Response from service:\n", apiURL)
-	req := client.Get().RequestURI(apiURL)
-	resp, err := req.DoRaw(context.TODO())
+	req, err := client.Get().RequestURI(apiURL).DoRaw(context.TODO())
+	//resp, err := req.DoRaw(context.TODO())
 	if err != nil {
 		return fmt.Errorf("request failed: %v", err)
 	}
 
-	fmt.Println("Response from service:\n", resp)
+	fmt.Println("Response from service:\n", string(req))
 
 	return err
 }
