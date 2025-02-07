@@ -17,6 +17,7 @@ limitations under the License.
 package backup
 
 import (
+	"github.com/deckhouse/deckhouse-cli/internal/backup/cmd/loki"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
@@ -41,6 +42,7 @@ func NewCommand() *cobra.Command {
 	backupCmd.AddCommand(
 		etcd.NewCommand(),
 		cluster_config.NewCommand(),
+		loki.NewCommand(),
 	)
 
 	return backupCmd
