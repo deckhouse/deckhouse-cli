@@ -27,7 +27,6 @@ func MandatoryLayoutsForPlatform(platformPkgDir string) map[string]string {
 	return map[string]string{
 		"root layout":             platformPkgDir,
 		"installers layout":       filepath.Join(platformPkgDir, "install"),
-		"release channels layout": filepath.Join(platformPkgDir, "release-channel"),
 	}
 }
 
