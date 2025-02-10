@@ -74,9 +74,9 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//}
 	const (
 		namespace   = "d8-monitoring" // Change to your service namespace
-		serviceName = "loki"          // Change to your service name
-		//portName    = "https"
-		servicePort = ":3100" // Change to the service port name
+		serviceName = "loki:"         // Change to your service name
+		portScheme  = "https:"
+		servicePort = "3100" // Change to the service port name
 		//namespace   = "default"     // Change to your service namespace
 		//serviceName = "log-service" // Change to your service name
 		//portName    = "http"
@@ -116,13 +116,12 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		Get().
 		Namespace(namespace).
 		Resource("services").
-		Name(serviceName + servicePort). // Port is required here
+		Name(portScheme + serviceName + servicePort). // Port is required here
 		SubResource("proxy").
-		Suffix(apiLokiUrl)
+		Suffix(apiLokiUrl).
+		Do(context.TODO())
 
-	// Execute request
-	result := request.Do(context.TODO())
-	rawData, err := result.Raw()
+	rawData, err := request.Raw()
 	if err != nil {
 		return fmt.Errorf("Failed to query Loki API: %v", err)
 	}
