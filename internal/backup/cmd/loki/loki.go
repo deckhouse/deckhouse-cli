@@ -71,14 +71,14 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//	return fmt.Errorf("Error collecting debug info: %w", err)
 	//}
 	const (
-		namespace   = "d8-monitoring"                        // Change to your service namespace
-		serviceName = "loki.d8-monitoring.svc.cluster.local" // Change to your service name
-		portName    = "https"
-		servicePort = ":3100" // Change to the service port name
-		//namespace   = "default"     // Change to your service namespace
-		//serviceName = "log-service" // Change to your service name
-		//portName    = "http"
-		//servicePort = "80" // Change to the service port name
+		//namespace   = "d8-monitoring" // Change to your service namespace
+		//serviceName = "loki"          // Change to your service name
+		////portName    = "https"
+		//servicePort = ":3100" // Change to the service port name
+		namespace   = "default"     // Change to your service namespace
+		serviceName = "log-service" // Change to your service name
+		portName    = "http"
+		servicePort = "80" // Change to the service port name
 
 	)
 	//loki.d8-monitoring.svc.cluster.local:3100
@@ -98,7 +98,8 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//)
 
 	//fmt.Println("Response from service:\n", apiProxyURL)
-	apiLokiUrl := "loki/api/v1/status/buildinfo"
+	//apiLokiUrl := "loki/api/v1/status/buildinfo"
+	apiLokiUrl := "testtesttest"
 
 	request := kubeCl.CoreV1().RESTClient().
 		Get().
