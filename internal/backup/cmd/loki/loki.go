@@ -71,14 +71,14 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//	return fmt.Errorf("Error collecting debug info: %w", err)
 	//}
 	const (
-		namespace   = "d8-monitoring" // Change to your service namespace
-		serviceName = "loki:"         // Change to your service name
-		portScheme  = "https:"
-		servicePort = "3100" // Change to the service port name
-		//namespace   = "default"     // Change to your service namespace
-		//serviceName = "log-service" // Change to your service name
-		//portName    = "http"
-		//servicePort = ":80" // Change to the service port name
+		//namespace   = "d8-monitoring" // Change to your service namespace
+		//serviceName = "loki:"         // Change to your service name
+		//portScheme  = "https:"
+		//servicePort = "3100" // Change to the service port name
+		namespace   = "default"     // Change to your service namespace
+		serviceName = "log-service" // Change to your service name
+		portScheme  = "http"
+		servicePort = ":80" // Change to the service port name
 
 	)
 	//loki.d8-monitoring.svc.cluster.local:3100
