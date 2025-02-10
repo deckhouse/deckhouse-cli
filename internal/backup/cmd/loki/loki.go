@@ -107,12 +107,12 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//)
 
 	//fmt.Println("Response from service:\n", apiProxyURL)
-	apiLokiUrl := "loki/api/v1/status/buildinfo"
+	apiLokiUrl := "/loki/api/v1/status/buildinfo"
 	//apiLokiUrl := ""
 
 	request := kubeCl.CoreV1().RESTClient().
 		Get().
-		SetHeader("Authorization: Bearer " + token).
+		SetHeader("Authorization", "Bearer "+token).
 		Namespace(namespace).
 		Resource("services").
 		Name(portScheme + serviceName + servicePort).
