@@ -119,13 +119,9 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		Resource("services").
 		Name(portScheme + serviceName + servicePort).
 		SubResource("proxy").
-		Suffix(apiLokiUrl).
-		Do(context.TODO())
+		Suffix(apiLokiUrl)
 
-	//request.Header().Set("Authorization", "Bearer "+token)
-	//request.ContentType()
-
-	rawData, err := request.Raw()
+	rawData, err := request.DoRaw(context.Background())
 	if err != nil {
 		return fmt.Errorf("Failed to query Loki API: %v", err)
 	}
