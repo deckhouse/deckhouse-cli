@@ -78,7 +78,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		namespace   = "default"     // Change to your service namespace
 		serviceName = "log-service" // Change to your service name
 		portName    = "http"
-		servicePort = "80" // Change to the service port name
+		servicePort = ":80" // Change to the service port name
 
 	)
 	//loki.d8-monitoring.svc.cluster.local:3100
