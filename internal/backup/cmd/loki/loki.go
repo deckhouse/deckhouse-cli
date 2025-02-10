@@ -114,10 +114,10 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		Get().
 		Namespace(namespace).
 		Resource("services").
-		Name(portScheme+serviceName+servicePort). // Port is required here
+		Name(portScheme + serviceName + servicePort).
 		SubResource("proxy").
 		Suffix(apiLokiUrl).
-		SetHeader("Authorization:", "Bearer "+token).
+		SetHeader("Authorization: Bearer " + token).
 		Do(context.TODO())
 
 	//request.Header().Set("Authorization", "Bearer "+token)
