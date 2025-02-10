@@ -19,6 +19,8 @@ package loki
 import (
 	"context"
 	"fmt"
+	"k8s.io/client-go/kubernetes"
+
 	//"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
@@ -71,14 +73,14 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//	return fmt.Errorf("Error collecting debug info: %w", err)
 	//}
 	const (
-		//namespace   = "d8-monitoring" // Change to your service namespace
-		//serviceName = "loki"          // Change to your service name
-		////portName    = "https"
-		//servicePort = ":3100" // Change to the service port name
-		namespace   = "default"     // Change to your service namespace
-		serviceName = "log-service" // Change to your service name
-		portName    = "http"
-		servicePort = ":80" // Change to the service port name
+		namespace   = "d8-monitoring" // Change to your service namespace
+		serviceName = "loki"          // Change to your service name
+		//portName    = "https"
+		servicePort = ":3100" // Change to the service port name
+		//namespace   = "default"     // Change to your service namespace
+		//serviceName = "log-service" // Change to your service name
+		//portName    = "http"
+		//servicePort = ":80" // Change to the service port name
 
 	)
 	//loki.d8-monitoring.svc.cluster.local:3100
@@ -87,9 +89,18 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	_, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	config, _, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	config.BearerToken = "eyJhbGciOiJSUzI1NiIsImtpZCI6IkFnbVRCVndWRm43dy04Qmg1cENqcXFQMVFhOEhuLXF0dUpFSTdWQXBYYUkifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJkOC1tb25pdG9yaW5nIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6InByb21ldGhldXMtdG9rZW4iLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC5uYW1lIjoicHJvbWV0aGV1cyIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6ImY0ZmFiMmY0LTNhNDYtNDkyOS1hMGY5LTFhODZkYjBiNDg4NCIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpkOC1tb25pdG9yaW5nOnByb21ldGhldXMifQ.PvoNrjPncvdmlqmkUPuBsKxPb8wvz0IYwt2UhMDGlkFateXcQiWFDUs82bnCG6FeRi_dR2UL5ODcnb8HN6WvlKM_vUDKx6jB1pZ93ejBb8_GFri1kvguYdeldoJ6WzX1BPXWLz8iUX6RkkWjzpTLSefy7GIeRyffnhuZfjMPySKGuK3aPwejfgnJ63duqJIpQO8DIa2NolUYupTw3G0_G5p1ad_Fj6kLdtecWXnZ89sEOyugJMlNLaE198paqXl2ijLz11u5Mb8BBQtGTk8cmqmfYroL2aocTV3fZunqW2W4jx24BwFD9276fOb2a4kq7yPHoyexX8PxGz7FpC6SYA"
+	config.BearerTokenFile = ""
+
+	// Create Kubernetes clientset
+	clientsetRbac, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("failed to create clientset: %w", err)
 	}
 
 	//apiProxyURL := fmt.Sprintf(
@@ -98,10 +109,10 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//)
 
 	//fmt.Println("Response from service:\n", apiProxyURL)
-	//apiLokiUrl := "loki/api/v1/status/buildinfo"
-	apiLokiUrl := ""
+	apiLokiUrl := "loki/api/v1/status/buildinfo"
+	//apiLokiUrl := ""
 
-	request := kubeCl.CoreV1().RESTClient().
+	request := clientsetRbac.CoreV1().RESTClient().
 		Get().
 		Namespace(namespace).
 		Resource("services").
