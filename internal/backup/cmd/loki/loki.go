@@ -107,7 +107,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//)
 
 	//fmt.Println("Response from service:\n", apiProxyURL)
-	apiLokiUrl := "metrics"
+	apiLokiUrl := "ready"
 	//apiLokiUrl := ""
 
 	request := kubeCl.CoreV1().RESTClient().
