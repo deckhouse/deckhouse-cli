@@ -113,6 +113,8 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	request := kubeCl.CoreV1().RESTClient().
 		Get().
 		SetHeader("Authorization", "Bearer "+token).
+		SetHeader("Accept", "application/json").
+		SetHeader("Content-Type", "application/json").
 		Namespace(namespace).
 		Resource("services").
 		Name(portScheme + serviceName + servicePort).
