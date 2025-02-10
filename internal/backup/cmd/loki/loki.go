@@ -17,10 +17,8 @@ limitations under the License.
 package loki
 
 import (
-	"crypto/tls"
-	"crypto/x509"
+	"context"
 	"fmt"
-	"net/http"
 	//"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
@@ -73,14 +71,14 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//	return fmt.Errorf("Error collecting debug info: %w", err)
 	//}
 	const (
-		//namespace   = "d8-monitoring" // Change to your service namespace
-		//serviceName = "loki"          // Change to your service name
+		namespace   = "d8-monitoring" // Change to your service namespace
+		serviceName = "loki"          // Change to your service name
+		portName    = "https"
+		servicePort = ":3100" // Change to the service port name
+		//namespace   = "default"     // Change to your service namespace
+		//serviceName = "log-service" // Change to your service name
 		//portName    = "http"
-		//servicePort = "3100" // Change to the service port name
-		namespace   = "default"     // Change to your service namespace
-		serviceName = "log-service" // Change to your service name
-		portName    = "http"
-		servicePort = "80" // Change to the service port name
+		//servicePort = "80" // Change to the service port name
 
 	)
 	//loki.d8-monitoring.svc.cluster.local:3100
@@ -89,72 +87,35 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	config, _, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	_, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	//caCert, err := os.(config.TLSClientConfig.CAData)
-	//if err != nil {
-	//	return fmt.Errorf("Failed to read CA file: %v", err)
-	//}
-
-	caCertPool := x509.NewCertPool()
-	caCertPool.AppendCertsFromPEM(config.TLSClientConfig.CAData)
-
-	//dynamicClient, err := dynamic.NewForConfig(config)
-	//if err != nil {
-	//	return fmt.Errorf("Failed to create dynamic client: %v", err)
-	//}
-	//
-	//resourceClient := dynamicClient.Resource(
-	//	schema.GroupVersionResource{
-	//		Group:    "deckhouse.io",
-	//		//Version:  "v1alpha1",
-	//		//Resource: "services",
-	//	},
+	//apiProxyURL := fmt.Sprintf(
+	//	"%s/api/v1/namespaces/%s/services/%s:%s/proxy/",
+	//	config.Host, namespace, serviceName, servicePort,
 	//)
 
-	// Set GroupVersion (for Core API, use "")
-	//config.GroupVersion = &schema.GroupVersion{Group: "", Version: "v1"}
-	//config.NegotiatedSerializer = serializer.NewCodecFactory(nil).WithoutConversion()
-	//config.NegotiatedSerializer = rest.NewNegotiatedSerializer(
-	//	rest.SerializerNegotiation{AcceptContentTypes: "application/json"},
-	//)
+	//fmt.Println("Response from service:\n", apiProxyURL)
+	apiLokiUrl := "loki/api/v1/status/buildinfo"
 
-	//client, err := rest.RESTClientFor(config)
-	//if err != nil {
-	//	return fmt.Errorf("client failed: %v", err)
-	//}
+	request := kubeCl.CoreV1().RESTClient().
+		Get().
+		Namespace(namespace).
+		Resource("services").
+		Name(serviceName + servicePort). // Port is required here
+		SubResource("proxy").
+		Suffix(apiLokiUrl)
 
-	//apiURL := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%s/proxy/", namespace, serviceName, servicePort)
-
-	apiProxyURL := fmt.Sprintf(
-		"%s/api/v1/namespaces/%s/services/%s:%s/proxy/",
-		config.Host, namespace, serviceName, servicePort,
-	)
-
-	fmt.Println("Response from service:\n", apiProxyURL)
-
-	tlsConfig := &tls.Config{
-		RootCAs: caCertPool,
-	}
-	transport := &http.Transport{TLSClientConfig: tlsConfig}
-	httpClient := &http.Client{Transport: transport}
-
-	req, err := http.NewRequest("GET", apiProxyURL, nil)
+	// Execute request
+	result := request.Do(context.TODO())
+	rawData, err := result.Raw()
 	if err != nil {
-		return fmt.Errorf("request failed: %v", err)
+		return fmt.Errorf("Failed to query Loki API: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+config.BearerToken)
 
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	fmt.Println("Response from service:\n", resp.Status)
+	fmt.Println("Loki API Response:", string(rawData))
 
 	return err
 }
