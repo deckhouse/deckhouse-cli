@@ -19,6 +19,9 @@ package loki
 import (
 	"context"
 	"fmt"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"time"
+
 	//"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
@@ -110,6 +113,10 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	apiLokiUrl := "ready"
 	//apiLokiUrl := ""
 
+	// Create a context with timeout (avoid hanging requests)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	request := kubeCl.CoreV1().RESTClient().
 		Get().
 		SetHeader("Authorization", "Bearer "+token).
@@ -123,14 +130,29 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		Resource("services").
 		Name(portScheme + serviceName + servicePort).
 		SubResource("proxy").
-		Suffix(apiLokiUrl)
+		Suffix(apiLokiUrl).
+		Do(ctx)
 
-	rawData, err := request.DoRaw(context.Background())
+	//rawData, err := request.DoRaw(context.Background())
+	//if err != nil {
+	//	return fmt.Errorf("Failed to query Loki API: %v", err)
+	//}
+
+	// Handle response and print detailed errors
+	rawResponse, err := request.Raw()
 	if err != nil {
-		return fmt.Errorf("Failed to query Loki API: %v", err)
+		if errors.IsUnauthorized(err) {
+			fmt.Println("❌ Authentication error: Check RBAC permissions.")
+		} else if errors.IsForbidden(err) {
+			fmt.Println("❌ Forbidden: ServiceAccount lacks required permissions.")
+		} else if errors.IsNotFound(err) {
+			fmt.Println("❌ Service or API path not found.")
+		} else {
+			fmt.Printf("❌ Unexpected error: %v\n", err)
+		}
 	}
 
-	fmt.Println("Loki API Response:", string(rawData))
+	fmt.Println("Loki API Response:", string(rawResponse))
 
 	return err
 }
