@@ -75,7 +75,7 @@ func NewCommand() *cobra.Command {
 
 const (
 	//lokiURL      = "https://loki.d8-monitoring.svc.cluster.local/loki/api/v1/query_range"
-	lokiURL      = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/status/buildinfo"
+	lokiURL      = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/series"
 	parallelJobs = 1                      // Number of parallel requests
 	query        = `{pod=~".+"}`          // LogQL query
 	startTime    = "2024-02-01T00:00:00Z" // Start time
@@ -254,6 +254,7 @@ func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, getApi []string
 		Namespace(namespace).
 		SubResource("exec").
 		VersionedParams(&v1.PodExecOptions{
+
 			Command:   getApi,
 			Container: containerName,
 			Stdin:     false,
