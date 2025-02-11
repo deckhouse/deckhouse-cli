@@ -17,9 +17,17 @@ limitations under the License.
 package loki
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/api/errors"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
+	"os"
+	"strings"
 	"time"
 
 	//"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
@@ -65,6 +73,31 @@ func NewCommand() *cobra.Command {
 //	verboseLog bool
 //)
 
+const (
+	lokiURL      = "https://loki.d8-monitoring.svc.cluster.local/loki/api/v1/query_range"
+	parallelJobs = 1                      // Number of parallel requests
+	query        = `{pod=~".+"}`          // LogQL query
+	startTime    = "2024-02-01T00:00:00Z" // Start time
+	endTime      = "2024-02-01T01:00:00Z" // End time
+	limit        = "10"                   // Number of logs per query
+)
+
+// Struct to store API response
+type LokiResponse struct {
+	Data struct {
+		Result []struct {
+			Stream map[string]string `json:"stream"`
+			Values [][]string        `json:"values"`
+		} `json:"result"`
+	} `json:"data"`
+}
+
+type Command struct {
+	Cmd  string
+	Args []string
+	File string
+}
+
 func backupLoki(cmd *cobra.Command, _ []string) error {
 
 	//req := client.Get().RequestURI("")
@@ -82,7 +115,9 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		//serviceName = "log-service:" // Change to your service name
 		//portScheme  = "http:"
 		//servicePort = "80" // Change to the service port name
-
+		labelSelector      = "leader=true"
+		namespaceDeckhouse = "d8-system"
+		containerName      = "deckhouse"
 	)
 	//loki.d8-monitoring.svc.cluster.local:3100
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
@@ -90,95 +125,181 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	_, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	//token := "eyJhbGciOiJSUzI1NiIsImtpZCI6IkFnbVRCVndWRm43dy04Qmg1cENqcXFQMVFhOEhuLXF0dUpFSTdWQXBYYUkifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJkOC1sb2ctc2hpcHBlciIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VjcmV0Lm5hbWUiOiJsb2ctc2hpcHBlci10b2tlbiIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50Lm5hbWUiOiJsb2ctc2hpcHBlciIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6Ijk5MDEyMzgyLTc3ODEtNGI3NS04ZDgzLTZiNGRjYjhkOGY1ZCIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpkOC1sb2ctc2hpcHBlcjpsb2ctc2hpcHBlciJ9.CdYOo_jrEy2k3pKu9jEnkRiDdC5D8NAmYcQIbLE5X6uN78xqhmrzSzIoKi_5D9ZSbc69mpDLmbhlfH9i4v9wFMiLi4NzrXWBOrQxWToB3W5lXDUPdpfIIgyBh1_EhTYPoYRZI_YYan2ToZ4l-RJ4T7jbgtkQmdJotBEHk38VCmtvILXYzYIkGcv302LhiZY8Ia8G_3fnjxNLnuHSyOcv19c9CwAQ6EPI4CqmvPxIJMQfjxUKEZqN217ek0kFx_W3FTY00arkU1IZxpsG6idLcfenDftvXclaulqcxlr4P9je6ghO2hUij4AzQOe7PFJyadH7ZVGAqdHY8n8ofY8X5w"
-	token := "eyJhbGciOiJSUzI1NiIsImtpZCI6IkFnbVRCVndWRm43dy04Qmg1cENqcXFQMVFhOEhuLXF0dUpFSTdWQXBYYUkifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJkOC1tb25pdG9yaW5nIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6Imxva2ktYXBpLXRva2VuIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZXJ2aWNlLWFjY291bnQubmFtZSI6Imxva2kiLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC51aWQiOiI0N2Y2ZWY1Ni01YjdkLTRlNjUtYTc3Zi1mNTI0ODkyZDJhNzgiLCJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQ6ZDgtbW9uaXRvcmluZzpsb2tpIn0.EF-RGqY0acC-C_2KPz51UPdwkLMGw-DV2nsrJuh2lQZ_0ebiwTmWoVFCj6o7Ey2z9CsNHkvEr9jxTc7uHh0rvRQIJp5rUrimeSBfvrJpLaiiVQ_h5cXJN84l5jq4IkbzO7lUObtjh6DmNzodZCbxMEu-Gm766weRhUdoW8zco7Cd-m26sQK4095tp9_4iW5lXBGC6R68DEa-2pjZjHpDspRwnI4XY_BVXldaIKpbR5cCU-8CKzJ0BXSvDcjKUjFv3Mk0TomMSFSlnMY5wyvr6vvus11E3MxajRq1vL9PJiW1ZfBFRnwEQsQnsIPgQMb45fmpgayCLMBnmjNF4WRxvg"
-	//config.BearerTokenFile = ""
+	podName, err := GetDeckhousePod(kubeCl, namespaceDeckhouse, labelSelector)
 
-	// Create Kubernetes clientset
-	//clientsetRbac, err := kubernetes.NewForConfig(config)
-	//if err != nil {
-	//	return fmt.Errorf("failed to create clientset: %w", err)
+	var stdout, stderr bytes.Buffer
+
+	//gzipWriter := gzip.NewWriter(os.Stdout)
+	//defer gzipWriter.Close()
+	//tarWriter := tar.NewWriter(gzipWriter)
+	//defer tarWriter.Close()
+
+	//for _, cmd := range debugCommands {
+	//
+	//	//fullCommand := append([]string{cmd.Cmd}, cmd.Args...)
+	//
+	//	executor, err := ExecInPod(config, kubeCl, fullCommand, podName, namespace, containerName)
+	//	if err = executor.StreamWithContext(
+	//		context.Background(),
+	//		remotecommand.StreamOptions{
+	//			Stdout: &stdout,
+	//			Stderr: &stderr,
+	//		}); err != nil {
+	//		fmt.Fprintf(os.Stderr, strings.Join(fullCommand, " "))
+	//		fmt.Fprintf(os.Stderr, stderr.String())
+	//	}
+	//
+	//	//if err = cmd.Writer(tarWriter, stdout.Bytes())
+	//	// err != nil {
+	//	//	return fmt.Errorf("failed to update the %s", err)
+	//	//}
+	//	fmt.Fprintf(os.Stdout, stdout.String())
+	//	stdout.Reset()
+	//
 	//}
 
-	//apiProxyURL := fmt.Sprintf(
-	//	"%s/api/v1/namespaces/%s/services/%s:%s/proxy/",
-	//	config.Host, namespace, serviceName, servicePort,
-	//)
+	// Convert time range to Unix timestamps
+	startTS, _ := time.Parse(time.RFC3339, startTime)
+	endTS, _ := time.Parse(time.RFC3339, endTime)
+	totalDuration := endTS.Sub(startTS)
 
-	//fmt.Println("Response from service:\n", apiProxyURL)
-	apiLokiUrl := "loki/api/v1/status/buildinfo"
-	//apiLokiUrl := ""
+	// Calculate chunk size (divide total duration by parallel jobs)
+	chunkSize := totalDuration / time.Duration(parallelJobs)
 
-	// Create a context with timeout (avoid hanging requests)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	chunkStart := startTS.Add(time.Duration(1) * chunkSize)
+	chunkEnd := chunkStart.Add(chunkSize)
 
-	request := kubeCl.CoreV1().RESTClient().
-		Get().
-		SetHeader("Authorization", "Bearer "+token).
-		SetHeader("Accept", "application/json").
-		SetHeader("Content-Type", "application/json").
-		SetHeader("User-Agent", "kubernetes-client-go").
-		SetHeader("Connection", "keep-alive").
-		SetHeader("User-Agent", "kube-rbac-proxy-debug").
-		SetHeader("X-Debug", "true").
-		SetHeader("Impersonate-User", "kubernetes-admin").
-		SetHeader("Impersonate-Group", "kubeadm:cluster-admins"). // Custom debug header
-		Namespace(namespace).
-		Resource("services").
-		Name(portScheme + serviceName + servicePort).
-		SubResource("proxy").
-		Suffix(apiLokiUrl).
-		Do(ctx)
+	fmt.Printf("Fetching logs from %s to %s\n", chunkStart, chunkEnd)
 
-	//rawData, err := request.DoRaw(context.Background())
-	//if err != nil {
-	//	return fmt.Errorf("Failed to query Loki API: %v", err)
-	//}
+	fullCommand := []string{"curl"}
 
-	// Handle response and print detailed errors
-	rawResponse, err := request.Raw()
-	if err != nil {
-		if errors.IsUnauthorized(err) {
-			fmt.Println("❌ Authentication error: Check RBAC permissions.")
-		} else if errors.IsForbidden(err) {
-			fmt.Println("❌ Forbidden: ServiceAccount lacks required permissions.")
-		} else if errors.IsNotFound(err) {
-			fmt.Println("❌ Service or API path not found.")
-		} else {
-			fmt.Printf("❌ Unexpected error: %v\n", err)
-		}
+	executor, err := ExecInPod(config, kubeCl, fullCommand, podName, namespaceDeckhouse, containerName)
+	if err = executor.StreamWithContext(
+		context.Background(),
+		remotecommand.StreamOptions{
+			Stdout: &stdout,
+			Stderr: &stderr,
+		}); err != nil {
+		fmt.Fprintf(os.Stderr, strings.Join(fullCommand, " "))
+		fmt.Fprintf(os.Stderr, stderr.String())
 	}
 
-	fmt.Println("Loki API Response:", string(rawResponse))
+	//if err = cmd.Writer(tarWriter, stdout.Bytes())
+	// err != nil {
+	//	return fmt.Errorf("failed to update the %s", err)
+	//}
+	fmt.Fprintf(os.Stdout, stdout.String())
 
-	//caCertPool := x509.NewCertPool()
-	//caCertPool.AppendCertsFromPEM(config.TLSClientConfig.CAData)
-	//
-	//tlsConfig := &tls.Config{
-	//	RootCAs: caCertPool,
-	//}
-	//
-	//transport := &http.Transport{TLSClientConfig: tlsConfig}
-	//httpClient := &http.Client{Transport: transport}
-	//req, err := http.NewRequest("GET", apiProxyURL, nil)
+	//logs, err := fetchLokiLogs(chunkStart, chunkEnd)
 	//if err != nil {
-	//	return fmt.Errorf("request failed: %v", err)
+	//	return fmt.Errorf("Error fetching logs: %v\n", err)
 	//}
-	//req.Header.Set("Authorization", "Bearer "+config.BearerToken)
-	//
-	//resp, err := httpClient.Do(req)
-	//if err != nil {
-	//	return fmt.Errorf("request failed: %v", err)
-	//}
-	//defer resp.Body.Close()
-	//
-	//fmt.Println("Response from service:\n", resp.Status)
 
 	return err
 }
+
+func GetDeckhousePod(kubeCl kubernetes.Interface, namespace string, labelSelector string) (string, error) {
+	pods, err := kubeCl.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		return "", fmt.Errorf("Error listing pods: %w", err)
+	}
+
+	if len(pods.Items) == 0 {
+		return "", fmt.Errorf("No pods found with the label: %s", labelSelector)
+	}
+
+	pod := pods.Items[0]
+	podName := pod.Name
+	return podName, nil
+}
+
+func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, getApi []string, podName string, namespace string, containerName string) (remotecommand.Executor, error) {
+	scheme := runtime.NewScheme()
+	parameterCodec := runtime.NewParameterCodec(scheme)
+	if err := v1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("Failed to create parameter codec: %w", err)
+	}
+
+	req := kubeCl.CoreV1().RESTClient().
+		Post().
+		Resource("pods").
+		Name(podName).
+		Namespace(namespace).
+		SubResource("exec").
+		VersionedParams(&v1.PodExecOptions{
+			Command:   getApi,
+			Container: containerName,
+			Stdin:     false,
+			Stdout:    true,
+			Stderr:    true,
+			TTY:       false,
+		}, parameterCodec)
+
+	executor, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
+	if err != nil {
+		return nil, fmt.Errorf("Creating SPDY executor for Pod %s: %v", podName, err)
+	}
+	return executor, nil
+}
+
+//func Writer(tarWriter *tar.Writer, fileContent []byte) error {
+//	header := &tar.Header{
+//		Name: string(),
+//		Mode: 0o600,
+//		Size: int64(len(fileContent)),
+//	}
+//
+//	if err := tarWriter.WriteHeader(header); err != nil {
+//		return fmt.Errorf("write tar header: %v", err)
+//	}
+//
+//	if _, err := tarWriter.Write(fileContent); err != nil {
+//		return fmt.Errorf("copy content: %v", err)
+//	}
+//
+//	return nil
+//}
+
+//func fetchLokiLogs(start, end time.Time) (LokiResponse, error) {
+//	var result LokiResponse
+//
+//	// Build Loki query parameters
+//	queryParams := url.Values{}
+//	queryParams.Set("query", query)
+//	queryParams.Set("start", fmt.Sprintf("%d", start.UnixNano()))
+//	queryParams.Set("end", fmt.Sprintf("%d", end.UnixNano()))
+//	queryParams.Set("limit", limit)
+//
+//	reqURL := fmt.Sprintf("%s?%s", lokiURL, queryParams.Encode())
+//
+//	//// Execute HTTP GET request (similar to cURL)
+//	//resp, err := http.Get(reqURL)
+//	//if err != nil {
+//	//	return result, err
+//	//}
+//	//defer resp.Body.Close()
+//	//
+//	//if resp.StatusCode != 200 {
+//	//	return result, fmt.Errorf("Loki API error: %s", resp.Status)
+//	//}
+//	//
+//	//body, err := io.ReadAll(resp.Body)
+//	//if err != nil {
+//	//	return result, err
+//	//}
+//
+//	// Parse Loki JSON response
+//	err = json.Unmarshal(body, &result)
+//	if err != nil {
+//		return result, err
+//	}
+//
+//	return result, nil
+//}
