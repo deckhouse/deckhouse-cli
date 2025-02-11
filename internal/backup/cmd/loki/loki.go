@@ -190,7 +190,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 	//fullEndpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, queuePath, pathFromOption)
 	fullEndpointUrl := fmt.Sprintf("%s", lokiURL)
-	fullCommand := []string{"curl", fullEndpointUrl}
+	fullCommand := []string{"curl --insecure", fullEndpointUrl}
 
 	//fullCommand := []string{"curl"}
 
