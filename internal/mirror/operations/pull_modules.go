@@ -73,7 +73,7 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 	}
 
 	logger.InfoLn("Searching for Deckhouse external modules images")
-	if err = layouts.FindDeckhouseModulesImages(pullParams, imageLayouts); err != nil {
+	if err = layouts.FindDeckhouseModulesImages(pullParams, imageLayouts, filter); err != nil {
 		return fmt.Errorf("Find modules images: %w", err)
 	}
 
