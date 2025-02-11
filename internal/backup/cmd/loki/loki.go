@@ -74,7 +74,8 @@ func NewCommand() *cobra.Command {
 //)
 
 const (
-	lokiURL      = "https://loki.d8-monitoring.svc.cluster.local/loki/api/v1/query_range"
+	//lokiURL      = "https://loki.d8-monitoring.svc.cluster.local/loki/api/v1/query_range"
+	lokiURL      = "https://loki.d8-monitoring.svc.cluster.local:3100/ready"
 	parallelJobs = 1                      // Number of parallel requests
 	query        = `{pod=~".+"}`          // LogQL query
 	startTime    = "2024-02-01T00:00:00Z" // Start time
@@ -176,7 +177,22 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 	fmt.Printf("Fetching logs from %s to %s\n", chunkStart, chunkEnd)
 
-	fullCommand := []string{"curl"}
+	//var result LokiResponse
+
+	// Build Loki query parameters
+	//queryParams := url.Values{}
+	//queryParams.Set("query", query)
+	//queryParams.Set("start", fmt.Sprintf("%d", chunkStart.UnixNano()))
+	//queryParams.Set("end", fmt.Sprintf("%d", chunkEnd.UnixNano()))
+	//queryParams.Set("limit", limit)
+
+	//reqURL := fmt.Sprintf("curl -vs '%s%s'", lokiURL, queryParams.Encode())
+
+	//fullEndpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, queuePath, pathFromOption)
+	fullEndpointUrl := fmt.Sprintf("%s", lokiURL)
+	fullCommand := []string{"curl", fullEndpointUrl}
+
+	//fullCommand := []string{"curl"}
 
 	executor, err := ExecInPod(config, kubeCl, fullCommand, podName, namespaceDeckhouse, containerName)
 	if err = executor.StreamWithContext(
