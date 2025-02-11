@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -75,12 +76,12 @@ func NewCommand() *cobra.Command {
 //)
 
 const (
-	//lokiURL      = "https://loki.d8-monitoring.svc.cluster.local/loki/api/v1/query_range"
-	lokiURL      = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/series"
+	lokiURL = "https://loki.d8-monitoring.svc.cluster.local/loki/api/v1/query_range"
+	//lokiURL      = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/series"
 	parallelJobs = 1                      // Number of parallel requests
 	query        = `{pod=~".+"}`          // LogQL query
-	startTime    = "2024-02-01T00:00:00Z" // Start time
-	endTime      = "2024-02-01T01:00:00Z" // End time
+	startTime    = "2025-02-11T00:00:00Z" // Start time
+	endTime      = "2025-02-11T01:00:00Z" // End time
 	limit        = "10"                   // Number of logs per query
 )
 
@@ -94,11 +95,11 @@ type LokiResponse struct {
 	} `json:"data"`
 }
 
-type Command struct {
-	Cmd  string
-	Args []string
-	File string
-}
+//type Command struct {
+//	Cmd  string
+//	Args []string
+//	File string
+//}
 
 func backupLoki(cmd *cobra.Command, _ []string) error {
 
@@ -181,18 +182,18 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	var result LokiResponse
 
 	// Build Loki query parameters
-	//queryParams := url.Values{}
-	//queryParams.Set("query", query)
-	//queryParams.Set("start", fmt.Sprintf("%d", chunkStart.UnixNano()))
-	//queryParams.Set("end", fmt.Sprintf("%d", chunkEnd.UnixNano()))
-	//queryParams.Set("limit", limit)
+	queryParams := url.Values{}
+	queryParams.Set("query", query)
+	queryParams.Set("start", fmt.Sprintf("%d", chunkStart.UnixNano()))
+	queryParams.Set("end", fmt.Sprintf("%d", chunkEnd.UnixNano()))
+	queryParams.Set("limit", limit)
 
 	//reqURL := fmt.Sprintf("curl -vs '%s%s'", lokiURL, queryParams.Encode())
 
 	//fullEndpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, queuePath, pathFromOption)
 
 	token := "eyJhbGciOiJSUzI1NiIsImtpZCI6IkFnbVRCVndWRm43dy04Qmg1cENqcXFQMVFhOEhuLXF0dUpFSTdWQXBYYUkifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJkOC1sb2ctc2hpcHBlciIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VjcmV0Lm5hbWUiOiJsb2ctc2hpcHBlci10b2tlbiIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50Lm5hbWUiOiJsb2ctc2hpcHBlciIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6Ijk5MDEyMzgyLTc3ODEtNGI3NS04ZDgzLTZiNGRjYjhkOGY1ZCIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpkOC1sb2ctc2hpcHBlcjpsb2ctc2hpcHBlciJ9.CdYOo_jrEy2k3pKu9jEnkRiDdC5D8NAmYcQIbLE5X6uN78xqhmrzSzIoKi_5D9ZSbc69mpDLmbhlfH9i4v9wFMiLi4NzrXWBOrQxWToB3W5lXDUPdpfIIgyBh1_EhTYPoYRZI_YYan2ToZ4l-RJ4T7jbgtkQmdJotBEHk38VCmtvILXYzYIkGcv302LhiZY8Ia8G_3fnjxNLnuHSyOcv19c9CwAQ6EPI4CqmvPxIJMQfjxUKEZqN217ek0kFx_W3FTY00arkU1IZxpsG6idLcfenDftvXclaulqcxlr4P9je6ghO2hUij4AzQOe7PFJyadH7ZVGAqdHY8n8ofY8X5w"
-	fullEndpointUrl := fmt.Sprintf("%s", lokiURL)
+	fullEndpointUrl := fmt.Sprintf("%s?%s", lokiURL, queryParams.Encode())
 	curlEndpointUrl := fmt.Sprintf("Authorization: Bearer %s", token)
 	fullCommand := []string{"curl", "-v", "--insecure", "-H", curlEndpointUrl, fullEndpointUrl}
 
