@@ -126,7 +126,9 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		SetHeader("User-Agent", "kubernetes-client-go").
 		SetHeader("Connection", "keep-alive").
 		SetHeader("User-Agent", "kube-rbac-proxy-debug").
-		SetHeader("X-Debug", "true"). // Custom debug header
+		SetHeader("X-Debug", "true").
+		SetHeader("Impersonate-User", "system:serviceaccount:d8-monitoring:loki").
+		SetHeader("Impersonate-Group", "system:authenticated"). // Custom debug header
 		Namespace(namespace).
 		Resource("services").
 		Name(portScheme + serviceName + servicePort).
@@ -154,6 +156,29 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	}
 
 	fmt.Println("Loki API Response:", string(rawResponse))
+
+	//caCertPool := x509.NewCertPool()
+	//caCertPool.AppendCertsFromPEM(config.TLSClientConfig.CAData)
+	//
+	//tlsConfig := &tls.Config{
+	//	RootCAs: caCertPool,
+	//}
+	//
+	//transport := &http.Transport{TLSClientConfig: tlsConfig}
+	//httpClient := &http.Client{Transport: transport}
+	//req, err := http.NewRequest("GET", apiProxyURL, nil)
+	//if err != nil {
+	//	return fmt.Errorf("request failed: %v", err)
+	//}
+	//req.Header.Set("Authorization", "Bearer "+config.BearerToken)
+	//
+	//resp, err := httpClient.Do(req)
+	//if err != nil {
+	//	return fmt.Errorf("request failed: %v", err)
+	//}
+	//defer resp.Body.Close()
+	//
+	//fmt.Println("Response from service:\n", resp.Status)
 
 	return err
 }
