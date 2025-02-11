@@ -191,7 +191,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//fullEndpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, queuePath, pathFromOption)
 	token := "eyJhbGciOiJSUzI1NiIsImtpZCI6IkFnbVRCVndWRm43dy04Qmg1cENqcXFQMVFhOEhuLXF0dUpFSTdWQXBYYUkifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJkOC1sb2ctc2hpcHBlciIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VjcmV0Lm5hbWUiOiJsb2ctc2hpcHBlci10b2tlbiIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50Lm5hbWUiOiJsb2ctc2hpcHBlciIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6Ijk5MDEyMzgyLTc3ODEtNGI3NS04ZDgzLTZiNGRjYjhkOGY1ZCIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpkOC1sb2ctc2hpcHBlcjpsb2ctc2hpcHBlciJ9.CdYOo_jrEy2k3pKu9jEnkRiDdC5D8NAmYcQIbLE5X6uN78xqhmrzSzIoKi_5D9ZSbc69mpDLmbhlfH9i4v9wFMiLi4NzrXWBOrQxWToB3W5lXDUPdpfIIgyBh1_EhTYPoYRZI_YYan2ToZ4l-RJ4T7jbgtkQmdJotBEHk38VCmtvILXYzYIkGcv302LhiZY8Ia8G_3fnjxNLnuHSyOcv19c9CwAQ6EPI4CqmvPxIJMQfjxUKEZqN217ek0kFx_W3FTY00arkU1IZxpsG6idLcfenDftvXclaulqcxlr4P9je6ghO2hUij4AzQOe7PFJyadH7ZVGAqdHY8n8ofY8X5w"
 	fullEndpointUrl := fmt.Sprintf("%s", lokiURL)
-	curlEndpointUrl := fmt.Sprintf("'Authorization: Bearer %s'", token)
+	curlEndpointUrl := fmt.Sprintf("Authorization: Bearer %s", token)
 	fullCommand := []string{"curl", "-v", "--insecure", "-H", curlEndpointUrl, fullEndpointUrl}
 
 	//fullCommand := []string{"curl"}
