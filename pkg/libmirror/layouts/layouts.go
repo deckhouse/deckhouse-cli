@@ -27,6 +27,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
@@ -256,7 +257,7 @@ func FillLayoutsWithBasicDeckhouseImages(
 	layouts.ReleaseChannelImages[pullParams.DeckhouseRegistryRepo+"/release-channel:rock-solid"] = struct{}{}
 }
 
-func FindDeckhouseModulesImages(params *params.PullParams, layouts *ImageLayouts) error {
+func FindDeckhouseModulesImages(params *params.PullParams, layouts *ImageLayouts, filter *modules.Filter) error {
 	modulesNames := maps.Keys(layouts.Modules)
 	for _, moduleName := range modulesNames {
 		moduleData := layouts.Modules[moduleName]
@@ -268,6 +269,7 @@ func FindDeckhouseModulesImages(params *params.PullParams, layouts *ImageLayouts
 			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, moduleName, "release") + ":rock-solid":   {},
 		}
 
+		moduleMinVersion, hasMinimalVersion := filter.GetMinimalVersion(moduleName)
 		channelVersions, err := releases.FetchVersionsFromModuleReleaseChannels(
 			moduleData.ReleaseImages,
 			params.RegistryAuth,
@@ -278,19 +280,28 @@ func FindDeckhouseModulesImages(params *params.PullParams, layouts *ImageLayouts
 			return fmt.Errorf("fetch versions from %q release channels: %w", moduleName, err)
 		}
 
-		for _, moduleVersion := range channelVersions {
+		for _, moduleVersionText := range channelVersions {
+			moduleVersion := semver.MustParse(moduleVersionText)
+			if hasMinimalVersion && moduleMinVersion.GreaterThan(moduleVersion) {
+				continue
+			}
+
 			moduleData.ModuleImages[path.Join(
 				params.DeckhouseRegistryRepo,
 				params.ModulesPathSuffix,
 				moduleName,
-			)+":"+moduleVersion] = struct{}{}
+			)+":"+moduleVersionText] = struct{}{}
 
 			moduleData.ReleaseImages[path.Join(
 				params.DeckhouseRegistryRepo,
 				params.ModulesPathSuffix,
 				moduleName,
 				"release",
-			)+":"+moduleVersion] = struct{}{}
+			)+":"+moduleVersionText] = struct{}{}
+		}
+
+		if len(moduleData.ModuleImages) == 0 {
+			return fmt.Errorf("found no releases matching filter %s@%s", moduleName, moduleMinVersion.String())
 		}
 
 		nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&params.BaseParams)
