@@ -79,8 +79,8 @@ type LokiResponse struct {
 			//Stream    map[string]string `json:"stream"`
 			Values [][]string `json:"values"`
 			Stream struct {
-				Pod       []string `json:"pod"`
-				Container []string `json:"container"`
+				Pod       string `json:"pod"`
+				Container string `json:"container"`
 			} `json:"stream"`
 		} `json:"result"`
 	} `json:"data"`
