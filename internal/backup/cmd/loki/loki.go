@@ -77,11 +77,11 @@ const (
 	lokiURL = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/query_range"
 	//lokiURL      = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/series"
 	parallelJobs = 1                      // Number of parallel requests
-	query        = `'query={pod=~".+"}'`  // LogQL query
+	query        = `query={pod=~".+"}`    // LogQL query
 	startTime    = "2025-02-12T16:22:00Z" // Start time
 	endTime      = "2025-02-12T16:25:00Z" // End time
-	limit        = `'limit=5000'`         // Number of logs per query
-	direction    = `'direction=FORWARD'`
+	limit        = `limit=5000`           // Number of logs per query
+	direction    = `direction=FORWARD`
 )
 
 // LokiResponse Struct to store API response
@@ -193,7 +193,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 	token := "eyJhbGciOiJSUzI1NiIsImtpZCI6IkFnbVRCVndWRm43dy04Qmg1cENqcXFQMVFhOEhuLXF0dUpFSTdWQXBYYUkifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJkOC1tb25pdG9yaW5nIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6Imxva2ktYXBpLXRva2VuIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZXJ2aWNlLWFjY291bnQubmFtZSI6Imxva2kiLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC51aWQiOiI0N2Y2ZWY1Ni01YjdkLTRlNjUtYTc3Zi1mNTI0ODkyZDJhNzgiLCJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQ6ZDgtbW9uaXRvcmluZzpsb2tpIn0.EF-RGqY0acC-C_2KPz51UPdwkLMGw-DV2nsrJuh2lQZ_0ebiwTmWoVFCj6o7Ey2z9CsNHkvEr9jxTc7uHh0rvRQIJp5rUrimeSBfvrJpLaiiVQ_h5cXJN84l5jq4IkbzO7lUObtjh6DmNzodZCbxMEu-Gm766weRhUdoW8zco7Cd-m26sQK4095tp9_4iW5lXBGC6R68DEa-2pjZjHpDspRwnI4XY_BVXldaIKpbR5cCU-8CKzJ0BXSvDcjKUjFv3Mk0TomMSFSlnMY5wyvr6vvus11E3MxajRq1vL9PJiW1ZfBFRnwEQsQnsIPgQMb45fmpgayCLMBnmjNF4WRxvg"
 
-	curlEndpointUrl := fmt.Sprintf("'Authorization: Bearer %s'", token)
+	curlEndpointUrl := fmt.Sprintf("Authorization: Bearer %s", token)
 	fullEndpointUrl := fmt.Sprintf("%s", lokiURL)
 	//encodeUrl := fmt.Sprintf("--data-urlencode 'start=%v' --data-urlencode 'end=%v' --data-urlencode 'query=%s' --data-urlencode 'limit=%s' --data-urlencode 'direction=%s'", chunkStart.UnixNano(), chunkEnd.UnixNano(), query, limit, direction)
 	//encodeUrl := fmt.Sprintf("--data-urlencode 'query=%s' --data-urlencode 'limit=%s' --data-urlencode 'direction=%s'", query, limit, direction)
