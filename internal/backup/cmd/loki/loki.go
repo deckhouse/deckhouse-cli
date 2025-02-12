@@ -198,7 +198,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//encodeUrl := fmt.Sprintf("--data-urlencode 'start=%v' --data-urlencode 'end=%v' --data-urlencode 'query=%s' --data-urlencode 'limit=%s' --data-urlencode 'direction=%s'", chunkStart.UnixNano(), chunkEnd.UnixNano(), query, limit, direction)
 	//encodeUrl := fmt.Sprintf("--data-urlencode 'query=%s' --data-urlencode 'limit=%s' --data-urlencode 'direction=%s'", query, limit, direction)
 	//fullCommand := []string{"curl", "-v", "--insecure", "-H", curlEndpointUrl, fullEndpointUrl, encodeUrl}
-	fullCommand := []string{"curl", "-v", "--insecure", "-H", curlEndpointUrl, fullEndpointUrl, "--data-urlencode", query, "--data-urlencode", limit, "--data-urlencode", direction}
+	fullCommand := []string{"curl", "-v", "--insecure", "-H", curlEndpointUrl, fullEndpointUrl, "--data-urlencode", fmt.Sprintf("%s", query), "--data-urlencode", fmt.Sprintf("%s", limit), "--data-urlencode", fmt.Sprintf("%s", direction)}
 
 	//fullCommand := []string{"curl"}
 
