@@ -87,38 +87,8 @@ func (c *Console) Run(args []string) error {
 		return err
 	}
 
-	stdinCh := make(chan []byte)
-	go func() {
-		in := os.Stdin
-		defer close(stdinCh)
-		buf := make([]byte, 1024)
-		for {
-			// reading from stdin
-			n, err := in.Read(buf)
-			if err != nil && err != io.EOF {
-				return
-			}
-			if n == 0 && err == io.EOF {
-				return
-			}
-
-			// the escape sequence
-			if buf[0] == 29 {
-				return
-			}
-
-			stdinCh <- buf[0:n]
-		}
-	}()
-
-	go func() {
-		if _, ok := <-stdinCh; !ok {
-			os.Exit(0)
-		}
-	}()
-
 	for {
-		err := connect(name, namespace, virtCli, stdinCh)
+		err := connect(name, namespace, virtCli)
 		if err != nil {
 			if errors.Is(err, util.ErrorInterrupt) || strings.Contains(err.Error(), "not found") {
 				return err
@@ -145,7 +115,7 @@ func (c *Console) Run(args []string) error {
 	}
 }
 
-func connect(name string, namespace string, virtCli kubeclient.Client, stdinCh chan []byte) error {
+func connect(name string, namespace string, virtCli kubeclient.Client) error {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()
 
@@ -174,6 +144,6 @@ func connect(name string, namespace string, virtCli kubeclient.Client, stdinCh c
 		return err
 	}
 
-	err = util.AttachConsole(stdinCh, stdinReader, stdoutReader, stdinWriter, stdoutWriter, name, resChan)
+	err = util.AttachConsole(stdinReader, stdoutReader, stdinWriter, stdoutWriter, name, resChan)
 	return err
 }

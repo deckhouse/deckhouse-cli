@@ -30,7 +30,7 @@ import (
 
 var ErrorInterrupt = errors.New("interrupt")
 
-func AttachConsole(stdinCh chan []byte, stdinReader, stdoutReader *io.PipeReader, stdinWriter, stdoutWriter *io.PipeWriter, name string, resChan <-chan error) (err error) {
+func AttachConsole(stdinReader, stdoutReader *io.PipeReader, stdinWriter, stdoutWriter *io.PipeWriter, name string, resChan <-chan error) (err error) {
 	writeStop := make(chan error)
 	readStop := make(chan error)
 	if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -50,6 +50,30 @@ func AttachConsole(stdinCh chan []byte, stdinReader, stdoutReader *io.PipeReader
 		readStop <- err
 	}()
 
+	stdinCh := make(chan []byte)
+	go func() {
+		in := os.Stdin
+		defer close(stdinCh)
+		buf := make([]byte, 1024)
+		for {
+			// reading from stdin
+			n, err := in.Read(buf)
+			if err != nil && err != io.EOF {
+				return
+			}
+			if n == 0 && err == io.EOF {
+				return
+			}
+
+			// the escape sequence
+			if buf[0] == 29 {
+				return
+			}
+
+			stdinCh <- buf[0:n]
+		}
+	}()
+
 	go func() {
 		defer close(writeStop)
 
@@ -64,6 +88,8 @@ func AttachConsole(stdinCh chan []byte, stdinReader, stdoutReader *io.PipeReader
 				return
 			}
 		}
+
+		os.Exit(0)
 	}()
 
 	select {
