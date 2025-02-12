@@ -227,7 +227,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed unmarshal %s", err)
 	}
 
-	fmt.Printf("%s\n", result)
+	//fmt.Printf("%s\n", result)
 
 	//fmt.Fprintf(os.Stdout, stderr.String())
 
