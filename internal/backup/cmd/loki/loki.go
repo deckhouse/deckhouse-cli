@@ -81,7 +81,7 @@ const (
 	query        = `query={pod=~".+"}`    // LogQL query
 	startTime    = "2025-02-12T16:22:00Z" // Start time
 	endTime      = "2025-02-12T16:25:00Z" // End time
-	limit        = `limit=5000`           // Number of logs per query
+	limit        = `limit=10`             // Number of logs per query
 	direction    = `direction=FORWARD`
 )
 
@@ -227,7 +227,14 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed unmarshal %s", err)
 	}
 
-	//fmt.Printf("%s\n", result)
+	var logs string
+	for _, resultLog := range result.Data.Result {
+		for _, log := range resultLog.Values {
+			logs += fmt.Sprintf("Timestamp: %s, Log: %s\n", log[0], log[1])
+		}
+	}
+
+	fmt.Printf("%s\n", logs)
 
 	//fmt.Fprintf(os.Stdout, stderr.String())
 
