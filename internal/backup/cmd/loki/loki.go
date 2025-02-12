@@ -19,6 +19,7 @@ package loki
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -75,8 +76,11 @@ const (
 type LokiResponse struct {
 	Data struct {
 		Result []struct {
-			Stream map[string]string `json:"stream"`
-			Values [][]string        `json:"values"`
+			//Stream    map[string]string `json:"stream"`
+			Values [][]string `json:"values"`
+			Stream struct {
+				Pod string `json:"pod"`
+			} `json:"stream"`
 		} `json:"result"`
 	} `json:"data"`
 }
@@ -194,19 +198,22 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//fmt.Fprintf(os.Stdout, stdout.String())
 	//fmt.Printf("%s\n", stdout.String())
 
-	//err = json.Unmarshal(stdout.Bytes(), &result)
-	//if err != nil {
-	//	return fmt.Errorf("failed unmarshal %s", err)
-	//}
+	err = json.Unmarshal(stdout.Bytes(), &result)
+	if err != nil {
+		return fmt.Errorf("failed unmarshal %s", err)
+	}
 
-	var logs string
+	//var logs string
 	for _, resultLog := range result.Data.Result {
-		for _, log := range resultLog.Values {
-			logs += fmt.Sprintf("Timestamp: %s, Log: %s\n", log[0], log[1])
+		for _, pod := range resultLog.Stream.Pod {
+			for _, log := range resultLog.Values {
+				//fmt.Sprintf("Pod: %s\nTimestamp: %s, Log: %s\n", pod, log[0], log[1])
+				fmt.Printf("Pod: %s\nTimestamp: %s, Log: %s\n", pod, log[0], log[1])
+			}
 		}
 	}
 
-	fmt.Printf("%s\n", logs)
+	//fmt.Printf("%s\n", logs)
 
 	//fmt.Fprintf(os.Stdout, stderr.String())
 
