@@ -27,7 +27,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -76,13 +75,14 @@ func NewCommand() *cobra.Command {
 //)
 
 const (
-	lokiURL = "https://loki.d8-monitoring.svc.cluster.local/loki/api/v1/query_range"
+	lokiURL = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/query_range"
 	//lokiURL      = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/series"
 	parallelJobs = 1                      // Number of parallel requests
 	query        = "{pod=~'.+'}"          // LogQL query
-	startTime    = "2025-02-11T00:00:00Z" // Start time
-	endTime      = "2025-02-11T01:00:00Z" // End time
-	limit        = "10"                   // Number of logs per query
+	startTime    = "2025-02-12T16:22:00Z" // Start time
+	endTime      = "2025-02-12T16:25:00Z" // End time
+	limit        = "5000"                 // Number of logs per query
+	direction    = "FORWARD"
 )
 
 // LokiResponse Struct to store API response
@@ -182,20 +182,22 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	var result LokiResponse
 
 	// Build Loki query parameters
-	queryParams := url.Values{}
-	queryParams.Set("query", query)
-	queryParams.Set("start", fmt.Sprintf("%d", chunkStart.UnixNano()))
-	queryParams.Set("end", fmt.Sprintf("%d", chunkEnd.UnixNano()))
-	queryParams.Set("limit", limit)
+	//queryParams := url.Values{}
+	//queryParams.Set("query", query)
+	//queryParams.Set("start", fmt.Sprintf("%d", chunkStart.UnixNano()))
+	//queryParams.Set("end", fmt.Sprintf("%d", chunkEnd.UnixNano()))
+	//queryParams.Set("limit", limit)
 
 	//reqURL := fmt.Sprintf("curl -vs '%s%s'", lokiURL, queryParams.Encode())
 
 	//fullEndpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, queuePath, pathFromOption)
 
-	token := "eyJhbGciOiJSUzI1NiIsImtpZCI6IkFnbVRCVndWRm43dy04Qmg1cENqcXFQMVFhOEhuLXF0dUpFSTdWQXBYYUkifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJkOC1sb2ctc2hpcHBlciIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VjcmV0Lm5hbWUiOiJsb2ctc2hpcHBlci10b2tlbiIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50Lm5hbWUiOiJsb2ctc2hpcHBlciIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6Ijk5MDEyMzgyLTc3ODEtNGI3NS04ZDgzLTZiNGRjYjhkOGY1ZCIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpkOC1sb2ctc2hpcHBlcjpsb2ctc2hpcHBlciJ9.CdYOo_jrEy2k3pKu9jEnkRiDdC5D8NAmYcQIbLE5X6uN78xqhmrzSzIoKi_5D9ZSbc69mpDLmbhlfH9i4v9wFMiLi4NzrXWBOrQxWToB3W5lXDUPdpfIIgyBh1_EhTYPoYRZI_YYan2ToZ4l-RJ4T7jbgtkQmdJotBEHk38VCmtvILXYzYIkGcv302LhiZY8Ia8G_3fnjxNLnuHSyOcv19c9CwAQ6EPI4CqmvPxIJMQfjxUKEZqN217ek0kFx_W3FTY00arkU1IZxpsG6idLcfenDftvXclaulqcxlr4P9je6ghO2hUij4AzQOe7PFJyadH7ZVGAqdHY8n8ofY8X5w"
-	fullEndpointUrl := fmt.Sprintf("%s?%s", lokiURL, queryParams.Encode())
+	token := "eyJhbGciOiJSUzI1NiIsImtpZCI6IkFnbVRCVndWRm43dy04Qmg1cENqcXFQMVFhOEhuLXF0dUpFSTdWQXBYYUkifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJkOC1tb25pdG9yaW5nIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6Imxva2ktYXBpLXRva2VuIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZXJ2aWNlLWFjY291bnQubmFtZSI6Imxva2kiLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC51aWQiOiI0N2Y2ZWY1Ni01YjdkLTRlNjUtYTc3Zi1mNTI0ODkyZDJhNzgiLCJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQ6ZDgtbW9uaXRvcmluZzpsb2tpIn0.EF-RGqY0acC-C_2KPz51UPdwkLMGw-DV2nsrJuh2lQZ_0ebiwTmWoVFCj6o7Ey2z9CsNHkvEr9jxTc7uHh0rvRQIJp5rUrimeSBfvrJpLaiiVQ_h5cXJN84l5jq4IkbzO7lUObtjh6DmNzodZCbxMEu-Gm766weRhUdoW8zco7Cd-m26sQK4095tp9_4iW5lXBGC6R68DEa-2pjZjHpDspRwnI4XY_BVXldaIKpbR5cCU-8CKzJ0BXSvDcjKUjFv3Mk0TomMSFSlnMY5wyvr6vvus11E3MxajRq1vL9PJiW1ZfBFRnwEQsQnsIPgQMb45fmpgayCLMBnmjNF4WRxvg"
+
 	curlEndpointUrl := fmt.Sprintf("Authorization: Bearer %s", token)
-	fullCommand := []string{"curl", "-v", "--insecure", "-H", curlEndpointUrl, fullEndpointUrl}
+	fullEndpointUrl := fmt.Sprintf("%s", lokiURL)
+	encodeUrl := fmt.Sprintf("--data-urlencode 'start=%s' --data-urlencode 'end=%s' --data-urlencode 'query=%s' --data-urlencode 'limit=%s' --data-urlencode 'direction=%s'", chunkStart.UnixNano(), chunkEnd.UnixNano(), query, limit, direction)
+	fullCommand := []string{"curl", "-v", "--insecure", "-H", curlEndpointUrl, fullEndpointUrl, encodeUrl}
 
 	//fullCommand := []string{"curl"}
 
@@ -215,7 +217,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//	return fmt.Errorf("failed to update the %s", err)
 	//}
 	//fmt.Printf("loki url is %s\n", fullCommand)
-	//fmt.Fprintf(os.Stdout, stdout.String())
+	fmt.Fprintf(os.Stdout, stdout.String())
 
 	err = json.Unmarshal(stdout.Bytes(), &result)
 	if err != nil {
