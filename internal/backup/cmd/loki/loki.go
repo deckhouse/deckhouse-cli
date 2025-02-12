@@ -217,7 +217,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	// err != nil {
 	//	return fmt.Errorf("failed to update the %s", err)
 	//}
-	//fmt.Printf("loki url is %s\n", fullCommand)
+	fmt.Printf("loki url is %s\n", fullCommand)
 	fmt.Fprintf(os.Stdout, stdout.String())
 	fmt.Printf("%s\n", stdout.String())
 
