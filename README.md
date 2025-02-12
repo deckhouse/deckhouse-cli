@@ -9,22 +9,32 @@ Deckhouse Client (d8) is a command-line client for Deckhouse.
 
 ## How to install?
 
-### From install script (Linux or macOS)
+### Using trdl package manager (Recommended)
 
-The install script will automatically grab the latest version of `d8` and install it locally.
+Deckhouse CLI is distributed and updated via [trdl](https://trdl.dev/). You
+should [install trdl client](https://trdl.dev/quickstart.html#installing-the-client) first.
 
-You can fetch and run this script via `curl`:
+After that is dealt with, add the Deckhouse CLI repository into trdl. Proceed with the following shell command:
 
 ```bash
-curl -fsSL -o d8-install.sh https://raw.githubusercontent.com/deckhouse/deckhouse-cli/main/d8-install.sh
-bash d8-install.sh
+URL=https://trrr.flant.dev/trdl-deckhouse-cli
+ROOT_VERSION=1
+ROOT_SHA512=$(curl -Ls ${URL}/${ROOT_VERSION}.root.json | sha512sum | tr -d '\-[:space:]\n')
+REPO=trdl-deckhouse-cli
+
+trdl add $REPO $URL $ROOT_VERSION $ROOT_SHA512
 ```
 
-of via `wget`:
+And install stable release using:
 
 ```bash
-wget -q https://raw.githubusercontent.com/deckhouse/deckhouse-cli/main/d8-install.sh
-bash d8-install.sh
+trdl update $REPO $ROOT_VERSION stable
+```
+
+Validate that the `d8` binary is installed:
+
+```bash
+. $(trdl use $REPO $ROOT_VERSION stable) && d8 --version
 ```
 
 ### From binary releases
@@ -32,5 +42,7 @@ bash d8-install.sh
 To install the `d8` binary from the provided GitHub release link, follow these steps:
 
 1. Download your [desired version](https://github.com/deckhouse/deckhouse-cli/releases)
-2. Unpack it (`tar -xvf d8-v0.1.0-linux-amd64.tar.gz`)
-3. Find the `d8` binary in the unpacked directory, and move it to its desired destination (`mv linux-amd64/d8 /usr/local/bin/d8`)
+2. Unpack it (`tar xvf d8-vX.Y.Z-OS-ARCH.tar.gz`)
+3. Find the `d8` binary in the unpacked directory, and move it to its desired destination under the $PATH.
+4. On macOS you might need to remove the quarantine attribute from binary to prevent Gatekeeper from blocking it (
+   `sudo xattr -d com.apple.quarantine /path/to/d8`)
