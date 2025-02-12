@@ -19,7 +19,6 @@ package loki
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -179,7 +178,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 	fmt.Printf("Fetching logs from %s to %s\n", chunkStart, chunkEnd)
 
-	var result LokiResponse
+	//var result LokiResponse
 
 	// Build Loki query parameters
 	//queryParams := url.Values{}
@@ -220,13 +219,14 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//}
 	//fmt.Printf("loki url is %s\n", fullCommand)
 	fmt.Fprintf(os.Stdout, stdout.String())
+	fmt.Printf("%s\n", stdout.String())
 
-	err = json.Unmarshal(stdout.Bytes(), &result)
-	if err != nil {
-		return fmt.Errorf("failed unmarshal %s", err)
-	}
-
-	fmt.Printf("%s\n", result)
+	//err = json.Unmarshal(stdout.Bytes(), &result)
+	//if err != nil {
+	//	return fmt.Errorf("failed unmarshal %s", err)
+	//}
+	//
+	//fmt.Printf("%s\n", result)
 
 	//fmt.Fprintf(os.Stdout, stderr.String())
 
