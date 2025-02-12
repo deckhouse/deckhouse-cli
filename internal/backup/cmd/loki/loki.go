@@ -78,7 +78,7 @@ const (
 	lokiURL = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/query_range"
 	//lokiURL      = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/series"
 	parallelJobs = 1                      // Number of parallel requests
-	query        = "{pod=~'.+'}"          // LogQL query
+	query        = `{pod=~".+"}`          // LogQL query
 	startTime    = "2025-02-12T16:22:00Z" // Start time
 	endTime      = "2025-02-12T16:25:00Z" // End time
 	limit        = "5000"                 // Number of logs per query
@@ -196,7 +196,8 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 	curlEndpointUrl := fmt.Sprintf("Authorization: Bearer %s", token)
 	fullEndpointUrl := fmt.Sprintf("%s", lokiURL)
-	encodeUrl := fmt.Sprintf("--data-urlencode 'start=%s' --data-urlencode 'end=%s' --data-urlencode 'query=%s' --data-urlencode 'limit=%s' --data-urlencode 'direction=%s'", chunkStart.UnixNano(), chunkEnd.UnixNano(), query, limit, direction)
+	//encodeUrl := fmt.Sprintf("--data-urlencode 'start=%v' --data-urlencode 'end=%v' --data-urlencode 'query=%s' --data-urlencode 'limit=%s' --data-urlencode 'direction=%s'", chunkStart.UnixNano(), chunkEnd.UnixNano(), query, limit, direction)
+	encodeUrl := fmt.Sprintf("--data-urlencode 'query=%s' --data-urlencode 'limit=%s' --data-urlencode 'direction=%s'", query, limit, direction)
 	fullCommand := []string{"curl", "-v", "--insecure", "-H", curlEndpointUrl, fullEndpointUrl, encodeUrl}
 
 	//fullCommand := []string{"curl"}
