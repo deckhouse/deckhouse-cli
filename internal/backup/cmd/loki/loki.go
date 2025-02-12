@@ -79,7 +79,7 @@ type LokiResponse struct {
 			//Stream    map[string]string `json:"stream"`
 			Values [][]string `json:"values"`
 			Stream struct {
-				Pod string `json:"pod"`
+				Pod []string `json:"pod"`
 			} `json:"stream"`
 		} `json:"result"`
 	} `json:"data"`
@@ -208,7 +208,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		for _, pod := range resultLog.Stream.Pod {
 			for _, log := range resultLog.Values {
 				//fmt.Sprintf("Pod: %s\nTimestamp: %s, Log: %s\n", pod, log[0], log[1])
-				fmt.Printf("Pod: %v\nTimestamp: %s, Log: %s\n", pod, log[0], log[1])
+				fmt.Printf("Pod: %s\nTimestamp: %s, Log: %s\n", pod, log[0], log[1])
 			}
 		}
 	}
