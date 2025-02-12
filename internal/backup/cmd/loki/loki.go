@@ -206,11 +206,9 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 	//var logs string
 	for _, resultLog := range result.Data.Result {
-		for _, pod := range resultLog.Stream.Pod {
-			for _, log := range resultLog.Values {
-				//fmt.Sprintf("Pod: %s\nTimestamp: %s, Log: %s\n", pod, log[0], log[1])
-				fmt.Printf("Pod: %s, Container: %s, Timestamp: %s, Log: %s\n", pod, resultLog.Stream.Container, log[0], log[1])
-			}
+		for _, log := range resultLog.Values {
+			//fmt.Sprintf("Pod: %s\nTimestamp: %s, Log: %s\n", pod, log[0], log[1])
+			fmt.Printf("Pod: %s, Container: %s, Timestamp: %s, Log: %s\n", resultLog.Stream.Pod, resultLog.Stream.Container, log[0], log[1])
 		}
 	}
 
