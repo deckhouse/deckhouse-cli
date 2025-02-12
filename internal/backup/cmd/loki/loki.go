@@ -19,7 +19,6 @@ package loki
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -61,19 +60,6 @@ func NewCommand() *cobra.Command {
 	return lokiCmd
 }
 
-//const (
-//	etcdPodNamespace      = "kube-system"
-//	etcdPodsLabelSelector = "component=etcd"
-//
-//	bufferSize16MB = 16 * 1024 * 1024
-//)
-//
-//var (
-//	requestedEtcdPodName string
-//
-//	verboseLog bool
-//)
-
 const (
 	lokiURL = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/query_range"
 	//lokiURL      = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/series"
@@ -103,21 +89,7 @@ type LokiResponse struct {
 
 func backupLoki(cmd *cobra.Command, _ []string) error {
 
-	//req := client.Get().RequestURI("")
-
-	//err = createtarball.Tarball(config, kubeCl)
-	//if err != nil {
-	//	return fmt.Errorf("Error collecting debug info: %w", err)
-	//}
 	const (
-		namespace   = "d8-monitoring" // Change to your service namespace
-		serviceName = "loki:"         // Change to your service name
-		portScheme  = "https:"
-		servicePort = "3100" // Change to the service port name
-		//namespace   = "default"      // Change to your service namespace
-		//serviceName = "log-service:" // Change to your service name
-		//portScheme  = "http:"
-		//servicePort = "80" // Change to the service port name
 		labelSelector      = "leader=true"
 		namespaceDeckhouse = "d8-system"
 		containerName      = "deckhouse"
@@ -218,14 +190,14 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	// err != nil {
 	//	return fmt.Errorf("failed to update the %s", err)
 	//}
-	fmt.Printf("loki url is %s\n", fullCommand)
+	//fmt.Printf("loki url is %s\n", fullCommand)
 	//fmt.Fprintf(os.Stdout, stdout.String())
 	//fmt.Printf("%s\n", stdout.String())
 
-	err = json.Unmarshal(stdout.Bytes(), &result)
-	if err != nil {
-		return fmt.Errorf("failed unmarshal %s", err)
-	}
+	//err = json.Unmarshal(stdout.Bytes(), &result)
+	//if err != nil {
+	//	return fmt.Errorf("failed unmarshal %s", err)
+	//}
 
 	var logs string
 	for _, resultLog := range result.Data.Result {
