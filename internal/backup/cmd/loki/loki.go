@@ -351,11 +351,11 @@ func (c *CurlRequest) GenerateCurlCommand() []string {
 	//fullCommand := []string{"curl", "-v", "--insecure", "-H", curlEndpointUrl, fullEndpointUrl, "--data-urlencode", fmt.Sprintf("%s", query), "--data-urlencode", fmt.Sprintf("%s", limit), "--data-urlencode", fmt.Sprintf("%s", direction)}
 
 	// Append the base URL
-	curlParts = append(curlParts, fmt.Sprintf(`%s`, lokiURL))
+	curlParts = append(curlParts, fmt.Sprintf("%s", lokiURL))
 	//
 	// Append dynamic `--data-urlencode` parameters
 	for key, value := range c.Params {
-		curlParts = append(curlParts, []string{"--data-urlencode", fmt.Sprintf(`'%s=%s'`, key, value)}...)
+		curlParts = append(curlParts, []string{"--data-urlencode", fmt.Sprintf("%s=%s", key, value)}...)
 	}
 	//
 	//// Append headers
