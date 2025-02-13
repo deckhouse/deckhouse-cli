@@ -37,6 +37,8 @@ Validate that the `d8` binary is installed:
 . $(trdl use $REPO $ROOT_VERSION stable) && d8 --version
 ```
 
+If you dont want to call `. $(trdl use $REPO $ROOT_VERSION stable)` every time you need to use `d8`, consider adding `export PATH=$PATH:$(trdl bin-path trdl-deckhouse-cli 1 stable)` to your shell RC file.
+
 ### From binary releases
 
 To install the `d8` binary from the provided GitHub release link, follow these steps:
