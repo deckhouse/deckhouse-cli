@@ -365,7 +365,7 @@ func (c *CurlRequest) GenerateCurlCommand() []string {
 	//
 	// Append Authorization header if AuthToken is set
 	if c.AuthToken != "" {
-		curlParts = append(curlParts, []string{"-H", fmt.Sprintf(`"Authorization: Bearer %s"`, c.AuthToken)}...)
+		curlParts = append(curlParts, []string{"-H", fmt.Sprintf("Authorization: Bearer %s", c.AuthToken)}...)
 	}
 
 	// Join the parts into a single string
