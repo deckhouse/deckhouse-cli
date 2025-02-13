@@ -222,10 +222,8 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//}
 	//fmt.Printf("loki url is %s\n", firstTimestampCurl)
 	fmt.Printf("loki url is %s\n", fullCommand)
-	fmt.Fprintf(os.Stdout, stdout.String())
 	fmt.Printf("%s\n", stdout.String())
-	fmt.Fprintf(os.Stdout, stderr.String())
-	fmt.Fprintf(os.Stderr, stderr.String())
+	fmt.Printf("%s\n", stderr.String())
 
 	err = json.Unmarshal(stdout.Bytes(), &result)
 	if err != nil {
