@@ -184,36 +184,36 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 	token := "eyJhbGciOiJSUzI1NiIsImtpZCI6IkFnbVRCVndWRm43dy04Qmg1cENqcXFQMVFhOEhuLXF0dUpFSTdWQXBYYUkifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJkOC1tb25pdG9yaW5nIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6Imxva2ktYXBpLXRva2VuIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZXJ2aWNlLWFjY291bnQubmFtZSI6Imxva2kiLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC51aWQiOiI0N2Y2ZWY1Ni01YjdkLTRlNjUtYTc3Zi1mNTI0ODkyZDJhNzgiLCJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQ6ZDgtbW9uaXRvcmluZzpsb2tpIn0.EF-RGqY0acC-C_2KPz51UPdwkLMGw-DV2nsrJuh2lQZ_0ebiwTmWoVFCj6o7Ey2z9CsNHkvEr9jxTc7uHh0rvRQIJp5rUrimeSBfvrJpLaiiVQ_h5cXJN84l5jq4IkbzO7lUObtjh6DmNzodZCbxMEu-Gm766weRhUdoW8zco7Cd-m26sQK4095tp9_4iW5lXBGC6R68DEa-2pjZjHpDspRwnI4XY_BVXldaIKpbR5cCU-8CKzJ0BXSvDcjKUjFv3Mk0TomMSFSlnMY5wyvr6vvus11E3MxajRq1vL9PJiW1ZfBFRnwEQsQnsIPgQMb45fmpgayCLMBnmjNF4WRxvg"
 
-	//curlParamFirstTS := CurlRequest{
-	//	//BaseURL: "http://<LOKI_HOST>:3100/loki/api/v1/query_range",
-	//	//Headers: map[string]string{
-	//	//	"Accept": "application/json",
-	//	//},
-	//	Params: map[string]string{
-	//		"query":     query,
-	//		"limit":     "1",
-	//		"direction": "FORWARD",
-	//	},
-	//	AuthToken: token, // Optional
-	//}
-	//firstTimestampCurl := curlParamFirstTS.GenerateCurlCommand()
+	curlParamFirstTS := CurlRequest{
+		//BaseURL: "http://<LOKI_HOST>:3100/loki/api/v1/query_range",
+		//Headers: map[string]string{
+		//	"Accept": "application/json",
+		//},
+		Params: map[string]string{
+			"query":     query,
+			"limit":     "1",
+			"direction": "FORWARD",
+		},
+		AuthToken: token, // Optional
+	}
+	firstTimestampCurl := curlParamFirstTS.GenerateCurlCommand()
 
 	//var curlRequest []string
 	//curlRequest = append(curlRequest, "curl --insecure -s")
-	curlEndpointUrl := fmt.Sprintf("Authorization: Bearer %s", token)
-	fullEndpointUrl := fmt.Sprintf("%s", lokiURL)
-	fullCommand := []string{"curl", "-v", "--insecure", "-H", curlEndpointUrl, fullEndpointUrl, "--data-urlencode", fmt.Sprintf("%s", query), "--data-urlencode", fmt.Sprintf("%s", limit), "--data-urlencode", fmt.Sprintf("%s", direction)}
+	//curlEndpointUrl := fmt.Sprintf("Authorization: Bearer %s", token)
+	//fullEndpointUrl := fmt.Sprintf("%s", lokiURL)
+	//fullCommand := []string{"curl", "-v", "--insecure", "-H", curlEndpointUrl, fullEndpointUrl, "--data-urlencode", fmt.Sprintf("%s", query), "--data-urlencode", fmt.Sprintf("%s", limit), "--data-urlencode", fmt.Sprintf("%s", direction)}
 	//getTimestamp := []string{"curl", "-v", "--insecure", "-H", curlEndpointUrl, fullEndpointUrl, "--data-urlencode", fmt.Sprintf("%s", query), "--data-urlencode", fmt.Sprintf("%s", limit), "--data-urlencode", fmt.Sprintf("%s", direction)}
 	//
 
-	executor, err := ExecInPod(config, kubeCl, fullCommand, podName, namespaceDeckhouse, containerName)
+	executor, err := ExecInPod(config, kubeCl, firstTimestampCurl, podName, namespaceDeckhouse, containerName)
 	if err = executor.StreamWithContext(
 		context.Background(),
 		remotecommand.StreamOptions{
 			Stdout: &stdout,
 			Stderr: &stderr,
 		}); err != nil {
-		fmt.Fprintf(os.Stderr, strings.Join(fullCommand, " "))
+		fmt.Fprintf(os.Stderr, strings.Join(firstTimestampCurl, " "))
 		fmt.Fprintf(os.Stderr, stderr.String())
 	}
 
@@ -222,7 +222,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//	return fmt.Errorf("failed to update the %s", err)
 	//}
 	//fmt.Printf("loki url is %s\n", firstTimestampCurl)
-	fmt.Printf("loki url is %s\n", fullCommand)
+	fmt.Printf("loki url is %s\n", firstTimestampCurl)
 	fmt.Printf("%s\n", stdout.String())
 	fmt.Printf("%s\n", stderr.String())
 
@@ -346,15 +346,16 @@ func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, getApi []string
 // Method to generate a cURL command dynamically
 func (c *CurlRequest) GenerateCurlCommand() []string {
 	// Start constructing the curl command
-	var curlParts []string
-	curlParts = append(curlParts, "curl --insecure -v")
+	//var curlParts []string
+	curlParts := append([]string{"curl", "--insecure", "-v"})
+	//fullCommand := []string{"curl", "-v", "--insecure", "-H", curlEndpointUrl, fullEndpointUrl, "--data-urlencode", fmt.Sprintf("%s", query), "--data-urlencode", fmt.Sprintf("%s", limit), "--data-urlencode", fmt.Sprintf("%s", direction)}
 
 	// Append the base URL
 	curlParts = append(curlParts, fmt.Sprintf(`"%s"`, lokiURL))
 	//
 	// Append dynamic `--data-urlencode` parameters
 	for key, value := range c.Params {
-		curlParts = append(curlParts, fmt.Sprintf(`--data-urlencode '%s=%s'`, key, value))
+		curlParts = append(curlParts, []string{"--data-urlencode", fmt.Sprintf(`'%s=%s'`, key, value)}...)
 	}
 	//
 	//// Append headers
@@ -364,7 +365,7 @@ func (c *CurlRequest) GenerateCurlCommand() []string {
 	//
 	// Append Authorization header if AuthToken is set
 	if c.AuthToken != "" {
-		curlParts = append(curlParts, fmt.Sprintf(`-H "Authorization: Bearer %s"`, c.AuthToken))
+		curlParts = append(curlParts, []string{"-H", fmt.Sprintf(`"Authorization: Bearer %s"`, c.AuthToken)}...)
 	}
 
 	// Join the parts into a single string
