@@ -346,7 +346,7 @@ func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, getApi []string
 func (c *CurlRequest) GenerateCurlCommand() []string {
 	// Start constructing the curl command
 	var curlParts []string
-	curlParts = append(curlParts, "curl --insecure -s")
+	curlParts = append(curlParts, "curl --insecure -v")
 
 	// Append the base URL
 	curlParts = append(curlParts, fmt.Sprintf(`"%s"`, lokiURL))
