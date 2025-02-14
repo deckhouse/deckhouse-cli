@@ -231,7 +231,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 	_, streamListDumpJson, err := getLogTimestamp(config, kubeCl, streamListDumpCurl)
 	if err != nil {
-		return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
+		return fmt.Errorf("Error get stream list JSON from Loki: %s", err)
 	}
 	//streamListDump, err := strconv.ParseInt(streamListDumpJson.Data.Result[0].Values[0][0], 10, 64)
 	//if err != nil {
