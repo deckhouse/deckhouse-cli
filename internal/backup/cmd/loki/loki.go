@@ -28,6 +28,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 	"os"
+	"strconv"
 	"strings"
 	//"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
@@ -60,7 +61,8 @@ func NewCommand() *cobra.Command {
 }
 
 const (
-	lokiURL = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/query_range"
+	//lokiURL = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/query_range"
+	lokiURL = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1"
 	//lokiURL      = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/series"
 	parallelJobs = 5             // Number of parallel requests
 	query        = `{pod=~".+"}` // LogQL query
@@ -76,7 +78,7 @@ const (
 	workers            = 5
 )
 
-// LokiResponse Struct to store API response
+// LokiResponse Struct to store API response query_range
 type LokiResponse struct {
 	Data struct {
 		Result []struct {
@@ -93,6 +95,13 @@ type LokiResponse struct {
 	} `json:"data"`
 }
 
+type SeriesApi struct {
+	Data []struct {
+		Pod       string `json:"pod"`
+		Container string `json:"container"`
+	} `json:"data"`
+}
+
 //type Command struct {
 //	Cmd  string
 //	Args []string
@@ -100,7 +109,7 @@ type LokiResponse struct {
 //}
 
 type CurlRequest struct {
-	//BaseURL   string            // Base URL of the request
+	BaseURL string // Base URL of the request
 	//Headers   map[string]string // Headers to include in the request
 	Params    map[string]string // Query parameters (dynamic --data-urlencode)
 	AuthToken string            // Bearer token (optional)
@@ -149,9 +158,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//	fmt.Fprintf(os.Stdout, stdout.String())
 	//	stdout.Reset()
 	//
-	//}
-
-	//var result LokiResponse
+	//
 
 	//var startTS int64
 	//// Extract timestamp from response
@@ -191,9 +198,11 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//}
 	//
 	//firstTimestampCurl := curlParamFirstTS.GenerateCurlCommand()
+
 	//chunkSize := int64(chunkDays * 24 * 60 * 60 * 1e9)
 
 	curlParamEndTS := CurlRequest{
+		BaseURL: "query_range",
 		Params: map[string]string{
 			"query":     `{pod=~".+"}`,
 			"limit":     "1",
@@ -202,18 +211,79 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		AuthToken: token, // Optional
 	}
 
-	endTimestampCurl := curlParamEndTS.GenerateCurlCommand()
-	endTimestampJson, err := getLogTimestamp(config, kubeCl, endTimestampCurl)
+	endDumpTimestampCurl := curlParamEndTS.GenerateCurlCommand()
+	endDumpTimestampJson, err := getLogTimestamp(config, kubeCl, endDumpTimestampCurl)
 	if err != nil {
-		return fmt.Errorf("Error get latest timestamp from Loki: %s", err)
+		return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
 	}
-	endTimestamp := endTimestampJson.Data.Result[0].Values[0][0]
+	endDumpTimestamp, err := strconv.ParseInt(endDumpTimestampJson.Data.Result[0].Values[0][0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("Error converting timestamp:", err)
+	}
+
+	fmt.Printf("%v\n", endDumpTimestamp)
+
+	curlParamStreamList := CurlRequest{
+		BaseURL:   "series",
+		AuthToken: token, // Optional
+	}
+
+	streamListDumpCurl := curlParamStreamList.GenerateCurlCommand()
+
+	fmt.Printf("%s\n", streamListDumpCurl)
+
+	//streamListDumpJson, err := getLogTimestamp(config, kubeCl, streamListDumpCurl)
+	//if err != nil {
+	//	return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
+	//}
+	//streamListDump, err := strconv.ParseInt(streamListDumpJson.Data.Result[0].Values[0][0], 10, 64)
+	//if err != nil {
+	//	return fmt.Errorf("Error converting timestamp:", err)
+	//}
 
 	//var wg sync.WaitGroup
-	//results := make(chan LokiResponse, 100) // Buffered channel
-	//var wg sync.WaitGroup
-	//results := make(chan string, workers) // Buffered channel for parallel execution
-	//sem := make(chan struct{}, workers)   // Semaphore to limit parallel requests
+	//logsChan := make(chan []string, parallelJobs) // Buffered channel for parallel execution
+	//sem := make(chan struct{}, parallelJobs)      // Semaphore to limit parallel requests
+
+	// Fetch logs in reverse order (end -> start)
+	//var startTime int64
+	//for t := endDumpTimestamp; t > startTime; t -= int64(chunkSize) {
+	//var lokiResp LokiResponse
+	//for _, result := range streamListDumpJson.Data {
+	//	podName :=
+	//
+	//}
+
+	//for t := endDumpTimestamp; len(result.Data.Result) > startTime; t -= int64(chunkSize) {
+	//	startTime := endDumpTimestamp - chunkSize
+	//
+	//	wg.Add(1)
+	//
+	//	go fetchLogs(t-int64(chunkSize), t, &wg, sem, logsChan)
+	//}
+
+	//for t := endDumpTimestamp; len(result.Data.Result) > startTime; t -= int64(chunkSize) {
+	//	startTime := endDumpTimestamp - chunkSize
+	//
+	//	wg.Add(1)
+	//
+	//	go fetchLogs(t-int64(chunkSize), t, &wg, sem, logsChan)
+	//}
+	//
+	//go func() {
+	//	wg.Wait()
+	//	close(logsChan)
+	//}()
+
+	//if len(result.Data.Result) > 0 && len(result.Data.Result[0].Values) > 0 {
+	//	//return result.Data.Result[0].Values[0][0], nil // First log's timestamp
+	//	//startTS = result.Data.Result[0].Values[0][0] // First log's timestamp
+	//	startTS, err = strconv.ParseInt(result.Data.Result[0].Values[0][0], 10, 64) // First log's timestamp
+	//	if err != nil {
+	//		return fmt.Errorf("Error converting timestamp:", err)
+	//	}
+	//}
+
 	////results := make(chan LokiResponse, parallelJobs)
 	//// Iterate over chunks of 30 days
 	//for chunkEnd := endTimestampBuff; chunkStart < chunkEnd; chunkStart -= chunkSize {
@@ -271,7 +341,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//}
 	//fmt.Printf("loki url is %s\n", firstTimestampCurl)
 	//fmt.Printf("loki url is %s\n", latestTimestamp)
-	fmt.Printf("%s\n", endTimestamp)
+	//fmt.Printf("%v\n%v\n", endDumpTimestamp, streamListDump)
 	//fmt.Printf("%s\n", stderr.String())
 	//var stdout bytes.Buffer
 	//err = json.Unmarshal(stdout.Bytes(), &result)
@@ -365,8 +435,9 @@ func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, getApi []string
 
 func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullCommand []string) (*LokiResponse, error) {
 
-	var stdout, stderr bytes.Buffer
 	var result LokiResponse
+
+	var stdout, stderr bytes.Buffer
 	podName, err := GetDeckhousePod(kubeCl, namespaceDeckhouse, labelSelector)
 	executor, err := ExecInPod(config, kubeCl, fullCommand, podName, namespaceDeckhouse, containerName)
 	if err = executor.StreamWithContext(
@@ -389,12 +460,52 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 
 func (c *CurlRequest) GenerateCurlCommand() []string {
 	curlParts := append([]string{"curl", "--insecure", "-v"})
-	curlParts = append(curlParts, fmt.Sprintf("%s", lokiURL))
+	curlParts = append(curlParts, fmt.Sprintf("%s/%s", lokiURL, c.BaseURL))
 	for key, value := range c.Params {
-		curlParts = append(curlParts, []string{"--data-urlencode", fmt.Sprintf("%s=%s", key, value)}...)
+		if value != "" {
+			curlParts = append(curlParts, []string{"--data-urlencode", fmt.Sprintf("%s=%s", key, value)}...)
+		}
 	}
+
 	if c.AuthToken != "" {
 		curlParts = append(curlParts, []string{"-H", fmt.Sprintf("Authorization: Bearer %s", c.AuthToken)}...)
 	}
 	return curlParts
 }
+
+//func fetchLogs(start, end int64, wg *sync.WaitGroup, sem chan struct{}, logsChan chan []string) {
+//	defer wg.Done()
+//	sem <- struct{}{}        // Acquire semaphore slot
+//	defer func() { <-sem }() // Release slot when done
+//
+//	//url := fmt.Sprintf("%s/loki/api/v1/query_range?query=%s&start=%d&end=%d&limit=5000&direction=backward", lokiURL, query, start, end)
+//	resp, err := http.Get(url)
+//	if err != nil {
+//		fmt.Println("Request failed:", err)
+//		return
+//	}
+//	defer resp.Body.Close()
+//
+//	body, err := io.ReadAll(resp.Body)
+//	if err != nil {
+//		fmt.Println("Failed to read response:", err)
+//		return
+//	}
+//
+//	var lokiResp LokiResponse
+//	if err := json.Unmarshal(body, &lokiResp); err != nil {
+//		fmt.Println("JSON parse error:", err)
+//		return
+//	}
+//
+//	var logs []string
+//	for _, result := range lokiResp.Data.Result {
+//		for _, entry := range result.Values {
+//			timestamp := entry[0]
+//			logMessage := entry[1]
+//			logs = append(logs, fmt.Sprintf("[%s] %s", timestamp, logMessage))
+//		}
+//	}
+//
+//	logsChan <- logs // Send logs to channel
+//}
