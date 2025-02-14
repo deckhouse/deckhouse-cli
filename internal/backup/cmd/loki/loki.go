@@ -212,7 +212,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	}
 
 	endDumpTimestampCurl := curlParamEndTS.GenerateCurlCommand()
-	endDumpTimestampJson, err := getLogTimestamp(config, kubeCl, endDumpTimestampCurl)
+	endDumpTimestampJson, _, err := getLogTimestamp(config, kubeCl, endDumpTimestampCurl)
 	if err != nil {
 		return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
 	}
@@ -229,16 +229,10 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	}
 	streamListDumpCurl := curlParamStreamList.GenerateCurlCommand()
 
-	for _, t := range streamListDumpCurl {
-		if t == fmt.Sprintf("%s/series", lokiURL) {
-			fmt.Printf("condition match\n %s is %s/series\n", t, lokiURL)
-		}
+	_, streamListDumpJson, err := getLogTimestamp(config, kubeCl, streamListDumpCurl)
+	if err != nil {
+		return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
 	}
-
-	//streamListDumpJson, err := getLogTimestamp(config, kubeCl, streamListDumpCurl)
-	//if err != nil {
-	//	return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
-	//}
 	//streamListDump, err := strconv.ParseInt(streamListDumpJson.Data.Result[0].Values[0][0], 10, 64)
 	//if err != nil {
 	//	return fmt.Errorf("Error converting timestamp:", err)
@@ -252,10 +246,34 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//var startTime int64
 	//for t := endDumpTimestamp; t > startTime; t -= int64(chunkSize) {
 	//var lokiResp LokiResponse
-	//for _, result := range streamListDumpJson.Data {
-	//	podName :=
-	//
-	//}
+	for _, result := range streamListDumpJson.Data {
+		for podName := range result.Pod {
+			containerNameStream := result.Container
+			fmt.Printf("Pod name is %v\nContainer name is : %s", podName, containerNameStream)
+
+			//curlParamStream := CurlRequest{
+			//	BaseURL: "query_range",
+			//	Params: map[string]string{
+			//		//"query":     `{pod=~"podName"}`,
+			//		"query": strconv.Itoa(podName),
+			//		"limit":     "1",
+			//		"direction": "BACKWARD",
+			//	},
+			//	AuthToken: token, // Optional
+			//}
+			//
+			//endDumpTimestampCurl := curlParamEndTS.GenerateCurlCommand()
+			//endDumpTimestampJson, _, err := getLogTimestamp(config, kubeCl, endDumpTimestampCurl)
+			//if err != nil {
+			//	return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
+			//}
+			//endDumpTimestamp, err := strconv.ParseInt(endDumpTimestampJson.Data.Result[0].Values[0][0], 10, 64)
+			//if err != nil {
+			//	return fmt.Errorf("Error converting timestamp:", err)
+			//}
+		}
+
+	}
 
 	//for t := endDumpTimestamp; len(result.Data.Result) > startTime; t -= int64(chunkSize) {
 	//	startTime := endDumpTimestamp - chunkSize
@@ -436,34 +454,44 @@ func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, getApi []string
 //	return nil
 //}
 
-func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullCommand []string) (*LokiResponse, error) {
+type LokiQuery interface {
+	GetType() string
+}
 
-	//for _, t := range fullCommand {
-	//	if t == fmt.Sprintf("%s/series", lokiURL) {
-	//		return true
-	//	}
-	//}
-	var result LokiResponse
+func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullCommand []string) (*LokiResponse, *SeriesApi, error) {
+	for _, t := range fullCommand {
 
-	var stdout, stderr bytes.Buffer
-	podName, err := GetDeckhousePod(kubeCl, namespaceDeckhouse, labelSelector)
-	executor, err := ExecInPod(config, kubeCl, fullCommand, podName, namespaceDeckhouse, containerName)
-	if err = executor.StreamWithContext(
-		context.Background(),
-		remotecommand.StreamOptions{
-			Stdout: &stdout,
-			Stderr: &stderr,
-		}); err != nil {
-		fmt.Fprintf(os.Stderr, strings.Join(fullCommand, " "))
-		return nil, err
+		var stdout, stderr bytes.Buffer
+		podName, err := GetDeckhousePod(kubeCl, namespaceDeckhouse, labelSelector)
+		executor, err := ExecInPod(config, kubeCl, fullCommand, podName, namespaceDeckhouse, containerName)
+		if err = executor.StreamWithContext(
+			context.Background(),
+			remotecommand.StreamOptions{
+				Stdout: &stdout,
+				Stderr: &stderr,
+			}); err != nil {
+			fmt.Fprintf(os.Stderr, strings.Join(fullCommand, " "))
+			return nil, nil, err
+		}
+
+		if t == fmt.Sprintf("%s/series", lokiURL) {
+			//fmt.Printf("condition match\n %s is %s/series\n", t, lokiURL)
+			var result SeriesApi
+			err = json.Unmarshal(stdout.Bytes(), &result)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed unmarshal %s", err)
+			}
+			return nil, &result, nil
+		}
+		var result LokiResponse
+		err = json.Unmarshal(stdout.Bytes(), &result)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed unmarshal %s", err)
+		}
+		return &result, nil, nil
 	}
 
-	err = json.Unmarshal(stdout.Bytes(), &result)
-	if err != nil {
-		return nil, fmt.Errorf("failed unmarshal %s", err)
-	}
-
-	return &result, nil
+	return nil, nil, nil
 }
 
 func (c *CurlRequest) GenerateCurlCommand() []string {
@@ -474,7 +502,6 @@ func (c *CurlRequest) GenerateCurlCommand() []string {
 			curlParts = append(curlParts, []string{"--data-urlencode", fmt.Sprintf("%s=%s", key, value)}...)
 		}
 	}
-
 	if c.AuthToken != "" {
 		curlParts = append(curlParts, []string{"-H", fmt.Sprintf("Authorization: Bearer %s", c.AuthToken)}...)
 	}
