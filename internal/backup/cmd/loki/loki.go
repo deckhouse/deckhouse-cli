@@ -227,10 +227,13 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		BaseURL:   "series",
 		AuthToken: token, // Optional
 	}
-
 	streamListDumpCurl := curlParamStreamList.GenerateCurlCommand()
 
-	fmt.Printf("%s\n", streamListDumpCurl)
+	for _, t := range streamListDumpCurl {
+		if t == fmt.Sprintf("%s/series", lokiURL) {
+			fmt.Printf("condition match\n %s is %s/series\n", t, lokiURL)
+		}
+	}
 
 	//streamListDumpJson, err := getLogTimestamp(config, kubeCl, streamListDumpCurl)
 	//if err != nil {
@@ -435,6 +438,11 @@ func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, getApi []string
 
 func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullCommand []string) (*LokiResponse, error) {
 
+	//for _, t := range fullCommand {
+	//	if t == fmt.Sprintf("%s/series", lokiURL) {
+	//		return true
+	//	}
+	//}
 	var result LokiResponse
 
 	var stdout, stderr bytes.Buffer
