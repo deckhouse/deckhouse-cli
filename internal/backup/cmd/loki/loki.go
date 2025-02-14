@@ -87,19 +87,20 @@ type LokiResponse struct {
 			//Values []struct {
 			//	Timestamp int64 `json:"[0]"`
 			//}
-			Stream struct {
-				Pod       string `json:"pod"`
-				Container string `json:"container"`
-			} `json:"stream"`
+			//Stream struct {
+			//	Pod       string `json:"pod"`
+			//	Container string `json:"container"`
+			//} `json:"stream"`
 		} `json:"result"`
 	} `json:"data"`
 }
 
 type SeriesApi struct {
-	Data []struct {
-		Pod       string `json:"pod"`
-		Container string `json:"container"`
-	} `json:"data"`
+	Data []map[string]string `json:"data"`
+	//{
+	//	//Pod       string `json:"pod"`
+	//	//Container string `json:"container"`
+	//} `json:"data"`
 }
 
 //type Command struct {
@@ -247,9 +248,9 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//for t := endDumpTimestamp; t > startTime; t -= int64(chunkSize) {
 	//var lokiResp LokiResponse
 	for _, result := range streamListDumpJson.Data {
-		for podName := range result.Pod {
-			containerNameStream := result.Container
-			fmt.Printf("Pod name is %v\nContainer name is : %s", podName, containerNameStream)
+		for podName := range result["pod"] {
+			containerNameStream := result["container"]
+			fmt.Printf("Pod name is %v\nContainer name is : %s\n", podName, containerNameStream)
 
 			//curlParamStream := CurlRequest{
 			//	BaseURL: "query_range",
@@ -482,8 +483,7 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 				return nil, nil, fmt.Errorf("failed unmarshal SeriesApi %s", err)
 			}
 			return nil, &result, nil
-		}
-		if t == fmt.Sprintf("%s/query_range", lokiURL) {
+		} else if t == fmt.Sprintf("%s/query_range", lokiURL) {
 			fmt.Printf("condition match\n %s is %s/query_range\n", t, lokiURL)
 			var result LokiResponse
 			err = json.Unmarshal(stdout.Bytes(), &result)
