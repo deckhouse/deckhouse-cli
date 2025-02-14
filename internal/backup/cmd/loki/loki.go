@@ -250,7 +250,8 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	for _, result := range streamListDumpJson.Data {
 		for podName := range result["pod"] {
 			containerNameStream := result["container"]
-			fmt.Printf("Pod name is %v\nContainer name is : %s\n", podName, containerNameStream)
+			podStr := fmt.Sprintf("%v", podName)
+			fmt.Printf("Pod name is %v\nContainer name is : %s\n", podStr, containerNameStream)
 
 			//curlParamStream := CurlRequest{
 			//	BaseURL: "query_range",
@@ -454,10 +455,6 @@ func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, getApi []string
 //
 //	return nil
 //}
-
-type LokiQuery interface {
-	GetType() string
-}
 
 func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullCommand []string) (*LokiResponse, *SeriesApi, error) {
 	for _, t := range fullCommand {
