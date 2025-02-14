@@ -482,13 +482,15 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 				return nil, nil, fmt.Errorf("failed unmarshal SeriesApi %s", err)
 			}
 			return nil, &result, nil
+		} else {
+			var result LokiResponse
+			err = json.Unmarshal(stdout.Bytes(), &result)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed unmarshal LokiResponse%s", err)
+			}
+			return &result, nil, nil
 		}
-		//var result LokiResponse
-		//err = json.Unmarshal(stdout.Bytes(), &result)
-		//if err != nil {
-		//	return nil, nil, fmt.Errorf("failed unmarshal LokiResponse%s", err)
-		//}
-		//return &result, nil, nil
+
 	}
 
 	return nil, nil, nil
