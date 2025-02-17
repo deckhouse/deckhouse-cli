@@ -264,7 +264,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 						"start":     strconv.FormatInt(chunkStart, 10),
 						"query":     query,
 						"limit":     "5000",
-						"direction": "FORWARD",
+						"direction": "BACKWARD",
 					},
 					AuthToken: token, // Optional
 				}
@@ -274,10 +274,10 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 					return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
 				}
 
-				if len(DumpLogCurlJson.Data.Result) == 0 {
-					fmt.Printf("No more logs.\nStop...")
-					break
-				}
+				//if len(DumpLogCurlJson.Data.Result) == 0 {
+				//	fmt.Printf("No more logs.\nStop...")
+				//	break
+				//}
 
 				// Print logs
 				for _, result := range DumpLogCurlJson.Data.Result {
@@ -286,8 +286,8 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 					}
 				}
 
-				firstLog := DumpLogCurlJson.Data.Result[0]
-				firstTimestamp, err := strconv.ParseInt(firstLog.Values[0][0], 10, 64)
+				firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1]
+				firstTimestamp, err := strconv.ParseInt(firstLog.Values[len(firstLog.Values)-1][0], 10, 64)
 				if err != nil {
 					return fmt.Errorf("Error converting timestamp:", err)
 				}
