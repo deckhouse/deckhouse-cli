@@ -200,7 +200,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//
 	//firstTimestampCurl := curlParamFirstTS.GenerateCurlCommand()
 
-	//chunkSize := int64(chunkDays * 24 * 60 * 60 * 1e9)
+	chunkSize := int64(chunkDays * 24 * 60 * 60 * 1e9) //30 days in nanosec timestamp
 
 	curlParamEndTS := CurlRequest{
 		BaseURL: "query_range",
@@ -224,16 +224,52 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 	fmt.Printf("%v\n", endDumpTimestamp)
 
-	curlParamStreamList := CurlRequest{
-		BaseURL:   "series",
-		AuthToken: token, // Optional
-	}
-	streamListDumpCurl := curlParamStreamList.GenerateCurlCommand()
+	for chunkEnd := endDumpTimestamp; chunkEnd > 0; chunkEnd -= chunkSize {
+		chunkStart := chunkEnd - chunkSize
 
-	_, streamListDumpJson, err := getLogTimestamp(config, kubeCl, streamListDumpCurl)
-	if err != nil {
-		return fmt.Errorf("Error get stream list JSON from Loki: %s", err)
+		curlParamStreamList := CurlRequest{
+			BaseURL: "series",
+			Params: map[string]string{
+				"end":   strconv.FormatInt(chunkEnd, 10),
+				"start": strconv.FormatInt(chunkStart, 10),
+			},
+			AuthToken: token, // Optional
+		}
+		streamListDumpCurl := curlParamStreamList.GenerateCurlCommand()
+
+		_, streamListDumpJson, err := getLogTimestamp(config, kubeCl, streamListDumpCurl)
+		if err != nil {
+			return fmt.Errorf("Error get stream list JSON from Loki: %s", err)
+		}
+
+		for _, result := range streamListDumpJson.Data {
+			containerNameStream, _ := result["container"]
+			//if hadContainer {}
+			podName, _ := result["pod"]
+			fmt.Printf("Pod name is %v\nContainer name is : %s\n", podName, containerNameStream)
+		}
+
+		//streamListDump, err := strconv.ParseInt(streamListDumpJson.Data.Result[0].Values[0][0], 10, 64)
+		//if err != nil {
+		//	return fmt.Errorf("Error converting timestamp:", err)
+		//}
+
 	}
+
+	//curlParamStreamList := CurlRequest{
+	//	BaseURL: "series",
+	//	Params: map[string]string{
+	//		"end": strconv.FormatInt(endDumpTimestamp, 10),
+	//	},
+	//	AuthToken: token, // Optional
+	//}
+	//streamListDumpCurl := curlParamStreamList.GenerateCurlCommand()
+	//
+	//_, streamListDumpJson, err := getLogTimestamp(config, kubeCl, streamListDumpCurl)
+	//if err != nil {
+	//	return fmt.Errorf("Error get stream list JSON from Loki: %s", err)
+	//}
+
 	//streamListDump, err := strconv.ParseInt(streamListDumpJson.Data.Result[0].Values[0][0], 10, 64)
 	//if err != nil {
 	//	return fmt.Errorf("Error converting timestamp:", err)
@@ -247,32 +283,33 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	//var startTime int64
 	//for t := endDumpTimestamp; t > startTime; t -= int64(chunkSize) {
 	//var lokiResp LokiResponse
-	for _, result := range streamListDumpJson.Data {
-		containerNameStream := result["container"]
-		podName := result["pod"]
-		fmt.Printf("Pod name is %v\nContainer name is : %s\n", podName, containerNameStream)
 
-		//curlParamStream := CurlRequest{
-		//	BaseURL: "query_range",
-		//	Params: map[string]string{
-		//		//"query":     `{pod=~"podName"}`,
-		//		"query": strconv.Itoa(podName),
-		//		"limit":     "1",
-		//		"direction": "BACKWARD",
-		//	},
-		//	AuthToken: token, // Optional
-		//}
-		//
-		//endDumpTimestampCurl := curlParamEndTS.GenerateCurlCommand()
-		//endDumpTimestampJson, _, err := getLogTimestamp(config, kubeCl, endDumpTimestampCurl)
-		//if err != nil {
-		//	return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
-		//}
-		//endDumpTimestamp, err := strconv.ParseInt(endDumpTimestampJson.Data.Result[0].Values[0][0], 10, 64)
-		//if err != nil {
-		//	return fmt.Errorf("Error converting timestamp:", err)
-		//}
-	}
+	//for _, result := range streamListDumpJson.Data {
+	//	containerNameStream := result["container"]
+	//	podName := result["pod"]
+	//	fmt.Printf("Pod name is %v\nContainer name is : %s\n", podName, containerNameStream)
+	//
+	//	//curlParamStream := CurlRequest{
+	//	//	BaseURL: "query_range",
+	//	//	Params: map[string]string{
+	//	//		//"query":     `{pod=~"podName"}`,
+	//	//		"query": strconv.Itoa(podName),
+	//	//		"limit":     "1",
+	//	//		"direction": "BACKWARD",
+	//	//	},
+	//	//	AuthToken: token, // Optional
+	//	//}
+	//	//
+	//	//endDumpTimestampCurl := curlParamEndTS.GenerateCurlCommand()
+	//	//endDumpTimestampJson, _, err := getLogTimestamp(config, kubeCl, endDumpTimestampCurl)
+	//	//if err != nil {
+	//	//	return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
+	//	//}
+	//	//endDumpTimestamp, err := strconv.ParseInt(endDumpTimestampJson.Data.Result[0].Values[0][0], 10, 64)
+	//	//if err != nil {
+	//	//	return fmt.Errorf("Error converting timestamp:", err)
+	//	//}
+	//}
 
 	//for t := endDumpTimestamp; len(result.Data.Result) > startTime; t -= int64(chunkSize) {
 	//	startTime := endDumpTimestamp - chunkSize
