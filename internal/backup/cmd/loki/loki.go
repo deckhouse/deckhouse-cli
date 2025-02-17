@@ -227,6 +227,8 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	for chunkEnd := endDumpTimestamp; chunkEnd > 0; chunkEnd -= chunkSize {
 		chunkStart := chunkEnd - chunkSize
 
+		fmt.Printf("Fetching logs from %v to %v\n", chunkStart, chunkEnd)
+
 		curlParamStreamList := CurlRequest{
 			BaseURL: "series",
 			Params: map[string]string{
