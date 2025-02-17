@@ -286,8 +286,10 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 					}
 				}
 
-				firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1]
-				firstTimestamp, err := strconv.ParseInt(firstLog.Values[len(firstLog.Values)-1][0], 10, 64)
+				//firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1]
+				firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
+				//firstTimestamp, err := strconv.ParseInt(firstLog.Values[len(firstLog.Values)-1][0], 10, 64)
+				firstTimestamp, err := strconv.ParseInt(firstLog, 10, 64)
 				if err != nil {
 					return fmt.Errorf("Error converting timestamp:", err)
 				}
