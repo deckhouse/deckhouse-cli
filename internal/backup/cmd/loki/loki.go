@@ -244,11 +244,26 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("Error get stream list JSON from Loki: %s", err)
 		}
 
+		if len(streamListDumpJson.Data) == 0 {
+			fmt.Printf("No more streams.\nStop...")
+			break // No more data, stop pagination
+		}
+
 		for _, result := range streamListDumpJson.Data {
 			containerNameStream, _ := result["container"]
 			//if hadContainer {}
 			podName, _ := result["pod"]
 			fmt.Printf("Pod name is %v\nContainer name is : %s\n", podName, containerNameStream)
+
+			//curlParamStream := CurlRequest{
+			//	BaseURL: "query_range",
+			//	Params: map[string]string{
+			//		"query":     `{pod=~"`podName`"}`,
+			//		"limit":     "5000",
+			//		"direction": "FORWARD",
+			//	},
+			//	AuthToken: token, // Optional
+			//}
 		}
 
 		//streamListDump, err := strconv.ParseInt(streamListDumpJson.Data.Result[0].Values[0][0], 10, 64)
