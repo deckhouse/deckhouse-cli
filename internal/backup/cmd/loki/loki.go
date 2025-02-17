@@ -273,7 +273,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 				if err != nil {
 					return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
 				}
-
+				fmt.Printf("chunkStart is: %v , chunkEnd : %v\n", chunkStart, chunkEnd)
 				if len(DumpLogCurlJson.Data.Result) == 0 {
 					fmt.Printf("No more logs.\nStop...\n")
 					break
