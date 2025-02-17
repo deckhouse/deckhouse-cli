@@ -254,7 +254,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			//if hadContainer {}
 			podName, _ := result["pod"]
 			fmt.Printf("STREAM IS: Pod name is %v , Container name is : %s\n", podName, containerNameStream)
-			query := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podName, containerNameStream)
+			query1 := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podName, containerNameStream)
 
 			for chunkEnd > chunkStart {
 				curlParamDumpLog := CurlRequest{
@@ -262,7 +262,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 					Params: map[string]string{
 						"end":       strconv.FormatInt(chunkEnd, 10),
 						"start":     strconv.FormatInt(chunkStart, 10),
-						"query":     query,
+						"query":     query1,
 						"limit":     "5000",
 						"direction": "BACKWARD",
 					},
@@ -275,13 +275,13 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 				}
 
 				if len(DumpLogCurlJson.Data.Result) == 0 {
-					fmt.Printf("No more logs.\nStop...")
+					fmt.Printf("No more logs.\nStop...\n")
 					break
 				}
 
 				// Print logs
-				for _, result := range DumpLogCurlJson.Data.Result {
-					for _, log := range result.Values {
+				for _, result1 := range DumpLogCurlJson.Data.Result {
+					for _, log := range result1.Values {
 						fmt.Printf("Timestamp: %s, Log: %s\n", log[0], log[1])
 					}
 				}
