@@ -256,40 +256,41 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			fmt.Printf("STREAM IS: Pod name is %v , Container name is : %s\n", podName, containerNameStream)
 			query := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podName, containerNameStream)
 
-			//for
-			curlParamDumpLog := CurlRequest{
-				BaseURL: "query_range",
-				Params: map[string]string{
-					"end":       strconv.FormatInt(chunkEnd, 10),
-					"start":     strconv.FormatInt(chunkStart, 10),
-					"query":     query,
-					"limit":     "5000",
-					"direction": "FORWARD",
-				},
-				AuthToken: token, // Optional
-			}
-			DumpLogCurl := curlParamDumpLog.GenerateCurlCommand()
-			DumpLogCurlJson, _, err := getLogTimestamp(config, kubeCl, DumpLogCurl)
-			if err != nil {
-				return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
-			}
-
-			// Print logs
-			for _, result := range DumpLogCurlJson.Data.Result {
-				for _, log := range result.Values {
-					fmt.Printf("Timestamp: %s, Log: %s\n", log[0], log[1])
+			for chunkEnd > chunkStart {
+				curlParamDumpLog := CurlRequest{
+					BaseURL: "query_range",
+					Params: map[string]string{
+						"end":       strconv.FormatInt(chunkEnd, 10),
+						"start":     strconv.FormatInt(chunkStart, 10),
+						"query":     query,
+						"limit":     "5000",
+						"direction": "FORWARD",
+					},
+					AuthToken: token, // Optional
 				}
-			}
-
-			//Get last timestamp for pagination
-			if len(DumpLogCurlJson.Data.Result) > 0 {
-				lastLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1]
-				lastTimestamp, err := strconv.ParseInt(lastLog.Values[len(lastLog.Values)-1][0], 10, 64)
+				DumpLogCurl := curlParamDumpLog.GenerateCurlCommand()
+				DumpLogCurlJson, _, err := getLogTimestamp(config, kubeCl, DumpLogCurl)
 				if err != nil {
-					return fmt.Errorf("Error converting timestamp:", err)
+					return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
 				}
-				fmt.Println("Fetching next batch from:", lastTimestamp)
-				chunkEnd = lastTimestamp
+
+				// Print logs
+				for _, result := range DumpLogCurlJson.Data.Result {
+					for _, log := range result.Values {
+						fmt.Printf("Timestamp: %s, Log: %s\n", log[0], log[1])
+					}
+				}
+
+				//Get last timestamp for pagination
+				if len(DumpLogCurlJson.Data.Result) > 0 {
+					lastLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1]
+					lastTimestamp, err := strconv.ParseInt(lastLog.Values[len(lastLog.Values)-1][0], 10, 64)
+					if err != nil {
+						return fmt.Errorf("Error converting timestamp:", err)
+					}
+					fmt.Println("Fetching next batch from:", lastTimestamp)
+					chunkEnd = lastTimestamp
+				}
 			}
 		}
 
