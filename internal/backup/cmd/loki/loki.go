@@ -264,7 +264,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 						"start":     strconv.FormatInt(chunkStart, 10),
 						"query":     query,
 						"limit":     "5000",
-						"direction": "BACKWARD",
+						"direction": "FORWARD",
 					},
 					AuthToken: token, // Optional
 				}
@@ -274,6 +274,11 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 					return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
 				}
 
+				if len(DumpLogCurlJson.Data.Result) == 0 {
+					fmt.Printf("No more logs.\nStop...")
+					break
+				}
+
 				// Print logs
 				for _, result := range DumpLogCurlJson.Data.Result {
 					for _, log := range result.Values {
@@ -281,21 +286,14 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 					}
 				}
 
-				//Get last timestamp for pagination
-				if len(DumpLogCurlJson.Data.Result) > 0 {
-					lastLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1]
-					lastTimestamp, err := strconv.ParseInt(lastLog.Values[len(lastLog.Values)-1][0], 10, 64)
-					if err != nil {
-						return fmt.Errorf("Error converting timestamp:", err)
-					}
-					fmt.Println("Fetching next batch from:", lastTimestamp)
-					chunkEnd = lastTimestamp
+				firstLog := DumpLogCurlJson.Data.Result[0]
+				firstTimestamp, err := strconv.ParseInt(firstLog.Values[0][0], 10, 64)
+				if err != nil {
+					return fmt.Errorf("Error converting timestamp:", err)
 				}
+				fmt.Println("Fetching next batch from:", firstTimestamp)
+				chunkEnd = firstTimestamp
 
-				if len(DumpLogCurlJson.Data.Result) == 0 {
-					fmt.Printf("No more logs.\nStop...")
-					break
-				}
 			}
 		}
 
