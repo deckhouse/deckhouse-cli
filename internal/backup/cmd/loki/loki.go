@@ -246,14 +246,14 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 		if len(streamListDumpJson.Data) == 0 {
 			fmt.Printf("No more streams.\nStop...")
-			break // No more data, stop pagination
+			break
 		}
 
 		for _, result := range streamListDumpJson.Data {
 			containerNameStream, _ := result["container"]
 			//if hadContainer {}
 			podName, _ := result["pod"]
-			fmt.Printf("STREAM IS: Pod name is %v\nContainer name is : %s\n", podName, containerNameStream)
+			fmt.Printf("STREAM IS: Pod name is %v , Container name is : %s\n", podName, containerNameStream)
 			query := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podName, containerNameStream)
 
 			//for
@@ -281,13 +281,16 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 				}
 			}
 
-			// Get last timestamp for pagination
-			//if len(DumpLogCurlJson.Data.Result) > 0 {
-			//	lastLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1]
-			//	lastTimestamp := lastLog.Values[len(lastLog.Values)-1][0]
-			//	fmt.Println("Fetching next batch from:", lastTimestamp)
-			//	fetchLogs(lastTimestamp) // Recursively fetch next batch
-			//}
+			//Get last timestamp for pagination
+			if len(DumpLogCurlJson.Data.Result) > 0 {
+				lastLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1]
+				lastTimestamp, err := strconv.ParseInt(lastLog.Values[len(lastLog.Values)-1][0], 10, 64)
+				if err != nil {
+					return fmt.Errorf("Error converting timestamp:", err)
+				}
+				fmt.Println("Fetching next batch from:", lastTimestamp)
+				chunkEnd = lastTimestamp
+			}
 		}
 
 		//streamListDump, err := strconv.ParseInt(streamListDumpJson.Data.Result[0].Values[0][0], 10, 64)
