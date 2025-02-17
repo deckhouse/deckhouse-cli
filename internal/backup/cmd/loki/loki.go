@@ -253,16 +253,40 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			containerNameStream, _ := result["container"]
 			//if hadContainer {}
 			podName, _ := result["pod"]
-			fmt.Printf("Pod name is %v\nContainer name is : %s\n", podName, containerNameStream)
+			fmt.Printf("STREAM IS: Pod name is %v\nContainer name is : %s\n", podName, containerNameStream)
+			query := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podName, containerNameStream)
 
-			//curlParamStream := CurlRequest{
-			//	BaseURL: "query_range",
-			//	Params: map[string]string{
-			//		"query":     `{pod=~"`podName`"}`,
-			//		"limit":     "5000",
-			//		"direction": "FORWARD",
-			//	},
-			//	AuthToken: token, // Optional
+			//for
+			curlParamDumpLog := CurlRequest{
+				BaseURL: "query_range",
+				Params: map[string]string{
+					"end":       strconv.FormatInt(chunkEnd, 10),
+					"start":     strconv.FormatInt(chunkStart, 10),
+					"query":     query,
+					"limit":     "5000",
+					"direction": "FORWARD",
+				},
+				AuthToken: token, // Optional
+			}
+			DumpLogCurl := curlParamDumpLog.GenerateCurlCommand()
+			DumpLogCurlJson, _, err := getLogTimestamp(config, kubeCl, DumpLogCurl)
+			if err != nil {
+				return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
+			}
+
+			// Print logs
+			for _, result := range DumpLogCurlJson.Data.Result {
+				for _, log := range result.Values {
+					fmt.Printf("Timestamp: %s, Log: %s\n", log[0], log[1])
+				}
+			}
+
+			// Get last timestamp for pagination
+			//if len(DumpLogCurlJson.Data.Result) > 0 {
+			//	lastLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1]
+			//	lastTimestamp := lastLog.Values[len(lastLog.Values)-1][0]
+			//	fmt.Println("Fetching next batch from:", lastTimestamp)
+			//	fetchLogs(lastTimestamp) // Recursively fetch next batch
 			//}
 		}
 
