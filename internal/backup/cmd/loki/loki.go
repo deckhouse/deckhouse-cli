@@ -264,7 +264,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 						"start":     strconv.FormatInt(chunkStart, 10),
 						"query":     query,
 						"limit":     "5000",
-						"direction": "FORWARD",
+						"direction": "BACKWARD",
 					},
 					AuthToken: token, // Optional
 				}
@@ -290,6 +290,11 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 					}
 					fmt.Println("Fetching next batch from:", lastTimestamp)
 					chunkEnd = lastTimestamp
+				}
+
+				if len(DumpLogCurlJson.Data.Result) == 0 {
+					fmt.Printf("No more logs.\nStop...")
+					break
 				}
 			}
 		}
