@@ -309,9 +309,10 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 		}
 
 		//logsByPodContainer := make(map[string][]string)
-		var logs []string
+		//var logs []string
 		for _, result2 := range DumpLogCurlJson.Data.Result {
 			for _, entry := range result2.Values {
+				var logs []string
 				timestampInt64, err := strconv.ParseInt(entry[0], 10, 64)
 				if err != nil {
 					//errChan <- fmt.Errorf("Error converting timestamp:", err)
