@@ -170,7 +170,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Error converting timestamp:", err)
 	}
 
-	fmt.Printf("%v\n", endDumpTimestamp)
+	//fmt.Printf("%v\n", endDumpTimestamp)
 
 	for chunkEnd := endDumpTimestamp; chunkEnd > 0; chunkEnd -= chunkSize {
 		chunkStart := chunkEnd - chunkSize
