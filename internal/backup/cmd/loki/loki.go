@@ -221,7 +221,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		var allLogs []string
 		for chunk := range logsChan {
 			allLogs = append(allLogs, chunk...)
-			fmt.Printf("\nLogs: %s", allLogs)
+			fmt.Printf("\nLogs: %s\n", allLogs)
 		}
 
 		////// Collect errors from channel
@@ -317,7 +317,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 				timestampUtc := time.Unix(0, timestampInt64).UTC()
 				//fileKey := fmt.Sprintf("%s-%s", podNameStream, containerNameStream)
 				//logs := fmt.Sprintf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1])
-				logs = append(logs, fmt.Sprintf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1]))
+				logs = append(logs, fmt.Sprintf("\nTimestamp: [%v], Log: %s\n", timestampUtc, entry[1]))
 				//fmt.Printf("%s", logs)
 				//logsByPodContainer[fileKey] = append(logsByPodContainer[fileKey], logs)
 				//for key, logs1 := range logsByPodContainer {
