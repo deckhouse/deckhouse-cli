@@ -67,7 +67,7 @@ const (
 	//lokiURL = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/query_range"
 	lokiURL = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1"
 	//lokiURL      = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/series"
-	parallelJobs = 5             // Number of parallel requests
+	parallelJobs = 1             // Number of parallel requests
 	query        = `{pod=~".+"}` // LogQL query
 	//query = `query={pod=~".+"}` // LogQL query
 	//startTime    = "2025-02-12T16:22:00Z" // Start time
@@ -85,25 +85,13 @@ const (
 type LokiResponse struct {
 	Data struct {
 		Result []struct {
-			//Stream    map[string]string `json:"stream"`
 			Values [][]string `json:"values"`
-			//Values []struct {
-			//	Timestamp int64 `json:"[0]"`
-			//}
-			//Stream struct {
-			//	Pod       string `json:"pod"`
-			//	Container string `json:"container"`
-			//} `json:"stream"`
 		} `json:"result"`
 	} `json:"data"`
 }
 
 type SeriesApi struct {
 	Data []map[string]string `json:"data"`
-	//{
-	//	//Pod       string `json:"pod"`
-	//	//Container string `json:"container"`
-	//} `json:"data"`
 }
 
 //type Command struct {
@@ -293,13 +281,6 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 			fmt.Printf("No more logs.\nStop...\n")
 			break
 		}
-
-		//// Print logs
-		//for _, result1 := range DumpLogCurlJson.Data.Result {
-		//	for _, log := range result1.Values {
-		//		fmt.Printf("Timestamp: %s, Log: %s\n", log[0], log[1])
-		//	}
-		//}
 
 		var logs []string
 		for _, result1 := range DumpLogCurlJson.Data.Result {
