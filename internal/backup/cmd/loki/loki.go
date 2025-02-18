@@ -17,10 +17,13 @@ limitations under the License.
 package loki
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -85,7 +88,8 @@ const (
 type LokiResponse struct {
 	Data struct {
 		Result []struct {
-			Values [][]string `json:"values"`
+			Stream map[string]string `json:"stream"`
+			Values [][]string        `json:"values"`
 		} `json:"result"`
 	} `json:"data"`
 }
@@ -93,12 +97,6 @@ type LokiResponse struct {
 type SeriesApi struct {
 	Data []map[string]string `json:"data"`
 }
-
-//type Command struct {
-//	Cmd  string
-//	Args []string
-//	File string
-//}
 
 type CurlRequest struct {
 	BaseURL string // Base URL of the request
@@ -119,14 +117,10 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	//podName, err := GetDeckhousePod(kubeCl, namespaceDeckhouse, labelSelector)
-	//
-	//var stdout, stderr bytes.Buffer
-
-	//gzipWriter := gzip.NewWriter(os.Stdout)
-	//defer gzipWriter.Close()
-	//tarWriter := tar.NewWriter(gzipWriter)
-	//defer tarWriter.Close()
+	gzipWriter := gzip.NewWriter(os.Stdout)
+	defer gzipWriter.Close()
+	tarWriter := tar.NewWriter(gzipWriter)
+	defer tarWriter.Close()
 
 	//for _, cmd := range debugCommands {
 	//
@@ -208,7 +202,12 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		logsChan := make(chan []string, parallelJobs)
 		errChan := make(chan error, parallelJobs)
 
+		var containerNameStream string
+		var podNameStream string
+
 		for _, result := range streamListDumpJson.Data {
+			containerNameStream, _ = result["container"]
+			podNameStream, _ = result["pod"]
 
 			wg.Add(1)
 			go fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, result, config, kubeCl, &wg, sem, logsChan, errChan)
@@ -225,6 +224,8 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		for chunk := range logsChan {
 			allLogs = append(allLogs, chunk...)
 			fmt.Printf("\nLogs: %s", allLogs)
+			fmt.Printf("\nLogs: %s", podNameStream)
+			fmt.Printf("\nLogs: %s", containerNameStream)
 		}
 
 		// Collect errors from channel
@@ -250,13 +251,13 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 	defer func() { <-sem }() // Release slot when done
 
 	containerNameStream, _ := result1["container"]
-	//if hadContainer {}
+
 	podName, _ := result1["pod"]
 	fmt.Printf("STREAM IS: Pod name is %v , Container name is : %s\n", podName, containerNameStream)
 	query1 := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podName, containerNameStream)
-
 	chunkEnd = endDumpTimestamp
 
+	//if hadContainer {}
 	for chunkEnd > chunkStart {
 		curlParamDumpLog := CurlRequest{
 			BaseURL: "query_range",
@@ -398,6 +399,7 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 			}); err != nil {
 			fmt.Fprintf(os.Stderr, strings.Join(fullCommand, " "))
 			return nil, nil, err
+
 		}
 
 		if t == fmt.Sprintf("%s/series", lokiURL) {
@@ -417,8 +419,51 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 			}
 			return &result, nil, nil
 		}
-
+		stdout.Reset()
 	}
 
 	return nil, nil, nil
+}
+
+// Create a tar.gz file from log files
+func createTarGz(logFiles []string, outputFile string) error {
+	tarFile, err := os.Create(outputFile)
+	if err != nil {
+		return err
+	}
+	defer tarFile.Close()
+
+	gzWriter := gzip.NewWriter(tarFile)
+	defer gzWriter.Close()
+
+	tarWriter := tar.NewWriter(gzWriter)
+	defer tarWriter.Close()
+
+	for _, logFile := range logFiles {
+		file, err := os.Open(logFile)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		info, err := file.Stat()
+		if err != nil {
+			return err
+		}
+
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return err
+		}
+
+		if _, err := io.Copy(tarWriter, file); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
