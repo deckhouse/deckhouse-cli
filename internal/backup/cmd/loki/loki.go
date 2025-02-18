@@ -239,18 +239,19 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		for result := range logsChan {
 			for key, logs := range result {
 				podContainerLogs[key] = append(podContainerLogs[key], logs...)
-				fmt.Printf("\nLogs: %s", podContainerLogs[key])
 			}
 		}
 
 		//// Save logs to files
 		//var logFiles []string
-		//for key, logs := range podContainerLogs {
-		//	filename := fmt.Sprintf("%s.log", key)
-		//	if err := writeLogsToFile(filename, logs); err == nil {
-		//		logFiles = append(logFiles, filename)
-		//	}
-		//}
+		for key, logs := range podContainerLogs {
+			//filename := fmt.Sprintf("%s.log", key)
+			fmt.Printf("Pod, Container: %s\n Logs: %s\n", key, logs)
+
+			//if err := writeLogsToFile(filename, logs); err == nil {
+			//	logFiles = append(logFiles, filename)
+			//}
+		}
 		//
 		//// Compress logs into tar.gz
 		//if err := createTarGz(logFiles, "logs.tar.gz"); err == nil {
