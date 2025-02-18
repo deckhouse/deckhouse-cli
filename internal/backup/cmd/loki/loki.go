@@ -272,12 +272,16 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 	containerNameStream, _ := result1["container"]
 	podNameStream, _ := result1["pod"]
 
-	fmt.Printf("STREAM IS: Pod name is %v , Container name is : %s\n", podNameStream, containerNameStream)
+	//fmt.Printf("STREAM IS: Pod name is %v , Container name is : %s\n", podNameStream, containerNameStream)
+
 	query1 := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podNameStream, containerNameStream)
 
 	chunkEnd = endDumpTimestamp
 	//if hadContainer {}
 	for chunkEnd > chunkStart {
+
+		fmt.Printf("Fetch logs for pod: %s and container: %s in time range chunkStart: %v and chunkEnd: %v", podNameStream, containerNameStream, chunkStart, chunkEnd)
+
 		curlParamDumpLog := CurlRequest{
 			BaseURL: "query_range",
 			Params: map[string]string{
@@ -331,7 +335,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 		if err != nil {
 			errChan <- fmt.Errorf("Error converting timestamp:", err)
 		}
-		fmt.Println("Fetching next batch from:", firstTimestamp)
+		//fmt.Println("Fetching next batch from:", firstTimestamp)
 		chunkEnd = firstTimestamp
 	}
 }
@@ -432,7 +436,7 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 		}
 
 		if t == fmt.Sprintf("%s/series", lokiURL) {
-			fmt.Printf("condition match\n %s is %s/series\n", t, lokiURL)
+			//fmt.Printf("condition match\n %s is %s/series\n", t, lokiURL)
 			var result SeriesApi
 			err = json.Unmarshal(stdout.Bytes(), &result)
 			if err != nil {
@@ -440,7 +444,7 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 			}
 			return nil, &result, nil
 		} else if t == fmt.Sprintf("%s/query_range", lokiURL) {
-			fmt.Printf("condition match\n %s is %s/query_range\n", t, lokiURL)
+			//fmt.Printf("condition match\n %s is %s/query_range\n", t, lokiURL)
 			var result LokiResponse
 			err = json.Unmarshal(stdout.Bytes(), &result)
 			if err != nil {
