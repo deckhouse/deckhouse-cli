@@ -43,11 +43,16 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string) error {
 		if errors.Is(err, io.EOF) {
 			break
 		}
+
+		if tarHdr.Typeflag != tar.TypeReg {
+			continue
+		}
+
 		writePath := filepath.Join(targetPath, filepath.Clean(tarHdr.Name))
 		if err = os.MkdirAll(filepath.Dir(writePath), 0o755); err != nil {
 			return fmt.Errorf("setup dir tree: %w", err)
 		}
-		bundleFile, err := os.OpenFile(writePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+		bundleFile, err := os.OpenFile(writePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 		if err != nil {
 			return fmt.Errorf("create file: %w", err)
 		}
