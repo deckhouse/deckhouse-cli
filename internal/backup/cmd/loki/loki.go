@@ -509,9 +509,9 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 		var logs []string
 		for _, result1 := range DumpLogCurlJson.Data.Result {
 			for _, entry := range result1.Values {
-				timestamp := entry[0]
-				logMessage := entry[1]
-				logs = append(logs, fmt.Sprintf("[%s] %s", timestamp, logMessage))
+				//timestamp := entry[0]
+				//logMessage := entry[1]
+				logs = append(logs, fmt.Sprintf("Timestamp: [%s], Log: %s\n", entry[0], entry[1]))
 			}
 		}
 
@@ -525,6 +525,20 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 		fmt.Println("Fetching next batch from:", firstTimestamp)
 		chunkEnd = firstTimestamp
 	}
+}
+
+func (c *CurlRequest) GenerateCurlCommand() []string {
+	curlParts := append([]string{"curl", "--insecure", "-v"})
+	curlParts = append(curlParts, fmt.Sprintf("%s/%s", lokiURL, c.BaseURL))
+	for key, value := range c.Params {
+		if value != "" {
+			curlParts = append(curlParts, []string{"--data-urlencode", fmt.Sprintf("%s=%s", key, value)}...)
+		}
+	}
+	if c.AuthToken != "" {
+		curlParts = append(curlParts, []string{"-H", fmt.Sprintf("Authorization: Bearer %s", c.AuthToken)}...)
+	}
+	return curlParts
 }
 
 func GetDeckhousePod(kubeCl kubernetes.Interface, namespace string, labelSelector string) (string, error) {
@@ -628,18 +642,4 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 	}
 
 	return nil, nil, nil
-}
-
-func (c *CurlRequest) GenerateCurlCommand() []string {
-	curlParts := append([]string{"curl", "--insecure", "-v"})
-	curlParts = append(curlParts, fmt.Sprintf("%s/%s", lokiURL, c.BaseURL))
-	for key, value := range c.Params {
-		if value != "" {
-			curlParts = append(curlParts, []string{"--data-urlencode", fmt.Sprintf("%s=%s", key, value)}...)
-		}
-	}
-	if c.AuthToken != "" {
-		curlParts = append(curlParts, []string{"-H", fmt.Sprintf("Authorization: Bearer %s", c.AuthToken)}...)
-	}
-	return curlParts
 }
