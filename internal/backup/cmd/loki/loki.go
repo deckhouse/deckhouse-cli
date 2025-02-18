@@ -223,36 +223,36 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		//	fmt.Printf("\nLogs: %s", allLogs)
 		//}
 
-		//// Collect errors from channel
-		var errorsList []error
-		for err := range errChan {
-			errorsList = append(errorsList, err)
-		}
-
-		if len(errChan) > 0 {
-			for err := range errChan {
-				fmt.Println(err)
-			}
-		}
-
-		// Collect logs from all goroutines
-		//podContainerLogs := make(map[string][]string)
-		for result := range logsChan {
-			for key, logs := range result {
-				podContainerLogs[key] = append(podContainerLogs[key], logs...)
-			}
-		}
-
-		//// Save logs to files
-		//var logFiles []string
-		for key, logs := range podContainerLogs {
-			//filename := fmt.Sprintf("%s.log", key)
-			fmt.Printf("Pod, Container: %s\n Logs: %s\n", key, logs)
-
-			//if err := writeLogsToFile(filename, logs); err == nil {
-			//	logFiles = append(logFiles, filename)
-			//}
-		}
+		////// Collect errors from channel
+		//var errorsList []error
+		//for err := range errChan {
+		//	errorsList = append(errorsList, err)
+		//}
+		//
+		//if len(errChan) > 0 {
+		//	for err := range errChan {
+		//		fmt.Println(err)
+		//	}
+		//}
+		//
+		//// Collect logs from all goroutines
+		////podContainerLogs := make(map[string][]string)
+		//for result := range logsChan {
+		//	for key, logs := range result {
+		//		podContainerLogs[key] = append(podContainerLogs[key], logs...)
+		//	}
+		//}
+		//
+		////// Save logs to files
+		////var logFiles []string
+		//for key, logs := range podContainerLogs {
+		//	//filename := fmt.Sprintf("%s.log", key)
+		//	fmt.Printf("Pod, Container: %s\n Logs: %s\n", key, logs)
+		//
+		//	//if err := writeLogsToFile(filename, logs); err == nil {
+		//	//	logFiles = append(logFiles, filename)
+		//	//}
+		//}
 		//
 		//// Compress logs into tar.gz
 		//if err := createTarGz(logFiles, "logs.tar.gz"); err == nil {
