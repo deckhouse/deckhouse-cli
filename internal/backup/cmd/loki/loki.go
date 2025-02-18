@@ -255,6 +255,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			podName, _ := result["pod"]
 			fmt.Printf("STREAM IS: Pod name is %v , Container name is : %s\n", podName, containerNameStream)
 			query1 := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podName, containerNameStream)
+			chunkEnd = endDumpTimestamp
 
 			for chunkEnd > chunkStart {
 				curlParamDumpLog := CurlRequest{
@@ -273,7 +274,9 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 				if err != nil {
 					return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
 				}
+
 				fmt.Printf("chunkStart is: %v , chunkEnd : %v\n", chunkStart, chunkEnd)
+
 				if len(DumpLogCurlJson.Data.Result) == 0 {
 					fmt.Printf("No more logs.\nStop...\n")
 					break
@@ -286,17 +289,13 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 					}
 				}
 
-				if len(DumpLogCurlJson.Data.Result) > 0 {
-					//firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1]
-					firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
-					//firstTimestamp, err := strconv.ParseInt(firstLog.Values[len(firstLog.Values)-1][0], 10, 64)
-					firstTimestamp, err := strconv.ParseInt(firstLog, 10, 64)
-					if err != nil {
-						return fmt.Errorf("Error converting timestamp:", err)
-					}
-					fmt.Println("Fetching next batch from:", firstTimestamp)
-					chunkEnd = firstTimestamp
+				firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
+				firstTimestamp, err := strconv.ParseInt(firstLog, 10, 64)
+				if err != nil {
+					return fmt.Errorf("Error converting timestamp:", err)
 				}
+				fmt.Println("Fetching next batch from:", firstTimestamp)
+				chunkEnd = firstTimestamp
 
 			}
 		}
