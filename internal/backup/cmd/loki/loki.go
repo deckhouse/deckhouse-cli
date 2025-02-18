@@ -200,7 +200,8 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, parallelJobs) // Semaphore to limit concurrent requests
-		logsChan := make(chan map[string][]string, parallelJobs)
+		//logsChan := make(chan map[string][]string, parallelJobs)
+		logsChan := make(chan []string, parallelJobs)
 		//podContainerLogs := make(map[string][]string)
 		errChan := make(chan error, parallelJobs)
 
@@ -263,7 +264,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	return err
 }
 
-func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, result1 map[string]string, config *rest.Config, kubeCl kubernetes.Interface, wg *sync.WaitGroup, sem chan struct{}, logsChan chan<- map[string][]string, errChan chan error) {
+func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, result1 map[string]string, config *rest.Config, kubeCl kubernetes.Interface, wg *sync.WaitGroup, sem chan struct{}, logsChan chan []string, errChan chan error) {
 	defer wg.Done()
 	sem <- struct{}{}        // Acquire semaphore slot
 	defer func() { <-sem }() // Release slot when done
@@ -301,7 +302,8 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 			break
 		}
 
-		logsByPodContainer := make(map[string][]string)
+		//logsByPodContainer := make(map[string][]string)
+		var logs []string
 		for _, result2 := range DumpLogCurlJson.Data.Result {
 			for _, entry := range result2.Values {
 				timestampInt64, err := strconv.ParseInt(entry[0], 10, 64)
@@ -320,7 +322,8 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 			}
 		}
 
-		logsChan <- logsByPodContainer // Send logs to channel
+		//logsChan <- logsByPodContainer // Send logs to channel
+		logsChan <- logs // Send logs to channel
 
 		firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
 		firstTimestamp, err := strconv.ParseInt(firstLog, 10, 64)
