@@ -70,7 +70,7 @@ const (
 	//lokiURL = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/query_range"
 	lokiURL = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1"
 	//lokiURL      = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/series"
-	parallelJobs = 1             // Number of parallel requests
+	parallelJobs = 10            // Number of parallel requests
 	query        = `{pod=~".+"}` // LogQL query
 	//query = `query={pod=~".+"}` // LogQL query
 	//startTime    = "2025-02-12T16:22:00Z" // Start time
