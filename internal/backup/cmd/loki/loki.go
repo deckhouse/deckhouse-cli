@@ -117,10 +117,10 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	gzipWriter := gzip.NewWriter(os.Stdout)
-	defer gzipWriter.Close()
-	tarWriter := tar.NewWriter(gzipWriter)
-	defer tarWriter.Close()
+	//gzipWriter := gzip.NewWriter(os.Stdout)
+	//defer gzipWriter.Close()
+	//tarWriter := tar.NewWriter(gzipWriter)
+	//defer tarWriter.Close()
 
 	//for _, cmd := range debugCommands {
 	//
@@ -199,18 +199,14 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, parallelJobs) // Semaphore to limit concurrent requests
-		logsChan := make(chan []string, parallelJobs)
+		logsChan := make(chan map[string][]string, parallelJobs)
+		podContainerLogs := make(map[string][]string)
 		errChan := make(chan error, parallelJobs)
 
-		var containerNameStream string
-		var podNameStream string
-
 		for _, result := range streamListDumpJson.Data {
-			containerNameStream, _ = result["container"]
-			podNameStream, _ = result["pod"]
 
 			wg.Add(1)
-			go fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, result, config, kubeCl, &wg, sem, logsChan, errChan)
+			go fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, result, config, kubeCl, &wg, sem, logsChan, podContainerLogs, errChan)
 
 		}
 
@@ -220,15 +216,13 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			close(errChan)
 		}()
 
-		var allLogs []string
-		for chunk := range logsChan {
-			allLogs = append(allLogs, chunk...)
-			fmt.Printf("\nLogs: %s", allLogs)
-			fmt.Printf("\nLogs: %s", podNameStream)
-			fmt.Printf("\nLogs: %s", containerNameStream)
-		}
+		//var allLogs []string
+		//for chunk := range logsChan {
+		//	allLogs = append(allLogs, chunk...)
+		//	fmt.Printf("\nLogs: %s", allLogs)
+		//}
 
-		// Collect errors from channel
+		//// Collect errors from channel
 		var errorsList []error
 		for err := range errChan {
 			errorsList = append(errorsList, err)
@@ -239,23 +233,44 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 				fmt.Println(err)
 			}
 		}
+
+		// Collect logs from all goroutines
+		//podContainerLogs := make(map[string][]string)
+		for result := range logsChan {
+			for key, logs := range result {
+				podContainerLogs[key] = append(podContainerLogs[key], logs...)
+			}
+		}
+
+		// Save logs to files
+		var logFiles []string
+		for key, logs := range podContainerLogs {
+			filename := fmt.Sprintf("%s.log", key)
+			if err := writeLogsToFile(filename, logs); err == nil {
+				logFiles = append(logFiles, filename)
+			}
+		}
+
+		// Compress logs into tar.gz
+		if err := createTarGz(logFiles, "logs.tar.gz"); err == nil {
+			fmt.Println("✅ Logs compressed to logs.tar.gz")
+		}
 	}
 
 	return err
 }
 
-func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, result1 map[string]string, config *rest.Config, kubeCl kubernetes.Interface, wg *sync.WaitGroup, sem chan struct{}, logsChan chan []string, errChan chan error) {
-
+func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, result1 map[string]string, config *rest.Config, kubeCl kubernetes.Interface, wg *sync.WaitGroup, sem chan struct{}, logsChan chan<- map[string][]string, logsByPodContainer map[string][]string, errChan chan error) {
 	defer wg.Done()
 	sem <- struct{}{}        // Acquire semaphore slot
 	defer func() { <-sem }() // Release slot when done
 
 	containerNameStream, _ := result1["container"]
-
-	podName, _ := result1["pod"]
-	fmt.Printf("STREAM IS: Pod name is %v , Container name is : %s\n", podName, containerNameStream)
-	query1 := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podName, containerNameStream)
+	podNameStream, _ := result1["pod"]
 	chunkEnd = endDumpTimestamp
+
+	fmt.Printf("STREAM IS: Pod name is %v , Container name is : %s\n", podNameStream, containerNameStream)
+	query1 := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podNameStream, containerNameStream)
 
 	//if hadContainer {}
 	for chunkEnd > chunkStart {
@@ -283,19 +298,21 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 			break
 		}
 
-		var logs []string
-		for _, result1 := range DumpLogCurlJson.Data.Result {
-			for _, entry := range result1.Values {
+		//logsByPodContainer := make(map[string][]string)
+		for _, result2 := range DumpLogCurlJson.Data.Result {
+			for _, entry := range result2.Values {
 				timestampInt64, err := strconv.ParseInt(entry[0], 10, 64)
 				if err != nil {
 					errChan <- fmt.Errorf("Error converting timestamp:", err)
 				}
 				timestampUtc := time.Unix(0, timestampInt64).UTC()
-				logs = append(logs, fmt.Sprintf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1]))
+				fileKey := fmt.Sprintf("%s-%s", podNameStream, containerNameStream)
+				logs := fmt.Sprintf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1])
+				logsByPodContainer[fileKey] = append(logsByPodContainer[fileKey], logs)
 			}
 		}
 
-		logsChan <- logs // Send logs to channel
+		logsChan <- logsByPodContainer // Send logs to channel
 
 		firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
 		firstTimestamp, err := strconv.ParseInt(firstLog, 10, 64)
@@ -461,6 +478,24 @@ func createTarGz(logFiles []string, outputFile string) error {
 		}
 
 		if _, err := io.Copy(tarWriter, file); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Write logs to a file
+func writeLogsToFile(filename string, logs []string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	for _, log := range logs {
+		_, err := file.WriteString(log + "\n")
+		if err != nil {
 			return err
 		}
 	}
