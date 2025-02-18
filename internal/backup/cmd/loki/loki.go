@@ -30,6 +30,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+
 	//"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
@@ -249,62 +251,43 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			break
 		}
 
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, parallelJobs) // Semaphore to limit concurrent requests
+		logsChan := make(chan []string, parallelJobs)
+		errChan := make(chan error, parallelJobs)
+
 		for _, result := range streamListDumpJson.Data {
-			containerNameStream, _ := result["container"]
-			//if hadContainer {}
-			podName, _ := result["pod"]
-			fmt.Printf("STREAM IS: Pod name is %v , Container name is : %s\n", podName, containerNameStream)
-			query1 := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podName, containerNameStream)
-			chunkEnd = endDumpTimestamp
 
-			for chunkEnd > chunkStart {
-				curlParamDumpLog := CurlRequest{
-					BaseURL: "query_range",
-					Params: map[string]string{
-						"end":       strconv.FormatInt(chunkEnd, 10),
-						"start":     strconv.FormatInt(chunkStart, 10),
-						"query":     query1,
-						"limit":     "5000",
-						"direction": "BACKWARD",
-					},
-					AuthToken: token, // Optional
-				}
-				DumpLogCurl := curlParamDumpLog.GenerateCurlCommand()
-				DumpLogCurlJson, _, err := getLogTimestamp(config, kubeCl, DumpLogCurl)
-				if err != nil {
-					return fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
-				}
+			wg.Add(1)
+			go fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, result, config, kubeCl, &wg, sem, logsChan, errChan)
 
-				fmt.Printf("chunkStart is: %v , chunkEnd : %v\n", chunkStart, chunkEnd)
-
-				if len(DumpLogCurlJson.Data.Result) == 0 {
-					fmt.Printf("No more logs.\nStop...\n")
-					break
-				}
-
-				// Print logs
-				for _, result1 := range DumpLogCurlJson.Data.Result {
-					for _, log := range result1.Values {
-						fmt.Printf("Timestamp: %s, Log: %s\n", log[0], log[1])
-					}
-				}
-
-				firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
-				firstTimestamp, err := strconv.ParseInt(firstLog, 10, 64)
-				if err != nil {
-					return fmt.Errorf("Error converting timestamp:", err)
-				}
-				fmt.Println("Fetching next batch from:", firstTimestamp)
-				chunkEnd = firstTimestamp
-
-			}
 		}
 
-		//streamListDump, err := strconv.ParseInt(streamListDumpJson.Data.Result[0].Values[0][0], 10, 64)
-		//if err != nil {
-		//	return fmt.Errorf("Error converting timestamp:", err)
-		//}
+		go func() {
+			wg.Wait()
+			close(logsChan)
+			close(errChan)
+		}()
 
+		var allLogs []string
+		for chunk := range logsChan {
+			allLogs = append(allLogs, chunk...)
+			fmt.Printf("\n📜 Logs: %s", allLogs)
+		}
+
+		// Collect errors from channel
+		var errorsList []error
+		for err := range errChan {
+			errorsList = append(errorsList, err)
+		}
+
+		// Print errors
+		if len(errChan) > 0 {
+			fmt.Println("\n🚨 Errors captured:")
+			for err := range errChan {
+				fmt.Println(err)
+			}
+		}
 	}
 
 	//curlParamStreamList := CurlRequest{
@@ -477,6 +460,73 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	return err
 }
 
+func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, result1 map[string]string, config *rest.Config, kubeCl kubernetes.Interface, wg *sync.WaitGroup, sem chan struct{}, logsChan chan []string, errChan chan error) {
+
+	defer wg.Done()
+	sem <- struct{}{}        // Acquire semaphore slot
+	defer func() { <-sem }() // Release slot when done
+
+	containerNameStream, _ := result1["container"]
+	//if hadContainer {}
+	podName, _ := result1["pod"]
+	fmt.Printf("STREAM IS: Pod name is %v , Container name is : %s\n", podName, containerNameStream)
+	query1 := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podName, containerNameStream)
+
+	chunkEnd = endDumpTimestamp
+
+	for chunkEnd > chunkStart {
+		curlParamDumpLog := CurlRequest{
+			BaseURL: "query_range",
+			Params: map[string]string{
+				"end":       strconv.FormatInt(chunkEnd, 10),
+				"start":     strconv.FormatInt(chunkStart, 10),
+				"query":     query1,
+				"limit":     "5000",
+				"direction": "BACKWARD",
+			},
+			AuthToken: token, // Optional
+		}
+		DumpLogCurl := curlParamDumpLog.GenerateCurlCommand()
+		DumpLogCurlJson, _, err := getLogTimestamp(config, kubeCl, DumpLogCurl)
+		if err != nil {
+			errChan <- fmt.Errorf("Error get JSON from Loki: %s", err)
+		}
+
+		fmt.Printf("chunkStart is: %v , chunkEnd : %v\n", chunkStart, chunkEnd)
+
+		if len(DumpLogCurlJson.Data.Result) == 0 {
+			fmt.Printf("No more logs.\nStop...\n")
+			break
+		}
+
+		//// Print logs
+		//for _, result1 := range DumpLogCurlJson.Data.Result {
+		//	for _, log := range result1.Values {
+		//		fmt.Printf("Timestamp: %s, Log: %s\n", log[0], log[1])
+		//	}
+		//}
+
+		var logs []string
+		for _, result1 := range DumpLogCurlJson.Data.Result {
+			for _, entry := range result1.Values {
+				timestamp := entry[0]
+				logMessage := entry[1]
+				logs = append(logs, fmt.Sprintf("[%s] %s", timestamp, logMessage))
+			}
+		}
+
+		logsChan <- logs // Send logs to channel
+
+		firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
+		firstTimestamp, err := strconv.ParseInt(firstLog, 10, 64)
+		if err != nil {
+			errChan <- fmt.Errorf("Error converting timestamp:", err)
+		}
+		fmt.Println("Fetching next batch from:", firstTimestamp)
+		chunkEnd = firstTimestamp
+	}
+}
+
 func GetDeckhousePod(kubeCl kubernetes.Interface, namespace string, labelSelector string) (string, error) {
 	pods, err := kubeCl.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
 		LabelSelector: labelSelector,
@@ -593,40 +643,3 @@ func (c *CurlRequest) GenerateCurlCommand() []string {
 	}
 	return curlParts
 }
-
-//func fetchLogs(start, end int64, wg *sync.WaitGroup, sem chan struct{}, logsChan chan []string) {
-//	defer wg.Done()
-//	sem <- struct{}{}        // Acquire semaphore slot
-//	defer func() { <-sem }() // Release slot when done
-//
-//	//url := fmt.Sprintf("%s/loki/api/v1/query_range?query=%s&start=%d&end=%d&limit=5000&direction=backward", lokiURL, query, start, end)
-//	resp, err := http.Get(url)
-//	if err != nil {
-//		fmt.Println("Request failed:", err)
-//		return
-//	}
-//	defer resp.Body.Close()
-//
-//	body, err := io.ReadAll(resp.Body)
-//	if err != nil {
-//		fmt.Println("Failed to read response:", err)
-//		return
-//	}
-//
-//	var lokiResp LokiResponse
-//	if err := json.Unmarshal(body, &lokiResp); err != nil {
-//		fmt.Println("JSON parse error:", err)
-//		return
-//	}
-//
-//	var logs []string
-//	for _, result := range lokiResp.Data.Result {
-//		for _, entry := range result.Values {
-//			timestamp := entry[0]
-//			logMessage := entry[1]
-//			logs = append(logs, fmt.Sprintf("[%s] %s", timestamp, logMessage))
-//		}
-//	}
-//
-//	logsChan <- logs // Send logs to channel
-//}
