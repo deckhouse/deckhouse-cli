@@ -182,7 +182,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			Params: map[string]string{
 				"end":   strconv.FormatInt(chunkEnd, 10),
 				"start": strconv.FormatInt(chunkStart, 10),
-				"match": `{pod=~"loki-0", container=~"kube-rbac-proxy"}`,
+				//"match": `{pod=~"loki-0", container=~"kube-rbac-proxy"}`,
 			},
 			AuthToken: token, // Optional
 		}
