@@ -201,13 +201,13 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, parallelJobs) // Semaphore to limit concurrent requests
 		logsChan := make(chan map[string][]string, parallelJobs)
-		podContainerLogs := make(map[string][]string)
+		//podContainerLogs := make(map[string][]string)
 		errChan := make(chan error, parallelJobs)
 
 		for _, result := range streamListDumpJson.Data {
 
 			wg.Add(1)
-			go fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, result, config, kubeCl, &wg, sem, logsChan, podContainerLogs, errChan)
+			go fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, result, config, kubeCl, &wg, sem, logsChan, errChan)
 
 		}
 
@@ -263,7 +263,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	return err
 }
 
-func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, result1 map[string]string, config *rest.Config, kubeCl kubernetes.Interface, wg *sync.WaitGroup, sem chan struct{}, logsChan chan<- map[string][]string, logsByPodContainer map[string][]string, errChan chan error) {
+func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, result1 map[string]string, config *rest.Config, kubeCl kubernetes.Interface, wg *sync.WaitGroup, sem chan struct{}, logsChan chan<- map[string][]string, errChan chan error) {
 	defer wg.Done()
 	sem <- struct{}{}        // Acquire semaphore slot
 	defer func() { <-sem }() // Release slot when done
@@ -301,7 +301,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 			break
 		}
 
-		//logsByPodContainer := make(map[string][]string)
+		logsByPodContainer := make(map[string][]string)
 		for _, result2 := range DumpLogCurlJson.Data.Result {
 			for _, entry := range result2.Values {
 				timestampInt64, err := strconv.ParseInt(entry[0], 10, 64)
