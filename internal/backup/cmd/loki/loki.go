@@ -280,7 +280,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 	//if hadContainer {}
 	for chunkEnd > chunkStart {
 
-		fmt.Printf("Fetch logs for pod: %s and container: %s in time range chunkStart: %v and chunkEnd: %v", podNameStream, containerNameStream, chunkStart, chunkEnd)
+		fmt.Printf("Fetch logs for pod: %s and container: %s in time range chunkStart: %v and chunkEnd: %v\n", podNameStream, containerNameStream, chunkStart, chunkEnd)
 
 		curlParamDumpLog := CurlRequest{
 			BaseURL: "query_range",
@@ -299,7 +299,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 			errChan <- fmt.Errorf("Error get JSON from Loki: %s", err)
 		}
 
-		fmt.Printf("chunkStart is: %v , chunkEnd : %v\n", chunkStart, chunkEnd)
+		//fmt.Printf("chunkStart is: %v , chunkEnd : %v\n", chunkStart, chunkEnd)
 
 		if len(DumpLogCurlJson.Data.Result) == 0 {
 			fmt.Printf("No more logs.\nStop...\n")
