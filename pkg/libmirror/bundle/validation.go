@@ -25,8 +25,8 @@ import (
 
 func MandatoryLayoutsForPlatform(platformPkgDir string) map[string]string {
 	return map[string]string{
-		"root layout":             platformPkgDir,
-		"installers layout":       filepath.Join(platformPkgDir, "install"),
+		"root layout":       platformPkgDir,
+		"installers layout": filepath.Join(platformPkgDir, "install"),
 	}
 }
 
@@ -57,14 +57,11 @@ func ValidateUnpackedPackage(mandatoryLayouts map[string]string) error {
 			return fmt.Errorf("%s image index: %w", layoutDescription, err)
 		}
 
-		indexManifest, err := index.IndexManifest()
+		_, err = index.IndexManifest()
 		if err != nil {
 			return fmt.Errorf("%s image index manifest: %w", layoutDescription, err)
 		}
 
-		if len(indexManifest.Manifests) == 0 {
-			return fmt.Errorf("No images in %s", layoutDescription)
-		}
 	}
 
 	return nil
