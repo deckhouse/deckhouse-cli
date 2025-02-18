@@ -311,10 +311,11 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 				timestampUtc := time.Unix(0, timestampInt64).UTC()
 				fileKey := fmt.Sprintf("%s-%s", podNameStream, containerNameStream)
 				logs := fmt.Sprintf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1])
-				logsByPodContainer[fileKey] = append(logsByPodContainer[fileKey], logs)
-				for key, logs1 := range logsByPodContainer {
-					fmt.Printf("Pod, Container: %s\n Logs: %s\n", key, logs1)
-				}
+				fmt.Printf("Pod, Container: \n%s\n Logs: \n%s\n", fileKey, logs)
+				//logsByPodContainer[fileKey] = append(logsByPodContainer[fileKey], logs)
+				//for key, logs1 := range logsByPodContainer {
+				//	fmt.Printf("Pod, Container: \n%s\n Logs: \n%s\n", key, logs1)
+				//}
 
 			}
 		}
