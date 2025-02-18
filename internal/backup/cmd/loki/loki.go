@@ -70,7 +70,7 @@ const (
 	//lokiURL = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/query_range"
 	lokiURL = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1"
 	//lokiURL      = "https://loki.d8-monitoring.svc.cluster.local:3100/loki/api/v1/series"
-	parallelJobs = 10            // Number of parallel requests
+	parallelJobs = 1             // Number of parallel requests
 	query        = `{pod=~".+"}` // LogQL query
 	//query = `query={pod=~".+"}` // LogQL query
 	//startTime    = "2025-02-12T16:22:00Z" // Start time
@@ -88,8 +88,8 @@ const (
 type LokiResponse struct {
 	Data struct {
 		Result []struct {
-			Stream map[string]string `json:"stream"`
-			Values [][]string        `json:"values"`
+			//Stream map[string]string `json:"stream"`
+			Values [][]string `json:"values"`
 		} `json:"result"`
 	} `json:"data"`
 }
@@ -218,11 +218,11 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			close(errChan)
 		}()
 
-		//var allLogs []string
-		//for chunk := range logsChan {
-		//	allLogs = append(allLogs, chunk...)
-		//	fmt.Printf("\nLogs: %s", allLogs)
-		//}
+		var allLogs []string
+		for chunk := range logsChan {
+			allLogs = append(allLogs, chunk...)
+			fmt.Printf("\nLogs: %s", allLogs)
+		}
 
 		////// Collect errors from channel
 		//var errorsList []error
@@ -271,11 +271,11 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 
 	containerNameStream, _ := result1["container"]
 	podNameStream, _ := result1["pod"]
-	chunkEnd = endDumpTimestamp
 
 	fmt.Printf("STREAM IS: Pod name is %v , Container name is : %s\n", podNameStream, containerNameStream)
 	query1 := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podNameStream, containerNameStream)
 
+	chunkEnd = endDumpTimestamp
 	//if hadContainer {}
 	for chunkEnd > chunkStart {
 		curlParamDumpLog := CurlRequest{
@@ -311,10 +311,10 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 					errChan <- fmt.Errorf("Error converting timestamp:", err)
 				}
 				timestampUtc := time.Unix(0, timestampInt64).UTC()
-				fileKey := fmt.Sprintf("%s-%s", podNameStream, containerNameStream)
+				//fileKey := fmt.Sprintf("%s-%s", podNameStream, containerNameStream)
 				//logs := fmt.Sprintf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1])
 				logs = append(logs, fmt.Sprintf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1]))
-				fmt.Printf("Pod, Container: \n%s\n Logs: \n%s\n", fileKey, logs)
+				//fmt.Printf("%s", logs)
 				//logsByPodContainer[fileKey] = append(logsByPodContainer[fileKey], logs)
 				//for key, logs1 := range logsByPodContainer {
 				//	fmt.Printf("Pod, Container: \n%s\n Logs: \n%s\n", key, logs1)
