@@ -218,11 +218,11 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			close(errChan)
 		}()
 
-		//var allLogs []string
-		//for chunk := range logsChan {
-		//	allLogs = append(allLogs, chunk...)
-		//	fmt.Printf("\nLogs: %s", allLogs)
-		//}
+		var allLogs []string
+		for chunk := range logsChan {
+			allLogs = append(allLogs, chunk...)
+			fmt.Printf("\nLogs: %s", allLogs)
+		}
 
 		////// Collect errors from channel
 		//var errorsList []error
