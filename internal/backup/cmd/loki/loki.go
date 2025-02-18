@@ -33,7 +33,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	//"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
@@ -198,31 +197,32 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			break
 		}
 
-		var wg sync.WaitGroup
-		sem := make(chan struct{}, parallelJobs) // Semaphore to limit concurrent requests
-		//logsChan := make(chan map[string][]string, parallelJobs)
-		logsChan := make(chan []string, parallelJobs)
-		//podContainerLogs := make(map[string][]string)
-		errChan := make(chan error, parallelJobs)
+		//var wg sync.WaitGroup
+		//sem := make(chan struct{}, parallelJobs) // Semaphore to limit concurrent requests
+		////logsChan := make(chan map[string][]string, parallelJobs)
+		//logsChan := make(chan []string, parallelJobs)
+		////podContainerLogs := make(map[string][]string)
+		//errChan := make(chan error, parallelJobs)
 
 		for _, result := range streamListDumpJson.Data {
 
-			wg.Add(1)
-			go fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, result, config, kubeCl, &wg, sem, logsChan, errChan)
+			//wg.Add(1)
+			//go fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, result, config, kubeCl, &wg, sem, logsChan, errChan)
+			fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, result, config, kubeCl)
 
 		}
 
-		go func() {
-			wg.Wait()
-			close(logsChan)
-			close(errChan)
-		}()
+		//go func() {
+		//	wg.Wait()
+		//	close(logsChan)
+		//	close(errChan)
+		//}()
 
-		var allLogs []string
-		for chunk := range logsChan {
-			allLogs = append(allLogs, chunk...)
-			fmt.Printf("\nLogs: %s\n", allLogs)
-		}
+		//var allLogs []string
+		//for chunk := range logsChan {
+		//	allLogs = append(allLogs, chunk...)
+		//	fmt.Printf("\nLogs: %s\n", allLogs)
+		//}
 
 		////// Collect errors from channel
 		//var errorsList []error
@@ -264,10 +264,11 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	return err
 }
 
-func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, result1 map[string]string, config *rest.Config, kubeCl kubernetes.Interface, wg *sync.WaitGroup, sem chan struct{}, logsChan chan []string, errChan chan error) {
-	defer wg.Done()
-	sem <- struct{}{}        // Acquire semaphore slot
-	defer func() { <-sem }() // Release slot when done
+// func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, result1 map[string]string, config *rest.Config, kubeCl kubernetes.Interface, wg *sync.WaitGroup, sem chan struct{}, logsChan chan []string, errChan chan error) {
+func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, result1 map[string]string, config *rest.Config, kubeCl kubernetes.Interface) {
+	//defer wg.Done()
+	//sem <- struct{}{}        // Acquire semaphore slot
+	//defer func() { <-sem }() // Release slot when done
 
 	containerNameStream, _ := result1["container"]
 	podNameStream, _ := result1["pod"]
@@ -296,7 +297,8 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 		DumpLogCurl := curlParamDumpLog.GenerateCurlCommand()
 		DumpLogCurlJson, _, err := getLogTimestamp(config, kubeCl, DumpLogCurl)
 		if err != nil {
-			errChan <- fmt.Errorf("Error get JSON from Loki: %s", err)
+			//errChan <- fmt.Errorf("Error get JSON from Loki: %s", err)
+			fmt.Errorf("Error get JSON from Loki: %s", err)
 		}
 
 		//fmt.Printf("chunkStart is: %v , chunkEnd : %v\n", chunkStart, chunkEnd)
@@ -312,13 +314,14 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 			for _, entry := range result2.Values {
 				timestampInt64, err := strconv.ParseInt(entry[0], 10, 64)
 				if err != nil {
-					errChan <- fmt.Errorf("Error converting timestamp:", err)
+					//errChan <- fmt.Errorf("Error converting timestamp:", err)
+					fmt.Errorf("Error converting timestamp:", err)
 				}
 				timestampUtc := time.Unix(0, timestampInt64).UTC()
 				//fileKey := fmt.Sprintf("%s-%s", podNameStream, containerNameStream)
 				//logs := fmt.Sprintf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1])
 				logs = append(logs, fmt.Sprintf("\nTimestamp: [%v], Log: %s\n", timestampUtc, entry[1]))
-				//fmt.Printf("%s", logs)
+				fmt.Printf("%s", logs)
 				//logsByPodContainer[fileKey] = append(logsByPodContainer[fileKey], logs)
 				//for key, logs1 := range logsByPodContainer {
 				//	fmt.Printf("Pod, Container: \n%s\n Logs: \n%s\n", key, logs1)
@@ -328,12 +331,13 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 		}
 
 		//logsChan <- logsByPodContainer // Send logs to channel
-		logsChan <- logs // Send logs to channel
+		//logsChan <- logs // Send logs to channel
 
 		firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
 		firstTimestamp, err := strconv.ParseInt(firstLog, 10, 64)
 		if err != nil {
-			errChan <- fmt.Errorf("Error converting timestamp:", err)
+			//errChan <- fmt.Errorf("Error converting timestamp:", err)
+			fmt.Errorf("Error converting timestamp:", err)
 		}
 		//fmt.Println("Fetching next batch from:", firstTimestamp)
 		chunkEnd = firstTimestamp
