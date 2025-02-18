@@ -54,12 +54,13 @@ preflight() {
 
 
 getLatestTag() {
-  local LATEST_RELEASE_URL="https://api.github.com/repos/deckhouse/deckhouse-cli/releases/latest"
-  if [ "${HAS_CURL}" == "true" ]; then
-    TAG=$(curl -SsL "$LATEST_RELEASE_URL" | grep "tag_name" | cut -d: -f2 | tr -d '", ')
-  elif [ "${HAS_WGET}" == "true" ]; then
-    TAG=$(wget -qO- "$LATEST_RELEASE_URL" | grep "tag_name" | cut -d: -f2 | tr -d '", ')
-  fi
+  # local LATEST_RELEASE_URL="https://api.github.com/repos/deckhouse/deckhouse-cli/releases/latest"
+  # if [ "${HAS_CURL}" == "true" ]; then
+  #   TAG=$(curl -SsL "$LATEST_RELEASE_URL" | grep "tag_name" | cut -d: -f2 | tr -d '", ')
+  # elif [ "${HAS_WGET}" == "true" ]; then
+  #   TAG=$(wget -qO- "$LATEST_RELEASE_URL" | grep "tag_name" | cut -d: -f2 | tr -d '", ')
+  # fi
+  TAG="v0.9.3"
 }
 
 
