@@ -273,9 +273,9 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 	containerNameStream, _ := result1["container"]
 	podNameStream, _ := result1["pod"]
 
-	//fmt.Printf("STREAM IS: Pod name is %v , Container name is : %s\n", podNameStream, containerNameStream)
+	fmt.Printf("STREAM IS: Pod name is %v , Container name is : %s\n", podNameStream, containerNameStream)
 
-	query1 := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podNameStream, containerNameStream)
+	//query1 := fmt.Sprintf(`{pod=~"%s", container=~"%s"}`, podNameStream, containerNameStream)
 
 	chunkEnd = endDumpTimestamp
 	//if hadContainer {}
@@ -286,9 +286,10 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, resul
 		curlParamDumpLog := CurlRequest{
 			BaseURL: "query_range",
 			Params: map[string]string{
-				"end":       strconv.FormatInt(chunkEnd, 10),
-				"start":     strconv.FormatInt(chunkStart, 10),
-				"query":     query1,
+				"end":   strconv.FormatInt(chunkEnd, 10),
+				"start": strconv.FormatInt(chunkStart, 10),
+				//"query":     query1,
+				"query":     `{}`,
 				"limit":     "5000",
 				"direction": "BACKWARD",
 			},
