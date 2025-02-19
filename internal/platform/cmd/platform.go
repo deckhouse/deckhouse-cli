@@ -22,6 +22,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module"
+	queue "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/queue"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 )
 
@@ -42,6 +43,7 @@ func NewCommand() *cobra.Command {
 	platformCmd.AddCommand(
 		edit.NewCommand(),
 		module.NewCommand(),
+		queue.NewCommand(),
 	)
 
 	flags.AddPersistentFlags(platformCmd)

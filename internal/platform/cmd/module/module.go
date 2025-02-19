@@ -25,7 +25,6 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/disable"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/flags"
 )
 
 var moduleLong = templates.LongDesc(`
@@ -46,8 +45,6 @@ func NewCommand() *cobra.Command {
 		values.NewCommand(),
 		snapshots.NewCommand(),
 	)
-
-	flags.AddFlags(moduleCmd.Flags())
 
 	return moduleCmd
 }

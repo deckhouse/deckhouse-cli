@@ -14,28 +14,30 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package flags
+package queue
 
 import (
-	"fmt"
-	"os"
-
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/queue/list"
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/queue/mainqueue"
 	"github.com/spf13/cobra"
+	"k8s.io/kubectl/pkg/util/templates"
 )
 
-func ValidateParameters(cmd *cobra.Command, args []string) error {
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+var queueLong = templates.LongDesc(`
+Dump queues from Deckhouse Kubernetes Platform.
+
+© Flant JSC 2025`)
+
+func NewCommand() *cobra.Command {
+	queueCmd := &cobra.Command{
+		Use: "queue", Short: "Dump queues.",
+		Long: queueLong,
 	}
 
-	stats, err := os.Stat(kubeconfigPath)
-	if err != nil {
-		return fmt.Errorf("Invalid --kubeconfig: %w", err)
-	}
-	if !stats.Mode().IsRegular() {
-		return fmt.Errorf("Invalid --kubeconfig: %s is not a regular file", kubeconfigPath)
-	}
+	queueCmd.AddCommand(
+		list.NewCommand(),
+		mainqueue.NewCommand(),
+	)
 
-	return nil
+	return queueCmd
 }

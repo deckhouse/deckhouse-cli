@@ -18,24 +18,18 @@ package flags
 
 import (
 	"fmt"
-	"os"
-
 	"github.com/spf13/cobra"
 )
 
 func ValidateParameters(cmd *cobra.Command, args []string) error {
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	var allowedOutput = map[string]bool{
+		"json": true,
+		"yaml": true,
+		"text": true,
 	}
-
-	stats, err := os.Stat(kubeconfigPath)
-	if err != nil {
-		return fmt.Errorf("Invalid --kubeconfig: %w", err)
+	outputFormat, _ := cmd.Flags().GetString("output")
+	if _, valid := allowedOutput[outputFormat]; !valid {
+		return fmt.Errorf("Please provide valid output: text, yaml, json. Got '%s', try --help\n", outputFormat)
 	}
-	if !stats.Mode().IsRegular() {
-		return fmt.Errorf("Invalid --kubeconfig: %s is not a regular file", kubeconfigPath)
-	}
-
 	return nil
 }
