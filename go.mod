@@ -583,9 +583,9 @@ replace (
 	github.com/distribution/reference => github.com/distribution/reference v0.5.0
 	github.com/docker/cli => github.com/docker/cli v25.0.6+incompatible
 	github.com/docker/docker => github.com/docker/docker v25.0.6+incompatible
-	github.com/hashicorp/vault => fox.flant.com/team/foxtrot/stronghold.git/images/stronghold v1.1.4
-	github.com/hashicorp/vault/api => fox.flant.com/team/foxtrot/stronghold.git/images/stronghold/api v1.1.4
-	github.com/hashicorp/vault/sdk => fox.flant.com/team/foxtrot/stronghold.git/images/stronghold/sdk v1.1.4
+	github.com/hashicorp/vault => flant.internal/team/foxtrot/stronghold.git/images/stronghold v1.1.4
+	github.com/hashicorp/vault/api => flant.internal/team/foxtrot/stronghold.git/images/stronghold/api v1.1.4
+	github.com/hashicorp/vault/sdk => flant.internal/team/foxtrot/stronghold.git/images/stronghold/sdk v1.1.4
 	github.com/jaguilar/vt100 => github.com/tonistiigi/vt100 v0.0.0-20190402012908-ad4c4a574305 // upstream not maintained
 	go.cypherpunks.ru/gogost/v5 v5.13.0 => github.com/flant/gogost/v5 v5.13.0
 )

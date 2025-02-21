@@ -9,9 +9,8 @@ on:
       - "main"
 
 env:
-  GOPRIVATE: fox.flant.com
-  PRIVATE_REPO: fox.flant.com
-  PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+  GOPRIVATE: "${{secrets.INTERNAL_REPO}}"
+  PRIVATE_REPO: "${{secrets.INTERNAL_REPO}}"
 
 permissions:
   contents: write
@@ -44,7 +43,7 @@ jobs:
 
       - name: Setup git
         run: |
-          git config --global url."https://gitlab-ci-token:${PRIVATE_REPO_TOKEN}@${PRIVATE_REPO}/".insteadOf https://${PRIVATE_REPO}/
+          git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
           git config --global --add safe.directory '*'
 
       - name: Build and package
@@ -84,7 +83,7 @@ jobs:
 
       - name: Setup git
         run: |
-          git config --global url."https://gitlab-ci-token:${PRIVATE_REPO_TOKEN}@${PRIVATE_REPO}/".insteadOf https://${PRIVATE_REPO}/
+          git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
           git config --global --add safe.directory '*'
 
       - name: Run tests
