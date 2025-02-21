@@ -18,6 +18,7 @@ package pull
 
 import (
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/pflag"
 )
@@ -141,5 +142,11 @@ func addFlags(flagSet *pflag.FlagSet) {
 		"insecure",
 		false,
 		"Interact with registries over HTTP.",
+	)
+	flagSet.StringVar(
+		&TempDir,
+		"tmp-dir",
+		filepath.Join(os.TempDir(), "d8", "mirror"),
+		"Temporary directory to use for image pulling",
 	)
 }
