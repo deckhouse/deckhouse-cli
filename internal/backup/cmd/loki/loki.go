@@ -187,7 +187,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 			for _, entry := range r.Values {
 				timestampInt64, err := strconv.ParseInt(entry[0], 10, 64)
 				if err != nil {
-					return fmt.Errorf("Error converting timestamp:", err)
+					return fmt.Errorf("Error converting timestamp: %s", err)
 				}
 				timestampUtc := time.Unix(0, timestampInt64).UTC()
 				logs = append(logs, fmt.Sprintf("\nTimestamp: [%v], Log: %s\n", timestampUtc, entry[1]))
@@ -197,7 +197,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 		firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
 		firstTimestamp, err := strconv.ParseInt(firstLog, 10, 64)
 		if err != nil {
-			return fmt.Errorf("Error converting timestamp:", err)
+			return fmt.Errorf("Error converting timestamp: %s", err)
 		}
 		chunkEnd = firstTimestamp
 	}
@@ -283,14 +283,14 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 			var series SeriesApi
 			err = json.Unmarshal(stdout.Bytes(), &series)
 			if err != nil {
-				return nil, nil, fmt.Errorf("failed unmarshal SeriesApi %s", err)
+				return nil, nil, fmt.Errorf("Failed unmarshal SeriesApi: %s", err)
 			}
 			return nil, &series, nil
 		} else if t == fmt.Sprintf("%s/query_range", lokiURL) {
 			var queryRange QueryRange
 			err = json.Unmarshal(stdout.Bytes(), &queryRange)
 			if err != nil {
-				return nil, nil, fmt.Errorf("failed unmarshal LokiResponse%s", err)
+				return nil, nil, fmt.Errorf("Failed unmarshal LokiResponse: %s", err)
 			}
 			return &queryRange, nil, nil
 		}
@@ -318,7 +318,7 @@ func getEndTimestamp(config *rest.Config, kubeCl kubernetes.Interface, token str
 		}
 		endTimestamp, err := strconv.ParseInt(endTimestampJson.Data.Result[0].Values[0][0], 10, 64)
 		if err != nil {
-			return 0, fmt.Errorf("Error converting timestamp:", err)
+			return 0, fmt.Errorf("Error converting timestamp: %s", err)
 		}
 		return endTimestamp, nil
 	}
