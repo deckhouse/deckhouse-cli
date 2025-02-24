@@ -132,10 +132,8 @@ jobs:
       - name: Setup git
         run: |
           git config --global url."ssh://git@${SOURCE_REPO_GIT}/".insteadOf "https://flant.internal/"
-          git config --global core.sshCommand "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
           git config --global --add safe.directory '*'
 
       - name: Run tests
         run: |
-          task test | true
-          sleep 900
+          task test
