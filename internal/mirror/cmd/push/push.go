@@ -42,7 +42,7 @@ import (
 
 // CLI Parameters
 var (
-	TempDir = filepath.Join(os.TempDir(), "mirror")
+	TempDir string
 
 	RegistryHost     string
 	RegistryPath     string

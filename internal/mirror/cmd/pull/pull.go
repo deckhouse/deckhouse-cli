@@ -47,7 +47,7 @@ var ErrPullFailed = errors.New("pull failed, see the log for details")
 
 // CLI Parameters
 var (
-	TempDir = filepath.Join(os.TempDir(), "mirror")
+	TempDir string
 
 	Insecure      bool
 	TLSSkipVerify bool
@@ -204,7 +204,7 @@ func pull(cmd *cobra.Command, _ []string) error {
 			if err = os.WriteFile(
 				filepath.Join(pullParams.BundleDir, bundlePackage.Name())+".gostsum",
 				[]byte(digest),
-				0644,
+				0o644,
 			); err != nil {
 				merr = multierror.Append(merr, fmt.Errorf("Could not write digest to .gostsum file: %w", err))
 			}
