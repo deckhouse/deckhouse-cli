@@ -28,7 +28,7 @@ func GetDeckhousePod(kubeCl kubernetes.Interface, namespace string, labelSelecto
 	return podName, nil
 }
 
-func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, getApi []string, podName string, namespace string, containerName string) (remotecommand.Executor, error) {
+func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, cmdLine []string, podName string, namespace string, containerName string) (remotecommand.Executor, error) {
 	scheme := runtime.NewScheme()
 	parameterCodec := runtime.NewParameterCodec(scheme)
 	if err := v1.AddToScheme(scheme); err != nil {
@@ -42,7 +42,7 @@ func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, getApi []string
 		Namespace(namespace).
 		SubResource("exec").
 		VersionedParams(&v1.PodExecOptions{
-			Command:   getApi,
+			Command:   cmdLine,
 			Container: containerName,
 			Stdin:     false,
 			Stdout:    true,

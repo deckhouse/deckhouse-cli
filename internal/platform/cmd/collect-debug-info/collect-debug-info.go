@@ -21,7 +21,9 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/collect-debug-info/debugTar"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"k8s.io/kubectl/pkg/util/templates"
+	"os"
 )
 
 var collectDebugInfoCmdLong = templates.LongDesc(`
@@ -36,7 +38,14 @@ func NewCommand() *cobra.Command {
 		Long:          collectDebugInfoCmdLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		RunE:          collectDebugInfo,
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			var err error
+			if term.IsTerminal(int(os.Stdout.Fd())) {
+				return fmt.Errorf("Please provide output tar.gz to dump debug logs, ex. \"> dump-logs.tar.gz\"")
+			}
+			return err
+		},
+		RunE: collectDebugInfo,
 	}
 	return collectDebugInfoCmd
 }
