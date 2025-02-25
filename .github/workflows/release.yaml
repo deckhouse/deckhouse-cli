@@ -10,7 +10,7 @@ on:
 
 env:
   GOPRIVATE: "flant.internal"
-  SOURCE_REPO_GIT: "${{secrets.SOURCE_REPO_GIT}}"
+  PRIVATE_REPO: "${{secrets.DECKHOUSE_PRIVATE_REPO}}"
 
 permissions:
   contents: write
@@ -49,15 +49,14 @@ jobs:
             
       - name: Add ssh_known_hosts
         run: |
-          HOST=${{ secrets.SOURCE_REPO_GIT }}
-          echo "::add-mask::$HOST"
-          IPS=$(nslookup "$HOST" | awk '/^Address: / { print $2 }')
+          echo "::add-mask::$PRIVATE_REPO"
+          IPS=$(nslookup "$PRIVATE_REPO" | awk '/^Address: / { print $2 }')
           for IP in $IPS; do
             echo "::add-mask::$IP"
           done
           mkdir -p /root/.ssh
           touch /root/.ssh/known_hosts
-          HOST_KEYS=$(ssh-keyscan -H "$HOST" 2>/dev/null)
+          HOST_KEYS=$(ssh-keyscan -H "$PRIVATE_REPO" 2>/dev/null)
           echo "$HOST_KEYS" | while IFS= read -r KEY_LINE; do
             CONSTANT_PART=$(echo "$KEY_LINE" | awk '{print $2, $3}')
             if ! grep -q "$CONSTANT_PART" /root/.ssh/known_hosts; then
@@ -67,7 +66,7 @@ jobs:
 
       - name: Setup git
         run: |
-          git config --global url."ssh://git@${SOURCE_REPO_GIT}/".insteadOf "https://flant.internal/"
+          git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
           git config --global --add safe.directory '*'
 
       - name: Build and package
@@ -113,15 +112,14 @@ jobs:
 
       - name: Add ssh_known_hosts
         run: |
-          HOST=${{ secrets.SOURCE_REPO_GIT }}
-          echo "::add-mask::$HOST"
-          IPS=$(nslookup "$HOST" | awk '/^Address: / { print $2 }')
+          echo "::add-mask::$PRIVATE_REPO"
+          IPS=$(nslookup "$PRIVATE_REPO" | awk '/^Address: / { print $2 }')
           for IP in $IPS; do
             echo "::add-mask::$IP"
           done
           mkdir -p /root/.ssh
           touch /root/.ssh/known_hosts
-          HOST_KEYS=$(ssh-keyscan -H "$HOST" 2>/dev/null)
+          HOST_KEYS=$(ssh-keyscan -H "$PRIVATE_REPO" 2>/dev/null)
           echo "$HOST_KEYS" | while IFS= read -r KEY_LINE; do
             CONSTANT_PART=$(echo "$KEY_LINE" | awk '{print $2, $3}')
             if ! grep -q "$CONSTANT_PART" /root/.ssh/known_hosts; then
@@ -131,7 +129,7 @@ jobs:
           
       - name: Setup git
         run: |
-          git config --global url."ssh://git@${SOURCE_REPO_GIT}/".insteadOf "https://flant.internal/"
+          git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
           git config --global --add safe.directory '*'
 
       - name: Run tests
