@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2024 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ package values
 
 import (
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
@@ -40,7 +39,6 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE:          valuesModule,
 	}
-	flags.AddFlags(valuesCmd.Flags())
 	return valuesCmd
 }
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2024 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,16 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package flags
+package list
 
 import (
 	"github.com/spf13/pflag"
 )
 
 func AddFlags(flagSet *pflag.FlagSet) {
-	flagSet.StringP(
-		"editor", "e",
-		"vi",
-		"Your favourite editor.",
+	flagSet.BoolP(
+		"show-empty",
+		"e",
+		false,
+		"Show empty queues.",
 	)
 }
