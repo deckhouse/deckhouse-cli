@@ -8,12 +8,46 @@ on:
 permissions:
   contents: write  
 
+env:
+  GOPRIVATE: "flant.internal"
+  PRIVATE_REPO: "${{secrets.DECKHOUSE_PRIVATE_REPO}}"
+
+
 jobs:
   release:
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     name: Perform deckhouse-cli release using trdl server
     runs-on: [self-hosted, regular]    
     steps:
+
+    - name: Start ssh-agent
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: |
+          ${{secrets.SOURCE_REPO_SSH_KEY}}
+          
+    - name: Add ssh_known_hosts
+      run: |
+        echo "::add-mask::$PRIVATE_REPO"
+        IPS=$(nslookup "$PRIVATE_REPO" | awk '/^Address: / { print $2 }')
+        for IP in $IPS; do
+          echo "::add-mask::$IP"
+        done
+        mkdir -p /root/.ssh
+        touch /root/.ssh/known_hosts
+        HOST_KEYS=$(ssh-keyscan -H "$PRIVATE_REPO" 2>/dev/null)
+        echo "$HOST_KEYS" | while IFS= read -r KEY_LINE; do
+          CONSTANT_PART=$(echo "$KEY_LINE" | awk '{print $2, $3}')
+          if ! grep -q "$CONSTANT_PART" /root/.ssh/known_hosts; then
+            echo "$KEY_LINE" >> /root/.ssh/known_hosts
+          fi
+        done
+
+    - name: Setup git
+      run: |
+        git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
+        git config --global --add safe.directory '*'
+
     - name: Release
       uses: werf/trdl-vault-actions/release@main
       with:

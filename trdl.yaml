@@ -1,4 +1,20 @@
-docker_image: localhost:5000/golang-d8:1.23.2-local@sha256:c58e9f0ae0a34db72cc832ee738ab370159f7cdcb134e1e228b5f668946606d2
+docker_image: registry.deckhouse.io/base_images/golang:1.23.1-bullseye@sha256:a24507d1a36fce86431198a979435dadb187e8d0ce0b5c181f46d6788d84a40f
 commands:
+  - apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc
+  - sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/bin
+  - eval "$(ssh-agent -s)" && base64 -d /run/secrets/stronghold-ssh > /dev/shm/stronghold-ssh && chmod 400 /dev/shm/stronghold-ssh && ssh-add /dev/shm/stronghold-ssh
+  - rm /dev/shm/stronghold-ssh
+  - export PRIVATE_REPO=$(cat /run/secrets/deckhouse-private-repo)
+  - mkdir -p ~/.ssh && touch ~/.ssh/known_hosts
+  - |
+    HOST_KEYS=$(ssh-keyscan -H "$PRIVATE_REPO" 2>/dev/null)
+    echo "$HOST_KEYS" | while IFS= read -r KEY_LINE; do
+      CONSTANT_PART=$(echo "$KEY_LINE" | awk '{print $2, $3}')
+      if ! grep -q "$CONSTANT_PART" ~/.ssh/known_hosts; then
+        echo "$KEY_LINE" >> ~/.ssh/known_hosts
+      fi
+    done
+  - git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
+  - git config --global --add safe.directory '*'
   - task -o group -p build:dist:all version={{ .Tag }}
   - cp -a ./dist/{{ .Tag }}/* /result
