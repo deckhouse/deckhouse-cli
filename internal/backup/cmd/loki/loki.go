@@ -140,6 +140,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			break
 		}
 		for _, r := range streamListDumpJson.Data {
+			fmt.Printf("stream is: %s", streamListDumpJson.Data)
 			err := fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, r, config, kubeCl)
 			if err != nil {
 				return fmt.Errorf("Error get logs from Loki: %s", err)
