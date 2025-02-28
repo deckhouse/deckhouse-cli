@@ -163,6 +163,9 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 		if limitFlag != "" {
 			limit = limitFlag
 		}
+
+		fmt.Printf("chunkStart is %v, chunkEnd is %v", chunkStart, chunkEnd)
+
 		curlParamDumpLog := CurlRequest{
 			BaseURL: "query_range",
 			Params: map[string]string{
@@ -185,8 +188,8 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 		}
 
 		var logs []string
-		for _, r := range DumpLogCurlJson.Data.Result {
-			for _, entry := range r.Values {
+		for _, d := range DumpLogCurlJson.Data.Result {
+			for _, entry := range d.Values {
 				timestampInt64, err := strconv.ParseInt(entry[0], 10, 64)
 				if err != nil {
 					return fmt.Errorf("Error converting timestamp: %s", err)
