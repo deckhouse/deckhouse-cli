@@ -191,8 +191,9 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 				if err != nil {
 					return fmt.Errorf("Error converting timestamp: %s", err)
 				}
-				timestampUtc := time.Unix(0, timestampInt64).UTC()
-				logs = append(logs, fmt.Sprintf("\nTimestamp: [%v], Log: %s\n", timestampUtc, entry[1]))
+				//timestampUtc := time.Unix(0, timestampInt64).UTC()
+				//logs = append(logs, fmt.Sprintf("\nTimestamp: [%v], Log: %s\n", timestampUtc, entry[1]))
+				logs = append(logs, fmt.Sprintf("\nTimestamp: [%v], Log: %s\n", timestampInt64, entry[1]))
 				fmt.Printf("%s", logs)
 			}
 		}
@@ -201,7 +202,9 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 		if err != nil {
 			return fmt.Errorf("Error converting timestamp: %s", err)
 		}
+		fmt.Printf("end timestamp is %v", firstTimestamp)
 		chunkEnd = firstTimestamp
+
 	}
 	return nil
 }
