@@ -4,9 +4,10 @@ commands:
   - export TASK_SHA256=0a2595f7fa3c15a62f8d0c244121a4977018b3bfdec7c1542ac2a8cf079978b8
   - apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc
   - curl -LO https://github.com/go-task/task/releases/download/$TASK_VERSION/task_linux_amd64.tar.gz
-  - echo "$TASK_SHA256  task_linux_amd64.tar.gz" | sha256sum -c && \
-  - tar -xf task_linux_amd64.tar.gz && \
-  - cp task /usr/local/bin/
+  - echo "$TASK_SHA256  task_linux_amd64.tar.gz" | sha256sum -c
+  - tar -xf task_linux_amd64.tar.gz
+  - rm -rf task_linux_amd64.tar.gz
+  - mv task /usr/local/bin/
   - eval "$(ssh-agent -s)" && base64 -d /run/secrets/stronghold-ssh > /dev/shm/stronghold-ssh && chmod 400 /dev/shm/stronghold-ssh && ssh-add /dev/shm/stronghold-ssh
   - rm /dev/shm/stronghold-ssh
   - export PRIVATE_REPO=$(cat /run/secrets/deckhouse-private-repo)
