@@ -159,6 +159,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 		filters = append(filters, fmt.Sprintf(`%s="%s"`, key, value))
 	}
 	q := fmt.Sprintf(`{%s}`, strings.Join(filters, ", "))
+
 	chunkEnd = endDumpTimestamp
 	for chunkEnd > chunkStart {
 		limit := "100000"
@@ -191,7 +192,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 			break
 		}
 
-		var logs []string
+		//var logs []string
 		for _, d := range DumpLogCurlJson.Data.Result {
 			for _, entry := range d.Values {
 				timestampInt64, err := strconv.ParseInt(entry[0], 10, 64)
@@ -199,9 +200,10 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 					return fmt.Errorf("Error converting timestamp: %s", err)
 				}
 				timestampUtc := time.Unix(0, timestampInt64).UTC()
-				logs = append(logs, fmt.Sprintf("\nTimestamp: [%v], Log: %s\n", timestampUtc, entry[1]))
+				//logs = append(logs, fmt.Sprintf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1]))
 				//logs = append(logs, fmt.Sprintf("\nTimestamp: [%v], Log: %s\n", timestampInt64, entry[1]))
-				fmt.Printf("%s", logs)
+				//fmt.Printf("%s", logs)
+				fmt.Printf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1])
 			}
 		}
 		//firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
