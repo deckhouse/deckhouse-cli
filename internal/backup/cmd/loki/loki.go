@@ -154,7 +154,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 	var filters []string
 	for key, value := range r {
 
-		fmt.Printf("\nstream is %s=%s", key, value)
+		//fmt.Printf("\nstream is %s=%s", key, value)
 
 		filters = append(filters, fmt.Sprintf(`%s="%s"`, key, value))
 	}
@@ -167,9 +167,9 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 			limit = limitFlag
 		}
 
-		chunkStartUtc := time.Unix(0, chunkStart).UTC()
-		chunkEndUtc := time.Unix(0, chunkEnd).UTC()
-		fmt.Printf("\nchunkStart is %v, chunkEnd is %v", chunkStartUtc, chunkEndUtc)
+		//chunkStartUtc := time.Unix(0, chunkStart).UTC()
+		//chunkEndUtc := time.Unix(0, chunkEnd).UTC()
+		//fmt.Printf("\nchunkStart is %v, chunkEnd is %v", chunkStartUtc, chunkEndUtc)
 
 		curlParamDumpLog := CurlRequest{
 			BaseURL: "query_range",
@@ -192,7 +192,6 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 			break
 		}
 
-		//var logs []string
 		for _, d := range DumpLogCurlJson.Data.Result {
 			for _, entry := range d.Values {
 				timestampInt64, err := strconv.ParseInt(entry[0], 10, 64)
@@ -200,21 +199,17 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 					return fmt.Errorf("Error converting timestamp: %s", err)
 				}
 				timestampUtc := time.Unix(0, timestampInt64).UTC()
-				//logs = append(logs, fmt.Sprintf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1]))
-				//logs = append(logs, fmt.Sprintf("\nTimestamp: [%v], Log: %s\n", timestampInt64, entry[1]))
-				//fmt.Printf("%s", logs)
 				fmt.Printf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1])
 			}
 		}
-		//firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
 		firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
 		firstTimestamp, err := strconv.ParseInt(firstLog, 10, 64)
 		if err != nil {
 			return fmt.Errorf("Error converting timestamp: %s", err)
 		}
-		firstTimestampUtc := time.Unix(0, firstTimestamp).UTC()
+		//firstTimestampUtc := time.Unix(0, firstTimestamp).UTC()
 
-		fmt.Printf("\nend timestamp is %v", firstTimestampUtc)
+		//fmt.Printf("\nend timestamp is %v", firstTimestampUtc)
 
 		chunkEnd = firstTimestamp
 
