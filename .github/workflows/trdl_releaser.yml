@@ -19,7 +19,7 @@ jobs:
       with:
         git-tag: ${{ github.ref_name }}
         vault-addr: ${{ secrets.TRDL_VAULT_ADDR }}
-        project-name: deckhouse-cli
+        project-name: d8-cli
         vault-auth-method: approle
         vault-role-id: ${{ secrets.TRDL_VAULT_ROLE_ID }}
         vault-secret-id: ${{ secrets.TRDL_VAULT_SECRET_ID }}
