@@ -140,7 +140,6 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			break
 		}
 		for _, r := range streamListDumpJson.Data {
-			//fmt.Printf("stream is: %s", streamListDumpJson.Data)
 			err := fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, r, config, kubeCl)
 			if err != nil {
 				return fmt.Errorf("Error get logs from Loki: %s", err)
@@ -153,9 +152,6 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map[string]string, config *rest.Config, kubeCl kubernetes.Interface) error {
 	var filters []string
 	for key, value := range r {
-
-		//fmt.Printf("\nstream is %s=%s", key, value)
-
 		filters = append(filters, fmt.Sprintf(`%s="%s"`, key, value))
 	}
 	q := fmt.Sprintf(`{%s}`, strings.Join(filters, ", "))
@@ -166,10 +162,6 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 		if limitFlag != "" {
 			limit = limitFlag
 		}
-
-		//chunkStartUtc := time.Unix(0, chunkStart).UTC()
-		//chunkEndUtc := time.Unix(0, chunkEnd).UTC()
-		//fmt.Printf("\nchunkStart is %v, chunkEnd is %v", chunkStartUtc, chunkEndUtc)
 
 		curlParamDumpLog := CurlRequest{
 			BaseURL: "query_range",
@@ -207,10 +199,6 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 		if err != nil {
 			return fmt.Errorf("Error converting timestamp: %s", err)
 		}
-		//firstTimestampUtc := time.Unix(0, firstTimestamp).UTC()
-
-		//fmt.Printf("\nend timestamp is %v", firstTimestampUtc)
-
 		chunkEnd = firstTimestamp
 
 	}
