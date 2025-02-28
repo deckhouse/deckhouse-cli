@@ -281,7 +281,9 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 
 		if t == fmt.Sprintf("%s/series", lokiURL) {
 			var series SeriesApi
-			fmt.Println("Raw JSON response:", stdout.String())
+			if !json.Valid(stdout.Bytes()) {
+				return nil, nil, fmt.Errorf("Error response from loki api: %s", stdout.String())
+			}
 			err = json.Unmarshal(stdout.Bytes(), &series)
 			if err != nil {
 				return nil, nil, fmt.Errorf("Failed unmarshal SeriesApi: %s", err)
@@ -290,6 +292,9 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 		} else if t == fmt.Sprintf("%s/query_range", lokiURL) {
 			var queryRange QueryRange
 			fmt.Println("Raw JSON response:", stdout.String())
+			if !json.Valid(stdout.Bytes()) {
+				return nil, nil, fmt.Errorf("Error response from loki api: %s", stdout.String())
+			}
 			err = json.Unmarshal(stdout.Bytes(), &queryRange)
 			if err != nil {
 				return nil, nil, fmt.Errorf("Failed unmarshal LokiResponse: %s", err)
