@@ -291,7 +291,6 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 			return nil, &series, nil
 		} else if t == fmt.Sprintf("%s/query_range", lokiURL) {
 			var queryRange QueryRange
-			fmt.Println("Raw JSON response:", stdout.String())
 			if !json.Valid(stdout.Bytes()) {
 				return nil, nil, fmt.Errorf("Error response from loki api: %s", stdout.String())
 			}
