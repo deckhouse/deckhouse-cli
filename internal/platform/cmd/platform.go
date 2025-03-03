@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	collect_debug_info "github.com/deckhouse/deckhouse-cli/internal/platform/cmd/collect-debug-info"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
@@ -42,6 +43,7 @@ func NewCommand() *cobra.Command {
 	platformCmd.AddCommand(
 		edit.NewCommand(),
 		module.NewCommand(),
+		collect_debug_info.NewCommand(),
 	)
 
 	flags.AddPersistentFlags(platformCmd)
