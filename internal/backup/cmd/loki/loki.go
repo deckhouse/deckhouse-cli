@@ -158,7 +158,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 
 	chunkEnd = endDumpTimestamp
 	for chunkEnd > chunkStart {
-		limit := "100000"
+		limit := "5000"
 		if limitFlag != "" {
 			limit = limitFlag
 		}
