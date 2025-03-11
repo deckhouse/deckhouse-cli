@@ -48,3 +48,28 @@ To install the `d8` binary from the provided GitHub release link, follow these s
 3. Find the `d8` binary in the unpacked directory, and move it to its desired destination under the $PATH.
 4. On macOS you might need to remove the quarantine attribute from binary to prevent Gatekeeper from blocking it (
    `sudo xattr -d com.apple.quarantine /path/to/d8`)
+
+## How to build?
+###  On local machine
+
+You need to have access to Stronghold's private repository for pulling libraries.
+
+Install [Task](https://taskfile.dev/installation) with any suitable method. For example:
+`go install github.com/go-task/task/v3/cmd/task@latest`
+
+To correctly access private repository run:
+```
+export PRIVATE_REPO=private.repo.com # replace with correct domain
+git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
+export GOPRIVATE="flant.internal"
+go mod tidy
+```
+
+To build for all platforms run:  
+`task build:dist:all`
+
+For any specific platform:  
+`task build:dist:linux:amd64`  
+`task build:dist:darwin:amd64`  
+`task build:dist:darwin:arm64`  
+`task build:dist:windows:amd64`

@@ -64,6 +64,7 @@ func init() {
 		{"print", "Prints runtime configurations"},
 		{"patch", "Patch data, configuration, and secrets"},
 		{"path-help", "Retrieve API help for paths"},
+		{"version", "Print version"},
 	}
 
 	strongholdCmd := &cobra.Command{
