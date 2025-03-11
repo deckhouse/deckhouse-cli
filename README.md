@@ -61,7 +61,7 @@ To correctly access private repository run:
 ```
 export PRIVATE_REPO=private.repo.com # replace with correct domain
 git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
-export GOPRIVATE="flant.internal/team/foxtrot/*"
+export GOPRIVATE="flant.internal"
 go mod tidy
 ```
 
