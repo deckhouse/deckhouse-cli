@@ -40,10 +40,6 @@ func BackupCustomResources(
 
 	resourcesToBackup := lo.Compact(
 		lo.Map(crdList.Items, func(crd v1.CustomResourceDefinition, _ int) schema.GroupVersionResource {
-			if crd.Spec.Scope != v1.NamespaceScoped {
-				return schema.GroupVersionResource{}
-			}
-
 			version, validVersionFound := lo.Find(crd.Spec.Versions, func(item v1.CustomResourceDefinitionVersion) bool {
 				return item.Storage && item.Served
 			})
