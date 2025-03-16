@@ -375,8 +375,6 @@ func getTokenLokiSa(kubeCl kubernetes.Interface) (string, error) {
 }
 
 func getLogWithRetry(config *rest.Config, kubeCl kubernetes.Interface, fullCommand []string) (*QueryRange, *SeriesApi, error) {
-	var err error
-
 	for attempts := 1; attempts <= 5; attempts++ {
 		QueryRangeDump, SeriesApiDump, err := getLogTimestamp(config, kubeCl, fullCommand)
 		if err == nil && QueryRangeDump == nil {
@@ -385,9 +383,9 @@ func getLogWithRetry(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 		if err == nil && SeriesApiDump == nil {
 			return QueryRangeDump, nil, nil
 		}
-		fmt.Printf("%v\n", err)
+		fmt.Printf("error get JSON response from Loki: %v\n", err)
 		time.Sleep(1 * time.Second)
 	}
 
-	return nil, nil, fmt.Errorf("error get JSON response from Loki: %w", err)
+	return nil, nil, fmt.Errorf("error get JSON response from Loki")
 }
