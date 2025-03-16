@@ -386,7 +386,7 @@ func getLogWithRetry(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 			return QueryRangeDump, nil, nil
 		}
 		fmt.Printf("%v\n", err)
-		time.Sleep(45 * time.Second)
+		time.Sleep(1 * time.Second)
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("Error get JSON response from Loki: %s", err)
