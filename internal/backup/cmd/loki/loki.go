@@ -193,9 +193,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 				fmt.Printf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1])
 			}
 		}
-		//get latest timestamp value from stream Loki api response to use pagination and get all log strings
-		//lastLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
-		//lastLog := DumpLogCurlJson.Data.Result[0].Values[0][0]
+		//get latest timestamp value from stream Loki api response to use pagination and get all log strings.
 		lastLog := DumpLogCurlJson.Data.Result[0].Values[len(DumpLogCurlJson.Data.Result[0].Values)-1][0]
 		lastTimestamp, err := strconv.ParseInt(lastLog, 10, 64)
 		if err != nil {
