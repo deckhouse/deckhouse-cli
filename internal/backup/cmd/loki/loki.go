@@ -69,14 +69,13 @@ const (
 	namespaceLoki      = "d8-monitoring"
 	secretNameLoki     = "loki-api-token"
 	templateDate       = "2006-01-02 15:04:05"
-
-	chunkSize = int64(30 * 24 * 60 * 60 * 1e9) //30 days in nanosec timestamp
 )
 
 var (
 	endTimestamp   string
 	startTimestamp string
 	limitFlag      string
+	chunkDaysFlag  int
 )
 
 type QueryRange struct {
@@ -117,6 +116,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("Error get end timestamp for Loki: %s", err)
 	}
+	chunkSize := int64(chunkDaysFlag * 24 * 60 * 60 * 1e9)
 	for chunkEnd := endDumpTimestamp; chunkEnd > 0; chunkEnd -= chunkSize {
 		chunkStart := chunkEnd - chunkSize
 		if startTimestamp != "" {
