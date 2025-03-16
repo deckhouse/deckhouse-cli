@@ -330,14 +330,14 @@ func getEndTimestamp(config *rest.Config, kubeCl kubernetes.Interface, token str
 			AuthToken: token,
 		}
 		endTimestampCurl := endTimestampCurlParam.GenerateCurlCommand()
-		//endTimestampJson, _, err := getLogTimestamp(config, kubeCl, endTimestampCurl)
-		endTimestampJson, _, err := getLogWithRetry(config, kubeCl, endTimestampCurl)
+		endTimestampJson, _, err := getLogTimestamp(config, kubeCl, endTimestampCurl)
+		//endTimestampJson, _, err := getLogWithRetry(config, kubeCl, endTimestampCurl)
 		if err != nil {
-			return 0, fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
+			return 0, fmt.Errorf("error get latest timestamp JSON from Loki: %s", err)
 		}
 		endTimestamp, err := strconv.ParseInt(endTimestampJson.Data.Result[0].Values[0][0], 10, 64)
 		if err != nil {
-			return 0, fmt.Errorf("Error converting timestamp: %s", err)
+			return 0, fmt.Errorf("error converting timestamp: %s", err)
 		}
 		return endTimestamp, err
 	}
