@@ -116,9 +116,9 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("Error get end timestamp for Loki: %s", err)
 	}
-	chunkSize := int64(chunkDaysFlag * 24 * 60 * 60 * 1e9)
-	for chunkEnd := endDumpTimestamp; chunkEnd > 0; chunkEnd -= chunkSize {
-		chunkStart := chunkEnd - chunkSize
+	chunkSize := time.Duration(chunkDaysFlag) * 24 * time.Hour
+	for chunkEnd := endDumpTimestamp; chunkEnd > 0; chunkEnd -= chunkSize.Nanoseconds() {
+		chunkStart := chunkEnd - chunkSize.Nanoseconds()
 		if startTimestamp != "" {
 			chunkStart, err = getStartTimestamp()
 		}
@@ -177,7 +177,6 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 		DumpLogCurl := curlParamDumpLog.GenerateCurlCommand()
 		DumpLogCurlJson, _, err := getLogTimestamp(config, kubeCl, DumpLogCurl)
 		if err != nil {
-			//errChan <- fmt.Errorf("Error get JSON from Loki: %s", err)
 			return fmt.Errorf("Error get JSON from Loki: %s", err)
 		}
 		if len(DumpLogCurlJson.Data.Result) == 0 {
@@ -194,12 +193,14 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 				fmt.Printf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1])
 			}
 		}
-		firstLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
-		firstTimestamp, err := strconv.ParseInt(firstLog, 10, 64)
+		//get latest timestamp from latest index array from Loki api response to use pagination and get all log strings from stream
+		//lastLog := DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values[len(DumpLogCurlJson.Data.Result[len(DumpLogCurlJson.Data.Result)-1].Values)-1][0]
+		lastLog := DumpLogCurlJson.Data.Result[0].Values[0][0]
+		lastTimestamp, err := strconv.ParseInt(lastLog, 10, 64)
 		if err != nil {
 			return fmt.Errorf("Error converting timestamp: %s", err)
 		}
-		chunkEnd = firstTimestamp
+		chunkEnd = lastTimestamp
 
 	}
 	return nil
