@@ -33,7 +33,6 @@ import (
 	"strings"
 	"time"
 
-	//"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -130,15 +129,19 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			},
 			AuthToken: token,
 		}
+
 		streamListDumpCurl := curlParamStreamList.GenerateCurlCommand()
-		_, streamListDumpJson, err := getLogTimestamp(config, kubeCl, streamListDumpCurl)
+		//_, streamListDumpJson, err := getLogTimestamp(config, kubeCl, streamListDumpCurl)
+		_, streamListDumpJson, err := getLogWithRetry(config, kubeCl, streamListDumpCurl)
 		if err != nil {
 			return fmt.Errorf("Error get stream list JSON from Loki: %s", err)
 		}
+
 		if len(streamListDumpJson.Data) == 0 {
 			fmt.Printf("No more streams.\nStop...")
 			break
 		}
+
 		for _, r := range streamListDumpJson.Data {
 			err := fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, r, config, kubeCl)
 			if err != nil {
@@ -175,7 +178,8 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 			AuthToken: token,
 		}
 		DumpLogCurl := curlParamDumpLog.GenerateCurlCommand()
-		DumpLogCurlJson, _, err := getLogTimestamp(config, kubeCl, DumpLogCurl)
+		//DumpLogCurlJson, _, err := getLogTimestamp(config, kubeCl, DumpLogCurl)
+		DumpLogCurlJson, _, err := getLogWithRetry(config, kubeCl, DumpLogCurl)
 		if err != nil {
 			return fmt.Errorf("Error get JSON from Loki: %s", err)
 		}
@@ -193,7 +197,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 				fmt.Printf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1])
 			}
 		}
-		//get latest timestamp value from stream Loki api response to use pagination and get all log strings.
+		//get last timestamp value from stream Loki api response to use pagination and get all logs.
 		lastLog := DumpLogCurlJson.Data.Result[0].Values[len(DumpLogCurlJson.Data.Result[0].Values)-1][0]
 		lastTimestamp, err := strconv.ParseInt(lastLog, 10, 64)
 		if err != nil {
@@ -268,8 +272,15 @@ func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, command []strin
 func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullCommand []string) (*QueryRange, *SeriesApi, error) {
 	for _, t := range fullCommand {
 		var stdout, stderr bytes.Buffer
+
 		podName, err := GetDeckhousePod(kubeCl, namespaceDeckhouse, labelSelector)
+		if err != nil {
+			return nil, nil, err
+		}
 		executor, err := ExecInPod(config, kubeCl, fullCommand, podName, namespaceDeckhouse, containerName)
+		if err != nil {
+			return nil, nil, err
+		}
 		if err = executor.StreamWithContext(
 			context.Background(),
 			remotecommand.StreamOptions{
@@ -319,7 +330,8 @@ func getEndTimestamp(config *rest.Config, kubeCl kubernetes.Interface, token str
 			AuthToken: token,
 		}
 		endTimestampCurl := endTimestampCurlParam.GenerateCurlCommand()
-		endTimestampJson, _, err := getLogTimestamp(config, kubeCl, endTimestampCurl)
+		//endTimestampJson, _, err := getLogTimestamp(config, kubeCl, endTimestampCurl)
+		endTimestampJson, _, err := getLogWithRetry(config, kubeCl, endTimestampCurl)
 		if err != nil {
 			return 0, fmt.Errorf("Error get latest timestamp JSON from Loki: %s", err)
 		}
@@ -360,4 +372,21 @@ func getTokenLokiSa(kubeCl kubernetes.Interface) (string, error) {
 		return "", fmt.Errorf("Token not found in Secret: %v", err)
 	}
 	return string(tokenBase64), err
+}
+
+func getLogWithRetry(config *rest.Config, kubeCl kubernetes.Interface, fullCommand []string) (*QueryRange, *SeriesApi, error) {
+	var err error
+
+	for attempts := 1; attempts <= 5; attempts++ {
+		QueryRangeDump, SeriesApiDump, err := getLogTimestamp(config, kubeCl, fullCommand)
+		if err == nil && QueryRangeDump == nil {
+			return nil, SeriesApiDump, nil
+		}
+		if err == nil && SeriesApiDump == nil {
+			return QueryRangeDump, nil, nil
+		}
+		fmt.Printf("Attempt %d failed: %v\n", attempts, err)
+	}
+
+	return nil, nil, err
 }
