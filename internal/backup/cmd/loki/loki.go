@@ -385,7 +385,8 @@ func getLogWithRetry(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 		if err == nil && SeriesApiDump == nil {
 			return QueryRangeDump, nil, nil
 		}
-		fmt.Printf("Attempt %d failed: %v\n", attempts, err)
+		fmt.Printf("\nAttempt %d failed: %v\n", attempts, err)
+		time.Sleep(45 * time.Second)
 	}
 
 	return nil, nil, err
