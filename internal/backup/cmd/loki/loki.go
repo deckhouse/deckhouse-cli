@@ -177,17 +177,16 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 			},
 			AuthToken: token,
 		}
-		DumpLogCurl := curlParamDumpLog.GenerateCurlCommand()
-		//DumpLogCurlJson, _, err := getLogTimestamp(config, kubeCl, DumpLogCurl)
-		DumpLogCurlJson, _, err := getLogWithRetry(config, kubeCl, DumpLogCurl)
+		dumpLogCurl := curlParamDumpLog.GenerateCurlCommand()
+		dumpLogCurlJson, _, err := getLogWithRetry(config, kubeCl, dumpLogCurl)
 		if err != nil {
 			return fmt.Errorf("Error get JSON from Loki: %s", err)
 		}
-		if len(DumpLogCurlJson.Data.Result) == 0 {
+		if len(dumpLogCurlJson.Data.Result) == 0 {
 			break
 		}
 
-		for _, d := range DumpLogCurlJson.Data.Result {
+		for _, d := range dumpLogCurlJson.Data.Result {
 			for _, entry := range d.Values {
 				timestampInt64, err := strconv.ParseInt(entry[0], 10, 64)
 				if err != nil {
@@ -198,13 +197,12 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 			}
 		}
 		//get last timestamp value from stream Loki api response to use pagination and get all logs.
-		lastLog := DumpLogCurlJson.Data.Result[0].Values[len(DumpLogCurlJson.Data.Result[0].Values)-1][0]
+		lastLog := dumpLogCurlJson.Data.Result[0].Values[len(dumpLogCurlJson.Data.Result[0].Values)-1][0]
 		lastTimestamp, err := strconv.ParseInt(lastLog, 10, 64)
 		if err != nil {
 			return fmt.Errorf("Error converting timestamp: %s", err)
 		}
 		chunkEnd = lastTimestamp
-
 	}
 	return nil
 }
