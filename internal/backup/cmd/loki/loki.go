@@ -339,7 +339,7 @@ func getEndTimestamp(config *rest.Config, kubeCl kubernetes.Interface, token str
 		if err != nil {
 			return 0, fmt.Errorf("Error converting timestamp: %s", err)
 		}
-		return endTimestamp, nil
+		return endTimestamp, err
 	}
 
 	end, err := time.Parse(templateDate, endTimestamp)
@@ -348,7 +348,7 @@ func getEndTimestamp(config *rest.Config, kubeCl kubernetes.Interface, token str
 	}
 	endTimestampNanoSec := end.UnixNano()
 
-	return endTimestampNanoSec, nil
+	return endTimestampNanoSec, err
 }
 
 func getStartTimestamp() (int64, error) {
