@@ -17,13 +17,25 @@ limitations under the License.
 package flags
 
 import (
+	"os"
+	
 	"github.com/spf13/pflag"
 )
+
 
 func AddFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringP(
 		"editor", "e",
-		"vi",
+		defaultEditor(),
 		"Your favourite editor.",
 	)
+}
+
+func defaultEditor() string {
+	ed := os.Getenv("EDITOR")
+	if ed == "" {
+		ed = "vi"
+	
+	}
+	return ed
 }
