@@ -9,6 +9,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	"os"
 )
 
 func GetDeckhousePod(kubeCl kubernetes.Interface) (string, error) {
@@ -19,6 +20,10 @@ func GetDeckhousePod(kubeCl kubernetes.Interface) (string, error) {
 		return "", fmt.Errorf("error listing pods: %w", err)
 	}
 
+	if len(pods.Items) == 0 {
+		fmt.Println("No pods deckhouse available in the namespace d8-system")
+		os.Exit(1)
+	}
 	pod := pods.Items[0]
 	podName := pod.Name
 	return podName, nil
