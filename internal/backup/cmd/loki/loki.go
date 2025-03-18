@@ -77,7 +77,7 @@ var (
 	startTimestamp string
 	limitFlag      string
 	chunkDaysFlag  int
-	Logger         = log.NewSLogger(slog.LevelInfo)
+	Logger         = log.NewSLogger(slog.LevelError)
 	QueryRangeDump *QueryRange
 	SeriesApiDump  *SeriesApi
 	//limit          = "5000"
@@ -333,7 +333,7 @@ func getTokenLokiSa(kubeCl kubernetes.Interface) (string, error) {
 func getLogWithRetry(config *rest.Config, kubeCl kubernetes.Interface, fullCommand []string) (*QueryRange, *SeriesApi, error) {
 	var err error
 	err = retry.RunTask(Logger,
-		"Get json response from Loki",
+		"error get json response from Loki",
 		task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
 			QueryRangeDump, SeriesApiDump, err = getLogTimestamp(config, kubeCl, fullCommand)
 			if err != nil {
