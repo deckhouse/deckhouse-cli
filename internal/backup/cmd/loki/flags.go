@@ -40,14 +40,14 @@ func addFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringVar(
 		&limitFlag,
 		"limit",
-		"",
-		"Limit max string to output per queue from Loki. (Default 100000 max limit strings per queue.)",
+		"5000",
+		"Limit the number of lines to output per queue from Loki. (Default 5000 max limit strings per queue.)",
 	)
 	flagSet.IntVar(
 		&chunkDaysFlag,
 		"days",
 		30,
-		"Limit max days range to output per queue from Loki. (Default 30 max limit days range per queue.)",
+		"Limit maximum number of days in range to output per queue from Loki. (Default 30 max limit days range per queue.)",
 	)
 }
 
