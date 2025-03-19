@@ -34,7 +34,7 @@ Operate platform options in DKP.
 
 func NewCommand() *cobra.Command {
 	platformCmd := &cobra.Command{
-		Use:     "platform <command>",
+		Use:     "platform",
 		Short:   "Operate platform options.",
 		Aliases: []string{"p"},
 		Long:    platformLong,
