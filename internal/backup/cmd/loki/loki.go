@@ -80,7 +80,6 @@ var (
 	Logger         = log.NewSLogger(slog.LevelError)
 	QueryRangeDump *QueryRange
 	SeriesApiDump  *SeriesApi
-	//limit          = "5000"
 )
 
 type QueryRange struct {
@@ -116,6 +115,8 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("error get token from secret for loki api: %w", err)
 	}
+
+	fmt.Println("Getting logs from Loki api...")
 
 	endDumpTimestamp, err := getEndTimestamp(config, kubeCl, token)
 	if err != nil {
@@ -166,10 +167,6 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 
 	chunkEnd = endDumpTimestamp
 	for chunkEnd > chunkStart {
-		//if limitFlag != "" {
-		//	limit = limitFlag
-		//}
-
 		curlParamDumpLog := CurlRequest{
 			BaseURL: "query_range",
 			Params: map[string]string{
@@ -288,7 +285,6 @@ func getEndTimestamp(config *rest.Config, kubeCl kubernetes.Interface, token str
 		}
 		endTimestampCurl := endTimestampCurlParam.GenerateCurlCommand()
 		endTimestampJson, _, err := getLogWithRetry(config, kubeCl, endTimestampCurl)
-		//endTimestampJson, _, err := getLogTimestamp(config, kubeCl, endTimestampCurl)
 		if err != nil {
 			return 0, fmt.Errorf("error get latest timestamp JSON from loki: %w", err)
 		}
