@@ -39,7 +39,7 @@ var (
 )
 
 func init() {
-	helpCmd := &cobra.Command{
+	helpJsonCmd := &cobra.Command{
 		Use:           "help-json",
 		Short:         "Get all commands in json",
 		Long:          helpLong,
@@ -50,7 +50,7 @@ func init() {
 	//flags.AddPersistentFlags(helpCmd)
 	//helpCmd.AddCommand(platform.NewCommand())
 
-	rootCmd.AddCommand(helpCmd)
+	rootCmd.AddCommand(helpJsonCmd)
 
 	// Collect help info in JSON
 	helpInfo := extractCommands(rootCmd)
