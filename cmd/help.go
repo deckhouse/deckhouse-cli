@@ -19,7 +19,6 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	platform "github.com/deckhouse/deckhouse-cli/internal/platform/cmd"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"k8s.io/kubectl/pkg/util/templates"
@@ -46,7 +45,7 @@ var (
 
 func init() {
 	helpCmd := &cobra.Command{
-		Use:           "help",
+		Use:           "help-json",
 		Short:         "Get all commands in json",
 		Long:          helpLong,
 		SilenceErrors: true,
@@ -54,12 +53,12 @@ func init() {
 	}
 
 	//flags.AddPersistentFlags(helpCmd)
-	helpCmd.AddCommand(platform.NewCommand())
+	//helpCmd.AddCommand(platform.NewCommand())
 
 	rootCmd.AddCommand(helpCmd)
 
 	// Collect help info in JSON
-	helpInfo := extractCommands(helpCmd)
+	helpInfo := extractCommands(rootCmd)
 	//helpInfo := extractFlags(helpCmd)
 
 	// Convert to JSON
