@@ -33,11 +33,6 @@ type CommandInfo struct {
 	Subcommands []CommandInfo     `json:"subcommands"`
 }
 
-type FlagInfo struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-}
-
 var (
 	helpLong = templates.LongDesc(`
 		providing the respective flag.`)
