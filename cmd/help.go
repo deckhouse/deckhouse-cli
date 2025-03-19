@@ -29,6 +29,7 @@ import (
 type CommandInfo struct {
 	Name        string            `json:"name"`
 	Description string            `json:"description"`
+	Aliases     []string          `json:"aliases"`
 	Flags       map[string]string `json:"flags"`
 	Subcommands []CommandInfo     `json:"subcommands"`
 }
@@ -58,7 +59,8 @@ func init() {
 	rootCmd.AddCommand(helpCmd)
 
 	// Collect help info in JSON
-	helpInfo := extractCommands(rootCmd)
+	//helpInfo := extractCommands(helpCmd)
+	helpInfo := extractFlags(helpCmd)
 
 	// Convert to JSON
 	jsonData, err := json.MarshalIndent(helpInfo, "", "  ")
@@ -86,6 +88,7 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	return CommandInfo{
 		Name:        cmd.Use,
 		Description: cmd.Short,
+		Aliases:     cmd.Aliases,
 		Flags:       flags,
 		Subcommands: subcommands,
 	}
