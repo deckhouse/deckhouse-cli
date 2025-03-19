@@ -58,7 +58,7 @@ func init() {
 	rootCmd.AddCommand(helpCmd)
 
 	// Collect help info in JSON
-	helpInfo := extractCommands(helpCmd)
+	helpInfo := extractCommands(rootCmd)
 
 	// Convert to JSON
 	jsonData, err := json.MarshalIndent(helpInfo, "", "  ")
