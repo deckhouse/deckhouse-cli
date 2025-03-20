@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/operatepod"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
@@ -227,11 +226,11 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 	for _, apiUrlLoki := range fullCommand {
 		var stdout, stderr bytes.Buffer
 
-		podName, err := operatepod.GetDeckhousePod(kubeCl)
+		podName, err := utilk8s.GetDeckhousePod(kubeCl)
 		if err != nil {
 			return nil, nil, err
 		}
-		executor, err := operatepod.ExecInPod(config, kubeCl, fullCommand, podName, namespaceDeckhouse, containerName)
+		executor, err := utilk8s.ExecInPod(config, kubeCl, fullCommand, podName, namespaceDeckhouse, containerName)
 		if err != nil {
 			return nil, nil, err
 		}
