@@ -1,8 +1,8 @@
 module github.com/deckhouse/deckhouse-cli
 
-go 1.23.1
+go 1.23.6
 
-toolchain go1.23.1
+toolchain go1.23.7
 
 require (
 	github.com/Masterminds/semver/v3 v3.3.0
