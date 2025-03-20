@@ -6,7 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/operatepod"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
@@ -160,7 +160,7 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface) error {
 		},
 	}
 
-	podName, err := operatepod.GetDeckhousePod(kubeCl)
+	podName, err := utilk8s.GetDeckhousePod(kubeCl)
 
 	var stdout, stderr bytes.Buffer
 	gzipWriter := gzip.NewWriter(os.Stdout)
@@ -170,7 +170,7 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface) error {
 
 	for _, cmd := range debugCommands {
 		fullCommand := append([]string{cmd.Cmd}, cmd.Args...)
-		executor, err := operatepod.ExecInPod(config, kubeCl, fullCommand, podName, namespace, containerName)
+		executor, err := utilk8s.ExecInPod(config, kubeCl, fullCommand, podName, namespace, containerName)
 		if err = executor.StreamWithContext(
 			context.Background(),
 			remotecommand.StreamOptions{

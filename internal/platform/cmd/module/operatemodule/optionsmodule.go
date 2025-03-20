@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/operatepod"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
@@ -24,8 +24,8 @@ func OptionsModule(config *rest.Config, kubeCl kubernetes.Interface, pathFromOpt
 
 	fullEndpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, pathFromOption)
 	getApi := []string{"curl", fullEndpointUrl}
-	podName, err := operatepod.GetDeckhousePod(kubeCl)
-	executor, err := operatepod.ExecInPod(config, kubeCl, getApi, podName, namespace, containerName)
+	podName, err := utilk8s.GetDeckhousePod(kubeCl)
+	executor, err := utilk8s.ExecInPod(config, kubeCl, getApi, podName, namespace, containerName)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
