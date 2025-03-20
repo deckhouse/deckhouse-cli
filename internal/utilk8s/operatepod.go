@@ -19,6 +19,9 @@ func GetDeckhousePod(kubeCl kubernetes.Interface) (string, error) {
 		return "", fmt.Errorf("error listing pods: %w", err)
 	}
 
+	if len(pods.Items) == 0 {
+		return "", fmt.Errorf("no pods deckhouse available in namespace d8-system to get response from loki api")
+	}
 	pod := pods.Items[0]
 	podName := pod.Name
 	return podName, nil
