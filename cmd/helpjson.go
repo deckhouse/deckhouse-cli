@@ -19,11 +19,9 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	platform "github.com/deckhouse/deckhouse-cli/internal/platform/cmd"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"k8s.io/kubectl/pkg/util/templates"
-	"os"
 )
 
 type CommandInfo struct {
@@ -41,185 +39,210 @@ var (
 
 func init() {
 	helpJsonCmd := &cobra.Command{
-		Use:    "help-json",
-		Short:  "Get all commands in json",
-		Long:   helpLong,
-		Hidden: true,
-		RunE:   extractCommands,
+		Use:   "help-json",
+		Short: "Get all commands in json",
+		Long:  helpLong,
+		//Hidden: true,
+		RunE: helpJson,
 	}
 
 	//flags.AddPersistentFlags(helpCmd)
-	helpJsonCmd.AddCommand(platform.NewCommand())
+	//helpJsonCmd.AddCommand(platform.NewCommand())
 
 	rootCmd.AddCommand(helpJsonCmd)
 
-	//err := extractCommands(rootCmd)
-	//if err != nil {
-	//	fmt.Println("Error generating JSON:", err)
-	//	os.Exit(1)
-	//}
-
-	// Collect help info in JSON
-	//helpInfo := extractCommands(helpJsonCmd)
-	//helpInfo := extractFlags(helpCmd)
-
-	//// Convert to JSON
-	//jsonData, err := json.MarshalIndent(helpInfo, "", "  ")
-	//if err != nil {
-	//	fmt.Println("Error generating JSON:", err)
-	//	os.Exit(1)
-	//}
-	//
-	//// Print JSON
-	//fmt.Println(string(jsonData))
-
 }
 
-// Extract subcommands and flags recursively
-func extractCommands(cmd *cobra.Command, _ []string) error {
-	// Extract flags
-	flags := make(map[string]string)
-	var flagSet *pflag.FlagSet
-	if flagSet != nil {
-		flagSet.VisitAll(func(f *pflag.Flag) {
-			flags[f.Name] = f.Usage
-		})
+func helpJson(cmd *cobra.Command, _ []string) error {
+
+	commandsData := extractCommands(rootCmd)
+
+	jsonData, err := json.MarshalIndent(commandsData, "", "  ")
+	if err != nil {
+		return err
 	}
 
-	// Extract subcommands
+	// Print JSON output
+	fmt.Println(string(jsonData))
+
+	return nil
+}
+
+func extractCommands(cmd *cobra.Command) CommandInfo {
+	flags := make(map[string]string)
+	collectFlags(cmd.Flags(), flags)
+	collectFlags(cmd.PersistentFlags(), flags)
+
+	// Recursive extraction of subcommands
 	var subcommands []CommandInfo
 	for _, subCmd := range cmd.Commands() {
-		subcommands = append(subcommands, CommandInfo{
-			Name:        subCmd.Use,
-			Description: subCmd.Short,
-			Flags:       flags,
-			Aliases:     subCmd.Aliases,
-			Subcommands: nil,
-		})
+		subcommands = append(subcommands, extractCommands(subCmd)) // 🔥 Recursion happens here
 	}
 
-	helpInfo := CommandInfo{
+	return CommandInfo{
 		Name:        cmd.Use,
 		Description: cmd.Short,
 		Flags:       flags,
 		Aliases:     cmd.Aliases,
 		Subcommands: subcommands,
 	}
-
-	// Convert to JSON
-	jsonData, err := json.MarshalIndent(helpInfo, "", "  ")
-	if err != nil {
-		fmt.Println("Error generating JSON:", err)
-		os.Exit(1)
-	}
-
-	// Print JSON
-	fmt.Println(string(jsonData))
-
-	//return CommandInfo{
-	//	Name:        cmd.Use,
-	//	Description: cmd.Short,
-	//	Flags:       flags,
-	//	Aliases:     cmd.Aliases,
-	//	Subcommands: subcommands,
-	//}
-	return err
 }
 
 // Helper function to collect flags
-//func collectFlags(flagSet *pflag.FlagSet, flags map[string]string) {
+func collectFlags(flagSet *pflag.FlagSet, flags map[string]string) {
+	if flagSet != nil {
+		flagSet.VisitAll(func(f *pflag.Flag) {
+			flags[f.Name] = f.Usage
+		})
+	}
+}
+
+//// Extract subcommands and flags recursively
+//func extractCommands(cmd *cobra.Command, _ []string) error {
+//
+//	// Extract flags
+//	flags := make(map[string]string)
+//	var flagSet *pflag.FlagSet
 //	if flagSet != nil {
 //		flagSet.VisitAll(func(f *pflag.Flag) {
 //			flags[f.Name] = f.Usage
 //		})
 //	}
-//}
-
-//func extractCommands(cmd *cobra.Command) CommandInfo {
-//	flags := make(map[string]string)
-//	cmd.Flags().VisitAll(func(f *pflag.Flag) {
-//		flags[f.Name] = f.Usage
-//	})
 //
+//	// Extract subcommands
 //	var subcommands []CommandInfo
 //	for _, subCmd := range cmd.Commands() {
-//		subcommands = append(subcommands, extractCommands(subCmd))
+//		subcommands = append(subcommands, CommandInfo{
+//			Name:        subCmd.Use,
+//			Description: subCmd.Short,
+//			Flags:       flags,
+//			Aliases:     subCmd.Aliases,
+//			Subcommands: nil,
+//		})
 //	}
 //
-//	return CommandInfo{
+//	helpInfo := CommandInfo{
 //		Name:        cmd.Use,
 //		Description: cmd.Short,
-//		Aliases:     cmd.Aliases,
 //		Flags:       flags,
+//		Aliases:     cmd.Aliases,
 //		Subcommands: subcommands,
 //	}
-//}
 //
-//func extractFlags(cmd *cobra.Command) map[string][]FlagInfo {
-//	flagsMap := make(map[string][]FlagInfo)
-//
-//	// Helper function to extract flags from a flag set
-//	getFlags := func(flagSet *pflag.FlagSet) []FlagInfo {
-//		var flags []FlagInfo
-//		if flagSet != nil {
-//			flagSet.VisitAll(func(f *pflag.Flag) {
-//				flags = append(flags, FlagInfo{
-//					Name:        f.Name,
-//					Description: f.Usage,
-//				})
-//			})
-//		}
-//		return flags
+//	// Convert to JSON
+//	jsonData, err := json.MarshalIndent(helpInfo, "", "  ")
+//	if err != nil {
+//		fmt.Println("Error generating JSON:", err)
+//		os.Exit(1)
 //	}
 //
-//	// Get flags for the current command
-//	flagsMap[cmd.Use] = append(getFlags(cmd.Flags()), getFlags(cmd.PersistentFlags())...)
+//	// Print JSON
+//	fmt.Println(string(jsonData))
 //
-//	// Recursively collect flags from subcommands
-//	for _, subCmd := range cmd.Commands() {
-//		for key, value := range extractFlags(subCmd) {
-//			flagsMap[key] = value
-//		}
-//	}
-//
-//	return flagsMap
+//	//return CommandInfo{
+//	//	Name:        cmd.Use,
+//	//	Description: cmd.Short,
+//	//	Flags:       flags,
+//	//	Aliases:     cmd.Aliases,
+//	//	Subcommands: subcommands,
+//	//}
+//	return err
 //}
-
-//func AddPersistentFlags(cmd *cobra.Command) {
-//	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
-//	if p := os.Getenv("KUBECONFIG"); p != "" {
-//		defaultKubeconfigPath = p
-//	}
-//	cmd.PersistentFlags().StringP(
-//		"kubeconfig",
-//		"k",
-//		defaultKubeconfigPath,
-//		"KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)",
-//	)
-//}
-
-//var platformLong = templates.LongDesc(`
-//Operate platform options in DKP.
 //
-//© Flant JSC 2025`)
+//// Helper function to collect flags
+////func collectFlags(flagSet *pflag.FlagSet, flags map[string]string) {
+////	if flagSet != nil {
+////		flagSet.VisitAll(func(f *pflag.Flag) {
+////			flags[f.Name] = f.Usage
+////		})
+////	}
+////}
 //
-//func NewCommand() *cobra.Command {
-//	platformCmd := &cobra.Command{
-//		Use:     "platform <command>",
-//		Short:   "Operate platform options.",
-//		Aliases: []string{"p"},
-//		Long:    platformLong,
-//		PreRunE: flags.ValidateParameters,
-//	}
+////func extractCommands(cmd *cobra.Command) CommandInfo {
+////	flags := make(map[string]string)
+////	cmd.Flags().VisitAll(func(f *pflag.Flag) {
+////		flags[f.Name] = f.Usage
+////	})
+////
+////	var subcommands []CommandInfo
+////	for _, subCmd := range cmd.Commands() {
+////		subcommands = append(subcommands, extractCommands(subCmd))
+////	}
+////
+////	return CommandInfo{
+////		Name:        cmd.Use,
+////		Description: cmd.Short,
+////		Aliases:     cmd.Aliases,
+////		Flags:       flags,
+////		Subcommands: subcommands,
+////	}
+////}
+////
+////func extractFlags(cmd *cobra.Command) map[string][]FlagInfo {
+////	flagsMap := make(map[string][]FlagInfo)
+////
+////	// Helper function to extract flags from a flag set
+////	getFlags := func(flagSet *pflag.FlagSet) []FlagInfo {
+////		var flags []FlagInfo
+////		if flagSet != nil {
+////			flagSet.VisitAll(func(f *pflag.Flag) {
+////				flags = append(flags, FlagInfo{
+////					Name:        f.Name,
+////					Description: f.Usage,
+////				})
+////			})
+////		}
+////		return flags
+////	}
+////
+////	// Get flags for the current command
+////	flagsMap[cmd.Use] = append(getFlags(cmd.Flags()), getFlags(cmd.PersistentFlags())...)
+////
+////	// Recursively collect flags from subcommands
+////	for _, subCmd := range cmd.Commands() {
+////		for key, value := range extractFlags(subCmd) {
+////			flagsMap[key] = value
+////		}
+////	}
+////
+////	return flagsMap
+////}
 //
-//	platformCmd.AddCommand(
-//		edit.NewCommand(),
-//		module.NewCommand(),
-//		collect_debug_info.NewCommand(),
-//		queue.NewCommand(),
-//	)
+////func AddPersistentFlags(cmd *cobra.Command) {
+////	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
+////	if p := os.Getenv("KUBECONFIG"); p != "" {
+////		defaultKubeconfigPath = p
+////	}
+////	cmd.PersistentFlags().StringP(
+////		"kubeconfig",
+////		"k",
+////		defaultKubeconfigPath,
+////		"KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)",
+////	)
+////}
 //
-//	flags.AddPersistentFlags(platformCmd)
-//
-//	return platformCmd
-//}
+////var platformLong = templates.LongDesc(`
+////Operate platform options in DKP.
+////
+////© Flant JSC 2025`)
+////
+////func NewCommand() *cobra.Command {
+////	platformCmd := &cobra.Command{
+////		Use:     "platform <command>",
+////		Short:   "Operate platform options.",
+////		Aliases: []string{"p"},
+////		Long:    platformLong,
+////		PreRunE: flags.ValidateParameters,
+////	}
+////
+////	platformCmd.AddCommand(
+////		edit.NewCommand(),
+////		module.NewCommand(),
+////		collect_debug_info.NewCommand(),
+////		queue.NewCommand(),
+////	)
+////
+////	flags.AddPersistentFlags(platformCmd)
+////
+////	return platformCmd
+////}
