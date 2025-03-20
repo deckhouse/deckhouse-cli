@@ -26,6 +26,7 @@ import (
 type CommandInfo struct {
 	Name        string            `json:"name"`
 	Description string            `json:"description"`
+	Version     string            `json:"version,omitempty"`
 	Aliases     []string          `json:"aliases"`
 	Flags       map[string]string `json:"flags"`
 	Subcommands []CommandInfo     `json:"subcommands"`
@@ -64,6 +65,7 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	return CommandInfo{
 		Name:        cmd.Use,
 		Description: cmd.Short,
+		Version:     cmd.Version,
 		Flags:       flags,
 		Aliases:     cmd.Aliases,
 		Subcommands: subcommands,
