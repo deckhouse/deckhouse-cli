@@ -45,13 +45,18 @@ func init() {
 		Short:  "Get all commands in json",
 		Long:   helpLong,
 		Hidden: true,
-		RunE:   extractCommands,
 	}
 
 	//flags.AddPersistentFlags(helpCmd)
 	helpJsonCmd.AddCommand(platform.NewCommand())
 
 	rootCmd.AddCommand(helpJsonCmd)
+
+	err := extractCommands(rootCmd)
+	if err != nil {
+		fmt.Println("Error generating JSON:", err)
+		os.Exit(1)
+	}
 
 	// Collect help info in JSON
 	//helpInfo := extractCommands(helpJsonCmd)
@@ -70,7 +75,7 @@ func init() {
 }
 
 // Extract subcommands and flags recursively
-func extractCommands(cmd *cobra.Command, args []string) error {
+func extractCommands(cmd *cobra.Command) error {
 	// Extract flags
 	flags := make(map[string]string)
 	var flagSet *pflag.FlagSet
