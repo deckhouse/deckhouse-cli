@@ -341,11 +341,5 @@ func getLogWithRetry(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 	if err != nil {
 		return nil, nil, fmt.Errorf("error get JSON from loki: %w", err)
 	}
-	if SeriesApiDump != nil {
-		return nil, SeriesApiDump, nil
-	}
-	if QueryRangeDump != nil {
-		return QueryRangeDump, nil, nil
-	}
-	return nil, nil, nil
+	return QueryRangeDump, SeriesApiDump, nil
 }
