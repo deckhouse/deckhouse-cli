@@ -17,7 +17,6 @@ limitations under the License.
 package cmd
 
 import (
-	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 
 	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
@@ -53,7 +52,11 @@ LICENSE NOTE: The Deckhouse Delivery Kit functionality is exclusively available 
 }
 
 func removeKubectlCmd(werfRootCmd *cobra.Command) {
-	kubectlCmd, _ := lo.Must2(werfRootCmd.Find([]string{"kubectl"}))
+	kubectlCmd, _, err := werfRootCmd.Find([]string{"kubectl"})
+	if err != nil {
+		return
+	}
+
 	kubectlCmd.Hidden = true
 
 	for _, cmd := range kubectlCmd.Commands() {
