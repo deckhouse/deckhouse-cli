@@ -154,7 +154,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			}
 		}
 	}
-	return err
+	return nil
 }
 
 func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map[string]string, config *rest.Config, kubeCl kubernetes.Interface) error {
