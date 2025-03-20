@@ -45,6 +45,7 @@ func init() {
 		Short:  "Get all commands in json",
 		Long:   helpLong,
 		Hidden: true,
+		RunE:   extractCommands,
 	}
 
 	//flags.AddPersistentFlags(helpCmd)
@@ -53,8 +54,51 @@ func init() {
 	rootCmd.AddCommand(helpJsonCmd)
 
 	// Collect help info in JSON
-	helpInfo := extractCommands(helpJsonCmd)
+	//helpInfo := extractCommands(helpJsonCmd)
 	//helpInfo := extractFlags(helpCmd)
+
+	//// Convert to JSON
+	//jsonData, err := json.MarshalIndent(helpInfo, "", "  ")
+	//if err != nil {
+	//	fmt.Println("Error generating JSON:", err)
+	//	os.Exit(1)
+	//}
+	//
+	//// Print JSON
+	//fmt.Println(string(jsonData))
+
+}
+
+// Extract subcommands and flags recursively
+func extractCommands(cmd *cobra.Command, args []string) error {
+	// Extract flags
+	flags := make(map[string]string)
+	var flagSet *pflag.FlagSet
+	if flagSet != nil {
+		flagSet.VisitAll(func(f *pflag.Flag) {
+			flags[f.Name] = f.Usage
+		})
+	}
+
+	// Extract subcommands
+	var subcommands []CommandInfo
+	for _, subCmd := range cmd.Commands() {
+		subcommands = append(subcommands, CommandInfo{
+			Name:        subCmd.Use,
+			Description: subCmd.Short,
+			Flags:       flags,
+			Aliases:     subCmd.Aliases,
+			Subcommands: nil,
+		})
+	}
+
+	helpInfo := CommandInfo{
+		Name:        cmd.Use,
+		Description: cmd.Short,
+		Flags:       flags,
+		Aliases:     cmd.Aliases,
+		Subcommands: subcommands,
+	}
 
 	// Convert to JSON
 	jsonData, err := json.MarshalIndent(helpInfo, "", "  ")
@@ -66,38 +110,24 @@ func init() {
 	// Print JSON
 	fmt.Println(string(jsonData))
 
-}
-
-// Extract subcommands and flags recursively
-func extractCommands(cmd *cobra.Command) CommandInfo {
-	// Extract flags
-	flags := make(map[string]string)
-	collectFlags(cmd.Flags(), flags)
-	collectFlags(cmd.PersistentFlags(), flags)
-
-	// Extract subcommands
-	var subcommands []CommandInfo
-	for _, subCmd := range cmd.Commands() {
-		subcommands = append(subcommands, extractCommands(subCmd))
-	}
-
-	return CommandInfo{
-		Name:        cmd.Use,
-		Description: cmd.Short,
-		Flags:       flags,
-		Aliases:     cmd.Aliases,
-		Subcommands: subcommands,
-	}
+	//return CommandInfo{
+	//	Name:        cmd.Use,
+	//	Description: cmd.Short,
+	//	Flags:       flags,
+	//	Aliases:     cmd.Aliases,
+	//	Subcommands: subcommands,
+	//}
+	return err
 }
 
 // Helper function to collect flags
-func collectFlags(flagSet *pflag.FlagSet, flags map[string]string) {
-	if flagSet != nil {
-		flagSet.VisitAll(func(f *pflag.Flag) {
-			flags[f.Name] = f.Usage
-		})
-	}
-}
+//func collectFlags(flagSet *pflag.FlagSet, flags map[string]string) {
+//	if flagSet != nil {
+//		flagSet.VisitAll(func(f *pflag.Flag) {
+//			flags[f.Name] = f.Usage
+//		})
+//	}
+//}
 
 //func extractCommands(cmd *cobra.Command) CommandInfo {
 //	flags := make(map[string]string)
