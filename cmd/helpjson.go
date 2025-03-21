@@ -33,7 +33,7 @@ type CommandInfo struct {
 	Subcommands []CommandInfo       `json:"subcommands"`
 }
 
-type FlagInfo {
+type FlagInfo struct{
 	Full  string `json:"full"`
 	Short string `json:"short"`
 }
