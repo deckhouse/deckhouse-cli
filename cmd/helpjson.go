@@ -62,12 +62,8 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	flags := make(map[string]string)
 	collectFlags(cmd.Flags(), flags)
 	collectFlags(cmd.PersistentFlags(), flags)
-	collectFlags(cmd.InheritedFlags(), flags)
-	collectFlags(cmd.LocalFlags(), flags)
-	collectFlags(cmd.NonInheritedFlags(), flags)
-	collectFlags(cmd.LocalNonPersistentFlags(), flags)
-	rootCmd.Flags().Bool("version", false, "Show application version")
-	//rootCmd.Parent().
+	cmd.SetHelpCommand(&cobra.Command{}) // Remove default "help" subcommand
+	cmd.Flags().BoolP("help", "h", false, "Show custom help message for subcommand")
 
 	var subcommands []CommandInfo
 	for _, subCmd := range cmd.Commands() {
