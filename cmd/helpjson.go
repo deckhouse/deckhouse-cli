@@ -43,6 +43,7 @@ func init() {
 		TraverseChildren: true,
 	}
 	rootCmd.AddCommand(helpJsonCmd)
+	helpJsonCmd.SetHelpCommand(&cobra.Command{}) // Remove default "help" subcommand
 	//rootCmd.Flags().Bool("version", false, "Show application version")
 	//rootCmd.Flags().Bool("help", false, "Show application version")
 }
@@ -62,7 +63,7 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	flags := make(map[string]string)
 	collectFlags(cmd.Flags(), flags)
 	collectFlags(cmd.PersistentFlags(), flags)
-	cmd.SetHelpCommand(&cobra.Command{}) // Remove default "help" subcommand
+	//cmd.SetHelpCommand(&cobra.Command{}) // Remove default "help" subcommand
 	cmd.Flags().BoolP("help", "h", false, "Show custom help message for subcommand")
 
 	var subcommands []CommandInfo
