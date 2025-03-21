@@ -34,8 +34,8 @@ type CommandInfo struct {
 }
 
 type FlagInfo struct {
-	Full  string `json:"full"`
-	Short string `json:"short"`
+	Description string `json:"description"`
+	Short       string `json:"shorthand"`
 }
 
 func init() {
@@ -62,8 +62,6 @@ func helpJson(cmd *cobra.Command, _ []string) error {
 func extractCommands(cmd *cobra.Command) CommandInfo {
 	flags := make(map[string]FlagInfo)
 	collectFlags(cmd.Flags(), flags)
-	collectFlags(cmd.Root().Flags(), flags)
-	collectFlags(cmd.Root().PersistentFlags(), flags)
 	collectFlags(cmd.PersistentFlags(), flags)
 
 	var subcommands []CommandInfo
@@ -85,8 +83,8 @@ func collectFlags(flagSet *pflag.FlagSet, flags map[string]FlagInfo) {
 	if flagSet != nil {
 		flagSet.VisitAll(func(f *pflag.Flag) {
 			flags[f.Name] = FlagInfo{
-				Full:  f.Usage,
-				Short: f.Shorthand,
+				Description: f.Usage,
+				Short:       f.Shorthand,
 			}
 		})
 	}
