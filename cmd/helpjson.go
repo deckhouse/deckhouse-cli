@@ -57,6 +57,10 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	flags := make(map[string]string)
 	collectFlags(cmd.Flags(), flags)
 	collectFlags(cmd.PersistentFlags(), flags)
+	helpFlag := cmd.Flags().Lookup("help")
+	if helpFlag == nil {
+		rootCmd.Flags().BoolP("help", "h", false, "Show help for the command")
+	}
 
 	var subcommands []CommandInfo
 	for _, subCmd := range cmd.Commands() {
@@ -74,13 +78,9 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 }
 
 func collectFlags(flagSet *pflag.FlagSet, flags map[string]string) {
-	//if flagSet != nil {
-	//	flagSet.VisitAll(func(f *pflag.Flag) {
-	rootCmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
-		flags[f.Name] = f.Usage
-	})
-	rootCmd.Flags().VisitAll(func(f *pflag.Flag) {
-		flags[f.Name] = f.Usage
-	})
-	//}
+	if flagSet != nil {
+		flagSet.VisitAll(func(f *pflag.Flag) {
+			flags[f.Name] = f.Usage
+		})
+	}
 }
