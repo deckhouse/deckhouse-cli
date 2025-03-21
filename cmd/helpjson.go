@@ -25,7 +25,7 @@ import (
 )
 
 type CommandInfo struct {
-	Name        string              `json:"name"`
+	Name        string              `json:"name,omitempty"`
 	Description string              `json:"description"`
 	Version     string              `json:"version,omitempty"`
 	Aliases     []string            `json:"aliases"`
@@ -34,7 +34,6 @@ type CommandInfo struct {
 }
 
 type FlagInfo struct {
-	Name        string `json:"name,omitempty"`
 	Description string `json:"description"`
 	Short       string `json:"shorthand"`
 }
