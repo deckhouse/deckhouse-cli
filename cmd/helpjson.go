@@ -87,7 +87,7 @@ func collectFlags(flagSet *pflag.FlagSet, flags map[string]string) {
 	if flagSet != nil {
 		flagSet.VisitAll(func(f *pflag.Flag) {
 			flags[f.Name] = f.Usage
-			if flags[f.Shorthand] != "" {
+			if f.Shorthand != "" {
 				flags[f.Shorthand] = f.Name
 			}
 
