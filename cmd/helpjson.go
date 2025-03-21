@@ -35,8 +35,8 @@ type CommandInfo struct {
 
 type FlagInfo struct {
 	Name        string `json:"name,omitempty"`
-	Description string `json:"description,omitempty"`
-	Short       string `json:"shorthand,omitempty"`
+	Description string `json:"description"`
+	Short       string `json:"shorthand"`
 }
 
 func init() {
@@ -85,8 +85,7 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 func collectFlags(flagSet *pflag.FlagSet, flags map[string]FlagInfo) {
 	if flagSet != nil {
 		flagSet.VisitAll(func(f *pflag.Flag) {
-			flags["flag"] = FlagInfo{
-				Name:        f.Name,
+			flags[f.Name] = FlagInfo{
 				Description: f.Usage,
 				Short:       f.Shorthand,
 			}
