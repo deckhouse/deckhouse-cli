@@ -88,7 +88,7 @@ func collectFlags(flagSet *pflag.FlagSet, flags map[string]string) {
 		flagSet.VisitAll(func(f *pflag.Flag) {
 			flags[f.Name] = f.Usage
 			if f.Shorthand != "" {
-				flags[f.Shorthand] = f.Name
+				flags[fmt.Sprintf("%s-%s", f.Name, f.Shorthand)] = f.Name
 			}
 
 		})
