@@ -62,7 +62,7 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	collectFlags(cmd.Flags(), flags)
 	collectFlags(cmd.PersistentFlags(), flags)
 	//rootCmd.Flags().Bool("version", false, "Show application version")
-	//rootCmd.Parent()
+	rootCmd.Parent().Flags()
 
 	var subcommands []CommandInfo
 	for _, subCmd := range cmd.Commands() {
