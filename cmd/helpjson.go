@@ -41,8 +41,8 @@ func init() {
 		RunE:   helpJson,
 	}
 	rootCmd.AddCommand(helpJsonCmd)
-	rootCmd.Flags().Bool("version", false, "Show application version")
-	rootCmd.Flags().Bool("help", false, "Show application version")
+	//rootCmd.Flags().Bool("version", false, "Show application version")
+	//rootCmd.Flags().Bool("help", false, "Show application version")
 }
 
 func helpJson(cmd *cobra.Command, _ []string) error {
@@ -60,6 +60,7 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	flags := make(map[string]string)
 	collectFlags(cmd.Flags(), flags)
 	collectFlags(cmd.PersistentFlags(), flags)
+	collectFlags(rootCmd.Flags(), flags)
 
 	var subcommands []CommandInfo
 	for _, subCmd := range cmd.Commands() {
