@@ -60,7 +60,7 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	flags := make(map[string]string)
 	collectFlags(cmd.Flags(), flags)
 	collectFlags(cmd.PersistentFlags(), flags)
-	collectFlags(rootCmd.Flags(), flags)
+	rootCmd.Flags().Bool("version", false, "Show application version")
 
 	var subcommands []CommandInfo
 	for _, subCmd := range cmd.Commands() {
