@@ -40,15 +40,15 @@ func init() {
 		Hidden: true,
 		RunE:   helpJson,
 	}
-	helpJsonCmd.SetHelpCommand(&cobra.Command{}) // Remove default "help" subcommand
-	helpJsonCmd.Flags().BoolP("help", "h", false, "Show custom help message for subcommand")
+	//helpJsonCmd.SetHelpCommand(&cobra.Command{}) // Remove default "help" subcommand
+	//helpJsonCmd.Flags().BoolP("help", "h", false, "Show custom help message for subcommand")
 	rootCmd.AddCommand(helpJsonCmd)
 	//rootCmd.Flags().Bool("version", false, "Show application version")
 	//rootCmd.Flags().Bool("help", false, "Show application version")
 }
 
 func helpJson(cmd *cobra.Command, _ []string) error {
-	commandsData := extractCommands(rootCmd)
+	commandsData := extractCommands(rootCmd.Parent())
 
 	jsonData, err := json.MarshalIndent(commandsData, "", "  ")
 	if err != nil {
@@ -63,7 +63,7 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	collectFlags(cmd.Flags(), flags)
 	collectFlags(cmd.PersistentFlags(), flags)
 	//cmd.SetHelpCommand(&cobra.Command{}) // Remove default "help" subcommand
-	cmd.Flags().BoolP("help", "h", false, "Show custom help message for subcommand")
+	//cmd.Flags().BoolP("help", "h", false, "Show custom help message for subcommand")
 
 	var subcommands []CommandInfo
 	for _, subCmd := range cmd.Commands() {
