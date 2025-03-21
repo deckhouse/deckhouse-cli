@@ -48,7 +48,7 @@ func init() {
 }
 
 func helpJson(cmd *cobra.Command, _ []string) error {
-	commandsData := extractCommands(rootCmd.Parent())
+	commandsData := extractCommands(rootCmd)
 
 	jsonData, err := json.MarshalIndent(commandsData, "", "  ")
 	if err != nil {
