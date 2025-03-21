@@ -79,5 +79,8 @@ func collectFlags(flagSet *pflag.FlagSet, flags map[string]string) {
 	rootCmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
 		flags[f.Name] = f.Usage
 	})
+	rootCmd.Flags().VisitAll(func(f *pflag.Flag) {
+		flags[f.Name] = f.Usage
+	})
 	//}
 }
