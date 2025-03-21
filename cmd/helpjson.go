@@ -45,6 +45,8 @@ func init() {
 		Hidden: true,
 		RunE:   helpJson,
 	}
+	helpJsonCmd.Flags().StringP("helpssss", "h", "", "Show custom help message for subcommand")
+
 	rootCmd.AddCommand(helpJsonCmd)
 }
 
