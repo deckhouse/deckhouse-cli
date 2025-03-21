@@ -19,7 +19,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -57,6 +57,8 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	flags := make(map[string]string)
 	collectFlags(cmd.Flags(), flags)
 	collectFlags(cmd.PersistentFlags(), flags)
+	collectFlags(rootCmd.Flags(), flags)
+	collectFlags(rootCmd.PersistentFlags(), flags)
 
 	var subcommands []CommandInfo
 	for _, subCmd := range cmd.Commands() {
