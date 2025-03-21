@@ -85,7 +85,7 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 func collectFlags(flagSet *pflag.FlagSet, flags map[string]FlagInfo) {
 	if flagSet != nil {
 		flagSet.VisitAll(func(f *pflag.Flag) {
-			flags[f.Name] = FlagInfo{
+			flags["flags"] = FlagInfo{
 				Name:        f.Name,
 				Description: f.Usage,
 				Short:       f.Shorthand,
