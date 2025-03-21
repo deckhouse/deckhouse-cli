@@ -35,11 +35,11 @@ type CommandInfo struct {
 
 func init() {
 	helpJsonCmd := &cobra.Command{
-		Use:     "help-json",
-		Short:   "Get all d8 command options and flags in json.",
-		Hidden:  true,
-		RunE:    helpJson,
-		Version: Version,
+		Use:          "help-json",
+		Short:        "Get all d8 command options and flags in json.",
+		Hidden:       true,
+		RunE:         helpJson,
+		SilenceUsage: true,
 	}
 	rootCmd.AddCommand(helpJsonCmd)
 	//rootCmd.Flags().Bool("version", false, "Show application version")
@@ -64,7 +64,8 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	collectFlags(cmd.InheritedFlags(), flags)
 	collectFlags(cmd.LocalFlags(), flags)
 	collectFlags(cmd.NonInheritedFlags(), flags)
-	//rootCmd.Flags().Bool("version", false, "Show application version")
+	collectFlags(cmd.LocalNonPersistentFlags(), flags)
+	rootCmd.Flags().Bool("version", false, "Show application version")
 	//rootCmd.Parent().
 
 	var subcommands []CommandInfo
