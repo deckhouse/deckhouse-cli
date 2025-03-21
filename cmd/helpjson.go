@@ -33,7 +33,7 @@ type CommandInfo struct {
 	Subcommands []CommandInfo       `json:"subcommands"`
 }
 
-type FlagInfo struct{
+type FlagInfo struct {
 	Full  string `json:"full"`
 	Short string `json:"short"`
 }
@@ -45,11 +45,7 @@ func init() {
 		Hidden: true,
 		RunE:   helpJson,
 	}
-	helpJsonCmd.SetHelpCommand(&cobra.Command{}) // Remove default "help" subcommand
-	helpJsonCmd.Flags().BoolP("help", "h", false, "Show custom help message for subcommand")
 	rootCmd.AddCommand(helpJsonCmd)
-	//rootCmd.Flags().Bool("version", false, "Show application version")
-	//rootCmd.Flags().Bool("help", false, "Show application version")
 }
 
 func helpJson(cmd *cobra.Command, _ []string) error {
@@ -70,9 +66,6 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	collectFlags(cmd.Root().PersistentFlags(), flags)
 	collectFlags(cmd.PersistentFlags(), flags)
 
-	//cmd.SetHelpCommand(&cobra.Command{}) // Remove default "help" subcommand
-	//cmd.Flags().BoolP("help", "h", false, "Show custom help message for subcommand")
-
 	var subcommands []CommandInfo
 	for _, subCmd := range cmd.Commands() {
 		subcommands = append(subcommands, extractCommands(subCmd))
@@ -92,7 +85,7 @@ func collectFlags(flagSet *pflag.FlagSet, flags map[string]FlagInfo) {
 	if flagSet != nil {
 		flagSet.VisitAll(func(f *pflag.Flag) {
 			flags[f.Name] = FlagInfo{
-				Full: f.Usage,
+				Full:  f.Usage,
 				Short: f.Shorthand,
 			}
 		})
