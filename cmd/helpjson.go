@@ -34,9 +34,9 @@ type CommandInfo struct {
 }
 
 type FlagInfo struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Short       string `json:"shorthand"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Short       string `json:"shorthand,omitempty"`
 }
 
 func init() {
