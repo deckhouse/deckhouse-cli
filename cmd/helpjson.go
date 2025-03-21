@@ -40,8 +40,8 @@ func init() {
 		Hidden: true,
 		RunE:   helpJson,
 	}
-	//helpJsonCmd.SetHelpCommand(&cobra.Command{}) // Remove default "help" subcommand
-	//helpJsonCmd.Flags().BoolP("help", "h", false, "Show custom help message for subcommand")
+	helpJsonCmd.SetHelpCommand(&cobra.Command{}) // Remove default "help" subcommand
+	helpJsonCmd.Flags().BoolP("help", "h", false, "Show custom help message for subcommand")
 	rootCmd.AddCommand(helpJsonCmd)
 	//rootCmd.Flags().Bool("version", false, "Show application version")
 	//rootCmd.Flags().Bool("help", false, "Show application version")
