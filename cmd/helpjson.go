@@ -42,6 +42,7 @@ func init() {
 	}
 	rootCmd.AddCommand(helpJsonCmd)
 	rootCmd.Flags().Bool("version", false, "Show application version")
+	rootCmd.Flags().Bool("help", false, "Show application version")
 }
 
 func helpJson(cmd *cobra.Command, _ []string) error {
