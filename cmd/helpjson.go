@@ -34,6 +34,7 @@ type CommandInfo struct {
 }
 
 type FlagInfo struct {
+	Name        string `json:"name,omitempty"`
 	Description string `json:"description"`
 	Short       string `json:"shorthand"`
 }
@@ -85,6 +86,7 @@ func collectFlags(flagSet *pflag.FlagSet, flags map[string]FlagInfo) {
 	if flagSet != nil {
 		flagSet.VisitAll(func(f *pflag.Flag) {
 			flags[f.Name] = FlagInfo{
+				Name:        f.Name,
 				Description: f.Usage,
 				Short:       f.Shorthand,
 			}
