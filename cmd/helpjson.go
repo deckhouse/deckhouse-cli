@@ -25,12 +25,17 @@ import (
 )
 
 type CommandInfo struct {
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	Version     string            `json:"version,omitempty"`
-	Aliases     []string          `json:"aliases"`
-	Flags       map[string]string `json:"flags"`
-	Subcommands []CommandInfo     `json:"subcommands"`
+	Name        string              `json:"name"`
+	Description string              `json:"description"`
+	Version     string              `json:"version,omitempty"`
+	Aliases     []string            `json:"aliases"`
+	Flags       map[string]FlagInfo `json:"flags"`
+	Subcommands []CommandInfo       `json:"subcommands"`
+}
+
+type FlagInfo {
+	Full  string `json:"full"`
+	Short string `json:"short"`
 }
 
 func init() {
@@ -59,7 +64,7 @@ func helpJson(cmd *cobra.Command, _ []string) error {
 }
 
 func extractCommands(cmd *cobra.Command) CommandInfo {
-	flags := make(map[string]string)
+	flags := make(map[string]FlagInfo)
 	collectFlags(cmd.Flags(), flags)
 	collectFlags(cmd.Root().Flags(), flags)
 	collectFlags(cmd.Root().PersistentFlags(), flags)
@@ -83,14 +88,13 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	}
 }
 
-func collectFlags(flagSet *pflag.FlagSet, flags map[string]string) {
+func collectFlags(flagSet *pflag.FlagSet, flags map[string]FlagInfo) {
 	if flagSet != nil {
 		flagSet.VisitAll(func(f *pflag.Flag) {
-			flags[f.Name] = f.Usage
-			if f.Shorthand != "" {
-				flags[fmt.Sprintf("%s-%s", f.Name, f.Shorthand)] = f.Name
+			flags[f.Name] = FlagInfo{
+				Full: f.Usage,
+				Short: f.Shorthand,
 			}
-
 		})
 	}
 }
