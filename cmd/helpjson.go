@@ -35,11 +35,12 @@ type CommandInfo struct {
 
 func init() {
 	helpJsonCmd := &cobra.Command{
-		Use:          "help-json",
-		Short:        "Get all d8 command options and flags in json.",
-		Hidden:       true,
-		RunE:         helpJson,
-		SilenceUsage: true,
+		Use:              "help-json",
+		Short:            "Get all d8 command options and flags in json.",
+		Hidden:           true,
+		RunE:             helpJson,
+		SilenceUsage:     true,
+		TraverseChildren: true,
 	}
 	rootCmd.AddCommand(helpJsonCmd)
 	//rootCmd.Flags().Bool("version", false, "Show application version")
