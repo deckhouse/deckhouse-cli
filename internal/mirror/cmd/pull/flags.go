@@ -146,7 +146,7 @@ func addFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringVar(
 		&TempDir,
 		"tmp-dir",
-		filepath.Join(os.TempDir(), "mirror"),
+		filepath.Join("'<images-bundle-path>'", ".tmp", "mirror"),
 		"Temporary directory to use for image pulling",
 	)
 }
