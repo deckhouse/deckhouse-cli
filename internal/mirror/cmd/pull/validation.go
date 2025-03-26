@@ -34,6 +34,9 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 	if err = validateImagesBundlePathArg(args); err != nil {
 		return err
 	}
+	if err = validateTmpPath(args); err != nil {
+		return err
+	}
 	if err = validateChunkSizeFlag(); err != nil {
 		return err
 	}
@@ -70,11 +73,12 @@ func validateImagesBundlePathArg(args []string) error {
 	if err != nil {
 		return fmt.Errorf("Read bundle directory: %w", err)
 	}
-	if len(dirEntries) > 0 {
-		return fmt.Errorf("%s is not empty, use --force to override", ImagesBundlePath)
+
+	if len(dirEntries) == 1 && dirEntries[0].Name() == ".tmp" {
+		return nil
 	}
 
-	return nil
+	return fmt.Errorf("%s is not empty, use --force to override", ImagesBundlePath)
 }
 
 func parseAndValidateVersionFlags() error {
@@ -98,5 +102,15 @@ func validateChunkSizeFlag() error {
 		return errors.New("Chunk size cannot be less than zero GB")
 	}
 
+	return nil
+}
+
+func validateTmpPath(args []string) error {
+	if TempDir == "" {
+		TempDir = filepath.Join(ImagesBundlePath, ".tmp", "mirror")
+	}
+	if err := os.MkdirAll(TempDir, 0755); err != nil {
+		return fmt.Errorf("Error creating temp directory at %s: %w", TempDir, err)
+	}
 	return nil
 }
