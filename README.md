@@ -17,7 +17,7 @@ should [install trdl client](https://trdl.dev/quickstart.html#installing-the-cli
 After that is dealt with, add the Deckhouse CLI repository into trdl. Proceed with the following shell command:
 
 ```bash
-URL=https://trrr.flant.dev/trdl-deckhouse-cli
+URL=https://deckhouse.ru/downloads/deckhouse-cli-trdl
 ROOT_VERSION=0
 ROOT_SHA512=$(curl -Ls ${URL}/root.json | sha512sum | tr -d '\-[:space:]\n')
 REPO=trdl-d8
