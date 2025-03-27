@@ -108,10 +108,11 @@ func validateChunkSizeFlag() error {
 }
 
 func validateTmpPath(args []string) error {
-	ImagesBundlePath = filepath.Clean(args[0])
-	TempDir = filepath.Join(ImagesBundlePath, ".tmp", "mirror")
+	if TempDir == "" {
+		TempDir = filepath.Join(ImagesBundlePath, ".tmp", "mirror")
+	}
 	if err := os.MkdirAll(TempDir, 0755); err != nil {
-		return fmt.Errorf("Error creating temp directory at %s: %w", ImagesBundlePath, err)
+		return fmt.Errorf("Error creating temp directory at %s: %w", TempDir, err)
 	}
 	return nil
 }
