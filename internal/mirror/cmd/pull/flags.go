@@ -18,7 +18,6 @@ package pull
 
 import (
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/pflag"
 )
@@ -146,7 +145,7 @@ func addFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringVar(
 		&TempDir,
 		"tmp-dir",
-		filepath.Join(os.TempDir(), "mirror"),
+		"",
 		"Temporary directory to use for image pulling",
 	)
 }
