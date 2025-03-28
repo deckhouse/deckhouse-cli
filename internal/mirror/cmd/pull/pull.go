@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
@@ -104,9 +105,7 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		PreRunE:       parseAndValidateParameters,
 		RunE:          pull,
-		PostRunE: func(_ *cobra.Command, _ []string) error {
-			return os.RemoveAll(TempDir)
-		},
+		PostRunE:      validatePullFinished,
 	}
 
 	addFlags(pullCmd.Flags())
@@ -321,5 +320,21 @@ func validateRegistryAccess(ctx context.Context, pullParams *params.PullParams) 
 		return err
 	}
 
+	return nil
+}
+
+func validatePullFinished(cmd *cobra.Command, _ []string) error {
+	files, err := os.ReadDir(ImagesBundlePath)
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		if !file.IsDir() && strings.HasSuffix(file.Name(), ".tar") {
+			err := os.RemoveAll(TempDir)
+			if err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
