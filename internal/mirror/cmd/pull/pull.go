@@ -17,6 +17,7 @@ limitations under the License.
 package pull
 
 import (
+	"archive/tar"
 	"context"
 	"crypto/md5"
 	"errors"
@@ -328,9 +329,32 @@ func validatePullFinished(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
+	var (
+		hasTarFiles bool
+		tarValid    bool
+	)
+
 	for _, file := range files {
 		if !file.IsDir() && strings.HasSuffix(file.Name(), ".tar") {
-			err := os.RemoveAll(TempDir)
+			hasTarFiles = true
+
+			tarFilePath := filepath.Join(ImagesBundlePath, file.Name())
+			tarFile, err := os.Open(tarFilePath)
+			if err != nil {
+				return err
+			}
+			defer tarFile.Close()
+			tr := tar.NewReader(tarFile)
+			_, err = tr.Next()
+			if err != nil {
+				return fmt.Errorf("Invalid tar file: %s (%v)\n", tarFilePath, err)
+			}
+
+			tarValid = true
+		}
+		if hasTarFiles && tarValid {
+			err = os.RemoveAll(TempDir)
 			if err != nil {
 				return err
 			}
