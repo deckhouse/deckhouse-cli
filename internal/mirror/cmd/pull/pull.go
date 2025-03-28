@@ -104,9 +104,6 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		PreRunE:       parseAndValidateParameters,
 		RunE:          pull,
-		PostRunE: func(_ *cobra.Command, _ []string) error {
-			return os.RemoveAll(TempDir)
-		},
 	}
 
 	addFlags(pullCmd.Flags())
@@ -212,6 +209,11 @@ func pull(cmd *cobra.Command, _ []string) error {
 		return merr.ErrorOrNil()
 	}); err != nil {
 		return fmt.Errorf("Compute GOST digests for bundle: %w", err)
+	}
+
+	err := os.RemoveAll(TempDir)
+	if err != nil {
+		return err
 	}
 
 	return nil
