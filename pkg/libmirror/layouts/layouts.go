@@ -18,25 +18,19 @@ package layouts
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"reflect"
 	"strings"
 
-	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"golang.org/x/exp/maps"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 )
 
 type ModuleImageLayout struct {
@@ -291,33 +285,6 @@ func FindDeckhouseModulesImages(
 
 		if len(moduleImageLayouts.ModuleImages) == 0 {
 			return fmt.Errorf("found no releases matching filter for %s", module.Name)
-		}
-
-		nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&params.BaseParams)
-		fetchDigestsFrom := maps.Clone(moduleImageLayouts.ModuleImages)
-		for imageTag := range fetchDigestsFrom {
-			ref, err := name.ParseReference(imageTag, nameOpts...)
-			if err != nil {
-				return fmt.Errorf("get digests for %q version: %w", imageTag, err)
-			}
-
-			img, err := remote.Image(ref, remoteOpts...)
-			if err != nil {
-				return fmt.Errorf("get digests for %q version: %w", imageTag, err)
-			}
-
-			imagesDigestsJSON, err := images.ExtractFileFromImage(img, "images_digests.json")
-			switch {
-			case errors.Is(err, fs.ErrNotExist):
-				continue
-			case err != nil:
-				return fmt.Errorf("extract digests for %q version: %w", imageTag, err)
-			}
-
-			digests := images.ExtractDigestsFromJSONFile(imagesDigestsJSON.Bytes())
-			for _, digest := range digests {
-				moduleImageLayouts.ModuleImages[path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name)+"@"+digest] = struct{}{}
-			}
 		}
 
 		layouts.Modules[module.Name] = moduleImageLayouts
