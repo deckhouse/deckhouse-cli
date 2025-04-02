@@ -65,7 +65,7 @@ func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
 		}
 	}
 	versionsAboveMinimal := parseAndFilterVersionsAboveMinimalAnbBelowAlpha(&mirrorFromVersion, tags, alphaChannelVersion)
-	versionsAboveMinimal = filterOnlyLatestPatches(versionsAboveMinimal)
+	versionsAboveMinimal = FilterOnlyLatestPatches(versionsAboveMinimal)
 
 	return deduplicateVersions(append(releaseChannelsVersions, versionsAboveMinimal...)), nil
 }
@@ -100,7 +100,7 @@ func parseAndFilterVersionsAboveMinimalAnbBelowAlpha(
 	return versionsAboveMinimal
 }
 
-func filterOnlyLatestPatches(versions []*semver.Version) []*semver.Version {
+func FilterOnlyLatestPatches(versions []*semver.Version) []*semver.Version {
 	type majorMinor [2]uint64
 	patches := map[majorMinor]uint64{}
 	for _, version := range versions {
@@ -112,6 +112,8 @@ func filterOnlyLatestPatches(versions []*semver.Version) []*semver.Version {
 
 	topPatches := make([]*semver.Version, 0, len(patches))
 	for majMin, patch := range patches {
+		// Use of semver.MustParse instead of semver.New is important here since we use those versions as map keys,
+		// structs must be comparable via == operator and semver.New does not provide structs identical to semver.MustParse.
 		topPatches = append(topPatches, semver.MustParse(fmt.Sprintf("v%d.%d.%d", majMin[0], majMin[1], patch)))
 	}
 	return topPatches

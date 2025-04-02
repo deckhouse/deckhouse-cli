@@ -27,14 +27,12 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"golang.org/x/exp/maps"
 
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
@@ -257,55 +255,46 @@ func FillLayoutsWithBasicDeckhouseImages(
 	layouts.ReleaseChannelImages[pullParams.DeckhouseRegistryRepo+"/release-channel:rock-solid"] = struct{}{}
 }
 
-func FindDeckhouseModulesImages(params *params.PullParams, layouts *ImageLayouts, filter *modules.Filter) error {
-	modulesNames := maps.Keys(layouts.Modules)
-	for _, moduleName := range modulesNames {
-		moduleData := layouts.Modules[moduleName]
-		moduleData.ReleaseImages = map[string]struct{}{
-			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, moduleName, "release") + ":alpha":        {},
-			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, moduleName, "release") + ":beta":         {},
-			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, moduleName, "release") + ":early-access": {},
-			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, moduleName, "release") + ":stable":       {},
-			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, moduleName, "release") + ":rock-solid":   {},
+func FindDeckhouseModulesImages(
+	params *params.PullParams,
+	layouts *ImageLayouts,
+	modulesData []modules.Module,
+	filter *modules.Filter,
+) error {
+	for _, module := range modulesData {
+		if !filter.Match(&module) {
+			continue
 		}
 
-		moduleMinVersion, hasMinimalVersion := filter.GetMinimalVersion(moduleName)
-		channelVersions, err := releases.FetchVersionsFromModuleReleaseChannels(
-			moduleData.ReleaseImages,
+		moduleImageLayouts := layouts.Modules[module.Name]
+		moduleImageLayouts.ReleaseImages = map[string]struct{}{
+			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":alpha":        {},
+			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":beta":         {},
+			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":early-access": {},
+			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":stable":       {},
+			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":rock-solid":   {},
+		}
+
+		moduleImages, releaseImages, err := modules.FindExternalModuleImages(
+			&module,
+			filter,
 			params.RegistryAuth,
 			params.Insecure,
 			params.SkipTLSVerification,
 		)
 		if err != nil {
-			return fmt.Errorf("fetch versions from %q release channels: %w", moduleName, err)
+			return fmt.Errorf("Find images of %s: %w", module.Name, err)
 		}
 
-		for _, moduleVersionText := range channelVersions {
-			moduleVersion := semver.MustParse(moduleVersionText)
-			if hasMinimalVersion && moduleMinVersion.GreaterThan(moduleVersion) {
-				continue
-			}
+		moduleImageLayouts.ModuleImages = moduleImages
+		maps.Copy(moduleImageLayouts.ReleaseImages, releaseImages)
 
-			moduleData.ModuleImages[path.Join(
-				params.DeckhouseRegistryRepo,
-				params.ModulesPathSuffix,
-				moduleName,
-			)+":"+moduleVersionText] = struct{}{}
-
-			moduleData.ReleaseImages[path.Join(
-				params.DeckhouseRegistryRepo,
-				params.ModulesPathSuffix,
-				moduleName,
-				"release",
-			)+":"+moduleVersionText] = struct{}{}
-		}
-
-		if len(moduleData.ModuleImages) == 0 {
-			return fmt.Errorf("found no releases matching filter %s@%s", moduleName, moduleMinVersion.String())
+		if len(moduleImageLayouts.ModuleImages) == 0 {
+			return fmt.Errorf("found no releases matching filter for %s", module.Name)
 		}
 
 		nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&params.BaseParams)
-		fetchDigestsFrom := maps.Clone(moduleData.ModuleImages)
+		fetchDigestsFrom := maps.Clone(moduleImageLayouts.ModuleImages)
 		for imageTag := range fetchDigestsFrom {
 			ref, err := name.ParseReference(imageTag, nameOpts...)
 			if err != nil {
@@ -327,11 +316,11 @@ func FindDeckhouseModulesImages(params *params.PullParams, layouts *ImageLayouts
 
 			digests := images.ExtractDigestsFromJSONFile(imagesDigestsJSON.Bytes())
 			for _, digest := range digests {
-				moduleData.ModuleImages[path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, moduleName)+"@"+digest] = struct{}{}
+				moduleImageLayouts.ModuleImages[path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name)+"@"+digest] = struct{}{}
 			}
 		}
 
-		layouts.Modules[moduleName] = moduleData
+		layouts.Modules[module.Name] = moduleImageLayouts
 	}
 
 	return nil

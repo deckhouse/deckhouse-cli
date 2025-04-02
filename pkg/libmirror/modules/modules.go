@@ -40,6 +40,17 @@ type Module struct {
 	Releases     []string
 }
 
+func (m *Module) Versions() []*semver.Version {
+	versions := make([]*semver.Version, 0)
+	for _, release := range m.Releases {
+		v, err := semver.NewVersion(release)
+		if err == nil {
+			versions = append(versions, v)
+		}
+	}
+	return versions
+}
+
 func ForRepo(repo string, registryAuth authn.Authenticator, insecure, skipVerifyTLS bool) ([]Module, error) {
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(registryAuth, insecure, skipVerifyTLS)
 	result, err := getModulesForRepo(repo, nameOpts, remoteOpts)
@@ -95,10 +106,8 @@ func FindExternalModuleImages(
 	authProvider authn.Authenticator,
 	insecure, skipVerifyTLS bool,
 ) (moduleImages, releaseImages map[string]struct{}, err error) {
+	moduleImages, releaseImages = map[string]struct{}{}, map[string]struct{}{}
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
-
-	moduleImages = map[string]struct{}{}
-	releaseImages = map[string]struct{}{}
 
 	releaseImages, err = getAvailableReleaseChannelsImagesForModule(mod, nameOpts, remoteOpts)
 	if err != nil {
@@ -110,17 +119,20 @@ func FindExternalModuleImages(
 		return nil, nil, fmt.Errorf("Fetch versions from %q release channels: %w", mod.Name, err)
 	}
 
-	minVersion, hasMinVersion := filter.GetMinimalVersion(mod.Name)
-	for _, tag := range mod.Releases {
-		version, err := semver.NewVersion(tag)
-		if err == nil && hasMinVersion && minVersion.Compare(version) <= 0 {
-			releaseImages[path.Join(mod.RegistryPath, "release")+":"+tag] = struct{}{}
-			moduleImages[mod.RegistryPath+":"+tag] = struct{}{}
-		}
-	}
 	for _, versionTag := range releaseChannelVersions {
 		moduleImages[mod.RegistryPath+":"+versionTag] = struct{}{}
 		releaseImages[path.Join(mod.RegistryPath, "release")+":"+versionTag] = struct{}{}
+	}
+
+	minVersion, minVersionRequested := filter.GetMinimalVersion(mod.Name)
+	if minVersionRequested {
+		for _, version := range releases.FilterOnlyLatestPatches(mod.Versions()) {
+			if minVersion.Compare(version) <= 0 {
+				tag := "v" + version.String()
+				moduleImages[mod.RegistryPath+":"+tag] = struct{}{}
+				releaseImages[path.Join(mod.RegistryPath, "release")+":"+tag] = struct{}{}
+			}
+		}
 	}
 
 	for _, imageTag := range maps.Keys(moduleImages) {
