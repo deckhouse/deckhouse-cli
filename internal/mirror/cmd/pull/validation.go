@@ -74,7 +74,7 @@ func validateImagesBundlePathArg(args []string) error {
 		return fmt.Errorf("Read bundle directory: %w", err)
 	}
 
-	if len(dirEntries) == 1 && dirEntries[0].Name() == ".tmp" {
+	if len(dirEntries) == 0 || (len(dirEntries) == 1 && dirEntries[0].Name() == ".tmp") {
 		return nil
 	}
 
