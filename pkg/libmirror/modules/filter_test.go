@@ -273,7 +273,7 @@ func TestFilter_FilterReleases(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.filter.FilterReleases(tt.mod)
+			tt.filter.FilterReleaseTagsAboveMinimal(tt.mod)
 			require.ElementsMatch(t, tt.want, tt.mod.Releases)
 			require.Len(t, tt.mod.Releases, len(tt.want))
 		})

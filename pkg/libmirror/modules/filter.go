@@ -98,10 +98,13 @@ func (f *Filter) Len() int { return len(f.modules) }
 
 func (f *Filter) GetMinimalVersion(moduleName string) (*semver.Version, bool) {
 	v, found := f.modules[moduleName]
+	if found && v.Major() == 0 && v.Minor() == 0 && v.Patch() == 0 {
+		return nil, false
+	}
 	return v, found
 }
 
-func (f *Filter) FilterReleases(mod *Module) {
+func (f *Filter) FilterReleaseTagsAboveMinimal(mod *Module) {
 	moduleMinVersion, hasMinVersion := f.modules[mod.Name]
 	if !hasMinVersion {
 		return
