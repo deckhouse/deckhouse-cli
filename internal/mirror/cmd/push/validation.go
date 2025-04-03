@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 )
@@ -89,6 +90,12 @@ func parseAndValidateRegistryURLArg(args []string) error {
 		return errors.New("<registry> argument is empty")
 	}
 
+	// We first validate that passed repository reference is correct and can be parsed
+	if _, err := name.NewRepository(registry); err != nil {
+		return fmt.Errorf("Validate registry address: %w", err)
+	}
+
+	// Then we parse it as URL to validate that it contains everything we need
 	registryUrl, err := url.ParseRequestURI("docker://" + registry)
 	if err != nil {
 		return fmt.Errorf("Validate registry address: %w", err)
@@ -96,10 +103,10 @@ func parseAndValidateRegistryURLArg(args []string) error {
 	RegistryHost = registryUrl.Host
 	RegistryPath = registryUrl.Path
 	if RegistryHost == "" {
-		return errors.New("--registry you provided contains no registry host. Please specify registry address correctly.")
+		return errors.New("<registry> you provided contains no registry host. Please specify registry address correctly.")
 	}
-	if RegistryPath == "" {
-		return errors.New("--registry you provided contains no path to repo. Please specify registry repo path correctly.")
+	if len(RegistryPath) < 2 || len(RegistryPath) > 255 {
+		return errors.New("repository part must be between 2 and 255 characters in length. Please specify registry repo path correctly.")
 	}
 
 	return nil
