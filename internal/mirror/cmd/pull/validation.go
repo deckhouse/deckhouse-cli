@@ -19,15 +19,20 @@ package pull
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/spf13/cobra"
 )
 
 func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 	var err error
+	if err = validateSourceRegistry(); err != nil {
+		return err
+	}
 	if err = parseAndValidateVersionFlags(); err != nil {
 		return err
 	}
@@ -39,6 +44,31 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 	}
 	if err = validateChunkSizeFlag(); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func validateSourceRegistry() error {
+	if SourceRegistryRepo == enterpriseEditionRepo {
+		return nil // Default is fine
+	}
+
+	// We first validate that passed repository reference is correct and can be parsed
+	if _, err := name.NewRepository(SourceRegistryRepo); err != nil {
+		return fmt.Errorf("Validate registry address: %w", err)
+	}
+
+	// Then we parse it as URL to validate that it contains everything we need
+	registryUrl, err := url.ParseRequestURI("docker://" + SourceRegistryRepo)
+	if err != nil {
+		return fmt.Errorf("Validate source registry parameter: %w", err)
+	}
+	if registryUrl.Host == "" {
+		return errors.New("--source you provided contains no registry host. Please specify source registry host address correctly.")
+	}
+	if registryUrl.Path == "" {
+		return errors.New("--source you provided contains no registry path. Please specify source registry repo path correctly.")
 	}
 
 	return nil
@@ -74,7 +104,7 @@ func validateImagesBundlePathArg(args []string) error {
 		return fmt.Errorf("Read bundle directory: %w", err)
 	}
 
-	if len(dirEntries) == 0 || (len(dirEntries) == 1 && dirEntries[0].Name() == ".tmp" &&  dirEntries[0].IsDir()) {
+	if len(dirEntries) == 0 || (len(dirEntries) == 1 && dirEntries[0].Name() == ".tmp" && dirEntries[0].IsDir()) {
 		return nil
 	}
 

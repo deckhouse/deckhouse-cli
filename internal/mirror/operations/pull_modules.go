@@ -48,6 +48,11 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 	if err != nil {
 		return fmt.Errorf("Find modules: %w", err)
 	}
+
+	if len(modulesData) == 0 {
+		return fmt.Errorf("Modules were not found, check your source repository address and modules path suffix")
+	}
+
 	logger.InfoF("Repo contains %d modules: %s", len(modulesData), formatModulesList(modulesData))
 
 	logger.InfoLn("Creating OCI Layouts")
