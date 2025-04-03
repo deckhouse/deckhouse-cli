@@ -17,27 +17,21 @@ should [install trdl client](https://trdl.dev/quickstart.html#installing-the-cli
 After that is dealt with, add the Deckhouse CLI repository into trdl. Proceed with the following shell command:
 
 ```bash
-URL=https://trrr.flant.dev/trdl-deckhouse-cli
-ROOT_VERSION=0
-ROOT_SHA512=$(curl -Ls ${URL}/root.json | sha512sum | tr -d '\-[:space:]\n')
-REPO=trdl-d8
+URL=https://deckhouse.ru/downloads/deckhouse-cli-trdl
+ROOT_VERSION=1
+ROOT_SHA512=343bd5f0d8811254e5f0b6fe292372a7b7eda08d276ff255229200f84e58a8151ab2729df3515cb11372dc3899c70df172a4e54c8a596a73d67ae790466a0491
+REPO=d8
 
 trdl add $REPO $URL $ROOT_VERSION $ROOT_SHA512
-```
-
-And install stable release using:
-
-```bash
-trdl update $REPO $ROOT_VERSION stable
 ```
 
 Validate that the `d8` binary is installed:
 
 ```bash
-. $(trdl use $REPO $ROOT_VERSION stable) && d8 --version
+. $(trdl use d8 0 stable) && d8 --version
 ```
 
-If you dont want to call `. $(trdl use $REPO $ROOT_VERSION stable)` every time you need to use `d8`, consider adding `export PATH=$PATH:$(trdl bin-path trdl-deckhouse-cli 1 stable)` to your shell RC file.
+If you dont want to call `. $(trdl use d8 0 stable)` every time you need to use `d8`, consider adding `alias d8='trdl exec d8 0 stable -- "$@"'` to your shell RC file.
 
 ### From binary releases
 
