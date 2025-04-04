@@ -18,7 +18,6 @@ package push
 
 import (
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/pflag"
 )
@@ -53,7 +52,7 @@ func addFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringVar(
 		&TempDir,
 		"tmp-dir",
-		filepath.Join(os.TempDir(), "mirror"),
-		"Temporary directory to use for image pushing",
+		"",
+		"Path to a temporary directory to use for image pulling and pushing. All processing is done in this directory, so make sure there is enough free disk space to accommodate the entire bundle you are downloading;",
 	)
 }
