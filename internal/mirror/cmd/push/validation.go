@@ -67,10 +67,18 @@ func validateImagesBundlePathArg(args []string) error {
 		if len(dirEntries) == 0 {
 			return errors.New("no packages found in bundle directory")
 		}
+
+		if TempDir == "" {
+			TempDir = filepath.Join(ImagesBundlePath, ".tmp", "mirror")
+		}
+
 		return nil
 	}
 
 	if bundleExtension := filepath.Ext(ImagesBundlePath); bundleExtension == ".tar" || bundleExtension == ".chunk" {
+		if TempDir == "" {
+			TempDir = filepath.Join(filepath.Dir(ImagesBundlePath), ".tmp", "mirror")
+		}
 		return nil
 	}
 
