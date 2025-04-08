@@ -196,7 +196,7 @@ func buildPushParams(logger params.Logger) *params.PushParams {
 			RegistryHost:        RegistryHost,
 			RegistryPath:        RegistryPath,
 			BundleDir:           ImagesBundlePath,
-			WorkingDir:          filepath.Join(TempDir, time.Now().Format("mirror_tmp_02-01-2006_15-04-05")),
+			WorkingDir:          filepath.Join(TempDir, "push"),
 		},
 
 		Parallelism: params.ParallelismConfig{
