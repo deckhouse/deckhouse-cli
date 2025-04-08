@@ -18,6 +18,7 @@ package operations
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -65,7 +66,7 @@ func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string)
 		return err
 	}
 
-	// We should not generate deckhousereleases.yaml manifest for bundles that don't have release channels
+	// We should not generate deckhousereleases.yaml manifest for tag-based pulls
 	if pullParams.DeckhouseTag == "" {
 		if err = generateDeckhouseReleaseManifests(pullParams, tagsToMirror, imageLayouts, logger); err != nil {
 			return err
@@ -88,12 +89,36 @@ func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string)
 		return fmt.Errorf("Pull Deckhouse images: %w", err)
 	}
 
-	logger.InfoLn("Processing image indexes")
-	for _, l := range imageLayouts.Layouts() {
-		err = layouts.SortIndexManifests(l)
-		if err != nil {
-			return fmt.Errorf("Sorting index manifests of %s: %w", l, err)
+	err = logger.Process("Processing image indexes", func() error {
+		if pullParams.DeckhouseTag != "" {
+			// If we are pulling some build by tag, propagate release channel image of it to all channels if it exists.
+			releaseChannel, err := layouts.FindImageDescriptorByTag(imageLayouts.ReleaseChannel, pullParams.DeckhouseTag)
+			switch {
+			case errors.Is(err, layouts.ErrImageNotFound):
+				logger.WarnLn("Registry does not contain release channels, release channels images will not be added to bundle")
+				goto sortManifests
+			case err != nil:
+				return fmt.Errorf("Find release-%s channel descriptor: %w", pullParams.DeckhouseTag, err)
+			}
+
+			for _, channel := range []string{"alpha", "beta", "early-access", "stable", "rock-solid"} {
+				if err = layouts.TagImage(imageLayouts.ReleaseChannel, releaseChannel.Digest, channel); err != nil {
+					return fmt.Errorf("tag release channel: %w", err)
+				}
+			}
 		}
+
+	sortManifests:
+		for _, l := range imageLayouts.AsList() {
+			err = layouts.SortIndexManifests(l)
+			if err != nil {
+				return fmt.Errorf("Sorting index manifests of %s: %w", l, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("Processing image indexes: %w", err)
 	}
 
 	if err = logger.Process("Pack Deckhouse images into platform.tar", func() error {

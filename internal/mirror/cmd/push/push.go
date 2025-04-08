@@ -139,7 +139,11 @@ func pushModules(pushParams *params.PushParams, logger params.Logger) error {
 			logger.WarnLn(err)
 		}
 	}
-	logger.InfoF("Modules pushed: %v", strings.Join(successfullyPushedModules, ", "))
+
+	if len(successfullyPushedModules) > 0 {
+		logger.InfoF("Modules pushed: %v", strings.Join(successfullyPushedModules, ", "))
+	}
+
 	return nil
 }
 

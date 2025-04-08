@@ -65,7 +65,7 @@ func addFlags(flagSet *pflag.FlagSet) {
 		&DeckhouseTag,
 		"deckhouse-tag",
 		"",
-		"Specific Deckhouse build tag to pull. Conflicts with --since-version. WARNING!: Clusters installed with this option will not be able to automatically update due to lack of release-channels information in bundle and, as such, will require special attention and manual intervention during updates.",
+		"Specific Deckhouse build tag to pull. Conflicts with --since-version. If registry contains release channel image for specified tag, all release channels in the bundle will be pointed to it.",
 	)
 	flagSet.StringArrayVarP(
 		&ModulesWhitelist,
