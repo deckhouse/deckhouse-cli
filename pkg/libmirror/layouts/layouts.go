@@ -18,6 +18,7 @@ package layouts
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -75,8 +76,8 @@ func NewImageLayouts() *ImageLayouts {
 	}
 }
 
-// Layouts returns a list of layout.Path's in it. Undefined path's are not included in the list.
-func (l *ImageLayouts) Layouts() []layout.Path {
+// AsList returns a list of layout.Path's in it. Undefined path's are not included in the list.
+func (l *ImageLayouts) AsList() []layout.Path {
 	layoutsValue := reflect.ValueOf(l).Elem()
 	layoutPathType := reflect.TypeOf(layout.Path(""))
 
@@ -284,7 +285,7 @@ func FindDeckhouseModulesImages(
 		maps.Copy(moduleImageLayouts.ReleaseImages, releaseImages)
 
 		if len(moduleImageLayouts.ModuleImages) == 0 {
-			return fmt.Errorf("found no releases matching filter for %s", module.Name)
+			return fmt.Errorf("found no releases for %s", module.Name)
 		}
 
 		layouts.Modules[module.Name] = moduleImageLayouts
@@ -292,6 +293,8 @@ func FindDeckhouseModulesImages(
 
 	return nil
 }
+
+var ErrImageNotFound = errors.New("image not found")
 
 func FindImageByTag(l layout.Path, tag string) (v1.Image, error) {
 	index, err := l.ImageIndex()
@@ -303,13 +306,62 @@ func FindImageByTag(l layout.Path, tag string) (v1.Image, error) {
 		return nil, err
 	}
 
-	for _, imageManifest := range indexManifest.Manifests {
-		for key, value := range imageManifest.Annotations {
+	for _, imageDescriptor := range indexManifest.Manifests {
+		for key, value := range imageDescriptor.Annotations {
 			if key == "org.opencontainers.image.ref.name" && strings.HasSuffix(value, ":"+tag) {
-				return index.Image(imageManifest.Digest)
+				return index.Image(imageDescriptor.Digest)
 			}
 		}
 	}
 
-	return nil, nil
+	return nil, ErrImageNotFound
+}
+
+func FindImageDescriptorByTag(l layout.Path, tag string) (v1.Descriptor, error) {
+	index, err := l.ImageIndex()
+	if err != nil {
+		return v1.Descriptor{}, err
+	}
+	indexManifest, err := index.IndexManifest()
+	if err != nil {
+		return v1.Descriptor{}, err
+	}
+
+	for _, imageDescriptor := range indexManifest.Manifests {
+		for key, value := range imageDescriptor.Annotations {
+			if key == "org.opencontainers.image.ref.name" && strings.HasSuffix(value, ":"+tag) {
+				return imageDescriptor, nil
+			}
+		}
+	}
+
+	return v1.Descriptor{}, ErrImageNotFound
+}
+
+func TagImage(l layout.Path, imageDigest v1.Hash, tag string) error {
+	index, err := l.ImageIndex()
+	if err != nil {
+		return err
+	}
+	indexManifest, err := index.IndexManifest()
+	if err != nil {
+		return err
+	}
+
+	for _, imageDescriptor := range indexManifest.Manifests {
+		if imageDescriptor.Digest == imageDigest {
+			imageRepo, _, found := strings.Cut(imageDescriptor.Annotations["org.opencontainers.image.ref.name"], ":")
+			// If there is no ":" symbol in the image reference, then it must be a reference by digest and those are fine as is
+			if found {
+				imageDescriptor.Annotations["org.opencontainers.image.ref.name"] = imageRepo + ":" + tag
+			}
+			imageDescriptor.Annotations["io.deckhouse.image.short_tag"] = tag
+			if err = l.AppendDescriptor(imageDescriptor); err != nil {
+				return fmt.Errorf("append descriptor %s: %w", tag, err)
+			}
+			return nil
+		}
+	}
+
+	return ErrImageNotFound
 }

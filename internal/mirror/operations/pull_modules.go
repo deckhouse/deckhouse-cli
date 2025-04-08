@@ -89,7 +89,7 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 	}
 
 	logger.InfoLn("Processing image indexes")
-	for _, l := range imageLayouts.Layouts() {
+	for _, l := range imageLayouts.AsList() {
 		err = layouts.SortIndexManifests(l)
 		if err != nil {
 			return fmt.Errorf("Sorting index manifests of %s: %w", l, err)

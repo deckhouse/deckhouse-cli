@@ -49,8 +49,8 @@ func TestImagesLayoutsAllLayouts(t *testing.T) {
 		},
 	}
 
-	layouts := il.Layouts()
-	require.Len(t, layouts, 7, "Layouts should return exactly the number of non-empty layouts defined within it")
+	layouts := il.AsList()
+	require.Len(t, layouts, 7, "AsList should return exactly the number of non-empty layouts defined within it")
 	require.Contains(t, layouts, il.Deckhouse, "All non-empty layouts should be returned")
 	require.Contains(t, layouts, il.ReleaseChannel, "All non-empty layouts should be returned")
 	require.Contains(t, layouts, il.InstallStandalone, "All non-empty layouts should be returned")
