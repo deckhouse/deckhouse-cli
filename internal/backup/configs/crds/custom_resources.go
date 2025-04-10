@@ -20,6 +20,11 @@ import (
 
 const configResourcesLabelSelector = "backup.deckhouse.io/cluster-config=true"
 
+type customResourceDescription struct {
+	gvr schema.GroupVersionResource
+	crd v1.CustomResourceDefinition
+}
+
 func BackupCustomResources(
 	restConfig *rest.Config,
 	_ kubernetes.Interface,
@@ -39,26 +44,34 @@ func BackupCustomResources(
 	}
 
 	resourcesToBackup := lo.Compact(
-		lo.Map(crdList.Items, func(crd v1.CustomResourceDefinition, _ int) schema.GroupVersionResource {
+		lo.Map(crdList.Items, func(crd v1.CustomResourceDefinition, _ int) *customResourceDescription {
 			version, validVersionFound := lo.Find(crd.Spec.Versions, func(item v1.CustomResourceDefinitionVersion) bool {
 				return item.Storage && item.Served
 			})
 			if !validVersionFound {
-				return schema.GroupVersionResource{} // Empty GVR's will be filtered out
+				return nil // Empty GVR's will be filtered out
 			}
 
-			return schema.GroupVersionResource{
-				Group:    crd.Spec.Group,
-				Version:  version.Name,
-				Resource: crd.Spec.Names.Plural,
+			return &customResourceDescription{
+				gvr: schema.GroupVersionResource{
+					Group:    crd.Spec.Group,
+					Version:  version.Name,
+					Resource: crd.Spec.Names.Plural,
+				},
+				crd: crd,
 			}
 		}))
 
-	resources := lo.Map(resourcesToBackup, func(resource schema.GroupVersionResource, _ int) []runtime.Object {
+	resources := lo.Map(resourcesToBackup, func(resource *customResourceDescription, _ int) []runtime.Object {
 		return lo.Flatten(parallel.Map(namespaces, func(namespace string, _ int) []runtime.Object {
-			list, err := dynamicCl.Resource(resource).Namespace(namespace).List(context.TODO(), metav1.ListOptions{})
+			query := dynamic.ResourceInterface(dynamicCl.Resource(resource.gvr))
+			if resource.crd.Spec.Scope == v1.NamespaceScoped {
+				query = query.(dynamic.NamespaceableResourceInterface).Namespace(namespace)
+			}
+
+			list, err := query.List(context.TODO(), metav1.ListOptions{})
 			if err != nil {
-				log.Fatalf("Failed to list %s: %v", resource, err)
+				log.Fatalf("Failed to list %s: %v", resource.gvr, err)
 			}
 
 			return lo.Map(list.Items, func(object unstructured.Unstructured, _ int) runtime.Object {
