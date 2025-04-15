@@ -115,7 +115,7 @@ func backupConfigs(cmd *cobra.Command, args []string) error {
 
 		return nil
 	})
-	if errors.Join(errs...) != nil {
+	if err = errors.Join(errs...); err != nil {
 		log.Printf("WARN: Some backup procedures failed, only successfully backed-up resources will be available:\n%v", err)
 	}
 
