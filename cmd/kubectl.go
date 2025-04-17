@@ -54,5 +54,24 @@ func init() {
 		}
 	}
 
+	for _, subCmd := range kubectlCmd.Commands() {
+		if subCmd.Name() == "debug" {
+			if imageFlag := subCmd.Flags().Lookup("image"); imageFlag != nil {
+				imageFlag.Usage = "Container image to use for debug container. If not specified, the platform's recommended image will be used."
+			}
+
+			originalRunE := subCmd.RunE
+			subCmd.RunE = func(cmd *cobra.Command, args []string) error {
+				if imageFlag := cmd.Flags().Lookup("image"); imageFlag != nil && !imageFlag.Changed {
+					cmd.Flags().Set("image", "nicolaka/netshoot")
+				}
+				if originalRunE != nil {
+					return originalRunE(cmd, args)
+				}
+				return nil
+			}
+		}
+	}
+
 	rootCmd.AddCommand(kubectlCmd)
 }
