@@ -52,11 +52,14 @@ func init() {
 	debugCmd = ReplaceCommandName("kubectl", "d8 k", debugCmd)
 
 	if imageFlag := debugCmd.Flags().Lookup("image"); imageFlag != nil {
-		imageFlag.Usage = "Container image to use for debug container. If not specified, the platform's recommended image will be used."
+		imageFlag.Usage = "Container image to use for debug container. If not specified, nicolaka/netshoot will be used."
+		imageFlag.DefValue = "nicolaka/netshoot"
+		if imageFlag.Value.String() == "" {
+			_ = imageFlag.Value.Set("nicolaka/netshoot")
+		}
 	}
 
-	originalRunE := debugCmd.RunE
-	debugCmd.RunE = func(cmd *cobra.Command, args []string) error {
+	debugCmd.PreRunE = func(cmd *cobra.Command, args []string) error {
 		image, err := cmd.Flags().GetString("image")
 		if err != nil {
 			return fmt.Errorf("failed to get image flag: %v", err)
@@ -66,10 +69,15 @@ func init() {
 				return fmt.Errorf("failed to set recommended image: %v", err)
 			}
 		}
+		return nil
+	}
+
+	originalRunE := debugCmd.RunE
+	debugCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		if originalRunE != nil {
 			return originalRunE(cmd, args)
 		}
-		return nil
+		return fmt.Errorf("original RunE is nil")
 	}
 
 	kubectlCmd.AddCommand(debugCmd)
