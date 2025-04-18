@@ -51,29 +51,31 @@ func init() {
 	debugCmd := debug.NewCmdDebug(configFlags, streams)
 	debugCmd = ReplaceCommandName("kubectl", "d8 k", debugCmd)
 
+	defaultImage := "nicolaka/netshoot"
 	if imageFlag := debugCmd.Flags().Lookup("image"); imageFlag != nil {
 		imageFlag.Usage = "Container image to use for debug container. If not specified, nicolaka/netshoot will be used."
-		imageFlag.DefValue = "nicolaka/netshoot"
-		if imageFlag.Value.String() == "" {
-			_ = imageFlag.Value.Set("nicolaka/netshoot")
+		imageFlag.DefValue = defaultImage
+		if err := imageFlag.Value.Set(defaultImage); err != nil {
+			fmt.Fprintf(debugCmd.ErrOrStderr(), "Failed to set default image: %v\n", err)
 		}
+	} else {
+		fmt.Fprintf(debugCmd.ErrOrStderr(), "Image flag not found in debug command\n")
 	}
 
-	debugCmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+	originalRunE := debugCmd.RunE
+	debugCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		image, err := cmd.Flags().GetString("image")
 		if err != nil {
 			return fmt.Errorf("failed to get image flag: %v", err)
 		}
 		if image == "" {
-			if err := cmd.Flags().Set("image", "nicolaka/netshoot"); err != nil {
+			if err := cmd.Flags().Set("image", defaultImage); err != nil {
 				return fmt.Errorf("failed to set recommended image: %v", err)
 			}
+			image = defaultImage
 		}
-		return nil
-	}
+		fmt.Fprintf(cmd.OutOrStdout(), "Using image: %s\n", image)
 
-	originalRunE := debugCmd.RunE
-	debugCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		if originalRunE != nil {
 			return originalRunE(cmd, args)
 		}
