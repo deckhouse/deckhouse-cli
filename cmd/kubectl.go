@@ -18,7 +18,7 @@ func init() {
 	kubectlCmd = ReplaceCommandName("kubectl", "d8 k", kubectlCmd)
 
 	kubectlCmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
-	kubectlCmd.SilenceErrors = false
+	kubectlCmd.SilenceErrors = true
 	logs.AddFlags(kubectlCmd.PersistentFlags())
 
 	switch {
@@ -52,42 +52,26 @@ func init() {
 	debugCmd = ReplaceCommandName("kubectl", "d8 k", debugCmd)
 
 	if imageFlag := debugCmd.Flags().Lookup("image"); imageFlag != nil {
-		fmt.Println("Updating image flag usage for debug")
 		imageFlag.Usage = "Container image to use for debug container. If not specified, the platform's recommended image will be used."
-	} else {
-		fmt.Println("Image flag not found in debug command")
 	}
 
 	originalRunE := debugCmd.RunE
 	debugCmd.RunE = func(cmd *cobra.Command, args []string) error {
-		fmt.Println("Entering RunE for d8 k debug")
-		fmt.Printf("Args: %v\n", args)
 		image, err := cmd.Flags().GetString("image")
 		if err != nil {
-			fmt.Printf("Failed to get image flag: %v\n", err)
-			return err
+			return fmt.Errorf("failed to get image flag: %v", err)
 		}
-		fmt.Printf("Current image value: %q\n", image)
 		if image == "" {
-			fmt.Println("Setting image to busybox")
-			if err := cmd.Flags().Set("image", "busybox"); err != nil {
-				fmt.Printf("Failed to set image flag: %v\n", err)
-				return err
+			if err := cmd.Flags().Set("image", "nicolaka/netshoot"); err != nil {
+				return fmt.Errorf("failed to set recommended image: %v", err)
 			}
 		}
 		if originalRunE != nil {
-			fmt.Println("Calling original RunE")
-			err := originalRunE(cmd, args)
-			if err != nil {
-				fmt.Printf("original RunE returned error: %v\n", err)
-			}
-			return err
+			return originalRunE(cmd, args)
 		}
-		fmt.Println("original RunE is nil")
 		return nil
 	}
 
 	kubectlCmd.AddCommand(debugCmd)
-
 	rootCmd.AddCommand(kubectlCmd)
 }
