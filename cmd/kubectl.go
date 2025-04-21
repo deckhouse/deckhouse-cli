@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -55,38 +56,42 @@ func init() {
 	if imageFlag := debugCmd.Flags().Lookup("image"); imageFlag != nil {
 		imageFlag.Usage = "Container image to use for debug container. If not specified, nicolaka/netshoot will be used."
 		imageFlag.DefValue = defaultImage
-	} else {
-		fmt.Fprintf(debugCmd.ErrOrStderr(), "Image flag not found in debug command\n")
 	}
 
-	originalPreRunE := debugCmd.PreRunE
-	debugCmd.PreRunE = func(cmd *cobra.Command, args []string) error {
-		image, err := cmd.Flags().GetString("image")
-		if err != nil {
-			return fmt.Errorf("failed to get image flag: %v", err)
-		}
-
-		if image == "" {
-			if err := cmd.Flags().Set("image", defaultImage); err != nil {
-				return fmt.Errorf("failed to set default image: %v", err)
+	wrappedDebugCmd := &cobra.Command{
+		Use:     debugCmd.Use,
+		Short:   debugCmd.Short,
+		Long:    debugCmd.Long,
+		Example: debugCmd.Example,
+		Args:    debugCmd.Args,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			hasImage := false
+			hasCopyTo := false
+			for _, arg := range args {
+				if strings.HasPrefix(arg, "--image=") || arg == "--image" {
+					hasImage = true
+					break
+				}
+				if strings.HasPrefix(arg, "--copy-to=") || arg == "--copy-to" {
+					hasCopyTo = true
+					break
+				}
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Using default image: %s\n", defaultImage)
-		}
 
-		if originalPreRunE != nil {
-			return originalPreRunE(cmd, args)
-		}
-		return nil
+			if !hasImage && !hasCopyTo {
+				args = append(args, fmt.Sprintf("--image=%s", defaultImage))
+				fmt.Fprintf(cmd.OutOrStdout(), "Using default image: %s\n", defaultImage)
+			}
+
+			debugCmd.SetArgs(args)
+			return debugCmd.Execute()
+		},
 	}
 
-	originalRunE := debugCmd.RunE
-	debugCmd.RunE = func(cmd *cobra.Command, args []string) error {
-		if originalRunE != nil {
-			return originalRunE(cmd, args)
-		}
-		return fmt.Errorf("original RunE is nil")
-	}
+	wrappedDebugCmd.Flags().AddFlagSet(debugCmd.Flags())
+	wrappedDebugCmd.SetHelpFunc(debugCmd.HelpFunc())
+	wrappedDebugCmd.SetUsageFunc(debugCmd.UsageFunc())
 
-	kubectlCmd.AddCommand(debugCmd)
+	kubectlCmd.AddCommand(wrappedDebugCmd)
 	rootCmd.AddCommand(kubectlCmd)
 }
