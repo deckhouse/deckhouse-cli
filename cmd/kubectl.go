@@ -2,7 +2,8 @@ package cmd
 
 import (
 	"os"
-	"strings"
+	"os/exec"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	cliflag "k8s.io/component-base/cli/flag"
@@ -16,38 +17,64 @@ func init() {
 	kubectlCmd.Aliases = []string{"kubectl"}
 	kubectlCmd = ReplaceCommandName("kubectl", "d8 k", kubectlCmd)
 
-	// Находим команду debug для модификации
-	var debugCmd *cobra.Command
-	for _, cmd := range kubectlCmd.Commands() {
-		if cmd.Name() == "debug" {
-			debugCmd = cmd
-			break
-		}
-	}
+	debugCmd := &cobra.Command{
+		Use:   "debug",
+		Short: "Debug pod with nicolaka/netshoot image by default",
+		Run: func(cmd *cobra.Command, args []string) {
+			cmdArgs := os.Args
 
-	if debugCmd != nil {
-		originalRun := debugCmd.RunE
-		debugCmd.RunE = func(cmd *cobra.Command, args []string) error {
-			imageSpecified := false
-			for _, arg := range os.Args {
-				if strings.HasPrefix(arg, "--image=") || arg == "--image" {
-					imageSpecified = true
+			debugIndex := -1
+			for i, arg := range cmdArgs {
+				if arg == "debug" {
+					debugIndex = i
 					break
 				}
 			}
 
-			if !imageSpecified {
-				if imageFlag := cmd.Flags().Lookup("image"); imageFlag != nil {
-					cmd.Flags().Set("image", "nicolaka/netshoot")
+			if debugIndex == -1 {
+				return
+			}
+
+			kubectlArgs := []string{"kubectl", "debug"}
+
+			kubectlArgs = append(kubectlArgs, cmdArgs[debugIndex+1:]...)
+
+			hasImageFlag := false
+			for _, arg := range kubectlArgs {
+				if arg == "--image" || len(arg) > 8 && arg[:8] == "--image=" {
+					hasImageFlag = true
+					break
 				}
 			}
 
-			return originalRun(cmd, args)
+			if !hasImageFlag {
+				kubectlArgs = append(kubectlArgs, "--image=nicolaka/netshoot")
+			}
+
+			kubectlPath, err := exec.LookPath("kubectl")
+			if err != nil {
+				cmd.PrintErrf("Error finding kubectl: %v\n", err)
+				os.Exit(1)
+			}
+
+			err = syscall.Exec(kubectlPath, kubectlArgs, os.Environ())
+			if err != nil {
+				cmd.PrintErrf("Error executing kubectl: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+
+	for _, cmd := range kubectlCmd.Commands() {
+		if cmd.Name() == "debug" {
+			kubectlCmd.RemoveCommand(cmd)
+			break
 		}
 	}
 
-	// Based on https://github.com/kubernetes/kubernetes/blob/v1.29.3/staging/src/k8s.io/component-base/cli/run.go#L88
+	kubectlCmd.AddCommand(debugCmd)
 
+	// Based on https://github.com/kubernetes/kubernetes/blob/v1.29.3/staging/src/k8s.io/component-base/cli/run.go#L88
 	kubectlCmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 	kubectlCmd.SilenceErrors = true
 	logs.AddFlags(kubectlCmd.PersistentFlags())
