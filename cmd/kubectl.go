@@ -53,32 +53,34 @@ func init() {
 
 	defaultImage := "nicolaka/netshoot"
 	if imageFlag := debugCmd.Flags().Lookup("image"); imageFlag != nil {
-		fmt.Fprintf(debugCmd.ErrOrStderr(), "Found image flag: %+v\n", imageFlag)
 		imageFlag.Usage = "Container image to use for debug container. If not specified, nicolaka/netshoot will be used."
 		imageFlag.DefValue = defaultImage
-		if err := imageFlag.Value.Set(defaultImage); err != nil {
-			fmt.Fprintf(debugCmd.ErrOrStderr(), "Failed to set default image: %v\n", err)
-		} else {
-			fmt.Fprintf(debugCmd.ErrOrStderr(), "Set image flag: Value=%s, DefValue=%s, Usage=%s\n",
-				imageFlag.Value.String(), imageFlag.DefValue, imageFlag.Usage)
-		}
 	} else {
 		fmt.Fprintf(debugCmd.ErrOrStderr(), "Image flag not found in debug command\n")
 	}
 
-	originalRunE := debugCmd.RunE
-	debugCmd.RunE = func(cmd *cobra.Command, args []string) error {
+	originalPreRunE := debugCmd.PreRunE
+	debugCmd.PreRunE = func(cmd *cobra.Command, args []string) error {
 		image, err := cmd.Flags().GetString("image")
 		if err != nil {
 			return fmt.Errorf("failed to get image flag: %v", err)
 		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "RunE: image=%q, args=%v\n", image, args)
 
 		if image == "" {
-			args = append(args, fmt.Sprintf("--image=%s", defaultImage))
-			fmt.Fprintf(cmd.OutOrStdout(), "Added --image=%s to args\n", defaultImage)
+			if err := cmd.Flags().Set("image", defaultImage); err != nil {
+				return fmt.Errorf("failed to set default image: %v", err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Using default image: %s\n", defaultImage)
 		}
 
+		if originalPreRunE != nil {
+			return originalPreRunE(cmd, args)
+		}
+		return nil
+	}
+
+	originalRunE := debugCmd.RunE
+	debugCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		if originalRunE != nil {
 			return originalRunE(cmd, args)
 		}
