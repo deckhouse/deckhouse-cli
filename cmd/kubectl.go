@@ -1,15 +1,26 @@
+/*
+Copyright 2024 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package cmd
 
 import (
-	"fmt"
-	"strings"
-
 	"github.com/spf13/cobra"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
 	kubecmd "k8s.io/kubectl/pkg/cmd"
-	"k8s.io/kubectl/pkg/cmd/debug"
 )
 
 func init() {
@@ -17,6 +28,8 @@ func init() {
 	kubectlCmd.Use = "k"
 	kubectlCmd.Aliases = []string{"kubectl"}
 	kubectlCmd = ReplaceCommandName("kubectl", "d8 k", kubectlCmd)
+
+	// Based on https://github.com/kubernetes/kubernetes/blob/v1.29.3/staging/src/k8s.io/component-base/cli/run.go#L88
 
 	kubectlCmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 	kubectlCmd.SilenceErrors = true
@@ -41,57 +54,5 @@ func init() {
 		}
 	}
 
-	streams := genericclioptions.IOStreams{
-		In:     kubectlCmd.InOrStdin(),
-		Out:    kubectlCmd.OutOrStdout(),
-		ErrOut: kubectlCmd.ErrOrStderr(),
-	}
-
-	configFlags := genericclioptions.NewConfigFlags(true)
-
-	debugCmd := debug.NewCmdDebug(configFlags, streams)
-	debugCmd = ReplaceCommandName("kubectl", "d8 k", debugCmd)
-
-	defaultImage := "nicolaka/netshoot"
-	if imageFlag := debugCmd.Flags().Lookup("image"); imageFlag != nil {
-		imageFlag.Usage = "Container image to use for debug container. If not specified, nicolaka/netshoot will be used."
-		imageFlag.DefValue = defaultImage
-	}
-
-	wrappedDebugCmd := &cobra.Command{
-		Use:     debugCmd.Use,
-		Short:   debugCmd.Short,
-		Long:    debugCmd.Long,
-		Example: debugCmd.Example,
-		Args:    debugCmd.Args,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			hasImage := false
-			hasCopyTo := false
-			for _, arg := range args {
-				if strings.HasPrefix(arg, "--image=") || arg == "--image" {
-					hasImage = true
-					break
-				}
-				if strings.HasPrefix(arg, "--copy-to=") || arg == "--copy-to" {
-					hasCopyTo = true
-					break
-				}
-			}
-
-			if !hasImage && !hasCopyTo {
-				args = append(args, fmt.Sprintf("--image=%s", defaultImage))
-				fmt.Fprintf(cmd.OutOrStdout(), "Using default image: %s\n", defaultImage)
-			}
-
-			debugCmd.SetArgs(args)
-			return debugCmd.Execute()
-		},
-	}
-
-	wrappedDebugCmd.Flags().AddFlagSet(debugCmd.Flags())
-	wrappedDebugCmd.SetHelpFunc(debugCmd.HelpFunc())
-	wrappedDebugCmd.SetUsageFunc(debugCmd.UsageFunc())
-
-	kubectlCmd.AddCommand(wrappedDebugCmd)
 	rootCmd.AddCommand(kubectlCmd)
 }
