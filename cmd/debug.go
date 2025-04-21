@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -29,18 +28,7 @@ func init() {
 		Example:            originalDebugCmd.Example,
 		DisableFlagParsing: true,
 		Run: func(cmd *cobra.Command, args []string) {
-			hasImage := false
-			for _, arg := range args {
-				if strings.HasPrefix(arg, "--image=") || arg == "--image" {
-					hasImage = true
-					break
-				}
-			}
-
-			if !hasImage {
-				args = append(args, fmt.Sprintf("--image=%s", defaultImage))
-				fmt.Fprintf(cmd.OutOrStdout(), "Using default image: %s\n", defaultImage)
-			}
+			args = append([]string{fmt.Sprintf("--image=%s", defaultImage)}, args...)
 
 			originalDebugCmd.DisableFlagParsing = false
 			originalDebugCmd.SetArgs(args)
