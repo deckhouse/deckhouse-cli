@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/kubectl/pkg/cmd/debug"
+	"k8s.io/kubectl/pkg/cmd/util"
 )
 
 func init() {
@@ -52,6 +53,10 @@ func init() {
 	}
 
 	debugCmd.Flags().AddFlagSet(originalDebugCmd.Flags())
+
+	configFlags.AddFlags(debugCmd.Flags())
+
+	util.AddPodRunningTimeoutFlag(debugCmd, 0)
 
 	if imageFlag := debugCmd.Flags().Lookup("image"); imageFlag != nil {
 		imageFlag.Usage = "Container image to use for debug container. If not specified, nicolaka/netshoot will be used."
