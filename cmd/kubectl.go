@@ -1,22 +1,9 @@
-/*
-Copyright 2024 Flant JSC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package cmd
 
 import (
+	"os"
+	"strings"
+
 	"github.com/spf13/cobra"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
@@ -28,6 +15,36 @@ func init() {
 	kubectlCmd.Use = "k"
 	kubectlCmd.Aliases = []string{"kubectl"}
 	kubectlCmd = ReplaceCommandName("kubectl", "d8 k", kubectlCmd)
+
+	// Находим команду debug для модификации
+	var debugCmd *cobra.Command
+	for _, cmd := range kubectlCmd.Commands() {
+		if cmd.Name() == "debug" {
+			debugCmd = cmd
+			break
+		}
+	}
+
+	if debugCmd != nil {
+		originalRun := debugCmd.RunE
+		debugCmd.RunE = func(cmd *cobra.Command, args []string) error {
+			imageSpecified := false
+			for _, arg := range os.Args {
+				if strings.HasPrefix(arg, "--image=") || arg == "--image" {
+					imageSpecified = true
+					break
+				}
+			}
+
+			if !imageSpecified {
+				if imageFlag := cmd.Flags().Lookup("image"); imageFlag != nil {
+					cmd.Flags().Set("image", "nicolaka/netshoot")
+				}
+			}
+
+			return originalRun(cmd, args)
+		}
+	}
 
 	// Based on https://github.com/kubernetes/kubernetes/blob/v1.29.3/staging/src/k8s.io/component-base/cli/run.go#L88
 
