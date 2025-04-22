@@ -18,10 +18,12 @@ package values
 
 import (
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
+
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
+
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 var valuesLong = templates.LongDesc(`
@@ -42,21 +44,29 @@ func NewCommand() *cobra.Command {
 	return valuesCmd
 }
 
-func valuesModule(cmd *cobra.Command, moduleName []string) error {
+func valuesModule(cmd *cobra.Command, args []string) error {
+	moduleName := args[0]
+
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	contextName, err := cmd.Flags().GetString("context")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	pathFromOption := fmt.Sprintf("%s/values.yaml", moduleName[0])
+	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	pathFromOption := fmt.Sprintf("%s/values.yaml", moduleName)
 	err = operatemodule.OptionsModule(config, kubeCl, pathFromOption)
 	if err != nil {
 		return fmt.Errorf("Error print values: %w", err)
 	}
-	return err
+
+	return nil
 }

@@ -18,12 +18,14 @@ package mainqueue
 
 import (
 	"fmt"
+
 	"k8s.io/kubectl/pkg/util/templates"
+
+	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/queue/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/queue/operatequeue"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
-	"github.com/spf13/cobra"
 )
 
 var mainQueueLong = templates.LongDesc(`
@@ -45,13 +47,18 @@ func NewCommand() *cobra.Command {
 	return listCmd
 }
 
-func mainQueue(cmd *cobra.Command, args []string) error {
+func mainQueue(cmd *cobra.Command, _ []string) error {
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	contextName, err := cmd.Flags().GetString("context")
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
@@ -67,5 +74,6 @@ func mainQueue(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("Error list main queue: %w", err)
 	}
-	return err
+
+	return nil
 }

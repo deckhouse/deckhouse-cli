@@ -18,9 +18,11 @@ package enable
 
 import (
 	"fmt"
+
+	"k8s.io/client-go/dynamic"
+
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
-	"k8s.io/client-go/dynamic"
 
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
@@ -44,13 +46,20 @@ func NewCommand() *cobra.Command {
 	return enableCmd
 }
 
-func enableModule(cmd *cobra.Command, moduleName []string) error {
+func enableModule(cmd *cobra.Command, args []string) error {
+	moduleName := args[0]
+
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	config, _, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	contextName, err := cmd.Flags().GetString("context")
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	config, _, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
@@ -59,10 +68,12 @@ func enableModule(cmd *cobra.Command, moduleName []string) error {
 	if err != nil {
 		return fmt.Errorf("Failed to create dynamic client: %v", err)
 	}
-	err = operatemodule.OperateModule(dynamicClient, moduleName[0], operatemodule.ModuleEnabled)
+
+	err = operatemodule.OperateModule(dynamicClient, moduleName, operatemodule.ModuleEnabled)
 	if err != nil {
 		return fmt.Errorf("Error enable module: %w", err)
 	}
-	fmt.Printf("Module %s enabled\n", moduleName[0])
-	return err
+
+	fmt.Println("Module", moduleName, "enabled")
+	return nil
 }
