@@ -214,12 +214,8 @@ func buildPushParams(logger params.Logger) *params.PushParams {
 func validateRegistryAccess(ctx context.Context, pushParams *params.PushParams) error {
 	opts := []validation.Option{
 		validation.UseAuthProvider(pushParams.RegistryAuth),
-	}
-	if pushParams.Insecure {
-		opts = append(opts, validation.UsePlainHTTP())
-	}
-	if pushParams.SkipTLSVerification {
-		opts = append(opts, validation.SkipTLSVerification())
+		validation.WithInsecure(pushParams.Insecure),
+		validation.WithTLSVerificationSkip(pushParams.SkipTLSVerification),
 	}
 
 	accessValidator := validation.NewRemoteRegistryAccessValidator()

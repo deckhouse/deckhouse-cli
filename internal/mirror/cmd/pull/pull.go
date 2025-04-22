@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"time"
 
@@ -132,14 +133,26 @@ func pull(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
-	defer cancel()
-	if err := validateRegistryAccess(ctx, pullParams); err != nil && os.Getenv("MIRROR_BYPASS_ACCESS_CHECKS") != "1" {
-		return fmt.Errorf("Source registry access validation failure: %w", err)
+	accessValidator := validation.NewRemoteRegistryAccessValidator()
+	validationOpts := []validation.Option{
+		validation.UseAuthProvider(pullParams.RegistryAuth),
+		validation.WithInsecure(pullParams.Insecure),
+		validation.WithTLSVerificationSkip(pullParams.SkipTLSVerification),
 	}
 
 	if !pullParams.SkipPlatform {
 		if err := logger.Process("Pull Deckhouse Kubernetes Platform", func() error {
+			targetTag := "stable"
+			if pullParams.DeckhouseTag != "" {
+				targetTag = pullParams.DeckhouseTag
+			}
+			imageRef := pullParams.DeckhouseRegistryRepo + ":" + targetTag
+			ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
+			defer cancel()
+			if err := accessValidator.ValidateReadAccessForImage(ctx, imageRef, validationOpts...); err != nil {
+				return fmt.Errorf("Source registry is not accessible: %w", err)
+			}
+
 			tagsToMirror, err := findTagsToMirror(pullParams, logger)
 			if err != nil {
 				return fmt.Errorf("Find tags to mirror: %w", err)
@@ -155,6 +168,12 @@ func pull(cmd *cobra.Command, _ []string) error {
 
 	if !pullParams.SkipSecurityDatabases {
 		if err := logger.Process("Pull Security Databases", func() error {
+			imageRef := pullParams.DeckhouseRegistryRepo + "/security/trivy-db:2"
+			ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
+			defer cancel()
+			if err := accessValidator.ValidateReadAccessForImage(ctx, imageRef, validationOpts...); err != nil {
+				return fmt.Errorf("Source registry is not accessible: %w", err)
+			}
 			if err := operations.PullSecurityDatabases(pullParams); err != nil {
 				return err
 			}
@@ -166,6 +185,13 @@ func pull(cmd *cobra.Command, _ []string) error {
 
 	if !pullParams.SkipModules {
 		if err := logger.Process("Pull Modules", func() error {
+			modulesRepo := path.Join(pullParams.DeckhouseRegistryRepo, pullParams.ModulesPathSuffix)
+			ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
+			defer cancel()
+			if err := accessValidator.ValidateListAccessForRepo(ctx, modulesRepo, validationOpts...); err != nil {
+				return fmt.Errorf("Source registry is not accessible: %w", err)
+			}
+
 			filterExpressions := ModulesBlacklist
 			filterType := modules.FilterTypeBlacklist
 			if ModulesWhitelist != nil {
@@ -311,29 +337,4 @@ func lastPullWasTooLongAgoToRetry(pullParams *params.PullParams) bool {
 	}
 
 	return time.Since(s.ModTime()) > 24*time.Hour
-}
-
-func validateRegistryAccess(ctx context.Context, pullParams *params.PullParams) error {
-	targetTag := "alpha"
-	if pullParams.DeckhouseTag != "" {
-		targetTag = pullParams.DeckhouseTag
-	}
-
-	opts := []validation.Option{
-		validation.UseAuthProvider(pullParams.RegistryAuth),
-	}
-	if pullParams.Insecure {
-		opts = append(opts, validation.UsePlainHTTP())
-	}
-	if pullParams.SkipTLSVerification {
-		opts = append(opts, validation.SkipTLSVerification())
-	}
-
-	accessValidator := validation.NewRemoteRegistryAccessValidator()
-	err := accessValidator.ValidateReadAccessForImage(ctx, pullParams.DeckhouseRegistryRepo+":"+targetTag, opts...)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }

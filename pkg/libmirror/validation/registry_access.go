@@ -36,15 +36,15 @@ type options struct {
 
 type Option func(o *options)
 
-func UsePlainHTTP() Option {
+func WithInsecure(insecure bool) Option {
 	return func(o *options) {
-		o.plainHTTP = true
+		o.plainHTTP = insecure
 	}
 }
 
-func SkipTLSVerification() Option {
+func WithTLSVerificationSkip(skipVerifyTLS bool) Option {
 	return func(o *options) {
-		o.skipTLSVerification = true
+		o.skipTLSVerification = skipVerifyTLS
 	}
 }
 
@@ -62,18 +62,22 @@ type RegistryWriteAccessValidator interface {
 	ValidateWriteAccessForRepo(ctx context.Context, repo string, opts ...Option) error
 }
 
+type RegistryTagsListingAccessValidator interface {
+	ValidateListAccessForRepo(ctx context.Context, repo string, opts ...Option) error
+}
+
 type RemoteRegistryAccessValidator struct{}
 
 func NewRemoteRegistryAccessValidator() *RemoteRegistryAccessValidator {
 	return &RemoteRegistryAccessValidator{}
 }
 
-func (v *RemoteRegistryAccessValidator) ValidateReadAccessForImage(ctx context.Context, imageTag string, o ...Option) error {
+func (v *RemoteRegistryAccessValidator) ValidateReadAccessForImage(ctx context.Context, imageRef string, o ...Option) error {
 	opts := v.useOptions(o)
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(opts.authProvider, opts.plainHTTP, opts.skipTLSVerification)
 	remoteOpts = append(remoteOpts, remote.WithContext(ctx))
 
-	ref, err := name.ParseReference(imageTag, nameOpts...)
+	ref, err := name.ParseReference(imageRef, nameOpts...)
 	if err != nil {
 		return fmt.Errorf("Parse registry address: %w", err)
 	}
@@ -117,4 +121,22 @@ func (v *RemoteRegistryAccessValidator) useOptions(opts []Option) *options {
 		opt(o)
 	}
 	return o
+}
+
+func (v *RemoteRegistryAccessValidator) ValidateListAccessForRepo(ctx context.Context, repo string, o ...Option) error {
+	opts := v.useOptions(o)
+	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(opts.authProvider, opts.plainHTTP, opts.skipTLSVerification)
+	remoteOpts = append(remoteOpts, remote.WithContext(ctx))
+
+	ref, err := name.NewRepository(repo, nameOpts...)
+	if err != nil {
+		return fmt.Errorf("Parse registry repository: %w", err)
+	}
+
+	_, err = remote.List(ref, remoteOpts...)
+	if err != nil {
+		return fmt.Errorf("List tags: %w", err)
+	}
+
+	return nil
 }
