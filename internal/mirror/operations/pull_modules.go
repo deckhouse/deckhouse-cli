@@ -50,7 +50,8 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 	}
 
 	if len(modulesData) == 0 {
-		return fmt.Errorf("Modules were not found, check your source repository address and modules path suffix")
+		logger.WarnF("Modules were not found, check your source repository address and modules path suffix")
+		return nil
 	}
 
 	logger.InfoF("Repo contains %d modules: %s", len(modulesData), formatModulesList(modulesData))
