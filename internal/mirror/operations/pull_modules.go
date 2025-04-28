@@ -24,8 +24,6 @@ import (
 	"path"
 	"path/filepath"
 
-	"github.com/samber/lo"
-
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
@@ -40,7 +38,7 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 	imageLayouts := layouts.NewImageLayouts()
 	tmpDir := filepath.Join(pullParams.WorkingDir, "modules")
 
-	logger.InfoF("Fetching Deckhouse modules list")
+	logger.InfoLn("Fetching Deckhouse modules list")
 	modulesData, err = modules.ForRepo(
 		path.Join(pullParams.DeckhouseRegistryRepo, pullParams.ModulesPathSuffix),
 		pullParams.RegistryAuth,
@@ -50,11 +48,10 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 	}
 
 	if len(modulesData) == 0 {
-		logger.WarnF("Modules were not found, check your source repository address and modules path suffix")
+		logger.WarnLn("Modules were not found, check your source repository address and modules path suffix")
 		return nil
 	}
-
-	logger.InfoF("Repo contains %d modules: %s", len(modulesData), formatModulesList(modulesData))
+	printModulesList(logger, modulesData)
 
 	logger.InfoLn("Creating OCI Layouts")
 	for _, module := range modulesData {
@@ -117,10 +114,9 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 	return nil
 }
 
-func formatModulesList(modulesData []modules.Module) string {
-	return string(
-		lo.Reduce(modulesData[1:], func(agg []byte, item modules.Module, _ int) []byte {
-			return append(agg, ", "+item.Name...)
-		}, []byte(modulesData[0].Name)),
-	)
+func printModulesList(logger params.Logger, modulesData []modules.Module) {
+	logger.InfoF("Repo contains %d modules:", len(modulesData))
+	for i, module := range modulesData {
+		logger.InfoF("%d:\t%s", i+1, module.Name)
+	}
 }
