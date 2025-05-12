@@ -1,30 +1,58 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
 	kubecmd "k8s.io/kubectl/pkg/cmd"
 )
 
-const debugImagePath = "/var/lib/bashible/debug-container-image"
-
-func getDebugImage() (string, error) {
-	_, err := os.Stat(debugImagePath)
-	if os.IsNotExist(err) {
-		return "", fmt.Errorf("debug image file not found: %s", debugImagePath)
-	}
-
-	content, err := os.ReadFile(debugImagePath)
+func getDebugImage(cmd *cobra.Command) (string, error) {
+	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
-		return "", fmt.Errorf("failed to read debug image file: %v", err)
+		return "", fmt.Errorf("failed to setup Kubernetes client: %w", err)
 	}
 
-	return strings.TrimSpace(string(content)), nil
+	_, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to setup Kubernetes client: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	configMap, err := kubeCl.CoreV1().ConfigMaps("d8-cloud-instance-manager").Get(ctx, "bashible-apiserver-files", v1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to get configmap: %w", err)
+	}
+
+	imagesDigestsJSON, ok := configMap.Data["images_digests.json"]
+	if !ok {
+		return "", fmt.Errorf("images_digests.json not found in ConfigMap")
+	}
+
+	var imageData struct {
+		Common struct {
+			DebugContainer string `json:"debugContainer"`
+		} `json:"common"`
+	}
+	if err := json.Unmarshal([]byte(imagesDigestsJSON), &imageData); err != nil {
+		return "", fmt.Errorf("failed to parse images_digests.json: %v", err)
+	}
+
+	image := strings.TrimSpace(imageData.Common.DebugContainer)
+	if image == "" {
+		return "", fmt.Errorf("debug container image not found in ConfigMap")
+	}
+	return image, nil
 }
 
 func init() {
@@ -52,14 +80,12 @@ func init() {
 		if cmd.Name() == "debug" || (cmd.Parent() != nil && cmd.Parent().Name() == "debug") {
 			imageFlag := cmd.Flags().Lookup("image")
 			if imageFlag != nil && imageFlag.Value.String() == "" {
-				debugImage, err := getDebugImage()
+				debugImage, err := getDebugImage(cmd)
 				if err != nil {
-					debugImage = "nicolaka/netshoot"
-					fmt.Fprintf(os.Stderr, "Warning: %v, using default image: %s\n", err, debugImage)
-				} else {
-					fmt.Fprintf(os.Stderr, "Using debug container image: %s\n", debugImage)
+					fmt.Fprintf(os.Stderr, "Error: cannot get debug container image from cluster: %v\n", err)
+					return fmt.Errorf("failed to get debug container image: %w", err)
 				}
-
+				fmt.Fprintf(os.Stderr, "Using debug container image: %s\n", debugImage)
 				cmd.Flags().Set("image", debugImage)
 			}
 		}
