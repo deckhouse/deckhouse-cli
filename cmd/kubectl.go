@@ -18,37 +18,18 @@ import (
 )
 
 func getDebugImage(cmd *cobra.Command) (string, error) {
-	kubeconfigPath := ""
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	configOverrides := &clientcmd.ConfigOverrides{}
 
 	if cmd.Flags().Lookup("kubeconfig") != nil {
-		flag, err := cmd.Flags().GetString("kubeconfig")
-		if err == nil && flag != "" {
-			kubeconfigPath = flag
+		path, err := cmd.Flags().GetString("kubeconfig")
+		if err == nil && path != "" {
+			loadingRules.ExplicitPath = path
 		}
 	}
 
-	if kubeconfigPath == "" && cmd.Parent() != nil && cmd.Parent().Flags().Lookup("kubeconfig") != nil {
-		flag, err := cmd.Parent().Flags().GetString("kubeconfig")
-		if err == nil && flag != "" {
-			kubeconfigPath = flag
-		}
-	}
-
-	if kubeconfigPath == "" {
-		rootCommand := cmd
-		for rootCommand.Parent() != nil {
-			rootCommand = rootCommand.Parent()
-		}
-
-		if rootCommand.PersistentFlags().Lookup("kubeconfig") != nil {
-			flag, err := rootCommand.PersistentFlags().GetString("kubeconfig")
-			if err == nil && flag != "" {
-				kubeconfigPath = flag
-			}
-		}
-	}
-
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
+	config, err := kubeConfig.ClientConfig()
 	if err != nil {
 		return "", fmt.Errorf("failed to setup Kubernetes client: %w", err)
 	}
@@ -106,7 +87,6 @@ func init() {
 		}
 	}
 
-	kubectlCmd.PersistentFlags().String("kubeconfig", "", "Path to the kubeconfig file")
 	rootCmd.PersistentFlags().String("kubeconfig", "", "Path to the kubeconfig file")
 
 	originalPersistentPreRunE := kubectlCmd.PersistentPreRunE
@@ -117,10 +97,11 @@ func init() {
 				debugImage, err := getDebugImage(cmd)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error: cannot get debug container image from cluster: %v\n", err)
-					return fmt.Errorf("failed to get debug container image: %w", err)
+					fmt.Fprintf(os.Stderr, "Tip: Check if KUBECONFIG is set or use --kubeconfig flag\n")
+				} else {
+					fmt.Fprintf(os.Stderr, "Using debug container image: %s\n", debugImage)
+					cmd.Flags().Set("image", debugImage)
 				}
-				fmt.Fprintf(os.Stderr, "Using debug container image: %s\n", debugImage)
-				cmd.Flags().Set("image", debugImage)
 			}
 		}
 
