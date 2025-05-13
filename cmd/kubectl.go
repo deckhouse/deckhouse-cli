@@ -18,9 +18,34 @@ import (
 )
 
 func getDebugImage(cmd *cobra.Command) (string, error) {
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
-	if err != nil {
-		return "", fmt.Errorf("failed to setup Kubernetes client: %w", err)
+	kubeconfigPath := ""
+
+	if cmd.Flags().Lookup("kubeconfig") != nil {
+		flag, err := cmd.Flags().GetString("kubeconfig")
+		if err == nil && flag != "" {
+			kubeconfigPath = flag
+		}
+	}
+
+	if kubeconfigPath == "" && cmd.Parent() != nil && cmd.Parent().Flags().Lookup("kubeconfig") != nil {
+		flag, err := cmd.Parent().Flags().GetString("kubeconfig")
+		if err == nil && flag != "" {
+			kubeconfigPath = flag
+		}
+	}
+
+	if kubeconfigPath == "" {
+		rootCommand := cmd
+		for rootCommand.Parent() != nil {
+			rootCommand = rootCommand.Parent()
+		}
+
+		if rootCommand.PersistentFlags().Lookup("kubeconfig") != nil {
+			flag, err := rootCommand.PersistentFlags().GetString("kubeconfig")
+			if err == nil && flag != "" {
+				kubeconfigPath = flag
+			}
+		}
 	}
 
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
@@ -81,6 +106,7 @@ func init() {
 		}
 	}
 
+	kubectlCmd.PersistentFlags().String("kubeconfig", "", "Path to the kubeconfig file")
 	rootCmd.PersistentFlags().String("kubeconfig", "", "Path to the kubeconfig file")
 
 	originalPersistentPreRunE := kubectlCmd.PersistentPreRunE
