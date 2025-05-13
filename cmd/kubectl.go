@@ -8,9 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
 	kubecmd "k8s.io/kubectl/pkg/cmd"
@@ -22,9 +23,14 @@ func getDebugImage(cmd *cobra.Command) (string, error) {
 		return "", fmt.Errorf("failed to setup Kubernetes client: %w", err)
 	}
 
-	_, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to setup Kubernetes client: %w", err)
+	}
+
+	kubeCl, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return "", fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -74,6 +80,8 @@ func init() {
 			imageFlag.Usage = "Container image to use for debug container. If not specified, the platform's recommended image will be used."
 		}
 	}
+
+	rootCmd.PersistentFlags().String("kubeconfig", "", "Path to the kubeconfig file")
 
 	originalPersistentPreRunE := kubectlCmd.PersistentPreRunE
 	kubectlCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
