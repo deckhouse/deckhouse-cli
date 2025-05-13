@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -41,30 +40,21 @@ func getDebugImage(cmd *cobra.Command) (string, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	configMap, err := kubeCl.CoreV1().ConfigMaps("d8-cloud-instance-manager").Get(ctx, "bashible-apiserver-files", v1.GetOptions{})
+	configMap, err := kubeCl.CoreV1().ConfigMaps("default").Get(ctx, "debug-container", v1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("failed to get configmap: %w", err)
 	}
 
-	imagesDigestsJSON, ok := configMap.Data["images_digests.json"]
+	containerName, ok := configMap.Data["container_name"]
 	if !ok {
-		return "", fmt.Errorf("images_digests.json not found in ConfigMap")
+		return "", fmt.Errorf("container_name not found in ConfigMap")
 	}
 
-	var imageData struct {
-		Common struct {
-			DebugContainer string `json:"debugContainer"`
-		} `json:"common"`
-	}
-	if err := json.Unmarshal([]byte(imagesDigestsJSON), &imageData); err != nil {
-		return "", fmt.Errorf("failed to parse images_digests.json: %v", err)
-	}
-
-	image := strings.TrimSpace(imageData.Common.DebugContainer)
-	if image == "" {
+	containerName = strings.TrimSpace(containerName)
+	if containerName == "" {
 		return "", fmt.Errorf("debug container image not found in ConfigMap")
 	}
-	return image, nil
+	return containerName, nil
 }
 
 func init() {
