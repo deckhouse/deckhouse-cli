@@ -18,12 +18,14 @@ package collect_debug_info
 
 import (
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/collect-debug-info/debugTar"
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
+	"os"
+
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	"k8s.io/kubectl/pkg/util/templates"
-	"os"
+
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/collect-debug-info/debugTar"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 var collectDebugInfoCmdLong = templates.LongDesc(`
@@ -55,7 +57,12 @@ func collectDebugInfo(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	contextName, err := cmd.Flags().GetString("context")
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}

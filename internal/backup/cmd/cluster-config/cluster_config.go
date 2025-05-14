@@ -153,7 +153,12 @@ func setupK8sClients(cmd *cobra.Command) (*rest.Config, *kubernetes.Clientset, *
 		return nil, nil, nil, fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	restConfig, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	contextName, err := cmd.Flags().GetString("context")
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	restConfig, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}

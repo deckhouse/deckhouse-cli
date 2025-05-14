@@ -33,4 +33,6 @@ func AddPersistentFlags(cmd *cobra.Command) {
 		defaultKubeconfigPath,
 		"KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)",
 	)
+
+	cmd.PersistentFlags().String("context", "", "The name of the kubeconfig context to use")
 }

@@ -18,12 +18,14 @@ package list
 
 import (
 	"fmt"
+
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 
-	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
+
+	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/edit/flags"
 )
 
 var listLong = templates.LongDesc(`
@@ -44,13 +46,18 @@ func NewCommand() *cobra.Command {
 	return listCmd
 }
 
-func listModule(cmd *cobra.Command, args []string) error {
+func listModule(cmd *cobra.Command, _ []string) error {
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	contextName, err := cmd.Flags().GetString("context")
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
@@ -59,5 +66,6 @@ func listModule(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("Error list modules: %w", err)
 	}
-	return err
+
+	return nil
 }

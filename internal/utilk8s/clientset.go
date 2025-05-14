@@ -8,10 +8,20 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+const DefaultKubeContext = ""
+
 // SetupK8sClientSet reads kubeconfig file at kubeconfigPath and constructs a kubernetes clientset from it.
-func SetupK8sClientSet(kubeconfigPath string) (*rest.Config, *kubernetes.Clientset, error) {
+// If contextName is not empty, context under that name is used instead of default.
+func SetupK8sClientSet(kubeconfigPath, contextName string) (*rest.Config, *kubernetes.Clientset, error) {
+	var configOverrides *clientcmd.ConfigOverrides = nil
+	if contextName != DefaultKubeContext {
+		configOverrides = &clientcmd.ConfigOverrides{
+			CurrentContext: contextName,
+		}
+	}
+
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfigPath}, nil).ClientConfig()
+		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfigPath}, configOverrides).ClientConfig()
 	if err != nil {
 		return nil, nil, fmt.Errorf("Reading kubeconfig file: %w", err)
 	}

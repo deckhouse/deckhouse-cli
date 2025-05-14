@@ -18,6 +18,7 @@ package snapshots
 
 import (
 	"fmt"
+
 	"github.com/deckhouse/deckhouse-cli/internal/platform/cmd/module/operatemodule"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 
@@ -43,20 +44,29 @@ func NewCommand() *cobra.Command {
 	return snapshotsCmd
 }
 
-func snapshotsModule(cmd *cobra.Command, moduleName []string) error {
+func snapshotsModule(cmd *cobra.Command, args []string) error {
+	moduleName := args[0]
+
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	contextName, err := cmd.Flags().GetString("context")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
-	pathFromOption := fmt.Sprintf("%s/snapshots.yaml", moduleName[0])
+
+	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	pathFromOption := fmt.Sprintf("%s/snapshots.yaml", moduleName)
 	err = operatemodule.OptionsModule(config, kubeCl, pathFromOption)
 	if err != nil {
 		return fmt.Errorf("Error snapshot module: %w", err)
 	}
-	return err
+
+	return nil
 }

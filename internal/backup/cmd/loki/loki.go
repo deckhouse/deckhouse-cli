@@ -21,24 +21,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
 	"log/slog"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
+
+	"github.com/deckhouse/deckhouse-cli/internal/platform/flags"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
+
 	"github.com/spf13/cobra"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/kubectl/pkg/util/templates"
+
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 var lokiLong = templates.LongDesc(`
@@ -103,9 +106,14 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to setup Kubernetes client: %w", err)
 	}
 
-	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
+	contextName, err := cmd.Flags().GetString("context")
 	if err != nil {
-		return fmt.Errorf("failed to setup Kubernetes client: %w", err)
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
 	token, err := getTokenLokiSa(kubeCl)
@@ -195,7 +203,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 				fmt.Printf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1])
 			}
 		}
-		//get last timestamp value from stream Loki api response to use pagination and get all log strings.
+		// get last timestamp value from stream Loki api response to use pagination and get all log strings.
 		lastLog := dumpLogCurlJson.Data.Result[0].Values[len(dumpLogCurlJson.Data.Result[0].Values)-1][0]
 		lastTimestamp, err := strconv.ParseInt(lastLog, 10, 64)
 		if err != nil {
