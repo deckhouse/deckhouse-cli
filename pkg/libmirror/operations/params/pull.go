@@ -33,6 +33,4 @@ type PullParams struct {
 	// Only one of those 2 is filled at a single time or none at all.
 	SinceVersion *semver.Version // --since-version
 	DeckhouseTag string          // --deckhouse-tag
-
-	ModulesPathSuffix string // --modules-path-suffix
 }

@@ -53,8 +53,8 @@ func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader)
 	// These are layouts within module-ABC.tar mapped to paths they belong to in the deckhouse registry.
 	// Registry paths are relative to root of deckhouse repo.
 	layoutsToPush := map[string]string{
-		"":        path.Join("modules", moduleName),
-		"release": path.Join("modules", moduleName, "release"),
+		"":        path.Join(pushParams.ModulesPathSuffix, moduleName),
+		"release": path.Join(pushParams.ModulesPathSuffix, moduleName, "release"),
 	}
 
 	for layoutPathSuffix, repo := range layoutsToPush {
