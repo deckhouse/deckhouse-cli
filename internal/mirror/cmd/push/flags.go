@@ -55,4 +55,10 @@ func addFlags(flagSet *pflag.FlagSet) {
 		"",
 		"Path to a temporary directory to use for image pulling and pushing. All processing is done in this directory, so make sure there is enough free disk space to accommodate the entire bundle you are downloading;",
 	)
+	flagSet.StringVar(
+		&ModulesPathSuffix,
+		"modules-path-suffix",
+		"/modules",
+		"Suffix to append to source repo path to locate modules.",
+	)
 }

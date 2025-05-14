@@ -289,6 +289,7 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 			Insecure:              Insecure,
 			SkipTLSVerification:   TLSSkipVerify,
 			DeckhouseRegistryRepo: SourceRegistryRepo,
+			ModulesPathSuffix:     ModulesPathSuffix,
 			RegistryAuth:          getSourceRegistryAuthProvider(),
 			BundleDir:             ImagesBundlePath,
 			WorkingDir: filepath.Join(
@@ -299,8 +300,6 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 		},
 
 		BundleChunkSize: ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
-
-		ModulesPathSuffix: ModulesPathSuffix,
 
 		DoGOSTDigests:         DoGOSTDigest,
 		SkipPlatform:          NoPlatform,

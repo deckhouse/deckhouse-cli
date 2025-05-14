@@ -36,9 +36,10 @@ type Logger interface {
 // BaseParams hold data related to pending registry mirroring operation.
 type BaseParams struct {
 	// --registry-login + --registry-password (can be nil in this case, means anonymous) or --license depending on the operation requested
-	RegistryAuth authn.Authenticator
-	RegistryHost string // --registry (FQDN with port, if one is provided)
-	RegistryPath string // --registry (path)
+	RegistryAuth      authn.Authenticator
+	RegistryHost      string // --registry (FQDN with port, if one is provided)
+	RegistryPath      string // --registry (path)
+	ModulesPathSuffix string // --modules-path-suffix
 
 	DeckhouseRegistryRepo string // --source during pull
 

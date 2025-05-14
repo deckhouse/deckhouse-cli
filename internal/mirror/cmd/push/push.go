@@ -43,10 +43,11 @@ import (
 var (
 	TempDir string
 
-	RegistryHost     string
-	RegistryPath     string
-	RegistryUsername string
-	RegistryPassword string
+	RegistryHost      string
+	RegistryPath      string
+	RegistryUsername  string
+	RegistryPassword  string
+	ModulesPathSuffix string
 
 	Insecure         bool
 	TLSSkipVerify    bool
@@ -199,6 +200,7 @@ func buildPushParams(logger params.Logger) *params.PushParams {
 			SkipTLSVerification: TLSSkipVerify,
 			RegistryHost:        RegistryHost,
 			RegistryPath:        RegistryPath,
+			ModulesPathSuffix:   ModulesPathSuffix,
 			BundleDir:           ImagesBundlePath,
 			WorkingDir:          filepath.Join(TempDir, "push"),
 		},
@@ -219,7 +221,7 @@ func validateRegistryAccess(ctx context.Context, pushParams *params.PushParams) 
 	}
 
 	accessValidator := validation.NewRemoteRegistryAccessValidator()
-	err := accessValidator.ValidateWriteAccessForRepo(ctx, path.Join(pushParams.RegistryHost, pushParams.RegistryPath), opts...)
+	err := accessValidator.ValidateWriteAccessForRepo(ctx, path.Join(pushParams.RegistryHost, pushParams.RegistryPath, pushParams.ModulesPathSuffix), opts...)
 	if err != nil {
 		return err
 	}
