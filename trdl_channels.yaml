@@ -4,4 +4,4 @@ groups:
   - name: ea
     version: 0.12.1
   - name: stable
-    version: 0.11.4
+    version: 0.12.1
