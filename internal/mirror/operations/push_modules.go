@@ -76,7 +76,7 @@ func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader)
 
 	pushParams.Logger.InfoF("Pushing module tag for %s", moduleName)
 	refOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&pushParams.BaseParams)
-	modulesRepo := path.Join(pushParams.RegistryHost, pushParams.RegistryPath, "modules")
+	modulesRepo := path.Join(pushParams.RegistryHost, pushParams.RegistryPath, pushParams.ModulesPathSuffix)
 	imageRef, err := name.ParseReference(modulesRepo+":"+moduleName, refOpts...)
 	if err != nil {
 		return fmt.Errorf("Parse image reference: %w", err)
