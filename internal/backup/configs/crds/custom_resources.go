@@ -61,16 +61,12 @@ func BackupCustomResources(
 			}
 		}))
 
-	namespacedResourcesToBackup := []*customResourceDescription{}
-	clusterwideResourcesToBackup := []*customResourceDescription{}
+	namespacedResourcesToBackup, clusterwideResourcesToBackup := lo.FilterReject(
+		resourcesToBackup,
+		func(r *customResourceDescription, _ int) bool { return r.crd.Spec.Scope == v1.NamespaceScoped },
+	)
 
-	for _, r := range resourcesToBackup {
-		if r.crd.Spec.Scope == v1.NamespaceScoped {
-			namespacedResourcesToBackup = append(namespacedResourcesToBackup, r)
-		} else {
-			clusterwideResourcesToBackup = append(clusterwideResourcesToBackup, r)
-		}
-	}
+	
 
 	nsResources := lo.Map(namespacedResourcesToBackup, func(resource *customResourceDescription, _ int) []runtime.Object {
 		return lo.Flatten(lo.Map(namespaces, func(namespace string, _ int) []runtime.Object {
