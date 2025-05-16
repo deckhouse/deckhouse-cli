@@ -6,7 +6,6 @@ import (
 	"log"
 
 	"github.com/samber/lo"
-	"github.com/samber/lo/parallel"
 	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiext "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -62,12 +61,21 @@ func BackupCustomResources(
 			}
 		}))
 
-	resources := lo.Map(resourcesToBackup, func(resource *customResourceDescription, _ int) []runtime.Object {
-		return lo.Flatten(parallel.Map(namespaces, func(namespace string, _ int) []runtime.Object {
+	namespacedResourcesToBackup := []*customResourceDescription{}
+	clusterwideResourcesToBackup := []*customResourceDescription{}
+
+	for _, r := range resourcesToBackup {
+		if r.crd.Spec.Scope == v1.NamespaceScoped {
+			namespacedResourcesToBackup = append(namespacedResourcesToBackup, r)
+		} else {
+			clusterwideResourcesToBackup = append(clusterwideResourcesToBackup, r)
+		}
+	}
+
+	nsResources := lo.Map(namespacedResourcesToBackup, func(resource *customResourceDescription, _ int) []runtime.Object {
+		return lo.Flatten(lo.Map(namespaces, func(namespace string, _ int) []runtime.Object {
 			query := dynamic.ResourceInterface(dynamicCl.Resource(resource.gvr))
-			if resource.crd.Spec.Scope == v1.NamespaceScoped {
-				query = query.(dynamic.NamespaceableResourceInterface).Namespace(namespace)
-			}
+			query = query.(dynamic.NamespaceableResourceInterface).Namespace(namespace)
 
 			list, err := query.List(context.TODO(), metav1.ListOptions{})
 			if err != nil {
@@ -80,5 +88,19 @@ func BackupCustomResources(
 		}))
 	})
 
-	return lo.Flatten(resources), nil
+	cwResources := lo.Map(clusterwideResourcesToBackup, func(resource *customResourceDescription, _ int) []runtime.Object {
+		query := dynamic.ResourceInterface(dynamicCl.Resource(resource.gvr))
+		list, err := query.List(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			log.Fatalf("Failed to list %s: %v", resource.gvr, err)
+		}
+
+		return lo.Map(list.Items, func(object unstructured.Unstructured, _ int) runtime.Object {
+			return &object
+		})
+
+	})
+
+	result := append(nsResources, cwResources...)
+	return lo.Flatten(result), nil
 }
