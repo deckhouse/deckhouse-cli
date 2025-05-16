@@ -10,7 +10,6 @@ import (
 	"runtime"
 
 	"github.com/samber/lo"
-	"github.com/samber/lo/parallel"
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -95,7 +94,7 @@ func backupConfigs(cmd *cobra.Command, args []string) error {
 		{payload: storageclasses.BackupStorageClasses},
 	}
 
-	errs := parallel.Map(backupStages, func(stage *BackupStage, _ int) error {
+	errs := lo.Map(backupStages, func(stage *BackupStage, _ int) error {
 		stagePayloadFuncName := runtime.FuncForPC(reflect.ValueOf(stage.payload).Pointer()).Name()
 
 		objects, err := stage.payload(restConfig, kubeCl, dynamicCl, namespaces)
