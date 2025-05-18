@@ -1,59 +1,111 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
-	"time"
 
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/remotecommand"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
 	kubecmd "k8s.io/kubectl/pkg/cmd"
 )
 
+type GlobalValues struct {
+	ModulesImages struct {
+		Digests struct {
+			Common struct {
+				DebugContainer string `json:"debugContainer"`
+			} `json:"common"`
+		} `json:"digests"`
+		Registry struct {
+			Address string `json:"address"`
+			Path    string `json:"path"`
+		} `json:"registry"`
+	} `json:"modulesImages"`
+}
+
 func getDebugImage(cmd *cobra.Command) (string, error) {
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	configOverrides := &clientcmd.ConfigOverrides{}
-
-	if cmd.Flags().Lookup("kubeconfig") != nil {
-		path, err := cmd.Flags().GetString("kubeconfig")
-		if err == nil && path != "" {
-			loadingRules.ExplicitPath = path
-		}
-	}
-
-	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-	config, err := kubeConfig.ClientConfig()
+	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
-		return "", fmt.Errorf("failed to setup Kubernetes client: %w", err)
+		return "", fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	kubeCl, err := kubernetes.NewForConfig(config)
+	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to create Kubernetes client: %w", err)
+		return "", fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	configMap, err := kubeCl.CoreV1().ConfigMaps("default").Get(ctx, "debug-container", v1.GetOptions{})
+	command := []string{"deckhouse-controller", "global", "values", "-o", "json"}
+	podName, err := utilk8s.GetDeckhousePod(kubeCl)
+	executor, err := utilk8s.ExecInPod(config, kubeCl, command, podName, "d8-system", "deckhouse")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err = executor.StreamWithContext(
+		context.Background(),
+		remotecommand.StreamOptions{
+			Stdout: &stdout,
+			Stderr: &stderr,
+		}); err != nil {
+		return "", err
+	}
+
+	fmt.Printf("%s\n", stdout.String()) // TODO: remove it
+
+	var gv GlobalValues
+	err = json.Unmarshal([]byte(stdout.String()), &gv)
 	if err != nil {
-		return "", fmt.Errorf("failed to get configmap: %w", err)
+		fmt.Printf("failed JSON parsing: %v\n", err)
+		return "", err
 	}
 
-	containerName, ok := configMap.Data["container_name"]
-	if !ok {
-		return "", fmt.Errorf("container_name not found in ConfigMap")
-	}
+	imageAddress := gv.ModulesImages.Registry.Address
+	imagePath := gv.ModulesImages.Registry.Path
+	imageHash := gv.ModulesImages.Digests.Common.DebugContainer
+	containerName := fmt.Sprintf("%s%s@%s\n", imageAddress, imagePath, imageHash)
 
-	containerName = strings.TrimSpace(containerName)
-	if containerName == "" {
-		return "", fmt.Errorf("debug container image not found in ConfigMap")
-	}
+	// loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	// configOverrides := &clientcmd.ConfigOverrides{}
+
+	// if cmd.Flags().Lookup("kubeconfig") != nil {
+	// 	path, err := cmd.Flags().GetString("kubeconfig")
+	// 	if err == nil && path != "" {
+	// 		loadingRules.ExplicitPath = path
+	// 	}
+	// }
+
+	// kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
+	// config, err := kubeConfig.ClientConfig()
+	// if err != nil {
+	// 	return "", fmt.Errorf("failed to setup Kubernetes client: %w", err)
+	// }
+
+	// kubeCl, err := kubernetes.NewForConfig(config)
+	// if err != nil {
+	// 	return "", fmt.Errorf("failed to create Kubernetes client: %w", err)
+	// }
+
+	// ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// defer cancel()
+	// configMap, err := kubeCl.CoreV1().ConfigMaps("default").Get(ctx, "debug-container", v1.GetOptions{})
+	// if err != nil {
+	// 	return "", fmt.Errorf("failed to get configmap: %w", err)
+	// }
+
+	// containerName, ok := configMap.Data["container_name"]
+	// if !ok {
+	// 	return "", fmt.Errorf("container_name not found in ConfigMap")
+	// }
+
+	// containerName = strings.TrimSpace(containerName)
+	// if containerName == "" {
+	// 	return "", fmt.Errorf("debug container image not found in ConfigMap")
+	// }
 	return containerName, nil
 }
 
