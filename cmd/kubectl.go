@@ -29,20 +29,29 @@ type GlobalValues struct {
 	} `json:"modulesImages"`
 }
 
+const DefaultDebugImage = "ubuntu:20.04"
+
 func getDebugImage(cmd *cobra.Command) (string, error) {
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
-		return "", fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+		return "", fmt.Errorf("failed to get kubeconfig flag: %w", err)
 	}
 
 	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath)
 	if err != nil {
-		return "", fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+		return "", fmt.Errorf("failed to setup Kubernetes client: %w", err)
 	}
 
 	command := []string{"deckhouse-controller", "global", "values", "-o", "json"}
 	podName, err := utilk8s.GetDeckhousePod(kubeCl)
+	if err != nil {
+		return "", fmt.Errorf("failed to get Deckhouse pod: %w", err)
+	}
+
 	executor, err := utilk8s.ExecInPod(config, kubeCl, command, podName, "d8-system", "deckhouse")
+	if err != nil {
+		return "", fmt.Errorf("failed to create executor for pod %s: %w", podName, err)
+	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -52,60 +61,20 @@ func getDebugImage(cmd *cobra.Command) (string, error) {
 			Stdout: &stdout,
 			Stderr: &stderr,
 		}); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to execute command in pod: %w", err)
 	}
-
-	fmt.Printf("%s\n", stdout.String()) // TODO: remove it
 
 	var gv GlobalValues
 	err = json.Unmarshal([]byte(stdout.String()), &gv)
 	if err != nil {
-		fmt.Printf("failed JSON parsing: %v\n", err)
-		return "", err
+		return "", fmt.Errorf("failed to parse JSON response: %w", err)
 	}
 
 	imageAddress := gv.ModulesImages.Registry.Address
 	imagePath := gv.ModulesImages.Registry.Path
 	imageHash := gv.ModulesImages.Digests.Common.DebugContainer
-	containerName := fmt.Sprintf("%s%s@%s\n", imageAddress, imagePath, imageHash)
 
-	// loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	// configOverrides := &clientcmd.ConfigOverrides{}
-
-	// if cmd.Flags().Lookup("kubeconfig") != nil {
-	// 	path, err := cmd.Flags().GetString("kubeconfig")
-	// 	if err == nil && path != "" {
-	// 		loadingRules.ExplicitPath = path
-	// 	}
-	// }
-
-	// kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-	// config, err := kubeConfig.ClientConfig()
-	// if err != nil {
-	// 	return "", fmt.Errorf("failed to setup Kubernetes client: %w", err)
-	// }
-
-	// kubeCl, err := kubernetes.NewForConfig(config)
-	// if err != nil {
-	// 	return "", fmt.Errorf("failed to create Kubernetes client: %w", err)
-	// }
-
-	// ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	// defer cancel()
-	// configMap, err := kubeCl.CoreV1().ConfigMaps("default").Get(ctx, "debug-container", v1.GetOptions{})
-	// if err != nil {
-	// 	return "", fmt.Errorf("failed to get configmap: %w", err)
-	// }
-
-	// containerName, ok := configMap.Data["container_name"]
-	// if !ok {
-	// 	return "", fmt.Errorf("container_name not found in ConfigMap")
-	// }
-
-	// containerName = strings.TrimSpace(containerName)
-	// if containerName == "" {
-	// 	return "", fmt.Errorf("debug container image not found in ConfigMap")
-	// }
+	containerName := fmt.Sprintf("%s%s@%s", imageAddress, imagePath, imageHash)
 	return containerName, nil
 }
 
@@ -127,30 +96,35 @@ func init() {
 		if imageFlag := debugCmd.Flags().Lookup("image"); imageFlag != nil {
 			imageFlag.Usage = "Container image to use for debug container. If not specified, the platform's recommended image will be used."
 		}
-	}
 
-	rootCmd.PersistentFlags().String("kubeconfig", "", "Path to the kubeconfig file")
-
-	originalPersistentPreRunE := kubectlCmd.PersistentPreRunE
-	kubectlCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
-		if cmd.Name() == "debug" || (cmd.Parent() != nil && cmd.Parent().Name() == "debug") {
+		originalPreRunE := debugCmd.PreRunE
+		debugCmd.PreRunE = func(cmd *cobra.Command, args []string) error {
 			imageFlag := cmd.Flags().Lookup("image")
 			if imageFlag != nil && imageFlag.Value.String() == "" {
 				debugImage, err := getDebugImage(cmd)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error: cannot get debug container image from cluster: %v\n", err)
 					fmt.Fprintf(os.Stderr, "Tip: Check if KUBECONFIG is set or use --kubeconfig flag\n")
+
+					fmt.Fprintf(os.Stderr, "Using default debug container image: %s\n", DefaultDebugImage)
+					err = cmd.Flags().Set("image", DefaultDebugImage)
+					if err != nil {
+						return fmt.Errorf("Failed to set default image: %w", err)
+					}
 				} else {
 					fmt.Fprintf(os.Stderr, "Using debug container image: %s\n", debugImage)
-					cmd.Flags().Set("image", debugImage)
+					err = cmd.Flags().Set("image", debugImage)
+					if err != nil {
+						return fmt.Errorf("Failed to set debug image: %w", err)
+					}
 				}
 			}
-		}
 
-		if originalPersistentPreRunE != nil {
-			return originalPersistentPreRunE(cmd, args)
+			if originalPreRunE != nil {
+				return originalPreRunE(cmd, args)
+			}
+			return nil
 		}
-		return nil
 	}
 
 	// Based on https://github.com/kubernetes/kubernetes/blob/v1.29.3/staging/src/k8s.io/component-base/cli/run.go#L88
