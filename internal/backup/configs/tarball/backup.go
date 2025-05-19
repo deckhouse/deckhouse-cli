@@ -2,6 +2,7 @@ package tarball
 
 import (
 	"archive/tar"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"path"
@@ -14,17 +15,31 @@ import (
 )
 
 type Backup struct {
-	mu     sync.Mutex
-	writer *tar.Writer
+	mu       sync.Mutex
+	writer   *tar.Writer
+	gzwriter *gzip.Writer
 }
 
 type BackupResourcesFilter interface {
 	Matches(object runtime.Object) bool
 }
 
-func NewBackup(sink io.Writer) *Backup {
+type BackupOptions struct {
+	Compress bool
+}
+
+func NewBackup(sink io.Writer, opts BackupOptions) *Backup {
+	w := sink
+	var gzipWriter *gzip.Writer
+	if opts.Compress {
+		gzipWriter = gzip.NewWriter(w)
+		w = io.Writer(gzipWriter)
+
+	}
+
 	return &Backup{
-		writer: tar.NewWriter(sink),
+		writer:   tar.NewWriter(w),
+		gzwriter: gzipWriter,
 	}
 }
 
@@ -69,5 +84,17 @@ func (b *Backup) PutObject(object runtime.Object) error {
 }
 
 func (b *Backup) Close() error {
-	return b.writer.Close()
+	err := b.writer.Close()
+	if err != nil {
+		return err
+	}
+
+	if b.gzwriter != nil {
+		err = b.gzwriter.Close()
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
