@@ -22,6 +22,7 @@ import (
 
 	collect_debug_info "github.com/deckhouse/deckhouse-cli/internal/system/cmd/collect-debug-info"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/edit"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/logs"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module"
 	queue "github.com/deckhouse/deckhouse-cli/internal/system/cmd/queue"
 	"github.com/deckhouse/deckhouse-cli/internal/system/flags"
@@ -46,6 +47,7 @@ func NewCommand() *cobra.Command {
 		module.NewCommand(),
 		collect_debug_info.NewCommand(),
 		queue.NewCommand(),
+		logs.NewCommand(),
 	)
 
 	flags.AddPersistentFlags(systemCmd)
