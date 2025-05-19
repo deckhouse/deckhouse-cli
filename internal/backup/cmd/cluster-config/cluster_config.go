@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	gzip "github.com/deckhouse/deckhouse-cli/internal/backup/configs/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/backup/configs/configmaps"
 	"github.com/deckhouse/deckhouse-cli/internal/backup/configs/crds"
 	"github.com/deckhouse/deckhouse-cli/internal/backup/configs/roles"
@@ -47,8 +48,11 @@ func NewCommand() *cobra.Command {
 		RunE:          backupConfigs,
 	}
 
+	addFlags(clusterConfigCmd.Flags())
 	return clusterConfigCmd
 }
+
+var compress bool
 
 type BackupStage struct {
 	payload BackupFunc
@@ -130,6 +134,15 @@ func backupConfigs(cmd *cobra.Command, args []string) error {
 
 	if err = os.Rename(tarFile.Name(), args[0]); err != nil {
 		return fmt.Errorf("write tarball failed: %w", err)
+	}
+
+	if compress {
+		if err = gzip.Compress(args[0], args[0]+".gz"); err != nil {
+			return fmt.Errorf("compress failed: %w", err)
+		}
+		if err = os.Remove(args[0]); err != nil {
+			return fmt.Errorf("write tarball failed: %w", err)
+		}
 	}
 
 	return nil
