@@ -92,7 +92,7 @@ func (b *Backup) Close() error {
 	if b.gzwriter != nil {
 		err = b.gzwriter.Close()
 		if err != nil {
-			return err
+			return fmt.Errorf("write gzip trailer: %w", err)
 		}
 	}
 
