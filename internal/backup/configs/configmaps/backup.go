@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/samber/lo"
-	"github.com/samber/lo/parallel"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -25,7 +24,7 @@ func BackupConfigMaps(
 		return strings.HasPrefix(item, "d8-") || strings.HasPrefix(item, "kube-")
 	})
 
-	configmaps := parallel.Map(namespaces, func(namespace string, _ int) []runtime.Object {
+	configmaps := lo.Map(namespaces, func(namespace string, _ int) []runtime.Object {
 		list, err := kubeCl.CoreV1().ConfigMaps(namespace).List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			log.Fatalf("Failed to list configmaps from : %v", err)
