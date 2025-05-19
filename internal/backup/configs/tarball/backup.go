@@ -86,7 +86,7 @@ func (b *Backup) PutObject(object runtime.Object) error {
 func (b *Backup) Close() error {
 	err := b.writer.Close()
 	if err != nil {
-		return err
+		return fmt.Errorf("close tar writer: %w", err)
 	}
 
 	if b.gzwriter != nil {
