@@ -37,7 +37,7 @@ This command creates a snapshot various kubernetes resources.
 © Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
-	etcdCmd := &cobra.Command{
+	clusterConfigCmd := &cobra.Command{
 		Use:           "cluster-config <backup-tarball-path>",
 		Short:         "Take a snapshot of cluster configuration",
 		Long:          clusterConfigLong,
@@ -47,7 +47,7 @@ func NewCommand() *cobra.Command {
 		RunE:          backupConfigs,
 	}
 
-	return etcdCmd
+	return clusterConfigCmd
 }
 
 type BackupStage struct {
