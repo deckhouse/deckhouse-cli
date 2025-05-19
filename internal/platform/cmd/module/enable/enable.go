@@ -47,6 +47,9 @@ func NewCommand() *cobra.Command {
 }
 
 func enableModule(cmd *cobra.Command, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("module name is required")
+	}
 	moduleName := args[0]
 
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
