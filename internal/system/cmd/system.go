@@ -27,28 +27,28 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/system/flags"
 )
 
-var platformLong = templates.LongDesc(`
-Operate platform options in DKP.
+var systemLong = templates.LongDesc(`
+Operate system options in DKP.
 
 © Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
-	platformCmd := &cobra.Command{
+	systemCmd := &cobra.Command{
 		Use:     "system",
-		Short:   "Operate platform options.",
+		Short:   "Operate system options.",
 		Aliases: []string{"s"},
-		Long:    platformLong,
+		Long:    systemLong,
 		PreRunE: flags.ValidateParameters,
 	}
 
-	platformCmd.AddCommand(
+	systemCmd.AddCommand(
 		edit.NewCommand(),
 		module.NewCommand(),
 		collect_debug_info.NewCommand(),
 		queue.NewCommand(),
 	)
 
-	flags.AddPersistentFlags(platformCmd)
+	flags.AddPersistentFlags(systemCmd)
 
-	return platformCmd
+	return systemCmd
 }
