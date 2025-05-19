@@ -47,8 +47,8 @@ func NewCommand() *cobra.Command {
 }
 
 func disableModule(cmd *cobra.Command, args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("module name is required")
+	if len(args) != 1 {
+		return fmt.Errorf("this command requires exactly 1 argument: module name")
 	}
 	moduleName := args[0]
 
