@@ -23,12 +23,13 @@ import (
 	"os"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/logs/flags"
+
 	"github.com/spf13/cobra"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/logs/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
