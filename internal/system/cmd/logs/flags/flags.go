@@ -31,5 +31,5 @@ func AddFlags(flagSet *pflag.FlagSet) {
 	flagSet.Int64Var(&Tail, "tail", 100, "default value number output strings logs from Deckhouse container.")
 	flagSet.BoolVarP(&Follow, "follow", "f", false, "Specify if the logs should be streamed.")
 	flagSet.StringVar(&Since, "since", "", "Show logs newer than a relative duration like 5s, 2m, or 1h.")
-	flagSet.StringVar(&SinceTime, "since-time", "", "Show logs after a specific RFC3339 timestamp, e.g. 2025-05-19T12:00:00")
+	flagSet.StringVar(&SinceTime, "since-time", "", "Show logs after a specific timestamp, e.g. --since-time='2025-05-19 12:00:00'")
 }
