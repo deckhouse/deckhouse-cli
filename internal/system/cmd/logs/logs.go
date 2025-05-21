@@ -29,7 +29,6 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 	"k8s.io/utils/ptr"
 
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/logs/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -45,10 +44,10 @@ func NewCommand() *cobra.Command {
 		Long:          listLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		PreRunE:       flags.ValidateParameters,
+		PreRunE:       ValidateParameters,
 		RunE:          getLogDeckhouse,
 	}
-	flags.AddFlags(logCmd.Flags())
+	AddFlags(logCmd.Flags())
 	return logCmd
 }
 
@@ -71,17 +70,17 @@ func getLogDeckhouse(cmd *cobra.Command, _ []string) error {
 	podName, err := utilk8s.GetDeckhousePod(kubeCl)
 	logOptions := &v1.PodLogOptions{
 		Container: "deckhouse",
-		Follow:    flags.Follow,
+		Follow:    Follow,
 	}
-	if flags.Tail > 0 {
-		logOptions.TailLines = &flags.Tail
+	if Tail > 0 {
+		logOptions.TailLines = &Tail
 	}
-	if flags.Since != "" {
-		duration, _ := time.ParseDuration(flags.Since)
+	if Since != "" {
+		duration, _ := time.ParseDuration(Since)
 		logOptions.SinceSeconds = ptr.To(int64(duration.Seconds()))
 	}
-	if flags.SinceTime != "" {
-		t, _ := time.Parse(time.DateTime, flags.SinceTime)
+	if SinceTime != "" {
+		t, _ := time.Parse(time.DateTime, SinceTime)
 		logOptions.SinceTime = &metav1.Time{Time: t}
 	}
 
