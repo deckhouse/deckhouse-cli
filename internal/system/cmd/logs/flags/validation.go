@@ -24,22 +24,24 @@ import (
 )
 
 func ValidateParameters(cmd *cobra.Command, args []string) error {
-	if Tail < 0 {
-		return fmt.Errorf("Invalid --tail must be a non-negative value.")
+	if Tail < -1 {
+		return fmt.Errorf("Invalid --tail must be greater than or equal to -1.")
 	}
-
 	if Since != "" {
 		_, err := time.ParseDuration(Since)
 		if err != nil {
 			return fmt.Errorf("Invalid --since value: %v\n", err)
 		}
 	}
-
 	if SinceTime != "" {
 		_, err := time.Parse(time.DateTime, SinceTime)
 		if err != nil {
 			return fmt.Errorf("Invalid --since-time value: %v\n", err)
 		}
 	}
+	if Since != "" && SinceTime != "" {
+		return fmt.Errorf("Only one of --since-time or --since may be used.")
+	}
+
 	return nil
 }

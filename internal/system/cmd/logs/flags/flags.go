@@ -28,8 +28,8 @@ var (
 )
 
 func AddFlags(flagSet *pflag.FlagSet) {
-	flagSet.Int64Var(&Tail, "tail", 100, "default value number output strings logs from Deckhouse container.")
+	flagSet.Int64Var(&Tail, "tail", -1, "Limit the number of lines in the output to the last N lines. Defaults to -1 with no limit.")
 	flagSet.BoolVarP(&Follow, "follow", "f", false, "Specify if the logs should be streamed.")
-	flagSet.StringVar(&Since, "since", "", "Show logs newer than a relative duration like 5s, 2m, or 1h.")
-	flagSet.StringVar(&SinceTime, "since-time", "", "Show logs after a specific timestamp, e.g. --since-time='2025-05-19 12:00:00'")
+	flagSet.StringVar(&Since, "since", "", "Show logs newer than a relative duration like 5s, 2m, or 1h. Only one of since-time / since may be used.")
+	flagSet.StringVar(&SinceTime, "since-time", "", "Show logs after a specific timestamp, e.g. --since-time='2025-05-19 12:00:00'. Only one of since-time / since may be used.")
 }

@@ -23,11 +23,11 @@ import (
 	"os"
 	"time"
 
-
 	"github.com/spf13/cobra"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubectl/pkg/util/templates"
+	"k8s.io/utils/ptr"
 
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/logs/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
@@ -78,7 +78,7 @@ func getLogDeckhouse(cmd *cobra.Command, _ []string) error {
 	}
 	if flags.Since != "" {
 		duration, _ := time.ParseDuration(flags.Since)
-		logOptions.SinceSeconds = To(int64(duration.Seconds()))
+		logOptions.SinceSeconds = ptr.To(int64(duration.Seconds()))
 	}
 	if flags.SinceTime != "" {
 		t, _ := time.Parse(time.DateTime, flags.SinceTime)
@@ -98,8 +98,4 @@ func getLogDeckhouse(cmd *cobra.Command, _ []string) error {
 			"Error reading logs: %v\n", err)
 	}
 	return nil
-}
-
-func To[T any](v T) *T {
-	return &v
 }
