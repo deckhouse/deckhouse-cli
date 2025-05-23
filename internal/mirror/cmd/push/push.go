@@ -221,7 +221,7 @@ func validateRegistryAccess(ctx context.Context, pushParams *params.PushParams) 
 	}
 
 	accessValidator := validation.NewRemoteRegistryAccessValidator()
-	err := accessValidator.ValidateWriteAccessForRepo(ctx, path.Join(pushParams.RegistryHost, pushParams.RegistryPath, pushParams.ModulesPathSuffix), opts...)
+	err := accessValidator.ValidateWriteAccessForRepo(ctx, path.Join(pushParams.RegistryHost, pushParams.RegistryPath), opts...)
 	if err != nil {
 		return err
 	}
