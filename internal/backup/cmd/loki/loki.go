@@ -302,8 +302,6 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 	}
 	defer resp.Body.Close()
 
-	close(stopChan)
-
 	if strings.Contains(fullCommand, "series") {
 		err = json.NewDecoder(resp.Body).Decode(&series)
 		if err != nil {
@@ -317,6 +315,7 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 		}
 		return &queryRange, nil, nil
 	}
+	close(stopChan)
 
 	return nil, nil, nil
 }
