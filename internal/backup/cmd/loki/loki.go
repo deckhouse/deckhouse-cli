@@ -17,12 +17,14 @@ limitations under the License.
 package loki
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"time"
@@ -30,7 +32,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/client-go/tools/portforward"
+	"k8s.io/client-go/transport/spdy"
 
 	"github.com/deckhouse/deckhouse-cli/internal/system/flags"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
@@ -66,7 +69,8 @@ func NewCommand() *cobra.Command {
 }
 
 const (
-	lokiURL            = "https://loki.d8-monitoring:3100/loki/api/v1"
+	//lokiURL            = "https://loki.d8-monitoring:3100/loki/api/v1"
+	lokiURL            = "https://localhost:3101/loki/api/v1"
 	namespaceDeckhouse = "d8-system"
 	containerName      = "deckhouse"
 	namespaceLoki      = "d8-monitoring"
@@ -80,6 +84,8 @@ var (
 	limitFlag      string
 	chunkDaysFlag  int
 	Logger         = log.NewSLogger(slog.LevelError)
+	series         SeriesApi
+	queryRange     QueryRange
 )
 
 type QueryRange struct {
@@ -95,9 +101,9 @@ type SeriesApi struct {
 }
 
 type CurlRequest struct {
-	BaseURL   string
-	Params    map[string]string
-	AuthToken string
+	BaseURL string
+	Params  map[string]string
+	//AuthToken string
 }
 
 func backupLoki(cmd *cobra.Command, _ []string) error {
@@ -116,54 +122,58 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	token, err := getTokenLokiSa(kubeCl)
-	if err != nil {
-		return fmt.Errorf("error get token from secret for loki api: %w", err)
-	}
+	//token, err := getTokenLokiSa(kubeCl)
+	//if err != nil {
+	//	return fmt.Errorf("error get token from secret for loki api: %w", err)
+	//}
 
 	fmt.Println("Getting logs from Loki api...")
 
-	endDumpTimestamp, err := getEndTimestamp(config, kubeCl, token)
+	//endDumpTimestamp, err := getEndTimestamp(config, kubeCl, token)
+	endDumpTimestamp, err := getEndTimestamp(config, kubeCl)
 	if err != nil {
 		return fmt.Errorf("error get end timestamp for loki: %w", err)
 	}
-	chunkSize := time.Duration(chunkDaysFlag) * 24 * time.Hour
-	for chunkEnd := endDumpTimestamp; chunkEnd > 0; chunkEnd -= chunkSize.Nanoseconds() {
-		chunkStart := chunkEnd - chunkSize.Nanoseconds()
-		if startTimestamp != "" {
-			chunkStart, err = getStartTimestamp()
-		}
-		curlParamStreamList := CurlRequest{
-			BaseURL: "series",
-			Params: map[string]string{
-				"end":   strconv.FormatInt(chunkEnd, 10),
-				"start": strconv.FormatInt(chunkStart, 10),
-			},
-			AuthToken: token,
-		}
 
-		streamListDumpCurl := curlParamStreamList.GenerateCurlCommand()
-		_, streamListDumpJson, err := getLogWithRetry(config, kubeCl, streamListDumpCurl)
-		if err != nil {
-			return fmt.Errorf("error get stream list JSON from loki: %w", err)
-		}
-
-		if len(streamListDumpJson.Data) == 0 {
-			fmt.Printf("No more streams.\nStop...")
-			break
-		}
-
-		for _, r := range streamListDumpJson.Data {
-			err := fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, r, config, kubeCl)
-			if err != nil {
-				return fmt.Errorf("error get logs from loki: %w", err)
-			}
-		}
-	}
+	fmt.Printf("full url api query is: %s\n", endDumpTimestamp)
+	//chunkSize := time.Duration(chunkDaysFlag) * 24 * time.Hour
+	//for chunkEnd := endDumpTimestamp; chunkEnd > 0; chunkEnd -= chunkSize.Nanoseconds() {
+	//	chunkStart := chunkEnd - chunkSize.Nanoseconds()
+	//	if startTimestamp != "" {
+	//		chunkStart, err = getStartTimestamp()
+	//	}
+	//	curlParamStreamList := CurlRequest{
+	//		BaseURL: "series",
+	//		Params: map[string]string{
+	//			"end":   strconv.FormatInt(chunkEnd, 10),
+	//			"start": strconv.FormatInt(chunkStart, 10),
+	//		},
+	//		//AuthToken: token,
+	//	}
+	//	//
+	//	streamListDumpCurl := curlParamStreamList.GenerateCurlCommand()
+	//	_, streamListDumpJson, err := getLogWithRetry(config, kubeCl, streamListDumpCurl)
+	//	if err != nil {
+	//		return fmt.Errorf("error get stream list JSON from loki: %w", err)
+	//	}
+	//
+	//	if len(streamListDumpJson.Data) == 0 {
+	//		fmt.Printf("No more streams.\nStop...")
+	//		break
+	//	}
+	//
+	//	for _, r := range streamListDumpJson.Data {
+	//		//err := fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, r, config, kubeCl)
+	//		err := fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, r, config, kubeCl)
+	//		if err != nil {
+	//			return fmt.Errorf("error get logs from loki: %w", err)
+	//		}
+	//	}
+	//}
 	return nil
 }
 
-func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map[string]string, config *rest.Config, kubeCl kubernetes.Interface) error {
+func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, r map[string]string, config *rest.Config, kubeCl kubernetes.Interface) error {
 	var filters []string
 	for key, value := range r {
 		filters = append(filters, fmt.Sprintf(`%s=%q`, key, value))
@@ -181,7 +191,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 				"limit":     limitFlag,
 				"direction": "BACKWARD",
 			},
-			AuthToken: token,
+			//AuthToken: token,
 		}
 		dumpLogCurl := curlParamDumpLog.GenerateCurlCommand()
 		dumpLogCurlJson, _, err := getLogWithRetry(config, kubeCl, dumpLogCurl)
@@ -214,70 +224,103 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 	return nil
 }
 
-func (c *CurlRequest) GenerateCurlCommand() []string {
-	curlParts := append([]string{"curl", "--insecure", "-v"})
-	curlParts = append(curlParts, fmt.Sprintf("%s/%s", lokiURL, c.BaseURL))
+func (c *CurlRequest) GenerateCurlCommand() string {
+	values := url.Values{}
 	for key, value := range c.Params {
 		if value != "" {
-			curlParts = append(curlParts, []string{"--data-urlencode", fmt.Sprintf("%s=%s", key, value)}...)
+			values.Set(key, value)
 		}
 	}
-	if c.AuthToken != "" {
-		curlParts = append(curlParts, []string{"-H", fmt.Sprintf("Authorization: Bearer %s", c.AuthToken)}...)
-	}
-	return curlParts
+	return c.BaseURL + "?" + values.Encode()
+	//curlParts := append([]string{"curl", "--insecure", "-v"})
+	//curlParts := append([]string{fmt.Sprintf("%s/%s?", lokiURL, c.BaseURL)})
+	//for key, value := range c.Params {
+	//	if value != "" {
+	//		curlParts = append(curlParts, []string{fmt.Sprintf("%s=%s", key, value)}...)
+	//	}
+	//}
+	//if c.AuthToken != "" {
+	//	curlParts = append(curlParts, []string{"-H", fmt.Sprintf("Authorization: Bearer %s", c.AuthToken)}...)
+	//}
+	//return curlParts
 }
 
-func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullCommand []string) (*QueryRange, *SeriesApi, error) {
-	for _, apiUrlLoki := range fullCommand {
-		var stdout, stderr bytes.Buffer
+func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullCommand string) (*QueryRange, *SeriesApi, error) {
+	//for _, apiUrlLoki := range fullCommand {
+	//var stdout, stderr bytes.Buffer
 
-		podName, err := utilk8s.GetDeckhousePod(kubeCl)
-		if err != nil {
-			return nil, nil, err
-		}
-		executor, err := utilk8s.ExecInPod(config, kubeCl, fullCommand, podName, namespaceDeckhouse, containerName)
-		if err != nil {
-			return nil, nil, err
-		}
-		if err = executor.StreamWithContext(
-			context.Background(),
-			remotecommand.StreamOptions{
-				Stdout: &stdout,
-				Stderr: &stderr,
-			}); err != nil {
-			fmt.Fprintf(os.Stderr, strings.Join(fullCommand, " "))
-			return nil, nil, err
-		}
+	//podName, err := utilk8s.GetDeckhousePod(kubeCl)
+	//if err != nil {
+	//	return nil, nil, err
+	//}
+	//executor, err := utilk8s.ExecInPod(config, kubeCl, fullCommand, podName, namespaceDeckhouse, containerName)
+	//if err != nil {
+	//	return nil, nil, err
+	//}
+	//if err = executor.StreamWithContext(
+	//	context.Background(),
+	//	remotecommand.StreamOptions{
+	//		Stdout: &stdout,
+	//		Stderr: &stderr,
+	//	}); err != nil {
+	//	fmt.Fprintf(os.Stderr, strings.Join(fullCommand, " "))
+	//	return nil, nil, err
+	//}
 
-		if apiUrlLoki == fmt.Sprintf("%s/series", lokiURL) {
-			var series SeriesApi
-			if !json.Valid(stdout.Bytes()) {
-				return nil, nil, fmt.Errorf("error response from loki api: %s", stdout.String())
-			}
-			err = json.Unmarshal(stdout.Bytes(), &series)
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed unmarshal loki response: %w", err)
-			}
-			return nil, &series, nil
-		} else if apiUrlLoki == fmt.Sprintf("%s/query_range", lokiURL) {
-			var queryRange QueryRange
-			if !json.Valid(stdout.Bytes()) {
-				return nil, nil, fmt.Errorf("error response from loki api: %s", stdout.String())
-			}
-			err = json.Unmarshal(stdout.Bytes(), &queryRange)
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed unmarshal loki response: %w", err)
-			}
-			return &queryRange, nil, nil
-		}
-		stdout.Reset()
+	pods, err := kubeCl.CoreV1().Pods("d8-monitoring").List(context.TODO(), metav1.ListOptions{
+		LabelSelector: "app=loki",
+	})
+	if err != nil {
+		return nil, nil, err
 	}
+	if len(pods.Items) == 0 {
+		panic("No pods found with label app=loki")
+	}
+	pod := pods.Items[0]
+	// Set up port-forwarding
+	stopChan, readyChan := make(chan struct{}, 1), make(chan struct{}, 1)
+	defer close(stopChan)
 
+	go func() {
+		err := forwardPort(config, "default", pod.Name, "3101", "3101", stopChan, readyChan)
+		if err != nil {
+			panic(err)
+		}
+	}()
+
+	<-readyChan
+	fmt.Println("Port-forwarding established. Access Loki at http://localhost:3101")
+
+	// Wait until interrupted
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	<-c
+	fmt.Println("Shutting down...")
+
+	resp, err := http.Get(fullCommand)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Request failed: %v\n", err)
+	}
+	defer resp.Body.Close()
+
+	if strings.Contains(fullCommand, "series") {
+		err = json.NewDecoder(resp.Body).Decode(&series)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed unmarshal loki response: %w", err)
+		}
+		return nil, &series, nil
+	} else if strings.Contains(fullCommand, "query_range") {
+		err = json.NewDecoder(resp.Body).Decode(&queryRange)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed unmarshal loki response: %w", err)
+		}
+		return &queryRange, nil, nil
+	}
 	return nil, nil, nil
 }
 
-func getEndTimestamp(config *rest.Config, kubeCl kubernetes.Interface, token string) (int64, error) {
+// func getEndTimestamp(config *rest.Config, kubeCl kubernetes.Interface, token string) (int64, error) {
+func getEndTimestamp(config *rest.Config, kubeCl kubernetes.Interface) (int64, error) {
 	if endTimestamp == "" {
 		endTimestampCurlParam := CurlRequest{
 			BaseURL: "query_range",
@@ -286,9 +329,10 @@ func getEndTimestamp(config *rest.Config, kubeCl kubernetes.Interface, token str
 				"limit":     "1",
 				"direction": "BACKWARD",
 			},
-			AuthToken: token,
+			//AuthToken: token,
 		}
 		endTimestampCurl := endTimestampCurlParam.GenerateCurlCommand()
+		fmt.Printf("full url api query is: %s\n", endTimestampCurl)
 		endTimestampJson, _, err := getLogWithRetry(config, kubeCl, endTimestampCurl)
 		if err != nil {
 			return 0, fmt.Errorf("error get latest timestamp JSON from loki: %w", err)
@@ -332,7 +376,7 @@ func getTokenLokiSa(kubeCl kubernetes.Interface) (string, error) {
 	return string(tokenBase64), err
 }
 
-func getLogWithRetry(config *rest.Config, kubeCl kubernetes.Interface, fullCommand []string) (*QueryRange, *SeriesApi, error) {
+func getLogWithRetry(config *rest.Config, kubeCl kubernetes.Interface, fullCommand string) (*QueryRange, *SeriesApi, error) {
 
 	var (
 		err            error
@@ -353,4 +397,30 @@ func getLogWithRetry(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 		return nil, nil, fmt.Errorf("error get JSON from loki: %w", err)
 	}
 	return QueryRangeDump, SeriesApiDump, nil
+}
+
+func forwardPort(config *rest.Config, namespace, podName, localPort, podPort string, stopChan, readyChan chan struct{}) error {
+	path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", namespace, podName)
+	hostIP := strings.TrimLeft(config.Host, "htps:/")
+
+	transport, upgrader, err := spdy.RoundTripperFor(config)
+	if err != nil {
+		return err
+	}
+
+	url := &url.URL{
+		Scheme: "https",
+		Path:   path,
+		Host:   hostIP,
+	}
+
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", url)
+
+	ports := []string{fmt.Sprintf("%s:%s", localPort, podPort)}
+	pf, err := portforward.New(dialer, ports, stopChan, readyChan, os.Stdout, os.Stderr)
+	if err != nil {
+		return err
+	}
+
+	return pf.ForwardPorts()
 }
