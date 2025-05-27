@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
 	"time"
@@ -291,17 +290,19 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 	<-readyChan
 	fmt.Println("Port-forwarding established. Access Loki at http://localhost:3101")
 
-	// Wait until interrupted
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-	<-c
-	fmt.Println("Shutting down...")
+	//// Wait until interrupted
+	//c := make(chan os.Signal, 1)
+	//signal.Notify(c, os.Interrupt)
+	//<-c
+	//fmt.Println("Shutting down...")
 
 	resp, err := http.Get(fullCommand)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Request failed: %v\n", err)
 	}
 	defer resp.Body.Close()
+
+	close(stopChan)
 
 	if strings.Contains(fullCommand, "series") {
 		err = json.NewDecoder(resp.Body).Decode(&series)
@@ -316,6 +317,7 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 		}
 		return &queryRange, nil, nil
 	}
+
 	return nil, nil, nil
 }
 
