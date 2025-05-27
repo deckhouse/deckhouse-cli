@@ -70,7 +70,7 @@ func NewCommand() *cobra.Command {
 
 const (
 	//lokiURL            = "https://loki.d8-monitoring:3100/loki/api/v1"
-	lokiURL            = "https://localhost:3101/loki/api/v1"
+	lokiURL            = "http://localhost:3101/loki/api/v1"
 	namespaceDeckhouse = "d8-system"
 	containerName      = "deckhouse"
 	namespaceLoki      = "d8-monitoring"
@@ -231,7 +231,7 @@ func (c *CurlRequest) GenerateCurlCommand() string {
 			values.Set(key, value)
 		}
 	}
-	return c.BaseURL + "?" + values.Encode()
+	return lokiURL + c.BaseURL + "?" + values.Encode()
 	//curlParts := append([]string{"curl", "--insecure", "-v"})
 	//curlParts := append([]string{fmt.Sprintf("%s/%s?", lokiURL, c.BaseURL)})
 	//for key, value := range c.Params {
@@ -282,7 +282,7 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 	defer close(stopChan)
 
 	go func() {
-		err := forwardPort(config, "default", pod.Name, "3101", "3101", stopChan, readyChan)
+		err := forwardPort(config, "d8-monitoring", pod.Name, "3101", "3101", stopChan, readyChan)
 		if err != nil {
 			panic(err)
 		}
