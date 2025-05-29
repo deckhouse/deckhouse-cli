@@ -38,6 +38,7 @@ type CommandInfo struct {
 type FlagInfo struct {
 	Description string `json:"description"`
 	Short       string `json:"shorthand"`
+	Global      bool   `json:"global"`
 }
 
 func init() {
@@ -62,8 +63,9 @@ func helpJson(cmd *cobra.Command, _ []string) error {
 
 func extractCommands(cmd *cobra.Command) CommandInfo {
 	flags := make(map[string]FlagInfo)
-	collectFlags(cmd.Flags(), flags)
-	collectFlags(cmd.PersistentFlags(), flags)
+
+	collectFlags(cmd.InheritedFlags(), flags, true)
+	collectFlags(cmd.LocalFlags(), flags, false)
 
 	if cmd.Use == "d8" {
 		flagSet := flag.NewFlagSet("globalFlags", flag.ExitOnError)
@@ -79,17 +81,19 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 				Description: description,
 				Short:       shorthand,
 			}
-			collectFlags(cmd.Flags(), flags)
+			collectFlags(cmd.Flags(), flags, false)
 		}
 	}
 
 	var subcommands []CommandInfo
 	for _, subCmd := range cmd.Commands() {
-		subcommands = append(subcommands, extractCommands(subCmd))
+		if !subCmd.Hidden {
+			subcommands = append(subcommands, extractCommands(subCmd))
+		}
 	}
 
 	return CommandInfo{
-		Name:        cmd.Use,
+		Name:        cmd.Name(),
 		Description: cmd.Short,
 		Version:     cmd.Version,
 		Flags:       flags,
@@ -98,12 +102,13 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	}
 }
 
-func collectFlags(flagSet *pflag.FlagSet, flags map[string]FlagInfo) {
+func collectFlags(flagSet *pflag.FlagSet, flags map[string]FlagInfo, isGlobal bool) {
 	if flagSet != nil {
 		flagSet.VisitAll(func(f *pflag.Flag) {
 			flags[f.Name] = FlagInfo{
 				Description: f.Usage,
 				Short:       f.Shorthand,
+				Global:      isGlobal,
 			}
 		})
 	}
