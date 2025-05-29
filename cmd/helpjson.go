@@ -93,7 +93,7 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	}
 
 	return CommandInfo{
-		Name:        cmd.Name(),
+		Name:        cmd.Use,
 		Description: cmd.Short,
 		Version:     cmd.Version,
 		Flags:       flags,
