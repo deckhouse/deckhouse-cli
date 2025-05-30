@@ -35,9 +35,11 @@ Operate system options in DKP.
 
 func NewCommand() *cobra.Command {
 	systemCmd := &cobra.Command{
-		Use:     "system",
-		Short:   "Operate system options.",
-		Aliases: []string{"s"},
+		Use:   "system",
+		Short: "Operate system options.",
+		// TODO(mvasl) p and platform are old names of this commands and are left as aliases for backwards compatibility
+		//  with our docs until we update them to use s or system.
+		Aliases: []string{"s", "p", "platform"},
 		Long:    systemLong,
 		PreRunE: flags.ValidateParameters,
 	}
