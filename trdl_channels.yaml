@@ -1,7 +1,7 @@
 groups:
-- name: "0"
-  channels:
-  - name: ea
-    version: 0.13.1
-  - name: stable
-    version: 0.12.1
+  - name: "0"
+    channels:
+      - name: ea
+        version: 0.13.1
+      - name: stable
+        version: 0.13.1
