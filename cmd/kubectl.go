@@ -18,15 +18,14 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
 	kubecmd "k8s.io/kubectl/pkg/cmd"
@@ -38,54 +37,31 @@ const (
 	cmImageKey  = "image"
 )
 
-func getKubeConfig(kubeconfigPath string) (*rest.Config, error) {
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-
-	if kubeconfigPath != "" {
-		loadingRules.ExplicitPath = kubeconfigPath
-	}
-
-	configOverrides := &clientcmd.ConfigOverrides{}
-	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-
-	config, err := kubeConfig.ClientConfig()
-	if err != nil {
-		return nil, fmt.Errorf("failed to load kubernetes config: %w", err)
-	}
-
-	return config, nil
-}
-
 func getDebugImage(cmd *cobra.Command) (string, error) {
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
 		return "", fmt.Errorf("failed to get kubeconfig flag: %w", err)
 	}
 
-	config, err := getKubeConfig(kubeconfigPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to setup Kubernetes client: %w", err)
-	}
-
-	kubeCl, err := kubernetes.NewForConfig(config)
+	_, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, "")
 	if err != nil {
 		return "", fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
 
+	var ErrGenericImageFetch = errors.New("An error occurred during execution. Use the '--image' flag to run your image")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	configMap, err := kubeCl.CoreV1().ConfigMaps(cmNamespace).Get(ctx, cmName, v1.GetOptions{})
 	if err != nil {
-		return "", fmt.Errorf("failed to get ConfigMap %s/%s: %w", cmNamespace, cmName, err)
+		return "", ErrGenericImageFetch
 	}
 
 	imageName, ok := configMap.Data[cmImageKey]
 	if !ok {
-		return "", fmt.Errorf("key '%s' not found in ConfigMap %s/%s", cmImageKey, cmNamespace, cmName)
+		return "", ErrGenericImageFetch
 	}
-
 	if imageName == "" {
-		return "", fmt.Errorf("image name is empty in ConfigMap %s/%s", cmNamespace, cmName)
+		return "", ErrGenericImageFetch
 	}
 
 	return imageName, nil
@@ -132,7 +108,7 @@ func init() {
 		if originalPersistentPreRunE != nil {
 			return originalPersistentPreRunE(cmd, args)
 		}
-		return nil
+		panic("originalPersistentPreRunE is nil, cannot proceed")
 	}
 
 	// Based on https://github.com/kubernetes/kubernetes/blob/v1.29.3/staging/src/k8s.io/component-base/cli/run.go#L88
