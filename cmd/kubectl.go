@@ -18,14 +18,14 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
@@ -38,54 +38,47 @@ const (
 	cmImageKey  = "image"
 )
 
-func getKubeConfig(kubeconfigPath string) (*rest.Config, error) {
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-
-	if kubeconfigPath != "" {
-		loadingRules.ExplicitPath = kubeconfigPath
-	}
-
-	configOverrides := &clientcmd.ConfigOverrides{}
-	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-
-	config, err := kubeConfig.ClientConfig()
-	if err != nil {
-		return nil, fmt.Errorf("failed to load kubernetes config: %w", err)
-	}
-
-	return config, nil
-}
-
 func getDebugImage(cmd *cobra.Command) (string, error) {
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	configOverrides := &clientcmd.ConfigOverrides{}
+
+	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		loadingRules,
+		configOverrides,
+	)
+
+	rawConfig, err := kubeConfig.RawConfig()
 	if err != nil {
-		return "", fmt.Errorf("failed to get kubeconfig flag: %w", err)
+		return "", fmt.Errorf("failed to get raw kubeconfig: %w", err)
 	}
 
-	config, err := getKubeConfig(kubeconfigPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to setup Kubernetes client: %w", err)
+	currentContext := rawConfig.CurrentContext
+	if currentContext == "" {
+		return "", errors.New("no current context in kubeconfig")
 	}
 
-	kubeCl, err := kubernetes.NewForConfig(config)
+	kubeconfigPath := ""
+	if len(loadingRules.Precedence) > 0 {
+		kubeconfigPath = loadingRules.Precedence[0]
+	}
+
+	_, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, currentContext)
 	if err != nil {
 		return "", fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
 
+	var ErrGenericImageFetch = errors.New("Cannot get debug image from cluster, please specify --image explicitly")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
 	configMap, err := kubeCl.CoreV1().ConfigMaps(cmNamespace).Get(ctx, cmName, v1.GetOptions{})
 	if err != nil {
-		return "", fmt.Errorf("failed to get ConfigMap %s/%s: %w", cmNamespace, cmName, err)
+		return "", ErrGenericImageFetch
 	}
 
 	imageName, ok := configMap.Data[cmImageKey]
-	if !ok {
-		return "", fmt.Errorf("key '%s' not found in ConfigMap %s/%s", cmImageKey, cmNamespace, cmName)
-	}
-
-	if imageName == "" {
-		return "", fmt.Errorf("image name is empty in ConfigMap %s/%s", cmNamespace, cmName)
+	if !ok || imageName == "" {
+		return "", ErrGenericImageFetch
 	}
 
 	return imageName, nil
@@ -111,8 +104,6 @@ func init() {
 		}
 	}
 
-	rootCmd.PersistentFlags().String("kubeconfig", "", "Path to the kubeconfig file")
-
 	originalPersistentPreRunE := kubectlCmd.PersistentPreRunE
 	kubectlCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		if cmd.Name() == "debug" || (cmd.Parent() != nil && cmd.Parent().Name() == "debug") {
@@ -132,7 +123,7 @@ func init() {
 		if originalPersistentPreRunE != nil {
 			return originalPersistentPreRunE(cmd, args)
 		}
-		return nil
+		panic("originalPersistentPreRunE is nil, cannot proceed")
 	}
 
 	// Based on https://github.com/kubernetes/kubernetes/blob/v1.29.3/staging/src/k8s.io/component-base/cli/run.go#L88
