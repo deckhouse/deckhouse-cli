@@ -43,7 +43,15 @@ func getDebugImage(cmd *cobra.Command) (string, error) {
 		return "", fmt.Errorf("failed to get kubeconfig flag: %w", err)
 	}
 
-	_, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, "")
+	contextName, err := cmd.Flags().GetString("context")
+	if err != nil {
+		return "", fmt.Errorf("failed to get kubeconfig flag: %w", err)
+	}
+
+	fmt.Fprintf(os.Stdout, "kubeconfigPath: %s\n", kubeconfigPath)
+	fmt.Fprintf(os.Stdout, "contextName: %s\n", contextName)
+
+	_, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
 	if err != nil {
 		return "", fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
