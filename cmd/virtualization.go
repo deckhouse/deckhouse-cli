@@ -21,11 +21,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/deckhouse/deckhouse-cli/internal/virtualization"
+	"github.com/deckhouse/virtualization/src/cli/pkg/command"
 )
 
 func init() {
-	virtualizationCmd, _ := virtualization.NewCommand(fmt.Sprintf("%s v", filepath.Base(os.Args[0])))
+	virtualizationCmd, _ := command.NewCommand(fmt.Sprintf("%s v", filepath.Base(os.Args[0])))
 	virtualizationCmd.Use = "v"
 	virtualizationCmd.Aliases = []string{"virtualization"}
 

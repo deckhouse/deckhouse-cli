@@ -6,15 +6,13 @@ toolchain go1.23.7
 
 require (
 	github.com/Masterminds/semver/v3 v3.3.0
-	github.com/deckhouse/virtualization/api v0.0.0-20241205091855-6f05a202ade8
+	github.com/deckhouse/virtualization/src/cli v0.0.0-20250617111832-70fdc2799bf3
 	github.com/google/go-containerregistry v0.20.0
-	github.com/gorilla/websocket v1.5.3
 	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/hashicorp/vault v1.14.8
 	github.com/int128/kubelogin v1.28.0
 	github.com/pkg/errors v0.9.1
-	github.com/povsister/scp v0.0.0-20210427074412-33febfd9f13e
 	github.com/samber/lo v1.47.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.8.1
@@ -26,17 +24,13 @@ require (
 	github.com/werf/werf/v2 v2.10.1-0.20240806161101-2bc58b7bad1c
 	gitlab.com/greyxor/slogor v1.2.11
 	go.cypherpunks.ru/gogost/v5 v5.13.0
-	golang.org/x/crypto v0.36.0
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
-	golang.org/x/sys v0.31.0
 	golang.org/x/term v0.30.0
-	golang.org/x/text v0.23.0
 	k8s.io/api v0.32.2
 	k8s.io/apiextensions-apiserver v0.29.3
 	k8s.io/apimachinery v0.32.2
 	k8s.io/client-go v0.32.2
 	k8s.io/component-base v0.29.3
-	k8s.io/klog/v2 v2.130.1
 	k8s.io/kubectl v0.29.3
 	k8s.io/utils v0.0.0-20241210054802-24370beab758
 	sigs.k8s.io/yaml v1.4.0
@@ -157,6 +151,7 @@ require (
 	github.com/cyphar/filepath-securejoin v0.3.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/daviddengcn/go-colortext v1.0.0 // indirect
+	github.com/deckhouse/virtualization/api v0.15.0 // indirect
 	github.com/deislabs/oras v1.1.0 // indirect
 	github.com/denisenkom/go-mssqldb v0.12.2 // indirect
 	github.com/denverdino/aliyungo v0.0.0-20190125010748-a747050bb1ba // indirect
@@ -254,6 +249,7 @@ require (
 	github.com/gookit/color v1.5.4 // indirect
 	github.com/gophercloud/gophercloud v0.1.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/gosuri/uitable v0.0.4 // indirect
 	github.com/gregjones/httpcache v0.0.0-20190611155906-901d90724c79 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0 // indirect
@@ -447,6 +443,7 @@ require (
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/posener/complete v1.2.3 // indirect
+	github.com/povsister/scp v0.0.0-20250504051308-e467f71ea63c // indirect
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect
 	github.com/pquerna/otp v1.2.1-0.20191009055518-468c2dd2b58d // indirect
 	github.com/proglottis/gpgme v0.1.3 // indirect
@@ -551,10 +548,13 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
+	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/mod v0.21.0 // indirect
 	golang.org/x/net v0.38.0 // indirect
 	golang.org/x/oauth2 v0.25.0 // indirect
 	golang.org/x/sync v0.12.0 // indirect
+	golang.org/x/sys v0.31.0 // indirect
+	golang.org/x/text v0.23.0 // indirect
 	golang.org/x/time v0.9.0 // indirect
 	golang.org/x/tools v0.26.0 // indirect
 	google.golang.org/api v0.219.0 // indirect
@@ -577,6 +577,7 @@ require (
 	k8s.io/cli-runtime v0.29.3 // indirect
 	k8s.io/component-helpers v0.29.3 // indirect
 	k8s.io/klog v1.0.0 // indirect
+	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20241105132330-32ad38e42d3f // indirect
 	k8s.io/metrics v0.29.3 // indirect
 	kubevirt.io/api v1.2.0 // indirect
