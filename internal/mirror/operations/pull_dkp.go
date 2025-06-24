@@ -69,7 +69,7 @@ func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string)
 	// We should not generate deckhousereleases.yaml manifest for tag-based pulls
 	if pullParams.DeckhouseTag == "" {
 		if err = generateDeckhouseReleaseManifests(pullParams, tagsToMirror, imageLayouts, logger); err != nil {
-			return err
+			logger.WarnLn(err.Error())
 		}
 	}
 
