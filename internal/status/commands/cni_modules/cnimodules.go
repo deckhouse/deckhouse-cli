@@ -84,11 +84,9 @@ func CNIModuleProcessing(item map[string]interface{}) (CNIModule, bool) {
         conditionType, _ := conditionMap["type"].(string)
         status, _ := conditionMap["status"].(string)
         if conditionType == constant.ModuleConditionEnabledByModuleConfig || conditionType == constant.ModuleConditionEnabledByModuleManager {
-//        if conditionType == "EnabledByModuleConfig" || conditionType == "EnabledByModuleManager" {
             enabled = status
         }
         if conditionType == constant.ModuleConditionIsReady {
-//        if conditionType == "IsReady" {
             ready = status
         }
     }
