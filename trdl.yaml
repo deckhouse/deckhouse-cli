@@ -1,4 +1,4 @@
-dockerImage: registry.deckhouse.io/base_images/golang:1.23.6-bullseye@sha256:fad5b33791a319ba1c910a03a33575ea34fc8e142695a64be9a1a228e74af11e
+dockerImage: registry.deckhouse.io/base_images@sha256:cabc413694e30033e225c4a99b04d9f886400591873b97ddd8577498ec717b81
 commands:
   - export TASK_VERSION=v3.41.0
   - export TASK_SHA256=0a2595f7fa3c15a62f8d0c244121a4977018b3bfdec7c1542ac2a8cf079978b8

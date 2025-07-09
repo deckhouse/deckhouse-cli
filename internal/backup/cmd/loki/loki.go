@@ -246,7 +246,7 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 				Stdout: &stdout,
 				Stderr: &stderr,
 			}); err != nil {
-			fmt.Fprintf(os.Stderr, strings.Join(fullCommand, " "))
+			fmt.Fprint(os.Stderr, strings.Join(fullCommand, " "))
 			return nil, nil, err
 		}
 

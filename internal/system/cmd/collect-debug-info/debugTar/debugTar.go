@@ -177,8 +177,8 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface) error {
 				Stdout: &stdout,
 				Stderr: &stderr,
 			}); err != nil {
-			fmt.Fprintf(os.Stderr, strings.Join(fullCommand, " "))
-			fmt.Fprintf(os.Stderr, stderr.String())
+			fmt.Fprint(os.Stderr, strings.Join(fullCommand, " "))
+			fmt.Fprint(os.Stderr, stderr.String())
 		}
 
 		err = cmd.Writer(tarWriter, stdout.Bytes())
