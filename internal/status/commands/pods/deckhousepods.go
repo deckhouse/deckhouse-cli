@@ -14,6 +14,7 @@ import (
     "github.com/deckhouse/deckhouse-cli/internal/status/statusresult"
 )
 
+// Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, kubeCl kubernetes.Interface) statusresult.StatusResult {
     pods, err := getDeckhousePods(ctx, kubeCl)
     output := color.RedString("Error getting Deckhouse pods: %v\n", err)
@@ -27,6 +28,7 @@ func Status(ctx context.Context, kubeCl kubernetes.Interface) statusresult.Statu
     }
 }
 
+// Get fetches raw resource data from the Kubernetes API.
 type deckhousePod struct {
     Name     string
     Ready    string
@@ -50,6 +52,7 @@ func getDeckhousePods(ctx context.Context, kubeCl kubernetes.Interface) ([]deckh
     return infor, nil
 }
 
+// Processing converts raw resource data into a structured format for easier output and analysis.
 func deckhousePodProcessing(pod corev1.Pod) deckhousePod {
     readyCount := 0
     for _, containerStatus := range pod.Status.ContainerStatuses {
@@ -94,6 +97,7 @@ func deckhousePodProcessing(pod corev1.Pod) deckhousePod {
     }
 }
 
+// Format returns a readable view of resource status for CLI display.
 func formatDeckhousePods(infor []deckhousePod) string {
     if len(infor) == 0 {
         return color.YellowString("❗ No Deckhouse pods found\n")

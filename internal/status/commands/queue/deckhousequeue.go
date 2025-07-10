@@ -16,6 +16,7 @@ import (
     "github.com/deckhouse/deckhouse-cli/internal/status/statusresult"
 )
 
+// Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, kubeCl kubernetes.Interface, restConfig *rest.Config) statusresult.StatusResult {
     queueOutput, err := getDeckhouseQueue(ctx, kubeCl, restConfig)
     output := color.RedString("Error getting Deckhouse queue: %v\n", err)
@@ -29,6 +30,7 @@ func Status(ctx context.Context, kubeCl kubernetes.Interface, restConfig *rest.C
     }
 }
 
+// Get fetches raw resource data from the Kubernetes API.
 type DeckhouseQueue struct {
     Header      string
     Tasks       []DeckhouseQueueTask
@@ -90,6 +92,7 @@ func getDeckhouseQueue(ctx context.Context, kubeCl kubernetes.Interface, restCon
     return deckhouseQueueProcessing(stdout.String()), nil
 }
 
+// Processing converts raw resource data into a structured format for easier output and analysis.
 func deckhouseQueueProcessing(raw string) DeckhouseQueue {
     lines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
 
@@ -145,6 +148,7 @@ func deckhouseQueueProcessing(raw string) DeckhouseQueue {
     }
 }
 
+// Format returns a readable view of resource status for CLI display.
 func formatDeckhouseQueue(queue DeckhouseQueue) string {
     yellow := color.New(color.FgYellow).SprintFunc()
     blue := color.New(color.FgCyan).SprintFunc()

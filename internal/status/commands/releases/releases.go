@@ -14,6 +14,7 @@ import (
     "github.com/deckhouse/deckhouse-cli/internal/status/statusresult"
 )
 
+// Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, dynamicClient dynamic.Interface) statusresult.StatusResult {
     releases, err := getDeckhouseReleases(ctx, dynamicClient)
     output := color.RedString("Error getting Deckhouse releases: %v\n", err)
@@ -27,6 +28,7 @@ func Status(ctx context.Context, dynamicClient dynamic.Interface) statusresult.S
     }
 }
 
+// Get fetches raw resource data from the Kubernetes API.
 type DeckhouseRelease struct {
     Name           string
     Phase          string
@@ -58,6 +60,7 @@ func getDeckhouseReleases(ctx context.Context, dynamicCl dynamic.Interface) ([]D
     return releases, nil
 }
 
+// Processing converts raw resource data into a structured format for easier output and analysis.
 func deckhouseReleaseProcessing(item map[string]interface{}, name string) (DeckhouseRelease, bool) {
     statusMap, ok := item["status"].(map[string]interface{})
     if !ok {
@@ -75,6 +78,7 @@ func deckhouseReleaseProcessing(item map[string]interface{}, name string) (Deckh
     }, true
 }
 
+// Format returns a readable view of resource status for CLI display.
 func formatDeckhouseReleases(releases []DeckhouseRelease) string {
     if len(releases) == 0 {
         return color.YellowString("❗ No Deckhouse releases found\n")
@@ -82,7 +86,7 @@ func formatDeckhouseReleases(releases []DeckhouseRelease) string {
     var sb strings.Builder
     yellow := color.New(color.FgYellow).SprintFunc()
     sb.WriteString(yellow("┌ Deckhouse Releases:\n"))
-    sb.WriteString(yellow(fmt.Sprintf("%-15s %-15s %-16s %s\n", "├ NAME", "PHASE", "TRANSITIONTIME", "MESSAGE")))
+    sb.WriteString(yellow(fmt.Sprintf("%-15s %-15s %-21s %s\n", "├ NAME", "PHASE", "TRANSITIONTIME", "MESSAGE")))
 
     for i, release := range releases {
         prefix := "├"
@@ -110,7 +114,7 @@ func formatDeckhouseReleases(releases []DeckhouseRelease) string {
             }
         }
 
-        sb.WriteString(fmt.Sprintf("%s %s\t%s\t%s\t%s\n",
+        sb.WriteString(fmt.Sprintf("%s %-13s %-15s %-21s %s\n",
             yellow(prefix),
             release.Name,
             release.Phase,

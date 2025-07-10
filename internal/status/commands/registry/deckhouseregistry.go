@@ -13,6 +13,7 @@ import (
     "github.com/deckhouse/deckhouse-cli/internal/status/statusresult"
 )
 
+// Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, kubeCl kubernetes.Interface) statusresult.StatusResult {
     info, err := getDeckhouseRegistry(ctx, kubeCl)
     output := color.RedString("Error getting Deckhouse registry: %v\n", err)
@@ -26,6 +27,7 @@ func Status(ctx context.Context, kubeCl kubernetes.Interface) statusresult.Statu
     }
 }
 
+// Get fetches raw resource data from the Kubernetes API.
 type deckhouseRegistry struct {
     Registry string
     Scheme   string
@@ -39,6 +41,7 @@ func getDeckhouseRegistry(ctx context.Context, kubeCl kubernetes.Interface) (dec
     return deckhouseRegistryProcessing(secret)
 }
 
+// Processing converts raw resource data into a structured format for easier output and analysis.
 func deckhouseRegistryProcessing(secret *v1.Secret) (deckhouseRegistry, error) {
     var dr deckhouseRegistry
 
@@ -58,6 +61,7 @@ func deckhouseRegistryProcessing(secret *v1.Secret) (deckhouseRegistry, error) {
     return dr, nil
 }
 
+// Format returns a readable view of resource status for CLI display.
 func formatDeckhouseRegistry(info deckhouseRegistry) string {
     yellow := color.New(color.FgYellow).SprintFunc()
 

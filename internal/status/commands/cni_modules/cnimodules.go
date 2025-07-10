@@ -14,6 +14,7 @@ import (
     constant "github.com/deckhouse/deckhouse-cli/internal/status/constants"
 )
 
+// Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, dynamicClient dynamic.Interface) statusresult.StatusResult {
     modules, err := getModules(ctx, dynamicClient)
     output := color.RedString("Error getting modules: %v\n", err)
@@ -27,6 +28,7 @@ func Status(ctx context.Context, dynamicClient dynamic.Interface) statusresult.S
     }
 }
 
+// Get fetches raw resource data from the Kubernetes API.
 type CNIModule struct {
     Name    string
     Weight  string
@@ -60,6 +62,7 @@ func getModules(ctx context.Context, dynamicCl dynamic.Interface) ([]CNIModule, 
     return modules, nil
 }
 
+// Processing converts raw resource data into a structured format for easier output and analysis.
 func CNIModuleProcessing(item map[string]interface{}) (CNIModule, bool) {
     name, _ := item["metadata"].(map[string]interface{})["name"].(string)
     properties, ok := item["properties"].(map[string]interface{})
@@ -100,6 +103,7 @@ func CNIModuleProcessing(item map[string]interface{}) (CNIModule, bool) {
     }, true
 }
 
+// Format returns a readable view of resource status for CLI display.
 func formatModules(modules []CNIModule) string {
     if len(modules) == 0 {
         return color.YellowString("❗ No CNI modules found\n")

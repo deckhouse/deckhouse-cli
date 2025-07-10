@@ -14,6 +14,7 @@ import (
     "github.com/deckhouse/deckhouse-cli/internal/status/statusresult"
 )
 
+// Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, dynamicClient dynamic.Interface) statusresult.StatusResult {
     alerts, err := getClusterAlerts(ctx, dynamicClient)
     output := color.RedString("Error getting cluster alerts: %v\n", err)
@@ -27,6 +28,7 @@ func Status(ctx context.Context, dynamicClient dynamic.Interface) statusresult.S
     }
 }
 
+// Get fetches raw resource data from the Kubernetes API.
 type ClusterAlert struct {
     Severity string
     Name     string
@@ -54,6 +56,7 @@ func getClusterAlerts(ctx context.Context, dynamicCl dynamic.Interface) ([]Clust
     return alerts, nil
 }
 
+// Processing converts raw resource data into a structured format for easier output and analysis.
 func ClusterAlertProcessing(item map[string]interface{}) (ClusterAlert, bool) {
     alertSpecMap, ok1 := item["alert"].(map[string]interface{})
     statusMap, ok2 := item["status"].(map[string]interface{})
@@ -71,6 +74,7 @@ func ClusterAlertProcessing(item map[string]interface{}) (ClusterAlert, bool) {
     }, true
 }
 
+// Format returns a readable view of resource status for CLI display.
 type AlertKey struct {
     Severity string
     Name     string
@@ -80,6 +84,7 @@ func formatClusterAlerts(alerts []ClusterAlert) string {
     if len(alerts) == 0 {
         return color.YellowString("✅ No Cluster Alerts found\n")
     }
+
     countMap := make(map[AlertKey]int)
     maxNameLen := len("ALERT")
     for _, alert := range alerts {
@@ -92,17 +97,16 @@ func formatClusterAlerts(alerts []ClusterAlert) string {
     }
 
     nameColWidth := 40
+    if maxNameLen > 50 {
+        nameColWidth = 66
+    }
     if maxNameLen > 39 {
         nameColWidth = 51
     }
 
-    if maxNameLen > 50 {
-        nameColWidth = 66
-    }
-
     var sortedAlerts []AlertKey
-    for alert := range countMap {
-        sortedAlerts = append(sortedAlerts, alert)
+    for key := range countMap {
+        sortedAlerts = append(sortedAlerts, key)
     }
     sort.SliceStable(sortedAlerts, func(i, j int) bool {
         if sortedAlerts[i].Severity == sortedAlerts[j].Severity {
@@ -115,6 +119,7 @@ func formatClusterAlerts(alerts []ClusterAlert) string {
     yellow := color.New(color.FgYellow).SprintFunc()
     sb.WriteString(yellow("┌ Cluster Alerts:\n"))
     sb.WriteString(yellow(fmt.Sprintf("├ %-10s %-*s %s\n", "SEVERITY", nameColWidth, "ALERT", "SUM")))
+
     for i, key := range sortedAlerts {
         prefix := "├"
         if i == len(sortedAlerts)-1 {
@@ -124,7 +129,11 @@ func formatClusterAlerts(alerts []ClusterAlert) string {
         name := key.Name
         nameRunes := []rune(name)
         if len(nameRunes) > nameColWidth {
-            name = string(nameRunes[:nameColWidth-3]) + "..."
+            truncatedWidth := nameColWidth - 3
+            if truncatedWidth < 0 {
+                truncatedWidth = 0
+            }
+            name = string(nameRunes[:truncatedWidth]) + "..."
         }
         count := countMap[key]
         sb.WriteString(fmt.Sprintf("%s %-10s %-*s %d\n",

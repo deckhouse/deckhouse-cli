@@ -13,6 +13,7 @@ import (
     "github.com/deckhouse/deckhouse-cli/internal/status/statusresult"
 )
 
+// Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, kubeCl kubernetes.Interface) statusresult.StatusResult {
     nodes, err := getMasterNodes(ctx, kubeCl)
     output := color.RedString("Error getting master nodes: %v\n", err)
@@ -26,6 +27,7 @@ func Status(ctx context.Context, kubeCl kubernetes.Interface) statusresult.Statu
     }
 }
 
+// Get fetches raw resource data from the Kubernetes API.
 type MasterNodeStatus struct {
     Name          string
     Status        string
@@ -43,6 +45,7 @@ func getMasterNodes(ctx context.Context, kubeCl kubernetes.Interface) ([]corev1.
     return nodes.Items, nil
 }
 
+// Processing converts raw resource data into a structured format for easier output and analysis.
 func masterNodeStatus(node corev1.Node) MasterNodeStatus {
     return MasterNodeStatus{
         Name:      node.Name,
@@ -72,6 +75,7 @@ func nodeInternalIP(node corev1.Node) string {
     return "<none>"
 }
 
+// Format returns a readable view of resource status for CLI display.
 func formatMasterNodes(nodes []corev1.Node) string {
     if len(nodes) == 0 {
         return color.YellowString("❗ No master nodes found\n")

@@ -15,6 +15,7 @@ import (
     "github.com/deckhouse/deckhouse-cli/internal/status/statusresult"
 )
 
+// Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, dynamicClient dynamic.Interface) statusresult.StatusResult {
     settings, err := getModuleConfigSettings(ctx, dynamicClient)
     output := color.RedString("Error getting ModuleConfig settings: %v\n", err)
@@ -28,6 +29,7 @@ func Status(ctx context.Context, dynamicClient dynamic.Interface) statusresult.S
     }
 }
 
+// Get fetches raw resource data from the Kubernetes API.
 type ConfigSetting struct {
     Key      string
     Value    string
@@ -55,6 +57,7 @@ func getModuleConfigSettings(ctx context.Context, dynamicClient dynamic.Interfac
     return configSettingsFromMapProcessing(rawSettings), nil
 }
 
+// Processing converts raw resource data into a structured format for easier output and analysis.
 func configSettingsFromMapProcessing(settings map[string]interface{}) []ConfigSetting {
     result := make([]ConfigSetting, 0, len(settings))
     for key, value := range settings {
@@ -94,6 +97,7 @@ func configSettingsProcessing(key string, data interface{}) ConfigSetting {
     }
 }
 
+// Format returns a readable view of resource status for CLI display.
 func formatModuleConfigSettings(settings []ConfigSetting) string {
     var sb strings.Builder
     sb.WriteString(color.New(color.FgYellow).Sprint("┌ ModuleConfig Deckhouse Settings:\n"))
