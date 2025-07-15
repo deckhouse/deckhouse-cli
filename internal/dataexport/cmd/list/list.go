@@ -97,7 +97,8 @@ func downloadFunc(
 	}
 
 	var req *http.Request
-	if volumeMode == "Filesystem" {
+	switch volumeMode {
+	case "Filesystem":
 		if srcPath == "" || srcPath[len(srcPath)-1:] != "/" {
 			return fmt.Errorf("invalid source path: '%s'", srcPath)
 		}
@@ -108,22 +109,31 @@ func downloadFunc(
 
 		log.Info("Start listing", slog.String("url", dataURL), slog.String("srcPath", srcPath))
 		req, _ = http.NewRequest("GET", dataURL, nil)
-	} else if volumeMode == "Block" {
+	case "Block":
 		log.Info("Start listing", slog.String("url", url))
 		req, _ = http.NewRequest("HEAD", url, nil)
 	}
 
-	resp, err := subClient.HttpDo(req)
+	resp, err := subClient.HttpDo(req.WithContext(ctx))
 	if err != nil {
 		return fmt.Errorf("HttpDo: %s\n", err.Error())
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		msg, err := io.ReadAll(io.LimitReader(resp.Body, 1000))
+		const maxLen = 4096
+		msg, err := io.ReadAll(io.LimitReader(resp.Body, maxLen))
 		if err == nil {
 			return fmt.Errorf("Backend response \"%s\" Msg: %s", resp.Status, string(msg))
 		}
+	}
+
+	if volumeMode == "Block" {
+		body := ""
+		if contLen := resp.Header.Get("Content-Length"); contLen != "" {
+			body = fmt.Sprintf("Content-Length: %s", contLen)
+		}
+		return foo(strings.NewReader(body))
 	}
 
 	return foo(resp.Body)
@@ -185,8 +195,12 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	err = downloadFunc(ctx, log, namespace, deName, srcPath, publish, sClient, func(body io.Reader) error {
 		_, err := io.Copy(os.Stdout, body)
+		if err == io.EOF {
+			err = nil
+		}
 		return err
 	})
+
 	if err != nil {
 		return err
 	}
