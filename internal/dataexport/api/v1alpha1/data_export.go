@@ -46,7 +46,3 @@ type TargetRefSpec struct {
 	Kind string `json:"kind"`
 	Name string `json:"name"`
 }
-
-// func init() {
-// 	SchemeBuilder.Register(&DataExport{}, &DataExportList{})
-// }

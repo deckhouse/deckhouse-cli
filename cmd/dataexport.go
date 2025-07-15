@@ -17,6 +17,8 @@ limitations under the License.
 package cmd
 
 import (
+	"context"
+	"log/slog"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -25,6 +27,7 @@ import (
 	deDelete "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/delete"
 	deDownload "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/download"
 	deList "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/list"
+	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 )
 
 const (
@@ -45,12 +48,19 @@ func init() {
 
 	dataCmd.SetOut(os.Stdout)
 
+	ctx := context.Background()
+
+	logger := util.SetupLogger()
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	dataCmd.AddCommand(
-		deCreate.NewCommand(),
-		deDelete.NewCommand(),
-		deDownload.NewCommand(),
+		deCreate.NewCommand(ctx, logger),
+		deDelete.NewCommand(ctx, logger),
+		deDownload.NewCommand(ctx, logger),
 		//deGet.NewCommand(),
-		deList.NewCommand(),
+		deList.NewCommand(ctx, logger),
 	)
 
 	rootCmd.AddCommand(dataCmd)

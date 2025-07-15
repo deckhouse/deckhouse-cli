@@ -17,9 +17,11 @@ limitations under the License.
 package download
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -53,13 +55,13 @@ func cmdExamples() string {
 	return strings.Join(resp, "\n")
 }
 
-func NewCommand() *cobra.Command {
+func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     cmdName + " [flags] [KIND/]data_export_name [path/file.ext]",
 		Short:   "Download exported data",
 		Example: cmdExamples(),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return Run(cmd, args)
+			return Run(ctx, log, cmd, args)
 		},
 		Args: func(cmd *cobra.Command, args []string) error {
 			_, _, err := parseArgs(args)
@@ -102,27 +104,13 @@ type dirResp struct {
 	Items   []dirItem `json:"items"`
 }
 
-func downloadStatusCode200(url, srcPath string, sClient *safeClient.SafeClient) (err error) {
-	dataURL, err := neturl.JoinPath(url, srcPath)
-	if err != nil {
-		return err
+func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log *slog.Logger, sem chan struct{}, url, srcPath, dstPath string) (err error) {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 
-	req, _ := http.NewRequest("GET", dataURL, nil)
-	resp, err := sClient.HttpDo(req)
-	if err != nil {
-		return fmt.Errorf("HttpDo: %s\n", err.Error())
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("Backend response \"%s\"", resp.Status)
-	}
-
-	return nil
-}
-
-func recursiveDownload(url, srcPath, dstPath string, sClient *safeClient.SafeClient) (err error) {
 	dataURL, err := neturl.JoinPath(url, srcPath)
 	if err != nil {
 		return err
@@ -137,7 +125,7 @@ func recursiveDownload(url, srcPath, dstPath string, sClient *safeClient.SafeCli
 
 	if resp.StatusCode != 200 {
 		if resp.ContentLength > 0 && resp.ContentLength < 1000 {
-			msg, err := io.ReadAll(resp.Body)
+			msg, err := io.ReadAll(io.LimitReader(resp.Body, 1000))
 			if err == nil {
 				return fmt.Errorf("Backend response \"%s\" Msg: %s", resp.Status, string(msg))
 			}
@@ -159,6 +147,9 @@ func recursiveDownload(url, srcPath, dstPath string, sClient *safeClient.SafeCli
 		}
 
 		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var firstErr error
+
 		for _, item := range dir.Items {
 			subPath := item.Name
 			if item.Type == "dir" {
@@ -168,20 +159,22 @@ func recursiveDownload(url, srcPath, dstPath string, sClient *safeClient.SafeCli
 				}
 				subPath += "/"
 			}
+			sem <- struct{}{}
 			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				subErr := recursiveDownload(url, srcPath+subPath, filepath.Join(dstPath, subPath), sClient)
+			go func(sp string) {
+				defer func() { <-sem; wg.Done() }()
+				subErr := recursiveDownload(ctx, sClient, log, sem, url, srcPath+sp, filepath.Join(dstPath, sp))
 				if subErr != nil {
-					subErr = fmt.Errorf("Download %s: %s", filepath.Join(srcPath, subPath), subErr)
-					fmt.Print(subErr.Error())
-					err = subErr
-					return
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("Download %s: %w", filepath.Join(srcPath, sp), subErr)
+					}
+					mu.Unlock()
 				}
-			}()
+			}(subPath)
 		}
 		wg.Wait()
-		return err
+		return firstErr
 	} else {
 		if dstPath != "" {
 			// Create out file
@@ -195,7 +188,7 @@ func recursiveDownload(url, srcPath, dstPath string, sClient *safeClient.SafeCli
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Downloaded %s\n", dstPath)
+			log.Info("Downloaded file", slog.String("path", dstPath))
 		} else {
 			_, err = io.Copy(os.Stdout, resp.Body)
 			if err != nil {
@@ -207,7 +200,7 @@ func recursiveDownload(url, srcPath, dstPath string, sClient *safeClient.SafeCli
 	return nil
 }
 
-func createDataExporterIfNeeded(deName, namespace string, publish bool, rtClient ctrlrtclient.Client) (string, error) {
+func createDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, rtClient ctrlrtclient.Client) (string, error) {
 	var volumeKind, volumeName string
 	lowerCaseDeName := strings.ToLower(deName)
 	if strings.HasPrefix(lowerCaseDeName, "pvc/") {
@@ -222,16 +215,16 @@ func createDataExporterIfNeeded(deName, namespace string, publish bool, rtClient
 		return deName, nil
 	}
 
-	err := util.CreateDataExport(deName, namespace, "", volumeKind, volumeName, publish, rtClient)
+	err := util.CreateDataExport(ctx, deName, namespace, "", volumeKind, volumeName, publish, rtClient)
 	if err != nil {
 		return deName, err
 	}
-	fmt.Printf("Creating %s ...\n", deName)
+	log.Info("DataExport creating", slog.String("name", deName), slog.String("namespace", namespace))
 
 	return deName, nil
 }
 
-func Run(cmd *cobra.Command, args []string) error {
+func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
 	namespace, _ := cmd.Flags().GetString("namespace")
 	dstPath, _ := cmd.Flags().GetString("output")
 	publish, _ := cmd.Flags().GetBool("publish")
@@ -252,13 +245,14 @@ func Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	deName, err := createDataExporterIfNeeded(dataName, namespace, publish, rtClient)
+	deName, err := createDataExporterIfNeeded(ctx, log, dataName, namespace, publish, rtClient)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("DataExport %s/%s created\n", namespace, deName)
 
-	url, volumeMode, subClient, err := util.PrepareDownload(deName, namespace, publish, sClient)
+	log.Info("DataExport created", slog.String("name", deName), slog.String("namespace", namespace))
+
+	url, volumeMode, subClient, err := util.PrepareDownload(ctx, log, deName, namespace, publish, sClient)
 	if err != nil {
 		return err
 	}
@@ -278,17 +272,18 @@ func Run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("Start downloading from %s%s to %s\n", url, srcPath, dstPath)
-	err = recursiveDownload(url, srcPath, dstPath, subClient)
+	log.Info("Start downloading", slog.String("url", url+srcPath), slog.String("dstPath", dstPath))
+	sem := make(chan struct{}, 10)
+	err = recursiveDownload(ctx, subClient, log, sem, url, srcPath, dstPath)
 	if err != nil {
-		fmt.Printf("ERROR: Not all files have been downloaded! %s\n", err.Error())
+		log.Error("Not all files have been downloaded", slog.String("error", err.Error()))
 	} else {
-		fmt.Printf("SUCCESS: All files have been downloaded!\n")
+		log.Info("All files have been downloaded", slog.String("dstPath", dstPath))
 	}
 
 	if deName != dataName { // DataExport created in download process
 		if util.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
-			util.DeleteDataExport(deName, namespace, rtClient)
+			util.DeleteDataExport(ctx, deName, namespace, rtClient)
 		}
 	}
 

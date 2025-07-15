@@ -17,8 +17,10 @@ limitations under the License.
 package list
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	neturl "net/url"
 	"strings"
@@ -45,14 +47,14 @@ func cmdExamples() string {
 	return strings.Join(resp, "\n")
 }
 
-func NewCommand() *cobra.Command {
+func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     cmdName + " [flags] data_export_name [/path/]",
 		Aliases: []string{"ls"},
 		Short:   "List DataExported content information",
 		Example: cmdExamples(),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return Run(cmd, args)
+			return Run(ctx, log, cmd, args)
 		},
 		Args: func(cmd *cobra.Command, args []string) error {
 			_, _, err := parseArgs(args)
@@ -80,8 +82,8 @@ func parseArgs(args []string) (deName, srcPath string, err error) {
 	return
 }
 
-func downloadRaw(namespace, deName, srcPath string, publish bool, sClient *safeClient.SafeClient) ([]byte, error) {
-	url, volumeMode, subClient, err := util.PrepareDownload(deName, namespace, publish, sClient)
+func downloadRaw(ctx context.Context, log *slog.Logger, namespace, deName, srcPath string, publish bool, sClient *safeClient.SafeClient) ([]byte, error) {
+	url, volumeMode, subClient, err := util.PrepareDownload(ctx, log, deName, namespace, publish, sClient)
 	if err != nil {
 		return nil, err
 	}
@@ -96,10 +98,10 @@ func downloadRaw(namespace, deName, srcPath string, publish bool, sClient *safeC
 			return nil, err
 		}
 
-		fmt.Printf("Start listing from %s\n", dataURL)
+		log.Info("Start listing", slog.String("url", dataURL), slog.String("srcPath", srcPath))
 		req, _ = http.NewRequest("GET", dataURL, nil)
 	} else if volumeMode == "Block" {
-		fmt.Printf("Start listing from %s\n", url)
+		log.Info("Start listing", slog.String("url", url))
 		req, _ = http.NewRequest("HEAD", url, nil)
 	}
 
@@ -137,7 +139,7 @@ func downloadRaw(namespace, deName, srcPath string, publish bool, sClient *safeC
 	return bodyRaw, nil
 }
 
-func createDataExporterIfNeeded(deName, namespace string, publish bool, rtClient ctrlrtclient.Client) (string, error) {
+func createDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, rtClient ctrlrtclient.Client) (string, error) {
 	var volumeKind, volumeName string
 	name := strings.ToLower(deName)
 	if strings.HasPrefix(name, "pvc/") {
@@ -152,16 +154,19 @@ func createDataExporterIfNeeded(deName, namespace string, publish bool, rtClient
 		return deName, nil
 	}
 
-	err := util.CreateDataExport(deName, namespace, "", volumeKind, volumeName, publish, rtClient)
+	err := util.CreateDataExport(ctx, deName, namespace, "", volumeKind, volumeName, publish, rtClient)
 	if err != nil {
 		return deName, err
 	}
-	fmt.Printf("Creating %s ...\n", deName)
+	log.Info("DataExport creating", slog.String("name", deName), slog.String("namespace", namespace))
 
 	return deName, nil
 }
 
-func Run(cmd *cobra.Command, args []string) error {
+func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
 	namespace, _ := cmd.Flags().GetString("namespace")
 	publish, _ := cmd.Flags().GetBool("publish")
 
@@ -181,13 +186,14 @@ func Run(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	deName, err := createDataExporterIfNeeded(dataName, namespace, publish, rtClient)
+	deName, err := createDataExporterIfNeeded(ctx, log, dataName, namespace, publish, rtClient)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("DataExport %s/%s created\n", namespace, deName)
 
-	data, err := downloadRaw(namespace, deName, srcPath, publish, sClient)
+	log.Info("DataExport created", slog.String("name", deName), slog.String("namespace", namespace))
+
+	data, err := downloadRaw(ctx, log, namespace, deName, srcPath, publish, sClient)
 	if err != nil {
 		return err
 	}
@@ -195,7 +201,7 @@ func Run(cmd *cobra.Command, args []string) error {
 
 	if deName != dataName { // DataExport created in download process
 		if util.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
-			util.DeleteDataExport(deName, namespace, rtClient)
+			util.DeleteDataExport(ctx, deName, namespace, rtClient)
 		}
 	}
 

@@ -17,8 +17,11 @@ limitations under the License.
 package create
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -41,13 +44,13 @@ func cmdExamples() string {
 	return strings.Join(resp, "\n")
 }
 
-func NewCommand() *cobra.Command {
+func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     cmdName + " [flags] data_export_name volume_type/volume_name",
 		Short:   "Create dataexport kubernetes resource",
 		Example: cmdExamples(),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return Run(cmd, args)
+			return Run(ctx, log, cmd, args)
 		},
 		Args: func(cmd *cobra.Command, args []string) error {
 			_, _, _, err := parseArgs(args)
@@ -87,7 +90,9 @@ func parseArgs(args []string) (deName, volumeKind, volumeName string, err error)
 	return
 }
 
-func Run(cmd *cobra.Command, args []string) error {
+func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
 	namespace, _ := cmd.Flags().GetString("namespace")
 	ttl, _ := cmd.Flags().GetString("ttl")
 	publish, _ := cmd.Flags().GetBool("publish")
@@ -107,11 +112,11 @@ func Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	err = util.CreateDataExport(deName, namespace, ttl, volumeKind, volumeName, publish, rtClient)
+	err = util.CreateDataExport(ctx, deName, namespace, ttl, volumeKind, volumeName, publish, rtClient)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("Created %s\n", deName)
+	log.Info("DataExport created", slog.String("name", deName), slog.String("namespace", namespace))
 	return nil
 }

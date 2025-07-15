@@ -21,18 +21,15 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	neturl "net/url"
 	"os"
 	"slices"
 	"strings"
 	"time"
 
-	authenticationv1 "k8s.io/api/authentication/v1"
-	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
@@ -43,9 +40,7 @@ const (
 	defaultTTL = "10m"
 )
 
-func GetDataExport(deName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
-	ctx := context.Background()
-
+func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
 	deObj := &v1alpha1.DataExport{}
 	err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: deName}, deObj)
 	if err != nil {
@@ -65,9 +60,7 @@ func GetDataExport(deName, namespace string, rtClient ctrlrtclient.Client) (*v1a
 	return deObj, nil
 }
 
-func GetDataExportWithRestart(deName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
-	ctx := context.Background()
-
+func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
 	deObj := &v1alpha1.DataExport{}
 
 	for i := 0; ; i++ {
@@ -83,10 +76,11 @@ func GetDataExportWithRestart(deName, namespace string, rtClient ctrlrtclient.Cl
 			// restart DataExport if Expired
 			if condition.Type == "Expired" {
 				if condition.Status == "True" {
-					if err := DeleteDataExport(deName, namespace, rtClient); err != nil {
+					if err := DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
 						return nil, err
 					}
 					if err := CreateDataExport(
+						ctx,
 						deName, namespace, "",
 						deObj.Spec.TargetRef.Kind,
 						deObj.Spec.TargetRef.Name,
@@ -122,8 +116,7 @@ func GetDataExportWithRestart(deName, namespace string, rtClient ctrlrtclient.Cl
 	return deObj, nil
 }
 
-func CreateDataExport(deName, namespace, ttl, volumeKind, volumeName string, publish bool, rtClient ctrlrtclient.Client) error {
-	ctx := context.Background()
+func CreateDataExport(ctx context.Context, deName, namespace, ttl, volumeKind, volumeName string, publish bool, rtClient ctrlrtclient.Client) error {
 	if ttl == "" {
 		ttl = defaultTTL
 	}
@@ -155,9 +148,7 @@ func CreateDataExport(deName, namespace, ttl, volumeKind, volumeName string, pub
 	return nil
 }
 
-func DeleteDataExport(deName, namespace string, rtClient ctrlrtclient.Client) error {
-	ctx := context.Background()
-
+func DeleteDataExport(ctx context.Context, deName, namespace string, rtClient ctrlrtclient.Client) error {
 	deObj := &v1alpha1.DataExport{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      deName,
@@ -170,48 +161,6 @@ func DeleteDataExport(deName, namespace string, rtClient ctrlrtclient.Client) er
 	}
 
 	return nil
-}
-
-func CreateToken(rtClient ctrlrtclient.Client) (string, error) {
-	ctx := context.Background()
-	// Authorization token
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "d8-data-exporter", Name: "data-exporter"}}
-
-	token := &authenticationv1.TokenRequest{}
-	err := rtClient.SubResource("token").Create(ctx, sa, token)
-	if err != nil {
-		return "", fmt.Errorf("kube Create token: %s", err.Error())
-	}
-	fmt.Printf("Token %#v\n\n", token.Status.Token)
-
-	// Authentication access
-	crBinding := &rbacv1.ClusterRoleBinding{}
-	err = rtClient.Get(ctx, client.ObjectKey{Name: "data-exporter-binding"}, crBinding)
-	if err != nil && apierrors.IsNotFound(err) {
-		crBinding := &rbacv1.ClusterRoleBinding{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "data-exporter-binding",
-			},
-			RoleRef: rbacv1.RoleRef{
-				APIGroup: "rbac.authorization.k8s.io",
-				Kind:     "ClusterRole",
-				Name:     "cluster-admin", //TODO create specific role
-			},
-			Subjects: []rbacv1.Subject{
-				{
-					Kind:      "ServiceAccount",
-					Name:      "data-exporter",
-					Namespace: "d8-data-exporter",
-				},
-			},
-		}
-		err = rtClient.Create(ctx, crBinding)
-	}
-	if err != nil {
-		return "", err
-	}
-
-	return token.Status.Token, nil
 }
 
 func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
@@ -250,9 +199,9 @@ func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 	}
 }
 
-func getExportStatus(deName, namespace string, public bool, rtClient ctrlrtclient.Client) (podUrl, volumeMode, internalCAData string, err error) {
-	fmt.Printf("Waiting for DataExport %s/%s to be ready ...\n", namespace, deName)
-	deObj, err := GetDataExportWithRestart(deName, namespace, rtClient)
+func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace string, public bool, rtClient ctrlrtclient.Client) (podUrl, volumeMode, internalCAData string, err error) {
+	log.Info("Waiting for DataExport to be ready", slog.String("name", deName), slog.String("namespace", namespace))
+	deObj, err := GetDataExportWithRestart(ctx, deName, namespace, rtClient)
 	if err != nil {
 		return
 	}
@@ -282,18 +231,18 @@ func getExportStatus(deName, namespace string, public bool, rtClient ctrlrtclien
 	}
 
 	volumeMode = deObj.Status.VolumeMode
-	fmt.Printf("DataExport %s/%s is ready\n", namespace, deName)
+	log.Info("DataExport is ready", slog.String("name", deName), slog.String("namespace", namespace), slog.String("url", podUrl), slog.String("volumeMode", volumeMode))
 	return
 }
 
-func PrepareDownload(deName, namespace string, publish bool, sClient *safeClient.SafeClient) (url, volumeMode string, subClient *safeClient.SafeClient, finErr error) {
+func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, sClient *safeClient.SafeClient) (url, volumeMode string, subClient *safeClient.SafeClient, finErr error) {
 	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {
 		finErr = err
 		return
 	}
 
-	podUrl, volumeMode, intrenalCAData, err := getExportStatus(deName, namespace, publish, rtClient)
+	podUrl, volumeMode, intrenalCAData, err := getExportStatus(ctx, log, deName, namespace, publish, rtClient)
 	if err != nil {
 		finErr = err
 		return

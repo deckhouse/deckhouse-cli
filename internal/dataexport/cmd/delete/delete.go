@@ -17,8 +17,11 @@ limitations under the License.
 package delete
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -38,13 +41,13 @@ func cmdExamples() string {
 	return strings.Join(resp, "\n")
 }
 
-func NewCommand() *cobra.Command {
+func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     cmdName + " [flags] data_export_name",
 		Short:   "Delete dataexport kubernetes resource",
 		Example: cmdExamples(),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return Run(cmd, args)
+			return Run(ctx, log, cmd, args)
 		},
 		Args: func(cmd *cobra.Command, args []string) error {
 			_, err := parseArgs(args)
@@ -65,7 +68,9 @@ func parseArgs(args []string) (deName string, err error) {
 	return "", fmt.Errorf("invalid arguments")
 }
 
-func Run(cmd *cobra.Command, args []string) error {
+func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	namespace, _ := cmd.Flags().GetString("namespace")
 
 	deName, err := parseArgs(args)
@@ -83,11 +88,11 @@ func Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	err = util.DeleteDataExport(deName, namespace, rtClient)
+	err = util.DeleteDataExport(ctx, deName, namespace, rtClient)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("Deleted DataExport %s/%s\n", namespace, deName)
+	log.Info("Deleted DataExport", slog.String("name", deName), slog.String("namespace", namespace))
 	return nil
 }
