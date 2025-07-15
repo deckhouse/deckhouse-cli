@@ -314,6 +314,8 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		if dstPath == "" {
 			dstPath = deName
 		}
+	default:
+	  return fmt.Errorf("%w: %s", util.UnsupportedVolumeModeErr, volumeMode)
 	}
 
 	log.Info("Start downloading", slog.String("url", url+srcPath), slog.String("dstPath", dstPath))
