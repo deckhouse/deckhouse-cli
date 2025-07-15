@@ -153,11 +153,9 @@ func forRespItems(jsonStream io.ReadCloser, workFunc func(*dirItem) error) error
 }
 
 func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log *slog.Logger, sem chan struct{}, url, srcPath, dstPath string) (err error) {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
+  if err := ctx.Err(); err != nil {
+    return err
+  }
 
 	dataURL, err := neturl.JoinPath(url, srcPath)
 	if err != nil {
