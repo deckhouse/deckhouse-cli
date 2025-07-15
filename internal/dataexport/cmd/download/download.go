@@ -32,8 +32,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
-
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
@@ -153,9 +151,9 @@ func forRespItems(jsonStream io.ReadCloser, workFunc func(*dirItem) error) error
 }
 
 func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log *slog.Logger, sem chan struct{}, url, srcPath, dstPath string) (err error) {
-  if err := ctx.Err(); err != nil {
-    return err
-  }
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	dataURL, err := neturl.JoinPath(url, srcPath)
 	if err != nil {
@@ -241,30 +239,6 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 	return nil
 }
 
-func createDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, rtClient ctrlrtclient.Client) (string, error) {
-	var volumeKind, volumeName string
-	lowerCaseDeName := strings.ToLower(deName)
-	if strings.HasPrefix(lowerCaseDeName, "pvc/") {
-		volumeKind = util.PersistentVolumeClaimKind
-		volumeName = deName[4:]
-		deName = "de-pvc-" + volumeName
-	} else if strings.HasPrefix(lowerCaseDeName, "vs/") {
-		volumeKind = util.VolumeSnapshotKind
-		volumeName = deName[3:]
-		deName = "de-vs-" + volumeName
-	} else {
-		return deName, nil
-	}
-
-	err := util.CreateDataExport(ctx, deName, namespace, "", volumeKind, volumeName, publish, rtClient)
-	if err != nil {
-		return deName, err
-	}
-	log.Info("DataExport creating", slog.String("name", deName), slog.String("namespace", namespace))
-
-	return deName, nil
-}
-
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
 	namespace, _ := cmd.Flags().GetString("namespace")
 	dstPath, _ := cmd.Flags().GetString("output")
@@ -286,7 +260,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	deName, err := createDataExporterIfNeeded(ctx, log, dataName, namespace, publish, rtClient)
+	deName, err := util.CreateDataExporterIfNeeded(ctx, log, dataName, namespace, publish, rtClient)
 	if err != nil {
 		return err
 	}
@@ -313,7 +287,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 			dstPath = deName
 		}
 	default:
-	  return fmt.Errorf("%w: %s", util.UnsupportedVolumeModeErr, volumeMode)
+		return fmt.Errorf("%w: %s", util.UnsupportedVolumeModeErr, volumeMode)
 	}
 
 	log.Info("Start downloading", slog.String("url", url+srcPath), slog.String("dstPath", dstPath))

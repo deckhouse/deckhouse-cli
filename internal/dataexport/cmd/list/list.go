@@ -29,8 +29,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
-
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
@@ -145,30 +143,6 @@ func downloadFunc(
 	}
 }
 
-func createDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, rtClient ctrlrtclient.Client) (string, error) {
-	var volumeKind, volumeName string
-	name := strings.ToLower(deName)
-	if strings.HasPrefix(name, "pvc/") {
-		volumeKind = util.PersistentVolumeClaimKind
-		volumeName = deName[4:]
-		deName = "de-pvc-" + volumeName
-	} else if strings.HasPrefix(name, "vs/") {
-		volumeKind = util.VolumeSnapshotKind
-		volumeName = deName[3:]
-		deName = "de-vs-" + volumeName
-	} else {
-		return deName, nil
-	}
-
-	err := util.CreateDataExport(ctx, deName, namespace, "", volumeKind, volumeName, publish, rtClient)
-	if err != nil {
-		return deName, err
-	}
-	log.Info("DataExport creating", slog.String("name", deName), slog.String("namespace", namespace))
-
-	return deName, nil
-}
-
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -192,7 +166,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	if err != nil {
 		return err
 	}
-	deName, err := createDataExporterIfNeeded(ctx, log, dataName, namespace, publish, rtClient)
+	deName, err := util.CreateDataExporterIfNeeded(ctx, log, dataName, namespace, publish, rtClient)
 	if err != nil {
 		return err
 	}

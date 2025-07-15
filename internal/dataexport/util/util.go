@@ -114,13 +114,37 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 		if returnErr == nil {
 			break
 		}
-		if i > 40 {
+		if i > 60 {
 			return nil, returnErr
 		}
 		time.Sleep(time.Second * 3)
 	}
 
 	return deObj, nil
+}
+
+func CreateDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, rtClient ctrlrtclient.Client) (string, error) {
+	var volumeKind, volumeName string
+	lowerCaseDeName := strings.ToLower(deName)
+	if strings.HasPrefix(lowerCaseDeName, "pvc/") {
+		volumeKind = PersistentVolumeClaimKind
+		volumeName = deName[4:]
+		deName = "de-pvc-" + volumeName
+	} else if strings.HasPrefix(lowerCaseDeName, "vs/") {
+		volumeKind = VolumeSnapshotKind
+		volumeName = deName[3:]
+		deName = "de-vs-" + volumeName
+	} else {
+		return deName, nil
+	}
+
+	err := CreateDataExport(ctx, deName, namespace, "", volumeKind, volumeName, publish, rtClient)
+	if err != nil {
+		return deName, err
+	}
+	log.Info("DataExport creating", slog.String("name", deName), slog.String("namespace", namespace))
+
+	return deName, nil
 }
 
 func CreateDataExport(ctx context.Context, deName, namespace, ttl, volumeKind, volumeName string, publish bool, rtClient ctrlrtclient.Client) error {
@@ -131,8 +155,8 @@ func CreateDataExport(ctx context.Context, deName, namespace, ttl, volumeKind, v
 	// Create dataexport object
 	deCfg := &v1alpha1.DataExport{
 		TypeMeta: metav1.TypeMeta{
-			//APIVersion: "deckhouse.io/v1alpha1",
-			Kind: "DataExport",
+			APIVersion: "deckhouse.io/v1alpha1",
+			Kind:       "DataExport",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      deName,
@@ -213,7 +237,6 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 		return
 	}
 
-	//TODO can get from URL param, Cluster flag, KubeConfig
 	if public {
 		if deObj.Status.PublicURL == "" {
 			err = fmt.Errorf("empty PublicURL")
