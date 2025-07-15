@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	neturl "net/url"
@@ -37,7 +38,13 @@ import (
 )
 
 const (
-	defaultTTL = "10m"
+	defaultTTL                = "10m"
+	PersistentVolumeClaimKind = "PersistentVolumeClaim"
+	VolumeSnapshotKind        = "VolumeSnapshot"
+)
+
+var (
+	UnsupportedVolumeModeErr = errors.New("invalid volume mode")
 )
 
 func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
@@ -225,7 +232,7 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 	}
 
 	volumeKind := deObj.Spec.TargetRef.Kind
-	if !slices.Contains([]string{"PersistentVolumeClaim", "VolumeSnapshot"}, volumeKind) {
+	if !slices.Contains([]string{PersistentVolumeClaimKind, VolumeSnapshotKind}, volumeKind) {
 		err = fmt.Errorf("invalid volume kind: %s", volumeKind)
 		return
 	}
@@ -263,7 +270,7 @@ func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace st
 			return
 		}
 	default:
-		finErr = fmt.Errorf("invalid volume mode: '%s'", volumeMode)
+		finErr = fmt.Errorf("%w: '%s'", UnsupportedVolumeModeErr, volumeMode)
 		return
 	}
 
@@ -271,7 +278,6 @@ func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace st
 
 	if publish {
 		subClient.SetTLSCAData([]byte{})
-
 	} else if len(intrenalCAData) > 0 {
 		decodedBytes, err := base64.StdEncoding.DecodeString(intrenalCAData)
 		if err != nil {

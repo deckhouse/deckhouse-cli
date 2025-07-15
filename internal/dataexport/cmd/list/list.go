@@ -112,6 +112,8 @@ func downloadFunc(
 	case "Block":
 		log.Info("Start listing", slog.String("url", url))
 		req, _ = http.NewRequest("HEAD", url, nil)
+	default:
+		return fmt.Errorf("%w: %s", util.UnsupportedVolumeModeErr, volumeMode)
 	}
 
 	resp, err := subClient.HttpDo(req.WithContext(ctx))
@@ -129,26 +131,29 @@ func downloadFunc(
 		return fmt.Errorf("Backend response \"%s\" Msg: %s", resp.Status, string(msg))
 	}
 
-	if volumeMode == "Block" {
+	switch volumeMode {
+	case "Block":
 		body := ""
 		if contLen := resp.Header.Get("Content-Length"); contLen != "" {
 			body = fmt.Sprintf("Content-Length: %s", contLen)
 		}
 		return foo(strings.NewReader(body))
+	case "Filesystem":
+		return foo(resp.Body)
+	default:
+		return fmt.Errorf("%w: %s", unsupportedVolumeModeErr, volumeMode)
 	}
-
-	return foo(resp.Body)
 }
 
 func createDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, rtClient ctrlrtclient.Client) (string, error) {
 	var volumeKind, volumeName string
 	name := strings.ToLower(deName)
 	if strings.HasPrefix(name, "pvc/") {
-		volumeKind = "PersistentVolumeClaim"
+		volumeKind = util.PersistentVolumeClaimKind
 		volumeName = deName[4:]
 		deName = "de-pvc-" + volumeName
 	} else if strings.HasPrefix(name, "vs/") {
-		volumeKind = "VolumeSnapshot"
+		volumeKind = util.VolumeSnapshotKind
 		volumeName = deName[3:]
 		deName = "de-vs-" + volumeName
 	} else {

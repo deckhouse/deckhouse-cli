@@ -77,11 +77,11 @@ func parseArgs(args []string) (deName, volumeKind, volumeName string, err error)
 		return
 	}
 	volumeKind, volumeName = resourceTypeAndName[0], resourceTypeAndName[1]
-	switch {
-	case volumeKind == "pvc" || volumeKind == "PVC":
-		volumeKind = "PersistentVolumeClaim"
-	case volumeKind == "vs" || volumeKind == "VS":
-		volumeKind = "VolumeSnapshot"
+	switch volumeKind {
+	case "pvc", "PVC":
+		volumeKind = util.PersistentVolumeClaimKind
+	case "vs", "VS":
+		volumeKind = util.VolumeSnapshotKind
 	default:
 		err = fmt.Errorf("invalid volume type, expect: 'pvc' or 'vs'")
 		return

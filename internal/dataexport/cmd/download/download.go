@@ -204,11 +204,11 @@ func createDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, n
 	var volumeKind, volumeName string
 	lowerCaseDeName := strings.ToLower(deName)
 	if strings.HasPrefix(lowerCaseDeName, "pvc/") {
-		volumeKind = "PersistentVolumeClaim"
+		volumeKind = util.PersistentVolumeClaimKind
 		volumeName = deName[4:]
 		deName = "de-pvc-" + volumeName
 	} else if strings.HasPrefix(lowerCaseDeName, "vs/") {
-		volumeKind = "VolumeSnapshot"
+		volumeKind = util.VolumeSnapshotKind
 		volumeName = deName[3:]
 		deName = "de-vs-" + volumeName
 	} else {
@@ -257,7 +257,8 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	if volumeMode == "Filesystem" {
+	switch volumeMode {
+	case "Filesystem":
 		if srcPath == "" {
 			return fmt.Errorf("invalid source path: '%s'", srcPath)
 		}
@@ -265,7 +266,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 			pathList := strings.Split(srcPath, "/")
 			dstPath = pathList[len(pathList)-1]
 		}
-	} else if volumeMode == "Block" {
+	case "Block":
 		srcPath = ""
 		if dstPath == "" {
 			dstPath = deName
