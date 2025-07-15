@@ -104,6 +104,54 @@ type dirResp struct {
 	Items   []dirItem `json:"items"`
 }
 
+func forRespItems(jsonStream io.ReadCloser, workFunc func(*dirItem) error) error {
+	dec := json.NewDecoder(jsonStream)
+
+	// find items list
+	for {
+		t, err := dec.Token()
+		if err != nil {
+			return err
+		}
+
+		if t == "items" {
+			t, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			if t != json.Delim('[') {
+				return fmt.Errorf("JSON items is not list")
+			}
+			break
+		}
+		dec.More()
+	}
+
+	// read items
+	for dec.More() {
+		var i dirItem
+		err := dec.Decode(&i)
+		if err != nil {
+			break
+		}
+		err = workFunc(&i)
+		if err != nil {
+			return err
+		}
+	}
+
+	// check items list closed
+	t, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if t != json.Delim(']') {
+		return fmt.Errorf("items loading is not completed")
+	}
+
+	return nil
+}
+
 func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log *slog.Logger, sem chan struct{}, url, srcPath, dstPath string) (err error) {
 	select {
 	case <-ctx.Done():
@@ -135,22 +183,11 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 	}
 
 	if srcPath != "" && srcPath[len(srcPath)-1:] == "/" {
-		dirListBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("Response body (%s) error: %s", srcPath, err.Error())
-		}
-
-		var dir dirResp
-		err = json.Unmarshal(dirListBody, &dir)
-		if err != nil {
-			return fmt.Errorf("Invalid dir (%s) data: %s", srcPath, err.Error())
-		}
-
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 		var firstErr error
 
-		for _, item := range dir.Items {
+		err = forRespItems(resp.Body, func(item *dirItem) error {
 			subPath := item.Name
 			if item.Type == "dir" {
 				err = os.MkdirAll(filepath.Join(dstPath, subPath), os.ModePerm)
@@ -172,7 +209,13 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 					mu.Unlock()
 				}
 			}(subPath)
+
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("Response body (%s) error: %s", srcPath, err.Error())
 		}
+
 		wg.Wait()
 		return firstErr
 	} else {
