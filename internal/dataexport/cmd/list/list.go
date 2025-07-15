@@ -141,7 +141,7 @@ func downloadFunc(
 	case "Filesystem":
 		return foo(resp.Body)
 	default:
-		return fmt.Errorf("%w: %s", unsupportedVolumeModeErr, volumeMode)
+		return fmt.Errorf("%w: %s", util.UnsupportedVolumeModeErr, volumeMode)
 	}
 }
 
