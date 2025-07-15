@@ -123,9 +123,10 @@ func downloadFunc(
 	if resp.StatusCode != 200 {
 		const maxLen = 4096
 		msg, err := io.ReadAll(io.LimitReader(resp.Body, maxLen))
-		if err == nil {
-			return fmt.Errorf("Backend response \"%s\" Msg: %s", resp.Status, string(msg))
+		if err != nil {
+			return fmt.Errorf("Backend response \"%s\"", resp.Status)
 		}
+		return fmt.Errorf("Backend response \"%s\" Msg: %s", resp.Status, string(msg))
 	}
 
 	if volumeMode == "Block" {
