@@ -124,7 +124,7 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		if resp.ContentLength > 0 && resp.ContentLength < 1000 {
+		if resp.ContentLength > 0 {
 			msg, err := io.ReadAll(io.LimitReader(resp.Body, 1000))
 			if err == nil {
 				return fmt.Errorf("Backend response \"%s\" Msg: %s", resp.Status, string(msg))

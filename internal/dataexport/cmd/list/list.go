@@ -112,8 +112,8 @@ func downloadRaw(ctx context.Context, log *slog.Logger, namespace, deName, srcPa
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		if resp.ContentLength > 0 && resp.ContentLength < 1000 {
-			msg, err := io.ReadAll(resp.Body)
+		if resp.ContentLength > 0 {
+			msg, err := io.ReadAll(io.LimitReader(resp.Body, 1000))
 			if err == nil {
 				return nil, fmt.Errorf("Backend response \"%s\" Msg: %s", resp.Status, string(msg))
 			}

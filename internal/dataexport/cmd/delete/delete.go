@@ -69,7 +69,7 @@ func parseArgs(args []string) (deName string, err error) {
 }
 
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	namespace, _ := cmd.Flags().GetString("namespace")
 

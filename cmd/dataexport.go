@@ -59,7 +59,6 @@ func init() {
 		deCreate.NewCommand(ctx, logger),
 		deDelete.NewCommand(ctx, logger),
 		deDownload.NewCommand(ctx, logger),
-		//deGet.NewCommand(),
 		deList.NewCommand(ctx, logger),
 	)
 
