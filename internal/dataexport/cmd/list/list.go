@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	neturl "net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -82,20 +83,27 @@ func parseArgs(args []string) (deName, srcPath string, err error) {
 	return
 }
 
-func downloadRaw(ctx context.Context, log *slog.Logger, namespace, deName, srcPath string, publish bool, sClient *safeClient.SafeClient) ([]byte, error) {
+func downloadFunc(
+	ctx context.Context,
+	log *slog.Logger,
+	namespace, deName, srcPath string,
+	publish bool,
+	sClient *safeClient.SafeClient,
+	foo func(body io.Reader) error,
+) error {
 	url, volumeMode, subClient, err := util.PrepareDownload(ctx, log, deName, namespace, publish, sClient)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	var req *http.Request
 	if volumeMode == "Filesystem" {
 		if srcPath == "" || srcPath[len(srcPath)-1:] != "/" {
-			return nil, fmt.Errorf("invalid source path: '%s'", srcPath)
+			return fmt.Errorf("invalid source path: '%s'", srcPath)
 		}
 		dataURL, err := neturl.JoinPath(url, srcPath)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		log.Info("Start listing", slog.String("url", dataURL), slog.String("srcPath", srcPath))
@@ -107,36 +115,18 @@ func downloadRaw(ctx context.Context, log *slog.Logger, namespace, deName, srcPa
 
 	resp, err := subClient.HttpDo(req)
 	if err != nil {
-		return nil, fmt.Errorf("HttpDo: %s\n", err.Error())
+		return fmt.Errorf("HttpDo: %s\n", err.Error())
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		if resp.ContentLength > 0 {
-			msg, err := io.ReadAll(io.LimitReader(resp.Body, 1000))
-			if err == nil {
-				return nil, fmt.Errorf("Backend response \"%s\" Msg: %s", resp.Status, string(msg))
-			}
-		}
-
-		return nil, fmt.Errorf("Backend response \"%s\"", resp.Status)
-	}
-
-	bodyRaw := []byte{}
-	if volumeMode == "Block" {
-		contLen := resp.Header.Get("Content-Length")
-		if len(contLen) == 0 {
-			contLen = "0"
-		}
-		bodyRaw = append(bodyRaw, []byte("Content-Length: "+contLen+"\n")...)
-	} else {
-		bodyRaw, err = io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("Response body (%s) error: %s", srcPath, err.Error())
+		msg, err := io.ReadAll(io.LimitReader(resp.Body, 1000))
+		if err == nil {
+			return fmt.Errorf("Backend response \"%s\" Msg: %s", resp.Status, string(msg))
 		}
 	}
 
-	return bodyRaw, nil
+	return foo(resp.Body)
 }
 
 func createDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, rtClient ctrlrtclient.Client) (string, error) {
@@ -193,11 +183,13 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	log.Info("DataExport created", slog.String("name", deName), slog.String("namespace", namespace))
 
-	data, err := downloadRaw(ctx, log, namespace, deName, srcPath, publish, sClient)
+	err = downloadFunc(ctx, log, namespace, deName, srcPath, publish, sClient, func(body io.Reader) error {
+		_, err := io.Copy(os.Stdout, body)
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(data))
 
 	if deName != dataName { // DataExport created in download process
 		if util.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
