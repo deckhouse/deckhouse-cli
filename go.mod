@@ -8,9 +8,11 @@ require (
 	github.com/Masterminds/semver/v3 v3.3.0
 	github.com/deckhouse/virtualization/src/cli v0.0.0-20250617111832-70fdc2799bf3
 	github.com/google/go-containerregistry v0.20.0
+	github.com/gosimple/slug v1.15.0
 	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/hashicorp/vault v1.14.8
+	github.com/iancoleman/strcase v0.3.0
 	github.com/int128/kubelogin v1.28.0
 	github.com/pkg/errors v0.9.1
 	github.com/samber/lo v1.47.0
@@ -26,13 +28,13 @@ require (
 	go.cypherpunks.ru/gogost/v5 v5.13.0
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
 	golang.org/x/term v0.30.0
+	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.33.0
 	k8s.io/apiextensions-apiserver v0.33.0
 	k8s.io/apimachinery v0.33.0
 	k8s.io/cli-runtime v0.29.3
 	k8s.io/client-go v0.33.0
 	k8s.io/component-base v0.33.0
-	k8s.io/klog v1.0.0
 	k8s.io/kubectl v0.29.3
 	k8s.io/utils v0.0.0-20241210054802-24370beab758
 	sigs.k8s.io/controller-runtime v0.21.0
@@ -252,6 +254,7 @@ require (
 	github.com/gophercloud/gophercloud v0.1.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
+	github.com/gosimple/unidecode v1.0.1 // indirect
 	github.com/gosuri/uitable v0.0.4 // indirect
 	github.com/gregjones/httpcache v0.0.0-20190611155906-901d90724c79 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0 // indirect
@@ -575,9 +578,9 @@ require (
 	gopkg.in/resty.v1 v1.12.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/apiserver v0.33.0 // indirect
 	k8s.io/component-helpers v0.29.3 // indirect
+	k8s.io/klog v1.0.0 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20250318190949-c8a335a9a2ff // indirect
 	k8s.io/metrics v0.29.3 // indirect
