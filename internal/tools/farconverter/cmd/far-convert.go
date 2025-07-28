@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package farconverter
+package cmd
 
 import (
 	"fmt"
@@ -22,6 +22,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
+
+	"github.com/deckhouse/deckhouse-cli/internal/tools/farconverter"
 )
 
 var convertLong = templates.LongDesc(`
@@ -50,7 +52,7 @@ func NewCommand() *cobra.Command {
 
 			return nil
 		},
-		RunE: Convert,
+		RunE: farconverter.Convert,
 	}
 
 	return convertCmd
