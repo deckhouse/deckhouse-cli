@@ -14,33 +14,32 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package tools
+package cmd
 
 import (
-	farconverter "github.com/deckhouse/deckhouse-cli/internal/tools/farconverter/cmd"
-	gostsum "github.com/deckhouse/deckhouse-cli/internal/tools/gostsum/cmd"
-
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
+
+	"github.com/deckhouse/deckhouse-cli/internal/tools/gostsum"
 )
 
-var toolsLong = templates.LongDesc(`
-Various useful tools for operating in The Deckhouse Ecosystem.
+var gostsumLong = templates.LongDesc(`
+Calculate Streebog checksum of the data according to the RFC 6986 (GOST R 34.11-2012) specifications.
+
+Data for checksumming is provided as a list of filepaths in the command-line arguments.
+If no filepaths are provided, data is assumed to be available from stdin.
 
 © Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
-	toolsCmd := &cobra.Command{
-		Use:     "tools",
-		Short:   "Various useful tools for operating in The Deckhouse Ecosystem.",
-		Aliases: []string{"t"},
-		Long:    toolsLong,
+	convertCmd := &cobra.Command{
+		Use:   "gostsum",
+		Short: "Calculate Streebog checksum of the data according to the RFC 6986 (GOST R 34.11-2012) specifications",
+		Long:  gostsumLong,
+		RunE:  gostsum.Gostsum,
 	}
 
-	toolsCmd.AddCommand(
-		farconverter.NewCommand(),
-		gostsum.NewCommand(),
-	)
+	addFlags(convertCmd.Flags())
 
-	return toolsCmd
+	return convertCmd
 }
