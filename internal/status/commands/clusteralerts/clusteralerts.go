@@ -1,147 +1,158 @@
 package clusteralerts
 
 import (
-    "context"
-    "fmt"
-    "strings"
-    "sort"
+	"context"
+	"fmt"
+	"sort"
+	"strings"
 
-    "github.com/fatih/color"
-    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-    "k8s.io/client-go/dynamic"
-    "k8s.io/apimachinery/pkg/runtime/schema"
+	"github.com/fatih/color"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 
-    "github.com/deckhouse/deckhouse-cli/internal/status/statusresult"
+	"github.com/deckhouse/deckhouse-cli/internal/status/statusresult"
 )
 
 // Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, dynamicClient dynamic.Interface) statusresult.StatusResult {
-    alerts, err := getClusterAlerts(ctx, dynamicClient)
-    output := color.RedString("Error getting cluster alerts: %v\n", err)
-    if err == nil {
-        output = formatClusterAlerts(alerts)
-    }
-    return statusresult.StatusResult{
-        Title:  "Cluster Alerts",
-        Level:  0,
-        Output: output,
-    }
+	alerts, err := getClusterAlerts(ctx, dynamicClient)
+	output := color.RedString("Error getting cluster alerts: %v\n", err)
+	if err == nil {
+		output = formatClusterAlerts(alerts)
+	}
+	return statusresult.StatusResult{
+		Title:  "Cluster Alerts",
+		Level:  0,
+		Output: output,
+	}
 }
 
 // Get fetches raw resource data from the Kubernetes API.
 type ClusterAlert struct {
-    Severity string
-    Name     string
-    Phase    string
+	Severity string
+	Name     string
+	Phase    string
 }
 
 func getClusterAlerts(ctx context.Context, dynamicCl dynamic.Interface) ([]ClusterAlert, error) {
-    gvr := schema.GroupVersionResource{
-        Group:    "deckhouse.io",
-        Version:  "v1alpha1",
-        Resource: "clusteralerts",
-    }
-    alertList, err := dynamicCl.Resource(gvr).List(ctx, metav1.ListOptions{})
-    if err != nil {
-        return nil, fmt.Errorf("failed to list cluster alerts: %w\n", err)
-    }
-    var alerts []ClusterAlert
-    for _, item := range alertList.Items {
-        alert, ok := ClusterAlertProcessing(item.Object)
-        if !ok {
-            continue
-        }
-        alerts = append(alerts, alert)
-    }
-    return alerts, nil
+	gvr := schema.GroupVersionResource{
+		Group:    "deckhouse.io",
+		Version:  "v1alpha1",
+		Resource: "clusteralerts",
+	}
+	alertList, err := dynamicCl.Resource(gvr).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list cluster alerts: %w\n", err)
+	}
+	var alerts []ClusterAlert
+	for _, item := range alertList.Items {
+		alert, ok := ClusterAlertProcessing(item.Object)
+		if !ok {
+			continue
+		}
+		alerts = append(alerts, alert)
+	}
+	return alerts, nil
 }
 
 // Processing converts raw resource data into a structured format for easier output and analysis.
 func ClusterAlertProcessing(item map[string]interface{}) (ClusterAlert, bool) {
-    alertSpecMap, ok1 := item["alert"].(map[string]interface{})
-    statusMap, ok2 := item["status"].(map[string]interface{})
-    if !ok1 || !ok2 {
-        return ClusterAlert{}, false
-    }
+	alertSpecMap, ok1 := item["alert"].(map[string]interface{})
+	statusMap, ok2 := item["status"].(map[string]interface{})
+	if !ok1 || !ok2 {
+		return ClusterAlert{}, false
+	}
 
-    name, _     := alertSpecMap["name"].(string)
-    severity, _ := alertSpecMap["severityLevel"].(string)
-    phase, _    := statusMap["alertStatus"].(string)
-    return ClusterAlert{
-        Severity: severity,
-        Name:     name,
-        Phase:    phase,
-    }, true
+	name := alertSpecMap["name"].(string)
+	severity := alertSpecMap["severityLevel"].(string)
+	phase := statusMap["alertStatus"].(string)
+	return ClusterAlert{
+		Severity: severity,
+		Name:     name,
+		Phase:    phase,
+	}, true
 }
 
 // Format returns a readable view of resource status for CLI display.
 type AlertKey struct {
-    Severity string
-    Name     string
+	Severity string
+	Name     string
 }
 
 func formatClusterAlerts(alerts []ClusterAlert) string {
-    if len(alerts) == 0 {
-        return color.YellowString("✅ No Cluster Alerts found\n")
-    }
+	if len(alerts) == 0 {
+		return color.YellowString("✅ No Cluster Alerts found\n")
+	}
 
-    countMap := make(map[AlertKey]int)
-    maxNameLen := len("ALERT")
-    for _, alert := range alerts {
-        key := AlertKey{Severity: alert.Severity, Name: alert.Name}
-        countMap[key]++
-        nameLen := len([]rune(alert.Name))
-        if nameLen > maxNameLen {
-            maxNameLen = nameLen
-        }
-    }
+	countMap := make(map[AlertKey]int)
+	maxNameLen := len("ALERT")
+	for _, alert := range alerts {
+		key := AlertKey{Severity: alert.Severity, Name: alert.Name}
+		countMap[key]++
+		nameLen := len([]rune(alert.Name))
+		if nameLen > maxNameLen {
+			maxNameLen = nameLen
+		}
+	}
 
-    nameColWidth := 40
-    if maxNameLen > 50 {
-        nameColWidth = 66
-    }
-    if maxNameLen > 39 {
-        nameColWidth = 51
-    }
+	nameColWidth := getNameColWidth(maxNameLen)
 
-    var sortedAlerts []AlertKey
-    for key := range countMap {
-        sortedAlerts = append(sortedAlerts, key)
-    }
-    sort.SliceStable(sortedAlerts, func(i, j int) bool {
-        if sortedAlerts[i].Severity == sortedAlerts[j].Severity {
-            return sortedAlerts[i].Name < sortedAlerts[j].Name
-        }
-        return sortedAlerts[i].Severity < sortedAlerts[j].Severity
-    })
+	sortedKeys := make([]AlertKey, 0, len(countMap))
+	for key := range countMap {
+		sortedKeys = append(sortedKeys, key)
+	}
+	sort.SliceStable(sortedKeys, func(i, j int) bool {
+		if sortedKeys[i].Severity == sortedKeys[j].Severity {
+			return sortedKeys[i].Name < sortedKeys[j].Name
+		}
+		return sortedKeys[i].Severity < sortedKeys[j].Severity
+	})
 
-    var sb strings.Builder
-    yellow := color.New(color.FgYellow).SprintFunc()
-    sb.WriteString(yellow("┌ Cluster Alerts:\n"))
-    sb.WriteString(yellow(fmt.Sprintf("├ %-10s %-*s %s\n", "SEVERITY", nameColWidth, "ALERT", "SUM")))
+	var sb strings.Builder
+	yellow := color.New(color.FgYellow).SprintFunc()
+	sb.WriteString(yellow("┌ Cluster Alerts:\n"))
+	sb.WriteString(yellow(fmt.Sprintf("├ %-10s %-*s %s\n", "SEVERITY", nameColWidth, "ALERT", "SUM")))
 
-    for i, key := range sortedAlerts {
-        prefix := "├"
-        if i == len(sortedAlerts)-1 {
-            prefix = "└"
-        }
-        severity := key.Severity
-        name := key.Name
-        nameRunes := []rune(name)
-        if len(nameRunes) > nameColWidth {
-            truncatedWidth := nameColWidth - 3
-            if truncatedWidth < 0 {
-                truncatedWidth = 0
-            }
-            name = string(nameRunes[:truncatedWidth]) + "..."
-        }
-        count := countMap[key]
-        sb.WriteString(fmt.Sprintf("%s %-10s %-*s %d\n",
-            yellow(prefix),
-            severity,
-            nameColWidth, name,
-            count,
-        ))
-    }
-    return sb.String()
+	for i, key := range sortedKeys {
+		prefix := "├"
+		if i == len(sortedKeys)-1 {
+			prefix = "└"
+		}
+		truncName := truncateName(key.Name, nameColWidth)
+		count := countMap[key]
+
+		sb.WriteString(fmt.Sprintf("%s %-10s %-*s %d\n",
+			yellow(prefix),
+			key.Severity,
+			nameColWidth, truncName,
+			count,
+		))
+	}
+
+	return sb.String()
+}
+
+// getNameColWidth determines the width of the ALERT column based on the maximum name length.
+func getNameColWidth(maxNameLen int) int {
+	switch {
+	case maxNameLen > 50:
+		return 66
+	case maxNameLen > 39:
+		return 51
+	default:
+		return 40
+	}
+}
+
+// truncateName truncates a string to a given length.
+func truncateName(name string, width int) string {
+	nameRunes := []rune(name)
+	if len(nameRunes) <= width {
+		return name
+	}
+	if width < 3 {
+		return "..."
+	}
+	return string(nameRunes[:width-3]) + "..."
 }
