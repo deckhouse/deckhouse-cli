@@ -34,8 +34,8 @@ func init() {
 		werfcommon.TerminateWithError(err.Error(), 1)
 	}
 
-	werfRootCmd.Use = "dk"
-	werfRootCmd.Aliases = []string{"delivery-kit"}
+	werfRootCmd.Use = "delivery-kit"
+	werfRootCmd.Aliases = []string{"dk"}
 	werfRootCmd = ReplaceCommandName("werf", "d8 dk", werfRootCmd)
 	werfRootCmd.Short = "A set of tools for building, distributing, and deploying containerized applications"
 	werfRootCmd.Long = werfRootCmd.Short + "."
