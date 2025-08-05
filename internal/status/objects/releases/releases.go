@@ -1,3 +1,19 @@
+/*
+Copyright 2025 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package deckhousereleases
 
 import (
@@ -9,9 +25,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
-	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/status/statusresult"
+	"github.com/deckhouse/deckhouse-cli/internal/status/tools/statusresult"
+	"github.com/deckhouse/deckhouse-cli/internal/status/tools/timeutil"
 )
 
 // Status orchestrates retrieval, processing, and formatting of the resource's current status.
@@ -96,63 +112,17 @@ func formatDeckhouseReleases(releases []DeckhouseRelease) string {
 			prefix = "└"
 		}
 
-		timeAgo := formatTransitionTime(release.TransitionTime)
+		timeAgo := timeutil.AgeAgoStr(release.TransitionTime)
 		message := release.Message
-
-		timeAgoField := timeAgo
-		if timeAgoField == "" {
-			timeAgoField = ""
-		}
 
 		sb.WriteString(fmt.Sprintf(
 			"%s %-13s %-15s %-21s %s\n",
 			yellow(prefix),
 			release.Name,
 			release.Phase,
-			timeAgoField,
+			timeAgo,
 			message,
 		))
 	}
-
 	return sb.String()
-}
-
-// formatTransitionTime returns time in a convenient format.
-func formatTransitionTime(transitionTimeStr string) string {
-	if transitionTimeStr == "" {
-		return ""
-	}
-	transitionTime, err := time.Parse(time.RFC3339, transitionTimeStr)
-	if err != nil {
-		return "Parse Error"
-	}
-	duration := time.Since(transitionTime)
-	if duration < 0 {
-		duration = 0
-	}
-
-	days := int(duration.Hours()) / 24
-	hours := int(duration.Hours()) % 24
-	minutes := int(duration.Minutes()) % 60
-	seconds := int(duration.Seconds()) % 60
-
-	switch {
-	case days > 0:
-		if hours > 0 {
-			return fmt.Sprintf("%dd %dh", days, hours)
-		}
-		return fmt.Sprintf("%dd", days)
-	case hours > 0:
-		if minutes > 0 {
-			return fmt.Sprintf("%dh %dm", hours, minutes)
-		}
-		return fmt.Sprintf("%dh", hours)
-	case minutes > 0:
-		if seconds > 0 {
-			return fmt.Sprintf("%dm %ds", minutes, seconds)
-		}
-		return fmt.Sprintf("%dm", minutes)
-	default:
-		return fmt.Sprintf("%ds", seconds)
-	}
 }

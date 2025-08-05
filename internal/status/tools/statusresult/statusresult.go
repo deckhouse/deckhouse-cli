@@ -14,12 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd
+package statusresult
 
-import (
-	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
-)
-
-func init() {
-	rootCmd.AddCommand(status.NewCommand())
+type StatusResult struct {
+	Title  string
+	Output string
+	Level  int
+	IsWarn bool
 }

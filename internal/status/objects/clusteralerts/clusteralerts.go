@@ -1,3 +1,19 @@
+/*
+Copyright 2025 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package clusteralerts
 
 import (
@@ -11,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
-	"github.com/deckhouse/deckhouse-cli/internal/status/statusresult"
+	"github.com/deckhouse/deckhouse-cli/internal/status/tools/statusresult"
 )
 
 // Status orchestrates retrieval, processing, and formatting of the resource's current status.
@@ -64,9 +80,17 @@ func ClusterAlertProcessing(item map[string]interface{}) (ClusterAlert, bool) {
 		return ClusterAlert{}, false
 	}
 
-	name := alertSpecMap["name"].(string)
-	severity := alertSpecMap["severityLevel"].(string)
-	phase := statusMap["alertStatus"].(string)
+	name, ok3 := alertSpecMap["name"].(string)
+	phase, ok5 := statusMap["alertStatus"].(string)
+	severity, ok4 := alertSpecMap["severityLevel"].(string)
+	if !ok4 {
+		severity = "N/A"
+	}
+
+	if !ok3 || !ok5 {
+		return ClusterAlert{}, false
+	}
+
 	return ClusterAlert{
 		Severity: severity,
 		Name:     name,

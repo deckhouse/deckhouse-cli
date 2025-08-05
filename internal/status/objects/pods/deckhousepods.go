@@ -1,3 +1,19 @@
+/*
+Copyright 2025 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package deckhousepods
 
 import (
@@ -9,9 +25,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/status/statusresult"
+	"github.com/deckhouse/deckhouse-cli/internal/status/tools/statusresult"
+	"github.com/deckhouse/deckhouse-cli/internal/status/tools/timeutil"
 )
 
 // Status orchestrates retrieval, processing, and formatting of the resource's current status.
@@ -61,7 +77,7 @@ func deckhousePodProcessing(pod corev1.Pod) deckhousePod {
 			Ready:    "0/0",
 			Status:   string(pod.Status.Phase),
 			Restarts: 0,
-			Age:      formatAge(pod.CreationTimestamp.Time),
+			Age:      timeutil.AgeAgo(pod.CreationTimestamp.Time),
 		}
 	}
 
@@ -78,30 +94,7 @@ func deckhousePodProcessing(pod corev1.Pod) deckhousePod {
 		Ready:    fmt.Sprintf("%d/%d", readyCount, totalContainers),
 		Status:   string(pod.Status.Phase),
 		Restarts: restarts,
-		Age:      formatAge(pod.CreationTimestamp.Time),
-	}
-}
-
-func formatAge(t time.Time) string {
-	if t.IsZero() {
-		return "<unknown>"
-	}
-
-	duration := time.Since(t)
-	days := int(duration.Hours()) / 24
-	hours := int(duration.Hours()) % 24
-	minutes := int(duration.Minutes()) % 60
-	seconds := int(duration.Seconds()) % 60
-
-	switch {
-	case days > 0:
-		return fmt.Sprintf("%dd %dh", days, hours)
-	case hours > 0:
-		return fmt.Sprintf("%dh %dm", hours, minutes)
-	case minutes > 0:
-		return fmt.Sprintf("%dm", minutes)
-	default:
-		return fmt.Sprintf("%ds", seconds)
+		Age:      timeutil.AgeAgo(pod.CreationTimestamp.Time),
 	}
 }
 

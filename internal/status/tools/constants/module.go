@@ -14,12 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd
+// Constants in this package are copied from the original deckhouse repository package - deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1/module.go
 
-import (
-	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
+package v1alpha1
+
+const (
+	ModuleConditionEnabledByModuleConfig  = "EnabledByModuleConfig"
+	ModuleConditionEnabledByModuleManager = "EnabledByModuleManager"
+	ModuleConditionIsReady                = "IsReady"
 )
-
-func init() {
-	rootCmd.AddCommand(status.NewCommand())
-}
