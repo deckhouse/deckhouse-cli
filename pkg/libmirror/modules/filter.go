@@ -141,7 +141,7 @@ func parseExact(body string) (VersionConstraint, error) {
 
 
 func parseSemver(v string) (VersionConstraint, error) {
-	// semver match, console@1.38.1 = registry.deckhouse.io/deckhouse/ce/modules/console:v1.38.5
+	// semver match, console@~1.38.1 = registry.deckhouse.io/deckhouse/ce/modules/console:v1.38.x
 	c, err := NewSemanticVersionConstraint(v)
 	if err != nil {
 		return nil, fmt.Errorf("invalid semver %q: %w", v, err)
