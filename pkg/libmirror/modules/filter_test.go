@@ -129,192 +129,191 @@ func TestNewFilter_VersionParsing(t *testing.T) {
 	}
 }
 
-
 func TestFilter_Match(t *testing.T) {
-    logger := log.NewSLogger(slog.LevelDebug)
-    type args struct {
-        mod *Module
-    }
-    tests := []struct {
-        name string
-        f    Filter
-        args args
-        want bool
-    }{
-        {
-            name: "[whitelist] empty filter",
-            f: Filter{
-                _type:   FilterTypeWhitelist,
-                modules: map[string]VersionConstraint{},
-                logger:  logger,
-            },
+	logger := log.NewSLogger(slog.LevelDebug)
+	type args struct {
+		mod *Module
+	}
+	tests := []struct {
+		name string
+		f    Filter
+		args args
+		want bool
+	}{
+		{
+			name: "[whitelist] empty filter",
+			f: Filter{
+				_type:   FilterTypeWhitelist,
+				modules: map[string]VersionConstraint{},
+				logger:  logger,
+			},
 			args: args{
 				mod: &Module{Name: "module1"},
 			},
-            want: false,
-        },
-        {
-            name: "[whitelist] match",
-            f: Filter{
-                _type: FilterTypeWhitelist,
-                modules: map[string]VersionConstraint{
-                    "module1": NewExactTagConstraint("v12.34.56"),
-                    "module2": NewExactTagConstraint("v0.0.1"),
-                },
-                logger: logger,
-            },
+			want: false,
+		},
+		{
+			name: "[whitelist] match",
+			f: Filter{
+				_type: FilterTypeWhitelist,
+				modules: map[string]VersionConstraint{
+					"module1": NewExactTagConstraint("v12.34.56"),
+					"module2": NewExactTagConstraint("v0.0.1"),
+				},
+				logger: logger,
+			},
 			args: args{
 				mod: &Module{Name: "module1"},
 			},
-            want: true,
-        },
-        {
-            name: "[whitelist] no match",
-            f: Filter{
-                _type: FilterTypeWhitelist,
-                modules: map[string]VersionConstraint{
-                    "module1": NewExactTagConstraint("v12.34.56"),
-                    "module2": NewExactTagConstraint("v0.0.1"),
-                },
-                logger: logger,
-            },
+			want: true,
+		},
+		{
+			name: "[whitelist] no match",
+			f: Filter{
+				_type: FilterTypeWhitelist,
+				modules: map[string]VersionConstraint{
+					"module1": NewExactTagConstraint("v12.34.56"),
+					"module2": NewExactTagConstraint("v0.0.1"),
+				},
+				logger: logger,
+			},
 			args: args{
 				mod: &Module{Name: "module3"},
 			},
-            want: false,
-        },
-        {
-            name: "[blacklist] empty filter",
-            f: Filter{
-                _type:   FilterTypeBlacklist,
-                modules: map[string]VersionConstraint{},
-                logger:  logger,
-            },
+			want: false,
+		},
+		{
+			name: "[blacklist] empty filter",
+			f: Filter{
+				_type:   FilterTypeBlacklist,
+				modules: map[string]VersionConstraint{},
+				logger:  logger,
+			},
 			args: args{
 				mod: &Module{Name: "module1"},
 			},
-            want: true,
-        },
-        {
-            name: "[blacklist] match",
-            f: Filter{
-                _type: FilterTypeBlacklist,
-                modules: map[string]VersionConstraint{
-                    "module1": NewExactTagConstraint("v12.34.56"),
-                    "module2": NewExactTagConstraint("v0.0.1"),
-                },
-                logger: logger,
-            },
+			want: true,
+		},
+		{
+			name: "[blacklist] match",
+			f: Filter{
+				_type: FilterTypeBlacklist,
+				modules: map[string]VersionConstraint{
+					"module1": NewExactTagConstraint("v12.34.56"),
+					"module2": NewExactTagConstraint("v0.0.1"),
+				},
+				logger: logger,
+			},
 			args: args{
 				mod: &Module{Name: "module1"},
 			},
-            want: false,
-        },
-        {
-            name: "[blacklist] no match",
-            f: Filter{
-                _type: FilterTypeBlacklist,
-                modules: map[string]VersionConstraint{
-                    "module1": NewExactTagConstraint("v12.34.56"),
-                    "module2": NewExactTagConstraint("v0.0.1"),
-                },
-                logger: logger,
-            },
+			want: false,
+		},
+		{
+			name: "[blacklist] no match",
+			f: Filter{
+				_type: FilterTypeBlacklist,
+				modules: map[string]VersionConstraint{
+					"module1": NewExactTagConstraint("v12.34.56"),
+					"module2": NewExactTagConstraint("v0.0.1"),
+				},
+				logger: logger,
+			},
 			args: args{
 				mod: &Module{Name: "module3"},
 			},
-            want: true,
-        },
-    }
+			want: true,
+		},
+	}
 
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            assert.Equalf(t, tt.want, tt.f.Match(tt.args.mod), "Match(%v)", tt.args.mod)
-        })
-    }
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equalf(t, tt.want, tt.f.Match(tt.args.mod), "Match(%v)", tt.args.mod)
+		})
+	}
 }
 
 func TestFilter_VersionsToMirror(t *testing.T) {
-    logger := log.NewSLogger(slog.LevelDebug)
+	logger := log.NewSLogger(slog.LevelDebug)
 
-    geConstraint := func(v string) VersionConstraint {
-        c, err := NewSemanticVersionConstraint(v)
-        require.NoError(t, err)
-        return c
-    }
+	geConstraint := func(v string) VersionConstraint {
+		c, err := NewSemanticVersionConstraint(v)
+		require.NoError(t, err)
+		return c
+	}
 
-    tests := []struct {
-        name   string
-        filter Filter
-        mod    *Module
-        want   []string
-    }{
-        {
-            name: "happy path: semver constraint ^",
-            filter: Filter{
-                logger: logger,
-                modules: map[string]VersionConstraint{
-                    "module1": geConstraint("^1.3.0"),
-                },
-            },
+	tests := []struct {
+		name   string
+		filter Filter
+		mod    *Module
+		want   []string
+	}{
+		{
+			name: "happy path: semver constraint ^",
+			filter: Filter{
+				logger: logger,
+				modules: map[string]VersionConstraint{
+					"module1": geConstraint("^1.3.0"),
+				},
+			},
 			mod: &Module{
 				Name:     "module1",
 				Releases: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.4.1"},
 			},
 			want: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.3.0", "v1.4.1"},
-        },
-        {
-            name: "semver constraint tilde ~ (>=1.3.0 <1.4.0)",
-            filter: Filter{
-                logger: logger,
-                modules: map[string]VersionConstraint{
-                    "module1": geConstraint("~1.3.0"),
-                },
-            },
-            mod: &Module{
-                Name:     "module1",
-                Releases: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.3.3", "v1.4.1"},
-            },
-            want: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.3.0", "v1.3.3"},
-        },
-        {
-            name: "semver constraint range >=1.1.0 <1.3.0",
-            filter: Filter{
-                logger: logger,
-                modules: map[string]VersionConstraint{
-                    "module1": geConstraint(">=1.1.0 <1.3.0"),
-                },
-            },
-            mod: &Module{
-                Name:     "module1",
-                Releases: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.4.1"},
-            },
-            want: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.1.0", "v1.2.0"},
-        },
-        {
-            name: "happy path: exact match",
-            filter: Filter{
-                logger: logger,
-                modules: map[string]VersionConstraint{
-                    "module1": NewExactTagConstraint("v1.3.0"),
-                },
-            },
+		},
+		{
+			name: "semver constraint tilde ~ (>=1.3.0 <1.4.0)",
+			filter: Filter{
+				logger: logger,
+				modules: map[string]VersionConstraint{
+					"module1": geConstraint("~1.3.0"),
+				},
+			},
+			mod: &Module{
+				Name:     "module1",
+				Releases: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.3.3", "v1.4.1"},
+			},
+			want: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.3.0", "v1.3.3"},
+		},
+		{
+			name: "semver constraint range >=1.1.0 <1.3.0",
+			filter: Filter{
+				logger: logger,
+				modules: map[string]VersionConstraint{
+					"module1": geConstraint(">=1.1.0 <1.3.0"),
+				},
+			},
+			mod: &Module{
+				Name:     "module1",
+				Releases: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.4.1"},
+			},
+			want: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.1.0", "v1.2.0"},
+		},
+		{
+			name: "happy path: exact match",
+			filter: Filter{
+				logger: logger,
+				modules: map[string]VersionConstraint{
+					"module1": NewExactTagConstraint("v1.3.0"),
+				},
+			},
 			mod: &Module{
 				Name:     "module1",
 				Releases: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.3.3", "v1.4.1"},
 			},
 			want: []string{"v1.3.0"},
-        },
-    }
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            var got []string
-            if tt.filter.ShouldMirrorReleaseChannels(tt.mod.Name) {
-                got = append(got, "alpha", "beta", "early-access", "stable", "rock-solid")
-            }
-            got = append(got, tt.filter.VersionsToMirror(tt.mod)...)
-            require.ElementsMatch(t, tt.want, got)
-            require.Len(t, got, len(tt.want))
-        })
-    }
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got []string
+			if tt.filter.ShouldMirrorReleaseChannels(tt.mod.Name) {
+				got = append(got, "alpha", "beta", "early-access", "stable", "rock-solid")
+			}
+			got = append(got, tt.filter.VersionsToMirror(tt.mod)...)
+			require.ElementsMatch(t, tt.want, got)
+			require.Len(t, got, len(tt.want))
+		})
+	}
 }
