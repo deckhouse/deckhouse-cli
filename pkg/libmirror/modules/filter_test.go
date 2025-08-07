@@ -28,52 +28,53 @@ import (
 )
 
 func TestNewFilter(t *testing.T) {
-    tests := []struct {
-        name        string
-        expressions []string
-        wantErr     bool
-    }{
-        {
-            name:        "empty expressions",
-            expressions: []string{},
-            wantErr:     false,
-        },
-        {
-            name:        "module without version",
-            expressions: []string{"module"},
-            wantErr:     false,
-        },
-        {
-            name:        "valid expression",
-            expressions: []string{"module@1.2.3"},
-            wantErr:     false,
-        },
-        {
-            name:        "multiple valid expressions",
-            expressions: []string{"module1@1.2.3", "module2@2.3.4"},
-            wantErr:     false,
-        },
-        {
-            name:        "empty module name",
-            expressions: []string{" @1.2.3"},
-            wantErr:     true,
-        },
-        {
-            name:        "duplicate module",
-            expressions: []string{"module@1.2.3", "module@2.3.4"},
-            wantErr:     true,
-        },
-    }
+	tests := []struct {
+		name           string
+		expressions    []string
+		expectedModule string
+		wantErr        bool
+	}{
+		{
+			name:        "empty expressions",
+			expressions: []string{},
+			wantErr:     false,
+		},
+		{
+			name:        "module without version",
+			expressions: []string{"module"},
+			wantErr:     false,
+		},
+		{
+			name:        "valid expression",
+			expressions: []string{"module@1.2.3"},
+			wantErr:     false,
+		},
+		{
+			name:        "multiple valid expressions",
+			expressions: []string{"module1@1.2.3", "module2@2.3.4"},
+			wantErr:     false,
+		},
+		{
+			name:        "empty module name",
+			expressions: []string{" @1.2.3"},
+			wantErr:     true,
+		},
+		{
+			name:        "duplicate module",
+			expressions: []string{"module@1.2.3", "module@2.3.4"},
+			wantErr:     true,
+		},
+	}
 
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            filter, err := NewFilter(tt.expressions, FilterTypeWhitelist)
-            if tt.wantErr {
-                require.Error(t, err)
-                return
-            }
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filter, err := NewFilter(tt.expressions, FilterTypeWhitelist)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
 
-            filter.UseLogger(log.NewSLogger(slog.LevelDebug))
+			filter.UseLogger(log.NewSLogger(slog.LevelDebug))
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -82,38 +83,39 @@ func TestNewFilter(t *testing.T) {
 				require.NotNil(t, filter)
 				require.NotNil(t, filter.modules)
 			}
-        })
-    }
+		})
+	}
 }
 
 // TestNewFilter_VersionParsing tests version parsing specifically
 func TestNewFilter_VersionParsing(t *testing.T) {
-    tests := []struct {
-        name       string
-        expression string
-        wantErr    bool
-    }{
-        {
-            name:       "valid version",
-            expression: "module@1.2.3",
-            wantErr:    false,
-        },
-        {
-            name:       "invalid version",
-            expression: "module@invalid",
-            wantErr:    true,
-        },
-    }
+	tests := []struct {
+		name       string
+		expression string
+		wantErr    bool
+	}{
+		{
+			name:       "valid version",
+			expression: "module@1.2.3",
+			wantErr:    false,
+		},
+		{
+			name:       "invalid version",
+			expression: "module@invalid",
+			wantErr:    true,
+		},
+	}
 
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            filter, err := NewFilter([]string{tt.expression}, FilterTypeWhitelist)
-            if tt.wantErr {
-                require.Error(t, err)
-                return
-            }
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filter, err := NewFilter([]string{tt.expression}, FilterTypeWhitelist)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
 
-            filter.UseLogger(log.NewSLogger(slog.LevelDebug))
+			filter.UseLogger(log.NewSLogger(slog.LevelDebug))
+
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {
@@ -123,9 +125,10 @@ func TestNewFilter_VersionParsing(t *testing.T) {
 				require.True(t, ok)
 				require.NotNil(t, v)
 			}
-        })
-    }
+		})
+	}
 }
+
 
 func TestFilter_Match(t *testing.T) {
     logger := log.NewSLogger(slog.LevelDebug)
