@@ -72,7 +72,21 @@ func addFlags(flagSet *pflag.FlagSet) {
 		"include-module",
 		"i",
 		nil,
-		`Whitelist specific modules for downloading. Format is "module-name[@version]". Use one flag per each module. Disables blacklisting by --exclude-module."`,
+		`Whitelist specific modules for downloading. Use one flag per each module. Disables blacklisting by --exclude-module."
+
+Example:
+Available versions for <module-name>: v1.0.0, v1.1.0, v1.2.0, v1.3.0, v1.3.3, v1.4.1
+
+module-name@1.3.0 → semver ^ constraint (^1.3.0): include v1.3.0, v1.3.3, v1.4.1
+
+module-name@~1.3.0 →  semver ~ constraint (>=1.3.0 <1.4.0): include only v1.3.0, v1.3.3
+
+module-name@=v1.3.0 → exact tag match: include only v1.3.0
+
+module-name@=bobV1 → exact tag match: include only bobV1
+
+module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and tag it as stable
+		`,
 	)
 	flagSet.StringArrayVarP(
 		&ModulesBlacklist,

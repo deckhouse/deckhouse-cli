@@ -26,7 +26,6 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
-	"golang.org/x/exp/maps"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
@@ -109,33 +108,31 @@ func FindExternalModuleImages(
 	moduleImages, releaseImages = map[string]struct{}{}, map[string]struct{}{}
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
 
-	releaseImages, err = getAvailableReleaseChannelsImagesForModule(mod, nameOpts, remoteOpts)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Get available release channels of module: %w", err)
-	}
+	if filter.ShouldMirrorReleaseChannels(mod.Name) {
+		channelImgs, err := getAvailableReleaseChannelsImagesForModule(mod, nameOpts, remoteOpts)
+		if err != nil {
+			return nil, nil, fmt.Errorf("get release channels: %w", err)
+		}
+		for img := range channelImgs {
+			releaseImages[img] = struct{}{}
+		}
 
-	releaseChannelVersions, err := releases.FetchVersionsFromModuleReleaseChannels(releaseImages, authProvider, insecure, skipVerifyTLS)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Fetch versions from %q release channels: %w", mod.Name, err)
-	}
-
-	for _, versionTag := range releaseChannelVersions {
-		moduleImages[mod.RegistryPath+":"+versionTag] = struct{}{}
-		releaseImages[path.Join(mod.RegistryPath, "release")+":"+versionTag] = struct{}{}
-	}
-
-	minVersion, minVersionRequested := filter.GetMinimalVersion(mod.Name)
-	if minVersionRequested {
-		for _, version := range releases.FilterOnlyLatestPatches(mod.Versions()) {
-			if minVersion.Compare(version) <= 0 {
-				tag := "v" + version.String()
-				moduleImages[mod.RegistryPath+":"+tag] = struct{}{}
-				releaseImages[path.Join(mod.RegistryPath, "release")+":"+tag] = struct{}{}
-			}
+		channelVers, err := releases.FetchVersionsFromModuleReleaseChannels(channelImgs, authProvider, insecure, skipVerifyTLS)
+		if err != nil {
+			return nil, nil, fmt.Errorf("fetch channel versions: %w", err)
+		}
+		for _, v := range channelVers {
+			moduleImages[mod.RegistryPath+":"+v] = struct{}{}
+			releaseImages[path.Join(mod.RegistryPath, "release")+":"+v] = struct{}{}
 		}
 	}
 
-	for _, imageTag := range maps.Keys(moduleImages) {
+	for _, tag := range filter.VersionsToMirror(mod) {
+		moduleImages[mod.RegistryPath+":"+tag] = struct{}{}
+		releaseImages[path.Join(mod.RegistryPath, "release")+":"+tag] = struct{}{}
+	}
+
+	for imageTag := range (moduleImages) {
 		ref, err := name.ParseReference(imageTag, nameOpts...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("Get digests for %q version: %w", imageTag, err)

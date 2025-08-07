@@ -20,8 +20,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Masterminds/semver/v3"
-
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
@@ -32,11 +30,15 @@ const (
 	FilterTypeBlacklist
 )
 
+var validChannels = map[string]struct{}{
+	"alpha": {}, "beta": {}, "early-access": {}, "stable": {}, "rock-solid": {},
+}
+
 // Filter for modules by black and whitelists. Maps module names to minimal versions of these modules to be pulled.
 // By default, this is a whitelist filter, but that can be changed via SetType.
 type Filter struct {
 	_type   FilterType
-	modules map[string]*semver.Version
+	modules map[string]VersionConstraint
 	logger  params.Logger
 }
 
@@ -47,7 +49,7 @@ func NewFilter(filterExpressions []string, filterType FilterType) (*Filter, erro
 
 	filter := &Filter{
 		_type:   filterType,
-		modules: make(map[string]*semver.Version),
+		modules: make(map[string]VersionConstraint),
 	}
 	if len(filterExpressions) == 0 {
 		// Empty filter matches any module
@@ -56,7 +58,7 @@ func NewFilter(filterExpressions []string, filterType FilterType) (*Filter, erro
 	}
 
 	for _, filterExpr := range filterExpressions {
-		moduleName, moduleMinVersionString, validSplit := strings.Cut(strings.TrimSpace(filterExpr), "@")
+		moduleName, versionStr, hasVersion := strings.Cut(strings.TrimSpace(filterExpr), "@")
 		moduleName = strings.TrimSpace(moduleName)
 		if moduleName == "" {
 			return nil, fmt.Errorf("Malformed filter expression %q: empty module name", filterExpr)
@@ -64,17 +66,18 @@ func NewFilter(filterExpressions []string, filterType FilterType) (*Filter, erro
 		if _, moduleRedeclared := filter.modules[moduleName]; moduleRedeclared {
 			return nil, fmt.Errorf("Malformed filter expression: module %s is declared multiple times", moduleName)
 		}
-		if !validSplit {
-			filter.modules[moduleName] = semver.New(0, 0, 0, "", "")
+		if !hasVersion {
+			constraint, _ := NewSemanticVersionConstraint(">=0.0.0")
+			filter.modules[moduleName] = constraint
 			continue
 		}
 
-		moduleMinVersion, err := semver.NewVersion(strings.TrimSpace(moduleMinVersionString))
+		constraint, err := parseVersionConstraint(versionStr)
 		if err != nil {
-			return nil, fmt.Errorf("Malformed filter expression %q: %w", filterExpr, err)
+			return nil, err
 		}
 
-		filter.modules[moduleName] = moduleMinVersion
+		filter.modules[moduleName] = constraint
 	}
 
 	return filter, nil
@@ -96,37 +99,85 @@ func (f *Filter) Match(mod *Module) bool {
 
 func (f *Filter) Len() int { return len(f.modules) }
 
-func (f *Filter) GetMinimalVersion(moduleName string) (*semver.Version, bool) {
-	v, found := f.modules[moduleName]
-	if found && v.Major() == 0 && v.Minor() == 0 && v.Patch() == 0 {
-		return nil, false
-	}
-	return v, found
+func (f *Filter) GetConstraint(moduleName string) (VersionConstraint, bool) {
+	constraint, found := f.modules[moduleName]
+	return constraint, found
 }
 
-func (f *Filter) FilterReleaseTagsAboveMinimal(mod *Module) {
-	moduleMinVersion, hasMinVersion := f.modules[mod.Name]
-	if !hasMinVersion {
-		return
+func parseVersionConstraint(v string) (VersionConstraint, error) {
+    v = strings.TrimSpace(v)
+    if v == "" {
+        return nil, fmt.Errorf("empty constraint")
+    }
+    switch v[0] {
+	// has user defined constraint (nothing to do)
+    case '=', '>', '<', '~', '^':
+    default:
+        // version without contraint (add ^ for backward compatibility)
+        v = "^" + v
+    }
+
+    // exact-match: "=1.2.3" or "=1.2.3+stable"
+    if v[0] == '=' {
+        return parseExact(v[1:])
+    }
+	// semver constraint
+    return parseSemver(v)
+}
+
+func parseExact(body string) (VersionConstraint, error) {
+	// exac match, console@=1.38.1 = registry.deckhouse.io/deckhouse/ce/modules/console:v1.38.1
+	tag, ch, _ := strings.Cut(body, "+")
+	if tag == "" {
+		return nil, fmt.Errorf("empty tag in %q", body)
+	}
+	if ch != "" {
+		if _, ok := validChannels[ch]; ok {
+			return NewExactTagConstraintWithChannel(tag, ch), nil
+		}
+	}
+	return NewExactTagConstraint(tag), nil
+}
+
+
+func parseSemver(v string) (VersionConstraint, error) {
+	// semver match, console@1.38.1 = registry.deckhouse.io/deckhouse/ce/modules/console:v1.38.5
+	c, err := NewSemanticVersionConstraint(v)
+	if err != nil {
+		return nil, fmt.Errorf("invalid semver %q: %w", v, err)
+	}
+	return c, nil
+}
+
+func (f *Filter) ShouldMirrorReleaseChannels(moduleName string) bool {
+    if c, ok := f.modules[moduleName]; ok && c.IsExact() {
+        return false
+    }
+    return true
+}
+
+func (f *Filter) VersionsToMirror(mod *Module) []string {
+	c, ok := f.modules[mod.Name]
+	if !ok {
+		return nil
 	}
 
-	filteredReleases := make([]string, 0)
-	for _, tag := range mod.Releases {
-		v, err := semver.NewVersion(tag)
-		if err != nil {
-			if f.logger != nil {
-				f.logger.DebugLn("Failed to parse module release tag as semver", tag, err.Error())
-			}
-			filteredReleases = append(filteredReleases, tag) // This is probably a release channel, so just leave it
-			continue
+	if c.IsExact() {
+		if e, ok := c.(*ExactTagConstraint); ok {
+			return []string{e.Tag()}
 		}
-
-		if moduleMinVersion.GreaterThan(v) {
-			continue
-		}
-
-		filteredReleases = append(filteredReleases, tag)
+		return nil
 	}
 
-	mod.Releases = filteredReleases
+	sc, ok := c.(*SemanticVersionConstraint)
+	if !ok {
+		return nil
+	}
+	var tags []string
+	for _, v := range mod.Versions() {
+		if sc.Match(v) {
+			tags = append(tags, "v"+v.String())
+		}
+	}
+	return tags
 }
