@@ -95,7 +95,11 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 	}
 
 	for name, layout := range imageLayouts.Modules {
-		ApplyChannelAliasesIfNeeded(name, layout, filter)
+		
+		if err := ApplyChannelAliasesIfNeeded(name, layout, filter); err != nil {
+			return  err
+		}
+
 		pkgName := "module-" + name + ".tar"
 		logger.InfoF("Packing %s", pkgName)
 
@@ -115,13 +119,18 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 	return nil
 }
 
-func ApplyChannelAliasesIfNeeded(name string, layout layouts.ModuleImageLayout, filter *modules.Filter) {
+func ApplyChannelAliasesIfNeeded(name string, layout layouts.ModuleImageLayout, filter *modules.Filter) (error) {
 	if c, ok := filter.GetConstraint(name); ok && c.HasChannelAlias() {
 		ex, _ := c.(*modules.ExactTagConstraint)
-		if desc, err := layouts.FindImageDescriptorByTag(layout.ReleasesLayout, ex.Tag()); err == nil {
-			_ = layouts.TagImage(layout.ReleasesLayout, desc.Digest, ex.Channel())
+		desc, err := layouts.FindImageDescriptorByTag(layout.ReleasesLayout, ex.Tag())
+		if err != nil {
+			return err
+		}
+		if err := layouts.TagImage(layout.ReleasesLayout, desc.Digest, ex.Channel()); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 func printModulesList(logger params.Logger, modulesData []modules.Module) {
