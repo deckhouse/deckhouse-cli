@@ -63,6 +63,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 
 	cmd.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
+	cmd.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
 
 	return cmd
 }
@@ -89,7 +90,7 @@ func downloadFunc(
 	sClient *safeClient.SafeClient,
 	foo func(body io.Reader) error,
 ) error {
-	url, volumeMode, subClient, err := util.PrepareDownload(ctx, log, deName, namespace, publish, sClient)
+	url, volumeMode, subClient, err := util.PrepareDownloadFunc(ctx, log, deName, namespace, publish, sClient)
 	if err != nil {
 		return err
 	}
@@ -111,7 +112,7 @@ func downloadFunc(
 		log.Info("Start listing", slog.String("url", url))
 		req, _ = http.NewRequest("HEAD", url, nil)
 	default:
-		return fmt.Errorf("%w: %s", util.UnsupportedVolumeModeErr, volumeMode)
+		return fmt.Errorf("%w: %s", util.ErrUnsupportedVolumeMode, volumeMode)
 	}
 
 	resp, err := subClient.HttpDo(req.WithContext(ctx))
@@ -139,7 +140,7 @@ func downloadFunc(
 	case "Filesystem":
 		return foo(resp.Body)
 	default:
-		return fmt.Errorf("%w: %s", util.UnsupportedVolumeModeErr, volumeMode)
+		return fmt.Errorf("%w: %s", util.ErrUnsupportedVolumeMode, volumeMode)
 	}
 }
 
@@ -149,6 +150,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	namespace, _ := cmd.Flags().GetString("namespace")
 	publish, _ := cmd.Flags().GetBool("publish")
+	ttl, _ := cmd.Flags().GetString("ttl")
 
 	dataName, srcPath, err := parseArgs(args)
 	if err != nil {
@@ -166,7 +168,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	if err != nil {
 		return err
 	}
-	deName, err := util.CreateDataExporterIfNeeded(ctx, log, dataName, namespace, publish, rtClient)
+	deName, err := util.CreateDataExporterIfNeededFunc(ctx, log, dataName, namespace, publish, ttl, rtClient)
 	if err != nil {
 		return err
 	}
