@@ -38,9 +38,11 @@ import (
 )
 
 const (
-	defaultTTL                = "10m"
+	defaultTTL                = "2m"
 	PersistentVolumeClaimKind = "PersistentVolumeClaim"
 	VolumeSnapshotKind        = "VolumeSnapshot"
+	VirtualDiskKind           = "VirtualDisk"
+	VirtualDiskSnapshotKind   = "VirtualDiskSnapshot"
 )
 
 var (
@@ -123,22 +125,56 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 	return deObj, nil
 }
 
-func CreateDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, rtClient ctrlrtclient.Client) (string, error) {
+func CreateDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, ttl string, rtClient ctrlrtclient.Client) (string, error) {
 	var volumeKind, volumeName string
 	lowerCaseDeName := strings.ToLower(deName)
-	if strings.HasPrefix(lowerCaseDeName, "pvc/") {
+
+	switch {
+	// PVC / PersistentVolumeClaim
+	case strings.HasPrefix(lowerCaseDeName, "pvc/"):
 		volumeKind = PersistentVolumeClaimKind
 		volumeName = deName[4:]
 		deName = "de-pvc-" + volumeName
-	} else if strings.HasPrefix(lowerCaseDeName, "vs/") {
+	case strings.HasPrefix(lowerCaseDeName, "persistentvolumeclaim/"):
+		volumeKind = PersistentVolumeClaimKind
+		volumeName = deName[len("persistentvolumeclaim/"):]
+		deName = "de-pvc-" + volumeName
+
+	// VS / VolumeSnapshot
+	case strings.HasPrefix(lowerCaseDeName, "vs/"):
 		volumeKind = VolumeSnapshotKind
 		volumeName = deName[3:]
 		deName = "de-vs-" + volumeName
-	} else {
+	case strings.HasPrefix(lowerCaseDeName, "volumesnapshot/"):
+		volumeKind = VolumeSnapshotKind
+		volumeName = deName[len("volumesnapshot/"):]
+		deName = "de-vs-" + volumeName
+
+	// VD / VirtualDisk
+	case strings.HasPrefix(lowerCaseDeName, "vd/"):
+		volumeKind = VirtualDiskKind
+		volumeName = deName[3:]
+		deName = "de-vd-" + volumeName
+	case strings.HasPrefix(lowerCaseDeName, "virtualdisk/"):
+		volumeKind = VirtualDiskKind
+		volumeName = deName[len("virtualdisk/"):]
+		deName = "de-vd-" + volumeName
+
+	// VDS / VirtualDiskSnapshot
+	case strings.HasPrefix(lowerCaseDeName, "vds/"):
+		volumeKind = VirtualDiskSnapshotKind
+		volumeName = deName[4:]
+		deName = "de-vds-" + volumeName
+	case strings.HasPrefix(lowerCaseDeName, "virtualdisksnapshot/"):
+		volumeKind = VirtualDiskSnapshotKind
+		volumeName = deName[len("virtualdisksnapshot/"):]
+		deName = "de-vds-" + volumeName
+
+	default:
 		return deName, nil
 	}
 
-	err := CreateDataExport(ctx, deName, namespace, "", volumeKind, volumeName, publish, rtClient)
+	err := CreateDataExport(ctx, deName, namespace, ttl, volumeKind, volumeName, publish, rtClient)
 	if err != nil {
 		return deName, err
 	}
@@ -255,7 +291,7 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 	}
 
 	volumeKind := deObj.Spec.TargetRef.Kind
-	if !slices.Contains([]string{PersistentVolumeClaimKind, VolumeSnapshotKind}, volumeKind) {
+	if !slices.Contains([]string{PersistentVolumeClaimKind, VolumeSnapshotKind, VirtualDiskKind, VirtualDiskSnapshotKind}, volumeKind) {
 		err = fmt.Errorf("invalid volume kind: %s", volumeKind)
 		return
 	}

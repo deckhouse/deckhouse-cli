@@ -59,7 +59,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	}
 
 	cmd.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
-	cmd.Flags().String("ttl", "30m", "Time to live")
+	cmd.Flags().String("ttl", "2m", "Time to live")
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
 
 	return cmd
@@ -76,14 +76,18 @@ func parseArgs(args []string) (deName, volumeKind, volumeName string, err error)
 		err = fmt.Errorf("invalid volume format, expect: <type>/<name>")
 		return
 	}
-	volumeKind, volumeName = resourceTypeAndName[0], resourceTypeAndName[1]
+	volumeKind, volumeName = strings.ToLower(resourceTypeAndName[0]), resourceTypeAndName[1]
 	switch volumeKind {
-	case "pvc", "PVC":
+	case "pvc", "persistentvolumeclaim":
 		volumeKind = util.PersistentVolumeClaimKind
-	case "vs", "VS":
+	case "vs", "volumesnapshot":
 		volumeKind = util.VolumeSnapshotKind
+	case "vd", "virtualdisk":
+		volumeKind = util.VirtualDiskKind
+	case "vds", "virtualdisksnapshot":
+		volumeKind = util.VirtualDiskSnapshotKind
 	default:
-		err = fmt.Errorf("invalid volume type, expect: 'pvc' or 'vs'")
+		err = fmt.Errorf("invalid volume type; valid values: pvc | persistentvolumeclaim | vs | volumesnapshot | vd | virtualdisk | vds | virtualdisksnapshot")
 		return
 	}
 
