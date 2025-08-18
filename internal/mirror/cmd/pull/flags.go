@@ -81,11 +81,11 @@ module-name@1.3.0 → semver ^ constraint (^1.3.0): include v1.3.0, v1.3.3, v1.4
 
 module-name@~1.3.0 →  semver ~ constraint (>=1.3.0 <1.4.0): include only v1.3.0, v1.3.3
 
-module-name@=v1.3.0 → exact tag match: include only v1.3.0
+module-name@=v1.3.0 → exact tag match: include only v1.3.0 and publish it to all release channels (alpha, beta, early-access, stable, rock-solid).
 
-module-name@=bobV1 → exact tag match: include only bobV1
+module-name@=bobV1 → exact tag match: include only bobV1 and publish it to all release channels (alpha, beta, early-access, stable, rock-solid).
 
-module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and tag it as stable
+module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publish it to stable channel
 		`,
 	)
 	flagSet.StringArrayVarP(
