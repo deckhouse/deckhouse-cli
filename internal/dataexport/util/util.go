@@ -46,7 +46,13 @@ const (
 )
 
 var (
-	UnsupportedVolumeModeErr = errors.New("invalid volume mode")
+	ErrUnsupportedVolumeMode = errors.New("invalid volume mode")
+)
+
+// Function pointers for test stubbing
+var (
+	PrepareDownloadFunc            = PrepareDownload
+	CreateDataExporterIfNeededFunc = CreateDataExporterIfNeeded
 )
 
 func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
@@ -329,7 +335,7 @@ func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace st
 			return
 		}
 	default:
-		finErr = fmt.Errorf("%w: '%s'", UnsupportedVolumeModeErr, volumeMode)
+		finErr = fmt.Errorf("%w: '%s'", ErrUnsupportedVolumeMode, volumeMode)
 		return
 	}
 

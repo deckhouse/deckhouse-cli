@@ -267,14 +267,14 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	deName, err := util.CreateDataExporterIfNeeded(ctx, log, dataName, namespace, publish, ttl, rtClient)
+	deName, err := util.CreateDataExporterIfNeededFunc(ctx, log, dataName, namespace, publish, ttl, rtClient)
 	if err != nil {
 		return err
 	}
 
 	log.Info("DataExport created", slog.String("name", deName), slog.String("namespace", namespace))
 
-	url, volumeMode, subClient, err := util.PrepareDownload(ctx, log, deName, namespace, publish, sClient)
+	url, volumeMode, subClient, err := util.PrepareDownloadFunc(ctx, log, deName, namespace, publish, sClient)
 	if err != nil {
 		return err
 	}
@@ -294,7 +294,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 			dstPath = deName
 		}
 	default:
-		return fmt.Errorf("%w: %s", util.UnsupportedVolumeModeErr, volumeMode)
+		return fmt.Errorf("%w: %s", util.ErrUnsupportedVolumeMode, volumeMode)
 	}
 
 	log.Info("Start downloading", slog.String("url", url+srcPath), slog.String("dstPath", dstPath))
