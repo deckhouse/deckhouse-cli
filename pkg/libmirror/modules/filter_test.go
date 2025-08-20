@@ -21,7 +21,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -145,7 +144,7 @@ func TestFilter_Match(t *testing.T) {
 			name: "[whitelist] empty filter",
 			f: Filter{
 				_type:   FilterTypeWhitelist,
-				modules: map[string]*semver.Version{},
+				modules: map[string]VersionConstraint{},
 				logger:  logger,
 			},
 			args: args{
@@ -157,9 +156,9 @@ func TestFilter_Match(t *testing.T) {
 			name: "[whitelist] match",
 			f: Filter{
 				_type: FilterTypeWhitelist,
-				modules: map[string]*semver.Version{
-					"module1": semver.MustParse("v12.34.56"),
-					"module2": semver.MustParse("v0.0.1"),
+				modules: map[string]VersionConstraint{
+					"module1": NewExactTagConstraint("v12.34.56"),
+					"module2": NewExactTagConstraint("v0.0.1"),
 				},
 				logger: logger,
 			},
@@ -172,9 +171,9 @@ func TestFilter_Match(t *testing.T) {
 			name: "[whitelist] no match",
 			f: Filter{
 				_type: FilterTypeWhitelist,
-				modules: map[string]*semver.Version{
-					"module1": semver.MustParse("v12.34.56"),
-					"module2": semver.MustParse("v0.0.1"),
+				modules: map[string]VersionConstraint{
+					"module1": NewExactTagConstraint("v12.34.56"),
+					"module2": NewExactTagConstraint("v0.0.1"),
 				},
 				logger: logger,
 			},
@@ -187,7 +186,7 @@ func TestFilter_Match(t *testing.T) {
 			name: "[blacklist] empty filter",
 			f: Filter{
 				_type:   FilterTypeBlacklist,
-				modules: map[string]*semver.Version{},
+				modules: map[string]VersionConstraint{},
 				logger:  logger,
 			},
 			args: args{
@@ -199,9 +198,9 @@ func TestFilter_Match(t *testing.T) {
 			name: "[blacklist] match",
 			f: Filter{
 				_type: FilterTypeBlacklist,
-				modules: map[string]*semver.Version{
-					"module1": semver.MustParse("v12.34.56"),
-					"module2": semver.MustParse("v0.0.1"),
+				modules: map[string]VersionConstraint{
+					"module1": NewExactTagConstraint("v12.34.56"),
+					"module2": NewExactTagConstraint("v0.0.1"),
 				},
 				logger: logger,
 			},
@@ -214,9 +213,9 @@ func TestFilter_Match(t *testing.T) {
 			name: "[blacklist] no match",
 			f: Filter{
 				_type: FilterTypeBlacklist,
-				modules: map[string]*semver.Version{
-					"module1": semver.MustParse("v12.34.56"),
-					"module2": semver.MustParse("v0.0.1"),
+				modules: map[string]VersionConstraint{
+					"module1": NewExactTagConstraint("v12.34.56"),
+					"module2": NewExactTagConstraint("v0.0.1"),
 				},
 				logger: logger,
 			},
@@ -226,6 +225,7 @@ func TestFilter_Match(t *testing.T) {
 			want: true,
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equalf(t, tt.want, tt.f.Match(tt.args.mod), "Match(%v)", tt.args.mod)
@@ -233,8 +233,15 @@ func TestFilter_Match(t *testing.T) {
 	}
 }
 
-func TestFilter_FilterReleases(t *testing.T) {
+func TestFilter_VersionsToMirror(t *testing.T) {
 	logger := log.NewSLogger(slog.LevelDebug)
+
+	geConstraint := func(v string) VersionConstraint {
+		c, err := NewSemanticVersionConstraint(v)
+		require.NoError(t, err)
+		return c
+	}
+
 	tests := []struct {
 		name   string
 		filter Filter
@@ -242,12 +249,11 @@ func TestFilter_FilterReleases(t *testing.T) {
 		want   []string
 	}{
 		{
-			name: "happy path",
+			name: "happy path: semver constraint ^",
 			filter: Filter{
 				logger: logger,
-				modules: map[string]*semver.Version{
-					"module1": semver.MustParse("v1.3.0"),
-					"module2": semver.MustParse("2.1.47"),
+				modules: map[string]VersionConstraint{
+					"module1": geConstraint("^1.3.0"),
 				},
 			},
 			mod: &Module{
@@ -257,25 +263,57 @@ func TestFilter_FilterReleases(t *testing.T) {
 			want: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.3.0", "v1.4.1"},
 		},
 		{
-			name: "module not in filter",
+			name: "semver constraint tilde ~ (>=1.3.0 <1.4.0)",
 			filter: Filter{
 				logger: logger,
-				modules: map[string]*semver.Version{
-					"module1": semver.MustParse("v1.3.0"),
-					"module2": semver.MustParse("2.1.47")},
+				modules: map[string]VersionConstraint{
+					"module1": geConstraint("~1.3.0"),
+				},
 			},
 			mod: &Module{
-				Name:     "module",
+				Name:     "module1",
+				Releases: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.3.3", "v1.4.1"},
+			},
+			want: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.3.0", "v1.3.3"},
+		},
+		{
+			name: "semver constraint range >=1.1.0 <1.3.0",
+			filter: Filter{
+				logger: logger,
+				modules: map[string]VersionConstraint{
+					"module1": geConstraint(">=1.1.0 <1.3.0"),
+				},
+			},
+			mod: &Module{
+				Name:     "module1",
 				Releases: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.4.1"},
 			},
-			want: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.4.1"},
+			want: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.1.0", "v1.2.0"},
+		},
+		{
+			name: "happy path: exact match",
+			filter: Filter{
+				logger: logger,
+				modules: map[string]VersionConstraint{
+					"module1": NewExactTagConstraint("v1.3.0"),
+				},
+			},
+			mod: &Module{
+				Name:     "module1",
+				Releases: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.3.3", "v1.4.1"},
+			},
+			want: []string{"v1.3.0"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.filter.FilterReleaseTagsAboveMinimal(tt.mod)
-			require.ElementsMatch(t, tt.want, tt.mod.Releases)
-			require.Len(t, tt.mod.Releases, len(tt.want))
+			var got []string
+			if tt.filter.ShouldMirrorReleaseChannels(tt.mod.Name) {
+				got = append(got, "alpha", "beta", "early-access", "stable", "rock-solid")
+			}
+			got = append(got, tt.filter.VersionsToMirror(tt.mod)...)
+			require.ElementsMatch(t, tt.want, got)
+			require.Len(t, got, len(tt.want))
 		})
 	}
 }

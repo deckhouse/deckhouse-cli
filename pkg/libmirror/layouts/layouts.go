@@ -262,12 +262,15 @@ func FindDeckhouseModulesImages(
 		}
 
 		moduleImageLayouts := layouts.Modules[module.Name]
-		moduleImageLayouts.ReleaseImages = map[string]struct{}{
-			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":alpha":        {},
-			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":beta":         {},
-			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":early-access": {},
-			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":stable":       {},
-			path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":rock-solid":   {},
+		moduleImageLayouts.ReleaseImages = map[string]struct{}{}
+		if filter.ShouldMirrorReleaseChannels(module.Name) {
+			moduleImageLayouts.ReleaseImages = map[string]struct{}{
+				path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":alpha":        {},
+				path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":beta":         {},
+				path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":early-access": {},
+				path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":stable":       {},
+				path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":rock-solid":   {},
+			}
 		}
 
 		moduleImages, releaseImages, err := modules.FindExternalModuleImages(
