@@ -31,7 +31,7 @@ const (
 )
 
 var validChannels = map[string]struct{}{
-	"alpha": {}, "beta": {}, "early-access": {}, "stable": {}, "rock-solid": {},
+	"alpha": {}, "beta": {}, "early-access": {}, "stable": {}, "rock-solid": {}, "lts": {},
 }
 
 // Filter for modules by black and whitelists. Maps module names to minimal versions of these modules to be pulled.

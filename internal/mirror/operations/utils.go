@@ -6,4 +6,5 @@ var Channels = []string{
 	"early-access",
 	"stable",
 	"rock-solid",
+	"lts",
 }
