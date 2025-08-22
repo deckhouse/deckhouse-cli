@@ -230,24 +230,28 @@ func FillLayoutsWithBasicDeckhouseImages(
 	layouts.DeckhouseImages[pullParams.DeckhouseRegistryRepo+":early-access"] = struct{}{}
 	layouts.DeckhouseImages[pullParams.DeckhouseRegistryRepo+":stable"] = struct{}{}
 	layouts.DeckhouseImages[pullParams.DeckhouseRegistryRepo+":rock-solid"] = struct{}{}
+		layouts.DeckhouseImages[pullParams.DeckhouseRegistryRepo+":lts"] = struct{}{}
 
 	layouts.InstallImages[pullParams.DeckhouseRegistryRepo+"/install:alpha"] = struct{}{}
 	layouts.InstallImages[pullParams.DeckhouseRegistryRepo+"/install:beta"] = struct{}{}
 	layouts.InstallImages[pullParams.DeckhouseRegistryRepo+"/install:early-access"] = struct{}{}
 	layouts.InstallImages[pullParams.DeckhouseRegistryRepo+"/install:stable"] = struct{}{}
 	layouts.InstallImages[pullParams.DeckhouseRegistryRepo+"/install:rock-solid"] = struct{}{}
+	layouts.InstallImages[pullParams.DeckhouseRegistryRepo+"/install:lts"] = struct{}{}
 
 	layouts.InstallStandaloneImages[pullParams.DeckhouseRegistryRepo+"/install-standalone:alpha"] = struct{}{}
 	layouts.InstallStandaloneImages[pullParams.DeckhouseRegistryRepo+"/install-standalone:beta"] = struct{}{}
 	layouts.InstallStandaloneImages[pullParams.DeckhouseRegistryRepo+"/install-standalone:early-access"] = struct{}{}
 	layouts.InstallStandaloneImages[pullParams.DeckhouseRegistryRepo+"/install-standalone:stable"] = struct{}{}
 	layouts.InstallStandaloneImages[pullParams.DeckhouseRegistryRepo+"/install-standalone:rock-solid"] = struct{}{}
+	layouts.InstallStandaloneImages[pullParams.DeckhouseRegistryRepo+"/install-standalone:lts"] = struct{}{}
 
 	layouts.ReleaseChannelImages[pullParams.DeckhouseRegistryRepo+"/release-channel:alpha"] = struct{}{}
 	layouts.ReleaseChannelImages[pullParams.DeckhouseRegistryRepo+"/release-channel:beta"] = struct{}{}
 	layouts.ReleaseChannelImages[pullParams.DeckhouseRegistryRepo+"/release-channel:early-access"] = struct{}{}
 	layouts.ReleaseChannelImages[pullParams.DeckhouseRegistryRepo+"/release-channel:stable"] = struct{}{}
 	layouts.ReleaseChannelImages[pullParams.DeckhouseRegistryRepo+"/release-channel:rock-solid"] = struct{}{}
+	layouts.ReleaseChannelImages[pullParams.DeckhouseRegistryRepo+"/release-channel:lts"] = struct{}{}
 }
 
 func FindDeckhouseModulesImages(
@@ -270,6 +274,7 @@ func FindDeckhouseModulesImages(
 				path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":early-access": {},
 				path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":stable":       {},
 				path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":rock-solid":   {},
+				path.Join(params.DeckhouseRegistryRepo, params.ModulesPathSuffix, module.Name, "release") + ":lts":   {},
 			}
 		}
 
