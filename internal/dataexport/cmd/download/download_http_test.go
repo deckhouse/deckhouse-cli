@@ -21,6 +21,8 @@ import (
 
 // helper to create SafeClient with empty rest.Config (no auth)
 func newNoAuthSafe() *safereq.SafeClient {
+	// Ensure that SafeClient allows unauthenticated HTTP requests during unit tests.
+	safereq.SupportNoAuth = true
 	sc, _ := safereq.NewSafeClient()
 	return sc.Copy()
 }
