@@ -339,11 +339,12 @@ func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace st
 		return
 	}
 
-	subClient = sClient.Copy()
+	// Reuse the original SafeClient unless we need to inject additional CA.
+	subClient = sClient
 
-	if publish {
-		subClient.SetTLSCAData([]byte{})
-	} else if len(intrenalCAData) > 0 {
+	if !publish && len(intrenalCAData) > 0 {
+		// Create an isolated copy to avoid mutating the original client
+		subClient = sClient.Copy()
 		decodedBytes, err := base64.StdEncoding.DecodeString(intrenalCAData)
 		if err != nil {
 			finErr = fmt.Errorf("CA decoding error: %s", err.Error())

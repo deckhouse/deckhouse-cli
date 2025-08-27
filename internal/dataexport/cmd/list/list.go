@@ -24,6 +24,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 const (
@@ -134,7 +136,16 @@ func downloadFunc(
 	case "Block":
 		body := ""
 		if contLen := resp.Header.Get("Content-Length"); contLen != "" {
-			body = fmt.Sprintf("Content-Length: %s", contLen)
+			// Convert raw bytes value to human-readable size using k8s quantity library.
+			// We deliberately ignore conversion errors and fallback to raw bytes if any.
+			if size, err := strconv.ParseInt(contLen, 10, 64); err == nil {
+				q := resource.NewQuantity(size, resource.BinarySI)
+				body = fmt.Sprintf("Disk size: %s", q.String())
+			} else {
+				body = fmt.Sprintf("Disk size: %s bytes", contLen)
+			}
+			// Ensure the size information is printed on a dedicated line for better readability.
+			body += "\n"
 		}
 		return foo(strings.NewReader(body))
 	case "Filesystem":
