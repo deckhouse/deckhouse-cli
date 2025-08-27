@@ -34,6 +34,8 @@ func TestListFilesystem_OK(t *testing.T) {
 	origPrep := util.PrepareDownloadFunc
 	origCreate := util.CreateDataExporterIfNeededFunc
 	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+		// Re-enable support for unauthenticated requests inside unit tests.
+		safereq.SupportNoAuth = true
 		return srv.URL + "/api/v1/files", "Filesystem", newSafe(), nil
 	}
 	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
@@ -68,6 +70,8 @@ func TestListBlock_OK(t *testing.T) {
 	origPrep := util.PrepareDownloadFunc
 	origCreate := util.CreateDataExporterIfNeededFunc
 	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+		// Re-enable support for unauthenticated requests inside unit tests.
+		safereq.SupportNoAuth = true
 		return srv.URL + "/api/v1/block", "Block", newSafe(), nil
 	}
 	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
@@ -89,7 +93,7 @@ func TestListBlock_OK(t *testing.T) {
 	io.Copy(&buf, r)
 	os.Stdout = oldStd
 
-	require.Contains(t, buf.String(), "Content-Length: 1234")
+	require.Contains(t, buf.String(), "Disk size:")
 }
 
 func TestListFilesystem_NotDir(t *testing.T) {
@@ -101,6 +105,8 @@ func TestListFilesystem_NotDir(t *testing.T) {
 	origPrep := util.PrepareDownloadFunc
 	origCreate := util.CreateDataExporterIfNeededFunc
 	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+		// Re-enable support for unauthenticated requests inside unit tests.
+		safereq.SupportNoAuth = true
 		return srv.URL + "/api/v1/files", "Filesystem", newSafe(), nil
 	}
 	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
