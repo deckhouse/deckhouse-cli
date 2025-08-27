@@ -43,12 +43,16 @@ const (
 
 func cmdExamples() string {
 	resp := []string{
-		fmt.Sprintf("  # Start exporter + Download + Stop for Filesystem"),
+		"  # Start exporter + Download + Stop for Filesystem",
 		fmt.Sprintf("    ... %s [flags] kind/volume_name path/file.ext [-o out_file.ext]", cmdName),
-		fmt.Sprintf("    ... %s -n target-namespace PVC/my-file-volume mydir/testdir/file.txt -o file.txt", cmdName),
-		fmt.Sprintf("  # Start exporter + Download + Stop for Block"),
+		fmt.Sprintf("    ... %s -n target-namespace pvc/my-file-volume mydir/testdir/file.txt -o file.txt", cmdName),
+		"  # Start exporter + Download + Stop for Block",
 		fmt.Sprintf("    ... %s [flags] kind/volume_name [-o out_file.ext]", cmdName),
-		fmt.Sprintf("    ... %s -n target-namespace VS/my-vs-volume -o file.txt", cmdName),
+		fmt.Sprintf("    ... %s -n target-namespace vs/my-vs-volume -o file.txt", cmdName),
+		"  # Start exporter + Download + Stop for VirtualDisk (Block)",
+		fmt.Sprintf("    ... %s -n target-namespace vd/my-virtualdisk -o file.img", cmdName),
+		"  # Start exporter + Download + Stop for VirtualDiskSnapshot (Block)",
+		fmt.Sprintf("    ... %s -n target-namespace vds/my-virtualdisk-snapshot -o file.img", cmdName),
 	}
 	return strings.Join(resp, "\n")
 }
@@ -70,6 +74,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
 	cmd.Flags().StringP("output", "o", "", "file to save data (default: same as resource)") //TODO support /dev/stdout
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
+	cmd.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
 
 	return cmd
 }
@@ -240,9 +245,11 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 }
 
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
+
 	namespace, _ := cmd.Flags().GetString("namespace")
 	dstPath, _ := cmd.Flags().GetString("output")
 	publish, _ := cmd.Flags().GetBool("publish")
+	ttl, _ := cmd.Flags().GetString("ttl")
 
 	dataName, srcPath, err := parseArgs(args)
 	if err != nil {
@@ -260,14 +267,14 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	deName, err := util.CreateDataExporterIfNeeded(ctx, log, dataName, namespace, publish, rtClient)
+	deName, err := util.CreateDataExporterIfNeededFunc(ctx, log, dataName, namespace, publish, ttl, rtClient)
 	if err != nil {
 		return err
 	}
 
 	log.Info("DataExport created", slog.String("name", deName), slog.String("namespace", namespace))
 
-	url, volumeMode, subClient, err := util.PrepareDownload(ctx, log, deName, namespace, publish, sClient)
+	url, volumeMode, subClient, err := util.PrepareDownloadFunc(ctx, log, deName, namespace, publish, sClient)
 	if err != nil {
 		return err
 	}
@@ -287,7 +294,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 			dstPath = deName
 		}
 	default:
-		return fmt.Errorf("%w: %s", util.UnsupportedVolumeModeErr, volumeMode)
+		return fmt.Errorf("%w: %s", util.ErrUnsupportedVolumeMode, volumeMode)
 	}
 
 	log.Info("Start downloading", slog.String("url", url+srcPath), slog.String("dstPath", dstPath))
