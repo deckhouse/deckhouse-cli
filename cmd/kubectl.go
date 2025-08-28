@@ -26,7 +26,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/clientcmd"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
 	kubecmd "k8s.io/kubectl/pkg/cmd"
@@ -39,32 +38,19 @@ const (
 )
 
 func getDebugImage(cmd *cobra.Command) (string, error) {
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	configOverrides := &clientcmd.ConfigOverrides{}
-
-	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		loadingRules,
-		configOverrides,
-	)
-
-	rawConfig, err := kubeConfig.RawConfig()
+	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
-		return "", fmt.Errorf("failed to get raw kubeconfig: %w", err)
+		return "", fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	currentContext := rawConfig.CurrentContext
-	if currentContext == "" {
-		return "", errors.New("no current context in kubeconfig")
-	}
-
-	kubeconfigPath := ""
-	if len(loadingRules.Precedence) > 0 {
-		kubeconfigPath = loadingRules.Precedence[0]
-	}
-
-	_, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, currentContext)
+	contextName, err := cmd.Flags().GetString("context")
 	if err != nil {
-		return "", fmt.Errorf("failed to create Kubernetes client: %w", err)
+		return "", fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	_, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
+	if err != nil {
+		return "", fmt.Errorf("Failed to create Kubernetes client: %w", err)
 	}
 
 	var ErrGenericImageFetch = errors.New("Cannot get debug image from cluster, please specify --image explicitly")
