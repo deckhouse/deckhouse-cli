@@ -33,7 +33,7 @@ import (
 )
 
 func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
-	releaseChannelsToCopy := []string{"alpha", "beta", "early-access", "stable", "rock-solid", "lts"}
+	releaseChannelsToCopy := []string{"alpha", "beta", "early-access", "stable", "rock-solid"}
 	releaseChannelsVersions := make([]*semver.Version, len(releaseChannelsToCopy))
 	for i, channel := range releaseChannelsToCopy {
 		v, err := getReleaseChannelVersionFromRegistry(pullParams, channel)
