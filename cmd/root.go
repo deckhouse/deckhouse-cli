@@ -86,12 +86,15 @@ func Execute() {
 
 	if err := rootCmd.Execute(); err != nil {
 		if helm_v3.IsPluginError(err) {
+			fmt.Fprintf(os.Stderr, "d8 version %s\n", Version)
 			werfcommon.ShutdownTelemetry(ctx, helm_v3.PluginErrorCode(err))
 			werfcommon.TerminateWithError(err.Error(), helm_v3.PluginErrorCode(err))
 		} else if errors.Is(err, resrcchangcalc.ErrChangesPlanned) {
+			fmt.Fprintf(os.Stderr, "d8 version %s\n", Version)
 			werfcommon.ShutdownTelemetry(ctx, 2)
 			os.Exit(2)
 		} else {
+			fmt.Fprintf(os.Stderr, "d8 version %s\n", Version)
 			werfcommon.ShutdownTelemetry(ctx, 1)
 			werfcommon.TerminateWithError(err.Error(), 1)
 		}
