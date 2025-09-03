@@ -1,6 +1,5 @@
-*                             @name212 @mvasl
+*                             @name212 @RomanenkoDenys
 /cmd/delivery.go              @alexey-igrychev @ilya-lesikov
 /cmd/stronghold.go            @trublast
 /cmd/virtualization.go        @fl64 @diafour
-/internal/platform/           @mvasl @d2285
 /internal/virtualization/     @fl64 @diafour
