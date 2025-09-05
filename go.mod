@@ -7,6 +7,7 @@ toolchain go1.24.4
 require (
 	github.com/Masterminds/semver/v3 v3.3.0
 	github.com/deckhouse/virtualization/src/cli v0.0.0-20250617111832-70fdc2799bf3
+	github.com/fatih/color v1.17.0
 	github.com/google/go-containerregistry v0.20.0
 	github.com/gosimple/slug v1.15.0
 	github.com/hashicorp/go-cleanhttp v0.5.2
@@ -107,6 +108,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.33.9 // indirect
 	github.com/aws/smithy-go v1.22.1 // indirect
 	github.com/axiomhq/hyperloglog v0.0.0-20220105174342-98591331716a // indirect
+	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/aymanbagabas/go-udiff v0.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bgentry/speakeasy v0.1.0 // indirect
@@ -186,7 +188,6 @@ require (
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
 	github.com/exponent-io/jsonpath v0.0.0-20210407135951-1de76d718b3f // indirect
 	github.com/fatih/camelcase v1.0.0 // indirect
-	github.com/fatih/color v1.17.0 // indirect
 	github.com/fatih/structs v1.1.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fluxcd/flagger v1.36.1 // indirect
@@ -374,6 +375,7 @@ require (
 	github.com/linode/linodego v0.7.1 // indirect
 	github.com/lithammer/dedent v1.1.0 // indirect
 	github.com/looplab/fsm v1.0.2 // indirect
+	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/manifoldco/promptui v0.9.0 // indirect
@@ -416,6 +418,7 @@ require (
 	github.com/monochromegane/go-gitignore v0.0.0-20200626010858-205db1a8cc00 // indirect
 	github.com/montanaflynn/stats v0.7.0 // indirect
 	github.com/morikuni/aec v1.0.0 // indirect
+	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/mxk/go-flowrate v0.0.0-20140419014527-cca7078d478f // indirect
 	github.com/natefinch/atomic v1.0.1 // indirect

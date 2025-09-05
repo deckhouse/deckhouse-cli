@@ -27,4 +27,10 @@ func AddFlags(flagSet *pflag.FlagSet) {
 		false,
 		"Show empty queues.",
 	)
+	flagSet.BoolP(
+		"watch",
+		"w",
+		false,
+		"Watch for changes to the queue list.",
+	)
 }

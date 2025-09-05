@@ -68,6 +68,11 @@ func listModule(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to show empty queues from flag: %w", err)
 	}
 
+	watch, err := cmd.Flags().GetBool("watch")
+	if err != nil {
+		return fmt.Errorf("Failed to get watch flag: %w", err)
+	}
+
 	format, err := cmd.Flags().GetString("output")
 	if err != nil {
 		return fmt.Errorf("Failed to get output format: %w", err)
@@ -78,7 +83,7 @@ func listModule(cmd *cobra.Command, _ []string) error {
 		pathFromOption = pathFromOption + "?showEmpty=true"
 	}
 
-	err = operatequeue.OperateQueue(config, kubeCl, pathFromOption)
+	err = operatequeue.OperateQueue(config, kubeCl, pathFromOption, watch)
 	if err != nil {
 		return fmt.Errorf("Error list queues: %w", err)
 	}
