@@ -70,7 +70,7 @@ func mainQueue(cmd *cobra.Command, _ []string) error {
 
 	pathFromOption := "main." + format
 
-	err = operatequeue.OperateQueue(config, kubeCl, pathFromOption)
+	err = operatequeue.OperateQueue(config, kubeCl, pathFromOption, false)
 	if err != nil {
 		return fmt.Errorf("Error list main queue: %w", err)
 	}

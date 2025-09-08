@@ -31,5 +31,11 @@ func ValidateParameters(cmd *cobra.Command, args []string) error {
 	if _, valid := allowedOutput[outputFormat]; !valid {
 		return fmt.Errorf("Please provide valid output: text, yaml, json. Got '%s', try --help\n", outputFormat)
 	}
+
+	watch, _ := cmd.Flags().GetBool("watch")
+	if watch && outputFormat != "text" {
+		return fmt.Errorf("Watch mode is only supported with text output format. Current format: %s", outputFormat)
+	}
+
 	return nil
 }
