@@ -58,6 +58,7 @@ func init() {
 		{"operator", "Perform operator-specific tasks"},
 		{"secrets", "Interact with secrets engines"},
 		{"token", "Interact with tokens"},
+		{"namespace", "Interact with namespaces"},
 		{"lease", "Interact with leases"},
 		{"transit", "Interact with Stronghold's Transit Secrets Engine"},
 		{"auth", "Interact with auth methods"},
