@@ -100,8 +100,17 @@ func downloadFunc(
 	var req *http.Request
 	switch volumeMode {
 	case "Filesystem":
-		if srcPath == "" || srcPath[len(srcPath)-1:] != "/" {
-			return fmt.Errorf("invalid source path: '%s'", srcPath)
+		if srcPath == "" {
+			if strings.HasPrefix(deName, "vd/") || strings.HasPrefix(deName, "vds/") {
+				// default to root listing for VD/VDS
+				srcPath = "/"
+			} else {
+				return fmt.Errorf("invalid source path: '%s'", srcPath)
+			}
+		}
+		// ensure trailing slash for directory listing
+		if srcPath[len(srcPath)-1:] != "/" {
+			srcPath += "/"
 		}
 		dataURL, err := neturl.JoinPath(url, srcPath)
 		if err != nil {

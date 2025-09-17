@@ -184,6 +184,12 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 	}
 
 	if srcPath != "" && srcPath[len(srcPath)-1:] == "/" {
+		// Ensure destination root directory exists
+		if dstPath != "" {
+			if err := os.MkdirAll(dstPath, os.ModePerm); err != nil {
+				return fmt.Errorf("create destination root dir error: %s", err.Error())
+			}
+		}
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 		var firstErr error
@@ -221,7 +227,10 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 		return firstErr
 	} else {
 		if dstPath != "" {
-			// Create out file
+			// Ensure parent directory exists and create output file
+			if err := os.MkdirAll(filepath.Dir(dstPath), os.ModePerm); err != nil {
+				return fmt.Errorf("create destination dir error: %s", err.Error())
+			}
 			out, err := os.Create(dstPath)
 			if err != nil {
 				return err
@@ -281,6 +290,9 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	switch volumeMode {
 	case "Filesystem":
+		if (srcPath == "" || srcPath == "/") && (strings.HasPrefix(dataName, "vd/") || strings.HasPrefix(dataName, "vds/")) {
+			srcPath = "/" + util.VirtualDiskImage
+		}
 		if srcPath == "" {
 			return fmt.Errorf("invalid source path: '%s'", srcPath)
 		}
