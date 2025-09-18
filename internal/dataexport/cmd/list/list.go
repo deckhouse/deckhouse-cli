@@ -101,12 +101,7 @@ func downloadFunc(
 	switch volumeMode {
 	case "Filesystem":
 		if srcPath == "" {
-			if strings.HasPrefix(deName, "vd/") || strings.HasPrefix(deName, "vds/") {
-				// default to root listing for VD/VDS
-				srcPath = "/"
-			} else {
-				return fmt.Errorf("invalid source path: '%s'", srcPath)
-			}
+			return fmt.Errorf("invalid source path: '%s'", srcPath)
 		}
 		// ensure trailing slash for directory listing
 		if srcPath[len(srcPath)-1:] != "/" {
@@ -188,12 +183,18 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	if err != nil {
 		return err
 	}
-	deName, err := util.CreateDataExporterIfNeededFunc(ctx, log, dataName, namespace, publish, ttl, rtClient)
+	deName, volumeKind, err := util.CreateDataExporterIfNeededFunc(ctx, log, dataName, namespace, publish, ttl, rtClient)
 	if err != nil {
 		return err
 	}
 
 	log.Info("DataExport created", slog.String("name", deName), slog.String("namespace", namespace))
+
+	if srcPath == "" {
+		if volumeKind == util.VirtualDiskKind || volumeKind == util.VirtualDiskSnapshotKind {
+			srcPath = "/"
+		}
+	}
 
 	err = downloadFunc(ctx, log, namespace, deName, srcPath, publish, sClient, func(body io.Reader) error {
 		_, err := io.Copy(os.Stdout, body)

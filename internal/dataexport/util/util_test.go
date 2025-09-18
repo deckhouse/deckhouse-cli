@@ -98,9 +98,13 @@ func TestCreateDataExporterIfNeeded(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-			returnedName, err := CreateDataExporterIfNeeded(ctx, logger, tt.input, "test-ns", false, "2m", c)
+			returnedName, kind, err := CreateDataExporterIfNeeded(ctx, logger, tt.input, "test-ns", false, "2m", c)
 			require.NoError(t, err)
 			require.Equal(t, tt.expectName, returnedName)
+			// kind may be empty when DataExport already exists
+			if tt.expectKind != "" {
+				require.Equal(t, tt.expectKind, kind)
+			}
 
 			var de v1alpha1.DataExport
 			getErr := c.Get(ctx, ctrlclient.ObjectKey{Name: tt.expectName, Namespace: "test-ns"}, &de)

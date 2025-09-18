@@ -276,7 +276,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	deName, err := util.CreateDataExporterIfNeededFunc(ctx, log, dataName, namespace, publish, ttl, rtClient)
+	deName, volumeKind, err := util.CreateDataExporterIfNeededFunc(ctx, log, dataName, namespace, publish, ttl, rtClient)
 	if err != nil {
 		return err
 	}
@@ -290,7 +290,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	switch volumeMode {
 	case "Filesystem":
-		if (srcPath == "" || srcPath == "/") && (strings.HasPrefix(dataName, "vd/") || strings.HasPrefix(dataName, "vds/")) {
+		if (srcPath == "" || srcPath == "/") && (volumeKind == util.VirtualDiskKind || volumeKind == util.VirtualDiskSnapshotKind) {
 			srcPath = "/" + util.VirtualDiskImage
 		}
 		if srcPath == "" {

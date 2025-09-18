@@ -43,8 +43,8 @@ func TestDownloadFilesystem_OK(t *testing.T) {
 	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		return srv.URL + "/api/v1/files", "Filesystem", newNoAuthSafe(), nil
 	}
-	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
-		return de, nil
+	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, string, error) {
+		return de, "", nil
 	}
 	defer func() {
 		util.PrepareDownloadFunc = origPrep
@@ -78,8 +78,8 @@ func TestDownloadFilesystem_BadPath(t *testing.T) {
 	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		return srv.URL + "/api/v1/files", "Block", newNoAuthSafe(), nil
 	}
-	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
-		return de, nil
+	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, string, error) {
+		return de, "", nil
 	}
 	defer func() { util.PrepareDownloadFunc = origPrep; util.CreateDataExporterIfNeededFunc = origCreate }()
 
@@ -102,8 +102,8 @@ func TestDownloadBlock_OK(t *testing.T) {
 	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		return srv.URL + "/api/v1/block", "Block", newNoAuthSafe(), nil
 	}
-	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
-		return de, nil
+	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, string, error) {
+		return de, "", nil
 	}
 	defer func() {
 		util.PrepareDownloadFunc = origPrep
@@ -132,8 +132,8 @@ func TestDownloadBlock_WrongEndpoint(t *testing.T) {
 	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		return srv.URL + "/api/v1/block", "Filesystem", newNoAuthSafe(), nil
 	}
-	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
-		return de, nil
+	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, string, error) {
+		return de, "", nil
 	}
 	defer func() { util.PrepareDownloadFunc = origPrep; util.CreateDataExporterIfNeededFunc = origCreate }()
 
