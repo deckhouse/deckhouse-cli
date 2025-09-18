@@ -38,8 +38,8 @@ func TestListFilesystem_OK(t *testing.T) {
 		safereq.SupportNoAuth = true
 		return srv.URL + "/api/v1/files", "Filesystem", newSafe(), nil
 	}
-	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
-		return de, nil
+	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, string, error) {
+		return de, "", nil
 	}
 	defer func() { util.PrepareDownloadFunc = origPrep; util.CreateDataExporterIfNeededFunc = origCreate }()
 
@@ -74,8 +74,8 @@ func TestListBlock_OK(t *testing.T) {
 		safereq.SupportNoAuth = true
 		return srv.URL + "/api/v1/block", "Block", newSafe(), nil
 	}
-	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
-		return de, nil
+	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, string, error) {
+		return de, "", nil
 	}
 	defer func() { util.PrepareDownloadFunc = origPrep; util.CreateDataExporterIfNeededFunc = origCreate }()
 
@@ -109,8 +109,8 @@ func TestListFilesystem_NotDir(t *testing.T) {
 		safereq.SupportNoAuth = true
 		return srv.URL + "/api/v1/files", "Filesystem", newSafe(), nil
 	}
-	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
-		return de, nil
+	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, string, error) {
+		return de, "", nil
 	}
 	defer func() { util.PrepareDownloadFunc = origPrep; util.CreateDataExporterIfNeededFunc = origCreate }()
 
