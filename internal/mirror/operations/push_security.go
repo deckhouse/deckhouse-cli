@@ -53,6 +53,7 @@ func PushSecurityDatabases(pushParams *params.PushParams, pkg io.Reader) error {
 		"trivy-java-db": "security/trivy-java-db",
 		"trivy-bdu":     "security/trivy-bdu",
 		"trivy-checks":  "security/trivy-checks",
+		"neuvector-db":  "neuvector/scanner",
 	}
 
 	for layoutPathSuffix, repo := range layoutsToPush {

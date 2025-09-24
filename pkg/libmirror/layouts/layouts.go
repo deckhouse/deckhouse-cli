@@ -64,6 +64,9 @@ type ImageLayouts struct {
 	TrivyChecks       layout.Path
 	TrivyChecksImages map[string]struct{}
 
+	NeuVectorDB       layout.Path
+	NeuVectorDBImages map[string]struct{}
+
 	Modules map[string]ModuleImageLayout
 
 	TagsResolver *TagsResolver

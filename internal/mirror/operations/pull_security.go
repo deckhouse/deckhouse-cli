@@ -33,6 +33,7 @@ func PullSecurityDatabases(pullParams *params.PullParams) error {
 	var err error
 	logger := pullParams.Logger
 	tmpDir := filepath.Join(pullParams.WorkingDir, "security")
+	neuvectorDir := filepath.Join(pullParams.WorkingDir, "neuvector")
 
 	imageLayouts := &layouts.ImageLayouts{}
 	imageLayouts.TrivyDB, err = layouts.CreateEmptyImageLayout(filepath.Join(tmpDir, "trivy-db"))
@@ -49,7 +50,11 @@ func PullSecurityDatabases(pullParams *params.PullParams) error {
 	}
 	imageLayouts.TrivyChecks, err = layouts.CreateEmptyImageLayout(filepath.Join(tmpDir, "trivy-checks"))
 	if err != nil {
-		return fmt.Errorf("setup java db layout: %w", err)
+		return fmt.Errorf("setup trivy checks layout: %w", err)
+	}
+	imageLayouts.NeuVectorDB, err = layouts.CreateEmptyImageLayout(filepath.Join(neuvectorDir, "scanner"))
+	if err != nil {
+		return fmt.Errorf("setup neuvector db layout: %w", err)
 	}
 
 	if err := layouts.PullTrivyVulnerabilityDatabasesImages(pullParams, imageLayouts); err != nil {
