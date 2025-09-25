@@ -36,7 +36,6 @@ func MandatoryLayoutsForSecurityDatabase(securityDbPkgDir string) map[string]str
 		"trivy bdu layout":           filepath.Join(securityDbPkgDir, "trivy-bdu"),
 		"trivy java database layout": filepath.Join(securityDbPkgDir, "trivy-java-db"),
 		"trivy checks layout":        filepath.Join(securityDbPkgDir, "trivy-checks"),
-		"neuvector database layout":  filepath.Join("neuvector", "scanner"),
 	}
 }
 

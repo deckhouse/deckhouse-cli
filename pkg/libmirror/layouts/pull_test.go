@@ -50,7 +50,6 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessSkipTLS(t *testing.T) {
 		deckhouseRepo + "/security/trivy-bdu:1",
 		deckhouseRepo + "/security/trivy-java-db:1",
 		deckhouseRepo + "/security/trivy-checks:0",
-		deckhouseRepo + "/neuvector/scanner:3",
 	}
 
 	wantImages := make([]v1.Image, 0)
@@ -68,7 +67,6 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessSkipTLS(t *testing.T) {
 		TrivyBDU:    createEmptyOCILayout(t),
 		TrivyJavaDB: createEmptyOCILayout(t),
 		TrivyChecks: createEmptyOCILayout(t),
-		NeuVectorDB: createEmptyOCILayout(t),
 	}
 
 	err := PullTrivyVulnerabilityDatabasesImages(
@@ -107,7 +105,6 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessInsecure(t *testing.T) {
 		deckhouseRepo + "/security/trivy-bdu:1",
 		deckhouseRepo + "/security/trivy-java-db:1",
 		deckhouseRepo + "/security/trivy-checks:0",
-		deckhouseRepo + "/neuvector/scanner:3",
 	}
 
 	wantImages := make([]v1.Image, 0)
@@ -125,7 +122,6 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessInsecure(t *testing.T) {
 		TrivyBDU:    createEmptyOCILayout(t),
 		TrivyJavaDB: createEmptyOCILayout(t),
 		TrivyChecks: createEmptyOCILayout(t),
-		NeuVectorDB: createEmptyOCILayout(t),
 	}
 
 	err := PullTrivyVulnerabilityDatabasesImages(
@@ -163,10 +159,8 @@ func layoutByIndex(t *testing.T, layouts *ImageLayouts, idx int) layout.Path {
 		return layouts.TrivyJavaDB
 	case 3:
 		return layouts.TrivyChecks
-	case 4:
-		return layouts.NeuVectorDB
 	default:
-		t.Fatalf("Unexpected layout index, expected only [0-4], but got %d", idx)
+		t.Fatalf("Unexpected layout index, expected only [0-3], but got %d", idx)
 		return ""
 	}
 }

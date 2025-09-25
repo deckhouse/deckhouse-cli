@@ -95,27 +95,49 @@ func PullDeckhouseImages(pullParams *params.PullParams, layouts *ImageLayouts) e
 
 func PullModules(pullParams *params.PullParams, layouts *ImageLayouts) error {
 	for moduleName, moduleData := range layouts.Modules {
-		pullParams.Logger.InfoLn(moduleName, "images")
-		if err := PullImageSet(
-			pullParams,
-			moduleData.ModuleLayout,
-			moduleData.ModuleImages,
-			WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
-		); err != nil {
-			return fmt.Errorf("pull %q module: %w", moduleName, err)
+		// Skip main module images if only pulling extra images
+		if !pullParams.OnlyExtraImages {
+			pullParams.Logger.InfoLn(moduleName, "images")
+			if err := PullImageSet(
+				pullParams,
+				moduleData.ModuleLayout,
+				moduleData.ModuleImages,
+				WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
+			); err != nil {
+				return fmt.Errorf("pull %q module: %w", moduleName, err)
+			}
+			pullParams.Logger.InfoLn(moduleName, "release channels")
+			if err := PullImageSet(
+				pullParams,
+				moduleData.ReleasesLayout,
+				moduleData.ReleaseImages,
+				WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
+				WithAllowMissingTags(true),
+			); err != nil {
+				return fmt.Errorf("pull %q module release information: %w", moduleName, err)
+			}
 		}
-		pullParams.Logger.InfoLn(moduleName, "release channels")
-		if err := PullImageSet(
-			pullParams,
-			moduleData.ReleasesLayout,
-			moduleData.ReleaseImages,
-			WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
-			WithAllowMissingTags(true),
-		); err != nil {
-			return fmt.Errorf("pull %q module release information: %w", moduleName, err)
+
+		// Always pull extra images if they exist
+		if len(moduleData.ExtraImages) > 0 {
+			pullParams.Logger.InfoLn(moduleName, "extra images")
+			if err := PullImageSet(
+				pullParams,
+				moduleData.ExtraLayout,
+				moduleData.ExtraImages,
+				WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
+				WithAllowMissingTags(true),
+			); err != nil {
+				return fmt.Errorf("pull %q module extra images: %w", moduleName, err)
+			}
 		}
 	}
-	pullParams.Logger.InfoLn("Deckhouse modules pulled!")
+	
+	message := "Deckhouse modules pulled!"
+	if pullParams.OnlyExtraImages {
+		message = "Extra images pulled!"
+	}
+	pullParams.Logger.InfoLn(message)
 	return nil
 }
 
@@ -130,7 +152,6 @@ func PullTrivyVulnerabilityDatabasesImages(
 		layouts.TrivyBDU:    path.Join(pullParams.DeckhouseRegistryRepo, "security", "trivy-bdu:1"),
 		layouts.TrivyJavaDB: path.Join(pullParams.DeckhouseRegistryRepo, "security", "trivy-java-db:1"),
 		layouts.TrivyChecks: path.Join(pullParams.DeckhouseRegistryRepo, "security", "trivy-checks:0"),
-		layouts.NeuVectorDB: path.Join(pullParams.DeckhouseRegistryRepo, "neuvector", "scanner:3"),
 	}
 
 	for dbImageLayout, imageRef := range dbImages {
