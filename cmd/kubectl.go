@@ -23,9 +23,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/kubernetes"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
 	kubecmd "k8s.io/kubectl/pkg/cmd"
@@ -38,17 +39,20 @@ const (
 )
 
 func getDebugImage(cmd *cobra.Command) (string, error) {
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
-	if err != nil {
-		return "", fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	configFlags := genericclioptions.NewConfigFlags(true)
+	if val, err := cmd.InheritedFlags().GetString("kubeconfig"); err == nil {
+		configFlags.KubeConfig = &val
+	}
+	if val, err := cmd.InheritedFlags().GetString("context"); err == nil {
+		configFlags.Context = &val
 	}
 
-	contextName, err := cmd.Flags().GetString("context")
+	restConfig, err := configFlags.ToRESTConfig()
 	if err != nil {
-		return "", fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+		return "", fmt.Errorf("Failed to create Kubernetes client: %w", err)
 	}
 
-	_, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
+	kubeCl, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return "", fmt.Errorf("Failed to create Kubernetes client: %w", err)
 	}
