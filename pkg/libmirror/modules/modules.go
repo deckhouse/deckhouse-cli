@@ -222,15 +222,15 @@ func FindModuleExtraImages(
 			return nil, fmt.Errorf("Extract extra_images.json from %q: %w", imageTag, err)
 		}
 
-		// Parse extra_images.json - it should contain image:tag mappings
-		var extraImagesMap map[string]interface{}
+		// Parse extra_images.json - it should contain image_name:tag mappings
+		var extraImagesMap map[string]string
 		if err := json.Unmarshal(extraImagesJSON.Bytes(), &extraImagesMap); err != nil {
 			return nil, fmt.Errorf("Parse extra_images.json from %q: %w", imageTag, err)
 		}
 
-		// Convert to full registry paths
-		for imageName := range extraImagesMap {
-			fullImagePath := path.Join(mod.RegistryPath, "extra", imageName)
+		// Convert to full registry paths with tags
+		for imageName, imageTag := range extraImagesMap {
+			fullImagePath := path.Join(mod.RegistryPath, "extra", imageName) + ":" + imageTag
 			extraImages[fullImagePath] = struct{}{}
 		}
 
