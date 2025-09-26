@@ -133,7 +133,7 @@ func FindExternalModuleImages(
 		releaseImages[path.Join(mod.RegistryPath, "release")+":"+tag] = struct{}{}
 	}
 
-	for imageTag := range (moduleImages) {
+	for imageTag := range moduleImages {
 		ref, err := name.ParseReference(imageTag, nameOpts...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("Get digests for %q version: %w", imageTag, err)

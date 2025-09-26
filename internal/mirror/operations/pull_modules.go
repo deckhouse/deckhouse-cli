@@ -67,11 +67,17 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 		if err != nil {
 			return fmt.Errorf("create OCI layout: %w", err)
 		}
+		extraLayout, err := layouts.CreateEmptyImageLayout(filepath.Join(tmpDir, module.Name, "extra"))
+		if err != nil {
+			return fmt.Errorf("create OCI layout: %w", err)
+		}
 		imageLayouts.Modules[module.Name] = layouts.ModuleImageLayout{
 			ModuleLayout:   moduleLayout,
 			ReleasesLayout: releasesLayout,
+			ExtraLayout:    extraLayout,
 			ModuleImages:   make(map[string]struct{}),
 			ReleaseImages:  make(map[string]struct{}),
+			ExtraImages:    make(map[string]struct{}),
 		}
 	}
 
