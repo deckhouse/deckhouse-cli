@@ -192,8 +192,8 @@ func getAvailableReleaseChannelsImagesForModule(mod *Module, refOpts []name.Opti
 	return result, nil
 }
 
-// FindExtraModuleImages extracts extra_images.json from module images and returns extra images map
-func FindExtraModuleImages(
+// FindModuleExtraImages extracts extra_images.json from module images and returns extra images map
+func FindModuleExtraImages(
 	mod *Module,
 	moduleImages map[string]struct{},
 	authProvider authn.Authenticator,
@@ -234,7 +234,7 @@ func FindExtraModuleImages(
 			extraImages[fullImagePath] = struct{}{}
 		}
 
-		break // Found extra_images.json, no need to check other versions
+		// Continue checking other versions to collect all possible extra images
 	}
 
 	return extraImages, nil

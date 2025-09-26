@@ -302,7 +302,7 @@ func FindDeckhouseModulesImages(
 		maps.Copy(moduleImageLayouts.ReleaseImages, releaseImages)
 
 		// Find extra images if any exist
-		extraImages, err := modules.FindExtraModuleImages(
+		extraImages, err := modules.FindModuleExtraImages(
 			&module,
 			moduleImages,
 			params.RegistryAuth,
