@@ -128,7 +128,8 @@ func FindExternalModuleImages(
 		}
 	}
 
-	for _, tag := range filter.VersionsToMirror(mod) {
+	versionsToMirror := filter.VersionsToMirror(mod)
+	for _, tag := range versionsToMirror {
 		moduleImages[mod.RegistryPath+":"+tag] = struct{}{}
 		releaseImages[path.Join(mod.RegistryPath, "release")+":"+tag] = struct{}{}
 	}
@@ -223,13 +224,23 @@ func FindModuleExtraImages(
 		}
 
 		// Parse extra_images.json - it should contain image_name:tag mappings
-		var extraImagesMap map[string]string
-		if err := json.Unmarshal(extraImagesJSON.Bytes(), &extraImagesMap); err != nil {
+		// Support numeric tag values like {"scanner": 3}
+		var extraImagesRaw map[string]interface{}
+		if err := json.Unmarshal(extraImagesJSON.Bytes(), &extraImagesRaw); err != nil {
 			return nil, fmt.Errorf("Parse extra_images.json from %q: %w", imageTag, err)
 		}
 
 		// Convert to full registry paths with tags
-		for imageName, imageTag := range extraImagesMap {
+		for imageName, tagValue := range extraImagesRaw {
+			var imageTag string
+			switch v := tagValue.(type) {
+			case float64:
+				imageTag = fmt.Sprintf("%.0f", v)
+			case int:
+				imageTag = fmt.Sprintf("%d", v)
+			default:
+				return nil, fmt.Errorf("Invalid tag type for %q in extra_images.json: %T", imageName, tagValue)
+			}
 			fullImagePath := path.Join(mod.RegistryPath, "extra", imageName) + ":" + imageTag
 			extraImages[fullImagePath] = struct{}{}
 		}
