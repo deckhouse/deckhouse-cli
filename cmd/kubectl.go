@@ -17,17 +17,104 @@ limitations under the License.
 package cmd
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"time"
+
 	"github.com/spf13/cobra"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/kubernetes"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
 	kubecmd "k8s.io/kubectl/pkg/cmd"
 )
+
+const (
+	cmNamespace = "d8-system"
+	cmName      = "debug-container"
+	cmImageKey  = "image"
+)
+
+func getDebugImage(cmd *cobra.Command) (string, error) {
+	configFlags := genericclioptions.NewConfigFlags(true)
+	if val, err := cmd.InheritedFlags().GetString("kubeconfig"); err == nil {
+		configFlags.KubeConfig = &val
+	}
+	if val, err := cmd.InheritedFlags().GetString("context"); err == nil {
+		configFlags.Context = &val
+	}
+
+	restConfig, err := configFlags.ToRESTConfig()
+	if err != nil {
+		return "", fmt.Errorf("Failed to create Kubernetes client: %w", err)
+	}
+
+	kubeCl, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return "", fmt.Errorf("Failed to create Kubernetes client: %w", err)
+	}
+
+	var ErrGenericImageFetch = errors.New("Cannot get debug image from cluster, please specify --image explicitly")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	configMap, err := kubeCl.CoreV1().ConfigMaps(cmNamespace).Get(ctx, cmName, v1.GetOptions{})
+	if err != nil {
+		return "", ErrGenericImageFetch
+	}
+
+	imageName, ok := configMap.Data[cmImageKey]
+	if !ok || imageName == "" {
+		return "", ErrGenericImageFetch
+	}
+
+	return imageName, nil
+}
 
 func init() {
 	kubectlCmd := kubecmd.NewDefaultKubectlCommand()
 	kubectlCmd.Use = "k"
 	kubectlCmd.Aliases = []string{"kubectl"}
 	kubectlCmd = ReplaceCommandName("kubectl", "d8 k", kubectlCmd)
+
+	var debugCmd *cobra.Command
+	for _, cmd := range kubectlCmd.Commands() {
+		if cmd.Name() == "debug" {
+			debugCmd = cmd
+			break
+		}
+	}
+
+	if debugCmd != nil {
+		if imageFlag := debugCmd.Flags().Lookup("image"); imageFlag != nil {
+			imageFlag.Usage = "Container image to use for debug container. If not specified, the platform's recommended image will be used."
+		}
+	}
+
+	originalPersistentPreRunE := kubectlCmd.PersistentPreRunE
+	kubectlCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if cmd.Name() == "debug" || (cmd.Parent() != nil && cmd.Parent().Name() == "debug") {
+			imageFlag := cmd.Flags().Lookup("image")
+			if imageFlag != nil && imageFlag.Value.String() == "" {
+				debugImage, err := getDebugImage(cmd)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: cannot get debug container image from cluster: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Continuing with default kubectl behavior...\n")
+				} else {
+					fmt.Fprintf(os.Stderr, "Using debug container image: %s\n", debugImage)
+					cmd.Flags().Set("image", debugImage)
+				}
+			}
+		}
+
+		if originalPersistentPreRunE != nil {
+			return originalPersistentPreRunE(cmd, args)
+		}
+		panic("originalPersistentPreRunE is nil, cannot proceed")
+	}
 
 	// Based on https://github.com/kubernetes/kubernetes/blob/v1.29.3/staging/src/k8s.io/component-base/cli/run.go#L88
 
