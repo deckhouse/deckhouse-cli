@@ -73,9 +73,10 @@ var (
 	DoGOSTDigest bool
 	NoPullResume bool
 
-	NoPlatform   bool
-	NoSecurityDB bool
-	NoModules    bool
+	NoPlatform      bool
+	NoSecurityDB    bool
+	NoModules       bool
+	OnlyExtraImages bool
 )
 
 var pullLong = `Download Deckhouse Kubernetes Platform distribution to the local filesystem.
@@ -183,8 +184,12 @@ func pull(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	if !pullParams.SkipModules {
-		if err := logger.Process("Pull Modules", func() error {
+	if !pullParams.SkipModules || pullParams.OnlyExtraImages {
+		processName := "Pull Modules"
+		if pullParams.OnlyExtraImages {
+			processName = "Pull Extra Images"
+		}
+		if err := logger.Process(processName, func() error {
 			modulesRepo := path.Join(pullParams.DeckhouseRegistryRepo, pullParams.ModulesPathSuffix)
 			ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
 			defer cancel()
@@ -305,6 +310,7 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 		SkipPlatform:          NoPlatform,
 		SkipSecurityDatabases: NoSecurityDB,
 		SkipModules:           NoModules,
+		OnlyExtraImages:       OnlyExtraImages,
 		DeckhouseTag:          DeckhouseTag,
 		SinceVersion:          SinceVersion,
 	}

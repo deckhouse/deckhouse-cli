@@ -40,6 +40,9 @@ type ModuleImageLayout struct {
 
 	ReleasesLayout layout.Path
 	ReleaseImages  map[string]struct{}
+
+	ExtraLayout layout.Path
+	ExtraImages map[string]struct{}
 }
 
 type ImageLayouts struct {
@@ -99,6 +102,9 @@ func (l *ImageLayouts) AsList() []layout.Path {
 		if moduleImageLayout.ReleasesLayout != "" {
 			paths = append(paths, moduleImageLayout.ReleasesLayout)
 		}
+		if moduleImageLayout.ExtraLayout != "" {
+			paths = append(paths, moduleImageLayout.ExtraLayout)
+		}
 	}
 
 	return paths
@@ -137,11 +143,19 @@ func CreateOCIImageLayoutsForDeckhouse(
 			return nil, fmt.Errorf("create OCI Image Layout at %s: %w", path, err)
 		}
 
+		path = filepath.Join(rootFolder, "modules", module.Name, "extra")
+		moduleExtraLayout, err := CreateEmptyImageLayout(path)
+		if err != nil {
+			return nil, fmt.Errorf("create OCI Image Layout at %s: %w", path, err)
+		}
+
 		layouts.Modules[module.Name] = ModuleImageLayout{
 			ModuleLayout:   moduleLayout,
 			ModuleImages:   map[string]struct{}{},
 			ReleasesLayout: moduleReleasesLayout,
 			ReleaseImages:  map[string]struct{}{},
+			ExtraLayout:    moduleExtraLayout,
+			ExtraImages:    map[string]struct{}{},
 		}
 	}
 
@@ -286,6 +300,19 @@ func FindDeckhouseModulesImages(
 
 		moduleImageLayouts.ModuleImages = moduleImages
 		maps.Copy(moduleImageLayouts.ReleaseImages, releaseImages)
+
+		// Find extra images if any exist
+		extraImages, err := modules.FindModuleExtraImages(
+			&module,
+			moduleImages,
+			params.RegistryAuth,
+			params.Insecure,
+			params.SkipTLSVerification,
+		)
+		if err != nil {
+			return fmt.Errorf("Find extra images of %s: %w", module.Name, err)
+		}
+		moduleImageLayouts.ExtraImages = extraImages
 
 		if len(moduleImageLayouts.ModuleImages) == 0 {
 			return fmt.Errorf("found no releases for %s", module.Name)

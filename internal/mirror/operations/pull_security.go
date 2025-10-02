@@ -49,7 +49,7 @@ func PullSecurityDatabases(pullParams *params.PullParams) error {
 	}
 	imageLayouts.TrivyChecks, err = layouts.CreateEmptyImageLayout(filepath.Join(tmpDir, "trivy-checks"))
 	if err != nil {
-		return fmt.Errorf("setup java db layout: %w", err)
+		return fmt.Errorf("setup trivy checks layout: %w", err)
 	}
 
 	if err := layouts.PullTrivyVulnerabilityDatabasesImages(pullParams, imageLayouts); err != nil {

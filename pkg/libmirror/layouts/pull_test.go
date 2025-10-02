@@ -160,7 +160,7 @@ func layoutByIndex(t *testing.T, layouts *ImageLayouts, idx int) layout.Path {
 	case 3:
 		return layouts.TrivyChecks
 	default:
-		t.Fatalf("Unexpected layout index, expected only [0-2], but got %d", idx)
+		t.Fatalf("Unexpected layout index, expected only [0-3], but got %d", idx)
 		return ""
 	}
 }

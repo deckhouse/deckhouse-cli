@@ -55,6 +55,7 @@ func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader)
 	layoutsToPush := map[string]string{
 		"":        path.Join(pushParams.ModulesPathSuffix, moduleName),
 		"release": path.Join(pushParams.ModulesPathSuffix, moduleName, "release"),
+		"extra":   path.Join(pushParams.ModulesPathSuffix, moduleName, "extra"),
 	}
 
 	for layoutPathSuffix, repo := range layoutsToPush {

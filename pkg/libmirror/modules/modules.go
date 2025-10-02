@@ -17,6 +17,7 @@ limitations under the License.
 package modules
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -127,12 +128,13 @@ func FindExternalModuleImages(
 		}
 	}
 
-	for _, tag := range filter.VersionsToMirror(mod) {
+	versionsToMirror := filter.VersionsToMirror(mod)
+	for _, tag := range versionsToMirror {
 		moduleImages[mod.RegistryPath+":"+tag] = struct{}{}
 		releaseImages[path.Join(mod.RegistryPath, "release")+":"+tag] = struct{}{}
 	}
 
-	for imageTag := range (moduleImages) {
+	for imageTag := range moduleImages {
 		ref, err := name.ParseReference(imageTag, nameOpts...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("Get digests for %q version: %w", imageTag, err)
@@ -189,4 +191,62 @@ func getAvailableReleaseChannelsImagesForModule(mod *Module, refOpts []name.Opti
 	}
 
 	return result, nil
+}
+
+// FindModuleExtraImages extracts extra_images.json from module images and returns extra images map
+func FindModuleExtraImages(
+	mod *Module,
+	moduleImages map[string]struct{},
+	authProvider authn.Authenticator,
+	insecure, skipVerifyTLS bool,
+) (extraImages map[string]struct{}, err error) {
+	extraImages = map[string]struct{}{}
+	_, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
+
+	// Try to extract extra_images.json from any available module version
+	for imageTag := range moduleImages {
+		ref, err := name.ParseReference(imageTag)
+		if err != nil {
+			continue
+		}
+
+		img, err := remote.Image(ref, remoteOpts...)
+		if err != nil {
+			continue
+		}
+
+		extraImagesJSON, err := images.ExtractFileFromImage(img, "extra_images.json")
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // No extra_images.json in this version, try next
+		}
+		if err != nil {
+			return nil, fmt.Errorf("Extract extra_images.json from %q: %w", imageTag, err)
+		}
+
+		// Parse extra_images.json - it should contain image_name:tag mappings
+		// Support numeric tag values like {"scanner": 3}
+		var extraImagesRaw map[string]interface{}
+		if err := json.Unmarshal(extraImagesJSON.Bytes(), &extraImagesRaw); err != nil {
+			return nil, fmt.Errorf("Parse extra_images.json from %q: %w", imageTag, err)
+		}
+
+		// Convert to full registry paths with tags
+		for imageName, tagValue := range extraImagesRaw {
+			var imageTag string
+			switch v := tagValue.(type) {
+			case float64:
+				imageTag = fmt.Sprintf("%.0f", v)
+			case int:
+				imageTag = fmt.Sprintf("%d", v)
+			default:
+				return nil, fmt.Errorf("Invalid tag type for %q in extra_images.json: %T", imageName, tagValue)
+			}
+			fullImagePath := path.Join(mod.RegistryPath, "extra", imageName) + ":" + imageTag
+			extraImages[fullImagePath] = struct{}{}
+		}
+
+		// Continue checking other versions to collect all possible extra images
+	}
+
+	return extraImages, nil
 }

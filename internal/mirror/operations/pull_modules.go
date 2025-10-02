@@ -67,11 +67,17 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 		if err != nil {
 			return fmt.Errorf("create OCI layout: %w", err)
 		}
+		extraLayout, err := layouts.CreateEmptyImageLayout(filepath.Join(tmpDir, module.Name, "extra"))
+		if err != nil {
+			return fmt.Errorf("create OCI layout: %w", err)
+		}
 		imageLayouts.Modules[module.Name] = layouts.ModuleImageLayout{
 			ModuleLayout:   moduleLayout,
 			ReleasesLayout: releasesLayout,
+			ExtraLayout:    extraLayout,
 			ModuleImages:   make(map[string]struct{}),
 			ReleaseImages:  make(map[string]struct{}),
+			ExtraImages:    make(map[string]struct{}),
 		}
 	}
 
@@ -95,9 +101,12 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 	}
 
 	for name, layout := range imageLayouts.Modules {
-		
-		if err := ApplyChannelAliasesIfNeeded(name, layout, filter); err != nil {
-			return  err
+
+		// Skip channel aliases for --only-extra-images mode
+		if !pullParams.OnlyExtraImages {
+			if err := ApplyChannelAliasesIfNeeded(name, layout, filter); err != nil {
+				return fmt.Errorf("Apply channel aliases for module %s: %w", name, err)
+			}
 		}
 
 		pkgName := "module-" + name + ".tar"
