@@ -25,7 +25,7 @@ import (
 )
 
 func init() {
-	virtualizationCmd, _ := command.NewCommand(fmt.Sprintf("%s v", filepath.Base(os.Args[0])))
+	virtualizationCmd := command.NewCommand(fmt.Sprintf("%s v", filepath.Base(os.Args[0])))
 	virtualizationCmd.Use = "v"
 	virtualizationCmd.Aliases = []string{"virtualization"}
 
