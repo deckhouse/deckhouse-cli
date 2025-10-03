@@ -174,6 +174,7 @@ func getAvailableReleaseChannelsImagesForModule(mod *Module, refOpts []name.Opti
 		releasesRegistryPath + ":early-access",
 		releasesRegistryPath + ":stable",
 		releasesRegistryPath + ":rock-solid",
+		releasesRegistryPath + ":lts",
 	} {
 		imageRef, err := name.ParseReference(imageTag, refOpts...)
 		if err != nil {
