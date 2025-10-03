@@ -46,18 +46,7 @@ import (
 
 var Version string
 
-var rootCmd = &cobra.Command{
-	Use:           "d8",
-	Short:         "d8 controls the Deckhouse Kubernetes Platform",
-	Version:       Version,
-	SilenceUsage:  true,
-	SilenceErrors: true,
-	Run: func(cmd *cobra.Command, args []string) {
-		cmd.Help()
-	},
-}
-
-func registerCommands() {
+func registerCommands(rootCmd *cobra.Command) {
 	deliveryCMD, ctx := commands.NewDeliveryCommand()
 	rootCmd.AddCommand(deliveryCMD)
 	rootCmd.SetContext(ctx)
@@ -76,7 +65,18 @@ func registerCommands() {
 }
 
 func execute() {
-	registerCommands()
+	rootCmd := &cobra.Command{
+		Use:           "d8",
+		Short:         "d8 controls the Deckhouse Kubernetes Platform",
+		Version:       Version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Run: func(cmd *cobra.Command, args []string) {
+			cmd.Help()
+		},
+	}
+
+	registerCommands(rootCmd)
 
 	ctx := rootCmd.Context()
 
