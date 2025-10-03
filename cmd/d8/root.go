@@ -62,7 +62,6 @@ func registerCommands() {
 	rootCmd.AddCommand(deliveryCMD)
 	rootCmd.SetContext(ctx)
 
-	rootCmd.AddCommand(newHelpJsonCommand())
 	rootCmd.AddCommand(backup.NewCommand())
 	rootCmd.AddCommand(dataexport.NewCommand())
 	rootCmd.AddCommand(mirror.NewCommand())
@@ -73,6 +72,7 @@ func registerCommands() {
 	rootCmd.AddCommand(commands.NewKubectlCommand())
 	rootCmd.AddCommand(commands.NewLoginCommand())
 	rootCmd.AddCommand(commands.NewStrongholdCommand())
+	rootCmd.AddCommand(commands.NewHelpJsonCommand(rootCmd))
 }
 
 func execute() {
