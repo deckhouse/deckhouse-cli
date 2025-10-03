@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd
+package commands
 
 import (
 	"os"
@@ -40,8 +40,7 @@ func MapCustomEnvsToInternalEnvs(envNamePrefix string, envNameMapPrefix string) 
 	}
 }
 
-func init() {
-
+func NewStrongholdCommand() *cobra.Command {
 	MapCustomEnvsToInternalEnvs("STRONGHOLD_", "VAULT_")
 
 	strongholdCommands := []Commands{
@@ -90,5 +89,5 @@ func init() {
 		strongholdCmd.AddCommand(strongholdSubCmd)
 	}
 
-	rootCmd.AddCommand(strongholdCmd)
+	return strongholdCmd
 }

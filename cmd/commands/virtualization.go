@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2024 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,12 +14,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd
+package commands
 
 import (
-	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/deckhouse/virtualization/src/cli/pkg/command"
+	"github.com/spf13/cobra"
 )
 
-func init() {
-	rootCmd.AddCommand(status.NewCommand())
+func NewVirtualizationCommand() *cobra.Command {
+	virtualizationCmd := command.NewCommand(fmt.Sprintf("%s v", filepath.Base(os.Args[0])))
+	virtualizationCmd.Use = "v"
+	virtualizationCmd.Aliases = []string{"virtualization"}
+
+	return virtualizationCmd
 }

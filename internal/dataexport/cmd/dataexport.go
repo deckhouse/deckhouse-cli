@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Flant JSC
+Copyright 2025 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,20 +21,20 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 	"github.com/spf13/cobra"
 
 	deCreate "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/create"
 	deDelete "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/delete"
 	deDownload "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/download"
 	deList "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/list"
-	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 )
 
 const (
 	cmdName = "data"
 )
 
-func init() {
+func NewCommand() *cobra.Command {
 	dataCmd := &cobra.Command{
 		Use:           cmdName,
 		Aliases:       []string{"de", "dataexport"},
@@ -62,5 +62,5 @@ func init() {
 		deList.NewCommand(ctx, logger),
 	)
 
-	rootCmd.AddCommand(dataCmd)
+	return dataCmd
 }

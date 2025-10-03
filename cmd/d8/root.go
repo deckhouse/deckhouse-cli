@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd
+package main
 
 import (
 	"errors"
@@ -22,9 +22,15 @@ import (
 	"log"
 	"math/rand"
 	"os"
-	"strings"
 	"time"
 
+	"github.com/deckhouse/deckhouse-cli/cmd/commands"
+	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
+	dataexport "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd"
+	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
+	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
+	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
+	"github.com/deckhouse/deckhouse-cli/internal/tools"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
@@ -37,16 +43,6 @@ import (
 	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
 	"github.com/werf/werf/v2/pkg/process_exterminator"
 )
-
-func ReplaceCommandName(from, to string, c *cobra.Command) *cobra.Command {
-	c.Example = strings.Replace(c.Example, from, to, -1)
-	// Need some investigation about links
-	// c.Long = strings.Replace(c.Long, from, to, -1)
-	for _, sub := range c.Commands() {
-		ReplaceCommandName(from, to, sub)
-	}
-	return c
-}
 
 var Version string
 
@@ -61,7 +57,27 @@ var rootCmd = &cobra.Command{
 	},
 }
 
-func Execute() {
+func registerCommands() {
+	deliveryCMD, ctx := commands.NewDeliveryCommand()
+	rootCmd.AddCommand(deliveryCMD)
+	rootCmd.SetContext(ctx)
+
+	rootCmd.AddCommand(newHelpJsonCommand())
+	rootCmd.AddCommand(backup.NewCommand())
+	rootCmd.AddCommand(dataexport.NewCommand())
+	rootCmd.AddCommand(mirror.NewCommand())
+	rootCmd.AddCommand(status.NewCommand())
+	rootCmd.AddCommand(tools.NewCommand())
+	rootCmd.AddCommand(system.NewCommand())
+	rootCmd.AddCommand(commands.NewVirtualizationCommand())
+	rootCmd.AddCommand(commands.NewKubectlCommand())
+	rootCmd.AddCommand(commands.NewLoginCommand())
+	rootCmd.AddCommand(commands.NewStrongholdCommand())
+}
+
+func execute() {
+	registerCommands()
+
 	ctx := rootCmd.Context()
 
 	rand.Seed(time.Now().UnixNano())

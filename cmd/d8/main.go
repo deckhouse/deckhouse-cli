@@ -14,12 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd
+package main
 
-import (
-	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
-)
-
-func init() {
-	rootCmd.AddCommand(mirror.NewCommand())
+func main() {
+	execute()
 }

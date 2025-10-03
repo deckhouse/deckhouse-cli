@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd
+package commands
 
 import (
 	"context"
@@ -74,7 +74,7 @@ func getDebugImage(cmd *cobra.Command) (string, error) {
 	return imageName, nil
 }
 
-func init() {
+func NewKubectlCommand() *cobra.Command {
 	kubectlCmd := kubecmd.NewDefaultKubectlCommand()
 	kubectlCmd.Use = "k"
 	kubectlCmd.Aliases = []string{"kubectl"}
@@ -141,5 +141,5 @@ func init() {
 		}
 	}
 
-	rootCmd.AddCommand(kubectlCmd)
+	return kubectlCmd
 }
