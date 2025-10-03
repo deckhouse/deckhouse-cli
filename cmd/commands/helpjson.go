@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd
+package commands
 
 import (
 	"encoding/json"
@@ -41,24 +41,27 @@ type FlagInfo struct {
 	Global      bool   `json:"global"`
 }
 
-func init() {
+func NewHelpJsonCommand(rootCmd *cobra.Command) *cobra.Command {
 	helpJsonCmd := &cobra.Command{
 		Use:    "help-json",
 		Short:  "Get all d8 command options and flags in json.",
 		Hidden: true,
-		RunE:   helpJson,
+		RunE:   helpJson(rootCmd),
 	}
-	rootCmd.AddCommand(helpJsonCmd)
+
+	return helpJsonCmd
 }
 
-func helpJson(cmd *cobra.Command, _ []string) error {
-	commandsData := extractCommands(rootCmd.Root())
-	jsonData, err := json.MarshalIndent(commandsData, "", "  ")
-	if err != nil {
-		return err
+func helpJson(rootCmd *cobra.Command) func(cmd *cobra.Command, _ []string) error {
+	return func(cmd *cobra.Command, _ []string) error {
+		commandsData := extractCommands(rootCmd.Root())
+		jsonData, err := json.MarshalIndent(commandsData, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(jsonData))
+		return nil
 	}
-	fmt.Println(string(jsonData))
-	return nil
 }
 
 func extractCommands(cmd *cobra.Command) CommandInfo {

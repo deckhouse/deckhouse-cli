@@ -14,10 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd
+package commands
 
-import "github.com/deckhouse/deckhouse-cli/internal/tools"
+import (
+	"strings"
 
-func init() {
-	rootCmd.AddCommand(tools.NewCommand())
+	"github.com/spf13/cobra"
+)
+
+func ReplaceCommandName(from, to string, c *cobra.Command) *cobra.Command {
+	c.Example = strings.Replace(c.Example, from, to, -1)
+	// Need some investigation about links
+	// c.Long = strings.Replace(c.Long, from, to, -1)
+	for _, sub := range c.Commands() {
+		ReplaceCommandName(from, to, sub)
+	}
+	return c
 }

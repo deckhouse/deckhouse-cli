@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd
+package commands
 
 import (
 	"os"
@@ -129,7 +129,7 @@ var (
 		d8 login get-token --oidc-issuer-url=https://dex.example.com --oidc-client-id=kubeconfig-generator --oidc-client-secret=YOUR_SECRET`)
 )
 
-func init() {
+func NewLoginCommand() *cobra.Command {
 	klCmd := getKubeloginCmd()
 
 	loginCmd := &cobra.Command{
@@ -146,5 +146,5 @@ func init() {
 	getTokenCmd := klCmd.GetToken.New()
 	loginCmd.AddCommand(getTokenCmd)
 
-	rootCmd.AddCommand(loginCmd)
+	return loginCmd
 }

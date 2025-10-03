@@ -14,9 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd
+package commands
 
 import (
+	"context"
+
 	"github.com/spf13/cobra"
 
 	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
@@ -24,7 +26,7 @@ import (
 	"github.com/werf/werf/v2/pkg/storage"
 )
 
-func init() {
+func NewDeliveryCommand() (*cobra.Command, context.Context) {
 	storage.DefaultHttpSynchronizationServer = "https://delivery-sync.deckhouse.ru"
 
 	ctx := werfcommon.GetContextWithLogger()
@@ -47,8 +49,7 @@ LICENSE NOTE: The Deckhouse Delivery Kit functionality is exclusively available 
 
 	removeKubectlCmd(werfRootCmd)
 
-	rootCmd.AddCommand(werfRootCmd)
-	rootCmd.SetContext(ctx)
+	return werfRootCmd, ctx
 }
 
 func removeKubectlCmd(werfRootCmd *cobra.Command) {
