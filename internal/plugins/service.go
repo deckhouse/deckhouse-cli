@@ -30,20 +30,12 @@ func NewPluginService(registry, username, password string) *PluginService {
 
 // GetPluginContract reads the plugin contract from image metadata annotation
 func (s *PluginService) GetPluginContract(ctx context.Context, repository, tag string) (*internal.Plugin, error) {
-	// Get the image
-	img, err := s.client.GetImage(ctx, repository, tag)
+	// Get the plugin-contract label from image
+	contractJSON, exists, err := s.client.GetLabel(ctx, repository, tag, "plugin-contract")
 	if err != nil {
-		return nil, fmt.Errorf("failed to get image: %w", err)
+		return nil, fmt.Errorf("failed to get image labels: %w", err)
 	}
 
-	// Get the config file to access annotations
-	configFile, err := img.ConfigFile()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get image config: %w", err)
-	}
-
-	// Look for plugin-contract in config labels/annotations
-	contractJSON, exists := configFile.Config.Labels["plugin-contract"]
 	if !exists {
 		return nil, fmt.Errorf("plugin-contract annotation not found in image metadata")
 	}
@@ -60,10 +52,10 @@ func (s *PluginService) GetPluginContract(ctx context.Context, repository, tag s
 
 // ExtractPlugin downloads the plugin image and extracts it to the specified location
 func (s *PluginService) ExtractPlugin(ctx context.Context, repository, tag, destination string) error {
-	// Get the image
-	img, err := s.client.GetImage(ctx, repository, tag)
+	// Get image layers
+	layers, err := s.client.GetImageLayers(ctx, repository, tag)
 	if err != nil {
-		return fmt.Errorf("failed to get image: %w", err)
+		return fmt.Errorf("failed to get image layers: %w", err)
 	}
 
 	// Create destination directory if it doesn't exist
@@ -71,17 +63,12 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, repository, tag, dest
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	// Export the image as a tarball
-	return s.extractImageLayers(img, destination)
+	// Extract all layers
+	return s.extractLayers(layers, destination)
 }
 
-// extractImageLayers extracts all layers of the image to the destination
-func (s *PluginService) extractImageLayers(img v1.Image, destination string) error {
-	// Get all layers
-	layers, err := img.Layers()
-	if err != nil {
-		return fmt.Errorf("failed to get image layers: %w", err)
-	}
+// extractLayers extracts all layers to the destination
+func (s *PluginService) extractLayers(layers []v1.Layer, destination string) error {
 
 	// Extract each layer
 	for i, layer := range layers {
