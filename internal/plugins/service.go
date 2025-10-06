@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
 // PluginService provides high-level operations for plugin management
@@ -52,42 +51,22 @@ func (s *PluginService) GetPluginContract(ctx context.Context, repository, tag s
 
 // ExtractPlugin downloads the plugin image and extracts it to the specified location
 func (s *PluginService) ExtractPlugin(ctx context.Context, repository, tag, destination string) error {
-	// Get image layers
-	layers, err := s.client.GetImageLayers(ctx, repository, tag)
-	if err != nil {
-		return fmt.Errorf("failed to get image layers: %w", err)
-	}
-
 	// Create destination directory if it doesn't exist
 	if err := os.MkdirAll(destination, 0755); err != nil {
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	// Extract all layers
-	return s.extractLayers(layers, destination)
-}
+	// Extract image layers using handler pattern
+	return s.client.ExtractImageLayers(ctx, repository, tag, func(stream *LayerStream) error {
+		fmt.Printf("Extracting layer %d/%d...\n", stream.Index, stream.Total)
 
-// extractLayers extracts all layers to the destination
-func (s *PluginService) extractLayers(layers []v1.Layer, destination string) error {
-
-	// Extract each layer
-	for i, layer := range layers {
-		fmt.Printf("Extracting layer %d/%d...\n", i+1, len(layers))
-
-		// Get the layer as an uncompressed tar stream
-		layerReader, err := layer.Uncompressed()
-		if err != nil {
-			return fmt.Errorf("failed to uncompress layer %d: %w", i, err)
+		// Extract the tar stream
+		if err := s.extractTar(stream.Reader, destination); err != nil {
+			return fmt.Errorf("failed to extract tar: %w", err)
 		}
-		defer layerReader.Close()
 
-		// Extract the tar
-		if err := s.extractTar(layerReader, destination); err != nil {
-			return fmt.Errorf("failed to extract layer %d: %w", i, err)
-		}
-	}
-
-	return nil
+		return nil
+	})
 }
 
 // extractTar extracts a tar archive to the destination directory

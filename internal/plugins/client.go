@@ -3,6 +3,7 @@ package plugins
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -116,4 +117,46 @@ func (c *RegistryClient) GetLabel(ctx context.Context, repository, tag, labelKey
 
 	value, exists := configFile.Config.Labels[labelKey]
 	return value, exists, nil
+}
+
+// LayerStream represents a single layer stream for extraction
+type LayerStream struct {
+	Index  int
+	Total  int
+	Reader io.ReadCloser
+}
+
+// ExtractImageLayers retrieves uncompressed layer streams for extraction
+// The caller is responsible for closing each LayerStream.Reader
+func (c *RegistryClient) ExtractImageLayers(ctx context.Context, repository, tag string, handler func(*LayerStream) error) error {
+	layers, err := c.GetImageLayers(ctx, repository, tag)
+	if err != nil {
+		return fmt.Errorf("failed to get image layers: %w", err)
+	}
+
+	total := len(layers)
+	for i, layer := range layers {
+		// Get the layer as an uncompressed tar stream
+		reader, err := layer.Uncompressed()
+		if err != nil {
+			return fmt.Errorf("failed to uncompress layer %d: %w", i, err)
+		}
+
+		// Create layer stream
+		stream := &LayerStream{
+			Index:  i + 1,
+			Total:  total,
+			Reader: reader,
+		}
+
+		// Pass to handler
+		err = handler(stream)
+		reader.Close()
+
+		if err != nil {
+			return fmt.Errorf("failed to handle layer %d: %w", i, err)
+		}
+	}
+
+	return nil
 }
