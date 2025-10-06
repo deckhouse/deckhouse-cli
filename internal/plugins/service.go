@@ -118,33 +118,6 @@ func (s *PluginService) extractTar(r io.Reader, destination string) error {
 			}
 			outFile.Close()
 
-		case tar.TypeSymlink:
-			// Create symlink
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return fmt.Errorf("failed to create parent directory for symlink %s: %w", target, err)
-			}
-
-			// Remove if exists
-			os.Remove(target)
-
-			if err := os.Symlink(header.Linkname, target); err != nil {
-				return fmt.Errorf("failed to create symlink %s: %w", target, err)
-			}
-
-		case tar.TypeLink:
-			// Create hard link
-			linkTarget := filepath.Join(destination, header.Linkname)
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return fmt.Errorf("failed to create parent directory for link %s: %w", target, err)
-			}
-
-			// Remove if exists
-			os.Remove(target)
-
-			if err := os.Link(linkTarget, target); err != nil {
-				return fmt.Errorf("failed to create hard link %s: %w", target, err)
-			}
-
 		default:
 			// Skip unsupported types
 			fmt.Printf("Skipping unsupported tar entry type %d for %s\n", header.Typeflag, header.Name)
