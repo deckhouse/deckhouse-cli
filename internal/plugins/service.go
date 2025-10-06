@@ -6,29 +6,35 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
+	"github.com/deckhouse/deckhouse/pkg/log"
 )
 
 // PluginService provides high-level operations for plugin management
 type PluginService struct {
 	registry string
 	client   *RegistryClient
+	log      *log.Logger
 }
 
 // NewPluginService creates a new plugin service
-func NewPluginService(registry, username, password string) *PluginService {
-	client := NewRegistryClient(registry, username, password)
+func NewPluginService(registry, username, password string, logger *log.Logger) *PluginService {
+	client := NewRegistryClient(registry, username, password, logger)
 	return &PluginService{
 		registry: registry,
 		client:   client,
+		log:      logger,
 	}
 }
 
 // GetPluginContract reads the plugin contract from image metadata annotation
 func (s *PluginService) GetPluginContract(ctx context.Context, repository, tag string) (*internal.Plugin, error) {
+	s.log.Debug("Getting plugin contract", slog.String("repository", repository), slog.String("tag", tag))
+
 	// Get the plugin-contract label from image
 	contractJSON, exists, err := s.client.GetLabel(ctx, repository, tag, "plugin-contract")
 	if err != nil {
@@ -36,6 +42,8 @@ func (s *PluginService) GetPluginContract(ctx context.Context, repository, tag s
 	}
 
 	if !exists {
+		s.log.Debug("Plugin contract not found in image", slog.String("repository", repository), slog.String("tag", tag))
+
 		return nil, fmt.Errorf("plugin-contract annotation not found in image metadata")
 	}
 
@@ -45,20 +53,26 @@ func (s *PluginService) GetPluginContract(ctx context.Context, repository, tag s
 		return nil, fmt.Errorf("failed to parse plugin contract: %w", err)
 	}
 
+	s.log.Debug("Plugin contract parsed successfully", slog.String("repository", repository), slog.String("tag", tag), slog.String("name", contract.Name), slog.String("version", contract.Version))
+
 	// Convert to domain entity
 	return contractToDomain(&contract), nil
 }
 
 // ExtractPlugin downloads the plugin image and extracts it to the specified location
 func (s *PluginService) ExtractPlugin(ctx context.Context, repository, tag, destination string) error {
+	s.log.Debug("Extracting plugin", slog.String("repository", repository), slog.String("tag", tag), slog.String("destination", destination))
+
 	// Create destination directory if it doesn't exist
 	if err := os.MkdirAll(destination, 0755); err != nil {
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
+	s.log.Debug("Destination directory created", slog.String("destination", destination))
+
 	// Extract image layers using handler pattern
 	return s.client.ExtractImageLayers(ctx, repository, tag, func(stream *LayerStream) error {
-		fmt.Printf("Extracting layer %d/%d...\n", stream.Index, stream.Total)
+		s.log.Info("Extracting layer", slog.Int("index", stream.Index), slog.Int("total", stream.Total))
 
 		// Extract the tar stream
 		if err := s.extractTar(stream.Reader, destination); err != nil {
@@ -71,6 +85,8 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, repository, tag, dest
 
 // extractTar extracts a tar archive to the destination directory
 func (s *PluginService) extractTar(r io.Reader, destination string) error {
+	s.log.Debug("Starting tar extraction", slog.String("destination", destination))
+
 	tr := tar.NewReader(r)
 
 	for {
@@ -94,12 +110,16 @@ func (s *PluginService) extractTar(r io.Reader, destination string) error {
 		switch header.Typeflag {
 		case tar.TypeDir:
 			// Create directory
+			s.log.Debug("Creating directory", slog.String("path", target))
+
 			if err := os.MkdirAll(target, os.FileMode(header.Mode)); err != nil {
 				return fmt.Errorf("failed to create directory %s: %w", target, err)
 			}
 
 		case tar.TypeReg:
 			// Create file
+			s.log.Debug("Extracting file", slog.String("path", target), slog.Int64("size", header.Size))
+
 			// Ensure parent directory exists
 			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 				return fmt.Errorf("failed to create parent directory for %s: %w", target, err)
@@ -118,17 +138,22 @@ func (s *PluginService) extractTar(r io.Reader, destination string) error {
 			}
 			outFile.Close()
 
+			s.log.Debug("File extracted successfully", slog.String("path", target))
+
 		default:
 			// Skip unsupported types
-			fmt.Printf("Skipping unsupported tar entry type %d for %s\n", header.Typeflag, header.Name)
+			s.log.Warn("Skipping unsupported tar entry", slog.Int("type", int(header.Typeflag)), slog.String("name", header.Name))
 		}
 	}
+
+	s.log.Debug("Tar extraction completed", slog.String("destination", destination))
 
 	return nil
 }
 
 // contractToDomain converts PluginContract DTO to Plugin domain entity
 func contractToDomain(contract *PluginContract) *internal.Plugin {
+	// Note: This is a pure conversion function, no logging needed as it's called from GetPluginContract
 	plugin := &internal.Plugin{
 		Name:        contract.Name,
 		Version:     contract.Version,

@@ -4,6 +4,7 @@ go 1.24.6
 
 require (
 	github.com/Masterminds/semver/v3 v3.3.0
+	github.com/deckhouse/deckhouse/pkg/log v0.1.0
 	github.com/deckhouse/virtualization/src/cli v1.0.0
 	github.com/fatih/color v1.18.0
 	github.com/google/go-containerregistry v0.20.0
@@ -68,6 +69,7 @@ require (
 	github.com/Azure/go-ntlmssp v0.0.0-20221128193559-754e69321358 // indirect
 	github.com/BurntSushi/toml v1.4.0 // indirect
 	github.com/DataDog/datadog-go v3.2.0+incompatible // indirect
+	github.com/DataDog/gostackparse v0.7.0 // indirect
 	github.com/Jeffail/gabs v1.1.1 // indirect
 	github.com/MakeNowJust/heredoc v1.0.0 // indirect
 	github.com/Masterminds/goutils v1.1.1 // indirect
