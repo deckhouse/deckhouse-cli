@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/deckhouse/deckhouse-cli/cmd/commands"
+	"github.com/deckhouse/deckhouse-cli/cmd/plugins"
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
 	dataexport "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
@@ -62,6 +63,8 @@ func registerCommands(rootCmd *cobra.Command) {
 	rootCmd.AddCommand(commands.NewLoginCommand())
 	rootCmd.AddCommand(commands.NewStrongholdCommand())
 	rootCmd.AddCommand(commands.NewHelpJsonCommand(rootCmd))
+
+	rootCmd.AddCommand(plugins.NewPluginsCommand())
 }
 
 func execute() {
