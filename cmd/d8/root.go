@@ -29,9 +29,12 @@ import (
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
 	dataexport "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
+	intplugins "github.com/deckhouse/deckhouse-cli/internal/plugins"
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
 	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
@@ -64,7 +67,19 @@ func registerCommands(rootCmd *cobra.Command) {
 	rootCmd.AddCommand(commands.NewStrongholdCommand())
 	rootCmd.AddCommand(commands.NewHelpJsonCommand(rootCmd))
 
-	rootCmd.AddCommand(plugins.NewPluginsCommand())
+	// plugin service draft
+	rootCmd.AddCommand(plugins.NewPluginsCommand(
+		intplugins.NewPluginService(
+			registry.NewClient(
+				"registry.deckhouse.io",
+				os.Getenv("D8_REGISTRY_USERNAME"),
+				os.Getenv("D8_REGISTRY_PASSWORD"),
+				dkplog.NewLogger().Named("registry-client"),
+			),
+			dkplog.NewLogger().Named("plugin-service"),
+		),
+	))
+
 }
 
 func execute() {

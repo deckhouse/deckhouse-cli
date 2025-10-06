@@ -11,29 +11,33 @@ import (
 	"path/filepath"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	"github.com/deckhouse/deckhouse/pkg/log"
+)
+
+const (
+	// PluginRepositoryPrefix is the base path for plugin images in the registry
+	PluginRepositoryPrefix = "deckhouse/cli/plugins"
 )
 
 // PluginService provides high-level operations for plugin management
 type PluginService struct {
-	registry string
-	client   *RegistryClient
-	log      *log.Logger
+	client *registry.Client
+	log    *log.Logger
 }
 
 // NewPluginService creates a new plugin service
-func NewPluginService(registry, username, password string, logger *log.Logger) *PluginService {
-	client := NewRegistryClient(registry, username, password, logger)
+func NewPluginService(client *registry.Client, logger *log.Logger) *PluginService {
 	return &PluginService{
-		registry: registry,
-		client:   client,
-		log:      logger,
+		client: client,
+		log:    logger,
 	}
 }
 
 // GetPluginContract reads the plugin contract from image metadata annotation
-func (s *PluginService) GetPluginContract(ctx context.Context, repository, tag string) (*internal.Plugin, error) {
-	s.log.Debug("Getting plugin contract", slog.String("repository", repository), slog.String("tag", tag))
+func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag string) (*internal.Plugin, error) {
+	repository := fmt.Sprintf("%s/%s", PluginRepositoryPrefix, pluginName)
+	s.log.Debug("Getting plugin contract", slog.String("plugin", pluginName), slog.String("repository", repository), slog.String("tag", tag))
 
 	// Get the plugin-contract label from image
 	contractJSON, exists, err := s.client.GetLabel(ctx, repository, tag, "plugin-contract")
@@ -42,7 +46,7 @@ func (s *PluginService) GetPluginContract(ctx context.Context, repository, tag s
 	}
 
 	if !exists {
-		s.log.Debug("Plugin contract not found in image", slog.String("repository", repository), slog.String("tag", tag))
+		s.log.Debug("Plugin contract not found in image", slog.String("plugin", pluginName), slog.String("repository", repository), slog.String("tag", tag))
 
 		return nil, fmt.Errorf("plugin-contract annotation not found in image metadata")
 	}
@@ -53,15 +57,16 @@ func (s *PluginService) GetPluginContract(ctx context.Context, repository, tag s
 		return nil, fmt.Errorf("failed to parse plugin contract: %w", err)
 	}
 
-	s.log.Debug("Plugin contract parsed successfully", slog.String("repository", repository), slog.String("tag", tag), slog.String("name", contract.Name), slog.String("version", contract.Version))
+	s.log.Debug("Plugin contract parsed successfully", slog.String("plugin", pluginName), slog.String("repository", repository), slog.String("tag", tag), slog.String("name", contract.Name), slog.String("version", contract.Version))
 
 	// Convert to domain entity
 	return contractToDomain(&contract), nil
 }
 
 // ExtractPlugin downloads the plugin image and extracts it to the specified location
-func (s *PluginService) ExtractPlugin(ctx context.Context, repository, tag, destination string) error {
-	s.log.Debug("Extracting plugin", slog.String("repository", repository), slog.String("tag", tag), slog.String("destination", destination))
+func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, destination string) error {
+	repository := fmt.Sprintf("%s/%s", PluginRepositoryPrefix, pluginName)
+	s.log.Debug("Extracting plugin", slog.String("plugin", pluginName), slog.String("repository", repository), slog.String("tag", tag), slog.String("destination", destination))
 
 	// Create destination directory if it doesn't exist
 	if err := os.MkdirAll(destination, 0755); err != nil {
@@ -71,7 +76,7 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, repository, tag, dest
 	s.log.Debug("Destination directory created", slog.String("destination", destination))
 
 	// Extract image layers using handler pattern
-	return s.client.ExtractImageLayers(ctx, repository, tag, func(stream *LayerStream) error {
+	return s.client.ExtractImageLayers(ctx, repository, tag, func(stream *registry.LayerStream) error {
 		s.log.Info("Extracting layer", slog.Int("index", stream.Index), slog.Int("total", stream.Total))
 
 		// Extract the tar stream

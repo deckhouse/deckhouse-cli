@@ -1,4 +1,4 @@
-package plugins
+package registry
 
 import (
 	"context"
@@ -14,16 +14,16 @@ import (
 	"github.com/deckhouse/deckhouse/pkg/log"
 )
 
-// RegistryClient provides methods to interact with container registries
-type RegistryClient struct {
+// Client provides methods to interact with container registries
+type Client struct {
 	registry string
 	auth     authn.Authenticator
 	options  []remote.Option
 	log      *log.Logger
 }
 
-// NewRegistryClient creates a new container registry client using go-containerregistry
-func NewRegistryClient(registry, username, password string, logger *log.Logger) *RegistryClient {
+// NewClient creates a new container registry client using go-containerregistry
+func NewClient(registry, username, password string, logger *log.Logger) *Client {
 	var auth authn.Authenticator
 
 	if username != "" && password != "" {
@@ -41,7 +41,7 @@ func NewRegistryClient(registry, username, password string, logger *log.Logger) 
 		remote.WithAuth(auth),
 	}
 
-	return &RegistryClient{
+	return &Client{
 		registry: registry,
 		auth:     auth,
 		options:  options,
@@ -50,7 +50,7 @@ func NewRegistryClient(registry, username, password string, logger *log.Logger) 
 }
 
 // GetManifest retrieves the manifest for a specific image tag
-func (c *RegistryClient) GetManifest(ctx context.Context, repository, tag string) (*remote.Descriptor, error) {
+func (c *Client) GetManifest(ctx context.Context, repository, tag string) (*remote.Descriptor, error) {
 	c.log.Debug("Getting manifest", slog.String("repository", repository), slog.String("tag", tag))
 
 	ref, err := name.ParseReference(fmt.Sprintf("%s/%s:%s", c.registry, repository, tag))
@@ -70,7 +70,7 @@ func (c *RegistryClient) GetManifest(ctx context.Context, repository, tag string
 }
 
 // GetImage retrieves an image for a specific reference
-func (c *RegistryClient) GetImage(ctx context.Context, repository, tag string) (v1.Image, error) {
+func (c *Client) GetImage(ctx context.Context, repository, tag string) (v1.Image, error) {
 	c.log.Debug("Getting image", slog.String("repository", repository), slog.String("tag", tag))
 
 	ref, err := name.ParseReference(fmt.Sprintf("%s/%s:%s", c.registry, repository, tag))
@@ -90,7 +90,7 @@ func (c *RegistryClient) GetImage(ctx context.Context, repository, tag string) (
 }
 
 // GetImageConfig retrieves the image config file containing labels and metadata
-func (c *RegistryClient) GetImageConfig(ctx context.Context, repository, tag string) (*v1.ConfigFile, error) {
+func (c *Client) GetImageConfig(ctx context.Context, repository, tag string) (*v1.ConfigFile, error) {
 	c.log.Debug("Getting image config", slog.String("repository", repository), slog.String("tag", tag))
 
 	img, err := c.GetImage(ctx, repository, tag)
@@ -109,7 +109,7 @@ func (c *RegistryClient) GetImageConfig(ctx context.Context, repository, tag str
 }
 
 // GetImageLayers retrieves all layers of an image
-func (c *RegistryClient) GetImageLayers(ctx context.Context, repository, tag string) ([]v1.Layer, error) {
+func (c *Client) GetImageLayers(ctx context.Context, repository, tag string) ([]v1.Layer, error) {
 	c.log.Debug("Getting image layers", slog.String("repository", repository), slog.String("tag", tag))
 
 	img, err := c.GetImage(ctx, repository, tag)
@@ -128,7 +128,7 @@ func (c *RegistryClient) GetImageLayers(ctx context.Context, repository, tag str
 }
 
 // GetLabel retrieves a specific label from image metadata
-func (c *RegistryClient) GetLabel(ctx context.Context, repository, tag, labelKey string) (string, bool, error) {
+func (c *Client) GetLabel(ctx context.Context, repository, tag, labelKey string) (string, bool, error) {
 	c.log.Debug("Getting label", slog.String("repository", repository), slog.String("tag", tag), slog.String("label", labelKey))
 
 	configFile, err := c.GetImageConfig(ctx, repository, tag)
@@ -157,7 +157,7 @@ type LayerStream struct {
 
 // ExtractImageLayers retrieves uncompressed layer streams for extraction
 // The caller is responsible for closing each LayerStream.Reader
-func (c *RegistryClient) ExtractImageLayers(ctx context.Context, repository, tag string, handler func(*LayerStream) error) error {
+func (c *Client) ExtractImageLayers(ctx context.Context, repository, tag string, handler func(*LayerStream) error) error {
 	c.log.Debug("Extracting image layers", slog.String("repository", repository), slog.String("tag", tag))
 
 	layers, err := c.GetImageLayers(ctx, repository, tag)
