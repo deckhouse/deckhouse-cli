@@ -17,6 +17,7 @@ limitations under the License.
 package module
 
 import (
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/edit"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/enable"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/list"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/snapshots"
@@ -44,6 +45,7 @@ func NewCommand() *cobra.Command {
 		list.NewCommand(),
 		values.NewCommand(),
 		snapshots.NewCommand(),
+		edit.NewCommand(),
 	)
 
 	return moduleCmd
