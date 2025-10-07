@@ -33,6 +33,7 @@ import (
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
 	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
+	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/sirupsen/logrus"
@@ -47,8 +48,6 @@ import (
 	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
 	"github.com/werf/werf/v2/pkg/process_exterminator"
 )
-
-var Version string
 
 func registerCommands(rootCmd *cobra.Command) {
 	deliveryCMD, ctx := commands.NewDeliveryCommand()
@@ -86,7 +85,7 @@ func execute() {
 	rootCmd := &cobra.Command{
 		Use:           "d8",
 		Short:         "d8 controls the Deckhouse Kubernetes Platform",
-		Version:       Version,
+		Version:       version.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Run: func(cmd *cobra.Command, args []string) {
