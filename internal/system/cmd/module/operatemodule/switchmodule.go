@@ -14,6 +14,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/yaml"
+)
+
+var (
+	GetOptions    = metav1.GetOptions{}
+	UpdateOptions = metav1.UpdateOptions{}
 )
 
 type ModuleState string
@@ -84,4 +90,25 @@ func patchSpec(moduleState ModuleState) ([]byte, error) {
 	}
 
 	return patchBytes, nil
+}
+func ToYAML(obj *unstructured.Unstructured) ([]byte, error) {
+	clean := obj.DeepCopy()
+	clean.SetManagedFields(nil)
+	if clean.Object["status"] != nil {
+		delete(clean.Object, "status")
+	}
+
+	yamlBytes, err := yaml.Marshal(clean.Object)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal to YAML: %w", err)
+	}
+	return yamlBytes, nil
+}
+
+func FromYAML(yamlData []byte) (*unstructured.Unstructured, error) {
+	var obj map[string]interface{}
+	if err := yaml.Unmarshal(yamlData, &obj); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal YAML: %w", err)
+	}
+	return &unstructured.Unstructured{Object: obj}, nil
 }
