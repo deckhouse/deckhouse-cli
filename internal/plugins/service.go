@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse/pkg/log"
 )
 
@@ -22,12 +22,12 @@ const (
 
 // PluginService provides high-level operations for plugin management
 type PluginService struct {
-	client *registry.Client
+	client pkg.RegistryClient
 	log    *log.Logger
 }
 
 // NewPluginService creates a new plugin service
-func NewPluginService(client *registry.Client, logger *log.Logger) *PluginService {
+func NewPluginService(client pkg.RegistryClient, logger *log.Logger) *PluginService {
 	return &PluginService{
 		client: client,
 		log:    logger,
@@ -76,11 +76,11 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, dest
 	s.log.Debug("Destination directory created", slog.String("destination", destination))
 
 	// Extract image layers using handler pattern
-	return s.client.ExtractImageLayers(ctx, repository, tag, func(stream *registry.LayerStream) error {
-		s.log.Info("Extracting layer", slog.Int("index", stream.Index), slog.Int("total", stream.Total))
+	return s.client.ExtractImageLayers(ctx, repository, tag, func(stream pkg.LayerStream) error {
+		s.log.Info("Extracting layer", slog.Int("index", stream.GetIndex()), slog.Int("total", stream.GetTotal()))
 
 		// Extract the tar stream
-		if err := s.extractTar(stream.Reader, destination); err != nil {
+		if err := s.extractTar(stream.GetReader(), destination); err != nil {
 			return fmt.Errorf("failed to extract tar: %w", err)
 		}
 

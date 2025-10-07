@@ -11,6 +11,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse/pkg/log"
 )
 
@@ -21,6 +22,9 @@ type Client struct {
 	options  []remote.Option
 	log      *log.Logger
 }
+
+// Ensure Client implements pkg.RegistryInterface
+var _ pkg.RegistryClient = (*Client)(nil)
 
 // NewClient creates a new container registry client using go-containerregistry
 func NewClient(registry, username, password string, logger *log.Logger) *Client {
@@ -150,14 +154,41 @@ func (c *Client) GetLabel(ctx context.Context, repository, tag, labelKey string)
 
 // LayerStream represents a single layer stream for extraction
 type LayerStream struct {
-	Index  int
-	Total  int
-	Reader io.ReadCloser
+	index  int
+	total  int
+	reader io.ReadCloser
+}
+
+// Ensure LayerStream implements pkg.LayerStreamInterface
+var _ pkg.LayerStream = (*LayerStream)(nil)
+
+// GetIndex returns the current layer index (1-based)
+func (ls *LayerStream) GetIndex() int {
+	return ls.index
+}
+
+// GetTotal returns the total number of layers
+func (ls *LayerStream) GetTotal() int {
+	return ls.total
+}
+
+// GetReader returns the reader for the layer content
+func (ls *LayerStream) GetReader() io.ReadCloser {
+	return ls.reader
+}
+
+// NewLayerStream creates a new LayerStream
+func NewLayerStream(index, total int, reader io.ReadCloser) *LayerStream {
+	return &LayerStream{
+		index:  index,
+		total:  total,
+		reader: reader,
+	}
 }
 
 // ExtractImageLayers retrieves uncompressed layer streams for extraction
 // The caller is responsible for closing each LayerStream.Reader
-func (c *Client) ExtractImageLayers(ctx context.Context, repository, tag string, handler func(*LayerStream) error) error {
+func (c *Client) ExtractImageLayers(ctx context.Context, repository, tag string, handler func(pkg.LayerStream) error) error {
 	c.log.Debug("Extracting image layers", slog.String("repository", repository), slog.String("tag", tag))
 
 	layers, err := c.GetImageLayers(ctx, repository, tag)
@@ -179,11 +210,7 @@ func (c *Client) ExtractImageLayers(ctx context.Context, repository, tag string,
 		}
 
 		// Create layer stream
-		stream := &LayerStream{
-			Index:  i + 1,
-			Total:  total,
-			Reader: reader,
-		}
+		stream := NewLayerStream(i+1, total, reader)
 
 		// Pass to handler
 		err = handler(stream)
