@@ -44,7 +44,7 @@ import (
 	"github.com/werf/werf/v2/pkg/process_exterminator"
 )
 
-var Version string
+var Version string = "dev"
 
 func registerCommands(rootCmd *cobra.Command) {
 	deliveryCMD, ctx := commands.NewDeliveryCommand()
