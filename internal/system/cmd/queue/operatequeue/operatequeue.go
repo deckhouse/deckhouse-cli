@@ -9,11 +9,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/muesli/termenv"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 func OperateQueue(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOption string, watch bool) error {

@@ -105,24 +105,24 @@ func (f *Filter) GetConstraint(moduleName string) (VersionConstraint, bool) {
 }
 
 func parseVersionConstraint(v string) (VersionConstraint, error) {
-    v = strings.TrimSpace(v)
-    if v == "" {
-        return nil, fmt.Errorf("empty constraint")
-    }
-    switch v[0] {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil, fmt.Errorf("empty constraint")
+	}
+	switch v[0] {
 	// has user defined constraint (nothing to do)
-    case '=', '>', '<', '~', '^':
-    default:
-        // version without contraint (add ^ for backward compatibility)
-        v = "^" + v
-    }
+	case '=', '>', '<', '~', '^':
+	default:
+		// version without contraint (add ^ for backward compatibility)
+		v = "^" + v
+	}
 
-    // exact-match: "=1.2.3" or "=1.2.3+stable"
-    if v[0] == '=' {
-        return parseExact(v[1:])
-    }
+	// exact-match: "=1.2.3" or "=1.2.3+stable"
+	if v[0] == '=' {
+		return parseExact(v[1:])
+	}
 	// semver constraint
-    return parseSemver(v)
+	return parseSemver(v)
 }
 
 func parseExact(body string) (VersionConstraint, error) {
@@ -139,7 +139,6 @@ func parseExact(body string) (VersionConstraint, error) {
 	return NewExactTagConstraint(tag), nil
 }
 
-
 func parseSemver(v string) (VersionConstraint, error) {
 	// semver match, console@~1.38.1 = registry.deckhouse.io/deckhouse/ce/modules/console:v1.38.x
 	c, err := NewSemanticVersionConstraint(v)
@@ -150,10 +149,10 @@ func parseSemver(v string) (VersionConstraint, error) {
 }
 
 func (f *Filter) ShouldMirrorReleaseChannels(moduleName string) bool {
-    if c, ok := f.modules[moduleName]; ok && c.IsExact() {
-        return false
-    }
-    return true
+	if c, ok := f.modules[moduleName]; ok && c.IsExact() {
+		return false
+	}
+	return true
 }
 
 func (f *Filter) VersionsToMirror(mod *Module) []string {

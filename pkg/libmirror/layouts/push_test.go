@@ -31,7 +31,6 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-
 	mirrorTestUtils "github.com/deckhouse/deckhouse-cli/testing/util/mirror"
 )
 

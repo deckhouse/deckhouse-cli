@@ -27,18 +27,17 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	"github.com/deckhouse/deckhouse-cli/internal/status/objects/clusteralerts"
+	cnimodules "github.com/deckhouse/deckhouse-cli/internal/status/objects/cni_modules"
+	deckhouseedition "github.com/deckhouse/deckhouse-cli/internal/status/objects/edition"
+	"github.com/deckhouse/deckhouse-cli/internal/status/objects/masters"
+	deckhousepods "github.com/deckhouse/deckhouse-cli/internal/status/objects/pods"
+	deckhousequeue "github.com/deckhouse/deckhouse-cli/internal/status/objects/queue"
+	deckhouseregistry "github.com/deckhouse/deckhouse-cli/internal/status/objects/registry"
+	deckhousereleases "github.com/deckhouse/deckhouse-cli/internal/status/objects/releases"
+	deckhousesettings "github.com/deckhouse/deckhouse-cli/internal/status/objects/settings"
 	"github.com/deckhouse/deckhouse-cli/internal/status/tools/statusresult"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
-
-	"github.com/deckhouse/deckhouse-cli/internal/status/objects/clusteralerts"
-	"github.com/deckhouse/deckhouse-cli/internal/status/objects/cni_modules"
-	"github.com/deckhouse/deckhouse-cli/internal/status/objects/edition"
-	"github.com/deckhouse/deckhouse-cli/internal/status/objects/masters"
-	"github.com/deckhouse/deckhouse-cli/internal/status/objects/pods"
-	"github.com/deckhouse/deckhouse-cli/internal/status/objects/queue"
-	"github.com/deckhouse/deckhouse-cli/internal/status/objects/registry"
-	"github.com/deckhouse/deckhouse-cli/internal/status/objects/releases"
-	"github.com/deckhouse/deckhouse-cli/internal/status/objects/settings"
 )
 
 var statusLong = templates.LongDesc(`

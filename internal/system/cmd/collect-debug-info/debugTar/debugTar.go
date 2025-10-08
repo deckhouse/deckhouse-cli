@@ -6,12 +6,14 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
+	"os"
+	"strings"
+
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
-	"os"
-	"strings"
+
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 type Command struct {
@@ -186,7 +188,6 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface) error {
 			return fmt.Errorf("failed to update the %w", err)
 		}
 		stdout.Reset()
-
 	}
 	return err
 }

@@ -101,7 +101,6 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 	}
 
 	for name, layout := range imageLayouts.Modules {
-
 		// Skip channel aliases for --only-extra-images mode
 		if !pullParams.OnlyExtraImages {
 			if err := ApplyChannelAliasesIfNeeded(name, layout, filter); err != nil {

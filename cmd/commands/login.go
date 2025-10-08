@@ -35,7 +35,6 @@ import (
 	"github.com/int128/kubelogin/pkg/usecases/authentication/ropc"
 	"github.com/int128/kubelogin/pkg/usecases/credentialplugin"
 	"github.com/int128/kubelogin/pkg/usecases/standalone"
-
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 )

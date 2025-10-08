@@ -21,13 +21,13 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 	"github.com/spf13/cobra"
 
 	deCreate "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/create"
 	deDelete "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/delete"
 	deDownload "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/download"
 	deList "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/list"
+	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 )
 
 const (

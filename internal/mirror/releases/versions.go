@@ -174,7 +174,6 @@ func FetchVersionsFromModuleReleaseChannels(
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
 	channelVersions := map[string]string{}
 	for imageTag := range releaseChannelImages {
-
 		ref, err := name.ParseReference(imageTag, nameOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("pull %q release channel: %w", imageTag, err)

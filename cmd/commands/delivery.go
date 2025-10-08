@@ -20,7 +20,6 @@ import (
 	"context"
 
 	"github.com/spf13/cobra"
-
 	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
 	werfroot "github.com/werf/werf/v2/cmd/werf/root"
 	"github.com/werf/werf/v2/pkg/storage"

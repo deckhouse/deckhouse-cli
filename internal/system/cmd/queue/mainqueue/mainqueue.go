@@ -19,9 +19,8 @@ package mainqueue
 import (
 	"fmt"
 
-	"k8s.io/kubectl/pkg/util/templates"
-
 	"github.com/spf13/cobra"
+	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/queue/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/queue/operatequeue"
