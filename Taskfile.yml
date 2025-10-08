@@ -244,6 +244,16 @@ tasks:
     cmds:
       - task: _test:go
 
+  lint:
+    desc: Run golangci-lint with auto-fix
+    cmds:
+      - golangci-lint run ./... --fix --build-tags="{{ .goTags }}"
+
+  lint:check:
+    desc: Run golangci-lint without auto-fix (CI mode)
+    cmds:
+      - golangci-lint run ./... --build-tags="{{ .goTags }}"
+
   clean:
     desc: Clean all binaries
     cmds:
