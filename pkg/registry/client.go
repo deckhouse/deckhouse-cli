@@ -44,8 +44,7 @@ var _ pkg.RegistryClient = (*Client)(nil)
 
 // NewClientWithOptions creates a new container registry client with advanced options
 func NewClientWithOptions(opts *ClientOptions) *Client {
-	auth := buildAuthenticator(opts)
-	remoteOptions := buildRemoteOptions(auth, opts)
+	remoteOptions := buildRemoteOptions(opts.Auth, opts)
 
 	return &Client{
 		registryHost: opts.RegistryHost,

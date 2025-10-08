@@ -61,41 +61,6 @@ func ensureLogger(opts *ClientOptions) {
 	}
 }
 
-// buildAuthenticator creates the appropriate authenticator based on provided credentials
-// Priority: Auth > License Token > Username/Password > Anonymous
-func buildAuthenticator(opts *ClientOptions) authn.Authenticator {
-	ensureLogger(opts)
-
-	if opts.Auth != nil {
-		opts.Logger.Debug("Registry client initialized with provided authenticator",
-			slog.String("registry", opts.RegistryHost))
-		return opts.Auth
-	}
-
-	if opts.LicenseToken != "" {
-		opts.Logger.Debug("Registry client initialized with license token authentication",
-			slog.String("registry", opts.RegistryHost))
-		return authn.FromConfig(authn.AuthConfig{
-			Username: "license-token",
-			Password: opts.LicenseToken,
-		})
-	}
-
-	if opts.Username != "" && opts.Password != "" {
-		opts.Logger.Debug("Registry client initialized with basic authentication",
-			slog.String("registry", opts.RegistryHost),
-			slog.String("username", opts.Username))
-		return authn.FromConfig(authn.AuthConfig{
-			Username: opts.Username,
-			Password: opts.Password,
-		})
-	}
-
-	opts.Logger.Debug("Registry client initialized with anonymous access",
-		slog.String("registry", opts.RegistryHost))
-	return authn.Anonymous
-}
-
 // buildRemoteOptions constructs remote options including auth and transport configuration
 func buildRemoteOptions(auth authn.Authenticator, opts *ClientOptions) []remote.Option {
 	remoteOptions := []remote.Option{
