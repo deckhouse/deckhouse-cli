@@ -26,11 +26,13 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gojuno/minimock/v3"
+
+	"github.com/deckhouse/deckhouse/pkg/log"
+
 	"github.com/deckhouse/deckhouse-cli/internal/plugins"
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/mock"
-	"github.com/deckhouse/deckhouse/pkg/log"
-	"github.com/gojuno/minimock/v3"
 )
 
 func TestGetPluginContract_Success(t *testing.T) {

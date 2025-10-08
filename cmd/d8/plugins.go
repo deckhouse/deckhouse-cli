@@ -19,13 +19,14 @@ package main
 import (
 	"log/slog"
 
-	d8flags "github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
-	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+
+	d8flags "github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
 	intplugins "github.com/deckhouse/deckhouse-cli/internal/plugins"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 func (r *RootCommand) initPluginServices() {

@@ -34,6 +34,8 @@ import (
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
 
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+
 	"github.com/deckhouse/deckhouse-cli/cmd/commands"
 	"github.com/deckhouse/deckhouse-cli/cmd/plugins"
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
@@ -45,18 +47,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg"
-	dkplog "github.com/deckhouse/deckhouse/pkg/log"
-	"github.com/sirupsen/logrus"
-	"github.com/spf13/cobra"
-
-	helm_v3 "github.com/werf/3p-helm/cmd/helm"
-	cliflag "k8s.io/component-base/cli/flag"
-	"k8s.io/component-base/logs"
-
-	"github.com/werf/logboek"
-	"github.com/werf/nelm/pkg/resrcchangcalc"
-	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
-	"github.com/werf/werf/v2/pkg/process_exterminator"
 )
 
 type RootCommand struct {

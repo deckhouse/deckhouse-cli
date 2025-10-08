@@ -26,8 +26,9 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse/pkg/log"
+
+	"github.com/deckhouse/deckhouse-cli/pkg"
 )
 
 // Client provides methods to interact with container registries

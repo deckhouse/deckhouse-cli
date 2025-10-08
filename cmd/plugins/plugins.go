@@ -23,9 +23,10 @@ import (
 
 	"github.com/spf13/cobra"
 
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+
 	"github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins"
-	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 )
 
 type PluginsCommand struct {

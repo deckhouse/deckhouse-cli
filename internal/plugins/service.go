@@ -26,9 +26,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/deckhouse/deckhouse/pkg/log"
+
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg"
-	"github.com/deckhouse/deckhouse/pkg/log"
 )
 
 const (
