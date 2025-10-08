@@ -17,14 +17,14 @@ limitations under the License.
 package module
 
 import (
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/enable"
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/list"
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/snapshots"
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/values"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/disable"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/enable"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/list"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/snapshots"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/values"
 )
 
 var moduleLong = templates.LongDesc(`

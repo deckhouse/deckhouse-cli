@@ -27,21 +27,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/system/flags"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
-
-	"github.com/spf13/cobra"
-	_ "k8s.io/client-go/plugin/pkg/client/auth"
-	"k8s.io/kubectl/pkg/util/templates"
-
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 var lokiLong = templates.LongDesc(`
@@ -333,7 +331,6 @@ func getTokenLokiSa(kubeCl kubernetes.Interface) (string, error) {
 }
 
 func getLogWithRetry(config *rest.Config, kubeCl kubernetes.Interface, fullCommand []string) (*QueryRange, *SeriesApi, error) {
-
 	var (
 		err            error
 		QueryRangeDump *QueryRange

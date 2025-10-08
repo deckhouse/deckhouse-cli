@@ -18,10 +18,9 @@ package flags
 
 import (
 	"os"
-	
+
 	"github.com/spf13/pflag"
 )
-
 
 func AddFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringP(
@@ -35,7 +34,6 @@ func defaultEditor() string {
 	ed := os.Getenv("EDITOR")
 	if ed == "" {
 		ed = "vi"
-	
 	}
 	return ed
 }

@@ -4,18 +4,17 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 
-	"log/slog"
-
 	"github.com/stretchr/testify/require"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 	safereq "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func newSafe() *safereq.SafeClient { sc, _ := safereq.NewSafeClient(); return sc.Copy() }
@@ -26,7 +25,7 @@ func TestListFilesystem_OK(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/api/v1/files/", r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(respBody))
 	}))
 	defer srv.Close()
@@ -63,7 +62,7 @@ func TestListBlock_OK(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodHead, r.Method)
 		w.Header().Set("Content-Length", "1234")
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 

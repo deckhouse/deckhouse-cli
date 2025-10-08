@@ -132,7 +132,7 @@ func PullModules(pullParams *params.PullParams, layouts *ImageLayouts) error {
 			}
 		}
 	}
-	
+
 	message := "Deckhouse modules pulled!"
 	if pullParams.OnlyExtraImages {
 		message = "Extra images pulled!"

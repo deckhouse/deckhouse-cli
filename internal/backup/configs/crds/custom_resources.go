@@ -66,8 +66,6 @@ func BackupCustomResources(
 		func(r *customResourceDescription, _ int) bool { return r.crd.Spec.Scope == v1.NamespaceScoped },
 	)
 
-	
-
 	nsResources := lo.Map(namespacedResourcesToBackup, func(resource *customResourceDescription, _ int) []runtime.Object {
 		return lo.Flatten(lo.Map(namespaces, func(namespace string, _ int) []runtime.Object {
 			query := dynamic.ResourceInterface(dynamicCl.Resource(resource.gvr))
@@ -94,7 +92,6 @@ func BackupCustomResources(
 		return lo.Map(list.Items, func(object unstructured.Unstructured, _ int) runtime.Object {
 			return &object
 		})
-
 	})
 
 	result := append(nsResources, cwResources...)

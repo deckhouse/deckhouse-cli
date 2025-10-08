@@ -17,12 +17,12 @@ limitations under the License.
 package backup
 
 import (
-	"github.com/deckhouse/deckhouse-cli/internal/backup/cmd/loki"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/deckhouse/deckhouse-cli/internal/backup/cmd/cluster-config"
+	cluster_config "github.com/deckhouse/deckhouse-cli/internal/backup/cmd/cluster-config"
 	"github.com/deckhouse/deckhouse-cli/internal/backup/cmd/etcd"
+	"github.com/deckhouse/deckhouse-cli/internal/backup/cmd/loki"
 )
 
 var backupLong = templates.LongDesc(`

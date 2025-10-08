@@ -29,11 +29,11 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 const (
@@ -109,10 +109,10 @@ func downloadFunc(
 		}
 
 		log.Info("Start listing", slog.String("url", dataURL), slog.String("srcPath", srcPath))
-		req, _ = http.NewRequest("GET", dataURL, nil)
+		req, _ = http.NewRequest(http.MethodGet, dataURL, nil)
 	case "Block":
 		log.Info("Start listing", slog.String("url", url))
-		req, _ = http.NewRequest("HEAD", url, nil)
+		req, _ = http.NewRequest(http.MethodHead, url, nil)
 	default:
 		return fmt.Errorf("%w: %s", util.ErrUnsupportedVolumeMode, volumeMode)
 	}
@@ -123,7 +123,7 @@ func downloadFunc(
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		const maxLen = 4096
 		msg, err := io.ReadAll(io.LimitReader(resp.Body, maxLen))
 		if err != nil {

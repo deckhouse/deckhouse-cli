@@ -88,7 +88,7 @@ func (s *SLogger) formatRecord(template string, args ...any) string {
 		msg := &strings.Builder{}
 		msg.WriteString(prefix)
 		for _, arg := range args {
-			msg.WriteString(fmt.Sprintf(" %v", arg))
+			fmt.Fprintf(msg, " %v", arg)
 		}
 
 		return msg.String()

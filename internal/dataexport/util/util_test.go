@@ -2,18 +2,16 @@ package util
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
-
-	"log/slog"
-
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
 )
 
 func TestCreateDataExporterIfNeeded(t *testing.T) {

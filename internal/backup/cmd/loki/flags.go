@@ -18,10 +18,10 @@ package loki
 
 import (
 	"fmt"
-	"github.com/spf13/pflag"
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 func addFlags(flagSet *pflag.FlagSet) {

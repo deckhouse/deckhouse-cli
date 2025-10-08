@@ -19,11 +19,11 @@ package snapshots
 import (
 	"fmt"
 
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/operatemodule"
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
-
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
+
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/operatemodule"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 var snapshotsLong = templates.LongDesc(`

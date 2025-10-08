@@ -17,10 +17,11 @@ limitations under the License.
 package queue
 
 import (
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/queue/list"
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/queue/mainqueue"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
+
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/queue/list"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/queue/mainqueue"
 )
 
 var queueLong = templates.LongDesc(`
