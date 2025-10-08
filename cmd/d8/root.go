@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/rand"
 	"os"
 	"time"
@@ -58,8 +59,18 @@ type RootCommand struct {
 }
 
 func NewRootCommand() *RootCommand {
+	logger := dkplog.NewLogger(
+		dkplog.WithLevel(
+			slog.Level(
+				dkplog.LogLevelFromStr(
+					os.Getenv("LOG_LEVEL"),
+				),
+			),
+		),
+	)
+
 	rootCmd := &RootCommand{
-		logger: dkplog.NewLogger().Named("d8"),
+		logger: logger.Named("d8"),
 	}
 
 	rootCmd.cmd = &cobra.Command{
