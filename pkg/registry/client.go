@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 
-	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -18,7 +17,6 @@ import (
 // Client provides methods to interact with container registries
 type Client struct {
 	registry string
-	auth     authn.Authenticator
 	options  []remote.Option
 	log      *log.Logger
 }
@@ -28,28 +26,25 @@ var _ pkg.RegistryClient = (*Client)(nil)
 
 // NewClient creates a new container registry client using go-containerregistry
 func NewClient(registry, username, password string, logger *log.Logger) *Client {
-	var auth authn.Authenticator
-
-	if username != "" && password != "" {
-		auth = &authn.Basic{
-			Username: username,
-			Password: password,
-		}
-		logger.Debug("Registry client initialized with authentication", slog.String("registry", registry), slog.String("username", username))
-	} else {
-		auth = authn.Anonymous
-		logger.Debug("Registry client initialized with anonymous access", slog.String("registry", registry))
+	opts := &ClientOptions{
+		Registry: registry,
+		Username: username,
+		Password: password,
+		Logger:   logger,
 	}
 
-	options := []remote.Option{
-		remote.WithAuth(auth),
-	}
+	return NewClientWithOptions(opts)
+}
+
+// NewClientWithOptions creates a new container registry client with advanced options
+func NewClientWithOptions(opts *ClientOptions) *Client {
+	auth := buildAuthenticator(opts)
+	remoteOptions := buildRemoteOptions(auth, opts)
 
 	return &Client{
-		registry: registry,
-		auth:     auth,
-		options:  options,
-		log:      logger,
+		registry: opts.Registry,
+		options:  remoteOptions,
+		log:      opts.Logger,
 	}
 }
 

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -49,40 +49,17 @@ import (
 	"github.com/werf/werf/v2/pkg/process_exterminator"
 )
 
-func registerCommands(rootCmd *cobra.Command) {
-	deliveryCMD, ctx := commands.NewDeliveryCommand()
-	rootCmd.AddCommand(deliveryCMD)
-	rootCmd.SetContext(ctx)
+type RootCommand struct {
+	cmd *cobra.Command
 
-	rootCmd.AddCommand(backup.NewCommand())
-	rootCmd.AddCommand(dataexport.NewCommand())
-	rootCmd.AddCommand(mirror.NewCommand())
-	rootCmd.AddCommand(status.NewCommand())
-	rootCmd.AddCommand(tools.NewCommand())
-	rootCmd.AddCommand(system.NewCommand())
-	rootCmd.AddCommand(commands.NewVirtualizationCommand())
-	rootCmd.AddCommand(commands.NewKubectlCommand())
-	rootCmd.AddCommand(commands.NewLoginCommand())
-	rootCmd.AddCommand(commands.NewStrongholdCommand())
-	rootCmd.AddCommand(commands.NewHelpJsonCommand(rootCmd))
-
-	// plugin service draft
-	rootCmd.AddCommand(plugins.NewPluginsCommand(
-		intplugins.NewPluginService(
-			registry.NewClient(
-				"registry.deckhouse.io",
-				os.Getenv("D8_REGISTRY_USERNAME"),
-				os.Getenv("D8_REGISTRY_PASSWORD"),
-				dkplog.NewLogger().Named("registry-client"),
-			),
-			dkplog.NewLogger().Named("plugin-service"),
-		),
-	))
-
+	pluginRegistryClient *registry.Client
+	pluginService        *intplugins.PluginService
 }
 
-func execute() {
-	rootCmd := &cobra.Command{
+func NewRootCommand() *RootCommand {
+	rootCmd := &RootCommand{}
+
+	rootCmd.cmd = &cobra.Command{
 		Use:           "d8",
 		Short:         "d8 controls the Deckhouse Kubernetes Platform",
 		Version:       version.Version,
@@ -93,20 +70,59 @@ func execute() {
 		},
 	}
 
-	registerCommands(rootCmd)
+	rootCmd.initPluginServices()
+	rootCmd.registerCommands()
+	rootCmd.cmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 
-	ctx := rootCmd.Context()
+	return rootCmd
+}
+
+func (r *RootCommand) initPluginServices() {
+	r.pluginRegistryClient = registry.NewClient(
+		// TODO: change registry
+		"registry.deckhouse.io",
+		// TODO: change creds
+		os.Getenv("D8_REGISTRY_USERNAME"),
+		os.Getenv("D8_REGISTRY_PASSWORD"),
+		dkplog.NewLogger().Named("registry-client"),
+	)
+
+	r.pluginService = intplugins.NewPluginService(
+		r.pluginRegistryClient,
+		dkplog.NewLogger().Named("plugin-service"),
+	)
+}
+
+func (r *RootCommand) registerCommands() {
+	deliveryCMD, ctx := commands.NewDeliveryCommand()
+	r.cmd.AddCommand(deliveryCMD)
+	r.cmd.SetContext(ctx)
+
+	r.cmd.AddCommand(backup.NewCommand())
+	r.cmd.AddCommand(dataexport.NewCommand())
+	r.cmd.AddCommand(mirror.NewCommand())
+	r.cmd.AddCommand(status.NewCommand())
+	r.cmd.AddCommand(tools.NewCommand())
+	r.cmd.AddCommand(system.NewCommand())
+	r.cmd.AddCommand(commands.NewVirtualizationCommand())
+	r.cmd.AddCommand(commands.NewKubectlCommand())
+	r.cmd.AddCommand(commands.NewLoginCommand())
+	r.cmd.AddCommand(commands.NewStrongholdCommand())
+	r.cmd.AddCommand(commands.NewHelpJsonCommand(r.cmd))
+
+	r.cmd.AddCommand(plugins.NewPluginsCommand(r.pluginService))
+}
+
+func (r *RootCommand) Execute() error {
+	ctx := r.cmd.Context()
 
 	rand.Seed(time.Now().UnixNano())
 	defer logs.FlushLogs()
 
-	// It is supposed to be executed against the kubectl command, but we want to use this normalization globally.
-	rootCmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
-
 	if shouldTerminate, err := werfcommon.ContainerBackendProcessStartupHook(); err != nil {
 		werfcommon.TerminateWithError(err.Error(), 1)
 	} else if shouldTerminate {
-		return
+		return nil
 	}
 
 	werfcommon.EnableTerminationSignalsTrap()
@@ -117,7 +133,7 @@ func execute() {
 		werfcommon.TerminateWithError(fmt.Sprintf("process exterminator initialization failed: %s", err), 1)
 	}
 
-	if err := rootCmd.Execute(); err != nil {
+	if err := r.cmd.Execute(); err != nil {
 		if helm_v3.IsPluginError(err) {
 			werfcommon.ShutdownTelemetry(ctx, helm_v3.PluginErrorCode(err))
 			werfcommon.TerminateWithError(err.Error(), helm_v3.PluginErrorCode(err))
@@ -131,4 +147,10 @@ func execute() {
 	}
 
 	werfcommon.ShutdownTelemetry(ctx, 0)
+	return nil
+}
+
+func execute() {
+	rootCmd := NewRootCommand()
+	rootCmd.Execute()
 }
