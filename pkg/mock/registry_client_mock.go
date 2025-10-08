@@ -21,61 +21,75 @@ type RegistryClientMock struct {
 	t          minimock.Tester
 	finishOnce sync.Once
 
-	funcExtractImageLayers          func(ctx context.Context, repository string, tag string, handler func(mm_pkg.LayerStream) error) (err error)
+	funcExtractImageLayers          func(ctx context.Context, tag string, handler func(mm_pkg.LayerStream) error) (err error)
 	funcExtractImageLayersOrigin    string
-	inspectFuncExtractImageLayers   func(ctx context.Context, repository string, tag string, handler func(mm_pkg.LayerStream) error)
+	inspectFuncExtractImageLayers   func(ctx context.Context, tag string, handler func(mm_pkg.LayerStream) error)
 	afterExtractImageLayersCounter  uint64
 	beforeExtractImageLayersCounter uint64
 	ExtractImageLayersMock          mRegistryClientMockExtractImageLayers
 
-	funcGetImage          func(ctx context.Context, repository string, tag string) (i1 v1.Image, err error)
+	funcGetImage          func(ctx context.Context, tag string) (i1 v1.Image, err error)
 	funcGetImageOrigin    string
-	inspectFuncGetImage   func(ctx context.Context, repository string, tag string)
+	inspectFuncGetImage   func(ctx context.Context, tag string)
 	afterGetImageCounter  uint64
 	beforeGetImageCounter uint64
 	GetImageMock          mRegistryClientMockGetImage
 
-	funcGetImageConfig          func(ctx context.Context, repository string, tag string) (cp1 *v1.ConfigFile, err error)
+	funcGetImageConfig          func(ctx context.Context, tag string) (cp1 *v1.ConfigFile, err error)
 	funcGetImageConfigOrigin    string
-	inspectFuncGetImageConfig   func(ctx context.Context, repository string, tag string)
+	inspectFuncGetImageConfig   func(ctx context.Context, tag string)
 	afterGetImageConfigCounter  uint64
 	beforeGetImageConfigCounter uint64
 	GetImageConfigMock          mRegistryClientMockGetImageConfig
 
-	funcGetImageLayers          func(ctx context.Context, repository string, tag string) (la1 []v1.Layer, err error)
+	funcGetImageLayers          func(ctx context.Context, tag string) (la1 []v1.Layer, err error)
 	funcGetImageLayersOrigin    string
-	inspectFuncGetImageLayers   func(ctx context.Context, repository string, tag string)
+	inspectFuncGetImageLayers   func(ctx context.Context, tag string)
 	afterGetImageLayersCounter  uint64
 	beforeGetImageLayersCounter uint64
 	GetImageLayersMock          mRegistryClientMockGetImageLayers
 
-	funcGetLabel          func(ctx context.Context, repository string, tag string, labelKey string) (s1 string, b1 bool, err error)
+	funcGetLabel          func(ctx context.Context, tag string, labelKey string) (s1 string, b1 bool, err error)
 	funcGetLabelOrigin    string
-	inspectFuncGetLabel   func(ctx context.Context, repository string, tag string, labelKey string)
+	inspectFuncGetLabel   func(ctx context.Context, tag string, labelKey string)
 	afterGetLabelCounter  uint64
 	beforeGetLabelCounter uint64
 	GetLabelMock          mRegistryClientMockGetLabel
 
-	funcGetManifest          func(ctx context.Context, repository string, tag string) (dp1 *remote.Descriptor, err error)
+	funcGetManifest          func(ctx context.Context, tag string) (dp1 *remote.Descriptor, err error)
 	funcGetManifestOrigin    string
-	inspectFuncGetManifest   func(ctx context.Context, repository string, tag string)
+	inspectFuncGetManifest   func(ctx context.Context, tag string)
 	afterGetManifestCounter  uint64
 	beforeGetManifestCounter uint64
 	GetManifestMock          mRegistryClientMockGetManifest
 
-	funcListRepositories          func(ctx context.Context, pathPrefix string) (sa1 []string, err error)
+	funcGetRegistry          func() (s1 string)
+	funcGetRegistryOrigin    string
+	inspectFuncGetRegistry   func()
+	afterGetRegistryCounter  uint64
+	beforeGetRegistryCounter uint64
+	GetRegistryMock          mRegistryClientMockGetRegistry
+
+	funcListRepositories          func(ctx context.Context) (sa1 []string, err error)
 	funcListRepositoriesOrigin    string
-	inspectFuncListRepositories   func(ctx context.Context, pathPrefix string)
+	inspectFuncListRepositories   func(ctx context.Context)
 	afterListRepositoriesCounter  uint64
 	beforeListRepositoriesCounter uint64
 	ListRepositoriesMock          mRegistryClientMockListRepositories
 
-	funcListTags          func(ctx context.Context, repository string) (sa1 []string, err error)
+	funcListTags          func(ctx context.Context) (sa1 []string, err error)
 	funcListTagsOrigin    string
-	inspectFuncListTags   func(ctx context.Context, repository string)
+	inspectFuncListTags   func(ctx context.Context)
 	afterListTagsCounter  uint64
 	beforeListTagsCounter uint64
 	ListTagsMock          mRegistryClientMockListTags
+
+	funcWithScope          func(scope string) (r1 mm_pkg.RegistryClient)
+	funcWithScopeOrigin    string
+	inspectFuncWithScope   func(scope string)
+	afterWithScopeCounter  uint64
+	beforeWithScopeCounter uint64
+	WithScopeMock          mRegistryClientMockWithScope
 }
 
 // NewRegistryClientMock returns a mock for mm_pkg.RegistryClient
@@ -104,11 +118,16 @@ func NewRegistryClientMock(t minimock.Tester) *RegistryClientMock {
 	m.GetManifestMock = mRegistryClientMockGetManifest{mock: m}
 	m.GetManifestMock.callArgs = []*RegistryClientMockGetManifestParams{}
 
+	m.GetRegistryMock = mRegistryClientMockGetRegistry{mock: m}
+
 	m.ListRepositoriesMock = mRegistryClientMockListRepositories{mock: m}
 	m.ListRepositoriesMock.callArgs = []*RegistryClientMockListRepositoriesParams{}
 
 	m.ListTagsMock = mRegistryClientMockListTags{mock: m}
 	m.ListTagsMock.callArgs = []*RegistryClientMockListTagsParams{}
+
+	m.WithScopeMock = mRegistryClientMockWithScope{mock: m}
+	m.WithScopeMock.callArgs = []*RegistryClientMockWithScopeParams{}
 
 	t.Cleanup(m.MinimockFinish)
 
@@ -141,18 +160,16 @@ type RegistryClientMockExtractImageLayersExpectation struct {
 
 // RegistryClientMockExtractImageLayersParams contains parameters of the RegistryClient.ExtractImageLayers
 type RegistryClientMockExtractImageLayersParams struct {
-	ctx        context.Context
-	repository string
-	tag        string
-	handler    func(mm_pkg.LayerStream) error
+	ctx     context.Context
+	tag     string
+	handler func(mm_pkg.LayerStream) error
 }
 
 // RegistryClientMockExtractImageLayersParamPtrs contains pointers to parameters of the RegistryClient.ExtractImageLayers
 type RegistryClientMockExtractImageLayersParamPtrs struct {
-	ctx        *context.Context
-	repository *string
-	tag        *string
-	handler    *func(mm_pkg.LayerStream) error
+	ctx     *context.Context
+	tag     *string
+	handler *func(mm_pkg.LayerStream) error
 }
 
 // RegistryClientMockExtractImageLayersResults contains results of the RegistryClient.ExtractImageLayers
@@ -162,11 +179,10 @@ type RegistryClientMockExtractImageLayersResults struct {
 
 // RegistryClientMockExtractImageLayersOrigins contains origins of expectations of the RegistryClient.ExtractImageLayers
 type RegistryClientMockExtractImageLayersExpectationOrigins struct {
-	origin           string
-	originCtx        string
-	originRepository string
-	originTag        string
-	originHandler    string
+	origin        string
+	originCtx     string
+	originTag     string
+	originHandler string
 }
 
 // Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
@@ -180,7 +196,7 @@ func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) Optional() *m
 }
 
 // Expect sets up expected params for RegistryClient.ExtractImageLayers
-func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) Expect(ctx context.Context, repository string, tag string, handler func(mm_pkg.LayerStream) error) *mRegistryClientMockExtractImageLayers {
+func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) Expect(ctx context.Context, tag string, handler func(mm_pkg.LayerStream) error) *mRegistryClientMockExtractImageLayers {
 	if mmExtractImageLayers.mock.funcExtractImageLayers != nil {
 		mmExtractImageLayers.mock.t.Fatalf("RegistryClientMock.ExtractImageLayers mock is already set by Set")
 	}
@@ -193,7 +209,7 @@ func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) Expect(ctx co
 		mmExtractImageLayers.mock.t.Fatalf("RegistryClientMock.ExtractImageLayers mock is already set by ExpectParams functions")
 	}
 
-	mmExtractImageLayers.defaultExpectation.params = &RegistryClientMockExtractImageLayersParams{ctx, repository, tag, handler}
+	mmExtractImageLayers.defaultExpectation.params = &RegistryClientMockExtractImageLayersParams{ctx, tag, handler}
 	mmExtractImageLayers.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
 	for _, e := range mmExtractImageLayers.expectations {
 		if minimock.Equal(e.params, mmExtractImageLayers.defaultExpectation.params) {
@@ -227,31 +243,8 @@ func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) ExpectCtxPara
 	return mmExtractImageLayers
 }
 
-// ExpectRepositoryParam2 sets up expected param repository for RegistryClient.ExtractImageLayers
-func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) ExpectRepositoryParam2(repository string) *mRegistryClientMockExtractImageLayers {
-	if mmExtractImageLayers.mock.funcExtractImageLayers != nil {
-		mmExtractImageLayers.mock.t.Fatalf("RegistryClientMock.ExtractImageLayers mock is already set by Set")
-	}
-
-	if mmExtractImageLayers.defaultExpectation == nil {
-		mmExtractImageLayers.defaultExpectation = &RegistryClientMockExtractImageLayersExpectation{}
-	}
-
-	if mmExtractImageLayers.defaultExpectation.params != nil {
-		mmExtractImageLayers.mock.t.Fatalf("RegistryClientMock.ExtractImageLayers mock is already set by Expect")
-	}
-
-	if mmExtractImageLayers.defaultExpectation.paramPtrs == nil {
-		mmExtractImageLayers.defaultExpectation.paramPtrs = &RegistryClientMockExtractImageLayersParamPtrs{}
-	}
-	mmExtractImageLayers.defaultExpectation.paramPtrs.repository = &repository
-	mmExtractImageLayers.defaultExpectation.expectationOrigins.originRepository = minimock.CallerInfo(1)
-
-	return mmExtractImageLayers
-}
-
-// ExpectTagParam3 sets up expected param tag for RegistryClient.ExtractImageLayers
-func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) ExpectTagParam3(tag string) *mRegistryClientMockExtractImageLayers {
+// ExpectTagParam2 sets up expected param tag for RegistryClient.ExtractImageLayers
+func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) ExpectTagParam2(tag string) *mRegistryClientMockExtractImageLayers {
 	if mmExtractImageLayers.mock.funcExtractImageLayers != nil {
 		mmExtractImageLayers.mock.t.Fatalf("RegistryClientMock.ExtractImageLayers mock is already set by Set")
 	}
@@ -273,8 +266,8 @@ func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) ExpectTagPara
 	return mmExtractImageLayers
 }
 
-// ExpectHandlerParam4 sets up expected param handler for RegistryClient.ExtractImageLayers
-func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) ExpectHandlerParam4(handler func(mm_pkg.LayerStream) error) *mRegistryClientMockExtractImageLayers {
+// ExpectHandlerParam3 sets up expected param handler for RegistryClient.ExtractImageLayers
+func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) ExpectHandlerParam3(handler func(mm_pkg.LayerStream) error) *mRegistryClientMockExtractImageLayers {
 	if mmExtractImageLayers.mock.funcExtractImageLayers != nil {
 		mmExtractImageLayers.mock.t.Fatalf("RegistryClientMock.ExtractImageLayers mock is already set by Set")
 	}
@@ -297,7 +290,7 @@ func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) ExpectHandler
 }
 
 // Inspect accepts an inspector function that has same arguments as the RegistryClient.ExtractImageLayers
-func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) Inspect(f func(ctx context.Context, repository string, tag string, handler func(mm_pkg.LayerStream) error)) *mRegistryClientMockExtractImageLayers {
+func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) Inspect(f func(ctx context.Context, tag string, handler func(mm_pkg.LayerStream) error)) *mRegistryClientMockExtractImageLayers {
 	if mmExtractImageLayers.mock.inspectFuncExtractImageLayers != nil {
 		mmExtractImageLayers.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.ExtractImageLayers")
 	}
@@ -322,7 +315,7 @@ func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) Return(err er
 }
 
 // Set uses given function f to mock the RegistryClient.ExtractImageLayers method
-func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) Set(f func(ctx context.Context, repository string, tag string, handler func(mm_pkg.LayerStream) error) (err error)) *RegistryClientMock {
+func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) Set(f func(ctx context.Context, tag string, handler func(mm_pkg.LayerStream) error) (err error)) *RegistryClientMock {
 	if mmExtractImageLayers.defaultExpectation != nil {
 		mmExtractImageLayers.mock.t.Fatalf("Default expectation is already set for the RegistryClient.ExtractImageLayers method")
 	}
@@ -338,14 +331,14 @@ func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) Set(f func(ct
 
 // When sets expectation for the RegistryClient.ExtractImageLayers which will trigger the result defined by the following
 // Then helper
-func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) When(ctx context.Context, repository string, tag string, handler func(mm_pkg.LayerStream) error) *RegistryClientMockExtractImageLayersExpectation {
+func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) When(ctx context.Context, tag string, handler func(mm_pkg.LayerStream) error) *RegistryClientMockExtractImageLayersExpectation {
 	if mmExtractImageLayers.mock.funcExtractImageLayers != nil {
 		mmExtractImageLayers.mock.t.Fatalf("RegistryClientMock.ExtractImageLayers mock is already set by Set")
 	}
 
 	expectation := &RegistryClientMockExtractImageLayersExpectation{
 		mock:               mmExtractImageLayers.mock,
-		params:             &RegistryClientMockExtractImageLayersParams{ctx, repository, tag, handler},
+		params:             &RegistryClientMockExtractImageLayersParams{ctx, tag, handler},
 		expectationOrigins: RegistryClientMockExtractImageLayersExpectationOrigins{origin: minimock.CallerInfo(1)},
 	}
 	mmExtractImageLayers.expectations = append(mmExtractImageLayers.expectations, expectation)
@@ -380,17 +373,17 @@ func (mmExtractImageLayers *mRegistryClientMockExtractImageLayers) invocationsDo
 }
 
 // ExtractImageLayers implements mm_pkg.RegistryClient
-func (mmExtractImageLayers *RegistryClientMock) ExtractImageLayers(ctx context.Context, repository string, tag string, handler func(mm_pkg.LayerStream) error) (err error) {
+func (mmExtractImageLayers *RegistryClientMock) ExtractImageLayers(ctx context.Context, tag string, handler func(mm_pkg.LayerStream) error) (err error) {
 	mm_atomic.AddUint64(&mmExtractImageLayers.beforeExtractImageLayersCounter, 1)
 	defer mm_atomic.AddUint64(&mmExtractImageLayers.afterExtractImageLayersCounter, 1)
 
 	mmExtractImageLayers.t.Helper()
 
 	if mmExtractImageLayers.inspectFuncExtractImageLayers != nil {
-		mmExtractImageLayers.inspectFuncExtractImageLayers(ctx, repository, tag, handler)
+		mmExtractImageLayers.inspectFuncExtractImageLayers(ctx, tag, handler)
 	}
 
-	mm_params := RegistryClientMockExtractImageLayersParams{ctx, repository, tag, handler}
+	mm_params := RegistryClientMockExtractImageLayersParams{ctx, tag, handler}
 
 	// Record call args
 	mmExtractImageLayers.ExtractImageLayersMock.mutex.Lock()
@@ -409,18 +402,13 @@ func (mmExtractImageLayers *RegistryClientMock) ExtractImageLayers(ctx context.C
 		mm_want := mmExtractImageLayers.ExtractImageLayersMock.defaultExpectation.params
 		mm_want_ptrs := mmExtractImageLayers.ExtractImageLayersMock.defaultExpectation.paramPtrs
 
-		mm_got := RegistryClientMockExtractImageLayersParams{ctx, repository, tag, handler}
+		mm_got := RegistryClientMockExtractImageLayersParams{ctx, tag, handler}
 
 		if mm_want_ptrs != nil {
 
 			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
 				mmExtractImageLayers.t.Errorf("RegistryClientMock.ExtractImageLayers got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
 					mmExtractImageLayers.ExtractImageLayersMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
-			}
-
-			if mm_want_ptrs.repository != nil && !minimock.Equal(*mm_want_ptrs.repository, mm_got.repository) {
-				mmExtractImageLayers.t.Errorf("RegistryClientMock.ExtractImageLayers got unexpected parameter repository, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
-					mmExtractImageLayers.ExtractImageLayersMock.defaultExpectation.expectationOrigins.originRepository, *mm_want_ptrs.repository, mm_got.repository, minimock.Diff(*mm_want_ptrs.repository, mm_got.repository))
 			}
 
 			if mm_want_ptrs.tag != nil && !minimock.Equal(*mm_want_ptrs.tag, mm_got.tag) {
@@ -445,9 +433,9 @@ func (mmExtractImageLayers *RegistryClientMock) ExtractImageLayers(ctx context.C
 		return (*mm_results).err
 	}
 	if mmExtractImageLayers.funcExtractImageLayers != nil {
-		return mmExtractImageLayers.funcExtractImageLayers(ctx, repository, tag, handler)
+		return mmExtractImageLayers.funcExtractImageLayers(ctx, tag, handler)
 	}
-	mmExtractImageLayers.t.Fatalf("Unexpected call to RegistryClientMock.ExtractImageLayers. %v %v %v %v", ctx, repository, tag, handler)
+	mmExtractImageLayers.t.Fatalf("Unexpected call to RegistryClientMock.ExtractImageLayers. %v %v %v", ctx, tag, handler)
 	return
 }
 
@@ -545,16 +533,14 @@ type RegistryClientMockGetImageExpectation struct {
 
 // RegistryClientMockGetImageParams contains parameters of the RegistryClient.GetImage
 type RegistryClientMockGetImageParams struct {
-	ctx        context.Context
-	repository string
-	tag        string
+	ctx context.Context
+	tag string
 }
 
 // RegistryClientMockGetImageParamPtrs contains pointers to parameters of the RegistryClient.GetImage
 type RegistryClientMockGetImageParamPtrs struct {
-	ctx        *context.Context
-	repository *string
-	tag        *string
+	ctx *context.Context
+	tag *string
 }
 
 // RegistryClientMockGetImageResults contains results of the RegistryClient.GetImage
@@ -565,10 +551,9 @@ type RegistryClientMockGetImageResults struct {
 
 // RegistryClientMockGetImageOrigins contains origins of expectations of the RegistryClient.GetImage
 type RegistryClientMockGetImageExpectationOrigins struct {
-	origin           string
-	originCtx        string
-	originRepository string
-	originTag        string
+	origin    string
+	originCtx string
+	originTag string
 }
 
 // Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
@@ -582,7 +567,7 @@ func (mmGetImage *mRegistryClientMockGetImage) Optional() *mRegistryClientMockGe
 }
 
 // Expect sets up expected params for RegistryClient.GetImage
-func (mmGetImage *mRegistryClientMockGetImage) Expect(ctx context.Context, repository string, tag string) *mRegistryClientMockGetImage {
+func (mmGetImage *mRegistryClientMockGetImage) Expect(ctx context.Context, tag string) *mRegistryClientMockGetImage {
 	if mmGetImage.mock.funcGetImage != nil {
 		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by Set")
 	}
@@ -595,7 +580,7 @@ func (mmGetImage *mRegistryClientMockGetImage) Expect(ctx context.Context, repos
 		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by ExpectParams functions")
 	}
 
-	mmGetImage.defaultExpectation.params = &RegistryClientMockGetImageParams{ctx, repository, tag}
+	mmGetImage.defaultExpectation.params = &RegistryClientMockGetImageParams{ctx, tag}
 	mmGetImage.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
 	for _, e := range mmGetImage.expectations {
 		if minimock.Equal(e.params, mmGetImage.defaultExpectation.params) {
@@ -629,31 +614,8 @@ func (mmGetImage *mRegistryClientMockGetImage) ExpectCtxParam1(ctx context.Conte
 	return mmGetImage
 }
 
-// ExpectRepositoryParam2 sets up expected param repository for RegistryClient.GetImage
-func (mmGetImage *mRegistryClientMockGetImage) ExpectRepositoryParam2(repository string) *mRegistryClientMockGetImage {
-	if mmGetImage.mock.funcGetImage != nil {
-		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by Set")
-	}
-
-	if mmGetImage.defaultExpectation == nil {
-		mmGetImage.defaultExpectation = &RegistryClientMockGetImageExpectation{}
-	}
-
-	if mmGetImage.defaultExpectation.params != nil {
-		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by Expect")
-	}
-
-	if mmGetImage.defaultExpectation.paramPtrs == nil {
-		mmGetImage.defaultExpectation.paramPtrs = &RegistryClientMockGetImageParamPtrs{}
-	}
-	mmGetImage.defaultExpectation.paramPtrs.repository = &repository
-	mmGetImage.defaultExpectation.expectationOrigins.originRepository = minimock.CallerInfo(1)
-
-	return mmGetImage
-}
-
-// ExpectTagParam3 sets up expected param tag for RegistryClient.GetImage
-func (mmGetImage *mRegistryClientMockGetImage) ExpectTagParam3(tag string) *mRegistryClientMockGetImage {
+// ExpectTagParam2 sets up expected param tag for RegistryClient.GetImage
+func (mmGetImage *mRegistryClientMockGetImage) ExpectTagParam2(tag string) *mRegistryClientMockGetImage {
 	if mmGetImage.mock.funcGetImage != nil {
 		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by Set")
 	}
@@ -676,7 +638,7 @@ func (mmGetImage *mRegistryClientMockGetImage) ExpectTagParam3(tag string) *mReg
 }
 
 // Inspect accepts an inspector function that has same arguments as the RegistryClient.GetImage
-func (mmGetImage *mRegistryClientMockGetImage) Inspect(f func(ctx context.Context, repository string, tag string)) *mRegistryClientMockGetImage {
+func (mmGetImage *mRegistryClientMockGetImage) Inspect(f func(ctx context.Context, tag string)) *mRegistryClientMockGetImage {
 	if mmGetImage.mock.inspectFuncGetImage != nil {
 		mmGetImage.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.GetImage")
 	}
@@ -701,7 +663,7 @@ func (mmGetImage *mRegistryClientMockGetImage) Return(i1 v1.Image, err error) *R
 }
 
 // Set uses given function f to mock the RegistryClient.GetImage method
-func (mmGetImage *mRegistryClientMockGetImage) Set(f func(ctx context.Context, repository string, tag string) (i1 v1.Image, err error)) *RegistryClientMock {
+func (mmGetImage *mRegistryClientMockGetImage) Set(f func(ctx context.Context, tag string) (i1 v1.Image, err error)) *RegistryClientMock {
 	if mmGetImage.defaultExpectation != nil {
 		mmGetImage.mock.t.Fatalf("Default expectation is already set for the RegistryClient.GetImage method")
 	}
@@ -717,14 +679,14 @@ func (mmGetImage *mRegistryClientMockGetImage) Set(f func(ctx context.Context, r
 
 // When sets expectation for the RegistryClient.GetImage which will trigger the result defined by the following
 // Then helper
-func (mmGetImage *mRegistryClientMockGetImage) When(ctx context.Context, repository string, tag string) *RegistryClientMockGetImageExpectation {
+func (mmGetImage *mRegistryClientMockGetImage) When(ctx context.Context, tag string) *RegistryClientMockGetImageExpectation {
 	if mmGetImage.mock.funcGetImage != nil {
 		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by Set")
 	}
 
 	expectation := &RegistryClientMockGetImageExpectation{
 		mock:               mmGetImage.mock,
-		params:             &RegistryClientMockGetImageParams{ctx, repository, tag},
+		params:             &RegistryClientMockGetImageParams{ctx, tag},
 		expectationOrigins: RegistryClientMockGetImageExpectationOrigins{origin: minimock.CallerInfo(1)},
 	}
 	mmGetImage.expectations = append(mmGetImage.expectations, expectation)
@@ -759,17 +721,17 @@ func (mmGetImage *mRegistryClientMockGetImage) invocationsDone() bool {
 }
 
 // GetImage implements mm_pkg.RegistryClient
-func (mmGetImage *RegistryClientMock) GetImage(ctx context.Context, repository string, tag string) (i1 v1.Image, err error) {
+func (mmGetImage *RegistryClientMock) GetImage(ctx context.Context, tag string) (i1 v1.Image, err error) {
 	mm_atomic.AddUint64(&mmGetImage.beforeGetImageCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetImage.afterGetImageCounter, 1)
 
 	mmGetImage.t.Helper()
 
 	if mmGetImage.inspectFuncGetImage != nil {
-		mmGetImage.inspectFuncGetImage(ctx, repository, tag)
+		mmGetImage.inspectFuncGetImage(ctx, tag)
 	}
 
-	mm_params := RegistryClientMockGetImageParams{ctx, repository, tag}
+	mm_params := RegistryClientMockGetImageParams{ctx, tag}
 
 	// Record call args
 	mmGetImage.GetImageMock.mutex.Lock()
@@ -788,18 +750,13 @@ func (mmGetImage *RegistryClientMock) GetImage(ctx context.Context, repository s
 		mm_want := mmGetImage.GetImageMock.defaultExpectation.params
 		mm_want_ptrs := mmGetImage.GetImageMock.defaultExpectation.paramPtrs
 
-		mm_got := RegistryClientMockGetImageParams{ctx, repository, tag}
+		mm_got := RegistryClientMockGetImageParams{ctx, tag}
 
 		if mm_want_ptrs != nil {
 
 			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
 				mmGetImage.t.Errorf("RegistryClientMock.GetImage got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
 					mmGetImage.GetImageMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
-			}
-
-			if mm_want_ptrs.repository != nil && !minimock.Equal(*mm_want_ptrs.repository, mm_got.repository) {
-				mmGetImage.t.Errorf("RegistryClientMock.GetImage got unexpected parameter repository, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
-					mmGetImage.GetImageMock.defaultExpectation.expectationOrigins.originRepository, *mm_want_ptrs.repository, mm_got.repository, minimock.Diff(*mm_want_ptrs.repository, mm_got.repository))
 			}
 
 			if mm_want_ptrs.tag != nil && !minimock.Equal(*mm_want_ptrs.tag, mm_got.tag) {
@@ -819,9 +776,9 @@ func (mmGetImage *RegistryClientMock) GetImage(ctx context.Context, repository s
 		return (*mm_results).i1, (*mm_results).err
 	}
 	if mmGetImage.funcGetImage != nil {
-		return mmGetImage.funcGetImage(ctx, repository, tag)
+		return mmGetImage.funcGetImage(ctx, tag)
 	}
-	mmGetImage.t.Fatalf("Unexpected call to RegistryClientMock.GetImage. %v %v %v", ctx, repository, tag)
+	mmGetImage.t.Fatalf("Unexpected call to RegistryClientMock.GetImage. %v %v", ctx, tag)
 	return
 }
 
@@ -919,16 +876,14 @@ type RegistryClientMockGetImageConfigExpectation struct {
 
 // RegistryClientMockGetImageConfigParams contains parameters of the RegistryClient.GetImageConfig
 type RegistryClientMockGetImageConfigParams struct {
-	ctx        context.Context
-	repository string
-	tag        string
+	ctx context.Context
+	tag string
 }
 
 // RegistryClientMockGetImageConfigParamPtrs contains pointers to parameters of the RegistryClient.GetImageConfig
 type RegistryClientMockGetImageConfigParamPtrs struct {
-	ctx        *context.Context
-	repository *string
-	tag        *string
+	ctx *context.Context
+	tag *string
 }
 
 // RegistryClientMockGetImageConfigResults contains results of the RegistryClient.GetImageConfig
@@ -939,10 +894,9 @@ type RegistryClientMockGetImageConfigResults struct {
 
 // RegistryClientMockGetImageConfigOrigins contains origins of expectations of the RegistryClient.GetImageConfig
 type RegistryClientMockGetImageConfigExpectationOrigins struct {
-	origin           string
-	originCtx        string
-	originRepository string
-	originTag        string
+	origin    string
+	originCtx string
+	originTag string
 }
 
 // Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
@@ -956,7 +910,7 @@ func (mmGetImageConfig *mRegistryClientMockGetImageConfig) Optional() *mRegistry
 }
 
 // Expect sets up expected params for RegistryClient.GetImageConfig
-func (mmGetImageConfig *mRegistryClientMockGetImageConfig) Expect(ctx context.Context, repository string, tag string) *mRegistryClientMockGetImageConfig {
+func (mmGetImageConfig *mRegistryClientMockGetImageConfig) Expect(ctx context.Context, tag string) *mRegistryClientMockGetImageConfig {
 	if mmGetImageConfig.mock.funcGetImageConfig != nil {
 		mmGetImageConfig.mock.t.Fatalf("RegistryClientMock.GetImageConfig mock is already set by Set")
 	}
@@ -969,7 +923,7 @@ func (mmGetImageConfig *mRegistryClientMockGetImageConfig) Expect(ctx context.Co
 		mmGetImageConfig.mock.t.Fatalf("RegistryClientMock.GetImageConfig mock is already set by ExpectParams functions")
 	}
 
-	mmGetImageConfig.defaultExpectation.params = &RegistryClientMockGetImageConfigParams{ctx, repository, tag}
+	mmGetImageConfig.defaultExpectation.params = &RegistryClientMockGetImageConfigParams{ctx, tag}
 	mmGetImageConfig.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
 	for _, e := range mmGetImageConfig.expectations {
 		if minimock.Equal(e.params, mmGetImageConfig.defaultExpectation.params) {
@@ -1003,31 +957,8 @@ func (mmGetImageConfig *mRegistryClientMockGetImageConfig) ExpectCtxParam1(ctx c
 	return mmGetImageConfig
 }
 
-// ExpectRepositoryParam2 sets up expected param repository for RegistryClient.GetImageConfig
-func (mmGetImageConfig *mRegistryClientMockGetImageConfig) ExpectRepositoryParam2(repository string) *mRegistryClientMockGetImageConfig {
-	if mmGetImageConfig.mock.funcGetImageConfig != nil {
-		mmGetImageConfig.mock.t.Fatalf("RegistryClientMock.GetImageConfig mock is already set by Set")
-	}
-
-	if mmGetImageConfig.defaultExpectation == nil {
-		mmGetImageConfig.defaultExpectation = &RegistryClientMockGetImageConfigExpectation{}
-	}
-
-	if mmGetImageConfig.defaultExpectation.params != nil {
-		mmGetImageConfig.mock.t.Fatalf("RegistryClientMock.GetImageConfig mock is already set by Expect")
-	}
-
-	if mmGetImageConfig.defaultExpectation.paramPtrs == nil {
-		mmGetImageConfig.defaultExpectation.paramPtrs = &RegistryClientMockGetImageConfigParamPtrs{}
-	}
-	mmGetImageConfig.defaultExpectation.paramPtrs.repository = &repository
-	mmGetImageConfig.defaultExpectation.expectationOrigins.originRepository = minimock.CallerInfo(1)
-
-	return mmGetImageConfig
-}
-
-// ExpectTagParam3 sets up expected param tag for RegistryClient.GetImageConfig
-func (mmGetImageConfig *mRegistryClientMockGetImageConfig) ExpectTagParam3(tag string) *mRegistryClientMockGetImageConfig {
+// ExpectTagParam2 sets up expected param tag for RegistryClient.GetImageConfig
+func (mmGetImageConfig *mRegistryClientMockGetImageConfig) ExpectTagParam2(tag string) *mRegistryClientMockGetImageConfig {
 	if mmGetImageConfig.mock.funcGetImageConfig != nil {
 		mmGetImageConfig.mock.t.Fatalf("RegistryClientMock.GetImageConfig mock is already set by Set")
 	}
@@ -1050,7 +981,7 @@ func (mmGetImageConfig *mRegistryClientMockGetImageConfig) ExpectTagParam3(tag s
 }
 
 // Inspect accepts an inspector function that has same arguments as the RegistryClient.GetImageConfig
-func (mmGetImageConfig *mRegistryClientMockGetImageConfig) Inspect(f func(ctx context.Context, repository string, tag string)) *mRegistryClientMockGetImageConfig {
+func (mmGetImageConfig *mRegistryClientMockGetImageConfig) Inspect(f func(ctx context.Context, tag string)) *mRegistryClientMockGetImageConfig {
 	if mmGetImageConfig.mock.inspectFuncGetImageConfig != nil {
 		mmGetImageConfig.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.GetImageConfig")
 	}
@@ -1075,7 +1006,7 @@ func (mmGetImageConfig *mRegistryClientMockGetImageConfig) Return(cp1 *v1.Config
 }
 
 // Set uses given function f to mock the RegistryClient.GetImageConfig method
-func (mmGetImageConfig *mRegistryClientMockGetImageConfig) Set(f func(ctx context.Context, repository string, tag string) (cp1 *v1.ConfigFile, err error)) *RegistryClientMock {
+func (mmGetImageConfig *mRegistryClientMockGetImageConfig) Set(f func(ctx context.Context, tag string) (cp1 *v1.ConfigFile, err error)) *RegistryClientMock {
 	if mmGetImageConfig.defaultExpectation != nil {
 		mmGetImageConfig.mock.t.Fatalf("Default expectation is already set for the RegistryClient.GetImageConfig method")
 	}
@@ -1091,14 +1022,14 @@ func (mmGetImageConfig *mRegistryClientMockGetImageConfig) Set(f func(ctx contex
 
 // When sets expectation for the RegistryClient.GetImageConfig which will trigger the result defined by the following
 // Then helper
-func (mmGetImageConfig *mRegistryClientMockGetImageConfig) When(ctx context.Context, repository string, tag string) *RegistryClientMockGetImageConfigExpectation {
+func (mmGetImageConfig *mRegistryClientMockGetImageConfig) When(ctx context.Context, tag string) *RegistryClientMockGetImageConfigExpectation {
 	if mmGetImageConfig.mock.funcGetImageConfig != nil {
 		mmGetImageConfig.mock.t.Fatalf("RegistryClientMock.GetImageConfig mock is already set by Set")
 	}
 
 	expectation := &RegistryClientMockGetImageConfigExpectation{
 		mock:               mmGetImageConfig.mock,
-		params:             &RegistryClientMockGetImageConfigParams{ctx, repository, tag},
+		params:             &RegistryClientMockGetImageConfigParams{ctx, tag},
 		expectationOrigins: RegistryClientMockGetImageConfigExpectationOrigins{origin: minimock.CallerInfo(1)},
 	}
 	mmGetImageConfig.expectations = append(mmGetImageConfig.expectations, expectation)
@@ -1133,17 +1064,17 @@ func (mmGetImageConfig *mRegistryClientMockGetImageConfig) invocationsDone() boo
 }
 
 // GetImageConfig implements mm_pkg.RegistryClient
-func (mmGetImageConfig *RegistryClientMock) GetImageConfig(ctx context.Context, repository string, tag string) (cp1 *v1.ConfigFile, err error) {
+func (mmGetImageConfig *RegistryClientMock) GetImageConfig(ctx context.Context, tag string) (cp1 *v1.ConfigFile, err error) {
 	mm_atomic.AddUint64(&mmGetImageConfig.beforeGetImageConfigCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetImageConfig.afterGetImageConfigCounter, 1)
 
 	mmGetImageConfig.t.Helper()
 
 	if mmGetImageConfig.inspectFuncGetImageConfig != nil {
-		mmGetImageConfig.inspectFuncGetImageConfig(ctx, repository, tag)
+		mmGetImageConfig.inspectFuncGetImageConfig(ctx, tag)
 	}
 
-	mm_params := RegistryClientMockGetImageConfigParams{ctx, repository, tag}
+	mm_params := RegistryClientMockGetImageConfigParams{ctx, tag}
 
 	// Record call args
 	mmGetImageConfig.GetImageConfigMock.mutex.Lock()
@@ -1162,18 +1093,13 @@ func (mmGetImageConfig *RegistryClientMock) GetImageConfig(ctx context.Context, 
 		mm_want := mmGetImageConfig.GetImageConfigMock.defaultExpectation.params
 		mm_want_ptrs := mmGetImageConfig.GetImageConfigMock.defaultExpectation.paramPtrs
 
-		mm_got := RegistryClientMockGetImageConfigParams{ctx, repository, tag}
+		mm_got := RegistryClientMockGetImageConfigParams{ctx, tag}
 
 		if mm_want_ptrs != nil {
 
 			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
 				mmGetImageConfig.t.Errorf("RegistryClientMock.GetImageConfig got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
 					mmGetImageConfig.GetImageConfigMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
-			}
-
-			if mm_want_ptrs.repository != nil && !minimock.Equal(*mm_want_ptrs.repository, mm_got.repository) {
-				mmGetImageConfig.t.Errorf("RegistryClientMock.GetImageConfig got unexpected parameter repository, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
-					mmGetImageConfig.GetImageConfigMock.defaultExpectation.expectationOrigins.originRepository, *mm_want_ptrs.repository, mm_got.repository, minimock.Diff(*mm_want_ptrs.repository, mm_got.repository))
 			}
 
 			if mm_want_ptrs.tag != nil && !minimock.Equal(*mm_want_ptrs.tag, mm_got.tag) {
@@ -1193,9 +1119,9 @@ func (mmGetImageConfig *RegistryClientMock) GetImageConfig(ctx context.Context, 
 		return (*mm_results).cp1, (*mm_results).err
 	}
 	if mmGetImageConfig.funcGetImageConfig != nil {
-		return mmGetImageConfig.funcGetImageConfig(ctx, repository, tag)
+		return mmGetImageConfig.funcGetImageConfig(ctx, tag)
 	}
-	mmGetImageConfig.t.Fatalf("Unexpected call to RegistryClientMock.GetImageConfig. %v %v %v", ctx, repository, tag)
+	mmGetImageConfig.t.Fatalf("Unexpected call to RegistryClientMock.GetImageConfig. %v %v", ctx, tag)
 	return
 }
 
@@ -1293,16 +1219,14 @@ type RegistryClientMockGetImageLayersExpectation struct {
 
 // RegistryClientMockGetImageLayersParams contains parameters of the RegistryClient.GetImageLayers
 type RegistryClientMockGetImageLayersParams struct {
-	ctx        context.Context
-	repository string
-	tag        string
+	ctx context.Context
+	tag string
 }
 
 // RegistryClientMockGetImageLayersParamPtrs contains pointers to parameters of the RegistryClient.GetImageLayers
 type RegistryClientMockGetImageLayersParamPtrs struct {
-	ctx        *context.Context
-	repository *string
-	tag        *string
+	ctx *context.Context
+	tag *string
 }
 
 // RegistryClientMockGetImageLayersResults contains results of the RegistryClient.GetImageLayers
@@ -1313,10 +1237,9 @@ type RegistryClientMockGetImageLayersResults struct {
 
 // RegistryClientMockGetImageLayersOrigins contains origins of expectations of the RegistryClient.GetImageLayers
 type RegistryClientMockGetImageLayersExpectationOrigins struct {
-	origin           string
-	originCtx        string
-	originRepository string
-	originTag        string
+	origin    string
+	originCtx string
+	originTag string
 }
 
 // Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
@@ -1330,7 +1253,7 @@ func (mmGetImageLayers *mRegistryClientMockGetImageLayers) Optional() *mRegistry
 }
 
 // Expect sets up expected params for RegistryClient.GetImageLayers
-func (mmGetImageLayers *mRegistryClientMockGetImageLayers) Expect(ctx context.Context, repository string, tag string) *mRegistryClientMockGetImageLayers {
+func (mmGetImageLayers *mRegistryClientMockGetImageLayers) Expect(ctx context.Context, tag string) *mRegistryClientMockGetImageLayers {
 	if mmGetImageLayers.mock.funcGetImageLayers != nil {
 		mmGetImageLayers.mock.t.Fatalf("RegistryClientMock.GetImageLayers mock is already set by Set")
 	}
@@ -1343,7 +1266,7 @@ func (mmGetImageLayers *mRegistryClientMockGetImageLayers) Expect(ctx context.Co
 		mmGetImageLayers.mock.t.Fatalf("RegistryClientMock.GetImageLayers mock is already set by ExpectParams functions")
 	}
 
-	mmGetImageLayers.defaultExpectation.params = &RegistryClientMockGetImageLayersParams{ctx, repository, tag}
+	mmGetImageLayers.defaultExpectation.params = &RegistryClientMockGetImageLayersParams{ctx, tag}
 	mmGetImageLayers.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
 	for _, e := range mmGetImageLayers.expectations {
 		if minimock.Equal(e.params, mmGetImageLayers.defaultExpectation.params) {
@@ -1377,31 +1300,8 @@ func (mmGetImageLayers *mRegistryClientMockGetImageLayers) ExpectCtxParam1(ctx c
 	return mmGetImageLayers
 }
 
-// ExpectRepositoryParam2 sets up expected param repository for RegistryClient.GetImageLayers
-func (mmGetImageLayers *mRegistryClientMockGetImageLayers) ExpectRepositoryParam2(repository string) *mRegistryClientMockGetImageLayers {
-	if mmGetImageLayers.mock.funcGetImageLayers != nil {
-		mmGetImageLayers.mock.t.Fatalf("RegistryClientMock.GetImageLayers mock is already set by Set")
-	}
-
-	if mmGetImageLayers.defaultExpectation == nil {
-		mmGetImageLayers.defaultExpectation = &RegistryClientMockGetImageLayersExpectation{}
-	}
-
-	if mmGetImageLayers.defaultExpectation.params != nil {
-		mmGetImageLayers.mock.t.Fatalf("RegistryClientMock.GetImageLayers mock is already set by Expect")
-	}
-
-	if mmGetImageLayers.defaultExpectation.paramPtrs == nil {
-		mmGetImageLayers.defaultExpectation.paramPtrs = &RegistryClientMockGetImageLayersParamPtrs{}
-	}
-	mmGetImageLayers.defaultExpectation.paramPtrs.repository = &repository
-	mmGetImageLayers.defaultExpectation.expectationOrigins.originRepository = minimock.CallerInfo(1)
-
-	return mmGetImageLayers
-}
-
-// ExpectTagParam3 sets up expected param tag for RegistryClient.GetImageLayers
-func (mmGetImageLayers *mRegistryClientMockGetImageLayers) ExpectTagParam3(tag string) *mRegistryClientMockGetImageLayers {
+// ExpectTagParam2 sets up expected param tag for RegistryClient.GetImageLayers
+func (mmGetImageLayers *mRegistryClientMockGetImageLayers) ExpectTagParam2(tag string) *mRegistryClientMockGetImageLayers {
 	if mmGetImageLayers.mock.funcGetImageLayers != nil {
 		mmGetImageLayers.mock.t.Fatalf("RegistryClientMock.GetImageLayers mock is already set by Set")
 	}
@@ -1424,7 +1324,7 @@ func (mmGetImageLayers *mRegistryClientMockGetImageLayers) ExpectTagParam3(tag s
 }
 
 // Inspect accepts an inspector function that has same arguments as the RegistryClient.GetImageLayers
-func (mmGetImageLayers *mRegistryClientMockGetImageLayers) Inspect(f func(ctx context.Context, repository string, tag string)) *mRegistryClientMockGetImageLayers {
+func (mmGetImageLayers *mRegistryClientMockGetImageLayers) Inspect(f func(ctx context.Context, tag string)) *mRegistryClientMockGetImageLayers {
 	if mmGetImageLayers.mock.inspectFuncGetImageLayers != nil {
 		mmGetImageLayers.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.GetImageLayers")
 	}
@@ -1449,7 +1349,7 @@ func (mmGetImageLayers *mRegistryClientMockGetImageLayers) Return(la1 []v1.Layer
 }
 
 // Set uses given function f to mock the RegistryClient.GetImageLayers method
-func (mmGetImageLayers *mRegistryClientMockGetImageLayers) Set(f func(ctx context.Context, repository string, tag string) (la1 []v1.Layer, err error)) *RegistryClientMock {
+func (mmGetImageLayers *mRegistryClientMockGetImageLayers) Set(f func(ctx context.Context, tag string) (la1 []v1.Layer, err error)) *RegistryClientMock {
 	if mmGetImageLayers.defaultExpectation != nil {
 		mmGetImageLayers.mock.t.Fatalf("Default expectation is already set for the RegistryClient.GetImageLayers method")
 	}
@@ -1465,14 +1365,14 @@ func (mmGetImageLayers *mRegistryClientMockGetImageLayers) Set(f func(ctx contex
 
 // When sets expectation for the RegistryClient.GetImageLayers which will trigger the result defined by the following
 // Then helper
-func (mmGetImageLayers *mRegistryClientMockGetImageLayers) When(ctx context.Context, repository string, tag string) *RegistryClientMockGetImageLayersExpectation {
+func (mmGetImageLayers *mRegistryClientMockGetImageLayers) When(ctx context.Context, tag string) *RegistryClientMockGetImageLayersExpectation {
 	if mmGetImageLayers.mock.funcGetImageLayers != nil {
 		mmGetImageLayers.mock.t.Fatalf("RegistryClientMock.GetImageLayers mock is already set by Set")
 	}
 
 	expectation := &RegistryClientMockGetImageLayersExpectation{
 		mock:               mmGetImageLayers.mock,
-		params:             &RegistryClientMockGetImageLayersParams{ctx, repository, tag},
+		params:             &RegistryClientMockGetImageLayersParams{ctx, tag},
 		expectationOrigins: RegistryClientMockGetImageLayersExpectationOrigins{origin: minimock.CallerInfo(1)},
 	}
 	mmGetImageLayers.expectations = append(mmGetImageLayers.expectations, expectation)
@@ -1507,17 +1407,17 @@ func (mmGetImageLayers *mRegistryClientMockGetImageLayers) invocationsDone() boo
 }
 
 // GetImageLayers implements mm_pkg.RegistryClient
-func (mmGetImageLayers *RegistryClientMock) GetImageLayers(ctx context.Context, repository string, tag string) (la1 []v1.Layer, err error) {
+func (mmGetImageLayers *RegistryClientMock) GetImageLayers(ctx context.Context, tag string) (la1 []v1.Layer, err error) {
 	mm_atomic.AddUint64(&mmGetImageLayers.beforeGetImageLayersCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetImageLayers.afterGetImageLayersCounter, 1)
 
 	mmGetImageLayers.t.Helper()
 
 	if mmGetImageLayers.inspectFuncGetImageLayers != nil {
-		mmGetImageLayers.inspectFuncGetImageLayers(ctx, repository, tag)
+		mmGetImageLayers.inspectFuncGetImageLayers(ctx, tag)
 	}
 
-	mm_params := RegistryClientMockGetImageLayersParams{ctx, repository, tag}
+	mm_params := RegistryClientMockGetImageLayersParams{ctx, tag}
 
 	// Record call args
 	mmGetImageLayers.GetImageLayersMock.mutex.Lock()
@@ -1536,18 +1436,13 @@ func (mmGetImageLayers *RegistryClientMock) GetImageLayers(ctx context.Context, 
 		mm_want := mmGetImageLayers.GetImageLayersMock.defaultExpectation.params
 		mm_want_ptrs := mmGetImageLayers.GetImageLayersMock.defaultExpectation.paramPtrs
 
-		mm_got := RegistryClientMockGetImageLayersParams{ctx, repository, tag}
+		mm_got := RegistryClientMockGetImageLayersParams{ctx, tag}
 
 		if mm_want_ptrs != nil {
 
 			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
 				mmGetImageLayers.t.Errorf("RegistryClientMock.GetImageLayers got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
 					mmGetImageLayers.GetImageLayersMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
-			}
-
-			if mm_want_ptrs.repository != nil && !minimock.Equal(*mm_want_ptrs.repository, mm_got.repository) {
-				mmGetImageLayers.t.Errorf("RegistryClientMock.GetImageLayers got unexpected parameter repository, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
-					mmGetImageLayers.GetImageLayersMock.defaultExpectation.expectationOrigins.originRepository, *mm_want_ptrs.repository, mm_got.repository, minimock.Diff(*mm_want_ptrs.repository, mm_got.repository))
 			}
 
 			if mm_want_ptrs.tag != nil && !minimock.Equal(*mm_want_ptrs.tag, mm_got.tag) {
@@ -1567,9 +1462,9 @@ func (mmGetImageLayers *RegistryClientMock) GetImageLayers(ctx context.Context, 
 		return (*mm_results).la1, (*mm_results).err
 	}
 	if mmGetImageLayers.funcGetImageLayers != nil {
-		return mmGetImageLayers.funcGetImageLayers(ctx, repository, tag)
+		return mmGetImageLayers.funcGetImageLayers(ctx, tag)
 	}
-	mmGetImageLayers.t.Fatalf("Unexpected call to RegistryClientMock.GetImageLayers. %v %v %v", ctx, repository, tag)
+	mmGetImageLayers.t.Fatalf("Unexpected call to RegistryClientMock.GetImageLayers. %v %v", ctx, tag)
 	return
 }
 
@@ -1667,18 +1562,16 @@ type RegistryClientMockGetLabelExpectation struct {
 
 // RegistryClientMockGetLabelParams contains parameters of the RegistryClient.GetLabel
 type RegistryClientMockGetLabelParams struct {
-	ctx        context.Context
-	repository string
-	tag        string
-	labelKey   string
+	ctx      context.Context
+	tag      string
+	labelKey string
 }
 
 // RegistryClientMockGetLabelParamPtrs contains pointers to parameters of the RegistryClient.GetLabel
 type RegistryClientMockGetLabelParamPtrs struct {
-	ctx        *context.Context
-	repository *string
-	tag        *string
-	labelKey   *string
+	ctx      *context.Context
+	tag      *string
+	labelKey *string
 }
 
 // RegistryClientMockGetLabelResults contains results of the RegistryClient.GetLabel
@@ -1690,11 +1583,10 @@ type RegistryClientMockGetLabelResults struct {
 
 // RegistryClientMockGetLabelOrigins contains origins of expectations of the RegistryClient.GetLabel
 type RegistryClientMockGetLabelExpectationOrigins struct {
-	origin           string
-	originCtx        string
-	originRepository string
-	originTag        string
-	originLabelKey   string
+	origin         string
+	originCtx      string
+	originTag      string
+	originLabelKey string
 }
 
 // Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
@@ -1708,7 +1600,7 @@ func (mmGetLabel *mRegistryClientMockGetLabel) Optional() *mRegistryClientMockGe
 }
 
 // Expect sets up expected params for RegistryClient.GetLabel
-func (mmGetLabel *mRegistryClientMockGetLabel) Expect(ctx context.Context, repository string, tag string, labelKey string) *mRegistryClientMockGetLabel {
+func (mmGetLabel *mRegistryClientMockGetLabel) Expect(ctx context.Context, tag string, labelKey string) *mRegistryClientMockGetLabel {
 	if mmGetLabel.mock.funcGetLabel != nil {
 		mmGetLabel.mock.t.Fatalf("RegistryClientMock.GetLabel mock is already set by Set")
 	}
@@ -1721,7 +1613,7 @@ func (mmGetLabel *mRegistryClientMockGetLabel) Expect(ctx context.Context, repos
 		mmGetLabel.mock.t.Fatalf("RegistryClientMock.GetLabel mock is already set by ExpectParams functions")
 	}
 
-	mmGetLabel.defaultExpectation.params = &RegistryClientMockGetLabelParams{ctx, repository, tag, labelKey}
+	mmGetLabel.defaultExpectation.params = &RegistryClientMockGetLabelParams{ctx, tag, labelKey}
 	mmGetLabel.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
 	for _, e := range mmGetLabel.expectations {
 		if minimock.Equal(e.params, mmGetLabel.defaultExpectation.params) {
@@ -1755,31 +1647,8 @@ func (mmGetLabel *mRegistryClientMockGetLabel) ExpectCtxParam1(ctx context.Conte
 	return mmGetLabel
 }
 
-// ExpectRepositoryParam2 sets up expected param repository for RegistryClient.GetLabel
-func (mmGetLabel *mRegistryClientMockGetLabel) ExpectRepositoryParam2(repository string) *mRegistryClientMockGetLabel {
-	if mmGetLabel.mock.funcGetLabel != nil {
-		mmGetLabel.mock.t.Fatalf("RegistryClientMock.GetLabel mock is already set by Set")
-	}
-
-	if mmGetLabel.defaultExpectation == nil {
-		mmGetLabel.defaultExpectation = &RegistryClientMockGetLabelExpectation{}
-	}
-
-	if mmGetLabel.defaultExpectation.params != nil {
-		mmGetLabel.mock.t.Fatalf("RegistryClientMock.GetLabel mock is already set by Expect")
-	}
-
-	if mmGetLabel.defaultExpectation.paramPtrs == nil {
-		mmGetLabel.defaultExpectation.paramPtrs = &RegistryClientMockGetLabelParamPtrs{}
-	}
-	mmGetLabel.defaultExpectation.paramPtrs.repository = &repository
-	mmGetLabel.defaultExpectation.expectationOrigins.originRepository = minimock.CallerInfo(1)
-
-	return mmGetLabel
-}
-
-// ExpectTagParam3 sets up expected param tag for RegistryClient.GetLabel
-func (mmGetLabel *mRegistryClientMockGetLabel) ExpectTagParam3(tag string) *mRegistryClientMockGetLabel {
+// ExpectTagParam2 sets up expected param tag for RegistryClient.GetLabel
+func (mmGetLabel *mRegistryClientMockGetLabel) ExpectTagParam2(tag string) *mRegistryClientMockGetLabel {
 	if mmGetLabel.mock.funcGetLabel != nil {
 		mmGetLabel.mock.t.Fatalf("RegistryClientMock.GetLabel mock is already set by Set")
 	}
@@ -1801,8 +1670,8 @@ func (mmGetLabel *mRegistryClientMockGetLabel) ExpectTagParam3(tag string) *mReg
 	return mmGetLabel
 }
 
-// ExpectLabelKeyParam4 sets up expected param labelKey for RegistryClient.GetLabel
-func (mmGetLabel *mRegistryClientMockGetLabel) ExpectLabelKeyParam4(labelKey string) *mRegistryClientMockGetLabel {
+// ExpectLabelKeyParam3 sets up expected param labelKey for RegistryClient.GetLabel
+func (mmGetLabel *mRegistryClientMockGetLabel) ExpectLabelKeyParam3(labelKey string) *mRegistryClientMockGetLabel {
 	if mmGetLabel.mock.funcGetLabel != nil {
 		mmGetLabel.mock.t.Fatalf("RegistryClientMock.GetLabel mock is already set by Set")
 	}
@@ -1825,7 +1694,7 @@ func (mmGetLabel *mRegistryClientMockGetLabel) ExpectLabelKeyParam4(labelKey str
 }
 
 // Inspect accepts an inspector function that has same arguments as the RegistryClient.GetLabel
-func (mmGetLabel *mRegistryClientMockGetLabel) Inspect(f func(ctx context.Context, repository string, tag string, labelKey string)) *mRegistryClientMockGetLabel {
+func (mmGetLabel *mRegistryClientMockGetLabel) Inspect(f func(ctx context.Context, tag string, labelKey string)) *mRegistryClientMockGetLabel {
 	if mmGetLabel.mock.inspectFuncGetLabel != nil {
 		mmGetLabel.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.GetLabel")
 	}
@@ -1850,7 +1719,7 @@ func (mmGetLabel *mRegistryClientMockGetLabel) Return(s1 string, b1 bool, err er
 }
 
 // Set uses given function f to mock the RegistryClient.GetLabel method
-func (mmGetLabel *mRegistryClientMockGetLabel) Set(f func(ctx context.Context, repository string, tag string, labelKey string) (s1 string, b1 bool, err error)) *RegistryClientMock {
+func (mmGetLabel *mRegistryClientMockGetLabel) Set(f func(ctx context.Context, tag string, labelKey string) (s1 string, b1 bool, err error)) *RegistryClientMock {
 	if mmGetLabel.defaultExpectation != nil {
 		mmGetLabel.mock.t.Fatalf("Default expectation is already set for the RegistryClient.GetLabel method")
 	}
@@ -1866,14 +1735,14 @@ func (mmGetLabel *mRegistryClientMockGetLabel) Set(f func(ctx context.Context, r
 
 // When sets expectation for the RegistryClient.GetLabel which will trigger the result defined by the following
 // Then helper
-func (mmGetLabel *mRegistryClientMockGetLabel) When(ctx context.Context, repository string, tag string, labelKey string) *RegistryClientMockGetLabelExpectation {
+func (mmGetLabel *mRegistryClientMockGetLabel) When(ctx context.Context, tag string, labelKey string) *RegistryClientMockGetLabelExpectation {
 	if mmGetLabel.mock.funcGetLabel != nil {
 		mmGetLabel.mock.t.Fatalf("RegistryClientMock.GetLabel mock is already set by Set")
 	}
 
 	expectation := &RegistryClientMockGetLabelExpectation{
 		mock:               mmGetLabel.mock,
-		params:             &RegistryClientMockGetLabelParams{ctx, repository, tag, labelKey},
+		params:             &RegistryClientMockGetLabelParams{ctx, tag, labelKey},
 		expectationOrigins: RegistryClientMockGetLabelExpectationOrigins{origin: minimock.CallerInfo(1)},
 	}
 	mmGetLabel.expectations = append(mmGetLabel.expectations, expectation)
@@ -1908,17 +1777,17 @@ func (mmGetLabel *mRegistryClientMockGetLabel) invocationsDone() bool {
 }
 
 // GetLabel implements mm_pkg.RegistryClient
-func (mmGetLabel *RegistryClientMock) GetLabel(ctx context.Context, repository string, tag string, labelKey string) (s1 string, b1 bool, err error) {
+func (mmGetLabel *RegistryClientMock) GetLabel(ctx context.Context, tag string, labelKey string) (s1 string, b1 bool, err error) {
 	mm_atomic.AddUint64(&mmGetLabel.beforeGetLabelCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetLabel.afterGetLabelCounter, 1)
 
 	mmGetLabel.t.Helper()
 
 	if mmGetLabel.inspectFuncGetLabel != nil {
-		mmGetLabel.inspectFuncGetLabel(ctx, repository, tag, labelKey)
+		mmGetLabel.inspectFuncGetLabel(ctx, tag, labelKey)
 	}
 
-	mm_params := RegistryClientMockGetLabelParams{ctx, repository, tag, labelKey}
+	mm_params := RegistryClientMockGetLabelParams{ctx, tag, labelKey}
 
 	// Record call args
 	mmGetLabel.GetLabelMock.mutex.Lock()
@@ -1937,18 +1806,13 @@ func (mmGetLabel *RegistryClientMock) GetLabel(ctx context.Context, repository s
 		mm_want := mmGetLabel.GetLabelMock.defaultExpectation.params
 		mm_want_ptrs := mmGetLabel.GetLabelMock.defaultExpectation.paramPtrs
 
-		mm_got := RegistryClientMockGetLabelParams{ctx, repository, tag, labelKey}
+		mm_got := RegistryClientMockGetLabelParams{ctx, tag, labelKey}
 
 		if mm_want_ptrs != nil {
 
 			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
 				mmGetLabel.t.Errorf("RegistryClientMock.GetLabel got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
 					mmGetLabel.GetLabelMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
-			}
-
-			if mm_want_ptrs.repository != nil && !minimock.Equal(*mm_want_ptrs.repository, mm_got.repository) {
-				mmGetLabel.t.Errorf("RegistryClientMock.GetLabel got unexpected parameter repository, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
-					mmGetLabel.GetLabelMock.defaultExpectation.expectationOrigins.originRepository, *mm_want_ptrs.repository, mm_got.repository, minimock.Diff(*mm_want_ptrs.repository, mm_got.repository))
 			}
 
 			if mm_want_ptrs.tag != nil && !minimock.Equal(*mm_want_ptrs.tag, mm_got.tag) {
@@ -1973,9 +1837,9 @@ func (mmGetLabel *RegistryClientMock) GetLabel(ctx context.Context, repository s
 		return (*mm_results).s1, (*mm_results).b1, (*mm_results).err
 	}
 	if mmGetLabel.funcGetLabel != nil {
-		return mmGetLabel.funcGetLabel(ctx, repository, tag, labelKey)
+		return mmGetLabel.funcGetLabel(ctx, tag, labelKey)
 	}
-	mmGetLabel.t.Fatalf("Unexpected call to RegistryClientMock.GetLabel. %v %v %v %v", ctx, repository, tag, labelKey)
+	mmGetLabel.t.Fatalf("Unexpected call to RegistryClientMock.GetLabel. %v %v %v", ctx, tag, labelKey)
 	return
 }
 
@@ -2073,16 +1937,14 @@ type RegistryClientMockGetManifestExpectation struct {
 
 // RegistryClientMockGetManifestParams contains parameters of the RegistryClient.GetManifest
 type RegistryClientMockGetManifestParams struct {
-	ctx        context.Context
-	repository string
-	tag        string
+	ctx context.Context
+	tag string
 }
 
 // RegistryClientMockGetManifestParamPtrs contains pointers to parameters of the RegistryClient.GetManifest
 type RegistryClientMockGetManifestParamPtrs struct {
-	ctx        *context.Context
-	repository *string
-	tag        *string
+	ctx *context.Context
+	tag *string
 }
 
 // RegistryClientMockGetManifestResults contains results of the RegistryClient.GetManifest
@@ -2093,10 +1955,9 @@ type RegistryClientMockGetManifestResults struct {
 
 // RegistryClientMockGetManifestOrigins contains origins of expectations of the RegistryClient.GetManifest
 type RegistryClientMockGetManifestExpectationOrigins struct {
-	origin           string
-	originCtx        string
-	originRepository string
-	originTag        string
+	origin    string
+	originCtx string
+	originTag string
 }
 
 // Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
@@ -2110,7 +1971,7 @@ func (mmGetManifest *mRegistryClientMockGetManifest) Optional() *mRegistryClient
 }
 
 // Expect sets up expected params for RegistryClient.GetManifest
-func (mmGetManifest *mRegistryClientMockGetManifest) Expect(ctx context.Context, repository string, tag string) *mRegistryClientMockGetManifest {
+func (mmGetManifest *mRegistryClientMockGetManifest) Expect(ctx context.Context, tag string) *mRegistryClientMockGetManifest {
 	if mmGetManifest.mock.funcGetManifest != nil {
 		mmGetManifest.mock.t.Fatalf("RegistryClientMock.GetManifest mock is already set by Set")
 	}
@@ -2123,7 +1984,7 @@ func (mmGetManifest *mRegistryClientMockGetManifest) Expect(ctx context.Context,
 		mmGetManifest.mock.t.Fatalf("RegistryClientMock.GetManifest mock is already set by ExpectParams functions")
 	}
 
-	mmGetManifest.defaultExpectation.params = &RegistryClientMockGetManifestParams{ctx, repository, tag}
+	mmGetManifest.defaultExpectation.params = &RegistryClientMockGetManifestParams{ctx, tag}
 	mmGetManifest.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
 	for _, e := range mmGetManifest.expectations {
 		if minimock.Equal(e.params, mmGetManifest.defaultExpectation.params) {
@@ -2157,31 +2018,8 @@ func (mmGetManifest *mRegistryClientMockGetManifest) ExpectCtxParam1(ctx context
 	return mmGetManifest
 }
 
-// ExpectRepositoryParam2 sets up expected param repository for RegistryClient.GetManifest
-func (mmGetManifest *mRegistryClientMockGetManifest) ExpectRepositoryParam2(repository string) *mRegistryClientMockGetManifest {
-	if mmGetManifest.mock.funcGetManifest != nil {
-		mmGetManifest.mock.t.Fatalf("RegistryClientMock.GetManifest mock is already set by Set")
-	}
-
-	if mmGetManifest.defaultExpectation == nil {
-		mmGetManifest.defaultExpectation = &RegistryClientMockGetManifestExpectation{}
-	}
-
-	if mmGetManifest.defaultExpectation.params != nil {
-		mmGetManifest.mock.t.Fatalf("RegistryClientMock.GetManifest mock is already set by Expect")
-	}
-
-	if mmGetManifest.defaultExpectation.paramPtrs == nil {
-		mmGetManifest.defaultExpectation.paramPtrs = &RegistryClientMockGetManifestParamPtrs{}
-	}
-	mmGetManifest.defaultExpectation.paramPtrs.repository = &repository
-	mmGetManifest.defaultExpectation.expectationOrigins.originRepository = minimock.CallerInfo(1)
-
-	return mmGetManifest
-}
-
-// ExpectTagParam3 sets up expected param tag for RegistryClient.GetManifest
-func (mmGetManifest *mRegistryClientMockGetManifest) ExpectTagParam3(tag string) *mRegistryClientMockGetManifest {
+// ExpectTagParam2 sets up expected param tag for RegistryClient.GetManifest
+func (mmGetManifest *mRegistryClientMockGetManifest) ExpectTagParam2(tag string) *mRegistryClientMockGetManifest {
 	if mmGetManifest.mock.funcGetManifest != nil {
 		mmGetManifest.mock.t.Fatalf("RegistryClientMock.GetManifest mock is already set by Set")
 	}
@@ -2204,7 +2042,7 @@ func (mmGetManifest *mRegistryClientMockGetManifest) ExpectTagParam3(tag string)
 }
 
 // Inspect accepts an inspector function that has same arguments as the RegistryClient.GetManifest
-func (mmGetManifest *mRegistryClientMockGetManifest) Inspect(f func(ctx context.Context, repository string, tag string)) *mRegistryClientMockGetManifest {
+func (mmGetManifest *mRegistryClientMockGetManifest) Inspect(f func(ctx context.Context, tag string)) *mRegistryClientMockGetManifest {
 	if mmGetManifest.mock.inspectFuncGetManifest != nil {
 		mmGetManifest.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.GetManifest")
 	}
@@ -2229,7 +2067,7 @@ func (mmGetManifest *mRegistryClientMockGetManifest) Return(dp1 *remote.Descript
 }
 
 // Set uses given function f to mock the RegistryClient.GetManifest method
-func (mmGetManifest *mRegistryClientMockGetManifest) Set(f func(ctx context.Context, repository string, tag string) (dp1 *remote.Descriptor, err error)) *RegistryClientMock {
+func (mmGetManifest *mRegistryClientMockGetManifest) Set(f func(ctx context.Context, tag string) (dp1 *remote.Descriptor, err error)) *RegistryClientMock {
 	if mmGetManifest.defaultExpectation != nil {
 		mmGetManifest.mock.t.Fatalf("Default expectation is already set for the RegistryClient.GetManifest method")
 	}
@@ -2245,14 +2083,14 @@ func (mmGetManifest *mRegistryClientMockGetManifest) Set(f func(ctx context.Cont
 
 // When sets expectation for the RegistryClient.GetManifest which will trigger the result defined by the following
 // Then helper
-func (mmGetManifest *mRegistryClientMockGetManifest) When(ctx context.Context, repository string, tag string) *RegistryClientMockGetManifestExpectation {
+func (mmGetManifest *mRegistryClientMockGetManifest) When(ctx context.Context, tag string) *RegistryClientMockGetManifestExpectation {
 	if mmGetManifest.mock.funcGetManifest != nil {
 		mmGetManifest.mock.t.Fatalf("RegistryClientMock.GetManifest mock is already set by Set")
 	}
 
 	expectation := &RegistryClientMockGetManifestExpectation{
 		mock:               mmGetManifest.mock,
-		params:             &RegistryClientMockGetManifestParams{ctx, repository, tag},
+		params:             &RegistryClientMockGetManifestParams{ctx, tag},
 		expectationOrigins: RegistryClientMockGetManifestExpectationOrigins{origin: minimock.CallerInfo(1)},
 	}
 	mmGetManifest.expectations = append(mmGetManifest.expectations, expectation)
@@ -2287,17 +2125,17 @@ func (mmGetManifest *mRegistryClientMockGetManifest) invocationsDone() bool {
 }
 
 // GetManifest implements mm_pkg.RegistryClient
-func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, repository string, tag string) (dp1 *remote.Descriptor, err error) {
+func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, tag string) (dp1 *remote.Descriptor, err error) {
 	mm_atomic.AddUint64(&mmGetManifest.beforeGetManifestCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetManifest.afterGetManifestCounter, 1)
 
 	mmGetManifest.t.Helper()
 
 	if mmGetManifest.inspectFuncGetManifest != nil {
-		mmGetManifest.inspectFuncGetManifest(ctx, repository, tag)
+		mmGetManifest.inspectFuncGetManifest(ctx, tag)
 	}
 
-	mm_params := RegistryClientMockGetManifestParams{ctx, repository, tag}
+	mm_params := RegistryClientMockGetManifestParams{ctx, tag}
 
 	// Record call args
 	mmGetManifest.GetManifestMock.mutex.Lock()
@@ -2316,18 +2154,13 @@ func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, reposi
 		mm_want := mmGetManifest.GetManifestMock.defaultExpectation.params
 		mm_want_ptrs := mmGetManifest.GetManifestMock.defaultExpectation.paramPtrs
 
-		mm_got := RegistryClientMockGetManifestParams{ctx, repository, tag}
+		mm_got := RegistryClientMockGetManifestParams{ctx, tag}
 
 		if mm_want_ptrs != nil {
 
 			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
 				mmGetManifest.t.Errorf("RegistryClientMock.GetManifest got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
 					mmGetManifest.GetManifestMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
-			}
-
-			if mm_want_ptrs.repository != nil && !minimock.Equal(*mm_want_ptrs.repository, mm_got.repository) {
-				mmGetManifest.t.Errorf("RegistryClientMock.GetManifest got unexpected parameter repository, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
-					mmGetManifest.GetManifestMock.defaultExpectation.expectationOrigins.originRepository, *mm_want_ptrs.repository, mm_got.repository, minimock.Diff(*mm_want_ptrs.repository, mm_got.repository))
 			}
 
 			if mm_want_ptrs.tag != nil && !minimock.Equal(*mm_want_ptrs.tag, mm_got.tag) {
@@ -2347,9 +2180,9 @@ func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, reposi
 		return (*mm_results).dp1, (*mm_results).err
 	}
 	if mmGetManifest.funcGetManifest != nil {
-		return mmGetManifest.funcGetManifest(ctx, repository, tag)
+		return mmGetManifest.funcGetManifest(ctx, tag)
 	}
-	mmGetManifest.t.Fatalf("Unexpected call to RegistryClientMock.GetManifest. %v %v %v", ctx, repository, tag)
+	mmGetManifest.t.Fatalf("Unexpected call to RegistryClientMock.GetManifest. %v %v", ctx, tag)
 	return
 }
 
@@ -2421,6 +2254,192 @@ func (m *RegistryClientMock) MinimockGetManifestInspect() {
 	}
 }
 
+type mRegistryClientMockGetRegistry struct {
+	optional           bool
+	mock               *RegistryClientMock
+	defaultExpectation *RegistryClientMockGetRegistryExpectation
+	expectations       []*RegistryClientMockGetRegistryExpectation
+
+	expectedInvocations       uint64
+	expectedInvocationsOrigin string
+}
+
+// RegistryClientMockGetRegistryExpectation specifies expectation struct of the RegistryClient.GetRegistry
+type RegistryClientMockGetRegistryExpectation struct {
+	mock *RegistryClientMock
+
+	results      *RegistryClientMockGetRegistryResults
+	returnOrigin string
+	Counter      uint64
+}
+
+// RegistryClientMockGetRegistryResults contains results of the RegistryClient.GetRegistry
+type RegistryClientMockGetRegistryResults struct {
+	s1 string
+}
+
+// Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
+// the test will fail minimock's automatic final call check if the mocked method was not called at least once.
+// Optional() makes method check to work in '0 or more' mode.
+// It is NOT RECOMMENDED to use this option unless you really need it, as default behaviour helps to
+// catch the problems when the expected method call is totally skipped during test run.
+func (mmGetRegistry *mRegistryClientMockGetRegistry) Optional() *mRegistryClientMockGetRegistry {
+	mmGetRegistry.optional = true
+	return mmGetRegistry
+}
+
+// Expect sets up expected params for RegistryClient.GetRegistry
+func (mmGetRegistry *mRegistryClientMockGetRegistry) Expect() *mRegistryClientMockGetRegistry {
+	if mmGetRegistry.mock.funcGetRegistry != nil {
+		mmGetRegistry.mock.t.Fatalf("RegistryClientMock.GetRegistry mock is already set by Set")
+	}
+
+	if mmGetRegistry.defaultExpectation == nil {
+		mmGetRegistry.defaultExpectation = &RegistryClientMockGetRegistryExpectation{}
+	}
+
+	return mmGetRegistry
+}
+
+// Inspect accepts an inspector function that has same arguments as the RegistryClient.GetRegistry
+func (mmGetRegistry *mRegistryClientMockGetRegistry) Inspect(f func()) *mRegistryClientMockGetRegistry {
+	if mmGetRegistry.mock.inspectFuncGetRegistry != nil {
+		mmGetRegistry.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.GetRegistry")
+	}
+
+	mmGetRegistry.mock.inspectFuncGetRegistry = f
+
+	return mmGetRegistry
+}
+
+// Return sets up results that will be returned by RegistryClient.GetRegistry
+func (mmGetRegistry *mRegistryClientMockGetRegistry) Return(s1 string) *RegistryClientMock {
+	if mmGetRegistry.mock.funcGetRegistry != nil {
+		mmGetRegistry.mock.t.Fatalf("RegistryClientMock.GetRegistry mock is already set by Set")
+	}
+
+	if mmGetRegistry.defaultExpectation == nil {
+		mmGetRegistry.defaultExpectation = &RegistryClientMockGetRegistryExpectation{mock: mmGetRegistry.mock}
+	}
+	mmGetRegistry.defaultExpectation.results = &RegistryClientMockGetRegistryResults{s1}
+	mmGetRegistry.defaultExpectation.returnOrigin = minimock.CallerInfo(1)
+	return mmGetRegistry.mock
+}
+
+// Set uses given function f to mock the RegistryClient.GetRegistry method
+func (mmGetRegistry *mRegistryClientMockGetRegistry) Set(f func() (s1 string)) *RegistryClientMock {
+	if mmGetRegistry.defaultExpectation != nil {
+		mmGetRegistry.mock.t.Fatalf("Default expectation is already set for the RegistryClient.GetRegistry method")
+	}
+
+	if len(mmGetRegistry.expectations) > 0 {
+		mmGetRegistry.mock.t.Fatalf("Some expectations are already set for the RegistryClient.GetRegistry method")
+	}
+
+	mmGetRegistry.mock.funcGetRegistry = f
+	mmGetRegistry.mock.funcGetRegistryOrigin = minimock.CallerInfo(1)
+	return mmGetRegistry.mock
+}
+
+// Times sets number of times RegistryClient.GetRegistry should be invoked
+func (mmGetRegistry *mRegistryClientMockGetRegistry) Times(n uint64) *mRegistryClientMockGetRegistry {
+	if n == 0 {
+		mmGetRegistry.mock.t.Fatalf("Times of RegistryClientMock.GetRegistry mock can not be zero")
+	}
+	mm_atomic.StoreUint64(&mmGetRegistry.expectedInvocations, n)
+	mmGetRegistry.expectedInvocationsOrigin = minimock.CallerInfo(1)
+	return mmGetRegistry
+}
+
+func (mmGetRegistry *mRegistryClientMockGetRegistry) invocationsDone() bool {
+	if len(mmGetRegistry.expectations) == 0 && mmGetRegistry.defaultExpectation == nil && mmGetRegistry.mock.funcGetRegistry == nil {
+		return true
+	}
+
+	totalInvocations := mm_atomic.LoadUint64(&mmGetRegistry.mock.afterGetRegistryCounter)
+	expectedInvocations := mm_atomic.LoadUint64(&mmGetRegistry.expectedInvocations)
+
+	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
+}
+
+// GetRegistry implements mm_pkg.RegistryClient
+func (mmGetRegistry *RegistryClientMock) GetRegistry() (s1 string) {
+	mm_atomic.AddUint64(&mmGetRegistry.beforeGetRegistryCounter, 1)
+	defer mm_atomic.AddUint64(&mmGetRegistry.afterGetRegistryCounter, 1)
+
+	mmGetRegistry.t.Helper()
+
+	if mmGetRegistry.inspectFuncGetRegistry != nil {
+		mmGetRegistry.inspectFuncGetRegistry()
+	}
+
+	if mmGetRegistry.GetRegistryMock.defaultExpectation != nil {
+		mm_atomic.AddUint64(&mmGetRegistry.GetRegistryMock.defaultExpectation.Counter, 1)
+
+		mm_results := mmGetRegistry.GetRegistryMock.defaultExpectation.results
+		if mm_results == nil {
+			mmGetRegistry.t.Fatal("No results are set for the RegistryClientMock.GetRegistry")
+		}
+		return (*mm_results).s1
+	}
+	if mmGetRegistry.funcGetRegistry != nil {
+		return mmGetRegistry.funcGetRegistry()
+	}
+	mmGetRegistry.t.Fatalf("Unexpected call to RegistryClientMock.GetRegistry.")
+	return
+}
+
+// GetRegistryAfterCounter returns a count of finished RegistryClientMock.GetRegistry invocations
+func (mmGetRegistry *RegistryClientMock) GetRegistryAfterCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmGetRegistry.afterGetRegistryCounter)
+}
+
+// GetRegistryBeforeCounter returns a count of RegistryClientMock.GetRegistry invocations
+func (mmGetRegistry *RegistryClientMock) GetRegistryBeforeCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmGetRegistry.beforeGetRegistryCounter)
+}
+
+// MinimockGetRegistryDone returns true if the count of the GetRegistry invocations corresponds
+// the number of defined expectations
+func (m *RegistryClientMock) MinimockGetRegistryDone() bool {
+	if m.GetRegistryMock.optional {
+		// Optional methods provide '0 or more' call count restriction.
+		return true
+	}
+
+	for _, e := range m.GetRegistryMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			return false
+		}
+	}
+
+	return m.GetRegistryMock.invocationsDone()
+}
+
+// MinimockGetRegistryInspect logs each unmet expectation
+func (m *RegistryClientMock) MinimockGetRegistryInspect() {
+	for _, e := range m.GetRegistryMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			m.t.Error("Expected call to RegistryClientMock.GetRegistry")
+		}
+	}
+
+	afterGetRegistryCounter := mm_atomic.LoadUint64(&m.afterGetRegistryCounter)
+	// if default expectation was set then invocations count should be greater than zero
+	if m.GetRegistryMock.defaultExpectation != nil && afterGetRegistryCounter < 1 {
+		m.t.Errorf("Expected call to RegistryClientMock.GetRegistry at\n%s", m.GetRegistryMock.defaultExpectation.returnOrigin)
+	}
+	// if func was set then invocations count should be greater than zero
+	if m.funcGetRegistry != nil && afterGetRegistryCounter < 1 {
+		m.t.Errorf("Expected call to RegistryClientMock.GetRegistry at\n%s", m.funcGetRegistryOrigin)
+	}
+
+	if !m.GetRegistryMock.invocationsDone() && afterGetRegistryCounter > 0 {
+		m.t.Errorf("Expected %d calls to RegistryClientMock.GetRegistry at\n%s but found %d calls",
+			mm_atomic.LoadUint64(&m.GetRegistryMock.expectedInvocations), m.GetRegistryMock.expectedInvocationsOrigin, afterGetRegistryCounter)
+	}
+}
+
 type mRegistryClientMockListRepositories struct {
 	optional           bool
 	mock               *RegistryClientMock
@@ -2447,14 +2466,12 @@ type RegistryClientMockListRepositoriesExpectation struct {
 
 // RegistryClientMockListRepositoriesParams contains parameters of the RegistryClient.ListRepositories
 type RegistryClientMockListRepositoriesParams struct {
-	ctx        context.Context
-	pathPrefix string
+	ctx context.Context
 }
 
 // RegistryClientMockListRepositoriesParamPtrs contains pointers to parameters of the RegistryClient.ListRepositories
 type RegistryClientMockListRepositoriesParamPtrs struct {
-	ctx        *context.Context
-	pathPrefix *string
+	ctx *context.Context
 }
 
 // RegistryClientMockListRepositoriesResults contains results of the RegistryClient.ListRepositories
@@ -2465,9 +2482,8 @@ type RegistryClientMockListRepositoriesResults struct {
 
 // RegistryClientMockListRepositoriesOrigins contains origins of expectations of the RegistryClient.ListRepositories
 type RegistryClientMockListRepositoriesExpectationOrigins struct {
-	origin           string
-	originCtx        string
-	originPathPrefix string
+	origin    string
+	originCtx string
 }
 
 // Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
@@ -2481,7 +2497,7 @@ func (mmListRepositories *mRegistryClientMockListRepositories) Optional() *mRegi
 }
 
 // Expect sets up expected params for RegistryClient.ListRepositories
-func (mmListRepositories *mRegistryClientMockListRepositories) Expect(ctx context.Context, pathPrefix string) *mRegistryClientMockListRepositories {
+func (mmListRepositories *mRegistryClientMockListRepositories) Expect(ctx context.Context) *mRegistryClientMockListRepositories {
 	if mmListRepositories.mock.funcListRepositories != nil {
 		mmListRepositories.mock.t.Fatalf("RegistryClientMock.ListRepositories mock is already set by Set")
 	}
@@ -2494,7 +2510,7 @@ func (mmListRepositories *mRegistryClientMockListRepositories) Expect(ctx contex
 		mmListRepositories.mock.t.Fatalf("RegistryClientMock.ListRepositories mock is already set by ExpectParams functions")
 	}
 
-	mmListRepositories.defaultExpectation.params = &RegistryClientMockListRepositoriesParams{ctx, pathPrefix}
+	mmListRepositories.defaultExpectation.params = &RegistryClientMockListRepositoriesParams{ctx}
 	mmListRepositories.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
 	for _, e := range mmListRepositories.expectations {
 		if minimock.Equal(e.params, mmListRepositories.defaultExpectation.params) {
@@ -2528,31 +2544,8 @@ func (mmListRepositories *mRegistryClientMockListRepositories) ExpectCtxParam1(c
 	return mmListRepositories
 }
 
-// ExpectPathPrefixParam2 sets up expected param pathPrefix for RegistryClient.ListRepositories
-func (mmListRepositories *mRegistryClientMockListRepositories) ExpectPathPrefixParam2(pathPrefix string) *mRegistryClientMockListRepositories {
-	if mmListRepositories.mock.funcListRepositories != nil {
-		mmListRepositories.mock.t.Fatalf("RegistryClientMock.ListRepositories mock is already set by Set")
-	}
-
-	if mmListRepositories.defaultExpectation == nil {
-		mmListRepositories.defaultExpectation = &RegistryClientMockListRepositoriesExpectation{}
-	}
-
-	if mmListRepositories.defaultExpectation.params != nil {
-		mmListRepositories.mock.t.Fatalf("RegistryClientMock.ListRepositories mock is already set by Expect")
-	}
-
-	if mmListRepositories.defaultExpectation.paramPtrs == nil {
-		mmListRepositories.defaultExpectation.paramPtrs = &RegistryClientMockListRepositoriesParamPtrs{}
-	}
-	mmListRepositories.defaultExpectation.paramPtrs.pathPrefix = &pathPrefix
-	mmListRepositories.defaultExpectation.expectationOrigins.originPathPrefix = minimock.CallerInfo(1)
-
-	return mmListRepositories
-}
-
 // Inspect accepts an inspector function that has same arguments as the RegistryClient.ListRepositories
-func (mmListRepositories *mRegistryClientMockListRepositories) Inspect(f func(ctx context.Context, pathPrefix string)) *mRegistryClientMockListRepositories {
+func (mmListRepositories *mRegistryClientMockListRepositories) Inspect(f func(ctx context.Context)) *mRegistryClientMockListRepositories {
 	if mmListRepositories.mock.inspectFuncListRepositories != nil {
 		mmListRepositories.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.ListRepositories")
 	}
@@ -2577,7 +2570,7 @@ func (mmListRepositories *mRegistryClientMockListRepositories) Return(sa1 []stri
 }
 
 // Set uses given function f to mock the RegistryClient.ListRepositories method
-func (mmListRepositories *mRegistryClientMockListRepositories) Set(f func(ctx context.Context, pathPrefix string) (sa1 []string, err error)) *RegistryClientMock {
+func (mmListRepositories *mRegistryClientMockListRepositories) Set(f func(ctx context.Context) (sa1 []string, err error)) *RegistryClientMock {
 	if mmListRepositories.defaultExpectation != nil {
 		mmListRepositories.mock.t.Fatalf("Default expectation is already set for the RegistryClient.ListRepositories method")
 	}
@@ -2593,14 +2586,14 @@ func (mmListRepositories *mRegistryClientMockListRepositories) Set(f func(ctx co
 
 // When sets expectation for the RegistryClient.ListRepositories which will trigger the result defined by the following
 // Then helper
-func (mmListRepositories *mRegistryClientMockListRepositories) When(ctx context.Context, pathPrefix string) *RegistryClientMockListRepositoriesExpectation {
+func (mmListRepositories *mRegistryClientMockListRepositories) When(ctx context.Context) *RegistryClientMockListRepositoriesExpectation {
 	if mmListRepositories.mock.funcListRepositories != nil {
 		mmListRepositories.mock.t.Fatalf("RegistryClientMock.ListRepositories mock is already set by Set")
 	}
 
 	expectation := &RegistryClientMockListRepositoriesExpectation{
 		mock:               mmListRepositories.mock,
-		params:             &RegistryClientMockListRepositoriesParams{ctx, pathPrefix},
+		params:             &RegistryClientMockListRepositoriesParams{ctx},
 		expectationOrigins: RegistryClientMockListRepositoriesExpectationOrigins{origin: minimock.CallerInfo(1)},
 	}
 	mmListRepositories.expectations = append(mmListRepositories.expectations, expectation)
@@ -2635,17 +2628,17 @@ func (mmListRepositories *mRegistryClientMockListRepositories) invocationsDone()
 }
 
 // ListRepositories implements mm_pkg.RegistryClient
-func (mmListRepositories *RegistryClientMock) ListRepositories(ctx context.Context, pathPrefix string) (sa1 []string, err error) {
+func (mmListRepositories *RegistryClientMock) ListRepositories(ctx context.Context) (sa1 []string, err error) {
 	mm_atomic.AddUint64(&mmListRepositories.beforeListRepositoriesCounter, 1)
 	defer mm_atomic.AddUint64(&mmListRepositories.afterListRepositoriesCounter, 1)
 
 	mmListRepositories.t.Helper()
 
 	if mmListRepositories.inspectFuncListRepositories != nil {
-		mmListRepositories.inspectFuncListRepositories(ctx, pathPrefix)
+		mmListRepositories.inspectFuncListRepositories(ctx)
 	}
 
-	mm_params := RegistryClientMockListRepositoriesParams{ctx, pathPrefix}
+	mm_params := RegistryClientMockListRepositoriesParams{ctx}
 
 	// Record call args
 	mmListRepositories.ListRepositoriesMock.mutex.Lock()
@@ -2664,18 +2657,13 @@ func (mmListRepositories *RegistryClientMock) ListRepositories(ctx context.Conte
 		mm_want := mmListRepositories.ListRepositoriesMock.defaultExpectation.params
 		mm_want_ptrs := mmListRepositories.ListRepositoriesMock.defaultExpectation.paramPtrs
 
-		mm_got := RegistryClientMockListRepositoriesParams{ctx, pathPrefix}
+		mm_got := RegistryClientMockListRepositoriesParams{ctx}
 
 		if mm_want_ptrs != nil {
 
 			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
 				mmListRepositories.t.Errorf("RegistryClientMock.ListRepositories got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
 					mmListRepositories.ListRepositoriesMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
-			}
-
-			if mm_want_ptrs.pathPrefix != nil && !minimock.Equal(*mm_want_ptrs.pathPrefix, mm_got.pathPrefix) {
-				mmListRepositories.t.Errorf("RegistryClientMock.ListRepositories got unexpected parameter pathPrefix, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
-					mmListRepositories.ListRepositoriesMock.defaultExpectation.expectationOrigins.originPathPrefix, *mm_want_ptrs.pathPrefix, mm_got.pathPrefix, minimock.Diff(*mm_want_ptrs.pathPrefix, mm_got.pathPrefix))
 			}
 
 		} else if mm_want != nil && !minimock.Equal(*mm_want, mm_got) {
@@ -2690,9 +2678,9 @@ func (mmListRepositories *RegistryClientMock) ListRepositories(ctx context.Conte
 		return (*mm_results).sa1, (*mm_results).err
 	}
 	if mmListRepositories.funcListRepositories != nil {
-		return mmListRepositories.funcListRepositories(ctx, pathPrefix)
+		return mmListRepositories.funcListRepositories(ctx)
 	}
-	mmListRepositories.t.Fatalf("Unexpected call to RegistryClientMock.ListRepositories. %v %v", ctx, pathPrefix)
+	mmListRepositories.t.Fatalf("Unexpected call to RegistryClientMock.ListRepositories. %v", ctx)
 	return
 }
 
@@ -2790,14 +2778,12 @@ type RegistryClientMockListTagsExpectation struct {
 
 // RegistryClientMockListTagsParams contains parameters of the RegistryClient.ListTags
 type RegistryClientMockListTagsParams struct {
-	ctx        context.Context
-	repository string
+	ctx context.Context
 }
 
 // RegistryClientMockListTagsParamPtrs contains pointers to parameters of the RegistryClient.ListTags
 type RegistryClientMockListTagsParamPtrs struct {
-	ctx        *context.Context
-	repository *string
+	ctx *context.Context
 }
 
 // RegistryClientMockListTagsResults contains results of the RegistryClient.ListTags
@@ -2808,9 +2794,8 @@ type RegistryClientMockListTagsResults struct {
 
 // RegistryClientMockListTagsOrigins contains origins of expectations of the RegistryClient.ListTags
 type RegistryClientMockListTagsExpectationOrigins struct {
-	origin           string
-	originCtx        string
-	originRepository string
+	origin    string
+	originCtx string
 }
 
 // Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
@@ -2824,7 +2809,7 @@ func (mmListTags *mRegistryClientMockListTags) Optional() *mRegistryClientMockLi
 }
 
 // Expect sets up expected params for RegistryClient.ListTags
-func (mmListTags *mRegistryClientMockListTags) Expect(ctx context.Context, repository string) *mRegistryClientMockListTags {
+func (mmListTags *mRegistryClientMockListTags) Expect(ctx context.Context) *mRegistryClientMockListTags {
 	if mmListTags.mock.funcListTags != nil {
 		mmListTags.mock.t.Fatalf("RegistryClientMock.ListTags mock is already set by Set")
 	}
@@ -2837,7 +2822,7 @@ func (mmListTags *mRegistryClientMockListTags) Expect(ctx context.Context, repos
 		mmListTags.mock.t.Fatalf("RegistryClientMock.ListTags mock is already set by ExpectParams functions")
 	}
 
-	mmListTags.defaultExpectation.params = &RegistryClientMockListTagsParams{ctx, repository}
+	mmListTags.defaultExpectation.params = &RegistryClientMockListTagsParams{ctx}
 	mmListTags.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
 	for _, e := range mmListTags.expectations {
 		if minimock.Equal(e.params, mmListTags.defaultExpectation.params) {
@@ -2871,31 +2856,8 @@ func (mmListTags *mRegistryClientMockListTags) ExpectCtxParam1(ctx context.Conte
 	return mmListTags
 }
 
-// ExpectRepositoryParam2 sets up expected param repository for RegistryClient.ListTags
-func (mmListTags *mRegistryClientMockListTags) ExpectRepositoryParam2(repository string) *mRegistryClientMockListTags {
-	if mmListTags.mock.funcListTags != nil {
-		mmListTags.mock.t.Fatalf("RegistryClientMock.ListTags mock is already set by Set")
-	}
-
-	if mmListTags.defaultExpectation == nil {
-		mmListTags.defaultExpectation = &RegistryClientMockListTagsExpectation{}
-	}
-
-	if mmListTags.defaultExpectation.params != nil {
-		mmListTags.mock.t.Fatalf("RegistryClientMock.ListTags mock is already set by Expect")
-	}
-
-	if mmListTags.defaultExpectation.paramPtrs == nil {
-		mmListTags.defaultExpectation.paramPtrs = &RegistryClientMockListTagsParamPtrs{}
-	}
-	mmListTags.defaultExpectation.paramPtrs.repository = &repository
-	mmListTags.defaultExpectation.expectationOrigins.originRepository = minimock.CallerInfo(1)
-
-	return mmListTags
-}
-
 // Inspect accepts an inspector function that has same arguments as the RegistryClient.ListTags
-func (mmListTags *mRegistryClientMockListTags) Inspect(f func(ctx context.Context, repository string)) *mRegistryClientMockListTags {
+func (mmListTags *mRegistryClientMockListTags) Inspect(f func(ctx context.Context)) *mRegistryClientMockListTags {
 	if mmListTags.mock.inspectFuncListTags != nil {
 		mmListTags.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.ListTags")
 	}
@@ -2920,7 +2882,7 @@ func (mmListTags *mRegistryClientMockListTags) Return(sa1 []string, err error) *
 }
 
 // Set uses given function f to mock the RegistryClient.ListTags method
-func (mmListTags *mRegistryClientMockListTags) Set(f func(ctx context.Context, repository string) (sa1 []string, err error)) *RegistryClientMock {
+func (mmListTags *mRegistryClientMockListTags) Set(f func(ctx context.Context) (sa1 []string, err error)) *RegistryClientMock {
 	if mmListTags.defaultExpectation != nil {
 		mmListTags.mock.t.Fatalf("Default expectation is already set for the RegistryClient.ListTags method")
 	}
@@ -2936,14 +2898,14 @@ func (mmListTags *mRegistryClientMockListTags) Set(f func(ctx context.Context, r
 
 // When sets expectation for the RegistryClient.ListTags which will trigger the result defined by the following
 // Then helper
-func (mmListTags *mRegistryClientMockListTags) When(ctx context.Context, repository string) *RegistryClientMockListTagsExpectation {
+func (mmListTags *mRegistryClientMockListTags) When(ctx context.Context) *RegistryClientMockListTagsExpectation {
 	if mmListTags.mock.funcListTags != nil {
 		mmListTags.mock.t.Fatalf("RegistryClientMock.ListTags mock is already set by Set")
 	}
 
 	expectation := &RegistryClientMockListTagsExpectation{
 		mock:               mmListTags.mock,
-		params:             &RegistryClientMockListTagsParams{ctx, repository},
+		params:             &RegistryClientMockListTagsParams{ctx},
 		expectationOrigins: RegistryClientMockListTagsExpectationOrigins{origin: minimock.CallerInfo(1)},
 	}
 	mmListTags.expectations = append(mmListTags.expectations, expectation)
@@ -2978,17 +2940,17 @@ func (mmListTags *mRegistryClientMockListTags) invocationsDone() bool {
 }
 
 // ListTags implements mm_pkg.RegistryClient
-func (mmListTags *RegistryClientMock) ListTags(ctx context.Context, repository string) (sa1 []string, err error) {
+func (mmListTags *RegistryClientMock) ListTags(ctx context.Context) (sa1 []string, err error) {
 	mm_atomic.AddUint64(&mmListTags.beforeListTagsCounter, 1)
 	defer mm_atomic.AddUint64(&mmListTags.afterListTagsCounter, 1)
 
 	mmListTags.t.Helper()
 
 	if mmListTags.inspectFuncListTags != nil {
-		mmListTags.inspectFuncListTags(ctx, repository)
+		mmListTags.inspectFuncListTags(ctx)
 	}
 
-	mm_params := RegistryClientMockListTagsParams{ctx, repository}
+	mm_params := RegistryClientMockListTagsParams{ctx}
 
 	// Record call args
 	mmListTags.ListTagsMock.mutex.Lock()
@@ -3007,18 +2969,13 @@ func (mmListTags *RegistryClientMock) ListTags(ctx context.Context, repository s
 		mm_want := mmListTags.ListTagsMock.defaultExpectation.params
 		mm_want_ptrs := mmListTags.ListTagsMock.defaultExpectation.paramPtrs
 
-		mm_got := RegistryClientMockListTagsParams{ctx, repository}
+		mm_got := RegistryClientMockListTagsParams{ctx}
 
 		if mm_want_ptrs != nil {
 
 			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
 				mmListTags.t.Errorf("RegistryClientMock.ListTags got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
 					mmListTags.ListTagsMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
-			}
-
-			if mm_want_ptrs.repository != nil && !minimock.Equal(*mm_want_ptrs.repository, mm_got.repository) {
-				mmListTags.t.Errorf("RegistryClientMock.ListTags got unexpected parameter repository, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
-					mmListTags.ListTagsMock.defaultExpectation.expectationOrigins.originRepository, *mm_want_ptrs.repository, mm_got.repository, minimock.Diff(*mm_want_ptrs.repository, mm_got.repository))
 			}
 
 		} else if mm_want != nil && !minimock.Equal(*mm_want, mm_got) {
@@ -3033,9 +2990,9 @@ func (mmListTags *RegistryClientMock) ListTags(ctx context.Context, repository s
 		return (*mm_results).sa1, (*mm_results).err
 	}
 	if mmListTags.funcListTags != nil {
-		return mmListTags.funcListTags(ctx, repository)
+		return mmListTags.funcListTags(ctx)
 	}
-	mmListTags.t.Fatalf("Unexpected call to RegistryClientMock.ListTags. %v %v", ctx, repository)
+	mmListTags.t.Fatalf("Unexpected call to RegistryClientMock.ListTags. %v", ctx)
 	return
 }
 
@@ -3107,6 +3064,317 @@ func (m *RegistryClientMock) MinimockListTagsInspect() {
 	}
 }
 
+type mRegistryClientMockWithScope struct {
+	optional           bool
+	mock               *RegistryClientMock
+	defaultExpectation *RegistryClientMockWithScopeExpectation
+	expectations       []*RegistryClientMockWithScopeExpectation
+
+	callArgs []*RegistryClientMockWithScopeParams
+	mutex    sync.RWMutex
+
+	expectedInvocations       uint64
+	expectedInvocationsOrigin string
+}
+
+// RegistryClientMockWithScopeExpectation specifies expectation struct of the RegistryClient.WithScope
+type RegistryClientMockWithScopeExpectation struct {
+	mock               *RegistryClientMock
+	params             *RegistryClientMockWithScopeParams
+	paramPtrs          *RegistryClientMockWithScopeParamPtrs
+	expectationOrigins RegistryClientMockWithScopeExpectationOrigins
+	results            *RegistryClientMockWithScopeResults
+	returnOrigin       string
+	Counter            uint64
+}
+
+// RegistryClientMockWithScopeParams contains parameters of the RegistryClient.WithScope
+type RegistryClientMockWithScopeParams struct {
+	scope string
+}
+
+// RegistryClientMockWithScopeParamPtrs contains pointers to parameters of the RegistryClient.WithScope
+type RegistryClientMockWithScopeParamPtrs struct {
+	scope *string
+}
+
+// RegistryClientMockWithScopeResults contains results of the RegistryClient.WithScope
+type RegistryClientMockWithScopeResults struct {
+	r1 mm_pkg.RegistryClient
+}
+
+// RegistryClientMockWithScopeOrigins contains origins of expectations of the RegistryClient.WithScope
+type RegistryClientMockWithScopeExpectationOrigins struct {
+	origin      string
+	originScope string
+}
+
+// Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
+// the test will fail minimock's automatic final call check if the mocked method was not called at least once.
+// Optional() makes method check to work in '0 or more' mode.
+// It is NOT RECOMMENDED to use this option unless you really need it, as default behaviour helps to
+// catch the problems when the expected method call is totally skipped during test run.
+func (mmWithScope *mRegistryClientMockWithScope) Optional() *mRegistryClientMockWithScope {
+	mmWithScope.optional = true
+	return mmWithScope
+}
+
+// Expect sets up expected params for RegistryClient.WithScope
+func (mmWithScope *mRegistryClientMockWithScope) Expect(scope string) *mRegistryClientMockWithScope {
+	if mmWithScope.mock.funcWithScope != nil {
+		mmWithScope.mock.t.Fatalf("RegistryClientMock.WithScope mock is already set by Set")
+	}
+
+	if mmWithScope.defaultExpectation == nil {
+		mmWithScope.defaultExpectation = &RegistryClientMockWithScopeExpectation{}
+	}
+
+	if mmWithScope.defaultExpectation.paramPtrs != nil {
+		mmWithScope.mock.t.Fatalf("RegistryClientMock.WithScope mock is already set by ExpectParams functions")
+	}
+
+	mmWithScope.defaultExpectation.params = &RegistryClientMockWithScopeParams{scope}
+	mmWithScope.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
+	for _, e := range mmWithScope.expectations {
+		if minimock.Equal(e.params, mmWithScope.defaultExpectation.params) {
+			mmWithScope.mock.t.Fatalf("Expectation set by When has same params: %#v", *mmWithScope.defaultExpectation.params)
+		}
+	}
+
+	return mmWithScope
+}
+
+// ExpectScopeParam1 sets up expected param scope for RegistryClient.WithScope
+func (mmWithScope *mRegistryClientMockWithScope) ExpectScopeParam1(scope string) *mRegistryClientMockWithScope {
+	if mmWithScope.mock.funcWithScope != nil {
+		mmWithScope.mock.t.Fatalf("RegistryClientMock.WithScope mock is already set by Set")
+	}
+
+	if mmWithScope.defaultExpectation == nil {
+		mmWithScope.defaultExpectation = &RegistryClientMockWithScopeExpectation{}
+	}
+
+	if mmWithScope.defaultExpectation.params != nil {
+		mmWithScope.mock.t.Fatalf("RegistryClientMock.WithScope mock is already set by Expect")
+	}
+
+	if mmWithScope.defaultExpectation.paramPtrs == nil {
+		mmWithScope.defaultExpectation.paramPtrs = &RegistryClientMockWithScopeParamPtrs{}
+	}
+	mmWithScope.defaultExpectation.paramPtrs.scope = &scope
+	mmWithScope.defaultExpectation.expectationOrigins.originScope = minimock.CallerInfo(1)
+
+	return mmWithScope
+}
+
+// Inspect accepts an inspector function that has same arguments as the RegistryClient.WithScope
+func (mmWithScope *mRegistryClientMockWithScope) Inspect(f func(scope string)) *mRegistryClientMockWithScope {
+	if mmWithScope.mock.inspectFuncWithScope != nil {
+		mmWithScope.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.WithScope")
+	}
+
+	mmWithScope.mock.inspectFuncWithScope = f
+
+	return mmWithScope
+}
+
+// Return sets up results that will be returned by RegistryClient.WithScope
+func (mmWithScope *mRegistryClientMockWithScope) Return(r1 mm_pkg.RegistryClient) *RegistryClientMock {
+	if mmWithScope.mock.funcWithScope != nil {
+		mmWithScope.mock.t.Fatalf("RegistryClientMock.WithScope mock is already set by Set")
+	}
+
+	if mmWithScope.defaultExpectation == nil {
+		mmWithScope.defaultExpectation = &RegistryClientMockWithScopeExpectation{mock: mmWithScope.mock}
+	}
+	mmWithScope.defaultExpectation.results = &RegistryClientMockWithScopeResults{r1}
+	mmWithScope.defaultExpectation.returnOrigin = minimock.CallerInfo(1)
+	return mmWithScope.mock
+}
+
+// Set uses given function f to mock the RegistryClient.WithScope method
+func (mmWithScope *mRegistryClientMockWithScope) Set(f func(scope string) (r1 mm_pkg.RegistryClient)) *RegistryClientMock {
+	if mmWithScope.defaultExpectation != nil {
+		mmWithScope.mock.t.Fatalf("Default expectation is already set for the RegistryClient.WithScope method")
+	}
+
+	if len(mmWithScope.expectations) > 0 {
+		mmWithScope.mock.t.Fatalf("Some expectations are already set for the RegistryClient.WithScope method")
+	}
+
+	mmWithScope.mock.funcWithScope = f
+	mmWithScope.mock.funcWithScopeOrigin = minimock.CallerInfo(1)
+	return mmWithScope.mock
+}
+
+// When sets expectation for the RegistryClient.WithScope which will trigger the result defined by the following
+// Then helper
+func (mmWithScope *mRegistryClientMockWithScope) When(scope string) *RegistryClientMockWithScopeExpectation {
+	if mmWithScope.mock.funcWithScope != nil {
+		mmWithScope.mock.t.Fatalf("RegistryClientMock.WithScope mock is already set by Set")
+	}
+
+	expectation := &RegistryClientMockWithScopeExpectation{
+		mock:               mmWithScope.mock,
+		params:             &RegistryClientMockWithScopeParams{scope},
+		expectationOrigins: RegistryClientMockWithScopeExpectationOrigins{origin: minimock.CallerInfo(1)},
+	}
+	mmWithScope.expectations = append(mmWithScope.expectations, expectation)
+	return expectation
+}
+
+// Then sets up RegistryClient.WithScope return parameters for the expectation previously defined by the When method
+func (e *RegistryClientMockWithScopeExpectation) Then(r1 mm_pkg.RegistryClient) *RegistryClientMock {
+	e.results = &RegistryClientMockWithScopeResults{r1}
+	return e.mock
+}
+
+// Times sets number of times RegistryClient.WithScope should be invoked
+func (mmWithScope *mRegistryClientMockWithScope) Times(n uint64) *mRegistryClientMockWithScope {
+	if n == 0 {
+		mmWithScope.mock.t.Fatalf("Times of RegistryClientMock.WithScope mock can not be zero")
+	}
+	mm_atomic.StoreUint64(&mmWithScope.expectedInvocations, n)
+	mmWithScope.expectedInvocationsOrigin = minimock.CallerInfo(1)
+	return mmWithScope
+}
+
+func (mmWithScope *mRegistryClientMockWithScope) invocationsDone() bool {
+	if len(mmWithScope.expectations) == 0 && mmWithScope.defaultExpectation == nil && mmWithScope.mock.funcWithScope == nil {
+		return true
+	}
+
+	totalInvocations := mm_atomic.LoadUint64(&mmWithScope.mock.afterWithScopeCounter)
+	expectedInvocations := mm_atomic.LoadUint64(&mmWithScope.expectedInvocations)
+
+	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
+}
+
+// WithScope implements mm_pkg.RegistryClient
+func (mmWithScope *RegistryClientMock) WithScope(scope string) (r1 mm_pkg.RegistryClient) {
+	mm_atomic.AddUint64(&mmWithScope.beforeWithScopeCounter, 1)
+	defer mm_atomic.AddUint64(&mmWithScope.afterWithScopeCounter, 1)
+
+	mmWithScope.t.Helper()
+
+	if mmWithScope.inspectFuncWithScope != nil {
+		mmWithScope.inspectFuncWithScope(scope)
+	}
+
+	mm_params := RegistryClientMockWithScopeParams{scope}
+
+	// Record call args
+	mmWithScope.WithScopeMock.mutex.Lock()
+	mmWithScope.WithScopeMock.callArgs = append(mmWithScope.WithScopeMock.callArgs, &mm_params)
+	mmWithScope.WithScopeMock.mutex.Unlock()
+
+	for _, e := range mmWithScope.WithScopeMock.expectations {
+		if minimock.Equal(*e.params, mm_params) {
+			mm_atomic.AddUint64(&e.Counter, 1)
+			return e.results.r1
+		}
+	}
+
+	if mmWithScope.WithScopeMock.defaultExpectation != nil {
+		mm_atomic.AddUint64(&mmWithScope.WithScopeMock.defaultExpectation.Counter, 1)
+		mm_want := mmWithScope.WithScopeMock.defaultExpectation.params
+		mm_want_ptrs := mmWithScope.WithScopeMock.defaultExpectation.paramPtrs
+
+		mm_got := RegistryClientMockWithScopeParams{scope}
+
+		if mm_want_ptrs != nil {
+
+			if mm_want_ptrs.scope != nil && !minimock.Equal(*mm_want_ptrs.scope, mm_got.scope) {
+				mmWithScope.t.Errorf("RegistryClientMock.WithScope got unexpected parameter scope, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmWithScope.WithScopeMock.defaultExpectation.expectationOrigins.originScope, *mm_want_ptrs.scope, mm_got.scope, minimock.Diff(*mm_want_ptrs.scope, mm_got.scope))
+			}
+
+		} else if mm_want != nil && !minimock.Equal(*mm_want, mm_got) {
+			mmWithScope.t.Errorf("RegistryClientMock.WithScope got unexpected parameters, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+				mmWithScope.WithScopeMock.defaultExpectation.expectationOrigins.origin, *mm_want, mm_got, minimock.Diff(*mm_want, mm_got))
+		}
+
+		mm_results := mmWithScope.WithScopeMock.defaultExpectation.results
+		if mm_results == nil {
+			mmWithScope.t.Fatal("No results are set for the RegistryClientMock.WithScope")
+		}
+		return (*mm_results).r1
+	}
+	if mmWithScope.funcWithScope != nil {
+		return mmWithScope.funcWithScope(scope)
+	}
+	mmWithScope.t.Fatalf("Unexpected call to RegistryClientMock.WithScope. %v", scope)
+	return
+}
+
+// WithScopeAfterCounter returns a count of finished RegistryClientMock.WithScope invocations
+func (mmWithScope *RegistryClientMock) WithScopeAfterCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmWithScope.afterWithScopeCounter)
+}
+
+// WithScopeBeforeCounter returns a count of RegistryClientMock.WithScope invocations
+func (mmWithScope *RegistryClientMock) WithScopeBeforeCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmWithScope.beforeWithScopeCounter)
+}
+
+// Calls returns a list of arguments used in each call to RegistryClientMock.WithScope.
+// The list is in the same order as the calls were made (i.e. recent calls have a higher index)
+func (mmWithScope *mRegistryClientMockWithScope) Calls() []*RegistryClientMockWithScopeParams {
+	mmWithScope.mutex.RLock()
+
+	argCopy := make([]*RegistryClientMockWithScopeParams, len(mmWithScope.callArgs))
+	copy(argCopy, mmWithScope.callArgs)
+
+	mmWithScope.mutex.RUnlock()
+
+	return argCopy
+}
+
+// MinimockWithScopeDone returns true if the count of the WithScope invocations corresponds
+// the number of defined expectations
+func (m *RegistryClientMock) MinimockWithScopeDone() bool {
+	if m.WithScopeMock.optional {
+		// Optional methods provide '0 or more' call count restriction.
+		return true
+	}
+
+	for _, e := range m.WithScopeMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			return false
+		}
+	}
+
+	return m.WithScopeMock.invocationsDone()
+}
+
+// MinimockWithScopeInspect logs each unmet expectation
+func (m *RegistryClientMock) MinimockWithScopeInspect() {
+	for _, e := range m.WithScopeMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			m.t.Errorf("Expected call to RegistryClientMock.WithScope at\n%s with params: %#v", e.expectationOrigins.origin, *e.params)
+		}
+	}
+
+	afterWithScopeCounter := mm_atomic.LoadUint64(&m.afterWithScopeCounter)
+	// if default expectation was set then invocations count should be greater than zero
+	if m.WithScopeMock.defaultExpectation != nil && afterWithScopeCounter < 1 {
+		if m.WithScopeMock.defaultExpectation.params == nil {
+			m.t.Errorf("Expected call to RegistryClientMock.WithScope at\n%s", m.WithScopeMock.defaultExpectation.returnOrigin)
+		} else {
+			m.t.Errorf("Expected call to RegistryClientMock.WithScope at\n%s with params: %#v", m.WithScopeMock.defaultExpectation.expectationOrigins.origin, *m.WithScopeMock.defaultExpectation.params)
+		}
+	}
+	// if func was set then invocations count should be greater than zero
+	if m.funcWithScope != nil && afterWithScopeCounter < 1 {
+		m.t.Errorf("Expected call to RegistryClientMock.WithScope at\n%s", m.funcWithScopeOrigin)
+	}
+
+	if !m.WithScopeMock.invocationsDone() && afterWithScopeCounter > 0 {
+		m.t.Errorf("Expected %d calls to RegistryClientMock.WithScope at\n%s but found %d calls",
+			mm_atomic.LoadUint64(&m.WithScopeMock.expectedInvocations), m.WithScopeMock.expectedInvocationsOrigin, afterWithScopeCounter)
+	}
+}
+
 // MinimockFinish checks that all mocked methods have been called the expected number of times
 func (m *RegistryClientMock) MinimockFinish() {
 	m.finishOnce.Do(func() {
@@ -3123,9 +3391,13 @@ func (m *RegistryClientMock) MinimockFinish() {
 
 			m.MinimockGetManifestInspect()
 
+			m.MinimockGetRegistryInspect()
+
 			m.MinimockListRepositoriesInspect()
 
 			m.MinimockListTagsInspect()
+
+			m.MinimockWithScopeInspect()
 		}
 	})
 }
@@ -3155,6 +3427,8 @@ func (m *RegistryClientMock) minimockDone() bool {
 		m.MinimockGetImageLayersDone() &&
 		m.MinimockGetLabelDone() &&
 		m.MinimockGetManifestDone() &&
+		m.MinimockGetRegistryDone() &&
 		m.MinimockListRepositoriesDone() &&
-		m.MinimockListTagsDone()
+		m.MinimockListTagsDone() &&
+		m.MinimockWithScopeDone()
 }

@@ -31,33 +31,75 @@ import (
 func (r *RootCommand) initPluginServices() {
 	r.logger.Debug("Initializing plugin services")
 
-	// Use the full source registry repo path for plugins
-	// This includes the ee/modules path which is needed for catalog API access
-	pluginRegistry := d8flags.SourceRegistryRepo
+	// Extract registry host from the source registry repo
+	// SourceRegistryRepo can be:
+	// - Just hostname: "registry.deckhouse.io"
+	// - Full path: "registry.deckhouse.io/deckhouse/ee"
+	registryHost := d8flags.SourceRegistryRepo
 
-	auth := getPluginRegistryAuthProvider(d8flags.SourceRegistryRepo, r.logger)
+	// If it's just a hostname (no slashes), use it directly
+	// Otherwise parse to extract the hostname
+	if len(registryHost) > 0 && registryHost[0] != '/' {
+		// Try to parse it - if it has a path component, extract the registry
+		// We need to add a dummy path to force it to be treated as a registry URL
+		testRef := registryHost
+		if !containsSlash(registryHost) {
+			// Just a hostname, use it as-is
+			r.logger.Debug("Using hostname as registry", slog.String("host", registryHost))
+		} else {
+			// Has path components, parse to extract registry
+			ref, err := name.ParseReference(registryHost)
+			if err == nil {
+				registryHost = ref.Context().RegistryStr()
+				r.logger.Debug("Extracted registry from path",
+					slog.String("original", testRef),
+					slog.String("extracted", registryHost))
+			}
+		}
+	}
+
+	auth := getPluginRegistryAuthProvider(registryHost, r.logger)
 
 	r.logger.Debug("Creating plugin registry client",
-		slog.String("registry", pluginRegistry),
+		slog.String("registry_host", registryHost),
 		slog.Bool("insecure", d8flags.Insecure),
 		slog.Bool("tls_skip_verify", d8flags.TLSSkipVerify))
 
-	r.pluginRegistryClient = registry.NewClientWithOptions(&registry.ClientOptions{
-		// TODO: change postfix to new registry
-		Registry:      pluginRegistry + "/modules",
+	// Create base client with registry host only
+	baseClient := registry.NewClientWithOptions(&registry.ClientOptions{
+		RegistryHost:  registryHost,
 		Auth:          auth,
 		Insecure:      d8flags.Insecure,
 		TLSSkipVerify: d8flags.TLSSkipVerify,
 		Logger:        r.logger.Named("registry-client"),
 	})
 
-	r.logger.Debug("Creating plugin service")
+	// Build scoped client using chained WithScope calls
+	// Example: registry.deckhouse.io -> deckhouse -> ee -> modules
+	r.pluginRegistryClient = baseClient.
+		WithScope("deckhouse").
+		WithScope("ee").
+		WithScope("modules")
+
+	r.logger.Debug("Creating plugin service with scoped client",
+		slog.String("scope_path", "deckhouse/ee/modules"))
+
 	r.pluginService = intplugins.NewPluginService(
 		r.pluginRegistryClient,
 		r.logger.Named("plugin-service"),
 	)
 
 	r.logger.Debug("Plugin services initialized successfully")
+}
+
+// containsSlash checks if a string contains a forward slash
+func containsSlash(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '/' {
+			return true
+		}
+	}
+	return false
 }
 
 func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) authn.Authenticator {
@@ -81,11 +123,32 @@ func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) a
 	}
 
 	// Priority 3: Try to get credentials from Docker config (~/.docker/config.json)
-	// This will automatically use credentials corresponding to the registry URL
-	// Parse the registry host from the full repository path (e.g., "registry.deckhouse.io/deckhouse/ee" -> "registry.deckhouse.io")
-	ref, err := name.ParseReference(registryHost)
+	// Parse the registry hostname to create a Registry object for DefaultKeychain
+	var reg name.Registry
+	var err error
+
+	// If registryHost contains a slash, it might be a full path - extract just the host
+	if containsSlash(registryHost) {
+		ref, parseErr := name.ParseReference(registryHost)
+		if parseErr == nil {
+			reg = ref.Context().Registry
+		} else {
+			// Fallback: just use the part before the first slash
+			idx := 0
+			for i := 0; i < len(registryHost); i++ {
+				if registryHost[i] == '/' {
+					idx = i
+					break
+				}
+			}
+			reg, err = name.NewRegistry(registryHost[:idx])
+		}
+	} else {
+		// Just a hostname, parse it directly
+		reg, err = name.NewRegistry(registryHost)
+	}
+
 	if err == nil {
-		reg := ref.Context().Registry
 		auth, err := authn.DefaultKeychain.Resolve(reg)
 		if err == nil && auth != authn.Anonymous {
 			// Verify that auth is not anonymous by trying to get the config

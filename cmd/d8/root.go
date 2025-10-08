@@ -34,7 +34,7 @@ import (
 	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -53,7 +53,7 @@ type RootCommand struct {
 	cmd    *cobra.Command
 	logger *dkplog.Logger
 
-	pluginRegistryClient *registry.Client
+	pluginRegistryClient pkg.RegistryClient
 	pluginService        *intplugins.PluginService
 }
 

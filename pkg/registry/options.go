@@ -13,8 +13,8 @@ import (
 
 // ClientOptions contains configuration options for the registry client
 type ClientOptions struct {
-	// Registry is the registry host (e.g., "registry.example.com")
-	Registry string
+	// RegistryHost is the registry hostname only (e.g., "registry.example.com")
+	RegistryHost string
 
 	// Auth provides authentication for registry access (takes precedence over Username/Password/LicenseToken)
 	Auth authn.Authenticator
@@ -52,13 +52,13 @@ func buildAuthenticator(opts *ClientOptions) authn.Authenticator {
 
 	if opts.Auth != nil {
 		opts.Logger.Debug("Registry client initialized with provided authenticator",
-			slog.String("registry", opts.Registry))
+			slog.String("registry", opts.RegistryHost))
 		return opts.Auth
 	}
 
 	if opts.LicenseToken != "" {
 		opts.Logger.Debug("Registry client initialized with license token authentication",
-			slog.String("registry", opts.Registry))
+			slog.String("registry", opts.RegistryHost))
 		return authn.FromConfig(authn.AuthConfig{
 			Username: "license-token",
 			Password: opts.LicenseToken,
@@ -67,7 +67,7 @@ func buildAuthenticator(opts *ClientOptions) authn.Authenticator {
 
 	if opts.Username != "" && opts.Password != "" {
 		opts.Logger.Debug("Registry client initialized with basic authentication",
-			slog.String("registry", opts.Registry),
+			slog.String("registry", opts.RegistryHost),
 			slog.String("username", opts.Username))
 		return authn.FromConfig(authn.AuthConfig{
 			Username: opts.Username,
@@ -76,7 +76,7 @@ func buildAuthenticator(opts *ClientOptions) authn.Authenticator {
 	}
 
 	opts.Logger.Debug("Registry client initialized with anonymous access",
-		slog.String("registry", opts.Registry))
+		slog.String("registry", opts.RegistryHost))
 	return authn.Anonymous
 }
 
@@ -109,12 +109,12 @@ func configureTransport(opts *ClientOptions) *http.Transport {
 		}
 		transport.TLSClientConfig.InsecureSkipVerify = true
 		opts.Logger.Debug("TLS certificate verification disabled",
-			slog.String("registry", opts.Registry))
+			slog.String("registry", opts.RegistryHost))
 	}
 
 	if opts.Insecure {
 		opts.Logger.Debug("Insecure HTTP mode enabled",
-			slog.String("registry", opts.Registry))
+			slog.String("registry", opts.RegistryHost))
 	}
 
 	return transport

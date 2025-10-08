@@ -38,19 +38,21 @@ func NewPluginService(client pkg.RegistryClient, logger *log.Logger) *PluginServ
 
 // GetPluginContract reads the plugin contract from image metadata annotation
 func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag string) (*internal.Plugin, error) {
-	// The pluginName is just the simple name like "code", "commander", etc.
-	// The registry client already has the full base path, so we just pass the plugin name
-	repository := pluginName
-	s.log.Debug("Getting plugin contract", slog.String("plugin", pluginName), slog.String("repository", repository), slog.String("tag", tag))
+	// Create a scoped client for this specific plugin
+	// The base client already has the path like "deckhouse/ee/modules"
+	// We just need to add the plugin name
+	s.log.Debug("Getting plugin contract", slog.String("plugin", pluginName), slog.String("tag", tag))
+
+	pluginClient := s.client.WithScope(pluginName)
 
 	// Get the plugin-contract label from image
-	contractJSON, exists, err := s.client.GetLabel(ctx, repository, tag, "plugin-contract")
+	contractJSON, exists, err := pluginClient.GetLabel(ctx, tag, "plugin-contract")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get image labels: %w", err)
 	}
 
 	if !exists {
-		s.log.Debug("Plugin contract not found in image", slog.String("plugin", pluginName), slog.String("repository", repository), slog.String("tag", tag))
+		s.log.Debug("Plugin contract not found in image", slog.String("plugin", pluginName), slog.String("tag", tag))
 
 		return nil, fmt.Errorf("plugin-contract annotation not found in image metadata")
 	}
@@ -61,7 +63,7 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 		return nil, fmt.Errorf("failed to parse plugin contract: %w", err)
 	}
 
-	s.log.Debug("Plugin contract parsed successfully", slog.String("plugin", pluginName), slog.String("repository", repository), slog.String("tag", tag), slog.String("name", contract.Name), slog.String("version", contract.Version))
+	s.log.Debug("Plugin contract parsed successfully", slog.String("plugin", pluginName), slog.String("tag", tag), slog.String("name", contract.Name), slog.String("version", contract.Version))
 
 	// Convert to domain entity
 	return contractToDomain(&contract), nil
@@ -69,10 +71,8 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 
 // ExtractPlugin downloads the plugin image and extracts it to the specified location
 func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, destination string) error {
-	// The pluginName is just the simple name like "code", "commander", etc.
-	// The registry client already has the full base path, so we just pass the plugin name
-	repository := pluginName
-	s.log.Debug("Extracting plugin", slog.String("plugin", pluginName), slog.String("repository", repository), slog.String("tag", tag), slog.String("destination", destination))
+	// Create a scoped client for this specific plugin
+	s.log.Debug("Extracting plugin", slog.String("plugin", pluginName), slog.String("tag", tag), slog.String("destination", destination))
 
 	// Create destination directory if it doesn't exist
 	if err := os.MkdirAll(destination, 0755); err != nil {
@@ -81,8 +81,10 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, dest
 
 	s.log.Debug("Destination directory created", slog.String("destination", destination))
 
+	pluginClient := s.client.WithScope(pluginName)
+
 	// Extract image layers using handler pattern
-	return s.client.ExtractImageLayers(ctx, repository, tag, func(stream pkg.LayerStream) error {
+	return pluginClient.ExtractImageLayers(ctx, tag, func(stream pkg.LayerStream) error {
 		s.log.Info("Extracting layer", slog.Int("index", stream.GetIndex()), slog.Int("total", stream.GetTotal()))
 
 		// Extract the tar stream
@@ -209,36 +211,15 @@ func contractToDomain(contract *PluginContract) *internal.Plugin {
 // Note: This requires the registry to support the catalog API and grant access to it.
 // If the registry doesn't allow catalog access, this will return an error.
 func (s *PluginService) ListPlugins(ctx context.Context) ([]string, error) {
-	s.log.Debug("Listing all plugins", slog.String("prefix", PluginRepositoryPrefix))
+	s.log.Debug("Listing all plugins")
 
-	// List all repositories under the plugin prefix
-	repos, err := s.client.ListRepositories(ctx, PluginRepositoryPrefix)
+	// The client is already scoped to "deckhouse/ee/modules"
+	// ListRepositories will return the plugin names directly (tags under that path)
+	pluginNames, err := s.client.ListRepositories(ctx)
 	if err != nil {
 		s.log.Warn("Failed to list repositories from registry. The registry may not allow catalog access or you may need special permissions.",
 			slog.String("error", err.Error()))
 		return nil, fmt.Errorf("failed to list repositories (registry may not allow catalog access): %w", err)
-	}
-
-	// Extract plugin names from repository paths
-	// Repository format: deckhouse/ee/modules/<plugin-name>
-	// The ListRepositories returns paths like: "deckhouse/ee/modules/code", "deckhouse/ee/modules/commander", etc.
-	// We need to extract just the plugin name (last part after the prefix)
-	var pluginNames []string
-	prefixWithSlash := PluginRepositoryPrefix + "/"
-
-	s.log.Debug("Processing repository list",
-		slog.Int("total_repos", len(repos)),
-		slog.String("prefix", PluginRepositoryPrefix))
-
-	for _, repo := range repos {
-		s.log.Debug("Checking repository", slog.String("repo", repo))
-		// Check if repo starts with the prefix
-		if len(repo) > len(prefixWithSlash) && repo[:len(prefixWithSlash)] == prefixWithSlash {
-			// Extract just the plugin name (everything after the prefix)
-			pluginName := repo[len(prefixWithSlash):]
-			pluginNames = append(pluginNames, pluginName)
-			s.log.Debug("Found plugin", slog.String("name", pluginName))
-		}
 	}
 
 	s.log.Debug("Plugins listed successfully", slog.Int("count", len(pluginNames)))
@@ -248,12 +229,12 @@ func (s *PluginService) ListPlugins(ctx context.Context) ([]string, error) {
 
 // ListPluginTags lists all available tags for a specific plugin
 func (s *PluginService) ListPluginTags(ctx context.Context, pluginName string) ([]string, error) {
-	// The pluginName is just the simple name like "code", "commander", etc.
-	// The registry client already has the full base path, so we just pass the plugin name
-	repository := pluginName
-	s.log.Debug("Listing plugin tags", slog.String("plugin", pluginName), slog.String("repository", repository))
+	// Create a scoped client for this specific plugin
+	s.log.Debug("Listing plugin tags", slog.String("plugin", pluginName))
 
-	tags, err := s.client.ListTags(ctx, repository)
+	pluginClient := s.client.WithScope(pluginName)
+
+	tags, err := pluginClient.ListTags(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tags for plugin %s: %w", pluginName, err)
 	}

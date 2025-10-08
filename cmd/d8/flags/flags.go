@@ -24,10 +24,9 @@ import (
 )
 
 const (
-	deckhouseRegistryHost     = "registry.deckhouse.io"
-	enterpriseEditionRepoPath = "/deckhouse/ee"
+	deckhouseRegistryHost = "registry.deckhouse.io"
 
-	enterpriseEditionRepo = deckhouseRegistryHost + enterpriseEditionRepoPath
+	enterpriseEditionRepo = deckhouseRegistryHost
 )
 
 // CLI Parameters

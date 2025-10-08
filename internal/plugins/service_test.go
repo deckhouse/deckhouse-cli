@@ -22,11 +22,10 @@ func TestGetPluginContract_Success(t *testing.T) {
 	mc := minimock.NewController(t)
 	defer mc.Finish()
 
-	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.GetLabelMock.
+	mockScopedClient := mock.NewRegistryClientMock(mc)
+	mockScopedClient.GetLabelMock.
 		Expect(
 			minimock.AnyContext,
-			"deckhouse/cli/plugins/test-plugin",
 			"v1.0.0",
 			"plugin-contract",
 		).
@@ -43,6 +42,11 @@ func TestGetPluginContract_Success(t *testing.T) {
                 ]
             }
         }`, true, nil)
+
+	mockClient := mock.NewRegistryClientMock(mc)
+	mockClient.WithScopeMock.
+		Expect("test-plugin").
+		Return(mockScopedClient)
 
 	logger := log.NewNop()
 	service := plugins.NewPluginService(mockClient, logger)
@@ -101,11 +105,10 @@ func TestGetPluginContract_MinimalContract(t *testing.T) {
 	mc := minimock.NewController(t)
 	defer mc.Finish()
 
-	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.GetLabelMock.
+	mockScopedClient := mock.NewRegistryClientMock(mc)
+	mockScopedClient.GetLabelMock.
 		Expect(
 			minimock.AnyContext,
-			"deckhouse/cli/plugins/minimal-plugin",
 			"v1.0.0",
 			"plugin-contract",
 		).
@@ -114,6 +117,11 @@ func TestGetPluginContract_MinimalContract(t *testing.T) {
 			"version": "v1.0.0",
 			"description": "Minimal plugin"
 		}`, true, nil)
+
+	mockClient := mock.NewRegistryClientMock(mc)
+	mockClient.WithScopeMock.
+		Expect("minimal-plugin").
+		Return(mockScopedClient)
 
 	logger := log.NewNop()
 	service := plugins.NewPluginService(mockClient, logger)
@@ -148,15 +156,19 @@ func TestGetPluginContract_LabelNotFound(t *testing.T) {
 	mc := minimock.NewController(t)
 	defer mc.Finish()
 
-	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.GetLabelMock.
+	mockScopedClient := mock.NewRegistryClientMock(mc)
+	mockScopedClient.GetLabelMock.
 		Expect(
 			minimock.AnyContext,
-			"deckhouse/cli/plugins/test-plugin",
 			"v1.0.0",
 			"plugin-contract",
 		).
 		Return("", false, nil)
+
+	mockClient := mock.NewRegistryClientMock(mc)
+	mockClient.WithScopeMock.
+		Expect("test-plugin").
+		Return(mockScopedClient)
 
 	logger := log.NewNop()
 	service := plugins.NewPluginService(mockClient, logger)
@@ -185,15 +197,19 @@ func TestGetPluginContract_GetLabelError(t *testing.T) {
 	defer mc.Finish()
 
 	expectedErr := errors.New("registry connection failed")
-	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.GetLabelMock.
+	mockScopedClient := mock.NewRegistryClientMock(mc)
+	mockScopedClient.GetLabelMock.
 		Expect(
 			minimock.AnyContext,
-			"deckhouse/cli/plugins/test-plugin",
 			"v1.0.0",
 			"plugin-contract",
 		).
 		Return("", false, expectedErr)
+
+	mockClient := mock.NewRegistryClientMock(mc)
+	mockClient.WithScopeMock.
+		Expect("test-plugin").
+		Return(mockScopedClient)
 
 	logger := log.NewNop()
 	service := plugins.NewPluginService(mockClient, logger)
@@ -220,15 +236,19 @@ func TestGetPluginContract_InvalidJSON(t *testing.T) {
 	mc := minimock.NewController(t)
 	defer mc.Finish()
 
-	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.GetLabelMock.
+	mockScopedClient := mock.NewRegistryClientMock(mc)
+	mockScopedClient.GetLabelMock.
 		Expect(
 			minimock.AnyContext,
-			"deckhouse/cli/plugins/test-plugin",
 			"v1.0.0",
 			"plugin-contract",
 		).
 		Return(`{invalid json`, true, nil)
+
+	mockClient := mock.NewRegistryClientMock(mc)
+	mockClient.WithScopeMock.
+		Expect("test-plugin").
+		Return(mockScopedClient)
 
 	logger := log.NewNop()
 	service := plugins.NewPluginService(mockClient, logger)
@@ -251,15 +271,19 @@ func TestGetPluginContract_EmptyJSON(t *testing.T) {
 	mc := minimock.NewController(t)
 	defer mc.Finish()
 
-	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.GetLabelMock.
+	mockScopedClient := mock.NewRegistryClientMock(mc)
+	mockScopedClient.GetLabelMock.
 		Expect(
 			minimock.AnyContext,
-			"deckhouse/cli/plugins/test-plugin",
 			"v1.0.0",
 			"plugin-contract",
 		).
 		Return(`{}`, true, nil)
+
+	mockClient := mock.NewRegistryClientMock(mc)
+	mockClient.WithScopeMock.
+		Expect("test-plugin").
+		Return(mockScopedClient)
 
 	logger := log.NewNop()
 	service := plugins.NewPluginService(mockClient, logger)
@@ -317,12 +341,9 @@ func TestExtractPlugin_Success(t *testing.T) {
 
 	tw.Close()
 
-	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.ExtractImageLayersMock.
-		Set(func(ctx context.Context, repository, tag string, handler func(pkg.LayerStream) error) error {
-			if repository != "deckhouse/cli/plugins/test-plugin" {
-				t.Errorf("Expected repository 'deckhouse/cli/plugins/test-plugin', got '%s'", repository)
-			}
+	mockScopedClient := mock.NewRegistryClientMock(mc)
+	mockScopedClient.ExtractImageLayersMock.
+		Set(func(ctx context.Context, tag string, handler func(pkg.LayerStream) error) error {
 			if tag != "v1.0.0" {
 				t.Errorf("Expected tag 'v1.0.0', got '%s'", tag)
 			}
@@ -336,6 +357,11 @@ func TestExtractPlugin_Success(t *testing.T) {
 
 			return handler(stream)
 		})
+
+	mockClient := mock.NewRegistryClientMock(mc)
+	mockClient.WithScopeMock.
+		Expect("test-plugin").
+		Return(mockScopedClient)
 
 	logger := log.NewNop()
 	service := plugins.NewPluginService(mockClient, logger)
@@ -418,9 +444,9 @@ func TestExtractPlugin_MultipleLayersSuccess(t *testing.T) {
 	layer2 := createTarLayer("file2.txt", "content2")
 
 	callCount := 0
-	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.ExtractImageLayersMock.
-		Set(func(ctx context.Context, repository, tag string, handler func(pkg.LayerStream) error) error {
+	mockScopedClient := mock.NewRegistryClientMock(mc)
+	mockScopedClient.ExtractImageLayersMock.
+		Set(func(ctx context.Context, tag string, handler func(pkg.LayerStream) error) error {
 			// Simulate two layers
 			layers := []io.Reader{layer1, layer2}
 
@@ -439,6 +465,11 @@ func TestExtractPlugin_MultipleLayersSuccess(t *testing.T) {
 
 			return nil
 		})
+
+	mockClient := mock.NewRegistryClientMock(mc)
+	mockClient.WithScopeMock.
+		Expect("test-plugin").
+		Return(mockScopedClient)
 
 	logger := log.NewNop()
 	service := plugins.NewPluginService(mockClient, logger)
@@ -487,17 +518,19 @@ func TestExtractPlugin_ExtractImageLayersError(t *testing.T) {
 	tmpDir := t.TempDir()
 	expectedErr := errors.New("failed to get layers")
 
-	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.ExtractImageLayersMock.
-		Set(func(ctx context.Context, repository, tag string, handler func(pkg.LayerStream) error) error {
-			if repository != "deckhouse/cli/plugins/test-plugin" {
-				t.Errorf("Expected repository 'deckhouse/cli/plugins/test-plugin', got '%s'", repository)
-			}
+	mockScopedClient := mock.NewRegistryClientMock(mc)
+	mockScopedClient.ExtractImageLayersMock.
+		Set(func(ctx context.Context, tag string, handler func(pkg.LayerStream) error) error {
 			if tag != "v1.0.0" {
 				t.Errorf("Expected tag 'v1.0.0', got '%s'", tag)
 			}
 			return expectedErr
 		})
+
+	mockClient := mock.NewRegistryClientMock(mc)
+	mockClient.WithScopeMock.
+		Expect("test-plugin").
+		Return(mockScopedClient)
 
 	logger := log.NewNop()
 	service := plugins.NewPluginService(mockClient, logger)
@@ -544,9 +577,9 @@ func TestExtractPlugin_PathTraversalAttempt(t *testing.T) {
 
 	tw.Close()
 
-	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.ExtractImageLayersMock.
-		Set(func(ctx context.Context, repository, tag string, handler func(pkg.LayerStream) error) error {
+	mockScopedClient := mock.NewRegistryClientMock(mc)
+	mockScopedClient.ExtractImageLayersMock.
+		Set(func(ctx context.Context, tag string, handler func(pkg.LayerStream) error) error {
 			stream := &mockLayerStream{
 				index:  1,
 				total:  1,
@@ -554,6 +587,11 @@ func TestExtractPlugin_PathTraversalAttempt(t *testing.T) {
 			}
 			return handler(stream)
 		})
+
+	mockClient := mock.NewRegistryClientMock(mc)
+	mockClient.WithScopeMock.
+		Expect("test-plugin").
+		Return(mockScopedClient)
 
 	logger := log.NewNop()
 	service := plugins.NewPluginService(mockClient, logger)
@@ -612,9 +650,9 @@ func TestExtractPlugin_EmptyRepository(t *testing.T) {
 	tw := tar.NewWriter(&tarBuf)
 	tw.Close()
 
-	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.ExtractImageLayersMock.
-		Set(func(ctx context.Context, repository, tag string, handler func(pkg.LayerStream) error) error {
+	mockScopedClient := mock.NewRegistryClientMock(mc)
+	mockScopedClient.ExtractImageLayersMock.
+		Set(func(ctx context.Context, tag string, handler func(pkg.LayerStream) error) error {
 			stream := &mockLayerStream{
 				index:  1,
 				total:  1,
@@ -622,6 +660,11 @@ func TestExtractPlugin_EmptyRepository(t *testing.T) {
 			}
 			return handler(stream)
 		})
+
+	mockClient := mock.NewRegistryClientMock(mc)
+	mockClient.WithScopeMock.
+		Expect("test-plugin").
+		Return(mockScopedClient)
 
 	logger := log.NewNop()
 	service := plugins.NewPluginService(mockClient, logger)
@@ -687,9 +730,9 @@ func TestExtractPlugin_NestedDirectories(t *testing.T) {
 
 	tw.Close()
 
-	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.ExtractImageLayersMock.
-		Set(func(ctx context.Context, repository, tag string, handler func(pkg.LayerStream) error) error {
+	mockScopedClient := mock.NewRegistryClientMock(mc)
+	mockScopedClient.ExtractImageLayersMock.
+		Set(func(ctx context.Context, tag string, handler func(pkg.LayerStream) error) error {
 			stream := &mockLayerStream{
 				index:  1,
 				total:  1,
@@ -697,6 +740,11 @@ func TestExtractPlugin_NestedDirectories(t *testing.T) {
 			}
 			return handler(stream)
 		})
+
+	mockClient := mock.NewRegistryClientMock(mc)
+	mockClient.WithScopeMock.
+		Expect("test-plugin").
+		Return(mockScopedClient)
 
 	logger := log.NewNop()
 	service := plugins.NewPluginService(mockClient, logger)
