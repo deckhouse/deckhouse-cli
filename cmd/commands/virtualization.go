@@ -21,8 +21,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/deckhouse/virtualization/src/cli/pkg/command"
 	"github.com/spf13/cobra"
+
+	"github.com/deckhouse/virtualization/src/cli/pkg/command"
 )
 
 func NewVirtualizationCommand() *cobra.Command {

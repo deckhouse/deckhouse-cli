@@ -8,14 +8,12 @@ import (
 
 	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
-	"k8s.io/client-go/rest"
-
-	_ "k8s.io/client-go/plugin/pkg/client/auth" // load all auth plugins
-	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
-
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
 	kubescheme "k8s.io/client-go/kubernetes/scheme"
+	_ "k8s.io/client-go/plugin/pkg/client/auth" // load all auth plugins
+	"k8s.io/client-go/rest"
+	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var (
@@ -84,7 +82,6 @@ func (c *SafeClient) HttpDo(req *http.Request) (*http.Response, error) {
 	// CertAuth
 	if (len(c.restConfig.CertData) != 0 || len(c.restConfig.CertFile) != 0) &&
 		(len(c.restConfig.KeyData) != 0 || len(c.restConfig.KeyFile) != 0) {
-
 		httpClient, err := rest.HTTPClientFor(c.restConfig)
 		if err != nil {
 			return nil, err

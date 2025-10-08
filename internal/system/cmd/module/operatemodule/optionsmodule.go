@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
+
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 func OptionsModule(config *rest.Config, kubeCl kubernetes.Interface, pathFromOption string) error {

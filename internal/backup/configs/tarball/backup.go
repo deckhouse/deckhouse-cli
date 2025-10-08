@@ -34,7 +34,6 @@ func NewBackup(sink io.Writer, opts BackupOptions) *Backup {
 	if opts.Compress {
 		gzipWriter = gzip.NewWriter(w)
 		w = io.Writer(gzipWriter)
-
 	}
 
 	return &Backup{

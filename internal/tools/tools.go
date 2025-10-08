@@ -17,11 +17,11 @@ limitations under the License.
 package tools
 
 import (
-	farconverter "github.com/deckhouse/deckhouse-cli/internal/tools/farconverter/cmd"
-	gostsum "github.com/deckhouse/deckhouse-cli/internal/tools/gostsum/cmd"
-
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
+
+	farconverter "github.com/deckhouse/deckhouse-cli/internal/tools/farconverter/cmd"
+	gostsum "github.com/deckhouse/deckhouse-cli/internal/tools/gostsum/cmd"
 )
 
 var toolsLong = templates.LongDesc(`

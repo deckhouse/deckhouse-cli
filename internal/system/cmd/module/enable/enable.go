@@ -19,13 +19,12 @@ package enable
 import (
 	"fmt"
 
+	"github.com/spf13/cobra"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/operatemodule"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
-
-	"github.com/spf13/cobra"
-	"k8s.io/kubectl/pkg/util/templates"
 )
 
 var enableLong = templates.LongDesc(`

@@ -36,9 +36,9 @@ const (
 
 func cmdExamples() string {
 	resp := []string{
-		fmt.Sprintf("  # Start data exporting for PVC 'test-pvc-name'"),
+		"  # Start data exporting for PVC 'test-pvc-name'",
 		fmt.Sprintf("    ... %s export-name pvc/test-pvc-name", cmdName),
-		fmt.Sprintf("  # Start data exporting with extra flags"),
+		"  # Start data exporting with extra flags",
 		fmt.Sprintf("    ... %s --kubeconfig='kube_tmp.conf' -n target-namespace --ttl 17m export-name pvc/test-pvc-name", cmdName),
 	}
 	return strings.Join(resp, "\n")

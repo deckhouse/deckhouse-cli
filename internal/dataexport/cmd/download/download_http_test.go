@@ -4,19 +4,18 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"log/slog"
-
 	"github.com/stretchr/testify/require"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 	safereq "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // helper to create SafeClient with empty rest.Config (no auth)
@@ -32,7 +31,7 @@ func TestDownloadFilesystem_OK(t *testing.T) {
 		require.Equal(t, "/api/v1/files/foo.txt", r.URL.Path)
 		w.Header().Set("X-Type", "file")
 		w.Header().Set("Content-Length", "3")
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("abc"))
 	}))
 	defer srv.Close()
@@ -92,7 +91,7 @@ func TestDownloadBlock_OK(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/api/v1/block", r.URL.Path)
 		w.Header().Set("Content-Length", "4")
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("raw!"))
 	}))
 	defer srv.Close()

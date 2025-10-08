@@ -24,6 +24,16 @@ import (
 	"os"
 	"time"
 
+	"github.com/sirupsen/logrus"
+	"github.com/spf13/cobra"
+	helm_v3 "github.com/werf/3p-helm/cmd/helm"
+	"github.com/werf/logboek"
+	"github.com/werf/nelm/pkg/resrcchangcalc"
+	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
+	"github.com/werf/werf/v2/pkg/process_exterminator"
+	cliflag "k8s.io/component-base/cli/flag"
+	"k8s.io/component-base/logs"
+
 	"github.com/deckhouse/deckhouse-cli/cmd/commands"
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
 	dataexport "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd"
@@ -32,17 +42,6 @@ import (
 	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
-	"github.com/sirupsen/logrus"
-	"github.com/spf13/cobra"
-
-	helm_v3 "github.com/werf/3p-helm/cmd/helm"
-	cliflag "k8s.io/component-base/cli/flag"
-	"k8s.io/component-base/logs"
-
-	"github.com/werf/logboek"
-	"github.com/werf/nelm/pkg/resrcchangcalc"
-	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
-	"github.com/werf/werf/v2/pkg/process_exterminator"
 )
 
 func registerCommands(rootCmd *cobra.Command) {

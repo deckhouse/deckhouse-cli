@@ -23,7 +23,7 @@ import (
 )
 
 func ReplaceCommandName(from, to string, c *cobra.Command) *cobra.Command {
-	c.Example = strings.Replace(c.Example, from, to, -1)
+	c.Example = strings.ReplaceAll(c.Example, from, to)
 	// Need some investigation about links
 	// c.Long = strings.Replace(c.Long, from, to, -1)
 	for _, sub := range c.Commands() {

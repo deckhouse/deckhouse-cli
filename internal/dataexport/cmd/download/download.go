@@ -72,7 +72,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	}
 
 	cmd.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
-	cmd.Flags().StringP("output", "o", "", "file to save data (default: same as resource)") //TODO support /dev/stdout
+	cmd.Flags().StringP("output", "o", "", "file to save data (default: same as resource)") // TODO support /dev/stdout
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
 	cmd.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
 
@@ -165,14 +165,14 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 		return err
 	}
 
-	req, _ := http.NewRequest("GET", dataURL, nil)
+	req, _ := http.NewRequest(http.MethodGet, dataURL, nil)
 	resp, err := sClient.HttpDo(req)
 	if err != nil {
 		return fmt.Errorf("HttpDo: %s\n", err.Error())
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		if resp.ContentLength > 0 {
 			msg, err := io.ReadAll(io.LimitReader(resp.Body, 1000))
 			if err == nil {
@@ -245,7 +245,6 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 }
 
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
-
 	namespace, _ := cmd.Flags().GetString("namespace")
 	dstPath, _ := cmd.Flags().GetString("output")
 	publish, _ := cmd.Flags().GetBool("publish")
