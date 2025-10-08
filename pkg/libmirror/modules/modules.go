@@ -109,7 +109,29 @@ func FindExternalModuleImages(
 	moduleImages, releaseImages = map[string]struct{}{}, map[string]struct{}{}
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
 
-	if filter.ShouldMirrorReleaseChannels(mod.Name) {
+	// Check if specific versions are requested (explicit tags)
+	versionsToMirror := filter.VersionsToMirror(mod)
+
+	// Check if this is the default ">=0.0.0" constraint (no version specified)
+	isDefaultConstraint := false
+	if constraint, found := filter.GetConstraint(mod.Name); found {
+		if sc, ok := constraint.(*SemanticVersionConstraint); ok {
+			// Detect the default >=0.0.0 constraint
+			constraintStr := sc.constraint.String()
+			if constraintStr == ">= 0.0.0" || constraintStr == ">=0.0.0" {
+				isDefaultConstraint = true
+			}
+		}
+	}
+
+	if len(versionsToMirror) > 0 && !isDefaultConstraint {
+		// Explicit versions specified (e.g., neuvector@=v1.2.3 or neuvector@~1.2.0)
+		for _, tag := range versionsToMirror {
+			moduleImages[mod.RegistryPath+":"+tag] = struct{}{}
+			releaseImages[path.Join(mod.RegistryPath, "release")+":"+tag] = struct{}{}
+		}
+	} else if filter.ShouldMirrorReleaseChannels(mod.Name) {
+		// No explicit versions - use release channels
 		channelImgs, err := getAvailableReleaseChannelsImagesForModule(mod, nameOpts, remoteOpts)
 		if err != nil {
 			return nil, nil, fmt.Errorf("get release channels: %w", err)
@@ -122,16 +144,10 @@ func FindExternalModuleImages(
 		if err != nil {
 			return nil, nil, fmt.Errorf("fetch channel versions: %w", err)
 		}
-		for _, v := range channelVers {
-			moduleImages[mod.RegistryPath+":"+v] = struct{}{}
-			releaseImages[path.Join(mod.RegistryPath, "release")+":"+v] = struct{}{}
+		for _, version := range channelVers {
+			moduleImages[mod.RegistryPath+":"+version] = struct{}{}
+			releaseImages[path.Join(mod.RegistryPath, "release")+":"+version] = struct{}{}
 		}
-	}
-
-	versionsToMirror := filter.VersionsToMirror(mod)
-	for _, tag := range versionsToMirror {
-		moduleImages[mod.RegistryPath+":"+tag] = struct{}{}
-		releaseImages[path.Join(mod.RegistryPath, "release")+":"+tag] = struct{}{}
 	}
 
 	for imageTag := range moduleImages {
