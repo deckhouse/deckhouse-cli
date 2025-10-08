@@ -27,6 +27,12 @@ type RegistryClient interface {
 
 	// ExtractImageLayers retrieves uncompressed layer streams for extraction
 	ExtractImageLayers(ctx context.Context, repository, tag string, handler func(LayerStream) error) error
+
+	// ListTags retrieves all available tags for a repository
+	ListTags(ctx context.Context, repository string) ([]string, error)
+
+	// ListRepositories retrieves all repositories under a given path
+	ListRepositories(ctx context.Context, pathPrefix string) ([]string, error)
 }
 
 // LayerStream provides access to a single layer stream for extraction

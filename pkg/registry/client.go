@@ -24,18 +24,6 @@ type Client struct {
 // Ensure Client implements pkg.RegistryInterface
 var _ pkg.RegistryClient = (*Client)(nil)
 
-// NewClient creates a new container registry client using go-containerregistry
-func NewClient(registry, username, password string, logger *log.Logger) *Client {
-	opts := &ClientOptions{
-		Registry: registry,
-		Username: username,
-		Password: password,
-		Logger:   logger,
-	}
-
-	return NewClientWithOptions(opts)
-}
-
 // NewClientWithOptions creates a new container registry client with advanced options
 func NewClientWithOptions(opts *ClientOptions) *Client {
 	auth := buildAuthenticator(opts)
@@ -221,4 +209,84 @@ func (c *Client) ExtractImageLayers(ctx context.Context, repository, tag string,
 	c.log.Debug("All layers extracted successfully", slog.String("repository", repository), slog.String("tag", tag), slog.Int("total_layers", total))
 
 	return nil
+}
+
+// ListTags lists all tags for a specific repository
+func (c *Client) ListTags(ctx context.Context, repository string) ([]string, error) {
+	c.log.Debug("Listing tags", slog.String("repository", repository))
+
+	ref, err := name.ParseReference(fmt.Sprintf("%s/%s", c.registry, repository))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse reference: %w", err)
+	}
+
+	repo := ref.Context()
+	opts := append(c.options, remote.WithContext(ctx))
+
+	tags, err := remote.List(repo, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list tags: %w", err)
+	}
+
+	c.log.Debug("Tags listed successfully", slog.String("repository", repository), slog.Int("count", len(tags)))
+
+	return tags, nil
+}
+
+// ListRepositories lists all repositories under a specific path prefix
+// This uses remote.List() on the base registry path to list sub-repositories/tags
+func (c *Client) ListRepositories(ctx context.Context, pathPrefix string) ([]string, error) {
+	c.log.Debug("Listing repositories", slog.String("pathPrefix", pathPrefix), slog.String("base_registry", c.registry))
+
+	// Use the base registry path to list sub-repositories
+	// For example, if c.registry is "registry.deckhouse.io/deckhouse/ee/modules"
+	// this will list all tags/sub-paths under that repository
+	ref, err := name.ParseReference(c.registry)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse registry reference: %w", err)
+	}
+
+	repo := ref.Context()
+	c.log.Debug("Listing tags for base repository", slog.String("repository", repo.String()))
+
+	opts := append(c.options, remote.WithContext(ctx))
+
+	// List "tags" which actually represent sub-repositories in this case
+	tags, err := remote.List(repo, opts...)
+	if err != nil {
+		c.log.Debug("Failed to list repository tags", slog.String("error", err.Error()))
+		return nil, fmt.Errorf("failed to list repositories: %w", err)
+	}
+
+	c.log.Debug("Base repository listing returned", slog.Int("total_items", len(tags)))
+
+	// Build repository paths (without registry hostname)
+	// Extract the repository path from c.registry (remove registry hostname)
+	// For example: "registry.deckhouse.io/deckhouse/ee/modules" -> "deckhouse/ee/modules"
+	baseRepoPath := repo.RepositoryStr()
+
+	var repos []string
+	for _, tag := range tags {
+		// Construct path: base_repo_path/tag
+		fullPath := fmt.Sprintf("%s/%s", baseRepoPath, tag)
+		repos = append(repos, fullPath)
+	}
+
+	c.log.Debug("Constructed repository paths", slog.Int("total", len(repos)), slog.String("base_path", baseRepoPath))
+
+	// Filter repositories by path prefix if specified
+	var filtered []string
+	if pathPrefix != "" {
+		for _, repoPath := range repos {
+			if len(repoPath) >= len(pathPrefix) && repoPath[:len(pathPrefix)] == pathPrefix {
+				filtered = append(filtered, repoPath)
+			}
+		}
+	} else {
+		filtered = repos
+	}
+
+	c.log.Debug("Repositories listed successfully", slog.String("pathPrefix", pathPrefix), slog.Int("total", len(repos)), slog.Int("filtered", len(filtered)))
+
+	return filtered, nil
 }

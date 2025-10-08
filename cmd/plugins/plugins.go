@@ -1,20 +1,46 @@
 package plugins
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/spf13/cobra"
 
+	"github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins"
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 )
 
 type PluginsCommand struct {
 	service *plugins.PluginService
+	log     *dkplog.Logger
 }
 
-func NewPluginsCommand(service *plugins.PluginService) *cobra.Command {
+// pluginDisplayInfo holds all information needed to display a plugin
+type pluginDisplayInfo struct {
+	Name        string
+	Version     string
+	Description string
+	IsInstalled bool
+	HasError    bool
+}
+
+// pluginsListData holds all data for the list command
+type pluginsListData struct {
+	Installed        []pluginDisplayInfo
+	Available        []pluginDisplayInfo
+	RegistryError    error
+	TotalInstalled   int
+	TotalAvailable   int
+	AvailableSuccess int
+	AvailableFailed  int
+}
+
+func NewPluginsCommand(service *plugins.PluginService, logger *dkplog.Logger) *cobra.Command {
 	pc := &PluginsCommand{
 		service: service,
+		log:     logger,
 	}
 
 	cmd := &cobra.Command{
@@ -29,27 +55,217 @@ func NewPluginsCommand(service *plugins.PluginService) *cobra.Command {
 	cmd.AddCommand(pc.pluginsUpdateCommand())
 	cmd.AddCommand(pc.pluginsRemoveCommand())
 
+	flags.AddFlags(cmd.PersistentFlags())
+
 	return cmd
 }
 
 func (pc *PluginsCommand) pluginsListCommand() *cobra.Command {
+	var showInstalledOnly bool
+	var showAvailableOnly bool
+
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List all installed Deckhouse CLI plugins",
-		Long:  "Display a list of all currently installed Deckhouse CLI plugins with their versions and status",
+		Short: "List Deckhouse CLI plugins",
+		Long:  "Display detailed information about installed plugins and available plugins from the registry",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// TODO: Implement listing installed plugins from filesystem
-			fmt.Println("Listing all installed plugins...")
-			fmt.Println("Plugin Name\t\tVersion\t\tStatus")
-			fmt.Println("-------------------------------------------")
-			fmt.Println("example-plugin\t\tv1.0.0\t\tActive")
-			fmt.Println("another-plugin\t\tv2.1.3\t\tActive")
-			fmt.Println("\nTotal: 2 plugins installed")
+			ctx := cmd.Context()
+
+			// Prepare all data before printing
+			data := pc.preparePluginsListData(ctx, showInstalledOnly, showAvailableOnly)
+
+			// Print all prepared data
+			pc.printPluginsList(data, showInstalledOnly, showAvailableOnly)
+
 			return nil
 		},
 	}
 
+	cmd.Flags().BoolVar(&showInstalledOnly, "installed", false, "Show only installed plugins")
+	cmd.Flags().BoolVar(&showAvailableOnly, "available", false, "Show only available plugins from registry")
+
 	return cmd
+}
+
+// preparePluginsListData fetches and prepares all data needed for display
+func (pc *PluginsCommand) preparePluginsListData(ctx context.Context, showInstalledOnly, showAvailableOnly bool) *pluginsListData {
+	data := &pluginsListData{
+		Installed: []pluginDisplayInfo{},
+		Available: []pluginDisplayInfo{},
+	}
+
+	// Fetch installed plugins if needed
+	if !showAvailableOnly {
+		data.Installed = pc.fetchInstalledPlugins()
+		data.TotalInstalled = len(data.Installed)
+	}
+
+	// Fetch available plugins from registry if needed
+	if !showInstalledOnly {
+		data.Available, data.RegistryError = pc.fetchAvailablePlugins(ctx)
+		data.TotalAvailable = len(data.Available)
+
+		// Count successful and failed plugins
+		for _, plugin := range data.Available {
+			if plugin.HasError {
+				data.AvailableFailed++
+			} else {
+				data.AvailableSuccess++
+			}
+		}
+	}
+
+	return data
+}
+
+// fetchInstalledPlugins retrieves installed plugins from filesystem
+func (pc *PluginsCommand) fetchInstalledPlugins() []pluginDisplayInfo {
+	// TODO: Implement listing installed plugins from filesystem
+	return []pluginDisplayInfo{
+		{
+			Name:        "example-plugin",
+			Version:     "v1.0.0",
+			Description: "Example installed plugin",
+			IsInstalled: true,
+			HasError:    false,
+		},
+		{
+			Name:        "another-plugin",
+			Version:     "v2.1.3",
+			Description: "Another installed plugin",
+			IsInstalled: true,
+			HasError:    false,
+		},
+	}
+}
+
+// fetchAvailablePlugins retrieves and prepares available plugins from registry
+func (pc *PluginsCommand) fetchAvailablePlugins(ctx context.Context) ([]pluginDisplayInfo, error) {
+	pluginNames, err := pc.service.ListPlugins(ctx)
+	if err != nil {
+		pc.log.Warn("Failed to list plugins", slog.String("error", err.Error()))
+		return nil, fmt.Errorf("failed to list plugins: %w", err)
+	}
+
+	if len(pluginNames) == 0 {
+		return []pluginDisplayInfo{}, nil
+	}
+
+	plugins := make([]pluginDisplayInfo, 0, len(pluginNames))
+
+	// Fetch contract for each plugin to get version and description
+	for _, pluginName := range pluginNames {
+		plugin := pluginDisplayInfo{
+			Name:        pluginName,
+			IsInstalled: false,
+		}
+
+		// Get the latest version contract
+		contract, err := pc.service.GetPluginContract(ctx, pluginName, "latest")
+		if err != nil {
+			// Log the error for debugging
+			pc.log.Warn("Failed to get plugin contract",
+				slog.String("plugin", pluginName),
+				slog.String("tag", "latest"),
+				slog.String("error", err.Error()))
+
+			// Show ERROR in version column and error description in description column
+			plugin.Version = "ERROR"
+			plugin.Description = "failed to get plugin contract"
+			plugin.HasError = true
+		} else {
+			plugin.Version = contract.Version
+			plugin.Description = contract.Description
+			plugin.HasError = false
+
+			// Truncate description if too long
+			if len(plugin.Description) > 40 {
+				plugin.Description = plugin.Description[:37] + "..."
+			}
+		}
+
+		plugins = append(plugins, plugin)
+	}
+
+	return plugins, nil
+}
+
+// printPluginsList prints all prepared data
+func (pc *PluginsCommand) printPluginsList(data *pluginsListData, showInstalledOnly, showAvailableOnly bool) {
+	// Print installed plugins section
+	if !showAvailableOnly {
+		pc.printInstalledSection(data)
+	}
+
+	// Print available plugins section
+	if !showInstalledOnly {
+		pc.printAvailableSection(data)
+	}
+}
+
+// printInstalledSection prints the installed plugins section
+func (pc *PluginsCommand) printInstalledSection(data *pluginsListData) {
+	fmt.Println("Installed Plugins:")
+	fmt.Println("-------------------------------------------")
+	fmt.Printf("%-20s %-15s %-40s\n", "NAME", "VERSION", "DESCRIPTION")
+	fmt.Println("-------------------------------------------")
+
+	if len(data.Installed) == 0 {
+		fmt.Println("No plugins installed")
+	} else {
+		for _, plugin := range data.Installed {
+			fmt.Printf("%-20s %-15s %-40s\n", plugin.Name, plugin.Version, plugin.Description)
+		}
+	}
+
+	fmt.Println()
+	fmt.Printf("Total: %d plugin(s) installed\n", data.TotalInstalled)
+	fmt.Println()
+}
+
+// printAvailableSection prints the available plugins section
+func (pc *PluginsCommand) printAvailableSection(data *pluginsListData) {
+	fmt.Println("Available Plugins in Registry:")
+	fmt.Println("-------------------------------------------")
+
+	// Handle registry error
+	if data.RegistryError != nil {
+		fmt.Println()
+		fmt.Println("⚠ Unable to connect to plugin registry")
+		fmt.Println()
+		fmt.Println("The registry may not be accessible or catalog listing may be disabled.")
+		fmt.Println("You can still use specific plugins if you know their names:")
+		fmt.Println("  - Use 'plugins contract <name>' to view plugin details")
+		fmt.Println("  - Use 'plugins install <name>' to install a plugin")
+		return
+	}
+
+	// Handle empty registry
+	if len(data.Available) == 0 {
+		fmt.Println("No plugins found in registry")
+		return
+	}
+
+	// Print plugins table
+	fmt.Printf("%-20s %-15s %-40s\n", "NAME", "VERSION", "DESCRIPTION")
+	fmt.Println("-------------------------------------------")
+
+	for _, plugin := range data.Available {
+		fmt.Printf("%-20s %-15s %-40s\n", plugin.Name, plugin.Version, plugin.Description)
+	}
+
+	// Print summary
+	fmt.Println()
+	if data.AvailableFailed > 0 {
+		fmt.Printf("Total: %d plugin(s) available (%d accessible, %d with errors)\n",
+			data.TotalAvailable, data.AvailableSuccess, data.AvailableFailed)
+	} else {
+		fmt.Printf("Total: %d plugin(s) available\n", data.TotalAvailable)
+	}
+
+	fmt.Println()
+	fmt.Println("Use 'plugins contract <name>' to see detailed information about a plugin")
+	fmt.Println("Use 'plugins install <name>' to install a plugin")
 }
 
 func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
@@ -80,6 +296,10 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 			ctx := cmd.Context()
 			plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
 			if err != nil {
+				pc.log.Warn("Failed to get plugin contract",
+					slog.String("plugin", pluginName),
+					slog.String("tag", tag),
+					slog.String("error", err.Error()))
 				return fmt.Errorf("failed to get plugin contract: %w", err)
 			}
 
@@ -151,6 +371,10 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 			fmt.Println("Verifying plugin contract...")
 			plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
 			if err != nil {
+				pc.log.Warn("Failed to get plugin contract",
+					slog.String("plugin", pluginName),
+					slog.String("tag", tag),
+					slog.String("error", err.Error()))
 				return fmt.Errorf("failed to get plugin contract: %w", err)
 			}
 
@@ -165,6 +389,11 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 			fmt.Println("Downloading and extracting plugin...")
 			err = pc.service.ExtractPlugin(ctx, pluginName, tag, destination)
 			if err != nil {
+				pc.log.Warn("Failed to extract plugin",
+					slog.String("plugin", pluginName),
+					slog.String("tag", tag),
+					slog.String("destination", destination),
+					slog.String("error", err.Error()))
 				return fmt.Errorf("failed to extract plugin: %w", err)
 			}
 
@@ -195,7 +424,11 @@ func (pc *PluginsCommand) pluginsUpdateCommand() *cobra.Command {
 			fmt.Println("Checking for updates...")
 			plugin, err := pc.service.GetPluginContract(ctx, pluginName, "latest")
 			if err != nil {
-				return fmt.Errorf("failed to check for updates: %w", err)
+				pc.log.Warn("Failed to get plugin contract",
+					slog.String("plugin", pluginName),
+					slog.String("tag", "latest"),
+					slog.String("error", err.Error()))
+				return fmt.Errorf("failed to get plugin contract: %w", err)
 			}
 
 			fmt.Printf("Latest version: %s\n", plugin.Version)
@@ -205,7 +438,12 @@ func (pc *PluginsCommand) pluginsUpdateCommand() *cobra.Command {
 			fmt.Println("Downloading latest version...")
 			err = pc.service.ExtractPlugin(ctx, pluginName, "latest", destination)
 			if err != nil {
-				return fmt.Errorf("failed to update plugin: %w", err)
+				pc.log.Warn("Failed to extract plugin",
+					slog.String("plugin", pluginName),
+					slog.String("tag", "latest"),
+					slog.String("destination", destination),
+					slog.String("error", err.Error()))
+				return fmt.Errorf("failed to extract plugin: %w", err)
 			}
 
 			fmt.Printf("✓ Plugin '%s' updated successfully to v%s!\n", pluginName, plugin.Version)

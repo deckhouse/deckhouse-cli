@@ -16,6 +16,9 @@ type ClientOptions struct {
 	// Registry is the registry host (e.g., "registry.example.com")
 	Registry string
 
+	// Auth provides authentication for registry access (takes precedence over Username/Password/LicenseToken)
+	Auth authn.Authenticator
+
 	// Username for basic authentication
 	Username string
 
@@ -43,9 +46,15 @@ func ensureLogger(opts *ClientOptions) {
 }
 
 // buildAuthenticator creates the appropriate authenticator based on provided credentials
-// Priority: License Token > Username/Password > Anonymous
+// Priority: Auth > License Token > Username/Password > Anonymous
 func buildAuthenticator(opts *ClientOptions) authn.Authenticator {
 	ensureLogger(opts)
+
+	if opts.Auth != nil {
+		opts.Logger.Debug("Registry client initialized with provided authenticator",
+			slog.String("registry", opts.Registry))
+		return opts.Auth
+	}
 
 	if opts.LicenseToken != "" {
 		opts.Logger.Debug("Registry client initialized with license token authentication",

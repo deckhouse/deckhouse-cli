@@ -50,14 +50,17 @@ import (
 )
 
 type RootCommand struct {
-	cmd *cobra.Command
+	cmd    *cobra.Command
+	logger *dkplog.Logger
 
 	pluginRegistryClient *registry.Client
 	pluginService        *intplugins.PluginService
 }
 
 func NewRootCommand() *RootCommand {
-	rootCmd := &RootCommand{}
+	rootCmd := &RootCommand{
+		logger: dkplog.NewLogger().Named("d8"),
+	}
 
 	rootCmd.cmd = &cobra.Command{
 		Use:           "d8",
@@ -77,22 +80,6 @@ func NewRootCommand() *RootCommand {
 	return rootCmd
 }
 
-func (r *RootCommand) initPluginServices() {
-	r.pluginRegistryClient = registry.NewClient(
-		// TODO: change registry
-		"registry.deckhouse.io",
-		// TODO: change creds
-		os.Getenv("D8_REGISTRY_USERNAME"),
-		os.Getenv("D8_REGISTRY_PASSWORD"),
-		dkplog.NewLogger().Named("registry-client"),
-	)
-
-	r.pluginService = intplugins.NewPluginService(
-		r.pluginRegistryClient,
-		dkplog.NewLogger().Named("plugin-service"),
-	)
-}
-
 func (r *RootCommand) registerCommands() {
 	deliveryCMD, ctx := commands.NewDeliveryCommand()
 	r.cmd.AddCommand(deliveryCMD)
@@ -110,7 +97,7 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(commands.NewStrongholdCommand())
 	r.cmd.AddCommand(commands.NewHelpJsonCommand(r.cmd))
 
-	r.cmd.AddCommand(plugins.NewPluginsCommand(r.pluginService))
+	r.cmd.AddCommand(plugins.NewPluginsCommand(r.pluginService, r.logger.Named("plugins-command")))
 }
 
 func (r *RootCommand) Execute() error {
