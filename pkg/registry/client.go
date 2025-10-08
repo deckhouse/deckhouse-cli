@@ -69,10 +69,6 @@ func (c *Client) GetRegistry() string {
 func (c *Client) GetManifest(ctx context.Context, tag string) (*remote.Descriptor, error) {
 	c.log.Debug("Getting manifest", slog.String("scope", c.scopePath), slog.String("tag", tag))
 
-	if c.scopePath == "" {
-		return nil, fmt.Errorf("scope path is empty, use WithScope() to set repository")
-	}
-
 	ref, err := name.ParseReference(fmt.Sprintf("%s/%s:%s", c.registryHost, c.scopePath, tag))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse reference: %w", err)
@@ -93,10 +89,6 @@ func (c *Client) GetManifest(ctx context.Context, tag string) (*remote.Descripto
 // The repository is determined by the chained WithScope() calls
 func (c *Client) GetImage(ctx context.Context, tag string) (v1.Image, error) {
 	c.log.Debug("Getting image", slog.String("scope", c.scopePath), slog.String("tag", tag))
-
-	if c.scopePath == "" {
-		return nil, fmt.Errorf("scope path is empty, use WithScope() to set repository")
-	}
 
 	ref, err := name.ParseReference(fmt.Sprintf("%s/%s:%s", c.registryHost, c.scopePath, tag))
 	if err != nil {
@@ -258,10 +250,6 @@ func (c *Client) ExtractImageLayers(ctx context.Context, tag string, handler fun
 func (c *Client) ListTags(ctx context.Context) ([]string, error) {
 	c.log.Debug("Listing tags", slog.String("scope", c.scopePath))
 
-	if c.scopePath == "" {
-		return nil, fmt.Errorf("scope path is empty, use WithScope() to set repository")
-	}
-
 	ref, err := name.ParseReference(fmt.Sprintf("%s/%s", c.registryHost, c.scopePath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse reference: %w", err)
@@ -286,10 +274,6 @@ func (c *Client) ListTags(ctx context.Context) ([]string, error) {
 func (c *Client) ListRepositories(ctx context.Context) ([]string, error) {
 	fullRegistry := c.GetRegistry()
 	c.log.Debug("Listing repositories", slog.String("base_registry", fullRegistry))
-
-	if c.scopePath == "" {
-		return nil, fmt.Errorf("scope path is empty, use WithScope() to set base path")
-	}
 
 	// Use the current scope path to list sub-repositories
 	// For example, if scope is "deckhouse/ee/modules"
