@@ -18,6 +18,7 @@ package validation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -26,7 +27,10 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 )
+
+var ErrImageUnavailable = errors.New("required image is not present in registry")
 
 type options struct {
 	plainHTTP           bool
@@ -84,6 +88,9 @@ func (v *RemoteRegistryAccessValidator) ValidateReadAccessForImage(ctx context.C
 
 	_, err = remote.Head(ref, remoteOpts...)
 	if err != nil {
+		if errorutil.IsImageNotFoundError(err) {
+			return ErrImageUnavailable
+		}
 		return err
 	}
 
