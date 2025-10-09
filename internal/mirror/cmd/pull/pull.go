@@ -169,12 +169,19 @@ func pull(cmd *cobra.Command, _ []string) error {
 
 	if !pullParams.SkipSecurityDatabases {
 		if err := logger.Process("Pull Security Databases", func() error {
-			imageRef := pullParams.DeckhouseRegistryRepo + "/security/trivy-db:2"
 			ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
 			defer cancel()
-			if err := accessValidator.ValidateReadAccessForImage(ctx, imageRef, validationOpts...); err != nil {
+
+			imageRef := pullParams.DeckhouseRegistryRepo + "/security/trivy-db:2"
+			err := accessValidator.ValidateReadAccessForImage(ctx, imageRef, validationOpts...)
+			switch {
+			case errors.Is(err, validation.ErrImageUnavailable):
+				logger.WarnF("Cannot pull security databases: %v", err)
+				return nil
+			case err != nil:
 				return fmt.Errorf("Source registry is not accessible: %w", err)
 			}
+
 			if err := operations.PullSecurityDatabases(pullParams); err != nil {
 				return err
 			}
