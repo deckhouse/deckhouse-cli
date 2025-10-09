@@ -176,7 +176,7 @@ func pull(cmd *cobra.Command, _ []string) error {
 			err := accessValidator.ValidateReadAccessForImage(ctx, imageRef, validationOpts...)
 			switch {
 			case errors.Is(err, validation.ErrImageUnavailable):
-				logger.WarnF("Cannot pull security databases: %v", err)
+				logger.WarnF("Skipping pull of security databases: %v", err)
 				return nil
 			case err != nil:
 				return fmt.Errorf("Source registry is not accessible: %w", err)
