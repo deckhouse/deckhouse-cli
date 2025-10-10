@@ -2,6 +2,7 @@ package utilk8s
 
 import (
 	"fmt"
+	"strings"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -20,8 +21,15 @@ func SetupK8sClientSet(kubeconfigPath, contextName string) (*rest.Config, *kuber
 		}
 	}
 
-	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfigPath}, configOverrides).ClientConfig()
+	loadingRules := &clientcmd.ClientConfigLoadingRules{}
+	kubeconfigFiles := strings.Split(kubeconfigPath, ":")
+	if len(kubeconfigFiles) > 1 {
+		loadingRules.Precedence = kubeconfigFiles
+	} else {
+		loadingRules.ExplicitPath = kubeconfigPath
+	}
+
+	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides).ClientConfig()
 	if err != nil {
 		return nil, nil, fmt.Errorf("Reading kubeconfig file: %w", err)
 	}
