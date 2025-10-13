@@ -52,7 +52,7 @@ linters:
       # Enforce using constants instead of raw keys.
       no-raw-keys: false
       # Enforce a single key naming convention.
-      # key-naming-case: ""
+      key-naming-case: "snake"
       # Enforce not using specific keys.
       forbidden-keys:
         - level
@@ -87,6 +87,7 @@ linters:
       - third_party$
       - builtin$
       - examples$
+      - _test\.go$
 formatters:
   enable:
     - gci
@@ -109,3 +110,4 @@ formatters:
       - third_party$
       - builtin$
       - examples$
+

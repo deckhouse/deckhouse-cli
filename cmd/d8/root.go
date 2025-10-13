@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/rand"
 	"os"
 	"time"
@@ -34,36 +35,45 @@ import (
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
 
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+
 	"github.com/deckhouse/deckhouse-cli/cmd/commands"
+	"github.com/deckhouse/deckhouse-cli/cmd/plugins"
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
 	dataexport "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
+	intplugins "github.com/deckhouse/deckhouse-cli/internal/plugins"
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
 	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
+	"github.com/deckhouse/deckhouse-cli/pkg"
 )
 
-func registerCommands(rootCmd *cobra.Command) {
-	deliveryCMD, ctx := commands.NewDeliveryCommand()
-	rootCmd.AddCommand(deliveryCMD)
-	rootCmd.SetContext(ctx)
+type RootCommand struct {
+	cmd    *cobra.Command
+	logger *dkplog.Logger
 
-	rootCmd.AddCommand(backup.NewCommand())
-	rootCmd.AddCommand(dataexport.NewCommand())
-	rootCmd.AddCommand(mirror.NewCommand())
-	rootCmd.AddCommand(status.NewCommand())
-	rootCmd.AddCommand(tools.NewCommand())
-	rootCmd.AddCommand(system.NewCommand())
-	rootCmd.AddCommand(commands.NewVirtualizationCommand())
-	rootCmd.AddCommand(commands.NewKubectlCommand())
-	rootCmd.AddCommand(commands.NewLoginCommand())
-	rootCmd.AddCommand(commands.NewStrongholdCommand())
-	rootCmd.AddCommand(commands.NewHelpJsonCommand(rootCmd))
+	pluginRegistryClient pkg.RegistryClient
+	pluginService        *intplugins.PluginService
 }
 
-func execute() {
-	rootCmd := &cobra.Command{
+func NewRootCommand() *RootCommand {
+	logger := dkplog.NewLogger(
+		dkplog.WithLevel(
+			slog.Level(
+				dkplog.LogLevelFromStr(
+					os.Getenv("LOG_LEVEL"),
+				),
+			),
+		),
+	)
+
+	rootCmd := &RootCommand{
+		logger: logger.Named("d8"),
+	}
+
+	rootCmd.cmd = &cobra.Command{
 		Use:           "d8",
 		Short:         "d8 controls the Deckhouse Kubernetes Platform",
 		Version:       version.Version,
@@ -74,20 +84,43 @@ func execute() {
 		},
 	}
 
-	registerCommands(rootCmd)
+	rootCmd.initPluginServices()
+	rootCmd.registerCommands()
+	rootCmd.cmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 
-	ctx := rootCmd.Context()
+	return rootCmd
+}
+
+func (r *RootCommand) registerCommands() {
+	deliveryCMD, ctx := commands.NewDeliveryCommand()
+	r.cmd.AddCommand(deliveryCMD)
+	r.cmd.SetContext(ctx)
+
+	r.cmd.AddCommand(backup.NewCommand())
+	r.cmd.AddCommand(dataexport.NewCommand())
+	r.cmd.AddCommand(mirror.NewCommand())
+	r.cmd.AddCommand(status.NewCommand())
+	r.cmd.AddCommand(tools.NewCommand())
+	r.cmd.AddCommand(system.NewCommand())
+	r.cmd.AddCommand(commands.NewVirtualizationCommand())
+	r.cmd.AddCommand(commands.NewKubectlCommand())
+	r.cmd.AddCommand(commands.NewLoginCommand())
+	r.cmd.AddCommand(commands.NewStrongholdCommand())
+	r.cmd.AddCommand(commands.NewHelpJsonCommand(r.cmd))
+
+	r.cmd.AddCommand(plugins.NewPluginsCommand(r.pluginService, r.logger.Named("plugins-command")))
+}
+
+func (r *RootCommand) Execute() error {
+	ctx := r.cmd.Context()
 
 	rand.Seed(time.Now().UnixNano())
 	defer logs.FlushLogs()
 
-	// It is supposed to be executed against the kubectl command, but we want to use this normalization globally.
-	rootCmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
-
 	if shouldTerminate, err := werfcommon.ContainerBackendProcessStartupHook(); err != nil {
 		werfcommon.TerminateWithError(err.Error(), 1)
 	} else if shouldTerminate {
-		return
+		return nil
 	}
 
 	werfcommon.EnableTerminationSignalsTrap()
@@ -98,7 +131,7 @@ func execute() {
 		werfcommon.TerminateWithError(fmt.Sprintf("process exterminator initialization failed: %s", err), 1)
 	}
 
-	if err := rootCmd.Execute(); err != nil {
+	if err := r.cmd.Execute(); err != nil {
 		if helm_v3.IsPluginError(err) {
 			werfcommon.ShutdownTelemetry(ctx, helm_v3.PluginErrorCode(err))
 			werfcommon.TerminateWithError(err.Error(), helm_v3.PluginErrorCode(err))
@@ -112,4 +145,10 @@ func execute() {
 	}
 
 	werfcommon.ShutdownTelemetry(ctx, 0)
+	return nil
+}
+
+func execute() {
+	rootCmd := NewRootCommand()
+	rootCmd.Execute()
 }
