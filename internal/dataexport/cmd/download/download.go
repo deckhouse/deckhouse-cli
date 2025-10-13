@@ -302,7 +302,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	if err != nil {
 		log.Error("Not all files have been downloaded", slog.String("error", err.Error()))
 	} else {
-		log.Info("All files have been downloaded", slog.String("dstPath", dstPath))
+		log.Info("All files have been downloaded", slog.String("dst_path", dstPath))
 	}
 
 	if deName != dataName { // DataExport created in download process
