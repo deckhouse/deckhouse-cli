@@ -127,6 +127,15 @@ func NewCommand() *cobra.Command {
 func pull(cmd *cobra.Command, _ []string) error {
 	logger := setupLogger()
 	pullParams := buildPullParams(logger)
+	
+	// Clean up temporary directory on function exit
+	defer func() {
+		// Remove the entire .tmp directory, not just the subdirectory
+		tmpBaseDir := filepath.Join(ImagesBundlePath, ".tmp")
+		if err := os.RemoveAll(tmpBaseDir); err != nil {
+			logger.WarnF("Failed to cleanup temporary directory %s: %v", tmpBaseDir, err)
+		}
+	}()
 
 	if NoPullResume || lastPullWasTooLongAgoToRetry(pullParams) {
 		if err := os.RemoveAll(pullParams.WorkingDir); err != nil {
@@ -252,11 +261,6 @@ func pull(cmd *cobra.Command, _ []string) error {
 		return merr.ErrorOrNil()
 	}); err != nil {
 		return fmt.Errorf("Compute GOST digests for bundle: %w", err)
-	}
-
-	err := os.RemoveAll(TempDir)
-	if err != nil {
-		return err
 	}
 
 	return nil
