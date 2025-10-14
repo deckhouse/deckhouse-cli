@@ -33,17 +33,25 @@ import (
 )
 
 func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
-	releaseChannelsToCopy := []string{"alpha", "beta", "early-access", "stable", "rock-solid", "lts"}
-	releaseChannelsVersions := make([]*semver.Version, len(releaseChannelsToCopy))
-	for i, channel := range releaseChannelsToCopy {
+	allChannels := []string{"alpha", "beta", "early-access", "stable", "rock-solid", "lts"}
+	channelVersions := make(map[string]*semver.Version)
+
+	// Collect available channel versions
+	for _, channel := range allChannels {
 		v, err := getReleaseChannelVersionFromRegistry(pullParams, channel)
 		if err != nil {
 			return nil, fmt.Errorf("get %s release version from registry: %w", channel, err)
 		}
-		releaseChannelsVersions[i] = v
+		if v != nil {
+			channelVersions[channel] = v
+		}
 	}
 
-	rockSolidVersion := releaseChannelsVersions[len(releaseChannelsToCopy)-1]
+	// Direct access to required versions
+	rockSolidVersion := channelVersions["rock-solid"]
+	if rockSolidVersion == nil {
+		return nil, fmt.Errorf("rock-solid channel is required but not available")
+	}
 	mirrorFromVersion := *rockSolidVersion
 	if pullParams.SinceVersion != nil {
 		mirrorFromVersion = *pullParams.SinceVersion
@@ -57,17 +65,21 @@ func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
 		return nil, fmt.Errorf("get releases from github: %w", err)
 	}
 
-	alphaChannelVersion := releaseChannelsVersions[0]
-	for i := range releaseChannelsToCopy {
-		if releaseChannelsToCopy[i] == "alpha" {
-			alphaChannelVersion = releaseChannelsVersions[i]
-			break
-		}
+	// Direct access to alpha version
+	alphaChannelVersion := channelVersions["alpha"]
+	if alphaChannelVersion == nil {
+		return nil, fmt.Errorf("alpha channel is required but not available")
 	}
 	versionsAboveMinimal := parseAndFilterVersionsAboveMinimalAnbBelowAlpha(&mirrorFromVersion, tags, alphaChannelVersion)
 	versionsAboveMinimal = FilterOnlyLatestPatches(versionsAboveMinimal)
 
-	return deduplicateVersions(append(releaseChannelsVersions, versionsAboveMinimal...)), nil
+	// Convert map values to slice for deduplication
+	var versions []*semver.Version
+	for _, v := range channelVersions {
+		versions = append(versions, v)
+	}
+	
+	return deduplicateVersions(append(versions, versionsAboveMinimal...)), nil
 }
 
 func getReleasedTagsFromRegistry(pullParams *params.PullParams) ([]string, error) {
@@ -130,6 +142,10 @@ func getReleaseChannelVersionFromRegistry(mirrorCtx *params.PullParams, releaseC
 
 	rockSolidReleaseImage, err := remote.Image(ref, remoteOpts...)
 	if err != nil {
+		// If release channel doesn't exist, don't return an error
+		if errorutil.IsImageNotFoundError(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("get %s release channel data: %w", releaseChannel, err)
 	}
 
