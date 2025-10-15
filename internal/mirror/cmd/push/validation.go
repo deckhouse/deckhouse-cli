@@ -69,7 +69,7 @@ func validateImagesBundlePathArg(args []string) error {
 		}
 
 		if TempDir == "" {
-			TempDir = filepath.Join(ImagesBundlePath, ".tmp", "mirror")
+			TempDir = filepath.Join(ImagesBundlePath, ".tmp")
 		}
 
 		return nil
@@ -77,7 +77,7 @@ func validateImagesBundlePathArg(args []string) error {
 
 	if bundleExtension := filepath.Ext(ImagesBundlePath); bundleExtension == ".tar" || bundleExtension == ".chunk" {
 		if TempDir == "" {
-			TempDir = filepath.Join(filepath.Dir(ImagesBundlePath), ".tmp", "mirror")
+			TempDir = filepath.Join(filepath.Dir(ImagesBundlePath), ".tmp")
 		}
 		return nil
 	}

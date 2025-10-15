@@ -130,10 +130,8 @@ func pull(cmd *cobra.Command, _ []string) error {
 	
 	// Clean up temporary directory on function exit
 	defer func() {
-		// Remove the entire .tmp directory, not just the subdirectory
-		tmpBaseDir := filepath.Join(ImagesBundlePath, ".tmp")
-		if err := os.RemoveAll(tmpBaseDir); err != nil {
-			logger.WarnF("Failed to cleanup temporary directory %s: %v", tmpBaseDir, err)
+		if err := os.RemoveAll(TempDir); err != nil {
+			logger.WarnF("Failed to cleanup temporary directory %s: %v", TempDir, err)
 		}
 	}()
 
@@ -303,6 +301,7 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 			BundleDir:             ImagesBundlePath,
 			WorkingDir: filepath.Join(
 				TempDir,
+				"mirror",
 				"pull",
 				fmt.Sprintf("%x", md5.Sum([]byte(SourceRegistryRepo))),
 			),
