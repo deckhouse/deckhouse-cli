@@ -96,6 +96,9 @@ func NewKubectlCommand() *cobra.Command {
 
 	originalPersistentPreRunE := kubectlCmd.PersistentPreRunE
 	kubectlCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		// Change to "d8 k" for correct error messages in kubectl
+		os.Args[0] = "d8 k"
+
 		if cmd.Name() == "debug" || (cmd.Parent() != nil && cmd.Parent().Name() == "debug") {
 			imageFlag := cmd.Flags().Lookup("image")
 			if imageFlag != nil && imageFlag.Value.String() == "" {
