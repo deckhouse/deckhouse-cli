@@ -172,6 +172,7 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 			BundleDir:             ImagesBundlePath,
 			WorkingDir: filepath.Join(
 				TempDir,
+				"mirror",
 				"pull",
 				fmt.Sprintf("%x", md5.Sum([]byte(SourceRegistryRepo))),
 			),

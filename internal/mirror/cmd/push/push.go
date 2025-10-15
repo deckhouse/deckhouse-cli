@@ -205,7 +205,7 @@ func buildPushParams(logger params.Logger) *params.PushParams {
 			RegistryPath:        RegistryPath,
 			ModulesPathSuffix:   ModulesPathSuffix,
 			BundleDir:           ImagesBundlePath,
-			WorkingDir:          filepath.Join(TempDir, "push"),
+			WorkingDir:          filepath.Join(TempDir, "mirror", "push"),
 		},
 
 		Parallelism: params.ParallelismConfig{
