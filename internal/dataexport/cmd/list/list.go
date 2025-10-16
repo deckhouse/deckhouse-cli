@@ -117,9 +117,9 @@ func downloadFunc(
 		return fmt.Errorf("%w: %s", util.ErrUnsupportedVolumeMode, volumeMode)
 	}
 
-	resp, err := subClient.HttpDo(req.WithContext(ctx))
+	resp, err := subClient.HTTPDo(req.WithContext(ctx))
 	if err != nil {
-		return fmt.Errorf("HttpDo: %s\n", err.Error())
+		return fmt.Errorf("HTTPDo: %s\n", err.Error())
 	}
 	defer resp.Body.Close()
 

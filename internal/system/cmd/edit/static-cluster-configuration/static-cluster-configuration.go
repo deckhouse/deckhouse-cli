@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package static_config
+package staticconfig
 
 import (
 	"fmt"

@@ -26,14 +26,14 @@ type DataExportList struct {
 
 // +k8s:deepcopy-gen=true
 type DataexportSpec struct {
-	Ttl       string        `json:"ttl"`
+	TTL       string        `json:"ttl"`
 	Publish   bool          `json:"publish"`
 	TargetRef TargetRefSpec `json:"targetRef"`
 }
 
 // +k8s:deepcopy-gen=true
 type DataExportStatus struct {
-	Url             string             `json:"url"`
+	URL             string             `json:"url"`
 	CA              string             `json:"ca,omitempty"`
 	PublicURL       string             `json:"publicURL"`
 	AccessTimestamp metav1.Time        `json:"accessTimestamp"`

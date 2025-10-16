@@ -105,7 +105,7 @@ func TestCreateDataExporterIfNeeded(t *testing.T) {
 			if tt.expectCreated {
 				require.NoError(t, getErr)
 				require.Equal(t, tt.expectKind, de.Spec.TargetRef.Kind)
-				require.Equal(t, "2m", de.Spec.Ttl)
+				require.Equal(t, "2m", de.Spec.TTL)
 			} else {
 				require.True(t, apierrors.IsNotFound(getErr))
 			}

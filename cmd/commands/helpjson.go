@@ -41,18 +41,18 @@ type FlagInfo struct {
 	Global      bool   `json:"global"`
 }
 
-func NewHelpJsonCommand(rootCmd *cobra.Command) *cobra.Command {
-	helpJsonCmd := &cobra.Command{
+func NewHelpJSONCommand(rootCmd *cobra.Command) *cobra.Command {
+	helpJSONCmd := &cobra.Command{
 		Use:    "help-json",
 		Short:  "Get all d8 command options and flags in json.",
 		Hidden: true,
-		RunE:   helpJson(rootCmd),
+		RunE:   helpJSON(rootCmd),
 	}
 
-	return helpJsonCmd
+	return helpJSONCmd
 }
 
-func helpJson(rootCmd *cobra.Command) func(cmd *cobra.Command, _ []string) error {
+func helpJSON(rootCmd *cobra.Command) func(cmd *cobra.Command, _ []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
 		commandsData := extractCommands(rootCmd.Root())
 		jsonData, err := json.MarshalIndent(commandsData, "", "  ")

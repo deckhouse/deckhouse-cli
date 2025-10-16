@@ -75,7 +75,7 @@ func NewStrongholdCommand() *cobra.Command {
 	}
 
 	for _, cmd := range strongholdCommands {
-		stronghold_command := []string{cmd.Command}
+		strongholdCommand := []string{cmd.Command}
 		strongholdSubCmd := &cobra.Command{
 			Use:                cmd.Command,
 			Short:              cmd.Description,
@@ -83,7 +83,7 @@ func NewStrongholdCommand() *cobra.Command {
 			SilenceErrors:      true,
 			SilenceUsage:       true,
 			Run: func(cmd *cobra.Command, args []string) {
-				vaultcommand.Run(append(stronghold_command, args...))
+				vaultcommand.Run(append(strongholdCommand, args...))
 			},
 		}
 		strongholdCmd.AddCommand(strongholdSubCmd)

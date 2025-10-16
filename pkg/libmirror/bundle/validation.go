@@ -30,12 +30,12 @@ func MandatoryLayoutsForPlatform(platformPkgDir string) map[string]string {
 	}
 }
 
-func MandatoryLayoutsForSecurityDatabase(securityDbPkgDir string) map[string]string {
+func MandatoryLayoutsForSecurityDatabase(securityDBPkgDir string) map[string]string {
 	return map[string]string{
-		"trivy database layout":      filepath.Join(securityDbPkgDir, "trivy-db"),
-		"trivy bdu layout":           filepath.Join(securityDbPkgDir, "trivy-bdu"),
-		"trivy java database layout": filepath.Join(securityDbPkgDir, "trivy-java-db"),
-		"trivy checks layout":        filepath.Join(securityDbPkgDir, "trivy-checks"),
+		"trivy database layout":      filepath.Join(securityDBPkgDir, "trivy-db"),
+		"trivy bdu layout":           filepath.Join(securityDBPkgDir, "trivy-bdu"),
+		"trivy java database layout": filepath.Join(securityDBPkgDir, "trivy-java-db"),
+		"trivy checks layout":        filepath.Join(securityDBPkgDir, "trivy-checks"),
 	}
 }
 

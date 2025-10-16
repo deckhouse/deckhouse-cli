@@ -22,7 +22,7 @@ import (
 
 	cluster_config "github.com/deckhouse/deckhouse-cli/internal/system/cmd/edit/cluster-configuration"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/edit/flags"
-	provider_config "github.com/deckhouse/deckhouse-cli/internal/system/cmd/edit/provider-cluster-configuration"
+	providerconfig "github.com/deckhouse/deckhouse-cli/internal/system/cmd/edit/provider-cluster-configuration"
 	static_config "github.com/deckhouse/deckhouse-cli/internal/system/cmd/edit/static-cluster-configuration"
 )
 
@@ -40,7 +40,7 @@ func NewCommand() *cobra.Command {
 	editCmd.AddCommand(
 		cluster_config.NewCommand(),
 		static_config.NewCommand(),
-		provider_config.NewCommand(),
+		providerconfig.NewCommand(),
 	)
 
 	flags.AddFlags(editCmd.Flags())
