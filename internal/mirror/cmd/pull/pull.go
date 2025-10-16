@@ -127,6 +127,13 @@ func NewCommand() *cobra.Command {
 func pull(cmd *cobra.Command, _ []string) error {
 	logger := setupLogger()
 	pullParams := buildPullParams(logger)
+	
+	// Clean up temporary directory on function exit
+	defer func() {
+		if err := os.RemoveAll(TempDir); err != nil {
+			logger.WarnF("Failed to cleanup temporary directory %s: %v", TempDir, err)
+		}
+	}()
 
 	if NoPullResume || lastPullWasTooLongAgoToRetry(pullParams) {
 		if err := os.RemoveAll(pullParams.WorkingDir); err != nil {
@@ -261,11 +268,6 @@ func pull(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Compute GOST digests for bundle: %w", err)
 	}
 
-	err := os.RemoveAll(TempDir)
-	if err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -306,6 +308,7 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 			BundleDir:             ImagesBundlePath,
 			WorkingDir: filepath.Join(
 				TempDir,
+				"mirror",
 				"pull",
 				fmt.Sprintf("%x", md5.Sum([]byte(SourceRegistryRepo))),
 			),
