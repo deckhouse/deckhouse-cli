@@ -96,7 +96,7 @@ func PushLayoutToRepoContext(
 			if err = pushImage(ctx, registryRepo, index, manifestSet[0], refOpts, remoteOpts); err != nil {
 				return fmt.Errorf("Push Image: %w", err)
 			}
-			imagesCount += 1
+			imagesCount++
 			continue
 		}
 
@@ -121,7 +121,7 @@ func PushLayoutToRepoContext(
 		if err != nil {
 			return fmt.Errorf("Push batch of images: %w", err)
 		}
-		batchesCount += 1
+		batchesCount++
 		imagesCount += len(manifestSet)
 	}
 

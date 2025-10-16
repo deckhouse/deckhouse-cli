@@ -51,7 +51,7 @@ func Open(baseDir, baseFileName string) (*FileReader, error) {
 		}
 
 		chunks = append(chunks, chunk)
-		chunkIndex += 1
+		chunkIndex++
 	}
 }
 

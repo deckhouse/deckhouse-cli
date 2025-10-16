@@ -69,8 +69,8 @@ func (s *SLogger) WarnLn(a ...any) {
 func (s *SLogger) Process(topic string, run func() error) error {
 	start := time.Now()
 	s.delegate.Info(strings.Repeat("║", s.processDepth) + "╔ " + topic)
-	s.processDepth += 1
-	defer func() { s.processDepth -= 1 }()
+	s.processDepth++
+	defer func() { s.processDepth-- }()
 	if err := run(); err != nil {
 		s.delegate.Error(
 			strings.Repeat("║", s.processDepth-1)+topic+" failed",
