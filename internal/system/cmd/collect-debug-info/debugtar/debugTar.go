@@ -1,4 +1,4 @@
-package debugTar
+package debugtar
 
 import (
 	"archive/tar"

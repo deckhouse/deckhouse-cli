@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cluster_config
+package clusterconfig
 
 import (
 	"github.com/spf13/pflag"

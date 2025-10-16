@@ -1,4 +1,4 @@
-package cluster_config
+package clusterconfig
 
 import (
 	"context"
