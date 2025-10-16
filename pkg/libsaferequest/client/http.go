@@ -57,7 +57,7 @@ func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
 	return &SafeClient{restConfig}, nil
 }
 
-func (c *SafeClient) HttpDo(req *http.Request) (*http.Response, error) {
+func (c *SafeClient) HTTPDo(req *http.Request) (*http.Response, error) {
 	if len(req.Header.Get("Authorization")) != 0 {
 		httpClient, err := rest.HTTPClientFor(c.restConfig)
 		if err != nil {

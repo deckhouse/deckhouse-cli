@@ -37,13 +37,13 @@ func executeQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, path
 		containerName = "deckhouse"
 	)
 
-	fullEndpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, queuePath, pathFromOption)
-	getApi := []string{"curl", fullEndpointUrl}
+	fullEndpointURL := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, queuePath, pathFromOption)
+	getAPI := []string{"curl", fullEndpointURL}
 	podName, err := utilk8s.GetDeckhousePod(kubeCl)
 	if err != nil {
 		return err
 	}
-	executor, err := utilk8s.ExecInPod(config, kubeCl, getApi, podName, namespace, containerName)
+	executor, err := utilk8s.ExecInPod(config, kubeCl, getAPI, podName, namespace, containerName)
 	if err != nil {
 		return err
 	}

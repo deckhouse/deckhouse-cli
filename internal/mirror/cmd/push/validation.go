@@ -104,12 +104,12 @@ func parseAndValidateRegistryURLArg(args []string) error {
 	}
 
 	// Then we parse it as URL to validate that it contains everything we need
-	registryUrl, err := url.ParseRequestURI("docker://" + registry)
+	registryURL, err := url.ParseRequestURI("docker://" + registry)
 	if err != nil {
 		return fmt.Errorf("Validate registry address: %w", err)
 	}
-	RegistryHost = registryUrl.Host
-	RegistryPath = registryUrl.Path
+	RegistryHost = registryURL.Host
+	RegistryPath = registryURL.Path
 	if RegistryHost == "" {
 		return errors.New("<registry> you provided contains no registry host. Please specify registry address correctly.")
 	}

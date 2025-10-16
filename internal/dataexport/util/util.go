@@ -113,7 +113,7 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 			}
 		}
 		// check DataExport Url
-		if returnErr == nil && deObj.Status.Url == "" {
+		if returnErr == nil && deObj.Status.URL == "" {
 			returnErr = fmt.Errorf("DataExport %s/%s has no URL", deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
 		} else if deObj.Spec.Publish && deObj.Status.PublicURL == "" {
 			returnErr = fmt.Errorf("DataExport %s/%s has empty PublicURL", deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
@@ -205,7 +205,7 @@ func CreateDataExport(ctx context.Context, deName, namespace, ttl, volumeKind, v
 			Namespace: namespace,
 		},
 		Spec: v1alpha1.DataexportSpec{
-			Ttl: ttl,
+			TTL: ttl,
 			TargetRef: v1alpha1.TargetRefSpec{
 				Kind: volumeKind,
 				Name: volumeName,
@@ -272,7 +272,7 @@ func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 	}
 }
 
-func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace string, public bool, rtClient ctrlrtclient.Client) (podUrl, volumeMode, internalCAData string, err error) {
+func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace string, public bool, rtClient ctrlrtclient.Client) (podURL, volumeMode, internalCAData string, err error) {
 	log.Info("Waiting for DataExport to be ready", slog.String("name", deName), slog.String("namespace", namespace))
 	deObj, err := GetDataExportWithRestart(ctx, deName, namespace, rtClient)
 	if err != nil {
@@ -284,12 +284,12 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 			err = fmt.Errorf("empty PublicURL")
 			return
 		}
-		podUrl = deObj.Status.PublicURL
-		if !strings.HasPrefix(podUrl, "http") {
-			podUrl += "https://"
+		podURL = deObj.Status.PublicURL
+		if !strings.HasPrefix(podURL, "http") {
+			podURL += "https://"
 		}
-	} else if deObj.Status.Url != "" {
-		podUrl = deObj.Status.Url
+	} else if deObj.Status.URL != "" {
+		podURL = deObj.Status.URL
 		internalCAData = deObj.Status.CA
 	} else {
 		err = fmt.Errorf("invalid URL")
@@ -303,7 +303,7 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 	}
 
 	volumeMode = deObj.Status.VolumeMode
-	log.Info("DataExport is ready", slog.String("name", deName), slog.String("namespace", namespace), slog.String("url", podUrl), slog.String("volumeMode", volumeMode))
+	log.Info("DataExport is ready", slog.String("name", deName), slog.String("namespace", namespace), slog.String("url", podURL), slog.String("volumeMode", volumeMode))
 	return
 }
 
@@ -314,7 +314,7 @@ func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace st
 		return
 	}
 
-	podUrl, volumeMode, intrenalCAData, err := getExportStatus(ctx, log, deName, namespace, publish, rtClient)
+	podURL, volumeMode, intrenalCAData, err := getExportStatus(ctx, log, deName, namespace, publish, rtClient)
 	if err != nil {
 		finErr = err
 		return
@@ -323,13 +323,13 @@ func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace st
 	// Validate srcPath, dstPath params
 	switch volumeMode {
 	case "Filesystem":
-		url, err = neturl.JoinPath(podUrl, "api/v1/files")
+		url, err = neturl.JoinPath(podURL, "api/v1/files")
 		if err != nil {
 			finErr = err
 			return
 		}
 	case "Block":
-		url, err = neturl.JoinPath(podUrl, "api/v1/block")
+		url, err = neturl.JoinPath(podURL, "api/v1/block")
 		if err != nil {
 			finErr = err
 			return

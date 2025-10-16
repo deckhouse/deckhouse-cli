@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package collect_debug_info
+package collectdebuginfo
 
 import (
 	"fmt"
@@ -24,7 +24,7 @@ import (
 	"golang.org/x/term"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/collect-debug-info/debugTar"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/collect-debug-info/debugtar"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -67,7 +67,7 @@ func collectDebugInfo(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	err = debugTar.Tarball(config, kubeCl)
+	err = debugtar.Tarball(config, kubeCl)
 	if err != nil {
 		return fmt.Errorf("Error collecting debug info: %w", err)
 	}

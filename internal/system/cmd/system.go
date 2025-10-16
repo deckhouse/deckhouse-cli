@@ -20,7 +20,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	collect_debug_info "github.com/deckhouse/deckhouse-cli/internal/system/cmd/collect-debug-info"
+	collectdebuginfo "github.com/deckhouse/deckhouse-cli/internal/system/cmd/collect-debug-info"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/edit"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/logs"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module"
@@ -47,7 +47,7 @@ func NewCommand() *cobra.Command {
 	systemCmd.AddCommand(
 		edit.NewCommand(),
 		module.NewCommand(),
-		collect_debug_info.NewCommand(),
+		collectdebuginfo.NewCommand(),
 		queue.NewCommand(),
 		logs.NewCommand(),
 	)
