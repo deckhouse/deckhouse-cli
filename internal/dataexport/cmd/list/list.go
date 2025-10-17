@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
-	datautil "github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
+	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -57,7 +57,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(ctx, log, cmd, args)
 		},
-		Args: func(_ *cobra.Command, args []string) error {
+		Args: func(cmd *cobra.Command, args []string) error {
 			_, _, err := parseArgs(args)
 			return err
 		},
@@ -70,17 +70,18 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	return cmd
 }
 
-func parseArgs(args []string) (string, string, error) {
+func parseArgs(args []string) (deName, srcPath string, err error) {
 	if len(args) < 1 || len(args) > 2 {
-		return "", "", fmt.Errorf("invalid arguments")
+		err = fmt.Errorf("invalid arguments")
+		return
 	}
 
-	deName, srcPath := args[0], ""
+	deName, srcPath = args[0], ""
 	if len(args) >= 2 {
 		srcPath = args[1]
 	}
 
-	return deName, srcPath, nil
+	return
 }
 
 func downloadFunc(
@@ -91,7 +92,7 @@ func downloadFunc(
 	sClient *safeClient.SafeClient,
 	foo func(body io.Reader) error,
 ) error {
-	url, volumeMode, subClient, err := datautil.PrepareDownloadFunc(ctx, log, deName, namespace, publish, sClient)
+	url, volumeMode, subClient, err := util.PrepareDownloadFunc(ctx, log, deName, namespace, publish, sClient)
 	if err != nil {
 		return err
 	}
@@ -113,12 +114,12 @@ func downloadFunc(
 		log.Info("Start listing", slog.String("url", url))
 		req, _ = http.NewRequest(http.MethodHead, url, nil)
 	default:
-		return fmt.Errorf("%w: %s", datautil.ErrUnsupportedVolumeMode, volumeMode)
+		return fmt.Errorf("%w: %s", util.ErrUnsupportedVolumeMode, volumeMode)
 	}
 
 	resp, err := subClient.HTTPDo(req.WithContext(ctx))
 	if err != nil {
-		return fmt.Errorf("http do: %s", err.Error())
+		return fmt.Errorf("HTTPDo: %s\n", err.Error())
 	}
 	defer resp.Body.Close()
 
@@ -150,7 +151,7 @@ func downloadFunc(
 	case "Filesystem":
 		return foo(resp.Body)
 	default:
-		return fmt.Errorf("%w: %s", datautil.ErrUnsupportedVolumeMode, volumeMode)
+		return fmt.Errorf("%w: %s", util.ErrUnsupportedVolumeMode, volumeMode)
 	}
 }
 
@@ -178,7 +179,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	if err != nil {
 		return err
 	}
-	deName, err := datautil.CreateDataExporterIfNeededFunc(ctx, log, dataName, namespace, publish, ttl, rtClient)
+	deName, err := util.CreateDataExporterIfNeededFunc(ctx, log, dataName, namespace, publish, ttl, rtClient)
 	if err != nil {
 		return err
 	}
@@ -198,10 +199,8 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	if deName != dataName { // DataExport created in download process
-		if datautil.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
-			if err := datautil.DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
-				_ = err
-			}
+		if util.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
+			util.DeleteDataExport(ctx, deName, namespace, rtClient)
 		}
 	}
 

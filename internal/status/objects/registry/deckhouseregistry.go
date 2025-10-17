@@ -52,7 +52,7 @@ type deckhouseRegistry struct {
 func getDeckhouseRegistry(ctx context.Context, kubeCl kubernetes.Interface) (deckhouseRegistry, error) {
 	secret, err := kubeCl.CoreV1().Secrets("d8-system").Get(ctx, "deckhouse-registry", metav1.GetOptions{})
 	if err != nil {
-		return deckhouseRegistry{}, fmt.Errorf("failed to get secret: %w", err)
+		return deckhouseRegistry{}, fmt.Errorf("failed to get secret: %w\n", err)
 	}
 	return deckhouseRegistryProcessing(secret)
 }
@@ -68,10 +68,10 @@ func deckhouseRegistryProcessing(secret *v1.Secret) (deckhouseRegistry, error) {
 		dr.Scheme = string(schemeData)
 	}
 	if dr.Registry == "" {
-		return deckhouseRegistry{}, fmt.Errorf("imagesRegistry not found")
+		return deckhouseRegistry{}, fmt.Errorf("'imagesRegistry' not found\n")
 	}
 	if dr.Scheme == "" {
-		return deckhouseRegistry{}, fmt.Errorf("scheme not found")
+		return deckhouseRegistry{}, fmt.Errorf("'scheme' not found\n")
 	}
 
 	return dr, nil

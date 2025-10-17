@@ -34,6 +34,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
+	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
@@ -142,7 +143,7 @@ func pushModules(pushParams *params.PushParams, logger params.Logger) error {
 	}
 
 	if len(successfullyPushedModules) > 0 {
-		logger.Infof("Modules pushed: %v", strings.Join(successfullyPushedModules, ", "))
+		logger.InfoF("Modules pushed: %v", strings.Join(successfullyPushedModules, ", "))
 	}
 
 	return nil
@@ -178,7 +179,7 @@ func pushStaticPackages(pushParams *params.PushParams, logger params.Logger) err
 		}
 
 		if err = pkg.Close(); err != nil {
-			logger.Warnf("Could not close bundle package %s: %w", pkgName, err)
+			logger.WarnF("Could not close bundle package %s: %w", pkgName, err)
 		}
 	}
 	return nil
@@ -254,7 +255,7 @@ func openChunkedPackage(pushParams *params.PushParams, pkgName string) (io.ReadC
 func push(_ *cobra.Command, _ []string) error {
 	logger := setupLogger()
 	pushParams := buildPushParams(logger)
-
+	logger.InfoF("d8 version: %s", version.Version)
 	if RegistryUsername != "" {
 		pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{Username: RegistryUsername, Password: RegistryPassword})
 	}

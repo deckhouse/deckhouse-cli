@@ -96,7 +96,7 @@ func (c *FileWriter) swapActiveChunk() error {
 		if err := c.closeActiveChunk(); err != nil {
 			return fmt.Errorf("Close active chunk file: %w", err)
 		}
-		c.chunkIndex++
+		c.chunkIndex += 1
 	}
 
 	newChunk, err := os.Create(filepath.Join(c.workingDir, fmt.Sprintf("%s.%04d.chunk", c.baseFileName, c.chunkIndex)))

@@ -58,7 +58,7 @@ func getDeckhousePods(ctx context.Context, kubeCl kubernetes.Interface) ([]deckh
 		LabelSelector: "app=deckhouse",
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list deckhouse pods: %w", err)
+		return nil, fmt.Errorf("failed to list deckhouse pods: %w\n", err)
 	}
 
 	infor := make([]deckhousePod, 0, len(pods.Items))

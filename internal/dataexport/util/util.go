@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package datautil
+package util
 
 import (
 	"bufio"
@@ -79,7 +79,7 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 	deObj := &v1alpha1.DataExport{}
 
 	for i := 0; ; i++ {
-		var returnErr error
+		var returnErr error = nil
 
 		// get DataExport from k8s by name
 		err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: deName}, deObj)
@@ -254,8 +254,9 @@ func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 			if slices.Contains([]string{"y", "n"}, input) {
 				inputChan <- strings.TrimSpace(input)
 				return
+			} else {
+				fmt.Println("Invalid input. Please press 'y' or 'n'.")
 			}
-			fmt.Println("Invalid input. Please press 'y' or 'n'.")
 		}
 	}()
 
@@ -271,81 +272,86 @@ func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 	}
 }
 
-func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace string, public bool, rtClient ctrlrtclient.Client) (string, string, string, error) {
+func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace string, public bool, rtClient ctrlrtclient.Client) (podURL, volumeMode, internalCAData string, err error) {
 	log.Info("Waiting for DataExport to be ready", slog.String("name", deName), slog.String("namespace", namespace))
 	deObj, err := GetDataExportWithRestart(ctx, deName, namespace, rtClient)
 	if err != nil {
-		return "", "", "", err
+		return
 	}
 
-	var podURL, volumeMode, internalCAData string
-
-	switch {
-	case public:
+	if public {
 		if deObj.Status.PublicURL == "" {
-			return "", "", "", fmt.Errorf("empty PublicURL")
+			err = fmt.Errorf("empty PublicURL")
+			return
 		}
 		podURL = deObj.Status.PublicURL
 		if !strings.HasPrefix(podURL, "http") {
 			podURL += "https://"
 		}
-	case deObj.Status.URL != "":
+	} else if deObj.Status.URL != "" {
 		podURL = deObj.Status.URL
 		internalCAData = deObj.Status.CA
-	default:
-		return "", "", "", fmt.Errorf("invalid URL")
+	} else {
+		err = fmt.Errorf("invalid URL")
+		return
 	}
 
 	volumeKind := deObj.Spec.TargetRef.Kind
 	if !slices.Contains([]string{PersistentVolumeClaimKind, VolumeSnapshotKind, VirtualDiskKind, VirtualDiskSnapshotKind}, volumeKind) {
-		return "", "", "", fmt.Errorf("invalid volume kind: %s", volumeKind)
+		err = fmt.Errorf("invalid volume kind: %s", volumeKind)
+		return
 	}
 
 	volumeMode = deObj.Status.VolumeMode
 	log.Info("DataExport is ready", slog.String("name", deName), slog.String("namespace", namespace), slog.String("url", podURL), slog.String("volumeMode", volumeMode))
-	return podURL, volumeMode, internalCAData, nil
+	return
 }
 
-func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, sClient *safeClient.SafeClient) (string, string, *safeClient.SafeClient, error) {
+func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, sClient *safeClient.SafeClient) (url, volumeMode string, subClient *safeClient.SafeClient, finErr error) {
 	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {
-		return "", "", nil, err
+		finErr = err
+		return
 	}
 
 	podURL, volumeMode, intrenalCAData, err := getExportStatus(ctx, log, deName, namespace, publish, rtClient)
 	if err != nil {
-		return "", "", nil, err
+		finErr = err
+		return
 	}
 
-	var url string
 	// Validate srcPath, dstPath params
 	switch volumeMode {
 	case "Filesystem":
 		url, err = neturl.JoinPath(podURL, "api/v1/files")
 		if err != nil {
-			return "", "", nil, err
+			finErr = err
+			return
 		}
 	case "Block":
 		url, err = neturl.JoinPath(podURL, "api/v1/block")
 		if err != nil {
-			return "", "", nil, err
+			finErr = err
+			return
 		}
 	default:
-		return "", "", nil, fmt.Errorf("%w: '%s'", ErrUnsupportedVolumeMode, volumeMode)
+		finErr = fmt.Errorf("%w: '%s'", ErrUnsupportedVolumeMode, volumeMode)
+		return
 	}
 
 	// Reuse the original SafeClient unless we need to inject additional CA.
-	subClient := sClient
+	subClient = sClient
 
 	if !publish && len(intrenalCAData) > 0 {
 		// Create an isolated copy to avoid mutating the original client
 		subClient = sClient.Copy()
 		decodedBytes, err := base64.StdEncoding.DecodeString(intrenalCAData)
 		if err != nil {
-			return "", "", nil, fmt.Errorf("CA decoding error: %s", err.Error())
+			finErr = fmt.Errorf("CA decoding error: %s", err.Error())
+			return
 		}
 		subClient.SetTLSCAData(decodedBytes)
 	}
 
-	return url, volumeMode, subClient, nil
+	return
 }

@@ -23,24 +23,24 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func ValidateParameters(_ *cobra.Command, _ []string) error {
+func ValidateParameters(cmd *cobra.Command, args []string) error {
 	if Tail < -1 {
-		return fmt.Errorf("invalid --tail must be greater than or equal to -1")
+		return fmt.Errorf("Invalid --tail must be greater than or equal to -1.")
 	}
 	if Since != "" {
 		_, err := time.ParseDuration(Since)
 		if err != nil {
-			return fmt.Errorf("invalid --since value: %v", err)
+			return fmt.Errorf("Invalid --since value: %v\n", err)
 		}
 	}
 	if SinceTime != "" {
 		_, err := time.Parse(time.DateTime, SinceTime)
 		if err != nil {
-			return fmt.Errorf("invalid --since-time value: %v", err)
+			return fmt.Errorf("Invalid --since-time value: %v\n", err)
 		}
 	}
 	if Since != "" && SinceTime != "" {
-		return fmt.Errorf("only one of --since-time or --since may be used")
+		return fmt.Errorf("Only one of --since-time or --since may be used.")
 	}
 
 	return nil

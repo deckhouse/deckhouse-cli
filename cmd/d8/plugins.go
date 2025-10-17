@@ -106,7 +106,7 @@ func containsSlash(s string) bool {
 func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) authn.Authenticator {
 	// Priority 1: Explicit username/password from flags
 	if d8flags.SourceRegistryLogin != "" {
-		logger.Info("Using explicit credentials from flags",
+		logger.Debug("Using explicit credentials from flags",
 			slog.String("username", d8flags.SourceRegistryLogin))
 		return authn.FromConfig(authn.AuthConfig{
 			Username: d8flags.SourceRegistryLogin,
@@ -116,7 +116,7 @@ func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) a
 
 	// Priority 2: License token from flags
 	if d8flags.DeckhouseLicenseToken != "" {
-		logger.Info("Using license token from flags")
+		logger.Debug("Using license token from flags")
 		return authn.FromConfig(authn.AuthConfig{
 			Username: "license-token",
 			Password: d8flags.DeckhouseLicenseToken,
@@ -155,7 +155,7 @@ func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) a
 			// Verify that auth is not anonymous by trying to get the config
 			cfg, err := auth.Authorization()
 			if err == nil && (cfg.Username != "" || cfg.Password != "" || cfg.Auth != "" || cfg.IdentityToken != "") {
-				logger.Info("Using credentials from Docker config",
+				logger.Debug("Using credentials from Docker config",
 					slog.String("registry", reg.String()))
 				return auth
 			}
@@ -163,7 +163,7 @@ func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) a
 	}
 
 	// Priority 4: Anonymous access
-	logger.Info("Using anonymous access for registry",
+	logger.Debug("Using anonymous access for registry",
 		slog.String("registry", registryHost))
 	return authn.Anonymous
 }

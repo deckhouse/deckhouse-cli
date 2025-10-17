@@ -196,7 +196,7 @@ func (p *Puller) pullSecurityDatabases() error {
 		err := p.accessValidator.ValidateReadAccessForImage(ctx, imageRef, p.validationOpts...)
 		switch {
 		case errors.Is(err, validation.ErrImageUnavailable):
-			p.logger.Warnf("Skipping pull of security databases: %v", err)
+			p.logger.WarnF("Skipping pull of security databases: %v", err)
 			return nil
 		case err != nil:
 			return fmt.Errorf("Source registry is not accessible: %w", err)
@@ -374,7 +374,7 @@ func setupLogger() *log.SLogger {
 
 func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger) ([]string, error) {
 	if pullParams.DeckhouseTag != "" {
-		logger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
+		logger.InfoF("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
 		return []string{pullParams.DeckhouseTag}, nil
 	}
 
@@ -382,9 +382,9 @@ func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger) ([]str
 	if err != nil {
 		return nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}
-	logger.Infof("Deckhouse releases to pull: %+v", versionsToMirror)
+	logger.InfoF("Deckhouse releases to pull: %+v", versionsToMirror)
 
-	return lo.Map(versionsToMirror, func(v semver.Version, _ int) string {
+	return lo.Map(versionsToMirror, func(v semver.Version, index int) string {
 		return "v" + v.String()
 	}), nil
 }
