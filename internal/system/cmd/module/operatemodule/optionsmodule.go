@@ -27,13 +27,7 @@ func OptionsModule(config *rest.Config, kubeCl kubernetes.Interface, pathFromOpt
 	fullEndpointURL := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, pathFromOption)
 	getAPI := []string{"curl", fullEndpointURL}
 	podName, err := utilk8s.GetDeckhousePod(kubeCl)
-	if err != nil {
-		_ = fmt.Errorf("failed to get deckhouse pod: %w", err)
-	}
 	executor, err := utilk8s.ExecInPod(config, kubeCl, getAPI, podName, namespace, containerName)
-	if err != nil {
-		_ = fmt.Errorf("failed to create executor: %w", err)
-	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

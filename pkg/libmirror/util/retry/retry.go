@@ -40,7 +40,7 @@ func RunTaskWithContext(ctx context.Context, logger params.Logger, name string, 
 	for restarts < task.MaxRetries() {
 		if restarts > 0 {
 			interval := task.Interval(restarts)
-			logger.Infof("%s failed, next retry in %v", name, interval)
+			logger.InfoF("%s failed, next retry in %v", name, interval)
 			select {
 			case <-time.After(interval):
 				// Pause completed, proceed with next attempt
@@ -55,7 +55,7 @@ func RunTaskWithContext(ctx context.Context, logger params.Logger, name string, 
 			return nil
 		}
 
-		restarts++
+		restarts += 1
 	}
 
 	return fmt.Errorf("%q: task failed to many times, last error: %w", name, lastErr)

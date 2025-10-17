@@ -1,4 +1,4 @@
-package datautil
+package util
 
 import (
 	"log/slog"

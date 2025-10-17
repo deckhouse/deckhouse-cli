@@ -27,7 +27,7 @@ import (
 	deDelete "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/delete"
 	deDownload "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/download"
 	deList "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/list"
-	datautil "github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
+	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 )
 
 const (
@@ -42,7 +42,7 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Run: func(cmd *cobra.Command, _ []string) {
-			_ = cmd.Help() // ignore error when displaying help
+			cmd.Help()
 		},
 	}
 
@@ -50,7 +50,7 @@ func NewCommand() *cobra.Command {
 
 	ctx := context.Background()
 
-	logger := datautil.SetupLogger()
+	logger := util.SetupLogger()
 	if logger == nil {
 		logger = slog.Default()
 	}

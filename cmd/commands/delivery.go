@@ -40,7 +40,7 @@ func NewDeliveryCommand() (*cobra.Command, context.Context) {
 	werfRootCmd = ReplaceCommandName("werf", "d8 dk", werfRootCmd)
 	werfRootCmd.Short = "A set of tools for building, distributing, and deploying containerized applications"
 	werfRootCmd.Long = werfRootCmd.Short + "."
-	werfRootCmd.Long += `
+	werfRootCmd.Long = werfRootCmd.Long + `
 
 LICENSE NOTE: The Deckhouse Delivery Kit functionality is exclusively available to users holding a valid license for any commercial version of the Deckhouse Kubernetes Platform.
 

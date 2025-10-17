@@ -40,7 +40,7 @@ func NewCommand() *cobra.Command {
 		Long:          collectDebugInfoCmdLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		PreRunE: func(_ *cobra.Command, _ []string) error {
+		PreRunE: func(cmd *cobra.Command, args []string) error {
 			if term.IsTerminal(int(os.Stdout.Fd())) {
 				return fmt.Errorf("Please provide output tar.gz to dump debug logs, ex. \"> dump-logs.tar.gz\"")
 			}
