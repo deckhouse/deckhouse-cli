@@ -64,7 +64,7 @@ func getDeckhouseReleases(ctx context.Context, dynamicCl dynamic.Interface) ([]D
 		return nil, fmt.Errorf("failed to list deckhouse releases: %w", err)
 	}
 
-	var releases []DeckhouseRelease
+	releases := make([]DeckhouseRelease, 0, len(releaseList.Items))
 	for _, item := range releaseList.Items {
 		release, ok := deckhouseReleaseProcessing(item.Object, item.GetName())
 		if !ok {

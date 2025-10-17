@@ -33,7 +33,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
+	datautil "github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -101,11 +101,6 @@ func parseArgs(args []string) (string, string, error) {
 type dirItem struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
-}
-
-type dirResp struct {
-	Version string    `json:"apiVersion"`
-	Items   []dirItem `json:"items"`
 }
 
 func forRespItems(jsonStream io.ReadCloser, workFunc func(*dirItem) error) error {
@@ -220,25 +215,25 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 
 		wg.Wait()
 		return firstErr
-	} else {
-		if dstPath != "" {
-			// Create out file
-			out, err := os.Create(dstPath)
-			if err != nil {
-				return err
-			}
-			defer out.Close()
+	}
 
-			_, err = io.Copy(out, resp.Body)
-			if err != nil {
-				return err
-			}
-			log.Info("Downloaded file", slog.String("path", dstPath))
-		} else {
-			_, err = io.Copy(os.Stdout, resp.Body)
-			if err != nil {
-				return err
-			}
+	if dstPath != "" {
+		// Create out file
+		out, err := os.Create(dstPath)
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+
+		_, err = io.Copy(out, resp.Body)
+		if err != nil {
+			return err
+		}
+		log.Info("Downloaded file", slog.String("path", dstPath))
+	} else {
+		_, err = io.Copy(os.Stdout, resp.Body)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -267,14 +262,14 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	deName, err := util.CreateDataExporterIfNeededFunc(ctx, log, dataName, namespace, publish, ttl, rtClient)
+	deName, err := datautil.CreateDataExporterIfNeededFunc(ctx, log, dataName, namespace, publish, ttl, rtClient)
 	if err != nil {
 		return err
 	}
 
 	log.Info("DataExport created", slog.String("name", deName), slog.String("namespace", namespace))
 
-	url, volumeMode, subClient, err := util.PrepareDownloadFunc(ctx, log, deName, namespace, publish, sClient)
+	url, volumeMode, subClient, err := datautil.PrepareDownloadFunc(ctx, log, deName, namespace, publish, sClient)
 	if err != nil {
 		return err
 	}
@@ -294,7 +289,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 			dstPath = deName
 		}
 	default:
-		return fmt.Errorf("%w: %s", util.ErrUnsupportedVolumeMode, volumeMode)
+		return fmt.Errorf("%w: %s", datautil.ErrUnsupportedVolumeMode, volumeMode)
 	}
 
 	log.Info("Start downloading", slog.String("url", url+srcPath), slog.String("dstPath", dstPath))
@@ -307,8 +302,10 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	if deName != dataName { // DataExport created in download process
-		if util.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
-			util.DeleteDataExport(ctx, deName, namespace, rtClient)
+		if datautil.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
+			if err := datautil.DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
+				_ = err
+			}
 		}
 	}
 

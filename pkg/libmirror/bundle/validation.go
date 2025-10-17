@@ -41,7 +41,7 @@ func MandatoryLayoutsForSecurityDatabase(securityDBPkgDir string) map[string]str
 
 func MandatoryLayoutsForModule(modulePkgDir string) map[string]string {
 	return map[string]string{
-		"module root layout":             filepath.Join(modulePkgDir),
+		"module root layout":             modulePkgDir,
 		"module release channels layout": filepath.Join(modulePkgDir, "release"),
 	}
 }

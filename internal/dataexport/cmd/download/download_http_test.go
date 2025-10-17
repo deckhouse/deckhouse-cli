@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
+	datautil "github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 	safereq "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -54,17 +54,17 @@ func TestDownloadFilesystem_OK(t *testing.T) {
 	defer srv.Close()
 
 	// stub PrepareDownload / CreateDataExporterIfNeeded
-	origPrep := util.PrepareDownloadFunc
-	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	origPrep := datautil.PrepareDownloadFunc
+	origCreate := datautil.CreateDataExporterIfNeededFunc
+	datautil.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		return srv.URL + "/api/v1/files", "Filesystem", newNoAuthSafe(), nil
 	}
-	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
+	datautil.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
 		return de, nil
 	}
 	defer func() {
-		util.PrepareDownloadFunc = origPrep
-		util.CreateDataExporterIfNeededFunc = origCreate
+		datautil.PrepareDownloadFunc = origPrep
+		datautil.CreateDataExporterIfNeededFunc = origCreate
 	}()
 
 	outFile := filepath.Join(t.TempDir(), "out.txt")
@@ -89,15 +89,15 @@ func TestDownloadFilesystem_BadPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	origPrep := util.PrepareDownloadFunc
-	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	origPrep := datautil.PrepareDownloadFunc
+	origCreate := datautil.CreateDataExporterIfNeededFunc
+	datautil.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		return srv.URL + "/api/v1/files", "Block", newNoAuthSafe(), nil
 	}
-	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
+	datautil.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
 		return de, nil
 	}
-	defer func() { util.PrepareDownloadFunc = origPrep; util.CreateDataExporterIfNeededFunc = origCreate }()
+	defer func() { datautil.PrepareDownloadFunc = origPrep; datautil.CreateDataExporterIfNeededFunc = origCreate }()
 
 	cmd := NewCommand(context.TODO(), slog.Default())
 	cmd.SetArgs([]string{"myexport", "foo.txt", "-o", filepath.Join(t.TempDir(), "out.txt")})
@@ -113,17 +113,17 @@ func TestDownloadBlock_OK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	origPrep := util.PrepareDownloadFunc
-	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	origPrep := datautil.PrepareDownloadFunc
+	origCreate := datautil.CreateDataExporterIfNeededFunc
+	datautil.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		return srv.URL + "/api/v1/block", "Block", newNoAuthSafe(), nil
 	}
-	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
+	datautil.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
 		return de, nil
 	}
 	defer func() {
-		util.PrepareDownloadFunc = origPrep
-		util.CreateDataExporterIfNeededFunc = origCreate
+		datautil.PrepareDownloadFunc = origPrep
+		datautil.CreateDataExporterIfNeededFunc = origCreate
 	}()
 
 	outFile := filepath.Join(t.TempDir(), "raw.img")
@@ -143,15 +143,15 @@ func TestDownloadBlock_WrongEndpoint(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	origPrep := util.PrepareDownloadFunc
-	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	origPrep := datautil.PrepareDownloadFunc
+	origCreate := datautil.CreateDataExporterIfNeededFunc
+	datautil.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		return srv.URL + "/api/v1/block", "Filesystem", newNoAuthSafe(), nil
 	}
-	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
+	datautil.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
 		return de, nil
 	}
-	defer func() { util.PrepareDownloadFunc = origPrep; util.CreateDataExporterIfNeededFunc = origCreate }()
+	defer func() { datautil.PrepareDownloadFunc = origPrep; datautil.CreateDataExporterIfNeededFunc = origCreate }()
 
 	cmd := NewCommand(context.TODO(), slog.Default())
 	cmd.SetArgs([]string{"myexport", "-o", filepath.Join(t.TempDir(), "raw.img")})

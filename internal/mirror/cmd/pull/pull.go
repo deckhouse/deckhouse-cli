@@ -176,7 +176,7 @@ func pull(cmd *cobra.Command, _ []string) error {
 			err := accessValidator.ValidateReadAccessForImage(ctx, imageRef, validationOpts...)
 			switch {
 			case errors.Is(err, validation.ErrImageUnavailable):
-				logger.WarnF("Skipping pull of security databases: %v", err)
+				logger.Warnf("Skipping pull of security databases: %v", err)
 				return nil
 			case err != nil:
 				return fmt.Errorf("Source registry is not accessible: %w", err)
@@ -279,7 +279,7 @@ func setupLogger() *log.SLogger {
 
 func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger) ([]string, error) {
 	if pullParams.DeckhouseTag != "" {
-		logger.InfoF("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
+		logger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
 		return []string{pullParams.DeckhouseTag}, nil
 	}
 
@@ -287,7 +287,7 @@ func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger) ([]str
 	if err != nil {
 		return nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}
-	logger.InfoF("Deckhouse releases to pull: %+v", versionsToMirror)
+	logger.Infof("Deckhouse releases to pull: %+v", versionsToMirror)
 
 	return lo.Map(versionsToMirror, func(v semver.Version, _ int) string {
 		return "v" + v.String()

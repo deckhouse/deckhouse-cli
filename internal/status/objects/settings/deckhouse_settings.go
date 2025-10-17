@@ -170,9 +170,9 @@ func formatSettingLine(setting ConfigSetting, indent string, prefixStack []bool,
 	// Map/Struct (has "children").
 	if len(setting.Children) > 0 {
 		sb.WriteString(fmt.Sprintf("%s%s %s:\n", prefix, coloredLineOperator, setting.Key))
-		newPrefixStack := append(prefixStack, !isLast)
+		prefixStack = append(prefixStack, !isLast)
 		for i, child := range setting.Children {
-			sb.WriteString(formatSettingLine(child, indent+"    ", newPrefixStack, i == len(setting.Children)-1, level+1))
+			sb.WriteString(formatSettingLine(child, indent+"    ", prefixStack, i == len(setting.Children)-1, level+1))
 		}
 		return sb.String()
 	}
@@ -181,7 +181,7 @@ func formatSettingLine(setting ConfigSetting, indent string, prefixStack []bool,
 	if len(setting.Items) > 0 {
 		allScalars := areAllItemsScalars(setting.Items)
 		sb.WriteString(fmt.Sprintf("%s%s %s:\n", prefix, coloredLineOperator, setting.Key))
-		newPrefixStack := append(prefixStack, !isLast)
+		prefixStack = append(prefixStack, !isLast)
 		if allScalars {
 			for i, item := range setting.Items {
 				sb.WriteString(fmt.Sprintf("%s│   %s %s\n", prefix, mapLineOp(i == len(setting.Items)-1), item.Value))
@@ -192,7 +192,7 @@ func formatSettingLine(setting ConfigSetting, indent string, prefixStack []bool,
 		for i, item := range setting.Items {
 			itemIsLast := i == len(setting.Items)-1
 			for j, child := range item.Children {
-				sb.WriteString(formatSettingLine(child, indentForArray, newPrefixStack, j == len(item.Children)-1, level+2))
+				sb.WriteString(formatSettingLine(child, indentForArray, prefixStack, j == len(item.Children)-1, level+2))
 			}
 			if len(item.Children) == 0 && item.Value != "" {
 				sb.WriteString(fmt.Sprintf("%s│   %s %s\n", prefix, mapLineOp(itemIsLast), item.Value))

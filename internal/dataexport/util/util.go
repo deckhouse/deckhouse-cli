@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package util
+package datautil
 
 import (
 	"bufio"
@@ -79,7 +79,7 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 	deObj := &v1alpha1.DataExport{}
 
 	for i := 0; ; i++ {
-		var returnErr error = nil
+		var returnErr error
 
 		// get DataExport from k8s by name
 		err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: deName}, deObj)
@@ -254,9 +254,8 @@ func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 			if slices.Contains([]string{"y", "n"}, input) {
 				inputChan <- strings.TrimSpace(input)
 				return
-			} else {
-				fmt.Println("Invalid input. Please press 'y' or 'n'.")
 			}
+			fmt.Println("Invalid input. Please press 'y' or 'n'.")
 		}
 	}()
 
@@ -281,7 +280,8 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 
 	var podURL, volumeMode, internalCAData string
 
-	if public {
+	switch {
+	case public:
 		if deObj.Status.PublicURL == "" {
 			return "", "", "", fmt.Errorf("empty PublicURL")
 		}
@@ -289,10 +289,10 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 		if !strings.HasPrefix(podURL, "http") {
 			podURL += "https://"
 		}
-	} else if deObj.Status.URL != "" {
+	case deObj.Status.URL != "":
 		podURL = deObj.Status.URL
 		internalCAData = deObj.Status.CA
-	} else {
+	default:
 		return "", "", "", fmt.Errorf("invalid URL")
 	}
 

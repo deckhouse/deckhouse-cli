@@ -109,7 +109,7 @@ func (q *DeckhouseQueueFetcher) execQueueList(_ context.Context, podName string)
 		return "", fmt.Errorf("failed to initialize SPDY executor: %w", err)
 	}
 	var stdout, stderr strings.Builder
-	err = exec.Stream(remotecommand.StreamOptions{
+	err = exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
 		Stdout: &stdout,
 		Stderr: &stderr,
 	})

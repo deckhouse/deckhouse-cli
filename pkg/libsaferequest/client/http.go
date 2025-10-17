@@ -8,7 +8,6 @@ import (
 
 	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/runtime"
-	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	kubescheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth" // load all auth plugins
@@ -118,7 +117,7 @@ func (c *SafeClient) NewRTClient(schemeFuncs ...(func(s *runtime.Scheme) error))
 	}
 
 	schemeFuncs = append(schemeFuncs, kubescheme.AddToScheme)
-	scheme := apiruntime.NewScheme()
+	scheme := runtime.NewScheme()
 	for _, f := range schemeFuncs {
 		if err := f(scheme); err != nil {
 			return nil, err

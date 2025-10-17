@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
+	datautil "github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 	safereq "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -53,17 +53,17 @@ func TestListFilesystem_OK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	origPrep := util.PrepareDownloadFunc
-	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	origPrep := datautil.PrepareDownloadFunc
+	origCreate := datautil.CreateDataExporterIfNeededFunc
+	datautil.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		// Re-enable support for unauthenticated requests inside unit tests.
 		safereq.SupportNoAuth = true
 		return srv.URL + "/api/v1/files", "Filesystem", newSafe(), nil
 	}
-	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
+	datautil.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
 		return de, nil
 	}
-	defer func() { util.PrepareDownloadFunc = origPrep; util.CreateDataExporterIfNeededFunc = origCreate }()
+	defer func() { datautil.PrepareDownloadFunc = origPrep; datautil.CreateDataExporterIfNeededFunc = origCreate }()
 
 	oldStd := os.Stdout
 	r, w, _ := os.Pipe()
@@ -89,17 +89,17 @@ func TestListBlock_OK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	origPrep := util.PrepareDownloadFunc
-	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	origPrep := datautil.PrepareDownloadFunc
+	origCreate := datautil.CreateDataExporterIfNeededFunc
+	datautil.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		// Re-enable support for unauthenticated requests inside unit tests.
 		safereq.SupportNoAuth = true
 		return srv.URL + "/api/v1/block", "Block", newSafe(), nil
 	}
-	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
+	datautil.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
 		return de, nil
 	}
-	defer func() { util.PrepareDownloadFunc = origPrep; util.CreateDataExporterIfNeededFunc = origCreate }()
+	defer func() { datautil.PrepareDownloadFunc = origPrep; datautil.CreateDataExporterIfNeededFunc = origCreate }()
 
 	// capture stdout because list writes to Stdout directly
 	oldStd := os.Stdout
@@ -124,17 +124,17 @@ func TestListFilesystem_NotDir(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	origPrep := util.PrepareDownloadFunc
-	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	origPrep := datautil.PrepareDownloadFunc
+	origCreate := datautil.CreateDataExporterIfNeededFunc
+	datautil.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		// Re-enable support for unauthenticated requests inside unit tests.
 		safereq.SupportNoAuth = true
 		return srv.URL + "/api/v1/files", "Filesystem", newSafe(), nil
 	}
-	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
+	datautil.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
 		return de, nil
 	}
-	defer func() { util.PrepareDownloadFunc = origPrep; util.CreateDataExporterIfNeededFunc = origCreate }()
+	defer func() { datautil.PrepareDownloadFunc = origPrep; datautil.CreateDataExporterIfNeededFunc = origCreate }()
 
 	cmd := NewCommand(context.TODO(), slog.Default())
 	cmd.SetOut(&bytes.Buffer{})

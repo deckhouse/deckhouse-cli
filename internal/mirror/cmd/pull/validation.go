@@ -113,7 +113,7 @@ func validateImagesBundlePathArg(args []string) error {
 
 func parseAndValidateVersionFlags() error {
 	if sinceVersionString != "" && DeckhouseTag != "" {
-		return errors.New("Using both --deckhouse-tag and --since-version at the same time is ambiguous.")
+		return errors.New("using both --deckhouse-tag and --since-version at the same time is ambiguous")
 	}
 
 	var err error

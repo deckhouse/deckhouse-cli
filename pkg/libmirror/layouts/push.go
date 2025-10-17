@@ -3,7 +3,12 @@ Copyright 2024 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+You may obtaifunc (silentLogger) Debugf(_ string, _ ...interface{})      {}
+func (silentLogger) DebugLn(_ ...interface{})             {}
+func (silentLogger) Infof(_ string, _ ...interface{})       {}
+func (silentLogger) InfoLn(_ ...interface{})              {}
+func (silentLogger) Warnf(_ string, _ ...interface{})       {}
+func (silentLogger) WarnLn(_ ...interface{})              {}py of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
 
@@ -92,7 +97,7 @@ func PushLayoutToRepoContext(
 		if parallelismConfig.Images == 1 {
 			tag := manifestSet[0].Annotations["io.deckhouse.image.short_tag"]
 			imageRef := registryRepo + ":" + tag
-			logger.InfoF("[%d / %d] Pushing image %s", imagesCount, len(indexManifest.Manifests), imageRef)
+			logger.Infof("[%d / %d] Pushing image %s", imagesCount, len(indexManifest.Manifests), imageRef)
 			if err = pushImage(ctx, registryRepo, index, manifestSet[0], refOpts, remoteOpts); err != nil {
 				return fmt.Errorf("Push Image: %w", err)
 			}
@@ -103,7 +108,7 @@ func PushLayoutToRepoContext(
 		err = logger.Process(fmt.Sprintf("Pushing batch %d / %d", batchesCount, len(batches)), func() error {
 			logger.InfoLn("Images in batch:")
 			for _, manifest := range manifestSet {
-				logger.InfoF("- %s", registryRepo+":"+manifest.Annotations["io.deckhouse.image.short_tag"])
+				logger.Infof("- %s", registryRepo+":"+manifest.Annotations["io.deckhouse.image.short_tag"])
 			}
 
 			errMu := &sync.Mutex{}
@@ -169,10 +174,10 @@ type silentLogger struct{}
 
 var _ params.Logger = silentLogger{}
 
-func (silentLogger) DebugF(_ string, _ ...interface{})      {}
+func (silentLogger) Debugf(_ string, _ ...interface{})      {}
 func (silentLogger) DebugLn(_ ...interface{})               {}
-func (silentLogger) InfoF(_ string, _ ...interface{})       {}
+func (silentLogger) Infof(_ string, _ ...interface{})       {}
 func (silentLogger) InfoLn(_ ...interface{})                {}
-func (silentLogger) WarnF(_ string, _ ...interface{})       {}
+func (silentLogger) Warnf(_ string, _ ...interface{})       {}
 func (silentLogger) WarnLn(_ ...interface{})                {}
 func (silentLogger) Process(_ string, _ func() error) error { return nil }
