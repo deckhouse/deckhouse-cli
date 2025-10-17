@@ -92,6 +92,142 @@ type Puller struct {
 	validationOpts  []validation.Option
 }
 
+const pullLong = `Download Deckhouse Kubernetes Platform distribution to the local filesystem.
+		
+This command downloads the Deckhouse Kubernetes Platform distribution bundle 
+containing specific platform releases and it's modules, 
+to be pushed into the air-gapped container registry at a later time.
+
+For more information on how to use it, consult the docs at 
+https://deckhouse.io/products/kubernetes-platform/documentation/v1/deckhouse-faq.html#manually-uploading-images-to-an-air-gapped-registry
+
+Additional configuration options for the d8 mirror family of commands are available as environment variables:
+
+ * $SSL_CERT_FILE           — Path to the SSL certificate. If the variable is set, system certificates are not used;
+ * $SSL_CERT_DIR            — List of directories to search for SSL certificate files, separated by a colon.
+                              If set, system certificates are not used. More info at https://docs.openssl.org/1.0.2/man1/c_rehash/;
+ * $HTTP_PROXY/$HTTPS_PROXY — URL of the proxy server for HTTP(S) requests to hosts that are not listed in the $NO_PROXY;
+ * $NO_PROXY                — Comma-separated list of hosts to exclude from proxying.
+                              Supported value formats include IP's', CIDR notations (1.2.3.4/8), domains, and asterisk sign (*).
+                              The IP addresses and domain names can also include a literal port number (1.2.3.4:80).
+                              The domain name matches that name and all the subdomains.
+                              The domain name with a leading . matches subdomains only.
+                              For example, foo.com matches foo.com and bar.foo.com; .y.com matches x.y.com but does not match y.com.
+                              A single asterisk * indicates that no proxying should be done;
+
+LICENSE NOTE:
+The d8 mirror functionality is exclusively available to users holding a 
+valid license for any commercial version of the Deckhouse Kubernetes Platform.
+
+© Flant JSC 2025`
+
+func NewCommand() *cobra.Command {
+	pullCmd := &cobra.Command{
+		Use:           "pull <images-bundle-path>",
+		Short:         "Copy Deckhouse Kubernetes Platform distribution to the local filesystem",
+		Long:          pullLong,
+		ValidArgs:     []string{"images-bundle-path"},
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		PreRunE:       parseAndValidateParameters,
+		RunE:          pull,
+	}
+
+	addFlags(pullCmd.Flags())
+	return pullCmd
+}
+
+func pull(cmd *cobra.Command, _ []string) error {
+	puller := NewPuller(cmd)
+	puller.logger.InfoF("d8 version: %s", version.Version)
+	if err := puller.Execute(); err != nil {
+		return ErrPullFailed
+	}
+	return nil
+}
+
+func setupLogger() *log.SLogger {
+	logLevel := slog.LevelInfo
+	if log.DebugLogLevel() >= 3 {
+		logLevel = slog.LevelDebug
+	}
+	return log.NewSLogger(logLevel)
+}
+
+func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger) ([]string, error) {
+	if pullParams.DeckhouseTag != "" {
+		logger.InfoF("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
+		return []string{pullParams.DeckhouseTag}, nil
+	}
+
+	versionsToMirror, err := versionsToMirrorFunc(pullParams)
+	if err != nil {
+		return nil, fmt.Errorf("Find versions to mirror: %w", err)
+	}
+	logger.InfoF("Deckhouse releases to pull: %+v", versionsToMirror)
+
+	return lo.Map(versionsToMirror, func(v semver.Version, index int) string {
+		return "v" + v.String()
+	}), nil
+}
+
+func buildPullParams(logger params.Logger) *params.PullParams {
+	mirrorCtx := &params.PullParams{
+		BaseParams: params.BaseParams{
+			Logger:                logger,
+			Insecure:              Insecure,
+			SkipTLSVerification:   TLSSkipVerify,
+			DeckhouseRegistryRepo: SourceRegistryRepo,
+			ModulesPathSuffix:     ModulesPathSuffix,
+			RegistryAuth:          getSourceRegistryAuthProvider(),
+			BundleDir:             ImagesBundlePath,
+			WorkingDir: filepath.Join(
+				TempDir,
+				"pull",
+				fmt.Sprintf("%x", md5.Sum([]byte(SourceRegistryRepo))),
+			),
+		},
+
+		BundleChunkSize: ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
+
+		DoGOSTDigests:         DoGOSTDigest,
+		SkipPlatform:          NoPlatform,
+		SkipSecurityDatabases: NoSecurityDB,
+		SkipModules:           NoModules,
+		OnlyExtraImages:       OnlyExtraImages,
+		DeckhouseTag:          DeckhouseTag,
+		SinceVersion:          SinceVersion,
+	}
+	return mirrorCtx
+}
+
+func getSourceRegistryAuthProvider() authn.Authenticator {
+	if SourceRegistryLogin != "" {
+		return authn.FromConfig(authn.AuthConfig{
+			Username: SourceRegistryLogin,
+			Password: SourceRegistryPassword,
+		})
+	}
+
+	if DeckhouseLicenseToken != "" {
+		return authn.FromConfig(authn.AuthConfig{
+			Username: "license-token",
+			Password: DeckhouseLicenseToken,
+		})
+	}
+
+	return authn.Anonymous
+}
+
+func lastPullWasTooLongAgoToRetry(pullParams *params.PullParams) bool {
+	s, err := os.Lstat(pullParams.WorkingDir)
+	if err != nil {
+		return false
+	}
+
+	return time.Since(s.ModTime()) > 24*time.Hour
+}
+
 // NewPuller creates a new Puller instance
 func NewPuller(cmd *cobra.Command) *Puller {
 	logger := setupLogger()
@@ -310,140 +446,4 @@ func (p *Puller) finalCleanup() error {
 		return err
 	}
 	return nil
-}
-
-var pullLong = `Download Deckhouse Kubernetes Platform distribution to the local filesystem.
-		
-This command downloads the Deckhouse Kubernetes Platform distribution bundle 
-containing specific platform releases and it's modules, 
-to be pushed into the air-gapped container registry at a later time.
-
-For more information on how to use it, consult the docs at 
-https://deckhouse.io/products/kubernetes-platform/documentation/v1/deckhouse-faq.html#manually-uploading-images-to-an-air-gapped-registry
-
-Additional configuration options for the d8 mirror family of commands are available as environment variables:
-
- * $SSL_CERT_FILE           — Path to the SSL certificate. If the variable is set, system certificates are not used;
- * $SSL_CERT_DIR            — List of directories to search for SSL certificate files, separated by a colon.
-                              If set, system certificates are not used. More info at https://docs.openssl.org/1.0.2/man1/c_rehash/;
- * $HTTP_PROXY/$HTTPS_PROXY — URL of the proxy server for HTTP(S) requests to hosts that are not listed in the $NO_PROXY;
- * $NO_PROXY                — Comma-separated list of hosts to exclude from proxying.
-                              Supported value formats include IP's', CIDR notations (1.2.3.4/8), domains, and asterisk sign (*).
-                              The IP addresses and domain names can also include a literal port number (1.2.3.4:80).
-                              The domain name matches that name and all the subdomains.
-                              The domain name with a leading . matches subdomains only.
-                              For example, foo.com matches foo.com and bar.foo.com; .y.com matches x.y.com but does not match y.com.
-                              A single asterisk * indicates that no proxying should be done;
-
-LICENSE NOTE:
-The d8 mirror functionality is exclusively available to users holding a 
-valid license for any commercial version of the Deckhouse Kubernetes Platform.
-
-© Flant JSC 2025`
-
-func NewCommand() *cobra.Command {
-	pullCmd := &cobra.Command{
-		Use:           "pull <images-bundle-path>",
-		Short:         "Copy Deckhouse Kubernetes Platform distribution to the local filesystem",
-		Long:          pullLong,
-		ValidArgs:     []string{"images-bundle-path"},
-		SilenceErrors: true,
-		SilenceUsage:  true,
-		PreRunE:       parseAndValidateParameters,
-		RunE:          pull,
-	}
-
-	addFlags(pullCmd.Flags())
-	return pullCmd
-}
-
-func pull(cmd *cobra.Command, _ []string) error {
-	puller := NewPuller(cmd)
-	puller.logger.InfoF("d8 version: %s", version.Version)
-	if err := puller.Execute(); err != nil {
-		return ErrPullFailed
-	}
-	return nil
-}
-
-func setupLogger() *log.SLogger {
-	logLevel := slog.LevelInfo
-	if log.DebugLogLevel() >= 3 {
-		logLevel = slog.LevelDebug
-	}
-	return log.NewSLogger(logLevel)
-}
-
-func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger) ([]string, error) {
-	if pullParams.DeckhouseTag != "" {
-		logger.InfoF("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
-		return []string{pullParams.DeckhouseTag}, nil
-	}
-
-	versionsToMirror, err := versionsToMirrorFunc(pullParams)
-	if err != nil {
-		return nil, fmt.Errorf("Find versions to mirror: %w", err)
-	}
-	logger.InfoF("Deckhouse releases to pull: %+v", versionsToMirror)
-
-	return lo.Map(versionsToMirror, func(v semver.Version, index int) string {
-		return "v" + v.String()
-	}), nil
-}
-
-func buildPullParams(logger params.Logger) *params.PullParams {
-	mirrorCtx := &params.PullParams{
-		BaseParams: params.BaseParams{
-			Logger:                logger,
-			Insecure:              Insecure,
-			SkipTLSVerification:   TLSSkipVerify,
-			DeckhouseRegistryRepo: SourceRegistryRepo,
-			ModulesPathSuffix:     ModulesPathSuffix,
-			RegistryAuth:          getSourceRegistryAuthProvider(),
-			BundleDir:             ImagesBundlePath,
-			WorkingDir: filepath.Join(
-				TempDir,
-				"pull",
-				fmt.Sprintf("%x", md5.Sum([]byte(SourceRegistryRepo))),
-			),
-		},
-
-		BundleChunkSize: ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
-
-		DoGOSTDigests:         DoGOSTDigest,
-		SkipPlatform:          NoPlatform,
-		SkipSecurityDatabases: NoSecurityDB,
-		SkipModules:           NoModules,
-		OnlyExtraImages:       OnlyExtraImages,
-		DeckhouseTag:          DeckhouseTag,
-		SinceVersion:          SinceVersion,
-	}
-	return mirrorCtx
-}
-
-func getSourceRegistryAuthProvider() authn.Authenticator {
-	if SourceRegistryLogin != "" {
-		return authn.FromConfig(authn.AuthConfig{
-			Username: SourceRegistryLogin,
-			Password: SourceRegistryPassword,
-		})
-	}
-
-	if DeckhouseLicenseToken != "" {
-		return authn.FromConfig(authn.AuthConfig{
-			Username: "license-token",
-			Password: DeckhouseLicenseToken,
-		})
-	}
-
-	return authn.Anonymous
-}
-
-func lastPullWasTooLongAgoToRetry(pullParams *params.PullParams) bool {
-	s, err := os.Lstat(pullParams.WorkingDir)
-	if err != nil {
-		return false
-	}
-
-	return time.Since(s.ModTime()) > 24*time.Hour
 }
