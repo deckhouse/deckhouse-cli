@@ -119,7 +119,7 @@ func downloadFunc(
 
 	resp, err := subClient.HTTPDo(req.WithContext(ctx))
 	if err != nil {
-		return fmt.Errorf("HTTPDo: %s\n", err.Error())
+		return fmt.Errorf("http do: %s", err.Error())
 	}
 	defer resp.Body.Close()
 

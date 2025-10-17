@@ -61,7 +61,7 @@ func getDeckhouseReleases(ctx context.Context, dynamicCl dynamic.Interface) ([]D
 
 	releaseList, err := dynamicCl.Resource(gvr).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list deckhouse releases: %w\n", err)
+		return nil, fmt.Errorf("failed to list deckhouse releases: %w", err)
 	}
 
 	var releases []DeckhouseRelease

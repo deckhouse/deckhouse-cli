@@ -168,7 +168,7 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 	req, _ := http.NewRequest(http.MethodGet, dataURL, nil)
 	resp, err := sClient.HTTPDo(req)
 	if err != nil {
-		return fmt.Errorf("HTTPDo: %s\n", err.Error())
+		return fmt.Errorf("http do: %s", err.Error())
 	}
 	defer resp.Body.Close()
 

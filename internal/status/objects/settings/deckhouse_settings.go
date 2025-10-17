@@ -62,12 +62,12 @@ func getModuleConfigSettings(ctx context.Context, dynamicClient dynamic.Interfac
 
 	mc, err := dynamicClient.Resource(gvr).Get(ctx, "deckhouse", metav1.GetOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get ModuleConfig: %w\n", err)
+		return nil, fmt.Errorf("failed to get ModuleConfig: %w", err)
 	}
 
 	rawSettings, found, err := unstructured.NestedMap(mc.Object, "spec", "settings")
 	if err != nil || !found {
-		return nil, fmt.Errorf("failed to find or parse settings in ModuleConfig: %w\n", err)
+		return nil, fmt.Errorf("failed to find or parse settings in ModuleConfig: %w", err)
 	}
 
 	return configSettingsFromMapProcessing(rawSettings), nil

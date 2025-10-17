@@ -51,7 +51,7 @@ type deckhouseEditionInfo struct {
 func getDeckhouseEdition(ctx context.Context, kubeCl kubernetes.Interface) (deckhouseEditionInfo, error) {
 	deployment, err := kubeCl.AppsV1().Deployments("d8-system").Get(ctx, "deckhouse", metav1.GetOptions{})
 	if err != nil {
-		return deckhouseEditionInfo{}, fmt.Errorf("failed to get deployment: %w\n", err)
+		return deckhouseEditionInfo{}, fmt.Errorf("failed to get deployment: %w", err)
 	}
 	return deckhouseEditionProcessing(deployment)
 }
@@ -60,7 +60,7 @@ func getDeckhouseEdition(ctx context.Context, kubeCl kubernetes.Interface) (deck
 func deckhouseEditionProcessing(deployment *appsv1.Deployment) (deckhouseEditionInfo, error) {
 	edition, found := deployment.Annotations["core.deckhouse.io/edition"]
 	if !found {
-		return deckhouseEditionInfo{}, fmt.Errorf("annotation 'core.deckhouse.io/edition' not found in deployment\n")
+		return deckhouseEditionInfo{}, fmt.Errorf("annotation 'core.deckhouse.io/edition' not found in deployment")
 	}
 	return deckhouseEditionInfo{Edition: edition}, nil
 }
