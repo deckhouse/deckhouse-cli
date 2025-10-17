@@ -255,7 +255,7 @@ func openChunkedPackage(pushParams *params.PushParams, pkgName string) (io.ReadC
 func push(_ *cobra.Command, _ []string) error {
 	logger := setupLogger()
 	pushParams := buildPushParams(logger)
-	logger.Infof("d8 version: %s", version.Version)
+	logger.InfoF("d8 version: %s", version.Version)
 	if RegistryUsername != "" {
 		pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{Username: RegistryUsername, Password: RegistryPassword})
 	}
