@@ -142,7 +142,7 @@ func pushModules(pushParams *params.PushParams, logger params.Logger) error {
 	}
 
 	if len(successfullyPushedModules) > 0 {
-		logger.InfoF("Modules pushed: %v", strings.Join(successfullyPushedModules, ", "))
+		logger.Infof("Modules pushed: %v", strings.Join(successfullyPushedModules, ", "))
 	}
 
 	return nil
@@ -178,7 +178,7 @@ func pushStaticPackages(pushParams *params.PushParams, logger params.Logger) err
 		}
 
 		if err = pkg.Close(); err != nil {
-			logger.WarnF("Could not close bundle package %s: %w", pkgName, err)
+			logger.Warnf("Could not close bundle package %s: %w", pkgName, err)
 		}
 	}
 	return nil

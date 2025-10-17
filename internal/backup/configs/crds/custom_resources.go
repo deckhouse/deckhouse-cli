@@ -94,6 +94,8 @@ func BackupCustomResources(
 		})
 	})
 
-	result := append(nsResources, cwResources...)
+	var result [][]runtime.Object
+	result = append(result, nsResources...)
+	result = append(result, cwResources...)
 	return lo.Flatten(result), nil
 }

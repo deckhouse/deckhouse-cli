@@ -37,14 +37,14 @@ func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string)
 	logger := pullParams.Logger
 	tmpDir := filepath.Join(pullParams.WorkingDir, "platform")
 
-	logger.InfoF("Creating OCI Image Layouts")
+	logger.Infof("Creating OCI Image Layouts")
 	imageLayouts, err := layouts.CreateOCIImageLayoutsForDeckhouse(tmpDir, nil)
 	if err != nil {
 		return fmt.Errorf("Create OCI Image Layouts: %w", err)
 	}
 
 	layouts.FillLayoutsWithBasicDeckhouseImages(pullParams, imageLayouts, tagsToMirror)
-	logger.InfoF("Resolving tags")
+	logger.Infof("Resolving tags")
 	if err = imageLayouts.TagsResolver.ResolveTagsDigestsForImageLayouts(&pullParams.BaseParams, imageLayouts); err != nil {
 		return fmt.Errorf("Resolve images tags to digests: %w", err)
 	}
@@ -73,7 +73,7 @@ func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string)
 		}
 	}
 
-	logger.InfoF("Searching for Deckhouse built-in modules digests")
+	logger.Infof("Searching for Deckhouse built-in modules digests")
 	for imageTag := range imageLayouts.InstallImages {
 		digests, err := images.ExtractImageDigestsFromDeckhouseInstaller(pullParams, imageTag, imageLayouts.Install)
 		if err != nil {
@@ -81,7 +81,7 @@ func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string)
 		}
 		maps.Copy(imageLayouts.DeckhouseImages, digests)
 	}
-	logger.InfoF("Found %d images", len(imageLayouts.DeckhouseImages))
+	logger.Infof("Found %d images", len(imageLayouts.DeckhouseImages))
 
 	if err = logger.Process("Pull Deckhouse images", func() error {
 		return layouts.PullDeckhouseImages(pullParams, imageLayouts)
@@ -152,7 +152,7 @@ func generateDeckhouseReleaseManifests(
 	imageLayouts *layouts.ImageLayouts,
 	logger params.Logger,
 ) error {
-	logger.InfoF("Generating DeckhouseRelease manifests")
+	logger.Infof("Generating DeckhouseRelease manifests")
 	deckhouseReleasesManifestFile := filepath.Join(pullParams.BundleDir, "deckhousereleases.yaml")
 	if err := manifests.GenerateDeckhouseReleaseManifestsForVersions(
 		tagsToMirror,

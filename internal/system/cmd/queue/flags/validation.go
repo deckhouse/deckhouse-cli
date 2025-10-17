@@ -22,7 +22,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func ValidateParameters(cmd *cobra.Command, args []string) error {
+func ValidateParameters(cmd *cobra.Command, _ []string) error {
 	var allowedOutput = map[string]bool{
 		"json": true,
 		"yaml": true,
@@ -30,7 +30,7 @@ func ValidateParameters(cmd *cobra.Command, args []string) error {
 	}
 	outputFormat, _ := cmd.Flags().GetString("output")
 	if _, valid := allowedOutput[outputFormat]; !valid {
-		return fmt.Errorf("Please provide valid output: text, yaml, json. Got '%s', try --help\n", outputFormat)
+		return fmt.Errorf("please provide valid output: text, yaml, json. Got '%s', try --help", outputFormat)
 	}
 
 	watch, _ := cmd.Flags().GetBool("watch")

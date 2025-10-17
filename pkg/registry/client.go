@@ -90,7 +90,8 @@ func (c *Client) GetManifest(ctx context.Context, tag string) (*remote.Descripto
 		return nil, fmt.Errorf("failed to parse reference: %w", err)
 	}
 
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 	desc, err := remote.Get(ref, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get manifest: %w", err)
@@ -111,7 +112,8 @@ func (c *Client) GetImage(ctx context.Context, tag string) (v1.Image, error) {
 		return nil, fmt.Errorf("failed to parse reference: %w", err)
 	}
 
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 	img, err := remote.Image(ref, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get image: %w", err)
@@ -272,7 +274,8 @@ func (c *Client) ListTags(ctx context.Context) ([]string, error) {
 	}
 
 	repo := ref.Context()
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 
 	tags, err := remote.List(repo, opts...)
 	if err != nil {
@@ -302,7 +305,8 @@ func (c *Client) ListRepositories(ctx context.Context) ([]string, error) {
 	repo := ref.Context()
 	c.log.Debug("Listing tags for base repository", slog.String("repository", repo.String()))
 
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 
 	// List "tags" which actually represent sub-repositories in this case
 	tags, err := remote.List(repo, opts...)

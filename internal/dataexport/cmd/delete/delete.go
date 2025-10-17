@@ -26,7 +26,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
+	datautil "github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -49,7 +49,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(ctx, log, cmd, args)
 		},
-		Args: func(cmd *cobra.Command, args []string) error {
+		Args: func(_ *cobra.Command, args []string) error {
 			_, err := parseArgs(args)
 			return err
 		},
@@ -60,7 +60,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	return cmd
 }
 
-func parseArgs(args []string) (deName string, err error) {
+func parseArgs(args []string) (string, error) {
 	if len(args) == 1 {
 		return args[0], nil
 	}
@@ -88,7 +88,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	err = util.DeleteDataExport(ctx, deName, namespace, rtClient)
+	err = datautil.DeleteDataExport(ctx, deName, namespace, rtClient)
 	if err != nil {
 		return err
 	}

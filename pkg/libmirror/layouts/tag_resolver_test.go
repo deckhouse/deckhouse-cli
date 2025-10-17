@@ -20,7 +20,7 @@ import (
 	"io"
 	"log"
 	"maps"
-	"math/rand"
+	"math/rand/v2"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -114,7 +114,7 @@ func setupEmptyRegistryRepo(useTLS bool) (host, repoPath string) {
 func createRandomImageInRegistry(t *testing.T, imageRef string) (digest string) {
 	t.Helper()
 
-	img, err := random.Image(int64(rand.Intn(1024)+1), int64(rand.Intn(5)+1))
+	img, err := random.Image(int64(rand.IntN(1024)+1), int64(rand.IntN(5)+1))
 	require.NoError(t, err)
 
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(nil, true, false)

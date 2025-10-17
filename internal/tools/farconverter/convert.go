@@ -34,10 +34,10 @@ type RawRule map[string]any
 
 // FalcoAuditRule is a structure to encode FalcoAuditRules custom resources.
 type FalcoAuditRule struct {
-	APIVersion string `yaml:"apiVersion"`
-	Kind       string
-	Metadata   Metadata
-	Spec       FalcoAuditRuleSpec
+	APIVersion string             `yaml:"apiVersion"`
+	Kind       string             `yaml:"kind"`
+	Metadata   Metadata           `yaml:"metadata"`
+	Spec       FalcoAuditRuleSpec `yaml:"spec"`
 }
 
 type FalcoAuditRuleSpecRule struct {
@@ -53,7 +53,7 @@ type FalcoAuditRuleSpec struct {
 }
 
 type Metadata struct {
-	Name string
+	Name string `yaml:"name"`
 }
 
 type Rule struct {
@@ -77,7 +77,7 @@ type List struct {
 	Items []any  `yaml:"items"`
 }
 
-func Convert(cmd *cobra.Command, args []string) error {
+func Convert(_ *cobra.Command, args []string) error {
 	input := args[0]
 	var rules []RawRule
 	log.Printf("Convert rules from %q", input)

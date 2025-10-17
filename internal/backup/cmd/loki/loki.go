@@ -30,7 +30,6 @@ import (
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/kubectl/pkg/util/templates"
@@ -130,6 +129,9 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		chunkStart := chunkEnd - chunkSize.Nanoseconds()
 		if startTimestamp != "" {
 			chunkStart, err = getStartTimestamp()
+			if err != nil {
+				_ = fmt.Errorf("error parsing start timestamp: %w", err)
+			}
 		}
 		curlParamStreamList := CurlRequest{
 			BaseURL: "series",
@@ -152,7 +154,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		}
 
 		for _, r := range streamListDumpJSON.Data {
-			err := fetchLogs(chunkStart, chunkEnd, endDumpTimestamp, token, r, config, kubeCl)
+			err := fetchLogs(chunkStart, endDumpTimestamp, token, r, config, kubeCl)
 			if err != nil {
 				return fmt.Errorf("error get logs from loki: %w", err)
 			}
@@ -161,14 +163,14 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map[string]string, config *rest.Config, kubeCl kubernetes.Interface) error {
-	var filters []string
+func fetchLogs(chunkStart, endDumpTimestamp int64, token string, r map[string]string, config *rest.Config, kubeCl kubernetes.Interface) error {
+	filters := make([]string, 0, len(r))
 	for key, value := range r {
 		filters = append(filters, fmt.Sprintf(`%s=%q`, key, value))
 	}
 	q := fmt.Sprintf(`{%s}`, strings.Join(filters, ", "))
 
-	chunkEnd = endDumpTimestamp
+	chunkEnd := endDumpTimestamp
 	for chunkEnd > chunkStart {
 		curlParamDumpLog := CurlRequest{
 			BaseURL: "query_range",
@@ -213,7 +215,7 @@ func fetchLogs(chunkStart, chunkEnd, endDumpTimestamp int64, token string, r map
 }
 
 func (c *CurlRequest) GenerateCurlCommand() []string {
-	curlParts := append([]string{"curl", "--insecure", "-v"})
+	curlParts := []string{"curl", "--insecure", "-v"}
 	curlParts = append(curlParts, fmt.Sprintf("%s/%s", lokiURL, c.BaseURL))
 	for key, value := range c.Params {
 		if value != "" {
@@ -339,7 +341,7 @@ func getLogWithRetry(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 
 	err = retry.RunTask(Logger,
 		"error get json response from Loki",
-		task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
+		task.WithConstantRetries(5, 10*time.Second, func(_ context.Context) error {
 			QueryRangeDump, SeriesAPIDump, err = getLogTimestamp(config, kubeCl, fullCommand)
 			if err != nil {
 				return fmt.Errorf("error get JSON response from loki: %w", err)
