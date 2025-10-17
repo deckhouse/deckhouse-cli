@@ -3,12 +3,7 @@ Copyright 2024 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
-You may obtaifunc (silentLogger) Debugf(_ string, _ ...interface{})      {}
-func (silentLogger) DebugLn(_ ...interface{})             {}
-func (silentLogger) Infof(_ string, _ ...interface{})       {}
-func (silentLogger) InfoLn(_ ...interface{})              {}
-func (silentLogger) Warnf(_ string, _ ...interface{})       {}
-func (silentLogger) WarnLn(_ ...interface{})              {}py of the License at
+You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
 

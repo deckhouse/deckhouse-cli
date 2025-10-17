@@ -111,7 +111,7 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(plugins.NewPluginsCommand(r.pluginService, r.logger.Named("plugins-command")))
 }
 
-func (r *RootCommand) Execute() error {
+func (r *RootCommand) Execute() {
 	ctx := r.cmd.Context()
 
 	rand.Seed(time.Now().UnixNano())
@@ -119,7 +119,7 @@ func (r *RootCommand) Execute() error {
 	if shouldTerminate, err := werfcommon.ContainerBackendProcessStartupHook(); err != nil {
 		werfcommon.TerminateWithError(err.Error(), 1)
 	} else if shouldTerminate {
-		return nil
+		os.Exit(0)
 	}
 
 	werfcommon.EnableTerminationSignalsTrap()
@@ -148,13 +148,9 @@ func (r *RootCommand) Execute() error {
 	}
 
 	werfcommon.ShutdownTelemetry(ctx, 0)
-	return nil
 }
 
 func execute() {
 	rootCmd := NewRootCommand()
-	if err := rootCmd.Execute(); err != nil {
-		logs.FlushLogs()
-		os.Exit(1)
-	}
+	rootCmd.Execute()
 }
