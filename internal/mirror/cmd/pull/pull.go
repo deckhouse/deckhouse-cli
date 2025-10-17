@@ -80,18 +80,6 @@ var (
 	OnlyExtraImages bool
 )
 
-// versionsToMirrorFunc allows mocking releases.VersionsToMirror in tests
-var versionsToMirrorFunc = releases.VersionsToMirror
-
-// Puller encapsulates the logic for pulling Deckhouse components
-type Puller struct {
-	cmd             *cobra.Command
-	logger          *log.SLogger
-	params          *params.PullParams
-	accessValidator *validation.RemoteRegistryAccessValidator
-	validationOpts  []validation.Option
-}
-
 const pullLong = `Download Deckhouse Kubernetes Platform distribution to the local filesystem.
 		
 This command downloads the Deckhouse Kubernetes Platform distribution bundle 
@@ -226,6 +214,18 @@ func lastPullWasTooLongAgoToRetry(pullParams *params.PullParams) bool {
 	}
 
 	return time.Since(s.ModTime()) > 24*time.Hour
+}
+
+// versionsToMirrorFunc allows mocking releases.VersionsToMirror in tests
+var versionsToMirrorFunc = releases.VersionsToMirror
+
+// Puller encapsulates the logic for pulling Deckhouse components
+type Puller struct {
+	cmd             *cobra.Command
+	logger          *log.SLogger
+	params          *params.PullParams
+	accessValidator *validation.RemoteRegistryAccessValidator
+	validationOpts  []validation.Option
 }
 
 // NewPuller creates a new Puller instance
