@@ -21,9 +21,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
-	"math/rand"
 	"os"
-	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -79,8 +77,8 @@ func NewRootCommand() *RootCommand {
 		Version:       version.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Run: func(cmd *cobra.Command, args []string) {
-			cmd.Help()
+		Run: func(cmd *cobra.Command, _ []string) {
+			_ = cmd.Help() // ignore error when displaying help
 		},
 	}
 
@@ -111,16 +109,13 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(plugins.NewPluginsCommand(r.pluginService, r.logger.Named("plugins-command")))
 }
 
-func (r *RootCommand) Execute() error {
+func (r *RootCommand) Execute() {
 	ctx := r.cmd.Context()
-
-	rand.Seed(time.Now().UnixNano())
-	defer logs.FlushLogs()
 
 	if shouldTerminate, err := werfcommon.ContainerBackendProcessStartupHook(); err != nil {
 		werfcommon.TerminateWithError(err.Error(), 1)
 	} else if shouldTerminate {
-		return nil
+		os.Exit(0)
 	}
 
 	werfcommon.EnableTerminationSignalsTrap()
@@ -132,20 +127,23 @@ func (r *RootCommand) Execute() error {
 	}
 
 	if err := r.cmd.Execute(); err != nil {
-		if helm_v3.IsPluginError(err) {
+		switch {
+		case helm_v3.IsPluginError(err):
 			werfcommon.ShutdownTelemetry(ctx, helm_v3.PluginErrorCode(err))
+			logs.FlushLogs()
 			werfcommon.TerminateWithError(err.Error(), helm_v3.PluginErrorCode(err))
-		} else if errors.Is(err, resrcchangcalc.ErrChangesPlanned) {
+		case errors.Is(err, resrcchangcalc.ErrChangesPlanned):
 			werfcommon.ShutdownTelemetry(ctx, 2)
+			logs.FlushLogs()
 			os.Exit(2)
-		} else {
+		default:
 			werfcommon.ShutdownTelemetry(ctx, 1)
+			logs.FlushLogs()
 			werfcommon.TerminateWithError(err.Error(), 1)
 		}
 	}
 
 	werfcommon.ShutdownTelemetry(ctx, 0)
-	return nil
 }
 
 func execute() {

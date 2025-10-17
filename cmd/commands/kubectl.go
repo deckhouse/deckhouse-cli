@@ -105,7 +105,9 @@ func NewKubectlCommand() *cobra.Command {
 					fmt.Fprintf(os.Stderr, "Continuing with default kubectl behavior...\n")
 				} else {
 					fmt.Fprintf(os.Stderr, "Using debug container image: %s\n", debugImage)
-					cmd.Flags().Set("image", debugImage)
+					if err := cmd.Flags().Set("image", debugImage); err != nil {
+						_ = err
+					}
 				}
 			}
 		}
@@ -136,7 +138,7 @@ func NewKubectlCommand() *cobra.Command {
 			return pre(cmd, args)
 		}
 	default:
-		kubectlCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		kubectlCmd.PersistentPreRun = func(_ *cobra.Command, _ []string) {
 			logs.InitLogs()
 		}
 	}

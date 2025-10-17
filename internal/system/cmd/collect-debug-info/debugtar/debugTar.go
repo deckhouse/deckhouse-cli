@@ -173,7 +173,10 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface) error {
 	for _, cmd := range debugCommands {
 		fullCommand := append([]string{cmd.Cmd}, cmd.Args...)
 		executor, err := utilk8s.ExecInPod(config, kubeCl, fullCommand, podName, namespace, containerName)
-		if err = executor.StreamWithContext(
+		if err != nil {
+			_ = fmt.Errorf("failed to create executor: %w", err)
+		}
+		if err := executor.StreamWithContext(
 			context.Background(),
 			remotecommand.StreamOptions{
 				Stdout: &stdout,

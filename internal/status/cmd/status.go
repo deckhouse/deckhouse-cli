@@ -64,7 +64,7 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 	restConfig, kubeCl, err := setupK8sClients(cmd)
 	if err != nil {
-		return fmt.Errorf("failed to setup Kubernetes client: %w\n", err)
+		return fmt.Errorf("failed to setup Kubernetes client: %w", err)
 	}
 	color.Cyan("\n┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓")
 	color.Cyan("┃      Cluster Status Report     ┃")
@@ -80,7 +80,7 @@ func executeAll(ctx context.Context, restConfig *rest.Config, kubeCl kubernetes.
 	dynamicClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
 		return []statusresult.StatusResult{
-			{Title: "Error", Output: fmt.Sprintf("Error creating dynamic client: %v\n", err)},
+			{Title: "Error", Output: fmt.Sprintf("Error creating dynamic client: %v", err)},
 		}
 	}
 
@@ -100,17 +100,17 @@ func executeAll(ctx context.Context, restConfig *rest.Config, kubeCl kubernetes.
 func setupK8sClients(cmd *cobra.Command) (*rest.Config, *kubernetes.Clientset, error) {
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get kubeconfig: %w\n", err)
+		return nil, nil, fmt.Errorf("failed to get kubeconfig: %w", err)
 	}
 
 	contextName, err := cmd.Flags().GetString("context")
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get context: %w\n", err)
+		return nil, nil, fmt.Errorf("failed to get context: %w", err)
 	}
 
 	restConfig, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to setup Kubernetes client: %w\n", err)
+		return nil, nil, fmt.Errorf("failed to setup Kubernetes client: %w", err)
 	}
 
 	return restConfig, kubeCl, nil

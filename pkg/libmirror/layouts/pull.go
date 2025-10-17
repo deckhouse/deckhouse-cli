@@ -244,11 +244,11 @@ func PullImageSet(
 	return nil
 }
 
-func splitImageRefByRepoAndTag(imageReferenceString string) (repo, tag string) {
+func splitImageRefByRepoAndTag(imageReferenceString string) (string, string) {
 	splitIndex := strings.LastIndex(imageReferenceString, ":")
-	repo = imageReferenceString[:splitIndex]
-	tag = imageReferenceString[splitIndex+1:]
-	return
+	repo := imageReferenceString[:splitIndex]
+	tag := imageReferenceString[splitIndex+1:]
+	return repo, tag
 }
 
 type pullImageSetOptions struct {

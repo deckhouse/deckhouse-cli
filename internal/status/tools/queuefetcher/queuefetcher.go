@@ -89,7 +89,7 @@ func (q *DeckhouseQueueFetcher) findLeaderPod(ctx context.Context) (string, erro
 	return pods.Items[0].Name, nil
 }
 
-func (q *DeckhouseQueueFetcher) execQueueList(ctx context.Context, podName string) (string, error) {
+func (q *DeckhouseQueueFetcher) execQueueList(_ context.Context, podName string) (string, error) {
 	req := q.kubeCl.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(podName).
@@ -109,7 +109,7 @@ func (q *DeckhouseQueueFetcher) execQueueList(ctx context.Context, podName strin
 		return "", fmt.Errorf("failed to initialize SPDY executor: %w", err)
 	}
 	var stdout, stderr strings.Builder
-	err = exec.Stream(remotecommand.StreamOptions{
+	err = exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
 		Stdout: &stdout,
 		Stderr: &stderr,
 	})

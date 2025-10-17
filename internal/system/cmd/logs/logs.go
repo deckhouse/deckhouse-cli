@@ -68,6 +68,9 @@ func getLogDeckhouse(cmd *cobra.Command, _ []string) error {
 	}
 
 	podName, err := utilk8s.GetDeckhousePod(kubeCl)
+	if err != nil {
+		_ = fmt.Errorf("failed to get deckhouse pod: %w", err)
+	}
 	logOptions := &v1.PodLogOptions{
 		Container: "deckhouse",
 		Follow:    Follow,
@@ -87,14 +90,13 @@ func getLogDeckhouse(cmd *cobra.Command, _ []string) error {
 	req := kubeCl.CoreV1().Pods("d8-system").GetLogs(podName, logOptions)
 	stream, err := req.Stream(context.Background())
 	if err != nil {
-		return fmt.Errorf("Error opening log stream: %v\n", err)
+		return fmt.Errorf("error opening log stream: %v", err)
 	}
 	defer stream.Close()
 
 	_, err = io.Copy(os.Stdout, stream)
 	if err != nil {
-		return fmt.Errorf(
-			"Error reading logs: %v\n", err)
+		return fmt.Errorf("error reading logs: %v", err)
 	}
 	return nil
 }

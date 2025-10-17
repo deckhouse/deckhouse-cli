@@ -17,10 +17,6 @@ limitations under the License.
 package loki
 
 import (
-	"fmt"
-	"os"
-
-	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
 
@@ -49,21 +45,4 @@ func addFlags(flagSet *pflag.FlagSet) {
 		5,
 		"Limit maximum number of days in range to output per queue from Loki. (Default 5 maximum number of days in range per queue.)",
 	)
-}
-
-func validateFlags(cmd *cobra.Command) error {
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
-	stats, err := os.Stat(kubeconfigPath)
-	if err != nil {
-		return fmt.Errorf("Invalid --kubeconfig: %w", err)
-	}
-	if !stats.Mode().IsRegular() {
-		return fmt.Errorf("Invalid --kubeconfig: %s is not a regular file", kubeconfigPath)
-	}
-
-	return nil
 }

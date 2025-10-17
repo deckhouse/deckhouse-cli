@@ -19,7 +19,7 @@ package mirror
 import (
 	"encoding/json"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,7 +156,7 @@ func createSyntheticInstallerImage(t *testing.T, version, repo string) v1.Image 
 func createRandomImageInRegistry(t *testing.T, tag string) (digest string) {
 	t.Helper()
 
-	img, err := random.Image(int64(rand.Intn(1024)+1), int64(rand.Intn(5)+1))
+	img, err := random.Image(int64(rand.IntN(1024)+1), int64(rand.IntN(5)+1))
 	require.NoError(t, err)
 
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(nil, true, false)
