@@ -34,6 +34,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
+	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
@@ -254,7 +255,7 @@ func openChunkedPackage(pushParams *params.PushParams, pkgName string) (io.ReadC
 func push(_ *cobra.Command, _ []string) error {
 	logger := setupLogger()
 	pushParams := buildPushParams(logger)
-
+	logger.Infof("d8 version: %s", version.Version)
 	if RegistryUsername != "" {
 		pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{Username: RegistryUsername, Password: RegistryPassword})
 	}
