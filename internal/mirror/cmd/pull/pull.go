@@ -128,7 +128,7 @@ func NewCommand() *cobra.Command {
 func pull(cmd *cobra.Command, _ []string) error {
 	logger := setupLogger()
 	pullParams := buildPullParams(logger)
-	logger.Infof("d8 version: %s", version.Version)
+	logger.InfoF("d8 version: %s", version.Version)
 	if NoPullResume || lastPullWasTooLongAgoToRetry(pullParams) {
 		if err := os.RemoveAll(pullParams.WorkingDir); err != nil {
 			return fmt.Errorf("Cleanup last unfinished pull data: %w", err)
