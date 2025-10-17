@@ -37,6 +37,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/gostsums"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
+	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
@@ -358,6 +359,7 @@ func NewCommand() *cobra.Command {
 
 func pull(cmd *cobra.Command, _ []string) error {
 	puller := NewPuller(cmd)
+	puller.logger.InfoF("d8 version: %s", version.Version)
 	if err := puller.Execute(); err != nil {
 		return ErrPullFailed
 	}
