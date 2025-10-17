@@ -109,7 +109,7 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 		}
 
 		pkgName := "module-" + name + ".tar"
-		logger.Infof("Packing %s", pkgName)
+		logger.InfoF("Packing %s", pkgName)
 
 		var pkg io.Writer = chunked.NewChunkedFileWriter(pullParams.BundleChunkSize, pullParams.BundleDir, pkgName)
 		if pullParams.BundleChunkSize == 0 {
@@ -153,8 +153,8 @@ func ApplyChannelAliasesIfNeeded(name string, layout layouts.ModuleImageLayout, 
 }
 
 func printModulesList(logger params.Logger, modulesData []modules.Module) {
-	logger.Infof("Repo contains %d modules:", len(modulesData))
+	logger.InfoF("Repo contains %d modules:", len(modulesData))
 	for i, module := range modulesData {
-		logger.Infof("%d:\t%s", i+1, module.Name)
+		logger.InfoF("%d:\t%s", i+1, module.Name)
 	}
 }

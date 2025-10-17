@@ -36,7 +36,7 @@ func NewCommand() *cobra.Command {
 		Use:   "far-convert",
 		Short: "Converts files with Falco rules to FalcoAuditRules CRD format",
 		Long:  convertLong,
-		Args: func(_ *cobra.Command, args []string) error {
+		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("this command requires exactly 1 argument, got %d", len(args))
 			}

@@ -42,7 +42,7 @@ func NewSLogger(logLevel slog.Level) *SLogger {
 	}
 }
 
-func (s *SLogger) Debugf(format string, a ...any) {
+func (s *SLogger) DebugF(format string, a ...any) {
 	s.delegate.Debug(s.formatRecord(format, a...))
 }
 
@@ -50,7 +50,7 @@ func (s *SLogger) DebugLn(a ...any) {
 	s.delegate.Debug(s.formatRecord("", a...))
 }
 
-func (s *SLogger) Infof(format string, a ...any) {
+func (s *SLogger) InfoF(format string, a ...any) {
 	s.delegate.Info(s.formatRecord(format, a...))
 }
 
@@ -58,7 +58,7 @@ func (s *SLogger) InfoLn(a ...any) {
 	s.delegate.Info(s.formatRecord("", a...))
 }
 
-func (s *SLogger) Warnf(format string, a ...any) {
+func (s *SLogger) WarnF(format string, a ...any) {
 	s.delegate.Warn(s.formatRecord(format, a...))
 }
 
@@ -69,8 +69,8 @@ func (s *SLogger) WarnLn(a ...any) {
 func (s *SLogger) Process(topic string, run func() error) error {
 	start := time.Now()
 	s.delegate.Info(strings.Repeat("║", s.processDepth) + "╔ " + topic)
-	s.processDepth++
-	defer func() { s.processDepth-- }()
+	s.processDepth += 1
+	defer func() { s.processDepth -= 1 }()
 	if err := run(); err != nil {
 		s.delegate.Error(
 			strings.Repeat("║", s.processDepth-1)+topic+" failed",

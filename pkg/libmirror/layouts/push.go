@@ -92,23 +92,23 @@ func PushLayoutToRepoContext(
 		if parallelismConfig.Images == 1 {
 			tag := manifestSet[0].Annotations["io.deckhouse.image.short_tag"]
 			imageRef := registryRepo + ":" + tag
-			logger.Infof("[%d / %d] Pushing image %s", imagesCount, len(indexManifest.Manifests), imageRef)
+			logger.InfoF("[%d / %d] Pushing image %s", imagesCount, len(indexManifest.Manifests), imageRef)
 			if err = pushImage(ctx, registryRepo, index, manifestSet[0], refOpts, remoteOpts); err != nil {
 				return fmt.Errorf("Push Image: %w", err)
 			}
-			imagesCount++
+			imagesCount += 1
 			continue
 		}
 
 		err = logger.Process(fmt.Sprintf("Pushing batch %d / %d", batchesCount, len(batches)), func() error {
 			logger.InfoLn("Images in batch:")
 			for _, manifest := range manifestSet {
-				logger.Infof("- %s", registryRepo+":"+manifest.Annotations["io.deckhouse.image.short_tag"])
+				logger.InfoF("- %s", registryRepo+":"+manifest.Annotations["io.deckhouse.image.short_tag"])
 			}
 
 			errMu := &sync.Mutex{}
 			merr := &multierror.Error{}
-			parallel.ForEach(manifestSet, func(item v1.Descriptor, _ int) {
+			parallel.ForEach(manifestSet, func(item v1.Descriptor, i int) {
 				if err = pushImage(ctx, registryRepo, index, item, refOpts, remoteOpts); err != nil {
 					errMu.Lock()
 					defer errMu.Unlock()
@@ -121,7 +121,7 @@ func PushLayoutToRepoContext(
 		if err != nil {
 			return fmt.Errorf("Push batch of images: %w", err)
 		}
-		batchesCount++
+		batchesCount += 1
 		imagesCount += len(manifestSet)
 	}
 
@@ -169,10 +169,10 @@ type silentLogger struct{}
 
 var _ params.Logger = silentLogger{}
 
-func (silentLogger) Debugf(_ string, _ ...interface{})      {}
+func (silentLogger) DebugF(_ string, _ ...interface{})      {}
 func (silentLogger) DebugLn(_ ...interface{})               {}
-func (silentLogger) Infof(_ string, _ ...interface{})       {}
+func (silentLogger) InfoF(_ string, _ ...interface{})       {}
 func (silentLogger) InfoLn(_ ...interface{})                {}
-func (silentLogger) Warnf(_ string, _ ...interface{})       {}
+func (silentLogger) WarnF(_ string, _ ...interface{})       {}
 func (silentLogger) WarnLn(_ ...interface{})                {}
 func (silentLogger) Process(_ string, _ func() error) error { return nil }

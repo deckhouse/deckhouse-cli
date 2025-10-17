@@ -52,8 +52,8 @@ func NewHelpJSONCommand(rootCmd *cobra.Command) *cobra.Command {
 	return helpJSONCmd
 }
 
-func helpJSON(rootCmd *cobra.Command) func(_ *cobra.Command, _ []string) error {
-	return func(_ *cobra.Command, _ []string) error {
+func helpJSON(rootCmd *cobra.Command) func(cmd *cobra.Command, _ []string) error {
+	return func(cmd *cobra.Command, _ []string) error {
 		commandsData := extractCommands(rootCmd.Root())
 		jsonData, err := json.MarshalIndent(commandsData, "", "  ")
 		if err != nil {
