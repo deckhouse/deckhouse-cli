@@ -37,6 +37,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/gostsums"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
+	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
@@ -127,7 +128,7 @@ func NewCommand() *cobra.Command {
 func pull(cmd *cobra.Command, _ []string) error {
 	logger := setupLogger()
 	pullParams := buildPullParams(logger)
-
+	logger.Infof("d8 version: %s", version.Version)
 	if NoPullResume || lastPullWasTooLongAgoToRetry(pullParams) {
 		if err := os.RemoveAll(pullParams.WorkingDir); err != nil {
 			return fmt.Errorf("Cleanup last unfinished pull data: %w", err)
