@@ -51,11 +51,11 @@ func Open(baseDir, baseFileName string) (*FileReader, error) {
 		}
 
 		chunks = append(chunks, chunk)
-		chunkIndex++
+		chunkIndex += 1
 	}
 }
 
-func (f *FileReader) Read(p []byte) (int, error) {
+func (f *FileReader) Read(p []byte) (n int, err error) {
 	return f.multiRd.Read(p)
 }
 
