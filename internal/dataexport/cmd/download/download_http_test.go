@@ -22,6 +22,23 @@ import (
 func newNoAuthSafe() *safereq.SafeClient {
 	// Ensure that SafeClient allows unauthenticated HTTP requests during unit tests.
 	safereq.SupportNoAuth = true
+	// Create a temporary empty kubeconfig to prevent loading real auth
+	tmpDir := os.TempDir()
+	emptyKubeconfig := filepath.Join(tmpDir, "empty-kubeconfig")
+	os.WriteFile(emptyKubeconfig, []byte(""), 0644)
+	defer os.Remove(emptyKubeconfig)
+
+	// Set KUBECONFIG to empty file to prevent loading real kubeconfig
+	oldKubeconfig := os.Getenv("KUBECONFIG")
+	os.Setenv("KUBECONFIG", emptyKubeconfig)
+	defer func() {
+		if oldKubeconfig != "" {
+			os.Setenv("KUBECONFIG", oldKubeconfig)
+		} else {
+			os.Unsetenv("KUBECONFIG")
+		}
+	}()
+
 	sc, _ := safereq.NewSafeClient()
 	return sc.Copy()
 }
