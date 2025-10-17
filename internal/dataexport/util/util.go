@@ -272,17 +272,18 @@ func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 	}
 }
 
-func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace string, public bool, rtClient ctrlrtclient.Client) (podURL, volumeMode, internalCAData string, err error) {
+func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace string, public bool, rtClient ctrlrtclient.Client) (string, string, string, error) {
 	log.Info("Waiting for DataExport to be ready", slog.String("name", deName), slog.String("namespace", namespace))
 	deObj, err := GetDataExportWithRestart(ctx, deName, namespace, rtClient)
 	if err != nil {
-		return
+		return "", "", "", err
 	}
+
+	var podURL, volumeMode, internalCAData string
 
 	if public {
 		if deObj.Status.PublicURL == "" {
-			err = fmt.Errorf("empty PublicURL")
-			return
+			return "", "", "", fmt.Errorf("empty PublicURL")
 		}
 		podURL = deObj.Status.PublicURL
 		if !strings.HasPrefix(podURL, "http") {
@@ -292,66 +293,59 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 		podURL = deObj.Status.URL
 		internalCAData = deObj.Status.CA
 	} else {
-		err = fmt.Errorf("invalid URL")
-		return
+		return "", "", "", fmt.Errorf("invalid URL")
 	}
 
 	volumeKind := deObj.Spec.TargetRef.Kind
 	if !slices.Contains([]string{PersistentVolumeClaimKind, VolumeSnapshotKind, VirtualDiskKind, VirtualDiskSnapshotKind}, volumeKind) {
-		err = fmt.Errorf("invalid volume kind: %s", volumeKind)
-		return
+		return "", "", "", fmt.Errorf("invalid volume kind: %s", volumeKind)
 	}
 
 	volumeMode = deObj.Status.VolumeMode
 	log.Info("DataExport is ready", slog.String("name", deName), slog.String("namespace", namespace), slog.String("url", podURL), slog.String("volumeMode", volumeMode))
-	return
+	return podURL, volumeMode, internalCAData, nil
 }
 
-func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, sClient *safeClient.SafeClient) (url, volumeMode string, subClient *safeClient.SafeClient, finErr error) {
+func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, sClient *safeClient.SafeClient) (string, string, *safeClient.SafeClient, error) {
 	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {
-		finErr = err
-		return
+		return "", "", nil, err
 	}
 
 	podURL, volumeMode, intrenalCAData, err := getExportStatus(ctx, log, deName, namespace, publish, rtClient)
 	if err != nil {
-		finErr = err
-		return
+		return "", "", nil, err
 	}
 
+	var url string
 	// Validate srcPath, dstPath params
 	switch volumeMode {
 	case "Filesystem":
 		url, err = neturl.JoinPath(podURL, "api/v1/files")
 		if err != nil {
-			finErr = err
-			return
+			return "", "", nil, err
 		}
 	case "Block":
 		url, err = neturl.JoinPath(podURL, "api/v1/block")
 		if err != nil {
-			finErr = err
-			return
+			return "", "", nil, err
 		}
 	default:
-		finErr = fmt.Errorf("%w: '%s'", ErrUnsupportedVolumeMode, volumeMode)
-		return
+		return "", "", nil, fmt.Errorf("%w: '%s'", ErrUnsupportedVolumeMode, volumeMode)
 	}
 
 	// Reuse the original SafeClient unless we need to inject additional CA.
-	subClient = sClient
+	subClient := sClient
 
 	if !publish && len(intrenalCAData) > 0 {
 		// Create an isolated copy to avoid mutating the original client
 		subClient = sClient.Copy()
 		decodedBytes, err := base64.StdEncoding.DecodeString(intrenalCAData)
 		if err != nil {
-			finErr = fmt.Errorf("CA decoding error: %s", err.Error())
-			return
+			return "", "", nil, fmt.Errorf("CA decoding error: %s", err.Error())
 		}
 		subClient.SetTLSCAData(decodedBytes)
 	}
 
-	return
+	return url, volumeMode, subClient, nil
 }

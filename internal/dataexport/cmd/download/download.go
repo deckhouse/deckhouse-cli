@@ -79,7 +79,8 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	return cmd
 }
 
-func parseArgs(args []string) (deName, srcPath string, err error) {
+func parseArgs(args []string) (string, string, error) {
+	var deName, srcPath string
 	switch len(args) {
 	case 1:
 		deName = args[0]
@@ -94,7 +95,7 @@ func parseArgs(args []string) (deName, srcPath string, err error) {
 		srcPath = "/" + srcPath
 	}
 
-	return
+	return deName, srcPath, nil
 }
 
 type dirItem struct {
@@ -155,7 +156,7 @@ func forRespItems(jsonStream io.ReadCloser, workFunc func(*dirItem) error) error
 	return nil
 }
 
-func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log *slog.Logger, sem chan struct{}, url, srcPath, dstPath string) (err error) {
+func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log *slog.Logger, sem chan struct{}, url, srcPath, dstPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

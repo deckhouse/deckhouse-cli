@@ -105,8 +105,8 @@ func FindExternalModuleImages(
 	filter *Filter,
 	authProvider authn.Authenticator,
 	insecure, skipVerifyTLS bool,
-) (moduleImages, releaseImages map[string]struct{}, err error) {
-	moduleImages, releaseImages = map[string]struct{}{}, map[string]struct{}{}
+) (map[string]struct{}, map[string]struct{}, error) {
+	moduleImages, releaseImages := map[string]struct{}{}, map[string]struct{}{}
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
 
 	// Check if specific versions are requested (explicit tags)
@@ -216,8 +216,8 @@ func FindModuleExtraImages(
 	moduleImages map[string]struct{},
 	authProvider authn.Authenticator,
 	insecure, skipVerifyTLS bool,
-) (extraImages map[string]struct{}, err error) {
-	extraImages = map[string]struct{}{}
+) (map[string]struct{}, error) {
+	extraImages := map[string]struct{}{}
 	_, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
 
 	// Try to extract extra_images.json from any available module version

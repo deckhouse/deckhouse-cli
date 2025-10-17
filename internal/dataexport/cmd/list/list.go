@@ -70,18 +70,17 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	return cmd
 }
 
-func parseArgs(args []string) (deName, srcPath string, err error) {
+func parseArgs(args []string) (string, string, error) {
 	if len(args) < 1 || len(args) > 2 {
-		err = fmt.Errorf("invalid arguments")
-		return
+		return "", "", fmt.Errorf("invalid arguments")
 	}
 
-	deName, srcPath = args[0], ""
+	deName, srcPath := args[0], ""
 	if len(args) >= 2 {
 		srcPath = args[1]
 	}
 
-	return
+	return deName, srcPath, nil
 }
 
 func downloadFunc(
