@@ -108,7 +108,7 @@ func PushLayoutToRepoContext(
 
 			errMu := &sync.Mutex{}
 			merr := &multierror.Error{}
-			parallel.ForEach(manifestSet, func(item v1.Descriptor, i int) {
+			parallel.ForEach(manifestSet, func(item v1.Descriptor, _ int) {
 				if err = pushImage(ctx, registryRepo, index, item, refOpts, remoteOpts); err != nil {
 					errMu.Lock()
 					defer errMu.Unlock()

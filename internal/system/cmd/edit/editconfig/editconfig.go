@@ -17,7 +17,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
-func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
+func BaseEditConfigCMD(cmd *cobra.Command, _, secret, dataKey string) error {
 	editor, err := cmd.Flags().GetString("editor")
 	if err != nil {
 		return fmt.Errorf("Failed to get editor from --editor flag: %w", err)

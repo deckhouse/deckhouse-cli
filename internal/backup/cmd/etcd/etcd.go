@@ -54,7 +54,7 @@ func NewCommand() *cobra.Command {
 		ValidArgs:     []string{"snapshot-path"},
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		PreRunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return validateFlags(cmd)
 		},
 		RunE: etcd,

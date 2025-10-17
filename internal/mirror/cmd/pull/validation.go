@@ -135,7 +135,7 @@ func validateChunkSizeFlag() error {
 	return nil
 }
 
-func validateTmpPath(args []string) error {
+func validateTmpPath(_ []string) error {
 	if TempDir == "" {
 		TempDir = filepath.Join(ImagesBundlePath, ".tmp", "mirror")
 	}

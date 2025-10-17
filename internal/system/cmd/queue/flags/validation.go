@@ -22,7 +22,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func ValidateParameters(cmd *cobra.Command, args []string) error {
+func ValidateParameters(cmd *cobra.Command, _ []string) error {
 	var allowedOutput = map[string]bool{
 		"json": true,
 		"yaml": true,

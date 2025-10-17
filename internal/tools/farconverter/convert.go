@@ -77,7 +77,7 @@ type List struct {
 	Items []any  `yaml:"items"`
 }
 
-func Convert(cmd *cobra.Command, args []string) error {
+func Convert(_ *cobra.Command, args []string) error {
 	input := args[0]
 	var rules []RawRule
 	log.Printf("Convert rules from %q", input)

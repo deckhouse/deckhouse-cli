@@ -338,7 +338,7 @@ func getLogWithRetry(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 
 	err = retry.RunTask(Logger,
 		"error get json response from Loki",
-		task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
+		task.WithConstantRetries(5, 10*time.Second, func(_ context.Context) error {
 			QueryRangeDump, SeriesAPIDump, err = getLogTimestamp(config, kubeCl, fullCommand)
 			if err != nil {
 				return fmt.Errorf("error get JSON response from loki: %w", err)

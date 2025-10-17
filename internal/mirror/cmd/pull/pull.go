@@ -289,7 +289,7 @@ func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger) ([]str
 	}
 	logger.InfoF("Deckhouse releases to pull: %+v", versionsToMirror)
 
-	return lo.Map(versionsToMirror, func(v semver.Version, index int) string {
+	return lo.Map(versionsToMirror, func(v semver.Version, _ int) string {
 		return "v" + v.String()
 	}), nil
 }

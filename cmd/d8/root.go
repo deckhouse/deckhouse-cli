@@ -79,7 +79,7 @@ func NewRootCommand() *RootCommand {
 		Version:       version.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(cmd *cobra.Command, _ []string) {
 			cmd.Help()
 		},
 	}
