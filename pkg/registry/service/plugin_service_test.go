@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package plugins_test
+package service_test
 
 import (
 	"archive/tar"
@@ -30,9 +30,9 @@ import (
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 
-	"github.com/deckhouse/deckhouse-cli/internal/plugins"
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/mock"
+	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 func TestGetPluginContract_Success(t *testing.T) {
@@ -67,7 +67,7 @@ func TestGetPluginContract_Success(t *testing.T) {
 		Return(mockScopedClient)
 
 	logger := log.NewNop()
-	service := plugins.NewPluginService(mockClient, logger)
+	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
 	plugin, err := service.GetPluginContract(context.Background(), "test-plugin", "v1.0.0")
@@ -142,7 +142,7 @@ func TestGetPluginContract_MinimalContract(t *testing.T) {
 		Return(mockScopedClient)
 
 	logger := log.NewNop()
-	service := plugins.NewPluginService(mockClient, logger)
+	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
 	plugin, err := service.GetPluginContract(context.Background(), "minimal-plugin", "v1.0.0")
@@ -189,7 +189,7 @@ func TestGetPluginContract_LabelNotFound(t *testing.T) {
 		Return(mockScopedClient)
 
 	logger := log.NewNop()
-	service := plugins.NewPluginService(mockClient, logger)
+	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
 	plugin, err := service.GetPluginContract(context.Background(), "test-plugin", "v1.0.0")
@@ -230,7 +230,7 @@ func TestGetPluginContract_GetLabelError(t *testing.T) {
 		Return(mockScopedClient)
 
 	logger := log.NewNop()
-	service := plugins.NewPluginService(mockClient, logger)
+	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
 	plugin, err := service.GetPluginContract(context.Background(), "test-plugin", "v1.0.0")
@@ -269,7 +269,7 @@ func TestGetPluginContract_InvalidJSON(t *testing.T) {
 		Return(mockScopedClient)
 
 	logger := log.NewNop()
-	service := plugins.NewPluginService(mockClient, logger)
+	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
 	plugin, err := service.GetPluginContract(context.Background(), "test-plugin", "v1.0.0")
@@ -304,7 +304,7 @@ func TestGetPluginContract_EmptyJSON(t *testing.T) {
 		Return(mockScopedClient)
 
 	logger := log.NewNop()
-	service := plugins.NewPluginService(mockClient, logger)
+	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
 	plugin, err := service.GetPluginContract(context.Background(), "test-plugin", "v1.0.0")
@@ -382,7 +382,7 @@ func TestExtractPlugin_Success(t *testing.T) {
 		Return(mockScopedClient)
 
 	logger := log.NewNop()
-	service := plugins.NewPluginService(mockClient, logger)
+	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
 	err = service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir)
@@ -490,7 +490,7 @@ func TestExtractPlugin_MultipleLayersSuccess(t *testing.T) {
 		Return(mockScopedClient)
 
 	logger := log.NewNop()
-	service := plugins.NewPluginService(mockClient, logger)
+	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
 	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir)
@@ -551,7 +551,7 @@ func TestExtractPlugin_ExtractImageLayersError(t *testing.T) {
 		Return(mockScopedClient)
 
 	logger := log.NewNop()
-	service := plugins.NewPluginService(mockClient, logger)
+	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
 	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir)
@@ -612,7 +612,7 @@ func TestExtractPlugin_PathTraversalAttempt(t *testing.T) {
 		Return(mockScopedClient)
 
 	logger := log.NewNop()
-	service := plugins.NewPluginService(mockClient, logger)
+	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
 	err = service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir)
@@ -640,7 +640,7 @@ func TestExtractPlugin_CreateDestinationError(t *testing.T) {
 	// ExtractImageLayers should not be called
 
 	logger := log.NewNop()
-	service := plugins.NewPluginService(mockClient, logger)
+	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
 	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", invalidDir)
@@ -685,7 +685,7 @@ func TestExtractPlugin_EmptyRepository(t *testing.T) {
 		Return(mockScopedClient)
 
 	logger := log.NewNop()
-	service := plugins.NewPluginService(mockClient, logger)
+	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
 	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir)
@@ -765,7 +765,7 @@ func TestExtractPlugin_NestedDirectories(t *testing.T) {
 		Return(mockScopedClient)
 
 	logger := log.NewNop()
-	service := plugins.NewPluginService(mockClient, logger)
+	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
 	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir)

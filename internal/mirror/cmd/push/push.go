@@ -55,7 +55,7 @@ var (
 	ImagesBundlePath string
 )
 
-var pushLong = `Upload Deckhouse Kubernetes Platform distribution bundle to the third-party registry.
+const pushLong = `Upload Deckhouse Kubernetes Platform distribution bundle to the third-party registry.
 
 This command pushes the Deckhouse Kubernetes Platform distribution into the specified container registry.
 
@@ -91,7 +91,9 @@ func NewCommand() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		PreRunE:       parseAndValidateParameters,
-		RunE:          push,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return NewPusher().Execute()
+		},
 		PostRunE: func(_ *cobra.Command, _ []string) error {
 			return os.RemoveAll(TempDir)
 		},
@@ -252,28 +254,63 @@ func openChunkedPackage(pushParams *params.PushParams, pkgName string) (io.ReadC
 	return pkg, nil
 }
 
-func push(_ *cobra.Command, _ []string) error {
+// Pusher handles the push operation for Deckhouse distribution
+type Pusher struct {
+	logger     params.Logger
+	pushParams *params.PushParams
+}
+
+// NewPusher creates a new Pusher instance
+func NewPusher() *Pusher {
 	logger := setupLogger()
 	pushParams := buildPushParams(logger)
-	logger.InfoF("d8 version: %s", version.Version)
+	return &Pusher{
+		logger:     logger,
+		pushParams: pushParams,
+	}
+}
+
+// Execute runs the full push process
+func (p *Pusher) Execute() error {
+	p.logger.InfoF("d8 version: %s", version.Version)
+
 	if RegistryUsername != "" {
-		pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{Username: RegistryUsername, Password: RegistryPassword})
+		p.pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{Username: RegistryUsername, Password: RegistryPassword})
 	}
 
-	logger.InfoLn("Validating registry access")
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := validateRegistryAccess(ctx, pushParams); err != nil && os.Getenv("MIRROR_BYPASS_ACCESS_CHECKS") != "1" {
-		return fmt.Errorf("registry credentials validation failure: %w", err)
-	}
-
-	if err := pushStaticPackages(pushParams, logger); err != nil {
+	if err := p.validateRegistryAccess(); err != nil {
 		return err
 	}
 
-	if err := pushModules(pushParams, logger); err != nil {
+	if err := p.pushStaticPackages(); err != nil {
+		return err
+	}
+
+	if err := p.pushModules(); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// validateRegistryAccess validates access to the registry
+func (p *Pusher) validateRegistryAccess() error {
+	p.logger.InfoLn("Validating registry access")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	err := validateRegistryAccess(ctx, p.pushParams)
+	if err != nil && os.Getenv("MIRROR_BYPASS_ACCESS_CHECKS") != "1" {
+		return fmt.Errorf("registry credentials validation failure: %w", err)
+	}
+	return nil
+}
+
+// pushStaticPackages pushes platform and security packages
+func (p *Pusher) pushStaticPackages() error {
+	return pushStaticPackages(p.pushParams, p.logger)
+}
+
+// pushModules pushes module packages
+func (p *Pusher) pushModules() error {
+	return pushModules(p.pushParams, p.logger)
 }

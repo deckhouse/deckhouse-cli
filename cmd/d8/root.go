@@ -42,12 +42,12 @@ import (
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
 	dataexport "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
-	intplugins "github.com/deckhouse/deckhouse-cli/internal/plugins"
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
 	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg"
+	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 type RootCommand struct {
@@ -55,7 +55,7 @@ type RootCommand struct {
 	logger *dkplog.Logger
 
 	pluginRegistryClient pkg.RegistryClient
-	pluginService        *intplugins.PluginService
+	registryService      *registryservice.Service
 }
 
 func NewRootCommand() *RootCommand {
@@ -108,7 +108,7 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(commands.NewStrongholdCommand())
 	r.cmd.AddCommand(commands.NewHelpJSONCommand(r.cmd))
 
-	r.cmd.AddCommand(plugins.NewPluginsCommand(r.pluginService, r.logger.Named("plugins-command")))
+	r.cmd.AddCommand(plugins.NewPluginsCommand(r.registryService.PluginService(), r.logger.Named("plugins-command")))
 }
 
 func (r *RootCommand) Execute() error {

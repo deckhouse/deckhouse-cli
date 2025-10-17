@@ -80,7 +80,7 @@ var (
 	OnlyExtraImages bool
 )
 
-var pullLong = `Download Deckhouse Kubernetes Platform distribution to the local filesystem.
+const pullLong = `Download Deckhouse Kubernetes Platform distribution to the local filesystem.
 		
 This command downloads the Deckhouse Kubernetes Platform distribution bundle 
 containing specific platform releases and it's modules, 
@@ -126,147 +126,11 @@ func NewCommand() *cobra.Command {
 }
 
 func pull(cmd *cobra.Command, _ []string) error {
-	logger := setupLogger()
-	pullParams := buildPullParams(logger)
-	logger.InfoF("d8 version: %s", version.Version)
-	if NoPullResume || lastPullWasTooLongAgoToRetry(pullParams) {
-		if err := os.RemoveAll(pullParams.WorkingDir); err != nil {
-			return fmt.Errorf("Cleanup last unfinished pull data: %w", err)
-		}
+	puller := NewPuller(cmd)
+	puller.logger.InfoF("d8 version: %s", version.Version)
+	if err := puller.Execute(); err != nil {
+		return ErrPullFailed
 	}
-
-	accessValidator := validation.NewRemoteRegistryAccessValidator()
-	validationOpts := []validation.Option{
-		validation.UseAuthProvider(pullParams.RegistryAuth),
-		validation.WithInsecure(pullParams.Insecure),
-		validation.WithTLSVerificationSkip(pullParams.SkipTLSVerification),
-	}
-
-	if !pullParams.SkipPlatform {
-		if err := logger.Process("Pull Deckhouse Kubernetes Platform", func() error {
-			targetTag := "stable"
-			if pullParams.DeckhouseTag != "" {
-				targetTag = pullParams.DeckhouseTag
-			}
-			imageRef := pullParams.DeckhouseRegistryRepo + ":" + targetTag
-			ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
-			defer cancel()
-			if err := accessValidator.ValidateReadAccessForImage(ctx, imageRef, validationOpts...); err != nil {
-				return fmt.Errorf("Source registry is not accessible: %w", err)
-			}
-
-			tagsToMirror, err := findTagsToMirror(pullParams, logger)
-			if err != nil {
-				return fmt.Errorf("Find tags to mirror: %w", err)
-			}
-			if err = operations.PullDeckhousePlatform(pullParams, tagsToMirror); err != nil {
-				return err
-			}
-			return nil
-		}); err != nil {
-			return ErrPullFailed
-		}
-	}
-
-	if !pullParams.SkipSecurityDatabases {
-		if err := logger.Process("Pull Security Databases", func() error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
-			defer cancel()
-
-			imageRef := pullParams.DeckhouseRegistryRepo + "/security/trivy-db:2"
-			err := accessValidator.ValidateReadAccessForImage(ctx, imageRef, validationOpts...)
-			switch {
-			case errors.Is(err, validation.ErrImageUnavailable):
-				logger.WarnF("Skipping pull of security databases: %v", err)
-				return nil
-			case err != nil:
-				return fmt.Errorf("Source registry is not accessible: %w", err)
-			}
-
-			if err := operations.PullSecurityDatabases(pullParams); err != nil {
-				return err
-			}
-			return nil
-		}); err != nil {
-			return ErrPullFailed
-		}
-	}
-
-	if !pullParams.SkipModules || pullParams.OnlyExtraImages {
-		processName := "Pull Modules"
-		if pullParams.OnlyExtraImages {
-			processName = "Pull Extra Images"
-		}
-		if err := logger.Process(processName, func() error {
-			modulesRepo := path.Join(pullParams.DeckhouseRegistryRepo, pullParams.ModulesPathSuffix)
-			ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
-			defer cancel()
-			if err := accessValidator.ValidateListAccessForRepo(ctx, modulesRepo, validationOpts...); err != nil {
-				return fmt.Errorf("Source registry is not accessible: %w", err)
-			}
-
-			filterExpressions := ModulesBlacklist
-			filterType := modules.FilterTypeBlacklist
-			if ModulesWhitelist != nil {
-				filterExpressions = ModulesWhitelist
-				filterType = modules.FilterTypeWhitelist
-			}
-
-			filter, err := modules.NewFilter(filterExpressions, filterType)
-			if err != nil {
-				return fmt.Errorf("Prepare module filter: %w", err)
-			}
-			return operations.PullModules(pullParams, filter)
-		}); err != nil {
-			return ErrPullFailed
-		}
-	}
-
-	if !DoGOSTDigest {
-		return nil
-	}
-
-	if err := logger.Process("Compute GOST digests for bundle", func() error {
-		bundleDirContents, err := os.ReadDir(pullParams.BundleDir)
-		if err != nil {
-			return fmt.Errorf("Read Deckhouse Kubernetes Platform distribution bundle: %w", err)
-		}
-
-		bundlePackages := lo.Filter(bundleDirContents, func(item os.DirEntry, _ int) bool {
-			ext := filepath.Ext(item.Name())
-			return ext == ".tar" || ext == ".chunk"
-		})
-
-		merr := &multierror.Error{}
-		parallel.ForEach(bundlePackages, func(bundlePackage os.DirEntry, _ int) {
-			file, err := os.Open(filepath.Join(pullParams.BundleDir, bundlePackage.Name()))
-			if err != nil {
-				merr = multierror.Append(merr, fmt.Errorf("Read Deckhouse Kubernetes Platform distribution bundle: %w", err))
-			}
-
-			digest, err := gostsums.CalculateBlobGostDigest(file)
-			if err != nil {
-				merr = multierror.Append(merr, fmt.Errorf("Calculate digest: %w", err))
-			}
-
-			if err = os.WriteFile(
-				filepath.Join(pullParams.BundleDir, bundlePackage.Name())+".gostsum",
-				[]byte(digest),
-				0o644,
-			); err != nil {
-				merr = multierror.Append(merr, fmt.Errorf("Could not write digest to .gostsum file: %w", err))
-			}
-		})
-		return merr.ErrorOrNil()
-	}); err != nil {
-		return fmt.Errorf("Compute GOST digests for bundle: %w", err)
-	}
-
-	err := os.RemoveAll(TempDir)
-	if err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -284,7 +148,7 @@ func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger) ([]str
 		return []string{pullParams.DeckhouseTag}, nil
 	}
 
-	versionsToMirror, err := releases.VersionsToMirror(pullParams)
+	versionsToMirror, err := versionsToMirrorFunc(pullParams)
 	if err != nil {
 		return nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}
@@ -350,4 +214,236 @@ func lastPullWasTooLongAgoToRetry(pullParams *params.PullParams) bool {
 	}
 
 	return time.Since(s.ModTime()) > 24*time.Hour
+}
+
+// versionsToMirrorFunc allows mocking releases.VersionsToMirror in tests
+var versionsToMirrorFunc = releases.VersionsToMirror
+
+// Puller encapsulates the logic for pulling Deckhouse components
+type Puller struct {
+	cmd             *cobra.Command
+	logger          *log.SLogger
+	params          *params.PullParams
+	accessValidator *validation.RemoteRegistryAccessValidator
+	validationOpts  []validation.Option
+}
+
+// NewPuller creates a new Puller instance
+func NewPuller(cmd *cobra.Command) *Puller {
+	logger := setupLogger()
+	pullParams := buildPullParams(logger)
+
+	return &Puller{
+		cmd:             cmd,
+		logger:          logger,
+		params:          pullParams,
+		accessValidator: validation.NewRemoteRegistryAccessValidator(),
+		validationOpts: []validation.Option{
+			validation.UseAuthProvider(pullParams.RegistryAuth),
+			validation.WithInsecure(pullParams.Insecure),
+			validation.WithTLSVerificationSkip(pullParams.SkipTLSVerification),
+		},
+	}
+}
+func (p *Puller) Execute() error {
+	if err := p.cleanupWorkingDirectory(); err != nil {
+		return err
+	}
+
+	if err := p.pullPlatform(); err != nil {
+		return err
+	}
+
+	if err := p.pullSecurityDatabases(); err != nil {
+		return err
+	}
+
+	if err := p.pullModules(); err != nil {
+		return err
+	}
+
+	if err := p.computeGOSTDigests(); err != nil {
+		return err
+	}
+
+	return p.finalCleanup()
+}
+
+// cleanupWorkingDirectory handles cleanup of the working directory if needed
+func (p *Puller) cleanupWorkingDirectory() error {
+	if NoPullResume || lastPullWasTooLongAgoToRetry(p.params) {
+		if err := os.RemoveAll(p.params.WorkingDir); err != nil {
+			return fmt.Errorf("Cleanup last unfinished pull data: %w", err)
+		}
+	}
+	return nil
+}
+
+// pullPlatform pulls the Deckhouse platform components
+func (p *Puller) pullPlatform() error {
+	if p.params.SkipPlatform {
+		return nil
+	}
+
+	return p.logger.Process("Pull Deckhouse Kubernetes Platform", func() error {
+		if err := p.validatePlatformAccess(); err != nil {
+			return err
+		}
+
+		tagsToMirror, err := findTagsToMirror(p.params, p.logger)
+		if err != nil {
+			return fmt.Errorf("Find tags to mirror: %w", err)
+		}
+
+		if err = operations.PullDeckhousePlatform(p.params, tagsToMirror); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+// validatePlatformAccess validates access to the platform registry
+func (p *Puller) validatePlatformAccess() error {
+	targetTag := "stable"
+	if p.params.DeckhouseTag != "" {
+		targetTag = p.params.DeckhouseTag
+	}
+	imageRef := p.params.DeckhouseRegistryRepo + ":" + targetTag
+
+	ctx, cancel := context.WithTimeout(p.cmd.Context(), 15*time.Second)
+	defer cancel()
+
+	if err := p.accessValidator.ValidateReadAccessForImage(ctx, imageRef, p.validationOpts...); err != nil {
+		return fmt.Errorf("Source registry is not accessible: %w", err)
+	}
+	return nil
+}
+
+// pullSecurityDatabases pulls the security databases
+func (p *Puller) pullSecurityDatabases() error {
+	if p.params.SkipSecurityDatabases {
+		return nil
+	}
+
+	return p.logger.Process("Pull Security Databases", func() error {
+		ctx, cancel := context.WithTimeout(p.cmd.Context(), 15*time.Second)
+		defer cancel()
+
+		imageRef := p.params.DeckhouseRegistryRepo + "/security/trivy-db:2"
+		err := p.accessValidator.ValidateReadAccessForImage(ctx, imageRef, p.validationOpts...)
+		switch {
+		case errors.Is(err, validation.ErrImageUnavailable):
+			p.logger.WarnF("Skipping pull of security databases: %v", err)
+			return nil
+		case err != nil:
+			return fmt.Errorf("Source registry is not accessible: %w", err)
+		}
+
+		if err := operations.PullSecurityDatabases(p.params); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+// pullModules pulls the Deckhouse modules
+func (p *Puller) pullModules() error {
+	if p.params.SkipModules && !p.params.OnlyExtraImages {
+		return nil
+	}
+
+	processName := "Pull Modules"
+	if p.params.OnlyExtraImages {
+		processName = "Pull Extra Images"
+	}
+
+	return p.logger.Process(processName, func() error {
+		if err := p.validateModulesAccess(); err != nil {
+			return err
+		}
+
+		filter, err := p.createModuleFilter()
+		if err != nil {
+			return err
+		}
+
+		return operations.PullModules(p.params, filter)
+	})
+}
+
+// validateModulesAccess validates access to the modules registry
+func (p *Puller) validateModulesAccess() error {
+	modulesRepo := path.Join(p.params.DeckhouseRegistryRepo, p.params.ModulesPathSuffix)
+	ctx, cancel := context.WithTimeout(p.cmd.Context(), 15*time.Second)
+	defer cancel()
+
+	if err := p.accessValidator.ValidateListAccessForRepo(ctx, modulesRepo, p.validationOpts...); err != nil {
+		return fmt.Errorf("Source registry is not accessible: %w", err)
+	}
+	return nil
+}
+
+// createModuleFilter creates the appropriate module filter based on whitelist/blacklist
+func (p *Puller) createModuleFilter() (*modules.Filter, error) {
+	filterExpressions := ModulesBlacklist
+	filterType := modules.FilterTypeBlacklist
+	if ModulesWhitelist != nil {
+		filterExpressions = ModulesWhitelist
+		filterType = modules.FilterTypeWhitelist
+	}
+
+	filter, err := modules.NewFilter(filterExpressions, filterType)
+	if err != nil {
+		return nil, fmt.Errorf("Prepare module filter: %w", err)
+	}
+	return filter, nil
+}
+
+// computeGOSTDigests computes GOST digests for the bundle if enabled
+func (p *Puller) computeGOSTDigests() error {
+	if !DoGOSTDigest {
+		return nil
+	}
+
+	return p.logger.Process("Compute GOST digests for bundle", func() error {
+		bundleDirContents, err := os.ReadDir(p.params.BundleDir)
+		if err != nil {
+			return fmt.Errorf("Read Deckhouse Kubernetes Platform distribution bundle: %w", err)
+		}
+
+		bundlePackages := lo.Filter(bundleDirContents, func(item os.DirEntry, _ int) bool {
+			ext := filepath.Ext(item.Name())
+			return ext == ".tar" || ext == ".chunk"
+		})
+
+		merr := &multierror.Error{}
+		parallel.ForEach(bundlePackages, func(bundlePackage os.DirEntry, _ int) {
+			file, err := os.Open(filepath.Join(p.params.BundleDir, bundlePackage.Name()))
+			if err != nil {
+				merr = multierror.Append(merr, fmt.Errorf("Read Deckhouse Kubernetes Platform distribution bundle: %w", err))
+			}
+
+			digest, err := gostsums.CalculateBlobGostDigest(file)
+			if err != nil {
+				merr = multierror.Append(merr, fmt.Errorf("Calculate digest: %w", err))
+			}
+
+			if err = os.WriteFile(
+				filepath.Join(p.params.BundleDir, bundlePackage.Name())+".gostsum",
+				[]byte(digest),
+				0o644,
+			); err != nil {
+				merr = multierror.Append(merr, fmt.Errorf("Could not write digest to .gostsum file: %w", err))
+			}
+		})
+		return merr.ErrorOrNil()
+	})
+}
+
+// finalCleanup performs final cleanup of temporary directories
+func (p *Puller) finalCleanup() error {
+	if err := os.RemoveAll(TempDir); err != nil {
+		return err
+	}
+	return nil
 }

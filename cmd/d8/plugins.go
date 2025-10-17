@@ -25,8 +25,8 @@ import (
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
 	d8flags "github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
-	intplugins "github.com/deckhouse/deckhouse-cli/internal/plugins"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	intplugins "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 func (r *RootCommand) initPluginServices() {
@@ -79,15 +79,14 @@ func (r *RootCommand) initPluginServices() {
 	// Example: registry.deckhouse.io -> deckhouse -> ee -> modules
 	r.pluginRegistryClient = baseClient.
 		WithScope("deckhouse").
-		WithScope("ee").
-		WithScope("modules")
+		WithScope("ee")
 
 	r.logger.Debug("Creating plugin service with scoped client",
 		slog.String("scope_path", "deckhouse/ee/modules"))
 
-	r.pluginService = intplugins.NewPluginService(
+	r.registryService = intplugins.NewService(
 		r.pluginRegistryClient,
-		r.logger.Named("plugin-service"),
+		r.logger.Named("registry-service"),
 	)
 
 	r.logger.Debug("Plugin services initialized successfully")

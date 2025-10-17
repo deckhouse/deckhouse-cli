@@ -26,11 +26,11 @@ import (
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
-	"github.com/deckhouse/deckhouse-cli/internal/plugins"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 type PluginsCommand struct {
-	service *plugins.PluginService
+	service *service.PluginService
 	log     *dkplog.Logger
 }
 
@@ -54,7 +54,7 @@ type pluginsListData struct {
 	AvailableFailed  int
 }
 
-func NewPluginsCommand(service *plugins.PluginService, logger *dkplog.Logger) *cobra.Command {
+func NewPluginsCommand(service *service.PluginService, logger *dkplog.Logger) *cobra.Command {
 	pc := &PluginsCommand{
 		service: service,
 		log:     logger,
