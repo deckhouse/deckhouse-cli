@@ -21,9 +21,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
-	"math/rand"
 	"os"
-	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -113,8 +111,6 @@ func (r *RootCommand) registerCommands() {
 
 func (r *RootCommand) Execute() {
 	ctx := r.cmd.Context()
-
-	rand.Seed(time.Now().UnixNano())
 
 	if shouldTerminate, err := werfcommon.ContainerBackendProcessStartupHook(); err != nil {
 		werfcommon.TerminateWithError(err.Error(), 1)
