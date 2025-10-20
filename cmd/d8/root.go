@@ -82,11 +82,18 @@ func NewRootCommand() *RootCommand {
 		},
 	}
 
-	rootCmd.initPluginServices()
 	rootCmd.registerCommands()
 	rootCmd.cmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 
 	return rootCmd
+}
+
+// GetPluginService initializes and returns the plugin service
+func (r *RootCommand) GetPluginService() *intplugins.PluginService {
+	if r.pluginService == nil {
+		r.initPluginServices()
+	}
+	return r.pluginService
 }
 
 func (r *RootCommand) registerCommands() {
@@ -106,7 +113,8 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(commands.NewStrongholdCommand())
 	r.cmd.AddCommand(commands.NewHelpJSONCommand(r.cmd))
 
-	r.cmd.AddCommand(plugins.NewPluginsCommand(r.pluginService, r.logger.Named("plugins-command")))
+	// Pass plugin service factory to plugins command for lazy initialization
+	r.cmd.AddCommand(plugins.NewPluginsCommand(r.GetPluginService, r.logger.Named("plugins-command")))
 }
 
 func (r *RootCommand) Execute() {

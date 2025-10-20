@@ -18,6 +18,7 @@ package main
 
 import (
 	"log/slog"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -27,6 +28,12 @@ import (
 	d8flags "github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
 	intplugins "github.com/deckhouse/deckhouse-cli/internal/plugins"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+)
+
+const (
+	// Registry hostnames
+	devRegistryHost        = "dev-registry.deckhouse.io"
+	productionRegistryHost = "registry.deckhouse.io"
 )
 
 func (r *RootCommand) initPluginServices() {
@@ -75,15 +82,12 @@ func (r *RootCommand) initPluginServices() {
 		Logger:        r.logger.Named("registry-client"),
 	})
 
-	// Build scoped client using chained WithScope calls
-	// Example: registry.deckhouse.io -> deckhouse -> ee -> modules
-	r.pluginRegistryClient = baseClient.
-		WithScope("deckhouse").
-		WithScope("ee").
-		WithScope("modules")
+	// Build scoped client using dynamic path based on registry
+	pluginPath := getPluginRegistryPath(registryHost, r.logger)
+	r.pluginRegistryClient = buildScopedClient(baseClient, pluginPath)
 
 	r.logger.Debug("Creating plugin service with scoped client",
-		slog.String("scope_path", "deckhouse/ee/modules"))
+		slog.String("scope_path", strings.Join(pluginPath, "/")))
 
 	r.pluginService = intplugins.NewPluginService(
 		r.pluginRegistryClient,
@@ -166,4 +170,38 @@ func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) a
 	logger.Info("Using anonymous access for registry",
 		slog.String("registry", registryHost))
 	return authn.Anonymous
+}
+
+// getPluginRegistryPath determines plugin path based on registry host
+func getPluginRegistryPath(registryHost string, logger *dkplog.Logger) []string {
+	logger.Debug("Determining plugin registry path",
+		slog.String("registry_host", registryHost))
+
+	// Check by hostname
+	switch {
+	case strings.Contains(registryHost, devRegistryHost):
+		logger.Debug("Using dev-registry path")
+		return []string{"deckhouse", "foxtrot", "external-modules"}
+
+	case strings.Contains(registryHost, productionRegistryHost):
+		logger.Debug("Using production registry path")
+		return []string{"deckhouse", "ee", "modules"}
+
+	default:
+		// Default for unknown registries
+		logger.Debug("Unknown registry, using default production path")
+		return []string{"deckhouse", "ee", "modules"}
+	}
+}
+
+// buildScopedClient builds scoped client from base client and path
+func buildScopedClient(baseClient *registry.Client, path []string) *registry.Client {
+	var scopedClient *registry.Client = baseClient
+
+	for _, scope := range path {
+		// WithScope returns pkg.RegistryClient interface, need type assertion
+		scopedClient = scopedClient.WithScope(scope).(*registry.Client)
+	}
+
+	return scopedClient
 }
