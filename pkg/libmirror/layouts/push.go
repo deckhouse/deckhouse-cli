@@ -19,6 +19,7 @@ package layouts
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,6 +59,21 @@ func PushLayoutToRepo(
 	)
 }
 
+// buildExtraImageRef builds the correct image reference for extra images
+func buildExtraImageRef(registryRepo, tag string) string {
+	if strings.Contains(registryRepo, "/extra") && strings.Contains(tag, ":") {
+		// This is an extra image with format "imageName:tag"
+		// Split tag into image name and actual tag
+		parts := strings.SplitN(tag, ":", 2)
+		if len(parts) == 2 {
+			imageName, imageTag := parts[0], parts[1]
+			return registryRepo + "/" + imageName + ":" + imageTag
+		}
+	}
+	// Regular image or fallback
+	return registryRepo + ":" + tag
+}
+
 func PushLayoutToRepoContext(
 	ctx context.Context,
 	imagesLayout layout.Path,
@@ -91,7 +107,7 @@ func PushLayoutToRepoContext(
 	for _, manifestSet := range batches {
 		if parallelismConfig.Images == 1 {
 			tag := manifestSet[0].Annotations["io.deckhouse.image.short_tag"]
-			imageRef := registryRepo + ":" + tag
+			imageRef := buildExtraImageRef(registryRepo, tag)
 			logger.InfoF("[%d / %d] Pushing image %s", imagesCount, len(indexManifest.Manifests), imageRef)
 			if err = pushImage(ctx, registryRepo, index, manifestSet[0], refOpts, remoteOpts); err != nil {
 				return fmt.Errorf("Push Image: %w", err)
@@ -103,7 +119,8 @@ func PushLayoutToRepoContext(
 		err = logger.Process(fmt.Sprintf("Pushing batch %d / %d", batchesCount, len(batches)), func() error {
 			logger.InfoLn("Images in batch:")
 			for _, manifest := range manifestSet {
-				logger.InfoF("- %s", registryRepo+":"+manifest.Annotations["io.deckhouse.image.short_tag"])
+				tag := manifest.Annotations["io.deckhouse.image.short_tag"]
+				logger.InfoF("- %s", buildExtraImageRef(registryRepo, tag))
 			}
 
 			errMu := &sync.Mutex{}
@@ -137,7 +154,7 @@ func pushImage(
 	remoteOpts []remote.Option,
 ) error {
 	tag := manifest.Annotations["io.deckhouse.image.short_tag"]
-	imageRef := registryRepo + ":" + tag
+	imageRef := buildExtraImageRef(registryRepo, tag)
 	img, err := index.Image(manifest.Digest)
 	if err != nil {
 		return fmt.Errorf("Read image: %v", err)
