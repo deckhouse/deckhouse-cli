@@ -206,6 +206,7 @@ func TestBuildPullParams(t *testing.T) {
 	// Check working directory calculation
 	expectedWorkingDir := filepath.Join(
 		TempDir,
+		"mirror",
 		"pull",
 		fmt.Sprintf("%x", md5.Sum([]byte(SourceRegistryRepo))),
 	)
@@ -422,7 +423,7 @@ func TestWorkingDirectoryCalculation(t *testing.T) {
 	params := buildPullParams(logger)
 
 	expectedHash := fmt.Sprintf("%x", md5.Sum([]byte(SourceRegistryRepo)))
-	expectedPath := filepath.Join(TempDir, "pull", expectedHash)
+	expectedPath := filepath.Join(TempDir, "mirror", "pull", expectedHash)
 
 	assert.Equal(t, expectedPath, params.WorkingDir)
 	assert.Contains(t, params.WorkingDir, "pull")
@@ -528,7 +529,7 @@ func TestValidateTmpPathEmpty(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Check that TempDir was set to default
-	expectedTempDir := filepath.Join(tempDir, ".tmp", "mirror")
+	expectedTempDir := filepath.Join(tempDir, ".tmp")
 	assert.Equal(t, expectedTempDir, TempDir)
 
 	// Check that directory was created
