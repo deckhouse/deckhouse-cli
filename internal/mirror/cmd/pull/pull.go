@@ -248,6 +248,9 @@ func NewPuller(cmd *cobra.Command) *Puller {
 	}
 }
 func (p *Puller) Execute() error {
+	// Ensure temporary directory is cleaned up even if an error occurs
+	defer p.finalCleanup()
+
 	if err := p.cleanupWorkingDirectory(); err != nil {
 		return err
 	}
@@ -268,7 +271,7 @@ func (p *Puller) Execute() error {
 		return err
 	}
 
-	return p.finalCleanup()
+	return nil
 }
 
 // cleanupWorkingDirectory handles cleanup of the working directory if needed
