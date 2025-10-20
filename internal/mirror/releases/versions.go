@@ -19,6 +19,7 @@ package releases
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -32,8 +33,10 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 )
 
+// allKnownChannels contains all officially supported release channels
+var allChannels = []string{"alpha", "beta", "early-access", "stable", "rock-solid", "lts"}
+
 func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
-	allChannels := []string{"alpha", "beta", "early-access", "stable", "rock-solid", "lts"}
 	channelVersions := make(map[string]*semver.Version)
 
 	// Collect available channel versions
@@ -78,7 +81,7 @@ func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
 	for _, v := range channelVersions {
 		versions = append(versions, v)
 	}
-	
+
 	return deduplicateVersions(append(versions, versionsAboveMinimal...)), nil
 }
 
@@ -131,6 +134,10 @@ func FilterOnlyLatestPatches(versions []*semver.Version) []*semver.Version {
 	return topPatches
 }
 
+func isReleaseChannel(channel string) bool {
+	return slices.Contains(allChannels, channel)
+}
+
 func getReleaseChannelVersionFromRegistry(mirrorCtx *params.PullParams, releaseChannel string) (*semver.Version, error) {
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&mirrorCtx.BaseParams)
 	nameOpts = append(nameOpts, name.StrictValidation)
@@ -142,8 +149,8 @@ func getReleaseChannelVersionFromRegistry(mirrorCtx *params.PullParams, releaseC
 
 	rockSolidReleaseImage, err := remote.Image(ref, remoteOpts...)
 	if err != nil {
-		// If release channel doesn't exist, don't return an error
-		if errorutil.IsImageNotFoundError(err) {
+		// If release channel doesn't exist, only ignore for known channels
+		if errorutil.IsImageNotFoundError(err) && isReleaseChannel(releaseChannel) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get %s release channel data: %w", releaseChannel, err)
