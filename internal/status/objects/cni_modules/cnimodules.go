@@ -62,9 +62,9 @@ func getModules(ctx context.Context, dynamicCl dynamic.Interface) ([]CNIModule, 
 	}
 	moduleList, err := dynamicCl.Resource(gvr).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list modules: %w", err)
+		return nil, fmt.Errorf("failed to list modules: %w\n", err)
 	}
-	modules := make([]CNIModule, 0, len(moduleList.Items))
+	var modules []CNIModule
 	for _, item := range moduleList.Items {
 		if !strings.Contains(item.GetName(), "cni") {
 			continue

@@ -48,7 +48,7 @@ func (h *ListableBlobHandler) ListBlobs() []string {
 	return h.ingestedBlobs
 }
 
-func SetupEmptyRegistryRepo(useTLS bool) (string, string, *ListableBlobHandler) {
+func SetupEmptyRegistryRepo(useTLS bool) (host, repoPath string, blobHandler *ListableBlobHandler) {
 	memBlobHandler := registry.NewInMemoryBlobHandler()
 	bh := &ListableBlobHandler{
 		BlobHandler:    memBlobHandler,
@@ -63,8 +63,8 @@ func SetupEmptyRegistryRepo(useTLS bool) (string, string, *ListableBlobHandler) 
 		server.Start()
 	}
 
-	host := strings.TrimPrefix(server.URL, "http://")
-	repoPath := "/deckhouse/ee"
+	host = strings.TrimPrefix(server.URL, "http://")
+	repoPath = "/deckhouse/ee"
 	if useTLS {
 		host = strings.TrimPrefix(server.URL, "https://")
 	}

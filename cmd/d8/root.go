@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"math/rand"
 	"os"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -40,12 +42,12 @@ import (
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
 	dataexport "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
-	intplugins "github.com/deckhouse/deckhouse-cli/internal/plugins"
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
 	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg"
+	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 type RootCommand struct {
@@ -53,7 +55,7 @@ type RootCommand struct {
 	logger *dkplog.Logger
 
 	pluginRegistryClient pkg.RegistryClient
-	pluginService        *intplugins.PluginService
+	registryService      *registryservice.Service
 }
 
 func NewRootCommand() *RootCommand {
@@ -77,8 +79,8 @@ func NewRootCommand() *RootCommand {
 		Version:       version.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Run: func(cmd *cobra.Command, _ []string) {
-			_ = cmd.Help() // ignore error when displaying help
+		Run: func(cmd *cobra.Command, args []string) {
+			cmd.Help()
 		},
 	}
 
@@ -117,13 +119,16 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(plugins.NewPluginsCommand(r.GetPluginService, r.logger.Named("plugins-command")))
 }
 
-func (r *RootCommand) Execute() {
+func (r *RootCommand) Execute() error {
 	ctx := r.cmd.Context()
+
+	rand.Seed(time.Now().UnixNano())
+	defer logs.FlushLogs()
 
 	if shouldTerminate, err := werfcommon.ContainerBackendProcessStartupHook(); err != nil {
 		werfcommon.TerminateWithError(err.Error(), 1)
 	} else if shouldTerminate {
-		os.Exit(0)
+		return nil
 	}
 
 	werfcommon.EnableTerminationSignalsTrap()
@@ -135,23 +140,20 @@ func (r *RootCommand) Execute() {
 	}
 
 	if err := r.cmd.Execute(); err != nil {
-		switch {
-		case helm_v3.IsPluginError(err):
+		if helm_v3.IsPluginError(err) {
 			werfcommon.ShutdownTelemetry(ctx, helm_v3.PluginErrorCode(err))
-			logs.FlushLogs()
 			werfcommon.TerminateWithError(err.Error(), helm_v3.PluginErrorCode(err))
-		case errors.Is(err, resrcchangcalc.ErrChangesPlanned):
+		} else if errors.Is(err, resrcchangcalc.ErrChangesPlanned) {
 			werfcommon.ShutdownTelemetry(ctx, 2)
-			logs.FlushLogs()
 			os.Exit(2)
-		default:
+		} else {
 			werfcommon.ShutdownTelemetry(ctx, 1)
-			logs.FlushLogs()
 			werfcommon.TerminateWithError(err.Error(), 1)
 		}
 	}
 
 	werfcommon.ShutdownTelemetry(ctx, 0)
+	return nil
 }
 
 func execute() {

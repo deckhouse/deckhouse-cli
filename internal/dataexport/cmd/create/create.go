@@ -26,7 +26,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
-	datautil "github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
+	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -52,7 +52,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(ctx, log, cmd, args)
 		},
-		Args: func(_ *cobra.Command, args []string) error {
+		Args: func(cmd *cobra.Command, args []string) error {
 			_, _, _, err := parseArgs(args)
 			return err
 		},
@@ -65,30 +65,33 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	return cmd
 }
 
-func parseArgs(args []string) (string, string, string, error) {
+func parseArgs(args []string) (deName, volumeKind, volumeName string, err error) {
 	if len(args) != 2 {
-		return "", "", "", fmt.Errorf("invalid arguments")
+		err = fmt.Errorf("invalid arguments")
+		return
 	}
-	deName := args[0]
+	deName = args[0]
 	resourceTypeAndName := strings.Split(args[1], "/")
 	if len(resourceTypeAndName) != 2 {
-		return "", "", "", fmt.Errorf("invalid volume format, expect: <type>/<name>")
+		err = fmt.Errorf("invalid volume format, expect: <type>/<name>")
+		return
 	}
-	volumeKind, volumeName := strings.ToLower(resourceTypeAndName[0]), resourceTypeAndName[1]
+	volumeKind, volumeName = strings.ToLower(resourceTypeAndName[0]), resourceTypeAndName[1]
 	switch volumeKind {
 	case "pvc", "persistentvolumeclaim":
-		volumeKind = datautil.PersistentVolumeClaimKind
+		volumeKind = util.PersistentVolumeClaimKind
 	case "vs", "volumesnapshot":
-		volumeKind = datautil.VolumeSnapshotKind
+		volumeKind = util.VolumeSnapshotKind
 	case "vd", "virtualdisk":
-		volumeKind = datautil.VirtualDiskKind
+		volumeKind = util.VirtualDiskKind
 	case "vds", "virtualdisksnapshot":
-		volumeKind = datautil.VirtualDiskSnapshotKind
+		volumeKind = util.VirtualDiskSnapshotKind
 	default:
-		return "", "", "", fmt.Errorf("invalid volume type; valid values: pvc | persistentvolumeclaim | vs | volumesnapshot | vd | virtualdisk | vds | virtualdisksnapshot")
+		err = fmt.Errorf("invalid volume type; valid values: pvc | persistentvolumeclaim | vs | volumesnapshot | vd | virtualdisk | vds | virtualdisksnapshot")
+		return
 	}
 
-	return deName, volumeKind, volumeName, nil
+	return
 }
 
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
@@ -113,7 +116,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	err = datautil.CreateDataExport(ctx, deName, namespace, ttl, volumeKind, volumeName, publish, rtClient)
+	err = util.CreateDataExport(ctx, deName, namespace, ttl, volumeKind, volumeName, publish, rtClient)
 	if err != nil {
 		return err
 	}

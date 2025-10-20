@@ -54,6 +54,13 @@ type ClientOptions struct {
 	Logger *log.Logger
 }
 
+// ensureLogger sets a default logger if none is provided
+func ensureLogger(opts *ClientOptions) {
+	if opts.Logger == nil {
+		opts.Logger = log.NewLogger().Named("registry-client")
+	}
+}
+
 // buildRemoteOptions constructs remote options including auth and transport configuration
 func buildRemoteOptions(auth authn.Authenticator, opts *ClientOptions) []remote.Option {
 	remoteOptions := []remote.Option{

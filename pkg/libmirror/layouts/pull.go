@@ -193,7 +193,7 @@ func PullImageSet(
 
 	pullCount, totalCount := 1, len(imageSet)
 	for imageReferenceString := range imageSet {
-		imageRepo, imageTag := splitImageRefByRepoAndTag(imageReferenceString)
+		imageRepo, _ := splitImageRefByRepoAndTag(imageReferenceString)
 
 		// If we already know the digest of the tagged image, we should pull it by this digest instead of pulling by tag
 		// to avoid race-conditions between mirroring and releasing new builds on release channels.
@@ -227,7 +227,7 @@ func PullImageSet(
 					layout.WithPlatform(v1.Platform{Architecture: "amd64", OS: "linux"}),
 					layout.WithAnnotations(map[string]string{
 						"org.opencontainers.image.ref.name": imageReferenceString,
-						"io.deckhouse.image.short_tag":      imageTag,
+						"io.deckhouse.image.short_tag":      extractExtraImageShortTag(imageReferenceString),
 					}),
 				)
 				if err != nil {
@@ -244,11 +244,25 @@ func PullImageSet(
 	return nil
 }
 
-func splitImageRefByRepoAndTag(imageReferenceString string) (string, string) {
+func splitImageRefByRepoAndTag(imageReferenceString string) (repo, tag string) {
 	splitIndex := strings.LastIndex(imageReferenceString, ":")
-	repo := imageReferenceString[:splitIndex]
-	tag := imageReferenceString[splitIndex+1:]
-	return repo, tag
+	repo = imageReferenceString[:splitIndex]
+	tag = imageReferenceString[splitIndex+1:]
+	return
+}
+
+// extractExtraImageShortTag extracts the image name and tag for extra images
+func extractExtraImageShortTag(imageReferenceString string) string {
+	const extraPrefix = "/extra/"
+
+	if extraIndex := strings.LastIndex(imageReferenceString, extraPrefix); extraIndex != -1 {
+		// Extra image: return "imageName:tag" part after "/extra/"
+		return imageReferenceString[extraIndex+len(extraPrefix):]
+	}
+
+	// Regular image: return just the tag
+	_, tag := splitImageRefByRepoAndTag(imageReferenceString)
+	return tag
 }
 
 type pullImageSetOptions struct {

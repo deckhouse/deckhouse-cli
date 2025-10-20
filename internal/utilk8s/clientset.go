@@ -14,7 +14,7 @@ const DefaultKubeContext = ""
 // SetupK8sClientSet reads kubeconfig file at kubeconfigPath and constructs a kubernetes clientset from it.
 // If contextName is not empty, context under that name is used instead of default.
 func SetupK8sClientSet(kubeconfigPath, contextName string) (*rest.Config, *kubernetes.Clientset, error) {
-	var configOverrides *clientcmd.ConfigOverrides
+	var configOverrides *clientcmd.ConfigOverrides = nil
 	if contextName != DefaultKubeContext {
 		configOverrides = &clientcmd.ConfigOverrides{
 			CurrentContext: contextName,
