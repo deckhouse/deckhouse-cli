@@ -131,7 +131,6 @@ func pull(cmd *cobra.Command, _ []string) error {
 	if err := puller.Execute(); err != nil {
 		return ErrPullFailed
 	}
-
 	return nil
 }
 
