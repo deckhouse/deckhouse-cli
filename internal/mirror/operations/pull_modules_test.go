@@ -38,16 +38,16 @@ func setupTestPullParamsForModules(t testing.TB) (*params.PullParams, *mockLogge
 
 	return &params.PullParams{
 		BaseParams: params.BaseParams{
-			RegistryAuth:         authn.Anonymous,
-			RegistryHost:         "localhost:5000",
-			RegistryPath:         "test-repo",
-			ModulesPathSuffix:    "modules",
+			RegistryAuth:          authn.Anonymous,
+			RegistryHost:          "localhost:5000",
+			RegistryPath:          "test-repo",
+			ModulesPathSuffix:     "modules",
 			DeckhouseRegistryRepo: "localhost:5000/test-repo",
-			BundleDir:            tempDir,
-			WorkingDir:           tempDir,
-			Insecure:             true,
-			SkipTLSVerification:  true,
-			Logger:               logger,
+			BundleDir:             tempDir,
+			WorkingDir:            tempDir,
+			Insecure:              true,
+			SkipTLSVerification:   true,
+			Logger:                logger,
 		},
 		BundleChunkSize: 0,
 	}, logger

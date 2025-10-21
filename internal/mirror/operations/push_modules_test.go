@@ -17,20 +17,20 @@ limitations under the License.
 package operations
 
 import (
-"archive/tar"
-"bytes"
-"errors"
-"fmt"
-"io"
-"os"
-"path/filepath"
-"strings"
-"testing"
+	"archive/tar"
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
 
-"github.com/google/go-containerregistry/pkg/authn"
-"github.com/stretchr/testify/require"
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/stretchr/testify/require"
 
-"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
 // mockLogger implements params.Logger for testing
@@ -76,15 +76,15 @@ func setupTestPushParams(t testing.TB) (*params.PushParams, *mockLogger) {
 
 	return &params.PushParams{
 		BaseParams: params.BaseParams{
-			RegistryAuth:       authn.Anonymous,
-			RegistryHost:       "localhost:5000",
-			RegistryPath:       "test-repo",
-			ModulesPathSuffix:  "modules",
-			BundleDir:          tempDir,
-			WorkingDir:         tempDir,
-			Insecure:           true,
+			RegistryAuth:        authn.Anonymous,
+			RegistryHost:        "localhost:5000",
+			RegistryPath:        "test-repo",
+			ModulesPathSuffix:   "modules",
+			BundleDir:           tempDir,
+			WorkingDir:          tempDir,
+			Insecure:            true,
 			SkipTLSVerification: true,
-			Logger:             logger,
+			Logger:              logger,
 		},
 		Parallelism: params.ParallelismConfig{
 			Blobs:  1,
@@ -211,7 +211,7 @@ func TestPushModule_MkdirError(t *testing.T) {
 
 func TestPushModule_UnpackError(t *testing.T) {
 	t.Skip("Skipping due to bug in bundle.Unpack - it doesn't handle tar reader errors properly")
-	
+
 	pushParams, _ := setupTestPushParams(t)
 	moduleName := "test-module"
 
@@ -234,7 +234,7 @@ func TestPushModule_ValidationError(t *testing.T) {
 
 func TestPushModule_NilReader(t *testing.T) {
 	t.Skip("Skipping due to nil pointer issues with tar reader")
-	
+
 	pushParams, _ := setupTestPushParams(t)
 	moduleName := "test-module"
 
@@ -245,7 +245,7 @@ func TestPushModule_NilReader(t *testing.T) {
 
 func TestPushModule_EmptyModuleName(t *testing.T) {
 	t.Skip("Skipping empty module name test")
-	
+
 	pushParams, _ := setupTestPushParams(t)
 	moduleName := ""
 	pkg := createValidModulePackage(t)
@@ -412,46 +412,46 @@ func TestPushModule_CodeCoverage_LayoutsToPush(t *testing.T) {
 	}
 
 	// We can't directly test the map, but we can verify the function runs
-// and check that the expected repos are constructed correctly
-err := PushModule(pushParams, moduleName, pkg)
+	// and check that the expected repos are constructed correctly
+	err := PushModule(pushParams, moduleName, pkg)
 
-// Verify that logs contain the expected repo constructions
-for layoutPath, expectedSuffix := range expectedPaths {
-expectedRepo := fmt.Sprintf("localhost:5000/test-repo/%s", expectedSuffix)
-found := false
-for _, log := range pushParams.Logger.(*mockLogger).logs {
-if strings.Contains(log, "Pushing"+expectedRepo) {
-found = true
-break
-}
-}
-require.True(t, found, "Should construct repo path for layout %s: %s", layoutPath, expectedRepo)
-}
+	// Verify that logs contain the expected repo constructions
+	for layoutPath, expectedSuffix := range expectedPaths {
+		expectedRepo := fmt.Sprintf("localhost:5000/test-repo/%s", expectedSuffix)
+		found := false
+		for _, log := range pushParams.Logger.(*mockLogger).logs {
+			if strings.Contains(log, "Pushing"+expectedRepo) {
+				found = true
+				break
+			}
+		}
+		require.True(t, found, "Should construct repo path for layout %s: %s", layoutPath, expectedRepo)
+	}
 
-require.Error(t, err) // Expected to fail due to registry
+	require.Error(t, err) // Expected to fail due to registry
 }
 
 func TestPushModule_CodeCoverage_RandomImage(t *testing.T) {
-// Test that random.Image is called correctly
-// This is hard to test directly, but we can ensure the code path is exercised
-pushParams, _ := setupTestPushParams(t)
-moduleName := "random-image-test"
-pkg := createValidModulePackage(t)
+	// Test that random.Image is called correctly
+	// This is hard to test directly, but we can ensure the code path is exercised
+	pushParams, _ := setupTestPushParams(t)
+	moduleName := "random-image-test"
+	pkg := createValidModulePackage(t)
 
-err := PushModule(pushParams, moduleName, pkg)
-require.Error(t, err) // Will fail at remote.Write, but random.Image should be called
+	err := PushModule(pushParams, moduleName, pkg)
+	require.Error(t, err) // Will fail at remote.Write, but random.Image should be called
 }
 
 func TestPushModule_CodeCoverage_AuthOptions(t *testing.T) {
-// Test that auth options are constructed correctly
-pushParams, _ := setupTestPushParams(t)
-pushParams.RegistryAuth = authn.Anonymous
-pushParams.Insecure = true
-pushParams.SkipTLSVerification = true
+	// Test that auth options are constructed correctly
+	pushParams, _ := setupTestPushParams(t)
+	pushParams.RegistryAuth = authn.Anonymous
+	pushParams.Insecure = true
+	pushParams.SkipTLSVerification = true
 
-moduleName := "auth-options-test"
-pkg := createValidModulePackage(t)
+	moduleName := "auth-options-test"
+	pkg := createValidModulePackage(t)
 
-err := PushModule(pushParams, moduleName, pkg)
-require.Error(t, err) // Will fail, but auth options should be constructed
+	err := PushModule(pushParams, moduleName, pkg)
+	require.Error(t, err) // Will fail, but auth options should be constructed
 }
