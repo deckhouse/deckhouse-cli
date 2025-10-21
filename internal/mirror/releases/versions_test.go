@@ -48,8 +48,8 @@ func TestParseAndFilterVersionsAboveMinimalAnbBelowAlpha(t *testing.T) {
 			expected: []string{},
 		},
 		{
-			name: "tags in range",
-			tags: []string{"v1.50.0", "v1.51.0", "v1.52.0", "v1.59.0"},
+			name:     "tags in range",
+			tags:     []string{"v1.50.0", "v1.51.0", "v1.52.0", "v1.59.0"},
 			expected: []string{"v1.50.0", "v1.51.0", "v1.52.0", "v1.59.0"},
 		},
 		{
@@ -95,23 +95,23 @@ func TestFilterOnlyLatestPatches(t *testing.T) {
 			expected: []string{"v1.50.0"},
 		},
 		{
-			name: "multiple patches same major.minor",
-			input: []string{"v1.50.0", "v1.50.1", "v1.50.2", "v1.50.3"},
+			name:     "multiple patches same major.minor",
+			input:    []string{"v1.50.0", "v1.50.1", "v1.50.2", "v1.50.3"},
 			expected: []string{"v1.50.3"},
 		},
 		{
-			name: "different major.minor versions",
-			input: []string{"v1.50.0", "v1.51.0", "v1.52.0", "v2.0.0"},
+			name:     "different major.minor versions",
+			input:    []string{"v1.50.0", "v1.51.0", "v1.52.0", "v2.0.0"},
 			expected: []string{"v1.50.0", "v1.51.0", "v1.52.0", "v2.0.0"},
 		},
 		{
-			name: "mixed patches",
-			input: []string{"v1.50.0", "v1.50.1", "v1.51.0", "v1.51.2", "v1.51.1"},
+			name:     "mixed patches",
+			input:    []string{"v1.50.0", "v1.50.1", "v1.51.0", "v1.51.2", "v1.51.1"},
 			expected: []string{"v1.50.1", "v1.51.2"},
 		},
 		{
-			name: "unsorted input",
-			input: []string{"v1.51.1", "v1.50.0", "v1.51.0", "v1.50.2"},
+			name:     "unsorted input",
+			input:    []string{"v1.51.1", "v1.50.0", "v1.51.0", "v1.50.2"},
 			expected: []string{"v1.50.2", "v1.51.1"},
 		},
 	}
