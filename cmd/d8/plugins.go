@@ -67,8 +67,7 @@ func (r *RootCommand) initPluginServices() {
 		slog.Bool("tls_skip_verify", d8flags.TLSSkipVerify))
 
 	// Create base client with registry host only
-	baseClient := registry.NewClientWithOptions(&registry.ClientOptions{
-		RegistryHost:  registryHost,
+	baseClient := registry.NewClientWithOptions(registryHost, &registry.ClientOptions{
 		Auth:          auth,
 		Insecure:      d8flags.Insecure,
 		TLSSkipVerify: d8flags.TLSSkipVerify,
