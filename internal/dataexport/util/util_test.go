@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/dataio"
 )
 
 func TestCreateDataExporterIfNeeded(t *testing.T) {
@@ -32,28 +33,28 @@ func TestCreateDataExporterIfNeeded(t *testing.T) {
 			name:          "PVC short alias",
 			input:         "pvc/myvol",
 			expectName:    "de-pvc-myvol",
-			expectKind:    PersistentVolumeClaimKind,
+			expectKind:    dataio.PersistentVolumeClaimKind,
 			expectCreated: true,
 		},
 		{
 			name:          "PVC long alias",
 			input:         "persistentvolumeclaim/myvol",
 			expectName:    "de-pvc-myvol",
-			expectKind:    PersistentVolumeClaimKind,
+			expectKind:    dataio.PersistentVolumeClaimKind,
 			expectCreated: true,
 		},
 		{
 			name:          "VolumeSnapshot short alias",
 			input:         "vs/snap1",
 			expectName:    "de-vs-snap1",
-			expectKind:    VolumeSnapshotKind,
+			expectKind:    dataio.VolumeSnapshotKind,
 			expectCreated: true,
 		},
 		{
 			name:          "VolumeSnapshot long alias",
 			input:         "volumesnapshot/snap1",
 			expectName:    "de-vs-snap1",
-			expectKind:    VolumeSnapshotKind,
+			expectKind:    dataio.VolumeSnapshotKind,
 			expectCreated: true,
 		},
 		{
@@ -66,28 +67,28 @@ func TestCreateDataExporterIfNeeded(t *testing.T) {
 			name:          "VirtualDisk short alias",
 			input:         "vd/mydisk",
 			expectName:    "de-vd-mydisk",
-			expectKind:    VirtualDiskKind,
+			expectKind:    dataio.VirtualDiskKind,
 			expectCreated: true,
 		},
 		{
 			name:          "VirtualDisk long alias",
 			input:         "virtualdisk/mydisk",
 			expectName:    "de-vd-mydisk",
-			expectKind:    VirtualDiskKind,
+			expectKind:    dataio.VirtualDiskKind,
 			expectCreated: true,
 		},
 		{
 			name:          "VirtualDiskSnapshot short alias",
 			input:         "vds/snap2",
 			expectName:    "de-vds-snap2",
-			expectKind:    VirtualDiskSnapshotKind,
+			expectKind:    dataio.VirtualDiskSnapshotKind,
 			expectCreated: true,
 		},
 		{
 			name:          "VirtualDiskSnapshot long alias",
 			input:         "virtualdisksnapshot/snap2",
 			expectName:    "de-vds-snap2",
-			expectKind:    VirtualDiskSnapshotKind,
+			expectKind:    dataio.VirtualDiskSnapshotKind,
 			expectCreated: true,
 		},
 	}

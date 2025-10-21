@@ -33,6 +33,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
+	"github.com/deckhouse/deckhouse-cli/internal/dataio"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -114,7 +115,7 @@ func downloadFunc(
 		log.Info("Start listing", slog.String("url", url))
 		req, _ = http.NewRequest(http.MethodHead, url, nil)
 	default:
-		return fmt.Errorf("%w: %s", util.ErrUnsupportedVolumeMode, volumeMode)
+		return fmt.Errorf("%w: %s", dataio.ErrUnsupportedVolumeMode, volumeMode)
 	}
 
 	resp, err := subClient.HTTPDo(req.WithContext(ctx))
@@ -151,7 +152,7 @@ func downloadFunc(
 	case "Filesystem":
 		return foo(resp.Body)
 	default:
-		return fmt.Errorf("%w: %s", util.ErrUnsupportedVolumeMode, volumeMode)
+		return fmt.Errorf("%w: %s", dataio.ErrUnsupportedVolumeMode, volumeMode)
 	}
 }
 
@@ -199,7 +200,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	if deName != dataName { // DataExport created in download process
-		if util.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
+		if dataio.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
 			util.DeleteDataExport(ctx, deName, namespace, rtClient)
 		}
 	}
