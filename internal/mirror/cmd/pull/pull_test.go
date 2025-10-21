@@ -1122,7 +1122,7 @@ func TestPullerValidatePlatformAccess(t *testing.T) {
 			DeckhouseTag: "v1.57.3",
 		},
 		accessValidator: accessValidator,
-		validationOpts:   []validation.Option{validation.WithInsecure(true)},
+		validationOpts:  []validation.Option{validation.WithInsecure(true)},
 	}
 
 	// Test with invalid registry (should fail due to network)
@@ -1147,7 +1147,7 @@ func TestPullerValidateModulesAccess(t *testing.T) {
 			},
 		},
 		accessValidator: accessValidator,
-		validationOpts:   []validation.Option{validation.WithInsecure(true)},
+		validationOpts:  []validation.Option{validation.WithInsecure(true)},
 	}
 
 	// Test with invalid registry (should fail)
@@ -1302,7 +1302,7 @@ func TestPullFunction(t *testing.T) {
 // Mock implementations for testing
 type mockLogger struct{}
 
-func (m *mockLogger) DebugF(format string, a ...interface{})  {}
+func (m *mockLogger) DebugF(format string, a ...interface{}) {}
 func (m *mockLogger) DebugLn(a ...interface{})               {}
 func (m *mockLogger) InfoF(format string, a ...interface{})  {}
 func (m *mockLogger) InfoLn(a ...interface{})                {}
@@ -1359,7 +1359,7 @@ func TestPullerExecuteWithCleanupFailure(t *testing.T) {
 // Benchmark tests
 func BenchmarkNewPuller(b *testing.B) {
 	cmd := &cobra.Command{}
-	
+
 	for i := 0; i < b.N; i++ {
 		_ = NewPuller(cmd)
 	}
@@ -1367,7 +1367,7 @@ func BenchmarkNewPuller(b *testing.B) {
 
 func BenchmarkBuildPullParams(b *testing.B) {
 	logger := log.NewSLogger(slog.LevelInfo)
-	
+
 	for i := 0; i < b.N; i++ {
 		_ = buildPullParams(logger)
 	}
@@ -1378,7 +1378,7 @@ func BenchmarkFindTagsToMirror(b *testing.B) {
 	pullParams := &params.PullParams{
 		DeckhouseTag: "v1.57.3",
 	}
-	
+
 	for i := 0; i < b.N; i++ {
 		_, _ = findTagsToMirror(pullParams, logger)
 	}
