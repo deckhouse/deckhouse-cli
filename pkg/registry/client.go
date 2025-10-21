@@ -147,6 +147,34 @@ func (c *Client) GetImage(ctx context.Context, tag string) (v1.Image, error) {
 	return img, nil
 }
 
+// PushImage pushes an image to the registry at the specified tag
+// The repository is determined by the chained WithScope() calls
+func (c *Client) PushImage(ctx context.Context, tag string, img v1.Image) error {
+	fullRegistry := c.GetRegistry()
+	logentry := c.log.With(
+		slog.String("registry_host", c.registryHost),
+		slog.String("scope", c.scopePath),
+		slog.String("tag", tag),
+	)
+
+	logentry.Debug("Pushing image")
+
+	ref, err := name.ParseReference(fmt.Sprintf("%s:%s", fullRegistry, tag))
+	if err != nil {
+		return fmt.Errorf("failed to parse reference: %w", err)
+	}
+
+	opts := append(c.options, remote.WithContext(ctx))
+
+	if err := remote.Write(ref, img, opts...); err != nil {
+		return fmt.Errorf("failed to push image: %w", err)
+	}
+
+	logentry.Debug("Image pushed successfully")
+
+	return nil
+}
+
 // GetImageConfig retrieves the image config file containing labels and metadata
 // The repository is determined by the chained WithScope() calls
 func (c *Client) GetImageConfig(ctx context.Context, tag string) (*v1.ConfigFile, error) {

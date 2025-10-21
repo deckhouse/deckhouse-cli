@@ -64,6 +64,10 @@ type RegistryClient interface {
 	// ListRepositories retrieves all sub-repositories under the current scope
 	// The scope is determined by the chained WithScope() calls
 	ListRepositories(ctx context.Context) ([]string, error)
+
+	// PushImage pushes an image to the registry at the specified tag
+	// The repository is determined by the chained WithScope() calls
+	PushImage(ctx context.Context, tag string, img v1.Image) error
 }
 
 // LayerStream provides access to a single layer stream for extraction
