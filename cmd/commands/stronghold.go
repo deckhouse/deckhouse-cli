@@ -44,6 +44,7 @@ func NewStrongholdCommand() *cobra.Command {
 	MapCustomEnvsToInternalEnvs("STRONGHOLD_", "VAULT_")
 
 	strongholdCommands := []Commands{
+		{"audit", "Interact with Stronghold's audit devices"},
 		{"read", "Read data and retrieves secrets"},
 		{"write", "Write data, configuration, and secrets"},
 		{"delete", "Delete secrets and configuration"},
