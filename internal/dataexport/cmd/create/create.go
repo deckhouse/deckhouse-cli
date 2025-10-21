@@ -27,6 +27,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
+	"github.com/deckhouse/deckhouse-cli/internal/dataio"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -79,13 +80,13 @@ func parseArgs(args []string) (deName, volumeKind, volumeName string, err error)
 	volumeKind, volumeName = strings.ToLower(resourceTypeAndName[0]), resourceTypeAndName[1]
 	switch volumeKind {
 	case "pvc", "persistentvolumeclaim":
-		volumeKind = util.PersistentVolumeClaimKind
+		volumeKind = dataio.PersistentVolumeClaimKind
 	case "vs", "volumesnapshot":
-		volumeKind = util.VolumeSnapshotKind
+		volumeKind = dataio.VolumeSnapshotKind
 	case "vd", "virtualdisk":
-		volumeKind = util.VirtualDiskKind
+		volumeKind = dataio.VirtualDiskKind
 	case "vds", "virtualdisksnapshot":
-		volumeKind = util.VirtualDiskSnapshotKind
+		volumeKind = dataio.VirtualDiskSnapshotKind
 	default:
 		err = fmt.Errorf("invalid volume type; valid values: pvc | persistentvolumeclaim | vs | volumesnapshot | vd | virtualdisk | vds | virtualdisksnapshot")
 		return
