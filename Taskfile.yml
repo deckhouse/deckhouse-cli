@@ -87,7 +87,7 @@ tasks:
   _test:go:
     internal: true
     cmds:
-      - go test -tags="{{ .cgoTags }}" ./...
+      - go test -count=1 -tags="{{ .cgoTags }}" ./...
 
   build:
     desc: Build d8 binary for personal usage
