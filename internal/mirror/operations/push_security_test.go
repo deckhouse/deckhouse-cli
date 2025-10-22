@@ -106,9 +106,11 @@ func createInvalidSecurityPackage(t testing.TB) io.Reader {
 func TestPushSecurityDatabases_MkdirError(t *testing.T) {
 	pushParams, _ := setupTestPushParams(t)
 
-	// Make WorkingDir read-only to cause mkdir error
-	require.NoError(t, os.Chmod(pushParams.WorkingDir, 0444))
-	defer os.Chmod(pushParams.WorkingDir, 0755) // cleanup
+	// Set WorkingDir to a file path to cause mkdir error
+	tempDir := t.TempDir()
+	workingDir := filepath.Join(tempDir, "not-a-dir")
+	require.NoError(t, os.WriteFile(workingDir, []byte("content"), 0644))
+	pushParams.WorkingDir = workingDir
 
 	pkg := createValidSecurityPackage(t)
 

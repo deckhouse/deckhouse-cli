@@ -54,9 +54,11 @@ func setupTestPullParams(t testing.TB) (*params.PullParams, *mockLogger) {
 func TestPullDeckhousePlatform_MkdirError(t *testing.T) {
 	pullParams, _ := setupTestPullParams(t)
 
-	// Make WorkingDir read-only to cause mkdir error
-	require.NoError(t, os.Chmod(pullParams.WorkingDir, 0444))
-	defer os.Chmod(pullParams.WorkingDir, 0755) // cleanup
+	// Set WorkingDir to a file path to cause mkdir error
+	tempDir := t.TempDir()
+	workingDir := filepath.Join(tempDir, "not-a-dir")
+	require.NoError(t, os.WriteFile(workingDir, []byte("content"), 0644))
+	pullParams.WorkingDir = workingDir
 
 	tagsToMirror := []string{"v1.0.0"}
 
