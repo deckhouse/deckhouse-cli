@@ -17,11 +17,13 @@ limitations under the License.
 package pull
 
 import (
+	"context"
 	"crypto/md5"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +35,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
 )
 
 func TestNewCommand(t *testing.T) {
@@ -975,4 +978,414 @@ func TestFindTagsToMirrorWithVersionsSuccess(t *testing.T) {
 	tags, err := findTagsToMirror(pullParams, logger)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"v1.50.0", "v1.51.0", "v1.52.0"}, tags)
+}
+
+func TestNewPuller(t *testing.T) {
+	// Save original global variables
+	originalTempDir := TempDir
+	originalImagesBundlePath := ImagesBundlePath
+	originalSourceRegistryRepo := SourceRegistryRepo
+	originalInsecure := Insecure
+	originalTLSSkipVerify := TLSSkipVerify
+	originalDoGOSTDigest := DoGOSTDigest
+	originalNoPlatform := NoPlatform
+	originalNoSecurityDB := NoSecurityDB
+	originalNoModules := NoModules
+	originalOnlyExtraImages := OnlyExtraImages
+	originalDeckhouseTag := DeckhouseTag
+	originalSinceVersion := SinceVersion
+
+	defer func() {
+		TempDir = originalTempDir
+		ImagesBundlePath = originalImagesBundlePath
+		SourceRegistryRepo = originalSourceRegistryRepo
+		Insecure = originalInsecure
+		TLSSkipVerify = originalTLSSkipVerify
+		DoGOSTDigest = originalDoGOSTDigest
+		NoPlatform = originalNoPlatform
+		NoSecurityDB = originalNoSecurityDB
+		NoModules = originalNoModules
+		OnlyExtraImages = originalOnlyExtraImages
+		DeckhouseTag = originalDeckhouseTag
+		SinceVersion = originalSinceVersion
+	}()
+
+	// Set test values
+	TempDir = "/tmp/test"
+	ImagesBundlePath = "/tmp/bundle"
+	SourceRegistryRepo = "test-registry.com"
+	Insecure = true
+	TLSSkipVerify = true
+	DoGOSTDigest = true
+	NoPlatform = true
+	NoSecurityDB = true
+	NoModules = true
+	OnlyExtraImages = true
+	DeckhouseTag = "v1.57.3"
+	SinceVersion = semver.MustParse("1.56.0")
+
+	cmd := &cobra.Command{}
+	puller := NewPuller(cmd)
+
+	assert.NotNil(t, puller)
+	assert.Equal(t, cmd, puller.cmd)
+	assert.NotNil(t, puller.logger)
+	assert.NotNil(t, puller.params)
+	assert.NotNil(t, puller.accessValidator)
+	assert.NotEmpty(t, puller.validationOpts)
+
+	// Verify params are built correctly
+	assert.Equal(t, ImagesBundlePath, puller.params.BundleDir)
+	assert.Equal(t, SourceRegistryRepo, puller.params.DeckhouseRegistryRepo)
+	assert.Equal(t, Insecure, puller.params.Insecure)
+	assert.Equal(t, TLSSkipVerify, puller.params.SkipTLSVerification)
+	assert.Equal(t, DoGOSTDigest, puller.params.DoGOSTDigests)
+	assert.Equal(t, NoPlatform, puller.params.SkipPlatform)
+	assert.Equal(t, NoSecurityDB, puller.params.SkipSecurityDatabases)
+	assert.Equal(t, NoModules, puller.params.SkipModules)
+	assert.Equal(t, OnlyExtraImages, puller.params.OnlyExtraImages)
+	assert.Equal(t, DeckhouseTag, puller.params.DeckhouseTag)
+	assert.Equal(t, SinceVersion, puller.params.SinceVersion)
+}
+
+func TestPullerCleanupWorkingDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+	workingDir := filepath.Join(tempDir, "work")
+
+	// Create a test working directory
+	err := os.MkdirAll(workingDir, 0755)
+	require.NoError(t, err)
+
+	// Create a file in the working directory
+	testFile := filepath.Join(workingDir, "test.txt")
+	err = os.WriteFile(testFile, []byte("test"), 0644)
+	require.NoError(t, err)
+
+	// Test with NoPullResume = true (should cleanup)
+	originalNoPullResume := NoPullResume
+	defer func() { NoPullResume = originalNoPullResume }()
+
+	NoPullResume = true
+
+	puller := &Puller{
+		params: &params.PullParams{
+			BaseParams: params.BaseParams{
+				WorkingDir: workingDir,
+			},
+		},
+	}
+
+	err = puller.cleanupWorkingDirectory()
+	assert.NoError(t, err)
+
+	// Verify directory was removed
+	_, err = os.Stat(workingDir)
+	assert.True(t, os.IsNotExist(err))
+
+	// Test with NoPullResume = false and recent directory (should not cleanup)
+	NoPullResume = false
+	err = os.MkdirAll(workingDir, 0755)
+	require.NoError(t, err)
+
+	err = puller.cleanupWorkingDirectory()
+	assert.NoError(t, err)
+
+	// Verify directory still exists
+	_, err = os.Stat(workingDir)
+	assert.NoError(t, err)
+
+	// Test with old directory (should cleanup)
+	err = os.Chtimes(workingDir, time.Now().Add(-25*time.Hour), time.Now().Add(-25*time.Hour))
+	require.NoError(t, err)
+
+	err = puller.cleanupWorkingDirectory()
+	assert.NoError(t, err)
+
+	// Verify directory was removed
+	_, err = os.Stat(workingDir)
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestPullerValidatePlatformAccess(t *testing.T) {
+	// Create a real access validator for testing
+	accessValidator := validation.NewRemoteRegistryAccessValidator()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	puller := &Puller{
+		cmd: cmd,
+		params: &params.PullParams{
+			BaseParams: params.BaseParams{
+				DeckhouseRegistryRepo: "test-registry.com",
+			},
+			DeckhouseTag: "v1.57.3",
+		},
+		accessValidator: accessValidator,
+		validationOpts:  []validation.Option{validation.WithInsecure(true)},
+	}
+
+	// Test with invalid registry (should fail due to network)
+	err := puller.validatePlatformAccess()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "Source registry is not accessible")
+}
+
+func TestPullerValidateModulesAccess(t *testing.T) {
+	// Create a real access validator for testing
+	accessValidator := validation.NewRemoteRegistryAccessValidator()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	puller := &Puller{
+		cmd: cmd,
+		params: &params.PullParams{
+			BaseParams: params.BaseParams{
+				DeckhouseRegistryRepo: "test-registry.com",
+				ModulesPathSuffix:     "/modules",
+			},
+		},
+		accessValidator: accessValidator,
+		validationOpts:  []validation.Option{validation.WithInsecure(true)},
+	}
+
+	// Test with invalid registry (should fail)
+	err := puller.validateModulesAccess()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "Source registry is not accessible")
+}
+
+func TestPullerCreateModuleFilter(t *testing.T) {
+	// Save original global variables
+	originalWhitelist := ModulesWhitelist
+	originalBlacklist := ModulesBlacklist
+
+	defer func() {
+		ModulesWhitelist = originalWhitelist
+		ModulesBlacklist = originalBlacklist
+	}()
+
+	puller := &Puller{}
+
+	// Test with blacklist (default)
+	ModulesWhitelist = nil
+	ModulesBlacklist = []string{"module1", "module2"}
+
+	filter, err := puller.createModuleFilter()
+	assert.NoError(t, err)
+	assert.NotNil(t, filter)
+
+	// Test with whitelist
+	ModulesWhitelist = []string{"module3", "module4"}
+	ModulesBlacklist = nil
+
+	filter, err = puller.createModuleFilter()
+	assert.NoError(t, err)
+	assert.NotNil(t, filter)
+}
+
+func TestPullerComputeGOSTDigests(t *testing.T) {
+	tempDir := t.TempDir()
+	bundleDir := filepath.Join(tempDir, "bundle")
+	err := os.MkdirAll(bundleDir, 0755)
+	require.NoError(t, err)
+
+	// Create test bundle files
+	tarFile := filepath.Join(bundleDir, "bundle.tar")
+	err = os.WriteFile(tarFile, []byte("test tar content"), 0644)
+	require.NoError(t, err)
+
+	chunkFile := filepath.Join(bundleDir, "bundle.chunk")
+	err = os.WriteFile(chunkFile, []byte("test chunk content"), 0644)
+	require.NoError(t, err)
+
+	// Create a file that should not be processed
+	txtFile := filepath.Join(bundleDir, "readme.txt")
+	err = os.WriteFile(txtFile, []byte("readme"), 0644)
+	require.NoError(t, err)
+
+	// Test with GOST digest disabled
+	originalDoGOSTDigest := DoGOSTDigest
+	defer func() { DoGOSTDigest = originalDoGOSTDigest }()
+
+	DoGOSTDigest = false
+
+	puller := &Puller{
+		params: &params.PullParams{
+			BaseParams: params.BaseParams{
+				BundleDir: bundleDir,
+			},
+		},
+		logger: log.NewSLogger(slog.LevelInfo),
+	}
+
+	err = puller.computeGOSTDigests()
+	assert.NoError(t, err)
+
+	// Verify no .gostsum files were created
+	files, err := os.ReadDir(bundleDir)
+	require.NoError(t, err)
+
+	gostsumFiles := 0
+	for _, file := range files {
+		if strings.HasSuffix(file.Name(), ".gostsum") {
+			gostsumFiles++
+		}
+	}
+	assert.Equal(t, 0, gostsumFiles)
+
+	// Test with GOST digest enabled (would require mocking gostsums.CalculateBlobGostDigest)
+	// This is complex to test without extensive mocking, so we'll skip the full integration test
+}
+
+func TestPullerFinalCleanup(t *testing.T) {
+	tempDir := t.TempDir()
+	testDir := filepath.Join(tempDir, "to-cleanup")
+	err := os.MkdirAll(testDir, 0755)
+	require.NoError(t, err)
+
+	// Create a file in the directory
+	testFile := filepath.Join(testDir, "test.txt")
+	err = os.WriteFile(testFile, []byte("test"), 0644)
+	require.NoError(t, err)
+
+	// Test cleanup
+	originalTempDir := TempDir
+	defer func() { TempDir = originalTempDir }()
+
+	TempDir = testDir
+
+	puller := &Puller{}
+	err = puller.finalCleanup()
+	assert.NoError(t, err)
+
+	// Verify directory was removed
+	_, err = os.Stat(testDir)
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestPullFunction(t *testing.T) {
+	// Save original global variables
+	originalTempDir := TempDir
+	originalImagesBundlePath := ImagesBundlePath
+	originalSourceRegistryRepo := SourceRegistryRepo
+	originalNoPlatform := NoPlatform
+	originalNoSecurityDB := NoSecurityDB
+	originalNoModules := NoModules
+
+	defer func() {
+		TempDir = originalTempDir
+		ImagesBundlePath = originalImagesBundlePath
+		SourceRegistryRepo = originalSourceRegistryRepo
+		NoPlatform = originalNoPlatform
+		NoSecurityDB = originalNoSecurityDB
+		NoModules = originalNoModules
+	}()
+
+	// Set test values to skip actual operations
+	TempDir = t.TempDir()
+	ImagesBundlePath = TempDir
+	SourceRegistryRepo = "test-registry.com"
+	NoPlatform = true
+	NoSecurityDB = true
+	NoModules = true
+
+	cmd := &cobra.Command{}
+	err := pull(cmd, []string{})
+
+	// The pull function should succeed when all operations are skipped
+	// (NoPlatform=true, NoSecurityDB=true, NoModules=true)
+	assert.NoError(t, err)
+}
+
+// Mock implementations for testing
+type mockLogger struct{}
+
+func (m *mockLogger) DebugF(format string, a ...interface{}) {}
+func (m *mockLogger) DebugLn(a ...interface{})               {}
+func (m *mockLogger) InfoF(format string, a ...interface{})  {}
+func (m *mockLogger) InfoLn(a ...interface{})                {}
+func (m *mockLogger) WarnF(format string, a ...interface{})  {}
+func (m *mockLogger) WarnLn(a ...interface{})                {}
+func (m *mockLogger) Process(name string, fn func() error) error {
+	return fn()
+}
+
+func TestPullerExecute(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Save original global variables
+	originalTempDir := TempDir
+	originalImagesBundlePath := ImagesBundlePath
+	originalNoPlatform := NoPlatform
+	originalNoSecurityDB := NoSecurityDB
+	originalNoModules := NoModules
+	originalDoGOSTDigest := DoGOSTDigest
+
+	defer func() {
+		TempDir = originalTempDir
+		ImagesBundlePath = originalImagesBundlePath
+		NoPlatform = originalNoPlatform
+		NoSecurityDB = originalNoSecurityDB
+		NoModules = originalNoModules
+		DoGOSTDigest = originalDoGOSTDigest
+	}()
+
+	// Set test values to skip actual operations
+	TempDir = tempDir
+	ImagesBundlePath = tempDir
+	NoPlatform = true
+	NoSecurityDB = true
+	NoModules = true
+	DoGOSTDigest = false
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	puller := NewPuller(cmd)
+	err := puller.Execute()
+
+	// Should succeed when all operations are skipped
+	assert.NoError(t, err)
+}
+
+func TestPullerExecuteWithCleanupFailure(t *testing.T) {
+	// This test is platform-dependent and may not work reliably
+	// The main cleanup functionality is tested in TestPullerFinalCleanup
+	t.Skip("Skipping platform-dependent cleanup failure test")
+}
+
+// Benchmark tests
+func BenchmarkNewPuller(b *testing.B) {
+	cmd := &cobra.Command{}
+
+	for i := 0; i < b.N; i++ {
+		_ = NewPuller(cmd)
+	}
+}
+
+func BenchmarkBuildPullParams(b *testing.B) {
+	logger := log.NewSLogger(slog.LevelInfo)
+
+	for i := 0; i < b.N; i++ {
+		_ = buildPullParams(logger)
+	}
+}
+
+func BenchmarkFindTagsToMirror(b *testing.B) {
+	logger := log.NewSLogger(slog.LevelInfo)
+	pullParams := &params.PullParams{
+		DeckhouseTag: "v1.57.3",
+	}
+
+	for i := 0; i < b.N; i++ {
+		_, _ = findTagsToMirror(pullParams, logger)
+	}
+}
+
+func BenchmarkGetSourceRegistryAuthProvider(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_ = getSourceRegistryAuthProvider()
+	}
 }

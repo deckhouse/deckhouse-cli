@@ -18,7 +18,6 @@ package registry
 
 import (
 	"crypto/tls"
-	"log/slog"
 	"net/http"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -29,9 +28,6 @@ import (
 
 // ClientOptions contains configuration options for the registry client
 type ClientOptions struct {
-	// RegistryHost is the registry hostname only (e.g., "registry.example.com")
-	RegistryHost string
-
 	// Auth provides authentication for registry access (takes precedence over Username/Password/LicenseToken)
 	Auth authn.Authenticator
 
@@ -55,10 +51,12 @@ type ClientOptions struct {
 }
 
 // ensureLogger sets a default logger if none is provided
-func ensureLogger(opts *ClientOptions) {
-	if opts.Logger == nil {
-		opts.Logger = log.NewLogger().Named("registry-client")
+func ensureLogger(logger *log.Logger) *log.Logger {
+	if logger == nil {
+		logger = log.NewLogger().Named("registry-client")
 	}
+
+	return logger
 }
 
 // buildRemoteOptions constructs remote options including auth and transport configuration
@@ -89,13 +87,9 @@ func configureTransport(opts *ClientOptions) *http.Transport {
 			transport.TLSClientConfig = &tls.Config{}
 		}
 		transport.TLSClientConfig.InsecureSkipVerify = true
-		opts.Logger.Debug("TLS certificate verification disabled",
-			slog.String("registry", opts.RegistryHost))
 	}
 
 	if opts.Insecure {
-		opts.Logger.Debug("Insecure HTTP mode enabled",
-			slog.String("registry", opts.RegistryHost))
 	}
 
 	return transport
