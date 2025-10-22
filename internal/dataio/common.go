@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -74,4 +75,18 @@ func ParseArgs(args []string) (deName, srcPath string, err error) {
 	}
 
 	return
+}
+
+func ReadFileFromCLI(filePath string) ([]byte, error) {
+	var data []byte
+	var err error
+
+	switch filePath {
+	case "-":
+		data, err = io.ReadAll(os.Stdin)
+	default:
+		data, err = os.ReadFile(filePath)
+	}
+
+	return data, err
 }
