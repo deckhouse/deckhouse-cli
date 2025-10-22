@@ -17,13 +17,14 @@ import (
 	safereq "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
-func newSafe() *safereq.SafeClient { 
+func newSafe() *safereq.SafeClient {
 	safereq.SupportNoAuth = true
 	// Temporarily set KUBECONFIG to /dev/null to avoid loading auth from kubeconfig
 	oldKubeconfig := os.Getenv("KUBECONFIG")
 	os.Setenv("KUBECONFIG", "/dev/null")
 	defer os.Setenv("KUBECONFIG", oldKubeconfig)
-	sc, _ := safereq.NewSafeClient(); return sc.Copy() 
+	sc, _ := safereq.NewSafeClient()
+	return sc.Copy()
 }
 
 func TestListFilesystem_OK(t *testing.T) {
