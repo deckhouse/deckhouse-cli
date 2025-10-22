@@ -25,10 +25,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	api "github.com/deckhouse/deckhouse-cli/internal/dataimport/api/v1alpha1"
+	v1alpha1 "github.com/deckhouse/deckhouse-cli/internal/dataimport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/dataimport/util"
+	"github.com/deckhouse/deckhouse-cli/internal/dataio"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
-	"k8s.io/apimachinery/pkg/api/resource"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -37,8 +38,8 @@ const (
 
 func cmdExamples() string {
 	resp := []string{
-		"  # Create DataImport with PVC template size 10Gi, RWO, FS",
-		fmt.Sprintf("    ... %s my-import --size=10Gi --access=ReadWriteOnce --mode=Filesystem", cmdName),
+		"  # Create DataImport (PVC provided via -f)",
+		fmt.Sprintf("    ... %s my-import -n ns1 -f - --ttl=2m --publish --wffc", cmdName),
 	}
 	return strings.Join(resp, "\n")
 }
@@ -46,7 +47,7 @@ func cmdExamples() string {
 func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     cmdName + " [flags] data_import_name",
-		Short:   "Create dataimport kubernetes resource",
+		Short:   "Create DataImport",
 		Example: cmdExamples(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(ctx, log, cmd, args)
@@ -60,13 +61,11 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	}
 
 	cmd.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
+	cmd.Flags().StringP("file", "f", "", "Path to PVC yaml/json file")
 	cmd.Flags().String("ttl", "2m", "Time to live")
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
+	cmd.Flags().StringP("file", "f", "", "PVC manifest")
 	cmd.Flags().Bool("wffc", false, "Wait for first consumer")
-	cmd.Flags().String("size", "", "PVC size, e.g. 10Gi")
-	cmd.Flags().String("access", "ReadWriteOnce", "PVC access mode")
-	cmd.Flags().String("class", "", "StorageClassName")
-	cmd.Flags().String("mode", "Filesystem", "PVC volume mode: Filesystem|Block")
 
 	return cmd
 }
@@ -79,43 +78,40 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	namespace, _ := cmd.Flags().GetString("namespace")
 	ttl, _ := cmd.Flags().GetString("ttl")
 	publish, _ := cmd.Flags().GetBool("publish")
+	pvcFile, _ := cmd.Flags().GetString("file")
 	wffc, _ := cmd.Flags().GetBool("wffc")
-	size, _ := cmd.Flags().GetString("size")
-	access, _ := cmd.Flags().GetString("access")
-	class, _ := cmd.Flags().GetString("class")
-	mode, _ := cmd.Flags().GetString("mode")
-
-	pvcTpl := api.PersistentVolumeClaimTemplateSpec{}
-	// Minimal parsing; detailed validation can be added later
-	if size != "" {
-		pvcTpl.Resources.Requests = api.ResourceList{api.ResourceStorage: resource.MustParse(size)}
-	}
-	if access != "" {
-		pvcTpl.AccessModes = []api.PersistentVolumeAccessMode{api.PersistentVolumeAccessMode(access)}
-	}
-	if class != "" {
-		pvcTpl.StorageClassName = &class
-	}
-	if mode != "" {
-		m := api.PersistentVolumeMode(mode)
-		pvcTpl.VolumeMode = &m
-	}
 
 	flags := cmd.PersistentFlags()
 	sc, err := safeClient.NewSafeClient(flags)
 	if err != nil {
 		return err
 	}
-	rtClient, err := sc.NewRTClient(api.AddToScheme)
+
+	rtClient, err := sc.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {
 		return err
 	}
 
-	if err := util.CreateDataImport(ctx, name, namespace, ttl, publish, wffc, pvcTpl, rtClient); err != nil {
+	data, err := dataio.ReadFileFromCLI(pvcFile)
+	if err != nil {
+		return err
+	}
+
+	pvcSpec := &v1alpha1.PersistentVolumeClaimTemplateSpec{}
+	if err := yaml.Unmarshal(data, pvcSpec); err != nil {
+		return fmt.Errorf("parse PVC: %w", err)
+	}
+
+	if namespace == "" {
+		if pvcSpec.Namespace == "" {
+			return fmt.Errorf("namespace is required")
+		}
+		namespace = pvcSpec.Namespace
+	}
+
+	if err := util.CreateDataImport(ctx, name, namespace, ttl, publish, wffc, pvcSpec, rtClient); err != nil {
 		return err
 	}
 	log.Info("DataImport created", slog.String("name", name), slog.String("namespace", namespace))
 	return nil
 }
-
-// no extra helpers needed

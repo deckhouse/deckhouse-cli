@@ -50,8 +50,8 @@ func DeleteDataImport(ctx context.Context, diName, namespace string, rtClient ct
 func CreateDataImport(
 	ctx context.Context,
 	name, namespace, ttl string,
-	publish, waitForFirstConsumer bool,
-	pvcTpl v1alpha1.PersistentVolumeClaimTemplateSpec,
+	publish, waitForFirtConsumer bool,
+	pvcTpl *v1alpha1.PersistentVolumeClaimTemplateSpec,
 	rtClient ctrlrtclient.Client,
 ) error {
 	if ttl == "" {
@@ -70,10 +70,10 @@ func CreateDataImport(
 		Spec: v1alpha1.DataImportSpec{
 			Ttl:                  ttl,
 			Publish:              publish,
-			WaitForFirstConsumer: waitForFirstConsumer,
+			WaitForFirstConsumer: waitForFirtConsumer,
 			TargetRef: v1alpha1.DataImportTargetRefSpec{
 				Kind:        "PersistentVolumeClaim",
-				PvcTemplate: &pvcTpl,
+				PvcTemplate: pvcTpl,
 			},
 		},
 	}
@@ -105,9 +105,9 @@ func GetDataImportWithRestart(
 				if err := DeleteDataImport(ctx, diName, namespace, rtClient); err != nil {
 					return nil, err
 				}
-				pvcTemplate := v1alpha1.PersistentVolumeClaimTemplateSpec{}
+				pvcTemplate := &v1alpha1.PersistentVolumeClaimTemplateSpec{}
 				if diObj.Spec.TargetRef.PvcTemplate != nil {
-					pvcTemplate = *diObj.Spec.TargetRef.PvcTemplate
+					pvcTemplate = diObj.Spec.TargetRef.PvcTemplate
 				}
 				if err := CreateDataImport(
 					ctx,
