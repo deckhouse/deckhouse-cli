@@ -292,7 +292,7 @@ func FindDeckhouseModulesImages(
 			}
 		}
 
-		logger.DebugF("%d. %s - find external module images", counter, module.Name)
+		logger.InfoF("%d:\t%s - find external module images", counter, module.Name)
 
 		moduleImages, moduleImagesWithExternal, releaseImages, err := modules.FindExternalModuleImages(
 			params,
@@ -309,7 +309,7 @@ func FindDeckhouseModulesImages(
 		moduleImageLayouts.ModuleImages = moduleImagesWithExternal
 		maps.Copy(moduleImageLayouts.ReleaseImages, releaseImages)
 
-		logger.DebugF("%d. %s - find module extra images", counter, module.Name)
+		logger.InfoF("%d:\t%s - find module extra images", counter, module.Name)
 
 		// Find extra images if any exist
 		extraImages, err := modules.FindModuleExtraImages(
@@ -331,7 +331,7 @@ func FindDeckhouseModulesImages(
 
 		layouts.Modules[module.Name] = moduleImageLayouts
 
-		logger.InfoF("%d. %s ✔", counter, module.Name)
+		logger.InfoF("%d:\t%s", counter, module.Name)
 	}
 
 	return nil
