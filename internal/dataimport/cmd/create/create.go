@@ -61,13 +61,12 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	}
 
 	cmd.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
-	cmd.Flags().StringP("file", "f", "", "Path to PVC yaml/json file")
 	cmd.Flags().String("ttl", "2m", "Time to live")
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
 	cmd.Flags().StringP("file", "f", "", "PVC manifest")
 	cmd.Flags().Bool("wffc", false, "Wait for first consumer")
 
-	return cmd
+	return cmd	
 }
 
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
