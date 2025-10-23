@@ -13,7 +13,6 @@ import (
 	mm_pkg "github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/gojuno/minimock/v3"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
 // RegistryClientMock implements mm_pkg.RegistryClient
@@ -27,6 +26,13 @@ type RegistryClientMock struct {
 	afterExtractImageLayersCounter  uint64
 	beforeExtractImageLayersCounter uint64
 	ExtractImageLayersMock          mRegistryClientMockExtractImageLayers
+
+	funcGetDigest          func(ctx context.Context, tag string) (hp1 *v1.Hash, err error)
+	funcGetDigestOrigin    string
+	inspectFuncGetDigest   func(ctx context.Context, tag string)
+	afterGetDigestCounter  uint64
+	beforeGetDigestCounter uint64
+	GetDigestMock          mRegistryClientMockGetDigest
 
 	funcGetImage          func(ctx context.Context, tag string) (i1 v1.Image, err error)
 	funcGetImageOrigin    string
@@ -56,7 +62,7 @@ type RegistryClientMock struct {
 	beforeGetLabelCounter uint64
 	GetLabelMock          mRegistryClientMockGetLabel
 
-	funcGetManifest          func(ctx context.Context, tag string) (dp1 *remote.Descriptor, err error)
+	funcGetManifest          func(ctx context.Context, tag string) (ba1 []byte, err error)
 	funcGetManifestOrigin    string
 	inspectFuncGetManifest   func(ctx context.Context, tag string)
 	afterGetManifestCounter  uint64
@@ -109,6 +115,9 @@ func NewRegistryClientMock(t minimock.Tester) *RegistryClientMock {
 
 	m.ExtractImageLayersMock = mRegistryClientMockExtractImageLayers{mock: m}
 	m.ExtractImageLayersMock.callArgs = []*RegistryClientMockExtractImageLayersParams{}
+
+	m.GetDigestMock = mRegistryClientMockGetDigest{mock: m}
+	m.GetDigestMock.callArgs = []*RegistryClientMockGetDigestParams{}
 
 	m.GetImageMock = mRegistryClientMockGetImage{mock: m}
 	m.GetImageMock.callArgs = []*RegistryClientMockGetImageParams{}
@@ -514,6 +523,349 @@ func (m *RegistryClientMock) MinimockExtractImageLayersInspect() {
 	if !m.ExtractImageLayersMock.invocationsDone() && afterExtractImageLayersCounter > 0 {
 		m.t.Errorf("Expected %d calls to RegistryClientMock.ExtractImageLayers at\n%s but found %d calls",
 			mm_atomic.LoadUint64(&m.ExtractImageLayersMock.expectedInvocations), m.ExtractImageLayersMock.expectedInvocationsOrigin, afterExtractImageLayersCounter)
+	}
+}
+
+type mRegistryClientMockGetDigest struct {
+	optional           bool
+	mock               *RegistryClientMock
+	defaultExpectation *RegistryClientMockGetDigestExpectation
+	expectations       []*RegistryClientMockGetDigestExpectation
+
+	callArgs []*RegistryClientMockGetDigestParams
+	mutex    sync.RWMutex
+
+	expectedInvocations       uint64
+	expectedInvocationsOrigin string
+}
+
+// RegistryClientMockGetDigestExpectation specifies expectation struct of the RegistryClient.GetDigest
+type RegistryClientMockGetDigestExpectation struct {
+	mock               *RegistryClientMock
+	params             *RegistryClientMockGetDigestParams
+	paramPtrs          *RegistryClientMockGetDigestParamPtrs
+	expectationOrigins RegistryClientMockGetDigestExpectationOrigins
+	results            *RegistryClientMockGetDigestResults
+	returnOrigin       string
+	Counter            uint64
+}
+
+// RegistryClientMockGetDigestParams contains parameters of the RegistryClient.GetDigest
+type RegistryClientMockGetDigestParams struct {
+	ctx context.Context
+	tag string
+}
+
+// RegistryClientMockGetDigestParamPtrs contains pointers to parameters of the RegistryClient.GetDigest
+type RegistryClientMockGetDigestParamPtrs struct {
+	ctx *context.Context
+	tag *string
+}
+
+// RegistryClientMockGetDigestResults contains results of the RegistryClient.GetDigest
+type RegistryClientMockGetDigestResults struct {
+	hp1 *v1.Hash
+	err error
+}
+
+// RegistryClientMockGetDigestOrigins contains origins of expectations of the RegistryClient.GetDigest
+type RegistryClientMockGetDigestExpectationOrigins struct {
+	origin    string
+	originCtx string
+	originTag string
+}
+
+// Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
+// the test will fail minimock's automatic final call check if the mocked method was not called at least once.
+// Optional() makes method check to work in '0 or more' mode.
+// It is NOT RECOMMENDED to use this option unless you really need it, as default behaviour helps to
+// catch the problems when the expected method call is totally skipped during test run.
+func (mmGetDigest *mRegistryClientMockGetDigest) Optional() *mRegistryClientMockGetDigest {
+	mmGetDigest.optional = true
+	return mmGetDigest
+}
+
+// Expect sets up expected params for RegistryClient.GetDigest
+func (mmGetDigest *mRegistryClientMockGetDigest) Expect(ctx context.Context, tag string) *mRegistryClientMockGetDigest {
+	if mmGetDigest.mock.funcGetDigest != nil {
+		mmGetDigest.mock.t.Fatalf("RegistryClientMock.GetDigest mock is already set by Set")
+	}
+
+	if mmGetDigest.defaultExpectation == nil {
+		mmGetDigest.defaultExpectation = &RegistryClientMockGetDigestExpectation{}
+	}
+
+	if mmGetDigest.defaultExpectation.paramPtrs != nil {
+		mmGetDigest.mock.t.Fatalf("RegistryClientMock.GetDigest mock is already set by ExpectParams functions")
+	}
+
+	mmGetDigest.defaultExpectation.params = &RegistryClientMockGetDigestParams{ctx, tag}
+	mmGetDigest.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
+	for _, e := range mmGetDigest.expectations {
+		if minimock.Equal(e.params, mmGetDigest.defaultExpectation.params) {
+			mmGetDigest.mock.t.Fatalf("Expectation set by When has same params: %#v", *mmGetDigest.defaultExpectation.params)
+		}
+	}
+
+	return mmGetDigest
+}
+
+// ExpectCtxParam1 sets up expected param ctx for RegistryClient.GetDigest
+func (mmGetDigest *mRegistryClientMockGetDigest) ExpectCtxParam1(ctx context.Context) *mRegistryClientMockGetDigest {
+	if mmGetDigest.mock.funcGetDigest != nil {
+		mmGetDigest.mock.t.Fatalf("RegistryClientMock.GetDigest mock is already set by Set")
+	}
+
+	if mmGetDigest.defaultExpectation == nil {
+		mmGetDigest.defaultExpectation = &RegistryClientMockGetDigestExpectation{}
+	}
+
+	if mmGetDigest.defaultExpectation.params != nil {
+		mmGetDigest.mock.t.Fatalf("RegistryClientMock.GetDigest mock is already set by Expect")
+	}
+
+	if mmGetDigest.defaultExpectation.paramPtrs == nil {
+		mmGetDigest.defaultExpectation.paramPtrs = &RegistryClientMockGetDigestParamPtrs{}
+	}
+	mmGetDigest.defaultExpectation.paramPtrs.ctx = &ctx
+	mmGetDigest.defaultExpectation.expectationOrigins.originCtx = minimock.CallerInfo(1)
+
+	return mmGetDigest
+}
+
+// ExpectTagParam2 sets up expected param tag for RegistryClient.GetDigest
+func (mmGetDigest *mRegistryClientMockGetDigest) ExpectTagParam2(tag string) *mRegistryClientMockGetDigest {
+	if mmGetDigest.mock.funcGetDigest != nil {
+		mmGetDigest.mock.t.Fatalf("RegistryClientMock.GetDigest mock is already set by Set")
+	}
+
+	if mmGetDigest.defaultExpectation == nil {
+		mmGetDigest.defaultExpectation = &RegistryClientMockGetDigestExpectation{}
+	}
+
+	if mmGetDigest.defaultExpectation.params != nil {
+		mmGetDigest.mock.t.Fatalf("RegistryClientMock.GetDigest mock is already set by Expect")
+	}
+
+	if mmGetDigest.defaultExpectation.paramPtrs == nil {
+		mmGetDigest.defaultExpectation.paramPtrs = &RegistryClientMockGetDigestParamPtrs{}
+	}
+	mmGetDigest.defaultExpectation.paramPtrs.tag = &tag
+	mmGetDigest.defaultExpectation.expectationOrigins.originTag = minimock.CallerInfo(1)
+
+	return mmGetDigest
+}
+
+// Inspect accepts an inspector function that has same arguments as the RegistryClient.GetDigest
+func (mmGetDigest *mRegistryClientMockGetDigest) Inspect(f func(ctx context.Context, tag string)) *mRegistryClientMockGetDigest {
+	if mmGetDigest.mock.inspectFuncGetDigest != nil {
+		mmGetDigest.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.GetDigest")
+	}
+
+	mmGetDigest.mock.inspectFuncGetDigest = f
+
+	return mmGetDigest
+}
+
+// Return sets up results that will be returned by RegistryClient.GetDigest
+func (mmGetDigest *mRegistryClientMockGetDigest) Return(hp1 *v1.Hash, err error) *RegistryClientMock {
+	if mmGetDigest.mock.funcGetDigest != nil {
+		mmGetDigest.mock.t.Fatalf("RegistryClientMock.GetDigest mock is already set by Set")
+	}
+
+	if mmGetDigest.defaultExpectation == nil {
+		mmGetDigest.defaultExpectation = &RegistryClientMockGetDigestExpectation{mock: mmGetDigest.mock}
+	}
+	mmGetDigest.defaultExpectation.results = &RegistryClientMockGetDigestResults{hp1, err}
+	mmGetDigest.defaultExpectation.returnOrigin = minimock.CallerInfo(1)
+	return mmGetDigest.mock
+}
+
+// Set uses given function f to mock the RegistryClient.GetDigest method
+func (mmGetDigest *mRegistryClientMockGetDigest) Set(f func(ctx context.Context, tag string) (hp1 *v1.Hash, err error)) *RegistryClientMock {
+	if mmGetDigest.defaultExpectation != nil {
+		mmGetDigest.mock.t.Fatalf("Default expectation is already set for the RegistryClient.GetDigest method")
+	}
+
+	if len(mmGetDigest.expectations) > 0 {
+		mmGetDigest.mock.t.Fatalf("Some expectations are already set for the RegistryClient.GetDigest method")
+	}
+
+	mmGetDigest.mock.funcGetDigest = f
+	mmGetDigest.mock.funcGetDigestOrigin = minimock.CallerInfo(1)
+	return mmGetDigest.mock
+}
+
+// When sets expectation for the RegistryClient.GetDigest which will trigger the result defined by the following
+// Then helper
+func (mmGetDigest *mRegistryClientMockGetDigest) When(ctx context.Context, tag string) *RegistryClientMockGetDigestExpectation {
+	if mmGetDigest.mock.funcGetDigest != nil {
+		mmGetDigest.mock.t.Fatalf("RegistryClientMock.GetDigest mock is already set by Set")
+	}
+
+	expectation := &RegistryClientMockGetDigestExpectation{
+		mock:               mmGetDigest.mock,
+		params:             &RegistryClientMockGetDigestParams{ctx, tag},
+		expectationOrigins: RegistryClientMockGetDigestExpectationOrigins{origin: minimock.CallerInfo(1)},
+	}
+	mmGetDigest.expectations = append(mmGetDigest.expectations, expectation)
+	return expectation
+}
+
+// Then sets up RegistryClient.GetDigest return parameters for the expectation previously defined by the When method
+func (e *RegistryClientMockGetDigestExpectation) Then(hp1 *v1.Hash, err error) *RegistryClientMock {
+	e.results = &RegistryClientMockGetDigestResults{hp1, err}
+	return e.mock
+}
+
+// Times sets number of times RegistryClient.GetDigest should be invoked
+func (mmGetDigest *mRegistryClientMockGetDigest) Times(n uint64) *mRegistryClientMockGetDigest {
+	if n == 0 {
+		mmGetDigest.mock.t.Fatalf("Times of RegistryClientMock.GetDigest mock can not be zero")
+	}
+	mm_atomic.StoreUint64(&mmGetDigest.expectedInvocations, n)
+	mmGetDigest.expectedInvocationsOrigin = minimock.CallerInfo(1)
+	return mmGetDigest
+}
+
+func (mmGetDigest *mRegistryClientMockGetDigest) invocationsDone() bool {
+	if len(mmGetDigest.expectations) == 0 && mmGetDigest.defaultExpectation == nil && mmGetDigest.mock.funcGetDigest == nil {
+		return true
+	}
+
+	totalInvocations := mm_atomic.LoadUint64(&mmGetDigest.mock.afterGetDigestCounter)
+	expectedInvocations := mm_atomic.LoadUint64(&mmGetDigest.expectedInvocations)
+
+	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
+}
+
+// GetDigest implements mm_pkg.RegistryClient
+func (mmGetDigest *RegistryClientMock) GetDigest(ctx context.Context, tag string) (hp1 *v1.Hash, err error) {
+	mm_atomic.AddUint64(&mmGetDigest.beforeGetDigestCounter, 1)
+	defer mm_atomic.AddUint64(&mmGetDigest.afterGetDigestCounter, 1)
+
+	mmGetDigest.t.Helper()
+
+	if mmGetDigest.inspectFuncGetDigest != nil {
+		mmGetDigest.inspectFuncGetDigest(ctx, tag)
+	}
+
+	mm_params := RegistryClientMockGetDigestParams{ctx, tag}
+
+	// Record call args
+	mmGetDigest.GetDigestMock.mutex.Lock()
+	mmGetDigest.GetDigestMock.callArgs = append(mmGetDigest.GetDigestMock.callArgs, &mm_params)
+	mmGetDigest.GetDigestMock.mutex.Unlock()
+
+	for _, e := range mmGetDigest.GetDigestMock.expectations {
+		if minimock.Equal(*e.params, mm_params) {
+			mm_atomic.AddUint64(&e.Counter, 1)
+			return e.results.hp1, e.results.err
+		}
+	}
+
+	if mmGetDigest.GetDigestMock.defaultExpectation != nil {
+		mm_atomic.AddUint64(&mmGetDigest.GetDigestMock.defaultExpectation.Counter, 1)
+		mm_want := mmGetDigest.GetDigestMock.defaultExpectation.params
+		mm_want_ptrs := mmGetDigest.GetDigestMock.defaultExpectation.paramPtrs
+
+		mm_got := RegistryClientMockGetDigestParams{ctx, tag}
+
+		if mm_want_ptrs != nil {
+
+			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
+				mmGetDigest.t.Errorf("RegistryClientMock.GetDigest got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmGetDigest.GetDigestMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
+			}
+
+			if mm_want_ptrs.tag != nil && !minimock.Equal(*mm_want_ptrs.tag, mm_got.tag) {
+				mmGetDigest.t.Errorf("RegistryClientMock.GetDigest got unexpected parameter tag, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmGetDigest.GetDigestMock.defaultExpectation.expectationOrigins.originTag, *mm_want_ptrs.tag, mm_got.tag, minimock.Diff(*mm_want_ptrs.tag, mm_got.tag))
+			}
+
+		} else if mm_want != nil && !minimock.Equal(*mm_want, mm_got) {
+			mmGetDigest.t.Errorf("RegistryClientMock.GetDigest got unexpected parameters, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+				mmGetDigest.GetDigestMock.defaultExpectation.expectationOrigins.origin, *mm_want, mm_got, minimock.Diff(*mm_want, mm_got))
+		}
+
+		mm_results := mmGetDigest.GetDigestMock.defaultExpectation.results
+		if mm_results == nil {
+			mmGetDigest.t.Fatal("No results are set for the RegistryClientMock.GetDigest")
+		}
+		return (*mm_results).hp1, (*mm_results).err
+	}
+	if mmGetDigest.funcGetDigest != nil {
+		return mmGetDigest.funcGetDigest(ctx, tag)
+	}
+	mmGetDigest.t.Fatalf("Unexpected call to RegistryClientMock.GetDigest. %v %v", ctx, tag)
+	return
+}
+
+// GetDigestAfterCounter returns a count of finished RegistryClientMock.GetDigest invocations
+func (mmGetDigest *RegistryClientMock) GetDigestAfterCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmGetDigest.afterGetDigestCounter)
+}
+
+// GetDigestBeforeCounter returns a count of RegistryClientMock.GetDigest invocations
+func (mmGetDigest *RegistryClientMock) GetDigestBeforeCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmGetDigest.beforeGetDigestCounter)
+}
+
+// Calls returns a list of arguments used in each call to RegistryClientMock.GetDigest.
+// The list is in the same order as the calls were made (i.e. recent calls have a higher index)
+func (mmGetDigest *mRegistryClientMockGetDigest) Calls() []*RegistryClientMockGetDigestParams {
+	mmGetDigest.mutex.RLock()
+
+	argCopy := make([]*RegistryClientMockGetDigestParams, len(mmGetDigest.callArgs))
+	copy(argCopy, mmGetDigest.callArgs)
+
+	mmGetDigest.mutex.RUnlock()
+
+	return argCopy
+}
+
+// MinimockGetDigestDone returns true if the count of the GetDigest invocations corresponds
+// the number of defined expectations
+func (m *RegistryClientMock) MinimockGetDigestDone() bool {
+	if m.GetDigestMock.optional {
+		// Optional methods provide '0 or more' call count restriction.
+		return true
+	}
+
+	for _, e := range m.GetDigestMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			return false
+		}
+	}
+
+	return m.GetDigestMock.invocationsDone()
+}
+
+// MinimockGetDigestInspect logs each unmet expectation
+func (m *RegistryClientMock) MinimockGetDigestInspect() {
+	for _, e := range m.GetDigestMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			m.t.Errorf("Expected call to RegistryClientMock.GetDigest at\n%s with params: %#v", e.expectationOrigins.origin, *e.params)
+		}
+	}
+
+	afterGetDigestCounter := mm_atomic.LoadUint64(&m.afterGetDigestCounter)
+	// if default expectation was set then invocations count should be greater than zero
+	if m.GetDigestMock.defaultExpectation != nil && afterGetDigestCounter < 1 {
+		if m.GetDigestMock.defaultExpectation.params == nil {
+			m.t.Errorf("Expected call to RegistryClientMock.GetDigest at\n%s", m.GetDigestMock.defaultExpectation.returnOrigin)
+		} else {
+			m.t.Errorf("Expected call to RegistryClientMock.GetDigest at\n%s with params: %#v", m.GetDigestMock.defaultExpectation.expectationOrigins.origin, *m.GetDigestMock.defaultExpectation.params)
+		}
+	}
+	// if func was set then invocations count should be greater than zero
+	if m.funcGetDigest != nil && afterGetDigestCounter < 1 {
+		m.t.Errorf("Expected call to RegistryClientMock.GetDigest at\n%s", m.funcGetDigestOrigin)
+	}
+
+	if !m.GetDigestMock.invocationsDone() && afterGetDigestCounter > 0 {
+		m.t.Errorf("Expected %d calls to RegistryClientMock.GetDigest at\n%s but found %d calls",
+			mm_atomic.LoadUint64(&m.GetDigestMock.expectedInvocations), m.GetDigestMock.expectedInvocationsOrigin, afterGetDigestCounter)
 	}
 }
 
@@ -1959,7 +2311,7 @@ type RegistryClientMockGetManifestParamPtrs struct {
 
 // RegistryClientMockGetManifestResults contains results of the RegistryClient.GetManifest
 type RegistryClientMockGetManifestResults struct {
-	dp1 *remote.Descriptor
+	ba1 []byte
 	err error
 }
 
@@ -2063,7 +2415,7 @@ func (mmGetManifest *mRegistryClientMockGetManifest) Inspect(f func(ctx context.
 }
 
 // Return sets up results that will be returned by RegistryClient.GetManifest
-func (mmGetManifest *mRegistryClientMockGetManifest) Return(dp1 *remote.Descriptor, err error) *RegistryClientMock {
+func (mmGetManifest *mRegistryClientMockGetManifest) Return(ba1 []byte, err error) *RegistryClientMock {
 	if mmGetManifest.mock.funcGetManifest != nil {
 		mmGetManifest.mock.t.Fatalf("RegistryClientMock.GetManifest mock is already set by Set")
 	}
@@ -2071,13 +2423,13 @@ func (mmGetManifest *mRegistryClientMockGetManifest) Return(dp1 *remote.Descript
 	if mmGetManifest.defaultExpectation == nil {
 		mmGetManifest.defaultExpectation = &RegistryClientMockGetManifestExpectation{mock: mmGetManifest.mock}
 	}
-	mmGetManifest.defaultExpectation.results = &RegistryClientMockGetManifestResults{dp1, err}
+	mmGetManifest.defaultExpectation.results = &RegistryClientMockGetManifestResults{ba1, err}
 	mmGetManifest.defaultExpectation.returnOrigin = minimock.CallerInfo(1)
 	return mmGetManifest.mock
 }
 
 // Set uses given function f to mock the RegistryClient.GetManifest method
-func (mmGetManifest *mRegistryClientMockGetManifest) Set(f func(ctx context.Context, tag string) (dp1 *remote.Descriptor, err error)) *RegistryClientMock {
+func (mmGetManifest *mRegistryClientMockGetManifest) Set(f func(ctx context.Context, tag string) (ba1 []byte, err error)) *RegistryClientMock {
 	if mmGetManifest.defaultExpectation != nil {
 		mmGetManifest.mock.t.Fatalf("Default expectation is already set for the RegistryClient.GetManifest method")
 	}
@@ -2108,8 +2460,8 @@ func (mmGetManifest *mRegistryClientMockGetManifest) When(ctx context.Context, t
 }
 
 // Then sets up RegistryClient.GetManifest return parameters for the expectation previously defined by the When method
-func (e *RegistryClientMockGetManifestExpectation) Then(dp1 *remote.Descriptor, err error) *RegistryClientMock {
-	e.results = &RegistryClientMockGetManifestResults{dp1, err}
+func (e *RegistryClientMockGetManifestExpectation) Then(ba1 []byte, err error) *RegistryClientMock {
+	e.results = &RegistryClientMockGetManifestResults{ba1, err}
 	return e.mock
 }
 
@@ -2135,7 +2487,7 @@ func (mmGetManifest *mRegistryClientMockGetManifest) invocationsDone() bool {
 }
 
 // GetManifest implements mm_pkg.RegistryClient
-func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, tag string) (dp1 *remote.Descriptor, err error) {
+func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, tag string) (ba1 []byte, err error) {
 	mm_atomic.AddUint64(&mmGetManifest.beforeGetManifestCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetManifest.afterGetManifestCounter, 1)
 
@@ -2155,7 +2507,7 @@ func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, tag st
 	for _, e := range mmGetManifest.GetManifestMock.expectations {
 		if minimock.Equal(*e.params, mm_params) {
 			mm_atomic.AddUint64(&e.Counter, 1)
-			return e.results.dp1, e.results.err
+			return e.results.ba1, e.results.err
 		}
 	}
 
@@ -2187,7 +2539,7 @@ func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, tag st
 		if mm_results == nil {
 			mmGetManifest.t.Fatal("No results are set for the RegistryClientMock.GetManifest")
 		}
-		return (*mm_results).dp1, (*mm_results).err
+		return (*mm_results).ba1, (*mm_results).err
 	}
 	if mmGetManifest.funcGetManifest != nil {
 		return mmGetManifest.funcGetManifest(ctx, tag)
@@ -3764,6 +4116,8 @@ func (m *RegistryClientMock) MinimockFinish() {
 		if !m.minimockDone() {
 			m.MinimockExtractImageLayersInspect()
 
+			m.MinimockGetDigestInspect()
+
 			m.MinimockGetImageInspect()
 
 			m.MinimockGetImageConfigInspect()
@@ -3807,6 +4161,7 @@ func (m *RegistryClientMock) minimockDone() bool {
 	done := true
 	return done &&
 		m.MinimockExtractImageLayersDone() &&
+		m.MinimockGetDigestDone() &&
 		m.MinimockGetImageDone() &&
 		m.MinimockGetImageConfigDone() &&
 		m.MinimockGetImageLayersDone() &&
