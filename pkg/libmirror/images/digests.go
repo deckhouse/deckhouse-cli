@@ -23,9 +23,12 @@ import (
 	"io"
 	"io/fs"
 	"regexp"
+	"strings"
 
+	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
@@ -45,6 +48,8 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 	installerTag string,
 	installersLayout layout.Path,
 ) (map[string]struct{}, error) {
+	logger := mirrorCtx.Logger
+
 	index, err := installersLayout.ImageIndex()
 	if err != nil {
 		return nil, fmt.Errorf("read installer images index: %w", err)
@@ -83,6 +88,27 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 		return nil, fmt.Errorf("cannot parse images list from json: %w", err)
 	}
 
+	vex := make([]string, 0)
+	for image := range images {
+		vexImageName, err := FindVexImage(mirrorCtx, mirrorCtx.DeckhouseRegistryRepo, nil, nil, image)
+
+		if err != nil {
+			return nil, fmt.Errorf("Find VEX image for digest %q: %w", image, err)
+		}
+
+		if vexImageName != "" {
+			logger.DebugF("Vex image found %s", vexImageName)
+			vex = append(vex, vexImageName)
+		}
+	}
+
+	if len(vex) > 0 {
+		logger.InfoF("VEX images found for %d images", len(vex))
+		for _, v := range vex {
+			images[v] = struct{}{}
+		}
+	}
+
 	return images, nil
 }
 
@@ -114,4 +140,36 @@ func parseImagesFromJSON(registryRepo string, jsonDigests io.Reader, dst map[str
 	}
 
 	return nil
+}
+
+func FindVexImage(
+	params *params.PullParams,
+	registryPath string,
+	nameOpts []name.Option,
+	remoteOpts []remote.Option,
+	digest string,
+) (string, error) {
+	logger := params.Logger
+
+	// vex image reference check
+	vexImageName := strings.Replace(strings.Replace(digest, ":", "-", 1), "@", ":", 1) + ".att"
+
+	logger.DebugF("Checking vex image from %s", vexImageName)
+
+	vexref, err := name.ParseReference(vexImageName, nameOpts...)
+	if err != nil {
+		return "", fmt.Errorf("parse reference: %w", err)
+	}
+
+	var vexErr error
+	_, vexErr = remote.Head(vexref, remoteOpts...)
+	if vexErr != nil {
+		_, vexErr = remote.Get(vexref, remoteOpts...)
+	}
+
+	if vexErr == nil {
+		return vexImageName, nil
+	}
+
+	return "", nil
 }
