@@ -89,9 +89,42 @@ func (c *Client) GetRegistry() string {
 	return fmt.Sprintf("%s/%s", c.registryHost, c.scopePath)
 }
 
+// The repository is determined by the chained WithScope() calls
+func (c *Client) GetDigest(ctx context.Context, tag string) (*v1.Hash, error) {
+	fullRegistry := c.GetRegistry()
+	logentry := c.log.With(
+		slog.String("registry_host", c.registryHost),
+		slog.String("scope", c.scopePath),
+		slog.String("tag", tag),
+	)
+
+	logentry.Debug("Getting manifest")
+
+	ref, err := name.ParseReference(fmt.Sprintf("%s:%s", fullRegistry, tag))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse reference: %w", err)
+	}
+
+	opts := append(c.options, remote.WithContext(ctx))
+
+	head, err := remote.Head(ref, opts...)
+	if err == nil {
+		return &head.Digest, nil
+	}
+
+	desc, err := remote.Get(ref, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get manifest: %w", err)
+	}
+
+	logentry.Debug("Manifest retrieved successfully")
+
+	return &desc.Digest, nil
+}
+
 // GetManifest retrieves the manifest for a specific image tag
 // The repository is determined by the chained WithScope() calls
-func (c *Client) GetManifest(ctx context.Context, tag string) (*remote.Descriptor, error) {
+func (c *Client) GetManifest(ctx context.Context, tag string) ([]byte, error) {
 	fullRegistry := c.GetRegistry()
 	logentry := c.log.With(
 		slog.String("registry_host", c.registryHost),
@@ -114,7 +147,7 @@ func (c *Client) GetManifest(ctx context.Context, tag string) (*remote.Descripto
 
 	logentry.Debug("Manifest retrieved successfully")
 
-	return desc, nil
+	return desc.Manifest, nil
 }
 
 // GetImage retrieves an remote image for a specific reference

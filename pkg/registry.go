@@ -21,7 +21,6 @@ import (
 	"io"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
 // RegistryClient defines the contract for interacting with container registries
@@ -33,11 +32,17 @@ type RegistryClient interface {
 	// GetRegistry returns the full registry path (host + scope)
 	GetRegistry() string
 
+	// GetDigest retrieves the digest for a specific image tag
+	// The repository is determined by the chained WithScope() calls
+	GetDigest(ctx context.Context, tag string) (*v1.Hash, error)
+
 	// GetManifest retrieves the manifest for a specific image tag
 	// The repository is determined by the chained WithScope() calls
-	GetManifest(ctx context.Context, tag string) (*remote.Descriptor, error)
+	GetManifest(ctx context.Context, tag string) ([]byte, error)
 
-	// GetImage retrieves an image for a specific reference
+	// GetImage retrieves an remote image for a specific reference
+	// Do not return remote image to avoid drop connection with context cancelation.
+	// It will be in use while passed context will be alive.
 	// The repository is determined by the chained WithScope() calls
 	GetImage(ctx context.Context, tag string) (v1.Image, error)
 

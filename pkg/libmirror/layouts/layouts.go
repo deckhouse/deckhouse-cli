@@ -270,10 +270,15 @@ func FindDeckhouseModulesImages(
 	modulesData []modules.Module,
 	filter *modules.Filter,
 ) error {
+	logger := params.Logger
+
+	counter := 0
 	for _, module := range modulesData {
 		if !filter.Match(&module) {
 			continue
 		}
+
+		counter++
 
 		moduleImageLayouts := layouts.Modules[module.Name]
 		moduleImageLayouts.ReleaseImages = map[string]struct{}{}
@@ -287,7 +292,10 @@ func FindDeckhouseModulesImages(
 			}
 		}
 
-		moduleImages, releaseImages, err := modules.FindExternalModuleImages(
+		logger.InfoF("%d:\t%s - find external module images", counter, module.Name)
+
+		moduleImages, moduleImagesWithExternal, releaseImages, err := modules.FindExternalModuleImages(
+			params,
 			&module,
 			filter,
 			params.RegistryAuth,
@@ -298,11 +306,14 @@ func FindDeckhouseModulesImages(
 			return fmt.Errorf("Find images of %s: %w", module.Name, err)
 		}
 
-		moduleImageLayouts.ModuleImages = moduleImages
+		moduleImageLayouts.ModuleImages = moduleImagesWithExternal
 		maps.Copy(moduleImageLayouts.ReleaseImages, releaseImages)
+
+		logger.InfoF("%d:\t%s - find module extra images", counter, module.Name)
 
 		// Find extra images if any exist
 		extraImages, err := modules.FindModuleExtraImages(
+			params,
 			&module,
 			moduleImages,
 			params.RegistryAuth,
@@ -319,6 +330,8 @@ func FindDeckhouseModulesImages(
 		}
 
 		layouts.Modules[module.Name] = moduleImageLayouts
+
+		logger.InfoF("%d:\t%s", counter, module.Name)
 	}
 
 	return nil

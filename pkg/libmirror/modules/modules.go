@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"strings"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 )
@@ -101,12 +103,15 @@ func getModulesForRepo(
 }
 
 func FindExternalModuleImages(
+	params *params.PullParams,
 	mod *Module,
 	filter *Filter,
 	authProvider authn.Authenticator,
 	insecure, skipVerifyTLS bool,
-) (moduleImages, releaseImages map[string]struct{}, err error) {
-	moduleImages, releaseImages = map[string]struct{}{}, map[string]struct{}{}
+) (moduleImages []string, moduleImagesWithExternal, releaseImages map[string]struct{}, err error) {
+	logger := params.Logger
+
+	moduleImagesWithExternal, releaseImages = map[string]struct{}{}, map[string]struct{}{}
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
 
 	// Check if specific versions are requested (explicit tags)
@@ -127,14 +132,15 @@ func FindExternalModuleImages(
 	if len(versionsToMirror) > 0 && !isDefaultConstraint {
 		// Explicit versions specified (e.g., neuvector@=v1.2.3 or neuvector@~1.2.0)
 		for _, tag := range versionsToMirror {
-			moduleImages[mod.RegistryPath+":"+tag] = struct{}{}
+			moduleImages = append(moduleImages, mod.RegistryPath+":"+tag)
+			moduleImagesWithExternal[mod.RegistryPath+":"+tag] = struct{}{}
 			releaseImages[path.Join(mod.RegistryPath, "release")+":"+tag] = struct{}{}
 		}
 	} else if filter.ShouldMirrorReleaseChannels(mod.Name) {
 		// No explicit versions - use release channels
 		channelImgs, err := getAvailableReleaseChannelsImagesForModule(mod, nameOpts, remoteOpts)
 		if err != nil {
-			return nil, nil, fmt.Errorf("get release channels: %w", err)
+			return nil, nil, nil, fmt.Errorf("get release channels: %w", err)
 		}
 		for img := range channelImgs {
 			releaseImages[img] = struct{}{}
@@ -142,18 +148,28 @@ func FindExternalModuleImages(
 
 		channelVers, err := releases.FetchVersionsFromModuleReleaseChannels(channelImgs, authProvider, insecure, skipVerifyTLS)
 		if err != nil {
-			return nil, nil, fmt.Errorf("fetch channel versions: %w", err)
+			return nil, nil, nil, fmt.Errorf("fetch channel versions: %w", err)
 		}
 		for _, version := range channelVers {
-			moduleImages[mod.RegistryPath+":"+version] = struct{}{}
+			moduleImages = append(moduleImages, mod.RegistryPath+":"+version)
+			moduleImagesWithExternal[mod.RegistryPath+":"+version] = struct{}{}
 			releaseImages[path.Join(mod.RegistryPath, "release")+":"+version] = struct{}{}
 		}
 	}
 
-	for imageTag := range moduleImages {
+	logger.DebugF("Finding module extra images for %s", mod.Name)
+
+	for _, imageTag := range moduleImages {
+		if strings.Contains(imageTag, "@sha256:") {
+			logger.DebugF("Skipping digest reference %s for images_digests.json extraction", imageTag)
+			continue // Skip digest references
+		}
+
+		logger.DebugF("Checking module image %s for extra images", imageTag)
+
 		ref, err := name.ParseReference(imageTag, nameOpts...)
 		if err != nil {
-			return nil, nil, fmt.Errorf("Get digests for %q version: %w", imageTag, err)
+			return nil, nil, nil, fmt.Errorf("Get digests for %q version: %w", imageTag, err)
 		}
 
 		img, err := remote.Image(ref, remoteOpts...)
@@ -161,24 +177,28 @@ func FindExternalModuleImages(
 			if errorutil.IsImageNotFoundError(err) {
 				continue
 			}
-			return nil, nil, fmt.Errorf("Get digests for %q version: %w", imageTag, err)
+			return nil, nil, nil, fmt.Errorf("Get digests for %q version: %w", imageTag, err)
 		}
+
+		logger.DebugF("Extracting images_digests.json from %s", imageTag)
 
 		imagesDigestsJSON, err := images.ExtractFileFromImage(img, "images_digests.json")
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			continue
 		case err != nil:
-			return nil, nil, fmt.Errorf("Extract digests for %q version: %w", imageTag, err)
+			return nil, nil, nil, fmt.Errorf("Extract digests for %q version: %w", imageTag, err)
 		}
+
+		logger.DebugF("Parsing images_digests.json from %s", imageTag)
 
 		digests := images.ExtractDigestsFromJSONFile(imagesDigestsJSON.Bytes())
 		for _, digest := range digests {
-			moduleImages[mod.RegistryPath+"@"+digest] = struct{}{}
+			moduleImagesWithExternal[mod.RegistryPath+"@"+digest] = struct{}{}
 		}
 	}
 
-	return moduleImages, releaseImages, nil
+	return moduleImages, moduleImagesWithExternal, releaseImages, nil
 }
 
 func getAvailableReleaseChannelsImagesForModule(mod *Module, refOpts []name.Option, remoteOpts []remote.Option) (map[string]struct{}, error) {
@@ -212,16 +232,26 @@ func getAvailableReleaseChannelsImagesForModule(mod *Module, refOpts []name.Opti
 
 // FindModuleExtraImages extracts extra_images.json from module images and returns extra images map
 func FindModuleExtraImages(
+	params *params.PullParams,
 	mod *Module,
-	moduleImages map[string]struct{},
+	moduleImages []string,
 	authProvider authn.Authenticator,
 	insecure, skipVerifyTLS bool,
 ) (extraImages map[string]struct{}, err error) {
+	logger := params.Logger
+
 	extraImages = map[string]struct{}{}
 	_, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
 
 	// Try to extract extra_images.json from any available module version
-	for imageTag := range moduleImages {
+	for _, imageTag := range moduleImages {
+		if strings.Contains(imageTag, "@sha256:") {
+			logger.DebugF("Skipping digest reference %s for extra_images.json extraction", imageTag)
+			continue // Skip digest references
+		}
+
+		logger.DebugF("Checking module image %s for extra_images.json", imageTag)
+
 		ref, err := name.ParseReference(imageTag)
 		if err != nil {
 			continue
@@ -232,6 +262,7 @@ func FindModuleExtraImages(
 			continue
 		}
 
+		logger.DebugF("Extracting extra_images.json from %s", imageTag)
 		extraImagesJSON, err := images.ExtractFileFromImage(img, "extra_images.json")
 		if errors.Is(err, fs.ErrNotExist) {
 			continue // No extra_images.json in this version, try next
