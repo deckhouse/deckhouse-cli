@@ -142,7 +142,6 @@ func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient
 	}
 
 	for offset < totalSize {
-		log.Info("upload", "offset", offset, "totalSize", totalSize, "chunkSize", chunkSize, "url", url)
 		remaining := totalSize - offset
 		sendLen := chunkSize
 		if sendLen > remaining {
