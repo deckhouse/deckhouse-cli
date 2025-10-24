@@ -330,6 +330,8 @@ func FindDeckhouseModulesImages(
 
 		nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&params.BaseParams)
 
+		logger.InfoF("Searching for VEX images")
+
 		for digest := range moduleImagesWithExternal {
 			vexImageName, err := FindVexImage(
 				params,
