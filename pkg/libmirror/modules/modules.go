@@ -195,7 +195,8 @@ func FindExternalModuleImages(
 
 		digests := images.ExtractDigestsFromJSONFile(imagesDigestsJSON.Bytes())
 		for _, digest := range digests {
-			moduleImagesWithExternal[mod.RegistryPath+"@"+digest] = struct{}{}
+			extraImageName := mod.RegistryPath + "@" + digest
+			moduleImagesWithExternal[extraImageName] = struct{}{}
 		}
 	}
 

@@ -33,6 +33,15 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 )
 
+const (
+	alphaChannel     = "alpha"
+	betaChannel      = "beta"
+	earlyAccess      = "early-access"
+	stableChannel    = "stable"
+	rockSolidChannel = "rock-solid"
+	ltsChannel       = "lts"
+)
+
 func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
 	logger := pullParams.Logger
 

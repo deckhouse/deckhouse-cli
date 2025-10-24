@@ -18,6 +18,7 @@ package log
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -38,6 +39,15 @@ func NewSLogger(logLevel slog.Level) *SLogger {
 		delegate: slog.New(slogor.NewHandler(os.Stdout, slogor.Options{
 			TimeFormat: time.StampMilli,
 			Level:      logLevel,
+		})),
+	}
+}
+
+func NewNop() *SLogger {
+	return &SLogger{
+		delegate: slog.New(slogor.NewHandler(io.Discard, slogor.Options{
+			TimeFormat: time.StampMilli,
+			Level:      slog.LevelError,
 		})),
 	}
 }

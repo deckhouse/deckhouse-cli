@@ -32,6 +32,7 @@ import (
 	"golang.org/x/exp/maps"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 )
 
 func TestExtractImageDigestsFromDeckhouseInstaller(t *testing.T) {
@@ -43,7 +44,10 @@ func TestExtractImageDigestsFromDeckhouseInstaller(t *testing.T) {
 
 	installersLayout := createOCILayoutWithInstallerImage(t, "localhost:5001/deckhouse", installerTag, expectedImages)
 	images, err := ExtractImageDigestsFromDeckhouseInstaller(
-		&params.PullParams{BaseParams: params.BaseParams{DeckhouseRegistryRepo: "localhost:5001/deckhouse"}},
+		&params.PullParams{BaseParams: params.BaseParams{
+			DeckhouseRegistryRepo: "localhost:5001/deckhouse",
+			Logger:                log.NewNop(),
+		}},
 		installerTag,
 		installersLayout,
 	)
