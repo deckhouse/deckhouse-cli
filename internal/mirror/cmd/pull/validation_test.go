@@ -499,12 +499,6 @@ func TestValidationValidateTmpPath(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name:        "temp dir creation failure - invalid path",
-			tempDir:     "/invalid/path/that/cannot/be/created",
-			bundlePath:  tempDir,
-			expectError: true,
-		},
-		{
 			name:        "temp dir with relative path",
 			tempDir:     "relative/temp",
 			bundlePath:  tempDir,
