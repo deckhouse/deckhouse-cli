@@ -93,7 +93,7 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 		vexImageName, err := FindVexImage(mirrorCtx, mirrorCtx.DeckhouseRegistryRepo, nil, nil, image)
 
 		if err != nil {
-			return nil, fmt.Errorf("Find VEX image for digest %q: %w", image, err)
+			return nil, fmt.Errorf("find VEX image for digest %q: %w", image, err)
 		}
 
 		if vexImageName != "" {
@@ -152,7 +152,7 @@ func FindVexImage(
 	logger := params.Logger
 
 	// vex image reference check
-	vexImageName := strings.Replace(strings.Replace(digest, ":", "-", 1), "@", ":", 1) + ".att"
+	vexImageName := strings.Replace(strings.Replace(digest, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
 
 	logger.DebugF("Checking vex image from %s", vexImageName)
 
