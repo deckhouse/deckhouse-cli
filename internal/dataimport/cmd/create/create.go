@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -27,7 +28,6 @@ import (
 
 	v1alpha1 "github.com/deckhouse/deckhouse-cli/internal/dataimport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/dataimport/util"
-	"github.com/deckhouse/deckhouse-cli/internal/dataio"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 	"sigs.k8s.io/yaml"
 )
@@ -63,10 +63,10 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
 	cmd.Flags().String("ttl", "2m", "Time to live")
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
-	cmd.Flags().StringP("file", "f", "", "PVC manifest")
+	cmd.Flags().StringP("file", "f", "", "PVC manifest file path")
 	cmd.Flags().Bool("wffc", false, "Wait for first consumer")
 
-	return cmd	
+	return cmd
 }
 
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
@@ -77,7 +77,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	namespace, _ := cmd.Flags().GetString("namespace")
 	ttl, _ := cmd.Flags().GetString("ttl")
 	publish, _ := cmd.Flags().GetBool("publish")
-	pvcFile, _ := cmd.Flags().GetString("file")
+	pvcFilePath, _ := cmd.Flags().GetString("file")
 	wffc, _ := cmd.Flags().GetBool("wffc")
 
 	flags := cmd.PersistentFlags()
@@ -91,7 +91,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	data, err := dataio.ReadFileFromCLI(pvcFile)
+	data, err := os.ReadFile(pvcFilePath)
 	if err != nil {
 		return err
 	}
