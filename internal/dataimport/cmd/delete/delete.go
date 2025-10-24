@@ -19,7 +19,7 @@ const (
 
 func cmdExamples() string {
 	resp := []string{
-		fmt.Sprintf("  ... -n target-namespace %s my-volume", cmdName),
+		fmt.Sprintf("  ... -n NAMESPACE %s DATAIMPORT_NAME", cmdName),
 	}
 	return strings.Join(resp, "\n")
 }
@@ -38,7 +38,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringP("namespace", "n", "d8-data-importer", "data volume namespace")
+	cmd.Flags().StringP("namespace", "n", "d8-storage-volume-data-manager", "data volume namespace")
 
 	return cmd
 }
