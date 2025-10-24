@@ -29,6 +29,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
@@ -255,12 +256,12 @@ func getAvailableReleaseChannelsImagesForModule(mod *Module, refOpts []name.Opti
 	releasesRegistryPath := path.Join(mod.RegistryPath, "release")
 	result := make(map[string]struct{})
 	for _, imageTag := range []string{
-		releasesRegistryPath + ":alpha",
-		releasesRegistryPath + ":beta",
-		releasesRegistryPath + ":early-access",
-		releasesRegistryPath + ":stable",
-		releasesRegistryPath + ":rock-solid",
-		releasesRegistryPath + ":lts",
+		releasesRegistryPath + ":" + internal.AlphaChannel,
+		releasesRegistryPath + ":" + internal.BetaChannel,
+		releasesRegistryPath + ":" + internal.EarlyAccessChannel,
+		releasesRegistryPath + ":" + internal.StableChannel,
+		releasesRegistryPath + ":" + internal.RockSolidChannel,
+		releasesRegistryPath + ":" + internal.LTSChannel,
 	} {
 		imageRef, err := name.ParseReference(imageTag, refOpts...)
 		if err != nil {

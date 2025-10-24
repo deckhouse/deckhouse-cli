@@ -26,6 +26,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"golang.org/x/exp/maps"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
@@ -43,12 +44,15 @@ const (
 
 func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
 	logger := pullParams.Logger
-	releaseChannelsToCopy := []string{alphaChannel, betaChannel, earlyAccess, stableChannel, rockSolidChannel, ltsChannel}
+
+	releaseChannelsToCopy := internal.GetAllDefaultReleaseChannels()
+	releaseChannelsToCopy = append(releaseChannelsToCopy, internal.LTSChannel)
+
 	releaseChannelsVersions := make(map[string]*semver.Version, len(releaseChannelsToCopy))
 	for _, channel := range releaseChannelsToCopy {
 		v, err := getReleaseChannelVersionFromRegistry(pullParams, channel)
 		if err != nil {
-			if channel == "lts" {
+			if channel == internal.LTSChannel {
 				logger.WarnF("Skipping LTS channel: %v", err)
 				continue
 			}
@@ -59,7 +63,7 @@ func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
 		releaseChannelsVersions[channel] = v
 	}
 
-	rockSolidVersion := releaseChannelsVersions[rockSolidChannel]
+	rockSolidVersion := releaseChannelsVersions[internal.RockSolidChannel]
 	mirrorFromVersion := *rockSolidVersion
 	if pullParams.SinceVersion != nil {
 		mirrorFromVersion = *pullParams.SinceVersion
@@ -73,7 +77,7 @@ func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
 		return nil, fmt.Errorf("get releases from github: %w", err)
 	}
 
-	alphaChannelVersion := releaseChannelsVersions[alphaChannel]
+	alphaChannelVersion := releaseChannelsVersions[internal.AlphaChannel]
 
 	versionsAboveMinimal := parseAndFilterVersionsAboveMinimalAnbBelowAlpha(&mirrorFromVersion, tags, alphaChannelVersion)
 	versionsAboveMinimal = FilterOnlyLatestPatches(versionsAboveMinimal)
