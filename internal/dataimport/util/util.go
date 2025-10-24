@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"net/http"
 	neturl "net/url"
+	"strconv"
 	"time"
 
 	"github.com/deckhouse/deckhouse-cli/internal/dataimport/api/v1alpha1"
@@ -236,4 +238,31 @@ func PrepareUpload(
 	}
 
 	return
+}
+
+func CheckUploadProgress(ctx context.Context, httpClient *safeClient.SafeClient, targetURL string) (int64, error) {
+	req, err := http.NewRequest(http.MethodHead, targetURL, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := httpClient.HTTPDo(req.WithContext(ctx))
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		if next := resp.Header.Get("X-Next-Offset"); next != "" {
+			if serverOffset, perr := strconv.ParseInt(next, 10, 64); perr == nil && serverOffset >= 0 {
+				return serverOffset, nil
+			}
+			return 0, fmt.Errorf("invalid X-Next-Offset header")
+		}
+		return 0, nil
+	case http.StatusNotFound:
+		return 0, nil
+	default:
+		return 0, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
 }
