@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
@@ -209,7 +210,8 @@ func TestBuildPullParams(t *testing.T) {
 	// Check working directory calculation
 	expectedWorkingDir := filepath.Join(
 		TempDir,
-		"pull",
+		mirror.TmpMirrorFolderName,
+		mirror.TmpMirrorPullFolderName,
 		fmt.Sprintf("%x", md5.Sum([]byte(SourceRegistryRepo))),
 	)
 	assert.Equal(t, expectedWorkingDir, params.WorkingDir)
@@ -425,10 +427,10 @@ func TestWorkingDirectoryCalculation(t *testing.T) {
 	params := buildPullParams(logger)
 
 	expectedHash := fmt.Sprintf("%x", md5.Sum([]byte(SourceRegistryRepo)))
-	expectedPath := filepath.Join(TempDir, "pull", expectedHash)
+	expectedPath := filepath.Join(TempDir, mirror.TmpMirrorFolderName, mirror.TmpMirrorPullFolderName, expectedHash)
 
 	assert.Equal(t, expectedPath, params.WorkingDir)
-	assert.Contains(t, params.WorkingDir, "pull")
+	assert.Contains(t, params.WorkingDir, mirror.TmpMirrorPullFolderName)
 	assert.Contains(t, params.WorkingDir, expectedHash)
 }
 
@@ -903,7 +905,7 @@ func TestPullFunctionErrorPaths(t *testing.T) {
 		params := buildPullParams(logger)
 
 		assert.Equal(t, tempDir, params.BundleDir)
-		assert.Contains(t, params.WorkingDir, "pull")
+		assert.Contains(t, params.WorkingDir, mirror.TmpMirrorPullFolderName)
 		// Check that working directory contains the MD5 hash of "test-registry"
 		expectedHash := fmt.Sprintf("%x", md5.Sum([]byte("test-registry")))
 		assert.Contains(t, params.WorkingDir, expectedHash)
@@ -1250,7 +1252,37 @@ func TestPullerFinalCleanup(t *testing.T) {
 	err = os.WriteFile(testFile, []byte("test"), 0644)
 	require.NoError(t, err)
 
-	// Test cleanup
+	// Test cleanup - since TempDir contains other files besides "pull", only "pull" should be removed
+	originalTempDir := TempDir
+	defer func() { TempDir = originalTempDir }()
+
+	TempDir = testDir
+
+	puller := &Puller{}
+	err = puller.finalCleanup()
+	assert.NoError(t, err)
+
+	// Verify directory still exists (since it contains other files)
+	_, err = os.Stat(testDir)
+	assert.False(t, os.IsNotExist(err))
+
+	// Verify the file still exists
+	_, err = os.Stat(testFile)
+	assert.False(t, os.IsNotExist(err))
+}
+
+func TestPullerFinalCleanupOnlyPullDir(t *testing.T) {
+	tempDir := t.TempDir()
+	testDir := filepath.Join(tempDir, "to-cleanup")
+	err := os.MkdirAll(testDir, 0755)
+	require.NoError(t, err)
+
+	// Create only a "pull" directory in TempDir
+	pullDir := filepath.Join(testDir, mirror.TmpMirrorFolderName)
+	err = os.MkdirAll(pullDir, 0755)
+	require.NoError(t, err)
+
+	// Test cleanup - since TempDir contains only "pull", entire TempDir should be removed
 	originalTempDir := TempDir
 	defer func() { TempDir = originalTempDir }()
 

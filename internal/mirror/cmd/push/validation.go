@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/samber/lo"
 	"github.com/spf13/cobra"
@@ -69,7 +70,7 @@ func validateImagesBundlePathArg(args []string) error {
 		}
 
 		if TempDir == "" {
-			TempDir = filepath.Join(ImagesBundlePath, ".tmp", "mirror")
+			TempDir = filepath.Join(ImagesBundlePath, ".tmp", mirror.TmpMirrorFolderName)
 		}
 
 		return nil
@@ -77,7 +78,7 @@ func validateImagesBundlePathArg(args []string) error {
 
 	if bundleExtension := filepath.Ext(ImagesBundlePath); bundleExtension == ".tar" || bundleExtension == ".chunk" {
 		if TempDir == "" {
-			TempDir = filepath.Join(filepath.Dir(ImagesBundlePath), ".tmp", "mirror")
+			TempDir = filepath.Join(filepath.Dir(ImagesBundlePath), ".tmp", mirror.TmpMirrorFolderName)
 		}
 		return nil
 	}
