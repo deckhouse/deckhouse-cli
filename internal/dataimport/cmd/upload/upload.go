@@ -83,10 +83,12 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	return upload(ctx, subClient, filepath.Join(url, pathToFile), dstPath, chunks, permOctal, uid, gid)
+	return upload(ctx, log, subClient, filepath.Join(url, pathToFile), dstPath, chunks, permOctal, uid, gid)
 }
 
-func upload(ctx context.Context, httpClient *client.SafeClient, url string, filePath string, chunks int, permOctal string, uid, gid int) error {
+func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient, url string, filePath string, chunks int, permOctal string, uid, gid int) error {
+	log.Info("upload", "url", url, "filePath", filePath, "chunks", chunks, "permOctal", permOctal, "uid", uid, "gid", gid)
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -113,6 +115,7 @@ func upload(ctx context.Context, httpClient *client.SafeClient, url string, file
 
 	offset := int64(0)
 	for offset < totalSize {
+		log.Info("upload", "offset", offset, "totalSize", totalSize, "chunkSize", chunkSize)
 		remaining := totalSize - offset
 		sendLen := chunkSize
 		if sendLen > remaining {
