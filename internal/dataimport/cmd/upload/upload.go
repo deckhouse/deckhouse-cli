@@ -45,6 +45,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 
 	cmd.Flags().BoolP("publish", "P", false, "publish the uploaded file")
 	cmd.Flags().StringP("dstPath", "d", "", "destination path of the uploaded file")
+	cmd.Flags().Bool("resume", false, "resume upload if process was interrupted")
 
 	return cmd
 }
@@ -63,6 +64,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	publish, _ := cmd.Flags().GetBool("publish")
 	namespace, _ := cmd.Flags().GetString("namespace")
 	dstPath, _ := cmd.Flags().GetString("dstPath")
+	resume, _ := cmd.Flags().GetBool("resume")
 
 	flags := cmd.PersistentFlags()
 	httpClient, err := client.NewSafeClient(flags)
@@ -100,11 +102,38 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	return upload(ctx, log, subClient, fileUrl, pathToFile, chunks, permOctal, uid, gid)
+	return upload(ctx, log, subClient, fileUrl, pathToFile, chunks, permOctal, uid, gid, resume)
 }
 
-func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient, url string, filePath string, chunks int, permOctal string, uid, gid int) error {
+func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient, url string, filePath string, chunks int, permOctal string, uid, gid int, resume bool) error {
 	log.Info("upload", "url", url, "filePath", filePath, "chunks", chunks, "permOctal", permOctal, "uid", uid, "gid", gid)
+
+	var offset int64 = 0
+	if resume {
+		if req, err := http.NewRequest(http.MethodHead, url, nil); err == nil {
+			req = req.WithContext(ctx)
+			resp, err := httpClient.HTTPDo(req)
+			if err != nil {
+				return err
+			}
+			switch resp.StatusCode {
+			case http.StatusOK:
+				if next := resp.Header.Get("X-Next-Offset"); next != "" {
+					if serverOffset, perr := strconv.ParseInt(next, 10, 64); perr == nil && serverOffset >= 0 {
+						offset = serverOffset
+					}
+				} else if cl := resp.Header.Get("Content-Length"); cl != "" {
+					offset = 0
+				}
+			case http.StatusNotFound:
+				offset = 0
+			default:
+				resp.Body.Close()
+				return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+			}
+			resp.Body.Close()
+		}
+	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -130,7 +159,6 @@ func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient
 		chunkSize++
 	}
 
-	offset := int64(0)
 	for offset < totalSize {
 		log.Info("upload", "offset", offset, "totalSize", totalSize, "chunkSize", chunkSize, "url", url)
 		remaining := totalSize - offset
@@ -159,7 +187,7 @@ func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient
 		defer resp.Body.Close()
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("backend response %s", resp.Status)
+			return fmt.Errorf("server returned error with status code %d: %s", resp.StatusCode, resp.Status)
 		}
 
 		nextOffsetStr := resp.Header.Get("X-Next-Offset")
@@ -169,10 +197,10 @@ func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient
 		}
 		nextOffset, err := strconv.ParseInt(nextOffsetStr, 10, 64)
 		if err != nil {
-			return fmt.Errorf("invalid X-Next-Offset: %w", err)
+			return fmt.Errorf("invalid X-Next-Offset: %s: %w", nextOffsetStr, err)
 		}
 		if nextOffset < offset {
-			return fmt.Errorf("non-monotonic X-Next-Offset: %d < %d", nextOffset, offset)
+			return fmt.Errorf("server returned X-Next-Offset (%d) smaller than current offset (%d)", nextOffset, offset)
 		}
 		offset = nextOffset
 	}
