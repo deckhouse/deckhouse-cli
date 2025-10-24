@@ -531,7 +531,7 @@ func TestValidateTmpPathEmpty(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Check that TempDir was set to default
-	expectedTempDir := filepath.Join(tempDir, ".tmp", "mirror")
+	expectedTempDir := filepath.Join(tempDir, ".tmp")
 	assert.Equal(t, expectedTempDir, TempDir)
 
 	// Check that directory was created
