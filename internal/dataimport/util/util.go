@@ -91,8 +91,6 @@ func GetDataImportWithRestart(
 	diName, namespace string,
 	rtClient ctrlrtclient.Client,
 ) (*v1alpha1.DataImport, error) {
-	log.Info("GetDataImportWithRestart", "diName", diName, "namespace", namespace)
-
 	for i := 0; ; i++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -103,13 +101,9 @@ func GetDataImportWithRestart(
 			return nil, fmt.Errorf("kube Get dataimport with ready: %s", err.Error())
 		}
 
-		log.Info("got data import ---")
-
 		var notReadyErr error
 		for _, condition := range diObj.Status.Conditions {
-			log.Info("condition", "type", condition.Type, "status", condition.Status)
 			if condition.Type == "Expired" && condition.Status == "True" {
-				log.Info("condition is expired")
 				if err := DeleteDataImport(ctx, diName, namespace, rtClient); err != nil {
 					return nil, err
 				}
@@ -133,12 +127,9 @@ func GetDataImportWithRestart(
 			if condition.Type == "Ready" {
 				if condition.Status != "True" {
 					notReadyErr = fmt.Errorf("DataImport %s/%s is not Ready", diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name)
-					log.Info("Ready not true")
 				}
 			}
 		}
-
-		log.Info("notReadyErr 1", "notReadyErr", notReadyErr)
 
 		if notReadyErr == nil {
 			if diObj.Spec.Publish {
@@ -150,16 +141,11 @@ func GetDataImportWithRestart(
 			}
 		}
 
-		log.Info("notReadyErr 2", "notReadyErr", notReadyErr)
-
 		if notReadyErr == nil && diObj.Status.VolumeMode == "" {
 			notReadyErr = fmt.Errorf("DataImport %s/%s has empty VolumeMode", diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name)
 		}
 
-		log.Info("notReadyErr 3", "notReadyErr", notReadyErr)
-
 		if notReadyErr == nil {
-			log.Info("data import is ready")
 			return diObj, nil
 		}
 		if i > 60 {
@@ -176,8 +162,6 @@ func PrepareUpload(
 	publish bool,
 	sClient *safeClient.SafeClient,
 ) (url, volumeMode string, subClient *safeClient.SafeClient, finErr error) {
-	log.Info("PrepareUpload", "diName", diName, "namespace", namespace, "publish", publish)
-
 	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {
 		finErr = err
@@ -192,7 +176,6 @@ func PrepareUpload(
 
 	var podURL string
 	if publish {
-		log.Info("publish is true")
 		if diObj.Status.PublicURL == "" {
 			finErr = fmt.Errorf("empty PublicURL")
 			return
@@ -204,8 +187,6 @@ func PrepareUpload(
 		finErr = fmt.Errorf("invalid URL")
 		return
 	}
-
-	log.Info("podURL", "podURL", podURL)
 
 	volumeMode = diObj.Status.VolumeMode
 	switch volumeMode {
