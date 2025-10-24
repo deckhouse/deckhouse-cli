@@ -112,11 +112,11 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 
 		counter++
 		if counter%scanPrintInterval == 0 {
-			logger.InfoF("Scanned [%d / %d] images for VEX", counter, len(images))
+			logger.InfoF("[%d / %d] Scanning images for VEX", counter, len(images))
 		}
 	}
 
-	logger.InfoF("Scanned [%d / %d] images for VEX", counter, len(images))
+	logger.InfoF("[%d / %d] Scanning images for VEX", counter, len(images))
 
 	logger.InfoF("Deckhouse digests found: %d", len(images))
 	logger.InfoF("VEX images found: %d", len(vex))
