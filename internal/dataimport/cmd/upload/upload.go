@@ -6,8 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -78,12 +78,19 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	url, _, subClient, err := util.PrepareUpload(ctx, log, diName, namespace, publish, httpClient)
+	log.Info("Run")
+
+	podUrl, _, subClient, err := util.PrepareUpload(ctx, log, diName, namespace, publish, httpClient)
 	if err != nil {
 		return err
 	}
 
-	return upload(ctx, log, subClient, filepath.Join(url, pathToFile), dstPath, chunks, permOctal, uid, gid)
+	fileUrl, err := url.JoinPath(podUrl, dstPath)
+	if err != nil {
+		return err
+	}
+
+	return upload(ctx, log, subClient, fileUrl, pathToFile, chunks, permOctal, uid, gid)
 }
 
 func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient, url string, filePath string, chunks int, permOctal string, uid, gid int) error {
@@ -115,7 +122,7 @@ func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient
 
 	offset := int64(0)
 	for offset < totalSize {
-		log.Info("upload", "offset", offset, "totalSize", totalSize, "chunkSize", chunkSize)
+		log.Info("upload", "offset", offset, "totalSize", totalSize, "chunkSize", chunkSize, "url", url)
 		remaining := totalSize - offset
 		sendLen := chunkSize
 		if sendLen > remaining {
