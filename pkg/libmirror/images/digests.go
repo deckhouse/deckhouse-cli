@@ -29,8 +29,10 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 )
 
 var digestRegex = regexp.MustCompile(`sha256:([a-f0-9]{64})`)
@@ -88,10 +90,17 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 		return nil, fmt.Errorf("cannot parse images list from json: %w", err)
 	}
 
-	vex := make([]string, 0)
-	for image := range images {
-		vexImageName, err := FindVexImage(mirrorCtx, mirrorCtx.DeckhouseRegistryRepo, nil, nil, image)
+	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&mirrorCtx.BaseParams)
 
+	logger.InfoF("Deckhouse digests found: %d", len(images))
+
+	logger.InfoF("Searching for VEX images")
+
+	vex := make([]string, 0)
+	const scanPrintInterval = 20
+	counter := 0
+	for image := range images {
+		vexImageName, err := FindVexImage(mirrorCtx, mirrorCtx.DeckhouseRegistryRepo, nameOpts, remoteOpts, image)
 		if err != nil {
 			return nil, fmt.Errorf("find VEX image for digest %q: %w", image, err)
 		}
@@ -100,13 +109,20 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 			logger.DebugF("Vex image found %s", vexImageName)
 			vex = append(vex, vexImageName)
 		}
+
+		counter++
+		if counter%scanPrintInterval == 0 {
+			logger.InfoF("Scanned %d/%d images for VEX", counter, len(images))
+		}
 	}
 
-	if len(vex) > 0 {
-		logger.InfoF("VEX images found for %d images", len(vex))
-		for _, v := range vex {
-			images[v] = struct{}{}
-		}
+	logger.InfoF("Scanned %d/%d images for VEX", counter, len(images))
+
+	logger.InfoF("Deckhouse digests found: %d", len(images))
+	logger.InfoF("VEX images found: %d", len(vex))
+
+	for _, v := range vex {
+		images[v] = struct{}{}
 	}
 
 	return images, nil
@@ -164,12 +180,28 @@ func FindVexImage(
 	var vexErr error
 	_, vexErr = remote.Head(vexref, remoteOpts...)
 	if vexErr != nil {
+		var transportErr *transport.Error
+		if errors.As(vexErr, &transportErr) && transportErr.StatusCode == 404 {
+			// Image not found, which is expected for non-vulnerable images
+			return "", nil
+		}
+
+		logger.WarnF("get Head error: %w", vexErr)
+	}
+
+	if vexErr != nil {
 		_, vexErr = remote.Get(vexref, remoteOpts...)
 	}
 
-	if vexErr == nil {
-		return vexImageName, nil
+	if vexErr != nil {
+		var transportErr *transport.Error
+		if errors.As(vexErr, &transportErr) && transportErr.StatusCode == 404 {
+			// Image not found, which is expected for non-vulnerable images
+			return "", nil
+		}
+
+		logger.WarnF("get Get error: %w", vexErr)
 	}
 
-	return "", nil
+	return vexImageName, nil
 }
