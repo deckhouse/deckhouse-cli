@@ -3,6 +3,7 @@ package download
 import (
 	"testing"
 
+	"github.com/deckhouse/deckhouse-cli/internal/dataio"
 	"github.com/stretchr/testify/require"
 )
 
@@ -35,7 +36,7 @@ func TestParseArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			de, path, err := parseArgs(tt.input)
+			de, path, err := dataio.ParseArgs(tt.input)
 			if tt.wantError {
 				require.Error(t, err)
 				return
