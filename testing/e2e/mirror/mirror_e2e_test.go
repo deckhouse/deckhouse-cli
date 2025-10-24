@@ -37,6 +37,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/yaml"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 )
@@ -48,11 +49,11 @@ func TestMirrorE2E(t *testing.T) {
 func createDeckhouseReleaseChannelsInRegistry(t *testing.T, repo string) {
 	t.Helper()
 
-	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", "alpha", "v1.56.5")
-	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", "beta", "v1.56.5")
-	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", "early-access", "v1.55.7")
-	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", "stable", "v1.55.7")
-	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", "rock-solid", "v1.55.7")
+	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", internal.AlphaChannel, "v1.56.5")
+	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", internal.BetaChannel, "v1.56.5")
+	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", internal.EarlyAccessChannel, "v1.55.7")
+	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", internal.StableChannel, "v1.55.7")
+	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", internal.RockSolidChannel, "v1.55.7")
 	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", "v1.55.7", "v1.55.7")
 	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", "v1.56.5", "v1.56.5")
 }
@@ -82,11 +83,11 @@ func createDeckhouseControllersAndInstallersInRegistry(t *testing.T, repo string
 
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(nil, true, false)
 
-	createRandomImageInRegistry(t, repo+":alpha")
-	createRandomImageInRegistry(t, repo+":beta")
-	createRandomImageInRegistry(t, repo+":early-access")
-	createRandomImageInRegistry(t, repo+":stable")
-	createRandomImageInRegistry(t, repo+":rock-solid")
+	createRandomImageInRegistry(t, repo+":"+internal.AlphaChannel)
+	createRandomImageInRegistry(t, repo+":"+internal.BetaChannel)
+	createRandomImageInRegistry(t, repo+":"+internal.EarlyAccessChannel)
+	createRandomImageInRegistry(t, repo+":"+internal.StableChannel)
+	createRandomImageInRegistry(t, repo+":"+internal.RockSolidChannel)
 	createRandomImageInRegistry(t, repo+":v1.56.5")
 	createRandomImageInRegistry(t, repo+":v1.55.7")
 
@@ -94,11 +95,11 @@ func createDeckhouseControllersAndInstallersInRegistry(t *testing.T, repo string
 		"v1.56.5": createSyntheticInstallerImage(t, "v1.56.5", repo),
 		"v1.55.7": createSyntheticInstallerImage(t, "v1.55.7", repo),
 	}
-	installers["alpha"] = installers["v1.56.5"]
-	installers["beta"] = installers["v1.56.5"]
-	installers["early-access"] = installers["v1.55.7"]
-	installers["stable"] = installers["v1.55.7"]
-	installers["rock-solid"] = installers["v1.55.7"]
+	installers[internal.AlphaChannel] = installers["v1.56.5"]
+	installers[internal.BetaChannel] = installers["v1.56.5"]
+	installers[internal.EarlyAccessChannel] = installers["v1.55.7"]
+	installers[internal.StableChannel] = installers["v1.55.7"]
+	installers[internal.RockSolidChannel] = installers["v1.55.7"]
 
 	for shortTag, installer := range installers {
 		ref, err := name.ParseReference(repo+"/install:"+shortTag, nameOpts...)

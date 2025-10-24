@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/manifests"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
@@ -101,7 +102,7 @@ func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string)
 				return fmt.Errorf("Find release-%s channel descriptor: %w", pullParams.DeckhouseTag, err)
 			}
 
-			for _, channel := range []string{"alpha", "beta", "early-access", "stable", "rock-solid"} {
+			for _, channel := range internal.GetAllDefaultReleaseChannels() {
 				if err = layouts.TagImage(imageLayouts.ReleaseChannel, releaseChannel.Digest, channel); err != nil {
 					return fmt.Errorf("tag release channel: %w", err)
 				}

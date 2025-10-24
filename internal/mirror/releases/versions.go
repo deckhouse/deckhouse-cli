@@ -26,6 +26,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"golang.org/x/exp/maps"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
@@ -33,17 +34,27 @@ import (
 )
 
 func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
-	releaseChannelsToCopy := []string{"alpha", "beta", "early-access", "stable", "rock-solid", "lts"}
-	releaseChannelsVersions := make([]*semver.Version, len(releaseChannelsToCopy))
-	for i, channel := range releaseChannelsToCopy {
+	logger := pullParams.Logger
+
+	releaseChannelsToCopy := internal.GetAllDefaultReleaseChannels()
+	releaseChannelsToCopy = append(releaseChannelsToCopy, internal.LTSChannel)
+
+	releaseChannelsVersions := make(map[string]*semver.Version, len(releaseChannelsToCopy))
+	for _, channel := range releaseChannelsToCopy {
 		v, err := getReleaseChannelVersionFromRegistry(pullParams, channel)
 		if err != nil {
+			if channel == internal.LTSChannel {
+				logger.WarnF("Skipping LTS channel: %v", err)
+				continue
+			}
+
 			return nil, fmt.Errorf("get %s release version from registry: %w", channel, err)
 		}
-		releaseChannelsVersions[i] = v
+
+		releaseChannelsVersions[channel] = v
 	}
 
-	rockSolidVersion := releaseChannelsVersions[len(releaseChannelsToCopy)-1]
+	rockSolidVersion := releaseChannelsVersions[internal.RockSolidChannel]
 	mirrorFromVersion := *rockSolidVersion
 	if pullParams.SinceVersion != nil {
 		mirrorFromVersion = *pullParams.SinceVersion
@@ -57,17 +68,17 @@ func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
 		return nil, fmt.Errorf("get releases from github: %w", err)
 	}
 
-	alphaChannelVersion := releaseChannelsVersions[0]
-	for i := range releaseChannelsToCopy {
-		if releaseChannelsToCopy[i] == "alpha" {
-			alphaChannelVersion = releaseChannelsVersions[i]
-			break
-		}
-	}
+	alphaChannelVersion := releaseChannelsVersions[internal.AlphaChannel]
+
 	versionsAboveMinimal := parseAndFilterVersionsAboveMinimalAnbBelowAlpha(&mirrorFromVersion, tags, alphaChannelVersion)
 	versionsAboveMinimal = FilterOnlyLatestPatches(versionsAboveMinimal)
 
-	return deduplicateVersions(append(releaseChannelsVersions, versionsAboveMinimal...)), nil
+	vers := make([]*semver.Version, 0, len(releaseChannelsVersions))
+	for _, v := range releaseChannelsVersions {
+		vers = append(vers, v)
+	}
+
+	return deduplicateVersions(append(vers, versionsAboveMinimal...)), nil
 }
 
 func getReleasedTagsFromRegistry(pullParams *params.PullParams) ([]string, error) {
