@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/deckhouse/deckhouse-cli/internal/dataimport/util"
 	"github.com/deckhouse/deckhouse-cli/internal/dataio"
@@ -18,7 +19,8 @@ import (
 )
 
 const (
-	cmdName = "upload"
+	cmdName                = "upload"
+	defaultFilePermissions = "0644"
 )
 
 func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
@@ -40,9 +42,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
 	cmd.Flags().StringP("file", "f", "", "file to upload")
 	cmd.Flags().IntP("chunks", "c", 10, "number of chunks to upload")
-	cmd.Flags().StringP("permOctal", "p", "0644", "permissions of the uploaded file")
-	cmd.Flags().IntP("uid", "u", 0, "uid of the uploaded file")
-	cmd.Flags().IntP("gid", "g", 0, "gid of the uploaded file")
+
 	cmd.Flags().BoolP("publish", "P", false, "publish the uploaded file")
 	cmd.Flags().StringP("dstPath", "d", "", "destination path of the uploaded file")
 
@@ -60,9 +60,6 @@ func cmdExamples() string {
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
 	pathToFile, _ := cmd.Flags().GetString("file")
 	chunks, _ := cmd.Flags().GetInt("chunks")
-	permOctal, _ := cmd.Flags().GetString("permOctal")
-	uid, _ := cmd.Flags().GetInt("uid")
-	gid, _ := cmd.Flags().GetInt("gid")
 	publish, _ := cmd.Flags().GetBool("publish")
 	namespace, _ := cmd.Flags().GetString("namespace")
 	dstPath, _ := cmd.Flags().GetString("dstPath")
@@ -79,6 +76,19 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	log.Info("Run")
+
+	permOctal := defaultFilePermissions
+	uid := os.Getuid()
+	gid := os.Getgid()
+	if pathToFile != "" && pathToFile != "-" {
+		if fi, statErr := os.Stat(pathToFile); statErr == nil {
+			permOctal = fmt.Sprintf("%04o", fi.Mode().Perm())
+			if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+				uid = int(st.Uid)
+				gid = int(st.Gid)
+			}
+		}
+	}
 
 	podUrl, _, subClient, err := util.PrepareUpload(ctx, log, diName, namespace, publish, httpClient)
 	if err != nil {
