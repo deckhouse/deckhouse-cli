@@ -34,6 +34,7 @@ import (
 	"github.com/samber/lo/parallel"
 	"github.com/spf13/cobra"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/gostsums"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
@@ -171,7 +172,8 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 			BundleDir:             ImagesBundlePath,
 			WorkingDir: filepath.Join(
 				TempDir,
-				"pull",
+				mirror.TmpMirrorFolderName,
+				mirror.TmpMirrorPullFolderName,
 				fmt.Sprintf("%x", md5.Sum([]byte(SourceRegistryRepo))),
 			),
 		},
@@ -442,8 +444,34 @@ func (p *Puller) computeGOSTDigests() error {
 
 // finalCleanup performs final cleanup of temporary directories
 func (p *Puller) finalCleanup() error {
-	if err := os.RemoveAll(TempDir); err != nil {
-		return err
+	// Check if TempDir contains only the "pull" subdirectory
+	entries, err := os.ReadDir(TempDir)
+	if err != nil {
+		return fmt.Errorf("failed to read temp directory: %w", err)
 	}
+
+	pullDirExists := false
+	otherEntries := 0
+	for _, entry := range entries {
+		if entry.Name() == mirror.TmpMirrorFolderName && entry.IsDir() {
+			pullDirExists = true
+		} else {
+			otherEntries++
+		}
+	}
+
+	if pullDirExists && otherEntries == 0 {
+		// TempDir contains only the "pull" folder, delete entire TempDir
+		if err := os.RemoveAll(TempDir); err != nil {
+			return fmt.Errorf("failed to remove temp directory: %w", err)
+		}
+	} else {
+		// TempDir contains other files/folders, remove only the "pull" subdirectory
+		pullDir := filepath.Join(TempDir, mirror.TmpMirrorFolderName)
+		if err := os.RemoveAll(pullDir); err != nil {
+			return fmt.Errorf("failed to remove pull directory: %w", err)
+		}
+	}
+
 	return nil
 }
