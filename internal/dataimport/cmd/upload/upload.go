@@ -146,7 +146,7 @@ func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient
 		}
 		req = req.WithContext(ctx)
 
-		req.Header.Set("X-Total-Size", strconv.FormatInt(totalSize, 10))
+		req.Header.Set("X-Content-Length", strconv.FormatInt(totalSize, 10))
 		req.Header.Set("X-Attribute-Permissions", permOctal)
 		req.Header.Set("X-Attribute-Uid", strconv.Itoa(uid))
 		req.Header.Set("X-Attribute-Gid", strconv.Itoa(gid))
