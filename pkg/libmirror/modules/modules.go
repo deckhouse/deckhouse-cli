@@ -197,59 +197,10 @@ func FindExternalModuleImages(
 		for _, digest := range digests {
 			extraImageName := mod.RegistryPath + "@" + digest
 			moduleImagesWithExternal[extraImageName] = struct{}{}
-
-			vexImageName, err := FindVexImage(
-				params,
-				mod.RegistryPath,
-				nameOpts,
-				remoteOpts,
-				digest,
-			)
-
-			if err != nil {
-				return nil, nil, nil, fmt.Errorf("Find VEX image for digest %q: %w", digest, err)
-			}
-
-			if vexImageName != "" {
-				logger.DebugF("Vex image found %s", vexImageName)
-				moduleImagesWithExternal[vexImageName] = struct{}{}
-			}
 		}
 	}
 
 	return moduleImages, moduleImagesWithExternal, releaseImages, nil
-}
-
-func FindVexImage(
-	params *params.PullParams,
-	registryPath string,
-	nameOpts []name.Option,
-	remoteOpts []remote.Option,
-	digest string,
-) (string, error) {
-	logger := params.Logger
-
-	// vex image reference check
-	vexImageName := registryPath + ":" + strings.Replace(digest, ":", "-", 1) + ".att"
-
-	logger.DebugF("Checking vex image from %s", vexImageName)
-
-	vexref, err := name.ParseReference(vexImageName, nameOpts...)
-	if err != nil {
-		return "", fmt.Errorf("parse reference: %w", err)
-	}
-
-	var vexErr error
-	_, vexErr = remote.Head(vexref, remoteOpts...)
-	if vexErr != nil {
-		_, vexErr = remote.Get(vexref, remoteOpts...)
-	}
-
-	if vexErr == nil {
-		return vexImageName, nil
-	}
-
-	return "", nil
 }
 
 func getAvailableReleaseChannelsImagesForModule(mod *Module, refOpts []name.Option, remoteOpts []remote.Option) (map[string]struct{}, error) {
