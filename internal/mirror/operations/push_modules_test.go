@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
+	"github.com/deckhouse/deckhouse-cli/pkg/mock"
 )
 
 // mockLogger implements params.Logger for testing
@@ -68,13 +69,13 @@ func (m *mockLogger) Process(topic string, run func() error) error {
 }
 
 // setupTestPushParams creates test PushParams with a mock logger
-func setupTestPushParams(t testing.TB) (*params.PushParams, *mockLogger) {
+func setupTestPushParams(t testing.TB) (*params.PushParams, *mockLogger, *mock.RegistryClientMock) {
 	t.Helper()
 
 	tempDir := t.TempDir()
 	logger := &mockLogger{}
 
-	return &params.PushParams{
+	pushParams := &params.PushParams{
 		BaseParams: params.BaseParams{
 			RegistryAuth:        authn.Anonymous,
 			RegistryHost:        "localhost:5000",
@@ -90,7 +91,16 @@ func setupTestPushParams(t testing.TB) (*params.PushParams, *mockLogger) {
 			Blobs:  1,
 			Images: 1,
 		},
-	}, logger
+	}
+
+	// Create registry client mock for tests
+	client := mock.NewRegistryClientMock(t)
+
+	// Note: We don't set default expectations for WithScope and PushImage here
+	// because some tests expect early errors before these methods are called.
+	// Tests that need these methods should set expectations explicitly.
+
+	return pushParams, logger, client
 }
 
 // createValidModulePackage creates a tar archive that mimics a valid module package
@@ -195,7 +205,7 @@ func createInvalidModulePackage(t testing.TB) io.Reader {
 }
 
 func TestPushModule_MkdirError(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 
 	// Set WorkingDir to a file path to cause mkdir error
 	tempDir := t.TempDir()
@@ -206,7 +216,7 @@ func TestPushModule_MkdirError(t *testing.T) {
 	moduleName := "test-module"
 	pkg := createValidModulePackage(t)
 
-	err := PushModule(pushParams, moduleName, pkg)
+	err := PushModule(pushParams, moduleName, pkg, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "mkdir")
 }
@@ -214,22 +224,22 @@ func TestPushModule_MkdirError(t *testing.T) {
 func TestPushModule_UnpackError(t *testing.T) {
 	t.Skip("Skipping due to bug in bundle.Unpack - it doesn't handle tar reader errors properly")
 
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	moduleName := "test-module"
 
 	// Create a reader that returns an error
 	errReader := &errorReader{err: errors.New("read error")}
-	err := PushModule(pushParams, moduleName, errReader)
+	err := PushModule(pushParams, moduleName, errReader, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Unpack package")
 }
 
 func TestPushModule_ValidationError(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	moduleName := "test-module"
 	pkg := createInvalidModulePackage(t)
 
-	err := PushModule(pushParams, moduleName, pkg)
+	err := PushModule(pushParams, moduleName, pkg, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Invalid module package")
 }
@@ -237,10 +247,10 @@ func TestPushModule_ValidationError(t *testing.T) {
 func TestPushModule_NilReader(t *testing.T) {
 	t.Skip("Skipping due to nil pointer issues with tar reader")
 
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	moduleName := "test-module"
 
-	err := PushModule(pushParams, moduleName, nil)
+	err := PushModule(pushParams, moduleName, nil, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Unpack package")
 }
@@ -248,22 +258,26 @@ func TestPushModule_NilReader(t *testing.T) {
 func TestPushModule_EmptyModuleName(t *testing.T) {
 	t.Skip("Skipping empty module name test")
 
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	moduleName := ""
 	pkg := createValidModulePackage(t)
 
-	err := PushModule(pushParams, moduleName, pkg)
+	err := PushModule(pushParams, moduleName, pkg, client)
 	require.Error(t, err)
 	// Should still attempt to create directory and unpack
 	require.Contains(t, err.Error(), "Unpack package")
 }
 
 func TestPushModule_LayoutPaths(t *testing.T) {
-	pushParams, logger := setupTestPushParams(t)
+	pushParams, logger, client := setupTestPushParams(t)
+
+	// Set up mock expectations for this test
+	client.PushImageMock.Return(nil)
+
 	moduleName := "test-module"
 	pkg := createValidModulePackage(t)
 
-	err := PushModule(pushParams, moduleName, pkg)
+	err := PushModule(pushParams, moduleName, pkg, client)
 
 	// Even if it fails due to registry, we can check that the correct paths were logged
 	if err != nil {
@@ -288,11 +302,15 @@ func TestPushModule_LayoutPaths(t *testing.T) {
 }
 
 func TestPushModule_LoggerCalls(t *testing.T) {
-	pushParams, logger := setupTestPushParams(t)
+	pushParams, logger, client := setupTestPushParams(t)
+
+	// Set up mock expectations for this test
+	client.PushImageMock.Return(nil)
+
 	moduleName := "test-module"
 	pkg := createValidModulePackage(t)
 
-	_ = PushModule(pushParams, moduleName, pkg)
+	_ = PushModule(pushParams, moduleName, pkg, client)
 
 	// Check that module tag logging occurred
 	hasModuleTagLog := false
@@ -306,14 +324,18 @@ func TestPushModule_LoggerCalls(t *testing.T) {
 }
 
 func TestPushModule_WorkingDirectoryCleanup(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
+
+	// Set up mock expectations for this test - expect PushImage to fail
+	client.PushImageMock.Return(errors.New("registry connection failed"))
+
 	moduleName := "test-module"
 	pkg := createValidModulePackage(t)
 
 	// Track if cleanup occurred by checking directory existence
 	packageDir := filepath.Join(pushParams.WorkingDir, "modules", moduleName)
 
-	err := PushModule(pushParams, moduleName, pkg)
+	err := PushModule(pushParams, moduleName, pkg, client)
 
 	// Even after error, the directory should be cleaned up
 	_, statErr := os.Stat(packageDir)
@@ -324,7 +346,11 @@ func TestPushModule_WorkingDirectoryCleanup(t *testing.T) {
 }
 
 func TestPushModule_RegistryAuth(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
+
+	// Set up mock expectations for this test - expect PushImage to fail
+	client.PushImageMock.Return(errors.New("registry connection failed"))
+
 	pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{
 		Username: "testuser",
 		Password: "testpass",
@@ -333,39 +359,51 @@ func TestPushModule_RegistryAuth(t *testing.T) {
 	moduleName := "test-module"
 	pkg := createValidModulePackage(t)
 
-	err := PushModule(pushParams, moduleName, pkg)
+	err := PushModule(pushParams, moduleName, pkg, client)
 	// Should fail due to registry, but auth should be passed through
 	require.Error(t, err)
 }
 
 func TestPushModule_ParseReferenceError(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
+
+	// Set up mock expectations for this test - expect PushImage to fail
+	client.PushImageMock.Return(errors.New("invalid reference"))
+
 	// Set invalid registry host to cause parse error
 	pushParams.RegistryHost = "invalid::host"
 
 	moduleName := "test-module"
 	pkg := createValidModulePackage(t)
 
-	err := PushModule(pushParams, moduleName, pkg)
+	err := PushModule(pushParams, moduleName, pkg, client)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "Parse image reference")
+	require.Contains(t, err.Error(), "Write module index tag")
 }
 
 func TestPushModule_InsecureAndTLSSkip(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
+
+	// Set up mock expectations for this test - expect PushImage to fail
+	client.PushImageMock.Return(errors.New("registry connection failed"))
+
 	pushParams.Insecure = true
 	pushParams.SkipTLSVerification = true
 
 	moduleName := "test-module"
 	pkg := createValidModulePackage(t)
 
-	err := PushModule(pushParams, moduleName, pkg)
+	err := PushModule(pushParams, moduleName, pkg, client)
 	// Should attempt the operation with insecure settings
 	require.Error(t, err) // Will fail due to no registry, but should not fail due to TLS
 }
 
 func TestPushModule_ParallelismConfig(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
+
+	// Set up mock expectations for this test - expect PushImage to fail
+	client.PushImageMock.Return(errors.New("registry connection failed"))
+
 	pushParams.Parallelism = params.ParallelismConfig{
 		Blobs:  2,
 		Images: 2,
@@ -374,7 +412,7 @@ func TestPushModule_ParallelismConfig(t *testing.T) {
 	moduleName := "test-module"
 	pkg := createValidModulePackage(t)
 
-	err := PushModule(pushParams, moduleName, pkg)
+	err := PushModule(pushParams, moduleName, pkg, client)
 	require.Error(t, err) // Will fail due to no registry, but parallelism should be passed through
 }
 
@@ -389,20 +427,28 @@ func (e *errorReader) Read(p []byte) (n int, err error) {
 
 // Benchmark tests
 func BenchmarkPushModule(b *testing.B) {
-	pushParams, _ := setupTestPushParams(b)
+	pushParams, _, client := setupTestPushParams(b)
+
+	// Set up mock expectations for benchmark - PushImage should succeed for performance testing
+	client.PushImageMock.Return(nil)
+
 	moduleName := "bench-module"
 	pkg := createValidModulePackage(b)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = PushModule(pushParams, moduleName, pkg)
+		_ = PushModule(pushParams, moduleName, pkg, client)
 	}
 }
 
 // Test coverage helpers - these functions help ensure we hit all code paths
 func TestPushModule_CodeCoverage_LayoutsToPush(t *testing.T) {
 	// This test ensures we cover the layoutsToPush map creation
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
+
+	// Set up mock expectations for this test - expect PushImage to fail
+	client.PushImageMock.Return(errors.New("registry connection failed"))
+
 	moduleName := "coverage-test"
 	pkg := createValidModulePackage(t)
 
@@ -415,7 +461,7 @@ func TestPushModule_CodeCoverage_LayoutsToPush(t *testing.T) {
 
 	// We can't directly test the map, but we can verify the function runs
 	// and check that the expected repos are constructed correctly
-	err := PushModule(pushParams, moduleName, pkg)
+	err := PushModule(pushParams, moduleName, pkg, client)
 
 	// Verify that logs contain the expected repo constructions
 	for layoutPath, expectedSuffix := range expectedPaths {
@@ -436,17 +482,25 @@ func TestPushModule_CodeCoverage_LayoutsToPush(t *testing.T) {
 func TestPushModule_CodeCoverage_RandomImage(t *testing.T) {
 	// Test that random.Image is called correctly
 	// This is hard to test directly, but we can ensure the code path is exercised
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
+
+	// Set up mock expectations for this test - expect PushImage to fail
+	client.PushImageMock.Return(errors.New("registry connection failed"))
+
 	moduleName := "random-image-test"
 	pkg := createValidModulePackage(t)
 
-	err := PushModule(pushParams, moduleName, pkg)
-	require.Error(t, err) // Will fail at remote.Write, but random.Image should be called
+	err := PushModule(pushParams, moduleName, pkg, client)
+	require.Error(t, err) // Will fail at Client.PushImage, but random.Image should be called
 }
 
 func TestPushModule_CodeCoverage_AuthOptions(t *testing.T) {
 	// Test that auth options are constructed correctly
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
+
+	// Set up mock expectations for this test - expect PushImage to fail
+	client.PushImageMock.Return(errors.New("registry connection failed"))
+
 	pushParams.RegistryAuth = authn.Anonymous
 	pushParams.Insecure = true
 	pushParams.SkipTLSVerification = true
@@ -454,6 +508,6 @@ func TestPushModule_CodeCoverage_AuthOptions(t *testing.T) {
 	moduleName := "auth-options-test"
 	pkg := createValidModulePackage(t)
 
-	err := PushModule(pushParams, moduleName, pkg)
+	err := PushModule(pushParams, moduleName, pkg, client)
 	require.Error(t, err) // Will fail, but auth options should be constructed
 }

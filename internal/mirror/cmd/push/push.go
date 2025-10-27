@@ -38,6 +38,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 // CLI Parameters
@@ -104,6 +105,28 @@ func NewCommand() *cobra.Command {
 }
 
 func pushModules(pushParams *params.PushParams, logger params.Logger) error {
+	// Create registry client for module operations
+	clientOpts := &registry.ClientOptions{
+		Insecure:      pushParams.Insecure,
+		TLSSkipVerify: pushParams.SkipTLSVerification,
+		Logger:        nil, // Will use default logger
+	}
+
+	if pushParams.RegistryAuth != nil {
+		clientOpts.Auth = pushParams.RegistryAuth
+	}
+
+	client := registry.NewClientWithOptions(pushParams.RegistryHost, clientOpts)
+
+	// Scope to the registry path and modules suffix
+	if pushParams.RegistryPath != "" {
+		client = client.WithScope(pushParams.RegistryPath).(*registry.Client)
+	}
+
+	if pushParams.ModulesPathSuffix != "" {
+		client = client.WithScope(pushParams.ModulesPathSuffix).(*registry.Client)
+	}
+
 	bundleContents, err := os.ReadDir(pushParams.BundleDir)
 	if err != nil {
 		return fmt.Errorf("List bundle directory: %w", err)
@@ -134,10 +157,13 @@ func pushModules(pushParams *params.PushParams, logger params.Logger) error {
 			if err != nil {
 				return fmt.Errorf("Open package %q: %w", modulePackageName, err)
 			}
-			if err = operations.PushModule(pushParams, modulePackageName, pkg); err != nil {
+
+			if err = operations.PushModule(pushParams, modulePackageName, pkg, client); err != nil {
 				return fmt.Errorf("Failed to push module %q: %w", modulePackageName, err)
 			}
+
 			successfullyPushedModules = append(successfullyPushedModules, modulePackageName)
+
 			return nil
 		}); err != nil {
 			logger.WarnLn(err)

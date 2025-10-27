@@ -104,7 +104,7 @@ func createInvalidSecurityPackage(t testing.TB) io.Reader {
 }
 
 func TestPushSecurityDatabases_MkdirError(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 
 	// Set WorkingDir to a file path to cause mkdir error
 	tempDir := t.TempDir()
@@ -122,7 +122,7 @@ func TestPushSecurityDatabases_MkdirError(t *testing.T) {
 func TestPushSecurityDatabases_UnpackError(t *testing.T) {
 	t.Skip("Skipping due to bug in bundle.Unpack - it doesn't handle tar reader errors properly")
 
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 
 	// Create a reader that returns an error
 	errReader := &errorReader{err: errors.New("read error")}
@@ -132,7 +132,7 @@ func TestPushSecurityDatabases_UnpackError(t *testing.T) {
 }
 
 func TestPushSecurityDatabases_ValidationError(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 	pkg := createInvalidSecurityPackage(t)
 
 	err := PushSecurityDatabases(pushParams, pkg)
@@ -143,7 +143,7 @@ func TestPushSecurityDatabases_ValidationError(t *testing.T) {
 func TestPushSecurityDatabases_NilReader(t *testing.T) {
 	t.Skip("Skipping due to nil pointer issues with tar reader")
 
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 
 	err := PushSecurityDatabases(pushParams, nil)
 	require.Error(t, err)
@@ -151,7 +151,7 @@ func TestPushSecurityDatabases_NilReader(t *testing.T) {
 }
 
 func TestPushSecurityDatabases_LayoutPaths(t *testing.T) {
-	pushParams, logger := setupTestPushParams(t)
+	pushParams, logger, _ := setupTestPushParams(t)
 	pkg := createValidSecurityPackage(t)
 
 	err := PushSecurityDatabases(pushParams, pkg)
@@ -180,7 +180,7 @@ func TestPushSecurityDatabases_LayoutPaths(t *testing.T) {
 }
 
 func TestPushSecurityDatabases_WorkingDirectoryCleanup(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 	pkg := createValidSecurityPackage(t)
 
 	// Track if cleanup occurred by checking directory existence
@@ -197,7 +197,7 @@ func TestPushSecurityDatabases_WorkingDirectoryCleanup(t *testing.T) {
 }
 
 func TestPushSecurityDatabases_RegistryAuth(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 	pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{
 		Username: "testuser",
 		Password: "testpass",
@@ -211,7 +211,7 @@ func TestPushSecurityDatabases_RegistryAuth(t *testing.T) {
 }
 
 func TestPushSecurityDatabases_InsecureAndTLSSkip(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 	pushParams.Insecure = true
 	pushParams.SkipTLSVerification = true
 
@@ -223,7 +223,7 @@ func TestPushSecurityDatabases_InsecureAndTLSSkip(t *testing.T) {
 }
 
 func TestPushSecurityDatabases_ParallelismConfig(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 	pushParams.Parallelism = params.ParallelismConfig{
 		Blobs:  2,
 		Images: 2,
@@ -238,7 +238,7 @@ func TestPushSecurityDatabases_ParallelismConfig(t *testing.T) {
 
 // Benchmark tests
 func BenchmarkPushSecurityDatabases(b *testing.B) {
-	pushParams, _ := setupTestPushParams(b)
+	pushParams, _, _ := setupTestPushParams(b)
 	pkg := createValidSecurityPackage(b)
 
 	b.ResetTimer()
@@ -250,7 +250,7 @@ func BenchmarkPushSecurityDatabases(b *testing.B) {
 // Test coverage helpers - these functions help ensure we hit all code paths
 func TestPushSecurityDatabases_CodeCoverage_LayoutsToPush(t *testing.T) {
 	// This test ensures we cover the layoutsToPush map creation
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 	pkg := createValidSecurityPackage(t)
 
 	// The layoutsToPush map should be created with correct paths
@@ -283,7 +283,7 @@ func TestPushSecurityDatabases_CodeCoverage_LayoutsToPush(t *testing.T) {
 
 func TestPushSecurityDatabases_CodeCoverage_AuthOptions(t *testing.T) {
 	// Test that auth options are constructed correctly
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 	pushParams.RegistryAuth = authn.Anonymous
 	pushParams.Insecure = true
 	pushParams.SkipTLSVerification = true

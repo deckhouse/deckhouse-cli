@@ -106,7 +106,7 @@ func createInvalidPlatformPackage(t testing.TB) io.Reader {
 }
 
 func TestPushDeckhousePlatform_MkdirError(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 
 	// Set WorkingDir to a file path to cause mkdir error
 	tempDir := t.TempDir()
@@ -124,7 +124,7 @@ func TestPushDeckhousePlatform_MkdirError(t *testing.T) {
 func TestPushDeckhousePlatform_UnpackError(t *testing.T) {
 	t.Skip("Skipping due to bug in bundle.Unpack - it doesn't handle tar reader errors properly")
 
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 
 	// Create a reader that returns an error
 	errReader := &errorReader{err: errors.New("read error")}
@@ -134,7 +134,7 @@ func TestPushDeckhousePlatform_UnpackError(t *testing.T) {
 }
 
 func TestPushDeckhousePlatform_ValidationError(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 	pkg := createInvalidPlatformPackage(t)
 
 	err := PushDeckhousePlatform(pushParams, pkg)
@@ -145,7 +145,7 @@ func TestPushDeckhousePlatform_ValidationError(t *testing.T) {
 func TestPushDeckhousePlatform_NilReader(t *testing.T) {
 	t.Skip("Skipping due to nil pointer issues with tar reader")
 
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 
 	err := PushDeckhousePlatform(pushParams, nil)
 	require.Error(t, err)
@@ -153,7 +153,7 @@ func TestPushDeckhousePlatform_NilReader(t *testing.T) {
 }
 
 func TestPushDeckhousePlatform_LayoutPaths(t *testing.T) {
-	pushParams, logger := setupTestPushParams(t)
+	pushParams, logger, _ := setupTestPushParams(t)
 	pkg := createValidPlatformPackage(t)
 
 	err := PushDeckhousePlatform(pushParams, pkg)
@@ -182,7 +182,7 @@ func TestPushDeckhousePlatform_LayoutPaths(t *testing.T) {
 }
 
 func TestPushDeckhousePlatform_LoggerCalls(t *testing.T) {
-	pushParams, logger := setupTestPushParams(t)
+	pushParams, logger, _ := setupTestPushParams(t)
 	pkg := createValidPlatformPackage(t)
 
 	_ = PushDeckhousePlatform(pushParams, pkg)
@@ -203,7 +203,7 @@ func TestPushDeckhousePlatform_LoggerCalls(t *testing.T) {
 }
 
 func TestPushDeckhousePlatform_WorkingDirectoryCleanup(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 	pkg := createValidPlatformPackage(t)
 
 	// Track if cleanup occurred by checking directory existence
@@ -220,7 +220,7 @@ func TestPushDeckhousePlatform_WorkingDirectoryCleanup(t *testing.T) {
 }
 
 func TestPushDeckhousePlatform_RegistryAuth(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 	pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{
 		Username: "testuser",
 		Password: "testpass",
@@ -234,7 +234,7 @@ func TestPushDeckhousePlatform_RegistryAuth(t *testing.T) {
 }
 
 func TestPushDeckhousePlatform_InsecureAndTLSSkip(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 	pushParams.Insecure = true
 	pushParams.SkipTLSVerification = true
 
@@ -246,7 +246,7 @@ func TestPushDeckhousePlatform_InsecureAndTLSSkip(t *testing.T) {
 }
 
 func TestPushDeckhousePlatform_ParallelismConfig(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 	pushParams.Parallelism = params.ParallelismConfig{
 		Blobs:  2,
 		Images: 2,
@@ -261,7 +261,7 @@ func TestPushDeckhousePlatform_ParallelismConfig(t *testing.T) {
 
 // Benchmark tests
 func BenchmarkPushDeckhousePlatform(b *testing.B) {
-	pushParams, _ := setupTestPushParams(b)
+	pushParams, _, _ := setupTestPushParams(b)
 	pkg := createValidPlatformPackage(b)
 
 	b.ResetTimer()
@@ -273,7 +273,7 @@ func BenchmarkPushDeckhousePlatform(b *testing.B) {
 // Test coverage helpers - these functions help ensure we hit all code paths
 func TestPushDeckhousePlatform_CodeCoverage_LayoutsToPush(t *testing.T) {
 	// This test ensures we cover the layoutsToPush slice creation
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 	pkg := createValidPlatformPackage(t)
 
 	// The layoutsToPush slice should be created with correct paths
@@ -306,7 +306,7 @@ func TestPushDeckhousePlatform_CodeCoverage_LayoutsToPush(t *testing.T) {
 
 func TestPushDeckhousePlatform_CodeCoverage_AuthOptions(t *testing.T) {
 	// Test that auth options are constructed correctly
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, _ := setupTestPushParams(t)
 	pushParams.RegistryAuth = authn.Anonymous
 	pushParams.Insecure = true
 	pushParams.SkipTLSVerification = true

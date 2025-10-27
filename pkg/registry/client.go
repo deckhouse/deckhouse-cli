@@ -43,15 +43,18 @@ var _ pkg.RegistryClient = (*Client)(nil)
 
 // NewClientWithOptions creates a new container registry client with advanced options
 func NewClientWithOptions(registry string, opts *ClientOptions) *Client {
+	// Ensure logger first before using it
+	logger := ensureLogger(opts.Logger)
+
 	remoteOptions := buildRemoteOptions(opts.Auth, opts)
 
 	if opts.TLSSkipVerify {
-		opts.Logger.Debug("TLS certificate verification disabled",
+		logger.Debug("TLS certificate verification disabled",
 			slog.String("registry", registry))
 	}
 
 	if opts.Insecure {
-		opts.Logger.Debug("Insecure HTTP mode enabled",
+		logger.Debug("Insecure HTTP mode enabled",
 			slog.String("registry", registry))
 	}
 
@@ -59,7 +62,7 @@ func NewClientWithOptions(registry string, opts *ClientOptions) *Client {
 		registryHost: registry,
 		scopePath:    "",
 		options:      remoteOptions,
-		log:          ensureLogger(opts.Logger),
+		log:          logger,
 	}
 }
 
