@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/dataio"
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"

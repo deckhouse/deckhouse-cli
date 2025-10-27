@@ -3,7 +3,7 @@ package download
 import (
 	"testing"
 
-	"github.com/deckhouse/deckhouse-cli/internal/dataio"
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/stretchr/testify/require"
 )
 

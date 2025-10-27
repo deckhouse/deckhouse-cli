@@ -12,8 +12,8 @@ import (
 	"strings"
 	"syscall"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/util"
-	"github.com/deckhouse/deckhouse-cli/internal/dataio"
 	client "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 	"github.com/spf13/cobra"
 )

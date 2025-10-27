@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/dataio"
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 )
 
 func TestCreateDataExporterIfNeeded(t *testing.T) {

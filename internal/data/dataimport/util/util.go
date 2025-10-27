@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"time"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/dataio"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
