@@ -38,7 +38,7 @@ const (
 
 func cmdExamples() string {
 	resp := []string{
-		"  # Create DataImport (PVC provided via -f)",
+		"  # Create DataImport",
 		fmt.Sprintf("    ... %s my-import -n d8-storage-volume-data-manager -f - --ttl 2m --publish --wffc", cmdName),
 	}
 	return strings.Join(resp, "\n")

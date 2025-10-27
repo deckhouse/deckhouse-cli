@@ -80,7 +80,62 @@ func NewCommand() *cobra.Command {
 		diUpload.NewCommand(ctx, logger),
 	)
 
-	root.AddCommand(exportCmd, importCmd)
+	// TODO remove this section later
+	// Backward-compat: `d8 data create` maps to `d8 data export create` with deprecation warning.
+	deprecatedCreate := &cobra.Command{
+		Use:   "create [flags] data_export_name volume_type/volume_name",
+		Short: "Deprecated: use 'd8 data export create' or 'd8 data import create'",
+		RunE: func(c *cobra.Command, args []string) error {
+			c.Println("WARNING: 'd8 data create' is deprecated and will be removed. Use 'd8 data export create' or 'd8 data import create'.")
+			return deCreate.Run(ctx, logger, c, args)
+		},
+	}
+	deprecatedCreate.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
+	deprecatedCreate.Flags().String("ttl", "2m", "Time to live")
+	deprecatedCreate.Flags().Bool("publish", false, "Provide access outside of cluster")
+
+	// TODO remove this section later
+	// Backward-compat: `d8 data list` -> export list (deprecated)
+	deprecatedList := &cobra.Command{
+		Use:   "list [flags] data_export_name [/path/]",
+		Short: "Deprecated: use 'd8 data export list'",
+		RunE: func(c *cobra.Command, args []string) error {
+			c.Println("WARNING: 'd8 data list' is deprecated and will be removed. Use 'd8 data export list'.")
+			return deList.Run(ctx, logger, c, args)
+		},
+	}
+	deprecatedList.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
+	deprecatedList.Flags().Bool("publish", false, "Provide access outside of cluster")
+	deprecatedList.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
+
+	// TODO remove this section later
+	// Backward-compat: `d8 data download` -> export download (deprecated)
+	deprecatedDownload := &cobra.Command{
+		Use:   "download [flags] [KIND/]data_export_name [path/file.ext]",
+		Short: "Deprecated: use 'd8 data export download'",
+		RunE: func(c *cobra.Command, args []string) error {
+			c.Println("WARNING: 'd8 data download' is deprecated and will be removed. Use 'd8 data export download'.")
+			return deDownload.Run(ctx, logger, c, args)
+		},
+	}
+	deprecatedDownload.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
+	deprecatedDownload.Flags().StringP("output", "o", "", "file to save data (default: same as resource)")
+	deprecatedDownload.Flags().Bool("publish", false, "Provide access outside of cluster")
+	deprecatedDownload.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
+
+	// TODO remove this section later
+	// Backward-compat: `d8 data delete` -> export delete (deprecated)
+	deprecatedDelete := &cobra.Command{
+		Use:   "delete [flags] data_export_name",
+		Short: "Deprecated: use 'd8 data export delete'",
+		RunE: func(c *cobra.Command, args []string) error {
+			c.Println("WARNING: 'd8 data delete' is deprecated and will be removed. Use 'd8 data export delete'.")
+			return deDelete.Run(ctx, logger, c, args)
+		},
+	}
+	deprecatedDelete.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
+
+	root.AddCommand(exportCmd, importCmd, deprecatedCreate, deprecatedList, deprecatedDownload, deprecatedDelete)
 
 	return root
 }
