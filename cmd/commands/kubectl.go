@@ -42,6 +42,12 @@ const (
 
 var d8CommandRegex = regexp.MustCompile("([\"'`])d8 (\\w+)")
 
+// wrapRunE wraps all RunE functions in the kubectl command tree to intercept stderr output.
+// This approach is preferred over modifying os.Args[0] because:
+// - It avoids modifying global state (os.Args) which could affect other parts of the system
+// - It provides surgical precision, only affecting kubectl error messages
+// - It preserves the integrity of os.Args for logging, debugging, and other tools
+// - It maintains clean separation of concerns without side effects
 func wrapRunE(cmd *cobra.Command) {
 	if cmd.RunE != nil {
 		originalRunE := cmd.RunE
