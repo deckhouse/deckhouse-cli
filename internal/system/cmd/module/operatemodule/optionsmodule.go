@@ -24,10 +24,10 @@ func OptionsModule(config *rest.Config, kubeCl kubernetes.Interface, pathFromOpt
 		containerName = "deckhouse"
 	)
 
-	fullEndpointUrl := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, pathFromOption)
-	getApi := []string{"curl", fullEndpointUrl}
+	fullEndpointURL := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, modulePath, pathFromOption)
+	getAPI := []string{"curl", fullEndpointURL}
 	podName, err := utilk8s.GetDeckhousePod(kubeCl)
-	executor, err := utilk8s.ExecInPod(config, kubeCl, getApi, podName, namespace, containerName)
+	executor, err := utilk8s.ExecInPod(config, kubeCl, getAPI, podName, namespace, containerName)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

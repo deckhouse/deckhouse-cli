@@ -32,18 +32,24 @@ import (
 	"golang.org/x/exp/maps"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 )
 
 func TestExtractImageDigestsFromDeckhouseInstaller(t *testing.T) {
 	expectedImages := []string{
-		"localhost:5001/deckhouse@sha256:72623af14db0cf2411cdf6364089b1954cbfd10e76e13ff08816a628b52a9712",
-		"localhost:5001/deckhouse@sha256:f58a7f8b3fbdc78a90578b45e8ddb1bf587102206d9320e9ce9f4fe9474f5650",
+		"nonexistent.registry.com/deckhouse@sha256:72623af14db0cf2411cdf6364089b1954cbfd10e76e13ff08816a628b52a9712",
+		"nonexistent.registry.com/deckhouse@sha256:f58a7f8b3fbdc78a90578b45e8ddb1bf587102206d9320e9ce9f4fe9474f5650",
+		"nonexistent.registry.com/deckhouse:sha256-72623af14db0cf2411cdf6364089b1954cbfd10e76e13ff08816a628b52a9712.att",
+		"nonexistent.registry.com/deckhouse:sha256-f58a7f8b3fbdc78a90578b45e8ddb1bf587102206d9320e9ce9f4fe9474f5650.att",
 	}
-	installerTag := "localhost:5001/deckhouse/install:stable"
+	installerTag := "nonexistent.registry.com/deckhouse/install:stable"
 
-	installersLayout := createOCILayoutWithInstallerImage(t, "localhost:5001/deckhouse", installerTag, expectedImages)
+	installersLayout := createOCILayoutWithInstallerImage(t, "nonexistent.registry.com/deckhouse", installerTag, expectedImages)
 	images, err := ExtractImageDigestsFromDeckhouseInstaller(
-		&params.PullParams{BaseParams: params.BaseParams{DeckhouseRegistryRepo: "localhost:5001/deckhouse"}},
+		&params.PullParams{BaseParams: params.BaseParams{
+			DeckhouseRegistryRepo: "nonexistent.registry.com/deckhouse",
+			Logger:                log.NewNop(),
+		}},
 		installerTag,
 		installersLayout,
 	)

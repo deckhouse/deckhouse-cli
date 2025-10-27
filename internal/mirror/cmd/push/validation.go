@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/samber/lo"
 	"github.com/spf13/cobra"
@@ -69,7 +70,7 @@ func validateImagesBundlePathArg(args []string) error {
 		}
 
 		if TempDir == "" {
-			TempDir = filepath.Join(ImagesBundlePath, ".tmp", "mirror")
+			TempDir = filepath.Join(ImagesBundlePath, ".tmp", mirror.TmpMirrorFolderName)
 		}
 
 		return nil
@@ -77,7 +78,7 @@ func validateImagesBundlePathArg(args []string) error {
 
 	if bundleExtension := filepath.Ext(ImagesBundlePath); bundleExtension == ".tar" || bundleExtension == ".chunk" {
 		if TempDir == "" {
-			TempDir = filepath.Join(filepath.Dir(ImagesBundlePath), ".tmp", "mirror")
+			TempDir = filepath.Join(filepath.Dir(ImagesBundlePath), ".tmp", mirror.TmpMirrorFolderName)
 		}
 		return nil
 	}
@@ -104,12 +105,12 @@ func parseAndValidateRegistryURLArg(args []string) error {
 	}
 
 	// Then we parse it as URL to validate that it contains everything we need
-	registryUrl, err := url.ParseRequestURI("docker://" + registry)
+	registryURL, err := url.ParseRequestURI("docker://" + registry)
 	if err != nil {
 		return fmt.Errorf("Validate registry address: %w", err)
 	}
-	RegistryHost = registryUrl.Host
-	RegistryPath = registryUrl.Path
+	RegistryHost = registryURL.Host
+	RegistryPath = registryURL.Path
 	if RegistryHost == "" {
 		return errors.New("<registry> you provided contains no registry host. Please specify registry address correctly.")
 	}

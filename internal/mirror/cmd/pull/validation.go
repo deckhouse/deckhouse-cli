@@ -60,14 +60,14 @@ func validateSourceRegistry() error {
 	}
 
 	// Then we parse it as URL to validate that it contains everything we need
-	registryUrl, err := url.ParseRequestURI("docker://" + SourceRegistryRepo)
+	registryURL, err := url.ParseRequestURI("docker://" + SourceRegistryRepo)
 	if err != nil {
 		return fmt.Errorf("Validate source registry parameter: %w", err)
 	}
-	if registryUrl.Host == "" {
+	if registryURL.Host == "" {
 		return errors.New("--source you provided contains no registry host. Please specify source registry host address correctly.")
 	}
-	if registryUrl.Path == "" {
+	if registryURL.Path == "" {
 		return errors.New("--source you provided contains no registry path. Please specify source registry repo path correctly.")
 	}
 
@@ -135,9 +135,9 @@ func validateChunkSizeFlag() error {
 	return nil
 }
 
-func validateTmpPath(args []string) error {
+func validateTmpPath(_ []string) error {
 	if TempDir == "" {
-		TempDir = filepath.Join(ImagesBundlePath, ".tmp", "mirror")
+		TempDir = filepath.Join(ImagesBundlePath, ".tmp")
 	}
 	if err := os.MkdirAll(TempDir, 0755); err != nil {
 		return fmt.Errorf("Error creating temp directory at %s: %w", TempDir, err)

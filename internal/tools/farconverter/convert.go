@@ -34,7 +34,7 @@ type RawRule map[string]any
 
 // FalcoAuditRule is a structure to encode FalcoAuditRules custom resources.
 type FalcoAuditRule struct {
-	ApiVersion string `yaml:"apiVersion"`
+	APIVersion string `yaml:"apiVersion"`
 	Kind       string
 	Metadata   Metadata
 	Spec       FalcoAuditRuleSpec
@@ -108,7 +108,7 @@ func Convert(cmd *cobra.Command, args []string) error {
 
 func convert(path string, rules []RawRule) FalcoAuditRule {
 	result := FalcoAuditRule{
-		ApiVersion: "deckhouse.io/v1alpha1",
+		APIVersion: "deckhouse.io/v1alpha1",
 		Kind:       "FalcoAuditRules",
 		Metadata: Metadata{
 			Name: nameFromPath(path),

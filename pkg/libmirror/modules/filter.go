@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
@@ -29,10 +30,6 @@ const (
 	FilterTypeWhitelist FilterType = iota
 	FilterTypeBlacklist
 )
-
-var validChannels = map[string]struct{}{
-	"alpha": {}, "beta": {}, "early-access": {}, "stable": {}, "rock-solid": {},
-}
 
 // Filter for modules by black and whitelists. Maps module names to minimal versions of these modules to be pulled.
 // By default, this is a whitelist filter, but that can be changed via SetType.
@@ -132,7 +129,7 @@ func parseExact(body string) (VersionConstraint, error) {
 		return nil, fmt.Errorf("empty tag in %q", body)
 	}
 	if ch != "" {
-		if _, ok := validChannels[ch]; ok {
+		if internal.ChannelIsValid(ch) {
 			return NewExactTagConstraintWithChannel(tag, ch), nil
 		}
 	}

@@ -25,8 +25,8 @@ import (
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
 	d8flags "github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
-	intplugins "github.com/deckhouse/deckhouse-cli/internal/plugins"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	intplugins "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 func (r *RootCommand) initPluginServices() {
@@ -67,8 +67,7 @@ func (r *RootCommand) initPluginServices() {
 		slog.Bool("tls_skip_verify", d8flags.TLSSkipVerify))
 
 	// Create base client with registry host only
-	baseClient := registry.NewClientWithOptions(&registry.ClientOptions{
-		RegistryHost:  registryHost,
+	baseClient := registry.NewClientWithOptions(registryHost, &registry.ClientOptions{
 		Auth:          auth,
 		Insecure:      d8flags.Insecure,
 		TLSSkipVerify: d8flags.TLSSkipVerify,
@@ -79,15 +78,14 @@ func (r *RootCommand) initPluginServices() {
 	// Example: registry.deckhouse.io -> deckhouse -> ee -> modules
 	r.pluginRegistryClient = baseClient.
 		WithScope("deckhouse").
-		WithScope("ee").
-		WithScope("modules")
+		WithScope("ee")
 
 	r.logger.Debug("Creating plugin service with scoped client",
 		slog.String("scope_path", "deckhouse/ee/modules"))
 
-	r.pluginService = intplugins.NewPluginService(
+	r.registryService = intplugins.NewService(
 		r.pluginRegistryClient,
-		r.logger.Named("plugin-service"),
+		r.logger.Named("registry-service"),
 	)
 
 	r.logger.Debug("Plugin services initialized successfully")
@@ -106,7 +104,7 @@ func containsSlash(s string) bool {
 func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) authn.Authenticator {
 	// Priority 1: Explicit username/password from flags
 	if d8flags.SourceRegistryLogin != "" {
-		logger.Info("Using explicit credentials from flags",
+		logger.Debug("Using explicit credentials from flags",
 			slog.String("username", d8flags.SourceRegistryLogin))
 		return authn.FromConfig(authn.AuthConfig{
 			Username: d8flags.SourceRegistryLogin,
@@ -116,7 +114,7 @@ func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) a
 
 	// Priority 2: License token from flags
 	if d8flags.DeckhouseLicenseToken != "" {
-		logger.Info("Using license token from flags")
+		logger.Debug("Using license token from flags")
 		return authn.FromConfig(authn.AuthConfig{
 			Username: "license-token",
 			Password: d8flags.DeckhouseLicenseToken,
@@ -155,7 +153,7 @@ func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) a
 			// Verify that auth is not anonymous by trying to get the config
 			cfg, err := auth.Authorization()
 			if err == nil && (cfg.Username != "" || cfg.Password != "" || cfg.Auth != "" || cfg.IdentityToken != "") {
-				logger.Info("Using credentials from Docker config",
+				logger.Debug("Using credentials from Docker config",
 					slog.String("registry", reg.String()))
 				return auth
 			}
@@ -163,7 +161,7 @@ func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) a
 	}
 
 	// Priority 4: Anonymous access
-	logger.Info("Using anonymous access for registry",
+	logger.Debug("Using anonymous access for registry",
 		slog.String("registry", registryHost))
 	return authn.Anonymous
 }

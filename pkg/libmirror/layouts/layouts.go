@@ -26,12 +26,16 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"golang.org/x/exp/maps"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 )
 
 type ModuleImageLayout struct {
@@ -270,10 +274,15 @@ func FindDeckhouseModulesImages(
 	modulesData []modules.Module,
 	filter *modules.Filter,
 ) error {
+	logger := params.Logger
+
+	counter := 0
 	for _, module := range modulesData {
 		if !filter.Match(&module) {
 			continue
 		}
+
+		counter++
 
 		moduleImageLayouts := layouts.Modules[module.Name]
 		moduleImageLayouts.ReleaseImages = map[string]struct{}{}
@@ -287,7 +296,10 @@ func FindDeckhouseModulesImages(
 			}
 		}
 
-		moduleImages, releaseImages, err := modules.FindExternalModuleImages(
+		logger.InfoF("%d:\t%s - find external module images", counter, module.Name)
+
+		moduleImages, moduleImagesWithExternal, releaseImages, err := modules.FindExternalModuleImages(
+			params,
 			&module,
 			filter,
 			params.RegistryAuth,
@@ -298,11 +310,14 @@ func FindDeckhouseModulesImages(
 			return fmt.Errorf("Find images of %s: %w", module.Name, err)
 		}
 
-		moduleImageLayouts.ModuleImages = moduleImages
+		moduleImageLayouts.ModuleImages = moduleImagesWithExternal
 		maps.Copy(moduleImageLayouts.ReleaseImages, releaseImages)
+
+		logger.InfoF("%d:\t%s - find module extra images", counter, module.Name)
 
 		// Find extra images if any exist
 		extraImages, err := modules.FindModuleExtraImages(
+			params,
 			&module,
 			moduleImages,
 			params.RegistryAuth,
@@ -312,6 +327,49 @@ func FindDeckhouseModulesImages(
 		if err != nil {
 			return fmt.Errorf("Find extra images of %s: %w", module.Name, err)
 		}
+
+		nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&params.BaseParams)
+
+		logger.InfoF("Searching for VEX images")
+
+		for digest := range moduleImagesWithExternal {
+			vexImageName, err := FindVexImage(
+				params,
+				module.RegistryPath,
+				nameOpts,
+				remoteOpts,
+				digest,
+			)
+
+			if err != nil {
+				return fmt.Errorf("Find VEX image for digest %q: %w", digest, err)
+			}
+
+			if vexImageName != "" {
+				logger.DebugF("Vex image found %s", vexImageName)
+				moduleImagesWithExternal[vexImageName] = struct{}{}
+			}
+		}
+
+		for digest := range extraImages {
+			vexImageName, err := FindVexImage(
+				params,
+				module.RegistryPath,
+				nameOpts,
+				remoteOpts,
+				digest,
+			)
+
+			if err != nil {
+				return fmt.Errorf("Find VEX image for digest %q: %w", digest, err)
+			}
+
+			if vexImageName != "" {
+				logger.DebugF("Vex image found %s", vexImageName)
+				extraImages[vexImageName] = struct{}{}
+			}
+		}
+
 		moduleImageLayouts.ExtraImages = extraImages
 
 		if len(moduleImageLayouts.ModuleImages) == 0 {
@@ -319,6 +377,8 @@ func FindDeckhouseModulesImages(
 		}
 
 		layouts.Modules[module.Name] = moduleImageLayouts
+
+		logger.InfoF("%d:\t%s", counter, module.Name)
 	}
 
 	return nil
@@ -394,4 +454,52 @@ func TagImage(l layout.Path, imageDigest v1.Hash, tag string) error {
 	}
 
 	return ErrImageNotFound
+}
+
+func FindVexImage(
+	params *params.PullParams,
+	registryPath string,
+	nameOpts []name.Option,
+	remoteOpts []remote.Option,
+	digest string,
+) (string, error) {
+	logger := params.Logger
+
+	// vex image reference check
+	vexImageName := strings.Replace(strings.Replace(digest, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
+
+	logger.DebugF("Checking vex image from %s", vexImageName)
+
+	vexref, err := name.ParseReference(vexImageName, nameOpts...)
+	if err != nil {
+		return "", fmt.Errorf("parse reference: %w", err)
+	}
+
+	var vexErr error
+	_, vexErr = remote.Head(vexref, remoteOpts...)
+	if vexErr != nil {
+		var transportErr *transport.Error
+		if errors.As(vexErr, &transportErr) && transportErr.StatusCode == 404 {
+			// Image not found, which is expected for non-vulnerable images
+			return "", nil
+		}
+
+		logger.WarnF("get Head error: %w", vexErr)
+	}
+
+	if vexErr != nil {
+		_, vexErr = remote.Get(vexref, remoteOpts...)
+	}
+
+	if vexErr != nil {
+		var transportErr *transport.Error
+		if errors.As(vexErr, &transportErr) && transportErr.StatusCode == 404 {
+			// Image not found, which is expected for non-vulnerable images
+			return "", nil
+		}
+
+		logger.WarnF("get Get error: %w", vexErr)
+	}
+
+	return vexImageName, nil
 }

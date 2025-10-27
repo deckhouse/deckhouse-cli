@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 )
 
@@ -257,10 +258,22 @@ func TestFilter_VersionsToMirror(t *testing.T) {
 				},
 			},
 			mod: &Module{
-				Name:     "module1",
-				Releases: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.4.1"},
+				Name: "module1",
+				Releases: []string{
+					internal.AlphaChannel,
+					internal.BetaChannel,
+					internal.EarlyAccessChannel,
+					internal.StableChannel,
+					internal.RockSolidChannel,
+					"v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.4.1"},
 			},
-			want: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.3.0", "v1.4.1"},
+			want: []string{
+				internal.AlphaChannel,
+				internal.BetaChannel,
+				internal.EarlyAccessChannel,
+				internal.StableChannel,
+				internal.RockSolidChannel,
+				"v1.3.0", "v1.4.1"},
 		},
 		{
 			name: "semver constraint tilde ~ (>=1.3.0 <1.4.0)",
@@ -271,10 +284,22 @@ func TestFilter_VersionsToMirror(t *testing.T) {
 				},
 			},
 			mod: &Module{
-				Name:     "module1",
-				Releases: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.3.3", "v1.4.1"},
+				Name: "module1",
+				Releases: []string{
+					internal.AlphaChannel,
+					internal.BetaChannel,
+					internal.EarlyAccessChannel,
+					internal.StableChannel,
+					internal.RockSolidChannel,
+					"v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.3.3", "v1.4.1"},
 			},
-			want: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.3.0", "v1.3.3"},
+			want: []string{
+				internal.AlphaChannel,
+				internal.BetaChannel,
+				internal.EarlyAccessChannel,
+				internal.StableChannel,
+				internal.RockSolidChannel,
+				"v1.3.0", "v1.3.3"},
 		},
 		{
 			name: "semver constraint range >=1.1.0 <1.3.0",
@@ -285,10 +310,22 @@ func TestFilter_VersionsToMirror(t *testing.T) {
 				},
 			},
 			mod: &Module{
-				Name:     "module1",
-				Releases: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.4.1"},
+				Name: "module1",
+				Releases: []string{
+					internal.AlphaChannel,
+					internal.BetaChannel,
+					internal.EarlyAccessChannel,
+					internal.StableChannel,
+					internal.RockSolidChannel,
+					"v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.4.1"},
 			},
-			want: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.1.0", "v1.2.0"},
+			want: []string{
+				internal.AlphaChannel,
+				internal.BetaChannel,
+				internal.EarlyAccessChannel,
+				internal.StableChannel,
+				internal.RockSolidChannel,
+				"v1.1.0", "v1.2.0"},
 		},
 		{
 			name: "happy path: exact match",
@@ -299,8 +336,14 @@ func TestFilter_VersionsToMirror(t *testing.T) {
 				},
 			},
 			mod: &Module{
-				Name:     "module1",
-				Releases: []string{"alpha", "beta", "early-access", "stable", "rock-solid", "v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.3.3", "v1.4.1"},
+				Name: "module1",
+				Releases: []string{
+					internal.AlphaChannel,
+					internal.BetaChannel,
+					internal.EarlyAccessChannel,
+					internal.StableChannel,
+					internal.RockSolidChannel,
+					"v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.3.3", "v1.4.1"},
 			},
 			want: []string{"v1.3.0"},
 		},
@@ -309,7 +352,7 @@ func TestFilter_VersionsToMirror(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var got []string
 			if tt.filter.ShouldMirrorReleaseChannels(tt.mod.Name) {
-				got = append(got, "alpha", "beta", "early-access", "stable", "rock-solid")
+				got = append(got, internal.GetAllDefaultReleaseChannels()...)
 			}
 			got = append(got, tt.filter.VersionsToMirror(tt.mod)...)
 			require.ElementsMatch(t, tt.want, got)

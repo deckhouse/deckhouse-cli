@@ -3,6 +3,7 @@ package client
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -57,7 +58,7 @@ func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
 	return &SafeClient{restConfig}, nil
 }
 
-func (c *SafeClient) HttpDo(req *http.Request) (*http.Response, error) {
+func (c *SafeClient) HTTPDo(req *http.Request) (*http.Response, error) {
 	if len(req.Header.Get("Authorization")) != 0 {
 		httpClient, err := rest.HTTPClientFor(c.restConfig)
 		if err != nil {
@@ -65,7 +66,11 @@ func (c *SafeClient) HttpDo(req *http.Request) (*http.Response, error) {
 		}
 
 		resp, err := httpClient.Do(req)
-		return resp, err
+		if err != nil {
+			return nil, fmt.Errorf("request header auth do request: %w", err)
+		}
+
+		return resp, nil
 	}
 
 	// BasicAuth || TokenAuth
@@ -76,7 +81,11 @@ func (c *SafeClient) HttpDo(req *http.Request) (*http.Response, error) {
 		}
 
 		resp, err := httpClient.Do(req)
-		return resp, err
+		if err != nil {
+			return nil, fmt.Errorf("basic/token auth do request: %w", err)
+		}
+
+		return resp, nil
 	}
 
 	// CertAuth
@@ -88,7 +97,11 @@ func (c *SafeClient) HttpDo(req *http.Request) (*http.Response, error) {
 		}
 
 		resp, err := httpClient.Do(req)
-		return resp, err
+		if err != nil {
+			return nil, fmt.Errorf("certificate auth do request: %w", err)
+		}
+
+		return resp, nil
 	}
 
 	// Ather AuthProvider
@@ -99,17 +112,25 @@ func (c *SafeClient) HttpDo(req *http.Request) (*http.Response, error) {
 		}
 
 		resp, err := httpClient.Do(req)
-		return resp, err
+		if err != nil {
+			return nil, fmt.Errorf("auth provider do request: %w", err)
+		}
+
+		return resp, nil
 	}
 
 	if SupportNoAuth {
 		httpClient := &http.Client{}
 
 		resp, err := httpClient.Do(req)
-		return resp, err
+		if err != nil {
+			return nil, fmt.Errorf("no auth do request: %w", err)
+		}
+
+		return resp, nil
 	}
 
-	return nil, fmt.Errorf("No auth")
+	return nil, errors.New("No auth")
 }
 
 func (c *SafeClient) NewRTClient(schemeFuncs ...(func(s *runtime.Scheme) error)) (ctrlrtclient.Client, error) {

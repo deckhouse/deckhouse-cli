@@ -24,6 +24,7 @@ import (
 	"path"
 	"path/filepath"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
@@ -142,7 +143,7 @@ func ApplyChannelAliasesIfNeeded(name string, layout layouts.ModuleImageLayout, 
 				return err
 			}
 		} else {
-			for _, channel := range Channels {
+			for _, channel := range append(internal.GetAllDefaultReleaseChannels(), internal.LTSChannel) {
 				if err := layouts.TagImage(layout.ReleasesLayout, desc.Digest, channel); err != nil {
 					return err
 				}

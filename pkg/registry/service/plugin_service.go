@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package plugins
+package service
 
 import (
 	"archive/tar"
@@ -30,13 +30,6 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg"
-)
-
-const (
-	// PluginRepositoryPrefix is the base path for plugin images in the registry
-	// This is relative to the registry base path (e.g., if registry is "registry.deckhouse.io/deckhouse/ee/modules"
-	// then full path will be "registry.deckhouse.io/deckhouse/ee/modules/deckhouse/cli/plugins")
-	PluginRepositoryPrefix = "deckhouse/ee/modules"
 )
 
 // PluginService provides high-level operations for plugin management
