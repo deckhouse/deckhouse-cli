@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/dataimport/api/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/dataimport/util"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 	"github.com/spf13/cobra"
 )

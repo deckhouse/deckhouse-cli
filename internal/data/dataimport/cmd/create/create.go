@@ -26,8 +26,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	v1alpha1 "github.com/deckhouse/deckhouse-cli/internal/dataimport/api/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/dataimport/util"
+	v1alpha1 "github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 	"sigs.k8s.io/yaml"
 )

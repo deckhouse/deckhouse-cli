@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
 	safereq "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 

@@ -40,8 +40,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/cmd/commands"
 	"github.com/deckhouse/deckhouse-cli/cmd/plugins"
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
-	dataexport "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd"
-	dataimport "github.com/deckhouse/deckhouse-cli/internal/dataimport/cmd"
+	data "github.com/deckhouse/deckhouse-cli/internal/data/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
 	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
@@ -98,8 +97,7 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.SetContext(ctx)
 
 	r.cmd.AddCommand(backup.NewCommand())
-	r.cmd.AddCommand(dataexport.NewCommand())
-	r.cmd.AddCommand(dataimport.NewCommand())
+	r.cmd.AddCommand(data.NewCommand())
 	r.cmd.AddCommand(mirror.NewCommand())
 	r.cmd.AddCommand(status.NewCommand())
 	r.cmd.AddCommand(tools.NewCommand())

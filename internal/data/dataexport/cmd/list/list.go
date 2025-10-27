@@ -31,8 +31,8 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
 	"github.com/deckhouse/deckhouse-cli/internal/dataio"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )

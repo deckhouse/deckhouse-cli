@@ -23,20 +23,22 @@ import (
 
 	"github.com/spf13/cobra"
 
-	diCreate "github.com/deckhouse/deckhouse-cli/internal/dataimport/cmd/create"
-	diDelete "github.com/deckhouse/deckhouse-cli/internal/dataimport/cmd/delete"
-	diUpload "github.com/deckhouse/deckhouse-cli/internal/dataimport/cmd/upload"
+	deCreate "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/create"
+	deDelete "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/delete"
+	deDownload "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/download"
+	deList "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/list"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
 )
 
 const (
-	cmdName = "dataimport"
+	cmdName = "export"
 )
 
 func NewCommand() *cobra.Command {
-	root := &cobra.Command{
+	dataCmd := &cobra.Command{
 		Use:           cmdName,
-		Aliases:       []string{"di"},
-		Short:         "Create and manage DataImport resources, upload files",
+		Aliases:       []string{"de"},
+		Short:         "Provides volume resources data from kubernetes cluster",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Run: func(cmd *cobra.Command, _ []string) {
@@ -44,16 +46,21 @@ func NewCommand() *cobra.Command {
 		},
 	}
 
-	root.SetOut(os.Stdout)
+	dataCmd.SetOut(os.Stdout)
 
 	ctx := context.Background()
-	logger := slog.Default()
 
-	root.AddCommand(
-		diCreate.NewCommand(ctx, logger),
-		diDelete.NewCommand(ctx, logger),
-		diUpload.NewCommand(ctx, logger),
+	logger := util.SetupLogger()
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	dataCmd.AddCommand(
+		deCreate.NewCommand(ctx, logger),
+		deDelete.NewCommand(ctx, logger),
+		deDownload.NewCommand(ctx, logger),
+		deList.NewCommand(ctx, logger),
 	)
 
-	return root
+	return dataCmd
 }
