@@ -40,32 +40,40 @@ const (
 	cmImageKey  = "image"
 )
 
-var d8CommandRegex = regexp.MustCompile(`d8 (\w+)`)
+var d8CommandRegex = regexp.MustCompile("([\"'`])d8 (\\w+)")
 
 func wrapRunE(cmd *cobra.Command) {
 	if cmd.RunE != nil {
 		originalRunE := cmd.RunE
+
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
 			// Create a pipe to capture stderr
 			r, w, err := os.Pipe()
 			if err != nil {
 				return originalRunE(cmd, args)
 			}
+
 			oldStderr := os.Stderr
 			os.Stderr = w
+
 			err = originalRunE(cmd, args)
 			w.Close()
 			os.Stderr = oldStderr
+
 			// Read the captured output
 			output, readErr := io.ReadAll(r)
 			r.Close()
+
 			if readErr != nil {
 				return err
 			}
+
 			// Modify the output to fix the command suggestion
-			modifiedOutput := d8CommandRegex.ReplaceAllString(string(output), "d8 k $1")
+			modifiedOutput := d8CommandRegex.ReplaceAllString(string(output), "$1d8 k $2")
+
 			// Write the modified output to real stderr
 			fmt.Fprint(oldStderr, modifiedOutput)
+
 			return err
 		}
 	}
