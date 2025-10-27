@@ -20,7 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -37,6 +39,55 @@ const (
 	cmName      = "debug-container"
 	cmImageKey  = "image"
 )
+
+var d8CommandRegex = regexp.MustCompile("([\"'`])d8 (\\w+)")
+
+// wrapRunE wraps all RunE functions in the kubectl command tree to intercept stderr output.
+// This approach is preferred over modifying os.Args[0] because:
+// - It avoids modifying global state (os.Args) which could affect other parts of the system
+// - It provides surgical precision, only affecting kubectl error messages
+// - It preserves the integrity of os.Args for logging, debugging, and other tools
+// - It maintains clean separation of concerns without side effects
+func wrapRunE(cmd *cobra.Command) {
+	if cmd.RunE != nil {
+		originalRunE := cmd.RunE
+
+		cmd.RunE = func(cmd *cobra.Command, args []string) error {
+			// Create a pipe to capture stderr
+			r, w, err := os.Pipe()
+			if err != nil {
+				return originalRunE(cmd, args)
+			}
+
+			oldStderr := os.Stderr
+			os.Stderr = w
+
+			err = originalRunE(cmd, args)
+			w.Close()
+			os.Stderr = oldStderr
+
+			// Read the captured output
+			output, readErr := io.ReadAll(r)
+			r.Close()
+
+			if readErr != nil {
+				return err
+			}
+
+			// Modify the output to fix the command suggestion
+			modifiedOutput := d8CommandRegex.ReplaceAllString(string(output), "$1d8 k $2")
+
+			// Write the modified output to real stderr
+			fmt.Fprint(oldStderr, modifiedOutput)
+
+			return err
+		}
+	}
+
+	for _, sub := range cmd.Commands() {
+		wrapRunE(sub)
+	}
+}
 
 func getDebugImage(cmd *cobra.Command) (string, error) {
 	configFlags := genericclioptions.NewConfigFlags(true)
@@ -79,6 +130,9 @@ func NewKubectlCommand() *cobra.Command {
 	kubectlCmd.Use = "k"
 	kubectlCmd.Aliases = []string{"kubectl"}
 	kubectlCmd = ReplaceCommandName("kubectl", "d8 k", kubectlCmd)
+
+	// Wrap RunE to fix error messages
+	wrapRunE(kubectlCmd)
 
 	var debugCmd *cobra.Command
 	for _, cmd := range kubectlCmd.Commands() {
