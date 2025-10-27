@@ -1252,7 +1252,37 @@ func TestPullerFinalCleanup(t *testing.T) {
 	err = os.WriteFile(testFile, []byte("test"), 0644)
 	require.NoError(t, err)
 
-	// Test cleanup
+	// Test cleanup - since TempDir contains other files besides "pull", only "pull" should be removed
+	originalTempDir := TempDir
+	defer func() { TempDir = originalTempDir }()
+
+	TempDir = testDir
+
+	puller := &Puller{}
+	err = puller.finalCleanup()
+	assert.NoError(t, err)
+
+	// Verify directory still exists (since it contains other files)
+	_, err = os.Stat(testDir)
+	assert.False(t, os.IsNotExist(err))
+
+	// Verify the file still exists
+	_, err = os.Stat(testFile)
+	assert.False(t, os.IsNotExist(err))
+}
+
+func TestPullerFinalCleanupOnlyPullDir(t *testing.T) {
+	tempDir := t.TempDir()
+	testDir := filepath.Join(tempDir, "to-cleanup")
+	err := os.MkdirAll(testDir, 0755)
+	require.NoError(t, err)
+
+	// Create only a "pull" directory in TempDir
+	pullDir := filepath.Join(testDir, mirror.TmpMirrorFolderName)
+	err = os.MkdirAll(pullDir, 0755)
+	require.NoError(t, err)
+
+	// Test cleanup - since TempDir contains only "pull", entire TempDir should be removed
 	originalTempDir := TempDir
 	defer func() { TempDir = originalTempDir }()
 
