@@ -124,7 +124,7 @@ func (c *Client) GetDigest(ctx context.Context, tag string) (*v1.Hash, error) {
 
 // GetManifest retrieves the manifest for a specific image tag
 // The repository is determined by the chained WithScope() calls
-func (c *Client) GetManifest(ctx context.Context, tag string) (*remote.Descriptor, error) {
+func (c *Client) GetManifest(ctx context.Context, tag string) ([]byte, error) {
 	fullRegistry := c.GetRegistry()
 	logentry := c.log.With(
 		slog.String("registry_host", c.registryHost),
