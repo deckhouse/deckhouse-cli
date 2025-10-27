@@ -84,9 +84,9 @@ func NewCommand() *cobra.Command {
 	// Backward-compat: `d8 data create` maps to `d8 data export create` with deprecation warning.
 	deprecatedCreate := &cobra.Command{
 		Use:   "create [flags] data_export_name volume_type/volume_name",
-		Short: "Deprecated: use 'd8 data export create' or 'd8 data import create'",
+		Short: "Deprecated: use 'd8 data export create'",
 		RunE: func(c *cobra.Command, args []string) error {
-			c.Println("WARNING: 'd8 data create' is deprecated and will be removed. Use 'd8 data export create' or 'd8 data import create'.")
+			c.Println("WARNING: 'd8 data create' is deprecated and will be removed. Use 'd8 data export create'.")
 			return deCreate.Run(ctx, logger, c, args)
 		},
 	}
