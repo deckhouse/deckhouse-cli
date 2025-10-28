@@ -17,42 +17,32 @@ limitations under the License.
 package util
 
 import (
-	"bufio"
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"log/slog"
 	neturl "net/url"
-	"os"
 	"slices"
 	"strings"
 	"time"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
-)
-
-const (
-	defaultTTL                = "2m"
-	PersistentVolumeClaimKind = "PersistentVolumeClaim"
-	VolumeSnapshotKind        = "VolumeSnapshot"
-	VirtualDiskKind           = "VirtualDisk"
-	VirtualDiskSnapshotKind   = "VirtualDiskSnapshot"
-)
-
-var (
-	ErrUnsupportedVolumeMode = errors.New("invalid volume mode")
 )
 
 // Function pointers for test stubbing
 var (
 	PrepareDownloadFunc            = PrepareDownload
 	CreateDataExporterIfNeededFunc = CreateDataExporterIfNeeded
+)
+
+const (
+	maxRetryAttempts = 60
 )
 
 func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
@@ -122,7 +112,7 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 		if returnErr == nil {
 			break
 		}
-		if i > 60 {
+		if i > maxRetryAttempts {
 			return nil, returnErr
 		}
 		time.Sleep(time.Second * 3)
@@ -138,41 +128,41 @@ func CreateDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, n
 	switch {
 	// PVC / PersistentVolumeClaim
 	case strings.HasPrefix(lowerCaseDeName, "pvc/"):
-		volumeKind = PersistentVolumeClaimKind
+		volumeKind = dataio.PersistentVolumeClaimKind
 		volumeName = deName[4:]
 		deName = "de-pvc-" + volumeName
 	case strings.HasPrefix(lowerCaseDeName, "persistentvolumeclaim/"):
-		volumeKind = PersistentVolumeClaimKind
+		volumeKind = dataio.PersistentVolumeClaimKind
 		volumeName = deName[len("persistentvolumeclaim/"):]
 		deName = "de-pvc-" + volumeName
 
 	// VS / VolumeSnapshot
 	case strings.HasPrefix(lowerCaseDeName, "vs/"):
-		volumeKind = VolumeSnapshotKind
+		volumeKind = dataio.VolumeSnapshotKind
 		volumeName = deName[3:]
 		deName = "de-vs-" + volumeName
 	case strings.HasPrefix(lowerCaseDeName, "volumesnapshot/"):
-		volumeKind = VolumeSnapshotKind
+		volumeKind = dataio.VolumeSnapshotKind
 		volumeName = deName[len("volumesnapshot/"):]
 		deName = "de-vs-" + volumeName
 
 	// VD / VirtualDisk
 	case strings.HasPrefix(lowerCaseDeName, "vd/"):
-		volumeKind = VirtualDiskKind
+		volumeKind = dataio.VirtualDiskKind
 		volumeName = deName[3:]
 		deName = "de-vd-" + volumeName
 	case strings.HasPrefix(lowerCaseDeName, "virtualdisk/"):
-		volumeKind = VirtualDiskKind
+		volumeKind = dataio.VirtualDiskKind
 		volumeName = deName[len("virtualdisk/"):]
 		deName = "de-vd-" + volumeName
 
 	// VDS / VirtualDiskSnapshot
 	case strings.HasPrefix(lowerCaseDeName, "vds/"):
-		volumeKind = VirtualDiskSnapshotKind
+		volumeKind = dataio.VirtualDiskSnapshotKind
 		volumeName = deName[4:]
 		deName = "de-vds-" + volumeName
 	case strings.HasPrefix(lowerCaseDeName, "virtualdisksnapshot/"):
-		volumeKind = VirtualDiskSnapshotKind
+		volumeKind = dataio.VirtualDiskSnapshotKind
 		volumeName = deName[len("virtualdisksnapshot/"):]
 		deName = "de-vds-" + volumeName
 
@@ -191,7 +181,7 @@ func CreateDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, n
 
 func CreateDataExport(ctx context.Context, deName, namespace, ttl, volumeKind, volumeName string, publish bool, rtClient ctrlrtclient.Client) error {
 	if ttl == "" {
-		ttl = defaultTTL
+		ttl = dataio.DefaultTTL
 	}
 
 	// Create dataexport object
@@ -236,42 +226,6 @@ func DeleteDataExport(ctx context.Context, deName, namespace string, rtClient ct
 	return nil
 }
 
-func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
-	inputChan := make(chan string)
-	defer close(inputChan)
-
-	go func() {
-		reader := bufio.NewReader(os.Stdin)
-		for {
-			fmt.Printf("%s: ", prompt)
-			input, err := reader.ReadString('\n')
-			if err != nil {
-				fmt.Println("Error reading input, please try again.")
-				continue
-			}
-
-			input = strings.ToLower(strings.TrimSpace(input))
-			if slices.Contains([]string{"y", "n"}, input) {
-				inputChan <- strings.TrimSpace(input)
-				return
-			} else {
-				fmt.Println("Invalid input. Please press 'y' or 'n'.")
-			}
-		}
-	}()
-
-	select {
-	case input := <-inputChan:
-		if input == "n" || input == "no" {
-			return false
-		}
-		return true
-	case <-time.After(timeout):
-		fmt.Printf("\n")
-		return true
-	}
-}
-
 func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace string, public bool, rtClient ctrlrtclient.Client) (podURL, volumeMode, internalCAData string, err error) {
 	log.Info("Waiting for DataExport to be ready", slog.String("name", deName), slog.String("namespace", namespace))
 	deObj, err := GetDataExportWithRestart(ctx, deName, namespace, rtClient)
@@ -297,7 +251,7 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 	}
 
 	volumeKind := deObj.Spec.TargetRef.Kind
-	if !slices.Contains([]string{PersistentVolumeClaimKind, VolumeSnapshotKind, VirtualDiskKind, VirtualDiskSnapshotKind}, volumeKind) {
+	if !slices.Contains([]string{dataio.PersistentVolumeClaimKind, dataio.VolumeSnapshotKind, dataio.VirtualDiskKind, dataio.VirtualDiskSnapshotKind}, volumeKind) {
 		err = fmt.Errorf("invalid volume kind: %s", volumeKind)
 		return
 	}
@@ -335,7 +289,7 @@ func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace st
 			return
 		}
 	default:
-		finErr = fmt.Errorf("%w: '%s'", ErrUnsupportedVolumeMode, volumeMode)
+		finErr = fmt.Errorf("%w: '%s'", dataio.ErrUnsupportedVolumeMode, volumeMode)
 		return
 	}
 

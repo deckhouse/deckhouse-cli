@@ -23,21 +23,21 @@ import (
 
 	"github.com/spf13/cobra"
 
-	deCreate "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/create"
-	deDelete "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/delete"
-	deDownload "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/download"
-	deList "github.com/deckhouse/deckhouse-cli/internal/dataexport/cmd/list"
-	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
+	deCreate "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/create"
+	deDelete "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/delete"
+	deDownload "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/download"
+	deList "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/list"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
 )
 
 const (
-	cmdName = "data"
+	cmdName = "export"
 )
 
 func NewCommand() *cobra.Command {
 	dataCmd := &cobra.Command{
 		Use:           cmdName,
-		Aliases:       []string{"de", "dataexport"},
+		Aliases:       []string{"de"},
 		Short:         "Provides volume resources data from kubernetes cluster",
 		SilenceUsage:  true,
 		SilenceErrors: true,

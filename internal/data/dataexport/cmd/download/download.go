@@ -32,8 +32,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/deckhouse/deckhouse-cli/internal/dataexport/api/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/dataexport/util"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -66,7 +67,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 			return Run(ctx, log, cmd, args)
 		},
 		Args: func(cmd *cobra.Command, args []string) error {
-			_, _, err := parseArgs(args)
+			_, _, err := dataio.ParseArgs(args)
 			return err
 		},
 	}
@@ -77,24 +78,6 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
 
 	return cmd
-}
-
-func parseArgs(args []string) (deName, srcPath string, err error) {
-	switch len(args) {
-	case 1:
-		deName = args[0]
-	case 2:
-		deName = args[0]
-		srcPath = args[1]
-	default:
-		return "", "", fmt.Errorf("invalid arguments")
-	}
-
-	if !strings.HasPrefix(srcPath, "/") {
-		srcPath = "/" + srcPath
-	}
-
-	return
 }
 
 type dirItem struct {
@@ -250,7 +233,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	publish, _ := cmd.Flags().GetBool("publish")
 	ttl, _ := cmd.Flags().GetString("ttl")
 
-	dataName, srcPath, err := parseArgs(args)
+	dataName, srcPath, err := dataio.ParseArgs(args)
 	if err != nil {
 		return fmt.Errorf("arguments parsing error: %s", err.Error())
 	}
@@ -293,7 +276,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 			dstPath = deName
 		}
 	default:
-		return fmt.Errorf("%w: %s", util.ErrUnsupportedVolumeMode, volumeMode)
+		return fmt.Errorf("%w: %s", dataio.ErrUnsupportedVolumeMode, volumeMode)
 	}
 
 	log.Info("Start downloading", slog.String("url", url+srcPath), slog.String("dstPath", dstPath))
@@ -306,7 +289,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	if deName != dataName { // DataExport created in download process
-		if util.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
+		if dataio.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
 			util.DeleteDataExport(ctx, deName, namespace, rtClient)
 		}
 	}
