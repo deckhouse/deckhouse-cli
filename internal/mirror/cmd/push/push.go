@@ -324,11 +324,12 @@ func (p *Pusher) pushStaticPackages() error {
 		clientOpts.Auth = p.pushParams.RegistryAuth
 	}
 
-	client := registry.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
+	var client pkg.RegistryClient
+	client = registry.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
 
 	// Scope to the registry path and modules suffix
 	if p.pushParams.RegistryPath != "" {
-		client = client.WithSegment(p.pushParams.RegistryPath).(*registry.Client)
+		client = client.WithSegment(p.pushParams.RegistryPath)
 	}
 
 	return pushStaticPackages(p.pushParams, p.logger, client)
@@ -347,15 +348,16 @@ func (p *Pusher) pushModules() error {
 		clientOpts.Auth = p.pushParams.RegistryAuth
 	}
 
-	client := registry.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
+	var client pkg.RegistryClient
+	client = registry.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
 
 	// Scope to the registry path and modules suffix
 	if p.pushParams.RegistryPath != "" {
-		client = client.WithSegment(p.pushParams.RegistryPath).(*registry.Client)
+		client = client.WithSegment(p.pushParams.RegistryPath)
 	}
 
 	if p.pushParams.ModulesPathSuffix != "" {
-		client = client.WithSegment(p.pushParams.ModulesPathSuffix).(*registry.Client)
+		client = client.WithSegment(p.pushParams.ModulesPathSuffix)
 	}
 
 	return pushModules(p.pushParams, p.logger, client)
