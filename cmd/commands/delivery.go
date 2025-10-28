@@ -18,21 +18,28 @@ package commands
 
 import (
 	"context"
+	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
-	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
+	"github.com/werf/common-go/pkg/graceful"
 	werfroot "github.com/werf/werf/v2/cmd/werf/root"
-	"github.com/werf/werf/v2/pkg/storage"
+	"github.com/werf/werf/v2/pkg/logging"
+	"github.com/werf/werf/v2/pkg/storage/synchronization/server"
 )
 
 func NewDeliveryCommand() (*cobra.Command, context.Context) {
-	storage.DefaultHttpSynchronizationServer = "https://delivery-sync.deckhouse.ru"
+	server.DefaultAddress = "https://delivery-sync.deckhouse.ru"
 
-	ctx := werfcommon.GetContextWithLogger()
+	terminationCtx := graceful.WithTermination(context.Background())
+	defer graceful.Shutdown(terminationCtx, onShutdown)
+
+	ctx := logging.WithLogger(terminationCtx)
 
 	werfRootCmd, err := werfroot.ConstructRootCmd(ctx)
 	if err != nil {
-		werfcommon.TerminateWithError(err.Error(), 1)
+		graceful.Terminate(ctx, err, 1)
+		return nil, ctx
 	}
 
 	werfRootCmd.Use = "delivery-kit"
@@ -64,4 +71,14 @@ func removeKubectlCmd(werfRootCmd *cobra.Command) {
 	}
 
 	werfRootCmd.RemoveCommand(kubectlCmd)
+}
+
+func onShutdown(_ context.Context, desc graceful.TerminationDescriptor) {
+	if desc.Signal() != nil {
+		logging.Default(fmt.Sprintf("Signal: %s", desc.Signal()))
+		os.Exit(desc.ExitCode())
+	} else if desc.Err() != nil {
+		logging.Error(desc.Err().Error())
+		os.Exit(desc.ExitCode())
+	}
 }
