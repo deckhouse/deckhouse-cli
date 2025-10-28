@@ -61,7 +61,7 @@ func PushSecurityDatabases(pushParams *params.PushParams, pkg io.Reader, client 
 		pushParams.Logger.InfoLn("Pushing", repoRef)
 		if err := layouts.PushLayoutToRepoContext(
 			context.Background(),
-			client.WithScope("security").WithScope(layoutPathSuffix),
+			client.WithSegment("security").WithSegment(layoutPathSuffix),
 			layout.Path(filepath.Join(packageDir, layoutPathSuffix)),
 			repoRef,
 			pushParams.RegistryAuth,

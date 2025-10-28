@@ -154,7 +154,7 @@ func TestPushSecurityDatabases_LayoutPaths(t *testing.T) {
 	pushParams, logger, client := setupTestPushParams(t)
 	pkg := createValidSecurityPackage(t)
 
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 
 	err := PushSecurityDatabases(pushParams, pkg, client)
 
@@ -185,7 +185,7 @@ func TestPushSecurityDatabases_WorkingDirectoryCleanup(t *testing.T) {
 	pushParams, _, client := setupTestPushParams(t)
 	pkg := createValidSecurityPackage(t)
 
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 
 	// Track if cleanup occurred by checking directory existence
 	packageDir := filepath.Join(pushParams.WorkingDir, "security")
@@ -209,7 +209,7 @@ func TestPushSecurityDatabases_RegistryAuth(t *testing.T) {
 
 	pkg := createValidSecurityPackage(t)
 
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 
 	err := PushSecurityDatabases(pushParams, pkg, client)
 	// For empty layouts, should succeed (auth is configured but not used)
@@ -223,7 +223,7 @@ func TestPushSecurityDatabases_InsecureAndTLSSkip(t *testing.T) {
 
 	pkg := createValidSecurityPackage(t)
 
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 
 	err := PushSecurityDatabases(pushParams, pkg, client)
 	// For empty layouts, should succeed (insecure settings are configured but not used)
@@ -239,7 +239,7 @@ func TestPushSecurityDatabases_ParallelismConfig(t *testing.T) {
 
 	pkg := createValidSecurityPackage(t)
 
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 
 	err := PushSecurityDatabases(pushParams, pkg, client)
 	// For empty layouts, should succeed (parallelism is configured but not used)
@@ -251,7 +251,7 @@ func BenchmarkPushSecurityDatabases(b *testing.B) {
 	pushParams, _, client := setupTestPushParams(b)
 	pkg := createValidSecurityPackage(b)
 
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -265,7 +265,7 @@ func TestPushSecurityDatabases_CodeCoverage_LayoutsToPush(t *testing.T) {
 	pushParams, _, client := setupTestPushParams(t)
 	pkg := createValidSecurityPackage(t)
 
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 
 	// The layoutsToPush map should be created with correct paths
 	expectedPaths := map[string]string{
@@ -304,7 +304,7 @@ func TestPushSecurityDatabases_CodeCoverage_AuthOptions(t *testing.T) {
 
 	pkg := createValidSecurityPackage(t)
 
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 
 	err := PushSecurityDatabases(pushParams, pkg, client)
 	require.NoError(t, err) // Will succeed for empty layouts

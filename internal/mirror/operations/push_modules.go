@@ -31,6 +31,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader, client pkg.RegistryClient) error {
@@ -61,7 +62,7 @@ func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader,
 		pushParams.Logger.InfoLn("Pushing", repoRef)
 		if err := layouts.PushLayoutToRepoContext(
 			context.Background(),
-			client.WithScope(moduleName).WithScope(layoutPathSuffix),
+			client.WithSegment(moduleName).WithSegment(layoutPathSuffix),
 			layout.Path(filepath.Join(packageDir, layoutPathSuffix)),
 			repoRef,
 			pushParams.RegistryAuth,
@@ -81,7 +82,7 @@ func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader,
 		return fmt.Errorf("random.Image: %w", err)
 	}
 
-	if err = client.PushImage(context.Background(), moduleName, img); err != nil {
+	if err = client.PushImage(context.Background(), moduleName, registry.NewImage(img)); err != nil {
 		return fmt.Errorf("Write module index tag: %w", err)
 	}
 

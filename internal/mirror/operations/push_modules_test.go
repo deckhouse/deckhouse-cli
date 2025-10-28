@@ -96,7 +96,7 @@ func setupTestPushParams(t testing.TB) (*params.PushParams, *mockLogger, *mock.R
 	// Create registry client mock for tests
 	client := mock.NewRegistryClientMock(t)
 
-	// Note: We set expectations for WithScope and PushImage in individual tests
+	// Note: We set expectations for WithSegment and PushImage in individual tests
 	// because some tests expect early errors before these methods are called.
 	// Tests that need these methods should set expectations explicitly.
 
@@ -272,7 +272,7 @@ func TestPushModule_LayoutPaths(t *testing.T) {
 	pushParams, logger, client := setupTestPushParams(t)
 
 	// Set up mock expectations for this test
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 	client.PushImageMock.Return(nil)
 
 	moduleName := "test-module"
@@ -306,7 +306,7 @@ func TestPushModule_LoggerCalls(t *testing.T) {
 	pushParams, logger, client := setupTestPushParams(t)
 
 	// Set up mock expectations for this test
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 	client.PushImageMock.Return(nil)
 
 	moduleName := "test-module"
@@ -329,7 +329,7 @@ func TestPushModule_WorkingDirectoryCleanup(t *testing.T) {
 	pushParams, _, client := setupTestPushParams(t)
 
 	// Set up mock expectations for this test - expect PushImage to fail
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 	client.PushImageMock.Return(errors.New("registry connection failed"))
 
 	moduleName := "test-module"
@@ -352,7 +352,7 @@ func TestPushModule_RegistryAuth(t *testing.T) {
 	pushParams, _, client := setupTestPushParams(t)
 
 	// Set up mock expectations for this test - expect PushImage to fail
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 	client.PushImageMock.Return(errors.New("registry connection failed"))
 
 	pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{
@@ -372,7 +372,7 @@ func TestPushModule_ParseReferenceError(t *testing.T) {
 	pushParams, _, client := setupTestPushParams(t)
 
 	// Set up mock expectations for this test - expect PushImage to fail
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 	client.PushImageMock.Return(errors.New("invalid reference"))
 
 	// Set invalid registry host to cause parse error
@@ -390,7 +390,7 @@ func TestPushModule_InsecureAndTLSSkip(t *testing.T) {
 	pushParams, _, client := setupTestPushParams(t)
 
 	// Set up mock expectations for this test - expect PushImage to fail
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 	client.PushImageMock.Return(errors.New("registry connection failed"))
 
 	pushParams.Insecure = true
@@ -408,7 +408,7 @@ func TestPushModule_ParallelismConfig(t *testing.T) {
 	pushParams, _, client := setupTestPushParams(t)
 
 	// Set up mock expectations for this test - expect PushImage to fail
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 	client.PushImageMock.Return(errors.New("registry connection failed"))
 
 	pushParams.Parallelism = params.ParallelismConfig{
@@ -437,7 +437,7 @@ func BenchmarkPushModule(b *testing.B) {
 	pushParams, _, client := setupTestPushParams(b)
 
 	// Set up mock expectations for benchmark - PushImage should succeed for performance testing
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 	client.PushImageMock.Return(nil)
 
 	moduleName := "bench-module"
@@ -455,7 +455,7 @@ func TestPushModule_CodeCoverage_LayoutsToPush(t *testing.T) {
 	pushParams, _, client := setupTestPushParams(t)
 
 	// Set up mock expectations for this test - expect PushImage to fail
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 	client.PushImageMock.Return(errors.New("registry connection failed"))
 
 	moduleName := "coverage-test"
@@ -494,7 +494,7 @@ func TestPushModule_CodeCoverage_RandomImage(t *testing.T) {
 	pushParams, _, client := setupTestPushParams(t)
 
 	// Set up mock expectations for this test - expect PushImage to fail
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 	client.PushImageMock.Return(errors.New("registry connection failed"))
 
 	moduleName := "random-image-test"
@@ -509,7 +509,7 @@ func TestPushModule_CodeCoverage_AuthOptions(t *testing.T) {
 	pushParams, _, client := setupTestPushParams(t)
 
 	// Set up mock expectations for this test - expect PushImage to fail
-	client.WithScopeMock.Return(client)
+	client.WithSegmentMock.Return(client)
 	client.PushImageMock.Return(errors.New("registry connection failed"))
 
 	pushParams.RegistryAuth = authn.Anonymous

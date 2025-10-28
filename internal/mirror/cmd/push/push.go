@@ -328,7 +328,7 @@ func (p *Pusher) pushStaticPackages() error {
 
 	// Scope to the registry path and modules suffix
 	if p.pushParams.RegistryPath != "" {
-		client = client.WithScope(p.pushParams.RegistryPath).(*registry.Client)
+		client = client.WithSegment(p.pushParams.RegistryPath).(*registry.Client)
 	}
 
 	return pushStaticPackages(p.pushParams, p.logger, client)
@@ -351,11 +351,11 @@ func (p *Pusher) pushModules() error {
 
 	// Scope to the registry path and modules suffix
 	if p.pushParams.RegistryPath != "" {
-		client = client.WithScope(p.pushParams.RegistryPath).(*registry.Client)
+		client = client.WithSegment(p.pushParams.RegistryPath).(*registry.Client)
 	}
 
 	if p.pushParams.ModulesPathSuffix != "" {
-		client = client.WithScope(p.pushParams.ModulesPathSuffix).(*registry.Client)
+		client = client.WithSegment(p.pushParams.ModulesPathSuffix).(*registry.Client)
 	}
 
 	return pushModules(p.pushParams, p.logger, client)

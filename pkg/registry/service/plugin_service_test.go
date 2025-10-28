@@ -62,7 +62,7 @@ func TestGetPluginContract_Success(t *testing.T) {
         }`, true, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -137,7 +137,7 @@ func TestGetPluginContract_MinimalContract(t *testing.T) {
 		}`, true, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("minimal-plugin").
 		Return(mockScopedClient)
 
@@ -184,7 +184,7 @@ func TestGetPluginContract_LabelNotFound(t *testing.T) {
 		Return("", false, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -225,7 +225,7 @@ func TestGetPluginContract_GetLabelError(t *testing.T) {
 		Return("", false, expectedErr)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -264,7 +264,7 @@ func TestGetPluginContract_InvalidJSON(t *testing.T) {
 		Return(`{invalid json`, true, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -299,7 +299,7 @@ func TestGetPluginContract_EmptyJSON(t *testing.T) {
 		Return(`{}`, true, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -377,7 +377,7 @@ func TestExtractPlugin_Success(t *testing.T) {
 		})
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -485,7 +485,7 @@ func TestExtractPlugin_MultipleLayersSuccess(t *testing.T) {
 		})
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -546,7 +546,7 @@ func TestExtractPlugin_ExtractImageLayersError(t *testing.T) {
 		})
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -607,7 +607,7 @@ func TestExtractPlugin_PathTraversalAttempt(t *testing.T) {
 		})
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -680,7 +680,7 @@ func TestExtractPlugin_EmptyRepository(t *testing.T) {
 		})
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -760,7 +760,7 @@ func TestExtractPlugin_NestedDirectories(t *testing.T) {
 		})
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 

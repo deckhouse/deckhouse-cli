@@ -34,11 +34,11 @@ import (
 
 // Client provides methods to interact with container registries
 type Client struct {
-	registryHost string   // e.g., "registry.deckhouse.io"
-	scopes       []string // e.g., [deckhouse,ee,modules] (built from chained WithScope calls)
-	scopePath    string   // e.g., "deckhouse/ee/modules" (built from chained WithScope calls)
-	options      []remote.Option
-	log          *log.Logger
+	registryHost        string   // e.g., "registry.deckhouse.io"
+	segments            []string // e.g., [deckhouse,ee,modules] (built from chained WithSegment calls)
+	constructedSegments string   // cached joined segments for scope path
+	options             []remote.Option
+	log                 *log.Logger
 }
 
 // Ensure Client implements pkg.RegistryInterface
@@ -65,26 +65,27 @@ func NewClientWithOptions(registry string, opts *ClientOptions) *Client {
 
 	return &Client{
 		registryHost: registry,
-		scopePath:    "",
 		options:      remoteOptions,
 		log:          logger,
 	}
 }
 
-// WithScope creates a new client with an additional scope path segment
+// WithSegment creates a new client with an additional scope path segment
 // This method can be chained to build complex paths:
-// client.WithScope("deckhouse").WithScope("ee").WithScope("modules")
-func (c *Client) WithScope(scope string) pkg.RegistryClient {
-	scope = strings.TrimPrefix(scope, "/")
-	scope = strings.TrimSuffix(scope, "/")
+// client.WithSegment("deckhouse").WithSegment("ee").WithSegment("modules")
+func (c *Client) WithSegment(segments ...string) pkg.RegistryClient {
+	for idx, scope := range segments {
+		segments[idx] = strings.TrimPrefix(scope, "/")
+		segments[idx] = strings.TrimSuffix(scope, "/")
+	}
 
-	if scope == "" {
+	if len(segments) == 0 {
 		return c
 	}
 
 	return &Client{
 		registryHost: c.registryHost,
-		scopes:       append(c.scopes, scope),
+		segments:     append(c.segments, segments...),
 		options:      c.options,
 		log:          c.log,
 	}
@@ -92,19 +93,24 @@ func (c *Client) WithScope(scope string) pkg.RegistryClient {
 
 // GetRegistry returns the full registry path (host + scope)
 func (c *Client) GetRegistry() string {
-	if len(c.scopes) == 0 {
+	if len(c.segments) == 0 {
 		return c.registryHost
 	}
 
-	return filepath.Join(c.registryHost, filepath.Join(c.scopes...))
+	if c.constructedSegments == "" {
+		c.constructedSegments = filepath.Join(c.segments...)
+	}
+
+	return filepath.Join(c.registryHost, c.constructedSegments)
 }
 
-// The repository is determined by the chained WithScope() calls
+// The repository is determined by the chained WithSegment() calls
 func (c *Client) GetDigest(ctx context.Context, tag string) (*v1.Hash, error) {
 	fullRegistry := c.GetRegistry()
+
 	logentry := c.log.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.scopePath),
+		slog.String("scope", c.constructedSegments),
 		slog.String("tag", tag),
 	)
 
@@ -133,12 +139,13 @@ func (c *Client) GetDigest(ctx context.Context, tag string) (*v1.Hash, error) {
 }
 
 // GetManifest retrieves the manifest for a specific image tag
-// The repository is determined by the chained WithScope() calls
+// The repository is determined by the chained WithSegment() calls
 func (c *Client) GetManifest(ctx context.Context, tag string) ([]byte, error) {
 	fullRegistry := c.GetRegistry()
+
 	logentry := c.log.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.scopePath),
+		slog.String("scope", c.constructedSegments),
 		slog.String("tag", tag),
 	)
 
@@ -163,12 +170,13 @@ func (c *Client) GetManifest(ctx context.Context, tag string) ([]byte, error) {
 // GetImage retrieves an remote image for a specific reference
 // Do not return remote image to avoid drop connection with context cancelation.
 // It will be in use while passed context will be alive.
-// The repository is determined by the chained WithScope() calls
-func (c *Client) GetImage(ctx context.Context, tag string) (v1.Image, error) {
+// The repository is determined by the chained WithSegment() calls
+func (c *Client) GetImage(ctx context.Context, tag string) (pkg.Image, error) {
 	fullRegistry := c.GetRegistry()
+
 	logentry := c.log.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.scopePath),
+		slog.String("scope", c.constructedSegments),
 		slog.String("tag", tag),
 	)
 
@@ -187,16 +195,16 @@ func (c *Client) GetImage(ctx context.Context, tag string) (v1.Image, error) {
 
 	logentry.Debug("Image retrieved successfully")
 
-	return img, nil
+	return &Image{Image: img}, nil
 }
 
 // PushImage pushes an image to the registry at the specified tag
-// The repository is determined by the chained WithScope() calls
-func (c *Client) PushImage(ctx context.Context, tag string, img v1.Image) error {
+// The repository is determined by the chained WithSegment() calls
+func (c *Client) PushImage(ctx context.Context, tag string, img pkg.Image) error {
 	fullRegistry := c.GetRegistry()
 	logentry := c.log.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.scopePath),
+		slog.String("scope", c.constructedSegments),
 		slog.String("tag", tag),
 	)
 
@@ -219,11 +227,11 @@ func (c *Client) PushImage(ctx context.Context, tag string, img v1.Image) error 
 }
 
 // GetImageConfig retrieves the image config file containing labels and metadata
-// The repository is determined by the chained WithScope() calls
+// The repository is determined by the chained WithSegment() calls
 func (c *Client) GetImageConfig(ctx context.Context, tag string) (*v1.ConfigFile, error) {
 	logentry := c.log.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.scopePath),
+		slog.String("scope", c.constructedSegments),
 		slog.String("tag", tag),
 	)
 
@@ -244,39 +252,13 @@ func (c *Client) GetImageConfig(ctx context.Context, tag string) (*v1.ConfigFile
 	return configFile, nil
 }
 
-// GetImageLayers retrieves all layers of an image
-// The repository is determined by the chained WithScope() calls
-func (c *Client) GetImageLayers(ctx context.Context, tag string) ([]v1.Layer, error) {
-	logentry := c.log.With(
-		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.scopePath),
-		slog.String("tag", tag),
-	)
-
-	logentry.Debug("Getting image layers")
-
-	img, err := c.GetImage(ctx, tag)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get image layers: %w", err)
-	}
-
-	layers, err := img.Layers()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get image layers: %w", err)
-	}
-
-	logentry.Debug("Image layers retrieved successfully", slog.Int("count", len(layers)))
-
-	return layers, nil
-}
-
 // GetLabel retrieves a specific label from remote image metadata
 // If you want to get several labels, consider using GetImageConfig to reduce API calls
-// The repository is determined by the chained WithScope() calls
+// The repository is determined by the chained WithSegment() calls
 func (c *Client) GetLabel(ctx context.Context, tag, labelKey string) (string, bool, error) {
 	logentry := c.log.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.scopePath),
+		slog.String("scope", c.constructedSegments),
 		slog.String("tag", tag),
 		slog.String("label", labelKey),
 	)
@@ -300,61 +282,14 @@ func (c *Client) GetLabel(ctx context.Context, tag, labelKey string) (string, bo
 	return value, exists, nil
 }
 
-// ExtractImageLayers retrieves uncompressed layer streams for extraction
-// The repository is determined by the chained WithScope() calls
-func (c *Client) ExtractImageLayers(ctx context.Context, tag string, handler func(pkg.LayerStream) error) error {
-	logentry := c.log.With(
-		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.scopePath),
-		slog.String("tag", tag),
-	)
-
-	logentry.Debug("Extracting image layers")
-
-	layers, err := c.GetImageLayers(ctx, tag)
-	if err != nil {
-		return fmt.Errorf("failed to get image layers: %w", err)
-	}
-
-	total := len(layers)
-
-	logentry.Debug("Starting layer extraction", slog.Int("total_layers", total))
-
-	for i, layer := range layers {
-		logentry.Debug("Processing layer", slog.Int("index", i+1), slog.Int("total", total))
-
-		// Get the layer as an uncompressed tar stream
-		reader, err := layer.Uncompressed()
-		if err != nil {
-			return fmt.Errorf("failed to uncompress layer %d: %w", i, err)
-		}
-
-		// Create layer stream
-		stream := NewLayerStream(i+1, total, reader)
-
-		// Pass to handler
-		err = handler(stream)
-		reader.Close()
-
-		if err != nil {
-			return fmt.Errorf("failed to handle layer %d: %w", i, err)
-		}
-
-		logentry.Debug("Layer processed successfully", slog.Int("index", i+1), slog.Int("total", total))
-	}
-
-	logentry.Debug("All layers extracted successfully", slog.Int("total_layers", total))
-
-	return nil
-}
-
 // ListTags lists all tags for the current scope
-// The repository is determined by the chained WithScope() calls
+// The repository is determined by the chained WithSegment() calls
 func (c *Client) ListTags(ctx context.Context) ([]string, error) {
 	fullRegistry := c.GetRegistry()
+
 	logentry := c.log.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.scopePath),
+		slog.String("scope", c.constructedSegments),
 	)
 
 	logentry.Debug("Listing tags")
@@ -378,13 +313,14 @@ func (c *Client) ListTags(ctx context.Context) ([]string, error) {
 }
 
 // ListRepositories lists all sub-repositories under the current scope
-// The scope is determined by the chained WithScope() calls
+// The scope is determined by the chained WithSegment() calls
 // Returns repository names (tags) under the current scope
 func (c *Client) ListRepositories(ctx context.Context) ([]string, error) {
 	fullRegistry := c.GetRegistry()
+
 	logentry := c.log.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.scopePath),
+		slog.String("scope", c.constructedSegments),
 	)
 
 	logentry.Debug("Listing repositories")

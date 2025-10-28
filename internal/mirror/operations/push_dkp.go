@@ -62,7 +62,7 @@ func PushDeckhousePlatform(pushParams *params.PushParams, pkg io.Reader, client 
 		pushParams.Logger.InfoLn("Pushing", repoRef)
 		if err := layouts.PushLayoutToRepoContext(
 			context.Background(),
-			client.WithScope(repo),
+			client.WithSegment(repo),
 			layout.Path(filepath.Join(packageDir, repo)),
 			repoRef,
 			pushParams.RegistryAuth,

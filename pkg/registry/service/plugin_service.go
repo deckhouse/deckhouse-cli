@@ -53,7 +53,7 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 	// We just need to add the plugin name
 	s.log.Debug("Getting plugin contract", slog.String("plugin", pluginName), slog.String("tag", tag))
 
-	pluginClient := s.client.WithScope(pluginName)
+	pluginClient := s.client.WithSegment(pluginName)
 
 	// Get the plugin-contract label from image
 	contractJSON, exists, err := pluginClient.GetLabel(ctx, tag, "plugin-contract")
@@ -91,19 +91,25 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, dest
 
 	s.log.Debug("Destination directory created", slog.String("destination", destination))
 
-	pluginClient := s.client.WithScope(pluginName)
+	pluginClient := s.client.WithSegment(pluginName)
+
+	img, err := pluginClient.GetImage(ctx, tag)
+	if err != nil {
+		return fmt.Errorf("failed to get image: %w", err)
+	}
+
+	r, err := img.Extract()
+	if err != nil {
+		return fmt.Errorf("failed to extract image: %w", err)
+	}
+
+	err = s.extractTar(r, destination)
+	if err != nil {
+		return fmt.Errorf("failed to extract tar: %w", err)
+	}
 
 	// Extract image layers using handler pattern
-	return pluginClient.ExtractImageLayers(ctx, tag, func(stream pkg.LayerStream) error {
-		s.log.Info("Extracting layer", slog.Int("index", stream.GetIndex()), slog.Int("total", stream.GetTotal()))
-
-		// Extract the tar stream
-		if err := s.extractTar(stream.GetReader(), destination); err != nil {
-			return fmt.Errorf("failed to extract tar: %w", err)
-		}
-
-		return nil
-	})
+	return nil
 }
 
 // extractTar extracts a tar archive to the destination directory
@@ -242,7 +248,7 @@ func (s *PluginService) ListPluginTags(ctx context.Context, pluginName string) (
 	// Create a scoped client for this specific plugin
 	s.log.Debug("Listing plugin tags", slog.String("plugin", pluginName))
 
-	pluginClient := s.client.WithScope(pluginName)
+	pluginClient := s.client.WithSegment(pluginName)
 
 	tags, err := pluginClient.ListTags(ctx)
 	if err != nil {
