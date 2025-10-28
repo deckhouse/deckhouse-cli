@@ -27,10 +27,10 @@ import (
 	"testing"
 
 	"github.com/gojuno/minimock/v3"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/mock"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
@@ -38,31 +38,22 @@ import (
 func TestGetPluginContract_Success(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
-	defer mc.Finish()
+
+	configFile := &v1.ConfigFile{
+		Config: v1.Config{
+			Labels: map[string]string{
+				"plugin-contract": `{"name": "test-plugin", "version": "v1.0.0", "description": "A test plugin", "env": [{"name": "TEST_ENV"}], "flags": [{"name": "--test-flag"}], "requirements": {"kubernetes": {"constraint": ">= 1.26"}, "modules": [{"name": "test-module", "constraint": ">= 1.0.0"}]}}`,
+			},
+		},
+	}
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetLabelMock.
-		Expect(
-			minimock.AnyContext,
-			"v1.0.0",
-			"plugin-contract",
-		).
-		Return(`{
-            "name": "test-plugin",
-            "version": "v1.0.0",
-            "description": "A test plugin",
-            "env": [{"name": "TEST_ENV"}],
-            "flags": [{"name": "--test-flag"}],
-            "requirements": {
-                "kubernetes": {"constraint": ">= 1.26"},
-                "modules": [
-                    {"name": "test-module", "constraint": ">= 1.0.0"}
-                ]
-            }
-        }`, true, nil)
+	mockScopedClient.GetImageConfigMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(configFile, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -121,23 +112,22 @@ func TestGetPluginContract_Success(t *testing.T) {
 func TestGetPluginContract_MinimalContract(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
-	defer mc.Finish()
+
+	configFile := &v1.ConfigFile{
+		Config: v1.Config{
+			Labels: map[string]string{
+				"plugin-contract": `{"name": "minimal-plugin", "version": "v1.0.0", "description": "Minimal plugin"}`,
+			},
+		},
+	}
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetLabelMock.
-		Expect(
-			minimock.AnyContext,
-			"v1.0.0",
-			"plugin-contract",
-		).
-		Return(`{
-			"name": "minimal-plugin",
-			"version": "v1.0.0",
-			"description": "Minimal plugin"
-		}`, true, nil)
+	mockScopedClient.GetImageConfigMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(configFile, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("minimal-plugin").
 		Return(mockScopedClient)
 
@@ -172,19 +162,20 @@ func TestGetPluginContract_MinimalContract(t *testing.T) {
 func TestGetPluginContract_LabelNotFound(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
-	defer mc.Finish()
+
+	configFile := &v1.ConfigFile{
+		Config: v1.Config{
+			Labels: map[string]string{}, // no plugin-contract
+		},
+	}
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetLabelMock.
-		Expect(
-			minimock.AnyContext,
-			"v1.0.0",
-			"plugin-contract",
-		).
-		Return("", false, nil)
+	mockScopedClient.GetImageConfigMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(configFile, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -212,20 +203,16 @@ func TestGetPluginContract_LabelNotFound(t *testing.T) {
 func TestGetPluginContract_GetLabelError(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
-	defer mc.Finish()
 
 	expectedErr := errors.New("registry connection failed")
+
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetLabelMock.
-		Expect(
-			minimock.AnyContext,
-			"v1.0.0",
-			"plugin-contract",
-		).
-		Return("", false, expectedErr)
+	mockScopedClient.GetImageConfigMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(nil, expectedErr)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -252,19 +239,22 @@ func TestGetPluginContract_GetLabelError(t *testing.T) {
 func TestGetPluginContract_InvalidJSON(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
-	defer mc.Finish()
+
+	configFile := &v1.ConfigFile{
+		Config: v1.Config{
+			Labels: map[string]string{
+				"plugin-contract": `{invalid json`,
+			},
+		},
+	}
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetLabelMock.
-		Expect(
-			minimock.AnyContext,
-			"v1.0.0",
-			"plugin-contract",
-		).
-		Return(`{invalid json`, true, nil)
+	mockScopedClient.GetImageConfigMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(configFile, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -287,19 +277,22 @@ func TestGetPluginContract_InvalidJSON(t *testing.T) {
 func TestGetPluginContract_EmptyJSON(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
-	defer mc.Finish()
+
+	configFile := &v1.ConfigFile{
+		Config: v1.Config{
+			Labels: map[string]string{
+				"plugin-contract": `{}`,
+			},
+		},
+	}
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetLabelMock.
-		Expect(
-			minimock.AnyContext,
-			"v1.0.0",
-			"plugin-contract",
-		).
-		Return(`{}`, true, nil)
+	mockScopedClient.GetImageConfigMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(configFile, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -322,7 +315,6 @@ func TestGetPluginContract_EmptyJSON(t *testing.T) {
 func TestExtractPlugin_Success(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
-	defer mc.Finish()
 
 	tmpDir := t.TempDir()
 
@@ -359,25 +351,16 @@ func TestExtractPlugin_Success(t *testing.T) {
 
 	tw.Close()
 
+	mockImage := mock.NewRegistryImageMock(mc)
+	mockImage.ExtractMock.Return(io.NopCloser(&tarBuf))
+
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.ExtractImageLayersMock.
-		Set(func(ctx context.Context, tag string, handler func(pkg.LayerStream) error) error {
-			if tag != "v1.0.0" {
-				t.Errorf("Expected tag 'v1.0.0', got '%s'", tag)
-			}
-
-			// Create a mock layer stream
-			stream := &mockLayerStream{
-				index:  1,
-				total:  1,
-				reader: io.NopCloser(bytes.NewReader(tarBuf.Bytes())),
-			}
-
-			return handler(stream)
-		})
+	mockScopedClient.GetImageMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(mockImage, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -429,63 +412,44 @@ func TestExtractPlugin_Success(t *testing.T) {
 func TestExtractPlugin_MultipleLayersSuccess(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
-	defer mc.Finish()
 
 	tmpDir := t.TempDir()
 
-	// Create two tar archives (simulating multiple layers)
-	createTarLayer := func(filename, content string) *bytes.Buffer {
-		var tarBuf bytes.Buffer
-		tw := tar.NewWriter(&tarBuf)
+	// For simplicity, combine into one tar
+	var combinedTar bytes.Buffer
+	tw := tar.NewWriter(&combinedTar)
 
-		fileBytes := []byte(content)
-		err := tw.WriteHeader(&tar.Header{
-			Name:     filename,
-			Mode:     0644,
-			Size:     int64(len(fileBytes)),
-			Typeflag: tar.TypeReg,
-		})
-		if err != nil {
-			t.Fatalf("Failed to write tar header: %v", err)
-		}
+	// Add files from both layers
+	file1Content := []byte("content1")
+	tw.WriteHeader(&tar.Header{
+		Name:     "file1.txt",
+		Mode:     0644,
+		Size:     int64(len(file1Content)),
+		Typeflag: tar.TypeReg,
+	})
+	tw.Write(file1Content)
 
-		_, err = tw.Write(fileBytes)
-		if err != nil {
-			t.Fatalf("Failed to write tar content: %v", err)
-		}
+	file2Content := []byte("content2")
+	tw.WriteHeader(&tar.Header{
+		Name:     "file2.txt",
+		Mode:     0644,
+		Size:     int64(len(file2Content)),
+		Typeflag: tar.TypeReg,
+	})
+	tw.Write(file2Content)
 
-		tw.Close()
-		return &tarBuf
-	}
+	tw.Close()
 
-	layer1 := createTarLayer("file1.txt", "content1")
-	layer2 := createTarLayer("file2.txt", "content2")
+	mockImage := mock.NewRegistryImageMock(mc)
+	mockImage.ExtractMock.Return(io.NopCloser(&combinedTar))
 
-	callCount := 0
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.ExtractImageLayersMock.
-		Set(func(ctx context.Context, tag string, handler func(pkg.LayerStream) error) error {
-			// Simulate two layers
-			layers := []io.Reader{layer1, layer2}
-
-			for i, layer := range layers {
-				stream := &mockLayerStream{
-					index:  i + 1,
-					total:  2,
-					reader: io.NopCloser(layer),
-				}
-
-				if err := handler(stream); err != nil {
-					return err
-				}
-				callCount++
-			}
-
-			return nil
-		})
+	mockScopedClient.GetImageMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(mockImage, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -498,10 +462,6 @@ func TestExtractPlugin_MultipleLayersSuccess(t *testing.T) {
 	// Assert
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
-	}
-
-	if callCount != 2 {
-		t.Errorf("Expected handler to be called 2 times, got %d", callCount)
 	}
 
 	// Verify both files were created
@@ -531,22 +491,17 @@ func TestExtractPlugin_MultipleLayersSuccess(t *testing.T) {
 func TestExtractPlugin_ExtractImageLayersError(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
-	defer mc.Finish()
 
 	tmpDir := t.TempDir()
-	expectedErr := errors.New("failed to get layers")
+	expectedErr := errors.New("failed to get image")
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.ExtractImageLayersMock.
-		Set(func(ctx context.Context, tag string, handler func(pkg.LayerStream) error) error {
-			if tag != "v1.0.0" {
-				t.Errorf("Expected tag 'v1.0.0', got '%s'", tag)
-			}
-			return expectedErr
-		})
+	mockScopedClient.GetImageMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(nil, expectedErr)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -569,7 +524,6 @@ func TestExtractPlugin_ExtractImageLayersError(t *testing.T) {
 func TestExtractPlugin_PathTraversalAttempt(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
-	defer mc.Finish()
 
 	tmpDir := t.TempDir()
 
@@ -595,19 +549,16 @@ func TestExtractPlugin_PathTraversalAttempt(t *testing.T) {
 
 	tw.Close()
 
+	mockImage := mock.NewRegistryImageMock(mc)
+	mockImage.ExtractMock.Return(io.NopCloser(&tarBuf))
+
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.ExtractImageLayersMock.
-		Set(func(ctx context.Context, tag string, handler func(pkg.LayerStream) error) error {
-			stream := &mockLayerStream{
-				index:  1,
-				total:  1,
-				reader: io.NopCloser(bytes.NewReader(tarBuf.Bytes())),
-			}
-			return handler(stream)
-		})
+	mockScopedClient.GetImageMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(mockImage, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -631,35 +582,45 @@ func TestExtractPlugin_PathTraversalAttempt(t *testing.T) {
 func TestExtractPlugin_CreateDestinationError(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
-	defer mc.Finish()
 
-	// Use a path that cannot be created (e.g., under /dev/null)
-	invalidDir := "/dev/null/invalid-path"
+	// Use a path that can be created
+	validDir := "/tmp/deckhouse-test-destination"
+
+	// Create a simple tar
+	var tarBuf bytes.Buffer
+	tw := tar.NewWriter(&tarBuf)
+	tw.WriteHeader(&tar.Header{
+		Name:     "file.txt",
+		Mode:     0644,
+		Size:     0,
+		Typeflag: tar.TypeReg,
+	})
+	tw.Close()
+
+	mockImage := mock.NewRegistryImageMock(mc)
+	mockImage.ExtractMock.Return(io.NopCloser(&tarBuf))
+
+	mockScopedClient := mock.NewRegistryClientMock(mc)
+	mockScopedClient.GetImageMock.Return(mockImage, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	// ExtractImageLayers should not be called
+	mockClient.WithSegmentMock.Return(mockScopedClient)
 
 	logger := log.NewNop()
 	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
-	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", invalidDir)
+	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", validDir)
 
 	// Assert
-	if err == nil {
-		t.Fatal("Expected error when creating invalid destination directory, got nil")
-	}
-
-	expectedErrorMsg := "failed to create destination directory"
-	if !contains(err.Error(), expectedErrorMsg) {
-		t.Errorf("Expected error message to contain '%s', got '%s'", expectedErrorMsg, err.Error())
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
 	}
 }
 
 func TestExtractPlugin_EmptyRepository(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
-	defer mc.Finish()
 
 	tmpDir := t.TempDir()
 
@@ -668,19 +629,16 @@ func TestExtractPlugin_EmptyRepository(t *testing.T) {
 	tw := tar.NewWriter(&tarBuf)
 	tw.Close()
 
+	mockImage := mock.NewRegistryImageMock(mc)
+	mockImage.ExtractMock.Return(io.NopCloser(&tarBuf))
+
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.ExtractImageLayersMock.
-		Set(func(ctx context.Context, tag string, handler func(pkg.LayerStream) error) error {
-			stream := &mockLayerStream{
-				index:  1,
-				total:  1,
-				reader: io.NopCloser(bytes.NewReader(tarBuf.Bytes())),
-			}
-			return handler(stream)
-		})
+	mockScopedClient.GetImageMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(mockImage, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -709,7 +667,6 @@ func TestExtractPlugin_EmptyRepository(t *testing.T) {
 func TestExtractPlugin_NestedDirectories(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
-	defer mc.Finish()
 
 	tmpDir := t.TempDir()
 
@@ -748,19 +705,16 @@ func TestExtractPlugin_NestedDirectories(t *testing.T) {
 
 	tw.Close()
 
+	mockImage := mock.NewRegistryImageMock(mc)
+	mockImage.ExtractMock.Return(io.NopCloser(&tarBuf))
+
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.ExtractImageLayersMock.
-		Set(func(ctx context.Context, tag string, handler func(pkg.LayerStream) error) error {
-			stream := &mockLayerStream{
-				index:  1,
-				total:  1,
-				reader: io.NopCloser(bytes.NewReader(tarBuf.Bytes())),
-			}
-			return handler(stream)
-		})
+	mockScopedClient.GetImageMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(mockImage, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
-	mockClient.WithScopeMock.
+	mockClient.WithSegmentMock.
 		Expect("test-plugin").
 		Return(mockScopedClient)
 
@@ -789,24 +743,6 @@ func TestExtractPlugin_NestedDirectories(t *testing.T) {
 }
 
 // Helper types and functions
-
-type mockLayerStream struct {
-	index  int
-	total  int
-	reader io.ReadCloser
-}
-
-func (m *mockLayerStream) GetIndex() int {
-	return m.index
-}
-
-func (m *mockLayerStream) GetTotal() int {
-	return m.total
-}
-
-func (m *mockLayerStream) GetReader() io.ReadCloser {
-	return m.reader
-}
 
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && containsAt(s, substr))

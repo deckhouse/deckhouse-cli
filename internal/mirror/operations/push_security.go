@@ -26,12 +26,13 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
-func PushSecurityDatabases(pushParams *params.PushParams, pkg io.Reader) error {
+func PushSecurityDatabases(pushParams *params.PushParams, pkg io.Reader, client pkg.RegistryClient) error {
 	packageDir := filepath.Join(pushParams.WorkingDir, "security")
 	if err := os.MkdirAll(packageDir, 0755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
@@ -60,6 +61,7 @@ func PushSecurityDatabases(pushParams *params.PushParams, pkg io.Reader) error {
 		pushParams.Logger.InfoLn("Pushing", repoRef)
 		if err := layouts.PushLayoutToRepoContext(
 			context.Background(),
+			client.WithSegment("security").WithSegment(layoutPathSuffix),
 			layout.Path(filepath.Join(packageDir, layoutPathSuffix)),
 			repoRef,
 			pushParams.RegistryAuth,

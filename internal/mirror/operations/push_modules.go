@@ -24,18 +24,17 @@ import (
 	"path"
 	"path/filepath"
 
-	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/random"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
-func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader) error {
+func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader, client pkg.RegistryClient) error {
 	packageDir := filepath.Join(pushParams.WorkingDir, "modules", moduleName)
 	if err := os.MkdirAll(packageDir, 0755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
@@ -63,6 +62,7 @@ func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader)
 		pushParams.Logger.InfoLn("Pushing", repoRef)
 		if err := layouts.PushLayoutToRepoContext(
 			context.Background(),
+			client.WithSegment(moduleName).WithSegment(layoutPathSuffix),
 			layout.Path(filepath.Join(packageDir, layoutPathSuffix)),
 			repoRef,
 			pushParams.RegistryAuth,
@@ -76,19 +76,13 @@ func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader)
 	}
 
 	pushParams.Logger.InfoF("Pushing module tag for %s", moduleName)
-	refOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&pushParams.BaseParams)
-	modulesRepo := path.Join(pushParams.RegistryHost, pushParams.RegistryPath, pushParams.ModulesPathSuffix)
-	imageRef, err := name.ParseReference(modulesRepo+":"+moduleName, refOpts...)
-	if err != nil {
-		return fmt.Errorf("Parse image reference: %w", err)
-	}
 
 	img, err := random.Image(32, 1)
 	if err != nil {
 		return fmt.Errorf("random.Image: %w", err)
 	}
 
-	if err = remote.Write(imageRef, img, remoteOpts...); err != nil {
+	if err = client.PushImage(context.Background(), moduleName, registry.NewImage(img)); err != nil {
 		return fmt.Errorf("Write module index tag: %w", err)
 	}
 

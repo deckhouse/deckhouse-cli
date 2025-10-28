@@ -32,14 +32,17 @@ import (
 	"github.com/samber/lo"
 	"github.com/samber/lo/parallel"
 
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 func PushLayoutToRepo(
+	client pkg.RegistryClient,
 	imagesLayout layout.Path,
 	registryRepo string,
 	authProvider authn.Authenticator,
@@ -49,6 +52,7 @@ func PushLayoutToRepo(
 ) error {
 	return PushLayoutToRepoContext(
 		context.Background(),
+		client,
 		imagesLayout,
 		registryRepo,
 		authProvider,
@@ -76,6 +80,7 @@ func buildExtraImageRef(registryRepo, tag string) string {
 
 func PushLayoutToRepoContext(
 	ctx context.Context,
+	client pkg.RegistryClient,
 	imagesLayout layout.Path,
 	registryRepo string,
 	authProvider authn.Authenticator,
@@ -92,6 +97,7 @@ func PushLayoutToRepoContext(
 	if err != nil {
 		return fmt.Errorf("Read OCI Image Index: %w", err)
 	}
+
 	indexManifest, err := index.IndexManifest()
 	if err != nil {
 		return fmt.Errorf("Parse OCI Image Index Manifest: %w", err)
@@ -109,7 +115,7 @@ func PushLayoutToRepoContext(
 			tag := manifestSet[0].Annotations["io.deckhouse.image.short_tag"]
 			imageRef := buildExtraImageRef(registryRepo, tag)
 			logger.InfoF("[%d / %d] Pushing image %s", imagesCount, len(indexManifest.Manifests), imageRef)
-			if err = pushImage(ctx, registryRepo, index, manifestSet[0], refOpts, remoteOpts); err != nil {
+			if err = pushImage(ctx, client, registryRepo, index, manifestSet[0], refOpts, remoteOpts, logger); err != nil {
 				return fmt.Errorf("Push Image: %w", err)
 			}
 			imagesCount += 1
@@ -126,7 +132,7 @@ func PushLayoutToRepoContext(
 			errMu := &sync.Mutex{}
 			merr := &multierror.Error{}
 			parallel.ForEach(manifestSet, func(item v1.Descriptor, i int) {
-				if err = pushImage(ctx, registryRepo, index, item, refOpts, remoteOpts); err != nil {
+				if err = pushImage(ctx, client, registryRepo, index, item, refOpts, remoteOpts, logger); err != nil {
 					errMu.Lock()
 					defer errMu.Unlock()
 					merr = multierror.Append(merr, err)
@@ -147,11 +153,13 @@ func PushLayoutToRepoContext(
 
 func pushImage(
 	ctx context.Context,
+	client pkg.RegistryClient,
 	registryRepo string,
 	index v1.ImageIndex,
 	manifest v1.Descriptor,
 	refOpts []name.Option,
 	remoteOpts []remote.Option,
+	logger params.Logger,
 ) error {
 	tag := manifest.Annotations["io.deckhouse.image.short_tag"]
 	imageRef := buildExtraImageRef(registryRepo, tag)
@@ -167,7 +175,7 @@ func pushImage(
 	err = retry.RunTaskWithContext(
 		ctx, silentLogger{}, "push",
 		task.WithConstantRetries(4, 3*time.Second, func(ctx context.Context) error {
-			if err = remote.Write(ref, img, append(remoteOpts, remote.WithContext(ctx))...); err != nil {
+			if err = client.PushImage(ctx, tag, registry.NewImage(img)); err != nil {
 				if errorutil.IsTrivyMediaTypeNotAllowedError(err) {
 					return fmt.Errorf(errorutil.CustomTrivyMediaTypesWarning)
 				}

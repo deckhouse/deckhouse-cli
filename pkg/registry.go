@@ -23,64 +23,47 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
+type RegistryImage interface {
+	v1.Image
+	Extract() io.ReadCloser
+}
+
 // RegistryClient defines the contract for interacting with container registries
 type RegistryClient interface {
-	// WithScope creates a new client with an additional scope path segment
+	// WithSegment creates a new client with an additional scope path segment
 	// This method can be chained to build complex paths
-	WithScope(scope string) RegistryClient
+	WithSegment(segments ...string) RegistryClient
 
 	// GetRegistry returns the full registry path (host + scope)
 	GetRegistry() string
 
 	// GetDigest retrieves the digest for a specific image tag
-	// The repository is determined by the chained WithScope() calls
+	// The repository is determined by the chained WithSegment() calls
 	GetDigest(ctx context.Context, tag string) (*v1.Hash, error)
 
 	// GetManifest retrieves the manifest for a specific image tag
-	// The repository is determined by the chained WithScope() calls
+	// The repository is determined by the chained WithSegment() calls
 	GetManifest(ctx context.Context, tag string) ([]byte, error)
 
 	// GetImage retrieves an remote image for a specific reference
 	// Do not return remote image to avoid drop connection with context cancelation.
 	// It will be in use while passed context will be alive.
-	// The repository is determined by the chained WithScope() calls
-	GetImage(ctx context.Context, tag string) (v1.Image, error)
+	// The repository is determined by the chained WithSegment() calls
+	GetImage(ctx context.Context, tag string) (RegistryImage, error)
 
 	// GetImageConfig retrieves the image config file containing labels and metadata
-	// The repository is determined by the chained WithScope() calls
+	// The repository is determined by the chained WithSegment() calls
 	GetImageConfig(ctx context.Context, tag string) (*v1.ConfigFile, error)
 
-	// GetImageLayers retrieves all layers of an image
-	// The repository is determined by the chained WithScope() calls
-	GetImageLayers(ctx context.Context, tag string) ([]v1.Layer, error)
-
-	// GetLabel retrieves a specific label from image metadata
-	// The repository is determined by the chained WithScope() calls
-	GetLabel(ctx context.Context, tag, labelKey string) (string, bool, error)
-
-	// ExtractImageLayers retrieves uncompressed layer streams for extraction
-	// The repository is determined by the chained WithScope() calls
-	ExtractImageLayers(ctx context.Context, tag string, handler func(LayerStream) error) error
-
 	// ListTags retrieves all available tags for the current scope
-	// The repository is determined by the chained WithScope() calls
+	// The repository is determined by the chained WithSegment() calls
 	ListTags(ctx context.Context) ([]string, error)
 
 	// ListRepositories retrieves all sub-repositories under the current scope
-	// The scope is determined by the chained WithScope() calls
+	// The scope is determined by the chained WithSegment() calls
 	ListRepositories(ctx context.Context) ([]string, error)
 
 	// PushImage pushes an image to the registry at the specified tag
-	// The repository is determined by the chained WithScope() calls
-	PushImage(ctx context.Context, tag string, img v1.Image) error
-}
-
-// LayerStream provides access to a single layer stream for extraction
-type LayerStream interface {
-	// GetIndex returns the current layer index (1-based)
-	GetIndex() int
-	// GetTotal returns the total number of layers
-	GetTotal() int
-	// GetReader returns the reader for the layer content
-	GetReader() io.ReadCloser
+	// The repository is determined by the chained WithSegment() calls
+	PushImage(ctx context.Context, tag string, img RegistryImage) error
 }

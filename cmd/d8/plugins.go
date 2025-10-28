@@ -74,11 +74,11 @@ func (r *RootCommand) initPluginServices() {
 		Logger:        r.logger.Named("registry-client"),
 	})
 
-	// Build scoped client using chained WithScope calls
+	// Build scoped client using chained WithSegment calls
 	// Example: registry.deckhouse.io -> deckhouse -> ee -> modules
 	r.pluginRegistryClient = baseClient.
-		WithScope("deckhouse").
-		WithScope("ee")
+		WithSegment("deckhouse").
+		WithSegment("ee")
 
 	r.logger.Debug("Creating plugin service with scoped client",
 		slog.String("scope_path", "deckhouse/ee/modules"))

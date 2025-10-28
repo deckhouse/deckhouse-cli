@@ -48,7 +48,7 @@ func (s *DeckhouseService) ListReleases(ctx context.Context) ([]string, error) {
 	s.logger.Debug("Listing Deckhouse releases")
 
 	// Assume releases are under a specific path, e.g., scoped to "releases"
-	releaseClient := s.client.WithScope("releases")
+	releaseClient := s.client.WithSegment("releases")
 
 	releaseNames, err := releaseClient.ListTags(ctx)
 	if err != nil {
@@ -65,19 +65,20 @@ func (s *DeckhouseService) ListReleases(ctx context.Context) ([]string, error) {
 func (s *DeckhouseService) GetReleaseInfo(ctx context.Context, releaseTag string) (interface{}, error) {
 	s.logger.Debug("Getting release info", "release", releaseTag)
 
-	releaseClient := s.client.WithScope("releases")
+	releaseClient := s.client.WithSegment("releases")
+
+	imageConfig, err := releaseClient.GetImageConfig(ctx, releaseTag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get image config: %w", err)
+	}
 
 	// Get some label, e.g., version info
-	info, exists, err := releaseClient.GetLabel(ctx, releaseTag, "version")
-	if err != nil {
-		return nil, fmt.Errorf("failed to get release info: %w", err)
-	}
-
+	version, exists := imageConfig.Config.Labels["version"]
 	if !exists {
-		return nil, fmt.Errorf("release info not found")
+		return nil, fmt.Errorf("version info not found")
 	}
 
-	return info, nil
+	return version, nil
 }
 
 // ExtractRelease downloads the Deckhouse release image and extracts it to the specified location
@@ -88,11 +89,18 @@ func (s *DeckhouseService) ExtractRelease(ctx context.Context, releaseTag, desti
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	releaseClient := s.client.WithScope("releases")
+	releaseClient := s.client.WithSegment("releases")
+	img, err := releaseClient.GetImage(ctx, releaseTag)
+	if err != nil {
+		return fmt.Errorf("failed to get image: %w", err)
+	}
 
-	return releaseClient.ExtractImageLayers(ctx, releaseTag, func(stream pkg.LayerStream) error {
-		return s.extractTar(stream.GetReader(), destination)
-	})
+	err = s.extractTar(img.Extract(), destination)
+	if err != nil {
+		return fmt.Errorf("failed to extract tar: %w", err)
+	}
+
+	return nil
 }
 
 // extractTar extracts a tar archive to the destination directory
@@ -134,7 +142,7 @@ func (s *DeckhouseService) extractTar(r io.Reader, destination string) error {
 func (s *DeckhouseService) ListReleaseTags(ctx context.Context) ([]string, error) {
 	s.logger.Debug("Listing release tags")
 
-	releaseClient := s.client.WithScope("releases")
+	releaseClient := s.client.WithSegment("releases")
 
 	tags, err := releaseClient.ListTags(ctx)
 	if err != nil {

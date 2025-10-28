@@ -62,19 +62,19 @@ func (s *ModuleService) ListModules(ctx context.Context) ([]string, error) {
 func (s *ModuleService) GetModuleInfo(ctx context.Context, moduleName, tag string) (interface{}, error) {
 	s.logger.Debug("Getting module info", "module", moduleName, "tag", tag)
 
-	moduleClient := s.client.WithScope(moduleName)
+	moduleClient := s.client.WithSegment(moduleName)
 
-	// Get some label, e.g., disable.message
-	info, exists, err := moduleClient.GetLabel(ctx, tag, "disable.message")
+	imageConfig, err := moduleClient.GetImageConfig(ctx, tag)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get module info: %w", err)
+		return nil, fmt.Errorf("failed to get image config: %w", err)
 	}
 
+	disableMessage, exists := imageConfig.Config.Labels["disable.message"]
 	if !exists {
 		return nil, fmt.Errorf("module info not found")
 	}
 
-	return info, nil
+	return disableMessage, nil
 }
 
 // ExtractModule downloads the module image and extracts it to the specified location
@@ -85,11 +85,19 @@ func (s *ModuleService) ExtractModule(ctx context.Context, moduleName, tag, dest
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	moduleClient := s.client.WithScope(moduleName)
+	moduleClient := s.client.WithSegment(moduleName)
 
-	return moduleClient.ExtractImageLayers(ctx, tag, func(stream pkg.LayerStream) error {
-		return s.extractTar(stream.GetReader(), destination)
-	})
+	img, err := moduleClient.GetImage(ctx, tag)
+	if err != nil {
+		return fmt.Errorf("failed to get image: %w", err)
+	}
+
+	err = s.extractTar(img.Extract(), destination)
+	if err != nil {
+		return fmt.Errorf("failed to extract tar: %w", err)
+	}
+
+	return nil
 }
 
 // extractTar extracts a tar archive to the destination directory
@@ -131,7 +139,7 @@ func (s *ModuleService) extractTar(r io.Reader, destination string) error {
 func (s *ModuleService) ListModuleTags(ctx context.Context, moduleName string) ([]string, error) {
 	s.logger.Debug("Listing module tags", "module", moduleName)
 
-	moduleClient := s.client.WithScope(moduleName)
+	moduleClient := s.client.WithSegment(moduleName)
 
 	tags, err := moduleClient.ListTags(ctx)
 	if err != nil {

@@ -106,7 +106,7 @@ func createInvalidPlatformPackage(t testing.TB) io.Reader {
 }
 
 func TestPushDeckhousePlatform_MkdirError(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 
 	// Set WorkingDir to a file path to cause mkdir error
 	tempDir := t.TempDir()
@@ -116,7 +116,7 @@ func TestPushDeckhousePlatform_MkdirError(t *testing.T) {
 
 	pkg := createValidPlatformPackage(t)
 
-	err := PushDeckhousePlatform(pushParams, pkg)
+	err := PushDeckhousePlatform(pushParams, pkg, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "mkdir")
 }
@@ -124,20 +124,20 @@ func TestPushDeckhousePlatform_MkdirError(t *testing.T) {
 func TestPushDeckhousePlatform_UnpackError(t *testing.T) {
 	t.Skip("Skipping due to bug in bundle.Unpack - it doesn't handle tar reader errors properly")
 
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 
 	// Create a reader that returns an error
 	errReader := &errorReader{err: errors.New("read error")}
-	err := PushDeckhousePlatform(pushParams, errReader)
+	err := PushDeckhousePlatform(pushParams, errReader, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Unpack package")
 }
 
 func TestPushDeckhousePlatform_ValidationError(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	pkg := createInvalidPlatformPackage(t)
 
-	err := PushDeckhousePlatform(pushParams, pkg)
+	err := PushDeckhousePlatform(pushParams, pkg, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Invalid platform package")
 }
@@ -145,18 +145,20 @@ func TestPushDeckhousePlatform_ValidationError(t *testing.T) {
 func TestPushDeckhousePlatform_NilReader(t *testing.T) {
 	t.Skip("Skipping due to nil pointer issues with tar reader")
 
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 
-	err := PushDeckhousePlatform(pushParams, nil)
+	err := PushDeckhousePlatform(pushParams, nil, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Unpack package")
 }
 
 func TestPushDeckhousePlatform_LayoutPaths(t *testing.T) {
-	pushParams, logger := setupTestPushParams(t)
+	pushParams, logger, client := setupTestPushParams(t)
 	pkg := createValidPlatformPackage(t)
 
-	err := PushDeckhousePlatform(pushParams, pkg)
+	client.WithSegmentMock.Return(client)
+
+	err := PushDeckhousePlatform(pushParams, pkg, client)
 
 	// Even if it fails due to registry, we can check that the correct paths were logged
 	if err == nil || err != nil {
@@ -182,10 +184,12 @@ func TestPushDeckhousePlatform_LayoutPaths(t *testing.T) {
 }
 
 func TestPushDeckhousePlatform_LoggerCalls(t *testing.T) {
-	pushParams, logger := setupTestPushParams(t)
+	pushParams, logger, client := setupTestPushParams(t)
 	pkg := createValidPlatformPackage(t)
 
-	_ = PushDeckhousePlatform(pushParams, pkg)
+	client.WithSegmentMock.Return(client)
+
+	_ = PushDeckhousePlatform(pushParams, pkg, client)
 
 	// Check that unpacking and validation logging occurred
 	hasUnpackLog := false
@@ -203,13 +207,15 @@ func TestPushDeckhousePlatform_LoggerCalls(t *testing.T) {
 }
 
 func TestPushDeckhousePlatform_WorkingDirectoryCleanup(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	pkg := createValidPlatformPackage(t)
+
+	client.WithSegmentMock.Return(client)
 
 	// Track if cleanup occurred by checking directory existence
 	packageDir := filepath.Join(pushParams.WorkingDir, "platform")
 
-	err := PushDeckhousePlatform(pushParams, pkg)
+	err := PushDeckhousePlatform(pushParams, pkg, client)
 
 	// Even after success, the directory should be cleaned up
 	_, statErr := os.Stat(packageDir)
@@ -220,7 +226,7 @@ func TestPushDeckhousePlatform_WorkingDirectoryCleanup(t *testing.T) {
 }
 
 func TestPushDeckhousePlatform_RegistryAuth(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{
 		Username: "testuser",
 		Password: "testpass",
@@ -228,25 +234,29 @@ func TestPushDeckhousePlatform_RegistryAuth(t *testing.T) {
 
 	pkg := createValidPlatformPackage(t)
 
-	err := PushDeckhousePlatform(pushParams, pkg)
+	client.WithSegmentMock.Return(client)
+
+	err := PushDeckhousePlatform(pushParams, pkg, client)
 	// For empty layouts, should succeed (auth is configured but not used)
 	require.NoError(t, err)
 }
 
 func TestPushDeckhousePlatform_InsecureAndTLSSkip(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	pushParams.Insecure = true
 	pushParams.SkipTLSVerification = true
 
 	pkg := createValidPlatformPackage(t)
 
-	err := PushDeckhousePlatform(pushParams, pkg)
+	client.WithSegmentMock.Return(client)
+
+	err := PushDeckhousePlatform(pushParams, pkg, client)
 	// For empty layouts, should succeed (insecure settings are configured but not used)
 	require.NoError(t, err)
 }
 
 func TestPushDeckhousePlatform_ParallelismConfig(t *testing.T) {
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	pushParams.Parallelism = params.ParallelismConfig{
 		Blobs:  2,
 		Images: 2,
@@ -254,34 +264,40 @@ func TestPushDeckhousePlatform_ParallelismConfig(t *testing.T) {
 
 	pkg := createValidPlatformPackage(t)
 
-	err := PushDeckhousePlatform(pushParams, pkg)
+	client.WithSegmentMock.Return(client)
+
+	err := PushDeckhousePlatform(pushParams, pkg, client)
 	// For empty layouts, should succeed (parallelism is configured but not used)
 	require.NoError(t, err)
 }
 
 // Benchmark tests
 func BenchmarkPushDeckhousePlatform(b *testing.B) {
-	pushParams, _ := setupTestPushParams(b)
+	pushParams, _, client := setupTestPushParams(b)
 	pkg := createValidPlatformPackage(b)
+
+	client.WithSegmentMock.Return(client)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = PushDeckhousePlatform(pushParams, pkg)
+		_ = PushDeckhousePlatform(pushParams, pkg, client)
 	}
 }
 
 // Test coverage helpers - these functions help ensure we hit all code paths
 func TestPushDeckhousePlatform_CodeCoverage_LayoutsToPush(t *testing.T) {
 	// This test ensures we cover the layoutsToPush slice creation
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	pkg := createValidPlatformPackage(t)
+
+	client.WithSegmentMock.Return(client)
 
 	// The layoutsToPush slice should be created with correct paths
 	expectedLayouts := []string{"", "install", "install-standalone", "release-channel"}
 
 	// We can't directly test the slice, but we can verify the function runs
 	// and check that the expected repos are constructed correctly
-	err := PushDeckhousePlatform(pushParams, pkg)
+	err := PushDeckhousePlatform(pushParams, pkg, client)
 
 	// Verify that logs contain the expected repo constructions
 	for _, layoutName := range expectedLayouts {
@@ -306,13 +322,15 @@ func TestPushDeckhousePlatform_CodeCoverage_LayoutsToPush(t *testing.T) {
 
 func TestPushDeckhousePlatform_CodeCoverage_AuthOptions(t *testing.T) {
 	// Test that auth options are constructed correctly
-	pushParams, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	pushParams.RegistryAuth = authn.Anonymous
 	pushParams.Insecure = true
 	pushParams.SkipTLSVerification = true
 
 	pkg := createValidPlatformPackage(t)
 
-	err := PushDeckhousePlatform(pushParams, pkg)
+	client.WithSegmentMock.Return(client)
+
+	err := PushDeckhousePlatform(pushParams, pkg, client)
 	require.NoError(t, err) // Will succeed for empty layouts
 }

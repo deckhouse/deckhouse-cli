@@ -40,8 +40,8 @@ func NewService(client pkg.RegistryClient, logger *log.Logger) *Service {
 		logger: logger,
 	}
 
-	s.moduleService = NewModuleService(client.WithScope("modules"), logger.Named("modules"))
-	s.pluginService = NewPluginService(client.WithScope("modules"), logger.Named("plugins"))
+	s.moduleService = NewModuleService(client.WithSegment("modules"), logger.Named("modules"))
+	s.pluginService = NewPluginService(client.WithSegment("modules"), logger.Named("plugins"))
 	s.deckhouseService = NewDeckhouseService(client, logger.Named("deckhouse"))
 
 	return s
