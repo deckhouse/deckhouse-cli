@@ -35,10 +35,12 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 )
 
 // CLI Parameters
@@ -104,29 +106,7 @@ func NewCommand() *cobra.Command {
 	return pushCmd
 }
 
-func pushModules(pushParams *params.PushParams, logger params.Logger) error {
-	// Create registry client for module operations
-	clientOpts := &registry.ClientOptions{
-		Insecure:      pushParams.Insecure,
-		TLSSkipVerify: pushParams.SkipTLSVerification,
-		Logger:        nil, // Will use default logger
-	}
-
-	if pushParams.RegistryAuth != nil {
-		clientOpts.Auth = pushParams.RegistryAuth
-	}
-
-	client := registry.NewClientWithOptions(pushParams.RegistryHost, clientOpts)
-
-	// Scope to the registry path and modules suffix
-	if pushParams.RegistryPath != "" {
-		client = client.WithScope(pushParams.RegistryPath).(*registry.Client)
-	}
-
-	if pushParams.ModulesPathSuffix != "" {
-		client = client.WithScope(pushParams.ModulesPathSuffix).(*registry.Client)
-	}
-
+func pushModules(pushParams *params.PushParams, logger params.Logger, client pkg.RegistryClient) error {
 	bundleContents, err := os.ReadDir(pushParams.BundleDir)
 	if err != nil {
 		return fmt.Errorf("List bundle directory: %w", err)
@@ -177,7 +157,7 @@ func pushModules(pushParams *params.PushParams, logger params.Logger) error {
 	return nil
 }
 
-func pushStaticPackages(pushParams *params.PushParams, logger params.Logger) error {
+func pushStaticPackages(pushParams *params.PushParams, logger params.Logger, client pkg.RegistryClient) error {
 	packages := []string{"platform", "security"}
 	for _, pkgName := range packages {
 		pkg, err := openPackage(pushParams, pkgName)
@@ -192,13 +172,13 @@ func pushStaticPackages(pushParams *params.PushParams, logger params.Logger) err
 		switch pkgName {
 		case "platform":
 			if err = logger.Process("Push Deckhouse platform", func() error {
-				return operations.PushDeckhousePlatform(pushParams, pkg)
+				return operations.PushDeckhousePlatform(pushParams, pkg, client)
 			}); err != nil {
 				return fmt.Errorf("Push Deckhouse Platform: %w", err)
 			}
 		case "security":
 			if err = logger.Process("Push security databases", func() error {
-				return operations.PushSecurityDatabases(pushParams, pkg)
+				return operations.PushSecurityDatabases(pushParams, pkg, client)
 			}); err != nil {
 				return fmt.Errorf("Push Security Databases: %w", err)
 			}
@@ -333,10 +313,50 @@ func (p *Pusher) validateRegistryAccess() error {
 
 // pushStaticPackages pushes platform and security packages
 func (p *Pusher) pushStaticPackages() error {
-	return pushStaticPackages(p.pushParams, p.logger)
+	// Create registry client for module operations
+	clientOpts := &registry.ClientOptions{
+		Insecure:      p.pushParams.Insecure,
+		TLSSkipVerify: p.pushParams.SkipTLSVerification,
+		Logger:        dkplog.NewNop(), // Will use default logger
+	}
+
+	if p.pushParams.RegistryAuth != nil {
+		clientOpts.Auth = p.pushParams.RegistryAuth
+	}
+
+	client := registry.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
+
+	// Scope to the registry path and modules suffix
+	if p.pushParams.RegistryPath != "" {
+		client = client.WithScope(p.pushParams.RegistryPath).(*registry.Client)
+	}
+
+	return pushStaticPackages(p.pushParams, p.logger, client)
 }
 
 // pushModules pushes module packages
 func (p *Pusher) pushModules() error {
-	return pushModules(p.pushParams, p.logger)
+	// Create registry client for module operations
+	clientOpts := &registry.ClientOptions{
+		Insecure:      p.pushParams.Insecure,
+		TLSSkipVerify: p.pushParams.SkipTLSVerification,
+		Logger:        dkplog.NewNop(), // Will use default logger
+	}
+
+	if p.pushParams.RegistryAuth != nil {
+		clientOpts.Auth = p.pushParams.RegistryAuth
+	}
+
+	client := registry.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
+
+	// Scope to the registry path and modules suffix
+	if p.pushParams.RegistryPath != "" {
+		client = client.WithScope(p.pushParams.RegistryPath).(*registry.Client)
+	}
+
+	if p.pushParams.ModulesPathSuffix != "" {
+		client = client.WithScope(p.pushParams.ModulesPathSuffix).(*registry.Client)
+	}
+
+	return pushModules(p.pushParams, p.logger, client)
 }

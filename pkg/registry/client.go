@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -32,8 +34,9 @@ import (
 
 // Client provides methods to interact with container registries
 type Client struct {
-	registryHost string // e.g., "registry.deckhouse.io"
-	scopePath    string // e.g., "deckhouse/ee/modules" (built from chained WithScope calls)
+	registryHost string   // e.g., "registry.deckhouse.io"
+	scopes       []string // e.g., [deckhouse,ee,modules] (built from chained WithScope calls)
+	scopePath    string   // e.g., "deckhouse/ee/modules" (built from chained WithScope calls)
 	options      []remote.Option
 	log          *log.Logger
 }
@@ -58,6 +61,8 @@ func NewClientWithOptions(registry string, opts *ClientOptions) *Client {
 			slog.String("registry", registry))
 	}
 
+	registry = strings.TrimSuffix(registry, "/")
+
 	return &Client{
 		registryHost: registry,
 		scopePath:    "",
@@ -70,14 +75,16 @@ func NewClientWithOptions(registry string, opts *ClientOptions) *Client {
 // This method can be chained to build complex paths:
 // client.WithScope("deckhouse").WithScope("ee").WithScope("modules")
 func (c *Client) WithScope(scope string) pkg.RegistryClient {
-	newScopePath := scope
-	if c.scopePath != "" {
-		newScopePath = fmt.Sprintf("%s/%s", c.scopePath, scope)
+	scope = strings.TrimPrefix(scope, "/")
+	scope = strings.TrimSuffix(scope, "/")
+
+	if scope == "" {
+		return c
 	}
 
 	return &Client{
 		registryHost: c.registryHost,
-		scopePath:    newScopePath,
+		scopes:       append(c.scopes, scope),
 		options:      c.options,
 		log:          c.log,
 	}
@@ -85,11 +92,11 @@ func (c *Client) WithScope(scope string) pkg.RegistryClient {
 
 // GetRegistry returns the full registry path (host + scope)
 func (c *Client) GetRegistry() string {
-	if c.scopePath == "" {
+	if len(c.scopes) == 0 {
 		return c.registryHost
 	}
 
-	return fmt.Sprintf("%s/%s", c.registryHost, c.scopePath)
+	return filepath.Join(c.registryHost, filepath.Join(c.scopes...))
 }
 
 // The repository is determined by the chained WithScope() calls

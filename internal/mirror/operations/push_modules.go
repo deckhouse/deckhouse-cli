@@ -61,6 +61,7 @@ func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader,
 		pushParams.Logger.InfoLn("Pushing", repoRef)
 		if err := layouts.PushLayoutToRepoContext(
 			context.Background(),
+			client.WithScope(moduleName).WithScope(layoutPathSuffix),
 			layout.Path(filepath.Join(packageDir, layoutPathSuffix)),
 			repoRef,
 			pushParams.RegistryAuth,
