@@ -104,7 +104,7 @@ func createInvalidSecurityPackage(t testing.TB) io.Reader {
 }
 
 func TestPushSecurityDatabases_MkdirError(t *testing.T) {
-	pushParams, _, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 
 	// Set WorkingDir to a file path to cause mkdir error
 	tempDir := t.TempDir()
@@ -114,7 +114,7 @@ func TestPushSecurityDatabases_MkdirError(t *testing.T) {
 
 	pkg := createValidSecurityPackage(t)
 
-	err := PushSecurityDatabases(pushParams, pkg)
+	err := PushSecurityDatabases(pushParams, pkg, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "mkdir")
 }
@@ -122,20 +122,20 @@ func TestPushSecurityDatabases_MkdirError(t *testing.T) {
 func TestPushSecurityDatabases_UnpackError(t *testing.T) {
 	t.Skip("Skipping due to bug in bundle.Unpack - it doesn't handle tar reader errors properly")
 
-	pushParams, _, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 
 	// Create a reader that returns an error
 	errReader := &errorReader{err: errors.New("read error")}
-	err := PushSecurityDatabases(pushParams, errReader)
+	err := PushSecurityDatabases(pushParams, errReader, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Unpack package")
 }
 
 func TestPushSecurityDatabases_ValidationError(t *testing.T) {
-	pushParams, _, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	pkg := createInvalidSecurityPackage(t)
 
-	err := PushSecurityDatabases(pushParams, pkg)
+	err := PushSecurityDatabases(pushParams, pkg, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Invalid security database package")
 }
@@ -143,18 +143,20 @@ func TestPushSecurityDatabases_ValidationError(t *testing.T) {
 func TestPushSecurityDatabases_NilReader(t *testing.T) {
 	t.Skip("Skipping due to nil pointer issues with tar reader")
 
-	pushParams, _, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 
-	err := PushSecurityDatabases(pushParams, nil)
+	err := PushSecurityDatabases(pushParams, nil, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Unpack package")
 }
 
 func TestPushSecurityDatabases_LayoutPaths(t *testing.T) {
-	pushParams, logger, _ := setupTestPushParams(t)
+	pushParams, logger, client := setupTestPushParams(t)
 	pkg := createValidSecurityPackage(t)
 
-	err := PushSecurityDatabases(pushParams, pkg)
+	client.WithScopeMock.Return(client)
+
+	err := PushSecurityDatabases(pushParams, pkg, client)
 
 	// Even if it fails due to registry, we can check that the correct paths were logged
 	if err != nil {
@@ -180,13 +182,15 @@ func TestPushSecurityDatabases_LayoutPaths(t *testing.T) {
 }
 
 func TestPushSecurityDatabases_WorkingDirectoryCleanup(t *testing.T) {
-	pushParams, _, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	pkg := createValidSecurityPackage(t)
+
+	client.WithScopeMock.Return(client)
 
 	// Track if cleanup occurred by checking directory existence
 	packageDir := filepath.Join(pushParams.WorkingDir, "security")
 
-	err := PushSecurityDatabases(pushParams, pkg)
+	err := PushSecurityDatabases(pushParams, pkg, client)
 
 	// Even after success, the directory should be cleaned up
 	_, statErr := os.Stat(packageDir)
@@ -197,7 +201,7 @@ func TestPushSecurityDatabases_WorkingDirectoryCleanup(t *testing.T) {
 }
 
 func TestPushSecurityDatabases_RegistryAuth(t *testing.T) {
-	pushParams, _, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{
 		Username: "testuser",
 		Password: "testpass",
@@ -205,25 +209,29 @@ func TestPushSecurityDatabases_RegistryAuth(t *testing.T) {
 
 	pkg := createValidSecurityPackage(t)
 
-	err := PushSecurityDatabases(pushParams, pkg)
+	client.WithScopeMock.Return(client)
+
+	err := PushSecurityDatabases(pushParams, pkg, client)
 	// For empty layouts, should succeed (auth is configured but not used)
 	require.NoError(t, err)
 }
 
 func TestPushSecurityDatabases_InsecureAndTLSSkip(t *testing.T) {
-	pushParams, _, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	pushParams.Insecure = true
 	pushParams.SkipTLSVerification = true
 
 	pkg := createValidSecurityPackage(t)
 
-	err := PushSecurityDatabases(pushParams, pkg)
+	client.WithScopeMock.Return(client)
+
+	err := PushSecurityDatabases(pushParams, pkg, client)
 	// For empty layouts, should succeed (insecure settings are configured but not used)
 	require.NoError(t, err)
 }
 
 func TestPushSecurityDatabases_ParallelismConfig(t *testing.T) {
-	pushParams, _, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	pushParams.Parallelism = params.ParallelismConfig{
 		Blobs:  2,
 		Images: 2,
@@ -231,27 +239,33 @@ func TestPushSecurityDatabases_ParallelismConfig(t *testing.T) {
 
 	pkg := createValidSecurityPackage(t)
 
-	err := PushSecurityDatabases(pushParams, pkg)
+	client.WithScopeMock.Return(client)
+
+	err := PushSecurityDatabases(pushParams, pkg, client)
 	// For empty layouts, should succeed (parallelism is configured but not used)
 	require.NoError(t, err)
 }
 
 // Benchmark tests
 func BenchmarkPushSecurityDatabases(b *testing.B) {
-	pushParams, _, _ := setupTestPushParams(b)
+	pushParams, _, client := setupTestPushParams(b)
 	pkg := createValidSecurityPackage(b)
+
+	client.WithScopeMock.Return(client)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = PushSecurityDatabases(pushParams, pkg)
+		_ = PushSecurityDatabases(pushParams, pkg, client)
 	}
 }
 
 // Test coverage helpers - these functions help ensure we hit all code paths
 func TestPushSecurityDatabases_CodeCoverage_LayoutsToPush(t *testing.T) {
 	// This test ensures we cover the layoutsToPush map creation
-	pushParams, _, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	pkg := createValidSecurityPackage(t)
+
+	client.WithScopeMock.Return(client)
 
 	// The layoutsToPush map should be created with correct paths
 	expectedPaths := map[string]string{
@@ -263,7 +277,7 @@ func TestPushSecurityDatabases_CodeCoverage_LayoutsToPush(t *testing.T) {
 
 	// We can't directly test the map, but we can verify the function runs
 	// and check that the expected repos are constructed correctly
-	err := PushSecurityDatabases(pushParams, pkg)
+	err := PushSecurityDatabases(pushParams, pkg, client)
 
 	// Verify that logs contain the expected repo constructions
 	for layoutPath, expectedSuffix := range expectedPaths {
@@ -283,13 +297,15 @@ func TestPushSecurityDatabases_CodeCoverage_LayoutsToPush(t *testing.T) {
 
 func TestPushSecurityDatabases_CodeCoverage_AuthOptions(t *testing.T) {
 	// Test that auth options are constructed correctly
-	pushParams, _, _ := setupTestPushParams(t)
+	pushParams, _, client := setupTestPushParams(t)
 	pushParams.RegistryAuth = authn.Anonymous
 	pushParams.Insecure = true
 	pushParams.SkipTLSVerification = true
 
 	pkg := createValidSecurityPackage(t)
 
-	err := PushSecurityDatabases(pushParams, pkg)
+	client.WithScopeMock.Return(client)
+
+	err := PushSecurityDatabases(pushParams, pkg, client)
 	require.NoError(t, err) // Will succeed for empty layouts
 }
