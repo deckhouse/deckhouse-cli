@@ -37,6 +37,14 @@ const (
 	cmdName = "data"
 )
 
+// Hooks for tests (overridable)
+var (
+	exportCreateRun   = deCreate.Run
+	exportListRun     = deList.Run
+	exportDownloadRun = deDownload.Run
+	exportDeleteRun   = deDelete.Run
+)
+
 func NewCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:           cmdName,
@@ -87,7 +95,7 @@ func NewCommand() *cobra.Command {
 		Short: "Deprecated: use 'd8 data export create'",
 		RunE: func(c *cobra.Command, args []string) error {
 			c.Println("WARNING: 'd8 data create' is deprecated and will be removed. Use 'd8 data export create'.")
-			return deCreate.Run(ctx, logger, c, args)
+			return exportCreateRun(ctx, logger, c, args)
 		},
 	}
 	deprecatedCreate.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
@@ -101,7 +109,7 @@ func NewCommand() *cobra.Command {
 		Short: "Deprecated: use 'd8 data export list'",
 		RunE: func(c *cobra.Command, args []string) error {
 			c.Println("WARNING: 'd8 data list' is deprecated and will be removed. Use 'd8 data export list'.")
-			return deList.Run(ctx, logger, c, args)
+			return exportListRun(ctx, logger, c, args)
 		},
 	}
 	deprecatedList.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
@@ -115,7 +123,7 @@ func NewCommand() *cobra.Command {
 		Short: "Deprecated: use 'd8 data export download'",
 		RunE: func(c *cobra.Command, args []string) error {
 			c.Println("WARNING: 'd8 data download' is deprecated and will be removed. Use 'd8 data export download'.")
-			return deDownload.Run(ctx, logger, c, args)
+			return exportDownloadRun(ctx, logger, c, args)
 		},
 	}
 	deprecatedDownload.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
@@ -130,7 +138,7 @@ func NewCommand() *cobra.Command {
 		Short: "Deprecated: use 'd8 data export delete'",
 		RunE: func(c *cobra.Command, args []string) error {
 			c.Println("WARNING: 'd8 data delete' is deprecated and will be removed. Use 'd8 data export delete'.")
-			return deDelete.Run(ctx, logger, c, args)
+			return exportDeleteRun(ctx, logger, c, args)
 		},
 	}
 	deprecatedDelete.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
