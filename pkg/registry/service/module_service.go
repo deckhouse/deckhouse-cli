@@ -64,17 +64,17 @@ func (s *ModuleService) GetModuleInfo(ctx context.Context, moduleName, tag strin
 
 	moduleClient := s.client.WithSegment(moduleName)
 
-	// Get some label, e.g., disable.message
-	info, exists, err := moduleClient.GetLabel(ctx, tag, "disable.message")
+	imageConfig, err := moduleClient.GetImageConfig(ctx, tag)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get module info: %w", err)
+		return nil, fmt.Errorf("failed to get image config: %w", err)
 	}
 
+	disableMessage, exists := imageConfig.Config.Labels["disable.message"]
 	if !exists {
 		return nil, fmt.Errorf("module info not found")
 	}
 
-	return info, nil
+	return disableMessage, nil
 }
 
 // ExtractModule downloads the module image and extracts it to the specified location

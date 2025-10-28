@@ -55,14 +55,6 @@ type RegistryClient interface {
 	// The repository is determined by the chained WithSegment() calls
 	GetImageConfig(ctx context.Context, tag string) (*v1.ConfigFile, error)
 
-	// GetImageLayers retrieves all layers of an image
-	// The repository is determined by the chained WithSegment() calls
-	GetImageLayers(ctx context.Context, tag string) ([]v1.Layer, error)
-
-	// GetLabel retrieves a specific label from image metadata
-	// The repository is determined by the chained WithSegment() calls
-	GetLabel(ctx context.Context, tag, labelKey string) (string, bool, error)
-
 	// ListTags retrieves all available tags for the current scope
 	// The repository is determined by the chained WithSegment() calls
 	ListTags(ctx context.Context) ([]string, error)

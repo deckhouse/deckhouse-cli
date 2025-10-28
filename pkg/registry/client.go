@@ -75,8 +75,7 @@ func NewClientWithOptions(registry string, opts *ClientOptions) *Client {
 // client.WithSegment("deckhouse").WithSegment("ee").WithSegment("modules")
 func (c *Client) WithSegment(segments ...string) pkg.RegistryClient {
 	for idx, scope := range segments {
-		segments[idx] = strings.TrimPrefix(scope, "/")
-		segments[idx] = strings.TrimSuffix(scope, "/")
+		segments[idx] = strings.TrimSuffix(strings.TrimPrefix(scope, "/"), "/")
 	}
 
 	if len(segments) == 0 {
@@ -202,6 +201,7 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 // The repository is determined by the chained WithSegment() calls
 func (c *Client) PushImage(ctx context.Context, tag string, img pkg.RegistryImage) error {
 	fullRegistry := c.GetRegistry()
+
 	logentry := c.log.With(
 		slog.String("registry_host", c.registryHost),
 		slog.String("scope", c.constructedSegments),
@@ -229,6 +229,8 @@ func (c *Client) PushImage(ctx context.Context, tag string, img pkg.RegistryImag
 // GetImageConfig retrieves the image config file containing labels and metadata
 // The repository is determined by the chained WithSegment() calls
 func (c *Client) GetImageConfig(ctx context.Context, tag string) (*v1.ConfigFile, error) {
+	_ = c.GetRegistry()
+
 	logentry := c.log.With(
 		slog.String("registry_host", c.registryHost),
 		slog.String("scope", c.constructedSegments),
@@ -250,62 +252,6 @@ func (c *Client) GetImageConfig(ctx context.Context, tag string) (*v1.ConfigFile
 	logentry.Debug("Image config retrieved successfully")
 
 	return configFile, nil
-}
-
-// GetImageLayers retrieves all layers of an image
-// The repository is determined by the chained WithSegment() calls
-func (c *Client) GetImageLayers(ctx context.Context, tag string) ([]v1.Layer, error) {
-	logentry := c.log.With(
-		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.constructedSegments),
-		slog.String("tag", tag),
-	)
-
-	logentry.Debug("Getting image layers")
-
-	img, err := c.GetImage(ctx, tag)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get image: %w", err)
-	}
-
-	layers, err := img.Layers()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get image layers: %w", err)
-	}
-
-	logentry.Debug("Image layers retrieved successfully", slog.Int("count", len(layers)))
-
-	return layers, nil
-}
-
-// GetLabel retrieves a specific label from remote image metadata
-// If you want to get several labels, consider using GetImageConfig to reduce API calls
-// The repository is determined by the chained WithSegment() calls
-func (c *Client) GetLabel(ctx context.Context, tag, labelKey string) (string, bool, error) {
-	logentry := c.log.With(
-		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.constructedSegments),
-		slog.String("tag", tag),
-		slog.String("label", labelKey),
-	)
-
-	logentry.Debug("Getting label")
-
-	configFile, err := c.GetImageConfig(ctx, tag)
-	if err != nil {
-		return "", false, err
-	}
-
-	if configFile.Config.Labels == nil {
-		logentry.Debug("No labels found in image")
-		return "", false, nil
-	}
-
-	value, exists := configFile.Config.Labels[labelKey]
-
-	logentry.Debug("Label lookup result", slog.Bool("exists", exists))
-
-	return value, exists, nil
 }
 
 // ListTags lists all tags for the current scope

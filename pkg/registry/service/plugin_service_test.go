@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/gojuno/minimock/v3"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 
@@ -38,26 +39,18 @@ func TestGetPluginContract_Success(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
 
+	configFile := &v1.ConfigFile{
+		Config: v1.Config{
+			Labels: map[string]string{
+				"plugin-contract": `{"name": "test-plugin", "version": "v1.0.0", "description": "A test plugin", "env": [{"name": "TEST_ENV"}], "flags": [{"name": "--test-flag"}], "requirements": {"kubernetes": {"constraint": ">= 1.26"}, "modules": [{"name": "test-module", "constraint": ">= 1.0.0"}]}}`,
+			},
+		},
+	}
+
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetLabelMock.
-		Expect(
-			minimock.AnyContext,
-			"v1.0.0",
-			"plugin-contract",
-		).
-		Return(`{
-            "name": "test-plugin",
-            "version": "v1.0.0",
-            "description": "A test plugin",
-            "env": [{"name": "TEST_ENV"}],
-            "flags": [{"name": "--test-flag"}],
-            "requirements": {
-                "kubernetes": {"constraint": ">= 1.26"},
-                "modules": [
-                    {"name": "test-module", "constraint": ">= 1.0.0"}
-                ]
-            }
-        }`, true, nil)
+	mockScopedClient.GetImageConfigMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(configFile, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
@@ -120,18 +113,18 @@ func TestGetPluginContract_MinimalContract(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
 
+	configFile := &v1.ConfigFile{
+		Config: v1.Config{
+			Labels: map[string]string{
+				"plugin-contract": `{"name": "minimal-plugin", "version": "v1.0.0", "description": "Minimal plugin"}`,
+			},
+		},
+	}
+
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetLabelMock.
-		Expect(
-			minimock.AnyContext,
-			"v1.0.0",
-			"plugin-contract",
-		).
-		Return(`{
-			"name": "minimal-plugin",
-			"version": "v1.0.0",
-			"description": "Minimal plugin"
-		}`, true, nil)
+	mockScopedClient.GetImageConfigMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(configFile, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
@@ -170,14 +163,16 @@ func TestGetPluginContract_LabelNotFound(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
 
+	configFile := &v1.ConfigFile{
+		Config: v1.Config{
+			Labels: map[string]string{}, // no plugin-contract
+		},
+	}
+
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetLabelMock.
-		Expect(
-			minimock.AnyContext,
-			"v1.0.0",
-			"plugin-contract",
-		).
-		Return("", false, nil)
+	mockScopedClient.GetImageConfigMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(configFile, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
@@ -210,14 +205,11 @@ func TestGetPluginContract_GetLabelError(t *testing.T) {
 	mc := minimock.NewController(t)
 
 	expectedErr := errors.New("registry connection failed")
+
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetLabelMock.
-		Expect(
-			minimock.AnyContext,
-			"v1.0.0",
-			"plugin-contract",
-		).
-		Return("", false, expectedErr)
+	mockScopedClient.GetImageConfigMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(nil, expectedErr)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
@@ -248,14 +240,18 @@ func TestGetPluginContract_InvalidJSON(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
 
+	configFile := &v1.ConfigFile{
+		Config: v1.Config{
+			Labels: map[string]string{
+				"plugin-contract": `{invalid json`,
+			},
+		},
+	}
+
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetLabelMock.
-		Expect(
-			minimock.AnyContext,
-			"v1.0.0",
-			"plugin-contract",
-		).
-		Return(`{invalid json`, true, nil)
+	mockScopedClient.GetImageConfigMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(configFile, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
@@ -282,14 +278,18 @@ func TestGetPluginContract_EmptyJSON(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
 
+	configFile := &v1.ConfigFile{
+		Config: v1.Config{
+			Labels: map[string]string{
+				"plugin-contract": `{}`,
+			},
+		},
+	}
+
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetLabelMock.
-		Expect(
-			minimock.AnyContext,
-			"v1.0.0",
-			"plugin-contract",
-		).
-		Return(`{}`, true, nil)
+	mockScopedClient.GetImageConfigMock.
+		Expect(context.Background(), "v1.0.0").
+		Return(configFile, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
@@ -584,7 +584,7 @@ func TestExtractPlugin_CreateDestinationError(t *testing.T) {
 	mc := minimock.NewController(t)
 
 	// Use a path that can be created
-	invalidDir := "/tmp/deckhouse-test-destination"
+	validDir := "/tmp/deckhouse-test-destination"
 
 	// Create a simple tar
 	var tarBuf bytes.Buffer
@@ -610,7 +610,7 @@ func TestExtractPlugin_CreateDestinationError(t *testing.T) {
 	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
-	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", invalidDir)
+	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", validDir)
 
 	// Assert
 	if err != nil {

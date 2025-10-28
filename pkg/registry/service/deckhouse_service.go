@@ -67,17 +67,18 @@ func (s *DeckhouseService) GetReleaseInfo(ctx context.Context, releaseTag string
 
 	releaseClient := s.client.WithSegment("releases")
 
-	// Get some label, e.g., version info
-	info, exists, err := releaseClient.GetLabel(ctx, releaseTag, "version")
+	imageConfig, err := releaseClient.GetImageConfig(ctx, releaseTag)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get release info: %w", err)
+		return nil, fmt.Errorf("failed to get image config: %w", err)
 	}
 
+	// Get some label, e.g., version info
+	version, exists := imageConfig.Config.Labels["version"]
 	if !exists {
-		return nil, fmt.Errorf("release info not found")
+		return nil, fmt.Errorf("version info not found")
 	}
 
-	return info, nil
+	return version, nil
 }
 
 // ExtractRelease downloads the Deckhouse release image and extracts it to the specified location
