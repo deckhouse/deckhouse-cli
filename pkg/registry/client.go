@@ -171,7 +171,7 @@ func (c *Client) GetManifest(ctx context.Context, tag string) ([]byte, error) {
 // Do not return remote image to avoid drop connection with context cancelation.
 // It will be in use while passed context will be alive.
 // The repository is determined by the chained WithSegment() calls
-func (c *Client) GetImage(ctx context.Context, tag string) (pkg.Image, error) {
+func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, error) {
 	fullRegistry := c.GetRegistry()
 
 	logentry := c.log.With(
@@ -200,7 +200,7 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.Image, error) {
 
 // PushImage pushes an image to the registry at the specified tag
 // The repository is determined by the chained WithSegment() calls
-func (c *Client) PushImage(ctx context.Context, tag string, img pkg.Image) error {
+func (c *Client) PushImage(ctx context.Context, tag string, img pkg.RegistryImage) error {
 	fullRegistry := c.GetRegistry()
 	logentry := c.log.With(
 		slog.String("registry_host", c.registryHost),
@@ -250,6 +250,32 @@ func (c *Client) GetImageConfig(ctx context.Context, tag string) (*v1.ConfigFile
 	logentry.Debug("Image config retrieved successfully")
 
 	return configFile, nil
+}
+
+// GetImageLayers retrieves all layers of an image
+// The repository is determined by the chained WithSegment() calls
+func (c *Client) GetImageLayers(ctx context.Context, tag string) ([]v1.Layer, error) {
+	logentry := c.log.With(
+		slog.String("registry_host", c.registryHost),
+		slog.String("scope", c.constructedSegments),
+		slog.String("tag", tag),
+	)
+
+	logentry.Debug("Getting image layers")
+
+	img, err := c.GetImage(ctx, tag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get image: %w", err)
+	}
+
+	layers, err := img.Layers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get image layers: %w", err)
+	}
+
+	logentry.Debug("Image layers retrieved successfully", slog.Int("count", len(layers)))
+
+	return layers, nil
 }
 
 // GetLabel retrieves a specific label from remote image metadata

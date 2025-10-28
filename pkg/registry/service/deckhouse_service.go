@@ -94,12 +94,7 @@ func (s *DeckhouseService) ExtractRelease(ctx context.Context, releaseTag, desti
 		return fmt.Errorf("failed to get image: %w", err)
 	}
 
-	r, err := img.Extract()
-	if err != nil {
-		return fmt.Errorf("failed to extract image: %w", err)
-	}
-
-	err = s.extractTar(r, destination)
+	err = s.extractTar(img.Extract(), destination)
 	if err != nil {
 		return fmt.Errorf("failed to extract tar: %w", err)
 	}

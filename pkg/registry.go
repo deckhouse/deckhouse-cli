@@ -23,9 +23,9 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
-type Image interface {
+type RegistryImage interface {
 	v1.Image
-	Extract() (io.ReadCloser, error)
+	Extract() io.ReadCloser
 }
 
 // RegistryClient defines the contract for interacting with container registries
@@ -49,11 +49,15 @@ type RegistryClient interface {
 	// Do not return remote image to avoid drop connection with context cancelation.
 	// It will be in use while passed context will be alive.
 	// The repository is determined by the chained WithSegment() calls
-	GetImage(ctx context.Context, tag string) (Image, error)
+	GetImage(ctx context.Context, tag string) (RegistryImage, error)
 
 	// GetImageConfig retrieves the image config file containing labels and metadata
 	// The repository is determined by the chained WithSegment() calls
 	GetImageConfig(ctx context.Context, tag string) (*v1.ConfigFile, error)
+
+	// GetImageLayers retrieves all layers of an image
+	// The repository is determined by the chained WithSegment() calls
+	GetImageLayers(ctx context.Context, tag string) ([]v1.Layer, error)
 
 	// GetLabel retrieves a specific label from image metadata
 	// The repository is determined by the chained WithSegment() calls
@@ -69,5 +73,5 @@ type RegistryClient interface {
 
 	// PushImage pushes an image to the registry at the specified tag
 	// The repository is determined by the chained WithSegment() calls
-	PushImage(ctx context.Context, tag string, img Image) error
+	PushImage(ctx context.Context, tag string, img RegistryImage) error
 }
