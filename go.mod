@@ -3,10 +3,11 @@ module github.com/deckhouse/deckhouse-cli
 go 1.24.6
 
 require (
-	github.com/Masterminds/semver/v3 v3.3.0
+	github.com/Masterminds/semver/v3 v3.3.1
 	github.com/deckhouse/deckhouse/pkg/log v0.1.0
 	github.com/deckhouse/virtualization/src/cli v1.0.0
 	github.com/fatih/color v1.18.0
+	github.com/fluxcd/flagger v1.36.1
 	github.com/gojuno/minimock/v3 v3.4.7
 	github.com/google/go-containerregistry v0.20.0
 	github.com/gosimple/slug v1.15.0
@@ -192,7 +193,6 @@ require (
 	github.com/fatih/camelcase v1.0.0 // indirect
 	github.com/fatih/structs v1.1.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
-	github.com/fluxcd/flagger v1.36.1 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/fsouza/go-dockerclient v1.11.1 // indirect
 	github.com/fvbommel/sortorder v1.1.0 // indirect
