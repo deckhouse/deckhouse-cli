@@ -11,12 +11,12 @@ import (
 )
 
 const (
-	testName = "exp-test"
-	testNS = "default"
-	testTTL = "30m"
-	testPublish = true
+	testName           = "exp-test"
+	testNS             = "default"
+	testTTL            = "30m"
+	testPublish        = true
 	deprecationWarning = "deprecated"
-	testOut = "out.txt"
+	testOut            = "out.txt"
 )
 
 func TestShim_Create_DelegatesToExportCreate(t *testing.T) {

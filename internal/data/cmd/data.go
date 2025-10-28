@@ -109,7 +109,7 @@ func NewCommand() *cobra.Command {
 		RunE: func(c *cobra.Command, args []string) error {
 			c.Println("WARNING: 'd8 data list' is deprecated and will be removed. Use 'd8 data export list'.")
 			return exportListRun(ctx, logger, c, args)
-		},
+		},	
 	}
 	deprecatedList.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
 	deprecatedList.Flags().Bool("publish", false, "Provide access outside of cluster")
