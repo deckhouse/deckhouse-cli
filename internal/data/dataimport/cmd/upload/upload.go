@@ -165,12 +165,11 @@ func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
-
+		
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status)
 		}
-
+		
 		nextOffsetStr := resp.Header.Get("X-Next-Offset")
 		if nextOffsetStr == "" {
 			offset += sendLen
@@ -184,6 +183,7 @@ func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient
 			return fmt.Errorf("server returned X-Next-Offset (%d) smaller than current offset (%d)", nextOffset, offset)
 		}
 		offset = nextOffset
+		resp.Body.Close()
 	}
 
 	return nil

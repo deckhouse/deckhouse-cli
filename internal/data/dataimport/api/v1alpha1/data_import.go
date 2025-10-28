@@ -107,7 +107,7 @@ const (
 type ResourceName string
 
 const (
-	// Volume size, in bytes (e,g. 5Gi = 5GiB = 5 * 1024 * 1024 * 1024)
+	// Volume size, in bytes (e.g. 5Gi = 5GiB = 5 * 1024 * 1024 * 1024)
 	ResourceStorage ResourceName = "storage"
 )
 

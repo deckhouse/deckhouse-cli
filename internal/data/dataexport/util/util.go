@@ -41,6 +41,10 @@ var (
 	CreateDataExporterIfNeededFunc = CreateDataExporterIfNeeded
 )
 
+const (
+	maxRetryAttempts = 60
+)
+
 func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
 	deObj := &v1alpha1.DataExport{}
 	err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: deName}, deObj)
@@ -108,7 +112,7 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 		if returnErr == nil {
 			break
 		}
-		if i > 60 {
+		if i > maxRetryAttempts {
 			return nil, returnErr
 		}
 		time.Sleep(time.Second * 3)

@@ -18,6 +18,11 @@ import (
 	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const (
+	maxRetryAttempts = 60
+	retryInterval    = 3
+)
+
 func GetDataImport(ctx context.Context, diName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataImport, error) {
 	diObj := &v1alpha1.DataImport{}
 	err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: diName}, diObj)
@@ -51,7 +56,7 @@ func DeleteDataImport(ctx context.Context, diName, namespace string, rtClient ct
 func CreateDataImport(
 	ctx context.Context,
 	name, namespace, ttl string,
-	publish, waitForFirtConsumer bool,
+	publish, waitForFirstConsumer bool,
 	pvcTpl *v1alpha1.PersistentVolumeClaimTemplateSpec,
 	rtClient ctrlrtclient.Client,
 ) error {
@@ -71,7 +76,7 @@ func CreateDataImport(
 		Spec: v1alpha1.DataImportSpec{
 			Ttl:                  ttl,
 			Publish:              publish,
-			WaitForFirstConsumer: waitForFirtConsumer,
+			WaitForFirstConsumer: waitForFirstConsumer,
 			TargetRef: v1alpha1.DataImportTargetRefSpec{
 				Kind:        "PersistentVolumeClaim",
 				PvcTemplate: pvcTpl,
@@ -147,10 +152,10 @@ func GetDataImportWithRestart(
 		if notReadyErr == nil {
 			return diObj, nil
 		}
-		if i > 60 {
+		if i > maxRetryAttempts {
 			return nil, notReadyErr
 		}
-		time.Sleep(3 * time.Second)
+		time.Sleep(retryInterval * time.Second)
 	}
 }
 
