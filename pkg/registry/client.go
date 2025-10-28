@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -34,11 +35,12 @@ import (
 
 // Client provides methods to interact with container registries
 type Client struct {
-	registryHost        string   // e.g., "registry.deckhouse.io"
-	segments            []string // e.g., [deckhouse,ee,modules] (built from chained WithSegment calls)
-	constructedSegments string   // cached joined segments for scope path
-	options             []remote.Option
-	log                 *log.Logger
+	registryHost            string    // e.g., "registry.deckhouse.io"
+	segments                []string  // e.g., [deckhouse,ee,modules] (built from chained WithSegment calls)
+	constructedSegments     string    // cached joined segments for scope path
+	constructedSegmentsOnce sync.Once // ensures constructedSegments is computed only once
+	options                 []remote.Option
+	log                     *log.Logger
 }
 
 // Ensure Client implements pkg.RegistryInterface
@@ -84,7 +86,7 @@ func (c *Client) WithSegment(segments ...string) pkg.RegistryClient {
 
 	return &Client{
 		registryHost: c.registryHost,
-		segments:     append(c.segments, segments...),
+		segments:     append(append([]string(nil), c.segments...), segments...),
 		options:      c.options,
 		log:          c.log,
 	}
@@ -96,9 +98,9 @@ func (c *Client) GetRegistry() string {
 		return c.registryHost
 	}
 
-	if c.constructedSegments == "" {
+	c.constructedSegmentsOnce.Do(func() {
 		c.constructedSegments = path.Join(c.segments...)
-	}
+	})
 
 	return path.Join(c.registryHost, c.constructedSegments)
 }
