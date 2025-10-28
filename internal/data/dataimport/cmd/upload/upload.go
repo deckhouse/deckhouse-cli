@@ -161,29 +161,37 @@ func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient
 		req.Header.Set("X-Attribute-Gid", strconv.Itoa(gid))
 		req.Header.Set("X-Offset", strconv.FormatInt(offset, 10))
 
-		resp, err := httpClient.HTTPDo(req)
-		if err != nil {
+		if err := func() error {
+			resp, err := httpClient.HTTPDo(req)
+			if err != nil {
+				return err
+			}
+			defer func() {
+				io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}()
+
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				return fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status)
+			}
+
+			nextOffsetStr := resp.Header.Get("X-Next-Offset")
+			if nextOffsetStr == "" {
+				offset += sendLen
+				return nil
+			}
+			nextOffset, err := strconv.ParseInt(nextOffsetStr, 10, 64)
+			if err != nil {
+				return fmt.Errorf("invalid X-Next-Offset: %s: %w", nextOffsetStr, err)
+			}
+			if nextOffset < offset {
+				return fmt.Errorf("server returned X-Next-Offset (%d) smaller than current offset (%d)", nextOffset, offset)
+			}
+			offset = nextOffset
+			return nil
+		}(); err != nil {
 			return err
 		}
-		
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status)
-		}
-		
-		nextOffsetStr := resp.Header.Get("X-Next-Offset")
-		if nextOffsetStr == "" {
-			offset += sendLen
-			continue
-		}
-		nextOffset, err := strconv.ParseInt(nextOffsetStr, 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid X-Next-Offset: %s: %w", nextOffsetStr, err)
-		}
-		if nextOffset < offset {
-			return fmt.Errorf("server returned X-Next-Offset (%d) smaller than current offset (%d)", nextOffset, offset)
-		}
-		offset = nextOffset
-		resp.Body.Close()
 	}
 
 	return nil
