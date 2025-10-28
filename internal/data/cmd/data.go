@@ -37,7 +37,6 @@ const (
 	cmdName = "data"
 )
 
-// Hooks for tests (overridable)
 var (
 	exportCreateRun   = deCreate.Run
 	exportListRun     = deList.Run
