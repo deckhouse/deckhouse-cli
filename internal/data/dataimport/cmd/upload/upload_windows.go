@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build windows
 
 package upload
 
@@ -12,7 +12,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
 
 	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/util"
@@ -88,10 +87,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	if pathToFile != "" && pathToFile != "-" {
 		if fi, statErr := os.Stat(pathToFile); statErr == nil {
 			permOctal = fmt.Sprintf("%04o", fi.Mode().Perm())
-			if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-				uid = int(st.Uid)
-				gid = int(st.Gid)
-			}
+			// On Windows, UID/GID are not applicable, keep defaults (-1)
 		}
 	}
 
