@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"path/filepath"
+	"path"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
@@ -98,10 +98,10 @@ func (c *Client) GetRegistry() string {
 	}
 
 	if c.constructedSegments == "" {
-		c.constructedSegments = filepath.Join(c.segments...)
+		c.constructedSegments = path.Join(c.segments...)
 	}
 
-	return filepath.Join(c.registryHost, c.constructedSegments)
+	return path.Join(c.registryHost, c.constructedSegments)
 }
 
 // The repository is determined by the chained WithSegment() calls
