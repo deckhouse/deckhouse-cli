@@ -28,8 +28,10 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	helm_v3 "github.com/werf/3p-helm/cmd/helm"
+	"github.com/werf/common-go/pkg/graceful"
 	"github.com/werf/logboek"
-	"github.com/werf/nelm/pkg/resrcchangcalc"
+	"github.com/werf/werf/v2/cmd/werf/common"
+	"github.com/werf/nelm/pkg/action"
 	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
 	"github.com/werf/werf/v2/pkg/process_exterminator"
 	cliflag "k8s.io/component-base/cli/flag"
@@ -128,19 +130,23 @@ func (r *RootCommand) Execute() error {
 	logrus.StandardLogger().SetOutput(logboek.OutStream())
 
 	if err := process_exterminator.Init(); err != nil {
-		werfcommon.TerminateWithError(fmt.Sprintf("process exterminator initialization failed: %s", err), 1)
+		graceful.Terminate(ctx, fmt.Errorf("process exterminator initialization failed: %w", err), 1)
+		return err
 	}
 
 	if err := r.cmd.Execute(); err != nil {
 		if helm_v3.IsPluginError(err) {
-			werfcommon.ShutdownTelemetry(ctx, helm_v3.PluginErrorCode(err))
-			werfcommon.TerminateWithError(err.Error(), helm_v3.PluginErrorCode(err))
-		} else if errors.Is(err, resrcchangcalc.ErrChangesPlanned) {
-			werfcommon.ShutdownTelemetry(ctx, 2)
-			os.Exit(2)
+			common.ShutdownTelemetry(ctx, helm_v3.PluginErrorCode(err))
+			graceful.Terminate(ctx, err, helm_v3.PluginErrorCode(err))
+			return err
+		} else if errors.Is(err, action.ErrChangesPlanned) {
+			common.ShutdownTelemetry(ctx, 2)
+			graceful.Terminate(ctx, action.ErrChangesPlanned, 2)
+			return err
 		} else {
-			werfcommon.ShutdownTelemetry(ctx, 1)
-			werfcommon.TerminateWithError(err.Error(), 1)
+			common.ShutdownTelemetry(ctx, 1)
+			graceful.Terminate(ctx, err, 1)
+			return err
 		}
 	}
 
