@@ -30,9 +30,8 @@ import (
 	helm_v3 "github.com/werf/3p-helm/cmd/helm"
 	"github.com/werf/common-go/pkg/graceful"
 	"github.com/werf/logboek"
-	"github.com/werf/werf/v2/cmd/werf/common"
 	"github.com/werf/nelm/pkg/action"
-	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
+	"github.com/werf/werf/v2/cmd/werf/common"
 	"github.com/werf/werf/v2/pkg/process_exterminator"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
@@ -148,16 +147,16 @@ func (r *RootCommand) addCustomCommands(pluginName string) *cobra.Command {
 	return cmd
 }
 
-func (r *RootCommand) Execute() error { //nolint:unparam
+func (r *RootCommand) Execute() error {
 	ctx := r.cmd.Context()
 
-	if shouldTerminate, err := werfcommon.ContainerBackendProcessStartupHook(); err != nil {
-		werfcommon.TerminateWithError(err.Error(), 1)
+	if shouldTerminate, err := common.ContainerBackendProcessStartupHook(); err != nil {
+		graceful.Terminate(ctx, err, 1)
+		return err
 	} else if shouldTerminate {
 		return nil
 	}
 
-	werfcommon.EnableTerminationSignalsTrap()
 	log.SetOutput(logboek.OutStream())
 	logrus.StandardLogger().SetOutput(logboek.OutStream())
 
@@ -166,24 +165,30 @@ func (r *RootCommand) Execute() error { //nolint:unparam
 		return err
 	}
 
+	// Do early exit if termination is started
+	if graceful.IsTerminating(ctx) {
+		return nil
+	}
+
 	if err := r.cmd.Execute(); err != nil {
-		if helm_v3.IsPluginError(err) {
+		switch {
+		case helm_v3.IsPluginError(err):
 			common.ShutdownTelemetry(ctx, helm_v3.PluginErrorCode(err))
 			graceful.Terminate(ctx, err, helm_v3.PluginErrorCode(err))
 			return err
-		} else if errors.Is(err, action.ErrChangesPlanned) {
+		case errors.Is(err, action.ErrChangesPlanned):
 			common.ShutdownTelemetry(ctx, 2)
 			logs.FlushLogs()
 			graceful.Terminate(ctx, action.ErrChangesPlanned, 2)
 			return err
-		} else {
-			common.ShutdownTelemetry(ctx, 1)
-			graceful.Terminate(ctx, err, 1)
-			return err
 		}
+
+		common.ShutdownTelemetry(ctx, 1)
+		graceful.Terminate(ctx, err, 1)
+		return err
 	}
 
-	werfcommon.ShutdownTelemetry(ctx, 0)
+	common.ShutdownTelemetry(ctx, 0)
 	logs.FlushLogs()
 	return nil
 }
