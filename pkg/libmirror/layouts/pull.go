@@ -246,7 +246,7 @@ func PullImageSet(
 						return nil
 					}
 
-					logger.DebugF("error here: %v", err)
+					logger.DebugF("failed to pull image %s:%s: %v", imageReferenceString, tag, err)
 
 					return fmt.Errorf("pull image metadata: %w", err)
 				}
