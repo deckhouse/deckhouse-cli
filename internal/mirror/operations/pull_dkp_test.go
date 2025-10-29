@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
+	mock "github.com/deckhouse/deckhouse-cli/pkg/mock"
 )
 
 // setupTestPullParams creates test PullParams with a mock logger
@@ -61,8 +62,9 @@ func TestPullDeckhousePlatform_MkdirError(t *testing.T) {
 	pullParams.WorkingDir = workingDir
 
 	tagsToMirror := []string{"v1.0.0"}
+	client := mock.NewRegistryClientMock(t)
 
-	err := PullDeckhousePlatform(pullParams, tagsToMirror)
+	err := PullDeckhousePlatform(pullParams, tagsToMirror, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Create OCI Image Layouts")
 }
@@ -73,8 +75,9 @@ func TestPullDeckhousePlatform_ResolveTagsError(t *testing.T) {
 	pullParams.RegistryHost = "invalid::host"
 
 	tagsToMirror := []string{"v1.0.0"}
+	client := mock.NewRegistryClientMock(t)
 
-	err := PullDeckhousePlatform(pullParams, tagsToMirror)
+	err := PullDeckhousePlatform(pullParams, tagsToMirror, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Resolve images tags to digests")
 }
@@ -120,8 +123,9 @@ func TestPullDeckhousePlatform_PackError(t *testing.T) {
 	pullParams.BundleDir = "/invalid/path"
 
 	tagsToMirror := []string{"v1.0.0"}
+	client := mock.NewRegistryClientMock(t)
 
-	err := PullDeckhousePlatform(pullParams, tagsToMirror)
+	err := PullDeckhousePlatform(pullParams, tagsToMirror, client)
 	require.Error(t, err)
 	// The error will be from resolve tags first, but pack error would occur later
 	// For now, just verify it fails
@@ -133,8 +137,9 @@ func TestPullDeckhousePlatform_WithDeckhouseTag(t *testing.T) {
 	pullParams.DeckhouseTag = "v1.0.0"
 
 	tagsToMirror := []string{"v1.0.0"}
+	client := mock.NewRegistryClientMock(t)
 
-	err := PullDeckhousePlatform(pullParams, tagsToMirror)
+	err := PullDeckhousePlatform(pullParams, tagsToMirror, client)
 	// Should succeed or fail based on registry availability
 	// The important thing is that it doesn't fail due to tag-specific logic
 	if err != nil {
@@ -146,8 +151,9 @@ func TestPullDeckhousePlatform_EmptyTagsToMirror(t *testing.T) {
 	pullParams, _ := setupTestPullParams(t)
 
 	tagsToMirror := []string{}
+	client := mock.NewRegistryClientMock(t)
 
-	err := PullDeckhousePlatform(pullParams, tagsToMirror)
+	err := PullDeckhousePlatform(pullParams, tagsToMirror, client)
 	// Should fail due to registry issues, but not due to empty tags
 	require.Error(t, err)
 }
@@ -156,8 +162,9 @@ func TestPullDeckhousePlatform_LoggerCalls(t *testing.T) {
 	pullParams, logger := setupTestPullParams(t)
 
 	tagsToMirror := []string{"v1.0.0"}
+	client := mock.NewRegistryClientMock(t)
 
-	_ = PullDeckhousePlatform(pullParams, tagsToMirror)
+	_ = PullDeckhousePlatform(pullParams, tagsToMirror, client)
 
 	// Check that expected logging occurred - adjust expectations based on actual flow
 	hasCreateLayoutsLog := false
@@ -174,11 +181,12 @@ func TestPullDeckhousePlatform_WorkingDirectoryCleanup(t *testing.T) {
 	pullParams, _ := setupTestPullParams(t)
 
 	tagsToMirror := []string{"v1.0.0"}
+	client := mock.NewRegistryClientMock(t)
 
 	// Track if working directory is used
 	platformDir := filepath.Join(pullParams.WorkingDir, "platform")
 
-	err := PullDeckhousePlatform(pullParams, tagsToMirror)
+	err := PullDeckhousePlatform(pullParams, tagsToMirror, client)
 
 	// The platform directory should be created and then cleaned up during execution
 	// Since the function fails early, check that it was attempted
@@ -198,8 +206,9 @@ func TestPullDeckhousePlatform_RegistryAuth(t *testing.T) {
 	})
 
 	tagsToMirror := []string{"v1.0.0"}
+	client := mock.NewRegistryClientMock(t)
 
-	err := PullDeckhousePlatform(pullParams, tagsToMirror)
+	err := PullDeckhousePlatform(pullParams, tagsToMirror, client)
 	// Should fail due to registry, but auth should be passed through
 	require.Error(t, err)
 }
@@ -210,8 +219,9 @@ func TestPullDeckhousePlatform_InsecureAndTLSSkip(t *testing.T) {
 	pullParams.SkipTLSVerification = true
 
 	tagsToMirror := []string{"v1.0.0"}
+	client := mock.NewRegistryClientMock(t)
 
-	err := PullDeckhousePlatform(pullParams, tagsToMirror)
+	err := PullDeckhousePlatform(pullParams, tagsToMirror, client)
 	// Should attempt the operation with insecure settings
 	require.Error(t, err) // Will fail due to no registry, but should not fail due to TLS
 }
@@ -221,8 +231,9 @@ func TestPullDeckhousePlatform_BundleChunkSize(t *testing.T) {
 	pullParams.BundleChunkSize = 1024 * 1024 // 1MB chunks
 
 	tagsToMirror := []string{"v1.0.0"}
+	client := mock.NewRegistryClientMock(t)
 
-	err := PullDeckhousePlatform(pullParams, tagsToMirror)
+	err := PullDeckhousePlatform(pullParams, tagsToMirror, client)
 	// Should use chunked writer when BundleChunkSize > 0
 	require.Error(t, err) // Will fail due to registry, but chunking should be attempted
 }
@@ -232,10 +243,11 @@ func BenchmarkPullDeckhousePlatform(b *testing.B) {
 	pullParams, _ := setupTestPullParams(b)
 
 	tagsToMirror := []string{"v1.0.0"}
+	client := mock.NewRegistryClientMock(b)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = PullDeckhousePlatform(pullParams, tagsToMirror)
+		_ = PullDeckhousePlatform(pullParams, tagsToMirror, client)
 	}
 }
 
@@ -245,8 +257,9 @@ func TestPullDeckhousePlatform_CodeCoverage_ProcessBlocks(t *testing.T) {
 	pullParams, logger := setupTestPullParams(t)
 
 	tagsToMirror := []string{"v1.0.0"}
+	client := mock.NewRegistryClientMock(t)
 
-	_ = PullDeckhousePlatform(pullParams, tagsToMirror)
+	_ = PullDeckhousePlatform(pullParams, tagsToMirror, client)
 
 	// Since the function fails at resolve tags, Process blocks won't be reached
 	// This test verifies the Process logging would work if we got that far
@@ -260,8 +273,9 @@ func TestPullDeckhousePlatform_CodeCoverage_TagPropagation(t *testing.T) {
 	pullParams.DeckhouseTag = "v1.0.0"
 
 	tagsToMirror := []string{"v1.0.0"}
+	client := mock.NewRegistryClientMock(t)
 
-	err := PullDeckhousePlatform(pullParams, tagsToMirror)
+	err := PullDeckhousePlatform(pullParams, tagsToMirror, client)
 	// Should succeed or fail, but tag propagation logic should be exercised
 	require.NotNil(t, err) // Will fail due to registry, but logic should run
 }
@@ -272,8 +286,9 @@ func TestPullDeckhousePlatform_CodeCoverage_ManifestGeneration(t *testing.T) {
 	// Don't set DeckhouseTag so manifest generation is attempted
 
 	tagsToMirror := []string{"v1.0.0"}
+	client := mock.NewRegistryClientMock(t)
 
-	err := PullDeckhousePlatform(pullParams, tagsToMirror)
+	err := PullDeckhousePlatform(pullParams, tagsToMirror, client)
 	// Should succeed or fail, but manifest generation should be attempted
 	require.NotNil(t, err) // Will fail due to registry, but manifest generation should be attempted
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package releases
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -27,22 +28,14 @@ import (
 	"golang.org/x/exp/maps"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 )
 
-const (
-	alphaChannel     = "alpha"
-	betaChannel      = "beta"
-	earlyAccess      = "early-access"
-	stableChannel    = "stable"
-	rockSolidChannel = "rock-solid"
-	ltsChannel       = "lts"
-)
-
-func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
+func VersionsToMirror(pullParams *params.PullParams, client pkg.RegistryClient) ([]semver.Version, error) {
 	logger := pullParams.Logger
 
 	releaseChannelsToCopy := internal.GetAllDefaultReleaseChannels()
@@ -72,7 +65,7 @@ func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
 		}
 	}
 
-	tags, err := getReleasedTagsFromRegistry(pullParams)
+	tags, err := getReleasedTagsFromRegistry(pullParams, client.WithSegment("release-channel"))
 	if err != nil {
 		return nil, fmt.Errorf("get releases from github: %w", err)
 	}
@@ -90,13 +83,18 @@ func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
 	return deduplicateVersions(append(vers, versionsAboveMinimal...)), nil
 }
 
-func getReleasedTagsFromRegistry(pullParams *params.PullParams) ([]string, error) {
-	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&pullParams.BaseParams)
+func getReleasedTagsFromRegistry(pullParams *params.PullParams, client pkg.RegistryClient) ([]string, error) {
+	logger := pullParams.Logger
+
+	nameOpts, _ := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&pullParams.BaseParams)
 	repo, err := name.NewRepository(pullParams.DeckhouseRegistryRepo+"/release-channel", nameOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("parsing repo: %v", err)
 	}
-	tags, err := remote.List(repo, remoteOpts...)
+
+	logger.DebugF("listing: %s", repo.String())
+
+	tags, err := client.ListTags(context.TODO())
 	if err != nil {
 		return nil, fmt.Errorf("get tags from Deckhouse registry: %w", err)
 	}
@@ -167,7 +165,7 @@ func getReleaseChannelVersionFromRegistry(mirrorCtx *params.PullParams, releaseC
 	}
 
 	if releaseInfo.Suspended {
-		return nil, fmt.Errorf("Cannot mirror Deckhouse: source registry contains suspended release channel %q, try again later", releaseChannel)
+		return nil, fmt.Errorf("cannot mirror Deckhouse: source registry contains suspended release channel %q, try again later", releaseChannel)
 	}
 
 	ver, err := semver.NewVersion(releaseInfo.Version)
@@ -190,8 +188,9 @@ func FetchVersionsFromModuleReleaseChannels(
 	releaseChannelImages map[string]struct{},
 	authProvider authn.Authenticator,
 	insecure, skipVerifyTLS bool,
+	client pkg.RegistryClient,
 ) (map[string]string, error) {
-	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
+	nameOpts, _ := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
 	channelVersions := map[string]string{}
 	for imageTag := range releaseChannelImages {
 		ref, err := name.ParseReference(imageTag, nameOpts...)
@@ -199,7 +198,10 @@ func FetchVersionsFromModuleReleaseChannels(
 			return nil, fmt.Errorf("pull %q release channel: %w", imageTag, err)
 		}
 
-		img, err := remote.Image(ref, remoteOpts...)
+		// Extract repository path and tag
+		tag := ref.Identifier()
+
+		img, err := client.GetImage(context.Background(), tag)
 		if err != nil {
 			if errorutil.IsImageNotFoundError(err) {
 				continue

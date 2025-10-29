@@ -34,9 +34,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
+	mock "github.com/deckhouse/deckhouse-cli/pkg/mock"
 )
 
 func TestNewCommand(t *testing.T) {
@@ -130,7 +132,8 @@ func TestFindTagsToMirror(t *testing.T) {
 				SinceVersion: tt.sinceVersion,
 			}
 
-			tags, err := findTagsToMirror(pullParams, logger)
+			client := mock.NewRegistryClientMock(t)
+			tags, err := findTagsToMirror(pullParams, logger, client)
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -956,7 +959,7 @@ func TestFindTagsToMirrorWithVersionsSuccess(t *testing.T) {
 	defer func() { versionsToMirrorFunc = originalVersionsToMirrorFunc }()
 
 	// Mock the function to return successful versions
-	versionsToMirrorFunc = func(pullParams *params.PullParams) ([]semver.Version, error) {
+	versionsToMirrorFunc = func(pullParams *params.PullParams, client pkg.RegistryClient) ([]semver.Version, error) {
 		return []semver.Version{
 			*semver.MustParse("1.50.0"),
 			*semver.MustParse("1.51.0"),
@@ -977,7 +980,8 @@ func TestFindTagsToMirrorWithVersionsSuccess(t *testing.T) {
 		SinceVersion: nil,
 	}
 
-	tags, err := findTagsToMirror(pullParams, logger)
+	client := mock.NewRegistryClientMock(t)
+	tags, err := findTagsToMirror(pullParams, logger, client)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"v1.50.0", "v1.51.0", "v1.52.0"}, tags)
 }
@@ -1411,8 +1415,10 @@ func BenchmarkFindTagsToMirror(b *testing.B) {
 		DeckhouseTag: "v1.57.3",
 	}
 
+	client := mock.NewRegistryClientMock(b)
+
 	for i := 0; i < b.N; i++ {
-		_, _ = findTagsToMirror(pullParams, logger)
+		_, _ = findTagsToMirror(pullParams, logger, client)
 	}
 }
 

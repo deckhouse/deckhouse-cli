@@ -39,10 +39,13 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 )
 
 var ErrPullFailed = errors.New("pull failed, see the log for details")
@@ -143,13 +146,13 @@ func setupLogger() *log.SLogger {
 	return log.NewSLogger(logLevel)
 }
 
-func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger) ([]string, error) {
+func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger, client pkg.RegistryClient) ([]string, error) {
 	if pullParams.DeckhouseTag != "" {
 		logger.InfoF("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
 		return []string{pullParams.DeckhouseTag}, nil
 	}
 
-	versionsToMirror, err := versionsToMirrorFunc(pullParams)
+	versionsToMirror, err := versionsToMirrorFunc(pullParams, client)
 	if err != nil {
 		return nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}
@@ -287,17 +290,42 @@ func (p *Puller) pullPlatform() error {
 		return nil
 	}
 
+	logger := dkplog.NewNop()
+
+	if log.DebugLogLevel() >= 3 {
+		logger = dkplog.NewLogger(dkplog.WithLevel(slog.LevelDebug))
+	}
+
+	// Create registry client for module operations
+	clientOpts := &registry.ClientOptions{
+		Insecure:      p.params.Insecure,
+		TLSSkipVerify: p.params.SkipTLSVerification,
+		Logger:        logger,
+	}
+
+	if p.params.RegistryAuth != nil {
+		clientOpts.Auth = p.params.RegistryAuth
+	}
+
+	var client pkg.RegistryClient
+	client = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+
+	// Scope to the registry path and modules suffix
+	if p.params.RegistryPath != "" {
+		client = client.WithSegment(p.params.RegistryPath)
+	}
+
 	return p.logger.Process("Pull Deckhouse Kubernetes Platform", func() error {
 		if err := p.validatePlatformAccess(); err != nil {
 			return err
 		}
 
-		tagsToMirror, err := findTagsToMirror(p.params, p.logger)
+		tagsToMirror, err := findTagsToMirror(p.params, p.logger, client)
 		if err != nil {
 			return fmt.Errorf("Find tags to mirror: %w", err)
 		}
 
-		if err = operations.PullDeckhousePlatform(p.params, tagsToMirror); err != nil {
+		if err = operations.PullDeckhousePlatform(p.params, tagsToMirror, client); err != nil {
 			return err
 		}
 		return nil
@@ -327,6 +355,31 @@ func (p *Puller) pullSecurityDatabases() error {
 		return nil
 	}
 
+	logger := dkplog.NewNop()
+
+	if log.DebugLogLevel() >= 3 {
+		logger = dkplog.NewLogger(dkplog.WithLevel(slog.LevelDebug))
+	}
+
+	// Create registry client for module operations
+	clientOpts := &registry.ClientOptions{
+		Insecure:      p.params.Insecure,
+		TLSSkipVerify: p.params.SkipTLSVerification,
+		Logger:        logger,
+	}
+
+	if p.params.RegistryAuth != nil {
+		clientOpts.Auth = p.params.RegistryAuth
+	}
+
+	var client pkg.RegistryClient
+	client = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+
+	// Scope to the registry path and modules suffix
+	if p.params.RegistryPath != "" {
+		client = client.WithSegment(p.params.RegistryPath)
+	}
+
 	return p.logger.Process("Pull Security Databases", func() error {
 		ctx, cancel := context.WithTimeout(p.cmd.Context(), 15*time.Second)
 		defer cancel()
@@ -341,7 +394,7 @@ func (p *Puller) pullSecurityDatabases() error {
 			return fmt.Errorf("Source registry is not accessible: %w", err)
 		}
 
-		if err := operations.PullSecurityDatabases(p.params); err != nil {
+		if err := operations.PullSecurityDatabases(p.params, client); err != nil {
 			return err
 		}
 		return nil
@@ -359,6 +412,35 @@ func (p *Puller) pullModules() error {
 		processName = "Pull Extra Images"
 	}
 
+	logger := dkplog.NewNop()
+
+	if log.DebugLogLevel() >= 3 {
+		logger = dkplog.NewLogger(dkplog.WithLevel(slog.LevelDebug))
+	}
+
+	// Create registry client for module operations
+	clientOpts := &registry.ClientOptions{
+		Insecure:      p.params.Insecure,
+		TLSSkipVerify: p.params.SkipTLSVerification,
+		Logger:        logger,
+	}
+
+	if p.params.RegistryAuth != nil {
+		clientOpts.Auth = p.params.RegistryAuth
+	}
+
+	var client pkg.RegistryClient
+	client = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+
+	// Scope to the registry path and modules suffix
+	if p.params.RegistryPath != "" {
+		client = client.WithSegment(p.params.RegistryPath)
+	}
+
+	if p.params.ModulesPathSuffix != "" {
+		client = client.WithSegment(p.params.ModulesPathSuffix)
+	}
+
 	return p.logger.Process(processName, func() error {
 		if err := p.validateModulesAccess(); err != nil {
 			return err
@@ -369,7 +451,7 @@ func (p *Puller) pullModules() error {
 			return err
 		}
 
-		return operations.PullModules(p.params, filter)
+		return operations.PullModules(p.params, filter, client)
 	})
 }
 

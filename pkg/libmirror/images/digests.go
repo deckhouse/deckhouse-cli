@@ -17,6 +17,7 @@ limitations under the License.
 package images
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,10 +30,11 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
-	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 var digestRegex = regexp.MustCompile(`sha256:([a-f0-9]{64})`)
@@ -49,6 +51,8 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 	mirrorCtx *params.PullParams,
 	installerTag string,
 	installersLayout layout.Path,
+	prevDigests map[string]struct{},
+	client pkg.RegistryClient,
 ) (map[string]struct{}, error) {
 	logger := mirrorCtx.Logger
 
@@ -100,7 +104,21 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 	const scanPrintInterval = 20
 	counter := 0
 	for image := range images {
-		vexImageName, err := FindVexImage(mirrorCtx, mirrorCtx.DeckhouseRegistryRepo, nameOpts, remoteOpts, image)
+		counter++
+		if counter%scanPrintInterval == 0 {
+			logger.InfoF("[%d / %d] Scanning images for VEX", counter, len(images))
+		}
+
+		if _, ok := prevDigests[image]; ok {
+			continue
+		}
+
+		vexImageName := strings.Replace(strings.Replace(image, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
+		if _, ok := prevDigests[vexImageName]; ok {
+			continue
+		}
+
+		vexImageName, err := FindVexImage(mirrorCtx, mirrorCtx.DeckhouseRegistryRepo, nameOpts, remoteOpts, image, client)
 		if err != nil {
 			return nil, fmt.Errorf("find VEX image for digest %q: %w", image, err)
 		}
@@ -110,10 +128,8 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 			vex = append(vex, vexImageName)
 		}
 
-		counter++
-		if counter%scanPrintInterval == 0 {
-			logger.InfoF("[%d / %d] Scanning images for VEX", counter, len(images))
-		}
+		prevDigests[image] = struct{}{}
+		prevDigests[vexImageName] = struct{}{}
 	}
 
 	logger.InfoF("[%d / %d] Scanning images for VEX", counter, len(images))
@@ -164,6 +180,7 @@ func FindVexImage(
 	nameOpts []name.Option,
 	remoteOpts []remote.Option,
 	digest string,
+	client pkg.RegistryClient,
 ) (string, error) {
 	logger := params.Logger
 
@@ -172,35 +189,27 @@ func FindVexImage(
 
 	logger.DebugF("Checking vex image from %s", vexImageName)
 
-	vexref, err := name.ParseReference(vexImageName, nameOpts...)
+	_, err := name.ParseReference(vexImageName, nameOpts...)
 	if err != nil {
 		return "", fmt.Errorf("parse reference: %w", err)
 	}
 
-	var vexErr error
-	_, vexErr = remote.Head(vexref, remoteOpts...)
-	if vexErr != nil {
-		var transportErr *transport.Error
-		if errors.As(vexErr, &transportErr) && transportErr.StatusCode == 404 {
-			// Image not found, which is expected for non-vulnerable images
-			return "", nil
-		}
+	split := strings.SplitN(vexImageName, ":", 2)
+	imagePath := split[0]
+	tag := split[1]
 
-		logger.WarnF("get Head error: %w", vexErr)
+	imageSegmentsRaw := strings.TrimPrefix(imagePath, client.GetRegistry())
+	imageSegments := strings.Split(imageSegmentsRaw, "/")
+
+	for i, segment := range imageSegments {
+		client = client.WithSegment(segment)
+		logger.DebugF("Segment %d: %s", i, segment)
 	}
 
-	if vexErr != nil {
-		_, vexErr = remote.Get(vexref, remoteOpts...)
-	}
-
-	if vexErr != nil {
-		var transportErr *transport.Error
-		if errors.As(vexErr, &transportErr) && transportErr.StatusCode == 404 {
-			// Image not found, which is expected for non-vulnerable images
-			return "", nil
-		}
-
-		logger.WarnF("get Get error: %w", vexErr)
+	err = client.CheckImageExists(context.TODO(), tag)
+	if errors.Is(err, registry.ErrImageNotFound) {
+		// Image not found, which is expected for non-vulnerable images
+		return "", nil
 	}
 
 	return vexImageName, nil

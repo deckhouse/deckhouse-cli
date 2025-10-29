@@ -28,13 +28,14 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/manifests"
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
-func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string) error {
+func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string, client pkg.RegistryClient) error {
 	logger := pullParams.Logger
 	tmpDir := filepath.Join(pullParams.WorkingDir, "platform")
 
@@ -51,15 +52,15 @@ func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string)
 	}
 
 	if err = logger.Process("Pull release channels and installers", func() error {
-		if err = layouts.PullDeckhouseReleaseChannels(pullParams, imageLayouts); err != nil {
+		if err = layouts.PullDeckhouseReleaseChannels(pullParams, imageLayouts, client); err != nil {
 			return fmt.Errorf("Pull release channels: %w", err)
 		}
 
-		if err = layouts.PullInstallers(pullParams, imageLayouts); err != nil {
+		if err = layouts.PullInstallers(pullParams, imageLayouts, client); err != nil {
 			return fmt.Errorf("Pull installers: %w", err)
 		}
 
-		if err = layouts.PullStandaloneInstallers(pullParams, imageLayouts); err != nil {
+		if err = layouts.PullStandaloneInstallers(pullParams, imageLayouts, client); err != nil {
 			return fmt.Errorf("Pull standalone installers: %w", err)
 		}
 		return nil
@@ -75,17 +76,20 @@ func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string)
 	}
 
 	logger.InfoF("Searching for Deckhouse built-in modules digests")
+
+	var prevDigests = make(map[string]struct{}, 0)
 	for imageTag := range imageLayouts.InstallImages {
-		digests, err := images.ExtractImageDigestsFromDeckhouseInstaller(pullParams, imageTag, imageLayouts.Install)
+		digests, err := images.ExtractImageDigestsFromDeckhouseInstaller(pullParams, imageTag, imageLayouts.Install, prevDigests, client)
 		if err != nil {
 			return fmt.Errorf("Extract images digests: %w", err)
 		}
+
 		maps.Copy(imageLayouts.DeckhouseImages, digests)
 	}
 	logger.InfoF("Found %d images", len(imageLayouts.DeckhouseImages))
 
 	if err = logger.Process("Pull Deckhouse images", func() error {
-		return layouts.PullDeckhouseImages(pullParams, imageLayouts)
+		return layouts.PullDeckhouseImages(pullParams, imageLayouts, client)
 	}); err != nil {
 		return fmt.Errorf("Pull Deckhouse images: %w", err)
 	}

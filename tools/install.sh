@@ -362,6 +362,8 @@ install_d8() {
 
 install_binary() {
   binary_path="$1"
+  # Normalize INSTALL_DIR by removing trailing slashes
+  INSTALL_DIR="${INSTALL_DIR%/}"
   target_path="${INSTALL_DIR}/${BINARY_NAME}"
   
   # Check if binary already exists
@@ -404,6 +406,8 @@ install_binary() {
 }
 
 verify_installation() {
+  # Normalize INSTALL_DIR by removing trailing slashes
+  INSTALL_DIR="${INSTALL_DIR%/}"
   target_path="${INSTALL_DIR}/${BINARY_NAME}"
   
   if ! command_exists "$BINARY_NAME" && [ ! -f "$target_path" ]; then

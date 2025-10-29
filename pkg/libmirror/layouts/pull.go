@@ -18,6 +18,7 @@ package layouts
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -26,21 +27,22 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
-func PullInstallers(pullParams *params.PullParams, layouts *ImageLayouts) error {
+func PullInstallers(pullParams *params.PullParams, layouts *ImageLayouts, client pkg.RegistryClient) error {
 	pullParams.Logger.InfoLn("Beginning to pull installers")
 	if err := PullImageSet(
 		pullParams,
 		layouts.Install,
 		layouts.InstallImages,
+		client,
 		WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
 	); err != nil {
 		return err
@@ -49,12 +51,13 @@ func PullInstallers(pullParams *params.PullParams, layouts *ImageLayouts) error 
 	return nil
 }
 
-func PullStandaloneInstallers(pullParams *params.PullParams, layouts *ImageLayouts) error {
+func PullStandaloneInstallers(pullParams *params.PullParams, layouts *ImageLayouts, client pkg.RegistryClient) error {
 	pullParams.Logger.InfoLn("Beginning to pull standalone installers")
 	if err := PullImageSet(
 		pullParams,
 		layouts.InstallStandalone,
 		layouts.InstallStandaloneImages,
+		client,
 		WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
 		WithAllowMissingTags(true),
 	); err != nil {
@@ -64,12 +67,13 @@ func PullStandaloneInstallers(pullParams *params.PullParams, layouts *ImageLayou
 	return nil
 }
 
-func PullDeckhouseReleaseChannels(pullParams *params.PullParams, layouts *ImageLayouts) error {
+func PullDeckhouseReleaseChannels(pullParams *params.PullParams, layouts *ImageLayouts, client pkg.RegistryClient) error {
 	pullParams.Logger.InfoLn("Beginning to pull Deckhouse release channels information")
 	if err := PullImageSet(
 		pullParams,
 		layouts.ReleaseChannel,
 		layouts.ReleaseChannelImages,
+		client,
 		WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
 		WithAllowMissingTags(pullParams.DeckhouseTag != ""),
 	); err != nil {
@@ -79,12 +83,13 @@ func PullDeckhouseReleaseChannels(pullParams *params.PullParams, layouts *ImageL
 	return nil
 }
 
-func PullDeckhouseImages(pullParams *params.PullParams, layouts *ImageLayouts) error {
+func PullDeckhouseImages(pullParams *params.PullParams, layouts *ImageLayouts, client pkg.RegistryClient) error {
 	pullParams.Logger.InfoLn("Beginning to pull Deckhouse, this may take a while")
 	if err := PullImageSet(
 		pullParams,
 		layouts.Deckhouse,
 		layouts.DeckhouseImages,
+		client,
 		WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
 	); err != nil {
 		return err
@@ -93,7 +98,7 @@ func PullDeckhouseImages(pullParams *params.PullParams, layouts *ImageLayouts) e
 	return nil
 }
 
-func PullModules(pullParams *params.PullParams, layouts *ImageLayouts) error {
+func PullModules(pullParams *params.PullParams, layouts *ImageLayouts, client pkg.RegistryClient) error {
 	for moduleName, moduleData := range layouts.Modules {
 		// Skip main module images if only pulling extra images
 		if !pullParams.OnlyExtraImages {
@@ -102,6 +107,7 @@ func PullModules(pullParams *params.PullParams, layouts *ImageLayouts) error {
 				pullParams,
 				moduleData.ModuleLayout,
 				moduleData.ModuleImages,
+				client,
 				WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
 			); err != nil {
 				return fmt.Errorf("pull %q module: %w", moduleName, err)
@@ -111,6 +117,7 @@ func PullModules(pullParams *params.PullParams, layouts *ImageLayouts) error {
 				pullParams,
 				moduleData.ReleasesLayout,
 				moduleData.ReleaseImages,
+				client,
 				WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
 				WithAllowMissingTags(true),
 			); err != nil {
@@ -125,6 +132,7 @@ func PullModules(pullParams *params.PullParams, layouts *ImageLayouts) error {
 				pullParams,
 				moduleData.ExtraLayout,
 				moduleData.ExtraImages,
+				client,
 				WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
 				WithAllowMissingTags(true),
 			); err != nil {
@@ -144,6 +152,7 @@ func PullModules(pullParams *params.PullParams, layouts *ImageLayouts) error {
 func PullTrivyVulnerabilityDatabasesImages(
 	pullParams *params.PullParams,
 	layouts *ImageLayouts,
+	client pkg.RegistryClient,
 ) error {
 	nameOpts, _ := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&pullParams.BaseParams)
 
@@ -164,6 +173,7 @@ func PullTrivyVulnerabilityDatabasesImages(
 			pullParams,
 			dbImageLayout,
 			map[string]struct{}{ref.String(): {}},
+			client,
 			WithTagToDigestMapper(NopTagToDigestMappingFunc),
 			WithAllowMissingTags(true), // SE edition does not contain images for trivy
 		); err != nil {
@@ -178,14 +188,17 @@ func PullImageSet(
 	pullParams *params.PullParams,
 	targetLayout layout.Path,
 	imageSet map[string]struct{},
+	client pkg.RegistryClient,
 	opts ...func(opts *pullImageSetOptions),
 ) error {
+	logger := pullParams.Logger
+
 	pullOpts := &pullImageSetOptions{}
 	for _, o := range opts {
 		o(pullOpts)
 	}
 
-	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(
+	nameOpts, _ := auth.MakeRemoteRegistryRequestOptions(
 		pullParams.RegistryAuth,
 		pullParams.Insecure,
 		pullParams.SkipTLSVerification,
@@ -209,16 +222,31 @@ func PullImageSet(
 			return fmt.Errorf("parse image reference %q: %w", pullReference, err)
 		}
 
+		logger.DebugF("reference here: %s", ref.String())
+
+		imagePath, tag := splitImageRefByRepoAndTag(pullReference)
+
+		scopedClient := client
+		imageSegmentsRaw := strings.TrimPrefix(imagePath, scopedClient.GetRegistry())
+		imageSegments := strings.Split(imageSegmentsRaw, "/")
+
+		for i, segment := range imageSegments {
+			scopedClient = scopedClient.WithSegment(segment)
+			logger.DebugF("Segment %d: %s", i, segment)
+		}
+
 		err = retry.RunTask(
 			pullParams.Logger,
 			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageReferenceString),
 			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
-				img, err := remote.Image(ref, append(remoteOpts, remote.WithContext(ctx))...)
+				img, err := scopedClient.GetImage(context.TODO(), tag)
 				if err != nil {
-					if errorutil.IsImageNotFoundError(err) && pullOpts.allowMissingTags {
-						pullParams.Logger.WarnLn("⚠️ Not found in registry, skipping pull")
+					if errors.Is(err, registry.ErrImageNotFound) && pullOpts.allowMissingTags {
+						logger.WarnLn("⚠️ Not found in registry, skipping pull")
 						return nil
 					}
+
+					logger.DebugF("failed to pull image %s:%s: %v", imageReferenceString, tag, err)
 
 					return fmt.Errorf("pull image metadata: %w", err)
 				}

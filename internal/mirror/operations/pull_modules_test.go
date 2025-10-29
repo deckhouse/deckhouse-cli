@@ -17,6 +17,7 @@ limitations under the License.
 package operations
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,6 +28,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
+	mock "github.com/deckhouse/deckhouse-cli/pkg/mock"
 )
 
 // setupTestPullParamsForModules creates test PullParams with a mock logger
@@ -61,7 +63,10 @@ func TestPullModules_FindModulesError(t *testing.T) {
 	filter, err := modules.NewFilter([]string{}, modules.FilterTypeWhitelist)
 	require.NoError(t, err)
 
-	err = PullModules(pullParams, filter)
+	client := mock.NewRegistryClientMock(t)
+	client.ListTagsMock.Return(nil, fmt.Errorf("invalid registry"))
+	client.WithSegmentMock.Optional().Return(client)
+	err = PullModules(pullParams, filter, client)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Find modules")
 }
@@ -74,9 +79,11 @@ func TestPullModules_NoModulesFound(t *testing.T) {
 	filter, err := modules.NewFilter([]string{}, modules.FilterTypeWhitelist)
 	require.NoError(t, err)
 
-	// This would normally fail due to registry
-	err = PullModules(pullParams, filter)
-	require.Error(t, err) // Will fail due to registry
+	client := mock.NewRegistryClientMock(t)
+	client.ListTagsMock.Return([]string{}, nil)
+	client.WithSegmentMock.Optional().Return(client)
+	err = PullModules(pullParams, filter, client)
+	require.NoError(t, err) // Succeeds with no modules
 }
 
 func TestPullModules_CreateLayoutError(t *testing.T) {
@@ -111,9 +118,11 @@ func TestPullModules_OnlyExtraImages(t *testing.T) {
 	filter, err := modules.NewFilter([]string{}, modules.FilterTypeWhitelist)
 	require.NoError(t, err)
 
-	err = PullModules(pullParams, filter)
-	// Should fail due to registry, but OnlyExtraImages flag should be respected
-	require.Error(t, err)
+	client := mock.NewRegistryClientMock(t)
+	client.ListTagsMock.Return([]string{}, nil)
+	client.WithSegmentMock.Optional().Return(client)
+	err = PullModules(pullParams, filter, client)
+	require.NoError(t, err) // Succeeds with no modules
 }
 
 func TestPullModules_BundleChunkSize(t *testing.T) {
@@ -123,9 +132,11 @@ func TestPullModules_BundleChunkSize(t *testing.T) {
 	filter, err := modules.NewFilter([]string{}, modules.FilterTypeWhitelist)
 	require.NoError(t, err)
 
-	err = PullModules(pullParams, filter)
-	// Should use chunked writer when BundleChunkSize > 0
-	require.Error(t, err) // Will fail due to registry, but chunking should be attempted
+	client := mock.NewRegistryClientMock(t)
+	client.ListTagsMock.Return([]string{}, nil)
+	client.WithSegmentMock.Optional().Return(client)
+	err = PullModules(pullParams, filter, client)
+	require.NoError(t, err) // Succeeds with no modules
 }
 
 func TestPullModules_LoggerCalls(t *testing.T) {
@@ -134,7 +145,10 @@ func TestPullModules_LoggerCalls(t *testing.T) {
 	filter, err := modules.NewFilter([]string{}, modules.FilterTypeWhitelist)
 	require.NoError(t, err)
 
-	_ = PullModules(pullParams, filter)
+	client := mock.NewRegistryClientMock(t)
+	client.ListTagsMock.Return([]string{}, nil)
+	client.WithSegmentMock.Optional().Return(client)
+	_ = PullModules(pullParams, filter, client)
 
 	// Check that expected logging occurred - only the first log since it fails early
 	hasFetchLog := false
@@ -154,10 +168,13 @@ func TestPullModules_WorkingDirectoryCleanup(t *testing.T) {
 	filter, err := modules.NewFilter([]string{}, modules.FilterTypeWhitelist)
 	require.NoError(t, err)
 
+	client := mock.NewRegistryClientMock(t)
+	client.ListTagsMock.Return([]string{}, nil)
+	client.WithSegmentMock.Optional().Return(client)
 	// Track if working directory is used
 	modulesDir := filepath.Join(pullParams.WorkingDir, "modules")
 
-	err = PullModules(pullParams, filter)
+	err = PullModules(pullParams, filter, client)
 
 	// The modules directory should be created during execution
 	// Since the function fails early, check that it was attempted
@@ -165,8 +182,7 @@ func TestPullModules_WorkingDirectoryCleanup(t *testing.T) {
 	// It might exist or not depending on when the failure occurred
 	_ = statErr // We don't assert here since failure timing varies
 
-	// We expect an error due to registry issues
-	require.Error(t, err)
+	require.NoError(t, err) // Succeeds with no modules
 }
 
 func TestPullModules_RegistryAuth(t *testing.T) {
@@ -179,9 +195,11 @@ func TestPullModules_RegistryAuth(t *testing.T) {
 	filter, err := modules.NewFilter([]string{}, modules.FilterTypeWhitelist)
 	require.NoError(t, err)
 
-	err = PullModules(pullParams, filter)
-	// Should fail due to registry, but auth should be passed through
-	require.Error(t, err)
+	client := mock.NewRegistryClientMock(t)
+	client.ListTagsMock.Return([]string{}, nil)
+	client.WithSegmentMock.Optional().Return(client)
+	err = PullModules(pullParams, filter, client)
+	require.NoError(t, err) // Succeeds with no modules
 }
 
 func TestPullModules_InsecureAndTLSSkip(t *testing.T) {
@@ -192,9 +210,11 @@ func TestPullModules_InsecureAndTLSSkip(t *testing.T) {
 	filter, err := modules.NewFilter([]string{}, modules.FilterTypeWhitelist)
 	require.NoError(t, err)
 
-	err = PullModules(pullParams, filter)
-	// Should attempt the operation with insecure settings
-	require.Error(t, err) // Will fail due to no registry, but should not fail due to TLS
+	client := mock.NewRegistryClientMock(t)
+	client.ListTagsMock.Return([]string{}, nil)
+	client.WithSegmentMock.Optional().Return(client)
+	err = PullModules(pullParams, filter, client)
+	require.NoError(t, err) // Succeeds with no modules
 }
 
 // Benchmark tests
@@ -204,9 +224,12 @@ func BenchmarkPullModules(b *testing.B) {
 	filter, err := modules.NewFilter([]string{}, modules.FilterTypeWhitelist)
 	require.NoError(b, err)
 
+	client := mock.NewRegistryClientMock(b)
+	client.ListTagsMock.Return([]string{}, nil)
+	client.WithSegmentMock.Optional().Return(client)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = PullModules(pullParams, filter)
+		_ = PullModules(pullParams, filter, client)
 	}
 }
 
@@ -218,7 +241,10 @@ func TestPullModules_CodeCoverage_ProcessBlocks(t *testing.T) {
 	filter, err := modules.NewFilter([]string{}, modules.FilterTypeWhitelist)
 	require.NoError(t, err)
 
-	_ = PullModules(pullParams, filter)
+	client := mock.NewRegistryClientMock(t)
+	client.ListTagsMock.Return([]string{}, nil)
+	client.WithSegmentMock.Optional().Return(client)
+	_ = PullModules(pullParams, filter, client)
 
 	// Since the function fails at find modules, Process blocks won't be reached
 	// This test verifies the Process logging would work if we got that far

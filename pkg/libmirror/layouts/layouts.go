@@ -17,6 +17,7 @@ limitations under the License.
 package layouts
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,12 +31,13 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
-	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"golang.org/x/exp/maps"
 
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 type ModuleImageLayout struct {
@@ -273,6 +275,7 @@ func FindDeckhouseModulesImages(
 	layouts *ImageLayouts,
 	modulesData []modules.Module,
 	filter *modules.Filter,
+	client pkg.RegistryClient,
 ) error {
 	logger := params.Logger
 
@@ -305,6 +308,7 @@ func FindDeckhouseModulesImages(
 			params.RegistryAuth,
 			params.Insecure,
 			params.SkipTLSVerification,
+			client.WithSegment(module.Name),
 		)
 		if err != nil {
 			return fmt.Errorf("Find images of %s: %w", module.Name, err)
@@ -323,6 +327,7 @@ func FindDeckhouseModulesImages(
 			params.RegistryAuth,
 			params.Insecure,
 			params.SkipTLSVerification,
+			client.WithSegment(module.Name),
 		)
 		if err != nil {
 			return fmt.Errorf("Find extra images of %s: %w", module.Name, err)
@@ -339,6 +344,7 @@ func FindDeckhouseModulesImages(
 				nameOpts,
 				remoteOpts,
 				digest,
+				client,
 			)
 
 			if err != nil {
@@ -358,6 +364,7 @@ func FindDeckhouseModulesImages(
 				nameOpts,
 				remoteOpts,
 				digest,
+				client,
 			)
 
 			if err != nil {
@@ -462,6 +469,7 @@ func FindVexImage(
 	nameOpts []name.Option,
 	remoteOpts []remote.Option,
 	digest string,
+	client pkg.RegistryClient,
 ) (string, error) {
 	logger := params.Logger
 
@@ -470,35 +478,27 @@ func FindVexImage(
 
 	logger.DebugF("Checking vex image from %s", vexImageName)
 
-	vexref, err := name.ParseReference(vexImageName, nameOpts...)
+	_, err := name.ParseReference(vexImageName, nameOpts...)
 	if err != nil {
 		return "", fmt.Errorf("parse reference: %w", err)
 	}
 
-	var vexErr error
-	_, vexErr = remote.Head(vexref, remoteOpts...)
-	if vexErr != nil {
-		var transportErr *transport.Error
-		if errors.As(vexErr, &transportErr) && transportErr.StatusCode == 404 {
-			// Image not found, which is expected for non-vulnerable images
-			return "", nil
-		}
+	split := strings.SplitN(vexImageName, ":", 2)
+	imagePath := split[0]
+	tag := split[1]
 
-		logger.WarnF("get Head error: %w", vexErr)
+	imageSegmentsRaw := strings.TrimPrefix(imagePath, client.GetRegistry())
+	imageSegments := strings.Split(imageSegmentsRaw, "/")
+
+	for i, segment := range imageSegments {
+		client = client.WithSegment(segment)
+		logger.DebugF("Segment %d: %s", i, segment)
 	}
 
-	if vexErr != nil {
-		_, vexErr = remote.Get(vexref, remoteOpts...)
-	}
-
-	if vexErr != nil {
-		var transportErr *transport.Error
-		if errors.As(vexErr, &transportErr) && transportErr.StatusCode == 404 {
-			// Image not found, which is expected for non-vulnerable images
-			return "", nil
-		}
-
-		logger.WarnF("get Get error: %w", vexErr)
+	err = client.CheckImageExists(context.TODO(), tag)
+	if errors.Is(err, registry.ErrImageNotFound) {
+		// Image not found, which is expected for non-vulnerable images
+		return "", nil
 	}
 
 	return vexImageName, nil
