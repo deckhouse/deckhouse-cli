@@ -33,6 +33,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	mock "github.com/deckhouse/deckhouse-cli/pkg/mock"
 )
 
 func TestExtractImageDigestsFromDeckhouseInstaller(t *testing.T) {
@@ -45,6 +46,10 @@ func TestExtractImageDigestsFromDeckhouseInstaller(t *testing.T) {
 	installerTag := "nonexistent.registry.com/deckhouse/install:stable"
 
 	installersLayout := createOCILayoutWithInstallerImage(t, "nonexistent.registry.com/deckhouse", installerTag, expectedImages)
+	client := mock.NewRegistryClientMock(t)
+	client.GetRegistryMock.Return("nonexistent.registry.com")
+	client.WithSegmentMock.Return(client)
+	client.CheckImageExistsMock.Return(nil)
 	images, err := ExtractImageDigestsFromDeckhouseInstaller(
 		&params.PullParams{BaseParams: params.BaseParams{
 			DeckhouseRegistryRepo: "nonexistent.registry.com/deckhouse",
@@ -52,6 +57,8 @@ func TestExtractImageDigestsFromDeckhouseInstaller(t *testing.T) {
 		}},
 		installerTag,
 		installersLayout,
+		map[string]struct{}{}, // prevDigests
+		client,
 	)
 	require.NoError(t, err)
 	require.True(t, len(images) == len(expectedImages))

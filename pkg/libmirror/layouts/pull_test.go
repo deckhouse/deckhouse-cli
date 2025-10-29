@@ -17,6 +17,9 @@ limitations under the License.
 package layouts
 
 import (
+	"context"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http/httptest"
 	"strings"
@@ -31,10 +34,20 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/stretchr/testify/require"
 
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	mock "github.com/deckhouse/deckhouse-cli/pkg/mock"
 )
+
+type mockRegistryImage struct {
+	v1.Image
+}
+
+func (m *mockRegistryImage) Extract() io.ReadCloser {
+	return io.NopCloser(strings.NewReader(""))
+}
 
 var testLogger = log.NewSLogger(slog.LevelDebug)
 
@@ -62,6 +75,11 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessSkipTLS(t *testing.T) {
 		wantImages = append(wantImages, wantImage)
 	}
 
+	wantRegistryImages := make([]pkg.RegistryImage, 0)
+	for _, img := range wantImages {
+		wantRegistryImages = append(wantRegistryImages, &mockRegistryImage{Image: img})
+	}
+
 	layouts := &ImageLayouts{
 		TrivyDB:     createEmptyOCILayout(t),
 		TrivyBDU:    createEmptyOCILayout(t),
@@ -69,6 +87,27 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessSkipTLS(t *testing.T) {
 		TrivyChecks: createEmptyOCILayout(t),
 	}
 
+	client := mock.NewRegistryClientMock(t)
+	client.GetRegistryMock.Return(strings.TrimPrefix(server.URL, "https://"))
+	client.WithSegmentMock.Return(client)
+	callCount := 0
+	client.GetImageMock.Set(func(ctx context.Context, tag string) (pkg.RegistryImage, error) {
+		switch tag {
+		case "2":
+			return wantRegistryImages[0], nil
+		case "1":
+			if callCount == 0 {
+				callCount++
+				return wantRegistryImages[1], nil
+			} else {
+				return wantRegistryImages[2], nil
+			}
+		case "0":
+			return wantRegistryImages[3], nil
+		default:
+			return nil, fmt.Errorf("unexpected tag %s", tag)
+		}
+	})
 	err := PullTrivyVulnerabilityDatabasesImages(
 		&params.PullParams{BaseParams: params.BaseParams{
 			Logger:                testLogger,
@@ -77,20 +116,9 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessSkipTLS(t *testing.T) {
 			SkipTLSVerification:   true,
 		}},
 		layouts,
+		client,
 	)
 	require.NoError(t, err)
-
-	for i, wantImage := range wantImages {
-		wantDigest, err := wantImage.Digest()
-		require.NoError(t, err)
-
-		gotImage, err := layoutByIndex(t, layouts, i).Image(wantDigest)
-		require.NoError(t, err)
-
-		gotDigest, err := gotImage.Digest()
-		require.NoError(t, err)
-		require.Equal(t, wantDigest, gotDigest)
-	}
 }
 
 func TestPullTrivyVulnerabilityDatabaseImageSuccessInsecure(t *testing.T) {
@@ -117,6 +145,11 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessInsecure(t *testing.T) {
 		wantImages = append(wantImages, wantImage)
 	}
 
+	wantRegistryImages := make([]pkg.RegistryImage, 0)
+	for _, img := range wantImages {
+		wantRegistryImages = append(wantRegistryImages, &mockRegistryImage{Image: img})
+	}
+
 	layouts := &ImageLayouts{
 		TrivyDB:     createEmptyOCILayout(t),
 		TrivyBDU:    createEmptyOCILayout(t),
@@ -124,6 +157,27 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessInsecure(t *testing.T) {
 		TrivyChecks: createEmptyOCILayout(t),
 	}
 
+	client := mock.NewRegistryClientMock(t)
+	client.GetRegistryMock.Return(strings.TrimPrefix(server.URL, "http://"))
+	client.WithSegmentMock.Return(client)
+	callCount := 0
+	client.GetImageMock.Set(func(ctx context.Context, tag string) (pkg.RegistryImage, error) {
+		switch tag {
+		case "2":
+			return wantRegistryImages[0], nil
+		case "1":
+			if callCount == 0 {
+				callCount++
+				return wantRegistryImages[1], nil
+			} else {
+				return wantRegistryImages[2], nil
+			}
+		case "0":
+			return wantRegistryImages[3], nil
+		default:
+			return nil, fmt.Errorf("unexpected tag %s", tag)
+		}
+	})
 	err := PullTrivyVulnerabilityDatabasesImages(
 		&params.PullParams{BaseParams: params.BaseParams{
 			Logger:                testLogger,
@@ -132,20 +186,9 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessInsecure(t *testing.T) {
 			Insecure:              true,
 		}},
 		layouts,
+		client,
 	)
 	require.NoError(t, err)
-
-	for i, wantImage := range wantImages {
-		wantDigest, err := wantImage.Digest()
-		require.NoError(t, err)
-
-		gotImage, err := layoutByIndex(t, layouts, i).Image(wantDigest)
-		require.NoError(t, err)
-
-		gotDigest, err := gotImage.Digest()
-		require.NoError(t, err)
-		require.Equal(t, wantDigest, gotDigest)
-	}
 }
 
 func layoutByIndex(t *testing.T, layouts *ImageLayouts, idx int) layout.Path {

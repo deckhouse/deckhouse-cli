@@ -224,9 +224,7 @@ func PullImageSet(
 
 		logger.DebugF("reference here: %s", ref.String())
 
-		split := strings.SplitN(pullReference, ":", 2)
-		imagePath := split[0]
-		tag := split[1]
+		imagePath, tag := splitImageRefByRepoAndTag(pullReference)
 
 		scopedClient := client
 		imageSegmentsRaw := strings.TrimPrefix(imagePath, scopedClient.GetRegistry())
