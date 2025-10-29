@@ -160,7 +160,7 @@ func FindExternalModuleImages(
 			releaseImages[path.Join(mod.RegistryPath, "release")+":"+version] = struct{}{}
 		}
 
-		versionsToMirror = make([]string, 0)
+		versionsToMirror := make([]string, 0)
 
 		for moduleTag := range moduleImagesWithExternal {
 			tag := strings.SplitN(moduleTag, ":", 2)[1]
