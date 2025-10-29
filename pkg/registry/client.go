@@ -35,6 +35,8 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg"
 )
 
+var ErrImageNotFound = errors.New("image not found")
+
 // Client provides methods to interact with container registries
 type Client struct {
 	registryHost            string    // e.g., "registry.deckhouse.io"
@@ -113,7 +115,7 @@ func (c *Client) GetDigest(ctx context.Context, tag string) (*v1.Hash, error) {
 
 	logentry := c.logger.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.constructedSegments),
+		slog.String("segments", c.constructedSegments),
 		slog.String("tag", tag),
 	)
 
@@ -148,7 +150,7 @@ func (c *Client) GetManifest(ctx context.Context, tag string) ([]byte, error) {
 
 	logentry := c.logger.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.constructedSegments),
+		slog.String("segments", c.constructedSegments),
 		slog.String("tag", tag),
 	)
 
@@ -179,7 +181,7 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 
 	logentry := c.logger.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.constructedSegments),
+		slog.String("segments", c.constructedSegments),
 		slog.String("tag", tag),
 	)
 
@@ -193,6 +195,12 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 	opts := append(c.options, remote.WithContext(ctx))
 	img, err := remote.Image(ref, opts...)
 	if err != nil {
+		var transportErr *transport.Error
+		if errors.As(err, &transportErr) && transportErr.StatusCode == 404 {
+			// Image not found, which is expected for non-vulnerable images
+			return nil, ErrImageNotFound
+		}
+
 		return nil, fmt.Errorf("failed to get image: %w", err)
 	}
 
@@ -208,7 +216,7 @@ func (c *Client) PushImage(ctx context.Context, tag string, img pkg.RegistryImag
 
 	logentry := c.logger.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.constructedSegments),
+		slog.String("segments", c.constructedSegments),
 		slog.String("tag", tag),
 	)
 
@@ -237,7 +245,7 @@ func (c *Client) GetImageConfig(ctx context.Context, tag string) (*v1.ConfigFile
 
 	logentry := c.logger.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.constructedSegments),
+		slog.String("segments", c.constructedSegments),
 		slog.String("tag", tag),
 	)
 
@@ -265,7 +273,7 @@ func (c *Client) ListTags(ctx context.Context) ([]string, error) {
 
 	logentry := c.logger.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.constructedSegments),
+		slog.String("segments", c.constructedSegments),
 	)
 
 	logentry.Debug("Listing tags")
@@ -296,7 +304,7 @@ func (c *Client) ListRepositories(ctx context.Context) ([]string, error) {
 
 	logentry := c.logger.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.constructedSegments),
+		slog.String("segments", c.constructedSegments),
 	)
 
 	logentry.Debug("Listing repositories")
@@ -326,8 +334,6 @@ func (c *Client) ListRepositories(ctx context.Context) ([]string, error) {
 	return tags, nil
 }
 
-var ErrImageNotFound = errors.New("image not found")
-
 // CheckImageExists checks if a specific image exists in the registry
 // If image not found, return an error
 // The repository is determined by the chained WithSegment() calls
@@ -336,7 +342,7 @@ func (c *Client) CheckImageExists(ctx context.Context, tag string) error {
 
 	logentry := c.logger.With(
 		slog.String("registry_host", c.registryHost),
-		slog.String("scope", c.constructedSegments),
+		slog.String("segments", c.constructedSegments),
 		slog.String("tag", tag),
 	)
 

@@ -146,13 +146,13 @@ func setupLogger() *log.SLogger {
 	return log.NewSLogger(logLevel)
 }
 
-func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger) ([]string, error) {
+func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger, client pkg.RegistryClient) ([]string, error) {
 	if pullParams.DeckhouseTag != "" {
 		logger.InfoF("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
 		return []string{pullParams.DeckhouseTag}, nil
 	}
 
-	versionsToMirror, err := versionsToMirrorFunc(pullParams)
+	versionsToMirror, err := versionsToMirrorFunc(pullParams, client)
 	if err != nil {
 		return nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}
@@ -320,7 +320,7 @@ func (p *Puller) pullPlatform() error {
 			return err
 		}
 
-		tagsToMirror, err := findTagsToMirror(p.params, p.logger)
+		tagsToMirror, err := findTagsToMirror(p.params, p.logger, client)
 		if err != nil {
 			return fmt.Errorf("Find tags to mirror: %w", err)
 		}

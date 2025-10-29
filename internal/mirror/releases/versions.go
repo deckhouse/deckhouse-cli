@@ -35,7 +35,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 )
 
-func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
+func VersionsToMirror(pullParams *params.PullParams, client pkg.RegistryClient) ([]semver.Version, error) {
 	logger := pullParams.Logger
 
 	releaseChannelsToCopy := internal.GetAllDefaultReleaseChannels()
@@ -65,7 +65,7 @@ func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
 		}
 	}
 
-	tags, err := getReleasedTagsFromRegistry(pullParams)
+	tags, err := getReleasedTagsFromRegistry(pullParams, client.WithSegment("release-channel"))
 	if err != nil {
 		return nil, fmt.Errorf("get releases from github: %w", err)
 	}
@@ -83,13 +83,18 @@ func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
 	return deduplicateVersions(append(vers, versionsAboveMinimal...)), nil
 }
 
-func getReleasedTagsFromRegistry(pullParams *params.PullParams) ([]string, error) {
-	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&pullParams.BaseParams)
+func getReleasedTagsFromRegistry(pullParams *params.PullParams, client pkg.RegistryClient) ([]string, error) {
+	logger := pullParams.Logger
+
+	nameOpts, _ := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&pullParams.BaseParams)
 	repo, err := name.NewRepository(pullParams.DeckhouseRegistryRepo+"/release-channel", nameOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("parsing repo: %v", err)
 	}
-	tags, err := remote.List(repo, remoteOpts...)
+
+	logger.DebugF("listing: %s", repo.String())
+
+	tags, err := client.ListTags(context.TODO())
 	if err != nil {
 		return nil, fmt.Errorf("get tags from Deckhouse registry: %w", err)
 	}

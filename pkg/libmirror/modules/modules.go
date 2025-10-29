@@ -56,9 +56,9 @@ func (m *Module) Versions() []*semver.Version {
 	return versions
 }
 
-func ForRepo(repo string, registryAuth authn.Authenticator, insecure, skipVerifyTLS bool) ([]Module, error) {
+func ForRepo(repo string, registryAuth authn.Authenticator, insecure, skipVerifyTLS bool, client pkg.RegistryClient) ([]Module, error) {
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(registryAuth, insecure, skipVerifyTLS)
-	result, err := getModulesForRepo(repo, nameOpts, remoteOpts)
+	result, err := getModulesForRepo(repo, nameOpts, remoteOpts, client)
 	if err != nil {
 		return nil, fmt.Errorf("Get external modules: %w", err)
 	}
@@ -70,13 +70,9 @@ func getModulesForRepo(
 	repo string,
 	nameOpts []name.Option,
 	remoteOpts []remote.Option,
+	client pkg.RegistryClient,
 ) ([]Module, error) {
-	modulesRepo, err := name.NewRepository(repo, nameOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("Parsing modules repo: %v", err)
-	}
-
-	modules, err := remote.List(modulesRepo, remoteOpts...)
+	modules, err := client.ListTags(context.TODO())
 	if err != nil {
 		if errorutil.IsRepoNotFoundError(err) {
 			return []Module{}, nil

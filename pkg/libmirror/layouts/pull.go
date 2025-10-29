@@ -18,6 +18,7 @@ package layouts
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -30,9 +31,9 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 func PullInstallers(pullParams *params.PullParams, layouts *ImageLayouts, client pkg.RegistryClient) error {
@@ -216,20 +217,23 @@ func PullImageSet(
 			}
 		}
 
-		_, err := name.ParseReference(pullReference, nameOpts...)
+		ref, err := name.ParseReference(pullReference, nameOpts...)
 		if err != nil {
 			return fmt.Errorf("parse image reference %q: %w", pullReference, err)
 		}
+
+		logger.DebugF("reference here: %s", ref.String())
 
 		split := strings.SplitN(pullReference, ":", 2)
 		imagePath := split[0]
 		tag := split[1]
 
-		imageSegmentsRaw := strings.TrimPrefix(imagePath, client.GetRegistry())
+		scopedClient := client
+		imageSegmentsRaw := strings.TrimPrefix(imagePath, scopedClient.GetRegistry())
 		imageSegments := strings.Split(imageSegmentsRaw, "/")
 
 		for i, segment := range imageSegments {
-			client = client.WithSegment(segment)
+			scopedClient = scopedClient.WithSegment(segment)
 			logger.DebugF("Segment %d: %s", i, segment)
 		}
 
@@ -237,12 +241,14 @@ func PullImageSet(
 			pullParams.Logger,
 			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageReferenceString),
 			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
-				img, err := client.GetImage(context.TODO(), tag)
+				img, err := scopedClient.GetImage(context.TODO(), tag)
 				if err != nil {
-					if errorutil.IsImageNotFoundError(err) && pullOpts.allowMissingTags {
-						pullParams.Logger.WarnLn("⚠️ Not found in registry, skipping pull")
+					if errors.Is(err, registry.ErrImageNotFound) && pullOpts.allowMissingTags {
+						logger.WarnLn("⚠️ Not found in registry, skipping pull")
 						return nil
 					}
+
+					logger.DebugF("error here: %v", err)
 
 					return fmt.Errorf("pull image metadata: %w", err)
 				}

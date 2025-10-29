@@ -76,11 +76,14 @@ func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string,
 	}
 
 	logger.InfoF("Searching for Deckhouse built-in modules digests")
+
+	var prevDigests = make(map[string]struct{}, 0)
 	for imageTag := range imageLayouts.InstallImages {
-		digests, err := images.ExtractImageDigestsFromDeckhouseInstaller(pullParams, imageTag, imageLayouts.Install, client)
+		digests, err := images.ExtractImageDigestsFromDeckhouseInstaller(pullParams, imageTag, imageLayouts.Install, prevDigests, client)
 		if err != nil {
 			return fmt.Errorf("Extract images digests: %w", err)
 		}
+
 		maps.Copy(imageLayouts.DeckhouseImages, digests)
 	}
 	logger.InfoF("Found %d images", len(imageLayouts.DeckhouseImages))

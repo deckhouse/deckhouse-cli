@@ -44,7 +44,9 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter, client p
 	modulesData, err = modules.ForRepo(
 		path.Join(pullParams.DeckhouseRegistryRepo, pullParams.ModulesPathSuffix),
 		pullParams.RegistryAuth,
-		pullParams.Insecure, pullParams.SkipTLSVerification)
+		pullParams.Insecure, pullParams.SkipTLSVerification,
+		client,
+	)
 	if err != nil {
 		return fmt.Errorf("Find modules: %w", err)
 	}

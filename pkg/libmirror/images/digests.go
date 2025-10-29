@@ -51,6 +51,7 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 	mirrorCtx *params.PullParams,
 	installerTag string,
 	installersLayout layout.Path,
+	prevDigests map[string]struct{},
 	client pkg.RegistryClient,
 ) (map[string]struct{}, error) {
 	logger := mirrorCtx.Logger
@@ -103,6 +104,20 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 	const scanPrintInterval = 20
 	counter := 0
 	for image := range images {
+		counter++
+		if counter%scanPrintInterval == 0 {
+			logger.InfoF("[%d / %d] Scanning images for VEX", counter, len(images))
+		}
+
+		if _, ok := prevDigests[image]; ok {
+			continue
+		}
+
+		vexImageName := strings.Replace(strings.Replace(image, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
+		if _, ok := prevDigests[vexImageName]; ok {
+			continue
+		}
+
 		vexImageName, err := FindVexImage(mirrorCtx, mirrorCtx.DeckhouseRegistryRepo, nameOpts, remoteOpts, image, client)
 		if err != nil {
 			return nil, fmt.Errorf("find VEX image for digest %q: %w", image, err)
@@ -113,10 +128,8 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 			vex = append(vex, vexImageName)
 		}
 
-		counter++
-		if counter%scanPrintInterval == 0 {
-			logger.InfoF("[%d / %d] Scanning images for VEX", counter, len(images))
-		}
+		prevDigests[image] = struct{}{}
+		prevDigests[vexImageName] = struct{}{}
 	}
 
 	logger.InfoF("[%d / %d] Scanning images for VEX", counter, len(images))
