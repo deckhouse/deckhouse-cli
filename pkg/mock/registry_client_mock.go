@@ -20,6 +20,13 @@ type RegistryClientMock struct {
 	t          minimock.Tester
 	finishOnce sync.Once
 
+	funcCheckImageExists          func(ctx context.Context, tag string) (err error)
+	funcCheckImageExistsOrigin    string
+	inspectFuncCheckImageExists   func(ctx context.Context, tag string)
+	afterCheckImageExistsCounter  uint64
+	beforeCheckImageExistsCounter uint64
+	CheckImageExistsMock          mRegistryClientMockCheckImageExists
+
 	funcGetDigest          func(ctx context.Context, tag string) (hp1 *v1.Hash, err error)
 	funcGetDigestOrigin    string
 	inspectFuncGetDigest   func(ctx context.Context, tag string)
@@ -92,6 +99,9 @@ func NewRegistryClientMock(t minimock.Tester) *RegistryClientMock {
 		controller.RegisterMocker(m)
 	}
 
+	m.CheckImageExistsMock = mRegistryClientMockCheckImageExists{mock: m}
+	m.CheckImageExistsMock.callArgs = []*RegistryClientMockCheckImageExistsParams{}
+
 	m.GetDigestMock = mRegistryClientMockGetDigest{mock: m}
 	m.GetDigestMock.callArgs = []*RegistryClientMockGetDigestParams{}
 
@@ -121,6 +131,348 @@ func NewRegistryClientMock(t minimock.Tester) *RegistryClientMock {
 	t.Cleanup(m.MinimockFinish)
 
 	return m
+}
+
+type mRegistryClientMockCheckImageExists struct {
+	optional           bool
+	mock               *RegistryClientMock
+	defaultExpectation *RegistryClientMockCheckImageExistsExpectation
+	expectations       []*RegistryClientMockCheckImageExistsExpectation
+
+	callArgs []*RegistryClientMockCheckImageExistsParams
+	mutex    sync.RWMutex
+
+	expectedInvocations       uint64
+	expectedInvocationsOrigin string
+}
+
+// RegistryClientMockCheckImageExistsExpectation specifies expectation struct of the RegistryClient.CheckImageExists
+type RegistryClientMockCheckImageExistsExpectation struct {
+	mock               *RegistryClientMock
+	params             *RegistryClientMockCheckImageExistsParams
+	paramPtrs          *RegistryClientMockCheckImageExistsParamPtrs
+	expectationOrigins RegistryClientMockCheckImageExistsExpectationOrigins
+	results            *RegistryClientMockCheckImageExistsResults
+	returnOrigin       string
+	Counter            uint64
+}
+
+// RegistryClientMockCheckImageExistsParams contains parameters of the RegistryClient.CheckImageExists
+type RegistryClientMockCheckImageExistsParams struct {
+	ctx context.Context
+	tag string
+}
+
+// RegistryClientMockCheckImageExistsParamPtrs contains pointers to parameters of the RegistryClient.CheckImageExists
+type RegistryClientMockCheckImageExistsParamPtrs struct {
+	ctx *context.Context
+	tag *string
+}
+
+// RegistryClientMockCheckImageExistsResults contains results of the RegistryClient.CheckImageExists
+type RegistryClientMockCheckImageExistsResults struct {
+	err error
+}
+
+// RegistryClientMockCheckImageExistsOrigins contains origins of expectations of the RegistryClient.CheckImageExists
+type RegistryClientMockCheckImageExistsExpectationOrigins struct {
+	origin    string
+	originCtx string
+	originTag string
+}
+
+// Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
+// the test will fail minimock's automatic final call check if the mocked method was not called at least once.
+// Optional() makes method check to work in '0 or more' mode.
+// It is NOT RECOMMENDED to use this option unless you really need it, as default behaviour helps to
+// catch the problems when the expected method call is totally skipped during test run.
+func (mmCheckImageExists *mRegistryClientMockCheckImageExists) Optional() *mRegistryClientMockCheckImageExists {
+	mmCheckImageExists.optional = true
+	return mmCheckImageExists
+}
+
+// Expect sets up expected params for RegistryClient.CheckImageExists
+func (mmCheckImageExists *mRegistryClientMockCheckImageExists) Expect(ctx context.Context, tag string) *mRegistryClientMockCheckImageExists {
+	if mmCheckImageExists.mock.funcCheckImageExists != nil {
+		mmCheckImageExists.mock.t.Fatalf("RegistryClientMock.CheckImageExists mock is already set by Set")
+	}
+
+	if mmCheckImageExists.defaultExpectation == nil {
+		mmCheckImageExists.defaultExpectation = &RegistryClientMockCheckImageExistsExpectation{}
+	}
+
+	if mmCheckImageExists.defaultExpectation.paramPtrs != nil {
+		mmCheckImageExists.mock.t.Fatalf("RegistryClientMock.CheckImageExists mock is already set by ExpectParams functions")
+	}
+
+	mmCheckImageExists.defaultExpectation.params = &RegistryClientMockCheckImageExistsParams{ctx, tag}
+	mmCheckImageExists.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
+	for _, e := range mmCheckImageExists.expectations {
+		if minimock.Equal(e.params, mmCheckImageExists.defaultExpectation.params) {
+			mmCheckImageExists.mock.t.Fatalf("Expectation set by When has same params: %#v", *mmCheckImageExists.defaultExpectation.params)
+		}
+	}
+
+	return mmCheckImageExists
+}
+
+// ExpectCtxParam1 sets up expected param ctx for RegistryClient.CheckImageExists
+func (mmCheckImageExists *mRegistryClientMockCheckImageExists) ExpectCtxParam1(ctx context.Context) *mRegistryClientMockCheckImageExists {
+	if mmCheckImageExists.mock.funcCheckImageExists != nil {
+		mmCheckImageExists.mock.t.Fatalf("RegistryClientMock.CheckImageExists mock is already set by Set")
+	}
+
+	if mmCheckImageExists.defaultExpectation == nil {
+		mmCheckImageExists.defaultExpectation = &RegistryClientMockCheckImageExistsExpectation{}
+	}
+
+	if mmCheckImageExists.defaultExpectation.params != nil {
+		mmCheckImageExists.mock.t.Fatalf("RegistryClientMock.CheckImageExists mock is already set by Expect")
+	}
+
+	if mmCheckImageExists.defaultExpectation.paramPtrs == nil {
+		mmCheckImageExists.defaultExpectation.paramPtrs = &RegistryClientMockCheckImageExistsParamPtrs{}
+	}
+	mmCheckImageExists.defaultExpectation.paramPtrs.ctx = &ctx
+	mmCheckImageExists.defaultExpectation.expectationOrigins.originCtx = minimock.CallerInfo(1)
+
+	return mmCheckImageExists
+}
+
+// ExpectTagParam2 sets up expected param tag for RegistryClient.CheckImageExists
+func (mmCheckImageExists *mRegistryClientMockCheckImageExists) ExpectTagParam2(tag string) *mRegistryClientMockCheckImageExists {
+	if mmCheckImageExists.mock.funcCheckImageExists != nil {
+		mmCheckImageExists.mock.t.Fatalf("RegistryClientMock.CheckImageExists mock is already set by Set")
+	}
+
+	if mmCheckImageExists.defaultExpectation == nil {
+		mmCheckImageExists.defaultExpectation = &RegistryClientMockCheckImageExistsExpectation{}
+	}
+
+	if mmCheckImageExists.defaultExpectation.params != nil {
+		mmCheckImageExists.mock.t.Fatalf("RegistryClientMock.CheckImageExists mock is already set by Expect")
+	}
+
+	if mmCheckImageExists.defaultExpectation.paramPtrs == nil {
+		mmCheckImageExists.defaultExpectation.paramPtrs = &RegistryClientMockCheckImageExistsParamPtrs{}
+	}
+	mmCheckImageExists.defaultExpectation.paramPtrs.tag = &tag
+	mmCheckImageExists.defaultExpectation.expectationOrigins.originTag = minimock.CallerInfo(1)
+
+	return mmCheckImageExists
+}
+
+// Inspect accepts an inspector function that has same arguments as the RegistryClient.CheckImageExists
+func (mmCheckImageExists *mRegistryClientMockCheckImageExists) Inspect(f func(ctx context.Context, tag string)) *mRegistryClientMockCheckImageExists {
+	if mmCheckImageExists.mock.inspectFuncCheckImageExists != nil {
+		mmCheckImageExists.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.CheckImageExists")
+	}
+
+	mmCheckImageExists.mock.inspectFuncCheckImageExists = f
+
+	return mmCheckImageExists
+}
+
+// Return sets up results that will be returned by RegistryClient.CheckImageExists
+func (mmCheckImageExists *mRegistryClientMockCheckImageExists) Return(err error) *RegistryClientMock {
+	if mmCheckImageExists.mock.funcCheckImageExists != nil {
+		mmCheckImageExists.mock.t.Fatalf("RegistryClientMock.CheckImageExists mock is already set by Set")
+	}
+
+	if mmCheckImageExists.defaultExpectation == nil {
+		mmCheckImageExists.defaultExpectation = &RegistryClientMockCheckImageExistsExpectation{mock: mmCheckImageExists.mock}
+	}
+	mmCheckImageExists.defaultExpectation.results = &RegistryClientMockCheckImageExistsResults{err}
+	mmCheckImageExists.defaultExpectation.returnOrigin = minimock.CallerInfo(1)
+	return mmCheckImageExists.mock
+}
+
+// Set uses given function f to mock the RegistryClient.CheckImageExists method
+func (mmCheckImageExists *mRegistryClientMockCheckImageExists) Set(f func(ctx context.Context, tag string) (err error)) *RegistryClientMock {
+	if mmCheckImageExists.defaultExpectation != nil {
+		mmCheckImageExists.mock.t.Fatalf("Default expectation is already set for the RegistryClient.CheckImageExists method")
+	}
+
+	if len(mmCheckImageExists.expectations) > 0 {
+		mmCheckImageExists.mock.t.Fatalf("Some expectations are already set for the RegistryClient.CheckImageExists method")
+	}
+
+	mmCheckImageExists.mock.funcCheckImageExists = f
+	mmCheckImageExists.mock.funcCheckImageExistsOrigin = minimock.CallerInfo(1)
+	return mmCheckImageExists.mock
+}
+
+// When sets expectation for the RegistryClient.CheckImageExists which will trigger the result defined by the following
+// Then helper
+func (mmCheckImageExists *mRegistryClientMockCheckImageExists) When(ctx context.Context, tag string) *RegistryClientMockCheckImageExistsExpectation {
+	if mmCheckImageExists.mock.funcCheckImageExists != nil {
+		mmCheckImageExists.mock.t.Fatalf("RegistryClientMock.CheckImageExists mock is already set by Set")
+	}
+
+	expectation := &RegistryClientMockCheckImageExistsExpectation{
+		mock:               mmCheckImageExists.mock,
+		params:             &RegistryClientMockCheckImageExistsParams{ctx, tag},
+		expectationOrigins: RegistryClientMockCheckImageExistsExpectationOrigins{origin: minimock.CallerInfo(1)},
+	}
+	mmCheckImageExists.expectations = append(mmCheckImageExists.expectations, expectation)
+	return expectation
+}
+
+// Then sets up RegistryClient.CheckImageExists return parameters for the expectation previously defined by the When method
+func (e *RegistryClientMockCheckImageExistsExpectation) Then(err error) *RegistryClientMock {
+	e.results = &RegistryClientMockCheckImageExistsResults{err}
+	return e.mock
+}
+
+// Times sets number of times RegistryClient.CheckImageExists should be invoked
+func (mmCheckImageExists *mRegistryClientMockCheckImageExists) Times(n uint64) *mRegistryClientMockCheckImageExists {
+	if n == 0 {
+		mmCheckImageExists.mock.t.Fatalf("Times of RegistryClientMock.CheckImageExists mock can not be zero")
+	}
+	mm_atomic.StoreUint64(&mmCheckImageExists.expectedInvocations, n)
+	mmCheckImageExists.expectedInvocationsOrigin = minimock.CallerInfo(1)
+	return mmCheckImageExists
+}
+
+func (mmCheckImageExists *mRegistryClientMockCheckImageExists) invocationsDone() bool {
+	if len(mmCheckImageExists.expectations) == 0 && mmCheckImageExists.defaultExpectation == nil && mmCheckImageExists.mock.funcCheckImageExists == nil {
+		return true
+	}
+
+	totalInvocations := mm_atomic.LoadUint64(&mmCheckImageExists.mock.afterCheckImageExistsCounter)
+	expectedInvocations := mm_atomic.LoadUint64(&mmCheckImageExists.expectedInvocations)
+
+	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
+}
+
+// CheckImageExists implements mm_pkg.RegistryClient
+func (mmCheckImageExists *RegistryClientMock) CheckImageExists(ctx context.Context, tag string) (err error) {
+	mm_atomic.AddUint64(&mmCheckImageExists.beforeCheckImageExistsCounter, 1)
+	defer mm_atomic.AddUint64(&mmCheckImageExists.afterCheckImageExistsCounter, 1)
+
+	mmCheckImageExists.t.Helper()
+
+	if mmCheckImageExists.inspectFuncCheckImageExists != nil {
+		mmCheckImageExists.inspectFuncCheckImageExists(ctx, tag)
+	}
+
+	mm_params := RegistryClientMockCheckImageExistsParams{ctx, tag}
+
+	// Record call args
+	mmCheckImageExists.CheckImageExistsMock.mutex.Lock()
+	mmCheckImageExists.CheckImageExistsMock.callArgs = append(mmCheckImageExists.CheckImageExistsMock.callArgs, &mm_params)
+	mmCheckImageExists.CheckImageExistsMock.mutex.Unlock()
+
+	for _, e := range mmCheckImageExists.CheckImageExistsMock.expectations {
+		if minimock.Equal(*e.params, mm_params) {
+			mm_atomic.AddUint64(&e.Counter, 1)
+			return e.results.err
+		}
+	}
+
+	if mmCheckImageExists.CheckImageExistsMock.defaultExpectation != nil {
+		mm_atomic.AddUint64(&mmCheckImageExists.CheckImageExistsMock.defaultExpectation.Counter, 1)
+		mm_want := mmCheckImageExists.CheckImageExistsMock.defaultExpectation.params
+		mm_want_ptrs := mmCheckImageExists.CheckImageExistsMock.defaultExpectation.paramPtrs
+
+		mm_got := RegistryClientMockCheckImageExistsParams{ctx, tag}
+
+		if mm_want_ptrs != nil {
+
+			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
+				mmCheckImageExists.t.Errorf("RegistryClientMock.CheckImageExists got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmCheckImageExists.CheckImageExistsMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
+			}
+
+			if mm_want_ptrs.tag != nil && !minimock.Equal(*mm_want_ptrs.tag, mm_got.tag) {
+				mmCheckImageExists.t.Errorf("RegistryClientMock.CheckImageExists got unexpected parameter tag, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmCheckImageExists.CheckImageExistsMock.defaultExpectation.expectationOrigins.originTag, *mm_want_ptrs.tag, mm_got.tag, minimock.Diff(*mm_want_ptrs.tag, mm_got.tag))
+			}
+
+		} else if mm_want != nil && !minimock.Equal(*mm_want, mm_got) {
+			mmCheckImageExists.t.Errorf("RegistryClientMock.CheckImageExists got unexpected parameters, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+				mmCheckImageExists.CheckImageExistsMock.defaultExpectation.expectationOrigins.origin, *mm_want, mm_got, minimock.Diff(*mm_want, mm_got))
+		}
+
+		mm_results := mmCheckImageExists.CheckImageExistsMock.defaultExpectation.results
+		if mm_results == nil {
+			mmCheckImageExists.t.Fatal("No results are set for the RegistryClientMock.CheckImageExists")
+		}
+		return (*mm_results).err
+	}
+	if mmCheckImageExists.funcCheckImageExists != nil {
+		return mmCheckImageExists.funcCheckImageExists(ctx, tag)
+	}
+	mmCheckImageExists.t.Fatalf("Unexpected call to RegistryClientMock.CheckImageExists. %v %v", ctx, tag)
+	return
+}
+
+// CheckImageExistsAfterCounter returns a count of finished RegistryClientMock.CheckImageExists invocations
+func (mmCheckImageExists *RegistryClientMock) CheckImageExistsAfterCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmCheckImageExists.afterCheckImageExistsCounter)
+}
+
+// CheckImageExistsBeforeCounter returns a count of RegistryClientMock.CheckImageExists invocations
+func (mmCheckImageExists *RegistryClientMock) CheckImageExistsBeforeCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmCheckImageExists.beforeCheckImageExistsCounter)
+}
+
+// Calls returns a list of arguments used in each call to RegistryClientMock.CheckImageExists.
+// The list is in the same order as the calls were made (i.e. recent calls have a higher index)
+func (mmCheckImageExists *mRegistryClientMockCheckImageExists) Calls() []*RegistryClientMockCheckImageExistsParams {
+	mmCheckImageExists.mutex.RLock()
+
+	argCopy := make([]*RegistryClientMockCheckImageExistsParams, len(mmCheckImageExists.callArgs))
+	copy(argCopy, mmCheckImageExists.callArgs)
+
+	mmCheckImageExists.mutex.RUnlock()
+
+	return argCopy
+}
+
+// MinimockCheckImageExistsDone returns true if the count of the CheckImageExists invocations corresponds
+// the number of defined expectations
+func (m *RegistryClientMock) MinimockCheckImageExistsDone() bool {
+	if m.CheckImageExistsMock.optional {
+		// Optional methods provide '0 or more' call count restriction.
+		return true
+	}
+
+	for _, e := range m.CheckImageExistsMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			return false
+		}
+	}
+
+	return m.CheckImageExistsMock.invocationsDone()
+}
+
+// MinimockCheckImageExistsInspect logs each unmet expectation
+func (m *RegistryClientMock) MinimockCheckImageExistsInspect() {
+	for _, e := range m.CheckImageExistsMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			m.t.Errorf("Expected call to RegistryClientMock.CheckImageExists at\n%s with params: %#v", e.expectationOrigins.origin, *e.params)
+		}
+	}
+
+	afterCheckImageExistsCounter := mm_atomic.LoadUint64(&m.afterCheckImageExistsCounter)
+	// if default expectation was set then invocations count should be greater than zero
+	if m.CheckImageExistsMock.defaultExpectation != nil && afterCheckImageExistsCounter < 1 {
+		if m.CheckImageExistsMock.defaultExpectation.params == nil {
+			m.t.Errorf("Expected call to RegistryClientMock.CheckImageExists at\n%s", m.CheckImageExistsMock.defaultExpectation.returnOrigin)
+		} else {
+			m.t.Errorf("Expected call to RegistryClientMock.CheckImageExists at\n%s with params: %#v", m.CheckImageExistsMock.defaultExpectation.expectationOrigins.origin, *m.CheckImageExistsMock.defaultExpectation.params)
+		}
+	}
+	// if func was set then invocations count should be greater than zero
+	if m.funcCheckImageExists != nil && afterCheckImageExistsCounter < 1 {
+		m.t.Errorf("Expected call to RegistryClientMock.CheckImageExists at\n%s", m.funcCheckImageExistsOrigin)
+	}
+
+	if !m.CheckImageExistsMock.invocationsDone() && afterCheckImageExistsCounter > 0 {
+		m.t.Errorf("Expected %d calls to RegistryClientMock.CheckImageExists at\n%s but found %d calls",
+			mm_atomic.LoadUint64(&m.CheckImageExistsMock.expectedInvocations), m.CheckImageExistsMock.expectedInvocationsOrigin, afterCheckImageExistsCounter)
+	}
 }
 
 type mRegistryClientMockGetDigest struct {
@@ -2993,6 +3345,8 @@ func (m *RegistryClientMock) MinimockWithSegmentInspect() {
 func (m *RegistryClientMock) MinimockFinish() {
 	m.finishOnce.Do(func() {
 		if !m.minimockDone() {
+			m.MinimockCheckImageExistsInspect()
+
 			m.MinimockGetDigestInspect()
 
 			m.MinimockGetImageInspect()
@@ -3033,6 +3387,7 @@ func (m *RegistryClientMock) MinimockWait(timeout mm_time.Duration) {
 func (m *RegistryClientMock) minimockDone() bool {
 	done := true
 	return done &&
+		m.MinimockCheckImageExistsDone() &&
 		m.MinimockGetDigestDone() &&
 		m.MinimockGetImageDone() &&
 		m.MinimockGetImageConfigDone() &&

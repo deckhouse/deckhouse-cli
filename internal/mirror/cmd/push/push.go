@@ -313,11 +313,17 @@ func (p *Pusher) validateRegistryAccess() error {
 
 // pushStaticPackages pushes platform and security packages
 func (p *Pusher) pushStaticPackages() error {
+	logger := dkplog.NewNop()
+
+	if log.DebugLogLevel() >= 3 {
+		logger = dkplog.NewLogger(dkplog.WithLevel(slog.LevelDebug))
+	}
+
 	// Create registry client for module operations
 	clientOpts := &registry.ClientOptions{
 		Insecure:      p.pushParams.Insecure,
 		TLSSkipVerify: p.pushParams.SkipTLSVerification,
-		Logger:        dkplog.NewNop(), // Will use default logger
+		Logger:        logger,
 	}
 
 	if p.pushParams.RegistryAuth != nil {
@@ -337,11 +343,17 @@ func (p *Pusher) pushStaticPackages() error {
 
 // pushModules pushes module packages
 func (p *Pusher) pushModules() error {
+	logger := dkplog.NewNop()
+
+	if log.DebugLogLevel() >= 3 {
+		logger = dkplog.NewLogger(dkplog.WithLevel(slog.LevelDebug))
+	}
+
 	// Create registry client for module operations
 	clientOpts := &registry.ClientOptions{
 		Insecure:      p.pushParams.Insecure,
 		TLSSkipVerify: p.pushParams.SkipTLSVerification,
-		Logger:        dkplog.NewNop(), // Will use default logger
+		Logger:        logger, // Will use default logger
 	}
 
 	if p.pushParams.RegistryAuth != nil {

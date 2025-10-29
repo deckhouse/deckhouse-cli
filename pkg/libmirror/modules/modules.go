@@ -17,6 +17,7 @@ limitations under the License.
 package modules
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
@@ -109,6 +111,7 @@ func FindExternalModuleImages(
 	filter *Filter,
 	authProvider authn.Authenticator,
 	insecure, skipVerifyTLS bool,
+	client pkg.RegistryClient,
 ) (moduleImages []string, moduleImagesWithExternal, releaseImages map[string]struct{}, err error) {
 	logger := params.Logger
 
@@ -137,61 +140,78 @@ func FindExternalModuleImages(
 			moduleImagesWithExternal[mod.RegistryPath+":"+tag] = struct{}{}
 			releaseImages[path.Join(mod.RegistryPath, "release")+":"+tag] = struct{}{}
 		}
-	} else if filter.ShouldMirrorReleaseChannels(mod.Name) {
+	}
+
+	if filter.ShouldMirrorReleaseChannels(mod.Name) {
 		// No explicit versions - use release channels
 		channelImgs, err := getAvailableReleaseChannelsImagesForModule(mod, nameOpts, remoteOpts)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("get release channels: %w", err)
 		}
+
 		for img := range channelImgs {
 			releaseImages[img] = struct{}{}
 		}
 
-		channelVers, err := releases.FetchVersionsFromModuleReleaseChannels(channelImgs, authProvider, insecure, skipVerifyTLS)
+		channelVers, err := releases.FetchVersionsFromModuleReleaseChannels(channelImgs, authProvider, insecure, skipVerifyTLS, client.WithSegment("release"))
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("fetch channel versions: %w", err)
 		}
+
 		for _, version := range channelVers {
 			moduleImages = append(moduleImages, mod.RegistryPath+":"+version)
 			moduleImagesWithExternal[mod.RegistryPath+":"+version] = struct{}{}
 			releaseImages[path.Join(mod.RegistryPath, "release")+":"+version] = struct{}{}
 		}
+
+		versionsToMirror = make([]string, 0)
+
+		for moduleTag := range moduleImagesWithExternal {
+			tag := strings.SplitN(moduleTag, ":", 2)[1]
+
+			semverTag, err := semver.NewVersion(tag)
+			if err == nil {
+				versionsToMirror = append(versionsToMirror, semverTag.Original())
+			}
+		}
 	}
+
+	//remove duplicate from versionsToMirror
+	seen := make(map[string]struct{})
+	uniqueTags := make([]string, 0, len(versionsToMirror))
+	for _, tag := range versionsToMirror {
+		if _, ok := seen[tag]; !ok {
+			seen[tag] = struct{}{}
+			uniqueTags = append(uniqueTags, tag)
+		}
+	}
+
+	versionsToMirror = uniqueTags
 
 	logger.DebugF("Finding module extra images for %s", mod.Name)
 
-	for _, imageTag := range moduleImages {
-		if strings.Contains(imageTag, "@sha256:") {
-			logger.DebugF("Skipping digest reference %s for images_digests.json extraction", imageTag)
-			continue // Skip digest references
-		}
+	for _, tag := range versionsToMirror {
+		logger.DebugF("Checking module image %s for extra images", tag)
 
-		logger.DebugF("Checking module image %s for extra images", imageTag)
-
-		ref, err := name.ParseReference(imageTag, nameOpts...)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("Get digests for %q version: %w", imageTag, err)
-		}
-
-		img, err := remote.Image(ref, remoteOpts...)
+		img, err := client.GetImage(context.TODO(), tag)
 		if err != nil {
 			if errorutil.IsImageNotFoundError(err) {
 				continue
 			}
-			return nil, nil, nil, fmt.Errorf("Get digests for %q version: %w", imageTag, err)
+			return nil, nil, nil, fmt.Errorf("Get digests for %q version: %w", tag, err)
 		}
 
-		logger.DebugF("Extracting images_digests.json from %s", imageTag)
+		logger.DebugF("Extracting images_digests.json from %s", tag)
 
 		imagesDigestsJSON, err := images.ExtractFileFromImage(img, "images_digests.json")
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			continue
 		case err != nil:
-			return nil, nil, nil, fmt.Errorf("Extract digests for %q version: %w", imageTag, err)
+			return nil, nil, nil, fmt.Errorf("Extract digests for %q version: %w", tag, err)
 		}
 
-		logger.DebugF("Parsing images_digests.json from %s", imageTag)
+		logger.DebugF("Parsing images_digests.json from %s", tag)
 
 		digests := images.ExtractDigestsFromJSONFile(imagesDigestsJSON.Bytes())
 		for _, digest := range digests {
@@ -239,11 +259,11 @@ func FindModuleExtraImages(
 	moduleImages []string,
 	authProvider authn.Authenticator,
 	insecure, skipVerifyTLS bool,
+	client pkg.RegistryClient,
 ) (extraImages map[string]struct{}, err error) {
 	logger := params.Logger
 
 	extraImages = map[string]struct{}{}
-	_, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
 
 	// Try to extract extra_images.json from any available module version
 	for _, imageTag := range moduleImages {
@@ -254,17 +274,13 @@ func FindModuleExtraImages(
 
 		logger.DebugF("Checking module image %s for extra_images.json", imageTag)
 
-		ref, err := name.ParseReference(imageTag)
-		if err != nil {
-			continue
-		}
-
-		img, err := remote.Image(ref, remoteOpts...)
+		img, err := client.GetImage(context.TODO(), strings.Split(imageTag, ":")[1])
 		if err != nil {
 			continue
 		}
 
 		logger.DebugF("Extracting extra_images.json from %s", imageTag)
+
 		extraImagesJSON, err := images.ExtractFileFromImage(img, "extra_images.json")
 		if errors.Is(err, fs.ErrNotExist) {
 			continue // No extra_images.json in this version, try next
@@ -283,6 +299,7 @@ func FindModuleExtraImages(
 		// Convert to full registry paths with tags
 		for imageName, tagValue := range extraImagesRaw {
 			var imageTag string
+
 			switch v := tagValue.(type) {
 			case float64:
 				imageTag = fmt.Sprintf("%.0f", v)
@@ -291,6 +308,7 @@ func FindModuleExtraImages(
 			default:
 				return nil, fmt.Errorf("Invalid tag type for %q in extra_images.json: %T", imageName, tagValue)
 			}
+
 			fullImagePath := path.Join(mod.RegistryPath, "extra", imageName) + ":" + imageTag
 			extraImages[fullImagePath] = struct{}{}
 		}

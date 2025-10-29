@@ -17,6 +17,7 @@ limitations under the License.
 package releases
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -27,19 +28,11 @@ import (
 	"golang.org/x/exp/maps"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
-)
-
-const (
-	alphaChannel     = "alpha"
-	betaChannel      = "beta"
-	earlyAccess      = "early-access"
-	stableChannel    = "stable"
-	rockSolidChannel = "rock-solid"
-	ltsChannel       = "lts"
 )
 
 func VersionsToMirror(pullParams *params.PullParams) ([]semver.Version, error) {
@@ -167,7 +160,7 @@ func getReleaseChannelVersionFromRegistry(mirrorCtx *params.PullParams, releaseC
 	}
 
 	if releaseInfo.Suspended {
-		return nil, fmt.Errorf("Cannot mirror Deckhouse: source registry contains suspended release channel %q, try again later", releaseChannel)
+		return nil, fmt.Errorf("cannot mirror Deckhouse: source registry contains suspended release channel %q, try again later", releaseChannel)
 	}
 
 	ver, err := semver.NewVersion(releaseInfo.Version)
@@ -190,8 +183,9 @@ func FetchVersionsFromModuleReleaseChannels(
 	releaseChannelImages map[string]struct{},
 	authProvider authn.Authenticator,
 	insecure, skipVerifyTLS bool,
+	client pkg.RegistryClient,
 ) (map[string]string, error) {
-	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
+	nameOpts, _ := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
 	channelVersions := map[string]string{}
 	for imageTag := range releaseChannelImages {
 		ref, err := name.ParseReference(imageTag, nameOpts...)
@@ -199,7 +193,10 @@ func FetchVersionsFromModuleReleaseChannels(
 			return nil, fmt.Errorf("pull %q release channel: %w", imageTag, err)
 		}
 
-		img, err := remote.Image(ref, remoteOpts...)
+		// Extract repository path and tag
+		tag := ref.Identifier()
+
+		img, err := client.GetImage(context.Background(), tag)
 		if err != nil {
 			if errorutil.IsImageNotFoundError(err) {
 				continue

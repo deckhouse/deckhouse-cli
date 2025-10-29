@@ -169,11 +169,13 @@ func (f *Filter) VersionsToMirror(mod *Module) []string {
 	if !ok {
 		return nil
 	}
+
 	var tags []string
 	for _, v := range mod.Versions() {
 		if sc.Match(v) {
 			tags = append(tags, "v"+v.String())
 		}
 	}
+
 	return tags
 }

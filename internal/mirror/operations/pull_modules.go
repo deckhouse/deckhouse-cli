@@ -26,13 +26,14 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
-func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
+func PullModules(pullParams *params.PullParams, filter *modules.Filter, client pkg.RegistryClient) error {
 	var err error
 	var modulesData []modules.Module
 	logger := pullParams.Logger
@@ -83,12 +84,12 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter) error {
 	}
 
 	logger.InfoLn("Searching for Deckhouse external modules images")
-	if err = layouts.FindDeckhouseModulesImages(pullParams, imageLayouts, modulesData, filter); err != nil {
+	if err = layouts.FindDeckhouseModulesImages(pullParams, imageLayouts, modulesData, filter, client); err != nil {
 		return fmt.Errorf("Find modules images: %w", err)
 	}
 
 	if err = logger.Process("Pull images", func() error {
-		return layouts.PullModules(pullParams, imageLayouts)
+		return layouts.PullModules(pullParams, imageLayouts, client)
 	}); err != nil {
 		return err
 	}

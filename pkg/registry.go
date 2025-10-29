@@ -45,15 +45,24 @@ type RegistryClient interface {
 	// The repository is determined by the chained WithSegment() calls
 	GetManifest(ctx context.Context, tag string) ([]byte, error)
 
+	// GetImageConfig retrieves the image config file containing labels and metadata
+	// The repository is determined by the chained WithSegment() calls
+	GetImageConfig(ctx context.Context, tag string) (*v1.ConfigFile, error)
+
+	// CheckImageExists checks if a specific image exists in the registry
+	// If image not found, return an error
+	// The repository is determined by the chained WithSegment() calls
+	CheckImageExists(ctx context.Context, tag string) error
+
 	// GetImage retrieves an remote image for a specific reference
 	// Do not return remote image to avoid drop connection with context cancelation.
 	// It will be in use while passed context will be alive.
 	// The repository is determined by the chained WithSegment() calls
 	GetImage(ctx context.Context, tag string) (RegistryImage, error)
 
-	// GetImageConfig retrieves the image config file containing labels and metadata
+	// PushImage pushes an image to the registry at the specified tag
 	// The repository is determined by the chained WithSegment() calls
-	GetImageConfig(ctx context.Context, tag string) (*v1.ConfigFile, error)
+	PushImage(ctx context.Context, tag string, img RegistryImage) error
 
 	// ListTags retrieves all available tags for the current scope
 	// The repository is determined by the chained WithSegment() calls
@@ -62,8 +71,4 @@ type RegistryClient interface {
 	// ListRepositories retrieves all sub-repositories under the current scope
 	// The scope is determined by the chained WithSegment() calls
 	ListRepositories(ctx context.Context) ([]string, error)
-
-	// PushImage pushes an image to the registry at the specified tag
-	// The repository is determined by the chained WithSegment() calls
-	PushImage(ctx context.Context, tag string, img RegistryImage) error
 }
