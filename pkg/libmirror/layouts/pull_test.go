@@ -43,10 +43,15 @@ import (
 
 type mockRegistryImage struct {
 	v1.Image
+	ref string
 }
 
 func (m *mockRegistryImage) Extract() io.ReadCloser {
 	return io.NopCloser(strings.NewReader(""))
+}
+
+func (m *mockRegistryImage) GetReference() string {
+	return m.ref
 }
 
 var testLogger = log.NewSLogger(slog.LevelDebug)
@@ -76,8 +81,8 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessSkipTLS(t *testing.T) {
 	}
 
 	wantRegistryImages := make([]pkg.RegistryImage, 0)
-	for _, img := range wantImages {
-		wantRegistryImages = append(wantRegistryImages, &mockRegistryImage{Image: img})
+	for i, img := range wantImages {
+		wantRegistryImages = append(wantRegistryImages, &mockRegistryImage{Image: img, ref: images[i]})
 	}
 
 	layouts := &ImageLayouts{
@@ -146,8 +151,8 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessInsecure(t *testing.T) {
 	}
 
 	wantRegistryImages := make([]pkg.RegistryImage, 0)
-	for _, img := range wantImages {
-		wantRegistryImages = append(wantRegistryImages, &mockRegistryImage{Image: img})
+	for i, img := range wantImages {
+		wantRegistryImages = append(wantRegistryImages, &mockRegistryImage{Image: img, ref: images[i]})
 	}
 
 	layouts := &ImageLayouts{

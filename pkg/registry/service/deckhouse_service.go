@@ -18,7 +18,9 @@ package service
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -27,6 +29,10 @@ import (
 	"github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
+)
+
+const (
+	releaseSegment = "release-channel"
 )
 
 // DeckhouseService provides high-level operations for Deckhouse platform management
@@ -43,29 +49,16 @@ func NewDeckhouseService(client pkg.RegistryClient, logger *log.Logger) *Deckhou
 	}
 }
 
-// ListReleases lists all available Deckhouse releases
-func (s *DeckhouseService) ListReleases(ctx context.Context) ([]string, error) {
-	s.logger.Debug("Listing Deckhouse releases")
-
-	// Assume releases are under a specific path, e.g., scoped to "releases"
-	releaseClient := s.client.WithSegment("releases")
-
-	releaseNames, err := releaseClient.ListTags(ctx)
-	if err != nil {
-		s.logger.Warn("Failed to list releases from registry", "error", err.Error())
-		return nil, fmt.Errorf("failed to list releases: %w", err)
-	}
-
-	s.logger.Debug("Releases listed successfully", "count", len(releaseNames))
-
-	return releaseNames, nil
+// GetRoot gets information about a specific Deckhouse release
+func (s *DeckhouseService) GetRoot() string {
+	return s.client.GetRegistry()
 }
 
 // GetReleaseInfo gets information about a specific Deckhouse release
 func (s *DeckhouseService) GetReleaseInfo(ctx context.Context, releaseTag string) (interface{}, error) {
 	s.logger.Debug("Getting release info", "release", releaseTag)
 
-	releaseClient := s.client.WithSegment("releases")
+	releaseClient := s.client.WithSegment(releaseSegment)
 
 	imageConfig, err := releaseClient.GetImageConfig(ctx, releaseTag)
 	if err != nil {
@@ -81,6 +74,63 @@ func (s *DeckhouseService) GetReleaseInfo(ctx context.Context, releaseTag string
 	return version, nil
 }
 
+func (s *DeckhouseService) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, error) {
+	logger := s.logger.With("tag", tag)
+
+	logger.Debug("Getting image")
+
+	img, err := s.client.GetImage(ctx, tag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get image: %w", err)
+	}
+
+	logger.Debug("Image retrieved successfully")
+
+	return img, nil
+}
+
+func (s *DeckhouseService) GetReleaseImage(ctx context.Context, releaseTag string) (pkg.RegistryImage, error) {
+	logger := s.logger.With("release", releaseTag)
+
+	logger.Debug("Getting release image")
+
+	releaseClient := s.client.WithSegment(releaseSegment)
+
+	img, err := releaseClient.GetImage(ctx, releaseTag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get release image: %w", err)
+	}
+
+	logger.Debug("Release image retrieved successfully")
+
+	return img, nil
+}
+
+type DeckhouseReleaseMetadata struct {
+	Version string
+	Suspend bool
+}
+
+func (s *DeckhouseService) GetReleaseMetadata(ctx context.Context, releaseTag string) (*DeckhouseReleaseMetadata, error) {
+	logger := s.logger.With("release", releaseTag)
+
+	logger.Debug("Getting release metadata")
+
+	releaseClient := s.client.WithSegment(releaseSegment)
+
+	img, err := releaseClient.GetImage(ctx, releaseTag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get image config: %w", err)
+	}
+
+	meta, err := extractDeckhouseReleaseMetadata(img.Extract())
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract release metadata: %w", err)
+	}
+
+	return meta, nil
+}
+
 // ExtractRelease downloads the Deckhouse release image and extracts it to the specified location
 func (s *DeckhouseService) ExtractRelease(ctx context.Context, releaseTag, destination string) error {
 	s.logger.Debug("Extracting release", "release", releaseTag, "destination", destination)
@@ -89,7 +139,8 @@ func (s *DeckhouseService) ExtractRelease(ctx context.Context, releaseTag, desti
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	releaseClient := s.client.WithSegment("releases")
+	releaseClient := s.client.WithSegment(releaseSegment)
+
 	img, err := releaseClient.GetImage(ctx, releaseTag)
 	if err != nil {
 		return fmt.Errorf("failed to get image: %w", err)
@@ -138,11 +189,44 @@ func (s *DeckhouseService) extractTar(r io.Reader, destination string) error {
 	return nil
 }
 
+func extractDeckhouseReleaseMetadata(rc io.ReadCloser) (*DeckhouseReleaseMetadata, error) {
+	var meta = new(DeckhouseReleaseMetadata)
+
+	defer rc.Close()
+
+	drr := &deckhouseReleaseReader{
+		versionReader: bytes.NewBuffer(nil),
+	}
+
+	err := drr.untarMetadata(rc)
+	if err != nil {
+		return nil, err
+	}
+
+	type versionStruct struct {
+		Version string `json:"version"`
+		Suspend bool   `json:"suspend"`
+	}
+
+	var version versionStruct
+	if drr.versionReader.Len() > 0 {
+		err = json.NewDecoder(drr.versionReader).Decode(&version)
+		if err != nil {
+			return nil, err
+		}
+
+		meta.Version = version.Version
+		meta.Suspend = version.Suspend
+	}
+
+	return meta, nil
+}
+
 // ListReleaseTags lists all available tags for Deckhouse releases
 func (s *DeckhouseService) ListReleaseTags(ctx context.Context) ([]string, error) {
 	s.logger.Debug("Listing release tags")
 
-	releaseClient := s.client.WithSegment("releases")
+	releaseClient := s.client.WithSegment(releaseSegment)
 
 	tags, err := releaseClient.ListTags(ctx)
 	if err != nil {
@@ -152,4 +236,36 @@ func (s *DeckhouseService) ListReleaseTags(ctx context.Context) ([]string, error
 	s.logger.Debug("Release tags listed successfully", "count", len(tags))
 
 	return tags, nil
+}
+
+func (s *DeckhouseService) CheckTagExists(ctx context.Context, tag string) error {
+	logger := s.logger.With("tag", tag)
+
+	logger.Debug("Checking if tag exists")
+
+	err := s.client.CheckImageExists(ctx, tag)
+	if err != nil {
+		return fmt.Errorf("failed to check if tag exists: %w", err)
+	}
+
+	s.logger.Debug("Tag existence check completed")
+
+	return nil
+}
+
+func (s *DeckhouseService) CheckReleaseExists(ctx context.Context, tag string) error {
+	logger := s.logger.With("tag", tag)
+
+	logger.Debug("Checking if release exists")
+
+	releaseClient := s.client.WithSegment(releaseSegment)
+
+	err := releaseClient.CheckImageExists(ctx, tag)
+	if err != nil {
+		return fmt.Errorf("failed to check if release exists: %w", err)
+	}
+
+	s.logger.Debug("Release existence check completed")
+
+	return nil
 }

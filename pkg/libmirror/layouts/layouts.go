@@ -225,6 +225,7 @@ func FillLayoutsWithBasicDeckhouseImages(
 	layouts.InstallImages = map[string]struct{}{}
 	layouts.InstallStandaloneImages = map[string]struct{}{}
 	layouts.ReleaseChannelImages = map[string]struct{}{}
+
 	// todo(mvasl) need to check if trivy must be here anymore
 	layouts.TrivyDBImages = map[string]struct{}{
 		pullParams.DeckhouseRegistryRepo + "/security/trivy-db:2":      {},

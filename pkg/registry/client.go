@@ -206,7 +206,7 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 
 	logentry.Debug("Image retrieved successfully")
 
-	return &Image{Image: img}, nil
+	return NewImage(img, WithReference(ref.String())), nil
 }
 
 // PushImage pushes an image to the registry at the specified tag

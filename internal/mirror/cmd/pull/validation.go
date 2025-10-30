@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 
 	"github.com/Masterminds/semver/v3"
+	pullflags "github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/spf13/cobra"
 )
@@ -50,17 +51,17 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 }
 
 func validateSourceRegistry() error {
-	if SourceRegistryRepo == enterpriseEditionRepo {
+	if pullflags.SourceRegistryRepo == pullflags.EnterpriseEditionRepo {
 		return nil // Default is fine
 	}
 
 	// We first validate that passed repository reference is correct and can be parsed
-	if _, err := name.NewRepository(SourceRegistryRepo); err != nil {
+	if _, err := name.NewRepository(pullflags.SourceRegistryRepo); err != nil {
 		return fmt.Errorf("Validate registry address: %w", err)
 	}
 
 	// Then we parse it as URL to validate that it contains everything we need
-	registryURL, err := url.ParseRequestURI("docker://" + SourceRegistryRepo)
+	registryURL, err := url.ParseRequestURI("docker://" + pullflags.SourceRegistryRepo)
 	if err != nil {
 		return fmt.Errorf("Validate source registry parameter: %w", err)
 	}
@@ -79,12 +80,12 @@ func validateImagesBundlePathArg(args []string) error {
 		return errors.New("This command requires exactly 1 argument")
 	}
 
-	ImagesBundlePath = filepath.Clean(args[0])
-	pathInfo, err := os.Stat(ImagesBundlePath)
+	pullflags.ImagesBundlePath = filepath.Clean(args[0])
+	pathInfo, err := os.Stat(pullflags.ImagesBundlePath)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		if err = os.MkdirAll(ImagesBundlePath, 0755); err != nil {
-			return fmt.Errorf("Create bundle directory at %s: %w", ImagesBundlePath, err)
+		if err = os.MkdirAll(pullflags.ImagesBundlePath, 0755); err != nil {
+			return fmt.Errorf("Create bundle directory at %s: %w", pullflags.ImagesBundlePath, err)
 		}
 		return validateImagesBundlePathArg(args)
 	case err != nil:
@@ -92,14 +93,14 @@ func validateImagesBundlePathArg(args []string) error {
 	}
 
 	if !pathInfo.IsDir() {
-		return fmt.Errorf("%s is not a directory", ImagesBundlePath)
+		return fmt.Errorf("%s is not a directory", pullflags.ImagesBundlePath)
 	}
 
-	if ForcePull {
+	if pullflags.ForcePull {
 		return nil
 	}
 
-	dirEntries, err := os.ReadDir(ImagesBundlePath)
+	dirEntries, err := os.ReadDir(pullflags.ImagesBundlePath)
 	if err != nil {
 		return fmt.Errorf("Read bundle directory: %w", err)
 	}
@@ -108,17 +109,17 @@ func validateImagesBundlePathArg(args []string) error {
 		return nil
 	}
 
-	return fmt.Errorf("%s is not empty, use --force to override", ImagesBundlePath)
+	return fmt.Errorf("%s is not empty, use --force to override", pullflags.ImagesBundlePath)
 }
 
 func parseAndValidateVersionFlags() error {
-	if sinceVersionString != "" && DeckhouseTag != "" {
+	if pullflags.SinceVersionString != "" && pullflags.DeckhouseTag != "" {
 		return errors.New("Using both --deckhouse-tag and --since-version at the same time is ambiguous.")
 	}
 
 	var err error
-	if sinceVersionString != "" {
-		SinceVersion, err = semver.NewVersion(sinceVersionString)
+	if pullflags.SinceVersionString != "" {
+		pullflags.SinceVersion, err = semver.NewVersion(pullflags.SinceVersionString)
 		if err != nil {
 			return fmt.Errorf("Parse minimal deckhouse version: %w", err)
 		}
@@ -128,7 +129,7 @@ func parseAndValidateVersionFlags() error {
 }
 
 func validateChunkSizeFlag() error {
-	if ImagesBundleChunkSizeGB < 0 {
+	if pullflags.ImagesBundleChunkSizeGB < 0 {
 		return errors.New("Chunk size cannot be less than zero GB")
 	}
 
@@ -136,11 +137,11 @@ func validateChunkSizeFlag() error {
 }
 
 func validateTmpPath(_ []string) error {
-	if TempDir == "" {
-		TempDir = filepath.Join(ImagesBundlePath, ".tmp")
+	if pullflags.TempDir == "" {
+		pullflags.TempDir = filepath.Join(pullflags.ImagesBundlePath, ".tmp")
 	}
-	if err := os.MkdirAll(TempDir, 0755); err != nil {
-		return fmt.Errorf("Error creating temp directory at %s: %w", TempDir, err)
+	if err := os.MkdirAll(pullflags.TempDir, 0755); err != nil {
+		return fmt.Errorf("Error creating temp directory at %s: %w", pullflags.TempDir, err)
 	}
 	return nil
 }

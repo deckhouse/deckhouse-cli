@@ -26,7 +26,7 @@ import (
 const (
 	deckhouseRegistryHost = "registry.deckhouse.io"
 
-	enterpriseEditionRepo = deckhouseRegistryHost
+	EnterpriseEditionRepo = deckhouseRegistryHost
 )
 
 // CLI Parameters
@@ -40,7 +40,7 @@ var (
 	ImagesBundlePath        string
 	ImagesBundleChunkSizeGB int64
 
-	sinceVersionString string
+	SinceVersionString string
 	SinceVersion       *semver.Version
 
 	DeckhouseTag string
@@ -49,7 +49,7 @@ var (
 	ModulesWhitelist  []string
 	ModulesBlacklist  []string
 
-	SourceRegistryRepo     = enterpriseEditionRepo // Fallback to EE if nothing was given as source.
+	SourceRegistryRepo     = EnterpriseEditionRepo // Fallback to EE if nothing was given as source.
 	SourceRegistryLogin    string
 	SourceRegistryPassword string
 	DeckhouseLicenseToken  string
@@ -67,7 +67,7 @@ func AddFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringVar(
 		&SourceRegistryRepo,
 		"source",
-		enterpriseEditionRepo,
+		EnterpriseEditionRepo,
 		"Source registry to pull Deckhouse images from.",
 	)
 	flagSet.StringVar(
@@ -90,7 +90,7 @@ func AddFlags(flagSet *pflag.FlagSet) {
 		"Deckhouse license key. Shortcut for --source-login=license-token --source-password=<>.",
 	)
 	flagSet.StringVar(
-		&sinceVersionString,
+		&SinceVersionString,
 		"since-version",
 		"",
 		"Minimal Deckhouse release to pull. Ignored if above current Rock Solid release. Conflicts with --deckhouse-tag.",

@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	pullflags "github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
@@ -147,89 +148,89 @@ func TestFindTagsToMirror(t *testing.T) {
 
 func TestBuildPullParams(t *testing.T) {
 	// Setup test environment variables
-	originalTempDir := TempDir
-	originalImagesBundlePath := ImagesBundlePath
-	originalSourceRegistryRepo := SourceRegistryRepo
-	originalModulesPathSuffix := ModulesPathSuffix
-	originalInsecure := Insecure
-	originalTLSSkipVerify := TLSSkipVerify
-	originalDoGOSTDigest := DoGOSTDigest
-	originalNoPlatform := NoPlatform
-	originalNoSecurityDB := NoSecurityDB
-	originalNoModules := NoModules
-	originalOnlyExtraImages := OnlyExtraImages
-	originalDeckhouseTag := DeckhouseTag
-	originalSinceVersion := SinceVersion
+	originalTempDir := pullflags.TempDir
+	originalImagesBundlePath := pullflags.ImagesBundlePath
+	originalSourceRegistryRepo := pullflags.SourceRegistryRepo
+	originalModulesPathSuffix := pullflags.ModulesPathSuffix
+	originalInsecure := pullflags.Insecure
+	originalTLSSkipVerify := pullflags.TLSSkipVerify
+	originalDoGOSTDigest := pullflags.DoGOSTDigest
+	originalNoPlatform := pullflags.NoPlatform
+	originalNoSecurityDB := pullflags.NoSecurityDB
+	originalNoModules := pullflags.NoModules
+	originalOnlyExtraImages := pullflags.OnlyExtraImages
+	originalDeckhouseTag := pullflags.DeckhouseTag
+	originalSinceVersion := pullflags.SinceVersion
 
 	defer func() {
-		TempDir = originalTempDir
-		ImagesBundlePath = originalImagesBundlePath
-		SourceRegistryRepo = originalSourceRegistryRepo
-		ModulesPathSuffix = originalModulesPathSuffix
-		Insecure = originalInsecure
-		TLSSkipVerify = originalTLSSkipVerify
-		DoGOSTDigest = originalDoGOSTDigest
-		NoPlatform = originalNoPlatform
-		NoSecurityDB = originalNoSecurityDB
-		NoModules = originalNoModules
-		OnlyExtraImages = originalOnlyExtraImages
-		DeckhouseTag = originalDeckhouseTag
-		SinceVersion = originalSinceVersion
+		pullflags.TempDir = originalTempDir
+		pullflags.ImagesBundlePath = originalImagesBundlePath
+		pullflags.SourceRegistryRepo = originalSourceRegistryRepo
+		pullflags.ModulesPathSuffix = originalModulesPathSuffix
+		pullflags.Insecure = originalInsecure
+		pullflags.TLSSkipVerify = originalTLSSkipVerify
+		pullflags.DoGOSTDigest = originalDoGOSTDigest
+		pullflags.NoPlatform = originalNoPlatform
+		pullflags.NoSecurityDB = originalNoSecurityDB
+		pullflags.NoModules = originalNoModules
+		pullflags.OnlyExtraImages = originalOnlyExtraImages
+		pullflags.DeckhouseTag = originalDeckhouseTag
+		pullflags.SinceVersion = originalSinceVersion
 	}()
 
 	// Set test values
-	TempDir = "/tmp/test"
-	ImagesBundlePath = "/tmp/bundle"
-	SourceRegistryRepo = "registry.example.com"
-	ModulesPathSuffix = "modules"
-	Insecure = true
-	TLSSkipVerify = true
-	DoGOSTDigest = true
-	NoPlatform = true
-	NoSecurityDB = true
-	NoModules = true
-	OnlyExtraImages = true
-	DeckhouseTag = "v1.57.3"
-	SinceVersion = semver.MustParse("1.56.0")
+	pullflags.TempDir = "/tmp/test"
+	pullflags.ImagesBundlePath = "/tmp/bundle"
+	pullflags.SourceRegistryRepo = "registry.example.com"
+	pullflags.ModulesPathSuffix = "modules"
+	pullflags.Insecure = true
+	pullflags.TLSSkipVerify = true
+	pullflags.DoGOSTDigest = true
+	pullflags.NoPlatform = true
+	pullflags.NoSecurityDB = true
+	pullflags.NoModules = true
+	pullflags.OnlyExtraImages = true
+	pullflags.DeckhouseTag = "v1.57.3"
+	pullflags.SinceVersion = semver.MustParse("1.56.0")
 
 	logger := log.NewSLogger(slog.LevelInfo)
 	params := buildPullParams(logger)
 
 	assert.NotNil(t, params)
 	assert.Equal(t, logger, params.Logger)
-	assert.Equal(t, Insecure, params.Insecure)
-	assert.Equal(t, TLSSkipVerify, params.SkipTLSVerification)
-	assert.Equal(t, SourceRegistryRepo, params.DeckhouseRegistryRepo)
-	assert.Equal(t, ModulesPathSuffix, params.ModulesPathSuffix)
-	assert.Equal(t, ImagesBundlePath, params.BundleDir)
-	assert.Equal(t, DoGOSTDigest, params.DoGOSTDigests)
-	assert.Equal(t, NoPlatform, params.SkipPlatform)
-	assert.Equal(t, NoSecurityDB, params.SkipSecurityDatabases)
-	assert.Equal(t, NoModules, params.SkipModules)
-	assert.Equal(t, OnlyExtraImages, params.OnlyExtraImages)
-	assert.Equal(t, DeckhouseTag, params.DeckhouseTag)
-	assert.Equal(t, SinceVersion, params.SinceVersion)
+	assert.Equal(t, pullflags.Insecure, params.Insecure)
+	assert.Equal(t, pullflags.TLSSkipVerify, params.SkipTLSVerification)
+	assert.Equal(t, pullflags.SourceRegistryRepo, params.DeckhouseRegistryRepo)
+	assert.Equal(t, pullflags.ModulesPathSuffix, params.ModulesPathSuffix)
+	assert.Equal(t, pullflags.ImagesBundlePath, params.BundleDir)
+	assert.Equal(t, pullflags.DoGOSTDigest, params.DoGOSTDigests)
+	assert.Equal(t, pullflags.NoPlatform, params.SkipPlatform)
+	assert.Equal(t, pullflags.NoSecurityDB, params.SkipSecurityDatabases)
+	assert.Equal(t, pullflags.NoModules, params.SkipModules)
+	assert.Equal(t, pullflags.OnlyExtraImages, params.OnlyExtraImages)
+	assert.Equal(t, pullflags.DeckhouseTag, params.DeckhouseTag)
+	assert.Equal(t, pullflags.SinceVersion, params.SinceVersion)
 
 	// Check working directory calculation
 	expectedWorkingDir := filepath.Join(
-		TempDir,
+		pullflags.TempDir,
 		mirror.TmpMirrorFolderName,
 		mirror.TmpMirrorPullFolderName,
-		fmt.Sprintf("%x", md5.Sum([]byte(SourceRegistryRepo))),
+		fmt.Sprintf("%x", md5.Sum([]byte(pullflags.SourceRegistryRepo))),
 	)
 	assert.Equal(t, expectedWorkingDir, params.WorkingDir)
 }
 
 func TestGetSourceRegistryAuthProvider(t *testing.T) {
 	// Save original values
-	originalLogin := SourceRegistryLogin
-	originalPassword := SourceRegistryPassword
-	originalToken := DeckhouseLicenseToken
+	originalLogin := pullflags.SourceRegistryLogin
+	originalPassword := pullflags.SourceRegistryPassword
+	originalToken := pullflags.DeckhouseLicenseToken
 
 	defer func() {
-		SourceRegistryLogin = originalLogin
-		SourceRegistryPassword = originalPassword
-		DeckhouseLicenseToken = originalToken
+		pullflags.SourceRegistryLogin = originalLogin
+		pullflags.SourceRegistryPassword = originalPassword
+		pullflags.DeckhouseLicenseToken = originalToken
 	}()
 
 	tests := []struct {
@@ -270,9 +271,9 @@ func TestGetSourceRegistryAuthProvider(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			SourceRegistryLogin = tt.login
-			SourceRegistryPassword = tt.password
-			DeckhouseLicenseToken = tt.token
+			pullflags.SourceRegistryLogin = tt.login
+			pullflags.SourceRegistryPassword = tt.password
+			pullflags.DeckhouseLicenseToken = tt.token
 
 			auth := getSourceRegistryAuthProvider()
 
@@ -345,31 +346,31 @@ func TestPullCommandIntegration(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Set up minimal required environment
-	originalTempDir := TempDir
-	originalImagesBundlePath := ImagesBundlePath
-	originalSourceRegistryRepo := SourceRegistryRepo
-	originalNoPlatform := NoPlatform
-	originalNoSecurityDB := NoSecurityDB
-	originalNoModules := NoModules
-	originalDoGOSTDigest := DoGOSTDigest
+	originalTempDir := pullflags.TempDir
+	originalImagesBundlePath := pullflags.ImagesBundlePath
+	originalSourceRegistryRepo := pullflags.SourceRegistryRepo
+	originalNoPlatform := pullflags.NoPlatform
+	originalNoSecurityDB := pullflags.NoSecurityDB
+	originalNoModules := pullflags.NoModules
+	originalDoGOSTDigest := pullflags.DoGOSTDigest
 
 	defer func() {
-		TempDir = originalTempDir
-		ImagesBundlePath = originalImagesBundlePath
-		SourceRegistryRepo = originalSourceRegistryRepo
-		NoPlatform = originalNoPlatform
-		NoSecurityDB = originalNoSecurityDB
-		NoModules = originalNoModules
-		DoGOSTDigest = originalDoGOSTDigest
+		pullflags.TempDir = originalTempDir
+		pullflags.ImagesBundlePath = originalImagesBundlePath
+		pullflags.SourceRegistryRepo = originalSourceRegistryRepo
+		pullflags.NoPlatform = originalNoPlatform
+		pullflags.NoSecurityDB = originalNoSecurityDB
+		pullflags.NoModules = originalNoModules
+		pullflags.DoGOSTDigest = originalDoGOSTDigest
 	}()
 
-	TempDir = tempDir
-	ImagesBundlePath = tempDir
-	SourceRegistryRepo = "registry.example.com"
-	NoPlatform = true
-	NoSecurityDB = true
-	NoModules = true
-	DoGOSTDigest = false
+	pullflags.TempDir = tempDir
+	pullflags.ImagesBundlePath = tempDir
+	pullflags.SourceRegistryRepo = "registry.example.com"
+	pullflags.NoPlatform = true
+	pullflags.NoSecurityDB = true
+	pullflags.NoModules = true
+	pullflags.DoGOSTDigest = false
 
 	cmd := NewCommand()
 
@@ -390,19 +391,19 @@ func TestPullParamsValidation(t *testing.T) {
 	logger := log.NewSLogger(slog.LevelInfo)
 
 	// Test with empty values
-	originalTempDir := TempDir
-	originalImagesBundlePath := ImagesBundlePath
-	originalSourceRegistryRepo := SourceRegistryRepo
+	originalTempDir := pullflags.TempDir
+	originalImagesBundlePath := pullflags.ImagesBundlePath
+	originalSourceRegistryRepo := pullflags.SourceRegistryRepo
 
 	defer func() {
-		TempDir = originalTempDir
-		ImagesBundlePath = originalImagesBundlePath
-		SourceRegistryRepo = originalSourceRegistryRepo
+		pullflags.TempDir = originalTempDir
+		pullflags.ImagesBundlePath = originalImagesBundlePath
+		pullflags.SourceRegistryRepo = originalSourceRegistryRepo
 	}()
 
-	TempDir = ""
-	ImagesBundlePath = ""
-	SourceRegistryRepo = ""
+	pullflags.TempDir = ""
+	pullflags.ImagesBundlePath = ""
+	pullflags.SourceRegistryRepo = ""
 
 	params := buildPullParams(logger)
 
@@ -415,22 +416,22 @@ func TestPullParamsValidation(t *testing.T) {
 
 func TestWorkingDirectoryCalculation(t *testing.T) {
 	// Test that working directory is calculated correctly with MD5 hash
-	originalTempDir := TempDir
-	originalSourceRegistryRepo := SourceRegistryRepo
+	originalTempDir := pullflags.TempDir
+	originalSourceRegistryRepo := pullflags.SourceRegistryRepo
 
 	defer func() {
-		TempDir = originalTempDir
-		SourceRegistryRepo = originalSourceRegistryRepo
+		pullflags.TempDir = originalTempDir
+		pullflags.SourceRegistryRepo = originalSourceRegistryRepo
 	}()
 
-	TempDir = "/tmp/test"
-	SourceRegistryRepo = "registry.example.com"
+	pullflags.TempDir = "/tmp/test"
+	pullflags.SourceRegistryRepo = "registry.example.com"
 
 	logger := log.NewSLogger(slog.LevelInfo)
 	params := buildPullParams(logger)
 
-	expectedHash := fmt.Sprintf("%x", md5.Sum([]byte(SourceRegistryRepo)))
-	expectedPath := filepath.Join(TempDir, mirror.TmpMirrorFolderName, mirror.TmpMirrorPullFolderName, expectedHash)
+	expectedHash := fmt.Sprintf("%x", md5.Sum([]byte(pullflags.SourceRegistryRepo)))
+	expectedPath := filepath.Join(pullflags.TempDir, mirror.TmpMirrorFolderName, mirror.TmpMirrorPullFolderName, expectedHash)
 
 	assert.Equal(t, expectedPath, params.WorkingDir)
 	assert.Contains(t, params.WorkingDir, mirror.TmpMirrorPullFolderName)
@@ -439,20 +440,20 @@ func TestWorkingDirectoryCalculation(t *testing.T) {
 
 func TestAuthProviderPriority(t *testing.T) {
 	// Test that auth provider prioritizes username/password over license token
-	originalLogin := SourceRegistryLogin
-	originalPassword := SourceRegistryPassword
-	originalToken := DeckhouseLicenseToken
+	originalLogin := pullflags.SourceRegistryLogin
+	originalPassword := pullflags.SourceRegistryPassword
+	originalToken := pullflags.DeckhouseLicenseToken
 
 	defer func() {
-		SourceRegistryLogin = originalLogin
-		SourceRegistryPassword = originalPassword
-		DeckhouseLicenseToken = originalToken
+		pullflags.SourceRegistryLogin = originalLogin
+		pullflags.SourceRegistryPassword = originalPassword
+		pullflags.DeckhouseLicenseToken = originalToken
 	}()
 
 	// Set both login and token - login should take priority
-	SourceRegistryLogin = "testuser"
-	SourceRegistryPassword = "testpass"
-	DeckhouseLicenseToken = "testtoken"
+	pullflags.SourceRegistryLogin = "testuser"
+	pullflags.SourceRegistryPassword = "testpass"
+	pullflags.DeckhouseLicenseToken = "testtoken"
 
 	auth := getSourceRegistryAuthProvider()
 
@@ -460,9 +461,9 @@ func TestAuthProviderPriority(t *testing.T) {
 	assert.NotEqual(t, authn.Anonymous, auth)
 
 	// Reset and test token only
-	SourceRegistryLogin = ""
-	SourceRegistryPassword = ""
-	DeckhouseLicenseToken = "testtoken"
+	pullflags.SourceRegistryLogin = ""
+	pullflags.SourceRegistryPassword = ""
+	pullflags.DeckhouseLicenseToken = "testtoken"
 
 	auth = getSourceRegistryAuthProvider()
 	assert.NotEqual(t, authn.Anonymous, auth)
@@ -470,16 +471,16 @@ func TestAuthProviderPriority(t *testing.T) {
 
 func TestParseAndValidateParametersMissingArgs(t *testing.T) {
 	// Test parseAndValidateParameters with missing arguments
-	originalImagesBundlePath := ImagesBundlePath
-	originalTempDir := TempDir
+	originalImagesBundlePath := pullflags.ImagesBundlePath
+	originalTempDir := pullflags.TempDir
 
 	defer func() {
-		ImagesBundlePath = originalImagesBundlePath
-		TempDir = originalTempDir
+		pullflags.ImagesBundlePath = originalImagesBundlePath
+		pullflags.TempDir = originalTempDir
 	}()
 
-	ImagesBundlePath = ""
-	TempDir = ""
+	pullflags.ImagesBundlePath = ""
+	pullflags.TempDir = ""
 
 	err := parseAndValidateParameters(&cobra.Command{}, []string{})
 	assert.Error(t, err)
@@ -488,10 +489,10 @@ func TestParseAndValidateParametersMissingArgs(t *testing.T) {
 
 func TestValidateSourceRegistryDefault(t *testing.T) {
 	// Test validateSourceRegistry with default enterprise edition repo
-	original := SourceRegistryRepo
-	defer func() { SourceRegistryRepo = original }()
+	original := pullflags.SourceRegistryRepo
+	defer func() { pullflags.SourceRegistryRepo = original }()
 
-	SourceRegistryRepo = enterpriseEditionRepo
+	pullflags.SourceRegistryRepo = pullflags.EnterpriseEditionRepo
 	err := validateSourceRegistry()
 	assert.NoError(t, err)
 }
@@ -502,16 +503,16 @@ func TestValidateImagesBundlePathArgEmptyDir(t *testing.T) {
 	emptyDir := filepath.Join(tempDir, "empty")
 	require.NoError(t, os.MkdirAll(emptyDir, 0755))
 
-	originalImagesBundlePath := ImagesBundlePath
-	originalForcePull := ForcePull
+	originalImagesBundlePath := pullflags.ImagesBundlePath
+	originalForcePull := pullflags.ForcePull
 
 	defer func() {
-		ImagesBundlePath = originalImagesBundlePath
-		ForcePull = originalForcePull
+		pullflags.ImagesBundlePath = originalImagesBundlePath
+		pullflags.ForcePull = originalForcePull
 	}()
 
-	ImagesBundlePath = ""
-	ForcePull = false
+	pullflags.ImagesBundlePath = ""
+	pullflags.ForcePull = false
 
 	err := validateImagesBundlePathArg([]string{emptyDir})
 	assert.NoError(t, err)
@@ -521,23 +522,23 @@ func TestValidateTmpPathEmpty(t *testing.T) {
 	// Test validateTmpPath when TempDir is empty
 	tempDir := t.TempDir()
 
-	originalTempDir := TempDir
-	originalImagesBundlePath := ImagesBundlePath
+	originalTempDir := pullflags.TempDir
+	originalImagesBundlePath := pullflags.ImagesBundlePath
 
 	defer func() {
-		TempDir = originalTempDir
-		ImagesBundlePath = originalImagesBundlePath
+		pullflags.TempDir = originalTempDir
+		pullflags.ImagesBundlePath = originalImagesBundlePath
 	}()
 
-	TempDir = ""
-	ImagesBundlePath = tempDir
+	pullflags.TempDir = ""
+	pullflags.ImagesBundlePath = tempDir
 
 	err := validateTmpPath([]string{})
 	assert.NoError(t, err)
 
 	// Check that TempDir was set to default
 	expectedTempDir := filepath.Join(tempDir, ".tmp")
-	assert.Equal(t, expectedTempDir, TempDir)
+	assert.Equal(t, expectedTempDir, pullflags.TempDir)
 
 	// Check that directory was created
 	_, err = os.Stat(expectedTempDir)
@@ -552,7 +553,7 @@ func TestValidateSourceRegistry(t *testing.T) {
 	}{
 		{
 			name:        "default enterprise edition repo",
-			registry:    enterpriseEditionRepo,
+			registry:    pullflags.EnterpriseEditionRepo,
 			expectError: false,
 		},
 		{
@@ -579,10 +580,10 @@ func TestValidateSourceRegistry(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			original := SourceRegistryRepo
-			defer func() { SourceRegistryRepo = original }()
+			original := pullflags.SourceRegistryRepo
+			defer func() { pullflags.SourceRegistryRepo = original }()
 
-			SourceRegistryRepo = tt.registry
+			pullflags.SourceRegistryRepo = tt.registry
 			err := validateSourceRegistry()
 
 			if tt.expectError {
@@ -648,16 +649,16 @@ func TestValidateImagesBundlePathArg(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			originalForcePull := ForcePull
-			originalImagesBundlePath := ImagesBundlePath
+			originalForcePull := pullflags.ForcePull
+			originalImagesBundlePath := pullflags.ImagesBundlePath
 
 			defer func() {
-				ForcePull = originalForcePull
-				ImagesBundlePath = originalImagesBundlePath
+				pullflags.ForcePull = originalForcePull
+				pullflags.ImagesBundlePath = originalImagesBundlePath
 			}()
 
-			ForcePull = tt.forcePull
-			ImagesBundlePath = ""
+			pullflags.ForcePull = tt.forcePull
+			pullflags.ImagesBundlePath = ""
 
 			err := validateImagesBundlePathArg(tt.args)
 
@@ -716,19 +717,19 @@ func TestParseAndValidateVersionFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			originalSinceVersionString := sinceVersionString
-			originalDeckhouseTag := DeckhouseTag
-			originalSinceVersion := SinceVersion
+			originalSinceVersionString := pullflags.SinceVersionString
+			originalDeckhouseTag := pullflags.DeckhouseTag
+			originalSinceVersion := pullflags.SinceVersion
 
 			defer func() {
-				sinceVersionString = originalSinceVersionString
-				DeckhouseTag = originalDeckhouseTag
-				SinceVersion = originalSinceVersion
+				pullflags.SinceVersionString = originalSinceVersionString
+				pullflags.DeckhouseTag = originalDeckhouseTag
+				pullflags.SinceVersion = originalSinceVersion
 			}()
 
-			sinceVersionString = tt.sinceVersionString
-			DeckhouseTag = tt.deckhouseTag
-			SinceVersion = nil
+			pullflags.SinceVersionString = tt.sinceVersionString
+			pullflags.DeckhouseTag = tt.deckhouseTag
+			pullflags.SinceVersion = nil
 
 			err := parseAndValidateVersionFlags()
 
@@ -740,8 +741,8 @@ func TestParseAndValidateVersionFlags(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				if tt.sinceVersionString != "" {
-					assert.NotNil(t, SinceVersion)
-					assert.Equal(t, tt.sinceVersionString, SinceVersion.String())
+					assert.NotNil(t, pullflags.SinceVersion)
+					assert.Equal(t, tt.sinceVersionString, pullflags.SinceVersion.String())
 				}
 			}
 		})
@@ -773,10 +774,10 @@ func TestValidateChunkSizeFlag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			original := ImagesBundleChunkSizeGB
-			defer func() { ImagesBundleChunkSizeGB = original }()
+			original := pullflags.ImagesBundleChunkSizeGB
+			defer func() { pullflags.ImagesBundleChunkSizeGB = original }()
 
-			ImagesBundleChunkSizeGB = tt.chunkSize
+			pullflags.ImagesBundleChunkSizeGB = tt.chunkSize
 			err := validateChunkSizeFlag()
 
 			if tt.expectError {
@@ -810,16 +811,16 @@ func TestValidateTmpPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			originalTempDir := TempDir
-			originalImagesBundlePath := ImagesBundlePath
+			originalTempDir := pullflags.TempDir
+			originalImagesBundlePath := pullflags.ImagesBundlePath
 
 			defer func() {
-				TempDir = originalTempDir
-				ImagesBundlePath = originalImagesBundlePath
+				pullflags.TempDir = originalTempDir
+				pullflags.ImagesBundlePath = originalImagesBundlePath
 			}()
 
-			TempDir = tt.tempDir
-			ImagesBundlePath = tempDir
+			pullflags.TempDir = tt.tempDir
+			pullflags.ImagesBundlePath = tempDir
 
 			err := validateTmpPath([]string{})
 
@@ -827,9 +828,9 @@ func TestValidateTmpPath(t *testing.T) {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
-				assert.NotEmpty(t, TempDir)
+				assert.NotEmpty(t, pullflags.TempDir)
 				// Check that directory was created
-				_, err := os.Stat(TempDir)
+				_, err := os.Stat(pullflags.TempDir)
 				assert.NoError(t, err)
 			}
 		})
@@ -841,7 +842,7 @@ func TestAddFlags(t *testing.T) {
 	flags := cmd.Flags()
 
 	// Add flags
-	addFlags(flags)
+	pullflags.AddFlags(flags)
 
 	// Check that expected flags are present
 	flagNames := []string{
@@ -885,22 +886,22 @@ func TestPullFunctionErrorPaths(t *testing.T) {
 	t.Run("working directory cleanup failure", func(t *testing.T) {
 		// This is hard to test directly since os.RemoveAll is called
 		// We can test the logic indirectly through the parameters
-		originalTempDir := TempDir
-		originalImagesBundlePath := ImagesBundlePath
-		originalNoPullResume := NoPullResume
-		originalSourceRegistryRepo := SourceRegistryRepo
+		originalTempDir := pullflags.TempDir
+		originalImagesBundlePath := pullflags.ImagesBundlePath
+		originalNoPullResume := pullflags.NoPullResume
+		originalSourceRegistryRepo := pullflags.SourceRegistryRepo
 
 		defer func() {
-			TempDir = originalTempDir
-			ImagesBundlePath = originalImagesBundlePath
-			NoPullResume = originalNoPullResume
-			SourceRegistryRepo = originalSourceRegistryRepo
+			pullflags.TempDir = originalTempDir
+			pullflags.ImagesBundlePath = originalImagesBundlePath
+			pullflags.NoPullResume = originalNoPullResume
+			pullflags.SourceRegistryRepo = originalSourceRegistryRepo
 		}()
 
-		TempDir = tempDir
-		ImagesBundlePath = tempDir
-		NoPullResume = true
-		SourceRegistryRepo = "test-registry"
+		pullflags.TempDir = tempDir
+		pullflags.ImagesBundlePath = tempDir
+		pullflags.NoPullResume = true
+		pullflags.SourceRegistryRepo = "test-registry"
 
 		// This test is limited since we can't easily mock os.RemoveAll
 		// But we can verify the parameters are set correctly
@@ -917,34 +918,34 @@ func TestPullFunctionErrorPaths(t *testing.T) {
 
 func TestEnterpriseEditionRepo(t *testing.T) {
 	// Test that the enterprise edition repo constant is properly defined
-	assert.Equal(t, "registry.deckhouse.ru/deckhouse/ee", enterpriseEditionRepo)
-	assert.Equal(t, enterpriseEditionRepo, SourceRegistryRepo) // Default value
+	assert.Equal(t, "registry.deckhouse.io", pullflags.EnterpriseEditionRepo)
+	assert.Equal(t, pullflags.EnterpriseEditionRepo, pullflags.SourceRegistryRepo) // Default value
 }
 
 func TestGlobalVariableDefaults(t *testing.T) {
 	// Test that global variables have expected defaults
-	assert.Equal(t, enterpriseEditionRepo, SourceRegistryRepo)
-	assert.Empty(t, SourceRegistryLogin)
-	assert.Empty(t, SourceRegistryPassword)
-	assert.Empty(t, DeckhouseLicenseToken)
-	assert.Empty(t, sinceVersionString)
-	assert.Nil(t, SinceVersion)
-	assert.Empty(t, DeckhouseTag)
-	assert.Equal(t, "/modules", ModulesPathSuffix)
-	assert.Equal(t, int64(0), ImagesBundleChunkSizeGB)
-	assert.False(t, DoGOSTDigest)
-	assert.False(t, ForcePull)
-	assert.False(t, NoPullResume)
-	assert.False(t, NoPlatform)
-	assert.False(t, NoSecurityDB)
-	assert.False(t, NoModules)
-	assert.False(t, OnlyExtraImages)
-	assert.False(t, TLSSkipVerify)
-	assert.False(t, Insecure)
-	assert.Empty(t, TempDir)
-	assert.Empty(t, ImagesBundlePath)
-	assert.Nil(t, ModulesWhitelist)
-	assert.Nil(t, ModulesBlacklist)
+	assert.Equal(t, pullflags.EnterpriseEditionRepo, pullflags.SourceRegistryRepo)
+	assert.Empty(t, pullflags.SourceRegistryLogin)
+	assert.Empty(t, pullflags.SourceRegistryPassword)
+	assert.Empty(t, pullflags.DeckhouseLicenseToken)
+	assert.Empty(t, pullflags.SinceVersionString)
+	assert.Nil(t, pullflags.SinceVersion)
+	assert.Empty(t, pullflags.DeckhouseTag)
+	assert.Equal(t, "/modules", pullflags.ModulesPathSuffix)
+	assert.Equal(t, int64(0), pullflags.ImagesBundleChunkSizeGB)
+	assert.False(t, pullflags.DoGOSTDigest)
+	assert.False(t, pullflags.ForcePull)
+	assert.False(t, pullflags.NoPullResume)
+	assert.False(t, pullflags.NoPlatform)
+	assert.False(t, pullflags.NoSecurityDB)
+	assert.False(t, pullflags.NoModules)
+	assert.False(t, pullflags.OnlyExtraImages)
+	assert.False(t, pullflags.TLSSkipVerify)
+	assert.False(t, pullflags.Insecure)
+	assert.Empty(t, pullflags.TempDir)
+	assert.Empty(t, pullflags.ImagesBundlePath)
+	assert.Nil(t, pullflags.ModulesWhitelist)
+	assert.Nil(t, pullflags.ModulesBlacklist)
 }
 
 func TestErrorMessages(t *testing.T) {
@@ -970,10 +971,10 @@ func TestFindTagsToMirrorWithVersionsSuccess(t *testing.T) {
 	logger := log.NewSLogger(slog.LevelInfo)
 
 	// Test the case where we need to call versions lookup
-	originalDeckhouseTag := DeckhouseTag
-	defer func() { DeckhouseTag = originalDeckhouseTag }()
+	originalDeckhouseTag := pullflags.DeckhouseTag
+	defer func() { pullflags.DeckhouseTag = originalDeckhouseTag }()
 
-	DeckhouseTag = "" // Force versions lookup
+	pullflags.DeckhouseTag = "" // Force versions lookup
 
 	pullParams := &params.PullParams{
 		DeckhouseTag: "",
@@ -988,47 +989,47 @@ func TestFindTagsToMirrorWithVersionsSuccess(t *testing.T) {
 
 func TestNewPuller(t *testing.T) {
 	// Save original global variables
-	originalTempDir := TempDir
-	originalImagesBundlePath := ImagesBundlePath
-	originalSourceRegistryRepo := SourceRegistryRepo
-	originalInsecure := Insecure
-	originalTLSSkipVerify := TLSSkipVerify
-	originalDoGOSTDigest := DoGOSTDigest
-	originalNoPlatform := NoPlatform
-	originalNoSecurityDB := NoSecurityDB
-	originalNoModules := NoModules
-	originalOnlyExtraImages := OnlyExtraImages
-	originalDeckhouseTag := DeckhouseTag
-	originalSinceVersion := SinceVersion
+	originalTempDir := pullflags.TempDir
+	originalImagesBundlePath := pullflags.ImagesBundlePath
+	originalSourceRegistryRepo := pullflags.SourceRegistryRepo
+	originalInsecure := pullflags.Insecure
+	originalTLSSkipVerify := pullflags.TLSSkipVerify
+	originalDoGOSTDigest := pullflags.DoGOSTDigest
+	originalNoPlatform := pullflags.NoPlatform
+	originalNoSecurityDB := pullflags.NoSecurityDB
+	originalNoModules := pullflags.NoModules
+	originalOnlyExtraImages := pullflags.OnlyExtraImages
+	originalDeckhouseTag := pullflags.DeckhouseTag
+	originalSinceVersion := pullflags.SinceVersion
 
 	defer func() {
-		TempDir = originalTempDir
-		ImagesBundlePath = originalImagesBundlePath
-		SourceRegistryRepo = originalSourceRegistryRepo
-		Insecure = originalInsecure
-		TLSSkipVerify = originalTLSSkipVerify
-		DoGOSTDigest = originalDoGOSTDigest
-		NoPlatform = originalNoPlatform
-		NoSecurityDB = originalNoSecurityDB
-		NoModules = originalNoModules
-		OnlyExtraImages = originalOnlyExtraImages
-		DeckhouseTag = originalDeckhouseTag
-		SinceVersion = originalSinceVersion
+		pullflags.TempDir = originalTempDir
+		pullflags.ImagesBundlePath = originalImagesBundlePath
+		pullflags.SourceRegistryRepo = originalSourceRegistryRepo
+		pullflags.Insecure = originalInsecure
+		pullflags.TLSSkipVerify = originalTLSSkipVerify
+		pullflags.DoGOSTDigest = originalDoGOSTDigest
+		pullflags.NoPlatform = originalNoPlatform
+		pullflags.NoSecurityDB = originalNoSecurityDB
+		pullflags.NoModules = originalNoModules
+		pullflags.OnlyExtraImages = originalOnlyExtraImages
+		pullflags.DeckhouseTag = originalDeckhouseTag
+		pullflags.SinceVersion = originalSinceVersion
 	}()
 
 	// Set test values
-	TempDir = "/tmp/test"
-	ImagesBundlePath = "/tmp/bundle"
-	SourceRegistryRepo = "test-registry.com"
-	Insecure = true
-	TLSSkipVerify = true
-	DoGOSTDigest = true
-	NoPlatform = true
-	NoSecurityDB = true
-	NoModules = true
-	OnlyExtraImages = true
-	DeckhouseTag = "v1.57.3"
-	SinceVersion = semver.MustParse("1.56.0")
+	pullflags.TempDir = "/tmp/test"
+	pullflags.ImagesBundlePath = "/tmp/bundle"
+	pullflags.SourceRegistryRepo = "test-registry.com"
+	pullflags.Insecure = true
+	pullflags.TLSSkipVerify = true
+	pullflags.DoGOSTDigest = true
+	pullflags.NoPlatform = true
+	pullflags.NoSecurityDB = true
+	pullflags.NoModules = true
+	pullflags.OnlyExtraImages = true
+	pullflags.DeckhouseTag = "v1.57.3"
+	pullflags.SinceVersion = semver.MustParse("1.56.0")
 
 	cmd := &cobra.Command{}
 	puller := NewPuller(cmd)
@@ -1041,17 +1042,17 @@ func TestNewPuller(t *testing.T) {
 	assert.NotEmpty(t, puller.validationOpts)
 
 	// Verify params are built correctly
-	assert.Equal(t, ImagesBundlePath, puller.params.BundleDir)
-	assert.Equal(t, SourceRegistryRepo, puller.params.DeckhouseRegistryRepo)
-	assert.Equal(t, Insecure, puller.params.Insecure)
-	assert.Equal(t, TLSSkipVerify, puller.params.SkipTLSVerification)
-	assert.Equal(t, DoGOSTDigest, puller.params.DoGOSTDigests)
-	assert.Equal(t, NoPlatform, puller.params.SkipPlatform)
-	assert.Equal(t, NoSecurityDB, puller.params.SkipSecurityDatabases)
-	assert.Equal(t, NoModules, puller.params.SkipModules)
-	assert.Equal(t, OnlyExtraImages, puller.params.OnlyExtraImages)
-	assert.Equal(t, DeckhouseTag, puller.params.DeckhouseTag)
-	assert.Equal(t, SinceVersion, puller.params.SinceVersion)
+	assert.Equal(t, pullflags.ImagesBundlePath, puller.params.BundleDir)
+	assert.Equal(t, pullflags.SourceRegistryRepo, puller.params.DeckhouseRegistryRepo)
+	assert.Equal(t, pullflags.Insecure, puller.params.Insecure)
+	assert.Equal(t, pullflags.TLSSkipVerify, puller.params.SkipTLSVerification)
+	assert.Equal(t, pullflags.DoGOSTDigest, puller.params.DoGOSTDigests)
+	assert.Equal(t, pullflags.NoPlatform, puller.params.SkipPlatform)
+	assert.Equal(t, pullflags.NoSecurityDB, puller.params.SkipSecurityDatabases)
+	assert.Equal(t, pullflags.NoModules, puller.params.SkipModules)
+	assert.Equal(t, pullflags.OnlyExtraImages, puller.params.OnlyExtraImages)
+	assert.Equal(t, pullflags.DeckhouseTag, puller.params.DeckhouseTag)
+	assert.Equal(t, pullflags.SinceVersion, puller.params.SinceVersion)
 }
 
 func TestPullerCleanupWorkingDirectory(t *testing.T) {
@@ -1068,10 +1069,10 @@ func TestPullerCleanupWorkingDirectory(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test with NoPullResume = true (should cleanup)
-	originalNoPullResume := NoPullResume
-	defer func() { NoPullResume = originalNoPullResume }()
+	originalNoPullResume := pullflags.NoPullResume
+	defer func() { pullflags.NoPullResume = originalNoPullResume }()
 
-	NoPullResume = true
+	pullflags.NoPullResume = true
 
 	puller := &Puller{
 		params: &params.PullParams{
@@ -1089,7 +1090,7 @@ func TestPullerCleanupWorkingDirectory(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 
 	// Test with NoPullResume = false and recent directory (should not cleanup)
-	NoPullResume = false
+	pullflags.NoPullResume = false
 	err = os.MkdirAll(workingDir, 0755)
 	require.NoError(t, err)
 
@@ -1164,27 +1165,27 @@ func TestPullerValidateModulesAccess(t *testing.T) {
 
 func TestPullerCreateModuleFilter(t *testing.T) {
 	// Save original global variables
-	originalWhitelist := ModulesWhitelist
-	originalBlacklist := ModulesBlacklist
+	originalWhitelist := pullflags.ModulesWhitelist
+	originalBlacklist := pullflags.ModulesBlacklist
 
 	defer func() {
-		ModulesWhitelist = originalWhitelist
-		ModulesBlacklist = originalBlacklist
+		pullflags.ModulesWhitelist = originalWhitelist
+		pullflags.ModulesBlacklist = originalBlacklist
 	}()
 
 	puller := &Puller{}
 
 	// Test with blacklist (default)
-	ModulesWhitelist = nil
-	ModulesBlacklist = []string{"module1", "module2"}
+	pullflags.ModulesWhitelist = nil
+	pullflags.ModulesBlacklist = []string{"module1", "module2"}
 
 	filter, err := puller.createModuleFilter()
 	assert.NoError(t, err)
 	assert.NotNil(t, filter)
 
 	// Test with whitelist
-	ModulesWhitelist = []string{"module3", "module4"}
-	ModulesBlacklist = nil
+	pullflags.ModulesWhitelist = []string{"module3", "module4"}
+	pullflags.ModulesBlacklist = nil
 
 	filter, err = puller.createModuleFilter()
 	assert.NoError(t, err)
@@ -1212,10 +1213,10 @@ func TestPullerComputeGOSTDigests(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test with GOST digest disabled
-	originalDoGOSTDigest := DoGOSTDigest
-	defer func() { DoGOSTDigest = originalDoGOSTDigest }()
+	originalDoGOSTDigest := pullflags.DoGOSTDigest
+	defer func() { pullflags.DoGOSTDigest = originalDoGOSTDigest }()
 
-	DoGOSTDigest = false
+	pullflags.DoGOSTDigest = false
 
 	puller := &Puller{
 		params: &params.PullParams{
@@ -1257,10 +1258,10 @@ func TestPullerFinalCleanup(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test cleanup - since TempDir contains other files besides "pull", only "pull" should be removed
-	originalTempDir := TempDir
-	defer func() { TempDir = originalTempDir }()
+	originalTempDir := pullflags.TempDir
+	defer func() { pullflags.TempDir = originalTempDir }()
 
-	TempDir = testDir
+	pullflags.TempDir = testDir
 
 	puller := &Puller{}
 	err = puller.finalCleanup()
@@ -1287,10 +1288,10 @@ func TestPullerFinalCleanupOnlyPullDir(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test cleanup - since TempDir contains only "pull", entire TempDir should be removed
-	originalTempDir := TempDir
-	defer func() { TempDir = originalTempDir }()
+	originalTempDir := pullflags.TempDir
+	defer func() { pullflags.TempDir = originalTempDir }()
 
-	TempDir = testDir
+	pullflags.TempDir = testDir
 
 	puller := &Puller{}
 	err = puller.finalCleanup()
@@ -1303,29 +1304,29 @@ func TestPullerFinalCleanupOnlyPullDir(t *testing.T) {
 
 func TestPullFunction(t *testing.T) {
 	// Save original global variables
-	originalTempDir := TempDir
-	originalImagesBundlePath := ImagesBundlePath
-	originalSourceRegistryRepo := SourceRegistryRepo
-	originalNoPlatform := NoPlatform
-	originalNoSecurityDB := NoSecurityDB
-	originalNoModules := NoModules
+	originalTempDir := pullflags.TempDir
+	originalImagesBundlePath := pullflags.ImagesBundlePath
+	originalSourceRegistryRepo := pullflags.SourceRegistryRepo
+	originalNoPlatform := pullflags.NoPlatform
+	originalNoSecurityDB := pullflags.NoSecurityDB
+	originalNoModules := pullflags.NoModules
 
 	defer func() {
-		TempDir = originalTempDir
-		ImagesBundlePath = originalImagesBundlePath
-		SourceRegistryRepo = originalSourceRegistryRepo
-		NoPlatform = originalNoPlatform
-		NoSecurityDB = originalNoSecurityDB
-		NoModules = originalNoModules
+		pullflags.TempDir = originalTempDir
+		pullflags.ImagesBundlePath = originalImagesBundlePath
+		pullflags.SourceRegistryRepo = originalSourceRegistryRepo
+		pullflags.NoPlatform = originalNoPlatform
+		pullflags.NoSecurityDB = originalNoSecurityDB
+		pullflags.NoModules = originalNoModules
 	}()
 
 	// Set test values to skip actual operations
-	TempDir = t.TempDir()
-	ImagesBundlePath = TempDir
-	SourceRegistryRepo = "test-registry.com"
-	NoPlatform = true
-	NoSecurityDB = true
-	NoModules = true
+	pullflags.TempDir = t.TempDir()
+	pullflags.ImagesBundlePath = pullflags.TempDir
+	pullflags.SourceRegistryRepo = "test-registry.com"
+	pullflags.NoPlatform = true
+	pullflags.NoSecurityDB = true
+	pullflags.NoModules = true
 
 	cmd := &cobra.Command{}
 	err := pull(cmd, []string{})
@@ -1352,29 +1353,29 @@ func TestPullerExecute(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Save original global variables
-	originalTempDir := TempDir
-	originalImagesBundlePath := ImagesBundlePath
-	originalNoPlatform := NoPlatform
-	originalNoSecurityDB := NoSecurityDB
-	originalNoModules := NoModules
-	originalDoGOSTDigest := DoGOSTDigest
+	originalTempDir := pullflags.TempDir
+	originalImagesBundlePath := pullflags.ImagesBundlePath
+	originalNoPlatform := pullflags.NoPlatform
+	originalNoSecurityDB := pullflags.NoSecurityDB
+	originalNoModules := pullflags.NoModules
+	originalDoGOSTDigest := pullflags.DoGOSTDigest
 
 	defer func() {
-		TempDir = originalTempDir
-		ImagesBundlePath = originalImagesBundlePath
-		NoPlatform = originalNoPlatform
-		NoSecurityDB = originalNoSecurityDB
-		NoModules = originalNoModules
-		DoGOSTDigest = originalDoGOSTDigest
+		pullflags.TempDir = originalTempDir
+		pullflags.ImagesBundlePath = originalImagesBundlePath
+		pullflags.NoPlatform = originalNoPlatform
+		pullflags.NoSecurityDB = originalNoSecurityDB
+		pullflags.NoModules = originalNoModules
+		pullflags.DoGOSTDigest = originalDoGOSTDigest
 	}()
 
 	// Set test values to skip actual operations
-	TempDir = tempDir
-	ImagesBundlePath = tempDir
-	NoPlatform = true
-	NoSecurityDB = true
-	NoModules = true
-	DoGOSTDigest = false
+	pullflags.TempDir = tempDir
+	pullflags.ImagesBundlePath = tempDir
+	pullflags.NoPlatform = true
+	pullflags.NoSecurityDB = true
+	pullflags.NoModules = true
+	pullflags.DoGOSTDigest = false
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())

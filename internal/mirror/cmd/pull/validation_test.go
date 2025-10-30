@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	pullflags "github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -34,7 +35,7 @@ func TestValidationValidateSourceRegistry(t *testing.T) {
 	}{
 		{
 			name:        "default enterprise edition repo",
-			registry:    enterpriseEditionRepo,
+			registry:    pullflags.EnterpriseEditionRepo,
 			expectError: false,
 		},
 		{
@@ -83,10 +84,10 @@ func TestValidationValidateSourceRegistry(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			original := SourceRegistryRepo
-			defer func() { SourceRegistryRepo = original }()
+			original := pullflags.SourceRegistryRepo
+			defer func() { pullflags.SourceRegistryRepo = original }()
 
-			SourceRegistryRepo = tt.registry
+			pullflags.SourceRegistryRepo = tt.registry
 			err := validateSourceRegistry()
 
 			if tt.expectError {
@@ -120,12 +121,12 @@ func TestValidationParseAndValidateParameters(t *testing.T) {
 			name: "valid parameters",
 			args: []string{validBundlePath},
 			setup: func() {
-				SourceRegistryRepo = enterpriseEditionRepo
-				sinceVersionString = ""
-				DeckhouseTag = ""
-				ImagesBundleChunkSizeGB = 0
-				TempDir = ""
-				ImagesBundlePath = ""
+				pullflags.SourceRegistryRepo = pullflags.EnterpriseEditionRepo
+				pullflags.SinceVersionString = ""
+				pullflags.DeckhouseTag = ""
+				pullflags.ImagesBundleChunkSizeGB = 0
+				pullflags.TempDir = ""
+				pullflags.ImagesBundlePath = ""
 			},
 			expectError: false,
 		},
@@ -133,12 +134,12 @@ func TestValidationParseAndValidateParameters(t *testing.T) {
 			name: "invalid source registry",
 			args: []string{validBundlePath},
 			setup: func() {
-				SourceRegistryRepo = "invalid"
-				sinceVersionString = ""
-				DeckhouseTag = ""
-				ImagesBundleChunkSizeGB = 0
-				TempDir = ""
-				ImagesBundlePath = ""
+				pullflags.SourceRegistryRepo = "invalid"
+				pullflags.SinceVersionString = ""
+				pullflags.DeckhouseTag = ""
+				pullflags.ImagesBundleChunkSizeGB = 0
+				pullflags.TempDir = ""
+				pullflags.ImagesBundlePath = ""
 			},
 			expectError: true,
 		},
@@ -146,12 +147,12 @@ func TestValidationParseAndValidateParameters(t *testing.T) {
 			name: "invalid version flags",
 			args: []string{validBundlePath},
 			setup: func() {
-				SourceRegistryRepo = enterpriseEditionRepo
-				sinceVersionString = "1.50.0"
-				DeckhouseTag = "v1.57.3"
-				ImagesBundleChunkSizeGB = 0
-				TempDir = ""
-				ImagesBundlePath = ""
+				pullflags.SourceRegistryRepo = pullflags.EnterpriseEditionRepo
+				pullflags.SinceVersionString = "1.50.0"
+				pullflags.DeckhouseTag = "v1.57.3"
+				pullflags.ImagesBundleChunkSizeGB = 0
+				pullflags.TempDir = ""
+				pullflags.ImagesBundlePath = ""
 			},
 			expectError: true,
 			errorMsg:    "ambiguous",
@@ -160,12 +161,12 @@ func TestValidationParseAndValidateParameters(t *testing.T) {
 			name: "invalid bundle path - no args",
 			args: []string{},
 			setup: func() {
-				SourceRegistryRepo = enterpriseEditionRepo
-				sinceVersionString = ""
-				DeckhouseTag = ""
-				ImagesBundleChunkSizeGB = 0
-				TempDir = ""
-				ImagesBundlePath = ""
+				pullflags.SourceRegistryRepo = pullflags.EnterpriseEditionRepo
+				pullflags.SinceVersionString = ""
+				pullflags.DeckhouseTag = ""
+				pullflags.ImagesBundleChunkSizeGB = 0
+				pullflags.TempDir = ""
+				pullflags.ImagesBundlePath = ""
 			},
 			expectError: true,
 			errorMsg:    "exactly 1 argument",
@@ -174,12 +175,12 @@ func TestValidationParseAndValidateParameters(t *testing.T) {
 			name: "invalid chunk size",
 			args: []string{validBundlePath},
 			setup: func() {
-				SourceRegistryRepo = enterpriseEditionRepo
-				sinceVersionString = ""
-				DeckhouseTag = ""
-				ImagesBundleChunkSizeGB = -1
-				TempDir = ""
-				ImagesBundlePath = ""
+				pullflags.SourceRegistryRepo = pullflags.EnterpriseEditionRepo
+				pullflags.SinceVersionString = ""
+				pullflags.DeckhouseTag = ""
+				pullflags.ImagesBundleChunkSizeGB = -1
+				pullflags.TempDir = ""
+				pullflags.ImagesBundlePath = ""
 			},
 			expectError: true,
 			errorMsg:    "less than zero",
@@ -189,20 +190,20 @@ func TestValidationParseAndValidateParameters(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Save originals
-			originalSourceRegistryRepo := SourceRegistryRepo
-			originalSinceVersionString := sinceVersionString
-			originalDeckhouseTag := DeckhouseTag
-			originalImagesBundleChunkSizeGB := ImagesBundleChunkSizeGB
-			originalTempDir := TempDir
-			originalImagesBundlePath := ImagesBundlePath
+			originalSourceRegistryRepo := pullflags.SourceRegistryRepo
+			originalSinceVersionString := pullflags.SinceVersionString
+			originalDeckhouseTag := pullflags.DeckhouseTag
+			originalImagesBundleChunkSizeGB := pullflags.ImagesBundleChunkSizeGB
+			originalTempDir := pullflags.TempDir
+			originalImagesBundlePath := pullflags.ImagesBundlePath
 
 			defer func() {
-				SourceRegistryRepo = originalSourceRegistryRepo
-				sinceVersionString = originalSinceVersionString
-				DeckhouseTag = originalDeckhouseTag
-				ImagesBundleChunkSizeGB = originalImagesBundleChunkSizeGB
-				TempDir = originalTempDir
-				ImagesBundlePath = originalImagesBundlePath
+				pullflags.SourceRegistryRepo = originalSourceRegistryRepo
+				pullflags.SinceVersionString = originalSinceVersionString
+				pullflags.DeckhouseTag = originalDeckhouseTag
+				pullflags.ImagesBundleChunkSizeGB = originalImagesBundleChunkSizeGB
+				pullflags.TempDir = originalTempDir
+				pullflags.ImagesBundlePath = originalImagesBundlePath
 			}()
 
 			tt.setup()
@@ -303,16 +304,16 @@ func TestValidationValidateImagesBundlePathArg(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			originalForcePull := ForcePull
-			originalImagesBundlePath := ImagesBundlePath
+			originalForcePull := pullflags.ForcePull
+			originalImagesBundlePath := pullflags.ImagesBundlePath
 
 			defer func() {
-				ForcePull = originalForcePull
-				ImagesBundlePath = originalImagesBundlePath
+				pullflags.ForcePull = originalForcePull
+				pullflags.ImagesBundlePath = originalImagesBundlePath
 			}()
 
-			ForcePull = tt.forcePull
-			ImagesBundlePath = ""
+			pullflags.ForcePull = tt.forcePull
+			pullflags.ImagesBundlePath = ""
 
 			err := validateImagesBundlePathArg(tt.args)
 
@@ -395,19 +396,19 @@ func TestValidationParseAndValidateVersionFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			originalSinceVersionString := sinceVersionString
-			originalDeckhouseTag := DeckhouseTag
-			originalSinceVersion := SinceVersion
+			originalSinceVersionString := pullflags.SinceVersionString
+			originalDeckhouseTag := pullflags.DeckhouseTag
+			originalSinceVersion := pullflags.SinceVersion
 
 			defer func() {
-				sinceVersionString = originalSinceVersionString
-				DeckhouseTag = originalDeckhouseTag
-				SinceVersion = originalSinceVersion
+				pullflags.SinceVersionString = originalSinceVersionString
+				pullflags.DeckhouseTag = originalDeckhouseTag
+				pullflags.SinceVersion = originalSinceVersion
 			}()
 
-			sinceVersionString = tt.sinceVersionString
-			DeckhouseTag = tt.deckhouseTag
-			SinceVersion = nil
+			pullflags.SinceVersionString = tt.sinceVersionString
+			pullflags.DeckhouseTag = tt.deckhouseTag
+			pullflags.SinceVersion = nil
 
 			err := parseAndValidateVersionFlags()
 
@@ -419,8 +420,8 @@ func TestValidationParseAndValidateVersionFlags(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				if tt.sinceVersionString != "" {
-					assert.NotNil(t, SinceVersion)
-					assert.Equal(t, tt.sinceVersionString, SinceVersion.String())
+					assert.NotNil(t, pullflags.SinceVersion)
+					assert.Equal(t, tt.sinceVersionString, pullflags.SinceVersion.String())
 				}
 			}
 		})
@@ -462,10 +463,10 @@ func TestValidationValidateChunkSizeFlag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			original := ImagesBundleChunkSizeGB
-			defer func() { ImagesBundleChunkSizeGB = original }()
+			original := pullflags.ImagesBundleChunkSizeGB
+			defer func() { pullflags.ImagesBundleChunkSizeGB = original }()
 
-			ImagesBundleChunkSizeGB = tt.chunkSize
+			pullflags.ImagesBundleChunkSizeGB = tt.chunkSize
 			err := validateChunkSizeFlag()
 
 			if tt.expectError {
@@ -508,16 +509,16 @@ func TestValidationValidateTmpPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			originalTempDir := TempDir
-			originalImagesBundlePath := ImagesBundlePath
+			originalTempDir := pullflags.TempDir
+			originalImagesBundlePath := pullflags.ImagesBundlePath
 
 			defer func() {
-				TempDir = originalTempDir
-				ImagesBundlePath = originalImagesBundlePath
+				pullflags.TempDir = originalTempDir
+				pullflags.ImagesBundlePath = originalImagesBundlePath
 			}()
 
-			TempDir = tt.tempDir
-			ImagesBundlePath = tt.bundlePath
+			pullflags.TempDir = tt.tempDir
+			pullflags.ImagesBundlePath = tt.bundlePath
 
 			err := validateTmpPath([]string{tt.tempDir})
 
@@ -525,9 +526,9 @@ func TestValidationValidateTmpPath(t *testing.T) {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
-				assert.NotEmpty(t, TempDir)
+				assert.NotEmpty(t, pullflags.TempDir)
 				// Check that directory was created
-				_, err := os.Stat(TempDir)
+				_, err := os.Stat(pullflags.TempDir)
 				assert.NoError(t, err)
 			}
 		})

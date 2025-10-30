@@ -14,11 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package pull
+package flags
 
 import (
 	"os"
 
+	"github.com/Masterminds/semver"
 	"github.com/spf13/pflag"
 )
 
@@ -26,14 +27,48 @@ const (
 	deckhouseRegistryHost     = "registry.deckhouse.ru"
 	enterpriseEditionRepoPath = "/deckhouse/ee"
 
-	enterpriseEditionRepo = deckhouseRegistryHost + enterpriseEditionRepoPath
+	EnterpriseEditionRepo = deckhouseRegistryHost + enterpriseEditionRepoPath
 )
 
-func addFlags(flagSet *pflag.FlagSet) {
+// CLI Parameters
+var (
+	TempDir string
+
+	Insecure      bool
+	TLSSkipVerify bool
+	ForcePull     bool
+
+	ImagesBundlePath        string
+	ImagesBundleChunkSizeGB int64
+
+	SinceVersionString string
+	SinceVersion       *semver.Version
+
+	DeckhouseTag string
+
+	ModulesPathSuffix string
+	ModulesWhitelist  []string
+	ModulesBlacklist  []string
+
+	SourceRegistryRepo     = EnterpriseEditionRepo // Fallback to EE if nothing was given as source.
+	SourceRegistryLogin    string
+	SourceRegistryPassword string
+	DeckhouseLicenseToken  string
+
+	DoGOSTDigest bool
+	NoPullResume bool
+
+	NoPlatform      bool
+	NoSecurityDB    bool
+	NoModules       bool
+	OnlyExtraImages bool
+)
+
+func AddFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringVar(
 		&SourceRegistryRepo,
 		"source",
-		enterpriseEditionRepo,
+		EnterpriseEditionRepo,
 		"Source registry to pull Deckhouse images from.",
 	)
 	flagSet.StringVar(
@@ -56,7 +91,7 @@ func addFlags(flagSet *pflag.FlagSet) {
 		"Deckhouse license key. Shortcut for --source-login=license-token --source-password=<>.",
 	)
 	flagSet.StringVar(
-		&sinceVersionString,
+		&SinceVersionString,
 		"since-version",
 		"",
 		"Minimal Deckhouse release to pull. Ignored if above current Rock Solid release. Conflicts with --deckhouse-tag.",

@@ -30,19 +30,35 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 )
 
+// TagsResolver is responsible for resolving tag to digest mappings for images.
+// It holds a mapping of tags to their corresponding digests.
+// Example usage:
+// resolver := NewTagsResolver()
+// err := resolver.ResolveTagsDigestsForImageLayouts(mirrorCtx, layouts)
 type TagsResolver struct {
 	tagsDigestsMapping map[string]v1.Hash
 }
 
+// NewTagsResolver initializes a new TagsResolver with an empty mapping.
+// Example usage:
+// resolver := NewTagsResolver()
 func NewTagsResolver() *TagsResolver {
 	return &TagsResolver{tagsDigestsMapping: make(map[string]v1.Hash)}
 }
 
 // TODO no-op must be the default, this should not exist
+// NopTagToDigestMappingFunc is a no-operation function that returns nil for any input.
+// This is used as a placeholder when no mapping is needed.
+// Example usage:
+// digest := NopTagToDigestMappingFunc("some-tag")
 func NopTagToDigestMappingFunc(_ string) *v1.Hash {
 	return nil
 }
 
+// ResolveTagsDigestsForImageLayouts resolves the digests for the given image layouts.
+// It takes a mirror context and the layouts to resolve.
+// Example usage:
+// err := resolver.ResolveTagsDigestsForImageLayouts(mirrorCtx, layouts)
 func (r *TagsResolver) ResolveTagsDigestsForImageLayouts(mirrorCtx *params.BaseParams, layouts *ImageLayouts) error {
 	imageSets := []map[string]struct{}{
 		layouts.DeckhouseImages,
