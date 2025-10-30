@@ -262,15 +262,15 @@ func (svc *Service) pullDeckhousePlatform(tagsToMirror []string) error {
 
 	err := logger.Process("Pull release channels and installers", func() error {
 		if err := svc.PullDeckhouseReleaseChannels(); err != nil {
-			return fmt.Errorf("Pull release channels: %w", err)
+			return fmt.Errorf("pull release channels: %w", err)
 		}
 
 		// if err = layouts.PullInstallers(pullParams, imageLayouts, client); err != nil {
-		// 	return fmt.Errorf("Pull installers: %w", err)
+		// 	return fmt.Errorf("pull installers: %w", err)
 		// }
 
 		// if err = layouts.PullStandaloneInstallers(pullParams, imageLayouts, client); err != nil {
-		// 	return fmt.Errorf("Pull standalone installers: %w", err)
+		// 	return fmt.Errorf("pull standalone installers: %w", err)
 		// }
 
 		return nil
@@ -350,12 +350,12 @@ func (svc *Service) pullDeckhousePlatform(tagsToMirror []string) error {
 		if bundleChunkSize == 0 {
 			platform, err = os.Create(filepath.Join(bundleDir, "platform.tar"))
 			if err != nil {
-				return fmt.Errorf("Create platform.tar: %w", err)
+				return fmt.Errorf("create platform.tar: %w", err)
 			}
 		}
 
 		if err := bundle.Pack(context.Background(), svc.layout.workingDir, platform); err != nil {
-			return fmt.Errorf("Pack platform.tar: %w", err)
+			return fmt.Errorf("pack platform.tar: %w", err)
 		}
 
 		return nil

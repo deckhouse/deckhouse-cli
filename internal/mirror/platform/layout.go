@@ -102,13 +102,8 @@ func extractExtraImageShortTag(imageReferenceString string) string {
 }
 
 func splitImageRefByRepoAndTag(imageReferenceString string) (repo, tag string) {
-	fmt.Println("imageReferenceString:", imageReferenceString)
 	splitIndex := strings.LastIndex(imageReferenceString, ":")
-	fmt.Println("splitIndex:", splitIndex)
 	repo = imageReferenceString[:splitIndex]
-	fmt.Println("repo:", repo)
-	fmt.Println("len:", len(imageReferenceString))
 	tag = imageReferenceString[splitIndex+1:]
-	fmt.Println("tag:", tag)
 	return
 }

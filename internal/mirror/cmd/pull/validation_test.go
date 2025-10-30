@@ -21,7 +21,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	pullflags "github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
+	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -34,9 +34,9 @@ import (
 	"github.com/samber/lo/parallel"
 	"github.com/spf13/cobra"
 
-	pullflags "github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
+	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/gostsums"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"

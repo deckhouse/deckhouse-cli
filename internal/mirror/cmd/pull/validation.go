@@ -24,7 +24,7 @@ import (
 	"path/filepath"
 
 	"github.com/Masterminds/semver/v3"
-	pullflags "github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
+	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/spf13/cobra"
 )
