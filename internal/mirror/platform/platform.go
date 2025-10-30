@@ -391,11 +391,81 @@ func (svc *Service) pullInstallers(ctx context.Context) error {
 		imageSet = append(imageSet, image)
 	}
 
-	if err := svc.PullReleaseImageSet(ctx, imageSet, svc.targetTag != ""); err != nil {
+	if err := svc.PullImageSet(ctx, imageSet, svc.targetTag != ""); err != nil {
 		return err
 	}
 
 	svc.userLogger.InfoLn("All required installers are pulled!")
+
+	return nil
+}
+
+func (svc *Service) PullImageSet(ctx context.Context, imageSet []string, allowMissingTags bool) error {
+	logger := svc.userLogger
+
+	pullCount, totalCount := 1, len(imageSet)
+
+	for _, imageReferenceString := range imageSet {
+		logger.DebugF("Preparing to pull image %s", imageReferenceString)
+
+		imageRepo, _ := splitImageRefByRepoAndTag(imageReferenceString)
+
+		// If we already know the digest of the tagged image, we should pull it by this digest instead of pulling by tag
+		// to avoid race-conditions between mirroring and releasing new builds on release channels.
+		pullReference := imageReferenceString
+
+		releaseMeta := svc.layout.ReleaseChannelImages[imageReferenceString]
+		if releaseMeta != nil {
+			pullReference = imageRepo + "@" + releaseMeta.Digest.String()
+		}
+
+		ref, err := name.ParseReference(pullReference)
+		if err != nil {
+			return fmt.Errorf("parse image reference %q: %w", pullReference, err)
+		}
+
+		logger.DebugF("reference here: %s", ref.String())
+
+		imagePath, tag := splitImageRefByRepoAndTag(pullReference)
+
+		logger.DebugF("Pulling image %s:%s", imagePath, tag)
+
+		err = retry.RunTask(
+			context.TODO(),
+			svc.userLogger,
+			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageReferenceString),
+			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
+				img, err := svc.deckhouseService.GetImage(ctx, tag)
+				if err != nil {
+					if errors.Is(err, registry.ErrImageNotFound) && allowMissingTags {
+						logger.WarnLn("⚠️ Not found in registry, skipping pull")
+						return nil
+					}
+
+					logger.DebugF("failed to pull image %s:%s: %v", imageReferenceString, tag, err)
+
+					return fmt.Errorf("pull image metadata: %w", err)
+				}
+
+				err = svc.layout.ReleaseChannel.AppendImage(img,
+					layout.WithPlatform(svc.layout.platform),
+					layout.WithAnnotations(map[string]string{
+						"org.opencontainers.image.ref.name": imageReferenceString,
+						"io.deckhouse.image.short_tag":      extractExtraImageShortTag(imageReferenceString),
+					}),
+				)
+				if err != nil {
+					return fmt.Errorf("write image to index: %w", err)
+				}
+
+				return nil
+			}))
+		if err != nil {
+			return fmt.Errorf("pull image %q: %w", imageReferenceString, err)
+		}
+
+		pullCount++
+	}
 
 	return nil
 }
