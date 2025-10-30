@@ -76,18 +76,18 @@ func NewService(
 // PullPlatform pulls the Deckhouse platform images and metadata
 // It validates access to the registry, determines which versions to mirror,
 // and prepares the image layouts for mirroring
-func (svc *Service) PullPlatform() error {
-	err := svc.validatePlatformAccess(context.TODO())
+func (svc *Service) PullPlatform(ctx context.Context) error {
+	err := svc.validatePlatformAccess(ctx)
 	if err != nil {
 		return fmt.Errorf("validate platform access: %w", err)
 	}
 
-	tagsToMirror, err := svc.findTagsToMirror(context.TODO())
+	tagsToMirror, err := svc.findTagsToMirror(ctx)
 	if err != nil {
 		return fmt.Errorf("find tags to mirror: %w", err)
 	}
 
-	err = svc.pullDeckhousePlatform(tagsToMirror)
+	err = svc.pullDeckhousePlatform(ctx, tagsToMirror)
 	if err != nil {
 		return fmt.Errorf("pull deckhouse platform: %w", err)
 	}
@@ -257,17 +257,17 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 	return ver, nil
 }
 
-func (svc *Service) pullDeckhousePlatform(tagsToMirror []string) error {
+func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []string) error {
 	logger := svc.userLogger
 
 	err := logger.Process("Pull release channels and installers", func() error {
-		if err := svc.PullDeckhouseReleaseChannels(); err != nil {
+		if err := svc.pullDeckhouseReleaseChannels(ctx); err != nil {
 			return fmt.Errorf("pull release channels: %w", err)
 		}
 
-		// if err = layouts.PullInstallers(pullParams, imageLayouts, client); err != nil {
-		// 	return fmt.Errorf("pull installers: %w", err)
-		// }
+		if err := svc.pullInstallers(ctx); err != nil {
+			return fmt.Errorf("pull installers: %w", err)
+		}
 
 		// if err = layouts.PullStandaloneInstallers(pullParams, imageLayouts, client); err != nil {
 		// 	return fmt.Errorf("pull standalone installers: %w", err)
@@ -366,10 +366,15 @@ func (svc *Service) pullDeckhousePlatform(tagsToMirror []string) error {
 	return nil
 }
 
-func (svc *Service) PullDeckhouseReleaseChannels() error {
+func (svc *Service) pullDeckhouseReleaseChannels(ctx context.Context) error {
 	svc.userLogger.InfoLn("Beginning to pull Deckhouse release channels information")
 
-	if err := svc.PullReleaseImageSet(); err != nil {
+	imageSet := make([]string, 0, len(svc.layout.ReleaseChannelImages))
+	for image := range svc.layout.ReleaseChannelImages {
+		imageSet = append(imageSet, image)
+	}
+
+	if err := svc.PullReleaseImageSet(ctx, imageSet, svc.targetTag != ""); err != nil {
 		return err
 	}
 
@@ -378,14 +383,29 @@ func (svc *Service) PullDeckhouseReleaseChannels() error {
 	return nil
 }
 
-func (svc *Service) PullReleaseImageSet() error {
-	logger := svc.userLogger
+func (svc *Service) pullInstallers(ctx context.Context) error {
+	svc.userLogger.InfoLn("Beginning to pull installers")
 
-	imageSet := svc.layout.ReleaseChannelImages
+	imageSet := make([]string, 0, len(svc.layout.InstallImages))
+	for image := range svc.layout.InstallImages {
+		imageSet = append(imageSet, image)
+	}
+
+	if err := svc.PullReleaseImageSet(ctx, imageSet, svc.targetTag != ""); err != nil {
+		return err
+	}
+
+	svc.userLogger.InfoLn("All required installers are pulled!")
+
+	return nil
+}
+
+func (svc *Service) PullReleaseImageSet(ctx context.Context, imageSet []string, allowMissingTags bool) error {
+	logger := svc.userLogger
 
 	pullCount, totalCount := 1, len(imageSet)
 
-	for imageReferenceString := range imageSet {
+	for _, imageReferenceString := range imageSet {
 		logger.DebugF("Preparing to pull image %s", imageReferenceString)
 
 		imageRepo, _ := splitImageRefByRepoAndTag(imageReferenceString)
@@ -411,12 +431,13 @@ func (svc *Service) PullReleaseImageSet() error {
 		logger.DebugF("Pulling image %s:%s", imagePath, tag)
 
 		err = retry.RunTask(
+			context.TODO(),
 			svc.userLogger,
 			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageReferenceString),
 			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
 				img, err := svc.deckhouseService.GetReleaseImage(ctx, tag)
 				if err != nil {
-					if errors.Is(err, registry.ErrImageNotFound) {
+					if errors.Is(err, registry.ErrImageNotFound) && allowMissingTags {
 						logger.WarnLn("⚠️ Not found in registry, skipping pull")
 						return nil
 					}

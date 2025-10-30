@@ -33,7 +33,7 @@ var testLogger = log.NewSLogger(slog.LevelDebug)
 func TestRunSuccessfulTask(t *testing.T) {
 	task := &successfulTask{}
 
-	require.NoErrorf(t, RunTask(testLogger, "TestRunSuccessfulTask", task), "Task should run without errors")
+	require.NoErrorf(t, RunTask(t.Context(), testLogger, "TestRunSuccessfulTask", task), "Task should run without errors")
 	require.Equalf(t, uint(1), task.runCount, "Task should only be called once")
 }
 
@@ -58,7 +58,7 @@ func (s *successfulTask) MaxRetries() uint {
 
 func TestRunFailingTask(t *testing.T) {
 	task := &failingTask{}
-	require.ErrorContainsf(t, RunTask(testLogger, "TestRunFailingTask", task), "failing task", "Task should fail with error")
+	require.ErrorContainsf(t, RunTask(t.Context(), testLogger, "TestRunFailingTask", task), "failing task", "Task should fail with error")
 	require.Equalf(t, uint(5), task.runCount, "Task should run 5 times")
 	require.Equalf(t, uint(4), task.reportedRetryCount, "Task should be retried 4 times")
 }
@@ -86,7 +86,7 @@ func (s *failingTask) MaxRetries() uint {
 
 func TestRunEventuallySuccessfulTask(t *testing.T) {
 	task := &eventualSuccessTask{}
-	require.NoErrorf(t, RunTask(testLogger, "TestRunEventuallySuccessfulTask", task), "Task should not fail")
+	require.NoErrorf(t, RunTask(t.Context(), testLogger, "TestRunEventuallySuccessfulTask", task), "Task should not fail")
 	require.Equalf(t, uint(2), task.runCount, "Task should run 2 times")
 }
 

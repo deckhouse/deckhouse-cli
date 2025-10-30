@@ -1,6 +1,7 @@
 package mirror
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/Masterminds/semver/v3"
@@ -53,8 +54,8 @@ func NewPullService(
 }
 
 // Pull
-func (svc *PullService) Pull() error {
-	err := svc.platformService.PullPlatform()
+func (svc *PullService) Pull(ctx context.Context) error {
+	err := svc.platformService.PullPlatform(ctx)
 	if err != nil {
 		return fmt.Errorf("pull platform: %w", err)
 	}

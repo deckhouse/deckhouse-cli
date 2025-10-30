@@ -104,7 +104,7 @@ func pull(cmd *cobra.Command, _ []string) error {
 
 	puller.logger.InfoF("d8 version: %s", version.Version)
 
-	if err := puller.Execute(); err != nil {
+	if err := puller.Execute(cmd.Context()); err != nil {
 		return ErrPullFailed
 	}
 
@@ -223,7 +223,7 @@ func NewPuller(cmd *cobra.Command) *Puller {
 		},
 	}
 }
-func (p *Puller) Execute() error {
+func (p *Puller) Execute(ctx context.Context) error {
 	if err := p.cleanupWorkingDirectory(); err != nil {
 		return err
 	}
@@ -262,7 +262,7 @@ func (p *Puller) Execute() error {
 			p.logger,
 		)
 
-		err := svc.Pull()
+		err := svc.Pull(ctx)
 		if err != nil {
 			panic(err)
 		}

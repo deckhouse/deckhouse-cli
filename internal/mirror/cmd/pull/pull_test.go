@@ -1381,7 +1381,7 @@ func TestPullerExecute(t *testing.T) {
 	cmd.SetContext(context.Background())
 
 	puller := NewPuller(cmd)
-	err := puller.Execute()
+	err := puller.Execute(cmd.Context())
 
 	// Should succeed when all operations are skipped
 	assert.NoError(t, err)
