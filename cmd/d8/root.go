@@ -56,7 +56,6 @@ type RootCommand struct {
 
 	pluginRegistryClient pkg.RegistryClient
 	registryService      *registryservice.Service
-	servicesInitialized  bool
 }
 
 func NewRootCommand() *RootCommand {
@@ -85,6 +84,7 @@ func NewRootCommand() *RootCommand {
 		},
 	}
 
+	rootCmd.initPluginServices()
 	rootCmd.registerCommands()
 	rootCmd.cmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 
@@ -108,13 +108,8 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(commands.NewStrongholdCommand())
 	r.cmd.AddCommand(commands.NewHelpJSONCommand(r.cmd))
 
-	r.cmd.AddCommand(plugins.NewPluginsCommand(func() *registryservice.PluginService { return r.getRegistryService().PluginService() }, r.logger.Named("plugins-command")))
-}
-
-// getRegistryService returns the registry service, initializing it if needed
-func (r *RootCommand) getRegistryService() *registryservice.Service {
-	r.ensurePluginServicesInitialized()
-	return r.registryService
+	pluginService := r.registryService.PluginService()
+	r.cmd.AddCommand(plugins.NewPluginsCommand(pluginService, r.logger.Named("plugins-command")))
 }
 
 func (r *RootCommand) Execute() error {

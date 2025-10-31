@@ -30,53 +30,43 @@ import (
 	intplugins "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
-func (r *RootCommand) ensurePluginServicesInitialized() {
-	if r.servicesInitialized {
-		return
-	}
-	r.servicesInitialized = true
-
+func (r *RootCommand) initPluginServices() {
 	r.logger.Debug("Initializing plugin services")
 
-	// Extract registry host and repository path from the source registry repo
+	// Extract registry host from the source registry repo
 	// SourceRegistryRepo can be:
 	// - Just hostname: "registry.deckhouse.io"
 	// - Full path: "registry.deckhouse.io/deckhouse/ee"
-	sourceRepo := d8flags.SourceRegistryRepo
+	registryRef, err := name.ParseReference(d8flags.SourceRegistryRepo)
+	if err != nil {
+		r.logger.Error("Failed to parse registry reference", slog.String("error", err.Error()))
+		return
+	}
 
-	var registryHost string
-	var repoSegments []string
+	registryHost := registryRef.Context().RegistryStr()
+	registrySegments := strings.Split(registryRef.Context().RepositoryStr(), "/")
+	r.logger.Debug("registrySegments", slog.Any("registrySegments", registrySegments))
 
 	// If it's just a hostname (no slashes), use it directly
-	// Otherwise parse to extract the hostname and repository segments
-	if len(sourceRepo) > 0 && sourceRepo[0] != '/' {
-		if !containsSlash(sourceRepo) {
-			// Just a hostname, use it as-is
-			registryHost = sourceRepo
-			r.logger.Debug("Using hostname as registry", slog.String("host", registryHost))
-		} else {
-			// Has path components, parse to extract registry and repository parts
-			ref, err := name.ParseReference(sourceRepo)
-			if err == nil {
-				registryHost = ref.Context().RegistryStr()
-				repoStr := ref.Context().RepositoryStr()
-				// Split repository path into segments
-				if repoStr != "" && repoStr != "library/"+sourceRepo {
-					// Only split if it's not the default parsing behavior
-					repoSegments = strings.Split(repoStr, "/")
-				}
-				r.logger.Debug("Extracted registry and repository from path",
-					slog.String("original", sourceRepo),
-					slog.String("registry", registryHost),
-					slog.String("repository", repoStr))
-			} else {
-				// Fallback: assume it's just a registry host
-				registryHost = sourceRepo
-				r.logger.Warn("Failed to parse source registry repo, using as registry host",
-					slog.String("source", sourceRepo), slog.String("error", err.Error()))
-			}
-		}
-	}
+	// Otherwise parse to extract the hostname
+	// if len(registryHost) > 0 && registryHost[0] != '/' {
+	// 	// Try to parse it - if it has a path component, extract the registry
+	// 	// We need to add a dummy path to force it to be treated as a registry URL
+	// 	testRef := registryHost
+	// 	if !containsSlash(registryHost) {
+	// 		// Just a hostname, use it as-is
+	// 		r.logger.Debug("Using hostname as registry", slog.String("host", registryHost))
+	// 	} else {
+	// 		// Has path components, parse to extract registry
+	// 		ref, err := name.ParseReference(registryHost)
+	// 		if err == nil {
+	// 			registryHost = ref.Context().RegistryStr()
+	// 			r.logger.Debug("Extracted registry from path",
+	// 				slog.String("original", testRef),
+	// 				slog.String("extracted", registryHost))
+	// 		}
+	// 	}
+	// }
 
 	r.logger.Debug("registryHost after parsing", slog.String("registryHost", registryHost))
 
@@ -97,19 +87,14 @@ func (r *RootCommand) ensurePluginServicesInitialized() {
 
 	// Build scoped client using chained WithSegment calls
 	// Example: registry.deckhouse.io -> deckhouse -> ee -> modules
-	r.pluginRegistryClient = baseClient
-	for _, segment := range repoSegments {
-		if segment != "" {
-			r.pluginRegistryClient = r.pluginRegistryClient.WithSegment(segment)
-		}
-	}
+	r.pluginRegistryClient = baseClient.WithSegment(registrySegments...)
 
 	r.logger.Debug("Creating plugin service with scoped client",
 		slog.String("registry", registryHost),
-		slog.String("repo_segments", strings.Join(repoSegments, "/")))
+		slog.Any("registrySegments", registrySegments),
+	)
 
 	r.registryService = intplugins.NewService(
-		// r.pluginRegistryClient.WithSegment("plugins"),
 		r.pluginRegistryClient,
 		r.logger.Named("registry-service"),
 	)
