@@ -251,6 +251,13 @@ func (c *Client) GetImageConfig(ctx context.Context, tag string) (*v1.ConfigFile
 		return nil, fmt.Errorf("failed to get image config: %w", err)
 	}
 
+	// manifest, err := img.Manifest()
+	// if err != nil {
+
+	// }
+	// annotations := manifest.Annotations
+	// c.log.Warn("debug annotations", slog.Any("annotations", annotations))
+
 	logentry.Debug("Image config retrieved successfully")
 
 	return configFile, nil

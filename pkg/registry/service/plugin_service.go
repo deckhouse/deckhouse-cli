@@ -19,6 +19,7 @@ package service
 import (
 	"archive/tar"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -56,23 +57,55 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 	pluginClient := s.client.WithSegment(pluginName)
 
 	// Get the plugin-imageConfig label from image
-	imageConfig, err := pluginClient.GetImageConfig(ctx, tag)
+	// imageConfig, err := pluginClient.GetImageConfig(ctx, tag)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to get image config: %w", err)
+	// }
+
+	manifestRaw, err := pluginClient.GetManifest(ctx, tag)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get image config: %w", err)
+		return nil, fmt.Errorf("failed to get manifest: %w", err)
+	}
+	s.log.Debug("Manifest retrieved successfully", slog.String("manifestraw", string(manifestRaw)))
+
+	manifest := &map[string]any{}
+	err = json.Unmarshal(manifestRaw, manifest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal manifest: %w", err)
 	}
 
-	contractJSON, exists := imageConfig.Config.Labels["plugin-contract"]
+	annotations := (*manifest)["annotations"].(map[string]any)
+	contractB64, exists := annotations["contract"].(string)
 	if !exists {
-		s.log.Debug("Plugin contract not found in image", slog.String("plugin", pluginName), slog.String("tag", tag))
-
 		return nil, fmt.Errorf("plugin-contract annotation not found in image metadata")
 	}
+	s.log.Debug("Contract base64 retrieved successfully", slog.String("contractb64", contractB64))
 
-	// Parse the contract JSON into DTO
-	contract := new(PluginContract)
-	if err := json.Unmarshal([]byte(contractJSON), &contract); err != nil {
-		return nil, fmt.Errorf("failed to parse plugin contract: %w", err)
+	contractRaw, err := base64.StdEncoding.DecodeString(contractB64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode contract: %w", err)
 	}
+	s.log.Debug("Contract raw retrieved successfully", slog.String("contractraw", string(contractRaw)))
+
+	contract := new(PluginContract)
+	err = json.Unmarshal(contractRaw, contract)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal contract: %w", err)
+	}
+	// s.log.Debug("Contract unmarshalled successfully", slog.String("contract_plugin_name", contract.Name))
+
+	// contractJSON, exists := imageConfig.Config.Labels["plugin-contract"]
+	// if !exists {
+	// 	s.log.Debug("Plugin contract not found in image", slog.String("plugin", pluginName), slog.String("tag", tag))
+
+	// 	return nil, fmt.Errorf("plugin-contract annotation not found in image metadata")
+	// }
+
+	// // Parse the contract JSON into DTO
+	// contract := new(PluginContract)
+	// if err := json.Unmarshal([]byte(contractJSON), &contract); err != nil {
+	// 	return nil, fmt.Errorf("failed to parse plugin contract: %w", err)
+	// }
 
 	s.log.Debug("Plugin contract parsed successfully", slog.String("plugin", pluginName), slog.String("tag", tag), slog.String("name", contract.Name), slog.String("version", contract.Version))
 
