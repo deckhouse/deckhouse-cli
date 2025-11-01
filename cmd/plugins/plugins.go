@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/spf13/cobra"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
@@ -67,6 +68,7 @@ func NewPluginsCommand(logger *dkplog.Logger) *cobra.Command {
 		Short:  "Manage Deckhouse CLI plugins",
 		Hidden: true,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			// init plugin services for subcommands after flags are parsed
 			pc.initPluginServices()
 		},
 	}
@@ -101,11 +103,6 @@ func (pc *PluginsCommand) pluginsListCommand() *cobra.Command {
 
 			return nil
 		},
-		// PreRunE: func(cmd *cobra.Command, args []string) error {
-		// 	panic("pisos list")
-		// 	pc.initPluginServices()
-		// 	return nil
-		// },
 	}
 
 	cmd.Flags().BoolVar(&showInstalledOnly, "installed", false, "Show only installed plugins")
@@ -187,13 +184,26 @@ func (pc *PluginsCommand) fetchAvailablePlugins(ctx context.Context) ([]pluginDi
 			IsInstalled: false,
 		}
 
+		// fetch versions to get latest version
+		versions, err := pc.service.ListPluginTags(ctx, pluginName)
+		if err != nil {
+			pc.logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+			return nil, fmt.Errorf("failed to list plugin tags: %w", err)
+		}
+
+		latestVersion, err := pc.fetchLatestVersion(ctx, versions)
+		if err != nil {
+			pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+			return nil, fmt.Errorf("failed to fetch latest version: %w", err)
+		}
+
 		// Get the latest version contract
-		contract, err := pc.service.GetPluginContract(ctx, pluginName, "main")
+		contract, err := pc.service.GetPluginContract(ctx, pluginName, latestVersion.Original())
 		if err != nil {
 			// Log the error for debugging
 			pc.logger.Warn("Failed to get plugin contract",
 				slog.String("plugin", pluginName),
-				slog.String("tag", "main"),
+				slog.String("tag", latestVersion.Original()),
 				slog.String("error", err.Error()))
 
 			// Show ERROR in version column and error description in description column
@@ -201,7 +211,7 @@ func (pc *PluginsCommand) fetchAvailablePlugins(ctx context.Context) ([]pluginDi
 			plugin.Description = "failed to get plugin contract"
 			plugin.HasError = true
 		} else {
-			plugin.Version = contract.Version
+			plugin.Version = latestVersion.Original()
 			plugin.Description = contract.Description
 			plugin.HasError = false
 
@@ -215,6 +225,36 @@ func (pc *PluginsCommand) fetchAvailablePlugins(ctx context.Context) ([]pluginDi
 	}
 
 	return plugins, nil
+}
+
+func (pc *PluginsCommand) fetchLatestVersion(_ context.Context, versions []string) (*semver.Version, error) {
+	if len(versions) == 0 {
+		return nil, fmt.Errorf("no versions found")
+	}
+
+	var latestVersion *semver.Version
+
+	for _, version := range versions {
+		version, err := semver.NewVersion(version)
+		if err != nil {
+			continue
+		}
+
+		if latestVersion == nil {
+			latestVersion = version
+			continue
+		}
+
+		if latestVersion.LessThan(version) {
+			latestVersion = version
+		}
+	}
+
+	if latestVersion == nil {
+		return nil, fmt.Errorf("no versions found")
+	}
+
+	return latestVersion, nil
 }
 
 // printPluginsList prints all prepared data
