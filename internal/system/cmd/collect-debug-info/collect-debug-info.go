@@ -39,33 +39,6 @@ func NewCommand() *cobra.Command {
 		listExclude bool
 	)
 
-	collectDebugInfo := func(cmd *cobra.Command, _ []string) error {
-		if listExclude {
-			printExcludableFiles()
-			return nil
-		}
-
-		kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
-		if err != nil {
-			return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-		}
-
-		contextName, err := cmd.Flags().GetString("context")
-		if err != nil {
-			return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-		}
-
-		config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
-		if err != nil {
-			return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-		}
-
-		if err = debugtar.Tarball(config, kubeCl, excludeList); err != nil {
-			return fmt.Errorf("Error collecting debug info: %w", err)
-		}
-		return nil
-	}
-
 	collectDebugInfoCmd := &cobra.Command{
 		Use:           "collect-debug-info",
 		Short:         "Collect debug info.",
@@ -76,12 +49,16 @@ func NewCommand() *cobra.Command {
 			if listExclude {
 				return nil
 			}
+
 			if term.IsTerminal(int(os.Stdout.Fd())) {
-				return fmt.Errorf("Please provide output tar.gz to dump debug logs, ex. \"> dump-logs.tar.gz\"")
+				return fmt.Errorf("output must be redirected to a file, e.g., \"> dump-logs.tar.gz\"")
 			}
+
 			return nil
 		},
-		RunE: collectDebugInfo,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return collectDebugInfo(cmd, listExclude, excludeList)
+		},
 	}
 	collectDebugInfoCmd.Flags().StringSliceVar(&excludeList, "exclude", []string{}, "Exclude specific files from the debug archive. Use comma-separated values")
 	collectDebugInfoCmd.Flags().BoolVarP(&listExclude, "list-exclude", "l", false, "List all files that can be excluded from the debug archive")
@@ -93,4 +70,31 @@ func printExcludableFiles() {
 	for _, fileName := range debugtar.GetExcludableFiles() {
 		fmt.Println(fileName)
 	}
+}
+
+func collectDebugInfo(cmd *cobra.Command, listExclude bool, excludeList []string) error {
+	if listExclude {
+		printExcludableFiles()
+		return nil
+	}
+
+	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	contextName, err := cmd.Flags().GetString("context")
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
+	if err != nil {
+		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+	}
+
+	if err = debugtar.Tarball(config, kubeCl, excludeList); err != nil {
+		return fmt.Errorf("Error collecting debug info: %w", err)
+	}
+	return nil
 }
