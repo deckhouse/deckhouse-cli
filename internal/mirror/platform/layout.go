@@ -8,15 +8,19 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 )
 
-type DeckhouseReleaseMeta struct {
-	Version string
-	Digest  v1.Hash
+type ImageMeta struct {
+	Version         string
+	TagReference    string
+	DigestReference string
 }
 
-func NewDeckhouseReleaseMeta(version string, digest v1.Hash) *DeckhouseReleaseMeta {
-	return &DeckhouseReleaseMeta{
-		Version: version,
-		Digest:  digest,
+func NewImageMeta(version string, tagReference string, digest *v1.Hash) *ImageMeta {
+	imageRepo, _ := splitImageRefByRepoAndTag(tagReference)
+
+	return &ImageMeta{
+		Version:         version,
+		TagReference:    tagReference,
+		DigestReference: imageRepo + "@" + digest.String(),
 	}
 }
 
@@ -26,16 +30,16 @@ type ImageLayouts struct {
 	rootUrl    string
 
 	Deckhouse       layout.Path
-	DeckhouseImages map[string]struct{}
+	DeckhouseImages map[string]*ImageMeta
 
 	Install       layout.Path
-	InstallImages map[string]struct{}
+	InstallImages map[string]*ImageMeta
 
 	InstallStandalone       layout.Path
-	InstallStandaloneImages map[string]struct{}
+	InstallStandaloneImages map[string]*ImageMeta
 
 	ReleaseChannel       layout.Path
-	ReleaseChannelImages map[string]*DeckhouseReleaseMeta
+	ReleaseChannelImages map[string]*ImageMeta
 }
 
 func NewImageLayouts(rootFolder, rootUrl string) *ImageLayouts {
@@ -44,10 +48,10 @@ func NewImageLayouts(rootFolder, rootUrl string) *ImageLayouts {
 		rootUrl:    rootUrl,
 		platform:   v1.Platform{Architecture: "amd64", OS: "linux"},
 
-		DeckhouseImages:         map[string]struct{}{},
-		InstallImages:           map[string]struct{}{},
-		InstallStandaloneImages: map[string]struct{}{},
-		ReleaseChannelImages:    map[string]*DeckhouseReleaseMeta{},
+		DeckhouseImages:         map[string]*ImageMeta{},
+		InstallImages:           map[string]*ImageMeta{},
+		InstallStandaloneImages: map[string]*ImageMeta{},
+		ReleaseChannelImages:    map[string]*ImageMeta{},
 	}
 
 	return l
@@ -55,9 +59,9 @@ func NewImageLayouts(rootFolder, rootUrl string) *ImageLayouts {
 
 func (l *ImageLayouts) FillDeckhouseImages(deckhouseVersions []string) {
 	for _, version := range deckhouseVersions {
-		l.DeckhouseImages[fmt.Sprintf("%s:%s", l.rootUrl, version)] = struct{}{}
-		l.InstallImages[fmt.Sprintf("%s/install:%s", l.rootUrl, version)] = struct{}{}
-		l.InstallStandaloneImages[fmt.Sprintf("%s/install-standalone:%s", l.rootUrl, version)] = struct{}{}
+		l.DeckhouseImages[fmt.Sprintf("%s:%s", l.rootUrl, version)] = nil
+		l.InstallImages[fmt.Sprintf("%s/install:%s", l.rootUrl, version)] = nil
+		l.InstallStandaloneImages[fmt.Sprintf("%s/install-standalone:%s", l.rootUrl, version)] = nil
 	}
 }
 
@@ -67,23 +71,23 @@ func (l *ImageLayouts) FillForTag(tag string) {
 		return
 	}
 
-	l.DeckhouseImages[l.rootUrl+":alpha"] = struct{}{}
-	l.DeckhouseImages[l.rootUrl+":beta"] = struct{}{}
-	l.DeckhouseImages[l.rootUrl+":early-access"] = struct{}{}
-	l.DeckhouseImages[l.rootUrl+":stable"] = struct{}{}
-	l.DeckhouseImages[l.rootUrl+":rock-solid"] = struct{}{}
+	l.DeckhouseImages[l.rootUrl+":alpha"] = nil
+	l.DeckhouseImages[l.rootUrl+":beta"] = nil
+	l.DeckhouseImages[l.rootUrl+":early-access"] = nil
+	l.DeckhouseImages[l.rootUrl+":stable"] = nil
+	l.DeckhouseImages[l.rootUrl+":rock-solid"] = nil
 
-	l.InstallImages[l.rootUrl+"/install:alpha"] = struct{}{}
-	l.InstallImages[l.rootUrl+"/install:beta"] = struct{}{}
-	l.InstallImages[l.rootUrl+"/install:early-access"] = struct{}{}
-	l.InstallImages[l.rootUrl+"/install:stable"] = struct{}{}
-	l.InstallImages[l.rootUrl+"/install:rock-solid"] = struct{}{}
+	l.InstallImages[l.rootUrl+"/install:alpha"] = nil
+	l.InstallImages[l.rootUrl+"/install:beta"] = nil
+	l.InstallImages[l.rootUrl+"/install:early-access"] = nil
+	l.InstallImages[l.rootUrl+"/install:stable"] = nil
+	l.InstallImages[l.rootUrl+"/install:rock-solid"] = nil
 
-	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:alpha"] = struct{}{}
-	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:beta"] = struct{}{}
-	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:early-access"] = struct{}{}
-	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:stable"] = struct{}{}
-	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:rock-solid"] = struct{}{}
+	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:alpha"] = nil
+	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:beta"] = nil
+	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:early-access"] = nil
+	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:stable"] = nil
+	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:rock-solid"] = nil
 }
 
 // extractExtraImageShortTag extracts the image name and tag for extra images

@@ -918,7 +918,7 @@ func TestPullFunctionErrorPaths(t *testing.T) {
 
 func TestEnterpriseEditionRepo(t *testing.T) {
 	// Test that the enterprise edition repo constant is properly defined
-	assert.Equal(t, "registry.deckhouse.io", pullflags.EnterpriseEditionRepo)
+	assert.Equal(t, "registry.deckhouse.ru/deckhouse/ee", pullflags.EnterpriseEditionRepo)
 	assert.Equal(t, pullflags.EnterpriseEditionRepo, pullflags.SourceRegistryRepo) // Default value
 }
 

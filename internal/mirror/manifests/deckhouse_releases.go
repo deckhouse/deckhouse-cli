@@ -42,6 +42,9 @@ func GenerateDeckhouseReleaseManifestsForVersions(
 	manifests := &bytes.Buffer{}
 	for _, version := range versionTagsToMirror {
 		versionReleaseImage, err := layouts.FindImageByTag(releaseChannelsImagesLayout, version)
+		if err != nil {
+			fmt.Printf("Find image by tag: %v\n", err)
+		}
 		releaseData, err := extractReleaseInfoForDeckhouseRelease(versionReleaseImage)
 		if err != nil {
 			return fmt.Errorf("Build manifest for version %q: %w", version, err)
