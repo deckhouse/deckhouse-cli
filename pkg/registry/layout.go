@@ -2,14 +2,30 @@ package registry
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 )
 
+type ImageMeta struct {
+	TagReference    string
+	DigestReference string
+}
+
+func NewImageMeta(tagReference string, digest *v1.Hash) *ImageMeta {
+	imageRepo, _ := splitImageRefByRepoAndTag(tagReference)
+
+	return &ImageMeta{
+		TagReference:    tagReference,
+		DigestReference: imageRepo + "@" + digest.String(),
+	}
+}
+
 type ImageLayout struct {
 	wrapped layout.Path
+	mapping map[string]*ImageMeta
 }
 
 func NewImageLayout(path layout.Path) *ImageLayout {
@@ -55,4 +71,17 @@ func findDigestByImageReference(imageReference string, indexManifest *v1.IndexMa
 	}
 
 	return nil
+}
+
+func splitImageRefByRepoAndTag(imageReferenceString string) (repo, tag string) {
+	splitIndex := strings.LastIndex(imageReferenceString, ":")
+	repo = imageReferenceString[:splitIndex]
+	tag = imageReferenceString[splitIndex+1:]
+
+	if strings.HasSuffix(repo, "@sha256") {
+		repo = strings.TrimSuffix(repo, "@sha256")
+		tag = "@sha256:" + tag
+	}
+
+	return repo, tag
 }

@@ -278,6 +278,10 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 			return fmt.Errorf("pull standalone installers: %w", err)
 		}
 
+		if err := svc.pullDeckhouseReleases(ctx); err != nil {
+			return fmt.Errorf("pull deckhouse releases: %w", err)
+		}
+
 		return nil
 	})
 	if err != nil {
@@ -453,6 +457,33 @@ func (svc *Service) pullStandaloneInstallers(ctx context.Context) error {
 	return nil
 }
 
+func (svc *Service) pullDeckhouseReleases(ctx context.Context) error {
+	svc.userLogger.InfoLn("Beginning to pull Deckhouse releases")
+
+	for image, meta := range svc.layout.DeckhouseImages {
+		if meta != nil {
+			continue
+		}
+
+		_, tag := splitImageRefByRepoAndTag(image)
+
+		digest, err := svc.deckhouseService.GetDigest(ctx, tag)
+		if err != nil {
+			return fmt.Errorf("get digest: %w", err)
+		}
+
+		svc.layout.DeckhouseImages[image] = NewImageMeta(tag, image, digest)
+	}
+
+	if err := svc.PullImageSet(ctx, svc.layout.DeckhouseImages, svc.layout.Deckhouse, svc.targetTag != ""); err != nil {
+		return err
+	}
+
+	svc.userLogger.InfoLn("All required Deckhouse releases are pulled!")
+
+	return nil
+}
+
 // ImageGetter is a function type for getting images from the registry
 type ImageGetter func(ctx context.Context, tag string) (pkg.RegistryImage, error)
 
@@ -539,10 +570,10 @@ func (svc *Service) generateDeckhouseReleaseManifests(
 	err := manifests.GenerateDeckhouseReleaseManifestsForVersions(
 		tagsToMirror,
 		deckhouseReleasesManifestFile,
-		svc.layout.ReleaseChannel,
+		svc.layout.Deckhouse,
 	)
 	if err != nil {
-		return fmt.Errorf("Generate DeckhouseRelease manifests: %w", err)
+		return fmt.Errorf("generate DeckhouseRelease manifests: %w", err)
 	}
 
 	return nil
