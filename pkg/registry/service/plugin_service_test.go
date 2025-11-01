@@ -20,6 +20,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"os"
@@ -27,7 +28,6 @@ import (
 	"testing"
 
 	"github.com/gojuno/minimock/v3"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 
@@ -39,18 +39,14 @@ func TestGetPluginContract_Success(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
 
-	configFile := &v1.ConfigFile{
-		Config: v1.Config{
-			Labels: map[string]string{
-				"plugin-contract": `{"name": "test-plugin", "version": "v1.0.0", "description": "A test plugin", "env": [{"name": "TEST_ENV"}], "flags": [{"name": "--test-flag"}], "requirements": {"kubernetes": {"constraint": ">= 1.26"}, "modules": [{"name": "test-module", "constraint": ">= 1.0.0"}]}}`,
-			},
-		},
-	}
+	contractJSON := `{"name": "test-plugin", "version": "v1.0.0", "description": "A test plugin", "env": [{"name": "TEST_ENV"}], "flags": [{"name": "--test-flag"}], "requirements": {"kubernetes": {"constraint": ">= 1.26"}, "modules": [{"name": "test-module", "constraint": ">= 1.0.0"}]}}`
+	contractB64 := base64.StdEncoding.EncodeToString([]byte(contractJSON))
+	manifestJSON := `{"annotations": {"contract": "` + contractB64 + `"}}`
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetImageConfigMock.
+	mockScopedClient.GetManifestMock.
 		Expect(context.Background(), "v1.0.0").
-		Return(configFile, nil)
+		Return([]byte(manifestJSON), nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
@@ -113,18 +109,14 @@ func TestGetPluginContract_MinimalContract(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
 
-	configFile := &v1.ConfigFile{
-		Config: v1.Config{
-			Labels: map[string]string{
-				"plugin-contract": `{"name": "minimal-plugin", "version": "v1.0.0", "description": "Minimal plugin"}`,
-			},
-		},
-	}
+	contractJSON := `{"name": "minimal-plugin", "version": "v1.0.0", "description": "Minimal plugin"}`
+	contractB64 := base64.StdEncoding.EncodeToString([]byte(contractJSON))
+	manifestJSON := `{"annotations": {"contract": "` + contractB64 + `"}}`
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetImageConfigMock.
+	mockScopedClient.GetManifestMock.
 		Expect(context.Background(), "v1.0.0").
-		Return(configFile, nil)
+		Return([]byte(manifestJSON), nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
@@ -163,16 +155,12 @@ func TestGetPluginContract_LabelNotFound(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
 
-	configFile := &v1.ConfigFile{
-		Config: v1.Config{
-			Labels: map[string]string{}, // no plugin-contract
-		},
-	}
+	manifestJSON := `{"annotations": {}}` // no contract annotation
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetImageConfigMock.
+	mockScopedClient.GetManifestMock.
 		Expect(context.Background(), "v1.0.0").
-		Return(configFile, nil)
+		Return([]byte(manifestJSON), nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
@@ -207,7 +195,7 @@ func TestGetPluginContract_GetLabelError(t *testing.T) {
 	expectedErr := errors.New("registry connection failed")
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetImageConfigMock.
+	mockScopedClient.GetManifestMock.
 		Expect(context.Background(), "v1.0.0").
 		Return(nil, expectedErr)
 
@@ -240,18 +228,14 @@ func TestGetPluginContract_InvalidJSON(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
 
-	configFile := &v1.ConfigFile{
-		Config: v1.Config{
-			Labels: map[string]string{
-				"plugin-contract": `{invalid json`,
-			},
-		},
-	}
+	invalidContractJSON := `{invalid json`
+	contractB64 := base64.StdEncoding.EncodeToString([]byte(invalidContractJSON))
+	manifestJSON := `{"annotations": {"contract": "` + contractB64 + `"}}`
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetImageConfigMock.
+	mockScopedClient.GetManifestMock.
 		Expect(context.Background(), "v1.0.0").
-		Return(configFile, nil)
+		Return([]byte(manifestJSON), nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
@@ -278,18 +262,14 @@ func TestGetPluginContract_EmptyJSON(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
 
-	configFile := &v1.ConfigFile{
-		Config: v1.Config{
-			Labels: map[string]string{
-				"plugin-contract": `{}`,
-			},
-		},
-	}
+	emptyContractJSON := `{}`
+	contractB64 := base64.StdEncoding.EncodeToString([]byte(emptyContractJSON))
+	manifestJSON := `{"annotations": {"contract": "` + contractB64 + `"}}`
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
-	mockScopedClient.GetImageConfigMock.
+	mockScopedClient.GetManifestMock.
 		Expect(context.Background(), "v1.0.0").
-		Return(configFile, nil)
+		Return([]byte(manifestJSON), nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
