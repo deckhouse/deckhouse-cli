@@ -346,10 +346,21 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pluginName := args[0]
-			tag := version
-			if tag == "" {
-				tag = "latest"
+			ctx := cmd.Context()
+
+			versions, err := pc.service.ListPluginTags(ctx, pluginName)
+			if err != nil {
+				pc.logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+				return fmt.Errorf("failed to list plugin tags: %w", err)
 			}
+
+			latestVersion, err := pc.fetchLatestVersion(ctx, versions)
+			if err != nil {
+				pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+				return fmt.Errorf("failed to fetch latest version: %w", err)
+			}
+
+			tag := latestVersion.Original()
 
 			fmt.Printf("Fetching contract for plugin: %s\n", pluginName)
 			fmt.Printf("Tag: %s\n", tag)
@@ -360,7 +371,6 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 			fmt.Println("\nRetrieving contract from registry...")
 
 			// Use service to get plugin contract
-			ctx := cmd.Context()
 			plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
 			if err != nil {
 				pc.logger.Warn("Failed to get plugin contract",
@@ -421,18 +431,27 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pluginName := args[0]
-			tag := version
-			if tag == "" {
-				tag = "latest"
+			ctx := cmd.Context()
+
+			versions, err := pc.service.ListPluginTags(ctx, pluginName)
+			if err != nil {
+				pc.logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+				return fmt.Errorf("failed to list plugin tags: %w", err)
 			}
+
+			latestVersion, err := pc.fetchLatestVersion(ctx, versions)
+			if err != nil {
+				pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+				return fmt.Errorf("failed to fetch latest version: %w", err)
+			}
+
+			tag := latestVersion.Original()
 
 			fmt.Printf("Installing plugin: %s\n", pluginName)
 			fmt.Printf("Tag: %s\n", tag)
 			if useMajor > 0 {
 				fmt.Printf("Using major version: %d\n", useMajor)
 			}
-
-			ctx := cmd.Context()
 
 			// Get plugin contract first
 			fmt.Println("Verifying plugin contract...")

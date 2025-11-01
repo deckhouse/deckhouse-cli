@@ -42,26 +42,24 @@ func (r *PluginsCommand) initPluginServices() {
 
 	// If it's just a hostname (no slashes), use it directly
 	// Otherwise parse to extract the hostname
-	// if len(registryHost) > 0 && registryHost[0] != '/' {
-	// 	// Try to parse it - if it has a path component, extract the registry
-	// 	// We need to add a dummy path to force it to be treated as a registry URL
-	// 	testRef := registryHost
-	// 	if !containsSlash(registryHost) {
-	// 		// Just a hostname, use it as-is
-	// 		r.logger.Debug("Using hostname as registry", slog.String("host", registryHost))
-	// 	} else {
-	// 		// Has path components, parse to extract registry
-	// 		ref, err := name.ParseReference(registryHost)
-	// 		if err == nil {
-	// 			registryHost = ref.Context().RegistryStr()
-	// 			r.logger.Debug("Extracted registry from path",
-	// 				slog.String("original", testRef),
-	// 				slog.String("extracted", registryHost))
-	// 		}
-	// 	}
-	// }
-
-	r.logger.Debug("registryHost after parsing", slog.String("registryHost", registryHost))
+	if len(registryHost) > 0 && registryHost[0] != '/' {
+		// Try to parse it - if it has a path component, extract the registry
+		// We need to add a dummy path to force it to be treated as a registry URL
+		testRef := registryHost
+		if !containsSlash(registryHost) {
+			// Just a hostname, use it as-is
+			r.logger.Debug("Using hostname as registry", slog.String("host", registryHost))
+		} else {
+			// Has path components, parse to extract registry
+			ref, err := name.ParseReference(registryHost)
+			if err == nil {
+				registryHost = ref.Context().RegistryStr()
+				r.logger.Debug("Extracted registry from path",
+					slog.String("original", testRef),
+					slog.String("extracted", registryHost))
+			}
+		}
+	}
 
 	auth := getPluginRegistryAuthProvider(registryHost, r.logger)
 
