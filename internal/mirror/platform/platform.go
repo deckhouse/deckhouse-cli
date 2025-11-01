@@ -16,6 +16,8 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/manifests"
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
@@ -86,6 +88,9 @@ func (svc *Service) PullPlatform(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("find tags to mirror: %w", err)
 	}
+
+	svc.layout.FillDeckhouseImages(tagsToMirror)
+	svc.layout.FillForTag(svc.targetTag)
 
 	err = svc.pullDeckhousePlatform(ctx, tagsToMirror)
 	if err != nil {
@@ -242,17 +247,17 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 		return nil, fmt.Errorf("cannot get %s release channel image digest: %w", releaseChannel, err)
 	}
 
-	svc.userLogger.DebugF("image reference: %s@%s", image.GetReference(), digest.String())
+	svc.userLogger.DebugF("image reference: %s@%s", image.GetTagReference(), digest.String())
 
 	svc.layout.ReleaseChannel.AppendImage(
 		image,
 		layout.WithPlatform(svc.layout.platform),
 		layout.WithAnnotations(map[string]string{
-			"org.opencontainers.image.ref.name": image.GetReference(),
-			"io.deckhouse.image.short_tag":      extractExtraImageShortTag(image.GetReference()),
+			"org.opencontainers.image.ref.name": image.GetTagReference(),
+			"io.deckhouse.image.short_tag":      extractExtraImageShortTag(image.GetTagReference()),
 		}),
 	)
-	svc.layout.ReleaseChannelImages[image.GetReference()] = NewDeckhouseReleaseMeta(meta.Version, digest)
+	svc.layout.ReleaseChannelImages[image.GetTagReference()] = NewDeckhouseReleaseMeta(meta.Version, digest)
 
 	return ver, nil
 }
@@ -269,9 +274,9 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 			return fmt.Errorf("pull installers: %w", err)
 		}
 
-		// if err = layouts.PullStandaloneInstallers(pullParams, imageLayouts, client); err != nil {
-		// 	return fmt.Errorf("pull standalone installers: %w", err)
-		// }
+		if err := svc.pullStandaloneInstallers(ctx); err != nil {
+			return fmt.Errorf("pull standalone installers: %w", err)
+		}
 
 		return nil
 	})
@@ -279,25 +284,26 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 		return err
 	}
 
-	// // We should not generate deckhousereleases.yaml manifest for tag-based pulls
-	// if pullParams.DeckhouseTag == "" {
-	// 	if err = generateDeckhouseReleaseManifests(pullParams, tagsToMirror, imageLayouts, logger); err != nil {
-	// 		logger.WarnLn(err.Error())
-	// 	}
-	// }
+	// We should not generate deckhousereleases.yaml manifest for tag-based pulls
+	if svc.targetTag == "" {
+		if err = svc.generateDeckhouseReleaseManifests(tagsToMirror); err != nil {
+			logger.WarnLn(err.Error())
+		}
+	}
 
-	// logger.InfoF("Searching for Deckhouse built-in modules digests")
+	logger.InfoF("Searching for Deckhouse built-in modules digests")
 
 	// var prevDigests = make(map[string]struct{}, 0)
-	// for imageTag := range imageLayouts.InstallImages {
+	// for imageTag := range svc.layout.InstallImages {
 	// 	digests, err := images.ExtractImageDigestsFromDeckhouseInstaller(pullParams, imageTag, imageLayouts.Install, prevDigests, client)
 	// 	if err != nil {
 	// 		return fmt.Errorf("Extract images digests: %w", err)
 	// 	}
 
-	// 	maps.Copy(imageLayouts.DeckhouseImages, digests)
+	// 	maps.Copy(svc.layout.DeckhouseImages, digests)
 	// }
-	// logger.InfoF("Found %d images", len(imageLayouts.DeckhouseImages))
+
+	// logger.InfoF("Found %d images", len(svc.layout.DeckhouseImages))
 
 	// if err = logger.Process("Pull Deckhouse images", func() error {
 	// 	return layouts.PullDeckhouseImages(pullParams, imageLayouts, client)
@@ -369,12 +375,17 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 func (svc *Service) pullDeckhouseReleaseChannels(ctx context.Context) error {
 	svc.userLogger.InfoLn("Beginning to pull Deckhouse release channels information")
 
-	imageSet := make([]string, 0, len(svc.layout.ReleaseChannelImages))
+	imageSet := make(map[string]string, 0)
 	for image := range svc.layout.ReleaseChannelImages {
-		imageSet = append(imageSet, image)
+		imageRepo, _ := splitImageRefByRepoAndTag(image)
+
+		releaseMeta := svc.layout.ReleaseChannelImages[image]
+		if releaseMeta != nil {
+			imageSet[image] = imageRepo + "@" + releaseMeta.Digest.String()
+		}
 	}
 
-	if err := svc.PullReleaseImageSet(ctx, imageSet, svc.targetTag != ""); err != nil {
+	if err := svc.PullReleaseImageSet(ctx, imageSet, svc.layout.ReleaseChannel, svc.targetTag != ""); err != nil {
 		return err
 	}
 
@@ -386,12 +397,19 @@ func (svc *Service) pullDeckhouseReleaseChannels(ctx context.Context) error {
 func (svc *Service) pullInstallers(ctx context.Context) error {
 	svc.userLogger.InfoLn("Beginning to pull installers")
 
-	imageSet := make([]string, 0, len(svc.layout.InstallImages))
+	imageSet := make(map[string]string, 0)
 	for image := range svc.layout.InstallImages {
-		imageSet = append(imageSet, image)
+		imageRepo, tag := splitImageRefByRepoAndTag(image)
+
+		digest, err := svc.deckhouseService.GetDigest(ctx, tag)
+		if err != nil {
+			return fmt.Errorf("get digest: %w", err)
+		}
+
+		imageSet[image] = imageRepo + "@" + digest.String()
 	}
 
-	if err := svc.PullImageSet(ctx, imageSet, svc.targetTag != ""); err != nil {
+	if err := svc.PullImageSet(ctx, imageSet, svc.layout.Install, svc.targetTag != ""); err != nil {
 		return err
 	}
 
@@ -400,23 +418,59 @@ func (svc *Service) pullInstallers(ctx context.Context) error {
 	return nil
 }
 
-func (svc *Service) PullImageSet(ctx context.Context, imageSet []string, allowMissingTags bool) error {
+func (svc *Service) pullStandaloneInstallers(ctx context.Context) error {
+	svc.userLogger.InfoLn("Beginning to pull standalone installers")
+
+	imageSet := make(map[string]string, 0)
+	for image := range svc.layout.InstallStandaloneImages {
+		imageRepo, tag := splitImageRefByRepoAndTag(image)
+
+		digest, err := svc.deckhouseService.GetDigest(ctx, tag)
+		if err != nil {
+			return fmt.Errorf("get digest: %w", err)
+		}
+
+		imageSet[image] = imageRepo + "@" + digest.String()
+	}
+
+	if err := svc.PullImageSet(ctx, imageSet, svc.layout.InstallStandalone, true); err != nil {
+		return err
+	}
+
+	svc.userLogger.InfoLn("All required standalone installers are pulled!")
+
+	return nil
+}
+
+// ImageGetter is a function type for getting images from the registry
+type ImageGetter func(ctx context.Context, tag string) (pkg.RegistryImage, error)
+
+func (svc *Service) PullImageSet(ctx context.Context, imageSet map[string]string, imageSetLayout layout.Path, allowMissingTags bool) error {
+	return svc.pullImageSet(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetImage)
+}
+
+func (svc *Service) PullReleaseImageSet(ctx context.Context, imageSet map[string]string, imageSetLayout layout.Path, allowMissingTags bool) error {
+	return svc.pullImageSet(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetReleaseImage)
+}
+
+func (svc *Service) pullImageSet(
+	ctx context.Context,
+	imageSet map[string]string,
+	imageSetLayout layout.Path,
+	allowMissingTags bool,
+	imageGetter ImageGetter,
+) error {
 	logger := svc.userLogger
 
 	pullCount, totalCount := 1, len(imageSet)
 
-	for _, imageReferenceString := range imageSet {
+	for imageReferenceString, pullReference := range imageSet {
 		logger.DebugF("Preparing to pull image %s", imageReferenceString)
-
-		imageRepo, _ := splitImageRefByRepoAndTag(imageReferenceString)
 
 		// If we already know the digest of the tagged image, we should pull it by this digest instead of pulling by tag
 		// to avoid race-conditions between mirroring and releasing new builds on release channels.
-		pullReference := imageReferenceString
-
-		releaseMeta := svc.layout.ReleaseChannelImages[imageReferenceString]
-		if releaseMeta != nil {
-			pullReference = imageRepo + "@" + releaseMeta.Digest.String()
+		if pullReference == "" {
+			pullReference = imageReferenceString
 		}
 
 		ref, err := name.ParseReference(pullReference)
@@ -428,26 +482,26 @@ func (svc *Service) PullImageSet(ctx context.Context, imageSet []string, allowMi
 
 		imagePath, tag := splitImageRefByRepoAndTag(pullReference)
 
-		logger.DebugF("Pulling image %s:%s", imagePath, tag)
+		logger.DebugF("Pulling image path %s: tag %s", imagePath, tag)
 
 		err = retry.RunTask(
-			context.TODO(),
+			ctx,
 			svc.userLogger,
 			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageReferenceString),
 			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
-				img, err := svc.deckhouseService.GetImage(ctx, tag)
+				img, err := imageGetter(ctx, tag)
 				if err != nil {
 					if errors.Is(err, registry.ErrImageNotFound) && allowMissingTags {
 						logger.WarnLn("⚠️ Not found in registry, skipping pull")
 						return nil
 					}
 
-					logger.DebugF("failed to pull image %s:%s: %v", imageReferenceString, tag, err)
+					logger.DebugF("failed to pull image %s: %v", imageReferenceString, err)
 
 					return fmt.Errorf("pull image metadata: %w", err)
 				}
 
-				err = svc.layout.ReleaseChannel.AppendImage(img,
+				err = imageSetLayout.AppendImage(img,
 					layout.WithPlatform(svc.layout.platform),
 					layout.WithAnnotations(map[string]string{
 						"org.opencontainers.image.ref.name": imageReferenceString,
@@ -470,71 +524,20 @@ func (svc *Service) PullImageSet(ctx context.Context, imageSet []string, allowMi
 	return nil
 }
 
-func (svc *Service) PullReleaseImageSet(ctx context.Context, imageSet []string, allowMissingTags bool) error {
-	logger := svc.userLogger
+func (svc *Service) generateDeckhouseReleaseManifests(
+	tagsToMirror []string,
+) error {
+	svc.userLogger.InfoF("Generating DeckhouseRelease manifests")
 
-	pullCount, totalCount := 1, len(imageSet)
+	deckhouseReleasesManifestFile := filepath.Join(pullflags.ImagesBundlePath, "deckhousereleases.yaml")
 
-	for _, imageReferenceString := range imageSet {
-		logger.DebugF("Preparing to pull image %s", imageReferenceString)
-
-		imageRepo, _ := splitImageRefByRepoAndTag(imageReferenceString)
-
-		// If we already know the digest of the tagged image, we should pull it by this digest instead of pulling by tag
-		// to avoid race-conditions between mirroring and releasing new builds on release channels.
-		pullReference := imageReferenceString
-
-		releaseMeta := svc.layout.ReleaseChannelImages[imageReferenceString]
-		if releaseMeta != nil {
-			pullReference = imageRepo + "@" + releaseMeta.Digest.String()
-		}
-
-		ref, err := name.ParseReference(pullReference)
-		if err != nil {
-			return fmt.Errorf("parse image reference %q: %w", pullReference, err)
-		}
-
-		logger.DebugF("reference here: %s", ref.String())
-
-		imagePath, tag := splitImageRefByRepoAndTag(pullReference)
-
-		logger.DebugF("Pulling image %s:%s", imagePath, tag)
-
-		err = retry.RunTask(
-			context.TODO(),
-			svc.userLogger,
-			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageReferenceString),
-			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
-				img, err := svc.deckhouseService.GetReleaseImage(ctx, tag)
-				if err != nil {
-					if errors.Is(err, registry.ErrImageNotFound) && allowMissingTags {
-						logger.WarnLn("⚠️ Not found in registry, skipping pull")
-						return nil
-					}
-
-					logger.DebugF("failed to pull image %s:%s: %v", imageReferenceString, tag, err)
-
-					return fmt.Errorf("pull image metadata: %w", err)
-				}
-
-				err = svc.layout.ReleaseChannel.AppendImage(img,
-					layout.WithPlatform(svc.layout.platform),
-					layout.WithAnnotations(map[string]string{
-						"org.opencontainers.image.ref.name": imageReferenceString,
-						"io.deckhouse.image.short_tag":      extractExtraImageShortTag(imageReferenceString),
-					}),
-				)
-				if err != nil {
-					return fmt.Errorf("write image to index: %w", err)
-				}
-
-				return nil
-			}))
-		if err != nil {
-			return fmt.Errorf("pull image %q: %w", imageReferenceString, err)
-		}
-
-		pullCount++
+	err := manifests.GenerateDeckhouseReleaseManifestsForVersions(
+		tagsToMirror,
+		deckhouseReleasesManifestFile,
+		svc.layout.ReleaseChannel,
+	)
+	if err != nil {
+		return fmt.Errorf("Generate DeckhouseRelease manifests: %w", err)
 	}
 
 	return nil

@@ -48,12 +48,12 @@ type RegistryImageMock struct {
 	beforeExtractCounter uint64
 	ExtractMock          mRegistryImageMockExtract
 
-	funcGetReference          func() (s1 string)
-	funcGetReferenceOrigin    string
-	inspectFuncGetReference   func()
-	afterGetReferenceCounter  uint64
-	beforeGetReferenceCounter uint64
-	GetReferenceMock          mRegistryImageMockGetReference
+	funcGetTagReference          func() (s1 string)
+	funcGetTagReferenceOrigin    string
+	inspectFuncGetTagReference   func()
+	afterGetTagReferenceCounter  uint64
+	beforeGetTagReferenceCounter uint64
+	GetTagReferenceMock          mRegistryImageMockGetTagReference
 
 	funcLayerByDiffID          func(h1 v1.Hash) (l1 v1.Layer, err error)
 	funcLayerByDiffIDOrigin    string
@@ -128,7 +128,7 @@ func NewRegistryImageMock(t minimock.Tester) *RegistryImageMock {
 
 	m.ExtractMock = mRegistryImageMockExtract{mock: m}
 
-	m.GetReferenceMock = mRegistryImageMockGetReference{mock: m}
+	m.GetTagReferenceMock = mRegistryImageMockGetTagReference{mock: m}
 
 	m.LayerByDiffIDMock = mRegistryImageMockLayerByDiffID{mock: m}
 	m.LayerByDiffIDMock.callArgs = []*RegistryImageMockLayerByDiffIDParams{}
@@ -900,27 +900,27 @@ func (m *RegistryImageMock) MinimockExtractInspect() {
 	}
 }
 
-type mRegistryImageMockGetReference struct {
+type mRegistryImageMockGetTagReference struct {
 	optional           bool
 	mock               *RegistryImageMock
-	defaultExpectation *RegistryImageMockGetReferenceExpectation
-	expectations       []*RegistryImageMockGetReferenceExpectation
+	defaultExpectation *RegistryImageMockGetTagReferenceExpectation
+	expectations       []*RegistryImageMockGetTagReferenceExpectation
 
 	expectedInvocations       uint64
 	expectedInvocationsOrigin string
 }
 
-// RegistryImageMockGetReferenceExpectation specifies expectation struct of the RegistryImage.GetReference
-type RegistryImageMockGetReferenceExpectation struct {
+// RegistryImageMockGetTagReferenceExpectation specifies expectation struct of the RegistryImage.GetTagReference
+type RegistryImageMockGetTagReferenceExpectation struct {
 	mock *RegistryImageMock
 
-	results      *RegistryImageMockGetReferenceResults
+	results      *RegistryImageMockGetTagReferenceResults
 	returnOrigin string
 	Counter      uint64
 }
 
-// RegistryImageMockGetReferenceResults contains results of the RegistryImage.GetReference
-type RegistryImageMockGetReferenceResults struct {
+// RegistryImageMockGetTagReferenceResults contains results of the RegistryImage.GetTagReference
+type RegistryImageMockGetTagReferenceResults struct {
 	s1 string
 }
 
@@ -929,160 +929,160 @@ type RegistryImageMockGetReferenceResults struct {
 // Optional() makes method check to work in '0 or more' mode.
 // It is NOT RECOMMENDED to use this option unless you really need it, as default behaviour helps to
 // catch the problems when the expected method call is totally skipped during test run.
-func (mmGetReference *mRegistryImageMockGetReference) Optional() *mRegistryImageMockGetReference {
-	mmGetReference.optional = true
-	return mmGetReference
+func (mmGetTagReference *mRegistryImageMockGetTagReference) Optional() *mRegistryImageMockGetTagReference {
+	mmGetTagReference.optional = true
+	return mmGetTagReference
 }
 
-// Expect sets up expected params for RegistryImage.GetReference
-func (mmGetReference *mRegistryImageMockGetReference) Expect() *mRegistryImageMockGetReference {
-	if mmGetReference.mock.funcGetReference != nil {
-		mmGetReference.mock.t.Fatalf("RegistryImageMock.GetReference mock is already set by Set")
+// Expect sets up expected params for RegistryImage.GetTagReference
+func (mmGetTagReference *mRegistryImageMockGetTagReference) Expect() *mRegistryImageMockGetTagReference {
+	if mmGetTagReference.mock.funcGetTagReference != nil {
+		mmGetTagReference.mock.t.Fatalf("RegistryImageMock.GetTagReference mock is already set by Set")
 	}
 
-	if mmGetReference.defaultExpectation == nil {
-		mmGetReference.defaultExpectation = &RegistryImageMockGetReferenceExpectation{}
+	if mmGetTagReference.defaultExpectation == nil {
+		mmGetTagReference.defaultExpectation = &RegistryImageMockGetTagReferenceExpectation{}
 	}
 
-	return mmGetReference
+	return mmGetTagReference
 }
 
-// Inspect accepts an inspector function that has same arguments as the RegistryImage.GetReference
-func (mmGetReference *mRegistryImageMockGetReference) Inspect(f func()) *mRegistryImageMockGetReference {
-	if mmGetReference.mock.inspectFuncGetReference != nil {
-		mmGetReference.mock.t.Fatalf("Inspect function is already set for RegistryImageMock.GetReference")
+// Inspect accepts an inspector function that has same arguments as the RegistryImage.GetTagReference
+func (mmGetTagReference *mRegistryImageMockGetTagReference) Inspect(f func()) *mRegistryImageMockGetTagReference {
+	if mmGetTagReference.mock.inspectFuncGetTagReference != nil {
+		mmGetTagReference.mock.t.Fatalf("Inspect function is already set for RegistryImageMock.GetTagReference")
 	}
 
-	mmGetReference.mock.inspectFuncGetReference = f
+	mmGetTagReference.mock.inspectFuncGetTagReference = f
 
-	return mmGetReference
+	return mmGetTagReference
 }
 
-// Return sets up results that will be returned by RegistryImage.GetReference
-func (mmGetReference *mRegistryImageMockGetReference) Return(s1 string) *RegistryImageMock {
-	if mmGetReference.mock.funcGetReference != nil {
-		mmGetReference.mock.t.Fatalf("RegistryImageMock.GetReference mock is already set by Set")
+// Return sets up results that will be returned by RegistryImage.GetTagReference
+func (mmGetTagReference *mRegistryImageMockGetTagReference) Return(s1 string) *RegistryImageMock {
+	if mmGetTagReference.mock.funcGetTagReference != nil {
+		mmGetTagReference.mock.t.Fatalf("RegistryImageMock.GetTagReference mock is already set by Set")
 	}
 
-	if mmGetReference.defaultExpectation == nil {
-		mmGetReference.defaultExpectation = &RegistryImageMockGetReferenceExpectation{mock: mmGetReference.mock}
+	if mmGetTagReference.defaultExpectation == nil {
+		mmGetTagReference.defaultExpectation = &RegistryImageMockGetTagReferenceExpectation{mock: mmGetTagReference.mock}
 	}
-	mmGetReference.defaultExpectation.results = &RegistryImageMockGetReferenceResults{s1}
-	mmGetReference.defaultExpectation.returnOrigin = minimock.CallerInfo(1)
-	return mmGetReference.mock
+	mmGetTagReference.defaultExpectation.results = &RegistryImageMockGetTagReferenceResults{s1}
+	mmGetTagReference.defaultExpectation.returnOrigin = minimock.CallerInfo(1)
+	return mmGetTagReference.mock
 }
 
-// Set uses given function f to mock the RegistryImage.GetReference method
-func (mmGetReference *mRegistryImageMockGetReference) Set(f func() (s1 string)) *RegistryImageMock {
-	if mmGetReference.defaultExpectation != nil {
-		mmGetReference.mock.t.Fatalf("Default expectation is already set for the RegistryImage.GetReference method")
+// Set uses given function f to mock the RegistryImage.GetTagReference method
+func (mmGetTagReference *mRegistryImageMockGetTagReference) Set(f func() (s1 string)) *RegistryImageMock {
+	if mmGetTagReference.defaultExpectation != nil {
+		mmGetTagReference.mock.t.Fatalf("Default expectation is already set for the RegistryImage.GetTagReference method")
 	}
 
-	if len(mmGetReference.expectations) > 0 {
-		mmGetReference.mock.t.Fatalf("Some expectations are already set for the RegistryImage.GetReference method")
+	if len(mmGetTagReference.expectations) > 0 {
+		mmGetTagReference.mock.t.Fatalf("Some expectations are already set for the RegistryImage.GetTagReference method")
 	}
 
-	mmGetReference.mock.funcGetReference = f
-	mmGetReference.mock.funcGetReferenceOrigin = minimock.CallerInfo(1)
-	return mmGetReference.mock
+	mmGetTagReference.mock.funcGetTagReference = f
+	mmGetTagReference.mock.funcGetTagReferenceOrigin = minimock.CallerInfo(1)
+	return mmGetTagReference.mock
 }
 
-// Times sets number of times RegistryImage.GetReference should be invoked
-func (mmGetReference *mRegistryImageMockGetReference) Times(n uint64) *mRegistryImageMockGetReference {
+// Times sets number of times RegistryImage.GetTagReference should be invoked
+func (mmGetTagReference *mRegistryImageMockGetTagReference) Times(n uint64) *mRegistryImageMockGetTagReference {
 	if n == 0 {
-		mmGetReference.mock.t.Fatalf("Times of RegistryImageMock.GetReference mock can not be zero")
+		mmGetTagReference.mock.t.Fatalf("Times of RegistryImageMock.GetTagReference mock can not be zero")
 	}
-	mm_atomic.StoreUint64(&mmGetReference.expectedInvocations, n)
-	mmGetReference.expectedInvocationsOrigin = minimock.CallerInfo(1)
-	return mmGetReference
+	mm_atomic.StoreUint64(&mmGetTagReference.expectedInvocations, n)
+	mmGetTagReference.expectedInvocationsOrigin = minimock.CallerInfo(1)
+	return mmGetTagReference
 }
 
-func (mmGetReference *mRegistryImageMockGetReference) invocationsDone() bool {
-	if len(mmGetReference.expectations) == 0 && mmGetReference.defaultExpectation == nil && mmGetReference.mock.funcGetReference == nil {
+func (mmGetTagReference *mRegistryImageMockGetTagReference) invocationsDone() bool {
+	if len(mmGetTagReference.expectations) == 0 && mmGetTagReference.defaultExpectation == nil && mmGetTagReference.mock.funcGetTagReference == nil {
 		return true
 	}
 
-	totalInvocations := mm_atomic.LoadUint64(&mmGetReference.mock.afterGetReferenceCounter)
-	expectedInvocations := mm_atomic.LoadUint64(&mmGetReference.expectedInvocations)
+	totalInvocations := mm_atomic.LoadUint64(&mmGetTagReference.mock.afterGetTagReferenceCounter)
+	expectedInvocations := mm_atomic.LoadUint64(&mmGetTagReference.expectedInvocations)
 
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// GetReference implements mm_pkg.RegistryImage
-func (mmGetReference *RegistryImageMock) GetReference() (s1 string) {
-	mm_atomic.AddUint64(&mmGetReference.beforeGetReferenceCounter, 1)
-	defer mm_atomic.AddUint64(&mmGetReference.afterGetReferenceCounter, 1)
+// GetTagReference implements mm_pkg.RegistryImage
+func (mmGetTagReference *RegistryImageMock) GetTagReference() (s1 string) {
+	mm_atomic.AddUint64(&mmGetTagReference.beforeGetTagReferenceCounter, 1)
+	defer mm_atomic.AddUint64(&mmGetTagReference.afterGetTagReferenceCounter, 1)
 
-	mmGetReference.t.Helper()
+	mmGetTagReference.t.Helper()
 
-	if mmGetReference.inspectFuncGetReference != nil {
-		mmGetReference.inspectFuncGetReference()
+	if mmGetTagReference.inspectFuncGetTagReference != nil {
+		mmGetTagReference.inspectFuncGetTagReference()
 	}
 
-	if mmGetReference.GetReferenceMock.defaultExpectation != nil {
-		mm_atomic.AddUint64(&mmGetReference.GetReferenceMock.defaultExpectation.Counter, 1)
+	if mmGetTagReference.GetTagReferenceMock.defaultExpectation != nil {
+		mm_atomic.AddUint64(&mmGetTagReference.GetTagReferenceMock.defaultExpectation.Counter, 1)
 
-		mm_results := mmGetReference.GetReferenceMock.defaultExpectation.results
+		mm_results := mmGetTagReference.GetTagReferenceMock.defaultExpectation.results
 		if mm_results == nil {
-			mmGetReference.t.Fatal("No results are set for the RegistryImageMock.GetReference")
+			mmGetTagReference.t.Fatal("No results are set for the RegistryImageMock.GetTagReference")
 		}
 		return (*mm_results).s1
 	}
-	if mmGetReference.funcGetReference != nil {
-		return mmGetReference.funcGetReference()
+	if mmGetTagReference.funcGetTagReference != nil {
+		return mmGetTagReference.funcGetTagReference()
 	}
-	mmGetReference.t.Fatalf("Unexpected call to RegistryImageMock.GetReference.")
+	mmGetTagReference.t.Fatalf("Unexpected call to RegistryImageMock.GetTagReference.")
 	return
 }
 
-// GetReferenceAfterCounter returns a count of finished RegistryImageMock.GetReference invocations
-func (mmGetReference *RegistryImageMock) GetReferenceAfterCounter() uint64 {
-	return mm_atomic.LoadUint64(&mmGetReference.afterGetReferenceCounter)
+// GetTagReferenceAfterCounter returns a count of finished RegistryImageMock.GetTagReference invocations
+func (mmGetTagReference *RegistryImageMock) GetTagReferenceAfterCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmGetTagReference.afterGetTagReferenceCounter)
 }
 
-// GetReferenceBeforeCounter returns a count of RegistryImageMock.GetReference invocations
-func (mmGetReference *RegistryImageMock) GetReferenceBeforeCounter() uint64 {
-	return mm_atomic.LoadUint64(&mmGetReference.beforeGetReferenceCounter)
+// GetTagReferenceBeforeCounter returns a count of RegistryImageMock.GetTagReference invocations
+func (mmGetTagReference *RegistryImageMock) GetTagReferenceBeforeCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmGetTagReference.beforeGetTagReferenceCounter)
 }
 
-// MinimockGetReferenceDone returns true if the count of the GetReference invocations corresponds
+// MinimockGetTagReferenceDone returns true if the count of the GetTagReference invocations corresponds
 // the number of defined expectations
-func (m *RegistryImageMock) MinimockGetReferenceDone() bool {
-	if m.GetReferenceMock.optional {
+func (m *RegistryImageMock) MinimockGetTagReferenceDone() bool {
+	if m.GetTagReferenceMock.optional {
 		// Optional methods provide '0 or more' call count restriction.
 		return true
 	}
 
-	for _, e := range m.GetReferenceMock.expectations {
+	for _, e := range m.GetTagReferenceMock.expectations {
 		if mm_atomic.LoadUint64(&e.Counter) < 1 {
 			return false
 		}
 	}
 
-	return m.GetReferenceMock.invocationsDone()
+	return m.GetTagReferenceMock.invocationsDone()
 }
 
-// MinimockGetReferenceInspect logs each unmet expectation
-func (m *RegistryImageMock) MinimockGetReferenceInspect() {
-	for _, e := range m.GetReferenceMock.expectations {
+// MinimockGetTagReferenceInspect logs each unmet expectation
+func (m *RegistryImageMock) MinimockGetTagReferenceInspect() {
+	for _, e := range m.GetTagReferenceMock.expectations {
 		if mm_atomic.LoadUint64(&e.Counter) < 1 {
-			m.t.Error("Expected call to RegistryImageMock.GetReference")
+			m.t.Error("Expected call to RegistryImageMock.GetTagReference")
 		}
 	}
 
-	afterGetReferenceCounter := mm_atomic.LoadUint64(&m.afterGetReferenceCounter)
+	afterGetTagReferenceCounter := mm_atomic.LoadUint64(&m.afterGetTagReferenceCounter)
 	// if default expectation was set then invocations count should be greater than zero
-	if m.GetReferenceMock.defaultExpectation != nil && afterGetReferenceCounter < 1 {
-		m.t.Errorf("Expected call to RegistryImageMock.GetReference at\n%s", m.GetReferenceMock.defaultExpectation.returnOrigin)
+	if m.GetTagReferenceMock.defaultExpectation != nil && afterGetTagReferenceCounter < 1 {
+		m.t.Errorf("Expected call to RegistryImageMock.GetTagReference at\n%s", m.GetTagReferenceMock.defaultExpectation.returnOrigin)
 	}
 	// if func was set then invocations count should be greater than zero
-	if m.funcGetReference != nil && afterGetReferenceCounter < 1 {
-		m.t.Errorf("Expected call to RegistryImageMock.GetReference at\n%s", m.funcGetReferenceOrigin)
+	if m.funcGetTagReference != nil && afterGetTagReferenceCounter < 1 {
+		m.t.Errorf("Expected call to RegistryImageMock.GetTagReference at\n%s", m.funcGetTagReferenceOrigin)
 	}
 
-	if !m.GetReferenceMock.invocationsDone() && afterGetReferenceCounter > 0 {
-		m.t.Errorf("Expected %d calls to RegistryImageMock.GetReference at\n%s but found %d calls",
-			mm_atomic.LoadUint64(&m.GetReferenceMock.expectedInvocations), m.GetReferenceMock.expectedInvocationsOrigin, afterGetReferenceCounter)
+	if !m.GetTagReferenceMock.invocationsDone() && afterGetTagReferenceCounter > 0 {
+		m.t.Errorf("Expected %d calls to RegistryImageMock.GetTagReference at\n%s but found %d calls",
+			mm_atomic.LoadUint64(&m.GetTagReferenceMock.expectedInvocations), m.GetTagReferenceMock.expectedInvocationsOrigin, afterGetTagReferenceCounter)
 	}
 }
 
@@ -2844,7 +2844,7 @@ func (m *RegistryImageMock) MinimockFinish() {
 
 			m.MinimockExtractInspect()
 
-			m.MinimockGetReferenceInspect()
+			m.MinimockGetTagReferenceInspect()
 
 			m.MinimockLayerByDiffIDInspect()
 
@@ -2888,7 +2888,7 @@ func (m *RegistryImageMock) minimockDone() bool {
 		m.MinimockConfigNameDone() &&
 		m.MinimockDigestDone() &&
 		m.MinimockExtractDone() &&
-		m.MinimockGetReferenceDone() &&
+		m.MinimockGetTagReferenceDone() &&
 		m.MinimockLayerByDiffIDDone() &&
 		m.MinimockLayerByDigestDone() &&
 		m.MinimockLayersDone() &&

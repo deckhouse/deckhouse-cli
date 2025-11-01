@@ -41,7 +41,7 @@ type ImageLayouts struct {
 func NewImageLayouts(rootFolder, rootUrl string) *ImageLayouts {
 	l := &ImageLayouts{
 		workingDir: rootFolder,
-		rootUrl:    "",
+		rootUrl:    rootUrl,
 		platform:   v1.Platform{Architecture: "amd64", OS: "linux"},
 
 		DeckhouseImages:         map[string]struct{}{},
@@ -105,5 +105,11 @@ func splitImageRefByRepoAndTag(imageReferenceString string) (repo, tag string) {
 	splitIndex := strings.LastIndex(imageReferenceString, ":")
 	repo = imageReferenceString[:splitIndex]
 	tag = imageReferenceString[splitIndex+1:]
-	return
+
+	if strings.HasSuffix(repo, "@sha256") {
+		repo = strings.TrimSuffix(repo, "@sha256")
+		tag = "@sha256:" + tag
+	}
+
+	return repo, tag
 }

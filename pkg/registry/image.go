@@ -9,14 +9,21 @@ import (
 
 type Image struct {
 	v1.Image
-	reference string
+	tagReference    string
+	digestReference string
 }
 
 type ImageOption func(img *Image)
 
-func WithReference(ref string) ImageOption {
+func WithTagReference(ref string) ImageOption {
 	return func(img *Image) {
-		img.reference = ref
+		img.tagReference = ref
+	}
+}
+
+func WithDigestReference(ref string) ImageOption {
+	return func(img *Image) {
+		img.digestReference = ref
 	}
 }
 
@@ -35,6 +42,6 @@ func (i *Image) Extract() io.ReadCloser {
 	return mutate.Extract(i)
 }
 
-func (i *Image) GetReference() string {
-	return i.reference
+func (i *Image) GetTagReference() string {
+	return i.tagReference
 }

@@ -50,7 +50,7 @@ func (m *mockRegistryImage) Extract() io.ReadCloser {
 	return io.NopCloser(strings.NewReader(""))
 }
 
-func (m *mockRegistryImage) GetReference() string {
+func (m *mockRegistryImage) GetTagReference() string {
 	return m.ref
 }
 

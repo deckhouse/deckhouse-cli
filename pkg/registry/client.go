@@ -187,7 +187,13 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 
 	logentry.Debug("Getting image")
 
-	ref, err := name.ParseReference(fullRegistry + ":" + tag)
+	imagepath := fullRegistry + ":" + tag
+	if strings.Contains(tag, "@sha256:") {
+		logentry.Debug("tag contains digest reference")
+		imagepath = fullRegistry + tag
+	}
+
+	ref, err := name.ParseReference(imagepath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse reference: %w", err)
 	}
@@ -198,7 +204,7 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 		var transportErr *transport.Error
 		if errors.As(err, &transportErr) && transportErr.StatusCode == 404 {
 			// Image not found, which is expected for non-vulnerable images
-			return nil, ErrImageNotFound
+			return nil, fmt.Errorf("%w: %w", err, ErrImageNotFound)
 		}
 
 		return nil, fmt.Errorf("failed to get image: %w", err)
@@ -206,7 +212,17 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 
 	logentry.Debug("Image retrieved successfully")
 
-	return NewImage(img, WithReference(ref.String())), nil
+	digest, err := img.Digest()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get image digest: %w", err)
+	}
+
+	imgOpts := []ImageOption{}
+
+	imgOpts = append(imgOpts, WithTagReference(ref.String()))
+	imgOpts = append(imgOpts, WithDigestReference(fullRegistry+digest.String()))
+
+	return NewImage(img, imgOpts...), nil
 }
 
 // PushImage pushes an image to the registry at the specified tag
