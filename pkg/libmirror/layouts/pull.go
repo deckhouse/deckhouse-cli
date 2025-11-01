@@ -236,6 +236,7 @@ func PullImageSet(
 		}
 
 		err = retry.RunTask(
+			context.TODO(),
 			pullParams.Logger,
 			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageReferenceString),
 			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {

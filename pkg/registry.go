@@ -26,6 +26,7 @@ import (
 type RegistryImage interface {
 	v1.Image
 	Extract() io.ReadCloser
+	GetTagReference() string
 }
 
 // RegistryClient defines the contract for interacting with container registries
