@@ -47,7 +47,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -85,6 +84,7 @@ func NewRootCommand() *RootCommand {
 		},
 	}
 
+	rootCmd.initPluginServices()
 	rootCmd.registerCommands()
 	rootCmd.cmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 
@@ -108,13 +108,8 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(commands.NewStrongholdCommand())
 	r.cmd.AddCommand(commands.NewHelpJSONCommand(r.cmd))
 
-	pluginServiceFactory := func() *service.PluginService {
-		if r.registryService == nil {
-			r.initPluginServices()
-		}
-		return r.registryService.PluginService()
-	}
-	r.cmd.AddCommand(plugins.NewPluginsCommand(pluginServiceFactory, r.logger.Named("plugins-command")))
+	pluginService := r.registryService.PluginService()
+	r.cmd.AddCommand(plugins.NewPluginsCommand(pluginService, r.logger.Named("plugins-command")))
 }
 
 func (r *RootCommand) Execute() error {
