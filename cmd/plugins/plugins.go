@@ -191,7 +191,7 @@ func (pc *PluginsCommand) fetchAvailablePlugins(ctx context.Context) ([]pluginDi
 			return nil, fmt.Errorf("failed to list plugin tags: %w", err)
 		}
 
-		latestVersion, err := pc.fetchLatestVersion(ctx, versions)
+		latestVersion, err := pc.findLatestVersion(versions)
 		if err != nil {
 			pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
 			return nil, fmt.Errorf("failed to fetch latest version: %w", err)
@@ -227,7 +227,8 @@ func (pc *PluginsCommand) fetchAvailablePlugins(ctx context.Context) ([]pluginDi
 	return plugins, nil
 }
 
-func (pc *PluginsCommand) fetchLatestVersion(_ context.Context, versions []string) (*semver.Version, error) {
+// findLatestVersion finds the latest version from a list of version strings
+func (pc *PluginsCommand) findLatestVersion(versions []string) (*semver.Version, error) {
 	if len(versions) == 0 {
 		return nil, fmt.Errorf("no versions found")
 	}
@@ -354,7 +355,7 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 				return fmt.Errorf("failed to list plugin tags: %w", err)
 			}
 
-			latestVersion, err := pc.fetchLatestVersion(ctx, versions)
+			latestVersion, err := pc.findLatestVersion(versions)
 			if err != nil {
 				pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
 				return fmt.Errorf("failed to fetch latest version: %w", err)
@@ -439,7 +440,7 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 				return fmt.Errorf("failed to list plugin tags: %w", err)
 			}
 
-			latestVersion, err := pc.fetchLatestVersion(ctx, versions)
+			latestVersion, err := pc.findLatestVersion(versions)
 			if err != nil {
 				pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
 				return fmt.Errorf("failed to fetch latest version: %w", err)

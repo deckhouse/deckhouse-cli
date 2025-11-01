@@ -49,7 +49,7 @@ var (
 	ModulesWhitelist  []string
 	ModulesBlacklist  []string
 
-	SourceRegistryRepo     string // Fallback to EE if nothing was given as source.
+	SourceRegistryRepo     = enterpriseEditionRepo // Fallback to EE if nothing was given as source.
 	SourceRegistryLogin    string
 	SourceRegistryPassword string
 	DeckhouseLicenseToken  string
