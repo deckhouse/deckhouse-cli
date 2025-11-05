@@ -1,7 +1,6 @@
 package platform
 
 import (
-	"fmt"
 	"path"
 	"strings"
 
@@ -62,9 +61,9 @@ func NewImageLayouts(rootFolder, rootUrl string) *ImageLayouts {
 
 func (l *ImageLayouts) FillDeckhouseImages(deckhouseVersions []string) {
 	for _, version := range deckhouseVersions {
-		l.DeckhouseImages[fmt.Sprintf("%s:%s", l.rootUrl, version)] = nil
-		l.InstallImages[fmt.Sprintf("%s/install:%s", l.rootUrl, version)] = nil
-		l.InstallStandaloneImages[fmt.Sprintf("%s/install-standalone:%s", l.rootUrl, version)] = nil
+		l.DeckhouseImages[l.rootUrl+":"+version] = nil
+		l.InstallImages[path.Join(l.rootUrl, internal.InstallSegment)+":"+version] = nil
+		l.InstallStandaloneImages[path.Join(l.rootUrl, internal.InstallStandaloneSegment)+":"+version] = nil
 	}
 }
 
