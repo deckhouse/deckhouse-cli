@@ -247,17 +247,22 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 		return nil, fmt.Errorf("cannot get %s release channel image digest: %w", releaseChannel, err)
 	}
 
-	svc.userLogger.DebugF("image reference: %s@%s", image.GetTagReference(), digest.String())
+	imageMeta, err := image.GetMetadata()
+	if err != nil {
+		return nil, fmt.Errorf("cannot get %s release channel image tag reference: %w", releaseChannel, err)
+	}
+
+	svc.userLogger.DebugF("image reference: %s@%s", imageMeta, digest.String())
 
 	svc.layout.ReleaseChannel.AppendImage(
 		image,
 		layout.WithPlatform(svc.layout.platform),
 		layout.WithAnnotations(map[string]string{
-			"org.opencontainers.image.ref.name": image.GetTagReference(),
-			"io.deckhouse.image.short_tag":      extractExtraImageShortTag(image.GetTagReference()),
+			"org.opencontainers.image.ref.name": imageMeta.GetTagReference(),
+			"io.deckhouse.image.short_tag":      extractExtraImageShortTag(imageMeta.GetTagReference()),
 		}),
 	)
-	svc.layout.ReleaseChannelImages[image.GetTagReference()] = NewImageMeta(meta.Version, image.GetTagReference(), &digest)
+	svc.layout.ReleaseChannelImages[imageMeta.GetTagReference()] = NewImageMeta(meta.Version, imageMeta.GetTagReference(), &digest)
 
 	return ver, nil
 }
@@ -421,7 +426,7 @@ func (svc *Service) pullInstallers(ctx context.Context) error {
 		svc.layout.InstallImages[image] = NewImageMeta(tag, image, digest)
 	}
 
-	if err := svc.PullImageSet(ctx, svc.layout.InstallImages, svc.layout.Install, svc.targetTag != ""); err != nil {
+	if err := svc.PullImageSetNew(ctx, svc.layout.InstallImages, svc.layout.Install, svc.targetTag != ""); err != nil {
 		return err
 	}
 
@@ -486,6 +491,69 @@ func (svc *Service) pullDeckhouseReleases(ctx context.Context) error {
 
 // ImageGetter is a function type for getting images from the registry
 type ImageGetter func(ctx context.Context, tag string) (pkg.RegistryImage, error)
+
+func (svc *Service) PullImageSetNew(ctx context.Context, imageSet map[string]*ImageMeta, imageSetLayout *registry.ImageLayout, allowMissingTags bool) error {
+	return svc.pullImageSetNew(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetImage)
+}
+
+func (svc *Service) pullImageSetNew(
+	ctx context.Context,
+	imageSet map[string]*ImageMeta,
+	imageSetLayout *registry.ImageLayout,
+	allowMissingTags bool,
+	imageGetter ImageGetter,
+) error {
+	logger := svc.userLogger
+
+	pullCount, totalCount := 1, len(imageSet)
+
+	for _, imageMeta := range imageSet {
+		logger.DebugF("Preparing to pull image %s", imageMeta.TagReference)
+
+		ref, err := name.ParseReference(imageMeta.DigestReference)
+		if err != nil {
+			return fmt.Errorf("parse image reference %q: %w", imageMeta.DigestReference, err)
+		}
+
+		logger.DebugF("reference here: %s", ref.String())
+
+		imagePath, tag := splitImageRefByRepoAndTag(imageMeta.DigestReference)
+
+		logger.DebugF("Pulling image path %s: tag %s", imagePath, tag)
+
+		err = retry.RunTask(
+			ctx,
+			svc.userLogger,
+			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageMeta.TagReference),
+			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
+				img, err := imageGetter(ctx, tag)
+				if err != nil {
+					if errors.Is(err, registry.ErrImageNotFound) && allowMissingTags {
+						logger.WarnLn("⚠️ Not found in registry, skipping pull")
+						return nil
+					}
+
+					logger.DebugF("failed to pull image %s: %v", imageMeta.TagReference, err)
+
+					return fmt.Errorf("pull image metadata: %w", err)
+				}
+
+				err = imageSetLayout.AddImage(img)
+				if err != nil {
+					return fmt.Errorf("add image to layout: %w", err)
+				}
+
+				return nil
+			}))
+		if err != nil {
+			return fmt.Errorf("pull image %q: %w", imageMeta.TagReference, err)
+		}
+
+		pullCount++
+	}
+
+	return nil
+}
 
 func (svc *Service) PullImageSet(ctx context.Context, imageSet map[string]*ImageMeta, imageSetLayout layout.Path, allowMissingTags bool) error {
 	return svc.pullImageSet(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetImage)
@@ -658,16 +726,24 @@ func createOCIImageLayoutsForDeckhouse(
 
 	fsPaths := map[*layout.Path]string{
 		&layouts.Deckhouse:         rootFolder,
-		&layouts.Install:           filepath.Join(rootFolder, "install"),
 		&layouts.InstallStandalone: filepath.Join(rootFolder, "install-standalone"),
 		&layouts.ReleaseChannel:    filepath.Join(rootFolder, "release-channel"),
 	}
+
 	for layoutPtr, fsPath := range fsPaths {
 		*layoutPtr, err = createEmptyImageLayout(fsPath)
 		if err != nil {
 			return nil, fmt.Errorf("create OCI Image Layout at %s: %w", fsPath, err)
 		}
 	}
+
+	fsPath := filepath.Join(rootFolder, "install")
+	layoutPtr, err := createEmptyImageLayout(fsPath)
+	if err != nil {
+		return nil, fmt.Errorf("create OCI Image Layout at %s: %w", fsPath, err)
+	}
+
+	layouts.Install = registry.NewImageLayout(layoutPtr)
 
 	return layouts, nil
 }

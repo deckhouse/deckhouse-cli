@@ -76,9 +76,9 @@ type RegistryClientMock struct {
 	beforeListTagsCounter uint64
 	ListTagsMock          mRegistryClientMockListTags
 
-	funcPushImage          func(ctx context.Context, tag string, img mm_pkg.RegistryImage) (err error)
+	funcPushImage          func(ctx context.Context, tag string, img v1.Image) (err error)
 	funcPushImageOrigin    string
-	inspectFuncPushImage   func(ctx context.Context, tag string, img mm_pkg.RegistryImage)
+	inspectFuncPushImage   func(ctx context.Context, tag string, img v1.Image)
 	afterPushImageCounter  uint64
 	beforePushImageCounter uint64
 	PushImageMock          mRegistryClientMockPushImage
@@ -2685,14 +2685,14 @@ type RegistryClientMockPushImageExpectation struct {
 type RegistryClientMockPushImageParams struct {
 	ctx context.Context
 	tag string
-	img mm_pkg.RegistryImage
+	img v1.Image
 }
 
 // RegistryClientMockPushImageParamPtrs contains pointers to parameters of the RegistryClient.PushImage
 type RegistryClientMockPushImageParamPtrs struct {
 	ctx *context.Context
 	tag *string
-	img *mm_pkg.RegistryImage
+	img *v1.Image
 }
 
 // RegistryClientMockPushImageResults contains results of the RegistryClient.PushImage
@@ -2719,7 +2719,7 @@ func (mmPushImage *mRegistryClientMockPushImage) Optional() *mRegistryClientMock
 }
 
 // Expect sets up expected params for RegistryClient.PushImage
-func (mmPushImage *mRegistryClientMockPushImage) Expect(ctx context.Context, tag string, img mm_pkg.RegistryImage) *mRegistryClientMockPushImage {
+func (mmPushImage *mRegistryClientMockPushImage) Expect(ctx context.Context, tag string, img v1.Image) *mRegistryClientMockPushImage {
 	if mmPushImage.mock.funcPushImage != nil {
 		mmPushImage.mock.t.Fatalf("RegistryClientMock.PushImage mock is already set by Set")
 	}
@@ -2790,7 +2790,7 @@ func (mmPushImage *mRegistryClientMockPushImage) ExpectTagParam2(tag string) *mR
 }
 
 // ExpectImgParam3 sets up expected param img for RegistryClient.PushImage
-func (mmPushImage *mRegistryClientMockPushImage) ExpectImgParam3(img mm_pkg.RegistryImage) *mRegistryClientMockPushImage {
+func (mmPushImage *mRegistryClientMockPushImage) ExpectImgParam3(img v1.Image) *mRegistryClientMockPushImage {
 	if mmPushImage.mock.funcPushImage != nil {
 		mmPushImage.mock.t.Fatalf("RegistryClientMock.PushImage mock is already set by Set")
 	}
@@ -2813,7 +2813,7 @@ func (mmPushImage *mRegistryClientMockPushImage) ExpectImgParam3(img mm_pkg.Regi
 }
 
 // Inspect accepts an inspector function that has same arguments as the RegistryClient.PushImage
-func (mmPushImage *mRegistryClientMockPushImage) Inspect(f func(ctx context.Context, tag string, img mm_pkg.RegistryImage)) *mRegistryClientMockPushImage {
+func (mmPushImage *mRegistryClientMockPushImage) Inspect(f func(ctx context.Context, tag string, img v1.Image)) *mRegistryClientMockPushImage {
 	if mmPushImage.mock.inspectFuncPushImage != nil {
 		mmPushImage.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.PushImage")
 	}
@@ -2838,7 +2838,7 @@ func (mmPushImage *mRegistryClientMockPushImage) Return(err error) *RegistryClie
 }
 
 // Set uses given function f to mock the RegistryClient.PushImage method
-func (mmPushImage *mRegistryClientMockPushImage) Set(f func(ctx context.Context, tag string, img mm_pkg.RegistryImage) (err error)) *RegistryClientMock {
+func (mmPushImage *mRegistryClientMockPushImage) Set(f func(ctx context.Context, tag string, img v1.Image) (err error)) *RegistryClientMock {
 	if mmPushImage.defaultExpectation != nil {
 		mmPushImage.mock.t.Fatalf("Default expectation is already set for the RegistryClient.PushImage method")
 	}
@@ -2854,7 +2854,7 @@ func (mmPushImage *mRegistryClientMockPushImage) Set(f func(ctx context.Context,
 
 // When sets expectation for the RegistryClient.PushImage which will trigger the result defined by the following
 // Then helper
-func (mmPushImage *mRegistryClientMockPushImage) When(ctx context.Context, tag string, img mm_pkg.RegistryImage) *RegistryClientMockPushImageExpectation {
+func (mmPushImage *mRegistryClientMockPushImage) When(ctx context.Context, tag string, img v1.Image) *RegistryClientMockPushImageExpectation {
 	if mmPushImage.mock.funcPushImage != nil {
 		mmPushImage.mock.t.Fatalf("RegistryClientMock.PushImage mock is already set by Set")
 	}
@@ -2896,7 +2896,7 @@ func (mmPushImage *mRegistryClientMockPushImage) invocationsDone() bool {
 }
 
 // PushImage implements mm_pkg.RegistryClient
-func (mmPushImage *RegistryClientMock) PushImage(ctx context.Context, tag string, img mm_pkg.RegistryImage) (err error) {
+func (mmPushImage *RegistryClientMock) PushImage(ctx context.Context, tag string, img v1.Image) (err error) {
 	mm_atomic.AddUint64(&mmPushImage.beforePushImageCounter, 1)
 	defer mm_atomic.AddUint64(&mmPushImage.afterPushImageCounter, 1)
 

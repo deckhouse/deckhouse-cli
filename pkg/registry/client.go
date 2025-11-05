@@ -212,22 +212,17 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 
 	logentry.Debug("Image retrieved successfully")
 
-	digest, err := img.Digest()
+	newImage, err := NewImage(img, WithFetchingMetadata(ref.String()))
 	if err != nil {
-		return nil, fmt.Errorf("failed to get image digest: %w", err)
+		return nil, fmt.Errorf("create new image: %w", err)
 	}
 
-	imgOpts := []ImageOption{}
-
-	imgOpts = append(imgOpts, WithTagReference(ref.String()))
-	imgOpts = append(imgOpts, WithDigestReference(fullRegistry+digest.String()))
-
-	return NewImage(img, imgOpts...), nil
+	return newImage, nil
 }
 
 // PushImage pushes an image to the registry at the specified tag
 // The repository is determined by the chained WithSegment() calls
-func (c *Client) PushImage(ctx context.Context, tag string, img pkg.RegistryImage) error {
+func (c *Client) PushImage(ctx context.Context, tag string, img v1.Image) error {
 	fullRegistry := c.GetRegistry()
 
 	logentry := c.logger.With(

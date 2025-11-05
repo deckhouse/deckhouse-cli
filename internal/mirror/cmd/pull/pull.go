@@ -48,6 +48,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
+	"github.com/deckhouse/deckhouse-cli/pkg/stub"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 )
 
@@ -249,6 +250,10 @@ func (p *Puller) Execute(ctx context.Context) error {
 		var client pkg.RegistryClient
 		client = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
+		if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
+			client = stub.NewRegistryClientStub()
+		}
+
 		// Scope to the registry path and modules suffix
 		if p.params.RegistryPath != "" {
 			client = client.WithSegment(p.params.RegistryPath)
@@ -325,6 +330,10 @@ func (p *Puller) pullPlatform() error {
 	var client pkg.RegistryClient
 	client = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
+	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
+		client = stub.NewRegistryClientStub()
+	}
+
 	// Scope to the registry path and modules suffix
 	if p.params.RegistryPath != "" {
 		client = client.WithSegment(p.params.RegistryPath)
@@ -393,6 +402,10 @@ func (p *Puller) pullSecurityDatabases() error {
 	var client pkg.RegistryClient
 	client = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
+	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
+		client = stub.NewRegistryClientStub()
+	}
+
 	// Scope to the registry path and modules suffix
 	if p.params.RegistryPath != "" {
 		client = client.WithSegment(p.params.RegistryPath)
@@ -449,6 +462,10 @@ func (p *Puller) pullModules() error {
 
 	var client pkg.RegistryClient
 	client = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+
+	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
+		client = stub.NewRegistryClientStub()
+	}
 
 	// Scope to the registry path and modules suffix
 	if p.params.RegistryPath != "" {

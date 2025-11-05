@@ -39,6 +39,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	mock "github.com/deckhouse/deckhouse-cli/pkg/mock"
+	d8registry "github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 type mockRegistryImage struct {
@@ -50,8 +51,8 @@ func (m *mockRegistryImage) Extract() io.ReadCloser {
 	return io.NopCloser(strings.NewReader(""))
 }
 
-func (m *mockRegistryImage) GetTagReference() string {
-	return m.ref
+func (m *mockRegistryImage) GetMetadata() (pkg.ImageMeta, error) {
+	return d8registry.NewImageMeta(m.ref, "", nil), nil
 }
 
 var testLogger = log.NewSLogger(slog.LevelDebug)

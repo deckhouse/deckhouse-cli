@@ -38,7 +38,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 func PushLayoutToRepo(
@@ -175,7 +174,7 @@ func pushImage(
 	err = retry.RunTaskWithContext(
 		ctx, silentLogger{}, "push",
 		task.WithConstantRetries(4, 3*time.Second, func(ctx context.Context) error {
-			if err = client.PushImage(ctx, tag, registry.NewImage(img)); err != nil {
+			if err = client.PushImage(ctx, tag, img); err != nil {
 				if errorutil.IsTrivyMediaTypeNotAllowedError(err) {
 					return fmt.Errorf(errorutil.CustomTrivyMediaTypesWarning)
 				}

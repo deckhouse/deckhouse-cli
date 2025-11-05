@@ -9,68 +9,84 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 )
 
-type ImageMeta struct {
-	TagReference    string
-	DigestReference string
-}
-
-func NewImageMeta(tagReference string, digest *v1.Hash) *ImageMeta {
-	imageRepo, _ := splitImageRefByRepoAndTag(tagReference)
-
-	return &ImageMeta{
-		TagReference:    tagReference,
-		DigestReference: imageRepo + "@" + digest.String(),
-	}
-}
+const (
+	AnnotationImageReferenceName = "org.opencontainers.image.ref.name"
+	AnnotationImageShortTag      = "io.deckhouse.image.short_tag"
+)
 
 type ImageLayout struct {
-	wrapped layout.Path
-	mapping map[string]*ImageMeta
+	wrapped         layout.Path
+	defaultPlatform v1.Platform
+
+	metaByTagReference map[string]pkg.ImageMeta
 }
 
 func NewImageLayout(path layout.Path) *ImageLayout {
-	return &ImageLayout{wrapped: path}
+	return &ImageLayout{
+		wrapped:            path,
+		metaByTagReference: make(map[string]pkg.ImageMeta),
+	}
 }
 
 func (l *ImageLayout) Path() layout.Path {
 	return l.wrapped
 }
 
-func (l *ImageLayout) GetImage(imageReference string) (pkg.RegistryImage, error) {
+func (l *ImageLayout) AddImage(img pkg.RegistryImage) error {
+	meta, err := img.GetMetadata()
+	if err != nil {
+		return fmt.Errorf("get image tag reference: %w", err)
+	}
+
+	l.metaByTagReference[meta.GetTagReference()] = meta
+
+	err = l.wrapped.AppendImage(img,
+		layout.WithPlatform(l.defaultPlatform),
+		layout.WithAnnotations(map[string]string{
+			AnnotationImageReferenceName: meta.GetTagReference(),
+			AnnotationImageShortTag:      extractExtraImageShortTag(meta.GetTagReference()),
+		}),
+	)
+	if err != nil {
+		return fmt.Errorf("append image: %w", err)
+	}
+
+	return nil
+}
+
+func (l *ImageLayout) GetImage(imageTagReference string) (pkg.RegistryImage, error) {
 	index, err := l.wrapped.ImageIndex()
 	if err != nil {
 		return nil, fmt.Errorf("images index: %w", err)
 	}
 
-	indexManifest, err := index.IndexManifest()
+	imageMeta, err := l.GetMeta(imageTagReference)
 	if err != nil {
-		return nil, fmt.Errorf("index manifest: %w", err)
+		return nil, fmt.Errorf("get image metadata for %q: %w", imageTagReference, err)
 	}
 
-	installerHash := findDigestByImageReference(imageReference, indexManifest)
-	if installerHash == nil {
-		return nil, fmt.Errorf("no image tagged as %q found in index", imageReference)
-	}
-
-	img, err := index.Image(*installerHash)
+	img, err := index.Image(*imageMeta.GetDigest())
 	if err != nil {
 		return nil, fmt.Errorf("cannot read image from index: %w", err)
 	}
 
-	return NewImage(img, WithTagReference(imageReference)), nil
-}
-
-func findDigestByImageReference(imageReference string, indexManifest *v1.IndexManifest) *v1.Hash {
-	for _, imageManifest := range indexManifest.Manifests {
-		imageRef, found := imageManifest.Annotations["org.opencontainers.image.ref.name"]
-		if found && imageRef == imageReference {
-			tag := imageManifest.Digest
-
-			return &tag
-		}
+	newImage, err := NewImage(img, WithFetchingMetadata(imageMeta.GetTagReference()))
+	if err != nil {
+		return nil, fmt.Errorf("create new image: %w", err)
 	}
 
-	return nil
+	return newImage, nil
+}
+
+var ErrImageMetaNotFound = fmt.Errorf("image metadata not found")
+
+func (l *ImageLayout) GetMeta(tagReference string) (pkg.ImageMeta, error) {
+	meta, found := l.metaByTagReference[tagReference]
+	if !found {
+		return nil, fmt.Errorf("no metadata found for tag %q: %w", tagReference, ErrImageMetaNotFound)
+	}
+
+	return meta, nil
 }
 
 func splitImageRefByRepoAndTag(imageReferenceString string) (repo, tag string) {
@@ -84,4 +100,18 @@ func splitImageRefByRepoAndTag(imageReferenceString string) (repo, tag string) {
 	}
 
 	return repo, tag
+}
+
+func extractExtraImageShortTag(imageReferenceString string) string {
+	const extraPrefix = "/extra/"
+
+	if extraIndex := strings.LastIndex(imageReferenceString, extraPrefix); extraIndex != -1 {
+		// Extra image: return "imageName:tag" part after "/extra/"
+		return imageReferenceString[extraIndex+len(extraPrefix):]
+	}
+
+	// Regular image: return just the tag
+	_, tag := splitImageRefByRepoAndTag(imageReferenceString)
+
+	return tag
 }

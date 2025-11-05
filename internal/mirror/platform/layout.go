@@ -2,8 +2,11 @@ package platform
 
 import (
 	"fmt"
+	"path"
 	"strings"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 )
@@ -32,7 +35,7 @@ type ImageLayouts struct {
 	Deckhouse       layout.Path
 	DeckhouseImages map[string]*ImageMeta
 
-	Install       layout.Path
+	Install       *registry.ImageLayout
 	InstallImages map[string]*ImageMeta
 
 	InstallStandalone       layout.Path
@@ -71,23 +74,12 @@ func (l *ImageLayouts) FillForTag(tag string) {
 		return
 	}
 
-	l.DeckhouseImages[l.rootUrl+":alpha"] = nil
-	l.DeckhouseImages[l.rootUrl+":beta"] = nil
-	l.DeckhouseImages[l.rootUrl+":early-access"] = nil
-	l.DeckhouseImages[l.rootUrl+":stable"] = nil
-	l.DeckhouseImages[l.rootUrl+":rock-solid"] = nil
-
-	l.InstallImages[l.rootUrl+"/install:alpha"] = nil
-	l.InstallImages[l.rootUrl+"/install:beta"] = nil
-	l.InstallImages[l.rootUrl+"/install:early-access"] = nil
-	l.InstallImages[l.rootUrl+"/install:stable"] = nil
-	l.InstallImages[l.rootUrl+"/install:rock-solid"] = nil
-
-	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:alpha"] = nil
-	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:beta"] = nil
-	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:early-access"] = nil
-	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:stable"] = nil
-	l.InstallStandaloneImages[l.rootUrl+"/install-standalone:rock-solid"] = nil
+	for _, channel := range internal.GetAllDefaultReleaseChannels() {
+		l.DeckhouseImages[l.rootUrl+":"+channel] = nil
+		l.InstallImages[path.Join(l.rootUrl, internal.InstallSegment)+":"+channel] = nil
+		l.InstallStandaloneImages[path.Join(l.rootUrl, internal.InstallStandaloneSegment)+":"+channel] = nil
+		l.ReleaseChannelImages[path.Join(l.rootUrl, internal.ReleaseChannelSegment)+":"+channel] = nil
+	}
 }
 
 // extractExtraImageShortTag extracts the image name and tag for extra images

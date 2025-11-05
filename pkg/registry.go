@@ -23,10 +23,16 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
+type ImageMeta interface {
+	GetTagReference() string
+	GetDigestReference() string
+	GetDigest() *v1.Hash
+}
+
 type RegistryImage interface {
 	v1.Image
 	Extract() io.ReadCloser
-	GetTagReference() string
+	GetMetadata() (ImageMeta, error)
 }
 
 // RegistryClient defines the contract for interacting with container registries
@@ -63,7 +69,7 @@ type RegistryClient interface {
 
 	// PushImage pushes an image to the registry at the specified tag
 	// The repository is determined by the chained WithSegment() calls
-	PushImage(ctx context.Context, tag string, img RegistryImage) error
+	PushImage(ctx context.Context, tag string, img v1.Image) error
 
 	// ListTags retrieves all available tags for the current scope
 	// The repository is determined by the chained WithSegment() calls
