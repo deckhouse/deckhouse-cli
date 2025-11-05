@@ -188,7 +188,7 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 	logentry.Debug("Getting image")
 
 	imagepath := fullRegistry + ":" + tag
-	if strings.Contains(tag, "@sha256:") {
+	if strings.HasPrefix(tag, "@sha256:") {
 		logentry.Debug("tag contains digest reference")
 		imagepath = fullRegistry + tag
 	}

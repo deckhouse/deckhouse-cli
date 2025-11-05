@@ -102,21 +102,6 @@ func (l *ImageLayouts) setLayoutByMirrorType(mirrorType internal.MirrorType, lay
 	}
 }
 
-// extractExtraImageShortTag extracts the image name and tag for extra images
-func extractExtraImageShortTag(imageReferenceString string) string {
-	const extraPrefix = "/extra/"
-
-	if extraIndex := strings.LastIndex(imageReferenceString, extraPrefix); extraIndex != -1 {
-		// Extra image: return "imageName:tag" part after "/extra/"
-		return imageReferenceString[extraIndex+len(extraPrefix):]
-	}
-
-	// Regular image: return just the tag
-	_, tag := splitImageRefByRepoAndTag(imageReferenceString)
-
-	return tag
-}
-
 func splitImageRefByRepoAndTag(imageReferenceString string) (repo, tag string) {
 	splitIndex := strings.LastIndex(imageReferenceString, ":")
 	repo = imageReferenceString[:splitIndex]

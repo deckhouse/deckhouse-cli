@@ -7,9 +7,7 @@ import (
 )
 
 type deckhouseReleaseReader struct {
-	versionReader   *bytes.Buffer
-	changelogReader *bytes.Buffer
-	moduleReader    *bytes.Buffer
+	versionReader *bytes.Buffer
 }
 
 func (rr *deckhouseReleaseReader) untarMetadata(rc io.Reader) error {

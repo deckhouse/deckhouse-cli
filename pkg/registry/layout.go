@@ -18,13 +18,13 @@ type ImageLayout struct {
 	wrapped         layout.Path
 	defaultPlatform v1.Platform
 
-	metaByTag map[string]pkg.ImageMeta
+	metaByTag map[string]*ImageMeta
 }
 
 func NewImageLayout(path layout.Path) *ImageLayout {
 	return &ImageLayout{
 		wrapped:   path,
-		metaByTag: make(map[string]pkg.ImageMeta),
+		metaByTag: make(map[string]*ImageMeta),
 	}
 }
 
@@ -41,7 +41,7 @@ func (l *ImageLayout) AddImage(img pkg.RegistryImage) error {
 	// TODO: support nesting tags in image
 	repoTags := strings.Split(meta.GetTagReference(), ":")
 	if len(repoTags) == 2 {
-		l.metaByTag[repoTags[1]] = meta
+		l.metaByTag[repoTags[1]] = meta.(*ImageMeta)
 	}
 
 	err = l.wrapped.AppendImage(img,
@@ -74,7 +74,7 @@ func (l *ImageLayout) GetImage(tag string) (pkg.RegistryImage, error) {
 		return nil, fmt.Errorf("cannot read image from index: %w", err)
 	}
 
-	newImage, err := NewImage(img, WithFetchingMetadata(imageMeta.GetTagReference()))
+	newImage, err := NewImage(img, WithMetadata(imageMeta))
 	if err != nil {
 		return nil, fmt.Errorf("create new image: %w", err)
 	}
@@ -84,7 +84,8 @@ func (l *ImageLayout) GetImage(tag string) (pkg.RegistryImage, error) {
 
 var ErrImageMetaNotFound = fmt.Errorf("image metadata not found")
 
-func (l *ImageLayout) GetMeta(tag string) (pkg.ImageMeta, error) {
+func (l *ImageLayout) GetMeta(tag string) (*ImageMeta, error) {
+	// Extract tag part from full reference or use as is
 	meta, found := l.metaByTag[tag]
 	if !found {
 		return nil, fmt.Errorf("no metadata found for tag %q: %w", tag, ErrImageMetaNotFound)
