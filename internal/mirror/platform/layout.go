@@ -1,13 +1,13 @@
 package platform
 
 import (
+	"fmt"
 	"path"
 	"strings"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/layout"
 )
 
 type ImageMeta struct {
@@ -40,14 +40,14 @@ type ImageLayouts struct {
 	Deckhouse       *registry.ImageLayout
 	DeckhouseImages map[string]*ImageMeta
 
-	Install       *registry.ImageLayout
-	InstallImages map[string]*ImageMeta
+	DeckhouseInstall *registry.ImageLayout
+	InstallImages    map[string]*ImageMeta
 
-	InstallStandalone       layout.Path
-	InstallStandaloneImages map[string]*ImageMeta
+	DeckhouseInstallStandalone *registry.ImageLayout
+	InstallStandaloneImages    map[string]*ImageMeta
 
-	ReleaseChannel       layout.Path
-	ReleaseChannelImages map[string]*ImageMeta
+	DeckhouseReleaseChannel *registry.ImageLayout
+	ReleaseChannelImages    map[string]*ImageMeta
 }
 
 func NewImageLayouts(rootFolder, rootUrl string) *ImageLayouts {
@@ -84,6 +84,21 @@ func (l *ImageLayouts) FillForTag(tag string) {
 		l.InstallImages[path.Join(l.rootUrl, internal.InstallSegment)+":"+channel] = nil
 		l.InstallStandaloneImages[path.Join(l.rootUrl, internal.InstallStandaloneSegment)+":"+channel] = nil
 		l.ReleaseChannelImages[path.Join(l.rootUrl, internal.ReleaseChannelSegment)+":"+channel] = nil
+	}
+}
+
+func (l *ImageLayouts) setLayoutByMirrorType(mirrorType internal.MirrorType, layout *registry.ImageLayout) {
+	switch mirrorType {
+	case internal.MirrorTypeDeckhouse:
+		l.Deckhouse = layout
+	case internal.MirrorTypeDeckhouseReleaseChannels:
+		l.DeckhouseReleaseChannel = layout
+	case internal.MirrorTypeDeckhouseInstall:
+		l.DeckhouseInstall = layout
+	case internal.MirrorTypeDeckhouseInstallStandalone:
+		l.DeckhouseInstallStandalone = layout
+	default:
+		panic(fmt.Sprintf("wrong mirror type in platform image layout: %v", mirrorType))
 	}
 }
 

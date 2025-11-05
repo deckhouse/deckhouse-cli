@@ -40,9 +40,7 @@ func (l *ImageLayout) AddImage(img pkg.RegistryImage) error {
 
 	// TODO: support nesting tags in image
 	repoTags := strings.Split(meta.GetTagReference(), ":")
-	fmt.Println("add image original reference", meta.GetTagReference())
 	if len(repoTags) == 2 {
-		fmt.Println("add image", repoTags[1])
 		l.metaByTag[repoTags[1]] = meta
 	}
 

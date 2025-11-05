@@ -1,3 +1,19 @@
+/*
+Copyright 2025 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package internal
 
 // deckhouse repo structure
@@ -15,4 +31,22 @@ const (
 	ModulesSegment           = "modules"
 	ModulesExtraSegment      = "extra"
 	ModulesReleasesSegment   = "releases"
+	// TODO: fix?
+	SecurityDatabasesSegment = "security-databases"
 )
+
+var segmentByMirrorType = map[MirrorType]string{
+	MirrorTypeDeckhouse:                  "",
+	MirrorTypeDeckhouseInstall:           InstallSegment,
+	MirrorTypeDeckhouseInstallStandalone: InstallStandaloneSegment,
+	MirrorTypeDeckhouseReleaseChannels:   ReleaseChannelSegment,
+	MirrorTypeModules:                    ModulesSegment,
+	MirrorTypeModulesReleaseChannels:     ModulesReleasesSegment,
+	MirrorTypeModulesExtra:               ModulesExtraSegment,
+	MirrorTypeSecurityDatabases:          SecurityDatabasesSegment,
+}
+
+// InstallSegmentByMirrorType returns the path segment for install based on the mirror type.
+func InstallSegmentByMirrorType(mirrorType MirrorType) string {
+	return segmentByMirrorType[mirrorType]
+}

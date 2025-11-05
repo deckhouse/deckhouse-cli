@@ -253,14 +253,11 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 
 	svc.userLogger.DebugF("image reference: %s@%s", imageMeta, digest.String())
 
-	svc.layout.ReleaseChannel.AppendImage(
-		image,
-		layout.WithPlatform(svc.layout.platform),
-		layout.WithAnnotations(map[string]string{
-			"org.opencontainers.image.ref.name": imageMeta.GetTagReference(),
-			"io.deckhouse.image.short_tag":      extractExtraImageShortTag(imageMeta.GetTagReference()),
-		}),
-	)
+	err = svc.layout.DeckhouseReleaseChannel.AddImage(image)
+	if err != nil {
+		return nil, fmt.Errorf("append %s release channel image to layout: %w", releaseChannel, err)
+	}
+
 	svc.layout.ReleaseChannelImages[imageMeta.GetTagReference()] = NewImageMeta(meta.Version, imageMeta.GetTagReference(), &digest)
 
 	return ver, nil
@@ -400,7 +397,7 @@ func (svc *Service) pullDeckhouseReleaseChannels(ctx context.Context) error {
 	}
 	svc.userLogger.InfoLn("All required deckhouse release channels meta are pulled!")
 
-	if err := svc.PullReleaseImageSet(ctx, svc.layout.ReleaseChannelImages, svc.layout.ReleaseChannel, svc.targetTag != ""); err != nil {
+	if err := svc.PullReleaseImageSetNew(ctx, svc.layout.ReleaseChannelImages, svc.layout.DeckhouseReleaseChannel, svc.targetTag != ""); err != nil {
 		return err
 	}
 
@@ -429,7 +426,7 @@ func (svc *Service) pullInstallers(ctx context.Context) error {
 	}
 	svc.userLogger.InfoLn("All required installers meta are pulled!")
 
-	if err := svc.PullImageSetNew(ctx, svc.layout.InstallImages, svc.layout.Install, svc.targetTag != ""); err != nil {
+	if err := svc.PullImageSetNew(ctx, svc.layout.InstallImages, svc.layout.DeckhouseInstall, svc.targetTag != ""); err != nil {
 		return err
 	}
 
@@ -458,7 +455,7 @@ func (svc *Service) pullStandaloneInstallers(ctx context.Context) error {
 	}
 	svc.userLogger.InfoLn("All required standalone installers meta are pulled!")
 
-	if err := svc.PullImageSet(ctx, svc.layout.InstallStandaloneImages, svc.layout.InstallStandalone, true); err != nil {
+	if err := svc.PullImageSetNew(ctx, svc.layout.InstallStandaloneImages, svc.layout.DeckhouseInstallStandalone, true); err != nil {
 		return err
 	}
 
@@ -498,6 +495,10 @@ func (svc *Service) pullDeckhouseReleases(ctx context.Context) error {
 
 // ImageGetter is a function type for getting images from the registry
 type ImageGetter func(ctx context.Context, tag string) (pkg.RegistryImage, error)
+
+func (svc *Service) PullReleaseImageSetNew(ctx context.Context, imageSet map[string]*ImageMeta, imageSetLayout *registry.ImageLayout, allowMissingTags bool) error {
+	return svc.pullImageSetNew(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetReleaseImage)
+}
 
 func (svc *Service) PullImageSetNew(ctx context.Context, imageSet map[string]*ImageMeta, imageSetLayout *registry.ImageLayout, allowMissingTags bool) error {
 	return svc.pullImageSetNew(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetImage)
@@ -713,18 +714,6 @@ func createOCIImageLayoutsForDeckhouse(
 
 	layouts := NewImageLayouts(rootFolder, rootUrl)
 
-	fsPaths := map[*layout.Path]string{
-		&layouts.InstallStandalone: filepath.Join(rootFolder, "install-standalone"),
-		&layouts.ReleaseChannel:    filepath.Join(rootFolder, "release-channel"),
-	}
-
-	for layoutPtr, fsPath := range fsPaths {
-		*layoutPtr, err = createEmptyImageLayout(fsPath)
-		if err != nil {
-			return nil, fmt.Errorf("create OCI Image Layout at %s: %w", fsPath, err)
-		}
-	}
-
 	fsPath := rootFolder
 	layoutPtr, err := createEmptyImageLayout(fsPath)
 	if err != nil {
@@ -733,13 +722,22 @@ func createOCIImageLayoutsForDeckhouse(
 
 	layouts.Deckhouse = registry.NewImageLayout(layoutPtr)
 
-	fsPath = filepath.Join(rootFolder, "install")
-	layoutPtr, err = createEmptyImageLayout(fsPath)
-	if err != nil {
-		return nil, fmt.Errorf("create OCI Image Layout at %s: %w", fsPath, err)
+	mirrorTypes := []internal.MirrorType{
+		internal.MirrorTypeDeckhouse,
+		internal.MirrorTypeDeckhouseReleaseChannels,
+		internal.MirrorTypeDeckhouseInstall,
+		internal.MirrorTypeDeckhouseInstallStandalone,
 	}
 
-	layouts.Install = registry.NewImageLayout(layoutPtr)
+	for _, mtype := range mirrorTypes {
+		fsPath = filepath.Join(rootFolder, internal.InstallSegmentByMirrorType(mtype))
+		layoutPtr, err = createEmptyImageLayout(fsPath)
+		if err != nil {
+			return nil, fmt.Errorf("create OCI Image Layout at %s: %w", fsPath, err)
+		}
+
+		layouts.setLayoutByMirrorType(mtype, registry.NewImageLayout(layoutPtr))
+	}
 
 	return layouts, nil
 }
