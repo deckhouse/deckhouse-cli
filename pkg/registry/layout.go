@@ -18,13 +18,13 @@ type ImageLayout struct {
 	wrapped         layout.Path
 	defaultPlatform v1.Platform
 
-	metaByTagReference map[string]pkg.ImageMeta
+	metaByTag map[string]pkg.ImageMeta
 }
 
 func NewImageLayout(path layout.Path) *ImageLayout {
 	return &ImageLayout{
-		wrapped:            path,
-		metaByTagReference: make(map[string]pkg.ImageMeta),
+		wrapped:   path,
+		metaByTag: make(map[string]pkg.ImageMeta),
 	}
 }
 
@@ -38,7 +38,13 @@ func (l *ImageLayout) AddImage(img pkg.RegistryImage) error {
 		return fmt.Errorf("get image tag reference: %w", err)
 	}
 
-	l.metaByTagReference[meta.GetTagReference()] = meta
+	// TODO: support nesting tags in image
+	repoTags := strings.Split(meta.GetTagReference(), ":")
+	fmt.Println("add image original reference", meta.GetTagReference())
+	if len(repoTags) == 2 {
+		fmt.Println("add image", repoTags[1])
+		l.metaByTag[repoTags[1]] = meta
+	}
 
 	err = l.wrapped.AppendImage(img,
 		layout.WithPlatform(l.defaultPlatform),
@@ -54,15 +60,15 @@ func (l *ImageLayout) AddImage(img pkg.RegistryImage) error {
 	return nil
 }
 
-func (l *ImageLayout) GetImage(imageTagReference string) (pkg.RegistryImage, error) {
+func (l *ImageLayout) GetImage(tag string) (pkg.RegistryImage, error) {
 	index, err := l.wrapped.ImageIndex()
 	if err != nil {
 		return nil, fmt.Errorf("images index: %w", err)
 	}
 
-	imageMeta, err := l.GetMeta(imageTagReference)
+	imageMeta, err := l.GetMeta(tag)
 	if err != nil {
-		return nil, fmt.Errorf("get image metadata for %q: %w", imageTagReference, err)
+		return nil, fmt.Errorf("get image metadata for %q: %w", tag, err)
 	}
 
 	img, err := index.Image(*imageMeta.GetDigest())
@@ -80,10 +86,10 @@ func (l *ImageLayout) GetImage(imageTagReference string) (pkg.RegistryImage, err
 
 var ErrImageMetaNotFound = fmt.Errorf("image metadata not found")
 
-func (l *ImageLayout) GetMeta(tagReference string) (pkg.ImageMeta, error) {
-	meta, found := l.metaByTagReference[tagReference]
+func (l *ImageLayout) GetMeta(tag string) (pkg.ImageMeta, error) {
+	meta, found := l.metaByTag[tag]
 	if !found {
-		return nil, fmt.Errorf("no metadata found for tag %q: %w", tagReference, ErrImageMetaNotFound)
+		return nil, fmt.Errorf("no metadata found for tag %q: %w", tag, ErrImageMetaNotFound)
 	}
 
 	return meta, nil

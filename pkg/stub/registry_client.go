@@ -21,12 +21,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 )
@@ -63,6 +65,7 @@ type RegistryImageStub struct {
 	manifest *v1.Manifest
 	config   *v1.ConfigFile
 	digest   v1.Hash
+	tag      string
 }
 
 // StubLayer provides a simple stub implementation of v1.Layer
@@ -171,9 +174,11 @@ func (r *RegistryImageStub) Layers() ([]v1.Layer, error) {
     pull_request: "https://github.com/deckhouse/deckhouse/pull/6329"
 `
 	changelogHeader := &tar.Header{
-		Name: "changelog.yaml",
-		Mode: 0644,
-		Size: int64(len(changelogData)),
+		Name:     "changelog.yaml",
+		Mode:     0644,
+		Size:     int64(len(changelogData)),
+		ModTime:  time.Now(),
+		Typeflag: tar.TypeReg,
 	}
 	if err := tarWriter.WriteHeader(changelogHeader); err != nil {
 		return nil, err
@@ -185,9 +190,11 @@ func (r *RegistryImageStub) Layers() ([]v1.Layer, error) {
 	// Add version.json file
 	versionData := `{"disruptions":{"1.56":["ingressNginx"]},"requirements":{"containerdOnAllNodes":"true","ingressNginx":"1.1","k8s":"1.23.0","nodesMinimalOSVersionUbuntu":"18.04"},"version":"v1.72.10"}`
 	versionHeader := &tar.Header{
-		Name: "version.json",
-		Mode: 0644,
-		Size: int64(len(versionData)),
+		Name:     "version.json",
+		Mode:     0644,
+		Size:     int64(len(versionData)),
+		ModTime:  time.Now(),
+		Typeflag: tar.TypeReg,
 	}
 	if err := tarWriter.WriteHeader(versionHeader); err != nil {
 		return nil, err
@@ -261,7 +268,7 @@ func (r *RegistryImageStub) Extract() io.ReadCloser {
 // GetMetadata implements RegistryImage
 func (r *RegistryImageStub) GetMetadata() (pkg.ImageMeta, error) {
 	return &ImageMetaStub{
-		tagRef:    "registry.deckhouse.ru/deckhouse/fe:alpha",
+		tagRef:    r.tag,
 		digestRef: fmt.Sprintf("sha256:%s", r.digest.String()),
 		digest:    &r.digest,
 	}, nil
@@ -357,10 +364,19 @@ func (s *RegistryClientStub) addRegistry(registryPath string, repos map[string][
 	}
 }
 
+// generateUniqueDigest creates a unique SHA256 digest based on the image reference
+func generateUniqueDigest(registry, repo, tag string) v1.Hash {
+	data := fmt.Sprintf("%s/%s:%s", registry, repo, tag)
+	hash := sha256.Sum256([]byte(data))
+	digestStr := fmt.Sprintf("sha256:%x", hash)
+	digest, _ := v1.NewHash(digestStr)
+	return digest
+}
+
 // createMockImageData creates mock image data with manifest, config, and registry image
-func (s *RegistryClientStub) createMockImageData(registry, repo, tag string) *ImageData {
-	// Create a mock digest - use a valid SHA256 hash
-	digest, _ := v1.NewHash("sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
+func (s *RegistryClientStub) createMockImageData(reg, repo, tag string) *ImageData {
+	// Create a unique digest based on the image reference
+	digest := generateUniqueDigest(reg, repo, tag)
 
 	// Create mock manifest
 	manifest := []byte(`{
@@ -383,11 +399,11 @@ func (s *RegistryClientStub) createMockImageData(registry, repo, tag string) *Im
 	// Create mock config
 	config := &v1.ConfigFile{
 		Config: v1.Config{
-			Image: fmt.Sprintf("%s/%s:%s", registry, repo, tag),
+			Image: fmt.Sprintf("%s/%s:%s", reg, repo, tag),
 			Labels: map[string]string{
 				"org.opencontainers.image.created": "2024-01-01T00:00:00Z",
 				"org.opencontainers.image.version": tag,
-				"org.opencontainers.image.source":  fmt.Sprintf("https://%s", registry),
+				"org.opencontainers.image.source":  fmt.Sprintf("https://%s", reg),
 			},
 		},
 		RootFS: v1.RootFS{
@@ -402,12 +418,12 @@ func (s *RegistryClientStub) createMockImageData(registry, repo, tag string) *Im
 		History: []v1.History{
 			{
 				Created: v1.Time{Time: v1.Time{}.Time},
-				Comment: fmt.Sprintf("Build for %s/%s:%s", registry, repo, tag),
+				Comment: fmt.Sprintf("Build for %s/%s:%s", reg, repo, tag),
 			},
 		},
 	}
 
-	// Create mock registry image
+	// Create mock registry image (v1.Image implementation)
 	imageStub := &RegistryImageStub{
 		manifest: &v1.Manifest{
 			SchemaVersion: 2,
@@ -433,12 +449,27 @@ func (s *RegistryClientStub) createMockImageData(registry, repo, tag string) *Im
 		},
 		config: config,
 		digest: digest,
+		tag:    fmt.Sprintf("%s/%s:%s", reg, repo, tag),
+	}
+
+	// Create real registry.Image wrapping the mock v1.Image
+	tagReference := fmt.Sprintf("%s/%s:%s", reg, repo, tag)
+	digestReference := fmt.Sprintf("%s/%s@%s", reg, repo, digest.String())
+	meta := registry.NewImageMeta(tagReference, digestReference, &digest)
+
+	var registryImage pkg.RegistryImage
+	regImg, err := registry.NewImage(imageStub, registry.WithMetadata(meta))
+	if err != nil {
+		// Fallback to just the stub if wrapping fails
+		registryImage = imageStub
+	} else {
+		registryImage = regImg
 	}
 
 	return &ImageData{
 		manifest: manifest,
 		config:   config,
-		image:    imageStub,
+		image:    registryImage,
 		digest:   &digest,
 		exists:   true,
 	}

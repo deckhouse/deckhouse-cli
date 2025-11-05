@@ -25,7 +25,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
-	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/samber/lo"
 )
@@ -384,6 +383,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 func (svc *Service) pullDeckhouseReleaseChannels(ctx context.Context) error {
 	svc.userLogger.InfoLn("Beginning to pull Deckhouse release channels information")
 
+	svc.userLogger.InfoLn("Pull deckhouse release channels meta")
 	for image, meta := range svc.layout.ReleaseChannelImages {
 		if meta != nil {
 			continue
@@ -398,6 +398,7 @@ func (svc *Service) pullDeckhouseReleaseChannels(ctx context.Context) error {
 
 		svc.layout.ReleaseChannelImages[image] = NewImageMeta(tag, image, digest)
 	}
+	svc.userLogger.InfoLn("All required deckhouse release channels meta are pulled!")
 
 	if err := svc.PullReleaseImageSet(ctx, svc.layout.ReleaseChannelImages, svc.layout.ReleaseChannel, svc.targetTag != ""); err != nil {
 		return err
@@ -411,6 +412,7 @@ func (svc *Service) pullDeckhouseReleaseChannels(ctx context.Context) error {
 func (svc *Service) pullInstallers(ctx context.Context) error {
 	svc.userLogger.InfoLn("Beginning to pull installers")
 
+	svc.userLogger.InfoLn("Pull installers meta")
 	for image, meta := range svc.layout.InstallImages {
 		if meta != nil {
 			continue
@@ -425,6 +427,7 @@ func (svc *Service) pullInstallers(ctx context.Context) error {
 
 		svc.layout.InstallImages[image] = NewImageMeta(tag, image, digest)
 	}
+	svc.userLogger.InfoLn("All required installers meta are pulled!")
 
 	if err := svc.PullImageSetNew(ctx, svc.layout.InstallImages, svc.layout.Install, svc.targetTag != ""); err != nil {
 		return err
@@ -438,6 +441,7 @@ func (svc *Service) pullInstallers(ctx context.Context) error {
 func (svc *Service) pullStandaloneInstallers(ctx context.Context) error {
 	svc.userLogger.InfoLn("Beginning to pull standalone installers")
 
+	svc.userLogger.InfoLn("Pull standalone installers meta")
 	for image, meta := range svc.layout.InstallStandaloneImages {
 		if meta != nil {
 			continue
@@ -452,6 +456,7 @@ func (svc *Service) pullStandaloneInstallers(ctx context.Context) error {
 
 		svc.layout.InstallStandaloneImages[image] = NewImageMeta(tag, image, digest)
 	}
+	svc.userLogger.InfoLn("All required standalone installers meta are pulled!")
 
 	if err := svc.PullImageSet(ctx, svc.layout.InstallStandaloneImages, svc.layout.InstallStandalone, true); err != nil {
 		return err
@@ -465,6 +470,7 @@ func (svc *Service) pullStandaloneInstallers(ctx context.Context) error {
 func (svc *Service) pullDeckhouseReleases(ctx context.Context) error {
 	svc.userLogger.InfoLn("Beginning to pull Deckhouse releases")
 
+	svc.userLogger.InfoLn("Pull deckhouse releases meta")
 	for image, meta := range svc.layout.DeckhouseImages {
 		if meta != nil {
 			continue
@@ -479,8 +485,9 @@ func (svc *Service) pullDeckhouseReleases(ctx context.Context) error {
 
 		svc.layout.DeckhouseImages[image] = NewImageMeta(tag, image, digest)
 	}
+	svc.userLogger.InfoLn("All required deckhouse releases meta are pulled!")
 
-	if err := svc.PullImageSet(ctx, svc.layout.DeckhouseImages, svc.layout.Deckhouse, svc.targetTag != ""); err != nil {
+	if err := svc.PullImageSetNew(ctx, svc.layout.DeckhouseImages, svc.layout.Deckhouse, svc.targetTag != ""); err != nil {
 		return err
 	}
 
@@ -510,23 +517,14 @@ func (svc *Service) pullImageSetNew(
 	for _, imageMeta := range imageSet {
 		logger.DebugF("Preparing to pull image %s", imageMeta.TagReference)
 
-		ref, err := name.ParseReference(imageMeta.DigestReference)
-		if err != nil {
-			return fmt.Errorf("parse image reference %q: %w", imageMeta.DigestReference, err)
-		}
+		logger.DebugF("Pulling image path %s: tag %s", imageMeta.ImageRepo, imageMeta.ImageTag)
 
-		logger.DebugF("reference here: %s", ref.String())
-
-		imagePath, tag := splitImageRefByRepoAndTag(imageMeta.DigestReference)
-
-		logger.DebugF("Pulling image path %s: tag %s", imagePath, tag)
-
-		err = retry.RunTask(
+		err := retry.RunTask(
 			ctx,
 			svc.userLogger,
 			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageMeta.TagReference),
 			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
-				img, err := imageGetter(ctx, tag)
+				img, err := imageGetter(ctx, imageMeta.ImageTag)
 				if err != nil {
 					if errors.Is(err, registry.ErrImageNotFound) && allowMissingTags {
 						logger.WarnLn("⚠️ Not found in registry, skipping pull")
@@ -577,23 +575,14 @@ func (svc *Service) pullImageSet(
 	for _, imageMeta := range imageSet {
 		logger.DebugF("Preparing to pull image %s", imageMeta.TagReference)
 
-		ref, err := name.ParseReference(imageMeta.DigestReference)
-		if err != nil {
-			return fmt.Errorf("parse image reference %q: %w", imageMeta.DigestReference, err)
-		}
+		logger.DebugF("Pulling image path %s: tag %s", imageMeta.ImageRepo, imageMeta.ImageTag)
 
-		logger.DebugF("reference here: %s", ref.String())
-
-		imagePath, tag := splitImageRefByRepoAndTag(imageMeta.DigestReference)
-
-		logger.DebugF("Pulling image path %s: tag %s", imagePath, tag)
-
-		err = retry.RunTask(
+		err := retry.RunTask(
 			ctx,
 			svc.userLogger,
 			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageMeta.TagReference),
 			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
-				img, err := imageGetter(ctx, tag)
+				img, err := imageGetter(ctx, imageMeta.ImageTag)
 				if err != nil {
 					if errors.Is(err, registry.ErrImageNotFound) && allowMissingTags {
 						logger.WarnLn("⚠️ Not found in registry, skipping pull")
@@ -635,7 +624,7 @@ func (svc *Service) generateDeckhouseReleaseManifests(
 
 	deckhouseReleasesManifestFile := filepath.Join(pullflags.ImagesBundlePath, "deckhousereleases.yaml")
 
-	err := manifests.GenerateDeckhouseReleaseManifestsForVersions(
+	err := manifests.GenerateDeckhouseReleaseManifestsForVersionsNew(
 		tagsToMirror,
 		deckhouseReleasesManifestFile,
 		svc.layout.Deckhouse,
@@ -725,7 +714,6 @@ func createOCIImageLayoutsForDeckhouse(
 	layouts := NewImageLayouts(rootFolder, rootUrl)
 
 	fsPaths := map[*layout.Path]string{
-		&layouts.Deckhouse:         rootFolder,
 		&layouts.InstallStandalone: filepath.Join(rootFolder, "install-standalone"),
 		&layouts.ReleaseChannel:    filepath.Join(rootFolder, "release-channel"),
 	}
@@ -737,8 +725,16 @@ func createOCIImageLayoutsForDeckhouse(
 		}
 	}
 
-	fsPath := filepath.Join(rootFolder, "install")
+	fsPath := rootFolder
 	layoutPtr, err := createEmptyImageLayout(fsPath)
+	if err != nil {
+		return nil, fmt.Errorf("create OCI Image Layout at %s: %w", fsPath, err)
+	}
+
+	layouts.Deckhouse = registry.NewImageLayout(layoutPtr)
+
+	fsPath = filepath.Join(rootFolder, "install")
+	layoutPtr, err = createEmptyImageLayout(fsPath)
 	if err != nil {
 		return nil, fmt.Errorf("create OCI Image Layout at %s: %w", fsPath, err)
 	}

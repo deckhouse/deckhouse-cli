@@ -11,15 +11,21 @@ import (
 )
 
 type ImageMeta struct {
+	ImageRepo       string
+	ImageTag        string
+	Digest          string
 	Version         string
 	TagReference    string
 	DigestReference string
 }
 
 func NewImageMeta(version string, tagReference string, digest *v1.Hash) *ImageMeta {
-	imageRepo, _ := splitImageRefByRepoAndTag(tagReference)
+	imageRepo, tag := splitImageRefByRepoAndTag(tagReference)
 
 	return &ImageMeta{
+		ImageRepo:       imageRepo,
+		ImageTag:        tag,
+		Digest:          digest.String(),
 		Version:         version,
 		TagReference:    tagReference,
 		DigestReference: imageRepo + "@" + digest.String(),
@@ -31,7 +37,7 @@ type ImageLayouts struct {
 	workingDir string
 	rootUrl    string
 
-	Deckhouse       layout.Path
+	Deckhouse       *registry.ImageLayout
 	DeckhouseImages map[string]*ImageMeta
 
 	Install       *registry.ImageLayout
