@@ -503,9 +503,11 @@ func (svc *Service) pullImageSet(
 	pullCount, totalCount := 1, len(imageSet)
 
 	for _, imageMeta := range imageSet {
-		logger.DebugF("Preparing to pull image %s", imageMeta.TagReference)
+		if imageMeta != nil {
+			logger.DebugF("Preparing to pull image %s", imageMeta.TagReference)
 
-		logger.DebugF("Pulling image path %s: tag %s", imageMeta.ImageRepo, imageMeta.ImageTag)
+			logger.DebugF("Pulling image path %s: tag %s", imageMeta.ImageRepo, imageMeta.ImageTag)
+		}
 
 		err := retry.RunTask(
 			ctx,
