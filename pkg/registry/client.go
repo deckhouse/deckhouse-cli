@@ -204,7 +204,7 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 		var transportErr *transport.Error
 		if errors.As(err, &transportErr) && transportErr.StatusCode == 404 {
 			// Image not found, which is expected for non-vulnerable images
-			return nil, fmt.Errorf("%w: %w", err, ErrImageNotFound)
+			return nil, fmt.Errorf("%w: %w", ErrImageNotFound, err)
 		}
 
 		return nil, fmt.Errorf("failed to get image: %w", err)
