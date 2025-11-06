@@ -14,29 +14,31 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package main
+package plugins
 
 import (
 	"log/slog"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
-	d8flags "github.com/deckhouse/deckhouse-cli/cmd/d8/flags"
+	d8flags "github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	intplugins "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
-func (r *RootCommand) initPluginServices() {
+func (r *PluginsCommand) initPluginServices() {
 	r.logger.Debug("Initializing plugin services")
 
 	// Extract registry host from the source registry repo
 	// SourceRegistryRepo can be:
 	// - Just hostname: "registry.deckhouse.io"
 	// - Full path: "registry.deckhouse.io/deckhouse/ee"
-	registryHost := d8flags.SourceRegistryRepo
+	sourceRepo := d8flags.SourceRegistryRepo
+	registryHost := sourceRepo
 
 	// If it's just a hostname (no slashes), use it directly
 	// Otherwise parse to extract the hostname
@@ -67,7 +69,7 @@ func (r *RootCommand) initPluginServices() {
 		slog.Bool("tls_skip_verify", d8flags.TLSSkipVerify))
 
 	// Create base client with registry host only
-	baseClient := registry.NewClientWithOptions(registryHost, &registry.ClientOptions{
+	baseClient := registry.NewClientWithOptions(sourceRepo, &registry.ClientOptions{
 		Auth:          auth,
 		Insecure:      d8flags.Insecure,
 		TLSSkipVerify: d8flags.TLSSkipVerify,
@@ -76,17 +78,17 @@ func (r *RootCommand) initPluginServices() {
 
 	// Build scoped client using chained WithSegment calls
 	// Example: registry.deckhouse.io -> deckhouse -> ee -> modules
-	r.pluginRegistryClient = baseClient.
-		WithSegment("deckhouse").
-		WithSegment("ee")
+	r.pluginRegistryClient = baseClient
 
 	r.logger.Debug("Creating plugin service with scoped client",
-		slog.String("scope_path", "deckhouse/ee/modules"))
+		slog.String("scope_path", strings.TrimPrefix(sourceRepo, sourceRepo)))
 
-	r.registryService = intplugins.NewService(
+	registryService := intplugins.NewService(
 		r.pluginRegistryClient,
 		r.logger.Named("registry-service"),
 	)
+
+	r.service = registryService.PluginService()
 
 	r.logger.Debug("Plugin services initialized successfully")
 }

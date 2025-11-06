@@ -46,16 +46,11 @@ import (
 	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
-	"github.com/deckhouse/deckhouse-cli/pkg"
-	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 type RootCommand struct {
 	cmd    *cobra.Command
 	logger *dkplog.Logger
-
-	pluginRegistryClient pkg.RegistryClient
-	registryService      *registryservice.Service
 }
 
 func NewRootCommand() *RootCommand {
@@ -84,7 +79,6 @@ func NewRootCommand() *RootCommand {
 		},
 	}
 
-	rootCmd.initPluginServices()
 	rootCmd.registerCommands()
 	rootCmd.cmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 
@@ -108,7 +102,7 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(commands.NewStrongholdCommand())
 	r.cmd.AddCommand(commands.NewHelpJSONCommand(r.cmd))
 
-	r.cmd.AddCommand(plugins.NewPluginsCommand(r.registryService.PluginService(), r.logger.Named("plugins-command")))
+	r.cmd.AddCommand(plugins.NewPluginsCommand(r.logger.Named("plugins-command")))
 }
 
 func (r *RootCommand) Execute() error {
