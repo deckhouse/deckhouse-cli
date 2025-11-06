@@ -13,7 +13,7 @@ import (
 type ImageMeta struct {
 	ImageRepo       string
 	ImageTag        string
-	Digest          string
+	Digest          *v1.Hash
 	Version         string
 	TagReference    string
 	DigestReference string
@@ -25,7 +25,7 @@ func NewImageMeta(version string, tagReference string, digest *v1.Hash) *ImageMe
 	return &ImageMeta{
 		ImageRepo:       imageRepo,
 		ImageTag:        tag,
-		Digest:          digest.String(),
+		Digest:          digest,
 		Version:         version,
 		TagReference:    tagReference,
 		DigestReference: imageRepo + "@" + digest.String(),

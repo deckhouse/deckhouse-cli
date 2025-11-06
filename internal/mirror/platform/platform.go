@@ -541,10 +541,11 @@ func (svc *Service) pullImageSet(
 			svc.userLogger,
 			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageMeta.TagReference),
 			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
-				img, err := imageGetter(ctx, "@"+imageMeta.Digest)
+				img, err := imageGetter(ctx, "@"+imageMeta.Digest.String())
 				if err != nil {
 					if errors.Is(err, registry.ErrImageNotFound) && allowMissingTags {
 						logger.WarnLn("⚠️ Not found in registry, skipping pull")
+
 						return nil
 					}
 
@@ -553,8 +554,16 @@ func (svc *Service) pullImageSet(
 					return fmt.Errorf("pull image metadata: %w", err)
 				}
 
+				img.SetMetadata(&registry.ImageMeta{
+					TagReference:    imageMeta.TagReference,
+					DigestReference: "@" + imageMeta.Digest.String(),
+					Digest:          imageMeta.Digest,
+				})
+
 				err = imageSetLayout.AddImage(img, imageMeta.ImageTag)
 				if err != nil {
+					logger.DebugF("failed to add image %s: %v", imageMeta.ImageTag, err)
+
 					return fmt.Errorf("add image to layout: %w", err)
 				}
 

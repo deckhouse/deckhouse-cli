@@ -411,6 +411,10 @@ func (r *RegistryImageStub) GetMetadata() (pkg.ImageMeta, error) {
 	return registry.NewImageMeta(r.tag, fmt.Sprintf("sha256:%s", r.digest.String()), &r.digest), nil
 }
 
+func (r *RegistryImageStub) SetMetadata(pkg.ImageMeta) {
+	// No-op for mock
+}
+
 // ImageMetaStub provides a simple stub implementation of ImageMeta
 type ImageMetaStub struct {
 	tagRef    string

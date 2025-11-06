@@ -33,6 +33,7 @@ type RegistryImage interface {
 	v1.Image
 	Extract() io.ReadCloser
 	GetMetadata() (ImageMeta, error)
+	SetMetadata(metadata ImageMeta)
 }
 
 // RegistryClient defines the contract for interacting with container registries

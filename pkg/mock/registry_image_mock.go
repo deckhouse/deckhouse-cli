@@ -105,6 +105,13 @@ type RegistryImageMock struct {
 	beforeRawManifestCounter uint64
 	RawManifestMock          mRegistryImageMockRawManifest
 
+	funcSetMetadata          func(metadata mm_pkg.ImageMeta)
+	funcSetMetadataOrigin    string
+	inspectFuncSetMetadata   func(metadata mm_pkg.ImageMeta)
+	afterSetMetadataCounter  uint64
+	beforeSetMetadataCounter uint64
+	SetMetadataMock          mRegistryImageMockSetMetadata
+
 	funcSize          func() (i1 int64, err error)
 	funcSizeOrigin    string
 	inspectFuncSize   func()
@@ -146,6 +153,9 @@ func NewRegistryImageMock(t minimock.Tester) *RegistryImageMock {
 	m.RawConfigFileMock = mRegistryImageMockRawConfigFile{mock: m}
 
 	m.RawManifestMock = mRegistryImageMockRawManifest{mock: m}
+
+	m.SetMetadataMock = mRegistryImageMockSetMetadata{mock: m}
+	m.SetMetadataMock.callArgs = []*RegistryImageMockSetMetadataParams{}
 
 	m.SizeMock = mRegistryImageMockSize{mock: m}
 
@@ -2647,6 +2657,310 @@ func (m *RegistryImageMock) MinimockRawManifestInspect() {
 	}
 }
 
+type mRegistryImageMockSetMetadata struct {
+	optional           bool
+	mock               *RegistryImageMock
+	defaultExpectation *RegistryImageMockSetMetadataExpectation
+	expectations       []*RegistryImageMockSetMetadataExpectation
+
+	callArgs []*RegistryImageMockSetMetadataParams
+	mutex    sync.RWMutex
+
+	expectedInvocations       uint64
+	expectedInvocationsOrigin string
+}
+
+// RegistryImageMockSetMetadataExpectation specifies expectation struct of the RegistryImage.SetMetadata
+type RegistryImageMockSetMetadataExpectation struct {
+	mock               *RegistryImageMock
+	params             *RegistryImageMockSetMetadataParams
+	paramPtrs          *RegistryImageMockSetMetadataParamPtrs
+	expectationOrigins RegistryImageMockSetMetadataExpectationOrigins
+
+	returnOrigin string
+	Counter      uint64
+}
+
+// RegistryImageMockSetMetadataParams contains parameters of the RegistryImage.SetMetadata
+type RegistryImageMockSetMetadataParams struct {
+	metadata mm_pkg.ImageMeta
+}
+
+// RegistryImageMockSetMetadataParamPtrs contains pointers to parameters of the RegistryImage.SetMetadata
+type RegistryImageMockSetMetadataParamPtrs struct {
+	metadata *mm_pkg.ImageMeta
+}
+
+// RegistryImageMockSetMetadataOrigins contains origins of expectations of the RegistryImage.SetMetadata
+type RegistryImageMockSetMetadataExpectationOrigins struct {
+	origin         string
+	originMetadata string
+}
+
+// Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
+// the test will fail minimock's automatic final call check if the mocked method was not called at least once.
+// Optional() makes method check to work in '0 or more' mode.
+// It is NOT RECOMMENDED to use this option unless you really need it, as default behaviour helps to
+// catch the problems when the expected method call is totally skipped during test run.
+func (mmSetMetadata *mRegistryImageMockSetMetadata) Optional() *mRegistryImageMockSetMetadata {
+	mmSetMetadata.optional = true
+	return mmSetMetadata
+}
+
+// Expect sets up expected params for RegistryImage.SetMetadata
+func (mmSetMetadata *mRegistryImageMockSetMetadata) Expect(metadata mm_pkg.ImageMeta) *mRegistryImageMockSetMetadata {
+	if mmSetMetadata.mock.funcSetMetadata != nil {
+		mmSetMetadata.mock.t.Fatalf("RegistryImageMock.SetMetadata mock is already set by Set")
+	}
+
+	if mmSetMetadata.defaultExpectation == nil {
+		mmSetMetadata.defaultExpectation = &RegistryImageMockSetMetadataExpectation{}
+	}
+
+	if mmSetMetadata.defaultExpectation.paramPtrs != nil {
+		mmSetMetadata.mock.t.Fatalf("RegistryImageMock.SetMetadata mock is already set by ExpectParams functions")
+	}
+
+	mmSetMetadata.defaultExpectation.params = &RegistryImageMockSetMetadataParams{metadata}
+	mmSetMetadata.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
+	for _, e := range mmSetMetadata.expectations {
+		if minimock.Equal(e.params, mmSetMetadata.defaultExpectation.params) {
+			mmSetMetadata.mock.t.Fatalf("Expectation set by When has same params: %#v", *mmSetMetadata.defaultExpectation.params)
+		}
+	}
+
+	return mmSetMetadata
+}
+
+// ExpectMetadataParam1 sets up expected param metadata for RegistryImage.SetMetadata
+func (mmSetMetadata *mRegistryImageMockSetMetadata) ExpectMetadataParam1(metadata mm_pkg.ImageMeta) *mRegistryImageMockSetMetadata {
+	if mmSetMetadata.mock.funcSetMetadata != nil {
+		mmSetMetadata.mock.t.Fatalf("RegistryImageMock.SetMetadata mock is already set by Set")
+	}
+
+	if mmSetMetadata.defaultExpectation == nil {
+		mmSetMetadata.defaultExpectation = &RegistryImageMockSetMetadataExpectation{}
+	}
+
+	if mmSetMetadata.defaultExpectation.params != nil {
+		mmSetMetadata.mock.t.Fatalf("RegistryImageMock.SetMetadata mock is already set by Expect")
+	}
+
+	if mmSetMetadata.defaultExpectation.paramPtrs == nil {
+		mmSetMetadata.defaultExpectation.paramPtrs = &RegistryImageMockSetMetadataParamPtrs{}
+	}
+	mmSetMetadata.defaultExpectation.paramPtrs.metadata = &metadata
+	mmSetMetadata.defaultExpectation.expectationOrigins.originMetadata = minimock.CallerInfo(1)
+
+	return mmSetMetadata
+}
+
+// Inspect accepts an inspector function that has same arguments as the RegistryImage.SetMetadata
+func (mmSetMetadata *mRegistryImageMockSetMetadata) Inspect(f func(metadata mm_pkg.ImageMeta)) *mRegistryImageMockSetMetadata {
+	if mmSetMetadata.mock.inspectFuncSetMetadata != nil {
+		mmSetMetadata.mock.t.Fatalf("Inspect function is already set for RegistryImageMock.SetMetadata")
+	}
+
+	mmSetMetadata.mock.inspectFuncSetMetadata = f
+
+	return mmSetMetadata
+}
+
+// Return sets up results that will be returned by RegistryImage.SetMetadata
+func (mmSetMetadata *mRegistryImageMockSetMetadata) Return() *RegistryImageMock {
+	if mmSetMetadata.mock.funcSetMetadata != nil {
+		mmSetMetadata.mock.t.Fatalf("RegistryImageMock.SetMetadata mock is already set by Set")
+	}
+
+	if mmSetMetadata.defaultExpectation == nil {
+		mmSetMetadata.defaultExpectation = &RegistryImageMockSetMetadataExpectation{mock: mmSetMetadata.mock}
+	}
+
+	mmSetMetadata.defaultExpectation.returnOrigin = minimock.CallerInfo(1)
+	return mmSetMetadata.mock
+}
+
+// Set uses given function f to mock the RegistryImage.SetMetadata method
+func (mmSetMetadata *mRegistryImageMockSetMetadata) Set(f func(metadata mm_pkg.ImageMeta)) *RegistryImageMock {
+	if mmSetMetadata.defaultExpectation != nil {
+		mmSetMetadata.mock.t.Fatalf("Default expectation is already set for the RegistryImage.SetMetadata method")
+	}
+
+	if len(mmSetMetadata.expectations) > 0 {
+		mmSetMetadata.mock.t.Fatalf("Some expectations are already set for the RegistryImage.SetMetadata method")
+	}
+
+	mmSetMetadata.mock.funcSetMetadata = f
+	mmSetMetadata.mock.funcSetMetadataOrigin = minimock.CallerInfo(1)
+	return mmSetMetadata.mock
+}
+
+// When sets expectation for the RegistryImage.SetMetadata which will trigger the result defined by the following
+// Then helper
+func (mmSetMetadata *mRegistryImageMockSetMetadata) When(metadata mm_pkg.ImageMeta) *RegistryImageMockSetMetadataExpectation {
+	if mmSetMetadata.mock.funcSetMetadata != nil {
+		mmSetMetadata.mock.t.Fatalf("RegistryImageMock.SetMetadata mock is already set by Set")
+	}
+
+	expectation := &RegistryImageMockSetMetadataExpectation{
+		mock:               mmSetMetadata.mock,
+		params:             &RegistryImageMockSetMetadataParams{metadata},
+		expectationOrigins: RegistryImageMockSetMetadataExpectationOrigins{origin: minimock.CallerInfo(1)},
+	}
+	mmSetMetadata.expectations = append(mmSetMetadata.expectations, expectation)
+	return expectation
+}
+
+// Then sets up RegistryImage.SetMetadata return parameters for the expectation previously defined by the When method
+
+func (e *RegistryImageMockSetMetadataExpectation) Then() *RegistryImageMock {
+	return e.mock
+}
+
+// Times sets number of times RegistryImage.SetMetadata should be invoked
+func (mmSetMetadata *mRegistryImageMockSetMetadata) Times(n uint64) *mRegistryImageMockSetMetadata {
+	if n == 0 {
+		mmSetMetadata.mock.t.Fatalf("Times of RegistryImageMock.SetMetadata mock can not be zero")
+	}
+	mm_atomic.StoreUint64(&mmSetMetadata.expectedInvocations, n)
+	mmSetMetadata.expectedInvocationsOrigin = minimock.CallerInfo(1)
+	return mmSetMetadata
+}
+
+func (mmSetMetadata *mRegistryImageMockSetMetadata) invocationsDone() bool {
+	if len(mmSetMetadata.expectations) == 0 && mmSetMetadata.defaultExpectation == nil && mmSetMetadata.mock.funcSetMetadata == nil {
+		return true
+	}
+
+	totalInvocations := mm_atomic.LoadUint64(&mmSetMetadata.mock.afterSetMetadataCounter)
+	expectedInvocations := mm_atomic.LoadUint64(&mmSetMetadata.expectedInvocations)
+
+	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
+}
+
+// SetMetadata implements mm_pkg.RegistryImage
+func (mmSetMetadata *RegistryImageMock) SetMetadata(metadata mm_pkg.ImageMeta) {
+	mm_atomic.AddUint64(&mmSetMetadata.beforeSetMetadataCounter, 1)
+	defer mm_atomic.AddUint64(&mmSetMetadata.afterSetMetadataCounter, 1)
+
+	mmSetMetadata.t.Helper()
+
+	if mmSetMetadata.inspectFuncSetMetadata != nil {
+		mmSetMetadata.inspectFuncSetMetadata(metadata)
+	}
+
+	mm_params := RegistryImageMockSetMetadataParams{metadata}
+
+	// Record call args
+	mmSetMetadata.SetMetadataMock.mutex.Lock()
+	mmSetMetadata.SetMetadataMock.callArgs = append(mmSetMetadata.SetMetadataMock.callArgs, &mm_params)
+	mmSetMetadata.SetMetadataMock.mutex.Unlock()
+
+	for _, e := range mmSetMetadata.SetMetadataMock.expectations {
+		if minimock.Equal(*e.params, mm_params) {
+			mm_atomic.AddUint64(&e.Counter, 1)
+			return
+		}
+	}
+
+	if mmSetMetadata.SetMetadataMock.defaultExpectation != nil {
+		mm_atomic.AddUint64(&mmSetMetadata.SetMetadataMock.defaultExpectation.Counter, 1)
+		mm_want := mmSetMetadata.SetMetadataMock.defaultExpectation.params
+		mm_want_ptrs := mmSetMetadata.SetMetadataMock.defaultExpectation.paramPtrs
+
+		mm_got := RegistryImageMockSetMetadataParams{metadata}
+
+		if mm_want_ptrs != nil {
+
+			if mm_want_ptrs.metadata != nil && !minimock.Equal(*mm_want_ptrs.metadata, mm_got.metadata) {
+				mmSetMetadata.t.Errorf("RegistryImageMock.SetMetadata got unexpected parameter metadata, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmSetMetadata.SetMetadataMock.defaultExpectation.expectationOrigins.originMetadata, *mm_want_ptrs.metadata, mm_got.metadata, minimock.Diff(*mm_want_ptrs.metadata, mm_got.metadata))
+			}
+
+		} else if mm_want != nil && !minimock.Equal(*mm_want, mm_got) {
+			mmSetMetadata.t.Errorf("RegistryImageMock.SetMetadata got unexpected parameters, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+				mmSetMetadata.SetMetadataMock.defaultExpectation.expectationOrigins.origin, *mm_want, mm_got, minimock.Diff(*mm_want, mm_got))
+		}
+
+		return
+
+	}
+	if mmSetMetadata.funcSetMetadata != nil {
+		mmSetMetadata.funcSetMetadata(metadata)
+		return
+	}
+	mmSetMetadata.t.Fatalf("Unexpected call to RegistryImageMock.SetMetadata. %v", metadata)
+
+}
+
+// SetMetadataAfterCounter returns a count of finished RegistryImageMock.SetMetadata invocations
+func (mmSetMetadata *RegistryImageMock) SetMetadataAfterCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmSetMetadata.afterSetMetadataCounter)
+}
+
+// SetMetadataBeforeCounter returns a count of RegistryImageMock.SetMetadata invocations
+func (mmSetMetadata *RegistryImageMock) SetMetadataBeforeCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmSetMetadata.beforeSetMetadataCounter)
+}
+
+// Calls returns a list of arguments used in each call to RegistryImageMock.SetMetadata.
+// The list is in the same order as the calls were made (i.e. recent calls have a higher index)
+func (mmSetMetadata *mRegistryImageMockSetMetadata) Calls() []*RegistryImageMockSetMetadataParams {
+	mmSetMetadata.mutex.RLock()
+
+	argCopy := make([]*RegistryImageMockSetMetadataParams, len(mmSetMetadata.callArgs))
+	copy(argCopy, mmSetMetadata.callArgs)
+
+	mmSetMetadata.mutex.RUnlock()
+
+	return argCopy
+}
+
+// MinimockSetMetadataDone returns true if the count of the SetMetadata invocations corresponds
+// the number of defined expectations
+func (m *RegistryImageMock) MinimockSetMetadataDone() bool {
+	if m.SetMetadataMock.optional {
+		// Optional methods provide '0 or more' call count restriction.
+		return true
+	}
+
+	for _, e := range m.SetMetadataMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			return false
+		}
+	}
+
+	return m.SetMetadataMock.invocationsDone()
+}
+
+// MinimockSetMetadataInspect logs each unmet expectation
+func (m *RegistryImageMock) MinimockSetMetadataInspect() {
+	for _, e := range m.SetMetadataMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			m.t.Errorf("Expected call to RegistryImageMock.SetMetadata at\n%s with params: %#v", e.expectationOrigins.origin, *e.params)
+		}
+	}
+
+	afterSetMetadataCounter := mm_atomic.LoadUint64(&m.afterSetMetadataCounter)
+	// if default expectation was set then invocations count should be greater than zero
+	if m.SetMetadataMock.defaultExpectation != nil && afterSetMetadataCounter < 1 {
+		if m.SetMetadataMock.defaultExpectation.params == nil {
+			m.t.Errorf("Expected call to RegistryImageMock.SetMetadata at\n%s", m.SetMetadataMock.defaultExpectation.returnOrigin)
+		} else {
+			m.t.Errorf("Expected call to RegistryImageMock.SetMetadata at\n%s with params: %#v", m.SetMetadataMock.defaultExpectation.expectationOrigins.origin, *m.SetMetadataMock.defaultExpectation.params)
+		}
+	}
+	// if func was set then invocations count should be greater than zero
+	if m.funcSetMetadata != nil && afterSetMetadataCounter < 1 {
+		m.t.Errorf("Expected call to RegistryImageMock.SetMetadata at\n%s", m.funcSetMetadataOrigin)
+	}
+
+	if !m.SetMetadataMock.invocationsDone() && afterSetMetadataCounter > 0 {
+		m.t.Errorf("Expected %d calls to RegistryImageMock.SetMetadata at\n%s but found %d calls",
+			mm_atomic.LoadUint64(&m.SetMetadataMock.expectedInvocations), m.SetMetadataMock.expectedInvocationsOrigin, afterSetMetadataCounter)
+	}
+}
+
 type mRegistryImageMockSize struct {
 	optional           bool
 	mock               *RegistryImageMock
@@ -2862,6 +3176,8 @@ func (m *RegistryImageMock) MinimockFinish() {
 
 			m.MinimockRawManifestInspect()
 
+			m.MinimockSetMetadataInspect()
+
 			m.MinimockSizeInspect()
 		}
 	})
@@ -2898,5 +3214,6 @@ func (m *RegistryImageMock) minimockDone() bool {
 		m.MinimockMediaTypeDone() &&
 		m.MinimockRawConfigFileDone() &&
 		m.MinimockRawManifestDone() &&
+		m.MinimockSetMetadataDone() &&
 		m.MinimockSizeDone()
 }

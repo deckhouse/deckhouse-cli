@@ -55,6 +55,10 @@ func (m *mockRegistryImage) GetMetadata() (pkg.ImageMeta, error) {
 	return d8registry.NewImageMeta(m.ref, "", nil), nil
 }
 
+func (m *mockRegistryImage) SetMetadata(meta pkg.ImageMeta) {
+	// No-op for mock
+}
+
 var testLogger = log.NewSLogger(slog.LevelDebug)
 
 func TestPullTrivyVulnerabilityDatabaseImageSuccessSkipTLS(t *testing.T) {

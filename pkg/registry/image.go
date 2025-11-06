@@ -96,6 +96,10 @@ func (i *Image) GetMetadata() (pkg.ImageMeta, error) {
 	return i.metadata, nil
 }
 
+func (i *Image) SetMetadata(metadata pkg.ImageMeta) {
+	i.metadata = metadata.(*ImageMeta)
+}
+
 func (i *Image) GetTagReference() (string, error) {
 	if i.metadata == nil {
 		return "", ErrImageMetaNotFound
