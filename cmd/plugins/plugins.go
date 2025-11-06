@@ -18,6 +18,7 @@ package plugins
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -443,17 +444,10 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 
 			// Create plugin directory if it doesn't exist
 			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin
-			pluginDir := path.Join(flags.DeckhousePluginsDir, pluginName)
-			pc.logger.Debug("Creating plugin directory", slog.String("plugin", pluginName), slog.String("directory", pluginDir))
-			_, err := os.Stat(pluginDir)
-			if err != nil && os.IsNotExist(err) {
-				err = os.MkdirAll(pluginDir, 0755)
-				if err != nil {
-					return fmt.Errorf("failed to create plugin directory: %w", err)
-				}
-			}
+			pluginDir := path.Join(flags.DeckhousePluginsDir, "plugins", pluginName)
+			err := os.MkdirAll(pluginDir, 0755)
 			if err != nil {
-				return fmt.Errorf("failed to stat plugin directory: %w", err)
+				return fmt.Errorf("failed to create plugin directory: %w", err)
 			}
 
 			versions, err := pc.service.ListPluginTags(ctx, pluginName)
@@ -469,14 +463,12 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 			}
 
 			majorVersion := strconv.Itoa(int(latestVersion.Major()))
+
 			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1
 			versionDir := path.Join(pluginDir, "v"+majorVersion)
-			_, err = os.Stat(versionDir)
-			if err != nil && os.IsNotExist(err) {
-				err = os.MkdirAll(versionDir, 0755)
-				if err != nil {
-					return fmt.Errorf("failed to create plugin directory: %w", err)
-				}
+			err = os.MkdirAll(versionDir, 0755)
+			if err != nil {
+				return fmt.Errorf("failed to create plugin directory: %w", err)
 			}
 
 			tag := latestVersion.Original()
@@ -488,38 +480,58 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 			}
 
 			// Get plugin contract first
-			// fmt.Println("Verifying plugin contract...")
-			// plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
-			// if err != nil {
-			// 	pc.logger.Warn("Failed to get plugin contract",
-			// 		slog.String("plugin", pluginName),
-			// 		slog.String("tag", tag),
-			// 		slog.String("error", err.Error()))
-			// 	return fmt.Errorf("failed to get plugin contract: %w", err)
-			// }
+			fmt.Println("Verifying plugin contract...")
+			plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
+			if err != nil {
+				pc.logger.Warn("Failed to get plugin contract",
+					slog.String("plugin", pluginName),
+					slog.String("tag", tag),
+					slog.String("error", err.Error()))
+				return fmt.Errorf("failed to get plugin contract: %w", err)
+			}
 
-			// fmt.Printf("Plugin: %s v%s\n", plugin.Name, plugin.Version)
-			// fmt.Printf("Description: %s\n", plugin.Description)
+			contractDir := path.Join(flags.DeckhousePluginsDir, "cache", "contracts")
+			err = os.MkdirAll(contractDir, 0755)
+			if err != nil {
+				return fmt.Errorf("failed to create contract directory: %w", err)
+			}
+
+			file, err := os.Create(path.Join(contractDir, pluginName+".json"))
+			if err != nil {
+				return fmt.Errorf("failed to create contract file: %w", err)
+			}
+			defer file.Close()
+
+			enc := json.NewEncoder(file)
+			enc.SetEscapeHTML(false)
+			enc.SetIndent("", "  ")
+			err = enc.Encode(plugin)
+			if err != nil {
+				return fmt.Errorf("failed to encode contract: %w", err)
+			}
+
+			fmt.Printf("Plugin: %s v%s\n", plugin.Name, plugin.Version)
+			fmt.Printf("Description: %s\n", plugin.Description)
 
 			// Extract plugin to installation directory
-			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1/example-plugin
-			destination := path.Join(versionDir, pluginName)
-			fmt.Printf("Installing to: %s\n", destination)
+			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1/
+			fmt.Printf("Installing to: %s\n", versionDir)
 
 			fmt.Println("Downloading and extracting plugin...")
-			err = pc.service.ExtractPlugin(ctx, pluginName, tag, destination)
+			err = pc.service.ExtractPlugin(ctx, pluginName, tag, versionDir)
 			if err != nil {
 				pc.logger.Warn("Failed to extract plugin",
 					slog.String("plugin", pluginName),
 					slog.String("tag", tag),
-					slog.String("destination", destination),
+					slog.String("destination", versionDir),
 					slog.String("error", err.Error()))
 				return fmt.Errorf("failed to extract plugin: %w", err)
 			}
 
-			// simlink
-			err = os.Symlink(destination, path.Join(pluginDir, "current"))
-			if err != nil {
+			// TODO: is delete old symlink needed?
+			// symlink current to the installed version
+			err = os.Symlink(path.Join(versionDir, pluginName), path.Join(pluginDir, "current"))
+			if err != nil && !os.IsExist(err) {
 				return fmt.Errorf("failed to create symlink: %w", err)
 			}
 

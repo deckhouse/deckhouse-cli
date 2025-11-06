@@ -25,7 +25,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
+	"path"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 
@@ -98,13 +98,6 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, dest
 	// Create a scoped client for this specific plugin
 	s.log.Debug("Extracting plugin", slog.String("plugin", pluginName), slog.String("tag", tag), slog.String("destination", destination))
 
-	// Create destination directory if it doesn't exist
-	if err := os.MkdirAll(destination, 0755); err != nil {
-		return fmt.Errorf("failed to create destination directory: %w", err)
-	}
-
-	s.log.Debug("Destination directory created", slog.String("destination", destination))
-
 	pluginClient := s.client.WithSegment(pluginName)
 
 	img, err := pluginClient.GetImage(ctx, tag)
@@ -112,7 +105,7 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, dest
 		return fmt.Errorf("failed to get image: %w", err)
 	}
 
-	err = s.extractTar(img.Extract(), destination)
+	err = s.untarPluginFiles(img.Extract(), destination, pluginName)
 	if err != nil {
 		return fmt.Errorf("failed to extract tar: %w", err)
 	}
@@ -120,8 +113,8 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, dest
 	return nil
 }
 
-// extractTar extracts a tar archive to the destination directory
-func (s *PluginService) extractTar(r io.Reader, destination string) error {
+// untarPluginFiles extracts a tar archive to the destination directory
+func (s *PluginService) untarPluginFiles(r io.Reader, destination, pluginName string) error {
 	s.log.Debug("Starting tar extraction", slog.String("destination", destination))
 
 	tr := tar.NewReader(r)
@@ -135,51 +128,17 @@ func (s *PluginService) extractTar(r io.Reader, destination string) error {
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
 
-		// Construct the full path
-		target := filepath.Join(destination, header.Name)
-
-		// Ensure the path is within the destination (prevent path traversal)
-		rel, err := filepath.Rel(destination, target)
-		if err != nil || len(rel) > 0 && rel[0] == '.' && rel[1] == '.' {
-			return fmt.Errorf("invalid file path (path traversal attempt): %s", header.Name)
-		}
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			// Create directory
-			s.log.Debug("Creating directory", slog.String("path", target))
-
-			if err := os.MkdirAll(target, os.FileMode(header.Mode)); err != nil {
-				return fmt.Errorf("failed to create directory %s: %w", target, err)
-			}
-
-		case tar.TypeReg:
-			// Create file
-			s.log.Debug("Extracting file", slog.String("path", target), slog.Int64("size", header.Size))
-
-			// Ensure parent directory exists
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return fmt.Errorf("failed to create parent directory for %s: %w", target, err)
-			}
-
-			// Create the file
-			outFile, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(header.Mode))
+		switch header.Name {
+		case "plugin":
+			s.log.Debug("Extracting plugin", slog.String("path", destination))
+			plugin, err := io.ReadAll(tr)
 			if err != nil {
-				return fmt.Errorf("failed to create file %s: %w", target, err)
+				return fmt.Errorf("failed to read plugin: %w", err)
 			}
-
-			// Copy the file contents
-			if _, err := io.Copy(outFile, tr); err != nil {
-				outFile.Close()
-				return fmt.Errorf("failed to write file %s: %w", target, err)
+			err = os.WriteFile(path.Join(destination, pluginName), plugin, os.FileMode(header.Mode))
+			if err != nil {
+				return fmt.Errorf("failed to write plugin: %w", err)
 			}
-			outFile.Close()
-
-			s.log.Debug("File extracted successfully", slog.String("path", target))
-
-		default:
-			// Skip unsupported types
-			s.log.Warn("Skipping unsupported tar entry", slog.Int("type", int(header.Typeflag)), slog.String("name", header.Name))
 		}
 	}
 
