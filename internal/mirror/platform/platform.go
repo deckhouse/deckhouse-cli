@@ -405,7 +405,7 @@ func (svc *Service) pullDeckhouseReleaseChannels(ctx context.Context) error {
 		ImageGetter:      svc.deckhouseService.GetReleaseImage,
 	}
 
-	return svc.pullImages(ctx, config)
+	return svc.pullerService.PullImages(ctx, config)
 }
 
 func (svc *Service) pullInstallers(ctx context.Context) error {
@@ -418,7 +418,7 @@ func (svc *Service) pullInstallers(ctx context.Context) error {
 		ImageGetter:      svc.deckhouseService.GetInstallerImage,
 	}
 
-	return svc.pullImages(ctx, config)
+	return svc.pullerService.PullImages(ctx, config)
 }
 
 func (svc *Service) pullStandaloneInstallers(ctx context.Context) error {
@@ -431,7 +431,7 @@ func (svc *Service) pullStandaloneInstallers(ctx context.Context) error {
 		ImageGetter:      svc.deckhouseService.GetInstallStandaloneImage,
 	}
 
-	return svc.pullImages(ctx, config)
+	return svc.pullerService.PullImages(ctx, config)
 }
 
 func (svc *Service) pullDeckhouseImages(ctx context.Context) error {
@@ -444,7 +444,7 @@ func (svc *Service) pullDeckhouseImages(ctx context.Context) error {
 		ImageGetter:      svc.deckhouseService.GetImage,
 	}
 
-	return svc.pullImages(ctx, config)
+	return svc.pullerService.PullImages(ctx, config)
 }
 
 // ImageGetter is a function type for getting images from the registry
@@ -458,39 +458,6 @@ type PullConfig struct {
 	AllowMissingTags bool
 	DigestGetter     func(ctx context.Context, tag string) (*v1.Hash, error)
 	ImageGetter      ImageGetter
-}
-
-func (svc *Service) pullImages(ctx context.Context, config PullConfig) error {
-	svc.userLogger.InfoLn("Beginning to pull " + config.Name)
-
-	svc.userLogger.InfoLn("Pull " + config.Name + " meta")
-	for image, meta := range config.ImageSet {
-		if meta != nil {
-			continue
-		}
-
-		_, tag := splitImageRefByRepoAndTag(image)
-
-		digest, err := config.DigestGetter(ctx, tag)
-		if err != nil {
-			if config.AllowMissingTags {
-				continue
-			}
-
-			return fmt.Errorf("get digest: %w", err)
-		}
-
-		config.ImageSet[image] = NewImageMeta(tag, image, digest)
-	}
-	svc.userLogger.InfoLn("All required " + config.Name + " meta are pulled!")
-
-	if err := svc.pullerService.PullImageSet(ctx, config.ImageSet, config.Layout, config.AllowMissingTags, config.ImageGetter); err != nil {
-		return err
-	}
-
-	svc.userLogger.InfoLn("All required " + config.Name + " are pulled!")
-
-	return nil
 }
 
 func (svc *Service) generateDeckhouseReleaseManifests(

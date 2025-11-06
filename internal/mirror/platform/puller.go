@@ -37,6 +37,40 @@ func NewPullerService(
 	}
 }
 
+// PullImages pulls images according to the provided configuration
+func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) error {
+	ps.userLogger.InfoLn("Beginning to pull " + config.Name)
+
+	ps.userLogger.InfoLn("Pull " + config.Name + " meta")
+	for image, meta := range config.ImageSet {
+		if meta != nil {
+			continue
+		}
+
+		_, tag := splitImageRefByRepoAndTag(image)
+
+		digest, err := config.DigestGetter(ctx, tag)
+		if err != nil {
+			if config.AllowMissingTags {
+				continue
+			}
+
+			return fmt.Errorf("get digest: %w", err)
+		}
+
+		config.ImageSet[image] = NewImageMeta(tag, image, digest)
+	}
+	ps.userLogger.InfoLn("All required " + config.Name + " meta are pulled!")
+
+	if err := ps.PullImageSet(ctx, config.ImageSet, config.Layout, config.AllowMissingTags, config.ImageGetter); err != nil {
+		return err
+	}
+
+	ps.userLogger.InfoLn("All required " + config.Name + " are pulled!")
+
+	return nil
+}
+
 // PullImageSet pulls a set of images using the provided image getter
 func (ps *PullerService) PullImageSet(
 	ctx context.Context,
