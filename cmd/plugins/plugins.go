@@ -20,6 +20,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path"
+	"strconv"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/spf13/cobra"
@@ -70,6 +73,10 @@ func NewPluginsCommand(logger *dkplog.Logger) *cobra.Command {
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			// init plugin services for subcommands after flags are parsed
 			pc.initPluginServices()
+			envCliPath := os.Getenv("DECKHOUSE_CLI_PATH")
+			if envCliPath != "" {
+				flags.DeckhousePluginsDir = envCliPath
+			}
 		},
 	}
 
@@ -434,6 +441,21 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 			pluginName := args[0]
 			ctx := cmd.Context()
 
+			// Create plugin directory if it doesn't exist
+			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin
+			pluginDir := path.Join(flags.DeckhousePluginsDir, pluginName)
+			pc.logger.Debug("Creating plugin directory", slog.String("plugin", pluginName), slog.String("directory", pluginDir))
+			_, err := os.Stat(pluginDir)
+			if err != nil && os.IsNotExist(err) {
+				err = os.MkdirAll(pluginDir, 0755)
+				if err != nil {
+					return fmt.Errorf("failed to create plugin directory: %w", err)
+				}
+			}
+			if err != nil {
+				return fmt.Errorf("failed to stat plugin directory: %w", err)
+			}
+
 			versions, err := pc.service.ListPluginTags(ctx, pluginName)
 			if err != nil {
 				pc.logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
@@ -446,6 +468,17 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 				return fmt.Errorf("failed to fetch latest version: %w", err)
 			}
 
+			majorVersion := strconv.Itoa(int(latestVersion.Major()))
+			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1
+			versionDir := path.Join(pluginDir, "v"+majorVersion)
+			_, err = os.Stat(versionDir)
+			if err != nil && os.IsNotExist(err) {
+				err = os.MkdirAll(versionDir, 0755)
+				if err != nil {
+					return fmt.Errorf("failed to create plugin directory: %w", err)
+				}
+			}
+
 			tag := latestVersion.Original()
 
 			fmt.Printf("Installing plugin: %s\n", pluginName)
@@ -455,22 +488,22 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 			}
 
 			// Get plugin contract first
-			fmt.Println("Verifying plugin contract...")
-			plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
-			if err != nil {
-				pc.logger.Warn("Failed to get plugin contract",
-					slog.String("plugin", pluginName),
-					slog.String("tag", tag),
-					slog.String("error", err.Error()))
-				return fmt.Errorf("failed to get plugin contract: %w", err)
-			}
+			// fmt.Println("Verifying plugin contract...")
+			// plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
+			// if err != nil {
+			// 	pc.logger.Warn("Failed to get plugin contract",
+			// 		slog.String("plugin", pluginName),
+			// 		slog.String("tag", tag),
+			// 		slog.String("error", err.Error()))
+			// 	return fmt.Errorf("failed to get plugin contract: %w", err)
+			// }
 
-			fmt.Printf("Plugin: %s v%s\n", plugin.Name, plugin.Version)
-			fmt.Printf("Description: %s\n", plugin.Description)
+			// fmt.Printf("Plugin: %s v%s\n", plugin.Name, plugin.Version)
+			// fmt.Printf("Description: %s\n", plugin.Description)
 
 			// Extract plugin to installation directory
-			// TODO: Make destination configurable
-			destination := fmt.Sprintf("/tmp/deckhouse-cli/plugins/%s", pluginName)
+			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1/example-plugin
+			destination := path.Join(versionDir, pluginName)
 			fmt.Printf("Installing to: %s\n", destination)
 
 			fmt.Println("Downloading and extracting plugin...")
@@ -482,6 +515,12 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 					slog.String("destination", destination),
 					slog.String("error", err.Error()))
 				return fmt.Errorf("failed to extract plugin: %w", err)
+			}
+
+			// simlink
+			err = os.Symlink(destination, path.Join(pluginDir, "current"))
+			if err != nil {
+				return fmt.Errorf("failed to create symlink: %w", err)
 			}
 
 			fmt.Printf("✓ Plugin '%s' successfully installed!\n", pluginName)
