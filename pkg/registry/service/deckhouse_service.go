@@ -61,9 +61,9 @@ func (s *DeckhouseService) GetRoot() string {
 func (s *DeckhouseService) GetReleaseInfo(ctx context.Context, releaseTag string) (interface{}, error) {
 	s.logger.Debug("Getting release info", "release", releaseTag)
 
-	releaseClient := s.client.WithSegment(releaseSegment)
+	segmentClient := s.client.WithSegment(releaseSegment)
 
-	imageConfig, err := releaseClient.GetImageConfig(ctx, releaseTag)
+	imageConfig, err := segmentClient.GetImageConfig(ctx, releaseTag)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get image config: %w", err)
 	}
@@ -107,14 +107,65 @@ func (s *DeckhouseService) GetDigest(ctx context.Context, tag string) (*v1.Hash,
 	return hash, nil
 }
 
+func (s *DeckhouseService) GetReleaseDigest(ctx context.Context, tag string) (*v1.Hash, error) {
+	logger := s.logger.With("tag", tag)
+
+	logger.Debug("Getting release digest")
+
+	segmentClient := s.client.WithSegment(releaseSegment)
+
+	hash, err := segmentClient.GetDigest(ctx, tag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get release digest: %w", err)
+	}
+
+	logger.Debug("Release digest retrieved successfully")
+
+	return hash, nil
+}
+
+func (s *DeckhouseService) GetInstallerDigest(ctx context.Context, tag string) (*v1.Hash, error) {
+	logger := s.logger.With("tag", tag)
+
+	logger.Debug("Getting installer digest")
+
+	segmentClient := s.client.WithSegment(installerSegment)
+
+	hash, err := segmentClient.GetDigest(ctx, tag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get installer digest: %w", err)
+	}
+
+	logger.Debug("Installer digest retrieved successfully")
+
+	return hash, nil
+}
+
+func (s *DeckhouseService) GetInstallStandaloneDigest(ctx context.Context, tag string) (*v1.Hash, error) {
+	logger := s.logger.With("tag", tag)
+
+	logger.Debug("Getting install standalone digest")
+
+	segmentClient := s.client.WithSegment(installStandaloneSegment)
+
+	hash, err := segmentClient.GetDigest(ctx, tag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get install standalone digest: %w", err)
+	}
+
+	logger.Debug("Install standalone digest retrieved successfully")
+
+	return hash, nil
+}
+
 func (s *DeckhouseService) GetReleaseImage(ctx context.Context, releaseTag string) (pkg.RegistryImage, error) {
 	logger := s.logger.With("release", releaseTag)
 
 	logger.Debug("Getting release image")
 
-	releaseClient := s.client.WithSegment(releaseSegment)
+	segmentClient := s.client.WithSegment(releaseSegment)
 
-	img, err := releaseClient.GetImage(ctx, releaseTag)
+	img, err := segmentClient.GetImage(ctx, releaseTag)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get release image: %w", err)
 	}
@@ -129,9 +180,9 @@ func (s *DeckhouseService) GetInstallerImage(ctx context.Context, tag string) (p
 
 	logger.Debug("Getting installer image")
 
-	releaseClient := s.client.WithSegment(installerSegment)
+	segmentClient := s.client.WithSegment(installerSegment)
 
-	img, err := releaseClient.GetImage(ctx, tag)
+	img, err := segmentClient.GetImage(ctx, tag)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get installer image: %w", err)
 	}
@@ -146,9 +197,9 @@ func (s *DeckhouseService) GetInstallStandaloneImage(ctx context.Context, tag st
 
 	logger.Debug("Getting install standalone image")
 
-	releaseClient := s.client.WithSegment(installStandaloneSegment)
+	segmentClient := s.client.WithSegment(installStandaloneSegment)
 
-	img, err := releaseClient.GetImage(ctx, tag)
+	img, err := segmentClient.GetImage(ctx, tag)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get install standalone image: %w", err)
 	}
@@ -168,9 +219,9 @@ func (s *DeckhouseService) GetReleaseMetadata(ctx context.Context, releaseTag st
 
 	logger.Debug("Getting release metadata")
 
-	releaseClient := s.client.WithSegment(releaseSegment)
+	segmentClient := s.client.WithSegment(releaseSegment)
 
-	img, err := releaseClient.GetImage(ctx, releaseTag)
+	img, err := segmentClient.GetImage(ctx, releaseTag)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get image config: %w", err)
 	}
@@ -191,9 +242,9 @@ func (s *DeckhouseService) ExtractRelease(ctx context.Context, releaseTag, desti
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	releaseClient := s.client.WithSegment(releaseSegment)
+	segmentClient := s.client.WithSegment(releaseSegment)
 
-	img, err := releaseClient.GetImage(ctx, releaseTag)
+	img, err := segmentClient.GetImage(ctx, releaseTag)
 	if err != nil {
 		return fmt.Errorf("failed to get image: %w", err)
 	}
@@ -278,9 +329,9 @@ func extractDeckhouseReleaseMetadata(rc io.ReadCloser) (*DeckhouseReleaseMetadat
 func (s *DeckhouseService) ListReleaseTags(ctx context.Context) ([]string, error) {
 	s.logger.Debug("Listing release tags")
 
-	releaseClient := s.client.WithSegment(releaseSegment)
+	segmentClient := s.client.WithSegment(releaseSegment)
 
-	tags, err := releaseClient.ListTags(ctx)
+	tags, err := segmentClient.ListTags(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list release tags: %w", err)
 	}
@@ -310,9 +361,9 @@ func (s *DeckhouseService) CheckReleaseExists(ctx context.Context, tag string) e
 
 	logger.Debug("Checking if release exists")
 
-	releaseClient := s.client.WithSegment(releaseSegment)
+	segmentClient := s.client.WithSegment(releaseSegment)
 
-	err := releaseClient.CheckImageExists(ctx, tag)
+	err := segmentClient.CheckImageExists(ctx, tag)
 	if err != nil {
 		return fmt.Errorf("failed to check if release exists: %w", err)
 	}

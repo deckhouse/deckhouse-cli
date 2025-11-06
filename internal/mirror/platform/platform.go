@@ -404,7 +404,7 @@ func (svc *Service) pullDeckhouseReleaseChannels(ctx context.Context) error {
 
 		_, tag := splitImageRefByRepoAndTag(image)
 
-		digest, err := svc.deckhouseService.GetDigest(ctx, tag)
+		digest, err := svc.deckhouseService.GetReleaseDigest(ctx, tag)
 		if err != nil {
 			return fmt.Errorf("get digest: %w", err)
 		}
@@ -433,7 +433,7 @@ func (svc *Service) pullInstallers(ctx context.Context) error {
 
 		_, tag := splitImageRefByRepoAndTag(image)
 
-		digest, err := svc.deckhouseService.GetDigest(ctx, tag)
+		digest, err := svc.deckhouseService.GetInstallerDigest(ctx, tag)
 		if err != nil {
 			return fmt.Errorf("get digest: %w", err)
 		}
@@ -462,7 +462,7 @@ func (svc *Service) pullStandaloneInstallers(ctx context.Context) error {
 
 		_, tag := splitImageRefByRepoAndTag(image)
 
-		digest, err := svc.deckhouseService.GetDigest(ctx, tag)
+		digest, err := svc.deckhouseService.GetInstallStandaloneDigest(ctx, tag)
 		if err != nil {
 			return fmt.Errorf("get digest: %w", err)
 		}
