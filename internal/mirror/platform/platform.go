@@ -247,11 +247,9 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 	}
 
 	if meta.Suspend {
-		if svc.ignoreSuspendedChannels {
-			svc.userLogger.WarnF("Skipping suspended release channel %q", releaseChannel)
-			return nil, nil
+		if !svc.ignoreSuspendedChannels {
+			return nil, fmt.Errorf("source registry contains suspended release channel %q, try again later", releaseChannel)
 		}
-		return nil, fmt.Errorf("source registry contains suspended release channel %q, try again later", releaseChannel)
 	}
 
 	ver, err := semver.NewVersion(meta.Version)

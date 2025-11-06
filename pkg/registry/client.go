@@ -215,7 +215,7 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 	logentry.Debug("Image retrieved successfully")
 
 	imageOpts := make([]ImageOption, 0, 1)
-	if isDigestReference {
+	if !isDigestReference {
 		imageOpts = append(imageOpts, WithFetchingMetadata(ref.String()))
 	}
 
