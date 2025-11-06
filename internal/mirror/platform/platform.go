@@ -24,8 +24,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
@@ -39,6 +37,8 @@ type Service struct {
 	deckhouseService *registryservice.DeckhouseService
 	// layout manages the OCI image layouts for different components
 	layout *ImageLayouts
+	// pullerService handles the pulling of images
+	pullerService *PullerService
 
 	// sinceVersion specifies the minimum version to start mirroring from (optional)
 	sinceVersion *semver.Version
@@ -76,6 +76,7 @@ func NewService(
 	return &Service{
 		deckhouseService:        deckhouseService,
 		layout:                  layout,
+		pullerService:           NewPullerService(deckhouseService, layout, logger, userLogger),
 		sinceVersion:            sinceVersion,
 		targetTag:               targetTag,
 		ignoreSuspendedChannels: ignoreSuspendedChannels,
@@ -319,7 +320,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	for _, imageMeta := range svc.layout.InstallImages {
 		digests, err := svc.ExtractImageDigestsFromDeckhouseInstallerNew(imageMeta.ImageTag, prevDigests)
 		if err != nil {
-			return fmt.Errorf("Extract images digests: %w", err)
+			return fmt.Errorf("extract images digests: %w", err)
 		}
 		_ = digests
 		// maps.Copy(svc.layout.DeckhouseImages, digests)
@@ -483,71 +484,11 @@ func (svc *Service) pullImages(ctx context.Context, config PullConfig) error {
 	}
 	svc.userLogger.InfoLn("All required " + config.Name + " meta are pulled!")
 
-	if err := svc.pullImageSet(ctx, config.ImageSet, config.Layout, config.ImageGetter); err != nil {
+	if err := svc.pullerService.PullImageSet(ctx, config.ImageSet, config.Layout, config.AllowMissingTags, config.ImageGetter); err != nil {
 		return err
 	}
 
 	svc.userLogger.InfoLn("All required " + config.Name + " are pulled!")
-
-	return nil
-}
-
-func (svc *Service) pullImageSet(
-	ctx context.Context,
-	imageSet map[string]*ImageMeta,
-	imageSetLayout *registry.ImageLayout,
-	imageGetter ImageGetter,
-) error {
-	logger := svc.userLogger
-
-	pullCount, totalCount := 1, len(imageSet)
-
-	for _, imageMeta := range imageSet {
-		if imageMeta != nil {
-			logger.DebugF("Preparing to pull image %s", imageMeta.TagReference)
-
-			logger.DebugF("Pulling image path %s: tag %s", imageMeta.ImageRepo, imageMeta.ImageTag)
-		}
-
-		err := retry.RunTask(
-			ctx,
-			svc.userLogger,
-			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageMeta.TagReference),
-			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
-				if imageMeta == nil {
-					logger.WarnLn("⚠️ Not found in registry, skipping pull")
-
-					return nil
-				}
-
-				img, err := imageGetter(ctx, "@"+imageMeta.Digest.String())
-				if err != nil {
-					logger.DebugF("failed to pull image %s: %v", imageMeta.TagReference, err)
-
-					return fmt.Errorf("pull image metadata: %w", err)
-				}
-
-				img.SetMetadata(&registry.ImageMeta{
-					TagReference:    imageMeta.TagReference,
-					DigestReference: imageMeta.ImageRepo + "@" + imageMeta.Digest.String(),
-					Digest:          imageMeta.Digest,
-				})
-
-				err = imageSetLayout.AddImage(img, imageMeta.ImageTag)
-				if err != nil {
-					logger.DebugF("failed to add image %s: %v", imageMeta.ImageTag, err)
-
-					return fmt.Errorf("add image to layout: %w", err)
-				}
-
-				return nil
-			}))
-		if err != nil {
-			return fmt.Errorf("pull image %q: %w", imageMeta.TagReference, err)
-		}
-
-		pullCount++
-	}
 
 	return nil
 }
