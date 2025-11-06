@@ -187,10 +187,12 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 
 	logentry.Debug("Getting image")
 
+	var isDigestReference bool
 	imagepath := fullRegistry + ":" + tag
 	if strings.HasPrefix(tag, "@sha256:") {
 		logentry.Debug("tag contains digest reference")
 		imagepath = fullRegistry + tag
+		isDigestReference = true
 	}
 
 	ref, err := name.ParseReference(imagepath)
@@ -212,7 +214,12 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 
 	logentry.Debug("Image retrieved successfully")
 
-	newImage, err := NewImage(img, WithFetchingMetadata(ref.String()))
+	imageOpts := make([]ImageOption, 0, 1)
+	if isDigestReference {
+		imageOpts = append(imageOpts, WithFetchingMetadata(ref.String()))
+	}
+
+	newImage, err := NewImage(img, imageOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("create new image: %w", err)
 	}

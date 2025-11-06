@@ -44,6 +44,9 @@ type Service struct {
 	// targetTag specifies a specific tag to mirror instead of determining versions automatically
 	targetTag string
 
+	// ignoreSuspendedChannels specifies whether to skip suspended release channels instead of failing
+	ignoreSuspendedChannels bool
+
 	// logger is for internal debug logging
 	logger *dkplog.Logger
 	// userLogger is for user-facing informational messages
@@ -55,6 +58,7 @@ func NewService(
 	sinceVersion *semver.Version,
 	workingDir string,
 	targetTag string,
+	ignoreSuspendedChannels bool,
 	logger *dkplog.Logger,
 	userLogger *log.SLogger,
 ) *Service {
@@ -69,12 +73,13 @@ func NewService(
 	}
 
 	return &Service{
-		deckhouseService: deckhouseService,
-		layout:           layout,
-		sinceVersion:     sinceVersion,
-		targetTag:        targetTag,
-		logger:           logger,
-		userLogger:       userLogger,
+		deckhouseService:        deckhouseService,
+		layout:                  layout,
+		sinceVersion:            sinceVersion,
+		targetTag:               targetTag,
+		ignoreSuspendedChannels: ignoreSuspendedChannels,
+		logger:                  logger,
+		userLogger:              userLogger,
 	}
 }
 
@@ -189,6 +194,11 @@ func (svc *Service) versionsToMirrorFunc(ctx context.Context) ([]semver.Version,
 			return nil, fmt.Errorf("get %s release version from registry: %w", channel, err)
 		}
 
+		if v == nil {
+			// Channel was skipped (e.g., suspended and ignoreSuspendedChannels is true)
+			continue
+		}
+
 		releaseChannelsVersions[channel] = v
 	}
 
@@ -237,6 +247,10 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 	}
 
 	if meta.Suspend {
+		if svc.ignoreSuspendedChannels {
+			svc.userLogger.WarnF("Skipping suspended release channel %q", releaseChannel)
+			return nil, nil
+		}
 		return nil, fmt.Errorf("source registry contains suspended release channel %q, try again later", releaseChannel)
 	}
 
@@ -257,7 +271,7 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 
 	svc.userLogger.DebugF("image reference: %s@%s", imageMeta, digest.String())
 
-	err = svc.layout.DeckhouseReleaseChannel.AddImage(image)
+	err = svc.layout.DeckhouseReleaseChannel.AddImage(image, releaseChannel)
 	if err != nil {
 		return nil, fmt.Errorf("append %s release channel image to layout: %w", releaseChannel, err)
 	}
@@ -541,7 +555,7 @@ func (svc *Service) pullImageSet(
 					return fmt.Errorf("pull image metadata: %w", err)
 				}
 
-				err = imageSetLayout.AddImage(img)
+				err = imageSetLayout.AddImage(img, imageMeta.ImageTag)
 				if err != nil {
 					return fmt.Errorf("add image to layout: %w", err)
 				}

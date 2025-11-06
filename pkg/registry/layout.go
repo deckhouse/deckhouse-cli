@@ -32,17 +32,14 @@ func (l *ImageLayout) Path() layout.Path {
 	return l.wrapped
 }
 
-func (l *ImageLayout) AddImage(img pkg.RegistryImage) error {
+func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 	meta, err := img.GetMetadata()
 	if err != nil {
 		return fmt.Errorf("get image tag reference: %w", err)
 	}
 
 	// TODO: support nesting tags in image
-	repoTags := strings.Split(meta.GetTagReference(), ":")
-	if len(repoTags) == 2 {
-		l.metaByTag[repoTags[1]] = meta.(*ImageMeta)
-	}
+	l.metaByTag[tag] = meta.(*ImageMeta)
 
 	err = l.wrapped.AppendImage(img,
 		layout.WithPlatform(l.defaultPlatform),

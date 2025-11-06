@@ -83,7 +83,10 @@ func (l *ImageLayouts) FillForTag(tag string) {
 		l.DeckhouseImages[l.rootUrl+":"+channel] = nil
 		l.InstallImages[path.Join(l.rootUrl, internal.InstallSegment)+":"+channel] = nil
 		l.InstallStandaloneImages[path.Join(l.rootUrl, internal.InstallStandaloneSegment)+":"+channel] = nil
-		l.ReleaseChannelImages[path.Join(l.rootUrl, internal.ReleaseChannelSegment)+":"+channel] = nil
+		key := path.Join(l.rootUrl, internal.ReleaseChannelSegment) + ":" + channel
+		if _, exists := l.ReleaseChannelImages[key]; !exists {
+			l.ReleaseChannelImages[key] = nil
+		}
 	}
 }
 

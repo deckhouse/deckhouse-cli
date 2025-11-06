@@ -37,6 +37,7 @@ func NewPullService(
 	registryService *registryservice.Service,
 	tmpDir string,
 	targetTag string,
+	ignoreSuspendedChannels bool,
 	logger *dkplog.Logger,
 	userLogger *log.SLogger,
 ) *PullService {
@@ -44,7 +45,7 @@ func NewPullService(
 		moduleService:    registryService.ModuleService(),
 		deckhouseService: registryService.DeckhouseService(),
 
-		platformService: platform.NewService(registryService.DeckhouseService(), nil, tmpDir, targetTag, logger, userLogger),
+		platformService: platform.NewService(registryService.DeckhouseService(), nil, tmpDir, targetTag, ignoreSuspendedChannels, logger.Named("pull"), userLogger),
 
 		layout: NewImageLayouts(),
 

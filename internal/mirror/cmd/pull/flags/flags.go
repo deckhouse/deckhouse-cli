@@ -62,6 +62,8 @@ var (
 	NoSecurityDB    bool
 	NoModules       bool
 	OnlyExtraImages bool
+
+	IgnoreSuspendedChannels bool
 )
 
 func AddFlags(flagSet *pflag.FlagSet) {
@@ -197,6 +199,13 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		false,
 		"Interact with registries over HTTP.",
 	)
+	flagSet.BoolVar(
+		&IgnoreSuspendedChannels,
+		"ignore-suspended-channels",
+		false,
+		"Ignore suspended release channels instead of failing.",
+	)
+	flagSet.MarkHidden("ignore-suspended-channels")
 	flagSet.StringVar(
 		&TempDir,
 		"tmp-dir",
