@@ -29,6 +29,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/samber/lo"
 )
@@ -183,7 +184,7 @@ func (svc *Service) versionsToMirrorFunc(ctx context.Context) ([]semver.Version,
 
 	releaseChannelsVersions := make(map[string]*semver.Version, len(releaseChannelsToCopy))
 	for _, channel := range releaseChannelsToCopy {
-		v, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
+		version, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
 		if err != nil {
 			if channel == internal.LTSChannel {
 				svc.userLogger.WarnF("Skipping LTS channel: %v", err)
@@ -194,12 +195,12 @@ func (svc *Service) versionsToMirrorFunc(ctx context.Context) ([]semver.Version,
 			return nil, fmt.Errorf("get %s release version from registry: %w", channel, err)
 		}
 
-		if v == nil {
+		if version == nil {
 			// Channel was skipped (e.g., suspended and ignoreSuspendedChannels is true)
 			continue
 		}
 
-		releaseChannelsVersions[channel] = v
+		releaseChannelsVersions[channel] = version
 	}
 
 	rockSolidVersion := releaseChannelsVersions[internal.RockSolidChannel]
@@ -295,7 +296,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 			return fmt.Errorf("pull standalone installers: %w", err)
 		}
 
-		if err := svc.pullDeckhouseReleases(ctx); err != nil {
+		if err := svc.pullDeckhouseImages(ctx); err != nil {
 			return fmt.Errorf("pull deckhouse releases: %w", err)
 		}
 
@@ -394,138 +395,101 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 }
 
 func (svc *Service) pullDeckhouseReleaseChannels(ctx context.Context) error {
-	svc.userLogger.InfoLn("Beginning to pull Deckhouse release channels information")
-
-	svc.userLogger.InfoLn("Pull deckhouse release channels meta")
-	for image, meta := range svc.layout.ReleaseChannelImages {
-		if meta != nil {
-			continue
-		}
-
-		_, tag := splitImageRefByRepoAndTag(image)
-
-		digest, err := svc.deckhouseService.GetReleaseDigest(ctx, tag)
-		if err != nil {
-			return fmt.Errorf("get digest: %w", err)
-		}
-
-		svc.layout.ReleaseChannelImages[image] = NewImageMeta(tag, image, digest)
-	}
-	svc.userLogger.InfoLn("All required deckhouse release channels meta are pulled!")
-
-	if err := svc.PullReleaseImageSet(ctx, svc.layout.ReleaseChannelImages, svc.layout.DeckhouseReleaseChannel, svc.targetTag != ""); err != nil {
-		return err
+	config := PullConfig{
+		Name:             "Deckhouse release channels information",
+		ImageSet:         svc.layout.ReleaseChannelImages,
+		Layout:           svc.layout.DeckhouseReleaseChannel,
+		AllowMissingTags: svc.targetTag != "",
+		DigestGetter:     svc.deckhouseService.GetReleaseDigest,
+		ImageGetter:      svc.deckhouseService.GetReleaseImage,
 	}
 
-	svc.userLogger.InfoLn("Deckhouse release channels are pulled!")
-
-	return nil
+	return svc.pullImages(ctx, config)
 }
 
 func (svc *Service) pullInstallers(ctx context.Context) error {
-	svc.userLogger.InfoLn("Beginning to pull installers")
-
-	svc.userLogger.InfoLn("Pull installers meta")
-	for image, meta := range svc.layout.InstallImages {
-		if meta != nil {
-			continue
-		}
-
-		_, tag := splitImageRefByRepoAndTag(image)
-
-		digest, err := svc.deckhouseService.GetInstallerDigest(ctx, tag)
-		if err != nil {
-			return fmt.Errorf("get digest: %w", err)
-		}
-
-		svc.layout.InstallImages[image] = NewImageMeta(tag, image, digest)
-	}
-	svc.userLogger.InfoLn("All required installers meta are pulled!")
-
-	if err := svc.PullInstallerImageSet(ctx, svc.layout.InstallImages, svc.layout.DeckhouseInstall, svc.targetTag != ""); err != nil {
-		return err
+	config := PullConfig{
+		Name:             "installers",
+		ImageSet:         svc.layout.InstallImages,
+		Layout:           svc.layout.DeckhouseInstall,
+		AllowMissingTags: true, // Allow missing installer images
+		DigestGetter:     svc.deckhouseService.GetInstallerDigest,
+		ImageGetter:      svc.deckhouseService.GetInstallerImage,
 	}
 
-	svc.userLogger.InfoLn("All required installers are pulled!")
-
-	return nil
+	return svc.pullImages(ctx, config)
 }
 
 func (svc *Service) pullStandaloneInstallers(ctx context.Context) error {
-	svc.userLogger.InfoLn("Beginning to pull standalone installers")
-
-	svc.userLogger.InfoLn("Pull standalone installers meta")
-	for image, meta := range svc.layout.InstallStandaloneImages {
-		if meta != nil {
-			continue
-		}
-
-		_, tag := splitImageRefByRepoAndTag(image)
-
-		digest, err := svc.deckhouseService.GetInstallStandaloneDigest(ctx, tag)
-		if err != nil {
-			return fmt.Errorf("get digest: %w", err)
-		}
-
-		svc.layout.InstallStandaloneImages[image] = NewImageMeta(tag, image, digest)
-	}
-	svc.userLogger.InfoLn("All required standalone installers meta are pulled!")
-
-	if err := svc.PullStandaloneInstallerImageSet(ctx, svc.layout.InstallStandaloneImages, svc.layout.DeckhouseInstallStandalone, true); err != nil {
-		return err
+	config := PullConfig{
+		Name:             "standalone installers",
+		ImageSet:         svc.layout.InstallStandaloneImages,
+		Layout:           svc.layout.DeckhouseInstallStandalone,
+		AllowMissingTags: true,
+		DigestGetter:     svc.deckhouseService.GetInstallStandaloneDigest,
+		ImageGetter:      svc.deckhouseService.GetInstallStandaloneImage,
 	}
 
-	svc.userLogger.InfoLn("All required standalone installers are pulled!")
-
-	return nil
+	return svc.pullImages(ctx, config)
 }
 
-func (svc *Service) pullDeckhouseReleases(ctx context.Context) error {
-	svc.userLogger.InfoLn("Beginning to pull Deckhouse releases")
-
-	svc.userLogger.InfoLn("Pull deckhouse releases meta")
-	for image, meta := range svc.layout.DeckhouseImages {
-		if meta != nil {
-			continue
-		}
-
-		_, tag := splitImageRefByRepoAndTag(image)
-
-		digest, err := svc.deckhouseService.GetDigest(ctx, tag)
-		if err != nil {
-			return fmt.Errorf("get digest: %w", err)
-		}
-
-		svc.layout.DeckhouseImages[image] = NewImageMeta(tag, image, digest)
-	}
-	svc.userLogger.InfoLn("All required deckhouse releases meta are pulled!")
-
-	if err := svc.PullImageSet(ctx, svc.layout.DeckhouseImages, svc.layout.Deckhouse, svc.targetTag != ""); err != nil {
-		return err
+func (svc *Service) pullDeckhouseImages(ctx context.Context) error {
+	config := PullConfig{
+		Name:             "Deckhouse releases",
+		ImageSet:         svc.layout.DeckhouseImages,
+		Layout:           svc.layout.Deckhouse,
+		AllowMissingTags: false,
+		DigestGetter:     svc.deckhouseService.GetDigest,
+		ImageGetter:      svc.deckhouseService.GetImage,
 	}
 
-	svc.userLogger.InfoLn("All required Deckhouse releases are pulled!")
-
-	return nil
+	return svc.pullImages(ctx, config)
 }
 
 // ImageGetter is a function type for getting images from the registry
 type ImageGetter func(ctx context.Context, tag string) (pkg.RegistryImage, error)
 
-func (svc *Service) PullImageSet(ctx context.Context, imageSet map[string]*ImageMeta, imageSetLayout *registry.ImageLayout, allowMissingTags bool) error {
-	return svc.pullImageSet(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetImage)
+// PullConfig encapsulates the configuration for pulling images
+type PullConfig struct {
+	Name             string
+	ImageSet         map[string]*ImageMeta
+	Layout           *registry.ImageLayout
+	AllowMissingTags bool
+	DigestGetter     func(ctx context.Context, tag string) (*v1.Hash, error)
+	ImageGetter      ImageGetter
 }
 
-func (svc *Service) PullReleaseImageSet(ctx context.Context, imageSet map[string]*ImageMeta, imageSetLayout *registry.ImageLayout, allowMissingTags bool) error {
-	return svc.pullImageSet(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetReleaseImage)
-}
+func (svc *Service) pullImages(ctx context.Context, config PullConfig) error {
+	svc.userLogger.InfoLn("Beginning to pull " + config.Name)
 
-func (svc *Service) PullInstallerImageSet(ctx context.Context, imageSet map[string]*ImageMeta, imageSetLayout *registry.ImageLayout, allowMissingTags bool) error {
-	return svc.pullImageSet(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetInstallerImage)
-}
+	svc.userLogger.InfoLn("Pull " + config.Name + " meta")
+	for image, meta := range config.ImageSet {
+		if meta != nil {
+			continue
+		}
 
-func (svc *Service) PullStandaloneInstallerImageSet(ctx context.Context, imageSet map[string]*ImageMeta, imageSetLayout *registry.ImageLayout, allowMissingTags bool) error {
-	return svc.pullImageSet(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetInstallStandaloneImage)
+		_, tag := splitImageRefByRepoAndTag(image)
+
+		digest, err := config.DigestGetter(ctx, tag)
+		if err != nil {
+			if config.AllowMissingTags {
+				continue
+			}
+
+			return fmt.Errorf("get digest: %w", err)
+		}
+
+		config.ImageSet[image] = NewImageMeta(tag, image, digest)
+	}
+	svc.userLogger.InfoLn("All required " + config.Name + " meta are pulled!")
+
+	if err := svc.pullImageSet(ctx, config.ImageSet, config.Layout, config.AllowMissingTags, config.ImageGetter); err != nil {
+		return err
+	}
+
+	svc.userLogger.InfoLn("All required " + config.Name + " are pulled!")
+
+	return nil
 }
 
 func (svc *Service) pullImageSet(
@@ -564,7 +528,7 @@ func (svc *Service) pullImageSet(
 
 				img.SetMetadata(&registry.ImageMeta{
 					TagReference:    imageMeta.TagReference,
-					DigestReference: "@" + imageMeta.Digest.String(),
+					DigestReference: imageMeta.ImageRepo + "@" + imageMeta.Digest.String(),
 					Digest:          imageMeta.Digest,
 				})
 

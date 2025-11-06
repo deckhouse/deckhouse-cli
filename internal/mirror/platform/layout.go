@@ -32,6 +32,13 @@ func NewImageMeta(version string, tagReference string, digest *v1.Hash) *ImageMe
 	}
 }
 
+type ImageDownloadRequest struct {
+	DeckhouseImages         map[string]*ImageMeta
+	InstallImages           map[string]*ImageMeta
+	InstallStandaloneImages map[string]*ImageMeta
+	ReleaseChannelImages    map[string]*ImageMeta
+}
+
 type ImageLayouts struct {
 	platform   v1.Platform
 	workingDir string
