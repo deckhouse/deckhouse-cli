@@ -483,7 +483,7 @@ func (svc *Service) pullImages(ctx context.Context, config PullConfig) error {
 	}
 	svc.userLogger.InfoLn("All required " + config.Name + " meta are pulled!")
 
-	if err := svc.pullImageSet(ctx, config.ImageSet, config.Layout, config.AllowMissingTags, config.ImageGetter); err != nil {
+	if err := svc.pullImageSet(ctx, config.ImageSet, config.Layout, config.ImageGetter); err != nil {
 		return err
 	}
 
@@ -496,7 +496,6 @@ func (svc *Service) pullImageSet(
 	ctx context.Context,
 	imageSet map[string]*ImageMeta,
 	imageSetLayout *registry.ImageLayout,
-	allowMissingTags bool,
 	imageGetter ImageGetter,
 ) error {
 	logger := svc.userLogger
@@ -513,14 +512,14 @@ func (svc *Service) pullImageSet(
 			svc.userLogger,
 			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageMeta.TagReference),
 			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
+				if imageMeta == nil {
+					logger.WarnLn("⚠️ Not found in registry, skipping pull")
+
+					return nil
+				}
+
 				img, err := imageGetter(ctx, "@"+imageMeta.Digest.String())
 				if err != nil {
-					if errors.Is(err, registry.ErrImageNotFound) && allowMissingTags {
-						logger.WarnLn("⚠️ Not found in registry, skipping pull")
-
-						return nil
-					}
-
 					logger.DebugF("failed to pull image %s: %v", imageMeta.TagReference, err)
 
 					return fmt.Errorf("pull image metadata: %w", err)
