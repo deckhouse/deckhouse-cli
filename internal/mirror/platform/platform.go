@@ -442,7 +442,7 @@ func (svc *Service) pullInstallers(ctx context.Context) error {
 	}
 	svc.userLogger.InfoLn("All required installers meta are pulled!")
 
-	if err := svc.PullImageSet(ctx, svc.layout.InstallImages, svc.layout.DeckhouseInstall, svc.targetTag != ""); err != nil {
+	if err := svc.PullInstallerImageSet(ctx, svc.layout.InstallImages, svc.layout.DeckhouseInstall, svc.targetTag != ""); err != nil {
 		return err
 	}
 
@@ -471,7 +471,7 @@ func (svc *Service) pullStandaloneInstallers(ctx context.Context) error {
 	}
 	svc.userLogger.InfoLn("All required standalone installers meta are pulled!")
 
-	if err := svc.PullImageSet(ctx, svc.layout.InstallStandaloneImages, svc.layout.DeckhouseInstallStandalone, true); err != nil {
+	if err := svc.PullStandaloneInstallerImageSet(ctx, svc.layout.InstallStandaloneImages, svc.layout.DeckhouseInstallStandalone, true); err != nil {
 		return err
 	}
 
@@ -512,12 +512,20 @@ func (svc *Service) pullDeckhouseReleases(ctx context.Context) error {
 // ImageGetter is a function type for getting images from the registry
 type ImageGetter func(ctx context.Context, tag string) (pkg.RegistryImage, error)
 
+func (svc *Service) PullImageSet(ctx context.Context, imageSet map[string]*ImageMeta, imageSetLayout *registry.ImageLayout, allowMissingTags bool) error {
+	return svc.pullImageSet(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetImage)
+}
+
 func (svc *Service) PullReleaseImageSet(ctx context.Context, imageSet map[string]*ImageMeta, imageSetLayout *registry.ImageLayout, allowMissingTags bool) error {
 	return svc.pullImageSet(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetReleaseImage)
 }
 
-func (svc *Service) PullImageSet(ctx context.Context, imageSet map[string]*ImageMeta, imageSetLayout *registry.ImageLayout, allowMissingTags bool) error {
-	return svc.pullImageSet(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetImage)
+func (svc *Service) PullInstallerImageSet(ctx context.Context, imageSet map[string]*ImageMeta, imageSetLayout *registry.ImageLayout, allowMissingTags bool) error {
+	return svc.pullImageSet(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetInstallerImage)
+}
+
+func (svc *Service) PullStandaloneInstallerImageSet(ctx context.Context, imageSet map[string]*ImageMeta, imageSetLayout *registry.ImageLayout, allowMissingTags bool) error {
+	return svc.pullImageSet(ctx, imageSet, imageSetLayout, allowMissingTags, svc.deckhouseService.GetInstallStandaloneImage)
 }
 
 func (svc *Service) pullImageSet(

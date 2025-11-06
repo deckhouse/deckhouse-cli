@@ -3,7 +3,9 @@ package platform
 import (
 	"archive/tar"
 	"bytes"
+	"fmt"
 	"io"
+	"strings"
 )
 
 const (
@@ -28,6 +30,10 @@ func (rr *deckhouseInstallerReader) untarMetadata(rc io.Reader) error {
 
 		if err != nil {
 			return err
+		}
+
+		if strings.Contains(hdr.Name, "deckhouse/candi") {
+			fmt.Println(hdr.Name)
 		}
 
 		switch hdr.Name {

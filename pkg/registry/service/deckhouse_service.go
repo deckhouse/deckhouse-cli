@@ -33,7 +33,9 @@ import (
 )
 
 const (
-	releaseSegment = "release-channel"
+	releaseSegment           = "release-channel"
+	installerSegment         = "install"
+	installStandaloneSegment = "install-standalone"
 )
 
 // DeckhouseService provides high-level operations for Deckhouse platform management
@@ -118,6 +120,40 @@ func (s *DeckhouseService) GetReleaseImage(ctx context.Context, releaseTag strin
 	}
 
 	logger.Debug("Release image retrieved successfully")
+
+	return img, nil
+}
+
+func (s *DeckhouseService) GetInstallerImage(ctx context.Context, tag string) (pkg.RegistryImage, error) {
+	logger := s.logger.With("tag", tag)
+
+	logger.Debug("Getting installer image")
+
+	releaseClient := s.client.WithSegment(installerSegment)
+
+	img, err := releaseClient.GetImage(ctx, tag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get installer image: %w", err)
+	}
+
+	logger.Debug("Installer image retrieved successfully")
+
+	return img, nil
+}
+
+func (s *DeckhouseService) GetInstallStandaloneImage(ctx context.Context, tag string) (pkg.RegistryImage, error) {
+	logger := s.logger.With("tag", tag)
+
+	logger.Debug("Getting install standalone image")
+
+	releaseClient := s.client.WithSegment(installStandaloneSegment)
+
+	img, err := releaseClient.GetImage(ctx, tag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get install standalone image: %w", err)
+	}
+
+	logger.Debug("Install standalone image retrieved successfully")
 
 	return img, nil
 }
