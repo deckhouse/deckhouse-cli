@@ -80,3 +80,11 @@ type RegistryClient interface {
 	// The scope is determined by the chained WithSegment() calls
 	ListRepositories(ctx context.Context) ([]string, error)
 }
+
+// BasicService defines common registry operations with standardized logging
+type BasicService interface {
+	GetImage(ctx context.Context, tag string) (RegistryImage, error)
+	GetDigest(ctx context.Context, tag string) (*v1.Hash, error)
+	CheckImageExists(ctx context.Context, tag string) error
+	ListTags(ctx context.Context) ([]string, error)
+}

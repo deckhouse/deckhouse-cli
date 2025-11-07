@@ -20,14 +20,13 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/manifests"
-	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/samber/lo"
 )
@@ -38,7 +37,7 @@ type Service struct {
 	// layout manages the OCI image layouts for different components
 	layout *ImageLayouts
 	// pullerService handles the pulling of images
-	pullerService *PullerService
+	pullerService *puller.PullerService
 
 	// sinceVersion specifies the minimum version to start mirroring from (optional)
 	sinceVersion *semver.Version
@@ -76,7 +75,7 @@ func NewService(
 	return &Service{
 		deckhouseService:        deckhouseService,
 		layout:                  layout,
-		pullerService:           NewPullerService(deckhouseService, layout, logger, userLogger),
+		pullerService:           puller.NewPullerService(deckhouseService, logger, userLogger),
 		sinceVersion:            sinceVersion,
 		targetTag:               targetTag,
 		ignoreSuspendedChannels: ignoreSuspendedChannels,
@@ -129,7 +128,7 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 
 	// Check if target is a release channel (like "stable", "beta") or a specific tag
 	if internal.ChannelIsValid(targetTag) {
-		err := svc.deckhouseService.CheckReleaseExists(ctx, targetTag)
+		err := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, targetTag)
 		if err != nil {
 			return fmt.Errorf("failed to check release exists: %w", err)
 		}
@@ -138,7 +137,7 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 	}
 
 	// For specific tags, check if the tag exists
-	err := svc.deckhouseService.CheckTagExists(ctx, targetTag)
+	err := svc.deckhouseService.CheckImageExists(ctx, targetTag)
 	if err != nil {
 		return fmt.Errorf("failed to check tag exists: %w", err)
 	}
@@ -216,7 +215,7 @@ func (svc *Service) versionsToMirrorFunc(ctx context.Context) ([]semver.Version,
 
 	logger.DebugF("listing deckhouse releases")
 
-	tags, err := svc.deckhouseService.ListReleaseTags(ctx)
+	tags, err := svc.deckhouseService.ReleaseChannels().ListTags(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get tags from Deckhouse registry: %w", err)
 	}
@@ -238,12 +237,12 @@ func (svc *Service) versionsToMirrorFunc(ctx context.Context) ([]semver.Version,
 // It fetches the release image and metadata, validates the channel is not suspended,
 // and stores the image in the layout for later use
 func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, releaseChannel string) (*semver.Version, error) {
-	image, err := svc.deckhouseService.GetReleaseImage(ctx, releaseChannel)
+	image, err := svc.deckhouseService.ReleaseChannels().GetImage(ctx, releaseChannel)
 	if err != nil {
 		return nil, fmt.Errorf("get %s release channel image: %w", releaseChannel, err)
 	}
 
-	meta, err := svc.deckhouseService.GetReleaseMetadata(ctx, releaseChannel)
+	meta, err := svc.deckhouseService.ReleaseChannels().GetMetadata(ctx, releaseChannel)
 	if err != nil {
 		return nil, fmt.Errorf("cannot get %s release channel version.json: %w", releaseChannel, err)
 	}
@@ -276,7 +275,7 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 		return nil, fmt.Errorf("append %s release channel image to layout: %w", releaseChannel, err)
 	}
 
-	svc.layout.ReleaseChannelImages[imageMeta.GetTagReference()] = NewImageMeta(meta.Version, imageMeta.GetTagReference(), &digest)
+	svc.layout.ReleaseChannelImages[imageMeta.GetTagReference()] = puller.NewImageMeta(meta.Version, imageMeta.GetTagReference(), &digest)
 
 	return ver, nil
 }
@@ -396,68 +395,51 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 }
 
 func (svc *Service) pullDeckhouseReleaseChannels(ctx context.Context) error {
-	config := PullConfig{
+	config := puller.PullConfig{
 		Name:             "Deckhouse release channels information",
 		ImageSet:         svc.layout.ReleaseChannelImages,
 		Layout:           svc.layout.DeckhouseReleaseChannel,
 		AllowMissingTags: svc.targetTag != "",
-		DigestGetter:     svc.deckhouseService.GetReleaseDigest,
-		ImageGetter:      svc.deckhouseService.GetReleaseImage,
+		GetterService:    svc.deckhouseService.ReleaseChannels(),
 	}
 
 	return svc.pullerService.PullImages(ctx, config)
 }
 
 func (svc *Service) pullInstallers(ctx context.Context) error {
-	config := PullConfig{
+	config := puller.PullConfig{
 		Name:             "installers",
 		ImageSet:         svc.layout.InstallImages,
 		Layout:           svc.layout.DeckhouseInstall,
 		AllowMissingTags: true, // Allow missing installer images
-		DigestGetter:     svc.deckhouseService.GetInstallerDigest,
-		ImageGetter:      svc.deckhouseService.GetInstallerImage,
+		GetterService:    svc.deckhouseService.Installer(),
 	}
 
 	return svc.pullerService.PullImages(ctx, config)
 }
 
 func (svc *Service) pullStandaloneInstallers(ctx context.Context) error {
-	config := PullConfig{
+	config := puller.PullConfig{
 		Name:             "standalone installers",
 		ImageSet:         svc.layout.InstallStandaloneImages,
 		Layout:           svc.layout.DeckhouseInstallStandalone,
 		AllowMissingTags: true,
-		DigestGetter:     svc.deckhouseService.GetInstallStandaloneDigest,
-		ImageGetter:      svc.deckhouseService.GetInstallStandaloneImage,
+		GetterService:    svc.deckhouseService.StandaloneInstaller(),
 	}
 
 	return svc.pullerService.PullImages(ctx, config)
 }
 
 func (svc *Service) pullDeckhouseImages(ctx context.Context) error {
-	config := PullConfig{
+	config := puller.PullConfig{
 		Name:             "Deckhouse releases",
 		ImageSet:         svc.layout.DeckhouseImages,
 		Layout:           svc.layout.Deckhouse,
 		AllowMissingTags: false,
-		DigestGetter:     svc.deckhouseService.GetDigest,
-		ImageGetter:      svc.deckhouseService.GetImage,
+		GetterService:    svc.deckhouseService,
 	}
 
 	return svc.pullerService.PullImages(ctx, config)
-}
-
-// ImageGetter is a function type for getting images from the registry
-type ImageGetter func(ctx context.Context, tag string) (pkg.RegistryImage, error)
-
-// PullConfig encapsulates the configuration for pulling images
-type PullConfig struct {
-	Name             string
-	ImageSet         map[string]*ImageMeta
-	Layout           *registry.ImageLayout
-	AllowMissingTags bool
-	DigestGetter     func(ctx context.Context, tag string) (*v1.Hash, error)
-	ImageGetter      ImageGetter
 }
 
 func (svc *Service) generateDeckhouseReleaseManifests(
@@ -638,7 +620,7 @@ func (svc *Service) FindVexImage(
 	// 	logger.DebugF("Segment %d: %s", i, segment)
 	// }
 
-	err := svc.deckhouseService.CheckTagExists(context.TODO(), tag)
+	err := svc.deckhouseService.CheckImageExists(context.TODO(), tag)
 	if errors.Is(err, registry.ErrImageNotFound) {
 		// Image not found, which is expected for non-vulnerable images
 		return "", nil

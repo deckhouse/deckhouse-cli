@@ -1,4 +1,4 @@
-package platform
+package puller
 
 import (
 	"context"
@@ -17,7 +17,6 @@ import (
 // PullerService handles the pulling of images from the registry
 type PullerService struct {
 	deckhouseService *service.DeckhouseService
-	layout           *ImageLayouts
 	logger           *dkplog.Logger
 	userLogger       *log.SLogger
 }
@@ -25,13 +24,11 @@ type PullerService struct {
 // NewPullerService creates a new PullerService
 func NewPullerService(
 	deckhouseService *service.DeckhouseService,
-	layout *ImageLayouts,
 	logger *dkplog.Logger,
 	userLogger *log.SLogger,
 ) *PullerService {
 	return &PullerService{
 		deckhouseService: deckhouseService,
-		layout:           layout,
 		logger:           logger,
 		userLogger:       userLogger,
 	}
@@ -47,9 +44,9 @@ func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) erro
 			continue
 		}
 
-		_, tag := splitImageRefByRepoAndTag(image)
+		_, tag := SplitImageRefByRepoAndTag(image)
 
-		digest, err := config.DigestGetter(ctx, tag)
+		digest, err := config.GetterService.GetDigest(ctx, tag)
 		if err != nil {
 			if config.AllowMissingTags {
 				continue
@@ -62,7 +59,7 @@ func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) erro
 	}
 	ps.userLogger.InfoLn("All required " + config.Name + " meta are pulled!")
 
-	if err := ps.PullImageSet(ctx, config.ImageSet, config.Layout, config.AllowMissingTags, config.ImageGetter); err != nil {
+	if err := ps.PullImageSet(ctx, config.ImageSet, config.Layout, config.AllowMissingTags, config.GetterService.GetImage); err != nil {
 		return err
 	}
 

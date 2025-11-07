@@ -3,40 +3,18 @@ package platform
 import (
 	"fmt"
 	"path"
-	"strings"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
-type ImageMeta struct {
-	ImageRepo       string
-	ImageTag        string
-	Digest          *v1.Hash
-	Version         string
-	TagReference    string
-	DigestReference string
-}
-
-func NewImageMeta(version string, tagReference string, digest *v1.Hash) *ImageMeta {
-	imageRepo, tag := splitImageRefByRepoAndTag(tagReference)
-
-	return &ImageMeta{
-		ImageRepo:       imageRepo,
-		ImageTag:        tag,
-		Digest:          digest,
-		Version:         version,
-		TagReference:    tagReference,
-		DigestReference: imageRepo + "@" + digest.String(),
-	}
-}
-
 type ImageDownloadRequest struct {
-	DeckhouseImages         map[string]*ImageMeta
-	InstallImages           map[string]*ImageMeta
-	InstallStandaloneImages map[string]*ImageMeta
-	ReleaseChannelImages    map[string]*ImageMeta
+	DeckhouseImages         map[string]*puller.ImageMeta
+	InstallImages           map[string]*puller.ImageMeta
+	InstallStandaloneImages map[string]*puller.ImageMeta
+	ReleaseChannelImages    map[string]*puller.ImageMeta
 }
 
 type ImageLayouts struct {
@@ -45,16 +23,16 @@ type ImageLayouts struct {
 	rootUrl    string
 
 	Deckhouse       *registry.ImageLayout
-	DeckhouseImages map[string]*ImageMeta
+	DeckhouseImages map[string]*puller.ImageMeta
 
 	DeckhouseInstall *registry.ImageLayout
-	InstallImages    map[string]*ImageMeta
+	InstallImages    map[string]*puller.ImageMeta
 
 	DeckhouseInstallStandalone *registry.ImageLayout
-	InstallStandaloneImages    map[string]*ImageMeta
+	InstallStandaloneImages    map[string]*puller.ImageMeta
 
 	DeckhouseReleaseChannel *registry.ImageLayout
-	ReleaseChannelImages    map[string]*ImageMeta
+	ReleaseChannelImages    map[string]*puller.ImageMeta
 }
 
 func NewImageLayouts(rootFolder, rootUrl string) *ImageLayouts {
@@ -63,10 +41,10 @@ func NewImageLayouts(rootFolder, rootUrl string) *ImageLayouts {
 		rootUrl:    rootUrl,
 		platform:   v1.Platform{Architecture: "amd64", OS: "linux"},
 
-		DeckhouseImages:         map[string]*ImageMeta{},
-		InstallImages:           map[string]*ImageMeta{},
-		InstallStandaloneImages: map[string]*ImageMeta{},
-		ReleaseChannelImages:    map[string]*ImageMeta{},
+		DeckhouseImages:         map[string]*puller.ImageMeta{},
+		InstallImages:           map[string]*puller.ImageMeta{},
+		InstallStandaloneImages: map[string]*puller.ImageMeta{},
+		ReleaseChannelImages:    map[string]*puller.ImageMeta{},
 	}
 
 	return l
@@ -110,17 +88,4 @@ func (l *ImageLayouts) setLayoutByMirrorType(mirrorType internal.MirrorType, lay
 	default:
 		panic(fmt.Sprintf("wrong mirror type in platform image layout: %v", mirrorType))
 	}
-}
-
-func splitImageRefByRepoAndTag(imageReferenceString string) (repo, tag string) {
-	splitIndex := strings.LastIndex(imageReferenceString, ":")
-	repo = imageReferenceString[:splitIndex]
-	tag = imageReferenceString[splitIndex+1:]
-
-	if strings.HasSuffix(repo, "@sha256") {
-		repo = strings.TrimSuffix(repo, "@sha256")
-		tag = "@sha256:" + tag
-	}
-
-	return repo, tag
 }
