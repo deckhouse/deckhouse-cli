@@ -36,6 +36,10 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
+var (
+	DeckhousePluginsDir = "/opt/deckhouse/lib/deckhouse-cli"
+)
+
 type PluginsCommand struct {
 	service              *service.PluginService
 	pluginRegistryClient pkg.RegistryClient
@@ -75,9 +79,10 @@ func NewPluginsCommand(logger *dkplog.Logger) *cobra.Command {
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			// init plugin services for subcommands after flags are parsed
 			pc.initPluginServices()
+			// set plugins directory
 			envCliPath := os.Getenv("DECKHOUSE_CLI_PATH")
 			if envCliPath != "" {
-				flags.DeckhousePluginsDir = envCliPath
+				DeckhousePluginsDir = envCliPath
 			}
 		},
 	}
@@ -156,7 +161,7 @@ func (pc *PluginsCommand) preparePluginsListData(ctx context.Context, showInstal
 
 // fetchInstalledPlugins retrieves installed plugins from filesystem
 func (pc *PluginsCommand) fetchInstalledPlugins(ctx context.Context) ([]pluginDisplayInfo, error) {
-	plugins, err := os.ReadDir(path.Join(flags.DeckhousePluginsDir, "plugins"))
+	plugins, err := os.ReadDir(path.Join(DeckhousePluginsDir, "plugins"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read plugins directory: %w", err)
 	}
@@ -187,7 +192,7 @@ func (pc *PluginsCommand) fetchInstalledPlugins(ctx context.Context) ([]pluginDi
 }
 
 func (pc *PluginsCommand) getInstalledPluginContract(pluginName string) (*internal.Plugin, error) {
-	contractFile := path.Join(flags.DeckhousePluginsDir, "cache", "contracts", pluginName+".json")
+	contractFile := path.Join(DeckhousePluginsDir, "cache", "contracts", pluginName+".json")
 
 	contractBytes, err := os.ReadFile(contractFile)
 	if err != nil {
@@ -477,7 +482,7 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 
 			// Create plugin directory if it doesn't exist
 			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin
-			pluginDir := path.Join(flags.DeckhousePluginsDir, "plugins", pluginName)
+			pluginDir := path.Join(DeckhousePluginsDir, "plugins", pluginName)
 			err := os.MkdirAll(pluginDir, 0755)
 			if err != nil {
 				return fmt.Errorf("failed to create plugin directory: %w", err)
@@ -527,42 +532,43 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 				fmt.Printf("Using major version: %d\n", useMajor)
 			}
 
-			// Get plugin contract first
-			fmt.Println("Verifying plugin contract...")
-			plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
-			if err != nil {
-				pc.logger.Warn("Failed to get plugin contract",
-					slog.String("plugin", pluginName),
-					slog.String("tag", tag),
-					slog.String("error", err.Error()))
-				return fmt.Errorf("failed to get plugin contract: %w", err)
-			}
-
-			contractDir := path.Join(flags.DeckhousePluginsDir, "cache", "contracts")
+			// example path: /opt/deckhouse/lib/deckhouse-cli/cache/contracts
+			contractDir := path.Join(DeckhousePluginsDir, "cache", "contracts")
 			err = os.MkdirAll(contractDir, 0755)
 			if err != nil {
 				return fmt.Errorf("failed to create contract directory: %w", err)
 			}
 
-			file, err := os.Create(path.Join(contractDir, pluginName+".json"))
+			// Get plugin contract first
+			contractFile := path.Join(contractDir, pluginName+".json")
+			err = pc.service.SavePluginContract(ctx, pluginName, tag, contractFile)
 			if err != nil {
-				return fmt.Errorf("failed to create contract file: %w", err)
-			}
-			defer file.Close()
-
-			enc := json.NewEncoder(file)
-			enc.SetEscapeHTML(false)
-			enc.SetIndent("", "  ")
-			err = enc.Encode(plugin)
-			if err != nil {
-				return fmt.Errorf("failed to encode contract: %w", err)
+				pc.logger.Warn("Failed to save plugin contract",
+					slog.String("plugin", pluginName),
+					slog.String("tag", tag),
+					slog.String("file", contractFile),
+					slog.String("error", err.Error()))
+				return fmt.Errorf("failed to save plugin contract: %w", err)
 			}
 
-			fmt.Printf("Plugin: %s %s\n", plugin.Name, plugin.Version)
-			fmt.Printf("Description: %s\n", plugin.Description)
+			// file, err := os.Create(path.Join(contractDir, pluginName+".json"))
+			// if err != nil {
+			// 	return fmt.Errorf("failed to create contract file: %w", err)
+			// }
+			// defer file.Close()
+
+			// enc := json.NewEncoder(file)
+			// enc.SetEscapeHTML(false)
+			// enc.SetIndent("", "  ")
+			// err = enc.Encode(plugin)
+			// if err != nil {
+			// 	return fmt.Errorf("failed to encode contract: %w", err)
+			// }
+
+			// fmt.Printf("Plugin: %s %s\n", plugin.Name, plugin.Version)
+			// fmt.Printf("Description: %s\n", plugin.Description)
 
 			// Extract plugin to installation directory
-			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1/
 			fmt.Printf("Installing to: %s\n", versionDir)
 
 			fmt.Println("Downloading and extracting plugin...")
@@ -577,9 +583,11 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 			}
 
 			// symlink current to the installed version (delete old symlink if exists)
-			_ = os.Remove(path.Join(pluginDir, "current"))
+			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/current
+			currentSymlink := path.Join(pluginDir, "current")
+			_ = os.Remove(currentSymlink)
 
-			err = os.Symlink(path.Join(versionDir, pluginName), path.Join(pluginDir, "current"))
+			err = os.Symlink(path.Join(versionDir, pluginName), currentSymlink)
 			if err != nil {
 				return fmt.Errorf("failed to create symlink: %w", err)
 			}

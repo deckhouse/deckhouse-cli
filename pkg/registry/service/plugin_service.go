@@ -93,6 +93,47 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 	return ContractToDomain(contract), nil
 }
 
+func (s *PluginService) SavePluginContract(ctx context.Context, pluginName, tag, destination string) error {
+	// Create a scoped client for this specific plugin
+	// The base client already has the path like "deckhouse/ee/modules"
+	// We just need to add the plugin name
+	s.log.Debug("Getting plugin contract", slog.String("plugin", pluginName), slog.String("tag", tag))
+
+	pluginClient := s.client.WithSegment(pluginName)
+
+	manifestRaw, err := pluginClient.GetManifest(ctx, tag)
+	if err != nil {
+		return fmt.Errorf("failed to get manifest: %w", err)
+	}
+	s.log.Debug("Manifest retrieved successfully", slog.String("manifestraw", string(manifestRaw)))
+
+	manifest := &map[string]any{}
+	err = json.Unmarshal(manifestRaw, manifest)
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal manifest: %w", err)
+	}
+
+	annotations := (*manifest)["annotations"].(map[string]any)
+	contractB64, exists := annotations["contract"].(string)
+	if !exists {
+		return fmt.Errorf("plugin-contract annotation not found in image metadata")
+	}
+	s.log.Debug("Contract base64 retrieved successfully", slog.String("contractb64", contractB64))
+
+	contractRaw, err := base64.StdEncoding.DecodeString(contractB64)
+	if err != nil {
+		return fmt.Errorf("failed to decode contract: %w", err)
+	}
+	s.log.Debug("Contract raw retrieved successfully", slog.String("contractraw", string(contractRaw)))
+
+	err = os.WriteFile(destination, contractRaw, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to create contract file: %w", err)
+	}
+
+	return nil
+}
+
 // ExtractPlugin downloads the plugin image and extracts it to the specified location
 func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, destination string) error {
 	// Create a scoped client for this specific plugin
@@ -131,12 +172,16 @@ func (s *PluginService) untarPluginFiles(r io.Reader, destination, pluginName st
 		switch header.Name {
 		case "plugin":
 			s.log.Debug("Extracting plugin", slog.String("path", destination))
-			plugin, err := io.ReadAll(tr)
+
+			pluginPath := path.Join(destination, pluginName)
+
+			outFile, err := os.OpenFile(pluginPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(header.Mode))
 			if err != nil {
-				return fmt.Errorf("failed to read plugin: %w", err)
+				return fmt.Errorf("failed to open plugin file: %w", err)
 			}
-			err = os.WriteFile(path.Join(destination, pluginName), plugin, os.FileMode(header.Mode))
-			if err != nil {
+			defer outFile.Close()
+
+			if _, err := io.Copy(outFile, tr); err != nil {
 				return fmt.Errorf("failed to write plugin: %w", err)
 			}
 		}
@@ -188,6 +233,44 @@ func ContractToDomain(contract *PluginContract) *internal.Plugin {
 	}
 
 	return plugin
+}
+
+// DomainToContract converts Plugin domain entity to PluginContract DTO
+func DomainToContract(plugin *internal.Plugin) *PluginContract {
+	contract := &PluginContract{
+		Name:        plugin.Name,
+		Version:     plugin.Version,
+		Description: plugin.Description,
+		Env:         make([]EnvVarDTO, 0, len(plugin.Env)),
+		Flags:       make([]FlagDTO, 0, len(plugin.Flags)),
+		Requirements: RequirementsDTO{
+			Kubernetes: KubernetesRequirementDTO{
+				Constraint: plugin.Requirements.Kubernetes.Constraint,
+			},
+			Modules: make([]ModuleRequirementDTO, 0, len(plugin.Requirements.Modules)),
+		},
+	}
+
+	for _, env := range plugin.Env {
+		contract.Env = append(contract.Env, EnvVarDTO{
+			Name: env.Name,
+		})
+	}
+
+	for _, flag := range plugin.Flags {
+		contract.Flags = append(contract.Flags, FlagDTO{
+			Name: flag.Name,
+		})
+	}
+
+	for _, mod := range plugin.Requirements.Modules {
+		contract.Requirements.Modules = append(contract.Requirements.Modules, ModuleRequirementDTO{
+			Name:       mod.Name,
+			Constraint: mod.Constraint,
+		})
+	}
+
+	return contract
 }
 
 // ListPlugins lists all available plugin names from the registry
