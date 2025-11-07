@@ -2,7 +2,6 @@ package puller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -59,7 +58,7 @@ func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) erro
 	}
 	ps.userLogger.InfoLn("All required " + config.Name + " meta are pulled!")
 
-	if err := ps.PullImageSet(ctx, config.ImageSet, config.Layout, config.AllowMissingTags, config.GetterService.GetImage); err != nil {
+	if err := ps.PullImageSet(ctx, config.ImageSet, config.Layout, config.GetterService.GetImage); err != nil {
 		return err
 	}
 
@@ -73,31 +72,28 @@ func (ps *PullerService) PullImageSet(
 	ctx context.Context,
 	imageSet map[string]*ImageMeta,
 	imageSetLayout *registry.ImageLayout,
-	allowMissingTags bool,
 	imageGetter ImageGetter,
 ) error {
 	logger := ps.userLogger
 
 	pullCount, totalCount := 1, len(imageSet)
 
-	for _, imageMeta := range imageSet {
-		logger.DebugF("Preparing to pull image %s", imageMeta.TagReference)
-
-		logger.DebugF("Pulling image path %s: tag %s", imageMeta.ImageRepo, imageMeta.ImageTag)
+	for imageReference, imageMeta := range imageSet {
+		logger.DebugF("Preparing to pull image %s", imageReference)
 
 		err := retry.RunTask(
 			ctx,
 			ps.userLogger,
-			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageMeta.TagReference),
+			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageReference),
 			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
+				if imageMeta == nil {
+					logger.WarnLn("⚠️ Not found in registry, skipping pull")
+
+					return nil
+				}
+
 				img, err := imageGetter(ctx, "@"+imageMeta.Digest.String())
 				if err != nil {
-					if errors.Is(err, registry.ErrImageNotFound) && allowMissingTags {
-						logger.WarnLn("⚠️ Not found in registry, skipping pull")
-
-						return nil
-					}
-
 					logger.DebugF("failed to pull image %s: %v", imageMeta.TagReference, err)
 
 					return fmt.Errorf("pull image metadata: %w", err)
