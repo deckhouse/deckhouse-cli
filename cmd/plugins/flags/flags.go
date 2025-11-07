@@ -32,7 +32,7 @@ const (
 // CLI Parameters
 var (
 	TempDir             string
-	DeckhousePluginsDir = "/opt/deckhouse/lib/deckhouse-cli/plugins/"
+	DeckhousePluginsDir = "/opt/deckhouse/lib/deckhouse-cli"
 
 	Insecure      bool
 	TLSSkipVerify bool

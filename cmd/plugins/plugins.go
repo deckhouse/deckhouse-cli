@@ -31,6 +31,7 @@ import (
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
@@ -128,7 +129,10 @@ func (pc *PluginsCommand) preparePluginsListData(ctx context.Context, showInstal
 
 	// Fetch installed plugins if needed
 	if !showAvailableOnly {
-		data.Installed = pc.fetchInstalledPlugins()
+		installed, err := pc.fetchInstalledPlugins(ctx)
+		if err == nil {
+			data.Installed = installed
+		}
 		data.TotalInstalled = len(data.Installed)
 	}
 
@@ -151,24 +155,53 @@ func (pc *PluginsCommand) preparePluginsListData(ctx context.Context, showInstal
 }
 
 // fetchInstalledPlugins retrieves installed plugins from filesystem
-func (pc *PluginsCommand) fetchInstalledPlugins() []pluginDisplayInfo {
-	// TODO: Implement listing installed plugins from filesystem
-	return []pluginDisplayInfo{
-		{
-			Name:        "example-plugin",
-			Version:     "v1.0.0",
-			Description: "Example installed plugin",
-			IsInstalled: true,
-			HasError:    false,
-		},
-		{
-			Name:        "another-plugin",
-			Version:     "v2.1.3",
-			Description: "Another installed plugin",
-			IsInstalled: true,
-			HasError:    false,
-		},
+func (pc *PluginsCommand) fetchInstalledPlugins(ctx context.Context) ([]pluginDisplayInfo, error) {
+	plugins, err := os.ReadDir(path.Join(flags.DeckhousePluginsDir, "plugins"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read plugins directory: %w", err)
 	}
+
+	res := make([]pluginDisplayInfo, 0, len(plugins))
+
+	for _, plugin := range plugins {
+		contract, err := pc.getInstalledPluginContract(plugin.Name())
+		if err != nil {
+			contract, err = pc.service.GetPluginContract(ctx, plugin.Name(), "")
+			if err != nil {
+				return nil, fmt.Errorf("failed to get plugin contract: %w", err)
+			}
+		}
+
+		displayInfo := pluginDisplayInfo{
+			Name:        plugin.Name(),
+			Version:     contract.Version,
+			Description: contract.Description,
+			IsInstalled: true,
+			HasError:    false,
+		}
+
+		res = append(res, displayInfo)
+	}
+
+	return res, nil
+}
+
+func (pc *PluginsCommand) getInstalledPluginContract(pluginName string) (*internal.Plugin, error) {
+	contractFile := path.Join(flags.DeckhousePluginsDir, "cache", "contracts", pluginName+".json")
+
+	contractBytes, err := os.ReadFile(contractFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read contract file: %w", err)
+	}
+
+	contract := new(service.PluginContract)
+
+	err = json.Unmarshal(contractBytes, contract)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal contract: %w", err)
+	}
+
+	return service.ContractToDomain(contract), nil
 }
 
 // fetchAvailablePlugins retrieves and prepares available plugins from registry
@@ -450,19 +483,34 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 				return fmt.Errorf("failed to create plugin directory: %w", err)
 			}
 
-			versions, err := pc.service.ListPluginTags(ctx, pluginName)
-			if err != nil {
-				pc.logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
-				return fmt.Errorf("failed to list plugin tags: %w", err)
+			var installVersion *semver.Version
+			if version != "" {
+				installVersion, err = semver.NewVersion(version)
+				if err != nil {
+					return fmt.Errorf("failed to parse version: %w", err)
+				}
+			} else {
+				versions, err := pc.service.ListPluginTags(ctx, pluginName)
+				if err != nil {
+					pc.logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+					return fmt.Errorf("failed to list plugin tags: %w", err)
+				}
+
+				if useMajor >= 0 {
+					versions = pc.filterMajorVersion(versions, useMajor)
+					if len(versions) == 0 {
+						return fmt.Errorf("no versions found for major version: %d", useMajor)
+					}
+				}
+
+				installVersion, err = pc.findLatestVersion(versions)
+				if err != nil {
+					pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+					return fmt.Errorf("failed to fetch latest version: %w", err)
+				}
 			}
 
-			latestVersion, err := pc.findLatestVersion(versions)
-			if err != nil {
-				pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
-				return fmt.Errorf("failed to fetch latest version: %w", err)
-			}
-
-			majorVersion := strconv.Itoa(int(latestVersion.Major()))
+			majorVersion := strconv.Itoa(int(installVersion.Major()))
 
 			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1
 			versionDir := path.Join(pluginDir, "v"+majorVersion)
@@ -471,11 +519,11 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 				return fmt.Errorf("failed to create plugin directory: %w", err)
 			}
 
-			tag := latestVersion.Original()
+			tag := installVersion.Original()
 
 			fmt.Printf("Installing plugin: %s\n", pluginName)
 			fmt.Printf("Tag: %s\n", tag)
-			if useMajor > 0 {
+			if useMajor >= 0 {
 				fmt.Printf("Using major version: %d\n", useMajor)
 			}
 
@@ -510,7 +558,7 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 				return fmt.Errorf("failed to encode contract: %w", err)
 			}
 
-			fmt.Printf("Plugin: %s v%s\n", plugin.Name, plugin.Version)
+			fmt.Printf("Plugin: %s %s\n", plugin.Name, plugin.Version)
 			fmt.Printf("Description: %s\n", plugin.Description)
 
 			// Extract plugin to installation directory
@@ -528,10 +576,11 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 				return fmt.Errorf("failed to extract plugin: %w", err)
 			}
 
-			// TODO: is delete old symlink needed?
-			// symlink current to the installed version
+			// symlink current to the installed version (delete old symlink if exists)
+			_ = os.Remove(path.Join(pluginDir, "current"))
+
 			err = os.Symlink(path.Join(versionDir, pluginName), path.Join(pluginDir, "current"))
-			if err != nil && !os.IsExist(err) {
+			if err != nil {
 				return fmt.Errorf("failed to create symlink: %w", err)
 			}
 
@@ -541,9 +590,26 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&version, "version", "", "Specific version of the plugin to install")
-	cmd.Flags().IntVar(&useMajor, "use-major", 0, "Use specific major version (e.g., 1, 2)")
+	cmd.Flags().IntVar(&useMajor, "use-major", -1, "Use specific major version (e.g., 1, 2)")
 
 	return cmd
+}
+
+func (pc *PluginsCommand) filterMajorVersion(versions []string, majorVersion int) []string {
+	res := make([]string, 0, 1)
+
+	for _, ver := range versions {
+		version, err := semver.NewVersion(ver)
+		if err != nil {
+			continue
+		}
+
+		if version.Major() == uint64(majorVersion) {
+			res = append(res, ver)
+		}
+	}
+
+	return res
 }
 
 func (pc *PluginsCommand) pluginsUpdateCommand() *cobra.Command {

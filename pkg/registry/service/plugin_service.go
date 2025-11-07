@@ -90,7 +90,7 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 	s.log.Debug("Plugin contract parsed successfully", slog.String("plugin", pluginName), slog.String("tag", tag), slog.String("name", contract.Name), slog.String("version", contract.Version))
 
 	// Convert to domain entity
-	return contractToDomain(contract), nil
+	return ContractToDomain(contract), nil
 }
 
 // ExtractPlugin downloads the plugin image and extracts it to the specified location
@@ -147,8 +147,8 @@ func (s *PluginService) untarPluginFiles(r io.Reader, destination, pluginName st
 	return nil
 }
 
-// contractToDomain converts PluginContract DTO to Plugin domain entity
-func contractToDomain(contract *PluginContract) *internal.Plugin {
+// ContractToDomain converts PluginContract DTO to Plugin domain entity
+func ContractToDomain(contract *PluginContract) *internal.Plugin {
 	// Note: This is a pure conversion function, no logging needed as it's called from GetPluginContract
 	plugin := &internal.Plugin{
 		Name:        contract.Name,
