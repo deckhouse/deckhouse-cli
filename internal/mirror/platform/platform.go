@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -22,7 +21,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/manifests"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
@@ -297,7 +295,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 		}
 
 		if err := svc.pullDeckhouseImages(ctx); err != nil {
-			return fmt.Errorf("pull deckhouse releases: %w", err)
+			return fmt.Errorf("pull deckhouse images: %w", err)
 		}
 
 		return nil
@@ -315,23 +313,36 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 
 	logger.InfoF("Searching for Deckhouse built-in modules digests")
 
-	var prevDigests = make(map[string]struct{}, 0)
+	var uniqueImages = make(map[string]string, 0)
 	for _, imageMeta := range svc.layout.InstallImages {
-		digests, err := svc.ExtractImageDigestsFromDeckhouseInstallerNew(imageMeta.ImageTag, prevDigests)
+		if _, ok := uniqueImages[imageMeta.DigestReference]; ok {
+			continue
+		}
+
+		uniqueImages[imageMeta.DigestReference] = imageMeta.ImageTag
+	}
+
+	var prevDigests = make(map[string]struct{}, 0)
+	for _, tag := range uniqueImages {
+		digests, err := svc.ExtractImageDigestsFromDeckhouseInstallerNew(tag, prevDigests)
 		if err != nil {
 			return fmt.Errorf("extract images digests: %w", err)
 		}
-		_ = digests
-		// maps.Copy(svc.layout.DeckhouseImages, digests)
+
+		maps.Copy(svc.layout.DeckhouseImages, digests)
 	}
 
-	// logger.InfoF("Found %d images", len(svc.layout.DeckhouseImages))
+	logger.InfoF("Found %d images", len(svc.layout.DeckhouseImages))
 
-	// if err = logger.Process("Pull Deckhouse images", func() error {
-	// 	return layouts.PullDeckhouseImages(pullParams, imageLayouts, client)
-	// }); err != nil {
-	// 	return fmt.Errorf("Pull Deckhouse images: %w", err)
-	// }
+	if err = logger.Process("Pull Deckhouse images", func() error {
+		if err := svc.pullDeckhouseImages(ctx); err != nil {
+			return fmt.Errorf("pull deckhouse images: %w", err)
+		}
+
+		return nil
+	}); err != nil {
+		return fmt.Errorf("Pull Deckhouse images: %w", err)
+	}
 
 	// err = logger.Process("Processing image indexes", func() error {
 	// 	if pullParams.DeckhouseTag != "" {
@@ -464,7 +475,7 @@ func (svc *Service) generateDeckhouseReleaseManifests(
 func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 	tag string,
 	prevDigests map[string]struct{},
-) (map[string]struct{}, error) {
+) (map[string]*puller.ImageMeta, error) {
 	logger := svc.userLogger
 
 	logger.DebugF("Extracting images digests from Deckhouse installer %s", tag)
@@ -474,30 +485,9 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 		return nil, fmt.Errorf("get installer image %q from layout: %w", tag, err)
 	}
 
-	result, err := extractDeckhouseReleaseMetadata(img.Extract())
+	images, err := extractDeckhouseReleaseExtraImages(img.Extract(), svc.deckhouseService.GetRoot())
 	if err != nil {
-		// TODO: handle error
-	}
-
-	_ = result
-
-	tagsCompatMode := false
-	imagesJSON, err := images.ExtractFileFromImage(img, "deckhouse/candi/images_digests.json")
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		// Older images had lists of deckhouse images tags instead of digests
-		tagsCompatMode = true
-		imagesJSON, err = images.ExtractFileFromImage(img, "deckhouse/candi/images_tags.json")
-		if err != nil {
-			return nil, fmt.Errorf("read tags from %q: %w", tag, err)
-		}
-	case err != nil:
-		return nil, fmt.Errorf("read digests from %q: %w", tag, err)
-	}
-
-	images := map[string]struct{}{}
-	if err = parseImagesFromJSON(svc.deckhouseService.GetRoot(), imagesJSON, images, tagsCompatMode); err != nil {
-		return nil, fmt.Errorf("cannot parse images list from json: %w", err)
+		return nil, fmt.Errorf("extract extra images from installer %q: %w", tag, err)
 	}
 
 	logger.InfoF("Deckhouse digests found: %d", len(images))
@@ -505,6 +495,8 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 	logger.InfoF("Searching for VEX images")
 
 	vex := make([]string, 0)
+	result := make(map[string]*puller.ImageMeta, len(images))
+
 	const scanPrintInterval = 20
 	counter := 0
 	for image := range images {
@@ -530,10 +522,13 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 		if vexImageName != "" {
 			logger.DebugF("Vex image found %s", vexImageName)
 			vex = append(vex, vexImageName)
+			result[vexImageName] = nil
 		}
 
 		prevDigests[image] = struct{}{}
 		prevDigests[vexImageName] = struct{}{}
+
+		result[image] = nil
 	}
 
 	logger.InfoF("[%d / %d] Scanning images for VEX", counter, len(images))
@@ -541,15 +536,11 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 	logger.InfoF("Deckhouse digests found: %d", len(images))
 	logger.InfoF("VEX images found: %d", len(vex))
 
-	for _, v := range vex {
-		images[v] = struct{}{}
-	}
-
-	return images, nil
+	return result, nil
 }
 
-func extractDeckhouseReleaseMetadata(rc io.ReadCloser) (map[string]struct{}, error) {
-	var meta = make(map[string]struct{}, 0)
+func extractDeckhouseReleaseExtraImages(rc io.ReadCloser, rootURL string) (map[string]struct{}, error) {
+	var images = make(map[string]struct{}, 0)
 
 	defer rc.Close()
 
@@ -563,36 +554,36 @@ func extractDeckhouseReleaseMetadata(rc io.ReadCloser) (map[string]struct{}, err
 		return nil, err
 	}
 
-	var tags map[string]any
+	var tags map[string]map[string]string
 	if drr.imageTagsReader.Len() > 0 {
 		err = json.NewDecoder(drr.imageTagsReader).Decode(&tags)
 		if err != nil {
 			return nil, err
 		}
 
-		for _, v := range tags {
-			if tagStr, ok := v.(string); ok {
-				meta[tagStr] = struct{}{}
+		for _, nameDigestTuple := range tags {
+			for _, imageID := range nameDigestTuple {
+				images[rootURL+":"+imageID] = struct{}{}
 			}
 		}
 
-		return meta, nil
+		return images, nil
 	}
 
-	var digests map[string]any
+	var digests map[string]map[string]string
 	if drr.imageDigestsReader.Len() > 0 {
 		err = json.NewDecoder(drr.imageDigestsReader).Decode(&digests)
 		if err != nil {
 			return nil, err
 		}
 
-		for _, v := range digests {
-			if digestStr, ok := v.(string); ok {
-				meta[digestStr] = struct{}{}
+		for _, nameDigestTuple := range digests {
+			for _, imageID := range nameDigestTuple {
+				images[rootURL+"@"+imageID] = struct{}{}
 			}
 		}
 
-		return meta, nil
+		return images, nil
 	}
 
 	return nil, fmt.Errorf("both files is not found in installer")
@@ -608,9 +599,8 @@ func (svc *Service) FindVexImage(
 
 	logger.DebugF("Checking vex image from %s", vexImageName)
 
-	split := strings.SplitN(vexImageName, ":", 2)
-	// imagePath := split[0]
-	tag := split[1]
+	splitIndex := strings.LastIndex(vexImageName, ":")
+	tag := vexImageName[splitIndex+1:]
 
 	// imageSegmentsRaw := strings.TrimPrefix(imagePath, svc.deckhouseService.GetRoot())
 	// imageSegments := strings.Split(imageSegmentsRaw, "/")
@@ -626,27 +616,11 @@ func (svc *Service) FindVexImage(
 		return "", nil
 	}
 
+	if err != nil {
+		return "", fmt.Errorf("check VEX image exists: %w", err)
+	}
+
 	return vexImageName, nil
-}
-
-func parseImagesFromJSON(registryRepo string, jsonDigests io.Reader, dst map[string]struct{}, tagsCompatMode bool) error {
-	digestsByModule := map[string]map[string]string{}
-	if err := json.NewDecoder(jsonDigests).Decode(&digestsByModule); err != nil {
-		return fmt.Errorf("parse images from json: %w", err)
-	}
-
-	for _, nameDigestTuple := range digestsByModule {
-		for _, imageID := range nameDigestTuple {
-			if tagsCompatMode {
-				dst[registryRepo+":"+imageID] = struct{}{}
-				continue
-			}
-
-			dst[registryRepo+"@"+imageID] = struct{}{}
-		}
-	}
-
-	return nil
 }
 
 // filterVersionsBetween filters release tags to include only versions

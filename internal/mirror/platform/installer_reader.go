@@ -31,8 +31,13 @@ func (rr *deckhouseInstallerReader) untarMetadata(rc io.Reader) error {
 		}
 
 		switch hdr.Name {
-		case "version.json":
+		case imagesDigestsFile:
 			_, err = io.Copy(rr.imageDigestsReader, tr)
+			if err != nil {
+				return err
+			}
+		case imagesTagsFile:
+			_, err = io.Copy(rr.imageTagsReader, tr)
 			if err != nil {
 				return err
 			}
