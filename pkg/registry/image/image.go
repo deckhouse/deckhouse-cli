@@ -67,7 +67,7 @@ func NewImage(img v1.Image, opts ...ImageOption) (*Image, error) {
 	}
 
 	// for fetching metadata
-	if image.metadata != nil && image.metadata.Digest != nil {
+	if image.metadata != nil && image.metadata.TagReference != "" {
 		imageRepo, _ := SplitImageRefByRepoAndTag(image.metadata.TagReference)
 
 		digest, err := img.Digest()

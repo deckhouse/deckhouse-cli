@@ -270,7 +270,7 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 
 	svc.userLogger.DebugF("image reference: %s@%s", imageMeta, digest.String())
 
-	err = svc.layout.DeckhouseReleaseChannel.AddImage(image, releaseChannel)
+	err = svc.layout.DeckhouseReleaseChannel.AddImage(image, imageMeta.GetTagReference())
 	if err != nil {
 		return nil, fmt.Errorf("append %s release channel image to layout: %w", releaseChannel, err)
 	}
