@@ -4,17 +4,17 @@ import (
 	"sync"
 )
 
-type ConccurrentWorker[T, R any] struct {
+type ConcurrentWorker[T, R any] struct {
 	workersCount int
 }
 
-func NewConcurrentWorker[T, R any](workersCount int) *ConccurrentWorker[T, R] {
-	return &ConccurrentWorker[T, R]{
+func NewConcurrentWorker[T, R any](workersCount int) *ConcurrentWorker[T, R] {
+	return &ConcurrentWorker[T, R]{
 		workersCount: workersCount,
 	}
 }
 
-func (cw *ConccurrentWorker[T, R]) Do(inputs []T, handler func(input T) (R, error), resultHandler func(item R) error) error {
+func (cw *ConcurrentWorker[T, R]) Do(inputs []T, handler func(input T) (R, error), resultHandler func(item R) error) error {
 	wg := new(sync.WaitGroup)
 	semaphore := make(chan struct{}, cw.workersCount)
 	stop := make(chan struct{})

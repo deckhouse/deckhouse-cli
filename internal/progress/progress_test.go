@@ -10,9 +10,6 @@ func TestProgressCallback(t *testing.T) {
 	const input = "Hello World!"
 	ctx := t.Context()
 
-	// Check the progress bar, or invisible copy-through, works at all sylog
-	// levels
-
 	visibilities := []bool{
 		true,
 		false,

@@ -59,7 +59,7 @@ func (s *BasicService) GetImage(ctx context.Context, tag string, opts ...pkg.Ima
 	if !strings.HasPrefix(tag, "@sha256:") {
 		newImage, err := image.NewImage(img, image.WithFetchingMetadata(tag))
 		if err != nil {
-			return nil, fmt.Errorf("new image with metadata: %w", err)
+			return nil, fmt.Errorf("new image with fetched metadata: %w", err)
 		}
 
 		return newImage, nil
@@ -76,6 +76,9 @@ func (s *BasicService) GetImage(ctx context.Context, tag string, opts ...pkg.Ima
 		DigestReference: fullRegistry + tag,
 		Digest:          &digest,
 	}))
+	if err != nil {
+		return nil, fmt.Errorf("new image with metadata: %w", err)
+	}
 
 	logger.Debug("Image retrieved successfully")
 
