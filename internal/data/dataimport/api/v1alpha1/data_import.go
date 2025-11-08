@@ -42,7 +42,7 @@ type DataImportList struct {
 
 // +k8s:deepcopy-gen=true
 type DataImportSpec struct {
-	Ttl                  string                  `json:"ttl"`
+	TTL                  string                  `json:"ttl"`
 	Publish              bool                    `json:"publish,omitempty"`
 	WaitForFirstConsumer bool                    `json:"waitForFirstConsumer,omitempty"`
 	TargetRef            DataImportTargetRefSpec `json:"targetRef"`
@@ -116,7 +116,7 @@ func (di *DataImport) GetStatus() *DataExportImportStatus {
 }
 
 type DataExportImportStatus struct {
-	Url                 string             `json:"url"`
+	URL                 string             `json:"url"`
 	CA                  string             `json:"ca,omitempty"`
 	PublicURL           string             `json:"publicURL"`
 	AccessTimestamp     metav1.Time        `json:"accessTimestamp"`

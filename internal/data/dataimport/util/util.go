@@ -1,4 +1,4 @@
-package util
+package util //nolint:revive
 
 import (
 	"context"
@@ -10,12 +10,13 @@ import (
 	"strconv"
 	"time"
 
-	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
-	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
-	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
+	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
@@ -74,7 +75,7 @@ func CreateDataImport(
 			Namespace: namespace,
 		},
 		Spec: v1alpha1.DataImportSpec{
-			Ttl:                  ttl,
+			TTL:                  ttl,
 			Publish:              publish,
 			WaitForFirstConsumer: waitForFirstConsumer,
 			TargetRef: v1alpha1.DataImportTargetRefSpec{
@@ -119,7 +120,7 @@ func GetDataImportWithRestart(
 					ctx,
 					diName,
 					namespace,
-					diObj.Spec.Ttl,
+					diObj.Spec.TTL,
 					diObj.Spec.Publish,
 					diObj.Spec.WaitForFirstConsumer,
 					pvcTemplate,
@@ -140,7 +141,7 @@ func GetDataImportWithRestart(
 				if diObj.Status.PublicURL == "" {
 					notReadyErr = fmt.Errorf("DataImport %s/%s has empty PublicURL", diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name)
 				}
-			} else if diObj.Status.Url == "" {
+			} else if diObj.Status.URL == "" {
 				notReadyErr = fmt.Errorf("DataImport %s/%s has no URL", diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name)
 			}
 		}
@@ -161,7 +162,7 @@ func GetDataImportWithRestart(
 
 func PrepareUpload(
 	ctx context.Context,
-	log *slog.Logger,
+	_ *slog.Logger,
 	diName, namespace string,
 	publish bool,
 	sClient *safeClient.SafeClient,
@@ -179,15 +180,16 @@ func PrepareUpload(
 	}
 
 	var podURL string
-	if publish {
+	switch {
+	case publish:
 		if diObj.Status.PublicURL == "" {
 			finErr = fmt.Errorf("empty PublicURL")
 			return
 		}
 		podURL = diObj.Status.PublicURL
-	} else if diObj.Status.Url != "" {
-		podURL = diObj.Status.Url
-	} else {
+	case diObj.Status.URL != "":
+		podURL = diObj.Status.URL
+	default:
 		finErr = fmt.Errorf("invalid URL")
 		return
 	}

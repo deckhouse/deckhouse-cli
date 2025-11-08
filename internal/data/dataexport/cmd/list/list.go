@@ -31,9 +31,9 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
-	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -58,7 +58,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(ctx, log, cmd, args)
 		},
-		Args: func(cmd *cobra.Command, args []string) error {
+		Args: func(_ *cobra.Command, args []string) error {
 			_, _, err := parseArgs(args)
 			return err
 		},
@@ -120,7 +120,7 @@ func downloadFunc(
 
 	resp, err := subClient.HTTPDo(req.WithContext(ctx))
 	if err != nil {
-		return fmt.Errorf("HTTPDo: %s\n", err.Error())
+		return fmt.Errorf("HTTPDo: %s", err.Error())
 	}
 	defer resp.Body.Close()
 
@@ -201,7 +201,9 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	if deName != dataName { // DataExport created in download process
 		if dataio.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
-			util.DeleteDataExport(ctx, deName, namespace, rtClient)
+			if err := util.DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
+				log.Warn("Failed to delete DataExport", slog.String("name", deName), slog.String("error", err.Error()))
+			}
 		}
 	}
 

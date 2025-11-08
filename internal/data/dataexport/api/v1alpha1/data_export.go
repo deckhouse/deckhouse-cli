@@ -1,7 +1,7 @@
 package v1alpha1
 
 import (
-	_ "k8s.io/apimachinery/pkg/api/resource"
+	_ "k8s.io/apimachinery/pkg/api/resource" // Register resource.Quantity types
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 

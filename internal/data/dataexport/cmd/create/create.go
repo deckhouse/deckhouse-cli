@@ -25,9 +25,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
-	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -53,7 +53,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(ctx, log, cmd, args)
 		},
-		Args: func(cmd *cobra.Command, args []string) error {
+		Args: func(_ *cobra.Command, args []string) error {
 			_, _, _, err := parseArgs(args)
 			return err
 		},

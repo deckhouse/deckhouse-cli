@@ -40,9 +40,8 @@ func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 			if slices.Contains([]string{"y", "n"}, input) {
 				inputChan <- strings.TrimSpace(input)
 				return
-			} else {
-				fmt.Println("Invalid input. Please press 'y' or 'n'.")
 			}
+			fmt.Println("Invalid input. Please press 'y' or 'n'.")
 		}
 	}()
 

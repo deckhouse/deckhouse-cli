@@ -59,9 +59,9 @@ func getClusterAlerts(ctx context.Context, dynamicCl dynamic.Interface) ([]Clust
 	}
 	alertList, err := dynamicCl.Resource(gvr).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list cluster alerts: %w\n", err)
+		return nil, fmt.Errorf("failed to list cluster alerts: %w", err)
 	}
-	var alerts []ClusterAlert
+	alerts := make([]ClusterAlert, 0, len(alertList.Items))
 	for _, item := range alertList.Items {
 		alert, ok := ClusterAlertProcessing(item.Object)
 		if !ok {

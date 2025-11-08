@@ -26,11 +26,11 @@ import (
 	"strings"
 	"time"
 
-	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
@@ -69,7 +69,7 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 	deObj := &v1alpha1.DataExport{}
 
 	for i := 0; ; i++ {
-		var returnErr error = nil
+		var returnErr error
 
 		// get DataExport from k8s by name
 		err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: deName}, deObj)
@@ -233,7 +233,8 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 		return
 	}
 
-	if public {
+	switch {
+	case public:
 		if deObj.Status.PublicURL == "" {
 			err = fmt.Errorf("empty PublicURL")
 			return
@@ -242,10 +243,10 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 		if !strings.HasPrefix(podURL, "http") {
 			podURL += "https://"
 		}
-	} else if deObj.Status.URL != "" {
+	case deObj.Status.URL != "":
 		podURL = deObj.Status.URL
 		internalCAData = deObj.Status.CA
-	} else {
+	default:
 		err = fmt.Errorf("invalid URL")
 		return
 	}
