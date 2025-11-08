@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package registry
+package client
 
 import (
 	"context"
@@ -54,7 +54,7 @@ type Client struct {
 var _ pkg.RegistryClient = (*Client)(nil)
 
 // NewClientWithOptions creates a new container registry client with advanced options
-func NewClientWithOptions(registry string, opts *ClientOptions) *Client {
+func NewClientWithOptions(registry string, opts *Options) *Client {
 	// Ensure logger first before using it
 	logger := ensureLogger(opts.Logger)
 
@@ -194,7 +194,7 @@ func (w WithDownloadBar) ApplyToImageGet(opts *pkg.ImageGetOptions) {
 // Do not return remote image to avoid drop connection with context cancelation.
 // It will be in use while passed context will be alive.
 // The repository is determined by the chained WithSegment() calls
-func (c *Client) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.RegistryImage, error) {
+func (c *Client) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.ClientImage, error) {
 	getImageOptions := &pkg.ImageGetOptions{}
 
 	for _, opt := range opts {
@@ -211,12 +211,10 @@ func (c *Client) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetO
 
 	logentry.Debug("Getting image")
 
-	var isDigestReference bool
 	imagepath := fullRegistry + ":" + tag
 	if strings.HasPrefix(tag, "@sha256:") {
 		logentry.Debug("tag contains digest reference")
 		imagepath = fullRegistry + tag
-		isDigestReference = true
 	}
 
 	ref, err := name.ParseReference(imagepath)
@@ -251,17 +249,7 @@ func (c *Client) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetO
 
 	logentry.Debug("Image retrieved successfully")
 
-	imageOpts := make([]ImageOption, 0, 1)
-	if !isDigestReference {
-		imageOpts = append(imageOpts, WithFetchingMetadata(ref.String()))
-	}
-
-	newImage, err := NewImage(img, imageOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("create new image: %w", err)
-	}
-
-	return newImage, nil
+	return NewImage(img, ref.String()), nil
 }
 
 // PushImage pushes an image to the registry at the specified tag

@@ -27,6 +27,7 @@ import (
 
 	d8flags "github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	intplugins "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -69,7 +70,7 @@ func (r *PluginsCommand) initPluginServices() {
 		slog.Bool("tls_skip_verify", d8flags.TLSSkipVerify))
 
 	// Create base client with registry host only
-	baseClient := registry.NewClientWithOptions(sourceRepo, &registry.ClientOptions{
+	baseClient := registry.NewClientWithOptions(sourceRepo, &client.Options{
 		Auth:          auth,
 		Insecure:      d8flags.Insecure,
 		TLSSkipVerify: d8flags.TLSSkipVerify,

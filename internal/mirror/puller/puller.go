@@ -10,6 +10,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 )
@@ -103,7 +104,7 @@ func (ps *PullerService) PullImageSet(
 					return fmt.Errorf("pull image metadata: %w", err)
 				}
 
-				img.SetMetadata(&registry.ImageMeta{
+				img.SetMetadata(&image.ImageMeta{
 					TagReference:    imageMeta.TagReference,
 					DigestReference: "@" + imageMeta.Digest.String(),
 					Digest:          imageMeta.Digest,

@@ -40,6 +40,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 )
 
@@ -320,7 +321,7 @@ func (p *Pusher) pushStaticPackages() error {
 	}
 
 	// Create registry client for module operations
-	clientOpts := &registry.ClientOptions{
+	clientOpts := &client.Options{
 		Insecure:      p.pushParams.Insecure,
 		TLSSkipVerify: p.pushParams.SkipTLSVerification,
 		Logger:        logger,
@@ -350,7 +351,7 @@ func (p *Pusher) pushModules() error {
 	}
 
 	// Create registry client for module operations
-	clientOpts := &registry.ClientOptions{
+	clientOpts := &client.Options{
 		Insecure:      p.pushParams.Insecure,
 		TLSSkipVerify: p.pushParams.SkipTLSVerification,
 		Logger:        logger, // Will use default logger

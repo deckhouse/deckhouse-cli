@@ -30,6 +30,11 @@ type ImageMeta interface {
 	GetDigest() *v1.Hash
 }
 
+type ClientImage interface {
+	v1.Image
+	Extract() io.ReadCloser
+}
+
 type RegistryImage interface {
 	v1.Image
 	Extract() io.ReadCloser
@@ -77,7 +82,7 @@ type RegistryClient interface {
 	// Do not return remote image to avoid drop connection with context cancelation.
 	// It will be in use while passed context will be alive.
 	// The repository is determined by the chained WithSegment() calls
-	GetImage(ctx context.Context, tag string, opts ...ImageGetOption) (RegistryImage, error)
+	GetImage(ctx context.Context, tag string, opts ...ImageGetOption) (ClientImage, error)
 
 	// PushImage pushes an image to the registry at the specified tag
 	// The repository is determined by the chained WithSegment() calls

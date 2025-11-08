@@ -1,10 +1,11 @@
-package registry
+package image
 
 import (
 	"fmt"
 	"io"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 )
@@ -68,7 +69,7 @@ func NewImage(img v1.Image, opts ...ImageOption) (*Image, error) {
 
 	// for fetching metadata
 	if image.metadata != nil && image.metadata.Digest != nil {
-		imageRepo, _ := splitImageRefByRepoAndTag(image.metadata.TagReference)
+		imageRepo, _ := registry.SplitImageRefByRepoAndTag(image.metadata.TagReference)
 
 		digest, err := img.Digest()
 		if err != nil {
@@ -90,7 +91,7 @@ func (i *Image) Extract() io.ReadCloser {
 
 func (i *Image) GetMetadata() (pkg.ImageMeta, error) {
 	if i.metadata == nil {
-		return nil, ErrImageMetaNotFound
+		return nil, registry.ErrImageMetaNotFound
 	}
 
 	return i.metadata, nil
@@ -102,7 +103,7 @@ func (i *Image) SetMetadata(metadata pkg.ImageMeta) {
 
 func (i *Image) GetTagReference() (string, error) {
 	if i.metadata == nil {
-		return "", ErrImageMetaNotFound
+		return "", registry.ErrImageMetaNotFound
 	}
 
 	return i.metadata.TagReference, nil
@@ -110,7 +111,7 @@ func (i *Image) GetTagReference() (string, error) {
 
 func (i *Image) GetDigestReference() (string, error) {
 	if i.metadata == nil {
-		return "", ErrImageMetaNotFound
+		return "", registry.ErrImageMetaNotFound
 	}
 
 	return i.metadata.DigestReference, nil

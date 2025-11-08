@@ -25,7 +25,6 @@ import (
 	"log/slog"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
 )
@@ -82,36 +81,6 @@ func (s *DeckhouseService) StandaloneInstaller() *BasicService {
 // GetRoot gets path of the registry root
 func (s *DeckhouseService) GetRoot() string {
 	return s.client.GetRegistry()
-}
-
-func (s *DeckhouseService) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.RegistryImage, error) {
-	logger := s.logger.With("tag", tag)
-
-	logger.Debug("Getting image")
-
-	img, err := s.client.GetImage(ctx, tag, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get image: %w", err)
-	}
-
-	logger.Debug("Image retrieved successfully")
-
-	return img, nil
-}
-
-func (s *DeckhouseService) GetDigest(ctx context.Context, tag string) (*v1.Hash, error) {
-	logger := s.logger.With("tag", tag)
-
-	logger.Debug("Getting digest")
-
-	hash, err := s.client.GetDigest(ctx, tag)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get image: %w", err)
-	}
-
-	logger.Debug("Digest retrieved successfully")
-
-	return hash, nil
 }
 
 type DeckhouseReleaseService struct {

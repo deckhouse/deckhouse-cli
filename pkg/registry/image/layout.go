@@ -1,10 +1,11 @@
-package registry
+package image
 
 import (
 	"fmt"
 	"strings"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 )
@@ -108,7 +109,7 @@ func (l *ImageLayout) TagImage(imageDigest v1.Hash, tag string) error {
 		}
 	}
 
-	return ErrImageNotFound
+	return client.ErrImageNotFound
 }
 
 var ErrImageMetaNotFound = fmt.Errorf("image metadata not found")
@@ -123,7 +124,7 @@ func (l *ImageLayout) GetMeta(tag string) (*ImageMeta, error) {
 	return meta, nil
 }
 
-func splitImageRefByRepoAndTag(imageReferenceString string) (repo, tag string) {
+func SplitImageRefByRepoAndTag(imageReferenceString string) (repo, tag string) {
 	splitIndex := strings.LastIndex(imageReferenceString, ":")
 	repo = imageReferenceString[:splitIndex]
 	tag = imageReferenceString[splitIndex+1:]
@@ -145,7 +146,7 @@ func extractExtraImageShortTag(imageReferenceString string) string {
 	}
 
 	// Regular image: return just the tag
-	_, tag := splitImageRefByRepoAndTag(imageReferenceString)
+	_, tag := SplitImageRefByRepoAndTag(imageReferenceString)
 
 	return tag
 }

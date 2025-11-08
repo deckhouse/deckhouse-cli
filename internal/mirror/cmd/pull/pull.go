@@ -47,6 +47,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	"github.com/deckhouse/deckhouse-cli/pkg/stub"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
@@ -237,7 +238,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 		}
 
 		// Create registry client for module operations
-		clientOpts := &registry.ClientOptions{
+		clientOpts := &client.Options{
 			Insecure:      p.params.Insecure,
 			TLSSkipVerify: p.params.SkipTLSVerification,
 			Logger:        logger,
@@ -247,20 +248,20 @@ func (p *Puller) Execute(ctx context.Context) error {
 			clientOpts.Auth = p.params.RegistryAuth
 		}
 
-		var client pkg.RegistryClient
-		client = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+		var c pkg.RegistryClient
+		c = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
 		if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
-			client = stub.NewRegistryClientStub()
+			c = stub.NewRegistryClientStub()
 		}
 
 		// Scope to the registry path and modules suffix
 		if p.params.RegistryPath != "" {
-			client = client.WithSegment(p.params.RegistryPath)
+			c = c.WithSegment(p.params.RegistryPath)
 		}
 
 		svc := mirror.NewPullService(
-			registryservice.NewService(client, logger),
+			registryservice.NewService(c, logger),
 			pullflags.TempDir,
 			pullflags.DeckhouseTag,
 			pullflags.IgnoreSuspendedChannels,
@@ -318,7 +319,7 @@ func (p *Puller) pullPlatform() error {
 	}
 
 	// Create registry client for module operations
-	clientOpts := &registry.ClientOptions{
+	clientOpts := &client.Options{
 		Insecure:      p.params.Insecure,
 		TLSSkipVerify: p.params.SkipTLSVerification,
 		Logger:        logger,
@@ -328,16 +329,16 @@ func (p *Puller) pullPlatform() error {
 		clientOpts.Auth = p.params.RegistryAuth
 	}
 
-	var client pkg.RegistryClient
-	client = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+	var c pkg.RegistryClient
+	c = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
 	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
-		client = stub.NewRegistryClientStub()
+		c = stub.NewRegistryClientStub()
 	}
 
 	// Scope to the registry path and modules suffix
 	if p.params.RegistryPath != "" {
-		client = client.WithSegment(p.params.RegistryPath)
+		c = c.WithSegment(p.params.RegistryPath)
 	}
 
 	return p.logger.Process("Pull Deckhouse Kubernetes Platform", func() error {
@@ -345,12 +346,12 @@ func (p *Puller) pullPlatform() error {
 			return err
 		}
 
-		tagsToMirror, err := findTagsToMirror(p.params, p.logger, client)
+		tagsToMirror, err := findTagsToMirror(p.params, p.logger, c)
 		if err != nil {
 			return fmt.Errorf("Find tags to mirror: %w", err)
 		}
 
-		if err = operations.PullDeckhousePlatform(p.params, tagsToMirror, client); err != nil {
+		if err = operations.PullDeckhousePlatform(p.params, tagsToMirror, c); err != nil {
 			return err
 		}
 
@@ -390,7 +391,7 @@ func (p *Puller) pullSecurityDatabases() error {
 	}
 
 	// Create registry client for module operations
-	clientOpts := &registry.ClientOptions{
+	clientOpts := &client.Options{
 		Insecure:      p.params.Insecure,
 		TLSSkipVerify: p.params.SkipTLSVerification,
 		Logger:        logger,
@@ -400,16 +401,16 @@ func (p *Puller) pullSecurityDatabases() error {
 		clientOpts.Auth = p.params.RegistryAuth
 	}
 
-	var client pkg.RegistryClient
-	client = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+	var c pkg.RegistryClient
+	c = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
 	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
-		client = stub.NewRegistryClientStub()
+		c = stub.NewRegistryClientStub()
 	}
 
 	// Scope to the registry path and modules suffix
 	if p.params.RegistryPath != "" {
-		client = client.WithSegment(p.params.RegistryPath)
+		c = c.WithSegment(p.params.RegistryPath)
 	}
 
 	return p.logger.Process("Pull Security Databases", func() error {
@@ -426,7 +427,7 @@ func (p *Puller) pullSecurityDatabases() error {
 			return fmt.Errorf("Source registry is not accessible: %w", err)
 		}
 
-		if err := operations.PullSecurityDatabases(p.params, client); err != nil {
+		if err := operations.PullSecurityDatabases(p.params, c); err != nil {
 			return err
 		}
 		return nil
@@ -451,7 +452,7 @@ func (p *Puller) pullModules() error {
 	}
 
 	// Create registry client for module operations
-	clientOpts := &registry.ClientOptions{
+	clientOpts := &client.Options{
 		Insecure:      p.params.Insecure,
 		TLSSkipVerify: p.params.SkipTLSVerification,
 		Logger:        logger,
@@ -461,20 +462,20 @@ func (p *Puller) pullModules() error {
 		clientOpts.Auth = p.params.RegistryAuth
 	}
 
-	var client pkg.RegistryClient
-	client = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+	var c pkg.RegistryClient
+	c = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
 	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
-		client = stub.NewRegistryClientStub()
+		c = stub.NewRegistryClientStub()
 	}
 
 	// Scope to the registry path and modules suffix
 	if p.params.RegistryPath != "" {
-		client = client.WithSegment(p.params.RegistryPath)
+		c = c.WithSegment(p.params.RegistryPath)
 	}
 
 	if p.params.ModulesPathSuffix != "" {
-		client = client.WithSegment(p.params.ModulesPathSuffix)
+		c = c.WithSegment(p.params.ModulesPathSuffix)
 	}
 
 	return p.logger.Process(processName, func() error {
@@ -487,7 +488,7 @@ func (p *Puller) pullModules() error {
 			return err
 		}
 
-		return operations.PullModules(p.params, filter, client)
+		return operations.PullModules(p.params, filter, c)
 	})
 }
 

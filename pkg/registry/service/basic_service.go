@@ -20,11 +20,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
 // BasicService provides common registry operations with standardized logging
@@ -54,9 +56,30 @@ func (s *BasicService) GetImage(ctx context.Context, tag string, opts ...pkg.Ima
 		return nil, fmt.Errorf("failed to get image: %w", err)
 	}
 
+	if !strings.HasPrefix(tag, "@sha256:") {
+		newImage, err := image.NewImage(img, image.WithFetchingMetadata(tag))
+		if err != nil {
+			return nil, fmt.Errorf("new image with metadata: %w", err)
+		}
+
+		return newImage, nil
+	}
+
+	digest, err := img.Digest()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get image digest: %w", err)
+	}
+
+	fullRegistry := s.client.GetRegistry()
+
+	newImage, err := image.NewImage(img, image.WithMetadata(&image.ImageMeta{
+		DigestReference: fullRegistry + tag,
+		Digest:          &digest,
+	}))
+
 	logger.Debug("Image retrieved successfully")
 
-	return img, nil
+	return newImage, nil
 }
 
 // GetDigest retrieves a digest from the registry
