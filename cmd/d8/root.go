@@ -21,9 +21,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
-	"math/rand"
 	"os"
-	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -105,10 +103,8 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(plugins.NewPluginsCommand(r.logger.Named("plugins-command")))
 }
 
-func (r *RootCommand) Execute() error {
+func (r *RootCommand) Execute() error { //nolint:unparam
 	ctx := r.cmd.Context()
-
-	rand.Seed(time.Now().UnixNano())
 
 	if shouldTerminate, err := werfcommon.ContainerBackendProcessStartupHook(); err != nil {
 		werfcommon.TerminateWithError(err.Error(), 1)

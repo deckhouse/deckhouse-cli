@@ -45,7 +45,7 @@ func NewCommand() *cobra.Command {
 		Long:          collectDebugInfoCmdLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		PreRunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(_ *cobra.Command, _ []string) error {
 			if listExclude {
 				return nil
 			}

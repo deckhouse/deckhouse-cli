@@ -89,7 +89,7 @@ func BaseEditConfigCMD(cmd *cobra.Command, _ string, secret, dataKey string) err
 func writeSecretTmp(secretConfig *v1.Secret, dataKey string) (*os.File, error) {
 	tempFile, err := os.CreateTemp(os.TempDir(), "secret.*.yaml")
 	if err != nil {
-		return nil, fmt.Errorf("Can't save cluster configuration: %w\n", err)
+		return nil, fmt.Errorf("can't save cluster configuration: %w", err)
 	}
 
 	_, err = tempFile.Write(secretConfig.Data[dataKey])

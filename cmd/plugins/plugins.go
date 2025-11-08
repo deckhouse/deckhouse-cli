@@ -67,7 +67,7 @@ func NewPluginsCommand(logger *dkplog.Logger) *cobra.Command {
 		Use:    "plugins",
 		Short:  "Manage Deckhouse CLI plugins",
 		Hidden: true,
-		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+		PersistentPreRun: func(_ *cobra.Command, _ []string) {
 			// init plugin services for subcommands after flags are parsed
 			pc.initPluginServices()
 		},

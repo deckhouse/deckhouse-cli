@@ -90,14 +90,14 @@ func getLogDeckhouse(cmd *cobra.Command, _ []string) error {
 	req := kubeCl.CoreV1().Pods("d8-system").GetLogs(podName, logOptions)
 	stream, err := req.Stream(context.Background())
 	if err != nil {
-		return fmt.Errorf("Error opening log stream: %v\n", err)
+		return fmt.Errorf("error opening log stream: %v", err)
 	}
 	defer stream.Close()
 
 	_, err = io.Copy(os.Stdout, stream)
 	if err != nil {
 		return fmt.Errorf(
-			"Error reading logs: %v\n", err)
+			"error reading logs: %v", err)
 	}
 	return nil
 }

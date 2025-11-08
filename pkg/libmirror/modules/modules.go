@@ -167,7 +167,7 @@ func FindExternalModuleImages(
 
 			semverTag, err := semver.NewVersion(tag)
 			if err == nil {
-				versionsToMirror = append(versionsToMirror, semverTag.Original())
+				versionsToMirror = append(versionsToMirror, semverTag.Original()) //nolint:staticcheck
 			}
 		}
 	}
@@ -182,11 +182,9 @@ func FindExternalModuleImages(
 		}
 	}
 
-	versionsToMirror = uniqueTags
-
 	logger.Debugf("Finding module extra images for %s", mod.Name)
 
-	for _, tag := range versionsToMirror {
+	for _, tag := range uniqueTags {
 		logger.Debugf("Checking module image %s for extra images", tag)
 
 		img, err := client.GetImage(context.TODO(), tag)

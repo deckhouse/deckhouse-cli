@@ -113,10 +113,10 @@ func parseAndValidateRegistryURLArg(args []string) error {
 	RegistryHost = registryURL.Host
 	RegistryPath = registryURL.Path
 	if RegistryHost == "" {
-		return errors.New("<registry> you provided contains no registry host. Please specify registry address correctly.")
+		return errors.New("<registry> you provided contains no registry host. Please specify registry address correctly")
 	}
 	if len(RegistryPath) < 2 || len(RegistryPath) > 255 {
-		return errors.New("repository part must be between 2 and 255 characters in length. Please specify registry repo path correctly.")
+		return errors.New("repository part must be between 2 and 255 characters in length. Please specify registry repo path correctly")
 	}
 
 	return nil
