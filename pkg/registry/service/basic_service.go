@@ -56,8 +56,10 @@ func (s *BasicService) GetImage(ctx context.Context, tag string, opts ...pkg.Ima
 		return nil, fmt.Errorf("failed to get image: %w", err)
 	}
 
+	fullRegistry := s.client.GetRegistry()
+
 	if !strings.HasPrefix(tag, "@sha256:") {
-		newImage, err := image.NewImage(img, image.WithFetchingMetadata(tag))
+		newImage, err := image.NewImage(img, image.WithFetchingMetadata(fullRegistry+":"+tag))
 		if err != nil {
 			return nil, fmt.Errorf("new image with fetched metadata: %w", err)
 		}
@@ -69,8 +71,6 @@ func (s *BasicService) GetImage(ctx context.Context, tag string, opts ...pkg.Ima
 	if err != nil {
 		return nil, fmt.Errorf("failed to get image digest: %w", err)
 	}
-
-	fullRegistry := s.client.GetRegistry()
 
 	newImage, err := image.NewImage(img, image.WithMetadata(&image.ImageMeta{
 		DigestReference: fullRegistry + tag,
