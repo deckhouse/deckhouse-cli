@@ -4,9 +4,10 @@ import (
 	"context"
 	"strings"
 
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
 // ImageGetter is a function type for getting images from the registry

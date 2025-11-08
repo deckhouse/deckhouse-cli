@@ -28,10 +28,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+
+	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
 // RegistryClientStub provides a stub implementation of RegistryClient for testing
@@ -153,12 +154,12 @@ func (r *RegistryImageStub) Size() (int64, error) {
 }
 
 // LayerByDigest implements v1.Image
-func (r *RegistryImageStub) LayerByDigest(h v1.Hash) (v1.Layer, error) {
+func (r *RegistryImageStub) LayerByDigest(_ v1.Hash) (v1.Layer, error) {
 	return nil, fmt.Errorf("LayerByDigest not implemented in stub")
 }
 
 // LayerByDiffID implements v1.Image
-func (r *RegistryImageStub) LayerByDiffID(h v1.Hash) (v1.Layer, error) {
+func (r *RegistryImageStub) LayerByDiffID(_ v1.Hash) (v1.Layer, error) {
 	return nil, fmt.Errorf("LayerByDiffID not implemented in stub")
 }
 
@@ -171,8 +172,8 @@ func (r *RegistryImageStub) Layers() ([]v1.Layer, error) {
 		parts := strings.Split(r.tag, ":")
 		if len(parts) == 2 {
 			tag := parts[1]
-			if strings.Contains(r.tag, "/release-channel:") {
-				// For release channels, map to semver versions
+			switch {
+			case strings.Contains(r.tag, "/release-channel:"):
 				switch tag {
 				case "alpha":
 					version = "v1.72.10"
@@ -191,9 +192,9 @@ func (r *RegistryImageStub) Layers() ([]v1.Layer, error) {
 						version = "v1.72.10"
 					}
 				}
-			} else if strings.HasPrefix(tag, "v") {
+			case strings.HasPrefix(tag, "v"):
 				version = tag
-			} else {
+			default:
 				version = "v1.72.10"
 			}
 		} else {
@@ -206,18 +207,22 @@ func (r *RegistryImageStub) Layers() ([]v1.Layer, error) {
 	tarWriter := tar.NewWriter(&tarBuf)
 
 	// Add directory headers
-	tarWriter.WriteHeader(&tar.Header{
+	if err := tarWriter.WriteHeader(&tar.Header{
 		Name:     "deckhouse/",
 		Typeflag: tar.TypeDir,
 		Mode:     0755,
 		ModTime:  time.Now(),
-	})
-	tarWriter.WriteHeader(&tar.Header{
+	}); err != nil {
+		return nil, err
+	}
+	if err := tarWriter.WriteHeader(&tar.Header{
 		Name:     "deckhouse/candi/",
 		Typeflag: tar.TypeDir,
 		Mode:     0755,
 		ModTime:  time.Now(),
-	})
+	}); err != nil {
+		return nil, err
+	}
 
 	// Add changelog.yaml file
 	changelogData := `candi:
@@ -301,8 +306,8 @@ func (r *RegistryImageStub) Extract() io.ReadCloser {
 		parts := strings.Split(r.tag, ":")
 		if len(parts) == 2 {
 			tag := parts[1]
-			if strings.Contains(r.tag, "/release-channel:") {
-				// For release channels, map to semver versions
+			switch {
+			case strings.Contains(r.tag, "/release-channel:"):
 				switch tag {
 				case "alpha":
 					version = "v1.72.10"
@@ -321,9 +326,9 @@ func (r *RegistryImageStub) Extract() io.ReadCloser {
 						version = "v1.72.10"
 					}
 				}
-			} else if strings.HasPrefix(tag, "v") {
+			case strings.HasPrefix(tag, "v"):
 				version = tag
-			} else {
+			default:
 				version = "v1.72.10"
 			}
 		} else {
@@ -336,18 +341,22 @@ func (r *RegistryImageStub) Extract() io.ReadCloser {
 	tarWriter := tar.NewWriter(&tarBuf)
 
 	// Add directory headers
-	tarWriter.WriteHeader(&tar.Header{
+	if err := tarWriter.WriteHeader(&tar.Header{
 		Name:     "deckhouse/",
 		Typeflag: tar.TypeDir,
 		Mode:     0755,
 		ModTime:  time.Now(),
-	})
-	tarWriter.WriteHeader(&tar.Header{
+	}); err != nil {
+		return io.NopCloser(strings.NewReader(""))
+	}
+	if err := tarWriter.WriteHeader(&tar.Header{
 		Name:     "deckhouse/candi/",
 		Typeflag: tar.TypeDir,
 		Mode:     0755,
 		ModTime:  time.Now(),
-	})
+	}); err != nil {
+		return io.NopCloser(strings.NewReader(""))
+	}
 
 	// Add changelog.yaml file
 	changelogData := `candi:
@@ -411,7 +420,7 @@ func (r *RegistryImageStub) GetMetadata() (pkg.ImageMeta, error) {
 	return image.NewImageMeta(r.tag, fmt.Sprintf("sha256:%s", r.digest.String()), &r.digest), nil
 }
 
-func (r *RegistryImageStub) SetMetadata(pkg.ImageMeta) {
+func (r *RegistryImageStub) SetMetadata(_ pkg.ImageMeta) {
 	// No-op for mock
 }
 
@@ -604,12 +613,12 @@ func (s *RegistryClientStub) createMockImageData(reg, repo, tag string) *ImageDa
 	}
 
 	// Determine the version to put in version.json based on the tag
-	version := tag
+	version := "v1.72.10" // default fallback
 	if repo == "release-channel" {
 		// For release channels, map to semver versions
 		switch tag {
 		case "alpha":
-			version = "v1.72.10"
+			// version = "v1.72.10" // same as default
 		case "beta":
 			version = "v1.71.0"
 		case "early-access":
@@ -622,15 +631,11 @@ func (s *RegistryClientStub) createMockImageData(reg, repo, tag string) *ImageDa
 			// If it's already a semver version, use it
 			if strings.HasPrefix(tag, "v") {
 				version = tag
-			} else {
-				version = "v1.72.10" // fallback
-			}
+			} // else keep default
 		}
 	} else if strings.HasPrefix(tag, "v") {
 		version = tag
-	} else {
-		version = "v1.72.10" // fallback for other tags
-	}
+	} // else keep default
 
 	// Create mock registry image (v1.Image implementation)
 	imageStub := &RegistryImageStub{
@@ -710,7 +715,7 @@ func (s *RegistryClientStub) GetRegistry() string {
 }
 
 // GetDigest retrieves the digest for a specific image tag
-func (s *RegistryClientStub) GetDigest(ctx context.Context, tag string) (*v1.Hash, error) {
+func (s *RegistryClientStub) GetDigest(_ context.Context, tag string) (*v1.Hash, error) {
 	registry, repo := s.findRegistryAndRepo()
 
 	if regData, exists := s.registries[registry]; exists {
@@ -733,7 +738,7 @@ func (s *RegistryClientStub) GetDigest(ctx context.Context, tag string) (*v1.Has
 }
 
 // GetManifest retrieves the manifest for a specific image tag
-func (s *RegistryClientStub) GetManifest(ctx context.Context, tag string) ([]byte, error) {
+func (s *RegistryClientStub) GetManifest(_ context.Context, tag string) ([]byte, error) {
 	registry, repo := s.findRegistryAndRepo()
 
 	if regData, exists := s.registries[registry]; exists {
@@ -756,7 +761,7 @@ func (s *RegistryClientStub) GetManifest(ctx context.Context, tag string) ([]byt
 }
 
 // GetImageConfig retrieves the image config file
-func (s *RegistryClientStub) GetImageConfig(ctx context.Context, tag string) (*v1.ConfigFile, error) {
+func (s *RegistryClientStub) GetImageConfig(_ context.Context, tag string) (*v1.ConfigFile, error) {
 	registry, repo := s.findRegistryAndRepo()
 
 	if regData, exists := s.registries[registry]; exists {
@@ -779,7 +784,7 @@ func (s *RegistryClientStub) GetImageConfig(ctx context.Context, tag string) (*v
 }
 
 // CheckImageExists checks if a specific image exists
-func (s *RegistryClientStub) CheckImageExists(ctx context.Context, tag string) error {
+func (s *RegistryClientStub) CheckImageExists(_ context.Context, tag string) error {
 	registry, repo := s.findRegistryAndRepo()
 
 	if regData, exists := s.registries[registry]; exists {
@@ -802,7 +807,7 @@ func (s *RegistryClientStub) CheckImageExists(ctx context.Context, tag string) e
 }
 
 // GetImage retrieves an image for a specific reference
-func (s *RegistryClientStub) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.ClientImage, error) {
+func (s *RegistryClientStub) GetImage(_ context.Context, tag string, _ ...pkg.ImageGetOption) (pkg.ClientImage, error) {
 	// Handle digest references (start with @)
 	if strings.HasPrefix(tag, "@") {
 		digestStr := strings.TrimPrefix(tag, "@")
@@ -846,13 +851,13 @@ func (s *RegistryClientStub) GetImage(ctx context.Context, tag string, opts ...p
 }
 
 // PushImage pushes an image to the registry
-func (s *RegistryClientStub) PushImage(ctx context.Context, tag string, img v1.Image) error {
+func (s *RegistryClientStub) PushImage(_ context.Context, _ string, _ v1.Image) error {
 	// Stub implementation - always succeeds
 	return nil
 }
 
 // ListTags retrieves all available tags
-func (s *RegistryClientStub) ListTags(ctx context.Context) ([]string, error) {
+func (s *RegistryClientStub) ListTags(_ context.Context) ([]string, error) {
 	var allTags []string
 	for _, regData := range s.registries {
 		for _, repoData := range regData.repositories {
@@ -863,7 +868,7 @@ func (s *RegistryClientStub) ListTags(ctx context.Context) ([]string, error) {
 }
 
 // ListRepositories retrieves all sub-repositories
-func (s *RegistryClientStub) ListRepositories(ctx context.Context) ([]string, error) {
+func (s *RegistryClientStub) ListRepositories(_ context.Context) ([]string, error) {
 	var allRepos []string
 	for _, regData := range s.registries {
 		for repo := range regData.repositories {

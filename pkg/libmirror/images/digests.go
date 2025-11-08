@@ -96,9 +96,9 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&mirrorCtx.BaseParams)
 
-	logger.InfoF("Deckhouse digests found: %d", len(images))
+	logger.Infof("Deckhouse digests found: %d", len(images))
 
-	logger.InfoF("Searching for VEX images")
+	logger.Infof("Searching for VEX images")
 
 	vex := make([]string, 0)
 	const scanPrintInterval = 20
@@ -106,7 +106,7 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 	for image := range images {
 		counter++
 		if counter%scanPrintInterval == 0 {
-			logger.InfoF("[%d / %d] Scanning images for VEX", counter, len(images))
+			logger.Infof("[%d / %d] Scanning images for VEX", counter, len(images))
 		}
 
 		if _, ok := prevDigests[image]; ok {
@@ -124,7 +124,7 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 		}
 
 		if vexImageName != "" {
-			logger.DebugF("Vex image found %s", vexImageName)
+			logger.Debugf("Vex image found %s", vexImageName)
 			vex = append(vex, vexImageName)
 		}
 
@@ -132,10 +132,10 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 		prevDigests[vexImageName] = struct{}{}
 	}
 
-	logger.InfoF("[%d / %d] Scanning images for VEX", counter, len(images))
+	logger.Infof("[%d / %d] Scanning images for VEX", counter, len(images))
 
-	logger.InfoF("Deckhouse digests found: %d", len(images))
-	logger.InfoF("VEX images found: %d", len(vex))
+	logger.Infof("Deckhouse digests found: %d", len(images))
+	logger.Infof("VEX images found: %d", len(vex))
 
 	for _, v := range vex {
 		images[v] = struct{}{}
@@ -176,9 +176,9 @@ func parseImagesFromJSON(registryRepo string, jsonDigests io.Reader, dst map[str
 
 func FindVexImage(
 	params *params.PullParams,
-	registryPath string,
+	_ string,
 	nameOpts []name.Option,
-	remoteOpts []remote.Option,
+	_ []remote.Option,
 	digest string,
 	client pkg.RegistryClient,
 ) (string, error) {
@@ -187,7 +187,7 @@ func FindVexImage(
 	// vex image reference check
 	vexImageName := strings.Replace(strings.Replace(digest, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
 
-	logger.DebugF("Checking vex image from %s", vexImageName)
+	logger.Debugf("Checking vex image from %s", vexImageName)
 
 	_, err := name.ParseReference(vexImageName, nameOpts...)
 	if err != nil {
@@ -203,7 +203,7 @@ func FindVexImage(
 
 	for i, segment := range imageSegments {
 		client = client.WithSegment(segment)
-		logger.DebugF("Segment %d: %s", i, segment)
+		logger.Debugf("Segment %d: %s", i, segment)
 	}
 
 	err = client.CheckImageExists(context.TODO(), tag)

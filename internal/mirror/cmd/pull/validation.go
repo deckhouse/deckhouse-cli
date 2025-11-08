@@ -24,9 +24,10 @@ import (
 	"path/filepath"
 
 	"github.com/Masterminds/semver/v3"
-	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/spf13/cobra"
+
+	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
 )
 
 func parseAndValidateParameters(_ *cobra.Command, args []string) error {
@@ -66,10 +67,10 @@ func validateSourceRegistry() error {
 		return fmt.Errorf("Validate source registry parameter: %w", err)
 	}
 	if registryURL.Host == "" {
-		return errors.New("--source you provided contains no registry host. Please specify source registry host address correctly.")
+		return errors.New("--source you provided contains no registry host. Please specify source registry host address correctly")
 	}
 	if registryURL.Path == "" {
-		return errors.New("--source you provided contains no registry path. Please specify source registry repo path correctly.")
+		return errors.New("--source you provided contains no registry path. Please specify source registry repo path correctly")
 	}
 
 	return nil
@@ -114,7 +115,7 @@ func validateImagesBundlePathArg(args []string) error {
 
 func parseAndValidateVersionFlags() error {
 	if pullflags.SinceVersionString != "" && pullflags.DeckhouseTag != "" {
-		return errors.New("Using both --deckhouse-tag and --since-version at the same time is ambiguous.")
+		return errors.New("Using both --deckhouse-tag and --since-version at the same time is ambiguous")
 	}
 
 	var err error

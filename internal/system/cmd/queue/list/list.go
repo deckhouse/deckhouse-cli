@@ -80,7 +80,7 @@ func listModule(cmd *cobra.Command, _ []string) error {
 
 	pathFromOption := "list." + format
 	if empty {
-		pathFromOption = pathFromOption + "?showEmpty=true"
+		pathFromOption += "?showEmpty=true"
 	}
 
 	err = operatequeue.OperateQueue(config, kubeCl, pathFromOption, watch)

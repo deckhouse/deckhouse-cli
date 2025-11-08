@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Masterminds/semver/v3"
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/platform"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 )
 
 type PullService struct {
@@ -21,11 +21,6 @@ type PullService struct {
 
 	// layout manages the OCI image layouts for different components
 	layout *ImageLayouts
-
-	// sinceVersion specifies the minimum version to start mirroring from (optional)
-	sinceVersion *semver.Version
-	// targetTag specifies a specific tag to mirror instead of determining versions automatically
-	targetTag string
 
 	// logger is for internal debug logging
 	logger *dkplog.Logger

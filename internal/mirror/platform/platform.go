@@ -15,6 +15,11 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/google/go-containerregistry/pkg/v1/layout"
+	"github.com/samber/lo"
+
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
@@ -26,9 +31,6 @@ import (
 	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	dkplog "github.com/deckhouse/deckhouse/pkg/log"
-	"github.com/google/go-containerregistry/pkg/v1/layout"
-	"github.com/samber/lo"
 )
 
 type Service struct {
@@ -62,14 +64,14 @@ func NewService(
 	logger *dkplog.Logger,
 	userLogger *log.SLogger,
 ) *Service {
-	userLogger.InfoF("Creating OCI Image Layouts")
+	userLogger.Infof("Creating OCI Image Layouts")
 
 	tmpDir := filepath.Join(workingDir, "platform")
 
 	layout, err := createOCIImageLayoutsForDeckhouse(tmpDir, deckhouseService.GetRoot())
 	if err != nil {
 		//TODO: handle error
-		userLogger.WarnF("Create OCI Image Layouts: %v", err)
+		userLogger.Warnf("Create OCI Image Layouts: %v", err)
 	}
 
 	return &Service{
@@ -151,7 +153,7 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 func (svc *Service) findTagsToMirror(ctx context.Context) ([]string, error) {
 	// If a specific tag is requested, skip the complex version determination logic
 	if svc.targetTag != "" {
-		svc.userLogger.InfoF("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", svc.targetTag)
+		svc.userLogger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", svc.targetTag)
 
 		return []string{svc.targetTag}, nil
 	}
@@ -162,12 +164,12 @@ func (svc *Service) findTagsToMirror(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("find versions to mirror: %w", err)
 	}
 
-	svc.userLogger.InfoF("Deckhouse releases to pull: %+v", versionsToMirror)
+	svc.userLogger.Infof("Deckhouse releases to pull: %+v", versionsToMirror)
 
 	// Convert versions to tag format (add "v" prefix)
 	return lo.Map(
 		versionsToMirror,
-		func(v semver.Version, index int) string {
+		func(v semver.Version, _ int) string {
 			return "v" + v.String()
 		},
 	), nil
@@ -187,7 +189,7 @@ func (svc *Service) versionsToMirrorFunc(ctx context.Context) ([]semver.Version,
 		version, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
 		if err != nil {
 			if channel == internal.LTSChannel {
-				svc.userLogger.WarnF("Skipping LTS channel: %v", err)
+				svc.userLogger.Warnf("Skipping LTS channel: %v", err)
 
 				continue
 			}
@@ -213,7 +215,7 @@ func (svc *Service) versionsToMirrorFunc(ctx context.Context) ([]semver.Version,
 		}
 	}
 
-	logger.DebugF("listing deckhouse releases")
+	logger.Debugf("listing deckhouse releases")
 
 	tags, err := svc.deckhouseService.ReleaseChannels().ListTags(ctx)
 	if err != nil {
@@ -268,7 +270,7 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 		return nil, fmt.Errorf("cannot get %s release channel image tag reference: %w", releaseChannel, err)
 	}
 
-	svc.userLogger.DebugF("image reference: %s@%s", imageMeta, digest.String())
+	svc.userLogger.Debugf("image reference: %s@%s", imageMeta, digest.String())
 
 	err = svc.layout.DeckhouseReleaseChannel.AddImage(image, imageMeta.GetTagReference())
 	if err != nil {
@@ -313,7 +315,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 		}
 	}
 
-	logger.InfoF("Searching for Deckhouse built-in modules digests")
+	logger.Infof("Searching for Deckhouse built-in modules digests")
 
 	var uniqueImages = make(map[string]string, 0)
 	for _, imageMeta := range svc.layout.InstallImages {
@@ -334,7 +336,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 		maps.Copy(svc.layout.DeckhouseImages, digests)
 	}
 
-	logger.InfoF("Found %d images", len(svc.layout.DeckhouseImages))
+	logger.Infof("Found %d images", len(svc.layout.DeckhouseImages))
 
 	if err = logger.Process("Pull Deckhouse images", func() error {
 		if err := svc.pullDeckhouseImages(ctx); err != nil {
@@ -366,7 +368,6 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 			}
 
 			for _, channel := range internal.GetAllDefaultReleaseChannels() {
-
 				if err = svc.layout.DeckhouseReleaseChannel.TagImage(digest, channel); err != nil {
 					return fmt.Errorf("tag release channel: %w", err)
 				}
@@ -466,7 +467,7 @@ func (svc *Service) pullDeckhouseImages(ctx context.Context) error {
 func (svc *Service) generateDeckhouseReleaseManifests(
 	tagsToMirror []string,
 ) error {
-	svc.userLogger.InfoF("Generating DeckhouseRelease manifests")
+	svc.userLogger.Infof("Generating DeckhouseRelease manifests")
 
 	deckhouseReleasesManifestFile := filepath.Join(pullflags.ImagesBundlePath, "deckhousereleases.yaml")
 
@@ -488,7 +489,7 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 ) (map[string]*puller.ImageMeta, error) {
 	logger := svc.userLogger
 
-	logger.DebugF("Extracting images digests from Deckhouse installer %s", tag)
+	logger.Debugf("Extracting images digests from Deckhouse installer %s", tag)
 
 	img, err := svc.layout.DeckhouseInstall.GetImage(tag)
 	if err != nil {
@@ -500,9 +501,9 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 		return nil, fmt.Errorf("extract extra images from installer %q: %w", tag, err)
 	}
 
-	logger.InfoF("Deckhouse digests found: %d", len(images))
+	logger.Infof("Deckhouse digests found: %d", len(images))
 
-	logger.InfoF("Searching for VEX images")
+	logger.Infof("Searching for VEX images")
 
 	vex := make([]string, 0)
 	result := make(map[string]*puller.ImageMeta, len(images))
@@ -512,7 +513,7 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 	for image := range images {
 		counter++
 		if counter%scanPrintInterval == 0 {
-			logger.InfoF("[%d / %d] Scanning images for VEX", counter, len(images))
+			logger.Infof("[%d / %d] Scanning images for VEX", counter, len(images))
 		}
 
 		if _, ok := prevDigests[image]; ok {
@@ -530,7 +531,7 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 		}
 
 		if vexImageName != "" {
-			logger.DebugF("Vex image found %s", vexImageName)
+			logger.Debugf("Vex image found %s", vexImageName)
 			vex = append(vex, vexImageName)
 			result[vexImageName] = nil
 		}
@@ -541,10 +542,10 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 		result[image] = nil
 	}
 
-	logger.InfoF("[%d / %d] Scanning images for VEX", counter, len(images))
+	logger.Infof("[%d / %d] Scanning images for VEX", counter, len(images))
 
-	logger.InfoF("Deckhouse digests found: %d", len(images))
-	logger.InfoF("VEX images found: %d", len(vex))
+	logger.Infof("Deckhouse digests found: %d", len(images))
+	logger.Infof("VEX images found: %d", len(vex))
 
 	return result, nil
 }
@@ -607,7 +608,7 @@ func (svc *Service) FindVexImage(
 	// vex image reference check
 	vexImageName := strings.Replace(strings.Replace(digest, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
 
-	logger.DebugF("Checking vex image from %s", vexImageName)
+	logger.Debugf("Checking vex image from %s", vexImageName)
 
 	splitIndex := strings.LastIndex(vexImageName, ":")
 	tag := vexImageName[splitIndex+1:]
@@ -617,7 +618,7 @@ func (svc *Service) FindVexImage(
 
 	// for i, segment := range imageSegments {
 	// 	client = client.WithSegment(segment)
-	// 	logger.DebugF("Segment %d: %s", i, segment)
+	// 	logger.Debugf("Segment %d: %s", i, segment)
 	// }
 
 	err := svc.deckhouseService.CheckImageExists(context.TODO(), tag)
@@ -704,11 +705,11 @@ func deduplicateVersions(versions []*semver.Version) []semver.Version {
 
 func createOCIImageLayoutsForDeckhouse(
 	rootFolder string,
-	rootUrl string,
+	rootURL string,
 ) (*ImageLayouts, error) {
 	var err error
 
-	layouts := NewImageLayouts(rootFolder, rootUrl)
+	layouts := NewImageLayouts(rootFolder, rootURL)
 
 	fsPath := rootFolder
 	layoutPtr, err := createEmptyImageLayout(fsPath)

@@ -39,7 +39,7 @@ type mockLogger struct {
 	logs []string
 }
 
-func (m *mockLogger) DebugF(format string, a ...interface{}) {
+func (m *mockLogger) Debugf(format string, a ...interface{}) {
 	m.logs = append(m.logs, fmt.Sprintf("DEBUG: "+format, a...))
 }
 
@@ -47,7 +47,7 @@ func (m *mockLogger) DebugLn(a ...interface{}) {
 	m.logs = append(m.logs, fmt.Sprintf("DEBUG: %s", fmt.Sprint(a...)))
 }
 
-func (m *mockLogger) InfoF(format string, a ...interface{}) {
+func (m *mockLogger) Infof(format string, a ...interface{}) {
 	m.logs = append(m.logs, fmt.Sprintf("INFO: "+format, a...))
 }
 
@@ -55,7 +55,7 @@ func (m *mockLogger) InfoLn(a ...interface{}) {
 	m.logs = append(m.logs, fmt.Sprintf("INFO: %s", fmt.Sprint(a...)))
 }
 
-func (m *mockLogger) WarnF(format string, a ...interface{}) {
+func (m *mockLogger) Warnf(format string, a ...interface{}) {
 	m.logs = append(m.logs, fmt.Sprintf("WARN: "+format, a...))
 }
 

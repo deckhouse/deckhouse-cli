@@ -89,8 +89,5 @@ func configureTransport(opts *Options) *http.Transport {
 		transport.TLSClientConfig.InsecureSkipVerify = true
 	}
 
-	if opts.Insecure {
-	}
-
 	return transport
 }

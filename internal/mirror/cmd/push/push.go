@@ -32,6 +32,8 @@ import (
 	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
@@ -40,7 +42,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
 	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
-	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 )
 
 // CLI Parameters
@@ -94,7 +95,7 @@ func NewCommand() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		PreRunE:       parseAndValidateParameters,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			return NewPusher().Execute()
 		},
 		PostRunE: func(_ *cobra.Command, _ []string) error {
@@ -151,7 +152,7 @@ func pushModules(pushParams *params.PushParams, logger params.Logger, client pkg
 	}
 
 	if len(successfullyPushedModules) > 0 {
-		logger.InfoF("Modules pushed: %v", strings.Join(successfullyPushedModules, ", "))
+		logger.Infof("Modules pushed: %v", strings.Join(successfullyPushedModules, ", "))
 	}
 
 	return nil
@@ -187,7 +188,7 @@ func pushStaticPackages(pushParams *params.PushParams, logger params.Logger, cli
 		}
 
 		if err = pkg.Close(); err != nil {
-			logger.WarnF("Could not close bundle package %s: %w", pkgName, err)
+			logger.Warnf("Could not close bundle package %s: %w", pkgName, err)
 		}
 	}
 	return nil
@@ -278,7 +279,7 @@ func NewPusher() *Pusher {
 
 // Execute runs the full push process
 func (p *Pusher) Execute() error {
-	p.logger.InfoF("d8 version: %s", version.Version)
+	p.logger.Infof("d8 version: %s", version.Version)
 
 	if RegistryUsername != "" {
 		p.pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{Username: RegistryUsername, Password: RegistryPassword})

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
@@ -12,7 +14,6 @@ import (
 	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 )
 
 // PullerService handles the pulling of images from the registry
@@ -81,7 +82,7 @@ func (ps *PullerService) PullImageSet(
 	pullCount, totalCount := 1, len(imageSet)
 
 	for imageReference, imageMeta := range imageSet {
-		logger.DebugF("Preparing to pull image %s", imageReference)
+		logger.Debugf("Preparing to pull image %s", imageReference)
 
 		err := retry.RunTask(
 			ctx,
@@ -99,7 +100,7 @@ func (ps *PullerService) PullImageSet(
 
 				img, err := imageGetter(ctx, "@"+imageMeta.Digest.String(), regclient.WithDownloadBar{Bar: pb})
 				if err != nil {
-					logger.DebugF("failed to pull image %s: %v", imageMeta.TagReference, err)
+					logger.Debugf("failed to pull image %s: %v", imageMeta.TagReference, err)
 
 					return fmt.Errorf("pull image metadata: %w", err)
 				}
@@ -112,7 +113,7 @@ func (ps *PullerService) PullImageSet(
 
 				err = imageSetLayout.AddImage(img, imageMeta.ImageTag)
 				if err != nil {
-					logger.DebugF("failed to add image %s: %v", imageMeta.ImageTag, err)
+					logger.Debugf("failed to add image %s: %v", imageMeta.ImageTag, err)
 
 					return fmt.Errorf("add image to layout: %w", err)
 				}

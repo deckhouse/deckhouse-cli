@@ -17,7 +17,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
-func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
+func BaseEditConfigCMD(cmd *cobra.Command, _ string, secret, dataKey string) error {
 	editor, err := cmd.Flags().GetString("editor")
 	if err != nil {
 		return fmt.Errorf("Failed to get editor from --editor flag: %w", err)
@@ -73,6 +73,9 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 	}
 
 	encodedValue, err := encodeSecretTmp(updatedContent, dataKey)
+	if err != nil {
+		return fmt.Errorf("Error encoding secret: %w", err)
+	}
 	_, err = kubeCl.CoreV1().
 		Secrets("kube-system").Patch(context.TODO(), secret, types.MergePatchType, encodedValue, metav1.PatchOptions{})
 	if err != nil {
@@ -86,7 +89,7 @@ func BaseEditConfigCMD(cmd *cobra.Command, name, secret, dataKey string) error {
 func writeSecretTmp(secretConfig *v1.Secret, dataKey string) (*os.File, error) {
 	tempFile, err := os.CreateTemp(os.TempDir(), "secret.*.yaml")
 	if err != nil {
-		return nil, fmt.Errorf("Can't save cluster configuration: %w\n", err)
+		return nil, fmt.Errorf("can't save cluster configuration: %w", err)
 	}
 
 	_, err = tempFile.Write(secretConfig.Data[dataKey])

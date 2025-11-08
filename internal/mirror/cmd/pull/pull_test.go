@@ -1339,11 +1339,11 @@ func TestPullFunction(t *testing.T) {
 // Mock implementations for testing
 type mockLogger struct{}
 
-func (m *mockLogger) DebugF(format string, a ...interface{}) {}
+func (m *mockLogger) Debugf(format string, a ...interface{}) {}
 func (m *mockLogger) DebugLn(a ...interface{})               {}
-func (m *mockLogger) InfoF(format string, a ...interface{})  {}
+func (m *mockLogger) Infof(format string, a ...interface{})  {}
 func (m *mockLogger) InfoLn(a ...interface{})                {}
-func (m *mockLogger) WarnF(format string, a ...interface{})  {}
+func (m *mockLogger) Warnf(format string, a ...interface{})  {}
 func (m *mockLogger) WarnLn(a ...interface{})                {}
 func (m *mockLogger) Process(name string, fn func() error) error {
 	return fn()

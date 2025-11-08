@@ -74,7 +74,7 @@ func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader,
 		}
 	}
 
-	pushParams.Logger.InfoF("Pushing module tag for %s", moduleName)
+	pushParams.Logger.Infof("Pushing module tag for %s", moduleName)
 
 	img, err := random.Image(32, 1)
 	if err != nil {

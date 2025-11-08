@@ -136,7 +136,8 @@ func (c *Client) GetDigest(ctx context.Context, tag string) (*v1.Hash, error) {
 		return nil, fmt.Errorf("failed to parse reference: %w", err)
 	}
 
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 
 	head, err := remote.Head(ref, opts...)
 	if err == nil {
@@ -171,7 +172,8 @@ func (c *Client) GetManifest(ctx context.Context, tag string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to parse reference: %w", err)
 	}
 
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 	desc, err := remote.Get(ref, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get manifest: %w", err)
@@ -239,7 +241,7 @@ func (c *Client) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetO
 	img, err := remote.Image(ref, imageOptions...)
 	if err != nil {
 		var transportErr *transport.Error
-		if errors.As(err, &transportErr) && transportErr.StatusCode == 404 {
+		if errors.As(err, &transportErr) && transportErr.StatusCode == http.StatusNotFound {
 			// Image not found, which is expected for non-vulnerable images
 			return nil, fmt.Errorf("%w: %w", ErrImageNotFound, err)
 		}
@@ -270,7 +272,8 @@ func (c *Client) PushImage(ctx context.Context, tag string, img v1.Image) error 
 		return fmt.Errorf("failed to parse reference: %w", err)
 	}
 
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 
 	if err := remote.Write(ref, img, opts...); err != nil {
 		return fmt.Errorf("failed to push image: %w", err)
@@ -327,7 +330,8 @@ func (c *Client) ListTags(ctx context.Context) ([]string, error) {
 	}
 
 	repo := ref.Context()
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 
 	tags, err := remote.List(repo, opts...)
 	if err != nil {
@@ -363,7 +367,8 @@ func (c *Client) ListRepositories(ctx context.Context) ([]string, error) {
 	repo := ref.Context()
 	logentry.Debug("Listing tags for base repository", slog.String("repository", repo.String()))
 
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 
 	// List "tags" which actually represent sub-repositories in this case
 	tags, err := remote.List(repo, opts...)
@@ -396,12 +401,13 @@ func (c *Client) CheckImageExists(ctx context.Context, tag string) error {
 		return fmt.Errorf("failed to parse reference: %w", err)
 	}
 
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 
 	_, err = remote.Head(ref, opts...)
 	if err != nil {
 		var transportErr *transport.Error
-		if errors.As(err, &transportErr) && transportErr.StatusCode == 404 {
+		if errors.As(err, &transportErr) && transportErr.StatusCode == http.StatusNotFound {
 			// Image not found, which is expected for non-vulnerable images
 			return ErrImageNotFound
 		}
@@ -415,7 +421,7 @@ func (c *Client) CheckImageExists(ctx context.Context, tag string) error {
 
 	if err != nil {
 		var transportErr *transport.Error
-		if errors.As(err, &transportErr) && transportErr.StatusCode == 404 {
+		if errors.As(err, &transportErr) && transportErr.StatusCode == http.StatusNotFound {
 			// Image not found, which is expected for non-vulnerable images
 			return ErrImageNotFound
 		}
