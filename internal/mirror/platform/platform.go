@@ -21,6 +21,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/manifests"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
@@ -344,37 +345,45 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 		return fmt.Errorf("Pull Deckhouse images: %w", err)
 	}
 
-	// err = logger.Process("Processing image indexes", func() error {
-	// 	if pullParams.DeckhouseTag != "" {
-	// 		// If we are pulling some build by tag, propagate release channel image of it to all channels if it exists.
-	// 		releaseChannel, err := layouts.FindImageDescriptorByTag(imageLayouts.ReleaseChannel, pullParams.DeckhouseTag)
-	// 		switch {
-	// 		case errors.Is(err, layouts.ErrImageNotFound):
-	// 			logger.WarnLn("Registry does not contain release channels, release channels images will not be added to bundle")
-	// 			goto sortManifests
-	// 		case err != nil:
-	// 			return fmt.Errorf("Find release-%s channel descriptor: %w", pullParams.DeckhouseTag, err)
-	// 		}
+	err = logger.Process("Processing image indexes", func() error {
+		if svc.targetTag != "" {
+			// If we are pulling some build by tag, propagate release channel image of it to all channels if it exists.
+			releaseChannel, err := svc.layout.DeckhouseReleaseChannel.GetImage(svc.targetTag)
 
-	// 		for _, channel := range internal.GetAllDefaultReleaseChannels() {
-	// 			if err = layouts.TagImage(imageLayouts.ReleaseChannel, releaseChannel.Digest, channel); err != nil {
-	// 				return fmt.Errorf("tag release channel: %w", err)
-	// 			}
-	// 		}
-	// 	}
+			switch {
+			case errors.Is(err, layouts.ErrImageNotFound):
+				logger.WarnLn("Registry does not contain release channels, release channels images will not be added to bundle")
+				// TODO: remove goto
+				goto sortManifests
+			case err != nil:
+				return fmt.Errorf("Find release-%s channel descriptor: %w", svc.targetTag, err)
+			}
 
-	// sortManifests:
-	// 	for _, l := range imageLayouts.AsList() {
-	// 		err = layouts.SortIndexManifests(l)
-	// 		if err != nil {
-	// 			return fmt.Errorf("Sorting index manifests of %s: %w", l, err)
-	// 		}
-	// 	}
-	// 	return nil
-	// })
-	// if err != nil {
-	// 	return fmt.Errorf("Processing image indexes: %w", err)
-	// }
+			digest, err := releaseChannel.Digest()
+			if err != nil {
+				return fmt.Errorf("cannot get release channel image digest: %w", err)
+			}
+
+			for _, channel := range internal.GetAllDefaultReleaseChannels() {
+
+				if err = svc.layout.DeckhouseReleaseChannel.TagImage(digest, channel); err != nil {
+					return fmt.Errorf("tag release channel: %w", err)
+				}
+			}
+		}
+
+	sortManifests:
+		for _, l := range svc.layout.AsList() {
+			err = layouts.SortIndexManifests(l)
+			if err != nil {
+				return fmt.Errorf("Sorting index manifests of %s: %w", l, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("Processing image indexes: %w", err)
+	}
 
 	if err := logger.Process("Pack Deckhouse images into platform.tar", func() error {
 		bundleChunkSize := pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000

@@ -84,12 +84,12 @@ func (s *DeckhouseService) GetRoot() string {
 	return s.client.GetRegistry()
 }
 
-func (s *DeckhouseService) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, error) {
+func (s *DeckhouseService) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.RegistryImage, error) {
 	logger := s.logger.With("tag", tag)
 
 	logger.Debug("Getting image")
 
-	img, err := s.client.GetImage(ctx, tag)
+	img, err := s.client.GetImage(ctx, tag, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get image: %w", err)
 	}

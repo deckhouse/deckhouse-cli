@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"path"
 	"strings"
 	"sync"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 
+	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/pkg"
 )
 
@@ -45,6 +47,7 @@ type Client struct {
 	constructedSegmentsOnce sync.Once // ensures constructedSegments is computed only once
 	options                 []remote.Option
 	logger                  *log.Logger
+	transport               http.RoundTripper // custom transport for TLS/insecure settings
 }
 
 // Ensure Client implements pkg.RegistryInterface
@@ -69,11 +72,17 @@ func NewClientWithOptions(registry string, opts *ClientOptions) *Client {
 
 	registry = strings.TrimSuffix(registry, "/")
 
-	return &Client{
+	client := &Client{
 		registryHost: registry,
 		options:      remoteOptions,
 		logger:       logger,
 	}
+
+	if needsCustomTransport(opts) {
+		client.transport = configureTransport(opts)
+	}
+
+	return client
 }
 
 // WithSegment creates a new client with an additional scope path segment
@@ -93,6 +102,7 @@ func (c *Client) WithSegment(segments ...string) pkg.RegistryClient {
 		segments:     append(append([]string(nil), c.segments...), segments...),
 		options:      c.options,
 		logger:       c.logger,
+		transport:    c.transport,
 	}
 }
 
@@ -172,11 +182,25 @@ func (c *Client) GetManifest(ctx context.Context, tag string) ([]byte, error) {
 	return desc.Manifest, nil
 }
 
+type WithDownloadBar struct {
+	Bar *progress.DownloadBar
+}
+
+func (w WithDownloadBar) ApplyToImageGet(opts *pkg.ImageGetOptions) {
+	opts.ProgressBar = w.Bar
+}
+
 // GetImage retrieves an remote image for a specific reference
 // Do not return remote image to avoid drop connection with context cancelation.
 // It will be in use while passed context will be alive.
 // The repository is determined by the chained WithSegment() calls
-func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, error) {
+func (c *Client) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.RegistryImage, error) {
+	getImageOptions := &pkg.ImageGetOptions{}
+
+	for _, opt := range opts {
+		opt.ApplyToImageGet(getImageOptions)
+	}
+
 	fullRegistry := c.GetRegistry()
 
 	logentry := c.logger.With(
@@ -200,8 +224,21 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 		return nil, fmt.Errorf("failed to parse reference: %w", err)
 	}
 
-	opts := append(c.options, remote.WithContext(ctx))
-	img, err := remote.Image(ref, opts...)
+	imageOptions := []remote.Option{remote.WithContext(ctx)}
+	imageOptions = append(imageOptions, c.options...)
+
+	if getImageOptions.ProgressBar != nil {
+		inner := remote.DefaultTransport
+		if c.transport != nil {
+			inner = c.transport
+		}
+
+		imageOptions = append(imageOptions, remote.WithTransport(
+			progress.NewRoundTripper(ctx, inner),
+		))
+	}
+
+	img, err := remote.Image(ref, imageOptions...)
 	if err != nil {
 		var transportErr *transport.Error
 		if errors.As(err, &transportErr) && transportErr.StatusCode == 404 {

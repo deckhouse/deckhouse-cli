@@ -101,7 +101,7 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessSkipTLS(t *testing.T) {
 	client.GetRegistryMock.Return(strings.TrimPrefix(server.URL, "https://"))
 	client.WithSegmentMock.Return(client)
 	callCount := 0
-	client.GetImageMock.Set(func(ctx context.Context, tag string) (pkg.RegistryImage, error) {
+	client.GetImageMock.Set(func(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.RegistryImage, error) {
 		switch tag {
 		case "2":
 			return wantRegistryImages[0], nil
@@ -171,7 +171,7 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessInsecure(t *testing.T) {
 	client.GetRegistryMock.Return(strings.TrimPrefix(server.URL, "http://"))
 	client.WithSegmentMock.Return(client)
 	callCount := 0
-	client.GetImageMock.Set(func(ctx context.Context, tag string) (pkg.RegistryImage, error) {
+	client.GetImageMock.Set(func(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.RegistryImage, error) {
 		switch tag {
 		case "2":
 			return wantRegistryImages[0], nil

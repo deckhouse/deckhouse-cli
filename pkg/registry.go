@@ -20,6 +20,7 @@ import (
 	"context"
 	"io"
 
+	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
@@ -34,6 +35,16 @@ type RegistryImage interface {
 	Extract() io.ReadCloser
 	GetMetadata() (ImageMeta, error)
 	SetMetadata(metadata ImageMeta)
+}
+
+// ImageGetOption is some configuration that modifies options for a get request.
+type ImageGetOption interface {
+	// ApplyToImageGet applies this configuration to the given image get options.
+	ApplyToImageGet(*ImageGetOptions)
+}
+
+type ImageGetOptions struct {
+	ProgressBar *progress.DownloadBar
 }
 
 // RegistryClient defines the contract for interacting with container registries
@@ -66,7 +77,7 @@ type RegistryClient interface {
 	// Do not return remote image to avoid drop connection with context cancelation.
 	// It will be in use while passed context will be alive.
 	// The repository is determined by the chained WithSegment() calls
-	GetImage(ctx context.Context, tag string) (RegistryImage, error)
+	GetImage(ctx context.Context, tag string, opts ...ImageGetOption) (RegistryImage, error)
 
 	// PushImage pushes an image to the registry at the specified tag
 	// The repository is determined by the chained WithSegment() calls
@@ -83,7 +94,7 @@ type RegistryClient interface {
 
 // BasicService defines common registry operations with standardized logging
 type BasicService interface {
-	GetImage(ctx context.Context, tag string) (RegistryImage, error)
+	GetImage(ctx context.Context, tag string, opts ...ImageGetOption) (RegistryImage, error)
 	GetDigest(ctx context.Context, tag string) (*v1.Hash, error)
 	CheckImageExists(ctx context.Context, tag string) error
 	ListTags(ctx context.Context) ([]string, error)

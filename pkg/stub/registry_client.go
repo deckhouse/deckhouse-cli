@@ -802,7 +802,7 @@ func (s *RegistryClientStub) CheckImageExists(ctx context.Context, tag string) e
 }
 
 // GetImage retrieves an image for a specific reference
-func (s *RegistryClientStub) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, error) {
+func (s *RegistryClientStub) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.RegistryImage, error) {
 	// Handle digest references (start with @)
 	if strings.HasPrefix(tag, "@") {
 		digestStr := strings.TrimPrefix(tag, "@")

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
@@ -92,7 +93,10 @@ func (ps *PullerService) PullImageSet(
 					return nil
 				}
 
-				img, err := imageGetter(ctx, "@"+imageMeta.Digest.String())
+				pb := &progress.DownloadBar{}
+				defer pb.Abort(true)
+
+				img, err := imageGetter(ctx, "@"+imageMeta.Digest.String(), registry.WithDownloadBar{Bar: pb})
 				if err != nil {
 					logger.DebugF("failed to pull image %s: %v", imageMeta.TagReference, err)
 

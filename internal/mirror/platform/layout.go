@@ -3,11 +3,13 @@ package platform
 import (
 	"fmt"
 	"path"
+	"reflect"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/layout"
 )
 
 type ImageDownloadRequest struct {
@@ -88,4 +90,23 @@ func (l *ImageLayouts) setLayoutByMirrorType(mirrorType internal.MirrorType, lay
 	default:
 		panic(fmt.Sprintf("wrong mirror type in platform image layout: %v", mirrorType))
 	}
+}
+
+// AsList returns a list of layout.Path's in it. Undefined path's are not included in the list.
+func (l *ImageLayouts) AsList() []layout.Path {
+	layoutsValue := reflect.ValueOf(l).Elem()
+	layoutPathType := reflect.TypeOf(layout.Path(""))
+
+	paths := make([]layout.Path, 0)
+	for i := 0; i < layoutsValue.NumField(); i++ {
+		if layoutsValue.Field(i).Type() != layoutPathType {
+			continue
+		}
+
+		if pathValue := layoutsValue.Field(i).String(); pathValue != "" {
+			paths = append(paths, layout.Path(pathValue))
+		}
+	}
+
+	return paths
 }

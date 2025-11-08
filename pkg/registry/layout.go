@@ -79,6 +79,38 @@ func (l *ImageLayout) GetImage(tag string) (pkg.RegistryImage, error) {
 	return newImage, nil
 }
 
+func (l *ImageLayout) TagImage(imageDigest v1.Hash, tag string) error {
+	index, err := l.wrapped.ImageIndex()
+	if err != nil {
+		return err
+	}
+
+	indexManifest, err := index.IndexManifest()
+	if err != nil {
+		return err
+	}
+
+	for _, imageDescriptor := range indexManifest.Manifests {
+		if imageDescriptor.Digest == imageDigest {
+			imageRepo, _, found := strings.Cut(imageDescriptor.Annotations[AnnotationImageReferenceName], ":")
+			// If there is no ":" symbol in the image reference, then it must be a reference by digest and those are fine as is
+			if found {
+				imageDescriptor.Annotations[AnnotationImageReferenceName] = imageRepo + ":" + tag
+			}
+
+			imageDescriptor.Annotations[AnnotationImageShortTag] = tag
+
+			if err = l.wrapped.AppendDescriptor(imageDescriptor); err != nil {
+				return fmt.Errorf("append descriptor %s: %w", tag, err)
+			}
+
+			return nil
+		}
+	}
+
+	return ErrImageNotFound
+}
+
 var ErrImageMetaNotFound = fmt.Errorf("image metadata not found")
 
 func (l *ImageLayout) GetMeta(tag string) (*ImageMeta, error) {

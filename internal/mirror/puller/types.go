@@ -10,7 +10,7 @@ import (
 )
 
 // ImageGetter is a function type for getting images from the registry
-type ImageGetter func(ctx context.Context, tag string) (pkg.RegistryImage, error)
+type ImageGetter func(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.RegistryImage, error)
 
 // PullConfig encapsulates the configuration for pulling images
 type PullConfig struct {

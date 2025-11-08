@@ -44,12 +44,12 @@ func NewBasicService(name string, client pkg.RegistryClient, logger *log.Logger)
 }
 
 // GetImage retrieves an image from the registry
-func (s *BasicService) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, error) {
+func (s *BasicService) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.RegistryImage, error) {
 	logger := s.logger.With(slog.String("service", s.name), slog.String("tag", tag))
 
 	logger.Debug("Getting image")
 
-	img, err := s.client.GetImage(ctx, tag)
+	img, err := s.client.GetImage(ctx, tag, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get image: %w", err)
 	}
