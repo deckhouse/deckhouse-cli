@@ -9,7 +9,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
@@ -73,7 +73,7 @@ func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) erro
 func (ps *PullerService) PullImageSet(
 	ctx context.Context,
 	imageSet map[string]*ImageMeta,
-	imageSetLayout *registry.ImageLayout,
+	imageSetLayout *image.ImageLayout,
 	imageGetter ImageGetter,
 ) error {
 	logger := ps.userLogger
@@ -97,7 +97,7 @@ func (ps *PullerService) PullImageSet(
 				pb := &progress.DownloadBar{}
 				defer pb.Abort(true)
 
-				img, err := imageGetter(ctx, "@"+imageMeta.Digest.String(), registry.WithDownloadBar{Bar: pb})
+				img, err := imageGetter(ctx, "@"+imageMeta.Digest.String(), regclient.WithDownloadBar{Bar: pb})
 				if err != nil {
 					logger.DebugF("failed to pull image %s: %v", imageMeta.TagReference, err)
 

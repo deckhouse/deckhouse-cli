@@ -23,7 +23,8 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
+	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
@@ -620,7 +621,7 @@ func (svc *Service) FindVexImage(
 	// }
 
 	err := svc.deckhouseService.CheckImageExists(context.TODO(), tag)
-	if errors.Is(err, registry.ErrImageNotFound) {
+	if errors.Is(err, regclient.ErrImageNotFound) {
 		// Image not found, which is expected for non-vulnerable images
 		return "", nil
 	}
@@ -715,7 +716,7 @@ func createOCIImageLayoutsForDeckhouse(
 		return nil, fmt.Errorf("create OCI Image Layout at %s: %w", fsPath, err)
 	}
 
-	layouts.Deckhouse = registry.NewImageLayout(layoutPtr)
+	layouts.Deckhouse = regimage.NewImageLayout(layoutPtr)
 
 	mirrorTypes := []internal.MirrorType{
 		internal.MirrorTypeDeckhouse,
@@ -731,7 +732,7 @@ func createOCIImageLayoutsForDeckhouse(
 			return nil, fmt.Errorf("create OCI Image Layout at %s: %w", fsPath, err)
 		}
 
-		layouts.setLayoutByMirrorType(mtype, registry.NewImageLayout(layoutPtr))
+		layouts.setLayoutByMirrorType(mtype, regimage.NewImageLayout(layoutPtr))
 	}
 
 	return layouts, nil

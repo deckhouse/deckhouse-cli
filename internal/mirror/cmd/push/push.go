@@ -39,8 +39,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
+	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 )
 
@@ -321,7 +320,7 @@ func (p *Pusher) pushStaticPackages() error {
 	}
 
 	// Create registry client for module operations
-	clientOpts := &client.Options{
+	clientOpts := &regclient.Options{
 		Insecure:      p.pushParams.Insecure,
 		TLSSkipVerify: p.pushParams.SkipTLSVerification,
 		Logger:        logger,
@@ -332,7 +331,7 @@ func (p *Pusher) pushStaticPackages() error {
 	}
 
 	var client pkg.RegistryClient
-	client = registry.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
+	client = regclient.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
 
 	// Scope to the registry path and modules suffix
 	if p.pushParams.RegistryPath != "" {
@@ -351,7 +350,7 @@ func (p *Pusher) pushModules() error {
 	}
 
 	// Create registry client for module operations
-	clientOpts := &client.Options{
+	clientOpts := &regclient.Options{
 		Insecure:      p.pushParams.Insecure,
 		TLSSkipVerify: p.pushParams.SkipTLSVerification,
 		Logger:        logger, // Will use default logger
@@ -362,7 +361,7 @@ func (p *Pusher) pushModules() error {
 	}
 
 	var client pkg.RegistryClient
-	client = registry.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
+	client = regclient.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
 
 	// Scope to the registry path and modules suffix
 	if p.pushParams.RegistryPath != "" {

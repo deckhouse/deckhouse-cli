@@ -32,7 +32,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
 func GenerateDeckhouseReleaseManifestsForVersions(
@@ -84,7 +84,7 @@ func GenerateDeckhouseReleaseManifestsForVersions(
 func GenerateDeckhouseReleaseManifestsForVersionsNew(
 	versionTagsToMirror []string,
 	pathToManifestYAML string,
-	releaseChannelsImagesLayout *registry.ImageLayout,
+	releaseChannelsImagesLayout *regimage.ImageLayout,
 ) error {
 	manifests := &bytes.Buffer{}
 	for _, version := range versionTagsToMirror {

@@ -37,7 +37,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 type ModuleImageLayout struct {
@@ -497,7 +497,7 @@ func FindVexImage(
 	}
 
 	err = client.CheckImageExists(context.TODO(), tag)
-	if errors.Is(err, registry.ErrImageNotFound) {
+	if errors.Is(err, regclient.ErrImageNotFound) {
 		// Image not found, which is expected for non-vulnerable images
 		return "", nil
 	}

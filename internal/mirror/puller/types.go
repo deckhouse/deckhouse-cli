@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
@@ -16,7 +16,7 @@ type ImageGetter func(ctx context.Context, tag string, opts ...pkg.ImageGetOptio
 type PullConfig struct {
 	Name             string
 	ImageSet         map[string]*ImageMeta
-	Layout           *registry.ImageLayout
+	Layout           *regimage.ImageLayout
 	AllowMissingTags bool
 	GetterService    pkg.BasicService
 }

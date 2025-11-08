@@ -46,8 +46,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
+	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	"github.com/deckhouse/deckhouse-cli/pkg/stub"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
@@ -238,7 +237,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 		}
 
 		// Create registry client for module operations
-		clientOpts := &client.Options{
+		clientOpts := &regclient.Options{
 			Insecure:      p.params.Insecure,
 			TLSSkipVerify: p.params.SkipTLSVerification,
 			Logger:        logger,
@@ -249,7 +248,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 		}
 
 		var c pkg.RegistryClient
-		c = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+		c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
 		if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
 			c = stub.NewRegistryClientStub()
@@ -319,7 +318,7 @@ func (p *Puller) pullPlatform() error {
 	}
 
 	// Create registry client for module operations
-	clientOpts := &client.Options{
+	clientOpts := &regclient.Options{
 		Insecure:      p.params.Insecure,
 		TLSSkipVerify: p.params.SkipTLSVerification,
 		Logger:        logger,
@@ -330,7 +329,7 @@ func (p *Puller) pullPlatform() error {
 	}
 
 	var c pkg.RegistryClient
-	c = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+	c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
 	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
 		c = stub.NewRegistryClientStub()
@@ -391,7 +390,7 @@ func (p *Puller) pullSecurityDatabases() error {
 	}
 
 	// Create registry client for module operations
-	clientOpts := &client.Options{
+	clientOpts := &regclient.Options{
 		Insecure:      p.params.Insecure,
 		TLSSkipVerify: p.params.SkipTLSVerification,
 		Logger:        logger,
@@ -402,7 +401,7 @@ func (p *Puller) pullSecurityDatabases() error {
 	}
 
 	var c pkg.RegistryClient
-	c = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+	c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
 	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
 		c = stub.NewRegistryClientStub()
@@ -452,7 +451,7 @@ func (p *Puller) pullModules() error {
 	}
 
 	// Create registry client for module operations
-	clientOpts := &client.Options{
+	clientOpts := &regclient.Options{
 		Insecure:      p.params.Insecure,
 		TLSSkipVerify: p.params.SkipTLSVerification,
 		Logger:        logger,
@@ -463,7 +462,7 @@ func (p *Puller) pullModules() error {
 	}
 
 	var c pkg.RegistryClient
-	c = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+	c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
 	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
 		c = stub.NewRegistryClientStub()

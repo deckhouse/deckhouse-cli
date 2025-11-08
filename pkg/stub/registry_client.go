@@ -29,7 +29,7 @@ import (
 	"time"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 )
@@ -408,7 +408,7 @@ func (r *RegistryImageStub) Extract() io.ReadCloser {
 
 // GetMetadata implements RegistryImage
 func (r *RegistryImageStub) GetMetadata() (pkg.ImageMeta, error) {
-	return registry.NewImageMeta(r.tag, fmt.Sprintf("sha256:%s", r.digest.String()), &r.digest), nil
+	return image.NewImageMeta(r.tag, fmt.Sprintf("sha256:%s", r.digest.String()), &r.digest), nil
 }
 
 func (r *RegistryImageStub) SetMetadata(pkg.ImageMeta) {
@@ -665,7 +665,7 @@ func (s *RegistryClientStub) createMockImageData(reg, repo, tag string) *ImageDa
 	// Create real registry.Image wrapping the mock v1.Image
 	tagReference := fmt.Sprintf("%s/%s:%s", reg, repo, tag)
 	digestReference := fmt.Sprintf("%s/%s@%s", reg, repo, digest.String())
-	_ = registry.NewImageMeta(tagReference, digestReference, &digest)
+	_ = image.NewImageMeta(tagReference, digestReference, &digest)
 
 	// Always use the stub directly to ensure Extract method works
 	var registryImage pkg.RegistryImage = imageStub
@@ -802,7 +802,7 @@ func (s *RegistryClientStub) CheckImageExists(ctx context.Context, tag string) e
 }
 
 // GetImage retrieves an image for a specific reference
-func (s *RegistryClientStub) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.RegistryImage, error) {
+func (s *RegistryClientStub) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.ClientImage, error) {
 	// Handle digest references (start with @)
 	if strings.HasPrefix(tag, "@") {
 		digestStr := strings.TrimPrefix(tag, "@")
@@ -816,7 +816,7 @@ func (s *RegistryClientStub) GetImage(ctx context.Context, tag string, opts ...p
 			for _, repoData := range regData.repositories {
 				for _, imageData := range repoData.images {
 					if imageData.digest != nil && imageData.digest.String() == digest.String() {
-						return imageData.image, nil
+						return imageData.image.(pkg.ClientImage), nil
 					}
 				}
 			}
@@ -829,7 +829,7 @@ func (s *RegistryClientStub) GetImage(ctx context.Context, tag string, opts ...p
 	if regData, exists := s.registries[registry]; exists {
 		if repoData, exists := regData.repositories[repo]; exists {
 			if imageData, exists := repoData.images[tag]; exists {
-				return imageData.image, nil
+				return imageData.image.(pkg.ClientImage), nil
 			}
 		}
 	}
@@ -838,7 +838,7 @@ func (s *RegistryClientStub) GetImage(ctx context.Context, tag string, opts ...p
 	for _, regData := range s.registries {
 		for _, repoData := range regData.repositories {
 			if imageData, exists := repoData.images[tag]; exists {
-				return imageData.image, nil
+				return imageData.image.(pkg.ClientImage), nil
 			}
 		}
 	}

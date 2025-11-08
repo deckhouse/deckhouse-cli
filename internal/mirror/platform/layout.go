@@ -7,7 +7,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 )
@@ -24,16 +24,16 @@ type ImageLayouts struct {
 	workingDir string
 	rootUrl    string
 
-	Deckhouse       *registry.ImageLayout
+	Deckhouse       *regimage.ImageLayout
 	DeckhouseImages map[string]*puller.ImageMeta
 
-	DeckhouseInstall *registry.ImageLayout
+	DeckhouseInstall *regimage.ImageLayout
 	InstallImages    map[string]*puller.ImageMeta
 
-	DeckhouseInstallStandalone *registry.ImageLayout
+	DeckhouseInstallStandalone *regimage.ImageLayout
 	InstallStandaloneImages    map[string]*puller.ImageMeta
 
-	DeckhouseReleaseChannel *registry.ImageLayout
+	DeckhouseReleaseChannel *regimage.ImageLayout
 	ReleaseChannelImages    map[string]*puller.ImageMeta
 }
 
@@ -77,7 +77,7 @@ func (l *ImageLayouts) FillForTag(tag string) {
 	}
 }
 
-func (l *ImageLayouts) setLayoutByMirrorType(mirrorType internal.MirrorType, layout *registry.ImageLayout) {
+func (l *ImageLayouts) setLayoutByMirrorType(mirrorType internal.MirrorType, layout *regimage.ImageLayout) {
 	switch mirrorType {
 	case internal.MirrorTypeDeckhouse:
 		l.Deckhouse = layout
