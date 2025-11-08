@@ -34,6 +34,8 @@ import (
 	"github.com/samber/lo/parallel"
 	"github.com/spf13/cobra"
 
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
@@ -49,7 +51,6 @@ import (
 	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	"github.com/deckhouse/deckhouse-cli/pkg/stub"
-	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 )
 
 var ErrPullFailed = errors.New("pull failed, see the log for details")
@@ -103,7 +104,7 @@ func NewCommand() *cobra.Command {
 func pull(cmd *cobra.Command, _ []string) error {
 	puller := NewPuller(cmd)
 
-	puller.logger.InfoF("d8 version: %s", version.Version)
+	puller.logger.Infof("d8 version: %s", version.Version)
 
 	if err := puller.Execute(cmd.Context()); err != nil {
 		return ErrPullFailed
@@ -122,7 +123,7 @@ func setupLogger() *log.SLogger {
 
 func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger, client pkg.RegistryClient) ([]string, error) {
 	if pullParams.DeckhouseTag != "" {
-		logger.InfoF("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
+		logger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
 		return []string{pullParams.DeckhouseTag}, nil
 	}
 
@@ -130,7 +131,7 @@ func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger, client
 	if err != nil {
 		return nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}
-	logger.InfoF("Deckhouse releases to pull: %+v", versionsToMirror)
+	logger.Infof("Deckhouse releases to pull: %+v", versionsToMirror)
 
 	return lo.Map(versionsToMirror, func(v semver.Version, index int) string {
 		return "v" + v.String()
@@ -420,7 +421,7 @@ func (p *Puller) pullSecurityDatabases() error {
 		err := p.accessValidator.ValidateReadAccessForImage(ctx, imageRef, p.validationOpts...)
 		switch {
 		case errors.Is(err, validation.ErrImageUnavailable):
-			p.logger.WarnF("Skipping pull of security databases: %v", err)
+			p.logger.Warnf("Skipping pull of security databases: %v", err)
 			return nil
 		case err != nil:
 			return fmt.Errorf("Source registry is not accessible: %w", err)

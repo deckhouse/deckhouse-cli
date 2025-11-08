@@ -1,9 +1,10 @@
 package mirror
 
 import (
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/platform"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
+
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/platform"
 )
 
 type ModuleRelease struct {

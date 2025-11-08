@@ -24,9 +24,10 @@ import (
 	"path/filepath"
 
 	"github.com/Masterminds/semver/v3"
-	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/spf13/cobra"
+
+	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
 )
 
 func parseAndValidateParameters(_ *cobra.Command, args []string) error {

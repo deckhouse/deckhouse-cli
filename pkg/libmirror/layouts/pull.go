@@ -222,7 +222,7 @@ func PullImageSet(
 			return fmt.Errorf("parse image reference %q: %w", pullReference, err)
 		}
 
-		logger.DebugF("reference here: %s", ref.String())
+		logger.Debugf("reference here: %s", ref.String())
 
 		imagePath, tag := splitImageRefByRepoAndTag(pullReference)
 
@@ -232,7 +232,7 @@ func PullImageSet(
 
 		for i, segment := range imageSegments {
 			scopedClient = scopedClient.WithSegment(segment)
-			logger.DebugF("Segment %d: %s", i, segment)
+			logger.Debugf("Segment %d: %s", i, segment)
 		}
 
 		err = retry.RunTask(
@@ -247,7 +247,7 @@ func PullImageSet(
 						return nil
 					}
 
-					logger.DebugF("failed to pull image %s:%s: %v", imageReferenceString, tag, err)
+					logger.Debugf("failed to pull image %s:%s: %v", imageReferenceString, tag, err)
 
 					return fmt.Errorf("pull image metadata: %w", err)
 				}

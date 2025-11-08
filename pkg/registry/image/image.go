@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
+
+	"github.com/deckhouse/deckhouse-cli/pkg"
 )
 
 type Image struct {

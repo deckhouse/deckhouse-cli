@@ -52,7 +52,7 @@ func NewNop() *SLogger {
 	}
 }
 
-func (s *SLogger) DebugF(format string, a ...any) {
+func (s *SLogger) Debugf(format string, a ...any) {
 	s.delegate.Debug(s.formatRecord(format, a...))
 }
 
@@ -60,7 +60,7 @@ func (s *SLogger) DebugLn(a ...any) {
 	s.delegate.Debug(s.formatRecord("", a...))
 }
 
-func (s *SLogger) InfoF(format string, a ...any) {
+func (s *SLogger) Infof(format string, a ...any) {
 	s.delegate.Info(s.formatRecord(format, a...))
 }
 
@@ -68,7 +68,7 @@ func (s *SLogger) InfoLn(a ...any) {
 	s.delegate.Info(s.formatRecord("", a...))
 }
 
-func (s *SLogger) WarnF(format string, a ...any) {
+func (s *SLogger) Warnf(format string, a ...any) {
 	s.delegate.Warn(s.formatRecord(format, a...))
 }
 

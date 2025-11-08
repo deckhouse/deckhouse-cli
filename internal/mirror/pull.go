@@ -5,10 +5,12 @@ import (
 	"fmt"
 
 	"github.com/Masterminds/semver/v3"
+
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/platform"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 )
 
 type PullService struct {

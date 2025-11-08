@@ -46,7 +46,7 @@ func VersionsToMirror(pullParams *params.PullParams, client pkg.RegistryClient) 
 		v, err := getReleaseChannelVersionFromRegistry(pullParams, channel)
 		if err != nil {
 			if channel == internal.LTSChannel {
-				logger.WarnF("Skipping LTS channel: %v", err)
+				logger.Warnf("Skipping LTS channel: %v", err)
 				continue
 			}
 
@@ -92,7 +92,7 @@ func getReleasedTagsFromRegistry(pullParams *params.PullParams, client pkg.Regis
 		return nil, fmt.Errorf("parsing repo: %v", err)
 	}
 
-	logger.DebugF("listing: %s", repo.String())
+	logger.Debugf("listing: %s", repo.String())
 
 	tags, err := client.ListTags(context.TODO())
 	if err != nil {

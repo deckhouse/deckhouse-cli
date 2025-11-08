@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
+
+	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 const (

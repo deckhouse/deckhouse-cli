@@ -75,7 +75,7 @@ func NewRootCommand() *RootCommand {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Run: func(cmd *cobra.Command, args []string) {
-			cmd.Help()
+			_ = cmd.Help()
 		},
 	}
 
@@ -131,6 +131,7 @@ func (r *RootCommand) Execute() error {
 			werfcommon.TerminateWithError(err.Error(), helm_v3.PluginErrorCode(err))
 		} else if errors.Is(err, resrcchangcalc.ErrChangesPlanned) {
 			werfcommon.ShutdownTelemetry(ctx, 2)
+			logs.FlushLogs()
 			os.Exit(2)
 		} else {
 			werfcommon.ShutdownTelemetry(ctx, 1)
@@ -144,5 +145,8 @@ func (r *RootCommand) Execute() error {
 
 func execute() {
 	rootCmd := NewRootCommand()
-	rootCmd.Execute()
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
+		os.Exit(1)
+	}
 }

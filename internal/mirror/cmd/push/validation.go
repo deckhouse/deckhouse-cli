@@ -24,10 +24,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/samber/lo"
 	"github.com/spf13/cobra"
+
+	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 )
 
 func parseAndValidateParameters(_ *cobra.Command, args []string) error {

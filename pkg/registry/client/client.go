@@ -239,7 +239,7 @@ func (c *Client) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetO
 	img, err := remote.Image(ref, imageOptions...)
 	if err != nil {
 		var transportErr *transport.Error
-		if errors.As(err, &transportErr) && transportErr.StatusCode == 404 {
+		if errors.As(err, &transportErr) && transportErr.StatusCode == http.StatusNotFound {
 			// Image not found, which is expected for non-vulnerable images
 			return nil, fmt.Errorf("%w: %w", ErrImageNotFound, err)
 		}
@@ -401,7 +401,7 @@ func (c *Client) CheckImageExists(ctx context.Context, tag string) error {
 	_, err = remote.Head(ref, opts...)
 	if err != nil {
 		var transportErr *transport.Error
-		if errors.As(err, &transportErr) && transportErr.StatusCode == 404 {
+		if errors.As(err, &transportErr) && transportErr.StatusCode == http.StatusNotFound {
 			// Image not found, which is expected for non-vulnerable images
 			return ErrImageNotFound
 		}
@@ -415,7 +415,7 @@ func (c *Client) CheckImageExists(ctx context.Context, tag string) error {
 
 	if err != nil {
 		var transportErr *transport.Error
-		if errors.As(err, &transportErr) && transportErr.StatusCode == 404 {
+		if errors.As(err, &transportErr) && transportErr.StatusCode == http.StatusNotFound {
 			// Image not found, which is expected for non-vulnerable images
 			return ErrImageNotFound
 		}

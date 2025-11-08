@@ -17,6 +17,7 @@ limitations under the License.
 package flags
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/Masterminds/semver/v3"
@@ -205,7 +206,9 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		false,
 		"Ignore suspended release channels instead of failing.",
 	)
-	flagSet.MarkHidden("ignore-suspended-channels")
+	if err := flagSet.MarkHidden("ignore-suspended-channels"); err != nil {
+		panic(fmt.Sprintf("failed to mark flag as hidden: %v", err))
+	}
 	flagSet.StringVar(
 		&TempDir,
 		"tmp-dir",

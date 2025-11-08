@@ -20,8 +20,9 @@ import (
 	"context"
 	"io"
 
-	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+
+	"github.com/deckhouse/deckhouse-cli/internal/progress"
 )
 
 type ImageMeta interface {

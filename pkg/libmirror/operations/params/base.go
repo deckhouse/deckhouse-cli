@@ -21,13 +21,13 @@ import (
 )
 
 type Logger interface {
-	DebugF(format string, a ...interface{})
+	Debugf(format string, a ...interface{})
 	DebugLn(a ...interface{})
 
-	InfoF(format string, a ...interface{})
+	Infof(format string, a ...interface{})
 	InfoLn(a ...interface{})
 
-	WarnF(format string, a ...interface{})
+	Warnf(format string, a ...interface{})
 	WarnLn(a ...interface{})
 
 	Process(topic string, run func() error) error

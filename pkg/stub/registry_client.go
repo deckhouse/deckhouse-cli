@@ -28,10 +28,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+
+	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
 // RegistryClientStub provides a stub implementation of RegistryClient for testing
@@ -171,8 +172,8 @@ func (r *RegistryImageStub) Layers() ([]v1.Layer, error) {
 		parts := strings.Split(r.tag, ":")
 		if len(parts) == 2 {
 			tag := parts[1]
-			if strings.Contains(r.tag, "/release-channel:") {
-				// For release channels, map to semver versions
+			switch {
+			case strings.Contains(r.tag, "/release-channel:"):
 				switch tag {
 				case "alpha":
 					version = "v1.72.10"
@@ -191,9 +192,9 @@ func (r *RegistryImageStub) Layers() ([]v1.Layer, error) {
 						version = "v1.72.10"
 					}
 				}
-			} else if strings.HasPrefix(tag, "v") {
+			case strings.HasPrefix(tag, "v"):
 				version = tag
-			} else {
+			default:
 				version = "v1.72.10"
 			}
 		} else {
@@ -206,18 +207,22 @@ func (r *RegistryImageStub) Layers() ([]v1.Layer, error) {
 	tarWriter := tar.NewWriter(&tarBuf)
 
 	// Add directory headers
-	tarWriter.WriteHeader(&tar.Header{
+	if err := tarWriter.WriteHeader(&tar.Header{
 		Name:     "deckhouse/",
 		Typeflag: tar.TypeDir,
 		Mode:     0755,
 		ModTime:  time.Now(),
-	})
-	tarWriter.WriteHeader(&tar.Header{
+	}); err != nil {
+		return nil, err
+	}
+	if err := tarWriter.WriteHeader(&tar.Header{
 		Name:     "deckhouse/candi/",
 		Typeflag: tar.TypeDir,
 		Mode:     0755,
 		ModTime:  time.Now(),
-	})
+	}); err != nil {
+		return nil, err
+	}
 
 	// Add changelog.yaml file
 	changelogData := `candi:
@@ -301,8 +306,8 @@ func (r *RegistryImageStub) Extract() io.ReadCloser {
 		parts := strings.Split(r.tag, ":")
 		if len(parts) == 2 {
 			tag := parts[1]
-			if strings.Contains(r.tag, "/release-channel:") {
-				// For release channels, map to semver versions
+			switch {
+			case strings.Contains(r.tag, "/release-channel:"):
 				switch tag {
 				case "alpha":
 					version = "v1.72.10"
@@ -321,9 +326,9 @@ func (r *RegistryImageStub) Extract() io.ReadCloser {
 						version = "v1.72.10"
 					}
 				}
-			} else if strings.HasPrefix(tag, "v") {
+			case strings.HasPrefix(tag, "v"):
 				version = tag
-			} else {
+			default:
 				version = "v1.72.10"
 			}
 		} else {
@@ -336,18 +341,22 @@ func (r *RegistryImageStub) Extract() io.ReadCloser {
 	tarWriter := tar.NewWriter(&tarBuf)
 
 	// Add directory headers
-	tarWriter.WriteHeader(&tar.Header{
+	if err := tarWriter.WriteHeader(&tar.Header{
 		Name:     "deckhouse/",
 		Typeflag: tar.TypeDir,
 		Mode:     0755,
 		ModTime:  time.Now(),
-	})
-	tarWriter.WriteHeader(&tar.Header{
+	}); err != nil {
+		return io.NopCloser(strings.NewReader(""))
+	}
+	if err := tarWriter.WriteHeader(&tar.Header{
 		Name:     "deckhouse/candi/",
 		Typeflag: tar.TypeDir,
 		Mode:     0755,
 		ModTime:  time.Now(),
-	})
+	}); err != nil {
+		return io.NopCloser(strings.NewReader(""))
+	}
 
 	// Add changelog.yaml file
 	changelogData := `candi:
@@ -604,12 +613,12 @@ func (s *RegistryClientStub) createMockImageData(reg, repo, tag string) *ImageDa
 	}
 
 	// Determine the version to put in version.json based on the tag
-	version := tag
+	version := "v1.72.10" // default fallback
 	if repo == "release-channel" {
 		// For release channels, map to semver versions
 		switch tag {
 		case "alpha":
-			version = "v1.72.10"
+			// version = "v1.72.10" // same as default
 		case "beta":
 			version = "v1.71.0"
 		case "early-access":
@@ -622,15 +631,11 @@ func (s *RegistryClientStub) createMockImageData(reg, repo, tag string) *ImageDa
 			// If it's already a semver version, use it
 			if strings.HasPrefix(tag, "v") {
 				version = tag
-			} else {
-				version = "v1.72.10" // fallback
-			}
+			} // else keep default
 		}
 	} else if strings.HasPrefix(tag, "v") {
 		version = tag
-	} else {
-		version = "v1.72.10" // fallback for other tags
-	}
+	} // else keep default
 
 	// Create mock registry image (v1.Image implementation)
 	imageStub := &RegistryImageStub{

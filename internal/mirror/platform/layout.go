@@ -5,11 +5,12 @@ import (
 	"path"
 	"reflect"
 
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/layout"
+
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/layout"
 )
 
 type ImageDownloadRequest struct {

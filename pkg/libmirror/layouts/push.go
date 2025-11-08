@@ -113,7 +113,7 @@ func PushLayoutToRepoContext(
 		if parallelismConfig.Images == 1 {
 			tag := manifestSet[0].Annotations["io.deckhouse.image.short_tag"]
 			imageRef := buildExtraImageRef(registryRepo, tag)
-			logger.InfoF("[%d / %d] Pushing image %s", imagesCount, len(indexManifest.Manifests), imageRef)
+			logger.Infof("[%d / %d] Pushing image %s", imagesCount, len(indexManifest.Manifests), imageRef)
 			if err = pushImage(ctx, client, registryRepo, index, manifestSet[0], refOpts, remoteOpts, logger); err != nil {
 				return fmt.Errorf("Push Image: %w", err)
 			}
@@ -125,7 +125,7 @@ func PushLayoutToRepoContext(
 			logger.InfoLn("Images in batch:")
 			for _, manifest := range manifestSet {
 				tag := manifest.Annotations["io.deckhouse.image.short_tag"]
-				logger.InfoF("- %s", buildExtraImageRef(registryRepo, tag))
+				logger.Infof("- %s", buildExtraImageRef(registryRepo, tag))
 			}
 
 			errMu := &sync.Mutex{}
@@ -193,10 +193,10 @@ type silentLogger struct{}
 
 var _ params.Logger = silentLogger{}
 
-func (silentLogger) DebugF(_ string, _ ...interface{})      {}
+func (silentLogger) Debugf(_ string, _ ...interface{})      {}
 func (silentLogger) DebugLn(_ ...interface{})               {}
-func (silentLogger) InfoF(_ string, _ ...interface{})       {}
+func (silentLogger) Infof(_ string, _ ...interface{})       {}
 func (silentLogger) InfoLn(_ ...interface{})                {}
-func (silentLogger) WarnF(_ string, _ ...interface{})       {}
+func (silentLogger) Warnf(_ string, _ ...interface{})       {}
 func (silentLogger) WarnLn(_ ...interface{})                {}
 func (silentLogger) Process(_ string, _ func() error) error { return nil }
