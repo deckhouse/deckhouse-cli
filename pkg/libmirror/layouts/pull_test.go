@@ -39,14 +39,24 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	mock "github.com/deckhouse/deckhouse-cli/pkg/mock"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
 type mockRegistryImage struct {
 	v1.Image
+	ref string
 }
 
 func (m *mockRegistryImage) Extract() io.ReadCloser {
 	return io.NopCloser(strings.NewReader(""))
+}
+
+func (m *mockRegistryImage) GetMetadata() (pkg.ImageMeta, error) {
+	return image.NewImageMeta(m.ref, "", nil), nil
+}
+
+func (m *mockRegistryImage) SetMetadata(meta pkg.ImageMeta) {
+	// No-op for mock
 }
 
 var testLogger = log.NewSLogger(slog.LevelDebug)
@@ -76,8 +86,8 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessSkipTLS(t *testing.T) {
 	}
 
 	wantRegistryImages := make([]pkg.RegistryImage, 0)
-	for _, img := range wantImages {
-		wantRegistryImages = append(wantRegistryImages, &mockRegistryImage{Image: img})
+	for i, img := range wantImages {
+		wantRegistryImages = append(wantRegistryImages, &mockRegistryImage{Image: img, ref: images[i]})
 	}
 
 	layouts := &ImageLayouts{
@@ -91,7 +101,7 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessSkipTLS(t *testing.T) {
 	client.GetRegistryMock.Return(strings.TrimPrefix(server.URL, "https://"))
 	client.WithSegmentMock.Return(client)
 	callCount := 0
-	client.GetImageMock.Set(func(ctx context.Context, tag string) (pkg.RegistryImage, error) {
+	client.GetImageMock.Set(func(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.ClientImage, error) {
 		switch tag {
 		case "2":
 			return wantRegistryImages[0], nil
@@ -146,8 +156,8 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessInsecure(t *testing.T) {
 	}
 
 	wantRegistryImages := make([]pkg.RegistryImage, 0)
-	for _, img := range wantImages {
-		wantRegistryImages = append(wantRegistryImages, &mockRegistryImage{Image: img})
+	for i, img := range wantImages {
+		wantRegistryImages = append(wantRegistryImages, &mockRegistryImage{Image: img, ref: images[i]})
 	}
 
 	layouts := &ImageLayouts{
@@ -161,7 +171,7 @@ func TestPullTrivyVulnerabilityDatabaseImageSuccessInsecure(t *testing.T) {
 	client.GetRegistryMock.Return(strings.TrimPrefix(server.URL, "http://"))
 	client.WithSegmentMock.Return(client)
 	callCount := 0
-	client.GetImageMock.Set(func(ctx context.Context, tag string) (pkg.RegistryImage, error) {
+	client.GetImageMock.Set(func(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.ClientImage, error) {
 		switch tag {
 		case "2":
 			return wantRegistryImages[0], nil

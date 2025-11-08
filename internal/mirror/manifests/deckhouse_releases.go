@@ -32,6 +32,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
+	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
 func GenerateDeckhouseReleaseManifestsForVersions(
@@ -42,6 +43,56 @@ func GenerateDeckhouseReleaseManifestsForVersions(
 	manifests := &bytes.Buffer{}
 	for _, version := range versionTagsToMirror {
 		versionReleaseImage, err := layouts.FindImageByTag(releaseChannelsImagesLayout, version)
+		if err != nil {
+			fmt.Printf("Find image by tag: %v\n", err)
+		}
+		releaseData, err := extractReleaseInfoForDeckhouseRelease(versionReleaseImage)
+		if err != nil {
+			return fmt.Errorf("Build manifest for version %q: %w", version, err)
+		}
+
+		releaseManifest, err := generateDeckhouseRelease(version, releaseData)
+		if err != nil {
+			return fmt.Errorf("Build manifest for version %q: %w", version, err)
+		}
+
+		manifests.Write(releaseManifest)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(pathToManifestYAML), 0o775); err != nil {
+		return fmt.Errorf("Create DeckhouseReleases manifest file: %w", err)
+	}
+	manifestFile, err := os.Create(pathToManifestYAML)
+	if err != nil {
+		return fmt.Errorf("Create DeckhouseReleases manifest file: %w", err)
+	}
+
+	if _, err = io.Copy(manifestFile, manifests); err != nil {
+		return fmt.Errorf("Write DeckhouseReleases manifest file: %w", err)
+	}
+
+	if err = manifestFile.Sync(); err != nil {
+		return fmt.Errorf("Write DeckhouseReleases manifest file: %w", err)
+	}
+	if err = manifestFile.Close(); err != nil {
+		return fmt.Errorf("Write DeckhouseReleases manifest file: %w", err)
+	}
+
+	return nil
+}
+
+func GenerateDeckhouseReleaseManifestsForVersionsNew(
+	versionTagsToMirror []string,
+	pathToManifestYAML string,
+	releaseChannelsImagesLayout *regimage.ImageLayout,
+) error {
+	manifests := &bytes.Buffer{}
+	for _, version := range versionTagsToMirror {
+		versionReleaseImage, err := releaseChannelsImagesLayout.GetImage(version)
+		if err != nil {
+			fmt.Printf("Find image by tag: %v\n", err)
+		}
+
 		releaseData, err := extractReleaseInfoForDeckhouseRelease(versionReleaseImage)
 		if err != nil {
 			return fmt.Errorf("Build manifest for version %q: %w", version, err)

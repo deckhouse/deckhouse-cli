@@ -1,0 +1,130 @@
+package puller
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/deckhouse/deckhouse-cli/internal/progress"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
+	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+)
+
+// PullerService handles the pulling of images from the registry
+type PullerService struct {
+	deckhouseService *service.DeckhouseService
+	logger           *dkplog.Logger
+	userLogger       *log.SLogger
+}
+
+// NewPullerService creates a new PullerService
+func NewPullerService(
+	deckhouseService *service.DeckhouseService,
+	logger *dkplog.Logger,
+	userLogger *log.SLogger,
+) *PullerService {
+	return &PullerService{
+		deckhouseService: deckhouseService,
+		logger:           logger,
+		userLogger:       userLogger,
+	}
+}
+
+// PullImages pulls images according to the provided configuration
+func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) error {
+	ps.userLogger.InfoLn("Beginning to pull " + config.Name)
+
+	ps.userLogger.InfoLn("Pull " + config.Name + " meta")
+	for image, meta := range config.ImageSet {
+		if meta != nil {
+			continue
+		}
+
+		_, tag := SplitImageRefByRepoAndTag(image)
+
+		digest, err := config.GetterService.GetDigest(ctx, tag)
+		if err != nil {
+			if config.AllowMissingTags {
+				continue
+			}
+
+			return fmt.Errorf("get digest: %w", err)
+		}
+
+		config.ImageSet[image] = NewImageMeta(tag, image, digest)
+	}
+	ps.userLogger.InfoLn("All required " + config.Name + " meta are pulled!")
+
+	if err := ps.PullImageSet(ctx, config.ImageSet, config.Layout, config.GetterService.GetImage); err != nil {
+		return err
+	}
+
+	ps.userLogger.InfoLn("All required " + config.Name + " are pulled!")
+
+	return nil
+}
+
+// PullImageSet pulls a set of images using the provided image getter
+func (ps *PullerService) PullImageSet(
+	ctx context.Context,
+	imageSet map[string]*ImageMeta,
+	imageSetLayout *image.ImageLayout,
+	imageGetter ImageGetter,
+) error {
+	logger := ps.userLogger
+
+	pullCount, totalCount := 1, len(imageSet)
+
+	for imageReference, imageMeta := range imageSet {
+		logger.DebugF("Preparing to pull image %s", imageReference)
+
+		err := retry.RunTask(
+			ctx,
+			ps.userLogger,
+			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageReference),
+			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
+				if imageMeta == nil {
+					logger.WarnLn("⚠️ Not found in registry, skipping pull")
+
+					return nil
+				}
+
+				pb := &progress.DownloadBar{}
+				defer pb.Abort(true)
+
+				img, err := imageGetter(ctx, "@"+imageMeta.Digest.String(), regclient.WithDownloadBar{Bar: pb})
+				if err != nil {
+					logger.DebugF("failed to pull image %s: %v", imageMeta.TagReference, err)
+
+					return fmt.Errorf("pull image metadata: %w", err)
+				}
+
+				img.SetMetadata(&image.ImageMeta{
+					TagReference:    imageMeta.TagReference,
+					DigestReference: "@" + imageMeta.Digest.String(),
+					Digest:          imageMeta.Digest,
+				})
+
+				err = imageSetLayout.AddImage(img, imageMeta.ImageTag)
+				if err != nil {
+					logger.DebugF("failed to add image %s: %v", imageMeta.ImageTag, err)
+
+					return fmt.Errorf("add image to layout: %w", err)
+				}
+
+				return nil
+			}))
+		if err != nil {
+			return fmt.Errorf("pull image %q: %w", imageMeta.TagReference, err)
+		}
+
+		pullCount++
+	}
+
+	return nil
+}

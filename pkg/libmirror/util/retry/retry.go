@@ -30,8 +30,8 @@ type Task interface {
 	MaxRetries() uint
 }
 
-func RunTask(logger params.Logger, name string, task Task) error {
-	return RunTaskWithContext(context.Background(), logger, name, task)
+func RunTask(ctx context.Context, logger params.Logger, name string, task Task) error {
+	return RunTaskWithContext(ctx, logger, name, task)
 }
 
 func RunTaskWithContext(ctx context.Context, logger params.Logger, name string, task Task) error {

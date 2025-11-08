@@ -17,21 +17,38 @@ limitations under the License.
 package service
 
 import (
-	"archive/tar"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
+	"log/slog"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
 )
 
+const (
+	deckhouseReleaseChannelsSegment = "release-channel"
+	installerSegment                = "install"
+	installStandaloneSegment        = "install-standalone"
+
+	deckhouseServiceName                = "deckhouse"
+	deckhouseReleaseChannelsServiceName = "deckhouse_release_channel"
+	installerServiceName                = "installer"
+	standaloneInstallerServiceName      = "standalone_installer"
+)
+
 // DeckhouseService provides high-level operations for Deckhouse platform management
 type DeckhouseService struct {
 	client pkg.RegistryClient
+
+	*BasicService
+	deckhouseReleaseChannels *DeckhouseReleaseService
+	installer                *BasicService
+	standaloneInstaller      *BasicService
+
 	logger *log.Logger
 }
 
@@ -39,117 +56,95 @@ type DeckhouseService struct {
 func NewDeckhouseService(client pkg.RegistryClient, logger *log.Logger) *DeckhouseService {
 	return &DeckhouseService{
 		client: client,
+
+		BasicService:             NewBasicService(deckhouseServiceName, client, logger),
+		deckhouseReleaseChannels: NewDeckhouseReleaseService(NewBasicService(deckhouseReleaseChannelsServiceName, client.WithSegment(deckhouseReleaseChannelsSegment), logger)),
+		installer:                NewBasicService(installerServiceName, client.WithSegment(installerSegment), logger),
+		standaloneInstaller:      NewBasicService(standaloneInstallerServiceName, client.WithSegment(installStandaloneSegment), logger),
+
 		logger: logger,
 	}
 }
 
-// ListReleases lists all available Deckhouse releases
-func (s *DeckhouseService) ListReleases(ctx context.Context) ([]string, error) {
-	s.logger.Debug("Listing Deckhouse releases")
-
-	// Assume releases are under a specific path, e.g., scoped to "releases"
-	releaseClient := s.client.WithSegment("releases")
-
-	releaseNames, err := releaseClient.ListTags(ctx)
-	if err != nil {
-		s.logger.Warn("Failed to list releases from registry", "error", err.Error())
-		return nil, fmt.Errorf("failed to list releases: %w", err)
-	}
-
-	s.logger.Debug("Releases listed successfully", "count", len(releaseNames))
-
-	return releaseNames, nil
+func (s *DeckhouseService) ReleaseChannels() *DeckhouseReleaseService {
+	return s.deckhouseReleaseChannels
 }
 
-// GetReleaseInfo gets information about a specific Deckhouse release
-func (s *DeckhouseService) GetReleaseInfo(ctx context.Context, releaseTag string) (interface{}, error) {
-	s.logger.Debug("Getting release info", "release", releaseTag)
-
-	releaseClient := s.client.WithSegment("releases")
-
-	imageConfig, err := releaseClient.GetImageConfig(ctx, releaseTag)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get image config: %w", err)
-	}
-
-	// Get some label, e.g., version info
-	version, exists := imageConfig.Config.Labels["version"]
-	if !exists {
-		return nil, fmt.Errorf("version info not found")
-	}
-
-	return version, nil
+func (s *DeckhouseService) Installer() *BasicService {
+	return s.installer
 }
 
-// ExtractRelease downloads the Deckhouse release image and extracts it to the specified location
-func (s *DeckhouseService) ExtractRelease(ctx context.Context, releaseTag, destination string) error {
-	s.logger.Debug("Extracting release", "release", releaseTag, "destination", destination)
-
-	if err := os.MkdirAll(destination, 0755); err != nil {
-		return fmt.Errorf("failed to create destination directory: %w", err)
-	}
-
-	releaseClient := s.client.WithSegment("releases")
-	img, err := releaseClient.GetImage(ctx, releaseTag)
-	if err != nil {
-		return fmt.Errorf("failed to get image: %w", err)
-	}
-
-	err = s.extractTar(img.Extract(), destination)
-	if err != nil {
-		return fmt.Errorf("failed to extract tar: %w", err)
-	}
-
-	return nil
+func (s *DeckhouseService) StandaloneInstaller() *BasicService {
+	return s.standaloneInstaller
 }
 
-// extractTar extracts a tar archive to the destination directory
-func (s *DeckhouseService) extractTar(r io.Reader, destination string) error {
-	tr := tar.NewReader(r)
+// GetRoot gets path of the registry root
+func (s *DeckhouseService) GetRoot() string {
+	return s.client.GetRegistry()
+}
 
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
+type DeckhouseReleaseService struct {
+	*BasicService
+}
+
+func NewDeckhouseReleaseService(basicService *BasicService) *DeckhouseReleaseService {
+	return &DeckhouseReleaseService{
+		BasicService: basicService,
+	}
+}
+
+type DeckhouseReleaseMetadata struct {
+	Version string
+	Suspend bool
+}
+
+func (s *DeckhouseReleaseService) GetMetadata(ctx context.Context, tag string) (*DeckhouseReleaseMetadata, error) {
+	logger := s.logger.With(slog.String("service", s.name), slog.String("tag", tag))
+
+	logger.Debug("Getting metadata")
+
+	img, err := s.client.GetImage(ctx, tag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get image: %w", err)
+	}
+
+	meta, err := extractDeckhouseReleaseMetadata(img.Extract())
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract metadata: %w", err)
+	}
+
+	return meta, nil
+}
+
+func extractDeckhouseReleaseMetadata(rc io.ReadCloser) (*DeckhouseReleaseMetadata, error) {
+	var meta = new(DeckhouseReleaseMetadata)
+
+	defer rc.Close()
+
+	drr := &deckhouseReleaseReader{
+		versionReader: bytes.NewBuffer(nil),
+	}
+
+	err := drr.untarMetadata(rc)
+	if err != nil {
+		return nil, err
+	}
+
+	type versionStruct struct {
+		Version string `json:"version"`
+		Suspend bool   `json:"suspend"`
+	}
+
+	var version versionStruct
+	if drr.versionReader.Len() > 0 {
+		err = json.NewDecoder(drr.versionReader).Decode(&version)
 		if err != nil {
-			return fmt.Errorf("failed to read tar header: %w", err)
+			return nil, err
 		}
 
-		target := filepath.Join(destination, header.Name)
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, os.FileMode(header.Mode)); err != nil {
-				return fmt.Errorf("failed to create directory %s: %w", target, err)
-			}
-		case tar.TypeReg:
-			file, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(header.Mode))
-			if err != nil {
-				return fmt.Errorf("failed to create file %s: %w", target, err)
-			}
-			if _, err := io.Copy(file, tr); err != nil {
-				file.Close()
-				return fmt.Errorf("failed to write file %s: %w", target, err)
-			}
-			file.Close()
-		}
-	}
-	return nil
-}
-
-// ListReleaseTags lists all available tags for Deckhouse releases
-func (s *DeckhouseService) ListReleaseTags(ctx context.Context) ([]string, error) {
-	s.logger.Debug("Listing release tags")
-
-	releaseClient := s.client.WithSegment("releases")
-
-	tags, err := releaseClient.ListTags(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list release tags: %w", err)
+		meta.Version = version.Version
+		meta.Suspend = version.Suspend
 	}
 
-	s.logger.Debug("Release tags listed successfully", "count", len(tags))
-
-	return tags, nil
+	return meta, nil
 }

@@ -34,9 +34,9 @@ type RegistryClientMock struct {
 	beforeGetDigestCounter uint64
 	GetDigestMock          mRegistryClientMockGetDigest
 
-	funcGetImage          func(ctx context.Context, tag string) (r1 mm_pkg.RegistryImage, err error)
+	funcGetImage          func(ctx context.Context, tag string, opts ...mm_pkg.ImageGetOption) (c2 mm_pkg.ClientImage, err error)
 	funcGetImageOrigin    string
-	inspectFuncGetImage   func(ctx context.Context, tag string)
+	inspectFuncGetImage   func(ctx context.Context, tag string, opts ...mm_pkg.ImageGetOption)
 	afterGetImageCounter  uint64
 	beforeGetImageCounter uint64
 	GetImageMock          mRegistryClientMockGetImage
@@ -76,9 +76,9 @@ type RegistryClientMock struct {
 	beforeListTagsCounter uint64
 	ListTagsMock          mRegistryClientMockListTags
 
-	funcPushImage          func(ctx context.Context, tag string, img mm_pkg.RegistryImage) (err error)
+	funcPushImage          func(ctx context.Context, tag string, img v1.Image) (err error)
 	funcPushImageOrigin    string
-	inspectFuncPushImage   func(ctx context.Context, tag string, img mm_pkg.RegistryImage)
+	inspectFuncPushImage   func(ctx context.Context, tag string, img v1.Image)
 	afterPushImageCounter  uint64
 	beforePushImageCounter uint64
 	PushImageMock          mRegistryClientMockPushImage
@@ -844,27 +844,30 @@ type RegistryClientMockGetImageExpectation struct {
 
 // RegistryClientMockGetImageParams contains parameters of the RegistryClient.GetImage
 type RegistryClientMockGetImageParams struct {
-	ctx context.Context
-	tag string
+	ctx  context.Context
+	tag  string
+	opts []mm_pkg.ImageGetOption
 }
 
 // RegistryClientMockGetImageParamPtrs contains pointers to parameters of the RegistryClient.GetImage
 type RegistryClientMockGetImageParamPtrs struct {
-	ctx *context.Context
-	tag *string
+	ctx  *context.Context
+	tag  *string
+	opts *[]mm_pkg.ImageGetOption
 }
 
 // RegistryClientMockGetImageResults contains results of the RegistryClient.GetImage
 type RegistryClientMockGetImageResults struct {
-	r1  mm_pkg.RegistryImage
+	c2  mm_pkg.ClientImage
 	err error
 }
 
 // RegistryClientMockGetImageOrigins contains origins of expectations of the RegistryClient.GetImage
 type RegistryClientMockGetImageExpectationOrigins struct {
-	origin    string
-	originCtx string
-	originTag string
+	origin     string
+	originCtx  string
+	originTag  string
+	originOpts string
 }
 
 // Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
@@ -878,7 +881,7 @@ func (mmGetImage *mRegistryClientMockGetImage) Optional() *mRegistryClientMockGe
 }
 
 // Expect sets up expected params for RegistryClient.GetImage
-func (mmGetImage *mRegistryClientMockGetImage) Expect(ctx context.Context, tag string) *mRegistryClientMockGetImage {
+func (mmGetImage *mRegistryClientMockGetImage) Expect(ctx context.Context, tag string, opts ...mm_pkg.ImageGetOption) *mRegistryClientMockGetImage {
 	if mmGetImage.mock.funcGetImage != nil {
 		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by Set")
 	}
@@ -891,7 +894,7 @@ func (mmGetImage *mRegistryClientMockGetImage) Expect(ctx context.Context, tag s
 		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by ExpectParams functions")
 	}
 
-	mmGetImage.defaultExpectation.params = &RegistryClientMockGetImageParams{ctx, tag}
+	mmGetImage.defaultExpectation.params = &RegistryClientMockGetImageParams{ctx, tag, opts}
 	mmGetImage.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
 	for _, e := range mmGetImage.expectations {
 		if minimock.Equal(e.params, mmGetImage.defaultExpectation.params) {
@@ -948,8 +951,31 @@ func (mmGetImage *mRegistryClientMockGetImage) ExpectTagParam2(tag string) *mReg
 	return mmGetImage
 }
 
+// ExpectOptsParam3 sets up expected param opts for RegistryClient.GetImage
+func (mmGetImage *mRegistryClientMockGetImage) ExpectOptsParam3(opts ...mm_pkg.ImageGetOption) *mRegistryClientMockGetImage {
+	if mmGetImage.mock.funcGetImage != nil {
+		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by Set")
+	}
+
+	if mmGetImage.defaultExpectation == nil {
+		mmGetImage.defaultExpectation = &RegistryClientMockGetImageExpectation{}
+	}
+
+	if mmGetImage.defaultExpectation.params != nil {
+		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by Expect")
+	}
+
+	if mmGetImage.defaultExpectation.paramPtrs == nil {
+		mmGetImage.defaultExpectation.paramPtrs = &RegistryClientMockGetImageParamPtrs{}
+	}
+	mmGetImage.defaultExpectation.paramPtrs.opts = &opts
+	mmGetImage.defaultExpectation.expectationOrigins.originOpts = minimock.CallerInfo(1)
+
+	return mmGetImage
+}
+
 // Inspect accepts an inspector function that has same arguments as the RegistryClient.GetImage
-func (mmGetImage *mRegistryClientMockGetImage) Inspect(f func(ctx context.Context, tag string)) *mRegistryClientMockGetImage {
+func (mmGetImage *mRegistryClientMockGetImage) Inspect(f func(ctx context.Context, tag string, opts ...mm_pkg.ImageGetOption)) *mRegistryClientMockGetImage {
 	if mmGetImage.mock.inspectFuncGetImage != nil {
 		mmGetImage.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.GetImage")
 	}
@@ -960,7 +986,7 @@ func (mmGetImage *mRegistryClientMockGetImage) Inspect(f func(ctx context.Contex
 }
 
 // Return sets up results that will be returned by RegistryClient.GetImage
-func (mmGetImage *mRegistryClientMockGetImage) Return(r1 mm_pkg.RegistryImage, err error) *RegistryClientMock {
+func (mmGetImage *mRegistryClientMockGetImage) Return(c2 mm_pkg.ClientImage, err error) *RegistryClientMock {
 	if mmGetImage.mock.funcGetImage != nil {
 		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by Set")
 	}
@@ -968,13 +994,13 @@ func (mmGetImage *mRegistryClientMockGetImage) Return(r1 mm_pkg.RegistryImage, e
 	if mmGetImage.defaultExpectation == nil {
 		mmGetImage.defaultExpectation = &RegistryClientMockGetImageExpectation{mock: mmGetImage.mock}
 	}
-	mmGetImage.defaultExpectation.results = &RegistryClientMockGetImageResults{r1, err}
+	mmGetImage.defaultExpectation.results = &RegistryClientMockGetImageResults{c2, err}
 	mmGetImage.defaultExpectation.returnOrigin = minimock.CallerInfo(1)
 	return mmGetImage.mock
 }
 
 // Set uses given function f to mock the RegistryClient.GetImage method
-func (mmGetImage *mRegistryClientMockGetImage) Set(f func(ctx context.Context, tag string) (r1 mm_pkg.RegistryImage, err error)) *RegistryClientMock {
+func (mmGetImage *mRegistryClientMockGetImage) Set(f func(ctx context.Context, tag string, opts ...mm_pkg.ImageGetOption) (c2 mm_pkg.ClientImage, err error)) *RegistryClientMock {
 	if mmGetImage.defaultExpectation != nil {
 		mmGetImage.mock.t.Fatalf("Default expectation is already set for the RegistryClient.GetImage method")
 	}
@@ -990,14 +1016,14 @@ func (mmGetImage *mRegistryClientMockGetImage) Set(f func(ctx context.Context, t
 
 // When sets expectation for the RegistryClient.GetImage which will trigger the result defined by the following
 // Then helper
-func (mmGetImage *mRegistryClientMockGetImage) When(ctx context.Context, tag string) *RegistryClientMockGetImageExpectation {
+func (mmGetImage *mRegistryClientMockGetImage) When(ctx context.Context, tag string, opts ...mm_pkg.ImageGetOption) *RegistryClientMockGetImageExpectation {
 	if mmGetImage.mock.funcGetImage != nil {
 		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by Set")
 	}
 
 	expectation := &RegistryClientMockGetImageExpectation{
 		mock:               mmGetImage.mock,
-		params:             &RegistryClientMockGetImageParams{ctx, tag},
+		params:             &RegistryClientMockGetImageParams{ctx, tag, opts},
 		expectationOrigins: RegistryClientMockGetImageExpectationOrigins{origin: minimock.CallerInfo(1)},
 	}
 	mmGetImage.expectations = append(mmGetImage.expectations, expectation)
@@ -1005,8 +1031,8 @@ func (mmGetImage *mRegistryClientMockGetImage) When(ctx context.Context, tag str
 }
 
 // Then sets up RegistryClient.GetImage return parameters for the expectation previously defined by the When method
-func (e *RegistryClientMockGetImageExpectation) Then(r1 mm_pkg.RegistryImage, err error) *RegistryClientMock {
-	e.results = &RegistryClientMockGetImageResults{r1, err}
+func (e *RegistryClientMockGetImageExpectation) Then(c2 mm_pkg.ClientImage, err error) *RegistryClientMock {
+	e.results = &RegistryClientMockGetImageResults{c2, err}
 	return e.mock
 }
 
@@ -1032,17 +1058,17 @@ func (mmGetImage *mRegistryClientMockGetImage) invocationsDone() bool {
 }
 
 // GetImage implements mm_pkg.RegistryClient
-func (mmGetImage *RegistryClientMock) GetImage(ctx context.Context, tag string) (r1 mm_pkg.RegistryImage, err error) {
+func (mmGetImage *RegistryClientMock) GetImage(ctx context.Context, tag string, opts ...mm_pkg.ImageGetOption) (c2 mm_pkg.ClientImage, err error) {
 	mm_atomic.AddUint64(&mmGetImage.beforeGetImageCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetImage.afterGetImageCounter, 1)
 
 	mmGetImage.t.Helper()
 
 	if mmGetImage.inspectFuncGetImage != nil {
-		mmGetImage.inspectFuncGetImage(ctx, tag)
+		mmGetImage.inspectFuncGetImage(ctx, tag, opts...)
 	}
 
-	mm_params := RegistryClientMockGetImageParams{ctx, tag}
+	mm_params := RegistryClientMockGetImageParams{ctx, tag, opts}
 
 	// Record call args
 	mmGetImage.GetImageMock.mutex.Lock()
@@ -1052,7 +1078,7 @@ func (mmGetImage *RegistryClientMock) GetImage(ctx context.Context, tag string) 
 	for _, e := range mmGetImage.GetImageMock.expectations {
 		if minimock.Equal(*e.params, mm_params) {
 			mm_atomic.AddUint64(&e.Counter, 1)
-			return e.results.r1, e.results.err
+			return e.results.c2, e.results.err
 		}
 	}
 
@@ -1061,7 +1087,7 @@ func (mmGetImage *RegistryClientMock) GetImage(ctx context.Context, tag string) 
 		mm_want := mmGetImage.GetImageMock.defaultExpectation.params
 		mm_want_ptrs := mmGetImage.GetImageMock.defaultExpectation.paramPtrs
 
-		mm_got := RegistryClientMockGetImageParams{ctx, tag}
+		mm_got := RegistryClientMockGetImageParams{ctx, tag, opts}
 
 		if mm_want_ptrs != nil {
 
@@ -1075,6 +1101,11 @@ func (mmGetImage *RegistryClientMock) GetImage(ctx context.Context, tag string) 
 					mmGetImage.GetImageMock.defaultExpectation.expectationOrigins.originTag, *mm_want_ptrs.tag, mm_got.tag, minimock.Diff(*mm_want_ptrs.tag, mm_got.tag))
 			}
 
+			if mm_want_ptrs.opts != nil && !minimock.Equal(*mm_want_ptrs.opts, mm_got.opts) {
+				mmGetImage.t.Errorf("RegistryClientMock.GetImage got unexpected parameter opts, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmGetImage.GetImageMock.defaultExpectation.expectationOrigins.originOpts, *mm_want_ptrs.opts, mm_got.opts, minimock.Diff(*mm_want_ptrs.opts, mm_got.opts))
+			}
+
 		} else if mm_want != nil && !minimock.Equal(*mm_want, mm_got) {
 			mmGetImage.t.Errorf("RegistryClientMock.GetImage got unexpected parameters, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
 				mmGetImage.GetImageMock.defaultExpectation.expectationOrigins.origin, *mm_want, mm_got, minimock.Diff(*mm_want, mm_got))
@@ -1084,12 +1115,12 @@ func (mmGetImage *RegistryClientMock) GetImage(ctx context.Context, tag string) 
 		if mm_results == nil {
 			mmGetImage.t.Fatal("No results are set for the RegistryClientMock.GetImage")
 		}
-		return (*mm_results).r1, (*mm_results).err
+		return (*mm_results).c2, (*mm_results).err
 	}
 	if mmGetImage.funcGetImage != nil {
-		return mmGetImage.funcGetImage(ctx, tag)
+		return mmGetImage.funcGetImage(ctx, tag, opts...)
 	}
-	mmGetImage.t.Fatalf("Unexpected call to RegistryClientMock.GetImage. %v %v", ctx, tag)
+	mmGetImage.t.Fatalf("Unexpected call to RegistryClientMock.GetImage. %v %v %v", ctx, tag, opts)
 	return
 }
 
@@ -2685,14 +2716,14 @@ type RegistryClientMockPushImageExpectation struct {
 type RegistryClientMockPushImageParams struct {
 	ctx context.Context
 	tag string
-	img mm_pkg.RegistryImage
+	img v1.Image
 }
 
 // RegistryClientMockPushImageParamPtrs contains pointers to parameters of the RegistryClient.PushImage
 type RegistryClientMockPushImageParamPtrs struct {
 	ctx *context.Context
 	tag *string
-	img *mm_pkg.RegistryImage
+	img *v1.Image
 }
 
 // RegistryClientMockPushImageResults contains results of the RegistryClient.PushImage
@@ -2719,7 +2750,7 @@ func (mmPushImage *mRegistryClientMockPushImage) Optional() *mRegistryClientMock
 }
 
 // Expect sets up expected params for RegistryClient.PushImage
-func (mmPushImage *mRegistryClientMockPushImage) Expect(ctx context.Context, tag string, img mm_pkg.RegistryImage) *mRegistryClientMockPushImage {
+func (mmPushImage *mRegistryClientMockPushImage) Expect(ctx context.Context, tag string, img v1.Image) *mRegistryClientMockPushImage {
 	if mmPushImage.mock.funcPushImage != nil {
 		mmPushImage.mock.t.Fatalf("RegistryClientMock.PushImage mock is already set by Set")
 	}
@@ -2790,7 +2821,7 @@ func (mmPushImage *mRegistryClientMockPushImage) ExpectTagParam2(tag string) *mR
 }
 
 // ExpectImgParam3 sets up expected param img for RegistryClient.PushImage
-func (mmPushImage *mRegistryClientMockPushImage) ExpectImgParam3(img mm_pkg.RegistryImage) *mRegistryClientMockPushImage {
+func (mmPushImage *mRegistryClientMockPushImage) ExpectImgParam3(img v1.Image) *mRegistryClientMockPushImage {
 	if mmPushImage.mock.funcPushImage != nil {
 		mmPushImage.mock.t.Fatalf("RegistryClientMock.PushImage mock is already set by Set")
 	}
@@ -2813,7 +2844,7 @@ func (mmPushImage *mRegistryClientMockPushImage) ExpectImgParam3(img mm_pkg.Regi
 }
 
 // Inspect accepts an inspector function that has same arguments as the RegistryClient.PushImage
-func (mmPushImage *mRegistryClientMockPushImage) Inspect(f func(ctx context.Context, tag string, img mm_pkg.RegistryImage)) *mRegistryClientMockPushImage {
+func (mmPushImage *mRegistryClientMockPushImage) Inspect(f func(ctx context.Context, tag string, img v1.Image)) *mRegistryClientMockPushImage {
 	if mmPushImage.mock.inspectFuncPushImage != nil {
 		mmPushImage.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.PushImage")
 	}
@@ -2838,7 +2869,7 @@ func (mmPushImage *mRegistryClientMockPushImage) Return(err error) *RegistryClie
 }
 
 // Set uses given function f to mock the RegistryClient.PushImage method
-func (mmPushImage *mRegistryClientMockPushImage) Set(f func(ctx context.Context, tag string, img mm_pkg.RegistryImage) (err error)) *RegistryClientMock {
+func (mmPushImage *mRegistryClientMockPushImage) Set(f func(ctx context.Context, tag string, img v1.Image) (err error)) *RegistryClientMock {
 	if mmPushImage.defaultExpectation != nil {
 		mmPushImage.mock.t.Fatalf("Default expectation is already set for the RegistryClient.PushImage method")
 	}
@@ -2854,7 +2885,7 @@ func (mmPushImage *mRegistryClientMockPushImage) Set(f func(ctx context.Context,
 
 // When sets expectation for the RegistryClient.PushImage which will trigger the result defined by the following
 // Then helper
-func (mmPushImage *mRegistryClientMockPushImage) When(ctx context.Context, tag string, img mm_pkg.RegistryImage) *RegistryClientMockPushImageExpectation {
+func (mmPushImage *mRegistryClientMockPushImage) When(ctx context.Context, tag string, img v1.Image) *RegistryClientMockPushImageExpectation {
 	if mmPushImage.mock.funcPushImage != nil {
 		mmPushImage.mock.t.Fatalf("RegistryClientMock.PushImage mock is already set by Set")
 	}
@@ -2896,7 +2927,7 @@ func (mmPushImage *mRegistryClientMockPushImage) invocationsDone() bool {
 }
 
 // PushImage implements mm_pkg.RegistryClient
-func (mmPushImage *RegistryClientMock) PushImage(ctx context.Context, tag string, img mm_pkg.RegistryImage) (err error) {
+func (mmPushImage *RegistryClientMock) PushImage(ctx context.Context, tag string, img v1.Image) (err error) {
 	mm_atomic.AddUint64(&mmPushImage.beforePushImageCounter, 1)
 	defer mm_atomic.AddUint64(&mmPushImage.afterPushImageCounter, 1)
 

@@ -23,7 +23,7 @@ require (
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/pflag v1.0.7
 	github.com/stretchr/testify v1.10.0
-	github.com/sylabs/oci-tools v0.16.0
+	github.com/vbauerster/mpb/v8 v8.7.5
 	github.com/werf/3p-helm v0.0.0-20240806141915-3137f4cc1557
 	github.com/werf/logboek v0.6.1
 	github.com/werf/nelm v0.0.0-20240806160049-119410ac7901
@@ -512,7 +512,6 @@ require (
 	github.com/tv42/httpunix v0.0.0-20191220191345-2ba4b9c3382c // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect
 	github.com/vbatts/tar-split v0.11.5 // indirect
-	github.com/vbauerster/mpb/v8 v8.7.5 // indirect
 	github.com/vishvananda/netlink v1.2.1-beta.2 // indirect
 	github.com/vishvananda/netns v0.0.4 // indirect
 	github.com/vmware/govmomi v0.18.0 // indirect
