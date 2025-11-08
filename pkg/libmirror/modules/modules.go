@@ -253,8 +253,8 @@ func FindModuleExtraImages(
 	params *params.PullParams,
 	mod *Module,
 	moduleImages []string,
-	authProvider authn.Authenticator,
-	insecure, skipVerifyTLS bool,
+	_ authn.Authenticator,
+	_, _ bool,
 	client pkg.RegistryClient,
 ) (extraImages map[string]struct{}, err error) {
 	logger := params.Logger

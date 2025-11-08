@@ -38,6 +38,9 @@ func OperateModule(dynamicClient dynamic.Interface, name string, moduleState Mod
 		return err
 	}
 	enabledSpec, err := patchSpec(moduleState)
+	if err != nil {
+		return err
+	}
 	if customResource != nil {
 		if _, err = resourceClient.Patch(context.TODO(), name, types.MergePatchType, enabledSpec, metav1.PatchOptions{}); err != nil {
 			return fmt.Errorf("failed to update the '%s' module config: %w", name, err)

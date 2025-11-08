@@ -95,7 +95,7 @@ func NewCommand() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		PreRunE:       parseAndValidateParameters,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			return NewPusher().Execute()
 		},
 		PostRunE: func(_ *cobra.Command, _ []string) error {

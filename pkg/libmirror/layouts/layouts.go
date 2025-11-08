@@ -466,9 +466,9 @@ func TagImage(l layout.Path, imageDigest v1.Hash, tag string) error {
 
 func FindVexImage(
 	params *params.PullParams,
-	registryPath string,
+	_ string,
 	nameOpts []name.Option,
-	remoteOpts []remote.Option,
+	_ []remote.Option,
 	digest string,
 	client pkg.RegistryClient,
 ) (string, error) {

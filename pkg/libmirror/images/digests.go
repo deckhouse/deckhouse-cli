@@ -176,9 +176,9 @@ func parseImagesFromJSON(registryRepo string, jsonDigests io.Reader, dst map[str
 
 func FindVexImage(
 	params *params.PullParams,
-	registryPath string,
+	_ string,
 	nameOpts []name.Option,
-	remoteOpts []remote.Option,
+	_ []remote.Option,
 	digest string,
 	client pkg.RegistryClient,
 ) (string, error) {

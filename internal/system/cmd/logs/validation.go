@@ -23,7 +23,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func ValidateParameters(cmd *cobra.Command, args []string) error {
+func ValidateParameters(_ *cobra.Command, _ []string) error {
 	if Tail < -1 {
 		return fmt.Errorf("Invalid --tail must be greater than or equal to -1.")
 	}

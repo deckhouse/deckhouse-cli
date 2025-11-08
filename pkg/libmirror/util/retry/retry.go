@@ -55,7 +55,7 @@ func RunTaskWithContext(ctx context.Context, logger params.Logger, name string, 
 			return nil
 		}
 
-		restarts += 1
+		restarts++
 	}
 
 	return fmt.Errorf("%q: task failed to many times, last error: %w", name, lastErr)

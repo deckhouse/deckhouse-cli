@@ -239,7 +239,7 @@ func PullImageSet(
 			context.TODO(),
 			pullParams.Logger,
 			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageReferenceString),
-			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
+			task.WithConstantRetries(5, 10*time.Second, func(_ context.Context) error {
 				img, err := scopedClient.GetImage(context.TODO(), tag)
 				if err != nil {
 					if errors.Is(err, regclient.ErrImageNotFound) && pullOpts.allowMissingTags {

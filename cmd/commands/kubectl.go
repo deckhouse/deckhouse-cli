@@ -192,7 +192,7 @@ func NewKubectlCommand() *cobra.Command {
 			return pre(cmd, args)
 		}
 	default:
-		kubectlCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		kubectlCmd.PersistentPreRun = func(_ *cobra.Command, _ []string) {
 			logs.InitLogs()
 		}
 	}

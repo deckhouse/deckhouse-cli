@@ -117,7 +117,7 @@ func PushLayoutToRepoContext(
 			if err = pushImage(ctx, client, registryRepo, index, manifestSet[0], refOpts, remoteOpts, logger); err != nil {
 				return fmt.Errorf("Push Image: %w", err)
 			}
-			imagesCount += 1
+			imagesCount++
 			continue
 		}
 
@@ -130,7 +130,7 @@ func PushLayoutToRepoContext(
 
 			errMu := &sync.Mutex{}
 			merr := &multierror.Error{}
-			parallel.ForEach(manifestSet, func(item v1.Descriptor, i int) {
+			parallel.ForEach(manifestSet, func(item v1.Descriptor, _ int) {
 				if err = pushImage(ctx, client, registryRepo, index, item, refOpts, remoteOpts, logger); err != nil {
 					errMu.Lock()
 					defer errMu.Unlock()
@@ -143,7 +143,7 @@ func PushLayoutToRepoContext(
 		if err != nil {
 			return fmt.Errorf("Push batch of images: %w", err)
 		}
-		batchesCount += 1
+		batchesCount++
 		imagesCount += len(manifestSet)
 	}
 
@@ -157,8 +157,8 @@ func pushImage(
 	index v1.ImageIndex,
 	manifest v1.Descriptor,
 	refOpts []name.Option,
-	remoteOpts []remote.Option,
-	logger params.Logger,
+	_ []remote.Option,
+	_ params.Logger,
 ) error {
 	tag := manifest.Annotations["io.deckhouse.image.short_tag"]
 	imageRef := buildExtraImageRef(registryRepo, tag)

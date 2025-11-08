@@ -68,6 +68,9 @@ func getLogDeckhouse(cmd *cobra.Command, _ []string) error {
 	}
 
 	podName, err := utilk8s.GetDeckhousePod(kubeCl)
+	if err != nil {
+		return fmt.Errorf("Failed to get Deckhouse pod: %w", err)
+	}
 	logOptions := &v1.PodLogOptions{
 		Container: "deckhouse",
 		Follow:    Follow,

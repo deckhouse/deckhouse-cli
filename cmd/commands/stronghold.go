@@ -82,7 +82,7 @@ func NewStrongholdCommand() *cobra.Command {
 			DisableFlagParsing: true,
 			SilenceErrors:      true,
 			SilenceUsage:       true,
-			Run: func(cmd *cobra.Command, args []string) {
+			Run: func(_ *cobra.Command, args []string) {
 				vaultcommand.Run(append(strongholdCommand, args...))
 			},
 		}

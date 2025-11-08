@@ -67,7 +67,7 @@ func NewPluginsCommand(logger *dkplog.Logger) *cobra.Command {
 		Use:    "plugins",
 		Short:  "Manage Deckhouse CLI plugins",
 		Hidden: true,
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
 			// init plugin services for subcommands after flags are parsed
 			pc.initPluginServices()
 		},
@@ -92,7 +92,7 @@ func (pc *PluginsCommand) pluginsListCommand() *cobra.Command {
 		Use:   "list",
 		Short: "List Deckhouse CLI plugins",
 		Long:  "Display detailed information about installed plugins and available plugins from the registry",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 
 			// Prepare all data before printing
@@ -549,7 +549,7 @@ func (pc *PluginsCommand) pluginsUpdateAllCommand() *cobra.Command {
 		Use:   "all",
 		Short: "Update all installed plugins",
 		Long:  "Update all installed plugins to their latest available versions",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			// TODO: Implement updating all installed plugins from filesystem
 			fmt.Println("Updating all installed plugins...")
 			fmt.Println("Checking for updates...")
@@ -570,7 +570,7 @@ func (pc *PluginsCommand) pluginsRemoveCommand() *cobra.Command {
 		Short:   "Remove an installed plugin",
 		Long:    "Remove a specific plugin from the Deckhouse CLI",
 		Args:    cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			pluginName := args[0]
 			fmt.Printf("Removing plugin: %s\n", pluginName)
 
@@ -596,7 +596,7 @@ func (pc *PluginsCommand) pluginsRemoveAllCommand() *cobra.Command {
 		Use:   "all",
 		Short: "Remove all installed plugins",
 		Long:  "Remove all plugins from the Deckhouse CLI at once",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			// TODO: Implement removing all installed plugins from filesystem
 			fmt.Println("Removing all installed plugins...")
 

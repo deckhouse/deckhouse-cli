@@ -169,7 +169,7 @@ func (svc *Service) findTagsToMirror(ctx context.Context) ([]string, error) {
 	// Convert versions to tag format (add "v" prefix)
 	return lo.Map(
 		versionsToMirror,
-		func(v semver.Version, index int) string {
+		func(v semver.Version, _ int) string {
 			return "v" + v.String()
 		},
 	), nil
@@ -705,11 +705,11 @@ func deduplicateVersions(versions []*semver.Version) []semver.Version {
 
 func createOCIImageLayoutsForDeckhouse(
 	rootFolder string,
-	rootUrl string,
+	rootURL string,
 ) (*ImageLayouts, error) {
 	var err error
 
-	layouts := NewImageLayouts(rootFolder, rootUrl)
+	layouts := NewImageLayouts(rootFolder, rootURL)
 
 	fsPath := rootFolder
 	layoutPtr, err := createEmptyImageLayout(fsPath)

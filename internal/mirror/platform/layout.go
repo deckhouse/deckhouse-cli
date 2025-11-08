@@ -23,7 +23,7 @@ type ImageDownloadRequest struct {
 type ImageLayouts struct {
 	platform   v1.Platform
 	workingDir string
-	rootUrl    string
+	rootURL    string
 
 	Deckhouse       *regimage.ImageLayout
 	DeckhouseImages map[string]*puller.ImageMeta
@@ -38,10 +38,10 @@ type ImageLayouts struct {
 	ReleaseChannelImages    map[string]*puller.ImageMeta
 }
 
-func NewImageLayouts(rootFolder, rootUrl string) *ImageLayouts {
+func NewImageLayouts(rootFolder, rootURL string) *ImageLayouts {
 	l := &ImageLayouts{
 		workingDir: rootFolder,
-		rootUrl:    rootUrl,
+		rootURL:    rootURL,
 		platform:   v1.Platform{Architecture: "amd64", OS: "linux"},
 
 		DeckhouseImages:         map[string]*puller.ImageMeta{},
@@ -55,9 +55,9 @@ func NewImageLayouts(rootFolder, rootUrl string) *ImageLayouts {
 
 func (l *ImageLayouts) FillDeckhouseImages(deckhouseVersions []string) {
 	for _, version := range deckhouseVersions {
-		l.DeckhouseImages[l.rootUrl+":"+version] = nil
-		l.InstallImages[path.Join(l.rootUrl, internal.InstallSegment)+":"+version] = nil
-		l.InstallStandaloneImages[path.Join(l.rootUrl, internal.InstallStandaloneSegment)+":"+version] = nil
+		l.DeckhouseImages[l.rootURL+":"+version] = nil
+		l.InstallImages[path.Join(l.rootURL, internal.InstallSegment)+":"+version] = nil
+		l.InstallStandaloneImages[path.Join(l.rootURL, internal.InstallStandaloneSegment)+":"+version] = nil
 	}
 }
 
@@ -68,10 +68,10 @@ func (l *ImageLayouts) FillForTag(tag string) {
 	}
 
 	for _, channel := range internal.GetAllDefaultReleaseChannels() {
-		l.DeckhouseImages[l.rootUrl+":"+channel] = nil
-		l.InstallImages[path.Join(l.rootUrl, internal.InstallSegment)+":"+channel] = nil
-		l.InstallStandaloneImages[path.Join(l.rootUrl, internal.InstallStandaloneSegment)+":"+channel] = nil
-		key := path.Join(l.rootUrl, internal.ReleaseChannelSegment) + ":" + channel
+		l.DeckhouseImages[l.rootURL+":"+channel] = nil
+		l.InstallImages[path.Join(l.rootURL, internal.InstallSegment)+":"+channel] = nil
+		l.InstallStandaloneImages[path.Join(l.rootURL, internal.InstallStandaloneSegment)+":"+channel] = nil
+		key := path.Join(l.rootURL, internal.ReleaseChannelSegment) + ":" + channel
 		if _, exists := l.ReleaseChannelImages[key]; !exists {
 			l.ReleaseChannelImages[key] = nil
 		}
