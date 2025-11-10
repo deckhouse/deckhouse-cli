@@ -11,6 +11,8 @@ on:
 env:
   GOPRIVATE: "flant.internal"
   PRIVATE_REPO: "${{secrets.DECKHOUSE_PRIVATE_REPO}}"
+  GO_VERSION: '1.24'
+  GOLANGCI_LINT_VERSION: 'v2.1'
 
 permissions:
   contents: write
@@ -139,14 +141,15 @@ jobs:
 
   lint:
     if: github.event_name == 'pull_request'
-    runs-on: [self-hosted, regular]
+    # runs-on: [self-hosted, regular]
     continue-on-error: true
     name: Lint
-    # container:
-    #   image: ubuntu:22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: deckhouse/modules-actions/lint@main
-        env:
-          DMT_METRICS_URL: ${{ secrets.DMT_METRICS_URL }}
-          DMT_METRICS_TOKEN: ${{ secrets.DMT_METRICS_TOKEN }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
