@@ -14,13 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package registry
+package client
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"path"
 	"strings"
 	"sync"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 
+	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/pkg"
 )
 
@@ -45,13 +47,14 @@ type Client struct {
 	constructedSegmentsOnce sync.Once // ensures constructedSegments is computed only once
 	options                 []remote.Option
 	logger                  *log.Logger
+	transport               http.RoundTripper // custom transport for TLS/insecure settings
 }
 
 // Ensure Client implements pkg.RegistryInterface
 var _ pkg.RegistryClient = (*Client)(nil)
 
 // NewClientWithOptions creates a new container registry client with advanced options
-func NewClientWithOptions(registry string, opts *ClientOptions) *Client {
+func NewClientWithOptions(registry string, opts *Options) *Client {
 	// Ensure logger first before using it
 	logger := ensureLogger(opts.Logger)
 
@@ -69,11 +72,17 @@ func NewClientWithOptions(registry string, opts *ClientOptions) *Client {
 
 	registry = strings.TrimSuffix(registry, "/")
 
-	return &Client{
+	client := &Client{
 		registryHost: registry,
 		options:      remoteOptions,
 		logger:       logger,
 	}
+
+	if needsCustomTransport(opts) {
+		client.transport = configureTransport(opts)
+	}
+
+	return client
 }
 
 // WithSegment creates a new client with an additional scope path segment
@@ -93,6 +102,7 @@ func (c *Client) WithSegment(segments ...string) pkg.RegistryClient {
 		segments:     append(append([]string(nil), c.segments...), segments...),
 		options:      c.options,
 		logger:       c.logger,
+		transport:    c.transport,
 	}
 }
 
@@ -126,7 +136,8 @@ func (c *Client) GetDigest(ctx context.Context, tag string) (*v1.Hash, error) {
 		return nil, fmt.Errorf("failed to parse reference: %w", err)
 	}
 
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 
 	head, err := remote.Head(ref, opts...)
 	if err == nil {
@@ -161,7 +172,8 @@ func (c *Client) GetManifest(ctx context.Context, tag string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to parse reference: %w", err)
 	}
 
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 	desc, err := remote.Get(ref, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get manifest: %w", err)
@@ -172,11 +184,25 @@ func (c *Client) GetManifest(ctx context.Context, tag string) ([]byte, error) {
 	return desc.Manifest, nil
 }
 
+type WithDownloadBar struct {
+	Bar *progress.DownloadBar
+}
+
+func (w WithDownloadBar) ApplyToImageGet(opts *pkg.ImageGetOptions) {
+	opts.ProgressBar = w.Bar
+}
+
 // GetImage retrieves an remote image for a specific reference
 // Do not return remote image to avoid drop connection with context cancelation.
 // It will be in use while passed context will be alive.
 // The repository is determined by the chained WithSegment() calls
-func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, error) {
+func (c *Client) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.ClientImage, error) {
+	getImageOptions := &pkg.ImageGetOptions{}
+
+	for _, opt := range opts {
+		opt.ApplyToImageGet(getImageOptions)
+	}
+
 	fullRegistry := c.GetRegistry()
 
 	logentry := c.logger.With(
@@ -187,18 +213,37 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 
 	logentry.Debug("Getting image")
 
-	ref, err := name.ParseReference(fullRegistry + ":" + tag)
+	imagepath := fullRegistry + ":" + tag
+	if strings.HasPrefix(tag, "@sha256:") {
+		logentry.Debug("tag contains digest reference")
+		imagepath = fullRegistry + tag
+	}
+
+	ref, err := name.ParseReference(imagepath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse reference: %w", err)
 	}
 
-	opts := append(c.options, remote.WithContext(ctx))
-	img, err := remote.Image(ref, opts...)
+	imageOptions := []remote.Option{remote.WithContext(ctx)}
+	imageOptions = append(imageOptions, c.options...)
+
+	if getImageOptions.ProgressBar != nil {
+		inner := remote.DefaultTransport
+		if c.transport != nil {
+			inner = c.transport
+		}
+
+		imageOptions = append(imageOptions, remote.WithTransport(
+			progress.NewRoundTripper(ctx, inner),
+		))
+	}
+
+	img, err := remote.Image(ref, imageOptions...)
 	if err != nil {
 		var transportErr *transport.Error
-		if errors.As(err, &transportErr) && transportErr.StatusCode == 404 {
+		if errors.As(err, &transportErr) && transportErr.StatusCode == http.StatusNotFound {
 			// Image not found, which is expected for non-vulnerable images
-			return nil, ErrImageNotFound
+			return nil, fmt.Errorf("%w: %w", ErrImageNotFound, err)
 		}
 
 		return nil, fmt.Errorf("failed to get image: %w", err)
@@ -206,12 +251,12 @@ func (c *Client) GetImage(ctx context.Context, tag string) (pkg.RegistryImage, e
 
 	logentry.Debug("Image retrieved successfully")
 
-	return &Image{Image: img}, nil
+	return NewImage(img, ref.String()), nil
 }
 
 // PushImage pushes an image to the registry at the specified tag
 // The repository is determined by the chained WithSegment() calls
-func (c *Client) PushImage(ctx context.Context, tag string, img pkg.RegistryImage) error {
+func (c *Client) PushImage(ctx context.Context, tag string, img v1.Image) error {
 	fullRegistry := c.GetRegistry()
 
 	logentry := c.logger.With(
@@ -227,7 +272,8 @@ func (c *Client) PushImage(ctx context.Context, tag string, img pkg.RegistryImag
 		return fmt.Errorf("failed to parse reference: %w", err)
 	}
 
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 
 	if err := remote.Write(ref, img, opts...); err != nil {
 		return fmt.Errorf("failed to push image: %w", err)
@@ -284,7 +330,8 @@ func (c *Client) ListTags(ctx context.Context) ([]string, error) {
 	}
 
 	repo := ref.Context()
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 
 	tags, err := remote.List(repo, opts...)
 	if err != nil {
@@ -320,7 +367,8 @@ func (c *Client) ListRepositories(ctx context.Context) ([]string, error) {
 	repo := ref.Context()
 	logentry.Debug("Listing tags for base repository", slog.String("repository", repo.String()))
 
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 
 	// List "tags" which actually represent sub-repositories in this case
 	tags, err := remote.List(repo, opts...)
@@ -353,12 +401,13 @@ func (c *Client) CheckImageExists(ctx context.Context, tag string) error {
 		return fmt.Errorf("failed to parse reference: %w", err)
 	}
 
-	opts := append(c.options, remote.WithContext(ctx))
+	opts := append([]remote.Option{}, c.options...)
+	opts = append(opts, remote.WithContext(ctx))
 
 	_, err = remote.Head(ref, opts...)
 	if err != nil {
 		var transportErr *transport.Error
-		if errors.As(err, &transportErr) && transportErr.StatusCode == 404 {
+		if errors.As(err, &transportErr) && transportErr.StatusCode == http.StatusNotFound {
 			// Image not found, which is expected for non-vulnerable images
 			return ErrImageNotFound
 		}
@@ -372,7 +421,7 @@ func (c *Client) CheckImageExists(ctx context.Context, tag string) error {
 
 	if err != nil {
 		var transportErr *transport.Error
-		if errors.As(err, &transportErr) && transportErr.StatusCode == 404 {
+		if errors.As(err, &transportErr) && transportErr.StatusCode == http.StatusNotFound {
 			// Image not found, which is expected for non-vulnerable images
 			return ErrImageNotFound
 		}

@@ -34,24 +34,50 @@ Collect debug info from Deckhouse Kubernetes Platform.
 © Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
+	var (
+		excludeList []string
+		listExclude bool
+	)
+
 	collectDebugInfoCmd := &cobra.Command{
 		Use:           "collect-debug-info",
 		Short:         "Collect debug info.",
 		Long:          collectDebugInfoCmdLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		PreRunE: func(cmd *cobra.Command, args []string) error {
-			if term.IsTerminal(int(os.Stdout.Fd())) {
-				return fmt.Errorf("Please provide output tar.gz to dump debug logs, ex. \"> dump-logs.tar.gz\"")
+		PreRunE: func(_ *cobra.Command, _ []string) error {
+			if listExclude {
+				return nil
 			}
+
+			if term.IsTerminal(int(os.Stdout.Fd())) {
+				return fmt.Errorf("output must be redirected to a file, e.g., \"> dump-logs.tar.gz\"")
+			}
+
 			return nil
 		},
-		RunE: collectDebugInfo,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return collectDebugInfo(cmd, listExclude, excludeList)
+		},
 	}
+	collectDebugInfoCmd.Flags().StringSliceVar(&excludeList, "exclude", []string{}, "Exclude specific files from the debug archive. Use comma-separated values")
+	collectDebugInfoCmd.Flags().BoolVarP(&listExclude, "list-exclude", "l", false, "List all files that can be excluded from the debug archive")
 	return collectDebugInfoCmd
 }
 
-func collectDebugInfo(cmd *cobra.Command, _ []string) error {
+func printExcludableFiles() {
+	fmt.Println("List of possible data to exclude:")
+	for _, fileName := range debugtar.GetExcludableFiles() {
+		fmt.Println(fileName)
+	}
+}
+
+func collectDebugInfo(cmd *cobra.Command, listExclude bool, excludeList []string) error {
+	if listExclude {
+		printExcludableFiles()
+		return nil
+	}
+
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
@@ -67,9 +93,8 @@ func collectDebugInfo(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	err = debugtar.Tarball(config, kubeCl)
-	if err != nil {
+	if err = debugtar.Tarball(config, kubeCl, excludeList); err != nil {
 		return fmt.Errorf("Error collecting debug info: %w", err)
 	}
-	return err
+	return nil
 }

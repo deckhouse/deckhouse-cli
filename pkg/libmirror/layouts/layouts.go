@@ -37,7 +37,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 type ModuleImageLayout struct {
@@ -225,6 +225,7 @@ func FillLayoutsWithBasicDeckhouseImages(
 	layouts.InstallImages = map[string]struct{}{}
 	layouts.InstallStandaloneImages = map[string]struct{}{}
 	layouts.ReleaseChannelImages = map[string]struct{}{}
+
 	// todo(mvasl) need to check if trivy must be here anymore
 	layouts.TrivyDBImages = map[string]struct{}{
 		pullParams.DeckhouseRegistryRepo + "/security/trivy-db:2":      {},
@@ -299,7 +300,7 @@ func FindDeckhouseModulesImages(
 			}
 		}
 
-		logger.InfoF("%d:\t%s - find external module images", counter, module.Name)
+		logger.Infof("%d:\t%s - find external module images", counter, module.Name)
 
 		moduleImages, moduleImagesWithExternal, releaseImages, err := modules.FindExternalModuleImages(
 			params,
@@ -317,7 +318,7 @@ func FindDeckhouseModulesImages(
 		moduleImageLayouts.ModuleImages = moduleImagesWithExternal
 		maps.Copy(moduleImageLayouts.ReleaseImages, releaseImages)
 
-		logger.InfoF("%d:\t%s - find module extra images", counter, module.Name)
+		logger.Infof("%d:\t%s - find module extra images", counter, module.Name)
 
 		// Find extra images if any exist
 		extraImages, err := modules.FindModuleExtraImages(
@@ -335,7 +336,7 @@ func FindDeckhouseModulesImages(
 
 		nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&params.BaseParams)
 
-		logger.InfoF("Searching for VEX images")
+		logger.Infof("Searching for VEX images")
 
 		for digest := range moduleImagesWithExternal {
 			vexImageName, err := FindVexImage(
@@ -352,7 +353,7 @@ func FindDeckhouseModulesImages(
 			}
 
 			if vexImageName != "" {
-				logger.DebugF("Vex image found %s", vexImageName)
+				logger.Debugf("Vex image found %s", vexImageName)
 				moduleImagesWithExternal[vexImageName] = struct{}{}
 			}
 		}
@@ -372,7 +373,7 @@ func FindDeckhouseModulesImages(
 			}
 
 			if vexImageName != "" {
-				logger.DebugF("Vex image found %s", vexImageName)
+				logger.Debugf("Vex image found %s", vexImageName)
 				extraImages[vexImageName] = struct{}{}
 			}
 		}
@@ -385,7 +386,7 @@ func FindDeckhouseModulesImages(
 
 		layouts.Modules[module.Name] = moduleImageLayouts
 
-		logger.InfoF("%d:\t%s", counter, module.Name)
+		logger.Infof("%d:\t%s", counter, module.Name)
 	}
 
 	return nil
@@ -465,9 +466,9 @@ func TagImage(l layout.Path, imageDigest v1.Hash, tag string) error {
 
 func FindVexImage(
 	params *params.PullParams,
-	registryPath string,
+	_ string,
 	nameOpts []name.Option,
-	remoteOpts []remote.Option,
+	_ []remote.Option,
 	digest string,
 	client pkg.RegistryClient,
 ) (string, error) {
@@ -476,7 +477,7 @@ func FindVexImage(
 	// vex image reference check
 	vexImageName := strings.Replace(strings.Replace(digest, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
 
-	logger.DebugF("Checking vex image from %s", vexImageName)
+	logger.Debugf("Checking vex image from %s", vexImageName)
 
 	_, err := name.ParseReference(vexImageName, nameOpts...)
 	if err != nil {
@@ -492,11 +493,11 @@ func FindVexImage(
 
 	for i, segment := range imageSegments {
 		client = client.WithSegment(segment)
-		logger.DebugF("Segment %d: %s", i, segment)
+		logger.Debugf("Segment %d: %s", i, segment)
 	}
 
 	err = client.CheckImageExists(context.TODO(), tag)
-	if errors.Is(err, registry.ErrImageNotFound) {
+	if errors.Is(err, regclient.ErrImageNotFound) {
 		// Image not found, which is expected for non-vulnerable images
 		return "", nil
 	}

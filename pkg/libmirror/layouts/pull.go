@@ -33,7 +33,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
+	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 func PullInstallers(pullParams *params.PullParams, layouts *ImageLayouts, client pkg.RegistryClient) error {
@@ -222,7 +222,7 @@ func PullImageSet(
 			return fmt.Errorf("parse image reference %q: %w", pullReference, err)
 		}
 
-		logger.DebugF("reference here: %s", ref.String())
+		logger.Debugf("reference here: %s", ref.String())
 
 		imagePath, tag := splitImageRefByRepoAndTag(pullReference)
 
@@ -232,21 +232,22 @@ func PullImageSet(
 
 		for i, segment := range imageSegments {
 			scopedClient = scopedClient.WithSegment(segment)
-			logger.DebugF("Segment %d: %s", i, segment)
+			logger.Debugf("Segment %d: %s", i, segment)
 		}
 
 		err = retry.RunTask(
+			context.TODO(),
 			pullParams.Logger,
 			fmt.Sprintf("[%d / %d] Pulling %s ", pullCount, totalCount, imageReferenceString),
-			task.WithConstantRetries(5, 10*time.Second, func(ctx context.Context) error {
+			task.WithConstantRetries(5, 10*time.Second, func(_ context.Context) error {
 				img, err := scopedClient.GetImage(context.TODO(), tag)
 				if err != nil {
-					if errors.Is(err, registry.ErrImageNotFound) && pullOpts.allowMissingTags {
+					if errors.Is(err, regclient.ErrImageNotFound) && pullOpts.allowMissingTags {
 						logger.WarnLn("⚠️ Not found in registry, skipping pull")
 						return nil
 					}
 
-					logger.DebugF("failed to pull image %s:%s: %v", imageReferenceString, tag, err)
+					logger.Debugf("failed to pull image %s:%s: %v", imageReferenceString, tag, err)
 
 					return fmt.Errorf("pull image metadata: %w", err)
 				}

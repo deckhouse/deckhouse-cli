@@ -26,12 +26,12 @@ import (
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
 	d8flags "github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
-	intplugins "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
-func (r *PluginsCommand) initPluginServices() {
-	r.logger.Debug("Initializing plugin services")
+func (pc *PluginsCommand) initPluginServices() {
+	pc.logger.Debug("Initializing plugin services")
 
 	// Extract registry host from the source registry repo
 	// SourceRegistryRepo can be:
@@ -48,49 +48,49 @@ func (r *PluginsCommand) initPluginServices() {
 		testRef := registryHost
 		if !containsSlash(registryHost) {
 			// Just a hostname, use it as-is
-			r.logger.Debug("Using hostname as registry", slog.String("host", registryHost))
+			pc.logger.Debug("Using hostname as registry", slog.String("host", registryHost))
 		} else {
 			// Has path components, parse to extract registry
 			ref, err := name.ParseReference(registryHost)
 			if err == nil {
 				registryHost = ref.Context().RegistryStr()
-				r.logger.Debug("Extracted registry from path",
+				pc.logger.Debug("Extracted registry from path",
 					slog.String("original", testRef),
 					slog.String("extracted", registryHost))
 			}
 		}
 	}
 
-	auth := getPluginRegistryAuthProvider(registryHost, r.logger)
+	auth := getPluginRegistryAuthProvider(registryHost, pc.logger)
 
-	r.logger.Debug("Creating plugin registry client",
+	pc.logger.Debug("Creating plugin registry client",
 		slog.String("registry_host", registryHost),
 		slog.Bool("insecure", d8flags.Insecure),
 		slog.Bool("tls_skip_verify", d8flags.TLSSkipVerify))
 
 	// Create base client with registry host only
-	baseClient := registry.NewClientWithOptions(sourceRepo, &registry.ClientOptions{
+	baseClient := client.NewClientWithOptions(sourceRepo, &client.Options{
 		Auth:          auth,
 		Insecure:      d8flags.Insecure,
 		TLSSkipVerify: d8flags.TLSSkipVerify,
-		Logger:        r.logger.Named("registry-client"),
+		Logger:        pc.logger.Named("registry-client"),
 	})
 
 	// Build scoped client using chained WithSegment calls
 	// Example: registry.deckhouse.io -> deckhouse -> ee -> modules
-	r.pluginRegistryClient = baseClient
+	pc.pluginRegistryClient = baseClient
 
-	r.logger.Debug("Creating plugin service with scoped client",
+	pc.logger.Debug("Creating plugin service with scoped client",
 		slog.String("scope_path", strings.TrimPrefix(sourceRepo, sourceRepo)))
 
-	registryService := intplugins.NewService(
-		r.pluginRegistryClient,
-		r.logger.Named("registry-service"),
+	registryService := service.NewService(
+		pc.pluginRegistryClient,
+		pc.logger.Named("registry-service"),
 	)
 
-	r.service = registryService.PluginService()
+	pc.service = registryService.PluginService()
 
-	r.logger.Debug("Plugin services initialized successfully")
+	pc.logger.Debug("Plugin services initialized successfully")
 }
 
 // containsSlash checks if a string contains a forward slash

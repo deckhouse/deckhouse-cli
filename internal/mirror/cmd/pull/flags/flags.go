@@ -14,11 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package pull
+package flags
 
 import (
+	"fmt"
 	"os"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/spf13/pflag"
 )
 
@@ -26,14 +28,50 @@ const (
 	deckhouseRegistryHost     = "registry.deckhouse.ru"
 	enterpriseEditionRepoPath = "/deckhouse/ee"
 
-	enterpriseEditionRepo = deckhouseRegistryHost + enterpriseEditionRepoPath
+	EnterpriseEditionRepo = deckhouseRegistryHost + enterpriseEditionRepoPath
 )
 
-func addFlags(flagSet *pflag.FlagSet) {
+// CLI Parameters
+var (
+	TempDir string
+
+	Insecure      bool
+	TLSSkipVerify bool
+	ForcePull     bool
+
+	ImagesBundlePath        string
+	ImagesBundleChunkSizeGB int64
+
+	SinceVersionString string
+	SinceVersion       *semver.Version
+
+	DeckhouseTag string
+
+	ModulesPathSuffix string
+	ModulesWhitelist  []string
+	ModulesBlacklist  []string
+
+	SourceRegistryRepo     = EnterpriseEditionRepo // Fallback to EE if nothing was given as source.
+	SourceRegistryLogin    string
+	SourceRegistryPassword string
+	DeckhouseLicenseToken  string
+
+	DoGOSTDigest bool
+	NoPullResume bool
+
+	NoPlatform      bool
+	NoSecurityDB    bool
+	NoModules       bool
+	OnlyExtraImages bool
+
+	IgnoreSuspendedChannels bool
+)
+
+func AddFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringVar(
 		&SourceRegistryRepo,
 		"source",
-		enterpriseEditionRepo,
+		EnterpriseEditionRepo,
 		"Source registry to pull Deckhouse images from.",
 	)
 	flagSet.StringVar(
@@ -56,7 +94,7 @@ func addFlags(flagSet *pflag.FlagSet) {
 		"Deckhouse license key. Shortcut for --source-login=license-token --source-password=<>.",
 	)
 	flagSet.StringVar(
-		&sinceVersionString,
+		&SinceVersionString,
 		"since-version",
 		"",
 		"Minimal Deckhouse release to pull. Ignored if above current Rock Solid release. Conflicts with --deckhouse-tag.",
@@ -162,6 +200,15 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		false,
 		"Interact with registries over HTTP.",
 	)
+	flagSet.BoolVar(
+		&IgnoreSuspendedChannels,
+		"ignore-suspended-channels",
+		false,
+		"Ignore suspended release channels instead of failing.",
+	)
+	if err := flagSet.MarkHidden("ignore-suspended-channels"); err != nil {
+		panic(fmt.Sprintf("failed to mark flag as hidden: %v", err))
+	}
 	flagSet.StringVar(
 		&TempDir,
 		"tmp-dir",

@@ -167,12 +167,12 @@ func FindExternalModuleImages(
 
 			semverTag, err := semver.NewVersion(tag)
 			if err == nil {
-				versionsToMirror = append(versionsToMirror, semverTag.Original())
+				versionsToMirror = append(versionsToMirror, semverTag.Original()) //nolint:staticcheck
 			}
 		}
 	}
 
-	//remove duplicate from versionsToMirror
+	// remove duplicate from versionsToMirror
 	seen := make(map[string]struct{})
 	uniqueTags := make([]string, 0, len(versionsToMirror))
 	for _, tag := range versionsToMirror {
@@ -182,12 +182,10 @@ func FindExternalModuleImages(
 		}
 	}
 
-	versionsToMirror = uniqueTags
+	logger.Debugf("Finding module extra images for %s", mod.Name)
 
-	logger.DebugF("Finding module extra images for %s", mod.Name)
-
-	for _, tag := range versionsToMirror {
-		logger.DebugF("Checking module image %s for extra images", tag)
+	for _, tag := range uniqueTags {
+		logger.Debugf("Checking module image %s for extra images", tag)
 
 		img, err := client.GetImage(context.TODO(), tag)
 		if err != nil {
@@ -197,7 +195,7 @@ func FindExternalModuleImages(
 			return nil, nil, nil, fmt.Errorf("Get digests for %q version: %w", tag, err)
 		}
 
-		logger.DebugF("Extracting images_digests.json from %s", tag)
+		logger.Debugf("Extracting images_digests.json from %s", tag)
 
 		imagesDigestsJSON, err := images.ExtractFileFromImage(img, "images_digests.json")
 		switch {
@@ -207,7 +205,7 @@ func FindExternalModuleImages(
 			return nil, nil, nil, fmt.Errorf("Extract digests for %q version: %w", tag, err)
 		}
 
-		logger.DebugF("Parsing images_digests.json from %s", tag)
+		logger.Debugf("Parsing images_digests.json from %s", tag)
 
 		digests := images.ExtractDigestsFromJSONFile(imagesDigestsJSON.Bytes())
 		for _, digest := range digests {
@@ -253,8 +251,8 @@ func FindModuleExtraImages(
 	params *params.PullParams,
 	mod *Module,
 	moduleImages []string,
-	authProvider authn.Authenticator,
-	insecure, skipVerifyTLS bool,
+	_ authn.Authenticator,
+	_, _ bool,
 	client pkg.RegistryClient,
 ) (extraImages map[string]struct{}, err error) {
 	logger := params.Logger
@@ -264,18 +262,18 @@ func FindModuleExtraImages(
 	// Try to extract extra_images.json from any available module version
 	for _, imageTag := range moduleImages {
 		if strings.Contains(imageTag, "@sha256:") {
-			logger.DebugF("Skipping digest reference %s for extra_images.json extraction", imageTag)
+			logger.Debugf("Skipping digest reference %s for extra_images.json extraction", imageTag)
 			continue // Skip digest references
 		}
 
-		logger.DebugF("Checking module image %s for extra_images.json", imageTag)
+		logger.Debugf("Checking module image %s for extra_images.json", imageTag)
 
 		img, err := client.GetImage(context.TODO(), strings.Split(imageTag, ":")[1])
 		if err != nil {
 			continue
 		}
 
-		logger.DebugF("Extracting extra_images.json from %s", imageTag)
+		logger.Debugf("Extracting extra_images.json from %s", imageTag)
 
 		extraImagesJSON, err := images.ExtractFileFromImage(img, "extra_images.json")
 		if errors.Is(err, fs.ErrNotExist) {

@@ -31,7 +31,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader, client pkg.RegistryClient) error {
@@ -75,14 +74,14 @@ func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader,
 		}
 	}
 
-	pushParams.Logger.InfoF("Pushing module tag for %s", moduleName)
+	pushParams.Logger.Infof("Pushing module tag for %s", moduleName)
 
 	img, err := random.Image(32, 1)
 	if err != nil {
 		return fmt.Errorf("random.Image: %w", err)
 	}
 
-	if err = client.PushImage(context.Background(), moduleName, registry.NewImage(img)); err != nil {
+	if err = client.PushImage(context.Background(), moduleName, img); err != nil {
 		return fmt.Errorf("Write module index tag: %w", err)
 	}
 

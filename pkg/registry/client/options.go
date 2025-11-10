@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package registry
+package client
 
 import (
 	"crypto/tls"
@@ -26,8 +26,8 @@ import (
 	"github.com/deckhouse/deckhouse/pkg/log"
 )
 
-// ClientOptions contains configuration options for the registry client
-type ClientOptions struct {
+// Options contains configuration options for the registry client
+type Options struct {
 	// Auth provides authentication for registry access (takes precedence over Username/Password/LicenseToken)
 	Auth authn.Authenticator
 
@@ -60,7 +60,7 @@ func ensureLogger(logger *log.Logger) *log.Logger {
 }
 
 // buildRemoteOptions constructs remote options including auth and transport configuration
-func buildRemoteOptions(auth authn.Authenticator, opts *ClientOptions) []remote.Option {
+func buildRemoteOptions(auth authn.Authenticator, opts *Options) []remote.Option {
 	remoteOptions := []remote.Option{
 		remote.WithAuth(auth),
 	}
@@ -74,12 +74,12 @@ func buildRemoteOptions(auth authn.Authenticator, opts *ClientOptions) []remote.
 }
 
 // needsCustomTransport checks if custom transport configuration is required
-func needsCustomTransport(opts *ClientOptions) bool {
+func needsCustomTransport(opts *Options) bool {
 	return opts.Insecure || opts.TLSSkipVerify
 }
 
 // configureTransport creates and configures an HTTP transport with TLS settings
-func configureTransport(opts *ClientOptions) *http.Transport {
+func configureTransport(opts *Options) *http.Transport {
 	transport := remote.DefaultTransport.(*http.Transport).Clone()
 
 	if opts.TLSSkipVerify {
@@ -87,9 +87,6 @@ func configureTransport(opts *ClientOptions) *http.Transport {
 			transport.TLSClientConfig = &tls.Config{}
 		}
 		transport.TLSClientConfig.InsecureSkipVerify = true
-	}
-
-	if opts.Insecure {
 	}
 
 	return transport

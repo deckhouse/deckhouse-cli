@@ -8,7 +8,6 @@ import (
 	"net/http"
 
 	"github.com/spf13/pflag"
-	"k8s.io/apimachinery/pkg/runtime"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	kubescheme "k8s.io/client-go/kubernetes/scheme"
@@ -133,7 +132,7 @@ func (c *SafeClient) HTTPDo(req *http.Request) (*http.Response, error) {
 	return nil, errors.New("No auth")
 }
 
-func (c *SafeClient) NewRTClient(schemeFuncs ...(func(s *runtime.Scheme) error)) (ctrlrtclient.Client, error) {
+func (c *SafeClient) NewRTClient(schemeFuncs ...(func(s *apiruntime.Scheme) error)) (ctrlrtclient.Client, error) {
 	if c.restConfig == nil {
 		return nil, fmt.Errorf("No rest config")
 	}

@@ -34,7 +34,11 @@ import (
 	"github.com/samber/lo/parallel"
 	"github.com/spf13/cobra"
 
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
+	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/gostsums"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
@@ -44,45 +48,12 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry"
-	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
+	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
+	"github.com/deckhouse/deckhouse-cli/pkg/stub"
 )
 
 var ErrPullFailed = errors.New("pull failed, see the log for details")
-
-// CLI Parameters
-var (
-	TempDir string
-
-	Insecure      bool
-	TLSSkipVerify bool
-	ForcePull     bool
-
-	ImagesBundlePath        string
-	ImagesBundleChunkSizeGB int64
-
-	sinceVersionString string
-	SinceVersion       *semver.Version
-
-	DeckhouseTag string
-
-	ModulesPathSuffix string
-	ModulesWhitelist  []string
-	ModulesBlacklist  []string
-
-	SourceRegistryRepo     = enterpriseEditionRepo // Fallback to EE if nothing was given as source.
-	SourceRegistryLogin    string
-	SourceRegistryPassword string
-	DeckhouseLicenseToken  string
-
-	DoGOSTDigest bool
-	NoPullResume bool
-
-	NoPlatform      bool
-	NoSecurityDB    bool
-	NoModules       bool
-	OnlyExtraImages bool
-)
 
 const pullLong = `Download Deckhouse Kubernetes Platform distribution to the local filesystem.
 		
@@ -125,16 +96,20 @@ func NewCommand() *cobra.Command {
 		RunE:          pull,
 	}
 
-	addFlags(pullCmd.Flags())
+	pullflags.AddFlags(pullCmd.Flags())
+
 	return pullCmd
 }
 
 func pull(cmd *cobra.Command, _ []string) error {
 	puller := NewPuller(cmd)
-	puller.logger.InfoF("d8 version: %s", version.Version)
-	if err := puller.Execute(); err != nil {
+
+	puller.logger.Infof("d8 version: %s", version.Version)
+
+	if err := puller.Execute(cmd.Context()); err != nil {
 		return ErrPullFailed
 	}
+
 	return nil
 }
 
@@ -148,7 +123,7 @@ func setupLogger() *log.SLogger {
 
 func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger, client pkg.RegistryClient) ([]string, error) {
 	if pullParams.DeckhouseTag != "" {
-		logger.InfoF("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
+		logger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
 		return []string{pullParams.DeckhouseTag}, nil
 	}
 
@@ -156,9 +131,9 @@ func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger, client
 	if err != nil {
 		return nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}
-	logger.InfoF("Deckhouse releases to pull: %+v", versionsToMirror)
+	logger.Infof("Deckhouse releases to pull: %+v", versionsToMirror)
 
-	return lo.Map(versionsToMirror, func(v semver.Version, index int) string {
+	return lo.Map(versionsToMirror, func(v semver.Version, _ int) string {
 		return "v" + v.String()
 	}), nil
 }
@@ -167,45 +142,45 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 	mirrorCtx := &params.PullParams{
 		BaseParams: params.BaseParams{
 			Logger:                logger,
-			Insecure:              Insecure,
-			SkipTLSVerification:   TLSSkipVerify,
-			DeckhouseRegistryRepo: SourceRegistryRepo,
-			ModulesPathSuffix:     ModulesPathSuffix,
+			Insecure:              pullflags.Insecure,
+			SkipTLSVerification:   pullflags.TLSSkipVerify,
+			DeckhouseRegistryRepo: pullflags.SourceRegistryRepo,
+			ModulesPathSuffix:     pullflags.ModulesPathSuffix,
 			RegistryAuth:          getSourceRegistryAuthProvider(),
-			BundleDir:             ImagesBundlePath,
+			BundleDir:             pullflags.ImagesBundlePath,
 			WorkingDir: filepath.Join(
-				TempDir,
+				pullflags.TempDir,
 				mirror.TmpMirrorFolderName,
 				mirror.TmpMirrorPullFolderName,
-				fmt.Sprintf("%x", md5.Sum([]byte(SourceRegistryRepo))),
+				fmt.Sprintf("%x", md5.Sum([]byte(pullflags.SourceRegistryRepo))),
 			),
 		},
 
-		BundleChunkSize: ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
+		BundleChunkSize: pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
 
-		DoGOSTDigests:         DoGOSTDigest,
-		SkipPlatform:          NoPlatform,
-		SkipSecurityDatabases: NoSecurityDB,
-		SkipModules:           NoModules,
-		OnlyExtraImages:       OnlyExtraImages,
-		DeckhouseTag:          DeckhouseTag,
-		SinceVersion:          SinceVersion,
+		DoGOSTDigests:         pullflags.DoGOSTDigest,
+		SkipPlatform:          pullflags.NoPlatform,
+		SkipSecurityDatabases: pullflags.NoSecurityDB,
+		SkipModules:           pullflags.NoModules,
+		OnlyExtraImages:       pullflags.OnlyExtraImages,
+		DeckhouseTag:          pullflags.DeckhouseTag,
+		SinceVersion:          pullflags.SinceVersion,
 	}
 	return mirrorCtx
 }
 
 func getSourceRegistryAuthProvider() authn.Authenticator {
-	if SourceRegistryLogin != "" {
+	if pullflags.SourceRegistryLogin != "" {
 		return authn.FromConfig(authn.AuthConfig{
-			Username: SourceRegistryLogin,
-			Password: SourceRegistryPassword,
+			Username: pullflags.SourceRegistryLogin,
+			Password: pullflags.SourceRegistryPassword,
 		})
 	}
 
-	if DeckhouseLicenseToken != "" {
+	if pullflags.DeckhouseLicenseToken != "" {
 		return authn.FromConfig(authn.AuthConfig{
 			Username: "license-token",
-			Password: DeckhouseLicenseToken,
+			Password: pullflags.DeckhouseLicenseToken,
 		})
 	}
 
@@ -250,9 +225,56 @@ func NewPuller(cmd *cobra.Command) *Puller {
 		},
 	}
 }
-func (p *Puller) Execute() error {
+func (p *Puller) Execute(ctx context.Context) error {
 	if err := p.cleanupWorkingDirectory(); err != nil {
 		return err
+	}
+
+	if os.Getenv("NEW_PULL") == "true" {
+		logger := dkplog.NewNop()
+
+		if log.DebugLogLevel() >= 3 {
+			logger = dkplog.NewLogger(dkplog.WithLevel(slog.LevelDebug))
+		}
+
+		// Create registry client for module operations
+		clientOpts := &regclient.Options{
+			Insecure:      p.params.Insecure,
+			TLSSkipVerify: p.params.SkipTLSVerification,
+			Logger:        logger,
+		}
+
+		if p.params.RegistryAuth != nil {
+			clientOpts.Auth = p.params.RegistryAuth
+		}
+
+		var c pkg.RegistryClient
+		c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+
+		if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
+			c = stub.NewRegistryClientStub()
+		}
+
+		// Scope to the registry path and modules suffix
+		if p.params.RegistryPath != "" {
+			c = c.WithSegment(p.params.RegistryPath)
+		}
+
+		svc := mirror.NewPullService(
+			registryservice.NewService(c, logger),
+			pullflags.TempDir,
+			pullflags.DeckhouseTag,
+			pullflags.IgnoreSuspendedChannels,
+			logger.Named("pull"),
+			p.logger,
+		)
+
+		err := svc.Pull(ctx)
+		if err != nil {
+			panic(err)
+		}
+
+		return nil
 	}
 
 	if err := p.pullPlatform(); err != nil {
@@ -276,7 +298,7 @@ func (p *Puller) Execute() error {
 
 // cleanupWorkingDirectory handles cleanup of the working directory if needed
 func (p *Puller) cleanupWorkingDirectory() error {
-	if NoPullResume || lastPullWasTooLongAgoToRetry(p.params) {
+	if pullflags.NoPullResume || lastPullWasTooLongAgoToRetry(p.params) {
 		if err := os.RemoveAll(p.params.WorkingDir); err != nil {
 			return fmt.Errorf("Cleanup last unfinished pull data: %w", err)
 		}
@@ -297,7 +319,7 @@ func (p *Puller) pullPlatform() error {
 	}
 
 	// Create registry client for module operations
-	clientOpts := &registry.ClientOptions{
+	clientOpts := &regclient.Options{
 		Insecure:      p.params.Insecure,
 		TLSSkipVerify: p.params.SkipTLSVerification,
 		Logger:        logger,
@@ -307,12 +329,16 @@ func (p *Puller) pullPlatform() error {
 		clientOpts.Auth = p.params.RegistryAuth
 	}
 
-	var client pkg.RegistryClient
-	client = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+	var c pkg.RegistryClient
+	c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+
+	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
+		c = stub.NewRegistryClientStub()
+	}
 
 	// Scope to the registry path and modules suffix
 	if p.params.RegistryPath != "" {
-		client = client.WithSegment(p.params.RegistryPath)
+		c = c.WithSegment(p.params.RegistryPath)
 	}
 
 	return p.logger.Process("Pull Deckhouse Kubernetes Platform", func() error {
@@ -320,24 +346,26 @@ func (p *Puller) pullPlatform() error {
 			return err
 		}
 
-		tagsToMirror, err := findTagsToMirror(p.params, p.logger, client)
+		tagsToMirror, err := findTagsToMirror(p.params, p.logger, c)
 		if err != nil {
 			return fmt.Errorf("Find tags to mirror: %w", err)
 		}
 
-		if err = operations.PullDeckhousePlatform(p.params, tagsToMirror, client); err != nil {
+		if err = operations.PullDeckhousePlatform(p.params, tagsToMirror, c); err != nil {
 			return err
 		}
+
 		return nil
 	})
 }
 
 // validatePlatformAccess validates access to the platform registry
 func (p *Puller) validatePlatformAccess() error {
-	targetTag := "stable"
+	targetTag := internal.StableChannel
 	if p.params.DeckhouseTag != "" {
 		targetTag = p.params.DeckhouseTag
 	}
+
 	imageRef := p.params.DeckhouseRegistryRepo + ":" + targetTag
 
 	ctx, cancel := context.WithTimeout(p.cmd.Context(), 15*time.Second)
@@ -346,6 +374,7 @@ func (p *Puller) validatePlatformAccess() error {
 	if err := p.accessValidator.ValidateReadAccessForImage(ctx, imageRef, p.validationOpts...); err != nil {
 		return fmt.Errorf("Source registry is not accessible: %w", err)
 	}
+
 	return nil
 }
 
@@ -362,7 +391,7 @@ func (p *Puller) pullSecurityDatabases() error {
 	}
 
 	// Create registry client for module operations
-	clientOpts := &registry.ClientOptions{
+	clientOpts := &regclient.Options{
 		Insecure:      p.params.Insecure,
 		TLSSkipVerify: p.params.SkipTLSVerification,
 		Logger:        logger,
@@ -372,12 +401,16 @@ func (p *Puller) pullSecurityDatabases() error {
 		clientOpts.Auth = p.params.RegistryAuth
 	}
 
-	var client pkg.RegistryClient
-	client = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+	var c pkg.RegistryClient
+	c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+
+	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
+		c = stub.NewRegistryClientStub()
+	}
 
 	// Scope to the registry path and modules suffix
 	if p.params.RegistryPath != "" {
-		client = client.WithSegment(p.params.RegistryPath)
+		c = c.WithSegment(p.params.RegistryPath)
 	}
 
 	return p.logger.Process("Pull Security Databases", func() error {
@@ -388,13 +421,13 @@ func (p *Puller) pullSecurityDatabases() error {
 		err := p.accessValidator.ValidateReadAccessForImage(ctx, imageRef, p.validationOpts...)
 		switch {
 		case errors.Is(err, validation.ErrImageUnavailable):
-			p.logger.WarnF("Skipping pull of security databases: %v", err)
+			p.logger.Warnf("Skipping pull of security databases: %v", err)
 			return nil
 		case err != nil:
 			return fmt.Errorf("Source registry is not accessible: %w", err)
 		}
 
-		if err := operations.PullSecurityDatabases(p.params, client); err != nil {
+		if err := operations.PullSecurityDatabases(p.params, c); err != nil {
 			return err
 		}
 		return nil
@@ -419,7 +452,7 @@ func (p *Puller) pullModules() error {
 	}
 
 	// Create registry client for module operations
-	clientOpts := &registry.ClientOptions{
+	clientOpts := &regclient.Options{
 		Insecure:      p.params.Insecure,
 		TLSSkipVerify: p.params.SkipTLSVerification,
 		Logger:        logger,
@@ -429,16 +462,20 @@ func (p *Puller) pullModules() error {
 		clientOpts.Auth = p.params.RegistryAuth
 	}
 
-	var client pkg.RegistryClient
-	client = registry.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+	var c pkg.RegistryClient
+	c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+
+	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
+		c = stub.NewRegistryClientStub()
+	}
 
 	// Scope to the registry path and modules suffix
 	if p.params.RegistryPath != "" {
-		client = client.WithSegment(p.params.RegistryPath)
+		c = c.WithSegment(p.params.RegistryPath)
 	}
 
 	if p.params.ModulesPathSuffix != "" {
-		client = client.WithSegment(p.params.ModulesPathSuffix)
+		c = c.WithSegment(p.params.ModulesPathSuffix)
 	}
 
 	return p.logger.Process(processName, func() error {
@@ -451,7 +488,7 @@ func (p *Puller) pullModules() error {
 			return err
 		}
 
-		return operations.PullModules(p.params, filter, client)
+		return operations.PullModules(p.params, filter, c)
 	})
 }
 
@@ -469,10 +506,10 @@ func (p *Puller) validateModulesAccess() error {
 
 // createModuleFilter creates the appropriate module filter based on whitelist/blacklist
 func (p *Puller) createModuleFilter() (*modules.Filter, error) {
-	filterExpressions := ModulesBlacklist
+	filterExpressions := pullflags.ModulesBlacklist
 	filterType := modules.FilterTypeBlacklist
-	if ModulesWhitelist != nil {
-		filterExpressions = ModulesWhitelist
+	if pullflags.ModulesWhitelist != nil {
+		filterExpressions = pullflags.ModulesWhitelist
 		filterType = modules.FilterTypeWhitelist
 	}
 
@@ -485,7 +522,7 @@ func (p *Puller) createModuleFilter() (*modules.Filter, error) {
 
 // computeGOSTDigests computes GOST digests for the bundle if enabled
 func (p *Puller) computeGOSTDigests() error {
-	if !DoGOSTDigest {
+	if !pullflags.DoGOSTDigest {
 		return nil
 	}
 
@@ -527,7 +564,7 @@ func (p *Puller) computeGOSTDigests() error {
 // finalCleanup performs final cleanup of temporary directories
 func (p *Puller) finalCleanup() error {
 	// Check if TempDir contains only the "pull" subdirectory
-	entries, err := os.ReadDir(TempDir)
+	entries, err := os.ReadDir(pullflags.TempDir)
 	if err != nil {
 		return fmt.Errorf("failed to read temp directory: %w", err)
 	}
@@ -544,12 +581,12 @@ func (p *Puller) finalCleanup() error {
 
 	if pullDirExists && otherEntries == 0 {
 		// TempDir contains only the "pull" folder, delete entire TempDir
-		if err := os.RemoveAll(TempDir); err != nil {
+		if err := os.RemoveAll(pullflags.TempDir); err != nil {
 			return fmt.Errorf("failed to remove temp directory: %w", err)
 		}
 	} else {
 		// TempDir contains other files/folders, remove only the "pull" subdirectory
-		pullDir := filepath.Join(TempDir, mirror.TmpMirrorFolderName)
+		pullDir := filepath.Join(pullflags.TempDir, mirror.TmpMirrorFolderName)
 		if err := os.RemoveAll(pullDir); err != nil {
 			return fmt.Errorf("failed to remove pull directory: %w", err)
 		}

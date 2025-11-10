@@ -24,10 +24,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/samber/lo"
 	"github.com/spf13/cobra"
+
+	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 )
 
 func parseAndValidateParameters(_ *cobra.Command, args []string) error {
@@ -112,10 +113,10 @@ func parseAndValidateRegistryURLArg(args []string) error {
 	RegistryHost = registryURL.Host
 	RegistryPath = registryURL.Path
 	if RegistryHost == "" {
-		return errors.New("<registry> you provided contains no registry host. Please specify registry address correctly.")
+		return errors.New("<registry> you provided contains no registry host. Please specify registry address correctly")
 	}
 	if len(RegistryPath) < 2 || len(RegistryPath) > 255 {
-		return errors.New("repository part must be between 2 and 255 characters in length. Please specify registry repo path correctly.")
+		return errors.New("repository part must be between 2 and 255 characters in length. Please specify registry repo path correctly")
 	}
 
 	return nil
