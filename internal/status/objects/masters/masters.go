@@ -56,7 +56,7 @@ func getMasterNodes(ctx context.Context, kubeCl kubernetes.Interface) ([]corev1.
 		LabelSelector: "node-role.kubernetes.io/master",
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list master nodes: %w\n", err)
+		return nil, fmt.Errorf("failed to list master nodes: %w", err)
 	}
 	return nodes.Items, nil
 }

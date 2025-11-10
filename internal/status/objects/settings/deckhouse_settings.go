@@ -34,7 +34,7 @@ import (
 // Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, dynamicClient dynamic.Interface) statusresult.StatusResult {
 	settings, err := getModuleConfigSettings(ctx, dynamicClient)
-	output := color.RedString("Error getting ModuleConfig settings: %v\n", err)
+	output := color.RedString("Error getting ModuleConfig settings: %v", err)
 	if err == nil {
 		output = formatModuleConfigSettings(settings)
 	}
@@ -62,12 +62,12 @@ func getModuleConfigSettings(ctx context.Context, dynamicClient dynamic.Interfac
 
 	mc, err := dynamicClient.Resource(gvr).Get(ctx, "deckhouse", metav1.GetOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get ModuleConfig: %w\n", err)
+		return nil, fmt.Errorf("failed to get ModuleConfig: %w", err)
 	}
 
 	rawSettings, found, err := unstructured.NestedMap(mc.Object, "spec", "settings")
 	if err != nil || !found {
-		return nil, fmt.Errorf("failed to find or parse settings in ModuleConfig: %w\n", err)
+		return nil, fmt.Errorf("failed to find or parse settings in ModuleConfig: %w", err)
 	}
 
 	return configSettingsFromMapProcessing(rawSettings), nil
@@ -170,7 +170,8 @@ func formatSettingLine(setting ConfigSetting, indent string, prefixStack []bool,
 	// Map/Struct (has "children").
 	if len(setting.Children) > 0 {
 		sb.WriteString(fmt.Sprintf("%s%s %s:\n", prefix, coloredLineOperator, setting.Key))
-		newPrefixStack := append(prefixStack, !isLast)
+		newPrefixStack := append([]bool{}, prefixStack...)
+		newPrefixStack = append(newPrefixStack, !isLast)
 		for i, child := range setting.Children {
 			sb.WriteString(formatSettingLine(child, indent+"    ", newPrefixStack, i == len(setting.Children)-1, level+1))
 		}
@@ -181,7 +182,8 @@ func formatSettingLine(setting ConfigSetting, indent string, prefixStack []bool,
 	if len(setting.Items) > 0 {
 		allScalars := areAllItemsScalars(setting.Items)
 		sb.WriteString(fmt.Sprintf("%s%s %s:\n", prefix, coloredLineOperator, setting.Key))
-		newPrefixStack := append(prefixStack, !isLast)
+		newPrefixStack := append([]bool{}, prefixStack...)
+		newPrefixStack = append(newPrefixStack, !isLast)
 		if allScalars {
 			for i, item := range setting.Items {
 				sb.WriteString(fmt.Sprintf("%s│   %s %s\n", prefix, mapLineOp(i == len(setting.Items)-1), item.Value))

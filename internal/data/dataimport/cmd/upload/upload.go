@@ -14,10 +14,11 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/spf13/cobra"
+
 	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/util"
 	client "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
-	"github.com/spf13/cobra"
 )
 
 const (
@@ -33,7 +34,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(ctx, log, cmd, args)
 		},
-		Args: func(cmd *cobra.Command, args []string) error {
+		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("invalid arguments")
 			}
@@ -95,12 +96,12 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		}
 	}
 
-	podUrl, _, subClient, err := util.PrepareUpload(ctx, log, diName, namespace, publish, httpClient)
+	podURL, _, subClient, err := util.PrepareUpload(ctx, log, diName, namespace, publish, httpClient)
 	if err != nil {
 		return err
 	}
 
-	fileUrl, err := url.JoinPath(podUrl, dstPath)
+	fileURL, err := url.JoinPath(podURL, dstPath)
 	if err != nil {
 		return err
 	}
@@ -109,11 +110,11 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		chunks = 1
 	}
 
-	return upload(ctx, log, subClient, fileUrl, pathToFile, chunks, permOctal, uid, gid, resume)
+	return upload(ctx, log, subClient, fileURL, pathToFile, chunks, permOctal, uid, gid, resume)
 }
 
-func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient, url string, filePath string, chunks int, permOctal string, uid, gid int, resume bool) error {
-	var offset int64 = 0
+func upload(ctx context.Context, _ *slog.Logger, httpClient *client.SafeClient, url string, filePath string, chunks int, permOctal string, uid, gid int, resume bool) error {
+	var offset int64
 	if resume {
 		off, err := util.CheckUploadProgress(ctx, httpClient, url)
 		if err != nil {
@@ -169,7 +170,7 @@ func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient
 				return err
 			}
 			defer func() {
-				io.Copy(io.Discard, resp.Body)
+				_, _ = io.Copy(io.Discard, resp.Body)
 				_ = resp.Body.Close()
 			}()
 

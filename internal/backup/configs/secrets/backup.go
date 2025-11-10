@@ -24,7 +24,7 @@ func BackupSecrets(
 		return strings.HasPrefix(item, "d8-") || strings.HasPrefix(item, "kube-")
 	})
 
-	secrets := lo.Map(namespaces, func(namespace string, index int) []runtime.Object {
+	secrets := lo.Map(namespaces, func(namespace string, _ int) []runtime.Object {
 		list, err := kubeCl.CoreV1().Secrets(namespace).List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			log.Fatalf("Failed to list secrets from : %v", err)
