@@ -184,8 +184,7 @@ func (s *PluginService) untarPluginFiles(r io.Reader, destination, pluginName st
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
 
-		switch header.Name {
-		case "plugin":
+		if header.Name == "plugin" {
 			s.log.Debug("Extracting plugin", slog.String("path", destination))
 
 			pluginPath := path.Join(destination, pluginName)
