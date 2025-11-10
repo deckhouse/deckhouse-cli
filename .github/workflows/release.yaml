@@ -11,6 +11,7 @@ on:
 env:
   GOPRIVATE: "flant.internal"
   PRIVATE_REPO: "${{secrets.DECKHOUSE_PRIVATE_REPO}}"
+  GOLANGCI_LINT_VERSION: 'v2.1'
 
 permissions:
   contents: write
@@ -192,6 +193,11 @@ jobs:
           git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
           git config --global --add safe.directory '*'
 
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          install-only: 'true'
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+
       - name: Run lint
         run: |
-          task lint
+          task lint:check
