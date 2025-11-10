@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
-	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/samber/lo"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
@@ -28,8 +27,8 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
-	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -38,6 +37,8 @@ type Service struct {
 	deckhouseService *registryservice.DeckhouseService
 	// layout manages the OCI image layouts for different components
 	layout *ImageLayouts
+	// downloadList manages the list of images to be downloaded
+	downloadList *ImageDownloadList
 	// pullerService handles the pulling of images
 	pullerService *puller.PullerService
 
@@ -68,7 +69,7 @@ func NewService(
 
 	tmpDir := filepath.Join(workingDir, "platform")
 
-	layout, err := createOCIImageLayoutsForDeckhouse(tmpDir, deckhouseService.GetRoot())
+	layout, err := createOCIImageLayoutsForPlatform(tmpDir)
 	if err != nil {
 		//TODO: handle error
 		userLogger.Warnf("Create OCI Image Layouts: %v", err)
@@ -77,6 +78,7 @@ func NewService(
 	return &Service{
 		deckhouseService:        deckhouseService,
 		layout:                  layout,
+		downloadList:            NewImageDownloadList(deckhouseService.GetRoot()),
 		pullerService:           puller.NewPullerService(deckhouseService, logger, userLogger),
 		sinceVersion:            sinceVersion,
 		targetTag:               targetTag,
@@ -100,8 +102,8 @@ func (svc *Service) PullPlatform(ctx context.Context) error {
 		return fmt.Errorf("find tags to mirror: %w", err)
 	}
 
-	svc.layout.FillDeckhouseImages(tagsToMirror)
-	svc.layout.FillForTag(svc.targetTag)
+	svc.downloadList.FillDeckhouseImages(tagsToMirror)
+	svc.downloadList.FillForTag(svc.targetTag)
 
 	err = svc.pullDeckhousePlatform(ctx, tagsToMirror)
 	if err != nil {
@@ -189,7 +191,11 @@ func (svc *Service) versionsToMirrorFunc(ctx context.Context) ([]semver.Version,
 		version, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
 		if err != nil {
 			if channel == internal.LTSChannel {
-				svc.userLogger.Warnf("Skipping LTS channel: %v", err)
+				if !errors.Is(err, client.ErrImageNotFound) {
+					svc.userLogger.Warnf("Skipping LTS channel: %v", err)
+				} else {
+					svc.userLogger.Warnf("Skipping LTS channel, because it's not required")
+				}
 
 				continue
 			}
@@ -277,7 +283,7 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 		return nil, fmt.Errorf("append %s release channel image to layout: %w", releaseChannel, err)
 	}
 
-	svc.layout.ReleaseChannelImages[imageMeta.GetTagReference()] = puller.NewImageMeta(meta.Version, imageMeta.GetTagReference(), &digest)
+	svc.downloadList.DeckhouseReleaseChannel[imageMeta.GetTagReference()] = puller.NewImageMeta(meta.Version, imageMeta.GetTagReference(), &digest)
 
 	return ver, nil
 }
@@ -318,7 +324,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	logger.Infof("Searching for Deckhouse built-in modules digests")
 
 	var uniqueImages = make(map[string]string, 0)
-	for _, imageMeta := range svc.layout.InstallImages {
+	for _, imageMeta := range svc.downloadList.DeckhouseInstall {
 		if _, ok := uniqueImages[imageMeta.DigestReference]; ok {
 			continue
 		}
@@ -328,15 +334,17 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 
 	var prevDigests = make(map[string]struct{}, 0)
 	for _, tag := range uniqueImages {
+		svc.userLogger.Infof("Extracting images digests from Deckhouse installer %s", tag)
+
 		digests, err := svc.ExtractImageDigestsFromDeckhouseInstallerNew(tag, prevDigests)
 		if err != nil {
 			return fmt.Errorf("extract images digests: %w", err)
 		}
 
-		maps.Copy(svc.layout.DeckhouseImages, digests)
+		maps.Copy(svc.downloadList.Deckhouse, digests)
 	}
 
-	logger.Infof("Found %d images", len(svc.layout.DeckhouseImages))
+	logger.Infof("Found %d images", len(svc.downloadList.Deckhouse))
 
 	if err = logger.Process("Pull Deckhouse images", func() error {
 		if err := svc.pullDeckhouseImages(ctx); err != nil {
@@ -419,7 +427,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 func (svc *Service) pullDeckhouseReleaseChannels(ctx context.Context) error {
 	config := puller.PullConfig{
 		Name:             "Deckhouse release channels information",
-		ImageSet:         svc.layout.ReleaseChannelImages,
+		ImageSet:         svc.downloadList.DeckhouseReleaseChannel,
 		Layout:           svc.layout.DeckhouseReleaseChannel,
 		AllowMissingTags: svc.targetTag != "",
 		GetterService:    svc.deckhouseService.ReleaseChannels(),
@@ -431,7 +439,7 @@ func (svc *Service) pullDeckhouseReleaseChannels(ctx context.Context) error {
 func (svc *Service) pullInstallers(ctx context.Context) error {
 	config := puller.PullConfig{
 		Name:             "installers",
-		ImageSet:         svc.layout.InstallImages,
+		ImageSet:         svc.downloadList.DeckhouseInstall,
 		Layout:           svc.layout.DeckhouseInstall,
 		AllowMissingTags: true, // Allow missing installer images
 		GetterService:    svc.deckhouseService.Installer(),
@@ -443,7 +451,7 @@ func (svc *Service) pullInstallers(ctx context.Context) error {
 func (svc *Service) pullStandaloneInstallers(ctx context.Context) error {
 	config := puller.PullConfig{
 		Name:             "standalone installers",
-		ImageSet:         svc.layout.InstallStandaloneImages,
+		ImageSet:         svc.downloadList.DeckhouseInstallStandalone,
 		Layout:           svc.layout.DeckhouseInstallStandalone,
 		AllowMissingTags: true,
 		GetterService:    svc.deckhouseService.StandaloneInstaller(),
@@ -455,7 +463,7 @@ func (svc *Service) pullStandaloneInstallers(ctx context.Context) error {
 func (svc *Service) pullDeckhouseImages(ctx context.Context) error {
 	config := puller.PullConfig{
 		Name:             "Deckhouse releases",
-		ImageSet:         svc.layout.DeckhouseImages,
+		ImageSet:         svc.downloadList.Deckhouse,
 		Layout:           svc.layout.Deckhouse,
 		AllowMissingTags: false,
 		GetterService:    svc.deckhouseService,
@@ -613,14 +621,6 @@ func (svc *Service) FindVexImage(
 	splitIndex := strings.LastIndex(vexImageName, ":")
 	tag := vexImageName[splitIndex+1:]
 
-	// imageSegmentsRaw := strings.TrimPrefix(imagePath, svc.deckhouseService.GetRoot())
-	// imageSegments := strings.Split(imageSegmentsRaw, "/")
-
-	// for i, segment := range imageSegments {
-	// 	client = client.WithSegment(segment)
-	// 	logger.Debugf("Segment %d: %s", i, segment)
-	// }
-
 	err := svc.deckhouseService.CheckImageExists(context.TODO(), tag)
 	if errors.Is(err, regclient.ErrImageNotFound) {
 		// Image not found, which is expected for non-vulnerable images
@@ -703,21 +703,10 @@ func deduplicateVersions(versions []*semver.Version) []semver.Version {
 	return vers
 }
 
-func createOCIImageLayoutsForDeckhouse(
+func createOCIImageLayoutsForPlatform(
 	rootFolder string,
-	rootURL string,
 ) (*ImageLayouts, error) {
-	var err error
-
-	layouts := NewImageLayouts(rootFolder, rootURL)
-
-	fsPath := rootFolder
-	layoutPtr, err := createEmptyImageLayout(fsPath)
-	if err != nil {
-		return nil, fmt.Errorf("create OCI Image Layout at %s: %w", fsPath, err)
-	}
-
-	layouts.Deckhouse = regimage.NewImageLayout(layoutPtr)
+	layouts := NewImageLayouts(rootFolder)
 
 	mirrorTypes := []internal.MirrorType{
 		internal.MirrorTypeDeckhouse,
@@ -727,62 +716,11 @@ func createOCIImageLayoutsForDeckhouse(
 	}
 
 	for _, mtype := range mirrorTypes {
-		fsPath = filepath.Join(rootFolder, internal.InstallSegmentByMirrorType(mtype))
-		layoutPtr, err = createEmptyImageLayout(fsPath)
+		err := layouts.setLayoutByMirrorType(rootFolder, mtype)
 		if err != nil {
-			return nil, fmt.Errorf("create OCI Image Layout at %s: %w", fsPath, err)
+			return nil, fmt.Errorf("set layout by mirror type %v: %w", mtype, err)
 		}
-
-		layouts.setLayoutByMirrorType(mtype, regimage.NewImageLayout(layoutPtr))
 	}
 
 	return layouts, nil
-}
-
-func createEmptyImageLayout(path string) (layout.Path, error) {
-	layoutFilePath := filepath.Join(path, "oci-layout")
-	indexFilePath := filepath.Join(path, "index.json")
-	blobsPath := filepath.Join(path, "blobs")
-
-	if err := os.MkdirAll(blobsPath, 0o755); err != nil {
-		return "", fmt.Errorf("mkdir for blobs: %w", err)
-	}
-
-	layoutContents := ociLayout{ImageLayoutVersion: "1.0.0"}
-	indexContents := indexSchema{
-		SchemaVersion: 2,
-		MediaType:     "application/vnd.oci.image.index.v1+json",
-	}
-
-	rawJSON, err := json.MarshalIndent(indexContents, "", "    ")
-	if err != nil {
-		return "", fmt.Errorf("create index.json: %w", err)
-	}
-	if err = os.WriteFile(indexFilePath, rawJSON, 0o644); err != nil {
-		return "", fmt.Errorf("create index.json: %w", err)
-	}
-
-	rawJSON, err = json.MarshalIndent(layoutContents, "", "    ")
-	if err != nil {
-		return "", fmt.Errorf("create oci-layout: %w", err)
-	}
-	if err = os.WriteFile(layoutFilePath, rawJSON, 0o644); err != nil {
-		return "", fmt.Errorf("create oci-layout: %w", err)
-	}
-
-	return layout.Path(path), nil
-}
-
-type indexSchema struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	MediaType     string `json:"mediaType"`
-	Manifests     []struct {
-		MediaType string `json:"mediaType,omitempty"`
-		Size      int    `json:"size,omitempty"`
-		Digest    string `json:"digest,omitempty"`
-	} `json:"manifests"`
-}
-
-type ociLayout struct {
-	ImageLayoutVersion string `json:"imageLayoutVersion"`
 }
