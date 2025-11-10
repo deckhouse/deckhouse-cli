@@ -27,7 +27,6 @@ import (
 	deDelete "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/delete"
 	deDownload "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/download"
 	deList "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/list"
-
 	diCreate "github.com/deckhouse/deckhouse-cli/internal/data/dataimport/cmd/create"
 	diDelete "github.com/deckhouse/deckhouse-cli/internal/data/dataimport/cmd/delete"
 	diUpload "github.com/deckhouse/deckhouse-cli/internal/data/dataimport/cmd/upload"
@@ -51,7 +50,7 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Run: func(cmd *cobra.Command, _ []string) {
-			cmd.Help()
+			_ = cmd.Help()
 		},
 	}
 
@@ -65,7 +64,7 @@ func NewCommand() *cobra.Command {
 		Short:         "Export data (DataExport)",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Run:           func(cmd *cobra.Command, _ []string) { cmd.Help() },
+		Run:           func(cmd *cobra.Command, _ []string) { _ = cmd.Help() },
 	}
 	exportCmd.AddCommand(
 		deCreate.NewCommand(ctx, logger),
@@ -79,7 +78,7 @@ func NewCommand() *cobra.Command {
 		Short:         "Import data (DataImport)",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Run:           func(cmd *cobra.Command, _ []string) { cmd.Help() },
+		Run:           func(cmd *cobra.Command, _ []string) { _ = cmd.Help() },
 	}
 	importCmd.AddCommand(
 		diCreate.NewCommand(ctx, logger),
@@ -109,7 +108,7 @@ func NewCommand() *cobra.Command {
 		RunE: func(c *cobra.Command, args []string) error {
 			c.Println("WARNING: 'd8 data list' is deprecated and will be removed. Use 'd8 data export list'.")
 			return exportListRun(ctx, logger, c, args)
-		},	
+		},
 	}
 	deprecatedList.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
 	deprecatedList.Flags().Bool("publish", false, "Provide access outside of cluster")

@@ -45,7 +45,7 @@ func initProgressBar(totalSize int64) (*mpb.Progress, *mpb.Bar) {
 // See: https://ixday.github.io/post/golang-cancel-copy/
 type readerFunc func(p []byte) (n int, err error)
 
-func (rf readerFunc) Read(p []byte) (n int, err error) { return rf(p) }
+func (rf readerFunc) Read(p []byte) (int, error) { return rf(p) }
 
 // Callback is a function that provides progress information copying from a Reader to a Writer
 type Callback func(int64, io.Reader, io.Writer) error
@@ -83,12 +83,12 @@ func BarCallback(ctx context.Context) Callback {
 	}
 }
 
-func CopyWithContext(ctx context.Context, dst io.Writer, src io.Reader) (written int64, err error) {
+func CopyWithContext(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
 	// Copy will call the Reader and Writer interface multiple time, in order
 	// to copy by chunk (avoiding loading the whole file in memory).
 	// I insert the ability to cancel before read time as it is the earliest
 	// possible in the call process.
-	written, err = io.Copy(dst, readerFunc(func(p []byte) (int, error) {
+	written, err := io.Copy(dst, readerFunc(func(p []byte) (int, error) {
 		// golang non-blocking channel: https://gobyexample.com/non-blocking-channel-operations
 		select {
 		// if context has been canceled

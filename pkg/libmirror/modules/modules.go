@@ -108,8 +108,11 @@ func FindExternalModuleImages(
 	authProvider authn.Authenticator,
 	insecure, skipVerifyTLS bool,
 	client pkg.RegistryClient,
-) (moduleImages []string, moduleImagesWithExternal, releaseImages map[string]struct{}, err error) {
+) ( /*moduleImages*/ []string /*moduleImagesWithExternal*/, map[string]struct{} /*releaseImages*/, map[string]struct{}, error) {
 	logger := params.Logger
+
+	var moduleImages []string
+	var moduleImagesWithExternal, releaseImages map[string]struct{}
 
 	moduleImagesWithExternal, releaseImages = map[string]struct{}{}, map[string]struct{}{}
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
@@ -254,10 +257,10 @@ func FindModuleExtraImages(
 	_ authn.Authenticator,
 	_, _ bool,
 	client pkg.RegistryClient,
-) (extraImages map[string]struct{}, err error) {
+) ( /*extraImages*/ map[string]struct{}, error) {
 	logger := params.Logger
 
-	extraImages = map[string]struct{}{}
+	extraImages := map[string]struct{}{}
 
 	// Try to extract extra_images.json from any available module version
 	for _, imageTag := range moduleImages {

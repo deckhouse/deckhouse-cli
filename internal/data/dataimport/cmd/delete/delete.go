@@ -7,10 +7,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
-	"github.com/spf13/cobra"
 )
 
 const (
@@ -32,7 +33,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(ctx, log, cmd, args)
 		},
-		Args: func(cmd *cobra.Command, args []string) error {
+		Args: func(_ *cobra.Command, args []string) error {
 			_, err := parseArgs(args)
 			return err
 		},
@@ -43,7 +44,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	return cmd
 }
 
-func parseArgs(args []string) (diName string, err error) {
+func parseArgs(args []string) ( /*diName*/ string, error) {
 	if len(args) == 1 {
 		return args[0], nil
 	}
@@ -78,5 +79,4 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	log.Info("Deleted DataImport", slog.String("name", diName), slog.String("namespace", namespace))
 	return nil
-
 }

@@ -40,9 +40,8 @@ func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 			if slices.Contains([]string{"y", "n"}, input) {
 				inputChan <- strings.TrimSpace(input)
 				return
-			} else {
-				fmt.Println("Invalid input. Please press 'y' or 'n'.")
 			}
+			fmt.Println("Invalid input. Please press 'y' or 'n'.")
 		}
 	}()
 
@@ -58,7 +57,9 @@ func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 	}
 }
 
-func ParseArgs(args []string) (deName, srcPath string, err error) {
+func ParseArgs(args []string) ( /*deName*/ string /*srcPath*/, string, error) {
+	var deName, srcPath string
+
 	switch len(args) {
 	case 1:
 		deName = args[0]
@@ -73,5 +74,5 @@ func ParseArgs(args []string) (deName, srcPath string, err error) {
 		srcPath = "/" + srcPath
 	}
 
-	return
+	return deName, srcPath, nil
 }

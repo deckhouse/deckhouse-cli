@@ -10,12 +10,13 @@ import (
 	"strconv"
 	"time"
 
-	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
-	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
-	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
+	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
@@ -74,7 +75,7 @@ func CreateDataImport(
 			Namespace: namespace,
 		},
 		Spec: v1alpha1.DataImportSpec{
-			Ttl:                  ttl,
+			TTL:                  ttl,
 			Publish:              publish,
 			WaitForFirstConsumer: waitForFirstConsumer,
 			TargetRef: v1alpha1.DataImportTargetRefSpec{
@@ -119,7 +120,7 @@ func GetDataImportWithRestart(
 					ctx,
 					diName,
 					namespace,
-					diObj.Spec.Ttl,
+					diObj.Spec.TTL,
 					diObj.Spec.Publish,
 					diObj.Spec.WaitForFirstConsumer,
 					pvcTemplate,
@@ -140,7 +141,7 @@ func GetDataImportWithRestart(
 				if diObj.Status.PublicURL == "" {
 					notReadyErr = fmt.Errorf("DataImport %s/%s has empty PublicURL", diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name)
 				}
-			} else if diObj.Status.Url == "" {
+			} else if diObj.Status.URL == "" {
 				notReadyErr = fmt.Errorf("DataImport %s/%s has no URL", diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name)
 			}
 		}
@@ -161,35 +162,35 @@ func GetDataImportWithRestart(
 
 func PrepareUpload(
 	ctx context.Context,
-	log *slog.Logger,
+	_ *slog.Logger,
 	diName, namespace string,
 	publish bool,
 	sClient *safeClient.SafeClient,
-) (url, volumeMode string, subClient *safeClient.SafeClient, finErr error) {
+) ( /*url*/ string /*volumeMode*/, string /*subClient*/, *safeClient.SafeClient, error) {
+	var url, volumeMode string
+	var subClient *safeClient.SafeClient
+
 	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {
-		finErr = err
-		return
+		return "", "", nil, err
 	}
 
 	diObj, err := GetDataImportWithRestart(ctx, diName, namespace, rtClient)
 	if err != nil {
-		finErr = err
-		return
+		return "", "", nil, err
 	}
 
 	var podURL string
-	if publish {
+	switch {
+	case publish:
 		if diObj.Status.PublicURL == "" {
-			finErr = fmt.Errorf("empty PublicURL")
-			return
+			return "", "", nil, fmt.Errorf("empty PublicURL")
 		}
 		podURL = diObj.Status.PublicURL
-	} else if diObj.Status.Url != "" {
-		podURL = diObj.Status.Url
-	} else {
-		finErr = fmt.Errorf("invalid URL")
-		return
+	case diObj.Status.URL != "":
+		podURL = diObj.Status.URL
+	default:
+		return "", "", nil, fmt.Errorf("invalid URL")
 	}
 
 	volumeMode = diObj.Status.VolumeMode
@@ -197,18 +198,15 @@ func PrepareUpload(
 	case "Filesystem":
 		url, err = neturl.JoinPath(podURL, "api/v1/files")
 		if err != nil {
-			finErr = err
-			return
+			return "", "", nil, err
 		}
 	case "Block":
 		url, err = neturl.JoinPath(podURL, "api/v1/block")
 		if err != nil {
-			finErr = err
-			return
+			return "", "", nil, err
 		}
 	default:
-		finErr = fmt.Errorf("%w: '%s'", dataio.ErrUnsupportedVolumeMode, volumeMode)
-		return
+		return "", "", nil, fmt.Errorf("%w: '%s'", dataio.ErrUnsupportedVolumeMode, volumeMode)
 	}
 
 	subClient = sClient
@@ -216,13 +214,12 @@ func PrepareUpload(
 		subClient = sClient.Copy()
 		decodedBytes, err := base64.StdEncoding.DecodeString(diObj.Status.CA)
 		if err != nil {
-			finErr = fmt.Errorf("CA decoding error: %s", err.Error())
-			return
+			return "", "", nil, fmt.Errorf("CA decoding error: %s", err.Error())
 		}
 		subClient.SetTLSCAData(decodedBytes)
 	}
 
-	return
+	return url, volumeMode, subClient, nil
 }
 
 func CheckUploadProgress(ctx context.Context, httpClient *safeClient.SafeClient, targetURL string) (int64, error) {

@@ -129,6 +129,7 @@ func CreateOCIImageLayoutsForDeckhouse(
 		&layouts.InstallStandalone: filepath.Join(rootFolder, "install-standalone"),
 		&layouts.ReleaseChannel:    filepath.Join(rootFolder, "release-channel"),
 	}
+
 	for layoutPtr, fsPath := range fsPaths {
 		*layoutPtr, err = CreateEmptyImageLayout(fsPath)
 		if err != nil {

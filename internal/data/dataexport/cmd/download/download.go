@@ -32,9 +32,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
-	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -66,7 +66,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(ctx, log, cmd, args)
 		},
-		Args: func(cmd *cobra.Command, args []string) error {
+		Args: func(_ *cobra.Command, args []string) error {
 			_, _, err := dataio.ParseArgs(args)
 			return err
 		},
@@ -83,11 +83,6 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 type dirItem struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
-}
-
-type dirResp struct {
-	Version string    `json:"apiVersion"`
-	Items   []dirItem `json:"items"`
 }
 
 func forRespItems(jsonStream io.ReadCloser, workFunc func(*dirItem) error) error {
@@ -138,7 +133,7 @@ func forRespItems(jsonStream io.ReadCloser, workFunc func(*dirItem) error) error
 	return nil
 }
 
-func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log *slog.Logger, sem chan struct{}, url, srcPath, dstPath string) (err error) {
+func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log *slog.Logger, sem chan struct{}, url, srcPath, dstPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -151,7 +146,7 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 	req, _ := http.NewRequest(http.MethodGet, dataURL, nil)
 	resp, err := sClient.HTTPDo(req)
 	if err != nil {
-		return fmt.Errorf("HTTPDo: %s\n", err.Error())
+		return fmt.Errorf("HTTPDo: %s", err.Error())
 	}
 	defer resp.Body.Close()
 
@@ -202,25 +197,24 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 
 		wg.Wait()
 		return firstErr
-	} else {
-		if dstPath != "" {
-			// Create out file
-			out, err := os.Create(dstPath)
-			if err != nil {
-				return err
-			}
-			defer out.Close()
+	}
+	if dstPath != "" {
+		// Create out file
+		out, err := os.Create(dstPath)
+		if err != nil {
+			return err
+		}
+		defer out.Close()
 
-			_, err = io.Copy(out, resp.Body)
-			if err != nil {
-				return err
-			}
-			log.Info("Downloaded file", slog.String("path", dstPath))
-		} else {
-			_, err = io.Copy(os.Stdout, resp.Body)
-			if err != nil {
-				return err
-			}
+		_, err = io.Copy(out, resp.Body)
+		if err != nil {
+			return err
+		}
+		log.Info("Downloaded file", slog.String("path", dstPath))
+	} else {
+		_, err = io.Copy(os.Stdout, resp.Body)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -290,7 +284,9 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	if deName != dataName { // DataExport created in download process
 		if dataio.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
-			util.DeleteDataExport(ctx, deName, namespace, rtClient)
+			if err := util.DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
+				log.Warn("Failed to delete DataExport", slog.String("name", deName), slog.String("error", err.Error()))
+			}
 		}
 	}
 

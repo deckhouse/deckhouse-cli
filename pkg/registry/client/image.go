@@ -26,11 +26,11 @@ import (
 type Image struct {
 	v1.Image
 
-	PullReference string
+	pullReference string
 }
 
 func NewImage(img v1.Image, pullReference string) *Image {
-	return &Image{Image: img, PullReference: pullReference}
+	return &Image{Image: img, pullReference: pullReference}
 }
 
 // Extract flattens the image to a single layer and returns ReadCloser for fetching the content
@@ -40,5 +40,5 @@ func (i *Image) Extract() io.ReadCloser {
 }
 
 func (i *Image) GetPullReference() string {
-	return i.PullReference
+	return i.pullReference
 }

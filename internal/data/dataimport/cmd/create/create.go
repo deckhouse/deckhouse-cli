@@ -25,11 +25,11 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"sigs.k8s.io/yaml"
 
 	v1alpha1 "github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
-	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -52,7 +52,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(ctx, log, cmd, args)
 		},
-		Args: func(cmd *cobra.Command, args []string) error {
+		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("invalid arguments")
 			}

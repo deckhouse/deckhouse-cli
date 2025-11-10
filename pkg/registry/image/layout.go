@@ -1,7 +1,10 @@
 package image
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -14,6 +17,10 @@ import (
 const (
 	AnnotationImageReferenceName = "org.opencontainers.image.ref.name"
 	AnnotationImageShortTag      = "io.deckhouse.image.short_tag"
+	layoutFileName               = "oci-layout"
+	indexFileName                = "index.json"
+	blobsDirName                 = "blobs"
+	layoutMediaType              = "application/vnd.oci.image.layout.v1+json"
 )
 
 type ImageLayout struct {
@@ -23,11 +30,66 @@ type ImageLayout struct {
 	metaByTag map[string]*ImageMeta
 }
 
-func NewImageLayout(path layout.Path) *ImageLayout {
-	return &ImageLayout{
-		wrapped:   path,
-		metaByTag: make(map[string]*ImageMeta),
+func NewImageLayout(path string) (*ImageLayout, error) {
+	l, err := createEmptyImageLayout(path)
+	if err != nil {
+		return nil, err
 	}
+
+	return &ImageLayout{
+		wrapped:   l,
+		metaByTag: make(map[string]*ImageMeta),
+	}, nil
+}
+
+func createEmptyImageLayout(path string) (layout.Path, error) {
+	layoutFilePath := filepath.Join(path, layoutFileName)
+	indexFilePath := filepath.Join(path, indexFileName)
+	blobsPath := filepath.Join(path, blobsDirName)
+
+	if err := os.MkdirAll(blobsPath, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir for blobs: %w", err)
+	}
+
+	layoutContents := ociLayout{ImageLayoutVersion: "1.0.0"}
+	indexContents := indexSchema{
+		SchemaVersion: 2,
+		MediaType:     layoutMediaType,
+	}
+
+	rawJSON, err := json.MarshalIndent(indexContents, "", "    ")
+	if err != nil {
+		return "", fmt.Errorf("marshal index.json content: %w", err)
+	}
+
+	if err = os.WriteFile(indexFilePath, rawJSON, 0o644); err != nil {
+		return "", fmt.Errorf("create index.json: %w", err)
+	}
+
+	rawJSON, err = json.MarshalIndent(layoutContents, "", "    ")
+	if err != nil {
+		return "", fmt.Errorf("marshal oci-layout content: %w", err)
+	}
+
+	if err = os.WriteFile(layoutFilePath, rawJSON, 0o644); err != nil {
+		return "", fmt.Errorf("create oci-layout: %w", err)
+	}
+
+	return layout.Path(path), nil
+}
+
+type indexSchema struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	MediaType     string `json:"mediaType"`
+	Manifests     []struct {
+		MediaType string `json:"mediaType,omitempty"`
+		Size      int    `json:"size,omitempty"`
+		Digest    string `json:"digest,omitempty"`
+	} `json:"manifests"`
+}
+
+type ociLayout struct {
+	ImageLayoutVersion string `json:"imageLayoutVersion"`
 }
 
 func (l *ImageLayout) Path() layout.Path {
@@ -125,10 +187,10 @@ func (l *ImageLayout) GetMeta(tag string) (*ImageMeta, error) {
 	return meta, nil
 }
 
-func SplitImageRefByRepoAndTag(imageReferenceString string) (repo, tag string) {
+func SplitImageRefByRepoAndTag(imageReferenceString string) (string, string) {
 	splitIndex := strings.LastIndex(imageReferenceString, ":")
-	repo = imageReferenceString[:splitIndex]
-	tag = imageReferenceString[splitIndex+1:]
+	repo := imageReferenceString[:splitIndex]
+	tag := imageReferenceString[splitIndex+1:]
 
 	if strings.HasSuffix(repo, "@sha256") {
 		repo = strings.TrimSuffix(repo, "@sha256")

@@ -49,7 +49,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(ctx, log, cmd, args)
 		},
-		Args: func(cmd *cobra.Command, args []string) error {
+		Args: func(_ *cobra.Command, args []string) error {
 			_, err := parseArgs(args)
 			return err
 		},
@@ -60,7 +60,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	return cmd
 }
 
-func parseArgs(args []string) (deName string, err error) {
+func parseArgs(args []string) ( /*deName*/ string, error) {
 	if len(args) == 1 {
 		return args[0], nil
 	}
