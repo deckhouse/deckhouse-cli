@@ -13,72 +13,80 @@ import (
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
-type ImageDownloadRequest struct {
-	DeckhouseImages         map[string]*puller.ImageMeta
-	InstallImages           map[string]*puller.ImageMeta
-	InstallStandaloneImages map[string]*puller.ImageMeta
-	ReleaseChannelImages    map[string]*puller.ImageMeta
+type ImageDownloadList struct {
+	rootURL string
+
+	Deckhouse                  map[string]*puller.ImageMeta
+	DeckhouseExtra             map[string]*puller.ImageMeta
+	DeckhouseInstall           map[string]*puller.ImageMeta
+	DeckhouseInstallStandalone map[string]*puller.ImageMeta
+	DeckhouseReleaseChannel    map[string]*puller.ImageMeta
 }
 
-type ImageLayouts struct {
-	platform   v1.Platform
-	workingDir string
-	rootURL    string
+func NewImageDownloadList(rootURL string) *ImageDownloadList {
+	return &ImageDownloadList{
+		rootURL: rootURL,
 
-	Deckhouse       *regimage.ImageLayout
-	DeckhouseImages map[string]*puller.ImageMeta
-
-	DeckhouseInstall *regimage.ImageLayout
-	InstallImages    map[string]*puller.ImageMeta
-
-	DeckhouseInstallStandalone *regimage.ImageLayout
-	InstallStandaloneImages    map[string]*puller.ImageMeta
-
-	DeckhouseReleaseChannel *regimage.ImageLayout
-	ReleaseChannelImages    map[string]*puller.ImageMeta
-}
-
-func NewImageLayouts(rootFolder, rootURL string) *ImageLayouts {
-	l := &ImageLayouts{
-		workingDir: rootFolder,
-		rootURL:    rootURL,
-		platform:   v1.Platform{Architecture: "amd64", OS: "linux"},
-
-		DeckhouseImages:         map[string]*puller.ImageMeta{},
-		InstallImages:           map[string]*puller.ImageMeta{},
-		InstallStandaloneImages: map[string]*puller.ImageMeta{},
-		ReleaseChannelImages:    map[string]*puller.ImageMeta{},
+		Deckhouse:                  make(map[string]*puller.ImageMeta),
+		DeckhouseExtra:             make(map[string]*puller.ImageMeta),
+		DeckhouseInstall:           make(map[string]*puller.ImageMeta),
+		DeckhouseInstallStandalone: make(map[string]*puller.ImageMeta),
+		DeckhouseReleaseChannel:    make(map[string]*puller.ImageMeta),
 	}
-
-	return l
 }
 
-func (l *ImageLayouts) FillDeckhouseImages(deckhouseVersions []string) {
+func (l *ImageDownloadList) FillDeckhouseImages(deckhouseVersions []string) {
 	for _, version := range deckhouseVersions {
-		l.DeckhouseImages[l.rootURL+":"+version] = nil
-		l.InstallImages[path.Join(l.rootURL, internal.InstallSegment)+":"+version] = nil
-		l.InstallStandaloneImages[path.Join(l.rootURL, internal.InstallStandaloneSegment)+":"+version] = nil
+		l.Deckhouse[l.rootURL+":"+version] = nil
+		l.DeckhouseInstall[path.Join(l.rootURL, internal.InstallSegment)+":"+version] = nil
+		l.DeckhouseInstallStandalone[path.Join(l.rootURL, internal.InstallStandaloneSegment)+":"+version] = nil
 	}
 }
 
-func (l *ImageLayouts) FillForTag(tag string) {
+func (l *ImageDownloadList) FillForTag(tag string) {
 	// If we are to pull only the specific requested version, we should not pull any release channels at all.
 	if tag != "" {
 		return
 	}
 
 	for _, channel := range internal.GetAllDefaultReleaseChannels() {
-		l.DeckhouseImages[l.rootURL+":"+channel] = nil
-		l.InstallImages[path.Join(l.rootURL, internal.InstallSegment)+":"+channel] = nil
-		l.InstallStandaloneImages[path.Join(l.rootURL, internal.InstallStandaloneSegment)+":"+channel] = nil
+		l.Deckhouse[l.rootURL+":"+channel] = nil
+		l.DeckhouseInstall[path.Join(l.rootURL, internal.InstallSegment)+":"+channel] = nil
+		l.DeckhouseInstallStandalone[path.Join(l.rootURL, internal.InstallStandaloneSegment)+":"+channel] = nil
 		key := path.Join(l.rootURL, internal.ReleaseChannelSegment) + ":" + channel
-		if _, exists := l.ReleaseChannelImages[key]; !exists {
-			l.ReleaseChannelImages[key] = nil
+		if _, exists := l.DeckhouseReleaseChannel[key]; !exists {
+			l.DeckhouseReleaseChannel[key] = nil
 		}
 	}
 }
 
-func (l *ImageLayouts) setLayoutByMirrorType(mirrorType internal.MirrorType, layout *regimage.ImageLayout) {
+type ImageLayouts struct {
+	platform   v1.Platform
+	workingDir string
+
+	Deckhouse                  *regimage.ImageLayout
+	DeckhouseInstall           *regimage.ImageLayout
+	DeckhouseInstallStandalone *regimage.ImageLayout
+	DeckhouseReleaseChannel    *regimage.ImageLayout
+}
+
+func NewImageLayouts(rootFolder string) *ImageLayouts {
+	l := &ImageLayouts{
+		workingDir: rootFolder,
+		platform:   v1.Platform{Architecture: "amd64", OS: "linux"},
+	}
+
+	return l
+}
+
+func (l *ImageLayouts) setLayoutByMirrorType(rootFolder string, mirrorType internal.MirrorType) error {
+	layoutPath := path.Join(rootFolder, internal.InstallSegmentByMirrorType(mirrorType))
+
+	layout, err := regimage.NewImageLayout(layoutPath)
+	if err != nil {
+		return fmt.Errorf("failed to create image layout: %w", err)
+	}
+
 	switch mirrorType {
 	case internal.MirrorTypeDeckhouse:
 		l.Deckhouse = layout
@@ -89,8 +97,10 @@ func (l *ImageLayouts) setLayoutByMirrorType(mirrorType internal.MirrorType, lay
 	case internal.MirrorTypeDeckhouseInstallStandalone:
 		l.DeckhouseInstallStandalone = layout
 	default:
-		panic(fmt.Sprintf("wrong mirror type in platform image layout: %v", mirrorType))
+		return fmt.Errorf("wrong mirror type in platform image layout: %v", mirrorType)
 	}
+
+	return nil
 }
 
 // AsList returns a list of layout.Path's in it. Undefined path's are not included in the list.
