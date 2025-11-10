@@ -171,7 +171,13 @@ func (pc *PluginsCommand) fetchInstalledPlugins(ctx context.Context) ([]pluginDi
 	for _, plugin := range plugins {
 		contract, err := pc.getInstalledPluginContract(plugin.Name())
 		if err != nil {
-			contract, err = pc.service.GetPluginContract(ctx, plugin.Name(), "")
+			// TODO: fetch latest version from binary --version
+			latestVersion, err := pc.fetchLatestVersion(ctx, plugin.Name())
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch latest version: %w", err)
+			}
+
+			contract, err = pc.service.GetPluginContract(ctx, plugin.Name(), latestVersion.Original())
 			if err != nil {
 				return nil, fmt.Errorf("failed to get plugin contract: %w", err)
 			}
@@ -231,15 +237,8 @@ func (pc *PluginsCommand) fetchAvailablePlugins(ctx context.Context) ([]pluginDi
 		}
 
 		// fetch versions to get latest version
-		versions, err := pc.service.ListPluginTags(ctx, pluginName)
+		latestVersion, err := pc.fetchLatestVersion(ctx, pluginName)
 		if err != nil {
-			pc.logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
-			return nil, fmt.Errorf("failed to list plugin tags: %w", err)
-		}
-
-		latestVersion, err := pc.findLatestVersion(versions)
-		if err != nil {
-			pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
 			return nil, fmt.Errorf("failed to fetch latest version: %w", err)
 		}
 
@@ -395,15 +394,8 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 			pluginName := args[0]
 			ctx := cmd.Context()
 
-			versions, err := pc.service.ListPluginTags(ctx, pluginName)
+			latestVersion, err := pc.fetchLatestVersion(ctx, pluginName)
 			if err != nil {
-				pc.logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
-				return fmt.Errorf("failed to list plugin tags: %w", err)
-			}
-
-			latestVersion, err := pc.findLatestVersion(versions)
-			if err != nil {
-				pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
 				return fmt.Errorf("failed to fetch latest version: %w", err)
 			}
 
@@ -639,6 +631,21 @@ func (pc *PluginsCommand) filterMajorVersion(versions []string, majorVersion int
 	return res
 }
 
+func (pc *PluginsCommand) fetchLatestVersion(ctx context.Context, pluginName string) (*semver.Version, error) {
+	versions, err := pc.service.ListPluginTags(ctx, pluginName)
+	if err != nil {
+		pc.logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+		return nil, fmt.Errorf("failed to list plugin tags: %w", err)
+	}
+
+	latestVersion, err := pc.findLatestVersion(versions)
+	if err != nil {
+		pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+		return nil, fmt.Errorf("failed to fetch latest version: %w", err)
+	}
+	return latestVersion, nil
+}
+
 func (pc *PluginsCommand) pluginsUpdateCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "update [plugin-name]",
@@ -651,34 +658,7 @@ func (pc *PluginsCommand) pluginsUpdateCommand() *cobra.Command {
 
 			ctx := cmd.Context()
 
-			// Get latest version
-			fmt.Println("Checking for updates...")
-			plugin, err := pc.service.GetPluginContract(ctx, pluginName, "latest")
-			if err != nil {
-				pc.logger.Warn("Failed to get plugin contract",
-					slog.String("plugin", pluginName),
-					slog.String("tag", "latest"),
-					slog.String("error", err.Error()))
-				return fmt.Errorf("failed to get plugin contract: %w", err)
-			}
-
-			fmt.Printf("Latest version: %s\n", plugin.Version)
-
-			// Extract plugin
-			destination := fmt.Sprintf("/tmp/deckhouse-cli/plugins/%s", pluginName)
-			fmt.Println("Downloading latest version...")
-			err = pc.service.ExtractPlugin(ctx, pluginName, "latest", destination)
-			if err != nil {
-				pc.logger.Warn("Failed to extract plugin",
-					slog.String("plugin", pluginName),
-					slog.String("tag", "latest"),
-					slog.String("destination", destination),
-					slog.String("error", err.Error()))
-				return fmt.Errorf("failed to extract plugin: %w", err)
-			}
-
-			fmt.Printf("✓ Plugin '%s' updated successfully to v%s!\n", pluginName, plugin.Version)
-			return nil
+			return pc.installPlugin(ctx, pluginName, "", -1)
 		},
 	}
 
@@ -693,13 +673,25 @@ func (pc *PluginsCommand) pluginsUpdateAllCommand() *cobra.Command {
 		Use:   "all",
 		Short: "Update all installed plugins",
 		Long:  "Update all installed plugins to their latest available versions",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			// TODO: Implement updating all installed plugins from filesystem
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+
 			fmt.Println("Updating all installed plugins...")
-			fmt.Println("Checking for updates...")
-			fmt.Println("  - example-plugin: v1.0.0 → v1.2.0")
-			fmt.Println("  - another-plugin: v2.1.3 (already up-to-date)")
+
+			plugins, err := os.ReadDir(path.Join(DeckhousePluginsDir, "plugins"))
+			if err != nil {
+				return fmt.Errorf("failed to read plugins directory: %w", err)
+			}
+
+			for _, plugin := range plugins {
+				err := pc.installPlugin(ctx, plugin.Name(), "", -1)
+				if err != nil {
+					return fmt.Errorf("failed to update plugin: %w", err)
+				}
+			}
+
 			fmt.Println("✓ All plugins updated successfully!")
+
 			return nil
 		},
 	}
@@ -718,13 +710,16 @@ func (pc *PluginsCommand) pluginsRemoveCommand() *cobra.Command {
 			pluginName := args[0]
 			fmt.Printf("Removing plugin: %s\n", pluginName)
 
-			// TODO: Implement actual removal from filesystem
-			destination := fmt.Sprintf("/tmp/deckhouse-cli/plugins/%s", pluginName)
-			fmt.Printf("Removing plugin from: %s\n", destination)
+			pluginDir := path.Join(DeckhousePluginsDir, "plugins", pluginName)
+			fmt.Printf("Removing plugin from: %s\n", pluginDir)
 
-			fmt.Println("Cleaning up plugin files...")
-			fmt.Println("Removing plugin configuration...")
+			err := os.RemoveAll(pluginDir)
+			if err != nil {
+				return fmt.Errorf("failed to remove plugin directory: %w", err)
+			}
+
 			fmt.Printf("✓ Plugin '%s' successfully removed!\n", pluginName)
+
 			return nil
 		},
 	}
@@ -741,15 +736,29 @@ func (pc *PluginsCommand) pluginsRemoveAllCommand() *cobra.Command {
 		Short: "Remove all installed plugins",
 		Long:  "Remove all plugins from the Deckhouse CLI at once",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			// TODO: Implement removing all installed plugins from filesystem
 			fmt.Println("Removing all installed plugins...")
 
-			fmt.Println("Found 2 plugins to remove:")
-			fmt.Println("  - example-plugin")
-			fmt.Println("  - another-plugin")
-			fmt.Println("Cleaning up plugin files...")
-			fmt.Println("Removing plugin configurations...")
+			plugins, err := os.ReadDir(path.Join(DeckhousePluginsDir, "plugins"))
+			if err != nil {
+				return fmt.Errorf("failed to read plugins directory: %w", err)
+			}
+
+			fmt.Println("Found", len(plugins), "plugins to remove:")
+
+			for _, plugin := range plugins {
+				pluginDir := path.Join(DeckhousePluginsDir, "plugins", plugin.Name())
+				fmt.Printf("Removing plugin from: %s\n", pluginDir)
+
+				err := os.RemoveAll(pluginDir)
+				if err != nil {
+					return fmt.Errorf("failed to remove plugin directory: %w", err)
+				}
+
+				fmt.Printf("✓ Plugin '%s' successfully removed!\n", plugin.Name())
+			}
+
 			fmt.Println("✓ All plugins successfully removed!")
+
 			return nil
 		},
 	}
