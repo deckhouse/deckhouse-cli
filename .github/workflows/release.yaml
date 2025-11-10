@@ -162,6 +162,12 @@ jobs:
           go-version: "1.23"
           cache: false # Cache download takes longer that a build from scratch
 
+      - name: Setup GolangCI-Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          install-only: 'true'
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+
       - name: Setup Task
         uses: arduino/setup-task@v2
 
@@ -192,11 +198,6 @@ jobs:
         run: |
           git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
           git config --global --add safe.directory '*'
-
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          install-only: 'true'
-          version: ${{ env.GOLANGCI_LINT_VERSION }}
 
       - name: Run lint
         run: |
