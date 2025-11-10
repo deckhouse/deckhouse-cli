@@ -82,6 +82,20 @@ func getModulesForRepo(
 
 	result := make([]Module, 0, len(modules))
 	for _, module := range modules {
+		// if len(flags.ModulesWhitelist) > 0 {
+		// 	isWhitelisted := false
+
+		// 	for _, whitelisted := range flags.ModulesWhitelist {
+		// 		if module == whitelisted {
+		// 			isWhitelisted = true
+		// 		}
+		// 	}
+
+		// 	if !isWhitelisted {
+		// 		continue
+		// 	}
+		// }
+
 		m := Module{
 			Name:         module,
 			RegistryPath: path.Join(repo, module),
@@ -295,6 +309,8 @@ func FindModuleExtraImages(
 
 		// Convert to full registry paths with tags
 		for imageName, tagValue := range extraImagesRaw {
+			logger.Debugf("Found extra image %s with tag %v", imageName, tagValue)
+
 			var imageTag string
 
 			switch v := tagValue.(type) {
@@ -307,6 +323,9 @@ func FindModuleExtraImages(
 			}
 
 			fullImagePath := path.Join(mod.RegistryPath, "extra", imageName) + ":" + imageTag
+
+			logger.Debugf("Constructed full extra image path: %s", fullImagePath)
+
 			extraImages[fullImagePath] = struct{}{}
 		}
 
