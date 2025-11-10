@@ -93,7 +93,7 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 	return ContractToDomain(contract), nil
 }
 
-func (s *PluginService) SavePluginContract(ctx context.Context, pluginName, tag, destination string) error {
+func (s *PluginService) GetRawPluginContract(ctx context.Context, pluginName, tag string) ([]byte, error) {
 	// Create a scoped client for this specific plugin
 	// The base client already has the path like "deckhouse/ee/modules"
 	// We just need to add the plugin name
@@ -103,35 +103,50 @@ func (s *PluginService) SavePluginContract(ctx context.Context, pluginName, tag,
 
 	manifestRaw, err := pluginClient.GetManifest(ctx, tag)
 	if err != nil {
-		return fmt.Errorf("failed to get manifest: %w", err)
+		return nil, fmt.Errorf("failed to get manifest: %w", err)
 	}
 	s.log.Debug("Manifest retrieved successfully", slog.String("manifestraw", string(manifestRaw)))
 
 	manifest := &map[string]any{}
 	err = json.Unmarshal(manifestRaw, manifest)
 	if err != nil {
-		return fmt.Errorf("failed to unmarshal manifest: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal manifest: %w", err)
 	}
 
 	annotations := (*manifest)["annotations"].(map[string]any)
 	contractB64, exists := annotations["contract"].(string)
 	if !exists {
-		return fmt.Errorf("plugin-contract annotation not found in image metadata")
+		return nil, fmt.Errorf("plugin-contract annotation not found in image metadata")
 	}
 	s.log.Debug("Contract base64 retrieved successfully", slog.String("contractb64", contractB64))
 
 	contractRaw, err := base64.StdEncoding.DecodeString(contractB64)
 	if err != nil {
-		return fmt.Errorf("failed to decode contract: %w", err)
+		return nil, fmt.Errorf("failed to decode contract: %w", err)
 	}
 	s.log.Debug("Contract raw retrieved successfully", slog.String("contractraw", string(contractRaw)))
 
-	err = os.WriteFile(destination, contractRaw, 0644)
+	// err = os.WriteFile(destination, contractRaw, 0644)
+	// if err != nil {
+	// 	return fmt.Errorf("failed to create contract file: %w", err)
+	// }
+
+	return contractRaw, nil
+}
+
+func (s *PluginService) GetPluginContractFromFile(_ context.Context, contractFile string) (*internal.Plugin, error) {
+	contractBytes, err := os.ReadFile(contractFile)
 	if err != nil {
-		return fmt.Errorf("failed to create contract file: %w", err)
+		return nil, fmt.Errorf("failed to read contract file: %w", err)
 	}
 
-	return nil
+	contract := new(PluginContract)
+	err = json.Unmarshal(contractBytes, contract)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal contract: %w", err)
+	}
+
+	return ContractToDomain(contract), nil
 }
 
 // ExtractPlugin downloads the plugin image and extracts it to the specified location

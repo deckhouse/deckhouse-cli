@@ -524,6 +524,19 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 				return fmt.Errorf("failed to create plugin directory: %w", err)
 			}
 
+			// if locked - exit
+			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1/example-plugin.lock
+			lockFilePath := path.Join(versionDir, pluginName+".lock")
+			_, err = os.Stat(lockFilePath)
+			if err == nil {
+				// File exists, plugin is locked
+				return fmt.Errorf("plugin is locked by: %s", lockFilePath)
+			}
+			// Some other error occurred (permissions, etc.)
+			if !os.IsNotExist(err) {
+				return fmt.Errorf("failed to check lock file %s: %w", lockFilePath, err)
+			}
+
 			tag := installVersion.Original()
 
 			fmt.Printf("Installing plugin: %s\n", pluginName)
@@ -532,6 +545,14 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 				fmt.Printf("Using major version: %d\n", useMajor)
 			}
 
+			// create lock lockFile
+			lockFile, err := os.Create(lockFilePath)
+			if err != nil {
+				return fmt.Errorf("failed to create lock file: %w", err)
+			}
+			lockFile.Close()
+			defer os.Remove(lockFilePath)
+
 			// example path: /opt/deckhouse/lib/deckhouse-cli/cache/contracts
 			contractDir := path.Join(DeckhousePluginsDir, "cache", "contracts")
 			err = os.MkdirAll(contractDir, 0755)
@@ -539,34 +560,24 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 				return fmt.Errorf("failed to create contract directory: %w", err)
 			}
 
-			// Get plugin contract first
-			contractFile := path.Join(contractDir, pluginName+".json")
-			err = pc.service.SavePluginContract(ctx, pluginName, tag, contractFile)
-			if err != nil {
-				pc.logger.Warn("Failed to save plugin contract",
-					slog.String("plugin", pluginName),
-					slog.String("tag", tag),
-					slog.String("file", contractFile),
-					slog.String("error", err.Error()))
-				return fmt.Errorf("failed to save plugin contract: %w", err)
-			}
-
-			// file, err := os.Create(path.Join(contractDir, pluginName+".json"))
+			// TODO: is it needed?
+			// get contract
+			// plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
 			// if err != nil {
-			// 	return fmt.Errorf("failed to create contract file: %w", err)
+			// 	return fmt.Errorf("failed to get plugin contract: %w", err)
 			// }
-			// defer file.Close()
-
-			// enc := json.NewEncoder(file)
-			// enc.SetEscapeHTML(false)
-			// enc.SetIndent("", "  ")
-			// err = enc.Encode(plugin)
-			// if err != nil {
-			// 	return fmt.Errorf("failed to encode contract: %w", err)
-			// }
-
 			// fmt.Printf("Plugin: %s %s\n", plugin.Name, plugin.Version)
 			// fmt.Printf("Description: %s\n", plugin.Description)
+
+			// check if binary exists (if yes - rename it to .old)
+			pluginBinaryPath := path.Join(versionDir, pluginName)
+			_, err = os.Stat(pluginBinaryPath)
+			if err == nil {
+				err = os.Rename(pluginBinaryPath, pluginBinaryPath+".old")
+				if err != nil {
+					return fmt.Errorf("failed to rename plugin: %w", err)
+				}
+			}
 
 			// Extract plugin to installation directory
 			fmt.Printf("Installing to: %s\n", versionDir)
