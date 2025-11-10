@@ -109,7 +109,7 @@ func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 		layout.WithPlatform(l.defaultPlatform),
 		layout.WithAnnotations(map[string]string{
 			AnnotationImageReferenceName: meta.GetTagReference(),
-			AnnotationImageShortTag:      extractExtraImageShortTag(meta.GetTagReference()),
+			AnnotationImageShortTag:      tag,
 		}),
 	)
 	if err != nil {
@@ -198,18 +198,4 @@ func SplitImageRefByRepoAndTag(imageReferenceString string) (string, string) {
 	}
 
 	return repo, tag
-}
-
-func extractExtraImageShortTag(imageReferenceString string) string {
-	const extraPrefix = "/extra/"
-
-	if extraIndex := strings.LastIndex(imageReferenceString, extraPrefix); extraIndex != -1 {
-		// Extra image: return "imageName:tag" part after "/extra/"
-		return imageReferenceString[extraIndex+len(extraPrefix):]
-	}
-
-	// Regular image: return just the tag
-	_, tag := SplitImageRefByRepoAndTag(imageReferenceString)
-
-	return tag
 }

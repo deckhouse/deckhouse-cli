@@ -256,7 +256,7 @@ func PullImageSet(
 					layout.WithPlatform(v1.Platform{Architecture: "amd64", OS: "linux"}),
 					layout.WithAnnotations(map[string]string{
 						"org.opencontainers.image.ref.name": imageReferenceString,
-						"io.deckhouse.image.short_tag":      extractExtraImageShortTag(imageReferenceString),
+						"io.deckhouse.image.short_tag":      tag,
 					}),
 				)
 				if err != nil {
@@ -279,20 +279,6 @@ func splitImageRefByRepoAndTag(imageReferenceString string) (string, string) {
 	tag := imageReferenceString[splitIndex+1:]
 
 	return repo, tag
-}
-
-// extractExtraImageShortTag extracts the image name and tag for extra images
-func extractExtraImageShortTag(imageReferenceString string) string {
-	const extraPrefix = "/extra/"
-
-	if extraIndex := strings.LastIndex(imageReferenceString, extraPrefix); extraIndex != -1 {
-		// Extra image: return "imageName:tag" part after "/extra/"
-		return imageReferenceString[extraIndex+len(extraPrefix):]
-	}
-
-	// Regular image: return just the tag
-	_, tag := splitImageRefByRepoAndTag(imageReferenceString)
-	return tag
 }
 
 type pullImageSetOptions struct {

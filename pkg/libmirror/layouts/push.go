@@ -19,7 +19,6 @@ package layouts
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -62,21 +61,6 @@ func PushLayoutToRepo(
 	)
 }
 
-// buildExtraImageRef builds the correct image reference for extra images
-func buildExtraImageRef(registryRepo, tag string) string {
-	if strings.Contains(registryRepo, "/extra") && strings.Contains(tag, ":") {
-		// This is an extra image with format "imageName:tag"
-		// Split tag into image name and actual tag
-		parts := strings.SplitN(tag, ":", 2)
-		if len(parts) == 2 {
-			imageName, imageTag := parts[0], parts[1]
-			return registryRepo + "/" + imageName + ":" + imageTag
-		}
-	}
-	// Regular image or fallback
-	return registryRepo + ":" + tag
-}
-
 func PushLayoutToRepoContext(
 	ctx context.Context,
 	client pkg.RegistryClient,
@@ -112,7 +96,9 @@ func PushLayoutToRepoContext(
 	for _, manifestSet := range batches {
 		if parallelismConfig.Images == 1 {
 			tag := manifestSet[0].Annotations["io.deckhouse.image.short_tag"]
-			imageRef := buildExtraImageRef(registryRepo, tag)
+
+			imageRef := registryRepo + ":" + tag
+
 			logger.Infof("[%d / %d] Pushing image %s", imagesCount, len(indexManifest.Manifests), imageRef)
 			if err = pushImage(ctx, client, registryRepo, index, manifestSet[0], refOpts, remoteOpts, logger); err != nil {
 				return fmt.Errorf("Push Image: %w", err)
@@ -125,7 +111,7 @@ func PushLayoutToRepoContext(
 			logger.InfoLn("Images in batch:")
 			for _, manifest := range manifestSet {
 				tag := manifest.Annotations["io.deckhouse.image.short_tag"]
-				logger.Infof("- %s", buildExtraImageRef(registryRepo, tag))
+				logger.Infof("- %s", registryRepo+":"+tag)
 			}
 
 			errMu := &sync.Mutex{}
@@ -161,7 +147,7 @@ func pushImage(
 	_ params.Logger,
 ) error {
 	tag := manifest.Annotations["io.deckhouse.image.short_tag"]
-	imageRef := buildExtraImageRef(registryRepo, tag)
+	imageRef := registryRepo + ":" + tag
 	img, err := index.Image(manifest.Digest)
 	if err != nil {
 		return fmt.Errorf("Read image: %v", err)
