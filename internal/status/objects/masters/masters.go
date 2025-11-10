@@ -141,7 +141,7 @@ func formatMasterNodes(nodes []corev1.Node) string {
 }
 
 // getNameColWidth returns the formatting width for columns with the given maxNameLen value.
-func getNameColWidth(maxNameLen int) (nameCol, statusCol, versionCol int) {
+func getNameColWidth(maxNameLen int) ( /*nameCol*/ int /*statusCol*/, int /*versionCol*/, int) {
 	switch {
 	case maxNameLen > 37:
 		return 51, 10, 14

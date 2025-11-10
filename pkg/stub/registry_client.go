@@ -536,7 +536,8 @@ func generateUniqueDigest(registry, repo, tag string) v1.Hash {
 }
 
 // findRegistryAndRepo finds the registry and repo from currentRegistry
-func (s *RegistryClientStub) findRegistryAndRepo() (registry, repo string) {
+func (s *RegistryClientStub) findRegistryAndRepo() (string, string) {
+	var registry, repo string
 	if s.currentRegistry == "" {
 		return "", ""
 	}

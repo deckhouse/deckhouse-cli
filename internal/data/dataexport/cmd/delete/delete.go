@@ -60,7 +60,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	return cmd
 }
 
-func parseArgs(args []string) (deName string, err error) {
+func parseArgs(args []string) ( /*deName*/ string, error) {
 	if len(args) == 1 {
 		return args[0], nil
 	}

@@ -25,7 +25,6 @@ const (
 
 type ImageLayout struct {
 	wrapped         layout.Path
-	path            string
 	defaultPlatform v1.Platform
 
 	metaByTag map[string]*ImageMeta
@@ -188,10 +187,10 @@ func (l *ImageLayout) GetMeta(tag string) (*ImageMeta, error) {
 	return meta, nil
 }
 
-func SplitImageRefByRepoAndTag(imageReferenceString string) (repo, tag string) {
+func SplitImageRefByRepoAndTag(imageReferenceString string) (string, string) {
 	splitIndex := strings.LastIndex(imageReferenceString, ":")
-	repo = imageReferenceString[:splitIndex]
-	tag = imageReferenceString[splitIndex+1:]
+	repo := imageReferenceString[:splitIndex]
+	tag := imageReferenceString[splitIndex+1:]
 
 	if strings.HasSuffix(repo, "@sha256") {
 		repo = strings.TrimSuffix(repo, "@sha256")

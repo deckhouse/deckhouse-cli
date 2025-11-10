@@ -44,7 +44,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	return cmd
 }
 
-func parseArgs(args []string) (diName string, err error) {
+func parseArgs(args []string) ( /*diName*/ string, error) {
 	if len(args) == 1 {
 		return args[0], nil
 	}

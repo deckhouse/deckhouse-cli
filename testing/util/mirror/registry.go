@@ -48,7 +48,9 @@ func (h *ListableBlobHandler) ListBlobs() []string {
 	return h.ingestedBlobs
 }
 
-func SetupEmptyRegistryRepo(useTLS bool) (host, repoPath string, blobHandler *ListableBlobHandler) {
+func SetupEmptyRegistryRepo(useTLS bool) ( /*host*/ string /*repoPath*/, string, *ListableBlobHandler) {
+	var host, repoPath string
+
 	memBlobHandler := registry.NewInMemoryBlobHandler()
 	bh := &ListableBlobHandler{
 		BlobHandler:    memBlobHandler,
