@@ -1,4 +1,4 @@
-package util //nolint:revive
+package util
 
 import (
 	"context"
@@ -166,32 +166,31 @@ func PrepareUpload(
 	diName, namespace string,
 	publish bool,
 	sClient *safeClient.SafeClient,
-) (url, volumeMode string, subClient *safeClient.SafeClient, finErr error) {
+) ( /*url*/ string /*volumeMode*/, string /*subClient*/, *safeClient.SafeClient, error) {
+	var url, volumeMode string
+	var subClient *safeClient.SafeClient
+
 	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {
-		finErr = err
-		return
+		return "", "", nil, err
 	}
 
 	diObj, err := GetDataImportWithRestart(ctx, diName, namespace, rtClient)
 	if err != nil {
-		finErr = err
-		return
+		return "", "", nil, err
 	}
 
 	var podURL string
 	switch {
 	case publish:
 		if diObj.Status.PublicURL == "" {
-			finErr = fmt.Errorf("empty PublicURL")
-			return
+			return "", "", nil, fmt.Errorf("empty PublicURL")
 		}
 		podURL = diObj.Status.PublicURL
 	case diObj.Status.URL != "":
 		podURL = diObj.Status.URL
 	default:
-		finErr = fmt.Errorf("invalid URL")
-		return
+		return "", "", nil, fmt.Errorf("invalid URL")
 	}
 
 	volumeMode = diObj.Status.VolumeMode
@@ -199,18 +198,15 @@ func PrepareUpload(
 	case "Filesystem":
 		url, err = neturl.JoinPath(podURL, "api/v1/files")
 		if err != nil {
-			finErr = err
-			return
+			return "", "", nil, err
 		}
 	case "Block":
 		url, err = neturl.JoinPath(podURL, "api/v1/block")
 		if err != nil {
-			finErr = err
-			return
+			return "", "", nil, err
 		}
 	default:
-		finErr = fmt.Errorf("%w: '%s'", dataio.ErrUnsupportedVolumeMode, volumeMode)
-		return
+		return "", "", nil, fmt.Errorf("%w: '%s'", dataio.ErrUnsupportedVolumeMode, volumeMode)
 	}
 
 	subClient = sClient
@@ -218,13 +214,12 @@ func PrepareUpload(
 		subClient = sClient.Copy()
 		decodedBytes, err := base64.StdEncoding.DecodeString(diObj.Status.CA)
 		if err != nil {
-			finErr = fmt.Errorf("CA decoding error: %s", err.Error())
-			return
+			return "", "", nil, fmt.Errorf("CA decoding error: %s", err.Error())
 		}
 		subClient.SetTLSCAData(decodedBytes)
 	}
 
-	return
+	return url, volumeMode, subClient, nil
 }
 
 func CheckUploadProgress(ctx context.Context, httpClient *safeClient.SafeClient, targetURL string) (int64, error) {

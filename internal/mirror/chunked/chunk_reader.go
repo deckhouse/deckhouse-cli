@@ -55,7 +55,7 @@ func Open(baseDir, baseFileName string) (*FileReader, error) {
 	}
 }
 
-func (f *FileReader) Read(p []byte) (n int, err error) {
+func (f *FileReader) Read(p []byte) (int, error) {
 	return f.multiRd.Read(p)
 }
 

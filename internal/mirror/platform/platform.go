@@ -28,7 +28,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
-	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -622,7 +621,7 @@ func (svc *Service) FindVexImage(
 	tag := vexImageName[splitIndex+1:]
 
 	err := svc.deckhouseService.CheckImageExists(context.TODO(), tag)
-	if errors.Is(err, regclient.ErrImageNotFound) {
+	if errors.Is(err, client.ErrImageNotFound) {
 		// Image not found, which is expected for non-vulnerable images
 		return "", nil
 	}

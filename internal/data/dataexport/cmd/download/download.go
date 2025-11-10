@@ -133,7 +133,7 @@ func forRespItems(jsonStream io.ReadCloser, workFunc func(*dirItem) error) error
 	return nil
 }
 
-func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log *slog.Logger, sem chan struct{}, url, srcPath, dstPath string) (err error) {
+func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log *slog.Logger, sem chan struct{}, url, srcPath, dstPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

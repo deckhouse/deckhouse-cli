@@ -66,16 +66,16 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	return cmd
 }
 
-func parseArgs(args []string) (deName, volumeKind, volumeName string, err error) {
+func parseArgs(args []string) ( /*deName*/ string /*volumeKind*/, string /*volumeNamestring*/, string, error) {
+	var deName, volumeKind, volumeName string
+
 	if len(args) != 2 {
-		err = fmt.Errorf("invalid arguments")
-		return
+		return "", "", "", fmt.Errorf("invalid arguments")
 	}
 	deName = args[0]
 	resourceTypeAndName := strings.Split(args[1], "/")
 	if len(resourceTypeAndName) != 2 {
-		err = fmt.Errorf("invalid volume format, expect: <type>/<name>")
-		return
+		return "", "", "", fmt.Errorf("invalid volume format, expect: <type>/<name>")
 	}
 	volumeKind, volumeName = strings.ToLower(resourceTypeAndName[0]), resourceTypeAndName[1]
 	switch volumeKind {
@@ -88,11 +88,10 @@ func parseArgs(args []string) (deName, volumeKind, volumeName string, err error)
 	case "vds", "virtualdisksnapshot":
 		volumeKind = dataio.VirtualDiskSnapshotKind
 	default:
-		err = fmt.Errorf("invalid volume type; valid values: pvc | persistentvolumeclaim | vs | volumesnapshot | vd | virtualdisk | vds | virtualdisksnapshot")
-		return
+		return "", "", "", fmt.Errorf("invalid volume type; valid values: pvc | persistentvolumeclaim | vs | volumesnapshot | vd | virtualdisk | vds | virtualdisksnapshot")
 	}
 
-	return
+	return deName, volumeKind, volumeName, nil
 }
 
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {

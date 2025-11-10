@@ -57,7 +57,9 @@ func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 	}
 }
 
-func ParseArgs(args []string) (deName, srcPath string, err error) {
+func ParseArgs(args []string) ( /*deName*/ string /*srcPath*/, string, error) {
+	var deName, srcPath string
+
 	switch len(args) {
 	case 1:
 		deName = args[0]
@@ -72,5 +74,5 @@ func ParseArgs(args []string) (deName, srcPath string, err error) {
 		srcPath = "/" + srcPath
 	}
 
-	return
+	return deName, srcPath, nil
 }
