@@ -55,11 +55,18 @@ func NewHelpJSONCommand(rootCmd *cobra.Command) *cobra.Command {
 func helpJSON(rootCmd *cobra.Command) func(_ *cobra.Command, _ []string) error {
 	return func(_ *cobra.Command, _ []string) error {
 		commandsData := extractCommands(rootCmd.Root())
+
 		jsonData, err := json.MarshalIndent(commandsData, "", "  ")
 		if err != nil {
 			return err
 		}
-		fmt.Println(string(jsonData))
+
+		// add CI make generate integration
+		// TODO: add variable to change username
+		result := strings.ReplaceAll(string(jsonData), "--username=runner", "--username=root")
+
+		fmt.Println(result)
+
 		return nil
 	}
 }
