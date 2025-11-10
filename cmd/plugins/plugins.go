@@ -171,16 +171,15 @@ func (pc *PluginsCommand) fetchInstalledPlugins(ctx context.Context) ([]pluginDi
 	for _, plugin := range plugins {
 		contract, err := pc.getInstalledPluginContract(plugin.Name())
 		if err != nil {
-			// TODO: fetch latest version from binary --version
-			latestVersion, err := pc.fetchLatestVersion(ctx, plugin.Name())
-			if err != nil {
-				return nil, fmt.Errorf("failed to fetch latest version: %w", err)
-			}
-
-			contract, err = pc.service.GetPluginContract(ctx, plugin.Name(), latestVersion.Original())
-			if err != nil {
-				return nil, fmt.Errorf("failed to get plugin contract: %w", err)
-			}
+			// TODO: fetch version from plugin binary --version
+			res = append(res, pluginDisplayInfo{
+				Name:        plugin.Name(),
+				Version:     "ERROR",
+				Description: "failed to get plugin contract",
+				IsInstalled: true,
+				HasError:    true,
+			})
+			continue
 		}
 
 		displayInfo := pluginDisplayInfo{
@@ -482,11 +481,11 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 	return cmd
 }
 
-// function checks if plugin can be installed, creates folders layout and then installs plugin
+// function checks if plugin can be installed, creates folders layout and then installs plugin, creates symlink "current" and caches contract.json
 // if version (e.g. v1.0.0) is not specified - use latest version
 // if useMajor > -1 (can be 0) - use specific major version
 func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName, version string, useMajor int) error {
-	// Create plugin directory if it doesn't exist
+	// create plugin directory if it doesn't exist
 	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin
 	pluginDir := path.Join(DeckhousePluginsDir, "plugins", pluginName)
 	err := os.MkdirAll(pluginDir, 0755)
@@ -544,14 +543,6 @@ func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName, version
 		return fmt.Errorf("failed to check lock file %s: %w", lockFilePath, err)
 	}
 
-	tag := installVersion.Original()
-
-	fmt.Printf("Installing plugin: %s\n", pluginName)
-	fmt.Printf("Tag: %s\n", tag)
-	if useMajor >= 0 {
-		fmt.Printf("Using major version: %d\n", useMajor)
-	}
-
 	// create lock lockFile
 	lockFile, err := os.Create(lockFilePath)
 	if err != nil {
@@ -560,23 +551,25 @@ func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName, version
 	lockFile.Close()
 	defer os.Remove(lockFilePath)
 
-	// example path: /opt/deckhouse/lib/deckhouse-cli/cache/contracts
-	contractDir := path.Join(DeckhousePluginsDir, "cache", "contracts")
-	err = os.MkdirAll(contractDir, 0755)
-	if err != nil {
-		return fmt.Errorf("failed to create contract directory: %w", err)
+	tag := installVersion.Original()
+
+	fmt.Printf("Installing plugin: %s\n", pluginName)
+	fmt.Printf("Tag: %s\n", tag)
+	if useMajor >= 0 {
+		fmt.Printf("Using major version: %d\n", useMajor)
 	}
 
-	// TODO: is it needed?
 	// get contract
-	// plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to get plugin contract: %w", err)
-	// }
-	// fmt.Printf("Plugin: %s %s\n", plugin.Name, plugin.Version)
-	// fmt.Printf("Description: %s\n", plugin.Description)
+	plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
+	if err != nil {
+		return fmt.Errorf("failed to get plugin contract: %w", err)
+	}
+
+	fmt.Printf("Plugin: %s %s\n", plugin.Name, plugin.Version)
+	fmt.Printf("Description: %s\n", plugin.Description)
 
 	// check if binary exists (if yes - rename it to .old)
+	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1/example-plugin
 	pluginBinaryPath := path.Join(versionDir, pluginName)
 	pluginBinaryInfo, err := os.Stat(pluginBinaryPath)
 	if err == nil && !pluginBinaryInfo.IsDir() {
@@ -586,28 +579,54 @@ func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName, version
 		}
 	}
 
-	// Extract plugin to installation directory
-	fmt.Printf("Installing to: %s\n", versionDir)
+	// extract plugin to installation directory
+	fmt.Printf("Installing to: %s\n", pluginBinaryPath)
 
 	fmt.Println("Downloading and extracting plugin...")
-	err = pc.service.ExtractPlugin(ctx, pluginName, tag, versionDir)
+	err = pc.service.ExtractPlugin(ctx, pluginName, tag, pluginBinaryPath)
 	if err != nil {
 		pc.logger.Warn("Failed to extract plugin",
 			slog.String("plugin", pluginName),
 			slog.String("tag", tag),
-			slog.String("destination", versionDir),
+			slog.String("destination", pluginBinaryPath),
 			slog.String("error", err.Error()))
 		return fmt.Errorf("failed to extract plugin: %w", err)
 	}
 
-	// symlink current to the installed version (delete old symlink if exists)
+	// symlink "current" to the installed version (delete old symlink if exists)
 	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/current
 	currentSymlink := path.Join(pluginDir, "current")
 	_ = os.Remove(currentSymlink)
 
-	err = os.Symlink(path.Join(versionDir, pluginName), currentSymlink)
+	err = os.Symlink(pluginBinaryPath, currentSymlink)
 	if err != nil {
 		return fmt.Errorf("failed to create symlink: %w", err)
+	}
+
+	// cache contract
+	// example path: /opt/deckhouse/lib/deckhouse-cli/cache/contracts
+	contractDir := path.Join(DeckhousePluginsDir, "cache", "contracts")
+	err = os.MkdirAll(contractDir, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create contract directory: %w", err)
+	}
+
+	// example path: /opt/deckhouse/lib/deckhouse-cli/cache/contracts/example-plugin.json
+	contractFilePath := path.Join(contractDir, pluginName+".json")
+	contract := service.DomainToContract(plugin)
+	contractFile, err := os.OpenFile(contractFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open contract file: %w", err)
+	}
+	defer contractFile.Close()
+
+	enc := json.NewEncoder(contractFile)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+
+	err = enc.Encode(contract)
+	if err != nil {
+		return fmt.Errorf("failed to cache contract: %w", err)
 	}
 
 	fmt.Printf("✓ Plugin '%s' successfully installed!\n", pluginName)

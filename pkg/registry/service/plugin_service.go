@@ -25,7 +25,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 
@@ -93,62 +92,6 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 	return ContractToDomain(contract), nil
 }
 
-func (s *PluginService) GetRawPluginContract(ctx context.Context, pluginName, tag string) ([]byte, error) {
-	// Create a scoped client for this specific plugin
-	// The base client already has the path like "deckhouse/ee/modules"
-	// We just need to add the plugin name
-	s.log.Debug("Getting plugin contract", slog.String("plugin", pluginName), slog.String("tag", tag))
-
-	pluginClient := s.client.WithSegment(pluginName)
-
-	manifestRaw, err := pluginClient.GetManifest(ctx, tag)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get manifest: %w", err)
-	}
-	s.log.Debug("Manifest retrieved successfully", slog.String("manifestraw", string(manifestRaw)))
-
-	manifest := &map[string]any{}
-	err = json.Unmarshal(manifestRaw, manifest)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal manifest: %w", err)
-	}
-
-	annotations := (*manifest)["annotations"].(map[string]any)
-	contractB64, exists := annotations["contract"].(string)
-	if !exists {
-		return nil, fmt.Errorf("plugin-contract annotation not found in image metadata")
-	}
-	s.log.Debug("Contract base64 retrieved successfully", slog.String("contractb64", contractB64))
-
-	contractRaw, err := base64.StdEncoding.DecodeString(contractB64)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode contract: %w", err)
-	}
-	s.log.Debug("Contract raw retrieved successfully", slog.String("contractraw", string(contractRaw)))
-
-	// err = os.WriteFile(destination, contractRaw, 0644)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to create contract file: %w", err)
-	// }
-
-	return contractRaw, nil
-}
-
-func (s *PluginService) GetPluginContractFromFile(_ context.Context, contractFile string) (*internal.Plugin, error) {
-	contractBytes, err := os.ReadFile(contractFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read contract file: %w", err)
-	}
-
-	contract := new(PluginContract)
-	err = json.Unmarshal(contractBytes, contract)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal contract: %w", err)
-	}
-
-	return ContractToDomain(contract), nil
-}
-
 // ExtractPlugin downloads the plugin image and extracts it to the specified location
 func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, destination string) error {
 	// Create a scoped client for this specific plugin
@@ -161,7 +104,7 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, dest
 		return fmt.Errorf("failed to get image: %w", err)
 	}
 
-	err = s.untarPluginFiles(img.Extract(), destination, pluginName)
+	err = s.extractPluginFromTar(img.Extract(), destination, pluginName)
 	if err != nil {
 		return fmt.Errorf("failed to extract tar: %w", err)
 	}
@@ -169,9 +112,11 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, dest
 	return nil
 }
 
-// untarPluginFiles extracts a tar archive to the destination directory
-func (s *PluginService) untarPluginFiles(r io.Reader, destination, pluginName string) error {
-	s.log.Debug("Starting tar extraction", slog.String("destination", destination))
+// extractPluginFromTar extracts the plugin binary from a tar archive to the destination directory
+func (s *PluginService) extractPluginFromTar(r io.Reader, destination, pluginName string) error {
+	s.log.Debug("Starting plugin extraction from tar archive",
+		slog.String("destination", destination),
+		slog.String("plugin", pluginName))
 
 	tr := tar.NewReader(r)
 
@@ -184,24 +129,25 @@ func (s *PluginService) untarPluginFiles(r io.Reader, destination, pluginName st
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
 
+		// only extract regular files named "plugin"
 		if header.Name == "plugin" {
-			s.log.Debug("Extracting plugin", slog.String("path", destination))
-
-			pluginPath := path.Join(destination, pluginName)
-
-			outFile, err := os.OpenFile(pluginPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(header.Mode))
+			outFile, err := os.OpenFile(destination, os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(header.Mode))
 			if err != nil {
-				return fmt.Errorf("failed to open plugin file: %w", err)
+				return fmt.Errorf("failed to create plugin file %s: %w", destination, err)
 			}
 			defer outFile.Close()
 
 			if _, err := io.Copy(outFile, tr); err != nil {
-				return fmt.Errorf("failed to write plugin: %w", err)
+				return fmt.Errorf("failed to write plugin content to %s: %w", destination, err)
 			}
+
+			break // plugin found and extracted, no need to continue
 		}
 	}
 
-	s.log.Debug("Tar extraction completed", slog.String("destination", destination))
+	s.log.Debug("Plugin extraction completed successfully",
+		slog.String("destination", destination),
+		slog.String("plugin", pluginName))
 
 	return nil
 }
