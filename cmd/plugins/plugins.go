@@ -480,131 +480,7 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 			pluginName := args[0]
 			ctx := cmd.Context()
 
-			// Create plugin directory if it doesn't exist
-			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin
-			pluginDir := path.Join(DeckhousePluginsDir, "plugins", pluginName)
-			err := os.MkdirAll(pluginDir, 0755)
-			if err != nil {
-				return fmt.Errorf("failed to create plugin directory: %w", err)
-			}
-
-			var installVersion *semver.Version
-			if version != "" {
-				installVersion, err = semver.NewVersion(version)
-				if err != nil {
-					return fmt.Errorf("failed to parse version: %w", err)
-				}
-			} else {
-				versions, err := pc.service.ListPluginTags(ctx, pluginName)
-				if err != nil {
-					pc.logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
-					return fmt.Errorf("failed to list plugin tags: %w", err)
-				}
-
-				if useMajor >= 0 {
-					versions = pc.filterMajorVersion(versions, useMajor)
-					if len(versions) == 0 {
-						return fmt.Errorf("no versions found for major version: %d", useMajor)
-					}
-				}
-
-				installVersion, err = pc.findLatestVersion(versions)
-				if err != nil {
-					pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
-					return fmt.Errorf("failed to fetch latest version: %w", err)
-				}
-			}
-
-			majorVersion := strconv.Itoa(int(installVersion.Major()))
-
-			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1
-			versionDir := path.Join(pluginDir, "v"+majorVersion)
-			err = os.MkdirAll(versionDir, 0755)
-			if err != nil {
-				return fmt.Errorf("failed to create plugin directory: %w", err)
-			}
-
-			// if locked - exit
-			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1/example-plugin.lock
-			lockFilePath := path.Join(versionDir, pluginName+".lock")
-			_, err = os.Stat(lockFilePath)
-			if err == nil {
-				// File exists, plugin is locked
-				return fmt.Errorf("plugin is locked by: %s", lockFilePath)
-			}
-			// Some other error occurred (permissions, etc.)
-			if !os.IsNotExist(err) {
-				return fmt.Errorf("failed to check lock file %s: %w", lockFilePath, err)
-			}
-
-			tag := installVersion.Original()
-
-			fmt.Printf("Installing plugin: %s\n", pluginName)
-			fmt.Printf("Tag: %s\n", tag)
-			if useMajor >= 0 {
-				fmt.Printf("Using major version: %d\n", useMajor)
-			}
-
-			// create lock lockFile
-			lockFile, err := os.Create(lockFilePath)
-			if err != nil {
-				return fmt.Errorf("failed to create lock file: %w", err)
-			}
-			lockFile.Close()
-			defer os.Remove(lockFilePath)
-
-			// example path: /opt/deckhouse/lib/deckhouse-cli/cache/contracts
-			contractDir := path.Join(DeckhousePluginsDir, "cache", "contracts")
-			err = os.MkdirAll(contractDir, 0755)
-			if err != nil {
-				return fmt.Errorf("failed to create contract directory: %w", err)
-			}
-
-			// TODO: is it needed?
-			// get contract
-			// plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
-			// if err != nil {
-			// 	return fmt.Errorf("failed to get plugin contract: %w", err)
-			// }
-			// fmt.Printf("Plugin: %s %s\n", plugin.Name, plugin.Version)
-			// fmt.Printf("Description: %s\n", plugin.Description)
-
-			// check if binary exists (if yes - rename it to .old)
-			pluginBinaryPath := path.Join(versionDir, pluginName)
-			_, err = os.Stat(pluginBinaryPath)
-			if err == nil {
-				err = os.Rename(pluginBinaryPath, pluginBinaryPath+".old")
-				if err != nil {
-					return fmt.Errorf("failed to rename plugin: %w", err)
-				}
-			}
-
-			// Extract plugin to installation directory
-			fmt.Printf("Installing to: %s\n", versionDir)
-
-			fmt.Println("Downloading and extracting plugin...")
-			err = pc.service.ExtractPlugin(ctx, pluginName, tag, versionDir)
-			if err != nil {
-				pc.logger.Warn("Failed to extract plugin",
-					slog.String("plugin", pluginName),
-					slog.String("tag", tag),
-					slog.String("destination", versionDir),
-					slog.String("error", err.Error()))
-				return fmt.Errorf("failed to extract plugin: %w", err)
-			}
-
-			// symlink current to the installed version (delete old symlink if exists)
-			// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/current
-			currentSymlink := path.Join(pluginDir, "current")
-			_ = os.Remove(currentSymlink)
-
-			err = os.Symlink(path.Join(versionDir, pluginName), currentSymlink)
-			if err != nil {
-				return fmt.Errorf("failed to create symlink: %w", err)
-			}
-
-			fmt.Printf("✓ Plugin '%s' successfully installed!\n", pluginName)
-			return nil
+			return pc.installPlugin(ctx, pluginName, version, useMajor)
 		},
 	}
 
@@ -612,6 +488,138 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 	cmd.Flags().IntVar(&useMajor, "use-major", -1, "Use specific major version (e.g., 1, 2)")
 
 	return cmd
+}
+
+// function checks if plugin can be installed, creates folders layout and then installs plugin
+// if version (e.g. v1.0.0) is not specified - use latest version
+// if useMajor > -1 (can be 0) - use specific major version
+func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName, version string, useMajor int) error {
+	// Create plugin directory if it doesn't exist
+	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin
+	pluginDir := path.Join(DeckhousePluginsDir, "plugins", pluginName)
+	err := os.MkdirAll(pluginDir, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create plugin directory: %w", err)
+	}
+
+	// check if version is specified
+	var installVersion *semver.Version
+	if version != "" {
+		installVersion, err = semver.NewVersion(version)
+		if err != nil {
+			return fmt.Errorf("failed to parse version: %w", err)
+		}
+	} else {
+		versions, err := pc.service.ListPluginTags(ctx, pluginName)
+		if err != nil {
+			pc.logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+			return fmt.Errorf("failed to list plugin tags: %w", err)
+		}
+
+		if useMajor >= 0 {
+			versions = pc.filterMajorVersion(versions, useMajor)
+			if len(versions) == 0 {
+				return fmt.Errorf("no versions found for major version: %d", useMajor)
+			}
+		}
+
+		installVersion, err = pc.findLatestVersion(versions)
+		if err != nil {
+			pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+			return fmt.Errorf("failed to fetch latest version: %w", err)
+		}
+	}
+
+	majorVersion := strconv.Itoa(int(installVersion.Major()))
+
+	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1
+	versionDir := path.Join(pluginDir, "v"+majorVersion)
+	err = os.MkdirAll(versionDir, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create plugin directory: %w", err)
+	}
+
+	// if locked - exit
+	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1/example-plugin.lock
+	lockFilePath := path.Join(versionDir, pluginName+".lock")
+	_, err = os.Stat(lockFilePath)
+	if err == nil {
+		// File exists, plugin is locked
+		return fmt.Errorf("plugin is locked by: %s", lockFilePath)
+	}
+	// Some other error occurred (permissions, etc.)
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to check lock file %s: %w", lockFilePath, err)
+	}
+
+	tag := installVersion.Original()
+
+	fmt.Printf("Installing plugin: %s\n", pluginName)
+	fmt.Printf("Tag: %s\n", tag)
+	if useMajor >= 0 {
+		fmt.Printf("Using major version: %d\n", useMajor)
+	}
+
+	// create lock lockFile
+	lockFile, err := os.Create(lockFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to create lock file: %w", err)
+	}
+	lockFile.Close()
+	defer os.Remove(lockFilePath)
+
+	// example path: /opt/deckhouse/lib/deckhouse-cli/cache/contracts
+	contractDir := path.Join(DeckhousePluginsDir, "cache", "contracts")
+	err = os.MkdirAll(contractDir, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create contract directory: %w", err)
+	}
+
+	// TODO: is it needed?
+	// get contract
+	// plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
+	// if err != nil {
+	// 	return fmt.Errorf("failed to get plugin contract: %w", err)
+	// }
+	// fmt.Printf("Plugin: %s %s\n", plugin.Name, plugin.Version)
+	// fmt.Printf("Description: %s\n", plugin.Description)
+
+	// check if binary exists (if yes - rename it to .old)
+	pluginBinaryPath := path.Join(versionDir, pluginName)
+	pluginBinaryInfo, err := os.Stat(pluginBinaryPath)
+	if err == nil && !pluginBinaryInfo.IsDir() {
+		err = os.Rename(pluginBinaryPath, pluginBinaryPath+".old")
+		if err != nil {
+			return fmt.Errorf("failed to save old version: %w", err)
+		}
+	}
+
+	// Extract plugin to installation directory
+	fmt.Printf("Installing to: %s\n", versionDir)
+
+	fmt.Println("Downloading and extracting plugin...")
+	err = pc.service.ExtractPlugin(ctx, pluginName, tag, versionDir)
+	if err != nil {
+		pc.logger.Warn("Failed to extract plugin",
+			slog.String("plugin", pluginName),
+			slog.String("tag", tag),
+			slog.String("destination", versionDir),
+			slog.String("error", err.Error()))
+		return fmt.Errorf("failed to extract plugin: %w", err)
+	}
+
+	// symlink current to the installed version (delete old symlink if exists)
+	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/current
+	currentSymlink := path.Join(pluginDir, "current")
+	_ = os.Remove(currentSymlink)
+
+	err = os.Symlink(path.Join(versionDir, pluginName), currentSymlink)
+	if err != nil {
+		return fmt.Errorf("failed to create symlink: %w", err)
+	}
+
+	fmt.Printf("✓ Plugin '%s' successfully installed!\n", pluginName)
+	return nil
 }
 
 func (pc *PluginsCommand) filterMajorVersion(versions []string, majorVersion int) []string {
