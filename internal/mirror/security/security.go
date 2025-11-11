@@ -146,6 +146,8 @@ func (svc *Service) pullSecurityDatabases(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("pull security database images: %w", err)
 			}
+
+			svc.userLogger.InfoLn()
 		}
 
 		return nil
