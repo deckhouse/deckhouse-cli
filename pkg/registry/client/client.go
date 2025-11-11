@@ -256,7 +256,13 @@ func (c *Client) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetO
 
 // PushImage pushes an image to the registry at the specified tag
 // The repository is determined by the chained WithSegment() calls
-func (c *Client) PushImage(ctx context.Context, tag string, img v1.Image) error {
+func (c *Client) PushImage(ctx context.Context, tag string, img v1.Image, opts ...pkg.ImagePutOption) error {
+	putImageOptions := &pkg.ImagePutOptions{}
+
+	for _, opt := range opts {
+		opt.ApplyToImagePut(putImageOptions)
+	}
+
 	fullRegistry := c.GetRegistry()
 
 	logentry := c.logger.With(
@@ -272,10 +278,10 @@ func (c *Client) PushImage(ctx context.Context, tag string, img v1.Image) error 
 		return fmt.Errorf("failed to parse reference: %w", err)
 	}
 
-	opts := append([]remote.Option{}, c.options...)
-	opts = append(opts, remote.WithContext(ctx))
+	remoteOptions := append([]remote.Option{}, c.options...)
+	remoteOptions = append(remoteOptions, remote.WithContext(ctx))
 
-	if err := remote.Write(ref, img, opts...); err != nil {
+	if err := remote.Write(ref, img, remoteOptions...); err != nil {
 		return fmt.Errorf("failed to push image: %w", err)
 	}
 
@@ -434,4 +440,12 @@ func (c *Client) CheckImageExists(ctx context.Context, tag string) error {
 	logentry.Debug("Image exists")
 
 	return nil
+}
+
+type WithUploadBar struct {
+	Bar *progress.UploadBar
+}
+
+func (w WithUploadBar) ApplyToImagePut(opts *pkg.ImagePutOptions) {
+	opts.ProgressBar = w.Bar
 }

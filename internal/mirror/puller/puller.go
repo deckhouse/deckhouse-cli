@@ -1,3 +1,19 @@
+/*
+Copyright 2025 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package puller
 
 import (
@@ -13,26 +29,22 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
 	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 // PullerService handles the pulling of images from the registry
 type PullerService struct {
-	deckhouseService *service.DeckhouseService
-	logger           *dkplog.Logger
-	userLogger       *log.SLogger
+	logger     *dkplog.Logger
+	userLogger *log.SLogger
 }
 
 // NewPullerService creates a new PullerService
 func NewPullerService(
-	deckhouseService *service.DeckhouseService,
 	logger *dkplog.Logger,
 	userLogger *log.SLogger,
 ) *PullerService {
 	return &PullerService{
-		deckhouseService: deckhouseService,
-		logger:           logger,
-		userLogger:       userLogger,
+		logger:     logger,
+		userLogger: userLogger,
 	}
 }
 

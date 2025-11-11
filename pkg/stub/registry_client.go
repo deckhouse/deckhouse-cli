@@ -852,7 +852,7 @@ func (s *RegistryClientStub) GetImage(_ context.Context, tag string, _ ...pkg.Im
 }
 
 // PushImage pushes an image to the registry
-func (s *RegistryClientStub) PushImage(_ context.Context, _ string, _ v1.Image) error {
+func (s *RegistryClientStub) PushImage(_ context.Context, _ string, _ v1.Image, _ ...pkg.ImagePutOption) error {
 	// Stub implementation - always succeeds
 	return nil
 }

@@ -33,11 +33,14 @@ const (
 	deckhouseReleaseChannelsSegment = "release-channel"
 	installerSegment                = "install"
 	installStandaloneSegment        = "install-standalone"
+	securitySegment                 = "security"
 
 	deckhouseServiceName                = "deckhouse"
 	deckhouseReleaseChannelsServiceName = "deckhouse_release_channel"
 	installerServiceName                = "installer"
 	standaloneInstallerServiceName      = "standalone_installer"
+
+	securityServiceName = "security"
 )
 
 // DeckhouseService provides high-level operations for Deckhouse platform management
@@ -48,6 +51,8 @@ type DeckhouseService struct {
 	deckhouseReleaseChannels *DeckhouseReleaseService
 	installer                *BasicService
 	standaloneInstaller      *BasicService
+
+	security *SecurityServices
 
 	logger *log.Logger
 }
@@ -61,6 +66,8 @@ func NewDeckhouseService(client pkg.RegistryClient, logger *log.Logger) *Deckhou
 		deckhouseReleaseChannels: NewDeckhouseReleaseService(NewBasicService(deckhouseReleaseChannelsServiceName, client.WithSegment(deckhouseReleaseChannelsSegment), logger)),
 		installer:                NewBasicService(installerServiceName, client.WithSegment(installerSegment), logger),
 		standaloneInstaller:      NewBasicService(standaloneInstallerServiceName, client.WithSegment(installStandaloneSegment), logger),
+
+		security: NewSecurityServices(securityServiceName, client.WithSegment(securitySegment), logger),
 
 		logger: logger,
 	}
@@ -76,6 +83,10 @@ func (s *DeckhouseService) Installer() *BasicService {
 
 func (s *DeckhouseService) StandaloneInstaller() *BasicService {
 	return s.standaloneInstaller
+}
+
+func (s *DeckhouseService) Security(imageName string) *BasicService {
+	return s.security.getService(imageName)
 }
 
 // GetRoot gets path of the registry root
@@ -114,6 +125,32 @@ func (s *DeckhouseReleaseService) GetMetadata(ctx context.Context, tag string) (
 	}
 
 	return meta, nil
+}
+
+type SecurityServices struct {
+	name             string
+	client           pkg.RegistryClient
+	securityServices map[string]*BasicService
+	logger           *log.Logger
+}
+
+func NewSecurityServices(name string, client pkg.RegistryClient, logger *log.Logger) *SecurityServices {
+	return &SecurityServices{
+		name:             name,
+		securityServices: map[string]*BasicService{},
+		client:           client,
+		logger:           logger,
+	}
+}
+
+func (s *SecurityServices) getService(imageName string) *BasicService {
+	if service, exists := s.securityServices[imageName]; exists {
+		return service
+	}
+
+	s.securityServices[imageName] = NewBasicService(s.name+" "+imageName, s.client.WithSegment(imageName), s.logger)
+
+	return s.securityServices[imageName]
 }
 
 func extractDeckhouseReleaseMetadata(rc io.ReadCloser) (*DeckhouseReleaseMetadata, error) {

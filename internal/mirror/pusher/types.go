@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package puller
+package pusher
 
 import (
 	"context"
@@ -26,40 +26,15 @@ import (
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
-// ImageGetter is a function type for getting images from the registry
-type ImageGetter func(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.RegistryImage, error)
+// ImagePutter is a function type for putting images to the registry
+type ImagePutter func(ctx context.Context, tag string, img v1.Image, opts ...pkg.ImagePutOption) error
 
-// PullConfig encapsulates the configuration for pulling images
-type PullConfig struct {
-	Name             string
-	ImageSet         map[string]*ImageMeta
-	Layout           *regimage.ImageLayout
-	AllowMissingTags bool
-	GetterService    pkg.BasicService
-}
-
-// ImageMeta represents metadata for an image
-type ImageMeta struct {
-	ImageRepo       string
-	ImageTag        string
-	Digest          *v1.Hash
-	Version         string
-	TagReference    string
-	DigestReference string
-}
-
-// NewImageMeta creates a new ImageMeta instance
-func NewImageMeta(version string, tagReference string, digest *v1.Hash) *ImageMeta {
-	imageRepo, tag := SplitImageRefByRepoAndTag(tagReference)
-
-	return &ImageMeta{
-		ImageRepo:       imageRepo,
-		ImageTag:        tag,
-		Digest:          digest,
-		Version:         version,
-		TagReference:    tagReference,
-		DigestReference: imageRepo + "@" + digest.String(),
-	}
+// PushConfig encapsulates the configuration for pushing images
+type PushConfig struct {
+	Name          string
+	ImageSet      map[string]struct{}
+	Layout        *regimage.ImageLayout
+	PutterService pkg.RegistryClient
 }
 
 // SplitImageRefByRepoAndTag splits an image reference into repository and tag parts

@@ -17,21 +17,26 @@ limitations under the License.
 package service
 
 import (
-	"archive/tar"
-	"context"
-	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-
 	"github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
 )
 
+const (
+	moduleReleaseChannelsSegment = "release"
+
+	modulesServiceName               = "modules"
+	moduleServiceName                = "module"
+	moduleReleaseChannelsServiceName = "module_release_channel"
+)
+
 // ModuleService provides high-level operations for module management
 type ModuleService struct {
 	client pkg.RegistryClient
+
+	*BasicService
+	moduleReleaseChannels *BasicService
+
 	logger *log.Logger
 }
 
@@ -39,114 +44,43 @@ type ModuleService struct {
 func NewModuleService(client pkg.RegistryClient, logger *log.Logger) *ModuleService {
 	return &ModuleService{
 		client: client,
+
+		BasicService:          NewBasicService(moduleServiceName, client, logger),
+		moduleReleaseChannels: NewBasicService(moduleReleaseChannelsServiceName, client.WithSegment(moduleReleaseChannelsSegment), logger),
+
 		logger: logger,
 	}
 }
 
-// ListModules lists all available module names from the registry
-func (s *ModuleService) ListModules(ctx context.Context) ([]string, error) {
-	s.logger.Debug("Listing all modules")
+type ModulesService struct {
+	client pkg.RegistryClient
 
-	moduleNames, err := s.client.ListRepositories(ctx)
-	if err != nil {
-		s.logger.Warn("Failed to list repositories from registry", "error", err.Error())
-		return nil, fmt.Errorf("failed to list repositories: %w", err)
-	}
+	*BasicService
 
-	s.logger.Debug("Modules listed successfully", "count", len(moduleNames))
+	services map[string]*ModuleService
 
-	return moduleNames, nil
+	logger *log.Logger
 }
 
-// GetModuleInfo gets information about a specific module
-func (s *ModuleService) GetModuleInfo(ctx context.Context, moduleName, tag string) (interface{}, error) {
-	s.logger.Debug("Getting module info", "module", moduleName, "tag", tag)
+func NewModulesService(client pkg.RegistryClient, logger *log.Logger) *ModulesService {
+	return &ModulesService{
+		client: client,
 
-	moduleClient := s.client.WithSegment(moduleName)
+		BasicService: NewBasicService(modulesServiceName, client, logger),
 
-	imageConfig, err := moduleClient.GetImageConfig(ctx, tag)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get image config: %w", err)
+		logger: logger,
 	}
-
-	disableMessage, exists := imageConfig.Config.Labels["disable.message"]
-	if !exists {
-		return nil, fmt.Errorf("module info not found")
-	}
-
-	return disableMessage, nil
 }
 
-// ExtractModule downloads the module image and extracts it to the specified location
-func (s *ModuleService) ExtractModule(ctx context.Context, moduleName, tag, destination string) error {
-	s.logger.Debug("Extracting module", "module", moduleName, "tag", tag, "destination", destination)
-
-	if err := os.MkdirAll(destination, 0755); err != nil {
-		return fmt.Errorf("failed to create destination directory: %w", err)
+func (s *ModulesService) Module(moduleName string) *ModuleService {
+	if s.services == nil {
+		s.services = make(map[string]*ModuleService)
 	}
 
-	moduleClient := s.client.WithSegment(moduleName)
-
-	img, err := moduleClient.GetImage(ctx, tag)
-	if err != nil {
-		return fmt.Errorf("failed to get image: %w", err)
+	if _, exists := s.services[moduleName]; !exists {
+		moduleClient := s.client.WithSegment(moduleName)
+		s.services[moduleName] = NewModuleService(moduleClient, s.logger)
 	}
 
-	err = s.extractTar(img.Extract(), destination)
-	if err != nil {
-		return fmt.Errorf("failed to extract tar: %w", err)
-	}
-
-	return nil
-}
-
-// extractTar extracts a tar archive to the destination directory
-func (s *ModuleService) extractTar(r io.Reader, destination string) error {
-	tr := tar.NewReader(r)
-
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("failed to read tar header: %w", err)
-		}
-
-		target := filepath.Join(destination, header.Name)
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, os.FileMode(header.Mode)); err != nil {
-				return fmt.Errorf("failed to create directory %s: %w", target, err)
-			}
-		case tar.TypeReg:
-			file, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(header.Mode))
-			if err != nil {
-				return fmt.Errorf("failed to create file %s: %w", target, err)
-			}
-			if _, err := io.Copy(file, tr); err != nil {
-				file.Close()
-				return fmt.Errorf("failed to write file %s: %w", target, err)
-			}
-			file.Close()
-		}
-	}
-	return nil
-}
-
-// ListModuleTags lists all available tags for a specific module
-func (s *ModuleService) ListModuleTags(ctx context.Context, moduleName string) ([]string, error) {
-	s.logger.Debug("Listing module tags", "module", moduleName)
-
-	moduleClient := s.client.WithSegment(moduleName)
-
-	tags, err := moduleClient.ListTags(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list tags for module %s: %w", moduleName, err)
-	}
-
-	s.logger.Debug("Module tags listed successfully", "module", moduleName, "count", len(tags))
-
-	return tags, nil
+	return s.services[moduleName]
 }

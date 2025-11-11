@@ -16,6 +16,8 @@ limitations under the License.
 
 package internal
 
+import "path"
+
 // deckhouse repo structure
 // root-segment:<version>
 // root-segment/install:<version>
@@ -28,25 +30,37 @@ const (
 	InstallSegment           = "install"
 	InstallStandaloneSegment = "install-standalone"
 	ReleaseChannelSegment    = "release-channel"
-	ModulesSegment           = "modules"
-	ModulesExtraSegment      = "extra"
-	ModulesReleasesSegment   = "releases"
-	// TODO: fix?
-	SecurityDatabasesSegment = "security-databases"
+
+	ModulesSegment         = "modules"
+	ModulesExtraSegment    = "extra"
+	ModulesReleasesSegment = "releases"
+
+	SecuritySegment = "security"
+
+	SecurityTrivyDBSegment     = "trivy-db"
+	SecurityTrivyBDUSegment    = "trivy-bdu"
+	SecurityTrivyJavaDBSegment = "trivy-java-db"
+	SecurityTrivyChecksSegment = "trivy-checks"
 )
 
-var segmentByMirrorType = map[MirrorType]string{
+var pathByMirrorType = map[MirrorType]string{
 	MirrorTypeDeckhouse:                  "",
 	MirrorTypeDeckhouseInstall:           InstallSegment,
 	MirrorTypeDeckhouseInstallStandalone: InstallStandaloneSegment,
 	MirrorTypeDeckhouseReleaseChannels:   ReleaseChannelSegment,
-	MirrorTypeModules:                    ModulesSegment,
-	MirrorTypeModulesReleaseChannels:     ModulesReleasesSegment,
-	MirrorTypeModulesExtra:               ModulesExtraSegment,
-	MirrorTypeSecurityDatabases:          SecurityDatabasesSegment,
+
+	MirrorTypeModules:                ModulesSegment,
+	MirrorTypeModulesReleaseChannels: ModulesReleasesSegment,
+	MirrorTypeModulesExtra:           ModulesExtraSegment,
+
+	MirrorTypeSecurity:                   SecuritySegment,
+	MirrorTypeSecurityTrivyDBSegment:     path.Join(SecuritySegment, SecurityTrivyDBSegment),
+	MirrorTypeSecurityTrivyBDUSegment:    path.Join(SecuritySegment, SecurityTrivyBDUSegment),
+	MirrorTypeSecurityTrivyJavaDBSegment: path.Join(SecuritySegment, SecurityTrivyJavaDBSegment),
+	MirrorTypeSecurityTrivyChecksSegment: path.Join(SecuritySegment, SecurityTrivyChecksSegment),
 }
 
-// InstallSegmentByMirrorType returns the path segment for install based on the mirror type.
-func InstallSegmentByMirrorType(mirrorType MirrorType) string {
-	return segmentByMirrorType[mirrorType]
+// InstallPathByMirrorType returns the path segment for install based on the mirror type.
+func InstallPathByMirrorType(mirrorType MirrorType) string {
+	return pathByMirrorType[mirrorType]
 }
