@@ -34,9 +34,8 @@ import (
 
 // PullerService handles the pulling of images from the registry
 type PullerService struct {
-	deckhouseService *service.DeckhouseService
-	logger           *dkplog.Logger
-	userLogger       *log.SLogger
+	logger     *dkplog.Logger
+	userLogger *log.SLogger
 }
 
 // NewPullerService creates a new PullerService
@@ -46,9 +45,8 @@ func NewPullerService(
 	userLogger *log.SLogger,
 ) *PullerService {
 	return &PullerService{
-		deckhouseService: deckhouseService,
-		logger:           logger,
-		userLogger:       userLogger,
+		logger:     logger,
+		userLogger: userLogger,
 	}
 }
 

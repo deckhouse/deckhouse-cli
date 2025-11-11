@@ -53,6 +53,16 @@ type ImageGetOptions struct {
 	ProgressBar *progress.DownloadBar
 }
 
+// ImagePutOption is some configuration that modifies options for a put request.
+type ImagePutOption interface {
+	// ApplyToImagePut applies this configuration to the given image put options.
+	ApplyToImagePut(*ImagePutOptions)
+}
+
+type ImagePutOptions struct {
+	ProgressBar *progress.UploadBar
+}
+
 // RegistryClient defines the contract for interacting with container registries
 type RegistryClient interface {
 	// WithSegment creates a new client with an additional scope path segment
@@ -87,7 +97,7 @@ type RegistryClient interface {
 
 	// PushImage pushes an image to the registry at the specified tag
 	// The repository is determined by the chained WithSegment() calls
-	PushImage(ctx context.Context, tag string, img v1.Image) error
+	PushImage(ctx context.Context, tag string, img v1.Image, opts ...ImagePutOption) error
 
 	// ListTags retrieves all available tags for the current scope
 	// The repository is determined by the chained WithSegment() calls
