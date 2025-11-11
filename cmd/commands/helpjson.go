@@ -41,6 +41,8 @@ type FlagInfo struct {
 	Global      bool   `json:"global"`
 }
 
+var HelpUsername = "user"
+
 func NewHelpJSONCommand(rootCmd *cobra.Command) *cobra.Command {
 	helpJSONCmd := &cobra.Command{
 		Use:    "help-json",
@@ -49,17 +51,30 @@ func NewHelpJSONCommand(rootCmd *cobra.Command) *cobra.Command {
 		RunE:   helpJSON(rootCmd),
 	}
 
+	helpJSONCmd.PersistentFlags().StringVar(
+		&HelpUsername,
+		"username-replace",
+		HelpUsername,
+		"Username for replace for CI autogenerate function",
+	)
+
 	return helpJSONCmd
 }
 
 func helpJSON(rootCmd *cobra.Command) func(_ *cobra.Command, _ []string) error {
 	return func(_ *cobra.Command, _ []string) error {
 		commandsData := extractCommands(rootCmd.Root())
+
 		jsonData, err := json.MarshalIndent(commandsData, "", "  ")
 		if err != nil {
 			return err
 		}
-		fmt.Println(string(jsonData))
+
+		// add CI make generate integration
+		result := strings.ReplaceAll(string(jsonData), "--username="+HelpUsername, "--username=root")
+
+		fmt.Println(result)
+
 		return nil
 	}
 }
