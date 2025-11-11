@@ -74,6 +74,8 @@ func NewImageLayouts(rootFolder string) *ImageLayouts {
 	return l
 }
 
+// TODO: maybe make mirrorType security (like a group)
+// and for loop with security names inside?
 func (l *ImageLayouts) setLayoutByMirrorType(rootFolder string, mirrorType internal.MirrorType) error {
 	layoutPath := filepath.Join(rootFolder, internal.InstallPathByMirrorType(mirrorType))
 
