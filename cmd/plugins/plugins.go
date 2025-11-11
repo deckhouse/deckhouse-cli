@@ -164,8 +164,8 @@ func (pc *PluginsCommand) fetchInstalledPlugins() ([]pluginDisplayInfo, error) {
 		output, err := cmd.Output()
 		if err != nil {
 			res = append(res, pluginDisplayInfo{
-				Name:    plugin.Name(),
-				Version: "failed to call plugin",
+				Name:        plugin.Name(),
+				Description: "failed to call plugin",
 			})
 			continue
 		}
@@ -173,15 +173,26 @@ func (pc *PluginsCommand) fetchInstalledPlugins() ([]pluginDisplayInfo, error) {
 		version, err := semver.NewVersion(strings.TrimSpace(string(output)))
 		if err != nil {
 			res = append(res, pluginDisplayInfo{
-				Name:    plugin.Name(),
-				Version: "failed to parse version",
+				Name:        plugin.Name(),
+				Description: "failed to parse version",
+			})
+			continue
+		}
+
+		contract, err := pc.getInstalledPluginContract(plugin.Name())
+		if err != nil {
+			res = append(res, pluginDisplayInfo{
+				Name:        plugin.Name(),
+				Version:     version.Original(),
+				Description: "failed to get description",
 			})
 			continue
 		}
 
 		displayInfo := pluginDisplayInfo{
-			Name:    plugin.Name(),
-			Version: version.Original(),
+			Name:        plugin.Name(),
+			Version:     version.Original(),
+			Description: contract.Description,
 		}
 
 		res = append(res, displayInfo)

@@ -22,6 +22,8 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -37,6 +39,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/cmd/commands"
 	"github.com/deckhouse/deckhouse-cli/cmd/plugins"
+	"github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
 	data "github.com/deckhouse/deckhouse-cli/internal/data/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
@@ -101,6 +104,36 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(commands.NewHelpJSONCommand(r.cmd))
 
 	r.cmd.AddCommand(plugins.NewPluginsCommand(r.logger.Named("plugins-command")))
+
+	path, err := os.ReadDir(flags.DeckhousePluginsDir + "/plugins")
+	if err != nil {
+		r.logger.Warn("Failed to read plugins directory", slog.String("error", err.Error()))
+	}
+
+	for _, plugin := range path {
+		r.cmd.AddCommand(r.addCustomCommands(plugin.Name()))
+	}
+}
+
+func (r *RootCommand) addCustomCommands(pluginName string) *cobra.Command {
+	pluginPath := path.Join(flags.DeckhousePluginsDir, "plugins", pluginName)
+	pluginBinaryPath := path.Join(pluginPath, "current")
+	cmd := &cobra.Command{
+		Use:                pluginName,
+		Short:              pluginName,
+		DisableFlagParsing: true,
+		Run: func(cmd *cobra.Command, args []string) {
+			command := exec.CommandContext(cmd.Context(), pluginBinaryPath, args...)
+			command.Stdout = os.Stdout
+			command.Stderr = os.Stderr
+
+			err := command.Run()
+			if err != nil {
+				r.logger.Warn("Failed to run plugin", slog.String("error", err.Error()))
+			}
+		},
+	}
+	return cmd
 }
 
 func (r *RootCommand) Execute() error { //nolint:unparam

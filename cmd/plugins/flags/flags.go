@@ -209,7 +209,7 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 	flagSet.StringVar(
 		&DeckhousePluginsDir,
 		"plugins-dir",
-		DefaultDeckhousePluginsDir,
+		DeckhousePluginsDir,
 		"Path to the d8 plugins directory.",
 	)
 }
