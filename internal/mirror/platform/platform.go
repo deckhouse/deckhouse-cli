@@ -1,3 +1,19 @@
+/*
+Copyright 2025 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package platform
 
 import (
@@ -46,9 +62,6 @@ type Service struct {
 	// targetTag specifies a specific tag to mirror instead of determining versions automatically
 	targetTag string
 
-	// ignoreSuspendedChannels specifies whether to skip suspended release channels instead of failing
-	ignoreSuspendedChannels bool
-
 	// logger is for internal debug logging
 	logger *dkplog.Logger
 	// userLogger is for user-facing informational messages
@@ -60,7 +73,6 @@ func NewService(
 	sinceVersion *semver.Version,
 	workingDir string,
 	targetTag string,
-	ignoreSuspendedChannels bool,
 	logger *dkplog.Logger,
 	userLogger *log.SLogger,
 ) *Service {
@@ -75,15 +87,14 @@ func NewService(
 	}
 
 	return &Service{
-		deckhouseService:        deckhouseService,
-		layout:                  layout,
-		downloadList:            NewImageDownloadList(deckhouseService.GetRoot()),
-		pullerService:           puller.NewPullerService(deckhouseService, logger, userLogger),
-		sinceVersion:            sinceVersion,
-		targetTag:               targetTag,
-		ignoreSuspendedChannels: ignoreSuspendedChannels,
-		logger:                  logger,
-		userLogger:              userLogger,
+		deckhouseService: deckhouseService,
+		layout:           layout,
+		downloadList:     NewImageDownloadList(deckhouseService.GetRoot()),
+		pullerService:    puller.NewPullerService(deckhouseService, logger, userLogger),
+		sinceVersion:     sinceVersion,
+		targetTag:        targetTag,
+		logger:           logger,
+		userLogger:       userLogger,
 	}
 }
 
@@ -255,9 +266,7 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 	}
 
 	if meta.Suspend {
-		if !svc.ignoreSuspendedChannels {
-			return nil, fmt.Errorf("source registry contains suspended release channel %q, try again later", releaseChannel)
-		}
+		return nil, fmt.Errorf("source registry contains suspended release channel %q, try again later", releaseChannel)
 	}
 
 	ver, err := semver.NewVersion(meta.Version)

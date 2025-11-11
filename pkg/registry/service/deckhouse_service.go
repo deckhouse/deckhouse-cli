@@ -33,11 +33,14 @@ const (
 	deckhouseReleaseChannelsSegment = "release-channel"
 	installerSegment                = "install"
 	installStandaloneSegment        = "install-standalone"
+	securitySegment                 = "security"
 
 	deckhouseServiceName                = "deckhouse"
 	deckhouseReleaseChannelsServiceName = "deckhouse_release_channel"
 	installerServiceName                = "installer"
 	standaloneInstallerServiceName      = "standalone_installer"
+
+	securityServiceName = "security"
 )
 
 // DeckhouseService provides high-level operations for Deckhouse platform management
@@ -48,6 +51,8 @@ type DeckhouseService struct {
 	deckhouseReleaseChannels *DeckhouseReleaseService
 	installer                *BasicService
 	standaloneInstaller      *BasicService
+
+	security *BasicService
 
 	logger *log.Logger
 }
@@ -61,6 +66,8 @@ func NewDeckhouseService(client pkg.RegistryClient, logger *log.Logger) *Deckhou
 		deckhouseReleaseChannels: NewDeckhouseReleaseService(NewBasicService(deckhouseReleaseChannelsServiceName, client.WithSegment(deckhouseReleaseChannelsSegment), logger)),
 		installer:                NewBasicService(installerServiceName, client.WithSegment(installerSegment), logger),
 		standaloneInstaller:      NewBasicService(standaloneInstallerServiceName, client.WithSegment(installStandaloneSegment), logger),
+
+		security: NewBasicService(securityServiceName, client.WithSegment(securitySegment), logger),
 
 		logger: logger,
 	}
@@ -76,6 +83,10 @@ func (s *DeckhouseService) Installer() *BasicService {
 
 func (s *DeckhouseService) StandaloneInstaller() *BasicService {
 	return s.standaloneInstaller
+}
+
+func (s *DeckhouseService) Security() *BasicService {
+	return s.security
 }
 
 // GetRoot gets path of the registry root

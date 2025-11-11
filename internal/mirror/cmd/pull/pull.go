@@ -264,7 +264,6 @@ func (p *Puller) Execute(ctx context.Context) error {
 			registryservice.NewService(c, logger),
 			pullflags.TempDir,
 			pullflags.DeckhouseTag,
-			pullflags.IgnoreSuspendedChannels,
 			logger.Named("pull"),
 			p.logger,
 		)

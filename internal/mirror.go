@@ -26,5 +26,5 @@ const (
 	MirrorTypeModules
 	MirrorTypeModulesReleaseChannels
 	MirrorTypeModulesExtra
-	MirrorTypeSecurityDatabases
+	MirrorTypeSecurity
 )

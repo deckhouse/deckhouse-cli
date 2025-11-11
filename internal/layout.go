@@ -28,11 +28,12 @@ const (
 	InstallSegment           = "install"
 	InstallStandaloneSegment = "install-standalone"
 	ReleaseChannelSegment    = "release-channel"
-	ModulesSegment           = "modules"
-	ModulesExtraSegment      = "extra"
-	ModulesReleasesSegment   = "releases"
-	// TODO: fix?
-	SecurityDatabasesSegment = "security-databases"
+
+	ModulesSegment         = "modules"
+	ModulesExtraSegment    = "extra"
+	ModulesReleasesSegment = "releases"
+
+	SecuritySegment = "security"
 )
 
 var segmentByMirrorType = map[MirrorType]string{
@@ -43,7 +44,7 @@ var segmentByMirrorType = map[MirrorType]string{
 	MirrorTypeModules:                    ModulesSegment,
 	MirrorTypeModulesReleaseChannels:     ModulesReleasesSegment,
 	MirrorTypeModulesExtra:               ModulesExtraSegment,
-	MirrorTypeSecurityDatabases:          SecurityDatabasesSegment,
+	MirrorTypeSecurity:                   SecuritySegment,
 }
 
 // InstallSegmentByMirrorType returns the path segment for install based on the mirror type.

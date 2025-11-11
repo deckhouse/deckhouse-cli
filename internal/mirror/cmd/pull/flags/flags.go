@@ -17,7 +17,6 @@ limitations under the License.
 package flags
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/Masterminds/semver/v3"
@@ -63,8 +62,6 @@ var (
 	NoSecurityDB    bool
 	NoModules       bool
 	OnlyExtraImages bool
-
-	IgnoreSuspendedChannels bool
 )
 
 func AddFlags(flagSet *pflag.FlagSet) {
@@ -200,15 +197,6 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		false,
 		"Interact with registries over HTTP.",
 	)
-	flagSet.BoolVar(
-		&IgnoreSuspendedChannels,
-		"ignore-suspended-channels",
-		false,
-		"Ignore suspended release channels instead of failing.",
-	)
-	if err := flagSet.MarkHidden("ignore-suspended-channels"); err != nil {
-		panic(fmt.Sprintf("failed to mark flag as hidden: %v", err))
-	}
 	flagSet.StringVar(
 		&TempDir,
 		"tmp-dir",

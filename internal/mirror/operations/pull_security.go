@@ -58,6 +58,7 @@ func PullSecurityDatabases(pullParams *params.PullParams, client pkg.RegistryCli
 	}
 
 	logger.InfoLn("Processing image indexes")
+
 	for _, l := range imageLayouts.AsList() {
 		err = layouts.SortIndexManifests(l)
 		if err != nil {
@@ -71,6 +72,7 @@ func PullSecurityDatabases(pullParams *params.PullParams, client pkg.RegistryCli
 			pullParams.BundleDir,
 			"security.tar",
 		)
+
 		if pullParams.BundleChunkSize == 0 {
 			securityDB, err = os.Create(filepath.Join(pullParams.BundleDir, "security.tar"))
 			if err != nil {
@@ -81,6 +83,7 @@ func PullSecurityDatabases(pullParams *params.PullParams, client pkg.RegistryCli
 		if err = bundle.Pack(context.Background(), tmpDir, securityDB); err != nil {
 			return fmt.Errorf("pack security.tar: %w", err)
 		}
+
 		return nil
 	}); err != nil {
 		return err
