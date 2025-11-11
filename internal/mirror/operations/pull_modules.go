@@ -24,6 +24,8 @@ import (
 	"path"
 	"path/filepath"
 
+	"github.com/google/go-containerregistry/pkg/v1/layout"
+
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/pkg"
@@ -75,13 +77,15 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter, client p
 		if err != nil {
 			return fmt.Errorf("create OCI layout: %w", err)
 		}
+
 		imageLayouts.Modules[module.Name] = layouts.ModuleImageLayout{
-			ModuleLayout:   moduleLayout,
-			ReleasesLayout: releasesLayout,
-			ExtraLayout:    extraLayout,
-			ModuleImages:   make(map[string]struct{}),
-			ReleaseImages:  make(map[string]struct{}),
-			ExtraImages:    make(map[string]struct{}),
+			ModuleLayout:      moduleLayout,
+			ReleasesLayout:    releasesLayout,
+			ExtraLayout:       extraLayout,
+			ModuleImages:      make(map[string]struct{}),
+			ReleaseImages:     make(map[string]struct{}),
+			ExtraNamedLayouts: make(map[string]layout.Path),
+			ExtraNamedImages:  make(map[string]map[string]struct{}),
 		}
 	}
 
