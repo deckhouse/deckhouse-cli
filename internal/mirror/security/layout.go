@@ -39,26 +39,28 @@ const (
 type ImageDownloadList struct {
 	rootURL string
 
-	Security map[string]*puller.ImageMeta
+	Security map[string]map[string]*puller.ImageMeta
 }
 
 func NewImageDownloadList(rootURL string) *ImageDownloadList {
 	return &ImageDownloadList{
 		rootURL:  rootURL,
-		Security: make(map[string]*puller.ImageMeta),
+		Security: make(map[string]map[string]*puller.ImageMeta),
 	}
 }
 
 func (l *ImageDownloadList) FillSecurityImages() {
-	imageReferences := []string{
-		path.Join(l.rootURL, internal.SecuritySegment, TrivyDBName) + ":2",
-		path.Join(l.rootURL, internal.SecuritySegment, TrivyBDUName) + ":1",
-		path.Join(l.rootURL, internal.SecuritySegment, TrivyJavaDBName) + ":1",
-		path.Join(l.rootURL, internal.SecuritySegment, TrivyChecksName) + ":0",
+	imageReferences := map[string]string{
+		TrivyDBName:     path.Join(l.rootURL, internal.SecuritySegment, TrivyDBName) + ":2",
+		TrivyBDUName:    path.Join(l.rootURL, internal.SecuritySegment, TrivyBDUName) + ":1",
+		TrivyJavaDBName: path.Join(l.rootURL, internal.SecuritySegment, TrivyJavaDBName) + ":1",
+		TrivyChecksName: path.Join(l.rootURL, internal.SecuritySegment, TrivyChecksName) + ":0",
 	}
 
-	for _, imageRef := range imageReferences {
-		l.Security[imageRef] = nil
+	for name, ref := range imageReferences {
+		l.Security[name] = map[string]*puller.ImageMeta{
+			ref: nil,
+		}
 	}
 }
 

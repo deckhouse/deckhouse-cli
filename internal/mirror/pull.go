@@ -59,7 +59,9 @@ func NewPullService(
 		moduleService:    registryService.ModuleService(),
 		deckhouseService: registryService.DeckhouseService(),
 
-		platformService: platform.NewService(registryService.DeckhouseService(), nil, tmpDir, targetTag, logger.Named("pull"), userLogger),
+		platformService: platform.NewService(registryService.DeckhouseService(), nil, tmpDir, targetTag, logger, userLogger),
+		securityService: security.NewService(registryService.DeckhouseService(), tmpDir, logger, userLogger),
+		modulesService:  modules.NewService(registryService.DeckhouseService(), tmpDir, logger, userLogger),
 
 		layout: NewImageLayouts(),
 
@@ -70,20 +72,20 @@ func NewPullService(
 
 // Pull
 func (svc *PullService) Pull(ctx context.Context) error {
-	err := svc.platformService.PullPlatform(ctx)
-	if err != nil {
-		return fmt.Errorf("pull platform: %w", err)
-	}
+	// err := svc.platformService.PullPlatform(ctx)
+	// if err != nil {
+	// 	return fmt.Errorf("pull platform: %w", err)
+	// }
 
-	err = svc.securityService.PullSecurity(ctx)
+	err := svc.securityService.PullSecurity(ctx)
 	if err != nil {
 		return fmt.Errorf("pull security databases: %w", err)
 	}
 
-	err = svc.modulesService.PullModules(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("pull modules: %w", err)
-	}
+	// err = svc.modulesService.PullModules(ctx, nil)
+	// if err != nil {
+	// 	return fmt.Errorf("pull modules: %w", err)
+	// }
 
 	return nil
 }

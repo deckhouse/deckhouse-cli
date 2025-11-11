@@ -112,7 +112,7 @@ func (svc *Service) validateSecurityAccess(ctx context.Context) error {
 	defer cancel()
 
 	// For specific tags, check if the tag exists
-	err := svc.deckhouseService.Security().CheckImageExists(ctx, TrivyDBName+":2")
+	err := svc.deckhouseService.Security(TrivyDBName).CheckImageExists(ctx, "2")
 	if errors.Is(err, client.ErrImageNotFound) {
 		svc.userLogger.Warnf("Skipping pull of security databases: %v", err)
 
@@ -133,15 +133,22 @@ func (svc *Service) pullSecurityDatabases(ctx context.Context) error {
 	svc.downloadList.FillSecurityImages()
 
 	err := logger.Process("Pull Security Databases", func() error {
-		config := puller.PullConfig{
-			Name:             "Security Databases",
-			ImageSet:         svc.downloadList.Security,
-			Layout:           svc.layout.Security,
-			AllowMissingTags: true, // Allow missing security database images
-			GetterService:    svc.deckhouseService.Security(),
+		for securityName, imageSet := range svc.downloadList.Security {
+			config := puller.PullConfig{
+				Name:             "Security Databases " + securityName,
+				ImageSet:         imageSet,
+				Layout:           svc.layout.Security,
+				AllowMissingTags: true, // Allow missing security database images
+				GetterService:    svc.deckhouseService.Security(securityName),
+			}
+
+			err := svc.pullerService.PullImages(ctx, config)
+			if err != nil {
+				return fmt.Errorf("pull security database images: %w", err)
+			}
 		}
 
-		return svc.pullerService.PullImages(ctx, config)
+		return nil
 	})
 	if err != nil {
 		return err
