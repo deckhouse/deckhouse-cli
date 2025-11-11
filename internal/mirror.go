@@ -27,4 +27,8 @@ const (
 	MirrorTypeModulesReleaseChannels
 	MirrorTypeModulesExtra
 	MirrorTypeSecurity
+	MirrorTypeSecurityTrivyDBSegment
+	MirrorTypeSecurityTrivyBDUSegment
+	MirrorTypeSecurityTrivyJavaDBSegment
+	MirrorTypeSecurityTrivyChecksSegment
 )

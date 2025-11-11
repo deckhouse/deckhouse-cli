@@ -29,13 +29,6 @@ import (
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
-const (
-	TrivyDBName     = "trivy-db"
-	TrivyBDUName    = "trivy-bdu"
-	TrivyJavaDBName = "trivy-java-db"
-	TrivyChecksName = "trivy-checks"
-)
-
 type ImageDownloadList struct {
 	rootURL string
 
@@ -51,10 +44,10 @@ func NewImageDownloadList(rootURL string) *ImageDownloadList {
 
 func (l *ImageDownloadList) FillSecurityImages() {
 	imageReferences := map[string]string{
-		TrivyDBName:     path.Join(l.rootURL, internal.SecuritySegment, TrivyDBName) + ":2",
-		TrivyBDUName:    path.Join(l.rootURL, internal.SecuritySegment, TrivyBDUName) + ":1",
-		TrivyJavaDBName: path.Join(l.rootURL, internal.SecuritySegment, TrivyJavaDBName) + ":1",
-		TrivyChecksName: path.Join(l.rootURL, internal.SecuritySegment, TrivyChecksName) + ":0",
+		internal.SecurityTrivyDBSegment:     path.Join(l.rootURL, internal.SecuritySegment, internal.SecurityTrivyDBSegment) + ":2",
+		internal.SecurityTrivyBDUSegment:    path.Join(l.rootURL, internal.SecuritySegment, internal.SecurityTrivyBDUSegment) + ":1",
+		internal.SecurityTrivyJavaDBSegment: path.Join(l.rootURL, internal.SecuritySegment, internal.SecurityTrivyJavaDBSegment) + ":1",
+		internal.SecurityTrivyChecksSegment: path.Join(l.rootURL, internal.SecuritySegment, internal.SecurityTrivyChecksSegment) + ":0",
 	}
 
 	for name, ref := range imageReferences {
@@ -68,20 +61,21 @@ type ImageLayouts struct {
 	platform   v1.Platform
 	workingDir string
 
-	Security *regimage.ImageLayout
+	Security map[string]*regimage.ImageLayout
 }
 
 func NewImageLayouts(rootFolder string) *ImageLayouts {
 	l := &ImageLayouts{
 		workingDir: rootFolder,
 		platform:   v1.Platform{Architecture: "amd64", OS: "linux"},
+		Security:   make(map[string]*regimage.ImageLayout, 1),
 	}
 
 	return l
 }
 
 func (l *ImageLayouts) setLayoutByMirrorType(rootFolder string, mirrorType internal.MirrorType) error {
-	layoutPath := filepath.Join(rootFolder, internal.InstallSegmentByMirrorType(mirrorType))
+	layoutPath := filepath.Join(rootFolder, internal.InstallPathByMirrorType(mirrorType))
 
 	layout, err := regimage.NewImageLayout(layoutPath)
 	if err != nil {
@@ -89,8 +83,14 @@ func (l *ImageLayouts) setLayoutByMirrorType(rootFolder string, mirrorType inter
 	}
 
 	switch mirrorType {
-	case internal.MirrorTypeSecurity:
-		l.Security = layout
+	case internal.MirrorTypeSecurityTrivyDBSegment:
+		l.Security[internal.SecurityTrivyDBSegment] = layout
+	case internal.MirrorTypeSecurityTrivyBDUSegment:
+		l.Security[internal.SecurityTrivyBDUSegment] = layout
+	case internal.MirrorTypeSecurityTrivyJavaDBSegment:
+		l.Security[internal.SecurityTrivyJavaDBSegment] = layout
+	case internal.MirrorTypeSecurityTrivyChecksSegment:
+		l.Security[internal.SecurityTrivyChecksSegment] = layout
 	default:
 		return fmt.Errorf("wrong mirror type in security image layout: %v", mirrorType)
 	}
@@ -101,8 +101,8 @@ func (l *ImageLayouts) setLayoutByMirrorType(rootFolder string, mirrorType inter
 // AsList returns a list of layout.Path's in it. Undefined path's are not included in the list.
 func (l *ImageLayouts) AsList() []layout.Path {
 	paths := make([]layout.Path, 0)
-	if l.Security != nil {
-		paths = append(paths, l.Security.Path())
+	for _, layout := range l.Security {
+		paths = append(paths, layout.Path())
 	}
 	return paths
 }

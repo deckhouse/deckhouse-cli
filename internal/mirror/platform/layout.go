@@ -96,7 +96,7 @@ func NewImageLayouts(rootFolder string) *ImageLayouts {
 }
 
 func (l *ImageLayouts) setLayoutByMirrorType(rootFolder string, mirrorType internal.MirrorType) error {
-	layoutPath := path.Join(rootFolder, internal.InstallSegmentByMirrorType(mirrorType))
+	layoutPath := path.Join(rootFolder, internal.InstallPathByMirrorType(mirrorType))
 
 	layout, err := regimage.NewImageLayout(layoutPath)
 	if err != nil {

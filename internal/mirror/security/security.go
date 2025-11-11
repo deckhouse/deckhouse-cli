@@ -112,7 +112,7 @@ func (svc *Service) validateSecurityAccess(ctx context.Context) error {
 	defer cancel()
 
 	// For specific tags, check if the tag exists
-	err := svc.deckhouseService.Security(TrivyDBName).CheckImageExists(ctx, "2")
+	err := svc.deckhouseService.Security(internal.SecurityTrivyDBSegment).CheckImageExists(ctx, "2")
 	if errors.Is(err, client.ErrImageNotFound) {
 		svc.userLogger.Warnf("Skipping pull of security databases: %v", err)
 
@@ -137,7 +137,7 @@ func (svc *Service) pullSecurityDatabases(ctx context.Context) error {
 			config := puller.PullConfig{
 				Name:             "Security Databases " + securityName,
 				ImageSet:         imageSet,
-				Layout:           svc.layout.Security,
+				Layout:           svc.layout.Security[securityName],
 				AllowMissingTags: true, // Allow missing security database images
 				GetterService:    svc.deckhouseService.Security(securityName),
 			}
@@ -202,7 +202,10 @@ func createOCIImageLayoutsForSecurity(
 	layouts := NewImageLayouts(rootFolder)
 
 	mirrorTypes := []internal.MirrorType{
-		internal.MirrorTypeSecurity,
+		internal.MirrorTypeSecurityTrivyDBSegment,
+		internal.MirrorTypeSecurityTrivyBDUSegment,
+		internal.MirrorTypeSecurityTrivyJavaDBSegment,
+		internal.MirrorTypeSecurityTrivyChecksSegment,
 	}
 
 	for _, mtype := range mirrorTypes {
