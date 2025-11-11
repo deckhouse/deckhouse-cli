@@ -206,7 +206,7 @@ func PullImageSet(
 
 	pullCount, totalCount := 1, len(imageSet)
 	for imageReferenceString := range imageSet {
-		imageRepo, _ := splitImageRefByRepoAndTag(imageReferenceString)
+		imageRepo, originalTag := splitImageRefByRepoAndTag(imageReferenceString)
 
 		// If we already know the digest of the tagged image, we should pull it by this digest instead of pulling by tag
 		// to avoid race-conditions between mirroring and releasing new builds on release channels.
@@ -224,6 +224,8 @@ func PullImageSet(
 
 		logger.Debugf("reference here: %s", ref.String())
 
+		// tag here can be ussually tag or digest
+		// thats why we need original tag calculated upper
 		imagePath, tag := splitImageRefByRepoAndTag(pullReference)
 
 		scopedClient := client
@@ -256,7 +258,8 @@ func PullImageSet(
 					layout.WithPlatform(v1.Platform{Architecture: "amd64", OS: "linux"}),
 					layout.WithAnnotations(map[string]string{
 						"org.opencontainers.image.ref.name": imageReferenceString,
-						"io.deckhouse.image.short_tag":      tag,
+						// original tag here to have tagged releases as an alias
+						"io.deckhouse.image.short_tag": originalTag,
 					}),
 				)
 				if err != nil {
