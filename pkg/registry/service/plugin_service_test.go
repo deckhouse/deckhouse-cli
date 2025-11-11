@@ -348,7 +348,7 @@ func TestExtractPlugin_Success(t *testing.T) {
 	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
-	err = service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir)
+	err = service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir+"/test-plugin")
 
 	// Assert
 	if err != nil {
@@ -438,7 +438,7 @@ func TestExtractPlugin_MultipleLayersSuccess(t *testing.T) {
 	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
-	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir)
+	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir+"/test-plugin")
 
 	// Assert
 	if err != nil {
@@ -490,7 +490,7 @@ func TestExtractPlugin_ExtractImageLayersError(t *testing.T) {
 	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
-	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir)
+	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir+"/test-plugin")
 
 	// Assert
 	if err == nil {
@@ -588,7 +588,7 @@ func TestExtractPlugin_CreateDestinationError(t *testing.T) {
 	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
-	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", validDir)
+	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", validDir+"/test-plugin")
 
 	// Assert
 	if err != nil {
@@ -624,7 +624,7 @@ func TestExtractPlugin_EmptyRepository(t *testing.T) {
 	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
-	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir)
+	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir+"/test-plugin")
 
 	// Assert
 	if err != nil {
@@ -700,7 +700,7 @@ func TestExtractPlugin_NestedDirectories(t *testing.T) {
 	service := registryservice.NewPluginService(mockClient, logger)
 
 	// Act
-	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir)
+	err := service.ExtractPlugin(context.Background(), "test-plugin", "v1.0.0", tmpDir+"/test-plugin")
 
 	// Assert
 	if err != nil {

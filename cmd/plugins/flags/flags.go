@@ -27,11 +27,15 @@ const (
 	deckhouseRegistryHost = "registry.deckhouse.io"
 
 	EnterpriseEditionRepo = deckhouseRegistryHost
+
+	DefaultDeckhousePluginsDir = "/opt/deckhouse/lib/deckhouse-cli"
 )
 
 // CLI Parameters
 var (
 	TempDir string
+
+	DeckhousePluginsDir = DefaultDeckhousePluginsDir
 
 	Insecure      bool
 	TLSSkipVerify bool
@@ -201,5 +205,11 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		"tmp-dir",
 		"",
 		"Path to a temporary directory to use for image pulling and pushing. All processing is done in this directory, so make sure there is enough free disk space to accommodate the entire bundle you are downloading;",
+	)
+	flagSet.StringVar(
+		&DeckhousePluginsDir,
+		"plugins-dir",
+		DefaultDeckhousePluginsDir,
+		"Path to the d8 plugins directory.",
 	)
 }
