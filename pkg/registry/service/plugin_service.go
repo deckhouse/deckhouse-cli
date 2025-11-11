@@ -25,7 +25,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 
@@ -90,20 +89,13 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 	s.log.Debug("Plugin contract parsed successfully", slog.String("plugin", pluginName), slog.String("tag", tag), slog.String("name", contract.Name), slog.String("version", contract.Version))
 
 	// Convert to domain entity
-	return contractToDomain(contract), nil
+	return ContractToDomain(contract), nil
 }
 
 // ExtractPlugin downloads the plugin image and extracts it to the specified location
 func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, destination string) error {
 	// Create a scoped client for this specific plugin
 	s.log.Debug("Extracting plugin", slog.String("plugin", pluginName), slog.String("tag", tag), slog.String("destination", destination))
-
-	// Create destination directory if it doesn't exist
-	if err := os.MkdirAll(destination, 0755); err != nil {
-		return fmt.Errorf("failed to create destination directory: %w", err)
-	}
-
-	s.log.Debug("Destination directory created", slog.String("destination", destination))
 
 	pluginClient := s.client.WithSegment(pluginName)
 
@@ -112,7 +104,7 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, dest
 		return fmt.Errorf("failed to get image: %w", err)
 	}
 
-	err = s.extractTar(img.Extract(), destination)
+	err = s.extractPluginFromTar(img.Extract(), destination, pluginName)
 	if err != nil {
 		return fmt.Errorf("failed to extract tar: %w", err)
 	}
@@ -120,9 +112,11 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, dest
 	return nil
 }
 
-// extractTar extracts a tar archive to the destination directory
-func (s *PluginService) extractTar(r io.Reader, destination string) error {
-	s.log.Debug("Starting tar extraction", slog.String("destination", destination))
+// extractPluginFromTar extracts the plugin binary from a tar archive to the destination directory
+func (s *PluginService) extractPluginFromTar(r io.Reader, destination, pluginName string) error {
+	s.log.Debug("Starting plugin extraction from tar archive",
+		slog.String("destination", destination),
+		slog.String("plugin", pluginName))
 
 	tr := tar.NewReader(r)
 
@@ -135,61 +129,31 @@ func (s *PluginService) extractTar(r io.Reader, destination string) error {
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
 
-		// Construct the full path
-		target := filepath.Join(destination, header.Name)
-
-		// Ensure the path is within the destination (prevent path traversal)
-		rel, err := filepath.Rel(destination, target)
-		if err != nil || len(rel) > 0 && rel[0] == '.' && rel[1] == '.' {
-			return fmt.Errorf("invalid file path (path traversal attempt): %s", header.Name)
-		}
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			// Create directory
-			s.log.Debug("Creating directory", slog.String("path", target))
-
-			if err := os.MkdirAll(target, os.FileMode(header.Mode)); err != nil {
-				return fmt.Errorf("failed to create directory %s: %w", target, err)
-			}
-
-		case tar.TypeReg:
-			// Create file
-			s.log.Debug("Extracting file", slog.String("path", target), slog.Int64("size", header.Size))
-
-			// Ensure parent directory exists
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return fmt.Errorf("failed to create parent directory for %s: %w", target, err)
-			}
-
-			// Create the file
-			outFile, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(header.Mode))
+		// only extract regular files named "plugin"
+		if header.Name == "plugin" {
+			outFile, err := os.OpenFile(destination, os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(header.Mode))
 			if err != nil {
-				return fmt.Errorf("failed to create file %s: %w", target, err)
+				return fmt.Errorf("failed to create plugin file %s: %w", destination, err)
 			}
+			defer outFile.Close()
 
-			// Copy the file contents
 			if _, err := io.Copy(outFile, tr); err != nil {
-				outFile.Close()
-				return fmt.Errorf("failed to write file %s: %w", target, err)
+				return fmt.Errorf("failed to write plugin content to %s: %w", destination, err)
 			}
-			outFile.Close()
 
-			s.log.Debug("File extracted successfully", slog.String("path", target))
-
-		default:
-			// Skip unsupported types
-			s.log.Warn("Skipping unsupported tar entry", slog.Int("type", int(header.Typeflag)), slog.String("name", header.Name))
+			break // plugin found and extracted, no need to continue
 		}
 	}
 
-	s.log.Debug("Tar extraction completed", slog.String("destination", destination))
+	s.log.Debug("Plugin extraction completed successfully",
+		slog.String("destination", destination),
+		slog.String("plugin", pluginName))
 
 	return nil
 }
 
-// contractToDomain converts PluginContract DTO to Plugin domain entity
-func contractToDomain(contract *PluginContract) *internal.Plugin {
+// ContractToDomain converts PluginContract DTO to Plugin domain entity
+func ContractToDomain(contract *PluginContract) *internal.Plugin {
 	// Note: This is a pure conversion function, no logging needed as it's called from GetPluginContract
 	plugin := &internal.Plugin{
 		Name:        contract.Name,
@@ -229,6 +193,44 @@ func contractToDomain(contract *PluginContract) *internal.Plugin {
 	}
 
 	return plugin
+}
+
+// DomainToContract converts Plugin domain entity to PluginContract DTO
+func DomainToContract(plugin *internal.Plugin) *PluginContract {
+	contract := &PluginContract{
+		Name:        plugin.Name,
+		Version:     plugin.Version,
+		Description: plugin.Description,
+		Env:         make([]EnvVarDTO, 0, len(plugin.Env)),
+		Flags:       make([]FlagDTO, 0, len(plugin.Flags)),
+		Requirements: RequirementsDTO{
+			Kubernetes: KubernetesRequirementDTO{
+				Constraint: plugin.Requirements.Kubernetes.Constraint,
+			},
+			Modules: make([]ModuleRequirementDTO, 0, len(plugin.Requirements.Modules)),
+		},
+	}
+
+	for _, env := range plugin.Env {
+		contract.Env = append(contract.Env, EnvVarDTO{
+			Name: env.Name,
+		})
+	}
+
+	for _, flag := range plugin.Flags {
+		contract.Flags = append(contract.Flags, FlagDTO{
+			Name: flag.Name,
+		})
+	}
+
+	for _, mod := range plugin.Requirements.Modules {
+		contract.Requirements.Modules = append(contract.Requirements.Modules, ModuleRequirementDTO{
+			Name:       mod.Name,
+			Constraint: mod.Constraint,
+		})
+	}
+
+	return contract
 }
 
 // ListPlugins lists all available plugin names from the registry
