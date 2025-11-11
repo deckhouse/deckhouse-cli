@@ -184,7 +184,7 @@ func FindExternalModuleImages(
 
 			semverTag, err := semver.NewVersion(tag)
 			if err == nil {
-				versionsToMirror = append(versionsToMirror, semverTag.Original()) //nolint:staticcheck
+				versionsToMirror = append(versionsToMirror, semverTag.Original())
 			}
 		}
 	}

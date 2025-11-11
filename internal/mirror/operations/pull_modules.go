@@ -24,6 +24,8 @@ import (
 	"path"
 	"path/filepath"
 
+	"github.com/google/go-containerregistry/pkg/v1/layout"
+
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/pkg"
@@ -31,7 +33,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
-	"github.com/google/go-containerregistry/pkg/v1/layout"
 )
 
 func PullModules(pullParams *params.PullParams, filter *modules.Filter, client pkg.RegistryClient) error {
