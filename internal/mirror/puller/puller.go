@@ -29,7 +29,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
 	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 // PullerService handles the pulling of images from the registry
@@ -40,7 +39,6 @@ type PullerService struct {
 
 // NewPullerService creates a new PullerService
 func NewPullerService(
-	deckhouseService *service.DeckhouseService,
 	logger *dkplog.Logger,
 	userLogger *log.SLogger,
 ) *PullerService {

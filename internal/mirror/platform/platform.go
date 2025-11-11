@@ -90,7 +90,7 @@ func NewService(
 		deckhouseService: deckhouseService,
 		layout:           layout,
 		downloadList:     NewImageDownloadList(deckhouseService.GetRoot()),
-		pullerService:    puller.NewPullerService(deckhouseService, logger, userLogger),
+		pullerService:    puller.NewPullerService(logger, userLogger),
 		sinceVersion:     sinceVersion,
 		targetTag:        targetTag,
 		logger:           logger,
