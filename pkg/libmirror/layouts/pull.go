@@ -103,6 +103,7 @@ func PullModules(pullParams *params.PullParams, layouts *ImageLayouts, client pk
 		// Skip main module images if only pulling extra images
 		if !pullParams.OnlyExtraImages {
 			pullParams.Logger.InfoLn(moduleName, "images")
+
 			if err := PullImageSet(
 				pullParams,
 				moduleData.ModuleLayout,
@@ -112,7 +113,9 @@ func PullModules(pullParams *params.PullParams, layouts *ImageLayouts, client pk
 			); err != nil {
 				return fmt.Errorf("pull %q module: %w", moduleName, err)
 			}
+
 			pullParams.Logger.InfoLn(moduleName, "release channels")
+
 			if err := PullImageSet(
 				pullParams,
 				moduleData.ReleasesLayout,
@@ -126,17 +129,22 @@ func PullModules(pullParams *params.PullParams, layouts *ImageLayouts, client pk
 		}
 
 		// Always pull extra images if they exist
-		if len(moduleData.ExtraImages) > 0 {
-			pullParams.Logger.InfoLn(moduleName, "extra images")
-			if err := PullImageSet(
-				pullParams,
-				moduleData.ExtraLayout,
-				moduleData.ExtraImages,
-				client,
-				WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
-				WithAllowMissingTags(true),
-			); err != nil {
-				return fmt.Errorf("pull %q module extra images: %w", moduleName, err)
+		if len(moduleData.ExtraNamedImages) > 0 {
+			for extraName, imageSet := range moduleData.ExtraNamedImages {
+				l := moduleData.ExtraNamedLayouts[extraName]
+
+				pullParams.Logger.InfoLn(moduleName, "extra images")
+
+				if err := PullImageSet(
+					pullParams,
+					l,
+					imageSet,
+					client,
+					WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
+					WithAllowMissingTags(true),
+				); err != nil {
+					return fmt.Errorf("pull %q module extra images: %w", moduleName, err)
+				}
 			}
 		}
 	}
@@ -282,6 +290,14 @@ func splitImageRefByRepoAndTag(imageReferenceString string) (string, string) {
 	tag := imageReferenceString[splitIndex+1:]
 
 	return repo, tag
+}
+
+func splitExtraName(imageReferenceStringWOTag string) (string, string) {
+	splitIndex := strings.LastIndex(imageReferenceStringWOTag, "/")
+	repo := imageReferenceStringWOTag[:splitIndex]
+	extra := imageReferenceStringWOTag[splitIndex+1:]
+
+	return repo, extra
 }
 
 type pullImageSetOptions struct {

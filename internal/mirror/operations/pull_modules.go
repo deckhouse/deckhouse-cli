@@ -31,6 +31,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
+	"github.com/google/go-containerregistry/pkg/v1/layout"
 )
 
 func PullModules(pullParams *params.PullParams, filter *modules.Filter, client pkg.RegistryClient) error {
@@ -75,13 +76,15 @@ func PullModules(pullParams *params.PullParams, filter *modules.Filter, client p
 		if err != nil {
 			return fmt.Errorf("create OCI layout: %w", err)
 		}
+
 		imageLayouts.Modules[module.Name] = layouts.ModuleImageLayout{
-			ModuleLayout:   moduleLayout,
-			ReleasesLayout: releasesLayout,
-			ExtraLayout:    extraLayout,
-			ModuleImages:   make(map[string]struct{}),
-			ReleaseImages:  make(map[string]struct{}),
-			ExtraImages:    make(map[string]struct{}),
+			ModuleLayout:      moduleLayout,
+			ReleasesLayout:    releasesLayout,
+			ExtraLayout:       extraLayout,
+			ModuleImages:      make(map[string]struct{}),
+			ReleaseImages:     make(map[string]struct{}),
+			ExtraNamedLayouts: make(map[string]layout.Path),
+			ExtraNamedImages:  make(map[string]map[string]struct{}),
 		}
 	}
 
