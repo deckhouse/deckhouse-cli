@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
@@ -74,6 +75,7 @@ func (pc *PluginsCommand) initPluginServices() {
 		Insecure:      d8flags.Insecure,
 		TLSSkipVerify: d8flags.TLSSkipVerify,
 		Logger:        pc.logger.Named("registry-client"),
+		Platform:      &v1.Platform{Architecture: "arm64", OS: "darwin"},
 	})
 
 	// Build scoped client using chained WithSegment calls

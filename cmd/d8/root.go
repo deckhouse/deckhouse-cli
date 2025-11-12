@@ -44,7 +44,6 @@ import (
 	data "github.com/deckhouse/deckhouse-cli/internal/data/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
-	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 )
@@ -101,7 +100,7 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(mirror.NewCommand())
 	r.cmd.AddCommand(status.NewCommand())
 	r.cmd.AddCommand(tools.NewCommand())
-	r.cmd.AddCommand(system.NewCommand())
+	// r.cmd.AddCommand(system.NewCommand())
 	r.cmd.AddCommand(commands.NewVirtualizationCommand())
 	r.cmd.AddCommand(commands.NewKubectlCommand())
 	r.cmd.AddCommand(commands.NewLoginCommand())

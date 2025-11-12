@@ -66,6 +66,12 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal manifest: %w", err)
 	}
+	if (*manifest)["annotations"] == nil {
+		return &internal.Plugin{
+			Name:    pluginName,
+			Version: tag,
+		}, nil
+	}
 
 	annotations := (*manifest)["annotations"].(map[string]any)
 	contractB64, exists := annotations["contract"].(string)
