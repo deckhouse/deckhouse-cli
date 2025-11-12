@@ -1,0 +1,67 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "D8 cni-switch switch",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/cmd/d8",
+            "args": [
+                "cni-switch",
+                "switch"
+            ],
+            "env": {},
+            "buildFlags": "-tags='dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp'",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal", // OR internalConsole
+        },
+        {
+            "name": "D8 cni-switch cleanup",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/cmd/d8",
+            "args": [
+                "cni-switch",
+                "cleanup"
+            ],
+            "env": {},
+            "buildFlags": "-tags='dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp'",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal", // OR internalConsole
+        },
+        {
+            "name": "D8 cni-switch prepare",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/cmd/d8",
+            "args": [
+                "cni-switch",
+                "prepare",
+                "--to-cni",
+                "${input:cniTarget}"
+            ],
+            "env": {},
+            "buildFlags": "-tags='dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp'",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal", // OR internalConsole
+        }
+    ],
+    "inputs": [
+        {
+            "id": "cniTarget",
+            "type": "pickString",
+            "description": "Select the target CNI",
+            "options": [
+                "cilium",
+                "flannel",
+                "simple-bridge"
+            ]
+        }
+    ]
+}
