@@ -192,6 +192,14 @@ func (w WithDownloadBar) ApplyToImageGet(opts *pkg.ImageGetOptions) {
 	opts.ProgressBar = w.Bar
 }
 
+type WithPlatform struct {
+	Platform *v1.Platform
+}
+
+func (w WithPlatform) ApplyToImageGet(opts *pkg.ImageGetOptions) {
+	opts.Platform = w.Platform
+}
+
 // GetImage retrieves an remote image for a specific reference
 // Do not return remote image to avoid drop connection with context cancelation.
 // It will be in use while passed context will be alive.
@@ -225,6 +233,11 @@ func (c *Client) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetO
 	}
 
 	imageOptions := []remote.Option{remote.WithContext(ctx)}
+
+	if getImageOptions.Platform != nil {
+		imageOptions = append(imageOptions, remote.WithPlatform(*getImageOptions.Platform))
+	}
+
 	imageOptions = append(imageOptions, c.options...)
 
 	if getImageOptions.ProgressBar != nil {

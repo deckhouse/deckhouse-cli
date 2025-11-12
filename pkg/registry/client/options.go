@@ -21,7 +21,6 @@ import (
 	"net/http"
 
 	"github.com/google/go-containerregistry/pkg/authn"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
@@ -49,8 +48,6 @@ type Options struct {
 
 	// Logger for client operations
 	Logger *log.Logger
-
-	Platform *v1.Platform
 }
 
 // ensureLogger sets a default logger if none is provided
@@ -71,10 +68,6 @@ func buildRemoteOptions(auth authn.Authenticator, opts *Options) []remote.Option
 	if needsCustomTransport(opts) {
 		transport := configureTransport(opts)
 		remoteOptions = append(remoteOptions, remote.WithTransport(transport))
-	}
-
-	if opts.Platform != nil {
-		remoteOptions = append(remoteOptions, remote.WithPlatform(*opts.Platform))
 	}
 
 	return remoteOptions
