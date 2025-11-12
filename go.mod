@@ -37,10 +37,10 @@ require (
 	k8s.io/api v0.33.3
 	k8s.io/apiextensions-apiserver v0.33.3
 	k8s.io/apimachinery v0.33.3
-	k8s.io/cli-runtime v0.29.3
+	k8s.io/cli-runtime v0.30.11
 	k8s.io/client-go v0.33.3
 	k8s.io/component-base v0.33.3
-	k8s.io/kubectl v0.29.3
+	k8s.io/kubectl v0.30.11
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
 	sigs.k8s.io/controller-runtime v0.21.0
 	sigs.k8s.io/yaml v1.4.0
@@ -603,11 +603,11 @@ require (
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	k8s.io/apiserver v0.33.3 // indirect
-	k8s.io/component-helpers v0.29.3 // indirect
+	k8s.io/component-helpers v0.30.11 // indirect
 	k8s.io/klog v1.0.0 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20250710124328-f3f2b991d03b // indirect
-	k8s.io/metrics v0.29.3 // indirect
+	k8s.io/metrics v0.30.11 // indirect
 	kubevirt.io/api v1.3.1 // indirect
 	kubevirt.io/containerized-data-importer-api v1.57.0-alpha1 // indirect
 	kubevirt.io/controller-lifecycle-operator-sdk/api v0.0.0-20220329064328-f3cc58c6ed90 // indirect
