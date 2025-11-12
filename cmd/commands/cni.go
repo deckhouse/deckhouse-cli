@@ -31,10 +31,11 @@ var (
 A group of commands to switch the CNI (Container Network Interface) provider in the Deckhouse cluster.
 
 This process is divided into several steps:
-1. 'd8 cni-switch prepare' - Prepares the cluster for CNI migration.
-2. 'd8 cni-switch switch' - Performs the actual CNI switch.
-3. 'd8 cni-switch cleanup' - (Optional) Cleans up resources if the switch is aborted.
-4. 'd8 cni-switch rollback' - (Optional) Rollback CNI if the switch is aborted.`)
+
+  - 'd8 cni-switch prepare'  - STEP 1. Prepares the cluster for CNI migration.
+  - 'd8 cni-switch switch'   - STEP 2. Performs the actual CNI switch.
+  - 'd8 cni-switch cleanup'  - (Optional) Cleans up resources if the switch is aborted.
+  - 'd8 cni-switch rollback' - (Optional) Rollback CNI if the switch is aborted.`)
 
 	cniPrepareExample = templates.Examples(`
 		# Prepare to switch to Cilium CNI
