@@ -67,6 +67,7 @@ func NewModulesService(client pkg.RegistryClient, logger *log.Logger) *ModulesSe
 		client: client,
 
 		BasicService: NewBasicService(modulesServiceName, client, logger),
+		services:     make(map[string]*ModuleService),
 
 		logger: logger,
 	}

@@ -39,17 +39,14 @@ import (
 )
 
 type Service struct {
-	// deckhouseService handles Deckhouse security registry operations
-	deckhouseService *registryservice.DeckhouseService
+	// securityService handles Deckhouse security registry operations
+	securityService *registryservice.SecurityServices
 	// layout manages the OCI image layouts for security components
 	layout *ImageLayouts
 	// downloadList manages the list of images to be downloaded
 	downloadList *ImageDownloadList
 	// pullerService handles the pulling of images
 	pullerService *puller.PullerService
-
-	// rootURL is the base registry URL for security images
-	rootURL string
 
 	// logger is for internal debug logging
 	logger *dkplog.Logger
@@ -58,7 +55,7 @@ type Service struct {
 }
 
 func NewService(
-	deckhouseService *registryservice.DeckhouseService,
+	registryService *registryservice.Service,
 	workingDir string,
 	logger *dkplog.Logger,
 	userLogger *log.SLogger,
@@ -73,16 +70,13 @@ func NewService(
 		userLogger.Warnf("Create OCI Image Layouts: %v", err)
 	}
 
-	rootURL := deckhouseService.GetRoot()
-
 	return &Service{
-		deckhouseService: deckhouseService,
-		layout:           layout,
-		downloadList:     NewImageDownloadList(rootURL),
-		pullerService:    puller.NewPullerService(logger, userLogger),
-		rootURL:          rootURL,
-		logger:           logger,
-		userLogger:       userLogger,
+		securityService: registryService.Security(),
+		layout:          layout,
+		downloadList:    NewImageDownloadList(registryService.GetRoot()),
+		pullerService:   puller.NewPullerService(logger, userLogger),
+		logger:          logger,
+		userLogger:      userLogger,
 	}
 }
 
@@ -112,7 +106,7 @@ func (svc *Service) validateSecurityAccess(ctx context.Context) error {
 	defer cancel()
 
 	// For specific tags, check if the tag exists
-	err := svc.deckhouseService.Security(internal.SecurityTrivyDBSegment).CheckImageExists(ctx, "2")
+	err := svc.securityService.Security(internal.SecurityTrivyDBSegment).CheckImageExists(ctx, "2")
 	if errors.Is(err, client.ErrImageNotFound) {
 		svc.userLogger.Warnf("Skipping pull of security databases: %v", err)
 
@@ -139,7 +133,7 @@ func (svc *Service) pullSecurityDatabases(ctx context.Context) error {
 				ImageSet:         imageSet,
 				Layout:           svc.layout.Security[securityName],
 				AllowMissingTags: true, // Allow missing security database images
-				GetterService:    svc.deckhouseService.Security(securityName),
+				GetterService:    svc.securityService.Security(securityName),
 			}
 
 			err := svc.pullerService.PullImages(ctx, config)

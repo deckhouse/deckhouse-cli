@@ -69,7 +69,7 @@ type Service struct {
 }
 
 func NewService(
-	deckhouseService *registryservice.DeckhouseService,
+	registryService *registryservice.Service,
 	sinceVersion *semver.Version,
 	workingDir string,
 	targetTag string,
@@ -86,10 +86,12 @@ func NewService(
 		userLogger.Warnf("Create OCI Image Layouts: %v", err)
 	}
 
+	rootURL := registryService.GetRoot()
+
 	return &Service{
-		deckhouseService: deckhouseService,
+		deckhouseService: registryService.DeckhouseService(),
 		layout:           layout,
-		downloadList:     NewImageDownloadList(deckhouseService.GetRoot()),
+		downloadList:     NewImageDownloadList(rootURL),
 		pullerService:    puller.NewPullerService(logger, userLogger),
 		sinceVersion:     sinceVersion,
 		targetTag:        targetTag,

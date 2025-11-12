@@ -38,8 +38,8 @@ import (
 )
 
 type Service struct {
-	// deckhouseService handles Deckhouse platform registry operations
-	deckhouseService *registryservice.DeckhouseService
+	// modulesService handles Deckhouse platform registry operations
+	modulesService *registryservice.ModulesService
 	// layout manages the OCI image layouts for different components
 	layout *ImageLayouts
 	// downloadList manages the list of images to be downloaded
@@ -57,7 +57,7 @@ type Service struct {
 }
 
 func NewService(
-	deckhouseService *registryservice.DeckhouseService,
+	registryService *registryservice.Service,
 	workingDir string,
 	logger *dkplog.Logger,
 	userLogger *log.SLogger,
@@ -72,16 +72,16 @@ func NewService(
 		userLogger.Warnf("Create OCI Image Layouts: %v", err)
 	}
 
-	rootURL := deckhouseService.GetRoot()
+	rootURL := registryService.GetRoot()
 
 	return &Service{
-		deckhouseService: deckhouseService,
-		layout:           layout,
-		downloadList:     NewImageDownloadList(rootURL),
-		pullerService:    puller.NewPullerService(logger, userLogger),
-		rootURL:          rootURL,
-		logger:           logger,
-		userLogger:       userLogger,
+		modulesService: registryService.ModuleService(),
+		layout:         layout,
+		downloadList:   NewImageDownloadList(rootURL),
+		pullerService:  puller.NewPullerService(logger, userLogger),
+		rootURL:        rootURL,
+		logger:         logger,
+		userLogger:     userLogger,
 	}
 }
 
@@ -110,7 +110,7 @@ func (svc *Service) validateModulesAccess(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	modulesRepo := filepath.Join(svc.deckhouseService.GetRoot(), internal.ModulesSegment)
+	modulesRepo := filepath.Join(svc.rootURL, internal.ModulesSegment)
 	validator := validation.NewRemoteRegistryAccessValidator()
 	err := validator.ValidateListAccessForRepo(ctx, modulesRepo, []validation.Option{}...) // TODO: add options
 	if err != nil {
@@ -133,7 +133,7 @@ func (svc *Service) pullModules(ctx context.Context, modules []string) error {
 			ImageSet:         svc.downloadList.Modules,
 			Layout:           svc.layout.Modules,
 			AllowMissingTags: true, // Allow missing module images
-			GetterService:    svc.deckhouseService,
+			GetterService:    svc.modulesService,
 		}
 
 		return svc.pullerService.PullImages(ctx, config)
@@ -149,7 +149,7 @@ func (svc *Service) pullModules(ctx context.Context, modules []string) error {
 			ImageSet:         svc.downloadList.ModulesReleaseChannels,
 			Layout:           svc.layout.ModulesReleaseChannels,
 			AllowMissingTags: true,
-			GetterService:    svc.deckhouseService,
+			GetterService:    svc.modulesService,
 		}
 
 		return svc.pullerService.PullImages(ctx, config)
