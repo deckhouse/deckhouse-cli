@@ -22,13 +22,16 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	helm_v3 "github.com/werf/3p-helm/cmd/helm"
+	"github.com/werf/common-go/pkg/graceful"
 	"github.com/werf/logboek"
-	"github.com/werf/nelm/pkg/resrcchangcalc"
-	werfcommon "github.com/werf/werf/v2/cmd/werf/common"
+	"github.com/werf/nelm/pkg/action"
+	"github.com/werf/werf/v2/cmd/werf/common"
 	"github.com/werf/werf/v2/pkg/process_exterminator"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
@@ -37,6 +40,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/cmd/commands"
 	"github.com/deckhouse/deckhouse-cli/cmd/plugins"
+	"github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
 	data "github.com/deckhouse/deckhouse-cli/internal/data/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
@@ -77,6 +81,11 @@ func NewRootCommand() *RootCommand {
 		},
 	}
 
+	envCliPath := os.Getenv("DECKHOUSE_CLI_PATH")
+	if envCliPath != "" {
+		flags.DeckhousePluginsDir = envCliPath
+	}
+
 	rootCmd.registerCommands()
 	rootCmd.cmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 
@@ -101,41 +110,85 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(commands.NewHelpJSONCommand(r.cmd))
 
 	r.cmd.AddCommand(plugins.NewPluginsCommand(r.logger.Named("plugins-command")))
+
+	err := os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
+	if err != nil {
+		r.logger.Debug("Failed to create plugins directory", slog.String("error", err.Error()))
+	}
+
+	path, err := os.ReadDir(flags.DeckhousePluginsDir + "/plugins")
+	if err != nil {
+		r.logger.Debug("Failed to read plugins directory", slog.String("error", err.Error()))
+	}
+
+	for _, plugin := range path {
+		r.cmd.AddCommand(r.addCustomCommands(plugin.Name()))
+	}
 }
 
-func (r *RootCommand) Execute() error { //nolint:unparam
+func (r *RootCommand) addCustomCommands(pluginName string) *cobra.Command {
+	pluginPath := path.Join(flags.DeckhousePluginsDir, "plugins", pluginName)
+	pluginBinaryPath := path.Join(pluginPath, "current")
+	cmd := &cobra.Command{
+		Use:                pluginName,
+		Short:              pluginName,
+		DisableFlagParsing: true,
+		Run: func(cmd *cobra.Command, args []string) {
+			command := exec.CommandContext(cmd.Context(), pluginBinaryPath, args...)
+			command.Stdout = os.Stdout
+			command.Stderr = os.Stderr
+
+			err := command.Run()
+			if err != nil {
+				r.logger.Warn("Failed to run plugin", slog.String("error", err.Error()))
+			}
+		},
+	}
+	return cmd
+}
+
+func (r *RootCommand) Execute() error {
 	ctx := r.cmd.Context()
 
-	if shouldTerminate, err := werfcommon.ContainerBackendProcessStartupHook(); err != nil {
-		werfcommon.TerminateWithError(err.Error(), 1)
+	if shouldTerminate, err := common.ContainerBackendProcessStartupHook(); err != nil {
+		graceful.Terminate(ctx, err, 1)
+		return err
 	} else if shouldTerminate {
 		return nil
 	}
 
-	werfcommon.EnableTerminationSignalsTrap()
 	log.SetOutput(logboek.OutStream())
 	logrus.StandardLogger().SetOutput(logboek.OutStream())
 
 	if err := process_exterminator.Init(); err != nil {
-		werfcommon.TerminateWithError(fmt.Sprintf("process exterminator initialization failed: %s", err), 1)
+		graceful.Terminate(ctx, fmt.Errorf("process exterminator initialization failed: %w", err), 1)
+		return err
+	}
+
+	// Do early exit if termination is started
+	if graceful.IsTerminating(ctx) {
+		return nil
 	}
 
 	if err := r.cmd.Execute(); err != nil {
 		switch {
 		case helm_v3.IsPluginError(err):
-			werfcommon.ShutdownTelemetry(ctx, helm_v3.PluginErrorCode(err))
-			werfcommon.TerminateWithError(err.Error(), helm_v3.PluginErrorCode(err))
-		case errors.Is(err, resrcchangcalc.ErrChangesPlanned):
-			werfcommon.ShutdownTelemetry(ctx, 2)
+			common.ShutdownTelemetry(ctx, helm_v3.PluginErrorCode(err))
+			graceful.Terminate(ctx, err, helm_v3.PluginErrorCode(err))
+			return err
+		case errors.Is(err, action.ErrChangesPlanned):
+			common.ShutdownTelemetry(ctx, 2)
 			logs.FlushLogs()
-			os.Exit(2)
-		default:
-			werfcommon.ShutdownTelemetry(ctx, 1)
-			werfcommon.TerminateWithError(err.Error(), 1)
+			graceful.Terminate(ctx, action.ErrChangesPlanned, 2)
+			return err
 		}
+
+		common.ShutdownTelemetry(ctx, 1)
+		graceful.Terminate(ctx, err, 1)
+		return err
 	}
 
-	werfcommon.ShutdownTelemetry(ctx, 0)
+	common.ShutdownTelemetry(ctx, 0)
 	logs.FlushLogs()
 	return nil
 }

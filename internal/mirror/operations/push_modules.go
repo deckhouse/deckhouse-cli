@@ -34,6 +34,8 @@ import (
 )
 
 func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader, client pkg.RegistryClient) error {
+	logger := pushParams.Logger
+
 	packageDir := filepath.Join(pushParams.WorkingDir, "modules", moduleName)
 	if err := os.MkdirAll(packageDir, 0755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
@@ -54,6 +56,24 @@ func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader,
 		"":        path.Join(pushParams.ModulesPathSuffix, moduleName),
 		"release": path.Join(pushParams.ModulesPathSuffix, moduleName, "release"),
 		"extra":   path.Join(pushParams.ModulesPathSuffix, moduleName, "extra"),
+	}
+
+	// automatically discover extra layouts in the extra/ directory
+	dirEntries, err := os.ReadDir(filepath.Join(packageDir, "extra"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			logger.Debugf("No extra dir for module %s", moduleName)
+		} else {
+			logger.Warnf("Error reading extra dir for module %s: %v", moduleName, err)
+		}
+	}
+
+	// add discovered extra layouts to the list of layouts to push
+	for _, de := range dirEntries {
+		logger.Debugf("Found extra layout %s for module %s", de.Name(), moduleName)
+		if de.IsDir() {
+			layoutsToPush[path.Join("extra", de.Name())] = path.Join(pushParams.ModulesPathSuffix, moduleName, "extra", de.Name())
+		}
 	}
 
 	for layoutPathSuffix, repo := range layoutsToPush {

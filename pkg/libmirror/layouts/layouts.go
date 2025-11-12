@@ -47,8 +47,10 @@ type ModuleImageLayout struct {
 	ReleasesLayout layout.Path
 	ReleaseImages  map[string]struct{}
 
-	ExtraLayout layout.Path
-	ExtraImages map[string]struct{}
+	ExtraLayout       layout.Path
+	ExtraNamedLayouts map[string]layout.Path
+
+	ExtraNamedImages map[string]map[string]struct{}
 }
 
 type ImageLayouts struct {
@@ -157,12 +159,13 @@ func CreateOCIImageLayoutsForDeckhouse(
 		}
 
 		layouts.Modules[module.Name] = ModuleImageLayout{
-			ModuleLayout:   moduleLayout,
-			ModuleImages:   map[string]struct{}{},
-			ReleasesLayout: moduleReleasesLayout,
-			ReleaseImages:  map[string]struct{}{},
-			ExtraLayout:    moduleExtraLayout,
-			ExtraImages:    map[string]struct{}{},
+			ModuleLayout:      moduleLayout,
+			ModuleImages:      map[string]struct{}{},
+			ReleasesLayout:    moduleReleasesLayout,
+			ReleaseImages:     map[string]struct{}{},
+			ExtraLayout:       moduleExtraLayout,
+			ExtraNamedLayouts: map[string]layout.Path{},
+			ExtraNamedImages:  map[string]map[string]struct{}{},
 		}
 	}
 
@@ -281,6 +284,8 @@ func FindDeckhouseModulesImages(
 ) error {
 	logger := params.Logger
 
+	tmpDir := filepath.Join(params.WorkingDir, "modules")
+
 	counter := 0
 	for _, module := range modulesData {
 		if !filter.Match(&module) {
@@ -360,6 +365,28 @@ func FindDeckhouseModulesImages(
 		}
 
 		for digest := range extraImages {
+			refWoTag, _ := splitImageRefByRepoAndTag(digest)
+
+			_, extraName := splitExtraName(refWoTag)
+
+			_, ok := layouts.Modules[module.Name].ExtraNamedLayouts[extraName]
+			if !ok {
+				extraLayout, err := CreateEmptyImageLayout(filepath.Join(tmpDir, module.Name, "extra", extraName))
+				if err != nil {
+					return fmt.Errorf("create OCI layout: %w", err)
+				}
+
+				layouts.Modules[module.Name].ExtraNamedLayouts[extraName] = extraLayout
+			}
+
+			_, ok = layouts.Modules[module.Name].ExtraNamedImages[extraName]
+			if !ok {
+				layouts.Modules[module.Name].ExtraNamedImages[extraName] = make(map[string]struct{}, 1)
+			}
+
+			images := layouts.Modules[module.Name].ExtraNamedImages[extraName]
+			images[digest] = struct{}{}
+
 			vexImageName, err := FindVexImage(
 				params,
 				module.RegistryPath,
@@ -376,10 +403,11 @@ func FindDeckhouseModulesImages(
 			if vexImageName != "" {
 				logger.Debugf("Vex image found %s", vexImageName)
 				extraImages[vexImageName] = struct{}{}
+				images[vexImageName] = struct{}{}
 			}
-		}
 
-		moduleImageLayouts.ExtraImages = extraImages
+			layouts.Modules[module.Name].ExtraNamedImages[extraName] = images
+		}
 
 		if len(moduleImageLayouts.ModuleImages) == 0 {
 			return fmt.Errorf("found no releases for %s", module.Name)
