@@ -33,15 +33,19 @@ vars:
       done
 
       echo "${ldflags[*]-}"
+  werfLDFlags:
+    sh: |
+      version="$(go list -m -f '{{"{{"}}.Version{{"}}"}}' github.com/werf/werf/v2)"
+      echo "-X 'github.com/werf/werf/v2/pkg/werf.Version=${version}'"
 
   cgoTags: "dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp osusergo exclude_graphdriver_devicemapper netgo no_devmapper static_build cni"
   goTags: "dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp"
 
-  cgoDevLDFlags: "-linkmode external -extldflags=-static -s -w -X 'github.com/deckhouse/deckhouse-cli/internal/version.Version=local-dev'"
-  goDevLDFlags: "-s -w -X 'github.com/deckhouse/deckhouse-cli/internal/version.Version=local-dev'"
+  cgoDevLDFlags: "-linkmode external -extldflags=-static -s -w -X 'github.com/deckhouse/deckhouse-cli/internal/version.Version=local-dev' {{ .werfLDFlags }}"
+  goDevLDFlags: "-s -w -X 'github.com/deckhouse/deckhouse-cli/internal/version.Version=local-dev' {{ .werfLDFlags }}"
 
-  cgoReleaseLDFlags: "-linkmode external -extldflags=-static -s -w -X 'github.com/deckhouse/deckhouse-cli/internal/version.Version={{ .version }}' -X github.com/werf/werf/pkg/werf.Version={{ .version }} {{ .kubectlLDFlags }}"
-  goReleaseLDFlags: "-s -w -X 'github.com/deckhouse/deckhouse-cli/internal/version.Version={{ .version }}' -X github.com/werf/werf/pkg/werf.Version={{ .version }} {{ .kubectlLDFlags }}"
+  cgoReleaseLDFlags: "-linkmode external -extldflags=-static -s -w -X 'github.com/deckhouse/deckhouse-cli/internal/version.Version={{ .version }}' {{ .werfLDFlags }} {{ .kubectlLDFlags }}"
+  goReleaseLDFlags: "-s -w -X 'github.com/deckhouse/deckhouse-cli/internal/version.Version={{ .version }}' {{ .werfLDFlags }} {{ .kubectlLDFlags }}"
 
 tasks:
   _build:cgo:dev:
