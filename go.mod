@@ -24,10 +24,10 @@ require (
 	github.com/spf13/pflag v1.0.7
 	github.com/stretchr/testify v1.10.0
 	github.com/vbauerster/mpb/v8 v8.7.5
-	github.com/werf/3p-helm v0.0.0-20250731134240-58a9eff8ec5b
-	github.com/werf/common-go v0.0.0-20251023101023-1aa12556cc61
+	github.com/werf/3p-helm v0.0.0-20251021224308-a90f195bd29a
+	github.com/werf/common-go v0.0.0-20251106163127-f918bc5950db
 	github.com/werf/logboek v0.6.1
-	github.com/werf/nelm v1.9.1-0.20250731134715-5824cfbe2c5e
+	github.com/werf/nelm v1.16.1-0.20251106103358-55c46afac355
 	github.com/werf/werf/v2 v2.45.1
 	gitlab.com/greyxor/slogor v1.2.11
 	go.cypherpunks.ru/gogost/v5 v5.13.0
@@ -169,6 +169,7 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/daviddengcn/go-colortext v1.0.0 // indirect
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
+	github.com/deckhouse/delivery-kit-sdk v1.0.1-0.20251022121655-0cbac8223333 // indirect
 	github.com/deckhouse/virtualization/api v1.0.0 // indirect
 	github.com/deislabs/oras v1.1.0 // indirect
 	github.com/denisenkom/go-mssqldb v0.12.2 // indirect
@@ -245,13 +246,13 @@ require (
 	github.com/gogo/googleapis v1.4.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
 	github.com/golang-sql/civil v0.0.0-20190719163853-cb61b32ac6fe // indirect
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/btree v1.1.3 // indirect
+	github.com/google/certificate-transparency-go v1.3.1 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/go-intervals v0.0.2 // indirect
@@ -369,7 +370,6 @@ require (
 	github.com/jefferai/isbadcipher v0.0.0-20190226160619-51d2077c035f // indirect
 	github.com/jefferai/jsonx v1.0.0 // indirect
 	github.com/jellydator/ttlcache/v3 v3.4.0 // indirect
-	github.com/jhump/protoreflect v1.16.0 // indirect
 	github.com/jinzhu/copier v0.4.0 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.1-0.20220621161143-b0104c826a24 // indirect
@@ -533,7 +533,7 @@ require (
 	github.com/walle/targz v0.0.0-20140417120357-57fe4206da5a // indirect
 	github.com/werf/3p-helm-for-werf-helm v0.0.0-20241217155820-089f92cd5c9d // indirect
 	github.com/werf/copy-recurse v0.2.7 // indirect
-	github.com/werf/kubedog v0.13.1-0.20250728071655-b80f0b64e912 // indirect
+	github.com/werf/kubedog v0.13.1-0.20251105104917-8615bb20d8c0 // indirect
 	github.com/werf/kubedog-for-werf-helm v0.0.0-20241217155728-9d45c48b82b6 // indirect
 	github.com/werf/lockgate v0.1.1 // indirect
 	github.com/werf/nelm-for-werf-helm v0.0.0-20241217155925-b0e6734d1dbf // indirect
@@ -635,6 +635,7 @@ replace (
 	github.com/hashicorp/vault/api => flant.internal/team/foxtrot/stronghold.git/images/stronghold/api v1.16.3
 	github.com/hashicorp/vault/sdk => flant.internal/team/foxtrot/stronghold.git/images/stronghold/sdk v1.16.3
 	github.com/jaguilar/vt100 => github.com/tonistiigi/vt100 v0.0.0-20190402012908-ad4c4a574305 // upstream not maintained
+	github.com/werf/werf/v2 => github.com/deckhouse/delivery-kit/v2 v2.51.2-dk.0.20251107144651-af3bcfb81e2c
 	go.cypherpunks.ru/gogost/v5 v5.13.0 => github.com/flant/gogost/v5 v5.13.0
 	k8s.io/kube-openapi => k8s.io/kube-openapi v0.0.0-20250318190949-c8a335a9a2ff
 )
