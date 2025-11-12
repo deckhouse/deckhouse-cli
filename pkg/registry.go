@@ -51,6 +51,7 @@ type ImageGetOption interface {
 
 type ImageGetOptions struct {
 	ProgressBar *progress.DownloadBar
+	Platform    *v1.Platform
 }
 
 // ImagePutOption is some configuration that modifies options for a put request.
