@@ -35,7 +35,7 @@ vars:
       echo "${ldflags[*]-}"
   werfLDFlags:
     sh: |
-      version="$(go list -m -f '{{"{{"}}.Version{{"}}"}}' github.com/werf/werf/v2)"
+      version="$(go list -m -f '{{"{{"}}.Replace.Version{{"}}"}}' github.com/werf/werf/v2)"
       echo "-X 'github.com/werf/werf/v2/pkg/werf.Version=${version}'"
 
   cgoTags: "dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp osusergo exclude_graphdriver_devicemapper netgo no_devmapper static_build cni"
