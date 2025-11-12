@@ -80,6 +80,11 @@ func NewRootCommand() *RootCommand {
 		},
 	}
 
+	envCliPath := os.Getenv("DECKHOUSE_CLI_PATH")
+	if envCliPath != "" {
+		flags.DeckhousePluginsDir = envCliPath
+	}
+
 	rootCmd.registerCommands()
 	rootCmd.cmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 
@@ -105,9 +110,14 @@ func (r *RootCommand) registerCommands() {
 
 	r.cmd.AddCommand(plugins.NewPluginsCommand(r.logger.Named("plugins-command")))
 
+	err := os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
+	if err != nil {
+		r.logger.Debug("Failed to create plugins directory", slog.String("error", err.Error()))
+	}
+
 	path, err := os.ReadDir(flags.DeckhousePluginsDir + "/plugins")
 	if err != nil {
-		r.logger.Warn("Failed to read plugins directory", slog.String("error", err.Error()))
+		r.logger.Debug("Failed to read plugins directory", slog.String("error", err.Error()))
 	}
 
 	for _, plugin := range path {
