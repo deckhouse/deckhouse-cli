@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/deckhouse/deckhouse-cli/internal/cni"
 	"github.com/spf13/cobra"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -35,9 +36,7 @@ import (
 )
 
 const (
-	cmNamespace = "d8-system"
-	cmName      = "debug-container"
-	cmImageKey  = "image"
+	cmImageKey = "debug-container-image"
 )
 
 var d8CommandRegex = regexp.MustCompile("([\"'`])d8 (\\w+)")
@@ -112,7 +111,7 @@ func getDebugImage(cmd *cobra.Command) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	configMap, err := kubeCl.CoreV1().ConfigMaps(cmNamespace).Get(ctx, cmName, v1.GetOptions{})
+	configMap, err := kubeCl.CoreV1().ConfigMaps(cni.CMDataNameSpace).Get(ctx, cni.CMDataName, v1.GetOptions{})
 	if err != nil {
 		return "", ErrGenericImageFetch
 	}
