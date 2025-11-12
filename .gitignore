@@ -20,7 +20,8 @@
 .project
 .settings
 .idea/
-.vscode
+.vscode/*
+!.vscode/launch.json
 venv/
 out/
 
