@@ -112,12 +112,12 @@ func (r *RootCommand) registerCommands() {
 
 	err := os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
 	if err != nil {
-		r.logger.Warn("Failed to create plugins directory", slog.String("error", err.Error()))
+		r.logger.Debug("Failed to create plugins directory", slog.String("error", err.Error()))
 	}
 
 	path, err := os.ReadDir(flags.DeckhousePluginsDir + "/plugins")
 	if err != nil {
-		r.logger.Warn("Failed to read plugins directory", slog.String("error", err.Error()))
+		r.logger.Debug("Failed to read plugins directory", slog.String("error", err.Error()))
 	}
 
 	for _, plugin := range path {
