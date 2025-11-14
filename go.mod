@@ -34,12 +34,12 @@ require (
 	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8
 	golang.org/x/term v0.34.0
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/api v0.32.10
-	k8s.io/apiextensions-apiserver v0.32.10
-	k8s.io/apimachinery v0.32.10
+	k8s.io/api v0.33.3
+	k8s.io/apiextensions-apiserver v0.33.3
+	k8s.io/apimachinery v0.33.3
 	k8s.io/cli-runtime v0.32.10
-	k8s.io/client-go v0.32.10
-	k8s.io/component-base v0.32.10
+	k8s.io/client-go v0.33.3
+	k8s.io/component-base v0.33.3
 	k8s.io/kubectl v0.32.10
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
 	sigs.k8s.io/controller-runtime v0.21.0
@@ -599,7 +599,7 @@ require (
 	gopkg.in/resty.v1 v1.12.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	k8s.io/apiserver v0.32.10 // indirect
+	k8s.io/apiserver v0.33.3 // indirect
 	k8s.io/component-helpers v0.32.10 // indirect
 	k8s.io/klog v1.0.0 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
