@@ -19,7 +19,7 @@
             "env": {},
             "buildFlags": "-tags='dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp'",
             "cwd": "${workspaceFolder}",
-            "console": "internalConsole", // OR integratedTerminal
+            "console": "integratedTerminal", // OR internalConsole
         }
     ],
     "inputs": [

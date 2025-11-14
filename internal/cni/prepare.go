@@ -59,7 +59,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("creating runtime client: %w", err)
 	}
-	fmt.Printf("✅ Kubernetes client created. (elapsed: %s)\n", time.Since(startTime).Round(time.Millisecond))
+	fmt.Printf("✅ Kubernetes client created (total elapsed: %s)\n", time.Since(startTime).Round(time.Millisecond))
 
 	// 2. Find an existing migration or create a new one
 	activeMigration, err := getOrCreateMigrationForPrepare(ctx, rtClient, targetCNI)
@@ -67,7 +67,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 		return err
 	}
 	fmt.Printf(
-		"ℹ️ Working with migration: %s (elapsed: %s)\n",
+		"Working with migration: '%s' (total elapsed: %s)\n",
 		activeMigration.Name,
 		time.Since(startTime).Round(time.Millisecond),
 	)
@@ -77,28 +77,28 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	err = rtClient.Create(ctx, ds)
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
-			fmt.Printf("ℹ️ DaemonSet '%s' already exists.\n", ds.Name)
+			fmt.Printf("DaemonSet '%s' already exists\n", ds.Name)
 		} else {
 			return fmt.Errorf("creating helper daemonset: %w", err)
 		}
 	} else {
 		fmt.Printf(
-			"✅ Successfully created DaemonSet '%s'. (elapsed: %s)\n",
+			"✅ Successfully created DaemonSet '%s' (total elapsed: %s)\n",
 			ds.Name,
 			time.Since(startTime).Round(time.Millisecond),
 		)
 	}
 
-	fmt.Println("⏳ Waiting for cni-switch-helper DaemonSet to become ready...")
+	fmt.Println("Waiting for 'cni-switch-helper' DaemonSet to become ready...")
 	err = waitForDaemonSetReady(ctx, rtClient, ds)
 	if err != nil {
 		return fmt.Errorf("waiting for daemonset ready: %w", err)
 	}
-	fmt.Printf("✅ DaemonSet is ready. (elapsed: %s)\n", time.Since(startTime).Round(time.Millisecond))
+	fmt.Printf("✅ DaemonSet is ready (total elapsed: %s)\n", time.Since(startTime).Round(time.Millisecond))
 
 	// 4. Detect current CNI and update migration status
 	if activeMigration.Status.CurrentCNI == "" {
-		fmt.Println("ℹ️ Detecting current CNI...")
+		fmt.Println("Detecting current CNI...")
 		var currentCNI string
 		currentCNI, err = detectCurrentCNI(rtClient)
 		if err != nil {
@@ -112,7 +112,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 			return fmt.Errorf("updating migration status with current CNI: %w", err)
 		}
 		fmt.Printf(
-			"✅ Successfully updated migration status. (elapsed: %s)\n",
+			"✅ Successfully updated migration status (total elapsed: %s)\n",
 			time.Since(startTime).Round(time.Millisecond),
 		)
 	}
@@ -122,25 +122,25 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	err = rtClient.Create(ctx, webhook)
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
-			fmt.Printf("ℹ️ MutatingWebhookConfiguration '%s' already exists.\n", webhook.Name)
+			fmt.Printf("MutatingWebhookConfiguration '%s' already exists\n", webhook.Name)
 		} else {
 			return fmt.Errorf("creating mutating webhook configuration: %w", err)
 		}
 	} else {
 		fmt.Printf(
-			"✅ Successfully created MutatingWebhookConfiguration '%s'. (elapsed: %s)\n",
+			"✅ Successfully created MutatingWebhookConfiguration '%s' (total elapsed: %s)\n",
 			webhook.Name,
 			time.Since(startTime).Round(time.Millisecond),
 		)
 	}
 
 	// 6. Wait for all nodes to be prepared
-	fmt.Println("⏳ Waiting for all nodes to complete the preparation step...")
+	fmt.Println("Waiting for all nodes to complete the preparation step...")
 	err = waitForNodesPrepared(ctx, rtClient)
 	if err != nil {
 		return fmt.Errorf("waiting for nodes to be prepared: %w", err)
 	}
-	fmt.Printf("✅ All nodes are prepared. (elapsed: %s)\n", time.Since(startTime).Round(time.Millisecond))
+	fmt.Printf("✅ All nodes are prepared (total elapsed: %s)\n", time.Since(startTime).Round(time.Millisecond))
 
 	// 7. Update overall status
 	activeMigration.Status.Conditions = append(activeMigration.Status.Conditions, metav1.Condition{
@@ -157,10 +157,10 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 
 	fmt.Println("\n--------------------------------------------------")
 	fmt.Printf(
-		"✅ Cluster successfully prepared for CNI switch. (total time: %s)\n",
+		"✅ Cluster successfully prepared for CNI switch (total time: %s)\n",
 		time.Since(startTime).Round(time.Second),
 	)
-	fmt.Println("You can now run 'd8 cni-switch switch' to proceed.")
+	fmt.Println("You can now run 'd8 cni-switch switch' to proceed")
 
 	return nil
 }
@@ -177,7 +177,7 @@ func getOrCreateMigrationForPrepare(
 
 	if activeMigration != nil {
 		fmt.Printf(
-			"ℹ️ Found active migration '%s' (Phase: %s).\n",
+			"Found active migration '%s' (Phase: %s)\n",
 			activeMigration.Name,
 			activeMigration.Status.ObservedPhase,
 		)
@@ -186,7 +186,7 @@ func getOrCreateMigrationForPrepare(
 	}
 
 	migrationName := fmt.Sprintf("cni-migration-to-%s-%s", targetCNI, time.Now().Format("20060102"))
-	fmt.Printf("ℹ️ No active migration found. Creating a new one: %s\n", migrationName)
+	fmt.Printf("No active migration found. Creating a new one: %s\n", migrationName)
 
 	newMigration := &v1alpha1.CNIMigration{
 		ObjectMeta: metav1.ObjectMeta{
@@ -204,7 +204,7 @@ func getOrCreateMigrationForPrepare(
 	err = rtClient.Create(ctx, newMigration)
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
-			fmt.Println("ℹ️ Migration object was created by another process. Getting it.")
+			fmt.Println("Migration object was created by another process. Getting it.")
 			err = rtClient.Get(ctx, client.ObjectKey{Name: migrationName}, newMigration)
 			if err != nil {
 				return nil, fmt.Errorf("getting existing CNIMigration object: %w", err)
@@ -239,7 +239,7 @@ func waitForDaemonSetReady(ctx context.Context, rtClient client.Client, ds *apps
 			}
 
 			fmt.Printf(
-				"\r⏳ Waiting for DaemonSet... %d/%d pods ready.",
+				"\rWaiting for DaemonSet... %d/%d pods ready",
 				ds.Status.NumberReady,
 				ds.Status.DesiredNumberScheduled,
 			)
@@ -279,7 +279,7 @@ func waitForNodesPrepared(ctx context.Context, rtClient client.Client) error {
 				}
 			}
 
-			fmt.Printf("\r⏳ Progress: %d/%d nodes prepared...", readyNodes, totalNodes)
+			fmt.Printf("\rProgress: %d/%d nodes prepared...", readyNodes, totalNodes)
 
 			if readyNodes >= totalNodes && totalNodes > 0 {
 				fmt.Println() // Newline after progress bar

@@ -51,8 +51,9 @@ func getSwitchHelperDaemonSet() *appsv1.DaemonSet {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:  "helper",
-							Image: "alpine:latest", // FIXME: Placeholder image
+							Name:    "helper",
+							Image:   "alpine:latest", // FIXME: Placeholder image
+							Command: []string{"sleep", "infinity"},
 						},
 					},
 					// The helper needs to run on all nodes, including control-plane nodes
