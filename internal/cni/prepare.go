@@ -47,7 +47,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	fmt.Printf("🚀 Starting CNI switch preparation for target '%s' (timeout: %s)\n", targetCNI, timeout)
+	fmt.Printf("🚀 Starting CNI switch preparation for target '%s' (global timeout: %s)\n", targetCNI, timeout)
 
 	// 1. Create a Kubernetes client
 	safeClient, err := saferequest.NewSafeClient()

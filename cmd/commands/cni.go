@@ -58,6 +58,7 @@ This process is divided into several steps:
 )
 
 func NewCniSwitchCommand() *cobra.Command {
+	log.SetFlags(0)
 	cmd := &cobra.Command{
 		Use:   "cni-switch",
 		Short: "A group of commands to switch CNI in the cluster",
