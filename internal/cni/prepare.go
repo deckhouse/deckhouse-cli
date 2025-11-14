@@ -91,7 +91,8 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	// 4. Detect current CNI and update migration status
 	if activeMigration.Status.CurrentCNI == "" {
 		fmt.Println("ℹ️ Detecting current CNI...")
-		currentCNI, err := detectCurrentCNI(rtClient)
+		var currentCNI string
+		currentCNI, err = detectCurrentCNI(rtClient)
 		if err != nil {
 			return fmt.Errorf("detecting current CNI: %w", err)
 		}
