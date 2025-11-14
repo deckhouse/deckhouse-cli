@@ -34,20 +34,20 @@ import (
 )
 
 var (
-	cniModuleConfigs = []string{"cni-cilium", "cni-flannel", "cni-simple-bridge"}
-	moduleConfigGVK  = schema.GroupVersionKind{
+	moduleConfigGVK = schema.GroupVersionKind{
 		Group:   "deckhouse.io",
 		Version: "v1alpha1",
 		Kind:    "ModuleConfig",
 	}
 )
 
-const prepareTimeout = 30 * time.Minute
-
 // RunPrepare executes the logic for the 'cni-switch prepare' command.
-func RunPrepare(targetCNI string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), prepareTimeout)
+func RunPrepare(targetCNI string, timeout time.Duration) error {
+	startTime := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+
+	fmt.Printf("🚀 Starting CNI switch preparation for target '%s' (timeout: %s)\n", targetCNI, timeout)
 
 	// 1. Create a Kubernetes client
 	safeClient, err := saferequest.NewSafeClient()
@@ -59,13 +59,14 @@ func RunPrepare(targetCNI string) error {
 	if err != nil {
 		return fmt.Errorf("creating runtime client: %w", err)
 	}
+	fmt.Printf("✅ Kubernetes client created. (elapsed: %s)\n", time.Since(startTime).Round(time.Millisecond))
 
 	// 2. Find an existing migration or create a new one
 	activeMigration, err := getOrCreateMigrationForPrepare(ctx, rtClient, targetCNI)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Working with migration: %s\n", activeMigration.Name)
+	fmt.Printf("ℹ️ Working with migration: %s (elapsed: %s)\n", activeMigration.Name, time.Since(startTime).Round(time.Millisecond))
 
 	// 3. Create the cni-switch-helper daemonset and wait for it to be ready
 	ds := getSwitchHelperDaemonSet()
@@ -77,7 +78,7 @@ func RunPrepare(targetCNI string) error {
 			return fmt.Errorf("creating helper daemonset: %w", err)
 		}
 	} else {
-		fmt.Printf("✅ Successfully created DaemonSet '%s'.\n", ds.Name)
+		fmt.Printf("✅ Successfully created DaemonSet '%s'. (elapsed: %s)\n", ds.Name, time.Since(startTime).Round(time.Millisecond))
 	}
 
 	fmt.Println("⏳ Waiting for cni-switch-helper DaemonSet to become ready...")
@@ -85,13 +86,12 @@ func RunPrepare(targetCNI string) error {
 	if err != nil {
 		return fmt.Errorf("waiting for daemonset ready: %w", err)
 	}
-	fmt.Println("✅ DaemonSet is ready.")
+	fmt.Printf("✅ DaemonSet is ready. (elapsed: %s)\n", time.Since(startTime).Round(time.Millisecond))
 
 	// 4. Detect current CNI and update migration status
 	if activeMigration.Status.CurrentCNI == "" {
 		fmt.Println("ℹ️ Detecting current CNI...")
-		var currentCNI string
-		currentCNI, err = detectCurrentCNI(rtClient)
+		currentCNI, err := detectCurrentCNI(rtClient)
 		if err != nil {
 			return fmt.Errorf("detecting current CNI: %w", err)
 		}
@@ -102,7 +102,7 @@ func RunPrepare(targetCNI string) error {
 		if err != nil {
 			return fmt.Errorf("updating migration status with current CNI: %w", err)
 		}
-		fmt.Println("✅ Successfully updated migration status.")
+		fmt.Printf("✅ Successfully updated migration status. (elapsed: %s)\n", time.Since(startTime).Round(time.Millisecond))
 	}
 
 	// 5. Create the mutating webhook configuration
@@ -115,7 +115,7 @@ func RunPrepare(targetCNI string) error {
 			return fmt.Errorf("creating mutating webhook configuration: %w", err)
 		}
 	} else {
-		fmt.Printf("✅ Successfully created MutatingWebhookConfiguration '%s'.\n", webhook.Name)
+		fmt.Printf("✅ Successfully created MutatingWebhookConfiguration '%s'. (elapsed: %s)\n", webhook.Name, time.Since(startTime).Round(time.Millisecond))
 	}
 
 	// 6. Wait for all nodes to be prepared
@@ -124,6 +124,7 @@ func RunPrepare(targetCNI string) error {
 	if err != nil {
 		return fmt.Errorf("waiting for nodes to be prepared: %w", err)
 	}
+	fmt.Printf("✅ All nodes are prepared. (elapsed: %s)\n", time.Since(startTime).Round(time.Millisecond))
 
 	// 7. Update overall status
 	activeMigration.Status.Conditions = append(activeMigration.Status.Conditions, metav1.Condition{
@@ -138,8 +139,7 @@ func RunPrepare(targetCNI string) error {
 		return fmt.Errorf("updating CNIMigration status to prepared: %w", err)
 	}
 
-	fmt.Println("\n--------------------------------------------------")
-	fmt.Println("✅ Cluster successfully prepared for CNI switch.")
+	fmt.Printf("\n✅ Cluster successfully prepared for CNI switch. (total time: %s)\n", time.Since(startTime).Round(time.Second))
 	fmt.Println("You can now run 'd8 cni-switch switch' to proceed.")
 
 	return nil

@@ -16,10 +16,13 @@ limitations under the License.
 
 package cni
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // RunRollback executes the logic for the 'cni-switch rollback' command.
-func RunRollback() error {
+func RunRollback(timeout time.Duration) error {
 	fmt.Println("Logic for rollback is not implemented yet.")
 	return nil
 }

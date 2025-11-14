@@ -23,6 +23,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+var (
+	cniModuleConfigs = []string{"cni-cilium", "cni-flannel", "cni-simple-bridge"}
+)
+
 const (
 	SwitchHelperDaemonSetName        = "cni-switch-helper"
 	ControlPlaneNodeLabel            = "node-role.kubernetes.io/control-plane"
@@ -71,6 +75,12 @@ func getSwitchHelperDaemonSet() *appsv1.DaemonSet {
 
 func getMutatingWebhookConfiguration() *admissionregistrationv1.MutatingWebhookConfiguration {
 	path := "/mutate"
+	// Exclude system namespaces and all known CNI module namespaces.
+	excludedNamespaces := []string{}
+	for _, moduleName := range cniModuleConfigs {
+		excludedNamespaces = append(excludedNamespaces, "d8-"+moduleName)
+	}
+
 	return &admissionregistrationv1.MutatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: MutatingWebhookConfigurationName,
@@ -84,7 +94,7 @@ func getMutatingWebhookConfiguration() *admissionregistrationv1.MutatingWebhookC
 						Namespace: "kube-system",
 						Path:      &path,
 					},
-					CABundle: []byte{}, // This will be patched later
+					CABundle: []byte{},
 				},
 				Rules: []admissionregistrationv1.RuleWithOperations{
 					{
@@ -101,7 +111,7 @@ func getMutatingWebhookConfiguration() *admissionregistrationv1.MutatingWebhookC
 						{
 							Key:      "kubernetes.io/metadata.name",
 							Operator: metav1.LabelSelectorOpNotIn,
-							Values:   []string{"d8-cni", "kube-system", "kube-public"}, // TODO: refine this list
+							Values:   excludedNamespaces,
 						},
 					},
 				},

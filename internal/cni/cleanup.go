@@ -16,10 +16,13 @@ limitations under the License.
 
 package cni
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // RunCleanup executes the logic for the 'cni-switch cleanup' command.
-func RunCleanup() error {
+func RunCleanup(timeout time.Duration) error {
 	fmt.Println("Logic for cleanup is not implemented yet.")
 	return nil
 }

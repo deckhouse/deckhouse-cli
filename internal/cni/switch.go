@@ -26,11 +26,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const switchTimeout = 60 * time.Minute
-
 // RunSwitch executes the logic for the 'cni-switch switch' command.
-func RunSwitch() error {
-	ctx, cancel := context.WithTimeout(context.Background(), switchTimeout)
+func RunSwitch(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	// 1. Create a Kubernetes client
