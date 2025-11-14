@@ -63,7 +63,7 @@ func NewCniSwitchCommand() *cobra.Command {
 		Short: "A group of commands to switch CNI in the cluster",
 		Long:  cniSwitchLong,
 	}
-	cmd.PersistentFlags().Duration("timeout", 30*time.Minute, "The timeout for the entire operation (e.g., 30m, 1h, 90s)")
+	cmd.PersistentFlags().Duration("timeout", 30*time.Minute, "The timeout for the entire operation (e.g., 30m, 1h)")
 	cmd.AddCommand(NewCmdCniPrepare())
 	cmd.AddCommand(NewCmdCniSwitch())
 	cmd.AddCommand(NewCmdCniCleanup())

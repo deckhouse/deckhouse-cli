@@ -62,7 +62,8 @@ func RunSwitch(timeout time.Duration) error {
 	}
 
 	if !isPrepared {
-		return fmt.Errorf("cluster is not ready for switching. Please ensure the 'prepare' command completed successfully")
+		return fmt.Errorf("cluster is not ready for switching." +
+			"Please ensure the 'prepare' command completed successfully")
 	}
 
 	fmt.Printf("Found prepared migration '%s'. Starting the switch process...\n", activeMigration.Name)

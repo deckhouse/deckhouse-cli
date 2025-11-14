@@ -52,7 +52,7 @@ func getSwitchHelperDaemonSet() *appsv1.DaemonSet {
 					Containers: []corev1.Container{
 						{
 							Name:  "helper",
-							Image: "placeholder/cni-switch-helper:latest", // FIXME: Placeholder image
+							Image: "alpine:latest", // FIXME: Placeholder image
 						},
 					},
 					// The helper needs to run on all nodes, including control-plane nodes
@@ -115,9 +115,11 @@ func getMutatingWebhookConfiguration() *admissionregistrationv1.MutatingWebhookC
 						},
 					},
 				},
-				SideEffects:             &[]admissionregistrationv1.SideEffectClass{admissionregistrationv1.SideEffectClassNone}[0],
+				SideEffects: &[]admissionregistrationv1.
+					SideEffectClass{admissionregistrationv1.SideEffectClassNone}[0],
 				AdmissionReviewVersions: []string{"v1"},
-				FailurePolicy:           &[]admissionregistrationv1.FailurePolicyType{admissionregistrationv1.Fail}[0],
+				FailurePolicy: &[]admissionregistrationv1.
+					FailurePolicyType{admissionregistrationv1.Fail}[0],
 			},
 		},
 	}
