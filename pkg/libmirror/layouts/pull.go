@@ -91,6 +91,7 @@ func PullDeckhouseImages(pullParams *params.PullParams, layouts *ImageLayouts, c
 		layouts.DeckhouseImages,
 		client,
 		WithTagToDigestMapper(layouts.TagsResolver.GetTagDigest),
+		WithAttestationImages(true),
 	); err != nil {
 		return err
 	}
@@ -274,6 +275,20 @@ func PullImageSet(
 					return fmt.Errorf("write image to index: %w", err)
 				}
 
+				if pullOpts.pullVEXAttestations {
+					moduleImageDigest, err := img.Digest()
+					if err != nil {
+						return fmt.Errorf("get image digest: %w", err)
+					}
+					return pullAttestationImage(
+						targetLayout,
+						imageRepo,
+						moduleImageDigest,
+						nameOpts,
+						remoteOpts,
+					)
+				}
+
 				return nil
 			}))
 		if err != nil {
@@ -300,9 +315,57 @@ func splitExtraName(imageReferenceStringWOTag string) (string, string) {
 	return repo, extra
 }
 
+func pullAttestationImage(
+	targetLayout layout.Path,
+	imageRepo string,
+	moduleImageDigest v1.Hash,
+	nameOpts []name.Option,
+	remoteOpts []remote.Option,
+) error {
+	ref, err := name.ParseReference(
+		fmt.Sprintf(
+			"%s:%s-%s.att",
+			imageRepo,
+			moduleImageDigest.Algorithm,
+			moduleImageDigest.Hex,
+		),
+		nameOpts...,
+	)
+	if err != nil {
+		return fmt.Errorf("parse attestation image reference: %w", err)
+	}
+
+	img, err := remote.Image(ref, remoteOpts...)
+	if err != nil {
+		if errorutil.IsImageNotFoundError(err) {
+			return nil // Attestation image for module image might not exist, this is normal.
+		}
+		return fmt.Errorf("pull attestation image: %w", err)
+	}
+
+	err = targetLayout.AppendImage(
+		img,
+		layout.WithPlatform(v1.Platform{Architecture: "amd64", OS: "linux"}),
+		layout.WithAnnotations(map[string]string{
+			"org.opencontainers.image.ref.name": ref.String(),
+			"io.deckhouse.image.short_tag": fmt.Sprintf(
+				"%s-%s.att",
+				moduleImageDigest.Algorithm,
+				moduleImageDigest.Hex,
+			),
+		}),
+	)
+	if err != nil {
+		return fmt.Errorf("pull attestation image: %w", err)
+	}
+
+	return nil
+}
+
 type pullImageSetOptions struct {
-	tagToDigestMapper TagToDigestMappingFunc
-	allowMissingTags  bool
+	tagToDigestMapper   TagToDigestMappingFunc
+	allowMissingTags    bool
+	pullVEXAttestations bool
 }
 
 func WithAllowMissingTags(allow bool) func(opts *pullImageSetOptions) {
@@ -316,5 +379,11 @@ type TagToDigestMappingFunc func(imageRef string) *v1.Hash
 func WithTagToDigestMapper(fn TagToDigestMappingFunc) func(opts *pullImageSetOptions) {
 	return func(opts *pullImageSetOptions) {
 		opts.tagToDigestMapper = fn
+	}
+}
+
+func WithAttestationImages(pullAttestations bool) func(opts *pullImageSetOptions) {
+	return func(opts *pullImageSetOptions) {
+		opts.pullVEXAttestations = pullAttestations
 	}
 }
