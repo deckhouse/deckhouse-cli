@@ -28,25 +28,24 @@ var (
 )
 
 const (
-	SwitchHelperDaemonSetName        = "cni-switch-helper"
 	ControlPlaneNodeLabel            = "node-role.kubernetes.io/control-plane"
-	MutatingWebhookConfigurationName = "cni-switch-webhook"
-	WebhookServiceName               = "cni-switch-helper-webhook-service"
+	MutatingWebhookConfigurationName = "effective-cni-annotator"
+	WebhookServiceName               = "effective-cni-annotator-webhook-service"
 )
 
 func getSwitchHelperDaemonSet() *appsv1.DaemonSet {
 	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      SwitchHelperDaemonSetName,
+			Name:      "cni-switch-helper",
 			Namespace: "d8-system",
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{"app": SwitchHelperDaemonSetName},
+				MatchLabels: map[string]string{"app": "cni-switch-helper"},
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"app": SwitchHelperDaemonSetName},
+					Labels: map[string]string{"app": "cni-switch-helper"},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{

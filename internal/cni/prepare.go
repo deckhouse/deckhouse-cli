@@ -67,12 +67,36 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 		return err
 	}
 	fmt.Printf(
-		"Working with migration: '%s' (total elapsed: %s)\n",
+		"✅ Working with migration: '%s' (total elapsed: %s)\n",
 		activeMigration.Name,
 		time.Since(startTime).Round(time.Millisecond),
 	)
 
-	// 3. Create the cni-switch-helper daemonset and wait for it to be ready
+	// 3. Detect current CNI and update migration status
+	if activeMigration.Status.CurrentCNI == "" {
+		var currentCNI string
+		currentCNI, err = detectCurrentCNI(rtClient)
+		if err != nil {
+			return fmt.Errorf("detecting current CNI: %w", err)
+		}
+		fmt.Printf("Detected current CNI: %s (target CNI: %s)\n", currentCNI, targetCNI)
+
+		if currentCNI == targetCNI {
+			return fmt.Errorf("target CNI '%s' is the same as the current CNI. Nothing to do", targetCNI)
+		}
+
+		activeMigration.Status.CurrentCNI = currentCNI
+		err = rtClient.Status().Update(ctx, activeMigration)
+		if err != nil {
+			return fmt.Errorf("updating migration status with current CNI: %w", err)
+		}
+		fmt.Printf(
+			"✅ Added current CNI to migration status (total elapsed: %s)\n",
+			time.Since(startTime).Round(time.Millisecond),
+		)
+	}
+
+	// 4. Create the cni-switch-helper daemonset and wait for it to be ready
 	ds := getSwitchHelperDaemonSet()
 	err = rtClient.Create(ctx, ds)
 	if err != nil {
@@ -82,11 +106,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 			return fmt.Errorf("creating helper daemonset: %w", err)
 		}
 	} else {
-		fmt.Printf(
-			"✅ Successfully created DaemonSet '%s' (total elapsed: %s)\n",
-			ds.Name,
-			time.Since(startTime).Round(time.Millisecond),
-		)
+		fmt.Printf("Successfully created DaemonSet '%s'\n", ds.Name)
 	}
 
 	fmt.Println("Waiting for 'cni-switch-helper' DaemonSet to become ready...")
@@ -96,39 +116,18 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	}
 	fmt.Printf("✅ DaemonSet is ready (total elapsed: %s)\n", time.Since(startTime).Round(time.Millisecond))
 
-	// 4. Detect current CNI and update migration status
-	if activeMigration.Status.CurrentCNI == "" {
-		fmt.Println("Detecting current CNI...")
-		var currentCNI string
-		currentCNI, err = detectCurrentCNI(rtClient)
-		if err != nil {
-			return fmt.Errorf("detecting current CNI: %w", err)
-		}
-		fmt.Printf("✅ Detected current CNI: %s\n", currentCNI)
-
-		activeMigration.Status.CurrentCNI = currentCNI
-		err = rtClient.Status().Update(ctx, activeMigration)
-		if err != nil {
-			return fmt.Errorf("updating migration status with current CNI: %w", err)
-		}
-		fmt.Printf(
-			"✅ Successfully updated migration status (total elapsed: %s)\n",
-			time.Since(startTime).Round(time.Millisecond),
-		)
-	}
-
 	// 5. Create the mutating webhook configuration
 	webhook := getMutatingWebhookConfiguration()
 	err = rtClient.Create(ctx, webhook)
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
-			fmt.Printf("MutatingWebhookConfiguration '%s' already exists\n", webhook.Name)
+			fmt.Printf("✅ MutatingWebhookConfiguration '%s' already exists\n", webhook.Name)
 		} else {
 			return fmt.Errorf("creating mutating webhook configuration: %w", err)
 		}
 	} else {
 		fmt.Printf(
-			"✅ Successfully created MutatingWebhookConfiguration '%s' (total elapsed: %s)\n",
+			"✅ Successfully created MutatingWebhook '%s' (total elapsed: %s)\n",
 			webhook.Name,
 			time.Since(startTime).Round(time.Millisecond),
 		)
@@ -185,7 +184,7 @@ func getOrCreateMigrationForPrepare(
 		return activeMigration, nil
 	}
 
-	migrationName := fmt.Sprintf("cni-migration-to-%s-%s", targetCNI, time.Now().Format("20060102"))
+	migrationName := fmt.Sprintf("cni-migration-%s", time.Now().Format("20060102-150405"))
 	fmt.Printf("No active migration found. Creating a new one: %s\n", migrationName)
 
 	newMigration := &v1alpha1.CNIMigration{
@@ -213,7 +212,13 @@ func getOrCreateMigrationForPrepare(
 		}
 		return nil, fmt.Errorf("creating new CNIMigration object: %w", err)
 	}
-	fmt.Printf("✅ Successfully created CNIMigration object '%s'\n", newMigration.Name)
+
+	err = rtClient.Status().Update(ctx, newMigration)
+	if err != nil {
+		return nil, fmt.Errorf("updating status for new CNIMigration object: %w", err)
+	}
+
+	fmt.Printf("Successfully created CNIMigration object '%s'\n", newMigration.Name)
 	return newMigration, nil
 }
 
@@ -234,7 +239,6 @@ func waitForDaemonSetReady(ctx context.Context, rtClient client.Client, ds *apps
 			}
 
 			if ds.Status.DesiredNumberScheduled == ds.Status.NumberReady && ds.Status.NumberUnavailable == 0 {
-				fmt.Println() // Newline after progress bar
 				return nil
 			}
 
