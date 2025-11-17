@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-	http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,89 +16,42 @@ limitations under the License.
 package system
 
 import (
-	"fmt"
-	"log/slog"
-	"os"
-	"os/exec"
-	"path"
-
 	"github.com/spf13/cobra"
+	"k8s.io/kubectl/pkg/util/templates"
 
-	dkplog "github.com/deckhouse/deckhouse/pkg/log"
-
-	"github.com/deckhouse/deckhouse-cli/cmd/plugins"
-	"github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
+	collectdebuginfo "github.com/deckhouse/deckhouse-cli/internal/system/cmd/collect-debug-info"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/edit"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/logs"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module"
+	queue "github.com/deckhouse/deckhouse-cli/internal/system/cmd/queue"
+	"github.com/deckhouse/deckhouse-cli/internal/system/flags"
 )
 
-func NewCommand(logger *dkplog.Logger) *cobra.Command {
-	pc := &plugins.PluginsCommand{
-		Logger: logger,
-	}
+var systemLong = templates.LongDesc(`
+Operate system options in DKP.
 
-	description := "Operate system options in DKP"
+© Flant JSC 2025`)
 
-	pluginContractFilePath := path.Join(flags.DeckhousePluginsDir, "cache", "contracts", "system.json")
-	pluginContract, err := service.GetPluginContractFromFile(pluginContractFilePath)
-	if err != nil {
-		logger.Debug("failed to get plugin contract from cache", slog.String("error", err.Error()))
-	}
-
-	if pluginContract != nil {
-		description = pluginContract.Description
-	}
-
+func NewCommand() *cobra.Command {
 	systemCmd := &cobra.Command{
-		Use:     "system",
-		Short:   description,
+		Use:   "system",
+		Short: "Operate system options. Aliases: s, p, platform",
+		// TODO(mvasl) p and platform are old names of this commands and are left as aliases for backwards compatibility
+		//  with our docs until we update them to use s or system.
 		Aliases: []string{"s", "p", "platform"},
-		Long:    description,
-		PreRun: func(_ *cobra.Command, _ []string) {
-			// init plugin services for subcommands after flags are parsed
-			pc.InitPluginServices()
-		},
-		Run: func(cmd *cobra.Command, args []string) {
-			installed, err := checkInstalled()
-			if err != nil {
-				fmt.Println("Error checking installed:", err)
-				return
-			}
-			if !installed {
-				fmt.Println("Not installed, installing...")
-				err = pc.InstallPlugin(cmd.Context(), "system", "", -1)
-				if err != nil {
-					fmt.Println("Error installing:", err)
-					return
-				}
-				fmt.Println("Installed successfully")
-			}
-
-			pluginPath := path.Join(flags.DeckhousePluginsDir, "plugins", "system")
-			pluginBinaryPath := path.Join(pluginPath, "current")
-			command := exec.CommandContext(cmd.Context(), pluginBinaryPath, args...)
-			command.Stdout = os.Stdout
-			command.Stderr = os.Stderr
-
-			err = command.Run()
-			if err != nil {
-				logger.Warn("Failed to run plugin", slog.String("error", err.Error()))
-			}
-		},
+		Long:    systemLong,
+		PreRunE: flags.ValidateParameters,
 	}
+
+	systemCmd.AddCommand(
+		edit.NewCommand(),
+		module.NewCommand(),
+		collectdebuginfo.NewCommand(),
+		queue.NewCommand(),
+		logs.NewCommand(),
+	)
+
+	flags.AddPersistentFlags(systemCmd)
 
 	return systemCmd
-}
-
-func checkInstalled() (bool, error) {
-	installedFile := path.Join(flags.DeckhousePluginsDir, "plugins", "system", "current")
-	_, err := os.Stat(installedFile)
-	if err != nil && os.IsNotExist(err) {
-		return false, nil
-	}
-
-	if err != nil {
-		return false, err
-	}
-
-	return true, nil
 }
