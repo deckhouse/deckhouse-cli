@@ -41,7 +41,7 @@ func NewCommand(logger *dkplog.Logger) *cobra.Command {
 	pluginContractFilePath := path.Join(flags.DeckhousePluginsDir, "cache", "contracts", "system.json")
 	pluginContract, err := service.GetPluginContractFromFile(pluginContractFilePath)
 	if err != nil {
-		logger.Warn("failed to get plugin contract from cache", slog.String("error", err.Error()))
+		logger.Debug("failed to get plugin contract from cache", slog.String("error", err.Error()))
 	}
 
 	if pluginContract != nil {
