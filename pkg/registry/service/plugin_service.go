@@ -27,8 +27,9 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/deckhouse/deckhouse/pkg/log"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+
+	"github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg"
