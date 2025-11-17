@@ -59,7 +59,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("creating runtime client: %w", err)
 	}
-	fmt.Printf("✅ Kubernetes client created (total elapsed: %s)\n", time.Since(startTime).Round(time.Millisecond))
+	fmt.Printf("✅ Kubernetes client created (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
 
 	// 2. Find an existing migration or create a new one
 	activeMigration, err := getOrCreateMigrationForPrepare(ctx, rtClient, targetCNI)
@@ -67,7 +67,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 		return err
 	}
 	fmt.Printf(
-		"✅ Working with migration: '%s' (total elapsed: %s)\n",
+		"✅ Working with migration: '%s' (total elapsed: %s)\n\n",
 		activeMigration.Name,
 		time.Since(startTime).Round(time.Millisecond),
 	)
@@ -79,7 +79,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 		if err != nil {
 			return fmt.Errorf("detecting current CNI: %w", err)
 		}
-		fmt.Printf("Detected current CNI: %s (target CNI: %s)\n", currentCNI, targetCNI)
+		fmt.Printf("Detected current CNI: '%s'\n", currentCNI)
 
 		if currentCNI == targetCNI {
 			return fmt.Errorf("target CNI '%s' is the same as the current CNI. Nothing to do", targetCNI)
@@ -91,7 +91,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 			return fmt.Errorf("updating migration status with current CNI: %w", err)
 		}
 		fmt.Printf(
-			"✅ Added current CNI to migration status (total elapsed: %s)\n",
+			"✅ Added current CNI to migration status (total elapsed: %s)\n\n",
 			time.Since(startTime).Round(time.Millisecond),
 		)
 	}
@@ -109,25 +109,25 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 		fmt.Printf("Successfully created DaemonSet '%s'\n", ds.Name)
 	}
 
-	fmt.Println("Waiting for 'cni-switch-helper' DaemonSet to become ready...")
+	fmt.Println("Waiting for 'cni-switch-helper' DaemonSet to become ready")
 	err = waitForDaemonSetReady(ctx, rtClient, ds)
 	if err != nil {
 		return fmt.Errorf("waiting for daemonset ready: %w", err)
 	}
-	fmt.Printf("✅ DaemonSet is ready (total elapsed: %s)\n", time.Since(startTime).Round(time.Millisecond))
+	fmt.Printf("✅ DaemonSet is ready (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
 
 	// 5. Create the mutating webhook configuration
 	webhook := getMutatingWebhookConfiguration()
 	err = rtClient.Create(ctx, webhook)
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
-			fmt.Printf("✅ MutatingWebhookConfiguration '%s' already exists\n", webhook.Name)
+			fmt.Printf("✅ MutatingWebhookConfiguration '%s' already exists\n\n", webhook.Name)
 		} else {
 			return fmt.Errorf("creating mutating webhook configuration: %w", err)
 		}
 	} else {
 		fmt.Printf(
-			"✅ Successfully created MutatingWebhook '%s' (total elapsed: %s)\n",
+			"✅ Successfully created MutatingWebhook '%s' (total elapsed: %s)\n\n",
 			webhook.Name,
 			time.Since(startTime).Round(time.Millisecond),
 		)
@@ -139,7 +139,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("waiting for nodes to be prepared: %w", err)
 	}
-	fmt.Printf("✅ All nodes are prepared (total elapsed: %s)\n", time.Since(startTime).Round(time.Millisecond))
+	fmt.Printf("✅ All nodes are prepared (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
 
 	// 7. Update overall status
 	activeMigration.Status.Conditions = append(activeMigration.Status.Conditions, metav1.Condition{
@@ -180,12 +180,11 @@ func getOrCreateMigrationForPrepare(
 			activeMigration.Name,
 			activeMigration.Status.ObservedPhase,
 		)
-		fmt.Println("Resuming the process...")
 		return activeMigration, nil
 	}
 
 	migrationName := fmt.Sprintf("cni-migration-%s", time.Now().Format("20060102-150405"))
-	fmt.Printf("No active migration found. Creating a new one: %s\n", migrationName)
+	fmt.Printf("No active migration found. Creating a new one...\n")
 
 	newMigration := &v1alpha1.CNIMigration{
 		ObjectMeta: metav1.ObjectMeta{
@@ -194,9 +193,6 @@ func getOrCreateMigrationForPrepare(
 		Spec: v1alpha1.CNIMigrationSpec{
 			TargetCNI: targetCNI,
 			Phase:     "Prepare",
-		},
-		Status: v1alpha1.CNIMigrationStatus{
-			ObservedPhase: "Preparing",
 		},
 	}
 
@@ -213,6 +209,7 @@ func getOrCreateMigrationForPrepare(
 		return nil, fmt.Errorf("creating new CNIMigration object: %w", err)
 	}
 
+	newMigration.Status.ObservedPhase = "Preparing"
 	err = rtClient.Status().Update(ctx, newMigration)
 	if err != nil {
 		return nil, fmt.Errorf("updating status for new CNIMigration object: %w", err)
