@@ -45,6 +45,7 @@ import (
 	data "github.com/deckhouse/deckhouse-cli/internal/data/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
+	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 )
@@ -85,6 +86,11 @@ func NewRootCommand() *RootCommand {
 		flags.DeckhousePluginsDir = envCliPath
 	}
 
+	envRegistryRepo := os.Getenv("DECKHOUSE_REGISTRY_REPO")
+	if envRegistryRepo != "" {
+		flags.SourceRegistryRepo = envRegistryRepo
+	}
+
 	rootCmd.registerCommands()
 	rootCmd.cmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 
@@ -101,12 +107,13 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(mirror.NewCommand())
 	r.cmd.AddCommand(status.NewCommand())
 	r.cmd.AddCommand(tools.NewCommand())
-	// r.cmd.AddCommand(system.NewCommand())
 	r.cmd.AddCommand(commands.NewVirtualizationCommand())
 	r.cmd.AddCommand(commands.NewKubectlCommand())
 	r.cmd.AddCommand(commands.NewLoginCommand())
 	r.cmd.AddCommand(commands.NewStrongholdCommand())
 	r.cmd.AddCommand(commands.NewHelpJSONCommand(r.cmd))
+
+	r.cmd.AddCommand(system.NewCommand(r.logger.Named("system-command")))
 
 	r.cmd.AddCommand(plugins.NewPluginsCommand(r.logger.Named("plugins-command")))
 
@@ -115,14 +122,14 @@ func (r *RootCommand) registerCommands() {
 		r.logger.Debug("Failed to create plugins directory", slog.String("error", err.Error()))
 	}
 
-	path, err := os.ReadDir(flags.DeckhousePluginsDir + "/plugins")
-	if err != nil {
-		r.logger.Debug("Failed to read plugins directory", slog.String("error", err.Error()))
-	}
+	// path, err := os.ReadDir(flags.DeckhousePluginsDir + "/plugins")
+	// if err != nil {
+	// 	r.logger.Debug("Failed to read plugins directory", slog.String("error", err.Error()))
+	// }
 
-	for _, plugin := range path {
-		r.cmd.AddCommand(r.addCustomCommands(plugin.Name()))
-	}
+	// for _, plugin := range path {
+	// 	r.cmd.AddCommand(r.addCustomCommands(plugin.Name()))
+	// }
 }
 
 func (r *RootCommand) addCustomCommands(pluginName string) *cobra.Command {

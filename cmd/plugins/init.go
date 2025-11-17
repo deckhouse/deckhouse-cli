@@ -30,14 +30,14 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
-func (pc *PluginsCommand) initPluginServices() {
-	pc.logger.Debug("Initializing plugin services")
+func (pc *PluginsCommand) InitPluginServices() {
+	pc.Logger.Debug("Initializing plugin services")
 
 	// Extract registry host from the source registry repo
 	// SourceRegistryRepo can be:
 	// - Just hostname: "registry.deckhouse.io"
-	// - Full path: "registry.deckhouse.io/deckhouse/ee/plugins"
-	sourceRepo := d8flags.SourcePluginRegistryRepo
+	// - Full path: "registry.deckhouse.io/deckhouse/ee/"
+	sourceRepo := d8flags.SourceRegistryRepo
 	registryHost := sourceRepo
 
 	// If it's just a hostname (no slashes), use it directly
@@ -47,14 +47,14 @@ func (pc *PluginsCommand) initPluginServices() {
 		ref, err := name.ParseReference(registryHost)
 		if err == nil {
 			registryHost = ref.Context().RegistryStr()
-			pc.logger.Debug("Extracted registry from path",
+			pc.Logger.Debug("Extracted registry from path",
 				slog.String("extracted", registryHost))
 		}
 	}
 
-	auth := getPluginRegistryAuthProvider(registryHost, pc.logger)
+	auth := getPluginRegistryAuthProvider(registryHost, pc.Logger)
 
-	pc.logger.Debug("Creating plugin registry client",
+	pc.Logger.Debug("Creating plugin registry client",
 		slog.String("registry_host", registryHost),
 		slog.Bool("insecure", d8flags.Insecure),
 		slog.Bool("tls_skip_verify", d8flags.TLSSkipVerify))
@@ -64,20 +64,20 @@ func (pc *PluginsCommand) initPluginServices() {
 		Auth:          auth,
 		Insecure:      d8flags.Insecure,
 		TLSSkipVerify: d8flags.TLSSkipVerify,
-		Logger:        pc.logger.Named("registry-client"),
+		Logger:        pc.Logger.Named("registry-client"),
 	})
 
-	pc.logger.Debug("Creating plugin service with scoped client",
+	pc.Logger.Debug("Creating plugin service with scoped client",
 		slog.String("scope_path", strings.TrimPrefix(sourceRepo, sourceRepo)))
 
 	registryService := service.NewService(
 		pc.pluginRegistryClient,
-		pc.logger.Named("registry-service"),
+		pc.Logger.Named("registry-service"),
 	)
 
-	pc.service = registryService.PluginService()
+	pc.Service = registryService.PluginService()
 
-	pc.logger.Debug("Plugin services initialized successfully")
+	pc.Logger.Debug("Plugin services initialized successfully")
 }
 
 // containsSlash checks if a string contains a forward slash

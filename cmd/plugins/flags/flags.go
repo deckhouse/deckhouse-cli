@@ -18,7 +18,6 @@ package flags
 
 import (
 	"os"
-	"path"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/spf13/pflag"
@@ -54,10 +53,10 @@ var (
 	ModulesWhitelist  []string
 	ModulesBlacklist  []string
 
-	SourcePluginRegistryRepo = path.Join(EnterpriseEditionRepo, "plugins") // Fallback to EE if nothing was given as source.
-	SourceRegistryLogin      string
-	SourceRegistryPassword   string
-	DeckhouseLicenseToken    string
+	SourceRegistryRepo     = EnterpriseEditionRepo // Fallback to EE if nothing was given as source.
+	SourceRegistryLogin    string
+	SourceRegistryPassword string
+	DeckhouseLicenseToken  string
 
 	DoGOSTDigest bool
 	NoPullResume bool
@@ -70,9 +69,9 @@ var (
 
 func AddFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringVar(
-		&SourcePluginRegistryRepo,
+		&SourceRegistryRepo,
 		"source",
-		SourcePluginRegistryRepo,
+		SourceRegistryRepo,
 		"Source registry to pull Deckhouse images from.",
 	)
 	flagSet.StringVar(
