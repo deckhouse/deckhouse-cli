@@ -22,8 +22,6 @@ import (
 	"log"
 	"log/slog"
 	"os"
-	"os/exec"
-	"path"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -132,26 +130,26 @@ func (r *RootCommand) registerCommands() {
 	// }
 }
 
-func (r *RootCommand) addCustomCommands(pluginName string) *cobra.Command {
-	pluginPath := path.Join(flags.DeckhousePluginsDir, "plugins", pluginName)
-	pluginBinaryPath := path.Join(pluginPath, "current")
-	cmd := &cobra.Command{
-		Use:                pluginName,
-		Short:              pluginName,
-		DisableFlagParsing: true,
-		Run: func(cmd *cobra.Command, args []string) {
-			command := exec.CommandContext(cmd.Context(), pluginBinaryPath, args...)
-			command.Stdout = os.Stdout
-			command.Stderr = os.Stderr
+// func (r *RootCommand) addCustomCommands(pluginName string) *cobra.Command {
+// 	pluginPath := path.Join(flags.DeckhousePluginsDir, "plugins", pluginName)
+// 	pluginBinaryPath := path.Join(pluginPath, "current")
+// 	cmd := &cobra.Command{
+// 		Use:                pluginName,
+// 		Short:              pluginName,
+// 		DisableFlagParsing: true,
+// 		Run: func(cmd *cobra.Command, args []string) {
+// 			command := exec.CommandContext(cmd.Context(), pluginBinaryPath, args...)
+// 			command.Stdout = os.Stdout
+// 			command.Stderr = os.Stderr
 
-			err := command.Run()
-			if err != nil {
-				r.logger.Warn("Failed to run plugin", slog.String("error", err.Error()))
-			}
-		},
-	}
-	return cmd
-}
+// 			err := command.Run()
+// 			if err != nil {
+// 				r.logger.Warn("Failed to run plugin", slog.String("error", err.Error()))
+// 			}
+// 		},
+// 	}
+// 	return cmd
+// }
 
 func (r *RootCommand) Execute() error {
 	ctx := r.cmd.Context()

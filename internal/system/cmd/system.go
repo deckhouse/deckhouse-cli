@@ -7,11 +7,13 @@ import (
 	"os/exec"
 	"path"
 
-	"github.com/deckhouse/deckhouse-cli/cmd/plugins"
-	"github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
-	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
+
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+
+	"github.com/deckhouse/deckhouse-cli/cmd/plugins"
+	"github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
 )
 
 var systemLong = templates.LongDesc(`
@@ -27,7 +29,7 @@ func NewCommand(logger *dkplog.Logger) *cobra.Command {
 	systemCmd := &cobra.Command{
 		Use:     "system",
 		Short:   "System operations",
-		Aliases: []string{"s", "ps", "platform"},
+		Aliases: []string{"s", "p", "platform"},
 		Long:    systemLong,
 		PreRun: func(_ *cobra.Command, _ []string) {
 			// init plugin services for subcommands after flags are parsed
