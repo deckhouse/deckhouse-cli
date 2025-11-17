@@ -18,7 +18,6 @@ package plugins
 
 import (
 	"log/slog"
-	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -36,7 +35,7 @@ func (pc *PluginsCommand) InitPluginServices() {
 	// Extract registry host from the source registry repo
 	// SourceRegistryRepo can be:
 	// - Just hostname: "registry.deckhouse.io"
-	// - Full path: "registry.deckhouse.io/deckhouse/ee/"
+	// - Full path: "registry.deckhouse.io/deckhouse/ee"
 	sourceRepo := d8flags.SourceRegistryRepo
 	registryHost := sourceRepo
 
@@ -68,14 +67,14 @@ func (pc *PluginsCommand) InitPluginServices() {
 	})
 
 	pc.Logger.Debug("Creating plugin service with scoped client",
-		slog.String("scope_path", strings.TrimPrefix(sourceRepo, sourceRepo)))
+		slog.String("path", sourceRepo))
 
 	registryService := service.NewService(
 		pc.pluginRegistryClient,
 		pc.Logger.Named("registry-service"),
 	)
 
-	pc.Service = registryService.PluginService()
+	pc.service = registryService.PluginService()
 
 	pc.Logger.Debug("Plugin services initialized successfully")
 }

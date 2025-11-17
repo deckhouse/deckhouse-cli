@@ -39,7 +39,7 @@ import (
 )
 
 type PluginsCommand struct {
-	Service              *service.PluginService
+	service              *service.PluginService
 	pluginRegistryClient pkg.RegistryClient
 
 	Logger *dkplog.Logger
@@ -217,7 +217,7 @@ func (pc *PluginsCommand) getInstalledPluginContract(pluginName string) (*intern
 
 // fetchAvailablePlugins retrieves and prepares available plugins from registry
 func (pc *PluginsCommand) fetchAvailablePlugins(ctx context.Context) ([]pluginDisplayInfo, error) {
-	pluginNames, err := pc.Service.ListPlugins(ctx)
+	pluginNames, err := pc.service.ListPlugins(ctx)
 	if err != nil {
 		pc.Logger.Warn("Failed to list plugins", slog.String("error", err.Error()))
 		return nil, fmt.Errorf("failed to list plugins: %w", err)
@@ -242,7 +242,7 @@ func (pc *PluginsCommand) fetchAvailablePlugins(ctx context.Context) ([]pluginDi
 		}
 
 		// Get the latest version contract
-		contract, err := pc.Service.GetPluginContract(ctx, pluginName, latestVersion.Original())
+		contract, err := pc.service.GetPluginContract(ctx, pluginName, latestVersion.Original())
 		if err != nil {
 			// Log the error for debugging
 			pc.Logger.Warn("Failed to get plugin contract",
@@ -402,7 +402,7 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 			fmt.Println("\nRetrieving contract from registry...")
 
 			// Use service to get plugin contract
-			plugin, err := pc.Service.GetPluginContract(ctx, pluginName, tag)
+			plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
 			if err != nil {
 				pc.Logger.Warn("Failed to get plugin contract",
 					slog.String("plugin", pluginName),
@@ -494,7 +494,7 @@ func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName, version
 			return fmt.Errorf("failed to parse version: %w", err)
 		}
 	} else {
-		versions, err := pc.Service.ListPluginTags(ctx, pluginName)
+		versions, err := pc.service.ListPluginTags(ctx, pluginName)
 		if err != nil {
 			pc.Logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
 			return fmt.Errorf("failed to list plugin tags: %w", err)
@@ -553,7 +553,7 @@ func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName, version
 	}
 
 	// get contract
-	plugin, err := pc.Service.GetPluginContract(ctx, pluginName, tag)
+	plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
 	if err != nil {
 		return fmt.Errorf("failed to get plugin contract: %w", err)
 	}
@@ -576,7 +576,7 @@ func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName, version
 	fmt.Printf("Installing to: %s\n", pluginBinaryPath)
 
 	fmt.Println("Downloading and extracting plugin...")
-	err = pc.Service.ExtractPlugin(ctx, pluginName, tag, pluginBinaryPath)
+	err = pc.service.ExtractPlugin(ctx, pluginName, tag, pluginBinaryPath)
 	if err != nil {
 		pc.Logger.Warn("Failed to extract plugin",
 			slog.String("plugin", pluginName),
@@ -644,7 +644,7 @@ func (pc *PluginsCommand) filterMajorVersion(versions []string, majorVersion int
 }
 
 func (pc *PluginsCommand) fetchLatestVersion(ctx context.Context, pluginName string) (*semver.Version, error) {
-	versions, err := pc.Service.ListPluginTags(ctx, pluginName)
+	versions, err := pc.service.ListPluginTags(ctx, pluginName)
 	if err != nil {
 		pc.Logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
 		return nil, fmt.Errorf("failed to list plugin tags: %w", err)

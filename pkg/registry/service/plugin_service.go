@@ -137,6 +137,22 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 	return ContractToDomain(contract), nil
 }
 
+// GetPluginContractFromFile reads the plugin contract from a file
+func GetPluginContractFromFile(contractFilePath string) (*internal.Plugin, error) {
+	contractBytes, err := os.ReadFile(contractFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read contract file: %w", err)
+	}
+
+	contract := new(PluginContract)
+	err = json.Unmarshal(contractBytes, contract)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal contract: %w", err)
+	}
+
+	return ContractToDomain(contract), nil
+}
+
 // ExtractPlugin downloads the plugin image and extracts it to the specified location
 func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, destination string) error {
 	// Create a scoped client for this specific plugin

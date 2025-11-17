@@ -1,3 +1,18 @@
+/*
+Copyright 2024 Flant JSC
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package system
 
 import (
@@ -8,29 +23,36 @@ import (
 	"path"
 
 	"github.com/spf13/cobra"
-	"k8s.io/kubectl/pkg/util/templates"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/cmd/plugins"
 	"github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
-
-var systemLong = templates.LongDesc(`
-Operate system options in DKP.
-
-© Flant JSC 2025`)
 
 func NewCommand(logger *dkplog.Logger) *cobra.Command {
 	pc := &plugins.PluginsCommand{
 		Logger: logger,
 	}
 
+	description := "Operate system options in DKP"
+
+	pluginContractFilePath := path.Join(flags.DeckhousePluginsDir, "cache", "contracts", "system.json")
+	pluginContract, err := service.GetPluginContractFromFile(pluginContractFilePath)
+	if err != nil {
+		logger.Warn("failed to get plugin contract from cache", slog.String("error", err.Error()))
+	}
+
+	if pluginContract != nil {
+		description = pluginContract.Description
+	}
+
 	systemCmd := &cobra.Command{
 		Use:     "system",
-		Short:   "System operations",
+		Short:   description,
 		Aliases: []string{"s", "p", "platform"},
-		Long:    systemLong,
+		Long:    description,
 		PreRun: func(_ *cobra.Command, _ []string) {
 			// init plugin services for subcommands after flags are parsed
 			pc.InitPluginServices()

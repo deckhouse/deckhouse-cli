@@ -119,37 +119,7 @@ func (r *RootCommand) registerCommands() {
 	if err != nil {
 		r.logger.Debug("Failed to create plugins directory", slog.String("error", err.Error()))
 	}
-
-	// path, err := os.ReadDir(flags.DeckhousePluginsDir + "/plugins")
-	// if err != nil {
-	// 	r.logger.Debug("Failed to read plugins directory", slog.String("error", err.Error()))
-	// }
-
-	// for _, plugin := range path {
-	// 	r.cmd.AddCommand(r.addCustomCommands(plugin.Name()))
-	// }
 }
-
-// func (r *RootCommand) addCustomCommands(pluginName string) *cobra.Command {
-// 	pluginPath := path.Join(flags.DeckhousePluginsDir, "plugins", pluginName)
-// 	pluginBinaryPath := path.Join(pluginPath, "current")
-// 	cmd := &cobra.Command{
-// 		Use:                pluginName,
-// 		Short:              pluginName,
-// 		DisableFlagParsing: true,
-// 		Run: func(cmd *cobra.Command, args []string) {
-// 			command := exec.CommandContext(cmd.Context(), pluginBinaryPath, args...)
-// 			command.Stdout = os.Stdout
-// 			command.Stderr = os.Stderr
-
-// 			err := command.Run()
-// 			if err != nil {
-// 				r.logger.Warn("Failed to run plugin", slog.String("error", err.Error()))
-// 			}
-// 		},
-// 	}
-// 	return cmd
-// }
 
 func (r *RootCommand) Execute() error {
 	ctx := r.cmd.Context()
