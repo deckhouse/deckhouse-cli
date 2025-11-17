@@ -66,6 +66,10 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	if err != nil {
 		return err
 	}
+	if activeMigration == nil {
+		// This means preparation is already complete, and the user has been notified.
+		return nil
+	}
 	fmt.Printf(
 		"✅ Working with migration: '%s' (total elapsed: %s)\n\n",
 		activeMigration.Name,
@@ -154,9 +158,8 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 		return fmt.Errorf("updating CNIMigration status to prepared: %w", err)
 	}
 
-	fmt.Println("\n--------------------------------------------------")
 	fmt.Printf(
-		"✅ Cluster successfully prepared for CNI switch (total time: %s)\n",
+		"\n✅ Cluster successfully prepared for CNI switch (total time: %s)\n",
 		time.Since(startTime).Round(time.Second),
 	)
 	fmt.Println("You can now run 'd8 cni-switch switch' to proceed")
@@ -180,6 +183,26 @@ func getOrCreateMigrationForPrepare(
 			activeMigration.Name,
 			activeMigration.Status.ObservedPhase,
 		)
+
+		// Check if preparation is already done
+		for _, cond := range activeMigration.Status.Conditions {
+			if cond.Type == "PreparationSucceeded" && cond.Status == metav1.ConditionTrue {
+				fmt.Println("✅ Cluster has already been prepared for CNI switch.")
+				fmt.Println("You can now run 'd8 cni-switch switch' to proceed.")
+				return nil, nil // Signal to the caller that we can exit gracefully
+			}
+		}
+
+		// Check if migration is in an unexpected phase
+		if activeMigration.Status.ObservedPhase != "" && activeMigration.Status.ObservedPhase != "Preparing" {
+			return nil, fmt.Errorf(
+				"an active migration is already in the '%s' phase. "+
+					"Cannot run 'prepare' again. To proceed, run 'd8 cni-switch switch'. "+
+					"To start over, run 'd8 cni-switch cleanup'",
+				activeMigration.Status.ObservedPhase,
+			)
+		}
+
 		return activeMigration, nil
 	}
 
