@@ -36,28 +36,19 @@ func (pc *PluginsCommand) initPluginServices() {
 	// Extract registry host from the source registry repo
 	// SourceRegistryRepo can be:
 	// - Just hostname: "registry.deckhouse.io"
-	// - Full path: "registry.deckhouse.io/deckhouse/ee"
-	sourceRepo := d8flags.SourceRegistryRepo
+	// - Full path: "registry.deckhouse.io/deckhouse/ee/plugins"
+	sourceRepo := d8flags.SourcePluginRegistryRepo
 	registryHost := sourceRepo
 
 	// If it's just a hostname (no slashes), use it directly
 	// Otherwise parse to extract the hostname
-	if len(registryHost) > 0 && registryHost[0] != '/' {
-		// Try to parse it - if it has a path component, extract the registry
-		// We need to add a dummy path to force it to be treated as a registry URL
-		testRef := registryHost
-		if !containsSlash(registryHost) {
-			// Just a hostname, use it as-is
-			pc.logger.Debug("Using hostname as registry", slog.String("host", registryHost))
-		} else {
-			// Has path components, parse to extract registry
-			ref, err := name.ParseReference(registryHost)
-			if err == nil {
-				registryHost = ref.Context().RegistryStr()
-				pc.logger.Debug("Extracted registry from path",
-					slog.String("original", testRef),
-					slog.String("extracted", registryHost))
-			}
+	if containsSlash(registryHost) {
+		// Has path components, parse to extract registry
+		ref, err := name.ParseReference(registryHost)
+		if err == nil {
+			registryHost = ref.Context().RegistryStr()
+			pc.logger.Debug("Extracted registry from path",
+				slog.String("extracted", registryHost))
 		}
 	}
 
@@ -69,16 +60,12 @@ func (pc *PluginsCommand) initPluginServices() {
 		slog.Bool("tls_skip_verify", d8flags.TLSSkipVerify))
 
 	// Create base client with registry host only
-	baseClient := client.NewClientWithOptions(sourceRepo, &client.Options{
+	pc.pluginRegistryClient = client.NewClientWithOptions(sourceRepo, &client.Options{
 		Auth:          auth,
 		Insecure:      d8flags.Insecure,
 		TLSSkipVerify: d8flags.TLSSkipVerify,
 		Logger:        pc.logger.Named("registry-client"),
 	})
-
-	// Build scoped client using chained WithSegment calls
-	// Example: registry.deckhouse.io -> deckhouse -> ee -> modules
-	pc.pluginRegistryClient = baseClient
 
 	pc.logger.Debug("Creating plugin service with scoped client",
 		slog.String("scope_path", strings.TrimPrefix(sourceRepo, sourceRepo)))

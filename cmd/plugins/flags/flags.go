@@ -18,6 +18,7 @@ package flags
 
 import (
 	"os"
+	"path"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/spf13/pflag"
@@ -26,7 +27,7 @@ import (
 const (
 	deckhouseRegistryHost = "registry.deckhouse.io"
 
-	EnterpriseEditionRepo = deckhouseRegistryHost
+	EnterpriseEditionRepo = deckhouseRegistryHost + "/deckhouse/ee"
 
 	DefaultDeckhousePluginsDir = "/opt/deckhouse/lib/deckhouse-cli"
 )
@@ -53,10 +54,10 @@ var (
 	ModulesWhitelist  []string
 	ModulesBlacklist  []string
 
-	SourceRegistryRepo     = EnterpriseEditionRepo // Fallback to EE if nothing was given as source.
-	SourceRegistryLogin    string
-	SourceRegistryPassword string
-	DeckhouseLicenseToken  string
+	SourcePluginRegistryRepo = path.Join(EnterpriseEditionRepo, "plugins") // Fallback to EE if nothing was given as source.
+	SourceRegistryLogin      string
+	SourceRegistryPassword   string
+	DeckhouseLicenseToken    string
 
 	DoGOSTDigest bool
 	NoPullResume bool
@@ -69,9 +70,9 @@ var (
 
 func AddFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringVar(
-		&SourceRegistryRepo,
+		&SourcePluginRegistryRepo,
 		"source",
-		EnterpriseEditionRepo,
+		SourcePluginRegistryRepo,
 		"Source registry to pull Deckhouse images from.",
 	)
 	flagSet.StringVar(
