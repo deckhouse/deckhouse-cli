@@ -16,6 +16,7 @@ require (
 	github.com/hashicorp/vault v1.14.8
 	github.com/iancoleman/strcase v0.3.0
 	github.com/int128/kubelogin v1.28.0
+	github.com/muesli/termenv v0.16.0
 	github.com/pkg/errors v0.9.1
 	github.com/samber/lo v1.51.0
 	github.com/sirupsen/logrus v1.9.3
@@ -40,6 +41,7 @@ require (
 	k8s.io/client-go v0.33.3
 	k8s.io/component-base v0.33.3
 	k8s.io/kubectl v0.32.10
+	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
 	sigs.k8s.io/controller-runtime v0.21.0
 	sigs.k8s.io/yaml v1.4.0
 )
@@ -115,6 +117,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.33.9 // indirect
 	github.com/aws/smithy-go v1.22.1 // indirect
 	github.com/axiomhq/hyperloglog v0.0.0-20220105174342-98591331716a // indirect
+	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/aymanbagabas/go-udiff v0.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bgentry/speakeasy v0.1.0 // indirect
@@ -388,6 +391,7 @@ require (
 	github.com/linode/linodego v0.7.1 // indirect
 	github.com/lithammer/dedent v1.1.0 // indirect
 	github.com/looplab/fsm v1.0.2 // indirect
+	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/manifoldco/promptui v0.9.0 // indirect
@@ -601,7 +605,6 @@ require (
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20250710124328-f3f2b991d03b // indirect
 	k8s.io/metrics v0.32.10 // indirect
-	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
 	kubevirt.io/api v1.3.1 // indirect
 	kubevirt.io/containerized-data-importer-api v1.57.0-alpha1 // indirect
 	kubevirt.io/controller-lifecycle-operator-sdk/api v0.0.0-20220329064328-f3cc58c6ed90 // indirect

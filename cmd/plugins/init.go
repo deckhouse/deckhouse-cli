@@ -30,7 +30,7 @@ import (
 )
 
 func (pc *PluginsCommand) InitPluginServices() {
-	pc.Logger.Debug("Initializing plugin services")
+	pc.logger.Debug("Initializing plugin services")
 
 	// Extract registry host from the source registry repo
 	// SourceRegistryRepo can be:
@@ -46,14 +46,14 @@ func (pc *PluginsCommand) InitPluginServices() {
 		ref, err := name.ParseReference(registryHost)
 		if err == nil {
 			registryHost = ref.Context().RegistryStr()
-			pc.Logger.Debug("Extracted registry from path",
+			pc.logger.Debug("Extracted registry from path",
 				slog.String("extracted", registryHost))
 		}
 	}
 
-	auth := getPluginRegistryAuthProvider(registryHost, pc.Logger)
+	auth := getPluginRegistryAuthProvider(registryHost, pc.logger)
 
-	pc.Logger.Debug("Creating plugin registry client",
+	pc.logger.Debug("Creating plugin registry client",
 		slog.String("registry_host", registryHost),
 		slog.Bool("insecure", d8flags.Insecure),
 		slog.Bool("tls_skip_verify", d8flags.TLSSkipVerify))
@@ -63,20 +63,20 @@ func (pc *PluginsCommand) InitPluginServices() {
 		Auth:          auth,
 		Insecure:      d8flags.Insecure,
 		TLSSkipVerify: d8flags.TLSSkipVerify,
-		Logger:        pc.Logger.Named("registry-client"),
+		Logger:        pc.logger.Named("registry-client"),
 	})
 
-	pc.Logger.Debug("Creating plugin service with scoped client",
+	pc.logger.Debug("Creating plugin service with scoped client",
 		slog.String("path", sourceRepo))
 
 	registryService := service.NewService(
 		pc.pluginRegistryClient,
-		pc.Logger.Named("registry-service"),
+		pc.logger.Named("registry-service"),
 	)
 
 	pc.service = registryService.PluginService()
 
-	pc.Logger.Debug("Plugin services initialized successfully")
+	pc.logger.Debug("Plugin services initialized successfully")
 }
 
 // containsSlash checks if a string contains a forward slash

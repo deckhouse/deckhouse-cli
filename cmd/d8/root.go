@@ -111,9 +111,13 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(commands.NewStrongholdCommand())
 	r.cmd.AddCommand(commands.NewHelpJSONCommand(r.cmd))
 
-	r.cmd.AddCommand(system.NewCommand(r.logger.Named("system-command")))
+	if os.Getenv("DECKHOUSE_PLUGINS_ENABLED") != "true" {
+		r.cmd.AddCommand(system.NewCommand())
+	} else {
+		r.cmd.AddCommand(system.NewPluginCommand(r.logger.Named("system-command")))
+	}
 
-	r.cmd.AddCommand(plugins.NewPluginsCommand(r.logger.Named("plugins-command")))
+	r.cmd.AddCommand(plugins.NewCommand(r.logger.Named("plugins-command")))
 
 	err := os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
 	if err != nil {
