@@ -101,16 +101,39 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	}
 
 	// 4. Create the cni-switch-helper daemonset and wait for it to be ready
-	ds := getSwitchHelperDaemonSet()
-	err = rtClient.Create(ctx, ds)
+	dsKey := client.ObjectKey{Name: "cni-switch-helper", Namespace: "d8-system"}
+	ds := &appsv1.DaemonSet{}
+	err = rtClient.Get(ctx, dsKey, ds)
+
 	if err != nil {
-		if errors.IsAlreadyExists(err) {
-			fmt.Printf("DaemonSet '%s' already exists\n", ds.Name)
+		if errors.IsNotFound(err) {
+			// DaemonSet does not exist, so we need to create it.
+			fmt.Println("DaemonSet 'cni-switch-helper' not found. Creating it...")
+
+			cm := &corev1.ConfigMap{}
+			if getCMErr := rtClient.Get(ctx, client.ObjectKey{Name: "d8-cli-data", Namespace: "d8-system"}, cm); getCMErr != nil {
+				return fmt.Errorf("getting d8-cli-data configmap: %w", getCMErr)
+			}
+
+			imageName, ok := cm.Data["cni-switch-helper-image"]
+			if !ok || imageName == "" {
+				return fmt.Errorf("cni-switch-helper-image not found or empty in d8-cli-data configmap")
+			}
+
+			dsToCreate := getSwitchHelperDaemonSet(imageName)
+			if createErr := rtClient.Create(ctx, dsToCreate); createErr != nil {
+				return fmt.Errorf("creating helper daemonset: %w", createErr)
+			}
+
+			fmt.Printf("Successfully created DaemonSet '%s'\n", dsToCreate.Name)
+			ds = dsToCreate // Use the newly created DS for the wait logic
 		} else {
-			return fmt.Errorf("creating helper daemonset: %w", err)
+			// Some other error occurred while getting the DaemonSet.
+			return fmt.Errorf("getting helper daemonset: %w", err)
 		}
 	} else {
-		fmt.Printf("Successfully created DaemonSet '%s'\n", ds.Name)
+		// DaemonSet already exists.
+		fmt.Printf("DaemonSet '%s' already exists\n", ds.Name)
 	}
 
 	fmt.Println("Waiting for 'cni-switch-helper' DaemonSet to become ready")

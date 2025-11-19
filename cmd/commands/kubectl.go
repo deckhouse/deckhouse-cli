@@ -36,8 +36,8 @@ import (
 
 const (
 	cmNamespace = "d8-system"
-	cmName      = "debug-container"
-	cmImageKey  = "image"
+	cmName      = "d8-cli-data"
+	cmImageKey  = "debug-container-image"
 )
 
 var d8CommandRegex = regexp.MustCompile("([\"'`])d8 (\\w+)")

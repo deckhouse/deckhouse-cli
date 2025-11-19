@@ -21,6 +21,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 var (
@@ -33,7 +34,10 @@ const (
 	WebhookServiceName               = "effective-cni-annotator-webhook-service"
 )
 
-func getSwitchHelperDaemonSet() *appsv1.DaemonSet {
+func getSwitchHelperDaemonSet(imageName string) *appsv1.DaemonSet {
+	truePtr := true
+	terminationGracePeriodSeconds := int64(5)
+
 	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "cni-switch-helper",
@@ -48,11 +52,71 @@ func getSwitchHelperDaemonSet() *appsv1.DaemonSet {
 					Labels: map[string]string{"app": "cni-switch-helper"},
 				},
 				Spec: corev1.PodSpec{
+					ServiceAccountName: "cni-switch-helper",
 					Containers: []corev1.Container{
 						{
-							Name:    "helper",
-							Image:   "alpine:latest", // FIXME: Placeholder image
-							Command: []string{"sleep", "infinity"},
+							Name:  "helper",
+							Image: imageName,
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "healthz",
+									ContainerPort: 8081,
+									Protocol:      corev1.ProtocolTCP,
+								},
+							},
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/healthz",
+										Port: intstr.FromString("healthz"),
+									},
+								},
+								InitialDelaySeconds: 15,
+								PeriodSeconds:       20,
+							},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/readyz",
+										Port: intstr.FromString("healthz"),
+									},
+								},
+								InitialDelaySeconds: 5,
+								PeriodSeconds:       10,
+							},
+							Env: []corev1.EnvVar{
+								{
+									Name: "NODE_NAME",
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "spec.nodeName",
+										},
+									},
+								},
+							},
+							SecurityContext: &corev1.SecurityContext{
+								Privileged: &truePtr,
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "host-proc",
+									MountPath: "/host/proc",
+									ReadOnly:  true,
+								},
+								{
+									Name:      "host-sys",
+									MountPath: "/host/sys",
+									ReadOnly:  true,
+								},
+								{
+									Name:      "cni-net-d",
+									MountPath: "/etc/cni/net.d",
+								},
+								{
+									Name:      "cni-bin",
+									MountPath: "/opt/cni/bin",
+								},
+							},
 						},
 					},
 					// The helper needs to run on all nodes, including control-plane nodes
@@ -64,9 +128,37 @@ func getSwitchHelperDaemonSet() *appsv1.DaemonSet {
 							Effect:   corev1.TaintEffectNoSchedule,
 						},
 					},
-					PriorityClassName: "system-node-critical",
-					HostNetwork:       true,
-					HostPID:           true,
+					PriorityClassName:             "system-node-critical",
+					HostNetwork:                   true,
+					HostPID:                       true,
+					HostIPC:                       true,
+					TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
+					Volumes: []corev1.Volume{
+						{
+							Name: "host-proc",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{Path: "/proc"},
+							},
+						},
+						{
+							Name: "host-sys",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{Path: "/sys"},
+							},
+						},
+						{
+							Name: "cni-net-d",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{Path: "/etc/cni/net.d"},
+							},
+						},
+						{
+							Name: "cni-bin",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{Path: "/opt/cni/bin"},
+							},
+						},
+					},
 				},
 			},
 		},
@@ -87,7 +179,7 @@ func getMutatingWebhookConfiguration() *admissionregistrationv1.MutatingWebhookC
 		},
 		Webhooks: []admissionregistrationv1.MutatingWebhook{
 			{
-				Name: "effective-cni.deckhouse.io",
+				Name: "effective-cni.network.deckhouse.io",
 				ClientConfig: admissionregistrationv1.WebhookClientConfig{
 					Service: &admissionregistrationv1.ServiceReference{
 						Name:      WebhookServiceName,
