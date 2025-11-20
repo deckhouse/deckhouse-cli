@@ -74,11 +74,12 @@ func getSwitchHelperClusterRole() *rbacv1.ClusterRole {
 				Verbs:     []string{"get", "update", "patch"},
 			},
 			{
-				APIGroups: []string{""},
+				APIGroups: []string{""}, // Core API group
 				Resources: []string{"pods"},
 				Verbs:     []string{"get", "list", "watch", "patch", "update", "delete"},
 			},
-		}}
+		},
+	}
 }
 
 func getSwitchHelperClusterRoleBinding(namespace string) *rbacv1.ClusterRoleBinding {
@@ -101,14 +102,14 @@ func getSwitchHelperClusterRoleBinding(namespace string) *rbacv1.ClusterRoleBind
 	}
 }
 
-func getSwitchHelperDaemonSet(imageName string) *appsv1.DaemonSet {
+func getSwitchHelperDaemonSet(namespace, imageName string) *appsv1.DaemonSet {
 	truePtr := true
 	terminationGracePeriodSeconds := int64(5)
 
 	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "cni-switch-helper",
-			Namespace: "d8-system",
+			Namespace: namespace,
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{
@@ -134,8 +135,8 @@ func getSwitchHelperDaemonSet(imageName string) *appsv1.DaemonSet {
 							LivenessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
-										Path: "/healthz",
-										Port: intstr.FromString("healthz"),
+										Path:   "/healthz",
+										Port:   intstr.FromString("healthz"),
 									},
 								},
 								InitialDelaySeconds: 15,
@@ -144,8 +145,8 @@ func getSwitchHelperDaemonSet(imageName string) *appsv1.DaemonSet {
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
-										Path: "/readyz",
-										Port: intstr.FromString("healthz"),
+										Path:   "/readyz",
+										Port:   intstr.FromString("healthz"),
 									},
 								},
 								InitialDelaySeconds: 5,
@@ -157,14 +158,6 @@ func getSwitchHelperDaemonSet(imageName string) *appsv1.DaemonSet {
 									ValueFrom: &corev1.EnvVarSource{
 										FieldRef: &corev1.ObjectFieldSelector{
 											FieldPath: "spec.nodeName",
-										},
-									},
-								},
-								{
-									Name: "POD_NAMESPACE",
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{
-											FieldPath: "metadata.namespace",
 										},
 									},
 								},
@@ -194,8 +187,6 @@ func getSwitchHelperDaemonSet(imageName string) *appsv1.DaemonSet {
 							},
 						},
 					},
-					// The helper needs to run on all nodes, including control-plane nodes
-					// to clean up CNI configurations everywhere.
 					Tolerations: []corev1.Toleration{
 						{
 							Key:      ControlPlaneNodeLabel,
@@ -203,10 +194,10 @@ func getSwitchHelperDaemonSet(imageName string) *appsv1.DaemonSet {
 							Effect:   corev1.TaintEffectNoSchedule,
 						},
 					},
-					PriorityClassName:             "system-node-critical",
-					HostNetwork:                   true,
-					HostPID:                       true,
-					HostIPC:                       true,
+					PriorityClassName:            "system-node-critical",
+					HostNetwork:                  true,
+					HostPID:                      true,
+					HostIPC:                      true,
 					TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
 					Volumes: []corev1.Volume{
 						{
@@ -240,7 +231,7 @@ func getSwitchHelperDaemonSet(imageName string) *appsv1.DaemonSet {
 	}
 }
 
-func getMutatingWebhookConfiguration(namespace string) *admissionregistrationv1.MutatingWebhookConfiguration {
+func getMutatingWebhookConfiguration() *admissionregistrationv1.MutatingWebhookConfiguration {
 	path := "/mutate"
 	// Exclude system namespaces and all known CNI module namespaces.
 	excludedNamespaces := []string{}

@@ -33,6 +33,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const (
+	cniSwitchNamespace = "cni-switch"
+)
+
 var (
 	moduleConfigGVK = schema.GroupVersionKind{
 		Group:   "deckhouse.io",
@@ -61,7 +65,15 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	}
 	fmt.Printf("✅ Kubernetes client created (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
 
-	// 2. Find an existing migration or create a new one
+	// 2. Create the dedicated namespace
+	fmt.Printf("Creating dedicated namespace '%s'...\n", cniSwitchNamespace)
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: cniSwitchNamespace}}
+	if err = rtClient.Create(ctx, ns); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating namespace %s: %w", cniSwitchNamespace, err)
+	}
+	fmt.Print("✅ Namespace ensured\n\n")
+
+	// 3. Find an existing migration or create a new one
 	activeMigration, err := getOrCreateMigrationForPrepare(ctx, rtClient, targetCNI)
 	if err != nil {
 		return err
@@ -76,7 +88,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 		time.Since(startTime).Round(time.Millisecond),
 	)
 
-	// 3. Detect current CNI and update migration status
+	// 4. Detect current CNI and update migration status
 	if activeMigration.Status.CurrentCNI == "" {
 		var currentCNI string
 		currentCNI, err = detectCurrentCNI(rtClient)
@@ -100,8 +112,8 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 		)
 	}
 
-	// 4. Create the cni-switch-helper daemonset and wait for it to be ready
-	dsKey := client.ObjectKey{Name: "cni-switch-helper", Namespace: "d8-system"}
+	// 5. Create the cni-switch-helper daemonset and wait for it to be ready
+	dsKey := client.ObjectKey{Name: "cni-switch-helper", Namespace: cniSwitchNamespace}
 	ds := &appsv1.DaemonSet{}
 	err = rtClient.Get(ctx, dsKey, ds)
 
@@ -126,9 +138,9 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 
 			// Create RBAC first
 			fmt.Println("Applying RBAC for cni-switch-helper...")
-			sa := getSwitchHelperServiceAccount("d8-system")
+			sa := getSwitchHelperServiceAccount(cniSwitchNamespace)
 			role := getSwitchHelperClusterRole()
-			binding := getSwitchHelperClusterRoleBinding("d8-system")
+			binding := getSwitchHelperClusterRoleBinding(cniSwitchNamespace)
 
 			if err = rtClient.Create(ctx, sa); err != nil && !errors.IsAlreadyExists(err) {
 				return fmt.Errorf("creating service account: %w", err)
@@ -139,10 +151,9 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 			if err = rtClient.Create(ctx, binding); err != nil && !errors.IsAlreadyExists(err) {
 				return fmt.Errorf("creating cluster role binding: %w", err)
 			}
-			fmt.Printf("RBAC applied: SA '%s', ClusterRole '%s', ClusterRoleBinding '%s'\n",
-				sa.Name, role.Name, binding.Name)
+			fmt.Println("✅ RBAC applied")
 
-			dsToCreate := getSwitchHelperDaemonSet(imageName)
+			dsToCreate := getSwitchHelperDaemonSet(cniSwitchNamespace, imageName)
 			if createErr := rtClient.Create(ctx, dsToCreate); createErr != nil {
 				return fmt.Errorf("creating helper daemonset: %w", createErr)
 			}
