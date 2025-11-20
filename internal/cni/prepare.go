@@ -111,7 +111,11 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 			fmt.Println("DaemonSet 'cni-switch-helper' not found. Creating it...")
 
 			cm := &corev1.ConfigMap{}
-			if getCMErr := rtClient.Get(ctx, client.ObjectKey{Name: "d8-cli-data", Namespace: "d8-system"}, cm); getCMErr != nil {
+			if getCMErr := rtClient.Get(
+				ctx,
+				client.ObjectKey{Name: "d8-cli-data", Namespace: "d8-system"},
+				cm,
+			); getCMErr != nil {
 				return fmt.Errorf("getting d8-cli-data configmap: %w", getCMErr)
 			}
 
@@ -119,6 +123,24 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 			if !ok || imageName == "" {
 				return fmt.Errorf("cni-switch-helper-image not found or empty in d8-cli-data configmap")
 			}
+
+			// Create RBAC first
+			fmt.Println("Applying RBAC for cni-switch-helper...")
+			sa := getSwitchHelperServiceAccount("d8-system")
+			role := getSwitchHelperClusterRole()
+			binding := getSwitchHelperClusterRoleBinding("d8-system")
+
+			if err = rtClient.Create(ctx, sa); err != nil && !errors.IsAlreadyExists(err) {
+				return fmt.Errorf("creating service account: %w", err)
+			}
+			if err = rtClient.Create(ctx, role); err != nil && !errors.IsAlreadyExists(err) {
+				return fmt.Errorf("creating cluster role: %w", err)
+			}
+			if err = rtClient.Create(ctx, binding); err != nil && !errors.IsAlreadyExists(err) {
+				return fmt.Errorf("creating cluster role binding: %w", err)
+			}
+			fmt.Printf("RBAC applied: SA '%s', ClusterRole '%s', ClusterRoleBinding '%s'\n",
+				sa.Name, role.Name, binding.Name)
 
 			dsToCreate := getSwitchHelperDaemonSet(imageName)
 			if createErr := rtClient.Create(ctx, dsToCreate); createErr != nil {
@@ -143,22 +165,22 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	}
 	fmt.Printf("✅ DaemonSet is ready (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
 
-	// 5. Create the mutating webhook configuration
-	webhook := getMutatingWebhookConfiguration()
-	err = rtClient.Create(ctx, webhook)
-	if err != nil {
-		if errors.IsAlreadyExists(err) {
-			fmt.Printf("✅ MutatingWebhookConfiguration '%s' already exists\n\n", webhook.Name)
-		} else {
-			return fmt.Errorf("creating mutating webhook configuration: %w", err)
-		}
-	} else {
-		fmt.Printf(
-			"✅ Successfully created MutatingWebhook '%s' (total elapsed: %s)\n\n",
-			webhook.Name,
-			time.Since(startTime).Round(time.Millisecond),
-		)
-	}
+	// // 5. Create the mutating webhook configuration
+	// webhook := getMutatingWebhookConfiguration()
+	// err = rtClient.Create(ctx, webhook)
+	// if err != nil {
+	// 	if errors.IsAlreadyExists(err) {
+	// 		fmt.Printf("✅ MutatingWebhookConfiguration '%s' already exists\n\n", webhook.Name)
+	// 	} else {
+	// 		return fmt.Errorf("creating mutating webhook configuration: %w", err)
+	// 	}
+	// } else {
+	// 	fmt.Printf(
+	// 		"✅ Successfully created MutatingWebhook '%s' (total elapsed: %s)\n\n",
+	// 		webhook.Name,
+	// 		time.Since(startTime).Round(time.Millisecond),
+	// 	)
+	// }
 
 	// 6. Wait for all nodes to be prepared
 	fmt.Println("Waiting for all nodes to complete the preparation step...")
