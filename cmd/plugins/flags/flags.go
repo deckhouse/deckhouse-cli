@@ -26,7 +26,7 @@ import (
 const (
 	deckhouseRegistryHost = "registry.deckhouse.io"
 
-	EnterpriseEditionRepo = deckhouseRegistryHost
+	EnterpriseEditionRepo = deckhouseRegistryHost + "/deckhouse/ee"
 
 	DefaultDeckhousePluginsDir = "/opt/deckhouse/lib/deckhouse-cli"
 )
@@ -71,7 +71,7 @@ func AddFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringVar(
 		&SourceRegistryRepo,
 		"source",
-		EnterpriseEditionRepo,
+		SourceRegistryRepo,
 		"Source registry to pull Deckhouse images from.",
 	)
 	flagSet.StringVar(

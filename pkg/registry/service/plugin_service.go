@@ -25,17 +25,32 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime"
+
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 // PluginService provides high-level operations for plugin management
 type PluginService struct {
 	client pkg.RegistryClient
 	log    *log.Logger
+}
+
+type manifestSchema struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	MediaType     string `json:"mediaType"`
+	Manifests     []struct {
+		MediaType string `json:"mediaType,omitempty"`
+		Size      int    `json:"size,omitempty"`
+		Digest    string `json:"digest,omitempty"`
+	} `json:"manifests"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // NewPluginService creates a new plugin service
@@ -49,7 +64,7 @@ func NewPluginService(client pkg.RegistryClient, logger *log.Logger) *PluginServ
 // GetPluginContract reads the plugin contract from image metadata annotation
 func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag string) (*internal.Plugin, error) {
 	// Create a scoped client for this specific plugin
-	// The base client already has the path like "deckhouse/ee/modules"
+	// The base client already has the path like "deckhouse/ee/plugins"
 	// We just need to add the plugin name
 	s.log.Debug("Getting plugin contract", slog.String("plugin", pluginName), slog.String("tag", tag))
 
@@ -61,15 +76,45 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 	}
 	s.log.Debug("Manifest retrieved successfully", slog.String("manifestraw", string(manifestRaw)))
 
-	manifest := &map[string]any{}
-	err = json.Unmarshal(manifestRaw, manifest)
+	manifest := manifestSchema{}
+	err = json.Unmarshal(manifestRaw, &manifest)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal manifest: %w", err)
 	}
 
-	annotations := (*manifest)["annotations"].(map[string]any)
-	contractB64, exists := annotations["contract"].(string)
-	if !exists {
+	// multiarch manifests are just list of manifests, we need to get the image manifest
+	if manifest.MediaType == "application/vnd.oci.image.index.v1+json" {
+		if len(manifest.Manifests) == 0 {
+			return nil, fmt.Errorf("no manifests found in index manifest")
+		}
+
+		// hardcoded first
+		digest := manifest.Manifests[0].Digest
+		if digest == "" {
+			return nil, fmt.Errorf("no digest found in manifest")
+		}
+
+		manifestRaw, err = pluginClient.WithSegment("meta").GetManifest(ctx, "@"+digest)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get manifest: %w", err)
+		}
+
+		err = json.Unmarshal(manifestRaw, &manifest)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal manifest: %w", err)
+		}
+	}
+
+	if manifest.Annotations == nil {
+		return &internal.Plugin{
+			Name:    pluginName,
+			Version: tag,
+		}, nil
+	}
+
+	annotations := manifest.Annotations
+	contractB64, ok := annotations["contract"]
+	if !ok || contractB64 == "" {
 		return nil, fmt.Errorf("plugin-contract annotation not found in image metadata")
 	}
 	s.log.Debug("Contract base64 retrieved successfully", slog.String("contractb64", contractB64))
@@ -92,6 +137,22 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 	return ContractToDomain(contract), nil
 }
 
+// GetPluginContractFromFile reads the plugin contract from a file
+func GetPluginContractFromFile(contractFilePath string) (*internal.Plugin, error) {
+	contractBytes, err := os.ReadFile(contractFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read contract file: %w", err)
+	}
+
+	contract := new(PluginContract)
+	err = json.Unmarshal(contractBytes, contract)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal contract: %w", err)
+	}
+
+	return ContractToDomain(contract), nil
+}
+
 // ExtractPlugin downloads the plugin image and extracts it to the specified location
 func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, destination string) error {
 	// Create a scoped client for this specific plugin
@@ -99,7 +160,8 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, dest
 
 	pluginClient := s.client.WithSegment(pluginName)
 
-	img, err := pluginClient.GetImage(ctx, tag)
+	platform := &v1.Platform{Architecture: runtime.GOARCH, OS: runtime.GOOS}
+	img, err := pluginClient.GetImage(ctx, tag, client.WithPlatform{Platform: platform})
 	if err != nil {
 		return fmt.Errorf("failed to get image: %w", err)
 	}

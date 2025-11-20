@@ -25,13 +25,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/gojuno/minimock/v3"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/mock"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -336,7 +339,7 @@ func TestExtractPlugin_Success(t *testing.T) {
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetImageMock.
-		Expect(context.Background(), "v1.0.0").
+		Expect(context.Background(), "v1.0.0", client.WithPlatform{Platform: &v1.Platform{Architecture: runtime.GOARCH, OS: runtime.GOOS}}).
 		Return(mockImage, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
@@ -426,7 +429,7 @@ func TestExtractPlugin_MultipleLayersSuccess(t *testing.T) {
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetImageMock.
-		Expect(context.Background(), "v1.0.0").
+		Expect(context.Background(), "v1.0.0", client.WithPlatform{Platform: &v1.Platform{Architecture: runtime.GOARCH, OS: runtime.GOOS}}).
 		Return(mockImage, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
@@ -478,7 +481,7 @@ func TestExtractPlugin_ExtractImageLayersError(t *testing.T) {
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetImageMock.
-		Expect(context.Background(), "v1.0.0").
+		Expect(context.Background(), "v1.0.0", client.WithPlatform{Platform: &v1.Platform{Architecture: runtime.GOARCH, OS: runtime.GOOS}}).
 		Return(nil, expectedErr)
 
 	mockClient := mock.NewRegistryClientMock(mc)
@@ -535,7 +538,7 @@ func TestExtractPlugin_PathTraversalAttempt(t *testing.T) {
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetImageMock.
-		Expect(context.Background(), "v1.0.0").
+		Expect(context.Background(), "v1.0.0", client.WithPlatform{Platform: &v1.Platform{Architecture: runtime.GOARCH, OS: runtime.GOOS}}).
 		Return(mockImage, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
@@ -612,7 +615,7 @@ func TestExtractPlugin_EmptyRepository(t *testing.T) {
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetImageMock.
-		Expect(context.Background(), "v1.0.0").
+		Expect(context.Background(), "v1.0.0", client.WithPlatform{Platform: &v1.Platform{Architecture: runtime.GOARCH, OS: runtime.GOOS}}).
 		Return(mockImage, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
@@ -688,7 +691,7 @@ func TestExtractPlugin_NestedDirectories(t *testing.T) {
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetImageMock.
-		Expect(context.Background(), "v1.0.0").
+		Expect(context.Background(), "v1.0.0", client.WithPlatform{Platform: &v1.Platform{Architecture: runtime.GOARCH, OS: runtime.GOOS}}).
 		Return(mockImage, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
