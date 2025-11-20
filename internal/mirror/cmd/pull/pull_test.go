@@ -35,11 +35,11 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
-	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
 	mock "github.com/deckhouse/deckhouse-cli/pkg/mock"
+	"github.com/deckhouse/deckhouse/pkg/registry"
 )
 
 func TestNewCommand(t *testing.T) {
@@ -960,7 +960,7 @@ func TestFindTagsToMirrorWithVersionsSuccess(t *testing.T) {
 	defer func() { versionsToMirrorFunc = originalVersionsToMirrorFunc }()
 
 	// Mock the function to return successful versions
-	versionsToMirrorFunc = func(pullParams *params.PullParams, client pkg.RegistryClient) ([]semver.Version, error) {
+	versionsToMirrorFunc = func(pullParams *params.PullParams, client registry.Client) ([]semver.Version, error) {
 		return []semver.Version{
 			*semver.MustParse("1.50.0"),
 			*semver.MustParse("1.51.0"),

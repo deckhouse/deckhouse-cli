@@ -18,8 +18,7 @@ package service
 
 import (
 	"github.com/deckhouse/deckhouse/pkg/log"
-
-	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse/pkg/registry"
 )
 
 const (
@@ -32,7 +31,7 @@ const (
 
 // Service provides high-level registry operations using a registry client
 type Service struct {
-	client pkg.RegistryClient
+	client registry.Client
 
 	modulesService   *ModulesService
 	pluginService    *PluginService
@@ -43,7 +42,7 @@ type Service struct {
 }
 
 // NewService creates a new registry service with the given client and logger
-func NewService(client pkg.RegistryClient, logger *log.Logger) *Service {
+func NewService(client registry.Client, logger *log.Logger) *Service {
 	s := &Service{
 		client: client,
 		logger: logger,

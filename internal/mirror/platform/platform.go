@@ -34,6 +34,7 @@ import (
 	"github.com/samber/lo"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	"github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
@@ -43,7 +44,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 

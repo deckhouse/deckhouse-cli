@@ -31,7 +31,8 @@ import (
 	"github.com/samber/lo"
 	"github.com/samber/lo/parallel"
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse/pkg/registry"
+
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
@@ -40,7 +41,7 @@ import (
 )
 
 func PushLayoutToRepo(
-	client pkg.RegistryClient,
+	client registry.Client,
 	imagesLayout layout.Path,
 	registryRepo string,
 	authProvider authn.Authenticator,
@@ -63,7 +64,7 @@ func PushLayoutToRepo(
 
 func PushLayoutToRepoContext(
 	ctx context.Context,
-	client pkg.RegistryClient,
+	client registry.Client,
 	imagesLayout layout.Path,
 	registryRepo string,
 	authProvider authn.Authenticator,
@@ -138,7 +139,7 @@ func PushLayoutToRepoContext(
 
 func pushImage(
 	ctx context.Context,
-	client pkg.RegistryClient,
+	client registry.Client,
 	registryRepo string,
 	index v1.ImageIndex,
 	manifest v1.Descriptor,

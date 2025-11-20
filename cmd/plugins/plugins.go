@@ -31,16 +31,16 @@ import (
 	"github.com/spf13/cobra"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	"github.com/deckhouse/deckhouse/pkg/registry"
 
 	"github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
 	"github.com/deckhouse/deckhouse-cli/internal"
-	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 type PluginsCommand struct {
 	service              *service.PluginService
-	pluginRegistryClient pkg.RegistryClient
+	pluginRegistryClient registry.Client
 
 	logger *dkplog.Logger
 }

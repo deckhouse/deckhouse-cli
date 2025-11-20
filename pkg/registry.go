@@ -22,6 +22,8 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
+	"github.com/deckhouse/deckhouse/pkg/registry"
+
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
 )
 
@@ -111,7 +113,7 @@ type RegistryClient interface {
 
 // BasicService defines common registry operations with standardized logging
 type BasicService interface {
-	GetImage(ctx context.Context, tag string, opts ...ImageGetOption) (RegistryImage, error)
+	GetImage(ctx context.Context, tag string, opts ...registry.ImageGetOption) (RegistryImage, error)
 	GetDigest(ctx context.Context, tag string) (*v1.Hash, error)
 	CheckImageExists(ctx context.Context, tag string) error
 	ListTags(ctx context.Context) ([]string, error)

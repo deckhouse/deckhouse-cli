@@ -22,6 +22,8 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
+	"github.com/deckhouse/deckhouse/pkg/registry"
+
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
@@ -34,7 +36,7 @@ type PushConfig struct {
 	Name          string
 	ImageSet      map[string]struct{}
 	Layout        *regimage.ImageLayout
-	PutterService pkg.RegistryClient
+	PutterService registry.Client
 }
 
 // SplitImageRefByRepoAndTag splits an image reference into repository and tag parts

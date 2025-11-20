@@ -10,8 +10,9 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 
+	"github.com/deckhouse/deckhouse/pkg/registry/client"
+
 	"github.com/deckhouse/deckhouse-cli/pkg"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 const (

@@ -27,15 +27,16 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"golang.org/x/exp/maps"
 
+	"github.com/deckhouse/deckhouse/pkg/registry"
+
 	"github.com/deckhouse/deckhouse-cli/internal"
-	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 )
 
-func VersionsToMirror(pullParams *params.PullParams, client pkg.RegistryClient) ([]semver.Version, error) {
+func VersionsToMirror(pullParams *params.PullParams, client registry.Client) ([]semver.Version, error) {
 	logger := pullParams.Logger
 
 	releaseChannelsToCopy := internal.GetAllDefaultReleaseChannels()
@@ -83,7 +84,7 @@ func VersionsToMirror(pullParams *params.PullParams, client pkg.RegistryClient) 
 	return deduplicateVersions(append(vers, versionsAboveMinimal...)), nil
 }
 
-func getReleasedTagsFromRegistry(pullParams *params.PullParams, client pkg.RegistryClient) ([]string, error) {
+func getReleasedTagsFromRegistry(pullParams *params.PullParams, client registry.Client) ([]string, error) {
 	logger := pullParams.Logger
 
 	nameOpts, _ := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&pullParams.BaseParams)
@@ -188,7 +189,7 @@ func FetchVersionsFromModuleReleaseChannels(
 	releaseChannelImages map[string]struct{},
 	authProvider authn.Authenticator,
 	insecure, skipVerifyTLS bool,
-	client pkg.RegistryClient,
+	client registry.Client,
 ) (map[string]string, error) {
 	nameOpts, _ := auth.MakeRemoteRegistryRequestOptions(authProvider, insecure, skipVerifyTLS)
 	channelVersions := map[string]string{}

@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -30,13 +31,137 @@ import (
 
 	"github.com/gojuno/minimock/v3"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/mock"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
+	"github.com/deckhouse/deckhouse/pkg/registry"
+	"github.com/deckhouse/deckhouse/pkg/registry/client"
 )
+
+// DescriptorStub implements registry.Descriptor
+type DescriptorStub struct {
+	MediaType string
+	Size      int64
+	Digest    string
+}
+
+func (d *DescriptorStub) GetAnnotations() map[string]string {
+	return map[string]string{}
+}
+
+func (d *DescriptorStub) GetArtifactType() string {
+	return ""
+}
+
+func (d *DescriptorStub) GetData() []byte {
+	return nil
+}
+
+func (d *DescriptorStub) GetDigest() v1.Hash {
+	h, _ := v1.NewHash(d.Digest)
+	return h
+}
+
+func (d *DescriptorStub) GetMediaType() types.MediaType {
+	return types.MediaType(d.MediaType)
+}
+
+func (d *DescriptorStub) GetSize() int64 {
+	return d.Size
+}
+
+func (d *DescriptorStub) GetPlatform() *v1.Platform {
+	return nil
+}
+
+func (d *DescriptorStub) GetURLs() []string {
+	return nil
+}
+
+// ManifestStub implements registry.Manifest
+type ManifestStub struct {
+	data []byte
+}
+
+func (m *ManifestStub) GetAnnotations() map[string]string {
+	var manifest map[string]interface{}
+	err := json.Unmarshal(m.data, &manifest)
+	if err != nil {
+		return nil
+	}
+	if annotations, ok := manifest["annotations"].(map[string]interface{}); ok {
+		result := make(map[string]string)
+		for k, v := range annotations {
+			if s, ok := v.(string); ok {
+				result[k] = s
+			}
+		}
+		return result
+	}
+	return nil
+}
+
+func (m *ManifestStub) GetConfig() registry.Descriptor {
+	return &DescriptorStub{
+		MediaType: "application/vnd.docker.container.image.v1+json",
+		Size:      1469,
+		Digest:    "sha256:b5d2b2c507a0944348e0303114d8d93aaaa081732b86451d9bce1f432a537bc7",
+	}
+}
+
+func (m *ManifestStub) GetLayers() []registry.Descriptor {
+	return []registry.Descriptor{
+		&DescriptorStub{
+			MediaType: "application/vnd.docker.image.rootfs.diff.tar.gzip",
+			Size:      32654,
+			Digest:    "sha256:e692418e4cbaf90ca69d05a66403747baa33ee08806650b51fab815ad7fc331f",
+		},
+	}
+}
+
+func (m *ManifestStub) GetMediaType() types.MediaType {
+	return "application/vnd.docker.distribution.manifest.v2+json"
+}
+
+func (m *ManifestStub) GetSchemaVersion() int64 {
+	return 2
+}
+
+func (m *ManifestStub) GetSubject() registry.Descriptor {
+	return nil
+}
+
+// ManifestResultStub implements registry.ManifestResult
+type ManifestResultStub struct {
+	data []byte
+}
+
+func (m *ManifestResultStub) RawManifest() []byte {
+	return m.data
+}
+
+func (m *ManifestResultStub) GetDescriptor() registry.Descriptor {
+	return &DescriptorStub{
+		MediaType: "application/vnd.docker.distribution.manifest.v2+json",
+		Size:      int64(len(m.data)),
+		Digest:    "sha256:stub",
+	}
+}
+
+func (m *ManifestResultStub) GetIndexManifest() (registry.IndexManifest, error) {
+	return nil, nil
+}
+
+func (m *ManifestResultStub) GetMediaType() types.MediaType {
+	return "application/vnd.docker.distribution.manifest.v2+json"
+}
+
+func (m *ManifestResultStub) GetManifest() (registry.Manifest, error) {
+	return &ManifestStub{data: m.data}, nil
+}
 
 func TestGetPluginContract_Success(t *testing.T) {
 	// Arrange
@@ -44,12 +169,12 @@ func TestGetPluginContract_Success(t *testing.T) {
 
 	contractJSON := `{"name": "test-plugin", "version": "v1.0.0", "description": "A test plugin", "env": [{"name": "TEST_ENV"}], "flags": [{"name": "--test-flag"}], "requirements": {"kubernetes": {"constraint": ">= 1.26"}, "modules": [{"name": "test-module", "constraint": ">= 1.0.0"}]}}`
 	contractB64 := base64.StdEncoding.EncodeToString([]byte(contractJSON))
-	manifestJSON := `{"annotations": {"contract": "` + contractB64 + `"}}`
+	manifestJSON := `{"annotations": {"plugin-contract": "` + contractB64 + `"}}`
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetManifestMock.
 		Expect(context.Background(), "v1.0.0").
-		Return([]byte(manifestJSON), nil)
+		Return(&ManifestResultStub{data: []byte(manifestJSON)}, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
@@ -114,12 +239,12 @@ func TestGetPluginContract_MinimalContract(t *testing.T) {
 
 	contractJSON := `{"name": "minimal-plugin", "version": "v1.0.0", "description": "Minimal plugin"}`
 	contractB64 := base64.StdEncoding.EncodeToString([]byte(contractJSON))
-	manifestJSON := `{"annotations": {"contract": "` + contractB64 + `"}}`
+	manifestJSON := `{"annotations": {"plugin-contract": "` + contractB64 + `"}}`
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetManifestMock.
 		Expect(context.Background(), "v1.0.0").
-		Return([]byte(manifestJSON), nil)
+		Return(&ManifestResultStub{data: []byte(manifestJSON)}, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
@@ -163,7 +288,7 @@ func TestGetPluginContract_LabelNotFound(t *testing.T) {
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetManifestMock.
 		Expect(context.Background(), "v1.0.0").
-		Return([]byte(manifestJSON), nil)
+		Return(&ManifestResultStub{data: []byte(manifestJSON)}, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
@@ -233,12 +358,12 @@ func TestGetPluginContract_InvalidJSON(t *testing.T) {
 
 	invalidContractJSON := `{invalid json`
 	contractB64 := base64.StdEncoding.EncodeToString([]byte(invalidContractJSON))
-	manifestJSON := `{"annotations": {"contract": "` + contractB64 + `"}}`
+	manifestJSON := `{"annotations": {"plugin-contract": "` + contractB64 + `"}}`
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetManifestMock.
 		Expect(context.Background(), "v1.0.0").
-		Return([]byte(manifestJSON), nil)
+		Return(&ManifestResultStub{data: []byte(manifestJSON)}, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.
@@ -267,12 +392,12 @@ func TestGetPluginContract_EmptyJSON(t *testing.T) {
 
 	emptyContractJSON := `{}`
 	contractB64 := base64.StdEncoding.EncodeToString([]byte(emptyContractJSON))
-	manifestJSON := `{"annotations": {"contract": "` + contractB64 + `"}}`
+	manifestJSON := `{"annotations": {"plugin-contract": "` + contractB64 + `"}}`
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetManifestMock.
 		Expect(context.Background(), "v1.0.0").
-		Return([]byte(manifestJSON), nil)
+		Return(&ManifestResultStub{data: []byte(manifestJSON)}, nil)
 
 	mockClient := mock.NewRegistryClientMock(mc)
 	mockClient.WithSegmentMock.

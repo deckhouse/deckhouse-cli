@@ -30,9 +30,10 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
+	"github.com/deckhouse/deckhouse/pkg/registry"
+
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
-	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
@@ -56,7 +57,7 @@ func (m *Module) Versions() []*semver.Version {
 	return versions
 }
 
-func ForRepo(repo string, registryAuth authn.Authenticator, insecure, skipVerifyTLS bool, client pkg.RegistryClient) ([]Module, error) {
+func ForRepo(repo string, registryAuth authn.Authenticator, insecure, skipVerifyTLS bool, client registry.Client) ([]Module, error) {
 	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(registryAuth, insecure, skipVerifyTLS)
 	result, err := getModulesForRepo(repo, nameOpts, remoteOpts, client)
 	if err != nil {
@@ -70,7 +71,7 @@ func getModulesForRepo(
 	repo string,
 	nameOpts []name.Option,
 	remoteOpts []remote.Option,
-	client pkg.RegistryClient,
+	client registry.Client,
 ) ([]Module, error) {
 	modules, err := client.ListTags(context.TODO())
 	if err != nil {
@@ -121,7 +122,7 @@ func FindExternalModuleImages(
 	filter *Filter,
 	authProvider authn.Authenticator,
 	insecure, skipVerifyTLS bool,
-	client pkg.RegistryClient,
+	client registry.Client,
 ) ( /*moduleImages*/ []string /*moduleImagesWithExternal*/, map[string]struct{} /*releaseImages*/, map[string]struct{}, error) {
 	logger := params.Logger
 
@@ -271,7 +272,7 @@ func FindModuleExtraImages(
 	moduleImages []string,
 	_ authn.Authenticator,
 	_, _ bool,
-	client pkg.RegistryClient,
+	client registry.Client,
 ) ( /*extraImages*/ map[string]struct{}, error) {
 	logger := params.Logger
 

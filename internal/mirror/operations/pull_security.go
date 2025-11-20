@@ -23,14 +23,15 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/deckhouse/deckhouse/pkg/registry"
+
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
-	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
-func PullSecurityDatabases(pullParams *params.PullParams, client pkg.RegistryClient) error {
+func PullSecurityDatabases(pullParams *params.PullParams, client registry.Client) error {
 	var err error
 	logger := pullParams.Logger
 	tmpDir := filepath.Join(pullParams.WorkingDir, "security")

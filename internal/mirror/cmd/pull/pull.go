@@ -35,6 +35,8 @@ import (
 	"github.com/spf13/cobra"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	"github.com/deckhouse/deckhouse/pkg/registry"
+	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
@@ -43,12 +45,10 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/releases"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
-	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
-	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	"github.com/deckhouse/deckhouse-cli/pkg/stub"
 )
@@ -121,7 +121,7 @@ func setupLogger() *log.SLogger {
 	return log.NewSLogger(logLevel)
 }
 
-func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger, client pkg.RegistryClient) ([]string, error) {
+func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger, client registry.Client) ([]string, error) {
 	if pullParams.DeckhouseTag != "" {
 		logger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
 		return []string{pullParams.DeckhouseTag}, nil
@@ -248,7 +248,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 			clientOpts.Auth = p.params.RegistryAuth
 		}
 
-		var c pkg.RegistryClient
+		var c registry.Client
 		c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
 		if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
@@ -328,7 +328,7 @@ func (p *Puller) pullPlatform() error {
 		clientOpts.Auth = p.params.RegistryAuth
 	}
 
-	var c pkg.RegistryClient
+	var c registry.Client
 	c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
 	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
@@ -400,7 +400,7 @@ func (p *Puller) pullSecurityDatabases() error {
 		clientOpts.Auth = p.params.RegistryAuth
 	}
 
-	var c pkg.RegistryClient
+	var c registry.Client
 	c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
 	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
@@ -461,7 +461,7 @@ func (p *Puller) pullModules() error {
 		clientOpts.Auth = p.params.RegistryAuth
 	}
 
-	var c pkg.RegistryClient
+	var c registry.Client
 	c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
 
 	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {

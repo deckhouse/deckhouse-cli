@@ -28,15 +28,16 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse/pkg/registry"
+	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
+
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
-	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
-func PullInstallers(pullParams *params.PullParams, layouts *ImageLayouts, client pkg.RegistryClient) error {
+func PullInstallers(pullParams *params.PullParams, layouts *ImageLayouts, client registry.Client) error {
 	pullParams.Logger.InfoLn("Beginning to pull installers")
 	if err := PullImageSet(
 		pullParams,
@@ -51,7 +52,7 @@ func PullInstallers(pullParams *params.PullParams, layouts *ImageLayouts, client
 	return nil
 }
 
-func PullStandaloneInstallers(pullParams *params.PullParams, layouts *ImageLayouts, client pkg.RegistryClient) error {
+func PullStandaloneInstallers(pullParams *params.PullParams, layouts *ImageLayouts, client registry.Client) error {
 	pullParams.Logger.InfoLn("Beginning to pull standalone installers")
 	if err := PullImageSet(
 		pullParams,
@@ -67,7 +68,7 @@ func PullStandaloneInstallers(pullParams *params.PullParams, layouts *ImageLayou
 	return nil
 }
 
-func PullDeckhouseReleaseChannels(pullParams *params.PullParams, layouts *ImageLayouts, client pkg.RegistryClient) error {
+func PullDeckhouseReleaseChannels(pullParams *params.PullParams, layouts *ImageLayouts, client registry.Client) error {
 	pullParams.Logger.InfoLn("Beginning to pull Deckhouse release channels information")
 	if err := PullImageSet(
 		pullParams,
@@ -83,7 +84,7 @@ func PullDeckhouseReleaseChannels(pullParams *params.PullParams, layouts *ImageL
 	return nil
 }
 
-func PullDeckhouseImages(pullParams *params.PullParams, layouts *ImageLayouts, client pkg.RegistryClient) error {
+func PullDeckhouseImages(pullParams *params.PullParams, layouts *ImageLayouts, client registry.Client) error {
 	pullParams.Logger.InfoLn("Beginning to pull Deckhouse, this may take a while")
 	if err := PullImageSet(
 		pullParams,
@@ -98,7 +99,7 @@ func PullDeckhouseImages(pullParams *params.PullParams, layouts *ImageLayouts, c
 	return nil
 }
 
-func PullModules(pullParams *params.PullParams, layouts *ImageLayouts, client pkg.RegistryClient) error {
+func PullModules(pullParams *params.PullParams, layouts *ImageLayouts, client registry.Client) error {
 	for moduleName, moduleData := range layouts.Modules {
 		// Skip main module images if only pulling extra images
 		if !pullParams.OnlyExtraImages {
@@ -160,7 +161,7 @@ func PullModules(pullParams *params.PullParams, layouts *ImageLayouts, client pk
 func PullTrivyVulnerabilityDatabasesImages(
 	pullParams *params.PullParams,
 	layouts *ImageLayouts,
-	client pkg.RegistryClient,
+	client registry.Client,
 ) error {
 	nameOpts, _ := auth.MakeRemoteRegistryRequestOptionsFromMirrorParams(&pullParams.BaseParams)
 
@@ -196,7 +197,7 @@ func PullImageSet(
 	pullParams *params.PullParams,
 	targetLayout layout.Path,
 	imageSet map[string]struct{},
-	client pkg.RegistryClient,
+	client registry.Client,
 	opts ...func(opts *pullImageSetOptions),
 ) error {
 	logger := pullParams.Logger

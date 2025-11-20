@@ -23,11 +23,9 @@ import (
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
-	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
-	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
@@ -107,10 +105,7 @@ func (ps *PullerService) PullImageSet(
 					return nil
 				}
 
-				pb := &progress.DownloadBar{}
-				defer pb.Abort(true)
-
-				img, err := imageGetter(ctx, "@"+imageMeta.Digest.String(), regclient.WithDownloadBar{Bar: pb})
+				img, err := imageGetter(ctx, "@"+imageMeta.Digest.String())
 				if err != nil {
 					logger.Debugf("failed to pull image %s: %v", imageMeta.TagReference, err)
 
