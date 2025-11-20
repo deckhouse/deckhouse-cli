@@ -23,9 +23,9 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	"github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	d8flags "github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 

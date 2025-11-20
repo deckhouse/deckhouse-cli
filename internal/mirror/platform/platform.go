@@ -34,6 +34,7 @@ import (
 	"github.com/samber/lo"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	"github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
@@ -43,7 +44,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -69,7 +69,7 @@ type Service struct {
 }
 
 func NewService(
-	deckhouseService *registryservice.DeckhouseService,
+	registryService *registryservice.Service,
 	sinceVersion *semver.Version,
 	workingDir string,
 	targetTag string,
@@ -86,10 +86,12 @@ func NewService(
 		userLogger.Warnf("Create OCI Image Layouts: %v", err)
 	}
 
+	rootURL := registryService.GetRoot()
+
 	return &Service{
-		deckhouseService: deckhouseService,
+		deckhouseService: registryService.DeckhouseService(),
 		layout:           layout,
-		downloadList:     NewImageDownloadList(deckhouseService.GetRoot()),
+		downloadList:     NewImageDownloadList(rootURL),
 		pullerService:    puller.NewPullerService(logger, userLogger),
 		sinceVersion:     sinceVersion,
 		targetTag:        targetTag,

@@ -18,38 +18,52 @@ package service
 
 import (
 	"github.com/deckhouse/deckhouse/pkg/log"
+	"github.com/deckhouse/deckhouse/pkg/registry"
+)
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
+const (
+	moduleSegment   = "modules"
+	pluginSegment   = "plugins"
+	securitySegment = "security"
+
+	securityServiceName = "security"
 )
 
 // Service provides high-level registry operations using a registry client
 type Service struct {
-	client pkg.RegistryClient
+	client registry.Client
 
-	moduleService    *ModuleService
+	modulesService   *ModulesService
 	pluginService    *PluginService
 	deckhouseService *DeckhouseService
+	security         *SecurityServices
 
 	logger *log.Logger
 }
 
 // NewService creates a new registry service with the given client and logger
-func NewService(client pkg.RegistryClient, logger *log.Logger) *Service {
+func NewService(client registry.Client, logger *log.Logger) *Service {
 	s := &Service{
 		client: client,
 		logger: logger,
 	}
 
-	s.moduleService = NewModuleService(client.WithSegment("modules"), logger.Named("modules"))
-	s.pluginService = NewPluginService(client.WithSegment("plugins"), logger.Named("plugins"))
+	s.modulesService = NewModulesService(client.WithSegment(moduleSegment), logger.Named("modules"))
+	s.pluginService = NewPluginService(client.WithSegment(pluginSegment), logger.Named("plugins"))
 	s.deckhouseService = NewDeckhouseService(client, logger.Named("deckhouse"))
+	s.security = NewSecurityServices(securityServiceName, client.WithSegment(securitySegment), logger.Named("security"))
 
 	return s
 }
 
+// GetRoot gets path of the registry root
+func (s *Service) GetRoot() string {
+	return s.client.GetRegistry()
+}
+
 // ModuleService returns the module service
-func (s *Service) ModuleService() *ModuleService {
-	return s.moduleService
+func (s *Service) ModuleService() *ModulesService {
+	return s.modulesService
 }
 
 // PluginService returns the plugin service
@@ -60,4 +74,8 @@ func (s *Service) PluginService() *PluginService {
 // DeckhouseService returns the deckhouse service
 func (s *Service) DeckhouseService() *DeckhouseService {
 	return s.deckhouseService
+}
+
+func (s *Service) Security() *SecurityServices {
+	return s.security
 }

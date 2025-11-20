@@ -25,17 +25,18 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/deckhouse/deckhouse/pkg/registry"
+
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/manifests"
-	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
-func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string, client pkg.RegistryClient) error {
+func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string, client registry.Client) error {
 	logger := pullParams.Logger
 	tmpDir := filepath.Join(pullParams.WorkingDir, "platform")
 

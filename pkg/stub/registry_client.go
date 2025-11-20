@@ -31,6 +31,9 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 
+	"github.com/deckhouse/deckhouse/pkg/registry"
+	"github.com/deckhouse/deckhouse/pkg/registry/client"
+
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
@@ -444,7 +447,7 @@ func (i *ImageMetaStub) GetDigest() *v1.Hash {
 }
 
 // NewRegistryClientStub creates a new stub registry client
-func NewRegistryClientStub() pkg.RegistryClient {
+func NewRegistryClientStub() registry.Client {
 	stub := &RegistryClientStub{
 		registries: make(map[string]*RegistryData),
 	}
@@ -686,7 +689,7 @@ func (s *RegistryClientStub) createMockImageData(reg, repo, tag string) *ImageDa
 }
 
 // WithSegment creates a new client with an additional scope path segment
-func (s *RegistryClientStub) WithSegment(segments ...string) pkg.RegistryClient {
+func (s *RegistryClientStub) WithSegment(segments ...string) registry.Client {
 	newRegistry := s.currentRegistry
 	if len(segments) > 0 {
 		if newRegistry == "" {
@@ -739,13 +742,13 @@ func (s *RegistryClientStub) GetDigest(_ context.Context, tag string) (*v1.Hash,
 }
 
 // GetManifest retrieves the manifest for a specific image tag
-func (s *RegistryClientStub) GetManifest(_ context.Context, tag string) ([]byte, error) {
+func (s *RegistryClientStub) GetManifest(_ context.Context, tag string) (registry.ManifestResult, error) {
 	registry, repo := s.findRegistryAndRepo()
 
 	if regData, exists := s.registries[registry]; exists {
 		if repoData, exists := regData.repositories[repo]; exists {
 			if imageData, exists := repoData.images[tag]; exists {
-				return imageData.manifest, nil
+				return client.NewManifestResultFromBytes(imageData.manifest), nil
 			}
 		}
 	}
@@ -754,7 +757,7 @@ func (s *RegistryClientStub) GetManifest(_ context.Context, tag string) ([]byte,
 	for _, regData := range s.registries {
 		for _, repoData := range regData.repositories {
 			if imageData, exists := repoData.images[tag]; exists {
-				return imageData.manifest, nil
+				return client.NewManifestResultFromBytes(imageData.manifest), nil
 			}
 		}
 	}
@@ -808,7 +811,7 @@ func (s *RegistryClientStub) CheckImageExists(_ context.Context, tag string) err
 }
 
 // GetImage retrieves an image for a specific reference
-func (s *RegistryClientStub) GetImage(_ context.Context, tag string, _ ...pkg.ImageGetOption) (pkg.ClientImage, error) {
+func (s *RegistryClientStub) GetImage(_ context.Context, tag string, _ ...registry.ImageGetOption) (registry.Image, error) {
 	// Handle digest references (start with @)
 	if strings.HasPrefix(tag, "@") {
 		digestStr := strings.TrimPrefix(tag, "@")
@@ -852,7 +855,7 @@ func (s *RegistryClientStub) GetImage(_ context.Context, tag string, _ ...pkg.Im
 }
 
 // PushImage pushes an image to the registry
-func (s *RegistryClientStub) PushImage(_ context.Context, _ string, _ v1.Image, _ ...pkg.ImagePutOption) error {
+func (s *RegistryClientStub) PushImage(_ context.Context, _ string, _ v1.Image, _ ...registry.ImagePutOption) error {
 	// Stub implementation - always succeeds
 	return nil
 }

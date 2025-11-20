@@ -27,13 +27,14 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/random"
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse/pkg/registry"
+
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
-func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader, client pkg.RegistryClient) error {
+func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader, client registry.Client) error {
 	logger := pushParams.Logger
 
 	packageDir := filepath.Join(pushParams.WorkingDir, "modules", moduleName)

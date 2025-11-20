@@ -25,6 +25,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
+	"github.com/deckhouse/deckhouse/pkg/registry"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
@@ -33,12 +34,12 @@ import (
 // BasicService provides common registry operations with standardized logging
 type BasicService struct {
 	name   string
-	client pkg.RegistryClient
+	client registry.Client
 	logger *log.Logger
 }
 
 // NewBasicService creates a new basic service
-func NewBasicService(name string, client pkg.RegistryClient, logger *log.Logger) *BasicService {
+func NewBasicService(name string, client registry.Client, logger *log.Logger) *BasicService {
 	return &BasicService{
 		name:   name,
 		client: client,
@@ -47,7 +48,7 @@ func NewBasicService(name string, client pkg.RegistryClient, logger *log.Logger)
 }
 
 // GetImage retrieves an image from the registry
-func (s *BasicService) GetImage(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.RegistryImage, error) {
+func (s *BasicService) GetImage(ctx context.Context, tag string, opts ...registry.ImageGetOption) (pkg.RegistryImage, error) {
 	logger := s.logger.With(slog.String("service", s.name), slog.String("tag", tag))
 
 	logger.Debug("Getting image")

@@ -30,31 +30,20 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
+	"github.com/deckhouse/deckhouse/pkg/registry"
+	"github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
-	"github.com/deckhouse/deckhouse-cli/pkg"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 // PluginService provides high-level operations for plugin management
 type PluginService struct {
-	client pkg.RegistryClient
+	client registry.Client
 	log    *log.Logger
 }
 
-type manifestSchema struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	MediaType     string `json:"mediaType"`
-	Manifests     []struct {
-		MediaType string `json:"mediaType,omitempty"`
-		Size      int    `json:"size,omitempty"`
-		Digest    string `json:"digest,omitempty"`
-	} `json:"manifests"`
-	Annotations map[string]string `json:"annotations,omitempty"`
-}
-
 // NewPluginService creates a new plugin service
-func NewPluginService(client pkg.RegistryClient, logger *log.Logger) *PluginService {
+func NewPluginService(client registry.Client, logger *log.Logger) *PluginService {
 	return &PluginService{
 		client: client,
 		log:    logger,
@@ -70,59 +59,69 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 
 	pluginClient := s.client.WithSegment(pluginName)
 
-	manifestRaw, err := pluginClient.GetManifest(ctx, tag)
+	digestManifestResult, err := pluginClient.GetManifest(ctx, tag)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get manifest: %w", err)
 	}
-	s.log.Debug("Manifest retrieved successfully", slog.String("manifestraw", string(manifestRaw)))
 
-	manifest := manifestSchema{}
-	err = json.Unmarshal(manifestRaw, &manifest)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal manifest: %w", err)
-	}
+	var manifest registry.Manifest
 
 	// multiarch manifests are just list of manifests, we need to get the image manifest
-	if manifest.MediaType == "application/vnd.oci.image.index.v1+json" {
-		if len(manifest.Manifests) == 0 {
+	if digestManifestResult.GetMediaType().IsIndex() {
+		indexManifest, err := digestManifestResult.GetIndexManifest()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get index manifest: %w", err)
+		}
+
+		if len(indexManifest.GetManifests()) == 0 {
 			return nil, fmt.Errorf("no manifests found in index manifest")
 		}
 
 		// hardcoded first
-		digest := manifest.Manifests[0].Digest
-		if digest == "" {
+		digest := indexManifest.GetManifests()[0].GetDigest()
+		if digest.String() == "" {
 			return nil, fmt.Errorf("no digest found in manifest")
 		}
 
-		manifestRaw, err = pluginClient.WithSegment("meta").GetManifest(ctx, "@"+digest)
+		digestClient := pluginClient.WithSegment("meta")
+
+		digestManifestResult, err = digestClient.GetManifest(ctx, "@"+digest.String())
 		if err != nil {
 			return nil, fmt.Errorf("failed to get manifest: %w", err)
 		}
 
-		err = json.Unmarshal(manifestRaw, &manifest)
+		manifest, err = digestManifestResult.GetManifest()
 		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal manifest: %w", err)
+			return nil, fmt.Errorf("failed to get manifest: %w", err)
+		}
+	} else {
+		manifest, err = digestManifestResult.GetManifest()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get manifest: %w", err)
 		}
 	}
 
-	if manifest.Annotations == nil {
+	if manifest.GetAnnotations() == nil {
 		return &internal.Plugin{
 			Name:    pluginName,
 			Version: tag,
 		}, nil
 	}
 
-	annotations := manifest.Annotations
-	contractB64, ok := annotations["contract"]
+	annotations := manifest.GetAnnotations()
+
+	contractB64, ok := annotations["plugin-contract"]
 	if !ok || contractB64 == "" {
 		return nil, fmt.Errorf("plugin-contract annotation not found in image metadata")
 	}
+
 	s.log.Debug("Contract base64 retrieved successfully", slog.String("contractb64", contractB64))
 
 	contractRaw, err := base64.StdEncoding.DecodeString(contractB64)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode contract: %w", err)
 	}
+
 	s.log.Debug("Contract raw retrieved successfully", slog.String("contractraw", string(contractRaw)))
 
 	contract := new(PluginContract)

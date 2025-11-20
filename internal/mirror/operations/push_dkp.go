@@ -26,13 +26,14 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse/pkg/registry"
+
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
-func PushDeckhousePlatform(pushParams *params.PushParams, pkg io.Reader, client pkg.RegistryClient) error {
+func PushDeckhousePlatform(pushParams *params.PushParams, pkg io.Reader, client registry.Client) error {
 	packageDir := filepath.Join(pushParams.WorkingDir, "platform")
 	if err := os.MkdirAll(packageDir, 0755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)

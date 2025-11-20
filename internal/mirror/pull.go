@@ -30,10 +30,7 @@ import (
 )
 
 type PullService struct {
-	// moduleService handles module-related registry operations
-	moduleService *registryservice.ModuleService
-	// deckhouseService handles Deckhouse platform registry operations
-	deckhouseService *registryservice.DeckhouseService
+	registryService *registryservice.Service
 
 	platformService *platform.Service
 	securityService *security.Service
@@ -56,12 +53,11 @@ func NewPullService(
 	userLogger *log.SLogger,
 ) *PullService {
 	return &PullService{
-		moduleService:    registryService.ModuleService(),
-		deckhouseService: registryService.DeckhouseService(),
+		registryService: registryService,
 
-		platformService: platform.NewService(registryService.DeckhouseService(), nil, tmpDir, targetTag, logger, userLogger),
-		securityService: security.NewService(registryService.DeckhouseService(), tmpDir, logger, userLogger),
-		modulesService:  modules.NewService(registryService.DeckhouseService(), tmpDir, logger, userLogger),
+		platformService: platform.NewService(registryService, nil, tmpDir, targetTag, logger, userLogger),
+		securityService: security.NewService(registryService, tmpDir, logger, userLogger),
+		modulesService:  modules.NewService(registryService, tmpDir, logger, userLogger),
 
 		layout: NewImageLayouts(),
 

@@ -22,12 +22,14 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
+	"github.com/deckhouse/deckhouse/pkg/registry"
+
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
 // ImageGetter is a function type for getting images from the registry
-type ImageGetter func(ctx context.Context, tag string, opts ...pkg.ImageGetOption) (pkg.RegistryImage, error)
+type ImageGetter func(ctx context.Context, tag string, opts ...registry.ImageGetOption) (pkg.RegistryImage, error)
 
 // PullConfig encapsulates the configuration for pulling images
 type PullConfig struct {

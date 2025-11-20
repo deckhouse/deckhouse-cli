@@ -33,15 +33,15 @@ import (
 	"github.com/spf13/cobra"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	"github.com/deckhouse/deckhouse/pkg/registry"
+	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
-	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
-	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 // CLI Parameters
@@ -107,7 +107,7 @@ func NewCommand() *cobra.Command {
 	return pushCmd
 }
 
-func pushModules(pushParams *params.PushParams, logger params.Logger, client pkg.RegistryClient) error {
+func pushModules(pushParams *params.PushParams, logger params.Logger, client registry.Client) error {
 	bundleContents, err := os.ReadDir(pushParams.BundleDir)
 	if err != nil {
 		return fmt.Errorf("List bundle directory: %w", err)
@@ -158,7 +158,7 @@ func pushModules(pushParams *params.PushParams, logger params.Logger, client pkg
 	return nil
 }
 
-func pushStaticPackages(pushParams *params.PushParams, logger params.Logger, client pkg.RegistryClient) error {
+func pushStaticPackages(pushParams *params.PushParams, logger params.Logger, client registry.Client) error {
 	packages := []string{"platform", "security"}
 	for _, pkgName := range packages {
 		pkg, err := openPackage(pushParams, pkgName)
@@ -331,7 +331,7 @@ func (p *Pusher) pushStaticPackages() error {
 		clientOpts.Auth = p.pushParams.RegistryAuth
 	}
 
-	var client pkg.RegistryClient
+	var client registry.Client
 	client = regclient.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
 
 	// Scope to the registry path and modules suffix
@@ -361,7 +361,7 @@ func (p *Pusher) pushModules() error {
 		clientOpts.Auth = p.pushParams.RegistryAuth
 	}
 
-	var client pkg.RegistryClient
+	var client registry.Client
 	client = regclient.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
 
 	// Scope to the registry path and modules suffix

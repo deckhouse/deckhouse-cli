@@ -33,11 +33,12 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"golang.org/x/exp/maps"
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse/pkg/registry"
+	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
+
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
-	regclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 type ModuleImageLayout struct {
@@ -280,7 +281,7 @@ func FindDeckhouseModulesImages(
 	layouts *ImageLayouts,
 	modulesData []modules.Module,
 	filter *modules.Filter,
-	client pkg.RegistryClient,
+	client registry.Client,
 ) error {
 	logger := params.Logger
 
@@ -499,7 +500,7 @@ func FindVexImage(
 	nameOpts []name.Option,
 	_ []remote.Option,
 	digest string,
-	client pkg.RegistryClient,
+	client registry.Client,
 ) (string, error) {
 	logger := params.Logger
 
