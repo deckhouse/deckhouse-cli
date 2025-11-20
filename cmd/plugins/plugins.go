@@ -59,10 +59,14 @@ type pluginsListData struct {
 	RegistryError error
 }
 
-func NewPluginsCommand(logger *dkplog.Logger) *cobra.Command {
-	pc := &PluginsCommand{
+func NewPluginsCommand(logger *dkplog.Logger) *PluginsCommand {
+	return &PluginsCommand{
 		logger: logger,
 	}
+}
+
+func NewCommand(logger *dkplog.Logger) *cobra.Command {
+	pc := NewPluginsCommand(logger)
 
 	cmd := &cobra.Command{
 		Use:    "plugins",
@@ -70,12 +74,7 @@ func NewPluginsCommand(logger *dkplog.Logger) *cobra.Command {
 		Hidden: true,
 		PersistentPreRun: func(_ *cobra.Command, _ []string) {
 			// init plugin services for subcommands after flags are parsed
-			pc.initPluginServices()
-			// set plugins directory
-			envCliPath := os.Getenv("DECKHOUSE_CLI_PATH")
-			if envCliPath != "" {
-				flags.DeckhousePluginsDir = envCliPath
-			}
+			pc.InitPluginServices()
 		},
 	}
 
@@ -469,7 +468,7 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 			pluginName := args[0]
 			ctx := cmd.Context()
 
-			return pc.installPlugin(ctx, pluginName, version, useMajor)
+			return pc.InstallPlugin(ctx, pluginName, version, useMajor)
 		},
 	}
 
@@ -482,7 +481,7 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 // function checks if plugin can be installed, creates folders layout and then installs plugin, creates symlink "current" and caches contract.json
 // if version (e.g. v1.0.0) is not specified - use latest version
 // if useMajor > -1 (can be 0) - use specific major version
-func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName, version string, useMajor int) error {
+func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName, version string, useMajor int) error {
 	// create plugin directory if it doesn't exist
 	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin
 	pluginDir := path.Join(flags.DeckhousePluginsDir, "plugins", pluginName)
@@ -675,7 +674,7 @@ func (pc *PluginsCommand) pluginsUpdateCommand() *cobra.Command {
 
 			ctx := cmd.Context()
 
-			return pc.installPlugin(ctx, pluginName, "", -1)
+			return pc.InstallPlugin(ctx, pluginName, "", -1)
 		},
 	}
 
@@ -701,7 +700,7 @@ func (pc *PluginsCommand) pluginsUpdateAllCommand() *cobra.Command {
 			}
 
 			for _, plugin := range plugins {
-				err := pc.installPlugin(ctx, plugin.Name(), "", -1)
+				err := pc.InstallPlugin(ctx, plugin.Name(), "", -1)
 				if err != nil {
 					return fmt.Errorf("failed to update plugin: %w", err)
 				}

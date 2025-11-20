@@ -22,8 +22,6 @@ import (
 	"log"
 	"log/slog"
 	"os"
-	"os/exec"
-	"path"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -86,6 +84,11 @@ func NewRootCommand() *RootCommand {
 		flags.DeckhousePluginsDir = envCliPath
 	}
 
+	envRegistryRepo := os.Getenv("DECKHOUSE_REGISTRY_REPO")
+	if envRegistryRepo != "" {
+		flags.SourceRegistryRepo = envRegistryRepo
+	}
+
 	rootCmd.registerCommands()
 	rootCmd.cmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 
@@ -102,49 +105,24 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(mirror.NewCommand())
 	r.cmd.AddCommand(status.NewCommand())
 	r.cmd.AddCommand(tools.NewCommand())
-	r.cmd.AddCommand(system.NewCommand())
 	r.cmd.AddCommand(commands.NewVirtualizationCommand())
 	r.cmd.AddCommand(commands.NewKubectlCommand())
 	r.cmd.AddCommand(commands.NewLoginCommand())
 	r.cmd.AddCommand(commands.NewStrongholdCommand())
 	r.cmd.AddCommand(commands.NewHelpJSONCommand(r.cmd))
 
-	r.cmd.AddCommand(plugins.NewPluginsCommand(r.logger.Named("plugins-command")))
+	if os.Getenv("DECKHOUSE_PLUGINS_ENABLED") != "true" {
+		r.cmd.AddCommand(system.NewCommand())
+	} else {
+		r.cmd.AddCommand(system.NewPluginCommand(r.logger.Named("system-command")))
+	}
+
+	r.cmd.AddCommand(plugins.NewCommand(r.logger.Named("plugins-command")))
 
 	err := os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
 	if err != nil {
 		r.logger.Debug("Failed to create plugins directory", slog.String("error", err.Error()))
 	}
-
-	path, err := os.ReadDir(flags.DeckhousePluginsDir + "/plugins")
-	if err != nil {
-		r.logger.Debug("Failed to read plugins directory", slog.String("error", err.Error()))
-	}
-
-	for _, plugin := range path {
-		r.cmd.AddCommand(r.addCustomCommands(plugin.Name()))
-	}
-}
-
-func (r *RootCommand) addCustomCommands(pluginName string) *cobra.Command {
-	pluginPath := path.Join(flags.DeckhousePluginsDir, "plugins", pluginName)
-	pluginBinaryPath := path.Join(pluginPath, "current")
-	cmd := &cobra.Command{
-		Use:                pluginName,
-		Short:              pluginName,
-		DisableFlagParsing: true,
-		Run: func(cmd *cobra.Command, args []string) {
-			command := exec.CommandContext(cmd.Context(), pluginBinaryPath, args...)
-			command.Stdout = os.Stdout
-			command.Stderr = os.Stderr
-
-			err := command.Run()
-			if err != nil {
-				r.logger.Warn("Failed to run plugin", slog.String("error", err.Error()))
-			}
-		},
-	}
-	return cmd
 }
 
 func (r *RootCommand) Execute() error {
