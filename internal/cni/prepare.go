@@ -65,15 +65,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	}
 	fmt.Printf("✅ Kubernetes client created (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
 
-	// 2. Create the dedicated namespace
-	fmt.Printf("Creating dedicated namespace '%s'...\n", cniSwitchNamespace)
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: cniSwitchNamespace}}
-	if err = rtClient.Create(ctx, ns); err != nil && !errors.IsAlreadyExists(err) {
-		return fmt.Errorf("creating namespace %s: %w", cniSwitchNamespace, err)
-	}
-	fmt.Print("✅ Namespace ensured\n\n")
-
-	// 3. Find an existing migration or create a new one
+	// 2. Find an existing migration or create a new one
 	activeMigration, err := getOrCreateMigrationForPrepare(ctx, rtClient, targetCNI)
 	if err != nil {
 		return err
@@ -87,6 +79,14 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 		activeMigration.Name,
 		time.Since(startTime).Round(time.Millisecond),
 	)
+
+	// 3. Create the dedicated namespace
+	fmt.Printf("Creating dedicated namespace '%s'...\n", cniSwitchNamespace)
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: cniSwitchNamespace}}
+	if err = rtClient.Create(ctx, ns); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating namespace %s: %w", cniSwitchNamespace, err)
+	}
+	fmt.Print("✅ Namespace ensured\n\n")
 
 	// 4. Detect current CNI and update migration status
 	if activeMigration.Status.CurrentCNI == "" {
@@ -151,7 +151,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 			if err = rtClient.Create(ctx, binding); err != nil && !errors.IsAlreadyExists(err) {
 				return fmt.Errorf("creating cluster role binding: %w", err)
 			}
-			fmt.Println("✅ RBAC applied")
+			fmt.Println("RBAC applied")
 
 			dsToCreate := getSwitchHelperDaemonSet(cniSwitchNamespace, imageName)
 			if createErr := rtClient.Create(ctx, dsToCreate); createErr != nil {
@@ -215,7 +215,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	}
 
 	fmt.Printf(
-		"\n✅ Cluster successfully prepared for CNI switch (total time: %s)\n",
+		"🎉 Cluster successfully prepared for CNI switch (total time: %s)\n",
 		time.Since(startTime).Round(time.Second),
 	)
 	fmt.Println("You can now run 'd8 cni-switch switch' to proceed")
@@ -234,16 +234,12 @@ func getOrCreateMigrationForPrepare(
 	}
 
 	if activeMigration != nil {
-		fmt.Printf(
-			"Found active migration '%s' (Phase: %s)\n",
-			activeMigration.Name,
-			activeMigration.Status.ObservedPhase,
-		)
+		fmt.Printf("Found active migration '%s'\n", activeMigration.Name)
 
 		// Check if preparation is already done
 		for _, cond := range activeMigration.Status.Conditions {
 			if cond.Type == "PreparationSucceeded" && cond.Status == metav1.ConditionTrue {
-				fmt.Println("✅ Cluster has already been prepared for CNI switch.")
+				fmt.Println("🎉 Cluster has already been prepared for CNI switch.")
 				fmt.Println("You can now run 'd8 cni-switch switch' to proceed.")
 				return nil, nil // Signal to the caller that we can exit gracefully
 			}
@@ -315,6 +311,11 @@ func waitForDaemonSetReady(ctx context.Context, rtClient client.Client, ds *apps
 			}
 
 			if ds.Status.DesiredNumberScheduled == ds.Status.NumberReady && ds.Status.NumberUnavailable == 0 {
+				fmt.Printf(
+					"\rWaiting for DaemonSet... %d/%d pods ready\n",
+					ds.Status.NumberReady,
+					ds.Status.DesiredNumberScheduled,
+				)
 				return nil
 			}
 
