@@ -17,8 +17,15 @@ limitations under the License.
 package cni
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 
@@ -43,6 +50,8 @@ var (
 		Version: "v1alpha1",
 		Kind:    "ModuleConfig",
 	}
+
+	CNIModuleConfigs = []string{"cni-cilium", "cni-flannel", "cni-simple-bridge"}
 )
 
 // RunPrepare executes the logic for the 'cni-switch prepare' command.
@@ -80,15 +89,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 		time.Since(startTime).Round(time.Millisecond),
 	)
 
-	// 3. Create the dedicated namespace
-	fmt.Printf("Creating dedicated namespace '%s'...\n", cniSwitchNamespace)
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: cniSwitchNamespace}}
-	if err = rtClient.Create(ctx, ns); err != nil && !errors.IsAlreadyExists(err) {
-		return fmt.Errorf("creating namespace %s: %w", cniSwitchNamespace, err)
-	}
-	fmt.Print("✅ Namespace ensured\n\n")
-
-	// 4. Detect current CNI and update migration status
+	// 3. Detect current CNI and update migration status
 	if activeMigration.Status.CurrentCNI == "" {
 		var currentCNI string
 		currentCNI, err = detectCurrentCNI(rtClient)
@@ -112,88 +113,119 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 		)
 	}
 
-	// 5. Create the cni-switch-helper daemonset and wait for it to be ready
+	// 4. Create the dedicated namespace
+	fmt.Printf("Creating dedicated namespace '%s'...\n", cniSwitchNamespace)
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: cniSwitchNamespace}}
+	if err = rtClient.Create(ctx, ns); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating namespace %s: %w", cniSwitchNamespace, err)
+	}
+	fmt.Print("✅ Namespace ensured\n\n")
+
+	// 5. Get the helper image name from the d8-cli-data configmap
+	cm := &corev1.ConfigMap{}
+	if err = rtClient.Get(
+		ctx,
+		client.ObjectKey{Name: "d8-cli-data", Namespace: "d8-system"},
+		cm,
+	); err != nil {
+		return fmt.Errorf("getting d8-cli-data configmap: %w", err)
+	}
+	imageName, ok := cm.Data["cni-switch-helper-image"]
+	if !ok || imageName == "" {
+		return fmt.Errorf("cni-switch-helper-image not found or empty in d8-cli-data configmap")
+	}
+
+	// 6. Apply RBAC
+	fmt.Println("Applying RBAC...")
+	// Agent RBAC
+	agentSA := getSwitchHelperServiceAccount(cniSwitchNamespace)
+	if err = rtClient.Create(ctx, agentSA); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating agent service account: %w", err)
+	}
+	agentRole := getSwitchHelperClusterRole()
+	if err = rtClient.Create(ctx, agentRole); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating cluster role: %w", err)
+	}
+	agentBinding := getSwitchHelperClusterRoleBinding(cniSwitchNamespace)
+	if err = rtClient.Create(ctx, agentBinding); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating cluster role binding: %w", err)
+	}
+	// Webhook RBAC
+	webhookSA := getWebhookServiceAccount(cniSwitchNamespace)
+	if err = rtClient.Create(ctx, webhookSA); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating webhook service account: %w", err)
+	}
+	webhookRole := getWebhookClusterRole()
+	if err = rtClient.Create(ctx, webhookRole); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating webhook cluster role: %w", err)
+	}
+	webhookBinding := getWebhookClusterRoleBinding(cniSwitchNamespace)
+	if err = rtClient.Create(ctx, webhookBinding); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating webhook cluster role binding: %w", err)
+	}
+	fmt.Printf("✅ RBAC applied (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
+
+	// 7. Create and wait for the cni-switch-helper daemonset
 	dsKey := client.ObjectKey{Name: "cni-switch-helper", Namespace: cniSwitchNamespace}
 	ds := &appsv1.DaemonSet{}
-	err = rtClient.Get(ctx, dsKey, ds)
-
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// DaemonSet does not exist, so we need to create it.
-			fmt.Println("DaemonSet 'cni-switch-helper' not found. Creating it...")
-
-			cm := &corev1.ConfigMap{}
-			if getCMErr := rtClient.Get(
-				ctx,
-				client.ObjectKey{Name: "d8-cli-data", Namespace: "d8-system"},
-				cm,
-			); getCMErr != nil {
-				return fmt.Errorf("getting d8-cli-data configmap: %w", getCMErr)
-			}
-
-			imageName, ok := cm.Data["cni-switch-helper-image"]
-			if !ok || imageName == "" {
-				return fmt.Errorf("cni-switch-helper-image not found or empty in d8-cli-data configmap")
-			}
-
-			// Create RBAC first
-			fmt.Println("Applying RBAC for cni-switch-helper...")
-			sa := getSwitchHelperServiceAccount(cniSwitchNamespace)
-			role := getSwitchHelperClusterRole()
-			binding := getSwitchHelperClusterRoleBinding(cniSwitchNamespace)
-
-			if err = rtClient.Create(ctx, sa); err != nil && !errors.IsAlreadyExists(err) {
-				return fmt.Errorf("creating service account: %w", err)
-			}
-			if err = rtClient.Create(ctx, role); err != nil && !errors.IsAlreadyExists(err) {
-				return fmt.Errorf("creating cluster role: %w", err)
-			}
-			if err = rtClient.Create(ctx, binding); err != nil && !errors.IsAlreadyExists(err) {
-				return fmt.Errorf("creating cluster role binding: %w", err)
-			}
-			fmt.Println("RBAC applied")
-
-			dsToCreate := getSwitchHelperDaemonSet(cniSwitchNamespace, imageName)
-			if createErr := rtClient.Create(ctx, dsToCreate); createErr != nil {
-				return fmt.Errorf("creating helper daemonset: %w", createErr)
-			}
-
-			fmt.Printf("Successfully created DaemonSet '%s'\n", dsToCreate.Name)
-			ds = dsToCreate // Use the newly created DS for the wait logic
-		} else {
-			// Some other error occurred while getting the DaemonSet.
+	if err = rtClient.Get(ctx, dsKey, ds); err != nil {
+		if !errors.IsNotFound(err) {
 			return fmt.Errorf("getting helper daemonset: %w", err)
 		}
+		fmt.Println("Creating helper DaemonSet 'cni-switch-helper'...")
+		dsToCreate := getSwitchHelperDaemonSet(cniSwitchNamespace, imageName)
+		if err = rtClient.Create(ctx, dsToCreate); err != nil {
+			return fmt.Errorf("creating helper daemonset: %w", err)
+		}
+		ds = dsToCreate
 	} else {
-		// DaemonSet already exists.
-		fmt.Printf("DaemonSet '%s' already exists\n", ds.Name)
+		fmt.Println("Helper DaemonSet 'cni-switch-helper' already exists.")
 	}
 
-	fmt.Println("Waiting for 'cni-switch-helper' DaemonSet to become ready")
-	err = waitForDaemonSetReady(ctx, rtClient, ds)
-	if err != nil {
+	if err = waitForDaemonSetReady(ctx, rtClient, ds); err != nil {
 		return fmt.Errorf("waiting for daemonset ready: %w", err)
 	}
-	fmt.Printf("✅ DaemonSet is ready (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
+	fmt.Printf("✅ Helper DaemonSet is ready (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
 
-	// // 5. Create the mutating webhook configuration
-	// webhook := getMutatingWebhookConfiguration()
-	// err = rtClient.Create(ctx, webhook)
-	// if err != nil {
-	// 	if errors.IsAlreadyExists(err) {
-	// 		fmt.Printf("✅ MutatingWebhookConfiguration '%s' already exists\n\n", webhook.Name)
-	// 	} else {
-	// 		return fmt.Errorf("creating mutating webhook configuration: %w", err)
-	// 	}
-	// } else {
-	// 	fmt.Printf(
-	// 		"✅ Successfully created MutatingWebhook '%s' (total elapsed: %s)\n\n",
-	// 		webhook.Name,
-	// 		time.Since(startTime).Round(time.Millisecond),
-	// 	)
-	// }
+	// 8. Create and wait for the mutating webhook
+	fmt.Println("Deploying Mutating Webhook for annotating new pods...")
+	// Generate certificates
+	caCert, serverCert, serverKey, err := generateWebhookCertificates(cniSwitchNamespace)
+	if err != nil {
+		return fmt.Errorf("generating webhook certificates: %w", err)
+	}
 
-	// 6. Wait for all nodes to be prepared
+	// Create TLS secret
+	tlsSecret := getWebhookTLSSecret(cniSwitchNamespace, serverCert, serverKey)
+	if err = rtClient.Create(ctx, tlsSecret); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating webhook tls secret: %w", err)
+	}
+
+	// Create Deployment
+	webhookDeployment := getWebhookDeployment(cniSwitchNamespace, imageName, webhookServiceAccountName)
+	if err = rtClient.Create(ctx, webhookDeployment); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating webhook deployment: %w", err)
+	}
+
+	// Wait for Deployment to be ready
+	if err = waitForDeploymentReady(ctx, rtClient, webhookDeployment); err != nil {
+		return fmt.Errorf("waiting for webhook deployment ready: %w", err)
+	}
+
+	// Create Service
+	webhookService := getWebhookService(cniSwitchNamespace)
+	if err = rtClient.Create(ctx, webhookService); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating webhook service: %w", err)
+	}
+
+	// Create MutatingWebhookConfiguration
+	webhookConfig := getMutatingWebhookConfiguration(cniSwitchNamespace, caCert)
+	if err = rtClient.Create(ctx, webhookConfig); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating mutating webhook configuration: %w", err)
+	}
+	fmt.Printf("✅ Mutating Webhook is active (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
+
+	// 9. Wait for all nodes to be prepared
 	fmt.Println("Waiting for all nodes to complete the preparation step...")
 	err = waitForNodesPrepared(ctx, rtClient)
 	if err != nil {
@@ -221,6 +253,78 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	fmt.Println("You can now run 'd8 cni-switch switch' to proceed")
 
 	return nil
+}
+
+// generateWebhookCertificates creates a self-signed CA and a server certificate for the webhook.
+func generateWebhookCertificates(namespace string) (caCert, serverCert, serverKey []byte, err error) {
+	// CA configuration
+	ca := &x509.Certificate{
+		SerialNumber: big.NewInt(2025),
+		Subject: pkix.Name{
+			Organization: []string{"deckhouse.io"},
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().AddDate(1, 0, 0),
+		IsCA:                  true,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+
+	caPrivKey, err := rsa.GenerateKey(rand.Reader, 4096)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("generating CA private key: %w", err)
+	}
+
+	caBytes, err := x509.CreateCertificate(rand.Reader, ca, ca, &caPrivKey.PublicKey, caPrivKey)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("creating CA certificate: %w", err)
+	}
+
+	caPEM := new(bytes.Buffer)
+	_ = pem.Encode(caPEM, &pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: caBytes,
+	})
+
+	// Server certificate configuration
+	commonName := fmt.Sprintf("%s.%s.svc", webhookServiceName, namespace)
+	cert := &x509.Certificate{
+		SerialNumber: big.NewInt(2026),
+		Subject: pkix.Name{
+			CommonName:   commonName,
+			Organization: []string{"deckhouse.io"},
+		},
+		DNSNames:    []string{commonName},
+		NotBefore:   time.Now(),
+		NotAfter:    time.Now().AddDate(1, 0, 0),
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+	}
+
+	serverPrivKey, err := rsa.GenerateKey(rand.Reader, 4096)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("generating server private key: %w", err)
+	}
+
+	serverCertBytes, err := x509.CreateCertificate(rand.Reader, cert, ca, &serverPrivKey.PublicKey, caPrivKey)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("creating server certificate: %w", err)
+	}
+
+	serverCertPEM := new(bytes.Buffer)
+	_ = pem.Encode(serverCertPEM, &pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: serverCertBytes,
+	})
+
+	serverPrivKeyPEM := new(bytes.Buffer)
+	_ = pem.Encode(serverPrivKeyPEM, &pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(serverPrivKey),
+	})
+
+	return caPEM.Bytes(), serverCertPEM.Bytes(), serverPrivKeyPEM.Bytes(), nil
 }
 
 func getOrCreateMigrationForPrepare(
@@ -328,6 +432,44 @@ func waitForDaemonSetReady(ctx context.Context, rtClient client.Client, ds *apps
 	}
 }
 
+func waitForDeploymentReady(ctx context.Context, rtClient client.Client, dep *appsv1.Deployment) error {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			key := client.ObjectKey{Name: dep.Name, Namespace: dep.Namespace}
+			err := rtClient.Get(ctx, key, dep)
+			if err != nil {
+				fmt.Printf("\n⚠️ Warning: could not get Deployment status: %v\n", err)
+				continue
+			}
+
+			// This is the exit condition for the loop.
+			if dep.Spec.Replicas != nil && dep.Status.ReadyReplicas >= *dep.Spec.Replicas && dep.Status.UnavailableReplicas == 0 {
+				fmt.Printf(
+					"\rWaiting for Deployment... %d/%d replicas ready\n",
+					dep.Status.ReadyReplicas,
+					*dep.Spec.Replicas,
+				)
+				return nil
+			}
+
+			// This is the progress update.
+			if dep.Spec.Replicas != nil {
+				fmt.Printf(
+					"\rWaiting for Deployment... %d/%d replicas ready",
+					dep.Status.ReadyReplicas,
+					*dep.Spec.Replicas,
+				)
+			}
+		}
+	}
+}
+
 func waitForNodesPrepared(ctx context.Context, rtClient client.Client) error {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -372,7 +514,7 @@ func waitForNodesPrepared(ctx context.Context, rtClient client.Client) error {
 
 func detectCurrentCNI(rtClient client.Client) (string, error) {
 	var enabledCNIs []string
-	for _, cniModule := range cniModuleConfigs {
+	for _, cniModule := range CNIModuleConfigs {
 		mc := &unstructured.Unstructured{}
 		mc.SetGroupVersionKind(moduleConfigGVK)
 
@@ -396,7 +538,7 @@ func detectCurrentCNI(rtClient client.Client) (string, error) {
 	}
 
 	if len(enabledCNIs) == 0 {
-		return "", fmt.Errorf("no enabled CNI module found. Looked for: %s", strings.Join(cniModuleConfigs, ", "))
+		return "", fmt.Errorf("no enabled CNI module found. Looked for: %s", strings.Join(CNIModuleConfigs, ", "))
 	}
 
 	if len(enabledCNIs) > 1 {

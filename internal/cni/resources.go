@@ -25,83 +25,20 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-var (
-	cniModuleConfigs = []string{"cni-cilium", "cni-flannel", "cni-simple-bridge"}
-)
-
+// Constants for various resource names
 const (
-	ControlPlaneNodeLabel            = "node-role.kubernetes.io/control-plane"
-	MutatingWebhookConfigurationName = "effective-cni-annotator"
-	WebhookServiceName               = "effective-cni-annotator-webhook-service"
-	helperServiceAccountName         = "cni-switch-helper"
-	helperClusterRoleName            = "cni-switch-helper-role"
-	helperClusterRoleBindingName     = "cni-switch-helper-binding"
+	switchHelperServiceAccountName = "cni-switch-helper-sa"
+	webhookServiceAccountName      = "cni-switch-webhook-sa"
+	webhookDeploymentName          = "cni-switch-webhook"
+	webhookServiceName             = "cni-switch-webhook-service"
+	webhookSecretName              = "cni-switch-webhook-tls"
+	webhookConfigName              = "cni-switch-pod-annotator"
+	webhookPort                    = 9443
 )
 
-func getSwitchHelperServiceAccount(namespace string) *corev1.ServiceAccount {
-	return &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      helperServiceAccountName,
-			Namespace: namespace,
-		},
-	}
-}
+// --- Agent Resources ---
 
-func getSwitchHelperClusterRole() *rbacv1.ClusterRole {
-	return &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: helperClusterRoleName,
-		},
-		Rules: []rbacv1.PolicyRule{
-			{
-				APIGroups: []string{"network.deckhouse.io"},
-				Resources: []string{"cnimigrations"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-			{
-				APIGroups: []string{"network.deckhouse.io"},
-				Resources: []string{"cnimigrations/status"},
-				Verbs:     []string{"get"},
-			},
-			{
-				APIGroups: []string{"network.deckhouse.io"},
-				Resources: []string{"cninodemigrations"},
-				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
-			},
-			{
-				APIGroups: []string{"network.deckhouse.io"},
-				Resources: []string{"cninodemigrations/status"},
-				Verbs:     []string{"get", "update", "patch"},
-			},
-			{
-				APIGroups: []string{""}, // Core API group
-				Resources: []string{"pods"},
-				Verbs:     []string{"get", "list", "watch", "patch", "update", "delete"},
-			},
-		},
-	}
-}
-
-func getSwitchHelperClusterRoleBinding(namespace string) *rbacv1.ClusterRoleBinding {
-	return &rbacv1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: helperClusterRoleBindingName,
-		},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
-			Kind:     "ClusterRole",
-			Name:     helperClusterRoleName,
-		},
-		Subjects: []rbacv1.Subject{
-			{
-				Kind:      "ServiceAccount",
-				Name:      helperServiceAccountName,
-				Namespace: namespace,
-			},
-		},
-	}
-}
-
+// getSwitchHelperDaemonSet returns a DaemonSet object for the cni-switch-helper agent.
 func getSwitchHelperDaemonSet(namespace, imageName string) *appsv1.DaemonSet {
 	truePtr := true
 	terminationGracePeriodSeconds := int64(5)
@@ -120,7 +57,7 @@ func getSwitchHelperDaemonSet(namespace, imageName string) *appsv1.DaemonSet {
 					Labels: map[string]string{"app": "cni-switch-helper"},
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: helperServiceAccountName,
+					ServiceAccountName: switchHelperServiceAccountName,
 					Containers: []corev1.Container{
 						{
 							Name:  "helper",
@@ -135,8 +72,8 @@ func getSwitchHelperDaemonSet(namespace, imageName string) *appsv1.DaemonSet {
 							LivenessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
-										Path:   "/healthz",
-										Port:   intstr.FromString("healthz"),
+										Path: "/healthz",
+										Port: intstr.FromString("healthz"),
 									},
 								},
 								InitialDelaySeconds: 15,
@@ -145,8 +82,8 @@ func getSwitchHelperDaemonSet(namespace, imageName string) *appsv1.DaemonSet {
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
-										Path:   "/readyz",
-										Port:   intstr.FromString("healthz"),
+										Path: "/readyz",
+										Port: intstr.FromString("healthz"),
 									},
 								},
 								InitialDelaySeconds: 5,
@@ -189,15 +126,13 @@ func getSwitchHelperDaemonSet(namespace, imageName string) *appsv1.DaemonSet {
 					},
 					Tolerations: []corev1.Toleration{
 						{
-							Key:      ControlPlaneNodeLabel,
 							Operator: corev1.TolerationOpExists,
-							Effect:   corev1.TaintEffectNoSchedule,
 						},
 					},
-					PriorityClassName:            "system-node-critical",
-					HostNetwork:                  true,
-					HostPID:                      true,
-					HostIPC:                      true,
+					PriorityClassName:             "system-node-critical",
+					HostNetwork:                   true,
+					HostPID:                       true,
+					HostIPC:                       true,
 					TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
 					Volumes: []corev1.Volume{
 						{
@@ -231,28 +166,144 @@ func getSwitchHelperDaemonSet(namespace, imageName string) *appsv1.DaemonSet {
 	}
 }
 
-func getMutatingWebhookConfiguration() *admissionregistrationv1.MutatingWebhookConfiguration {
-	path := "/mutate"
-	// Exclude system namespaces and all known CNI module namespaces.
-	excludedNamespaces := []string{}
-	for _, moduleName := range cniModuleConfigs {
-		excludedNamespaces = append(excludedNamespaces, "d8-"+moduleName)
+// --- Webhook Resources ---
+
+// getWebhookTLSSecret returns a Secret object containing the webhook's TLS certificates.
+func getWebhookTLSSecret(namespace string, cert, key []byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      webhookSecretName,
+			Namespace: namespace,
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			corev1.TLSCertKey:       cert,
+			corev1.TLSPrivateKeyKey: key,
+		},
 	}
+}
+
+// getWebhookDeployment returns a Deployment object for the webhook server.
+func getWebhookDeployment(namespace, imageName, serviceAccountName string) *appsv1.Deployment {
+	replicas := int32(2)
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      webhookDeploymentName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app": webhookDeploymentName,
+			},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": webhookDeploymentName,
+				},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app": webhookDeploymentName,
+					},
+				},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: serviceAccountName,
+					Affinity: &corev1.Affinity{
+						PodAntiAffinity: &corev1.PodAntiAffinity{
+							RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+								{
+									LabelSelector: &metav1.LabelSelector{
+										MatchLabels: map[string]string{
+											"app": webhookDeploymentName,
+										},
+									},
+									TopologyKey: "kubernetes.io/hostname",
+								},
+							},
+						},
+					},
+					Containers: []corev1.Container{
+						{
+							Name:  "webhook",
+							Image: imageName,
+							Args: []string{
+								"webhook",
+							},
+							Ports: []corev1.ContainerPort{
+								{
+									ContainerPort: webhookPort,
+									Name:          "webhook",
+								},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "tls-certs",
+									MountPath: "/etc/tls",
+									ReadOnly:  true,
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "tls-certs",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName: webhookSecretName,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// getWebhookService returns a Service object for the webhook.
+func getWebhookService(namespace string) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      webhookServiceName,
+			Namespace: namespace,
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				"app": webhookDeploymentName,
+			},
+			Ports: []corev1.ServicePort{
+				{
+					Protocol:   corev1.ProtocolTCP,
+					Port:       443,
+					TargetPort: intstr.FromInt(webhookPort),
+				},
+			},
+		},
+	}
+}
+
+// getMutatingWebhookConfiguration returns a MutatingWebhookConfiguration object for annotating pods.
+func getMutatingWebhookConfiguration(namespace string, caBundle []byte) *admissionregistrationv1.MutatingWebhookConfiguration {
+	path := "/mutate-pod"
+	failurePolicy := admissionregistrationv1.Fail
+	sideEffects := admissionregistrationv1.SideEffectClassNone
 
 	return &admissionregistrationv1.MutatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: MutatingWebhookConfigurationName,
+			Name: webhookConfigName,
 		},
 		Webhooks: []admissionregistrationv1.MutatingWebhook{
 			{
-				Name: "effective-cni.network.deckhouse.io",
+				Name: "annotator.cni-switch.deckhouse.io",
 				ClientConfig: admissionregistrationv1.WebhookClientConfig{
 					Service: &admissionregistrationv1.ServiceReference{
-						Name:      WebhookServiceName,
-						Namespace: "kube-system",
+						Name:      webhookServiceName,
+						Namespace: namespace,
 						Path:      &path,
+						Port:      &[]int32{443}[0],
 					},
-					CABundle: []byte{},
+					CABundle: caBundle,
 				},
 				Rules: []admissionregistrationv1.RuleWithOperations{
 					{
@@ -269,15 +320,132 @@ func getMutatingWebhookConfiguration() *admissionregistrationv1.MutatingWebhookC
 						{
 							Key:      "kubernetes.io/metadata.name",
 							Operator: metav1.LabelSelectorOpNotIn,
-							Values:   excludedNamespaces,
+							Values:   generateExcludedNamespaces(namespace),
 						},
 					},
 				},
-				SideEffects: &[]admissionregistrationv1.
-					SideEffectClass{admissionregistrationv1.SideEffectClassNone}[0],
-				AdmissionReviewVersions: []string{"v1"},
-				FailurePolicy: &[]admissionregistrationv1.
-					FailurePolicyType{admissionregistrationv1.Fail}[0],
+				FailurePolicy: &failurePolicy,
+				SideEffects:   &sideEffects,
+			},
+		},
+	}
+}
+
+// generateExcludedNamespaces creates a list of namespaces to be excluded from webhook processing.
+// This includes the webhook's own namespace and CNI module namespaces.
+func generateExcludedNamespaces(currentNamespace string) []string {
+	excluded := []string{currentNamespace} // Exclude the webhook's own namespace (e.g., "cni-switch")
+	for _, module := range CNIModuleConfigs {
+		excluded = append(excluded, "d8-"+module) // Exclude "d8-cni-cilium", "d8-cni-flannel", etc.
+	}
+	return excluded
+}
+
+// --- RBAC Resources ---
+
+func getSwitchHelperServiceAccount(namespace string) *corev1.ServiceAccount {
+	return &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      switchHelperServiceAccountName,
+			Namespace: namespace,
+		},
+	}
+}
+
+func getWebhookServiceAccount(namespace string) *corev1.ServiceAccount {
+	return &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      webhookServiceAccountName,
+			Namespace: namespace,
+		},
+	}
+}
+
+func getSwitchHelperClusterRole() *rbacv1.ClusterRole {
+	return &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "d8:cni-switch-helper",
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"network.deckhouse.io"},
+				Resources: []string{"cnimigrations"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{"network.deckhouse.io"},
+				Resources: []string{"cnimigrations/status"},
+				Verbs:     []string{"get"},
+			},
+			{
+				APIGroups: []string{"network.deckhouse.io"},
+				Resources: []string{"cninodemigrations"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
+			{
+				APIGroups: []string{"network.deckhouse.io"},
+				Resources: []string{"cninodemigrations/status"},
+				Verbs:     []string{"get", "update", "patch"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"pods"},
+				Verbs:     []string{"get", "list", "watch", "patch", "update", "delete"},
+			},
+		},
+	}
+}
+
+func getWebhookClusterRole() *rbacv1.ClusterRole {
+	return &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "d8:cni-switch-webhook",
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"network.deckhouse.io"},
+				Resources: []string{"cnimigrations"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+		},
+	}
+}
+
+func getSwitchHelperClusterRoleBinding(namespace string) *rbacv1.ClusterRoleBinding {
+	return &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "d8:cni-switch-helper",
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     "d8:cni-switch-helper",
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      switchHelperServiceAccountName,
+				Namespace: namespace,
+			},
+		},
+	}
+}
+
+func getWebhookClusterRoleBinding(namespace string) *rbacv1.ClusterRoleBinding {
+	return &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "d8:cni-switch-webhook",
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     "d8:cni-switch-webhook",
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      webhookServiceAccountName,
+				Namespace: namespace,
 			},
 		},
 	}
