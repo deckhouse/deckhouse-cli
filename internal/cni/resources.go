@@ -231,6 +231,7 @@ func getWebhookDeployment(namespace, imageName, serviceAccountName string) *apps
 							Image: imageName,
 							Args: []string{
 								"--mode=webhook",
+								"--health-probe-bind-address=:8082",
 							},
 							Ports: []corev1.ContainerPort{
 								{
@@ -239,7 +240,7 @@ func getWebhookDeployment(namespace, imageName, serviceAccountName string) *apps
 								},
 								{
 									Name:          "healthz",
-									ContainerPort: 8081,
+									ContainerPort: 8082,
 									Protocol:      corev1.ProtocolTCP,
 								},
 							},
