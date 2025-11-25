@@ -209,6 +209,8 @@ func getWebhookDeployment(namespace, imageName, serviceAccountName string) *apps
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: serviceAccountName,
+					HostNetwork:        true,
+					DNSPolicy:          corev1.DNSClusterFirstWithHostNet,
 					Affinity: &corev1.Affinity{
 						PodAntiAffinity: &corev1.PodAntiAffinity{
 							RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
@@ -228,13 +230,38 @@ func getWebhookDeployment(namespace, imageName, serviceAccountName string) *apps
 							Name:  "webhook",
 							Image: imageName,
 							Args: []string{
-								"webhook",
+								"--mode=webhook",
 							},
 							Ports: []corev1.ContainerPort{
 								{
 									ContainerPort: webhookPort,
 									Name:          "webhook",
 								},
+								{
+									Name:          "healthz",
+									ContainerPort: 8081,
+									Protocol:      corev1.ProtocolTCP,
+								},
+							},
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/healthz",
+										Port: intstr.FromString("healthz"),
+									},
+								},
+								InitialDelaySeconds: 15,
+								PeriodSeconds:       20,
+							},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/readyz",
+										Port: intstr.FromString("healthz"),
+									},
+								},
+								InitialDelaySeconds: 5,
+								PeriodSeconds:       10,
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
@@ -295,7 +322,8 @@ func getMutatingWebhookConfiguration(namespace string, caBundle []byte) *admissi
 		},
 		Webhooks: []admissionregistrationv1.MutatingWebhook{
 			{
-				Name: "annotator.cni-switch.deckhouse.io",
+				Name:                    "annotator.cni-switch.deckhouse.io",
+				AdmissionReviewVersions: []string{"v1"},
 				ClientConfig: admissionregistrationv1.WebhookClientConfig{
 					Service: &admissionregistrationv1.ServiceReference{
 						Name:      webhookServiceName,
