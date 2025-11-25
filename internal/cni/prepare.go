@@ -119,7 +119,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	if err = rtClient.Create(ctx, ns); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("creating namespace %s: %w", cniSwitchNamespace, err)
 	}
-	fmt.Print("✅ Namespace ensured\n\n")
+	fmt.Printf("✅ Namespace ensured (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
 
 	// 5. Get the helper image name from the d8-cli-data configmap
 	cm := &corev1.ConfigMap{}
@@ -165,29 +165,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	}
 	fmt.Printf("✅ RBAC applied (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
 
-	// 7. Create and wait for the cni-switch-helper daemonset
-	dsKey := client.ObjectKey{Name: "cni-switch-helper", Namespace: cniSwitchNamespace}
-	ds := &appsv1.DaemonSet{}
-	if err = rtClient.Get(ctx, dsKey, ds); err != nil {
-		if !errors.IsNotFound(err) {
-			return fmt.Errorf("getting helper daemonset: %w", err)
-		}
-		fmt.Println("Creating helper DaemonSet 'cni-switch-helper'...")
-		dsToCreate := getSwitchHelperDaemonSet(cniSwitchNamespace, imageName)
-		if err = rtClient.Create(ctx, dsToCreate); err != nil {
-			return fmt.Errorf("creating helper daemonset: %w", err)
-		}
-		ds = dsToCreate
-	} else {
-		fmt.Println("Helper DaemonSet 'cni-switch-helper' already exists.")
-	}
-
-	if err = waitForDaemonSetReady(ctx, rtClient, ds); err != nil {
-		return fmt.Errorf("waiting for daemonset ready: %w", err)
-	}
-	fmt.Printf("✅ Helper DaemonSet is ready (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
-
-	// 8. Create and wait for the mutating webhook
+	// 7. Create and wait for the mutating webhook
 	fmt.Println("Deploying Mutating Webhook for annotating new pods...")
 	// Generate certificates
 	caCert, serverCert, serverKey, err := generateWebhookCertificates(cniSwitchNamespace)
@@ -224,6 +202,28 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 		return fmt.Errorf("creating mutating webhook configuration: %w", err)
 	}
 	fmt.Printf("✅ Mutating Webhook is active (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
+
+	// 8. Create and wait for the cni-switch-helper daemonset
+	dsKey := client.ObjectKey{Name: "cni-switch-helper", Namespace: cniSwitchNamespace}
+	ds := &appsv1.DaemonSet{}
+	if err = rtClient.Get(ctx, dsKey, ds); err != nil {
+		if !errors.IsNotFound(err) {
+			return fmt.Errorf("getting helper daemonset: %w", err)
+		}
+		fmt.Println("Creating helper DaemonSet 'cni-switch-helper'...")
+		dsToCreate := getSwitchHelperDaemonSet(cniSwitchNamespace, imageName)
+		if err = rtClient.Create(ctx, dsToCreate); err != nil {
+			return fmt.Errorf("creating helper daemonset: %w", err)
+		}
+		ds = dsToCreate
+	} else {
+		fmt.Println("Helper DaemonSet 'cni-switch-helper' already exists.")
+	}
+
+	if err = waitForDaemonSetReady(ctx, rtClient, ds); err != nil {
+		return fmt.Errorf("waiting for daemonset ready: %w", err)
+	}
+	fmt.Printf("✅ Helper DaemonSet is ready (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
 
 	// 9. Wait for all nodes to be prepared
 	fmt.Println("Waiting for all nodes to complete the preparation step...")
