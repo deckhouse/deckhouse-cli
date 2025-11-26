@@ -28,6 +28,16 @@ import (
 
 // RunSwitch executes the logic for the 'cni-switch switch' command.
 func RunSwitch(timeout time.Duration) error {
+	// 0. Ask for user confirmation
+	confirmed, err := AskForConfirmation("switch")
+	if err != nil {
+		return fmt.Errorf("asking for confirmation: %w", err)
+	}
+	if !confirmed {
+		fmt.Println("Operation cancelled by user.")
+		return nil
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 

@@ -50,12 +50,20 @@ var (
 		Version: "v1alpha1",
 		Kind:    "ModuleConfig",
 	}
-
-	CNIModuleConfigs = []string{"cni-cilium", "cni-flannel", "cni-simple-bridge"}
 )
 
 // RunPrepare executes the logic for the 'cni-switch prepare' command.
 func RunPrepare(targetCNI string, timeout time.Duration) error {
+	// 0. Ask for user confirmation
+	confirmed, err := AskForConfirmation("prepare")
+	if err != nil {
+		return fmt.Errorf("asking for confirmation: %w", err)
+	}
+	if !confirmed {
+		fmt.Println("Operation cancelled by user.")
+		return nil
+	}
+
 	startTime := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

@@ -27,7 +27,7 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 )
 
-var (
+var ( // TODO: STEP 3 ???
 	cniSwitchLong = templates.LongDesc(`
 A group of commands to switch the CNI (Container Network Interface) provider in the Deckhouse cluster.
 
