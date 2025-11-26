@@ -141,6 +141,12 @@ func RunCleanup(timeout time.Duration) error {
 	}
 	fmt.Println("✅ All CNIMigration resources deleted")
 
+	// 7. Remove annotations from all pods
+	if err = removePodAnnotations(ctx, rtClient); err != nil {
+		// Non-fatal, print a warning
+		fmt.Printf("⚠️  Warning: failed to remove all pod annotations: %v\n", err)
+	}
+
 	fmt.Printf("\n🎉 CNI switch cleanup successfully completed (total time: %s)\n", time.Since(startTime).Round(time.Second))
 	return nil
 }
@@ -220,6 +226,45 @@ func waitForResourceDeletion(ctx context.Context, rtClient client.Client, obj cl
 			}
 		}
 	}
+}
+
+const EffectiveCNIAnnotation = "effective-cni.network.deckhouse.io"
+
+func removePodAnnotations(ctx context.Context, rtClient client.Client) error {
+	fmt.Println("\nRemoving CNI switch annotations from all pods...")
+
+	podList := &corev1.PodList{}
+	if err := rtClient.List(ctx, podList); err != nil {
+		return fmt.Errorf("listing all pods: %w", err)
+	}
+
+	podsPatched := 0
+	for _, pod := range podList.Items {
+		if pod.Spec.HostNetwork {
+			continue
+		}
+
+		if _, ok := pod.Annotations[EffectiveCNIAnnotation]; ok {
+			// Use a merge patch to remove just the one annotation
+			patch := []byte(fmt.Sprintf(`{"metadata":{"annotations":{"%s":null}}}`, EffectiveCNIAnnotation))
+			err := rtClient.Patch(ctx, &pod, client.RawPatch(client.Merge.Type(), patch))
+			if err != nil {
+				// Log error for individual pod but continue trying others
+				fmt.Printf("\n⚠️  Warning: failed to patch pod %s/%s: %v", pod.Namespace, pod.Name, err)
+				continue
+			}
+			podsPatched++
+			fmt.Printf("\r  Patched %d pods...", podsPatched)
+		}
+	}
+
+	if podsPatched > 0 {
+		fmt.Printf("\n✅ Removed annotations from %d pods.\n", podsPatched)
+	} else {
+		fmt.Println("✅ No pods with CNI switch annotations were found.")
+	}
+
+	return nil
 }
 
 // getKind extracts a user-friendly kind from a runtime object.
