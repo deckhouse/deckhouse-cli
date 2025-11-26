@@ -84,7 +84,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 		return nil
 	}
 	fmt.Printf(
-		"✅ Working with migration: '%s' (total elapsed: %s)\n\n",
+		"✅ Working with CNIMigration '%s' (total elapsed: %s)\n\n",
 		activeMigration.Name,
 		time.Since(startTime).Round(time.Millisecond),
 	)
@@ -250,7 +250,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 		"🎉 Cluster successfully prepared for CNI switch (total time: %s)\n",
 		time.Since(startTime).Round(time.Second),
 	)
-	fmt.Println("You can now run 'd8 cni-switch switch' to proceed")
+	fmt.Println("\nYou can now run 'd8 cni-switch switch' to proceed")
 
 	return nil
 }
@@ -338,13 +338,13 @@ func getOrCreateMigrationForPrepare(
 	}
 
 	if activeMigration != nil {
-		fmt.Printf("Found active migration '%s'\n", activeMigration.Name)
+		fmt.Printf("Found active CNIMigration '%s'\n", activeMigration.Name)
 
 		// Check if preparation is already done
 		for _, cond := range activeMigration.Status.Conditions {
 			if cond.Type == "PreparationSucceeded" && cond.Status == metav1.ConditionTrue {
 				fmt.Println("🎉 Cluster has already been prepared for CNI switch.")
-				fmt.Println("You can now run 'd8 cni-switch switch' to proceed.")
+				fmt.Println("\nYou can now run 'd8 cni-switch switch' to proceed.")
 				return nil, nil // Signal to the caller that we can exit gracefully
 			}
 		}
@@ -399,7 +399,7 @@ func getOrCreateMigrationForPrepare(
 }
 
 func waitForDaemonSetReady(ctx context.Context, rtClient client.Client, ds *appsv1.DaemonSet) error {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -433,7 +433,7 @@ func waitForDaemonSetReady(ctx context.Context, rtClient client.Client, ds *apps
 }
 
 func waitForDeploymentReady(ctx context.Context, rtClient client.Client, dep *appsv1.Deployment) error {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -449,7 +449,8 @@ func waitForDeploymentReady(ctx context.Context, rtClient client.Client, dep *ap
 			}
 
 			// This is the exit condition for the loop.
-			if dep.Spec.Replicas != nil && dep.Status.ReadyReplicas >= *dep.Spec.Replicas && dep.Status.UnavailableReplicas == 0 {
+			if dep.Spec.Replicas != nil && dep.Status.ReadyReplicas >=
+				*dep.Spec.Replicas && dep.Status.UnavailableReplicas == 0 {
 				fmt.Printf(
 					"\rWaiting for Deployment... %d/%d replicas ready\n",
 					dep.Status.ReadyReplicas,
@@ -471,7 +472,7 @@ func waitForDeploymentReady(ctx context.Context, rtClient client.Client, dep *ap
 }
 
 func waitForNodesPrepared(ctx context.Context, rtClient client.Client) error {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -505,7 +506,7 @@ func waitForNodesPrepared(ctx context.Context, rtClient client.Client) error {
 			fmt.Printf("\rProgress: %d/%d nodes prepared...", readyNodes, totalNodes)
 
 			if readyNodes >= totalNodes && totalNodes > 0 {
-				fmt.Println() // Newline after progress bar
+				fmt.Printf("\rProgress: %d/%d nodes prepared...\n", readyNodes, totalNodes)
 				return nil
 			}
 		}
