@@ -150,27 +150,38 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	if err = rtClient.Create(ctx, agentSA); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("creating agent service account: %w", err)
 	}
+	fmt.Printf("- Helper's ServiceAccount '%s' created\n", agentSA.Name)
+
 	agentRole := getSwitchHelperClusterRole()
 	if err = rtClient.Create(ctx, agentRole); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("creating cluster role: %w", err)
 	}
+	fmt.Printf("- Helper's ClusterRole '%s' created\n", agentRole.Name)
+
 	agentBinding := getSwitchHelperClusterRoleBinding(cniSwitchNamespace)
 	if err = rtClient.Create(ctx, agentBinding); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("creating cluster role binding: %w", err)
 	}
+	fmt.Printf("- Helper's ClusterRoleBinding '%s' created\n", agentBinding.Name)
+
 	// Webhook RBAC
 	webhookSA := getWebhookServiceAccount(cniSwitchNamespace)
 	if err = rtClient.Create(ctx, webhookSA); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("creating webhook service account: %w", err)
 	}
+	fmt.Printf("- Webhook's ServiceAccount '%s' created\n", webhookSA.Name)
+
 	webhookRole := getWebhookClusterRole()
 	if err = rtClient.Create(ctx, webhookRole); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("creating webhook cluster role: %w", err)
 	}
+	fmt.Printf("- Webhook's ClusterRole '%s' created\n", webhookRole.Name)
+
 	webhookBinding := getWebhookClusterRoleBinding(cniSwitchNamespace)
 	if err = rtClient.Create(ctx, webhookBinding); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("creating webhook cluster role binding: %w", err)
 	}
+	fmt.Printf("- Webhook's ClusterRoleBinding '%s' created\n", webhookBinding.Name)
 	fmt.Printf("✅ RBAC applied (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
 
 	// 7. Create and wait for the mutating webhook
@@ -180,12 +191,14 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("generating webhook certificates: %w", err)
 	}
+	fmt.Printf("- TLS certificate generated\n")
 
 	// Create TLS secret
 	tlsSecret := getWebhookTLSSecret(cniSwitchNamespace, serverCert, serverKey)
 	if err = rtClient.Create(ctx, tlsSecret); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("creating webhook tls secret: %w", err)
 	}
+	fmt.Printf("- Secret with TLS certificate '%s' created\n", tlsSecret.Name)
 
 	// Create Deployment
 	webhookDeployment := getWebhookDeployment(cniSwitchNamespace, imageName, webhookServiceAccountName)
@@ -197,19 +210,22 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	if err = waitForDeploymentReady(ctx, rtClient, webhookDeployment); err != nil {
 		return fmt.Errorf("waiting for webhook deployment ready: %w", err)
 	}
+	fmt.Printf("- Webhook Deployment '%s' created\n", webhookDeployment.Name)
 
 	// Create Service
 	webhookService := getWebhookService(cniSwitchNamespace)
 	if err = rtClient.Create(ctx, webhookService); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("creating webhook service: %w", err)
 	}
+	fmt.Printf("- Webhook Service '%s' created\n", webhookService.Name)
 
 	// Create MutatingWebhookConfiguration
 	webhookConfig := getMutatingWebhookConfiguration(cniSwitchNamespace, caCert)
 	if err = rtClient.Create(ctx, webhookConfig); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("creating mutating webhook configuration: %w", err)
 	}
-	fmt.Printf("✅ Mutating Webhook is active (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
+	fmt.Printf("✅ Mutating Webhook '%s' is active (total elapsed: %s)\n\n",
+		webhookConfig.Name, time.Since(startTime).Round(time.Millisecond))
 
 	// 8. Create and wait for the cni-switch-helper daemonset
 	dsKey := client.ObjectKey{Name: "cni-switch-helper", Namespace: cniSwitchNamespace}
@@ -239,7 +255,8 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("waiting for nodes to be prepared: %w", err)
 	}
-	fmt.Printf("✅ All nodes are prepared (total elapsed: %s)\n\n", time.Since(startTime).Round(time.Millisecond))
+	fmt.Printf("✅ All CNINodeMigrations are created and all nodes are prepared (total elapsed: %s)\n\n",
+		time.Since(startTime).Round(time.Millisecond))
 
 	// 7. Update overall status
 	activeMigration.Status.Conditions = append(activeMigration.Status.Conditions, metav1.Condition{
@@ -267,7 +284,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 func generateWebhookCertificates(namespace string) (caCert, serverCert, serverKey []byte, err error) {
 	// CA configuration
 	ca := &x509.Certificate{
-		SerialNumber: big.NewInt(2025),
+		SerialNumber: big.NewInt(2025), // TODO: Number!
 		Subject: pkix.Name{
 			Organization: []string{"deckhouse.io"},
 		},
@@ -298,7 +315,7 @@ func generateWebhookCertificates(namespace string) (caCert, serverCert, serverKe
 	// Server certificate configuration
 	commonName := fmt.Sprintf("%s.%s.svc", webhookServiceName, namespace)
 	cert := &x509.Certificate{
-		SerialNumber: big.NewInt(2026),
+		SerialNumber: big.NewInt(2026), // TODO: Number!
 		Subject: pkix.Name{
 			CommonName:   commonName,
 			Organization: []string{"deckhouse.io"},
@@ -424,7 +441,7 @@ func waitForDaemonSetReady(ctx context.Context, rtClient client.Client, ds *apps
 
 			if ds.Status.DesiredNumberScheduled == ds.Status.NumberReady && ds.Status.NumberUnavailable == 0 {
 				fmt.Printf(
-					"\rWaiting for DaemonSet... %d/%d pods ready\n",
+					"\r  Waiting for DaemonSet... %d/%d pods ready\n",
 					ds.Status.NumberReady,
 					ds.Status.DesiredNumberScheduled,
 				)
@@ -432,7 +449,7 @@ func waitForDaemonSetReady(ctx context.Context, rtClient client.Client, ds *apps
 			}
 
 			fmt.Printf(
-				"\rWaiting for DaemonSet... %d/%d pods ready",
+				"\r  Waiting for DaemonSet... %d/%d pods ready",
 				ds.Status.NumberReady,
 				ds.Status.DesiredNumberScheduled,
 			)
@@ -460,7 +477,7 @@ func waitForDeploymentReady(ctx context.Context, rtClient client.Client, dep *ap
 			if dep.Spec.Replicas != nil && dep.Status.ReadyReplicas >=
 				*dep.Spec.Replicas && dep.Status.UnavailableReplicas == 0 {
 				fmt.Printf(
-					"\rWaiting for Deployment... %d/%d replicas ready\n",
+					"\r  Waiting for Deployment... %d/%d replicas ready\n",
 					dep.Status.ReadyReplicas,
 					*dep.Spec.Replicas,
 				)
@@ -470,7 +487,7 @@ func waitForDeploymentReady(ctx context.Context, rtClient client.Client, dep *ap
 			// This is the progress update.
 			if dep.Spec.Replicas != nil {
 				fmt.Printf(
-					"\rWaiting for Deployment... %d/%d replicas ready",
+					"\r  Waiting for Deployment... %d/%d replicas ready",
 					dep.Status.ReadyReplicas,
 					*dep.Spec.Replicas,
 				)
@@ -511,10 +528,10 @@ func waitForNodesPrepared(ctx context.Context, rtClient client.Client) error {
 				}
 			}
 
-			fmt.Printf("\rProgress: %d/%d nodes prepared...", readyNodes, totalNodes)
+			fmt.Printf("\r  Progress: %d/%d nodes prepared...", readyNodes, totalNodes)
 
 			if readyNodes >= totalNodes && totalNodes > 0 {
-				fmt.Printf("\rProgress: %d/%d nodes prepared...\n", readyNodes, totalNodes)
+				fmt.Printf("\r  Progress: %d/%d nodes prepared...\n", readyNodes, totalNodes)
 				return nil
 			}
 		}
