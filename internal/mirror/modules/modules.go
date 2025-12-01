@@ -18,6 +18,7 @@ package modules
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	"github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
@@ -33,7 +35,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -104,11 +105,16 @@ func (svc *Service) validateModulesAccess(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	modulesRepo := filepath.Join(svc.rootURL, internal.ModulesSegment)
-	validator := validation.NewRemoteRegistryAccessValidator()
-	err := validator.ValidateListAccessForRepo(ctx, modulesRepo, []validation.Option{}...) // TODO: add options
+	// For specific tags, check if the tag exists
+	_, err := svc.modulesService.ListTags(ctx)
+	if errors.Is(err, client.ErrImageNotFound) {
+		svc.userLogger.Warnf("Skipping pull of modules: %v", err)
+
+		return nil
+	}
+
 	if err != nil {
-		return fmt.Errorf("modules registry is not accessible: %w", err)
+		return fmt.Errorf("failed to check modules lists: %w", err)
 	}
 
 	return nil
@@ -139,29 +145,32 @@ func (svc *Service) pullModules(ctx context.Context) error {
 
 	err = logger.Process("Pull Modules", func() error {
 		for _, module := range modules {
-			// Pull modules images
 			config := puller.PullConfig{
-				Name:             module,
-				ImageSet:         svc.modulesDownloadList.Module(module).Module,
-				Layout:           svc.layout.Module(module).Modules,
-				AllowMissingTags: true, // Allow missing module images
-				GetterService:    svc.modulesService,
-			}
-
-			err := svc.pullerService.PullImages(ctx, config)
-			if err != nil {
-				return err
-			}
-
-			config = puller.PullConfig{
 				Name:             module + " release channels",
 				ImageSet:         svc.modulesDownloadList.Module(module).ModuleReleaseChannels,
 				Layout:           svc.layout.Module(module).ModulesReleaseChannels,
 				AllowMissingTags: true,
-				GetterService:    svc.modulesService,
+				GetterService:    svc.modulesService.Module(module).ReleaseChannels(),
 			}
 
 			err = svc.pullerService.PullImages(ctx, config)
+			if err != nil {
+				return err
+			}
+
+			// TODO:
+			// we must extract module images tags from release channels before pulling module images
+
+			// Pull modules images
+			config = puller.PullConfig{
+				Name:             module,
+				ImageSet:         svc.modulesDownloadList.Module(module).Module,
+				Layout:           svc.layout.Module(module).Modules,
+				AllowMissingTags: true, // Allow missing module images
+				GetterService:    svc.modulesService.Module(module),
+			}
+
+			err := svc.pullerService.PullImages(ctx, config)
 			if err != nil {
 				return err
 			}
@@ -171,7 +180,7 @@ func (svc *Service) pullModules(ctx context.Context) error {
 				ImageSet:         svc.modulesDownloadList.Module(module).ModuleExtra,
 				Layout:           svc.layout.Module(module).ModulesExtra,
 				AllowMissingTags: true,
-				GetterService:    svc.modulesService,
+				GetterService:    svc.modulesService.Module(module).Extra(),
 			}
 
 			err = svc.pullerService.PullImages(ctx, config)
