@@ -38,12 +38,14 @@ import (
 )
 
 type Service struct {
+	workingDir string
+
 	// modulesService handles Deckhouse platform registry operations
 	modulesService *registryservice.ModulesService
 	// layout manages the OCI image layouts for different components
-	layout *ImageLayouts
-	// downloadList manages the list of images to be downloaded
-	downloadList *ImageDownloadList
+	layout *ModulesImageLayouts
+	// modulesDownloadList manages the list of images to be downloaded
+	modulesDownloadList *ModulesDownloadList
 	// pullerService handles the pulling of images
 	pullerService *puller.PullerService
 
@@ -64,36 +66,28 @@ func NewService(
 ) *Service {
 	userLogger.Infof("Creating OCI Image Layouts for Modules")
 
-	tmpDir := filepath.Join(workingDir, "modules")
-
-	layout, err := createOCIImageLayoutsForModules(tmpDir)
-	if err != nil {
-		//TODO: handle error
-		userLogger.Warnf("Create OCI Image Layouts: %v", err)
-	}
-
 	rootURL := registryService.GetRoot()
 
 	return &Service{
-		modulesService: registryService.ModuleService(),
-		layout:         layout,
-		downloadList:   NewImageDownloadList(rootURL),
-		pullerService:  puller.NewPullerService(logger, userLogger),
-		rootURL:        rootURL,
-		logger:         logger,
-		userLogger:     userLogger,
+		workingDir:          workingDir,
+		modulesService:      registryService.ModuleService(),
+		modulesDownloadList: NewModulesDownloadList(rootURL),
+		pullerService:       puller.NewPullerService(logger, userLogger),
+		rootURL:             rootURL,
+		logger:              logger,
+		userLogger:          userLogger,
 	}
 }
 
 // PullModules pulls the Deckhouse modules
 // It validates access to the registry and pulls the module images
-func (svc *Service) PullModules(ctx context.Context, modules []string) error {
+func (svc *Service) PullModules(ctx context.Context) error {
 	err := svc.validateModulesAccess(ctx)
 	if err != nil {
 		return fmt.Errorf("validate modules access: %w", err)
 	}
 
-	err = svc.pullModules(ctx, modules)
+	err = svc.pullModules(ctx)
 	if err != nil {
 		return fmt.Errorf("pull modules: %w", err)
 	}
@@ -120,45 +114,73 @@ func (svc *Service) validateModulesAccess(ctx context.Context) error {
 	return nil
 }
 
-func (svc *Service) pullModules(ctx context.Context, modules []string) error {
+func (svc *Service) pullModules(ctx context.Context) error {
 	logger := svc.userLogger
 
+	tmpDir := filepath.Join(svc.workingDir, "modules")
+
+	modules, err := svc.modulesService.ListTags(ctx)
+	if err != nil {
+		return fmt.Errorf("list modules: %w", err)
+	}
+
+	moduleImagesLayout, err := createOCIImageLayoutsForModules(tmpDir, modules)
+	if err != nil {
+		return fmt.Errorf("create OCI image layouts for modules: %w", err)
+	}
+	svc.layout = moduleImagesLayout
+
 	// Fill download list with modules images
-	svc.downloadList.FillModulesImages(modules)
+	svc.modulesDownloadList.FillModulesImages(modules)
 
-	// Pull modules images
-	err := logger.Process("Pull Modules", func() error {
-		config := puller.PullConfig{
-			Name:             "Modules",
-			ImageSet:         svc.downloadList.Modules,
-			Layout:           svc.layout.Modules,
-			AllowMissingTags: true, // Allow missing module images
-			GetterService:    svc.modulesService,
+	err = logger.Process("Pull Modules", func() error {
+		for _, module := range modules {
+			// Pull modules images
+			config := puller.PullConfig{
+				Name:             module,
+				ImageSet:         svc.modulesDownloadList.Module(module).Module,
+				Layout:           svc.layout.Module(module).Modules,
+				AllowMissingTags: true, // Allow missing module images
+				GetterService:    svc.modulesService,
+			}
+
+			err := svc.pullerService.PullImages(ctx, config)
+			if err != nil {
+				return err
+			}
+
+			config = puller.PullConfig{
+				Name:             module + " release channels",
+				ImageSet:         svc.modulesDownloadList.Module(module).ModuleReleaseChannels,
+				Layout:           svc.layout.Module(module).ModulesReleaseChannels,
+				AllowMissingTags: true,
+				GetterService:    svc.modulesService,
+			}
+
+			err = svc.pullerService.PullImages(ctx, config)
+			if err != nil {
+				return err
+			}
+
+			config = puller.PullConfig{
+				Name:             module + " extra",
+				ImageSet:         svc.modulesDownloadList.Module(module).ModuleExtra,
+				Layout:           svc.layout.Module(module).ModulesExtra,
+				AllowMissingTags: true,
+				GetterService:    svc.modulesService,
+			}
+
+			err = svc.pullerService.PullImages(ctx, config)
+			if err != nil {
+				return err
+			}
 		}
 
-		return svc.pullerService.PullImages(ctx, config)
+		return nil
 	})
 	if err != nil {
 		return err
 	}
-
-	// Pull modules release channels
-	err = logger.Process("Pull Modules Release Channels", func() error {
-		config := puller.PullConfig{
-			Name:             "Modules Release Channels",
-			ImageSet:         svc.downloadList.ModulesReleaseChannels,
-			Layout:           svc.layout.ModulesReleaseChannels,
-			AllowMissingTags: true,
-			GetterService:    svc.modulesService,
-		}
-
-		return svc.pullerService.PullImages(ctx, config)
-	})
-	if err != nil {
-		return err
-	}
-
-	// TODO: Pull modules extra images if needed
 
 	err = logger.Process("Processing modules image indexes", func() error {
 		for _, l := range svc.layout.AsList() {
@@ -203,6 +225,25 @@ func (svc *Service) pullModules(ctx context.Context, modules []string) error {
 }
 
 func createOCIImageLayoutsForModules(
+	rootFolder string,
+	modules []string,
+) (*ModulesImageLayouts, error) {
+	layouts := NewModulesImageLayouts(rootFolder)
+
+	for _, moduleName := range modules {
+		moduleLayouts, err := createOCIImageLayoutsForModule(
+			filepath.Join(rootFolder, moduleName),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create OCI image layouts for module %s: %w", moduleName, err)
+		}
+		layouts.list[moduleName] = moduleLayouts
+	}
+
+	return layouts, nil
+}
+
+func createOCIImageLayoutsForModule(
 	rootFolder string,
 ) (*ImageLayouts, error) {
 	layouts := NewImageLayouts(rootFolder)
