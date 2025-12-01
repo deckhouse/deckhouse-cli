@@ -28,28 +28,45 @@ import (
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
+type ModulesDownloadList struct {
+	rootURL string
+	list    map[string]*ImageDownloadList
+}
+
+func NewModulesDownloadList(rootURL string) *ModulesDownloadList {
+	return &ModulesDownloadList{
+		rootURL: rootURL,
+		list:    make(map[string]*ImageDownloadList),
+	}
+}
+
+func (l *ModulesDownloadList) Module(moduleName string) *ImageDownloadList {
+	return l.list[moduleName]
+}
+
+func (l *ModulesDownloadList) FillModulesImages(modules []string) {
+	for _, moduleName := range modules {
+		list := NewImageDownloadList(filepath.Join(l.rootURL, moduleName))
+		list.FillForTag("")
+		l.list[moduleName] = list
+	}
+}
+
 type ImageDownloadList struct {
 	rootURL string
 
-	Modules                map[string]*puller.ImageMeta
-	ModulesReleaseChannels map[string]*puller.ImageMeta
-	ModulesExtra           map[string]*puller.ImageMeta
+	Module                map[string]*puller.ImageMeta
+	ModuleReleaseChannels map[string]*puller.ImageMeta
+	ModuleExtra           map[string]*puller.ImageMeta
 }
 
 func NewImageDownloadList(rootURL string) *ImageDownloadList {
 	return &ImageDownloadList{
 		rootURL: rootURL,
 
-		Modules:                make(map[string]*puller.ImageMeta),
-		ModulesReleaseChannels: make(map[string]*puller.ImageMeta),
-		ModulesExtra:           make(map[string]*puller.ImageMeta),
-	}
-}
-
-func (l *ImageDownloadList) FillModulesImages(modules []string) {
-	for _, module := range modules {
-		l.Modules[filepath.Join(l.rootURL, internal.ModulesSegment, module)+":latest"] = nil
-		l.ModulesReleaseChannels[filepath.Join(l.rootURL, internal.ModulesSegment, module, internal.ModulesReleasesSegment)+":latest"] = nil
+		Module:                make(map[string]*puller.ImageMeta),
+		ModuleReleaseChannels: make(map[string]*puller.ImageMeta),
+		ModuleExtra:           make(map[string]*puller.ImageMeta),
 	}
 }
 
@@ -59,8 +76,41 @@ func (l *ImageDownloadList) FillForTag(tag string) {
 		return
 	}
 
-	// For modules, release channels might be handled differently
-	// TODO: implement if needed
+	for _, channel := range internal.GetAllDefaultReleaseChannels() {
+		l.ModuleReleaseChannels[l.rootURL+":"+channel] = nil
+	}
+}
+
+type ModulesImageLayouts struct {
+	platform   v1.Platform
+	workingDir string
+
+	list map[string]*ImageLayouts
+}
+
+func NewModulesImageLayouts(rootFolder string) *ModulesImageLayouts {
+	l := &ModulesImageLayouts{
+		workingDir: rootFolder,
+		platform:   v1.Platform{Architecture: "amd64", OS: "linux"},
+		list:       make(map[string]*ImageLayouts),
+	}
+
+	return l
+}
+
+func (l *ModulesImageLayouts) Module(moduleName string) *ImageLayouts {
+	return l.list[moduleName]
+}
+
+// AsList returns a list of layout.Path's from all modules. Undefined path's are not included in the list.
+func (l *ModulesImageLayouts) AsList() []layout.Path {
+	var paths []layout.Path
+	for _, imgLayout := range l.list {
+		if imgLayout != nil {
+			paths = append(paths, imgLayout.AsList()...)
+		}
+	}
+	return paths
 }
 
 type ImageLayouts struct {

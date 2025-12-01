@@ -78,7 +78,7 @@ func (svc *PullService) Pull(ctx context.Context) error {
 		return fmt.Errorf("pull security databases: %w", err)
 	}
 
-	err = svc.modulesService.PullModules(ctx, nil)
+	err = svc.modulesService.PullModules(ctx)
 	if err != nil {
 		return fmt.Errorf("pull modules: %w", err)
 	}

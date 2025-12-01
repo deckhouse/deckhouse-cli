@@ -23,10 +23,12 @@ import (
 
 const (
 	moduleReleaseChannelsSegment = "release"
+	moduleExtraSegment           = "extra"
 
 	modulesServiceName               = "modules"
 	moduleServiceName                = "module"
 	moduleReleaseChannelsServiceName = "module_release_channel"
+	moduleExtraServiceName           = "module_extra"
 )
 
 // ModuleService provides high-level operations for module management
@@ -34,7 +36,8 @@ type ModuleService struct {
 	client registry.Client
 
 	*BasicService
-	moduleReleaseChannels *BasicService
+	moduleReleaseChannels *ModuleReleaseService
+	extra                 *BasicService
 
 	logger *log.Logger
 }
@@ -45,10 +48,19 @@ func NewModuleService(client registry.Client, logger *log.Logger) *ModuleService
 		client: client,
 
 		BasicService:          NewBasicService(moduleServiceName, client, logger),
-		moduleReleaseChannels: NewBasicService(moduleReleaseChannelsServiceName, client.WithSegment(moduleReleaseChannelsSegment), logger),
+		moduleReleaseChannels: NewModuleReleaseService(NewBasicService(moduleReleaseChannelsServiceName, client.WithSegment(moduleReleaseChannelsSegment), logger)),
+		extra:                 NewBasicService(moduleExtraServiceName, client.WithSegment(moduleExtraSegment), logger),
 
 		logger: logger,
 	}
+}
+
+func (s *ModuleService) ReleaseChannels() *ModuleReleaseService {
+	return s.moduleReleaseChannels
+}
+
+func (s *ModuleService) Extra() *BasicService {
+	return s.extra
 }
 
 type ModulesService struct {
@@ -83,4 +95,14 @@ func (s *ModulesService) Module(moduleName string) *ModuleService {
 	}
 
 	return s.services[moduleName]
+}
+
+type ModuleReleaseService struct {
+	*BasicService
+}
+
+func NewModuleReleaseService(basicService *BasicService) *ModuleReleaseService {
+	return &ModuleReleaseService{
+		BasicService: basicService,
+	}
 }
