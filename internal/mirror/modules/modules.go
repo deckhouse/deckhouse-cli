@@ -124,6 +124,10 @@ func (svc *Service) pullModules(ctx context.Context) error {
 		return fmt.Errorf("list modules: %w", err)
 	}
 
+	for _, module := range modules {
+		logger.Infof("Module found: %s", module)
+	}
+
 	moduleImagesLayout, err := createOCIImageLayoutsForModules(tmpDir, modules)
 	if err != nil {
 		return fmt.Errorf("create OCI image layouts for modules: %w", err)

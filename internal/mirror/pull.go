@@ -68,7 +68,14 @@ func NewPullService(
 
 // Pull
 func (svc *PullService) Pull(ctx context.Context) error {
-	err := svc.platformService.PullPlatform(ctx)
+
+	err := svc.modulesService.PullModules(ctx)
+	if err != nil {
+		return fmt.Errorf("pull modules: %w", err)
+	}
+
+	return nil
+	err = svc.platformService.PullPlatform(ctx)
 	if err != nil {
 		return fmt.Errorf("pull platform: %w", err)
 	}
