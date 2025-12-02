@@ -21,28 +21,28 @@ import (
 )
 
 func addFlags(flagSet *pflag.FlagSet) {
-	flagSet.StringVar(
-		&endTimestamp,
-		"end",
+	flagSet.StringVarP(
+		&config.StartTimestamp,
+		"start", "s",
 		"",
-		"Set end timestamp range to dump logs from Loki. (Default get max end timestamp from Loki, ex. \"2025-01-14 15:04:05\".)",
+		"Start timestamp for log dumping. Format: 2006-01-02 15:04:05 (UTC).",
 	)
-	flagSet.StringVar(
-		&startTimestamp,
-		"start",
+	flagSet.StringVarP(
+		&config.EndTimestamp,
+		"end", "e",
 		"",
-		"Set start timestamp range to dump logs from Loki. (Default get max start timestamp from Loki, ex. \"2025-01-12 15:04:05\".)",
+		"End timestamp for log dumping. Format: 2006-01-02 15:04:05 (UTC).",
 	)
-	flagSet.StringVar(
-		&limitFlag,
-		"limit",
+	flagSet.StringVarP(
+		&config.Limit,
+		"limit", "l",
 		"5000",
-		"Limit the number of lines to output per queue from Loki. (Default 5000 max limit strings per queue.)",
+		"Limit number of log entries per query.",
 	)
-	flagSet.IntVar(
-		&chunkDaysFlag,
-		"days",
-		5,
-		"Limit maximum number of days in range to output per queue from Loki. (Default 5 maximum number of days in range per queue.)",
+	flagSet.IntVarP(
+		&config.ChunkDays,
+		"chunk-days", "c",
+		1,
+		"Number of days per chunk for pagination.",
 	)
 }
