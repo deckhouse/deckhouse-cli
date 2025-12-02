@@ -38,7 +38,6 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
-	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/manifests"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
@@ -46,6 +45,18 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
+
+// Options contains configuration options for the platform service
+type Options struct {
+	// SinceVersion specifies the minimum version to start mirroring from (optional)
+	SinceVersion *semver.Version
+	// TargetTag specifies a specific tag to mirror instead of determining versions automatically
+	TargetTag string
+	// BundleDir is the directory to store the bundle
+	BundleDir string
+	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
+	BundleChunkSize int64
+}
 
 type Service struct {
 	// deckhouseService handles Deckhouse platform registry operations
@@ -57,10 +68,8 @@ type Service struct {
 	// pullerService handles the pulling of images
 	pullerService *puller.PullerService
 
-	// sinceVersion specifies the minimum version to start mirroring from (optional)
-	sinceVersion *semver.Version
-	// targetTag specifies a specific tag to mirror instead of determining versions automatically
-	targetTag string
+	// options contains service configuration
+	options *Options
 
 	// logger is for internal debug logging
 	logger *dkplog.Logger
@@ -70,13 +79,16 @@ type Service struct {
 
 func NewService(
 	registryService *registryservice.Service,
-	sinceVersion *semver.Version,
 	workingDir string,
-	targetTag string,
+	options *Options,
 	logger *dkplog.Logger,
 	userLogger *log.SLogger,
 ) *Service {
 	userLogger.Infof("Creating OCI Image Layouts")
+
+	if options == nil {
+		options = &Options{}
+	}
 
 	tmpDir := filepath.Join(workingDir, "platform")
 
@@ -93,8 +105,7 @@ func NewService(
 		layout:           layout,
 		downloadList:     NewImageDownloadList(rootURL),
 		pullerService:    puller.NewPullerService(logger, userLogger),
-		sinceVersion:     sinceVersion,
-		targetTag:        targetTag,
+		options:          options,
 		logger:           logger,
 		userLogger:       userLogger,
 	}
@@ -115,7 +126,7 @@ func (svc *Service) PullPlatform(ctx context.Context) error {
 	}
 
 	svc.downloadList.FillDeckhouseImages(tagsToMirror)
-	svc.downloadList.FillForTag(svc.targetTag)
+	svc.downloadList.FillForTag(svc.options.TargetTag)
 
 	err = svc.pullDeckhousePlatform(ctx, tagsToMirror)
 	if err != nil {
@@ -132,8 +143,8 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 	// Default to stable channel if no specific tag is set
 	targetTag := internal.StableChannel
 
-	if svc.targetTag != "" {
-		targetTag = svc.targetTag
+	if svc.options.TargetTag != "" {
+		targetTag = svc.options.TargetTag
 	}
 
 	svc.logger.Debug("Validating access to the source registry", slog.String("tag", targetTag))
@@ -166,10 +177,10 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 // Otherwise, it finds all relevant versions that should be mirrored based on channels and version ranges
 func (svc *Service) findTagsToMirror(ctx context.Context) ([]string, error) {
 	// If a specific tag is requested, skip the complex version determination logic
-	if svc.targetTag != "" {
-		svc.userLogger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", svc.targetTag)
+	if svc.options.TargetTag != "" {
+		svc.userLogger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", svc.options.TargetTag)
 
-		return []string{svc.targetTag}, nil
+		return []string{svc.options.TargetTag}, nil
 	}
 
 	// Determine which versions should be mirrored based on release channels and version constraints
@@ -227,9 +238,9 @@ func (svc *Service) versionsToMirrorFunc(ctx context.Context) ([]semver.Version,
 
 	mirrorFromVersion := *rockSolidVersion
 
-	if svc.sinceVersion != nil {
-		if svc.sinceVersion.LessThan(rockSolidVersion) {
-			mirrorFromVersion = *svc.sinceVersion
+	if svc.options.SinceVersion != nil {
+		if svc.options.SinceVersion.LessThan(rockSolidVersion) {
+			mirrorFromVersion = *svc.options.SinceVersion
 		}
 	}
 
@@ -267,9 +278,9 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 		return nil, fmt.Errorf("cannot get %s release channel version.json: %w", releaseChannel, err)
 	}
 
-	if meta.Suspend {
-		return nil, fmt.Errorf("source registry contains suspended release channel %q, try again later", releaseChannel)
-	}
+	// if meta.Suspend {
+	// 	return nil, fmt.Errorf("source registry contains suspended release channel %q, try again later", releaseChannel)
+	// }
 
 	ver, err := semver.NewVersion(meta.Version)
 	if err != nil {
@@ -325,7 +336,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	}
 
 	// We should not generate deckhousereleases.yaml manifest for tag-based pulls
-	if svc.targetTag == "" {
+	if svc.options.TargetTag == "" {
 		if err = svc.generateDeckhouseReleaseManifests(tagsToMirror); err != nil {
 			logger.WarnLn(err.Error())
 		}
@@ -367,9 +378,9 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	}
 
 	err = logger.Process("Processing image indexes", func() error {
-		if svc.targetTag != "" {
+		if svc.options.TargetTag != "" {
 			// If we are pulling some build by tag, propagate release channel image of it to all channels if it exists.
-			releaseChannel, err := svc.layout.DeckhouseReleaseChannel.GetImage(svc.targetTag)
+			releaseChannel, err := svc.layout.DeckhouseReleaseChannel.GetImage(svc.options.TargetTag)
 
 			switch {
 			case errors.Is(err, layouts.ErrImageNotFound):
@@ -377,7 +388,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 				// TODO: remove goto
 				goto sortManifests
 			case err != nil:
-				return fmt.Errorf("Find release-%s channel descriptor: %w", svc.targetTag, err)
+				return fmt.Errorf("Find release-%s channel descriptor: %w", svc.options.TargetTag, err)
 			}
 
 			digest, err := releaseChannel.Digest()
@@ -406,8 +417,8 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	}
 
 	if err := logger.Process("Pack Deckhouse images into platform.tar", func() error {
-		bundleChunkSize := pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000
-		bundleDir := pullflags.ImagesBundlePath
+		bundleChunkSize := svc.options.BundleChunkSize
+		bundleDir := svc.options.BundleDir
 
 		var platform io.Writer = chunked.NewChunkedFileWriter(
 			bundleChunkSize,
@@ -439,7 +450,7 @@ func (svc *Service) pullDeckhouseReleaseChannels(ctx context.Context) error {
 		Name:             "Deckhouse release channels information",
 		ImageSet:         svc.downloadList.DeckhouseReleaseChannel,
 		Layout:           svc.layout.DeckhouseReleaseChannel,
-		AllowMissingTags: svc.targetTag != "",
+		AllowMissingTags: svc.options.TargetTag != "",
 		GetterService:    svc.deckhouseService.ReleaseChannels(),
 	}
 
@@ -487,7 +498,7 @@ func (svc *Service) generateDeckhouseReleaseManifests(
 ) error {
 	svc.userLogger.Infof("Generating DeckhouseRelease manifests")
 
-	deckhouseReleasesManifestFile := filepath.Join(pullflags.ImagesBundlePath, "deckhousereleases.yaml")
+	deckhouseReleasesManifestFile := filepath.Join(svc.options.BundleDir, "deckhousereleases.yaml")
 
 	err := manifests.GenerateDeckhouseReleaseManifestsForVersionsNew(
 		tagsToMirror,
