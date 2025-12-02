@@ -17,7 +17,6 @@ limitations under the License.
 package status
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/fatih/color"
@@ -27,16 +26,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/deckhouse/deckhouse-cli/internal/status/objects/clusteralerts"
-	cnimodules "github.com/deckhouse/deckhouse-cli/internal/status/objects/cni_modules"
-	deckhouseedition "github.com/deckhouse/deckhouse-cli/internal/status/objects/edition"
-	"github.com/deckhouse/deckhouse-cli/internal/status/objects/masters"
-	deckhousepods "github.com/deckhouse/deckhouse-cli/internal/status/objects/pods"
-	deckhousequeue "github.com/deckhouse/deckhouse-cli/internal/status/objects/queue"
-	deckhouseregistry "github.com/deckhouse/deckhouse-cli/internal/status/objects/registry"
-	deckhousereleases "github.com/deckhouse/deckhouse-cli/internal/status/objects/releases"
-	deckhousesettings "github.com/deckhouse/deckhouse-cli/internal/status/objects/settings"
-	"github.com/deckhouse/deckhouse-cli/internal/status/tools/statusresult"
+	"github.com/deckhouse/deckhouse-cli/internal/status/adapters"
+	"github.com/deckhouse/deckhouse-cli/internal/status/usecase"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -62,39 +53,45 @@ func NewCommand() *cobra.Command {
 
 func runStatus(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
+
+	// Setup K8s clients
 	restConfig, kubeCl, err := setupK8sClients(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to setup Kubernetes client: %w", err)
 	}
+
+	dynamicCl, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create dynamic client: %w", err)
+	}
+
+	// Create provider factory
+	factory := adapters.NewStatusProviderFactory(kubeCl, dynamicCl, restConfig)
+
+	// Build usecase with all providers
+	statusUC := usecase.NewStatusUseCase(
+		factory.CreateMastersProvider(),
+		factory.CreateDeckhousePodsProvider(),
+		factory.CreateReleasesProvider(),
+		factory.CreateEditionProvider(),
+		factory.CreateSettingsProvider(),
+		factory.CreateRegistryProvider(),
+		factory.CreateClusterAlertsProvider(),
+		factory.CreateCNIModulesProvider(),
+		factory.CreateQueueProvider(),
+	)
+
+	// Execute and display results
 	color.Cyan("\n┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓")
 	color.Cyan("┃      Cluster Status Report     ┃")
 	color.Cyan("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n")
-	results := executeAll(ctx, restConfig, kubeCl)
-	for _, result := range results {
-		fmt.Println(result.Output)
+
+	report := statusUC.Execute(ctx)
+	for _, section := range report.GetAllSections() {
+		fmt.Println(section.Output)
 	}
+
 	return nil
-}
-
-func executeAll(ctx context.Context, restConfig *rest.Config, kubeCl kubernetes.Interface) []statusresult.StatusResult {
-	dynamicClient, err := dynamic.NewForConfig(restConfig)
-	if err != nil {
-		return []statusresult.StatusResult{
-			{Title: "Error", Output: fmt.Sprintf("Error creating dynamic client: %v\n", err)},
-		}
-	}
-
-	return []statusresult.StatusResult{
-		masters.Status(ctx, kubeCl),
-		deckhousepods.Status(ctx, kubeCl),
-		deckhousereleases.Status(ctx, dynamicClient),
-		deckhouseedition.Status(ctx, kubeCl),
-		deckhousesettings.Status(ctx, dynamicClient),
-		deckhouseregistry.Status(ctx, kubeCl),
-		clusteralerts.Status(ctx, dynamicClient),
-		cnimodules.Status(ctx, dynamicClient),
-		deckhousequeue.Status(ctx, kubeCl, restConfig),
-	}
 }
 
 func setupK8sClients(cmd *cobra.Command) (*rest.Config, *kubernetes.Clientset, error) {

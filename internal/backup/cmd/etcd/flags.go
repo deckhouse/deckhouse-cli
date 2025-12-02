@@ -26,13 +26,13 @@ import (
 
 func addFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringVarP(
-		&requestedEtcdPodName,
+		&config.PodName,
 		"etcd-pod", "p",
 		"",
 		"Name of the etcd pod to snapshot from. (optional)",
 	)
 	flagSet.BoolVar(
-		&verboseLog,
+		&config.Verbose,
 		"verbose",
 		false,
 		"Verbose log output.",
@@ -42,15 +42,15 @@ func addFlags(flagSet *pflag.FlagSet) {
 func validateFlags(cmd *cobra.Command) error {
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+		return fmt.Errorf("failed to setup Kubernetes client: %w", err)
 	}
 
 	stats, err := os.Stat(kubeconfigPath)
 	if err != nil {
-		return fmt.Errorf("Invalid --kubeconfig: %w", err)
+		return fmt.Errorf("invalid --kubeconfig: %w", err)
 	}
 	if !stats.Mode().IsRegular() {
-		return fmt.Errorf("Invalid --kubeconfig: %s is not a regular file", kubeconfigPath)
+		return fmt.Errorf("invalid --kubeconfig: %s is not a regular file", kubeconfigPath)
 	}
 
 	return nil

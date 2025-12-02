@@ -17,31 +17,13 @@ limitations under the License.
 package push
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"os"
-	"path"
-	"path/filepath"
-	"strings"
-	"time"
 
-	"github.com/google/go-containerregistry/pkg/authn"
-	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 
-	dkplog "github.com/deckhouse/deckhouse/pkg/log"
-	"github.com/deckhouse/deckhouse/pkg/registry"
-	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
-
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
 )
 
 // CLI Parameters
@@ -58,6 +40,9 @@ var (
 	TLSSkipVerify    bool
 	ImagesBundlePath string
 )
+
+// ErrPushFailed is returned when push operation fails
+var ErrPushFailed = errors.New("push failed, see the log for details")
 
 const pushLong = `Upload Deckhouse Kubernetes Platform distribution bundle to the third-party registry.
 
@@ -86,6 +71,7 @@ valid license for any commercial version of the Deckhouse Kubernetes Platform.
 
 © Flant JSC 2025`
 
+// NewCommand creates a new push command
 func NewCommand() *cobra.Command {
 	pushCmd := &cobra.Command{
 		Use:           "push <images-bundle-path> <registry>",
@@ -95,9 +81,7 @@ func NewCommand() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		PreRunE:       parseAndValidateParameters,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return NewPusher().Execute()
-		},
+		RunE:          runPush,
 		PostRunE: func(_ *cobra.Command, _ []string) error {
 			return os.RemoveAll(TempDir)
 		},
@@ -107,271 +91,14 @@ func NewCommand() *cobra.Command {
 	return pushCmd
 }
 
-func pushModules(pushParams *params.PushParams, logger params.Logger, client registry.Client) error {
-	bundleContents, err := os.ReadDir(pushParams.BundleDir)
-	if err != nil {
-		return fmt.Errorf("List bundle directory: %w", err)
-	}
+func runPush(cmd *cobra.Command, _ []string) error {
+	runner := NewRunner()
 
-	modulePackages := lo.Compact(lo.Map(bundleContents, func(item os.DirEntry, _ int) string {
-		fileExt := filepath.Ext(item.Name())
-		pkgName, _, ok := strings.Cut(strings.TrimPrefix(item.Name(), "module-"), ".")
-		switch {
-		case !ok:
-			fallthrough
-		case fileExt != ".tar" && fileExt != ".chunk":
-			fallthrough
-		case !strings.HasPrefix(item.Name(), "module-"):
-			return ""
-		}
-		return pkgName
-	}))
+	runner.logger.Infof("d8 version: %s", version.Version)
 
-	successfullyPushedModules := make([]string, 0)
-	for _, modulePackageName := range modulePackages {
-		if lo.Contains(successfullyPushedModules, modulePackageName) {
-			continue
-		}
-
-		if err = logger.Process("Push module: "+modulePackageName, func() error {
-			pkg, err := openPackage(pushParams, "module-"+modulePackageName)
-			if err != nil {
-				return fmt.Errorf("Open package %q: %w", modulePackageName, err)
-			}
-
-			if err = operations.PushModule(pushParams, modulePackageName, pkg, client); err != nil {
-				return fmt.Errorf("Failed to push module %q: %w", modulePackageName, err)
-			}
-
-			successfullyPushedModules = append(successfullyPushedModules, modulePackageName)
-
-			return nil
-		}); err != nil {
-			logger.WarnLn(err)
-		}
-	}
-
-	if len(successfullyPushedModules) > 0 {
-		logger.Infof("Modules pushed: %v", strings.Join(successfullyPushedModules, ", "))
+	if err := runner.Run(cmd.Context()); err != nil {
+		return fmt.Errorf("push: %w", err)
 	}
 
 	return nil
-}
-
-func pushStaticPackages(pushParams *params.PushParams, logger params.Logger, client registry.Client) error {
-	packages := []string{"platform", "security"}
-	for _, pkgName := range packages {
-		pkg, err := openPackage(pushParams, pkgName)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			logger.InfoLn(pkgName, "package is not present, skipping")
-			continue
-		case err != nil:
-			return err
-		}
-
-		switch pkgName {
-		case "platform":
-			if err = logger.Process("Push Deckhouse platform", func() error {
-				return operations.PushDeckhousePlatform(pushParams, pkg, client)
-			}); err != nil {
-				return fmt.Errorf("Push Deckhouse Platform: %w", err)
-			}
-		case "security":
-			if err = logger.Process("Push security databases", func() error {
-				return operations.PushSecurityDatabases(pushParams, pkg, client)
-			}); err != nil {
-				return fmt.Errorf("Push Security Databases: %w", err)
-			}
-		default:
-			return errors.New("Unknown package " + pkgName)
-		}
-
-		if err = pkg.Close(); err != nil {
-			logger.Warnf("Could not close bundle package %s: %w", pkgName, err)
-		}
-	}
-	return nil
-}
-
-func setupLogger() *log.SLogger {
-	logLevel := slog.LevelInfo
-	if log.DebugLogLevel() >= 3 {
-		logLevel = slog.LevelDebug
-	}
-	return log.NewSLogger(logLevel)
-}
-
-func buildPushParams(logger params.Logger) *params.PushParams {
-	pushParams := &params.PushParams{
-		BaseParams: params.BaseParams{
-			Logger:              logger,
-			Insecure:            Insecure,
-			SkipTLSVerification: TLSSkipVerify,
-			RegistryHost:        RegistryHost,
-			RegistryPath:        RegistryPath,
-			ModulesPathSuffix:   ModulesPathSuffix,
-			BundleDir:           ImagesBundlePath,
-			WorkingDir:          filepath.Join(TempDir, "push"),
-		},
-
-		Parallelism: params.ParallelismConfig{
-			Blobs:  4,
-			Images: 1,
-		},
-	}
-	return pushParams
-}
-
-func validateRegistryAccess(ctx context.Context, pushParams *params.PushParams) error {
-	opts := []validation.Option{
-		validation.UseAuthProvider(pushParams.RegistryAuth),
-		validation.WithInsecure(pushParams.Insecure),
-		validation.WithTLSVerificationSkip(pushParams.SkipTLSVerification),
-	}
-
-	accessValidator := validation.NewRemoteRegistryAccessValidator()
-	err := accessValidator.ValidateWriteAccessForRepo(ctx, path.Join(pushParams.RegistryHost, pushParams.RegistryPath), opts...)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func openPackage(pushParams *params.PushParams, pkgName string) (io.ReadCloser, error) {
-	p := filepath.Join(pushParams.BundleDir, pkgName+".tar")
-	pkg, err := os.Open(p)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		return openChunkedPackage(pushParams, pkgName)
-	case err != nil:
-		return nil, fmt.Errorf("Read bundle package %s: %w", pkgName, err)
-	}
-
-	return pkg, nil
-}
-
-func openChunkedPackage(pushParams *params.PushParams, pkgName string) (io.ReadCloser, error) {
-	pkg, err := chunked.Open(pushParams.BundleDir, pkgName+".tar")
-	if err != nil {
-		return nil, fmt.Errorf("Open bundle package %q: %w", pkgName, err)
-	}
-
-	return pkg, nil
-}
-
-// Pusher handles the push operation for Deckhouse distribution
-type Pusher struct {
-	logger     params.Logger
-	pushParams *params.PushParams
-}
-
-// NewPusher creates a new Pusher instance
-func NewPusher() *Pusher {
-	logger := setupLogger()
-	pushParams := buildPushParams(logger)
-	return &Pusher{
-		logger:     logger,
-		pushParams: pushParams,
-	}
-}
-
-// Execute runs the full push process
-func (p *Pusher) Execute() error {
-	p.logger.Infof("d8 version: %s", version.Version)
-
-	if RegistryUsername != "" {
-		p.pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{Username: RegistryUsername, Password: RegistryPassword})
-	}
-
-	if err := p.validateRegistryAccess(); err != nil {
-		return err
-	}
-
-	if err := p.pushStaticPackages(); err != nil {
-		return err
-	}
-
-	if err := p.pushModules(); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// validateRegistryAccess validates access to the registry
-func (p *Pusher) validateRegistryAccess() error {
-	p.logger.InfoLn("Validating registry access")
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	err := validateRegistryAccess(ctx, p.pushParams)
-	if err != nil && os.Getenv("MIRROR_BYPASS_ACCESS_CHECKS") != "1" {
-		return fmt.Errorf("registry credentials validation failure: %w", err)
-	}
-	return nil
-}
-
-// pushStaticPackages pushes platform and security packages
-func (p *Pusher) pushStaticPackages() error {
-	logger := dkplog.NewNop()
-
-	if log.DebugLogLevel() >= 3 {
-		logger = dkplog.NewLogger(dkplog.WithLevel(slog.LevelDebug))
-	}
-
-	// Create registry client for module operations
-	clientOpts := &regclient.Options{
-		Insecure:      p.pushParams.Insecure,
-		TLSSkipVerify: p.pushParams.SkipTLSVerification,
-		Logger:        logger,
-	}
-
-	if p.pushParams.RegistryAuth != nil {
-		clientOpts.Auth = p.pushParams.RegistryAuth
-	}
-
-	var client registry.Client
-	client = regclient.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
-
-	// Scope to the registry path and modules suffix
-	if p.pushParams.RegistryPath != "" {
-		client = client.WithSegment(p.pushParams.RegistryPath)
-	}
-
-	return pushStaticPackages(p.pushParams, p.logger, client)
-}
-
-// pushModules pushes module packages
-func (p *Pusher) pushModules() error {
-	logger := dkplog.NewNop()
-
-	if log.DebugLogLevel() >= 3 {
-		logger = dkplog.NewLogger(dkplog.WithLevel(slog.LevelDebug))
-	}
-
-	// Create registry client for module operations
-	clientOpts := &regclient.Options{
-		Insecure:      p.pushParams.Insecure,
-		TLSSkipVerify: p.pushParams.SkipTLSVerification,
-		Logger:        logger, // Will use default logger
-	}
-
-	if p.pushParams.RegistryAuth != nil {
-		clientOpts.Auth = p.pushParams.RegistryAuth
-	}
-
-	var client registry.Client
-	client = regclient.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
-
-	// Scope to the registry path and modules suffix
-	if p.pushParams.RegistryPath != "" {
-		client = client.WithSegment(p.pushParams.RegistryPath)
-	}
-
-	if p.pushParams.ModulesPathSuffix != "" {
-		client = client.WithSegment(p.pushParams.ModulesPathSuffix)
-	}
-
-	return pushModules(p.pushParams, p.logger, client)
 }

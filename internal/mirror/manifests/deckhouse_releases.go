@@ -29,11 +29,26 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
+
+// DeckhouseRelease represents a Deckhouse release manifest
+type DeckhouseRelease struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              DeckhouseReleaseSpec `json:"spec"`
+}
+
+// DeckhouseReleaseSpec defines the desired state of DeckhouseRelease
+type DeckhouseReleaseSpec struct {
+	Version       string            `json:"version"`
+	Requirements  map[string]string `json:"requirements,omitempty"`
+	Disruptions   []string          `json:"disruptions,omitempty"`
+	Changelog     map[string]any    `json:"changelog,omitempty"`
+	ChangelogLink string            `json:"changelogLink,omitempty"`
+}
 
 func GenerateDeckhouseReleaseManifestsForVersions(
 	versionTagsToMirror []string,
@@ -141,7 +156,7 @@ func generateDeckhouseRelease(versionTag string, releaseInfo *releaseInfo) ([]by
 		disruptions = releaseInfo.Disruptions[disruptionsVersion]
 	}
 
-	manifest, err := yaml.Marshal(&v1alpha1.DeckhouseRelease{
+	manifest, err := yaml.Marshal(&DeckhouseRelease{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "DeckhouseRelease",
 			APIVersion: "deckhouse.io/v1alpha1",
@@ -149,7 +164,7 @@ func generateDeckhouseRelease(versionTag string, releaseInfo *releaseInfo) ([]by
 		ObjectMeta: metav1.ObjectMeta{
 			Name: versionTag,
 		},
-		Spec: v1alpha1.DeckhouseReleaseSpec{
+		Spec: DeckhouseReleaseSpec{
 			Version:       versionTag,
 			Requirements:  releaseInfo.Requirements,
 			Disruptions:   disruptions,
