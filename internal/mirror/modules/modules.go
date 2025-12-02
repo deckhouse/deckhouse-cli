@@ -254,8 +254,6 @@ func (svc *Service) pullModules(ctx context.Context) error {
 }
 
 func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) error {
-	logger := svc.userLogger
-
 	// Initialize download list for this module
 	downloadList := NewImageDownloadList(filepath.Join(svc.rootURL, "modules", module.name))
 	svc.modulesDownloadList.list[module.name] = downloadList
@@ -328,10 +326,7 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 	}
 
 	// Extract and pull extra images from module versions
-	extraImages, err := svc.findExtraImages(ctx, module.name, moduleVersions)
-	if err != nil {
-		logger.Warnf("Failed to find extra images for %s: %v", module.name, err)
-	}
+	extraImages := svc.findExtraImages(ctx, module.name, moduleVersions)
 
 	if len(extraImages) > 0 {
 		for img := range extraImages {
@@ -352,9 +347,7 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 	}
 
 	// Find and pull VEX images for all module images
-	if err := svc.pullVexImages(ctx, module.name, downloadList); err != nil {
-		logger.Warnf("Failed to pull VEX images for %s: %v", module.name, err)
-	}
+	svc.pullVexImages(ctx, module.name, downloadList)
 
 	return nil
 }
@@ -415,7 +408,7 @@ func extractVersionJSON(img interface{ Extract() io.ReadCloser }) (*versionJSON,
 }
 
 // findExtraImages finds extra images from module images
-func (svc *Service) findExtraImages(ctx context.Context, moduleName string, versions []string) (map[string]struct{}, error) {
+func (svc *Service) findExtraImages(ctx context.Context, moduleName string, versions []string) map[string]struct{} {
 	extraImages := make(map[string]struct{})
 
 	for _, version := range versions {
@@ -460,7 +453,7 @@ func (svc *Service) findExtraImages(ctx context.Context, moduleName string, vers
 		}
 	}
 
-	return extraImages, nil
+	return extraImages
 }
 
 // extractExtraImagesJSON extracts extra_images.json from an image
@@ -489,7 +482,7 @@ func extractExtraImagesJSON(img interface{ Extract() io.ReadCloser }) (map[strin
 }
 
 // pullVexImages finds and pulls VEX attestation images for module images
-func (svc *Service) pullVexImages(ctx context.Context, moduleName string, downloadList *ImageDownloadList) error {
+func (svc *Service) pullVexImages(ctx context.Context, moduleName string, downloadList *ImageDownloadList) {
 	allImages := make([]string, 0)
 
 	for img := range downloadList.Module {
@@ -510,8 +503,6 @@ func (svc *Service) pullVexImages(ctx context.Context, moduleName string, downlo
 			downloadList.Module[vexImageName] = nil
 		}
 	}
-
-	return nil
 }
 
 // findVexImage checks if a VEX attestation image exists for the given image
