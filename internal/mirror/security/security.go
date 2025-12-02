@@ -30,13 +30,20 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
-	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
+
+// Options contains configuration options for the security service
+type Options struct {
+	// BundleDir is the directory to store the bundle
+	BundleDir string
+	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
+	BundleChunkSize int64
+}
 
 type Service struct {
 	// securityService handles Deckhouse security registry operations
@@ -48,6 +55,9 @@ type Service struct {
 	// pullerService handles the pulling of images
 	pullerService *puller.PullerService
 
+	// options contains service configuration
+	options *Options
+
 	// logger is for internal debug logging
 	logger *dkplog.Logger
 	// userLogger is for user-facing informational messages
@@ -57,10 +67,15 @@ type Service struct {
 func NewService(
 	registryService *registryservice.Service,
 	workingDir string,
+	options *Options,
 	logger *dkplog.Logger,
 	userLogger *log.SLogger,
 ) *Service {
 	userLogger.Infof("Creating OCI Image Layouts for Security")
+
+	if options == nil {
+		options = &Options{}
+	}
 
 	tmpDir := filepath.Join(workingDir, "security")
 
@@ -75,6 +90,7 @@ func NewService(
 		layout:          layout,
 		downloadList:    NewImageDownloadList(registryService.GetRoot()),
 		pullerService:   puller.NewPullerService(logger, userLogger),
+		options:         options,
 		logger:          logger,
 		userLogger:      userLogger,
 	}
@@ -164,8 +180,8 @@ func (svc *Service) pullSecurityDatabases(ctx context.Context) error {
 	}
 
 	if err := logger.Process("Pack security images into security.tar", func() error {
-		bundleChunkSize := pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000
-		bundleDir := pullflags.ImagesBundlePath
+		bundleChunkSize := svc.options.BundleChunkSize
+		bundleDir := svc.options.BundleDir
 
 		var security io.Writer = chunked.NewChunkedFileWriter(
 			bundleChunkSize,

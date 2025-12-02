@@ -25,9 +25,28 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/platform"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/security"
+	libmodules "github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
+
+// PullServiceOptions contains configuration options for PullService
+type PullServiceOptions struct {
+	// SkipPlatform skips pulling platform images
+	SkipPlatform bool
+	// SkipSecurity skips pulling security databases
+	SkipSecurity bool
+	// SkipModules skips pulling module images
+	SkipModules bool
+	// OnlyExtraImages pulls only extra images for modules (without main module images)
+	OnlyExtraImages bool
+	// ModuleFilter is the filter for module selection (whitelist/blacklist)
+	ModuleFilter *libmodules.Filter
+	// BundleDir is the directory to store the bundle
+	BundleDir string
+	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
+	BundleChunkSize int64
+}
 
 type PullService struct {
 	registryService *registryservice.Service
@@ -35,6 +54,8 @@ type PullService struct {
 	platformService *platform.Service
 	securityService *security.Service
 	modulesService  *modules.Service
+
+	options *PullServiceOptions
 
 	// layout manages the OCI image layouts for different components
 	layout *ImageLayouts
@@ -49,15 +70,52 @@ func NewPullService(
 	registryService *registryservice.Service,
 	tmpDir string,
 	targetTag string,
+	options *PullServiceOptions,
 	logger *dkplog.Logger,
 	userLogger *log.SLogger,
 ) *PullService {
+	if options == nil {
+		options = &PullServiceOptions{}
+	}
+
 	return &PullService{
 		registryService: registryService,
 
-		platformService: platform.NewService(registryService, nil, tmpDir, targetTag, logger, userLogger),
-		securityService: security.NewService(registryService, tmpDir, logger, userLogger),
-		modulesService:  modules.NewService(registryService, tmpDir, logger, userLogger),
+		platformService: platform.NewService(
+			registryService,
+			tmpDir,
+			&platform.Options{
+				TargetTag:       targetTag,
+				BundleDir:       options.BundleDir,
+				BundleChunkSize: options.BundleChunkSize,
+			},
+			logger,
+			userLogger,
+		),
+		securityService: security.NewService(
+			registryService,
+			tmpDir,
+			&security.Options{
+				BundleDir:       options.BundleDir,
+				BundleChunkSize: options.BundleChunkSize,
+			},
+			logger,
+			userLogger,
+		),
+		modulesService: modules.NewService(
+			registryService,
+			tmpDir,
+			&modules.Options{
+				Filter:          options.ModuleFilter,
+				OnlyExtraImages: options.OnlyExtraImages,
+				BundleDir:       options.BundleDir,
+				BundleChunkSize: options.BundleChunkSize,
+			},
+			logger,
+			userLogger,
+		),
+
+		options: options,
 
 		layout: NewImageLayouts(),
 
@@ -66,21 +124,27 @@ func NewPullService(
 	}
 }
 
-// Pull
+// Pull downloads Deckhouse components from registry
 func (svc *PullService) Pull(ctx context.Context) error {
-	err := svc.platformService.PullPlatform(ctx)
-	if err != nil {
-		return fmt.Errorf("pull platform: %w", err)
+	if !svc.options.SkipPlatform {
+		err := svc.platformService.PullPlatform(ctx)
+		if err != nil {
+			return fmt.Errorf("pull platform: %w", err)
+		}
 	}
 
-	err = svc.securityService.PullSecurity(ctx)
-	if err != nil {
-		return fmt.Errorf("pull security databases: %w", err)
+	if !svc.options.SkipSecurity {
+		err := svc.securityService.PullSecurity(ctx)
+		if err != nil {
+			return fmt.Errorf("pull security databases: %w", err)
+		}
 	}
 
-	err = svc.modulesService.PullModules(ctx)
-	if err != nil {
-		return fmt.Errorf("pull modules: %w", err)
+	if !svc.options.SkipModules || svc.options.OnlyExtraImages {
+		err := svc.modulesService.PullModules(ctx)
+		if err != nil {
+			return fmt.Errorf("pull modules: %w", err)
+		}
 	}
 
 	return nil
