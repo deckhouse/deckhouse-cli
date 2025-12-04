@@ -90,6 +90,14 @@ func getSwitchHelperDaemonSet(namespace, imageName string) *appsv1.DaemonSet {
 										},
 									},
 								},
+								{
+									Name:  "KUBERNETES_SERVICE_HOST",
+									Value: "127.0.0.1",
+								},
+								{
+									Name:  "KUBERNETES_SERVICE_PORT",
+									Value: "6445",
+								},
 							},
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: &truePtr,
