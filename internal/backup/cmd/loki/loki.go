@@ -281,39 +281,51 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 	return nil, nil, nil
 }
 
-func getEndTimestamp(config *rest.Config, kubeCl kubernetes.Interface, token string) (int64, error) {
-	if endTimestamp == "" {
-		endTimestampCurlParam := CurlRequest{
-			BaseURL: "query_range",
-			Params: map[string]string{
-				"query":     `{pod=~".+"}`,
-				"limit":     "1",
-				"direction": "BACKWARD",
-			},
-			AuthToken: token,
-		}
-		endTimestampCurl := endTimestampCurlParam.GenerateCurlCommand()
-		endTimestampJson, _, err := getLogWithRetryFunc(config, kubeCl, endTimestampCurl)
-		if err != nil {
-			return 0, fmt.Errorf("error get latest timestamp JSON from loki: %w", err)
-		}
-		if len(endTimestampJson.Data.Result) == 0 || len(endTimestampJson.Data.Result[0].Values) == 0 {
-			return 0, fmt.Errorf("no logs found in Loki, cannot determine end timestamp")
-		}
-		endTimestamp, err := strconv.ParseInt(endTimestampJson.Data.Result[0].Values[0][0], 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("error converting timestamp: %w", err)
-		}
-		return endTimestamp, err
-	}
-
-	end, err := time.Parse(templateDate, endTimestamp)
+// parseEndTimestampFromFlag parses date string from the --end flag
+func parseEndTimestampFromFlag(dateStr string) (int64, error) {
+	end, err := time.Parse(templateDate, dateStr)
 	if err != nil {
 		return 0, fmt.Errorf("error parsing date: %w, please provide correct date", err)
 	}
-	endTimestampNanoSec := end.UnixNano()
+	return end.UnixNano(), nil
+}
 
-	return endTimestampNanoSec, err
+// fetchEndTimestampFromLoki retrieves the latest timestamp from Loki API
+func fetchEndTimestampFromLoki(config *rest.Config, kubeCl kubernetes.Interface, token string) (int64, error) {
+	curlParam := CurlRequest{
+		BaseURL: "query_range",
+		Params: map[string]string{
+			"query":     `{pod=~".+"}`,
+			"limit":     "1",
+			"direction": "BACKWARD",
+		},
+		AuthToken: token,
+	}
+
+	curlCmd := curlParam.GenerateCurlCommand()
+	response, _, err := getLogWithRetryFunc(config, kubeCl, curlCmd)
+	if err != nil {
+		return 0, fmt.Errorf("error get latest timestamp JSON from loki: %w", err)
+	}
+
+	if len(response.Data.Result) == 0 || len(response.Data.Result[0].Values) == 0 {
+		return 0, fmt.Errorf("no logs found in Loki, cannot determine end timestamp")
+	}
+
+	ts, err := strconv.ParseInt(response.Data.Result[0].Values[0][0], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("error converting timestamp: %w", err)
+	}
+
+	return ts, nil
+}
+
+// getEndTimestamp returns end timestamp from the flag or fetches it from Loki API
+func getEndTimestamp(config *rest.Config, kubeCl kubernetes.Interface, token string) (int64, error) {
+	if endTimestamp != "" {
+		return parseEndTimestampFromFlag(endTimestamp)
+	}
+	return fetchEndTimestampFromLoki(config, kubeCl, token)
 }
 
 func getStartTimestamp() (int64, error) {
