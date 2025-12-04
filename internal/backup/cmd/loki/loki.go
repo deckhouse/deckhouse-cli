@@ -78,6 +78,9 @@ var (
 	limitFlag      string
 	chunkDaysFlag  int
 	Logger         = log.NewSLogger(slog.LevelError)
+
+	// For testing purposes only: getLogWithRetryFunc will be used to mock the getLogWithRetry function
+	getLogWithRetryFunc = getLogWithRetry
 )
 
 type QueryRange struct {
@@ -290,11 +293,14 @@ func getEndTimestamp(config *rest.Config, kubeCl kubernetes.Interface, token str
 			AuthToken: token,
 		}
 		endTimestampCurl := endTimestampCurlParam.GenerateCurlCommand()
-		endTimestampJSON, _, err := getLogWithRetry(config, kubeCl, endTimestampCurl)
+		endTimestampJson, _, err := getLogWithRetryFunc(config, kubeCl, endTimestampCurl)
 		if err != nil {
 			return 0, fmt.Errorf("error get latest timestamp JSON from loki: %w", err)
 		}
-		endTimestamp, err := strconv.ParseInt(endTimestampJSON.Data.Result[0].Values[0][0], 10, 64)
+		if len(endTimestampJson.Data.Result) == 0 || len(endTimestampJson.Data.Result[0].Values) == 0 {
+			return 0, fmt.Errorf("no logs found in Loki, cannot determine end timestamp")
+		}
+		endTimestamp, err := strconv.ParseInt(endTimestampJson.Data.Result[0].Values[0][0], 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("error converting timestamp: %w", err)
 		}
