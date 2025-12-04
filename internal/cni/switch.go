@@ -120,11 +120,12 @@ func RunSwitch(timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("getting daemonset name for target CNI: %w", err)
 	}
-	if err := waitForModulePodsInitializing(ctx, rtClient, targetModuleName, dsName); err != nil {
+	if err = waitForModulePodsInitializing(ctx, rtClient, targetModuleName, dsName); err != nil {
 		return fmt.Errorf("waiting for target CNI pods to initialize: %w", err)
 	}
 	fmt.Printf("✅ CNI module 'cni-%s' enabled and pods initialized (total elapsed: %s)\n\n",
-		targetCNI, time.Since(startTime).Round(time.Millisecond))
+		targetCNI,
+		time.Since(startTime).Round(time.Millisecond))
 
 	// 5. Disable current CNI
 	fmt.Printf("Disabling current CNI module 'cni-%s'...\n", currentCNI)
@@ -133,6 +134,14 @@ func RunSwitch(timeout time.Duration) error {
 	}
 	if err := waitForModule(ctx, rtClient, "cni-"+strings.ToLower(currentCNI), false); err != nil {
 		return fmt.Errorf("waiting for module '%s' to be disabled: %w", currentCNI, err)
+	}
+
+	dsNameCurrent, err := getDaemonSetNameForCNI("cni-" + strings.ToLower(currentCNI))
+	if err != nil {
+		return fmt.Errorf("getting daemonset name for current CNI: %w", err)
+	}
+	if err := waitForModulePodsTermination(ctx, rtClient, "cni-"+strings.ToLower(currentCNI), dsNameCurrent); err != nil {
+		return fmt.Errorf("waiting for current CNI pods to terminate: %w", err)
 	}
 
 	if err := updateCNIMigrationStatus(ctx, rtClient, activeMigration.Name, metav1.Condition{
@@ -144,7 +153,8 @@ func RunSwitch(timeout time.Duration) error {
 		return fmt.Errorf("updating CNIMigration status: %w", err)
 	}
 	fmt.Printf("✅ CNI module 'cni-%s' disabled (total elapsed: %s)\n\n",
-		currentCNI, time.Since(startTime).Round(time.Millisecond))
+		currentCNI,
+		time.Since(startTime).Round(time.Millisecond))
 
 	// 6. Update phase to Migrate (Triggers cleanup on nodes) // TODO: extra phase?
 	fmt.Println("Updating CNIMigration phase to 'Migrate' to trigger node cleanup...")
@@ -183,7 +193,8 @@ func RunSwitch(timeout time.Duration) error {
 		return fmt.Errorf("waiting for module '%s' to be ready: %w", targetCNI, err)
 	}
 	fmt.Printf("✅ CNI module 'cni-%s' is now Ready (total elapsed: %s)\n\n",
-		targetCNI, time.Since(startTime).Round(time.Millisecond))
+		targetCNI,
+		time.Since(startTime).Round(time.Millisecond))
 
 	// 10. Delete Mutating Webhook
 	fmt.Println("Deleting Mutating Webhook...")
@@ -346,7 +357,7 @@ func waitForModule(ctx context.Context, cl client.Client, moduleName string, sho
 						isReadyFound = true
 						condStatus, _, _ := unstructured.NestedString(condition, "status")
 						if condStatus == "False" {
-							fmt.Printf("\r  Module '%s' is disabled (IsReady=False).", moduleName)
+							fmt.Printf("\r  Module '%s' is disabled (IsReady=False).\n", moduleName)
 							fmt.Println()
 							return nil
 						}
@@ -559,7 +570,7 @@ func waitForModulePodsInitializing(ctx context.Context, cl client.Client, module
 				// 4. Check pod status
 				if pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodRunning { // TODO: PodPending?
 					for _, initStatus := range pod.Status.InitContainerStatuses {
-						if initStatus.Name == "wait-for-cni-migration" && (initStatus.State.Waiting != nil || initStatus.State.Running != nil) {
+						if initStatus.Name == "cni-switch-init-checker" && (initStatus.State.Waiting != nil || initStatus.State.Running != nil) {
 							// Pod is waiting in or running our init-container
 							initializingPods++
 							break
@@ -574,6 +585,39 @@ func waitForModulePodsInitializing(ctx context.Context, cl client.Client, module
 				fmt.Println("\n  ✅ All pods for target CNI are correctly waiting in the init-container.")
 				return nil
 			}
+		}
+	}
+}
+
+// waitForModulePodsTermination waits for all pods of a module's daemonset to be terminated.
+func waitForModulePodsTermination(ctx context.Context, cl client.Client, moduleName string, dsName string) error {
+	fmt.Printf("  Waiting for pods of module '%s' to terminate...", moduleName)
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			// List pods with label app=<dsName> in namespace d8-<moduleName>
+			podList := &corev1.PodList{}
+			opts := []client.ListOption{
+				client.InNamespace("d8-" + moduleName),
+				client.MatchingLabels(map[string]string{"app": dsName}),
+			}
+			if err := cl.List(ctx, podList, opts...); err != nil {
+				fmt.Printf("\r  Error listing pods for module '%s': %v. Retrying...", moduleName, err)
+				continue
+			}
+
+			if len(podList.Items) == 0 {
+				fmt.Println("\r  ✅ All pods for disabled CNI module are terminated.")
+				return nil
+			}
+
+			fmt.Printf("\r  Waiting for %d pods of module '%s' to terminate...", len(podList.Items), moduleName)
 		}
 	}
 }
