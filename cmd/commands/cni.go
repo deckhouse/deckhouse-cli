@@ -23,8 +23,10 @@ import (
 	"time"
 
 	"github.com/deckhouse/deckhouse-cli/internal/cni"
+	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 var (
@@ -59,6 +61,9 @@ This process is divided into several steps:
 
 func NewCniSwitchCommand() *cobra.Command {
 	log.SetFlags(0)
+	// Initialize controller-runtime logger to avoid warnings. Discard output to keep CLI clean.
+	ctrllog.SetLogger(logr.Discard())
+
 	cmd := &cobra.Command{
 		Use:   "cni-switch",
 		Short: "A group of commands to switch CNI in the cluster",

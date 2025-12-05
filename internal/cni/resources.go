@@ -29,6 +29,7 @@ import (
 
 // getSwitchHelperDaemonSet returns a DaemonSet object for the cni-switch-helper.
 func getSwitchHelperDaemonSet(namespace, imageName string) *appsv1.DaemonSet {
+	rootID := int64(0)
 	truePtr := true
 	terminationGracePeriodSeconds := int64(5)
 	mountPropagationBidirectional := corev1.MountPropagationBidirectional
@@ -100,7 +101,9 @@ func getSwitchHelperDaemonSet(namespace, imageName string) *appsv1.DaemonSet {
 								},
 							},
 							SecurityContext: &corev1.SecurityContext{
-								Privileged: &truePtr,
+								Privileged:  &truePtr,
+								RunAsUser:   &rootID,
+								RunAsGroup:  &rootID,
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
