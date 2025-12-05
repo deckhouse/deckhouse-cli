@@ -237,6 +237,7 @@ func getWebhookTLSSecret(namespace string, cert, key []byte) *corev1.Secret {
 // getWebhookDeployment returns a Deployment object for the webhook server.
 func getWebhookDeployment(namespace, imageName, serviceAccountName string) *appsv1.Deployment {
 	replicas := int32(2)
+	terminationGracePeriodSeconds := int64(5)
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      webhookDeploymentName,
@@ -259,9 +260,10 @@ func getWebhookDeployment(namespace, imageName, serviceAccountName string) *apps
 					},
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: serviceAccountName,
-					HostNetwork:        true,
-					DNSPolicy:          corev1.DNSClusterFirstWithHostNet,
+					ServiceAccountName:            serviceAccountName,
+					HostNetwork:                   true,
+					DNSPolicy:                     corev1.DNSClusterFirstWithHostNet,
+					TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
 					Affinity: &corev1.Affinity{
 						PodAntiAffinity: &corev1.PodAntiAffinity{
 							RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{

@@ -63,6 +63,39 @@ func RunCleanup(timeout time.Duration) error {
 	if err = deleteAndWait(ctx, rtClient, webhookConfig); err != nil {
 		return err
 	}
+
+	// 2.1. Delete all CNINodeMigration resources
+	fmt.Println("\nDeleting all CNINodeMigration resources...")
+	nodeMigrations := &v1alpha1.CNINodeMigrationList{}
+	if err = rtClient.List(ctx, nodeMigrations); err != nil && !isCRDNotFound(err) {
+		return fmt.Errorf("listing CNINodeMigrations: %w", err)
+	}
+	for _, nm := range nodeMigrations.Items {
+		if err = deleteAndWait(ctx, rtClient, &nm); err != nil {
+			return err
+		}
+	}
+	fmt.Println("✅ All CNINodeMigration resources deleted")
+
+	// 2.2. Delete all CNIMigration resources
+	fmt.Println("\nDeleting all CNIMigration resources...")
+	migrations := &v1alpha1.CNIMigrationList{}
+	if err = rtClient.List(ctx, migrations); err != nil && !isCRDNotFound(err) {
+		return fmt.Errorf("listing CNIMigrations: %w", err)
+	}
+	for _, m := range migrations.Items {
+		if err = deleteAndWait(ctx, rtClient, &m); err != nil {
+			return err
+		}
+	}
+	fmt.Println("✅ All CNIMigration resources deleted")
+
+	// 2.3. Remove annotations from all pods
+	if err = removePodAnnotations(ctx, rtClient); err != nil {
+		// Non-fatal, print a warning
+		fmt.Printf("⚠️  Warning: failed to remove all pod annotations: %v\n", err)
+	}
+
 	clusterRoleHelper := &rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: "d8:cni-switch-helper"},
 	}
@@ -136,38 +169,6 @@ func RunCleanup(timeout time.Duration) error {
 		return err
 	}
 	fmt.Println("✅ Namespace successfully deleted")
-
-	// 5. Remove annotations from all pods
-	if err = removePodAnnotations(ctx, rtClient); err != nil {
-		// Non-fatal, print a warning
-		fmt.Printf("⚠️  Warning: failed to remove all pod annotations: %v\n", err)
-	}
-
-	// 6. Delete all CNINodeMigration resources
-	fmt.Println("\nDeleting all CNINodeMigration resources...")
-	nodeMigrations := &v1alpha1.CNINodeMigrationList{}
-	if err = rtClient.List(ctx, nodeMigrations); err != nil && !isCRDNotFound(err) {
-		return fmt.Errorf("listing CNINodeMigrations: %w", err)
-	}
-	for _, nm := range nodeMigrations.Items {
-		if err = deleteAndWait(ctx, rtClient, &nm); err != nil {
-			return err
-		}
-	}
-	fmt.Println("✅ All CNINodeMigration resources deleted")
-
-	// 7. Delete all CNIMigration resources
-	fmt.Println("\nDeleting all CNIMigration resources...")
-	migrations := &v1alpha1.CNIMigrationList{}
-	if err = rtClient.List(ctx, migrations); err != nil && !isCRDNotFound(err) {
-		return fmt.Errorf("listing CNIMigrations: %w", err)
-	}
-	for _, m := range migrations.Items {
-		if err = deleteAndWait(ctx, rtClient, &m); err != nil {
-			return err
-		}
-	}
-	fmt.Println("✅ All CNIMigration resources deleted")
 
 	fmt.Printf("\n🎉 CNI switch cleanup successfully completed (total time: %s)\n", time.Since(startTime).Round(time.Second))
 	return nil
