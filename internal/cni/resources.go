@@ -365,7 +365,7 @@ func getWebhookService(namespace string) *corev1.Service {
 // getMutatingWebhookConfiguration returns a MutatingWebhookConfiguration object for annotating pods.
 func getMutatingWebhookConfiguration(namespace string, caBundle []byte) *admissionregistrationv1.MutatingWebhookConfiguration {
 	path := "/mutate-pod"
-	failurePolicy := admissionregistrationv1.Fail
+	failurePolicy := admissionregistrationv1.Ignore
 	sideEffects := admissionregistrationv1.SideEffectClassNone
 
 	return &admissionregistrationv1.MutatingWebhookConfiguration{

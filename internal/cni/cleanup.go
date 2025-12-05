@@ -137,7 +137,13 @@ func RunCleanup(timeout time.Duration) error {
 	}
 	fmt.Println("✅ Namespace successfully deleted")
 
-	// 5. Delete all CNINodeMigration resources
+	// 5. Remove annotations from all pods
+	if err = removePodAnnotations(ctx, rtClient); err != nil {
+		// Non-fatal, print a warning
+		fmt.Printf("⚠️  Warning: failed to remove all pod annotations: %v\n", err)
+	}
+
+	// 6. Delete all CNINodeMigration resources
 	fmt.Println("\nDeleting all CNINodeMigration resources...")
 	nodeMigrations := &v1alpha1.CNINodeMigrationList{}
 	if err = rtClient.List(ctx, nodeMigrations); err != nil && !isCRDNotFound(err) {
@@ -150,7 +156,7 @@ func RunCleanup(timeout time.Duration) error {
 	}
 	fmt.Println("✅ All CNINodeMigration resources deleted")
 
-	// 6. Delete all CNIMigration resources
+	// 7. Delete all CNIMigration resources
 	fmt.Println("\nDeleting all CNIMigration resources...")
 	migrations := &v1alpha1.CNIMigrationList{}
 	if err = rtClient.List(ctx, migrations); err != nil && !isCRDNotFound(err) {
@@ -162,12 +168,6 @@ func RunCleanup(timeout time.Duration) error {
 		}
 	}
 	fmt.Println("✅ All CNIMigration resources deleted")
-
-	// 7. Remove annotations from all pods
-	if err = removePodAnnotations(ctx, rtClient); err != nil {
-		// Non-fatal, print a warning
-		fmt.Printf("⚠️  Warning: failed to remove all pod annotations: %v\n", err)
-	}
 
 	fmt.Printf("\n🎉 CNI switch cleanup successfully completed (total time: %s)\n", time.Since(startTime).Round(time.Second))
 	return nil
