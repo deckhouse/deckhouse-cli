@@ -50,10 +50,11 @@ func NewPluginCommand(commandName string, description string, logger *dkplog.Log
 	}
 
 	systemCmd := &cobra.Command{
-		Use:     commandName,
-		Short:   description,
-		Aliases: []string{"s", "p", "platform"},
-		Long:    description,
+		Use:                commandName,
+		Short:              description,
+		Aliases:            []string{"s", "p", "platform"},
+		Long:               description,
+		DisableFlagParsing: true,
 		PreRun: func(_ *cobra.Command, _ []string) {
 			// init plugin services for subcommands after flags are parsed
 			pc.InitPluginServices()
@@ -81,6 +82,8 @@ func NewPluginCommand(commandName string, description string, logger *dkplog.Log
 				logger.Warn("failed to compute absolute path", slog.String("error", err.Error()))
 				return
 			}
+
+			logger.Info("Executing plugin", slog.Any("args", args))
 
 			command := exec.CommandContext(cmd.Context(), absPath, args...)
 			command.Stdout = os.Stdout
