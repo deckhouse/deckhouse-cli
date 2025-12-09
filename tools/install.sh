@@ -32,7 +32,7 @@ set -e
 # Default settings
 REPO=${REPO:-deckhouse/deckhouse-cli}
 VERSION=${VERSION:-latest}
-INSTALL_DIR=${INSTALL_DIR:-/usr/local/bin}
+INSTALL_DIR=${INSTALL_DIR:-/opt/deckhouse/bin}
 FORCE=${FORCE:-no}
 UNATTENDED=${UNATTENDED:-no}
 BINARY_NAME="d8"
