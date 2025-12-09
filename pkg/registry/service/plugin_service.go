@@ -116,7 +116,7 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 
 	contractB64, ok := annotations[PluginContractAnnotation]
 	if !ok || contractB64 == "" {
-		return nil, fmt.Errorf("plugin-contract annotation not found in image metadata")
+		return nil, fmt.Errorf("contract annotation not found in image metadata")
 	}
 
 	s.log.Debug("Contract base64 retrieved successfully", slog.String("contractb64", contractB64))
