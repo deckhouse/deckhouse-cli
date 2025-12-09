@@ -22,6 +22,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -77,6 +78,12 @@ func NewRootCommand() *RootCommand {
 		Run: func(cmd *cobra.Command, _ []string) {
 			_ = cmd.Help()
 		},
+	}
+
+	if execPath, err := os.Executable(); err == nil {
+		flags.DeckhousePluginsDir = filepath.Dir(execPath)
+	} else {
+		flags.DeckhousePluginsDir = flags.DefaultDeckhousePluginsDir
 	}
 
 	envCliPath := os.Getenv("DECKHOUSE_CLI_PATH")
