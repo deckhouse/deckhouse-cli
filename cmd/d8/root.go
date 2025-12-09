@@ -114,7 +114,8 @@ func (r *RootCommand) registerCommands() {
 	if os.Getenv("DECKHOUSE_PLUGINS_ENABLED") != "true" {
 		r.cmd.AddCommand(system.NewCommand())
 	} else {
-		r.cmd.AddCommand(system.NewPluginCommand(r.logger.Named("system-command")))
+		r.cmd.AddCommand(plugins.NewPluginCommand(plugins.SystemPluginName, "Operate system options in DKP", r.logger.Named("system-command")))
+		r.cmd.AddCommand(plugins.NewPluginCommand(plugins.PackagePluginName, "Package swiss tool", r.logger.Named("package-command")))
 	}
 
 	r.cmd.AddCommand(plugins.NewCommand(r.logger.Named("plugins-command")))
