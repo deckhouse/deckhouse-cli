@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -595,7 +596,12 @@ func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName, version
 	currentSymlink := path.Join(pluginDir, "current")
 	_ = os.Remove(currentSymlink)
 
-	err = os.Symlink(pluginBinaryPath, currentSymlink)
+	absPath, err := filepath.Abs(pluginBinaryPath)
+	if err != nil {
+		return fmt.Errorf("failed to compute absolute path: %w", err)
+	}
+
+	err = os.Symlink(absPath, currentSymlink)
 	if err != nil {
 		return fmt.Errorf("failed to create symlink: %w", err)
 	}

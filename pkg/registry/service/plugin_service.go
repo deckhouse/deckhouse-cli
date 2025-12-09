@@ -36,6 +36,10 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal"
 )
 
+const (
+	PluginContractAnnotation = "contract"
+)
+
 // PluginService provides high-level operations for plugin management
 type PluginService struct {
 	client registry.Client
@@ -110,7 +114,7 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 
 	annotations := manifest.GetAnnotations()
 
-	contractB64, ok := annotations["plugin-contract"]
+	contractB64, ok := annotations[PluginContractAnnotation]
 	if !ok || contractB64 == "" {
 		return nil, fmt.Errorf("plugin-contract annotation not found in image metadata")
 	}

@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -35,10 +36,8 @@ const (
 	PackagePluginName = "package"
 )
 
-func NewPluginCommand(commandName string, logger *dkplog.Logger) *cobra.Command {
+func NewPluginCommand(commandName string, description string, logger *dkplog.Logger) *cobra.Command {
 	pc := NewPluginsCommand(logger.Named("plugins-command"))
-
-	description := "Operate system options in DKP"
 
 	pluginContractFilePath := path.Join(flags.DeckhousePluginsDir, "cache", "contracts", "system.json")
 	pluginContract, err := service.GetPluginContractFromFile(pluginContractFilePath)
@@ -77,7 +76,13 @@ func NewPluginCommand(commandName string, logger *dkplog.Logger) *cobra.Command 
 
 			pluginPath := path.Join(flags.DeckhousePluginsDir, "plugins", commandName)
 			pluginBinaryPath := path.Join(pluginPath, "current")
-			command := exec.CommandContext(cmd.Context(), pluginBinaryPath, args...)
+			absPath, err := filepath.Abs(pluginBinaryPath)
+			if err != nil {
+				logger.Warn("failed to compute absolute path", slog.String("error", err.Error()))
+				return
+			}
+
+			command := exec.CommandContext(cmd.Context(), absPath, args...)
 			command.Stdout = os.Stdout
 			command.Stderr = os.Stderr
 
@@ -93,7 +98,12 @@ func NewPluginCommand(commandName string, logger *dkplog.Logger) *cobra.Command 
 
 func checkInstalled(commandName string) (bool, error) {
 	installedFile := path.Join(flags.DeckhousePluginsDir, "plugins", commandName, "current")
-	_, err := os.Stat(installedFile)
+	absPath, err := filepath.Abs(installedFile)
+	if err != nil {
+		return false, fmt.Errorf("failed to compute absolute path: %w", err)
+	}
+
+	_, err = os.Stat(absPath)
 	if err != nil && os.IsNotExist(err) {
 		return false, nil
 	}
