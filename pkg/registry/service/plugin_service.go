@@ -110,7 +110,7 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 
 	annotations := manifest.GetAnnotations()
 
-	contractB64, ok := annotations["plugin-contract"]
+	contractB64, ok := annotations["contract"]
 	if !ok || contractB64 == "" {
 		return nil, fmt.Errorf("plugin-contract annotation not found in image metadata")
 	}
