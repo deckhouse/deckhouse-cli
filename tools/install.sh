@@ -471,7 +471,6 @@ ${FMT_BOLD}Quick Commands:${FMT_RESET}
 
   ${FMT_BLUE}d8 status${FMT_RESET}     - Show cluster status
   ${FMT_BLUE}d8 mirror${FMT_RESET}     - Mirror Deckhouse modules
-  ${FMT_BLUE}d8 version${FMT_RESET}    - Show version information
 
 EOF
 }
