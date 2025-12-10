@@ -32,7 +32,7 @@ set -e
 # Default settings
 REPO=${REPO:-deckhouse/deckhouse-cli}
 VERSION=${VERSION:-latest}
-INSTALL_DIR=${INSTALL_DIR:-/usr/local/bin}
+INSTALL_DIR=${INSTALL_DIR:-/opt/deckhouse/bin}
 FORCE=${FORCE:-no}
 UNATTENDED=${UNATTENDED:-no}
 BINARY_NAME="d8"
@@ -410,14 +410,15 @@ verify_installation() {
   INSTALL_DIR="${INSTALL_DIR%/}"
   target_path="${INSTALL_DIR}/${BINARY_NAME}"
   
-  if ! command_exists "$BINARY_NAME" && [ ! -f "$target_path" ]; then
+  fmt_info "Verifying installation..."
+
+  # Check if binary exists after installation 
+  if [ ! -f "$target_path" ]; then
     fmt_error "Installation verification failed"
     exit 1
   fi
   
-  fmt_info "Verifying installation..."
-  
-  # Try to get version
+  # Try to get version directly or using absolute path if not in PATH
   if command_exists "$BINARY_NAME"; then
     version_output=$("$BINARY_NAME" --version 2>/dev/null || echo "")
     if [ -n "$version_output" ]; then
@@ -429,8 +430,8 @@ verify_installation() {
       fmt_success "✓ ${version_output}"
     fi
   fi
-  
-  # Check if binary is in PATH
+
+  # Suggest adding INSTALL_DIR to PATH for the user
   if ! command_exists "$BINARY_NAME"; then
     echo ""
     fmt_warn "Note: ${INSTALL_DIR} is not in your PATH"
