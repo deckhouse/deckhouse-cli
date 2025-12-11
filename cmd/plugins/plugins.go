@@ -32,6 +32,7 @@ import (
 	"github.com/Masterminds/semver/v3"
 	"github.com/spf13/cobra"
 
+	"github.com/deckhouse/deckhouse/pkg/log"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry"
 
@@ -524,12 +525,14 @@ func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, 
 	err := os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
 	// if permission failed
 	if errors.Is(err, os.ErrPermission) {
+		pc.logger.Warn("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", flags.DeckhousePluginsDir), log.Err(err))
+
 		flags.DeckhousePluginsDir, err = os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("failed to receive home dir to create plugins dir: %w", err)
 		}
 
-		pc.logger.Warn("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'")
+		flags.DeckhousePluginsDir = path.Join(flags.DeckhousePluginsDir, ".deckhouse-cli")
 	}
 
 	if err != nil {
