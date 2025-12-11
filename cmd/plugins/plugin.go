@@ -36,7 +36,8 @@ const (
 	PackagePluginName = "package"
 )
 
-func NewPluginCommand(commandName string, description string, logger *dkplog.Logger) *cobra.Command {
+// TODO: add options pattern
+func NewPluginCommand(commandName string, description string, aliases []string, logger *dkplog.Logger) *cobra.Command {
 	pc := NewPluginsCommand(logger.Named("plugins-command"))
 
 	pluginContractFilePath := path.Join(flags.DeckhousePluginsDir, "cache", "contracts", "system.json")
@@ -52,7 +53,7 @@ func NewPluginCommand(commandName string, description string, logger *dkplog.Log
 	systemCmd := &cobra.Command{
 		Use:                commandName,
 		Short:              description,
-		Aliases:            []string{"s", "p", "platform"},
+		Aliases:            aliases,
 		Long:               description,
 		DisableFlagParsing: true,
 		PreRun: func(_ *cobra.Command, _ []string) {
