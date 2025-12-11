@@ -288,11 +288,13 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 
 	svc.userLogger.Debugf("image reference: %s@%s", imageMeta, digest.String())
 
-	err = svc.layout.DeckhouseReleaseChannel.AddImage(image, imageMeta.GetTagReference())
+	// Use just the channel name (e.g., "alpha") as the tag for the layout, not the full reference
+	err = svc.layout.DeckhouseReleaseChannel.AddImage(image, releaseChannel)
 	if err != nil {
 		return nil, fmt.Errorf("append %s release channel image to layout: %w", releaseChannel, err)
 	}
 
+	// But use full reference for internal tracking
 	svc.downloadList.DeckhouseReleaseChannel[imageMeta.GetTagReference()] = puller.NewImageMeta(meta.Version, imageMeta.GetTagReference(), &digest)
 
 	return ver, nil
