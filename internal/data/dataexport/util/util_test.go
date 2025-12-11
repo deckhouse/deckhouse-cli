@@ -1,4 +1,4 @@
-package util
+package util //nolint: revive
 
 import (
 	"context"
@@ -11,8 +11,8 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 )
 
 func TestCreateDataExporterIfNeeded(t *testing.T) {

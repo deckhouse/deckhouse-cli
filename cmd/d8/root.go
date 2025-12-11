@@ -114,16 +114,11 @@ func (r *RootCommand) registerCommands() {
 	if os.Getenv("DECKHOUSE_PLUGINS_ENABLED") != "true" {
 		r.cmd.AddCommand(system.NewCommand())
 	} else {
-		r.cmd.AddCommand(plugins.NewPluginCommand(plugins.SystemPluginName, "Operate system options in DKP", r.logger.Named("system-command")))
-		r.cmd.AddCommand(plugins.NewPluginCommand(plugins.PackagePluginName, "Package swiss tool", r.logger.Named("package-command")))
+		r.cmd.AddCommand(plugins.NewPluginCommand(plugins.SystemPluginName, "Operate system options in DKP", []string{"s", "p", "platform"}, r.logger.Named("system-command")))
+		r.cmd.AddCommand(plugins.NewPluginCommand(plugins.PackagePluginName, "Package swiss tool", []string{}, r.logger.Named("package-command")))
 	}
 
 	r.cmd.AddCommand(plugins.NewCommand(r.logger.Named("plugins-command")))
-
-	err := os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
-	if err != nil {
-		r.logger.Debug("Failed to create plugins directory", slog.String("error", err.Error()))
-	}
 }
 
 func (r *RootCommand) Execute() error {
