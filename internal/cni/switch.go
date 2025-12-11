@@ -224,7 +224,7 @@ func RunSwitch(timeout time.Duration) error {
 	if err = deleteMutatingWebhook(ctx, rtClient); err != nil {
 		return fmt.Errorf("deleting mutating webhook: %w", err)
 	}
-	fmt.Printf("✅ Mutating webhook deleted (total elapsed: %s)\n\n",
+	fmt.Printf("\n✅ Mutating webhook deleted (total elapsed: %s)\n\n",
 		time.Since(startTime).Round(time.Millisecond))
 
 	// 11. Signal 'NewCNIEnabled'
@@ -253,8 +253,6 @@ func RunSwitch(timeout time.Duration) error {
 
 	// 13. Finalize migration
 	fmt.Println("Finalizing migration...")
-
-	// Update condition 'Succeeded' using the helper
 	if err = updateCNIMigrationStatus(ctx, rtClient, activeMigration.Name, metav1.Condition{
 		Type:               "Succeeded",
 		Status:             metav1.ConditionTrue,
