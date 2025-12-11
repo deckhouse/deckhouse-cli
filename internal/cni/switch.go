@@ -765,7 +765,7 @@ func verifyResourcesExist(ctx context.Context, rtClient client.Client) error {
 }
 
 func updateCNIMigrationPhase(ctx context.Context, cl client.Client, migrationName string, phase string) error {
-	update := func() error { // TDEN переписать по типу других
+	update := func() error {
 		migration := &v1alpha1.CNIMigration{}
 		if err := cl.Get(ctx, types.NamespacedName{Name: migrationName}, migration); err != nil {
 			return fmt.Errorf("getting CNIMigration: %w", err)
