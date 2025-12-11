@@ -637,7 +637,8 @@ func waitForModulePodsInitializing(ctx context.Context, cl client.Client, module
 			err := cl.Get(ctx, types.NamespacedName{Name: dsName, Namespace: "d8-" + moduleName}, ds)
 			if err != nil {
 				if errors.IsNotFound(err) {
-					fmt.Printf("\r\033[K  Waiting for DaemonSet '%s' in namespace 'd8-%s': not found...", dsName, moduleName)
+					fmt.Printf("\r\033[K  Waiting for DaemonSet '%s' in namespace 'd8-%s': not found...",
+						dsName, moduleName)
 					continue
 				}
 				fmt.Printf("\r\033[K  Error getting DaemonSet '%s' in namespace 'd8-%s': %v. Retrying...",
