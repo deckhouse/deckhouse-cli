@@ -1,5 +1,4 @@
-// nolint: revive
-package util
+package util //nolint: revive
 
 import (
 	"context"
