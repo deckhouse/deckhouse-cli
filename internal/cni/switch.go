@@ -212,8 +212,14 @@ func RunSwitch(timeout time.Duration) error {
 
 	// 9. Wait for target CNI to be Ready
 	// Now that NodeCleanupSucceeded is True, the target CNI pods should unblock and become Ready
-	if err = waitForModule(ctx, rtClient, "cni-"+strings.ToLower(targetCNI), true); err != nil {
-		return fmt.Errorf("waiting for module '%s' to be ready: %w", targetCNI, err)
+	targetModuleName := "cni-" + strings.ToLower(targetCNI)
+	fmt.Printf("Waiting for pods of module '%s' to become Ready...\n", targetModuleName)
+	dsName, err = getDaemonSetNameForCNI(targetModuleName)
+	if err != nil {
+		return fmt.Errorf("getting daemonset name for target CNI: %w", err)
+	}
+	if err = waitForModulePodsReady(ctx, rtClient, targetModuleName, dsName); err != nil {
+		return fmt.Errorf("waiting for target CNI pods to be ready: %w", err)
 	}
 	fmt.Printf("✅ CNI module 'cni-%s' is now Ready (total elapsed: %s)\n\n",
 		targetCNI,
@@ -688,6 +694,40 @@ func waitForModulePodsInitializing(ctx context.Context, cl client.Client, module
 
 			if int32(initializingPods) >= ds.Status.DesiredNumberScheduled {
 				fmt.Println("\n- All pods for target CNI are correctly waiting in the init-container.")
+				return nil
+			}
+		}
+	}
+}
+
+// waitForModulePodsReady waits for all pods of a module's daemonset to be in the 'Ready' state.
+func waitForModulePodsReady(ctx context.Context, cl client.Client, moduleName string, dsName string) error {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			// Get the DaemonSet
+			ds := &appsv1.DaemonSet{}
+			err := cl.Get(ctx, types.NamespacedName{Name: dsName, Namespace: "d8-" + moduleName}, ds)
+			if err != nil {
+				fmt.Printf("\r\033[K  Error getting DaemonSet '%s': %v. Retrying...", dsName, err)
+				continue
+			}
+
+			if ds.Status.DesiredNumberScheduled == 0 {
+				fmt.Printf("\r\033[K  Waiting for DaemonSet '%s' to schedule pods...", dsName)
+				continue
+			}
+
+			fmt.Printf("\r\033[K  Progress: %d/%d pods are Ready.",
+				ds.Status.NumberReady, ds.Status.DesiredNumberScheduled)
+
+			if ds.Status.NumberReady >= ds.Status.DesiredNumberScheduled {
+				fmt.Println("\n- All pods for target CNI are Ready.")
 				return nil
 			}
 		}
