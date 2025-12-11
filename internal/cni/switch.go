@@ -242,7 +242,6 @@ func RunSwitch(timeout time.Duration) error {
 
 	// 12. Wait for pods to be restarted
 	fmt.Println("Waiting for pods to be restarted on all nodes...")
-	// We do not hard fail here, as per ADR suggestions.
 	if err = waitForNodeConditions(ctx, rtClient, activeMigration, "PodsRestarted"); err != nil {
 		fmt.Printf("⚠️  Warning: Timed out waiting for pods to restart: %v\n", err)
 		fmt.Println("Please check the cluster status manually. The CNI switch is otherwise complete.")

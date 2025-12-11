@@ -80,24 +80,7 @@ func RunCleanup(timeout time.Duration) error {
 	}
 	fmt.Println("✅ Active controllers stopped")
 
-	// 4. Delete all CNINodeMigration resources
-	fmt.Println("\nDeleting all CNINodeMigration resources...")
-	nodeMigrations := &v1alpha1.CNINodeMigrationList{}
-	if err = rtClient.List(ctx, nodeMigrations); err != nil && !strings.Contains(err.Error(), "no matches for kind") {
-		return fmt.Errorf("listing CNINodeMigrations: %w", err)
-	}
-	for _, nm := range nodeMigrations.Items {
-		// Remove finalizers to ensure deletion even if controller is down
-		if err = removeFinalizers(ctx, rtClient, &nm); err != nil {
-			fmt.Printf("⚠️  Warning: failed to remove finalizers from %s: %v\n", nm.Name, err)
-		}
-		if err = deleteAndWait(ctx, rtClient, &nm); err != nil {
-			return err
-		}
-	}
-	fmt.Println("✅ All CNINodeMigration resources deleted")
-
-	// 5. Delete all CNIMigration resources
+	// 4. Delete all CNIMigration resources
 	fmt.Println("\nDeleting all CNIMigration resources...")
 	migrations := &v1alpha1.CNIMigrationList{}
 	if err = rtClient.List(ctx, migrations); err != nil && !strings.Contains(err.Error(), "no matches for kind") {
@@ -113,6 +96,23 @@ func RunCleanup(timeout time.Duration) error {
 		}
 	}
 	fmt.Println("✅ All CNIMigration resources deleted")
+
+	// 5. Delete all CNINodeMigration resources
+	fmt.Println("\nDeleting all CNINodeMigration resources...")
+	nodeMigrations := &v1alpha1.CNINodeMigrationList{}
+	if err = rtClient.List(ctx, nodeMigrations); err != nil && !strings.Contains(err.Error(), "no matches for kind") {
+		return fmt.Errorf("listing CNINodeMigrations: %w", err)
+	}
+	for _, nm := range nodeMigrations.Items {
+		// Remove finalizers to ensure deletion even if controller is down
+		if err = removeFinalizers(ctx, rtClient, &nm); err != nil {
+			fmt.Printf("⚠️  Warning: failed to remove finalizers from %s: %v\n", nm.Name, err)
+		}
+		if err = deleteAndWait(ctx, rtClient, &nm); err != nil {
+			return err
+		}
+	}
+	fmt.Println("✅ All CNINodeMigration resources deleted")
 
 	// 6. Remove annotations from all pods
 	if err = removePodAnnotations(ctx, rtClient); err != nil {
@@ -261,6 +261,12 @@ func waitForResourceDeletion(ctx context.Context, rtClient client.Client, obj cl
 				}
 				fmt.Printf("error: %v\n", err)
 				return fmt.Errorf("getting %s '%s': %w", kind, key.Name, err)
+			}
+
+			// If the resource is still there, check for finalizers and remove them
+			// to ensure it doesn't get stuck in Terminating state.
+			if len(obj.GetFinalizers()) > 0 {
+				_ = removeFinalizers(ctx, rtClient, obj)
 			}
 		}
 	}
