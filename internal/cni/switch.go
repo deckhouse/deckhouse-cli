@@ -404,8 +404,7 @@ func waitForModule(ctx context.Context, cl client.Client, moduleName string, sho
 						isReadyFound = true
 						condStatus, _, _ := unstructured.NestedString(condition, "status")
 						if condStatus == "False" {
-							fmt.Printf("\r✅ Module '%s' is disabled (IsReady=False).\n", moduleName)
-							fmt.Println()
+							fmt.Printf("\r- Module '%s' is disabled (IsReady=False).\n", moduleName)
 							return nil
 						}
 					}
@@ -606,7 +605,6 @@ func deleteMutatingWebhook(ctx context.Context, cl client.Client) error {
 				fmt.Printf("\r  ⚠️  Error deleting mutating webhook: %v. Retrying...", err)
 				continue
 			}
-			fmt.Println("- Mutating webhook deleted")
 			return nil
 		}
 	}
@@ -724,7 +722,7 @@ func waitForModulePodsTermination(ctx context.Context, cl client.Client, moduleN
 			}
 
 			if len(podList.Items) == 0 {
-				fmt.Println("- All pods for disabled CNI module are terminated.")
+				fmt.Println("\n- All pods for disabled CNI module are terminated.")
 				return nil
 			}
 
