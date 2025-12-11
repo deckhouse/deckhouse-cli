@@ -55,10 +55,13 @@ func getSwitchHelperDaemonSet(namespace, imageName string) *appsv1.DaemonSet {
 						{
 							Name:  "helper",
 							Image: imageName,
+							Args: []string{
+								"--health-probe-bind-address=:42281",
+							},
 							Ports: []corev1.ContainerPort{
 								{
 									Name:          "healthz",
-									ContainerPort: 8081,
+									ContainerPort: 42281,
 									Protocol:      corev1.ProtocolTCP,
 								},
 							},
@@ -267,6 +270,11 @@ func getWebhookDeployment(namespace, imageName, serviceAccountName string) *apps
 					HostNetwork:                   true,
 					DNSPolicy:                     corev1.DNSClusterFirstWithHostNet,
 					TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
+					Tolerations: []corev1.Toleration{
+						{
+							Operator: corev1.TolerationOpExists,
+						},
+					},
 					Affinity: &corev1.Affinity{
 						PodAntiAffinity: &corev1.PodAntiAffinity{
 							RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
@@ -287,7 +295,7 @@ func getWebhookDeployment(namespace, imageName, serviceAccountName string) *apps
 							Image: imageName,
 							Args: []string{
 								"--mode=webhook",
-								"--health-probe-bind-address=:8082",
+								"--health-probe-bind-address=:42282",
 							},
 							Ports: []corev1.ContainerPort{
 								{
@@ -296,7 +304,7 @@ func getWebhookDeployment(namespace, imageName, serviceAccountName string) *apps
 								},
 								{
 									Name:          "healthz",
-									ContainerPort: 8082,
+									ContainerPort: 42282,
 									Protocol:      corev1.ProtocolTCP,
 								},
 							},

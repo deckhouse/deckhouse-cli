@@ -56,7 +56,7 @@ const (
 	webhookSecretName        = "cni-switch-webhook-tls"
 	webhookConfigName        = "cni-switch-pod-annotator"
 	webhookConfigurationName = "annotator.cni-switch.deckhouse.io"
-	webhookPort              = 9443
+	webhookPort              = 42443
 
 	// Annotations
 	EffectiveCNIAnnotation = "effective-cni.network.deckhouse.io"
