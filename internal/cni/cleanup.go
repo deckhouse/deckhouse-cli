@@ -299,7 +299,7 @@ func removePodAnnotations(ctx context.Context, rtClient client.Client) error {
 				continue
 			}
 			podsPatched++
-			fmt.Printf("\r  Patched %d pods...", podsPatched)
+			fmt.Printf("\r\033[K  Patched %d pods...", podsPatched)
 		}
 	}
 

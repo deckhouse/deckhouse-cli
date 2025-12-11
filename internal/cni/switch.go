@@ -290,13 +290,13 @@ func toggleModule(ctx context.Context, cl client.Client, moduleName string, togg
 
 			err := cl.Get(ctx, types.NamespacedName{Name: moduleName}, mc)
 			if err != nil {
-				fmt.Printf("\r  ⚠️  Error getting module config '%s': %v. Retrying...", moduleName, err)
+				fmt.Printf("\r\033[K  ⚠️  Error getting module config '%s': %v. Retrying...", moduleName, err)
 				continue
 			}
 
 			spec, found, err := unstructured.NestedMap(mc.Object, "spec")
 			if err != nil {
-				fmt.Printf("\r  ⚠️  Error getting spec from module config '%s': %v. Retrying...", moduleName, err)
+				fmt.Printf("\r\033[K  ⚠️  Error getting spec from module config '%s': %v. Retrying...", moduleName, err)
 				continue
 			}
 			if !found {
@@ -311,12 +311,12 @@ func toggleModule(ctx context.Context, cl client.Client, moduleName string, togg
 			spec["enabled"] = toggle
 
 			if err := unstructured.SetNestedMap(mc.Object, spec, "spec"); err != nil {
-				fmt.Printf("\r  ⚠️  Error setting spec for module config '%s': %v. Retrying...", moduleName, err)
+				fmt.Printf("\r\033[K  ⚠️  Error setting spec for module config '%s': %v. Retrying...", moduleName, err)
 				continue
 			}
 
 			if err := cl.Update(ctx, mc); err != nil {
-				fmt.Printf("\r  ⚠️  Error updating module config '%s': %v. Retrying...", moduleName, err)
+				fmt.Printf("\r\033[K  ⚠️  Error updating module config '%s': %v. Retrying...", moduleName, err)
 				continue
 			}
 			return nil
@@ -345,16 +345,16 @@ func waitForModule(ctx context.Context, cl client.Client, moduleName string, sho
 			if shouldBeReady {
 				if err != nil {
 					if errors.IsNotFound(err) {
-						fmt.Printf("\r  Waiting for module '%s': not found yet...", moduleName)
+						fmt.Printf("\r\033[K  Waiting for module '%s': not found yet...", moduleName)
 					} else {
-						fmt.Printf("\r  ⚠️  Error getting module '%s': %v. Retrying...", moduleName, err)
+						fmt.Printf("\r\033[K  ⚠️  Error getting module '%s': %v. Retrying...", moduleName, err)
 					}
 					continue
 				}
 
 				state, found, err := unstructured.NestedString(module.Object, "status", "phase")
 				if err != nil || !found {
-					fmt.Printf("\r  Waiting for module '%s': status.phase field not found. Retrying...",
+					fmt.Printf("\r\033[K  Waiting for module '%s': status.phase field not found. Retrying...",
 						moduleName)
 					continue
 				}
@@ -364,24 +364,24 @@ func waitForModule(ctx context.Context, cl client.Client, moduleName string, sho
 					fmt.Println()
 					return nil
 				}
-				fmt.Printf("\r  Waiting for module '%s' to be Ready, current state: %s", moduleName, state)
+				fmt.Printf("\r\033[K  Waiting for module '%s' to be Ready, current state: %s", moduleName, state)
 
 			} else { // should NOT be ready (disabled)
 				err := cl.Get(ctx, types.NamespacedName{Name: moduleName}, module)
 				if err != nil {
 					if errors.IsNotFound(err) {
-						fmt.Printf("\r  Module '%s' is not found, assuming disabled.", moduleName)
+						fmt.Printf("\r\033[K  Module '%s' is not found, assuming disabled.", moduleName)
 						fmt.Println()
 						return nil
 					}
-					fmt.Printf("\r  ⚠️  Error getting module '%s': %v. Retrying...", moduleName, err)
+					fmt.Printf("\r\033[K  ⚠️  Error getting module '%s': %v. Retrying...", moduleName, err)
 					continue
 				}
 
 				// Check conditions to see if it's disabled
 				conditions, found, err := unstructured.NestedSlice(module.Object, "status", "conditions")
 				if err != nil || !found {
-					fmt.Printf("\r  Waiting for module '%s' status conditions. Retrying...", moduleName)
+					fmt.Printf("\r\033[K  Waiting for module '%s' status conditions. Retrying...", moduleName)
 					continue
 				}
 
@@ -401,17 +401,17 @@ func waitForModule(ctx context.Context, cl client.Client, moduleName string, sho
 						isReadyFound = true
 						condStatus, _, _ := unstructured.NestedString(condition, "status")
 						if condStatus == "False" {
-							fmt.Printf("\r- Module '%s' is disabled (IsReady=False).\n", moduleName)
+							fmt.Printf("\r\033[K- Module '%s' is disabled (IsReady=False).\n", moduleName)
 							return nil
 						}
 					}
 				}
 
 				if !isReadyFound {
-					fmt.Printf("\r  Waiting for module '%s' to be disabled, 'IsReady' condition not found...",
+					fmt.Printf("\r\033[K  Waiting for module '%s' to be disabled, 'IsReady' condition not found...",
 						moduleName)
 				} else {
-					fmt.Printf("\r  Waiting for module '%s' to be disabled (IsReady=False)...", moduleName)
+					fmt.Printf("\r\033[K  Waiting for module '%s' to be disabled (IsReady=False)...", moduleName)
 				}
 			}
 		}
@@ -432,7 +432,7 @@ func updateCNIMigrationStatus(
 			migration := &v1alpha1.CNIMigration{}
 			err := cl.Get(ctx, types.NamespacedName{Name: migrationName}, migration)
 			if err != nil {
-				fmt.Printf("\r  ⚠️  Error getting CNIMigration '%s': %v. Retrying...", migrationName, err)
+				fmt.Printf("\r\033[K  ⚠️  Error getting CNIMigration '%s': %v. Retrying...", migrationName, err)
 				continue
 			}
 
@@ -463,7 +463,7 @@ func updateCNIMigrationStatus(
 			}
 
 			if !errors.IsConflict(err) {
-				fmt.Printf("\r  ⚠️  Error patching CNIMigration status: %v. Retrying...", err)
+				fmt.Printf("\r\033[K  ⚠️  Error patching CNIMigration status: %v. Retrying...", err)
 			}
 		}
 	}
@@ -507,7 +507,7 @@ func waitForNodeConditions(
 			// Get current total nodes
 			nodeList := &corev1.NodeList{}
 			if err := cl.List(ctx, nodeList); err != nil {
-				fmt.Printf("\r  ⚠️  Error listing nodes: %v. Retrying...", err)
+				fmt.Printf("\r\033[K  ⚠️  Error listing nodes: %v. Retrying...", err)
 				continue
 			}
 			totalNodes := len(nodeList.Items)
@@ -515,7 +515,7 @@ func waitForNodeConditions(
 			// Get current node migrations
 			nodeMigrations := &v1alpha1.CNINodeMigrationList{}
 			if err := cl.List(ctx, nodeMigrations); err != nil {
-				fmt.Printf("\r  ⚠️  Error listing CNINodeMigration resources: %v. Retrying...", err)
+				fmt.Printf("\r\033[K  ⚠️  Error listing CNINodeMigration resources: %v. Retrying...", err)
 				continue
 			}
 
@@ -536,8 +536,7 @@ func waitForNodeConditions(
 
 						// Check if it was previously failed
 						if _, wasFailed := reportedFailures[nm.Name]; wasFailed {
-							fmt.Printf("\r\033[K") // Clear line
-							fmt.Printf("  ✅ Node '%s' has recovered.\n", nm.Name)
+							fmt.Printf("\r\033[K  ✅ Node '%s' has recovered.\n", nm.Name)
 							delete(reportedFailures, nm.Name)
 						}
 						break
@@ -554,8 +553,7 @@ func waitForNodeConditions(
 						failedNodes++
 						if _, reported := reportedFailures[nm.Name]; !reported {
 							// Clear line, print error, then let the progress bar overwrite next
-							fmt.Printf("\r\033[K") // Clear current line
-							fmt.Printf("  ❌ Node '%s' failed: %s\n", nm.Name, cond.Message)
+							fmt.Printf("\r\033[K  ❌ Node '%s' failed: %s\n", nm.Name, cond.Message)
 							reportedFailures[nm.Name] = struct{}{}
 						}
 						break
@@ -567,7 +565,7 @@ func waitForNodeConditions(
 			go updateStats(totalNodes, succeededNodes, failedNodes)
 
 			// Output progress
-			fmt.Printf("\r  Progress: %d/%d nodes completed, %d failed.   ",
+			fmt.Printf("\r\033[K  Progress: %d/%d nodes completed, %d failed.   ",
 				succeededNodes, totalNodes, failedNodes)
 
 			// 5. Check exit condition
@@ -596,10 +594,10 @@ func deleteMutatingWebhook(ctx context.Context, cl client.Client) error {
 			}
 			if err := cl.Delete(ctx, webhook); err != nil {
 				if errors.IsNotFound(err) {
-					fmt.Println("\r  Mutating webhook not found, assuming already deleted.")
+					fmt.Println("\r\033[K  Mutating webhook not found, assuming already deleted.")
 					return nil
 				}
-				fmt.Printf("\r  ⚠️  Error deleting mutating webhook: %v. Retrying...", err)
+				fmt.Printf("\r\033[K  ⚠️  Error deleting mutating webhook: %v. Retrying...", err)
 				continue
 			}
 			return nil
@@ -639,17 +637,17 @@ func waitForModulePodsInitializing(ctx context.Context, cl client.Client, module
 			err := cl.Get(ctx, types.NamespacedName{Name: dsName, Namespace: "d8-" + moduleName}, ds)
 			if err != nil {
 				if errors.IsNotFound(err) {
-					fmt.Printf("\r  Waiting for DaemonSet '%s' in namespace 'd8-%s': not found...", dsName, moduleName)
+					fmt.Printf("\r\033[K  Waiting for DaemonSet '%s' in namespace 'd8-%s': not found...", dsName, moduleName)
 					continue
 				}
-				fmt.Printf("\r  Error getting DaemonSet '%s' in namespace 'd8-%s': %v. Retrying...",
+				fmt.Printf("\r\033[K  Error getting DaemonSet '%s' in namespace 'd8-%s': %v. Retrying...",
 					dsName, moduleName, err)
 				continue
 			}
 
 			// Check if pods are scheduled
 			if ds.Status.DesiredNumberScheduled == 0 {
-				fmt.Printf("\r  Waiting for DaemonSet '%s' to schedule pods...", dsName)
+				fmt.Printf("\r\033[K  Waiting for DaemonSet '%s' to schedule pods...", dsName)
 				continue
 			}
 
@@ -660,12 +658,12 @@ func waitForModulePodsInitializing(ctx context.Context, cl client.Client, module
 				client.MatchingLabels(ds.Spec.Selector.MatchLabels),
 			}
 			if err := cl.List(ctx, podList, opts...); err != nil {
-				fmt.Printf("\r  Error listing pods for module '%s': %v. Retrying...", moduleName, err)
+				fmt.Printf("\r\033[K  Error listing pods for module '%s': %v. Retrying...", moduleName, err)
 				continue
 			}
 
 			if len(podList.Items) == 0 {
-				fmt.Printf("\r  Waiting for pods of DaemonSet '%s' to be created...", dsName)
+				fmt.Printf("\r\033[K  Waiting for pods of DaemonSet '%s' to be created...", dsName)
 				continue
 			}
 
@@ -684,7 +682,7 @@ func waitForModulePodsInitializing(ctx context.Context, cl client.Client, module
 				}
 			}
 
-			fmt.Printf("\r  Progress: %d/%d pods are in 'Initializing' state.",
+			fmt.Printf("\r\033[K  Progress: %d/%d pods are in 'Initializing' state.",
 				initializingPods, ds.Status.DesiredNumberScheduled)
 
 			if int32(initializingPods) >= ds.Status.DesiredNumberScheduled {
@@ -714,7 +712,7 @@ func waitForModulePodsTermination(ctx context.Context, cl client.Client, moduleN
 				client.MatchingLabels(map[string]string{"app": dsName}),
 			}
 			if err := cl.List(ctx, podList, opts...); err != nil {
-				fmt.Printf("\r  Error listing pods for module '%s': %v. Retrying...", moduleName, err)
+				fmt.Printf("\r\033[K  Error listing pods for module '%s': %v. Retrying...", moduleName, err)
 				continue
 			}
 
@@ -723,7 +721,7 @@ func waitForModulePodsTermination(ctx context.Context, cl client.Client, moduleN
 				return nil
 			}
 
-			fmt.Printf("\r  Waiting for %d pods of module '%s' to terminate...", len(podList.Items), moduleName)
+			fmt.Printf("\r\033[K  Waiting for %d pods of module '%s' to terminate...", len(podList.Items), moduleName)
 		}
 	}
 }
@@ -781,7 +779,7 @@ func updateCNIMigrationPhase(ctx context.Context, cl client.Client, migrationNam
 	if err := update(); err == nil {
 		return nil
 	} else {
-		fmt.Printf("\r  ⚠️  %v. Retrying...", err)
+		fmt.Printf("\r\033[K  ⚠️  %v. Retrying...", err)
 	}
 
 	ticker := time.NewTicker(2 * time.Second)
@@ -793,7 +791,7 @@ func updateCNIMigrationPhase(ctx context.Context, cl client.Client, migrationNam
 			return ctx.Err()
 		case <-ticker.C:
 			if err := update(); err != nil {
-				fmt.Printf("\r  ⚠️  %v. Retrying...", err)
+				fmt.Printf("\r\033[K  ⚠️  %v. Retrying...", err)
 				continue
 			}
 			return nil

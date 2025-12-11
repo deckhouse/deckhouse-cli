@@ -448,7 +448,7 @@ func waitForDaemonSetReady(ctx context.Context, rtClient client.Client, ds *apps
 			// This is the exit condition for the loop.
 			if ds.Status.DesiredNumberScheduled == ds.Status.NumberReady && ds.Status.NumberUnavailable == 0 {
 				fmt.Printf(
-					"\r  Waiting for DaemonSet... %d/%d pods ready\n",
+					"\r\033[K  Waiting for DaemonSet... %d/%d pods ready\n",
 					ds.Status.NumberReady,
 					ds.Status.DesiredNumberScheduled,
 				)
@@ -457,7 +457,7 @@ func waitForDaemonSetReady(ctx context.Context, rtClient client.Client, ds *apps
 
 			// This is the progress update.
 			fmt.Printf(
-				"\r  Waiting for DaemonSet... %d/%d pods ready",
+				"\r\033[K  Waiting for DaemonSet... %d/%d pods ready",
 				ds.Status.NumberReady,
 				ds.Status.DesiredNumberScheduled,
 			)
@@ -485,7 +485,7 @@ func waitForDeploymentReady(ctx context.Context, rtClient client.Client, dep *ap
 			if dep.Spec.Replicas != nil && dep.Status.ReadyReplicas >=
 				*dep.Spec.Replicas && dep.Status.UnavailableReplicas == 0 {
 				fmt.Printf(
-					"\r  Waiting for Deployment... %d/%d replicas ready\n",
+					"\r\033[K  Waiting for Deployment... %d/%d replicas ready\n",
 					dep.Status.ReadyReplicas,
 					*dep.Spec.Replicas,
 				)
@@ -495,7 +495,7 @@ func waitForDeploymentReady(ctx context.Context, rtClient client.Client, dep *ap
 			// This is the progress update.
 			if dep.Spec.Replicas != nil {
 				fmt.Printf(
-					"\r  Waiting for Deployment... %d/%d replicas ready",
+					"\r\033[K  Waiting for Deployment... %d/%d replicas ready",
 					dep.Status.ReadyReplicas,
 					*dep.Spec.Replicas,
 				)
@@ -536,10 +536,10 @@ func waitForNodesPrepared(ctx context.Context, rtClient client.Client) error {
 				}
 			}
 
-			fmt.Printf("\r  Progress: %d/%d nodes prepared...", readyNodes, totalNodes)
+			fmt.Printf("\r\033[K  Progress: %d/%d nodes prepared...", readyNodes, totalNodes)
 
 			if readyNodes >= totalNodes && totalNodes > 0 {
-				fmt.Printf("\r  Progress: %d/%d nodes prepared...\n", readyNodes, totalNodes)
+				fmt.Printf("\r\033[K  Progress: %d/%d nodes prepared...\n", readyNodes, totalNodes)
 				return nil
 			}
 		}
