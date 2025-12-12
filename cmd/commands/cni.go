@@ -22,11 +22,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/cni"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/deckhouse/deckhouse-cli/internal/cni"
 )
 
 var (
@@ -81,7 +82,7 @@ func NewCmdCniPrepare() *cobra.Command {
 		Use:     "prepare",
 		Short:   "Prepares the cluster for CNI switching",
 		Example: cniPrepareExample,
-		PreRunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			targetCNI, _ := cmd.Flags().GetString("to-cni")
 			for _, supported := range supportedCNIs {
 				if strings.ToLower(targetCNI) == supported {
@@ -95,7 +96,7 @@ func NewCmdCniPrepare() *cobra.Command {
 			)
 		},
 
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(cmd *cobra.Command, _ []string) {
 			targetCNI, _ := cmd.Flags().GetString("to-cni")
 			timeout, _ := cmd.Flags().GetDuration("timeout")
 			if err := cni.RunPrepare(targetCNI, timeout); err != nil {
@@ -117,7 +118,7 @@ func NewCmdCniSwitch() *cobra.Command {
 		Use:     "switch",
 		Short:   "Performs the CNI switching",
 		Example: cniSwitchExample,
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(cmd *cobra.Command, _ []string) {
 			timeout, _ := cmd.Flags().GetDuration("timeout")
 			if err := cni.RunSwitch(timeout); err != nil {
 				log.Fatalf("❌ Error running switch command: %v", err)
@@ -132,7 +133,7 @@ func NewCmdCniCleanup() *cobra.Command {
 		Use:     "cleanup",
 		Short:   "Cleans up resources created during CNI switching",
 		Example: cniCleanupExample,
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(cmd *cobra.Command, _ []string) {
 			timeout, _ := cmd.Flags().GetDuration("timeout")
 			if err := cni.RunCleanup(timeout); err != nil {
 				log.Fatalf("❌ Error running cleanup command: %v", err)
@@ -146,8 +147,8 @@ func NewCmdCniRollback() *cobra.Command { // TDEN It needs to be done!
 	cmd := &cobra.Command{
 		Use:     "rollback",
 		Short:   "Rollback all changes and restore previous CNI",
-		Example: cniCleanupExample,
-		Run: func(cmd *cobra.Command, args []string) {
+		Example: cniRollbackExample,
+		Run: func(cmd *cobra.Command, _ []string) {
 			timeout, _ := cmd.Flags().GetDuration("timeout")
 			if err := cni.RunRollback(timeout); err != nil {
 				log.Fatalf("❌ Error running rollback command: %v", err)

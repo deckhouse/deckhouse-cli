@@ -25,7 +25,6 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/cni"
 	"github.com/spf13/cobra"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -33,6 +32,8 @@ import (
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/logs"
 	kubecmd "k8s.io/kubectl/pkg/cmd"
+
+	"github.com/deckhouse/deckhouse-cli/internal/cni"
 )
 
 const (
