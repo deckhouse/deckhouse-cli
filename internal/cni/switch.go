@@ -22,8 +22,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/cni/api/v1alpha1"
-	saferequest "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -34,6 +32,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/deckhouse/deckhouse-cli/internal/cni/api/v1alpha1"
+	saferequest "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 // RunSwitch executes the logic for the 'cni-switch switch' command.
@@ -371,8 +372,7 @@ func waitForModule(ctx context.Context, cl client.Client, moduleName string, sho
 					return nil
 				}
 				fmt.Printf("\r\033[K  Waiting for module '%s' to be Ready, current state: %s", moduleName, state)
-
-			} else { // should NOT be ready (disabled)
+			} else {
 				err := cl.Get(ctx, types.NamespacedName{Name: moduleName}, module)
 				if err != nil {
 					if errors.IsNotFound(err) {
@@ -817,11 +817,11 @@ func updateCNIMigrationPhase(ctx context.Context, cl client.Client, migrationNam
 		return nil
 	}
 
-	if err := update(); err == nil {
+	err := update()
+	if err == nil {
 		return nil
-	} else {
-		fmt.Printf("\r\033[K  ⚠️  %v. Retrying...", err)
 	}
+	fmt.Printf("\r\033[K  ⚠️  %v. Retrying...", err)
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()

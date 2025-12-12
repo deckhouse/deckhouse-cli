@@ -23,9 +23,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/deckhouse/deckhouse-cli/internal/cni/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/deckhouse/deckhouse-cli/internal/cni/api/v1alpha1"
 )
 
 const (

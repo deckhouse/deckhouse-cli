@@ -22,8 +22,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/cni/api/v1alpha1"
-	saferequest "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -31,6 +29,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/deckhouse/deckhouse-cli/internal/cni/api/v1alpha1"
+	saferequest "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 // RunCleanup executes the logic for the 'cni-switch cleanup' command.

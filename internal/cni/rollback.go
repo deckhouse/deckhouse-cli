@@ -24,5 +24,6 @@ import (
 // RunRollback executes the logic for the 'cni-switch rollback' command.
 func RunRollback(timeout time.Duration) error {
 	fmt.Println("Logic for rollback is not implemented yet.")
+	_ = timeout
 	return nil
 }

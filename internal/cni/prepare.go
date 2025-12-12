@@ -29,14 +29,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/cni/api/v1alpha1"
-	saferequest "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/deckhouse/deckhouse-cli/internal/cni/api/v1alpha1"
+	saferequest "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 // RunPrepare executes the logic for the 'cni-switch prepare' command.
@@ -270,7 +271,7 @@ func RunPrepare(targetCNI string, timeout time.Duration) error {
 }
 
 // generateWebhookCertificates creates a self-signed CA and a server certificate for the webhook.
-func generateWebhookCertificates(namespace string) (caCert, serverCert, serverKey []byte, err error) {
+func generateWebhookCertificates(namespace string) ([]byte, []byte, []byte, error) {
 	caSerialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	caSerialNumber, err := rand.Int(rand.Reader, caSerialNumberLimit)
 	if err != nil {
