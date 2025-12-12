@@ -44,6 +44,7 @@ const (
 	switchAccount         = "system:serviceaccount:d8-multitenancy-manager:multitenancy-manager"
 	failedAttemptsFile    = "/tmp/failed_annotations.txt"
 	errorLogFile          = "/tmp/failed_errors.txt"
+	skippedObjectsFile    = "/tmp/skipped_objects.txt"
 )
 
 type ObjectRef struct {
@@ -136,6 +137,7 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 	// Clear failed attempts files
 	_ = os.WriteFile(failedAttemptsFile, []byte{}, 0644)
 	_ = os.WriteFile(errorLogFile, []byte{}, 0644)
+	_ = os.WriteFile(skippedObjectsFile, []byte{}, 0644)
 
 	// Create switch account config for retry
 	switchRestConfig := rest.CopyConfig(restConfig)
@@ -338,6 +340,7 @@ func annotateObjects(
 			if logLevel == "DEBUG" || logLevel == "TRACE" {
 				color.Yellow("\nSkipping type that does not support annotation: %s\n", obj.Kind)
 			}
+			recordSkippedObject(obj, "MethodNotSupported", fmt.Sprintf("Resource type %s does not support PATCH operation", obj.Kind))
 			continue
 		}
 
@@ -385,6 +388,7 @@ func annotateObjects(
 						}
 						unsupportedTypes[obj.Kind] = true
 						color.Yellow("\nAdding %s to unsupported annotation types due to MethodNotSupported (after trying switch account).\n", obj.Kind)
+						recordSkippedObject(obj, "MethodNotSupported", fmt.Sprintf("After switching to account %s: %v", switchAccount, err))
 						continue
 					}
 					color.Red("\nFailed to add annotation after switching accounts for %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
@@ -411,6 +415,7 @@ func annotateObjects(
 				}
 				unsupportedTypes[obj.Kind] = true
 				color.Yellow("\nAdding %s to unsupported annotation types due to MethodNotSupported.\n", obj.Kind)
+				recordSkippedObject(obj, "MethodNotSupported", fmt.Sprintf("Error: %v", err))
 				continue
 			}
 
@@ -423,6 +428,7 @@ func annotateObjects(
 					color.Yellow("\nObject not found (may have been deleted): %s/%s/%s - skipping\n", obj.Kind, obj.Namespace, obj.Name)
 				}
 				// Don't record to failed_annotations.txt - object doesn't exist anymore
+				recordSkippedObject(obj, "NotFound", fmt.Sprintf("Object was deleted or does not exist: %v", err))
 			} else {
 				// Other errors - definitely record them
 				color.Red("\nFailed to add annotation to %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
@@ -621,6 +627,21 @@ func recordFailure(obj ObjectRef, errorMsg string) {
 		return
 	}
 	_, _ = fmt.Fprintf(f, "%s|%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind, errorMsg)
+	_ = f.Sync()
+	_ = f.Close()
+}
+
+func recordSkippedObject(obj ObjectRef, reason string, details string) {
+	// Append to skipped objects file
+	f, err := os.OpenFile(skippedObjectsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		// If we can't write to the file, log to stderr as fallback
+		fmt.Fprintf(os.Stderr, "Warning: failed to write to %s: %v\n", skippedObjectsFile, err)
+		return
+	}
+	timestamp := time.Now().Format(time.RFC3339)
+	gvrStr := obj.GVR.String()
+	_, _ = fmt.Fprintf(f, "%s|%s|%s|%s|%s|%s|%s\n", timestamp, obj.Namespace, obj.Name, obj.Kind, gvrStr, reason, details)
 	_ = f.Sync()
 	_ = f.Close()
 }
