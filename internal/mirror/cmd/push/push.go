@@ -23,9 +23,11 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -36,6 +38,7 @@ import (
 	"github.com/deckhouse/deckhouse/pkg/registry"
 	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
@@ -289,11 +292,71 @@ func (p *Pusher) Execute() error {
 		return err
 	}
 
+	// Use new push service when NEW_PULL env is set
+	if os.Getenv("NEW_PULL") == "true" {
+		return p.executeNewPush()
+	}
+
 	if err := p.pushStaticPackages(); err != nil {
 		return err
 	}
 
 	if err := p.pushModules(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// executeNewPush runs the push using the new service architecture
+func (p *Pusher) executeNewPush() error {
+	// Set up graceful cancellation on Ctrl+C
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	logger := dkplog.NewNop()
+
+	if log.DebugLogLevel() >= 3 {
+		logger = dkplog.NewLogger(dkplog.WithLevel(slog.LevelDebug))
+	}
+
+	// Create registry client
+	clientOpts := &regclient.Options{
+		Insecure:      p.pushParams.Insecure,
+		TLSSkipVerify: p.pushParams.SkipTLSVerification,
+		Logger:        logger,
+	}
+
+	if p.pushParams.RegistryAuth != nil {
+		clientOpts.Auth = p.pushParams.RegistryAuth
+	}
+
+	var client registry.Client
+	client = regclient.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
+
+	// Scope to the registry path
+	if p.pushParams.RegistryPath != "" {
+		client = client.WithSegment(p.pushParams.RegistryPath)
+	}
+
+	svc := mirror.NewPushService(
+		client,
+		&mirror.PushServiceOptions{
+			BundleDir:         p.pushParams.BundleDir,
+			WorkingDir:        p.pushParams.WorkingDir,
+			ModulesPathSuffix: p.pushParams.ModulesPathSuffix,
+		},
+		logger.Named("push"),
+		p.logger.(*log.SLogger),
+	)
+
+	err := svc.Push(ctx)
+	if err != nil {
+		// Handle context cancellation gracefully
+		if errors.Is(err, context.Canceled) {
+			p.logger.WarnLn("Operation cancelled by user")
+			return nil
+		}
 		return err
 	}
 

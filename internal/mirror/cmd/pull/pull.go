@@ -23,8 +23,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
@@ -102,11 +104,19 @@ func NewCommand() *cobra.Command {
 }
 
 func pull(cmd *cobra.Command, _ []string) error {
+	// Set up graceful cancellation on Ctrl+C
+	ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
 	puller := NewPuller(cmd)
 
 	puller.logger.Infof("d8 version: %s", version.Version)
 
-	if err := puller.Execute(cmd.Context()); err != nil {
+	if err := puller.Execute(ctx); err != nil {
+		if errors.Is(err, context.Canceled) {
+			puller.logger.WarnLn("\nOperation cancelled by user")
+			return nil
+		}
 		return ErrPullFailed
 	}
 
