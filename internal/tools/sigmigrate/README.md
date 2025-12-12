@@ -19,8 +19,8 @@ d8 tools sig-migrate [flags]
 | `--retry`      | Retry annotation for objects that failed to be processed in the previous run | `false`                                     |
 | `--as`         | Specify a Kubernetes service account for kubectl operations (impersonation)  | `system:serviceaccount:d8-system:deckhouse` |
 | `--log-level`  | Set the log level (INFO, DEBUG, TRACE)                                       | `DEBUG`                                     |
-| `--kubeconfig` | Path to the kubeconfig file to use for CLI requests                          |                                             |
-| `--context`    | The name of the kubeconfig context to use                                    |                                             |
+| `--kubeconfig` | Path to the kubeconfig file to use for CLI requests                          | `$HOME/.kube/config` or `$KUBECONFIG`        |
+| `--context`    | The name of the kubeconfig context to use                                    | `kubernetes-admin@kubernetes`               |
 
 ## Usage Examples
 
@@ -92,7 +92,31 @@ The command creates two files to track failed operations:
 - `/tmp/failed_annotations.txt` - list of objects in `namespace|name|kind` format that failed to be processed
 - `/tmp/failed_errors.txt` - detailed error information in `namespace|name|kind|error_message` format
 
-To retry, use the `--retry` flag:
+### Automatic Failure Detection
+
+At the end of execution, if any objects failed to be annotated, the command will automatically display a warning message with:
+
+- The number of failed objects
+- Paths to both error log files
+- Instructions on how to investigate and retry
+
+Example output when failures occur:
+
+```
+⚠️  Migration completed with 5 failed object(s).
+
+Some objects could not be annotated. Please check the error details:
+  Error log file: /tmp/failed_errors.txt
+  Failed objects list: /tmp/failed_annotations.txt
+
+To investigate the issues:
+  1. Review the error log file to understand why objects failed
+  2. Check permissions and resource availability
+  3. Retry migration for failed objects only using:
+     d8 tools sig-migrate --retry
+```
+
+To retry failed objects, use the `--retry` flag:
 
 ```shell
 d8 tools sig-migrate --retry

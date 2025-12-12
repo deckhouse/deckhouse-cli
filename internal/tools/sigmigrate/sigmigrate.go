@@ -148,7 +148,15 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 	timestamp := time.Now().Unix()
 	unsupportedTypes := make(map[string]bool)
 
-	return annotateObjects(dynamicClient, switchDynamicClient, objects, timestamp, unsupportedTypes, config.LogLevel)
+	err = annotateObjects(dynamicClient, switchDynamicClient, objects, timestamp, unsupportedTypes, config.LogLevel)
+	if err != nil {
+		return err
+	}
+
+	// Check if there were any failed annotations
+	checkFailedAnnotations()
+
+	return nil
 }
 
 func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClient dynamic.Interface, logLevel string) (map[string]ObjectRef, error) {
@@ -502,4 +510,42 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+func checkFailedAnnotations() {
+	data, err := os.ReadFile(failedAttemptsFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		// If we can't read the file, just return silently
+		return
+	}
+
+	// Check if file is not empty (after trimming whitespace)
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return
+	}
+
+	// Count failed objects
+	lines := strings.Split(content, "\n")
+	failedCount := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			failedCount++
+		}
+	}
+
+	if failedCount > 0 {
+		color.Red("\n⚠️  Migration completed with %d failed object(s).\n\n", failedCount)
+		color.Red("Some objects could not be annotated. Please check the error details:\n")
+		color.Yellow("  Error log file: %s\n", errorLogFile)
+		color.Yellow("  Failed objects list: %s\n\n", failedAttemptsFile)
+		color.Red("To investigate the issues:\n")
+		color.Yellow("  1. Review the error log file to understand why objects failed\n")
+		color.Yellow("  2. Check permissions and resource availability\n")
+		color.Yellow("  3. Retry migration for failed objects only using:\n")
+		color.Green("     d8 tools sig-migrate --retry\n\n")
+	}
 }
