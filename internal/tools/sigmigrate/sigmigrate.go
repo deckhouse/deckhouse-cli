@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -109,25 +110,26 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 
 	var objects map[string]ObjectRef
 	if config.RetryFailed {
+		color.Cyan("Retrying failed annotations from previous runs...\n")
 		objects, err = loadFailedObjects()
 		if err != nil {
 			return fmt.Errorf("failed to load failed objects: %w", err)
 		}
 		if len(objects) == 0 {
-			fmt.Println("No valid objects found in retry list. Exiting.")
+			color.Red("No valid objects found in retry list. Exiting.")
 			return nil
 		}
-		fmt.Printf("Loaded %d objects for retry from %s.\n", len(objects), failedAttemptsFile)
+		color.Cyan("Loaded %d objects for retry from %s.\n", len(objects), failedAttemptsFile)
 	} else {
 		objects, err = collectAllObjects(discoveryClient, dynamicClient, config.LogLevel)
 		if err != nil {
 			return fmt.Errorf("failed to collect objects: %w", err)
 		}
-		fmt.Printf("Total objects collected: %d\n", len(objects))
+		color.Cyan("\nTotal objects collected: %d\n", len(objects))
 	}
 
 	if len(objects) == 0 {
-		fmt.Println("No objects available for annotation. Exiting.")
+		color.Red("No objects available for annotation. Exiting.")
 		return nil
 	}
 
@@ -205,7 +207,8 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 		if logLevel == "TRACE" {
 			fmt.Printf("\nFetching resource: %s\n", gvr.String())
 		} else {
-			fmt.Printf("\rCalculating: [%d%%] Processing Namespaced Resource: %s                                ", progress, gvr.Resource)
+			greenProgress := color.New(color.FgGreen).SprintFunc()
+			fmt.Printf("\rCalculating: [%s] Processing Namespaced Resource: %s                                ", greenProgress(fmt.Sprintf("%d%%", progress)), gvr.Resource)
 		}
 
 		resourceClient := dynamicClient.Resource(gvr)
@@ -240,7 +243,8 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 		if logLevel == "TRACE" {
 			fmt.Printf("\nFetching resource: %s\n", gvr.String())
 		} else {
-			fmt.Printf("\rCalculating: [%d%%] Processing Cluster Resource: %s                                 ", progress, gvr.Resource)
+			greenProgress := color.New(color.FgGreen).SprintFunc()
+			fmt.Printf("\rCalculating: [%s] Processing Cluster Resource: %s                                 ", greenProgress(fmt.Sprintf("%d%%", progress)), gvr.Resource)
 		}
 
 		resourceClient := dynamicClient.Resource(gvr)
@@ -283,14 +287,15 @@ func annotateObjects(
 		var err error
 		if unsupportedTypes[obj.Kind] {
 			if logLevel == "DEBUG" || logLevel == "TRACE" {
-				fmt.Printf("\nSkipping type that does not support annotation: %s\n", obj.Kind)
+				color.Yellow("\nSkipping type that does not support annotation: %s\n", obj.Kind)
 			}
 			continue
 		}
 
 		currentObject++
 		progress := (currentObject * 100) / totalObjects
-		fmt.Printf("\rProgress: [%d%%] Annotating: Kind=%s, Namespace=%s, Name=%s                    ", progress, obj.Kind, obj.Namespace, obj.Name)
+		greenProgress := color.New(color.FgGreen).SprintFunc()
+		fmt.Printf("\rProgress: [%s] Annotating: Kind=%s, Namespace=%s, Name=%s                    ", greenProgress(fmt.Sprintf("%d%%", progress)), obj.Kind, obj.Namespace, obj.Name)
 
 		resourceClient := dynamicClient.Resource(obj.GVR)
 		var objClient dynamic.ResourceInterface
@@ -305,12 +310,12 @@ func annotateObjects(
 		if err != nil {
 			if strings.Contains(err.Error(), "the server does not allow this method") {
 				unsupportedTypes[obj.Kind] = true
-				fmt.Printf("\nAdding %s to unsupported annotation types due to MethodNotAllowed.\n", obj.Kind)
+				color.Yellow("\nAdding %s to unsupported annotation types due to MethodNotAllowed.\n", obj.Kind)
 				continue
 			}
 
 			if strings.Contains(err.Error(), "denied request: failed expression: request.userInfo.username") {
-				fmt.Printf("\nRetrying with different service account: %s for %s/%s/%s\n", switchAccount, obj.Kind, obj.Namespace, obj.Name)
+				color.Yellow("\nRetrying with different service account: %s for %s/%s/%s\n", switchAccount, obj.Kind, obj.Namespace, obj.Name)
 				switchResourceClient := switchDynamicClient.Resource(obj.GVR)
 				var switchObjClient dynamic.ResourceInterface
 				if obj.Namespace == "clusterwide" {
@@ -321,14 +326,14 @@ func annotateObjects(
 
 				err = addAnnotation(switchObjClient, obj.Name, annotationKey, fmt.Sprintf("%d", timestamp), logLevel)
 				if err != nil {
-					fmt.Printf("\nFailed to add annotation after switching accounts for %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
-					fmt.Printf("Retry Details: %v\n", err)
+					color.Red("\nFailed to add annotation after switching accounts for %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
+					color.Yellow("Retry Details: %v\n", err)
 					recordFailure(obj, err.Error())
 					continue
 				}
 			} else if !strings.Contains(err.Error(), "Not found") && !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "the server does not allow this method") {
-				fmt.Printf("\nFailed to add annotation to %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
-				fmt.Printf("Details: %v\n", err)
+				color.Red("\nFailed to add annotation to %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
+				color.Yellow("Details: %v\n", err)
 				recordFailure(obj, err.Error())
 				continue
 			}
@@ -338,8 +343,8 @@ func annotateObjects(
 		err = removeAnnotation(objClient, obj.Name, annotationKeyToRemove, logLevel)
 		if err != nil {
 			if !strings.Contains(err.Error(), "Not found") && !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "the server does not allow this method") {
-				fmt.Printf("\nFailed to remove annotation from %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
-				fmt.Printf("Details: %v\n", err)
+				color.Red("\nFailed to remove annotation from %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
+				color.Yellow("Details: %v\n", err)
 				recordFailure(obj, err.Error())
 			}
 		}

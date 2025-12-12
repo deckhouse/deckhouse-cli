@@ -17,6 +17,8 @@ limitations under the License.
 package cmd
 
 import (
+	"os"
+
 	"github.com/spf13/pflag"
 )
 
@@ -39,15 +41,20 @@ func addFlags(flags *pflag.FlagSet) {
 		"Set the log level (INFO, DEBUG, TRACE). Defaults to DEBUG.",
 	)
 
+	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
+	if p := os.Getenv("KUBECONFIG"); p != "" {
+		defaultKubeconfigPath = p
+	}
+
 	flags.String(
 		"kubeconfig",
-		"",
-		"Path to the kubeconfig file to use for CLI requests.",
+		defaultKubeconfigPath,
+		"Path to the kubeconfig file to use for CLI requests. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)",
 	)
 
 	flags.String(
 		"context",
-		"",
+		"kubernetes-admin@kubernetes",
 		"The name of the kubeconfig context to use.",
 	)
 }
