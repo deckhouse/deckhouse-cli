@@ -174,9 +174,22 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 	namespacedResources := []schema.GroupVersionResource{}
 	clusterResources := []schema.GroupVersionResource{}
 
+	// Track resources by name to prefer core API versions over metrics/extensions
+	type resourceInfo struct {
+		gvr        schema.GroupVersionResource
+		namespaced bool
+	}
+	resourceMap := make(map[string]resourceInfo)
+
 	for _, apiResourceList := range apiResourceLists {
 		gv, err := schema.ParseGroupVersion(apiResourceList.GroupVersion)
 		if err != nil {
+			continue
+		}
+
+		// Skip metrics and other API groups that don't support standard operations
+		// These groups typically only support read operations
+		if gv.Group == "metrics.k8s.io" || gv.Group == "custom.metrics.k8s.io" || gv.Group == "external.metrics.k8s.io" {
 			continue
 		}
 
@@ -191,17 +204,45 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 				continue
 			}
 
+			// Skip resources that don't support patch (needed for annotations)
+			if !contains(apiResource.Verbs, "patch") {
+				continue
+			}
+
 			gvr := schema.GroupVersionResource{
 				Group:    gv.Group,
 				Version:  gv.Version,
 				Resource: apiResource.Name,
 			}
 
-			if apiResource.Namespaced {
-				namespacedResources = append(namespacedResources, gvr)
+			// Use resource name as key (e.g., "pods")
+			resourceKey := apiResource.Name
+
+			// Prefer core API versions (empty group or v1) over extensions
+			// If we already have this resource, prefer the one with empty group or v1
+			if existingInfo, exists := resourceMap[resourceKey]; exists {
+				// Prefer core API (empty group) over extensions
+				if gv.Group == "" && existingInfo.gvr.Group != "" {
+					resourceMap[resourceKey] = resourceInfo{gvr: gvr, namespaced: apiResource.Namespaced}
+				} else if gv.Group == "" && existingInfo.gvr.Group == "" {
+					// Both are core, prefer v1 over other versions
+					if gv.Version == "v1" && existingInfo.gvr.Version != "v1" {
+						resourceMap[resourceKey] = resourceInfo{gvr: gvr, namespaced: apiResource.Namespaced}
+					}
+				}
+				// Otherwise keep the existing one
 			} else {
-				clusterResources = append(clusterResources, gvr)
+				resourceMap[resourceKey] = resourceInfo{gvr: gvr, namespaced: apiResource.Namespaced}
 			}
+		}
+	}
+
+	// Convert map to slices
+	for _, info := range resourceMap {
+		if info.namespaced {
+			namespacedResources = append(namespacedResources, info.gvr)
+		} else {
+			clusterResources = append(clusterResources, info.gvr)
 		}
 	}
 
@@ -305,6 +346,10 @@ func annotateObjects(
 		greenProgress := color.New(color.FgGreen).SprintFunc()
 		fmt.Printf("\rProgress: [%s] Annotating: Kind=%s, Namespace=%s, Name=%s                    ", greenProgress(fmt.Sprintf("%d%%", progress)), obj.Kind, obj.Namespace, obj.Name)
 
+		if logLevel == "TRACE" {
+			color.Cyan("\n[TRACE] Processing object: Kind=%s, Namespace=%s, Name=%s, GVR=%s\n", obj.Kind, obj.Namespace, obj.Name, obj.GVR.String())
+		}
+
 		resourceClient := dynamicClient.Resource(obj.GVR)
 		var objClient dynamic.ResourceInterface
 		if obj.Namespace == "clusterwide" {
@@ -316,13 +361,12 @@ func annotateObjects(
 		// Add annotation
 		err = addAnnotation(objClient, obj.Name, annotationKey, fmt.Sprintf("%d", timestamp), logLevel)
 		if err != nil {
-			if strings.Contains(err.Error(), "the server does not allow this method") {
-				unsupportedTypes[obj.Kind] = true
-				color.Yellow("\nAdding %s to unsupported annotation types due to MethodNotAllowed.\n", obj.Kind)
-				continue
-			}
+			errStr := err.Error()
 
-			if strings.Contains(err.Error(), "denied request: failed expression: request.userInfo.username") {
+			// First, check for permission denied - try with different service account
+			// This should be checked BEFORE MethodNotSupported, as permission errors
+			// can sometimes be reported as "method not allowed"
+			if strings.Contains(errStr, "denied request: failed expression: request.userInfo.username") {
 				color.Yellow("\nRetrying with different service account: %s for %s/%s/%s\n", switchAccount, obj.Kind, obj.Namespace, obj.Name)
 				switchResourceClient := switchDynamicClient.Resource(obj.GVR)
 				var switchObjClient dynamic.ResourceInterface
@@ -334,26 +378,73 @@ func annotateObjects(
 
 				err = addAnnotation(switchObjClient, obj.Name, annotationKey, fmt.Sprintf("%d", timestamp), logLevel)
 				if err != nil {
+					// If it still fails with MethodNotSupported after switching accounts, then it's truly unsupported
+					if errors.IsMethodNotSupported(err) {
+						if logLevel == "TRACE" {
+							color.Cyan("\n[TRACE] MethodNotSupported error after switching account: %v\n", err)
+						}
+						unsupportedTypes[obj.Kind] = true
+						color.Yellow("\nAdding %s to unsupported annotation types due to MethodNotSupported (after trying switch account).\n", obj.Kind)
+						continue
+					}
 					color.Red("\nFailed to add annotation after switching accounts for %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
 					color.Yellow("Retry Details: %v\n", err)
 					recordFailure(obj, err.Error())
 					continue
 				}
-			} else if !strings.Contains(err.Error(), "Not found") && !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "the server does not allow this method") {
-				color.Red("\nFailed to add annotation to %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
-				color.Yellow("Details: %v\n", err)
-				recordFailure(obj, err.Error())
+				// Success with switch account, continue to next object
 				continue
 			}
+
+			// Check for unsupported method (resource type doesn't support annotations)
+			// Only mark as unsupported if it's truly MethodNotSupported AND not a permission issue
+			if errors.IsMethodNotSupported(err) {
+				if logLevel == "TRACE" {
+					color.Cyan("\n[TRACE] MethodNotSupported error: %v\n", err)
+					color.Cyan("[TRACE] Error details for %s/%s/%s: %s\n", obj.Kind, obj.Namespace, obj.Name, errStr)
+					// Check if it's a StatusError to get more details
+					if statusErr, ok := err.(*errors.StatusError); ok {
+						color.Cyan("[TRACE] Status code: %d\n", statusErr.Status().Code)
+						color.Cyan("[TRACE] Status reason: %s\n", statusErr.Status().Reason)
+						color.Cyan("[TRACE] Status message: %s\n", statusErr.Status().Message)
+					}
+				}
+				unsupportedTypes[obj.Kind] = true
+				color.Yellow("\nAdding %s to unsupported annotation types due to MethodNotSupported.\n", obj.Kind)
+				continue
+			}
+
+			// Record all other errors (excluding "Not found" - object was deleted, no need to retry)
+			isNotFound := errors.IsNotFound(err) || strings.Contains(errStr, "Not found") || strings.Contains(errStr, "not found")
+
+			if isNotFound {
+				// Object not found - might have been deleted, skip recording as there's no point in retrying
+				if logLevel == "DEBUG" || logLevel == "TRACE" {
+					color.Yellow("\nObject not found (may have been deleted): %s/%s/%s - skipping\n", obj.Kind, obj.Namespace, obj.Name)
+				}
+				// Don't record to failed_annotations.txt - object doesn't exist anymore
+			} else {
+				// Other errors - definitely record them
+				color.Red("\nFailed to add annotation to %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
+				color.Yellow("Details: %v\n", err)
+				recordFailure(obj, errStr)
+			}
+			continue
 		}
 
 		// Remove annotation
 		err = removeAnnotation(objClient, obj.Name, annotationKeyToRemove, logLevel)
 		if err != nil {
-			if !strings.Contains(err.Error(), "Not found") && !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "the server does not allow this method") {
-				color.Red("\nFailed to remove annotation from %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
-				color.Yellow("Details: %v\n", err)
-				recordFailure(obj, err.Error())
+			// Skip MethodNotSupported and NotFound errors - no need to record them
+			// MethodNotSupported: resource type doesn't support PATCH (already known from addAnnotation)
+			// NotFound: object was deleted, no point in retrying
+			if !errors.IsMethodNotSupported(err) && !errors.IsNotFound(err) {
+				errStr := err.Error()
+				if !strings.Contains(errStr, "Not found") && !strings.Contains(errStr, "not found") {
+					color.Red("\nFailed to remove annotation from %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
+					color.Yellow("Details: %v\n", err)
+					recordFailure(obj, errStr)
+				}
 			}
 		}
 	}
@@ -365,11 +456,15 @@ func annotateObjects(
 func addAnnotation(client dynamic.ResourceInterface, name, key, value, logLevel string) error {
 	obj, err := client.Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
+		if logLevel == "TRACE" {
+			color.Cyan("\n[TRACE] Get failed for %s: %v\n", name, err)
+		}
 		return err
 	}
 
 	if logLevel == "TRACE" {
-		fmt.Printf("\nRunning annotation command: add %s=%s to %s\n", key, value, name)
+		color.Cyan("\n[TRACE] Running annotation command: add %s=%s to %s\n", key, value, name)
+		color.Cyan("[TRACE] Object UID: %s, ResourceVersion: %s\n", obj.GetUID(), obj.GetResourceVersion())
 	}
 
 	annotations := obj.GetAnnotations()
@@ -390,7 +485,26 @@ func addAnnotation(client dynamic.ResourceInterface, name, key, value, logLevel 
 		return fmt.Errorf("failed to marshal patch: %w", err)
 	}
 
+	if logLevel == "TRACE" {
+		color.Cyan("[TRACE] Patch payload: %s\n", string(patchBytes))
+		color.Cyan("[TRACE] Calling Patch with MergePatchType for %s\n", name)
+	}
+
+	// Try MergePatchType first
 	_, err = client.Patch(context.TODO(), name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+	if err != nil {
+		// If MergePatchType fails with MethodNotSupported, try StrategicMergePatchType
+		// This is needed for some resources like pods
+		if errors.IsMethodNotSupported(err) {
+			if logLevel == "TRACE" {
+				color.Cyan("[TRACE] MergePatchType not supported, trying StrategicMergePatchType for %s\n", name)
+			}
+			_, err = client.Patch(context.TODO(), name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+		}
+		if err != nil && logLevel == "TRACE" {
+			color.Cyan("[TRACE] Patch failed for %s: %v\n", name, err)
+		}
+	}
 	return err
 }
 
@@ -490,19 +604,25 @@ func loadFailedObjects() (map[string]ObjectRef, error) {
 func recordFailure(obj ObjectRef, errorMsg string) {
 	// Append to failed attempts file
 	f, err := os.OpenFile(failedAttemptsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err == nil {
-		_, _ = fmt.Fprintf(f, "%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind)
-		_ = f.Sync()
-		_ = f.Close()
+	if err != nil {
+		// If we can't write to the file, log to stderr as fallback
+		fmt.Fprintf(os.Stderr, "Warning: failed to write to %s: %v\n", failedAttemptsFile, err)
+		return
 	}
+	_, _ = fmt.Fprintf(f, "%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind)
+	_ = f.Sync()
+	_ = f.Close()
 
 	// Append to error log file
 	f, err = os.OpenFile(errorLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err == nil {
-		_, _ = fmt.Fprintf(f, "%s|%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind, errorMsg)
-		_ = f.Sync()
-		_ = f.Close()
+	if err != nil {
+		// If we can't write to the file, log to stderr as fallback
+		fmt.Fprintf(os.Stderr, "Warning: failed to write to %s: %v\n", errorLogFile, err)
+		return
 	}
+	_, _ = fmt.Fprintf(f, "%s|%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind, errorMsg)
+	_ = f.Sync()
+	_ = f.Close()
 }
 
 func contains(slice []string, item string) bool {
