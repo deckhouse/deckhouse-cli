@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package system
+package plugins
 
 import (
 	"fmt"
@@ -21,20 +21,24 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
-	"github.com/deckhouse/deckhouse-cli/cmd/plugins"
 	"github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
-func NewPluginCommand(logger *dkplog.Logger) *cobra.Command {
-	pc := plugins.NewPluginsCommand(logger.Named("plugins-command"))
+const (
+	SystemPluginName  = "system"
+	PackagePluginName = "package"
+)
 
-	description := "Operate system options in DKP"
+// TODO: add options pattern
+func NewPluginCommand(commandName string, description string, aliases []string, logger *dkplog.Logger) *cobra.Command {
+	pc := NewPluginsCommand(logger.Named("plugins-command"))
 
 	pluginContractFilePath := path.Join(flags.DeckhousePluginsDir, "cache", "contracts", "system.json")
 	pluginContract, err := service.GetPluginContractFromFile(pluginContractFilePath)
@@ -47,23 +51,24 @@ func NewPluginCommand(logger *dkplog.Logger) *cobra.Command {
 	}
 
 	systemCmd := &cobra.Command{
-		Use:     "system",
-		Short:   description,
-		Aliases: []string{"s", "p", "platform"},
-		Long:    description,
+		Use:                commandName,
+		Short:              description,
+		Aliases:            aliases,
+		Long:               description,
+		DisableFlagParsing: true,
 		PreRun: func(_ *cobra.Command, _ []string) {
 			// init plugin services for subcommands after flags are parsed
 			pc.InitPluginServices()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			installed, err := checkInstalled()
+			installed, err := checkInstalled(commandName)
 			if err != nil {
 				fmt.Println("Error checking installed:", err)
 				return
 			}
 			if !installed {
 				fmt.Println("Not installed, installing...")
-				err = pc.InstallPlugin(cmd.Context(), "system", "", -1)
+				err = pc.InstallPlugin(cmd.Context(), commandName, "", -1)
 				if err != nil {
 					fmt.Println("Error installing:", err)
 					return
@@ -71,9 +76,17 @@ func NewPluginCommand(logger *dkplog.Logger) *cobra.Command {
 				fmt.Println("Installed successfully")
 			}
 
-			pluginPath := path.Join(flags.DeckhousePluginsDir, "plugins", "system")
+			pluginPath := path.Join(flags.DeckhousePluginsDir, "plugins", commandName)
 			pluginBinaryPath := path.Join(pluginPath, "current")
-			command := exec.CommandContext(cmd.Context(), pluginBinaryPath, args...)
+			absPath, err := filepath.Abs(pluginBinaryPath)
+			if err != nil {
+				logger.Warn("failed to compute absolute path", slog.String("error", err.Error()))
+				return
+			}
+
+			logger.Info("Executing plugin", slog.Any("args", args))
+
+			command := exec.CommandContext(cmd.Context(), absPath, args...)
 			command.Stdout = os.Stdout
 			command.Stderr = os.Stderr
 
@@ -87,9 +100,14 @@ func NewPluginCommand(logger *dkplog.Logger) *cobra.Command {
 	return systemCmd
 }
 
-func checkInstalled() (bool, error) {
-	installedFile := path.Join(flags.DeckhousePluginsDir, "plugins", "system", "current")
-	_, err := os.Stat(installedFile)
+func checkInstalled(commandName string) (bool, error) {
+	installedFile := path.Join(flags.DeckhousePluginsDir, "plugins", commandName, "current")
+	absPath, err := filepath.Abs(installedFile)
+	if err != nil {
+		return false, fmt.Errorf("failed to compute absolute path: %w", err)
+	}
+
+	_, err = os.Stat(absPath)
 	if err != nil && os.IsNotExist(err) {
 		return false, nil
 	}

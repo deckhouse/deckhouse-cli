@@ -36,6 +36,7 @@ import (
 	"github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/mock"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	"github.com/deckhouse/deckhouse/pkg/registry"
 	"github.com/deckhouse/deckhouse/pkg/registry/client"
@@ -169,7 +170,7 @@ func TestGetPluginContract_Success(t *testing.T) {
 
 	contractJSON := `{"name": "test-plugin", "version": "v1.0.0", "description": "A test plugin", "env": [{"name": "TEST_ENV"}], "flags": [{"name": "--test-flag"}], "requirements": {"kubernetes": {"constraint": ">= 1.26"}, "modules": [{"name": "test-module", "constraint": ">= 1.0.0"}]}}`
 	contractB64 := base64.StdEncoding.EncodeToString([]byte(contractJSON))
-	manifestJSON := `{"annotations": {"plugin-contract": "` + contractB64 + `"}}`
+	manifestJSON := `{"annotations": {"` + service.PluginContractAnnotation + `": "` + contractB64 + `"}}`
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetManifestMock.
@@ -239,7 +240,7 @@ func TestGetPluginContract_MinimalContract(t *testing.T) {
 
 	contractJSON := `{"name": "minimal-plugin", "version": "v1.0.0", "description": "Minimal plugin"}`
 	contractB64 := base64.StdEncoding.EncodeToString([]byte(contractJSON))
-	manifestJSON := `{"annotations": {"plugin-contract": "` + contractB64 + `"}}`
+	manifestJSON := `{"annotations": {"` + service.PluginContractAnnotation + `": "` + contractB64 + `"}}`
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetManifestMock.
@@ -310,7 +311,7 @@ func TestGetPluginContract_LabelNotFound(t *testing.T) {
 		t.Errorf("Expected plugin to be nil, got: %+v", plugin)
 	}
 
-	expectedError := "plugin-contract annotation not found in image metadata"
+	expectedError := "contract annotation not found in image metadata"
 	if err.Error() != expectedError {
 		t.Errorf("Expected error '%s', got '%s'", expectedError, err.Error())
 	}
@@ -358,7 +359,7 @@ func TestGetPluginContract_InvalidJSON(t *testing.T) {
 
 	invalidContractJSON := `{invalid json`
 	contractB64 := base64.StdEncoding.EncodeToString([]byte(invalidContractJSON))
-	manifestJSON := `{"annotations": {"plugin-contract": "` + contractB64 + `"}}`
+	manifestJSON := `{"annotations": {"` + service.PluginContractAnnotation + `": "` + contractB64 + `"}}`
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetManifestMock.
@@ -392,7 +393,7 @@ func TestGetPluginContract_EmptyJSON(t *testing.T) {
 
 	emptyContractJSON := `{}`
 	contractB64 := base64.StdEncoding.EncodeToString([]byte(emptyContractJSON))
-	manifestJSON := `{"annotations": {"plugin-contract": "` + contractB64 + `"}}`
+	manifestJSON := `{"annotations": {"` + service.PluginContractAnnotation + `": "` + contractB64 + `"}}`
 
 	mockScopedClient := mock.NewRegistryClientMock(mc)
 	mockScopedClient.GetManifestMock.
@@ -855,19 +856,4 @@ func TestExtractPlugin_NestedDirectories(t *testing.T) {
 	if string(content) != "nested file" {
 		t.Errorf("Expected content 'nested file', got '%s'", content)
 	}
-}
-
-// Helper types and functions
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && containsAt(s, substr))
-}
-
-func containsAt(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

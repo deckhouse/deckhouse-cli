@@ -270,17 +270,37 @@ func (p *Puller) Execute(ctx context.Context) error {
 			c = c.WithSegment(p.params.RegistryPath)
 		}
 
+		// Create module filter from CLI flags
+		filter, err := p.createModuleFilter()
+		if err != nil {
+			return err
+		}
+
 		svc := mirror.NewPullService(
 			registryservice.NewService(c, logger),
 			pullflags.TempDir,
 			pullflags.DeckhouseTag,
+			&mirror.PullServiceOptions{
+				SkipPlatform:    pullflags.NoPlatform,
+				SkipSecurity:    pullflags.NoSecurityDB,
+				SkipModules:     pullflags.NoModules,
+				OnlyExtraImages: pullflags.OnlyExtraImages,
+				ModuleFilter:    filter,
+				BundleDir:       pullflags.ImagesBundlePath,
+				BundleChunkSize: pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
+			},
 			logger.Named("pull"),
 			p.logger,
 		)
 
-		err := svc.Pull(ctx)
+		err = svc.Pull(ctx)
 		if err != nil {
-			panic(err)
+			// Handle context cancellation gracefully
+			if errors.Is(err, context.Canceled) {
+				p.logger.WarnLn("Operation cancelled by user")
+				return nil
+			}
+			return err
 		}
 
 		return nil

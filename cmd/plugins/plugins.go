@@ -19,11 +19,13 @@ package plugins
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -482,43 +484,69 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 // if version (e.g. v1.0.0) is not specified - use latest version
 // if useMajor > -1 (can be 0) - use specific major version
 func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName, version string, useMajor int) error {
-	// create plugin directory if it doesn't exist
-	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin
-	pluginDir := path.Join(flags.DeckhousePluginsDir, "plugins", pluginName)
-	err := os.MkdirAll(pluginDir, 0755)
-	if err != nil {
-		return fmt.Errorf("failed to create plugin directory: %w", err)
-	}
-
 	// check if version is specified
 	var installVersion *semver.Version
+	var err error
 	if version != "" {
 		installVersion, err = semver.NewVersion(version)
 		if err != nil {
 			return fmt.Errorf("failed to parse version: %w", err)
 		}
-	} else {
-		versions, err := pc.service.ListPluginTags(ctx, pluginName)
-		if err != nil {
-			pc.logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
-			return fmt.Errorf("failed to list plugin tags: %w", err)
-		}
 
-		if useMajor >= 0 {
-			versions = pc.filterMajorVersion(versions, useMajor)
-			if len(versions) == 0 {
-				return fmt.Errorf("no versions found for major version: %d", useMajor)
-			}
-		}
+		return pc.installPlugin(ctx, pluginName, installVersion, useMajor)
+	}
 
-		installVersion, err = pc.findLatestVersion(versions)
-		if err != nil {
-			pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
-			return fmt.Errorf("failed to fetch latest version: %w", err)
+	versions, err := pc.service.ListPluginTags(ctx, pluginName)
+	if err != nil {
+		pc.logger.Warn("Failed to list plugin tags", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+		return fmt.Errorf("failed to list plugin tags: %w", err)
+	}
+
+	if useMajor >= 0 {
+		versions = pc.filterMajorVersion(versions, useMajor)
+		if len(versions) == 0 {
+			return fmt.Errorf("no versions found for major version: %d", useMajor)
 		}
 	}
 
-	majorVersion := strconv.Itoa(int(installVersion.Major()))
+	installVersion, err = pc.findLatestVersion(versions)
+	if err != nil {
+		pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+		return fmt.Errorf("failed to fetch latest version: %w", err)
+	}
+
+	return pc.installPlugin(ctx, pluginName, installVersion, useMajor)
+}
+
+func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, version *semver.Version, useMajor int) error {
+	// to check we can create directories here
+	// we try to create root plugins folder
+	err := os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
+	// if permission failed
+	if errors.Is(err, os.ErrPermission) {
+		pc.logger.Warn("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", flags.DeckhousePluginsDir), dkplog.Err(err))
+
+		flags.DeckhousePluginsDir, err = os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("failed to receive home dir to create plugins dir: %w", err)
+		}
+
+		flags.DeckhousePluginsDir = path.Join(flags.DeckhousePluginsDir, ".deckhouse-cli")
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to create plugin root directory: %w", err)
+	}
+
+	// create plugin directory if it doesn't exist
+	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin
+	pluginDir := path.Join(flags.DeckhousePluginsDir, "plugins", pluginName)
+	err = os.MkdirAll(pluginDir, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create plugin directory: %w", err)
+	}
+
+	majorVersion := strconv.Itoa(int(version.Major()))
 
 	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1
 	versionDir := path.Join(pluginDir, "v"+majorVersion)
@@ -548,7 +576,7 @@ func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName, version
 	lockFile.Close()
 	defer os.Remove(lockFilePath)
 
-	tag := installVersion.Original()
+	tag := version.Original()
 
 	fmt.Printf("Installing plugin: %s\n", pluginName)
 	fmt.Printf("Tag: %s\n", tag)
@@ -595,7 +623,12 @@ func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName, version
 	currentSymlink := path.Join(pluginDir, "current")
 	_ = os.Remove(currentSymlink)
 
-	err = os.Symlink(pluginBinaryPath, currentSymlink)
+	absPath, err := filepath.Abs(pluginBinaryPath)
+	if err != nil {
+		return fmt.Errorf("failed to compute absolute path: %w", err)
+	}
+
+	err = os.Symlink(absPath, currentSymlink)
 	if err != nil {
 		return fmt.Errorf("failed to create symlink: %w", err)
 	}
