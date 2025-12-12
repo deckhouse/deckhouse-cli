@@ -60,7 +60,7 @@ type SigMigrateConfig struct {
 	Context     string
 }
 
-func SigMigrate(cmd *cobra.Command, args []string) error {
+func SigMigrate(cmd *cobra.Command, _ []string) error {
 	config := &SigMigrateConfig{}
 
 	var err error
@@ -132,8 +132,8 @@ func SigMigrate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Clear failed attempts files
-	os.Truncate(failedAttemptsFile, 0)
-	os.Truncate(errorLogFile, 0)
+	_ = os.Truncate(failedAttemptsFile, 0)
+	_ = os.Truncate(errorLogFile, 0)
 
 	// Create switch account config for retry
 	switchRestConfig := rest.CopyConfig(restConfig)
@@ -381,7 +381,7 @@ func addAnnotation(client dynamic.ResourceInterface, name, key, value, logLevel 
 	return err
 }
 
-func removeAnnotation(client dynamic.ResourceInterface, name, keyPrefix, logLevel string) error {
+func removeAnnotation(client dynamic.ResourceInterface, name, keyPrefix, _ string) error {
 	obj, err := client.Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -459,7 +459,7 @@ func loadFailedObjects() (map[string]ObjectRef, error) {
 		// In production, you might want to store GVR in the file
 		resource := strings.ToLower(kind)
 		if !strings.HasSuffix(resource, "s") {
-			resource = resource + "s"
+			resource += "s"
 		}
 		objects[key] = ObjectRef{
 			Namespace: namespace,

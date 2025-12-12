@@ -14,13 +14,13 @@ d8 tools sig-migrate [flags]
 
 ## Flags
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--retry` | Retry annotation for objects that failed to be processed in the previous run | `false` |
-| `--as` | Specify a Kubernetes service account for kubectl operations (impersonation) | `system:serviceaccount:d8-system:deckhouse` |
-| `--log-level` | Set the log level (INFO, DEBUG, TRACE) | `DEBUG` |
-| `--kubeconfig` | Path to the kubeconfig file to use for CLI requests | |
-| `--context` | The name of the kubeconfig context to use | |
+| Flag           | Description                                                                  | Default                                     |
+| -------------- | ---------------------------------------------------------------------------- | ------------------------------------------- |
+| `--retry`      | Retry annotation for objects that failed to be processed in the previous run | `false`                                     |
+| `--as`         | Specify a Kubernetes service account for kubectl operations (impersonation)  | `system:serviceaccount:d8-system:deckhouse` |
+| `--log-level`  | Set the log level (INFO, DEBUG, TRACE)                                       | `DEBUG`                                     |
+| `--kubeconfig` | Path to the kubeconfig file to use for CLI requests                          |                                             |
+| `--context`    | The name of the kubeconfig context to use                                    |                                             |
 
 ## Usage Examples
 
