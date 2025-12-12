@@ -162,7 +162,7 @@ func TestLoadFailedObjects(t *testing.T) {
 		"default|test-pod|pods",
 		"kube-system|test-cm|configmaps",
 		"|cluster-resource|clusterroles", // Invalid - missing namespace
-		"",                                // Empty line
+		"",                               // Empty line
 	}
 
 	objects := make(map[string]ObjectRef)
@@ -288,4 +288,3 @@ func TestAnnotateObjects_UnsupportedType(t *testing.T) {
 	_, exists := annotations["d8-migration"]
 	require.False(t, exists, "annotation should not be added for unsupported types")
 }
-

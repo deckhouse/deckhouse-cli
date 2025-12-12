@@ -134,8 +134,8 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Clear failed attempts files
-	_ = os.Truncate(failedAttemptsFile, 0)
-	_ = os.Truncate(errorLogFile, 0)
+	_ = os.WriteFile(failedAttemptsFile, []byte{}, 0644)
+	_ = os.WriteFile(errorLogFile, []byte{}, 0644)
 
 	// Create switch account config for retry
 	switchRestConfig := rest.CopyConfig(restConfig)
@@ -491,15 +491,17 @@ func recordFailure(obj ObjectRef, errorMsg string) {
 	// Append to failed attempts file
 	f, err := os.OpenFile(failedAttemptsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err == nil {
-		fmt.Fprintf(f, "%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind)
-		f.Close()
+		_, _ = fmt.Fprintf(f, "%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind)
+		_ = f.Sync()
+		_ = f.Close()
 	}
 
 	// Append to error log file
 	f, err = os.OpenFile(errorLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err == nil {
-		fmt.Fprintf(f, "%s|%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind, errorMsg)
-		f.Close()
+		_, _ = fmt.Fprintf(f, "%s|%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind, errorMsg)
+		_ = f.Sync()
+		_ = f.Close()
 	}
 }
 
