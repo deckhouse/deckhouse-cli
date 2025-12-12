@@ -196,7 +196,7 @@ func RunSwitch(timeout time.Duration) error {
 			time.Since(startTime).Round(time.Millisecond))
 
 		// 8. This status update is CRITICAL. It unblocks the target CNI's init-container.
-		fmt.Println("Signaling target CNI pods to proceed by updating CNIMigration status...")
+		fmt.Println("Signaling 'NodeCleanupSucceeded' to proceed with pod restart...")
 		if err = updateCNIMigrationStatus(ctx, rtClient, activeMigration.Name, metav1.Condition{
 			Type:    "NodeCleanupSucceeded",
 			Status:  metav1.ConditionTrue,
