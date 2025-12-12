@@ -51,5 +51,3 @@ func addFlags(flags *pflag.FlagSet) {
 		"The name of the kubeconfig context to use.",
 	)
 }
-
-

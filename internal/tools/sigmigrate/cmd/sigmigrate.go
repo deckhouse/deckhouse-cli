@@ -50,5 +50,3 @@ func NewCommand() *cobra.Command {
 
 	return sigMigrateCmd
 }
-
-
