@@ -22,6 +22,7 @@ import (
 
 	farconverter "github.com/deckhouse/deckhouse-cli/internal/tools/farconverter/cmd"
 	gostsum "github.com/deckhouse/deckhouse-cli/internal/tools/gostsum/cmd"
+	sigmigrate "github.com/deckhouse/deckhouse-cli/internal/tools/sigmigrate/cmd"
 )
 
 var toolsLong = templates.LongDesc(`
@@ -40,6 +41,7 @@ func NewCommand() *cobra.Command {
 	toolsCmd.AddCommand(
 		farconverter.NewCommand(),
 		gostsum.NewCommand(),
+		sigmigrate.NewCommand(),
 	)
 
 	return toolsCmd
