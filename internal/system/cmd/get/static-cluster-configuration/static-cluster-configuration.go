@@ -49,5 +49,3 @@ func getStaticClusterConfig(cmd *cobra.Command, _ []string) error {
 	}
 	return nil
 }
-
-
