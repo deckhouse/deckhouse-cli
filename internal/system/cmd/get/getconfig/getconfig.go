@@ -19,11 +19,8 @@ package get
 import (
 	"context"
 	"fmt"
-	"os"
 
-	"github.com/alecthomas/chroma/v2/quick"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
@@ -60,15 +57,6 @@ func BaseGetConfigCMD(cmd *cobra.Command, _ string, secret, dataKey string) erro
 		return fmt.Errorf("Data key %q not found in secret %q", dataKey, secret)
 	}
 
-	return printYAML(string(data))
-}
-
-func printYAML(content string) error {
-	// If stdout is a terminal, use syntax highlighting
-	if term.IsTerminal(int(os.Stdout.Fd())) {
-		return quick.Highlight(os.Stdout, content, "yaml", "terminal256", "solarized-dark")
-	}
-	// Otherwise, print plain text (for pipes/redirects)
-	fmt.Print(content)
+	fmt.Print(string(data))
 	return nil
 }
