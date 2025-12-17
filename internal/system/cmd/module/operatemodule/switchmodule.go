@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -15,6 +16,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 type ModuleState string
@@ -24,7 +26,31 @@ const (
 	ModuleDisabled ModuleState = "disabled"
 )
 
+// GetDynamicClient creates a dynamic Kubernetes client from cobra command flags.
+// It reads "kubeconfig" and "context" flags from the command.
+// Dynamic client is required to work with Custom Resources like ModuleRelease
+// and ModuleConfig, which don't have typed clients in client-go.
+func GetDynamicClient(cmd *cobra.Command) (dynamic.Interface, error) {
+	kubeconfigPath, _ := cmd.Flags().GetString("kubeconfig")
+	contextName, _ := cmd.Flags().GetString("context")
+
+	config, _, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to setup Kubernetes client: %w", err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
+	}
+
+	return dynamicClient, nil
+}
+
 func OperateModule(dynamicClient dynamic.Interface, name string, moduleState ModuleState) error {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultAPITimeout)
+	defer cancel()
+
 	resourceClient := dynamicClient.Resource(
 		schema.GroupVersionResource{
 			Group:    "deckhouse.io",
@@ -33,29 +59,31 @@ func OperateModule(dynamicClient dynamic.Interface, name string, moduleState Mod
 		},
 	)
 
-	customResource, err := resourceClient.Get(context.TODO(), name, metav1.GetOptions{})
-	if err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-	enabledSpec, err := patchSpec(moduleState)
+	_, err := resourceClient.Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return err
-	}
-	if customResource != nil {
-		if _, err = resourceClient.Patch(context.TODO(), name, types.MergePatchType, enabledSpec, metav1.PatchOptions{}); err != nil {
-			return fmt.Errorf("failed to update the '%s' module config: %w", name, err)
+		if !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to get module config '%s': %w", name, err)
+		}
+		// Resource not found, create new one
+		obj, err := createModuleConfig(name, moduleState)
+		if err != nil {
+			return fmt.Errorf("failed to convert the '%s' module config: %w", name, err)
+		}
+		if _, err = resourceClient.Create(ctx, obj, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("failed to create the '%s' module config: %w", name, err)
 		}
 		return nil
 	}
 
-	obj, err := createModuleConfig(name, moduleState)
+	// Resource exists, patch it
+	enabledSpec, err := patchSpec(moduleState)
 	if err != nil {
-		return fmt.Errorf("failed to convert the '%s' module config: %w", name, err)
+		return err
 	}
-	if _, err = resourceClient.Create(context.TODO(), obj, metav1.CreateOptions{}); err != nil {
-		return fmt.Errorf("failed to create the '%s' module config: %w", name, err)
+	if _, err = resourceClient.Patch(ctx, name, types.MergePatchType, enabledSpec, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("failed to update the '%s' module config: %w", name, err)
 	}
-	return err
+	return nil
 }
 
 func createModuleConfig(name string, moduleState ModuleState) (*unstructured.Unstructured, error) {
@@ -84,7 +112,7 @@ func patchSpec(moduleState ModuleState) ([]byte, error) {
 
 	patchBytes, err := json.Marshal(patchData)
 	if err != nil {
-		return nil, fmt.Errorf("Error convert to json updated data: %w", err)
+		return nil, fmt.Errorf("failed to marshal patch data: %w", err)
 	}
 
 	return patchBytes, nil
