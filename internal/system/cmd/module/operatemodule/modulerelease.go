@@ -84,7 +84,7 @@ func ListModuleReleases(dynamicClient dynamic.Interface, moduleName string) ([]M
 		return nil, fmt.Errorf("failed to list module releases: %w", err)
 	}
 
-	var releases []ModuleReleaseInfo
+	releases := make([]ModuleReleaseInfo, 0, len(list.Items))
 	for i := range list.Items {
 		item := &list.Items[i]
 

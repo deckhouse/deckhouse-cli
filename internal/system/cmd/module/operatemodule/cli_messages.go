@@ -74,17 +74,17 @@ func ReleaseNotFoundError(moduleName, version string) error {
 
 // PrintNearestVersionSuggestions prints suggestions for nearest versions.
 func PrintNearestVersionSuggestions(releases []ModuleReleaseInfo, targetVersion string) {
-	lower, upper := FindNearestVersions(releases, targetVersion)
-	if lower == nil && upper == nil {
+	nearest := FindNearestVersions(releases, targetVersion)
+	if nearest.Lower == nil && nearest.Upper == nil {
 		return
 	}
 
 	fmt.Fprintln(os.Stderr, "\nPerhaps you meant one of these?")
-	if lower != nil {
-		fmt.Fprintf(os.Stderr, "   • %s (previous version)\n", lower.Version)
+	if nearest.Lower != nil {
+		fmt.Fprintf(os.Stderr, "   • %s (previous version)\n", nearest.Lower.Version)
 	}
-	if upper != nil {
-		fmt.Fprintf(os.Stderr, "   • %s (next version)\n", upper.Version)
+	if nearest.Upper != nil {
+		fmt.Fprintf(os.Stderr, "   • %s (next version)\n", nearest.Upper.Version)
 	}
 }
 

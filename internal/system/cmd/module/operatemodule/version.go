@@ -34,6 +34,12 @@ func NormalizeVersion(version string) string {
 	return version
 }
 
+// NearestVersions contains the closest versions below and above a target version.
+type NearestVersions struct {
+	Lower *ModuleReleaseInfo // closest version below target, nil if none exists
+	Upper *ModuleReleaseInfo // closest version above target, nil if none exists
+}
+
 // SortReleasesByVersion sorts releases by semantic version in ascending order.
 // Falls back to lexicographic comparison if version parsing fails.
 func SortReleasesByVersion(releases []ModuleReleaseInfo) {
@@ -48,16 +54,15 @@ func SortReleasesByVersion(releases []ModuleReleaseInfo) {
 }
 
 // FindNearestVersions finds the closest versions below and above the target version.
-// Returns nil for lower/upper if no such version exists.
-func FindNearestVersions(releases []ModuleReleaseInfo, targetVersion string) (lower, upper *ModuleReleaseInfo) {
+func FindNearestVersions(releases []ModuleReleaseInfo, targetVersion string) NearestVersions {
 	targetVersion = NormalizeVersion(targetVersion)
 
 	targetSemver, err := semver.NewVersion(targetVersion)
 	if err != nil {
-		return nil, nil
+		return NearestVersions{}
 	}
 
-	var lowerRelease, upperRelease *ModuleReleaseInfo
+	var result NearestVersions
 	var lowerVersion, upperVersion *semver.Version
 
 	for i := range releases {
@@ -71,7 +76,7 @@ func FindNearestVersions(releases []ModuleReleaseInfo, targetVersion string) (lo
 		if v.LessThan(targetSemver) {
 			if lowerVersion == nil || v.GreaterThan(lowerVersion) {
 				lowerVersion = v
-				lowerRelease = r
+				result.Lower = r
 			}
 		}
 
@@ -79,12 +84,12 @@ func FindNearestVersions(releases []ModuleReleaseInfo, targetVersion string) (lo
 		if v.GreaterThan(targetSemver) {
 			if upperVersion == nil || v.LessThan(upperVersion) {
 				upperVersion = v
-				upperRelease = r
+				result.Upper = r
 			}
 		}
 	}
 
-	return lowerRelease, upperRelease
+	return result
 }
 
 // extractVersionFromName extracts version from release name.
