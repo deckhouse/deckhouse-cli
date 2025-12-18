@@ -73,7 +73,7 @@ func VersionsToMirror(pullParams *params.PullParams, client registry.Client) ([]
 
 	alphaChannelVersion := releaseChannelsVersions[internal.AlphaChannel]
 
-	versionsAboveMinimal := parseAndFilterVersionsAboveMinimalAnbBelowAlpha(&mirrorFromVersion, tags, alphaChannelVersion)
+	versionsAboveMinimal := parseAndFilterVersionsAboveMinimalAndBelowAlpha(&mirrorFromVersion, tags, alphaChannelVersion)
 	versionsAboveMinimal = FilterOnlyLatestPatches(versionsAboveMinimal)
 
 	vers := make([]*semver.Version, 0, len(releaseChannelsVersions))
@@ -103,7 +103,7 @@ func getReleasedTagsFromRegistry(pullParams *params.PullParams, client registry.
 	return tags, nil
 }
 
-func parseAndFilterVersionsAboveMinimalAnbBelowAlpha(
+func parseAndFilterVersionsAboveMinimalAndBelowAlpha(
 	minVersion *semver.Version,
 	tags []string,
 	alphaChannelVersion *semver.Version,

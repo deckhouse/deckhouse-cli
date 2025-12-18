@@ -191,7 +191,7 @@ func pushStaticPackages(pushParams *params.PushParams, logger params.Logger, cli
 		}
 
 		if err = pkg.Close(); err != nil {
-			logger.Warnf("Could not close bundle package %s: %w", pkgName, err)
+			logger.Warnf("Could not close bundle package %s: %v", pkgName, err)
 		}
 	}
 	return nil

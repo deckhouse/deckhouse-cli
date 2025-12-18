@@ -97,9 +97,9 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 		s.userLogger.Infof("[%d / %d] Pushing image %s:%s", i+1, len(indexManifest.Manifests), client.GetRegistry(), tag)
 
 		img, err := index.Image(manifest.Digest)
-			if err != nil {
+		if err != nil {
 			return fmt.Errorf("read image %s: %w", tag, err)
-			}
+		}
 
 		err = retry.RunTaskWithContext(
 			ctx, silentLogger{}, "push",
