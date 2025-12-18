@@ -164,77 +164,77 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClient dynamic.Interface, logLevel string) (map[string]ObjectRef, error) {
 	objects := make(map[string]ObjectRef)
 
-	// Get all API resources
-	apiResourceLists, err := discoveryClient.ServerPreferredResources()
+	// Get all API groups first (similar to kubectl api-resources)
+	apiGroupList, err := discoveryClient.ServerGroups()
 	if err != nil {
-		// Ignore group discovery errors
-		if !discovery.IsGroupDiscoveryFailedError(err) {
-			return nil, fmt.Errorf("failed to discover API resources: %w", err)
-		}
+		return nil, fmt.Errorf("failed to discover API groups: %w", err)
 	}
 
 	namespacedResources := []schema.GroupVersionResource{}
 	clusterResources := []schema.GroupVersionResource{}
 
-	// Track resources by name to prefer core API versions over metrics/extensions
+	// Track resources by GVR to collect all unique API versions
+	// This allows us to process both core API resources and custom resources (like apps.kruise.io)
 	type resourceInfo struct {
 		gvr        schema.GroupVersionResource
 		namespaced bool
 	}
 	resourceMap := make(map[string]resourceInfo)
 
-	for _, apiResourceList := range apiResourceLists {
-		gv, err := schema.ParseGroupVersion(apiResourceList.GroupVersion)
-		if err != nil {
-			continue
-		}
-
-		// Skip metrics and other API groups that don't support standard operations
-		// These groups typically only support read operations
-		if gv.Group == "metrics.k8s.io" || gv.Group == "custom.metrics.k8s.io" || gv.Group == "external.metrics.k8s.io" {
-			continue
-		}
-
-		for _, apiResource := range apiResourceList.APIResources {
-			// Skip subresources
-			if strings.Contains(apiResource.Name, "/") {
-				continue
-			}
-
-			// Skip resources that don't support list
-			if !contains(apiResource.Verbs, "list") {
-				continue
-			}
-
-			// Skip resources that don't support patch (needed for annotations)
-			if !contains(apiResource.Verbs, "patch") {
-				continue
-			}
-
-			gvr := schema.GroupVersionResource{
-				Group:    gv.Group,
-				Version:  gv.Version,
-				Resource: apiResource.Name,
-			}
-
-			// Use resource name as key (e.g., "pods")
-			resourceKey := apiResource.Name
-
-			// Prefer core API versions (empty group or v1) over extensions
-			// If we already have this resource, prefer the one with empty group or v1
-			if existingInfo, exists := resourceMap[resourceKey]; exists {
-				// Prefer core API (empty group) over extensions
-				if gv.Group == "" && existingInfo.gvr.Group != "" {
-					resourceMap[resourceKey] = resourceInfo{gvr: gvr, namespaced: apiResource.Namespaced}
-				} else if gv.Group == "" && existingInfo.gvr.Group == "" {
-					// Both are core, prefer v1 over other versions
-					if gv.Version == "v1" && existingInfo.gvr.Version != "v1" {
-						resourceMap[resourceKey] = resourceInfo{gvr: gvr, namespaced: apiResource.Namespaced}
-					}
+	// Iterate through all API groups and their versions (like kubectl api-resources does)
+	for _, group := range apiGroupList.Groups {
+		for _, version := range group.Versions {
+			// Get resources for this specific group version
+			apiResourceList, err := discoveryClient.ServerResourcesForGroupVersion(version.GroupVersion)
+			if err != nil {
+				// Log but continue - some groups may fail (e.g., metrics)
+				if logLevel == "TRACE" {
+					fmt.Printf("Warning: failed to get resources for %s: %v\n", version.GroupVersion, err)
 				}
-				// Otherwise keep the existing one
-			} else {
-				resourceMap[resourceKey] = resourceInfo{gvr: gvr, namespaced: apiResource.Namespaced}
+				continue
+			}
+
+			gv, err := schema.ParseGroupVersion(apiResourceList.GroupVersion)
+			if err != nil {
+				continue
+			}
+
+			// Skip metrics and other API groups that don't support standard operations
+			// These groups typically only support read operations
+			if gv.Group == "metrics.k8s.io" || gv.Group == "custom.metrics.k8s.io" || gv.Group == "external.metrics.k8s.io" {
+				continue
+			}
+
+			for _, apiResource := range apiResourceList.APIResources {
+				// Skip subresources
+				if strings.Contains(apiResource.Name, "/") {
+					continue
+				}
+
+				// Skip resources that don't support list
+				if !contains(apiResource.Verbs, "list") {
+					continue
+				}
+
+				// Skip resources that don't support patch (needed for annotations)
+				if !contains(apiResource.Verbs, "patch") {
+					continue
+				}
+
+				gvr := schema.GroupVersionResource{
+					Group:    gv.Group,
+					Version:  gv.Version,
+					Resource: apiResource.Name,
+				}
+
+				// Use full GVR string as key to collect all unique API versions
+				// This allows us to process both core API (apps/v1/daemonsets) and custom resources (apps.kruise.io/v1alpha1/daemonsets)
+				resourceKey := gvr.String()
+
+				// Only add if we haven't seen this exact GVR before
+				if _, exists := resourceMap[resourceKey]; !exists {
+					resourceMap[resourceKey] = resourceInfo{gvr: gvr, namespaced: apiResource.Namespaced}
+				}
 			}
 		}
 	}
