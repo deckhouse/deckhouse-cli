@@ -114,7 +114,7 @@ func pull(cmd *cobra.Command, _ []string) error {
 
 	if err := puller.Execute(ctx); err != nil {
 		if errors.Is(err, context.Canceled) {
-			puller.logger.WarnLn("\nOperation cancelled by user")
+			puller.logger.WarnLn("Operation cancelled by user")
 			return nil
 		}
 		return ErrPullFailed
@@ -173,6 +173,7 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 		SkipSecurityDatabases: pullflags.NoSecurityDB,
 		SkipModules:           pullflags.NoModules,
 		OnlyExtraImages:       pullflags.OnlyExtraImages,
+		IgnoreSuspend:         pullflags.IgnoreSuspend,
 		DeckhouseTag:          pullflags.DeckhouseTag,
 		SinceVersion:          pullflags.SinceVersion,
 	}
@@ -285,6 +286,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 				SkipSecurity:    pullflags.NoSecurityDB,
 				SkipModules:     pullflags.NoModules,
 				OnlyExtraImages: pullflags.OnlyExtraImages,
+				IgnoreSuspend:   pullflags.IgnoreSuspend,
 				ModuleFilter:    filter,
 				BundleDir:       pullflags.ImagesBundlePath,
 				BundleChunkSize: pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,

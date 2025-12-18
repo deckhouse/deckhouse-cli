@@ -369,9 +369,13 @@ func (svc *Service) extractVersionsFromReleaseChannels(ctx context.Context, modu
 			svc.logger.Debug(fmt.Sprintf("Failed to extract version.json for %s/%s: %v", moduleName, channel, err))
 			continue
 		}
-
 		if versionJSON.Version != "" {
-			versions = append(versions, "v"+versionJSON.Version)
+			version := versionJSON.Version
+			// Ensure version has "v" prefix (some may already have it)
+			if !strings.HasPrefix(version, "v") {
+				version = "v" + version
+			}
+			versions = append(versions, version)
 		}
 	}
 

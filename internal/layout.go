@@ -31,9 +31,9 @@ const (
 	InstallStandaloneSegment = "install-standalone"
 	ReleaseChannelSegment    = "release-channel"
 
-	ModulesSegment         = "modules"
+	ModulesSegment         = "module"
 	ModulesExtraSegment    = "extra"
-	ModulesReleasesSegment = "releases"
+	ModulesReleasesSegment = "release"
 
 	SecuritySegment = "security"
 

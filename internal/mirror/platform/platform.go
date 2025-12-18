@@ -56,6 +56,8 @@ type Options struct {
 	BundleDir string
 	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
 	BundleChunkSize int64
+	// IgnoreSuspend allows mirroring even if release channels are suspended
+	IgnoreSuspend bool
 }
 
 type Service struct {
@@ -278,9 +280,9 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 		return nil, fmt.Errorf("cannot get %s release channel version.json: %w", releaseChannel, err)
 	}
 
-	// if meta.Suspend {
-	// 	return nil, fmt.Errorf("source registry contains suspended release channel %q, try again later", releaseChannel)
-	// }
+	if meta.Suspend && !svc.options.IgnoreSuspend {
+		return nil, fmt.Errorf("source registry contains suspended release channel %q, try again later (use --ignore-suspend to override)", releaseChannel)
+	}
 
 	ver, err := semver.NewVersion(meta.Version)
 	if err != nil {

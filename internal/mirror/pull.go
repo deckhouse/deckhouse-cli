@@ -40,6 +40,8 @@ type PullServiceOptions struct {
 	SkipModules bool
 	// OnlyExtraImages pulls only extra images for modules (without main module images)
 	OnlyExtraImages bool
+	// IgnoreSuspend allows mirroring even if release channels are suspended
+	IgnoreSuspend bool
 	// ModuleFilter is the filter for module selection (whitelist/blacklist)
 	ModuleFilter *libmodules.Filter
 	// BundleDir is the directory to store the bundle
@@ -88,6 +90,7 @@ func NewPullService(
 				TargetTag:       targetTag,
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
+				IgnoreSuspend:   options.IgnoreSuspend,
 			},
 			logger,
 			userLogger,
@@ -127,23 +130,23 @@ func NewPullService(
 // Pull downloads Deckhouse components from registry
 func (svc *PullService) Pull(ctx context.Context) error {
 	if !svc.options.SkipPlatform {
-		err := svc.platformService.PullPlatform(ctx)
-		if err != nil {
-			return fmt.Errorf("pull platform: %w", err)
+	err := svc.platformService.PullPlatform(ctx)
+	if err != nil {
+		return fmt.Errorf("pull platform: %w", err)
 		}
 	}
 
 	if !svc.options.SkipSecurity {
 		err := svc.securityService.PullSecurity(ctx)
-		if err != nil {
-			return fmt.Errorf("pull security databases: %w", err)
+	if err != nil {
+		return fmt.Errorf("pull security databases: %w", err)
 		}
 	}
 
 	if !svc.options.SkipModules || svc.options.OnlyExtraImages {
 		err := svc.modulesService.PullModules(ctx)
-		if err != nil {
-			return fmt.Errorf("pull modules: %w", err)
+	if err != nil {
+		return fmt.Errorf("pull modules: %w", err)
 		}
 	}
 
