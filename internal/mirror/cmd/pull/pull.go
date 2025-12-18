@@ -105,7 +105,11 @@ func NewCommand() *cobra.Command {
 
 func pull(cmd *cobra.Command, _ []string) error {
 	// Set up graceful cancellation on Ctrl+C
-	ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+	parentCtx := cmd.Context()
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := signal.NotifyContext(parentCtx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	puller := NewPuller(cmd)
