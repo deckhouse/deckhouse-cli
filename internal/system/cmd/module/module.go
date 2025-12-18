@@ -20,6 +20,8 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/applynow"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/approve"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/disable"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/enable"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/list"
@@ -39,8 +41,15 @@ func NewCommand() *cobra.Command {
 	}
 
 	moduleCmd.AddCommand(
+		// Release management (ModuleRelease)
+		approve.NewCommand(),
+		applynow.NewCommand(),
+
+		// Module state (ModuleConfig)
 		enable.NewCommand(),
 		disable.NewCommand(),
+
+		// Inspection
 		list.NewCommand(),
 		values.NewCommand(),
 		snapshots.NewCommand(),
