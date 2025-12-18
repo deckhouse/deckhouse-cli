@@ -110,7 +110,7 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 					}
 					return fmt.Errorf("write %s:%s to registry: %w", client.GetRegistry(), tag, err)
 				}
-			return nil
+				return nil
 			}),
 		)
 		if err != nil {
