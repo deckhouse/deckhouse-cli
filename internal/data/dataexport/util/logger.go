@@ -1,4 +1,4 @@
-package util
+package util //nolint
 
 import (
 	"log/slog"
