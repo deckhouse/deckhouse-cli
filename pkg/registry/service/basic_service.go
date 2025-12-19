@@ -132,3 +132,12 @@ func (s *BasicService) ListTags(ctx context.Context) ([]string, error) {
 
 	return tags, nil
 }
+
+// WithSegment returns a new BasicService scoped to the given segment
+func (s *BasicService) WithSegment(segment string) *BasicService {
+	return NewBasicService(
+		s.name+"/"+segment,
+		s.client.WithSegment(segment),
+		s.logger,
+	)
+}

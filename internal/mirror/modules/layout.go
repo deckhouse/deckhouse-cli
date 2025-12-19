@@ -117,15 +117,20 @@ type ImageLayouts struct {
 	platform   v1.Platform
 	workingDir string
 
-	Modules                *regimage.ImageLayout
+	// Modules is the main module image layout (modules/<name>/)
+	Modules *regimage.ImageLayout
+	// ModulesReleaseChannels is the release channel layout (modules/<name>/release/)
 	ModulesReleaseChannels *regimage.ImageLayout
-	ModulesExtra           *regimage.ImageLayout
+	// ExtraImages holds layouts for each extra image (modules/<name>/<extra-name>/)
+	// Key is the extra image name (e.g., "scanner", "enforcer")
+	ExtraImages map[string]*regimage.ImageLayout
 }
 
 func NewImageLayouts(rootFolder string) *ImageLayouts {
 	l := &ImageLayouts{
-		workingDir: rootFolder,
-		platform:   v1.Platform{Architecture: "amd64", OS: "linux"},
+		workingDir:  rootFolder,
+		platform:    v1.Platform{Architecture: "amd64", OS: "linux"},
+		ExtraImages: make(map[string]*regimage.ImageLayout),
 	}
 
 	return l
@@ -144,13 +149,29 @@ func (l *ImageLayouts) setLayoutByMirrorType(rootFolder string, mirrorType inter
 		l.Modules = layout
 	case internal.MirrorTypeModulesReleaseChannels:
 		l.ModulesReleaseChannels = layout
-	case internal.MirrorTypeModulesExtra:
-		l.ModulesExtra = layout
 	default:
 		return fmt.Errorf("wrong mirror type in modules image layout: %v", mirrorType)
 	}
 
 	return nil
+}
+
+// GetOrCreateExtraLayout returns or creates a layout for a specific extra image.
+// Extra images are stored under: modules/<name>/extra/<extra-name>/
+func (l *ImageLayouts) GetOrCreateExtraLayout(extraName string) (*regimage.ImageLayout, error) {
+	if existing, ok := l.ExtraImages[extraName]; ok {
+		return existing, nil
+	}
+
+	// Create layout at modules/<module-name>/extra/<extra-name>/
+	layoutPath := filepath.Join(l.workingDir, "extra", extraName)
+	layout, err := regimage.NewImageLayout(layoutPath)
+	if err != nil {
+		return nil, fmt.Errorf("create extra image layout for %s: %w", extraName, err)
+	}
+
+	l.ExtraImages[extraName] = layout
+	return layout, nil
 }
 
 // AsList returns a list of layout.Path's in it. Undefined path's are not included in the list.
@@ -162,8 +183,11 @@ func (l *ImageLayouts) AsList() []layout.Path {
 	if l.ModulesReleaseChannels != nil {
 		paths = append(paths, l.ModulesReleaseChannels.Path())
 	}
-	if l.ModulesExtra != nil {
-		paths = append(paths, l.ModulesExtra.Path())
+	// Add all extra image layouts
+	for _, extraLayout := range l.ExtraImages {
+		if extraLayout != nil {
+			paths = append(paths, extraLayout.Path())
+		}
 	}
 	return paths
 }

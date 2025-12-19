@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -323,26 +324,88 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 				return fmt.Errorf("pull module images: %w", err)
 			}
 		}
+
+		// Also pull release images with version tags (modules/<name>/release:v1.x.x)
+		// These are in addition to channel tags (alpha, beta, etc.)
+		if len(moduleVersions) > 0 {
+			releaseVersionSet := make(map[string]*puller.ImageMeta)
+			for _, version := range moduleVersions {
+				releaseVersionSet[svc.rootURL+"/modules/"+module.name+"/release:"+version] = nil
+				downloadList.ModuleReleaseChannels[svc.rootURL+"/modules/"+module.name+"/release:"+version] = nil
+			}
+
+			config := puller.PullConfig{
+				Name:             module.name + " release versions",
+				ImageSet:         releaseVersionSet,
+				Layout:           svc.layout.Module(module.name).ModulesReleaseChannels,
+				AllowMissingTags: true,
+				GetterService:    svc.modulesService.Module(module.name).ReleaseChannels(),
+			}
+
+			if err := svc.pullerService.PullImages(ctx, config); err != nil {
+				svc.logger.Debug(fmt.Sprintf("Failed to pull release version images for %s: %v", module.name, err))
+				// Don't fail - version release images may not exist for all versions
+			}
+		}
+
+		// Extract and pull internal digest images from module versions (images_digests.json)
+		// These are internal images that module uses at runtime
+		digestImages := svc.extractInternalDigestImages(ctx, module.name, moduleVersions)
+		if len(digestImages) > 0 {
+			// Add digest images to download list
+			digestImageSet := make(map[string]*puller.ImageMeta)
+			for _, digestRef := range digestImages {
+				digestImageSet[digestRef] = nil
+				downloadList.Module[digestRef] = nil
+			}
+
+			config := puller.PullConfig{
+				Name:             module.name + " internal images",
+				ImageSet:         digestImageSet,
+				Layout:           svc.layout.Module(module.name).Modules,
+				AllowMissingTags: true,
+				GetterService:    svc.modulesService.Module(module.name),
+			}
+
+			if err := svc.pullerService.PullImages(ctx, config); err != nil {
+				svc.logger.Debug(fmt.Sprintf("Failed to pull internal digest images for %s: %v", module.name, err))
+				// Don't fail on missing internal images, just log warning
+			}
+		}
 	}
 
 	// Extract and pull extra images from module versions
-	extraImages := svc.findExtraImages(ctx, module.name, moduleVersions)
+	// Each extra image gets its own layout: modules/<name>/extra/<extra-name>/
+	extraImagesByName := svc.findExtraImages(ctx, module.name, moduleVersions)
 
-	if len(extraImages) > 0 {
-		for img := range extraImages {
-			downloadList.ModuleExtra[img] = nil
+	for extraName, images := range extraImagesByName {
+		if len(images) == 0 {
+			continue
+		}
+
+		// Get or create layout for this extra image
+		extraLayout, err := svc.layout.Module(module.name).GetOrCreateExtraLayout(extraName)
+		if err != nil {
+			return fmt.Errorf("create layout for extra image %s: %w", extraName, err)
+		}
+
+		// Build image set for this extra
+		imageSet := make(map[string]*puller.ImageMeta)
+		for _, img := range images {
+			imageSet[img.FullRef] = nil
+			downloadList.ModuleExtra[img.FullRef] = nil
 		}
 
 		config := puller.PullConfig{
-			Name:             module.name + " extra",
-			ImageSet:         downloadList.ModuleExtra,
-			Layout:           svc.layout.Module(module.name).ModulesExtra,
+			Name:             module.name + "/" + extraName,
+			ImageSet:         imageSet,
+			Layout:           extraLayout,
 			AllowMissingTags: true,
-			GetterService:    svc.modulesService.Module(module.name).Extra(),
+			GetterService:    svc.modulesService.Module(module.name).Extra().WithSegment(extraName),
 		}
 
 		if err := svc.pullerService.PullImages(ctx, config); err != nil {
-			return fmt.Errorf("pull extra images: %w", err)
+			return fmt.Errorf("pull extra image %s: %w", extraName, err)
 		}
 	}
 
@@ -411,9 +474,22 @@ func extractVersionJSON(img interface{ Extract() io.ReadCloser }) (*versionJSON,
 	}
 }
 
-// findExtraImages finds extra images from module images
-func (svc *Service) findExtraImages(ctx context.Context, moduleName string, versions []string) map[string]struct{} {
-	extraImages := make(map[string]struct{})
+// extraImageInfo holds information about an extra image to pull
+type extraImageInfo struct {
+	// Name is the extra image name (e.g., "scanner", "enforcer")
+	Name string
+	// Tag is the image tag
+	Tag string
+	// FullRef is the full image reference for pulling
+	FullRef string
+}
+
+// findExtraImages finds extra images from module images.
+// Returns a map where key is extra image name, value is list of image refs to pull.
+// Extra images are stored under: modules/<name>/extra/<extra-name>:<tag>
+func (svc *Service) findExtraImages(ctx context.Context, moduleName string, versions []string) map[string][]extraImageInfo {
+	// Map of extra-name -> list of images to pull
+	extraImages := make(map[string][]extraImageInfo)
 
 	for _, version := range versions {
 		// Skip digest references
@@ -452,8 +528,14 @@ func (svc *Service) findExtraImages(ctx context.Context, moduleName string, vers
 				continue
 			}
 
+			// Extra images go under: modules/<name>/extra/<extra-name>:<tag>
 			fullImagePath := svc.rootURL + "/modules/" + moduleName + "/extra/" + imageName + ":" + imageTag
-			extraImages[fullImagePath] = struct{}{}
+
+			extraImages[imageName] = append(extraImages[imageName], extraImageInfo{
+				Name:    imageName,
+				Tag:     imageTag,
+				FullRef: fullImagePath,
+			})
 		}
 	}
 
@@ -483,6 +565,90 @@ func extractExtraImagesJSON(img interface{ Extract() io.ReadCloser }) (map[strin
 			return extraImages, nil
 		}
 	}
+}
+
+// digestRegex matches sha256 digests in images_digests.json
+var digestRegex = regexp.MustCompile(`sha256:[a-f0-9]{64}`)
+
+// extractImagesDigestsJSON extracts images_digests.json from module image
+// and returns list of sha256 digests. These are internal images that module uses at runtime.
+func extractImagesDigestsJSON(img interface{ Extract() io.ReadCloser }) ([]string, error) {
+	rc := img.Extract()
+	defer rc.Close()
+
+	tr := tar.NewReader(rc)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil, fmt.Errorf("images_digests.json not found in image")
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		if hdr.Name == "images_digests.json" {
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				return nil, fmt.Errorf("read images_digests.json: %w", err)
+			}
+			// Extract all sha256:... digests from JSON file
+			digests := digestRegex.FindAllString(string(data), -1)
+			return digests, nil
+		}
+	}
+}
+
+// extractInternalDigestImages extracts internal digest images from module versions.
+// It reads images_digests.json from each module version image and returns
+// list of image references in format "repo@sha256:..." which will be pulled
+// and stored with tag = hex part of digest.
+func (svc *Service) extractInternalDigestImages(ctx context.Context, moduleName string, versions []string) []string {
+	seenDigests := make(map[string]struct{})
+	var digestRefs []string
+
+	moduleRepo := svc.rootURL + "/modules/" + moduleName
+
+	for _, version := range versions {
+		// Skip digest references
+		if strings.Contains(version, "@sha256:") {
+			continue
+		}
+
+		tag := version
+		if strings.Contains(version, ":") {
+			parts := strings.SplitN(version, ":", 2)
+			tag = parts[1]
+		}
+
+		img, err := svc.modulesService.Module(moduleName).GetImage(ctx, tag)
+		if err != nil {
+			svc.logger.Debug(fmt.Sprintf("Failed to get module image %s:%s for digest extraction: %v", moduleName, tag, err))
+			continue
+		}
+
+		// Extract images_digests.json
+		digests, err := extractImagesDigestsJSON(img)
+		if err != nil {
+			svc.logger.Debug(fmt.Sprintf("No images_digests.json in %s:%s: %v", moduleName, tag, err))
+			continue
+		}
+
+		svc.logger.Debug(fmt.Sprintf("Found %d internal digests in %s:%s", len(digests), moduleName, tag))
+
+		for _, digest := range digests {
+			if _, seen := seenDigests[digest]; seen {
+				continue
+			}
+			seenDigests[digest] = struct{}{}
+
+			// Create reference in format repo@sha256:...
+			// When pulled, the tag will be the hex part (after last ":")
+			digestRef := moduleRepo + "@" + digest
+			digestRefs = append(digestRefs, digestRef)
+		}
+	}
+
+	return digestRefs
 }
 
 // pullVexImages finds and pulls VEX attestation images for module images
@@ -597,9 +763,11 @@ func (svc *Service) packModules(modules []moduleData) error {
 				pkg = f
 			}
 
-			// Pack from the module's working directory
+			// Pack from the module's working directory with prefix to create correct registry structure.
+			// This ensures the tar contains paths like "modules/<name>/index.json" instead of just "index.json".
 			moduleDir := filepath.Join(svc.layout.workingDir, module.name)
-			if err := bundle.Pack(context.Background(), moduleDir, pkg); err != nil {
+			tarPrefix := filepath.Join("modules", module.name)
+			if err := bundle.PackWithPrefix(context.Background(), moduleDir, tarPrefix, pkg); err != nil {
 				return fmt.Errorf("pack module %s: %w", pkgName, err)
 			}
 
@@ -656,10 +824,11 @@ func createOCIImageLayoutsForModule(
 ) (*ImageLayouts, error) {
 	layouts := NewImageLayouts(rootFolder)
 
+	// Only create layouts for main module and release channels.
+	// Extra image layouts are created dynamically when extra images are discovered.
 	mirrorTypes := []internal.MirrorType{
 		internal.MirrorTypeModules,
 		internal.MirrorTypeModulesReleaseChannels,
-		internal.MirrorTypeModulesExtra,
 	}
 
 	for _, mtype := range mirrorTypes {

@@ -19,7 +19,10 @@ package puller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
@@ -57,6 +60,23 @@ func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) erro
 		}
 
 		_, tag := SplitImageRefByRepoAndTag(image)
+
+		// Check if this is a digest reference (repo@sha256:abc...)
+		// For digest references, we already know the digest - it's in the reference itself
+		if strings.Contains(image, "@sha256:") {
+			// Extract digest from reference
+			digestStr := image[strings.Index(image, "@sha256:")+1:] // "sha256:abc..."
+			digest, err := v1.NewHash(digestStr)
+			if err != nil {
+				ps.userLogger.Debugf("failed to parse digest from %s: %v", image, err)
+				if config.AllowMissingTags {
+					continue
+				}
+				return fmt.Errorf("parse digest from reference %s: %w", image, err)
+			}
+			config.ImageSet[image] = NewImageMeta(tag, image, &digest)
+			continue
+		}
 
 		digest, err := config.GetterService.GetDigest(ctx, tag)
 		if err != nil {

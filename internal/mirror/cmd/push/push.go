@@ -308,7 +308,10 @@ func (p *Pusher) Execute() error {
 	return nil
 }
 
-// executeNewPush runs the push using the new service architecture
+// executeNewPush runs the push using the push service.
+// This service expects the bundle to have the exact same structure as the registry:
+// - Each OCI layout's relative path becomes its registry segment
+// - Works with unified bundles where pull saved the structure as-is
 func (p *Pusher) executeNewPush() error {
 	// Set up graceful cancellation on Ctrl+C
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -130,23 +130,23 @@ func NewPullService(
 // Pull downloads Deckhouse components from registry
 func (svc *PullService) Pull(ctx context.Context) error {
 	if !svc.options.SkipPlatform {
-		err := svc.platformService.PullPlatform(ctx)
-		if err != nil {
-			return fmt.Errorf("pull platform: %w", err)
+	err := svc.platformService.PullPlatform(ctx)
+	if err != nil {
+		return fmt.Errorf("pull platform: %w", err)
 		}
 	}
 
 	if !svc.options.SkipSecurity {
 		err := svc.securityService.PullSecurity(ctx)
-		if err != nil {
-			return fmt.Errorf("pull security databases: %w", err)
+	if err != nil {
+		return fmt.Errorf("pull security databases: %w", err)
 		}
 	}
 
 	if !svc.options.SkipModules || svc.options.OnlyExtraImages {
 		err := svc.modulesService.PullModules(ctx)
-		if err != nil {
-			return fmt.Errorf("pull modules: %w", err)
+	if err != nil {
+		return fmt.Errorf("pull modules: %w", err)
 		}
 	}
 

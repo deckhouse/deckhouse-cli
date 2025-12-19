@@ -18,22 +18,32 @@ package internal
 
 import "path"
 
-// deckhouse repo structure
-// root-segment:<version>
-// root-segment/install:<version>
-// root-segment/install-standalone:<version>
-// root-segment/release-channel:<version>
-// root-segment/modules/<module-name>:<version>
-// root-segment/modules/<module-name>/releases:<version>
-// root-segment/modules/<module-name>/extra/<module-extra-name>:<version>
+// deckhouse repo structure (relative to root path like registry.deckhouse.io/deckhouse/fe)
+//
+// Platform:
+//
+//	<root>:<version>                                    - Deckhouse main image
+//	<root>/release-channel:<channel>                    - Release channel metadata
+//	<root>/install:<version>                            - Installer image
+//	<root>/install-standalone:<version>                 - Standalone installer
+//
+// Security:
+//
+//	<root>/security/<security-name>:<version>           - Security databases (trivy-db, trivy-bdu, etc.)
+//
+// Modules:
+//
+//	<root>/modules/<module-name>:<version>                    - Module main image
+//	<root>/modules/<module-name>/release:<channel>            - Module release channel metadata
+//	<root>/modules/<module-name>/extra/<extra-name>:<version> - Module extra images
 const (
 	InstallSegment           = "install"
 	InstallStandaloneSegment = "install-standalone"
 	ReleaseChannelSegment    = "release-channel"
 
-	ModulesSegment         = "module"
-	ModulesExtraSegment    = "extra"
-	ModulesReleasesSegment = "release"
+	ModulesSegment        = "modules"
+	ModulesReleaseSegment = "release"
+	ModulesExtraSegment   = "extra"
 
 	SecuritySegment = "security"
 
@@ -49,9 +59,9 @@ var pathByMirrorType = map[MirrorType]string{
 	MirrorTypeDeckhouseInstallStandalone: InstallStandaloneSegment,
 	MirrorTypeDeckhouseReleaseChannels:   ReleaseChannelSegment,
 
-	MirrorTypeModules:                ModulesSegment,
-	MirrorTypeModulesReleaseChannels: ModulesReleasesSegment,
-	MirrorTypeModulesExtra:           ModulesExtraSegment,
+	// Module paths are relative to modules/<module-name>/ directory
+	MirrorTypeModules:                "",                    // Module main image at root of module dir
+	MirrorTypeModulesReleaseChannels: ModulesReleaseSegment, // modules/<name>/release
 
 	MirrorTypeSecurity:                   SecuritySegment,
 	MirrorTypeSecurityTrivyDBSegment:     path.Join(SecuritySegment, SecurityTrivyDBSegment),

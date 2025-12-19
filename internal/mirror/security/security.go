@@ -77,9 +77,9 @@ func NewService(
 		options = &Options{}
 	}
 
-	tmpDir := filepath.Join(workingDir, "security")
-
-	layout, err := createOCIImageLayoutsForSecurity(tmpDir)
+	// workingDir is the root where we create layouts
+	// Layouts will be created at workingDir/security/trivy-db, etc.
+	layout, err := createOCIImageLayoutsForSecurity(workingDir)
 	if err != nil {
 		//TODO: handle error
 		userLogger.Warnf("Create OCI Image Layouts: %v", err)
