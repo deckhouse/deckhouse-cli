@@ -36,7 +36,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 )
 
-func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string, client registry.Client) error {
+func PullDeckhousePlatform(pullParams *params.PullParams, channelsToMirror []string, tagsToMirror []string, client registry.Client) error {
 	logger := pullParams.Logger
 	tmpDir := filepath.Join(pullParams.WorkingDir, "platform")
 
@@ -46,7 +46,7 @@ func PullDeckhousePlatform(pullParams *params.PullParams, tagsToMirror []string,
 		return fmt.Errorf("Create OCI Image Layouts: %w", err)
 	}
 
-	layouts.FillLayoutsWithBasicDeckhouseImages(pullParams, imageLayouts, tagsToMirror)
+	layouts.FillLayoutsWithBasicDeckhouseImages(pullParams, imageLayouts, channelsToMirror, tagsToMirror)
 	logger.Infof("Resolving tags")
 	if err = imageLayouts.TagsResolver.ResolveTagsDigestsForImageLayouts(&pullParams.BaseParams, imageLayouts); err != nil {
 		return fmt.Errorf("Resolve images tags to digests: %w", err)

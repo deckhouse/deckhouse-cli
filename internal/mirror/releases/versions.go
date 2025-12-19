@@ -36,52 +36,78 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 )
 
-func VersionsToMirror(pullParams *params.PullParams, client registry.Client) ([]semver.Version, error) {
+type releaseChannelVersionResult struct {
+	ver *semver.Version
+	err error
+}
+
+func VersionsToMirror(pullParams *params.PullParams, client registry.Client) ([]semver.Version, []string, error) {
 	logger := pullParams.Logger
 
 	releaseChannelsToCopy := internal.GetAllDefaultReleaseChannels()
 	releaseChannelsToCopy = append(releaseChannelsToCopy, internal.LTSChannel)
 
-	releaseChannelsVersions := make(map[string]*semver.Version, len(releaseChannelsToCopy))
+	releaseChannelsVersionsResult := make(map[string]releaseChannelVersionResult, len(releaseChannelsToCopy))
 	for _, channel := range releaseChannelsToCopy {
 		v, err := getReleaseChannelVersionFromRegistry(pullParams, channel)
-		if err != nil {
-			if channel == internal.LTSChannel {
+		if channel == internal.LTSChannel {
+			if err != nil {
 				logger.Warnf("Skipping LTS channel: %v", err)
 				continue
 			}
 
-			return nil, fmt.Errorf("get %s release version from registry: %w", channel, err)
 		}
 
-		releaseChannelsVersions[channel] = v
+		releaseChannelsVersionsResult[channel] = releaseChannelVersionResult{ver: v, err: err}
 	}
 
-	rockSolidVersion := releaseChannelsVersions[internal.RockSolidChannel]
-	mirrorFromVersion := *rockSolidVersion
-	if pullParams.SinceVersion != nil {
-		mirrorFromVersion = *pullParams.SinceVersion
-		if rockSolidVersion.LessThan(pullParams.SinceVersion) {
-			mirrorFromVersion = *rockSolidVersion
+	releaseChannelsVersions := make(map[string]*semver.Version, len(releaseChannelsToCopy))
+
+	_, ltsChannelFound := releaseChannelsVersionsResult[internal.LTSChannel]
+	for channel, res := range releaseChannelsVersionsResult {
+		if !ltsChannelFound && res.err != nil {
+			return nil, nil, fmt.Errorf("get %s release version from registry: %w", channel, res.err)
+		}
+
+		if res.err == nil {
+			fmt.Println(channel)
+			releaseChannelsVersions[channel] = res.ver
+		}
+	}
+
+	vers := make([]*semver.Version, 0, len(releaseChannelsVersions))
+	channels := make([]string, 0, len(releaseChannelsVersions))
+	for channel, v := range releaseChannelsVersions {
+		vers = append(vers, v)
+		channels = append(channels, channel)
+	}
+
+	var mirrorFromVersion *semver.Version
+	rockSolidVersion, found := releaseChannelsVersions[internal.RockSolidChannel]
+	if found {
+		mirrorFromVersion = rockSolidVersion
+		if pullParams.SinceVersion != nil {
+			mirrorFromVersion = pullParams.SinceVersion
+			if rockSolidVersion.LessThan(pullParams.SinceVersion) {
+				mirrorFromVersion = rockSolidVersion
+			}
 		}
 	}
 
 	tags, err := getReleasedTagsFromRegistry(pullParams, client.WithSegment("release-channel"))
 	if err != nil {
-		return nil, fmt.Errorf("get releases from github: %w", err)
+		return nil, nil, fmt.Errorf("get releases from github: %w", err)
 	}
 
-	alphaChannelVersion := releaseChannelsVersions[internal.AlphaChannel]
+	alphaChannelVersion, found := releaseChannelsVersions[internal.AlphaChannel]
+	if found {
+		versionsAboveMinimal := parseAndFilterVersionsAboveMinimalAnbBelowAlpha(mirrorFromVersion, tags, alphaChannelVersion)
+		versionsAboveMinimal = FilterOnlyLatestPatches(versionsAboveMinimal)
 
-	versionsAboveMinimal := parseAndFilterVersionsAboveMinimalAnbBelowAlpha(&mirrorFromVersion, tags, alphaChannelVersion)
-	versionsAboveMinimal = FilterOnlyLatestPatches(versionsAboveMinimal)
-
-	vers := make([]*semver.Version, 0, len(releaseChannelsVersions))
-	for _, v := range releaseChannelsVersions {
-		vers = append(vers, v)
+		return deduplicateVersions(append(vers, versionsAboveMinimal...)), channels, nil
 	}
 
-	return deduplicateVersions(append(vers, versionsAboveMinimal...)), nil
+	return deduplicateVersions(vers), channels, nil
 }
 
 func getReleasedTagsFromRegistry(pullParams *params.PullParams, client registry.Client) ([]string, error) {
@@ -173,6 +199,7 @@ func getReleaseChannelVersionFromRegistry(mirrorCtx *params.PullParams, releaseC
 	if err != nil {
 		return nil, fmt.Errorf("cannot find release channel version: %w", err)
 	}
+
 	return ver, nil
 }
 
