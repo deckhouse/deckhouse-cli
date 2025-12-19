@@ -118,7 +118,7 @@ func VersionsToMirror(pullParams *params.PullParams, client registry.Client, tag
 
 	alphaChannelVersion, found := releaseChannelsVersions[internal.AlphaChannel]
 	if found {
-		versionsAboveMinimal := parseAndFilterVersionsAboveMinimalAnbBelowAlpha(mirrorFromVersion, tags, alphaChannelVersion)
+		versionsAboveMinimal := parseAndFilterVersionsAboveMinimalAndBelowAlpha(mirrorFromVersion, tags, alphaChannelVersion)
 		versionsAboveMinimal = FilterOnlyLatestPatches(versionsAboveMinimal)
 
 		return deduplicateVersions(append(vers, versionsAboveMinimal...)), channels, nil
