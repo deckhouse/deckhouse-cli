@@ -90,10 +90,6 @@ func PackWithPrefix(ctx context.Context, sourcePath string, prefix string, sink 
 	return nil
 }
 
-func packFunc(ctx context.Context, pathPrefix string, writer *tar.Writer) filepath.WalkFunc {
-	return packFuncWithPrefix(ctx, pathPrefix, "", writer)
-}
-
 func packFuncWithPrefix(ctx context.Context, pathPrefix string, tarPrefix string, writer *tar.Writer) filepath.WalkFunc {
 	unixEpochStart := time.Unix(0, 0)
 	return func(path string, info fs.FileInfo, err error) error {
