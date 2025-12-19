@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2024 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,35 +14,33 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package tools
+package get
 
 import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	farconverter "github.com/deckhouse/deckhouse-cli/internal/tools/farconverter/cmd"
-	gostsum "github.com/deckhouse/deckhouse-cli/internal/tools/gostsum/cmd"
-	sigmigrate "github.com/deckhouse/deckhouse-cli/internal/tools/sigmigrate/cmd"
+	cluster_config "github.com/deckhouse/deckhouse-cli/internal/system/cmd/get/cluster-configuration"
+	providerconfig "github.com/deckhouse/deckhouse-cli/internal/system/cmd/get/provider-cluster-configuration"
+	static_config "github.com/deckhouse/deckhouse-cli/internal/system/cmd/get/static-cluster-configuration"
 )
 
-var toolsLong = templates.LongDesc(`
-Various useful tools for operating in The Deckhouse Ecosystem.
+var getLong = templates.LongDesc(`
+Get configuration files from Kubernetes cluster.
 
 © Flant JSC 2025`)
 
 func NewCommand() *cobra.Command {
-	toolsCmd := &cobra.Command{
-		Use:     "tools",
-		Short:   "Various useful tools for operating in The Deckhouse Ecosystem.",
-		Aliases: []string{"t"},
-		Long:    toolsLong,
+	getCmd := &cobra.Command{
+		Use: "get", Short: "Get configuration files",
+		Long: getLong,
 	}
 
-	toolsCmd.AddCommand(
-		farconverter.NewCommand(),
-		gostsum.NewCommand(),
-		sigmigrate.NewCommand(),
+	getCmd.AddCommand(
+		cluster_config.NewCommand(),
+		static_config.NewCommand(),
+		providerconfig.NewCommand(),
 	)
 
-	return toolsCmd
+	return getCmd
 }

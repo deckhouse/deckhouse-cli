@@ -20,11 +20,9 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/operatemodule"
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 var disableLong = templates.LongDesc(`
@@ -51,24 +49,9 @@ func disableModule(cmd *cobra.Command, args []string) error {
 	}
 	moduleName := args[0]
 
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
+	dynamicClient, err := operatemodule.GetDynamicClient(cmd)
 	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
-	contextName, err := cmd.Flags().GetString("context")
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
-	config, _, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
-	dynamicClient, err := dynamic.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("Failed to create dynamic client: %v", err)
+		return err
 	}
 
 	err = operatemodule.OperateModule(dynamicClient, moduleName, operatemodule.ModuleDisabled)

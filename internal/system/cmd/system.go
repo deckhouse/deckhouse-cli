@@ -21,6 +21,7 @@ import (
 
 	collectdebuginfo "github.com/deckhouse/deckhouse-cli/internal/system/cmd/collect-debug-info"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/edit"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/get"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/logs"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module"
 	queue "github.com/deckhouse/deckhouse-cli/internal/system/cmd/queue"
@@ -45,6 +46,7 @@ func NewCommand() *cobra.Command {
 
 	systemCmd.AddCommand(
 		edit.NewCommand(),
+		get.NewCommand(),
 		module.NewCommand(),
 		collectdebuginfo.NewCommand(),
 		queue.NewCommand(),

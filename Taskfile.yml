@@ -102,9 +102,27 @@ tasks:
           outputDir: "."
 
   build:dev:linux:amd64:
-    desc: Build d8 dev binary for linux/amd64
+    desc: Build d8 dev binary for linux/amd64 (requires Linux or Docker)
     cmds:
       - task: _build:cgo:dev
+        vars:
+          targetOS: "linux"
+          targetArch: "amd64"
+          outputDir: "{{ .outputDir }}"
+
+  build:dev:linux:amd64:cross:
+    desc: Cross-compile d8 dev binary for linux/amd64 from macOS (no CGO)
+    summary: |
+      Cross-compiles Linux binary from macOS without CGO.
+      
+      This is useful for quick testing when you don't have access to a Linux machine
+      or Docker. The resulting binary has the same features as darwin/windows builds
+      (no CGO-dependent functionality).
+      
+      For a full-featured Linux build with CGO, use build:dev:linux:amd64 on Linux
+      or in a Linux container.
+    cmds:
+      - task: _build:go:dev
         vars:
           targetOS: "linux"
           targetArch: "amd64"
