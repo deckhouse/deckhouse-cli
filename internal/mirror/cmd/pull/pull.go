@@ -122,16 +122,11 @@ func setupLogger() *log.SLogger {
 }
 
 func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger, client registry.Client) ([]string, []string, error) {
-	if pullParams.DeckhouseTag != "" {
-		logger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
-		// TODO: find channel for tag
-		return []string{pullParams.DeckhouseTag}, nil, nil
-	}
-
-	versionsToMirror, channelsToMirror, err := versionsToMirrorFunc(pullParams, client)
+	versionsToMirror, channelsToMirror, err := versionsToMirrorFunc(pullParams, client, []string{pullParams.DeckhouseTag})
 	if err != nil {
 		return nil, nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}
+
 	logger.Infof("Deckhouse releases to pull: %+v", versionsToMirror)
 
 	return lo.Map(versionsToMirror, func(v semver.Version, _ int) string {

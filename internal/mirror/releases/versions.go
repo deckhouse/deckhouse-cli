@@ -41,8 +41,12 @@ type releaseChannelVersionResult struct {
 	err error
 }
 
-func VersionsToMirror(pullParams *params.PullParams, client registry.Client) ([]semver.Version, []string, error) {
+func VersionsToMirror(pullParams *params.PullParams, client registry.Client, tagsToMirror []string) ([]semver.Version, []string, error) {
 	logger := pullParams.Logger
+
+	if len(tagsToMirror) > 0 {
+		logger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
+	}
 
 	releaseChannelsToCopy := internal.GetAllDefaultReleaseChannels()
 	releaseChannelsToCopy = append(releaseChannelsToCopy, internal.LTSChannel)
@@ -70,15 +74,23 @@ func VersionsToMirror(pullParams *params.PullParams, client registry.Client) ([]
 		}
 
 		if res.err == nil {
-			fmt.Println(channel)
 			releaseChannelsVersions[channel] = res.ver
 		}
 	}
 
 	vers := make([]*semver.Version, 0, len(releaseChannelsVersions))
-	channels := make([]string, 0, len(releaseChannelsVersions))
+	mappedChannels := make(map[string]struct{}, len(releaseChannelsVersions))
 	for channel, v := range releaseChannelsVersions {
-		vers = append(vers, v)
+		for _, tag := range tagsToMirror {
+			if tag == "v"+v.String() || tag == channel {
+				vers = append(vers, v)
+				mappedChannels[channel] = struct{}{}
+			}
+		}
+	}
+
+	channels := make([]string, 0, len(mappedChannels))
+	for channel := range mappedChannels {
 		channels = append(channels, channel)
 	}
 
