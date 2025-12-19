@@ -401,7 +401,7 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 			ImageSet:         imageSet,
 			Layout:           extraLayout,
 			AllowMissingTags: true,
-			GetterService:    svc.modulesService.Module(module.name).Extra().WithSegment(extraName),
+			GetterService:    svc.modulesService.Module(module.name).ExtraImage(extraName),
 		}
 
 		if err := svc.pullerService.PullImages(ctx, config); err != nil {
@@ -662,6 +662,8 @@ func (svc *Service) pullVexImages(ctx context.Context, moduleName string, downlo
 		allImages = append(allImages, img)
 	}
 
+	// Find VEX images and add to a separate set for pulling
+	vexImageSet := make(map[string]*puller.ImageMeta)
 	for _, img := range allImages {
 		vexImageName, err := svc.findVexImage(ctx, moduleName, img)
 		if err != nil {
@@ -670,7 +672,24 @@ func (svc *Service) pullVexImages(ctx context.Context, moduleName string, downlo
 		}
 		if vexImageName != "" {
 			svc.logger.Debug(fmt.Sprintf("Found VEX image: %s", vexImageName))
+			vexImageSet[vexImageName] = nil
 			downloadList.Module[vexImageName] = nil
+		}
+	}
+
+	// Pull VEX images if any found
+	if len(vexImageSet) > 0 {
+		config := puller.PullConfig{
+			Name:             moduleName + " VEX images",
+			ImageSet:         vexImageSet,
+			Layout:           svc.layout.Module(moduleName).Modules,
+			AllowMissingTags: true, // VEX images may not exist
+			GetterService:    svc.modulesService.Module(moduleName),
+		}
+
+		if err := svc.pullerService.PullImages(ctx, config); err != nil {
+			svc.logger.Debug(fmt.Sprintf("Failed to pull VEX images for %s: %v", moduleName, err))
+			// Don't fail on VEX image pull errors
 		}
 	}
 }

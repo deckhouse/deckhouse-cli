@@ -71,11 +71,7 @@ func SplitImageRefByRepoAndTag(imageReferenceString string) (string, string) {
 	repo := imageReferenceString[:splitIndex]
 	tag := imageReferenceString[splitIndex+1:]
 
-	if strings.HasSuffix(repo, "@sha256") {
-		repo = strings.TrimSuffix(repo, "@sha256")
-		// Return just the hex digest without @sha256: prefix
-		// This makes it a valid registry tag
-	}
+	repo = strings.TrimSuffix(repo, "@sha256")
 
 	return repo, tag
 }

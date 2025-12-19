@@ -38,6 +38,7 @@ type ModuleService struct {
 	*BasicService
 	moduleReleaseChannels *ModuleReleaseService
 	extra                 *BasicService
+	extraImages           map[string]*BasicService
 
 	logger *log.Logger
 }
@@ -50,6 +51,7 @@ func NewModuleService(client registry.Client, logger *log.Logger) *ModuleService
 		BasicService:          NewBasicService(moduleServiceName, client, logger),
 		moduleReleaseChannels: NewModuleReleaseService(NewBasicService(moduleReleaseChannelsServiceName, client.WithSegment(moduleReleaseChannelsSegment), logger)),
 		extra:                 NewBasicService(moduleExtraServiceName, client.WithSegment(moduleExtraSegment), logger),
+		extraImages:           make(map[string]*BasicService),
 
 		logger: logger,
 	}
@@ -61,6 +63,20 @@ func (s *ModuleService) ReleaseChannels() *ModuleReleaseService {
 
 func (s *ModuleService) Extra() *BasicService {
 	return s.extra
+}
+
+// ExtraImage returns a BasicService scoped to a specific extra image (e.g., modules/<module>/extra/<extraName>)
+func (s *ModuleService) ExtraImage(extraName string) *BasicService {
+	if s.extraImages == nil {
+		s.extraImages = make(map[string]*BasicService)
+	}
+
+	if _, exists := s.extraImages[extraName]; !exists {
+		extraClient := s.client.WithSegment(moduleExtraSegment).WithSegment(extraName)
+		s.extraImages[extraName] = NewBasicService(moduleExtraServiceName+"/"+extraName, extraClient, s.logger)
+	}
+
+	return s.extraImages[extraName]
 }
 
 type ModulesService struct {

@@ -121,7 +121,7 @@ type ImageLayouts struct {
 	Modules *regimage.ImageLayout
 	// ModulesReleaseChannels is the release channel layout (modules/<name>/release/)
 	ModulesReleaseChannels *regimage.ImageLayout
-	// ExtraImages holds layouts for each extra image (modules/<name>/<extra-name>/)
+	// ExtraImages holds layouts for each extra image (modules/<name>/extra/<extra-name>/)
 	// Key is the extra image name (e.g., "scanner", "enforcer")
 	ExtraImages map[string]*regimage.ImageLayout
 }
