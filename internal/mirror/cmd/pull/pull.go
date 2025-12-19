@@ -121,21 +121,22 @@ func setupLogger() *log.SLogger {
 	return log.NewSLogger(logLevel)
 }
 
-func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger, client registry.Client) ([]string, error) {
+func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger, client registry.Client) ([]string, []string, error) {
+	strickTags := []string{}
 	if pullParams.DeckhouseTag != "" {
-		logger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
-		return []string{pullParams.DeckhouseTag}, nil
+		strickTags = append(strickTags, pullParams.DeckhouseTag)
 	}
 
-	versionsToMirror, err := versionsToMirrorFunc(pullParams, client)
+	versionsToMirror, channelsToMirror, err := versionsToMirrorFunc(pullParams, client, strickTags)
 	if err != nil {
-		return nil, fmt.Errorf("Find versions to mirror: %w", err)
+		return nil, nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}
+
 	logger.Infof("Deckhouse releases to pull: %+v", versionsToMirror)
 
 	return lo.Map(versionsToMirror, func(v semver.Version, _ int) string {
 		return "v" + v.String()
-	}), nil
+	}), channelsToMirror, nil
 }
 
 func buildPullParams(logger params.Logger) *params.PullParams {
@@ -365,12 +366,12 @@ func (p *Puller) pullPlatform() error {
 			return err
 		}
 
-		tagsToMirror, err := findTagsToMirror(p.params, p.logger, c)
+		tagsToMirror, channelsToMirror, err := findTagsToMirror(p.params, p.logger, c)
 		if err != nil {
 			return fmt.Errorf("Find tags to mirror: %w", err)
 		}
 
-		if err = operations.PullDeckhousePlatform(p.params, tagsToMirror, c); err != nil {
+		if err = operations.PullDeckhousePlatform(p.params, channelsToMirror, tagsToMirror, c); err != nil {
 			return err
 		}
 
@@ -379,19 +380,31 @@ func (p *Puller) pullPlatform() error {
 }
 
 // validatePlatformAccess validates access to the platform registry
+// check access with strict tag, stable or lts
+// if any resource found - access is ok
 func (p *Puller) validatePlatformAccess() error {
-	targetTag := internal.StableChannel
+	targetTags := []string{}
 	if p.params.DeckhouseTag != "" {
-		targetTag = p.params.DeckhouseTag
+		targetTags = append(targetTags, p.params.DeckhouseTag)
 	}
 
-	imageRef := p.params.DeckhouseRegistryRepo + ":" + targetTag
+	targetTags = append(targetTags, internal.StableChannel, internal.LTSChannel)
 
-	ctx, cancel := context.WithTimeout(p.cmd.Context(), 15*time.Second)
-	defer cancel()
+	var accessErr error
+	for _, targetTag := range targetTags {
+		imageRef := p.params.DeckhouseRegistryRepo + ":" + targetTag
 
-	if err := p.accessValidator.ValidateReadAccessForImage(ctx, imageRef, p.validationOpts...); err != nil {
-		return fmt.Errorf("Source registry is not accessible: %w", err)
+		ctx, cancel := context.WithTimeout(p.cmd.Context(), 15*time.Second)
+		defer cancel()
+
+		accessErr = p.accessValidator.ValidateReadAccessForImage(ctx, imageRef, p.validationOpts...)
+		if accessErr == nil {
+			break
+		}
+	}
+
+	if accessErr != nil {
+		return fmt.Errorf("Source registry is not accessible: %w", accessErr)
 	}
 
 	return nil
