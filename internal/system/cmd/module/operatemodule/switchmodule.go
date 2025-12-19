@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -26,6 +28,33 @@ const (
 	ModuleDisabled ModuleState = "disabled"
 )
 
+// OperateResultStatus represents the result of a module operation.
+type OperateResultStatus int
+
+const (
+	// ResultChanged indicates the module state was changed.
+	ResultChanged OperateResultStatus = iota
+	// ResultAlreadyInState indicates the module is already in the desired state.
+	ResultAlreadyInState
+)
+
+// OperateResult contains the result of a module operation.
+type OperateResult struct {
+	Status OperateResultStatus
+}
+
+// ExperimentalModuleError represents an error when trying to enable an experimental module.
+type ExperimentalModuleError struct {
+	ModuleName string
+}
+
+func (e *ExperimentalModuleError) Error() string {
+	return fmt.Sprintf("module '%s' is experimental", e.ModuleName)
+}
+
+// experimentalModuleRegexp matches admission webhook errors for experimental modules.
+var experimentalModuleRegexp = regexp.MustCompile(`the '([^']+)' module is experimental`)
+
 // GetDynamicClient creates a dynamic Kubernetes client from cobra command flags.
 // It reads "kubeconfig" and "context" flags from the command.
 // Dynamic client is required to work with Custom Resources like ModuleRelease
@@ -47,7 +76,7 @@ func GetDynamicClient(cmd *cobra.Command) (dynamic.Interface, error) {
 	return dynamicClient, nil
 }
 
-func OperateModule(dynamicClient dynamic.Interface, name string, moduleState ModuleState) error {
+func OperateModule(dynamicClient dynamic.Interface, name string, moduleState ModuleState) (*OperateResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultAPITimeout)
 	defer cancel()
 
@@ -59,31 +88,70 @@ func OperateModule(dynamicClient dynamic.Interface, name string, moduleState Mod
 		},
 	)
 
-	_, err := resourceClient.Get(ctx, name, metav1.GetOptions{})
+	existing, err := resourceClient.Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		if !errors.IsNotFound(err) {
-			return fmt.Errorf("failed to get module config '%s': %w", name, err)
+			return nil, fmt.Errorf("failed to get module config '%s': %w", name, err)
 		}
 		// Resource not found, create new one
 		obj, err := createModuleConfig(name, moduleState)
 		if err != nil {
-			return fmt.Errorf("failed to convert the '%s' module config: %w", name, err)
+			return nil, fmt.Errorf("failed to convert the '%s' module config: %w", name, err)
 		}
 		if _, err = resourceClient.Create(ctx, obj, metav1.CreateOptions{}); err != nil {
-			return fmt.Errorf("failed to create the '%s' module config: %w", name, err)
+			return nil, parseModuleOperationError(name, err)
 		}
-		return nil
+		return &OperateResult{Status: ResultChanged}, nil
+	}
+
+	// Check if module is already in the desired state
+	if isModuleInState(existing, moduleState) {
+		return &OperateResult{Status: ResultAlreadyInState}, nil
 	}
 
 	// Resource exists, patch it
 	enabledSpec, err := patchSpec(moduleState)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, err = resourceClient.Patch(ctx, name, types.MergePatchType, enabledSpec, metav1.PatchOptions{}); err != nil {
-		return fmt.Errorf("failed to update the '%s' module config: %w", name, err)
+		return nil, parseModuleOperationError(name, err)
 	}
-	return nil
+	return &OperateResult{Status: ResultChanged}, nil
+}
+
+// isModuleInState checks if the module is already in the desired state.
+func isModuleInState(obj *unstructured.Unstructured, desiredState ModuleState) bool {
+	spec, found, err := unstructured.NestedMap(obj.Object, "spec")
+	if err != nil || !found {
+		return false
+	}
+
+	enabled, found, err := unstructured.NestedBool(spec, "enabled")
+	if err != nil || !found {
+		// If enabled is not set, module is not explicitly in any state
+		return false
+	}
+
+	desiredEnabled := desiredState == ModuleEnabled
+	return enabled == desiredEnabled
+}
+
+// parseModuleOperationError parses the error from a module operation
+// and returns a more user-friendly error if possible.
+func parseModuleOperationError(moduleName string, err error) error {
+	errStr := err.Error()
+
+	// Check for experimental module error
+	if strings.Contains(errStr, "module is experimental") {
+		matches := experimentalModuleRegexp.FindStringSubmatch(errStr)
+		if len(matches) > 1 {
+			return &ExperimentalModuleError{ModuleName: matches[1]}
+		}
+		return &ExperimentalModuleError{ModuleName: moduleName}
+	}
+
+	return err
 }
 
 func createModuleConfig(name string, moduleState ModuleState) (*unstructured.Unstructured, error) {

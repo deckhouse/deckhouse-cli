@@ -17,7 +17,9 @@ limitations under the License.
 package enable
 
 import (
+	"errors"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
@@ -54,11 +56,31 @@ func enableModule(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	err = operatemodule.OperateModule(dynamicClient, moduleName, operatemodule.ModuleEnabled)
+	result, err := operatemodule.OperateModule(dynamicClient, moduleName, operatemodule.ModuleEnabled)
 	if err != nil {
-		return fmt.Errorf("Error enable module: %w", err)
+		var expErr *operatemodule.ExperimentalModuleError
+		if errors.As(err, &expErr) {
+			fmt.Fprintf(os.Stderr, "%s Module '%s' is experimental and cannot be enabled.\n", operatemodule.MsgError, expErr.ModuleName)
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintln(os.Stderr, "To enable experimental modules, add the following to your 'deckhouse' ModuleConfig:")
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintln(os.Stderr, "  spec:")
+			fmt.Fprintln(os.Stderr, "    settings:")
+			fmt.Fprintln(os.Stderr, "      allowExperimentalModules: true")
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintln(os.Stderr, "Or run:")
+			fmt.Fprintln(os.Stderr, "  kubectl patch mc deckhouse --type=merge -p '{\"spec\":{\"settings\":{\"allowExperimentalModules\":true}}}'")
+			return fmt.Errorf("module '%s' is experimental", expErr.ModuleName)
+		}
+		return fmt.Errorf("failed to enable module: %w", err)
 	}
 
-	fmt.Println("Module", moduleName, "enabled")
+	switch result.Status {
+	case operatemodule.ResultAlreadyInState:
+		fmt.Fprintf(os.Stderr, "%s Module '%s' is already enabled.\n", operatemodule.MsgWarn, moduleName)
+	case operatemodule.ResultChanged:
+		fmt.Printf("%s Module '%s' enabled.\n", operatemodule.MsgOK, moduleName)
+	}
+
 	return nil
 }

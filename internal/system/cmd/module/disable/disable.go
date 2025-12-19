@@ -18,6 +18,7 @@ package disable
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
@@ -54,11 +55,17 @@ func disableModule(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	err = operatemodule.OperateModule(dynamicClient, moduleName, operatemodule.ModuleDisabled)
+	result, err := operatemodule.OperateModule(dynamicClient, moduleName, operatemodule.ModuleDisabled)
 	if err != nil {
-		return fmt.Errorf("Error disable module: %w", err)
+		return fmt.Errorf("failed to disable module: %w", err)
 	}
 
-	fmt.Println("Module", moduleName, "disabled")
+	switch result.Status {
+	case operatemodule.ResultAlreadyInState:
+		fmt.Fprintf(os.Stderr, "%s Module '%s' is already disabled.\n", operatemodule.MsgWarn, moduleName)
+	case operatemodule.ResultChanged:
+		fmt.Printf("%s Module '%s' disabled.\n", operatemodule.MsgOK, moduleName)
+	}
+
 	return nil
 }
