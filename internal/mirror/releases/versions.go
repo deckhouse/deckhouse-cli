@@ -59,7 +59,6 @@ func VersionsToMirror(pullParams *params.PullParams, client registry.Client, tag
 				logger.Warnf("Skipping LTS channel: %v", err)
 				continue
 			}
-
 		}
 
 		releaseChannelsVersionsResult[channel] = releaseChannelVersionResult{ver: v, err: err}
