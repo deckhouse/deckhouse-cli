@@ -122,7 +122,12 @@ func setupLogger() *log.SLogger {
 }
 
 func findTagsToMirror(pullParams *params.PullParams, logger *log.SLogger, client registry.Client) ([]string, []string, error) {
-	versionsToMirror, channelsToMirror, err := versionsToMirrorFunc(pullParams, client, []string{pullParams.DeckhouseTag})
+	strickTags := []string{}
+	if pullParams.DeckhouseTag != "" {
+		strickTags = append(strickTags, pullParams.DeckhouseTag)
+	}
+
+	versionsToMirror, channelsToMirror, err := versionsToMirrorFunc(pullParams, client, strickTags)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}

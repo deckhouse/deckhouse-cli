@@ -247,11 +247,6 @@ func FillLayoutsWithBasicDeckhouseImages(
 		layouts.ReleaseChannelImages[fmt.Sprintf("%s/release-channel:%s", pullParams.DeckhouseRegistryRepo, version)] = struct{}{}
 	}
 
-	// If we are to pull only the specific requested version, we should not pull any release channels at all.
-	if pullParams.DeckhouseTag != "" {
-		return
-	}
-
 	for _, channel := range channelsToMirror {
 		layouts.DeckhouseImages[pullParams.DeckhouseRegistryRepo+":"+channel] = struct{}{}
 		layouts.InstallImages[pullParams.DeckhouseRegistryRepo+"/install:"+channel] = struct{}{}

@@ -128,17 +128,34 @@ func TestFindTagsToMirror(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var originalVersionsToMirrorFunc func(*params.PullParams, registry.Client) ([]semver.Version, []string, error)
+			var originalVersionsToMirrorFunc func(*params.PullParams, registry.Client, []string) ([]semver.Version, []string, error)
 			if tt.deckhouseTag == "" {
 				// Mock for the no tag case to avoid panic
 				originalVersionsToMirrorFunc = versionsToMirrorFunc
-				versionsToMirrorFunc = func(pullParams *params.PullParams, client registry.Client) ([]semver.Version, []string, error) {
+				versionsToMirrorFunc = func(pullParams *params.PullParams, client registry.Client, tagsToMirror []string) ([]semver.Version, []string, error) {
 					return nil, nil, fmt.Errorf("mock error for no tag case")
+				}
+				defer func() { versionsToMirrorFunc = originalVersionsToMirrorFunc }()
+			} else {
+				// Mock for specific tag case
+				originalVersionsToMirrorFunc = versionsToMirrorFunc
+				versionsToMirrorFunc = func(pullParams *params.PullParams, client registry.Client, tagsToMirror []string) ([]semver.Version, []string, error) {
+					if len(tagsToMirror) > 0 {
+						v, err := semver.NewVersion(strings.TrimPrefix(tagsToMirror[0], "v"))
+						if err != nil {
+							return nil, nil, err
+						}
+						return []semver.Version{*v}, []string{"alpha"}, nil
+					}
+					return nil, nil, fmt.Errorf("no tags")
 				}
 				defer func() { versionsToMirrorFunc = originalVersionsToMirrorFunc }()
 			}
 
 			pullParams := &params.PullParams{
+				BaseParams: params.BaseParams{
+					Logger: logger,
+				},
 				DeckhouseTag: tt.deckhouseTag,
 				SinceVersion: tt.sinceVersion,
 			}
@@ -970,7 +987,7 @@ func TestFindTagsToMirrorWithVersionsSuccess(t *testing.T) {
 	defer func() { versionsToMirrorFunc = originalVersionsToMirrorFunc }()
 
 	// Mock the function to return successful versions
-	versionsToMirrorFunc = func(pullParams *params.PullParams, client registry.Client) ([]semver.Version, []string, error) {
+	versionsToMirrorFunc = func(pullParams *params.PullParams, client registry.Client, tagsToMirror []string) ([]semver.Version, []string, error) {
 		return []semver.Version{
 			*semver.MustParse("1.50.0"),
 			*semver.MustParse("1.51.0"),

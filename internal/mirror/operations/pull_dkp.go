@@ -38,9 +38,6 @@ import (
 
 func PullDeckhousePlatform(pullParams *params.PullParams, channelsToMirror []string, tagsToMirror []string, client registry.Client) error {
 	logger := pullParams.Logger
-	if len(tagsToMirror) == 0 {
-		return fmt.Errorf("no tags to mirror")
-	}
 
 	tmpDir := filepath.Join(pullParams.WorkingDir, "platform")
 

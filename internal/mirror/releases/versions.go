@@ -81,6 +81,12 @@ func VersionsToMirror(pullParams *params.PullParams, client registry.Client, tag
 	vers := make([]*semver.Version, 0, len(releaseChannelsVersions))
 	mappedChannels := make(map[string]struct{}, len(releaseChannelsVersions))
 	for channel, v := range releaseChannelsVersions {
+		if len(tagsToMirror) == 0 {
+			vers = append(vers, v)
+			mappedChannels[channel] = struct{}{}
+			continue
+		}
+
 		for _, tag := range tagsToMirror {
 			if tag == "v"+v.String() || tag == channel {
 				vers = append(vers, v)
