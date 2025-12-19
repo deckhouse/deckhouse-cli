@@ -63,6 +63,20 @@ linters:
         - time
       # Enforce putting arguments on separate lines.
       args-on-sep-lines: false
+    revive:
+      rules:
+        - name: var-naming
+          severity: warning
+          disabled: false
+          exclude: [""]
+          arguments:
+            - ["ID"] # AllowList
+            - ["VM"] # DenyList
+            - - skip-initialism-name-checks: false
+                upper-case-const: false
+                skip-package-name-checks: true
+                skip-package-name-collision-with-go-std: false
+                extra-bad-package-names: []
     staticcheck:
       checks:
         - all
