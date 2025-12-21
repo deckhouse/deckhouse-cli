@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestParseAndFilterVersionsAboveMinimalAnbBelowAlpha(t *testing.T) {
+func TestParseAndFilterVersionsAboveMinimalAndBelowAlpha(t *testing.T) {
 	minVersion := semver.MustParse("v1.50.0")
 	alphaVersion := semver.MustParse("v1.60.0")
 
@@ -66,7 +66,7 @@ func TestParseAndFilterVersionsAboveMinimalAnbBelowAlpha(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := parseAndFilterVersionsAboveMinimalAnbBelowAlpha(minVersion, tt.tags, alphaVersion)
+			result := parseAndFilterVersionsAboveMinimalAndBelowAlpha(minVersion, tt.tags, alphaVersion)
 
 			resultStrs := make([]string, len(result))
 			for i, v := range result {
@@ -184,14 +184,14 @@ func TestDeduplicateVersions(t *testing.T) {
 }
 
 // Benchmark tests
-func BenchmarkParseAndFilterVersionsAboveMinimalAnbBelowAlpha(b *testing.B) {
+func BenchmarkParseAndFilterVersionsAboveMinimalAndBelowAlpha(b *testing.B) {
 	minVersion := semver.MustParse("v1.50.0")
 	alphaVersion := semver.MustParse("v1.60.0")
 	tags := []string{"v1.49.0", "v1.50.0", "v1.51.0", "v1.52.0", "v1.59.0", "v1.60.0", "v1.61.0"}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		parseAndFilterVersionsAboveMinimalAnbBelowAlpha(minVersion, tags, alphaVersion)
+		parseAndFilterVersionsAboveMinimalAndBelowAlpha(minVersion, tags, alphaVersion)
 	}
 }
 

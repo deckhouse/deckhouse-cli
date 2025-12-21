@@ -71,8 +71,15 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string) error {
 }
 
 func Pack(ctx context.Context, sourcePath string, sink io.Writer) error {
+	return PackWithPrefix(ctx, sourcePath, "", sink)
+}
+
+// PackWithPrefix packs directory contents into tar with an optional prefix for all paths.
+// For example, PackWithPrefix(ctx, "/tmp/module", "modules/stronghold", sink) will create
+// tar entries like "modules/stronghold/index.json" instead of just "index.json".
+func PackWithPrefix(ctx context.Context, sourcePath string, prefix string, sink io.Writer) error {
 	tarWriter := tar.NewWriter(sink)
-	if err := filepath.Walk(sourcePath, packFunc(ctx, sourcePath, tarWriter)); err != nil {
+	if err := filepath.Walk(sourcePath, packFuncWithPrefix(ctx, sourcePath, prefix, tarWriter)); err != nil {
 		return fmt.Errorf("pack mirrored images into tar: %w", err)
 	}
 
@@ -83,7 +90,7 @@ func Pack(ctx context.Context, sourcePath string, sink io.Writer) error {
 	return nil
 }
 
-func packFunc(ctx context.Context, pathPrefix string, writer *tar.Writer) filepath.WalkFunc {
+func packFuncWithPrefix(ctx context.Context, pathPrefix string, tarPrefix string, writer *tar.Writer) filepath.WalkFunc {
 	unixEpochStart := time.Unix(0, 0)
 	return func(path string, info fs.FileInfo, err error) error {
 		if ctx.Err() != nil {
@@ -102,6 +109,10 @@ func packFunc(ctx context.Context, pathPrefix string, writer *tar.Writer) filepa
 		}
 
 		pathInTar := strings.TrimPrefix(path, pathPrefix+string(os.PathSeparator))
+		// Add prefix if specified
+		if tarPrefix != "" {
+			pathInTar = tarPrefix + "/" + pathInTar
+		}
 		err = writer.WriteHeader(&tar.Header{
 			Typeflag: tar.TypeReg,
 			Format:   tar.FormatGNU,

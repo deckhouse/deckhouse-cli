@@ -55,8 +55,9 @@ var (
 	SourceRegistryPassword string
 	DeckhouseLicenseToken  string
 
-	DoGOSTDigest bool
-	NoPullResume bool
+	DoGOSTDigest  bool
+	NoPullResume  bool
+	IgnoreSuspend bool
 
 	NoPlatform      bool
 	NoSecurityDB    bool
@@ -160,6 +161,12 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		"no-pull-resume",
 		false,
 		"Do not continue last unfinished pull operation and start from scratch.",
+	)
+	flagSet.BoolVar(
+		&IgnoreSuspend,
+		"ignore-suspend",
+		false,
+		"Ignore suspended release channels and continue mirroring. Use with caution.",
 	)
 	flagSet.BoolVar(
 		&NoPlatform,

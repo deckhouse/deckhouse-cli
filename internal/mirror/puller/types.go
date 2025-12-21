@@ -65,15 +65,13 @@ func NewImageMeta(version string, tagReference string, digest *v1.Hash) *ImageMe
 }
 
 // SplitImageRefByRepoAndTag splits an image reference into repository and tag parts
+// For digest references (repo@sha256:abc), returns just the hex part as tag
 func SplitImageRefByRepoAndTag(imageReferenceString string) (string, string) {
 	splitIndex := strings.LastIndex(imageReferenceString, ":")
 	repo := imageReferenceString[:splitIndex]
 	tag := imageReferenceString[splitIndex+1:]
 
-	if strings.HasSuffix(repo, "@sha256") {
-		repo = strings.TrimSuffix(repo, "@sha256")
-		tag = "@sha256:" + tag
-	}
+	repo = strings.TrimSuffix(repo, "@sha256")
 
 	return repo, tag
 }
