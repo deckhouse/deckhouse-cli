@@ -23,7 +23,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/edit"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/get"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/logs"
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module"
+	module "github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/cmd"
 	queue "github.com/deckhouse/deckhouse-cli/internal/system/cmd/queue"
 	"github.com/deckhouse/deckhouse-cli/internal/system/flags"
 )
