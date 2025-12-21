@@ -25,7 +25,7 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/cli"
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/module_config"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/moduleconfig"
 )
 
 var enableLong = templates.LongDesc(`
@@ -57,9 +57,9 @@ func enableModule(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	result, err := module_config.SetEnabledState(dynamicClient, moduleName, module_config.Enabled)
+	result, err := moduleconfig.SetEnabledState(dynamicClient, moduleName, moduleconfig.Enabled)
 	if err != nil {
-		var expErr *module_config.ExperimentalModuleError
+		var expErr *moduleconfig.ExperimentalModuleError
 		if errors.As(err, &expErr) {
 			fmt.Fprintf(os.Stderr, "%s Module '%s' is experimental and cannot be enabled.\n", cli.MsgError, expErr.ModuleName)
 			fmt.Fprintln(os.Stderr)
@@ -77,9 +77,9 @@ func enableModule(cmd *cobra.Command, args []string) error {
 	}
 
 	switch result.Status {
-	case module_config.AlreadyInState:
+	case moduleconfig.AlreadyInState:
 		fmt.Fprintf(os.Stderr, "%s Module '%s' is already enabled.\n", cli.MsgWarn, moduleName)
-	case module_config.Changed:
+	case moduleconfig.Changed:
 		fmt.Printf("%s Module '%s' enabled.\n", cli.MsgOK, moduleName)
 	}
 

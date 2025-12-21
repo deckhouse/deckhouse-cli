@@ -24,7 +24,7 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/cli"
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/module_config"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/moduleconfig"
 )
 
 var disableLong = templates.LongDesc(`
@@ -56,15 +56,15 @@ func disableModule(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	result, err := module_config.SetEnabledState(dynamicClient, moduleName, module_config.Disabled)
+	result, err := moduleconfig.SetEnabledState(dynamicClient, moduleName, moduleconfig.Disabled)
 	if err != nil {
 		return fmt.Errorf("failed to disable module: %w", err)
 	}
 
 	switch result.Status {
-	case module_config.AlreadyInState:
+	case moduleconfig.AlreadyInState:
 		fmt.Fprintf(os.Stderr, "%s Module '%s' is already disabled.\n", cli.MsgWarn, moduleName)
-	case module_config.Changed:
+	case moduleconfig.Changed:
 		fmt.Printf("%s Module '%s' disabled.\n", cli.MsgOK, moduleName)
 	}
 

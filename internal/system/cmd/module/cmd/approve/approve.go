@@ -26,7 +26,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/cli"
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/module_releases"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/modulereleases"
 )
 
 var approveLong = templates.LongDesc(`
@@ -67,7 +67,7 @@ func NewCommand() *cobra.Command {
 
 func approveRelease(cmd *cobra.Command, args []string) error {
 	moduleName := args[0]
-	version := module_releases.NormalizeVersion(args[1])
+	version := modulereleases.NormalizeVersion(args[1])
 
 	dynamicClient, err := cli.GetDynamicClient(cmd)
 	if err != nil {
@@ -75,10 +75,10 @@ func approveRelease(cmd *cobra.Command, args []string) error {
 	}
 
 	// Try to get the release
-	release, err := module_releases.GetModuleRelease(dynamicClient, moduleName, version)
+	release, err := modulereleases.GetModuleRelease(dynamicClient, moduleName, version)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return cli.SuggestSuitableReleasesOnNotFound(dynamicClient, moduleName, version, module_releases.CanBeApproved)
+			return cli.SuggestSuitableReleasesOnNotFound(dynamicClient, moduleName, version, modulereleases.CanBeApproved)
 		}
 		return fmt.Errorf("failed to get module release: %w", err)
 	}
@@ -105,7 +105,7 @@ func approveRelease(cmd *cobra.Command, args []string) error {
 	}
 
 	// Apply the approved annotation
-	err = module_releases.ApproveModuleRelease(dynamicClient, release.Name)
+	err = modulereleases.ApproveModuleRelease(dynamicClient, release.Name)
 	if err != nil {
 		return fmt.Errorf("failed to approve module release: %w", err)
 	}

@@ -5,9 +5,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/module_releases"
 	"github.com/fatih/color"
 	"k8s.io/client-go/dynamic"
+
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/modulereleases"
 )
 
 // Output message prefixes with colors for better status readability.
@@ -29,10 +30,10 @@ const maxModulesToList = 10
 //
 // For example, all the releases that are in Pending phase and not yet approved.
 // You can select any rule with the ReleaseMatchFunc predicate.
-func SuggestSuitableReleasesOnNotFound(dynamicClient dynamic.Interface, moduleName, version string, match module_releases.ReleaseMatchFunc) error {
+func SuggestSuitableReleasesOnNotFound(dynamicClient dynamic.Interface, moduleName, version string, match modulereleases.ReleaseMatchFunc) error {
 	fmt.Fprintf(os.Stderr, "\n%s Release '%s-%s' not found.\n", MsgError, moduleName, version)
 
-	suitableReleases, err := module_releases.FindReleases(dynamicClient, moduleName, match)
+	suitableReleases, err := modulereleases.FindReleases(dynamicClient, moduleName, match)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n   Could not fetch available releases: %v\n", err)
 		return ReleaseNotFoundError(moduleName, version)
@@ -58,8 +59,8 @@ func ReleaseNotFoundError(moduleName, version string) error {
 }
 
 // PrintNearestVersionSuggestions prints suggestions for nearest versions.
-func PrintNearestVersionSuggestions(releases []module_releases.ModuleReleaseInfo, targetVersion string) {
-	nearest := module_releases.FindNearestVersions(releases, targetVersion)
+func PrintNearestVersionSuggestions(releases []modulereleases.ModuleReleaseInfo, targetVersion string) {
+	nearest := modulereleases.FindNearestVersions(releases, targetVersion)
 	if nearest.Lower == nil && nearest.Upper == nil {
 		return
 	}
@@ -74,7 +75,7 @@ func PrintNearestVersionSuggestions(releases []module_releases.ModuleReleaseInfo
 }
 
 // PrintPendingReleases prints a list of available pending releases.
-func PrintPendingReleases(releases []module_releases.ModuleReleaseInfo) {
+func PrintPendingReleases(releases []modulereleases.ModuleReleaseInfo) {
 	fmt.Fprintln(os.Stderr, "\nAvailable pending releases:")
 	for _, r := range releases {
 		fmt.Fprintf(os.Stderr, "   • %s\n", r.Version)
@@ -83,7 +84,7 @@ func PrintPendingReleases(releases []module_releases.ModuleReleaseInfo) {
 
 // PrintNoReleasesHelp prints help when no pending releases are found.
 func PrintNoReleasesHelp(dynamicClient dynamic.Interface, moduleName string) {
-	allReleases, _ := module_releases.ListModuleReleases(dynamicClient, moduleName)
+	allReleases, _ := modulereleases.ListModuleReleases(dynamicClient, moduleName)
 
 	if len(allReleases) > 0 {
 		fmt.Fprintf(os.Stderr, "\nNo pending releases available for module '%s'.\n", moduleName)
@@ -102,7 +103,7 @@ func PrintSimilarModules(dynamicClient dynamic.Interface, moduleName string) {
 		return
 	}
 
-	modules, _ := module_releases.ListModuleNames(dynamicClient)
+	modules, _ := modulereleases.ListModuleNames(dynamicClient)
 	if len(modules) == 0 {
 		return
 	}

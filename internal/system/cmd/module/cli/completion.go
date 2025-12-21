@@ -21,24 +21,24 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/module_releases"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/modulereleases"
 )
 
 // CompleteForApprove provides shell completion for the approve command.
 // It suggests pending releases that are not yet approved.
 func CompleteForApprove(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-	return completeModuleReleaseAndVersion(cmd, args, toComplete, module_releases.CanBeApproved)
+	return completeModuleReleaseAndVersion(cmd, args, toComplete, modulereleases.CanBeApproved)
 }
 
 // CompleteForApplyNow provides shell completion for the apply-now command.
 // It suggests pending releases that don't have the apply-now annotation.
 func CompleteForApplyNow(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-	return completeModuleReleaseAndVersion(cmd, args, toComplete, module_releases.CanBeAppliedNow)
+	return completeModuleReleaseAndVersion(cmd, args, toComplete, modulereleases.CanBeAppliedNow)
 }
 
 // completeModuleReleaseAndVersion provides shell completion for module names and versions.
 // It takes a ReleaseMatchFunc to filter releases by the given predicate.
-func completeModuleReleaseAndVersion(cmd *cobra.Command, args []string, toComplete string, match module_releases.ReleaseMatchFunc) ([]string, cobra.ShellCompDirective) {
+func completeModuleReleaseAndVersion(cmd *cobra.Command, args []string, toComplete string, match modulereleases.ReleaseMatchFunc) ([]string, cobra.ShellCompDirective) {
 	dynamicClient, err := GetDynamicClient(cmd)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveError
@@ -52,13 +52,13 @@ func completeModuleReleaseAndVersion(cmd *cobra.Command, args []string, toComple
 	// Suggest module name / version by its prefix, entered by the user in the terminal.
 	switch len(args) {
 	case completingModuleName:
-		modules, err := module_releases.ListModuleNames(dynamicClient)
+		modules, err := modulereleases.ListModuleNames(dynamicClient)
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveError
 		}
 		return filterByPrefix(modules, toComplete), cobra.ShellCompDirectiveNoFileComp
 	case completingVersion:
-		versions, err := module_releases.FindVersions(dynamicClient, args[0], match)
+		versions, err := modulereleases.FindVersions(dynamicClient, args[0], match)
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveError
 		}
