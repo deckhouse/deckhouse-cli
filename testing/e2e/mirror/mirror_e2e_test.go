@@ -17,235 +17,255 @@ limitations under the License.
 package mirror
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
+	"time"
 
-	"github.com/Masterminds/semver/v3"
-	"github.com/google/go-containerregistry/pkg/authn"
-	"github.com/google/go-containerregistry/pkg/crane"
-	"github.com/google/go-containerregistry/pkg/name"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/empty"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
-	"github.com/google/go-containerregistry/pkg/v1/random"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/stretchr/testify/require"
-	"sigs.k8s.io/yaml"
 
-	"github.com/deckhouse/deckhouse-cli/internal"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
+	mirrorutil "github.com/deckhouse/deckhouse-cli/testing/util/mirror"
 )
 
-func TestMirrorE2E(t *testing.T) {
-	t.SkipNow()
-}
+// TestMirrorE2E_FullCycle performs a complete mirror cycle:
+// 1. Collects reference digests from source registry
+// 2. Pulls images to local bundle
+// 3. Pushes bundle to target registry
+// 4. Validates target registry structure
+// 5. Compares all digests between source and target
+//
+// Run with:
+//
+//	go test -v ./testing/e2e/mirror/... \
+//	  -license-token=YOUR_TOKEN \
+//	  -source-registry=registry.deckhouse.ru/deckhouse/fe
+//
+// Or using environment variables:
+//
+//	E2E_LICENSE_TOKEN=YOUR_TOKEN \
+//	E2E_SOURCE_REGISTRY=registry.deckhouse.ru/deckhouse/fe \
+//	go test -v ./testing/e2e/mirror/...
+func TestMirrorE2E_FullCycle(t *testing.T) {
+	cfg := GetConfig()
 
-func createDeckhouseReleaseChannelsInRegistry(t *testing.T, repo string) {
-	t.Helper()
+	// Debug: show config
+	t.Logf("Config: SourceRegistry=%s, SourceUser=%s, HasAuth=%v",
+		cfg.SourceRegistry, cfg.SourceUser, cfg.HasSourceAuth())
 
-	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", internal.AlphaChannel, "v1.56.5")
-	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", internal.BetaChannel, "v1.56.5")
-	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", internal.EarlyAccessChannel, "v1.55.7")
-	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", internal.StableChannel, "v1.55.7")
-	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", internal.RockSolidChannel, "v1.55.7")
-	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", "v1.55.7", "v1.55.7")
-	createDeckhouseReleaseChannelImageInRegistry(t, repo+"/release-channel", "v1.56.5", "v1.56.5")
-}
-
-func createTrivyVulnerabilityDatabasesInRegistry(t *testing.T, repo string, insecure, useTLS bool) {
-	t.Helper()
-	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(authn.Anonymous, insecure, useTLS)
-
-	images := []string{
-		repo + "/security/trivy-db:2",
-		repo + "/security/trivy-bdu:1",
-		repo + "/security/trivy-java-db:1",
-		repo + "/security/trivy-checks:0",
+	if !cfg.HasSourceAuth() {
+		t.Skip("Source authentication not provided (use -license-token or -source-user/-source-password)")
 	}
 
-	for _, image := range images {
-		ref, err := name.ParseReference(image, nameOpts...)
-		require.NoError(t, err)
-		wantImage, err := random.Image(256, 1)
-		require.NoError(t, err)
-		require.NoError(t, remote.Write(ref, wantImage, remoteOpts...))
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+
+	// Setup target registry
+	targetHost, targetPath, cleanup := setupTargetRegistry(t, cfg)
+	defer cleanup()
+
+	targetRegistry := targetHost + targetPath
+	t.Logf("Target registry: %s", targetRegistry)
+
+	// Create bundle directory
+	bundleDir := t.TempDir()
+	if cfg.KeepBundle {
+		bundleDir = filepath.Join(os.TempDir(), fmt.Sprintf("d8-mirror-e2e-%d", time.Now().Unix()))
+		require.NoError(t, os.MkdirAll(bundleDir, 0755))
+		t.Logf("Bundle directory (will be kept): %s", bundleDir)
+	} else {
+		t.Logf("Bundle directory: %s", bundleDir)
+	}
+
+	// Step 1: Collect reference digests from source
+	t.Log("Step 1: Collecting reference digests from source registry...")
+	t.Logf("Source: %s, tlsSkipVerify: %v", cfg.SourceRegistry, cfg.TLSSkipVerify)
+	sourceCollector := NewDigestCollector(cfg.SourceRegistry, cfg.GetSourceAuth(), cfg.TLSSkipVerify)
+	referenceDigests, err := sourceCollector.CollectAll(ctx)
+	require.NoError(t, err, "Failed to collect reference digests")
+	t.Logf("Collected %d reference digests", len(referenceDigests))
+
+	// Step 2: Execute pull
+	t.Log("Step 2: Pulling images to bundle...")
+	pullCmd := buildPullCommand(cfg, bundleDir)
+	t.Logf("Running: %s", pullCmd.String())
+
+	pullOutput, err := pullCmd.CombinedOutput()
+	if err != nil {
+		t.Logf("Pull output:\n%s", string(pullOutput))
+	}
+	require.NoError(t, err, "Pull failed")
+	t.Log("Pull completed successfully")
+
+	// Verify bundle was created
+	bundleFiles, err := os.ReadDir(bundleDir)
+	require.NoError(t, err)
+	t.Logf("Bundle contains %d files/dirs", len(bundleFiles))
+	for _, f := range bundleFiles {
+		t.Logf("  - %s", f.Name())
+	}
+
+	// Step 3: Execute push
+	t.Log("Step 3: Pushing bundle to target registry...")
+	pushCmd := buildPushCommand(cfg, bundleDir, targetRegistry)
+	t.Logf("Running: %s", pushCmd.String())
+
+	pushOutput, err := pushCmd.CombinedOutput()
+	if err != nil {
+		t.Logf("Push output:\n%s", string(pushOutput))
+	}
+	require.NoError(t, err, "Push failed")
+	t.Log("Push completed successfully")
+
+	// Step 4: Validate structure
+	t.Log("Step 4: Validating target registry structure...")
+	validator := NewStructureValidator(targetRegistry, cfg.GetTargetAuth(), cfg.TLSSkipVerify)
+	validator.SetExpectedFromDigests(NormalizeDigests(referenceDigests))
+
+	validationResult, err := validator.ValidateMinimal(ctx)
+	require.NoError(t, err, "Validation error")
+
+	if !validationResult.IsValid() {
+		t.Logf("Validation issues:\n%s", validationResult.String())
+	}
+	require.True(t, validationResult.IsValid(), "Structure validation failed")
+	t.Log("Structure validation passed")
+
+	// Step 5: Compare digests
+	t.Log("Step 5: Comparing digests...")
+	targetCollector := NewDigestCollector(targetRegistry, cfg.GetTargetAuth(), cfg.TLSSkipVerify)
+	targetDigests, err := targetCollector.CollectAll(ctx)
+	require.NoError(t, err, "Failed to collect target digests")
+	t.Logf("Collected %d target digests", len(targetDigests))
+
+	// Normalize both maps for comparison
+	normalizedReference := NormalizeDigests(referenceDigests)
+	normalizedTarget := NormalizeDigests(targetDigests)
+
+	compareResult := Compare(normalizedReference, normalizedTarget)
+	if !compareResult.IsMatch() {
+		t.Logf("Comparison failed:\n%s", compareResult.String())
+	}
+	require.True(t, compareResult.IsMatch(),
+		"Digest comparison failed: %d mismatches found\n%s",
+		len(compareResult.Mismatches),
+		FormatMismatches(compareResult.Mismatches))
+
+	t.Logf("SUCCESS: All %d digests match!", compareResult.MatchedCount)
+}
+
+// TestMirrorE2E_PullOnly tests only the pull operation
+func TestMirrorE2E_PullOnly(t *testing.T) {
+	cfg := GetConfig()
+
+	if !cfg.HasSourceAuth() {
+		t.Skip("Source authentication not provided")
+	}
+
+	bundleDir := t.TempDir()
+	if cfg.KeepBundle {
+		bundleDir = filepath.Join(os.TempDir(), fmt.Sprintf("d8-mirror-pull-%d", time.Now().Unix()))
+		require.NoError(t, os.MkdirAll(bundleDir, 0755))
+		t.Logf("Bundle directory (will be kept): %s", bundleDir)
+	}
+
+	pullCmd := buildPullCommand(cfg, bundleDir)
+	t.Logf("Running: %s", pullCmd.String())
+
+	output, err := pullCmd.CombinedOutput()
+	t.Logf("Output:\n%s", string(output))
+	require.NoError(t, err, "Pull failed")
+
+	// Verify bundle was created
+	bundleFiles, err := os.ReadDir(bundleDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, bundleFiles, "Bundle directory is empty")
+
+	t.Logf("Bundle created with %d files:", len(bundleFiles))
+	for _, f := range bundleFiles {
+		info, _ := f.Info()
+		if info != nil {
+			t.Logf("  - %s (%d bytes)", f.Name(), info.Size())
+		} else {
+			t.Logf("  - %s", f.Name())
+		}
 	}
 }
 
-func createDeckhouseControllersAndInstallersInRegistry(t *testing.T, repo string) {
+// setupTargetRegistry sets up the target registry for testing
+// Returns host, path, and cleanup function
+func setupTargetRegistry(t *testing.T, cfg *Config) (string, string, func()) {
 	t.Helper()
 
-	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(nil, true, false)
-
-	createRandomImageInRegistry(t, repo+":"+internal.AlphaChannel)
-	createRandomImageInRegistry(t, repo+":"+internal.BetaChannel)
-	createRandomImageInRegistry(t, repo+":"+internal.EarlyAccessChannel)
-	createRandomImageInRegistry(t, repo+":"+internal.StableChannel)
-	createRandomImageInRegistry(t, repo+":"+internal.RockSolidChannel)
-	createRandomImageInRegistry(t, repo+":v1.56.5")
-	createRandomImageInRegistry(t, repo+":v1.55.7")
-
-	installers := map[string]v1.Image{
-		"v1.56.5": createSyntheticInstallerImage(t, "v1.56.5", repo),
-		"v1.55.7": createSyntheticInstallerImage(t, "v1.55.7", repo),
+	if cfg.UseInMemoryRegistry() {
+		// Use in-memory registry
+		host, path, _ := mirrorutil.SetupEmptyRegistryRepo(false)
+		t.Logf("Started in-memory registry at %s%s", host, path)
+		return host, path, func() {
+			// In-memory registry is cleaned up when test ends
+		}
 	}
-	installers[internal.AlphaChannel] = installers["v1.56.5"]
-	installers[internal.BetaChannel] = installers["v1.56.5"]
-	installers[internal.EarlyAccessChannel] = installers["v1.55.7"]
-	installers[internal.StableChannel] = installers["v1.55.7"]
-	installers[internal.RockSolidChannel] = installers["v1.55.7"]
 
-	for shortTag, installer := range installers {
-		ref, err := name.ParseReference(repo+"/install:"+shortTag, nameOpts...)
-		require.NoError(t, err)
-
-		err = remote.Write(ref, installer, remoteOpts...)
-		require.NoError(t, err)
-
-		ref, err = name.ParseReference(repo+"/install-standalone:"+shortTag, nameOpts...)
-		require.NoError(t, err)
-
-		err = remote.Write(ref, installer, remoteOpts...)
-		require.NoError(t, err)
+	// Use external registry
+	return cfg.TargetRegistry, "", func() {
+		// External registry cleanup is user's responsibility
 	}
 }
 
-func createSyntheticInstallerImage(t *testing.T, version, repo string) v1.Image {
-	t.Helper()
+// buildPullCommand builds the d8 mirror pull command
+func buildPullCommand(cfg *Config, bundleDir string) *exec.Cmd {
+	args := []string{
+		"mirror", "pull",
+		"--source", cfg.SourceRegistry,
+		"--force", // overwrite if exists
+	}
 
-	// FROM scratch
-	base := empty.Image
-	layers := make([]v1.Layer, 0)
+	// Add authentication flags
+	if cfg.SourceUser != "" {
+		args = append(args, "--source-login", cfg.SourceUser)
+		args = append(args, "--source-password", cfg.SourcePassword)
+	} else if cfg.LicenseToken != "" {
+		args = append(args, "--license", cfg.LicenseToken)
+	}
 
-	// COPY ./version /deckhouse/version
-	// COPY ./images_digests.json /deckhouse/candi/images_digests.json
-	imagesDigests, err := json.Marshal(
-		map[string]map[string]string{
-			"common": {
-				"alpine": createRandomImageInRegistry(t, repo+":alpine"+version),
-			},
-			"nodeManager": {
-				"bashibleApiserver": createRandomImageInRegistry(t, repo+":bashibleApiserver"+version),
-			},
-		})
-	require.NoError(t, err)
-	l, err := crane.Layer(map[string][]byte{
-		"deckhouse/version":                   []byte(version),
-		"deckhouse/candi/images_digests.json": imagesDigests,
-	})
-	require.NoError(t, err)
-	layers = append(layers, l)
+	// Add TLS skip verify flag (for self-signed certs)
+	if cfg.TLSSkipVerify {
+		args = append(args, "--tls-skip-verify")
+	}
 
-	img, err := mutate.AppendLayers(base, layers...)
-	require.NoError(t, err)
+	args = append(args, bundleDir)
 
-	// ENTRYPOINT ["/bin/bash"]
-	img, err = mutate.Config(img, v1.Config{
-		Entrypoint: []string{"/bin/bash"},
-	})
-	require.NoError(t, err)
-
-	return img
-}
-
-func createRandomImageInRegistry(t *testing.T, tag string) (digest string) {
-	t.Helper()
-
-	img, err := random.Image(int64(rand.Intn(1024)+1), int64(rand.Intn(5)+1))
-	require.NoError(t, err)
-
-	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(nil, true, false)
-	ref, err := name.ParseReference(tag, nameOpts...)
-	require.NoError(t, err)
-
-	err = remote.Write(ref, img, remoteOpts...)
-	require.NoError(t, err)
-
-	digestHash, err := img.Digest()
-	require.NoError(t, err)
-
-	return digestHash.String()
-}
-
-func createDeckhouseReleaseChannelImageInRegistry(t *testing.T, repo, tag, version string) (digest string) {
-	t.Helper()
-
-	// FROM scratch
-	base := empty.Image
-	layers := make([]v1.Layer, 0)
-
-	// COPY ./version.json /version.json
-	changelog, err := yaml.JSONToYAML([]byte(`{"candi":{"fixes":[{"summary":"Fix deckhouse containerd start after installing new containerd-deckhouse package.","pull_request":"https://github.com/deckhouse/deckhouse/pull/6329"}]}}`))
-	require.NoError(t, err)
-	versionInfo := fmt.Sprintf(
-		`{"disruptions":{"1.56":["ingressNginx"]},"requirements":{"containerdOnAllNodes":"true","ingressNginx":"1.1","k8s":"1.23.0","nodesMinimalOSVersionUbuntu":"18.04"},"version":%q}`,
-		"v"+version,
+	cmd := exec.Command(cfg.D8Binary, args...)
+	cmd.Env = append(os.Environ(),
+		"HOME="+os.Getenv("HOME"),
 	)
-	l, err := crane.Layer(map[string][]byte{
-		"version.json":   []byte(versionInfo),
-		"changelog.yaml": changelog,
-	})
-	layers = append(layers, l)
 
-	img, err := mutate.AppendLayers(base, layers...)
-	require.NoError(t, err)
-
-	nameOpts, remoteOpts := auth.MakeRemoteRegistryRequestOptions(nil, true, false)
-	ref, err := name.ParseReference(repo+":"+tag, nameOpts...)
-	require.NoError(t, err)
-
-	err = remote.Write(ref, img, remoteOpts...)
-	require.NoError(t, err)
-
-	digestHash, err := img.Digest()
-	require.NoError(t, err)
-
-	return digestHash.String()
+	return cmd
 }
 
-func validateDeckhouseReleasesManifests(t *testing.T, pullCtx *params.PullParams, versions []semver.Version) {
-	t.Helper()
-	deckhouseReleasesManifestsFilepath := filepath.Join(pullCtx.BundleDir, "deckhousereleases.yaml")
-	actualManifests, err := os.ReadFile(deckhouseReleasesManifestsFilepath)
-	require.NoError(t, err)
-
-	expectedManifests := strings.Builder{}
-	for _, version := range versions {
-		expectedManifests.WriteString(fmt.Sprintf(`---
-apiVersion: deckhouse.io/v1alpha1
-approved: false
-kind: DeckhouseRelease
-metadata:
-  creationTimestamp: null
-  name: v%[1]s
-spec:
-  changelog:
-    candi:
-      fixes:
-      - summary: Fix deckhouse containerd start after installing new containerd-deckhouse package.
-        pull_request: https://github.com/deckhouse/deckhouse/pull/6329
-  changelogLink: https://github.com/deckhouse/deckhouse/releases/tag/v%[1]s
-  disruptions:
-  - ingressNginx
-  requirements:
-    containerdOnAllNodes: 'true'
-    ingressNginx: '1.1'
-    k8s: 1.23.0
-    nodesMinimalOSVersionUbuntu: '18.04'
-  version: v%[1]s
-status:
-  approved: false
-  message: ""
-  transitionTime: "0001-01-01T00:00:00Z"
-`, version.String()))
+// buildPushCommand builds the d8 mirror push command
+func buildPushCommand(cfg *Config, bundleDir, targetRegistry string) *exec.Cmd {
+	args := []string{
+		"mirror", "push",
+		bundleDir,
+		targetRegistry,
 	}
 
-	require.FileExists(t, deckhouseReleasesManifestsFilepath, "deckhousereleases.yaml should be generated next tar bundle")
-	require.YAMLEq(t, expectedManifests.String(), string(actualManifests))
+	if cfg.TLSSkipVerify {
+		args = append(args, "--tls-skip-verify")
+	}
+
+	if cfg.TargetUser != "" {
+		args = append(args, "--registry-login", cfg.TargetUser)
+		args = append(args, "--registry-password", cfg.TargetPassword)
+	}
+
+	cmd := exec.Command(cfg.D8Binary, args...)
+	cmd.Env = append(os.Environ(),
+		"HOME="+os.Getenv("HOME"),
+	)
+
+	return cmd
 }
