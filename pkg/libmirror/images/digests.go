@@ -200,7 +200,18 @@ func FindVexImage(
 	if splitIndex == -1 {
 		return "", fmt.Errorf("invalid vex image name format: %s", vexImageName)
 	}
+	imagePath := vexImageName[:splitIndex]
 	tag := vexImageName[splitIndex+1:]
+
+	// Add missing path segments to client if VEX image is in a subpath
+	imageSegmentsRaw := strings.TrimPrefix(imagePath, client.GetRegistry())
+	imageSegmentsRaw = strings.TrimPrefix(imageSegmentsRaw, "/")
+	if imageSegmentsRaw != "" {
+		for _, segment := range strings.Split(imageSegmentsRaw, "/") {
+			client = client.WithSegment(segment)
+			logger.Debugf("Segment: %s", segment)
+		}
+	}
 
 	err = client.CheckImageExists(context.TODO(), tag)
 	if errors.Is(err, regclient.ErrImageNotFound) {
