@@ -17,83 +17,42 @@ limitations under the License.
 package mirror
 
 import (
-	"context"
 	"io"
+	"io/fs"
 	golog "log"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/google/go-containerregistry/pkg/registry"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
-// ListableBlobHandler wraps a BlobHandler to track ingested blobs
-type ListableBlobHandler struct {
-	registry.BlobHandler
-	registry.BlobPutHandler
-
-	mu            sync.Mutex
-	ingestedBlobs []string
-}
-
-// Get implements registry.BlobHandler and tracks accessed blobs
-func (h *ListableBlobHandler) Get(ctx context.Context, repo string, hash v1.Hash) (io.ReadCloser, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.ingestedBlobs = append(h.ingestedBlobs, hash.String())
-
-	return h.BlobHandler.Get(ctx, repo, hash)
-}
-
-// ListBlobs returns all blobs that have been accessed
-func (h *ListableBlobHandler) ListBlobs() []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return append([]string{}, h.ingestedBlobs...)
-}
-
-// TestRegistry holds the test registry server and its resources
+// TestRegistry is a disk-based container registry for e2e testing.
+// Blobs are stored on disk to avoid memory exhaustion when mirroring large images.
 type TestRegistry struct {
-	Server      *httptest.Server
-	Host        string
-	RepoPath    string
-	BlobHandler *ListableBlobHandler
+	server     *httptest.Server
+	storageDir string
+
+	Host string // e.g. "127.0.0.1:12345"
 }
 
-// Close stops the test registry server
-func (r *TestRegistry) Close() {
-	if r.Server != nil {
-		r.Server.Close()
-	}
-}
-
-// FullPath returns the full registry path including host and repo
-func (r *TestRegistry) FullPath() string {
-	return r.Host + r.RepoPath
-}
-
-// SetupEmptyRegistryRepo creates an in-memory registry for testing
-// Returns host, repoPath, and a ListableBlobHandler to track blob access
-func SetupEmptyRegistryRepo(useTLS bool) ( /*host*/ string /*repoPath*/, string, *ListableBlobHandler) {
-	reg := SetupTestRegistry(useTLS)
-	return reg.Host, reg.RepoPath, reg.BlobHandler
-}
-
-// SetupTestRegistry creates an in-memory registry for testing and returns a TestRegistry
-func SetupTestRegistry(useTLS bool) *TestRegistry {
-	memBlobHandler := registry.NewInMemoryBlobHandler()
-	bh := &ListableBlobHandler{
-		BlobHandler:    memBlobHandler,
-		BlobPutHandler: memBlobHandler.(registry.BlobPutHandler),
+// NewTestRegistry creates a new disk-based test registry.
+// Storage is created in a temporary directory that will be cleaned up on Close().
+func NewTestRegistry(useTLS bool) (*TestRegistry, error) {
+	storageDir, err := os.MkdirTemp("", "test-registry-*")
+	if err != nil {
+		return nil, err
 	}
 
-	registryHandler := registry.New(
-		registry.WithBlobHandler(bh),
+	blobHandler := registry.NewDiskBlobHandler(storageDir)
+
+	handler := registry.New(
+		registry.WithBlobHandler(blobHandler),
 		registry.Logger(golog.New(io.Discard, "", 0)),
 	)
 
-	server := httptest.NewUnstartedServer(registryHandler)
+	server := httptest.NewUnstartedServer(handler)
 	if useTLS {
 		server.StartTLS()
 	} else {
@@ -106,16 +65,71 @@ func SetupTestRegistry(useTLS bool) *TestRegistry {
 	}
 
 	return &TestRegistry{
-		Server:      server,
-		Host:        host,
-		RepoPath:    "/deckhouse/ee",
-		BlobHandler: bh,
+		server:     server,
+		storageDir: storageDir,
+		Host:       host,
+	}, nil
+}
+
+// Close stops the registry server and removes all stored data.
+func (r *TestRegistry) Close() {
+	if r.server != nil {
+		r.server.Close()
+	}
+	if r.storageDir != "" {
+		os.RemoveAll(r.storageDir)
 	}
 }
 
-// SetupTestRegistryWithPath creates an in-memory registry with a custom repo path
-func SetupTestRegistryWithPath(useTLS bool, repoPath string) *TestRegistry {
-	reg := SetupTestRegistry(useTLS)
-	reg.RepoPath = repoPath
+// StoragePath returns the path to the on-disk blob storage.
+// Useful for debugging or inspecting stored data.
+func (r *TestRegistry) StoragePath() string {
+	return r.storageDir
+}
+
+// BlobCount returns the number of blobs currently stored in the registry.
+func (r *TestRegistry) BlobCount() int {
+	count := 0
+	_ = filepath.WalkDir(r.storageDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			count++
+		}
+		return nil
+	})
+	return count
+}
+
+// ListBlobs returns a list of blob digests stored in the registry.
+// This is useful for verifying what was pushed.
+func (r *TestRegistry) ListBlobs() []string {
+	var blobs []string
+	_ = filepath.WalkDir(r.storageDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			// Extract digest from path (format: storageDir/sha256/abc123...)
+			rel, _ := filepath.Rel(r.storageDir, path)
+			parts := strings.Split(rel, string(filepath.Separator))
+			if len(parts) == 2 {
+				blobs = append(blobs, parts[0]+":"+parts[1])
+			}
+		}
+		return nil
+	})
+	return blobs
+}
+
+// SetupTestRegistry creates a disk-based registry for testing.
+// Returns *TestRegistry - use reg.Host to get the address, then append your own repo path.
+func SetupTestRegistry(useTLS bool) *TestRegistry {
+	reg, err := NewTestRegistry(useTLS)
+	if err != nil {
+		panic("failed to create test registry: " + err.Error())
+	}
 	return reg
 }
+

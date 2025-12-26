@@ -60,6 +60,11 @@ var (
 	d8Binary = flag.String("d8-binary",
 		getEnvOrDefault("E2E_D8_BINARY", "../../../bin/d8"),
 		"Path to d8 binary")
+
+	// Debug/test options
+	noModules = flag.Bool("no-modules",
+		getEnvOrDefault("E2E_NO_MODULES", "") == "true",
+		"Skip modules during pull (for testing failure scenarios)")
 )
 
 func getEnvOrDefault(key, defaultValue string) string {
@@ -83,6 +88,9 @@ type Config struct {
 	TLSSkipVerify bool
 	KeepBundle    bool
 	D8Binary      string
+
+	// Debug/test options
+	NoModules bool // Skip modules during pull (for testing failure scenarios)
 }
 
 // GetConfig returns the current test configuration from flags
@@ -99,6 +107,7 @@ func GetConfig() *Config {
 		TLSSkipVerify:  *tlsSkipVerify,
 		KeepBundle:     *keepBundle,
 		D8Binary:       *d8Binary,
+		NoModules:      *noModules,
 	}
 }
 

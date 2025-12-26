@@ -1,178 +1,206 @@
 # E2E Tests for d8 mirror
 
-End-to-end tests for the `d8 mirror pull` and `d8 mirror push` commands.
+Heavy end-to-end tests for the `d8 mirror pull` and `d8 mirror push` commands.
 
 ## Overview
 
-These tests perform a complete mirror cycle:
-1. Collect reference digests from source registry
-2. Pull images to a local bundle
-3. Push bundle to a target registry
-4. Validate the target registry structure
-5. Compare all digests between source and target
+These tests perform a **complete mirror cycle with deep comparison** to ensure source and target registries are **100% identical**.
+
+### Test Steps
+
+1. **Analyze source registry** - Discover all repositories and count all images
+2. **Pull images** - Execute `d8 mirror pull` to create a bundle
+3. **Push images** - Execute `d8 mirror push` to target registry
+4. **Deep comparison** - Compare EVERY repository, tag, and digest between source and target
+
+### What Gets Compared (Deep Comparison)
+
+- **Repository level**: All repositories in source must exist in target
+- **Tag level**: All tags in each repository must exist in target  
+- **Manifest digest**: Every image manifest digest must match (SHA256)
+- **Config digest**: Image config blob digest is verified
+- **Layer digests**: ALL layer digests of every image are compared
+- **Layer count**: Number of layers must match
+
+This ensures **byte-for-byte identical** registries.
 
 ## Requirements
 
 - Built `d8` binary (run `task build` from project root)
-- Valid license token for the source registry
+- Valid credentials for the source registry
 - Network access to the source registry
+- Sufficient disk space for the bundle (can be several GB)
 
 ## Running Tests
 
 ### Basic Usage
 
 ```bash
-# Run with license token
+# Run with license token (official Deckhouse registry)
 go test -v ./testing/e2e/mirror/... \
   -license-token=YOUR_LICENSE_TOKEN
 
-# Or use environment variables (recommended)
-E2E_LICENSE_TOKEN=YOUR_LICENSE_TOKEN \
-go test -v ./testing/e2e/mirror/...
+# Run with local registry (self-signed cert)
+go test -v ./testing/e2e/mirror/... \
+  -source-registry=localhost:443/deckhouse \
+  -source-user=admin \
+  -source-password=secret \
+  -tls-skip-verify
 ```
 
 ### Full Configuration
 
 ```bash
-# Using license token
 go test -v ./testing/e2e/mirror/... \
-  -source-registry=registry.deckhouse.ru/deckhouse/fe \
-  -license-token=YOUR_LICENSE_TOKEN \
-  -target-registry=my-registry.local:5000/deckhouse \
+  -source-registry=my-registry.local/deckhouse \
+  -source-user=admin \
+  -source-password=secret \
+  -target-registry=my-target.local:5000/deckhouse \
   -target-user=admin \
   -target-password=secret \
   -tls-skip-verify \
   -keep-bundle
-
-# Using explicit source credentials (with self-signed cert)
-go test -v ./testing/e2e/mirror/... \
-  -source-registry=my-source-registry.local/deckhouse \
-  -source-user=admin \
-  -source-password=secret \
-  -target-registry=my-target-registry.local:5000/deckhouse \
-  -tls-skip-verify
-
-# Using environment variables (recommended)
-E2E_SOURCE_REGISTRY=localhost:443/deckhouse-etalon \
-E2E_SOURCE_USER=admin \
-E2E_SOURCE_PASSWORD=secret \
-E2E_TLS_SKIP_VERIFY=true \
-go test -v ./testing/e2e/mirror/...
 ```
 
 ### Environment Variables
 
-All flags can be set via environment variables:
-
 | Flag | Environment Variable | Default | Description |
 |------|---------------------|---------|-------------|
-| `-source-registry` | `E2E_SOURCE_REGISTRY` | `registry.deckhouse.ru/deckhouse/fe` | Source registry to pull from |
-| `-source-user` | `E2E_SOURCE_USER` | | Source registry username (alternative to license-token) |
+| `-source-registry` | `E2E_SOURCE_REGISTRY` | `registry.deckhouse.ru/deckhouse/fe` | Source registry |
+| `-source-user` | `E2E_SOURCE_USER` | | Source registry username |
 | `-source-password` | `E2E_SOURCE_PASSWORD` | | Source registry password |
-| `-license-token` | `E2E_LICENSE_TOKEN` | | License token for Deckhouse registry (shortcut for source-user=license-token) |
-| `-target-registry` | `E2E_TARGET_REGISTRY` | (empty = in-memory) | Target registry to push to |
+| `-license-token` | `E2E_LICENSE_TOKEN` | | License token |
+| `-target-registry` | `E2E_TARGET_REGISTRY` | (local disk-based registry) | Target registry |
 | `-target-user` | `E2E_TARGET_USER` | | Target registry username |
 | `-target-password` | `E2E_TARGET_PASSWORD` | | Target registry password |
-| `-tls-skip-verify` | `E2E_TLS_SKIP_VERIFY` | `false` | Skip TLS certificate verification (for self-signed certs) |
-| `-keep-bundle` | `E2E_KEEP_BUNDLE` | `false` | Keep bundle directory after test |
+| `-tls-skip-verify` | `E2E_TLS_SKIP_VERIFY` | `false` | Skip TLS verification |
+| `-keep-bundle` | `E2E_KEEP_BUNDLE` | `false` | Keep bundle after test |
 | `-d8-binary` | `E2E_D8_BINARY` | `bin/d8` | Path to d8 binary |
 
-**Note:** Either `-license-token` OR `-source-user`/`-source-password` must be provided for authentication.
+## Test Output
 
-## Test Scenarios
+### Log Directory Structure
 
-### TestMirrorE2E_FullCycle
+Test logs are stored in `testing/e2e/.logs/<test>-<timestamp>/`:
 
-Complete end-to-end test that:
-1. Collects all image digests from source registry
-2. Runs `d8 mirror pull` to create a bundle
-3. Runs `d8 mirror push` to push to target
-4. Validates that all segments exist in target
-5. Compares every digest between source and target
-
-### TestMirrorE2E_PullOnly
-
-Tests only the pull operation:
-1. Runs `d8 mirror pull` to create a bundle
-2. Verifies the bundle directory contains expected files
-
-## Target Registry Options
-
-### In-Memory Registry (Default)
-
-When `-target-registry` is not specified, tests use an in-memory registry.
-This is useful for CI/CD and quick local testing.
-
-### External Registry
-
-Specify `-target-registry` to push to a real registry:
-
-```bash
-# Docker registry with self-signed cert
-go test -v ./testing/e2e/mirror/... \
-  -license-token=TOKEN \
-  -target-registry=localhost:5000/deckhouse \
-  -tls-skip-verify
-
-# Registry with auth  
-go test -v ./testing/e2e/mirror/... \
-  -license-token=TOKEN \
-  -target-registry=registry.example.com/deckhouse \
-  -target-user=admin \
-  -target-password=secret
+```
+testing/e2e/.logs/fullcycle-20251225-123456/
+├── test.log       # Full command output (pull/push)
+├── report.txt     # Test summary report
+└── comparison.txt # Detailed registry comparison
 ```
 
-## What Gets Validated
+### Sample Report Output
 
-### Structure Validation
+```
+================================================================================
+E2E TEST REPORT: TestMirrorE2E_FullCycle
+================================================================================
 
-- Root Deckhouse images exist
-- `/install` segment exists with release channel tags
-- `/install-standalone` segment exists
-- `/release-channel` segment exists
-- `/security/*` databases exist (if present in source)
-- `/modules/*` exist (if present in source)
+Duration: 25m30s
 
-### Digest Comparison
+REGISTRIES:
+  Source: localhost:443/deckhouse (15 repos, 1847 images)
+  Target: 127.0.0.1:54321/deckhouse/ee (15 repos, 1847 images)
 
-Every image tag in the source is compared with the target:
-- All images must be present in target
-- All digests must match exactly (SHA256)
+COMPARISON:
+  ✓ Matched:      1847 images (manifest digest)
+  ✓ Deep checked: 1847 images
+  ✓ Layers:       15234 verified
+
+STEPS:
+  ✓ Analyze source (15 repos, 1847 images) (45s)
+  ✓ Pull images (5.23 GB bundle) (12m15s)
+  ✓ Push to registry (8m30s)
+  ✓ Deep comparison (1847 images verified) (4m00s)
+
+--------------------------------------------------------------------------------
+RESULT: PASSED - REGISTRIES ARE IDENTICAL
+        1847 images, 15234 layers - all hashes verified
+================================================================================
+```
+
+### Comparison Report (comparison.txt)
+
+Contains detailed breakdown per repository with layer-level verification:
+
+```
+REGISTRY COMPARISON SUMMARY
+===========================
+
+Source: localhost:443/deckhouse
+Target: 127.0.0.1:54321/deckhouse/ee
+Duration: 4m0s
+
+REPOSITORIES:
+  Source: 15
+  Target: 15
+  Missing in target: 0
+  Extra in target: 0
+
+IMAGES (manifest digest comparison):
+  Source: 1847
+  Target: 1847
+  Matched: 1847
+  Missing: 0
+  Mismatched: 0
+  Extra: 0
+
+DEEP COMPARISON (layers + config):
+  Images deep-checked: 1847
+  Source layers: 15234
+  Target layers: 15234
+  Matched layers: 15234
+  Missing layers: 0
+  Config mismatches: 0
+
+✓ REGISTRIES ARE IDENTICAL (all hashes match)
+
+REPOSITORY BREAKDOWN:
+---------------------
+✓ (root): 523/523 tags, 4521 layers checked
+✓ install: 6/6 tags, 48 layers checked
+✓ install-standalone: 78/78 tags, 624 layers checked
+✓ release-channel: 6/6 tags, 12 layers checked
+✓ security/trivy-db: 1/1 tags, 2 layers checked
+✓ modules/deckhouse-admin: 15/15 tags, 120 layers checked
+...
+```
 
 ## Timeouts
 
-The full cycle test has a 60-minute timeout. This can be adjusted in the test code if needed.
+The test has a **120-minute timeout** to handle large registries.
 
 ## Troubleshooting
 
-### "License token not provided"
+### "Source authentication not provided"
 
-Set the license token via flag or environment variable:
+Set credentials:
 ```bash
 E2E_LICENSE_TOKEN=your_token go test -v ./testing/e2e/mirror/...
+# or
+E2E_SOURCE_USER=admin E2E_SOURCE_PASSWORD=secret go test -v ./testing/e2e/mirror/...
 ```
 
-### "Pull failed"
+### "Pull failed" or "Push failed"
 
-Check that:
-1. The `d8` binary exists at `bin/d8` (run `task build` first) or specify path with `-d8-binary`
-2. You have network access to the source registry
-3. The license token is valid
+1. Check `d8` binary exists (`task build`)
+2. Check network access
+3. Use `-tls-skip-verify` for self-signed certs
+4. Check credentials
 
-### "Push failed"
+### "Registries differ"
 
-Check that:
-1. The target registry is accessible
-2. Credentials are correct (if using authenticated registry)
-3. Use `-tls-skip-verify` for self-signed certificates
+Check `comparison.txt` for details:
+- **Missing images**: Images in source but not in target
+- **Mismatched digests**: Images exist but have different content
 
 ### Viewing Bundle Contents
 
-Use `-keep-bundle` to preserve the bundle directory:
 ```bash
 go test -v ./testing/e2e/mirror/... \
   -license-token=TOKEN \
   -keep-bundle
 
-# Bundle will be at /tmp/d8-mirror-e2e-TIMESTAMP/
+# Bundle location shown in output
 ```
