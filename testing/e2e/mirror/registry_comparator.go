@@ -39,7 +39,7 @@ import (
 var (
 	// Digest-based tags (sha256 hashes used as tags)
 	digestTagRegex = regexp.MustCompile(`^[a-f0-9]{64}$`)
-	// SHA256 prefixed tags  
+	// SHA256 prefixed tags
 	sha256TagRegex = regexp.MustCompile(`^sha256-[a-f0-9]{64}`)
 	// Cosign signature and attestation tags
 	cosignTagSuffixes = []string{".sig", ".att", ".sbom"}
@@ -136,7 +136,7 @@ func (c *RegistryComparator) SetProgressCallback(fn func(msg string)) {
 	c.onProgress = fn
 }
 
-func (c *RegistryComparator) progress(format string, args ...interface{}) {
+func (c *RegistryComparator) logProgressf(format string, args ...interface{}) {
 	if c.onProgress != nil {
 		c.onProgress(fmt.Sprintf(format, args...))
 	}
@@ -169,25 +169,25 @@ type ComparisonReport struct {
 	ExtraImages       []string // ref in target but not in source
 
 	// Deep comparison stats
-	DeepCheckedImages  int
-	TotalSourceLayers  int
-	TotalTargetLayers  int
-	MatchedLayers      int
-	MissingLayers      int
-	ConfigMismatches   int
-	LayerMismatches    []LayerMismatch
+	DeepCheckedImages int
+	TotalSourceLayers int
+	TotalTargetLayers int
+	MatchedLayers     int
+	MissingLayers     int
+	ConfigMismatches  int
+	LayerMismatches   []LayerMismatch
 }
 
 // RepositoryComparison holds comparison for a single repository
 type RepositoryComparison struct {
-	Repository   string
-	SourceTags   []string
-	TargetTags   []string
-	MissingTags  []string // In source but not in target
-	ExtraTags    []string // In target but not in source
-	SkippedTags  int      // Tags skipped (digest-based, .att, .sig, etc.)
-	MatchedTags  int
-	TagDetails   map[string]*TagComparison
+	Repository  string
+	SourceTags  []string
+	TargetTags  []string
+	MissingTags []string // In source but not in target
+	ExtraTags   []string // In target but not in source
+	SkippedTags int      // Tags skipped (digest-based, .att, .sig, etc.)
+	MatchedTags int
+	TagDetails  map[string]*TagComparison
 }
 
 // TagComparison holds comparison for a single tag
@@ -412,22 +412,16 @@ func (c *RegistryComparator) Compare(ctx context.Context) (*ComparisonReport, er
 	}
 
 	// Step 1: Discover all repositories in source
-	c.progress("Discovering repositories in source registry...")
-	sourceRepos, err := c.discoverRepositories(ctx, c.sourceRegistry, c.sourceRemoteOpts)
-	if err != nil {
-		return nil, fmt.Errorf("discover source repositories: %w", err)
-	}
+	c.logProgressf("Discovering repositories in source registry...")
+	sourceRepos := c.discoverRepositories(c.sourceRegistry, c.sourceRemoteOpts)
 	report.SourceRepositories = sourceRepos
-	c.progress("Found %d repositories in source", len(sourceRepos))
+	c.logProgressf("Found %d repositories in source", len(sourceRepos))
 
 	// Step 2: Discover all repositories in target
-	c.progress("Discovering repositories in target registry...")
-	targetRepos, err := c.discoverRepositories(ctx, c.targetRegistry, c.targetRemoteOpts)
-	if err != nil {
-		return nil, fmt.Errorf("discover target repositories: %w", err)
-	}
+	c.logProgressf("Discovering repositories in target registry...")
+	targetRepos := c.discoverRepositories(c.targetRegistry, c.targetRemoteOpts)
 	report.TargetRepositories = targetRepos
-	c.progress("Found %d repositories in target", len(targetRepos))
+	c.logProgressf("Found %d repositories in target", len(targetRepos))
 
 	// Step 3: Find missing and extra repositories
 	sourceRepoSet := make(map[string]bool)
@@ -451,13 +445,13 @@ func (c *RegistryComparator) Compare(ctx context.Context) (*ComparisonReport, er
 	}
 
 	// Step 4: Compare each repository in detail
-	c.progress("Comparing repositories...")
+	c.logProgressf("Comparing repositories...")
 	for i, repoPath := range sourceRepos {
-		c.progress("[%d/%d] Comparing %s", i+1, len(sourceRepos), repoPath)
+		c.logProgressf("[%d/%d] Comparing %s", i+1, len(sourceRepos), repoPath)
 
-		repoComparison, err := c.compareRepository(ctx, repoPath)
+		repoComparison, err := c.compareRepository(repoPath)
 		if err != nil {
-			c.progress("Warning: failed to compare %s: %v", repoPath, err)
+			c.logProgressf("Warning: failed to compare %s: %v", repoPath, err)
 			continue
 		}
 
@@ -530,11 +524,11 @@ func (c *RegistryComparator) Compare(ctx context.Context) (*ComparisonReport, er
 }
 
 // discoverRepositories discovers all repositories by walking known segments
-func (c *RegistryComparator) discoverRepositories(ctx context.Context, registry string, opts []remote.Option) ([]string, error) {
+func (c *RegistryComparator) discoverRepositories(registry string, opts []remote.Option) []string {
 	var repos []string
 
 	// Root repository
-	if c.repositoryExists(ctx, registry, opts) {
+	if c.repositoryExists(registry, opts) {
 		repos = append(repos, "")
 	}
 
@@ -547,7 +541,7 @@ func (c *RegistryComparator) discoverRepositories(ctx context.Context, registry 
 
 	for _, segment := range segments {
 		segmentPath := segment
-		if c.repositoryExists(ctx, path.Join(registry, segmentPath), opts) {
+		if c.repositoryExists(path.Join(registry, segmentPath), opts) {
 			repos = append(repos, segmentPath)
 		}
 	}
@@ -561,42 +555,42 @@ func (c *RegistryComparator) discoverRepositories(ctx context.Context, registry 
 	}
 	for _, db := range securityDBs {
 		dbPath := path.Join(internal.SecuritySegment, db)
-		if c.repositoryExists(ctx, path.Join(registry, dbPath), opts) {
+		if c.repositoryExists(path.Join(registry, dbPath), opts) {
 			repos = append(repos, dbPath)
 		}
 	}
 
 	// Modules - need to discover dynamically
 	modulesPath := path.Join(registry, internal.ModulesSegment)
-	moduleTags, err := c.listTags(ctx, modulesPath, opts)
+	moduleTags, err := c.listTags(modulesPath, opts)
 	if err == nil {
 		for _, moduleName := range moduleTags {
 			moduleBasePath := path.Join(internal.ModulesSegment, moduleName)
 
 			// Module root
-			if c.repositoryExists(ctx, path.Join(registry, moduleBasePath), opts) {
+			if c.repositoryExists(path.Join(registry, moduleBasePath), opts) {
 				repos = append(repos, moduleBasePath)
 			}
 
 			// Module release
 			moduleReleasePath := path.Join(moduleBasePath, "release")
-			if c.repositoryExists(ctx, path.Join(registry, moduleReleasePath), opts) {
+			if c.repositoryExists(path.Join(registry, moduleReleasePath), opts) {
 				repos = append(repos, moduleReleasePath)
 			}
 		}
 	}
 
-	return repos, nil
+	return repos
 }
 
 // repositoryExists checks if a repository exists and has tags
-func (c *RegistryComparator) repositoryExists(ctx context.Context, repo string, opts []remote.Option) bool {
-	tags, err := c.listTags(ctx, repo, opts)
+func (c *RegistryComparator) repositoryExists(repo string, opts []remote.Option) bool {
+	tags, err := c.listTags(repo, opts)
 	return err == nil && len(tags) > 0
 }
 
 // compareRepository compares a single repository between source and target
-func (c *RegistryComparator) compareRepository(ctx context.Context, repoPath string) (*RepositoryComparison, error) {
+func (c *RegistryComparator) compareRepository(repoPath string) (*RepositoryComparison, error) {
 	sourceRepo := c.sourceRegistry
 	targetRepo := c.targetRegistry
 	if repoPath != "" {
@@ -610,11 +604,11 @@ func (c *RegistryComparator) compareRepository(ctx context.Context, repoPath str
 	}
 
 	// Get source tags
-	allSourceTags, err := c.listTags(ctx, sourceRepo, c.sourceRemoteOpts)
+	allSourceTags, err := c.listTags(sourceRepo, c.sourceRemoteOpts)
 	if err != nil {
 		return nil, fmt.Errorf("list source tags: %w", err)
 	}
-	
+
 	// Filter out tags that are not mirrored by design
 	sourceTags := make([]string, 0, len(allSourceTags))
 	skippedTags := 0
@@ -629,12 +623,12 @@ func (c *RegistryComparator) compareRepository(ctx context.Context, repoPath str
 	comparison.SkippedTags = skippedTags
 
 	// Get target tags
-	allTargetTags, err := c.listTags(ctx, targetRepo, c.targetRemoteOpts)
+	allTargetTags, err := c.listTags(targetRepo, c.targetRemoteOpts)
 	if err != nil {
 		// Target repo might not exist
 		allTargetTags = []string{}
 	}
-	
+
 	// Filter target tags too
 	targetTags := make([]string, 0, len(allTargetTags))
 	for _, tag := range allTargetTags {
@@ -687,11 +681,11 @@ func (c *RegistryComparator) compareRepository(ctx context.Context, repoPath str
 			targetRef := targetRepo + ":" + tag
 
 			// Perform deep comparison
-			imgComp, err := c.compareImageDeep(ctx, sourceRef, targetRef)
+			imgComp, err := c.compareImageDeep(sourceRef, targetRef)
 			if err != nil {
 				// Fallback to simple digest comparison
-				sourceDigest, err1 := c.getDigest(ctx, sourceRef, c.sourceRemoteOpts)
-				targetDigest, err2 := c.getDigest(ctx, targetRef, c.targetRemoteOpts)
+				sourceDigest, err1 := c.getDigest(sourceRef, c.sourceRemoteOpts)
+				targetDigest, err2 := c.getDigest(targetRef, c.targetRemoteOpts)
 				if err1 != nil || err2 != nil {
 					return
 				}
@@ -747,7 +741,7 @@ func (c *RegistryComparator) compareRepository(ctx context.Context, repoPath str
 }
 
 // listTags lists all tags in a repository
-func (c *RegistryComparator) listTags(ctx context.Context, repo string, opts []remote.Option) ([]string, error) {
+func (c *RegistryComparator) listTags(repo string, opts []remote.Option) ([]string, error) {
 	repoRef, err := name.NewRepository(repo, c.nameOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("parse repo %s: %w", repo, err)
@@ -762,7 +756,7 @@ func (c *RegistryComparator) listTags(ctx context.Context, repo string, opts []r
 }
 
 // getDigest gets the digest for a specific image reference
-func (c *RegistryComparator) getDigest(ctx context.Context, ref string, opts []remote.Option) (string, error) {
+func (c *RegistryComparator) getDigest(ref string, opts []remote.Option) (string, error) {
 	imgRef, err := name.ParseReference(ref, c.nameOpts...)
 	if err != nil {
 		return "", fmt.Errorf("parse ref %s: %w", ref, err)
@@ -777,7 +771,7 @@ func (c *RegistryComparator) getDigest(ctx context.Context, ref string, opts []r
 }
 
 // getImageInfo gets detailed information about an image including all layer digests
-func (c *RegistryComparator) getImageInfo(ctx context.Context, ref string, opts []remote.Option) (*ImageInfo, error) {
+func (c *RegistryComparator) getImageInfo(ref string, opts []remote.Option) (*ImageInfo, error) {
 	imgRef, err := name.ParseReference(ref, c.nameOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("parse ref %s: %w", ref, err)
@@ -860,13 +854,13 @@ func (c *RegistryComparator) getImageInfo(ctx context.Context, ref string, opts 
 }
 
 // compareImageDeep performs deep comparison of two images including all layers
-func (c *RegistryComparator) compareImageDeep(ctx context.Context, sourceRef, targetRef string) (*ImageComparison, error) {
-	sourceInfo, err := c.getImageInfo(ctx, sourceRef, c.sourceRemoteOpts)
+func (c *RegistryComparator) compareImageDeep(sourceRef, targetRef string) (*ImageComparison, error) {
+	sourceInfo, err := c.getImageInfo(sourceRef, c.sourceRemoteOpts)
 	if err != nil {
 		return nil, fmt.Errorf("get source image info: %w", err)
 	}
 
-	targetInfo, err := c.getImageInfo(ctx, targetRef, c.targetRemoteOpts)
+	targetInfo, err := c.getImageInfo(targetRef, c.targetRemoteOpts)
 	if err != nil {
 		return nil, fmt.Errorf("get target image info: %w", err)
 	}
@@ -933,4 +927,3 @@ type ImageComparison struct {
 	LayersMatch   bool
 	FullMatch     bool
 }
-

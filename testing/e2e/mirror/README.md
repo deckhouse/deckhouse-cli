@@ -1,6 +1,6 @@
 # E2E Tests for d8 mirror
 
-Heavy end-to-end tests for the `d8 mirror pull` and `d8 mirror push` commands.
+End-to-end tests for the `d8 mirror pull` and `d8 mirror push` commands.
 
 ## Overview
 
@@ -11,7 +11,7 @@ These tests perform a **complete mirror cycle with deep comparison** to ensure s
 1. **Analyze source registry** - Discover all repositories and count all images
 2. **Pull images** - Execute `d8 mirror pull` to create a bundle
 3. **Push images** - Execute `d8 mirror push` to target registry
-4. **Deep comparison** - Compare EVERY repository, tag, and digest between source and target
+4. **Deep comparison** - Compare every repository, tag, and digest between source and target
 
 ### What Gets Compared (Deep Comparison)
 
@@ -29,7 +29,7 @@ This ensures **byte-for-byte identical** registries.
 - Built `d8` binary (run `task build` from project root)
 - Valid credentials for the source registry
 - Network access to the source registry
-- Sufficient disk space for the bundle (can be several GB)
+- Sufficient disk space for the bundle (can be several GB, aroud 20)
 
 ## Running Tests
 
