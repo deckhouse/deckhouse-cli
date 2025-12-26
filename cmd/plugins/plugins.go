@@ -19,7 +19,6 @@ package plugins
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -519,29 +518,10 @@ func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName, version
 }
 
 func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, version *semver.Version, useMajor int) error {
-	// to check we can create directories here
-	// we try to create root plugins folder
-	err := os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
-	// if permission failed
-	if errors.Is(err, os.ErrPermission) {
-		pc.logger.Warn("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", flags.DeckhousePluginsDir), dkplog.Err(err))
-
-		flags.DeckhousePluginsDir, err = os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("failed to receive home dir to create plugins dir: %w", err)
-		}
-
-		flags.DeckhousePluginsDir = path.Join(flags.DeckhousePluginsDir, ".deckhouse-cli")
-	}
-
-	if err != nil {
-		return fmt.Errorf("failed to create plugin root directory: %w", err)
-	}
-
 	// create plugin directory if it doesn't exist
 	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin
 	pluginDir := path.Join(flags.DeckhousePluginsDir, "plugins", pluginName)
-	err = os.MkdirAll(pluginDir, 0755)
+	err := os.MkdirAll(pluginDir, 0755)
 	if err != nil {
 		return fmt.Errorf("failed to create plugin directory: %w", err)
 	}
