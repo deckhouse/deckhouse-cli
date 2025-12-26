@@ -17,59 +17,118 @@ limitations under the License.
 package mirror
 
 import (
-	"context"
 	"io"
+	"io/fs"
 	golog "log"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/google/go-containerregistry/pkg/registry"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
-type ListableBlobHandler struct {
-	registry.BlobHandler
-	registry.BlobPutHandler
+// TestRegistry is a disk-based container registry for e2e testing.
+// Blobs are stored on disk to avoid memory exhaustion when mirroring large images.
+type TestRegistry struct {
+	server     *httptest.Server
+	storageDir string
 
-	mu            sync.Mutex
-	ingestedBlobs []string
+	Host string // e.g. "127.0.0.1:12345"
 }
 
-func (h *ListableBlobHandler) Get(ctx context.Context, repo string, hash v1.Hash) (io.ReadCloser, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.ingestedBlobs = append(h.ingestedBlobs, hash.String())
-
-	return h.BlobHandler.Get(ctx, repo, hash)
-}
-
-func (h *ListableBlobHandler) ListBlobs() []string {
-	return h.ingestedBlobs
-}
-
-func SetupEmptyRegistryRepo(useTLS bool) ( /*host*/ string /*repoPath*/, string, *ListableBlobHandler) {
-	var host, repoPath string
-
-	memBlobHandler := registry.NewInMemoryBlobHandler()
-	bh := &ListableBlobHandler{
-		BlobHandler:    memBlobHandler,
-		BlobPutHandler: memBlobHandler.(registry.BlobPutHandler),
+// NewTestRegistry creates a new disk-based test registry.
+// Storage is created in a temporary directory that will be cleaned up on Close().
+func NewTestRegistry(useTLS bool) (*TestRegistry, error) {
+	storageDir, err := os.MkdirTemp("", "test-registry-*")
+	if err != nil {
+		return nil, err
 	}
-	registryHandler := registry.New(registry.WithBlobHandler(bh), registry.Logger(golog.New(io.Discard, "", 0)))
 
-	server := httptest.NewUnstartedServer(registryHandler)
+	blobHandler := registry.NewDiskBlobHandler(storageDir)
+
+	handler := registry.New(
+		registry.WithBlobHandler(blobHandler),
+		registry.Logger(golog.New(io.Discard, "", 0)),
+	)
+
+	server := httptest.NewUnstartedServer(handler)
 	if useTLS {
 		server.StartTLS()
 	} else {
 		server.Start()
 	}
 
-	host = strings.TrimPrefix(server.URL, "http://")
-	repoPath = "/deckhouse/ee"
+	host := strings.TrimPrefix(server.URL, "http://")
 	if useTLS {
 		host = strings.TrimPrefix(server.URL, "https://")
 	}
 
-	return host, repoPath, bh
+	return &TestRegistry{
+		server:     server,
+		storageDir: storageDir,
+		Host:       host,
+	}, nil
+}
+
+// Close stops the registry server and removes all stored data.
+func (r *TestRegistry) Close() {
+	if r.server != nil {
+		r.server.Close()
+	}
+	if r.storageDir != "" {
+		os.RemoveAll(r.storageDir)
+	}
+}
+
+// StoragePath returns the path to the on-disk blob storage.
+// Useful for debugging or inspecting stored data.
+func (r *TestRegistry) StoragePath() string {
+	return r.storageDir
+}
+
+// BlobCount returns the number of blobs currently stored in the registry.
+func (r *TestRegistry) BlobCount() int {
+	count := 0
+	_ = filepath.WalkDir(r.storageDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			count++
+		}
+		return nil
+	})
+	return count
+}
+
+// ListBlobs returns a list of blob digests stored in the registry.
+// This is useful for verifying what was pushed.
+func (r *TestRegistry) ListBlobs() []string {
+	var blobs []string
+	_ = filepath.WalkDir(r.storageDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			// Extract digest from path (format: storageDir/sha256/abc123...)
+			rel, _ := filepath.Rel(r.storageDir, path)
+			parts := strings.Split(rel, string(filepath.Separator))
+			if len(parts) == 2 {
+				blobs = append(blobs, parts[0]+":"+parts[1])
+			}
+		}
+		return nil
+	})
+	return blobs
+}
+
+// SetupTestRegistry creates a disk-based registry for testing.
+// Returns *TestRegistry - use reg.Host to get the address, then append your own repo path.
+func SetupTestRegistry(useTLS bool) *TestRegistry {
+	reg, err := NewTestRegistry(useTLS)
+	if err != nil {
+		panic("failed to create test registry: " + err.Error())
+	}
+	return reg
 }
