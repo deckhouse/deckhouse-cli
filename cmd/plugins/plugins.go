@@ -19,6 +19,7 @@ package plugins
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -76,6 +77,20 @@ func NewCommand(logger *dkplog.Logger) *cobra.Command {
 		PersistentPreRun: func(_ *cobra.Command, _ []string) {
 			// init plugin services for subcommands after flags are parsed
 			pc.InitPluginServices()
+
+			err := os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
+			// if permission failed
+			if errors.Is(err, os.ErrPermission) {
+				pc.logger.Warn("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", flags.DeckhousePluginsDir), dkplog.Err(err))
+
+				flags.DeckhousePluginsDir, err = os.UserHomeDir()
+				if err != nil {
+					logger.Warn("failed to receive home dir to create plugins dir", slog.String("error", err.Error()))
+					return
+				}
+
+				flags.DeckhousePluginsDir = path.Join(flags.DeckhousePluginsDir, ".deckhouse-cli")
+			}
 		},
 	}
 
