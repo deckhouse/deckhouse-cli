@@ -29,40 +29,43 @@ This ensures **byte-for-byte identical** registries.
 - Built `d8` binary (run `task build` from project root)
 - Valid credentials for the source registry
 - Network access to the source registry
-- Sufficient disk space for the bundle (can be several GB, aroud 20)
+- Sufficient disk space for the bundle (can be ~20 GB)
 
 ## Running Tests
 
-### Basic Usage
+### Using Taskfile (Recommended)
 
 ```bash
-# Run with license token (official Deckhouse registry)
-go test -v ./testing/e2e/mirror/... \
-  -license-token=YOUR_LICENSE_TOKEN
+# With environment variables
+E2E_SOURCE_REGISTRY=localhost:443/deckhouse \
+E2E_SOURCE_USER=admin \
+E2E_SOURCE_PASSWORD=secret \
+E2E_TLS_SKIP_VERIFY=true \
+task test:e2e:mirror
 
-# Run with local registry (self-signed cert)
-go test -v ./testing/e2e/mirror/... \
+# With command-line flags
+task test:e2e:mirror -- \
+  -source-registry=localhost:443/deckhouse \
+  -source-user=admin \
+  -source-password=admin \
+  -tls-skip-verify
+
+# With license token (official Deckhouse registry)
+E2E_LICENSE_TOKEN=xxx task test:e2e:mirror
+```
+
+### Using go test directly
+
+```bash
+# Note: requires -tags=e2e flag
+go test -v -tags=e2e -timeout=120m ./testing/e2e/mirror/... \
   -source-registry=localhost:443/deckhouse \
   -source-user=admin \
   -source-password=secret \
   -tls-skip-verify
 ```
 
-### Full Configuration
-
-```bash
-go test -v ./testing/e2e/mirror/... \
-  -source-registry=my-registry.local/deckhouse \
-  -source-user=admin \
-  -source-password=secret \
-  -target-registry=my-target.local:5000/deckhouse \
-  -target-user=admin \
-  -target-password=secret \
-  -tls-skip-verify \
-  -keep-bundle
-```
-
-### Environment Variables
+### Configuration Options
 
 | Flag | Environment Variable | Default | Description |
 |------|---------------------|---------|-------------|
@@ -76,47 +79,66 @@ go test -v ./testing/e2e/mirror/... \
 | `-tls-skip-verify` | `E2E_TLS_SKIP_VERIFY` | `false` | Skip TLS verification |
 | `-keep-bundle` | `E2E_KEEP_BUNDLE` | `false` | Keep bundle after test |
 | `-d8-binary` | `E2E_D8_BINARY` | `bin/d8` | Path to d8 binary |
+| `-new-pull` | `E2E_NEW_PULL` | `false` | Use new pull implementation |
 
-## Test Output
+## Test Artifacts
 
-### Log Directory Structure
-
-Test logs are stored in `testing/e2e/.logs/<test>-<timestamp>/`:
+Tests produce detailed artifacts in `testing/e2e/.logs/<test>-<timestamp>/`:
 
 ```
-testing/e2e/.logs/fullcycle-20251225-123456/
+testing/e2e/.logs/fullcycle-20251226-114128/
 ├── test.log       # Full command output (pull/push)
 ├── report.txt     # Test summary report
 └── comparison.txt # Detailed registry comparison
 ```
 
-### Sample Report Output
+### Cleaning Up Logs
+
+```bash
+task test:e2e:mirror:logs:clean
+```
+
+### Sample Report (report.txt)
 
 ```
 ================================================================================
 E2E TEST REPORT: TestMirrorE2E_FullCycle
 ================================================================================
 
-Duration: 25m30s
+EXECUTION:
+  Started:  2025-12-26T11:41:28+03:00
+  Finished: 2025-12-26T11:46:28+03:00
+  Duration: 5m1s
 
 REGISTRIES:
-  Source: localhost:443/deckhouse (15 repos, 1847 images)
-  Target: 127.0.0.1:54321/deckhouse/ee (15 repos, 1847 images)
+  Source: localhost:443/deckhouse-etalon
+  Target: 127.0.0.1:61594/deckhouse/ee
 
-COMPARISON:
-  ✓ Matched:      1847 images (manifest digest)
-  ✓ Deep checked: 1847 images
-  ✓ Layers:       15234 verified
+IMAGES TO VERIFY:
+  Source: 324 images (82 repos)
+  Target: 324 images (82 repos)
+  (excluded 1071 internal tags from comparison)
+
+BUNDLE:
+  Size: 22.52 GB
+
+VERIFICATION RESULTS:
+  Images matched:    324 (manifest + config + layers)
+  Layers verified:   1172
+  Missing images:    0
+  Digest mismatch:   0
+  Missing layers:    0
 
 STEPS:
-  ✓ Analyze source (15 repos, 1847 images) (45s)
-  ✓ Pull images (5.23 GB bundle) (12m15s)
-  ✓ Push to registry (8m30s)
-  ✓ Deep comparison (1847 images verified) (4m00s)
+  [PASS] Analyze source (82 repos) (330ms)
+  [PASS] Pull images (22.52 GB bundle) (2m59.826s)
+  [PASS] Push to registry (1m57.742s)
+  [PASS] Deep comparison (324 images verified) (2.266s)
 
---------------------------------------------------------------------------------
+================================================================================
 RESULT: PASSED - REGISTRIES ARE IDENTICAL
-        1847 images, 15234 layers - all hashes verified
+  82 repositories verified
+  324 images verified
 ================================================================================
 ```
 
@@ -130,27 +152,26 @@ REGISTRY COMPARISON SUMMARY
 
 Source: localhost:443/deckhouse
 Target: 127.0.0.1:54321/deckhouse/ee
-Duration: 4m0s
+Duration: 2s
 
 REPOSITORIES:
-  Source: 15
-  Target: 15
+  Source: 82
+  Target: 82
   Missing in target: 0
   Extra in target: 0
 
-IMAGES (manifest digest comparison):
-  Source: 1847
-  Target: 1847
-  Matched: 1847
-  Missing: 0
-  Mismatched: 0
-  Extra: 0
+IMAGES TO VERIFY:
+  Source: 324 images
+  Target: 324 images
+  (excluded 1071 internal tags: digest-based, .att, .sig)
 
+VERIFICATION RESULTS:
+  Matched: 324
 DEEP COMPARISON (layers + config):
-  Images deep-checked: 1847
-  Source layers: 15234
-  Target layers: 15234
-  Matched layers: 15234
+  Images deep-checked: 324
+  Source layers: 1172
+  Target layers: 1172
+  Matched layers: 1172
   Missing layers: 0
   Config mismatches: 0
 
@@ -158,12 +179,12 @@ DEEP COMPARISON (layers + config):
 
 REPOSITORY BREAKDOWN:
 ---------------------
-✓ (root): 523/523 tags, 4521 layers checked
+✓ (root): 6/6 tags, 66 layers checked
 ✓ install: 6/6 tags, 48 layers checked
 ✓ install-standalone: 78/78 tags, 624 layers checked
 ✓ release-channel: 6/6 tags, 12 layers checked
 ✓ security/trivy-db: 1/1 tags, 2 layers checked
-✓ modules/deckhouse-admin: 15/15 tags, 120 layers checked
+✓ modules/deckhouse-admin: 5/5 tags, 10 layers checked
 ...
 ```
 
@@ -177,9 +198,9 @@ The test has a **120-minute timeout** to handle large registries.
 
 Set credentials:
 ```bash
-E2E_LICENSE_TOKEN=your_token go test -v ./testing/e2e/mirror/...
+E2E_LICENSE_TOKEN=your_token task test:e2e:mirror
 # or
-E2E_SOURCE_USER=admin E2E_SOURCE_PASSWORD=secret go test -v ./testing/e2e/mirror/...
+E2E_SOURCE_USER=admin E2E_SOURCE_PASSWORD=secret task test:e2e:mirror
 ```
 
 ### "Pull failed" or "Push failed"
@@ -198,9 +219,7 @@ Check `comparison.txt` for details:
 ### Viewing Bundle Contents
 
 ```bash
-go test -v ./testing/e2e/mirror/... \
-  -license-token=TOKEN \
-  -keep-bundle
+E2E_KEEP_BUNDLE=true task test:e2e:mirror -- ...
 
 # Bundle location shown in output
 ```

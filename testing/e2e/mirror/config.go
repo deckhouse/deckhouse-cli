@@ -65,6 +65,11 @@ var (
 	noModules = flag.Bool("no-modules",
 		getEnvOrDefault("E2E_NO_MODULES", "") == "true",
 		"Skip modules during pull (for testing failure scenarios)")
+
+	// Experimental options
+	newPull = flag.Bool("new-pull",
+		getEnvOrDefault("E2E_NEW_PULL", "") == "true",
+		"Use new pull implementation")
 )
 
 func getEnvOrDefault(key, defaultValue string) string {
@@ -91,6 +96,9 @@ type Config struct {
 
 	// Debug/test options
 	NoModules bool // Skip modules during pull (for testing failure scenarios)
+
+	// Experimental options
+	NewPull bool // Use new pull implementation
 }
 
 // GetConfig returns the current test configuration from flags
@@ -108,6 +116,7 @@ func GetConfig() *Config {
 		KeepBundle:     *keepBundle,
 		D8Binary:       *d8Binary,
 		NoModules:      *noModules,
+		NewPull:        *newPull,
 	}
 }
 

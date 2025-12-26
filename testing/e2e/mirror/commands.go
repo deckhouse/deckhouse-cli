@@ -60,6 +60,11 @@ func buildPullCommand(cfg *Config, bundleDir string) *exec.Cmd {
 	cmd := exec.Command(cfg.D8Binary, args...)
 	cmd.Env = append(os.Environ(), "HOME="+os.Getenv("HOME"))
 
+	// Experimental options (via env)
+	if cfg.NewPull {
+		cmd.Env = append(cmd.Env, "NEW_PULL=true")
+	}
+
 	return cmd
 }
 

@@ -292,9 +292,8 @@ tasks:
         
         # Keep bundle for debugging
         E2E_LICENSE_TOKEN=xxx E2E_KEEP_BUNDLE=true task test:e2e:mirror
-    deps:
-      - build
     cmds:
+      - task build
       - go test -v -timeout 120m -tags=e2e ./testing/e2e/mirror/... {{ .CLI_ARGS }}
 
   test:e2e:mirror:logs:clean:
