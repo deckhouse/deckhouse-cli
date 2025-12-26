@@ -132,4 +132,3 @@ func SetupTestRegistry(useTLS bool) *TestRegistry {
 	}
 	return reg
 }
-
