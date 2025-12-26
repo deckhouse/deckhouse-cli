@@ -106,7 +106,7 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 				return
 			}
 
-			logger.Info("Executing plugin", slog.Any("args", args))
+			logger.Debug("Executing plugin", slog.Any("args", args))
 
 			command := exec.CommandContext(cmd.Context(), absPath, args...)
 			command.Stdout = os.Stdout
