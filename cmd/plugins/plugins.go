@@ -43,6 +43,7 @@ import (
 type PluginsCommand struct {
 	service              *service.PluginService
 	pluginRegistryClient registry.Client
+	pluginDirectory      string
 
 	logger *dkplog.Logger
 }
@@ -63,7 +64,8 @@ type pluginsListData struct {
 
 func NewPluginsCommand(logger *dkplog.Logger) *PluginsCommand {
 	return &PluginsCommand{
-		logger: logger,
+		pluginDirectory: flags.DeckhousePluginsDir,
+		logger:          logger,
 	}
 }
 
@@ -165,7 +167,7 @@ func (pc *PluginsCommand) preparePluginsListData(ctx context.Context, showInstal
 
 // fetchInstalledPlugins retrieves installed plugins from filesystem
 func (pc *PluginsCommand) fetchInstalledPlugins() ([]pluginDisplayInfo, error) {
-	plugins, err := os.ReadDir(path.Join(flags.DeckhousePluginsDir, "plugins"))
+	plugins, err := os.ReadDir(path.Join(pc.pluginDirectory, "plugins"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read plugins directory: %w", err)
 	}
@@ -173,7 +175,7 @@ func (pc *PluginsCommand) fetchInstalledPlugins() ([]pluginDisplayInfo, error) {
 	res := make([]pluginDisplayInfo, 0, len(plugins))
 
 	for _, plugin := range plugins {
-		pluginBinaryPath := path.Join(flags.DeckhousePluginsDir, "plugins", plugin.Name(), "current")
+		pluginBinaryPath := path.Join(pc.pluginDirectory, "plugins", plugin.Name(), "current")
 		cmd := exec.Command(pluginBinaryPath, "--version")
 
 		output, err := cmd.Output()
@@ -217,7 +219,7 @@ func (pc *PluginsCommand) fetchInstalledPlugins() ([]pluginDisplayInfo, error) {
 }
 
 func (pc *PluginsCommand) getInstalledPluginContract(pluginName string) (*internal.Plugin, error) {
-	contractFile := path.Join(flags.DeckhousePluginsDir, "cache", "contracts", pluginName+".json")
+	contractFile := path.Join(pc.pluginDirectory, "cache", "contracts", pluginName+".json")
 
 	file, err := os.Open(contractFile)
 	if err != nil {
@@ -535,7 +537,7 @@ func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName, version
 func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, version *semver.Version, useMajor int) error {
 	// create plugin directory if it doesn't exist
 	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin
-	pluginDir := path.Join(flags.DeckhousePluginsDir, "plugins", pluginName)
+	pluginDir := path.Join(pc.pluginDirectory, "plugins", pluginName)
 	err := os.MkdirAll(pluginDir, 0755)
 	if err != nil {
 		return fmt.Errorf("failed to create plugin directory: %w", err)
@@ -630,7 +632,7 @@ func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, 
 
 	// cache contract
 	// example path: /opt/deckhouse/lib/deckhouse-cli/cache/contracts
-	contractDir := path.Join(flags.DeckhousePluginsDir, "cache", "contracts")
+	contractDir := path.Join(pc.pluginDirectory, "cache", "contracts")
 	err = os.MkdirAll(contractDir, 0755)
 	if err != nil {
 		return fmt.Errorf("failed to create contract directory: %w", err)
@@ -722,7 +724,7 @@ func (pc *PluginsCommand) pluginsUpdateAllCommand() *cobra.Command {
 
 			fmt.Println("Updating all installed plugins...")
 
-			plugins, err := os.ReadDir(path.Join(flags.DeckhousePluginsDir, "plugins"))
+			plugins, err := os.ReadDir(path.Join(pc.pluginDirectory, "plugins"))
 			if err != nil {
 				return fmt.Errorf("failed to read plugins directory: %w", err)
 			}
@@ -754,7 +756,7 @@ func (pc *PluginsCommand) pluginsRemoveCommand() *cobra.Command {
 			pluginName := args[0]
 			fmt.Printf("Removing plugin: %s\n", pluginName)
 
-			pluginDir := path.Join(flags.DeckhousePluginsDir, "plugins", pluginName)
+			pluginDir := path.Join(pc.pluginDirectory, "plugins", pluginName)
 			fmt.Printf("Removing plugin from: %s\n", pluginDir)
 
 			err := os.RemoveAll(pluginDir)
@@ -764,7 +766,7 @@ func (pc *PluginsCommand) pluginsRemoveCommand() *cobra.Command {
 
 			fmt.Println("Cleaning up plugin files...")
 
-			os.Remove(path.Join(flags.DeckhousePluginsDir, "cache", "contracts", pluginName+".json"))
+			os.Remove(path.Join(pc.pluginDirectory, "cache", "contracts", pluginName+".json"))
 
 			fmt.Printf("✓ Plugin '%s' successfully removed!\n", pluginName)
 
@@ -786,7 +788,7 @@ func (pc *PluginsCommand) pluginsRemoveAllCommand() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			fmt.Println("Removing all installed plugins...")
 
-			plugins, err := os.ReadDir(path.Join(flags.DeckhousePluginsDir, "plugins"))
+			plugins, err := os.ReadDir(path.Join(pc.pluginDirectory, "plugins"))
 			if err != nil {
 				return fmt.Errorf("failed to read plugins directory: %w", err)
 			}
@@ -794,7 +796,7 @@ func (pc *PluginsCommand) pluginsRemoveAllCommand() *cobra.Command {
 			fmt.Println("Found", len(plugins), "plugins to remove:")
 
 			for _, plugin := range plugins {
-				pluginDir := path.Join(flags.DeckhousePluginsDir, "plugins", plugin.Name())
+				pluginDir := path.Join(pc.pluginDirectory, "plugins", plugin.Name())
 				fmt.Printf("Removing plugin from: %s\n", pluginDir)
 
 				err := os.RemoveAll(pluginDir)
@@ -804,7 +806,7 @@ func (pc *PluginsCommand) pluginsRemoveAllCommand() *cobra.Command {
 
 				fmt.Printf("Cleaning up plugin files for '%s'...\n", plugin.Name())
 
-				os.Remove(path.Join(flags.DeckhousePluginsDir, "cache", "contracts", plugin.Name()+".json"))
+				os.Remove(path.Join(pc.pluginDirectory, "cache", "contracts", plugin.Name()+".json"))
 
 				fmt.Printf("✓ Plugin '%s' successfully removed!\n", plugin.Name())
 			}

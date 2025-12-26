@@ -28,7 +28,6 @@ import (
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
-	"github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -41,7 +40,7 @@ const (
 func NewPluginCommand(commandName string, description string, aliases []string, logger *dkplog.Logger) *cobra.Command {
 	pc := NewPluginsCommand(logger.Named("plugins-command"))
 
-	pluginContractFilePath := path.Join(flags.DeckhousePluginsDir, "cache", "contracts", "system.json")
+	pluginContractFilePath := path.Join(pc.pluginDirectory, "cache", "contracts", "system.json")
 	pluginContract, err := service.GetPluginContractFromFile(pluginContractFilePath)
 	if err != nil {
 		logger.Debug("failed to get plugin contract from cache", slog.String("error", err.Error()))
@@ -53,18 +52,18 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 
 	// to check we can create directories here
 	// we try to create root plugins folder
-	err = os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
+	err = os.MkdirAll(pc.pluginDirectory+"/plugins", 0755)
 	// if permission failed
 	if errors.Is(err, os.ErrPermission) {
-		pc.logger.Warn("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", flags.DeckhousePluginsDir), dkplog.Err(err))
+		pc.logger.Warn("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", pc.pluginDirectory), dkplog.Err(err))
 
-		flags.DeckhousePluginsDir, err = os.UserHomeDir()
+		pc.pluginDirectory, err = os.UserHomeDir()
 		if err != nil {
 			logger.Warn("failed to receive home dir to create plugins dir", slog.String("error", err.Error()))
 			return nil
 		}
 
-		flags.DeckhousePluginsDir = path.Join(flags.DeckhousePluginsDir, ".deckhouse-cli")
+		pc.pluginDirectory = path.Join(pc.pluginDirectory, ".deckhouse-cli")
 	}
 
 	if err != nil {
@@ -83,11 +82,12 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 			pc.InitPluginServices()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			installed, err := checkInstalled(commandName)
+			installed, err := pc.checkInstalled(commandName)
 			if err != nil {
 				fmt.Println("Error checking installed:", err)
 				return
 			}
+
 			if !installed {
 				fmt.Println("Not installed, installing...")
 				err = pc.InstallPlugin(cmd.Context(), commandName, "", -1)
@@ -98,7 +98,7 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 				fmt.Println("Installed successfully")
 			}
 
-			pluginPath := path.Join(flags.DeckhousePluginsDir, "plugins", commandName)
+			pluginPath := path.Join(pc.pluginDirectory, "plugins", commandName)
 			pluginBinaryPath := path.Join(pluginPath, "current")
 			absPath, err := filepath.Abs(pluginBinaryPath)
 			if err != nil {
@@ -122,8 +122,8 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 	return systemCmd
 }
 
-func checkInstalled(commandName string) (bool, error) {
-	installedFile := path.Join(flags.DeckhousePluginsDir, "plugins", commandName, "current")
+func (pc *PluginsCommand) checkInstalled(commandName string) (bool, error) {
+	installedFile := path.Join(pc.pluginDirectory, "plugins", commandName, "current")
 	absPath, err := filepath.Abs(installedFile)
 	if err != nil {
 		return false, fmt.Errorf("failed to compute absolute path: %w", err)
