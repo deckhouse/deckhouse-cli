@@ -16,6 +16,7 @@ limitations under the License.
 package plugins
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -48,6 +49,27 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 
 	if pluginContract != nil {
 		description = pluginContract.Description
+	}
+
+	// to check we can create directories here
+	// we try to create root plugins folder
+	err = os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
+	// if permission failed
+	if errors.Is(err, os.ErrPermission) {
+		pc.logger.Warn("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", flags.DeckhousePluginsDir), dkplog.Err(err))
+
+		flags.DeckhousePluginsDir, err = os.UserHomeDir()
+		if err != nil {
+			logger.Warn("failed to receive home dir to create plugins dir", slog.String("error", err.Error()))
+			return nil
+		}
+
+		flags.DeckhousePluginsDir = path.Join(flags.DeckhousePluginsDir, ".deckhouse-cli")
+	}
+
+	if err != nil {
+		logger.Warn("failed to create plugin root directory", slog.String("error", err.Error()))
+		return nil
 	}
 
 	systemCmd := &cobra.Command{
