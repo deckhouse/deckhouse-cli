@@ -444,20 +444,20 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 
 			// print requirements
 			if len(plugin.Requirements.Modules) > 0 || len(plugin.Requirements.Plugins) > 0 || plugin.Requirements.Kubernetes.Constraint != "" {
-			fmt.Println("\nRequirements:")
+				fmt.Println("\nRequirements:")
 
 				// print kubernetes requirement
 				if plugin.Requirements.Kubernetes.Constraint != "" {
-			fmt.Printf("  Kubernetes: %s\n", plugin.Requirements.Kubernetes.Constraint)
+					fmt.Printf("  Kubernetes: %s\n", plugin.Requirements.Kubernetes.Constraint)
 				}
 
 				// print modules requirement
-			if len(plugin.Requirements.Modules) > 0 {
-				fmt.Println("  Modules:")
-				for _, mod := range plugin.Requirements.Modules {
-					fmt.Printf("    - %s: %s\n", mod.Name, mod.Constraint)
+				if len(plugin.Requirements.Modules) > 0 {
+					fmt.Println("  Modules:")
+					for _, mod := range plugin.Requirements.Modules {
+						fmt.Printf("    - %s: %s\n", mod.Name, mod.Constraint)
+					}
 				}
-			}
 
 				// print plugins requirement
 				if len(plugin.Requirements.Plugins) > 0 {
@@ -855,10 +855,10 @@ func (pc *PluginsCommand) validateRequirements(plugin *internal.Plugin) error {
 		return fmt.Errorf("plugin requirements: %w", err)
 	}
 
-	// err = pc.validateModuleRequirement(plugin)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to validate module requirement: %w", err)
-	// }
+	err = pc.validateModuleRequirement(plugin)
+	if err != nil {
+		return fmt.Errorf("module requirements: %w", err)
+	}
 
 	return nil
 }
@@ -892,5 +892,10 @@ func (pc *PluginsCommand) validatePluginRequirement(plugin *internal.Plugin) err
 		}
 	}
 
+	return nil
+}
+
+func (pc *PluginsCommand) validateModuleRequirement(_ *internal.Plugin) error {
+	// TODO: Implement module requirement validation
 	return nil
 }
