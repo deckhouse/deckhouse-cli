@@ -442,12 +442,29 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 				}
 			}
 
+			// print requirements
+			if len(plugin.Requirements.Modules) > 0 || len(plugin.Requirements.Plugins) > 0 || plugin.Requirements.Kubernetes.Constraint != "" {
 			fmt.Println("\nRequirements:")
+
+				// print kubernetes requirement
+				if plugin.Requirements.Kubernetes.Constraint != "" {
 			fmt.Printf("  Kubernetes: %s\n", plugin.Requirements.Kubernetes.Constraint)
+				}
+
+				// print modules requirement
 			if len(plugin.Requirements.Modules) > 0 {
 				fmt.Println("  Modules:")
 				for _, mod := range plugin.Requirements.Modules {
 					fmt.Printf("    - %s: %s\n", mod.Name, mod.Constraint)
+				}
+			}
+
+				// print plugins requirement
+				if len(plugin.Requirements.Plugins) > 0 {
+					fmt.Println("  Plugins:")
+					for _, plugin := range plugin.Requirements.Plugins {
+						fmt.Printf("    - %s: %s\n", plugin.Name, plugin.Constraint)
+					}
 				}
 			}
 
