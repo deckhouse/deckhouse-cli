@@ -597,6 +597,7 @@ func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, 
 	fmt.Printf("Description: %s\n", plugin.Description)
 
 	// validate requirements
+	pc.logger.Debug("validating requirements", slog.String("plugin", plugin.Name))
 	err = pc.validateRequirements(plugin)
 	if err != nil {
 		return fmt.Errorf("failed to validate requirements: %w", err)
@@ -850,10 +851,16 @@ func (pc *PluginsCommand) getInstalledPluginVersion(pluginName string) (*semver.
 }
 
 func (pc *PluginsCommand) validateRequirements(plugin *internal.Plugin) error {
+	// validate plugin requirements
+	pc.logger.Debug("validating plugin requirements", slog.String("plugin", plugin.Name))
+
 	err := pc.validatePluginRequirement(plugin)
 	if err != nil {
 		return fmt.Errorf("plugin requirements: %w", err)
 	}
+
+	// validate module requirements
+	pc.logger.Debug("validating module requirements", slog.String("plugin", plugin.Name))
 
 	err = pc.validateModuleRequirement(plugin)
 	if err != nil {
