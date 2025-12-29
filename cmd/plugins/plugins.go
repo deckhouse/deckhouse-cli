@@ -175,23 +175,12 @@ func (pc *PluginsCommand) fetchInstalledPlugins() ([]pluginDisplayInfo, error) {
 	res := make([]pluginDisplayInfo, 0, len(plugins))
 
 	for _, plugin := range plugins {
-		pluginBinaryPath := path.Join(pc.pluginDirectory, "plugins", plugin.Name(), "current")
-		cmd := exec.Command(pluginBinaryPath, "--version")
-
-		output, err := cmd.Output()
+		version, err := pc.getInstalledPluginVersion(plugin.Name())
 		if err != nil {
 			res = append(res, pluginDisplayInfo{
 				Name:        plugin.Name(),
-				Description: "failed to call plugin",
-			})
-			continue
-		}
-
-		version, err := semver.NewVersion(strings.TrimSpace(string(output)))
-		if err != nil {
-			res = append(res, pluginDisplayInfo{
-				Name:        plugin.Name(),
-				Description: "failed to parse version",
+				Version:     "ERROR",
+				Description: err.Error(),
 			})
 			continue
 		}
@@ -590,6 +579,12 @@ func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, 
 	fmt.Printf("Plugin: %s %s\n", plugin.Name, plugin.Version)
 	fmt.Printf("Description: %s\n", plugin.Description)
 
+	// validate requirements
+	err = pc.validateRequirements(plugin)
+	if err != nil {
+		return fmt.Errorf("failed to validate requirements: %w", err)
+	}
+
 	// check if binary exists (if yes - rename it to .old)
 	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1/example-plugin
 	pluginBinaryPath := path.Join(versionDir, pluginName)
@@ -818,4 +813,66 @@ func (pc *PluginsCommand) pluginsRemoveAllCommand() *cobra.Command {
 	}
 
 	return cmd
+}
+
+func (pc *PluginsCommand) getInstalledPluginVersion(pluginName string) (*semver.Version, error) {
+	pluginBinaryPath := path.Join(pc.pluginDirectory, "plugins", pluginName, "current")
+	cmd := exec.Command(pluginBinaryPath, "--version")
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to call plugin: %w", err)
+	}
+
+	version, err := semver.NewVersion(strings.TrimSpace(string(output)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse version: %w", err)
+	}
+
+	return version, nil
+}
+
+func (pc *PluginsCommand) validateRequirements(plugin *internal.Plugin) error {
+	err := pc.validatePluginRequirement(plugin)
+	if err != nil {
+		return fmt.Errorf("failed to validate plugin requirement: %w", err)
+	}
+
+	// err = pc.validateModuleRequirement(plugin)
+	// if err != nil {
+	// 	return fmt.Errorf("failed to validate module requirement: %w", err)
+	// }
+
+	return nil
+}
+
+func (pc *PluginsCommand) validatePluginRequirement(plugin *internal.Plugin) error {
+	for _, pluginRequirement := range plugin.Requirements.Plugins {
+		installed, err := pc.checkInstalled(pluginRequirement.Name)
+		if err != nil {
+			return fmt.Errorf("failed to check if plugin is installed: %w", err)
+		}
+		if !installed {
+			return fmt.Errorf("plugin %s is not installed", pluginRequirement.Name)
+		}
+
+		// check constraint
+		if pluginRequirement.Constraint != "" {
+			installedVersion, err := pc.getInstalledPluginVersion(pluginRequirement.Name)
+			if err != nil {
+				return fmt.Errorf("failed to get installed version: %w", err)
+			}
+
+			constraint, err := semver.NewConstraint(pluginRequirement.Constraint)
+			if err != nil {
+				return fmt.Errorf("failed to parse constraint: %w", err)
+			}
+
+			if !constraint.Check(installedVersion) {
+				return fmt.Errorf("plugin %s version %s does not satisfy constraint %s", pluginRequirement.Name, plugin.Version, pluginRequirement.Constraint)
+			}
+		}
+	}
+
+	return nil
 }
