@@ -835,7 +835,7 @@ func (pc *PluginsCommand) getInstalledPluginVersion(pluginName string) (*semver.
 func (pc *PluginsCommand) validateRequirements(plugin *internal.Plugin) error {
 	err := pc.validatePluginRequirement(plugin)
 	if err != nil {
-		return fmt.Errorf("failed to validate plugin requirement: %w", err)
+		return fmt.Errorf("plugin requirements: %w", err)
 	}
 
 	// err = pc.validateModuleRequirement(plugin)
@@ -848,6 +848,7 @@ func (pc *PluginsCommand) validateRequirements(plugin *internal.Plugin) error {
 
 func (pc *PluginsCommand) validatePluginRequirement(plugin *internal.Plugin) error {
 	for _, pluginRequirement := range plugin.Requirements.Plugins {
+		// check if plugin is installed
 		installed, err := pc.checkInstalled(pluginRequirement.Name)
 		if err != nil {
 			return fmt.Errorf("failed to check if plugin is installed: %w", err)
