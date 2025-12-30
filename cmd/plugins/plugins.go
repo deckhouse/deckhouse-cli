@@ -839,7 +839,16 @@ func (pc *PluginsCommand) getInstalledPluginVersion(pluginName string) (*semver.
 
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to call plugin: %w", err)
+		pc.logger.Warn("failed to call plugin with '--version'", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+
+		// try to call plugin with "version" command
+		// this is for compatibility with plugins that don't support "--version"
+		cmd = exec.Command(pluginBinaryPath, "version")
+
+		output, err = cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("failed to call plugin: %w", err)
+		}
 	}
 
 	version, err := semver.NewVersion(strings.TrimSpace(string(output)))
@@ -894,7 +903,7 @@ func (pc *PluginsCommand) validatePluginRequirement(plugin *internal.Plugin) err
 			}
 
 			if !constraint.Check(installedVersion) {
-				return fmt.Errorf("plugin %s version %s does not satisfy constraint %s", pluginRequirement.Name, plugin.Version, pluginRequirement.Constraint)
+				return fmt.Errorf("plugin %s version %s does not satisfy constraint %s", pluginRequirement.Name, installedVersion.Original(), pluginRequirement.Constraint)
 			}
 		}
 	}
