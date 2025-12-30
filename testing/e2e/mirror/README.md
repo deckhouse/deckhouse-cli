@@ -4,65 +4,81 @@ End-to-end tests for the `d8 mirror pull` and `d8 mirror push` commands.
 
 ## Overview
 
-These tests perform a **complete mirror cycle with deep comparison** to ensure source and target registries are **100% identical**.
+These tests perform **complete mirror cycles with verification** to ensure:
+1. All expected images are downloaded from source
+2. All images are correctly pushed to target registry
+3. All images match between source and target (deep comparison)
 
-### Test Steps
+## Test Types
 
-1. **Analyze source registry** - Discover all repositories and count all images
-2. **Pull images** - Execute `d8 mirror pull` to create a bundle
-3. **Push images** - Execute `d8 mirror push` to target registry
-4. **Deep comparison** - Compare every repository, tag, and digest between source and target
+| Test | Description | Timeout | Command |
+|------|-------------|---------|---------|
+| **Full Cycle** | Platform + Modules + Security | 3h | `task test:e2e:mirror` |
+| **Platform** | Deckhouse core only | 2h | `task test:e2e:mirror:platform` |
+| **Platform Stable** | Only stable channel | 2h | `task test:e2e:mirror:platform` + `E2E_DECKHOUSE_TAG=stable` |
+| **Modules** | All modules | 2h | `task test:e2e:mirror:modules` |
+| **Single Module** | One module (fast) | 2h | `task test:e2e:mirror:modules` + `E2E_INCLUDE_MODULES=module-name` |
+| **Security** | Security DBs only | 30m | `task test:e2e:mirror:security` |
 
-### What Gets Compared (Deep Comparison)
+## Verification Approach
 
-- **Repository level**: All repositories in source must exist in target
-- **Tag level**: All tags in each repository must exist in target  
-- **Manifest digest**: Every image manifest digest must match (SHA256)
-- **Config digest**: Image config blob digest is verified
-- **Layer digests**: ALL layer digests of every image are compared
-- **Layer count**: Number of layers must match
+### Step 1: Read Expected Images from Source
+Before pulling, we independently read what SHOULD be downloaded:
+- Release channel versions from source registry
+- `images_digests.json` from each installer image
+- Module list and versions
 
-This ensures **byte-for-byte identical** registries.
+### Step 2: Pull & Push
+Execute `d8 mirror pull` and `d8 mirror push`
 
-## Requirements
+### Step 3: Verify
+Compare expected images with what's actually in target:
+- All expected digests must exist in target
+- All images in target must match source (manifest, config, layers)
 
-- Built `d8` binary (run `task build` from project root)
-- Valid credentials for the source registry
-- Network access to the source registry
-- Sufficient disk space for the bundle (can be ~20 GB)
+This catches:
+- **Pull bugs** - if pull forgets to download an image
+- **Push bugs** - if push fails to upload an image
+- **Data corruption** - if any digest doesn't match
 
 ## Running Tests
 
-### Using Taskfile (Recommended)
+### Quick Start
 
 ```bash
-# With environment variables
+# Full cycle with license token
+E2E_LICENSE_TOKEN=xxx task test:e2e:mirror
+
+# Platform only (faster)
+E2E_LICENSE_TOKEN=xxx E2E_DECKHOUSE_TAG=stable task test:e2e:mirror:platform
+
+# Single module (fastest)
+E2E_LICENSE_TOKEN=xxx E2E_INCLUDE_MODULES=module-name task test:e2e:mirror:modules
+```
+
+### Using Environment Variables
+
+```bash
+# Official registry with license
+E2E_LICENSE_TOKEN=your_license_token \
+task test:e2e:mirror
+
+# Local registry
 E2E_SOURCE_REGISTRY=localhost:443/deckhouse \
 E2E_SOURCE_USER=admin \
 E2E_SOURCE_PASSWORD=secret \
 E2E_TLS_SKIP_VERIFY=true \
-task test:e2e:mirror
+task test:e2e:mirror:platform
 
-# With command-line flags
-task test:e2e:mirror -- \
-  -source-registry=localhost:443/deckhouse \
-  -source-user=admin \
-  -source-password=admin \
-  -tls-skip-verify
+# Specific release channel
+E2E_LICENSE_TOKEN=xxx \
+E2E_DECKHOUSE_TAG=stable \
+task test:e2e:mirror:platform
 
-# With license token (official Deckhouse registry)
-E2E_LICENSE_TOKEN=xxx task test:e2e:mirror
-```
-
-### Using go test directly
-
-```bash
-# Note: requires -tags=e2e flag
-go test -v -tags=e2e -timeout=120m ./testing/e2e/mirror/... \
-  -source-registry=localhost:443/deckhouse \
-  -source-user=admin \
-  -source-password=secret \
-  -tls-skip-verify
+# Specific modules only
+E2E_LICENSE_TOKEN=xxx \
+E2E_INCLUDE_MODULES="pod-reloader,neuvector" \
+task test:e2e:mirror:modules
 ```
 
 ### Configuration Options
@@ -73,20 +89,26 @@ go test -v -tags=e2e -timeout=120m ./testing/e2e/mirror/... \
 | `-source-user` | `E2E_SOURCE_USER` | | Source registry username |
 | `-source-password` | `E2E_SOURCE_PASSWORD` | | Source registry password |
 | `-license-token` | `E2E_LICENSE_TOKEN` | | License token |
-| `-target-registry` | `E2E_TARGET_REGISTRY` | (local disk-based registry) | Target registry |
+| `-target-registry` | `E2E_TARGET_REGISTRY` | `""` (in-memory) | Target registry |
 | `-target-user` | `E2E_TARGET_USER` | | Target registry username |
 | `-target-password` | `E2E_TARGET_PASSWORD` | | Target registry password |
 | `-tls-skip-verify` | `E2E_TLS_SKIP_VERIFY` | `false` | Skip TLS verification |
+| `-deckhouse-tag` | `E2E_DECKHOUSE_TAG` | | Specific tag/channel (e.g., `stable`, `v1.65.8`) |
+| `-no-modules` | `E2E_NO_MODULES` | `false` | Skip modules |
+| `-no-platform` | `E2E_NO_PLATFORM` | `false` | Skip platform |
+| `-no-security` | `E2E_NO_SECURITY` | `false` | Skip security DBs |
+| `-include-modules` | `E2E_INCLUDE_MODULES` | | Comma-separated module list |
 | `-keep-bundle` | `E2E_KEEP_BUNDLE` | `false` | Keep bundle after test |
+| `-existing-bundle` | `E2E_EXISTING_BUNDLE` | | Path to existing bundle (skip pull) |
 | `-d8-binary` | `E2E_D8_BINARY` | `bin/d8` | Path to d8 binary |
-| `-new-pull` | `E2E_NEW_PULL` | `false` | Use new pull implementation |
+| `-new-pull` | `E2E_NEW_PULL` | `false` | Use experimental pull |
 
 ## Test Artifacts
 
-Tests produce detailed artifacts in `testing/e2e/.logs/<test>-<timestamp>/`:
+Tests produce artifacts in `testing/e2e/.logs/<test>-<timestamp>/`:
 
 ```
-testing/e2e/.logs/fullcycle-20251226-114128/
+testing/e2e/.logs/TestFullCycleE2E-20251226-114128/
 ├── test.log       # Full command output (pull/push)
 ├── report.txt     # Test summary report
 └── comparison.txt # Detailed registry comparison
@@ -98,128 +120,63 @@ testing/e2e/.logs/fullcycle-20251226-114128/
 task test:e2e:mirror:logs:clean
 ```
 
-### Sample Report (report.txt)
+## Requirements
 
-```
-================================================================================
-E2E TEST REPORT: TestMirrorE2E_FullCycle
-================================================================================
+- Built `d8` binary (run `task build`)
+- Valid credentials for source registry
+- Network access
+- Disk space for bundle (20-50 GB depending on scope)
 
-EXECUTION:
-  Started:  2025-12-26T11:41:28+03:00
-  Finished: 2025-12-26T11:46:28+03:00
-  Duration: 5m1s
+## What Gets Verified
 
-REGISTRIES:
-  Source: localhost:443/deckhouse-etalon
-  Target: 127.0.0.1:61594/deckhouse/ee
+### Platform Test
+1. Release channels exist (alpha, beta, stable, rock-solid)
+2. Install images for each version
+3. All digests from `images_digests.json` exist in target
 
-IMAGES TO VERIFY:
-  Source: 324 images (82 repos)
-  Target: 324 images (82 repos)
-  (excluded 1071 internal tags from comparison)
+### Modules Test
+1. Module list matches expected
+2. Each module has release tags
+3. Module images match source
 
-BUNDLE:
-  Size: 22.52 GB
-
-VERIFICATION RESULTS:
-  Images matched:    324 (manifest + config + layers)
-  Layers verified:   1172
-  Missing images:    0
-  Digest mismatch:   0
-  Missing layers:    0
-
-STEPS:
-  [PASS] Analyze source (82 repos) (330ms)
-  [PASS] Pull images (22.52 GB bundle) (2m59.826s)
-  [PASS] Push to registry (1m57.742s)
-  [PASS] Deep comparison (324 images verified) (2.266s)
-
-================================================================================
-RESULT: PASSED - REGISTRIES ARE IDENTICAL
-  82 repositories verified
-  324 images verified
-================================================================================
-```
-
-### Comparison Report (comparison.txt)
-
-Contains detailed breakdown per repository with layer-level verification:
-
-```
-REGISTRY COMPARISON SUMMARY
-===========================
-
-Source: localhost:443/deckhouse
-Target: 127.0.0.1:54321/deckhouse/ee
-Duration: 2s
-
-REPOSITORIES:
-  Source: 82
-  Target: 82
-  Missing in target: 0
-  Extra in target: 0
-
-IMAGES TO VERIFY:
-  Source: 324 images
-  Target: 324 images
-  (excluded 1071 internal tags: digest-based, .att, .sig)
-
-VERIFICATION RESULTS:
-  Matched: 324
-DEEP COMPARISON (layers + config):
-  Images deep-checked: 324
-  Source layers: 1172
-  Target layers: 1172
-  Matched layers: 1172
-  Missing layers: 0
-  Config mismatches: 0
-
-✓ REGISTRIES ARE IDENTICAL (all hashes match)
-
-REPOSITORY BREAKDOWN:
----------------------
-✓ (root): 6/6 tags, 66 layers checked
-✓ install: 6/6 tags, 48 layers checked
-✓ install-standalone: 78/78 tags, 624 layers checked
-✓ release-channel: 6/6 tags, 12 layers checked
-✓ security/trivy-db: 1/1 tags, 2 layers checked
-✓ modules/deckhouse-admin: 5/5 tags, 10 layers checked
-...
-```
-
-## Timeouts
-
-The test has a **120-minute timeout** to handle large registries.
+### Security Test
+1. All security databases exist (trivy-db, trivy-bdu, etc.)
+2. Tags match source
 
 ## Troubleshooting
 
 ### "Source authentication not provided"
-
-Set credentials:
 ```bash
 E2E_LICENSE_TOKEN=your_token task test:e2e:mirror
-# or
-E2E_SOURCE_USER=admin E2E_SOURCE_PASSWORD=secret task test:e2e:mirror
 ```
 
-### "Pull failed" or "Push failed"
-
-1. Check `d8` binary exists (`task build`)
+### "Pull failed"
+1. Check `d8` binary: `task build`
 2. Check network access
-3. Use `-tls-skip-verify` for self-signed certs
-4. Check credentials
+3. For self-signed certs: `E2E_TLS_SKIP_VERIFY=true`
 
-### "Registries differ"
+### "Verification failed"
+Check `comparison.txt`:
+- **Missing in target**: Pull or push didn't transfer the image
+- **Digest mismatch**: Data corruption or version skew
 
-Check `comparison.txt` for details:
-- **Missing images**: Images in source but not in target
-- **Mismatched digests**: Images exist but have different content
-
-### Viewing Bundle Contents
-
+### Running Against Local Registry
 ```bash
-E2E_KEEP_BUNDLE=true task test:e2e:mirror -- ...
+E2E_SOURCE_REGISTRY=localhost:5000/deckhouse \
+E2E_SOURCE_USER=admin \
+E2E_SOURCE_PASSWORD=admin \
+E2E_TLS_SKIP_VERIFY=true \
+task test:e2e:mirror:platform
+```
 
-# Bundle location shown in output
+### Keep Bundle for Debugging
+```bash
+E2E_KEEP_BUNDLE=true E2E_LICENSE_TOKEN=xxx task test:e2e:mirror:platform
+# Bundle location shown in test output
+```
+
+### Use Existing Bundle (Skip Pull)
+```bash
+E2E_EXISTING_BUNDLE=/path/to/bundle E2E_LICENSE_TOKEN=xxx task test:e2e:mirror:platform
+# Test will skip pull step and use existing bundle
 ```

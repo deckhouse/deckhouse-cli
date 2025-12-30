@@ -267,40 +267,39 @@ tasks:
       - task: _test:go
 
   test:e2e:mirror:
-    desc: Run E2E tests for d8 mirror (requires credentials)
+    desc: Run full cycle E2E mirror test (platform + modules + security)
     summary: |
-      Runs heavy E2E tests for d8 mirror pull/push commands.
+      E2E test for d8 mirror pull/push commands.
+      Required: E2E_LICENSE_TOKEN env variable
       
-      The test performs a complete mirror cycle:
-      1. Analyzes source registry
-      2. Pulls images to local bundle
-      3. Pushes bundle to target registry
-      4. Compares all images between source and target
-      
-      Required: Set E2E_LICENSE_TOKEN or E2E_SOURCE_USER/E2E_SOURCE_PASSWORD
-      
-      Examples:
-        # With license token
-        E2E_LICENSE_TOKEN=xxx task test:e2e:mirror
-        
-        # With local registry
-        E2E_SOURCE_REGISTRY=localhost:443/deckhouse \
-        E2E_SOURCE_USER=admin \
-        E2E_SOURCE_PASSWORD=secret \
-        E2E_TLS_SKIP_VERIFY=true \
-        task test:e2e:mirror
-        
-        # Keep bundle for debugging
-        E2E_LICENSE_TOKEN=xxx E2E_KEEP_BUNDLE=true task test:e2e:mirror
+      Example: E2E_LICENSE_TOKEN=xxx task test:e2e:mirror
     cmds:
       - task build
-      - go test -v -timeout 120m -tags=e2e ./testing/e2e/mirror/... {{ .CLI_ARGS }}
+      - go test -v -count=1 -timeout 180m -tags=e2e -run 'TestFullCycleE2E' ./testing/e2e/mirror {{ .CLI_ARGS }}
+
+  test:e2e:mirror:platform:
+    desc: Run platform E2E test
+    cmds:
+      - task build
+      - go test -v -count=1 -timeout 120m -tags=e2e -run 'TestPlatform' ./testing/e2e/mirror {{ .CLI_ARGS }}
+
+  test:e2e:mirror:modules:
+    desc: Run all modules E2E test
+    cmds:
+      - task build
+      - go test -v -count=1 -timeout 120m -tags=e2e -run 'TestModulesE2E$' ./testing/e2e/mirror {{ .CLI_ARGS }}
+
+
+  test:e2e:mirror:security:
+    desc: Run security E2E test
+    cmds:
+      - task build
+      - go test -v -count=1 -timeout 30m -tags=e2e -run 'TestSecurityE2E' ./testing/e2e/mirror {{ .CLI_ARGS }}
 
   test:e2e:mirror:logs:clean:
     desc: Clean E2E test logs
     cmds:
       - rm -rf ./testing/e2e/.logs/*
-      - echo "E2E logs cleaned"
 
   lint:
     desc: Run golangci-lint with auto-fix

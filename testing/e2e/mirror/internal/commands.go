@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Flant JSC
+Copyright 2025 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package mirror
+package internal
 
 import (
 	"fmt"
@@ -25,19 +25,13 @@ import (
 	"time"
 )
 
-// =============================================================================
-// Command Builders
-// =============================================================================
-
-// buildPullCommand builds the d8 mirror pull command
-func buildPullCommand(cfg *Config, bundleDir string) *exec.Cmd {
+func BuildPullCommand(cfg *Config, bundleDir string) *exec.Cmd {
 	args := []string{
 		"mirror", "pull",
 		"--source", cfg.SourceRegistry,
-		"--force", // overwrite if exists
+		"--force",
 	}
 
-	// Authentication
 	if cfg.SourceUser != "" {
 		args = append(args, "--source-login", cfg.SourceUser)
 		args = append(args, "--source-password", cfg.SourcePassword)
@@ -45,22 +39,31 @@ func buildPullCommand(cfg *Config, bundleDir string) *exec.Cmd {
 		args = append(args, "--license", cfg.LicenseToken)
 	}
 
-	// TLS
 	if cfg.TLSSkipVerify {
 		args = append(args, "--tls-skip-verify")
 	}
 
-	// Debug options
+	if cfg.DeckhouseTag != "" {
+		args = append(args, "--deckhouse-tag", cfg.DeckhouseTag)
+	}
 	if cfg.NoModules {
 		args = append(args, "--no-modules")
+	}
+	if cfg.NoPlatform {
+		args = append(args, "--no-platform")
+	}
+	if cfg.NoSecurity {
+		args = append(args, "--no-security-db")
+	}
+	for _, module := range cfg.IncludeModules {
+		args = append(args, "--include-module", module)
 	}
 
 	args = append(args, bundleDir)
 
 	cmd := exec.Command(cfg.D8Binary, args...)
-	cmd.Env = append(os.Environ(), "HOME="+os.Getenv("HOME"))
+	cmd.Env = os.Environ()
 
-	// Experimental options (via env)
 	if cfg.NewPull {
 		cmd.Env = append(cmd.Env, "NEW_PULL=true")
 	}
@@ -68,62 +71,59 @@ func buildPullCommand(cfg *Config, bundleDir string) *exec.Cmd {
 	return cmd
 }
 
-// buildPushCommand builds the d8 mirror push command
-func buildPushCommand(cfg *Config, bundleDir, targetRegistry string) *exec.Cmd {
+func BuildPushCommand(cfg *Config, bundleDir, targetRegistry string) *exec.Cmd {
 	args := []string{
 		"mirror", "push",
 		bundleDir,
 		targetRegistry,
 	}
 
-	// TLS
 	if cfg.TLSSkipVerify {
 		args = append(args, "--tls-skip-verify")
 	}
 
-	// Authentication
 	if cfg.TargetUser != "" {
 		args = append(args, "--registry-login", cfg.TargetUser)
 		args = append(args, "--registry-password", cfg.TargetPassword)
 	}
 
 	cmd := exec.Command(cfg.D8Binary, args...)
-	cmd.Env = append(os.Environ(), "HOME="+os.Getenv("HOME"))
+	cmd.Env = os.Environ()
+	
+	// Ensure HOME is set - some tools (like ssh) require it
+	if os.Getenv("HOME") == "" {
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			cmd.Env = append(cmd.Env, "HOME="+homeDir)
+		}
+	}
+
+	if cfg.NewPull {
+		cmd.Env = append(cmd.Env, "NEW_PULL=true")
+	}
 
 	return cmd
 }
 
-// =============================================================================
-// Command Runner
-// =============================================================================
-
-// runCommandWithLog runs command with streaming output and saves to log file
-func runCommandWithLog(t *testing.T, cmd *exec.Cmd, logFile string) error {
+func RunCommandWithLog(t *testing.T, cmd *exec.Cmd, logFile string) error {
 	t.Helper()
 
-	// Open log file
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		t.Logf("Warning: could not open log file %s: %v", logFile, err)
-		// Fallback: just stream without logging
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
 	}
 	defer f.Close()
 
-	// Write command header
 	fmt.Fprintf(f, "\n\n========== COMMAND: %s ==========\n", cmd.String())
 	fmt.Fprintf(f, "Started: %s\n\n", time.Now().Format(time.RFC3339))
 
-	// Stream to stdout and file
 	cmd.Stdout = io.MultiWriter(os.Stdout, f)
 	cmd.Stderr = io.MultiWriter(os.Stderr, f)
 
-	// Run
 	cmdErr := cmd.Run()
 
-	// Write result
 	if cmdErr != nil {
 		fmt.Fprintf(f, "\n\n========== COMMAND FAILED: %v ==========\n", cmdErr)
 	} else {
@@ -132,3 +132,4 @@ func runCommandWithLog(t *testing.T, cmd *exec.Cmd, logFile string) error {
 
 	return cmdErr
 }
+

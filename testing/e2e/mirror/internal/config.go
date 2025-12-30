@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Flant JSC
+Copyright 2025 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,18 +14,26 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package mirror
+package internal
 
 import (
 	"flag"
 	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 )
 
-// Test configuration flags
+const (
+	SecurityTestTimeout = 30 * time.Minute
+	PlatformTestTimeout = 2 * time.Hour
+	ModulesTestTimeout  = 2 * time.Hour
+	FullCycleTestTimeout = 3 * time.Hour
+)
+
 var (
-	// Source registry configuration
 	sourceRegistry = flag.String("source-registry",
 		getEnvOrDefault("E2E_SOURCE_REGISTRY", "registry.deckhouse.ru/deckhouse/fe"),
 		"Reference registry to pull from")
@@ -39,7 +47,6 @@ var (
 		getEnvOrDefault("E2E_LICENSE_TOKEN", ""),
 		"License token for source registry authentication (shortcut for source-user=license-token)")
 
-	// Target registry configuration
 	targetRegistry = flag.String("target-registry",
 		getEnvOrDefault("E2E_TARGET_REGISTRY", ""),
 		"Target registry to push to (empty = use in-memory registry)")
@@ -50,23 +57,35 @@ var (
 		getEnvOrDefault("E2E_TARGET_PASSWORD", ""),
 		"Target registry password")
 
-	// Test options
 	tlsSkipVerify = flag.Bool("tls-skip-verify",
 		getEnvOrDefault("E2E_TLS_SKIP_VERIFY", "") == "true",
 		"Skip TLS certificate verification (for self-signed certs)")
 	keepBundle = flag.Bool("keep-bundle",
 		getEnvOrDefault("E2E_KEEP_BUNDLE", "") == "true",
 		"Keep bundle directory after test")
+	existingBundle = flag.String("existing-bundle",
+		getEnvOrDefault("E2E_EXISTING_BUNDLE", ""),
+		"Path to existing bundle directory (skip pull step)")
 	d8Binary = flag.String("d8-binary",
-		getEnvOrDefault("E2E_D8_BINARY", "../../../bin/d8"),
+		getEnvOrDefault("E2E_D8_BINARY", "bin/d8"),
 		"Path to d8 binary")
 
-	// Debug/test options
+	deckhouseTag = flag.String("deckhouse-tag",
+		getEnvOrDefault("E2E_DECKHOUSE_TAG", ""),
+		"Specific Deckhouse tag or release channel (e.g., 'stable', 'v1.65.8')")
 	noModules = flag.Bool("no-modules",
 		getEnvOrDefault("E2E_NO_MODULES", "") == "true",
-		"Skip modules during pull (for testing failure scenarios)")
+		"Skip modules during pull")
+	noPlatform = flag.Bool("no-platform",
+		getEnvOrDefault("E2E_NO_PLATFORM", "") == "true",
+		"Skip platform during pull")
+	noSecurity = flag.Bool("no-security",
+		getEnvOrDefault("E2E_NO_SECURITY", "") == "true",
+		"Skip security databases during pull")
+	includeModules = flag.String("include-modules",
+		getEnvOrDefault("E2E_INCLUDE_MODULES", ""),
+		"Comma-separated list of modules to include (empty = all)")
 
-	// Experimental options
 	newPull = flag.Bool("new-pull",
 		getEnvOrDefault("E2E_NEW_PULL", "") == "true",
 		"Use new pull implementation")
@@ -79,7 +98,6 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-// Config holds the parsed test configuration
 type Config struct {
 	SourceRegistry string
 	SourceUser     string
@@ -90,21 +108,22 @@ type Config struct {
 	TargetUser     string
 	TargetPassword string
 
-	TLSSkipVerify bool
-	KeepBundle    bool
-	D8Binary      string
+	TLSSkipVerify  bool
+	KeepBundle     bool
+	ExistingBundle string
+	D8Binary       string
 
-	// Debug/test options
-	NoModules bool // Skip modules during pull (for testing failure scenarios)
+	DeckhouseTag   string
+	NoModules      bool
+	NoPlatform      bool
+	NoSecurity      bool
+	IncludeModules  []string
 
-	// Experimental options
-	NewPull bool // Use new pull implementation
+	NewPull bool
 }
 
-// GetConfig returns the current test configuration from flags
 func GetConfig() *Config {
-	// flag.Parse() is called automatically by go test
-	return &Config{
+	cfg := &Config{
 		SourceRegistry: *sourceRegistry,
 		SourceUser:     *sourceUser,
 		SourcePassword: *sourcePassword,
@@ -114,22 +133,67 @@ func GetConfig() *Config {
 		TargetPassword: *targetPassword,
 		TLSSkipVerify:  *tlsSkipVerify,
 		KeepBundle:     *keepBundle,
-		D8Binary:       *d8Binary,
+		ExistingBundle: *existingBundle,
+		D8Binary:       resolveD8Binary(*d8Binary),
+		DeckhouseTag:   *deckhouseTag,
 		NoModules:      *noModules,
+		NoPlatform:     *noPlatform,
+		NoSecurity:     *noSecurity,
 		NewPull:        *newPull,
+	}
+
+	if *includeModules != "" {
+		cfg.IncludeModules = parseCommaSeparated(*includeModules)
+	}
+
+	return cfg
+}
+
+func resolveD8Binary(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	projectRoot := FindProjectRoot()
+	return filepath.Join(projectRoot, path)
+}
+
+func FindProjectRoot() string {
+	dir, _ := os.Getwd()
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			dir, _ = os.Getwd()
+			return dir
+		}
+		dir = parent
 	}
 }
 
-// GetSourceAuth returns authenticator for source registry
+
+
+func parseCommaSeparated(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var parts []string
+	for _, part := range strings.Split(s, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return parts
+}
+
 func (c *Config) GetSourceAuth() authn.Authenticator {
-	// Explicit credentials take precedence
 	if c.SourceUser != "" {
 		return authn.FromConfig(authn.AuthConfig{
 			Username: c.SourceUser,
 			Password: c.SourcePassword,
 		})
 	}
-	// License token is a shortcut for source-user=license-token
 	if c.LicenseToken != "" {
 		return authn.FromConfig(authn.AuthConfig{
 			Username: "license-token",
@@ -139,12 +203,10 @@ func (c *Config) GetSourceAuth() authn.Authenticator {
 	return authn.Anonymous
 }
 
-// HasSourceAuth returns true if any source authentication is configured
 func (c *Config) HasSourceAuth() bool {
 	return c.SourceUser != "" || c.LicenseToken != ""
 }
 
-// GetTargetAuth returns authenticator for target registry
 func (c *Config) GetTargetAuth() authn.Authenticator {
 	if c.TargetUser != "" {
 		return authn.FromConfig(authn.AuthConfig{
@@ -155,7 +217,11 @@ func (c *Config) GetTargetAuth() authn.Authenticator {
 	return authn.Anonymous
 }
 
-// UseInMemoryRegistry returns true if we should use in-memory registry
 func (c *Config) UseInMemoryRegistry() bool {
 	return c.TargetRegistry == ""
 }
+
+func (c *Config) HasExistingBundle() bool {
+	return c.ExistingBundle != ""
+}
+
