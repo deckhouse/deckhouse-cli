@@ -40,6 +40,7 @@ type Flag struct {
 type Requirements struct {
 	Kubernetes KubernetesRequirement
 	Modules    []ModuleRequirement
+	Plugins    []PluginRequirement
 }
 
 // KubernetesRequirement represents Kubernetes version constraint
@@ -49,6 +50,12 @@ type KubernetesRequirement struct {
 
 // ModuleRequirement represents a required Deckhouse module
 type ModuleRequirement struct {
+	Name       string
+	Constraint string
+}
+
+// PluginRequirement represents a required plugin
+type PluginRequirement struct {
 	Name       string
 	Constraint string
 }

@@ -246,12 +246,20 @@ func ContractToDomain(contract *PluginContract) *internal.Plugin {
 			Constraint: contract.Requirements.Kubernetes.Constraint,
 		},
 		Modules: make([]internal.ModuleRequirement, 0, len(contract.Requirements.Modules)),
+		Plugins: make([]internal.PluginRequirement, 0, len(contract.Requirements.Plugins)),
 	}
 
 	for _, modDTO := range contract.Requirements.Modules {
 		plugin.Requirements.Modules = append(plugin.Requirements.Modules, internal.ModuleRequirement{
 			Name:       modDTO.Name,
 			Constraint: modDTO.Constraint,
+		})
+	}
+
+	for _, pluginDTO := range contract.Requirements.Plugins {
+		plugin.Requirements.Plugins = append(plugin.Requirements.Plugins, internal.PluginRequirement{
+			Name:       pluginDTO.Name,
+			Constraint: pluginDTO.Constraint,
 		})
 	}
 
@@ -271,6 +279,7 @@ func DomainToContract(plugin *internal.Plugin) *PluginContract {
 				Constraint: plugin.Requirements.Kubernetes.Constraint,
 			},
 			Modules: make([]ModuleRequirementDTO, 0, len(plugin.Requirements.Modules)),
+			Plugins: make([]PluginRequirementDTO, 0, len(plugin.Requirements.Plugins)),
 		},
 	}
 
@@ -290,6 +299,13 @@ func DomainToContract(plugin *internal.Plugin) *PluginContract {
 		contract.Requirements.Modules = append(contract.Requirements.Modules, ModuleRequirementDTO{
 			Name:       mod.Name,
 			Constraint: mod.Constraint,
+		})
+	}
+
+	for _, plugin := range plugin.Requirements.Plugins {
+		contract.Requirements.Plugins = append(contract.Requirements.Plugins, PluginRequirementDTO{
+			Name:       plugin.Name,
+			Constraint: plugin.Constraint,
 		})
 	}
 
