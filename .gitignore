@@ -38,3 +38,6 @@ build/
 
 # Entrypoint for the application
 !/cmd/d8
+
+# E2E test logs
+testing/e2e/.logs/
