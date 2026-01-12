@@ -25,8 +25,8 @@ These tests perform **complete mirror cycles with verification** to ensure:
 ### Step 1: Read Expected Images from Source
 Before pulling, we independently read what SHOULD be downloaded:
 - Release channel versions from source registry
-- `images_digests.json` from each installer image
-- Module list and versions
+- `images_digests.json` from each installer image (platform)
+- Module list, versions, and `images_digests.json` from each module image
 
 ### Step 2: Pull & Push
 Execute `d8 mirror pull` and `d8 mirror push`
@@ -136,8 +136,9 @@ task test:e2e:mirror:logs:clean
 
 ### Modules Test
 1. Module list matches expected
-2. Each module has release tags
-3. Module images match source
+2. Release channel tags exist and digests match source
+3. Module version images exist (`:v1.2.3` tags from release channels)
+4. All digests from `images_digests.json` exist in target (if module has them)
 
 ### Security Test
 1. All security databases exist (trivy-db, trivy-bdu, etc.)
@@ -157,7 +158,9 @@ E2E_LICENSE_TOKEN=your_token task test:e2e:mirror
 
 ### "Verification failed"
 Check `comparison.txt`:
-- **Missing in target**: Pull or push didn't transfer the image
+- **Missing digests**: Pull or push didn't transfer the image
+- **Missing module versions**: Module version image not in target
+- **Missing module digests**: Module's internal images not transferred
 - **Digest mismatch**: Data corruption or version skew
 
 ### Running Against Local Registry
