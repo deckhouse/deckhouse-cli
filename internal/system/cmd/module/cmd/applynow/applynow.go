@@ -85,7 +85,7 @@ func applyNowRelease(cmd *cobra.Command, args []string) error {
 
 	// Check if already has apply-now annotation
 	if release.IsApplyNow {
-		fmt.Fprintf(os.Stderr, "%s Module release '%s' already has apply-now annotation.\n", cli.MsgWarn, release.Name)
+		fmt.Fprintf(os.Stderr, "%s Module release '%s' already has apply-now annotation.\n", cli.MsgInfo, release.Name)
 		fmt.Fprintf(os.Stderr, "   Phase: %s\n", release.Phase)
 		if release.Message != "" {
 			fmt.Fprintf(os.Stderr, "   Message: %s\n", release.Message)
@@ -109,7 +109,7 @@ func applyNowRelease(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to set apply-now annotation: %w", err)
 	}
-	fmt.Printf("%s Module release '%s' marked for immediate deployment.\n", cli.MsgOK, release.Name)
+	fmt.Printf("%s Module release '%s' marked for immediate deployment.\n", cli.MsgInfo, release.Name)
 	fmt.Println("   The release will be applied immediately, bypassing update windows.")
 
 	return nil

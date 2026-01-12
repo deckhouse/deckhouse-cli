@@ -63,9 +63,9 @@ func disableModule(cmd *cobra.Command, args []string) error {
 
 	switch result.Status {
 	case moduleconfig.AlreadyInState:
-		fmt.Fprintf(os.Stderr, "%s Module '%s' is already disabled.\n", cli.MsgWarn, moduleName)
+		fmt.Fprintf(os.Stderr, "%s Module '%s' is already disabled.\n", cli.MsgInfo, moduleName)
 	case moduleconfig.Changed:
-		fmt.Printf("%s Module '%s' disabled.\n", cli.MsgOK, moduleName)
+		fmt.Printf("%s Module '%s' disabled.\n", cli.MsgInfo, moduleName)
 	}
 
 	return nil

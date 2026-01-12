@@ -85,7 +85,7 @@ func approveRelease(cmd *cobra.Command, args []string) error {
 
 	// Check if already approved
 	if release.IsApproved {
-		fmt.Fprintf(os.Stderr, "%s Module release '%s' is already approved.\n", cli.MsgWarn, release.Name)
+		fmt.Fprintf(os.Stderr, "%s Module release '%s' is already approved.\n", cli.MsgInfo, release.Name)
 		fmt.Fprintf(os.Stderr, "   Phase: %s\n", release.Phase)
 		if release.Message != "" {
 			fmt.Fprintf(os.Stderr, "   Message: %s\n", release.Message)
@@ -109,7 +109,7 @@ func approveRelease(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to approve module release: %w", err)
 	}
-	fmt.Printf("%s Module release '%s' approved.\n", cli.MsgOK, release.Name)
+	fmt.Printf("%s Module release '%s' approved.\n", cli.MsgInfo, release.Name)
 	fmt.Println("   The release will be deployed according to the update policy.")
 
 	return nil
