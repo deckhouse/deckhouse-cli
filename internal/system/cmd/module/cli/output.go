@@ -13,7 +13,7 @@ import (
 
 // Output message prefixes with colors for better status readability.
 var (
-	MsgInfo    = color.New(color.FgGreen).Sprint("[INFO]")
+	MsgInfo  = color.New(color.FgGreen).Sprint("[INFO]")
 	MsgWarn  = color.New(color.FgYellow).Sprint("[WARN]")
 	MsgError = color.New(color.FgRed).Sprint("[ERROR]")
 )
