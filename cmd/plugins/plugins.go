@@ -83,15 +83,15 @@ func NewCommand(logger *dkplog.Logger) *cobra.Command {
 			err := os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
 			// if permission failed
 			if errors.Is(err, os.ErrPermission) {
-				pc.logger.Warn("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", flags.DeckhousePluginsDir), dkplog.Err(err))
+				pc.logger.Warn("use homedir instead of default d8 plugins path", dkplog.Err(err))
 
-				newPluginDirectory, err := os.UserHomeDir()
+				homeDir, err := os.UserHomeDir()
 				if err != nil {
 					logger.Warn("failed to receive home dir to create plugins dir", slog.String("error", err.Error()))
 					return
 				}
 
-				pc.pluginDirectory = path.Join(newPluginDirectory, ".deckhouse-cli")
+				pc.pluginDirectory = path.Join(homeDir, ".deckhouse-cli")
 			}
 		},
 	}
@@ -503,7 +503,7 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 
 	cmd.Flags().StringVar(&version, "version", "", "Specific version of the plugin to install")
 	cmd.Flags().IntVar(&useMajor, "use-major", -1, "Use specific major version (e.g., 1, 2)")
-	cmd.Flags().BoolVar(&resolvePluginsConflicts, "resolve-plugins-conflicts", false, "Resolve conflicts between installed plugins")
+	cmd.Flags().BoolVar(&resolvePluginsConflicts, "resolve-plugins-conflicts", false, "Resolve conflicts between plugins requirements")
 
 	return cmd
 }
@@ -911,12 +911,14 @@ func (pc *PluginsCommand) validateRequirements(plugin *internal.Plugin) (FailedC
 	// validate plugin requirements
 	pc.logger.Debug("validating plugin requirements", slog.String("plugin", plugin.Name))
 
-	result := make(FailedConstraints)
-
-	var err error
-	result, err = pc.validatePluginRequirement(plugin)
+	err := pc.validatePluginConflicts(plugin)
 	if err != nil {
-		return result, fmt.Errorf("plugin requirements: %w", err)
+		return nil, fmt.Errorf("plugin conflicts: %w", err)
+	}
+
+	failedConstraints, err := pc.validatePluginRequirement(plugin)
+	if err != nil {
+		return nil, fmt.Errorf("plugin requirements: %w", err)
 	}
 
 	// validate module requirements
@@ -924,10 +926,61 @@ func (pc *PluginsCommand) validateRequirements(plugin *internal.Plugin) (FailedC
 
 	err = pc.validateModuleRequirement(plugin)
 	if err != nil {
-		return result, fmt.Errorf("module requirements: %w", err)
+		return nil, fmt.Errorf("module requirements: %w", err)
 	}
 
-	return result, nil
+	return failedConstraints, nil
+}
+
+// check that installing version not make conflict with existing plugins requirements
+func (pc *PluginsCommand) validatePluginConflicts(plugin *internal.Plugin) error {
+	plugins, err := os.ReadDir(path.Join(pc.pluginDirectory, "plugins"))
+	if err != nil {
+		return fmt.Errorf("failed to read plugins directory: %w", err)
+	}
+
+	for _, pluginDir := range plugins {
+		pluginName := pluginDir.Name()
+
+		contract, err := pc.getInstalledPluginContract(pluginName)
+		if err != nil {
+			return fmt.Errorf("failed to get installed plugin contract: %w", err)
+		}
+
+		err = validatePluginConflict(plugin, contract)
+		if err != nil {
+			return fmt.Errorf("validate plugin conflict: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func validatePluginConflict(plugin *internal.Plugin, installedPlugin *internal.Plugin) error {
+	for _, requirement := range installedPlugin.Requirements.Plugins {
+		// installed plugin requirement is the same as the plugin we are validating
+		if requirement.Name == plugin.Name {
+			constraint, err := semver.NewConstraint(requirement.Constraint)
+			if err != nil {
+				return fmt.Errorf("failed to parse constraint: %w", err)
+			}
+
+			version, err := semver.NewVersion(installedPlugin.Version)
+			if err != nil {
+				return fmt.Errorf("failed to parse version: %w", err)
+			}
+
+			if !constraint.Check(version) {
+				return fmt.Errorf("installing plugin %s %s will make conflict with existing plugin %s %s",
+					plugin.Name,
+					plugin.Version,
+					installedPlugin.Name,
+					constraint.String())
+			}
+		}
+	}
+
+	return nil
 }
 
 func (pc *PluginsCommand) validatePluginRequirement(plugin *internal.Plugin) (FailedConstraints, error) {
@@ -957,7 +1010,12 @@ func (pc *PluginsCommand) validatePluginRequirement(plugin *internal.Plugin) (Fa
 			}
 
 			if !constraint.Check(installedVersion) {
-				pc.logger.Warn("plugin requirement not satisfied", slog.String("plugin", plugin.Name), slog.String("requirement", pluginRequirement.Name), slog.String("constraint", pluginRequirement.Constraint), slog.String("installedVersion", installedVersion.Original()))
+				pc.logger.Warn("plugin requirement not satisfied",
+					slog.String("plugin", plugin.Name),
+					slog.String("requirement", pluginRequirement.Name),
+					slog.String("constraint", pluginRequirement.Constraint),
+					slog.String("installedVersion", installedVersion.Original()))
+
 				result[pluginRequirement.Name] = constraint
 			}
 		}
