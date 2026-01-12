@@ -83,9 +83,15 @@ type VerificationResult struct {
 	FoundAttTags   []string
 	MissingAttTags []string
 
-	ModulesExpected int
-	ModulesFound    int
-	ModulesMissing  []string
+	ModulesExpected       int
+	ModulesFound          int
+	ModulesMissing        []string
+	ModuleVersionsTotal   int
+	ModuleVersionsFound   int
+	ModuleVersionsMissing []string
+	ModuleDigestsTotal    int
+	ModuleDigestsFound    int
+	ModuleDigestsMissing  []string
 
 	SecurityExpected int
 	SecurityFound    int
@@ -102,6 +108,8 @@ func (r *VerificationResult) IsSuccess() bool {
 	return len(r.MissingDigests) == 0 &&
 		len(r.MissingAttTags) == 0 &&
 		len(r.ModulesMissing) == 0 &&
+		len(r.ModuleVersionsMissing) == 0 &&
+		len(r.ModuleDigestsMissing) == 0 &&
 		len(r.SecurityMissing) == 0
 }
 
@@ -136,6 +144,18 @@ func (r *VerificationResult) Summary() string {
 		sb.WriteString(fmt.Sprintf("  ✓ Modules: %d / %d\n", r.ModulesFound, r.ModulesExpected))
 		if len(r.ModulesMissing) > 0 {
 			sb.WriteString(fmt.Sprintf("  ✗ Missing modules: %d\n", len(r.ModulesMissing)))
+		}
+		if r.ModuleVersionsTotal > 0 {
+			sb.WriteString(fmt.Sprintf("  ✓ Module versions: %d / %d\n", r.ModuleVersionsFound, r.ModuleVersionsTotal))
+			if len(r.ModuleVersionsMissing) > 0 {
+				sb.WriteString(fmt.Sprintf("  ✗ Missing versions: %d\n", len(r.ModuleVersionsMissing)))
+			}
+		}
+		if r.ModuleDigestsTotal > 0 {
+			sb.WriteString(fmt.Sprintf("  ✓ Module digests: %d / %d\n", r.ModuleDigestsFound, r.ModuleDigestsTotal))
+			if len(r.ModuleDigestsMissing) > 0 {
+				sb.WriteString(fmt.Sprintf("  ✗ Missing digests: %d\n", len(r.ModuleDigestsMissing)))
+			}
 		}
 	}
 	if r.SecurityExpected > 0 {
@@ -187,6 +207,22 @@ func (r *VerificationResult) DetailedReport() string {
 		sb.WriteString("MISSING MODULES:\n")
 		for _, m := range r.ModulesMissing {
 			sb.WriteString(fmt.Sprintf("  - %s\n", m))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(r.ModuleVersionsMissing) > 0 {
+		sb.WriteString("MISSING MODULE VERSIONS:\n")
+		for _, v := range r.ModuleVersionsMissing {
+			sb.WriteString(fmt.Sprintf("  - %s\n", v))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(r.ModuleDigestsMissing) > 0 {
+		sb.WriteString("MISSING MODULE DIGESTS:\n")
+		for _, d := range r.ModuleDigestsMissing {
+			sb.WriteString(fmt.Sprintf("  - %s\n", d))
 		}
 		sb.WriteString("\n")
 	}
@@ -295,11 +331,24 @@ func (v *DigestVerifier) VerifyModules(ctx context.Context, moduleNames []string
 
 	releaseChannels := d8internal.GetAllDefaultReleaseChannels()
 	sourceOpts := v.sourceReader.RemoteOpts()
+	targetOpts := append(v.targetOpts, remote.WithContext(ctx))
 
 	v.logProgressf("Verifying modules...")
 
 	for _, moduleName := range modules {
 		v.logProgressf("  Checking module: %s", moduleName)
+
+		moduleInfo, err := v.sourceReader.ReadModuleDigests(ctx, moduleName)
+		if err != nil {
+			v.logProgressf("    Warning: failed to read module info: %v", err)
+			result.Errors = append(result.Errors, fmt.Sprintf("module %s: failed to read: %v", moduleName, err))
+			continue
+		}
+
+		if len(moduleInfo.ReleaseChannels) == 0 {
+			v.logProgressf("    No release channels in source, skipping")
+			continue
+		}
 
 		sourceReleaseRepo := path.Join(v.sourceReader.Registry(), d8internal.ModulesSegment, moduleName, "release")
 		targetReleaseRepo := path.Join(v.targetReg, d8internal.ModulesSegment, moduleName, "release")
@@ -310,7 +359,6 @@ func (v *DigestVerifier) VerifyModules(ctx context.Context, moduleNames []string
 			continue
 		}
 
-		targetOpts := append(v.targetOpts, remote.WithContext(ctx))
 		targetTags, err := remote.List(targetRef.Context(), targetOpts...)
 		if err != nil {
 			v.logProgressf("    Target: no tags found (module not mirrored)")
@@ -318,7 +366,6 @@ func (v *DigestVerifier) VerifyModules(ctx context.Context, moduleNames []string
 			continue
 		}
 
-		// Filter to only release channels
 		targetChannels := []string{}
 		for _, tag := range targetTags {
 			for _, channel := range releaseChannels {
@@ -337,9 +384,9 @@ func (v *DigestVerifier) VerifyModules(ctx context.Context, moduleNames []string
 
 		v.logProgressf("    Target has %d channels: %v", len(targetChannels), targetChannels)
 
-		matchedChannels := []string{}
-		mismatchedChannels := []string{}
-		sourceNotFoundChannels := []string{}
+		matchedChannels := 0
+		mismatchedChannels := 0
+		sourceOptsWithCtx := append(sourceOpts, remote.WithContext(ctx))
 
 		for _, channel := range targetChannels {
 			targetTagRef := targetReleaseRepo + ":" + channel
@@ -350,56 +397,95 @@ func (v *DigestVerifier) VerifyModules(ctx context.Context, moduleNames []string
 
 			targetDesc, err := remote.Head(targetImgRef, targetOpts...)
 			if err != nil {
-				continue // Already listed, should exist
+				continue
 			}
 			targetDigest := targetDesc.Digest.String()
 
 			sourceTagRef := sourceReleaseRepo + ":" + channel
 			sourceImgRef, err := name.ParseReference(sourceTagRef)
 			if err != nil {
-				sourceNotFoundChannels = append(sourceNotFoundChannels, channel)
 				continue
 			}
 
-			sourceOptsWithCtx := append(sourceOpts, remote.WithContext(ctx))
 			sourceDesc, err := remote.Head(sourceImgRef, sourceOptsWithCtx...)
 			if err != nil {
-				// Channel exists in target but not in source - might be removed upstream
-				v.logProgressf("    ⚠ %s: exists in target but not in source (may be removed upstream)", channel)
-				sourceNotFoundChannels = append(sourceNotFoundChannels, channel)
+				v.logProgressf("    ⚠ %s: exists in target but not in source", channel)
 				continue
 			}
 			sourceDigest := sourceDesc.Digest.String()
 
 			if sourceDigest != targetDigest {
 				v.logProgressf("    ✗ %s: DIGEST MISMATCH!", channel)
-				v.logProgressf("        Source: %s", sourceDigest)
-				v.logProgressf("        Target: %s", targetDigest)
-				mismatchedChannels = append(mismatchedChannels, channel)
+				mismatchedChannels++
 				result.Errors = append(result.Errors,
-					fmt.Sprintf("module %s/%s: digest mismatch (source=%s, target=%s)",
-						moduleName, channel, sourceDigest[:19], targetDigest[:19]))
+					fmt.Sprintf("module %s/%s: digest mismatch", moduleName, channel))
 			} else {
 				v.logProgressf("    ✓ %s: digest match %s", channel, sourceDigest[:19])
-				matchedChannels = append(matchedChannels, channel)
+				matchedChannels++
 			}
 		}
 
-		if len(mismatchedChannels) > 0 {
-			v.logProgressf("    Result: %d matched, %d MISMATCHED, %d source-not-found",
-				len(matchedChannels), len(mismatchedChannels), len(sourceNotFoundChannels))
+		if mismatchedChannels == 0 && matchedChannels > 0 {
 			result.ModulesFound++
-		} else if len(matchedChannels) > 0 {
-			v.logProgressf("    ✓ All %d channels verified with matching digests", len(matchedChannels))
-			result.ModulesFound++
-		} else if len(sourceNotFoundChannels) > 0 {
-			v.logProgressf("    ⚠ All %d channels exist only in target (removed from source?)", len(sourceNotFoundChannels))
-			result.ModulesFound++
+		}
+
+		v.logProgressf("    Verifying module version images...")
+		targetModuleRepo := path.Join(v.targetReg, d8internal.ModulesSegment, moduleName)
+
+		for _, version := range moduleInfo.Versions {
+			result.ModuleVersionsTotal++
+			targetVersionRef := targetModuleRepo + ":" + version
+			targetImgRef, err := name.ParseReference(targetVersionRef)
+			if err != nil {
+				result.ModuleVersionsMissing = append(result.ModuleVersionsMissing, moduleName+":"+version)
+				continue
+			}
+
+			_, err = remote.Head(targetImgRef, targetOpts...)
+			if err != nil {
+				v.logProgressf("    ✗ %s:%s NOT FOUND in target", moduleName, version)
+				result.ModuleVersionsMissing = append(result.ModuleVersionsMissing, moduleName+":"+version)
+			} else {
+				v.logProgressf("    ✓ %s:%s found", moduleName, version)
+				result.ModuleVersionsFound++
+			}
+		}
+
+		if len(moduleInfo.ImageDigests) > 0 {
+			v.logProgressf("    Verifying %d module image digests...", len(moduleInfo.ImageDigests))
+			v.verifyModuleDigests(ctx, result, moduleName, targetModuleRepo, moduleInfo.ImageDigests)
 		}
 	}
 
 	result.EndTime = time.Now()
 	return result, nil
+}
+
+func (v *DigestVerifier) verifyModuleDigests(ctx context.Context, result *VerificationResult, moduleName, targetRepo string, digests []string) {
+	items := make([]verifyItem, 0, len(digests))
+
+	for _, digest := range digests {
+		digest := digest
+		result.ModuleDigestsTotal++
+		ref := targetRepo + "@" + digest
+
+		items = append(items, verifyItem{
+			ref: ref,
+			onErr: func(ref string, err error) {
+				result.Errors = append(result.Errors, fmt.Sprintf("module %s digest %s: %v", moduleName, digest[:19], err))
+			},
+			onFound: func(ref string) {
+				result.ModuleDigestsFound++
+			},
+			onMissing: func(ref string) {
+				result.ModuleDigestsMissing = append(result.ModuleDigestsMissing, moduleName+"@"+digest)
+			},
+		})
+	}
+
+	v.verifyInParallel(ctx, items)
+	v.logProgressf("    Module digests: %d found, %d missing",
+		result.ModuleDigestsFound, len(result.ModuleDigestsMissing))
 }
 
 func (v *DigestVerifier) VerifySecurity(ctx context.Context) (*VerificationResult, error) {
@@ -667,6 +753,12 @@ func mergeResults(dst, src *VerificationResult) {
 	dst.ModulesExpected += src.ModulesExpected
 	dst.ModulesFound += src.ModulesFound
 	dst.ModulesMissing = append(dst.ModulesMissing, src.ModulesMissing...)
+	dst.ModuleVersionsTotal += src.ModuleVersionsTotal
+	dst.ModuleVersionsFound += src.ModuleVersionsFound
+	dst.ModuleVersionsMissing = append(dst.ModuleVersionsMissing, src.ModuleVersionsMissing...)
+	dst.ModuleDigestsTotal += src.ModuleDigestsTotal
+	dst.ModuleDigestsFound += src.ModuleDigestsFound
+	dst.ModuleDigestsMissing = append(dst.ModuleDigestsMissing, src.ModuleDigestsMissing...)
 
 	dst.SecurityExpected += src.SecurityExpected
 	dst.SecurityFound += src.SecurityFound

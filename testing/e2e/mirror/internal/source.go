@@ -312,9 +312,10 @@ func extractDigestsFromTar(rc io.Reader) ([]string, error) {
 }
 
 type ModuleInfo struct {
-	Name     string
-	Versions []string
-	Digests  []string
+	Name            string
+	ReleaseChannels []ReleaseChannelInfo
+	Versions        []string
+	ImageDigests    []string
 }
 
 func (r *SourceReader) listTags(ctx context.Context, repoPath string) ([]string, error) {
@@ -350,22 +351,189 @@ func (r *SourceReader) ReadModuleDigests(ctx context.Context, moduleName string)
 	r.progress("Reading module %s...", moduleName)
 
 	info := &ModuleInfo{
-		Name:     moduleName,
-		Versions: make([]string, 0),
-		Digests:  make([]string, 0),
+		Name:            moduleName,
+		ReleaseChannels: make([]ReleaseChannelInfo, 0),
+		Versions:        make([]string, 0),
+		ImageDigests:    make([]string, 0),
 	}
 
-	moduleReleaseRef := path.Join(r.registry, d8internal.ModulesSegment, moduleName, "release")
-	tags, err := r.listTags(ctx, moduleReleaseRef)
-	if err != nil {
-		r.progress("  No release tags found")
+	channels := d8internal.GetAllDefaultReleaseChannels()
+	moduleReleaseBase := path.Join(r.registry, d8internal.ModulesSegment, moduleName, "release")
+
+	versionSet := make(map[string]bool)
+	for _, channel := range channels {
+		ref := moduleReleaseBase + ":" + channel
+		version, err := r.readModuleReleaseChannelVersion(ctx, ref)
+		if err != nil {
+			continue
+		}
+
+		info.ReleaseChannels = append(info.ReleaseChannels, ReleaseChannelInfo{
+			Channel: channel,
+			Version: version,
+		})
+		versionSet[version] = true
+	}
+
+	if len(info.ReleaseChannels) == 0 {
+		r.progress("  No release channels found")
 		return info, nil
 	}
 
-	info.Versions = tags
-	r.progress("  Found %d release tags", len(tags))
+	r.progress("  Found %d release channels", len(info.ReleaseChannels))
+
+	for version := range versionSet {
+		info.Versions = append(info.Versions, version)
+	}
+	sort.Strings(info.Versions)
+
+	digestSet := make(map[string]bool)
+	moduleBase := path.Join(r.registry, d8internal.ModulesSegment, moduleName)
+
+	for _, version := range info.Versions {
+		moduleRef := moduleBase + ":" + version
+		digests, err := r.readModuleImageDigests(ctx, moduleRef)
+		if err != nil {
+			r.progress("  Warning: failed to read digests for %s:%s: %v", moduleName, version, err)
+			continue
+		}
+
+		for _, d := range digests {
+			digestSet[d] = true
+		}
+	}
+
+	for d := range digestSet {
+		info.ImageDigests = append(info.ImageDigests, d)
+	}
+	sort.Strings(info.ImageDigests)
+
+	r.progress("  Found %d versions, %d unique digests", len(info.Versions), len(info.ImageDigests))
 
 	return info, nil
+}
+
+func (r *SourceReader) readModuleReleaseChannelVersion(ctx context.Context, ref string) (string, error) {
+	imgRef, err := name.ParseReference(ref)
+	if err != nil {
+		return "", fmt.Errorf("parse reference: %w", err)
+	}
+
+	opts := append(r.opts, remote.WithContext(ctx))
+	img, err := remote.Image(imgRef, opts...)
+	if err != nil {
+		return "", fmt.Errorf("get image: %w", err)
+	}
+
+	layers, err := img.Layers()
+	if err != nil {
+		return "", fmt.Errorf("get layers: %w", err)
+	}
+
+	for _, layer := range layers {
+		rc, err := layer.Uncompressed()
+		if err != nil {
+			continue
+		}
+
+		version, err := extractVersionFromTar(rc)
+		rc.Close()
+		if err == nil && version != "" {
+			return version, nil
+		}
+	}
+
+	return "", fmt.Errorf("version.json not found in image")
+}
+
+func (r *SourceReader) readModuleImageDigests(ctx context.Context, ref string) ([]string, error) {
+	imgRef, err := name.ParseReference(ref)
+	if err != nil {
+		return nil, fmt.Errorf("parse reference: %w", err)
+	}
+
+	opts := append(r.opts, remote.WithContext(ctx))
+	desc, err := remote.Get(imgRef, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("get descriptor: %w", err)
+	}
+
+	var img v1.Image
+
+	if desc.MediaType.IsIndex() {
+		idx, err := desc.ImageIndex()
+		if err != nil {
+			return nil, fmt.Errorf("get index: %w", err)
+		}
+
+		manifest, err := idx.IndexManifest()
+		if err != nil {
+			return nil, fmt.Errorf("get index manifest: %w", err)
+		}
+
+		if len(manifest.Manifests) == 0 {
+			return nil, fmt.Errorf("index has no manifests")
+		}
+
+		img, err = idx.Image(manifest.Manifests[0].Digest)
+		if err != nil {
+			return nil, fmt.Errorf("get image from index: %w", err)
+		}
+	} else {
+		img, err = desc.Image()
+		if err != nil {
+			return nil, fmt.Errorf("get image: %w", err)
+		}
+	}
+
+	layers, err := img.Layers()
+	if err != nil {
+		return nil, fmt.Errorf("get layers: %w", err)
+	}
+
+	for _, layer := range layers {
+		rc, err := layer.Uncompressed()
+		if err != nil {
+			continue
+		}
+
+		digests, err := extractModuleDigestsFromTar(rc)
+		rc.Close()
+		if err == nil && len(digests) > 0 {
+			return digests, nil
+		}
+	}
+
+	return nil, nil
+}
+
+func extractModuleDigestsFromTar(rc io.Reader) ([]string, error) {
+	tr := tar.NewReader(rc)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		if hdr.Name == "images_digests.json" || strings.HasSuffix(hdr.Name, "/images_digests.json") {
+			var digestsByComponent map[string]map[string]string
+			if err := json.NewDecoder(tr).Decode(&digestsByComponent); err != nil {
+				return nil, err
+			}
+
+			var result []string
+			for _, images := range digestsByComponent {
+				for _, digest := range images {
+					result = append(result, digest)
+				}
+			}
+			return result, nil
+		}
+	}
+	return nil, nil
 }
 
 type SecurityDigests struct {

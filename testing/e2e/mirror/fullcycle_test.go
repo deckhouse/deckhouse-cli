@@ -159,6 +159,12 @@ func runVerificationStep(t *testing.T, ctx context.Context, cfg *internal.Config
 	env.Report.ModulesExpected = result.ModulesExpected
 	env.Report.ModulesFound = result.ModulesFound
 	env.Report.ModulesMissing = len(result.ModulesMissing)
+	env.Report.ModuleVersionsTotal = result.ModuleVersionsTotal
+	env.Report.ModuleVersionsFound = result.ModuleVersionsFound
+	env.Report.ModuleVersionsMissing = len(result.ModuleVersionsMissing)
+	env.Report.ModuleDigestsTotal = result.ModuleDigestsTotal
+	env.Report.ModuleDigestsFound = result.ModuleDigestsFound
+	env.Report.ModuleDigestsMissing = len(result.ModuleDigestsMissing)
 	env.Report.SecurityExpected = result.SecurityExpected
 	env.Report.SecurityFound = result.SecurityFound
 	env.Report.SecurityMissing = len(result.SecurityMissing)
@@ -174,6 +180,12 @@ func runVerificationStep(t *testing.T, ctx context.Context, cfg *internal.Config
 	}
 	if len(result.MissingAttTags) > 0 {
 		failures = append(failures, fmt.Sprintf("missing %d .att tags in target", len(result.MissingAttTags)))
+	}
+	if len(result.ModuleVersionsMissing) > 0 {
+		failures = append(failures, fmt.Sprintf("missing %d module versions in target", len(result.ModuleVersionsMissing)))
+	}
+	if len(result.ModuleDigestsMissing) > 0 {
+		failures = append(failures, fmt.Sprintf("missing %d module digests in target", len(result.ModuleDigestsMissing)))
 	}
 
 	if len(failures) > 0 {

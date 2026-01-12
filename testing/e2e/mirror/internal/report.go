@@ -44,9 +44,15 @@ type TestReport struct {
 	FoundAttTags    int
 	MissingAttTags  int
 
-	ModulesExpected int
-	ModulesFound     int
-	ModulesMissing   int
+	ModulesExpected       int
+	ModulesFound          int
+	ModulesMissing        int
+	ModuleVersionsTotal   int
+	ModuleVersionsFound   int
+	ModuleVersionsMissing int
+	ModuleDigestsTotal    int
+	ModuleDigestsFound    int
+	ModuleDigestsMissing  int
 
 	SecurityExpected int
 	SecurityFound     int
@@ -224,6 +230,12 @@ func (r *TestReport) format(useColors bool) string {
 	}
 	if r.ModulesExpected > 0 {
 		b.WriteString(r.formatSection(useColors, "Modules verified: ", r.ModulesFound, r.ModulesExpected, r.ModulesMissing))
+	}
+	if r.ModuleVersionsTotal > 0 {
+		b.WriteString(r.formatSection(useColors, "Module versions:  ", r.ModuleVersionsFound, r.ModuleVersionsTotal, r.ModuleVersionsMissing))
+	}
+	if r.ModuleDigestsTotal > 0 {
+		b.WriteString(r.formatSection(useColors, "Module digests:   ", r.ModuleDigestsFound, r.ModuleDigestsTotal, r.ModuleDigestsMissing))
 	}
 	if r.SecurityExpected > 0 {
 		b.WriteString(r.formatSection(useColors, "Security verified:", r.SecurityFound, r.SecurityExpected, r.SecurityMissing))

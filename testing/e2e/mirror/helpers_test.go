@@ -133,28 +133,54 @@ func verifyModulesImages(t *testing.T, ctx context.Context, cfg *internal.Config
 	require.NoError(t, err, "Modules verification failed")
 
 	t.Logf("Found %d/%d modules in target", result.ModulesFound, result.ModulesExpected)
+	t.Logf("Found %d/%d module versions in target", result.ModuleVersionsFound, result.ModuleVersionsTotal)
+	t.Logf("Found %d/%d module digests in target", result.ModuleDigestsFound, result.ModuleDigestsTotal)
 
 	for _, missing := range result.ModulesMissing {
-		t.Logf("  ✗ %s", missing)
+		t.Logf("  ✗ module: %s", missing)
+	}
+	for _, missing := range result.ModuleVersionsMissing {
+		t.Logf("  ✗ version: %s", missing)
+	}
+	for _, missing := range result.ModuleDigestsMissing {
+		t.Logf("  ✗ digest: %s", missing)
 	}
 
+	var failures []string
 	if len(result.ModulesMissing) > 0 {
+		failures = append(failures, fmt.Sprintf("%d modules missing", len(result.ModulesMissing)))
+	}
+	if len(result.ModuleVersionsMissing) > 0 {
+		failures = append(failures, fmt.Sprintf("%d versions missing", len(result.ModuleVersionsMissing)))
+	}
+	if len(result.ModuleDigestsMissing) > 0 {
+		failures = append(failures, fmt.Sprintf("%d digests missing", len(result.ModuleDigestsMissing)))
+	}
+
+	if len(failures) > 0 {
 		env.Report.AddStep(
-			fmt.Sprintf("Modules Verification (%d/%d found)",
-				result.ModulesFound, result.ModulesExpected),
+			fmt.Sprintf("Modules Verification (%d modules, %d versions)",
+				result.ModulesFound, result.ModuleVersionsFound),
 			"FAIL", time.Since(stepStart),
-			fmt.Errorf("missing %d modules: %v", len(result.ModulesMissing), result.ModulesMissing),
+			fmt.Errorf("%v", failures),
 		)
-		require.Empty(t, result.ModulesMissing, "Some modules are missing in target")
+		require.Empty(t, failures, "Modules verification failed: %v", failures)
 		return
 	}
 
 	env.Report.ModulesExpected = result.ModulesExpected
 	env.Report.ModulesFound = result.ModulesFound
 	env.Report.ModulesMissing = len(result.ModulesMissing)
+	env.Report.ModuleVersionsTotal = result.ModuleVersionsTotal
+	env.Report.ModuleVersionsFound = result.ModuleVersionsFound
+	env.Report.ModuleVersionsMissing = len(result.ModuleVersionsMissing)
+	env.Report.ModuleDigestsTotal = result.ModuleDigestsTotal
+	env.Report.ModuleDigestsFound = result.ModuleDigestsFound
+	env.Report.ModuleDigestsMissing = len(result.ModuleDigestsMissing)
 
 	env.Report.AddStep(
-		fmt.Sprintf("Modules Verification (%d modules)", result.ModulesFound),
+		fmt.Sprintf("Modules Verification (%d modules, %d versions, %d digests)",
+			result.ModulesFound, result.ModuleVersionsFound, result.ModuleDigestsFound),
 		"PASS", time.Since(stepStart), nil,
 	)
 	t.Log("Modules verification passed")
@@ -212,4 +238,3 @@ func saveReport(t *testing.T, path string, report *internal.TestReport) {
 		t.Logf("Warning: failed to write report: %v", err)
 	}
 }
-
