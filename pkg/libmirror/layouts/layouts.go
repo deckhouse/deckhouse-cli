@@ -493,22 +493,31 @@ func FindVexImage(
 		return "", fmt.Errorf("parse reference: %w", err)
 	}
 
-	split := strings.SplitN(vexImageName, ":", 2)
-	imagePath := split[0]
-	tag := split[1]
+	// Use LastIndex to correctly handle URLs with port (e.g., localhost:443/repo:tag)
+	splitIndex := strings.LastIndex(vexImageName, ":")
+	if splitIndex == -1 {
+		return "", fmt.Errorf("invalid vex image name format: %s", vexImageName)
+	}
+	imagePath := vexImageName[:splitIndex]
+	tag := vexImageName[splitIndex+1:]
 
+	// Add missing path segments to client if VEX image is in a subpath
 	imageSegmentsRaw := strings.TrimPrefix(imagePath, client.GetRegistry())
-	imageSegments := strings.Split(imageSegmentsRaw, "/")
-
-	for i, segment := range imageSegments {
-		client = client.WithSegment(segment)
-		logger.Debugf("Segment %d: %s", i, segment)
+	imageSegmentsRaw = strings.TrimPrefix(imageSegmentsRaw, "/")
+	if imageSegmentsRaw != "" {
+		for _, segment := range strings.Split(imageSegmentsRaw, "/") {
+			client = client.WithSegment(segment)
+			logger.Debugf("Segment: %s", segment)
+		}
 	}
 
 	err = client.CheckImageExists(context.TODO(), tag)
 	if errors.Is(err, regclient.ErrImageNotFound) {
 		// Image not found, which is expected for non-vulnerable images
 		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("check VEX image exists: %w", err)
 	}
 
 	return vexImageName, nil

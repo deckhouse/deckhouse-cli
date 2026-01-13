@@ -81,15 +81,13 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 			return nil, fmt.Errorf("no manifests found in index manifest")
 		}
 
-		// hardcoded first
+		// hardcoded first manifest (all contracts must be the same for all manifests)
 		digest := indexManifest.GetManifests()[0].GetDigest()
 		if digest.String() == "" {
 			return nil, fmt.Errorf("no digest found in manifest")
 		}
 
-		digestClient := pluginClient.WithSegment("meta")
-
-		digestManifestResult, err = digestClient.GetManifest(ctx, "@"+digest.String())
+		digestManifestResult, err = pluginClient.GetManifest(ctx, "@"+digest.String())
 		if err != nil {
 			return nil, fmt.Errorf("failed to get manifest: %w", err)
 		}
