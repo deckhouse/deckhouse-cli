@@ -98,16 +98,12 @@ func (l *ImageLayout) Path() layout.Path {
 }
 
 func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
-	// Skip if tag already exists to prevent duplicates
-	if _, exists := l.metaByTag[tag]; exists {
-		return nil
-	}
-
 	meta, err := img.GetMetadata()
 	if err != nil {
 		return fmt.Errorf("get image tag reference: %w", err)
 	}
 
+	// TODO: support nesting tags in image
 	l.metaByTag[tag] = meta.(*ImageMeta)
 
 	err = l.wrapped.AppendImage(img,
