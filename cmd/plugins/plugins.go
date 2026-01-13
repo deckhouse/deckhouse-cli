@@ -17,7 +17,6 @@ limitations under the License.
 package plugins
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,7 +31,7 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
+	"sigs.k8s.io/yaml"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry"
@@ -417,16 +416,18 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 					slog.String("error", err.Error()))
 				return fmt.Errorf("failed to get plugin contract: %w", err)
 			}
+			contract := service.DomainToContract(plugin)
 
 			// Display contract
-			buffer := bytes.NewBuffer(nil)
-			enc := yaml.NewEncoder(buffer)
-			enc.SetIndent(2)
-			err = enc.Encode(plugin)
+			jsonBytes, err := json.Marshal(contract)
 			if err != nil {
-				return fmt.Errorf("failed to encode requirements: %w", err)
+				return fmt.Errorf("failed to marshal contract to JSON: %w", err)
 			}
-			fmt.Println(buffer.String())
+			yamlBytes, err := yaml.JSONToYAML(jsonBytes)
+			if err != nil {
+				return fmt.Errorf("failed to convert JSON to YAML: %w", err)
+			}
+			fmt.Println(string(yamlBytes))
 
 			return nil
 		},

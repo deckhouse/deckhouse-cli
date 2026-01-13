@@ -20,10 +20,10 @@ package internal
 type Plugin struct {
 	Name         string
 	Version      string
-	Description  string       `yaml:",omitempty"`
-	Env          []EnvVar     `yaml:",omitempty"`
-	Flags        []Flag       `yaml:",omitempty"`
-	Requirements Requirements `yaml:",omitempty"`
+	Description  string
+	Env          []EnvVar
+	Flags        []Flag
+	Requirements Requirements
 }
 
 // EnvVar represents an environment variable required by the plugin
@@ -38,14 +38,14 @@ type Flag struct {
 
 // Requirements represents plugin dependencies
 type Requirements struct {
-	Kubernetes KubernetesRequirement `yaml:",omitempty"`
-	Modules    []ModuleRequirement   `yaml:",omitempty"`
-	Plugins    []PluginRequirement   `yaml:",omitempty"`
+	Kubernetes KubernetesRequirement
+	Modules    []ModuleRequirement
+	Plugins    []PluginRequirement
 }
 
 // KubernetesRequirement represents Kubernetes version constraint
 type KubernetesRequirement struct {
-	Constraint string `yaml:",omitempty"`
+	Constraint string
 }
 
 // ModuleRequirement represents a required Deckhouse module
