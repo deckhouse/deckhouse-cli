@@ -85,11 +85,11 @@ func NewCommand(logger *dkplog.Logger) *cobra.Command {
 			err := os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
 			// if permission failed
 			if errors.Is(err, os.ErrPermission) {
-				pc.logger.Warn("use homedir instead of default d8 plugins path", dkplog.Err(err))
+				pc.logger.Debug("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", flags.DeckhousePluginsDir), dkplog.Err(err))
 
 				homeDir, err := os.UserHomeDir()
 				if err != nil {
-					logger.Warn("failed to receive home dir to create plugins dir", slog.String("error", err.Error()))
+					logger.Debug("failed to receive home dir to create plugins dir", slog.String("error", err.Error()))
 					return
 				}
 

@@ -48,6 +48,17 @@ func VersionsToMirror(pullParams *params.PullParams, client registry.Client, tag
 		logger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", pullParams.DeckhouseTag)
 	}
 
+	vers := make([]*semver.Version, 0, 1)
+
+	for _, tag := range tagsToMirror {
+		v, err := semver.NewVersion(tag)
+		if err != nil {
+			continue
+		}
+
+		vers = append(vers, v)
+	}
+
 	releaseChannelsToCopy := internal.GetAllDefaultReleaseChannels()
 	releaseChannelsToCopy = append(releaseChannelsToCopy, internal.LTSChannel)
 
@@ -77,7 +88,6 @@ func VersionsToMirror(pullParams *params.PullParams, client registry.Client, tag
 		}
 	}
 
-	vers := make([]*semver.Version, 0, len(releaseChannelsVersions))
 	mappedChannels := make(map[string]struct{}, len(releaseChannelsVersions))
 	for channel, v := range releaseChannelsVersions {
 		if len(tagsToMirror) == 0 {
@@ -97,6 +107,10 @@ func VersionsToMirror(pullParams *params.PullParams, client registry.Client, tag
 	channels := make([]string, 0, len(mappedChannels))
 	for channel := range mappedChannels {
 		channels = append(channels, channel)
+	}
+
+	if len(tagsToMirror) > 0 {
+		return deduplicateVersions(vers), channels, nil
 	}
 
 	var mirrorFromVersion *semver.Version
