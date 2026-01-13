@@ -66,15 +66,20 @@ func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) erro
 		if strings.Contains(image, "@sha256:") {
 			// Extract digest from reference
 			digestStr := image[strings.Index(image, "@sha256:")+1:] // "sha256:abc..."
+
 			digest, err := v1.NewHash(digestStr)
 			if err != nil {
 				ps.userLogger.Debugf("failed to parse digest from %s: %v", image, err)
+
 				if config.AllowMissingTags {
 					continue
 				}
+
 				return fmt.Errorf("parse digest from reference %s: %w", image, err)
 			}
+
 			config.ImageSet[image] = NewImageMeta(tag, image, &digest)
+
 			continue
 		}
 
@@ -89,6 +94,7 @@ func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) erro
 
 		config.ImageSet[image] = NewImageMeta(tag, image, digest)
 	}
+
 	ps.userLogger.InfoLn("All required " + config.Name + " meta are pulled!")
 
 	if err := ps.PullImageSet(ctx, config.ImageSet, config.Layout, config.GetterService.GetImage); err != nil {
