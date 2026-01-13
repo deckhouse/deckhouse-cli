@@ -40,6 +40,8 @@ type PullServiceOptions struct {
 	SkipModules bool
 	// OnlyExtraImages pulls only extra images for modules (without main module images)
 	OnlyExtraImages bool
+	// IgnoreSuspend allows mirroring even if release channels are suspended
+	IgnoreSuspend bool
 	// ModuleFilter is the filter for module selection (whitelist/blacklist)
 	ModuleFilter *libmodules.Filter
 	// BundleDir is the directory to store the bundle
@@ -88,6 +90,7 @@ func NewPullService(
 				TargetTag:       targetTag,
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
+				IgnoreSuspend:   options.IgnoreSuspend,
 			},
 			logger,
 			userLogger,

@@ -70,10 +70,5 @@ func SplitImageRefByRepoAndTag(imageReferenceString string) (string, string) {
 	repo := imageReferenceString[:splitIndex]
 	tag := imageReferenceString[splitIndex+1:]
 
-	if strings.HasSuffix(repo, "@sha256") {
-		repo = strings.TrimSuffix(repo, "@sha256")
-		tag = "@sha256:" + tag
-	}
-
 	return repo, tag
 }

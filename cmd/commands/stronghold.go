@@ -59,12 +59,15 @@ func NewStrongholdCommand() *cobra.Command {
 		{"token", "Interact with tokens"},
 		{"namespace", "Interact with namespaces"},
 		{"lease", "Interact with leases"},
+		{"proxy", "Start a Stronghold Proxy"},
+		{"agent", "Start a Stronghold agent"},
 		{"transit", "Interact with Stronghold's Transit Secrets Engine"},
 		{"auth", "Interact with auth methods"},
 		{"print", "Prints runtime configurations"},
 		{"patch", "Patch data, configuration, and secrets"},
 		{"path-help", "Retrieve API help for paths"},
 		{"version", "Print version"},
+		{"version-history", "Prints the version history of the target Stronghold server"},
 	}
 
 	strongholdCmd := &cobra.Command{

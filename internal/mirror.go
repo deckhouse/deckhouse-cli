@@ -25,7 +25,6 @@ const (
 	MirrorTypeDeckhouseReleaseChannels
 	MirrorTypeModules
 	MirrorTypeModulesReleaseChannels
-	MirrorTypeModulesExtra
 	MirrorTypeSecurity
 	MirrorTypeSecurityTrivyDBSegment
 	MirrorTypeSecurityTrivyBDUSegment
