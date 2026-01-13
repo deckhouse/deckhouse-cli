@@ -17,6 +17,7 @@ limitations under the License.
 package plugins
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry"
@@ -404,13 +406,7 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 
 			tag := latestVersion.Original()
 
-			fmt.Printf("Fetching contract for plugin: %s\n", pluginName)
-			fmt.Printf("Tag: %s\n", tag)
-			if useMajor > 0 {
-				fmt.Printf("Using major version: %d\n", useMajor)
-			}
-
-			fmt.Println("\nRetrieving contract from registry...")
+			pc.logger.Debug("Fetching contract for plugin", slog.String("plugin", pluginName), slog.String("tag", tag))
 
 			// Use service to get plugin contract
 			plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
@@ -423,52 +419,15 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 			}
 
 			// Display contract
-			fmt.Println("---")
-			fmt.Printf("Name: %s\n", plugin.Name)
-			fmt.Printf("Version: %s\n", plugin.Version)
-			fmt.Printf("Description: %s\n", plugin.Description)
-
-			if len(plugin.Env) > 0 {
-				fmt.Println("\nEnvironment Variables:")
-				for _, env := range plugin.Env {
-					fmt.Printf("  - %s\n", env.Name)
-				}
+			buffer := bytes.NewBuffer(nil)
+			enc := yaml.NewEncoder(buffer)
+			enc.SetIndent(2)
+			err = enc.Encode(plugin)
+			if err != nil {
+				return fmt.Errorf("failed to encode requirements: %w", err)
 			}
+			fmt.Println(buffer.String())
 
-			if len(plugin.Flags) > 0 {
-				fmt.Println("\nFlags:")
-				for _, flag := range plugin.Flags {
-					fmt.Printf("  - %s\n", flag.Name)
-				}
-			}
-
-			// print requirements
-			if len(plugin.Requirements.Modules) > 0 || len(plugin.Requirements.Plugins) > 0 || plugin.Requirements.Kubernetes.Constraint != "" {
-				fmt.Println("\nRequirements:")
-
-				// print kubernetes requirement
-				if plugin.Requirements.Kubernetes.Constraint != "" {
-					fmt.Printf("  Kubernetes: %s\n", plugin.Requirements.Kubernetes.Constraint)
-				}
-
-				// print modules requirement
-				if len(plugin.Requirements.Modules) > 0 {
-					fmt.Println("  Modules:")
-					for _, mod := range plugin.Requirements.Modules {
-						fmt.Printf("    - %s: %s\n", mod.Name, mod.Constraint)
-					}
-				}
-
-				// print plugins requirement
-				if len(plugin.Requirements.Plugins) > 0 {
-					fmt.Println("  Plugins:")
-					for _, plugin := range plugin.Requirements.Plugins {
-						fmt.Printf("    - %s: %s\n", plugin.Name, plugin.Constraint)
-					}
-				}
-			}
-
-			fmt.Println("\n✓ Contract retrieved successfully!")
 			return nil
 		},
 	}
