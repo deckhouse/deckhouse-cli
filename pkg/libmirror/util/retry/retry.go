@@ -31,10 +31,10 @@ type Task interface {
 }
 
 func RunTask(ctx context.Context, logger params.Logger, name string, task Task) error {
-	return RunTaskWithContext(ctx, logger, name, task)
+	return runTaskWithContext(ctx, logger, name, task)
 }
 
-func RunTaskWithContext(ctx context.Context, logger params.Logger, name string, task Task) error {
+func runTaskWithContext(ctx context.Context, logger params.Logger, name string, task Task) error {
 	restarts := uint(0)
 	var lastErr error
 	for restarts < task.MaxRetries() {

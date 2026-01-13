@@ -94,15 +94,16 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 			continue
 		}
 
-		s.userLogger.Infof("[%d / %d] Pushing image %s:%s", i+1, len(indexManifest.Manifests), client.GetRegistry(), tag)
-
 		img, err := index.Image(manifest.Digest)
 		if err != nil {
 			return fmt.Errorf("read image %s: %w", tag, err)
 		}
 
-		err = retry.RunTaskWithContext(
-			ctx, silentLogger{}, "push",
+		imageReferenceString := fmt.Sprintf("%s:%s", client.GetRegistry(), tag)
+		err = retry.RunTask(
+			ctx,
+			s.userLogger,
+			fmt.Sprintf("[%d / %d] Pushing %s", i+1, len(indexManifest.Manifests), imageReferenceString),
 			task.WithConstantRetries(pushRetryAttempts, pushRetryDelay, func(ctx context.Context) error {
 				if err := client.PushImage(ctx, tag, img); err != nil {
 					if errorutil.IsTrivyMediaTypeNotAllowedError(err) {
@@ -111,8 +112,7 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 					return fmt.Errorf("write %s:%s to registry: %w", client.GetRegistry(), tag, err)
 				}
 				return nil
-			}),
-		)
+			}))
 		if err != nil {
 			return fmt.Errorf("push image %s: %w", tag, err)
 		}
@@ -143,14 +143,3 @@ func (s *Service) openChunkedPackage(bundleDir, pkgName string) (io.ReadCloser, 
 
 	return pkg, nil
 }
-
-// silentLogger suppresses retry task logging
-type silentLogger struct{}
-
-func (silentLogger) Debugf(_ string, _ ...interface{})      {}
-func (silentLogger) DebugLn(_ ...interface{})               {}
-func (silentLogger) Infof(_ string, _ ...interface{})       {}
-func (silentLogger) InfoLn(_ ...interface{})                {}
-func (silentLogger) Warnf(_ string, _ ...interface{})       {}
-func (silentLogger) WarnLn(_ ...interface{})                {}
-func (silentLogger) Process(_ string, _ func() error) error { return nil }
