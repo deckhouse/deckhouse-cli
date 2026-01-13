@@ -20,99 +20,114 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
+	"time"
 
-	"github.com/samber/lo"
+	"github.com/google/go-containerregistry/pkg/v1/layout"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	"github.com/deckhouse/deckhouse/pkg/registry"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
 )
 
-// PusherService handles the pushing of images to the registry
-type PusherService struct {
+const (
+	pushRetryAttempts = 4
+	pushRetryDelay    = 3 * time.Second
+)
+
+// Service handles the pushing of images to the registry
+type Service struct {
 	logger     *dkplog.Logger
 	userLogger *log.SLogger
 }
 
-// NewPusherService creates a new PusherService
-func NewPusherService(
-	logger *dkplog.Logger,
-	userLogger *log.SLogger,
-) *PusherService {
-	return &PusherService{
+// NewService creates a new pusher service
+func NewService(logger *dkplog.Logger, userLogger *log.SLogger) *Service {
+	return &Service{
 		logger:     logger,
 		userLogger: userLogger,
 	}
 }
 
-// PushModules pushes module packages from the bundle directory
-func (ps *PusherService) PushModules(_ context.Context, bundleDir string, _ interface{}) error {
-	bundleContents, err := os.ReadDir(bundleDir)
+// PackageExists checks if a package exists (tar or chunked)
+func (s *Service) PackageExists(bundleDir, pkgName string) bool {
+	packagePath := filepath.Join(bundleDir, pkgName+".tar")
+	if _, err := os.Stat(packagePath); err == nil {
+		return true
+	}
+	// Check for chunked package
+	if _, err := os.Stat(packagePath + ".chunk000"); err == nil {
+		return true
+	}
+	return false
+}
+
+// PushLayout pushes all images from an OCI layout to the registry
+func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client registry.Client) error {
+	index, err := layoutPath.ImageIndex()
 	if err != nil {
-		return fmt.Errorf("list bundle directory: %w", err)
+		return fmt.Errorf("read OCI image index: %w", err)
 	}
 
-	modulePackages := lo.Compact(lo.Map(bundleContents, func(item os.DirEntry, _ int) string {
-		fileExt := filepath.Ext(item.Name())
-		pkgName, _, ok := strings.Cut(strings.TrimPrefix(item.Name(), "module-"), ".")
-		switch {
-		case !ok:
-			fallthrough
-		case fileExt != ".tar" && fileExt != ".chunk":
-			fallthrough
-		case !strings.HasPrefix(item.Name(), "module-"):
-			return ""
-		}
-		return pkgName
-	}))
+	indexManifest, err := index.IndexManifest()
+	if err != nil {
+		return fmt.Errorf("parse OCI image index manifest: %w", err)
+	}
 
-	successfullyPushedModules := make([]string, 0)
-	for _, modulePackageName := range modulePackages {
-		if lo.Contains(successfullyPushedModules, modulePackageName) {
+	if len(indexManifest.Manifests) == 0 {
+		return nil
+	}
+
+	s.userLogger.Infof("Pushing %d images", len(indexManifest.Manifests))
+
+	for i, manifest := range indexManifest.Manifests {
+		tag := manifest.Annotations["io.deckhouse.image.short_tag"]
+		if tag == "" {
+			s.logger.Warn("Skipping image without short_tag annotation", slog.String("digest", manifest.Digest.String()))
 			continue
 		}
 
-		if err = ps.userLogger.Process("Push module: "+modulePackageName, func() error {
-			pkg, err := ps.openPackage(bundleDir, "module-"+modulePackageName)
-			if err != nil {
-				return fmt.Errorf("open package %q: %w", modulePackageName, err)
-			}
-			defer pkg.Close()
-
-			// Here we would call operations.PushModule, but since we don't have access to it,
-			// we'll leave this as a placeholder
-			// if err = operations.PushModule(pushParams, modulePackageName, pkg, client); err != nil {
-			//     return fmt.Errorf("failed to push module %q: %w", modulePackageName, err)
-			// }
-
-			ps.userLogger.InfoLn("Module " + modulePackageName + " pushed successfully")
-
-			successfullyPushedModules = append(successfullyPushedModules, modulePackageName)
-
-			return nil
-		}); err != nil {
-			ps.userLogger.WarnLn(err)
+		img, err := index.Image(manifest.Digest)
+		if err != nil {
+			return fmt.Errorf("read image %s: %w", tag, err)
 		}
-	}
 
-	if len(successfullyPushedModules) > 0 {
-		ps.userLogger.Infof("Modules pushed: %v", strings.Join(successfullyPushedModules, ", "))
+		imageReferenceString := fmt.Sprintf("%s:%s", client.GetRegistry(), tag)
+		err = retry.RunTask(
+			ctx,
+			s.userLogger,
+			fmt.Sprintf("[%d / %d] Pushing %s", i+1, len(indexManifest.Manifests), imageReferenceString),
+			task.WithConstantRetries(pushRetryAttempts, pushRetryDelay, func(ctx context.Context) error {
+				if err := client.PushImage(ctx, tag, img); err != nil {
+					if errorutil.IsTrivyMediaTypeNotAllowedError(err) {
+						return fmt.Errorf(errorutil.CustomTrivyMediaTypesWarning)
+					}
+					return fmt.Errorf("write %s:%s to registry: %w", client.GetRegistry(), tag, err)
+				}
+				return nil
+			}))
+		if err != nil {
+			return fmt.Errorf("push image %s: %w", tag, err)
+		}
 	}
 
 	return nil
 }
 
-// openPackage opens a package file, trying .tar first, then .chunk
-func (ps *PusherService) openPackage(bundleDir, pkgName string) (io.ReadCloser, error) {
+// OpenPackage opens a package file, trying .tar first, then chunked
+func (s *Service) OpenPackage(bundleDir, pkgName string) (io.ReadCloser, error) {
 	p := filepath.Join(bundleDir, pkgName+".tar")
 	pkg, err := os.Open(p)
 	switch {
 	case os.IsNotExist(err):
-		return ps.openChunkedPackage(bundleDir, pkgName)
+		return s.openChunkedPackage(bundleDir, pkgName)
 	case err != nil:
 		return nil, fmt.Errorf("read bundle package %s: %w", pkgName, err)
 	}
@@ -120,8 +135,7 @@ func (ps *PusherService) openPackage(bundleDir, pkgName string) (io.ReadCloser, 
 	return pkg, nil
 }
 
-// openChunkedPackage opens a chunked package
-func (ps *PusherService) openChunkedPackage(bundleDir, pkgName string) (io.ReadCloser, error) {
+func (s *Service) openChunkedPackage(bundleDir, pkgName string) (io.ReadCloser, error) {
 	pkg, err := chunked.Open(bundleDir, pkgName+".tar")
 	if err != nil {
 		return nil, fmt.Errorf("open bundle package %q: %w", pkgName, err)

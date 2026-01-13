@@ -132,7 +132,7 @@ func VersionsToMirror(pullParams *params.PullParams, client registry.Client, tag
 
 	alphaChannelVersion, found := releaseChannelsVersions[internal.AlphaChannel]
 	if found {
-		versionsAboveMinimal := parseAndFilterVersionsAboveMinimalAnbBelowAlpha(mirrorFromVersion, tags, alphaChannelVersion)
+		versionsAboveMinimal := parseAndFilterVersionsAboveMinimalAndBelowAlpha(mirrorFromVersion, tags, alphaChannelVersion)
 		versionsAboveMinimal = FilterOnlyLatestPatches(versionsAboveMinimal)
 
 		return deduplicateVersions(append(vers, versionsAboveMinimal...)), channels, nil
@@ -160,7 +160,7 @@ func getReleasedTagsFromRegistry(pullParams *params.PullParams, client registry.
 	return tags, nil
 }
 
-func parseAndFilterVersionsAboveMinimalAnbBelowAlpha(
+func parseAndFilterVersionsAboveMinimalAndBelowAlpha(
 	minVersion *semver.Version,
 	tags []string,
 	alphaChannelVersion *semver.Version,
@@ -222,9 +222,9 @@ func getReleaseChannelVersionFromRegistry(mirrorCtx *params.PullParams, releaseC
 		return nil, fmt.Errorf("cannot find release channel version: %w", err)
 	}
 
-	// if releaseInfo.Suspended {
-	// 	return nil, fmt.Errorf("cannot mirror Deckhouse: source registry contains suspended release channel %q, try again later", releaseChannel)
-	// }
+	if releaseInfo.Suspended && !mirrorCtx.IgnoreSuspend {
+		return nil, fmt.Errorf("cannot mirror Deckhouse: source registry contains suspended release channel %q, try again later (use --ignore-suspend to override)", releaseChannel)
+	}
 
 	ver, err := semver.NewVersion(releaseInfo.Version)
 	if err != nil {

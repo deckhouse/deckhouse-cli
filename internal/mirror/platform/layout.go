@@ -56,6 +56,8 @@ func (l *ImageDownloadList) FillDeckhouseImages(deckhouseVersions []string) {
 		l.Deckhouse[l.rootURL+":"+version] = nil
 		l.DeckhouseInstall[path.Join(l.rootURL, internal.InstallSegment)+":"+version] = nil
 		l.DeckhouseInstallStandalone[path.Join(l.rootURL, internal.InstallStandaloneSegment)+":"+version] = nil
+		// Also add version tags to release-channel (e.g., release-channel:v1.74.0)
+		l.DeckhouseReleaseChannel[path.Join(l.rootURL, internal.ReleaseChannelSegment)+":"+version] = nil
 	}
 }
 

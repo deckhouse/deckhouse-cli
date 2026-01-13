@@ -23,8 +23,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
@@ -102,11 +104,23 @@ func NewCommand() *cobra.Command {
 }
 
 func pull(cmd *cobra.Command, _ []string) error {
+	// Set up graceful cancellation on Ctrl+C
+	parentCtx := cmd.Context()
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := signal.NotifyContext(parentCtx, syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
 	puller := NewPuller(cmd)
 
 	puller.logger.Infof("d8 version: %s", version.Version)
 
-	if err := puller.Execute(cmd.Context()); err != nil {
+	if err := puller.Execute(ctx); err != nil {
+		if errors.Is(err, context.Canceled) {
+			puller.logger.WarnLn("Operation cancelled by user")
+			return nil
+		}
 		return ErrPullFailed
 	}
 
@@ -164,6 +178,7 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 		SkipSecurityDatabases: pullflags.NoSecurityDB,
 		SkipModules:           pullflags.NoModules,
 		OnlyExtraImages:       pullflags.OnlyExtraImages,
+		IgnoreSuspend:         pullflags.IgnoreSuspend,
 		DeckhouseTag:          pullflags.DeckhouseTag,
 		SinceVersion:          pullflags.SinceVersion,
 	}
@@ -276,6 +291,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 				SkipSecurity:    pullflags.NoSecurityDB,
 				SkipModules:     pullflags.NoModules,
 				OnlyExtraImages: pullflags.OnlyExtraImages,
+				IgnoreSuspend:   pullflags.IgnoreSuspend,
 				ModuleFilter:    filter,
 				BundleDir:       pullflags.ImagesBundlePath,
 				BundleChunkSize: pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
