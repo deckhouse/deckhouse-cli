@@ -453,11 +453,16 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 			pluginName := args[0]
 			ctx := cmd.Context()
 
-			return pc.InstallPlugin(ctx, pluginName, &installPluginOptions{
-				version:                 version,
-				useMajor:                useMajor,
-				resolvePluginsConflicts: resolvePluginsConflicts,
-			})
+			opts := []installPluginOption{
+				installWithVersion(version),
+				installWithMajorVersion(useMajor),
+			}
+
+			if resolvePluginsConflicts {
+				opts = append(opts, installWithResolvePluginsConflicts())
+			}
+
+			return pc.InstallPlugin(ctx, pluginName, opts...)
 		},
 	}
 
@@ -470,32 +475,54 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 
 type installPluginOptions struct {
 	version                 string
-	useMajor                int
+	majorVersion            int
 	resolvePluginsConflicts bool
+}
+
+type installPluginOption func(*installPluginOptions)
+
+func installWithMajorVersion(majorVersion int) installPluginOption {
+	return func(opts *installPluginOptions) {
+		opts.majorVersion = majorVersion
+	}
+}
+
+func installWithVersion(version string) installPluginOption {
+	return func(opts *installPluginOptions) {
+		opts.version = version
+	}
+}
+
+func installWithResolvePluginsConflicts() installPluginOption {
+	return func(opts *installPluginOptions) {
+		opts.resolvePluginsConflicts = true
+	}
 }
 
 // function checks if plugin can be installed, creates folders layout and then installs plugin, creates symlink "current" and caches contract.json
 // version - semver version string (e.g. v1.0.0), default: "" (use latest version)
 // useMajor - major version to install, default: -1 (use latest major version)
 // resolvePluginsConflicts - resolve conflicts between installed plugins, default: false
-func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName string, opts *installPluginOptions) error {
+func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName string, opts ...installPluginOption) error {
 	// check if version is specified
 	var installVersion *semver.Version
 
-	if opts == nil {
-		opts = &installPluginOptions{
-			useMajor: -1,
-		}
+	options := &installPluginOptions{
+		majorVersion: -1,
 	}
 
-	if opts.version != "" {
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	if options.version != "" {
 		var err error
-		installVersion, err = semver.NewVersion(opts.version)
+		installVersion, err = semver.NewVersion(options.version)
 		if err != nil {
 			return fmt.Errorf("failed to parse version: %w", err)
 		}
 
-		return pc.installPlugin(ctx, pluginName, installVersion, opts.resolvePluginsConflicts)
+		return pc.installPlugin(ctx, pluginName, installVersion, options.resolvePluginsConflicts)
 	}
 
 	versions, err := pc.service.ListPluginTags(ctx, pluginName)
@@ -504,10 +531,10 @@ func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName string, 
 		return fmt.Errorf("failed to list plugin tags: %w", err)
 	}
 
-	if opts.useMajor >= 0 {
-		versions = pc.filterMajorVersion(versions, opts.useMajor)
+	if options.majorVersion >= 0 {
+		versions = pc.filterMajorVersion(versions, options.majorVersion)
 		if len(versions) == 0 {
-			return fmt.Errorf("no versions found for major version: %d", opts.useMajor)
+			return fmt.Errorf("no versions found for major version: %d", options.majorVersion)
 		}
 	}
 
@@ -517,7 +544,7 @@ func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName string, 
 		return fmt.Errorf("failed to fetch latest version: %w", err)
 	}
 
-	return pc.installPlugin(ctx, pluginName, installVersion, opts.resolvePluginsConflicts)
+	return pc.installPlugin(ctx, pluginName, installVersion, options.resolvePluginsConflicts)
 }
 
 func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, version *semver.Version, resolvePluginsConflicts bool) error {
@@ -693,15 +720,11 @@ func (pc *PluginsCommand) fetchLatestVersion(ctx context.Context, pluginName str
 }
 
 func (pc *PluginsCommand) resolvePluginConflicts(ctx context.Context, failedConstraints FailedConstraints) error {
-	installOptions := &installPluginOptions{
-		resolvePluginsConflicts: true,
-	}
-
 	// for each failed constraint, try to install the plugin
 	for pluginName := range failedConstraints {
 		pc.logger.Debug("resolving plugin conflict", slog.String("plugin", pluginName))
 
-		err := pc.InstallPlugin(ctx, pluginName, installOptions)
+		err := pc.InstallPlugin(ctx, pluginName, installWithResolvePluginsConflicts())
 		if err != nil {
 			return fmt.Errorf("failed to install plugin: %w", err)
 		}
@@ -722,7 +745,7 @@ func (pc *PluginsCommand) pluginsUpdateCommand() *cobra.Command {
 
 			ctx := cmd.Context()
 
-			return pc.InstallPlugin(ctx, pluginName, nil)
+			return pc.InstallPlugin(ctx, pluginName)
 		},
 	}
 
@@ -748,7 +771,7 @@ func (pc *PluginsCommand) pluginsUpdateAllCommand() *cobra.Command {
 			}
 
 			for _, plugin := range plugins {
-				err := pc.InstallPlugin(ctx, plugin.Name(), nil)
+				err := pc.InstallPlugin(ctx, plugin.Name())
 				if err != nil {
 					return fmt.Errorf("failed to update plugin: %w", err)
 				}
