@@ -99,6 +99,10 @@ func VersionsToMirror(pullParams *params.PullParams, client registry.Client, tag
 		channels = append(channels, channel)
 	}
 
+	if len(tagsToMirror) > 0 {
+		return deduplicateVersions(vers), channels, nil
+	}
+
 	var mirrorFromVersion *semver.Version
 	rockSolidVersion, found := releaseChannelsVersions[internal.RockSolidChannel]
 	if found {
