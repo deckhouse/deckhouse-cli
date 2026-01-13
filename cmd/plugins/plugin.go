@@ -55,11 +55,11 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 	err = os.MkdirAll(pc.pluginDirectory+"/plugins", 0755)
 	// if permission failed
 	if errors.Is(err, os.ErrPermission) {
-		pc.logger.Warn("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", pc.pluginDirectory), dkplog.Err(err))
+		pc.logger.Debug("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", pc.pluginDirectory), dkplog.Err(err))
 
 		pc.pluginDirectory, err = os.UserHomeDir()
 		if err != nil {
-			logger.Warn("failed to receive home dir to create plugins dir", slog.String("error", err.Error()))
+			logger.Debug("failed to receive home dir to create plugins dir", slog.String("error", err.Error()))
 			return nil
 		}
 
