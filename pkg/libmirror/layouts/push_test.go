@@ -38,7 +38,9 @@ func TestPushLayoutToRepoWithParallelism(t *testing.T) {
 
 	const totalImages, layersPerImage = 10, 3
 	imagesLayout := createEmptyOCILayout(t)
-	host, repoPath, _ := mirrorTestUtils.SetupEmptyRegistryRepo(false)
+	reg := mirrorTestUtils.SetupTestRegistry(false)
+	defer reg.Close()
+	repoPath := reg.Host + "/deckhouse/ee"
 
 	client := mock.NewRegistryClientMock(t)
 	client.PushImageMock.Return(nil)
@@ -50,7 +52,7 @@ func TestPushLayoutToRepoWithParallelism(t *testing.T) {
 		digest, err := img.Digest()
 		s.NoError(err)
 		err = imagesLayout.AppendImage(img, platformOpt, layout.WithAnnotations(map[string]string{
-			"org.opencontainers.image.ref.name": host + repoPath + "@" + digest.String(),
+			"org.opencontainers.image.ref.name": repoPath + "@" + digest.String(),
 			"io.deckhouse.image.short_tag":      digest.Hex,
 		}))
 		s.NoError(err)
@@ -59,7 +61,7 @@ func TestPushLayoutToRepoWithParallelism(t *testing.T) {
 	err := PushLayoutToRepo(
 		client,
 		imagesLayout,
-		host+repoPath, // Images repo
+		repoPath,
 		authn.Anonymous,
 		log.NewSLogger(slog.LevelDebug),
 		params.ParallelismConfig{
@@ -81,7 +83,9 @@ func TestPushLayoutToRepoWithoutParallelism(t *testing.T) {
 
 	const totalImages, layersPerImage = 10, 3
 	imagesLayout := createEmptyOCILayout(t)
-	host, repoPath, _ := mirrorTestUtils.SetupEmptyRegistryRepo(false)
+	reg := mirrorTestUtils.SetupTestRegistry(false)
+	defer reg.Close()
+	repoPath := reg.Host + "/deckhouse/ee"
 
 	client := mock.NewRegistryClientMock(t)
 	client.PushImageMock.Return(nil)
@@ -93,7 +97,7 @@ func TestPushLayoutToRepoWithoutParallelism(t *testing.T) {
 		digest, err := img.Digest()
 		s.NoError(err)
 		err = imagesLayout.AppendImage(img, platformOpt, layout.WithAnnotations(map[string]string{
-			"org.opencontainers.image.ref.name": host + repoPath + "@" + digest.String(),
+			"org.opencontainers.image.ref.name": repoPath + "@" + digest.String(),
 			"io.deckhouse.image.short_tag":      digest.Hex,
 		}))
 		s.NoError(err)
@@ -102,7 +106,7 @@ func TestPushLayoutToRepoWithoutParallelism(t *testing.T) {
 	err := PushLayoutToRepo(
 		client,
 		imagesLayout,
-		host+repoPath, // Images repo
+		repoPath,
 		authn.Anonymous,
 		log.NewSLogger(slog.LevelDebug),
 		params.ParallelismConfig{
@@ -121,7 +125,9 @@ func TestPushLayoutToRepoWithoutParallelism(t *testing.T) {
 
 func TestPushEmptyLayoutToRepo(t *testing.T) {
 	s := require.New(t)
-	host, repoPath, blobHandler := mirrorTestUtils.SetupEmptyRegistryRepo(false)
+	reg := mirrorTestUtils.SetupTestRegistry(false)
+	defer reg.Close()
+	repoPath := reg.Host + "/deckhouse/ee"
 
 	client := mock.NewRegistryClientMock(t)
 
@@ -129,7 +135,7 @@ func TestPushEmptyLayoutToRepo(t *testing.T) {
 	err := PushLayoutToRepo(
 		client,
 		emptyLayout,
-		host+repoPath,
+		repoPath,
 		authn.Anonymous,
 		log.NewSLogger(slog.LevelDebug),
 		params.DefaultParallelism,
@@ -137,5 +143,5 @@ func TestPushEmptyLayoutToRepo(t *testing.T) {
 		false, // TLS verification irrelevant to HTTP requests
 	)
 	s.NoError(err, "Push should not fail")
-	s.Len(blobHandler.ListBlobs(), 0, "No blobs should be pushed to registry")
+	s.Len(reg.ListBlobs(), 0, "No blobs should be pushed to registry")
 }
