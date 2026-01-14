@@ -40,6 +40,7 @@ type FlagDTO struct {
 type RequirementsDTO struct {
 	Kubernetes KubernetesRequirementDTO `json:"kubernetes,omitempty"`
 	Modules    []ModuleRequirementDTO   `json:"modules,omitempty"`
+	Plugins    []PluginRequirementDTO   `json:"plugins,omitempty"`
 }
 
 // KubernetesRequirementDTO represents Kubernetes requirement in JSON
@@ -49,6 +50,12 @@ type KubernetesRequirementDTO struct {
 
 // ModuleRequirementDTO represents module requirement in JSON
 type ModuleRequirementDTO struct {
+	Name       string `json:"name"`
+	Constraint string `json:"constraint"`
+}
+
+// PluginRequirementDTO represents plugin requirement in JSON
+type PluginRequirementDTO struct {
 	Name       string `json:"name"`
 	Constraint string `json:"constraint"`
 }

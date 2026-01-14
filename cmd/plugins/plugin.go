@@ -90,7 +90,7 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 
 			if !installed {
 				fmt.Println("Not installed, installing...")
-				err = pc.InstallPlugin(cmd.Context(), commandName, "", -1)
+				err = pc.InstallPlugin(cmd.Context(), commandName)
 				if err != nil {
 					fmt.Println("Error installing:", err)
 					return

@@ -31,6 +31,7 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/spf13/cobra"
+	"sigs.k8s.io/yaml"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry"
@@ -85,13 +86,13 @@ func NewCommand(logger *dkplog.Logger) *cobra.Command {
 			if errors.Is(err, os.ErrPermission) {
 				pc.logger.Debug("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", flags.DeckhousePluginsDir), dkplog.Err(err))
 
-				newPluginDirectory, err := os.UserHomeDir()
+				homeDir, err := os.UserHomeDir()
 				if err != nil {
 					logger.Debug("failed to receive home dir to create plugins dir", slog.String("error", err.Error()))
 					return
 				}
 
-				pc.pluginDirectory = path.Join(newPluginDirectory, ".deckhouse-cli")
+				pc.pluginDirectory = path.Join(homeDir, ".deckhouse-cli")
 			}
 		},
 	}
@@ -175,23 +176,12 @@ func (pc *PluginsCommand) fetchInstalledPlugins() ([]pluginDisplayInfo, error) {
 	res := make([]pluginDisplayInfo, 0, len(plugins))
 
 	for _, plugin := range plugins {
-		pluginBinaryPath := path.Join(pc.pluginDirectory, "plugins", plugin.Name(), "current")
-		cmd := exec.Command(pluginBinaryPath, "--version")
-
-		output, err := cmd.Output()
+		version, err := pc.getInstalledPluginVersion(plugin.Name())
 		if err != nil {
 			res = append(res, pluginDisplayInfo{
 				Name:        plugin.Name(),
-				Description: "failed to call plugin",
-			})
-			continue
-		}
-
-		version, err := semver.NewVersion(strings.TrimSpace(string(output)))
-		if err != nil {
-			res = append(res, pluginDisplayInfo{
-				Name:        plugin.Name(),
-				Description: "failed to parse version",
+				Version:     "ERROR",
+				Description: err.Error(),
 			})
 			continue
 		}
@@ -415,13 +405,7 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 
 			tag := latestVersion.Original()
 
-			fmt.Printf("Fetching contract for plugin: %s\n", pluginName)
-			fmt.Printf("Tag: %s\n", tag)
-			if useMajor > 0 {
-				fmt.Printf("Using major version: %d\n", useMajor)
-			}
-
-			fmt.Println("\nRetrieving contract from registry...")
+			pc.logger.Debug("Fetching contract for plugin", slog.String("plugin", pluginName), slog.String("tag", tag))
 
 			// Use service to get plugin contract
 			plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
@@ -432,37 +416,19 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 					slog.String("error", err.Error()))
 				return fmt.Errorf("failed to get plugin contract: %w", err)
 			}
+			contract := service.DomainToContract(plugin)
 
 			// Display contract
-			fmt.Println("---")
-			fmt.Printf("Name: %s\n", plugin.Name)
-			fmt.Printf("Version: %s\n", plugin.Version)
-			fmt.Printf("Description: %s\n", plugin.Description)
-
-			if len(plugin.Env) > 0 {
-				fmt.Println("\nEnvironment Variables:")
-				for _, env := range plugin.Env {
-					fmt.Printf("  - %s\n", env.Name)
-				}
+			jsonBytes, err := json.Marshal(contract)
+			if err != nil {
+				return fmt.Errorf("failed to marshal contract to JSON: %w", err)
 			}
-
-			if len(plugin.Flags) > 0 {
-				fmt.Println("\nFlags:")
-				for _, flag := range plugin.Flags {
-					fmt.Printf("  - %s\n", flag.Name)
-				}
+			yamlBytes, err := yaml.JSONToYAML(jsonBytes)
+			if err != nil {
+				return fmt.Errorf("failed to convert JSON to YAML: %w", err)
 			}
+			fmt.Println(string(yamlBytes))
 
-			fmt.Println("\nRequirements:")
-			fmt.Printf("  Kubernetes: %s\n", plugin.Requirements.Kubernetes.Constraint)
-			if len(plugin.Requirements.Modules) > 0 {
-				fmt.Println("  Modules:")
-				for _, mod := range plugin.Requirements.Modules {
-					fmt.Printf("    - %s: %s\n", mod.Name, mod.Constraint)
-				}
-			}
-
-			fmt.Println("\n✓ Contract retrieved successfully!")
 			return nil
 		},
 	}
@@ -476,6 +442,7 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 	var version string
 	var useMajor int
+	var resolvePluginsConflicts bool
 
 	cmd := &cobra.Command{
 		Use:   "install [plugin-name]",
@@ -486,30 +453,76 @@ func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
 			pluginName := args[0]
 			ctx := cmd.Context()
 
-			return pc.InstallPlugin(ctx, pluginName, version, useMajor)
+			opts := []installPluginOption{
+				installWithVersion(version),
+				installWithMajorVersion(useMajor),
+			}
+
+			if resolvePluginsConflicts {
+				opts = append(opts, installWithResolvePluginsConflicts())
+			}
+
+			return pc.InstallPlugin(ctx, pluginName, opts...)
 		},
 	}
 
 	cmd.Flags().StringVar(&version, "version", "", "Specific version of the plugin to install")
 	cmd.Flags().IntVar(&useMajor, "use-major", -1, "Use specific major version (e.g., 1, 2)")
+	cmd.Flags().BoolVar(&resolvePluginsConflicts, "resolve-plugins-conflicts", false, "Resolve conflicts between plugins requirements")
 
 	return cmd
 }
 
+type installPluginOptions struct {
+	version                 string
+	majorVersion            int
+	resolvePluginsConflicts bool
+}
+
+type installPluginOption func(*installPluginOptions)
+
+func installWithMajorVersion(majorVersion int) installPluginOption {
+	return func(opts *installPluginOptions) {
+		opts.majorVersion = majorVersion
+	}
+}
+
+func installWithVersion(version string) installPluginOption {
+	return func(opts *installPluginOptions) {
+		opts.version = version
+	}
+}
+
+func installWithResolvePluginsConflicts() installPluginOption {
+	return func(opts *installPluginOptions) {
+		opts.resolvePluginsConflicts = true
+	}
+}
+
 // function checks if plugin can be installed, creates folders layout and then installs plugin, creates symlink "current" and caches contract.json
-// if version (e.g. v1.0.0) is not specified - use latest version
-// if useMajor > -1 (can be 0) - use specific major version
-func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName, version string, useMajor int) error {
+// version - semver version string (e.g. v1.0.0), default: "" (use latest version)
+// useMajor - major version to install, default: -1 (use latest major version)
+// resolvePluginsConflicts - resolve conflicts between installed plugins, default: false
+func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName string, opts ...installPluginOption) error {
 	// check if version is specified
 	var installVersion *semver.Version
-	var err error
-	if version != "" {
-		installVersion, err = semver.NewVersion(version)
+
+	options := &installPluginOptions{
+		majorVersion: -1,
+	}
+
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	if options.version != "" {
+		var err error
+		installVersion, err = semver.NewVersion(options.version)
 		if err != nil {
 			return fmt.Errorf("failed to parse version: %w", err)
 		}
 
-		return pc.installPlugin(ctx, pluginName, installVersion, useMajor)
+		return pc.installPlugin(ctx, pluginName, installVersion, options.resolvePluginsConflicts)
 	}
 
 	versions, err := pc.service.ListPluginTags(ctx, pluginName)
@@ -518,10 +531,10 @@ func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName, version
 		return fmt.Errorf("failed to list plugin tags: %w", err)
 	}
 
-	if useMajor >= 0 {
-		versions = pc.filterMajorVersion(versions, useMajor)
+	if options.majorVersion >= 0 {
+		versions = pc.filterMajorVersion(versions, options.majorVersion)
 		if len(versions) == 0 {
-			return fmt.Errorf("no versions found for major version: %d", useMajor)
+			return fmt.Errorf("no versions found for major version: %d", options.majorVersion)
 		}
 	}
 
@@ -531,10 +544,10 @@ func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName, version
 		return fmt.Errorf("failed to fetch latest version: %w", err)
 	}
 
-	return pc.installPlugin(ctx, pluginName, installVersion, useMajor)
+	return pc.installPlugin(ctx, pluginName, installVersion, options.resolvePluginsConflicts)
 }
 
-func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, version *semver.Version, useMajor int) error {
+func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, version *semver.Version, resolvePluginsConflicts bool) error {
 	// create plugin directory if it doesn't exist
 	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin
 	pluginDir := path.Join(pc.pluginDirectory, "plugins", pluginName)
@@ -577,9 +590,6 @@ func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, 
 
 	fmt.Printf("Installing plugin: %s\n", pluginName)
 	fmt.Printf("Tag: %s\n", tag)
-	if useMajor >= 0 {
-		fmt.Printf("Using major version: %d\n", useMajor)
-	}
 
 	// get contract
 	plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
@@ -589,6 +599,23 @@ func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, 
 
 	fmt.Printf("Plugin: %s %s\n", plugin.Name, plugin.Version)
 	fmt.Printf("Description: %s\n", plugin.Description)
+
+	// validate requirements
+	pc.logger.Debug("validating requirements", slog.String("plugin", plugin.Name))
+	failedConstraints, err := pc.validateRequirements(plugin)
+	if err != nil {
+		return fmt.Errorf("failed to validate requirements: %w", err)
+	}
+	if len(failedConstraints) > 0 && !resolvePluginsConflicts {
+		return fmt.Errorf("plugin requirements not satisfied")
+	}
+	if len(failedConstraints) > 0 && resolvePluginsConflicts {
+		// try to resolve conflicts
+		err = pc.resolvePluginConflicts(ctx, failedConstraints)
+		if err != nil {
+			return fmt.Errorf("failed to resolve conflicts: %w", err)
+		}
+	}
 
 	// check if binary exists (if yes - rename it to .old)
 	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1/example-plugin
@@ -692,6 +719,20 @@ func (pc *PluginsCommand) fetchLatestVersion(ctx context.Context, pluginName str
 	return latestVersion, nil
 }
 
+func (pc *PluginsCommand) resolvePluginConflicts(ctx context.Context, failedConstraints FailedConstraints) error {
+	// for each failed constraint, try to install the plugin
+	for pluginName := range failedConstraints {
+		pc.logger.Debug("resolving plugin conflict", slog.String("plugin", pluginName))
+
+		err := pc.InstallPlugin(ctx, pluginName, installWithResolvePluginsConflicts())
+		if err != nil {
+			return fmt.Errorf("failed to install plugin: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func (pc *PluginsCommand) pluginsUpdateCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "update [plugin-name]",
@@ -704,7 +745,7 @@ func (pc *PluginsCommand) pluginsUpdateCommand() *cobra.Command {
 
 			ctx := cmd.Context()
 
-			return pc.InstallPlugin(ctx, pluginName, "", -1)
+			return pc.InstallPlugin(ctx, pluginName)
 		},
 	}
 
@@ -730,7 +771,7 @@ func (pc *PluginsCommand) pluginsUpdateAllCommand() *cobra.Command {
 			}
 
 			for _, plugin := range plugins {
-				err := pc.InstallPlugin(ctx, plugin.Name(), "", -1)
+				err := pc.InstallPlugin(ctx, plugin.Name())
 				if err != nil {
 					return fmt.Errorf("failed to update plugin: %w", err)
 				}
@@ -818,4 +859,155 @@ func (pc *PluginsCommand) pluginsRemoveAllCommand() *cobra.Command {
 	}
 
 	return cmd
+}
+
+func (pc *PluginsCommand) getInstalledPluginVersion(pluginName string) (*semver.Version, error) {
+	pluginBinaryPath := path.Join(pc.pluginDirectory, "plugins", pluginName, "current")
+	cmd := exec.Command(pluginBinaryPath, "--version")
+
+	output, err := cmd.Output()
+	if err != nil {
+		pc.logger.Warn("failed to call plugin with '--version'", slog.String("plugin", pluginName), slog.String("error", err.Error()))
+
+		// try to call plugin with "version" command
+		// this is for compatibility with plugins that don't support "--version"
+		cmd = exec.Command(pluginBinaryPath, "version")
+
+		output, err = cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("failed to call plugin: %w", err)
+		}
+	}
+
+	version, err := semver.NewVersion(strings.TrimSpace(string(output)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse version: %w", err)
+	}
+
+	return version, nil
+}
+
+// map of plugin name to failed constraints
+type FailedConstraints map[string]*semver.Constraints
+
+func (pc *PluginsCommand) validateRequirements(plugin *internal.Plugin) (FailedConstraints, error) {
+	// validate plugin requirements
+	pc.logger.Debug("validating plugin requirements", slog.String("plugin", plugin.Name))
+
+	err := pc.validatePluginConflicts(plugin)
+	if err != nil {
+		return nil, fmt.Errorf("plugin conflicts: %w", err)
+	}
+
+	failedConstraints, err := pc.validatePluginRequirement(plugin)
+	if err != nil {
+		return nil, fmt.Errorf("plugin requirements: %w", err)
+	}
+
+	// validate module requirements
+	pc.logger.Debug("validating module requirements", slog.String("plugin", plugin.Name))
+
+	err = pc.validateModuleRequirement(plugin)
+	if err != nil {
+		return nil, fmt.Errorf("module requirements: %w", err)
+	}
+
+	return failedConstraints, nil
+}
+
+// check that installing version not make conflict with existing plugins requirements
+func (pc *PluginsCommand) validatePluginConflicts(plugin *internal.Plugin) error {
+	plugins, err := os.ReadDir(path.Join(pc.pluginDirectory, "plugins"))
+	if err != nil {
+		return fmt.Errorf("failed to read plugins directory: %w", err)
+	}
+
+	for _, pluginDir := range plugins {
+		pluginName := pluginDir.Name()
+
+		contract, err := pc.getInstalledPluginContract(pluginName)
+		if err != nil {
+			return fmt.Errorf("failed to get installed plugin contract: %w", err)
+		}
+
+		err = validatePluginConflict(plugin, contract)
+		if err != nil {
+			return fmt.Errorf("validate plugin conflict: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func validatePluginConflict(plugin *internal.Plugin, installedPlugin *internal.Plugin) error {
+	for _, requirement := range installedPlugin.Requirements.Plugins {
+		// installed plugin requirement is the same as the plugin we are validating
+		if requirement.Name == plugin.Name {
+			constraint, err := semver.NewConstraint(requirement.Constraint)
+			if err != nil {
+				return fmt.Errorf("failed to parse constraint: %w", err)
+			}
+
+			version, err := semver.NewVersion(installedPlugin.Version)
+			if err != nil {
+				return fmt.Errorf("failed to parse version: %w", err)
+			}
+
+			if !constraint.Check(version) {
+				return fmt.Errorf("installing plugin %s %s will make conflict with existing plugin %s %s",
+					plugin.Name,
+					plugin.Version,
+					installedPlugin.Name,
+					constraint.String())
+			}
+		}
+	}
+
+	return nil
+}
+
+func (pc *PluginsCommand) validatePluginRequirement(plugin *internal.Plugin) (FailedConstraints, error) {
+	result := make(FailedConstraints)
+
+	for _, pluginRequirement := range plugin.Requirements.Plugins {
+		// check if plugin is installed
+		installed, err := pc.checkInstalled(pluginRequirement.Name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check if plugin is installed: %w", err)
+		}
+		if !installed {
+			result[pluginRequirement.Name] = nil
+			continue
+		}
+
+		// check constraint
+		if pluginRequirement.Constraint != "" {
+			installedVersion, err := pc.getInstalledPluginVersion(pluginRequirement.Name)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get installed version: %w", err)
+			}
+
+			constraint, err := semver.NewConstraint(pluginRequirement.Constraint)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse constraint: %w", err)
+			}
+
+			if !constraint.Check(installedVersion) {
+				pc.logger.Warn("plugin requirement not satisfied",
+					slog.String("plugin", plugin.Name),
+					slog.String("requirement", pluginRequirement.Name),
+					slog.String("constraint", pluginRequirement.Constraint),
+					slog.String("installedVersion", installedVersion.Original()))
+
+				result[pluginRequirement.Name] = constraint
+			}
+		}
+	}
+
+	return result, nil
+}
+
+func (pc *PluginsCommand) validateModuleRequirement(_ *internal.Plugin) error {
+	// TODO: Implement module requirement validation
+	return nil
 }
