@@ -35,13 +35,13 @@ require (
 	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8
 	golang.org/x/term v0.38.0
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/api v0.33.3
-	k8s.io/apiextensions-apiserver v0.33.3
-	k8s.io/apimachinery v0.33.3
-	k8s.io/cli-runtime v0.32.10
-	k8s.io/client-go v0.33.3
-	k8s.io/component-base v0.33.3
-	k8s.io/kubectl v0.32.10
+	k8s.io/api v0.33.7
+	k8s.io/apiextensions-apiserver v0.33.7
+	k8s.io/apimachinery v0.33.7
+	k8s.io/cli-runtime v0.33.7
+	k8s.io/client-go v0.33.7
+	k8s.io/component-base v0.33.7
+	k8s.io/kubectl v0.33.7
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
 	sigs.k8s.io/controller-runtime v0.21.0
 	sigs.k8s.io/yaml v1.4.0
@@ -615,12 +615,12 @@ require (
 	gopkg.in/resty.v1 v1.12.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	k8s.io/apiserver v0.33.3 // indirect
-	k8s.io/component-helpers v0.32.10 // indirect
+	k8s.io/apiserver v0.33.7 // indirect
+	k8s.io/component-helpers v0.33.7 // indirect
 	k8s.io/klog v1.0.0 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20250710124328-f3f2b991d03b // indirect
-	k8s.io/metrics v0.32.10 // indirect
+	k8s.io/metrics v0.33.7 // indirect
 	kubevirt.io/api v1.3.1 // indirect
 	kubevirt.io/containerized-data-importer-api v1.57.0-alpha1 // indirect
 	kubevirt.io/controller-lifecycle-operator-sdk/api v0.0.0-20220329064328-f3cc58c6ed90 // indirect
@@ -628,9 +628,9 @@ require (
 	nhooyr.io/websocket v1.8.7 // indirect
 	oras.land/oras-go v1.2.5 // indirect
 	sigs.k8s.io/json v0.0.0-20241010143419-9aa6b5e7a4b3 // indirect
-	sigs.k8s.io/kustomize/api v0.18.0 // indirect
-	sigs.k8s.io/kustomize/kustomize/v5 v5.5.0 // indirect
-	sigs.k8s.io/kustomize/kyaml v0.18.1 // indirect
+	sigs.k8s.io/kustomize/api v0.19.0 // indirect
+	sigs.k8s.io/kustomize/kustomize/v5 v5.6.0 // indirect
+	sigs.k8s.io/kustomize/kyaml v0.19.0 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.6.0 // indirect
 	tags.cncf.io/container-device-interface v0.8.1 // indirect
