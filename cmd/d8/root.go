@@ -45,6 +45,7 @@ import (
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
 	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
+	useroperation "github.com/deckhouse/deckhouse-cli/internal/useroperation/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 )
 
@@ -104,6 +105,7 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(data.NewCommand())
 	r.cmd.AddCommand(mirror.NewCommand())
 	r.cmd.AddCommand(status.NewCommand())
+	r.cmd.AddCommand(useroperation.NewCommand())
 	r.cmd.AddCommand(tools.NewCommand())
 	r.cmd.AddCommand(commands.NewVirtualizationCommand())
 	r.cmd.AddCommand(commands.NewKubectlCommand())
