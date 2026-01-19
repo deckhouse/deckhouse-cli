@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
+
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 var userOperationGVR = schema.GroupVersionResource{
