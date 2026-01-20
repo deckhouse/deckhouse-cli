@@ -855,13 +855,13 @@ func (s *RegistryClientStub) GetImage(_ context.Context, tag string, _ ...regist
 }
 
 // PushImage pushes an image to the registry
-func (s *RegistryClientStub) PushImage(_ context.Context, _ string, _ v1.Image, _ ...registry.ImagePutOption) error {
+func (s *RegistryClientStub) PushImage(_ context.Context, _ string, _ v1.Image, _ ...registry.ImagePushOption) error {
 	// Stub implementation - always succeeds
 	return nil
 }
 
 // ListTags retrieves all available tags
-func (s *RegistryClientStub) ListTags(_ context.Context) ([]string, error) {
+func (s *RegistryClientStub) ListTags(_ context.Context, _ ...registry.ListTagsOption) ([]string, error) {
 	var allTags []string
 	for _, regData := range s.registries {
 		for _, repoData := range regData.repositories {
@@ -872,7 +872,7 @@ func (s *RegistryClientStub) ListTags(_ context.Context) ([]string, error) {
 }
 
 // ListRepositories retrieves all sub-repositories
-func (s *RegistryClientStub) ListRepositories(_ context.Context) ([]string, error) {
+func (s *RegistryClientStub) ListRepositories(_ context.Context, _ ...registry.ListRepositoriesOption) ([]string, error) {
 	var allRepos []string
 	for _, regData := range s.registries {
 		for repo := range regData.repositories {
