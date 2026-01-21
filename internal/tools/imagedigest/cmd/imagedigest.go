@@ -18,7 +18,6 @@ package cmd
 
 import (
 	"github.com/spf13/cobra"
-	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest/cmd/add"
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest/cmd/calculate"
@@ -26,19 +25,11 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest/cmd/validate"
 )
 
-var imagedigestLong = templates.LongDesc(`
-Manage GOST R 34.11-2012 (Streebog) digests for container images.
-
-Computes GOST digests from sorted image layer digests and stores them
-in annotations for integrity verification.
-
-© Flant JSC 2025`)
-
 func NewCommand() *cobra.Command {
 	imagedigestCmd := &cobra.Command{
 		Use:   "imagedigest",
-		Short: "Manage GOST R 34.11-2012 (Streebog) digests for container images",
-		Long:  imagedigestLong,
+		Short: "",
+		Long:  "",
 	}
 
 	imagedigestCmd.PersistentFlags().BoolP("insecure", "i", false, "Allow insecure connections to registries (skip TLS verification)")
