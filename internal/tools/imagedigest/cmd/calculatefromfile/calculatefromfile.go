@@ -22,26 +22,15 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest"
 )
 
-var calculateFromFileLong = templates.LongDesc(`
-Calculate GOST R 34.11-2012 (Streebog-256) digest for a file.
-
-Use '-' to read from stdin.
-
-Example:
-  d8 tools imagedigest calculate-from-file /path/to/file
-  d8 tools imagedigest calculate-from-file -
-  cat file.tar | d8 tools imagedigest calculate-from-file -`)
-
 func NewCommand() *cobra.Command {
 	calculateFromFileCmd := &cobra.Command{
 		Use:   "calculate-from-file <file>",
-		Short: "Calculate GOST digest for a file (use '-' for stdin)",
-		Long:  calculateFromFileLong,
+		Short: "Calculating the file digest according to the GOST standard Streebog (GOST R 34.11-2012). For stdin use '-'",
+		Long:  `Calculating the file digest according to the GOST standard Streebog (GOST R 34.11-2012)`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("this command requires exactly 1 argument (file path or '-' for stdin), got %d", len(args))
