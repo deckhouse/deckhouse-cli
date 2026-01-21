@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/google/go-containerregistry/pkg/crane"
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest"
@@ -32,8 +33,8 @@ func NewCommand() *cobra.Command {
 		Short: "Calculating the image digest according to the GOST standard Streebog (GOST R 34.11-2012)",
 		Long:  `Calculating the image digest according to the GOST standard Streebog (GOST R 34.11-2012)`,
 		Args: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 1 {
-				return fmt.Errorf("this command requires exactly 1 argument (image reference), got %d", len(args))
+			if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
+				return err
 			}
 			return nil
 		},
@@ -56,12 +57,12 @@ func runCalculate(cmd *cobra.Command, args []string) error {
 		opts = append(opts, crane.Insecure)
 	}
 
-	digest, err := imagedigest.PullAndCalculate(imageName, opts...)
+	gostImageDigest, err := imagedigest.PullAndCalculate(imageName, opts...)
 	if err != nil {
-		return fmt.Errorf("failed to calculate GOST digest: %w", err)
+		log.Fatal().Err(err).Msg("CalculateGostImageDigest")
 	}
 
-	fmt.Println(hex.EncodeToString(digest))
+	log.Info().Msgf("GOST Image Digest: %s", hex.EncodeToString(gostImageDigest))
 
 	return nil
 }

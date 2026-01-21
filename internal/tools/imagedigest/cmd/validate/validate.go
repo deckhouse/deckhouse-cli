@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/google/go-containerregistry/pkg/crane"
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest"
@@ -27,19 +28,19 @@ import (
 
 func NewCommand() *cobra.Command {
 	validateCmd := &cobra.Command{
-		Use:           "validate <image>",
-		Short:         "Validating the image digest in the image metadata calculated according to the GOST standard Streebog (GOST R 34.11-2012)",
-		Long:          `Validating the image digest in the image metadata calculated according to the GOST standard Streebog (GOST R 34.11-2012)`,
+		Use:   "validate <image>",
+		Short: "Validating the image digest in the image metadata calculated according to the GOST standard Streebog (GOST R 34.11-2012)",
+		Long:  `Validating the image digest in the image metadata calculated according to the GOST standard Streebog (GOST R 34.11-2012)`,
 		Args: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 1 {
-				return fmt.Errorf("this command requires exactly 1 argument (image reference), got %d", len(args))
+			if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
+				return err
 			}
 			return nil
 		},
 		RunE: runValidate,
 	}
 
-	validateCmd.Flags().Bool("fix", false, "Automatically fix GOST digest if validation fails")
+	validateCmd.Flags().Bool("fix", false, "Fix GOST Image Digest if it is incorrect")
 
 	return validateCmd
 }
@@ -62,32 +63,27 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		opts = append(opts, crane.Insecure)
 	}
 
-	fmt.Printf("Validating GOST digest for image: %s\n", imageName)
-
 	result, err := imagedigest.PullAndValidate(imageName, opts...)
 	if err != nil {
-		if result != nil {
-			fmt.Printf("Stored GOST digest:     %s\n", result.StoredDigest)
-			fmt.Printf("Calculated GOST digest: %s\n", result.CalculatedDigest)
-		}
-		fmt.Printf("Validation failed: %v\n", err)
+		log.Error().Err(err).Msg("ValidateGostImageDigest")
 
 		if fix {
-			fmt.Println("Attempting to fix GOST digest...")
+			log.Info().Msg("Fix GOST Image Digest")
 			newDigest, fixErr := imagedigest.PullAnnotatePush(imageName, opts...)
 			if fixErr != nil {
-				return fmt.Errorf("failed to fix GOST digest: %w", fixErr)
+				log.Fatal().Err(fixErr).Msg("AddGostImageDigest")
 			}
-			fmt.Printf("New GOST digest: %s\n", newDigest)
-			fmt.Println("Digest fixed successfully")
+			log.Info().Msgf("GOST Image Digest: %s", newDigest)
+			log.Info().Msg("Added successfully")
 			return nil
 		}
 
-		return err
+		return nil
 	}
 
-	fmt.Printf("GOST digest: %s\n", result.StoredDigest)
-	fmt.Println("Validation successful")
+	log.Info().Msgf("GOST Image Digest from image: %s", result.StoredDigest)
+	log.Info().Msgf("Calculated GOST Image Digest: %s", result.CalculatedDigest)
+	log.Info().Msg("Validate successfully")
 
 	return nil
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/crane"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/rs/zerolog/log"
 	"go.cypherpunks.ru/gogost/v5/gost34112012256"
 )
 
@@ -101,6 +102,9 @@ func ReadGostAnnotation(image v1.Image) (string, bool, error) {
 	}
 
 	digest, ok := manifest.Annotations[GostDigestAnnotationKey]
+	if !ok {
+		log.Debug().Msg("the image does not contain gost digest")
+	}
 	return digest, ok, nil
 }
 
@@ -247,6 +251,8 @@ func GetImageInfo(name string, image v1.Image) (*ImageInfo, error) {
 		return nil, err
 	}
 	info.LayerDigests = layerDigests
+
+	log.Debug().Interface("imageInfo", info).Msg("ImageMetadata")
 
 	return info, nil
 }

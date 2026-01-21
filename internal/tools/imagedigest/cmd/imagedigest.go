@@ -17,6 +17,10 @@ limitations under the License.
 package cmd
 
 import (
+	"os"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest/cmd/add"
@@ -30,9 +34,23 @@ func NewCommand() *cobra.Command {
 		Use:   "imagedigest",
 		Short: "",
 		Long:  "",
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			ojson, _ := cmd.Flags().GetBool("json")
+			debug, _ := cmd.Flags().GetBool("debug")
+
+			zerolog.SetGlobalLevel(zerolog.InfoLevel)
+			if !ojson {
+				log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout})
+			}
+			if debug {
+				zerolog.SetGlobalLevel(zerolog.DebugLevel)
+			}
+		},
 	}
 
 	imagedigestCmd.PersistentFlags().BoolP("insecure", "i", false, "Allow insecure connections to registries (skip TLS verification)")
+	imagedigestCmd.PersistentFlags().BoolP("json", "", false, "Use JSON formatter for output logs")
+	imagedigestCmd.PersistentFlags().BoolP("debug", "d", false, "Enable debug logging")
 
 	imagedigestCmd.AddCommand(
 		calculate.NewCommand(),

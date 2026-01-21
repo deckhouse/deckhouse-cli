@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest"
@@ -32,8 +33,8 @@ func NewCommand() *cobra.Command {
 		Short: "Calculating the file digest according to the GOST standard Streebog (GOST R 34.11-2012). For stdin use '-'",
 		Long:  `Calculating the file digest according to the GOST standard Streebog (GOST R 34.11-2012)`,
 		Args: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 1 {
-				return fmt.Errorf("this command requires exactly 1 argument (file path or '-' for stdin), got %d", len(args))
+			if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
+				return err
 			}
 			return nil
 		},
@@ -50,18 +51,20 @@ func runCalculateFromFile(cmd *cobra.Command, args []string) error {
 	if filename != "-" {
 		file, err := os.Open(filename)
 		if err != nil {
-			return fmt.Errorf("failed to open file: %w", err)
+			log.Err(err).Msg("failed to open file")
+			os.Exit(1)
 		}
 		defer file.Close()
 		reader = file
 	}
 
-	digest, err := imagedigest.CalculateGostHashFromReader(reader)
+	sum, err := imagedigest.CalculateGostHashFromReader(reader)
 	if err != nil {
-		return fmt.Errorf("failed to calculate GOST digest: %w", err)
+		log.Err(err).Msg("failed to calculate GOST digest")
+		os.Exit(2)
 	}
 
-	fmt.Println(hex.EncodeToString(digest))
+	fmt.Println(hex.EncodeToString(sum))
 
 	return nil
 }

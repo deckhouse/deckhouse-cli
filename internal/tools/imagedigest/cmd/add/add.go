@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/google/go-containerregistry/pkg/crane"
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest"
@@ -31,8 +32,8 @@ func NewCommand() *cobra.Command {
 		Short: "Calculating and adding the image digest to the image metadata according to the GOST standard Streebog (GOST R 34.11-2012)",
 		Long:  `Calculating and adding the image digest to the image metadata according to the GOST standard Streebog (GOST R 34.11-2012)`,
 		Args: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 1 {
-				return fmt.Errorf("this command requires exactly 1 argument (image reference), got %d", len(args))
+			if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
+				return err
 			}
 			return nil
 		},
@@ -55,15 +56,13 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		opts = append(opts, crane.Insecure)
 	}
 
-	fmt.Printf("Calculating GOST digest for image: %s\n", imageName)
-
 	digest, err := imagedigest.PullAnnotatePush(imageName, opts...)
 	if err != nil {
-		return fmt.Errorf("failed to add GOST digest: %w", err)
+		log.Fatal().Err(err).Msg("AddGostImageDigest")
 	}
 
-	fmt.Printf("GOST digest: %s\n", digest)
-	fmt.Println("Digest added successfully")
+	log.Info().Msgf("GOST Image Digest: %s", digest)
+	log.Info().Msg("Added successfully")
 
 	return nil
 }
