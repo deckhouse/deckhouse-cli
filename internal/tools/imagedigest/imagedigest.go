@@ -256,4 +256,3 @@ func GetImageInfo(name string, image v1.Image) (*ImageInfo, error) {
 
 	return info, nil
 }
-

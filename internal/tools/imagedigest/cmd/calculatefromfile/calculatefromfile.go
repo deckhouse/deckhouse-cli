@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest"
@@ -51,8 +50,7 @@ func runCalculateFromFile(cmd *cobra.Command, args []string) error {
 	if filename != "-" {
 		file, err := os.Open(filename)
 		if err != nil {
-			log.Err(err).Msg("failed to open file")
-			os.Exit(1)
+			return fmt.Errorf("failed to open file: %w", err)
 		}
 		defer file.Close()
 		reader = file
@@ -60,8 +58,7 @@ func runCalculateFromFile(cmd *cobra.Command, args []string) error {
 
 	sum, err := imagedigest.CalculateGostHashFromReader(reader)
 	if err != nil {
-		log.Err(err).Msg("failed to calculate GOST digest")
-		os.Exit(2)
+		return fmt.Errorf("failed to calculate GOST digest: %w", err)
 	}
 
 	fmt.Println(hex.EncodeToString(sum))
