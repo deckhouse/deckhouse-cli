@@ -39,11 +39,9 @@ Example:
 
 func NewCommand() *cobra.Command {
 	calculateFromFileCmd := &cobra.Command{
-		Use:           "calculate-from-file <file>",
-		Short:         "Calculate GOST digest for a file (use '-' for stdin)",
-		Long:          calculateFromFileLong,
-		SilenceErrors: true,
-		SilenceUsage:  true,
+		Use:   "calculate-from-file <file>",
+		Short: "Calculate GOST digest for a file (use '-' for stdin)",
+		Long:  calculateFromFileLong,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("this command requires exactly 1 argument (file path or '-' for stdin), got %d", len(args))

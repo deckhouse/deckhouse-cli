@@ -21,28 +21,15 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/spf13/cobra"
-	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest"
 )
 
-var addLong = templates.LongDesc(`
-Calculate and add GOST R 34.11-2012 (Streebog-256) digest to image metadata.
-
-The digest is calculated based on sorted layer digests and stored in the image
-annotation "deckhouse.io/gost-digest".
-
-Example:
-  d8 tools imagedigest add registry.example.com/image:tag
-  d8 tools imagedigest add --insecure localhost:5000/image:latest`)
-
 func NewCommand() *cobra.Command {
 	addCmd := &cobra.Command{
-		Use:           "add <image>",
-		Short:         "Calculate and add GOST digest to image metadata",
-		Long:          addLong,
-		SilenceErrors: true,
-		SilenceUsage:  true,
+		Use:   "add <image>",
+		Short: "Calculating and adding the image digest to the image metadata according to the GOST standard Streebog (GOST R 34.11-2012)",
+		Long:  `Calculating and adding the image digest to the image metadata according to the GOST standard Streebog (GOST R 34.11-2012)`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("this command requires exactly 1 argument (image reference), got %d", len(args))

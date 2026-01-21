@@ -21,30 +21,15 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/spf13/cobra"
-	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest"
 )
 
-var validateLong = templates.LongDesc(`
-Validate GOST R 34.11-2012 (Streebog-256) digest stored in image metadata.
-
-Compares the stored digest from annotation "deckhouse.io/gost-digest" with
-the recalculated value based on current layer digests.
-
-Use --fix flag to automatically repair the digest if validation fails.
-
-Example:
-  d8 tools imagedigest validate registry.example.com/image:tag
-  d8 tools imagedigest validate --fix registry.example.com/image:tag`)
-
 func NewCommand() *cobra.Command {
 	validateCmd := &cobra.Command{
 		Use:           "validate <image>",
-		Short:         "Validate stored GOST digest against recalculated value",
-		Long:          validateLong,
-		SilenceErrors: true,
-		SilenceUsage:  true,
+		Short:         "Validating the image digest in the image metadata calculated according to the GOST standard Streebog (GOST R 34.11-2012)",
+		Long:          `Validating the image digest in the image metadata calculated according to the GOST standard Streebog (GOST R 34.11-2012)`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("this command requires exactly 1 argument (image reference), got %d", len(args))
