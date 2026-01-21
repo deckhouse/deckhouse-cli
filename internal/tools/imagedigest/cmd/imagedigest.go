@@ -29,14 +29,8 @@ import (
 var imagedigestLong = templates.LongDesc(`
 Manage GOST R 34.11-2012 (Streebog) digests for container images.
 
-This tool calculates GOST digests based on sorted layer digests of container images
-and stores them in image annotations for integrity verification.
-
-Available Commands:
-  calculate            Calculate GOST digest for a container image
-  calculate-from-file  Calculate GOST digest for a file
-  add                  Calculate and add GOST digest to image metadata
-  validate             Validate stored GOST digest against recalculated value
+Computes GOST digests from sorted image layer digests and stores them
+in annotations for integrity verification.
 
 © Flant JSC 2025`)
 
