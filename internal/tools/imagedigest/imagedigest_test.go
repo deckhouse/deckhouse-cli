@@ -17,142 +17,200 @@ limitations under the License.
 package imagedigest
 
 import (
+	"bytes"
 	"encoding/hex"
 	"strings"
 	"testing"
 
-	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/random"
 )
 
-func TestCalculateLayersGostDigest(t *testing.T) {
-	t.Run("empty layers error", func(t *testing.T) {
-		_, err := CalculateLayersGostDigest(&ImageMetadata{})
-		if err == nil || !strings.Contains(err.Error(), "no layers found") {
-			t.Errorf("expected 'no layers found' error, got %v", err)
+// =============================================================================
+// Layer 1: Pure Hash Computation Tests
+// =============================================================================
+
+func TestCalculateGostHash(t *testing.T) {
+	t.Run("returns 32 bytes", func(t *testing.T) {
+		hash := CalculateGostHash([]byte("test data"))
+		if len(hash) != 32 {
+			t.Errorf("expected 32-byte hash, got %d", len(hash))
+		}
+	})
+
+	t.Run("deterministic", func(t *testing.T) {
+		data := []byte("test data")
+		hash1 := CalculateGostHash(data)
+		hash2 := CalculateGostHash(data)
+		if !bytes.Equal(hash1, hash2) {
+			t.Error("expected same hash for same input")
+		}
+	})
+
+	t.Run("different input different output", func(t *testing.T) {
+		hash1 := CalculateGostHash([]byte("data1"))
+		hash2 := CalculateGostHash([]byte("data2"))
+		if bytes.Equal(hash1, hash2) {
+			t.Error("expected different hashes for different inputs")
 		}
 	})
 }
 
-func TestCompareImageGostHash(t *testing.T) {
-	hash, _ := CalculateLayersGostDigest(&ImageMetadata{LayersDigest: []string{"sha256:test"}})
-	hashHex := hex.EncodeToString(hash)
-
-	t.Run("matching", func(t *testing.T) {
-		err := CompareImageGostHash(&ImageMetadata{ImageGostDigest: hashHex}, hash)
+func TestCalculateGostHashFromReader(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		reader := strings.NewReader("test data")
+		hash, err := CalculateGostHashFromReader(reader)
 		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(hash) != 32 {
+			t.Errorf("expected 32-byte hash, got %d", len(hash))
 		}
 	})
 
-	t.Run("mismatch", func(t *testing.T) {
-		err := CompareImageGostHash(&ImageMetadata{ImageGostDigest: hashHex}, make([]byte, 32))
-		if err == nil || !strings.Contains(err.Error(), "mismatch") {
-			t.Errorf("expected mismatch error, got %v", err)
-		}
-	})
-
-	t.Run("invalid hex", func(t *testing.T) {
-		err := CompareImageGostHash(&ImageMetadata{ImageGostDigest: "not-hex"}, hash)
-		if err == nil || !strings.Contains(err.Error(), "invalid") {
-			t.Errorf("expected invalid format error, got %v", err)
+	t.Run("matches direct calculation", func(t *testing.T) {
+		data := "test data"
+		directHash := CalculateGostHash([]byte(data))
+		readerHash, _ := CalculateGostHashFromReader(strings.NewReader(data))
+		if !bytes.Equal(directHash, readerHash) {
+			t.Error("reader hash should match direct hash")
 		}
 	})
 }
 
-func TestImageToImageMetadata(t *testing.T) {
-	img, err := random.Image(256, 2) // 256 bytes, 2 layers
+// =============================================================================
+// Layer 2: Layer Digest Extraction Tests
+// =============================================================================
+
+func TestExtractSortedLayerDigests(t *testing.T) {
+	img, err := random.Image(256, 3)
 	if err != nil {
 		t.Fatalf("failed to create test image: %v", err)
 	}
 
-	t.Run("extracts metadata", func(t *testing.T) {
-		im, err := ImageToImageMetadata("test:v1", img)
+	t.Run("extracts correct count", func(t *testing.T) {
+		digests, err := ExtractSortedLayerDigests(img)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if im.ImageName != "test:v1" {
-			t.Errorf("ImageName = %s, want test:v1", im.ImageName)
-		}
-		if im.ImageDigest == "" {
-			t.Error("ImageDigest is empty")
-		}
-		if len(im.LayersDigest) != 2 {
-			t.Errorf("LayersDigest length = %d, want 2", len(im.LayersDigest))
+		if len(digests) != 3 {
+			t.Errorf("expected 3 digests, got %d", len(digests))
 		}
 	})
 
-	t.Run("layers are sorted", func(t *testing.T) {
-		im, _ := ImageToImageMetadata("test", img)
-		for i := 1; i < len(im.LayersDigest); i++ {
-			if im.LayersDigest[i-1] > im.LayersDigest[i] {
-				t.Error("layers not sorted")
+	t.Run("digests are sorted", func(t *testing.T) {
+		digests, _ := ExtractSortedLayerDigests(img)
+		for i := 1; i < len(digests); i++ {
+			if digests[i-1] > digests[i] {
+				t.Error("digests not sorted")
 			}
 		}
 	})
 }
 
-func TestCalculateGostDigestFromImage(t *testing.T) {
-	img, _ := random.Image(256, 2)
+func TestReadGostAnnotation(t *testing.T) {
+	img, _ := random.Image(256, 1)
 
-	t.Run("success", func(t *testing.T) {
-		got, err := CalculateGostDigestFromImage("test:v1", img)
+	t.Run("no annotation", func(t *testing.T) {
+		digest, ok, err := ReadGostAnnotation(img)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(got) != 32 {
-			t.Errorf("expected 32-byte hash, got %d", len(got))
+		if ok {
+			t.Error("expected ok=false for image without annotation")
+		}
+		if digest != "" {
+			t.Error("expected empty digest")
+		}
+	})
+
+	t.Run("with annotation", func(t *testing.T) {
+		annotated := AddGostAnnotation(img, "abc123")
+		digest, ok, err := ReadGostAnnotation(annotated)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !ok {
+			t.Error("expected ok=true for annotated image")
+		}
+		if digest != "abc123" {
+			t.Errorf("expected 'abc123', got '%s'", digest)
+		}
+	})
+}
+
+func TestAddGostAnnotation(t *testing.T) {
+	img, _ := random.Image(256, 1)
+
+	t.Run("adds annotation", func(t *testing.T) {
+		annotated := AddGostAnnotation(img, "test-digest")
+		manifest, _ := annotated.Manifest()
+		if manifest.Annotations[GostDigestAnnotationKey] != "test-digest" {
+			t.Error("annotation not set correctly")
+		}
+	})
+}
+
+// =============================================================================
+// Layer 3: Composed Operations Tests
+// =============================================================================
+
+func TestCalculateImageGostDigest(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		img, _ := random.Image(256, 2)
+		digest, err := CalculateImageGostDigest(img)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(digest) != 32 {
+			t.Errorf("expected 32-byte hash, got %d", len(digest))
 		}
 	})
 
 	t.Run("deterministic", func(t *testing.T) {
-		hash1, _ := CalculateGostDigestFromImage("test:v1", img)
-		hash2, _ := CalculateGostDigestFromImage("test:v1", img)
-		if hex.EncodeToString(hash1) != hex.EncodeToString(hash2) {
+		img, _ := random.Image(256, 2)
+		hash1, _ := CalculateImageGostDigest(img)
+		hash2, _ := CalculateImageGostDigest(img)
+		if !bytes.Equal(hash1, hash2) {
 			t.Error("expected same hash for same image")
 		}
 	})
 }
 
-func TestAddGostDigestToImage(t *testing.T) {
+func TestAnnotateWithGostDigest(t *testing.T) {
 	img, _ := random.Image(256, 2)
 
 	t.Run("success", func(t *testing.T) {
-		result, err := AddGostDigestToImage("test:v1", img)
+		annotated, digestHex, err := AnnotateWithGostDigest(img)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(result.DigestHex) != 64 { // hex-encoded 32 bytes
-			t.Errorf("expected 64-char hex, got %d", len(result.DigestHex))
+		if len(digestHex) != 64 {
+			t.Errorf("expected 64-char hex, got %d", len(digestHex))
 		}
-		if result.Image == nil {
+		if annotated == nil {
 			t.Fatal("expected annotated image")
 		}
 
 		// Verify annotation was added
-		manifest, _ := result.Image.Manifest()
-		if manifest.Annotations[GostDigestAnnotationKey] != result.DigestHex {
-			t.Errorf("annotation not set correctly")
+		manifest, _ := annotated.Manifest()
+		if manifest.Annotations[GostDigestAnnotationKey] != digestHex {
+			t.Error("annotation not set correctly")
 		}
 	})
 
 	t.Run("digest matches recalculation", func(t *testing.T) {
-		result, _ := AddGostDigestToImage("test:v1", img)
-
-		// Recalculate and compare
-		recalculated, _ := CalculateGostDigestFromImage("test:v1", img)
-		if result.DigestHex != hex.EncodeToString(recalculated) {
+		_, digestHex, _ := AnnotateWithGostDigest(img)
+		recalculated, _ := CalculateImageGostDigest(img)
+		if digestHex != hex.EncodeToString(recalculated) {
 			t.Error("digest doesn't match recalculation")
 		}
 	})
 }
 
-func TestValidateGostDigestFromImage(t *testing.T) {
+func TestValidateGostDigest(t *testing.T) {
 	t.Run("no annotation error", func(t *testing.T) {
 		img, _ := random.Image(256, 1)
-
-		_, err := ValidateGostDigestFromImage("test:v1", img)
+		_, err := ValidateGostDigest(img)
 		if err == nil || !strings.Contains(err.Error(), "does not contain GOST digest") {
 			t.Errorf("expected no annotation error, got %v", err)
 		}
@@ -160,35 +218,26 @@ func TestValidateGostDigestFromImage(t *testing.T) {
 
 	t.Run("success with valid annotation", func(t *testing.T) {
 		img, _ := random.Image(256, 2)
+		annotated, expectedDigest, _ := AnnotateWithGostDigest(img)
 
-		// Use AddGostDigestToImage to create properly annotated image
-		addResult, err := AddGostDigestToImage("test:v1", img)
-		if err != nil {
-			t.Fatalf("failed to add digest: %v", err)
-		}
-
-		result, err := ValidateGostDigestFromImage("test:v1", addResult.Image)
+		result, err := ValidateGostDigest(annotated)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if result.StoredDigest != addResult.DigestHex {
-			t.Errorf("StoredDigest = %s, want %s", result.StoredDigest, addResult.DigestHex)
+		if result.StoredDigest != expectedDigest {
+			t.Errorf("StoredDigest = %s, want %s", result.StoredDigest, expectedDigest)
 		}
-		if result.CalculatedDigest != addResult.DigestHex {
-			t.Errorf("CalculatedDigest = %s, want %s", result.CalculatedDigest, addResult.DigestHex)
+		if result.CalculatedDigest != expectedDigest {
+			t.Errorf("CalculatedDigest = %s, want %s", result.CalculatedDigest, expectedDigest)
 		}
 	})
 
 	t.Run("mismatch with incorrect annotation", func(t *testing.T) {
 		img, _ := random.Image(256, 2)
+		wrongDigest := hex.EncodeToString(make([]byte, 32))
+		annotated := AddGostAnnotation(img, wrongDigest)
 
-		// Create image with incorrect GOST annotation
-		wrongDigest := hex.EncodeToString(make([]byte, 32)) // all zeros
-		annotatedImg := mutate.Annotations(img, map[string]string{
-			GostDigestAnnotationKey: wrongDigest,
-		}).(v1.Image)
-
-		result, err := ValidateGostDigestFromImage("test:v1", annotatedImg)
+		result, err := ValidateGostDigest(annotated)
 		if err == nil || !strings.Contains(err.Error(), "mismatch") {
 			t.Errorf("expected mismatch error, got %v", err)
 		}
@@ -200,6 +249,38 @@ func TestValidateGostDigestFromImage(t *testing.T) {
 		}
 		if result.CalculatedDigest == wrongDigest {
 			t.Error("CalculatedDigest should differ from wrong stored digest")
+		}
+	})
+}
+
+// =============================================================================
+// Utility: ImageInfo Tests
+// =============================================================================
+
+func TestGetImageInfo(t *testing.T) {
+	img, _ := random.Image(256, 2)
+
+	t.Run("extracts all fields", func(t *testing.T) {
+		info, err := GetImageInfo("test:v1", img)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if info.Name != "test:v1" {
+			t.Errorf("Name = %s, want test:v1", info.Name)
+		}
+		if info.Digest == "" {
+			t.Error("Digest is empty")
+		}
+		if len(info.LayerDigests) != 2 {
+			t.Errorf("LayerDigests length = %d, want 2", len(info.LayerDigests))
+		}
+	})
+
+	t.Run("includes GOST digest if present", func(t *testing.T) {
+		annotated, expectedDigest, _ := AnnotateWithGostDigest(img)
+		info, _ := GetImageInfo("test:v1", annotated)
+		if info.GostDigest != expectedDigest {
+			t.Errorf("GostDigest = %s, want %s", info.GostDigest, expectedDigest)
 		}
 	})
 }

@@ -70,7 +70,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Calculating GOST digest for image: %s\n", imageName)
 
-	digest, err := imagedigest.AddGostImageDigest(imageName, opts...)
+	digest, err := imagedigest.PullAnnotatePush(imageName, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to add GOST digest: %w", err)
 	}

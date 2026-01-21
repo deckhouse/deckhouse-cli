@@ -79,7 +79,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Validating GOST digest for image: %s\n", imageName)
 
-	result, err := imagedigest.ValidateGostImageDigest(imageName, opts...)
+	result, err := imagedigest.PullAndValidate(imageName, opts...)
 	if err != nil {
 		if result != nil {
 			fmt.Printf("Stored GOST digest:     %s\n", result.StoredDigest)
@@ -89,7 +89,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 
 		if fix {
 			fmt.Println("Attempting to fix GOST digest...")
-			newDigest, fixErr := imagedigest.AddGostImageDigest(imageName, opts...)
+			newDigest, fixErr := imagedigest.PullAnnotatePush(imageName, opts...)
 			if fixErr != nil {
 				return fmt.Errorf("failed to fix GOST digest: %w", fixErr)
 			}

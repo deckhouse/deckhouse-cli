@@ -69,7 +69,7 @@ func runCalculate(cmd *cobra.Command, args []string) error {
 		opts = append(opts, crane.Insecure)
 	}
 
-	digest, err := imagedigest.CalculateGostImageDigest(imageName, opts...)
+	digest, err := imagedigest.PullAndCalculate(imageName, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to calculate GOST digest: %w", err)
 	}

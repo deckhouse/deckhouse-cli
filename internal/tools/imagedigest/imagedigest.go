@@ -21,7 +21,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/crane"
@@ -34,219 +34,220 @@ const (
 	GostDigestAnnotationKey = "deckhouse.io/gost-digest"
 )
 
-type ImageMetadata struct {
-	ImageName       string
-	ImageDigest     string
-	ImageGostDigest string
-	LayersDigest    []string
-}
-
-// AnnotatedImageResult contains the result of adding GOST digest to an image.
-type AnnotatedImageResult struct {
-	Image     v1.Image // Annotated image with GOST digest
-	DigestHex string   // Calculated GOST digest in hex format
-}
-
 // ValidationResult contains the result of GOST digest validation.
 type ValidationResult struct {
 	StoredDigest     string // Digest read from image annotation
 	CalculatedDigest string // Freshly calculated digest from layers
 }
 
-// CalculateGostImageDigest calculates GOST R 34.11-2012 (Streebog-256) digest
-// for a container image based on sorted layer digests.
-func CalculateGostImageDigest(imageName string, opts ...crane.Option) ([]byte, error) {
-	image, err := crane.Pull(imageName, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return CalculateGostDigestFromImage(imageName, image)
+// ImageInfo contains display information about an image (read-only DTO).
+type ImageInfo struct {
+	Name         string
+	Digest       string
+	GostDigest   string   // May be empty if not annotated
+	LayerDigests []string // Sorted
 }
 
-// CalculateGostDigestFromImage calculates GOST digest from an already-pulled image.
-func CalculateGostDigestFromImage(imageName string, image v1.Image) ([]byte, error) {
-	im, err := ImageToImageMetadata(imageName, image)
-	if err != nil {
-		return nil, err
-	}
-	return CalculateLayersGostDigest(im)
+// =============================================================================
+// Layer 1: Pure Hash Computation (no dependencies on image types)
+// =============================================================================
+
+// CalculateGostHash computes GOST R 34.11-2012 (Streebog-256) from raw bytes.
+func CalculateGostHash(data []byte) []byte {
+	hasher := gost34112012256.New()
+	hasher.Write(data)
+	return hasher.Sum(nil)
 }
 
-// AddGostImageDigest calculates and adds GOST digest to image annotations.
-func AddGostImageDigest(imageName string, opts ...crane.Option) (string, error) {
-	image, err := crane.Pull(imageName, opts...)
+// CalculateGostHashFromReader computes GOST R 34.11-2012 hash from io.Reader.
+func CalculateGostHashFromReader(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(r)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	result, err := AddGostDigestToImage(imageName, image)
-	if err != nil {
-		return "", err
-	}
-
-	err = crane.Push(result.Image, imageName, opts...)
-	if err != nil {
-		return "", err
-	}
-
-	return result.DigestHex, nil
+	return CalculateGostHash(data), nil
 }
 
-// AddGostDigestToImage calculates GOST digest and returns annotated image.
-// Does not push to registry - caller is responsible for that.
-func AddGostDigestToImage(imageName string, image v1.Image) (*AnnotatedImageResult, error) {
-	im, err := ImageToImageMetadata(imageName, image)
-	if err != nil {
-		return nil, err
-	}
+// =============================================================================
+// Layer 2: Layer Digest Extraction (depends only on v1.Image)
+// =============================================================================
 
-	gostImageDigest, err := CalculateLayersGostDigest(im)
-	if err != nil {
-		return nil, err
-	}
-
-	digestHex := hex.EncodeToString(gostImageDigest)
-
-	annotatedImage := mutate.Annotations(image, map[string]string{
-		GostDigestAnnotationKey: digestHex,
-	}).(v1.Image)
-
-	return &AnnotatedImageResult{
-		Image:     annotatedImage,
-		DigestHex: digestHex,
-	}, nil
-}
-
-// ValidateGostImageDigest validates stored GOST digest against recalculated digest.
-func ValidateGostImageDigest(imageName string, opts ...crane.Option) (*ValidationResult, error) {
-	image, err := crane.Pull(imageName, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return ValidateGostDigestFromImage(imageName, image)
-}
-
-// ValidateGostDigestFromImage validates GOST digest from an already-pulled image.
-func ValidateGostDigestFromImage(imageName string, image v1.Image) (*ValidationResult, error) {
-	im, err := ImageToImageMetadata(imageName, image)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(im.ImageGostDigest) == 0 {
-		return nil, fmt.Errorf("image %s does not contain GOST digest annotation (%s)", imageName, GostDigestAnnotationKey)
-	}
-
-	result := &ValidationResult{
-		StoredDigest: im.ImageGostDigest,
-	}
-
-	gostImageDigest, err := CalculateLayersGostDigest(im)
-	if err != nil {
-		return result, err
-	}
-	result.CalculatedDigest = hex.EncodeToString(gostImageDigest)
-
-	err = CompareImageGostHash(im, gostImageDigest)
-	if err != nil {
-		return result, err
-	}
-
-	return result, nil
-}
-
-// ImageToImageMetadata extracts metadata from a v1.Image.
-func ImageToImageMetadata(imageName string, image v1.Image) (*ImageMetadata, error) {
-	im := &ImageMetadata{ImageName: imageName}
-
-	imageDigest, err := image.Digest()
-	if err != nil {
-		return nil, err
-	}
-	im.ImageDigest = imageDigest.String()
-
-	manifest, err := image.Manifest()
-	if err != nil {
-		return nil, err
-	}
-
-	imageGostDigestStr, ok := manifest.Annotations[GostDigestAnnotationKey]
-	if ok {
-		im.ImageGostDigest = imageGostDigestStr
-	}
-
+// ExtractSortedLayerDigests returns sorted layer digests from an image.
+func ExtractSortedLayerDigests(image v1.Image) ([]string, error) {
 	layers, err := image.Layers()
 	if err != nil {
 		return nil, err
 	}
 
+	digests := make([]string, 0, len(layers))
 	for _, layer := range layers {
 		digest, err := layer.Digest()
 		if err != nil {
 			return nil, err
 		}
-		im.LayersDigest = append(im.LayersDigest, digest.String())
+		digests = append(digests, digest.String())
 	}
 
-	sort.Slice(
-		im.LayersDigest,
-		func(i, j int) bool {
-			return strings.Compare(im.LayersDigest[i], im.LayersDigest[j]) == -1
-		},
-	)
-
-	return im, nil
+	slices.Sort(digests)
+	return digests, nil
 }
 
-// CalculateLayersGostDigest calculates GOST digest from concatenated sorted layer digests.
-func CalculateLayersGostDigest(im *ImageMetadata) ([]byte, error) {
-	layersDigestBuilder := strings.Builder{}
-	for _, digest := range im.LayersDigest {
-		layersDigestBuilder.WriteString(digest)
+// ReadGostAnnotation reads the GOST digest annotation if present.
+// Returns the digest value, whether it was found, and any error.
+func ReadGostAnnotation(image v1.Image) (string, bool, error) {
+	manifest, err := image.Manifest()
+	if err != nil {
+		return "", false, err
 	}
 
-	data := layersDigestBuilder.String()
+	digest, ok := manifest.Annotations[GostDigestAnnotationKey]
+	return digest, ok, nil
+}
 
-	if len(data) == 0 {
-		return nil, fmt.Errorf("invalid layers hash data: no layers found")
-	}
+// AddGostAnnotation returns a new image with the GOST annotation added.
+func AddGostAnnotation(image v1.Image, digestHex string) v1.Image {
+	return mutate.Annotations(image, map[string]string{
+		GostDigestAnnotationKey: digestHex,
+	}).(v1.Image)
+}
 
-	hasher := gost34112012256.New()
-	_, err := hasher.Write([]byte(data))
+// =============================================================================
+// Layer 3: Composed Operations (combines layers 1 and 2)
+// =============================================================================
+
+// CalculateImageGostDigest calculates GOST digest from an image's layers.
+func CalculateImageGostDigest(image v1.Image) ([]byte, error) {
+	digests, err := ExtractSortedLayerDigests(image)
 	if err != nil {
 		return nil, err
 	}
-
-	return hasher.Sum(nil), nil
+	if len(digests) == 0 {
+		return nil, fmt.Errorf("invalid layers hash data: no layers found")
+	}
+	return CalculateGostHash([]byte(strings.Join(digests, ""))), nil
 }
 
-// CompareImageGostHash compares stored GOST digest with calculated hash using constant-time comparison.
-func CompareImageGostHash(im *ImageMetadata, gostHash []byte) error {
-	imageGostHashByte, err := hex.DecodeString(im.ImageGostDigest)
+// AnnotateWithGostDigest calculates GOST digest and returns annotated image.
+// Returns the annotated image and the calculated digest in hex format.
+func AnnotateWithGostDigest(image v1.Image) (v1.Image, string, error) {
+	digest, err := CalculateImageGostDigest(image)
+	if err != nil {
+		return nil, "", err
+	}
+	digestHex := hex.EncodeToString(digest)
+	return AddGostAnnotation(image, digestHex), digestHex, nil
+}
+
+// ValidateGostDigest verifies the stored annotation matches recalculated digest.
+// Returns ValidationResult with both digests for comparison, and error if mismatch.
+func ValidateGostDigest(image v1.Image) (*ValidationResult, error) {
+	stored, ok, err := ReadGostAnnotation(image)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("image does not contain GOST digest annotation (%s)", GostDigestAnnotationKey)
+	}
+
+	calculated, err := CalculateImageGostDigest(image)
+	if err != nil {
+		return &ValidationResult{StoredDigest: stored}, err
+	}
+
+	result := &ValidationResult{
+		StoredDigest:     stored,
+		CalculatedDigest: hex.EncodeToString(calculated),
+	}
+
+	if err := compareDigests(stored, calculated); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// compareDigests compares stored hex digest with calculated hash using constant-time comparison.
+func compareDigests(storedHex string, calculatedHash []byte) error {
+	storedBytes, err := hex.DecodeString(storedHex)
 	if err != nil {
 		return fmt.Errorf("invalid stored GOST digest format: %w", err)
 	}
 
-	if subtle.ConstantTimeCompare(imageGostHashByte, gostHash) == 0 {
+	if subtle.ConstantTimeCompare(storedBytes, calculatedHash) == 0 {
 		return fmt.Errorf("GOST digest mismatch: stored=%s, calculated=%s",
-			im.ImageGostDigest, hex.EncodeToString(gostHash))
+			storedHex, hex.EncodeToString(calculatedHash))
 	}
 	return nil
 }
 
-// CalculateFromReader calculates GOST R 34.11-2012 (Streebog-256) digest
-// from an io.Reader (file or stdin).
-func CalculateFromReader(reader io.Reader) ([]byte, error) {
-	data, err := io.ReadAll(reader)
+// =============================================================================
+// Layer 4: Registry Operations (high-level convenience with network I/O)
+// =============================================================================
+
+// PullAndCalculate pulls image and calculates GOST digest.
+func PullAndCalculate(imageName string, opts ...crane.Option) ([]byte, error) {
+	image, err := crane.Pull(imageName, opts...)
 	if err != nil {
 		return nil, err
 	}
-
-	hasher := gost34112012256.New()
-	_, err = hasher.Write(data)
-	if err != nil {
-		return nil, err
-	}
-
-	return hasher.Sum(nil), nil
+	return CalculateImageGostDigest(image)
 }
+
+// PullAnnotatePush pulls image, annotates with GOST digest, and pushes back.
+// Returns the calculated digest in hex format.
+func PullAnnotatePush(imageName string, opts ...crane.Option) (string, error) {
+	image, err := crane.Pull(imageName, opts...)
+	if err != nil {
+		return "", err
+	}
+
+	annotated, digestHex, err := AnnotateWithGostDigest(image)
+	if err != nil {
+		return "", err
+	}
+
+	if err := crane.Push(annotated, imageName, opts...); err != nil {
+		return "", err
+	}
+	return digestHex, nil
+}
+
+// PullAndValidate pulls image and validates its GOST digest.
+func PullAndValidate(imageName string, opts ...crane.Option) (*ValidationResult, error) {
+	image, err := crane.Pull(imageName, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return ValidateGostDigest(image)
+}
+
+// =============================================================================
+// Utility: ImageInfo for display purposes
+// =============================================================================
+
+// GetImageInfo extracts display information from an image.
+func GetImageInfo(name string, image v1.Image) (*ImageInfo, error) {
+	info := &ImageInfo{Name: name}
+
+	imageDigest, err := image.Digest()
+	if err != nil {
+		return nil, err
+	}
+	info.Digest = imageDigest.String()
+
+	gostDigest, ok, err := ReadGostAnnotation(image)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		info.GostDigest = gostDigest
+	}
+
+	layerDigests, err := ExtractSortedLayerDigests(image)
+	if err != nil {
+		return nil, err
+	}
+	info.LayerDigests = layerDigests
+
+	return info, nil
+}
+

@@ -69,7 +69,7 @@ func runCalculateFromFile(cmd *cobra.Command, args []string) error {
 		reader = file
 	}
 
-	digest, err := imagedigest.CalculateFromReader(reader)
+	digest, err := imagedigest.CalculateGostHashFromReader(reader)
 	if err != nil {
 		return fmt.Errorf("failed to calculate GOST digest: %w", err)
 	}
