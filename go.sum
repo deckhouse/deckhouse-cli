@@ -415,10 +415,6 @@ github.com/deckarep/golang-set/v2 v2.6.0 h1:XfcQbWM1LlMB8BsJ8N9vW5ehnnPVIw0je80N
 github.com/deckarep/golang-set/v2 v2.6.0/go.mod h1:VAky9rY/yGXJOLEDv3OMci+7wtDpOF4IN+y82NBOac4=
 github.com/deckhouse/deckhouse/pkg/log v0.1.0 h1:2aPfyiHHSIJlX4x7ysyPOaIb7CLmyY+hUf9uDb8TYd8=
 github.com/deckhouse/deckhouse/pkg/log v0.1.0/go.mod h1:pbAxTSDcPmwyl3wwKDcEB3qdxHnRxqTV+J0K+sha8bw=
-github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20251120122028-65011cba39f4 h1:puYW42+BF8fYuoq/dMDd+oxNprMuuSACWqDss6IQulE=
-github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20251120122028-65011cba39f4/go.mod h1:+oNXMQMOaVpDq00i+PX9NXptzIybUDRmxAO7iRWM32s=
-github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260119191635-04ce9157d702 h1:HdfASfTGK2124itxEKqFNqEIEdjJ2XfD0DA+8ONBTok=
-github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260119191635-04ce9157d702/go.mod h1:OdmJduRktTXVMNLAULkzoPbzLbtaU/jBuwSoAUbnxRM=
 github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260120103154-2be5575578db h1:xq4DMxGgDk0IaqUzIqwkKOiY9dtQlpVnEupfE/TBU6c=
 github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260120103154-2be5575578db/go.mod h1:OdmJduRktTXVMNLAULkzoPbzLbtaU/jBuwSoAUbnxRM=
 github.com/deckhouse/virtualization/api v1.0.0 h1:q4TvC74tpjk25k0byXJCYP4HjvRexBSeI0cC8QeCMTQ=
