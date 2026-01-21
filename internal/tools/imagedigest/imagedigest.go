@@ -41,6 +41,12 @@ type ImageMetadata struct {
 	LayersDigest    []string
 }
 
+// AnnotatedImageResult contains the result of adding GOST digest to an image.
+type AnnotatedImageResult struct {
+	Image     v1.Image // Annotated image with GOST digest
+	DigestHex string   // Calculated GOST digest in hex format
+}
+
 // ValidationResult contains the result of GOST digest validation.
 type ValidationResult struct {
 	StoredDigest     string // Digest read from image annotation
@@ -50,50 +56,79 @@ type ValidationResult struct {
 // CalculateGostImageDigest calculates GOST R 34.11-2012 (Streebog-256) digest
 // for a container image based on sorted layer digests.
 func CalculateGostImageDigest(imageName string, opts ...crane.Option) ([]byte, error) {
-	im, err := getImageMetadataFromRegistry(imageName, opts...)
+	image, err := crane.Pull(imageName, opts...)
 	if err != nil {
 		return nil, err
 	}
+	return CalculateGostDigestFromImage(imageName, image)
+}
 
-	return calculateLayersGostDigest(im)
+// CalculateGostDigestFromImage calculates GOST digest from an already-pulled image.
+func CalculateGostDigestFromImage(imageName string, image v1.Image) ([]byte, error) {
+	im, err := ImageToImageMetadata(imageName, image)
+	if err != nil {
+		return nil, err
+	}
+	return CalculateLayersGostDigest(im)
 }
 
 // AddGostImageDigest calculates and adds GOST digest to image annotations.
 func AddGostImageDigest(imageName string, opts ...crane.Option) (string, error) {
-	image, err := getImageFromRegistry(imageName, opts...)
-	if err != nil {
-		return "", err
-	}
-	im, err := imageToImageMetadata(imageName, image)
+	image, err := crane.Pull(imageName, opts...)
 	if err != nil {
 		return "", err
 	}
 
-	gostImageDigest, err := calculateLayersGostDigest(im)
+	result, err := AddGostDigestToImage(imageName, image)
 	if err != nil {
 		return "", err
+	}
+
+	err = crane.Push(result.Image, imageName, opts...)
+	if err != nil {
+		return "", err
+	}
+
+	return result.DigestHex, nil
+}
+
+// AddGostDigestToImage calculates GOST digest and returns annotated image.
+// Does not push to registry - caller is responsible for that.
+func AddGostDigestToImage(imageName string, image v1.Image) (*AnnotatedImageResult, error) {
+	im, err := ImageToImageMetadata(imageName, image)
+	if err != nil {
+		return nil, err
+	}
+
+	gostImageDigest, err := CalculateLayersGostDigest(im)
+	if err != nil {
+		return nil, err
 	}
 
 	digestHex := hex.EncodeToString(gostImageDigest)
 
-	err = updateImageInRegistry(
-		imageName,
-		image,
-		map[string]string{
-			GostDigestAnnotationKey: digestHex,
-		},
-		opts...,
-	)
-	if err != nil {
-		return "", err
-	}
+	annotatedImage := mutate.Annotations(image, map[string]string{
+		GostDigestAnnotationKey: digestHex,
+	}).(v1.Image)
 
-	return digestHex, nil
+	return &AnnotatedImageResult{
+		Image:     annotatedImage,
+		DigestHex: digestHex,
+	}, nil
 }
 
 // ValidateGostImageDigest validates stored GOST digest against recalculated digest.
 func ValidateGostImageDigest(imageName string, opts ...crane.Option) (*ValidationResult, error) {
-	im, err := getImageMetadataFromRegistry(imageName, opts...)
+	image, err := crane.Pull(imageName, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return ValidateGostDigestFromImage(imageName, image)
+}
+
+// ValidateGostDigestFromImage validates GOST digest from an already-pulled image.
+func ValidateGostDigestFromImage(imageName string, image v1.Image) (*ValidationResult, error) {
+	im, err := ImageToImageMetadata(imageName, image)
 	if err != nil {
 		return nil, err
 	}
@@ -106,13 +141,13 @@ func ValidateGostImageDigest(imageName string, opts ...crane.Option) (*Validatio
 		StoredDigest: im.ImageGostDigest,
 	}
 
-	gostImageDigest, err := calculateLayersGostDigest(im)
+	gostImageDigest, err := CalculateLayersGostDigest(im)
 	if err != nil {
 		return result, err
 	}
 	result.CalculatedDigest = hex.EncodeToString(gostImageDigest)
 
-	err = compareImageGostHash(im, gostImageDigest)
+	err = CompareImageGostHash(im, gostImageDigest)
 	if err != nil {
 		return result, err
 	}
@@ -120,29 +155,8 @@ func ValidateGostImageDigest(imageName string, opts ...crane.Option) (*Validatio
 	return result, nil
 }
 
-func getImageMetadataFromRegistry(imageName string, opts ...crane.Option) (*ImageMetadata, error) {
-	image, err := getImageFromRegistry(imageName, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return imageToImageMetadata(imageName, image)
-}
-
-func getImageFromRegistry(imageName string, opts ...crane.Option) (v1.Image, error) {
-	return crane.Pull(imageName, opts...)
-}
-
-func updateImageInRegistry(
-	imageName string,
-	image v1.Image,
-	annotations map[string]string,
-	opts ...crane.Option,
-) error {
-	image = mutate.Annotations(image, annotations).(v1.Image)
-	return crane.Push(image, imageName, opts...)
-}
-
-func imageToImageMetadata(imageName string, image v1.Image) (*ImageMetadata, error) {
+// ImageToImageMetadata extracts metadata from a v1.Image.
+func ImageToImageMetadata(imageName string, image v1.Image) (*ImageMetadata, error) {
 	im := &ImageMetadata{ImageName: imageName}
 
 	imageDigest, err := image.Digest()
@@ -184,7 +198,8 @@ func imageToImageMetadata(imageName string, image v1.Image) (*ImageMetadata, err
 	return im, nil
 }
 
-func calculateLayersGostDigest(im *ImageMetadata) ([]byte, error) {
+// CalculateLayersGostDigest calculates GOST digest from concatenated sorted layer digests.
+func CalculateLayersGostDigest(im *ImageMetadata) ([]byte, error) {
 	layersDigestBuilder := strings.Builder{}
 	for _, digest := range im.LayersDigest {
 		layersDigestBuilder.WriteString(digest)
@@ -205,7 +220,8 @@ func calculateLayersGostDigest(im *ImageMetadata) ([]byte, error) {
 	return hasher.Sum(nil), nil
 }
 
-func compareImageGostHash(im *ImageMetadata, gostHash []byte) error {
+// CompareImageGostHash compares stored GOST digest with calculated hash using constant-time comparison.
+func CompareImageGostHash(im *ImageMetadata, gostHash []byte) error {
 	imageGostHashByte, err := hex.DecodeString(im.ImageGostDigest)
 	if err != nil {
 		return fmt.Errorf("invalid stored GOST digest format: %w", err)
