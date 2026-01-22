@@ -23,6 +23,7 @@ import (
 
 	"github.com/fatih/color"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
@@ -78,13 +79,22 @@ func getDeckhouseReleases(ctx context.Context, dynamicCl dynamic.Interface) ([]D
 
 // Processing converts raw resource data into a structured format for easier output and analysis.
 func deckhouseReleaseProcessing(item map[string]interface{}, name string) (DeckhouseRelease, bool) {
-	statusMap, ok := item["status"].(map[string]interface{})
-	if !ok {
+	if item == nil {
 		return DeckhouseRelease{}, false
 	}
-	phase := statusMap["phase"].(string)
-	transitionTime := statusMap["transitionTime"].(string)
-	message := statusMap["message"].(string)
+
+	statusValue, exists := item["status"]
+	if !exists || statusValue == nil {
+		return DeckhouseRelease{}, false
+	}
+
+	if _, ok := statusValue.(map[string]interface{}); !ok {
+		return DeckhouseRelease{}, false
+	}
+
+	phase, _, _ := unstructured.NestedString(item, "status", "phase")
+	transitionTime, _, _ := unstructured.NestedString(item, "status", "transitionTime")
+	message, _, _ := unstructured.NestedString(item, "status", "message")
 
 	return DeckhouseRelease{
 		Name:           name,
