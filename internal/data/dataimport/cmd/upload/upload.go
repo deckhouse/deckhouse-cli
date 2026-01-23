@@ -42,7 +42,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
+	cmd.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
 	cmd.Flags().StringP("file", "f", "", "file to upload")
 	cmd.Flags().IntP("chunks", "c", 10, "number of chunks to upload")
 	cmd.Flags().BoolP("publish", "P", false, "publish the uploaded file")

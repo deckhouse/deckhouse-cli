@@ -27,6 +27,7 @@ import (
 	"github.com/spf13/cobra"
 	"sigs.k8s.io/yaml"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	v1alpha1 "github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
@@ -60,7 +61,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
+	cmd.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
 	cmd.Flags().String("ttl", "2m", "Time to live")
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
 	cmd.Flags().StringP("file", "f", "", "PVC manifest file path")
