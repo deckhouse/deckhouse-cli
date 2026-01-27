@@ -25,6 +25,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
@@ -55,7 +56,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
+	cmd.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
 
 	return cmd
 }
