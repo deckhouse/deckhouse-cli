@@ -415,10 +415,6 @@ github.com/deckarep/golang-set/v2 v2.6.0 h1:XfcQbWM1LlMB8BsJ8N9vW5ehnnPVIw0je80N
 github.com/deckarep/golang-set/v2 v2.6.0/go.mod h1:VAky9rY/yGXJOLEDv3OMci+7wtDpOF4IN+y82NBOac4=
 github.com/deckhouse/deckhouse/pkg/log v0.1.0 h1:2aPfyiHHSIJlX4x7ysyPOaIb7CLmyY+hUf9uDb8TYd8=
 github.com/deckhouse/deckhouse/pkg/log v0.1.0/go.mod h1:pbAxTSDcPmwyl3wwKDcEB3qdxHnRxqTV+J0K+sha8bw=
-github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20251120122028-65011cba39f4 h1:puYW42+BF8fYuoq/dMDd+oxNprMuuSACWqDss6IQulE=
-github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20251120122028-65011cba39f4/go.mod h1:+oNXMQMOaVpDq00i+PX9NXptzIybUDRmxAO7iRWM32s=
-github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260119191635-04ce9157d702 h1:HdfASfTGK2124itxEKqFNqEIEdjJ2XfD0DA+8ONBTok=
-github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260119191635-04ce9157d702/go.mod h1:OdmJduRktTXVMNLAULkzoPbzLbtaU/jBuwSoAUbnxRM=
 github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260120103154-2be5575578db h1:xq4DMxGgDk0IaqUzIqwkKOiY9dtQlpVnEupfE/TBU6c=
 github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260120103154-2be5575578db/go.mod h1:OdmJduRktTXVMNLAULkzoPbzLbtaU/jBuwSoAUbnxRM=
 github.com/deckhouse/virtualization/api v1.0.0 h1:q4TvC74tpjk25k0byXJCYP4HjvRexBSeI0cC8QeCMTQ=
@@ -1290,6 +1286,7 @@ github.com/mattn/go-isatty v0.0.8/go.mod h1:Iq45c/XA43vh69/j3iqttzPXn0bhXyGjM0Hd
 github.com/mattn/go-isatty v0.0.12/go.mod h1:cbi8OIDigv2wuxKPP5vlRcQ1OAZbq2CE4Kysco4FUpU=
 github.com/mattn/go-isatty v0.0.14/go.mod h1:7GGIvUiUoEMVVmxf/4nioHXj79iQHKdU27kJ6hsGG94=
 github.com/mattn/go-isatty v0.0.16/go.mod h1:kYGgaQfpe5nmfYZH+SKPsOc2e4SrIfOl2e/yFXSvRLM=
+github.com/mattn/go-isatty v0.0.19/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
 github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
 github.com/mattn/go-runewidth v0.0.3/go.mod h1:LwmH8dsx7+W8Uxz3IHJYH5QSwggIsqBzpuz5H//U1FU=
@@ -1643,6 +1640,8 @@ github.com/rs/xid v1.6.0/go.mod h1:7XoLgs4eV+QndskICGsho+ADou8ySMSjJKDIan90Nz0=
 github.com/rs/zerolog v1.4.0/go.mod h1:YbFCdg8HfsridGWAh22vktObvhZbQsZXe4/zB0OKkWU=
 github.com/rs/zerolog v1.13.0/go.mod h1:YbFCdg8HfsridGWAh22vktObvhZbQsZXe4/zB0OKkWU=
 github.com/rs/zerolog v1.15.0/go.mod h1:xYTKnLHcpfU2225ny5qZjxnj9NvkumZYjJHlAThCjNc=
+github.com/rs/zerolog v1.34.0 h1:k43nTLIwcTVQAncfCw4KZ2VY6ukYoZaBPNOE8txlOeY=
+github.com/rs/zerolog v1.34.0/go.mod h1:bJsvje4Z08ROH4Nhs5iH600c3IkWhwp44iRc54W6wYQ=
 github.com/rubenv/sql-migrate v1.6.1 h1:bo6/sjsan9HaXAsNxYP/jCEDUGibHp8JmOBw7NTGRos=
 github.com/rubenv/sql-migrate v1.6.1/go.mod h1:tPzespupJS0jacLfhbwto/UjSX+8h2FdWB7ar+QlHa0=
 github.com/russross/blackfriday v1.5.2/go.mod h1:JO/DiYxRf+HjHt06OyowR9PTA263kcR/rfWxYHBV53g=
