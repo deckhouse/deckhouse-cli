@@ -76,6 +76,8 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd.Flags().StringP("output", "o", "", "file to save data (default: same as resource)") // TODO support /dev/stdout
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
 	cmd.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
+	cmd.Flags().Bool("tls-skip-verify", false, "Disable TLS certificate validation for download")
+	cmd.Flags().Bool("auto-delete", false, "Delete auto-created DataExport immediately without prompt")
 
 	return cmd
 }
@@ -226,6 +228,8 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	dstPath, _ := cmd.Flags().GetString("output")
 	publish, _ := cmd.Flags().GetBool("publish")
 	ttl, _ := cmd.Flags().GetString("ttl")
+	tlsSkipVerify, _ := cmd.Flags().GetBool("tls-skip-verify")
+	autoDelete, _ := cmd.Flags().GetBool("auto-delete")
 
 	dataName, srcPath, err := dataio.ParseArgs(args)
 	if err != nil {
@@ -234,6 +238,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	flags := cmd.PersistentFlags()
 	safeClient.SupportNoAuth = false
+	safeClient.Insecure = tlsSkipVerify
 	sClient, err := safeClient.NewSafeClient(flags)
 	if err != nil {
 		return err
@@ -283,7 +288,11 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	if deName != dataName { // DataExport created in download process
-		if dataio.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
+		shouldDelete := autoDelete || dataio.AskYesNoWithTimeout(
+			"DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]",
+			time.Second*30,
+		)
+		if shouldDelete {
 			if err := util.DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
 				log.Warn("Failed to delete DataExport", slog.String("name", deName), slog.String("error", err.Error()))
 			}
