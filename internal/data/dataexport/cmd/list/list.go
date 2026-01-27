@@ -64,7 +64,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
+	cmd.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
 	cmd.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
 
