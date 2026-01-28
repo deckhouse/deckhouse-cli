@@ -28,7 +28,7 @@ import (
 	saferequest "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
-// RunWatch executes the logic for the 'cni-switch watch' command.
+// RunWatch executes the logic for the 'cni-migration watch' command.
 func RunWatch() error {
 	ctx := context.Background()
 

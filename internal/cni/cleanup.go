@@ -26,7 +26,7 @@ import (
 	saferequest "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
-// RunCleanup executes the logic for the 'cni-switch cleanup' command.
+// RunCleanup executes the logic for the 'cni-migration cleanup' command.
 func RunCleanup() error {
 	ctx := context.Background()
 

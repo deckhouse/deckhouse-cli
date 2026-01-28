@@ -88,7 +88,7 @@ func FindActiveMigration(ctx context.Context, rtClient client.Client) (*v1alpha1
 	if len(migrationList.Items) > 1 {
 		return nil, fmt.Errorf(
 			"found %d CNI migration objects, which is an inconsistent state. "+
-				"Please run 'd8 cni-switch cleanup' to resolve this",
+				"Please run 'd8 cni-migration cleanup' to resolve this",
 			len(migrationList.Items),
 		)
 	}

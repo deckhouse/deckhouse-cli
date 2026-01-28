@@ -28,7 +28,7 @@ import (
 	saferequest "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
-// RunSwitch executes the logic for the 'cni-switch switch' command.
+// RunSwitch executes the logic for the 'cni-migration switch' command.
 func RunSwitch(targetCNI string) error {
 	// Ask for user confirmation
 	confirmed, err := AskForConfirmation("switch")

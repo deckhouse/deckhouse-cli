@@ -37,27 +37,27 @@ The migration process is handled automatically by an in-cluster controller.
 This CLI tool is used to trigger the migration and monitor its status.
 
 Workflow:
-  1. 'd8 cni-switch switch --to-cni <CNI>' - Initiates the migration.
+  1. 'd8 cni-migration switch --to-cni <CNI>' - Initiates the migration.
      This creates a CNIMigration resource, which triggers the deployment of the migration agent.
      The agent then performs all necessary steps (validation, node checks, CNI switching).
 
-  2. 'd8 cni-switch watch' - (Optional) Monitors the progress of the migration.
+  2. 'd8 cni-migration watch' - (Optional) Monitors the progress of the migration.
      Since the process is automated, this command simply watches the status.
 
-  3. 'd8 cni-switch cleanup' - Cleans up the migration resources after completion.
+  3. 'd8 cni-migration cleanup' - Cleans up the migration resources after completion.
 `)
 
 	cniSwitchExample = templates.Examples(`
 		# Start the migration to Cilium CNI
-		d8 cni-switch switch --to-cni cilium`)
+		d8 cni-migration switch --to-cni cilium`)
 
 	cniWatchExample = templates.Examples(`
 		# Monitor the ongoing migration
-		d8 cni-switch watch`)
+		d8 cni-migration watch`)
 
 	cniCleanupExample = templates.Examples(`
 		# Cleanup resources created by the 'switch' command
-		d8 cni-switch cleanup`)
+		d8 cni-migration cleanup`)
 
 	supportedCNIs = []string{"cilium", "flannel", "simple-bridge"}
 )
@@ -67,7 +67,7 @@ func NewCniSwitchCommand() *cobra.Command {
 	ctrllog.SetLogger(logr.Discard())
 
 	cmd := &cobra.Command{
-		Use:   "cni-switch",
+		Use:   "cni-migration",
 		Short: "A group of commands to switch CNI in the cluster",
 		Long:  cniSwitchLong,
 	}
