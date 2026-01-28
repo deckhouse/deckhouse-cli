@@ -170,7 +170,7 @@ func pushStaticPackages(pushParams *params.PushParams, logger params.Logger, cli
 			logger.InfoLn(pkgName, "package is not present, skipping")
 			continue
 		case err != nil:
-			return err
+			return fmt.Errorf("open package %q: %w", pkgName, err)
 		}
 
 		switch pkgName {
@@ -236,7 +236,7 @@ func validateRegistryAccess(ctx context.Context, pushParams *params.PushParams) 
 	accessValidator := validation.NewRemoteRegistryAccessValidator()
 	err := accessValidator.ValidateWriteAccessForRepo(ctx, path.Join(pushParams.RegistryHost, pushParams.RegistryPath), opts...)
 	if err != nil {
-		return err
+		return fmt.Errorf("validate write access to registry %s: %w", path.Join(pushParams.RegistryHost, pushParams.RegistryPath), err)
 	}
 
 	return nil
@@ -359,7 +359,7 @@ func (p *Pusher) executeNewPush() error {
 			p.logger.WarnLn("Operation cancelled by user")
 			return nil
 		}
-		return err
+		return fmt.Errorf("push to registry: %w", err)
 	}
 
 	return nil

@@ -130,7 +130,7 @@ func (svc *Service) validateSecurityAccess(ctx context.Context) error {
 	}
 
 	if err != nil {
-		return fmt.Errorf("failed to check tag exists: %w", err)
+		return fmt.Errorf("failed to check security database tag %q in registry: %w", "2", err)
 	}
 
 	return nil
