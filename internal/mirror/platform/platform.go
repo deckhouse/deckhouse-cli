@@ -159,7 +159,7 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 	if internal.ChannelIsValid(targetTag) {
 		err := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, targetTag)
 		if err != nil {
-			return fmt.Errorf("failed to check release exists: %w", err)
+			return fmt.Errorf("failed to check release channel %q exists in registry: %w", targetTag, err)
 		}
 
 		return nil
@@ -168,7 +168,7 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 	// For specific tags, check if the tag exists
 	err := svc.deckhouseService.CheckImageExists(ctx, targetTag)
 	if err != nil {
-		return fmt.Errorf("failed to check tag exists: %w", err)
+		return fmt.Errorf("failed to check Deckhouse tag %q exists in registry: %w", targetTag, err)
 	}
 
 	return nil

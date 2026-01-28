@@ -145,7 +145,7 @@ func (svc *Service) validateModulesAccess(ctx context.Context) error {
 	}
 
 	if err != nil {
-		return fmt.Errorf("failed to check modules lists: %w", err)
+		return fmt.Errorf("failed to list modules from registry: %w", err)
 	}
 
 	return nil
