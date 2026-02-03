@@ -75,7 +75,7 @@ func wrapRunE(cmd *cobra.Command) {
 			}
 
 			// Modify the output to fix the command suggestion
-			modifiedOutput := d8CommandRegex.ReplaceAllString(string(output), "$1d8 k $2")
+			modifiedOutput := d8CommandRegex.ReplaceAllString(string(output), "${1}d8 k ${2}")
 
 			// Write the modified output to real stderr
 			fmt.Fprint(oldStderr, modifiedOutput)
