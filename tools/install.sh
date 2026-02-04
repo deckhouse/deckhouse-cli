@@ -36,6 +36,7 @@ INSTALL_DIR=${INSTALL_DIR:-/opt/deckhouse/bin}
 FORCE=${FORCE:-no}
 UNATTENDED=${UNATTENDED:-no}
 BINARY_NAME="d8"
+SUDOERS_FILE="/etc/sudoers.d/${BINARY_NAME}"
 
 # Detect OS and architecture
 detect_platform() {
@@ -209,7 +210,7 @@ supports_hyperlinks() {
 
 # Adapted from code and information by Anton Kochkov (@XVilka)
 # Source: https://gist.github.com/XVilka/8346728
-supports_truecolor() {
+supports_true_color() {
   case "$COLORTERM" in
   truecolor|24bit) return 0 ;;
   esac
@@ -277,7 +278,7 @@ setup_color() {
   fi
 
   # shellcheck disable=SC2034  # FMT_RAINBOW kept for potential future use
-  if supports_truecolor; then
+  if supports_true_color; then
     FMT_RAINBOW="
       $(printf '\033[38;2;255;0;0m')
       $(printf '\033[38;2;255;97;0m')
@@ -364,8 +365,8 @@ install_binary() {
   binary_path="$1"
   # Normalize INSTALL_DIR by removing trailing slashes
   INSTALL_DIR="${INSTALL_DIR%/}"
-  target_path="${INSTALL_DIR}/${BINARY_NAME}"
-  
+  target_path="${INSTALL_DIR}/${BINARY_NAME}-origin"
+
   # Check if binary already exists
   if [ -f "$target_path" ] && [ "$FORCE" != "yes" ]; then
     if [ "$UNATTENDED" = "yes" ]; then
@@ -408,8 +409,8 @@ install_binary() {
 verify_installation() {
   # Normalize INSTALL_DIR by removing trailing slashes
   INSTALL_DIR="${INSTALL_DIR%/}"
-  target_path="${INSTALL_DIR}/${BINARY_NAME}"
-  
+  target_path="${INSTALL_DIR}/${BINARY_NAME}-origin"
+
   fmt_info "Verifying installation..."
 
   # Check if binary exists after installation 
@@ -509,6 +510,69 @@ ${FMT_BOLD}Examples:${FMT_RESET}
 EOF
 }
 
+install_sudoers() {
+  fmt_info "Configuring sudoers rules for ${BINARY_NAME}..."
+
+  target_path="${INSTALL_DIR}/${BINARY_NAME}-origin"
+
+  if [ "$(id -u)" -eq 0 ]; then # is root
+    WRITE_CMD=""
+  elif user_can_sudo; then # not root, but can sudo
+    WRITE_CMD="sudo"
+  else
+    fmt_warn "Skipping sudoers configuration:"
+    fmt_warn "  insufficient privileges to write ${SUDOERS_FILE}"
+    fmt_warn "  please run this script as root or with sudo"
+    return 0
+  fi
+
+  $WRITE_CMD sh -c "cat > ${SUDOERS_FILE}" << EOF
+ALL ALL=(root) NOPASSWD: ${target_path} plugins install *
+ALL ALL=(root) NOPASSWD: ${target_path} system *
+EOF
+
+  $WRITE_CMD chmod 0440 "${SUDOERS_FILE}"
+
+  # syntax checking
+  if command_exists visudo; then
+    if ! $WRITE_CMD visudo -cf "${SUDOERS_FILE}"; then
+      fmt_error "sudoers file ${SUDOERS_FILE} is invalid!"
+      fmt_error "Please fix or remove it manually"
+      exit 1
+    fi
+  fi
+
+  fmt_success "sudoers rules installed at ${SUDOERS_FILE}"
+}
+
+# Install wrapper script
+# the script provides the user with transparent sudo usage for some commands.
+# So that the user doesn't have to type "sudo" explicitly.
+install_wrapper() {
+    fmt_info "Installing wrapper..."
+
+    target_path="${INSTALL_DIR}/${BINARY_NAME}"
+
+    cat > "${target_path}" << EOF
+#!/bin/bash
+# d8 wrapper: auto-sudo is only for allowed commands, the rest is directly
+
+REAL_D8="${target_path}-origin"
+D8_CMD="\$1"
+
+# Allowed commands for sudo (must match exactly with sudoers)
+if [[ "\$D8_CMD" == "plugins" && "\${2:-}" == "install" ]] || [[ "\$D8_CMD" == "system" ]]; then
+    exec sudo -n "\${REAL_D8}" "\$@"
+else
+    exec "\${REAL_D8}" "\$@"
+fi
+EOF
+
+    chmod +x "${target_path}"
+    fmt_success "Wrapper installed"
+    echo
+}
+
 main() {
   # Run as unattended if stdin is not a tty
   if [ ! -t 0 ]; then
@@ -562,7 +626,13 @@ main() {
 
   # Install D8
   install_d8
-  
+
+  # Install wrapper
+  install_wrapper
+
+  # Configure sudoers (optional, requires root/sudo)
+  install_sudoers
+
   # Verify installation
   verify_installation
   
