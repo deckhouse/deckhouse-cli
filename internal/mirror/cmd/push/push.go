@@ -43,6 +43,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
 )
@@ -236,6 +237,7 @@ func validateRegistryAccess(ctx context.Context, pushParams *params.PushParams) 
 	accessValidator := validation.NewRemoteRegistryAccessValidator()
 	err := accessValidator.ValidateWriteAccessForRepo(ctx, path.Join(pushParams.RegistryHost, pushParams.RegistryPath), opts...)
 	if err != nil {
+		fmt.Fprint(os.Stderr, errorutil.FormatRegistryError(err))
 		return fmt.Errorf("validate write access to registry %s: %w", path.Join(pushParams.RegistryHost, pushParams.RegistryPath), err)
 	}
 
@@ -359,7 +361,8 @@ func (p *Pusher) executeNewPush() error {
 			p.logger.WarnLn("Operation cancelled by user")
 			return nil
 		}
-		return fmt.Errorf("push to registry: %w", err)
+		fmt.Fprint(os.Stderr, errorutil.FormatRegistryError(err))
+		return fmt.Errorf("push to registry failed: %w", err)
 	}
 
 	return nil
@@ -372,7 +375,8 @@ func (p *Pusher) validateRegistryAccess() error {
 	defer cancel()
 	err := validateRegistryAccess(ctx, p.pushParams)
 	if err != nil && os.Getenv("MIRROR_BYPASS_ACCESS_CHECKS") != "1" {
-		return fmt.Errorf("registry credentials validation failure: %w", err)
+		fmt.Fprint(os.Stderr, errorutil.FormatRegistryError(err))
+		return fmt.Errorf("registry credentials validation failed: %w", err)
 	}
 	return nil
 }
