@@ -108,7 +108,7 @@ func completeRepositoryNames(cmd *cobra.Command, args []string, toComplete strin
 		return nil, cobra.ShellCompDirectiveError
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), constants.DefaultAPITimeout)
+	ctx, cancel := context.WithTimeout(cmd.Context(), constants.DefaultAPITimeout)
 	defer cancel()
 
 	repoClient := dynamicClient.Resource(packageRepositoryGVR)
