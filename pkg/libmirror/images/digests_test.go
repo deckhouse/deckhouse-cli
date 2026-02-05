@@ -47,9 +47,8 @@ func TestExtractImageDigestsFromDeckhouseInstaller(t *testing.T) {
 
 	installersLayout := createOCILayoutWithInstallerImage(t, "nonexistent.registry.com/deckhouse", installerTag, expectedImages)
 	client := mock.NewRegistryClientMock(t)
-	client.GetRegistryMock.Return("nonexistent.registry.com")
-	client.WithSegmentMock.Return(client)
 	client.CheckImageExistsMock.Return(nil)
+	client.GetRegistryMock.Return("nonexistent.registry.com/deckhouse")
 	images, err := ExtractImageDigestsFromDeckhouseInstaller(
 		&params.PullParams{BaseParams: params.BaseParams{
 			DeckhouseRegistryRepo: "nonexistent.registry.com/deckhouse",
