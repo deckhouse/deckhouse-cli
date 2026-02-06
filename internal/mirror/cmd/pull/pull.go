@@ -49,6 +49,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
@@ -307,7 +308,8 @@ func (p *Puller) Execute(ctx context.Context) error {
 				p.logger.WarnLn("Operation cancelled by user")
 				return nil
 			}
-			return fmt.Errorf("pull from registry: %w", err)
+			fmt.Fprint(os.Stderr, errorutil.FormatRegistryError(err))
+			return fmt.Errorf("pull from registry failed: %w", err)
 		}
 
 		return nil
@@ -420,6 +422,7 @@ func (p *Puller) validatePlatformAccess() error {
 	}
 
 	if accessErr != nil {
+		fmt.Fprint(os.Stderr, errorutil.FormatRegistryError(accessErr))
 		return fmt.Errorf("Source registry is not accessible: %w", accessErr)
 	}
 
@@ -472,6 +475,7 @@ func (p *Puller) pullSecurityDatabases() error {
 			p.logger.Warnf("Skipping pull of security databases: %v", err)
 			return nil
 		case err != nil:
+			fmt.Fprint(os.Stderr, errorutil.FormatRegistryError(err))
 			return fmt.Errorf("Source registry is not accessible: %w", err)
 		}
 
@@ -547,6 +551,7 @@ func (p *Puller) validateModulesAccess() error {
 	defer cancel()
 
 	if err := p.accessValidator.ValidateListAccessForRepo(ctx, modulesRepo, p.validationOpts...); err != nil {
+		fmt.Fprint(os.Stderr, errorutil.FormatRegistryError(err))
 		return fmt.Errorf("Source registry is not accessible: %w", err)
 	}
 	return nil
