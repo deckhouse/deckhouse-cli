@@ -9,20 +9,16 @@ import (
 )
 
 func newResetPasswordCommand() *cobra.Command {
-	var bcryptHash string
-
 	cmd := &cobra.Command{
-		Use:           "reset-password <username> --bcrypt-hash '<hash>'",
+		Use:           "reset-password <username> <bcryptHash>",
 		Aliases:       []string{"resetpass"},
 		Short:         "Reset local user's password in Dex (requires bcrypt hash)",
-		Args:          cobra.ExactArgs(1),
+		Args:          cobra.ExactArgs(2),
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			username := args[0]
-			if bcryptHash == "" {
-				return fmt.Errorf("--bcrypt-hash is required")
-			}
+			bcryptHash := args[1]
 			wf, err := getWaitFlags(cmd)
 			if err != nil {
 				return err
@@ -77,7 +73,7 @@ func newResetPasswordCommand() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&bcryptHash, "bcrypt-hash", "", "Bcrypt hash of the new password (as produced by htpasswd -BinC 10).")
-	addWaitFlags(cmd, waitFlags{wait: true, timeout: 5 * time.Minute})
+	cmd.Long = "Reset local user's password in Dex.\n\nThe second argument must be a bcrypt hash (e.g. produced by `htpasswd -BinC 10`)."
+	addWaitFlags(cmd)
 	return cmd
 }

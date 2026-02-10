@@ -150,14 +150,14 @@ Request local user operations for Dex static users via `UserOperation` custom re
 d8 user-operation reset2fa test-user --timeout 5m
 
 # Lock user for 10 minutes
-d8 user-operation lock test-user --for 10m --timeout 5m
+d8 user-operation lock test-user 10m --timeout 5m
 
 # Unlock user
 d8 user-operation unlock test-user --timeout 5m
 
 # Reset password (bcrypt hash is required)
 HASH="$(echo -n 'Test12345!' | htpasswd -BinC 10 \"\" | cut -d: -f2 | tr -d '\n')"
-d8 user-operation reset-password test-user --bcrypt-hash "$HASH" --timeout 5m
+d8 user-operation reset-password test-user "$HASH" --timeout 5m
 ```
 
 ---

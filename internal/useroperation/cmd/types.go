@@ -21,14 +21,19 @@ var userOperationGVR = schema.GroupVersionResource{
 	Resource: "useroperations",
 }
 
+const (
+	defaultWait    = true
+	defaultTimeout = 5 * time.Minute
+)
+
 type waitFlags struct {
 	wait    bool
 	timeout time.Duration
 }
 
-func addWaitFlags(cmd *cobra.Command, defaults waitFlags) {
-	cmd.Flags().Bool("wait", defaults.wait, "Wait for UserOperation completion and print result.")
-	cmd.Flags().Duration("timeout", defaults.timeout, "How long to wait for completion when --wait is enabled.")
+func addWaitFlags(cmd *cobra.Command) {
+	cmd.Flags().Bool("wait", defaultWait, "Wait for UserOperation completion and print result.")
+	cmd.Flags().Duration("timeout", defaultTimeout, "How long to wait for completion when --wait is enabled.")
 }
 
 func getWaitFlags(cmd *cobra.Command) (waitFlags, error) {
@@ -44,6 +49,9 @@ func getWaitFlags(cmd *cobra.Command) (waitFlags, error) {
 }
 
 func getStringFlag(cmd *cobra.Command, name string) (string, error) {
+	// This command group reuses persistent kubeconfig/context flags.
+	// Depending on how the command is constructed, these flags may exist either on the command itself
+	// or on a parent command. We support both.
 	if cmd.Flags().Lookup(name) != nil {
 		return cmd.Flags().GetString(name)
 	}
@@ -81,21 +89,30 @@ func waitUserOperation(ctx context.Context, dyn dynamic.Interface, name string, 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var last *unstructured.Unstructured
 	err := wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
 		obj, err := dyn.Resource(userOperationGVR).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
+			// Hard error: if we can't read the resource, we can't reliably wait for completion.
 			return false, err
 		}
-		last = obj
+
 		phase, found, _ := unstructured.NestedString(obj.Object, "status", "phase")
 		if !found || phase == "" {
+			// Not completed yet: keep polling until the controller fills status.phase.
 			return false, nil
 		}
+
+		// Completed (Succeeded/Failed): stop polling.
 		return true, nil
 	})
 	if err != nil {
-		return last, err
+		return nil, err
 	}
-	return last, nil
+
+	// Fetch the final object to return the latest status/message.
+	obj, err := dyn.Resource(userOperationGVR).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return obj, nil
 }

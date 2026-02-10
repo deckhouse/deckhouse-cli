@@ -9,22 +9,18 @@ import (
 )
 
 func newLockCommand() *cobra.Command {
-	var forStr string
-
 	cmd := &cobra.Command{
-		Use:           "lock <username> --for 10m",
+		Use:           "lock <username> <lockDuration>",
 		Short:         "Lock local user in Dex for a period of time",
-		Args:          cobra.ExactArgs(1),
+		Args:          cobra.ExactArgs(2),
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			username := args[0]
-			if forStr == "" {
-				return fmt.Errorf("--for is required")
-			}
+			lockDuration := args[1]
 			// Validate duration format (must be parseable by time.ParseDuration; supports s/m/h).
-			if _, err := time.ParseDuration(forStr); err != nil {
-				return fmt.Errorf("invalid --for duration %q: %w", forStr, err)
+			if _, err := time.ParseDuration(lockDuration); err != nil {
+				return fmt.Errorf("invalid lockDuration %q: %w", lockDuration, err)
 			}
 
 			wf, err := getWaitFlags(cmd)
@@ -50,7 +46,7 @@ func newLockCommand() *cobra.Command {
 						"type":          "Lock",
 						"initiatorType": "admin",
 						"lock": map[string]any{
-							"for": forStr,
+							"for": lockDuration,
 						},
 					},
 				},
@@ -81,7 +77,7 @@ func newLockCommand() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&forStr, "for", "", "Lock duration (e.g. 30s, 10m, 1h).")
-	addWaitFlags(cmd, waitFlags{wait: true, timeout: 5 * time.Minute})
+	cmd.Long = "Lock local user in Dex for a period of time.\n\nThe lockDuration argument must be a duration string (e.g. 30s, 10m, 1h)."
+	addWaitFlags(cmd)
 	return cmd
 }

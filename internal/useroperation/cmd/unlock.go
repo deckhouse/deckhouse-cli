@@ -68,6 +68,7 @@ func newUnlockCommand() *cobra.Command {
 		},
 	}
 
-	addWaitFlags(cmd, waitFlags{wait: true, timeout: 5 * time.Minute})
+	cmd.Long = "Unlock local user in Dex.\n\nThis requests a UserOperation of type Unlock and waits for completion by default."
+	addWaitFlags(cmd)
 	return cmd
 }

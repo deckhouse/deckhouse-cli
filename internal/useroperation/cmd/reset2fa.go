@@ -68,6 +68,7 @@ func newReset2FACommand() *cobra.Command {
 		},
 	}
 
-	addWaitFlags(cmd, waitFlags{wait: true, timeout: 5 * time.Minute})
+	cmd.Long = "Reset local user's 2FA (TOTP) in Dex.\n\nThis requests a UserOperation of type Reset2FA and waits for completion by default."
+	addWaitFlags(cmd)
 	return cmd
 }
