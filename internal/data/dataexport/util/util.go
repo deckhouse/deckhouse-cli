@@ -265,13 +265,14 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, sClient *safeClient.SafeClient) (string, string, *safeClient.SafeClient, error) {
 	var url, volumeMode string
 	var subClient *safeClient.SafeClient
+	var decodedBytes []byte
 
 	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {
 		return "", "", nil, err
 	}
 
-	podURL, volumeMode, intrenalCAData, err := getExportStatus(ctx, log, deName, namespace, publish, rtClient)
+	podURL, volumeMode, internalCAData, err := getExportStatus(ctx, log, deName, namespace, publish, rtClient)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -292,18 +293,17 @@ func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace st
 		return "", "", nil, fmt.Errorf("%w: '%s'", dataio.ErrUnsupportedVolumeMode, volumeMode)
 	}
 
-	// Reuse the original SafeClient unless we need to inject additional CA.
-	subClient = sClient
-
-	if !publish && len(intrenalCAData) > 0 {
-		// Create an isolated copy to avoid mutating the original client
-		subClient = sClient.Copy()
-		decodedBytes, err := base64.StdEncoding.DecodeString(intrenalCAData)
+	if len(internalCAData) > 0 {
+		decodedBytes, err = base64.StdEncoding.DecodeString(internalCAData)
 		if err != nil {
 			return "", "", nil, fmt.Errorf("CA decoding error: %s", err.Error())
 		}
-		subClient.SetTLSCAData(decodedBytes)
 	}
+
+	// Create an isolated copy to avoid mutating the original client
+	subClient = sClient.Copy()
+	// Always call SetTLSCAData to build a merged trust pool (system CAs + kubeconfig CA + internal CA if present)
+	subClient.SetTLSCAData(decodedBytes)
 
 	return url, volumeMode, subClient, nil
 }
