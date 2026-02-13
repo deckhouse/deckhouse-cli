@@ -141,23 +141,23 @@ d8 --version
 
 ---
 
-## 🧰 User operations (user-authn)
+## 🧰 User management (user-authn)
 
-Request local user operations for Dex static users via `UserOperation` custom resources.
+Manage Dex static users via `UserOperation` custom resources.
 
 ```bash
 # Reset user's 2FA (TOTP)
-d8 user-operation reset2fa test-user --timeout 5m
+d8 user reset2fa test-user --timeout 5m
 
 # Lock user for 10 minutes
-d8 user-operation lock test-user 10m --timeout 5m
+d8 user lock test-user 10m --timeout 5m
 
 # Unlock user
-d8 user-operation unlock test-user --timeout 5m
+d8 user unlock test-user --timeout 5m
 
 # Reset password (bcrypt hash is required)
 HASH="$(echo -n 'Test12345!' | htpasswd -BinC 10 \"\" | cut -d: -f2 | tr -d '\n')"
-d8 user-operation reset-password test-user "$HASH" --timeout 5m
+d8 user reset-password test-user "$HASH" --timeout 5m
 ```
 
 ---

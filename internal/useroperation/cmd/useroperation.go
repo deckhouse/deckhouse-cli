@@ -8,17 +8,18 @@ import (
 )
 
 var userOperationLong = templates.LongDesc(`
-Request local user operations (ResetPassword/Reset2FA/Lock/Unlock) in the Deckhouse user-authn module.
+Manage Deckhouse users (user-authn).
 
-The command creates a UserOperation custom resource and (optionally) waits for completion.
+This command provides admin operations for Dex local users via UserOperation custom resources:
+ResetPassword, Reset2FA, Lock, Unlock.
 
 © Flant JSC 2026`)
 
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:           "user-operation",
-		Aliases:       []string{"userop", "uo"},
-		Short:         "Request local user operations in user-authn module",
+		Use:           "user",
+		Aliases:       []string{"userop"},
+		Short:         "Manage Deckhouse users (user-authn)",
 		Long:          userOperationLong,
 		SilenceErrors: true,
 		SilenceUsage:  true,
