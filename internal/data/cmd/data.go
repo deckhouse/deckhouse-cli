@@ -23,6 +23,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	deCreate "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/create"
 	deDelete "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/delete"
 	deDownload "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/download"
@@ -96,7 +97,7 @@ func NewCommand() *cobra.Command {
 			return exportCreateRun(ctx, logger, c, args)
 		},
 	}
-	deprecatedCreate.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
+	deprecatedCreate.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
 	deprecatedCreate.Flags().String("ttl", "2m", "Time to live")
 	deprecatedCreate.Flags().Bool("publish", false, "Provide access outside of cluster")
 
@@ -110,7 +111,7 @@ func NewCommand() *cobra.Command {
 			return exportListRun(ctx, logger, c, args)
 		},
 	}
-	deprecatedList.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
+	deprecatedList.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
 	deprecatedList.Flags().Bool("publish", false, "Provide access outside of cluster")
 	deprecatedList.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
 
@@ -124,7 +125,7 @@ func NewCommand() *cobra.Command {
 			return exportDownloadRun(ctx, logger, c, args)
 		},
 	}
-	deprecatedDownload.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
+	deprecatedDownload.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
 	deprecatedDownload.Flags().StringP("output", "o", "", "file to save data (default: same as resource)")
 	deprecatedDownload.Flags().Bool("publish", false, "Provide access outside of cluster")
 	deprecatedDownload.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
@@ -139,7 +140,7 @@ func NewCommand() *cobra.Command {
 			return exportDeleteRun(ctx, logger, c, args)
 		},
 	}
-	deprecatedDelete.Flags().StringP("namespace", "n", "d8-data-exporter", "data volume namespace")
+	deprecatedDelete.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
 
 	root.AddCommand(exportCmd, importCmd, deprecatedCreate, deprecatedList, deprecatedDownload, deprecatedDelete)
 

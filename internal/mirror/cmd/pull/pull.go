@@ -121,7 +121,7 @@ func pull(cmd *cobra.Command, _ []string) error {
 			puller.logger.WarnLn("Operation cancelled by user")
 			return nil
 		}
-		return ErrPullFailed
+		return fmt.Errorf("pull failed: %w", err)
 	}
 
 	return nil
@@ -307,7 +307,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 				p.logger.WarnLn("Operation cancelled by user")
 				return nil
 			}
-			return err
+			return fmt.Errorf("pull from registry: %w", err)
 		}
 
 		return nil

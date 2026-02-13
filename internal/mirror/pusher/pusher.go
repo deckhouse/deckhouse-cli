@@ -96,7 +96,7 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 
 		img, err := index.Image(manifest.Digest)
 		if err != nil {
-			return fmt.Errorf("read image %s: %w", tag, err)
+			return fmt.Errorf("read image %s from layout %s: %w", tag, layoutPath, err)
 		}
 
 		imageReferenceString := fmt.Sprintf("%s:%s", client.GetRegistry(), tag)

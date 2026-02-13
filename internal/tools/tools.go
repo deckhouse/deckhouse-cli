@@ -22,6 +22,7 @@ import (
 
 	farconverter "github.com/deckhouse/deckhouse-cli/internal/tools/farconverter/cmd"
 	gostsum "github.com/deckhouse/deckhouse-cli/internal/tools/gostsum/cmd"
+	imagedigest "github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest/cmd"
 	sigmigrate "github.com/deckhouse/deckhouse-cli/internal/tools/sigmigrate/cmd"
 )
 
@@ -41,6 +42,7 @@ func NewCommand() *cobra.Command {
 	toolsCmd.AddCommand(
 		farconverter.NewCommand(),
 		gostsum.NewCommand(),
+		imagedigest.NewCommand(),
 		sigmigrate.NewCommand(),
 	)
 

@@ -89,7 +89,7 @@ func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) erro
 				continue
 			}
 
-			return fmt.Errorf("get digest: %w", err)
+			return fmt.Errorf("get digest for image %s: %w", tag, err)
 		}
 
 		config.ImageSet[image] = NewImageMeta(tag, image, digest)
@@ -135,7 +135,7 @@ func (ps *PullerService) PullImageSet(
 				if err != nil {
 					logger.Debugf("failed to pull image %s: %v", imageMeta.TagReference, err)
 
-					return fmt.Errorf("pull image metadata: %w", err)
+					return fmt.Errorf("pull image %s (digest %s): %w", imageMeta.TagReference, imageMeta.Digest.String(), err)
 				}
 
 				img.SetMetadata(&image.ImageMeta{
@@ -148,7 +148,7 @@ func (ps *PullerService) PullImageSet(
 				if err != nil {
 					logger.Debugf("failed to add image %s: %v", imageMeta.ImageTag, err)
 
-					return fmt.Errorf("add image to layout: %w", err)
+					return fmt.Errorf("add image %s to layout: %w", imageMeta.ImageTag, err)
 				}
 
 				return nil

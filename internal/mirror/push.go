@@ -153,7 +153,7 @@ func (svc *PushService) unpackAllPackages(ctx context.Context, dirPath string) e
 
 	packages := svc.findPackages(entries)
 	if len(packages) == 0 {
-		return fmt.Errorf("no packages found in bundle directory")
+		return fmt.Errorf("no packages found in bundle directory %q", svc.options.BundleDir)
 	}
 
 	svc.userLogger.Infof("Found %d packages to unpack", len(packages))
@@ -227,7 +227,7 @@ func (svc *PushService) openPackage(pkgName string) (io.ReadCloser, error) {
 	}
 
 	if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("open %s: %w", tarPath, err)
+		return nil, fmt.Errorf("open tar package %q: %w", tarPath, err)
 	}
 
 	// Try chunked format
@@ -239,7 +239,7 @@ func (svc *PushService) openPackage(pkgName string) (io.ReadCloser, error) {
 func (svc *PushService) pushAllLayouts(ctx context.Context, rootDir string) error {
 	layouts, err := svc.findLayouts(rootDir)
 	if err != nil {
-		return fmt.Errorf("scan layouts: %w", err)
+		return fmt.Errorf("scan layouts in %q: %w", rootDir, err)
 	}
 
 	if len(layouts) == 0 {
@@ -317,7 +317,7 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 	svc.userLogger.Infof("Pushing %s", targetClient.GetRegistry())
 
 	if err := svc.pusher.PushLayout(ctx, layout.Path(layoutDir), targetClient); err != nil {
-		return fmt.Errorf("push layout %q: %w", relPath, err)
+		return fmt.Errorf("push layout %q to registry %s: %w", relPath, targetClient.GetRegistry(), err)
 	}
 
 	return nil
@@ -352,7 +352,7 @@ func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string) 
 			svc.userLogger.InfoLn("No modules directory found, skipping modules index")
 			return nil
 		}
-		return fmt.Errorf("read modules directory: %w", err)
+		return fmt.Errorf("read modules directory %q: %w", modulesDir, err)
 	}
 
 	// Find all module directories
@@ -385,12 +385,12 @@ func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string) 
 		// Create minimal random image (32 bytes, 1 layer)
 		img, err := random.Image(32, 1)
 		if err != nil {
-			return fmt.Errorf("create random image for module %s: %w", moduleName, err)
+			return fmt.Errorf("create random image for module discovery tag %s: %w", moduleName, err)
 		}
 
 		// Push with module name as tag
 		if err := modulesClient.PushImage(ctx, moduleName, img); err != nil {
-			return fmt.Errorf("push module index tag %s: %w", moduleName, err)
+			return fmt.Errorf("push module index tag %s to registry %s: %w", moduleName, modulesClient.GetRegistry(), err)
 		}
 	}
 

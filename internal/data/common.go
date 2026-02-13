@@ -16,6 +16,7 @@ const (
 	VolumeSnapshotKind        = "VolumeSnapshot"
 	VirtualDiskKind           = "VirtualDisk"
 	VirtualDiskSnapshotKind   = "VirtualDiskSnapshot"
+	Namespace                 = "d8-storage-volume-data-manager"
 )
 
 var (
