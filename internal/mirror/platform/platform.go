@@ -186,14 +186,14 @@ func (svc *Service) findTagsToMirror(ctx context.Context) ([]string, []string, e
 		strickTags = append(strickTags, svc.options.TargetTag)
 	}
 
-	versionsToMirror, channelsToMirror, err := svc.versionsToMirrorFunc(ctx, strickTags)
+	versionsToMirror, channelsToMirror, err := svc.versionsToMirror(ctx, strickTags)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}
 
 	svc.userLogger.Infof("Deckhouse releases to pull: %+v", versionsToMirror)
 
-	vers := make([]string, len(versionsToMirror))
+	vers := make([]string, 0, len(versionsToMirror))
 	for _, v := range versionsToMirror {
 		vers = append(vers, "v"+v.String())
 	}
@@ -206,10 +206,10 @@ type releaseChannelVersionResult struct {
 	err error
 }
 
-// versionsToMirrorFunc determines which Deckhouse release versions should be mirrored
+// versionsToMirror determines which Deckhouse release versions should be mirrored
 // It collects current versions from all release channels and filters available releases
 // to include only versions that should be mirrored based on the mirroring strategy
-func (svc *Service) versionsToMirrorFunc(ctx context.Context, tagsToMirror []string) ([]semver.Version, []string, error) {
+func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string) ([]semver.Version, []string, error) {
 	logger := svc.userLogger
 
 	if len(tagsToMirror) > 0 {
@@ -233,16 +233,16 @@ func (svc *Service) versionsToMirrorFunc(ctx context.Context, tagsToMirror []str
 	releaseChannelsVersionsResult := make(map[string]releaseChannelVersionResult, len(releaseChannelsToCopy))
 	for _, channel := range releaseChannelsToCopy {
 		v, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
-		if err != nil {
-			if channel == internal.LTSChannel {
-				if err != nil {
-					logger.Warnf("Skipping LTS channel: %v", err)
-					continue
-				}
-			}
 
-			releaseChannelsVersionsResult[channel] = releaseChannelVersionResult{ver: v, err: err}
+		// If LTS channel is missing or errored, just warn and continue (it is optional)
+		if err != nil && channel == internal.LTSChannel {
+			logger.Warnf("Skipping LTS channel: %v", err)
+			continue
+
 		}
+
+		// Always record the result except for LTS channel, we will decide later if we can continue without it
+		releaseChannelsVersionsResult[channel] = releaseChannelVersionResult{ver: v, err: err}
 	}
 
 	releaseChannelsVersions := make(map[string]*semver.Version, len(releaseChannelsToCopy))
@@ -755,15 +755,19 @@ func filterOnlyLatestPatches(versions []*semver.Version) []*semver.Version {
 // deduplicateVersions removes duplicate versions from the list.
 // This is necessary because channel versions and filtered versions might overlap.
 func deduplicateVersions(versions []*semver.Version) []semver.Version {
-	m := map[semver.Version]struct{}{}
+	m := map[string]struct{}{}
 
 	for _, v := range versions {
-		m[*v] = struct{}{}
+		if v == nil {
+			continue
+		}
+		m[v.String()] = struct{}{}
 	}
 
 	vers := make([]semver.Version, 0, len(m))
-	for k := range maps.Keys(m) {
-		vers = append(vers, k)
+	for s := range m {
+		// semver.MustParse returns a canonical semver.Version value suitable for comparison
+		vers = append(vers, *semver.MustParse("v" + s))
 	}
 
 	return vers
