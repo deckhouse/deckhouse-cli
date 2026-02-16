@@ -246,83 +246,67 @@ func (p *Puller) Execute(ctx context.Context) error {
 		return err
 	}
 
-	if os.Getenv("NEW_PULL") == "true" {
-		logger := dkplog.NewNop()
+	logger := dkplog.NewNop()
 
-		if log.DebugLogLevel() >= 3 {
-			logger = dkplog.NewLogger(dkplog.WithLevel(slog.LevelDebug))
-		}
-
-		// Create registry client for module operations
-		clientOpts := &regclient.Options{
-			Insecure:      p.params.Insecure,
-			TLSSkipVerify: p.params.SkipTLSVerification,
-			Logger:        logger,
-		}
-
-		if p.params.RegistryAuth != nil {
-			clientOpts.Auth = p.params.RegistryAuth
-		}
-
-		var c registry.Client
-		c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
-
-		if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
-			c = stub.NewRegistryClientStub()
-		}
-
-		// Scope to the registry path and modules suffix
-		if p.params.RegistryPath != "" {
-			c = c.WithSegment(p.params.RegistryPath)
-		}
-
-		// Create module filter from CLI flags
-		filter, err := p.createModuleFilter()
-		if err != nil {
-			return err
-		}
-
-		svc := mirror.NewPullService(
-			registryservice.NewService(c, logger),
-			pullflags.TempDir,
-			pullflags.DeckhouseTag,
-			&mirror.PullServiceOptions{
-				SkipPlatform:    pullflags.NoPlatform,
-				SkipSecurity:    pullflags.NoSecurityDB,
-				SkipModules:     pullflags.NoModules,
-				OnlyExtraImages: pullflags.OnlyExtraImages,
-				IgnoreSuspend:   pullflags.IgnoreSuspend,
-				ModuleFilter:    filter,
-				BundleDir:       pullflags.ImagesBundlePath,
-				BundleChunkSize: pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
-			},
-			logger.Named("pull"),
-			p.logger,
-		)
-
-		err = svc.Pull(ctx)
-		if err != nil {
-			// Handle context cancellation gracefully
-			if errors.Is(err, context.Canceled) {
-				p.logger.WarnLn("Operation cancelled by user")
-				return nil
-			}
-			return fmt.Errorf("pull from registry: %w", err)
-		}
-
-		return nil
+	if log.DebugLogLevel() >= 3 {
+		logger = dkplog.NewLogger(dkplog.WithLevel(slog.LevelDebug))
 	}
 
-	if err := p.pullPlatform(); err != nil {
+	// Create registry client for module operations
+	clientOpts := &regclient.Options{
+		Insecure:      p.params.Insecure,
+		TLSSkipVerify: p.params.SkipTLSVerification,
+		Logger:        logger,
+	}
+
+	if p.params.RegistryAuth != nil {
+		clientOpts.Auth = p.params.RegistryAuth
+	}
+
+	var c registry.Client
+	c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+
+	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
+		c = stub.NewRegistryClientStub()
+	}
+
+	// Scope to the registry path and modules suffix
+	if p.params.RegistryPath != "" {
+		c = c.WithSegment(p.params.RegistryPath)
+	}
+
+	// Create module filter from CLI flags
+	filter, err := p.createModuleFilter()
+	if err != nil {
 		return err
 	}
 
-	if err := p.pullSecurityDatabases(); err != nil {
-		return err
-	}
+	svc := mirror.NewPullService(
+		registryservice.NewService(c, logger),
+		pullflags.TempDir,
+		pullflags.DeckhouseTag,
+		&mirror.PullServiceOptions{
+			SkipPlatform:    pullflags.NoPlatform,
+			SkipSecurity:    pullflags.NoSecurityDB,
+			SkipModules:     pullflags.NoModules,
+			OnlyExtraImages: pullflags.OnlyExtraImages,
+			IgnoreSuspend:   pullflags.IgnoreSuspend,
+			ModuleFilter:    filter,
+			BundleDir:       pullflags.ImagesBundlePath,
+			BundleChunkSize: pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
+		},
+		logger.Named("pull"),
+		p.logger,
+	)
 
-	if err := p.pullModules(); err != nil {
-		return err
+	err = svc.Pull(ctx)
+	if err != nil {
+		// Handle context cancellation gracefully
+		if errors.Is(err, context.Canceled) {
+			p.logger.WarnLn("Operation cancelled by user")
+			return nil
+		}
+		return fmt.Errorf("pull from registry: %w", err)
 	}
 
 	if err := p.computeGOSTDigests(); err != nil {

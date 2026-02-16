@@ -292,20 +292,7 @@ func (p *Pusher) Execute() error {
 		return err
 	}
 
-	// Use new push service when NEW_PULL env is set
-	if os.Getenv("NEW_PULL") == "true" {
-		return p.executeNewPush()
-	}
-
-	if err := p.pushStaticPackages(); err != nil {
-		return err
-	}
-
-	if err := p.pushModules(); err != nil {
-		return err
-	}
-
-	return nil
+	return p.executeNewPush()
 }
 
 // executeNewPush runs the push using the push service.
