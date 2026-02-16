@@ -191,7 +191,7 @@ func (svc *Service) findTagsToMirror(ctx context.Context) ([]string, []string, e
 		return nil, nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}
 
-	svc.logger.Infof("Deckhouse releases to pull: %+v", versionsToMirror)
+	svc.userLogger.Infof("Deckhouse releases to pull: %+v", versionsToMirror)
 
 	vers := make([]string, len(versionsToMirror))
 	for _, v := range versionsToMirror {
