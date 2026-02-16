@@ -218,127 +218,205 @@ type VersionsToMirrorResult struct {
 	CustomTags []string
 }
 
+// parsedTags represents the parsed input tags categorized by type
+type parsedTags struct {
+	semverVersions []*semver.Version
+	customTags     []string
+}
+
+// channelVersions represents the fetched versions from release channels
+type channelVersions map[string]*semver.Version
+
 // versionsToMirror determines which Deckhouse release versions should be mirrored
 // It collects current versions from all release channels and filters available releases
 // to include only versions that should be mirrored based on the mirroring strategy
 func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string) (*VersionsToMirrorResult, error) {
-	logger := svc.userLogger
-
 	if len(tagsToMirror) > 0 {
-		logger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", svc.options.TargetTag)
+		svc.userLogger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", svc.options.TargetTag)
 	}
 
-	vers := make([]*semver.Version, 0, 1)
-	customTags := make([]string, 0)
+	// Parse input tags into categories
+	parsed := svc.parseInputTags(tagsToMirror)
 
-	for _, tag := range tagsToMirror {
-		v, err := semver.NewVersion(tag)
-		if err != nil {
-			// Not a valid semver and not a channel name - treat as custom tag
-			if !internal.ChannelIsValid(tag) {
-				customTags = append(customTags, tag)
-			}
-			continue
-		}
-
-		vers = append(vers, v)
+	// Fetch current versions from all release channels
+	channelVersions, err := svc.fetchReleaseChannelVersions(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	releaseChannelsToCopy := internal.GetAllDefaultReleaseChannels()
-	releaseChannelsToCopy = append(releaseChannelsToCopy, internal.LTSChannel)
+	// Match channels and versions based on requested tags
+	versions, matchedChannels := svc.matchChannelsToTags(tagsToMirror, channelVersions, parsed.semverVersions)
 
-	releaseChannelsVersionsResult := make(map[string]releaseChannelVersionResult, len(releaseChannelsToCopy))
-	for _, channel := range releaseChannelsToCopy {
-		v, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
-
-		// If LTS channel is missing or errored, just warn and continue (it is optional)
-		if err != nil && channel == internal.LTSChannel {
-			logger.Warnf("Skipping LTS channel: %v", err)
-			continue
-
-		}
-
-		// Always record the result except for LTS channel, we will decide later if we can continue without it
-		releaseChannelsVersionsResult[channel] = releaseChannelVersionResult{ver: v, err: err}
-	}
-
-	releaseChannelsVersions := make(map[string]*semver.Version, len(releaseChannelsToCopy))
-
-	_, ltsChannelFound := releaseChannelsVersionsResult[internal.LTSChannel]
-	for channel, res := range releaseChannelsVersionsResult {
-		if !ltsChannelFound && res.err != nil {
-			return nil, fmt.Errorf("get %s release version from registry: %w", channel, res.err)
-		}
-
-		if res.err == nil {
-			releaseChannelsVersions[channel] = res.ver
-		}
-	}
-
-	mappedChannels := make(map[string]struct{}, len(releaseChannelsVersions))
-	for channel, v := range releaseChannelsVersions {
-		if len(tagsToMirror) == 0 {
-			vers = append(vers, v)
-			mappedChannels[channel] = struct{}{}
-			continue
-		}
-
-		for _, tag := range tagsToMirror {
-			if tag == "v"+v.String() || tag == channel {
-				vers = append(vers, v)
-				mappedChannels[channel] = struct{}{}
-			}
-		}
-	}
-
-	channels := make([]string, 0, len(mappedChannels))
-	for channel := range mappedChannels {
-		channels = append(channels, channel)
-	}
-
+	// If specific tags requested, return immediately
 	if len(tagsToMirror) > 0 {
 		return &VersionsToMirrorResult{
-			Versions:   deduplicateVersions(vers),
-			Channels:   channels,
-			CustomTags: customTags,
+			Versions:   deduplicateVersions(versions),
+			Channels:   matchedChannels,
+			CustomTags: parsed.customTags,
 		}, nil
 	}
 
-	var mirrorFromVersion *semver.Version
-	rockSolidVersion, found := releaseChannelsVersions[internal.RockSolidChannel]
-	if found {
-		mirrorFromVersion = rockSolidVersion
-		if svc.options.SinceVersion != nil {
-			if svc.options.SinceVersion.LessThan(rockSolidVersion) {
-				mirrorFromVersion = svc.options.SinceVersion
+	// For full discovery mode, expand version range
+	expandedVersions, err := svc.expandVersionRange(ctx, channelVersions, versions)
+	if err != nil {
+		return nil, err
+	}
+
+	return &VersionsToMirrorResult{
+		Versions:   deduplicateVersions(expandedVersions),
+		Channels:   matchedChannels,
+		CustomTags: parsed.customTags,
+	}, nil
+}
+
+// parseInputTags categorizes input tags into semver versions and custom tags
+func (svc *Service) parseInputTags(tags []string) parsedTags {
+	result := parsedTags{
+		semverVersions: make([]*semver.Version, 0, len(tags)),
+		customTags:     make([]string, 0),
+	}
+
+	for _, tag := range tags {
+		version, err := semver.NewVersion(tag)
+		if err != nil {
+			// Not a valid semver - check if it's a custom tag (not a channel name)
+			if !internal.ChannelIsValid(tag) {
+				result.customTags = append(result.customTags, tag)
+			}
+			continue
+		}
+		result.semverVersions = append(result.semverVersions, version)
+	}
+
+	return result
+}
+
+// fetchReleaseChannelVersions retrieves current versions from all release channels
+func (svc *Service) fetchReleaseChannelVersions(ctx context.Context) (channelVersions, error) {
+	channelsToFetch := append(internal.GetAllDefaultReleaseChannels(), internal.LTSChannel)
+	
+	// Fetch versions from all channels
+	channelResults := make(map[string]releaseChannelVersionResult, len(channelsToFetch))
+	for _, channel := range channelsToFetch {
+		version, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
+
+		// LTS channel is optional - warn and continue if missing
+		if err != nil && channel == internal.LTSChannel {
+			svc.userLogger.Warnf("Skipping LTS channel: %v", err)
+			continue
+		}
+
+		channelResults[channel] = releaseChannelVersionResult{ver: version, err: err}
+	}
+
+	// Validate and extract successful channel versions
+	return svc.validateChannelResults(channelResults)
+}
+
+// validateChannelResults validates channel fetch results and extracts successful versions
+func (svc *Service) validateChannelResults(results map[string]releaseChannelVersionResult) (channelVersions, error) {
+	versions := make(channelVersions, len(results))
+	_, ltsExists := results[internal.LTSChannel]
+
+	for channel, result := range results {
+		// If LTS doesn't exist, all other channels must succeed
+		if !ltsExists && result.err != nil {
+			return nil, fmt.Errorf("get %s release version from registry: %w", channel, result.err)
+		}
+
+		if result.err == nil {
+			versions[channel] = result.ver
+		}
+	}
+
+	return versions, nil
+}
+
+// matchChannelsToTags matches requested tags to channel versions and returns matching versions and channels
+func (svc *Service) matchChannelsToTags(requestedTags []string, channelVersions channelVersions, semverVersions []*semver.Version) ([]*semver.Version, []string) {
+	versions := make([]*semver.Version, 0, len(semverVersions))
+	versions = append(versions, semverVersions...)
+	
+	matchedChannels := make(map[string]struct{})
+
+	// If no specific tags requested, mirror all channels
+	if len(requestedTags) == 0 {
+		for channel, version := range channelVersions {
+			versions = append(versions, version)
+			matchedChannels[channel] = struct{}{}
+		}
+		return versions, mapKeysToSlice(matchedChannels)
+	}
+
+	// Match specific tags to channels
+	for channel, version := range channelVersions {
+		for _, tag := range requestedTags {
+			if svc.tagMatchesChannel(tag, channel, version) {
+				versions = append(versions, version)
+				matchedChannels[channel] = struct{}{}
+				break
 			}
 		}
 	}
 
-	logger.Debugf("listing deckhouse releases")
+	return versions, mapKeysToSlice(matchedChannels)
+}
 
-	tags, err := svc.deckhouseService.ReleaseChannels().ListTags(ctx)
+// tagMatchesChannel checks if a tag matches a channel (by name or version)
+func (svc *Service) tagMatchesChannel(tag, channelName string, channelVersion *semver.Version) bool {
+	return tag == channelName || tag == "v"+channelVersion.String()
+}
+
+// expandVersionRange expands the version range for full discovery mode
+func (svc *Service) expandVersionRange(ctx context.Context, channelVersions channelVersions, baseVersions []*semver.Version) ([]*semver.Version, error) {
+	minVersion := svc.determineMinimumVersion(channelVersions)
+	maxVersion := channelVersions[internal.AlphaChannel]
+
+	if maxVersion == nil {
+		// No alpha channel - return base versions only
+		return baseVersions, nil
+	}
+
+	svc.userLogger.Debugf("listing deckhouse releases")
+
+	// Fetch all available tags
+	allTags, err := svc.deckhouseService.ReleaseChannels().ListTags(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get tags from Deckhouse registry: %w", err)
 	}
 
-	alphaChannelVersion, found := releaseChannelsVersions[internal.AlphaChannel]
-	if found {
-		versionsAboveMinimal := filterVersionsBetween(mirrorFromVersion, alphaChannelVersion, tags)
-		versionsAboveMinimal = filterOnlyLatestPatches(versionsAboveMinimal)
+	// Filter and get latest patches
+	filteredVersions := filterVersionsBetween(minVersion, maxVersion, allTags)
+	latestPatches := filterOnlyLatestPatches(filteredVersions)
 
-		return &VersionsToMirrorResult{
-			Versions:   deduplicateVersions(append(vers, versionsAboveMinimal...)),
-			Channels:   channels,
-			CustomTags: customTags,
-		}, nil
+	return append(baseVersions, latestPatches...), nil
+}
+
+// determineMinimumVersion determines the minimum version for mirroring based on configuration
+func (svc *Service) determineMinimumVersion(channelVersions channelVersions) *semver.Version {
+	rockSolidVersion := channelVersions[internal.RockSolidChannel]
+	if rockSolidVersion == nil {
+		return nil
 	}
 
-	return &VersionsToMirrorResult{
-		Versions:   deduplicateVersions(vers),
-		Channels:   channels,
-		CustomTags: customTags,
-	}, nil
+	// Use rock-solid as baseline
+	minVersion := rockSolidVersion
+
+	// Override with SinceVersion if it's older
+	if svc.options.SinceVersion != nil && svc.options.SinceVersion.LessThan(rockSolidVersion) {
+		minVersion = svc.options.SinceVersion
+	}
+
+	return minVersion
+}
+
+// mapKeysToSlice converts a map's keys to a slice
+func mapKeysToSlice(m map[string]struct{}) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 // getReleaseChannelVersionFromRegistry retrieves the current version for a specific release channel
