@@ -476,20 +476,20 @@ func (s *RegistryClientStub) initializeRegistries() {
 
 	// Registry 1: dynamic source
 	s.addRegistry(source, map[string][]string{
-		"":                   {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
-		"release-channel":    {"alpha", "beta", "early-access", "stable", "rock-solid"}, // channel names, not versions
-		"install":            {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "alpha", "beta", "early-access", "stable", "rock-solid"},
-		"install-standalone": {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "alpha", "beta", "early-access", "stable", "rock-solid"},
+		"":                   {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"}, // including custom tag
+		"release-channel":    {"alpha", "beta", "early-access", "stable", "rock-solid"},           // channel names, not versions
+		"install":            {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"},
+		"install-standalone": {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"},
 	})
 
 	// Registry 2: gcr.io
 	s.addRegistry("gcr.io/google-containers", map[string][]string{
-		"":                   {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
+		"":                   {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
 		"pause":              {"3.9", "latest"},
 		"kube-apiserver":     {"v1.28.0", "v1.29.0", "latest"},
 		"release-channel":    {"alpha", "beta", "early-access", "stable", "rock-solid"},
-		"install":            {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "alpha", "beta", "early-access", "stable", "rock-solid"},
-		"install-standalone": {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "alpha", "beta", "early-access", "stable", "rock-solid"},
+		"install":            {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
+		"install-standalone": {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
 	})
 
 	// Registry 3: quay.io
@@ -843,7 +843,16 @@ func (s *RegistryClientStub) GetImage(_ context.Context, tag string, _ ...regist
 		}
 	}
 
-	// Fall back to all registries
+	// Fall back to searching in the specific registry first, then all registries
+	if regData, exists := s.registries[registry]; exists {
+		for _, repoData := range regData.repositories {
+			if imageData, exists := repoData.images[tag]; exists {
+				return imageData.image.(pkg.ClientImage), nil
+			}
+		}
+	}
+
+	// Last resort: search all registries
 	for _, regData := range s.registries {
 		for _, repoData := range regData.repositories {
 			if imageData, exists := repoData.images[tag]; exists {
@@ -862,7 +871,13 @@ func (s *RegistryClientStub) PushImage(_ context.Context, _ string, _ v1.Image, 
 
 // ListTags retrieves all available tags
 func (s *RegistryClientStub) ListTags(_ context.Context, _ ...registry.ListTagsOption) ([]string, error) {
-	var allTags []string
+	total := 0
+	for _, regData := range s.registries {
+		for _, repoData := range regData.repositories {
+			total += len(repoData.tags)
+		}
+	}
+	allTags := make([]string, 0, total)
 	for _, regData := range s.registries {
 		for _, repoData := range regData.repositories {
 			allTags = append(allTags, repoData.tags...)
@@ -873,7 +888,11 @@ func (s *RegistryClientStub) ListTags(_ context.Context, _ ...registry.ListTagsO
 
 // ListRepositories retrieves all sub-repositories
 func (s *RegistryClientStub) ListRepositories(_ context.Context, _ ...registry.ListRepositoriesOption) ([]string, error) {
-	var allRepos []string
+	total := 0
+	for _, regData := range s.registries {
+		total += len(regData.repositories)
+	}
+	allRepos := make([]string, 0, total)
 	for _, regData := range s.registries {
 		for repo := range regData.repositories {
 			allRepos = append(allRepos, repo)

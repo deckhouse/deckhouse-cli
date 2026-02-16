@@ -21,11 +21,10 @@ func SetupK8sClientSet(kubeconfigPath, contextName string) (*rest.Config, *kuber
 		}
 	}
 
-	chain := []string{}
-	loadingRules := &clientcmd.ClientConfigLoadingRules{}
-
 	// use splitlist func to use separator from OS specific
 	kubeconfigFiles := filepath.SplitList(kubeconfigPath)
+	chain := make([]string, 0, len(kubeconfigFiles))
+	loadingRules := &clientcmd.ClientConfigLoadingRules{}
 	chain = append(chain, deduplicate(kubeconfigFiles)...)
 
 	if len(chain) > 1 {

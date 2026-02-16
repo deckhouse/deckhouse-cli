@@ -653,7 +653,7 @@ func (svc *Service) extractInternalDigestImages(ctx context.Context, moduleName 
 
 // pullVexImages finds and pulls VEX attestation images for module images
 func (svc *Service) pullVexImages(ctx context.Context, moduleName string, downloadList *ImageDownloadList) {
-	allImages := make([]string, 0)
+	allImages := make([]string, 0, len(downloadList.Module)+len(downloadList.ModuleExtra))
 
 	for img := range downloadList.Module {
 		allImages = append(allImages, img)
