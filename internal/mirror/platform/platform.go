@@ -186,19 +186,21 @@ func (svc *Service) findTagsToMirror(ctx context.Context) ([]string, []string, e
 		strickTags = append(strickTags, svc.options.TargetTag)
 	}
 
-	versionsToMirror, channelsToMirror, err := svc.versionsToMirror(ctx, strickTags)
+	result, err := svc.versionsToMirror(ctx, strickTags)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}
 
-	svc.userLogger.Infof("Deckhouse releases to pull: %+v", versionsToMirror)
+	svc.userLogger.Infof("Deckhouse releases to pull: %+v", result.Versions)
 
-	vers := make([]string, 0, len(versionsToMirror))
-	for _, v := range versionsToMirror {
+	vers := make([]string, 0, len(result.Versions)+len(result.CustomTags))
+	for _, v := range result.Versions {
 		vers = append(vers, "v"+v.String())
 	}
+	// Add custom tags as-is (without "v" prefix)
+	vers = append(vers, result.CustomTags...)
 
-	return vers, channelsToMirror, nil
+	return vers, result.Channels, nil
 }
 
 type releaseChannelVersionResult struct {
@@ -206,10 +208,20 @@ type releaseChannelVersionResult struct {
 	err error
 }
 
+// VersionsToMirrorResult contains the result of versionsToMirror operation
+type VersionsToMirrorResult struct {
+	// Versions contains semver versions to mirror
+	Versions []semver.Version
+	// Channels contains release channels to mirror
+	Channels []string
+	// CustomTags contains custom tags (non-semver, non-channel tags) to mirror
+	CustomTags []string
+}
+
 // versionsToMirror determines which Deckhouse release versions should be mirrored
 // It collects current versions from all release channels and filters available releases
 // to include only versions that should be mirrored based on the mirroring strategy
-func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string) ([]semver.Version, []string, error) {
+func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string) (*VersionsToMirrorResult, error) {
 	logger := svc.userLogger
 
 	if len(tagsToMirror) > 0 {
@@ -217,10 +229,15 @@ func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string)
 	}
 
 	vers := make([]*semver.Version, 0, 1)
+	customTags := make([]string, 0)
 
 	for _, tag := range tagsToMirror {
 		v, err := semver.NewVersion(tag)
 		if err != nil {
+			// Not a valid semver and not a channel name - treat as custom tag
+			if !internal.ChannelIsValid(tag) {
+				customTags = append(customTags, tag)
+			}
 			continue
 		}
 
@@ -250,7 +267,7 @@ func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string)
 	_, ltsChannelFound := releaseChannelsVersionsResult[internal.LTSChannel]
 	for channel, res := range releaseChannelsVersionsResult {
 		if !ltsChannelFound && res.err != nil {
-			return nil, nil, fmt.Errorf("get %s release version from registry: %w", channel, res.err)
+			return nil, fmt.Errorf("get %s release version from registry: %w", channel, res.err)
 		}
 
 		if res.err == nil {
@@ -280,7 +297,11 @@ func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string)
 	}
 
 	if len(tagsToMirror) > 0 {
-		return deduplicateVersions(vers), channels, nil
+		return &VersionsToMirrorResult{
+			Versions:   deduplicateVersions(vers),
+			Channels:   channels,
+			CustomTags: customTags,
+		}, nil
 	}
 
 	var mirrorFromVersion *semver.Version
@@ -298,7 +319,7 @@ func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string)
 
 	tags, err := svc.deckhouseService.ReleaseChannels().ListTags(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("get tags from Deckhouse registry: %w", err)
+		return nil, fmt.Errorf("get tags from Deckhouse registry: %w", err)
 	}
 
 	alphaChannelVersion, found := releaseChannelsVersions[internal.AlphaChannel]
@@ -306,10 +327,18 @@ func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string)
 		versionsAboveMinimal := filterVersionsBetween(mirrorFromVersion, alphaChannelVersion, tags)
 		versionsAboveMinimal = filterOnlyLatestPatches(versionsAboveMinimal)
 
-		return deduplicateVersions(append(vers, versionsAboveMinimal...)), channels, nil
+		return &VersionsToMirrorResult{
+			Versions:   deduplicateVersions(append(vers, versionsAboveMinimal...)),
+			Channels:   channels,
+			CustomTags: customTags,
+		}, nil
 	}
 
-	return deduplicateVersions(vers), channels, nil
+	return &VersionsToMirrorResult{
+		Versions:   deduplicateVersions(vers),
+		Channels:   channels,
+		CustomTags: customTags,
+	}, nil
 }
 
 // getReleaseChannelVersionFromRegistry retrieves the current version for a specific release channel
