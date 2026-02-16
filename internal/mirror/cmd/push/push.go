@@ -20,18 +20,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
-	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
@@ -39,8 +36,6 @@ import (
 	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/operations"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
@@ -110,93 +105,6 @@ func NewCommand() *cobra.Command {
 	return pushCmd
 }
 
-func pushModules(pushParams *params.PushParams, logger params.Logger, client registry.Client) error {
-	bundleContents, err := os.ReadDir(pushParams.BundleDir)
-	if err != nil {
-		return fmt.Errorf("List bundle directory: %w", err)
-	}
-
-	modulePackages := lo.Compact(lo.Map(bundleContents, func(item os.DirEntry, _ int) string {
-		fileExt := filepath.Ext(item.Name())
-		pkgName, _, ok := strings.Cut(strings.TrimPrefix(item.Name(), "module-"), ".")
-		switch {
-		case !ok:
-			fallthrough
-		case fileExt != ".tar" && fileExt != ".chunk":
-			fallthrough
-		case !strings.HasPrefix(item.Name(), "module-"):
-			return ""
-		}
-		return pkgName
-	}))
-
-	successfullyPushedModules := make([]string, 0)
-	for _, modulePackageName := range modulePackages {
-		if lo.Contains(successfullyPushedModules, modulePackageName) {
-			continue
-		}
-
-		if err = logger.Process("Push module: "+modulePackageName, func() error {
-			pkg, err := openPackage(pushParams, "module-"+modulePackageName)
-			if err != nil {
-				return fmt.Errorf("Open package %q: %w", modulePackageName, err)
-			}
-
-			if err = operations.PushModule(pushParams, modulePackageName, pkg, client); err != nil {
-				return fmt.Errorf("Failed to push module %q: %w", modulePackageName, err)
-			}
-
-			successfullyPushedModules = append(successfullyPushedModules, modulePackageName)
-
-			return nil
-		}); err != nil {
-			logger.WarnLn(err)
-		}
-	}
-
-	if len(successfullyPushedModules) > 0 {
-		logger.Infof("Modules pushed: %v", strings.Join(successfullyPushedModules, ", "))
-	}
-
-	return nil
-}
-
-func pushStaticPackages(pushParams *params.PushParams, logger params.Logger, client registry.Client) error {
-	packages := []string{"platform", "security"}
-	for _, pkgName := range packages {
-		pkg, err := openPackage(pushParams, pkgName)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			logger.InfoLn(pkgName, "package is not present, skipping")
-			continue
-		case err != nil:
-			return fmt.Errorf("open package %q: %w", pkgName, err)
-		}
-
-		switch pkgName {
-		case "platform":
-			if err = logger.Process("Push Deckhouse platform", func() error {
-				return operations.PushDeckhousePlatform(pushParams, pkg, client)
-			}); err != nil {
-				return fmt.Errorf("Push Deckhouse Platform: %w", err)
-			}
-		case "security":
-			if err = logger.Process("Push security databases", func() error {
-				return operations.PushSecurityDatabases(pushParams, pkg, client)
-			}); err != nil {
-				return fmt.Errorf("Push Security Databases: %w", err)
-			}
-		default:
-			return errors.New("Unknown package " + pkgName)
-		}
-
-		if err = pkg.Close(); err != nil {
-			logger.Warnf("Could not close bundle package %s: %v", pkgName, err)
-		}
-	}
-	return nil
-}
-
 func setupLogger() *log.SLogger {
 	logLevel := slog.LevelInfo
 	if log.DebugLogLevel() >= 3 {
@@ -240,28 +148,6 @@ func validateRegistryAccess(ctx context.Context, pushParams *params.PushParams) 
 	}
 
 	return nil
-}
-
-func openPackage(pushParams *params.PushParams, pkgName string) (io.ReadCloser, error) {
-	p := filepath.Join(pushParams.BundleDir, pkgName+".tar")
-	pkg, err := os.Open(p)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		return openChunkedPackage(pushParams, pkgName)
-	case err != nil:
-		return nil, fmt.Errorf("Read bundle package %s: %w", pkgName, err)
-	}
-
-	return pkg, nil
-}
-
-func openChunkedPackage(pushParams *params.PushParams, pkgName string) (io.ReadCloser, error) {
-	pkg, err := chunked.Open(pushParams.BundleDir, pkgName+".tar")
-	if err != nil {
-		return nil, fmt.Errorf("Open bundle package %q: %w", pkgName, err)
-	}
-
-	return pkg, nil
 }
 
 // Pusher handles the push operation for Deckhouse distribution
@@ -362,68 +248,4 @@ func (p *Pusher) validateRegistryAccess() error {
 		return fmt.Errorf("registry credentials validation failure: %w", err)
 	}
 	return nil
-}
-
-// pushStaticPackages pushes platform and security packages
-func (p *Pusher) pushStaticPackages() error {
-	logger := dkplog.NewNop()
-
-	if log.DebugLogLevel() >= 3 {
-		logger = dkplog.NewLogger(dkplog.WithLevel(slog.LevelDebug))
-	}
-
-	// Create registry client for module operations
-	clientOpts := &regclient.Options{
-		Insecure:      p.pushParams.Insecure,
-		TLSSkipVerify: p.pushParams.SkipTLSVerification,
-		Logger:        logger,
-	}
-
-	if p.pushParams.RegistryAuth != nil {
-		clientOpts.Auth = p.pushParams.RegistryAuth
-	}
-
-	var client registry.Client
-	client = regclient.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
-
-	// Scope to the registry path and modules suffix
-	if p.pushParams.RegistryPath != "" {
-		client = client.WithSegment(p.pushParams.RegistryPath)
-	}
-
-	return pushStaticPackages(p.pushParams, p.logger, client)
-}
-
-// pushModules pushes module packages
-func (p *Pusher) pushModules() error {
-	logger := dkplog.NewNop()
-
-	if log.DebugLogLevel() >= 3 {
-		logger = dkplog.NewLogger(dkplog.WithLevel(slog.LevelDebug))
-	}
-
-	// Create registry client for module operations
-	clientOpts := &regclient.Options{
-		Insecure:      p.pushParams.Insecure,
-		TLSSkipVerify: p.pushParams.SkipTLSVerification,
-		Logger:        logger, // Will use default logger
-	}
-
-	if p.pushParams.RegistryAuth != nil {
-		clientOpts.Auth = p.pushParams.RegistryAuth
-	}
-
-	var client registry.Client
-	client = regclient.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
-
-	// Scope to the registry path and modules suffix
-	if p.pushParams.RegistryPath != "" {
-		client = client.WithSegment(p.pushParams.RegistryPath)
-	}
-
-	if p.pushParams.ModulesPathSuffix != "" {
-		client = client.WithSegment(p.pushParams.ModulesPathSuffix)
-	}
-
-	return pushModules(p.pushParams, p.logger, client)
 }
