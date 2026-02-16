@@ -125,13 +125,13 @@ func (svc *Service) PullPlatform(ctx context.Context) error {
 		return fmt.Errorf("validate platform access: %w", err)
 	}
 
-	tagsToMirror, err := svc.findTagsToMirror(ctx)
+	tagsToMirror, channelsToMirror, err := svc.findTagsToMirror(ctx)
 	if err != nil {
 		return fmt.Errorf("find tags to mirror: %w", err)
 	}
 
 	svc.downloadList.FillDeckhouseImages(tagsToMirror)
-	svc.downloadList.FillForTag(svc.options.TargetTag)
+	svc.downloadList.FillForChannels(channelsToMirror)
 
 	err = svc.pullDeckhousePlatform(ctx, tagsToMirror)
 	if err != nil {
@@ -180,71 +180,117 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 // findTagsToMirror determines which Deckhouse release tags should be mirrored
 // If a specific target tag is set, it returns only that tag
 // Otherwise, it finds all relevant versions that should be mirrored based on channels and version ranges
-func (svc *Service) findTagsToMirror(ctx context.Context) ([]string, error) {
-	// If a specific tag is requested, skip the complex version determination logic
+func (svc *Service) findTagsToMirror(ctx context.Context) ([]string, []string, error) {
+	strickTags := []string{}
 	if svc.options.TargetTag != "" {
-		svc.userLogger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", svc.options.TargetTag)
-
-		return []string{svc.options.TargetTag}, nil
+		strickTags = append(strickTags, svc.options.TargetTag)
 	}
 
-	// Determine which versions should be mirrored based on release channels and version constraints
-	versionsToMirror, err := svc.versionsToMirrorFunc(ctx)
+	versionsToMirror, channelsToMirror, err := svc.versionsToMirrorFunc(ctx, strickTags)
 	if err != nil {
-		return nil, fmt.Errorf("find versions to mirror: %w", err)
+		return nil, nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}
 
-	svc.userLogger.Infof("Deckhouse releases to pull: %+v", versionsToMirror)
+	svc.logger.Infof("Deckhouse releases to pull: %+v", versionsToMirror)
 
 	vers := make([]string, len(versionsToMirror))
 	for _, v := range versionsToMirror {
 		vers = append(vers, "v"+v.String())
 	}
 
-	return vers, nil
+	return vers, channelsToMirror, nil
+}
+
+type releaseChannelVersionResult struct {
+	ver *semver.Version
+	err error
 }
 
 // versionsToMirrorFunc determines which Deckhouse release versions should be mirrored
 // It collects current versions from all release channels and filters available releases
 // to include only versions that should be mirrored based on the mirroring strategy
-func (svc *Service) versionsToMirrorFunc(ctx context.Context) ([]semver.Version, error) {
+func (svc *Service) versionsToMirrorFunc(ctx context.Context, tagsToMirror []string) ([]semver.Version, []string, error) {
 	logger := svc.userLogger
+
+	if len(tagsToMirror) > 0 {
+		logger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", svc.options.TargetTag)
+	}
+
+	vers := make([]*semver.Version, 0, 1)
+
+	for _, tag := range tagsToMirror {
+		v, err := semver.NewVersion(tag)
+		if err != nil {
+			continue
+		}
+
+		vers = append(vers, v)
+	}
 
 	releaseChannelsToCopy := internal.GetAllDefaultReleaseChannels()
 	releaseChannelsToCopy = append(releaseChannelsToCopy, internal.LTSChannel)
 
-	releaseChannelsVersions := make(map[string]*semver.Version, len(releaseChannelsToCopy))
+	releaseChannelsVersionsResult := make(map[string]releaseChannelVersionResult, len(releaseChannelsToCopy))
 	for _, channel := range releaseChannelsToCopy {
-		version, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
+		v, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
 		if err != nil {
 			if channel == internal.LTSChannel {
-				if !errors.Is(err, client.ErrImageNotFound) {
-					svc.userLogger.Warnf("Skipping LTS channel: %v", err)
-				} else {
-					svc.userLogger.Warnf("Skipping LTS channel, because it's not required")
+				if err != nil {
+					logger.Warnf("Skipping LTS channel: %v", err)
+					continue
 				}
-
-				continue
 			}
 
-			return nil, fmt.Errorf("get %s release version from registry: %w", channel, err)
+			releaseChannelsVersionsResult[channel] = releaseChannelVersionResult{ver: v, err: err}
+		}
+	}
+
+	releaseChannelsVersions := make(map[string]*semver.Version, len(releaseChannelsToCopy))
+
+	_, ltsChannelFound := releaseChannelsVersionsResult[internal.LTSChannel]
+	for channel, res := range releaseChannelsVersionsResult {
+		if !ltsChannelFound && res.err != nil {
+			return nil, nil, fmt.Errorf("get %s release version from registry: %w", channel, res.err)
 		}
 
-		if version == nil {
-			// Channel was skipped (e.g., suspended and ignoreSuspendedChannels is true)
+		if res.err == nil {
+			releaseChannelsVersions[channel] = res.ver
+		}
+	}
+
+	mappedChannels := make(map[string]struct{}, len(releaseChannelsVersions))
+	for channel, v := range releaseChannelsVersions {
+		if len(tagsToMirror) == 0 {
+			vers = append(vers, v)
+			mappedChannels[channel] = struct{}{}
 			continue
 		}
 
-		releaseChannelsVersions[channel] = version
+		for _, tag := range tagsToMirror {
+			if tag == "v"+v.String() || tag == channel {
+				vers = append(vers, v)
+				mappedChannels[channel] = struct{}{}
+			}
+		}
 	}
 
-	rockSolidVersion := releaseChannelsVersions[internal.RockSolidChannel]
+	channels := make([]string, 0, len(mappedChannels))
+	for channel := range mappedChannels {
+		channels = append(channels, channel)
+	}
 
-	mirrorFromVersion := *rockSolidVersion
+	if len(tagsToMirror) > 0 {
+		return deduplicateVersions(vers), channels, nil
+	}
 
-	if svc.options.SinceVersion != nil {
-		if svc.options.SinceVersion.LessThan(rockSolidVersion) {
-			mirrorFromVersion = *svc.options.SinceVersion
+	var mirrorFromVersion *semver.Version
+	rockSolidVersion, found := releaseChannelsVersions[internal.RockSolidChannel]
+	if found {
+		mirrorFromVersion = rockSolidVersion
+		if svc.options.SinceVersion != nil {
+			if svc.options.SinceVersion.LessThan(rockSolidVersion) {
+				mirrorFromVersion = svc.options.SinceVersion
+			}
 		}
 	}
 
@@ -252,20 +298,18 @@ func (svc *Service) versionsToMirrorFunc(ctx context.Context) ([]semver.Version,
 
 	tags, err := svc.deckhouseService.ReleaseChannels().ListTags(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("get tags from Deckhouse registry: %w", err)
+		return nil, nil, fmt.Errorf("get tags from Deckhouse registry: %w", err)
 	}
 
-	alphaChannelVersion := releaseChannelsVersions[internal.AlphaChannel]
+	alphaChannelVersion, found := releaseChannelsVersions[internal.AlphaChannel]
+	if found {
+		versionsAboveMinimal := filterVersionsBetween(mirrorFromVersion, alphaChannelVersion, tags)
+		versionsAboveMinimal = filterOnlyLatestPatches(versionsAboveMinimal)
 
-	versionsAboveMinimal := filterVersionsBetween(&mirrorFromVersion, alphaChannelVersion, tags)
-	versionsAboveMinimal = filterOnlyLatestPatches(versionsAboveMinimal)
-
-	vers := make([]*semver.Version, 0, len(releaseChannelsVersions))
-	for _, v := range releaseChannelsVersions {
-		vers = append(vers, v)
+		return deduplicateVersions(append(vers, versionsAboveMinimal...)), channels, nil
 	}
 
-	return deduplicateVersions(append(vers, versionsAboveMinimal...)), nil
+	return deduplicateVersions(vers), channels, nil
 }
 
 // getReleaseChannelVersionFromRegistry retrieves the current version for a specific release channel

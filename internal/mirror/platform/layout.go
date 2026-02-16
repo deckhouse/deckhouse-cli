@@ -61,13 +61,8 @@ func (l *ImageDownloadList) FillDeckhouseImages(deckhouseVersions []string) {
 	}
 }
 
-func (l *ImageDownloadList) FillForTag(tag string) {
-	// If we are to pull only the specific requested version, we should not pull any release channels at all.
-	if tag != "" {
-		return
-	}
-
-	for _, channel := range internal.GetAllDefaultReleaseChannels() {
+func (l *ImageDownloadList) FillForChannels(channels []string) {
+	for _, channel := range channels {
 		l.Deckhouse[l.rootURL+":"+channel] = nil
 		l.DeckhouseInstall[path.Join(l.rootURL, internal.InstallSegment)+":"+channel] = nil
 		l.DeckhouseInstallStandalone[path.Join(l.rootURL, internal.InstallStandaloneSegment)+":"+channel] = nil
