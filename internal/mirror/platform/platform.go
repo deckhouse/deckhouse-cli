@@ -31,7 +31,6 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
-	"github.com/samber/lo"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry/client"
@@ -51,6 +50,10 @@ type Options struct {
 	// SinceVersion specifies the minimum version to start mirroring from (optional)
 	SinceVersion *semver.Version
 	// TargetTag specifies a specific tag to mirror instead of determining versions automatically
+	// it can be:
+	// semver f.e. vX.Y.Z
+	// channel f.e. alpha/beta/stable
+	// any other tag
 	TargetTag string
 	// BundleDir is the directory to store the bundle
 	BundleDir string
@@ -193,13 +196,12 @@ func (svc *Service) findTagsToMirror(ctx context.Context) ([]string, error) {
 
 	svc.userLogger.Infof("Deckhouse releases to pull: %+v", versionsToMirror)
 
-	// Convert versions to tag format (add "v" prefix)
-	return lo.Map(
-		versionsToMirror,
-		func(v semver.Version, _ int) string {
-			return "v" + v.String()
-		},
-	), nil
+	vers := make([]string, len(versionsToMirror))
+	for _, v := range versionsToMirror {
+		vers = append(vers, "v"+v.String())
+	}
+
+	return vers, nil
 }
 
 // versionsToMirrorFunc determines which Deckhouse release versions should be mirrored
