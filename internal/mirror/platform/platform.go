@@ -294,7 +294,7 @@ func (svc *Service) parseInputTags(tags []string) parsedTags {
 // fetchReleaseChannelVersions retrieves current versions from all release channels
 func (svc *Service) fetchReleaseChannelVersions(ctx context.Context) (channelVersions, error) {
 	channelsToFetch := append(internal.GetAllDefaultReleaseChannels(), internal.LTSChannel)
-	
+
 	// Fetch versions from all channels
 	channelResults := make(map[string]releaseChannelVersionResult, len(channelsToFetch))
 	for _, channel := range channelsToFetch {
@@ -336,7 +336,7 @@ func (svc *Service) validateChannelResults(results map[string]releaseChannelVers
 func (svc *Service) matchChannelsToTags(requestedTags []string, channelVersions channelVersions, semverVersions []*semver.Version) ([]*semver.Version, []string) {
 	versions := make([]*semver.Version, 0, len(semverVersions))
 	versions = append(versions, semverVersions...)
-	
+
 	matchedChannels := make(map[string]struct{})
 
 	// If no specific tags requested, mirror all channels

@@ -477,7 +477,7 @@ func (s *RegistryClientStub) initializeRegistries() {
 	// Registry 1: dynamic source
 	s.addRegistry(source, map[string][]string{
 		"":                   {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"}, // including custom tag
-		"release-channel":    {"alpha", "beta", "early-access", "stable", "rock-solid"},             // channel names, not versions
+		"release-channel":    {"alpha", "beta", "early-access", "stable", "rock-solid"},           // channel names, not versions
 		"install":            {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"},
 		"install-standalone": {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"},
 	})
@@ -871,7 +871,13 @@ func (s *RegistryClientStub) PushImage(_ context.Context, _ string, _ v1.Image, 
 
 // ListTags retrieves all available tags
 func (s *RegistryClientStub) ListTags(_ context.Context, _ ...registry.ListTagsOption) ([]string, error) {
-	var allTags []string
+	total := 0
+	for _, regData := range s.registries {
+		for _, repoData := range regData.repositories {
+			total += len(repoData.tags)
+		}
+	}
+	allTags := make([]string, 0, total)
 	for _, regData := range s.registries {
 		for _, repoData := range regData.repositories {
 			allTags = append(allTags, repoData.tags...)
@@ -882,7 +888,11 @@ func (s *RegistryClientStub) ListTags(_ context.Context, _ ...registry.ListTagsO
 
 // ListRepositories retrieves all sub-repositories
 func (s *RegistryClientStub) ListRepositories(_ context.Context, _ ...registry.ListRepositoriesOption) ([]string, error) {
-	var allRepos []string
+	total := 0
+	for _, regData := range s.registries {
+		total += len(regData.repositories)
+	}
+	allRepos := make([]string, 0, total)
 	for _, regData := range s.registries {
 		for repo := range regData.repositories {
 			allRepos = append(allRepos, repo)
