@@ -169,6 +169,7 @@ func PrepareUpload(
 ) ( /*url*/ string /*volumeMode*/, string /*subClient*/, *safeClient.SafeClient, error) {
 	var url, volumeMode string
 	var subClient *safeClient.SafeClient
+	var decodedBytes []byte
 
 	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {
@@ -209,15 +210,17 @@ func PrepareUpload(
 		return "", "", nil, fmt.Errorf("%w: '%s'", dataio.ErrUnsupportedVolumeMode, volumeMode)
 	}
 
-	subClient = sClient
-	if !publish && len(diObj.Status.CA) > 0 {
-		subClient = sClient.Copy()
-		decodedBytes, err := base64.StdEncoding.DecodeString(diObj.Status.CA)
+	if len(diObj.Status.CA) > 0 {
+		decodedBytes, err = base64.StdEncoding.DecodeString(diObj.Status.CA)
 		if err != nil {
 			return "", "", nil, fmt.Errorf("CA decoding error: %s", err.Error())
 		}
-		subClient.SetTLSCAData(decodedBytes)
 	}
+
+	// Create an isolated copy to avoid mutating the original client
+	subClient = sClient.Copy()
+	// Always call SetTLSCAData to build a merged trust pool (system CAs + kubeconfig CA + internal CA if present)
+	subClient.SetTLSCAData(decodedBytes)
 
 	return url, volumeMode, subClient, nil
 }
