@@ -102,7 +102,7 @@ func (l *ImageLayouts) setLayoutByMirrorType(rootFolder string, mirrorType inter
 
 // AsList returns a list of layout.Path's in it. Undefined path's are not included in the list.
 func (l *ImageLayouts) AsList() []layout.Path {
-	paths := make([]layout.Path, 0)
+	paths := make([]layout.Path, 0, len(l.Security))
 	for _, layout := range l.Security {
 		paths = append(paths, layout.Path())
 	}

@@ -42,6 +42,8 @@ import (
 type RegistryClientStub struct {
 	registries      map[string]*RegistryData
 	currentRegistry string
+	// defaultRegistry holds the deterministic 'source' registry added during initialization
+	defaultRegistry string
 }
 
 // RegistryData holds data for a specific registry
@@ -474,28 +476,31 @@ func getSourceFromArgs() string {
 func (s *RegistryClientStub) initializeRegistries() {
 	source := getSourceFromArgs()
 
+	// record deterministic source registry so stub resolves segments consistently
+	s.defaultRegistry = source
+
 	// Registry 1: dynamic source
 	s.addRegistry(source, map[string][]string{
-		"":                   {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
-		"release-channel":    {"alpha", "beta", "early-access", "stable", "rock-solid"}, // channel names, not versions
-		"install":            {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "alpha", "beta", "early-access", "stable", "rock-solid"},
-		"install-standalone": {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "alpha", "beta", "early-access", "stable", "rock-solid"},
+		"":                   {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"}, // including custom tag
+		"release-channel":    {"alpha", "beta", "early-access", "stable", "rock-solid"},                                                                    // channel names, not versions
+		"install":            {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"},
+		"install-standalone": {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"},
 	})
 
 	// Registry 2: gcr.io
 	s.addRegistry("gcr.io/google-containers", map[string][]string{
 		"":                   {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
-		"pause":              {"3.9", "latest"},
-		"kube-apiserver":     {"v1.28.0", "v1.29.0", "latest"},
+		"pause":              {"alpha", "beta", "early-access", "stable", "rock-solid", "3.9", "latest"},
+		"kube-apiserver":     {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.28.0", "v1.29.0", "latest"},
 		"release-channel":    {"alpha", "beta", "early-access", "stable", "rock-solid"},
-		"install":            {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "alpha", "beta", "early-access", "stable", "rock-solid"},
-		"install-standalone": {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "alpha", "beta", "early-access", "stable", "rock-solid"},
+		"install":            {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
+		"install-standalone": {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
 	})
 
 	// Registry 3: quay.io
 	s.addRegistry("quay.io/prometheus", map[string][]string{
-		"prometheus":   {"v2.45.0", "v2.46.0", "latest"},
-		"alertmanager": {"v0.26.0", "v0.27.0", "latest"},
+		"prometheus":   {"alpha", "beta", "early-access", "stable", "rock-solid", "v2.45.0", "v2.46.0", "latest"},
+		"alertmanager": {"alpha", "beta", "early-access", "stable", "rock-solid", "v0.26.0", "v0.27.0", "latest"},
 	})
 }
 
@@ -690,12 +695,22 @@ func (s *RegistryClientStub) createMockImageData(reg, repo, tag string) *ImageDa
 
 // WithSegment creates a new client with an additional scope path segment
 func (s *RegistryClientStub) WithSegment(segments ...string) registry.Client {
-	newRegistry := s.currentRegistry
-	if len(segments) > 0 {
-		if newRegistry == "" {
-			newRegistry = strings.Join(segments, "/")
+	// If no current registry is set, use the stub's deterministic default registry as base
+	base := s.currentRegistry
+	if base == "" {
+		base = s.defaultRegistry
+	}
+
+	var newRegistry string
+	if len(segments) == 0 {
+		newRegistry = base
+	} else {
+		segPath := strings.Join(segments, "/")
+		if base == "" {
+			// fall back to segment-only (legacy behavior)
+			newRegistry = segPath
 		} else {
-			newRegistry = newRegistry + "/" + strings.Join(segments, "/")
+			newRegistry = base + "/" + segPath
 		}
 	}
 
@@ -708,6 +723,10 @@ func (s *RegistryClientStub) WithSegment(segments ...string) registry.Client {
 // GetRegistry returns the full registry path
 func (s *RegistryClientStub) GetRegistry() string {
 	if s.currentRegistry == "" {
+		if s.defaultRegistry != "" {
+			return s.defaultRegistry
+		}
+
 		for registry := range s.registries {
 			return registry
 		}
@@ -843,7 +862,16 @@ func (s *RegistryClientStub) GetImage(_ context.Context, tag string, _ ...regist
 		}
 	}
 
-	// Fall back to all registries
+	// Fall back to searching in the specific registry first, then all registries
+	if regData, exists := s.registries[registry]; exists {
+		for _, repoData := range regData.repositories {
+			if imageData, exists := repoData.images[tag]; exists {
+				return imageData.image.(pkg.ClientImage), nil
+			}
+		}
+	}
+
+	// Last resort: search all registries
 	for _, regData := range s.registries {
 		for _, repoData := range regData.repositories {
 			if imageData, exists := repoData.images[tag]; exists {
@@ -862,7 +890,13 @@ func (s *RegistryClientStub) PushImage(_ context.Context, _ string, _ v1.Image, 
 
 // ListTags retrieves all available tags
 func (s *RegistryClientStub) ListTags(_ context.Context, _ ...registry.ListTagsOption) ([]string, error) {
-	var allTags []string
+	total := 0
+	for _, regData := range s.registries {
+		for _, repoData := range regData.repositories {
+			total += len(repoData.tags)
+		}
+	}
+	allTags := make([]string, 0, total)
 	for _, regData := range s.registries {
 		for _, repoData := range regData.repositories {
 			allTags = append(allTags, repoData.tags...)
@@ -873,7 +907,11 @@ func (s *RegistryClientStub) ListTags(_ context.Context, _ ...registry.ListTagsO
 
 // ListRepositories retrieves all sub-repositories
 func (s *RegistryClientStub) ListRepositories(_ context.Context, _ ...registry.ListRepositoriesOption) ([]string, error) {
-	var allRepos []string
+	total := 0
+	for _, regData := range s.registries {
+		total += len(regData.repositories)
+	}
+	allRepos := make([]string, 0, total)
 	for _, regData := range s.registries {
 		for repo := range regData.repositories {
 			allRepos = append(allRepos, repo)
