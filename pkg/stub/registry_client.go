@@ -476,10 +476,10 @@ func (s *RegistryClientStub) initializeRegistries() {
 
 	// Registry 1: dynamic source
 	s.addRegistry(source, map[string][]string{
-		"":                   {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"}, // including custom tag
-		"release-channel":    {"alpha", "beta", "early-access", "stable", "rock-solid"},           // channel names, not versions
-		"install":            {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"},
-		"install-standalone": {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"},
+		"":                   {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"}, // including custom tag
+		"release-channel":    {"alpha", "beta", "early-access", "stable", "rock-solid"},                                                                    // channel names, not versions
+		"install":            {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"},
+		"install-standalone": {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"},
 	})
 
 	// Registry 2: gcr.io
@@ -690,12 +690,21 @@ func (s *RegistryClientStub) createMockImageData(reg, repo, tag string) *ImageDa
 
 // WithSegment creates a new client with an additional scope path segment
 func (s *RegistryClientStub) WithSegment(segments ...string) registry.Client {
-	newRegistry := s.currentRegistry
-	if len(segments) > 0 {
-		if newRegistry == "" {
-			newRegistry = strings.Join(segments, "/")
+	// If no current registry is set, use the stub's default registry as base
+	base := s.currentRegistry
+	if base == "" {
+		base = s.GetRegistry()
+	}
+
+	var newRegistry string
+	if len(segments) == 0 {
+		newRegistry = base
+	} else {
+		segPath := strings.Join(segments, "/")
+		if base == "" {
+			newRegistry = segPath
 		} else {
-			newRegistry = newRegistry + "/" + strings.Join(segments, "/")
+			newRegistry = base + "/" + segPath
 		}
 	}
 

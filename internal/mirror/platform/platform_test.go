@@ -34,14 +34,14 @@ import (
 
 func TestService_versionsToMirror(t *testing.T) {
 	tests := []struct {
-		name             string
-		strictTags       []string
-		options          *Options
-		wantVersions     []string // expected versions in format "v1.72.10", etc.
-		wantChannels     []string // expected channels
-		wantCustomTags   []string // expected custom tags
-		wantErr          bool
-		wantErrContains  string
+		name            string
+		strictTags      []string
+		options         *Options
+		wantVersions    []string // expected versions in format "v1.72.10", etc.
+		wantChannels    []string // expected channels
+		wantCustomTags  []string // expected custom tags
+		wantErr         bool
+		wantErrContains string
 	}{
 		{
 			name:       "with strict tags - single semver version",
@@ -85,9 +85,9 @@ func TestService_versionsToMirror(t *testing.T) {
 			wantErr:        false,
 		},
 		{
-			name:       "with strict tags - custom tag",
-			strictTags: []string{"pr12345"},
-			options:    &Options{},
+			name:         "with strict tags - custom tag",
+			strictTags:   []string{"pr12345"},
+			options:      &Options{},
 			wantVersions: []string{
 				// No semver versions for custom tag
 			},
