@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Masterminds/semver"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry/client"
 
@@ -37,15 +38,31 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
-	libmodules "github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
+type Module struct {
+	Name         string
+	RegistryPath string
+	Releases     []string
+}
+
+func (m *Module) Versions() []*semver.Version {
+	versions := make([]*semver.Version, 0)
+	for _, release := range m.Releases {
+		v, err := semver.NewVersion(release)
+		if err == nil {
+			versions = append(versions, v)
+		}
+	}
+	return versions
+}
+
 // Options contains configuration options for the modules service
 type Options struct {
 	// Filter is the module filter (whitelist/blacklist)
-	Filter *libmodules.Filter
+	Filter *Filter
 	// OnlyExtraImages pulls only extra images without main module images
 	OnlyExtraImages bool
 	// BundleDir is the directory to store the bundle
@@ -93,7 +110,7 @@ func NewService(
 
 	// Create default filter (blacklist with no items = accept all)
 	if options.Filter == nil {
-		filter, _ := libmodules.NewFilter(nil, libmodules.FilterTypeBlacklist)
+		filter, _ := NewFilter(nil, FilterTypeBlacklist)
 		options.Filter = filter
 	}
 
@@ -176,7 +193,7 @@ func (svc *Service) pullModules(ctx context.Context) error {
 	// Filter modules according to whitelist/blacklist
 	filteredModules := make([]moduleData, 0)
 	for _, moduleName := range moduleNames {
-		mod := &libmodules.Module{
+		mod := &Module{
 			Name:         moduleName,
 			RegistryPath: filepath.Join(svc.rootURL, "modules", moduleName),
 		}
@@ -289,7 +306,7 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 	}
 
 	// Check for explicit version constraints from filter
-	mod := &libmodules.Module{
+	mod := &Module{
 		Name:         module.name,
 		RegistryPath: module.registryPath,
 	}
@@ -724,7 +741,7 @@ func (svc *Service) applyChannelAliases(moduleName string) error {
 		return nil
 	}
 
-	exact, ok := constraint.(*libmodules.ExactTagConstraint)
+	exact, ok := constraint.(*ExactTagConstraint)
 	if !ok {
 		return nil
 	}
