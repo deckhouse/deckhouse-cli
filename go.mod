@@ -1,12 +1,12 @@
 module github.com/deckhouse/deckhouse-cli
 
-go 1.24.6
+go 1.24.13
 
 require (
 	github.com/Masterminds/semver/v3 v3.3.1
 	github.com/deckhouse/deckhouse/pkg/log v0.1.0
 	github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260120103154-2be5575578db
-	github.com/deckhouse/virtualization/src/cli v1.4.0
+	github.com/deckhouse/virtualization/src/cli v1.5.1
 	github.com/fatih/color v1.18.0
 	github.com/fluxcd/flagger v1.36.1
 	github.com/gojuno/minimock/v3 v3.4.7
@@ -173,7 +173,7 @@ require (
 	github.com/cyphar/filepath-securejoin v0.4.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
-	github.com/deckhouse/virtualization/api v1.4.0 // indirect
+	github.com/deckhouse/virtualization/api v1.5.1 // indirect
 	github.com/deislabs/oras v1.1.0 // indirect
 	github.com/denisenkom/go-mssqldb v0.12.2 // indirect
 	github.com/denverdino/aliyungo v0.0.0-20190125010748-a747050bb1ba // indirect

@@ -418,10 +418,10 @@ github.com/deckhouse/deckhouse/pkg/log v0.1.0 h1:2aPfyiHHSIJlX4x7ysyPOaIb7CLmyY+
 github.com/deckhouse/deckhouse/pkg/log v0.1.0/go.mod h1:pbAxTSDcPmwyl3wwKDcEB3qdxHnRxqTV+J0K+sha8bw=
 github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260120103154-2be5575578db h1:xq4DMxGgDk0IaqUzIqwkKOiY9dtQlpVnEupfE/TBU6c=
 github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260120103154-2be5575578db/go.mod h1:OdmJduRktTXVMNLAULkzoPbzLbtaU/jBuwSoAUbnxRM=
-github.com/deckhouse/virtualization/api v1.4.0 h1:JW37E/3je7K9G3x0P8lKmaS3Y0svkNCGIwiWAVpiqos=
-github.com/deckhouse/virtualization/api v1.4.0/go.mod h1:uNjdIZzANEGMWDqPVYEIKe5ugtcuncND+DePz61jNv8=
-github.com/deckhouse/virtualization/src/cli v1.4.0 h1:dxlrwkmv4pMu/Orzwfefd2hMaUo1w7GoFhuYhWgVU28=
-github.com/deckhouse/virtualization/src/cli v1.4.0/go.mod h1:NT4p09Zr9M2oPb/JbmjTbLj831V2T58T6xI8OT6LGvM=
+github.com/deckhouse/virtualization/api v1.5.1 h1:9I0mn4xyrNWfElm0BRTAFpuTc4gFK6Qww61MAsT4KR8=
+github.com/deckhouse/virtualization/api v1.5.1/go.mod h1:hC9CVWrE7umq9qsYKYkbLl8gQ2XO2B+RtBNChFLfhpE=
+github.com/deckhouse/virtualization/src/cli v1.5.1 h1:VEGz7oNxQD4n/ej57OWZW/O1VNlYGwgI3GeROoiqz+w=
+github.com/deckhouse/virtualization/src/cli v1.5.1/go.mod h1:BIXWNx7Sz6rtjT6Ln+p3gBdjindz5/wEsxbkwKqA0Og=
 github.com/denisenkom/go-mssqldb v0.0.0-20191128021309-1d7a30a10f73/go.mod h1:xbL0rPBG9cCiLr28tMa8zpbdarY27NDyej4t/EjAShU=
 github.com/denisenkom/go-mssqldb v0.12.2 h1:1OcPn5GBIobjWNd+8yjfHNIaFX14B1pWI3F9HZy5KXw=
 github.com/denisenkom/go-mssqldb v0.12.2/go.mod h1:lnIw1mZukFRZDJYQ0Pb833QS2IaC3l5HkEfra2LJ+sk=
