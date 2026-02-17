@@ -56,10 +56,12 @@ func NewDeckhouseService(client registry.Client, logger *log.Logger) *DeckhouseS
 	return &DeckhouseService{
 		client: client,
 
-		BasicService:             NewBasicService(deckhouseServiceName, client, logger),
-		deckhouseReleaseChannels: NewDeckhouseReleaseService(NewBasicService(deckhouseReleaseChannelsServiceName, client.WithSegment(deckhouseReleaseChannelsSegment), logger)),
-		installer:                NewBasicService(installerServiceName, client.WithSegment(installerSegment), logger),
-		standaloneInstaller:      NewBasicService(standaloneInstallerServiceName, client.WithSegment(installStandaloneSegment), logger),
+		BasicService: NewBasicService(deckhouseServiceName, client, logger),
+		deckhouseReleaseChannels: NewDeckhouseReleaseService(
+			NewBasicService(deckhouseReleaseChannelsServiceName, client.WithSegment(deckhouseReleaseChannelsSegment), logger),
+		),
+		installer:           NewBasicService(installerServiceName, client.WithSegment(installerSegment), logger),
+		standaloneInstaller: NewBasicService(standaloneInstallerServiceName, client.WithSegment(installStandaloneSegment), logger),
 
 		logger: logger,
 	}

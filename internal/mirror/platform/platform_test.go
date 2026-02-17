@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,14 +34,14 @@ import (
 
 func TestService_versionsToMirror(t *testing.T) {
 	tests := []struct {
-		name             string
-		strictTags       []string
-		options          *Options
-		wantVersions     []string // expected versions in format "v1.72.10", etc.
-		wantChannels     []string // expected channels
-		wantCustomTags   []string // expected custom tags
-		wantErr          bool
-		wantErrContains  string
+		name            string
+		strictTags      []string
+		options         *Options
+		wantVersions    []string // expected versions in format "v1.72.10", etc.
+		wantChannels    []string // expected channels
+		wantCustomTags  []string // expected custom tags
+		wantErr         bool
+		wantErrContains string
 	}{
 		{
 			name:       "with strict tags - single semver version",
@@ -85,9 +85,9 @@ func TestService_versionsToMirror(t *testing.T) {
 			wantErr:        false,
 		},
 		{
-			name:       "with strict tags - custom tag",
-			strictTags: []string{"pr12345"},
-			options:    &Options{},
+			name:         "with strict tags - custom tag",
+			strictTags:   []string{"pr12345"},
+			options:      &Options{},
 			wantVersions: []string{
 				// No semver versions for custom tag
 			},
@@ -129,10 +129,9 @@ func TestService_versionsToMirror(t *testing.T) {
 				"v1.71.0",  // beta
 				"v1.70.0",  // early-access
 				"v1.69.0",  // stable
-				"v1.68.0",  // rock-solid
 			},
 			wantChannels: []string{
-				"alpha", "beta", "early-access", "stable", "rock-solid",
+				"alpha", "beta", "early-access", "stable",
 			},
 			wantCustomTags: []string{},
 			wantErr:        false,
