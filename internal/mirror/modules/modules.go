@@ -29,7 +29,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Masterminds/semver"
+	"github.com/Masterminds/semver/v3"
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry/client"
 
