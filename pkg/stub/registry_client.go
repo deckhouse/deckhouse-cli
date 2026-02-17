@@ -42,6 +42,8 @@ import (
 type RegistryClientStub struct {
 	registries      map[string]*RegistryData
 	currentRegistry string
+	// defaultRegistry holds the deterministic 'source' registry added during initialization
+	defaultRegistry string
 }
 
 // RegistryData holds data for a specific registry
@@ -474,6 +476,9 @@ func getSourceFromArgs() string {
 func (s *RegistryClientStub) initializeRegistries() {
 	source := getSourceFromArgs()
 
+	// record deterministic source registry so stub resolves segments consistently
+	s.defaultRegistry = source
+
 	// Registry 1: dynamic source
 	s.addRegistry(source, map[string][]string{
 		"":                   {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"}, // including custom tag
@@ -484,18 +489,18 @@ func (s *RegistryClientStub) initializeRegistries() {
 
 	// Registry 2: gcr.io
 	s.addRegistry("gcr.io/google-containers", map[string][]string{
-		"":                   {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
-		"pause":              {"3.9", "latest"},
-		"kube-apiserver":     {"v1.28.0", "v1.29.0", "latest"},
+		"":                   {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
+		"pause":              {"alpha", "beta", "early-access", "stable", "rock-solid", "3.9", "latest"},
+		"kube-apiserver":     {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.28.0", "v1.29.0", "latest"},
 		"release-channel":    {"alpha", "beta", "early-access", "stable", "rock-solid"},
-		"install":            {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
-		"install-standalone": {"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
+		"install":            {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
+		"install-standalone": {"alpha", "beta", "early-access", "stable", "rock-solid", "v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"},
 	})
 
 	// Registry 3: quay.io
 	s.addRegistry("quay.io/prometheus", map[string][]string{
-		"prometheus":   {"v2.45.0", "v2.46.0", "latest"},
-		"alertmanager": {"v0.26.0", "v0.27.0", "latest"},
+		"prometheus":   {"alpha", "beta", "early-access", "stable", "rock-solid", "v2.45.0", "v2.46.0", "latest"},
+		"alertmanager": {"alpha", "beta", "early-access", "stable", "rock-solid", "v0.26.0", "v0.27.0", "latest"},
 	})
 }
 
@@ -690,10 +695,10 @@ func (s *RegistryClientStub) createMockImageData(reg, repo, tag string) *ImageDa
 
 // WithSegment creates a new client with an additional scope path segment
 func (s *RegistryClientStub) WithSegment(segments ...string) registry.Client {
-	// If no current registry is set, use the stub's default registry as base
+	// If no current registry is set, use the stub's deterministic default registry as base
 	base := s.currentRegistry
 	if base == "" {
-		base = s.GetRegistry()
+		base = s.defaultRegistry
 	}
 
 	var newRegistry string
@@ -702,6 +707,7 @@ func (s *RegistryClientStub) WithSegment(segments ...string) registry.Client {
 	} else {
 		segPath := strings.Join(segments, "/")
 		if base == "" {
+			// fall back to segment-only (legacy behavior)
 			newRegistry = segPath
 		} else {
 			newRegistry = base + "/" + segPath
@@ -717,6 +723,10 @@ func (s *RegistryClientStub) WithSegment(segments ...string) registry.Client {
 // GetRegistry returns the full registry path
 func (s *RegistryClientStub) GetRegistry() string {
 	if s.currentRegistry == "" {
+		if s.defaultRegistry != "" {
+			return s.defaultRegistry
+		}
+
 		for registry := range s.registries {
 			return registry
 		}

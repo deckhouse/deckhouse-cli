@@ -262,9 +262,21 @@ func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string)
 		return nil, err
 	}
 
+	// Filter out channels that are below the minimum version (SinceVersion/rock-solid)
+	minVersion := svc.determineMinimumVersion(channelVersions)
+	filteredChannels := make([]string, 0, len(matchedChannels))
+	for _, ch := range matchedChannels {
+		if minVersion != nil {
+			if v, ok := channelVersions[ch]; ok && v != nil && v.LessThan(minVersion) {
+				continue
+			}
+		}
+		filteredChannels = append(filteredChannels, ch)
+	}
+
 	return &VersionsToMirrorResult{
 		Versions:   deduplicateVersions(expandedVersions),
-		Channels:   matchedChannels,
+		Channels:   filteredChannels,
 		CustomTags: parsed.customTags,
 	}, nil
 }
@@ -389,7 +401,20 @@ func (svc *Service) expandVersionRange(ctx context.Context, channelVersions chan
 	filteredVersions := filterVersionsBetween(minVersion, maxVersion, allTags)
 	latestPatches := filterOnlyLatestPatches(filteredVersions)
 
-	return append(baseVersions, latestPatches...), nil
+	// Filter base channel versions by minVersion as well
+	filteredBase := baseVersions
+	if minVersion != nil {
+		nb := make([]*semver.Version, 0, len(baseVersions))
+		for _, v := range baseVersions {
+			if v == nil || v.LessThan(minVersion) {
+				continue
+			}
+			nb = append(nb, v)
+		}
+		filteredBase = nb
+	}
+
+	return append(filteredBase, latestPatches...), nil
 }
 
 // determineMinimumVersion determines the minimum version for mirroring based on configuration
@@ -402,8 +427,9 @@ func (svc *Service) determineMinimumVersion(channelVersions channelVersions) *se
 	// Use rock-solid as baseline
 	minVersion := rockSolidVersion
 
-	// Override with SinceVersion if it's older
-	if svc.options.SinceVersion != nil && svc.options.SinceVersion.LessThan(rockSolidVersion) {
+	// If SinceVersion is provided and is newer than rock-solid, start from SinceVersion
+	// (user wants to mirror from a later version than rock-solid)
+	if svc.options.SinceVersion != nil && svc.options.SinceVersion.GreaterThan(minVersion) {
 		minVersion = svc.options.SinceVersion
 	}
 

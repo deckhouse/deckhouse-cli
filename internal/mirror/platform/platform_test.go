@@ -129,10 +129,9 @@ func TestService_versionsToMirror(t *testing.T) {
 				"v1.71.0",  // beta
 				"v1.70.0",  // early-access
 				"v1.69.0",  // stable
-				"v1.68.0",  // rock-solid
 			},
 			wantChannels: []string{
-				"alpha", "beta", "early-access", "stable", "rock-solid",
+				"alpha", "beta", "early-access", "stable",
 			},
 			wantCustomTags: []string{},
 			wantErr:        false,
