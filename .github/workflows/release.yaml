@@ -264,7 +264,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: deckhouse-cli-pr-build-${{ github.run_id }}
+          name: deckhouse-cli-pr-build-${{ github.run_id }}.tar.gz
           path: dist/**/*.tar.gz
           retention-days: 1
           compression-level: 9
