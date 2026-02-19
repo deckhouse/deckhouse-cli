@@ -266,6 +266,41 @@ tasks:
     cmds:
       - task: _test:go
 
+  test:e2e:mirror:
+    desc: Run full cycle E2E mirror test (platform + modules + security)
+    summary: |
+      E2E test for d8 mirror pull/push commands.
+      Required: E2E_LICENSE_TOKEN env variable
+      
+      Example: E2E_LICENSE_TOKEN=xxx task test:e2e:mirror
+    cmds:
+      - task build
+      - go test -v -count=1 -timeout 180m -tags=e2e -run 'TestFullCycleE2E' ./testing/e2e/mirror {{ .CLI_ARGS }}
+
+  test:e2e:mirror:platform:
+    desc: Run platform E2E test
+    cmds:
+      - task build
+      - go test -v -count=1 -timeout 120m -tags=e2e -run 'TestPlatform' ./testing/e2e/mirror {{ .CLI_ARGS }}
+
+  test:e2e:mirror:modules:
+    desc: Run all modules E2E test
+    cmds:
+      - task build
+      - go test -v -count=1 -timeout 120m -tags=e2e -run 'TestModulesE2E$' ./testing/e2e/mirror {{ .CLI_ARGS }}
+
+
+  test:e2e:mirror:security:
+    desc: Run security E2E test
+    cmds:
+      - task build
+      - go test -v -count=1 -timeout 30m -tags=e2e -run 'TestSecurityE2E' ./testing/e2e/mirror {{ .CLI_ARGS }}
+
+  test:e2e:mirror:logs:clean:
+    desc: Clean E2E test logs
+    cmds:
+      - rm -rf ./testing/e2e/.logs/*
+
   lint:
     desc: Run golangci-lint with auto-fix
     cmds:

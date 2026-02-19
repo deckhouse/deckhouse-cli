@@ -103,6 +103,7 @@ linters:
       - examples$
       - _test\.go$
       - deepcopy\.go$
+      - testing/
 formatters:
   enable:
     - gci
