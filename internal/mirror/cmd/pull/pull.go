@@ -26,6 +26,8 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -177,6 +179,7 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 		SkipPlatform:          pullflags.NoPlatform,
 		SkipSecurityDatabases: pullflags.NoSecurityDB,
 		SkipModules:           pullflags.NoModules,
+		SkipInstaller:         pullflags.NoInstaller,
 		OnlyExtraImages:       pullflags.OnlyExtraImages,
 		IgnoreSuspend:         pullflags.IgnoreSuspend,
 		DeckhouseTag:          pullflags.DeckhouseTag,
@@ -265,7 +268,8 @@ func (p *Puller) Execute(ctx context.Context) error {
 		}
 
 		var c registry.Client
-		c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+		repo, edition := cutEditionFromRegistryRepo(p.params.DeckhouseRegistryRepo)
+		c = regclient.NewClientWithOptions(repo, clientOpts)
 
 		if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
 			c = stub.NewRegistryClientStub()
@@ -283,7 +287,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 		}
 
 		svc := mirror.NewPullService(
-			registryservice.NewService(c, logger),
+			registryservice.NewService(c, edition, logger),
 			pullflags.TempDir,
 			pullflags.DeckhouseTag,
 			&mirror.PullServiceOptions{
@@ -341,6 +345,46 @@ func (p *Puller) cleanupWorkingDirectory() error {
 		}
 	}
 	return nil
+}
+
+var enumEditions = []string{
+	"ee",
+	"fe",
+	"se",
+	"be",
+	"se-plus",
+	"ce",
+}
+
+// cutEditionFromRegistryRepo cuts the edition from the registry repository
+// returns the registry repository without the edition and the edition
+// this is needed because of the different paths for the installer images in the registry
+// example:
+// registry.deckhouse.ru/deckhouse/ee/ -> registry.deckhouse.ru/deckhouse, ee
+// myregistry.ru/deckhouse/ -> myregistry.ru/deckhouse, ""
+func cutEditionFromRegistryRepo(registryRepo string) (string, string) {
+	// strip last slash
+	registry := strings.TrimSuffix(registryRepo, "/")
+
+	// split by /
+	parts := strings.Split(registry, "/")
+
+	// get last element
+	lastPart := parts[len(parts)-1]
+
+	// if not edition, return registry + /installer
+	if !slices.Contains(enumEditions, strings.ToLower(lastPart)) {
+		return registry, ""
+	}
+	edition := lastPart
+
+	// cut edition
+	newparts := parts[:len(parts)-1]
+
+	// join back together
+	newregistry := strings.Join(newparts, "/")
+
+	return newregistry, edition
 }
 
 // pullPlatform pulls the Deckhouse platform components

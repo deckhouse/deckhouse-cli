@@ -71,6 +71,7 @@ func (pc *PluginsCommand) InitPluginServices() {
 
 	registryService := service.NewService(
 		pc.pluginRegistryClient,
+		"",
 		pc.logger.Named("registry-service"),
 	)
 
