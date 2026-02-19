@@ -30,4 +30,5 @@ const (
 	MirrorTypeSecurityTrivyBDUSegment
 	MirrorTypeSecurityTrivyJavaDBSegment
 	MirrorTypeSecurityTrivyChecksSegment
+	// MirrorTypeInstaller
 )

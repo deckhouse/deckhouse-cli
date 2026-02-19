@@ -37,6 +37,7 @@ type Service struct {
 	pluginService    *PluginService
 	deckhouseService *DeckhouseService
 	security         *SecurityServices
+	installer        *InstallerServices
 
 	logger *log.Logger
 }
@@ -52,6 +53,7 @@ func NewService(client registry.Client, logger *log.Logger) *Service {
 	s.pluginService = NewPluginService(client.WithSegment(pluginSegment), logger.Named("plugins"))
 	s.deckhouseService = NewDeckhouseService(client, logger.Named("deckhouse"))
 	s.security = NewSecurityServices(securityServiceName, client.WithSegment(securitySegment), logger.Named("security"))
+	s.installer = NewInstallerServices(installerServiceName, client.WithSegment(installerSegment), logger.Named("installer"))
 
 	return s
 }
@@ -78,4 +80,8 @@ func (s *Service) DeckhouseService() *DeckhouseService {
 
 func (s *Service) Security() *SecurityServices {
 	return s.security
+}
+
+func (s *Service) InstallerService() *InstallerServices {
+	return s.installer
 }

@@ -22,6 +22,7 @@ import (
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/installer"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/platform"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/security"
@@ -38,6 +39,8 @@ type PullServiceOptions struct {
 	SkipSecurity bool
 	// SkipModules skips pulling module images
 	SkipModules bool
+	// SkipInstaller skips pulling installer images
+	SkipInstaller bool
 	// OnlyExtraImages pulls only extra images for modules (without main module images)
 	OnlyExtraImages bool
 	// IgnoreSuspend allows mirroring even if release channels are suspended
@@ -53,9 +56,10 @@ type PullServiceOptions struct {
 type PullService struct {
 	registryService *registryservice.Service
 
-	platformService *platform.Service
-	securityService *security.Service
-	modulesService  *modules.Service
+	platformService  *platform.Service
+	securityService  *security.Service
+	modulesService   *modules.Service
+	installerService *installer.Service
 
 	options *PullServiceOptions
 
@@ -117,6 +121,13 @@ func NewPullService(
 			logger,
 			userLogger,
 		),
+		installerService: installer.NewService(
+			registryService,
+			tmpDir,
+			nil,
+			logger,
+			userLogger,
+		),
 
 		options: options,
 
@@ -147,6 +158,13 @@ func (svc *PullService) Pull(ctx context.Context) error {
 		err := svc.modulesService.PullModules(ctx)
 		if err != nil {
 			return fmt.Errorf("pull modules: %w", err)
+		}
+	}
+
+	if !svc.options.SkipInstaller {
+		err := svc.installerService.PullInstaller(ctx)
+		if err != nil {
+			return fmt.Errorf("pull installer: %w", err)
 		}
 	}
 

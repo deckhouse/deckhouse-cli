@@ -62,6 +62,7 @@ var (
 	NoPlatform      bool
 	NoSecurityDB    bool
 	NoModules       bool
+	NoInstaller     bool
 	OnlyExtraImages bool
 )
 
@@ -185,6 +186,12 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		"no-modules",
 		false,
 		"Do not pull Deckhouse modules into bundle.",
+	)
+	flagSet.BoolVar(
+		&NoInstaller,
+		"no-installer",
+		false,
+		"Do not pull Deckhouse installer into bundle.",
 	)
 	flagSet.BoolVar(
 		&OnlyExtraImages,
