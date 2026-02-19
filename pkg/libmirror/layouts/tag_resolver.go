@@ -60,12 +60,13 @@ func NopTagToDigestMappingFunc(_ string) *v1.Hash {
 // Example usage:
 // err := resolver.ResolveTagsDigestsForImageLayouts(mirrorCtx, layouts)
 func (r *TagsResolver) ResolveTagsDigestsForImageLayouts(mirrorCtx *params.BaseParams, layouts *ImageLayouts) error {
-	imageSets := []map[string]struct{}{
+	imageSets := make([]map[string]struct{}, 0, 4+len(layouts.Modules)*2)
+	imageSets = append(imageSets,
 		layouts.DeckhouseImages,
 		layouts.ReleaseChannelImages,
 		layouts.InstallImages,
 		layouts.InstallStandaloneImages,
-	}
+	)
 
 	for _, moduleImageLayout := range layouts.Modules {
 		imageSets = append(imageSets, moduleImageLayout.ModuleImages)
