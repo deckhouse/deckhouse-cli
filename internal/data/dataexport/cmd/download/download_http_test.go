@@ -57,7 +57,7 @@ func TestDownloadFilesystem_OK(t *testing.T) {
 	outFile := filepath.Join(t.TempDir(), "out.txt")
 
 	cmd := NewCommand(context.TODO(), slog.Default())
-	cmd.SetArgs([]string{"myexport", "foo.txt", "-o", outFile})
+	cmd.SetArgs([]string{"myexport", "foo.txt", "-o", outFile, "--publish=false"})
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
@@ -87,7 +87,7 @@ func TestDownloadFilesystem_BadPath(t *testing.T) {
 	defer func() { util.PrepareDownloadFunc = origPrep; util.CreateDataExporterIfNeededFunc = origCreate }()
 
 	cmd := NewCommand(context.TODO(), slog.Default())
-	cmd.SetArgs([]string{"myexport", "foo.txt", "-o", filepath.Join(t.TempDir(), "out.txt")})
+	cmd.SetArgs([]string{"myexport", "foo.txt", "-o", filepath.Join(t.TempDir(), "out.txt"), "--publish=false"})
 	require.NoError(t, cmd.Execute())
 }
 
@@ -115,7 +115,7 @@ func TestDownloadBlock_OK(t *testing.T) {
 
 	outFile := filepath.Join(t.TempDir(), "raw.img")
 	cmd := NewCommand(context.TODO(), slog.Default())
-	cmd.SetArgs([]string{"myexport", "-o", outFile})
+	cmd.SetArgs([]string{"myexport", "-o", outFile, "--publish=false"})
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	require.NoError(t, cmd.Execute())
@@ -141,7 +141,7 @@ func TestDownloadBlock_WrongEndpoint(t *testing.T) {
 	defer func() { util.PrepareDownloadFunc = origPrep; util.CreateDataExporterIfNeededFunc = origCreate }()
 
 	cmd := NewCommand(context.TODO(), slog.Default())
-	cmd.SetArgs([]string{"myexport", "-o", filepath.Join(t.TempDir(), "raw.img")})
+	cmd.SetArgs([]string{"myexport", "-o", filepath.Join(t.TempDir(), "raw.img"), "--publish=false"})
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	require.NoError(t, cmd.Execute())
