@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/spf13/pflag"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
@@ -55,6 +56,13 @@ func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
 		return nil, err
 	}
 	return &SafeClient{restConfig}, nil
+}
+
+// SetProbeEndpoint configures host, TLS ServerName and timeout for probe requests.
+func (c *SafeClient) SetProbeEndpoint(timeout time.Duration, targetHost, kubeServiceServerName string) {
+	c.restConfig.Host = targetHost
+	c.restConfig.TLSClientConfig.ServerName = kubeServiceServerName
+	c.restConfig.Timeout = timeout
 }
 
 func (c *SafeClient) HTTPDo(req *http.Request) (*http.Response, error) {
@@ -132,7 +140,7 @@ func (c *SafeClient) HTTPDo(req *http.Request) (*http.Response, error) {
 	return nil, errors.New("No auth")
 }
 
-func (c *SafeClient) NewRTClient(schemeFuncs ...(func(s *apiruntime.Scheme) error)) (ctrlrtclient.Client, error) {
+func (c *SafeClient) NewRTClient(schemeFuncs ...func(s *apiruntime.Scheme) error) (ctrlrtclient.Client, error) {
 	if c.restConfig == nil {
 		return nil, fmt.Errorf("No rest config")
 	}

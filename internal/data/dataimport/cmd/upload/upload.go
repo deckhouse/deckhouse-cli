@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
+	v1alpha1 "github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/util"
 	client "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
@@ -65,7 +66,6 @@ func cmdExamples() string {
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
 	pathToFile, _ := cmd.Flags().GetString("file")
 	chunks, _ := cmd.Flags().GetInt("chunks")
-	publish, _ := cmd.Flags().GetBool("publish")
 	namespace, _ := cmd.Flags().GetString("namespace")
 	dstPath, _ := cmd.Flags().GetString("dstPath")
 	resume, _ := cmd.Flags().GetBool("resume")
@@ -82,6 +82,22 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	log.Info("Run")
+
+	// Create runtime client for publish auto-detection and reconciliation.
+	rtClient, err := httpClient.NewRTClient(v1alpha1.AddToScheme)
+	if err != nil {
+		return err
+	}
+
+	publishFlag, err := dataio.ParsePublishFlag(cmd.Flags())
+	if err != nil {
+		return err
+	}
+
+	publish, err := dataio.ResolvePublish(ctx, publishFlag, rtClient, httpClient, log)
+	if err != nil {
+		return err
+	}
 
 	permOctal := defaultFilePermissions
 	uid := os.Getuid()

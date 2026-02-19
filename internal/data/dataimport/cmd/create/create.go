@@ -77,7 +77,6 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	name := args[0]
 	namespace, _ := cmd.Flags().GetString("namespace")
 	ttl, _ := cmd.Flags().GetString("ttl")
-	publish, _ := cmd.Flags().GetBool("publish")
 	pvcFilePath, _ := cmd.Flags().GetString("file")
 	wffc, _ := cmd.Flags().GetBool("wffc")
 
@@ -107,6 +106,16 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 			return fmt.Errorf("namespace is required")
 		}
 		namespace = pvcSpec.Namespace
+	}
+
+	publishFlag, err := dataio.ParsePublishFlag(cmd.Flags())
+	if err != nil {
+		return err
+	}
+
+	publish, err := dataio.ResolvePublish(ctx, publishFlag, rtClient, sc, log)
+	if err != nil {
+		return err
 	}
 
 	if err := util.CreateDataImport(ctx, name, namespace, ttl, publish, wffc, pvcSpec, rtClient); err != nil {

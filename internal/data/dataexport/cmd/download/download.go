@@ -224,7 +224,6 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
 	namespace, _ := cmd.Flags().GetString("namespace")
 	dstPath, _ := cmd.Flags().GetString("output")
-	publish, _ := cmd.Flags().GetBool("publish")
 	ttl, _ := cmd.Flags().GetString("ttl")
 
 	dataName, srcPath, err := dataio.ParseArgs(args)
@@ -239,6 +238,16 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
+	if err != nil {
+		return err
+	}
+
+	publishFlag, err := dataio.ParsePublishFlag(cmd.Flags())
+	if err != nil {
+		return err
+	}
+
+	publish, err := dataio.ResolvePublish(ctx, publishFlag, rtClient, sClient, log)
 	if err != nil {
 		return err
 	}
