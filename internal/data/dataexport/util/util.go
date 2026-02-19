@@ -65,8 +65,9 @@ func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlr
 	return deObj, nil
 }
 
-func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
+func GetDataExportWithRestart(ctx context.Context, deName, namespace string, publish bool, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
 	deObj := &v1alpha1.DataExport{}
+	publishReconciled := false
 
 	for i := 0; ; i++ {
 		var returnErr error
@@ -75,6 +76,19 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 		err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: deName}, deObj)
 		if err != nil {
 			return nil, fmt.Errorf("kube Get dataexport with restart: %s", err.Error())
+		}
+
+		// On the first iteration, reconcile Spec.Publish with the resolved value.
+		// If the object was patched, restart the loop to pick up the updated status.
+		if !publishReconciled {
+			patched, err := EnsureDataExportPublish(ctx, deObj, publish, rtClient)
+			if err != nil {
+				return nil, err
+			}
+			publishReconciled = true
+			if patched {
+				continue
+			}
 		}
 
 		for _, condition := range deObj.Status.Conditions {
@@ -230,7 +244,7 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 	var podURL, volumeMode, internalCAData string
 
 	log.Info("Waiting for DataExport to be ready", slog.String("name", deName), slog.String("namespace", namespace))
-	deObj, err := GetDataExportWithRestart(ctx, deName, namespace, rtClient)
+	deObj, err := GetDataExportWithRestart(ctx, deName, namespace, public, rtClient)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -306,4 +320,36 @@ func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace st
 	subClient.SetTLSCAData(decodedBytes)
 
 	return url, volumeMode, subClient, nil
+}
+
+// EnsureDataExportPublish patches DataExport.Spec.Publish to match the resolved value.
+// Only upgrades publish: false -> true is patched, true -> false is intentionally skipped
+// to avoid downgrading already-published resources.
+// Returns (true, nil) if the object was patched and the caller should re-read it.
+func EnsureDataExportPublish(
+	ctx context.Context,
+	deObj *v1alpha1.DataExport,
+	publish bool,
+	rtClient ctrlrtclient.Client,
+) (bool, error) {
+	if !publish {
+		return false, nil
+	}
+
+	if deObj == nil {
+		return false, fmt.Errorf("nil DataExport object")
+	}
+
+	if deObj.Spec.Publish == publish {
+		return false, nil
+	}
+
+	patch := ctrlrtclient.MergeFrom(deObj.DeepCopy())
+	deObj.Spec.Publish = publish
+
+	if err := rtClient.Patch(ctx, deObj, patch); err != nil {
+		return false, fmt.Errorf("patch DataExport publish: %w", err)
+	}
+
+	return true, nil
 }
