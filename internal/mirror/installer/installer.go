@@ -19,13 +19,17 @@ package installer
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"time"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
@@ -39,6 +43,10 @@ type Options struct {
 	// channel f.e. alpha/beta/stable
 	// any other tag
 	TargetTag string
+	// BundleDir is the directory to store the bundle
+	BundleDir string
+	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
+	BundleChunkSize int64
 }
 type Service struct {
 	// registryService handles Deckhouse installer registry operations
@@ -159,6 +167,32 @@ func (svc *Service) pullInstaller(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("pull installer: %w", err)
+	}
+
+	if err := logger.Process("Pack Deckhouse images into platform.tar", func() error {
+		bundleChunkSize := svc.options.BundleChunkSize
+		bundleDir := svc.options.BundleDir
+
+		var installer io.Writer = chunked.NewChunkedFileWriter(
+			bundleChunkSize,
+			bundleDir,
+			"installer.tar",
+		)
+
+		if bundleChunkSize == 0 {
+			installer, err = os.Create(filepath.Join(bundleDir, "installer.tar"))
+			if err != nil {
+				return fmt.Errorf("create installer.tar: %w", err)
+			}
+		}
+
+		if err := bundle.Pack(context.Background(), svc.layout.workingDir, installer); err != nil {
+			return fmt.Errorf("pack installer.tar: %w", err)
+		}
+
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	return nil

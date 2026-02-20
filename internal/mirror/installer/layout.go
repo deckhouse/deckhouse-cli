@@ -24,21 +24,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
+	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
-
-// import (
-// 	"fmt"
-// 	"path"
-// 	"path/filepath"
-
-// 	v1 "github.com/google/go-containerregistry/pkg/v1"
-// 	"github.com/google/go-containerregistry/pkg/v1/layout"
-
-// 	"github.com/deckhouse/deckhouse-cli/internal"
-// 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
-// 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
-// )
 
 type ImageDownloadList struct {
 	rootURL string
@@ -63,12 +50,12 @@ func (l *ImageDownloadList) FillInstallerImages(tagsToMirror []string) {
 type ImageLayouts struct {
 	platform   v1.Platform
 	workingDir string
-	image      *image.ImageLayout
+	image      *regimage.ImageLayout
 }
 
 func NewImageLayouts(rootFolder string) (*ImageLayouts, error) {
 	layoutPath := filepath.Join(rootFolder, "installer")
-	image, err := image.NewImageLayout(layoutPath)
+	image, err := regimage.NewImageLayout(layoutPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create image layout: %w", err)
 	}

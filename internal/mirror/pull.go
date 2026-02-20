@@ -124,7 +124,11 @@ func NewPullService(
 		installerService: installer.NewService(
 			registryService,
 			tmpDir,
-			nil,
+			&installer.Options{
+				TargetTag:       targetTag,
+				BundleDir:       options.BundleDir,
+				BundleChunkSize: options.BundleChunkSize,
+			},
 			logger,
 			userLogger,
 		),
