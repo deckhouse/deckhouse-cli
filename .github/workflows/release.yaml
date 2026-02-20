@@ -259,12 +259,12 @@ jobs:
           git config --global --add safe.directory '*'
 
       - name: Build and package
-        run: task build-and-package
+        run: task build:dist:all
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: deckhouse-cli-pr-build-${{ github.run_id }}.tar.gz
-          path: dist/**/*.tar.gz
+          name: deckhouse-cli-pr-build-${{ github.run_id }}
+          path: dist/**/*
           retention-days: 1
           compression-level: 9
