@@ -20,10 +20,11 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
+
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
 // import (
