@@ -17,6 +17,9 @@ limitations under the License.
 package installer
 
 import (
+	"fmt"
+	"path/filepath"
+
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -62,14 +65,20 @@ type ImageLayouts struct {
 	image      *image.ImageLayout
 }
 
-func NewImageLayouts(rootFolder string) *ImageLayouts {
+func NewImageLayouts(rootFolder string) (*ImageLayouts, error) {
+	layoutPath := filepath.Join(rootFolder, "installer")
+	image, err := image.NewImageLayout(layoutPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create image layout: %w", err)
+	}
+
 	l := &ImageLayouts{
 		workingDir: rootFolder,
 		platform:   v1.Platform{Architecture: "amd64", OS: "linux"},
-		image:      new(image.ImageLayout),
+		image:      image,
 	}
 
-	return l
+	return l, nil
 }
 
 // AsList returns a list of layout.Path's in it. Undefined path's are not included in the list.

@@ -70,7 +70,11 @@ func NewService(
 
 	// workingDir is the root where we create layouts
 	// Layouts will be created at workingDir/installer/
-	layout := NewImageLayouts(filepath.Join(workingDir, "installer"))
+	layout, err := NewImageLayouts(filepath.Join(workingDir, "installer"))
+	if err != nil {
+		//TODO: handle error
+		userLogger.Warnf("Create OCI Image Layouts: %v", err)
+	}
 
 	if options == nil {
 		options = &Options{}
@@ -97,10 +101,7 @@ func (svc *Service) PullInstaller(ctx context.Context) error {
 		return fmt.Errorf("validate installer access: %w", err)
 	}
 
-	tagsToMirror, err := svc.findTagsToMirror(ctx)
-	if err != nil {
-		return fmt.Errorf("find tags to mirror: %w", err)
-	}
+	tagsToMirror := svc.findTagsToMirror(ctx)
 
 	svc.downloadList.FillInstallerImages(tagsToMirror)
 
@@ -132,21 +133,20 @@ func (svc *Service) validateInstallerAccess(ctx context.Context) error {
 	return nil
 }
 
-func (svc *Service) findTagsToMirror(_ context.Context) ([]string, error) {
+func (svc *Service) findTagsToMirror(_ context.Context) []string {
 	targetTag := defaultTargetTag
 
 	if svc.options.TargetTag != "" {
 		targetTag = svc.options.TargetTag
 	}
 
-	return []string{targetTag}, nil
+	return []string{targetTag}
 }
 
 func (svc *Service) pullInstaller(ctx context.Context) error {
 	logger := svc.userLogger
 
 	err := logger.Process("Pull installer", func() error {
-
 		config := puller.PullConfig{
 			Name:             "installer",
 			ImageSet:         svc.downloadList.Installer,
