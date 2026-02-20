@@ -16,6 +16,11 @@ env:
 permissions:
   contents: write
 
+# Cancel in-progress jobs for the same PR (pull_request_target event) or for the same branch (push event).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -259,12 +264,12 @@ jobs:
           git config --global --add safe.directory '*'
 
       - name: Build and package
-        run: task build-and-package
+        run: task build:dist:all
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: deckhouse-cli-pr-build-${{ github.run_id }}.tar.gz
-          path: dist/**/*.tar.gz
+          name: deckhouse-cli-pr-build-${{ github.run_id }}
+          path: dist/**/*
           retention-days: 1
           compression-level: 9
