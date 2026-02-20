@@ -51,7 +51,7 @@ func RunWatch() error {
 		return fmt.Errorf("creating runtime client: %w", err)
 	}
 
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(1000 * time.Millisecond)
 	defer ticker.Stop()
 
 	var (
@@ -69,8 +69,14 @@ func RunWatch() error {
 			if err != nil {
 				// Clear footer before warning
 				clearFooter(footerLines)
-				fmt.Printf("⚠️ Error finding active migration: %v\n", err)
-				footerLines = 1
+				msg := fmt.Sprintf("⚠️ Error finding active migration: %v", err)
+
+				termWidth := getTermWidth()
+				if termWidth <= 0 {
+					termWidth = 80
+				}
+				footerLines = printFooter(msg, termWidth)
+
 				continue
 			}
 
@@ -133,7 +139,7 @@ func RunWatch() error {
 					if !printedEvents[eventKey] {
 						if isProgress {
 							fmt.Printf("[%s] %s %s: %s\n",
-								c.LastTransitionTime.Format("15:04:05"),
+								time.Now().Format("15:04:05"),
 								icon,
 								c.Type,
 								c.Message)
@@ -141,7 +147,7 @@ func RunWatch() error {
 							stepDuration := c.LastTransitionTime.Time.Sub(lastStepTime)
 
 							fmt.Printf("[%s] %s %s: %s (+%s)\n",
-								c.LastTransitionTime.Format("15:04:05"),
+								time.Now().Format("15:04:05"),
 								icon,
 								c.Type,
 								c.Message,
@@ -154,10 +160,6 @@ func RunWatch() error {
 					if !isProgress {
 						lastStepTime = c.LastTransitionTime.Time
 					}
-				}
-
-				if c.Status == metav1.ConditionFalse && c.Reason == "Error" {
-					return ErrMigrationFailed
 				}
 			}
 
@@ -192,6 +194,7 @@ func RunWatch() error {
 			// Check completion
 			for _, cond := range activeMigration.Status.Conditions {
 				if cond.Type == v1alpha1.ConditionSucceeded && cond.Status == metav1.ConditionTrue {
+					clearFooter(footerLines)
 					totalDuration := cond.LastTransitionTime.Time.Sub(activeMigration.CreationTimestamp.Time)
 					fmt.Printf("🎉 CNI switch to '%s' completed successfully! (Total time: %s)\n",
 						activeMigration.Spec.TargetCNI,
