@@ -42,33 +42,18 @@ type Service struct {
 	logger *log.Logger
 }
 
-type ServiceOption func(*Service)
-
-func WithEdition(edition string) ServiceOption {
-	return func(s *Service) {
-		s.client = s.client.WithSegment(edition)
-	}
-}
-
 // NewService creates a new registry service with the given client and logger
-func NewService(client registry.Client, logger *log.Logger, opts ...ServiceOption) *Service {
+func NewService(client registry.Client, edition string, logger *log.Logger) *Service {
 	s := &Service{
 		client: client,
 		logger: logger,
 	}
 
-	// before options parse to skip edition segment from registry path
-	installerClient := client.WithSegment("installer")
-
-	for _, opt := range opts {
-		opt(s)
-	}
-
-	s.modulesService = NewModulesService(client.WithSegment(moduleSegment), logger.Named("modules"))
-	s.pluginService = NewPluginService(client.WithSegment(pluginSegment), logger.Named("plugins"))
-	s.deckhouseService = NewDeckhouseService(client, logger.Named("deckhouse"))
-	s.security = NewSecurityServices(securityServiceName, client.WithSegment(securitySegment), logger.Named("security"))
-	s.installer = NewInstallerServices(installerServiceName, installerClient, logger.Named("installer"))
+	s.modulesService = NewModulesService(client.WithSegment(edition, moduleSegment), logger.Named("modules"))
+	s.pluginService = NewPluginService(client.WithSegment(edition, pluginSegment), logger.Named("plugins"))
+	s.deckhouseService = NewDeckhouseService(client.WithSegment(edition), logger.Named("deckhouse"))
+	s.security = NewSecurityServices(securityServiceName, client.WithSegment(edition, securitySegment), logger.Named("security"))
+	s.installer = NewInstallerServices(installerServiceName, client.WithSegment("installer"), logger.Named("installer"))
 
 	return s
 }
