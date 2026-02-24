@@ -287,7 +287,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 		}
 
 		svc := mirror.NewPullService(
-			registryservice.NewService(c, edition, logger),
+			registryservice.NewService(c, logger, registryservice.WithEdition(edition)),
 			pullflags.TempDir,
 			pullflags.DeckhouseTag,
 			&mirror.PullServiceOptions{
