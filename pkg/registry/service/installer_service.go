@@ -20,13 +20,3 @@ func NewInstallerServices(name string, client registry.Client, logger *log.Logge
 		logger:       logger,
 	}
 }
-
-// func (s *InstallerServices) Installer(imageName string) *BasicService {
-// 	if service, exists := s.securityServices[imageName]; exists {
-// 		return service
-// 	}
-
-// 	s.securityServices[imageName] = NewBasicService(s.name+" "+imageName, s.client.WithSegment(imageName), s.logger)
-
-// 	return s.securityServices[imageName]
-// }

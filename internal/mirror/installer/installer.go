@@ -102,8 +102,6 @@ func NewService(
 // PullInstaller pulls the installer image
 // It validates access to the registry and pulls the image
 func (svc *Service) PullInstaller(ctx context.Context) error {
-	// logger := svc.userLogger
-
 	err := svc.validateInstallerAccess(ctx)
 	if err != nil {
 		return fmt.Errorf("validate installer access: %w", err)
