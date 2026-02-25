@@ -18,12 +18,15 @@ package dataio
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"log/slog"
 	"net"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -74,7 +77,8 @@ func ResolvePublish(
 //   - same UID: internal path is reachable -> publish=false
 //   - UID mismatch: ClusterIP reached a different cluster (e.g. local minikube/kind) -> publish=true
 //   - network-unreachable on probe: internal path is not reachable -> publish=true
-//   - any other probe error: ambiguous -> fail fast with hint
+//   - TLS/auth rejection on probe: ClusterIP reached a different server -> publish=true
+//   - any other probe error (transient 5xx, cancellation, deserialization): ambiguous -> fail fast with hint
 func DetectPublish(
 	ctx context.Context,
 	rtClient ctrlrtclient.Client,
@@ -120,7 +124,22 @@ func DetectPublish(
 			log.Info("Publish autodetect: internal endpoint is unreachable, selecting publish=true")
 			return true, nil
 		}
-		// TLS/auth/RBAC/other errors are ambiguous.
+		// TLS/auth/RBAC rejection: the first request via kubeconfig succeeded
+		// with the same credentials, so a rejection here means ClusterIP
+		// reached a different server.
+		if isProbeRejected(err) {
+			log.Info("Publish autodetect: internal endpoint rejected, selecting publish=true")
+			return true, nil
+		}
+		// Remaining errors are ambiguous - the probe endpoint may be the same
+		// server experiencing a transient issue:
+		//   - context.Canceled: deliberate cancellation, not a detection result
+		//   - apierrors 500 InternalError: transient API server failure
+		//   - apierrors 503 ServiceUnavailable / ServerTimeout: server overloaded
+		//   - apierrors 504 Timeout: API-level processing timeout
+		//   - apierrors 429 TooManyRequests: rate limiting
+		//   - apierrors 400 BadRequest, 404 NotFound: unexpected but not clearly "different server"
+		//   - response deserialization errors (malformed JSON, unexpected content type)
 		return false, ErrAutoDetectWithHint
 	}
 
@@ -178,6 +197,74 @@ func isNetworkUnreachable(err error) bool {
 
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	return false
+}
+
+// isProbeRejected classifies errors that indicate the ClusterIP endpoint
+// is reachable but belongs to a different server than the kubeconfig endpoint.
+//
+// Precondition: the first request via kubeconfig already succeeded with the
+// same CA, token, and RBAC permissions. If the probe to ClusterIP gets a TLS
+// or auth rejection, it means ClusterIP reached a different server.
+//
+// Returns true for:
+//   - x509.UnknownAuthorityError: server certificate signed by a different CA
+//   - x509.CertificateInvalidError: server certificate expired, not yet valid,
+//     constraint violation, incompatible key usage, etc.
+//     (also covers errors wrapped in tls.CertificateVerificationError, which
+//     has Unwrap() so errors.As finds the inner x509 error automatically)
+//   - x509.HostnameError: server certificate CN/SAN doesn't match
+//     kubernetes.default.svc
+//   - tls.RecordHeaderError: server doesn't speak TLS at all
+//     (plain HTTP on HTTPS port, or a non-HTTP service)
+//   - tls.AlertError: server sent a TLS alert rejecting the handshake
+//     (bad_certificate, handshake_failure, protocol_version, unknown_ca, etc.)
+//   - apierrors 401 Unauthorized: server doesn't accept our token
+//   - apierrors 403 Forbidden: server has different RBAC rules
+//
+// Returns false for:
+//   - nil: no error
+//   - everything else: ambiguous, handled by the caller as ErrAutoDetectWithHint
+func isProbeRejected(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// TLS: certificate signed by unknown authority
+	var unknownAuthErr x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuthErr) {
+		return true
+	}
+
+	// TLS: certificate expired, not yet valid, etc.
+	var certInvalidErr x509.CertificateInvalidError
+	if errors.As(err, &certInvalidErr) {
+		return true
+	}
+
+	// TLS: certificate CN/SAN doesn't match server name
+	var hostnameErr x509.HostnameError
+	if errors.As(err, &hostnameErr) {
+		return true
+	}
+
+	// TLS: server doesn't speak TLS (plain HTTP on HTTPS port)
+	var recordHeaderErr tls.RecordHeaderError
+	if errors.As(err, &recordHeaderErr) {
+		return true
+	}
+
+	// TLS: server reject handshake
+	var tlsAlertErr tls.AlertError
+	if errors.As(err, &tlsAlertErr) {
+		return true
+	}
+
+	// Auth/RBAC: 401 or 403 from a different API server
+	if apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) {
 		return true
 	}
 
