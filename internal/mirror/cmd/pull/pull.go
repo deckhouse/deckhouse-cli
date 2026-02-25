@@ -26,8 +26,6 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
-	"slices"
-	"strings"
 	"syscall"
 	"time"
 
@@ -268,7 +266,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 		}
 
 		var c registry.Client
-		repo, edition := cutEditionFromRegistryRepo(p.params.DeckhouseRegistryRepo)
+		repo, edition := registryservice.GetEditionFromRegistryPath(p.params.DeckhouseRegistryRepo)
 		c = regclient.NewClientWithOptions(repo, clientOpts)
 
 		if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
@@ -345,46 +343,6 @@ func (p *Puller) cleanupWorkingDirectory() error {
 		}
 	}
 	return nil
-}
-
-var enumEditions = []string{
-	"ee",
-	"fe",
-	"se",
-	"be",
-	"se-plus",
-	"ce",
-}
-
-// cutEditionFromRegistryRepo cuts the edition from the registry repository
-// returns the registry repository without the edition and the edition
-// this is needed because of the different paths for the installer images in the registry
-// example:
-// registry.deckhouse.ru/deckhouse/ee/ -> registry.deckhouse.ru/deckhouse, ee
-// myregistry.ru/deckhouse/ -> myregistry.ru/deckhouse, ""
-func cutEditionFromRegistryRepo(registryRepo string) (string, string) {
-	// strip last slash
-	registry := strings.TrimSuffix(registryRepo, "/")
-
-	// split by /
-	parts := strings.Split(registry, "/")
-
-	// get last element
-	lastPart := parts[len(parts)-1]
-
-	// if not edition, return registry + /installer
-	if !slices.Contains(enumEditions, strings.ToLower(lastPart)) {
-		return registry, ""
-	}
-	edition := lastPart
-
-	// cut edition
-	newparts := parts[:len(parts)-1]
-
-	// join back together
-	newregistry := strings.Join(newparts, "/")
-
-	return newregistry, edition
 }
 
 // pullPlatform pulls the Deckhouse platform components

@@ -17,6 +17,9 @@ limitations under the License.
 package service
 
 import (
+	"strings"
+
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry"
 )
@@ -43,16 +46,18 @@ type Service struct {
 }
 
 // NewService creates a new registry service with the given client and logger
-func NewService(client registry.Client, edition string, logger *log.Logger) *Service {
+func NewService(client registry.Client, edition pkg.Edition, logger *log.Logger) *Service {
 	s := &Service{
 		client: client,
 		logger: logger,
 	}
 
-	s.modulesService = NewModulesService(client.WithSegment(edition, moduleSegment), logger.Named("modules"))
-	s.pluginService = NewPluginService(client.WithSegment(edition, pluginSegment), logger.Named("plugins"))
-	s.deckhouseService = NewDeckhouseService(client.WithSegment(edition), logger.Named("deckhouse"))
-	s.security = NewSecurityServices(securityServiceName, client.WithSegment(edition, securitySegment), logger.Named("security"))
+	s.modulesService = NewModulesService(client.WithSegment(edition.String(), moduleSegment), logger.Named("modules"))
+	s.deckhouseService = NewDeckhouseService(client.WithSegment(edition.String()), logger.Named("deckhouse"))
+	s.security = NewSecurityServices(securityServiceName, client.WithSegment(edition.String(), securitySegment), logger.Named("security"))
+
+	// services that are not scoped by edition
+	s.pluginService = NewPluginService(client.WithSegment(pluginSegment), logger.Named("plugins"))
 	s.installer = NewInstallerServices(installerServiceName, client.WithSegment("installer"), logger.Named("installer"))
 
 	return s
@@ -84,4 +89,35 @@ func (s *Service) Security() *SecurityServices {
 
 func (s *Service) InstallerService() *InstallerServices {
 	return s.installer
+}
+
+// GetEditionFromRegistryPath cuts the edition from the registry path
+// returns the path without the edition and the edition
+// this is needed because of the different paths for the installer images in the registry
+// example:
+// registry.deckhouse.ru/deckhouse/ee/ -> registry.deckhouse.ru/deckhouse, ee
+// myregistry.ru/deckhouse/ -> myregistry.ru/deckhouse, ""
+func GetEditionFromRegistryPath(registryRepo string) (string, pkg.Edition) {
+	// strip last slash
+	registry := strings.TrimSuffix(registryRepo, "/")
+
+	// split by /
+	parts := strings.Split(registry, "/")
+
+	// get last element
+	lastPart := parts[len(parts)-1]
+
+	// if not edition, return registry + /installer
+	edition := pkg.Edition(lastPart)
+	if !edition.IsValid() {
+		return registry, pkg.NoEdition
+	}
+
+	// cut edition
+	newparts := parts[:len(parts)-1]
+
+	// join back together
+	newregistry := strings.Join(newparts, "/")
+
+	return newregistry, edition
 }
