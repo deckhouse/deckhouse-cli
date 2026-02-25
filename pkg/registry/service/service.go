@@ -19,9 +19,10 @@ package service
 import (
 	"strings"
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry"
+
+	"github.com/deckhouse/deckhouse-cli/pkg"
 )
 
 const (
