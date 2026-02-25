@@ -42,6 +42,31 @@ const (
 	cmdName = "download"
 )
 
+type firstErrState struct {
+	mu  sync.Mutex
+	err error
+}
+
+// Set keeps only the first non-nil error from concurrent workers.
+func (s *firstErrState) Set(srcPath, subPath string, subErr error) {
+	if subErr == nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.err == nil {
+		s.err = fmt.Errorf("download %s: %w", filepath.Join(srcPath, subPath), subErr)
+	}
+}
+
+func (s *firstErrState) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
+}
+
 func cmdExamples() string {
 	resp := []string{
 		"  # Start exporter + Download + Stop for Filesystem",
@@ -163,8 +188,7 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 
 	if srcPath != "" && srcPath[len(srcPath)-1:] == "/" {
 		var wg sync.WaitGroup
-		var mu sync.Mutex
-		var firstErr error
+		var firstErr firstErrState
 
 		err = forRespItems(resp.Body, func(item *dirItem) error {
 			subPath := item.Name
@@ -175,19 +199,20 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 				}
 				subPath += "/"
 			}
-			sem <- struct{}{}
-			wg.Add(1)
-			go func(sp string) {
-				defer func() { <-sem; wg.Done() }()
-				subErr := recursiveDownload(ctx, sClient, log, sem, url, srcPath+sp, filepath.Join(dstPath, sp))
-				if subErr != nil {
-					mu.Lock()
-					if firstErr == nil {
-						firstErr = fmt.Errorf("Download %s: %w", filepath.Join(srcPath, sp), subErr)
-					}
-					mu.Unlock()
-				}
-			}(subPath)
+			// Run subtask in a goroutine when semaphore capacity is available;
+			// otherwise process inline to avoid blocking on sem (prevents deadlock on wide trees).
+			select {
+			case sem <- struct{}{}:
+				wg.Add(1)
+				go func(sp string) {
+					defer func() { <-sem; wg.Done() }()
+					subErr := recursiveDownload(ctx, sClient, log, sem, url, srcPath+sp, filepath.Join(dstPath, sp))
+					firstErr.Set(srcPath, sp, subErr)
+				}(subPath)
+			default:
+				subErr := recursiveDownload(ctx, sClient, log, sem, url, srcPath+subPath, filepath.Join(dstPath, subPath))
+				firstErr.Set(srcPath, subPath, subErr)
+			}
 
 			return nil
 		})
@@ -196,7 +221,7 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 		}
 
 		wg.Wait()
-		return firstErr
+		return firstErr.Err()
 	}
 	if dstPath != "" {
 		// Create out file
