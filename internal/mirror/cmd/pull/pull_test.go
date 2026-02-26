@@ -38,8 +38,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
-	mock "github.com/deckhouse/deckhouse-cli/pkg/mock"
-	"github.com/deckhouse/deckhouse/pkg/registry"
 )
 
 func TestNewCommand(t *testing.T) {
@@ -100,75 +98,6 @@ func TestSetupLogger(t *testing.T) {
 			logger := setupLogger()
 			assert.NotNil(t, logger)
 			// We can't easily test the internal slog level, but we can verify the logger is created
-		})
-	}
-}
-
-func TestFindTagsToMirror(t *testing.T) {
-	logger := log.NewSLogger(slog.LevelInfo)
-
-	tests := []struct {
-		name         string
-		deckhouseTag string
-		sinceVersion *semver.Version
-		expectError  bool
-		expectedTags []string
-	}{
-		{
-			name:         "specific tag provided",
-			deckhouseTag: "v1.57.3",
-			expectedTags: []string{"v1.57.3"},
-		},
-		{
-			name:         "no tag, should call releases.VersionsToMirror",
-			deckhouseTag: "",
-			expectError:  true, // Will fail because releases.VersionsToMirror needs real params
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var originalVersionsToMirrorFunc func(*params.PullParams, registry.Client, []string) ([]semver.Version, []string, error)
-			if tt.deckhouseTag == "" {
-				// Mock for the no tag case to avoid panic
-				originalVersionsToMirrorFunc = versionsToMirrorFunc
-				versionsToMirrorFunc = func(pullParams *params.PullParams, client registry.Client, tagsToMirror []string) ([]semver.Version, []string, error) {
-					return nil, nil, fmt.Errorf("mock error for no tag case")
-				}
-				defer func() { versionsToMirrorFunc = originalVersionsToMirrorFunc }()
-			} else {
-				// Mock for specific tag case
-				originalVersionsToMirrorFunc = versionsToMirrorFunc
-				versionsToMirrorFunc = func(pullParams *params.PullParams, client registry.Client, tagsToMirror []string) ([]semver.Version, []string, error) {
-					if len(tagsToMirror) > 0 {
-						v, err := semver.NewVersion(strings.TrimPrefix(tagsToMirror[0], "v"))
-						if err != nil {
-							return nil, nil, err
-						}
-						return []semver.Version{*v}, []string{"alpha"}, nil
-					}
-					return nil, nil, fmt.Errorf("no tags")
-				}
-				defer func() { versionsToMirrorFunc = originalVersionsToMirrorFunc }()
-			}
-
-			pullParams := &params.PullParams{
-				BaseParams: params.BaseParams{
-					Logger: logger,
-				},
-				DeckhouseTag: tt.deckhouseTag,
-				SinceVersion: tt.sinceVersion,
-			}
-
-			client := mock.NewRegistryClientMock(t)
-			tags, _, err := findTagsToMirror(pullParams, logger, client)
-
-			if tt.expectError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, tt.expectedTags, tags)
-			}
 		})
 	}
 }
@@ -981,39 +910,6 @@ func TestErrorMessages(t *testing.T) {
 	assert.Equal(t, "pull failed, see the log for details", err.Error())
 }
 
-func TestFindTagsToMirrorWithVersionsSuccess(t *testing.T) {
-	// Save original function
-	originalVersionsToMirrorFunc := versionsToMirrorFunc
-	defer func() { versionsToMirrorFunc = originalVersionsToMirrorFunc }()
-
-	// Mock the function to return successful versions
-	versionsToMirrorFunc = func(pullParams *params.PullParams, client registry.Client, tagsToMirror []string) ([]semver.Version, []string, error) {
-		return []semver.Version{
-			*semver.MustParse("1.50.0"),
-			*semver.MustParse("1.51.0"),
-			*semver.MustParse("1.52.0"),
-		}, nil, nil
-	}
-
-	logger := log.NewSLogger(slog.LevelInfo)
-
-	// Test the case where we need to call versions lookup
-	originalDeckhouseTag := pullflags.DeckhouseTag
-	defer func() { pullflags.DeckhouseTag = originalDeckhouseTag }()
-
-	pullflags.DeckhouseTag = "" // Force versions lookup
-
-	pullParams := &params.PullParams{
-		DeckhouseTag: "",
-		SinceVersion: nil,
-	}
-
-	client := mock.NewRegistryClientMock(t)
-	tags, _, err := findTagsToMirror(pullParams, logger, client)
-	assert.NoError(t, err)
-	assert.Equal(t, []string{"v1.50.0", "v1.51.0", "v1.52.0"}, tags)
-}
-
 func TestNewPuller(t *testing.T) {
 	// Save original global variables
 	originalTempDir := pullflags.TempDir
@@ -1434,19 +1330,6 @@ func BenchmarkBuildPullParams(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		_ = buildPullParams(logger)
-	}
-}
-
-func BenchmarkFindTagsToMirror(b *testing.B) {
-	logger := log.NewSLogger(slog.LevelInfo)
-	pullParams := &params.PullParams{
-		DeckhouseTag: "v1.57.3",
-	}
-
-	client := mock.NewRegistryClientMock(b)
-
-	for i := 0; i < b.N; i++ {
-		_, _, _ = findTagsToMirror(pullParams, logger, client)
 	}
 }
 

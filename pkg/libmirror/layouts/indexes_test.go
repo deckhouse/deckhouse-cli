@@ -93,3 +93,11 @@ func Test_indexManifestAnnotations_MarshalJSON(t *testing.T) {
 		})
 	}
 }
+
+func createEmptyOCILayout(t *testing.T) layout.Path {
+	t.Helper()
+
+	l, err := CreateEmptyImageLayout(t.TempDir())
+	require.NoError(t, err)
+	return l
+}

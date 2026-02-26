@@ -92,8 +92,8 @@ func formatDeckhouseRegistry(info deckhouseRegistry) string {
 
 	var sb strings.Builder
 	sb.WriteString(yellow("┌ Deckhouse Registry Information:\n"))
-	sb.WriteString(fmt.Sprintf("%s %s %s\n", yellow("├"), yellow("Registry:"), registry))
-	sb.WriteString(fmt.Sprintf("%s %s %s\n", yellow("└"), yellow("Scheme:"), scheme))
+	fmt.Fprintf(&sb, "%s %s %s\n", yellow("├"), yellow("Registry:"), registry)
+	fmt.Fprintf(&sb, "%s %s %s\n", yellow("└"), yellow("Scheme:"), scheme)
 
 	return sb.String()
 }
