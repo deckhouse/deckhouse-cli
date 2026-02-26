@@ -7,7 +7,7 @@ Subcommand for the command line client for Deckhouse.
 ### Examples
 #### create
 ```shell
-d8 data create export-name pvc/test-pvc-name
+d8 data export create export-name pvc/test-pvc-name
 ```
 
 #### create from a snapshot
@@ -61,5 +61,5 @@ NAMESPACE       NAME                  READYTOUSE   SOURCEPVC                    
 
 5. Create data export from that snapshot using d8 command as shown in the example below 
 ```shell
-d8 data create export-name snapshot/my-snapshot
+d8 data export create export-name snapshot/my-snapshot
 ```
