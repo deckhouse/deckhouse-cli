@@ -1233,6 +1233,7 @@ func TestPullFunction(t *testing.T) {
 	originalNoPlatform := pullflags.NoPlatform
 	originalNoSecurityDB := pullflags.NoSecurityDB
 	originalNoModules := pullflags.NoModules
+	originalNoInstaller := pullflags.NoInstaller
 
 	defer func() {
 		pullflags.TempDir = originalTempDir
@@ -1241,6 +1242,7 @@ func TestPullFunction(t *testing.T) {
 		pullflags.NoPlatform = originalNoPlatform
 		pullflags.NoSecurityDB = originalNoSecurityDB
 		pullflags.NoModules = originalNoModules
+		pullflags.NoInstaller = originalNoInstaller
 	}()
 
 	// Set test values to skip actual operations
@@ -1250,6 +1252,7 @@ func TestPullFunction(t *testing.T) {
 	pullflags.NoPlatform = true
 	pullflags.NoSecurityDB = true
 	pullflags.NoModules = true
+	pullflags.NoInstaller = true
 
 	cmd := &cobra.Command{}
 	err := pull(cmd, []string{})
