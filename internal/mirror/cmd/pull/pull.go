@@ -241,7 +241,8 @@ func (p *Puller) Execute(ctx context.Context) error {
 	}
 
 	var c registry.Client
-	c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+	repo, edition := registryservice.GetEditionFromRegistryPath(p.params.DeckhouseRegistryRepo)
+	c = regclient.NewClientWithOptions(repo, clientOpts)
 
 	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
 		c = stub.NewRegistryClientStub()
@@ -259,13 +260,15 @@ func (p *Puller) Execute(ctx context.Context) error {
 	}
 
 	svc := mirror.NewPullService(
-		registryservice.NewService(c, logger),
+		registryservice.NewService(c, edition, logger),
 		pullflags.TempDir,
 		pullflags.DeckhouseTag,
 		&mirror.PullServiceOptions{
 			SkipPlatform:    pullflags.NoPlatform,
 			SkipSecurity:    pullflags.NoSecurityDB,
 			SkipModules:     pullflags.NoModules,
+			SkipInstaller:   pullflags.NoInstaller,
+			InstallerTag:    pullflags.InstallerTag,
 			OnlyExtraImages: pullflags.OnlyExtraImages,
 			IgnoreSuspend:   pullflags.IgnoreSuspend,
 			ModuleFilter:    filter,
