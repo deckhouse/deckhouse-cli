@@ -26,7 +26,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/platform"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/security"
-	libmodules "github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
@@ -48,7 +47,7 @@ type PullServiceOptions struct {
 	// IgnoreSuspend allows mirroring even if release channels are suspended
 	IgnoreSuspend bool
 	// ModuleFilter is the filter for module selection (whitelist/blacklist)
-	ModuleFilter *libmodules.Filter
+	ModuleFilter *modules.Filter
 	// BundleDir is the directory to store the bundle
 	BundleDir string
 	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
