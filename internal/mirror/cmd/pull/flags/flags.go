@@ -45,6 +45,7 @@ var (
 	SinceVersion       *semver.Version
 
 	DeckhouseTag string
+	InstallerTag string
 
 	ModulesPathSuffix string
 	ModulesWhitelist  []string
@@ -103,6 +104,12 @@ func AddFlags(flagSet *pflag.FlagSet) {
 		"deckhouse-tag",
 		"",
 		"Specific Deckhouse build tag to pull. Conflicts with --since-version. If registry contains release channel image for specified tag, all release channels in the bundle will be pointed to it.",
+	)
+	flagSet.StringVar(
+		&InstallerTag,
+		"installer-tag",
+		"latest",
+		"Specific Deckhouse installer build tag to pull. If not specified, the latest tag for the installer will be pulled from the registry path.",
 	)
 	flagSet.StringArrayVarP(
 		&ModulesWhitelist,

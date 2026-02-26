@@ -293,6 +293,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 				SkipSecurity:    pullflags.NoSecurityDB,
 				SkipModules:     pullflags.NoModules,
 				SkipInstaller:   pullflags.NoInstaller,
+				InstallerTag:    pullflags.InstallerTag,
 				OnlyExtraImages: pullflags.OnlyExtraImages,
 				IgnoreSuspend:   pullflags.IgnoreSuspend,
 				ModuleFilter:    filter,

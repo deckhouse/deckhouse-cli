@@ -41,6 +41,8 @@ type PullServiceOptions struct {
 	SkipModules bool
 	// SkipInstaller skips pulling installer images
 	SkipInstaller bool
+	// InstallerTag is the tag for the installer image
+	InstallerTag string
 	// OnlyExtraImages pulls only extra images for modules (without main module images)
 	OnlyExtraImages bool
 	// IgnoreSuspend allows mirroring even if release channels are suspended
@@ -125,7 +127,7 @@ func NewPullService(
 			registryService,
 			tmpDir,
 			&installer.Options{
-				TargetTag:       targetTag,
+				TargetTag:       options.InstallerTag,
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
 			},
