@@ -160,15 +160,14 @@ func formatModules(modules []CNIModule) string {
 		phase := module.Phase
 		enabled := module.Enabled
 		ready := module.Ready
-		sb.WriteString(fmt.Sprintf("%s %-18s %-8s %-10s %-12s %-8s %-8s\n",
+		fmt.Fprintf(&sb, "%s %-18s %-8s %-10s %-12s %-8s %-8s\n",
 			yellow(prefix),
 			name,
 			weight,
 			source,
 			phase,
 			enabled,
-			ready,
-		))
+			ready)
 	}
 	return sb.String()
 }

@@ -127,14 +127,12 @@ func formatMasterNodes(nodes []corev1.Node) string {
 			prefix = "└"
 		}
 		nodeName := truncateName(s.Name, nameColWidth)
-		sb.WriteString(fmt.Sprintf(
-			"%s %-*s %-*s %-*s %s\n",
+		fmt.Fprintf(&sb, "%s %-*s %-*s %-*s %s\n",
 			yellow(prefix),
 			nameColWidth, nodeName,
 			statusColWidth, s.Status,
 			versionColWidth, s.Version,
-			s.IPAddress,
-		))
+			s.IPAddress)
 	}
 
 	return sb.String()
