@@ -71,6 +71,8 @@ d8 mirror pull <images-bundle-path> [flags]
 | `--no-security-db` | Do not pull security databases into bundle |
 | `--no-modules` | Do not pull Deckhouse modules into bundle |
 | `--only-extra-images` | Pull only extra images for modules (security databases, scanners, etc.) without main module images |
+| `--no-installer` | Do not pull Deckhouse installer into bundle |
+| `--installer-tag` | Specific Deckhouse installer build tag to pull. |
 
 #### Bundle Options
 
