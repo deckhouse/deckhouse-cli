@@ -61,7 +61,7 @@ containing specific platform releases and it's modules,
 to be pushed into the air-gapped container registry at a later time.
 
 For more information on how to use it, consult the docs at 
-https://deckhouse.io/products/kubernetes-platform/documentation/v1/deckhouse-faq.html#manually-uploading-images-to-an-air-gapped-registry
+https://deckhouse.io/products/kubernetes-platform/documentation/latest/installing/#manual-loading-of-dkp-images-and-vulnerability-db-into-a-private-registry
 
 Additional configuration options for the d8 mirror family of commands are available as environment variables:
 
@@ -156,6 +156,7 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 		SkipPlatform:          pullflags.NoPlatform,
 		SkipSecurityDatabases: pullflags.NoSecurityDB,
 		SkipModules:           pullflags.NoModules,
+		SkipInstaller:         pullflags.NoInstaller,
 		OnlyExtraImages:       pullflags.OnlyExtraImages,
 		IgnoreSuspend:         pullflags.IgnoreSuspend,
 		DeckhouseTag:          pullflags.DeckhouseTag,
@@ -240,7 +241,8 @@ func (p *Puller) Execute(ctx context.Context) error {
 	}
 
 	var c registry.Client
-	c = regclient.NewClientWithOptions(p.params.DeckhouseRegistryRepo, clientOpts)
+	repo, edition := registryservice.GetEditionFromRegistryPath(p.params.DeckhouseRegistryRepo)
+	c = regclient.NewClientWithOptions(repo, clientOpts)
 
 	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
 		c = stub.NewRegistryClientStub()
@@ -258,13 +260,15 @@ func (p *Puller) Execute(ctx context.Context) error {
 	}
 
 	svc := mirror.NewPullService(
-		registryservice.NewService(c, logger),
+		registryservice.NewService(c, edition, logger),
 		pullflags.TempDir,
 		pullflags.DeckhouseTag,
 		&mirror.PullServiceOptions{
 			SkipPlatform:    pullflags.NoPlatform,
 			SkipSecurity:    pullflags.NoSecurityDB,
 			SkipModules:     pullflags.NoModules,
+			SkipInstaller:   pullflags.NoInstaller,
+			InstallerTag:    pullflags.InstallerTag,
 			OnlyExtraImages: pullflags.OnlyExtraImages,
 			IgnoreSuspend:   pullflags.IgnoreSuspend,
 			ModuleFilter:    filter,

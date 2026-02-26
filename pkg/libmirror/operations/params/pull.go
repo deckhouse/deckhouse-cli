@@ -28,6 +28,7 @@ type PullParams struct {
 	SkipPlatform          bool  // --no-platform
 	SkipSecurityDatabases bool  // --no-security-db
 	SkipModules           bool  // --no-modules
+	SkipInstaller         bool  // --no-installer
 	OnlyExtraImages       bool  // --only-extra-images
 	IgnoreSuspend         bool  // --ignore-suspend
 	BundleChunkSize       int64 // Plain bytes

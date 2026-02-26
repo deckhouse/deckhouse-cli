@@ -38,6 +38,7 @@ func (pc *PluginsCommand) InitPluginServices() {
 	// - Full path: "registry.deckhouse.io/deckhouse/ee"
 	sourceRepo := d8flags.SourceRegistryRepo
 	registryHost := sourceRepo
+	registryPath, edition := service.GetEditionFromRegistryPath(sourceRepo)
 
 	// If it's just a hostname (no slashes), use it directly
 	// Otherwise parse to extract the hostname
@@ -59,7 +60,7 @@ func (pc *PluginsCommand) InitPluginServices() {
 		slog.Bool("tls_skip_verify", d8flags.TLSSkipVerify))
 
 	// Create base client with registry host only
-	pc.pluginRegistryClient = client.NewClientWithOptions(sourceRepo, &client.Options{
+	pc.pluginRegistryClient = client.NewClientWithOptions(registryPath, &client.Options{
 		Auth:          auth,
 		Insecure:      d8flags.Insecure,
 		TLSSkipVerify: d8flags.TLSSkipVerify,
@@ -67,10 +68,11 @@ func (pc *PluginsCommand) InitPluginServices() {
 	})
 
 	pc.logger.Debug("Creating plugin service with scoped client",
-		slog.String("path", sourceRepo))
+		slog.String("path", registryPath))
 
 	registryService := service.NewService(
 		pc.pluginRegistryClient,
+		edition,
 		pc.logger.Named("registry-service"),
 	)
 

@@ -45,6 +45,7 @@ var (
 	SinceVersion       *semver.Version
 
 	DeckhouseTag string
+	InstallerTag string
 
 	ModulesPathSuffix string
 	ModulesWhitelist  []string
@@ -62,6 +63,7 @@ var (
 	NoPlatform      bool
 	NoSecurityDB    bool
 	NoModules       bool
+	NoInstaller     bool
 	OnlyExtraImages bool
 )
 
@@ -102,6 +104,12 @@ func AddFlags(flagSet *pflag.FlagSet) {
 		"deckhouse-tag",
 		"",
 		"Specific Deckhouse build tag to pull. Conflicts with --since-version. If registry contains release channel image for specified tag, all release channels in the bundle will be pointed to it.",
+	)
+	flagSet.StringVar(
+		&InstallerTag,
+		"installer-tag",
+		"latest",
+		"Specific Deckhouse installer build tag to pull. If not specified, the latest tag for the installer will be pulled from the registry path.",
 	)
 	flagSet.StringArrayVarP(
 		&ModulesWhitelist,
@@ -185,6 +193,12 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		"no-modules",
 		false,
 		"Do not pull Deckhouse modules into bundle.",
+	)
+	flagSet.BoolVar(
+		&NoInstaller,
+		"no-installer",
+		false,
+		"Do not pull Deckhouse installer into bundle.",
 	)
 	flagSet.BoolVar(
 		&OnlyExtraImages,

@@ -62,7 +62,7 @@ const pushLong = `Upload Deckhouse Kubernetes Platform distribution bundle to th
 This command pushes the Deckhouse Kubernetes Platform distribution into the specified container registry.
 
 For more information on how to use it, consult the docs at 
-https://deckhouse.io/products/kubernetes-platform/documentation/v1/deckhouse-faq.html#manually-uploading-images-to-an-air-gapped-registry
+https://deckhouse.io/products/kubernetes-platform/documentation/latest/installing/#manual-loading-of-dkp-images-and-vulnerability-db-into-a-private-registry
 
 Additional configuration options for the d8 mirror family of commands are available as environment variables:
 
