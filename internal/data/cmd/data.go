@@ -18,12 +18,12 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 
 	"github.com/spf13/cobra"
 
-	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	deCreate "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/create"
 	deDelete "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/delete"
 	deDownload "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/cmd/download"
@@ -35,13 +35,6 @@ import (
 
 const (
 	cmdName = "data"
-)
-
-var (
-	exportCreateRun   = deCreate.Run
-	exportListRun     = deList.Run
-	exportDownloadRun = deDownload.Run
-	exportDeleteRun   = deDelete.Run
 )
 
 func NewCommand() *cobra.Command {
@@ -87,60 +80,38 @@ func NewCommand() *cobra.Command {
 		diUpload.NewCommand(ctx, logger),
 	)
 
-	// TODO remove this section later
-	// Backward-compat: `d8 data create` maps to `d8 data export create` with deprecation warning.
+	// TODO: remove deprecated commands after migration period
 	deprecatedCreate := &cobra.Command{
-		Use:   "create [flags] data_export_name volume_type/volume_name",
-		Short: "Deprecated: use 'd8 data export create'",
+		Use:    "create",
+		Hidden: true,
 		RunE: func(c *cobra.Command, args []string) error {
-			c.Println("WARNING: 'd8 data create' is deprecated and will be removed. Use 'd8 data export create'.")
-			return exportCreateRun(ctx, logger, c, args)
+			return fmt.Errorf("'d8 data create' has been removed, use 'd8 data export create'")
 		},
 	}
-	deprecatedCreate.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
-	deprecatedCreate.Flags().String("ttl", "2m", "Time to live")
-	deprecatedCreate.Flags().Bool("publish", false, "Provide access outside of cluster")
 
-	// TODO remove this section later
-	// Backward-compat: `d8 data list` -> export list (deprecated)
 	deprecatedList := &cobra.Command{
-		Use:   "list [flags] data_export_name [/path/]",
-		Short: "Deprecated: use 'd8 data export list'",
+		Use:    "list",
+		Hidden: true,
 		RunE: func(c *cobra.Command, args []string) error {
-			c.Println("WARNING: 'd8 data list' is deprecated and will be removed. Use 'd8 data export list'.")
-			return exportListRun(ctx, logger, c, args)
+			return fmt.Errorf("'d8 data list' has been removed, use 'd8 data export list'")
 		},
 	}
-	deprecatedList.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
-	deprecatedList.Flags().Bool("publish", false, "Provide access outside of cluster")
-	deprecatedList.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
 
-	// TODO remove this section later
-	// Backward-compat: `d8 data download` -> export download (deprecated)
 	deprecatedDownload := &cobra.Command{
-		Use:   "download [flags] [KIND/]data_export_name [path/file.ext]",
-		Short: "Deprecated: use 'd8 data export download'",
+		Use:    "download",
+		Hidden: true,
 		RunE: func(c *cobra.Command, args []string) error {
-			c.Println("WARNING: 'd8 data download' is deprecated and will be removed. Use 'd8 data export download'.")
-			return exportDownloadRun(ctx, logger, c, args)
+			return fmt.Errorf("'d8 data download' has been removed, use 'd8 data export download'")
 		},
 	}
-	deprecatedDownload.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
-	deprecatedDownload.Flags().StringP("output", "o", "", "file to save data (default: same as resource)")
-	deprecatedDownload.Flags().Bool("publish", false, "Provide access outside of cluster")
-	deprecatedDownload.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
 
-	// TODO remove this section later
-	// Backward-compat: `d8 data delete` -> export delete (deprecated)
 	deprecatedDelete := &cobra.Command{
-		Use:   "delete [flags] data_export_name",
-		Short: "Deprecated: use 'd8 data export delete'",
+		Use:    "delete",
+		Hidden: true,
 		RunE: func(c *cobra.Command, args []string) error {
-			c.Println("WARNING: 'd8 data delete' is deprecated and will be removed. Use 'd8 data export delete'.")
-			return exportDeleteRun(ctx, logger, c, args)
+			return fmt.Errorf("'d8 data delete' has been removed, use 'd8 data export delete'")
 		},
 	}
-	deprecatedDelete.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
 
 	root.AddCommand(exportCmd, importCmd, deprecatedCreate, deprecatedList, deprecatedDownload, deprecatedDelete)
 
