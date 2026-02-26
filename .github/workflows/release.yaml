@@ -202,3 +202,69 @@ jobs:
       - name: Run lint
         run: |
           task lint:check
+
+
+  pr-build:
+    if: github.event_name == 'pull_request'
+    runs-on: [self-hosted, regular]
+    container:
+      image: ubuntu:22.04
+    name: Build for PR
+    steps:
+      - name: Install dependency for linux-amd64 dist
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc dnsutils
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # To use `git describe --tags`
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false # Cache download takes longer that a build from scratch
+
+      - name: Setup Task
+        uses: arduino/setup-task@v2
+
+      - name: Start ssh-agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: |
+            ${{secrets.SOURCE_REPO_SSH_KEY}}
+            
+      - name: Add ssh_known_hosts
+        run: |
+          echo "::add-mask::$PRIVATE_REPO"
+          IPS=$(nslookup "$PRIVATE_REPO" | awk '/^Address: / { print $2 }')
+          for IP in $IPS; do
+            echo "::add-mask::$IP"
+          done
+          mkdir -p /root/.ssh
+          touch /root/.ssh/known_hosts
+          HOST_KEYS=$(ssh-keyscan -H "$PRIVATE_REPO" 2>/dev/null)
+          echo "$HOST_KEYS" | while IFS= read -r KEY_LINE; do
+            CONSTANT_PART=$(echo "$KEY_LINE" | awk '{print $2, $3}')
+            if ! grep -q "$CONSTANT_PART" /root/.ssh/known_hosts; then
+              echo "$KEY_LINE" >> /root/.ssh/known_hosts
+            fi
+          done
+
+      - name: Setup git
+        run: |
+          git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
+          git config --global --add safe.directory '*'
+
+      - name: Build and package
+        run: task build-and-package
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deckhouse-cli-pr-build-${{ github.run_id }}.tar.gz
+          path: dist/**/*.tar.gz
+          retention-days: 1
+          compression-level: 9
