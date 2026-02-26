@@ -6,7 +6,7 @@ The `d8 mirror` command facilitates the distribution of Deckhouse Kubernetes Pla
 
 This functionality is exclusively available to users holding a valid license for any commercial version of the Deckhouse Kubernetes Platform.
 
-**Official Documentation:** https://deckhouse.io/products/kubernetes-platform/documentation/v1/deckhouse-faq.html#manually-uploading-images-to-an-air-gapped-registry
+**Official Documentation:** https://deckhouse.io/products/kubernetes-platform/documentation/latest/installing/#manual-loading-of-dkp-images-and-vulnerability-db-into-a-private-registry
 
 ## License Note
 
@@ -423,7 +423,7 @@ Internally, the tool uses OCI-compliant image layouts for organizing container i
 ## Additional Resources
 
 - [Deckhouse Official Documentation](https://deckhouse.io/products/kubernetes-platform/documentation/)
-- [Air-Gapped Installation Guide](https://deckhouse.io/products/kubernetes-platform/documentation/v1/deckhouse-faq.html#manually-uploading-images-to-an-air-gapped-registry)
+- [Air-Gapped Installation Guide](https://deckhouse.io/products/kubernetes-platform/guides/airgapped-update.html)
 - [Deckhouse Licensing](https://deckhouse.io/products/kubernetes-platform/pricing.html)
 
 ---
