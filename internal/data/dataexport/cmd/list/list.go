@@ -162,7 +162,6 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	defer cancel()
 
 	namespace, _ := cmd.Flags().GetString("namespace")
-	publish, _ := cmd.Flags().GetBool("publish")
 	ttl, _ := cmd.Flags().GetString("ttl")
 
 	dataName, srcPath, err := parseArgs(args)
@@ -181,6 +180,17 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	if err != nil {
 		return err
 	}
+
+	publishFlag, err := dataio.ParsePublishFlag(cmd.Flags())
+	if err != nil {
+		return err
+	}
+
+	publish, err := dataio.ResolvePublish(ctx, publishFlag, rtClient, sClient, log)
+	if err != nil {
+		return err
+	}
+
 	deName, err := util.CreateDataExporterIfNeededFunc(ctx, log, dataName, namespace, publish, ttl, rtClient)
 	if err != nil {
 		return err
