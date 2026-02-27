@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 const (
@@ -23,18 +25,29 @@ var (
 	ErrUnsupportedVolumeMode = errors.New("invalid volume mode")
 )
 
-func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
-	inputChan := make(chan string)
-	defer close(inputChan)
+const (
+	defaultOnNonTTY   = false
+	defaultInputOnErr = "no"
+)
 
+func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
+	// In non-interactive sessions (pipe/no TTY), do not prompt and use safe default.
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return defaultOnNonTTY
+	}
+
+	// Buffered channel avoids blocking send if timeout branch wins first.
+	inputChan := make(chan string, 1)
 	go func() {
 		reader := bufio.NewReader(os.Stdin)
 		for {
 			fmt.Printf("%s: ", prompt)
 			input, err := reader.ReadString('\n')
 			if err != nil {
-				fmt.Println("Error reading input, please try again.")
-				continue
+				// Read errors (EOF/closed stdin/etc.) can repeat forever; fall back once and exit.
+				fmt.Println("Error reading input, chosen default value: no.")
+				inputChan <- defaultInputOnErr
+				return
 			}
 
 			input = strings.ToLower(strings.TrimSpace(input))
@@ -42,6 +55,7 @@ func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 				inputChan <- strings.TrimSpace(input)
 				return
 			}
+			// Retry only for invalid user input.
 			fmt.Println("Invalid input. Please press 'y' or 'n'.")
 		}
 	}()
