@@ -40,6 +40,7 @@ D8 provides comprehensive cluster management capabilities:
 | [**backup**](internal/backup/) | Backup operations | ETCD snapshots, configuration backups, data export |
 | [**mirror**](internal/mirror/) | Module mirroring | Registry operations, image synchronization, air-gapped deployments |
 | [**system**](internal/system/) | System diagnostics | Debug info collection, logs analysis, troubleshooting |
+| **user-operation** | Local user operations | Request `UserOperation` in `user-authn` (ResetPassword/Reset2FA/Lock/Unlock) |
 
 ### 🚀 Module Management
 
@@ -136,6 +137,27 @@ go install github.com/deckhouse/deckhouse-cli@main
 
 ```bash
 d8 --version
+```
+
+---
+
+## 🧰 User management (user-authn)
+
+Manage Dex static users via `UserOperation` custom resources.
+
+```bash
+# Reset user's 2FA (TOTP)
+d8 user reset2fa test-user --timeout 5m
+
+# Lock user for 10 minutes
+d8 user lock test-user 10m --timeout 5m
+
+# Unlock user
+d8 user unlock test-user --timeout 5m
+
+# Reset password (bcrypt hash is required)
+HASH="$(echo -n 'Test12345!' | htpasswd -BinC 10 \"\" | cut -d: -f2 | tr -d '\n')"
+d8 user reset-password test-user "$HASH" --timeout 5m
 ```
 
 ---
