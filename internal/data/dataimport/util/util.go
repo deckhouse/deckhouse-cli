@@ -95,9 +95,9 @@ func CreateDataImport(
 
 func GetDataImportWithRestart(
 	ctx context.Context,
-	log *slog.Logger,
 	diName, namespace string,
 	rtClient ctrlrtclient.Client,
+	log *slog.Logger,
 ) (*v1alpha1.DataImport, error) {
 	for i := 0; ; i++ {
 		if err := ctx.Err(); err != nil {
@@ -188,7 +188,7 @@ func PrepareUpload(
 		return "", "", nil, err
 	}
 
-	diObj, err := GetDataImportWithRestart(ctx, log, diName, namespace, rtClient)
+	diObj, err := GetDataImportWithRestart(ctx, diName, namespace, rtClient, log)
 	if err != nil {
 		return "", "", nil, err
 	}

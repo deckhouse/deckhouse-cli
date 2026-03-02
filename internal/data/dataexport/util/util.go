@@ -67,7 +67,7 @@ func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlr
 	return deObj, nil
 }
 
-func GetDataExportWithRestart(ctx context.Context, log *slog.Logger, deName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
+func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtClient ctrlrtclient.Client, log *slog.Logger) (*v1alpha1.DataExport, error) {
 	deObj := &v1alpha1.DataExport{}
 
 	for i := 0; ; i++ {
@@ -241,7 +241,7 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 	var podURL, volumeMode, internalCAData string
 
 	log.Info("Waiting for DataExport to be ready", slog.String("name", deName), slog.String("namespace", namespace))
-	deObj, err := GetDataExportWithRestart(ctx, log, deName, namespace, rtClient)
+	deObj, err := GetDataExportWithRestart(ctx, deName, namespace, rtClient, log)
 	if err != nil {
 		return "", "", "", err
 	}
