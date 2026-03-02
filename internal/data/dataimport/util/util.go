@@ -174,10 +174,10 @@ func GetDataImportWithRestart(
 
 func PrepareUpload(
 	ctx context.Context,
-	log *slog.Logger,
 	diName, namespace string,
 	publish bool,
 	sClient *safeClient.SafeClient,
+	log *slog.Logger,
 ) ( /*url*/ string /*volumeMode*/, string /*subClient*/, *safeClient.SafeClient, error) {
 	var url, volumeMode string
 	var subClient *safeClient.SafeClient
