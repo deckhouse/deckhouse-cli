@@ -42,25 +42,6 @@ const (
 	cmdName = "download"
 )
 
-type firstErrState struct {
-	mu  sync.Mutex
-	err error
-}
-
-// Set keeps only the first non-nil error from concurrent workers.
-func (s *firstErrState) Set(srcPath, subPath string, subErr error) {
-	if subErr == nil {
-		return
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.err == nil {
-		s.err = fmt.Errorf("download %s: %w", filepath.Join(srcPath, subPath), subErr)
-	}
-}
-
 func cmdExamples() string {
 	resp := []string{
 		"  # Start exporter + Download + Stop for Filesystem",
@@ -182,7 +163,25 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 
 	if srcPath != "" && srcPath[len(srcPath)-1:] == "/" {
 		var wg sync.WaitGroup
-		var firstErr firstErrState
+		var mu sync.Mutex
+		var firstErr error
+
+		// Keep only the first non-nil sub-download error.
+		setFirstErr := func(subPath string, subErr error) {
+			if subErr == nil {
+				return
+			}
+			mu.Lock()
+			if firstErr == nil {
+				firstErr = fmt.Errorf("download %s: %w", filepath.Join(srcPath, subPath), subErr)
+			}
+			mu.Unlock()
+		}
+
+		downloadOne := func(subPath string) {
+			subErr := recursiveDownload(ctx, sClient, log, sem, url, srcPath+subPath, filepath.Join(dstPath, subPath))
+			setFirstErr(subPath, subErr)
+		}
 
 		err = forRespItems(resp.Body, func(item *dirItem) error {
 			subPath := item.Name
@@ -203,12 +202,10 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 						<-sem
 						wg.Done()
 					}()
-					subErr := recursiveDownload(ctx, sClient, log, sem, url, srcPath+sp, filepath.Join(dstPath, sp))
-					firstErr.Set(srcPath, sp, subErr)
+					downloadOne(sp)
 				}(subPath)
 			default:
-				subErr := recursiveDownload(ctx, sClient, log, sem, url, srcPath+subPath, filepath.Join(dstPath, subPath))
-				firstErr.Set(srcPath, subPath, subErr)
+				downloadOne(subPath)
 			}
 
 			return nil
@@ -218,7 +215,7 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 		}
 
 		wg.Wait()
-		return firstErr.err
+		return firstErr
 	}
 	if dstPath != "" {
 		// Create out file
