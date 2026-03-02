@@ -61,12 +61,6 @@ func (s *firstErrState) Set(srcPath, subPath string, subErr error) {
 	}
 }
 
-func (s *firstErrState) Err() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.err
-}
-
 func cmdExamples() string {
 	resp := []string{
 		"  # Start exporter + Download + Stop for Filesystem",
@@ -205,7 +199,10 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 			case sem <- struct{}{}:
 				wg.Add(1)
 				go func(sp string) {
-					defer func() { <-sem; wg.Done() }()
+					defer func() {
+						<-sem
+						wg.Done()
+					}()
 					subErr := recursiveDownload(ctx, sClient, log, sem, url, srcPath+sp, filepath.Join(dstPath, sp))
 					firstErr.Set(srcPath, sp, subErr)
 				}(subPath)
@@ -221,7 +218,7 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 		}
 
 		wg.Wait()
-		return firstErr.Err()
+		return firstErr.err
 	}
 	if dstPath != "" {
 		// Create out file
