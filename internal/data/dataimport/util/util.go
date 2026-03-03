@@ -34,7 +34,9 @@ func GetDataImport(ctx context.Context, diName, namespace string, rtClient ctrlr
 	for _, condition := range diObj.Status.Conditions {
 		if condition.Type == "Ready" {
 			if condition.Status != "True" {
-				return nil, fmt.Errorf("DataImport %s/%s is not Ready", diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name)
+				return nil, fmt.Errorf("DataImport %s/%s is not Ready: %s (%s)",
+					diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name,
+					condition.Message, condition.Reason)
 			}
 			break
 		}
@@ -95,6 +97,7 @@ func GetDataImportWithRestart(
 	ctx context.Context,
 	diName, namespace string,
 	rtClient ctrlrtclient.Client,
+	log *slog.Logger,
 ) (*v1alpha1.DataImport, error) {
 	for i := 0; ; i++ {
 		if err := ctx.Err(); err != nil {
@@ -131,7 +134,9 @@ func GetDataImportWithRestart(
 			}
 			if condition.Type == "Ready" {
 				if condition.Status != "True" {
-					notReadyErr = fmt.Errorf("DataImport %s/%s is not Ready", diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name)
+					notReadyErr = fmt.Errorf("DataImport %s/%s is not Ready: %s (%s)",
+						diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name,
+						condition.Message, condition.Reason)
 				}
 			}
 		}
@@ -156,16 +161,23 @@ func GetDataImportWithRestart(
 		if i > maxRetryAttempts {
 			return nil, notReadyErr
 		}
+		// Every fifth attempt we output it to the terminal so that the user can see the error.
+		if i > 0 && i%5 == 0 {
+			log.Info("Still waiting for DataImport to be ready",
+				slog.String("name", diName),
+				slog.String("status", notReadyErr.Error()),
+				slog.Int("attempt", i))
+		}
 		time.Sleep(retryInterval * time.Second)
 	}
 }
 
 func PrepareUpload(
 	ctx context.Context,
-	_ *slog.Logger,
 	diName, namespace string,
 	publish bool,
 	sClient *safeClient.SafeClient,
+	log *slog.Logger,
 ) ( /*url*/ string /*volumeMode*/, string /*subClient*/, *safeClient.SafeClient, error) {
 	var url, volumeMode string
 	var subClient *safeClient.SafeClient
@@ -176,7 +188,7 @@ func PrepareUpload(
 		return "", "", nil, err
 	}
 
-	diObj, err := GetDataImportWithRestart(ctx, diName, namespace, rtClient)
+	diObj, err := GetDataImportWithRestart(ctx, diName, namespace, rtClient, log)
 	if err != nil {
 		return "", "", nil, err
 	}
