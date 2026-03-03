@@ -917,13 +917,18 @@ func (pc *PluginsCommand) validateRequirements(plugin *internal.Plugin) (FailedC
 
 // check that installing version not make conflict with existing plugins requirements
 func (pc *PluginsCommand) validatePluginConflicts(plugin *internal.Plugin) error {
-	plugins, err := os.ReadDir(path.Join(pc.pluginDirectory, "plugins"))
+	contractDir, err := os.ReadDir(path.Join(pc.pluginDirectory, "cache", "contracts"))
+	// if no plugins installed, nothing to conflict
+	if err != nil && errors.Is(err, os.ErrNotExist) {
+		pc.logger.Debug("failed to read contract directory", slog.String("error", err.Error()))
+		return nil
+	}
 	if err != nil {
-		return fmt.Errorf("failed to read plugins directory: %w", err)
+		return fmt.Errorf("failed to read contract directory: %w", err)
 	}
 
-	for _, pluginDir := range plugins {
-		pluginName := pluginDir.Name()
+	for _, contractFile := range contractDir {
+		pluginName := strings.TrimSuffix(contractFile.Name(), ".json")
 
 		contract, err := pc.getInstalledPluginContract(pluginName)
 		if err != nil {
