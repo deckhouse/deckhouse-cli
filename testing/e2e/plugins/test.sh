@@ -10,8 +10,8 @@
 # setup
 export DECKHOUSE_CLI_PATH="$(PWD)/e2e.test"
 export DECKHOUSE_REGISTRY_REPO="dev-registry.deckhouse.io/deckhouse/foxtrot"
-export D8_MIRROR_SOURCE_LOGIN="license-token"
-export D8_MIRROR_SOURCE_PASSWORD=$1
+export D8_MIRROR_SOURCE_LOGIN=$1
+export D8_MIRROR_SOURCE_PASSWORD=$2
 
 # cleanup 
 cleanup_on_error() {
