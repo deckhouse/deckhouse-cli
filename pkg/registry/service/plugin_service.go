@@ -320,7 +320,7 @@ func (s *PluginService) ListPlugins(ctx context.Context) ([]string, error) {
 
 	// The client is already scoped to "deckhouse/ee/modules"
 	// ListRepositories will return the plugin names directly (tags under that path)
-	pluginNames, err := s.client.ListRepositories(ctx)
+	pluginNames, err := s.client.ListTags(ctx)
 	if err != nil {
 		s.log.Warn("Failed to list repositories from registry. The registry may not allow catalog access or you may need special permissions.",
 			slog.String("error", err.Error()))
