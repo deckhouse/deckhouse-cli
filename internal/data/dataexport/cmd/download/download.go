@@ -166,6 +166,23 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 		var mu sync.Mutex
 		var firstErr error
 
+		// Keep only the first non-nil sub-download error.
+		setFirstErr := func(subPath string, subErr error) {
+			if subErr == nil {
+				return
+			}
+			mu.Lock()
+			if firstErr == nil {
+				firstErr = fmt.Errorf("download %s: %w", filepath.Join(srcPath, subPath), subErr)
+			}
+			mu.Unlock()
+		}
+
+		downloadOne := func(subPath string) {
+			subErr := recursiveDownload(ctx, sClient, log, sem, url, srcPath+subPath, filepath.Join(dstPath, subPath))
+			setFirstErr(subPath, subErr)
+		}
+
 		err = forRespItems(resp.Body, func(item *dirItem) error {
 			subPath := item.Name
 			if item.Type == "dir" {
@@ -175,19 +192,21 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 				}
 				subPath += "/"
 			}
-			sem <- struct{}{}
-			wg.Add(1)
-			go func(sp string) {
-				defer func() { <-sem; wg.Done() }()
-				subErr := recursiveDownload(ctx, sClient, log, sem, url, srcPath+sp, filepath.Join(dstPath, sp))
-				if subErr != nil {
-					mu.Lock()
-					if firstErr == nil {
-						firstErr = fmt.Errorf("Download %s: %w", filepath.Join(srcPath, sp), subErr)
-					}
-					mu.Unlock()
-				}
-			}(subPath)
+			// Run subtask in a goroutine when semaphore capacity is available;
+			// otherwise process inline to avoid blocking on sem (prevents deadlock on wide trees).
+			select {
+			case sem <- struct{}{}:
+				wg.Add(1)
+				go func(sp string) {
+					defer func() {
+						<-sem
+						wg.Done()
+					}()
+					downloadOne(sp)
+				}(subPath)
+			default:
+				downloadOne(subPath)
+			}
 
 			return nil
 		})
