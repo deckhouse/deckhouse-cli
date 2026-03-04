@@ -104,7 +104,9 @@ func NewService(
 func (svc *Service) PullInstaller(ctx context.Context) error {
 	err := svc.validateInstallerAccess(ctx)
 	if err != nil {
-		return fmt.Errorf("validate installer access: %w", err)
+		svc.userLogger.Warnf("installer access: %v", err)
+
+		return nil
 	}
 
 	tagsToMirror := svc.findTagsToMirror(ctx)
