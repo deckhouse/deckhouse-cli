@@ -237,7 +237,11 @@ func (p *Puller) Execute(ctx context.Context) error {
 	}
 
 	if p.params.RegistryAuth != nil {
-		clientOpts.Auth = p.params.RegistryAuth
+		if p.params.RegistryAuth != authn.Anonymous {
+			clientOpts.Auth = p.params.RegistryAuth
+		} else {
+			clientOpts.Keychain = authn.DefaultKeychain
+		}
 	}
 
 	var c registry.Client

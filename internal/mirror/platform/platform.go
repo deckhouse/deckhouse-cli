@@ -42,6 +42,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -574,7 +575,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 			releaseChannel, err := svc.layout.DeckhouseReleaseChannel.GetImage(svc.options.TargetTag)
 
 			switch {
-			case errors.Is(err, layouts.ErrImageNotFound):
+			case errors.Is(err, image.ErrImageMetaNotFound):
 				logger.WarnLn("Registry does not contain release channels, release channels images will not be added to bundle")
 				// TODO: remove goto
 				goto sortManifests
