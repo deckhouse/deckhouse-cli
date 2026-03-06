@@ -55,7 +55,7 @@ func TestListFilesystem_OK(t *testing.T) {
 	os.Stdout = w
 
 	cmd := NewCommand(context.TODO(), slog.Default())
-	cmd.SetArgs([]string{"myexport", "/"})
+	cmd.SetArgs([]string{"myexport", "/", "--publish=false"})
 	require.NoError(t, cmd.Execute())
 
 	w.Close()
@@ -92,7 +92,7 @@ func TestListBlock_OK(t *testing.T) {
 	os.Stdout = w
 
 	cmd := NewCommand(context.TODO(), slog.Default())
-	cmd.SetArgs([]string{"myexport"})
+	cmd.SetArgs([]string{"myexport", "--publish=false"})
 	require.NoError(t, cmd.Execute())
 
 	w.Close()
@@ -124,7 +124,8 @@ func TestListFilesystem_NotDir(t *testing.T) {
 	cmd := NewCommand(context.TODO(), slog.Default())
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"myexport", "some/invalid"})
+	cmd.SetArgs([]string{"myexport", "some/invalid", "--publish=false"})
 	err := cmd.Execute()
 	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid source path")
 }
