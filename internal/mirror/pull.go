@@ -22,10 +22,10 @@ import (
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/installer"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/platform"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/security"
-	libmodules "github.com/deckhouse/deckhouse-cli/pkg/libmirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
@@ -38,12 +38,16 @@ type PullServiceOptions struct {
 	SkipSecurity bool
 	// SkipModules skips pulling module images
 	SkipModules bool
+	// SkipInstaller skips pulling installer images
+	SkipInstaller bool
+	// InstallerTag is the tag for the installer image
+	InstallerTag string
 	// OnlyExtraImages pulls only extra images for modules (without main module images)
 	OnlyExtraImages bool
 	// IgnoreSuspend allows mirroring even if release channels are suspended
 	IgnoreSuspend bool
 	// ModuleFilter is the filter for module selection (whitelist/blacklist)
-	ModuleFilter *libmodules.Filter
+	ModuleFilter *modules.Filter
 	// BundleDir is the directory to store the bundle
 	BundleDir string
 	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
@@ -53,9 +57,10 @@ type PullServiceOptions struct {
 type PullService struct {
 	registryService *registryservice.Service
 
-	platformService *platform.Service
-	securityService *security.Service
-	modulesService  *modules.Service
+	platformService  *platform.Service
+	securityService  *security.Service
+	modulesService   *modules.Service
+	installerService *installer.Service
 
 	options *PullServiceOptions
 
@@ -117,6 +122,17 @@ func NewPullService(
 			logger,
 			userLogger,
 		),
+		installerService: installer.NewService(
+			registryService,
+			tmpDir,
+			&installer.Options{
+				TargetTag:       options.InstallerTag,
+				BundleDir:       options.BundleDir,
+				BundleChunkSize: options.BundleChunkSize,
+			},
+			logger,
+			userLogger,
+		),
 
 		options: options,
 
@@ -147,6 +163,13 @@ func (svc *PullService) Pull(ctx context.Context) error {
 		err := svc.modulesService.PullModules(ctx)
 		if err != nil {
 			return fmt.Errorf("pull modules: %w", err)
+		}
+	}
+
+	if !svc.options.SkipInstaller {
+		err := svc.installerService.PullInstaller(ctx)
+		if err != nil {
+			return fmt.Errorf("pull installer: %w", err)
 		}
 	}
 

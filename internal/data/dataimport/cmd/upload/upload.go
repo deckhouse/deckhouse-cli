@@ -112,7 +112,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		}
 	}
 
-	podURL, _, subClient, err := util.PrepareUpload(ctx, log, diName, namespace, publish, httpClient)
+	podURL, _, subClient, err := util.PrepareUpload(ctx, diName, namespace, publish, httpClient, log)
 	if err != nil {
 		return err
 	}

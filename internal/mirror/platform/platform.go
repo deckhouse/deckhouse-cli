@@ -42,6 +42,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -231,7 +232,8 @@ type channelVersions map[string]*semver.Version
 // It collects current versions from all release channels and filters available releases
 // to include only versions that should be mirrored based on the mirroring strategy
 func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string) (*VersionsToMirrorResult, error) {
-	if len(tagsToMirror) > 0 {
+	isTagsMirror := len(tagsToMirror) > 0
+	if isTagsMirror {
 		svc.userLogger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", svc.options.TargetTag)
 	}
 
@@ -240,15 +242,19 @@ func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string)
 
 	// Fetch current versions from all release channels
 	channelVersions, err := svc.fetchReleaseChannelVersions(ctx)
-	if err != nil {
-		return nil, err
+	if err != nil && !errors.Is(err, ErrSomeChannelsFailed) {
+		return nil, fmt.Errorf("failed to fetch release channel versions: %w", err)
+	}
+
+	if errors.Is(err, ErrSomeChannelsFailed) && !isTagsMirror {
+		return nil, fmt.Errorf("failed to fetch some release channel versions: %w", err)
 	}
 
 	// Match channels and versions based on requested tags
 	versions, matchedChannels := svc.matchChannelsToTags(tagsToMirror, channelVersions, parsed.semverVersions)
 
 	// If specific tags requested, return immediately
-	if len(tagsToMirror) > 0 {
+	if isTagsMirror {
 		return &VersionsToMirrorResult{
 			Versions:   deduplicateVersions(versions),
 			Channels:   matchedChannels,
@@ -325,20 +331,28 @@ func (svc *Service) fetchReleaseChannelVersions(ctx context.Context) (channelVer
 	return svc.validateChannelResults(channelResults)
 }
 
+var ErrSomeChannelsFailed = errors.New("some channels failed to fetch")
+
 // validateChannelResults validates channel fetch results and extracts successful versions
 func (svc *Service) validateChannelResults(results map[string]releaseChannelVersionResult) (channelVersions, error) {
 	versions := make(channelVersions, len(results))
-	_, ltsExists := results[internal.LTSChannel]
+
+	someChannelsIsFailed := false
 
 	for channel, result := range results {
-		// If LTS doesn't exist, all other channels must succeed
-		if !ltsExists && result.err != nil {
-			return nil, fmt.Errorf("get %s release version from registry: %w", channel, result.err)
-		}
-
 		if result.err == nil {
 			versions[channel] = result.ver
+
+			continue
 		}
+
+		if result.err != nil {
+			someChannelsIsFailed = true
+		}
+	}
+
+	if someChannelsIsFailed {
+		return versions, ErrSomeChannelsFailed
 	}
 
 	return versions, nil
@@ -561,7 +575,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 			releaseChannel, err := svc.layout.DeckhouseReleaseChannel.GetImage(svc.options.TargetTag)
 
 			switch {
-			case errors.Is(err, layouts.ErrImageNotFound):
+			case errors.Is(err, image.ErrImageMetaNotFound):
 				logger.WarnLn("Registry does not contain release channels, release channels images will not be added to bundle")
 				// TODO: remove goto
 				goto sortManifests

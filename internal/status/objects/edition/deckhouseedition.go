@@ -70,6 +70,6 @@ func formatDeckhouseEdition(info deckhouseEditionInfo) string {
 	var sb strings.Builder
 	yellow := color.New(color.FgYellow).SprintFunc()
 	sb.WriteString(yellow("┌ Deckhouse Edition:\n"))
-	sb.WriteString(fmt.Sprintf("%s %s\n", yellow("└"), info.Edition))
+	fmt.Fprintf(&sb, "%s %s\n", yellow("└"), info.Edition)
 	return sb.String()
 }

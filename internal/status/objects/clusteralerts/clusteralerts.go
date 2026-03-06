@@ -146,12 +146,11 @@ func formatClusterAlerts(alerts []ClusterAlert) string {
 		truncName := truncateName(key.Name, nameColWidth)
 		count := countMap[key]
 
-		sb.WriteString(fmt.Sprintf("%s %-10s %-*s %d\n",
+		fmt.Fprintf(&sb, "%s %-10s %-*s %d\n",
 			yellow(prefix),
 			key.Severity,
 			nameColWidth, truncName,
-			count,
-		))
+			count)
 	}
 
 	return sb.String()

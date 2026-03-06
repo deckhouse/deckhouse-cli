@@ -163,13 +163,13 @@ func formatSettingLine(setting ConfigSetting, indent string, prefixStack []bool,
 
 	// No "children", no arrays: just return the string.
 	if len(setting.Children) == 0 && len(setting.Items) == 0 {
-		sb.WriteString(fmt.Sprintf("%s%s %s: %s\n", prefix, coloredLineOperator, setting.Key, setting.Value))
+		fmt.Fprintf(&sb, "%s%s %s: %s\n", prefix, coloredLineOperator, setting.Key, setting.Value)
 		return sb.String()
 	}
 
 	// Map/Struct (has "children").
 	if len(setting.Children) > 0 {
-		sb.WriteString(fmt.Sprintf("%s%s %s:\n", prefix, coloredLineOperator, setting.Key))
+		fmt.Fprintf(&sb, "%s%s %s:\n", prefix, coloredLineOperator, setting.Key)
 		newPrefixStack := append([]bool{}, prefixStack...)
 		newPrefixStack = append(newPrefixStack, !isLast)
 		for i, child := range setting.Children {
@@ -181,12 +181,12 @@ func formatSettingLine(setting ConfigSetting, indent string, prefixStack []bool,
 	// Array: separate scalar elements and objects.
 	if len(setting.Items) > 0 {
 		allScalars := areAllItemsScalars(setting.Items)
-		sb.WriteString(fmt.Sprintf("%s%s %s:\n", prefix, coloredLineOperator, setting.Key))
+		fmt.Fprintf(&sb, "%s%s %s:\n", prefix, coloredLineOperator, setting.Key)
 		newPrefixStack := append([]bool{}, prefixStack...)
 		newPrefixStack = append(newPrefixStack, !isLast)
 		if allScalars {
 			for i, item := range setting.Items {
-				sb.WriteString(fmt.Sprintf("%s│   %s %s\n", prefix, mapLineOp(i == len(setting.Items)-1), item.Value))
+				fmt.Fprintf(&sb, "%s│   %s %s\n", prefix, mapLineOp(i == len(setting.Items)-1), item.Value)
 			}
 			return sb.String()
 		}
@@ -197,7 +197,7 @@ func formatSettingLine(setting ConfigSetting, indent string, prefixStack []bool,
 				sb.WriteString(formatSettingLine(child, indentForArray, newPrefixStack, j == len(item.Children)-1, level+2))
 			}
 			if len(item.Children) == 0 && item.Value != "" {
-				sb.WriteString(fmt.Sprintf("%s│   %s %s\n", prefix, mapLineOp(itemIsLast), item.Value))
+				fmt.Fprintf(&sb, "%s│   %s %s\n", prefix, mapLineOp(itemIsLast), item.Value)
 			}
 		}
 		return sb.String()

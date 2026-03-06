@@ -125,14 +125,12 @@ func formatDeckhouseReleases(releases []DeckhouseRelease) string {
 		timeAgo := timeutil.AgeAgoStr(release.TransitionTime)
 		message := release.Message
 
-		sb.WriteString(fmt.Sprintf(
-			"%s %-13s %-15s %-21s %s\n",
+		fmt.Fprintf(&sb, "%s %-13s %-15s %-21s %s\n",
 			yellow(prefix),
 			release.Name,
 			release.Phase,
 			timeAgo,
-			message,
-		))
+			message)
 	}
 	return sb.String()
 }

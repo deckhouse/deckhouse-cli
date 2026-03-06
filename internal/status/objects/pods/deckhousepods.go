@@ -115,14 +115,13 @@ func formatDeckhousePods(infor []deckhousePod) string {
 		if i == len(infor)-1 {
 			prefix = "└"
 		}
-		sb.WriteString(fmt.Sprintf("%s%-29s %-8s %-12s %-10d %s\n",
+		fmt.Fprintf(&sb, "%s%-29s %-8s %-12s %-10d %s\n",
 			yellow(prefix+" "),
 			info.Name,
 			info.Ready,
 			info.Status,
 			info.Restarts,
-			info.Age,
-		))
+			info.Age)
 	}
 	return sb.String()
 }
