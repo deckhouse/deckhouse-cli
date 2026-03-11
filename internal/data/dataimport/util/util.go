@@ -97,11 +97,8 @@ func GetDataImportWithRestart(
 	ctx context.Context,
 	diName, namespace string,
 	rtClient ctrlrtclient.Client,
-	publish bool,
 	log *slog.Logger,
 ) (*v1alpha1.DataImport, error) {
-	publishReconciled := false
-
 	for i := 0; ; i++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -110,19 +107,6 @@ func GetDataImportWithRestart(
 		diObj := &v1alpha1.DataImport{}
 		if err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: diName}, diObj); err != nil {
 			return nil, fmt.Errorf("kube Get dataimport with ready: %s", err.Error())
-		}
-
-		// On the first iteration, reconcile Spec.Publish with the resolved value.
-		// If the object was patched, restart the loop to pick up the updated status.
-		if !publishReconciled {
-			patched, err := EnsureDataImportPublish(ctx, diObj, publish, rtClient)
-			if err != nil {
-				return nil, err
-			}
-			publishReconciled = true
-			if patched {
-				continue
-			}
 		}
 
 		var notReadyErr error
@@ -204,7 +188,21 @@ func PrepareUpload(
 		return "", "", nil, err
 	}
 
-	diObj, err := GetDataImportWithRestart(ctx, diName, namespace, rtClient, publish, log)
+	// Fetch the current state so we can reconcile Spec.Publish before waiting.
+	diObj, err := GetDataImport(ctx, diName, namespace, rtClient)
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	// Patch Spec.Publish if the resolved value differs from what the object has.
+	// Must happen before GetDataImportWithRestart so the loop waits for PublicURL
+	// when publish=true.
+	err = EnsureDataImportPublish(ctx, diObj, publish, rtClient)
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	diObj, err = GetDataImportWithRestart(ctx, diName, namespace, rtClient, log)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -262,27 +260,27 @@ func EnsureDataImportPublish(
 	diObj *v1alpha1.DataImport,
 	publish bool,
 	rtClient ctrlrtclient.Client,
-) (bool, error) {
+) error {
 	if !publish {
-		return false, nil
+		return nil
 	}
 
 	if diObj == nil {
-		return false, fmt.Errorf("nil DataImport")
+		return fmt.Errorf("nil DataImport")
 	}
 
 	if diObj.Spec.Publish == publish {
-		return false, nil
+		return nil
 	}
 
 	patch := ctrlrtclient.MergeFrom(diObj.DeepCopy())
 	diObj.Spec.Publish = publish
 
 	if err := rtClient.Patch(ctx, diObj, patch); err != nil {
-		return false, fmt.Errorf("patch DataImport publish: %w", err)
+		return fmt.Errorf("patch DataImport publish: %w", err)
 	}
 
-	return true, nil
+	return nil
 }
 
 func CheckUploadProgress(ctx context.Context, httpClient *safeClient.SafeClient, targetURL string) (int64, error) {

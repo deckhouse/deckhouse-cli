@@ -67,9 +67,8 @@ func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlr
 	return deObj, nil
 }
 
-func GetDataExportWithRestart(ctx context.Context, deName, namespace string, publish bool, rtClient ctrlrtclient.Client, log *slog.Logger) (*v1alpha1.DataExport, error) {
+func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtClient ctrlrtclient.Client, log *slog.Logger) (*v1alpha1.DataExport, error) {
 	deObj := &v1alpha1.DataExport{}
-	publishReconciled := false
 
 	for i := 0; ; i++ {
 		var returnErr error
@@ -78,19 +77,6 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, pub
 		err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: deName}, deObj)
 		if err != nil {
 			return nil, fmt.Errorf("kube Get dataexport with restart: %s", err.Error())
-		}
-
-		// On the first iteration, reconcile Spec.Publish with the resolved value.
-		// If the object was patched, restart the loop to pick up the updated status.
-		if !publishReconciled {
-			patched, err := EnsureDataExportPublish(ctx, deObj, publish, rtClient)
-			if err != nil {
-				return nil, err
-			}
-			publishReconciled = true
-			if patched {
-				continue
-			}
 		}
 
 		for _, condition := range deObj.Status.Conditions {
@@ -254,8 +240,21 @@ func DeleteDataExport(ctx context.Context, deName, namespace string, rtClient ct
 func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace string, public bool, rtClient ctrlrtclient.Client) ( /*podURL*/ string /*volumeMode*/, string /*internalCAData*/, string, error) {
 	var podURL, volumeMode, internalCAData string
 
+	// Fetch the current state so we can reconcile Spec.Publish before waiting.
+	deObj, err := GetDataExport(ctx, deName, namespace, rtClient)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	// Patch Spec.Publish if the resolved value differs from what the object has.
+	// Must happen before GetDataExportWithRestart so the loop waits for PublicURL
+	// when publish=true.
+	if err = EnsureDataExportPublish(ctx, deObj, public, rtClient); err != nil {
+		return "", "", "", err
+	}
+
 	log.Info("Waiting for DataExport to be ready", slog.String("name", deName), slog.String("namespace", namespace))
-	deObj, err := GetDataExportWithRestart(ctx, deName, namespace, public, rtClient, log)
+	deObj, err = GetDataExportWithRestart(ctx, deName, namespace, rtClient, log)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -342,25 +341,25 @@ func EnsureDataExportPublish(
 	deObj *v1alpha1.DataExport,
 	publish bool,
 	rtClient ctrlrtclient.Client,
-) (bool, error) {
+) error {
 	if !publish {
-		return false, nil
+		return nil
 	}
 
 	if deObj == nil {
-		return false, fmt.Errorf("nil DataExport object")
+		return fmt.Errorf("nil DataExport object")
 	}
 
 	if deObj.Spec.Publish == publish {
-		return false, nil
+		return nil
 	}
 
 	patch := ctrlrtclient.MergeFrom(deObj.DeepCopy())
 	deObj.Spec.Publish = publish
 
 	if err := rtClient.Patch(ctx, deObj, patch); err != nil {
-		return false, fmt.Errorf("patch DataExport publish: %w", err)
+		return fmt.Errorf("patch DataExport publish: %w", err)
 	}
 
-	return true, nil
+	return nil
 }
