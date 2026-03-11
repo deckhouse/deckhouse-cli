@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"testing"
 
 	"github.com/spf13/pflag"
@@ -35,6 +36,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	kubescheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 // timeoutError implements net.Error with Timeout()=true but is neither
@@ -214,6 +217,70 @@ func TestDetectPublish_ServiceNotFound(t *testing.T) {
 
 	_, err := DetectPublish(context.Background(), c, nil, log)
 	require.ErrorIs(t, err, ErrAutoDetectWithHint)
+}
+
+// newFakeSafeClient writes a minimal kubeconfig to a temp file and constructs
+// a SafeClient from it, bypassing the real ~/.kube/config on disk.
+func newFakeSafeClient(t *testing.T) *safeClient.SafeClient {
+	t.Helper()
+	const kubeconfig = `apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: https://fake-server:6443
+    insecure-skip-tls-verify: true
+  name: fake
+contexts:
+- context:
+    cluster: fake
+    user: fake
+  name: fake
+current-context: fake
+users:
+- name: fake
+  user:
+    token: fake-token
+`
+	f, err := os.CreateTemp(t.TempDir(), "kubeconfig-*.yaml")
+	require.NoError(t, err)
+	_, err = f.WriteString(kubeconfig)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	t.Setenv("KUBECONFIG", f.Name())
+
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	c, err := safeClient.NewSafeClient(fs)
+	require.NoError(t, err)
+	return c
+}
+
+// TestDetectPublish_ProbeConnRefused tests the full DetectPublish pipeline:
+// first service is found, probe client is built from a fake SafeClient,
+// probe to 127.0.0.1:443 gets connection refused -> isNetworkUnreachable -> publish=true.
+func TestDetectPublish_ProbeConnRefused(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, kubescheme.AddToScheme(scheme))
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      kubeServiceName,
+			Namespace: kubeServiceNamespace,
+			UID:       types.UID("uid-abc"),
+		},
+		Spec: corev1.ServiceSpec{
+			// Probe will dial https://127.0.0.1:443 - nothing listens there,
+			// so we get connection refused immediately.
+			ClusterIP: "127.0.0.1",
+		},
+	}
+	rtClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
+	sClient := newFakeSafeClient(t)
+
+	got, err := DetectPublish(context.Background(), rtClient, sClient, slog.Default())
+	require.NoError(t, err)
+	// connection refused → isNetworkUnreachable → publish=true
+	assert.True(t, got)
 }
 
 func TestIsProbeRejected(t *testing.T) {
