@@ -18,12 +18,15 @@ package dataio
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"testing"
 
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -211,4 +214,149 @@ func TestDetectPublish_ServiceNotFound(t *testing.T) {
 
 	_, err := DetectPublish(context.Background(), c, nil, log)
 	require.ErrorIs(t, err, ErrAutoDetectWithHint)
+}
+
+func TestIsProbeRejected(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "x509.UnknownAuthorityError",
+			err:  x509.UnknownAuthorityError{},
+			want: true,
+		},
+		{
+			name: "x509.CertificateInvalidError expired",
+			err:  x509.CertificateInvalidError{Cert: &x509.Certificate{}, Reason: x509.Expired},
+			want: true,
+		},
+		{
+			name: "x509.HostnameError",
+			err:  x509.HostnameError{Host: "10.96.0.1"},
+			want: true,
+		},
+		{
+			name: "tls.RecordHeaderError",
+			err:  tls.RecordHeaderError{Msg: "not a TLS packet"},
+			want: true,
+		},
+		{
+			name: "tls.AlertError handshake_failure",
+			err:  tls.AlertError(0x28),
+			want: true,
+		},
+		{
+			name: "wrapped x509.UnknownAuthorityError",
+			err:  fmt.Errorf("tls verify: %w", x509.UnknownAuthorityError{}),
+			want: true,
+		},
+		{
+			name: "connection refused",
+			err:  errors.New("connection refused"),
+			want: false,
+		},
+		{
+			name: "context.Canceled",
+			err:  context.Canceled,
+			want: false,
+		},
+		{
+			name: "500 Internal Server Error",
+			err:  fmt.Errorf("500 Internal Server Error"),
+			want: false,
+		},
+		{
+			name: "503 Service Unavailable",
+			err:  fmt.Errorf("503 Service Unavailable"),
+			want: false,
+		},
+		{
+			name: "net.OpError dial (not TLS)",
+			err:  &net.OpError{Op: "dial"},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isProbeRejected(tt.err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestParsePublishFlag(t *testing.T) {
+	tests := []struct {
+		name         string
+		setupFlags   func() *pflag.FlagSet
+		wantExplicit bool
+		wantValue    bool
+		wantErr      bool
+	}{
+		{
+			name:       "nil FlagSet",
+			setupFlags: func() *pflag.FlagSet { return nil },
+			wantErr:    true,
+		},
+		{
+			name: "FlagSet without publish registered",
+			setupFlags: func() *pflag.FlagSet {
+				return pflag.NewFlagSet("test", pflag.ContinueOnError)
+			},
+			wantErr: true,
+		},
+		{
+			name: "publish registered but not changed",
+			setupFlags: func() *pflag.FlagSet {
+				fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+				fs.Bool("publish", false, "")
+				return fs
+			},
+			wantExplicit: false,
+			wantValue:    false,
+		},
+		{
+			name: "--publish=true changed",
+			setupFlags: func() *pflag.FlagSet {
+				fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+				fs.Bool("publish", false, "")
+				require.NoError(t, fs.Parse([]string{"--publish=true"}))
+				return fs
+			},
+			wantExplicit: true,
+			wantValue:    true,
+		},
+		{
+			name: "--publish=false changed",
+			setupFlags: func() *pflag.FlagSet {
+				fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+				fs.Bool("publish", false, "")
+				require.NoError(t, fs.Parse([]string{"--publish=false"}))
+				return fs
+			},
+			wantExplicit: true,
+			wantValue:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := tt.setupFlags()
+			got, err := ParsePublishFlag(fs)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantExplicit, got.Explicit)
+			assert.Equal(t, tt.wantValue, got.Value)
+		})
+	}
 }
