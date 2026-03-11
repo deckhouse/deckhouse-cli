@@ -30,8 +30,10 @@ jobs:
     steps:
       - name: Install dependency for linux-amd64 dist
         env:
-          DEBIAN_FRONTEND: noninteractive
-        run: apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc dnsutils
+           DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update && apt-get install -y apt-utils libbtrfs-dev libelf-dev libssl-dev libuv1-dev libzstd-dev file git gcc dnsutils
+          ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -94,7 +96,9 @@ jobs:
       - name: Install dependency for linux-amd64 dist
         env:
           DEBIAN_FRONTEND: noninteractive
-        run: apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc dnsutils
+        run: |
+          apt-get update && apt-get install -y apt-utils libbtrfs-dev libelf-dev libssl-dev libuv1-dev libzstd-dev file git gcc dnsutils
+          ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -153,8 +157,10 @@ jobs:
     steps:
       - name: Install dependency for linux-amd64 dist
         env:
-          DEBIAN_FRONTEND: noninteractive
-        run: apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc dnsutils
+           DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update && apt-get install -y apt-utils libbtrfs-dev libelf-dev libssl-dev libuv1-dev libzstd-dev file git gcc dnsutils
+          ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -218,8 +224,10 @@ jobs:
     steps:
       - name: Install dependency for linux-amd64 dist
         env:
-          DEBIAN_FRONTEND: noninteractive
-        run: apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc dnsutils
+           DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update && apt-get install -y apt-utils libbtrfs-dev libelf-dev libssl-dev libuv1-dev libzstd-dev file git gcc dnsutils
+          ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
 
       - name: Checkout
         uses: actions/checkout@v4
