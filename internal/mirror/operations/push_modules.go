@@ -56,7 +56,6 @@ func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader,
 	layoutsToPush := map[string]string{
 		"":        path.Join(pushParams.ModulesPathSuffix, moduleName),
 		"release": path.Join(pushParams.ModulesPathSuffix, moduleName, "release"),
-		"extra":   path.Join(pushParams.ModulesPathSuffix, moduleName, "extra"),
 	}
 
 	// automatically discover extra layouts in the extra/ directory
@@ -67,6 +66,10 @@ func PushModule(pushParams *params.PushParams, moduleName string, pkg io.Reader,
 		} else {
 			logger.Warnf("Error reading extra dir for module %s: %v", moduleName, err)
 		}
+	}
+
+	if err == nil {
+		layoutsToPush["extra"] = path.Join(pushParams.ModulesPathSuffix, moduleName, "extra")
 	}
 
 	// add discovered extra layouts to the list of layouts to push
