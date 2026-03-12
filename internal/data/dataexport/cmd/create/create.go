@@ -99,7 +99,6 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	defer cancel()
 	namespace, _ := cmd.Flags().GetString("namespace")
 	ttl, _ := cmd.Flags().GetString("ttl")
-	publish, _ := cmd.Flags().GetBool("publish")
 
 	deName, volumeKind, volumeName, err := parseArgs(args)
 	if err != nil {
@@ -107,11 +106,21 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	flags := cmd.PersistentFlags()
-	safeClient, err := safeClient.NewSafeClient(flags)
+	sc, err := safeClient.NewSafeClient(flags)
 	if err != nil {
 		return err
 	}
-	rtClient, err := safeClient.NewRTClient(v1alpha1.AddToScheme)
+	rtClient, err := sc.NewRTClient(v1alpha1.AddToScheme)
+	if err != nil {
+		return err
+	}
+
+	publishFlag, err := dataio.ParsePublishFlag(cmd.Flags())
+	if err != nil {
+		return err
+	}
+
+	publish, err := dataio.ResolvePublish(ctx, publishFlag, rtClient, sc, log)
 	if err != nil {
 		return err
 	}

@@ -240,8 +240,21 @@ func DeleteDataExport(ctx context.Context, deName, namespace string, rtClient ct
 func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace string, public bool, rtClient ctrlrtclient.Client) ( /*podURL*/ string /*volumeMode*/, string /*internalCAData*/, string, error) {
 	var podURL, volumeMode, internalCAData string
 
+	// Fetch the current state so we can reconcile Spec.Publish before waiting.
+	deObj, err := GetDataExport(ctx, deName, namespace, rtClient)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	// Patch Spec.Publish if the resolved value differs from what the object has.
+	// Must happen before GetDataExportWithRestart so the loop waits for PublicURL
+	// when publish=true.
+	if err = EnsureDataExportPublish(ctx, deObj, public, rtClient); err != nil {
+		return "", "", "", err
+	}
+
 	log.Info("Waiting for DataExport to be ready", slog.String("name", deName), slog.String("namespace", namespace))
-	deObj, err := GetDataExportWithRestart(ctx, deName, namespace, rtClient, log)
+	deObj, err = GetDataExportWithRestart(ctx, deName, namespace, rtClient, log)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -317,4 +330,35 @@ func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace st
 	subClient.SetTLSCAData(decodedBytes)
 
 	return url, volumeMode, subClient, nil
+}
+
+// EnsureDataExportPublish patches DataExport.Spec.Publish to match the resolved value.
+// Only upgrades publish: false -> true is patched, true -> false is intentionally skipped
+// to avoid downgrading already-published resources.
+func EnsureDataExportPublish(
+	ctx context.Context,
+	deObj *v1alpha1.DataExport,
+	publish bool,
+	rtClient ctrlrtclient.Client,
+) error {
+	if !publish {
+		return nil
+	}
+
+	if deObj == nil {
+		return fmt.Errorf("nil DataExport object")
+	}
+
+	if deObj.Spec.Publish == publish {
+		return nil
+	}
+
+	patch := ctrlrtclient.MergeFrom(deObj.DeepCopy())
+	deObj.Spec.Publish = publish
+
+	if err := rtClient.Patch(ctx, deObj, patch); err != nil {
+		return fmt.Errorf("patch DataExport publish: %w", err)
+	}
+
+	return nil
 }

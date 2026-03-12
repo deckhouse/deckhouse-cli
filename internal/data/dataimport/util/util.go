@@ -188,7 +188,21 @@ func PrepareUpload(
 		return "", "", nil, err
 	}
 
-	diObj, err := GetDataImportWithRestart(ctx, diName, namespace, rtClient, log)
+	// Fetch the current state so we can reconcile Spec.Publish before waiting.
+	diObj, err := GetDataImport(ctx, diName, namespace, rtClient)
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	// Patch Spec.Publish if the resolved value differs from what the object has.
+	// Must happen before GetDataImportWithRestart so the loop waits for PublicURL
+	// when publish=true.
+	err = EnsureDataImportPublish(ctx, diObj, publish, rtClient)
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	diObj, err = GetDataImportWithRestart(ctx, diName, namespace, rtClient, log)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -235,6 +249,37 @@ func PrepareUpload(
 	subClient.SetTLSCAData(decodedBytes)
 
 	return url, volumeMode, subClient, nil
+}
+
+// EnsureDataImportPublish patches DataImport.Spec.Publish to match the resolved value.
+// Only upgrades publish: false -> true is patched, true -> false is intentionally skipped
+// to avoid downgrading already-published resources.
+func EnsureDataImportPublish(
+	ctx context.Context,
+	diObj *v1alpha1.DataImport,
+	publish bool,
+	rtClient ctrlrtclient.Client,
+) error {
+	if !publish {
+		return nil
+	}
+
+	if diObj == nil {
+		return fmt.Errorf("nil DataImport")
+	}
+
+	if diObj.Spec.Publish == publish {
+		return nil
+	}
+
+	patch := ctrlrtclient.MergeFrom(diObj.DeepCopy())
+	diObj.Spec.Publish = publish
+
+	if err := rtClient.Patch(ctx, diObj, patch); err != nil {
+		return fmt.Errorf("patch DataImport publish: %w", err)
+	}
+
+	return nil
 }
 
 func CheckUploadProgress(ctx context.Context, httpClient *safeClient.SafeClient, targetURL string) (int64, error) {
