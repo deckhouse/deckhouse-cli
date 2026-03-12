@@ -26,6 +26,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -76,7 +77,7 @@ func ResolvePublish(
 //   - same UID: internal path is reachable -> publish=false
 //   - UID mismatch: ClusterIP reached a different cluster (e.g. local minikube/kind) -> publish=true
 //   - network-unreachable on probe: internal path is not reachable -> publish=true
-//   - TLS rejection on probe: ClusterIP reached a different server -> publish=true
+//   - TLS/auth rejection on probe: ClusterIP reached a different server -> publish=true
 //   - any other probe error (transient 5xx, cancellation, deserialization): ambiguous -> fail fast with hint
 func DetectPublish(
 	ctx context.Context,
@@ -123,8 +124,9 @@ func DetectPublish(
 			log.Info("Publish autodetect: internal endpoint is unreachable, selecting publish=true")
 			return true, nil
 		}
-		// TLS rejection: the probe uses the same CA and ServerName as the kubeconfig
-		// endpoint, so a TLS failure here means ClusterIP reached a different server.
+		// TLS/auth/RBAC rejection: the first request via kubeconfig succeeded
+		// with the same credentials, so a rejection here means ClusterIP
+		// reached a different server.
 		if isProbeRejected(err) {
 			log.Info("Publish autodetect: internal endpoint rejected, selecting publish=true")
 			return true, nil
@@ -201,13 +203,12 @@ func isNetworkUnreachable(err error) bool {
 	return false
 }
 
-// isProbeRejected classifies TLS errors that indicate the ClusterIP endpoint
-// belongs to a different server than the kubeconfig endpoint.
+// isProbeRejected classifies errors that indicate the ClusterIP endpoint
+// is reachable but belongs to a different server than the kubeconfig endpoint.
 //
-// Only TLS errors are treated as definitive: the probe uses the same CA and
-// ServerName as the original kubeconfig request, so a TLS failure means the
-// server at ClusterIP has a different identity. HTTP-level errors are ambiguous
-// and fall through to ErrAutoDetectWithHint in the caller.
+// Precondition: the first request via kubeconfig already succeeded with the
+// same CA, token, and RBAC permissions. If the probe to ClusterIP gets a TLS
+// or auth rejection, it means ClusterIP reached a different server.
 //
 // Returns true for:
 //   - x509.UnknownAuthorityError: server certificate signed by a different CA
@@ -221,6 +222,8 @@ func isNetworkUnreachable(err error) bool {
 //     (plain HTTP on HTTPS port, or a non-HTTP service)
 //   - tls.AlertError: server sent a TLS alert rejecting the handshake
 //     (bad_certificate, handshake_failure, protocol_version, unknown_ca, etc.)
+//   - apierrors 401 Unauthorized: server doesn't accept our token
+//   - apierrors 403 Forbidden: server has different RBAC rules
 //
 // Returns false for:
 //   - nil: no error
@@ -257,6 +260,11 @@ func isProbeRejected(err error) bool {
 	// TLS: server reject handshake
 	var tlsAlertErr tls.AlertError
 	if errors.As(err, &tlsAlertErr) {
+		return true
+	}
+
+	// Auth/RBAC: 401 or 403 from a different API server
+	if apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) {
 		return true
 	}
 

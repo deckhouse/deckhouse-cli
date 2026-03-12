@@ -31,8 +31,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	kubescheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -348,6 +350,16 @@ func TestIsProbeRejected(t *testing.T) {
 			name: "net.OpError dial (not TLS)",
 			err:  &net.OpError{Op: "dial"},
 			want: false,
+		},
+		{
+			name: "apierrors 401 Unauthorized",
+			err:  apierrors.NewUnauthorized("token not accepted"),
+			want: true,
+		},
+		{
+			name: "apierrors 403 Forbidden",
+			err:  apierrors.NewForbidden(schema.GroupResource{Resource: "services"}, "kubernetes", errors.New("access denied")),
+			want: true,
 		},
 	}
 
