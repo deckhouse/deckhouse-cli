@@ -335,7 +335,6 @@ func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace st
 // EnsureDataExportPublish patches DataExport.Spec.Publish to match the resolved value.
 // Only upgrades publish: false -> true is patched, true -> false is intentionally skipped
 // to avoid downgrading already-published resources.
-// Returns (true, nil) if the object was patched and the caller should re-read it.
 func EnsureDataExportPublish(
 	ctx context.Context,
 	deObj *v1alpha1.DataExport,
