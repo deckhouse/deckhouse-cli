@@ -17,79 +17,19 @@ limitations under the License.
 package commands
 
 import (
-	"os"
-	"strings"
-
 	vaultcommand "github.com/hashicorp/vault/command"
 	"github.com/spf13/cobra"
 )
 
-type Commands struct {
-	Command     string
-	Description string
-}
-
-func MapCustomEnvsToInternalEnvs(envNamePrefix string, envNameMapPrefix string) {
-	env := os.Environ()
-	for _, keyValue := range env {
-		parts := strings.SplitN(keyValue, "=", 2)
-		if strings.HasPrefix(parts[0], envNamePrefix) {
-			replacedEnvName := strings.Replace(parts[0], envNamePrefix, envNameMapPrefix, 1)
-			os.Setenv(replacedEnvName, parts[1])
-		}
-	}
-}
-
 func NewStrongholdCommand() *cobra.Command {
-	MapCustomEnvsToInternalEnvs("STRONGHOLD_", "VAULT_")
-
-	strongholdCommands := []Commands{
-		{"read", "Read data and retrieves secrets"},
-		{"write", "Write data, configuration, and secrets"},
-		{"delete", "Delete secrets and configuration"},
-		{"list", "List data or secrets"},
-		{"login", "Authenticate locally"},
-		{"status", "Print seal and HA status"},
-		{"unwrap", "Unwrap a wrapped secret"},
-		{"kv", "Interact with Stronghold's Key-Value storage"},
-		{"policy", "Interact with policies"},
-		{"pki", "Interact with Stronghold's PKI Secrets Engine"},
-		{"operator", "Perform operator-specific tasks"},
-		{"secrets", "Interact with secrets engines"},
-		{"token", "Interact with tokens"},
-		{"namespace", "Interact with namespaces"},
-		{"lease", "Interact with leases"},
-		{"proxy", "Start a Stronghold Proxy"},
-		{"agent", "Start a Stronghold agent"},
-		{"transit", "Interact with Stronghold's Transit Secrets Engine"},
-		{"auth", "Interact with auth methods"},
-		{"print", "Prints runtime configurations"},
-		{"patch", "Patch data, configuration, and secrets"},
-		{"path-help", "Retrieve API help for paths"},
-		{"version", "Print version"},
-		{"version-history", "Prints the version history of the target Stronghold server"},
-	}
-
 	strongholdCmd := &cobra.Command{
-		Use:           "stronghold",
+		Use:           "stronghold [command] [args...]",
 		Short:         "Deckhouse Stronghold commands",
 		SilenceErrors: true,
 		SilenceUsage:  true,
-	}
-
-	for _, cmd := range strongholdCommands {
-		strongholdCommand := []string{cmd.Command}
-		strongholdSubCmd := &cobra.Command{
-			Use:                cmd.Command,
-			Short:              cmd.Description,
-			DisableFlagParsing: true,
-			SilenceErrors:      true,
-			SilenceUsage:       true,
-			Run: func(_ *cobra.Command, args []string) {
-				vaultcommand.Run(append(strongholdCommand, args...))
-			},
-		}
-		strongholdCmd.AddCommand(strongholdSubCmd)
+		Run: func(_ *cobra.Command, args []string) {
+			vaultcommand.Run(args)
+		},
 	}
 
 	return strongholdCmd
