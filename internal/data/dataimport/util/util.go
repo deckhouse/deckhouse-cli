@@ -192,7 +192,7 @@ func PrepareUpload(
 	diObj := &v1alpha1.DataImport{}
 	err = rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: diName}, diObj)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("kube Get dataimport: %s", err.Error())
+		return "", "", nil, fmt.Errorf("failed to get dataImport: %w", err)
 	}
 
 	// Patch Spec.Publish if the resolved value differs from what the object has.

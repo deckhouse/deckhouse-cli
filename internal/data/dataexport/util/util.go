@@ -244,7 +244,7 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 	deObj := &v1alpha1.DataExport{}
 	err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: deName}, deObj)
 	if err != nil {
-		return "", "", "", fmt.Errorf("kube Get dataExport: %s", err.Error())
+		return "", "", "", fmt.Errorf("failed to get dataExport: %w", err)
 	}
 
 	// Patch Spec.Publish if the resolved value differs from what the object has.
