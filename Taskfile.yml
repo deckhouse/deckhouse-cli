@@ -38,8 +38,8 @@ vars:
       version="$(go list -m -f '{{"{{"}}.Version{{"}}"}}' github.com/werf/werf/v2)"
       echo "-X 'github.com/werf/werf/v2/pkg/werf.Version=${version}'"
 
-  cgoTags: "dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp osusergo exclude_graphdriver_devicemapper netgo no_devmapper static_build cni"
-  goTags: "dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp"
+  cgoTags: "clionly dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp osusergo exclude_graphdriver_devicemapper netgo no_devmapper static_build cni"
+  goTags: "clionly dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp"
 
   cgoDevLDFlags: "-linkmode external -extldflags=-static -s -w -X 'github.com/deckhouse/deckhouse-cli/internal/version.Version=local-dev' {{ .werfLDFlags }}"
   goDevLDFlags: "-s -w -X 'github.com/deckhouse/deckhouse-cli/internal/version.Version=local-dev' {{ .werfLDFlags }}"
@@ -114,11 +114,11 @@ tasks:
     desc: Cross-compile d8 dev binary for linux/amd64 from macOS (no CGO)
     summary: |
       Cross-compiles Linux binary from macOS without CGO.
-      
+
       This is useful for quick testing when you don't have access to a Linux machine
       or Docker. The resulting binary has the same features as darwin/windows builds
       (no CGO-dependent functionality).
-      
+
       For a full-featured Linux build with CGO, use build:dev:linux:amd64 on Linux
       or in a Linux container.
     cmds:
