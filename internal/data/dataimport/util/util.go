@@ -189,7 +189,7 @@ func PrepareUpload(
 	}
 
 	// Fetch the current state so we can reconcile Spec.Publish before waiting.
-	diObj := &v1alpha1.DataImport{}
+	diObj := new(v1alpha1.DataImport)
 	err = rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: diName}, diObj)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to get dataImport: %w", err)
