@@ -189,9 +189,10 @@ func PrepareUpload(
 	}
 
 	// Fetch the current state so we can reconcile Spec.Publish before waiting.
-	diObj, err := GetDataImport(ctx, diName, namespace, rtClient)
+	diObj := &v1alpha1.DataImport{}
+	err = rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: diName}, diObj)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, fmt.Errorf("kube Get dataimport: %s", err.Error())
 	}
 
 	// Patch Spec.Publish if the resolved value differs from what the object has.

@@ -241,9 +241,10 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 	var podURL, volumeMode, internalCAData string
 
 	// Fetch the current state so we can reconcile Spec.Publish before waiting.
-	deObj, err := GetDataExport(ctx, deName, namespace, rtClient)
+	deObj := &v1alpha1.DataExport{}
+	err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: deName}, deObj)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", fmt.Errorf("kube Get dataExport: %s", err.Error())
 	}
 
 	// Patch Spec.Publish if the resolved value differs from what the object has.
