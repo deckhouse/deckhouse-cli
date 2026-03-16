@@ -208,27 +208,8 @@ func (svc *PushService) unpackPackage(ctx context.Context, dirPath, pkgName stri
 		}
 		defer pkg.Close()
 
-		// support old behavior when inside "module-<name>.tar" isn't have modules/<name> folder
-		// if unpack this archive without check, it will be pushed to registry root, not to modules/<name>
-		isLegacyModuleArchive := bundle.IsLegacyModuleArchive(ctx, pkg, pkgName)
-
-		// TODO: how can we avoid reading the entire archive again?
-		pkg2, err := svc.openPackage(pkgName)
-		if err != nil {
-			return fmt.Errorf("open package: %w", err)
-		}
-		defer pkg2.Close()
-
-		if isLegacyModuleArchive {
-			prefix := filepath.Join("modules", strings.TrimPrefix(pkgName, "module-"))
-			if err := bundle.UnpackWithPrefix(ctx, pkg2, dirPath, prefix); err != nil {
-				return fmt.Errorf("unpack with prefix: %w", err)
-			}
-			return nil
-		}
-
-		// Unpack directly to unified directory - no path transformations
-		if err := bundle.Unpack(ctx, pkg2, dirPath); err != nil {
+		// Unpack directly to unified directory
+		if err := bundle.Unpack(ctx, pkg, dirPath, pkgName); err != nil {
 			return fmt.Errorf("unpack: %w", err)
 		}
 
