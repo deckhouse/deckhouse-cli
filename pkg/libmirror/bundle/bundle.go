@@ -48,7 +48,52 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string) error {
 			continue
 		}
 
+		fmt.Println("tarHdr.Name", tarHdr.Name) //TODO: remove debug
+		if strings.HasPrefix(tarHdr.Name, "release") {
+			tarHdr.Name = strings.TrimPrefix(tarHdr.Name, "module-")
+		}
+
 		writePath := filepath.Join(targetPath, filepath.Clean(tarHdr.Name))
+		fmt.Println("writePath", writePath) //TODO: remove debug
+		if err = os.MkdirAll(filepath.Dir(writePath), 0o755); err != nil {
+			return fmt.Errorf("setup dir tree: %w", err)
+		}
+		bundleFile, err := os.OpenFile(writePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		if err != nil {
+			return fmt.Errorf("create file: %w", err)
+		}
+		if _, err = io.Copy(bundleFile, tarReader); err != nil {
+			return fmt.Errorf("write %q: %w", writePath, err)
+		}
+		if err = bundleFile.Sync(); err != nil {
+			return fmt.Errorf("write %q: %w", writePath, err)
+		}
+		if err = bundleFile.Close(); err != nil {
+			return fmt.Errorf("write %q: %w", writePath, err)
+		}
+	}
+
+	return nil
+}
+
+func UnpackWithPrefix(ctx context.Context, source io.Reader, targetPath string, prefix string) error {
+	var err error
+	tarReader := tar.NewReader(source)
+
+	for {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		tarHdr, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if tarHdr.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		writePath := filepath.Join(targetPath, prefix, filepath.Clean(tarHdr.Name))
 		if err = os.MkdirAll(filepath.Dir(writePath), 0o755); err != nil {
 			return fmt.Errorf("setup dir tree: %w", err)
 		}
@@ -142,4 +187,28 @@ func packFuncWithPrefix(ctx context.Context, pathPrefix string, tarPrefix string
 
 		return nil
 	}
+}
+
+// checks if <pkgName> folder exists inside the archive
+// returns true if it exists, false otherwise
+// warning: this function reads the entire archive
+func IsLegacyModuleArchive(ctx context.Context, source io.Reader, pkgName string) bool {
+	var err error
+	tarReader := tar.NewReader(source)
+
+	for {
+		if err = ctx.Err(); err != nil {
+			break
+		}
+		tarHdr, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if strings.HasPrefix(tarHdr.Name, pkgName) {
+			return false
+		}
+	}
+
+	return true
 }
