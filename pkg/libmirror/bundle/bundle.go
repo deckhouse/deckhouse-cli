@@ -36,12 +36,9 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 
 	// support old behavior when inside "module-<name>.tar" isn't have modules/<name> folder
 	// if unpack this archive without check, it will be pushed to registry root, not to modules/<name>
-	isModule := strings.HasPrefix(pkgName, "module-")
+	// isLegacyModule is true by default if we unpacking module-<name>.tar
+	isLegacyModule := strings.HasPrefix(pkgName, "module-")
 	moduleName := strings.TrimPrefix(pkgName, "module-")
-	isLegacyModule := false
-	if isModule {
-		isLegacyModule = true
-	}
 
 	for {
 		if err = ctx.Err(); err != nil {
@@ -57,7 +54,7 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 			continue
 		}
 
-		if isModule && strings.HasPrefix(tarHdr.Name, "modules/"+moduleName) {
+		if isLegacyModule && strings.HasPrefix(tarHdr.Name, "modules/"+moduleName) {
 			isLegacyModule = false
 		}
 
@@ -81,7 +78,7 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 	}
 
 	from := filepath.Join(targetPath, "tmp")
-	to := filepath.Join(targetPath)
+	to := targetPath
 	if isLegacyModule {
 		to = filepath.Join(targetPath, "modules", moduleName)
 
