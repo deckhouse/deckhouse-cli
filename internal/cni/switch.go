@@ -60,7 +60,7 @@ func RunSwitch(targetCNI string) error {
 	}
 	if existingMigration != nil {
 		return fmt.Errorf("a CNI migration (%s) is already in progress. "+
-			"Please use 'd8 cni-migration watch' to monitor it or 'd8 cni-migration cleanup' to abort it",
+			"Please use 'd8 tools cni-migration watch' to monitor it or 'd8 tools cni-migration cleanup' to abort it",
 			existingMigration.Name)
 	}
 

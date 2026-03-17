@@ -111,7 +111,6 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(commands.NewKubectlCommand())
 	r.cmd.AddCommand(commands.NewLoginCommand())
 	r.cmd.AddCommand(commands.NewStrongholdCommand())
-	r.cmd.AddCommand(commands.NewCniMigrationCommand())
 	r.cmd.AddCommand(commands.NewHelpJSONCommand(r.cmd))
 
 	if os.Getenv("DECKHOUSE_PLUGINS_ENABLED") != "true" {

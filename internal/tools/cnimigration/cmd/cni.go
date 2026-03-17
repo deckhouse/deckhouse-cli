@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package commands
+package cmd
 
 import (
 	"errors"
@@ -39,31 +39,31 @@ This CLI tool is used to trigger the migration and monitor its status.
 
 Workflow:
 
-  1. 'd8 cni-migration switch --to-cni <CNI>' - Initiates the migration.
+  1. 'd8 tools cni-migration switch --to-cni <CNI>' - Initiates the migration.
      This creates a CNIMigration resource, which triggers the deployment of the migration agent.
      The agent then performs all necessary steps (validation, node checks, CNI switching).
 
-  2. 'd8 cni-migration watch' - (Optional) Monitors the progress of the migration.
+  2. 'd8 tools cni-migration watch' - (Optional) Monitors the progress of the migration.
      Since the process is automated, this command simply watches the status.
 
-  3. 'd8 cni-migration cleanup' - Cleans up the migration resources after completion.`
+  3. 'd8 tools cni-migration cleanup' - Cleans up the migration resources after completion.`
 
 	cniSwitchExample = templates.Examples(`
 		# Start the migration to Cilium CNI
-		d8 cni-migration switch --to-cni cilium`)
+		d8 tools cni-migration switch --to-cni cilium`)
 
 	cniWatchExample = templates.Examples(`
 		# Monitor the ongoing migration
-		d8 cni-migration watch`)
+		d8 tools cni-migration watch`)
 
 	cniCleanupExample = templates.Examples(`
 		# Cleanup resources created by the 'switch' command
-		d8 cni-migration cleanup`)
+		d8 tools cni-migration cleanup`)
 
 	supportedCNIs = []string{"cilium", "flannel", "simple-bridge"}
 )
 
-func NewCniMigrationCommand() *cobra.Command {
+func NewCommand() *cobra.Command {
 	log.SetFlags(0)
 	ctrllog.SetLogger(logr.Discard())
 
