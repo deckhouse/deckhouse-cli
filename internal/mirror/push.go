@@ -208,8 +208,8 @@ func (svc *PushService) unpackPackage(ctx context.Context, dirPath, pkgName stri
 		}
 		defer pkg.Close()
 
-		// Unpack directly to unified directory - no path transformations
-		if err := bundle.Unpack(ctx, pkg, dirPath); err != nil {
+		// Unpack directly to unified directory
+		if err := bundle.Unpack(ctx, pkg, dirPath, pkgName); err != nil {
 			return fmt.Errorf("unpack: %w", err)
 		}
 
@@ -303,6 +303,10 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 	segment := ""
 	if relPath != "." {
 		segment = relPath
+	}
+	// support old behavior when modules stored as "module-<name>.tar"
+	if strings.HasPrefix(layoutDir, "module-") {
+		segment = internal.ModulesSegment
 	}
 
 	// Create client with appropriate segments

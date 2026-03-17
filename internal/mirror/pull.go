@@ -152,6 +152,13 @@ func (svc *PullService) Pull(ctx context.Context) error {
 		}
 	}
 
+	if !svc.options.SkipInstaller {
+		err := svc.installerService.PullInstaller(ctx)
+		if err != nil {
+			return fmt.Errorf("pull installer: %w", err)
+		}
+	}
+
 	if !svc.options.SkipSecurity {
 		err := svc.securityService.PullSecurity(ctx)
 		if err != nil {
@@ -163,13 +170,6 @@ func (svc *PullService) Pull(ctx context.Context) error {
 		err := svc.modulesService.PullModules(ctx)
 		if err != nil {
 			return fmt.Errorf("pull modules: %w", err)
-		}
-	}
-
-	if !svc.options.SkipInstaller {
-		err := svc.installerService.PullInstaller(ctx)
-		if err != nil {
-			return fmt.Errorf("pull installer: %w", err)
 		}
 	}
 

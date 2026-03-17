@@ -58,7 +58,7 @@ func TestBundlePackingAndUnpacking(t *testing.T) {
 
 	tarBundle, err := os.Open(tarBundlePath)
 	require.NoError(t, err)
-	err = Unpack(context.TODO(), tarBundle, unpackToDir)
+	err = Unpack(context.TODO(), tarBundle, unpackToDir, "")
 	require.NoError(t, err, "Unpacking should finish without errors")
 
 	resultingFiles := findAllPaths(t, unpackToDir)

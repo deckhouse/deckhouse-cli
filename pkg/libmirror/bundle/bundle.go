@@ -30,9 +30,15 @@ import (
 	"time"
 )
 
-func Unpack(ctx context.Context, source io.Reader, targetPath string) error {
+func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName string) error {
 	var err error
 	tarReader := tar.NewReader(source)
+
+	// support old behavior when inside "module-<name>.tar" isn't have modules/<name> folder
+	// if unpack this archive without check, it will be pushed to registry root, not to modules/<name>
+	// isLegacyModule is true by default if we unpacking module-<name>.tar
+	isLegacyModule := strings.HasPrefix(pkgName, "module-")
+	moduleName := strings.TrimPrefix(pkgName, "module-")
 
 	for {
 		if err = ctx.Err(); err != nil {
@@ -48,7 +54,11 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string) error {
 			continue
 		}
 
-		writePath := filepath.Join(targetPath, filepath.Clean(tarHdr.Name))
+		if isLegacyModule && strings.HasPrefix(tarHdr.Name, "modules/"+moduleName) {
+			isLegacyModule = false
+		}
+
+		writePath := filepath.Join(targetPath, "tmp", filepath.Clean(tarHdr.Name))
 		if err = os.MkdirAll(filepath.Dir(writePath), 0o755); err != nil {
 			return fmt.Errorf("setup dir tree: %w", err)
 		}
@@ -66,6 +76,33 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string) error {
 			return fmt.Errorf("write %q: %w", writePath, err)
 		}
 	}
+
+	from := filepath.Join(targetPath, "tmp")
+	to := targetPath
+	if isLegacyModule {
+		to = filepath.Join(targetPath, "modules", moduleName)
+
+		if err = os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
+			return fmt.Errorf("setup dir tree: %w", err)
+		}
+
+		err = moveFiles(from, to)
+		if err != nil {
+			return fmt.Errorf("move module from tmp: %w", err)
+		}
+		return nil
+	}
+
+	if err = os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
+		return fmt.Errorf("setup dir tree: %w", err)
+	}
+
+	err = moveFiles(from, to)
+	if err != nil {
+		return fmt.Errorf("move module from tmp to '%s': %w", to, err)
+	}
+
+	_ = os.RemoveAll(filepath.Join(targetPath, "tmp"))
 
 	return nil
 }
@@ -142,4 +179,35 @@ func packFuncWithPrefix(ctx context.Context, pathPrefix string, tarPrefix string
 
 		return nil
 	}
+}
+
+func moveFiles(from, to string) error {
+	files, err := os.ReadDir(from)
+	if err != nil {
+		return fmt.Errorf("read directory: %w", err)
+	}
+
+	for _, file := range files {
+		if file.IsDir() {
+			if err = os.MkdirAll(filepath.Join(to, file.Name()), 0o755); err != nil {
+				return fmt.Errorf("setup dir tree: %w", err)
+			}
+
+			if err = moveFiles(filepath.Join(from, file.Name()), filepath.Join(to, file.Name())); err != nil {
+				return fmt.Errorf("move files: %w", err)
+			}
+
+			continue
+		}
+
+		fromPath := filepath.Join(from, file.Name())
+		toPath := filepath.Join(to, file.Name())
+
+		err = os.Rename(fromPath, toPath)
+		if err != nil {
+			return fmt.Errorf("move file: %w", err)
+		}
+	}
+
+	return nil
 }
