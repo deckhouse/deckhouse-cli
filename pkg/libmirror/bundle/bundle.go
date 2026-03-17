@@ -52,7 +52,6 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 		if errors.Is(err, io.EOF) {
 			break
 		}
-		fmt.Println("tarHdr.Name", tarHdr.Name) //TODO: remove debug
 
 		if tarHdr.Typeflag != tar.TypeReg {
 			continue

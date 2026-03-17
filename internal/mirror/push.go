@@ -299,7 +299,6 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 	}
 
 	// Build registry segment from relative path
-	fmt.Println("layoutDir", layoutDir) //TODO: remove debug
 	relPath, _ := filepath.Rel(rootDir, layoutDir)
 	segment := ""
 	if relPath != "." {
