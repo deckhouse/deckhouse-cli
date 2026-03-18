@@ -20,7 +20,6 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	cnimigration "github.com/deckhouse/deckhouse-cli/internal/tools/cnimigration/cmd"
 	farconverter "github.com/deckhouse/deckhouse-cli/internal/tools/farconverter/cmd"
 	gostsum "github.com/deckhouse/deckhouse-cli/internal/tools/gostsum/cmd"
 	imagedigest "github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest/cmd"
@@ -41,7 +40,6 @@ func NewCommand() *cobra.Command {
 	}
 
 	toolsCmd.AddCommand(
-		cnimigration.NewCommand(),
 		farconverter.NewCommand(),
 		gostsum.NewCommand(),
 		imagedigest.NewCommand(),
