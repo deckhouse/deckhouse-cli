@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -39,26 +39,26 @@ This CLI tool is used to trigger the migration and monitor its status.
 
 Workflow:
 
-  1. 'd8 tools cni-migration switch --to-cni <CNI>' - Initiates the migration.
+  1. 'd8 network cni-migration switch --to-cni <CNI>' - Initiates the migration.
      This creates a CNIMigration resource, which triggers the deployment of the migration agent.
      The agent then performs all necessary steps (validation, node checks, CNI switching).
 
-  2. 'd8 tools cni-migration watch' - (Optional) Monitors the progress of the migration.
+  2. 'd8 network cni-migration watch' - (Optional) Monitors the progress of the migration.
      Since the process is automated, this command simply watches the status.
 
-  3. 'd8 tools cni-migration cleanup' - Cleans up the migration resources after completion.`
+  3. 'd8 network cni-migration cleanup' - Cleans up the migration resources after completion.`
 
 	cniSwitchExample = templates.Examples(`
 		# Start the migration to Cilium CNI
-		d8 tools cni-migration switch --to-cni cilium`)
+		d8 network cni-migration switch --to-cni cilium`)
 
 	cniWatchExample = templates.Examples(`
 		# Monitor the ongoing migration
-		d8 tools cni-migration watch`)
+		d8 network cni-migration watch`)
 
 	cniCleanupExample = templates.Examples(`
 		# Cleanup resources created by the 'switch' command
-		d8 tools cni-migration cleanup`)
+		d8 network cni-migration cleanup`)
 
 	supportedCNIs = []string{"cilium", "flannel", "simple-bridge"}
 )
