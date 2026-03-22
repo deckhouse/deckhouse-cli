@@ -114,6 +114,8 @@ func NewCommand() *cobra.Command {
 	deprecatedList.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
 	deprecatedList.Flags().Bool("publish", false, "Provide access outside of cluster")
 	deprecatedList.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
+	deprecatedList.Flags().Bool("tls-skip-verify", false, "Disable TLS certificate validation for download")
+	deprecatedList.Flags().Bool("auto-delete", false, "Delete auto-created DataExport immediately without prompt")
 
 	// TODO remove this section later
 	// Backward-compat: `d8 data download` -> export download (deprecated)
@@ -129,6 +131,8 @@ func NewCommand() *cobra.Command {
 	deprecatedDownload.Flags().StringP("output", "o", "", "file to save data (default: same as resource)")
 	deprecatedDownload.Flags().Bool("publish", false, "Provide access outside of cluster")
 	deprecatedDownload.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
+	deprecatedDownload.Flags().Bool("tls-skip-verify", false, "Disable TLS certificate validation for download")
+	deprecatedDownload.Flags().Bool("auto-delete", false, "Delete auto-created DataExport immediately without prompt")
 
 	// TODO remove this section later
 	// Backward-compat: `d8 data delete` -> export delete (deprecated)
