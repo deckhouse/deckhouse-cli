@@ -67,6 +67,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
 	cmd.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
+	cmd.Flags().Bool("cleanup", false, "Delete auto-created DataExport without prompting (--cleanup=true to delete, --cleanup=false to keep)")
 
 	return cmd
 }
@@ -163,6 +164,8 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	namespace, _ := cmd.Flags().GetString("namespace")
 	ttl, _ := cmd.Flags().GetString("ttl")
+	cleanup, _ := cmd.Flags().GetBool("cleanup")
+	cleanupExplicit := cmd.Flags().Changed("cleanup")
 
 	dataName, srcPath, err := parseArgs(args)
 	if err != nil {
@@ -210,11 +213,10 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	if deName != dataName { // DataExport created in download process
-		if dataio.AskYesNoWithTimeout("DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]", time.Second*30) {
-			if err := util.DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
-				log.Warn("Failed to delete DataExport", slog.String("name", deName), slog.String("error", err.Error()))
-			}
+	// Clean up auto-created DataExport
+	if deName != dataName && dataio.ShouldCleanup(cleanup, cleanupExplicit) {
+		if err := util.DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
+			log.Warn("Failed to delete DataExport", slog.String("name", deName), slog.String("error", err.Error()))
 		}
 	}
 
