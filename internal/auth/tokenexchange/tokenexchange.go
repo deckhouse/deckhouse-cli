@@ -27,6 +27,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/hashicorp/go-multierror"
 )
 
 const (
@@ -118,33 +120,33 @@ func NewClient(cfg *Config) (*Client, error) {
 
 // Validate checks that all required configuration fields are set.
 func (c *Config) Validate() error {
+	var errs *multierror.Error
+
 	if c.DexURL == "" {
-		return fmt.Errorf("dex-url is required")
+		errs = multierror.Append(errs, fmt.Errorf("--dex-url is required"))
 	}
 	if c.ClientID == "" {
-		return fmt.Errorf("client-id is required")
+		errs = multierror.Append(errs, fmt.Errorf("--client-id is required"))
 	}
 	if c.ClientSecret == "" {
-		return fmt.Errorf("client-secret is required")
+		errs = multierror.Append(errs, fmt.Errorf("--client-secret is required"))
 	}
 	if c.SubjectToken == "" {
-		return fmt.Errorf("subject-token is required")
+		errs = multierror.Append(errs, fmt.Errorf("--subject-token is required"))
 	}
 	if c.ConnectorID == "" {
-		return fmt.Errorf("connector-id is required")
+		errs = multierror.Append(errs, fmt.Errorf("--connector-id is required"))
 	}
 
-	// Validate subject token type
 	if c.SubjectTokenType != "" && c.SubjectTokenType != "id_token" && c.SubjectTokenType != "access_token" {
-		return fmt.Errorf("subject-token-type must be 'id_token' or 'access_token'")
+		errs = multierror.Append(errs, fmt.Errorf("--subject-token-type must be 'id_token' or 'access_token'"))
 	}
 
-	// Validate requested token type
 	if c.RequestedTokenType != "" && c.RequestedTokenType != "id_token" && c.RequestedTokenType != "access_token" {
-		return fmt.Errorf("requested-token-type must be 'id_token' or 'access_token'")
+		errs = multierror.Append(errs, fmt.Errorf("--requested-token-type must be 'id_token' or 'access_token'"))
 	}
 
-	return nil
+	return errs.ErrorOrNil()
 }
 
 // Exchange performs the token exchange and returns the response.
