@@ -7,7 +7,7 @@ vars:
     sh: date -u +'%Y-%m-%dT%H:%M:%SZ'
   version:
     sh: git describe --tags
-  kubectlVersion: v1.29.3
+  kubectlVersion: v1.32.10
   kubectlLDFlags:
     sh: |
       buildDate="{{ .buildDate }}"
@@ -96,6 +96,7 @@ tasks:
   build:
     desc: Build d8 binary for personal usage
     run: once
+    deps: [checkKubectl]
     cmds:
       - task: build:dev:{{ OS }}:{{ .arch }}
         vars:
@@ -276,6 +277,26 @@ tasks:
     cmds:
       - golangci-lint run ./... --build-tags="{{ .goTags }}"
 
+  checkKubectl:
+    desc: Verify that kubectlVersion in Taskfile.yml matches k8s.io/kubectl version in go.mod
+    cmds:
+      - |
+        gomod_raw=$(grep 'k8s.io/kubectl ' go.mod | awk '{print $2}')
+        if [ -z "${gomod_raw}" ]; then
+          echo "ERROR: k8s.io/kubectl not found in go.mod"
+          exit 1
+        fi
+        # go.mod uses v0.Y.Z; kubectl version is v1.Y.Z
+        kubectl_from_gomod="v1.${gomod_raw#v0.}"
+        if [ "${kubectl_from_gomod}" != "{{ .kubectlVersion }}" ]; then
+          echo "ERROR: kubectlVersion mismatch!"
+          echo "  Taskfile kubectlVersion : {{ .kubectlVersion }}"
+          echo "  go.mod k8s.io/kubectl   : ${gomod_raw} (= ${kubectl_from_gomod})"
+          echo "Please update kubectlVersion in Taskfile.yml to match go.mod."
+          exit 1
+        fi
+        echo "kubectlVersion OK: {{ .kubectlVersion }}"
+
   clean:
     desc: Clean all binaries
     cmds:
@@ -298,6 +319,7 @@ tasks:
 
   release:sign:
     desc: "Sign last version tag + origin/main and push signatures."
+    deps: [checkKubectl]
     preconditions:
       - sh: '[[ "{{.CLI_ARGS}}" =~ ^v\d+.\d+.\d+$ ]] || exit 1'
         msg: Provide valid semver prefixed with "v" (eg. task {{.TASK}} -- v1.2.3) to be used as version
@@ -314,6 +336,7 @@ tasks:
 
   release:publish-trdl-channels:
     desc: Publish release channels to TRDL
+    deps: [checkKubectl]
     preconditions:
       - sh: test $(git rev-parse --abbrev-ref HEAD) = "main"
         msg: This can only be done on main branch
