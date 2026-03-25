@@ -37,6 +37,8 @@ import (
 	"github.com/int128/kubelogin/pkg/usecases/standalone"
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
+
+	tokenexchangecmd "github.com/deckhouse/deckhouse-cli/internal/auth/tokenexchange/cmd"
 )
 
 func getKubeloginCmd() *kubelogincmd.Cmd {
@@ -144,6 +146,7 @@ func NewLoginCommand() *cobra.Command {
 
 	getTokenCmd := klCmd.GetToken.New()
 	loginCmd.AddCommand(getTokenCmd)
+	loginCmd.AddCommand(tokenexchangecmd.NewCommand())
 
 	return loginCmd
 }
