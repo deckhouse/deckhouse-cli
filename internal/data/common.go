@@ -30,6 +30,19 @@ const (
 	defaultInputOnErr = "no"
 )
 
+// ShouldCleanup decides whether to delete an auto-created DataExport.
+// When the --cleanup flag was explicitly set by the user, its value is used directly.
+// Otherwise the decision is delegated to an interactive prompt with a timeout.
+func ShouldCleanup(cleanup, cleanupExplicit bool) bool {
+	if cleanupExplicit {
+		return cleanup
+	}
+	return AskYesNoWithTimeout(
+		"DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]",
+		time.Second*30,
+	)
+}
+
 func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 	// In non-interactive sessions (pipe/no TTY), do not prompt and use safe default.
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
