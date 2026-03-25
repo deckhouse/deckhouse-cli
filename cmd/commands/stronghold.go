@@ -23,10 +23,11 @@ import (
 
 func NewStrongholdCommand() *cobra.Command {
 	strongholdCmd := &cobra.Command{
-		Use:           "stronghold [command] [args...]",
-		Short:         "Deckhouse Stronghold commands",
-		SilenceErrors: true,
-		SilenceUsage:  true,
+		Use:                "stronghold [command] [args...]",
+		Short:              "Deckhouse Stronghold commands",
+		SilenceErrors:      true,
+		SilenceUsage:       true,
+		DisableFlagParsing: true,
 		Run: func(_ *cobra.Command, args []string) {
 			vaultcommand.Run(args)
 		},
