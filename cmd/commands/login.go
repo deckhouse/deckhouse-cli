@@ -140,6 +140,7 @@ func NewLoginCommand() *cobra.Command {
 		Example:       loginExample,
 		SilenceErrors: true,
 		SilenceUsage:  true,
+		Hidden:        true,
 	}
 
 	klCmd.Logger.AddFlags(loginCmd.PersistentFlags())
