@@ -25,7 +25,8 @@ import (
 	"log/slog"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
-	"github.com/deckhouse/deckhouse/pkg/registry"
+
+	client "github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 const (
@@ -41,7 +42,7 @@ const (
 
 // DeckhouseService provides high-level operations for Deckhouse platform management
 type DeckhouseService struct {
-	client registry.Client
+	client client.Client
 
 	*BasicService
 	deckhouseReleaseChannels *DeckhouseReleaseService
@@ -52,7 +53,7 @@ type DeckhouseService struct {
 }
 
 // NewDeckhouseService creates a new deckhouse service
-func NewDeckhouseService(client registry.Client, logger *log.Logger) *DeckhouseService {
+func NewDeckhouseService(client client.Client, logger *log.Logger) *DeckhouseService {
 	return &DeckhouseService{
 		client: client,
 

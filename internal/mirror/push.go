@@ -31,13 +31,13 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/random"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
-	"github.com/deckhouse/deckhouse/pkg/registry"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/pusher"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	client "github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 const (
@@ -77,7 +77,7 @@ type PushServiceOptions struct {
 //	        ├── release/
 //	        └── <extra-name>/
 type PushService struct {
-	client     registry.Client
+	client     client.Client
 	options    *PushServiceOptions
 	pusher     *pusher.Service
 	logger     *dkplog.Logger
@@ -86,7 +86,7 @@ type PushService struct {
 
 // NewPushService creates a new PushService
 func NewPushService(
-	client registry.Client,
+	client client.Client,
 	options *PushServiceOptions,
 	logger *dkplog.Logger,
 	userLogger *log.SLogger,

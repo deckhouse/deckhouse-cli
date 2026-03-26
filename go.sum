@@ -420,8 +420,8 @@ github.com/deckarep/golang-set/v2 v2.6.0 h1:XfcQbWM1LlMB8BsJ8N9vW5ehnnPVIw0je80N
 github.com/deckarep/golang-set/v2 v2.6.0/go.mod h1:VAky9rY/yGXJOLEDv3OMci+7wtDpOF4IN+y82NBOac4=
 github.com/deckhouse/deckhouse/pkg/log v0.2.0 h1:6tmZQLwNb1o/hP1gzJQBjcwfA/bubbgObovXzxq+Exo=
 github.com/deckhouse/deckhouse/pkg/log v0.2.0/go.mod h1:pbAxTSDcPmwyl3wwKDcEB3qdxHnRxqTV+J0K+sha8bw=
-github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260303152757-642385fa96a8 h1:UaY4R7vvFGwGuW2H72Ju9AAigqqM7whdSBT6yrHjj2I=
-github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260303152757-642385fa96a8/go.mod h1:2TD5mf6e/lCbSayfycnVHd+yzpbcj0DOD2yypnv7eGQ=
+github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260326143935-b535ad6cb730 h1:kJs7prT4Aq/Ek5j5LO0dmIytTSPuMqfxpYK5L3tDYR0=
+github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260326143935-b535ad6cb730/go.mod h1:KDf44MqEif8jAKCehKJqOg0k4sJcnetKJKDGd0IFQjI=
 github.com/deckhouse/delivery-kit-sdk v1.0.1-0.20251022121655-0cbac8223333 h1:9YuKuSrRfTSdAaLIUwi0t4bkedoNgj3IMFXPcP/rkSo=
 github.com/deckhouse/delivery-kit-sdk v1.0.1-0.20251022121655-0cbac8223333/go.mod h1:iukQB9dt5DasWCI/XkjeyD5KtTJtHp5DMCGN8IS5PqA=
 github.com/deckhouse/delivery-kit/v2 v2.63.1-dk h1:1YDVwEJMoEfiNGdEuiuXIfyJ3Ux8evnCsmJYZrJBmHU=

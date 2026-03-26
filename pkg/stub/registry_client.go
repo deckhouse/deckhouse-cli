@@ -35,6 +35,7 @@ import (
 	"github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
+	localreg "github.com/deckhouse/deckhouse-cli/pkg/registry"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
@@ -449,7 +450,7 @@ func (i *ImageMetaStub) GetDigest() *v1.Hash {
 }
 
 // NewRegistryClientStub creates a new stub registry client
-func NewRegistryClientStub() registry.Client {
+func NewRegistryClientStub() localreg.Client {
 	stub := &RegistryClientStub{
 		registries: make(map[string]*RegistryData),
 	}
@@ -694,7 +695,7 @@ func (s *RegistryClientStub) createMockImageData(reg, repo, tag string) *ImageDa
 }
 
 // WithSegment creates a new client with an additional scope path segment
-func (s *RegistryClientStub) WithSegment(segments ...string) registry.Client {
+func (s *RegistryClientStub) WithSegment(segments ...string) localreg.Client {
 	// If no current registry is set, use the stub's deterministic default registry as base
 	base := s.currentRegistry
 	if base == "" {
@@ -918,4 +919,14 @@ func (s *RegistryClientStub) ListRepositories(_ context.Context, _ ...registry.L
 		}
 	}
 	return allRepos, nil
+}
+
+// DeleteTag removes a specific tag from the repository.
+func (s *RegistryClientStub) DeleteTag(_ context.Context, _ string) error {
+	return nil
+}
+
+// TagImage adds a new tag pointing to the same manifest as sourceTag.
+func (s *RegistryClientStub) TagImage(_ context.Context, _, _ string) error {
+	return nil
 }

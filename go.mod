@@ -5,10 +5,11 @@ go 1.24.13
 require (
 	github.com/Masterminds/semver/v3 v3.3.1
 	github.com/deckhouse/deckhouse/pkg/log v0.2.0
-	github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260303152757-642385fa96a8
+	github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260326143935-b535ad6cb730
 	github.com/deckhouse/virtualization/src/cli v1.5.1
 	github.com/fatih/color v1.18.0
 	github.com/fluxcd/flagger v1.36.1
+	github.com/go-logr/logr v1.4.3
 	github.com/gojuno/minimock/v3 v3.4.7
 	github.com/google/go-containerregistry v0.20.2
 	github.com/gosimple/slug v1.15.0
@@ -17,6 +18,7 @@ require (
 	github.com/hashicorp/vault v1.14.8
 	github.com/iancoleman/strcase v0.3.0
 	github.com/int128/kubelogin v1.28.0
+	github.com/mitchellh/go-wordwrap v1.0.1
 	github.com/muesli/termenv v0.16.0
 	github.com/pkg/errors v0.9.1
 	github.com/rs/zerolog v1.34.0
@@ -232,7 +234,6 @@ require (
 	github.com/go-jose/go-jose/v4 v4.0.5 // indirect
 	github.com/go-ldap/ldap/v3 v3.4.4 // indirect
 	github.com/go-ldap/ldif v0.0.0-20200320164324-fd88d9b715b3 // indirect
-	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/go-openapi/analysis v0.23.0 // indirect
@@ -433,7 +434,6 @@ require (
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
-	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/mitchellh/hashstructure v1.1.0 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/mitchellh/pointerstructure v1.2.1 // indirect

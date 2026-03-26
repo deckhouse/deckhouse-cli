@@ -268,6 +268,13 @@ func isProbeRejected(err error) bool {
 		return true
 	}
 
+	// 404 Not Found: default/kubernetes service always exists in a valid kube cluster.
+	// If the probe endpoint returns 404, it is not the same kubernetes API server.
+	// This also covers the case where ClusterIP belongs to a non-kubernetes service.
+	if apierrors.IsNotFound(err) {
+		return true
+	}
+
 	return false
 }
 
