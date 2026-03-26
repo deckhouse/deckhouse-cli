@@ -18,7 +18,8 @@ package service
 
 import (
 	"github.com/deckhouse/deckhouse/pkg/log"
-	"github.com/deckhouse/deckhouse/pkg/registry"
+
+	client "github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 const (
@@ -33,7 +34,7 @@ const (
 
 // ModuleService provides high-level operations for module management
 type ModuleService struct {
-	client registry.Client
+	client client.Client
 
 	*BasicService
 	moduleReleaseChannels *ModuleReleaseService
@@ -44,7 +45,7 @@ type ModuleService struct {
 }
 
 // NewModuleService creates a new module service
-func NewModuleService(client registry.Client, logger *log.Logger) *ModuleService {
+func NewModuleService(client client.Client, logger *log.Logger) *ModuleService {
 	return &ModuleService{
 		client: client,
 
@@ -80,7 +81,7 @@ func (s *ModuleService) ExtraImage(extraName string) *BasicService {
 }
 
 type ModulesService struct {
-	client registry.Client
+	client client.Client
 
 	*BasicService
 
@@ -89,7 +90,7 @@ type ModulesService struct {
 	logger *log.Logger
 }
 
-func NewModulesService(client registry.Client, logger *log.Logger) *ModulesService {
+func NewModulesService(client client.Client, logger *log.Logger) *ModulesService {
 	return &ModulesService{
 		client: client,
 

@@ -28,18 +28,19 @@ import (
 	"github.com/deckhouse/deckhouse/pkg/registry"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
+	client "github.com/deckhouse/deckhouse-cli/pkg/registry"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
 // BasicService provides common registry operations with standardized logging
 type BasicService struct {
 	name   string
-	client registry.Client
+	client client.Client
 	logger *log.Logger
 }
 
 // NewBasicService creates a new basic service
-func NewBasicService(name string, client registry.Client, logger *log.Logger) *BasicService {
+func NewBasicService(name string, client client.Client, logger *log.Logger) *BasicService {
 	return &BasicService{
 		name:   name,
 		client: client,

@@ -2,7 +2,7 @@
 
 package mock
 
-//go:generate minimock -i github.com/deckhouse/deckhouse/pkg/registry.Client -o registry_client_mock.go -n RegistryClientMock -p mock
+//go:generate minimock -i github.com/deckhouse/deckhouse-cli/pkg/registry.Client -o registry_client_mock.go -n RegistryClientMock -p mock
 
 import (
 	"context"
@@ -10,12 +10,13 @@ import (
 	mm_atomic "sync/atomic"
 	mm_time "time"
 
-	mm_registry "github.com/deckhouse/deckhouse/pkg/registry"
+	mm_client "github.com/deckhouse/deckhouse-cli/pkg/registry"
+	"github.com/deckhouse/deckhouse/pkg/registry"
 	"github.com/gojuno/minimock/v3"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
-// RegistryClientMock implements mm_registry.Client
+// RegistryClientMock implements mm_client.Client
 type RegistryClientMock struct {
 	t          minimock.Tester
 	finishOnce sync.Once
@@ -27,6 +28,13 @@ type RegistryClientMock struct {
 	beforeCheckImageExistsCounter uint64
 	CheckImageExistsMock          mRegistryClientMockCheckImageExists
 
+	funcDeleteTag          func(ctx context.Context, tag string) (err error)
+	funcDeleteTagOrigin    string
+	inspectFuncDeleteTag   func(ctx context.Context, tag string)
+	afterDeleteTagCounter  uint64
+	beforeDeleteTagCounter uint64
+	DeleteTagMock          mRegistryClientMockDeleteTag
+
 	funcGetDigest          func(ctx context.Context, tag string) (hp1 *v1.Hash, err error)
 	funcGetDigestOrigin    string
 	inspectFuncGetDigest   func(ctx context.Context, tag string)
@@ -34,9 +42,9 @@ type RegistryClientMock struct {
 	beforeGetDigestCounter uint64
 	GetDigestMock          mRegistryClientMockGetDigest
 
-	funcGetImage          func(ctx context.Context, tag string, opts ...mm_registry.ImageGetOption) (i1 mm_registry.Image, err error)
+	funcGetImage          func(ctx context.Context, tag string, opts ...registry.ImageGetOption) (i1 registry.Image, err error)
 	funcGetImageOrigin    string
-	inspectFuncGetImage   func(ctx context.Context, tag string, opts ...mm_registry.ImageGetOption)
+	inspectFuncGetImage   func(ctx context.Context, tag string, opts ...registry.ImageGetOption)
 	afterGetImageCounter  uint64
 	beforeGetImageCounter uint64
 	GetImageMock          mRegistryClientMockGetImage
@@ -48,7 +56,7 @@ type RegistryClientMock struct {
 	beforeGetImageConfigCounter uint64
 	GetImageConfigMock          mRegistryClientMockGetImageConfig
 
-	funcGetManifest          func(ctx context.Context, tag string) (m1 mm_registry.ManifestResult, err error)
+	funcGetManifest          func(ctx context.Context, tag string) (m1 registry.ManifestResult, err error)
 	funcGetManifestOrigin    string
 	inspectFuncGetManifest   func(ctx context.Context, tag string)
 	afterGetManifestCounter  uint64
@@ -62,28 +70,35 @@ type RegistryClientMock struct {
 	beforeGetRegistryCounter uint64
 	GetRegistryMock          mRegistryClientMockGetRegistry
 
-	funcListRepositories          func(ctx context.Context, opts ...mm_registry.ListRepositoriesOption) (sa1 []string, err error)
+	funcListRepositories          func(ctx context.Context, opts ...registry.ListRepositoriesOption) (sa1 []string, err error)
 	funcListRepositoriesOrigin    string
-	inspectFuncListRepositories   func(ctx context.Context, opts ...mm_registry.ListRepositoriesOption)
+	inspectFuncListRepositories   func(ctx context.Context, opts ...registry.ListRepositoriesOption)
 	afterListRepositoriesCounter  uint64
 	beforeListRepositoriesCounter uint64
 	ListRepositoriesMock          mRegistryClientMockListRepositories
 
-	funcListTags          func(ctx context.Context, opts ...mm_registry.ListTagsOption) (sa1 []string, err error)
+	funcListTags          func(ctx context.Context, opts ...registry.ListTagsOption) (sa1 []string, err error)
 	funcListTagsOrigin    string
-	inspectFuncListTags   func(ctx context.Context, opts ...mm_registry.ListTagsOption)
+	inspectFuncListTags   func(ctx context.Context, opts ...registry.ListTagsOption)
 	afterListTagsCounter  uint64
 	beforeListTagsCounter uint64
 	ListTagsMock          mRegistryClientMockListTags
 
-	funcPushImage          func(ctx context.Context, tag string, img v1.Image, opts ...mm_registry.ImagePushOption) (err error)
+	funcPushImage          func(ctx context.Context, tag string, img v1.Image, opts ...registry.ImagePushOption) (err error)
 	funcPushImageOrigin    string
-	inspectFuncPushImage   func(ctx context.Context, tag string, img v1.Image, opts ...mm_registry.ImagePushOption)
+	inspectFuncPushImage   func(ctx context.Context, tag string, img v1.Image, opts ...registry.ImagePushOption)
 	afterPushImageCounter  uint64
 	beforePushImageCounter uint64
 	PushImageMock          mRegistryClientMockPushImage
 
-	funcWithSegment          func(segments ...string) (c1 mm_registry.Client)
+	funcTagImage          func(ctx context.Context, sourceTag string, destTag string) (err error)
+	funcTagImageOrigin    string
+	inspectFuncTagImage   func(ctx context.Context, sourceTag string, destTag string)
+	afterTagImageCounter  uint64
+	beforeTagImageCounter uint64
+	TagImageMock          mRegistryClientMockTagImage
+
+	funcWithSegment          func(segments ...string) (c1 mm_client.Client)
 	funcWithSegmentOrigin    string
 	inspectFuncWithSegment   func(segments ...string)
 	afterWithSegmentCounter  uint64
@@ -91,7 +106,7 @@ type RegistryClientMock struct {
 	WithSegmentMock          mRegistryClientMockWithSegment
 }
 
-// NewRegistryClientMock returns a mock for mm_registry.Client
+// NewRegistryClientMock returns a mock for mm_client.Client
 func NewRegistryClientMock(t minimock.Tester) *RegistryClientMock {
 	m := &RegistryClientMock{t: t}
 
@@ -101,6 +116,9 @@ func NewRegistryClientMock(t minimock.Tester) *RegistryClientMock {
 
 	m.CheckImageExistsMock = mRegistryClientMockCheckImageExists{mock: m}
 	m.CheckImageExistsMock.callArgs = []*RegistryClientMockCheckImageExistsParams{}
+
+	m.DeleteTagMock = mRegistryClientMockDeleteTag{mock: m}
+	m.DeleteTagMock.callArgs = []*RegistryClientMockDeleteTagParams{}
 
 	m.GetDigestMock = mRegistryClientMockGetDigest{mock: m}
 	m.GetDigestMock.callArgs = []*RegistryClientMockGetDigestParams{}
@@ -124,6 +142,9 @@ func NewRegistryClientMock(t minimock.Tester) *RegistryClientMock {
 
 	m.PushImageMock = mRegistryClientMockPushImage{mock: m}
 	m.PushImageMock.callArgs = []*RegistryClientMockPushImageParams{}
+
+	m.TagImageMock = mRegistryClientMockTagImage{mock: m}
+	m.TagImageMock.callArgs = []*RegistryClientMockTagImageParams{}
 
 	m.WithSegmentMock = mRegistryClientMockWithSegment{mock: m}
 	m.WithSegmentMock.callArgs = []*RegistryClientMockWithSegmentParams{}
@@ -345,7 +366,7 @@ func (mmCheckImageExists *mRegistryClientMockCheckImageExists) invocationsDone()
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// CheckImageExists implements mm_registry.Client
+// CheckImageExists implements mm_client.Client
 func (mmCheckImageExists *RegistryClientMock) CheckImageExists(ctx context.Context, tag string) (err error) {
 	mm_atomic.AddUint64(&mmCheckImageExists.beforeCheckImageExistsCounter, 1)
 	defer mm_atomic.AddUint64(&mmCheckImageExists.afterCheckImageExistsCounter, 1)
@@ -472,6 +493,348 @@ func (m *RegistryClientMock) MinimockCheckImageExistsInspect() {
 	if !m.CheckImageExistsMock.invocationsDone() && afterCheckImageExistsCounter > 0 {
 		m.t.Errorf("Expected %d calls to RegistryClientMock.CheckImageExists at\n%s but found %d calls",
 			mm_atomic.LoadUint64(&m.CheckImageExistsMock.expectedInvocations), m.CheckImageExistsMock.expectedInvocationsOrigin, afterCheckImageExistsCounter)
+	}
+}
+
+type mRegistryClientMockDeleteTag struct {
+	optional           bool
+	mock               *RegistryClientMock
+	defaultExpectation *RegistryClientMockDeleteTagExpectation
+	expectations       []*RegistryClientMockDeleteTagExpectation
+
+	callArgs []*RegistryClientMockDeleteTagParams
+	mutex    sync.RWMutex
+
+	expectedInvocations       uint64
+	expectedInvocationsOrigin string
+}
+
+// RegistryClientMockDeleteTagExpectation specifies expectation struct of the Client.DeleteTag
+type RegistryClientMockDeleteTagExpectation struct {
+	mock               *RegistryClientMock
+	params             *RegistryClientMockDeleteTagParams
+	paramPtrs          *RegistryClientMockDeleteTagParamPtrs
+	expectationOrigins RegistryClientMockDeleteTagExpectationOrigins
+	results            *RegistryClientMockDeleteTagResults
+	returnOrigin       string
+	Counter            uint64
+}
+
+// RegistryClientMockDeleteTagParams contains parameters of the Client.DeleteTag
+type RegistryClientMockDeleteTagParams struct {
+	ctx context.Context
+	tag string
+}
+
+// RegistryClientMockDeleteTagParamPtrs contains pointers to parameters of the Client.DeleteTag
+type RegistryClientMockDeleteTagParamPtrs struct {
+	ctx *context.Context
+	tag *string
+}
+
+// RegistryClientMockDeleteTagResults contains results of the Client.DeleteTag
+type RegistryClientMockDeleteTagResults struct {
+	err error
+}
+
+// RegistryClientMockDeleteTagOrigins contains origins of expectations of the Client.DeleteTag
+type RegistryClientMockDeleteTagExpectationOrigins struct {
+	origin    string
+	originCtx string
+	originTag string
+}
+
+// Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
+// the test will fail minimock's automatic final call check if the mocked method was not called at least once.
+// Optional() makes method check to work in '0 or more' mode.
+// It is NOT RECOMMENDED to use this option unless you really need it, as default behaviour helps to
+// catch the problems when the expected method call is totally skipped during test run.
+func (mmDeleteTag *mRegistryClientMockDeleteTag) Optional() *mRegistryClientMockDeleteTag {
+	mmDeleteTag.optional = true
+	return mmDeleteTag
+}
+
+// Expect sets up expected params for Client.DeleteTag
+func (mmDeleteTag *mRegistryClientMockDeleteTag) Expect(ctx context.Context, tag string) *mRegistryClientMockDeleteTag {
+	if mmDeleteTag.mock.funcDeleteTag != nil {
+		mmDeleteTag.mock.t.Fatalf("RegistryClientMock.DeleteTag mock is already set by Set")
+	}
+
+	if mmDeleteTag.defaultExpectation == nil {
+		mmDeleteTag.defaultExpectation = &RegistryClientMockDeleteTagExpectation{}
+	}
+
+	if mmDeleteTag.defaultExpectation.paramPtrs != nil {
+		mmDeleteTag.mock.t.Fatalf("RegistryClientMock.DeleteTag mock is already set by ExpectParams functions")
+	}
+
+	mmDeleteTag.defaultExpectation.params = &RegistryClientMockDeleteTagParams{ctx, tag}
+	mmDeleteTag.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
+	for _, e := range mmDeleteTag.expectations {
+		if minimock.Equal(e.params, mmDeleteTag.defaultExpectation.params) {
+			mmDeleteTag.mock.t.Fatalf("Expectation set by When has same params: %#v", *mmDeleteTag.defaultExpectation.params)
+		}
+	}
+
+	return mmDeleteTag
+}
+
+// ExpectCtxParam1 sets up expected param ctx for Client.DeleteTag
+func (mmDeleteTag *mRegistryClientMockDeleteTag) ExpectCtxParam1(ctx context.Context) *mRegistryClientMockDeleteTag {
+	if mmDeleteTag.mock.funcDeleteTag != nil {
+		mmDeleteTag.mock.t.Fatalf("RegistryClientMock.DeleteTag mock is already set by Set")
+	}
+
+	if mmDeleteTag.defaultExpectation == nil {
+		mmDeleteTag.defaultExpectation = &RegistryClientMockDeleteTagExpectation{}
+	}
+
+	if mmDeleteTag.defaultExpectation.params != nil {
+		mmDeleteTag.mock.t.Fatalf("RegistryClientMock.DeleteTag mock is already set by Expect")
+	}
+
+	if mmDeleteTag.defaultExpectation.paramPtrs == nil {
+		mmDeleteTag.defaultExpectation.paramPtrs = &RegistryClientMockDeleteTagParamPtrs{}
+	}
+	mmDeleteTag.defaultExpectation.paramPtrs.ctx = &ctx
+	mmDeleteTag.defaultExpectation.expectationOrigins.originCtx = minimock.CallerInfo(1)
+
+	return mmDeleteTag
+}
+
+// ExpectTagParam2 sets up expected param tag for Client.DeleteTag
+func (mmDeleteTag *mRegistryClientMockDeleteTag) ExpectTagParam2(tag string) *mRegistryClientMockDeleteTag {
+	if mmDeleteTag.mock.funcDeleteTag != nil {
+		mmDeleteTag.mock.t.Fatalf("RegistryClientMock.DeleteTag mock is already set by Set")
+	}
+
+	if mmDeleteTag.defaultExpectation == nil {
+		mmDeleteTag.defaultExpectation = &RegistryClientMockDeleteTagExpectation{}
+	}
+
+	if mmDeleteTag.defaultExpectation.params != nil {
+		mmDeleteTag.mock.t.Fatalf("RegistryClientMock.DeleteTag mock is already set by Expect")
+	}
+
+	if mmDeleteTag.defaultExpectation.paramPtrs == nil {
+		mmDeleteTag.defaultExpectation.paramPtrs = &RegistryClientMockDeleteTagParamPtrs{}
+	}
+	mmDeleteTag.defaultExpectation.paramPtrs.tag = &tag
+	mmDeleteTag.defaultExpectation.expectationOrigins.originTag = minimock.CallerInfo(1)
+
+	return mmDeleteTag
+}
+
+// Inspect accepts an inspector function that has same arguments as the Client.DeleteTag
+func (mmDeleteTag *mRegistryClientMockDeleteTag) Inspect(f func(ctx context.Context, tag string)) *mRegistryClientMockDeleteTag {
+	if mmDeleteTag.mock.inspectFuncDeleteTag != nil {
+		mmDeleteTag.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.DeleteTag")
+	}
+
+	mmDeleteTag.mock.inspectFuncDeleteTag = f
+
+	return mmDeleteTag
+}
+
+// Return sets up results that will be returned by Client.DeleteTag
+func (mmDeleteTag *mRegistryClientMockDeleteTag) Return(err error) *RegistryClientMock {
+	if mmDeleteTag.mock.funcDeleteTag != nil {
+		mmDeleteTag.mock.t.Fatalf("RegistryClientMock.DeleteTag mock is already set by Set")
+	}
+
+	if mmDeleteTag.defaultExpectation == nil {
+		mmDeleteTag.defaultExpectation = &RegistryClientMockDeleteTagExpectation{mock: mmDeleteTag.mock}
+	}
+	mmDeleteTag.defaultExpectation.results = &RegistryClientMockDeleteTagResults{err}
+	mmDeleteTag.defaultExpectation.returnOrigin = minimock.CallerInfo(1)
+	return mmDeleteTag.mock
+}
+
+// Set uses given function f to mock the Client.DeleteTag method
+func (mmDeleteTag *mRegistryClientMockDeleteTag) Set(f func(ctx context.Context, tag string) (err error)) *RegistryClientMock {
+	if mmDeleteTag.defaultExpectation != nil {
+		mmDeleteTag.mock.t.Fatalf("Default expectation is already set for the Client.DeleteTag method")
+	}
+
+	if len(mmDeleteTag.expectations) > 0 {
+		mmDeleteTag.mock.t.Fatalf("Some expectations are already set for the Client.DeleteTag method")
+	}
+
+	mmDeleteTag.mock.funcDeleteTag = f
+	mmDeleteTag.mock.funcDeleteTagOrigin = minimock.CallerInfo(1)
+	return mmDeleteTag.mock
+}
+
+// When sets expectation for the Client.DeleteTag which will trigger the result defined by the following
+// Then helper
+func (mmDeleteTag *mRegistryClientMockDeleteTag) When(ctx context.Context, tag string) *RegistryClientMockDeleteTagExpectation {
+	if mmDeleteTag.mock.funcDeleteTag != nil {
+		mmDeleteTag.mock.t.Fatalf("RegistryClientMock.DeleteTag mock is already set by Set")
+	}
+
+	expectation := &RegistryClientMockDeleteTagExpectation{
+		mock:               mmDeleteTag.mock,
+		params:             &RegistryClientMockDeleteTagParams{ctx, tag},
+		expectationOrigins: RegistryClientMockDeleteTagExpectationOrigins{origin: minimock.CallerInfo(1)},
+	}
+	mmDeleteTag.expectations = append(mmDeleteTag.expectations, expectation)
+	return expectation
+}
+
+// Then sets up Client.DeleteTag return parameters for the expectation previously defined by the When method
+func (e *RegistryClientMockDeleteTagExpectation) Then(err error) *RegistryClientMock {
+	e.results = &RegistryClientMockDeleteTagResults{err}
+	return e.mock
+}
+
+// Times sets number of times Client.DeleteTag should be invoked
+func (mmDeleteTag *mRegistryClientMockDeleteTag) Times(n uint64) *mRegistryClientMockDeleteTag {
+	if n == 0 {
+		mmDeleteTag.mock.t.Fatalf("Times of RegistryClientMock.DeleteTag mock can not be zero")
+	}
+	mm_atomic.StoreUint64(&mmDeleteTag.expectedInvocations, n)
+	mmDeleteTag.expectedInvocationsOrigin = minimock.CallerInfo(1)
+	return mmDeleteTag
+}
+
+func (mmDeleteTag *mRegistryClientMockDeleteTag) invocationsDone() bool {
+	if len(mmDeleteTag.expectations) == 0 && mmDeleteTag.defaultExpectation == nil && mmDeleteTag.mock.funcDeleteTag == nil {
+		return true
+	}
+
+	totalInvocations := mm_atomic.LoadUint64(&mmDeleteTag.mock.afterDeleteTagCounter)
+	expectedInvocations := mm_atomic.LoadUint64(&mmDeleteTag.expectedInvocations)
+
+	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
+}
+
+// DeleteTag implements mm_client.Client
+func (mmDeleteTag *RegistryClientMock) DeleteTag(ctx context.Context, tag string) (err error) {
+	mm_atomic.AddUint64(&mmDeleteTag.beforeDeleteTagCounter, 1)
+	defer mm_atomic.AddUint64(&mmDeleteTag.afterDeleteTagCounter, 1)
+
+	mmDeleteTag.t.Helper()
+
+	if mmDeleteTag.inspectFuncDeleteTag != nil {
+		mmDeleteTag.inspectFuncDeleteTag(ctx, tag)
+	}
+
+	mm_params := RegistryClientMockDeleteTagParams{ctx, tag}
+
+	// Record call args
+	mmDeleteTag.DeleteTagMock.mutex.Lock()
+	mmDeleteTag.DeleteTagMock.callArgs = append(mmDeleteTag.DeleteTagMock.callArgs, &mm_params)
+	mmDeleteTag.DeleteTagMock.mutex.Unlock()
+
+	for _, e := range mmDeleteTag.DeleteTagMock.expectations {
+		if minimock.Equal(*e.params, mm_params) {
+			mm_atomic.AddUint64(&e.Counter, 1)
+			return e.results.err
+		}
+	}
+
+	if mmDeleteTag.DeleteTagMock.defaultExpectation != nil {
+		mm_atomic.AddUint64(&mmDeleteTag.DeleteTagMock.defaultExpectation.Counter, 1)
+		mm_want := mmDeleteTag.DeleteTagMock.defaultExpectation.params
+		mm_want_ptrs := mmDeleteTag.DeleteTagMock.defaultExpectation.paramPtrs
+
+		mm_got := RegistryClientMockDeleteTagParams{ctx, tag}
+
+		if mm_want_ptrs != nil {
+
+			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
+				mmDeleteTag.t.Errorf("RegistryClientMock.DeleteTag got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmDeleteTag.DeleteTagMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
+			}
+
+			if mm_want_ptrs.tag != nil && !minimock.Equal(*mm_want_ptrs.tag, mm_got.tag) {
+				mmDeleteTag.t.Errorf("RegistryClientMock.DeleteTag got unexpected parameter tag, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmDeleteTag.DeleteTagMock.defaultExpectation.expectationOrigins.originTag, *mm_want_ptrs.tag, mm_got.tag, minimock.Diff(*mm_want_ptrs.tag, mm_got.tag))
+			}
+
+		} else if mm_want != nil && !minimock.Equal(*mm_want, mm_got) {
+			mmDeleteTag.t.Errorf("RegistryClientMock.DeleteTag got unexpected parameters, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+				mmDeleteTag.DeleteTagMock.defaultExpectation.expectationOrigins.origin, *mm_want, mm_got, minimock.Diff(*mm_want, mm_got))
+		}
+
+		mm_results := mmDeleteTag.DeleteTagMock.defaultExpectation.results
+		if mm_results == nil {
+			mmDeleteTag.t.Fatal("No results are set for the RegistryClientMock.DeleteTag")
+		}
+		return (*mm_results).err
+	}
+	if mmDeleteTag.funcDeleteTag != nil {
+		return mmDeleteTag.funcDeleteTag(ctx, tag)
+	}
+	mmDeleteTag.t.Fatalf("Unexpected call to RegistryClientMock.DeleteTag. %v %v", ctx, tag)
+	return
+}
+
+// DeleteTagAfterCounter returns a count of finished RegistryClientMock.DeleteTag invocations
+func (mmDeleteTag *RegistryClientMock) DeleteTagAfterCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmDeleteTag.afterDeleteTagCounter)
+}
+
+// DeleteTagBeforeCounter returns a count of RegistryClientMock.DeleteTag invocations
+func (mmDeleteTag *RegistryClientMock) DeleteTagBeforeCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmDeleteTag.beforeDeleteTagCounter)
+}
+
+// Calls returns a list of arguments used in each call to RegistryClientMock.DeleteTag.
+// The list is in the same order as the calls were made (i.e. recent calls have a higher index)
+func (mmDeleteTag *mRegistryClientMockDeleteTag) Calls() []*RegistryClientMockDeleteTagParams {
+	mmDeleteTag.mutex.RLock()
+
+	argCopy := make([]*RegistryClientMockDeleteTagParams, len(mmDeleteTag.callArgs))
+	copy(argCopy, mmDeleteTag.callArgs)
+
+	mmDeleteTag.mutex.RUnlock()
+
+	return argCopy
+}
+
+// MinimockDeleteTagDone returns true if the count of the DeleteTag invocations corresponds
+// the number of defined expectations
+func (m *RegistryClientMock) MinimockDeleteTagDone() bool {
+	if m.DeleteTagMock.optional {
+		// Optional methods provide '0 or more' call count restriction.
+		return true
+	}
+
+	for _, e := range m.DeleteTagMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			return false
+		}
+	}
+
+	return m.DeleteTagMock.invocationsDone()
+}
+
+// MinimockDeleteTagInspect logs each unmet expectation
+func (m *RegistryClientMock) MinimockDeleteTagInspect() {
+	for _, e := range m.DeleteTagMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			m.t.Errorf("Expected call to RegistryClientMock.DeleteTag at\n%s with params: %#v", e.expectationOrigins.origin, *e.params)
+		}
+	}
+
+	afterDeleteTagCounter := mm_atomic.LoadUint64(&m.afterDeleteTagCounter)
+	// if default expectation was set then invocations count should be greater than zero
+	if m.DeleteTagMock.defaultExpectation != nil && afterDeleteTagCounter < 1 {
+		if m.DeleteTagMock.defaultExpectation.params == nil {
+			m.t.Errorf("Expected call to RegistryClientMock.DeleteTag at\n%s", m.DeleteTagMock.defaultExpectation.returnOrigin)
+		} else {
+			m.t.Errorf("Expected call to RegistryClientMock.DeleteTag at\n%s with params: %#v", m.DeleteTagMock.defaultExpectation.expectationOrigins.origin, *m.DeleteTagMock.defaultExpectation.params)
+		}
+	}
+	// if func was set then invocations count should be greater than zero
+	if m.funcDeleteTag != nil && afterDeleteTagCounter < 1 {
+		m.t.Errorf("Expected call to RegistryClientMock.DeleteTag at\n%s", m.funcDeleteTagOrigin)
+	}
+
+	if !m.DeleteTagMock.invocationsDone() && afterDeleteTagCounter > 0 {
+		m.t.Errorf("Expected %d calls to RegistryClientMock.DeleteTag at\n%s but found %d calls",
+			mm_atomic.LoadUint64(&m.DeleteTagMock.expectedInvocations), m.DeleteTagMock.expectedInvocationsOrigin, afterDeleteTagCounter)
 	}
 }
 
@@ -688,7 +1051,7 @@ func (mmGetDigest *mRegistryClientMockGetDigest) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// GetDigest implements mm_registry.Client
+// GetDigest implements mm_client.Client
 func (mmGetDigest *RegistryClientMock) GetDigest(ctx context.Context, tag string) (hp1 *v1.Hash, err error) {
 	mm_atomic.AddUint64(&mmGetDigest.beforeGetDigestCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetDigest.afterGetDigestCounter, 1)
@@ -846,19 +1209,19 @@ type RegistryClientMockGetImageExpectation struct {
 type RegistryClientMockGetImageParams struct {
 	ctx  context.Context
 	tag  string
-	opts []mm_registry.ImageGetOption
+	opts []registry.ImageGetOption
 }
 
 // RegistryClientMockGetImageParamPtrs contains pointers to parameters of the Client.GetImage
 type RegistryClientMockGetImageParamPtrs struct {
 	ctx  *context.Context
 	tag  *string
-	opts *[]mm_registry.ImageGetOption
+	opts *[]registry.ImageGetOption
 }
 
 // RegistryClientMockGetImageResults contains results of the Client.GetImage
 type RegistryClientMockGetImageResults struct {
-	i1  mm_registry.Image
+	i1  registry.Image
 	err error
 }
 
@@ -881,7 +1244,7 @@ func (mmGetImage *mRegistryClientMockGetImage) Optional() *mRegistryClientMockGe
 }
 
 // Expect sets up expected params for Client.GetImage
-func (mmGetImage *mRegistryClientMockGetImage) Expect(ctx context.Context, tag string, opts ...mm_registry.ImageGetOption) *mRegistryClientMockGetImage {
+func (mmGetImage *mRegistryClientMockGetImage) Expect(ctx context.Context, tag string, opts ...registry.ImageGetOption) *mRegistryClientMockGetImage {
 	if mmGetImage.mock.funcGetImage != nil {
 		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by Set")
 	}
@@ -952,7 +1315,7 @@ func (mmGetImage *mRegistryClientMockGetImage) ExpectTagParam2(tag string) *mReg
 }
 
 // ExpectOptsParam3 sets up expected param opts for Client.GetImage
-func (mmGetImage *mRegistryClientMockGetImage) ExpectOptsParam3(opts ...mm_registry.ImageGetOption) *mRegistryClientMockGetImage {
+func (mmGetImage *mRegistryClientMockGetImage) ExpectOptsParam3(opts ...registry.ImageGetOption) *mRegistryClientMockGetImage {
 	if mmGetImage.mock.funcGetImage != nil {
 		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by Set")
 	}
@@ -975,7 +1338,7 @@ func (mmGetImage *mRegistryClientMockGetImage) ExpectOptsParam3(opts ...mm_regis
 }
 
 // Inspect accepts an inspector function that has same arguments as the Client.GetImage
-func (mmGetImage *mRegistryClientMockGetImage) Inspect(f func(ctx context.Context, tag string, opts ...mm_registry.ImageGetOption)) *mRegistryClientMockGetImage {
+func (mmGetImage *mRegistryClientMockGetImage) Inspect(f func(ctx context.Context, tag string, opts ...registry.ImageGetOption)) *mRegistryClientMockGetImage {
 	if mmGetImage.mock.inspectFuncGetImage != nil {
 		mmGetImage.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.GetImage")
 	}
@@ -986,7 +1349,7 @@ func (mmGetImage *mRegistryClientMockGetImage) Inspect(f func(ctx context.Contex
 }
 
 // Return sets up results that will be returned by Client.GetImage
-func (mmGetImage *mRegistryClientMockGetImage) Return(i1 mm_registry.Image, err error) *RegistryClientMock {
+func (mmGetImage *mRegistryClientMockGetImage) Return(i1 registry.Image, err error) *RegistryClientMock {
 	if mmGetImage.mock.funcGetImage != nil {
 		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by Set")
 	}
@@ -1000,7 +1363,7 @@ func (mmGetImage *mRegistryClientMockGetImage) Return(i1 mm_registry.Image, err 
 }
 
 // Set uses given function f to mock the Client.GetImage method
-func (mmGetImage *mRegistryClientMockGetImage) Set(f func(ctx context.Context, tag string, opts ...mm_registry.ImageGetOption) (i1 mm_registry.Image, err error)) *RegistryClientMock {
+func (mmGetImage *mRegistryClientMockGetImage) Set(f func(ctx context.Context, tag string, opts ...registry.ImageGetOption) (i1 registry.Image, err error)) *RegistryClientMock {
 	if mmGetImage.defaultExpectation != nil {
 		mmGetImage.mock.t.Fatalf("Default expectation is already set for the Client.GetImage method")
 	}
@@ -1016,7 +1379,7 @@ func (mmGetImage *mRegistryClientMockGetImage) Set(f func(ctx context.Context, t
 
 // When sets expectation for the Client.GetImage which will trigger the result defined by the following
 // Then helper
-func (mmGetImage *mRegistryClientMockGetImage) When(ctx context.Context, tag string, opts ...mm_registry.ImageGetOption) *RegistryClientMockGetImageExpectation {
+func (mmGetImage *mRegistryClientMockGetImage) When(ctx context.Context, tag string, opts ...registry.ImageGetOption) *RegistryClientMockGetImageExpectation {
 	if mmGetImage.mock.funcGetImage != nil {
 		mmGetImage.mock.t.Fatalf("RegistryClientMock.GetImage mock is already set by Set")
 	}
@@ -1031,7 +1394,7 @@ func (mmGetImage *mRegistryClientMockGetImage) When(ctx context.Context, tag str
 }
 
 // Then sets up Client.GetImage return parameters for the expectation previously defined by the When method
-func (e *RegistryClientMockGetImageExpectation) Then(i1 mm_registry.Image, err error) *RegistryClientMock {
+func (e *RegistryClientMockGetImageExpectation) Then(i1 registry.Image, err error) *RegistryClientMock {
 	e.results = &RegistryClientMockGetImageResults{i1, err}
 	return e.mock
 }
@@ -1057,8 +1420,8 @@ func (mmGetImage *mRegistryClientMockGetImage) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// GetImage implements mm_registry.Client
-func (mmGetImage *RegistryClientMock) GetImage(ctx context.Context, tag string, opts ...mm_registry.ImageGetOption) (i1 mm_registry.Image, err error) {
+// GetImage implements mm_client.Client
+func (mmGetImage *RegistryClientMock) GetImage(ctx context.Context, tag string, opts ...registry.ImageGetOption) (i1 registry.Image, err error) {
 	mm_atomic.AddUint64(&mmGetImage.beforeGetImageCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetImage.afterGetImageCounter, 1)
 
@@ -1405,7 +1768,7 @@ func (mmGetImageConfig *mRegistryClientMockGetImageConfig) invocationsDone() boo
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// GetImageConfig implements mm_registry.Client
+// GetImageConfig implements mm_client.Client
 func (mmGetImageConfig *RegistryClientMock) GetImageConfig(ctx context.Context, tag string) (cp1 *v1.ConfigFile, err error) {
 	mm_atomic.AddUint64(&mmGetImageConfig.beforeGetImageConfigCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetImageConfig.afterGetImageConfigCounter, 1)
@@ -1573,7 +1936,7 @@ type RegistryClientMockGetManifestParamPtrs struct {
 
 // RegistryClientMockGetManifestResults contains results of the Client.GetManifest
 type RegistryClientMockGetManifestResults struct {
-	m1  mm_registry.ManifestResult
+	m1  registry.ManifestResult
 	err error
 }
 
@@ -1677,7 +2040,7 @@ func (mmGetManifest *mRegistryClientMockGetManifest) Inspect(f func(ctx context.
 }
 
 // Return sets up results that will be returned by Client.GetManifest
-func (mmGetManifest *mRegistryClientMockGetManifest) Return(m1 mm_registry.ManifestResult, err error) *RegistryClientMock {
+func (mmGetManifest *mRegistryClientMockGetManifest) Return(m1 registry.ManifestResult, err error) *RegistryClientMock {
 	if mmGetManifest.mock.funcGetManifest != nil {
 		mmGetManifest.mock.t.Fatalf("RegistryClientMock.GetManifest mock is already set by Set")
 	}
@@ -1691,7 +2054,7 @@ func (mmGetManifest *mRegistryClientMockGetManifest) Return(m1 mm_registry.Manif
 }
 
 // Set uses given function f to mock the Client.GetManifest method
-func (mmGetManifest *mRegistryClientMockGetManifest) Set(f func(ctx context.Context, tag string) (m1 mm_registry.ManifestResult, err error)) *RegistryClientMock {
+func (mmGetManifest *mRegistryClientMockGetManifest) Set(f func(ctx context.Context, tag string) (m1 registry.ManifestResult, err error)) *RegistryClientMock {
 	if mmGetManifest.defaultExpectation != nil {
 		mmGetManifest.mock.t.Fatalf("Default expectation is already set for the Client.GetManifest method")
 	}
@@ -1722,7 +2085,7 @@ func (mmGetManifest *mRegistryClientMockGetManifest) When(ctx context.Context, t
 }
 
 // Then sets up Client.GetManifest return parameters for the expectation previously defined by the When method
-func (e *RegistryClientMockGetManifestExpectation) Then(m1 mm_registry.ManifestResult, err error) *RegistryClientMock {
+func (e *RegistryClientMockGetManifestExpectation) Then(m1 registry.ManifestResult, err error) *RegistryClientMock {
 	e.results = &RegistryClientMockGetManifestResults{m1, err}
 	return e.mock
 }
@@ -1748,8 +2111,8 @@ func (mmGetManifest *mRegistryClientMockGetManifest) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// GetManifest implements mm_registry.Client
-func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, tag string) (m1 mm_registry.ManifestResult, err error) {
+// GetManifest implements mm_client.Client
+func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, tag string) (m1 registry.ManifestResult, err error) {
 	mm_atomic.AddUint64(&mmGetManifest.beforeGetManifestCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetManifest.afterGetManifestCounter, 1)
 
@@ -1986,7 +2349,7 @@ func (mmGetRegistry *mRegistryClientMockGetRegistry) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// GetRegistry implements mm_registry.Client
+// GetRegistry implements mm_client.Client
 func (mmGetRegistry *RegistryClientMock) GetRegistry() (s1 string) {
 	mm_atomic.AddUint64(&mmGetRegistry.beforeGetRegistryCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetRegistry.afterGetRegistryCounter, 1)
@@ -2091,13 +2454,13 @@ type RegistryClientMockListRepositoriesExpectation struct {
 // RegistryClientMockListRepositoriesParams contains parameters of the Client.ListRepositories
 type RegistryClientMockListRepositoriesParams struct {
 	ctx  context.Context
-	opts []mm_registry.ListRepositoriesOption
+	opts []registry.ListRepositoriesOption
 }
 
 // RegistryClientMockListRepositoriesParamPtrs contains pointers to parameters of the Client.ListRepositories
 type RegistryClientMockListRepositoriesParamPtrs struct {
 	ctx  *context.Context
-	opts *[]mm_registry.ListRepositoriesOption
+	opts *[]registry.ListRepositoriesOption
 }
 
 // RegistryClientMockListRepositoriesResults contains results of the Client.ListRepositories
@@ -2124,7 +2487,7 @@ func (mmListRepositories *mRegistryClientMockListRepositories) Optional() *mRegi
 }
 
 // Expect sets up expected params for Client.ListRepositories
-func (mmListRepositories *mRegistryClientMockListRepositories) Expect(ctx context.Context, opts ...mm_registry.ListRepositoriesOption) *mRegistryClientMockListRepositories {
+func (mmListRepositories *mRegistryClientMockListRepositories) Expect(ctx context.Context, opts ...registry.ListRepositoriesOption) *mRegistryClientMockListRepositories {
 	if mmListRepositories.mock.funcListRepositories != nil {
 		mmListRepositories.mock.t.Fatalf("RegistryClientMock.ListRepositories mock is already set by Set")
 	}
@@ -2172,7 +2535,7 @@ func (mmListRepositories *mRegistryClientMockListRepositories) ExpectCtxParam1(c
 }
 
 // ExpectOptsParam2 sets up expected param opts for Client.ListRepositories
-func (mmListRepositories *mRegistryClientMockListRepositories) ExpectOptsParam2(opts ...mm_registry.ListRepositoriesOption) *mRegistryClientMockListRepositories {
+func (mmListRepositories *mRegistryClientMockListRepositories) ExpectOptsParam2(opts ...registry.ListRepositoriesOption) *mRegistryClientMockListRepositories {
 	if mmListRepositories.mock.funcListRepositories != nil {
 		mmListRepositories.mock.t.Fatalf("RegistryClientMock.ListRepositories mock is already set by Set")
 	}
@@ -2195,7 +2558,7 @@ func (mmListRepositories *mRegistryClientMockListRepositories) ExpectOptsParam2(
 }
 
 // Inspect accepts an inspector function that has same arguments as the Client.ListRepositories
-func (mmListRepositories *mRegistryClientMockListRepositories) Inspect(f func(ctx context.Context, opts ...mm_registry.ListRepositoriesOption)) *mRegistryClientMockListRepositories {
+func (mmListRepositories *mRegistryClientMockListRepositories) Inspect(f func(ctx context.Context, opts ...registry.ListRepositoriesOption)) *mRegistryClientMockListRepositories {
 	if mmListRepositories.mock.inspectFuncListRepositories != nil {
 		mmListRepositories.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.ListRepositories")
 	}
@@ -2220,7 +2583,7 @@ func (mmListRepositories *mRegistryClientMockListRepositories) Return(sa1 []stri
 }
 
 // Set uses given function f to mock the Client.ListRepositories method
-func (mmListRepositories *mRegistryClientMockListRepositories) Set(f func(ctx context.Context, opts ...mm_registry.ListRepositoriesOption) (sa1 []string, err error)) *RegistryClientMock {
+func (mmListRepositories *mRegistryClientMockListRepositories) Set(f func(ctx context.Context, opts ...registry.ListRepositoriesOption) (sa1 []string, err error)) *RegistryClientMock {
 	if mmListRepositories.defaultExpectation != nil {
 		mmListRepositories.mock.t.Fatalf("Default expectation is already set for the Client.ListRepositories method")
 	}
@@ -2236,7 +2599,7 @@ func (mmListRepositories *mRegistryClientMockListRepositories) Set(f func(ctx co
 
 // When sets expectation for the Client.ListRepositories which will trigger the result defined by the following
 // Then helper
-func (mmListRepositories *mRegistryClientMockListRepositories) When(ctx context.Context, opts ...mm_registry.ListRepositoriesOption) *RegistryClientMockListRepositoriesExpectation {
+func (mmListRepositories *mRegistryClientMockListRepositories) When(ctx context.Context, opts ...registry.ListRepositoriesOption) *RegistryClientMockListRepositoriesExpectation {
 	if mmListRepositories.mock.funcListRepositories != nil {
 		mmListRepositories.mock.t.Fatalf("RegistryClientMock.ListRepositories mock is already set by Set")
 	}
@@ -2277,8 +2640,8 @@ func (mmListRepositories *mRegistryClientMockListRepositories) invocationsDone()
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// ListRepositories implements mm_registry.Client
-func (mmListRepositories *RegistryClientMock) ListRepositories(ctx context.Context, opts ...mm_registry.ListRepositoriesOption) (sa1 []string, err error) {
+// ListRepositories implements mm_client.Client
+func (mmListRepositories *RegistryClientMock) ListRepositories(ctx context.Context, opts ...registry.ListRepositoriesOption) (sa1 []string, err error) {
 	mm_atomic.AddUint64(&mmListRepositories.beforeListRepositoriesCounter, 1)
 	defer mm_atomic.AddUint64(&mmListRepositories.afterListRepositoriesCounter, 1)
 
@@ -2434,13 +2797,13 @@ type RegistryClientMockListTagsExpectation struct {
 // RegistryClientMockListTagsParams contains parameters of the Client.ListTags
 type RegistryClientMockListTagsParams struct {
 	ctx  context.Context
-	opts []mm_registry.ListTagsOption
+	opts []registry.ListTagsOption
 }
 
 // RegistryClientMockListTagsParamPtrs contains pointers to parameters of the Client.ListTags
 type RegistryClientMockListTagsParamPtrs struct {
 	ctx  *context.Context
-	opts *[]mm_registry.ListTagsOption
+	opts *[]registry.ListTagsOption
 }
 
 // RegistryClientMockListTagsResults contains results of the Client.ListTags
@@ -2467,7 +2830,7 @@ func (mmListTags *mRegistryClientMockListTags) Optional() *mRegistryClientMockLi
 }
 
 // Expect sets up expected params for Client.ListTags
-func (mmListTags *mRegistryClientMockListTags) Expect(ctx context.Context, opts ...mm_registry.ListTagsOption) *mRegistryClientMockListTags {
+func (mmListTags *mRegistryClientMockListTags) Expect(ctx context.Context, opts ...registry.ListTagsOption) *mRegistryClientMockListTags {
 	if mmListTags.mock.funcListTags != nil {
 		mmListTags.mock.t.Fatalf("RegistryClientMock.ListTags mock is already set by Set")
 	}
@@ -2515,7 +2878,7 @@ func (mmListTags *mRegistryClientMockListTags) ExpectCtxParam1(ctx context.Conte
 }
 
 // ExpectOptsParam2 sets up expected param opts for Client.ListTags
-func (mmListTags *mRegistryClientMockListTags) ExpectOptsParam2(opts ...mm_registry.ListTagsOption) *mRegistryClientMockListTags {
+func (mmListTags *mRegistryClientMockListTags) ExpectOptsParam2(opts ...registry.ListTagsOption) *mRegistryClientMockListTags {
 	if mmListTags.mock.funcListTags != nil {
 		mmListTags.mock.t.Fatalf("RegistryClientMock.ListTags mock is already set by Set")
 	}
@@ -2538,7 +2901,7 @@ func (mmListTags *mRegistryClientMockListTags) ExpectOptsParam2(opts ...mm_regis
 }
 
 // Inspect accepts an inspector function that has same arguments as the Client.ListTags
-func (mmListTags *mRegistryClientMockListTags) Inspect(f func(ctx context.Context, opts ...mm_registry.ListTagsOption)) *mRegistryClientMockListTags {
+func (mmListTags *mRegistryClientMockListTags) Inspect(f func(ctx context.Context, opts ...registry.ListTagsOption)) *mRegistryClientMockListTags {
 	if mmListTags.mock.inspectFuncListTags != nil {
 		mmListTags.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.ListTags")
 	}
@@ -2563,7 +2926,7 @@ func (mmListTags *mRegistryClientMockListTags) Return(sa1 []string, err error) *
 }
 
 // Set uses given function f to mock the Client.ListTags method
-func (mmListTags *mRegistryClientMockListTags) Set(f func(ctx context.Context, opts ...mm_registry.ListTagsOption) (sa1 []string, err error)) *RegistryClientMock {
+func (mmListTags *mRegistryClientMockListTags) Set(f func(ctx context.Context, opts ...registry.ListTagsOption) (sa1 []string, err error)) *RegistryClientMock {
 	if mmListTags.defaultExpectation != nil {
 		mmListTags.mock.t.Fatalf("Default expectation is already set for the Client.ListTags method")
 	}
@@ -2579,7 +2942,7 @@ func (mmListTags *mRegistryClientMockListTags) Set(f func(ctx context.Context, o
 
 // When sets expectation for the Client.ListTags which will trigger the result defined by the following
 // Then helper
-func (mmListTags *mRegistryClientMockListTags) When(ctx context.Context, opts ...mm_registry.ListTagsOption) *RegistryClientMockListTagsExpectation {
+func (mmListTags *mRegistryClientMockListTags) When(ctx context.Context, opts ...registry.ListTagsOption) *RegistryClientMockListTagsExpectation {
 	if mmListTags.mock.funcListTags != nil {
 		mmListTags.mock.t.Fatalf("RegistryClientMock.ListTags mock is already set by Set")
 	}
@@ -2620,8 +2983,8 @@ func (mmListTags *mRegistryClientMockListTags) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// ListTags implements mm_registry.Client
-func (mmListTags *RegistryClientMock) ListTags(ctx context.Context, opts ...mm_registry.ListTagsOption) (sa1 []string, err error) {
+// ListTags implements mm_client.Client
+func (mmListTags *RegistryClientMock) ListTags(ctx context.Context, opts ...registry.ListTagsOption) (sa1 []string, err error) {
 	mm_atomic.AddUint64(&mmListTags.beforeListTagsCounter, 1)
 	defer mm_atomic.AddUint64(&mmListTags.afterListTagsCounter, 1)
 
@@ -2779,7 +3142,7 @@ type RegistryClientMockPushImageParams struct {
 	ctx  context.Context
 	tag  string
 	img  v1.Image
-	opts []mm_registry.ImagePushOption
+	opts []registry.ImagePushOption
 }
 
 // RegistryClientMockPushImageParamPtrs contains pointers to parameters of the Client.PushImage
@@ -2787,7 +3150,7 @@ type RegistryClientMockPushImageParamPtrs struct {
 	ctx  *context.Context
 	tag  *string
 	img  *v1.Image
-	opts *[]mm_registry.ImagePushOption
+	opts *[]registry.ImagePushOption
 }
 
 // RegistryClientMockPushImageResults contains results of the Client.PushImage
@@ -2815,7 +3178,7 @@ func (mmPushImage *mRegistryClientMockPushImage) Optional() *mRegistryClientMock
 }
 
 // Expect sets up expected params for Client.PushImage
-func (mmPushImage *mRegistryClientMockPushImage) Expect(ctx context.Context, tag string, img v1.Image, opts ...mm_registry.ImagePushOption) *mRegistryClientMockPushImage {
+func (mmPushImage *mRegistryClientMockPushImage) Expect(ctx context.Context, tag string, img v1.Image, opts ...registry.ImagePushOption) *mRegistryClientMockPushImage {
 	if mmPushImage.mock.funcPushImage != nil {
 		mmPushImage.mock.t.Fatalf("RegistryClientMock.PushImage mock is already set by Set")
 	}
@@ -2909,7 +3272,7 @@ func (mmPushImage *mRegistryClientMockPushImage) ExpectImgParam3(img v1.Image) *
 }
 
 // ExpectOptsParam4 sets up expected param opts for Client.PushImage
-func (mmPushImage *mRegistryClientMockPushImage) ExpectOptsParam4(opts ...mm_registry.ImagePushOption) *mRegistryClientMockPushImage {
+func (mmPushImage *mRegistryClientMockPushImage) ExpectOptsParam4(opts ...registry.ImagePushOption) *mRegistryClientMockPushImage {
 	if mmPushImage.mock.funcPushImage != nil {
 		mmPushImage.mock.t.Fatalf("RegistryClientMock.PushImage mock is already set by Set")
 	}
@@ -2932,7 +3295,7 @@ func (mmPushImage *mRegistryClientMockPushImage) ExpectOptsParam4(opts ...mm_reg
 }
 
 // Inspect accepts an inspector function that has same arguments as the Client.PushImage
-func (mmPushImage *mRegistryClientMockPushImage) Inspect(f func(ctx context.Context, tag string, img v1.Image, opts ...mm_registry.ImagePushOption)) *mRegistryClientMockPushImage {
+func (mmPushImage *mRegistryClientMockPushImage) Inspect(f func(ctx context.Context, tag string, img v1.Image, opts ...registry.ImagePushOption)) *mRegistryClientMockPushImage {
 	if mmPushImage.mock.inspectFuncPushImage != nil {
 		mmPushImage.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.PushImage")
 	}
@@ -2957,7 +3320,7 @@ func (mmPushImage *mRegistryClientMockPushImage) Return(err error) *RegistryClie
 }
 
 // Set uses given function f to mock the Client.PushImage method
-func (mmPushImage *mRegistryClientMockPushImage) Set(f func(ctx context.Context, tag string, img v1.Image, opts ...mm_registry.ImagePushOption) (err error)) *RegistryClientMock {
+func (mmPushImage *mRegistryClientMockPushImage) Set(f func(ctx context.Context, tag string, img v1.Image, opts ...registry.ImagePushOption) (err error)) *RegistryClientMock {
 	if mmPushImage.defaultExpectation != nil {
 		mmPushImage.mock.t.Fatalf("Default expectation is already set for the Client.PushImage method")
 	}
@@ -2973,7 +3336,7 @@ func (mmPushImage *mRegistryClientMockPushImage) Set(f func(ctx context.Context,
 
 // When sets expectation for the Client.PushImage which will trigger the result defined by the following
 // Then helper
-func (mmPushImage *mRegistryClientMockPushImage) When(ctx context.Context, tag string, img v1.Image, opts ...mm_registry.ImagePushOption) *RegistryClientMockPushImageExpectation {
+func (mmPushImage *mRegistryClientMockPushImage) When(ctx context.Context, tag string, img v1.Image, opts ...registry.ImagePushOption) *RegistryClientMockPushImageExpectation {
 	if mmPushImage.mock.funcPushImage != nil {
 		mmPushImage.mock.t.Fatalf("RegistryClientMock.PushImage mock is already set by Set")
 	}
@@ -3014,8 +3377,8 @@ func (mmPushImage *mRegistryClientMockPushImage) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// PushImage implements mm_registry.Client
-func (mmPushImage *RegistryClientMock) PushImage(ctx context.Context, tag string, img v1.Image, opts ...mm_registry.ImagePushOption) (err error) {
+// PushImage implements mm_client.Client
+func (mmPushImage *RegistryClientMock) PushImage(ctx context.Context, tag string, img v1.Image, opts ...registry.ImagePushOption) (err error) {
 	mm_atomic.AddUint64(&mmPushImage.beforePushImageCounter, 1)
 	defer mm_atomic.AddUint64(&mmPushImage.afterPushImageCounter, 1)
 
@@ -3154,6 +3517,379 @@ func (m *RegistryClientMock) MinimockPushImageInspect() {
 	}
 }
 
+type mRegistryClientMockTagImage struct {
+	optional           bool
+	mock               *RegistryClientMock
+	defaultExpectation *RegistryClientMockTagImageExpectation
+	expectations       []*RegistryClientMockTagImageExpectation
+
+	callArgs []*RegistryClientMockTagImageParams
+	mutex    sync.RWMutex
+
+	expectedInvocations       uint64
+	expectedInvocationsOrigin string
+}
+
+// RegistryClientMockTagImageExpectation specifies expectation struct of the Client.TagImage
+type RegistryClientMockTagImageExpectation struct {
+	mock               *RegistryClientMock
+	params             *RegistryClientMockTagImageParams
+	paramPtrs          *RegistryClientMockTagImageParamPtrs
+	expectationOrigins RegistryClientMockTagImageExpectationOrigins
+	results            *RegistryClientMockTagImageResults
+	returnOrigin       string
+	Counter            uint64
+}
+
+// RegistryClientMockTagImageParams contains parameters of the Client.TagImage
+type RegistryClientMockTagImageParams struct {
+	ctx       context.Context
+	sourceTag string
+	destTag   string
+}
+
+// RegistryClientMockTagImageParamPtrs contains pointers to parameters of the Client.TagImage
+type RegistryClientMockTagImageParamPtrs struct {
+	ctx       *context.Context
+	sourceTag *string
+	destTag   *string
+}
+
+// RegistryClientMockTagImageResults contains results of the Client.TagImage
+type RegistryClientMockTagImageResults struct {
+	err error
+}
+
+// RegistryClientMockTagImageOrigins contains origins of expectations of the Client.TagImage
+type RegistryClientMockTagImageExpectationOrigins struct {
+	origin          string
+	originCtx       string
+	originSourceTag string
+	originDestTag   string
+}
+
+// Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
+// the test will fail minimock's automatic final call check if the mocked method was not called at least once.
+// Optional() makes method check to work in '0 or more' mode.
+// It is NOT RECOMMENDED to use this option unless you really need it, as default behaviour helps to
+// catch the problems when the expected method call is totally skipped during test run.
+func (mmTagImage *mRegistryClientMockTagImage) Optional() *mRegistryClientMockTagImage {
+	mmTagImage.optional = true
+	return mmTagImage
+}
+
+// Expect sets up expected params for Client.TagImage
+func (mmTagImage *mRegistryClientMockTagImage) Expect(ctx context.Context, sourceTag string, destTag string) *mRegistryClientMockTagImage {
+	if mmTagImage.mock.funcTagImage != nil {
+		mmTagImage.mock.t.Fatalf("RegistryClientMock.TagImage mock is already set by Set")
+	}
+
+	if mmTagImage.defaultExpectation == nil {
+		mmTagImage.defaultExpectation = &RegistryClientMockTagImageExpectation{}
+	}
+
+	if mmTagImage.defaultExpectation.paramPtrs != nil {
+		mmTagImage.mock.t.Fatalf("RegistryClientMock.TagImage mock is already set by ExpectParams functions")
+	}
+
+	mmTagImage.defaultExpectation.params = &RegistryClientMockTagImageParams{ctx, sourceTag, destTag}
+	mmTagImage.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
+	for _, e := range mmTagImage.expectations {
+		if minimock.Equal(e.params, mmTagImage.defaultExpectation.params) {
+			mmTagImage.mock.t.Fatalf("Expectation set by When has same params: %#v", *mmTagImage.defaultExpectation.params)
+		}
+	}
+
+	return mmTagImage
+}
+
+// ExpectCtxParam1 sets up expected param ctx for Client.TagImage
+func (mmTagImage *mRegistryClientMockTagImage) ExpectCtxParam1(ctx context.Context) *mRegistryClientMockTagImage {
+	if mmTagImage.mock.funcTagImage != nil {
+		mmTagImage.mock.t.Fatalf("RegistryClientMock.TagImage mock is already set by Set")
+	}
+
+	if mmTagImage.defaultExpectation == nil {
+		mmTagImage.defaultExpectation = &RegistryClientMockTagImageExpectation{}
+	}
+
+	if mmTagImage.defaultExpectation.params != nil {
+		mmTagImage.mock.t.Fatalf("RegistryClientMock.TagImage mock is already set by Expect")
+	}
+
+	if mmTagImage.defaultExpectation.paramPtrs == nil {
+		mmTagImage.defaultExpectation.paramPtrs = &RegistryClientMockTagImageParamPtrs{}
+	}
+	mmTagImage.defaultExpectation.paramPtrs.ctx = &ctx
+	mmTagImage.defaultExpectation.expectationOrigins.originCtx = minimock.CallerInfo(1)
+
+	return mmTagImage
+}
+
+// ExpectSourceTagParam2 sets up expected param sourceTag for Client.TagImage
+func (mmTagImage *mRegistryClientMockTagImage) ExpectSourceTagParam2(sourceTag string) *mRegistryClientMockTagImage {
+	if mmTagImage.mock.funcTagImage != nil {
+		mmTagImage.mock.t.Fatalf("RegistryClientMock.TagImage mock is already set by Set")
+	}
+
+	if mmTagImage.defaultExpectation == nil {
+		mmTagImage.defaultExpectation = &RegistryClientMockTagImageExpectation{}
+	}
+
+	if mmTagImage.defaultExpectation.params != nil {
+		mmTagImage.mock.t.Fatalf("RegistryClientMock.TagImage mock is already set by Expect")
+	}
+
+	if mmTagImage.defaultExpectation.paramPtrs == nil {
+		mmTagImage.defaultExpectation.paramPtrs = &RegistryClientMockTagImageParamPtrs{}
+	}
+	mmTagImage.defaultExpectation.paramPtrs.sourceTag = &sourceTag
+	mmTagImage.defaultExpectation.expectationOrigins.originSourceTag = minimock.CallerInfo(1)
+
+	return mmTagImage
+}
+
+// ExpectDestTagParam3 sets up expected param destTag for Client.TagImage
+func (mmTagImage *mRegistryClientMockTagImage) ExpectDestTagParam3(destTag string) *mRegistryClientMockTagImage {
+	if mmTagImage.mock.funcTagImage != nil {
+		mmTagImage.mock.t.Fatalf("RegistryClientMock.TagImage mock is already set by Set")
+	}
+
+	if mmTagImage.defaultExpectation == nil {
+		mmTagImage.defaultExpectation = &RegistryClientMockTagImageExpectation{}
+	}
+
+	if mmTagImage.defaultExpectation.params != nil {
+		mmTagImage.mock.t.Fatalf("RegistryClientMock.TagImage mock is already set by Expect")
+	}
+
+	if mmTagImage.defaultExpectation.paramPtrs == nil {
+		mmTagImage.defaultExpectation.paramPtrs = &RegistryClientMockTagImageParamPtrs{}
+	}
+	mmTagImage.defaultExpectation.paramPtrs.destTag = &destTag
+	mmTagImage.defaultExpectation.expectationOrigins.originDestTag = minimock.CallerInfo(1)
+
+	return mmTagImage
+}
+
+// Inspect accepts an inspector function that has same arguments as the Client.TagImage
+func (mmTagImage *mRegistryClientMockTagImage) Inspect(f func(ctx context.Context, sourceTag string, destTag string)) *mRegistryClientMockTagImage {
+	if mmTagImage.mock.inspectFuncTagImage != nil {
+		mmTagImage.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.TagImage")
+	}
+
+	mmTagImage.mock.inspectFuncTagImage = f
+
+	return mmTagImage
+}
+
+// Return sets up results that will be returned by Client.TagImage
+func (mmTagImage *mRegistryClientMockTagImage) Return(err error) *RegistryClientMock {
+	if mmTagImage.mock.funcTagImage != nil {
+		mmTagImage.mock.t.Fatalf("RegistryClientMock.TagImage mock is already set by Set")
+	}
+
+	if mmTagImage.defaultExpectation == nil {
+		mmTagImage.defaultExpectation = &RegistryClientMockTagImageExpectation{mock: mmTagImage.mock}
+	}
+	mmTagImage.defaultExpectation.results = &RegistryClientMockTagImageResults{err}
+	mmTagImage.defaultExpectation.returnOrigin = minimock.CallerInfo(1)
+	return mmTagImage.mock
+}
+
+// Set uses given function f to mock the Client.TagImage method
+func (mmTagImage *mRegistryClientMockTagImage) Set(f func(ctx context.Context, sourceTag string, destTag string) (err error)) *RegistryClientMock {
+	if mmTagImage.defaultExpectation != nil {
+		mmTagImage.mock.t.Fatalf("Default expectation is already set for the Client.TagImage method")
+	}
+
+	if len(mmTagImage.expectations) > 0 {
+		mmTagImage.mock.t.Fatalf("Some expectations are already set for the Client.TagImage method")
+	}
+
+	mmTagImage.mock.funcTagImage = f
+	mmTagImage.mock.funcTagImageOrigin = minimock.CallerInfo(1)
+	return mmTagImage.mock
+}
+
+// When sets expectation for the Client.TagImage which will trigger the result defined by the following
+// Then helper
+func (mmTagImage *mRegistryClientMockTagImage) When(ctx context.Context, sourceTag string, destTag string) *RegistryClientMockTagImageExpectation {
+	if mmTagImage.mock.funcTagImage != nil {
+		mmTagImage.mock.t.Fatalf("RegistryClientMock.TagImage mock is already set by Set")
+	}
+
+	expectation := &RegistryClientMockTagImageExpectation{
+		mock:               mmTagImage.mock,
+		params:             &RegistryClientMockTagImageParams{ctx, sourceTag, destTag},
+		expectationOrigins: RegistryClientMockTagImageExpectationOrigins{origin: minimock.CallerInfo(1)},
+	}
+	mmTagImage.expectations = append(mmTagImage.expectations, expectation)
+	return expectation
+}
+
+// Then sets up Client.TagImage return parameters for the expectation previously defined by the When method
+func (e *RegistryClientMockTagImageExpectation) Then(err error) *RegistryClientMock {
+	e.results = &RegistryClientMockTagImageResults{err}
+	return e.mock
+}
+
+// Times sets number of times Client.TagImage should be invoked
+func (mmTagImage *mRegistryClientMockTagImage) Times(n uint64) *mRegistryClientMockTagImage {
+	if n == 0 {
+		mmTagImage.mock.t.Fatalf("Times of RegistryClientMock.TagImage mock can not be zero")
+	}
+	mm_atomic.StoreUint64(&mmTagImage.expectedInvocations, n)
+	mmTagImage.expectedInvocationsOrigin = minimock.CallerInfo(1)
+	return mmTagImage
+}
+
+func (mmTagImage *mRegistryClientMockTagImage) invocationsDone() bool {
+	if len(mmTagImage.expectations) == 0 && mmTagImage.defaultExpectation == nil && mmTagImage.mock.funcTagImage == nil {
+		return true
+	}
+
+	totalInvocations := mm_atomic.LoadUint64(&mmTagImage.mock.afterTagImageCounter)
+	expectedInvocations := mm_atomic.LoadUint64(&mmTagImage.expectedInvocations)
+
+	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
+}
+
+// TagImage implements mm_client.Client
+func (mmTagImage *RegistryClientMock) TagImage(ctx context.Context, sourceTag string, destTag string) (err error) {
+	mm_atomic.AddUint64(&mmTagImage.beforeTagImageCounter, 1)
+	defer mm_atomic.AddUint64(&mmTagImage.afterTagImageCounter, 1)
+
+	mmTagImage.t.Helper()
+
+	if mmTagImage.inspectFuncTagImage != nil {
+		mmTagImage.inspectFuncTagImage(ctx, sourceTag, destTag)
+	}
+
+	mm_params := RegistryClientMockTagImageParams{ctx, sourceTag, destTag}
+
+	// Record call args
+	mmTagImage.TagImageMock.mutex.Lock()
+	mmTagImage.TagImageMock.callArgs = append(mmTagImage.TagImageMock.callArgs, &mm_params)
+	mmTagImage.TagImageMock.mutex.Unlock()
+
+	for _, e := range mmTagImage.TagImageMock.expectations {
+		if minimock.Equal(*e.params, mm_params) {
+			mm_atomic.AddUint64(&e.Counter, 1)
+			return e.results.err
+		}
+	}
+
+	if mmTagImage.TagImageMock.defaultExpectation != nil {
+		mm_atomic.AddUint64(&mmTagImage.TagImageMock.defaultExpectation.Counter, 1)
+		mm_want := mmTagImage.TagImageMock.defaultExpectation.params
+		mm_want_ptrs := mmTagImage.TagImageMock.defaultExpectation.paramPtrs
+
+		mm_got := RegistryClientMockTagImageParams{ctx, sourceTag, destTag}
+
+		if mm_want_ptrs != nil {
+
+			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
+				mmTagImage.t.Errorf("RegistryClientMock.TagImage got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmTagImage.TagImageMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
+			}
+
+			if mm_want_ptrs.sourceTag != nil && !minimock.Equal(*mm_want_ptrs.sourceTag, mm_got.sourceTag) {
+				mmTagImage.t.Errorf("RegistryClientMock.TagImage got unexpected parameter sourceTag, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmTagImage.TagImageMock.defaultExpectation.expectationOrigins.originSourceTag, *mm_want_ptrs.sourceTag, mm_got.sourceTag, minimock.Diff(*mm_want_ptrs.sourceTag, mm_got.sourceTag))
+			}
+
+			if mm_want_ptrs.destTag != nil && !minimock.Equal(*mm_want_ptrs.destTag, mm_got.destTag) {
+				mmTagImage.t.Errorf("RegistryClientMock.TagImage got unexpected parameter destTag, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmTagImage.TagImageMock.defaultExpectation.expectationOrigins.originDestTag, *mm_want_ptrs.destTag, mm_got.destTag, minimock.Diff(*mm_want_ptrs.destTag, mm_got.destTag))
+			}
+
+		} else if mm_want != nil && !minimock.Equal(*mm_want, mm_got) {
+			mmTagImage.t.Errorf("RegistryClientMock.TagImage got unexpected parameters, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+				mmTagImage.TagImageMock.defaultExpectation.expectationOrigins.origin, *mm_want, mm_got, minimock.Diff(*mm_want, mm_got))
+		}
+
+		mm_results := mmTagImage.TagImageMock.defaultExpectation.results
+		if mm_results == nil {
+			mmTagImage.t.Fatal("No results are set for the RegistryClientMock.TagImage")
+		}
+		return (*mm_results).err
+	}
+	if mmTagImage.funcTagImage != nil {
+		return mmTagImage.funcTagImage(ctx, sourceTag, destTag)
+	}
+	mmTagImage.t.Fatalf("Unexpected call to RegistryClientMock.TagImage. %v %v %v", ctx, sourceTag, destTag)
+	return
+}
+
+// TagImageAfterCounter returns a count of finished RegistryClientMock.TagImage invocations
+func (mmTagImage *RegistryClientMock) TagImageAfterCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmTagImage.afterTagImageCounter)
+}
+
+// TagImageBeforeCounter returns a count of RegistryClientMock.TagImage invocations
+func (mmTagImage *RegistryClientMock) TagImageBeforeCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmTagImage.beforeTagImageCounter)
+}
+
+// Calls returns a list of arguments used in each call to RegistryClientMock.TagImage.
+// The list is in the same order as the calls were made (i.e. recent calls have a higher index)
+func (mmTagImage *mRegistryClientMockTagImage) Calls() []*RegistryClientMockTagImageParams {
+	mmTagImage.mutex.RLock()
+
+	argCopy := make([]*RegistryClientMockTagImageParams, len(mmTagImage.callArgs))
+	copy(argCopy, mmTagImage.callArgs)
+
+	mmTagImage.mutex.RUnlock()
+
+	return argCopy
+}
+
+// MinimockTagImageDone returns true if the count of the TagImage invocations corresponds
+// the number of defined expectations
+func (m *RegistryClientMock) MinimockTagImageDone() bool {
+	if m.TagImageMock.optional {
+		// Optional methods provide '0 or more' call count restriction.
+		return true
+	}
+
+	for _, e := range m.TagImageMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			return false
+		}
+	}
+
+	return m.TagImageMock.invocationsDone()
+}
+
+// MinimockTagImageInspect logs each unmet expectation
+func (m *RegistryClientMock) MinimockTagImageInspect() {
+	for _, e := range m.TagImageMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			m.t.Errorf("Expected call to RegistryClientMock.TagImage at\n%s with params: %#v", e.expectationOrigins.origin, *e.params)
+		}
+	}
+
+	afterTagImageCounter := mm_atomic.LoadUint64(&m.afterTagImageCounter)
+	// if default expectation was set then invocations count should be greater than zero
+	if m.TagImageMock.defaultExpectation != nil && afterTagImageCounter < 1 {
+		if m.TagImageMock.defaultExpectation.params == nil {
+			m.t.Errorf("Expected call to RegistryClientMock.TagImage at\n%s", m.TagImageMock.defaultExpectation.returnOrigin)
+		} else {
+			m.t.Errorf("Expected call to RegistryClientMock.TagImage at\n%s with params: %#v", m.TagImageMock.defaultExpectation.expectationOrigins.origin, *m.TagImageMock.defaultExpectation.params)
+		}
+	}
+	// if func was set then invocations count should be greater than zero
+	if m.funcTagImage != nil && afterTagImageCounter < 1 {
+		m.t.Errorf("Expected call to RegistryClientMock.TagImage at\n%s", m.funcTagImageOrigin)
+	}
+
+	if !m.TagImageMock.invocationsDone() && afterTagImageCounter > 0 {
+		m.t.Errorf("Expected %d calls to RegistryClientMock.TagImage at\n%s but found %d calls",
+			mm_atomic.LoadUint64(&m.TagImageMock.expectedInvocations), m.TagImageMock.expectedInvocationsOrigin, afterTagImageCounter)
+	}
+}
+
 type mRegistryClientMockWithSegment struct {
 	optional           bool
 	mock               *RegistryClientMock
@@ -3190,7 +3926,7 @@ type RegistryClientMockWithSegmentParamPtrs struct {
 
 // RegistryClientMockWithSegmentResults contains results of the Client.WithSegment
 type RegistryClientMockWithSegmentResults struct {
-	c1 mm_registry.Client
+	c1 mm_client.Client
 }
 
 // RegistryClientMockWithSegmentOrigins contains origins of expectations of the Client.WithSegment
@@ -3269,7 +4005,7 @@ func (mmWithSegment *mRegistryClientMockWithSegment) Inspect(f func(segments ...
 }
 
 // Return sets up results that will be returned by Client.WithSegment
-func (mmWithSegment *mRegistryClientMockWithSegment) Return(c1 mm_registry.Client) *RegistryClientMock {
+func (mmWithSegment *mRegistryClientMockWithSegment) Return(c1 mm_client.Client) *RegistryClientMock {
 	if mmWithSegment.mock.funcWithSegment != nil {
 		mmWithSegment.mock.t.Fatalf("RegistryClientMock.WithSegment mock is already set by Set")
 	}
@@ -3283,7 +4019,7 @@ func (mmWithSegment *mRegistryClientMockWithSegment) Return(c1 mm_registry.Clien
 }
 
 // Set uses given function f to mock the Client.WithSegment method
-func (mmWithSegment *mRegistryClientMockWithSegment) Set(f func(segments ...string) (c1 mm_registry.Client)) *RegistryClientMock {
+func (mmWithSegment *mRegistryClientMockWithSegment) Set(f func(segments ...string) (c1 mm_client.Client)) *RegistryClientMock {
 	if mmWithSegment.defaultExpectation != nil {
 		mmWithSegment.mock.t.Fatalf("Default expectation is already set for the Client.WithSegment method")
 	}
@@ -3314,7 +4050,7 @@ func (mmWithSegment *mRegistryClientMockWithSegment) When(segments ...string) *R
 }
 
 // Then sets up Client.WithSegment return parameters for the expectation previously defined by the When method
-func (e *RegistryClientMockWithSegmentExpectation) Then(c1 mm_registry.Client) *RegistryClientMock {
+func (e *RegistryClientMockWithSegmentExpectation) Then(c1 mm_client.Client) *RegistryClientMock {
 	e.results = &RegistryClientMockWithSegmentResults{c1}
 	return e.mock
 }
@@ -3340,8 +4076,8 @@ func (mmWithSegment *mRegistryClientMockWithSegment) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// WithSegment implements mm_registry.Client
-func (mmWithSegment *RegistryClientMock) WithSegment(segments ...string) (c1 mm_registry.Client) {
+// WithSegment implements mm_client.Client
+func (mmWithSegment *RegistryClientMock) WithSegment(segments ...string) (c1 mm_client.Client) {
 	mm_atomic.AddUint64(&mmWithSegment.beforeWithSegmentCounter, 1)
 	defer mm_atomic.AddUint64(&mmWithSegment.afterWithSegmentCounter, 1)
 
@@ -3471,6 +4207,8 @@ func (m *RegistryClientMock) MinimockFinish() {
 		if !m.minimockDone() {
 			m.MinimockCheckImageExistsInspect()
 
+			m.MinimockDeleteTagInspect()
+
 			m.MinimockGetDigestInspect()
 
 			m.MinimockGetImageInspect()
@@ -3486,6 +4224,8 @@ func (m *RegistryClientMock) MinimockFinish() {
 			m.MinimockListTagsInspect()
 
 			m.MinimockPushImageInspect()
+
+			m.MinimockTagImageInspect()
 
 			m.MinimockWithSegmentInspect()
 		}
@@ -3512,6 +4252,7 @@ func (m *RegistryClientMock) minimockDone() bool {
 	done := true
 	return done &&
 		m.MinimockCheckImageExistsDone() &&
+		m.MinimockDeleteTagDone() &&
 		m.MinimockGetDigestDone() &&
 		m.MinimockGetImageDone() &&
 		m.MinimockGetImageConfigDone() &&
@@ -3520,5 +4261,6 @@ func (m *RegistryClientMock) minimockDone() bool {
 		m.MinimockListRepositoriesDone() &&
 		m.MinimockListTagsDone() &&
 		m.MinimockPushImageDone() &&
+		m.MinimockTagImageDone() &&
 		m.MinimockWithSegmentDone()
 }

@@ -31,11 +31,11 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
-	"github.com/deckhouse/deckhouse/pkg/registry"
 	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
+	client "github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 var digestRegex = regexp.MustCompile(`sha256:([a-f0-9]{64})`)
@@ -53,7 +53,7 @@ func ExtractImageDigestsFromDeckhouseInstaller(
 	installerTag string,
 	installersLayout layout.Path,
 	prevDigests map[string]struct{},
-	client registry.Client,
+	client client.Client,
 ) (map[string]struct{}, error) {
 	logger := mirrorCtx.Logger
 
@@ -181,7 +181,7 @@ func FindVexImage(
 	nameOpts []name.Option,
 	_ []remote.Option,
 	digest string,
-	client registry.Client,
+	client client.Client,
 ) (string, error) {
 	logger := params.Logger
 

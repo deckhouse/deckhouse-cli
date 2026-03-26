@@ -28,13 +28,13 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
-	"github.com/deckhouse/deckhouse/pkg/registry"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
+	client "github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 const (
@@ -70,7 +70,7 @@ func (s *Service) PackageExists(bundleDir, pkgName string) bool {
 }
 
 // PushLayout pushes all images from an OCI layout to the registry
-func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client registry.Client) error {
+func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client client.Client) error {
 	index, err := layoutPath.ImageIndex()
 	if err != nil {
 		return fmt.Errorf("read OCI image index: %w", err)

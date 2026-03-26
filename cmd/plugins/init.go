@@ -23,9 +23,10 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
-	"github.com/deckhouse/deckhouse/pkg/registry/client"
+	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	d8flags "github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
+	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -60,12 +61,13 @@ func (pc *PluginsCommand) InitPluginServices() {
 		slog.Bool("tls_skip_verify", d8flags.TLSSkipVerify))
 
 	// Create base client with registry host only
-	pc.pluginRegistryClient = client.NewClientWithOptions(registryPath, &client.Options{
-		Auth:          auth,
-		Insecure:      d8flags.Insecure,
-		TLSSkipVerify: d8flags.TLSSkipVerify,
-		Logger:        pc.logger.Named("registry-client"),
-	})
+	clientOpts := []regclient.Option{
+		regclient.WithAuth(auth),
+		regclient.WithInsecure(d8flags.Insecure),
+		regclient.WithTLSSkipVerify(d8flags.TLSSkipVerify),
+		regclient.WithLogger(pc.logger.Named("registry-client")),
+	}
+	pc.pluginRegistryClient = pkgclient.NewFromOptions(registryPath, clientOpts...)
 
 	pc.logger.Debug("Creating plugin service with scoped client",
 		slog.String("path", registryPath))
