@@ -233,6 +233,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 	clientOpts := []regclient.Option{
 		regclient.WithInsecure(p.params.Insecure),
 		regclient.WithTLSSkipVerify(p.params.SkipTLSVerification),
+		regclient.WithTimeout(0),
 		regclient.WithLogger(logger),
 	}
 

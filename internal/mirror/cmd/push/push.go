@@ -201,6 +201,7 @@ func (p *Pusher) executeNewPush() error {
 		regclient.WithInsecure(p.pushParams.Insecure),
 		regclient.WithTLSSkipVerify(p.pushParams.SkipTLSVerification),
 		regclient.WithAuth(p.pushParams.RegistryAuth),
+		regclient.WithTimeout(0),
 		regclient.WithLogger(logger),
 	}
 
