@@ -31,9 +31,10 @@ import (
 
 	"github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry"
-	"github.com/deckhouse/deckhouse/pkg/registry/client"
+	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
+	localclient "github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 const (
@@ -42,12 +43,12 @@ const (
 
 // PluginService provides high-level operations for plugin management
 type PluginService struct {
-	client registry.Client
+	client localclient.Client
 	log    *log.Logger
 }
 
 // NewPluginService creates a new plugin service
-func NewPluginService(client registry.Client, logger *log.Logger) *PluginService {
+func NewPluginService(client localclient.Client, logger *log.Logger) *PluginService {
 	return &PluginService{
 		client: client,
 		log:    logger,
@@ -162,7 +163,7 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, dest
 	pluginClient := s.client.WithSegment(pluginName)
 
 	platform := &v1.Platform{Architecture: runtime.GOARCH, OS: runtime.GOOS}
-	img, err := pluginClient.GetImage(ctx, tag, client.WithPlatform{Platform: platform})
+	img, err := pluginClient.GetImage(ctx, tag, regclient.WithPlatform{Platform: platform})
 	if err != nil {
 		return fmt.Errorf("failed to get image: %w", err)
 	}

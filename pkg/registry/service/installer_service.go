@@ -2,18 +2,19 @@ package service
 
 import (
 	"github.com/deckhouse/deckhouse/pkg/log"
-	"github.com/deckhouse/deckhouse/pkg/registry"
+
+	client "github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 type InstallerServices struct {
 	*BasicService
 
-	client registry.Client
+	client client.Client
 
 	logger *log.Logger
 }
 
-func NewInstallerServices(name string, client registry.Client, logger *log.Logger) *InstallerServices {
+func NewInstallerServices(name string, client client.Client, logger *log.Logger) *InstallerServices {
 	return &InstallerServices{
 		BasicService: NewBasicService(name, client, logger),
 		client:       client,

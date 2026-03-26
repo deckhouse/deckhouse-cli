@@ -36,7 +36,6 @@ import (
 	"github.com/spf13/cobra"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
-	"github.com/deckhouse/deckhouse/pkg/registry"
 	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
@@ -48,6 +47,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
+	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	"github.com/deckhouse/deckhouse-cli/pkg/stub"
 )
@@ -230,23 +230,22 @@ func (p *Puller) Execute(ctx context.Context) error {
 	}
 
 	// Create registry client for module operations
-	clientOpts := &regclient.Options{
-		Insecure:      p.params.Insecure,
-		TLSSkipVerify: p.params.SkipTLSVerification,
-		Logger:        logger,
+	clientOpts := []regclient.Option{
+		regclient.WithInsecure(p.params.Insecure),
+		regclient.WithTLSSkipVerify(p.params.SkipTLSVerification),
+		regclient.WithLogger(logger),
 	}
 
 	if p.params.RegistryAuth != nil {
 		if p.params.RegistryAuth != authn.Anonymous {
-			clientOpts.Auth = p.params.RegistryAuth
+			clientOpts = append(clientOpts, regclient.WithAuth(p.params.RegistryAuth))
 		} else {
-			clientOpts.Keychain = authn.DefaultKeychain
+			clientOpts = append(clientOpts, regclient.WithKeychain(authn.DefaultKeychain))
 		}
 	}
 
-	var c registry.Client
 	repo, edition := registryservice.GetEditionFromRegistryPath(p.params.DeckhouseRegistryRepo)
-	c = regclient.NewClientWithOptions(repo, clientOpts)
+	c := pkgclient.NewFromOptions(repo, clientOpts...)
 
 	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
 		c = stub.NewRegistryClientStub()

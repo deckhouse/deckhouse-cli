@@ -32,7 +32,6 @@ import (
 	"github.com/spf13/cobra"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
-	"github.com/deckhouse/deckhouse/pkg/registry"
 	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
@@ -40,6 +39,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
+	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 // CLI Parameters
@@ -197,18 +197,14 @@ func (p *Pusher) executeNewPush() error {
 	}
 
 	// Create registry client
-	clientOpts := &regclient.Options{
-		Insecure:      p.pushParams.Insecure,
-		TLSSkipVerify: p.pushParams.SkipTLSVerification,
-		Logger:        logger,
+	clientOpts := []regclient.Option{
+		regclient.WithInsecure(p.pushParams.Insecure),
+		regclient.WithTLSSkipVerify(p.pushParams.SkipTLSVerification),
+		regclient.WithAuth(p.pushParams.RegistryAuth),
+		regclient.WithLogger(logger),
 	}
 
-	if p.pushParams.RegistryAuth != nil {
-		clientOpts.Auth = p.pushParams.RegistryAuth
-	}
-
-	var client registry.Client
-	client = regclient.NewClientWithOptions(p.pushParams.RegistryHost, clientOpts)
+	client := pkgclient.NewFromOptions(p.pushParams.RegistryHost, clientOpts...)
 
 	// Scope to the registry path
 	if p.pushParams.RegistryPath != "" {

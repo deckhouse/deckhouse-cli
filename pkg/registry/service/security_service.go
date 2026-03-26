@@ -2,17 +2,18 @@ package service
 
 import (
 	"github.com/deckhouse/deckhouse/pkg/log"
-	"github.com/deckhouse/deckhouse/pkg/registry"
+
+	client "github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 type SecurityServices struct {
 	name             string
-	client           registry.Client
+	client           client.Client
 	securityServices map[string]*BasicService
 	logger           *log.Logger
 }
 
-func NewSecurityServices(name string, client registry.Client, logger *log.Logger) *SecurityServices {
+func NewSecurityServices(name string, client client.Client, logger *log.Logger) *SecurityServices {
 	return &SecurityServices{
 		name:             name,
 		securityServices: map[string]*BasicService{},
