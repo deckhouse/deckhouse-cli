@@ -735,13 +735,35 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 
 	logger.Infof("Deckhouse digests found: %d", len(images))
 
-	logger.Infof("Searching for VEX images")
-
 	vex := make([]string, 0)
 	result := make(map[string]*puller.ImageMeta, len(images))
 
 	const scanPrintInterval = 20
 	counter := 0
+
+	if svc.options.SkipVexImages {
+		fmt.Println("DEBUG SKIPPING VEX IMAGES")
+		for image := range images {
+			counter++
+			if counter%scanPrintInterval == 0 {
+				logger.Infof("[%d / %d] Scanning images", counter, len(images))
+			}
+
+			if _, ok := prevDigests[image]; ok {
+				continue
+			}
+
+			prevDigests[image] = struct{}{}
+			result[image] = nil
+		}
+
+		logger.Infof("[%d / %d] Scanning images", counter, len(images))
+		logger.Infof("Deckhouse digests found: %d", len(images))
+
+		return result, nil
+	}
+
+	logger.Infof("Searching for VEX images")
 	for image := range images {
 		counter++
 		if counter%scanPrintInterval == 0 {
@@ -754,12 +776,6 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 
 		vexImageName := strings.Replace(strings.Replace(image, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
 		if _, ok := prevDigests[vexImageName]; ok {
-			continue
-		}
-
-		if svc.options.SkipVexImages {
-			prevDigests[image] = struct{}{}
-			result[image] = nil
 			continue
 		}
 
