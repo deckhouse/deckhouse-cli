@@ -130,7 +130,17 @@ func (svc *Service) validateInstallerAccess(ctx context.Context) error {
 
 	svc.logger.Debug("Validating access to the installer registry", slog.String("tag", targetTag))
 
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	// Add timeout to prevent hanging on slow/unreachable registries
+	timeout := 15 * time.Second
+	if timeoutStr := os.Getenv("D8_MIRROR_TIMEOUT"); timeoutStr != "" {
+		var err error
+		timeout, err = time.ParseDuration(timeoutStr + "s")
+		if err != nil {
+			return fmt.Errorf("invalid timeout: %w", err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	err := svc.registryService.InstallerService().CheckImageExists(ctx, targetTag)

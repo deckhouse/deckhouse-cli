@@ -241,11 +241,24 @@ func (p *Pusher) executeNewPush() error {
 // validateRegistryAccess validates access to the registry
 func (p *Pusher) validateRegistryAccess() error {
 	p.logger.InfoLn("Validating registry access")
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+
+	// Add timeout to prevent hanging on slow/unreachable registries
+	timeout := 15 * time.Second
+	if timeoutStr := os.Getenv("D8_MIRROR_TIMEOUT"); timeoutStr != "" {
+		var err error
+		timeout, err = time.ParseDuration(timeoutStr + "s")
+		if err != nil {
+			return fmt.Errorf("invalid timeout: %w", err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+
 	err := validateRegistryAccess(ctx, p.pushParams)
 	if err != nil && os.Getenv("MIRROR_BYPASS_ACCESS_CHECKS") != "1" {
 		return fmt.Errorf("registry credentials validation failure: %w", err)
 	}
+
 	return nil
 }

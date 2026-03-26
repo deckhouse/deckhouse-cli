@@ -156,7 +156,16 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 	svc.logger.Debug("Validating access to the source registry", slog.String("tag", targetTag))
 
 	// Add timeout to prevent hanging on slow/unreachable registries
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	timeout := 15 * time.Second
+	if timeoutStr := os.Getenv("D8_MIRROR_TIMEOUT"); timeoutStr != "" {
+		var err error
+		timeout, err = time.ParseDuration(timeoutStr + "s")
+		if err != nil {
+			return fmt.Errorf("invalid timeout: %w", err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// Check if target is a release channel (like "stable", "beta") or a specific tag

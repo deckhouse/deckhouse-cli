@@ -151,7 +151,16 @@ func (svc *Service) validateModulesAccess(ctx context.Context) error {
 	svc.logger.Debug("Validating access to the modules registry")
 
 	// Add timeout to prevent hanging on slow/unreachable registries
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	timeout := 15 * time.Second
+	if timeoutStr := os.Getenv("D8_MIRROR_TIMEOUT"); timeoutStr != "" {
+		var err error
+		timeout, err = time.ParseDuration(timeoutStr + "s")
+		if err != nil {
+			return fmt.Errorf("invalid timeout: %w", err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// For specific tags, check if the tag exists
