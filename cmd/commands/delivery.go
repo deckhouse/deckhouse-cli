@@ -51,7 +51,7 @@ func NewDeliveryCommand() (*cobra.Command, context.Context) {
 
 LICENSE NOTE: The Deckhouse Delivery Kit functionality is exclusively available to users holding a valid license for any commercial version of the Deckhouse Kubernetes Platform.
 
-© Flant JSC 2026`
+© Flant JSC 2025`
 
 	removeKubectlCmd(werfRootCmd)
 

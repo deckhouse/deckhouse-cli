@@ -31,17 +31,7 @@ jobs:
       - name: Install dependency for linux-amd64 dist
         env:
           DEBIAN_FRONTEND: noninteractive
-        run: |
-          apt-get update && apt-get install -y \
-            apt-utils \
-            libbtrfs-dev \
-            libelf-dev    `# delivery-kit: ELF binary signature support (CGO)` \
-            libssl-dev    `# delivery-kit: OpenSSL crypto for signature verification (CGO)` \
-            libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
-            libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
-            file git gcc dnsutils
-          # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a
-          ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
+        run: apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc dnsutils
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -104,17 +94,7 @@ jobs:
       - name: Install dependency for linux-amd64 dist
         env:
           DEBIAN_FRONTEND: noninteractive
-        run: |
-          apt-get update && apt-get install -y \
-            apt-utils \
-            libbtrfs-dev \
-            libelf-dev    `# delivery-kit: ELF binary signature support (CGO)` \
-            libssl-dev    `# delivery-kit: OpenSSL crypto for signature verification (CGO)` \
-            libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
-            libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
-            file git gcc dnsutils
-          # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a
-          ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
+        run: apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc dnsutils
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -174,17 +154,7 @@ jobs:
       - name: Install dependency for linux-amd64 dist
         env:
           DEBIAN_FRONTEND: noninteractive
-        run: |
-          apt-get update && apt-get install -y \
-            apt-utils \
-            libbtrfs-dev \
-            libelf-dev    `# delivery-kit: ELF binary signature support (CGO)` \
-            libssl-dev    `# delivery-kit: OpenSSL crypto for signature verification (CGO)` \
-            libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
-            libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
-            file git gcc dnsutils
-          # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a
-          ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
+        run: apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc dnsutils
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -249,17 +219,7 @@ jobs:
       - name: Install dependency for linux-amd64 dist
         env:
           DEBIAN_FRONTEND: noninteractive
-        run: |
-          apt-get update && apt-get install -y \
-            apt-utils \
-            libbtrfs-dev \
-            libelf-dev    `# delivery-kit: ELF binary signature support (CGO)` \
-            libssl-dev    `# delivery-kit: OpenSSL crypto for signature verification (CGO)` \
-            libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
-            libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
-            file git gcc dnsutils
-          # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a
-          ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
+        run: apt-get update && apt-get install -y apt-utils libbtrfs-dev file git gcc dnsutils
 
       - name: Checkout
         uses: actions/checkout@v4
