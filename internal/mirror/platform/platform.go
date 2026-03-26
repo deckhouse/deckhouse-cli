@@ -62,6 +62,8 @@ type Options struct {
 	BundleChunkSize int64
 	// IgnoreSuspend allows mirroring even if release channels are suspended
 	IgnoreSuspend bool
+	// SkipVexImages allows skipping VEX images
+	SkipVexImages bool
 }
 
 type Service struct {
@@ -752,6 +754,12 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 
 		vexImageName := strings.Replace(strings.Replace(image, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
 		if _, ok := prevDigests[vexImageName]; ok {
+			continue
+		}
+
+		if svc.options.SkipVexImages {
+			prevDigests[image] = struct{}{}
+			result[image] = nil
 			continue
 		}
 

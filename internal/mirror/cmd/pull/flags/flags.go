@@ -65,6 +65,7 @@ var (
 	NoModules       bool
 	NoInstaller     bool
 	OnlyExtraImages bool
+	SkipVexImages   bool
 )
 
 func AddFlags(flagSet *pflag.FlagSet) {
@@ -205,6 +206,12 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		"only-extra-images",
 		false,
 		"Pull only extra images for modules (additional images like security databases, scanners, etc.) without pulling main module images.",
+	)
+	flagSet.BoolVar(
+		&SkipVexImages,
+		"skip-vex-images",
+		false,
+		"Do not pull VEX images.",
 	)
 	flagSet.BoolVar(
 		&TLSSkipVerify,

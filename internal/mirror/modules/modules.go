@@ -66,6 +66,8 @@ type Options struct {
 	Filter *Filter
 	// OnlyExtraImages pulls only extra images without main module images
 	OnlyExtraImages bool
+	// SkipVexImages allows skipping VEX images
+	SkipVexImages bool
 	// BundleDir is the directory to store the bundle
 	BundleDir string
 	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
@@ -436,8 +438,10 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 		}
 	}
 
-	// Find and pull VEX images for all module images
-	svc.pullVexImages(ctx, module.name, downloadList)
+	if !svc.options.SkipVexImages {
+		// Find and pull VEX images for all module images
+		svc.pullVexImages(ctx, module.name, downloadList)
+	}
 
 	return nil
 }

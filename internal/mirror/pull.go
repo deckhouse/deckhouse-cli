@@ -52,6 +52,8 @@ type PullServiceOptions struct {
 	BundleDir string
 	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
 	BundleChunkSize int64
+	// SkipVexImages allows skipping VEX images
+	SkipVexImages bool
 }
 
 type PullService struct {
@@ -96,6 +98,7 @@ func NewPullService(
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
 				IgnoreSuspend:   options.IgnoreSuspend,
+				SkipVexImages:   options.SkipVexImages,
 			},
 			logger,
 			userLogger,
@@ -116,6 +119,7 @@ func NewPullService(
 			&modules.Options{
 				Filter:          options.ModuleFilter,
 				OnlyExtraImages: options.OnlyExtraImages,
+				SkipVexImages:   options.SkipVexImages,
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
 			},

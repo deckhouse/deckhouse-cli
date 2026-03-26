@@ -271,6 +271,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 			SkipPlatform:    pullflags.NoPlatform,
 			SkipSecurity:    pullflags.NoSecurityDB,
 			SkipModules:     pullflags.NoModules,
+			SkipVexImages:   pullflags.SkipVexImages,
 			SkipInstaller:   pullflags.NoInstaller,
 			InstallerTag:    pullflags.InstallerTag,
 			OnlyExtraImages: pullflags.OnlyExtraImages,
