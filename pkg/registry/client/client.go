@@ -1,8 +1,9 @@
 package client
 
 import (
-	localreg "github.com/deckhouse/deckhouse-cli/pkg/registry"
 	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
+
+	localreg "github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 // adapter wraps *regclient.Client from the upstream package and makes it satisfy

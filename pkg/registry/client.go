@@ -3,8 +3,9 @@ package client
 import (
 	"context"
 
-	"github.com/deckhouse/deckhouse/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+
+	"github.com/deckhouse/deckhouse/pkg/registry"
 )
 
 // Client defines the contract for interacting with container registries
