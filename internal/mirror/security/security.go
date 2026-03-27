@@ -119,17 +119,6 @@ func (svc *Service) PullSecurity(ctx context.Context) error {
 func (svc *Service) validateSecurityAccess(ctx context.Context) error {
 	svc.logger.Debug("Validating access to the security registry")
 
-	// Add timeout to prevent hanging on slow/unreachable registries
-	timeout := svc.options.Timeout
-	if timeout < 0 {
-		timeout = 15 * time.Second
-	}
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-
 	// For specific tags, check if the tag exists
 	err := svc.securityService.Security(internal.SecurityTrivyDBSegment).CheckImageExists(ctx, "2")
 	if errors.Is(err, client.ErrImageNotFound) {

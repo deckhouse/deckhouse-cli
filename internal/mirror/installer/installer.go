@@ -132,17 +132,6 @@ func (svc *Service) validateInstallerAccess(ctx context.Context) error {
 
 	svc.logger.Debug("Validating access to the installer registry", slog.String("tag", targetTag))
 
-	// Add timeout to prevent hanging on slow/unreachable registries
-	timeout := svc.options.Timeout
-	if timeout < 0 {
-		timeout = 15 * time.Second
-	}
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-
 	err := svc.registryService.InstallerService().CheckImageExists(ctx, targetTag)
 	if err != nil {
 		return fmt.Errorf("failed to check installer tag %q exists in registry: %w", targetTag, err)
