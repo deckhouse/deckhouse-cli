@@ -17,6 +17,7 @@ limitations under the License.
 package push
 
 import (
+	"fmt"
 	"os"
 	"time"
 
@@ -67,7 +68,11 @@ func addFlags(flagSet *pflag.FlagSet) {
 func ParseEnvironmentVariables() {
 	if timeoutStr := os.Getenv("D8_MIRROR_TIMEOUT"); timeoutStr != "" {
 		timeout, err := time.ParseDuration(timeoutStr)
-		if err == nil {
+		if err != nil {
+			// TODO: Add logger
+			fmt.Println("Failed to parse timeout duration from environment variable D8_MIRROR_TIMEOUT: ", err)
+		}
+		if err == nil && timeout >= 0 {
 			MirrorTimeout = timeout
 		}
 	}

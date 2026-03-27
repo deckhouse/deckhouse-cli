@@ -236,7 +236,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 		regclient.WithTLSSkipVerify(p.params.SkipTLSVerification),
 		regclient.WithLogger(logger),
 	}
-	if pullflags.MirrorTimeout != -1 {
+	if pullflags.MirrorTimeout >= 0 {
 		clientOpts = append(clientOpts, regclient.WithTimeout(pullflags.MirrorTimeout))
 	}
 
