@@ -150,7 +150,7 @@ func NewPullService(
 // Pull downloads Deckhouse components from registry
 func (svc *PullService) Pull(ctx context.Context) error {
 	if svc.options.SkipVexImages {
-		svc.logger.Warn("The skip-vex-images flag was detected: Vulnerability scanning may not work correctly when this flag is used.")
+		svc.userLogger.WarnLn("The skip-vex-images flag was detected: Vulnerability scanning may not work correctly when this flag is used.")
 	}
 
 	if !svc.options.SkipPlatform {
