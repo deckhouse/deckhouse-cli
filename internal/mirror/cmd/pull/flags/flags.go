@@ -18,6 +18,7 @@ package flags
 
 import (
 	"os"
+	"time"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/spf13/pflag"
@@ -65,6 +66,9 @@ var (
 	NoModules       bool
 	NoInstaller     bool
 	OnlyExtraImages bool
+	SkipVexImages   bool
+
+	MirrorTimeout time.Duration = -1
 )
 
 func AddFlags(flagSet *pflag.FlagSet) {
@@ -207,6 +211,12 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		"Pull only extra images for modules (additional images like security databases, scanners, etc.) without pulling main module images.",
 	)
 	flagSet.BoolVar(
+		&SkipVexImages,
+		"skip-vex-images",
+		false,
+		"Do not pull VEX images.",
+	)
+	flagSet.BoolVar(
 		&TLSSkipVerify,
 		"tls-skip-verify",
 		false,
@@ -224,4 +234,13 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		"",
 		"Path to a temporary directory to use for image pulling and pushing. All processing is done in this directory, so make sure there is enough free disk space to accommodate the entire bundle you are downloading;",
 	)
+}
+
+func ParseEnvironmentVariables() {
+	if timeoutStr := os.Getenv("D8_MIRROR_TIMEOUT"); timeoutStr != "" {
+		timeout, err := time.ParseDuration(timeoutStr)
+		if err == nil {
+			MirrorTimeout = timeout
+		}
+	}
 }

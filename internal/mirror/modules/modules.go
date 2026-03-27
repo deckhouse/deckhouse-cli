@@ -66,10 +66,14 @@ type Options struct {
 	Filter *Filter
 	// OnlyExtraImages pulls only extra images without main module images
 	OnlyExtraImages bool
+	// SkipVexImages allows skipping VEX images
+	SkipVexImages bool
 	// BundleDir is the directory to store the bundle
 	BundleDir string
 	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
 	BundleChunkSize int64
+	// Timeout is the timeout for the modules access check
+	Timeout time.Duration
 }
 
 type Service struct {
@@ -151,7 +155,12 @@ func (svc *Service) validateModulesAccess(ctx context.Context) error {
 	svc.logger.Debug("Validating access to the modules registry")
 
 	// Add timeout to prevent hanging on slow/unreachable registries
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	timeout := 15 * time.Second
+	if svc.options.Timeout != -1 {
+		timeout = svc.options.Timeout
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// For specific tags, check if the tag exists
@@ -427,8 +436,10 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 		}
 	}
 
-	// Find and pull VEX images for all module images
-	svc.pullVexImages(ctx, module.name, downloadList)
+	if !svc.options.SkipVexImages {
+		// Find and pull VEX images for all module images
+		svc.pullVexImages(ctx, module.name, downloadList)
+	}
 
 	return nil
 }

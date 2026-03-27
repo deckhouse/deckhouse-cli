@@ -96,6 +96,7 @@ func NewCommand() *cobra.Command {
 	}
 
 	pullflags.AddFlags(pullCmd.Flags())
+	pullflags.ParseEnvironmentVariables()
 
 	return pullCmd
 }
@@ -235,6 +236,9 @@ func (p *Puller) Execute(ctx context.Context) error {
 		regclient.WithTLSSkipVerify(p.params.SkipTLSVerification),
 		regclient.WithLogger(logger),
 	}
+	if pullflags.MirrorTimeout != -1 {
+		clientOpts = append(clientOpts, regclient.WithTimeout(pullflags.MirrorTimeout))
+	}
 
 	if p.params.RegistryAuth != nil {
 		if p.params.RegistryAuth != authn.Anonymous {
@@ -270,6 +274,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 			SkipPlatform:    pullflags.NoPlatform,
 			SkipSecurity:    pullflags.NoSecurityDB,
 			SkipModules:     pullflags.NoModules,
+			SkipVexImages:   pullflags.SkipVexImages,
 			SkipInstaller:   pullflags.NoInstaller,
 			InstallerTag:    pullflags.InstallerTag,
 			OnlyExtraImages: pullflags.OnlyExtraImages,
@@ -277,6 +282,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 			ModuleFilter:    filter,
 			BundleDir:       pullflags.ImagesBundlePath,
 			BundleChunkSize: pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
+			Timeout:         pullflags.MirrorTimeout,
 		},
 		logger.Named("pull"),
 		p.logger,

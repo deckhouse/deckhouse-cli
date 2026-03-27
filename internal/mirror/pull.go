@@ -19,6 +19,7 @@ package mirror
 import (
 	"context"
 	"fmt"
+	"time"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
@@ -52,6 +53,10 @@ type PullServiceOptions struct {
 	BundleDir string
 	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
 	BundleChunkSize int64
+	// SkipVexImages allows skipping VEX images
+	SkipVexImages bool
+	// Timeout is the timeout for the pull operation
+	Timeout time.Duration
 }
 
 type PullService struct {
@@ -96,6 +101,8 @@ func NewPullService(
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
 				IgnoreSuspend:   options.IgnoreSuspend,
+				SkipVexImages:   options.SkipVexImages,
+				Timeout:         options.Timeout,
 			},
 			logger,
 			userLogger,
@@ -106,6 +113,7 @@ func NewPullService(
 			&security.Options{
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
+				Timeout:         options.Timeout,
 			},
 			logger,
 			userLogger,
@@ -116,8 +124,10 @@ func NewPullService(
 			&modules.Options{
 				Filter:          options.ModuleFilter,
 				OnlyExtraImages: options.OnlyExtraImages,
+				SkipVexImages:   options.SkipVexImages,
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
+				Timeout:         options.Timeout,
 			},
 			logger,
 			userLogger,
@@ -129,6 +139,7 @@ func NewPullService(
 				TargetTag:       options.InstallerTag,
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
+				Timeout:         options.Timeout,
 			},
 			logger,
 			userLogger,
@@ -145,6 +156,10 @@ func NewPullService(
 
 // Pull downloads Deckhouse components from registry
 func (svc *PullService) Pull(ctx context.Context) error {
+	if svc.options.SkipVexImages {
+		svc.userLogger.WarnLn("The skip-vex-images flag was detected: Vulnerability scanning may not work correctly when this flag is used.")
+	}
+
 	if !svc.options.SkipPlatform {
 		err := svc.platformService.PullPlatform(ctx)
 		if err != nil {

@@ -62,6 +62,10 @@ type Options struct {
 	BundleChunkSize int64
 	// IgnoreSuspend allows mirroring even if release channels are suspended
 	IgnoreSuspend bool
+	// SkipVexImages allows skipping VEX images
+	SkipVexImages bool
+	// Timeout is the timeout for the platform access check
+	Timeout time.Duration
 }
 
 type Service struct {
@@ -156,7 +160,12 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 	svc.logger.Debug("Validating access to the source registry", slog.String("tag", targetTag))
 
 	// Add timeout to prevent hanging on slow/unreachable registries
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	timeout := 15 * time.Second
+	if svc.options.Timeout != -1 {
+		timeout = svc.options.Timeout
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// Check if target is a release channel (like "stable", "beta") or a specific tag
@@ -724,13 +733,34 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 
 	logger.Infof("Deckhouse digests found: %d", len(images))
 
-	logger.Infof("Searching for VEX images")
-
 	vex := make([]string, 0)
 	result := make(map[string]*puller.ImageMeta, len(images))
 
 	const scanPrintInterval = 20
 	counter := 0
+
+	if svc.options.SkipVexImages {
+		for image := range images {
+			counter++
+			if counter%scanPrintInterval == 0 {
+				logger.Infof("[%d / %d] Scanning images", counter, len(images))
+			}
+
+			if _, ok := prevDigests[image]; ok {
+				continue
+			}
+
+			prevDigests[image] = struct{}{}
+			result[image] = nil
+		}
+
+		logger.Infof("[%d / %d] Scanning images", counter, len(images))
+		logger.Infof("Deckhouse digests found: %d", len(images))
+
+		return result, nil
+	}
+
+	logger.Infof("Searching for VEX images")
 	for image := range images {
 		counter++
 		if counter%scanPrintInterval == 0 {
