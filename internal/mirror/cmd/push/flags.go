@@ -18,6 +18,7 @@ package push
 
 import (
 	"os"
+	"time"
 
 	"github.com/spf13/pflag"
 )
@@ -61,4 +62,13 @@ func addFlags(flagSet *pflag.FlagSet) {
 		"/modules",
 		"Suffix to append to source repo path to locate modules.",
 	)
+}
+
+func ParseEnvironmentVariables() {
+	if timeoutStr := os.Getenv("D8_MIRROR_TIMEOUT"); timeoutStr != "" {
+		timeout, err := time.ParseDuration(timeoutStr)
+		if err == nil {
+			MirrorTimeout = timeout
+		}
+	}
 }

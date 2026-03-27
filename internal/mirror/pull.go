@@ -19,6 +19,7 @@ package mirror
 import (
 	"context"
 	"fmt"
+	"time"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
@@ -54,6 +55,8 @@ type PullServiceOptions struct {
 	BundleChunkSize int64
 	// SkipVexImages allows skipping VEX images
 	SkipVexImages bool
+	// Timeout is the timeout for the pull operation
+	Timeout time.Duration
 }
 
 type PullService struct {
@@ -99,6 +102,7 @@ func NewPullService(
 				BundleChunkSize: options.BundleChunkSize,
 				IgnoreSuspend:   options.IgnoreSuspend,
 				SkipVexImages:   options.SkipVexImages,
+				Timeout:         options.Timeout,
 			},
 			logger,
 			userLogger,
@@ -109,6 +113,7 @@ func NewPullService(
 			&security.Options{
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
+				Timeout:         options.Timeout,
 			},
 			logger,
 			userLogger,
@@ -122,6 +127,7 @@ func NewPullService(
 				SkipVexImages:   options.SkipVexImages,
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
+				Timeout:         options.Timeout,
 			},
 			logger,
 			userLogger,
@@ -133,6 +139,7 @@ func NewPullService(
 				TargetTag:       options.InstallerTag,
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
+				Timeout:         options.Timeout,
 			},
 			logger,
 			userLogger,

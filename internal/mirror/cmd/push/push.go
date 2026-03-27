@@ -55,6 +55,8 @@ var (
 	Insecure         bool
 	TLSSkipVerify    bool
 	ImagesBundlePath string
+
+	MirrorTimeout time.Duration = -1
 )
 
 const pushLong = `Upload Deckhouse Kubernetes Platform distribution bundle to the third-party registry.
@@ -102,6 +104,7 @@ func NewCommand() *cobra.Command {
 	}
 
 	addFlags(pushCmd.Flags())
+	ParseEnvironmentVariables()
 	return pushCmd
 }
 
@@ -201,8 +204,10 @@ func (p *Pusher) executeNewPush() error {
 		regclient.WithInsecure(p.pushParams.Insecure),
 		regclient.WithTLSSkipVerify(p.pushParams.SkipTLSVerification),
 		regclient.WithAuth(p.pushParams.RegistryAuth),
-		regclient.WithTimeout(0),
 		regclient.WithLogger(logger),
+	}
+	if MirrorTimeout != -1 {
+		clientOpts = append(clientOpts, regclient.WithTimeout(MirrorTimeout))
 	}
 
 	client := pkgclient.NewFromOptions(p.pushParams.RegistryHost, clientOpts...)
@@ -241,12 +246,8 @@ func (p *Pusher) validateRegistryAccess() error {
 
 	// Add timeout to prevent hanging on slow/unreachable registries
 	timeout := 15 * time.Second
-	if timeoutStr := os.Getenv("D8_MIRROR_TIMEOUT"); timeoutStr != "" {
-		var err error
-		timeout, err = time.ParseDuration(timeoutStr + "s")
-		if err != nil {
-			return fmt.Errorf("invalid timeout: %w", err)
-		}
+	if MirrorTimeout != -1 {
+		timeout = MirrorTimeout
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)

@@ -96,6 +96,7 @@ func NewCommand() *cobra.Command {
 	}
 
 	pullflags.AddFlags(pullCmd.Flags())
+	pullflags.ParseEnvironmentVariables()
 
 	return pullCmd
 }
@@ -233,8 +234,10 @@ func (p *Puller) Execute(ctx context.Context) error {
 	clientOpts := []regclient.Option{
 		regclient.WithInsecure(p.params.Insecure),
 		regclient.WithTLSSkipVerify(p.params.SkipTLSVerification),
-		regclient.WithTimeout(0),
 		regclient.WithLogger(logger),
+	}
+	if pullflags.MirrorTimeout != -1 {
+		clientOpts = append(clientOpts, regclient.WithTimeout(pullflags.MirrorTimeout))
 	}
 
 	if p.params.RegistryAuth != nil {
@@ -279,6 +282,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 			ModuleFilter:    filter,
 			BundleDir:       pullflags.ImagesBundlePath,
 			BundleChunkSize: pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
+			Timeout:         pullflags.MirrorTimeout,
 		},
 		logger.Named("pull"),
 		p.logger,

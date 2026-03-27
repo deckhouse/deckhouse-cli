@@ -47,6 +47,8 @@ type Options struct {
 	BundleDir string
 	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
 	BundleChunkSize int64
+	// Timeout is the timeout for the installer access check
+	Timeout time.Duration
 }
 type Service struct {
 	// registryService handles Deckhouse installer registry operations
@@ -132,12 +134,8 @@ func (svc *Service) validateInstallerAccess(ctx context.Context) error {
 
 	// Add timeout to prevent hanging on slow/unreachable registries
 	timeout := 15 * time.Second
-	if timeoutStr := os.Getenv("D8_MIRROR_TIMEOUT"); timeoutStr != "" {
-		var err error
-		timeout, err = time.ParseDuration(timeoutStr + "s")
-		if err != nil {
-			return fmt.Errorf("invalid timeout: %w", err)
-		}
+	if svc.options.Timeout != -1 {
+		timeout = svc.options.Timeout
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
