@@ -159,15 +159,6 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 
 	svc.logger.Debug("Validating access to the source registry", slog.String("tag", targetTag))
 
-	// Add timeout to prevent hanging on slow/unreachable registries
-	timeout := 15 * time.Second
-	if svc.options.Timeout != -1 {
-		timeout = svc.options.Timeout
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
 	// Check if target is a release channel (like "stable", "beta") or a specific tag
 	if internal.ChannelIsValid(targetTag) {
 		err := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, targetTag)

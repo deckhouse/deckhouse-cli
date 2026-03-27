@@ -206,7 +206,7 @@ func (p *Pusher) executeNewPush() error {
 		regclient.WithAuth(p.pushParams.RegistryAuth),
 		regclient.WithLogger(logger),
 	}
-	if MirrorTimeout != -1 {
+	if MirrorTimeout >= 0 {
 		clientOpts = append(clientOpts, regclient.WithTimeout(MirrorTimeout))
 	}
 
@@ -246,7 +246,7 @@ func (p *Pusher) validateRegistryAccess() error {
 
 	// Add timeout to prevent hanging on slow/unreachable registries
 	timeout := 15 * time.Second
-	if MirrorTimeout != -1 {
+	if MirrorTimeout >= 0 {
 		timeout = MirrorTimeout
 	}
 

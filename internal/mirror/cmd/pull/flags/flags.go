@@ -17,6 +17,7 @@ limitations under the License.
 package flags
 
 import (
+	"fmt"
 	"os"
 	"time"
 
@@ -239,7 +240,11 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 func ParseEnvironmentVariables() {
 	if timeoutStr := os.Getenv("D8_MIRROR_TIMEOUT"); timeoutStr != "" {
 		timeout, err := time.ParseDuration(timeoutStr)
-		if err == nil {
+		if err != nil {
+			// TODO: Add logger
+			fmt.Println("Failed to parse timeout duration from environment variable D8_MIRROR_TIMEOUT: ", err)
+		}
+		if err == nil && timeout >= 0 {
 			MirrorTimeout = timeout
 		}
 	}
