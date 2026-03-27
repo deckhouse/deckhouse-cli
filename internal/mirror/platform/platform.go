@@ -742,7 +742,6 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 	counter := 0
 
 	if svc.options.SkipVexImages {
-		fmt.Println("DEBUG SKIPPING VEX IMAGES")
 		for image := range images {
 			counter++
 			if counter%scanPrintInterval == 0 {
