@@ -25,14 +25,39 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted, regular]
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
     container:
       image: ubuntu:22.04
     steps:
-      - name: Install dependency for linux-amd64 dist
+      - name: Install dependency for linux-${{ matrix.arch }} dist
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          apt-get update && apt-get install -y \
+          # 1. Add arm64 architecture
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            dpkg --add-architecture arm64
+          fi
+          # 2. Fix sources.list to explicitly support amd64 and arm64.
+          # This solves 404 errors by forcing apt to look for specific architecture files
+          # and using IPv4 to avoid mirror issues.
+          rm -f /etc/apt/sources.list.d/*
+          cat > /etc/apt/sources.list <<EOF
+          # AMD64 sources (standard)
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
+          deb [arch=amd64] http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse
+          # ARM64 sources (using ports.ubuntu.com which is the official repo for non-x86)
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe multiverse
+          EOF
+          # 3. Clean cache and update with IPv4 enforcement
+          rm -rf /var/lib/apt/lists/*
+          apt-get update -o Acquire::ForceIPv4=true
+          # 4. Install common dependencies
+          apt-get install -y \
             apt-utils \
             libbtrfs-dev \
             libelf-dev    `# delivery-kit: ELF binary signature support (CGO)` \
@@ -40,8 +65,30 @@ jobs:
             libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
             libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
             file git gcc dnsutils
-          # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a
-          ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
+          # 5. Install cross-compiler and ARM64 libraries if building for arm64
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            echo "Installing cross-compilation toolchain..."
+            apt-get install -y \
+              gcc-aarch64-linux-gnu \
+              libbtrfs-dev:arm64 \
+              libelf-dev:arm64 \
+              libssl-dev:arm64 \
+              libuv1-dev:arm64 \
+              libzstd-dev:arm64
+            # Fix libuv static lib path for arm64
+            libuv_path=$(dpkg -L libuv1-dev:arm64 | grep -F '/libuv_a.a')
+            if [ -n "$libuv_path" ]; then
+              mkdir -p /usr/local/lib
+              ln -fs "$libuv_path" /usr/local/lib/libuv.a
+            fi
+          else
+            # Fix libuv static lib path for amd64
+            libuv_path=$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')
+            if [ -n "$libuv_path" ]; then
+              mkdir -p /usr/local/lib
+              ln -fs "$libuv_path" /usr/local/lib/libuv.a
+            fi
+          fi
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -86,7 +133,35 @@ jobs:
           git config --global --add safe.directory '*'
 
       - name: Build and package
-        run: task build-and-package
+        env:
+          # Set Cross-Compilation vars for arm64
+          CC: ${{ matrix.arch == 'arm64' && 'aarch64-linux-gnu-gcc' || 'gcc' }}
+          PKG_CONFIG_PATH: ${{ matrix.arch == 'arm64' && '/usr/lib/aarch64-linux-gnu/pkgconfig' || '' }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "1"
+          # FIX: Override CGO flags to remove macOS specific '-arch' flag
+          CGO_CFLAGS: "-O2 -g"
+          CGO_LDFLAGS: ""
+        run: task build-and-package:${{ matrix.arch }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist-${{ matrix.arch }}
+          path: dist/**/*
+          retention-days: 1
+
+  # Separate job for creating the release, waiting for all architectures to finish
+  create-release:
+    needs: release
+    runs-on: [self-hosted, regular]
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-dist-*
+          merge-multiple: true
 
       - name: Release
         uses: softprops/action-gh-release@v2
@@ -95,6 +170,8 @@ jobs:
             dist/**/*.tar.gz
             dist/**/*.tar.gz.sha256sum
 
+
+  # Running tests on a single architecture
   test:
     if: github.event_name == 'pull_request'
     runs-on: [self-hosted, regular]
@@ -163,6 +240,7 @@ jobs:
           task test
 
 
+  # Running lint on a single architecture
   lint:
     if: github.event_name == 'pull_request'
     runs-on: [self-hosted, regular]
@@ -242,15 +320,40 @@ jobs:
   pr-build:
     if: github.event_name == 'pull_request'
     runs-on: [self-hosted, regular]
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
     container:
       image: ubuntu:22.04
     name: Build for PR
     steps:
-      - name: Install dependency for linux-amd64 dist
+      - name: Install dependency for linux-${{ matrix.arch }} dist
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          apt-get update && apt-get install -y \
+          # 1. Add arm64 architecture
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            dpkg --add-architecture arm64
+          fi
+          # 2. Fix sources.list to explicitly support amd64 and arm64.
+          # This solves 404 errors by forcing apt to look for specific architecture files
+          # and using IPv4 to avoid mirror issues.
+          rm -f /etc/apt/sources.list.d/*
+          cat > /etc/apt/sources.list <<EOF
+          # AMD64 sources (standard)
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
+          deb [arch=amd64] http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse
+          # ARM64 sources (using ports.ubuntu.com which is the official repo for non-x86)
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe multiverse
+          EOF
+          # 3. Clean cache and update with IPv4 enforcement
+          rm -rf /var/lib/apt/lists/*
+          apt-get update -o Acquire::ForceIPv4=true
+          # 4. Install common dependencies
+          apt-get install -y \
             apt-utils \
             libbtrfs-dev \
             libelf-dev    `# delivery-kit: ELF binary signature support (CGO)` \
@@ -258,8 +361,30 @@ jobs:
             libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
             libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
             file git gcc dnsutils
-          # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a
-          ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
+          # 5. Install cross-compiler and ARM64 libraries if building for arm64
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            echo "Installing cross-compilation toolchain..."
+            apt-get install -y \
+              gcc-aarch64-linux-gnu \
+              libbtrfs-dev:arm64 \
+              libelf-dev:arm64 \
+              libssl-dev:arm64 \
+              libuv1-dev:arm64 \
+              libzstd-dev:arm64
+            # Fix libuv static lib path for arm64
+            libuv_path=$(dpkg -L libuv1-dev:arm64 | grep -F '/libuv_a.a')
+            if [ -n "$libuv_path" ]; then
+              mkdir -p /usr/local/lib
+              ln -fs "$libuv_path" /usr/local/lib/libuv.a
+            fi
+          else
+            # Fix libuv static lib path for amd64
+            libuv_path=$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')
+            if [ -n "$libuv_path" ]; then
+              mkdir -p /usr/local/lib
+              ln -fs "$libuv_path" /usr/local/lib/libuv.a
+            fi
+          fi
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -303,13 +428,22 @@ jobs:
           git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
           git config --global --add safe.directory '*'
 
+      # Build specific architecture, since the container is already running for that arch
       - name: Build and package
-        run: task build:dist:all
+        env:
+          CC: ${{ matrix.arch == 'arm64' && 'aarch64-linux-gnu-gcc' || 'gcc' }}
+          PKG_CONFIG_PATH: ${{ matrix.arch == 'arm64' && '/usr/lib/aarch64-linux-gnu/pkgconfig' || '' }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "1"
+          # FIX: Override CGO flags to remove macOS specific '-arch' flag
+          CGO_CFLAGS: "-O2 -g"
+          CGO_LDFLAGS: ""
+        run: task build:dist:all:${{ matrix.arch }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: deckhouse-cli-pr-build-${{ github.run_id }}
+          name: deckhouse-cli-pr-build-${{ matrix.arch }}-${{ github.run_id }}
           path: dist/**/*
           retention-days: 1
           compression-level: 9

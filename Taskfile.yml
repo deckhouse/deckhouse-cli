@@ -111,6 +111,15 @@ tasks:
           targetArch: "amd64"
           outputDir: "{{ .outputDir }}"
 
+  build:dev:linux:arm64:
+    desc: Build d8 dev binary for linux/arm64 (requires Linux or Docker)
+    cmds:
+      - task: _build:cgo:dev
+        vars:
+          targetOS: "linux"
+          targetArch: "arm64"
+          outputDir: "{{ .outputDir }}"
+
   build:dev:linux:amd64:cross:
     desc: Cross-compile d8 dev binary for linux/amd64 from macOS (no CGO)
     summary: |
@@ -127,6 +136,24 @@ tasks:
         vars:
           targetOS: "linux"
           targetArch: "amd64"
+          outputDir: "{{ .outputDir }}"
+
+  build:dev:linux:arm64:cross:
+    desc: Cross-compile d8 dev binary for linux/arm64 from macOS (no CGO)
+    summary: |
+      Cross-compiles Linux binary from macOS without CGO.
+
+      This is useful for quick testing when you don't have access to a Linux machine
+      or Docker. The resulting binary has the same features as darwin/windows builds
+      (no CGO-dependent functionality).
+
+      For a full-featured Linux build with CGO, use build:dev:linux:arm64 on Linux
+      or in a Linux container.
+    cmds:
+      - task: _build:go:dev
+        vars:
+          targetOS: "linux"
+          targetArch: "arm64"
           outputDir: "{{ .outputDir }}"
 
   build:dev:darwin:amd64:
@@ -160,9 +187,23 @@ tasks:
     desc: Build all d8 release binaries in parallel
     deps:
       - build:dist:linux:amd64
+      - build:dist:linux:arm64
       - build:dist:darwin:amd64
       - build:dist:darwin:arm64
       - build:dist:windows:amd64
+
+  build:dist:all:amd64:
+    desc: Build all d8 arm64 release binaries in parallel
+    deps:
+      - build:dist:linux:amd64
+      - build:dist:darwin:amd64
+      - build:dist:windows:amd64
+
+  build:dist:all:arm64:
+    desc: Build all d8 arm64 release binaries in parallel
+    deps:
+      - build:dist:linux:arm64
+      - build:dist:darwin:arm64
 
   build:dist:linux:amd64:
     desc: Build d8 release binary for linux/amd64
@@ -171,6 +212,15 @@ tasks:
         vars:
           targetOS: "linux"
           targetArch: "amd64"
+          outputDir: "{{ .outputDir }}"
+
+  build:dist:linux:arm64:
+    desc: Build d8 release binary for linux/rmd64
+    cmds:
+      - task: _build:cgo:dist
+        vars:
+          targetOS: "linux"
+          targetArch: "arm64"
           outputDir: "{{ .outputDir }}"
 
   build:dist:darwin:amd64:
@@ -210,9 +260,23 @@ tasks:
     desc: Package all release assets in parallel
     deps:
       - package:dist:linux:amd64
+      - package:dist:linux:arm64
       - package:dist:darwin:amd64
       - package:dist:darwin:arm64
       - package:dist:windows:amd64
+
+  package:dist:all:amd64:
+    desc: Package all amd64 release assets in parallel
+    deps:
+      - package:dist:linux:amd64
+      - package:dist:darwin:amd64
+      - package:dist:windows:amd64
+
+  package:dist:all:arm64:
+    desc: Package all arm64 release assets in parallel
+    deps:
+      - package:dist:linux:arm64
+      - package:dist:darwin:arm64
 
   package:dist:linux:amd64:
     desc: Package release asset for linux/amd64
@@ -221,6 +285,14 @@ tasks:
       - task: _package:dist
         vars:
           target: "linux-amd64"
+
+  package:dist:linux:arm64:
+    desc: Package release asset for linux/arm64
+    dir: dist/{{ .version }}
+    cmds:
+      - task: _package:dist
+        vars:
+          target: "linux-arm64"
 
   package:dist:darwin:amd64:
     desc: Package release asset for darwin/amd64
@@ -260,6 +332,20 @@ tasks:
     cmds:
       - task: build:dist:all
       - task: package:dist:all
+      - task: checksum
+
+  build-and-package:amd64:
+    desc: Build and package all d8 amd64 binaries
+    cmds:
+      - task: build:dist:all:amd64
+      - task: package:dist:all:amd64
+      - task: checksum
+
+  build-and-package:arm64:
+    desc: Build and package all d8 arm64 binaries
+    cmds:
+      - task: build:dist:all:arm64
+      - task: package:dist:all:arm64
       - task: checksum
 
   test:
