@@ -35,7 +35,16 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          apt-get update && apt-get install -y \
+          # 1. Clean up existing apt cache to prevent 404 errors on metadata
+          rm -rf /var/lib/apt/lists/*
+          # 2. Add arm64 architecture if needed (before the first update)
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            dpkg --add-architecture arm64
+          fi
+          # 3. Update lists for all added architectures
+          apt-get update
+          # 4. Install common dependencies
+          apt-get install -y \
             apt-utils \
             libbtrfs-dev \
             libelf-dev    `# delivery-kit: ELF binary signature support (CGO)` \
@@ -43,12 +52,9 @@ jobs:
             libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
             libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
             file git gcc dnsutils
-
-          # If building for arm64 on amd64 host, install cross-compiler and arm64 libs
+          # 5. Install cross-compiler and ARM64 libraries if building for arm64
           if [ "${{ matrix.arch }}" = "arm64" ]; then
-            echo "Setting up cross-compilation for arm64"
-            dpkg --add-architecture arm64
-            apt-get update
+            echo "Installing cross-compilation toolchain..."
             apt-get install -y \
               gcc-aarch64-linux-gnu \
               libbtrfs-dev:arm64 \
@@ -56,15 +62,14 @@ jobs:
               libssl-dev:arm64 \
               libuv1-dev:arm64 \
               libzstd-dev:arm64
-            
-            # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a for arm64
+            # Fix libuv static lib path for arm64
             libuv_path=$(dpkg -L libuv1-dev:arm64 | grep -F '/libuv_a.a')
             if [ -n "$libuv_path" ]; then
               mkdir -p /usr/local/lib
               ln -fs "$libuv_path" /usr/local/lib/libuv.a
             fi
           else
-            # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a for amd64
+            # Fix libuv static lib path for amd64
             libuv_path=$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')
             if [ -n "$libuv_path" ]; then
               mkdir -p /usr/local/lib
@@ -310,7 +315,16 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          apt-get update && apt-get install -y \
+          # 1. Clean up existing apt cache to prevent 404 errors on metadata
+          rm -rf /var/lib/apt/lists/*
+          # 2. Add arm64 architecture if needed (before the first update)
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            dpkg --add-architecture arm64
+          fi
+          # 3. Update lists for all added architectures
+          apt-get update
+          # 4. Install common dependencies
+          apt-get install -y \
             apt-utils \
             libbtrfs-dev \
             libelf-dev    `# delivery-kit: ELF binary signature support (CGO)` \
@@ -318,12 +332,9 @@ jobs:
             libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
             libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
             file git gcc dnsutils
-
-          # Cross-compilation setup for arm64
+          # 5. Install cross-compiler and ARM64 libraries if building for arm64
           if [ "${{ matrix.arch }}" = "arm64" ]; then
-            echo "Setting up cross-compilation for arm64"
-            dpkg --add-architecture arm64
-            apt-get update
+            echo "Installing cross-compilation toolchain..."
             apt-get install -y \
               gcc-aarch64-linux-gnu \
               libbtrfs-dev:arm64 \
@@ -331,15 +342,14 @@ jobs:
               libssl-dev:arm64 \
               libuv1-dev:arm64 \
               libzstd-dev:arm64
-            
-            # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a for arm64
+            # Fix libuv static lib path for arm64
             libuv_path=$(dpkg -L libuv1-dev:arm64 | grep -F '/libuv_a.a')
             if [ -n "$libuv_path" ]; then
               mkdir -p /usr/local/lib
               ln -fs "$libuv_path" /usr/local/lib/libuv.a
             fi
           else
-            # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a for amd64
+            # Fix libuv static lib path for amd64
             libuv_path=$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')
             if [ -n "$libuv_path" ]; then
               mkdir -p /usr/local/lib
