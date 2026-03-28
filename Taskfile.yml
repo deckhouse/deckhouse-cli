@@ -192,6 +192,19 @@ tasks:
       - build:dist:darwin:arm64
       - build:dist:windows:amd64
 
+  build:dist:all:amd64:
+    desc: Build all d8 arm64 release binaries in parallel
+    deps:
+      - build:dist:linux:amd64
+      - build:dist:darwin:amd64
+      - build:dist:windows:amd64
+
+  build:dist:all:arm64:
+    desc: Build all d8 arm64 release binaries in parallel
+    deps:
+      - build:dist:linux:arm64
+      - build:dist:darwin:arm64
+
   build:dist:linux:amd64:
     desc: Build d8 release binary for linux/amd64
     cmds:
@@ -252,6 +265,19 @@ tasks:
       - package:dist:darwin:arm64
       - package:dist:windows:amd64
 
+  package:dist:all:amd64:
+    desc: Package all amd64 release assets in parallel
+    deps:
+      - package:dist:linux:amd64
+      - package:dist:darwin:amd64
+      - package:dist:windows:amd64
+
+  package:dist:all:arm64:
+    desc: Package all arm64 release assets in parallel
+    deps:
+      - package:dist:linux:arm64
+      - package:dist:darwin:arm64
+
   package:dist:linux:amd64:
     desc: Package release asset for linux/amd64
     dir: dist/{{ .version }}
@@ -306,6 +332,20 @@ tasks:
     cmds:
       - task: build:dist:all
       - task: package:dist:all
+      - task: checksum
+
+  build-and-package:amd64:
+    desc: Build and package all d8 amd64 binaries
+    cmds:
+      - task: build:dist:all:amd64
+      - task: package:dist:all:amd64
+      - task: checksum
+
+  build-and-package:arm64:
+    desc: Build and package all d8 arm64 binaries
+    cmds:
+      - task: build:dist:all:arm64
+      - task: package:dist:all:arm64
       - task: checksum
 
   test:
