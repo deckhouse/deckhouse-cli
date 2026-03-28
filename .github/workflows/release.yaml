@@ -298,7 +298,6 @@ jobs:
 
 
   pr-build:
-    needs: setup-qemu
     if: github.event_name == 'pull_request'
     runs-on: [self-hosted, regular]
     strategy:
