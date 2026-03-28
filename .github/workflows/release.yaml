@@ -35,14 +35,22 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # 1. Clean up existing apt cache to prevent 404 errors on metadata
-          rm -rf /var/lib/apt/lists/*
-          # 2. Add arm64 architecture if needed (before the first update)
+          # 1. Add arm64 architecture
           if [ "${{ matrix.arch }}" = "arm64" ]; then
             dpkg --add-architecture arm64
           fi
-          # 3. Update lists for all added architectures
-          apt-get update
+          # 2. Fix sources.list to explicitly support amd64 and arm64.
+          # This solves 404 errors by forcing apt to look for specific architecture files
+          # and using IPv4 to avoid mirror issues.
+          cat > /etc/apt/sources.list <<EOF
+          deb [arch=amd64,arm64] http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
+          deb [arch=amd64,arm64] http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
+          deb [arch=amd64,arm64] http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse
+          deb [arch=amd64,arm64] http://archive.ubuntu.com/ubuntu/ jammy-backports main restricted universe multiverse
+          EOF
+          # 3. Clean cache and update with IPv4 enforcement
+          rm -rf /var/lib/apt/lists/*
+          apt-get update -o Acquire::ForceIPv4=true
           # 4. Install common dependencies
           apt-get install -y \
             apt-utils \
@@ -315,14 +323,22 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # 1. Clean up existing apt cache to prevent 404 errors on metadata
-          rm -rf /var/lib/apt/lists/*
-          # 2. Add arm64 architecture if needed (before the first update)
+          # 1. Add arm64 architecture
           if [ "${{ matrix.arch }}" = "arm64" ]; then
             dpkg --add-architecture arm64
           fi
-          # 3. Update lists for all added architectures
-          apt-get update
+          # 2. Fix sources.list to explicitly support amd64 and arm64.
+          # This solves 404 errors by forcing apt to look for specific architecture files
+          # and using IPv4 to avoid mirror issues.
+          cat > /etc/apt/sources.list <<EOF
+          deb [arch=amd64,arm64] http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
+          deb [arch=amd64,arm64] http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
+          deb [arch=amd64,arm64] http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse
+          deb [arch=amd64,arm64] http://archive.ubuntu.com/ubuntu/ jammy-backports main restricted universe multiverse
+          EOF
+          # 3. Clean cache and update with IPv4 enforcement
+          rm -rf /var/lib/apt/lists/*
+          apt-get update -o Acquire::ForceIPv4=true
           # 4. Install common dependencies
           apt-get install -y \
             apt-utils \
