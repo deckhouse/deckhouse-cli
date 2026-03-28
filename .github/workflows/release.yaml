@@ -42,11 +42,16 @@ jobs:
           # 2. Fix sources.list to explicitly support amd64 and arm64.
           # This solves 404 errors by forcing apt to look for specific architecture files
           # and using IPv4 to avoid mirror issues.
+          rm -f /etc/apt/sources.list.d/*
           cat > /etc/apt/sources.list <<EOF
-          deb [arch=amd64,arm64] http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
-          deb [arch=amd64,arm64] http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
-          deb [arch=amd64,arm64] http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse
-          deb [arch=amd64,arm64] http://archive.ubuntu.com/ubuntu/ jammy-backports main restricted universe multiverse
+          # AMD64 sources (standard)
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
+          deb [arch=amd64] http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse
+          # ARM64 sources (using ports.ubuntu.com which is the official repo for non-x86)
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe multiverse
           EOF
           # 3. Clean cache and update with IPv4 enforcement
           rm -rf /var/lib/apt/lists/*
@@ -330,11 +335,16 @@ jobs:
           # 2. Fix sources.list to explicitly support amd64 and arm64.
           # This solves 404 errors by forcing apt to look for specific architecture files
           # and using IPv4 to avoid mirror issues.
+          rm -f /etc/apt/sources.list.d/*
           cat > /etc/apt/sources.list <<EOF
-          deb [arch=amd64,arm64] http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
-          deb [arch=amd64,arm64] http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
-          deb [arch=amd64,arm64] http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse
-          deb [arch=amd64,arm64] http://archive.ubuntu.com/ubuntu/ jammy-backports main restricted universe multiverse
+          # AMD64 sources (standard)
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
+          deb [arch=amd64] http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse
+          # ARM64 sources (using ports.ubuntu.com which is the official repo for non-x86)
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe multiverse
           EOF
           # 3. Clean cache and update with IPv4 enforcement
           rm -rf /var/lib/apt/lists/*
