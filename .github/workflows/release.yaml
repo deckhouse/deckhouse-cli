@@ -30,7 +30,6 @@ jobs:
         arch: [amd64, arm64]
     container:
       image: ubuntu:22.04
-      options: --platform linux/${{ matrix.arch }}
     steps:
       - name: Install dependency for linux-amd64 dist
         env:
@@ -305,7 +304,6 @@ jobs:
         arch: [amd64, arm64]
     container:
       image: ubuntu:22.04
-      options: --platform linux/${{ matrix.arch }}
     name: Build for PR
     steps:
       - name: Install dependency for linux-amd64 dist
