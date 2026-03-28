@@ -117,7 +117,7 @@ jobs:
       - name: Build and package
         env:
           # Set Cross-Compilation vars for arm64
-          CC: ${{ matrix.arch == 'arm64' && 'aarch64-linux-gnu-gcc' || 'gcc' }}
+          CC: ${{ matrix.arch == 'arm64' && 'aarch64-linux-gnu-gcc' || '' }}
           PKG_CONFIG_PATH: ${{ matrix.arch == 'arm64' && '/usr/lib/aarch64-linux-gnu/pkgconfig' || '' }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: "1"
@@ -392,7 +392,7 @@ jobs:
       # Build specific architecture, since the container is already running for that arch
       - name: Build and package
         env:
-          CC: ${{ matrix.arch == 'arm64' && 'aarch64-linux-gnu-gcc' || 'gcc' }}
+          CC: ${{ matrix.arch == 'arm64' && 'aarch64-linux-gnu-gcc' || '' }}
           PKG_CONFIG_PATH: ${{ matrix.arch == 'arm64' && '/usr/lib/aarch64-linux-gnu/pkgconfig' || '' }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: "1"
