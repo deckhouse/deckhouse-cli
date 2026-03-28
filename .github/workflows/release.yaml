@@ -31,7 +31,7 @@ jobs:
     container:
       image: ubuntu:22.04
     steps:
-      - name: Install dependency for linux-amd64 dist
+      - name: Install dependency for linux-${{ matrix.arch }} dist
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -135,10 +135,13 @@ jobs:
       - name: Build and package
         env:
           # Set Cross-Compilation vars for arm64
-          CC: ${{ matrix.arch == 'arm64' && 'aarch64-linux-gnu-gcc' || '' }}
+          CC: ${{ matrix.arch == 'arm64' && 'aarch64-linux-gnu-gcc' || 'gcc' }}
           PKG_CONFIG_PATH: ${{ matrix.arch == 'arm64' && '/usr/lib/aarch64-linux-gnu/pkgconfig' || '' }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: "1"
+          # FIX: Override CGO flags to remove macOS specific '-arch' flag
+          CGO_CFLAGS: "-O2 -g"
+          CGO_LDFLAGS: ""
         run: task build-and-package:${{ matrix.arch }}
 
       - name: Upload artifacts
@@ -324,7 +327,7 @@ jobs:
       image: ubuntu:22.04
     name: Build for PR
     steps:
-      - name: Install dependency for linux-amd64 dist
+      - name: Install dependency for linux-${{ matrix.arch }} dist
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -428,10 +431,13 @@ jobs:
       # Build specific architecture, since the container is already running for that arch
       - name: Build and package
         env:
-          CC: ${{ matrix.arch == 'arm64' && 'aarch64-linux-gnu-gcc' || '' }}
+          CC: ${{ matrix.arch == 'arm64' && 'aarch64-linux-gnu-gcc' || 'gcc' }}
           PKG_CONFIG_PATH: ${{ matrix.arch == 'arm64' && '/usr/lib/aarch64-linux-gnu/pkgconfig' || '' }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: "1"
+          # FIX: Override CGO flags to remove macOS specific '-arch' flag
+          CGO_CFLAGS: "-O2 -g"
+          CGO_LDFLAGS: ""
         run: task build:dist:all:${{ matrix.arch }}
 
       - name: Upload build artifacts
