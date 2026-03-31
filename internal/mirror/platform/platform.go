@@ -695,7 +695,7 @@ func (svc *Service) generateDeckhouseReleaseManifests(
 	err := manifests.GenerateDeckhouseReleaseManifestsForVersionsNew(
 		tagsToMirror,
 		deckhouseReleasesManifestFile,
-		svc.layout.Deckhouse,
+		svc.layout.DeckhouseReleaseChannel,
 	)
 	if err != nil {
 		return fmt.Errorf("generate DeckhouseRelease manifests: %w", err)
