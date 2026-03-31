@@ -65,7 +65,6 @@ func (l *ImageDownloadList) FillForChannels(channels []string) {
 	for _, channel := range channels {
 		l.Deckhouse[l.rootURL+":"+channel] = nil
 		l.DeckhouseInstall[path.Join(l.rootURL, internal.InstallSegment)+":"+channel] = nil
-		l.DeckhouseInstallStandalone[path.Join(l.rootURL, internal.InstallStandaloneSegment)+":"+channel] = nil
 		key := path.Join(l.rootURL, internal.ReleaseChannelSegment) + ":" + channel
 		if _, exists := l.DeckhouseReleaseChannel[key]; !exists {
 			l.DeckhouseReleaseChannel[key] = nil
