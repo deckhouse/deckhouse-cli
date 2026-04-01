@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package manifests
+package platform
 
 import (
 	"bytes"
@@ -30,20 +30,19 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
-	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
-// TODO: Move this to platform
-func GenerateDeckhouseReleaseManifestsForVersionsNew(
+func (svc *Service) writeDeckhouseReleaseManifests(
 	versionTagsToMirror []string,
 	pathToManifestYAML string,
-	releaseChannelsImagesLayout *regimage.ImageLayout,
+	releaseChannelsImagesLayout *image.ImageLayout,
 ) error {
 	manifests := &bytes.Buffer{}
 	for _, version := range versionTagsToMirror {
 		versionReleaseImage, err := releaseChannelsImagesLayout.GetImage(version)
 		if err != nil {
-			fmt.Printf("Find image by tag: %v\n", err)
+			svc.userLogger.Warnf("Find image by tag: %v", err)
 			continue
 		}
 

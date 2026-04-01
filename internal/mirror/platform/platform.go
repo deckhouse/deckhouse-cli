@@ -37,7 +37,6 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/manifests"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
@@ -692,7 +691,7 @@ func (svc *Service) generateDeckhouseReleaseManifests(
 
 	deckhouseReleasesManifestFile := filepath.Join(svc.options.BundleDir, "deckhousereleases.yaml")
 
-	err := manifests.GenerateDeckhouseReleaseManifestsForVersionsNew(
+	err := svc.writeDeckhouseReleaseManifests(
 		tagsToMirror,
 		deckhouseReleasesManifestFile,
 		svc.layout.DeckhouseReleaseChannel,
