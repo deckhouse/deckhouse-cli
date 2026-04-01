@@ -44,7 +44,8 @@ func GenerateDeckhouseReleaseManifestsForVersions(
 	for _, version := range versionTagsToMirror {
 		versionReleaseImage, err := layouts.FindImageByTag(releaseChannelsImagesLayout, version)
 		if err != nil {
-			return fmt.Errorf("Find image by tag %q: %w", version, err)
+			fmt.Printf("Find image by tag: %v\n", err)
+			continue
 		}
 		releaseData, err := extractReleaseInfoForDeckhouseRelease(versionReleaseImage)
 		if err != nil {
@@ -90,7 +91,8 @@ func GenerateDeckhouseReleaseManifestsForVersionsNew(
 	for _, version := range versionTagsToMirror {
 		versionReleaseImage, err := releaseChannelsImagesLayout.GetImage(version)
 		if err != nil {
-			return fmt.Errorf("Find image by tag %q: %w", version, err)
+			fmt.Printf("Find image by tag: %v\n", err)
+			continue
 		}
 
 		releaseData, err := extractReleaseInfoForDeckhouseRelease(versionReleaseImage)
