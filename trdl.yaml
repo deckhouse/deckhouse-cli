@@ -17,4 +17,5 @@ commands:
   - git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
   - git config --global --add safe.directory '*'
   - task -o group -p build:dist:all version={{ .Tag }}
+  - mkdir /result
   - cp -a ./dist/{{ .Tag }}/* /result

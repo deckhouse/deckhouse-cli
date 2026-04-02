@@ -303,22 +303,8 @@ jobs:
           git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
           git config --global --add safe.directory '*'
 
-      - name: Debug print version
-        run: |
-          echo "Version: ${{ github.ref_name }}"
-
       - name: Build and package
         run: task build:dist:all
-
-      - name: Build with version
-        run: task build:dist:all version=${{ github.ref_name }}
-
-      - name: Debug copy
-        run: |
-          ls -la ./dist/${{ github.ref_name }}
-          mkdir /result
-          cp -a ./dist/${{ github.ref_name }}/* /result
-          ls -la /result
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
