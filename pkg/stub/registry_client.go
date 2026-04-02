@@ -827,7 +827,7 @@ func (s *RegistryClientStub) CheckImageExists(_ context.Context, tag string) err
 			}
 		}
 	}
-	return fmt.Errorf("image not found: %s", tag)
+	return fmt.Errorf("%w: %s", client.ErrImageNotFound, tag)
 }
 
 // GetImage retrieves an image for a specific reference
@@ -850,7 +850,7 @@ func (s *RegistryClientStub) GetImage(_ context.Context, tag string, _ ...regist
 				}
 			}
 		}
-		return nil, fmt.Errorf("image not found for digest: %s", digestStr)
+		return nil, fmt.Errorf("%w for digest: %s", client.ErrImageNotFound, digestStr)
 	}
 
 	registry, repo := s.findRegistryAndRepo()
@@ -880,7 +880,7 @@ func (s *RegistryClientStub) GetImage(_ context.Context, tag string, _ ...regist
 			}
 		}
 	}
-	return nil, fmt.Errorf("image not found for tag: %s", tag)
+	return nil, fmt.Errorf("%w for tag: %s", client.ErrImageNotFound, tag)
 }
 
 // PushImage pushes an image to the registry
