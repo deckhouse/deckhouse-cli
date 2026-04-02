@@ -27,6 +27,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -151,6 +152,7 @@ func (svc *Service) PullPlatform(ctx context.Context) error {
 func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 	// Default to stable channel if no specific tag is set
 	targetTag := internal.StableChannel
+	fallbackTag := internal.LTSChannel
 
 	if svc.options.TargetTag != "" {
 		targetTag = svc.options.TargetTag
@@ -161,8 +163,20 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 	// Check if target is a release channel (like "stable", "beta") or a specific tag
 	if internal.ChannelIsValid(targetTag) {
 		err := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, targetTag)
-		if err != nil {
+		if err == nil {
+			return nil
+		}
+
+		// Everything but ErrImageNotFound means we can't reach the registry at all
+		if !errors.Is(err, client.ErrImageNotFound) {
 			return fmt.Errorf("failed to check release channel %q exists in registry: %w", targetTag, err)
+		}
+
+		// Channel not found (CSE edition may not have "stable").
+		// Fall back to LTS to verify registry access.
+		fallbackErr := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, fallbackTag)
+		if fallbackErr != nil {
+			return fmt.Errorf("failed to check release channel %q exists in registry: %w", fallbackTag, fallbackErr)
 		}
 
 		return nil
@@ -310,19 +324,35 @@ func (svc *Service) parseInputTags(tags []string) parsedTags {
 
 // fetchReleaseChannelVersions retrieves current versions from all release channels
 func (svc *Service) fetchReleaseChannelVersions(ctx context.Context) (channelVersions, error) {
-	channelsToFetch := append(internal.GetAllDefaultReleaseChannels(), internal.LTSChannel)
+	defaultChannels := internal.GetAllDefaultReleaseChannels()
+	allChannels := slices.Concat(defaultChannels, []string{internal.LTSChannel})
+	channelResults := make(map[string]releaseChannelVersionResult, len(allChannels))
 
-	// Fetch versions from all channels
-	channelResults := make(map[string]releaseChannelVersionResult, len(channelsToFetch))
-	for _, channel := range channelsToFetch {
+	// - LTS exists: fetch all channels (default + LTS), missing default channels are OK
+	// - LTS doesn't exist: all default channels are required
+	ltsVersion, ltsErr := svc.getReleaseChannelVersionFromRegistry(ctx, internal.LTSChannel)
+	if ltsErr != nil && !errors.Is(ltsErr, client.ErrImageNotFound) {
+		return nil, fmt.Errorf("get LTS release channel: %w", ltsErr)
+	}
+
+	hasLTS := ltsErr == nil
+
+	if hasLTS {
+		// Other channels will be appended below (if exists)
+		channelResults[internal.LTSChannel] = releaseChannelVersionResult{ver: ltsVersion}
+	}
+
+	for _, channel := range defaultChannels {
 		version, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
-
-		// LTS channel is optional - warn and continue if missing
-		if err != nil && channel == internal.LTSChannel {
-			svc.userLogger.Warnf("Skipping LTS channel: %v", err)
-			continue
+		// Real error (network, auth) - fail immediately
+		if err != nil && !errors.Is(err, client.ErrImageNotFound) {
+			return nil, fmt.Errorf("failed to get release channel version from registry for channel %s: %w", channel, err)
 		}
 
+		// Missing default channels are OK when LTS is present (e.g., CSE edition)
+		if hasLTS && errors.Is(err, client.ErrImageNotFound) {
+			continue
+		}
 		channelResults[channel] = releaseChannelVersionResult{ver: version, err: err}
 	}
 
