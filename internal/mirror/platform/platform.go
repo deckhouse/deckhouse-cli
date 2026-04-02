@@ -167,6 +167,11 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 			return nil
 		}
 
+		// Everything but ErrImageNotFound means we can't reach the registry at all
+		if !errors.Is(err, client.ErrImageNotFound) {
+			return fmt.Errorf("failed to check release channel %q exists in registry: %w", targetTag, err)
+		}
+
 		// Channel not found (CSE edition may not have "stable").
 		// Fall back to LTS to verify registry access.
 		fallbackErr := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, fallbackTag)
@@ -319,19 +324,28 @@ func (svc *Service) parseInputTags(tags []string) parsedTags {
 
 // fetchReleaseChannelVersions retrieves current versions from all release channels
 func (svc *Service) fetchReleaseChannelVersions(ctx context.Context) (channelVersions, error) {
-	channelsToFetch := append(internal.GetAllDefaultReleaseChannels(), internal.LTSChannel)
+	defaultChannels := internal.GetAllDefaultReleaseChannels()
+	allChannels := append(defaultChannels, internal.LTSChannel)
+	channelResults := make(map[string]releaseChannelVersionResult, len(allChannels))
 
-	// Fetch versions from all channels
-	channelResults := make(map[string]releaseChannelVersionResult, len(channelsToFetch))
-	for _, channel := range channelsToFetch {
+	// - LTS exists: fetch all channels (default + LTS), missing default channels are OK
+	// - LTS doesn't exist: all default channels are required
+	ltsVersion, ltsErr := svc.getReleaseChannelVersionFromRegistry(ctx, internal.LTSChannel)
+	hasLTS := ltsErr == nil
+
+	if hasLTS {
+		// Other channels will be appended below (if exists)
+		channelResults[internal.LTSChannel] = releaseChannelVersionResult{ver: ltsVersion}
+	} else if !errors.Is(ltsErr, client.ErrImageNotFound) {
+		return nil, fmt.Errorf("get LTS release channel: %w", ltsErr)
+	}
+
+	for _, channel := range defaultChannels {
 		version, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
-
-		// Channel not found in registry (CSE edition may not have all channels) - skip it
-		if err != nil && errors.Is(err, client.ErrImageNotFound) {
-			svc.userLogger.Infof("Skipping %s channel: not found in registry", channel)
+		// Missing default channels are OK when LTS is present (e.g., CSE edition)
+		if hasLTS && errors.Is(err, client.ErrImageNotFound) {
 			continue
 		}
-
 		channelResults[channel] = releaseChannelVersionResult{ver: version, err: err}
 	}
 
