@@ -152,6 +152,7 @@ func (svc *Service) PullPlatform(ctx context.Context) error {
 func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 	// Default to stable channel if no specific tag is set
 	targetTag := internal.StableChannel
+	fallbackTag := internal.LTSChannel
 
 	if svc.options.TargetTag != "" {
 		targetTag = svc.options.TargetTag
@@ -162,8 +163,15 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 	// Check if target is a release channel (like "stable", "beta") or a specific tag
 	if internal.ChannelIsValid(targetTag) {
 		err := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, targetTag)
-		if err != nil {
-			return fmt.Errorf("failed to check release channel %q exists in registry: %w", targetTag, err)
+		if err == nil {
+			return nil
+		}
+
+		// Channel not found (CSE edition may not have "stable").
+		// Fall back to LTS to verify registry access.
+		fallbackErr := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, fallbackTag)
+		if fallbackErr != nil {
+			return fmt.Errorf("failed to check release channel %q exists in registry: %w", fallbackTag, fallbackErr)
 		}
 
 		return nil
@@ -318,9 +326,9 @@ func (svc *Service) fetchReleaseChannelVersions(ctx context.Context) (channelVer
 	for _, channel := range channelsToFetch {
 		version, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
 
-		// LTS channel is optional - warn and continue if missing
-		if err != nil && channel == internal.LTSChannel {
-			svc.userLogger.Warnf("Skipping LTS channel: %v", err)
+		// Channel not found in registry (CSE edition may not have all channels) - skip it
+		if err != nil && errors.Is(err, client.ErrImageNotFound) {
+			svc.userLogger.Infof("Skipping %s channel: not found in registry", channel)
 			continue
 		}
 
