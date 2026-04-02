@@ -306,6 +306,12 @@ jobs:
       - name: Build and package
         run: task build:dist:all
 
+      - name: Debug copy
+        run: |
+          ls -la ./dist/{{ github.ref_name }}
+          ls -la /result
+          cp -a ./dist/{{ github.ref_name }}/* /result
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
