@@ -316,6 +316,7 @@ jobs:
       - name: Debug copy
         run: |
           ls -la ./dist/${{ github.ref_name }}
+          mkdir /result
           cp -a ./dist/${{ github.ref_name }}/* /result
           ls -la /result
 
