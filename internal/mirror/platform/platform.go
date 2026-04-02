@@ -331,17 +331,23 @@ func (svc *Service) fetchReleaseChannelVersions(ctx context.Context) (channelVer
 	// - LTS exists: fetch all channels (default + LTS), missing default channels are OK
 	// - LTS doesn't exist: all default channels are required
 	ltsVersion, ltsErr := svc.getReleaseChannelVersionFromRegistry(ctx, internal.LTSChannel)
+	if !errors.Is(ltsErr, client.ErrImageNotFound) {
+		return nil, fmt.Errorf("get LTS release channel: %w", ltsErr)
+	}
+
 	hasLTS := ltsErr == nil
 
 	if hasLTS {
 		// Other channels will be appended below (if exists)
 		channelResults[internal.LTSChannel] = releaseChannelVersionResult{ver: ltsVersion}
-	} else if !errors.Is(ltsErr, client.ErrImageNotFound) {
-		return nil, fmt.Errorf("get LTS release channel: %w", ltsErr)
 	}
 
 	for _, channel := range defaultChannels {
 		version, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
+		if !errors.Is(ltsErr, client.ErrImageNotFound) {
+			return nil, fmt.Errorf("failed to get release channel version from registry for channel %s, %w", channel, ltsErr)
+		}
+
 		// Missing default channels are OK when LTS is present (e.g., CSE edition)
 		if hasLTS && errors.Is(err, client.ErrImageNotFound) {
 			continue
