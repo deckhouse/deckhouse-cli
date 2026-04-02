@@ -59,6 +59,7 @@ func ExtractFileFromImage(img v1.Image, fileName string) (*bytes.Buffer, error) 
 			}
 
 			if hdr.Name != fileName {
+				_ = decompressedLayer.Close()
 				continue
 			}
 
