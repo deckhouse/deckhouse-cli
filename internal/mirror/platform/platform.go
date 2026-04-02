@@ -325,7 +325,9 @@ func (svc *Service) parseInputTags(tags []string) parsedTags {
 // fetchReleaseChannelVersions retrieves current versions from all release channels
 func (svc *Service) fetchReleaseChannelVersions(ctx context.Context) (channelVersions, error) {
 	defaultChannels := internal.GetAllDefaultReleaseChannels()
-	allChannels := append(defaultChannels, internal.LTSChannel)
+	allChannels := make([]string, len(defaultChannels))
+	copy(allChannels, defaultChannels)
+	allChannels = append(allChannels, internal.LTSChannel)
 	channelResults := make(map[string]releaseChannelVersionResult, len(allChannels))
 
 	// - LTS exists: fetch all channels (default + LTS), missing default channels are OK
