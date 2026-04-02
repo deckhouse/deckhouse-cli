@@ -307,7 +307,7 @@ jobs:
         run: |
           export TASK_VERSION=v3.41.0
           export TASK_SHA256=0a2595f7fa3c15a62f8d0c244121a4977018b3bfdec7c1542ac2a8cf079978b8
-          apt-get update && apt-get install -y libbtrfs-dev apt-utils libelf-dev libssl-dev libuv1-dev libzstd-dev file git gcc dnsutils
+          apt-get update && apt-get install -y libbtrfs-dev apt-utils libelf-dev libssl-dev libuv1-dev libzstd-dev file git gcc dnsutils curl
           ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
           curl -LO https://github.com/go-task/task/releases/download/$TASK_VERSION/task_linux_amd64.tar.gz
           echo "$TASK_SHA256  task_linux_amd64.tar.gz" | sha256sum -c
