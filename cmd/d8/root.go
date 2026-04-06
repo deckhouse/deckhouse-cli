@@ -48,6 +48,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
 	useroperation "github.com/deckhouse/deckhouse-cli/internal/useroperation/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/registryerr"
 )
 
 type RootCommand struct {
@@ -174,7 +175,13 @@ func (r *RootCommand) Execute() error {
 func execute() {
 	rootCmd := NewRootCommand()
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
+		var diag *registryerr.Diagnostic
+		// If registry error - show formatted diagnostic with causes and solutions if possible
+		if errors.As(err, &diag) {
+			fmt.Fprint(os.Stderr, diag.Format())
+		} else {
+			fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
+		}
 		os.Exit(1)
 	}
 }

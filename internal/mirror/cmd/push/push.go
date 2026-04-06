@@ -38,6 +38,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/registryerr"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
@@ -178,10 +179,20 @@ func (p *Pusher) Execute() error {
 	}
 
 	if err := p.validateRegistryAccess(); err != nil {
+		if diag := registryerr.Classify(err); diag != nil {
+			return diag
+		}
 		return err
 	}
 
-	return p.executeNewPush()
+	if err := p.executeNewPush(); err != nil {
+		if diag := registryerr.Classify(err); diag != nil {
+			return diag
+		}
+		return err
+	}
+
+	return nil
 }
 
 // executeNewPush runs the push using the push service.
