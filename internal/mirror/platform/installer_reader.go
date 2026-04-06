@@ -20,6 +20,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"io"
+	"path/filepath"
 )
 
 const (
@@ -46,7 +47,7 @@ func (rr *deckhouseInstallerReader) untarMetadata(rc io.Reader) error {
 			return err
 		}
 
-		switch hdr.Name {
+		switch filepath.ToSlash(hdr.Name) {
 		case imagesDigestsFile:
 			_, err = io.Copy(rr.imageDigestsReader, tr)
 			if err != nil {
