@@ -107,10 +107,13 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 			}
 		}
 		// check DataExport Url
-		if returnErr == nil && deObj.Status.URL == "" {
-			returnErr = fmt.Errorf("DataExport %s/%s has no URL", deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
-		} else if deObj.Spec.Publish && deObj.Status.PublicURL == "" {
-			returnErr = fmt.Errorf("DataExport %s/%s has empty PublicURL", deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
+		if returnErr == nil {
+			if deObj.Status.URL == "" {
+				returnErr = fmt.Errorf("DataExport %s/%s has no URL", deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
+			}
+			if deObj.Status.PublicURL == "" && deObj.Spec.Publish {
+				returnErr = fmt.Errorf("DataExport %s/%s has empty PublicURL", deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
+			}
 		}
 
 		if returnErr == nil {
