@@ -74,6 +74,8 @@ type Options struct {
 	BundleChunkSize int64
 	// Timeout is the timeout for the modules access check
 	Timeout time.Duration
+	// DryRun prints the pull plan without downloading any image blobs
+	DryRun bool
 }
 
 type Service struct {
@@ -242,6 +244,11 @@ func (svc *Service) pullModules(ctx context.Context) error {
 		return err
 	}
 
+	// Skip OCI layout post-processing in dry-run (layouts are empty)
+	if svc.options.DryRun {
+		return nil
+	}
+
 	err = logger.Process("Processing modules image indexes", func() error {
 		for _, l := range svc.layout.AsList() {
 			err = layouts.SortIndexManifests(l)
@@ -289,20 +296,22 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 			downloadList.ModuleReleaseChannels[svc.rootURL+"/modules/"+module.name+"/release:"+channel] = nil
 		}
 
-		// Pull release channels first to get version information
-		config := puller.PullConfig{
-			Name:             module.name + " release channels",
-			ImageSet:         downloadList.ModuleReleaseChannels,
-			Layout:           svc.layout.Module(module.name).ModulesReleaseChannels,
-			AllowMissingTags: true,
-			GetterService:    svc.modulesService.Module(module.name).ReleaseChannels(),
+		if !svc.options.DryRun {
+			// Pull release channels first to get version information
+			config := puller.PullConfig{
+				Name:             module.name + " release channels",
+				ImageSet:         downloadList.ModuleReleaseChannels,
+				Layout:           svc.layout.Module(module.name).ModulesReleaseChannels,
+				AllowMissingTags: true,
+				GetterService:    svc.modulesService.Module(module.name).ReleaseChannels(),
+			}
+
+			if err := svc.pullerService.PullImages(ctx, config); err != nil {
+				return fmt.Errorf("pull release channels: %w", err)
+			}
 		}
 
-		if err := svc.pullerService.PullImages(ctx, config); err != nil {
-			return fmt.Errorf("pull release channels: %w", err)
-		}
-
-		// Extract versions from pulled release channels
+		// Extract versions from release channels (calls registry directly, works in dry-run)
 		moduleVersions = svc.extractVersionsFromReleaseChannels(ctx, module.name)
 	}
 
@@ -320,6 +329,21 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 
 	// Deduplicate versions
 	moduleVersions = deduplicateStrings(moduleVersions)
+
+	// In dry-run mode: print what would be pulled and return without downloading blobs
+	if svc.options.DryRun {
+		svc.userLogger.InfoLn("[dry-run] Module '" + module.name + "' images that would be pulled:")
+		for ref := range downloadList.ModuleReleaseChannels {
+			svc.userLogger.InfoLn("  " + ref)
+		}
+		for _, version := range moduleVersions {
+			svc.userLogger.InfoLn("  " + svc.rootURL + "/modules/" + module.name + ":" + version)
+		}
+		if len(moduleVersions) > 0 {
+			svc.userLogger.InfoLn("  (extra images discovery requires a real pull)")
+		}
+		return nil
+	}
 
 	// Skip main module images if only pulling extra images
 	if !svc.options.OnlyExtraImages {

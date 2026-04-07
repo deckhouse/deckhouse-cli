@@ -66,6 +66,8 @@ type Options struct {
 	SkipVexImages bool
 	// Timeout is the timeout for the platform access check
 	Timeout time.Duration
+	// DryRun prints the pull plan without downloading any image blobs
+	DryRun bool
 }
 
 type Service struct {
@@ -546,8 +548,12 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 			return fmt.Errorf("pull standalone installers: %w", err)
 		}
 
-		if err := svc.pullDeckhouseImages(ctx); err != nil {
-			return fmt.Errorf("pull deckhouse images: %w", err)
+		// In dry-run mode skip pulling main release blobs; we only need the installer
+		// image (already pulled above) to extract image_digest.json.
+		if !svc.options.DryRun {
+			if err := svc.pullDeckhouseImages(ctx); err != nil {
+				return fmt.Errorf("pull deckhouse images: %w", err)
+			}
 		}
 
 		return nil
@@ -557,7 +563,8 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	}
 
 	// We should not generate deckhousereleases.yaml manifest for tag-based pulls
-	if svc.options.TargetTag == "" {
+	// and never write to bundleDir in dry-run mode.
+	if svc.options.TargetTag == "" && !svc.options.DryRun {
 		if err = svc.generateDeckhouseReleaseManifests(tagsToMirror); err != nil {
 			logger.WarnLn(err.Error())
 		}
@@ -580,6 +587,13 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 
 		digests, err := svc.ExtractImageDigestsFromDeckhouseInstallerNew(tag, prevDigests)
 		if err != nil {
+			if svc.options.DryRun {
+				// In dry-run mode the installer image may not contain a real images_digests.json
+				// (e.g. when using a stub registry). Warn and continue — the caller will still
+				// see the version/channel image refs that were resolved above.
+				svc.userLogger.Warnf("[dry-run] Could not extract images from installer %q: %v", tag, err)
+				continue
+			}
 			return fmt.Errorf("extract images digests: %w", err)
 		}
 
@@ -587,6 +601,25 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	}
 
 	logger.Infof("Found %d images", len(svc.downloadList.Deckhouse))
+
+	// In dry-run mode: print the complete image list (including any extras extracted
+	// from images_digests.json) and return without writing any bundle output.
+	if svc.options.DryRun {
+		svc.userLogger.InfoLn("[dry-run] Platform images that would be pulled:")
+		for ref := range svc.downloadList.Deckhouse {
+			svc.userLogger.InfoLn("  " + ref)
+		}
+		for ref := range svc.downloadList.DeckhouseReleaseChannel {
+			svc.userLogger.InfoLn("  " + ref)
+		}
+		for ref := range svc.downloadList.DeckhouseInstall {
+			svc.userLogger.InfoLn("  " + ref)
+		}
+		for ref := range svc.downloadList.DeckhouseInstallStandalone {
+			svc.userLogger.InfoLn("  " + ref)
+		}
+		return nil
+	}
 
 	if err = logger.Process("Pull Deckhouse images", func() error {
 		if err := svc.pullDeckhouseImages(ctx); err != nil {
