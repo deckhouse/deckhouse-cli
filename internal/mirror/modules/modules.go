@@ -311,7 +311,9 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 			}
 		}
 
-		// Extract versions from release channels (calls registry directly, works in dry-run)
+		// Extract versions from release channels.
+		// Does not depend on PullImages above - calls GetImage() directly
+		// against the remote registry, not from the local OCI layout.
 		moduleVersions = svc.extractVersionsFromReleaseChannels(ctx, module.name)
 	}
 
