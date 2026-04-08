@@ -49,6 +49,8 @@ type Options struct {
 	BundleChunkSize int64
 	// Timeout is the timeout for the installer access check
 	Timeout time.Duration
+	// DryRun prints the pull plan without downloading any image blobs
+	DryRun bool
 }
 type Service struct {
 	// registryService handles Deckhouse installer registry operations
@@ -114,6 +116,14 @@ func (svc *Service) PullInstaller(ctx context.Context) error {
 	tagsToMirror := svc.findTagsToMirror(ctx)
 
 	svc.downloadList.FillInstallerImages(tagsToMirror)
+
+	if svc.options.DryRun {
+		svc.userLogger.InfoLn("[dry-run] Installer images that would be pulled:")
+		for ref := range svc.downloadList.Installer {
+			svc.userLogger.InfoLn("  " + ref)
+		}
+		return nil
+	}
 
 	err = svc.pullInstaller(ctx)
 	if err != nil {

@@ -45,6 +45,8 @@ type Options struct {
 	BundleChunkSize int64
 	// Timeout is the timeout for the security access check
 	Timeout time.Duration
+	// DryRun prints the pull plan without downloading any image blobs
+	DryRun bool
 }
 
 type Service struct {
@@ -139,6 +141,16 @@ func (svc *Service) pullSecurityDatabases(ctx context.Context) error {
 
 	// Fill download list with security images
 	svc.downloadList.FillSecurityImages()
+
+	if svc.options.DryRun {
+		svc.userLogger.InfoLn("[dry-run] Security database images that would be pulled:")
+		for _, imageSet := range svc.downloadList.Security {
+			for ref := range imageSet {
+				svc.userLogger.InfoLn("  " + ref)
+			}
+		}
+		return nil
+	}
 
 	err := logger.Process("Pull Security Databases", func() error {
 		for securityName, imageSet := range svc.downloadList.Security {
