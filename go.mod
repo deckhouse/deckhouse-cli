@@ -5,7 +5,7 @@ go 1.24.13
 require (
 	github.com/Masterminds/semver/v3 v3.3.1
 	github.com/deckhouse/deckhouse/pkg/log v0.2.0
-	github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260326143935-b535ad6cb730
+	github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260407161812-f9afe0918c6e
 	github.com/deckhouse/virtualization/src/cli v1.5.1
 	github.com/fatih/color v1.18.0
 	github.com/fluxcd/flagger v1.36.1
