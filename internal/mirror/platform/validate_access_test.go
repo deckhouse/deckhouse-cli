@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -78,28 +78,28 @@ func TestService_validatePlatformAccess(t *testing.T) {
 		errContains string
 	}{
 		{
-			name:      "no target tag defaults to stable channel which exists",
+			name:       "no target tag defaults to stable channel which exists",
 			makeClient: stub.NewRegistryClientStub,
-			targetTag: "",
-			wantErr:   false,
+			targetTag:  "",
+			wantErr:    false,
 		},
 		{
-			name:      "explicit channel tag exists",
+			name:       "explicit channel tag exists",
 			makeClient: stub.NewRegistryClientStub,
-			targetTag: "alpha",
-			wantErr:   false,
+			targetTag:  "alpha",
+			wantErr:    false,
 		},
 		{
-			name:      "early-access channel exists",
+			name:       "early-access channel exists",
 			makeClient: stub.NewRegistryClientStub,
-			targetTag: "early-access",
-			wantErr:   false,
+			targetTag:  "early-access",
+			wantErr:    false,
 		},
 		{
-			name:      "rock-solid channel exists",
+			name:       "rock-solid channel exists",
 			makeClient: stub.NewRegistryClientStub,
-			targetTag: "rock-solid",
-			wantErr:   false,
+			targetTag:  "rock-solid",
+			wantErr:    false,
 		},
 		{
 			name:       "channel not found falls back to LTS successfully",
@@ -122,16 +122,16 @@ func TestService_validatePlatformAccess(t *testing.T) {
 			errContains: "lts",
 		},
 		{
-			name:      "semver tag exists in root repository",
+			name:       "semver tag exists in root repository",
 			makeClient: stub.NewRegistryClientStub,
-			targetTag: "v1.72.10",
-			wantErr:   false,
+			targetTag:  "v1.72.10",
+			wantErr:    false,
 		},
 		{
-			name:      "another semver tag exists",
+			name:       "another semver tag exists",
 			makeClient: stub.NewRegistryClientStub,
-			targetTag: "v1.69.0",
-			wantErr:   false,
+			targetTag:  "v1.69.0",
+			wantErr:    false,
 		},
 		{
 			name:        "semver tag not present in registry returns error",
@@ -141,10 +141,10 @@ func TestService_validatePlatformAccess(t *testing.T) {
 			errContains: "v9.99.0",
 		},
 		{
-			name:      "custom non-channel tag exists in root repository",
+			name:       "custom non-channel tag exists in root repository",
 			makeClient: stub.NewRegistryClientStub,
-			targetTag: "pr12345",
-			wantErr:   false,
+			targetTag:  "pr12345",
+			wantErr:    false,
 		},
 		{
 			name:        "custom non-channel tag not present in registry returns error",
@@ -179,11 +179,11 @@ func TestService_findTagsToMirror(t *testing.T) {
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
 	tests := []struct {
-		name          string
-		options       *Options
-		wantVersions  []string // expected in result[0] (both "vX.Y.Z" and custom tags)
-		wantChannels  []string
-		wantErr       bool
+		name         string
+		options      *Options
+		wantVersions []string // expected in result[0] (both "vX.Y.Z" and custom tags)
+		wantChannels []string
+		wantErr      bool
 	}{
 		{
 			name:    "empty TargetTag returns all channel versions",
@@ -222,7 +222,7 @@ func TestService_findTagsToMirror(t *testing.T) {
 			wantErr:      false,
 		},
 		{
-			name: "TargetTag is semver with matching channel returns version and channel",
+			name:    "TargetTag is semver with matching channel returns version and channel",
 			options: &Options{TargetTag: "v1.71.0"},
 			// v1.71.0 is the beta channel version
 			wantVersions: []string{"v1.71.0"},
