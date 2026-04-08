@@ -97,14 +97,13 @@ func TestDryRun_InstallerPulledToTmpDir(t *testing.T) {
 	err := svc.PullPlatform(context.Background())
 	require.NoError(t, err)
 
-	// The installer OCI layout directory must exist under workingDir, proving
-	// that pullInstallers was executed (so images_digests.json extraction was
-	// attempted).
+	// In optimized dry-run, no OCI layout is created - images_digests.json is
+	// streamed directly from the remote registry via ExtractFileFromImage.
 	installerLayoutDir := filepath.Join(workingDir, "platform", "install")
 	_, statErr := os.Stat(installerLayoutDir)
-	assert.NoError(t, statErr, "installer OCI layout must be created in tmpDir during dry-run; dir: %s", installerLayoutDir)
+	assert.ErrorIs(t, statErr, os.ErrNotExist, "installer OCI layout must NOT be created in dry-run; dir: %s", installerLayoutDir)
 
-	// bundleDir must remain empty – no platform.tar, no deckhousereleases.yaml
+	// bundleDir must remain empty
 	entries, err := os.ReadDir(bundleDir)
 	require.NoError(t, err)
 	assert.Empty(t, entries, "dry-run must not write any files to the bundle directory; found: %v", entries)
