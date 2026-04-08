@@ -40,6 +40,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
@@ -104,10 +105,15 @@ func NewService(
 
 	tmpDir := filepath.Join(workingDir, "platform")
 
-	layout, err := createOCIImageLayoutsForPlatform(tmpDir)
-	if err != nil {
-		//TODO: handle error
-		userLogger.Warnf("Create OCI Image Layouts: %v", err)
+	// layout is nil in dry-run mode; pullDeckhousePlatformDryRun does not use it.
+	var layout *ImageLayouts
+	if !options.DryRun {
+		var err error
+		layout, err = createOCIImageLayoutsForPlatform(tmpDir)
+		if err != nil {
+			//TODO: handle error
+			userLogger.Warnf("Create OCI Image Layouts: %v", err)
+		}
 	}
 
 	rootURL := registryService.GetRoot()
@@ -533,6 +539,10 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 }
 
 func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []string) error {
+	if svc.options.DryRun {
+		return svc.pullDeckhousePlatformDryRun(ctx, tagsToMirror)
+	}
+
 	logger := svc.userLogger
 
 	err := logger.Process("Pull release channels and installers", func() error {
@@ -548,12 +558,8 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 			return fmt.Errorf("pull standalone installers: %w", err)
 		}
 
-		// In dry-run mode skip pulling main release blobs; we only need the installer
-		// image (already pulled above) to extract image_digest.json.
-		if !svc.options.DryRun {
-			if err := svc.pullDeckhouseImages(ctx); err != nil {
-				return fmt.Errorf("pull deckhouse images: %w", err)
-			}
+		if err := svc.pullDeckhouseImages(ctx); err != nil {
+			return fmt.Errorf("pull deckhouse images: %w", err)
 		}
 
 		return nil
@@ -563,8 +569,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	}
 
 	// We should not generate deckhousereleases.yaml manifest for tag-based pulls
-	// and never write to bundleDir in dry-run mode.
-	if svc.options.TargetTag == "" && !svc.options.DryRun {
+	if svc.options.TargetTag == "" {
 		if err = svc.generateDeckhouseReleaseManifests(tagsToMirror); err != nil {
 			logger.WarnLn(err.Error())
 		}
@@ -587,13 +592,6 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 
 		digests, err := svc.ExtractImageDigestsFromDeckhouseInstallerNew(tag, prevDigests)
 		if err != nil {
-			if svc.options.DryRun {
-				// In dry-run mode the installer image may not contain a real images_digests.json
-				// (e.g. when using a stub registry). Warn and continue — the caller will still
-				// see the version/channel image refs that were resolved above.
-				svc.userLogger.Warnf("[dry-run] Could not extract images from installer %q: %v", tag, err)
-				continue
-			}
 			return fmt.Errorf("extract images digests: %w", err)
 		}
 
@@ -601,25 +599,6 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	}
 
 	logger.Infof("Found %d images", len(svc.downloadList.Deckhouse))
-
-	// In dry-run mode: print the complete image list (including any extras extracted
-	// from images_digests.json) and return without writing any bundle output.
-	if svc.options.DryRun {
-		svc.userLogger.InfoLn("[dry-run] Platform images that would be pulled:")
-		for ref := range svc.downloadList.Deckhouse {
-			svc.userLogger.InfoLn("  " + ref)
-		}
-		for ref := range svc.downloadList.DeckhouseReleaseChannel {
-			svc.userLogger.InfoLn("  " + ref)
-		}
-		for ref := range svc.downloadList.DeckhouseInstall {
-			svc.userLogger.InfoLn("  " + ref)
-		}
-		for ref := range svc.downloadList.DeckhouseInstallStandalone {
-			svc.userLogger.InfoLn("  " + ref)
-		}
-		return nil
-	}
 
 	if err = logger.Process("Pull Deckhouse images", func() error {
 		if err := svc.pullDeckhouseImages(ctx); err != nil {
@@ -745,6 +724,104 @@ func (svc *Service) pullDeckhouseImages(ctx context.Context) error {
 	}
 
 	return svc.pullerService.PullImages(ctx, config)
+}
+
+// pullDeckhousePlatformDryRun resolves and prints platform images without pulling
+// any blobs to disk. It streams images_digests.json directly from the remote
+// installer image using ExtractFileFromImage (layer-by-layer, no OCI layout needed).
+func (svc *Service) pullDeckhousePlatformDryRun(ctx context.Context, tagsToMirror []string) error {
+	logger := svc.userLogger
+
+	logger.Infof("Searching for Deckhouse built-in modules digests")
+
+	var prevDigests = make(map[string]struct{})
+	for _, tag := range tagsToMirror {
+		logger.Infof("[dry-run] Streaming installer metadata for %s from registry", tag)
+
+		digests, err := svc.extractImageDigestsFromRemote(ctx, tag, prevDigests)
+		if err != nil {
+			logger.Warnf("[dry-run] Could not extract images from installer %q: %v", tag, err)
+			continue
+		}
+
+		maps.Copy(svc.downloadList.Deckhouse, digests)
+	}
+
+	logger.Infof("Found %d images", len(svc.downloadList.Deckhouse))
+
+	svc.userLogger.InfoLn("[dry-run] Platform images that would be pulled:")
+	for _, ref := range slices.Sorted(maps.Keys(svc.downloadList.Deckhouse)) {
+		svc.userLogger.InfoLn("  " + ref)
+	}
+	for _, ref := range slices.Sorted(maps.Keys(svc.downloadList.DeckhouseReleaseChannel)) {
+		svc.userLogger.InfoLn("  " + ref)
+	}
+	for _, ref := range slices.Sorted(maps.Keys(svc.downloadList.DeckhouseInstall)) {
+		svc.userLogger.InfoLn("  " + ref)
+	}
+	for _, ref := range slices.Sorted(maps.Keys(svc.downloadList.DeckhouseInstallStandalone)) {
+		svc.userLogger.InfoLn("  " + ref)
+	}
+	return nil
+}
+
+// extractImageDigestsFromRemote streams images_digests.json (or images_tags.json)
+// directly from the remote installer image without saving the image to disk.
+// Uses ExtractFileFromImage which downloads only the layer containing the target file.
+func (svc *Service) extractImageDigestsFromRemote(
+	ctx context.Context,
+	tag string,
+	prevDigests map[string]struct{},
+) (map[string]*puller.ImageMeta, error) {
+	img, err := svc.deckhouseService.Installer().GetImage(ctx, tag)
+	if err != nil {
+		return nil, fmt.Errorf("get remote installer image %q: %w", tag, err)
+	}
+
+	rootURL := svc.deckhouseService.GetRoot()
+	result := make(map[string]*puller.ImageMeta)
+
+	// Try images_tags.json first (preferred)
+	tagsFile, err := images.ExtractFileFromImage(img, imagesTagsFile)
+	if err == nil && tagsFile.Len() > 0 {
+		var tags map[string]map[string]string
+		if err := json.NewDecoder(tagsFile).Decode(&tags); err != nil {
+			return nil, fmt.Errorf("decode %s: %w", imagesTagsFile, err)
+		}
+		for _, nameTagTuple := range tags {
+			for _, imageID := range nameTagTuple {
+				ref := rootURL + ":" + imageID
+				if _, ok := prevDigests[ref]; !ok {
+					prevDigests[ref] = struct{}{}
+					result[ref] = nil
+				}
+			}
+		}
+		svc.userLogger.Infof("Deckhouse digests found: %d", len(result))
+		return result, nil
+	}
+
+	// Fallback: images_digests.json
+	digestsFile, err := images.ExtractFileFromImage(img, imagesDigestsFile)
+	if err != nil {
+		return nil, fmt.Errorf("extract %s from installer %q: %w", imagesDigestsFile, tag, err)
+	}
+	var digests map[string]map[string]string
+	if err := json.NewDecoder(digestsFile).Decode(&digests); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", imagesDigestsFile, err)
+	}
+	for _, nameDigestTuple := range digests {
+		for _, imageID := range nameDigestTuple {
+			ref := rootURL + "@" + imageID
+			if _, ok := prevDigests[ref]; !ok {
+				prevDigests[ref] = struct{}{}
+				result[ref] = nil
+			}
+		}
+	}
+
+	svc.userLogger.Infof("Deckhouse digests found: %d", len(result))
+	return result, nil
 }
 
 func (svc *Service) generateDeckhouseReleaseManifests(
