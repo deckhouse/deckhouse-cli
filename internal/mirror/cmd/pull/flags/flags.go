@@ -69,6 +69,8 @@ var (
 	OnlyExtraImages bool
 	SkipVexImages   bool
 
+	DryRun bool
+
 	MirrorTimeout time.Duration = -1
 )
 
@@ -216,6 +218,12 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		"skip-vex-images",
 		false,
 		"Do not pull VEX images.",
+	)
+	flagSet.BoolVar(
+		&DryRun,
+		"dry-run",
+		false,
+		"Print what would be pulled without downloading any images. Useful for fast validation of flags and filters.",
 	)
 	flagSet.BoolVar(
 		&TLSSkipVerify,

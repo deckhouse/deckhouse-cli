@@ -35,6 +35,7 @@ bin/
 d8
 dist/
 build/
+tmp/
 
 # Entrypoint for the application
 !/cmd/d8

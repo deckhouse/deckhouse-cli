@@ -57,6 +57,8 @@ type PullServiceOptions struct {
 	SkipVexImages bool
 	// Timeout is the timeout for the pull operation
 	Timeout time.Duration
+	// DryRun prints the pull plan without downloading any image blobs
+	DryRun bool
 }
 
 type PullService struct {
@@ -103,6 +105,7 @@ func NewPullService(
 				IgnoreSuspend:   options.IgnoreSuspend,
 				SkipVexImages:   options.SkipVexImages,
 				Timeout:         options.Timeout,
+				DryRun:          options.DryRun,
 			},
 			logger,
 			userLogger,
@@ -114,6 +117,7 @@ func NewPullService(
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
 				Timeout:         options.Timeout,
+				DryRun:          options.DryRun,
 			},
 			logger,
 			userLogger,
@@ -128,6 +132,7 @@ func NewPullService(
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
 				Timeout:         options.Timeout,
+				DryRun:          options.DryRun,
 			},
 			logger,
 			userLogger,
@@ -140,6 +145,7 @@ func NewPullService(
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
 				Timeout:         options.Timeout,
+				DryRun:          options.DryRun,
 			},
 			logger,
 			userLogger,

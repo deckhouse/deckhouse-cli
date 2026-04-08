@@ -66,6 +66,8 @@ type Options struct {
 	SkipVexImages bool
 	// Timeout is the timeout for the platform access check
 	Timeout time.Duration
+	// DryRun prints the pull plan without downloading any image blobs
+	DryRun bool
 }
 
 type Service struct {
@@ -102,10 +104,15 @@ func NewService(
 
 	tmpDir := filepath.Join(workingDir, "platform")
 
-	layout, err := createOCIImageLayoutsForPlatform(tmpDir)
-	if err != nil {
-		//TODO: handle error
-		userLogger.Warnf("Create OCI Image Layouts: %v", err)
+	// layout is nil in dry-run mode; pullDeckhousePlatformDryRun does not use it.
+	var layout *ImageLayouts
+	if !options.DryRun {
+		var err error
+		layout, err = createOCIImageLayoutsForPlatform(tmpDir)
+		if err != nil {
+			//TODO: handle error
+			userLogger.Warnf("Create OCI Image Layouts: %v", err)
+		}
 	}
 
 	rootURL := registryService.GetRoot()
@@ -531,6 +538,10 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 }
 
 func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []string) error {
+	if svc.options.DryRun {
+		return svc.pullDeckhousePlatformDryRun(ctx, tagsToMirror)
+	}
+
 	logger := svc.userLogger
 
 	err := logger.Process("Pull release channels and installers", func() error {

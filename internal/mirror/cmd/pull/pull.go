@@ -283,6 +283,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 			BundleDir:       pullflags.ImagesBundlePath,
 			BundleChunkSize: pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
 			Timeout:         pullflags.MirrorTimeout,
+			DryRun:          pullflags.DryRun,
 		},
 		logger.Named("pull"),
 		p.logger,
@@ -296,6 +297,11 @@ func (p *Puller) Execute(ctx context.Context) error {
 			return nil
 		}
 		return fmt.Errorf("pull from registry: %w", err)
+	}
+
+	if pullflags.DryRun {
+		p.logger.InfoLn("[dry-run] Done. No images were downloaded.")
+		return nil
 	}
 
 	if err := p.computeGOSTDigests(); err != nil {
