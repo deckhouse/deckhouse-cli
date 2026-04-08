@@ -273,14 +273,3 @@ func TestDryRunExitsZeroOnSuccess(t *testing.T) {
 	err := puller.Execute(ctx)
 	assert.NoError(t, err, "dry-run must exit with code 0 on success")
 }
-
-// TestDryRunFlagInOptions verifies DryRun field is included in PullServiceOptions literal.
-func TestDryRunFlagInOptions(t *testing.T) {
-	defer saveFlagsAndRestore(t)()
-
-	pullflags.DryRun = true
-	assert.True(t, pullflags.DryRun)
-
-	pullflags.DryRun = false
-	assert.False(t, pullflags.DryRun)
-}
