@@ -40,7 +40,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/images"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
@@ -724,104 +723,6 @@ func (svc *Service) pullDeckhouseImages(ctx context.Context) error {
 	}
 
 	return svc.pullerService.PullImages(ctx, config)
-}
-
-// pullDeckhousePlatformDryRun resolves and prints platform images without pulling
-// any blobs to disk. It streams images_digests.json directly from the remote
-// installer image using ExtractFileFromImage (layer-by-layer, no OCI layout needed).
-func (svc *Service) pullDeckhousePlatformDryRun(ctx context.Context, tagsToMirror []string) error {
-	logger := svc.userLogger
-
-	logger.Infof("Searching for Deckhouse built-in modules digests")
-
-	var prevDigests = make(map[string]struct{})
-	for _, tag := range tagsToMirror {
-		logger.Infof("[dry-run] Streaming installer metadata for %s from registry", tag)
-
-		digests, err := svc.extractImageDigestsFromRemote(ctx, tag, prevDigests)
-		if err != nil {
-			logger.Warnf("[dry-run] Could not extract images from installer %q: %v", tag, err)
-			continue
-		}
-
-		maps.Copy(svc.downloadList.Deckhouse, digests)
-	}
-
-	logger.Infof("Found %d images", len(svc.downloadList.Deckhouse))
-
-	svc.userLogger.InfoLn("[dry-run] Platform images that would be pulled:")
-	for _, ref := range slices.Sorted(maps.Keys(svc.downloadList.Deckhouse)) {
-		svc.userLogger.InfoLn("  " + ref)
-	}
-	for _, ref := range slices.Sorted(maps.Keys(svc.downloadList.DeckhouseReleaseChannel)) {
-		svc.userLogger.InfoLn("  " + ref)
-	}
-	for _, ref := range slices.Sorted(maps.Keys(svc.downloadList.DeckhouseInstall)) {
-		svc.userLogger.InfoLn("  " + ref)
-	}
-	for _, ref := range slices.Sorted(maps.Keys(svc.downloadList.DeckhouseInstallStandalone)) {
-		svc.userLogger.InfoLn("  " + ref)
-	}
-	return nil
-}
-
-// extractImageDigestsFromRemote streams images_digests.json (or images_tags.json)
-// directly from the remote installer image without saving the image to disk.
-// Uses ExtractFileFromImage which downloads only the layer containing the target file.
-func (svc *Service) extractImageDigestsFromRemote(
-	ctx context.Context,
-	tag string,
-	prevDigests map[string]struct{},
-) (map[string]*puller.ImageMeta, error) {
-	img, err := svc.deckhouseService.Installer().GetImage(ctx, tag)
-	if err != nil {
-		return nil, fmt.Errorf("get remote installer image %q: %w", tag, err)
-	}
-
-	rootURL := svc.deckhouseService.GetRoot()
-	result := make(map[string]*puller.ImageMeta)
-
-	// Try images_tags.json first (preferred)
-	tagsFile, err := images.ExtractFileFromImage(img, imagesTagsFile)
-	if err == nil && tagsFile.Len() > 0 {
-		var tags map[string]map[string]string
-		if err := json.NewDecoder(tagsFile).Decode(&tags); err != nil {
-			return nil, fmt.Errorf("decode %s: %w", imagesTagsFile, err)
-		}
-		for _, nameTagTuple := range tags {
-			for _, imageID := range nameTagTuple {
-				ref := rootURL + ":" + imageID
-				if _, ok := prevDigests[ref]; !ok {
-					prevDigests[ref] = struct{}{}
-					result[ref] = nil
-				}
-			}
-		}
-		svc.userLogger.Infof("Deckhouse digests found: %d", len(result))
-		return result, nil
-	}
-
-	// Fallback: images_digests.json
-	digestsFile, err := images.ExtractFileFromImage(img, imagesDigestsFile)
-	if err != nil {
-		return nil, fmt.Errorf("extract %s from installer %q: %w", imagesDigestsFile, tag, err)
-	}
-	var digests map[string]map[string]string
-	if err := json.NewDecoder(digestsFile).Decode(&digests); err != nil {
-		return nil, fmt.Errorf("decode %s: %w", imagesDigestsFile, err)
-	}
-	for _, nameDigestTuple := range digests {
-		for _, imageID := range nameDigestTuple {
-			ref := rootURL + "@" + imageID
-			if _, ok := prevDigests[ref]; !ok {
-				prevDigests[ref] = struct{}{}
-				result[ref] = nil
-			}
-		}
-	}
-
-	svc.userLogger.Infof("Deckhouse digests found: %d", len(result))
-	return result, nil
 }
 
 func (svc *Service) generateDeckhouseReleaseManifests(
