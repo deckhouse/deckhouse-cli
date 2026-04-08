@@ -44,6 +44,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/gostsums"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
@@ -219,6 +220,7 @@ func NewPuller(cmd *cobra.Command) *Puller {
 		},
 	}
 }
+
 func (p *Puller) Execute(ctx context.Context) error {
 	if err := p.cleanupWorkingDirectory(); err != nil {
 		return err
@@ -253,6 +255,9 @@ func (p *Puller) Execute(ctx context.Context) error {
 
 	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
 		c = stub.NewRegistryClientStub()
+		// The stub's root URL already includes the edition path segment, so we
+		// must not add it again via registryservice.NewService.
+		edition = pkg.NoEdition
 	}
 
 	// Scope to the registry path and modules suffix

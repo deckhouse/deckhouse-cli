@@ -30,7 +30,8 @@ import (
 )
 
 // TestNewRegistryClientStub_ReleaseChannelTags verifies that the Deckhouse
-// stub exposes all five release channels under the "release-channel" repo.
+// stub exposes all five release channels and their version tags under the
+// "release-channel" repo.
 func TestNewRegistryClientStub_ReleaseChannelTags(t *testing.T) {
 	client := stub.NewRegistryClientStub()
 	rcClient := client.WithSegment("release-channel")
@@ -40,6 +41,7 @@ func TestNewRegistryClientStub_ReleaseChannelTags(t *testing.T) {
 
 	assert.ElementsMatch(t, []string{
 		"alpha", "beta", "early-access", "stable", "rock-solid",
+		"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0",
 	}, tags)
 }
 

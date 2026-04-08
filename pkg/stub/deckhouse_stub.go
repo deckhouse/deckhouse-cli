@@ -69,6 +69,8 @@ func NewRegistryClientStub() localreg.Client {
 	for channel, version := range releaseChannelData {
 		img := releaseChannelImage(version)
 		reg.MustAddImage("release-channel", channel, img)
+		// Version-tagged release-channel images are required by non-DryRun full-discovery pull.
+		reg.MustAddImage("release-channel", version, img)
 	}
 
 	// ---- root-level and installer repositories ----
