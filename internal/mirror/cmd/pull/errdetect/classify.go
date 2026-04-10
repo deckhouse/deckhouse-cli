@@ -14,7 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package errdiag
+// Package errdetect classifies registry errors for d8 mirror pull
+// with pull-specific causes and solutions.
+package errdetect
 
 import (
 	"context"
@@ -25,7 +27,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"syscall"
 
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
@@ -34,108 +35,95 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/errmatch"
 )
 
-// Error category names displayed to the user after "error: ".
-// Some categories are extended with dynamic details (hostname, port, HTTP code)
-// at classification time via fmt.Sprintf.
 const (
-	CategoryEOF            = "Connection terminated unexpectedly (EOF)"
-	CategoryTLS            = "TLS/certificate verification failed"
-	CategoryAuth           = "Authentication failed"
-	CategoryAuth401        = "Authentication failed (HTTP 401 Unauthorized)"
-	CategoryAuth403        = "Access denied (HTTP 403 Forbidden)"
-	CategoryRateLimit      = "Rate limited by registry (HTTP 429 Too Many Requests)"
-	CategoryServerError    = "Registry server error"
-	CategoryDNS            = "DNS resolution failed"
-	CategoryTimeout        = "Operation timed out"
-	CategoryNetwork        = "Network connection failed"
-	CategoryImageNotFound  = "Image not found in registry"
-	CategoryRepoNotFound   = "Repository not found in registry"
-	CategoryUnsupportedOCI = "Unsupported OCI artifact type"
+	categoryEOF           = "Connection terminated unexpectedly (EOF)"
+	categoryTLS           = "TLS/certificate verification failed"
+	categoryAuth          = "Authentication failed"
+	categoryAuth401       = "Authentication failed (HTTP 401 Unauthorized)"
+	categoryAuth403       = "Access denied (HTTP 403 Forbidden)"
+	categoryRateLimit     = "Rate limited by registry (HTTP 429 Too Many Requests)"
+	categoryServerError   = "Registry server error"
+	categoryDNS           = "DNS resolution failed"
+	categoryTimeout       = "Operation timed out"
+	categoryNetwork       = "Network connection failed"
+	categoryImageNotFound = "Image not found in registry"
+	categoryRepoNotFound  = "Repository not found in registry"
 )
 
-// Classify analyzes an error and returns a *diagnostic.HelpfulError if
-// the error can be classified into a known category, or nil otherwise.
-// Detection order matters: more specific checks come before general ones.
-func Classify(err error) *diagnostic.HelpfulError {
+// Diagnose analyzes an error and returns a *diagnostic.HelpfulError
+// with pull-specific causes and solutions, or nil if the error is not recognized.
+func Diagnose(err error) *diagnostic.HelpfulError {
 	if err == nil {
 		return nil
 	}
 
-	// Already classified - don't wrap twice.
 	var helpErr *diagnostic.HelpfulError
 	if errors.As(err, &helpErr) {
 		return nil
 	}
 
 	switch {
-	case isEOFError(err):
+	case isEOF(err):
 		return &diagnostic.HelpfulError{
-			Category:    CategoryEOF,
+			Category:    categoryEOF,
 			OriginalErr: err,
 			Causes: []string{
 				"Corporate proxy or middleware intercepting and terminating HTTPS connections",
-				"Registry server closed the connection unexpectedly",
+				"Source registry closed the connection unexpectedly",
 				"Network device (firewall, load balancer) dropping packets",
 			},
 			Solutions: []string{
 				"Check if a corporate proxy is intercepting HTTPS traffic",
 				"If using a proxy, ensure it is configured to pass through registry traffic",
-				"Use --tls-skip-verify flag if a proxy is replacing TLS certificates",
 				"Try connecting directly without proxy: unset HTTP_PROXY HTTPS_PROXY",
 			},
 		}
 
 	case isCertificateError(err):
 		return &diagnostic.HelpfulError{
-			Category:    CategoryTLS,
+			Category:    categoryTLS,
 			OriginalErr: err,
 			Causes: []string{
-				"Self-signed certificate without proper trust chain",
+				"Self-signed certificate on the source registry",
 				"Certificate expired or not yet valid",
-				"Hostname mismatch between certificate and registry URL",
 				"Corporate proxy or middleware intercepting HTTPS connections",
 			},
 			Solutions: []string{
 				"Use --tls-skip-verify flag to skip TLS verification (not recommended for production)",
-				"Add the registry's CA certificate to your system trust store",
-				"Verify the registry URL hostname matches the certificate",
+				"Add the source registry's CA certificate to your system trust store",
 				"Verify system clock is correct (expired certificates can be caused by wrong time)",
 			},
 		}
 
 	case isAuthenticationError(err):
-		var transportErr *transport.Error
-		category := CategoryAuth
-		if errors.As(err, &transportErr) {
-			switch transportErr.StatusCode {
-			case http.StatusUnauthorized:
-				category = CategoryAuth401
-			case http.StatusForbidden:
-				category = CategoryAuth403
-			}
+		category := categoryAuth
+		if code := authStatusCode(err); code == http.StatusUnauthorized {
+			category = categoryAuth401
+		} else if code == http.StatusForbidden {
+			category = categoryAuth403
 		}
 
 		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
 			Causes: []string{
-				"Invalid or expired credentials",
-				"License key or registry credentials are incorrect or not provided",
-				"Insufficient permissions for the requested operation",
+				"License key is invalid, expired, or not provided",
+				"Source registry credentials are incorrect",
+				"Insufficient permissions for the requested images",
 			},
 			Solutions: []string{
-				"For pull: verify your license key and pass it with --license flag",
-				"For push: verify --registry-login and --registry-password are correct",
+				"Verify your license key and pass it with --license flag",
+				"For custom source registries, use --source-login and --source-password",
 				"Contact registry administrator to verify access rights",
 			},
 		}
 
 	case isRateLimitError(err):
 		return &diagnostic.HelpfulError{
-			Category:    CategoryRateLimit,
+			Category:    categoryRateLimit,
 			OriginalErr: err,
 			Causes: []string{
-				"Too many requests to the registry in a short time",
+				"Too many requests to the source registry in a short time",
 				"Registry-side rate limiting policy",
 			},
 			Solutions: []string{
@@ -145,44 +133,42 @@ func Classify(err error) *diagnostic.HelpfulError {
 		}
 
 	case isServerError(err):
-		var transportErr *transport.Error
-		category := CategoryServerError
-		if errors.As(err, &transportErr) {
-			category = fmt.Sprintf("%s (HTTP %d)", CategoryServerError, transportErr.StatusCode)
+		category := categoryServerError
+		if code := serverStatusCode(err); code != 0 {
+			category = fmt.Sprintf("%s (HTTP %d)", categoryServerError, code)
 		}
 
 		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
 			Causes: []string{
-				"Registry server is experiencing internal errors",
+				"Source registry is experiencing internal errors",
 				"Backend storage is temporarily unavailable",
 				"Registry is overloaded or being maintained",
 			},
 			Solutions: []string{
 				"Wait a few minutes and retry the operation",
-				"Check registry server status and health",
+				"Check source registry status and health",
 				"Contact registry administrator if the problem persists",
 			},
 		}
 
 	case isDNSError(err):
-		var dnsErr *net.DNSError
-		category := CategoryDNS
-		if errors.As(err, &dnsErr) && dnsErr.Name != "" {
-			category = fmt.Sprintf("%s for '%s'", CategoryDNS, dnsErr.Name)
+		category := categoryDNS
+		if name := dnsHostname(err); name != "" {
+			category = fmt.Sprintf("%s for '%s'", categoryDNS, name)
 		}
 
 		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
 			Causes: []string{
-				"Registry hostname cannot be resolved by DNS",
+				"Source registry hostname cannot be resolved by DNS",
 				"DNS server is unreachable or not responding",
-				"Incorrect registry URL or typo in hostname",
+				"Incorrect source registry URL or typo in hostname",
 			},
 			Solutions: []string{
-				"Verify the registry URL is spelled correctly",
+				"Verify the --source registry URL is spelled correctly",
 				"Check your DNS server configuration",
 				"Try using the registry's IP address instead of hostname",
 			},
@@ -190,90 +176,65 @@ func Classify(err error) *diagnostic.HelpfulError {
 
 	case isTimeoutError(err):
 		return &diagnostic.HelpfulError{
-			Category:    CategoryTimeout,
+			Category:    categoryTimeout,
 			OriginalErr: err,
 			Causes: []string{
-				"Registry server took too long to respond",
+				"Source registry took too long to respond",
 				"Network latency is too high",
 				"Firewall silently dropping packets (no RST, no ICMP)",
 			},
 			Solutions: []string{
-				"Check network connectivity to the registry",
-				"Try increasing the timeout with --timeout flag",
+				"Check network connectivity to the source registry",
 				"Verify firewall rules allow outbound HTTPS (port 443)",
 			},
 		}
 
 	case isNetworkError(err):
-		var opErr *net.OpError
-		category := CategoryNetwork
-		if errors.As(err, &opErr) && opErr.Addr != nil {
-			category = fmt.Sprintf("%s to %s", CategoryNetwork, opErr.Addr.String())
+		category := categoryNetwork
+		if addr := networkAddr(err); addr != "" {
+			category = fmt.Sprintf("%s to %s", categoryNetwork, addr)
 		}
 
 		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
 			Causes: []string{
-				"Network connectivity issues or no internet connection",
+				"No network connection to the source registry",
 				"Firewall or security group blocking the connection",
-				"Registry server is down or unreachable",
+				"Source registry is down or unreachable",
 			},
 			Solutions: []string{
 				"Check your network connection and internet access",
 				"Verify firewall rules allow outbound HTTPS (port 443)",
-				"Test connectivity with: curl -v https://<registry>",
+				"Test connectivity with: curl -v https://<source-registry>",
 			},
 		}
 
 	case errmatch.IsImageNotFound(err):
 		return &diagnostic.HelpfulError{
-			Category:    CategoryImageNotFound,
+			Category:    categoryImageNotFound,
 			OriginalErr: err,
 			Causes: []string{
-				"Image tag doesn't exist in the registry",
+				"Image tag doesn't exist in the source registry",
 				"Incorrect image name or tag specified",
 			},
 			Solutions: []string{
-				"Verify the image name and tag are correct",
-				"Check if you have permission to access this image",
+				"Verify the source registry path with --source flag",
+				"Check if the requested Deckhouse version exists",
 			},
 		}
 
 	case errmatch.IsRepoNotFound(err):
 		return &diagnostic.HelpfulError{
-			Category:    CategoryRepoNotFound,
+			Category:    categoryRepoNotFound,
 			OriginalErr: err,
 			Causes: []string{
-				"Repository doesn't exist in the registry",
-				"Incorrect repository path or name",
+				"Repository doesn't exist in the source registry",
+				"Incorrect source registry path",
 			},
 			Solutions: []string{
-				"Verify the repository path is correct",
+				"Verify the --source registry path is correct",
 				"Ensure you have permission to access this repository",
-			},
-		}
-
-	case isUnsupportedOCIMediaType(err):
-		return &diagnostic.HelpfulError{
-			Category:    CategoryUnsupportedOCI,
-			OriginalErr: err,
-			Causes: []string{
-				"Registry doesn't support required OCI media types for Deckhouse artifacts",
-				"Project Quay or similar registry not configured for custom artifact types",
-			},
-			Solutions: []string{
-				"Configure registry to allow custom OCI artifact types",
-				"See: https://deckhouse.io/products/kubernetes-platform/documentation/v1/supported_versions.html#container-registry",
-				"For Project Quay, add the following to config.yaml and retry push:\n" +
-					"  FEATURE_GENERAL_OCI_SUPPORT: true\n" +
-					"  ALLOWED_OCI_ARTIFACT_TYPES:\n" +
-					"    \"application/octet-stream\":\n" +
-					"      - \"application/deckhouse.io.bdu.layer.v1.tar+gzip\"\n" +
-					"      - \"application/vnd.cncf.openpolicyagent.layer.v1.tar+gzip\"\n" +
-					"    \"application/vnd.aquasec.trivy.config.v1+json\":\n" +
-					"      - \"application/vnd.aquasec.trivy.javadb.layer.v1.tar+gzip\"\n" +
-					"      - \"application/vnd.aquasec.trivy.db.layer.v1.tar+gzip\"",
 			},
 		}
 	}
@@ -281,7 +242,9 @@ func Classify(err error) *diagnostic.HelpfulError {
 	return nil
 }
 
-func isEOFError(err error) bool {
+// --- detection functions ---
+
+func isEOF(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
@@ -320,6 +283,14 @@ func isAuthenticationError(err error) bool {
 	}
 
 	return false
+}
+
+func authStatusCode(err error) int {
+	var transportErr *transport.Error
+	if errors.As(err, &transportErr) {
+		return transportErr.StatusCode
+	}
+	return 0
 }
 
 func isRateLimitError(err error) bool {
@@ -364,9 +335,25 @@ func isServerError(err error) bool {
 	return false
 }
 
+func serverStatusCode(err error) int {
+	var transportErr *transport.Error
+	if errors.As(err, &transportErr) {
+		return transportErr.StatusCode
+	}
+	return 0
+}
+
 func isDNSError(err error) bool {
 	var dnsErr *net.DNSError
 	return errors.As(err, &dnsErr)
+}
+
+func dnsHostname(err error) string {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return dnsErr.Name
+	}
+	return ""
 }
 
 func isTimeoutError(err error) bool {
@@ -374,7 +361,6 @@ func isTimeoutError(err error) bool {
 }
 
 func isNetworkError(err error) bool {
-	// DNS and timeout are checked before this, so we skip them here
 	if isDNSError(err) || isTimeoutError(err) {
 		return false
 	}
@@ -404,30 +390,10 @@ func isNetworkError(err error) bool {
 	return false
 }
 
-// unsupportedOCIMediaTypes lists media type substrings whose rejection by a
-// registry (via MANIFEST_INVALID) indicates an OCI artifact configuration issue.
-var unsupportedOCIMediaTypes = []string{
-	"vnd.aquasec.trivy",
-	"application/octet-stream",
-	"deckhouse.io.bdu",
-	"vnd.cncf.openpolicyagent",
-}
-
-func isUnsupportedOCIMediaType(err error) bool {
-	if err == nil {
-		return false
+func networkAddr(err error) string {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Addr != nil {
+		return opErr.Addr.String()
 	}
-
-	errMsg := err.Error()
-	if !strings.Contains(errMsg, "MANIFEST_INVALID") {
-		return false
-	}
-
-	for _, mediaType := range unsupportedOCIMediaTypes {
-		if strings.Contains(errMsg, mediaType) {
-			return true
-		}
-	}
-
-	return false
+	return ""
 }

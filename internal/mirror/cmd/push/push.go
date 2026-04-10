@@ -35,7 +35,7 @@ import (
 	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/errdiag"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/push/errdetect"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/validation"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
@@ -179,14 +179,14 @@ func (p *Pusher) Execute() error {
 	}
 
 	if err := p.validateRegistryAccess(); err != nil {
-		if diag := errdiag.Classify(err); diag != nil {
+		if diag := errdetect.Diagnose(err); diag != nil {
 			return diag
 		}
 		return err
 	}
 
 	if err := p.executeNewPush(); err != nil {
-		if diag := errdiag.Classify(err); diag != nil {
+		if diag := errdetect.Diagnose(err); diag != nil {
 			return diag
 		}
 		return err

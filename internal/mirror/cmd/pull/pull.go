@@ -40,8 +40,8 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/errdetect"
 	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/errdiag"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/gostsums"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/validation"
@@ -120,7 +120,7 @@ func pull(cmd *cobra.Command, _ []string) error {
 			puller.logger.WarnLn("Operation cancelled by user")
 			return nil
 		}
-		if diag := errdiag.Classify(err); diag != nil {
+		if diag := errdetect.Diagnose(err); diag != nil {
 			return diag
 		}
 		return fmt.Errorf("pull failed: %w", err)
