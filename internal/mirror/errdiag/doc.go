@@ -44,6 +44,6 @@ limitations under the License.
 // DNS is checked before Network because [net.DNSError] satisfies [net.Error].
 // Timeout is checked before Network for the same reason.
 //
-// Error matchers for flow control (e.g., skipping optional images) are in the
-// sibling package [github.com/deckhouse/deckhouse-cli/pkg/registry/errmatch].
+// Error matchers for flow control (e.g., skipping optional images) are in
+// [github.com/deckhouse/deckhouse-cli/pkg/registry/errmatch].
 package errdiag

@@ -35,12 +35,12 @@ import (
 	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/errdiag"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/validation"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/errdiag"
 )
 
 // CLI Parameters

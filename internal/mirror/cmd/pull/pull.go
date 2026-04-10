@@ -41,6 +41,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/errdiag"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/gostsums"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/validation"
@@ -48,7 +49,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/errdiag"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	"github.com/deckhouse/deckhouse-cli/pkg/stub"
 )

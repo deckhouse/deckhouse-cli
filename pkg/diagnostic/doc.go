@@ -74,7 +74,7 @@ limitations under the License.
 // To add diagnostics for a new domain (e.g. backup), create a Classify function
 // that wraps known errors into *[HelpfulError]:
 //
-//	// pkg/backup/errdiag/classify.go
+//	// internal/backup/errdiag/classify.go
 //	func Classify(err error) *diagnostic.HelpfulError {
 //	    if isETCDError(err) {
 //	        return &diagnostic.HelpfulError{

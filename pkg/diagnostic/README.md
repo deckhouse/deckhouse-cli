@@ -84,17 +84,25 @@ error: TLS/certificate verification failed            <-- Category
 `Error()` returns plain text for logs: `"Category: OriginalErr.Error()"`.
 `Unwrap()` returns `OriginalErr` so `errors.Is`/`errors.As` work through it.
 
-## Example Package layout
+## Where classifiers live
+
+Classifiers are **application/UI logic**, not library code. They contain
+user-facing advice (CLI flags, links to docs) that is specific to a command group.
+Place them in `internal/` next to the commands they serve.
 
 ```
-pkg/diagnostic/            HelpfulError + Format (generic, no domain logic)
-pkg/registry/errdiag/      Classify - registry error classifier
-pkg/registry/errmatch/     IsImageNotFound, IsRepoNotFound - for flow control
+pkg/diagnostic/              HelpfulError + Format (generic, reusable)
+pkg/registry/errmatch/       error matchers (generic, reusable)
+internal/mirror/errdiag/     mirror classifier (advice about --tls-skip-verify, --license)
+internal/backup/errdiag/     backup classifier (advice about etcdctl, kubeconfig)
 ```
+
+Why not `pkg/`: solutions mention specific CLI flags (`--tls-skip-verify`, `--license`).
+A different command group working with the same registry would need different advice.
 
 ## Adding diagnostics to a new command
 
-**1. Create a classifier** for your domain:
+**1. Create a classifier** next to your command group:
 
 ```go
 // internal/backup/errdiag/classify.go
@@ -139,7 +147,8 @@ regardless of which classifier produced it.
 
 ## Rules (Best Practice)
 
+- Classifiers go in `internal/<command-group>/errdiag/` - they are application logic, not libraries
 - Classify in the **leaf command** (RunE), not in libraries or root.go
-- Each domain uses its **own classifier** - prevents false diagnostics
+- Each command group uses its **own classifier** - prevents false diagnostics
 - Skip classification if the error is already a `*HelpfulError` (see guard in the example above)
-- `Causes` and `Solutions` are optional - empty slices are omitted from output, but highly recommended to provide those
+- `Causes` and `Solutions` are optional but highly recommended
