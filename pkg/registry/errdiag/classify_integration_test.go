@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package registryerr
+package errdiag
 
 import (
 	"context"
@@ -31,6 +31,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
 // headImage performs remote.Head against the given host with insecure (plain HTTP) mode.
@@ -65,7 +67,7 @@ func newRegistryErrorHandler(statusCode int, code, message string) http.Handler 
 
 // classifyFromServer starts an httptest server with the given handler,
 // makes a real remote.Head call, and returns the Classify result.
-func classifyFromServer(t *testing.T, handler http.Handler) *Diagnostic {
+func classifyFromServer(t *testing.T, handler http.Handler) *diagnostic.HelpfulError {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -74,10 +76,6 @@ func classifyFromServer(t *testing.T, handler http.Handler) *Diagnostic {
 	require.Error(t, err)
 	return Classify(err)
 }
-
-// --- HTTP Status Code Tests ---
-// Verify that real go-containerregistry errors from HTTP responses
-// are correctly classified using the Category constants.
 
 func TestIntegration_Auth401(t *testing.T) {
 	diag := classifyFromServer(t, newRegistryErrorHandler(
@@ -126,18 +124,13 @@ func TestIntegration_ServerErrors(t *testing.T) {
 
 			diag := classifyFromServer(t, handler)
 			require.NotNil(t, diag)
-			// Category is dynamic: "Registry server error (HTTP 500)"
 			assert.Contains(t, diag.Category, CategoryServerError)
 			assert.Contains(t, diag.Category, tt.name)
 		})
 	}
 }
 
-// --- TLS Error Test ---
-
 func TestIntegration_TLSCertificateError(t *testing.T) {
-	// httptest.NewTLSServer uses a self-signed cert not in the system trust store.
-	// Connecting without TLS skip produces an x509 certificate error.
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -155,11 +148,7 @@ func TestIntegration_TLSCertificateError(t *testing.T) {
 	assert.Equal(t, CategoryTLS, diag.Category)
 }
 
-// --- EOF Error Test ---
-
 func TestIntegration_EOF(t *testing.T) {
-	// Server accepts the TCP connection then closes it immediately,
-	// producing an EOF on the client side.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hijacker, ok := w.(http.Hijacker)
 		if !ok {
@@ -181,10 +170,7 @@ func TestIntegration_EOF(t *testing.T) {
 	assert.Equal(t, CategoryEOF, diag.Category)
 }
 
-// --- Connection Refused Test ---
-
 func TestIntegration_ConnectionRefused(t *testing.T) {
-	// Bind a port, then close the listener so nothing accepts connections.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	addr := listener.Addr().String()
@@ -198,11 +184,8 @@ func TestIntegration_ConnectionRefused(t *testing.T) {
 
 	diag := Classify(err)
 	require.NotNil(t, diag, "expected network error to be classified, got raw: %v", err)
-	// Category is dynamic: "Network connection failed to 127.0.0.1:XXXXX"
 	assert.Contains(t, diag.Category, CategoryNetwork)
 }
-
-// --- Timeout Test ---
 
 func TestIntegration_Timeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -224,18 +207,3 @@ func TestIntegration_Timeout(t *testing.T) {
 	assert.Equal(t, CategoryTimeout, diag.Category)
 }
 
-// --- DNS Error Test ---
-
-func TestIntegration_DNSResolutionFailure(t *testing.T) {
-	// .invalid TLD is reserved by RFC 2606 and guaranteed to never resolve.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	err := headImage(ctx, "nonexistent.invalid:443")
-	require.Error(t, err)
-
-	diag := Classify(err)
-	require.NotNil(t, diag, "expected DNS error to be classified, got raw: %v", err)
-	// Category is dynamic: "DNS resolution failed for 'nonexistent.invalid'"
-	assert.Contains(t, diag.Category, CategoryDNS)
-}

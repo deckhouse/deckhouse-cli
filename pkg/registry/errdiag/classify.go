@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package registryerr
+package errdiag
 
 import (
 	"context"
@@ -29,48 +29,10 @@ import (
 	"syscall"
 
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
+
+	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/errmatch"
 )
-
-const TrivyMediaTypesWarning = `` +
-	"It looks like you are using Project Quay registry and it is not configured correctly for hosting Deckhouse.\n" +
-	"See the docs at https://deckhouse.io/products/kubernetes-platform/documentation/v1/supported_versions.html#container-registry for more details.\n\n" +
-	"TL;DR: You should retry push after allowing some additional types of OCI artifacts in your config.yaml as follows:\n" +
-	`FEATURE_GENERAL_OCI_SUPPORT: true
-ALLOWED_OCI_ARTIFACT_TYPES:
-  "application/octet-stream":
-    - "application/deckhouse.io.bdu.layer.v1.tar+gzip"
-    - "application/vnd.cncf.openpolicyagent.layer.v1.tar+gzip"
-  "application/vnd.aquasec.trivy.config.v1+json":
-    - "application/vnd.aquasec.trivy.javadb.layer.v1.tar+gzip"
-    - "application/vnd.aquasec.trivy.db.layer.v1.tar+gzip"`
-
-func IsImageNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	errMsg := err.Error()
-	return strings.Contains(errMsg, "MANIFEST_UNKNOWN") || strings.Contains(errMsg, "404 Not Found")
-}
-
-func IsRepoNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	errMsg := err.Error()
-	return strings.Contains(errMsg, "NAME_UNKNOWN")
-}
-
-func IsTrivyMediaTypeNotAllowed(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	errMsg := err.Error()
-	return strings.Contains(errMsg, "MANIFEST_INVALID") &&
-		(strings.Contains(errMsg, "vnd.aquasec.trivy") || strings.Contains(errMsg, "application/octet-stream"))
-}
 
 // Error category names displayed to the user after "error: ".
 // Some categories are extended with dynamic details (hostname, port, HTTP code)
@@ -91,17 +53,23 @@ const (
 	CategoryUnsupportedOCI = "Unsupported OCI artifact type"
 )
 
-// Classify analyzes an error and returns a Diagnostic if
+// Classify analyzes an error and returns a *diagnostic.HelpfulError if
 // the error can be classified into a known category, or nil otherwise.
 // Detection order matters: more specific checks come before general ones.
-func Classify(err error) *Diagnostic {
+func Classify(err error) *diagnostic.HelpfulError {
 	if err == nil {
+		return nil
+	}
+
+	// Already classified - don't wrap twice.
+	var helpErr *diagnostic.HelpfulError
+	if errors.As(err, &helpErr) {
 		return nil
 	}
 
 	switch {
 	case isEOFError(err):
-		return &Diagnostic{
+		return &diagnostic.HelpfulError{
 			Category:    CategoryEOF,
 			OriginalErr: err,
 			Causes: []string{
@@ -118,7 +86,7 @@ func Classify(err error) *Diagnostic {
 		}
 
 	case isCertificateError(err):
-		return &Diagnostic{
+		return &diagnostic.HelpfulError{
 			Category:    CategoryTLS,
 			OriginalErr: err,
 			Causes: []string{
@@ -147,7 +115,7 @@ func Classify(err error) *Diagnostic {
 			}
 		}
 
-		return &Diagnostic{
+		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
 			Causes: []string{
@@ -163,7 +131,7 @@ func Classify(err error) *Diagnostic {
 		}
 
 	case isRateLimitError(err):
-		return &Diagnostic{
+		return &diagnostic.HelpfulError{
 			Category:    CategoryRateLimit,
 			OriginalErr: err,
 			Causes: []string{
@@ -183,7 +151,7 @@ func Classify(err error) *Diagnostic {
 			category = fmt.Sprintf("%s (HTTP %d)", CategoryServerError, transportErr.StatusCode)
 		}
 
-		return &Diagnostic{
+		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
 			Causes: []string{
@@ -205,7 +173,7 @@ func Classify(err error) *Diagnostic {
 			category = fmt.Sprintf("%s for '%s'", CategoryDNS, dnsErr.Name)
 		}
 
-		return &Diagnostic{
+		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
 			Causes: []string{
@@ -221,7 +189,7 @@ func Classify(err error) *Diagnostic {
 		}
 
 	case isTimeoutError(err):
-		return &Diagnostic{
+		return &diagnostic.HelpfulError{
 			Category:    CategoryTimeout,
 			OriginalErr: err,
 			Causes: []string{
@@ -243,7 +211,7 @@ func Classify(err error) *Diagnostic {
 			category = fmt.Sprintf("%s to %s", CategoryNetwork, opErr.Addr.String())
 		}
 
-		return &Diagnostic{
+		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
 			Causes: []string{
@@ -258,8 +226,8 @@ func Classify(err error) *Diagnostic {
 			},
 		}
 
-	case IsImageNotFound(err):
-		return &Diagnostic{
+	case errmatch.IsImageNotFound(err):
+		return &diagnostic.HelpfulError{
 			Category:    CategoryImageNotFound,
 			OriginalErr: err,
 			Causes: []string{
@@ -272,8 +240,8 @@ func Classify(err error) *Diagnostic {
 			},
 		}
 
-	case IsRepoNotFound(err):
-		return &Diagnostic{
+	case errmatch.IsRepoNotFound(err):
+		return &diagnostic.HelpfulError{
 			Category:    CategoryRepoNotFound,
 			OriginalErr: err,
 			Causes: []string{
@@ -286,17 +254,26 @@ func Classify(err error) *Diagnostic {
 			},
 		}
 
-	case IsTrivyMediaTypeNotAllowed(err):
-		return &Diagnostic{
+	case isUnsupportedOCIMediaType(err):
+		return &diagnostic.HelpfulError{
 			Category:    CategoryUnsupportedOCI,
 			OriginalErr: err,
 			Causes: []string{
-				"Registry doesn't support required media types for Trivy security databases",
-				"Project Quay registry not configured for Deckhouse artifacts",
+				"Registry doesn't support required OCI media types for Deckhouse artifacts",
+				"Project Quay or similar registry not configured for custom artifact types",
 			},
 			Solutions: []string{
 				"Configure registry to allow custom OCI artifact types",
 				"See: https://deckhouse.io/products/kubernetes-platform/documentation/v1/supported_versions.html#container-registry",
+				"For Project Quay, add the following to config.yaml and retry push:\n" +
+					"  FEATURE_GENERAL_OCI_SUPPORT: true\n" +
+					"  ALLOWED_OCI_ARTIFACT_TYPES:\n" +
+					"    \"application/octet-stream\":\n" +
+					"      - \"application/deckhouse.io.bdu.layer.v1.tar+gzip\"\n" +
+					"      - \"application/vnd.cncf.openpolicyagent.layer.v1.tar+gzip\"\n" +
+					"    \"application/vnd.aquasec.trivy.config.v1+json\":\n" +
+					"      - \"application/vnd.aquasec.trivy.javadb.layer.v1.tar+gzip\"\n" +
+					"      - \"application/vnd.aquasec.trivy.db.layer.v1.tar+gzip\"",
 			},
 		}
 	}
@@ -422,6 +399,34 @@ func isNetworkError(err error) bool {
 			syscallErr == syscall.ETIMEDOUT ||
 			syscallErr == syscall.ENETUNREACH ||
 			syscallErr == syscall.EHOSTUNREACH
+	}
+
+	return false
+}
+
+// unsupportedOCIMediaTypes lists media type substrings whose rejection by a
+// registry (via MANIFEST_INVALID) indicates an OCI artifact configuration issue.
+var unsupportedOCIMediaTypes = []string{
+	"vnd.aquasec.trivy",
+	"application/octet-stream",
+	"deckhouse.io.bdu",
+	"vnd.cncf.openpolicyagent",
+}
+
+func isUnsupportedOCIMediaType(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "MANIFEST_INVALID") {
+		return false
+	}
+
+	for _, mediaType := range unsupportedOCIMediaTypes {
+		if strings.Contains(errMsg, mediaType) {
+			return true
+		}
 	}
 
 	return false

@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package registryerr
+package diagnostic
 
 import (
 	"os"
@@ -45,7 +45,7 @@ func (t textStyler) style(text string, ansiCodes ...string) string {
 	return strings.Join(ansiCodes, "") + text + ansiReset
 }
 
-// Semantic text styles used by Diagnostic.Format().
+// Semantic text styles used by HelpfulError.Format().
 func (t textStyler) danger(s string) string { return t.style(s, ansiBold, ansiRed) } // error labels
 func (t textStyler) header(s string) string { return t.style(s, ansiBold) }          // category name
 func (t textStyler) hint(s string) string   { return t.style(s, ansiCyan) }          // arrows, solutions
@@ -62,30 +62,7 @@ func newTextStyler() textStyler {
 	}
 }
 
-// Diagnostic is a classified registry error with user-friendly diagnostics.
-// It implements the error interface so it can propagate up the call chain and be
-// printed once at the top level, avoiding double output.
-type Diagnostic struct {
-	Category    string   // e.g. "DNS resolution failed for 'registry.example.com'"
-	OriginalErr error    // the underlying error from go-containerregistry or net
-	Causes      []string // "Possible causes" shown to the user
-	Solutions   []string // "How to fix" shown to the user
-}
-
-// Error returns a plain-text representation suitable for logging and error wrapping.
-// Use Format() for user-facing colored terminal output.
-func (d *Diagnostic) Error() string {
-	return d.Category + ": " + d.OriginalErr.Error()
-}
-
-// Unwrap returns the original error so errors.Is/errors.As work through the diagnostic.
-func (d *Diagnostic) Unwrap() error {
-	return d.OriginalErr
-}
-
 // Format returns the formatted diagnostic string with colors if stderr is a TTY.
-//
-// Example:
 //
 //	error: Network connection failed to 127.0.0.1:443
 //	  ╰─▶ dial tcp 127.0.0.1:443: connect: connection refused
@@ -95,24 +72,27 @@ func (d *Diagnostic) Unwrap() error {
 //
 //	  How to fix:
 //	    * Check your network connection and internet access
-func (d *Diagnostic) Format() string {
+func (e *HelpfulError) Format() string {
 	t := newTextStyler()
 
 	var b strings.Builder
-	b.WriteString("\n" + t.danger("error") + t.header(": "+d.Category) + "\n")
-	b.WriteString(t.hint("  ╰─▶ ") + d.OriginalErr.Error() + "\n\n")
+	b.WriteString("\n" + t.danger("error") + t.header(": "+e.Category) + "\n")
+	if e.OriginalErr != nil {
+		b.WriteString(t.hint("  ╰─▶ ") + e.OriginalErr.Error() + "\n")
+	}
+	b.WriteString("\n")
 
-	if len(d.Causes) > 0 {
+	if len(e.Causes) > 0 {
 		b.WriteString(t.warn("  Possible causes:") + "\n")
-		for _, cause := range d.Causes {
+		for _, cause := range e.Causes {
 			b.WriteString("    * " + cause + "\n")
 		}
 		b.WriteString("\n")
 	}
 
-	if len(d.Solutions) > 0 {
+	if len(e.Solutions) > 0 {
 		b.WriteString(t.hint("  How to fix:") + "\n")
-		for _, solution := range d.Solutions {
+		for _, solution := range e.Solutions {
 			b.WriteString("    * " + solution + "\n")
 		}
 	}

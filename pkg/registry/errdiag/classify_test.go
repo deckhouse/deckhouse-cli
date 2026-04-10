@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package registryerr
+package errdiag
 
 import (
 	"context"
@@ -25,7 +25,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"syscall"
 	"testing"
 
@@ -83,15 +82,13 @@ func TestClassify_TLS_Hostname(t *testing.T) {
 }
 
 func TestClassify_Auth_401(t *testing.T) {
-	err := &transport.Error{StatusCode: http.StatusUnauthorized}
-	diag := Classify(err)
+	diag := Classify(&transport.Error{StatusCode: http.StatusUnauthorized})
 	require.NotNil(t, diag)
 	assert.Equal(t, CategoryAuth401, diag.Category)
 }
 
 func TestClassify_Auth_403(t *testing.T) {
-	err := &transport.Error{StatusCode: http.StatusForbidden}
-	diag := Classify(err)
+	diag := Classify(&transport.Error{StatusCode: http.StatusForbidden})
 	require.NotNil(t, diag)
 	assert.Equal(t, CategoryAuth403, diag.Category)
 }
@@ -99,9 +96,7 @@ func TestClassify_Auth_403(t *testing.T) {
 func TestClassify_Auth_DiagnosticCode(t *testing.T) {
 	err := &transport.Error{
 		StatusCode: http.StatusOK,
-		Errors: []transport.Diagnostic{
-			{Code: transport.UnauthorizedErrorCode},
-		},
+		Errors:     []transport.Diagnostic{{Code: transport.UnauthorizedErrorCode}},
 	}
 	diag := Classify(err)
 	require.NotNil(t, diag)
@@ -109,8 +104,7 @@ func TestClassify_Auth_DiagnosticCode(t *testing.T) {
 }
 
 func TestClassify_RateLimit_429(t *testing.T) {
-	err := &transport.Error{StatusCode: http.StatusTooManyRequests}
-	diag := Classify(err)
+	diag := Classify(&transport.Error{StatusCode: http.StatusTooManyRequests})
 	require.NotNil(t, diag)
 	assert.Equal(t, CategoryRateLimit, diag.Category)
 }
@@ -118,9 +112,7 @@ func TestClassify_RateLimit_429(t *testing.T) {
 func TestClassify_RateLimit_DiagnosticCode(t *testing.T) {
 	err := &transport.Error{
 		StatusCode: http.StatusOK,
-		Errors: []transport.Diagnostic{
-			{Code: transport.TooManyRequestsErrorCode},
-		},
+		Errors:     []transport.Diagnostic{{Code: transport.TooManyRequestsErrorCode}},
 	}
 	diag := Classify(err)
 	require.NotNil(t, diag)
@@ -142,7 +134,6 @@ func TestClassify_ServerErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			diag := Classify(&transport.Error{StatusCode: tt.statusCode})
 			require.NotNil(t, diag)
-			// Category is dynamic: "Registry server error (HTTP 500)"
 			assert.Contains(t, diag.Category, CategoryServerError)
 			assert.Contains(t, diag.Category, tt.name)
 		})
@@ -152,9 +143,7 @@ func TestClassify_ServerErrors(t *testing.T) {
 func TestClassify_ServerError_Unavailable(t *testing.T) {
 	err := &transport.Error{
 		StatusCode: http.StatusOK,
-		Errors: []transport.Diagnostic{
-			{Code: transport.UnavailableErrorCode},
-		},
+		Errors:     []transport.Diagnostic{{Code: transport.UnavailableErrorCode}},
 	}
 	diag := Classify(err)
 	require.NotNil(t, diag)
@@ -165,7 +154,6 @@ func TestClassify_DNS(t *testing.T) {
 	err := &net.DNSError{Name: "registry.example.com", Err: "no such host"}
 	diag := Classify(err)
 	require.NotNil(t, diag)
-	// Category is dynamic: "DNS resolution failed for 'registry.example.com'"
 	assert.Contains(t, diag.Category, CategoryDNS)
 	assert.Contains(t, diag.Category, "registry.example.com")
 }
@@ -186,32 +174,20 @@ func TestClassify_Timeout_OS(t *testing.T) {
 
 func TestClassify_Network_ConnRefused(t *testing.T) {
 	err := &net.OpError{
-		Op:  "dial",
-		Net: "tcp",
-		Addr: &net.TCPAddr{
-			IP:   net.IPv4(127, 0, 0, 1),
-			Port: 443,
-		},
-		Err: &os.SyscallError{
-			Syscall: "connect",
-			Err:     syscall.ECONNREFUSED,
-		},
+		Op: "dial", Net: "tcp",
+		Addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443},
+		Err:  &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED},
 	}
 	diag := Classify(err)
 	require.NotNil(t, diag)
-	// Category is dynamic: "Network connection failed to 127.0.0.1:443"
 	assert.Contains(t, diag.Category, CategoryNetwork)
 	assert.Contains(t, diag.Category, "127.0.0.1:443")
 }
 
 func TestClassify_Network_ConnReset(t *testing.T) {
 	err := &net.OpError{
-		Op:  "read",
-		Net: "tcp",
-		Err: &os.SyscallError{
-			Syscall: "read",
-			Err:     syscall.ECONNRESET,
-		},
+		Op: "read", Net: "tcp",
+		Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET},
 	}
 	diag := Classify(err)
 	require.NotNil(t, diag)
@@ -219,22 +195,19 @@ func TestClassify_Network_ConnReset(t *testing.T) {
 }
 
 func TestClassify_ImageNotFound(t *testing.T) {
-	err := errors.New("MANIFEST_UNKNOWN: manifest unknown")
-	diag := Classify(err)
+	diag := Classify(errors.New("MANIFEST_UNKNOWN: manifest unknown"))
 	require.NotNil(t, diag)
 	assert.Equal(t, CategoryImageNotFound, diag.Category)
 }
 
 func TestClassify_RepoNotFound(t *testing.T) {
-	err := errors.New("NAME_UNKNOWN: repository not found")
-	diag := Classify(err)
+	diag := Classify(errors.New("NAME_UNKNOWN: repository not found"))
 	require.NotNil(t, diag)
 	assert.Equal(t, CategoryRepoNotFound, diag.Category)
 }
 
-func TestClassify_TrivyMediaType(t *testing.T) {
-	err := errors.New("MANIFEST_INVALID: media type vnd.aquasec.trivy not allowed")
-	diag := Classify(err)
+func TestClassify_UnsupportedOCIMediaType(t *testing.T) {
+	diag := Classify(errors.New("MANIFEST_INVALID: media type vnd.aquasec.trivy not allowed"))
 	require.NotNil(t, diag)
 	assert.Equal(t, CategoryUnsupportedOCI, diag.Category)
 }
@@ -247,49 +220,11 @@ func TestClassify_DeepWrapping(t *testing.T) {
 	assert.Equal(t, CategoryTLS, diag.Category)
 }
 
-func TestDiagnostic_Unwrap(t *testing.T) {
+func TestClassify_Unwrap(t *testing.T) {
 	originalErr := io.EOF
 	diag := Classify(fmt.Errorf("wrap: %w", originalErr))
 	require.NotNil(t, diag)
 	assert.True(t, errors.Is(diag, originalErr))
-}
-
-func TestDiagnostic_Format_NoColor(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	diag := &Diagnostic{
-		Category:    CategoryNetwork,
-		OriginalErr: errors.New("test"),
-		Causes:      []string{"cause1"},
-		Solutions:   []string{"fix1"},
-	}
-
-	output := diag.Format()
-	assert.NotContains(t, output, "\033[")
-	assert.Contains(t, output, CategoryNetwork)
-	assert.Contains(t, output, "cause1")
-	assert.Contains(t, output, "fix1")
-}
-
-func TestDiagnostic_Format_Structure(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	diag := &Diagnostic{
-		Category:    CategoryNetwork,
-		OriginalErr: errors.New("connection refused"),
-		Causes:      []string{"Network down", "Firewall blocking"},
-		Solutions:   []string{"Check network", "Check firewall"},
-	}
-
-	output := diag.Format()
-	assert.Contains(t, output, "error: "+CategoryNetwork)
-	assert.Contains(t, output, "connection refused")
-	assert.Contains(t, output, "Possible causes:")
-	assert.Contains(t, output, "Network down")
-	assert.Contains(t, output, "Firewall blocking")
-	assert.Contains(t, output, "How to fix:")
-	assert.Contains(t, output, "Check network")
-	assert.Contains(t, output, "Check firewall")
 }
 
 func TestClassify_Priority_DNSOverNetwork(t *testing.T) {
@@ -314,51 +249,20 @@ func TestClassify_WrappedAuth(t *testing.T) {
 	assert.Equal(t, CategoryAuth401, diag.Category)
 }
 
-func TestIsImageNotFound(t *testing.T) {
-	assert.True(t, IsImageNotFound(errors.New("MANIFEST_UNKNOWN: not found")))
-	assert.True(t, IsImageNotFound(errors.New("404 Not Found")))
-	assert.False(t, IsImageNotFound(errors.New("some other error")))
-	assert.False(t, IsImageNotFound(nil))
+func TestClassify_AlreadyClassified(t *testing.T) {
+	first := Classify(io.EOF)
+	require.NotNil(t, first)
+
+	second := Classify(first)
+	assert.Nil(t, second, "must not wrap an already classified error")
 }
 
-func TestIsRepoNotFound(t *testing.T) {
-	assert.True(t, IsRepoNotFound(errors.New("NAME_UNKNOWN: repo")))
-	assert.False(t, IsRepoNotFound(errors.New("some other error")))
-	assert.False(t, IsRepoNotFound(nil))
-}
-
-func TestIsTrivyMediaTypeNotAllowed(t *testing.T) {
-	assert.True(t, IsTrivyMediaTypeNotAllowed(errors.New("MANIFEST_INVALID: vnd.aquasec.trivy")))
-	assert.True(t, IsTrivyMediaTypeNotAllowed(errors.New("MANIFEST_INVALID: application/octet-stream")))
-	assert.False(t, IsTrivyMediaTypeNotAllowed(errors.New("MANIFEST_INVALID: other")))
-	assert.False(t, IsTrivyMediaTypeNotAllowed(nil))
-}
-
-func TestDiagnostic_Error_PlainText(t *testing.T) {
-	diag := &Diagnostic{
-		Category:    CategoryNetwork,
-		OriginalErr: errors.New("connection refused"),
-		Causes:      []string{"cause"},
-		Solutions:   []string{"fix"},
-	}
-
-	errStr := diag.Error()
-	assert.Equal(t, CategoryNetwork+": connection refused", errStr)
-	assert.NotContains(t, errStr, "\033[")
-	assert.NotContains(t, errStr, "Possible causes")
-}
-
-func TestDiagnostic_Format_ForceColor(t *testing.T) {
-	t.Setenv("FORCE_COLOR", "1")
-	t.Setenv("NO_COLOR", "")
-
-	diag := &Diagnostic{
-		Category:    CategoryEOF,
-		OriginalErr: errors.New("test"),
-		Causes:      []string{"cause1"},
-		Solutions:   []string{"fix1"},
-	}
-
-	output := diag.Format()
-	assert.True(t, strings.Contains(output, "\033["))
+func TestIsUnsupportedOCIMediaType(t *testing.T) {
+	assert.True(t, isUnsupportedOCIMediaType(errors.New("MANIFEST_INVALID: vnd.aquasec.trivy")))
+	assert.True(t, isUnsupportedOCIMediaType(errors.New("MANIFEST_INVALID: application/octet-stream")))
+	assert.True(t, isUnsupportedOCIMediaType(errors.New("MANIFEST_INVALID: deckhouse.io.bdu.layer")))
+	assert.True(t, isUnsupportedOCIMediaType(errors.New("MANIFEST_INVALID: vnd.cncf.openpolicyagent")))
+	assert.False(t, isUnsupportedOCIMediaType(errors.New("MANIFEST_INVALID: other")))
+	assert.False(t, isUnsupportedOCIMediaType(errors.New("some error without manifest invalid")))
+	assert.False(t, isUnsupportedOCIMediaType(nil))
 }
