@@ -48,6 +48,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
 	useroperation "github.com/deckhouse/deckhouse-cli/internal/useroperation/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
+	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
 type RootCommand struct {
@@ -174,7 +175,15 @@ func (r *RootCommand) Execute() error {
 func execute() {
 	rootCmd := NewRootCommand()
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
+		// If a command returned a HelpfulError, show formatted diagnostic.
+		// Commands are responsible for classifying their own errors using
+		// domain-specific errdetect packages (e.g. errdetect.Diagnose for mirror).
+		var helpErr *diagnostic.HelpfulError
+		if errors.As(err, &helpErr) {
+			fmt.Fprint(os.Stderr, helpErr.Format())
+		} else {
+			fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
+		}
 		os.Exit(1)
 	}
 }
