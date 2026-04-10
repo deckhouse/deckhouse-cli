@@ -106,7 +106,7 @@ ambiguous advice.
 **1. Create an errdetect package** next to your command:
 
 ```go
-// internal/backup/cmd/snapshot/errdetect/classify.go
+// internal/backup/cmd/snapshot/errdetect/diagnose.go
 package errdetect
 
 import (

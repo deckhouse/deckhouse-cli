@@ -26,8 +26,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/errmatch"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/auth"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/errmatch"
 )
 
 var ErrImageUnavailable = errors.New("required image is not present in registry")

@@ -72,7 +72,7 @@ limitations under the License.
 //
 // Create an errdetect package next to your command with a Diagnose function:
 //
-//	// internal/backup/cmd/snapshot/errdetect/classify.go
+//	// internal/backup/cmd/snapshot/errdetect/diagnose.go
 //	func Diagnose(err error) *diagnostic.HelpfulError {
 //	    if isETCDError(err) {
 //	        return &diagnostic.HelpfulError{

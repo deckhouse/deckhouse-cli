@@ -31,8 +31,8 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/errmatch"
 	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/errmatch"
 )
 
 const (

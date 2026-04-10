@@ -177,7 +177,7 @@ func execute() {
 	if err := rootCmd.Execute(); err != nil {
 		// If a command returned a HelpfulError, show formatted diagnostic.
 		// Commands are responsible for classifying their own errors using
-		// domain-specific classifiers (e.g. errdiag.Classify for registry).
+		// domain-specific errdetect packages (e.g. errdetect.Diagnose for mirror).
 		var helpErr *diagnostic.HelpfulError
 		if errors.As(err, &helpErr) {
 			fmt.Fprint(os.Stderr, helpErr.Format())
