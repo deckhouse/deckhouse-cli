@@ -27,7 +27,7 @@ error: TLS/certificate verification failed
        |  cobra dispatches
        |  to subcommand ──────────────> err := puller.Execute()
        |                                     |
-       |                                [Classify err] -> is it HelpfulError?
+       |                                [Diagnose err] -> is it HelpfulError?
        |                                     |
        |                                 yes | no
        |                                  |     |
@@ -44,9 +44,9 @@ error: TLS/certificate verification failed
   (colored)   (plain)
 ```
 
-Each command classifies errors with its own domain classifier.
+Each command diagnoses errors with its own errdetect package.
 `root.go` only catches `*HelpfulError` via `errors.As` - it does not
-import any classifier, so unrelated commands never get false diagnostics.
+import any errdetect, so unrelated commands never get false diagnostics.
 
 ## HelpfulError
 
@@ -87,36 +87,37 @@ error: TLS/certificate verification failed            <-- Category
 ## Where classifiers live
 
 Classifiers are **application/UI logic**, not library code. They contain
-user-facing advice (CLI flags, links to docs) that is specific to a command group.
-Place them in `internal/` next to the commands they serve.
+user-facing advice (CLI flags, links to docs) that is specific to each command.
+Place them in `internal/` next to the command they serve.
 
 ```
-pkg/diagnostic/              HelpfulError + Format (generic, reusable)
-pkg/registry/errmatch/       error matchers (generic, reusable)
-internal/mirror/errdiag/     mirror classifier (advice about --tls-skip-verify, --license)
-internal/backup/errdiag/     backup classifier (advice about etcdctl, kubeconfig)
+pkg/diagnostic/                        HelpfulError + Format (generic, reusable)
+pkg/registry/errmatch/                 error matchers (generic, reusable)
+internal/mirror/cmd/pull/errdetect/    pull-specific diagnostics
+internal/mirror/cmd/push/errdetect/    push-specific diagnostics
 ```
 
-Why not `pkg/`: solutions mention specific CLI flags (`--tls-skip-verify`, `--license`).
-A different command group working with the same registry would need different advice.
+Why per-command: pull advises `--license`/`--source-login`, push advises
+`--registry-login`/`--registry-password`. Shared classifier would give
+ambiguous advice.
 
 ## Adding diagnostics to a new command
 
-**1. Create a classifier** next to your command group:
+**1. Create an errdetect package** next to your command:
 
 ```go
-// internal/backup/errdiag/classify.go
-package errdiag
+// internal/backup/cmd/snapshot/errdetect/classify.go
+package errdetect
 
 import (
     "errors"
     "github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
-func Classify(err error) *diagnostic.HelpfulError {
+func Diagnose(err error) *diagnostic.HelpfulError {
     var helpErr *diagnostic.HelpfulError
     if errors.As(err, &helpErr) {
-        return nil // already classified, don't wrap twice
+        return nil // already diagnosed, don't wrap twice
     }
 
     if isETCDError(err) {
@@ -135,7 +136,7 @@ func Classify(err error) *diagnostic.HelpfulError {
 
 ```go
 if err := doSnapshot(); err != nil {
-    if diag := errdiag.Classify(err); diag != nil {
+    if diag := errdetect.Diagnose(err); diag != nil {
         return diag
     }
     return fmt.Errorf("snapshot failed: %w", err)
@@ -143,12 +144,12 @@ if err := doSnapshot(); err != nil {
 ```
 
 No changes to `root.go` needed - it catches any `*HelpfulError`
-regardless of which classifier produced it.
+regardless of which errdetect produced it.
 
 ## Rules (Best Practice)
 
-- Classifiers go in `internal/<command-group>/errdiag/` - they are application logic, not libraries
-- Classify in the **leaf command** (RunE), not in libraries or root.go
-- Each command group uses its **own classifier** - prevents false diagnostics
-- Skip classification if the error is already a `*HelpfulError` (see guard in the example above)
+- Classifiers go in `internal/<command>/errdetect/` - they are application logic, not libraries
+- Diagnose in the **leaf command** (RunE), not in libraries or root.go
+- Each command uses its **own errdetect** - prevents false diagnostics
+- Skip diagnosis if the error is already a `*HelpfulError` (see guard in the example above)
 - `Causes` and `Solutions` are optional but highly recommended

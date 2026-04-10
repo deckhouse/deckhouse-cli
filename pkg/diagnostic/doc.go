@@ -23,11 +23,10 @@ limitations under the License.
 //
 // # Creating a HelpfulError
 //
-// Option 1: use a domain-specific classifier that wraps known errors
-// (see [github.com/deckhouse/deckhouse-cli/pkg/registry/errdiag] for the registry
-// implementation):
+// Option 1: use a command-specific errdetect package
+// (see internal/mirror/cmd/pull/errdetect for an example):
 //
-//	if diag := errdiag.Classify(err); diag != nil {
+//	if diag := errdetect.Diagnose(err); diag != nil {
 //	    return diag
 //	}
 //
@@ -69,13 +68,12 @@ limitations under the License.
 // [HelpfulError.Error] returns plain text (safe for logs).
 // [HelpfulError.Format] returns colored terminal output (TTY-aware, respects NO_COLOR).
 //
-// # Adding a new domain classifier
+// # Adding diagnostics to a new command
 //
-// To add diagnostics for a new domain (e.g. backup), create a Classify function
-// that wraps known errors into *[HelpfulError]:
+// Create an errdetect package next to your command with a Diagnose function:
 //
-//	// internal/backup/errdiag/classify.go
-//	func Classify(err error) *diagnostic.HelpfulError {
+//	// internal/backup/cmd/snapshot/errdetect/classify.go
+//	func Diagnose(err error) *diagnostic.HelpfulError {
 //	    if isETCDError(err) {
 //	        return &diagnostic.HelpfulError{
 //	            Category: "ETCD connection failed", OriginalErr: err,
@@ -86,16 +84,16 @@ limitations under the License.
 //	    return nil
 //	}
 //
-// Then call it at the command level, same pattern as registry:
+// Then call it at the command level:
 //
-//	if diag := errdiag.Classify(err); diag != nil {
+//	if diag := errdetect.Diagnose(err); diag != nil {
 //	    return diag
 //	}
 //
-// # Important: classify at the command level, not in root.go
+// # Important: diagnose at the command level, not in root.go
 //
-// Each command must call its own domain classifier. root.go only catches
+// Each command must call its own errdetect package. root.go only catches
 // [HelpfulError] via [errors.As] - it does not import or call any classifier.
 // This prevents false classification: a DNS error from "d8 backup" must not
-// be classified with registry-specific advice like "--tls-skip-verify".
+// be diagnosed with registry-specific advice like "--tls-skip-verify".
 package diagnostic
