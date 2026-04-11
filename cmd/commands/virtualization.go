@@ -28,7 +28,7 @@ import (
 
 func NewVirtualizationCommand() *cobra.Command {
 	virtualizationCmd := command.NewCommand(fmt.Sprintf("%s v", filepath.Base(os.Args[0])))
-	virtualizationCmd.Use = "v"
+	virtualizationCmd.Use = "v [command] [args...]"
 	virtualizationCmd.Aliases = []string{"virtualization"}
 
 	return virtualizationCmd

@@ -7,7 +7,7 @@ vars:
     sh: date -u +'%Y-%m-%dT%H:%M:%SZ'
   version:
     sh: git describe --tags
-  kubectlVersion: v1.33.8
+  kubectlVersion: v1.34.2
   kubectlLDFlags:
     sh: |
       buildDate="{{ .buildDate }}"
