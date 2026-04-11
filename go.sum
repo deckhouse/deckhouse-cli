@@ -428,8 +428,8 @@ github.com/deckhouse/delivery-kit/v2 v2.63.1-dk h1:1YDVwEJMoEfiNGdEuiuXIfyJ3Ux8e
 github.com/deckhouse/delivery-kit/v2 v2.63.1-dk/go.mod h1:bwoZNyZ/EmE8HOT2mNsqmnM+l/WAJRUG002iBH0yfBk=
 github.com/deckhouse/virtualization/api v1.5.1 h1:9I0mn4xyrNWfElm0BRTAFpuTc4gFK6Qww61MAsT4KR8=
 github.com/deckhouse/virtualization/api v1.5.1/go.mod h1:hC9CVWrE7umq9qsYKYkbLl8gQ2XO2B+RtBNChFLfhpE=
-github.com/deckhouse/virtualization/src/cli v1.5.1 h1:VEGz7oNxQD4n/ej57OWZW/O1VNlYGwgI3GeROoiqz+w=
-github.com/deckhouse/virtualization/src/cli v1.5.1/go.mod h1:BIXWNx7Sz6rtjT6Ln+p3gBdjindz5/wEsxbkwKqA0Og=
+github.com/deckhouse/virtualization/src/cli v0.0.0-20260411164351-43c8e331b69d h1:zDGHNhF+iGDPViRYQPf2iA6W/OQRPoZHAKw7+loYeEw=
+github.com/deckhouse/virtualization/src/cli v0.0.0-20260411164351-43c8e331b69d/go.mod h1:BIXWNx7Sz6rtjT6Ln+p3gBdjindz5/wEsxbkwKqA0Og=
 github.com/denisenkom/go-mssqldb v0.0.0-20191128021309-1d7a30a10f73/go.mod h1:xbL0rPBG9cCiLr28tMa8zpbdarY27NDyej4t/EjAShU=
 github.com/denisenkom/go-mssqldb v0.12.2 h1:1OcPn5GBIobjWNd+8yjfHNIaFX14B1pWI3F9HZy5KXw=
 github.com/denisenkom/go-mssqldb v0.12.2/go.mod h1:lnIw1mZukFRZDJYQ0Pb833QS2IaC3l5HkEfra2LJ+sk=
