@@ -43,13 +43,15 @@ limitations under the License.
 //
 // # How fields map to Format() output
 //
-//	error: ETCD snapshot failed                          <-- Category
-//	  ╰─▶ dial tcp 10.0.0.1:2379: connection refused    <-- OriginalErr.Error()
+//	error: ETCD snapshot failed                     <-- Category
+//	  ╰─▶ save snapshot                              <-- OriginalErr chain (unwrapped)
+//	    ╰─▶ dial tcp 10.0.0.1:2379
+//	      ╰─▶ connection refused
 //
-//	  Possible causes:                                   <-- Causes
+//	  Possible causes:                               <-- Causes
 //	    * ETCD cluster is unreachable
 //
-//	  How to fix:                                        <-- Solutions
+//	  How to fix:                                    <-- Solutions
 //	    * Check ETCD health: etcdctl endpoint health
 //
 // # How it propagates

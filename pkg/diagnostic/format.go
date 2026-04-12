@@ -17,6 +17,7 @@ limitations under the License.
 package diagnostic
 
 import (
+	"errors"
 	"os"
 	"strings"
 
@@ -65,7 +66,10 @@ func newTextStyler() textStyler {
 // Format returns the formatted diagnostic string with colors if stderr is a TTY.
 //
 //	error: Network connection failed to 127.0.0.1:443
-//	  ╰─▶ dial tcp 127.0.0.1:443: connect: connection refused
+//	  ╰─▶ pull from registry
+//	    ╰─▶ validate platform access
+//	      ╰─▶ dial tcp 127.0.0.1:443
+//	        ╰─▶ connect: connection refused
 //
 //	  Possible causes:
 //	    * Network connectivity issues or no internet connection
@@ -78,7 +82,11 @@ func (e *HelpfulError) Format() string {
 	var b strings.Builder
 	b.WriteString("\n" + t.danger("error") + t.header(": "+e.Category) + "\n")
 	if e.OriginalErr != nil {
-		b.WriteString(t.hint("  ╰─▶ ") + e.OriginalErr.Error() + "\n")
+		chain := unwrapChain(e.OriginalErr)
+		for i, msg := range chain {
+			indent := strings.Repeat("  ", i)
+			b.WriteString("  " + indent + t.hint("╰─▶ ") + msg + "\n")
+		}
 	}
 	b.WriteString("\n")
 
@@ -99,4 +107,32 @@ func (e *HelpfulError) Format() string {
 
 	b.WriteString("\n")
 	return b.String()
+}
+
+// unwrapChain walks errors.Unwrap() and extracts each level's unique context.
+// For "a: b: c" wrapped via fmt.Errorf("%w"), returns ["a", "b", "c"].
+func unwrapChain(err error) []string {
+	var chain []string
+
+	for err != nil {
+		inner := errors.Unwrap(err)
+		if inner == nil {
+			chain = append(chain, err.Error())
+			break
+		}
+
+		full := err.Error()
+		innerText := inner.Error()
+		context := strings.TrimSuffix(full, ": "+innerText)
+		if context == full {
+			// Can't extract prefix cleanly - use full message and stop
+			chain = append(chain, full)
+			break
+		}
+
+		chain = append(chain, context)
+		err = inner
+	}
+
+	return chain
 }

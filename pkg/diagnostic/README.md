@@ -69,14 +69,16 @@ type HelpfulError struct {
 How fields map to output (`Format()`):
 
 ```
-error: TLS/certificate verification failed            <-- Category
-  ╰─▶ x509: certificate signed by unknown authority   <-- OriginalErr.Error()
+error: TLS/certificate verification failed       <-- Category
+  ╰─▶ Get "https://registry.example.com/v2/"       <-- OriginalErr chain
+    ╰─▶ tls: failed to verify certificate             (unwrapped level by level)
+      ╰─▶ x509: certificate signed by unknown authority
 
-  Possible causes:                                    <-- Causes
+  Possible causes:                               <-- Causes
     * Self-signed certificate without proper trust chain
     * Corporate proxy intercepting HTTPS connections
 
-  How to fix:                                         <-- Solutions
+  How to fix:                                    <-- Solutions
     * Use --tls-skip-verify flag
     * Add the registry's CA certificate to your system trust store
 ```
