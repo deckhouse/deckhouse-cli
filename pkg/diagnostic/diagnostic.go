@@ -16,14 +16,19 @@ limitations under the License.
 
 package diagnostic
 
+// Suggestion pairs a possible cause with its specific solutions.
+type Suggestion struct {
+	Cause     string   // why it might have happened
+	Solutions []string // how to fix this specific cause
+}
+
 // HelpfulError is an error enriched with possible causes and actionable solutions.
 // It implements the error interface so it can propagate up the call chain
 // and be printed once at the top level, avoiding double output.
 type HelpfulError struct {
-	Category    string   // e.g. "DNS resolution failed for 'registry.example.com'"
-	OriginalErr error    // the underlying error
-	Causes      []string // "Possible causes" shown to the user
-	Solutions   []string // "How to fix" shown to the user
+	Category    string       // e.g. "DNS resolution failed for 'registry.example.com'"
+	OriginalErr error        // the underlying error
+	Suggestions []Suggestion // cause-solution pairs shown to the user
 }
 
 // Error returns a plain-text representation suitable for logging and error wrapping.

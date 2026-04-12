@@ -7,13 +7,10 @@ with possible causes and solutions instead of raw Go error text:
 error: TLS/certificate verification failed
   ╰─▶ x509: certificate signed by unknown authority
 
-  Possible causes:
-    * Self-signed certificate without proper trust chain
-    * Corporate proxy intercepting HTTPS connections
-
-  How to fix:
-    * Use --tls-skip-verify flag to skip TLS verification
-    * Add the registry's CA certificate to your system trust store
+  * Self-signed certificate on the source registry
+    -> Use --tls-skip-verify flag to skip TLS verification
+  * Corporate proxy intercepting HTTPS connections
+    -> Check if a corporate proxy is intercepting HTTPS traffic
 ```
 
 ## How it works
@@ -51,11 +48,15 @@ import any errdetect, so unrelated commands never get false diagnostics.
 ## HelpfulError
 
 ```go
+type Suggestion struct {
+    Cause     string   // why it might have happened
+    Solutions []string // how to fix this specific cause
+}
+
 type HelpfulError struct {
-    Category    string   // what went wrong: "TLS/certificate verification failed"
-    OriginalErr error    // the underlying error (required, used by Unwrap/Error/Format)
-    Causes      []string // why it might have happened (optional)
-    Solutions   []string // how to fix it (optional)
+    Category    string       // what went wrong: "TLS/certificate verification failed"
+    OriginalErr error        // the underlying error (required, used by Unwrap/Error/Format)
+    Suggestions []Suggestion // cause-solution pairs (optional)
 }
 ```
 
@@ -63,24 +64,18 @@ type HelpfulError struct {
 |-------|----------|----------------------|
 | `Category` | yes | output shows `error: ` with no description |
 | `OriginalErr` | yes | safe (no panic), but `Unwrap` returns nil and `Format` skips the error line |
-| `Causes` | no | "Possible causes" section is omitted |
-| `Solutions` | no | "How to fix" section is omitted |
+| `Suggestions` | no | suggestions section is omitted |
 
 How fields map to output (`Format()`):
 
 ```
-error: TLS/certificate verification failed       <-- Category
-  ╰─▶ Get "https://registry.example.com/v2/"       <-- OriginalErr chain
-    ╰─▶ tls: failed to verify certificate             (unwrapped level by level)
-      ╰─▶ x509: certificate signed by unknown authority
+error: TLS/certificate verification failed  <-- Category
+  ╰─▶ x509: certificate signed by ...      <-- OriginalErr (unwrapped chain)
 
-  Possible causes:                               <-- Causes
-    * Self-signed certificate without proper trust chain
-    * Corporate proxy intercepting HTTPS connections
-
-  How to fix:                                    <-- Solutions
-    * Use --tls-skip-verify flag
-    * Add the registry's CA certificate to your system trust store
+  * Self-signed certificate                 <-- Suggestion.Cause
+    -> Use --tls-skip-verify flag           <-- Suggestion.Solutions
+  * Corporate proxy intercepting HTTPS      <-- next Suggestion.Cause
+    -> Check if proxy is intercepting ...   <-- its Solutions
 ```
 
 `Error()` returns plain text for logs: `"Category: OriginalErr.Error()"`.
@@ -126,8 +121,12 @@ func Diagnose(err error) *diagnostic.HelpfulError {
         return &diagnostic.HelpfulError{
             Category:    "ETCD connection failed",
             OriginalErr: err,
-            Causes:      []string{"ETCD cluster is unreachable"},
-            Solutions:   []string{"Check ETCD health: etcdctl endpoint health"},
+            Suggestions: []diagnostic.Suggestion{
+                {
+                    Cause:     "ETCD cluster is unreachable",
+                    Solutions: []string{"Check ETCD health: etcdctl endpoint health"},
+                },
+            },
         }
     }
     return nil
@@ -154,4 +153,4 @@ regardless of which errdetect produced it.
 - Diagnose in the **leaf command** (RunE), not in libraries or root.go
 - Each command uses its **own errdetect** - prevents false diagnostics
 - Skip diagnosis if the error is already a `*HelpfulError` (see guard in the example above)
-- `Causes` and `Solutions` are optional but highly recommended
+- `Suggestions` are optional but highly recommended

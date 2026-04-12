@@ -75,11 +75,19 @@ func TestDiagnose_PushSpecificAuth(t *testing.T) {
 	diag := Diagnose(&transport.Error{StatusCode: http.StatusUnauthorized})
 	require.NotNil(t, diag)
 
-	solutions := strings.Join(diag.Solutions, " ")
+	solutions := allSolutions(diag)
 	assert.Contains(t, solutions, "--registry-login")
 	assert.Contains(t, solutions, "--registry-password")
 	assert.NotContains(t, solutions, "--license")
 	assert.NotContains(t, solutions, "--source-login")
+}
+
+func allSolutions(diag *diagnostic.HelpfulError) string {
+	var parts []string
+	for _, s := range diag.Suggestions {
+		parts = append(parts, s.Solutions...)
+	}
+	return strings.Join(parts, " ")
 }
 
 func TestDiagnose_Unwrap(t *testing.T) {

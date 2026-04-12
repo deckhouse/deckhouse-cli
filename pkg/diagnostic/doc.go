@@ -35,24 +35,26 @@ limitations under the License.
 //	return &diagnostic.HelpfulError{
 //	    Category:    "ETCD snapshot failed",
 //	    OriginalErr: err,
-//	    Causes:      []string{"ETCD cluster is unreachable"},
-//	    Solutions:   []string{"Check ETCD health: etcdctl endpoint health"},
+//	    Suggestions: []diagnostic.Suggestion{
+//	        {
+//	            Cause:     "ETCD cluster is unreachable",
+//	            Solutions: []string{"Check ETCD health: etcdctl endpoint health"},
+//	        },
+//	    },
 //	}
 //
-// Causes and Solutions are optional - empty slices are silently omitted from output.
+// Suggestions are optional - an empty slice is silently omitted from output.
+// Each Suggestion pairs a cause with its specific solutions.
 //
 // # How fields map to Format() output
 //
-//	error: ETCD snapshot failed                     <-- Category
-//	  ╰─▶ save snapshot                              <-- OriginalErr chain (unwrapped)
+//	error: ETCD snapshot failed                <-- Category
+//	  ╰─▶ save snapshot                         <-- OriginalErr chain (unwrapped)
 //	    ╰─▶ dial tcp 10.0.0.1:2379
 //	      ╰─▶ connection refused
 //
-//	  Possible causes:                               <-- Causes
-//	    * ETCD cluster is unreachable
-//
-//	  How to fix:                                    <-- Solutions
-//	    * Check ETCD health: etcdctl endpoint health
+//	  * ETCD cluster is unreachable             <-- Suggestion.Cause
+//	    -> Check ETCD health: etcdctl ...       <-- Suggestion.Solutions
 //
 // # How it propagates
 //
@@ -79,8 +81,9 @@ limitations under the License.
 //	    if isETCDError(err) {
 //	        return &diagnostic.HelpfulError{
 //	            Category: "ETCD connection failed", OriginalErr: err,
-//	            Causes:   []string{"ETCD cluster is unreachable"},
-//	            Solutions: []string{"Check ETCD health"},
+//	            Suggestions: []diagnostic.Suggestion{
+//	                {Cause: "ETCD cluster is unreachable", Solutions: []string{"Check ETCD health"}},
+//	            },
 //	        }
 //	    }
 //	    return nil

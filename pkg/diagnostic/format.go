@@ -66,16 +66,12 @@ func newTextStyler() textStyler {
 // Format returns the formatted diagnostic string with colors if stderr is a TTY.
 //
 //	error: Network connection failed to 127.0.0.1:443
-//	  ╰─▶ pull from registry
-//	    ╰─▶ validate platform access
-//	      ╰─▶ dial tcp 127.0.0.1:443
-//	        ╰─▶ connect: connection refused
+//	  ╰─▶ dial tcp 127.0.0.1:443: connect: connection refused
 //
-//	  Possible causes:
-//	    * Network connectivity issues or no internet connection
-//
-//	  How to fix:
-//	    * Check your network connection and internet access
+//	  * Firewall or security group blocking the connection
+//	    -> Verify firewall rules allow outbound HTTPS (port 443)
+//	  * Registry is down or unreachable
+//	    -> Test connectivity with: curl -v https://<registry>
 func (e *HelpfulError) Format() string {
 	t := newTextStyler()
 
@@ -90,18 +86,10 @@ func (e *HelpfulError) Format() string {
 	}
 	b.WriteString("\n")
 
-	if len(e.Causes) > 0 {
-		b.WriteString(t.warn("  Possible causes:") + "\n")
-		for _, cause := range e.Causes {
-			b.WriteString("    * " + cause + "\n")
-		}
-		b.WriteString("\n")
-	}
-
-	if len(e.Solutions) > 0 {
-		b.WriteString(t.hint("  How to fix:") + "\n")
-		for _, solution := range e.Solutions {
-			b.WriteString("    * " + solution + "\n")
+	for _, s := range e.Suggestions {
+		b.WriteString("  " + t.warn("* "+s.Cause) + "\n")
+		for _, sol := range s.Solutions {
+			b.WriteString("    " + t.hint("-> ") + sol + "\n")
 		}
 	}
 

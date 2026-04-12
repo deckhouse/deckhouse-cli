@@ -67,15 +67,17 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    categoryEOF,
 			OriginalErr: err,
-			Causes: []string{
-				"Corporate proxy or middleware intercepting and terminating HTTPS connections",
-				"Source registry closed the connection unexpectedly",
-				"Network device (firewall, load balancer) dropping packets",
-			},
-			Solutions: []string{
-				"Check if a corporate proxy is intercepting HTTPS traffic",
-				"If using a proxy, ensure it is configured to pass through registry traffic",
-				"Try connecting directly without proxy: unset HTTP_PROXY HTTPS_PROXY",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause: "Corporate proxy or middleware intercepting and terminating HTTPS connections",
+					Solutions: []string{
+						"Check if a corporate proxy is intercepting HTTPS traffic",
+						"If using a proxy, ensure it is configured to pass through registry traffic",
+						"Try connecting directly without proxy: unset HTTP_PROXY HTTPS_PROXY",
+					},
+				},
+				{Cause: "Source registry closed the connection unexpectedly"},
+				{Cause: "Network device (firewall, load balancer) dropping packets"},
 			},
 		}
 
@@ -83,15 +85,22 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    categoryTLS,
 			OriginalErr: err,
-			Causes: []string{
-				"Self-signed certificate on the source registry",
-				"Certificate expired or not yet valid",
-				"Corporate proxy or middleware intercepting HTTPS connections",
-			},
-			Solutions: []string{
-				"Use --tls-skip-verify flag to skip TLS verification (not recommended for production)",
-				"Add the source registry's CA certificate to your system trust store",
-				"Verify system clock is correct (expired certificates can be caused by wrong time)",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Self-signed certificate on the source registry",
+					Solutions: []string{"Use --tls-skip-verify flag to skip TLS verification (not recommended for production)"},
+				},
+				{
+					Cause: "Certificate expired or not yet valid",
+					Solutions: []string{
+						"Verify system clock is correct (expired certificates can be caused by wrong time)",
+						"Add the source registry's CA certificate to your system trust store",
+					},
+				},
+				{
+					Cause:     "Corporate proxy or middleware intercepting HTTPS connections",
+					Solutions: []string{"Check if a corporate proxy is intercepting HTTPS traffic"},
+				},
 			},
 		}
 
@@ -106,15 +115,19 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
-			Causes: []string{
-				"License key is invalid, expired, or not provided",
-				"Source registry credentials are incorrect",
-				"Insufficient permissions for the requested images",
-			},
-			Solutions: []string{
-				"Verify your license key and pass it with --license flag",
-				"For custom source registries, use --source-login and --source-password",
-				"Contact registry administrator to verify access rights",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "License key is invalid, expired, or not provided",
+					Solutions: []string{"Verify your license key and pass it with --license flag"},
+				},
+				{
+					Cause:     "Source registry credentials are incorrect",
+					Solutions: []string{"For custom source registries, use --source-login and --source-password"},
+				},
+				{
+					Cause:     "Insufficient permissions for the requested images",
+					Solutions: []string{"Contact registry administrator to verify access rights"},
+				},
 			},
 		}
 
@@ -122,13 +135,15 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    categoryRateLimit,
 			OriginalErr: err,
-			Causes: []string{
-				"Too many requests to the source registry in a short time",
-				"Registry-side rate limiting policy",
-			},
-			Solutions: []string{
-				"Wait a few minutes and retry the operation",
-				"Contact registry administrator to increase rate limits",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Too many requests to the source registry in a short time",
+					Solutions: []string{"Wait a few minutes and retry the operation"},
+				},
+				{
+					Cause:     "Registry-side rate limiting policy",
+					Solutions: []string{"Contact registry administrator to increase rate limits"},
+				},
 			},
 		}
 
@@ -141,15 +156,19 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
-			Causes: []string{
-				"Source registry is experiencing internal errors",
-				"Backend storage is temporarily unavailable",
-				"Registry is overloaded or being maintained",
-			},
-			Solutions: []string{
-				"Wait a few minutes and retry the operation",
-				"Check source registry status and health",
-				"Contact registry administrator if the problem persists",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Source registry is experiencing internal errors",
+					Solutions: []string{"Wait a few minutes and retry the operation"},
+				},
+				{
+					Cause:     "Backend storage is temporarily unavailable",
+					Solutions: []string{"Check source registry status and health"},
+				},
+				{
+					Cause:     "Registry is overloaded or being maintained",
+					Solutions: []string{"Contact registry administrator if the problem persists"},
+				},
 			},
 		}
 
@@ -162,15 +181,19 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
-			Causes: []string{
-				"Source registry hostname cannot be resolved by DNS",
-				"DNS server is unreachable or not responding",
-				"Incorrect source registry URL or typo in hostname",
-			},
-			Solutions: []string{
-				"Verify the --source registry URL is spelled correctly",
-				"Check your DNS server configuration",
-				"Try using the registry's IP address instead of hostname",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Incorrect source registry URL or typo in hostname",
+					Solutions: []string{"Verify the --source registry URL is spelled correctly"},
+				},
+				{
+					Cause:     "DNS server is unreachable or not responding",
+					Solutions: []string{"Check your DNS server configuration"},
+				},
+				{
+					Cause:     "Source registry hostname cannot be resolved by DNS",
+					Solutions: []string{"Try using the registry's IP address instead of hostname"},
+				},
 			},
 		}
 
@@ -178,14 +201,16 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    categoryTimeout,
 			OriginalErr: err,
-			Causes: []string{
-				"Source registry took too long to respond",
-				"Network latency is too high",
-				"Firewall silently dropping packets (no RST, no ICMP)",
-			},
-			Solutions: []string{
-				"Check network connectivity to the source registry",
-				"Verify firewall rules allow outbound HTTPS (port 443)",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Source registry took too long to respond",
+					Solutions: []string{"Check network connectivity to the source registry"},
+				},
+				{
+					Cause:     "Firewall silently dropping packets (no RST, no ICMP)",
+					Solutions: []string{"Verify firewall rules allow outbound HTTPS (port 443)"},
+				},
+				{Cause: "Network latency is too high"},
 			},
 		}
 
@@ -198,15 +223,19 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
-			Causes: []string{
-				"No network connection to the source registry",
-				"Firewall or security group blocking the connection",
-				"Source registry is down or unreachable",
-			},
-			Solutions: []string{
-				"Check your network connection and internet access",
-				"Verify firewall rules allow outbound HTTPS (port 443)",
-				"Test connectivity with: curl -v https://<source-registry>",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "No network connection to the source registry",
+					Solutions: []string{"Check your network connection and internet access"},
+				},
+				{
+					Cause:     "Firewall or security group blocking the connection",
+					Solutions: []string{"Verify firewall rules allow outbound HTTPS (port 443)"},
+				},
+				{
+					Cause:     "Source registry is down or unreachable",
+					Solutions: []string{"Test connectivity with: curl -v https://<source-registry>"},
+				},
 			},
 		}
 
@@ -214,13 +243,15 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    categoryImageNotFound,
 			OriginalErr: err,
-			Causes: []string{
-				"Image tag doesn't exist in the source registry",
-				"Incorrect image name or tag specified",
-			},
-			Solutions: []string{
-				"Verify the source registry path with --source flag",
-				"Check if the requested Deckhouse version exists",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Image tag doesn't exist in the source registry",
+					Solutions: []string{"Check if the requested Deckhouse version exists"},
+				},
+				{
+					Cause:     "Incorrect image name or tag specified",
+					Solutions: []string{"Verify the source registry path with --source flag"},
+				},
 			},
 		}
 
@@ -228,13 +259,15 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    categoryRepoNotFound,
 			OriginalErr: err,
-			Causes: []string{
-				"Repository doesn't exist in the source registry",
-				"Incorrect source registry path",
-			},
-			Solutions: []string{
-				"Verify the --source registry path is correct",
-				"Ensure you have permission to access this repository",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Repository doesn't exist in the source registry",
+					Solutions: []string{"Verify the --source registry path is correct"},
+				},
+				{
+					Cause:     "Incorrect source registry path",
+					Solutions: []string{"Ensure you have permission to access this repository"},
+				},
 			},
 		}
 	}

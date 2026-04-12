@@ -30,14 +30,15 @@ func TestHelpfulError_Error_PlainText(t *testing.T) {
 	diag := &HelpfulError{
 		Category:    "Network connection failed",
 		OriginalErr: errors.New("connection refused"),
-		Causes:      []string{"cause"},
-		Solutions:   []string{"fix"},
+		Suggestions: []Suggestion{
+			{Cause: "cause", Solutions: []string{"fix"}},
+		},
 	}
 
 	errStr := diag.Error()
 	assert.Equal(t, "Network connection failed: connection refused", errStr)
 	assert.NotContains(t, errStr, "\033[")
-	assert.NotContains(t, errStr, "Possible causes")
+	assert.NotContains(t, errStr, "cause")
 }
 
 func TestHelpfulError_Unwrap(t *testing.T) {
@@ -55,8 +56,9 @@ func TestHelpfulError_Format_NoColor(t *testing.T) {
 	diag := &HelpfulError{
 		Category:    "Network connection failed",
 		OriginalErr: errors.New("test"),
-		Causes:      []string{"cause1"},
-		Solutions:   []string{"fix1"},
+		Suggestions: []Suggestion{
+			{Cause: "cause1", Solutions: []string{"fix1"}},
+		},
 	}
 
 	output := diag.Format()
@@ -72,18 +74,18 @@ func TestHelpfulError_Format_Structure(t *testing.T) {
 	diag := &HelpfulError{
 		Category:    "Network connection failed",
 		OriginalErr: errors.New("connection refused"),
-		Causes:      []string{"Network down", "Firewall blocking"},
-		Solutions:   []string{"Check network", "Check firewall"},
+		Suggestions: []Suggestion{
+			{Cause: "Network down", Solutions: []string{"Check network"}},
+			{Cause: "Firewall blocking", Solutions: []string{"Check firewall"}},
+		},
 	}
 
 	output := diag.Format()
 	assert.Contains(t, output, "error: Network connection failed")
 	assert.Contains(t, output, "connection refused")
-	assert.Contains(t, output, "Possible causes:")
 	assert.Contains(t, output, "Network down")
-	assert.Contains(t, output, "Firewall blocking")
-	assert.Contains(t, output, "How to fix:")
 	assert.Contains(t, output, "Check network")
+	assert.Contains(t, output, "Firewall blocking")
 	assert.Contains(t, output, "Check firewall")
 }
 
@@ -97,8 +99,10 @@ func TestHelpfulError_Format_NilOriginalErr(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	diag := &HelpfulError{
-		Category:  "Something failed",
-		Solutions: []string{"Try again"},
+		Category: "Something failed",
+		Suggestions: []Suggestion{
+			{Cause: "Unknown", Solutions: []string{"Try again"}},
+		},
 	}
 
 	output := diag.Format()
@@ -129,8 +133,9 @@ func TestHelpfulError_Format_ForceColor(t *testing.T) {
 	diag := &HelpfulError{
 		Category:    "Test error",
 		OriginalErr: errors.New("test"),
-		Causes:      []string{"cause1"},
-		Solutions:   []string{"fix1"},
+		Suggestions: []Suggestion{
+			{Cause: "cause1", Solutions: []string{"fix1"}},
+		},
 	}
 
 	output := diag.Format()

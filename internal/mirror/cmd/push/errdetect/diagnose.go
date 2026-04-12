@@ -67,15 +67,17 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    categoryEOF,
 			OriginalErr: err,
-			Causes: []string{
-				"Corporate proxy or middleware intercepting and terminating HTTPS connections",
-				"Target registry closed the connection unexpectedly",
-				"Network device (firewall, load balancer) dropping packets",
-			},
-			Solutions: []string{
-				"Check if a corporate proxy is intercepting HTTPS traffic",
-				"If using a proxy, ensure it is configured to pass through registry traffic",
-				"Try connecting directly without proxy: unset HTTP_PROXY HTTPS_PROXY",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause: "Corporate proxy or middleware intercepting and terminating HTTPS connections",
+					Solutions: []string{
+						"Check if a corporate proxy is intercepting HTTPS traffic",
+						"If using a proxy, ensure it is configured to pass through registry traffic",
+						"Try connecting directly without proxy: unset HTTP_PROXY HTTPS_PROXY",
+					},
+				},
+				{Cause: "Target registry closed the connection unexpectedly"},
+				{Cause: "Network device (firewall, load balancer) dropping packets"},
 			},
 		}
 
@@ -83,15 +85,22 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    categoryTLS,
 			OriginalErr: err,
-			Causes: []string{
-				"Self-signed certificate on the target registry",
-				"Certificate expired or not yet valid",
-				"Corporate proxy or middleware intercepting HTTPS connections",
-			},
-			Solutions: []string{
-				"Use --tls-skip-verify flag to skip TLS verification (not recommended for production)",
-				"Add the target registry's CA certificate to your system trust store",
-				"Verify system clock is correct (expired certificates can be caused by wrong time)",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Self-signed certificate on the target registry",
+					Solutions: []string{"Use --tls-skip-verify flag to skip TLS verification (not recommended for production)"},
+				},
+				{
+					Cause: "Certificate expired or not yet valid",
+					Solutions: []string{
+						"Verify system clock is correct (expired certificates can be caused by wrong time)",
+						"Add the target registry's CA certificate to your system trust store",
+					},
+				},
+				{
+					Cause:     "Corporate proxy or middleware intercepting HTTPS connections",
+					Solutions: []string{"Check if a corporate proxy is intercepting HTTPS traffic"},
+				},
 			},
 		}
 
@@ -106,15 +115,19 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
-			Causes: []string{
-				"Registry credentials are invalid or not provided",
-				"Account does not have push permissions",
-				"Repository path requires different access rights",
-			},
-			Solutions: []string{
-				"Verify --registry-login and --registry-password are correct",
-				"Ensure the account has write access to the target repository",
-				"Contact registry administrator to verify push permissions",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Registry credentials are invalid or not provided",
+					Solutions: []string{"Verify --registry-login and --registry-password are correct"},
+				},
+				{
+					Cause:     "Account does not have push permissions",
+					Solutions: []string{"Ensure the account has write access to the target repository"},
+				},
+				{
+					Cause:     "Repository path requires different access rights",
+					Solutions: []string{"Contact registry administrator to verify push permissions"},
+				},
 			},
 		}
 
@@ -122,13 +135,15 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    categoryRateLimit,
 			OriginalErr: err,
-			Causes: []string{
-				"Too many requests to the target registry in a short time",
-				"Registry-side rate limiting policy",
-			},
-			Solutions: []string{
-				"Wait a few minutes and retry the operation",
-				"Contact registry administrator to increase rate limits",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Too many requests to the target registry in a short time",
+					Solutions: []string{"Wait a few minutes and retry the operation"},
+				},
+				{
+					Cause:     "Registry-side rate limiting policy",
+					Solutions: []string{"Contact registry administrator to increase rate limits"},
+				},
 			},
 		}
 
@@ -141,15 +156,19 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
-			Causes: []string{
-				"Target registry is experiencing internal errors",
-				"Backend storage is temporarily unavailable",
-				"Registry is overloaded or being maintained",
-			},
-			Solutions: []string{
-				"Wait a few minutes and retry the operation",
-				"Check target registry status and health",
-				"Contact registry administrator if the problem persists",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Target registry is experiencing internal errors",
+					Solutions: []string{"Wait a few minutes and retry the operation"},
+				},
+				{
+					Cause:     "Backend storage is temporarily unavailable",
+					Solutions: []string{"Check target registry status and health"},
+				},
+				{
+					Cause:     "Registry is overloaded or being maintained",
+					Solutions: []string{"Contact registry administrator if the problem persists"},
+				},
 			},
 		}
 
@@ -162,15 +181,19 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
-			Causes: []string{
-				"Target registry hostname cannot be resolved by DNS",
-				"DNS server is unreachable or not responding",
-				"Incorrect registry address or typo in hostname",
-			},
-			Solutions: []string{
-				"Verify the <registry> argument is spelled correctly",
-				"Check your DNS server configuration",
-				"Try using the registry's IP address instead of hostname",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Incorrect registry address or typo in hostname",
+					Solutions: []string{"Verify the <registry> argument is spelled correctly"},
+				},
+				{
+					Cause:     "DNS server is unreachable or not responding",
+					Solutions: []string{"Check your DNS server configuration"},
+				},
+				{
+					Cause:     "Target registry hostname cannot be resolved by DNS",
+					Solutions: []string{"Try using the registry's IP address instead of hostname"},
+				},
 			},
 		}
 
@@ -178,14 +201,16 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    categoryTimeout,
 			OriginalErr: err,
-			Causes: []string{
-				"Target registry took too long to respond",
-				"Network latency is too high",
-				"Firewall silently dropping packets (no RST, no ICMP)",
-			},
-			Solutions: []string{
-				"Check network connectivity to the target registry",
-				"Verify firewall rules allow outbound HTTPS (port 443)",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Target registry took too long to respond",
+					Solutions: []string{"Check network connectivity to the target registry"},
+				},
+				{
+					Cause:     "Firewall silently dropping packets (no RST, no ICMP)",
+					Solutions: []string{"Verify firewall rules allow outbound HTTPS (port 443)"},
+				},
+				{Cause: "Network latency is too high"},
 			},
 		}
 
@@ -198,15 +223,19 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    category,
 			OriginalErr: err,
-			Causes: []string{
-				"No network connection to the target registry",
-				"Firewall or security group blocking the connection",
-				"Target registry is down or unreachable",
-			},
-			Solutions: []string{
-				"Check your network connection",
-				"Verify firewall rules allow outbound HTTPS (port 443)",
-				"Test connectivity with: curl -v https://<target-registry>",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "No network connection to the target registry",
+					Solutions: []string{"Check your network connection"},
+				},
+				{
+					Cause:     "Firewall or security group blocking the connection",
+					Solutions: []string{"Verify firewall rules allow outbound HTTPS (port 443)"},
+				},
+				{
+					Cause:     "Target registry is down or unreachable",
+					Solutions: []string{"Test connectivity with: curl -v https://<target-registry>"},
+				},
 			},
 		}
 
@@ -214,13 +243,15 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    categoryImageNotFound,
 			OriginalErr: err,
-			Causes: []string{
-				"Expected image is missing in the target registry",
-				"Previous push may have been interrupted",
-			},
-			Solutions: []string{
-				"Retry the push operation",
-				"Verify the <registry> argument is correct",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Expected image is missing in the target registry",
+					Solutions: []string{"Retry the push operation"},
+				},
+				{
+					Cause:     "Previous push may have been interrupted",
+					Solutions: []string{"Verify the <registry> argument is correct"},
+				},
 			},
 		}
 
@@ -228,13 +259,15 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return &diagnostic.HelpfulError{
 			Category:    categoryRepoNotFound,
 			OriginalErr: err,
-			Causes: []string{
-				"Repository doesn't exist in the target registry",
-				"Incorrect <registry> argument",
-			},
-			Solutions: []string{
-				"Verify the <registry> argument is correct",
-				"Ensure the repository is created in the target registry",
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause:     "Repository doesn't exist in the target registry",
+					Solutions: []string{"Verify the <registry> argument is correct"},
+				},
+				{
+					Cause:     "Incorrect <registry> argument",
+					Solutions: []string{"Ensure the repository is created in the target registry"},
+				},
 			},
 		}
 	}
