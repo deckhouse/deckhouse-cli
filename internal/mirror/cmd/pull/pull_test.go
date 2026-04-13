@@ -37,7 +37,7 @@ import (
 	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/validation"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/validation"
 )
 
 func TestNewCommand(t *testing.T) {
