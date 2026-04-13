@@ -96,7 +96,7 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 			OriginalErr: err,
 			Suggestions: []diagnostic.Suggestion{
 				{
-					Cause:     "Self-signed or private CA certificate on the target registry",
+					Cause: "Self-signed or private CA certificate on the target registry",
 					Solutions: []string{
 						"Add the target registry's CA certificate to your system trust store",
 						"Use --tls-skip-verify flag to skip TLS verification (not recommended for production)",
@@ -114,7 +114,7 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 					Solutions: []string{"Use --insecure flag if the target registry uses HTTP instead of HTTPS"},
 				},
 				{
-					Cause:     "Corporate proxy or middleware intercepting and replacing TLS certificates",
+					Cause: "Corporate proxy or middleware intercepting and replacing TLS certificates",
 					Solutions: []string{
 						"Add the proxy's CA certificate to your system trust store",
 						"Check if a corporate proxy is intercepting HTTPS traffic",
@@ -288,7 +288,7 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 					Solutions: []string{"Use --insecure flag if the target registry uses HTTP instead of HTTPS"},
 				},
 				{
-					Cause:     "Firewall or security group blocking outbound connections",
+					Cause: "Firewall or security group blocking outbound connections",
 					Solutions: []string{
 						"Verify firewall rules allow outbound HTTPS (port 443) to the target registry",
 						"Test connectivity with: curl -v https://<target-registry>",
