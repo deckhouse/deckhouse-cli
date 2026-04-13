@@ -46,6 +46,8 @@ const (
 	categoryDNS           = "DNS resolution failed"
 	categoryTimeout       = "Operation timed out"
 	categoryNetwork       = "Network connection failed"
+	categoryDiskFull      = "Disk space exhausted"
+	categoryPermission    = "Permission denied"
 	categoryImageNotFound = "Image not found in registry"
 	categoryRepoNotFound  = "Repository not found in registry"
 )
@@ -69,6 +71,13 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 			OriginalErr: err,
 			Suggestions: []diagnostic.Suggestion{
 				{
+					Cause: "Large layer transfer interrupted by an intermediate timeout",
+					Solutions: []string{
+						"Increase the timeout with D8_MIRROR_TIMEOUT env variable, e.g.: export D8_MIRROR_TIMEOUT=4h",
+						"Pull supports resuming — simply re-run the same command to continue from where it stopped",
+					},
+				},
+				{
 					Cause: "Corporate proxy or middleware intercepting and terminating HTTPS connections",
 					Solutions: []string{
 						"Check if a corporate proxy is intercepting HTTPS traffic",
@@ -87,19 +96,29 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 			OriginalErr: err,
 			Suggestions: []diagnostic.Suggestion{
 				{
-					Cause:     "Self-signed certificate on the source registry",
-					Solutions: []string{"Use --tls-skip-verify flag to skip TLS verification (not recommended for production)"},
+					Cause:     "Self-signed or private CA certificate on the source registry",
+					Solutions: []string{
+						"Add the source registry's CA certificate to your system trust store",
+						"Use --tls-skip-verify flag to skip TLS verification (not recommended for production)",
+					},
 				},
 				{
 					Cause: "Certificate expired or not yet valid",
 					Solutions: []string{
-						"Verify system clock is correct (expired certificates can be caused by wrong time)",
-						"Add the source registry's CA certificate to your system trust store",
+						"Verify system clock is correct (wrong time is a common cause of certificate errors)",
+						"Renew the registry certificate if it has expired",
 					},
 				},
 				{
-					Cause:     "Corporate proxy or middleware intercepting HTTPS connections",
-					Solutions: []string{"Check if a corporate proxy is intercepting HTTPS traffic"},
+					Cause:     "Source registry is serving plain HTTP, not HTTPS",
+					Solutions: []string{"Use --insecure flag if the source registry uses HTTP instead of HTTPS"},
+				},
+				{
+					Cause:     "Corporate proxy or middleware intercepting and replacing TLS certificates",
+					Solutions: []string{
+						"Add the proxy's CA certificate to your system trust store",
+						"Check if a corporate proxy is intercepting HTTPS traffic",
+					},
 				},
 			},
 		}
@@ -203,14 +222,61 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 			OriginalErr: err,
 			Suggestions: []diagnostic.Suggestion{
 				{
-					Cause:     "Source registry took too long to respond",
-					Solutions: []string{"Check network connectivity to the source registry"},
+					Cause: "Large image layers require more time to transfer than the default timeout",
+					Solutions: []string{
+						"Increase the timeout with D8_MIRROR_TIMEOUT env variable, e.g.: export D8_MIRROR_TIMEOUT=4h",
+						"Pull supports resuming — re-run the same command to continue from where it stopped",
+					},
 				},
 				{
 					Cause:     "Firewall silently dropping packets (no RST, no ICMP)",
-					Solutions: []string{"Verify firewall rules allow outbound HTTPS (port 443)"},
+					Solutions: []string{"Verify firewall rules allow outbound HTTPS (port 443) to the source registry"},
 				},
-				{Cause: "Network latency is too high"},
+				{
+					Cause:     "Source registry took too long to respond",
+					Solutions: []string{"Check network connectivity and latency to the source registry"},
+				},
+			},
+		}
+
+	case isDiskFullError(err):
+		return &diagnostic.HelpfulError{
+			Category:    categoryDiskFull,
+			OriginalErr: err,
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause: "Not enough free disk space for the bundle output",
+					Solutions: []string{
+						"Free up disk space on the output partition",
+						"Use --images-bundle-chunk-size to split the bundle into smaller chunks",
+					},
+				},
+				{
+					Cause: "Temporary working directory is on a partition with insufficient space",
+					Solutions: []string{
+						"Mirror operations require free space approximately equal to the full bundle size",
+						"Use --tmp-dir to point to a partition with more free space",
+					},
+				},
+			},
+		}
+
+	case isPermissionError(err):
+		return &diagnostic.HelpfulError{
+			Category:    categoryPermission,
+			OriginalErr: err,
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause: "Output directory is not writable by the current user",
+					Solutions: []string{
+						"Check write permissions on the output path",
+						"Run with a user that has write access, or change directory permissions",
+					},
+				},
+				{
+					Cause:     "Temporary directory is not writable",
+					Solutions: []string{"Use --tmp-dir to specify a writable temporary directory"},
+				},
 			},
 		}
 
@@ -225,16 +291,19 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 			OriginalErr: err,
 			Suggestions: []diagnostic.Suggestion{
 				{
-					Cause:     "No network connection to the source registry",
-					Solutions: []string{"Check your network connection and internet access"},
+					Cause:     "Source registry is serving plain HTTP, not HTTPS",
+					Solutions: []string{"Use --insecure flag if the source registry uses HTTP instead of HTTPS"},
 				},
 				{
-					Cause:     "Firewall or security group blocking the connection",
-					Solutions: []string{"Verify firewall rules allow outbound HTTPS (port 443)"},
+					Cause:     "Firewall or security group blocking outbound connections",
+					Solutions: []string{
+						"Verify firewall rules allow outbound HTTPS (port 443) to the source registry",
+						"Test connectivity with: curl -v https://<source-registry>",
+					},
 				},
 				{
-					Cause:     "Source registry is down or unreachable",
-					Solutions: []string{"Test connectivity with: curl -v https://<source-registry>"},
+					Cause:     "Source registry is down or temporarily unreachable",
+					Solutions: []string{"Check your network connection and the source registry status"},
 				},
 			},
 		}
@@ -245,12 +314,15 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 			OriginalErr: err,
 			Suggestions: []diagnostic.Suggestion{
 				{
-					Cause:     "Image tag doesn't exist in the source registry",
-					Solutions: []string{"Check if the requested Deckhouse version exists"},
+					Cause: "Requested Deckhouse version or tag does not exist in the source registry",
+					Solutions: []string{
+						"Check --deckhouse-tag or --since-version value for typos or non-existent versions",
+						"Browse available release versions in the source registry",
+					},
 				},
 				{
-					Cause:     "Incorrect image name or tag specified",
-					Solutions: []string{"Verify the source registry path with --source flag"},
+					Cause:     "License key does not have access to the requested edition or version",
+					Solutions: []string{"Verify the --license key grants access to the requested Deckhouse edition"},
 				},
 			},
 		}
@@ -261,12 +333,18 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 			OriginalErr: err,
 			Suggestions: []diagnostic.Suggestion{
 				{
-					Cause:     "Repository doesn't exist in the source registry",
-					Solutions: []string{"Verify the --source registry path is correct"},
+					Cause: "Source registry path is incorrect or the repository does not exist",
+					Solutions: []string{
+						"Double-check the --source flag value for typos or extra path segments",
+						"Default source is registry.deckhouse.ru/deckhouse/ee",
+					},
 				},
 				{
-					Cause:     "Incorrect source registry path",
-					Solutions: []string{"Ensure you have permission to access this repository"},
+					Cause: "Account does not have read access to the repository",
+					Solutions: []string{
+						"Verify the --license key or --source-login credentials have read permissions",
+						"Contact registry administrator to confirm your access rights",
+					},
 				},
 			},
 		}
@@ -429,4 +507,14 @@ func networkAddr(err error) string {
 		return opErr.Addr.String()
 	}
 	return ""
+}
+
+func isDiskFullError(err error) bool {
+	return errors.Is(err, syscall.ENOSPC)
+}
+
+func isPermissionError(err error) bool {
+	return errors.Is(err, os.ErrPermission) ||
+		errors.Is(err, syscall.EACCES) ||
+		errors.Is(err, syscall.EPERM)
 }

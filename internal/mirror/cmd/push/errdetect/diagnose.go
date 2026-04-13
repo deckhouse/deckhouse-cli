@@ -46,6 +46,8 @@ const (
 	categoryDNS           = "DNS resolution failed"
 	categoryTimeout       = "Operation timed out"
 	categoryNetwork       = "Network connection failed"
+	categoryDiskFull      = "Disk space exhausted"
+	categoryPermission    = "Permission denied"
 	categoryImageNotFound = "Image not found in registry"
 	categoryRepoNotFound  = "Repository not found in registry"
 )
@@ -69,6 +71,13 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 			OriginalErr: err,
 			Suggestions: []diagnostic.Suggestion{
 				{
+					Cause: "Large layer upload interrupted by an intermediate timeout",
+					Solutions: []string{
+						"Increase the timeout with D8_MIRROR_TIMEOUT env variable, e.g.: export D8_MIRROR_TIMEOUT=4h",
+						"Re-run the same push command to retry the failed uploads",
+					},
+				},
+				{
 					Cause: "Corporate proxy or middleware intercepting and terminating HTTPS connections",
 					Solutions: []string{
 						"Check if a corporate proxy is intercepting HTTPS traffic",
@@ -87,19 +96,29 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 			OriginalErr: err,
 			Suggestions: []diagnostic.Suggestion{
 				{
-					Cause:     "Self-signed certificate on the target registry",
-					Solutions: []string{"Use --tls-skip-verify flag to skip TLS verification (not recommended for production)"},
+					Cause:     "Self-signed or private CA certificate on the target registry",
+					Solutions: []string{
+						"Add the target registry's CA certificate to your system trust store",
+						"Use --tls-skip-verify flag to skip TLS verification (not recommended for production)",
+					},
 				},
 				{
 					Cause: "Certificate expired or not yet valid",
 					Solutions: []string{
-						"Verify system clock is correct (expired certificates can be caused by wrong time)",
-						"Add the target registry's CA certificate to your system trust store",
+						"Verify system clock is correct (wrong time is a common cause of certificate errors)",
+						"Renew the registry certificate if it has expired",
 					},
 				},
 				{
-					Cause:     "Corporate proxy or middleware intercepting HTTPS connections",
-					Solutions: []string{"Check if a corporate proxy is intercepting HTTPS traffic"},
+					Cause:     "Target registry is serving plain HTTP, not HTTPS",
+					Solutions: []string{"Use --insecure flag if the target registry uses HTTP instead of HTTPS"},
+				},
+				{
+					Cause:     "Corporate proxy or middleware intercepting and replacing TLS certificates",
+					Solutions: []string{
+						"Add the proxy's CA certificate to your system trust store",
+						"Check if a corporate proxy is intercepting HTTPS traffic",
+					},
 				},
 			},
 		}
@@ -203,14 +222,54 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 			OriginalErr: err,
 			Suggestions: []diagnostic.Suggestion{
 				{
-					Cause:     "Target registry took too long to respond",
-					Solutions: []string{"Check network connectivity to the target registry"},
+					Cause: "Large image layers require more time to upload than the default timeout",
+					Solutions: []string{
+						"Increase the timeout with D8_MIRROR_TIMEOUT env variable, e.g.: export D8_MIRROR_TIMEOUT=4h",
+						"Re-run the same push command to retry the failed uploads",
+					},
 				},
 				{
 					Cause:     "Firewall silently dropping packets (no RST, no ICMP)",
-					Solutions: []string{"Verify firewall rules allow outbound HTTPS (port 443)"},
+					Solutions: []string{"Verify firewall rules allow outbound HTTPS (port 443) to the target registry"},
 				},
-				{Cause: "Network latency is too high"},
+				{
+					Cause:     "Target registry took too long to respond",
+					Solutions: []string{"Check network connectivity and latency to the target registry"},
+				},
+			},
+		}
+
+	case isDiskFullError(err):
+		return &diagnostic.HelpfulError{
+			Category:    categoryDiskFull,
+			OriginalErr: err,
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause: "Not enough free disk space in the temporary working directory",
+					Solutions: []string{
+						"Free up disk space on the partition",
+						"Use --tmp-dir to point to a partition with more free space",
+					},
+				},
+			},
+		}
+
+	case isPermissionError(err):
+		return &diagnostic.HelpfulError{
+			Category:    categoryPermission,
+			OriginalErr: err,
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause: "Bundle directory or temporary directory is not readable by the current user",
+					Solutions: []string{
+						"Check read permissions on the bundle path",
+						"Run with a user that has read access, or change directory permissions",
+					},
+				},
+				{
+					Cause:     "Temporary directory is not writable",
+					Solutions: []string{"Use --tmp-dir to specify a writable temporary directory"},
+				},
 			},
 		}
 
@@ -225,16 +284,19 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 			OriginalErr: err,
 			Suggestions: []diagnostic.Suggestion{
 				{
-					Cause:     "No network connection to the target registry",
-					Solutions: []string{"Check your network connection"},
+					Cause:     "Target registry is serving plain HTTP, not HTTPS",
+					Solutions: []string{"Use --insecure flag if the target registry uses HTTP instead of HTTPS"},
 				},
 				{
-					Cause:     "Firewall or security group blocking the connection",
-					Solutions: []string{"Verify firewall rules allow outbound HTTPS (port 443)"},
+					Cause:     "Firewall or security group blocking outbound connections",
+					Solutions: []string{
+						"Verify firewall rules allow outbound HTTPS (port 443) to the target registry",
+						"Test connectivity with: curl -v https://<target-registry>",
+					},
 				},
 				{
-					Cause:     "Target registry is down or unreachable",
-					Solutions: []string{"Test connectivity with: curl -v https://<target-registry>"},
+					Cause:     "Target registry is down or temporarily unreachable",
+					Solutions: []string{"Check your network connection and the target registry status"},
 				},
 			},
 		}
@@ -245,12 +307,15 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 			OriginalErr: err,
 			Suggestions: []diagnostic.Suggestion{
 				{
-					Cause:     "Expected image is missing in the target registry",
-					Solutions: []string{"Retry the push operation"},
+					Cause: "Bundle is incomplete or corrupted — expected image manifest was not found",
+					Solutions: []string{
+						"Re-run d8 mirror pull to download a fresh complete bundle",
+						"If using a split bundle, ensure all chunk files are present and intact",
+					},
 				},
 				{
-					Cause:     "Previous push may have been interrupted",
-					Solutions: []string{"Verify the <registry> argument is correct"},
+					Cause:     "Registry inconsistency during concurrent push operations",
+					Solutions: []string{"Retry the push operation"},
 				},
 			},
 		}
@@ -261,12 +326,18 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 			OriginalErr: err,
 			Suggestions: []diagnostic.Suggestion{
 				{
-					Cause:     "Repository doesn't exist in the target registry",
-					Solutions: []string{"Verify the <registry> argument is correct"},
+					Cause: "Repository does not exist in the target registry",
+					Solutions: []string{
+						"Some registries require the repository to be created before pushing",
+						"Create the target repository in the registry's web interface or API",
+					},
 				},
 				{
-					Cause:     "Incorrect <registry> argument",
-					Solutions: []string{"Ensure the repository is created in the target registry"},
+					Cause: "Incorrect target registry path",
+					Solutions: []string{
+						"Verify the <registry> argument is spelled correctly",
+						"Check for extra path segments, leading slashes, or typos",
+					},
 				},
 			},
 		}
@@ -429,4 +500,14 @@ func networkAddr(err error) string {
 		return opErr.Addr.String()
 	}
 	return ""
+}
+
+func isDiskFullError(err error) bool {
+	return errors.Is(err, syscall.ENOSPC)
+}
+
+func isPermissionError(err error) bool {
+	return errors.Is(err, os.ErrPermission) ||
+		errors.Is(err, syscall.EACCES) ||
+		errors.Is(err, syscall.EPERM)
 }

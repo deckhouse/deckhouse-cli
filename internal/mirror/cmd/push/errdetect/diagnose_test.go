@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
@@ -58,6 +60,8 @@ func TestDiagnose_AllCategories(t *testing.T) {
 		{"Auth403", &transport.Error{StatusCode: http.StatusForbidden}, categoryAuth403},
 		{"RateLimit", &transport.Error{StatusCode: http.StatusTooManyRequests}, categoryRateLimit},
 		{"Server500", &transport.Error{StatusCode: http.StatusInternalServerError}, categoryServerError},
+		{"DiskFull", fmt.Errorf("write temp: %w", syscall.ENOSPC), categoryDiskFull},
+		{"Permission", fmt.Errorf("open bundle: %w", os.ErrPermission), categoryPermission},
 		{"ImageNotFound", errors.New("MANIFEST_UNKNOWN: not found"), categoryImageNotFound},
 		{"RepoNotFound", errors.New("NAME_UNKNOWN: repo"), categoryRepoNotFound},
 	}
@@ -80,6 +84,20 @@ func TestDiagnose_PushSpecificAuth(t *testing.T) {
 	assert.Contains(t, solutions, "--registry-password")
 	assert.NotContains(t, solutions, "--license")
 	assert.NotContains(t, solutions, "--source-login")
+}
+
+func TestDiagnose_DiskFull(t *testing.T) {
+	diag := Diagnose(fmt.Errorf("write temp: %w", syscall.ENOSPC))
+	require.NotNil(t, diag)
+	assert.Equal(t, categoryDiskFull, diag.Category)
+	assert.NotEmpty(t, diag.Suggestions)
+}
+
+func TestDiagnose_PermissionDenied(t *testing.T) {
+	diag := Diagnose(fmt.Errorf("open bundle: %w", os.ErrPermission))
+	require.NotNil(t, diag)
+	assert.Equal(t, categoryPermission, diag.Category)
+	assert.NotEmpty(t, diag.Suggestions)
 }
 
 func allSolutions(diag *diagnostic.HelpfulError) string {
