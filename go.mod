@@ -6,7 +6,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.3.1
 	github.com/deckhouse/deckhouse/pkg/log v0.2.0
 	github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260326143935-b535ad6cb730
-	github.com/deckhouse/virtualization/src/cli v1.5.1
+	github.com/deckhouse/virtualization/src/cli v0.0.0-20260411165904-511d83a97fc1
 	github.com/fatih/color v1.18.0
 	github.com/fluxcd/flagger v1.36.1
 	github.com/go-logr/logr v1.4.3
@@ -664,7 +664,3 @@ replace (
 	go.cypherpunks.ru/gogost/v5 v5.13.0 => github.com/flant/gogost/v5 v5.13.0
 	k8s.io/kube-openapi => k8s.io/kube-openapi v0.0.0-20250710124328-f3f2b991d03b
 )
-
-replace github.com/deckhouse/virtualization/src/cli => ../../dvp/virtualization/src/cli
-
-replace github.com/deckhouse/virtualization/api => ../../dvp/virtualization/api
