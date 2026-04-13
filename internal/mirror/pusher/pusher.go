@@ -30,7 +30,6 @@ import (
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/errorutil"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
@@ -106,9 +105,6 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 			fmt.Sprintf("[%d / %d] Pushing %s", i+1, len(indexManifest.Manifests), imageReferenceString),
 			task.WithConstantRetries(pushRetryAttempts, pushRetryDelay, func(ctx context.Context) error {
 				if err := client.PushImage(ctx, tag, img); err != nil {
-					if errorutil.IsTrivyMediaTypeNotAllowedError(err) {
-						return fmt.Errorf(errorutil.CustomTrivyMediaTypesWarning)
-					}
 					return fmt.Errorf("write %s:%s to registry: %w", client.GetRegistry(), tag, err)
 				}
 				return nil
