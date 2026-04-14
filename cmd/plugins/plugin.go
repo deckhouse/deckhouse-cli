@@ -85,7 +85,7 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 			installed, err := pc.checkInstalled(commandName)
 			if err != nil {
 				fmt.Println("Error checking installed:", err)
-				return
+				os.Exit(1)
 			}
 
 			if !installed {
@@ -93,7 +93,7 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 				err = pc.InstallPlugin(cmd.Context(), commandName)
 				if err != nil {
 					fmt.Println("Error installing:", err)
-					return
+					os.Exit(1)
 				}
 				fmt.Println("Installed successfully")
 			}
@@ -103,7 +103,7 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 			absPath, err := filepath.Abs(pluginBinaryPath)
 			if err != nil {
 				logger.Warn("failed to compute absolute path", slog.String("error", err.Error()))
-				return
+				os.Exit(1)
 			}
 
 			logger.Debug("Executing plugin", slog.Any("args", args))
@@ -115,6 +115,7 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 			err = command.Run()
 			if err != nil {
 				logger.Warn("Failed to run plugin", slog.String("error", err.Error()))
+				os.Exit(1)
 			}
 		},
 	}
