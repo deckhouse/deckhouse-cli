@@ -51,7 +51,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	"github.com/deckhouse/deckhouse-cli/pkg/stub"
+	"github.com/deckhouse/deckhouse-cli/pkg/fake"
 )
 
 var ErrPullFailed = errors.New("pull failed, see the log for details")
@@ -258,7 +258,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 	c := pkgclient.NewFromOptions(repo, clientOpts...)
 
 	if os.Getenv("STUB_REGISTRY_CLIENT") == "true" {
-		c = stub.NewRegistryClientStub()
+		c = fake.NewRegistryClientStub()
 		// The stub's root URL already includes the edition path segment, so we
 		// must not add it again via registryservice.NewService.
 		edition = pkg.NoEdition

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package stub_test
+package fake_test
 
 import (
 	"archive/tar"
@@ -26,14 +26,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/stub"
+	"github.com/deckhouse/deckhouse-cli/pkg/fake"
 )
 
 // TestNewRegistryClientStub_ReleaseChannelTags verifies that the Deckhouse
 // stub exposes all five release channels and their version tags under the
 // "release-channel" repo.
 func TestNewRegistryClientStub_ReleaseChannelTags(t *testing.T) {
-	client := stub.NewRegistryClientStub()
+	client := fake.NewRegistryClientStub()
 	rcClient := client.WithSegment("release-channel")
 
 	tags, err := rcClient.ListTags(context.Background())
@@ -56,7 +56,7 @@ func TestNewRegistryClientStub_ReleaseChannelVersionJSON(t *testing.T) {
 		"rock-solid":   "v1.68.0",
 	}
 
-	client := stub.NewRegistryClientStub()
+	client := fake.NewRegistryClientStub()
 
 	for channel, wantVersion := range wantVersions {
 		t.Run(channel, func(t *testing.T) {
@@ -100,7 +100,7 @@ func TestNewRegistryClientStub_ReleaseChannelVersionJSON(t *testing.T) {
 
 // TestNewRegistryClientStub_RootTags verifies that root-level tags are present.
 func TestNewRegistryClientStub_RootTags(t *testing.T) {
-	client := stub.NewRegistryClientStub()
+	client := fake.NewRegistryClientStub()
 
 	tags, err := client.ListTags(context.Background())
 	require.NoError(t, err)
@@ -116,7 +116,7 @@ func TestNewRegistryClientStub_RootTags(t *testing.T) {
 
 // TestNewRegistryClientStub_InstallTags verifies the "install" repository.
 func TestNewRegistryClientStub_InstallTags(t *testing.T) {
-	client := stub.NewRegistryClientStub()
+	client := fake.NewRegistryClientStub()
 	installClient := client.WithSegment("install")
 
 	tags, err := installClient.ListTags(context.Background())
@@ -129,7 +129,7 @@ func TestNewRegistryClientStub_InstallTags(t *testing.T) {
 // TestNewRegistryClientStub_InstallStandaloneTags verifies the
 // "install-standalone" repository.
 func TestNewRegistryClientStub_InstallStandaloneTags(t *testing.T) {
-	client := stub.NewRegistryClientStub()
+	client := fake.NewRegistryClientStub()
 	saClient := client.WithSegment("install-standalone")
 
 	tags, err := saClient.ListTags(context.Background())
@@ -141,7 +141,7 @@ func TestNewRegistryClientStub_InstallStandaloneTags(t *testing.T) {
 // TestNewRegistryClientStub_PlatformImageHasVersionJSON verifies that root
 // images carry a version.json file.
 func TestNewRegistryClientStub_PlatformImageHasVersionJSON(t *testing.T) {
-	client := stub.NewRegistryClientStub()
+	client := fake.NewRegistryClientStub()
 
 	cfg, err := client.GetImageConfig(context.Background(), "v1.72.10")
 	require.NoError(t, err)
@@ -152,7 +152,7 @@ func TestNewRegistryClientStub_PlatformImageHasVersionJSON(t *testing.T) {
 
 // TestNewRegistryClientStub_CustomTag verifies that the non-semver "pr12345" tag exists.
 func TestNewRegistryClientStub_CustomTag(t *testing.T) {
-	client := stub.NewRegistryClientStub()
+	client := fake.NewRegistryClientStub()
 
 	err := client.CheckImageExists(context.Background(), "pr12345")
 	assert.NoError(t, err)
@@ -160,7 +160,7 @@ func TestNewRegistryClientStub_CustomTag(t *testing.T) {
 
 // TestNewRegistryClientStub_GetRegistry verifies the default registry path.
 func TestNewRegistryClientStub_GetRegistry(t *testing.T) {
-	client := stub.NewRegistryClientStub()
+	client := fake.NewRegistryClientStub()
 	// Default host set in deckhouse_stub.go:
 	// registry.deckhouse.ru/deckhouse/fe
 	assert.Equal(t, "registry.deckhouse.ru/deckhouse/fe", client.GetRegistry())

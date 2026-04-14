@@ -29,7 +29,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	"github.com/deckhouse/deckhouse-cli/pkg/stub"
+	"github.com/deckhouse/deckhouse-cli/pkg/fake"
 )
 
 func TestService_versionsToMirror(t *testing.T) {
@@ -141,7 +141,7 @@ func TestService_versionsToMirror(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create stub registry client
-			stubClient := stub.NewRegistryClientStub()
+			stubClient := fake.NewRegistryClientStub()
 
 			// Create logger
 			logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelInfo))
@@ -193,7 +193,7 @@ func TestService_versionsToMirror(t *testing.T) {
 
 func TestService_versionsToMirror_WithTargetTag(t *testing.T) {
 	// Create stub registry client
-	stubClient := stub.NewRegistryClientStub()
+	stubClient := fake.NewRegistryClientStub()
 
 	// Create logger
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelInfo))
@@ -234,7 +234,7 @@ func TestService_versionsToMirror_WithTargetTag(t *testing.T) {
 
 func TestService_versionsToMirror_CustomTagWithSemver(t *testing.T) {
 	// Create stub registry client
-	stubClient := stub.NewRegistryClientStub()
+	stubClient := fake.NewRegistryClientStub()
 
 	// Create logger
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelInfo))
@@ -272,7 +272,7 @@ func TestService_versionsToMirror_CustomTagWithSemver(t *testing.T) {
 
 func TestService_versionsToMirror_Deduplication(t *testing.T) {
 	// Create stub registry client
-	stubClient := stub.NewRegistryClientStub()
+	stubClient := fake.NewRegistryClientStub()
 
 	// Create logger
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelInfo))

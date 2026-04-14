@@ -15,7 +15,8 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	"github.com/deckhouse/deckhouse-cli/pkg/stub"
+	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
+	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 func newTestSecurityService(
@@ -36,11 +37,11 @@ func TestService_validateSecurityAccess(t *testing.T) {
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
 	t.Run("trivy-db tag 2 exists – no error", func(t *testing.T) {
-		reg := stub.NewRegistry("registry.example.com")
-		trivyImg := stub.NewImageBuilder().MustBuild()
+		reg := upfake.NewRegistry("registry.example.com")
+		trivyImg := upfake.NewImageBuilder().MustBuild()
 		reg.MustAddImage("security/trivy-db", "2", trivyImg)
 
-		stubClient := stub.NewClient(reg)
+		stubClient := pkgclient.Adapt(upfake.NewClient(reg))
 		securityClient := stubClient.WithSegment("security")
 		securityService := registryservice.NewSecurityServices("security", securityClient, logger)
 
@@ -50,8 +51,8 @@ func TestService_validateSecurityAccess(t *testing.T) {
 	})
 
 	t.Run("trivy-db tag 2 absent – no error (graceful skip)", func(t *testing.T) {
-		reg := stub.NewRegistry("registry.example.com")
-		stubClient := stub.NewClient(reg)
+		reg := upfake.NewRegistry("registry.example.com")
+		stubClient := pkgclient.Adapt(upfake.NewClient(reg))
 		securityClient := stubClient.WithSegment("security")
 		securityService := registryservice.NewSecurityServices("security", securityClient, logger)
 
@@ -67,8 +68,8 @@ func TestService_validateSecurityAccess_MultipleDatabases(t *testing.T) {
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
-	reg := stub.NewRegistry("registry.example.com")
-	trivyImg := stub.NewImageBuilder().MustBuild()
+	reg := upfake.NewRegistry("registry.example.com")
+	trivyImg := upfake.NewImageBuilder().MustBuild()
 
 	for _, dbSegment := range []string{
 		internal.SecurityTrivyDBSegment,
@@ -79,7 +80,7 @@ func TestService_validateSecurityAccess_MultipleDatabases(t *testing.T) {
 		reg.MustAddImage("security/"+dbSegment, "2", trivyImg)
 	}
 
-	stubClient := stub.NewClient(reg)
+	stubClient := pkgclient.Adapt(upfake.NewClient(reg))
 	securityClient := stubClient.WithSegment("security")
 	securityService := registryservice.NewSecurityServices("security", securityClient, logger)
 
@@ -107,11 +108,11 @@ func TestService_validateSecurityAccess_PerDatabase(t *testing.T) {
 
 	for _, db := range databases {
 		t.Run("database "+db.segment+" with tag 2 present", func(t *testing.T) {
-			reg := stub.NewRegistry("registry.example.com")
-			dbImg := stub.NewImageBuilder().MustBuild()
+			reg := upfake.NewRegistry("registry.example.com")
+			dbImg := upfake.NewImageBuilder().MustBuild()
 			reg.MustAddImage("security/"+db.segment, "2", dbImg)
 
-			stubClient := stub.NewClient(reg)
+			stubClient := pkgclient.Adapt(upfake.NewClient(reg))
 			securityClient := stubClient.WithSegment("security")
 			securityService := registryservice.NewSecurityServices("security", securityClient, logger)
 

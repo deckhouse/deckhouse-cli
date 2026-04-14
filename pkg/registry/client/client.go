@@ -21,6 +21,13 @@ func (a *adapter) WithSegment(segments ...string) localreg.Client {
 	return &adapter{a.Client.WithSegment(segments...)}
 }
 
+// Adapt wraps an upstream dkpreg.Client so that it satisfies the local
+// Client interface.  This is useful for fake/stub clients that return the
+// upstream interface type.
+func Adapt(c dkpreg.Client) localreg.Client {
+	return &adapter{c}
+}
+
 // NewFromOptions wraps regclient.New (the functional-options constructor)
 // and returns a value that fully satisfies the local Client interface.
 // Use this when building options via Option functions (e.g. regclient.WithAuth).

@@ -30,7 +30,9 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	localreg "github.com/deckhouse/deckhouse-cli/pkg/registry"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	"github.com/deckhouse/deckhouse-cli/pkg/stub"
+	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
+	localfake "github.com/deckhouse/deckhouse-cli/pkg/fake"
+	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 // newTestPlatformService is a test helper that builds a Service with only the
@@ -53,17 +55,17 @@ func newTestPlatformService(
 // ltsOnlyStub returns a stub registry that has only the LTS channel in
 // release-channel/, simulating CSE-edition registries lacking standard channels.
 func ltsOnlyStub() localreg.Client {
-	reg := stub.NewRegistry("registry.deckhouse.ru/deckhouse/fe")
-	img := stub.NewImageBuilder().
+	reg := upfake.NewRegistry("registry.deckhouse.ru/deckhouse/fe")
+	img := upfake.NewImageBuilder().
 		WithFile("version.json", `{"version":"v1.68.0"}`).
 		MustBuild()
 	reg.MustAddImage("release-channel", "lts", img)
-	return stub.NewClient(reg)
+	return pkgclient.Adapt(upfake.NewClient(reg))
 }
 
 // emptyStub returns a stub registry with no release channels at all.
 func emptyStub() localreg.Client {
-	return stub.NewClient(stub.NewRegistry("registry.deckhouse.ru/deckhouse/fe"))
+	return pkgclient.Adapt(upfake.NewClient(upfake.NewRegistry("registry.deckhouse.ru/deckhouse/fe")))
 }
 
 func TestService_validatePlatformAccess(t *testing.T) {
@@ -79,25 +81,25 @@ func TestService_validatePlatformAccess(t *testing.T) {
 	}{
 		{
 			name:       "no target tag defaults to stable channel which exists",
-			makeClient: stub.NewRegistryClientStub,
+			makeClient: localfake.NewRegistryClientStub,
 			targetTag:  "",
 			wantErr:    false,
 		},
 		{
 			name:       "explicit channel tag exists",
-			makeClient: stub.NewRegistryClientStub,
+			makeClient: localfake.NewRegistryClientStub,
 			targetTag:  "alpha",
 			wantErr:    false,
 		},
 		{
 			name:       "early-access channel exists",
-			makeClient: stub.NewRegistryClientStub,
+			makeClient: localfake.NewRegistryClientStub,
 			targetTag:  "early-access",
 			wantErr:    false,
 		},
 		{
 			name:       "rock-solid channel exists",
-			makeClient: stub.NewRegistryClientStub,
+			makeClient: localfake.NewRegistryClientStub,
 			targetTag:  "rock-solid",
 			wantErr:    false,
 		},
@@ -123,32 +125,32 @@ func TestService_validatePlatformAccess(t *testing.T) {
 		},
 		{
 			name:       "semver tag exists in root repository",
-			makeClient: stub.NewRegistryClientStub,
+			makeClient: localfake.NewRegistryClientStub,
 			targetTag:  "v1.72.10",
 			wantErr:    false,
 		},
 		{
 			name:       "another semver tag exists",
-			makeClient: stub.NewRegistryClientStub,
+			makeClient: localfake.NewRegistryClientStub,
 			targetTag:  "v1.69.0",
 			wantErr:    false,
 		},
 		{
 			name:        "semver tag not present in registry returns error",
-			makeClient:  stub.NewRegistryClientStub,
+			makeClient:  localfake.NewRegistryClientStub,
 			targetTag:   "v9.99.0",
 			wantErr:     true,
 			errContains: "v9.99.0",
 		},
 		{
 			name:       "custom non-channel tag exists in root repository",
-			makeClient: stub.NewRegistryClientStub,
+			makeClient: localfake.NewRegistryClientStub,
 			targetTag:  "pr12345",
 			wantErr:    false,
 		},
 		{
 			name:        "custom non-channel tag not present in registry returns error",
-			makeClient:  stub.NewRegistryClientStub,
+			makeClient:  localfake.NewRegistryClientStub,
 			targetTag:   "does-not-exist",
 			wantErr:     true,
 			errContains: "does-not-exist",
@@ -247,7 +249,7 @@ func TestService_findTagsToMirror(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := stub.NewRegistryClientStub()
+			client := localfake.NewRegistryClientStub()
 			svc := newTestPlatformService(client, tt.options, logger, userLogger)
 
 			versions, channels, err := svc.findTagsToMirror(context.Background())

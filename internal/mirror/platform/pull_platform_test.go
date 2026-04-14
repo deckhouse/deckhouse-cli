@@ -18,7 +18,9 @@ dkplog "github.com/deckhouse/deckhouse/pkg/log"
 "github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 localreg "github.com/deckhouse/deckhouse-cli/pkg/registry"
 registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-"github.com/deckhouse/deckhouse-cli/pkg/stub"
+upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
+	localfake "github.com/deckhouse/deckhouse-cli/pkg/fake"
+	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 // stubRootURL is the host used by NewRegistryClientStub.
@@ -49,7 +51,7 @@ userLogger *log.SLogger,
 // (version.json contains "suspend": true).
 func suspendedStub() localreg.Client {
 	// reuse the full stub but replace the alpha release-channel image
-	reg := stub.NewRegistry(stubRootURL)
+	reg := upfake.NewRegistry(stubRootURL)
 
 	// Standard channels — alpha is suspended.
 	channels := map[string]struct {
@@ -64,7 +66,7 @@ func suspendedStub() localreg.Client {
 	}
 	for ch, data := range channels {
 		content := fmt.Sprintf(`{"version":%q,"suspend":%v}`, data.version, data.suspend)
-		img := stub.NewImageBuilder().WithFile("version.json", content).MustBuild()
+		img := upfake.NewImageBuilder().WithFile("version.json", content).MustBuild()
 		reg.MustAddImage("release-channel", ch, img)
 	}
 
@@ -72,7 +74,7 @@ func suspendedStub() localreg.Client {
 	versionTags := []string{"alpha", "beta", "early-access", "stable", "rock-solid",
 		"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"}
 	for _, tag := range versionTags {
-		img := stub.NewImageBuilder().
+		img := upfake.NewImageBuilder().
 			WithFile("version.json", `{"version":"v1.72.10"}`).
 			WithFile("deckhouse/candi/images_digests.json", `{}`).
 			MustBuild()
@@ -80,7 +82,7 @@ func suspendedStub() localreg.Client {
 		reg.MustAddImage("install", tag, img)
 		reg.MustAddImage("install-standalone", tag, img)
 	}
-	return stub.NewClient(reg)
+	return pkgclient.Adapt(upfake.NewClient(reg))
 }
 
 // ---- validatePlatformAccess behaviour ----
@@ -100,7 +102,7 @@ func TestPullPlatform_ErrorWhenSemverTagMissingInRegistry(t *testing.T) {
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
-	svc := newDryRunService(stub.NewRegistryClientStub(), &Options{TargetTag: "v9.99.0"}, logger, userLogger)
+	svc := newDryRunService(localfake.NewRegistryClientStub(), &Options{TargetTag: "v9.99.0"}, logger, userLogger)
 	err := svc.PullPlatform(context.Background())
 
 	require.Error(t, err)
@@ -112,7 +114,7 @@ func TestPullPlatform_ErrorWhenCustomTagMissingInRegistry(t *testing.T) {
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
-	svc := newDryRunService(stub.NewRegistryClientStub(), &Options{TargetTag: "no-such-tag"}, logger, userLogger)
+	svc := newDryRunService(localfake.NewRegistryClientStub(), &Options{TargetTag: "no-such-tag"}, logger, userLogger)
 	err := svc.PullPlatform(context.Background())
 
 	require.Error(t, err)
@@ -151,7 +153,7 @@ func TestPullPlatform_DryRun_SemverTag_PopulatesDownloadList(t *testing.T) {
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
-	svc := newDryRunService(stub.NewRegistryClientStub(), &Options{TargetTag: "v1.69.0"}, logger, userLogger)
+	svc := newDryRunService(localfake.NewRegistryClientStub(), &Options{TargetTag: "v1.69.0"}, logger, userLogger)
 	err := svc.PullPlatform(context.Background())
 	require.NoError(t, err)
 
@@ -175,7 +177,7 @@ func TestPullPlatform_DryRun_AlphaVersionTag_MatchesAlphaChannel(t *testing.T) {
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
-	svc := newDryRunService(stub.NewRegistryClientStub(), &Options{TargetTag: "v1.72.10"}, logger, userLogger)
+	svc := newDryRunService(localfake.NewRegistryClientStub(), &Options{TargetTag: "v1.72.10"}, logger, userLogger)
 	err := svc.PullPlatform(context.Background())
 	require.NoError(t, err)
 
@@ -207,7 +209,7 @@ func TestPullPlatform_DryRun_ChannelTag_PopulatesVersionAndAlias(t *testing.T) {
 logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 userLogger := log.NewSLogger(slog.LevelWarn)
 
-svc := newDryRunService(stub.NewRegistryClientStub(), &Options{TargetTag: tt.channel}, logger, userLogger)
+svc := newDryRunService(localfake.NewRegistryClientStub(), &Options{TargetTag: tt.channel}, logger, userLogger)
 			err := svc.PullPlatform(context.Background())
 			require.NoError(t, err)
 
@@ -229,7 +231,7 @@ func TestPullPlatform_DryRun_CustomTag_OnlyThatTagInDownloadList(t *testing.T) {
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
-	svc := newDryRunService(stub.NewRegistryClientStub(), &Options{TargetTag: "pr12345"}, logger, userLogger)
+	svc := newDryRunService(localfake.NewRegistryClientStub(), &Options{TargetTag: "pr12345"}, logger, userLogger)
 	err := svc.PullPlatform(context.Background())
 	require.NoError(t, err)
 
@@ -250,7 +252,7 @@ func TestPullPlatform_DryRun_FullDiscovery_AllVersionsAndChannels(t *testing.T) 
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
-	svc := newDryRunService(stub.NewRegistryClientStub(), nil, logger, userLogger)
+	svc := newDryRunService(localfake.NewRegistryClientStub(), nil, logger, userLogger)
 	err := svc.PullPlatform(context.Background())
 	require.NoError(t, err)
 
@@ -286,7 +288,7 @@ func TestPullPlatform_DryRun_SinceVersion_FiltersOlderChannels(t *testing.T) {
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
 	since := semver.MustParse("1.70.0")
-	svc := newDryRunService(stub.NewRegistryClientStub(), &Options{SinceVersion: since}, logger, userLogger)
+	svc := newDryRunService(localfake.NewRegistryClientStub(), &Options{SinceVersion: since}, logger, userLogger)
 	err := svc.PullPlatform(context.Background())
 	require.NoError(t, err)
 
@@ -315,7 +317,7 @@ func TestPullPlatform_DryRun_SinceVersion_EqualToAlpha_OnlyAlpha(t *testing.T) {
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
 	since := semver.MustParse("1.72.10")
-	svc := newDryRunService(stub.NewRegistryClientStub(), &Options{SinceVersion: since}, logger, userLogger)
+	svc := newDryRunService(localfake.NewRegistryClientStub(), &Options{SinceVersion: since}, logger, userLogger)
 	err := svc.PullPlatform(context.Background())
 	require.NoError(t, err)
 
@@ -335,9 +337,9 @@ func TestPullPlatform_DryRun_LTSRegistry_WithSemverTargetTag(t *testing.T) {
 	// because access validation checks the tag directly (not via channels).
 	// However the stub's root repo has no tags so the check will fail.
 // Use a custom stub that has the LTS channel AND a semver tag in the root repo.
-reg := stub.NewRegistry(stubRootURL)
+reg := upfake.NewRegistry(stubRootURL)
 
-img := stub.NewImageBuilder().
+img := upfake.NewImageBuilder().
 WithFile("version.json", `{"version":"v1.68.0"}`).
 WithFile("deckhouse/candi/images_digests.json", `{}`).
 MustBuild()
@@ -346,7 +348,7 @@ reg.MustAddImage("", "v1.68.0", img)
 reg.MustAddImage("install", "v1.68.0", img)
 reg.MustAddImage("install-standalone", "v1.68.0", img)
 
-client := stub.NewClient(reg)
+client := pkgclient.Adapt(upfake.NewClient(reg))
 logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 userLogger := log.NewSLogger(slog.LevelWarn)
 
@@ -363,7 +365,7 @@ func TestPullPlatform_DryRun_FullDiscovery_ReleaseChannelListPopulated(t *testin
 logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 userLogger := log.NewSLogger(slog.LevelWarn)
 
-svc := newDryRunService(stub.NewRegistryClientStub(), nil, logger, userLogger)
+svc := newDryRunService(localfake.NewRegistryClientStub(), nil, logger, userLogger)
 err := svc.PullPlatform(context.Background())
 require.NoError(t, err)
 
@@ -386,7 +388,7 @@ func TestPullPlatform_DryRun_SemverTag_ReleaseChannelListContainsVersionAndChann
 logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 userLogger := log.NewSLogger(slog.LevelWarn)
 
-svc := newDryRunService(stub.NewRegistryClientStub(), &Options{TargetTag: "v1.69.0"}, logger, userLogger)
+svc := newDryRunService(localfake.NewRegistryClientStub(), &Options{TargetTag: "v1.69.0"}, logger, userLogger)
 err := svc.PullPlatform(context.Background())
 require.NoError(t, err)
 
@@ -402,7 +404,7 @@ func TestPullPlatform_DryRun_AllSemverTags_HaveInstallerEntries(t *testing.T) {
 logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 userLogger := log.NewSLogger(slog.LevelWarn)
 
-svc := newDryRunService(stub.NewRegistryClientStub(), nil, logger, userLogger)
+svc := newDryRunService(localfake.NewRegistryClientStub(), nil, logger, userLogger)
 err := svc.PullPlatform(context.Background())
 require.NoError(t, err)
 

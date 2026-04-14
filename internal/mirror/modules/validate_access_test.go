@@ -27,7 +27,8 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	"github.com/deckhouse/deckhouse-cli/pkg/stub"
+	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
+	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 func TestService_validateModulesAccess(t *testing.T) {
@@ -36,13 +37,13 @@ func TestService_validateModulesAccess(t *testing.T) {
 
 	t.Run("modules present in registry returns no error", func(t *testing.T) {
 		// Build a stub where the "modules" repository has module names as tags.
-		reg := stub.NewRegistry("registry.example.com")
-		placeholder := stub.NewImageBuilder().MustBuild()
+		reg := upfake.NewRegistry("registry.example.com")
+		placeholder := upfake.NewImageBuilder().MustBuild()
 		reg.MustAddImage("modules", "console", placeholder)
 		reg.MustAddImage("modules", "ingress-nginx", placeholder)
 		reg.MustAddImage("modules", "cert-manager", placeholder)
 
-		stubClient := stub.NewClient(reg)
+		stubClient := pkgclient.Adapt(upfake.NewClient(reg))
 		// Scope client to "modules" so that ListTags returns module names.
 		modulesClient := stubClient.WithSegment("modules")
 		modulesService := registryservice.NewModulesService(modulesClient, logger)
@@ -61,8 +62,8 @@ func TestService_validateModulesAccess(t *testing.T) {
 	t.Run("modules repository absent in registry returns no error and emits warning", func(t *testing.T) {
 		// Empty registry – the "modules" repo does not exist, so ListTags returns
 		// ErrImageNotFound which validateModulesAccess treats as a graceful skip.
-		reg := stub.NewRegistry("registry.example.com")
-		stubClient := stub.NewClient(reg)
+		reg := upfake.NewRegistry("registry.example.com")
+		stubClient := pkgclient.Adapt(upfake.NewClient(reg))
 		modulesClient := stubClient.WithSegment("modules")
 		modulesService := registryservice.NewModulesService(modulesClient, logger)
 
@@ -82,13 +83,13 @@ func TestService_validateModulesAccess_WithFilter(t *testing.T) {
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
-	reg := stub.NewRegistry("registry.example.com")
-	placeholder := stub.NewImageBuilder().MustBuild()
+	reg := upfake.NewRegistry("registry.example.com")
+	placeholder := upfake.NewImageBuilder().MustBuild()
 	reg.MustAddImage("modules", "console", placeholder)
 	reg.MustAddImage("modules", "ingress-nginx", placeholder)
 	reg.MustAddImage("modules", "sds-replicated-volume", placeholder)
 
-	stubClient := stub.NewClient(reg)
+	stubClient := pkgclient.Adapt(upfake.NewClient(reg))
 	modulesClient := stubClient.WithSegment("modules")
 	modulesService := registryservice.NewModulesService(modulesClient, logger)
 
@@ -141,11 +142,11 @@ func TestService_validateModulesAccess_Timeout(t *testing.T) {
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
-	reg := stub.NewRegistry("registry.example.com")
-	placeholder := stub.NewImageBuilder().MustBuild()
+	reg := upfake.NewRegistry("registry.example.com")
+	placeholder := upfake.NewImageBuilder().MustBuild()
 	reg.MustAddImage("modules", "console", placeholder)
 
-	stubClient := stub.NewClient(reg)
+	stubClient := pkgclient.Adapt(upfake.NewClient(reg))
 	modulesClient := stubClient.WithSegment("modules")
 	modulesService := registryservice.NewModulesService(modulesClient, logger)
 

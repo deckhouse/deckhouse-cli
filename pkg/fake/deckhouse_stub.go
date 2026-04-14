@@ -14,14 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package stub
+package fake
 
 import (
 	"fmt"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
+	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
+
 	localreg "github.com/deckhouse/deckhouse-cli/pkg/registry"
+	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 // defaultSource is the registry root used by NewRegistryClientStub.
@@ -63,7 +66,7 @@ const imagesDigestsJSON = `{}`
 //
 //   - "install" and "install-standalone" repositories: same tags as root.
 func NewRegistryClientStub() localreg.Client {
-	reg := NewRegistry(defaultSource)
+	reg := upfake.NewRegistry(defaultSource)
 
 	// ---- release-channel repository ----
 	for channel, version := range releaseChannelData {
@@ -98,14 +101,14 @@ func NewRegistryClientStub() localreg.Client {
 		reg.MustAddImage("install-standalone", rt.tag, img)
 	}
 
-	return NewClient(reg)
+	return pkgclient.Adapt(upfake.NewClient(reg))
 }
 
 // platformImage creates a stub v1.Image for the root (edition) repository
 // containing the files that the deckhouse platform service reads during
 // version discovery.
 func platformImage(version string) v1.Image {
-	return NewImageBuilder().
+	return upfake.NewImageBuilder().
 		WithFile("version.json", fmt.Sprintf(`{"version":%q}`, version)).
 		WithFile("changelog.yaml", changelogYAML).
 		WithFile("deckhouse/candi/images_digests.json", imagesDigestsJSON).
@@ -116,7 +119,7 @@ func platformImage(version string) v1.Image {
 // releaseChannelImage creates a stub v1.Image for the release-channel
 // repository containing version.json that DeckhouseReleaseService reads.
 func releaseChannelImage(version string) v1.Image {
-	return NewImageBuilder().
+	return upfake.NewImageBuilder().
 		WithFile("version.json", fmt.Sprintf(`{"version":%q}`, version)).
 		MustBuild()
 }

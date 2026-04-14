@@ -19,7 +19,9 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	localreg "github.com/deckhouse/deckhouse-cli/pkg/registry"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	"github.com/deckhouse/deckhouse-cli/pkg/stub"
+	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
+	localfake "github.com/deckhouse/deckhouse-cli/pkg/fake"
+	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 // pullStubRootURL matches the default host used by NewRegistryClientStub.
@@ -53,7 +55,7 @@ func newPullService(
 //   - security   ("security/trivy-db" repo, tag "2")
 //   - modules    ("modules" repo with two module names as tags)
 func fullStub() localreg.Client {
-	reg := stub.NewRegistry(pullStubRootURL)
+	reg := upfake.NewRegistry(pullStubRootURL)
 
 	// ---- platform: release-channel ----
 	channels := map[string]string{
@@ -64,7 +66,7 @@ func fullStub() localreg.Client {
 		"rock-solid":   "v1.68.0",
 	}
 	for ch, ver := range channels {
-		img := stub.NewImageBuilder().
+		img := upfake.NewImageBuilder().
 			WithFile("version.json", `{"version":"`+ver+`"}`).
 			MustBuild()
 		reg.MustAddImage("release-channel", ch, img)
@@ -74,7 +76,7 @@ func fullStub() localreg.Client {
 
 	// ---- platform: root + install + install-standalone ----
 	platformImg := func(ver string) v1.Image {
-		return stub.NewImageBuilder().
+		return upfake.NewImageBuilder().
 			WithFile("version.json", `{"version":"`+ver+`"}`).
 			WithFile("deckhouse/candi/images_digests.json", `{}`).
 			MustBuild()
@@ -92,21 +94,21 @@ func fullStub() localreg.Client {
 	}
 
 	// ---- installer: "installer" repo (used by Service.InstallerService) ----
-	installerImg := stub.NewImageBuilder().MustBuild()
+	installerImg := upfake.NewImageBuilder().MustBuild()
 	reg.MustAddImage("installer", "latest", installerImg)
 	reg.MustAddImage("installer", "v1.72.10", installerImg)
 	reg.MustAddImage("installer", "v1.69.0", installerImg)
 
 	// ---- security: trivy-db tag "2" ----
-	trivyImg := stub.NewImageBuilder().MustBuild()
+	trivyImg := upfake.NewImageBuilder().MustBuild()
 	reg.MustAddImage("security/trivy-db", "2", trivyImg)
 
 	// ---- modules: two module names as tags ----
-	modImg := stub.NewImageBuilder().MustBuild()
+	modImg := upfake.NewImageBuilder().MustBuild()
 	reg.MustAddImage("modules", "cert-manager", modImg)
 	reg.MustAddImage("modules", "ingress-nginx", modImg)
 
-	return stub.NewClient(reg)
+	return pkgclient.Adapt(upfake.NewClient(reg))
 }
 
 // ---------------------------------------------------------------------------
@@ -117,7 +119,7 @@ func fullStub() localreg.Client {
 // error wrapping "pull platform" when the registry is empty and SkipPlatform
 // is false.
 func TestPull_EmptyRegistry_ReturnsPlatformError(t *testing.T) {
-	emptyStub := stub.NewClient(stub.NewRegistry(pullStubRootURL))
+	emptyStub := pkgclient.Adapt(upfake.NewClient(upfake.NewRegistry(pullStubRootURL)))
 
 	svc := newPullService(t, emptyStub, "v1.69.0", &PullServiceOptions{
 		SkipSecurity:  true,
@@ -133,7 +135,7 @@ func TestPull_EmptyRegistry_ReturnsPlatformError(t *testing.T) {
 // TestPull_MissingTargetTag_ReturnsPlatformError verifies that Pull wraps a
 // platform error that names the missing tag.
 func TestPull_MissingTargetTag_ReturnsPlatformError(t *testing.T) {
-	svc := newPullService(t, stub.NewRegistryClientStub(), "v9.99.0", &PullServiceOptions{
+	svc := newPullService(t, localfake.NewRegistryClientStub(), "v9.99.0", &PullServiceOptions{
 		SkipSecurity:  true,
 		SkipModules:   true,
 		SkipInstaller: true,
@@ -149,18 +151,18 @@ func TestPull_MissingTargetTag_ReturnsPlatformError(t *testing.T) {
 // wrapping "suspended" when a release channel is suspended and IgnoreSuspend
 // is false.
 func TestPull_SuspendedChannel_ReturnsError(t *testing.T) {
-	reg := stub.NewRegistry(pullStubRootURL)
+	reg := upfake.NewRegistry(pullStubRootURL)
 	reg.MustAddImage("release-channel", "alpha",
-		stub.NewImageBuilder().
+		upfake.NewImageBuilder().
 			WithFile("version.json", `{"version":"v1.72.10","suspend":true}`).
 			MustBuild(),
 	)
 	for _, ch := range []string{"beta", "early-access", "stable", "rock-solid"} {
 		reg.MustAddImage("release-channel", ch,
-			stub.NewImageBuilder().WithFile("version.json", `{"version":"v1.69.0"}`).MustBuild(),
+			upfake.NewImageBuilder().WithFile("version.json", `{"version":"v1.69.0"}`).MustBuild(),
 		)
 	}
-	img := stub.NewImageBuilder().
+	img := upfake.NewImageBuilder().
 		WithFile("version.json", `{"version":"v1.72.10"}`).
 		WithFile("deckhouse/candi/images_digests.json", `{}`).
 		MustBuild()
@@ -170,7 +172,7 @@ func TestPull_SuspendedChannel_ReturnsError(t *testing.T) {
 		reg.MustAddImage("install-standalone", tag, img)
 	}
 
-	svc := newPullService(t, stub.NewClient(reg), "", &PullServiceOptions{
+	svc := newPullService(t, pkgclient.Adapt(upfake.NewClient(reg)), "", &PullServiceOptions{
 		SkipSecurity:  true,
 		SkipModules:   true,
 		SkipInstaller: true,
@@ -191,7 +193,7 @@ func TestPull_SuspendedChannel_ReturnsError(t *testing.T) {
 // default stub with a specific semver tag and security/modules/installer
 // skipped (those repos are absent from the default stub).
 func TestPull_DefaultStub_Succeeds(t *testing.T) {
-	svc := newPullService(t, stub.NewRegistryClientStub(), "v1.69.0", &PullServiceOptions{
+	svc := newPullService(t, localfake.NewRegistryClientStub(), "v1.69.0", &PullServiceOptions{
 		SkipSecurity:  true,
 		SkipModules:   true,
 		SkipInstaller: true,
@@ -206,7 +208,7 @@ func TestPull_AllChannelTags(t *testing.T) {
 	for _, ch := range []string{"alpha", "beta", "early-access", "stable", "rock-solid"} {
 		ch := ch
 		t.Run(ch, func(t *testing.T) {
-			svc := newPullService(t, stub.NewRegistryClientStub(), ch, &PullServiceOptions{
+			svc := newPullService(t, localfake.NewRegistryClientStub(), ch, &PullServiceOptions{
 				SkipSecurity:  true,
 				SkipModules:   true,
 				SkipInstaller: true,
@@ -219,7 +221,7 @@ func TestPull_AllChannelTags(t *testing.T) {
 // TestPull_EmptyTargetTag_FullDiscovery verifies full-discovery mode
 // (no TargetTag) returns nil.
 func TestPull_EmptyTargetTag_FullDiscovery(t *testing.T) {
-	svc := newPullService(t, stub.NewRegistryClientStub(), "", &PullServiceOptions{
+	svc := newPullService(t, localfake.NewRegistryClientStub(), "", &PullServiceOptions{
 		SkipSecurity:  true,
 		SkipModules:   true,
 		SkipInstaller: true,
@@ -231,7 +233,7 @@ func TestPull_EmptyTargetTag_FullDiscovery(t *testing.T) {
 // TestPull_IgnoreSuspend_AllowsSuspendedChannel verifies that
 // IgnoreSuspend=true makes Pull succeed even when a channel is suspended.
 func TestPull_IgnoreSuspend_AllowsSuspendedChannel(t *testing.T) {
-	reg := stub.NewRegistry(pullStubRootURL)
+	reg := upfake.NewRegistry(pullStubRootURL)
 	channelVersions := map[string]struct {
 		ver     string
 		suspend bool
@@ -247,12 +249,12 @@ func TestPull_IgnoreSuspend_AllowsSuspendedChannel(t *testing.T) {
 		if data.suspend {
 			content = `{"version":"` + data.ver + `","suspend":true}`
 		}
-		img := stub.NewImageBuilder().WithFile("version.json", content).MustBuild()
+		img := upfake.NewImageBuilder().WithFile("version.json", content).MustBuild()
 		reg.MustAddImage("release-channel", ch, img)
 		// Version-tagged release-channel images are required by non-DryRun full-discovery pull.
 		reg.MustAddImage("release-channel", data.ver, img)
 	}
-	img := stub.NewImageBuilder().
+	img := upfake.NewImageBuilder().
 		WithFile("version.json", `{"version":"v1.72.10"}`).
 		WithFile("deckhouse/candi/images_digests.json", `{}`).
 		MustBuild()
@@ -263,7 +265,7 @@ func TestPull_IgnoreSuspend_AllowsSuspendedChannel(t *testing.T) {
 		reg.MustAddImage("install-standalone", tag, img)
 	}
 
-	svc := newPullService(t, stub.NewClient(reg), "", &PullServiceOptions{
+	svc := newPullService(t, pkgclient.Adapt(upfake.NewClient(reg)), "", &PullServiceOptions{
 		SkipSecurity:  true,
 		SkipModules:   true,
 		SkipInstaller: true,
@@ -276,7 +278,7 @@ func TestPull_IgnoreSuspend_AllowsSuspendedChannel(t *testing.T) {
 // TestPull_SkipPlatform_AlwaysSucceeds verifies that SkipPlatform=true
 // makes Pull succeed even with an empty registry.
 func TestPull_SkipPlatform_AlwaysSucceeds(t *testing.T) {
-	emptyStub := stub.NewClient(stub.NewRegistry(pullStubRootURL))
+	emptyStub := pkgclient.Adapt(upfake.NewClient(upfake.NewRegistry(pullStubRootURL)))
 
 	svc := newPullService(t, emptyStub, "v1.69.0", &PullServiceOptions{
 		SkipPlatform:  true,
@@ -291,7 +293,7 @@ func TestPull_SkipPlatform_AlwaysSucceeds(t *testing.T) {
 // TestPull_SkipAll_EmptyRegistry verifies Pull succeeds when every
 // service is skipped, regardless of registry contents.
 func TestPull_SkipAll_EmptyRegistry(t *testing.T) {
-	emptyStub := stub.NewClient(stub.NewRegistry(pullStubRootURL))
+	emptyStub := pkgclient.Adapt(upfake.NewClient(upfake.NewRegistry(pullStubRootURL)))
 
 	svc := newPullService(t, emptyStub, "", &PullServiceOptions{
 		SkipPlatform:  true,
@@ -308,7 +310,7 @@ func TestPull_SkipAll_EmptyRegistry(t *testing.T) {
 func TestPull_InstallerGracefulSkip(t *testing.T) {
 	// The default stub has no "installer" repo; installer access validation
 	// returns ErrImageNotFound which PullInstaller treats as a graceful skip.
-	svc := newPullService(t, stub.NewRegistryClientStub(), "v1.69.0", &PullServiceOptions{
+	svc := newPullService(t, localfake.NewRegistryClientStub(), "v1.69.0", &PullServiceOptions{
 		SkipSecurity:  true,
 		SkipModules:   true,
 		SkipInstaller: false,
@@ -321,7 +323,7 @@ func TestPull_InstallerGracefulSkip(t *testing.T) {
 // absent Pull still succeeds (validateSecurityAccess gracefully skips on
 // ErrImageNotFound).
 func TestPull_SecurityGracefulSkip(t *testing.T) {
-	svc := newPullService(t, stub.NewRegistryClientStub(), "v1.69.0", &PullServiceOptions{
+	svc := newPullService(t, localfake.NewRegistryClientStub(), "v1.69.0", &PullServiceOptions{
 		SkipPlatform:  true,
 		SkipModules:   true,
 		SkipInstaller: true,
@@ -334,7 +336,7 @@ func TestPull_SecurityGracefulSkip(t *testing.T) {
 // TestPull_ModulesGracefulSkip verifies that when no modules exist in
 // the registry Pull still succeeds (PullModules logs a warning and returns nil).
 func TestPull_ModulesGracefulSkip(t *testing.T) {
-	svc := newPullService(t, stub.NewRegistryClientStub(), "v1.69.0", &PullServiceOptions{
+	svc := newPullService(t, localfake.NewRegistryClientStub(), "v1.69.0", &PullServiceOptions{
 		SkipPlatform:  true,
 		SkipSecurity:  true,
 		SkipInstaller: true,
@@ -347,7 +349,7 @@ func TestPull_ModulesGracefulSkip(t *testing.T) {
 // TestPull_SkipVexImages_DoesNotError verifies the SkipVexImages flag
 // does not cause Pull to fail.
 func TestPull_SkipVexImages_DoesNotError(t *testing.T) {
-	svc := newPullService(t, stub.NewRegistryClientStub(), "v1.69.0", &PullServiceOptions{
+	svc := newPullService(t, localfake.NewRegistryClientStub(), "v1.69.0", &PullServiceOptions{
 		SkipVexImages: true,
 		SkipSecurity:  true,
 		SkipModules:   true,
@@ -384,8 +386,8 @@ func TestPull_FullStub_FullDiscovery(t *testing.T) {
 // TestPull_FullStub_CustomTag verifies Pull succeeds with a custom
 // (non-semver, non-channel) tag when that tag exists in the registry.
 func TestPull_FullStub_CustomTag(t *testing.T) {
-	reg := stub.NewRegistry(pullStubRootURL)
-	img := stub.NewImageBuilder().
+	reg := upfake.NewRegistry(pullStubRootURL)
+	img := upfake.NewImageBuilder().
 		WithFile("version.json", `{"version":"v1.72.10"}`).
 		WithFile("deckhouse/candi/images_digests.json", `{}`).
 		MustBuild()
@@ -393,7 +395,7 @@ func TestPull_FullStub_CustomTag(t *testing.T) {
 	reg.MustAddImage("install", "pr12345", img)
 	reg.MustAddImage("install-standalone", "pr12345", img)
 
-	svc := newPullService(t, stub.NewClient(reg), "pr12345", &PullServiceOptions{
+	svc := newPullService(t, pkgclient.Adapt(upfake.NewClient(reg)), "pr12345", &PullServiceOptions{
 		SkipSecurity:  true,
 		SkipModules:   true,
 		SkipInstaller: true,
