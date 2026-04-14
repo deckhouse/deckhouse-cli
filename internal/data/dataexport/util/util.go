@@ -273,7 +273,7 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 		}
 		podURL = deObj.Status.PublicURL
 		if !strings.HasPrefix(podURL, "http") {
-			podURL += "https://"
+			podURL = "https://" + podURL
 		}
 	case deObj.Status.URL != "":
 		podURL = deObj.Status.URL
