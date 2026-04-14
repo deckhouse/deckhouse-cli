@@ -41,6 +41,7 @@ var (
 	CreateDataExporterIfNeededFunc = CreateDataExporterIfNeeded
 )
 
+// var instead of const to allow test override.
 var maxRetryAttempts = 60
 
 func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
