@@ -125,9 +125,11 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 		}
 		// Every fifth attempt we output it to the terminal so that the user can see the error.
 		if i > 0 && i%5 == 0 {
+			remaining := time.Duration((maxRetryAttempts-i)*3) * time.Second
 			log.Info("Still waiting for DataExport to be ready",
 				slog.String("name", deName),
 				slog.String("status", returnErr.Error()),
+				slog.String("timeout_in", remaining.String()),
 				slog.Int("attempt", i))
 		}
 		time.Sleep(time.Second * 3)
