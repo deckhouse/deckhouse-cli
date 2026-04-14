@@ -120,7 +120,8 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 			break
 		}
 		if i > maxRetryAttempts {
-			return nil, returnErr
+			return nil, fmt.Errorf("%w\n\nTo inspect DataExport status, run:\n  d8 k -n %s get de %s -o yaml",
+				returnErr, namespace, deName)
 		}
 		// Every fifth attempt we output it to the terminal so that the user can see the error.
 		if i > 0 && i%5 == 0 {
