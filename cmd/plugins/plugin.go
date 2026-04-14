@@ -81,19 +81,17 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 			// init plugin services for subcommands after flags are parsed
 			pc.InitPluginServices()
 		},
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			installed, err := pc.checkInstalled(commandName)
 			if err != nil {
-				fmt.Println("Error checking installed:", err)
-				return
+				return fmt.Errorf("failed to check installed: %w", err)
 			}
 
 			if !installed {
 				fmt.Println("Not installed, installing...")
 				err = pc.InstallPlugin(cmd.Context(), commandName)
 				if err != nil {
-					fmt.Println("Error installing:", err)
-					return
+					return fmt.Errorf("failed to install plugin: %w", err)
 				}
 				fmt.Println("Installed successfully")
 			}
@@ -102,8 +100,7 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 			pluginBinaryPath := path.Join(pluginPath, "current")
 			absPath, err := filepath.Abs(pluginBinaryPath)
 			if err != nil {
-				logger.Warn("failed to compute absolute path", slog.String("error", err.Error()))
-				return
+				return fmt.Errorf("failed to compute absolute path: %w", err)
 			}
 
 			logger.Debug("Executing plugin", slog.Any("args", args))
@@ -114,8 +111,10 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 
 			err = command.Run()
 			if err != nil {
-				logger.Warn("Failed to run plugin", slog.String("error", err.Error()))
+				return fmt.Errorf("failed to run plugin: %w", err)
 			}
+
+			return nil
 		},
 	}
 
