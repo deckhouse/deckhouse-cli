@@ -2,7 +2,7 @@
 
 package mock
 
-//go:generate minimock -i github.com/deckhouse/deckhouse-cli/pkg/registry.Client -o registry_client_mock.go -n RegistryClientMock -p mock
+//go:generate minimock -i github.com/deckhouse/deckhouse/pkg/registry.Client -o registry_client_mock.go -n RegistryClientMock -p mock
 
 import (
 	"context"
@@ -10,13 +10,12 @@ import (
 	mm_atomic "sync/atomic"
 	mm_time "time"
 
-	mm_client "github.com/deckhouse/deckhouse-cli/pkg/registry"
 	"github.com/deckhouse/deckhouse/pkg/registry"
 	"github.com/gojuno/minimock/v3"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
-// RegistryClientMock implements mm_client.Client
+// RegistryClientMock implements registry.Client
 type RegistryClientMock struct {
 	t          minimock.Tester
 	finishOnce sync.Once
@@ -98,7 +97,7 @@ type RegistryClientMock struct {
 	beforeTagImageCounter uint64
 	TagImageMock          mRegistryClientMockTagImage
 
-	funcWithSegment          func(segments ...string) (c1 mm_client.Client)
+	funcWithSegment          func(segments ...string) (c1 registry.Client)
 	funcWithSegmentOrigin    string
 	inspectFuncWithSegment   func(segments ...string)
 	afterWithSegmentCounter  uint64
@@ -106,7 +105,7 @@ type RegistryClientMock struct {
 	WithSegmentMock          mRegistryClientMockWithSegment
 }
 
-// NewRegistryClientMock returns a mock for mm_client.Client
+// NewRegistryClientMock returns a mock for registry.Client
 func NewRegistryClientMock(t minimock.Tester) *RegistryClientMock {
 	m := &RegistryClientMock{t: t}
 
@@ -366,7 +365,7 @@ func (mmCheckImageExists *mRegistryClientMockCheckImageExists) invocationsDone()
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// CheckImageExists implements mm_client.Client
+// CheckImageExists implements registry.Client
 func (mmCheckImageExists *RegistryClientMock) CheckImageExists(ctx context.Context, tag string) (err error) {
 	mm_atomic.AddUint64(&mmCheckImageExists.beforeCheckImageExistsCounter, 1)
 	defer mm_atomic.AddUint64(&mmCheckImageExists.afterCheckImageExistsCounter, 1)
@@ -708,7 +707,7 @@ func (mmDeleteTag *mRegistryClientMockDeleteTag) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// DeleteTag implements mm_client.Client
+// DeleteTag implements registry.Client
 func (mmDeleteTag *RegistryClientMock) DeleteTag(ctx context.Context, tag string) (err error) {
 	mm_atomic.AddUint64(&mmDeleteTag.beforeDeleteTagCounter, 1)
 	defer mm_atomic.AddUint64(&mmDeleteTag.afterDeleteTagCounter, 1)
@@ -1051,7 +1050,7 @@ func (mmGetDigest *mRegistryClientMockGetDigest) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// GetDigest implements mm_client.Client
+// GetDigest implements registry.Client
 func (mmGetDigest *RegistryClientMock) GetDigest(ctx context.Context, tag string) (hp1 *v1.Hash, err error) {
 	mm_atomic.AddUint64(&mmGetDigest.beforeGetDigestCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetDigest.afterGetDigestCounter, 1)
@@ -1420,7 +1419,7 @@ func (mmGetImage *mRegistryClientMockGetImage) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// GetImage implements mm_client.Client
+// GetImage implements registry.Client
 func (mmGetImage *RegistryClientMock) GetImage(ctx context.Context, tag string, opts ...registry.ImageGetOption) (i1 registry.Image, err error) {
 	mm_atomic.AddUint64(&mmGetImage.beforeGetImageCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetImage.afterGetImageCounter, 1)
@@ -1768,7 +1767,7 @@ func (mmGetImageConfig *mRegistryClientMockGetImageConfig) invocationsDone() boo
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// GetImageConfig implements mm_client.Client
+// GetImageConfig implements registry.Client
 func (mmGetImageConfig *RegistryClientMock) GetImageConfig(ctx context.Context, tag string) (cp1 *v1.ConfigFile, err error) {
 	mm_atomic.AddUint64(&mmGetImageConfig.beforeGetImageConfigCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetImageConfig.afterGetImageConfigCounter, 1)
@@ -2111,7 +2110,7 @@ func (mmGetManifest *mRegistryClientMockGetManifest) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// GetManifest implements mm_client.Client
+// GetManifest implements registry.Client
 func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, tag string) (m1 registry.ManifestResult, err error) {
 	mm_atomic.AddUint64(&mmGetManifest.beforeGetManifestCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetManifest.afterGetManifestCounter, 1)
@@ -2349,7 +2348,7 @@ func (mmGetRegistry *mRegistryClientMockGetRegistry) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// GetRegistry implements mm_client.Client
+// GetRegistry implements registry.Client
 func (mmGetRegistry *RegistryClientMock) GetRegistry() (s1 string) {
 	mm_atomic.AddUint64(&mmGetRegistry.beforeGetRegistryCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetRegistry.afterGetRegistryCounter, 1)
@@ -2640,7 +2639,7 @@ func (mmListRepositories *mRegistryClientMockListRepositories) invocationsDone()
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// ListRepositories implements mm_client.Client
+// ListRepositories implements registry.Client
 func (mmListRepositories *RegistryClientMock) ListRepositories(ctx context.Context, opts ...registry.ListRepositoriesOption) (sa1 []string, err error) {
 	mm_atomic.AddUint64(&mmListRepositories.beforeListRepositoriesCounter, 1)
 	defer mm_atomic.AddUint64(&mmListRepositories.afterListRepositoriesCounter, 1)
@@ -2983,7 +2982,7 @@ func (mmListTags *mRegistryClientMockListTags) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// ListTags implements mm_client.Client
+// ListTags implements registry.Client
 func (mmListTags *RegistryClientMock) ListTags(ctx context.Context, opts ...registry.ListTagsOption) (sa1 []string, err error) {
 	mm_atomic.AddUint64(&mmListTags.beforeListTagsCounter, 1)
 	defer mm_atomic.AddUint64(&mmListTags.afterListTagsCounter, 1)
@@ -3377,7 +3376,7 @@ func (mmPushImage *mRegistryClientMockPushImage) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// PushImage implements mm_client.Client
+// PushImage implements registry.Client
 func (mmPushImage *RegistryClientMock) PushImage(ctx context.Context, tag string, img v1.Image, opts ...registry.ImagePushOption) (err error) {
 	mm_atomic.AddUint64(&mmPushImage.beforePushImageCounter, 1)
 	defer mm_atomic.AddUint64(&mmPushImage.afterPushImageCounter, 1)
@@ -3755,7 +3754,7 @@ func (mmTagImage *mRegistryClientMockTagImage) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// TagImage implements mm_client.Client
+// TagImage implements registry.Client
 func (mmTagImage *RegistryClientMock) TagImage(ctx context.Context, sourceTag string, destTag string) (err error) {
 	mm_atomic.AddUint64(&mmTagImage.beforeTagImageCounter, 1)
 	defer mm_atomic.AddUint64(&mmTagImage.afterTagImageCounter, 1)
@@ -3926,7 +3925,7 @@ type RegistryClientMockWithSegmentParamPtrs struct {
 
 // RegistryClientMockWithSegmentResults contains results of the Client.WithSegment
 type RegistryClientMockWithSegmentResults struct {
-	c1 mm_client.Client
+	c1 registry.Client
 }
 
 // RegistryClientMockWithSegmentOrigins contains origins of expectations of the Client.WithSegment
@@ -4005,7 +4004,7 @@ func (mmWithSegment *mRegistryClientMockWithSegment) Inspect(f func(segments ...
 }
 
 // Return sets up results that will be returned by Client.WithSegment
-func (mmWithSegment *mRegistryClientMockWithSegment) Return(c1 mm_client.Client) *RegistryClientMock {
+func (mmWithSegment *mRegistryClientMockWithSegment) Return(c1 registry.Client) *RegistryClientMock {
 	if mmWithSegment.mock.funcWithSegment != nil {
 		mmWithSegment.mock.t.Fatalf("RegistryClientMock.WithSegment mock is already set by Set")
 	}
@@ -4019,7 +4018,7 @@ func (mmWithSegment *mRegistryClientMockWithSegment) Return(c1 mm_client.Client)
 }
 
 // Set uses given function f to mock the Client.WithSegment method
-func (mmWithSegment *mRegistryClientMockWithSegment) Set(f func(segments ...string) (c1 mm_client.Client)) *RegistryClientMock {
+func (mmWithSegment *mRegistryClientMockWithSegment) Set(f func(segments ...string) (c1 registry.Client)) *RegistryClientMock {
 	if mmWithSegment.defaultExpectation != nil {
 		mmWithSegment.mock.t.Fatalf("Default expectation is already set for the Client.WithSegment method")
 	}
@@ -4050,7 +4049,7 @@ func (mmWithSegment *mRegistryClientMockWithSegment) When(segments ...string) *R
 }
 
 // Then sets up Client.WithSegment return parameters for the expectation previously defined by the When method
-func (e *RegistryClientMockWithSegmentExpectation) Then(c1 mm_client.Client) *RegistryClientMock {
+func (e *RegistryClientMockWithSegmentExpectation) Then(c1 registry.Client) *RegistryClientMock {
 	e.results = &RegistryClientMockWithSegmentResults{c1}
 	return e.mock
 }
@@ -4076,8 +4075,8 @@ func (mmWithSegment *mRegistryClientMockWithSegment) invocationsDone() bool {
 	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
 }
 
-// WithSegment implements mm_client.Client
-func (mmWithSegment *RegistryClientMock) WithSegment(segments ...string) (c1 mm_client.Client) {
+// WithSegment implements registry.Client
+func (mmWithSegment *RegistryClientMock) WithSegment(segments ...string) (c1 registry.Client) {
 	mm_atomic.AddUint64(&mmWithSegment.beforeWithSegmentCounter, 1)
 	defer mm_atomic.AddUint64(&mmWithSegment.afterWithSegmentCounter, 1)
 

@@ -23,7 +23,7 @@ import (
 
 	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 
-	localreg "github.com/deckhouse/deckhouse-cli/pkg/registry"
+	localreg "github.com/deckhouse/deckhouse/pkg/registry"
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 

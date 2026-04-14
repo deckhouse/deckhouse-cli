@@ -22,7 +22,7 @@ import (
 	"github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
-	client "github.com/deckhouse/deckhouse-cli/pkg/registry"
+	client "github.com/deckhouse/deckhouse/pkg/registry"
 )
 
 const (

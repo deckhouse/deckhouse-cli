@@ -17,7 +17,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	localreg "github.com/deckhouse/deckhouse-cli/pkg/registry"
+	localreg "github.com/deckhouse/deckhouse/pkg/registry"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 	localfake "github.com/deckhouse/deckhouse-cli/pkg/fake"

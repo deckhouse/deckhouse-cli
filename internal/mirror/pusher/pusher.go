@@ -33,7 +33,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
-	client "github.com/deckhouse/deckhouse-cli/pkg/registry"
+	client "github.com/deckhouse/deckhouse/pkg/registry"
 )
 
 const (
