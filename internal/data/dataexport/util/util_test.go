@@ -177,8 +177,8 @@ func TestGetDataExportWithRestart_ErrorMessages(t *testing.T) {
 			wantErrNotContains: "empty PublicURL",
 		},
 		{
-			// Ready=True but PublicURL not yet generated — correct "empty PublicURL" error.
-			name: "Ready=True, publish=true, PublicURL empty: error mentions PublicURL",
+			// Ready=True but PublicURL not yet generated — race between controllers.
+			name: "Ready=True, publish=true, PublicURL empty: error says waiting for public URL",
 			de: &v1alpha1.DataExport{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-de", Namespace: "test-ns"},
 				Spec:       v1alpha1.DataexportSpec{Publish: true},
@@ -189,12 +189,13 @@ func TestGetDataExportWithRestart_ErrorMessages(t *testing.T) {
 					},
 				},
 			},
-			wantErr:         true,
-			wantErrContains: "empty PublicURL",
+			wantErr:            true,
+			wantErrContains:    "waiting for public URL",
+			wantErrNotContains: "empty PublicURL",
 		},
 		{
-			// URL empty and publish=true: "has no URL" takes priority over "empty PublicURL".
-			name: "URL empty with publish=true: error is about missing URL, not PublicURL",
+			// URL empty and publish=true: "waiting for internal URL" takes priority over public URL check.
+			name: "URL empty with publish=true: error is about waiting for internal URL, not PublicURL",
 			de: &v1alpha1.DataExport{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-de", Namespace: "test-ns"},
 				Spec:       v1alpha1.DataexportSpec{Publish: true},
@@ -205,8 +206,23 @@ func TestGetDataExportWithRestart_ErrorMessages(t *testing.T) {
 				},
 			},
 			wantErr:            true,
-			wantErrContains:    "has no URL",
+			wantErrContains:    "waiting for internal URL",
 			wantErrNotContains: "empty PublicURL",
+		},
+		{
+			// Timeout: after maxRetryAttempts=0 the error should include the d8 k recommendation.
+			name: "timeout: error contains d8 k recommendation",
+			de: &v1alpha1.DataExport{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-de", Namespace: "test-ns"},
+				Spec:       v1alpha1.DataexportSpec{Publish: false},
+				Status: v1alpha1.DataExportStatus{
+					Conditions: []metav1.Condition{
+						readyCond(metav1.ConditionFalse, "Pending", "Started"),
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "d8 k -n",
 		},
 		{
 			// Happy path: both internal URL and public URL are present.
