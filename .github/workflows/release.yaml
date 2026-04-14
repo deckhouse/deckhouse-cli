@@ -100,6 +100,7 @@ jobs:
     runs-on: [self-hosted, regular]
     container:
       image: ubuntu:22.04
+    name: Test
     steps:
       - name: Install dependency for linux-amd64 dist
         env:
