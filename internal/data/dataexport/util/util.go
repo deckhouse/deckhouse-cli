@@ -108,9 +108,11 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 		if returnErr == nil {
 			switch {
 			case deObj.Status.URL == "":
-				returnErr = fmt.Errorf("DataExport %s/%s has no URL", deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
+				returnErr = fmt.Errorf("DataExport %s/%s: waiting for internal URL to be assigned by controller",
+					deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
 			case deObj.Spec.Publish && deObj.Status.PublicURL == "":
-				returnErr = fmt.Errorf("DataExport %s/%s has empty PublicURL", deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
+				returnErr = fmt.Errorf("DataExport %s/%s: waiting for public URL to be created by controller",
+					deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
 			}
 		}
 
