@@ -22,8 +22,9 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
 	client "github.com/deckhouse/deckhouse/pkg/registry"
+
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 

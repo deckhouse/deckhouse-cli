@@ -20,9 +20,9 @@ import (
 	"strings"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
+	client "github.com/deckhouse/deckhouse/pkg/registry"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
-	client "github.com/deckhouse/deckhouse/pkg/registry"
 )
 
 const (

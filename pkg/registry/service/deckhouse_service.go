@@ -25,7 +25,6 @@ import (
 	"log/slog"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
-
 	client "github.com/deckhouse/deckhouse/pkg/registry"
 )
 

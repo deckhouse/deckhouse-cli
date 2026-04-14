@@ -31,13 +31,13 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/random"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	client "github.com/deckhouse/deckhouse/pkg/registry"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/pusher"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	client "github.com/deckhouse/deckhouse/pkg/registry"
 )
 
 const (

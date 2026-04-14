@@ -34,11 +34,11 @@ import (
 	"sigs.k8s.io/yaml"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	client "github.com/deckhouse/deckhouse/pkg/registry"
 
 	"github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	client "github.com/deckhouse/deckhouse/pkg/registry"
 )
 
 type PluginsCommand struct {

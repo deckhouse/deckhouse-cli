@@ -21,9 +21,9 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
+	localreg "github.com/deckhouse/deckhouse/pkg/registry"
 	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 
-	localreg "github.com/deckhouse/deckhouse/pkg/registry"
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 

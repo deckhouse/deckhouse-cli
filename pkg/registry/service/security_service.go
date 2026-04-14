@@ -2,7 +2,6 @@ package service
 
 import (
 	"github.com/deckhouse/deckhouse/pkg/log"
-
 	client "github.com/deckhouse/deckhouse/pkg/registry"
 )
 
