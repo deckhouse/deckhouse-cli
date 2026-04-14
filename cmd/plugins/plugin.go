@@ -77,6 +77,7 @@ func NewPluginCommand(commandName string, description string, aliases []string, 
 		Aliases:            aliases,
 		Long:               description,
 		DisableFlagParsing: true,
+		SilenceUsage:       true,
 		PreRun: func(_ *cobra.Command, _ []string) {
 			// init plugin services for subcommands after flags are parsed
 			pc.InitPluginServices()
