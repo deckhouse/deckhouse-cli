@@ -34,7 +34,6 @@ import (
 	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
-	localclient "github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 const (
@@ -43,12 +42,12 @@ const (
 
 // PluginService provides high-level operations for plugin management
 type PluginService struct {
-	client localclient.Client
+	client registry.Client
 	log    *log.Logger
 }
 
 // NewPluginService creates a new plugin service
-func NewPluginService(client localclient.Client, logger *log.Logger) *PluginService {
+func NewPluginService(client registry.Client, logger *log.Logger) *PluginService {
 	return &PluginService{
 		client: client,
 		log:    logger,

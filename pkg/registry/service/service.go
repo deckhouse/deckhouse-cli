@@ -20,9 +20,9 @@ import (
 	"strings"
 
 	"github.com/deckhouse/deckhouse/pkg/log"
+	client "github.com/deckhouse/deckhouse/pkg/registry"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
-	client "github.com/deckhouse/deckhouse-cli/pkg/registry"
 )
 
 const (
@@ -47,19 +47,28 @@ type Service struct {
 }
 
 // NewService creates a new registry service with the given client and logger
-func NewService(client client.Client, edition pkg.Edition, logger *log.Logger) *Service {
+func NewService(c client.Client, edition pkg.Edition, logger *log.Logger) *Service {
 	s := &Service{
-		client: client,
+		client: c,
 		logger: logger,
 	}
 
-	s.modulesService = NewModulesService(client.WithSegment(edition.String(), moduleSegment), logger.Named("modules"))
-	s.deckhouseService = NewDeckhouseService(client.WithSegment(edition.String()), logger.Named("deckhouse"))
-	s.security = NewSecurityServices(securityServiceName, client.WithSegment(edition.String(), securitySegment), logger.Named("security"))
+	// base is scoped to the edition sub-path when an edition is specified.
+	// When edition is NoEdition the client already points at the correct root.
+	var base client.Client
+	if edition == pkg.NoEdition {
+		base = c
+	} else {
+		base = c.WithSegment(edition.String())
+	}
+
+	s.modulesService = NewModulesService(base.WithSegment(moduleSegment), logger.Named("modules"))
+	s.deckhouseService = NewDeckhouseService(base, logger.Named("deckhouse"))
+	s.security = NewSecurityServices(securityServiceName, base.WithSegment(securitySegment), logger.Named("security"))
 
 	// services that are not scoped by edition
-	s.pluginService = NewPluginService(client.WithSegment(pluginSegment), logger.Named("plugins"))
-	s.installer = NewInstallerServices(installerServiceName, client.WithSegment("installer"), logger.Named("installer"))
+	s.pluginService = NewPluginService(c.WithSegment(pluginSegment), logger.Named("plugins"))
+	s.installer = NewInstallerServices(installerServiceName, c.WithSegment("installer"), logger.Named("installer"))
 
 	return s
 }

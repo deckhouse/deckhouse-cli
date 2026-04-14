@@ -30,7 +30,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	"github.com/deckhouse/deckhouse-cli/pkg/stub"
+	"github.com/deckhouse/deckhouse-cli/pkg/fake"
 )
 
 // TestDryRun_NoBundleFilesWritten verifies that PullSecurity in dry-run mode does
@@ -39,7 +39,7 @@ func TestDryRun_NoBundleFilesWritten(t *testing.T) {
 	workingDir := t.TempDir()
 	bundleDir := t.TempDir()
 
-	stubClient := stub.NewRegistryClientStub()
+	stubClient := fake.NewRegistryClientStub()
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
@@ -71,7 +71,7 @@ func TestDryRun_WorkingDirHasLayouts(t *testing.T) {
 	workingDir := t.TempDir()
 	bundleDir := t.TempDir()
 
-	stubClient := stub.NewRegistryClientStub()
+	stubClient := fake.NewRegistryClientStub()
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 

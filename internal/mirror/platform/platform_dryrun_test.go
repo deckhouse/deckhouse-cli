@@ -28,33 +28,23 @@ import (
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
-	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	"github.com/deckhouse/deckhouse-cli/pkg/stub"
+	"github.com/deckhouse/deckhouse-cli/pkg/fake"
 )
 
 // TestDryRun_NoBundleFilesWritten verifies that PullPlatform in dry-run mode does
-// not write any files to the bundle directory. Temporary OCI layout data may only
-// land under the working/tmp directory.
+// not write any files to the bundle directory.
 func TestDryRun_NoBundleFilesWritten(t *testing.T) {
-	workingDir := t.TempDir()
 	bundleDir := t.TempDir() // must stay empty after dry-run
 
-	stubClient := stub.NewRegistryClientStub()
+	stubClient := fake.NewRegistryClientStub()
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
-	regSvc := registryservice.NewService(stubClient, pkg.FEEdition, logger)
-
-	svc := NewService(
-		regSvc,
-		workingDir,
-		&Options{
-			TargetTag: "v1.69.0",
-			BundleDir: bundleDir,
-			DryRun:    true,
-		},
+	svc := newTestPlatformService(
+		stubClient,
+		&Options{TargetTag: "v1.69.0", BundleDir: bundleDir, DryRun: true},
 		logger,
 		userLogger,
 	)
@@ -68,40 +58,34 @@ func TestDryRun_NoBundleFilesWritten(t *testing.T) {
 	assert.Empty(t, entries, "dry-run must not write any files to the bundle directory; found: %v", entries)
 }
 
-// TestDryRun_InstallerPulledToTmpDir verifies that in dry-run mode the installer
-// image IS pulled into the working (tmp) directory so that images_digests.json can
-// be read from it. This produces the complete list of images that would be
-// downloaded in a real run.
-func TestDryRun_InstallerPulledToTmpDir(t *testing.T) {
+// TestDryRun_NoOCILayoutCreated verifies that in dry-run mode no OCI image layout
+// directories are created under the working directory. images_digests.json is
+// streamed directly from the remote registry without writing anything to disk.
+func TestDryRun_NoOCILayoutCreated(t *testing.T) {
 	workingDir := t.TempDir()
 	bundleDir := t.TempDir()
 
-	stubClient := stub.NewRegistryClientStub()
+	stubClient := fake.NewRegistryClientStub()
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
-	regSvc := registryservice.NewService(stubClient, pkg.FEEdition, logger)
-
-	svc := NewService(
-		regSvc,
-		workingDir,
-		&Options{
-			TargetTag: "v1.69.0",
-			BundleDir: bundleDir,
-			DryRun:    true,
-		},
-		logger,
-		userLogger,
-	)
+	deckhouseSvc := registryservice.NewDeckhouseService(stubClient, logger)
+	svc := &Service{
+		deckhouseService: deckhouseSvc,
+		downloadList:     NewImageDownloadList(stubClient.GetRegistry()),
+		options:          &Options{TargetTag: "v1.69.0", BundleDir: bundleDir, DryRun: true},
+		logger:           logger,
+		userLogger:       userLogger,
+	}
 
 	err := svc.PullPlatform(context.Background())
 	require.NoError(t, err)
 
-	// In optimized dry-run, no OCI layout is created - images_digests.json is
-	// streamed directly from the remote registry via ExtractFileFromImage.
+	// No OCI layout directories should be created.
 	installerLayoutDir := filepath.Join(workingDir, "platform", "install")
 	_, statErr := os.Stat(installerLayoutDir)
-	assert.ErrorIs(t, statErr, os.ErrNotExist, "installer OCI layout must NOT be created in dry-run; dir: %s", installerLayoutDir)
+	assert.ErrorIs(t, statErr, os.ErrNotExist,
+		"installer OCI layout must NOT be created in dry-run")
 
 	// bundleDir must remain empty
 	entries, err := os.ReadDir(bundleDir)

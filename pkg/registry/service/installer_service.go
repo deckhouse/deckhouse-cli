@@ -2,8 +2,7 @@ package service
 
 import (
 	"github.com/deckhouse/deckhouse/pkg/log"
-
-	client "github.com/deckhouse/deckhouse-cli/pkg/registry"
+	client "github.com/deckhouse/deckhouse/pkg/registry"
 )
 
 type InstallerServices struct {
