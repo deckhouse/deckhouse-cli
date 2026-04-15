@@ -39,14 +39,14 @@ import (
 )
 
 const (
-	annotationKey             = "d8-migration"
-	annotationKeyToRemove     = "d8-migration-"
-	defaultKubectlAs          = "system:serviceaccount:d8-system:deckhouse"
-	switchAccount             = "system:serviceaccount:d8-multitenancy-manager:multitenancy-manager"
-	legacyFailedAttemptsFile  = "/tmp/failed_annotations.txt"
-	legacyErrorLogFile        = "/tmp/failed_errors.txt"
-	legacySkippedObjectsFile  = "/tmp/skipped_objects.txt"
-	runTimestampFormat        = "20060102T150405Z"
+	annotationKey            = "d8-migration"
+	annotationKeyToRemove    = "d8-migration-"
+	defaultKubectlAs         = "system:serviceaccount:d8-system:deckhouse"
+	switchAccount            = "system:serviceaccount:d8-multitenancy-manager:multitenancy-manager"
+	legacyFailedAttemptsFile = "/tmp/failed_annotations.txt"
+	legacyErrorLogFile       = "/tmp/failed_errors.txt"
+	legacySkippedObjectsFile = "/tmp/skipped_objects.txt"
+	runTimestampFormat       = "20060102T150405Z"
 )
 
 var runStateMu sync.RWMutex
@@ -265,7 +265,8 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 	}
 
 	var objects map[string]ObjectRef
-	if config.Object != "" && !config.RetryFailed {
+	switch {
+	case config.Object != "" && !config.RetryFailed:
 		objects, err = collectSingleObject(discoveryClient, dynamicClient, config.Object, config.LogLevel)
 		if err != nil {
 			tracef("failed to collect specified object %q: %v", config.Object, err)
@@ -277,7 +278,7 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 			return nil
 		}
 		color.Cyan("\nCollected one object: %s\n", config.Object)
-	} else if config.RetryFailed {
+	case config.RetryFailed:
 		color.Cyan("Retrying failed annotations from previous runs...\n")
 		objects, err = loadFailedObjects()
 		if err != nil {
@@ -298,7 +299,7 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 			}
 		}
 		color.Cyan("Loaded %d objects for retry from %s.\n", len(objects), getLegacyRetryFilePath())
-	} else {
+	default:
 		objects, err = collectAllObjects(discoveryClient, dynamicClient, config.LogLevel)
 		if err != nil {
 			tracef("failed to collect objects: %v", err)
@@ -330,11 +331,7 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 	timestamp := time.Now().Unix()
 	unsupportedTypes := make(map[string]bool)
 
-	err = annotateObjects(dynamicClient, switchDynamicClient, objects, timestamp, unsupportedTypes, config.LogLevel)
-	if err != nil {
-		tracef("annotateObjects failed: %v", err)
-		return err
-	}
+	annotateObjects(dynamicClient, switchDynamicClient, objects, timestamp, unsupportedTypes, config.LogLevel)
 
 	// Check if there were any failed annotations
 	checkFailedAnnotations()
@@ -516,7 +513,7 @@ func annotateObjects(
 	timestamp int64,
 	unsupportedTypes map[string]bool,
 	logLevel string,
-) error {
+) {
 	currentObject := 0
 	totalObjects := len(objects)
 
@@ -647,7 +644,6 @@ func annotateObjects(
 	}
 
 	fmt.Println()
-	return nil
 }
 
 func addAnnotation(client dynamic.ResourceInterface, name, key, value, logLevel string) error {
@@ -919,16 +915,16 @@ func formatServerErrorDetails(err error) string {
 	return fmt.Sprintf("%s (status: code=%d, reason=%s, message=%q)", err.Error(), status.Code, status.Reason, status.Message)
 }
 
-func parseObjectIdentifier(objectIdentifier string) (namespace string, name string, kind string, err error) {
+func parseObjectIdentifier(objectIdentifier string) (string, string, string, error) {
 	trimmedIdentifier := strings.TrimSpace(objectIdentifier)
 	parts := strings.Split(trimmedIdentifier, "/")
 	if len(parts) != 3 {
 		return "", "", "", fmt.Errorf("invalid object format: expected <namespace>/<name>/<kind>")
 	}
 
-	namespace = strings.TrimSpace(parts[0])
-	name = strings.TrimSpace(parts[1])
-	kind = strings.TrimSpace(parts[2])
+	namespace := strings.TrimSpace(parts[0])
+	name := strings.TrimSpace(parts[1])
+	kind := strings.TrimSpace(parts[2])
 	if namespace == "" || name == "" || kind == "" {
 		return "", "", "", fmt.Errorf("invalid object format: namespace, name and kind must be non-empty")
 	}

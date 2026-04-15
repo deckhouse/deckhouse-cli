@@ -362,8 +362,7 @@ func TestAnnotateObjects_UnsupportedType(t *testing.T) {
 	}
 
 	// Should skip unsupported types
-	err := annotateObjects(dynamicClient, dynamicClient, objects, 1234567890, unsupportedTypes, "DEBUG")
-	require.NoError(t, err)
+	annotateObjects(dynamicClient, dynamicClient, objects, 1234567890, unsupportedTypes, "DEBUG")
 
 	// Verify object was not modified
 	resourceClient := dynamicClient.Resource(gvr).Namespace("default")
@@ -466,8 +465,7 @@ func TestAnnotateObjects_ErrorRecording(t *testing.T) {
 	defer setCurrentRunState(nil)
 
 	unsupportedTypes := make(map[string]bool)
-	err := annotateObjects(dynamicClient, dynamicClient, objects, 1234567890, unsupportedTypes, "DEBUG")
-	require.NoError(t, err)
+	annotateObjects(dynamicClient, dynamicClient, objects, 1234567890, unsupportedTypes, "DEBUG")
 
 	// NotFound errors are classified as skipped and should be written to skipped file.
 	skippedData, err := os.ReadFile(runSkippedFile)
