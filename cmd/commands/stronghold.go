@@ -33,5 +33,9 @@ func NewStrongholdCommand() *cobra.Command {
 		},
 	}
 
+	for _, sub := range StrongholdSubcommands() {
+		strongholdCmd.AddCommand(sub)
+	}
+
 	return strongholdCmd
 }
