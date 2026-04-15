@@ -41,9 +41,8 @@ var (
 	CreateDataExporterIfNeededFunc = CreateDataExporterIfNeeded
 )
 
-const (
-	maxRetryAttempts = 60
-)
+// var instead of const to allow test override.
+var maxRetryAttempts = 60
 
 func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
 	deObj := &v1alpha1.DataExport{}
@@ -107,23 +106,31 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 			}
 		}
 		// check DataExport Url
-		if returnErr == nil && deObj.Status.URL == "" {
-			returnErr = fmt.Errorf("DataExport %s/%s has no URL", deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
-		} else if deObj.Spec.Publish && deObj.Status.PublicURL == "" {
-			returnErr = fmt.Errorf("DataExport %s/%s has empty PublicURL", deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
+		if returnErr == nil {
+			switch {
+			case deObj.Status.URL == "":
+				returnErr = fmt.Errorf("DataExport %s/%s: waiting for internal URL to be assigned by controller",
+					deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
+			case deObj.Spec.Publish && deObj.Status.PublicURL == "":
+				returnErr = fmt.Errorf("DataExport %s/%s: waiting for public URL to be created by controller",
+					deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
+			}
 		}
 
 		if returnErr == nil {
 			break
 		}
 		if i > maxRetryAttempts {
-			return nil, returnErr
+			return nil, fmt.Errorf("%w\n\nTo inspect DataExport status, run:\n  d8 k -n %s get de %s -o yaml",
+				returnErr, namespace, deName)
 		}
 		// Every fifth attempt we output it to the terminal so that the user can see the error.
 		if i > 0 && i%5 == 0 {
+			remaining := time.Duration((maxRetryAttempts-i)*3) * time.Second
 			log.Info("Still waiting for DataExport to be ready",
 				slog.String("name", deName),
 				slog.String("status", returnErr.Error()),
+				slog.String("timeout_in", remaining.String()),
 				slog.Int("attempt", i))
 		}
 		time.Sleep(time.Second * 3)
@@ -262,12 +269,9 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 
 	switch {
 	case public:
-		if deObj.Status.PublicURL == "" {
-			return "", "", "", fmt.Errorf("empty PublicURL")
-		}
 		podURL = deObj.Status.PublicURL
 		if !strings.HasPrefix(podURL, "http") {
-			podURL += "https://"
+			podURL = "https://" + podURL
 		}
 	case deObj.Status.URL != "":
 		podURL = deObj.Status.URL
