@@ -57,4 +57,10 @@ func addFlags(flags *pflag.FlagSet) {
 		"kubernetes-admin@kubernetes",
 		"The name of the kubeconfig context to use.",
 	)
+
+	flags.String(
+		"object",
+		"",
+		"Scan only a specific object in format <namespace>/<name>/<kind>. Use 'clusterwide' namespace for cluster-scoped resources.",
+	)
 }

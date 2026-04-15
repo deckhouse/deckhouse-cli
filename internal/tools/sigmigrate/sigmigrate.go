@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fatih/color"
@@ -38,14 +39,134 @@ import (
 )
 
 const (
-	annotationKey         = "d8-migration"
-	annotationKeyToRemove = "d8-migration-"
-	defaultKubectlAs      = "system:serviceaccount:d8-system:deckhouse"
-	switchAccount         = "system:serviceaccount:d8-multitenancy-manager:multitenancy-manager"
-	failedAttemptsFile    = "/tmp/failed_annotations.txt"
-	errorLogFile          = "/tmp/failed_errors.txt"
-	skippedObjectsFile    = "/tmp/skipped_objects.txt"
+	annotationKey             = "d8-migration"
+	annotationKeyToRemove     = "d8-migration-"
+	defaultKubectlAs          = "system:serviceaccount:d8-system:deckhouse"
+	switchAccount             = "system:serviceaccount:d8-multitenancy-manager:multitenancy-manager"
+	legacyFailedAttemptsFile  = "/tmp/failed_annotations.txt"
+	legacyErrorLogFile        = "/tmp/failed_errors.txt"
+	legacySkippedObjectsFile  = "/tmp/skipped_objects.txt"
+	runTimestampFormat        = "20060102T150405Z"
 )
+
+var runStateMu sync.RWMutex
+
+var currentRunState *sigMigrateRunState
+
+// sigMigrateRunState stores paths and resources for one command run.
+type sigMigrateRunState struct {
+	RunID                 string
+	FailedAttemptsFile    string
+	ErrorLogFile          string
+	SkippedObjectsFile    string
+	TraceLogFile          string
+	LegacyFailedRetryFile string
+	traceFile             *os.File
+}
+
+func newSigMigrateRunState(now time.Time) *sigMigrateRunState {
+	runID := now.UTC().Format(runTimestampFormat)
+
+	return &sigMigrateRunState{
+		RunID:                 runID,
+		FailedAttemptsFile:    fmt.Sprintf("/tmp/failed_annotations_%s.txt", runID),
+		ErrorLogFile:          fmt.Sprintf("/tmp/failed_errors_%s.txt", runID),
+		SkippedObjectsFile:    fmt.Sprintf("/tmp/skipped_objects_%s.txt", runID),
+		TraceLogFile:          fmt.Sprintf("/tmp/sigmigrate_trace_%s.log", runID),
+		LegacyFailedRetryFile: legacyFailedAttemptsFile,
+	}
+}
+
+func setCurrentRunState(state *sigMigrateRunState) {
+	runStateMu.Lock()
+	defer runStateMu.Unlock()
+	currentRunState = state
+}
+
+func getCurrentRunState() *sigMigrateRunState {
+	runStateMu.RLock()
+	defer runStateMu.RUnlock()
+
+	if currentRunState == nil {
+		return &sigMigrateRunState{
+			FailedAttemptsFile:    legacyFailedAttemptsFile,
+			ErrorLogFile:          legacyErrorLogFile,
+			SkippedObjectsFile:    legacySkippedObjectsFile,
+			LegacyFailedRetryFile: legacyFailedAttemptsFile,
+		}
+	}
+
+	return currentRunState
+}
+
+func getFailedAttemptsFilePath() string {
+	return getCurrentRunState().FailedAttemptsFile
+}
+
+func getErrorLogFilePath() string {
+	return getCurrentRunState().ErrorLogFile
+}
+
+func getSkippedObjectsFilePath() string {
+	return getCurrentRunState().SkippedObjectsFile
+}
+
+func getLegacyRetryFilePath() string {
+	return getCurrentRunState().LegacyFailedRetryFile
+}
+
+func tracef(format string, args ...interface{}) {
+	state := getCurrentRunState()
+	if state.traceFile == nil {
+		return
+	}
+
+	message := fmt.Sprintf(format, args...)
+	if _, err := fmt.Fprintf(state.traceFile, "%s TRACE %s\n", time.Now().UTC().Format(time.RFC3339Nano), message); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to write trace log file %s: %v\n", state.TraceLogFile, err)
+	}
+}
+
+func syncLegacyRetryFile() error {
+	state := getCurrentRunState()
+	srcFile := state.FailedAttemptsFile
+	dstFile := state.LegacyFailedRetryFile
+	if srcFile == "" || dstFile == "" || srcFile == dstFile {
+		return nil
+	}
+
+	data, err := os.ReadFile(srcFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			data = []byte{}
+		} else {
+			return fmt.Errorf("failed to read source retry file %s: %w", srcFile, err)
+		}
+	}
+
+	if err := os.WriteFile(dstFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write legacy retry file %s: %w", dstFile, err)
+	}
+
+	tracef("synced retry compatibility file: %s -> %s", srcFile, dstFile)
+	return nil
+}
+
+func truncateFile(path string) {
+	if err := os.WriteFile(path, []byte{}, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to truncate %s: %v\n", path, err)
+		tracef("failed to truncate file %s: %v", path, err)
+		return
+	}
+	tracef("truncated file %s", path)
+}
+
+var switchAccountRetryErrorPhrases = []string{
+	"denied request: failed expression: request.userInfo.username",
+	"is forbidden: ValidatingAdmissionPolicy 'd8-multitenancy-manager'",
+}
+
+const requestedResourceNotFoundPhrase = "the server could not find the requested resource"
 
 type ObjectRef struct {
 	Namespace string
@@ -60,6 +181,7 @@ type SigMigrateConfig struct {
 	LogLevel    string
 	Kubeconfig  string
 	Context     string
+	Object      string
 }
 
 func SigMigrate(cmd *cobra.Command, _ []string) error {
@@ -91,8 +213,39 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to get context flag: %w", err)
 	}
 
+	config.Object, err = cmd.Flags().GetString("object")
+	if err != nil {
+		return fmt.Errorf("failed to get object flag: %w", err)
+	}
+
+	runState := newSigMigrateRunState(time.Now())
+	traceFile, traceOpenErr := os.OpenFile(runState.TraceLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if traceOpenErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to open trace log file %s: %v\n", runState.TraceLogFile, traceOpenErr)
+	} else {
+		runState.traceFile = traceFile
+	}
+	setCurrentRunState(runState)
+	defer func() {
+		if runState.traceFile != nil {
+			_ = runState.traceFile.Sync()
+			_ = runState.traceFile.Close()
+		}
+		setCurrentRunState(nil)
+	}()
+	defer func() {
+		if syncErr := syncLegacyRetryFile(); syncErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to sync legacy retry file: %v\n", syncErr)
+		}
+	}()
+
+	tracef("sig-migrate started: retry=%t, object=%q, log-level=%s", config.RetryFailed, config.Object, config.LogLevel)
+	tracef("run artifacts: failed=%s, errors=%s, skipped=%s, trace=%s", getFailedAttemptsFilePath(), getErrorLogFilePath(), getSkippedObjectsFilePath(), runState.TraceLogFile)
+	tracef("legacy retry compatibility file: %s", getLegacyRetryFilePath())
+
 	restConfig, _, err := utilk8s.SetupK8sClientSet(config.Kubeconfig, config.Context)
 	if err != nil {
+		tracef("failed to setup Kubernetes client: %v", err)
 		return fmt.Errorf("failed to setup Kubernetes client: %w", err)
 	}
 
@@ -101,29 +254,54 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
 	if err != nil {
+		tracef("failed to create discovery client: %v", err)
 		return fmt.Errorf("failed to create discovery client: %w", err)
 	}
 
 	dynamicClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
+		tracef("failed to create dynamic client: %v", err)
 		return fmt.Errorf("failed to create dynamic client: %w", err)
 	}
 
 	var objects map[string]ObjectRef
-	if config.RetryFailed {
+	if config.Object != "" && !config.RetryFailed {
+		objects, err = collectSingleObject(discoveryClient, dynamicClient, config.Object, config.LogLevel)
+		if err != nil {
+			tracef("failed to collect specified object %q: %v", config.Object, err)
+			return fmt.Errorf("failed to collect specified object: %w", err)
+		}
+		if len(objects) == 0 {
+			color.Red("Specified object not found: %s", config.Object)
+			tracef("specified object not found: %q", config.Object)
+			return nil
+		}
+		color.Cyan("\nCollected one object: %s\n", config.Object)
+	} else if config.RetryFailed {
 		color.Cyan("Retrying failed annotations from previous runs...\n")
 		objects, err = loadFailedObjects()
 		if err != nil {
+			tracef("failed to load failed objects from %s: %v", getLegacyRetryFilePath(), err)
 			return fmt.Errorf("failed to load failed objects: %w", err)
 		}
 		if len(objects) == 0 {
 			color.Red("No valid objects found in retry list. Exiting.")
+			tracef("retry list is empty: %s", getLegacyRetryFilePath())
 			return nil
 		}
-		color.Cyan("Loaded %d objects for retry from %s.\n", len(objects), failedAttemptsFile)
+		if config.Object != "" {
+			objects = filterObjectsByIdentifier(objects, config.Object)
+			if len(objects) == 0 {
+				color.Red("Specified object not found in retry list: %s", config.Object)
+				tracef("specified object not found in retry list: %q", config.Object)
+				return nil
+			}
+		}
+		color.Cyan("Loaded %d objects for retry from %s.\n", len(objects), getLegacyRetryFilePath())
 	} else {
 		objects, err = collectAllObjects(discoveryClient, dynamicClient, config.LogLevel)
 		if err != nil {
+			tracef("failed to collect objects: %v", err)
 			return fmt.Errorf("failed to collect objects: %w", err)
 		}
 		color.Cyan("\nTotal objects collected: %d\n", len(objects))
@@ -131,19 +309,21 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 
 	if len(objects) == 0 {
 		color.Red("No objects available for annotation. Exiting.")
+		tracef("no objects available for annotation")
 		return nil
 	}
 
-	// Clear failed attempts files
-	_ = os.WriteFile(failedAttemptsFile, []byte{}, 0644)
-	_ = os.WriteFile(errorLogFile, []byte{}, 0644)
-	_ = os.WriteFile(skippedObjectsFile, []byte{}, 0644)
+	// Clear run-scoped files before writing fresh run data.
+	truncateFile(getFailedAttemptsFilePath())
+	truncateFile(getErrorLogFilePath())
+	truncateFile(getSkippedObjectsFilePath())
 
 	// Create switch account config for retry
 	switchRestConfig := rest.CopyConfig(restConfig)
 	switchRestConfig.Impersonate.UserName = switchAccount
 	switchDynamicClient, err := dynamic.NewForConfig(switchRestConfig)
 	if err != nil {
+		tracef("failed to create switch dynamic client: %v", err)
 		return fmt.Errorf("failed to create switch dynamic client: %w", err)
 	}
 
@@ -152,11 +332,13 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 
 	err = annotateObjects(dynamicClient, switchDynamicClient, objects, timestamp, unsupportedTypes, config.LogLevel)
 	if err != nil {
+		tracef("annotateObjects failed: %v", err)
 		return err
 	}
 
 	// Check if there were any failed annotations
 	checkFailedAnnotations()
+	tracef("sig-migrate completed")
 
 	return nil
 }
@@ -167,6 +349,7 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 	// Get all API groups first (similar to kubectl api-resources)
 	apiGroupList, err := discoveryClient.ServerGroups()
 	if err != nil {
+		tracef("failed to discover API groups: %v", err)
 		return nil, fmt.Errorf("failed to discover API groups: %w", err)
 	}
 
@@ -191,6 +374,7 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 				if logLevel == "TRACE" {
 					fmt.Printf("Warning: failed to get resources for %s: %v\n", version.GroupVersion, err)
 				}
+				tracef("failed to get resources for %s: %v", version.GroupVersion, err)
 				continue
 			}
 
@@ -268,6 +452,7 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 			if logLevel == "TRACE" {
 				fmt.Printf("Error listing %s: %v\n", gvr.String(), err)
 			}
+			tracef("error listing %s: %v", gvr.String(), err)
 			continue
 		}
 
@@ -304,6 +489,7 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 			if logLevel == "TRACE" {
 				fmt.Printf("Error listing %s: %v\n", gvr.String(), err)
 			}
+			tracef("error listing %s: %v", gvr.String(), err)
 			continue
 		}
 
@@ -352,6 +538,7 @@ func annotateObjects(
 		if logLevel == "TRACE" {
 			color.Cyan("\n[TRACE] Processing object: Kind=%s, Namespace=%s, Name=%s, GVR=%s\n", obj.Kind, obj.Namespace, obj.Name, obj.GVR.String())
 		}
+		tracef("processing object kind=%s namespace=%s name=%s gvr=%s", obj.Kind, obj.Namespace, obj.Name, obj.GVR.String())
 
 		resourceClient := dynamicClient.Resource(obj.GVR)
 		var objClient dynamic.ResourceInterface
@@ -369,8 +556,9 @@ func annotateObjects(
 			// First, check for permission denied - try with different service account
 			// This should be checked BEFORE MethodNotSupported, as permission errors
 			// can sometimes be reported as "method not allowed"
-			if strings.Contains(errStr, "denied request: failed expression: request.userInfo.username") {
+			if shouldRetryWithSwitchAccount(errStr) {
 				color.Yellow("\nRetrying with different service account: %s for %s/%s/%s\n", switchAccount, obj.Kind, obj.Namespace, obj.Name)
+				tracef("retrying with switch account %s for %s/%s/%s", switchAccount, obj.Kind, obj.Namespace, obj.Name)
 				switchResourceClient := switchDynamicClient.Resource(obj.GVR)
 				var switchObjClient dynamic.ResourceInterface
 				if obj.Namespace == "clusterwide" {
@@ -386,6 +574,7 @@ func annotateObjects(
 						if logLevel == "TRACE" {
 							color.Cyan("\n[TRACE] MethodNotSupported error after switching account: %v\n", err)
 						}
+						tracef("method not supported after switch account for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
 						unsupportedTypes[obj.Kind] = true
 						color.Yellow("\nAdding %s to unsupported annotation types due to MethodNotSupported (after trying switch account).\n", obj.Kind)
 						recordSkippedObject(obj, "MethodNotSupported", fmt.Sprintf("After switching to account %s: %v", switchAccount, err))
@@ -393,6 +582,7 @@ func annotateObjects(
 					}
 					color.Red("\nFailed to add annotation after switching accounts for %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
 					color.Yellow("Retry Details: %v\n", err)
+					tracef("failed to add annotation after switch account for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
 					recordFailure(obj, err.Error())
 					continue
 				}
@@ -413,26 +603,26 @@ func annotateObjects(
 						color.Cyan("[TRACE] Status message: %s\n", statusErr.Status().Message)
 					}
 				}
+				tracef("method not supported for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
 				unsupportedTypes[obj.Kind] = true
 				color.Yellow("\nAdding %s to unsupported annotation types due to MethodNotSupported.\n", obj.Kind)
 				recordSkippedObject(obj, "MethodNotSupported", fmt.Sprintf("Error: %v", err))
 				continue
 			}
 
-			// Record all other errors (excluding "Not found" - object was deleted, no need to retry)
-			isNotFound := errors.IsNotFound(err) || strings.Contains(errStr, "Not found") || strings.Contains(errStr, "not found")
+			// Record all other errors (excluding not-found cases - skip retry for these)
+			isNotFound := errors.IsNotFound(err) || strings.Contains(strings.ToLower(errStr), "not found")
 
 			if isNotFound {
-				// Object not found - might have been deleted, skip recording as there's no point in retrying
-				if logLevel == "DEBUG" || logLevel == "TRACE" {
-					color.Yellow("\nObject not found (may have been deleted): %s/%s/%s - skipping\n", obj.Kind, obj.Namespace, obj.Name)
-				}
-				// Don't record to failed_annotations.txt - object doesn't exist anymore
-				recordSkippedObject(obj, "NotFound", fmt.Sprintf("Object was deleted or does not exist: %v", err))
+				skipReason, skipDetails := classifyNotFoundError(err)
+				color.Yellow("\nSkipping %s/%s/%s: %s\n", obj.Kind, obj.Namespace, obj.Name, skipDetails)
+				tracef("skipping object %s/%s/%s: reason=%s details=%s", obj.Kind, obj.Namespace, obj.Name, skipReason, skipDetails)
+				recordSkippedObject(obj, skipReason, skipDetails)
 			} else {
 				// Other errors - definitely record them
 				color.Red("\nFailed to add annotation to %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
 				color.Yellow("Details: %v\n", err)
+				tracef("failed to add annotation for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
 				recordFailure(obj, errStr)
 			}
 			continue
@@ -449,6 +639,7 @@ func annotateObjects(
 				if !strings.Contains(errStr, "Not found") && !strings.Contains(errStr, "not found") {
 					color.Red("\nFailed to remove annotation from %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
 					color.Yellow("Details: %v\n", err)
+					tracef("failed to remove annotation for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
 					recordFailure(obj, errStr)
 				}
 			}
@@ -465,6 +656,7 @@ func addAnnotation(client dynamic.ResourceInterface, name, key, value, logLevel 
 		if logLevel == "TRACE" {
 			color.Cyan("\n[TRACE] Get failed for %s: %v\n", name, err)
 		}
+		tracef("get failed for %s: %s", name, formatServerErrorDetails(err))
 		return err
 	}
 
@@ -472,6 +664,7 @@ func addAnnotation(client dynamic.ResourceInterface, name, key, value, logLevel 
 		color.Cyan("\n[TRACE] Running annotation command: add %s=%s to %s\n", key, value, name)
 		color.Cyan("[TRACE] Object UID: %s, ResourceVersion: %s\n", obj.GetUID(), obj.GetResourceVersion())
 	}
+	tracef("add annotation key=%s value=%s object=%s uid=%s rv=%s", key, value, name, obj.GetUID(), obj.GetResourceVersion())
 
 	annotations := obj.GetAnnotations()
 	if annotations == nil {
@@ -495,6 +688,7 @@ func addAnnotation(client dynamic.ResourceInterface, name, key, value, logLevel 
 		color.Cyan("[TRACE] Patch payload: %s\n", string(patchBytes))
 		color.Cyan("[TRACE] Calling Patch with MergePatchType for %s\n", name)
 	}
+	tracef("patch payload for %s: %s", name, string(patchBytes))
 
 	// Try MergePatchType first
 	_, err = client.Patch(context.TODO(), name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
@@ -505,10 +699,14 @@ func addAnnotation(client dynamic.ResourceInterface, name, key, value, logLevel 
 			if logLevel == "TRACE" {
 				color.Cyan("[TRACE] MergePatchType not supported, trying StrategicMergePatchType for %s\n", name)
 			}
+			tracef("merge patch type not supported for %s, retry with StrategicMergePatchType", name)
 			_, err = client.Patch(context.TODO(), name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
 		}
 		if err != nil && logLevel == "TRACE" {
 			color.Cyan("[TRACE] Patch failed for %s: %v\n", name, err)
+		}
+		if err != nil {
+			tracef("patch failed for %s: %s", name, formatServerErrorDetails(err))
 		}
 	}
 	return err
@@ -559,12 +757,14 @@ func removeAnnotation(client dynamic.ResourceInterface, name, keyPrefix, _ strin
 func loadFailedObjects() (map[string]ObjectRef, error) {
 	objects := make(map[string]ObjectRef)
 
-	data, err := os.ReadFile(failedAttemptsFile)
+	retryFile := getLegacyRetryFilePath()
+	data, err := os.ReadFile(retryFile)
 	if err != nil {
 		if os.IsNotExist(err) {
+			tracef("retry file does not exist: %s", retryFile)
 			return objects, nil
 		}
-		return nil, fmt.Errorf("failed to read failed attempts file: %w", err)
+		return nil, fmt.Errorf("failed to read failed attempts file %s: %w", retryFile, err)
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -608,11 +808,17 @@ func loadFailedObjects() (map[string]ObjectRef, error) {
 }
 
 func recordFailure(obj ObjectRef, errorMsg string) {
+	failedAttemptsFile := getFailedAttemptsFilePath()
+	errorLogFile := getErrorLogFilePath()
+
+	tracef("recording failure for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, errorMsg)
+
 	// Append to failed attempts file
 	f, err := os.OpenFile(failedAttemptsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		// If we can't write to the file, log to stderr as fallback
 		fmt.Fprintf(os.Stderr, "Warning: failed to write to %s: %v\n", failedAttemptsFile, err)
+		tracef("failed to append failed attempts file %s: %v", failedAttemptsFile, err)
 		return
 	}
 	_, _ = fmt.Fprintf(f, "%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind)
@@ -624,6 +830,7 @@ func recordFailure(obj ObjectRef, errorMsg string) {
 	if err != nil {
 		// If we can't write to the file, log to stderr as fallback
 		fmt.Fprintf(os.Stderr, "Warning: failed to write to %s: %v\n", errorLogFile, err)
+		tracef("failed to append error log file %s: %v", errorLogFile, err)
 		return
 	}
 	_, _ = fmt.Fprintf(f, "%s|%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind, errorMsg)
@@ -632,11 +839,15 @@ func recordFailure(obj ObjectRef, errorMsg string) {
 }
 
 func recordSkippedObject(obj ObjectRef, reason string, details string) {
+	skippedObjectsFile := getSkippedObjectsFilePath()
+	tracef("recording skipped object %s/%s/%s: reason=%s details=%s", obj.Kind, obj.Namespace, obj.Name, reason, details)
+
 	// Append to skipped objects file
 	f, err := os.OpenFile(skippedObjectsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		// If we can't write to the file, log to stderr as fallback
 		fmt.Fprintf(os.Stderr, "Warning: failed to write to %s: %v\n", skippedObjectsFile, err)
+		tracef("failed to append skipped objects file %s: %v", skippedObjectsFile, err)
 		return
 	}
 	timestamp := time.Now().Format(time.RFC3339)
@@ -644,6 +855,16 @@ func recordSkippedObject(obj ObjectRef, reason string, details string) {
 	_, _ = fmt.Fprintf(f, "%s|%s|%s|%s|%s|%s|%s\n", timestamp, obj.Namespace, obj.Name, obj.Kind, gvrStr, reason, details)
 	_ = f.Sync()
 	_ = f.Close()
+}
+
+func shouldRetryWithSwitchAccount(errMsg string) bool {
+	for _, phrase := range switchAccountRetryErrorPhrases {
+		if strings.Contains(errMsg, phrase) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func contains(slice []string, item string) bool {
@@ -655,12 +876,190 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
+func classifyNotFoundError(err error) (string, string) {
+	serverDetails := formatServerErrorDetails(err)
+	if isResourceEndpointNotFound(err) {
+		tracef("classified not found error as ResourceNotServed: %s", serverDetails)
+		return "ResourceNotServed", fmt.Sprintf("Resource endpoint is not found or not served by API server: %s", serverDetails)
+	}
+
+	tracef("classified not found error as NotFound: %s", serverDetails)
+	return "NotFound", fmt.Sprintf("Object not found (it may have been removed): %s", serverDetails)
+}
+
+func isResourceEndpointNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if strings.Contains(strings.ToLower(err.Error()), requestedResourceNotFoundPhrase) {
+		return true
+	}
+
+	statusErr, ok := err.(*errors.StatusError)
+	if !ok {
+		return false
+	}
+
+	statusMessage := strings.ToLower(statusErr.Status().Message)
+	return strings.Contains(statusMessage, requestedResourceNotFoundPhrase)
+}
+
+func formatServerErrorDetails(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	statusErr, ok := err.(*errors.StatusError)
+	if !ok {
+		return err.Error()
+	}
+
+	status := statusErr.Status()
+	return fmt.Sprintf("%s (status: code=%d, reason=%s, message=%q)", err.Error(), status.Code, status.Reason, status.Message)
+}
+
+func parseObjectIdentifier(objectIdentifier string) (namespace string, name string, kind string, err error) {
+	trimmedIdentifier := strings.TrimSpace(objectIdentifier)
+	parts := strings.Split(trimmedIdentifier, "/")
+	if len(parts) != 3 {
+		return "", "", "", fmt.Errorf("invalid object format: expected <namespace>/<name>/<kind>")
+	}
+
+	namespace = strings.TrimSpace(parts[0])
+	name = strings.TrimSpace(parts[1])
+	kind = strings.TrimSpace(parts[2])
+	if namespace == "" || name == "" || kind == "" {
+		return "", "", "", fmt.Errorf("invalid object format: namespace, name and kind must be non-empty")
+	}
+
+	return namespace, name, kind, nil
+}
+
+func collectSingleObject(
+	discoveryClient discovery.DiscoveryInterface,
+	dynamicClient dynamic.Interface,
+	objectIdentifier string,
+	logLevel string,
+) (map[string]ObjectRef, error) {
+	namespace, name, kind, err := parseObjectIdentifier(objectIdentifier)
+	if err != nil {
+		return map[string]ObjectRef{}, nil
+	}
+
+	objects := make(map[string]ObjectRef)
+
+	apiGroupList, err := discoveryClient.ServerGroups()
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover API groups: %w", err)
+	}
+
+	for _, group := range apiGroupList.Groups {
+		for _, version := range group.Versions {
+			apiResourceList, err := discoveryClient.ServerResourcesForGroupVersion(version.GroupVersion)
+			if err != nil {
+				if logLevel == "TRACE" {
+					fmt.Printf("Warning: failed to get resources for %s: %v\n", version.GroupVersion, err)
+				}
+				tracef("failed to get resources for %s while collecting single object: %v", version.GroupVersion, err)
+				continue
+			}
+
+			gv, err := schema.ParseGroupVersion(apiResourceList.GroupVersion)
+			if err != nil {
+				continue
+			}
+
+			for _, apiResource := range apiResourceList.APIResources {
+				if apiResource.Name != kind {
+					continue
+				}
+
+				if strings.Contains(apiResource.Name, "/") {
+					continue
+				}
+
+				if !contains(apiResource.Verbs, "get") || !contains(apiResource.Verbs, "patch") {
+					continue
+				}
+
+				if namespace == "clusterwide" && apiResource.Namespaced {
+					continue
+				}
+				if namespace != "clusterwide" && !apiResource.Namespaced {
+					continue
+				}
+
+				gvr := schema.GroupVersionResource{
+					Group:    gv.Group,
+					Version:  gv.Version,
+					Resource: apiResource.Name,
+				}
+
+				resourceClient := dynamicClient.Resource(gvr)
+				var objClient dynamic.ResourceInterface
+				if namespace == "clusterwide" {
+					objClient = resourceClient
+				} else {
+					objClient = resourceClient.Namespace(namespace)
+				}
+
+				_, err = objClient.Get(context.TODO(), name, metav1.GetOptions{})
+				if err != nil {
+					if errors.IsNotFound(err) {
+						continue
+					}
+					if logLevel == "TRACE" {
+						fmt.Printf("Warning: failed to get object %s/%s/%s in %s: %v\n", namespace, name, kind, gvr.String(), err)
+					}
+					tracef("failed to get object %s/%s/%s in %s: %s", namespace, name, kind, gvr.String(), formatServerErrorDetails(err))
+					continue
+				}
+
+				key := fmt.Sprintf("%s|%s|%s", namespace, name, kind)
+				objects[key] = ObjectRef{
+					Namespace: namespace,
+					Name:      name,
+					Kind:      kind,
+					GVR:       gvr,
+				}
+
+				return objects, nil
+			}
+		}
+	}
+
+	return objects, nil
+}
+
+func filterObjectsByIdentifier(objects map[string]ObjectRef, objectIdentifier string) map[string]ObjectRef {
+	namespace, name, kind, err := parseObjectIdentifier(objectIdentifier)
+	if err != nil {
+		return map[string]ObjectRef{}
+	}
+
+	key := fmt.Sprintf("%s|%s|%s", namespace, name, kind)
+
+	filtered := make(map[string]ObjectRef)
+	if object, exists := objects[key]; exists {
+		filtered[key] = object
+	}
+
+	return filtered
+}
+
 func checkFailedAnnotations() {
+	state := getCurrentRunState()
+	failedAttemptsFile := state.FailedAttemptsFile
+	errorLogFile := state.ErrorLogFile
+	traceLogFile := state.TraceLogFile
+
 	data, err := os.ReadFile(failedAttemptsFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return
 		}
+		tracef("failed to read failed attempts file %s: %v", failedAttemptsFile, err)
 		// If we can't read the file, just return silently
 		return
 	}
@@ -684,9 +1083,10 @@ func checkFailedAnnotations() {
 		color.Red("\n⚠️  Migration completed with %d failed object(s).\n\n", failedCount)
 		color.Red("Some objects could not be annotated. Please check the error details:\n")
 		color.Yellow("  Error log file: %s\n", errorLogFile)
-		color.Yellow("  Failed objects list: %s\n\n", failedAttemptsFile)
+		color.Yellow("  Failed objects list: %s\n", failedAttemptsFile)
+		color.Yellow("  Trace log file: %s\n\n", traceLogFile)
 		color.Red("To investigate the issues:\n")
-		color.Yellow("  1. Review the error log file to understand why objects failed\n")
+		color.Yellow("  1. Review the trace and error log files to understand why objects failed\n")
 		color.Yellow("  2. Check permissions and resource availability\n")
 		color.Yellow("  3. Retry migration for failed objects only using:\n")
 		color.Green("     d8 tools sig-migrate --retry\n\n")
