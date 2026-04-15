@@ -20,15 +20,44 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
 )
+
+func TestShouldRetryWithSwitchAccount(t *testing.T) {
+	tests := []struct {
+		name     string
+		errMsg   string
+		expected bool
+	}{
+		{
+			name:     "retry phrase exists in message",
+			errMsg:   "forbidden: denied request: failed expression: request.userInfo.username",
+			expected: true,
+		},
+		{
+			name:     "retry phrase does not exist in message",
+			errMsg:   "some generic error",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := shouldRetryWithSwitchAccount(tt.errMsg)
+			require.Equal(t, tt.expected, result)
+		})
+	}
+}
 
 func TestContains(t *testing.T) {
 	tests := []struct {
@@ -63,6 +92,94 @@ func TestContains(t *testing.T) {
 			require.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestParseObjectIdentifier_Valid(t *testing.T) {
+	ns, name, kind, err := parseObjectIdentifier("default/cm-one/configmaps")
+	require.NoError(t, err)
+	require.Equal(t, "default", ns)
+	require.Equal(t, "cm-one", name)
+	require.Equal(t, "configmaps", kind)
+}
+
+func TestParseObjectIdentifier_InvalidFormat(t *testing.T) {
+	_, _, _, err := parseObjectIdentifier("default|cm-one|configmaps")
+	require.Error(t, err)
+
+	_, _, _, err = parseObjectIdentifier("default/cm-one")
+	require.Error(t, err)
+
+	_, _, _, err = parseObjectIdentifier("default//configmaps")
+	require.Error(t, err)
+}
+
+func TestFilterObjectsByIdentifier_SpecificObject(t *testing.T) {
+	objects := map[string]ObjectRef{
+		"default|cm-one|configmaps": {
+			Namespace: "default",
+			Name:      "cm-one",
+			Kind:      "configmaps",
+			GVR: schema.GroupVersionResource{
+				Group:    "",
+				Version:  "v1",
+				Resource: "configmaps",
+			},
+		},
+		"kube-system|cm-two|configmaps": {
+			Namespace: "kube-system",
+			Name:      "cm-two",
+			Kind:      "configmaps",
+			GVR: schema.GroupVersionResource{
+				Group:    "",
+				Version:  "v1",
+				Resource: "configmaps",
+			},
+		},
+	}
+
+	filtered := filterObjectsByIdentifier(objects, "kube-system/cm-two/configmaps")
+	require.Len(t, filtered, 1)
+	require.Contains(t, filtered, "kube-system|cm-two|configmaps")
+	require.Equal(t, "cm-two", filtered["kube-system|cm-two|configmaps"].Name)
+}
+
+func TestFilterObjectsByIdentifier_NotFound(t *testing.T) {
+	objects := map[string]ObjectRef{
+		"default|cm-one|configmaps": {
+			Namespace: "default",
+			Name:      "cm-one",
+			Kind:      "configmaps",
+			GVR: schema.GroupVersionResource{
+				Group:    "",
+				Version:  "v1",
+				Resource: "configmaps",
+			},
+		},
+	}
+
+	filtered := filterObjectsByIdentifier(objects, "default/missing/configmaps")
+	require.Len(t, filtered, 0)
+}
+
+func TestFilterObjectsByIdentifier_InvalidFormat(t *testing.T) {
+	objects := map[string]ObjectRef{
+		"default|cm-one|configmaps": {
+			Namespace: "default",
+			Name:      "cm-one",
+			Kind:      "configmaps",
+			GVR: schema.GroupVersionResource{
+				Group:    "",
+				Version:  "v1",
+				Resource: "configmaps",
+			},
+		},
+	}
+
+	filtered := filterObjectsByIdentifier(objects, "")
+	require.Len(t, filtered, 0)
+
+	filtered = filterObjectsByIdentifier(objects, "default|cm-one|configmaps")
+	require.Len(t, filtered, 0)
 }
 
 func TestAddAnnotation(t *testing.T) {
@@ -140,61 +257,32 @@ func TestRemoveAnnotation(t *testing.T) {
 }
 
 func TestLoadFailedObjects(t *testing.T) {
-	// Create a temporary file
 	tmpDir := t.TempDir()
-	failedFile := filepath.Join(tmpDir, "failed_annotations.txt")
+	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.txt")
+	runState := &sigMigrateRunState{
+		LegacyFailedRetryFile: legacyRetryFile,
+	}
 
-	// Override the global constant for testing
-	originalFile := failedAttemptsFile
-	defer func() {
-		// Restore original
-		_ = originalFile
-	}()
+	setCurrentRunState(runState)
+	defer setCurrentRunState(nil)
 
-	// Write test data
 	testData := "default|test-pod|pods\nkube-system|test-cm|configmaps\n|cluster-resource|clusterroles\n"
-	err := os.WriteFile(failedFile, []byte(testData), 0644)
+	err := os.WriteFile(legacyRetryFile, []byte(testData), 0644)
 	require.NoError(t, err)
 
-	// Test loading (we need to modify the function to accept file path or use a test helper)
-	// For now, test the parsing logic
-	lines := []string{
-		"default|test-pod|pods",
-		"kube-system|test-cm|configmaps",
-		"|cluster-resource|clusterroles", // Invalid - missing namespace
-		"",                               // Empty line
-	}
+	objects, err := loadFailedObjects()
+	require.NoError(t, err)
+	require.Len(t, objects, 2)
 
-	objects := make(map[string]ObjectRef)
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
+	first := objects["default|test-pod|pods"]
+	require.Equal(t, "default", first.Namespace)
+	require.Equal(t, "test-pod", first.Name)
+	require.Equal(t, "pods", first.Kind)
 
-		parts := []string{"default", "test-pod", "pods"}
-		if len(parts) == 3 {
-			namespace := parts[0]
-			name := parts[1]
-			kind := parts[2]
-
-			if namespace != "" && name != "" && kind != "" {
-				key := namespace + "|" + name + "|" + kind
-				objects[key] = ObjectRef{
-					Namespace: namespace,
-					Name:      name,
-					Kind:      kind,
-					GVR: schema.GroupVersionResource{
-						Resource: kind,
-					},
-				}
-			}
-		}
-	}
-
-	require.Len(t, objects, 1)
-	require.Equal(t, "default", objects["default|test-pod|pods"].Namespace)
-	require.Equal(t, "test-pod", objects["default|test-pod|pods"].Name)
-	require.Equal(t, "pods", objects["default|test-pod|pods"].Kind)
+	second := objects["kube-system|test-cm|configmaps"]
+	require.Equal(t, "kube-system", second.Namespace)
+	require.Equal(t, "test-cm", second.Name)
+	require.Equal(t, "configmaps", second.Kind)
 }
 
 func TestRecordFailure(t *testing.T) {
@@ -274,8 +362,7 @@ func TestAnnotateObjects_UnsupportedType(t *testing.T) {
 	}
 
 	// Should skip unsupported types
-	err := annotateObjects(dynamicClient, dynamicClient, objects, 1234567890, unsupportedTypes, "DEBUG")
-	require.NoError(t, err)
+	annotateObjects(dynamicClient, dynamicClient, objects, 1234567890, unsupportedTypes, "DEBUG")
 
 	// Verify object was not modified
 	resourceClient := dynamicClient.Resource(gvr).Namespace("default")
@@ -356,9 +443,7 @@ func TestAnnotateObjects_ErrorRecording(t *testing.T) {
 		Resource: "configmaps",
 	}
 
-	// Create an object that doesn't exist (will cause NotFound error)
 	dynamicClient := fake.NewSimpleDynamicClient(scheme)
-
 	objects := map[string]ObjectRef{
 		"default|non-existent-cm|configmaps": {
 			Namespace: "default",
@@ -369,37 +454,134 @@ func TestAnnotateObjects_ErrorRecording(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	failedFile := filepath.Join(tmpDir, "failed_annotations.txt")
-	errorFile := filepath.Join(tmpDir, "failed_errors.txt")
-
-	// Save original constants
-	originalFailedFile := failedAttemptsFile
-	originalErrorFile := errorLogFile
-
-	// Note: We can't easily override the constants in the actual function,
-	// but we can test the logic by checking that errors would be recorded
-	// In a real scenario, the function would write to the actual files
-	defer func() {
-		_ = originalFailedFile
-		_ = originalErrorFile
-	}()
+	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.txt")
+	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.txt")
+	runSkippedFile := filepath.Join(tmpDir, "skipped_run.txt")
+	setCurrentRunState(&sigMigrateRunState{
+		FailedAttemptsFile: runFailedFile,
+		ErrorLogFile:       runErrorFile,
+		SkippedObjectsFile: runSkippedFile,
+	})
+	defer setCurrentRunState(nil)
 
 	unsupportedTypes := make(map[string]bool)
+	annotateObjects(dynamicClient, dynamicClient, objects, 1234567890, unsupportedTypes, "DEBUG")
 
-	// This should fail with NotFound error and record it
-	err := annotateObjects(dynamicClient, dynamicClient, objects, 1234567890, unsupportedTypes, "DEBUG")
-	require.NoError(t, err) // Function itself doesn't return error, but records failures
-
-	// Verify that the error would have been recorded by checking the helper function
-	obj := objects["default|non-existent-cm|configmaps"]
-	recordFailureToFile(obj, "configmaps \"non-existent-cm\" not found", failedFile, errorFile)
-
-	// Verify files contain the error
-	failedData, err := os.ReadFile(failedFile)
+	// NotFound errors are classified as skipped and should be written to skipped file.
+	skippedData, err := os.ReadFile(runSkippedFile)
 	require.NoError(t, err)
-	require.Contains(t, string(failedData), "default|non-existent-cm|configmaps")
+	require.Contains(t, string(skippedData), "default|non-existent-cm|configmaps")
+	require.Contains(t, string(skippedData), "NotFound")
 
-	errorData, err := os.ReadFile(errorFile)
+	_, err = os.Stat(runFailedFile)
+	require.True(t, os.IsNotExist(err), "failed file should not be created for NotFound")
+	_, err = os.Stat(runErrorFile)
+	require.True(t, os.IsNotExist(err), "error file should not be created for NotFound")
+}
+
+func TestSyncLegacyRetryFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	runFile := filepath.Join(tmpDir, "failed_annotations_run.txt")
+	legacyFile := filepath.Join(tmpDir, "failed_annotations.txt")
+
+	err := os.WriteFile(runFile, []byte("ns|obj|pods\n"), 0644)
 	require.NoError(t, err)
-	require.Contains(t, string(errorData), "default|non-existent-cm|configmaps|configmaps")
+
+	setCurrentRunState(&sigMigrateRunState{
+		FailedAttemptsFile:    runFile,
+		LegacyFailedRetryFile: legacyFile,
+	})
+	defer setCurrentRunState(nil)
+
+	err = syncLegacyRetryFile()
+	require.NoError(t, err)
+
+	legacyData, err := os.ReadFile(legacyFile)
+	require.NoError(t, err)
+	require.Equal(t, "ns|obj|pods\n", string(legacyData))
+}
+
+func TestTracefWritesContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "sigmigrate_trace.log")
+	traceFile, err := os.OpenFile(tracePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	require.NoError(t, err)
+	defer traceFile.Close()
+
+	setCurrentRunState(&sigMigrateRunState{
+		TraceLogFile: tracePath,
+		traceFile:    traceFile,
+	})
+	defer setCurrentRunState(nil)
+
+	tracef("hello %s", "trace")
+	err = traceFile.Sync()
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(tracePath)
+	require.NoError(t, err)
+	require.Contains(t, string(data), "TRACE hello trace")
+}
+
+func TestNewSigMigrateRunState_GeneratesSaltedPaths(t *testing.T) {
+	ts := time.Date(2026, 4, 14, 15, 16, 25, 0, time.UTC)
+	state := newSigMigrateRunState(ts)
+
+	require.Equal(t, "20260414T151625Z", state.RunID)
+	require.Equal(t, "/tmp/failed_annotations_20260414T151625Z.txt", state.FailedAttemptsFile)
+	require.Equal(t, "/tmp/failed_errors_20260414T151625Z.txt", state.ErrorLogFile)
+	require.Equal(t, "/tmp/skipped_objects_20260414T151625Z.txt", state.SkippedObjectsFile)
+	require.Equal(t, "/tmp/sigmigrate_trace_20260414T151625Z.log", state.TraceLogFile)
+	require.Equal(t, legacyFailedAttemptsFile, state.LegacyFailedRetryFile)
+}
+
+func TestClassifyNotFoundError_ObjectNotFound(t *testing.T) {
+	err := apierrors.NewNotFound(schema.GroupResource{Group: "", Resource: "configmaps"}, "test-cm")
+
+	reason, details := classifyNotFoundError(err)
+	require.Equal(t, "NotFound", reason)
+	require.Contains(t, details, "Object not found")
+	require.Contains(t, details, err.Error())
+}
+
+func TestClassifyNotFoundError_ResourceEndpointNotServed(t *testing.T) {
+	err := &apierrors.StatusError{ErrStatus: metav1.Status{
+		Status:  metav1.StatusFailure,
+		Code:    404,
+		Reason:  metav1.StatusReasonNotFound,
+		Message: "the server could not find the requested resource",
+	}}
+
+	reason, details := classifyNotFoundError(err)
+	require.Equal(t, "ResourceNotServed", reason)
+	require.Contains(t, details, "not served by API server")
+	require.Contains(t, details, "the server could not find the requested resource")
+	require.Contains(t, details, "status: code=404")
+}
+
+func TestIsResourceEndpointNotFound(t *testing.T) {
+	err := &apierrors.StatusError{ErrStatus: metav1.Status{
+		Status:  metav1.StatusFailure,
+		Code:    404,
+		Reason:  metav1.StatusReasonNotFound,
+		Message: "the server could not find the requested resource",
+	}}
+
+	require.True(t, isResourceEndpointNotFound(err))
+	require.False(t, isResourceEndpointNotFound(apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "test-cm")))
+}
+
+func TestFormatServerErrorDetails_StatusError(t *testing.T) {
+	err := &apierrors.StatusError{ErrStatus: metav1.Status{
+		Status:  metav1.StatusFailure,
+		Code:    404,
+		Reason:  metav1.StatusReasonNotFound,
+		Message: "the server could not find the requested resource",
+	}}
+
+	details := formatServerErrorDetails(err)
+	require.Contains(t, details, err.Error())
+	require.Contains(t, details, "status: code=404")
+	require.Contains(t, details, "reason=NotFound")
+	require.True(t, strings.Contains(details, "message=\"the server could not find the requested resource\""))
 }
