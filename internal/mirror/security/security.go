@@ -103,37 +103,39 @@ func NewService(
 // PullSecurity pulls the security databases
 // It validates access to the registry and pulls the security database images
 func (svc *Service) PullSecurity(ctx context.Context) error {
-	err := svc.validateSecurityAccess(ctx)
+	available, err := svc.securityDatabasesAvailable(ctx)
 	if err != nil {
-		return fmt.Errorf("validate security access: %w", err)
+		return fmt.Errorf("check security databases availability: %w", err)
 	}
 
-	err = svc.pullSecurityDatabases(ctx)
-	if err != nil {
+	if !available {
+		return nil
+	}
+
+	if err := svc.pullSecurityDatabases(ctx); err != nil {
 		return fmt.Errorf("pull security databases: %w", err)
 	}
 
 	return nil
 }
 
-// validateSecurityAccess validates access to the security registry
-// It checks if the security database image exists in the source registry
-func (svc *Service) validateSecurityAccess(ctx context.Context) error {
-	svc.logger.Debug("Validating access to the security registry")
+// securityDatabasesAvailable checks if security database images exist in the source registry.
+// Returns false for editions that do not include security databases (e.g. CE, BE, SE).
+func (svc *Service) securityDatabasesAvailable(ctx context.Context) (bool, error) {
+	svc.logger.Debug("Checking if security databases are available in registry")
 
-	// For specific tags, check if the tag exists
 	err := svc.securityService.Security(internal.SecurityTrivyDBSegment).CheckImageExists(ctx, "2")
 	if errors.Is(err, client.ErrImageNotFound) {
-		svc.userLogger.Warnf("Skipping pull of security databases: %v", err)
+		svc.userLogger.WarnLn("Security databases are not available in this edition, skipping")
 
-		return nil
+		return false, nil
 	}
 
 	if err != nil {
-		return fmt.Errorf("failed to check security database tag %q in registry: %w", "2", err)
+		return false, fmt.Errorf("failed to check security database tag %q in registry: %w", "2", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 func (svc *Service) pullSecurityDatabases(ctx context.Context) error {
