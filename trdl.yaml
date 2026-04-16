@@ -1,4 +1,4 @@
-dockerImage: registry.deckhouse.io/base_images@sha256:0058436c9e51628cd76960ddf891850abee5cc59e15b3d56f448f55aa10385f2 # from: golang:1.24.13-bookworm
+dockerImage: registry.deckhouse.io/base_images/builder/golang-bookworm-1.25@sha256:4aaf81659fa6ea3cbbb0f241d739dda485bce79ec98b0fd5014ef4f4210e1cd5 # from: golang:1.25.8-bookworm
 commands:
   - export TASK_VERSION=v3.41.0
   - export TASK_SHA256=0a2595f7fa3c15a62f8d0c244121a4977018b3bfdec7c1542ac2a8cf079978b8
