@@ -1,6 +1,6 @@
 module github.com/deckhouse/deckhouse-cli
 
-go 1.24.13
+go 1.25.0
 
 require (
 	github.com/Masterminds/semver/v3 v3.3.1
@@ -36,7 +36,7 @@ require (
 	gitlab.com/greyxor/slogor v1.2.11
 	go.cypherpunks.ru/gogost/v5 v5.13.0
 	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8
-	golang.org/x/term v0.38.0
+	golang.org/x/term v0.41.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.33.8
 	k8s.io/apiextensions-apiserver v0.33.8
@@ -54,7 +54,7 @@ require (
 	cloud.google.com/go v0.116.0 // indirect
 	cloud.google.com/go/auth v0.16.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
-	cloud.google.com/go/compute/metadata v0.6.0 // indirect
+	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/iam v1.2.2 // indirect
 	cloud.google.com/go/kms v1.20.1 // indirect
 	cloud.google.com/go/longrunning v0.6.2 // indirect
@@ -137,7 +137,7 @@ require (
 	github.com/bugsnag/panicwrap v1.3.4 // indirect
 	github.com/cenkalti/backoff/v3 v3.2.2 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
-	github.com/cenkalti/backoff/v5 v5.0.1 // indirect
+	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/chai2010/gettext-go v1.0.2 // indirect
 	github.com/chanced/caps v1.0.2 // indirect
@@ -230,8 +230,8 @@ require (
 	github.com/go-git/go-git/v5 v5.16.2 // indirect
 	github.com/go-gorp/gorp/v3 v3.1.0 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
-	github.com/go-jose/go-jose/v3 v3.0.4 // indirect
-	github.com/go-jose/go-jose/v4 v4.0.5 // indirect
+	github.com/go-jose/go-jose/v3 v3.0.5 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-ldap/ldap/v3 v3.4.4 // indirect
 	github.com/go-ldap/ldif v0.0.0-20200320164324-fd88d9b715b3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
@@ -290,7 +290,7 @@ require (
 	github.com/goware/urlx v0.3.2 // indirect
 	github.com/gregjones/httpcache v0.0.0-20190611155906-901d90724c79 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0 // indirect
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.24.0 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
 	github.com/hailocab/go-hostpool v0.0.0-20160125115350-e80d13ce29ed // indirect
 	github.com/hashicorp/cap v0.9.0 // indirect
 	github.com/hashicorp/consul-template v0.40.0 // indirect
@@ -376,14 +376,10 @@ require (
 	github.com/int128/listener v1.1.0 // indirect
 	github.com/int128/oauth2cli v1.14.0 // indirect
 	github.com/int128/oauth2dev v1.0.0 // indirect
-	github.com/jackc/chunkreader/v2 v2.0.1 // indirect
-	github.com/jackc/pgconn v1.14.3 // indirect
-	github.com/jackc/pgio v1.0.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
-	github.com/jackc/pgproto3/v2 v2.3.3 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/pgtype v1.14.3 // indirect
-	github.com/jackc/pgx/v4 v4.18.3 // indirect
+	github.com/jackc/pgx/v5 v5.9.1 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/jedib0t/go-pretty/v6 v6.5.5 // indirect
 	github.com/jefferai/isbadcipher v0.0.0-20190226160619-51d2077c035f // indirect
@@ -424,7 +420,7 @@ require (
 	github.com/mediocregopher/radix/v4 v4.1.4 // indirect
 	github.com/michaelklishin/rabbit-hole/v2 v2.12.0 // indirect
 	github.com/miekg/dns v1.1.58 // indirect
-	github.com/miekg/pkcs11 v1.1.2-0.20231115102856-9078ad6b9d4b // indirect
+	github.com/miekg/pkcs11 v1.1.2 // indirect
 	github.com/mikesmitty/edkey v0.0.0-20170222072505-3356ea4e686a // indirect
 	github.com/minio/crc64nvme v1.0.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
@@ -481,7 +477,7 @@ require (
 	github.com/paulmach/orb v0.12.0 // indirect
 	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/peterbourgon/diskv v2.0.1+incompatible // indirect
-	github.com/petermattis/goid v0.0.0-20240813172612-4fcff4a6cae7 // indirect
+	github.com/petermattis/goid v0.0.0-20250813065127-a731cc31b4fe // indirect
 	github.com/pierrec/lz4 v2.6.1+incompatible // indirect
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect
 	github.com/pires/go-proxyproto v0.6.1 // indirect
@@ -508,7 +504,7 @@ require (
 	github.com/ryanuber/columnize v2.1.2+incompatible // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1 // indirect
-	github.com/sasha-s/go-deadlock v0.3.5 // indirect
+	github.com/sasha-s/go-deadlock v0.3.6 // indirect
 	github.com/seccomp/libseccomp-golang v0.10.0 // indirect
 	github.com/secure-systems-lab/go-securesystemslib v0.9.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
@@ -587,38 +583,38 @@ require (
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.60.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace v0.46.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.60.0 // indirect
-	go.opentelemetry.io/otel v1.40.0 // indirect
+	go.opentelemetry.io/otel v1.43.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v0.44.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v0.44.0 // indirect
-	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.33.0 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.43.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.33.0 // indirect
-	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.33.0 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.43.0 // indirect
 	go.opentelemetry.io/otel/exporters/prometheus v0.44.0 // indirect
-	go.opentelemetry.io/otel/metric v1.40.0 // indirect
-	go.opentelemetry.io/otel/sdk v1.40.0 // indirect
-	go.opentelemetry.io/otel/sdk/metric v1.40.0 // indirect
-	go.opentelemetry.io/otel/trace v1.40.0 // indirect
-	go.opentelemetry.io/proto/otlp v1.4.0 // indirect
+	go.opentelemetry.io/otel/metric v1.43.0 // indirect
+	go.opentelemetry.io/otel/sdk v1.43.0 // indirect
+	go.opentelemetry.io/otel/sdk/metric v1.43.0 // indirect
+	go.opentelemetry.io/otel/trace v1.43.0 // indirect
+	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/mock v0.5.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/crypto v0.46.0 // indirect
-	golang.org/x/mod v0.30.0 // indirect
-	golang.org/x/net v0.48.0 // indirect
-	golang.org/x/oauth2 v0.29.0 // indirect
-	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.40.0 // indirect
-	golang.org/x/text v0.32.0 // indirect
+	golang.org/x/crypto v0.49.0 // indirect
+	golang.org/x/mod v0.33.0 // indirect
+	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/oauth2 v0.35.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
-	golang.org/x/tools v0.39.0 // indirect
+	golang.org/x/tools v0.42.0 // indirect
 	google.golang.org/api v0.230.0 // indirect
 	google.golang.org/genproto v0.0.0-20241118233622-e639e219e697 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20250218202821-56aae31c358a // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250428153025-10db94c68c34 // indirect
-	google.golang.org/grpc v1.72.0 // indirect
-	google.golang.org/protobuf v1.36.6 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260401024825-9d38bb4040a9 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260401024825-9d38bb4040a9 // indirect
+	google.golang.org/grpc v1.80.0 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.12.0 // indirect
 	gopkg.in/evanphx/json-patch.v5 v5.8.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
@@ -655,9 +651,9 @@ replace (
 	github.com/docker/cli => github.com/docker/cli v25.0.6+incompatible
 	github.com/docker/docker => github.com/docker/docker v25.0.6+incompatible
 	github.com/google/gnostic-models => github.com/google/gnostic-models v0.6.9
-	github.com/hashicorp/vault => flant.internal/team/foxtrot/stronghold.git/images/stronghold v1.16.14
-	github.com/hashicorp/vault/api => flant.internal/team/foxtrot/stronghold.git/images/stronghold/api v1.16.14
-	github.com/hashicorp/vault/sdk => flant.internal/team/foxtrot/stronghold.git/images/stronghold/sdk v1.16.14
+	github.com/hashicorp/vault => flant.internal/team/foxtrot/stronghold.git/images/stronghold v0.0.0-20260416081424-02af246518dd
+	github.com/hashicorp/vault/api => flant.internal/team/foxtrot/stronghold.git/images/stronghold/api v1.16.18
+	github.com/hashicorp/vault/sdk => flant.internal/team/foxtrot/stronghold.git/images/stronghold/sdk v1.16.18
 	github.com/jaguilar/vt100 => github.com/tonistiigi/vt100 v0.0.0-20190402012908-ad4c4a574305 // upstream not maintained
 	github.com/opencontainers/runc => github.com/opencontainers/runc v1.1.14
 	github.com/werf/werf/v2 => github.com/deckhouse/delivery-kit/v2 v2.63.1-dk
