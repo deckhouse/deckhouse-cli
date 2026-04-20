@@ -41,6 +41,12 @@ const (
 	cmdName = "download"
 )
 
+const (
+	itemTypeDir  = "dir"
+	itemTypeFile = "file"
+	itemTypeLink = "link"
+)
+
 func cmdExamples() string {
 	resp := []string{
 		"  # Start exporter + Download + Stop for Filesystem",
@@ -186,13 +192,13 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 		err = forRespItems(resp.Body, func(item *dirItem) error {
 			subPath := item.Name
 			switch item.Type {
-			case "dir":
+			case itemTypeDir:
 				err = os.MkdirAll(filepath.Join(dstPath, subPath), os.ModePerm)
 				if err != nil {
 					return fmt.Errorf("Create dir error: %s", err.Error())
 				}
 				subPath += "/"
-			case "file", "link":
+			case itemTypeFile, itemTypeLink:
 				// downloadable, proceed below
 			default:
 				log.Warn("Skipping non-downloadable entry", slog.String("name", item.Name), slog.String("type", item.Type))
