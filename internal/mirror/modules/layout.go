@@ -28,6 +28,7 @@ import (
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
+// ModulesDownloadList is a to-do list grouped by module name.
 type ModulesDownloadList struct {
 	rootURL string
 	list    map[string]*ImageDownloadList
@@ -40,44 +41,24 @@ func NewModulesDownloadList(rootURL string) *ModulesDownloadList {
 	}
 }
 
-func (l *ModulesDownloadList) Module(moduleName string) *ImageDownloadList {
-	return l.list[moduleName]
-}
-
-func (l *ModulesDownloadList) FillModulesImages(modules []string) {
-	for _, moduleName := range modules {
-		list := NewImageDownloadList(filepath.Join(l.rootURL, moduleName))
-		list.FillForTag("")
-		l.list[moduleName] = list
-	}
-}
-
+// ImageDownloadList queues image refs for a single module for the puller.
+//   - Values: nil until the puller fills them with metadata.
+//   - rootURL: module-scoped path, used to build refs for display, not HTTP.
 type ImageDownloadList struct {
 	rootURL string
 
-	Module                map[string]*puller.ImageMeta
-	ModuleReleaseChannels map[string]*puller.ImageMeta
-	ModuleExtra           map[string]*puller.ImageMeta
+	Module                map[puller.ImageRef]*puller.ImageMeta
+	ModuleReleaseChannels map[puller.ImageRef]*puller.ImageMeta
+	ModuleExtra           map[puller.ImageRef]*puller.ImageMeta
 }
 
 func NewImageDownloadList(rootURL string) *ImageDownloadList {
 	return &ImageDownloadList{
 		rootURL: rootURL,
 
-		Module:                make(map[string]*puller.ImageMeta),
-		ModuleReleaseChannels: make(map[string]*puller.ImageMeta),
-		ModuleExtra:           make(map[string]*puller.ImageMeta),
-	}
-}
-
-func (l *ImageDownloadList) FillForTag(tag string) {
-	// If we are to pull only the specific requested version, we should not pull any release channels at all.
-	if tag != "" {
-		return
-	}
-
-	for _, channel := range internal.GetAllDefaultReleaseChannels() {
-		l.ModuleReleaseChannels[l.rootURL+":"+channel] = nil
+		Module:                make(map[puller.ImageRef]*puller.ImageMeta),
+		ModuleReleaseChannels: make(map[puller.ImageRef]*puller.ImageMeta),
+		ModuleExtra:           make(map[puller.ImageRef]*puller.ImageMeta),
 	}
 }
 

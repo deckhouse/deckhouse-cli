@@ -115,7 +115,7 @@ func NewService(
 		}
 	}
 
-	rootURL := registryService.GetRoot()
+	rootURL := registryService.DeckhouseService().GetRoot()
 
 	return &Service{
 		deckhouseService: registryService.DeckhouseService(),

@@ -121,7 +121,7 @@ func NewService(
 		options.Filter = filter
 	}
 
-	rootURL := registryService.GetRoot()
+	rootURL := registryService.DeckhouseService().GetRoot()
 
 	return &Service{
 		workingDir:          workingDir,

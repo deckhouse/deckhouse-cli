@@ -62,11 +62,18 @@ func NewService(c client.Client, edition pkg.Edition, logger *log.Logger) *Servi
 		base = c.WithSegment(edition.String())
 	}
 
+	// Edition-scoped services (built from base; see branches above).
+	//   modules   -> <base>/modules
+	//   deckhouse -> <base> (platform images, release-channel, install, etc.)
+	//   security  -> <base>/security
+	// For upstream <base> = ".../deckhouse/ee"; for flat mirror <base> = ".../deckhouse".
 	s.modulesService = NewModulesService(base.WithSegment(moduleSegment), logger.Named("modules"))
 	s.deckhouseService = NewDeckhouseService(base, logger.Named("deckhouse"))
 	s.security = NewSecurityServices(securityServiceName, base.WithSegment(securitySegment), logger.Named("security"))
 
-	// services that are not scoped by edition
+	// Edition-independent services (built from c, without edition segment):
+	//   plugins   -> <registry root>/plugins
+	//   installer -> <registry root>/installer
 	s.pluginService = NewPluginService(c.WithSegment(pluginSegment), logger.Named("plugins"))
 	s.installer = NewInstallerServices(installerServiceName, c.WithSegment("installer"), logger.Named("installer"))
 
