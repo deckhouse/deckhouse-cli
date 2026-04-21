@@ -201,7 +201,7 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 			case itemTypeFile, itemTypeLink:
 				// downloadable, proceed below
 			default:
-				log.Warn("Skipping non-downloadable entry", slog.String("name", item.Name), slog.String("type", item.Type))
+				log.Warn("Skipping unsupported entry during filesystem download", slog.String("path", item.Name), slog.String("type", item.Type))
 				return nil
 			}
 
