@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/cli-runtime/pkg/printers"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -45,7 +46,7 @@ func newGetCommand() *cobra.Command {
 				return err
 			}
 
-			obj, err := dyn.Resource(userGVR).Get(cmd.Context(), name, metav1.GetOptions{})
+			obj, err := dyn.Resource(iamtypes.UserGVR).Get(cmd.Context(), name, metav1.GetOptions{})
 			if err != nil {
 				return fmt.Errorf("getting User %q: %w", name, err)
 			}

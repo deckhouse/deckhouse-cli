@@ -17,6 +17,7 @@ limitations under the License.
 package user
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -26,25 +27,13 @@ import (
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	group "github.com/deckhouse/deckhouse-cli/internal/iam/group/cmd"
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
-
-var userGVR = schema.GroupVersionResource{
-	Group:    "deckhouse.io",
-	Version:  "v1",
-	Resource: "users",
-}
-
-var groupGVR = schema.GroupVersionResource{
-	Group:    "deckhouse.io",
-	Version:  "v1alpha1",
-	Resource: "groups",
-}
 
 var createLong = templates.LongDesc(`
 Create a local static user in Deckhouse (User CR).
@@ -102,7 +91,7 @@ func newCreateCommand() *cobra.Command {
 
 	_ = cmd.RegisterFlagCompletionFunc("output", utilk8s.CompleteOutputFormats("name", "yaml", "json"))
 	_ = cmd.RegisterFlagCompletionFunc("member-of", func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		return utilk8s.CompleteResourceNames(cmd, groupGVR, "", toComplete)
+		return utilk8s.CompleteResourceNames(cmd, iamtypes.GroupGVR, "", toComplete)
 	})
 
 	return cmd
@@ -171,7 +160,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	created, err := dyn.Resource(userGVR).Create(cmd.Context(), obj, metav1.CreateOptions{})
+	created, err := dyn.Resource(iamtypes.UserGVR).Create(cmd.Context(), obj, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("creating User %q: %w", name, err)
 	}
@@ -189,7 +178,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if len(memberOf) > 0 {
 		var errs *multierror.Error
 		for _, groupName := range memberOf {
-			if err := ensureGroupMember(cmd, dyn, groupName, "User", name, createGroups); err != nil {
+			if _, err := group.EnsureMember(cmd.Context(), dyn, groupName, iamtypes.KindUser, name, group.EnsureMemberOpts{
+				CreateGroupIfMissing: createGroups,
+			}); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to add user to group %q: %v\n", groupName, err)
 				errs = multierror.Append(errs, err)
 			}
@@ -214,74 +205,16 @@ func buildUserObject(name, email, password, ttl string) *unstructured.Unstructur
 
 	return &unstructured.Unstructured{
 		Object: map[string]any{
-			"apiVersion": "deckhouse.io/v1",
-			"kind":       "User",
+			"apiVersion": iamtypes.APIVersionDeckhouseV1,
+			// unstructured.GetKind() type-asserts the kind value to plain string,
+			// so the typed SubjectKind constant must be cast at this boundary.
+			"kind": string(iamtypes.KindUser),
 			"metadata": map[string]any{
 				"name": name,
 			},
 			"spec": spec,
 		},
 	}
-}
-
-func ensureGroupMember(cmd *cobra.Command, dyn dynamic.Interface, groupName, memberKind, memberName string, createIfMissing bool) error {
-	ctx := cmd.Context()
-	groupClient := dyn.Resource(groupGVR)
-
-	obj, err := groupClient.Get(ctx, groupName, metav1.GetOptions{})
-	if err != nil {
-		if !createIfMissing {
-			return fmt.Errorf("group %q not found: %w", groupName, err)
-		}
-		obj = &unstructured.Unstructured{
-			Object: map[string]any{
-				"apiVersion": "deckhouse.io/v1alpha1",
-				"kind":       "Group",
-				"metadata": map[string]any{
-					"name": groupName,
-				},
-				"spec": map[string]any{
-					"name": groupName,
-					"members": []any{
-						map[string]any{
-							"kind": memberKind,
-							"name": memberName,
-						},
-					},
-				},
-			},
-		}
-		_, err = groupClient.Create(ctx, obj, metav1.CreateOptions{})
-		if err != nil {
-			return fmt.Errorf("creating group %q: %w", groupName, err)
-		}
-		return nil
-	}
-
-	members, _, _ := unstructured.NestedSlice(obj.Object, "spec", "members")
-	for _, m := range members {
-		member, ok := m.(map[string]any)
-		if !ok {
-			continue
-		}
-		if member["kind"] == memberKind && member["name"] == memberName {
-			return nil // already a member
-		}
-	}
-
-	members = append(members, map[string]any{
-		"kind": memberKind,
-		"name": memberName,
-	})
-	if err := unstructured.SetNestedSlice(obj.Object, members, "spec", "members"); err != nil {
-		return fmt.Errorf("setting members: %w", err)
-	}
-
-	_, err = groupClient.Update(ctx, obj, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("updating group %q: %w", groupName, err)
-	}
-	return nil
 }
 
 func validateUserName(name string) error {
@@ -293,7 +226,7 @@ func validateUserName(name string) error {
 
 func validateEmail(email string) error {
 	if email == "" {
-		return fmt.Errorf("--email is required")
+		return errors.New("--email is required")
 	}
 	if email != strings.ToLower(email) {
 		return fmt.Errorf("email must be lowercase, got %q", email)

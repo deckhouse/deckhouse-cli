@@ -18,16 +18,10 @@ package group
 
 import (
 	"github.com/spf13/cobra"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
-
-var userGVRForCompletion = schema.GroupVersionResource{
-	Group:    "deckhouse.io",
-	Version:  "v1",
-	Resource: "users",
-}
 
 // memberKinds is the enum accepted as the positional member-kind argument
 // on "group add-member" / "group remove-member" commands.
@@ -38,7 +32,7 @@ func completeGroupOnly(cmd *cobra.Command, args []string, toComplete string) ([]
 	if len(args) >= 1 {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	return utilk8s.CompleteResourceNames(cmd, groupGVR, "", toComplete)
+	return utilk8s.CompleteResourceNames(cmd, iamtypes.GroupGVR, "", toComplete)
 }
 
 // completeMemberArgs completes "GROUP [user|group] NAME" triplets for
@@ -46,15 +40,15 @@ func completeGroupOnly(cmd *cobra.Command, args []string, toComplete string) ([]
 func completeMemberArgs(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	switch len(args) {
 	case 0:
-		return utilk8s.CompleteResourceNames(cmd, groupGVR, "", toComplete)
+		return utilk8s.CompleteResourceNames(cmd, iamtypes.GroupGVR, "", toComplete)
 	case 1:
 		return utilk8s.FilterByPrefix(memberKinds, toComplete), cobra.ShellCompDirectiveNoFileComp
 	case 2:
 		switch args[1] {
 		case "user":
-			return utilk8s.CompleteResourceNames(cmd, userGVRForCompletion, "", toComplete)
+			return utilk8s.CompleteResourceNames(cmd, iamtypes.UserGVR, "", toComplete)
 		case "group":
-			return utilk8s.CompleteResourceNames(cmd, groupGVR, "", toComplete)
+			return utilk8s.CompleteResourceNames(cmd, iamtypes.GroupGVR, "", toComplete)
 		}
 	}
 	return nil, cobra.ShellCompDirectiveNoFileComp

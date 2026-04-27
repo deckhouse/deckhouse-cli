@@ -18,6 +18,7 @@ package access
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 	"time"
 
@@ -25,16 +26,17 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 )
 
 func TestParseRuleRef(t *testing.T) {
 	tests := []struct {
-		input       string
-		wantKind    string
-		wantNS      string
-		wantName    string
-		wantErr     bool
-		errContains string
+		input    string
+		wantKind string
+		wantNS   string
+		wantName string
+		wantErr  bool
 	}{
 		{input: "ClusterAuthorizationRule/superadmins", wantKind: "ClusterAuthorizationRule", wantName: "superadmins"},
 		{input: "CAR/superadmins", wantKind: "ClusterAuthorizationRule", wantName: "superadmins"},
@@ -42,19 +44,18 @@ func TestParseRuleRef(t *testing.T) {
 		{input: "AuthorizationRule/dev/editors", wantKind: "AuthorizationRule", wantNS: "dev", wantName: "editors"},
 		{input: "AR/dev/editors", wantKind: "AuthorizationRule", wantNS: "dev", wantName: "editors"},
 		{input: "ar/dev/editors", wantKind: "AuthorizationRule", wantNS: "dev", wantName: "editors"},
-		{input: "superadmins", wantErr: true, errContains: "invalid rule reference"},
-		{input: "CAR/dev/editors", wantErr: true, errContains: "must be of the form ClusterAuthorizationRule/NAME"},
-		{input: "AR/editors", wantErr: true, errContains: "must be of the form AuthorizationRule/NAMESPACE/NAME"},
-		{input: "Role/dev/x", wantErr: true, errContains: "unknown rule kind"},
+		{input: "superadmins", wantErr: true},
+		{input: "CAR/dev/editors", wantErr: true},
+		{input: "AR/editors", wantErr: true},
+		{input: "Role/dev/x", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
 			kind, ns, name, err := parseRuleRef(tc.input)
 			if tc.wantErr {
 				require.Error(t, err)
-				if tc.errContains != "" {
-					assert.Contains(t, err.Error(), tc.errContains)
-				}
+				assert.True(t, errors.Is(err, ErrInvalidRuleRef),
+					"expected ErrInvalidRuleRef, got %v", err)
 				return
 			}
 			require.NoError(t, err)
@@ -133,7 +134,7 @@ func TestRuleRowFromObject_CAR(t *testing.T) {
 		"kind":       "ClusterAuthorizationRule",
 		"metadata": map[string]any{
 			"name":   "superadmins",
-			"labels": map[string]any{managedByLabel: managedByValue},
+			"labels": map[string]any{iamtypes.LabelManagedBy: iamtypes.ManagedByValueCLI},
 		},
 		"spec": map[string]any{
 			"accessLevel":    "SuperAdmin",
@@ -156,7 +157,7 @@ func TestRuleRowFromObject_CAR(t *testing.T) {
 	assert.Equal(t, "superadmins", row.Name)
 	assert.Empty(t, row.Namespace)
 	assert.Equal(t, "SuperAdmin", row.AccessLevel)
-	assert.Equal(t, "all-namespaces", row.ScopeType)
+	assert.Equal(t, iamtypes.ScopeAllNamespaces, row.ScopeType)
 	assert.True(t, row.AllowScale)
 	assert.True(t, row.PortForwarding)
 	assert.True(t, row.ManagedByD8)
@@ -185,7 +186,7 @@ func TestRuleRowFromObject_AR(t *testing.T) {
 	assert.Equal(t, "AuthorizationRule", row.Kind)
 	assert.Equal(t, "editors", row.Name)
 	assert.Equal(t, "dev", row.Namespace)
-	assert.Equal(t, "namespace", row.ScopeType)
+	assert.Equal(t, iamtypes.ScopeNamespace, row.ScopeType)
 	assert.Equal(t, []string{"dev"}, row.ScopeNamespaces)
 	assert.False(t, row.ManagedByD8)
 	assert.Equal(t, "AuthorizationRule/dev/editors", row.ref())
@@ -240,12 +241,8 @@ func TestTruncate(t *testing.T) {
 	assert.Equal(t, "a", truncate("abc", 1))
 }
 
-func TestHumanAge(t *testing.T) {
-	// Zero time returns a placeholder.
+// humanAge delegates to apimachinery duration.HumanDuration; we only assert
+// the zero-time placeholder, which is our own behavior on top of it.
+func TestHumanAge_ZeroPlaceholder(t *testing.T) {
 	assert.Equal(t, "-", humanAge(time.Time{}))
-
-	assert.Regexp(t, `^\d+s$`, humanAge(time.Now().Add(-10*time.Second)))
-	assert.Regexp(t, `^\d+m$`, humanAge(time.Now().Add(-10*time.Minute)))
-	assert.Regexp(t, `^\d+h$`, humanAge(time.Now().Add(-3*time.Hour)))
-	assert.Regexp(t, `^\d+d$`, humanAge(time.Now().Add(-48*time.Hour)))
 }

@@ -25,11 +25,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
+
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 )
 
 // resolveUserEmail fetches a User CR and returns its spec.email.
 func resolveUserEmail(ctx context.Context, dyn dynamic.Interface, userName string) (string, error) {
-	obj, err := dyn.Resource(userGVR).Get(ctx, userName, metav1.GetOptions{})
+	obj, err := dyn.Resource(iamtypes.UserGVR).Get(ctx, userName, metav1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("getting User %q to resolve email: %w", userName, err)
 	}
@@ -54,7 +56,7 @@ type accessInventory struct {
 
 // memberRef is a (kind, name) pair from Group.spec.members.
 type memberRef struct {
-	Kind string
+	Kind iamtypes.SubjectKind
 	Name string
 }
 
@@ -67,7 +69,7 @@ func buildInventory(ctx context.Context, dyn dynamic.Interface) (*accessInventor
 	}
 
 	// Fetch users
-	userList, err := dyn.Resource(userGVR).List(ctx, metav1.ListOptions{})
+	userList, err := dyn.Resource(iamtypes.UserGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("listing Users: %w", err)
 	}
@@ -81,7 +83,7 @@ func buildInventory(ctx context.Context, dyn dynamic.Interface) (*accessInventor
 	}
 
 	// Fetch groups
-	groupList, err := dyn.Resource(groupGVR).List(ctx, metav1.ListOptions{})
+	groupList, err := dyn.Resource(iamtypes.GroupGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("listing Groups: %w", err)
 	}
@@ -95,7 +97,7 @@ func buildInventory(ctx context.Context, dyn dynamic.Interface) (*accessInventor
 				continue
 			}
 			members = append(members, memberRef{
-				Kind: fmt.Sprint(m["kind"]),
+				Kind: iamtypes.SubjectKind(fmt.Sprint(m["kind"])),
 				Name: fmt.Sprint(m["name"]),
 			})
 		}
@@ -103,7 +105,7 @@ func buildInventory(ctx context.Context, dyn dynamic.Interface) (*accessInventor
 	}
 
 	// Fetch ClusterAuthorizationRules
-	carList, err := dyn.Resource(clusterAuthorizationRuleGVR).List(ctx, metav1.ListOptions{})
+	carList, err := dyn.Resource(iamtypes.ClusterAuthorizationRuleGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("listing ClusterAuthorizationRules: %w", err)
 	}
@@ -113,7 +115,7 @@ func buildInventory(ctx context.Context, dyn dynamic.Interface) (*accessInventor
 	}
 
 	// Fetch AuthorizationRules from all namespaces
-	arList, err := dyn.Resource(authorizationRuleGVR).Namespace("").List(ctx, metav1.ListOptions{})
+	arList, err := dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("listing AuthorizationRules: %w", err)
 	}
@@ -128,34 +130,28 @@ func buildInventory(ctx context.Context, dyn dynamic.Interface) (*accessInventor
 func normalizeClusterAuthRule(obj *unstructured.Unstructured) []normalizedGrant {
 	name := obj.GetName()
 	labels := obj.GetLabels()
-	managedByD8 := labels[managedByLabel] == managedByValue
+	managedByD8 := labels[iamtypes.LabelManagedBy] == iamtypes.ManagedByValueCLI
 
 	accessLevel, _, _ := unstructured.NestedString(obj.Object, "spec", "accessLevel")
 	allowScale, _, _ := unstructured.NestedBool(obj.Object, "spec", "allowScale")
 	portForwarding, _, _ := unstructured.NestedBool(obj.Object, "spec", "portForwarding")
 
-	scopeType := "cluster"
+	scopeType := iamtypes.ScopeCluster
 	matchAny, matchAnyFound, _ := unstructured.NestedBool(obj.Object, "spec", "namespaceSelector", "matchAny")
 	if matchAnyFound && matchAny {
-		scopeType = "all-namespaces"
+		scopeType = iamtypes.ScopeAllNamespaces
 	}
 
-	subjects, _, _ := unstructured.NestedSlice(obj.Object, "spec", "subjects")
 	var grants []normalizedGrant
-	for _, s := range subjects {
-		sub, ok := s.(map[string]any)
-		if !ok {
-			continue
-		}
-		kind := fmt.Sprint(sub["kind"])
-		if kind == "ServiceAccount" {
+	for _, sub := range readSubjectRefs(obj) {
+		if sub.Kind == iamtypes.KindServiceAccount {
 			continue
 		}
 		grants = append(grants, normalizedGrant{
-			SourceKind:       "ClusterAuthorizationRule",
+			SourceKind:       iamtypes.KindClusterAuthorizationRule,
 			SourceName:       name,
-			SubjectKind:      kind,
-			SubjectPrincipal: fmt.Sprint(sub["name"]),
+			SubjectKind:      sub.Kind,
+			SubjectPrincipal: sub.Name,
 			AccessLevel:      accessLevel,
 			AllowScale:       allowScale,
 			PortForwarding:   portForwarding,
@@ -170,33 +166,27 @@ func normalizeNamespacedAuthRule(obj *unstructured.Unstructured) []normalizedGra
 	name := obj.GetName()
 	ns := obj.GetNamespace()
 	labels := obj.GetLabels()
-	managedByD8 := labels[managedByLabel] == managedByValue
+	managedByD8 := labels[iamtypes.LabelManagedBy] == iamtypes.ManagedByValueCLI
 
 	accessLevel, _, _ := unstructured.NestedString(obj.Object, "spec", "accessLevel")
 	allowScale, _, _ := unstructured.NestedBool(obj.Object, "spec", "allowScale")
 	portForwarding, _, _ := unstructured.NestedBool(obj.Object, "spec", "portForwarding")
 
-	subjects, _, _ := unstructured.NestedSlice(obj.Object, "spec", "subjects")
 	var grants []normalizedGrant
-	for _, s := range subjects {
-		sub, ok := s.(map[string]any)
-		if !ok {
-			continue
-		}
-		kind := fmt.Sprint(sub["kind"])
-		if kind == "ServiceAccount" {
+	for _, sub := range readSubjectRefs(obj) {
+		if sub.Kind == iamtypes.KindServiceAccount {
 			continue
 		}
 		grants = append(grants, normalizedGrant{
-			SourceKind:       "AuthorizationRule",
+			SourceKind:       iamtypes.KindAuthorizationRule,
 			SourceName:       name,
 			SourceNamespace:  ns,
-			SubjectKind:      kind,
-			SubjectPrincipal: fmt.Sprint(sub["name"]),
+			SubjectKind:      sub.Kind,
+			SubjectPrincipal: sub.Name,
 			AccessLevel:      accessLevel,
 			AllowScale:       allowScale,
 			PortForwarding:   portForwarding,
-			ScopeType:        "namespace",
+			ScopeType:        iamtypes.ScopeNamespace,
 			ScopeNamespaces:  []string{ns},
 			ManagedByD8:      managedByD8,
 		})
@@ -209,7 +199,7 @@ func (inv *accessInventory) ResolveUserGroups(userName string) ([]string, []stri
 	directSet := make(map[string]bool)
 	for gName, members := range inv.GroupMembers {
 		for _, m := range members {
-			if m.Kind == "User" && m.Name == userName {
+			if m.Kind == iamtypes.KindUser && m.Name == userName {
 				directSet[gName] = true
 			}
 		}
@@ -224,7 +214,7 @@ func (inv *accessInventory) ResolveUserGroups(userName string) ([]string, []stri
 		visited[g] = true
 		for parentGroup, members := range inv.GroupMembers {
 			for _, m := range members {
-				if m.Kind == "Group" && m.Name == g {
+				if m.Kind == iamtypes.KindGroup && m.Name == g {
 					walk(parentGroup)
 				}
 			}
@@ -261,9 +251,9 @@ func (inv *accessInventory) UserGrants(userName string) ([]normalizedGrant, []no
 
 	var directGrants, inheritedGrants []normalizedGrant
 	for _, grant := range inv.Grants {
-		if grant.SubjectKind == "User" && grant.SubjectPrincipal == email {
+		if grant.SubjectKind == iamtypes.KindUser && grant.SubjectPrincipal == email {
 			directGrants = append(directGrants, grant)
-		} else if grant.SubjectKind == "Group" && groupSet[grant.SubjectPrincipal] {
+		} else if grant.SubjectKind == iamtypes.KindGroup && groupSet[grant.SubjectPrincipal] {
 			inheritedGrants = append(inheritedGrants, grant)
 		}
 	}
@@ -274,7 +264,7 @@ func (inv *accessInventory) UserGrants(userName string) ([]normalizedGrant, []no
 func (inv *accessInventory) GroupGrants(groupName string) []normalizedGrant {
 	var grants []normalizedGrant
 	for _, grant := range inv.Grants {
-		if grant.SubjectKind == "Group" && grant.SubjectPrincipal == groupName {
+		if grant.SubjectKind == iamtypes.KindGroup && grant.SubjectPrincipal == groupName {
 			grants = append(grants, grant)
 		}
 	}
@@ -311,9 +301,9 @@ func computeEffectiveSummary(grants []normalizedGrant) *effectiveSummary {
 			summary.PortForwarding = true
 		}
 		switch g.ScopeType {
-		case "cluster", "all-namespaces":
+		case iamtypes.ScopeCluster, iamtypes.ScopeAllNamespaces:
 			clusterLevels = append(clusterLevels, g.AccessLevel)
-		case "namespace":
+		case iamtypes.ScopeNamespace:
 			for _, ns := range g.ScopeNamespaces {
 				nsLevels[ns] = append(nsLevels[ns], g.AccessLevel)
 			}
@@ -406,7 +396,7 @@ func (inv *accessInventory) DetectGroupCycles() map[string][]string {
 		path = append(path, g)
 
 		for _, m := range inv.GroupMembers[g] {
-			if m.Kind == "Group" {
+			if m.Kind == iamtypes.KindGroup {
 				dfs(m.Name)
 			}
 		}

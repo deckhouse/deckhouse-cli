@@ -17,14 +17,15 @@ limitations under the License.
 package group
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -74,65 +75,38 @@ func runAddMember(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx := cmd.Context()
-	groupClient := dyn.Resource(groupGVR)
-
-	obj, err := groupClient.Get(ctx, groupName, metav1.GetOptions{})
-	if err != nil {
-		if !createGroup {
-			return fmt.Errorf("group %q not found (use --create-group to create it): %w", groupName, err)
-		}
-		obj = buildGroupObject(groupName)
-		obj, err = groupClient.Create(ctx, obj, metav1.CreateOptions{})
-		if err != nil {
-			return fmt.Errorf("creating group %q: %w", groupName, err)
-		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "Group %q created\n", groupName)
-	}
-
-	// Cycle detection for group->group membership
-	if memberKind == "Group" {
-		hasCycle, cyclePath, err := detectCycle(cmd, dyn, groupName, memberName)
-		if err != nil {
-			return fmt.Errorf("cycle detection failed: %w", err)
-		}
-		if hasCycle {
-			return fmt.Errorf("adding group %q to %q would create a cycle: %s", memberName, groupName, strings.Join(cyclePath, " -> "))
-		}
-	}
-
-	members, _ := getGroupMembers(obj)
-	for _, m := range members {
-		if fmt.Sprint(m["kind"]) == memberKind && fmt.Sprint(m["name"]) == memberName {
-			cmd.Printf("Member %s/%s already exists in group %s\n", memberKind, memberName, groupName)
-			return nil
-		}
-	}
-
-	rawMembers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "members")
-	rawMembers = append(rawMembers, map[string]any{
-		"kind": memberKind,
-		"name": memberName,
+	res, err := EnsureMember(cmd.Context(), dyn, groupName, memberKind, memberName, EnsureMemberOpts{
+		CreateGroupIfMissing: createGroup,
+		CycleCheck:           true,
 	})
-	if err := unstructured.SetNestedSlice(obj.Object, rawMembers, "spec", "members"); err != nil {
-		return fmt.Errorf("setting members: %w", err)
-	}
-
-	_, err = groupClient.Update(ctx, obj, metav1.UpdateOptions{})
 	if err != nil {
-		return fmt.Errorf("updating group %q: %w", groupName, err)
+		// EnsureMember wraps the API NotFound error verbatim, so the standard
+		// k8s error helpers see through the wrap and we don't need to grep
+		// the message string.
+		if !createGroup && apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w (use --create-group to create it)", err)
+		}
+		return err
 	}
 
-	cmd.Printf("Added %s %q to group %q\n", strings.ToLower(memberKind), memberName, groupName)
+	switch {
+	case res.GroupCreated:
+		fmt.Fprintf(cmd.ErrOrStderr(), "Group %q created\n", groupName)
+		cmd.Printf("Added %s %q to group %q\n", strings.ToLower(string(memberKind)), memberName, groupName)
+	case res.AlreadyMember:
+		cmd.Printf("Member %s/%s already exists in group %s\n", memberKind, memberName, groupName)
+	case res.Added:
+		cmd.Printf("Added %s %q to group %q\n", strings.ToLower(string(memberKind)), memberName, groupName)
+	}
 	return nil
 }
 
-func normalizeMemberKind(kind string) (string, error) {
+func normalizeMemberKind(kind string) (iamtypes.SubjectKind, error) {
 	switch strings.ToLower(kind) {
 	case "user":
-		return "User", nil
+		return iamtypes.KindUser, nil
 	case "group":
-		return "Group", nil
+		return iamtypes.KindGroup, nil
 	default:
 		return "", fmt.Errorf("invalid member kind %q: must be user or group", kind)
 	}
@@ -151,6 +125,6 @@ func parseMemberArgs(args []string) (string, string, string, error) {
 	case 3:
 		return args[0], args[1], args[2], nil
 	default:
-		return "", "", "", fmt.Errorf("expected GROUP MEMBER or GROUP (user|group) MEMBER, got %d arguments", len(args))
+		return "", "", "", errors.New("expected GROUP MEMBER or GROUP (user|group) MEMBER")
 	}
 }

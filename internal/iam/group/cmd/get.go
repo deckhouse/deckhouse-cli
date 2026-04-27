@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/cli-runtime/pkg/printers"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -44,7 +45,7 @@ func newGetCommand() *cobra.Command {
 				return err
 			}
 
-			obj, err := dyn.Resource(groupGVR).Get(cmd.Context(), name, metav1.GetOptions{})
+			obj, err := dyn.Resource(iamtypes.GroupGVR).Get(cmd.Context(), name, metav1.GetOptions{})
 			if err != nil {
 				return fmt.Errorf("getting Group %q: %w", name, err)
 			}
@@ -73,12 +74,13 @@ func printGroupDetail(cmd *cobra.Command, obj *unstructured.Unstructured) error 
 	}
 
 	members, _ := getGroupMembers(obj)
+	groupKindStr := string(iamtypes.KindGroup)
 	var users, groups []string
 	for _, m := range members {
 		kind := fmt.Sprint(m["kind"])
 		mName := fmt.Sprint(m["name"])
 		switch kind {
-		case "Group":
+		case groupKindStr:
 			groups = append(groups, mName)
 		default:
 			users = append(users, mName)
@@ -154,7 +156,7 @@ func printGroupTable(cmd *cobra.Command, groups []*unstructured.Unstructured) er
 		userCount := 0
 		nestedCount := 0
 		for _, m := range members {
-			if fmt.Sprint(m["kind"]) == "Group" {
+			if fmt.Sprint(m["kind"]) == string(iamtypes.KindGroup) {
 				nestedCount++
 			} else {
 				userCount++

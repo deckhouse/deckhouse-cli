@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -83,9 +84,9 @@ func runExplain(cmd *cobra.Command, args []string) error {
 	}
 
 	switch subjectKind {
-	case "User":
+	case iamtypes.KindUser:
 		return explainUser(cmd, inv, name, outputFmt)
-	case "Group":
+	case iamtypes.KindGroup:
 		return explainGroup(cmd, inv, name, outputFmt)
 	}
 	return nil
@@ -254,12 +255,12 @@ func collectGroupWarnings(inv *accessInventory, groupName string, cycles map[str
 	// Check if any user members are orphaned
 	members := inv.GroupMembers[groupName]
 	for _, m := range members {
-		if m.Kind == "User" {
+		if m.Kind == iamtypes.KindUser {
 			if _, ok := inv.Users[m.Name]; !ok {
 				warnings = append(warnings, fmt.Sprintf("user member %q not found as a local User CR (may be orphaned)", m.Name))
 			}
 		}
-		if m.Kind == "Group" {
+		if m.Kind == iamtypes.KindGroup {
 			if _, ok := inv.GroupMembers[m.Name]; !ok {
 				warnings = append(warnings, fmt.Sprintf("nested group %q not found as a local Group CR", m.Name))
 			}
@@ -294,7 +295,7 @@ func printGroupExplainJSON(cmd *cobra.Command, inv *accessInventory, groupName s
 		Warnings:  warnings,
 	}
 	for _, m := range members {
-		item.Members = append(item.Members, memberEntry(m))
+		item.Members = append(item.Members, memberEntry{Kind: string(m.Kind), Name: m.Name})
 	}
 	if item.Members == nil {
 		item.Members = []memberEntry{}

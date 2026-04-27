@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -29,12 +30,10 @@ import (
 // "d8 iam access grant", "d8 iam access revoke" and "d8 iam access explain".
 var subjectKinds = []string{"user", "group"}
 
-// allAccessLevelsList is the static list of access levels for flag completion.
-// Kept in stable admin-to-user order to be friendlier in shell completion UIs.
-var allAccessLevelsList = []string{
-	"User", "PrivilegedUser", "Editor", "Admin",
-	"ClusterEditor", "ClusterAdmin", "SuperAdmin",
-}
+// allAccessLevelsList is exposed for flag completion. It points at the same
+// ordered slice that drives validation in types.go, so adding a new level
+// updates both sites at once.
+var allAccessLevelsList = allAccessLevelsOrdered
 
 // completeSubjectAndName completes "user|group NAME" positional pairs.
 func completeSubjectAndName(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -44,9 +43,9 @@ func completeSubjectAndName(cmd *cobra.Command, args []string, toComplete string
 	case 1:
 		switch args[0] {
 		case "user":
-			return utilk8s.CompleteResourceNames(cmd, userGVR, "", toComplete)
+			return utilk8s.CompleteResourceNames(cmd, iamtypes.UserGVR, "", toComplete)
 		case "group":
-			return utilk8s.CompleteResourceNames(cmd, groupGVR, "", toComplete)
+			return utilk8s.CompleteResourceNames(cmd, iamtypes.GroupGVR, "", toComplete)
 		}
 	}
 	return nil, cobra.ShellCompDirectiveNoFileComp
@@ -94,7 +93,7 @@ func completeRuleRef(cmd *cobra.Command, args []string, toComplete string) ([]st
 	var suggestions []string
 
 	if wantCAR {
-		list, err := dyn.Resource(clusterAuthorizationRuleGVR).List(cmd.Context(), metav1.ListOptions{})
+		list, err := dyn.Resource(iamtypes.ClusterAuthorizationRuleGVR).List(cmd.Context(), metav1.ListOptions{})
 		if err == nil {
 			for i := range list.Items {
 				suggestions = append(suggestions, "CAR/"+list.Items[i].GetName())
@@ -102,7 +101,7 @@ func completeRuleRef(cmd *cobra.Command, args []string, toComplete string) ([]st
 		}
 	}
 	if wantAR {
-		list, err := dyn.Resource(authorizationRuleGVR).Namespace("").List(cmd.Context(), metav1.ListOptions{})
+		list, err := dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace("").List(cmd.Context(), metav1.ListOptions{})
 		if err == nil {
 			for i := range list.Items {
 				obj := &list.Items[i]

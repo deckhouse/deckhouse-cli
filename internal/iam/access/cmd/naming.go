@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 )
 
@@ -36,7 +37,7 @@ func generateGrantName(spec *canonicalGrantSpec) (string, error) {
 	hash8 := fmt.Sprintf("%x", h[:4])
 
 	name := fmt.Sprintf("d8-access-%s-%s-%s-%s-%s",
-		strings.ToLower(spec.SubjectKind),
+		strings.ToLower(string(spec.SubjectKind)),
 		sanitizeNamePart(spec.SubjectRef),
 		scopeNamePart(spec),
 		strings.ToLower(spec.AccessLevel),
@@ -51,12 +52,14 @@ func generateGrantName(spec *canonicalGrantSpec) (string, error) {
 }
 
 // grantLabels returns the standard labels for a d8-managed grant object.
+// Typed enum values are converted to plain strings here because Kubernetes
+// label values are strings.
 func grantLabels(spec *canonicalGrantSpec) map[string]string {
 	return map[string]string{
-		managedByLabel:                     managedByValue,
-		"deckhouse.io/access-model":        "current",
-		"deckhouse.io/access-subject-kind": strings.ToLower(spec.SubjectKind),
-		"deckhouse.io/access-scope":        spec.ScopeType,
+		iamtypes.LabelManagedBy:         iamtypes.ManagedByValueCLI,
+		iamtypes.LabelAccessModel:       string(iamtypes.ModelCurrent),
+		iamtypes.LabelAccessSubjectKind: strings.ToLower(string(spec.SubjectKind)),
+		iamtypes.LabelAccessScope:       string(spec.ScopeType),
 	}
 }
 
@@ -67,10 +70,10 @@ func grantAnnotations(spec *canonicalGrantSpec) (map[string]string, error) {
 		return nil, err
 	}
 	return map[string]string{
-		"deckhouse.io/access-subject-ref":        spec.SubjectRef,
-		"deckhouse.io/access-subject-principal":  spec.SubjectPrincipal,
-		"deckhouse.io/access-canonical-spec":     jsonStr,
-		"deckhouse.io/access-created-by-version": version.Version,
+		iamtypes.AnnotationAccessSubjectRef:       spec.SubjectRef,
+		iamtypes.AnnotationAccessSubjectPrincipal: spec.SubjectPrincipal,
+		iamtypes.AnnotationAccessCanonicalSpec:    jsonStr,
+		iamtypes.AnnotationAccessCreatedByVersion: version.Version,
 	}, nil
 }
 
@@ -88,14 +91,14 @@ func sanitizeNamePart(s string) string {
 
 func scopeNamePart(spec *canonicalGrantSpec) string {
 	switch spec.ScopeType {
-	case "namespace":
+	case iamtypes.ScopeNamespace:
 		if len(spec.Namespaces) == 1 {
 			return spec.Namespaces[0]
 		}
 		return "multi-ns"
-	case "cluster":
+	case iamtypes.ScopeCluster:
 		return "cluster"
-	case "all-namespaces":
+	case iamtypes.ScopeAllNamespaces:
 		return "all"
 	default:
 		return "unknown"

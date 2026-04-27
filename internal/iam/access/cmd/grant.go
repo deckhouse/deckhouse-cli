@@ -24,11 +24,13 @@ import (
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -157,7 +159,7 @@ func runGrant(cmd *cobra.Command, args []string) error {
 	outputFmt, _ := cmd.Flags().GetString("output")
 
 	if accessLevel == "" {
-		return fmt.Errorf("--access-level is required (or use --to to add a subject to an existing rule)")
+		return errors.New("--access-level is required (or use --to to add a subject to an existing rule)")
 	}
 
 	subjectKind, err := parseSubjectKind(subjectKindStr)
@@ -170,7 +172,7 @@ func runGrant(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	isNamespaced := scopeType == "namespace"
+	isNamespaced := scopeType == iamtypes.ScopeNamespace
 	if err := validateAccessLevel(accessLevel, isNamespaced); err != nil {
 		return err
 	}
@@ -182,101 +184,159 @@ func runGrant(cmd *cobra.Command, args []string) error {
 
 	var subjectPrincipal string
 	switch subjectKind {
-	case "User":
+	case iamtypes.KindUser:
 		subjectPrincipal, err = resolveUserEmail(cmd.Context(), dyn, subjectName)
 		if err != nil {
 			return err
 		}
-	case "Group":
+	case iamtypes.KindGroup:
 		subjectPrincipal = subjectName
-		if _, err := dyn.Resource(groupGVR).Get(cmd.Context(), subjectName, metav1.GetOptions{}); err != nil {
+		if _, err := dyn.Resource(iamtypes.GroupGVR).Get(cmd.Context(), subjectName, metav1.GetOptions{}); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: local Group CR %q not found. Grant may target an external provider group.\n", subjectName)
 		}
 	}
 
-	switch scopeType {
-	case "namespace":
-		return grantNamespaced(cmd, dyn, subjectKind, subjectName, subjectPrincipal, accessLevel, namespaces, allowScale, portForwarding, dryRun, outputFmt)
-	case "cluster", "all-namespaces":
-		return grantCluster(cmd, dyn, subjectKind, subjectName, subjectPrincipal, accessLevel, scopeType, allowScale, portForwarding, dryRun, outputFmt)
+	opts := grantOpts{
+		subjectKind:      subjectKind,
+		subjectRef:       subjectName,
+		subjectPrincipal: subjectPrincipal,
+		accessLevel:      accessLevel,
+		scopeType:        scopeType,
+		namespaces:       namespaces,
+		allowScale:       allowScale,
+		portForwarding:   portForwarding,
+		dryRun:           dryRun,
+		outputFmt:        outputFmt,
 	}
-	return nil
+	return applyGrants(cmd, dyn, opts)
 }
 
-func grantNamespaced(cmd *cobra.Command, dyn dynamic.Interface,
-	subjectKind, subjectRef, subjectPrincipal, accessLevel string,
-	namespaces []string, allowScale, portForwarding, dryRun bool, outputFmt string) error {
-	var errs *multierror.Error
-	for _, ns := range namespaces {
-		spec := &canonicalGrantSpec{
-			Model:            "current",
-			SubjectKind:      subjectKind,
-			SubjectRef:       subjectRef,
-			SubjectPrincipal: subjectPrincipal,
-			AccessLevel:      accessLevel,
-			ScopeType:        "namespace",
-			Namespaces:       []string{ns},
-			AllowScale:       allowScale,
-			PortForwarding:   portForwarding,
-		}
+// grantOpts captures everything needed to materialize one or more grants. It
+// exists so applyGrants doesn't take 10+ parameters and so the caller can be
+// read top-to-bottom without arg-counting.
+type grantOpts struct {
+	subjectKind      iamtypes.SubjectKind
+	subjectRef       string // local CR name (User.metadata.name or Group.metadata.name)
+	subjectPrincipal string // value that ends up in spec.subjects[].name
+	accessLevel      string
+	scopeType        iamtypes.Scope
+	namespaces       []string
+	allowScale       bool
+	portForwarding   bool
+	dryRun           bool
+	outputFmt        string
+}
 
-		obj, err := buildAuthorizationRule(spec, ns)
+// applyGrants iterates every namespace for namespace-scoped grants and falls
+// back to a single iteration for cluster-scoped ones. The resource client is
+// chosen from the scope, and from then on the cluster vs namespaced paths are
+// identical.
+func applyGrants(cmd *cobra.Command, dyn dynamic.Interface, opts grantOpts) error {
+	specs, err := canonicalGrantSpecs(canonicalGrantInput{
+		SubjectKind:      opts.subjectKind,
+		SubjectRef:       opts.subjectRef,
+		SubjectPrincipal: opts.subjectPrincipal,
+		AccessLevel:      opts.accessLevel,
+		ScopeType:        opts.scopeType,
+		Namespaces:       opts.namespaces,
+		AllowScale:       opts.allowScale,
+		PortForwarding:   opts.portForwarding,
+	})
+	if err != nil {
+		return err
+	}
+
+	var errs *multierror.Error
+	for _, spec := range specs {
+		client, err := grantClient(dyn, spec)
+		if err != nil {
+			return err
+		}
+		obj, err := buildGrantObject(spec)
 		if err != nil {
 			return err
 		}
 
-		if dryRun {
-			if err := utilk8s.PrintObject(cmd.OutOrStdout(), obj, outputFmt); err != nil {
+		if opts.dryRun {
+			if err := utilk8s.PrintObject(cmd.OutOrStdout(), obj, opts.outputFmt); err != nil {
 				return err
 			}
 			continue
 		}
 
-		result, err := createOrUpdateNamespacedGrant(cmd, dyn, obj, ns)
+		result, err := createOrUpdateGrant(cmd, client, obj, spec)
 		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to create grant in namespace %q: %v\n", ns, err)
-			errs = multierror.Append(errs, fmt.Errorf("namespace %s: %w", ns, err))
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to create grant for %s: %v\n", grantHumanScope(spec), err)
+			errs = multierror.Append(errs, fmt.Errorf("%s: %w", grantHumanScope(spec), err))
 			continue
 		}
-		if err := utilk8s.PrintObject(cmd.OutOrStdout(), result, outputFmt); err != nil {
+		if err := utilk8s.PrintObject(cmd.OutOrStdout(), result, opts.outputFmt); err != nil {
 			return err
 		}
 	}
-
 	return errs.ErrorOrNil()
 }
 
-func grantCluster(cmd *cobra.Command, dyn dynamic.Interface,
-	subjectKind, subjectRef, subjectPrincipal, accessLevel, scopeType string,
-	allowScale, portForwarding, dryRun bool, outputFmt string) error {
-	spec := &canonicalGrantSpec{
-		Model:            "current",
-		SubjectKind:      subjectKind,
-		SubjectRef:       subjectRef,
-		SubjectPrincipal: subjectPrincipal,
-		AccessLevel:      accessLevel,
-		ScopeType:        scopeType,
-		AllowScale:       allowScale,
-		PortForwarding:   portForwarding,
+// canonicalGrantSpecs expands a canonicalGrantInput into one canonicalGrantSpec
+// per concrete object that will be created. Namespaced scope produces N specs
+// (one per namespace), cluster/all-namespaces produces a single spec. Used by
+// both applyGrants and revokeManagedGrants so the two flows agree on object
+// identity (since the d8-managed name is derived from the canonical spec).
+func canonicalGrantSpecs(in canonicalGrantInput) ([]*canonicalGrantSpec, error) {
+	base := &canonicalGrantSpec{
+		Model:            iamtypes.ModelCurrent,
+		SubjectKind:      in.SubjectKind,
+		SubjectRef:       in.SubjectRef,
+		SubjectPrincipal: in.SubjectPrincipal,
+		AccessLevel:      in.AccessLevel,
+		ScopeType:        in.ScopeType,
+		AllowScale:       in.AllowScale,
+		PortForwarding:   in.PortForwarding,
 	}
 
-	obj, err := buildClusterAuthorizationRule(spec)
-	if err != nil {
-		return err
+	switch in.ScopeType {
+	case iamtypes.ScopeNamespace:
+		if len(in.Namespaces) == 0 {
+			return nil, errors.New("namespaced grant requires at least one namespace")
+		}
+		specs := make([]*canonicalGrantSpec, 0, len(in.Namespaces))
+		for _, ns := range in.Namespaces {
+			if ns == "" {
+				return nil, errors.New("namespace name must not be empty")
+			}
+			s := *base
+			s.Namespaces = []string{ns}
+			specs = append(specs, &s)
+		}
+		return specs, nil
+	case iamtypes.ScopeCluster, iamtypes.ScopeAllNamespaces:
+		return []*canonicalGrantSpec{base}, nil
+	default:
+		return nil, fmt.Errorf("unsupported scope %q", in.ScopeType)
 	}
-
-	if dryRun {
-		return utilk8s.PrintObject(cmd.OutOrStdout(), obj, outputFmt)
-	}
-
-	result, err := createOrUpdateClusterGrant(cmd, dyn, obj)
-	if err != nil {
-		return err
-	}
-	return utilk8s.PrintObject(cmd.OutOrStdout(), result, outputFmt)
 }
 
-func buildAuthorizationRule(spec *canonicalGrantSpec, ns string) (*unstructured.Unstructured, error) {
+// grantClient picks the right dynamic.ResourceInterface for a spec. A
+// namespaced spec has exactly one namespace at this point (canonicalSpecs
+// guarantees that).
+func grantClient(dyn dynamic.Interface, spec *canonicalGrantSpec) (dynamic.ResourceInterface, error) {
+	switch spec.ScopeType {
+	case iamtypes.ScopeNamespace:
+		if len(spec.Namespaces) != 1 {
+			return nil, fmt.Errorf("namespaced grant must target exactly one namespace, got %d", len(spec.Namespaces))
+		}
+		return dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace(spec.Namespaces[0]), nil
+	case iamtypes.ScopeCluster, iamtypes.ScopeAllNamespaces:
+		return dyn.Resource(iamtypes.ClusterAuthorizationRuleGVR), nil
+	default:
+		return nil, fmt.Errorf("unsupported scope %q", spec.ScopeType)
+	}
+}
+
+// buildGrantObject produces the Unstructured for a grant — AR for namespaced,
+// CAR for cluster/all-namespaces. The object kind/apiVersion/namespace branch
+// off ScopeType but the rest is shared.
+func buildGrantObject(spec *canonicalGrantSpec) (*unstructured.Unstructured, error) {
 	name, err := generateGrantName(spec)
 	if err != nil {
 		return nil, err
@@ -293,121 +353,106 @@ func buildAuthorizationRule(spec *canonicalGrantSpec, ns string) (*unstructured.
 		"portForwarding": spec.PortForwarding,
 		"subjects": []any{
 			map[string]any{
-				"kind": spec.SubjectKind,
+				"kind": string(spec.SubjectKind),
 				"name": spec.SubjectPrincipal,
 			},
 		},
 	}
 
-	return &unstructured.Unstructured{
-		Object: map[string]any{
-			"apiVersion": "deckhouse.io/v1alpha1",
-			"kind":       "AuthorizationRule",
-			"metadata": map[string]any{
-				"name":        name,
-				"namespace":   ns,
-				"labels":      toAnyMap(labels),
-				"annotations": toAnyMap(annotations),
-			},
-			"spec": ruleSpec,
-		},
-	}, nil
-}
-
-func buildClusterAuthorizationRule(spec *canonicalGrantSpec) (*unstructured.Unstructured, error) {
-	name, err := generateGrantName(spec)
-	if err != nil {
-		return nil, err
-	}
-	labels := grantLabels(spec)
-	annotations, err := grantAnnotations(spec)
-	if err != nil {
-		return nil, err
+	metadata := map[string]any{
+		"name":        name,
+		"labels":      toAnyMap(labels),
+		"annotations": toAnyMap(annotations),
 	}
 
-	ruleSpec := map[string]any{
-		"accessLevel":    spec.AccessLevel,
-		"allowScale":     spec.AllowScale,
-		"portForwarding": spec.PortForwarding,
-		"subjects": []any{
-			map[string]any{
-				"kind": spec.SubjectKind,
-				"name": spec.SubjectPrincipal,
-			},
-		},
-	}
-
-	if spec.ScopeType == "all-namespaces" {
-		ruleSpec["namespaceSelector"] = map[string]any{
-			"matchAny": true,
+	var apiVersion, kind string
+	switch spec.ScopeType {
+	case iamtypes.ScopeNamespace:
+		// canonicalGrantSpecs guarantees exactly one namespace per spec for
+		// namespaced scope; recheck it here so this function stays correct
+		// even if a future caller bypasses the expansion helper.
+		if len(spec.Namespaces) != 1 {
+			return nil, fmt.Errorf("namespaced grant must target exactly one namespace, got %d", len(spec.Namespaces))
 		}
+		if spec.Namespaces[0] == "" {
+			return nil, errors.New("namespaced grant has empty namespace")
+		}
+		apiVersion = iamtypes.APIVersionDeckhouseV1Alpha1
+		kind = iamtypes.KindAuthorizationRule
+		metadata["namespace"] = spec.Namespaces[0]
+	case iamtypes.ScopeCluster:
+		apiVersion = iamtypes.APIVersionDeckhouseV1
+		kind = iamtypes.KindClusterAuthorizationRule
+	case iamtypes.ScopeAllNamespaces:
+		apiVersion = iamtypes.APIVersionDeckhouseV1
+		kind = iamtypes.KindClusterAuthorizationRule
+		ruleSpec["namespaceSelector"] = map[string]any{"matchAny": true}
+	default:
+		return nil, fmt.Errorf("unsupported scope %q", spec.ScopeType)
 	}
 
 	return &unstructured.Unstructured{
 		Object: map[string]any{
-			"apiVersion": "deckhouse.io/v1",
-			"kind":       "ClusterAuthorizationRule",
-			"metadata": map[string]any{
-				"name":        name,
-				"labels":      toAnyMap(labels),
-				"annotations": toAnyMap(annotations),
-			},
-			"spec": ruleSpec,
+			"apiVersion": apiVersion,
+			"kind":       kind,
+			"metadata":   metadata,
+			"spec":       ruleSpec,
 		},
 	}, nil
 }
 
-func createOrUpdateNamespacedGrant(cmd *cobra.Command, dyn dynamic.Interface, obj *unstructured.Unstructured, ns string) (*unstructured.Unstructured, error) {
-	client := dyn.Resource(authorizationRuleGVR).Namespace(ns)
+// createOrUpdateGrant creates the object, or updates it if a same-named
+// d8-managed object exists with a different canonical spec. Same canonical
+// spec is treated as a no-op.
+//
+// A non-NotFound Get error is propagated rather than swallowed; otherwise a
+// transient API failure (timeout, RBAC issue, conflict) would silently fall
+// through to Create and produce a misleading "AlreadyExists" or — worse — a
+// blind overwrite if the cached object differs from server state.
+func createOrUpdateGrant(cmd *cobra.Command, client dynamic.ResourceInterface,
+	obj *unstructured.Unstructured, spec *canonicalGrantSpec) (*unstructured.Unstructured, error) {
 	name := obj.GetName()
+	scope := grantHumanScope(spec)
 
 	existing, err := client.Get(cmd.Context(), name, metav1.GetOptions{})
-	if err == nil {
-		// Check if it matches
+	switch {
+	case err == nil:
 		existingAnnot := existing.GetAnnotations()
 		newAnnot := obj.GetAnnotations()
-		if existingAnnot["deckhouse.io/access-canonical-spec"] == newAnnot["deckhouse.io/access-canonical-spec"] {
-			cmd.PrintErrf("AuthorizationRule/%s/%s unchanged\n", ns, name)
+		if existingAnnot[iamtypes.AnnotationAccessCanonicalSpec] == newAnnot[iamtypes.AnnotationAccessCanonicalSpec] {
+			cmd.PrintErrf("%s/%s unchanged\n", scope, name)
 			return existing, nil
 		}
 		obj.SetResourceVersion(existing.GetResourceVersion())
 		return client.Update(cmd.Context(), obj, metav1.UpdateOptions{})
+	case apierrors.IsNotFound(err):
+		return client.Create(cmd.Context(), obj, metav1.CreateOptions{})
+	default:
+		return nil, fmt.Errorf("getting %s/%s: %w", scope, name, err)
 	}
-
-	return client.Create(cmd.Context(), obj, metav1.CreateOptions{})
 }
 
-func createOrUpdateClusterGrant(cmd *cobra.Command, dyn dynamic.Interface, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
-	client := dyn.Resource(clusterAuthorizationRuleGVR)
-	name := obj.GetName()
-
-	existing, err := client.Get(cmd.Context(), name, metav1.GetOptions{})
-	if err == nil {
-		existingAnnot := existing.GetAnnotations()
-		newAnnot := obj.GetAnnotations()
-		if existingAnnot["deckhouse.io/access-canonical-spec"] == newAnnot["deckhouse.io/access-canonical-spec"] {
-			cmd.PrintErrf("ClusterAuthorizationRule/%s unchanged\n", name)
-			return existing, nil
-		}
-		obj.SetResourceVersion(existing.GetResourceVersion())
-		return client.Update(cmd.Context(), obj, metav1.UpdateOptions{})
+// grantHumanScope renders the source kind (with optional namespace) used in
+// progress and warning messages so output stays consistent with revoke.
+func grantHumanScope(spec *canonicalGrantSpec) string {
+	if spec.ScopeType == iamtypes.ScopeNamespace && len(spec.Namespaces) == 1 {
+		return iamtypes.KindAuthorizationRule + "/" + spec.Namespaces[0]
 	}
-
-	return client.Create(cmd.Context(), obj, metav1.CreateOptions{})
+	return iamtypes.KindClusterAuthorizationRule
 }
 
-func parseSubjectKind(s string) (string, error) {
+func parseSubjectKind(s string) (iamtypes.SubjectKind, error) {
 	switch strings.ToLower(s) {
 	case "user":
-		return "User", nil
+		return iamtypes.KindUser, nil
 	case "group":
-		return "Group", nil
+		return iamtypes.KindGroup, nil
 	default:
 		return "", fmt.Errorf("invalid subject kind %q: must be user or group", s)
 	}
 }
 
-func parseScopeFlags(namespaces []string, cluster, allNamespaces bool) (string, error) {
+func parseScopeFlags(namespaces []string, cluster, allNamespaces bool) (iamtypes.Scope, error) {
 	count := 0
 	if len(namespaces) > 0 {
 		count++
@@ -419,19 +464,19 @@ func parseScopeFlags(namespaces []string, cluster, allNamespaces bool) (string, 
 		count++
 	}
 	if count == 0 {
-		return "", fmt.Errorf("one of -n/--namespace, --cluster, or --all-namespaces must be specified")
+		return "", errors.New("one of -n/--namespace, --cluster, or --all-namespaces must be specified")
 	}
 	if count > 1 {
-		return "", fmt.Errorf("-n/--namespace, --cluster, and --all-namespaces are mutually exclusive")
+		return "", errors.New("-n/--namespace, --cluster, and --all-namespaces are mutually exclusive")
 	}
 
 	if len(namespaces) > 0 {
-		return "namespace", nil
+		return iamtypes.ScopeNamespace, nil
 	}
 	if cluster {
-		return "cluster", nil
+		return iamtypes.ScopeCluster, nil
 	}
-	return "all-namespaces", nil
+	return iamtypes.ScopeAllNamespaces, nil
 }
 
 func toAnyMap(m map[string]string) map[string]any {
@@ -495,7 +540,7 @@ func runSourceBasedGrant(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(args) != 2 {
-		return fmt.Errorf("source-based grant requires: grant --to <source> (user|group) <principal>")
+		return errors.New("source-based grant requires: grant --to <source> (user|group) <principal>")
 	}
 	subjectKind, err := parseSubjectKind(args[0])
 	if err != nil {
@@ -516,72 +561,59 @@ func runSourceBasedGrant(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid --to: %w", err)
 	}
+
+	var client dynamic.ResourceInterface
 	switch refKind {
-	case "ClusterAuthorizationRule":
-		return addSubjectToClusterRule(cmd, dyn, refName, subjectKind, subjectPrincipal)
-	case "AuthorizationRule":
-		return addSubjectToNamespacedRule(cmd, dyn, refNS, refName, subjectKind, subjectPrincipal)
+	case iamtypes.KindClusterAuthorizationRule:
+		client = dyn.Resource(iamtypes.ClusterAuthorizationRuleGVR)
+	case iamtypes.KindAuthorizationRule:
+		client = dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace(refNS)
 	default:
 		return fmt.Errorf("unsupported --to kind %q", refKind)
 	}
+	return addSubjectToRule(cmd, client, refKind, refNS, refName, subjectKind, subjectPrincipal)
 }
 
-func addSubjectToClusterRule(cmd *cobra.Command, dyn dynamic.Interface, ruleName, subjectKind, subjectPrincipal string) error {
-	client := dyn.Resource(clusterAuthorizationRuleGVR)
+// addSubjectToRule adds (kind,principal) to spec.subjects of the rule pointed
+// to by client. The cluster vs namespaced difference lives entirely in how
+// the caller built the dynamic.ResourceInterface; ref/ns are only used for
+// human messages.
+func addSubjectToRule(cmd *cobra.Command, client dynamic.ResourceInterface,
+	ruleKind, ns, ruleName string, subjectKind iamtypes.SubjectKind, subjectPrincipal string) error {
+	ref := formatRuleRef(ruleKind, ns, ruleName)
+
 	obj, err := client.Get(cmd.Context(), ruleName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("getting ClusterAuthorizationRule %q: %w", ruleName, err)
+		return fmt.Errorf("getting %s: %w", ref, err)
 	}
 
 	newSubjects, added := addSubject(obj, subjectKind, subjectPrincipal)
 	if !added {
-		cmd.Printf("Subject %s/%s already present in ClusterAuthorizationRule/%s (no change)\n", subjectKind, subjectPrincipal, ruleName)
+		cmd.Printf("Subject %s/%s already present in %s (no change)\n", subjectKind, subjectPrincipal, ref)
 		return nil
 	}
 
 	if err := unstructured.SetNestedSlice(obj.Object, newSubjects, "spec", "subjects"); err != nil {
-		return fmt.Errorf("setting subjects: %w", err)
+		return fmt.Errorf("setting subjects on %s: %w", ref, err)
 	}
-	if _, err = client.Update(cmd.Context(), obj, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("updating ClusterAuthorizationRule %q: %w", ruleName, err)
+	if _, err := client.Update(cmd.Context(), obj, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("updating %s: %w", ref, err)
 	}
-	cmd.Printf("Added subject %s/%s to ClusterAuthorizationRule/%s\n", subjectKind, subjectPrincipal, ruleName)
+	cmd.Printf("Added subject %s/%s to %s\n", subjectKind, subjectPrincipal, ref)
 	return nil
 }
 
-func addSubjectToNamespacedRule(cmd *cobra.Command, dyn dynamic.Interface, ns, ruleName, subjectKind, subjectPrincipal string) error {
-	client := dyn.Resource(authorizationRuleGVR).Namespace(ns)
-	obj, err := client.Get(cmd.Context(), ruleName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("getting AuthorizationRule %q in namespace %q: %w", ruleName, ns, err)
-	}
-
-	newSubjects, added := addSubject(obj, subjectKind, subjectPrincipal)
-	if !added {
-		cmd.Printf("Subject %s/%s already present in AuthorizationRule/%s/%s (no change)\n", subjectKind, subjectPrincipal, ns, ruleName)
-		return nil
-	}
-
-	if err := unstructured.SetNestedSlice(obj.Object, newSubjects, "spec", "subjects"); err != nil {
-		return fmt.Errorf("setting subjects: %w", err)
-	}
-	if _, err = client.Update(cmd.Context(), obj, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("updating AuthorizationRule %s/%s: %w", ns, ruleName, err)
-	}
-	cmd.Printf("Added subject %s/%s to AuthorizationRule/%s/%s\n", subjectKind, subjectPrincipal, ns, ruleName)
-	return nil
-}
-
-func addSubject(obj *unstructured.Unstructured, kind, name string) ([]any, bool) {
+func addSubject(obj *unstructured.Unstructured, kind iamtypes.SubjectKind, name string) ([]any, bool) {
 	subjects, _, _ := unstructured.NestedSlice(obj.Object, "spec", "subjects")
+	kindStr := string(kind)
 	for _, s := range subjects {
 		sub, ok := s.(map[string]any)
 		if !ok {
 			continue
 		}
-		if fmt.Sprint(sub["kind"]) == kind && fmt.Sprint(sub["name"]) == name {
+		if fmt.Sprint(sub["kind"]) == kindStr && fmt.Sprint(sub["name"]) == name {
 			return subjects, false
 		}
 	}
-	return append(subjects, map[string]any{"kind": kind, "name": name}), true
+	return append(subjects, map[string]any{"kind": kindStr, "name": name}), true
 }

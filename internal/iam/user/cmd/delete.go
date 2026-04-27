@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -51,7 +52,7 @@ func newDeleteCommand() *cobra.Command {
 				return err
 			}
 
-			err = dyn.Resource(userGVR).Delete(cmd.Context(), name, metav1.DeleteOptions{})
+			err = dyn.Resource(iamtypes.UserGVR).Delete(cmd.Context(), name, metav1.DeleteOptions{})
 			if err != nil {
 				return fmt.Errorf("deleting User %q: %w", name, err)
 			}

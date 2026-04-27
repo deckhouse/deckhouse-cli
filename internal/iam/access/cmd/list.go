@@ -27,6 +27,7 @@ import (
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -129,7 +130,7 @@ func newListUserCommand() *cobra.Command {
 			if len(args) >= 1 {
 				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
-			return utilk8s.CompleteResourceNames(cmd, userGVR, "", toComplete)
+			return utilk8s.CompleteResourceNames(cmd, iamtypes.UserGVR, "", toComplete)
 		},
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -172,7 +173,7 @@ func newListGroupCommand() *cobra.Command {
 			if len(args) >= 1 {
 				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
-			return utilk8s.CompleteResourceNames(cmd, groupGVR, "", toComplete)
+			return utilk8s.CompleteResourceNames(cmd, iamtypes.GroupGVR, "", toComplete)
 		},
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -254,7 +255,7 @@ func printGroupsTable(cmd *cobra.Command, inv *accessInventory) error {
 		members := inv.GroupMembers[groupName]
 		userCount, nestedCount := 0, 0
 		for _, m := range members {
-			if m.Kind == "Group" {
+			if m.Kind == iamtypes.KindGroup {
 				nestedCount++
 			} else {
 				userCount++
@@ -345,8 +346,8 @@ func printGroupDetail(cmd *cobra.Command, inv *accessInventory, groupName string
 }
 
 func printGrantToWriter(w io.Writer, g *normalizedGrant, via string) {
-	scope := g.ScopeType
-	if g.ScopeType == "namespace" && len(g.ScopeNamespaces) > 0 {
+	scope := string(g.ScopeType)
+	if g.ScopeType == iamtypes.ScopeNamespace && len(g.ScopeNamespaces) > 0 {
 		scope = fmt.Sprintf("namespaces %s", strings.Join(g.ScopeNamespaces, ", "))
 	}
 	managed := ""
@@ -368,14 +369,11 @@ func printGrantToWriter(w io.Writer, g *normalizedGrant, via string) {
 	}
 }
 
-// formatGrantSource renders the source CAR/AR reference as "Kind/Name" for
-// cluster-scoped objects and "Kind/Namespace/Name" for namespaced ones.
-// Used by text output in list, explain, and warning messages.
+// formatGrantSource renders the source CAR/AR reference. Delegates to
+// formatRuleRef so list/explain/warning output and revoke output stay
+// byte-identical for the same triple (Kind, NS, Name).
 func formatGrantSource(g *normalizedGrant) string {
-	if g.SourceNamespace != "" {
-		return fmt.Sprintf("%s/%s/%s", g.SourceKind, g.SourceNamespace, g.SourceName)
-	}
-	return fmt.Sprintf("%s/%s", g.SourceKind, g.SourceName)
+	return formatRuleRef(g.SourceKind, g.SourceNamespace, g.SourceName)
 }
 
 // printEffectiveSummary renders the "cluster scope / namespaced scope /
@@ -399,7 +397,7 @@ func printEffectiveSummary(w io.Writer, summary *effectiveSummary) {
 func partitionMembersByKind(members []memberRef) ([]string, []string) {
 	var users, groups []string
 	for _, m := range members {
-		if m.Kind == "Group" {
+		if m.Kind == iamtypes.KindGroup {
 			groups = append(groups, m.Name)
 		} else {
 			users = append(users, m.Name)
@@ -498,7 +496,7 @@ func grantToJSON(g *normalizedGrant, via string) grantJSON {
 			Namespace: g.SourceNamespace,
 		},
 		AccessLevel:    g.AccessLevel,
-		Scope:          scopeJSON{Type: g.ScopeType, Namespaces: g.ScopeNamespaces},
+		Scope:          scopeJSON{Type: string(g.ScopeType), Namespaces: g.ScopeNamespaces},
 		AllowScale:     g.AllowScale,
 		PortForwarding: g.PortForwarding,
 		ManagedByD8:    g.ManagedByD8,
@@ -566,7 +564,7 @@ func buildUserAccessJSON(inv *accessInventory, userName string) userAccessJSON {
 	summary := computeEffectiveSummary(allGrants)
 
 	item := userAccessJSON{Kind: "AccessExplanation"}
-	item.Subject.Kind = "User"
+	item.Subject.Kind = string(iamtypes.KindUser)
 	item.Subject.RefName = userName
 	item.Subject.Principal = email
 	item.Groups.Direct = directGroups
@@ -617,7 +615,7 @@ func printGroupsJSON(cmd *cobra.Command, inv *accessInventory) error {
 		members := inv.GroupMembers[gName]
 		userCount, nestedCount := 0, 0
 		for _, m := range members {
-			if m.Kind == "Group" {
+			if m.Kind == iamtypes.KindGroup {
 				nestedCount++
 			} else {
 				userCount++
@@ -661,7 +659,7 @@ func printGroupDetailJSON(cmd *cobra.Command, inv *accessInventory, groupName st
 
 	detail := detailJSON{Name: groupName, Effective: summaryToJSON(summary)}
 	for _, m := range members {
-		detail.Members = append(detail.Members, memberJSON(m))
+		detail.Members = append(detail.Members, memberJSON{Kind: string(m.Kind), Name: m.Name})
 	}
 	if detail.Members == nil {
 		detail.Members = []memberJSON{}

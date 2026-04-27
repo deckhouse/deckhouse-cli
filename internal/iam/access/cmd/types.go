@@ -22,58 +22,66 @@ import (
 	"sort"
 	"strings"
 
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 )
 
-var (
-	userGVR = schema.GroupVersionResource{
-		Group: "deckhouse.io", Version: "v1", Resource: "users",
-	}
-	groupGVR = schema.GroupVersionResource{
-		Group: "deckhouse.io", Version: "v1alpha1", Resource: "groups",
-	}
-	authorizationRuleGVR = schema.GroupVersionResource{
-		Group: "deckhouse.io", Version: "v1alpha1", Resource: "authorizationrules",
-	}
-	clusterAuthorizationRuleGVR = schema.GroupVersionResource{
-		Group: "deckhouse.io", Version: "v1", Resource: "clusterauthorizationrules",
-	}
+// namespacedAccessLevelsOrdered is the source of truth for access levels
+// allowed at namespace scope, listed from least to most privileged.
+var namespacedAccessLevelsOrdered = []string{
+	"User", "PrivilegedUser", "Editor", "Admin",
+}
+
+// clusterOnlyAccessLevelsOrdered are the levels that only make sense at
+// cluster scope. Combined with namespacedAccessLevelsOrdered they form the
+// full set of access levels accepted by `d8 iam access grant`.
+var clusterOnlyAccessLevelsOrdered = []string{
+	"ClusterEditor", "ClusterAdmin", "SuperAdmin",
+}
+
+// allAccessLevelsOrdered is the full ordered list of access levels in
+// least-to-most privileged order. Used for completion and error messages
+// so user-facing output stays in a predictable order.
+var allAccessLevelsOrdered = append(
+	append([]string(nil), namespacedAccessLevelsOrdered...),
+	clusterOnlyAccessLevelsOrdered...,
 )
 
 // accessLevelOrder defines the hierarchy: higher index = more privileged.
-var accessLevelOrder = map[string]int{
-	"User":           0,
-	"PrivilegedUser": 1,
-	"Editor":         2,
-	"Admin":          3,
-	"ClusterEditor":  4,
-	"ClusterAdmin":   5,
-	"SuperAdmin":     6,
+// Built from allAccessLevelsOrdered so a single rename keeps everything in
+// sync.
+var accessLevelOrder = func() map[string]int {
+	m := make(map[string]int, len(allAccessLevelsOrdered))
+	for i, l := range allAccessLevelsOrdered {
+		m[l] = i
+	}
+	return m
+}()
+
+var namespacedAccessLevels = sliceToSet(namespacedAccessLevelsOrdered)
+var allAccessLevels = sliceToSet(allAccessLevelsOrdered)
+
+func sliceToSet(s []string) map[string]bool {
+	m := make(map[string]bool, len(s))
+	for _, v := range s {
+		m[v] = true
+	}
+	return m
 }
 
-var namespacedAccessLevels = map[string]bool{
-	"User": true, "PrivilegedUser": true, "Editor": true, "Admin": true,
-}
-
-var allAccessLevels = map[string]bool{
-	"User": true, "PrivilegedUser": true, "Editor": true, "Admin": true,
-	"ClusterEditor": true, "ClusterAdmin": true, "SuperAdmin": true,
-}
-
-const managedByLabel = "app.kubernetes.io/managed-by"
-const managedByValue = "d8-cli"
-
-// canonicalGrantSpec is the canonical representation of a grant for hashing and comparison.
+// canonicalGrantSpec is the canonical representation of a grant for hashing
+// and comparison. The typed Model/SubjectKind/ScopeType fields encode-decode
+// to plain JSON strings (Go's encoding/json treats `type X string` as a
+// string), so on-disk annotations stay byte-compatible with previous releases.
 type canonicalGrantSpec struct {
-	Model            string   `json:"model"`
-	SubjectKind      string   `json:"subjectKind"`
-	SubjectRef       string   `json:"subjectRef"`
-	SubjectPrincipal string   `json:"subjectPrincipal"`
-	AccessLevel      string   `json:"accessLevel"`
-	ScopeType        string   `json:"scopeType"`
-	Namespaces       []string `json:"namespaces,omitempty"`
-	AllowScale       bool     `json:"allowScale"`
-	PortForwarding   bool     `json:"portForwarding"`
+	Model            iamtypes.AccessModel `json:"model"`
+	SubjectKind      iamtypes.SubjectKind `json:"subjectKind"`
+	SubjectRef       string               `json:"subjectRef"`
+	SubjectPrincipal string               `json:"subjectPrincipal"`
+	AccessLevel      string               `json:"accessLevel"`
+	ScopeType        iamtypes.Scope       `json:"scopeType"`
+	Namespaces       []string             `json:"namespaces,omitempty"`
+	AllowScale       bool                 `json:"allowScale"`
+	PortForwarding   bool                 `json:"portForwarding"`
 }
 
 func (c *canonicalGrantSpec) JSON() (string, error) {
@@ -93,18 +101,18 @@ func (c *canonicalGrantSpec) JSON() (string, error) {
 
 // normalizedGrant is the internal representation of a grant from any source.
 type normalizedGrant struct {
-	SourceKind      string // AuthorizationRule or ClusterAuthorizationRule
+	SourceKind      string // AuthorizationRule or ClusterAuthorizationRule (object kind)
 	SourceName      string
 	SourceNamespace string // only for AuthorizationRule
 
-	SubjectKind      string // User or Group
+	SubjectKind      iamtypes.SubjectKind
 	SubjectPrincipal string // email for users, name for groups
 
 	AccessLevel    string
 	AllowScale     bool
 	PortForwarding bool
 
-	ScopeType       string   // namespace, cluster, all-namespaces
+	ScopeType       iamtypes.Scope
 	ScopeNamespaces []string // for namespace scope
 
 	ManagedByD8 bool
@@ -113,14 +121,14 @@ type normalizedGrant struct {
 func validateAccessLevel(level string, namespaced bool) error {
 	if namespaced {
 		if !namespacedAccessLevels[level] {
-			valid := []string{"User", "PrivilegedUser", "Editor", "Admin"}
-			return fmt.Errorf("access level %q is not valid for namespaced scope; valid levels: %s", level, strings.Join(valid, ", "))
+			return fmt.Errorf("access level %q is not valid for namespaced scope; valid levels: %s",
+				level, strings.Join(namespacedAccessLevelsOrdered, ", "))
 		}
-	} else {
-		if !allAccessLevels[level] {
-			valid := []string{"User", "PrivilegedUser", "Editor", "Admin", "ClusterEditor", "ClusterAdmin", "SuperAdmin"}
-			return fmt.Errorf("invalid access level %q; valid levels: %s", level, strings.Join(valid, ", "))
-		}
+		return nil
+	}
+	if !allAccessLevels[level] {
+		return fmt.Errorf("invalid access level %q; valid levels: %s",
+			level, strings.Join(allAccessLevelsOrdered, ", "))
 	}
 	return nil
 }
@@ -135,4 +143,19 @@ func maxAccessLevel(levels []string) string {
 		}
 	}
 	return best
+}
+
+// canonicalGrantInput captures the minimal subset of grant/revoke options
+// needed to expand a user-facing intent into one canonicalGrantSpec per
+// concrete object. It is intentionally a flat value type so callers don't
+// have to leak grantOpts/revokeOpts into shared helpers.
+type canonicalGrantInput struct {
+	SubjectKind      iamtypes.SubjectKind
+	SubjectRef       string
+	SubjectPrincipal string
+	AccessLevel      string
+	ScopeType        iamtypes.Scope
+	Namespaces       []string
+	AllowScale       bool
+	PortForwarding   bool
 }

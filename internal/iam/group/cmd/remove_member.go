@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -64,7 +65,7 @@ func newRemoveMemberCommand() *cobra.Command {
 			}
 
 			ctx := cmd.Context()
-			groupClient := dyn.Resource(groupGVR)
+			groupClient := dyn.Resource(iamtypes.GroupGVR)
 
 			obj, err := groupClient.Get(ctx, groupName, metav1.GetOptions{})
 			if err != nil {
@@ -72,6 +73,7 @@ func newRemoveMemberCommand() *cobra.Command {
 			}
 
 			rawMembers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "members")
+			memberKindStr := string(memberKind)
 			found := false
 			var newMembers []any
 			for _, item := range rawMembers {
@@ -80,7 +82,7 @@ func newRemoveMemberCommand() *cobra.Command {
 					newMembers = append(newMembers, item)
 					continue
 				}
-				if fmt.Sprint(m["kind"]) == memberKind && fmt.Sprint(m["name"]) == memberName {
+				if fmt.Sprint(m["kind"]) == memberKindStr && fmt.Sprint(m["name"]) == memberName {
 					found = true
 					continue
 				}
@@ -88,7 +90,7 @@ func newRemoveMemberCommand() *cobra.Command {
 			}
 
 			if !found {
-				cmd.Printf("Nothing to do: %s %q is not a member of group %q\n", strings.ToLower(memberKind), memberName, groupName)
+				cmd.Printf("Nothing to do: %s %q is not a member of group %q\n", strings.ToLower(memberKindStr), memberName, groupName)
 				return nil
 			}
 
@@ -101,7 +103,7 @@ func newRemoveMemberCommand() *cobra.Command {
 				return fmt.Errorf("updating group %q: %w", groupName, err)
 			}
 
-			cmd.Printf("Removed %s %q from group %q\n", strings.ToLower(memberKind), memberName, groupName)
+			cmd.Printf("Removed %s %q from group %q\n", strings.ToLower(memberKindStr), memberName, groupName)
 			return nil
 		},
 	}

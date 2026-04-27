@@ -16,21 +16,7 @@ limitations under the License.
 
 package group
 
-import (
-	"fmt"
-
-	"github.com/spf13/cobra"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
-)
-
-var groupGVR = schema.GroupVersionResource{
-	Group:    "deckhouse.io",
-	Version:  "v1alpha1",
-	Resource: "groups",
-}
+import "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 // getGroupMembers extracts spec.members from a Group object.
 func getGroupMembers(obj *unstructured.Unstructured) ([]map[string]any, error) {
@@ -50,54 +36,4 @@ func getGroupMembers(obj *unstructured.Unstructured) ([]map[string]any, error) {
 		result = append(result, m)
 	}
 	return result, nil
-}
-
-// detectCycle checks if adding a group member (childGroup -> parentGroup) would create a cycle.
-// It loads all groups from the cluster and walks the membership graph.
-func detectCycle(cmd *cobra.Command, dyn dynamic.Interface, parentGroup, childGroup string) (bool, []string, error) {
-	ctx := cmd.Context()
-	allGroups, err := dyn.Resource(groupGVR).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return false, nil, fmt.Errorf("listing groups for cycle detection: %w", err)
-	}
-
-	adj := make(map[string][]string)
-	for _, g := range allGroups.Items {
-		gName := g.GetName()
-		members, _ := getGroupMembers(&g)
-		for _, m := range members {
-			if fmt.Sprint(m["kind"]) == "Group" {
-				adj[gName] = append(adj[gName], fmt.Sprint(m["name"]))
-			}
-		}
-	}
-
-	adj[parentGroup] = append(adj[parentGroup], childGroup)
-
-	visited := make(map[string]bool)
-	var path []string
-	var dfs func(string) bool
-	dfs = func(node string) bool {
-		if node == parentGroup {
-			path = append(path, node)
-			return true
-		}
-		if visited[node] {
-			return false
-		}
-		visited[node] = true
-		path = append(path, node)
-		for _, next := range adj[node] {
-			if dfs(next) {
-				return true
-			}
-		}
-		path = path[:len(path)-1]
-		return false
-	}
-
-	if dfs(childGroup) {
-		return true, path, nil
-	}
-	return false, nil, nil
 }

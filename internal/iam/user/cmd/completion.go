@@ -19,6 +19,7 @@ package user
 import (
 	"github.com/spf13/cobra"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -29,5 +30,5 @@ func completeUserNames(cmd *cobra.Command, args []string, toComplete string) ([]
 	if len(args) >= 1 {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	return utilk8s.CompleteResourceNames(cmd, userGVR, "", toComplete)
+	return utilk8s.CompleteResourceNames(cmd, iamtypes.UserGVR, "", toComplete)
 }

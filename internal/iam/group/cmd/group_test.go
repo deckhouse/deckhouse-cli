@@ -23,6 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 )
 
 func TestBuildGroupObject(t *testing.T) {
@@ -72,14 +74,14 @@ func TestParseMemberArgs(t *testing.T) {
 func TestNormalizeMemberKind(t *testing.T) {
 	tests := []struct {
 		input   string
-		want    string
+		want    iamtypes.SubjectKind
 		wantErr string
 	}{
-		{input: "user", want: "User"},
-		{input: "User", want: "User"},
-		{input: "USER", want: "User"},
-		{input: "group", want: "Group"},
-		{input: "Group", want: "Group"},
+		{input: "user", want: iamtypes.KindUser},
+		{input: "User", want: iamtypes.KindUser},
+		{input: "USER", want: iamtypes.KindUser},
+		{input: "group", want: iamtypes.KindGroup},
+		{input: "Group", want: iamtypes.KindGroup},
 		{input: "invalid", wantErr: "invalid member kind"},
 	}
 	for _, tt := range tests {

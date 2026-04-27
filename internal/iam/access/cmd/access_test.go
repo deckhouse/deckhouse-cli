@@ -22,18 +22,20 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 )
 
 func TestParseSubjectKind(t *testing.T) {
 	tests := []struct {
 		input   string
-		want    string
+		want    iamtypes.SubjectKind
 		wantErr string
 	}{
-		{input: "user", want: "User"},
-		{input: "User", want: "User"},
-		{input: "group", want: "Group"},
-		{input: "Group", want: "Group"},
+		{input: "user", want: iamtypes.KindUser},
+		{input: "User", want: iamtypes.KindUser},
+		{input: "group", want: iamtypes.KindGroup},
+		{input: "Group", want: iamtypes.KindGroup},
 		{input: "serviceaccount", wantErr: "invalid subject kind"},
 	}
 	for _, tt := range tests {
@@ -56,12 +58,12 @@ func TestParseScopeFlags(t *testing.T) {
 		namespaces []string
 		cluster    bool
 		allNS      bool
-		want       string
+		want       iamtypes.Scope
 		wantErr    string
 	}{
-		{name: "namespace", namespaces: []string{"dev"}, want: "namespace"},
-		{name: "cluster", cluster: true, want: "cluster"},
-		{name: "all-namespaces", allNS: true, want: "all-namespaces"},
+		{name: "namespace", namespaces: []string{"dev"}, want: iamtypes.ScopeNamespace},
+		{name: "cluster", cluster: true, want: iamtypes.ScopeCluster},
+		{name: "all-namespaces", allNS: true, want: iamtypes.ScopeAllNamespaces},
 		{name: "none", wantErr: "one of"},
 		{name: "namespace+cluster", namespaces: []string{"dev"}, cluster: true, wantErr: "mutually exclusive"},
 		{name: "cluster+allNS", cluster: true, allNS: true, wantErr: "mutually exclusive"},
@@ -165,7 +167,7 @@ func TestRemoveSubject(t *testing.T) {
 			{"kind": "User", "name": "anton@abc.com"},
 			{"kind": "Group", "name": "admins"},
 		})
-		newSubjects, removed := removeSubject(obj, "User", "anton@abc.com")
+		newSubjects, removed := removeSubject(obj, iamtypes.KindUser, "anton@abc.com")
 		assert.True(t, removed)
 		assert.Len(t, newSubjects, 1)
 	})
@@ -174,7 +176,7 @@ func TestRemoveSubject(t *testing.T) {
 		obj := buildTestObj([]map[string]any{
 			{"kind": "Group", "name": "admins"},
 		})
-		newSubjects, removed := removeSubject(obj, "User", "anton@abc.com")
+		newSubjects, removed := removeSubject(obj, iamtypes.KindUser, "anton@abc.com")
 		assert.False(t, removed)
 		assert.Len(t, newSubjects, 1)
 	})

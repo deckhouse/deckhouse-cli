@@ -21,6 +21,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 )
 
 func TestResolveUserGroups(t *testing.T) {
@@ -237,10 +239,10 @@ func TestNormalizeClusterAuthRule(t *testing.T) {
 
 	grants := normalizeClusterAuthRule(obj)
 	assert.Len(t, grants, 2) // ServiceAccount filtered out
-	assert.Equal(t, "User", grants[0].SubjectKind)
+	assert.Equal(t, iamtypes.KindUser, grants[0].SubjectKind)
 	assert.Equal(t, "anton@abc.com", grants[0].SubjectPrincipal)
 	assert.True(t, grants[0].ManagedByD8)
-	assert.Equal(t, "Group", grants[1].SubjectKind)
+	assert.Equal(t, iamtypes.KindGroup, grants[1].SubjectKind)
 }
 
 func TestNormalizeClusterAuthRule_AllNamespaces(t *testing.T) {
@@ -263,5 +265,5 @@ func TestNormalizeClusterAuthRule_AllNamespaces(t *testing.T) {
 
 	grants := normalizeClusterAuthRule(obj)
 	assert.Len(t, grants, 1)
-	assert.Equal(t, "all-namespaces", grants[0].ScopeType)
+	assert.Equal(t, iamtypes.ScopeAllNamespaces, grants[0].ScopeType)
 }

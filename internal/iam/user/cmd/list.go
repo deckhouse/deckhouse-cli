@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	sigsyaml "sigs.k8s.io/yaml"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -43,7 +44,7 @@ func newListCommand() *cobra.Command {
 				return err
 			}
 
-			result, err := dyn.Resource(userGVR).List(cmd.Context(), metav1.ListOptions{})
+			result, err := dyn.Resource(iamtypes.UserGVR).List(cmd.Context(), metav1.ListOptions{})
 			if err != nil {
 				return fmt.Errorf("listing Users: %w", err)
 			}

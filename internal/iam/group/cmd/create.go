@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -58,7 +59,7 @@ func newCreateCommand() *cobra.Command {
 				return err
 			}
 
-			created, err := dyn.Resource(groupGVR).Create(cmd.Context(), obj, metav1.CreateOptions{})
+			created, err := dyn.Resource(iamtypes.GroupGVR).Create(cmd.Context(), obj, metav1.CreateOptions{})
 			if err != nil {
 				return fmt.Errorf("creating Group %q: %w", name, err)
 			}
@@ -76,8 +77,10 @@ func newCreateCommand() *cobra.Command {
 func buildGroupObject(name string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]any{
-			"apiVersion": "deckhouse.io/v1alpha1",
-			"kind":       "Group",
+			"apiVersion": iamtypes.APIVersionDeckhouseV1Alpha1,
+			// unstructured.GetKind() type-asserts the kind value to plain string;
+			// cast the typed SubjectKind constant at this boundary.
+			"kind": string(iamtypes.KindGroup),
 			"metadata": map[string]any{
 				"name": name,
 			},

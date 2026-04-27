@@ -19,6 +19,7 @@ package access
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -28,21 +29,27 @@ import (
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/duration"
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/kubectl/pkg/util/templates"
 	sigsyaml "sigs.k8s.io/yaml"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
+// ErrInvalidRuleRef is returned by parseRuleRef when the textual reference does
+// not match one of the supported "CAR/<name>" or "AR/<ns>/<name>" forms.
+var ErrInvalidRuleRef = errors.New("invalid rule reference")
+
 // ruleRow is a uniform view over a CAR or an AR for list/get rendering.
 type ruleRow struct {
-	Kind            string // ClusterAuthorizationRule | AuthorizationRule
+	Kind            string // ClusterAuthorizationRule | AuthorizationRule (object kind)
 	Name            string
 	Namespace       string // empty for CAR
 	AccessLevel     string
-	ScopeType       string   // cluster | all-namespaces | namespace
+	ScopeType       iamtypes.Scope
 	ScopeNamespaces []string // for namespace scope (the single namespace of the AR)
 	AllowScale      bool
 	PortForwarding  bool
@@ -52,15 +59,33 @@ type ruleRow struct {
 }
 
 type subjectRef struct {
-	Kind string // User | Group | ServiceAccount | ...
+	Kind iamtypes.SubjectKind
 	Name string
 }
 
 func (r ruleRow) ref() string {
-	if r.Namespace == "" {
-		return r.Kind + "/" + r.Name
+	return formatRuleRef(r.Kind, r.Namespace, r.Name)
+}
+
+// readSubjectRefs decodes spec.subjects into typed (kind, name) pairs.
+// Shared by rule listing and grant normalization so the unstructured layer
+// is touched in exactly one place. Caller decides whether to filter
+// ServiceAccount subjects (we keep them here so callers that need the raw
+// shape — e.g. rules get — see exactly what is on the object).
+func readSubjectRefs(obj *unstructured.Unstructured) []subjectRef {
+	raw, _, _ := unstructured.NestedSlice(obj.Object, "spec", "subjects")
+	out := make([]subjectRef, 0, len(raw))
+	for _, s := range raw {
+		m, ok := s.(map[string]any)
+		if !ok {
+			continue
+		}
+		out = append(out, subjectRef{
+			Kind: iamtypes.SubjectKind(fmt.Sprint(m["kind"])),
+			Name: fmt.Sprint(m["name"]),
+		})
 	}
-	return r.Kind + "/" + r.Namespace + "/" + r.Name
+	return out
 }
 
 // ------------------------------ cobra ------------------------------
@@ -142,7 +167,7 @@ func runRulesList(cmd *cobra.Command, _ []string) error {
 	outputFmt, _ := cmd.Flags().GetString("output")
 
 	if managedOnly && manualOnly {
-		return fmt.Errorf("--managed-only and --manual-only are mutually exclusive")
+		return errors.New("--managed-only and --manual-only are mutually exclusive")
 	}
 
 	dyn, err := utilk8s.NewDynamicClient(cmd)
@@ -224,10 +249,10 @@ func runRulesGet(cmd *cobra.Command, args []string) error {
 
 	var obj *unstructured.Unstructured
 	switch refKind {
-	case "ClusterAuthorizationRule":
-		obj, err = dyn.Resource(clusterAuthorizationRuleGVR).Get(cmd.Context(), refName, metav1.GetOptions{})
-	case "AuthorizationRule":
-		obj, err = dyn.Resource(authorizationRuleGVR).Namespace(refNS).Get(cmd.Context(), refName, metav1.GetOptions{})
+	case iamtypes.KindClusterAuthorizationRule:
+		obj, err = dyn.Resource(iamtypes.ClusterAuthorizationRuleGVR).Get(cmd.Context(), refName, metav1.GetOptions{})
+	case iamtypes.KindAuthorizationRule:
+		obj, err = dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace(refNS).Get(cmd.Context(), refName, metav1.GetOptions{})
 	}
 	if err != nil {
 		return fmt.Errorf("getting %s: %w", args[0], err)
@@ -255,7 +280,7 @@ func collectRuleRows(ctx context.Context, dyn dynamic.Interface, includeCARs, in
 	var rows []ruleRow
 
 	if includeCARs {
-		list, err := dyn.Resource(clusterAuthorizationRuleGVR).List(ctx, metav1.ListOptions{})
+		list, err := dyn.Resource(iamtypes.ClusterAuthorizationRuleGVR).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("listing ClusterAuthorizationRules: %w", err)
 		}
@@ -270,7 +295,7 @@ func collectRuleRows(ctx context.Context, dyn dynamic.Interface, includeCARs, in
 			nsToList = nsFilter
 		}
 		for _, ns := range nsToList {
-			list, err := dyn.Resource(authorizationRuleGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
+			list, err := dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
 			if err != nil {
 				return nil, fmt.Errorf("listing AuthorizationRules in %q: %w", ns, err)
 			}
@@ -292,32 +317,21 @@ func ruleRowFromObject(obj *unstructured.Unstructured) ruleRow {
 
 	kind := obj.GetKind()
 	ns := obj.GetNamespace()
-	scopeType := ""
+	var scopeType iamtypes.Scope
 	var scopeNamespaces []string
 	switch kind {
-	case "ClusterAuthorizationRule":
-		scopeType = "cluster"
+	case iamtypes.KindClusterAuthorizationRule:
+		scopeType = iamtypes.ScopeCluster
 		matchAny, found, _ := unstructured.NestedBool(obj.Object, "spec", "namespaceSelector", "matchAny")
 		if found && matchAny {
-			scopeType = "all-namespaces"
+			scopeType = iamtypes.ScopeAllNamespaces
 		}
-	case "AuthorizationRule":
-		scopeType = "namespace"
+	case iamtypes.KindAuthorizationRule:
+		scopeType = iamtypes.ScopeNamespace
 		scopeNamespaces = []string{ns}
 	}
 
-	var subjects []subjectRef
-	raw, _, _ := unstructured.NestedSlice(obj.Object, "spec", "subjects")
-	for _, s := range raw {
-		m, ok := s.(map[string]any)
-		if !ok {
-			continue
-		}
-		subjects = append(subjects, subjectRef{
-			Kind: fmt.Sprint(m["kind"]),
-			Name: fmt.Sprint(m["name"]),
-		})
-	}
+	subjects := readSubjectRefs(obj)
 
 	return ruleRow{
 		Kind:            kind,
@@ -328,7 +342,7 @@ func ruleRowFromObject(obj *unstructured.Unstructured) ruleRow {
 		ScopeNamespaces: scopeNamespaces,
 		AllowScale:      allowScale,
 		PortForwarding:  portForwarding,
-		ManagedByD8:     labels[managedByLabel] == managedByValue,
+		ManagedByD8:     labels[iamtypes.LabelManagedBy] == iamtypes.ManagedByValueCLI,
 		Subjects:        subjects,
 		CreationTime:    obj.GetCreationTimestamp().Time,
 	}
@@ -370,9 +384,9 @@ func sortRuleRows(rows []ruleRow) {
 // shortKind maps full CRD names to compact column values for the table view.
 func shortKind(kind string) string {
 	switch kind {
-	case "ClusterAuthorizationRule":
+	case iamtypes.KindClusterAuthorizationRule:
 		return "CAR"
-	case "AuthorizationRule":
+	case iamtypes.KindAuthorizationRule:
 		return "AR"
 	default:
 		return kind
@@ -381,7 +395,7 @@ func shortKind(kind string) string {
 
 func managedByColumn(r ruleRow) string {
 	if r.ManagedByD8 {
-		return "d8-cli"
+		return iamtypes.ManagedByValueCLI
 	}
 	return "manual"
 }
@@ -439,21 +453,14 @@ func truncate(s string, max int) string {
 	return s[:max-1] + "…"
 }
 
+// humanAge formats a creation timestamp as the same compact age column
+// kubectl uses (e.g. "5m", "2h", "3d"). Delegates to apimachinery so the
+// formatting stays consistent with other Kubernetes tooling.
 func humanAge(t time.Time) string {
 	if t.IsZero() {
 		return "-"
 	}
-	d := time.Since(t)
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh", int(d.Hours()))
-	default:
-		return fmt.Sprintf("%dd", int(d.Hours()/24))
-	}
+	return duration.HumanDuration(time.Since(t))
 }
 
 // ------------------------------ rendering: text (get) ------------------------------
@@ -465,7 +472,11 @@ func printRuleRowText(w io.Writer, r ruleRow, reverse map[string]string) error {
 	if r.Namespace != "" {
 		fmt.Fprintf(w, "  Namespace:    %s\n", r.Namespace)
 	}
-	fmt.Fprintf(w, "  Access level: %s\n", firstNonEmpty(r.AccessLevel, "<unset>"))
+	accessLevel := r.AccessLevel
+	if accessLevel == "" {
+		accessLevel = "<unset>"
+	}
+	fmt.Fprintf(w, "  Access level: %s\n", accessLevel)
 	fmt.Fprintf(w, "  Scope:        %s\n", r.ScopeType)
 	fmt.Fprintf(w, "  Allow scale:  %v\n", r.AllowScale)
 	fmt.Fprintf(w, "  Port forward: %v\n", r.PortForwarding)
@@ -479,7 +490,7 @@ func printRuleRowText(w io.Writer, r ruleRow, reverse map[string]string) error {
 		fmt.Fprintln(w, "  <none>")
 	} else {
 		for _, s := range r.Subjects {
-			key := s.Kind + "/" + s.Name
+			key := string(s.Kind) + "/" + s.Name
 			local := reverse[key]
 			switch local {
 			case "":
@@ -503,13 +514,6 @@ func printRuleRowText(w io.Writer, r ruleRow, reverse map[string]string) error {
 	}
 
 	return nil
-}
-
-func firstNonEmpty(v, fallback string) string {
-	if v == "" {
-		return fallback
-	}
-	return v
 }
 
 // ------------------------------ rendering: json/yaml ------------------------------
@@ -538,14 +542,14 @@ func ruleRowToJSON(r ruleRow) ruleJSON {
 		Name:           r.Name,
 		Namespace:      r.Namespace,
 		AccessLevel:    r.AccessLevel,
-		Scope:          r.ScopeType,
+		Scope:          string(r.ScopeType),
 		AllowScale:     r.AllowScale,
 		PortForwarding: r.PortForwarding,
 		ManagedByD8:    r.ManagedByD8,
 		CreationTime:   r.CreationTime,
 	}
 	for _, s := range r.Subjects {
-		out.Subjects = append(out.Subjects, subjectJSON(s))
+		out.Subjects = append(out.Subjects, subjectJSON{Kind: string(s.Kind), Name: s.Name})
 	}
 	if out.Subjects == nil {
 		out.Subjects = []subjectJSON{}
@@ -600,22 +604,22 @@ func printRuleRowsYAML(w io.Writer, rows []ruleRow) error {
 func parseRuleRef(ref string) (string, string, string, error) {
 	parts := strings.Split(ref, "/")
 	if len(parts) < 2 {
-		return "", "", "", fmt.Errorf("invalid rule reference %q; expected ClusterAuthorizationRule/NAME or AuthorizationRule/NS/NAME (short forms CAR/... and AR/... also accepted)", ref)
+		return "", "", "", fmt.Errorf("%w %q: expected ClusterAuthorizationRule/NAME or AuthorizationRule/NS/NAME (short forms CAR/... and AR/... also accepted)", ErrInvalidRuleRef, ref)
 	}
 
 	switch parts[0] {
-	case "ClusterAuthorizationRule", "CAR", "car":
+	case iamtypes.KindClusterAuthorizationRule, "CAR", "car":
 		if len(parts) != 2 {
-			return "", "", "", fmt.Errorf("ClusterAuthorizationRule reference must be of the form ClusterAuthorizationRule/NAME (got %q)", ref)
+			return "", "", "", fmt.Errorf("%w %q: ClusterAuthorizationRule reference must be of the form ClusterAuthorizationRule/NAME", ErrInvalidRuleRef, ref)
 		}
-		return "ClusterAuthorizationRule", "", parts[1], nil
-	case "AuthorizationRule", "AR", "ar":
+		return iamtypes.KindClusterAuthorizationRule, "", parts[1], nil
+	case iamtypes.KindAuthorizationRule, "AR", "ar":
 		if len(parts) != 3 {
-			return "", "", "", fmt.Errorf("AuthorizationRule reference must be of the form AuthorizationRule/NAMESPACE/NAME (got %q)", ref)
+			return "", "", "", fmt.Errorf("%w %q: AuthorizationRule reference must be of the form AuthorizationRule/NAMESPACE/NAME", ErrInvalidRuleRef, ref)
 		}
-		return "AuthorizationRule", parts[1], parts[2], nil
+		return iamtypes.KindAuthorizationRule, parts[1], parts[2], nil
 	default:
-		return "", "", "", fmt.Errorf("unknown rule kind %q; use ClusterAuthorizationRule, AuthorizationRule, CAR or AR", parts[0])
+		return "", "", "", fmt.Errorf("%w %q: unknown rule kind %q (use ClusterAuthorizationRule, AuthorizationRule, CAR or AR)", ErrInvalidRuleRef, ref, parts[0])
 	}
 }
 
@@ -632,15 +636,15 @@ func reverseSubjectLookup(ctx context.Context, dyn dynamic.Interface, subjects [
 	needGroups := false
 	for _, s := range subjects {
 		switch s.Kind {
-		case "User":
+		case iamtypes.KindUser:
 			needUsers = true
-		case "Group":
+		case iamtypes.KindGroup:
 			needGroups = true
 		}
 	}
 
 	if needUsers {
-		userList, err := dyn.Resource(userGVR).List(ctx, metav1.ListOptions{})
+		userList, err := dyn.Resource(iamtypes.UserGVR).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("listing Users: %w", err)
 		}
@@ -653,17 +657,17 @@ func reverseSubjectLookup(ctx context.Context, dyn dynamic.Interface, subjects [
 			}
 		}
 		for _, s := range subjects {
-			if s.Kind != "User" {
+			if s.Kind != iamtypes.KindUser {
 				continue
 			}
 			if cr, ok := emailToCR[s.Name]; ok {
-				result["User/"+s.Name] = cr
+				result[string(iamtypes.KindUser)+"/"+s.Name] = cr
 			}
 		}
 	}
 
 	if needGroups {
-		groupList, err := dyn.Resource(groupGVR).List(ctx, metav1.ListOptions{})
+		groupList, err := dyn.Resource(iamtypes.GroupGVR).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("listing Groups: %w", err)
 		}
@@ -672,11 +676,11 @@ func reverseSubjectLookup(ctx context.Context, dyn dynamic.Interface, subjects [
 			present[groupList.Items[i].GetName()] = true
 		}
 		for _, s := range subjects {
-			if s.Kind != "Group" {
+			if s.Kind != iamtypes.KindGroup {
 				continue
 			}
 			if present[s.Name] {
-				result["Group/"+s.Name] = s.Name
+				result[string(iamtypes.KindGroup)+"/"+s.Name] = s.Name
 			}
 		}
 	}

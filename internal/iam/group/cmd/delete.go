@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -41,7 +42,7 @@ func newDeleteCommand() *cobra.Command {
 				return err
 			}
 
-			err = dyn.Resource(groupGVR).Delete(cmd.Context(), name, metav1.DeleteOptions{})
+			err = dyn.Resource(iamtypes.GroupGVR).Delete(cmd.Context(), name, metav1.DeleteOptions{})
 			if err != nil {
 				return fmt.Errorf("deleting Group %q: %w", name, err)
 			}

@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"encoding/base32"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -56,7 +57,7 @@ func resolvePasswordMode(prompt, stdin, generate bool) (passwordMode, error) {
 		count++
 	}
 	if count > 1 {
-		return passwordModeNone, fmt.Errorf("only one of --password-prompt, --password-stdin, --generate-password may be specified")
+		return passwordModeNone, errors.New("only one of --password-prompt, --password-stdin, --generate-password may be specified")
 	}
 
 	if prompt {
@@ -72,7 +73,7 @@ func resolvePasswordMode(prompt, stdin, generate bool) (passwordMode, error) {
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		return passwordModePrompt, nil
 	}
-	return passwordModeNone, fmt.Errorf("stdin is not a terminal; use --password-stdin or --generate-password")
+	return passwordModeNone, errors.New("stdin is not a terminal; use --password-stdin or --generate-password")
 }
 
 // readPasswordPrompt reads a password interactively with confirmation.
@@ -93,10 +94,10 @@ func readPasswordPrompt(stdinFd int, out io.Writer) (string, error) {
 	}
 
 	if string(pw1) != string(pw2) {
-		return "", fmt.Errorf("passwords do not match")
+		return "", errors.New("passwords do not match")
 	}
 	if len(pw1) == 0 {
-		return "", fmt.Errorf("password must not be empty")
+		return "", errors.New("password must not be empty")
 	}
 	return string(pw1), nil
 }
@@ -108,11 +109,11 @@ func readPasswordStdin(r io.Reader) (string, error) {
 		if err := scanner.Err(); err != nil {
 			return "", fmt.Errorf("reading password from stdin: %w", err)
 		}
-		return "", fmt.Errorf("no password provided on stdin")
+		return "", errors.New("no password provided on stdin")
 	}
 	pw := strings.TrimRight(scanner.Text(), "\r\n")
 	if pw == "" {
-		return "", fmt.Errorf("password must not be empty")
+		return "", errors.New("password must not be empty")
 	}
 	return pw, nil
 }
