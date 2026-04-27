@@ -41,12 +41,12 @@ import (
 	"github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
 	data "github.com/deckhouse/deckhouse-cli/internal/data/cmd"
+	iam "github.com/deckhouse/deckhouse-cli/internal/iam/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/network"
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
 	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
-	useroperation "github.com/deckhouse/deckhouse-cli/internal/useroperation/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
@@ -107,7 +107,7 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(data.NewCommand())
 	r.cmd.AddCommand(mirror.NewCommand())
 	r.cmd.AddCommand(status.NewCommand())
-	r.cmd.AddCommand(useroperation.NewCommand())
+	r.cmd.AddCommand(iam.NewCommand())
 	r.cmd.AddCommand(network.NewCommand())
 	r.cmd.AddCommand(tools.NewCommand())
 	r.cmd.AddCommand(commands.NewVirtualizationCommand())

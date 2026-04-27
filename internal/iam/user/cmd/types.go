@@ -1,8 +1,23 @@
-package useroperation
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package user
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -11,8 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
-
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 var userOperationGVR = schema.GroupVersionResource{
@@ -46,39 +59,6 @@ func getWaitFlags(cmd *cobra.Command) (waitFlags, error) {
 		return waitFlags{}, err
 	}
 	return waitFlags{wait: waitVal, timeout: timeoutVal}, nil
-}
-
-func getStringFlag(cmd *cobra.Command, name string) (string, error) {
-	// This command group reuses persistent kubeconfig/context flags.
-	// Depending on how the command is constructed, these flags may exist either on the command itself
-	// or on a parent command. We support both.
-	if cmd.Flags().Lookup(name) != nil {
-		return cmd.Flags().GetString(name)
-	}
-	if cmd.InheritedFlags().Lookup(name) != nil {
-		return cmd.InheritedFlags().GetString(name)
-	}
-	return "", fmt.Errorf("flag %q not found", name)
-}
-
-func newDynamicClient(cmd *cobra.Command) (dynamic.Interface, error) {
-	kubeconfigPath, err := getStringFlag(cmd, "kubeconfig")
-	if err != nil {
-		return nil, fmt.Errorf("failed to get kubeconfig: %w", err)
-	}
-	contextName, err := getStringFlag(cmd, "context")
-	if err != nil {
-		return nil, fmt.Errorf("failed to get context: %w", err)
-	}
-	restConfig, _, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to setup Kubernetes client: %w", err)
-	}
-	dyn, err := dynamic.NewForConfig(restConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
-	}
-	return dyn, nil
 }
 
 func createUserOperation(ctx context.Context, dyn dynamic.Interface, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
