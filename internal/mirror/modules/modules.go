@@ -319,10 +319,19 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 		moduleVersions = svc.extractVersionsFromReleaseChannels(ctx, module.name)
 	}
 
+	// Fetch the full list of module tags from the registry so semver constraints
+	// in the filter can match against actual published versions, not just the
+	// versions currently advertised on release channels.
+	tags, err := svc.modulesService.Module(module.name).ListTags(ctx)
+	if err != nil {
+		return fmt.Errorf("list tags for module %s: %w", module.name, err)
+	}
+
 	// Check for explicit version constraints from filter
 	mod := &Module{
 		Name:         module.name,
 		RegistryPath: module.registryPath,
+		Releases:     tags,
 	}
 
 	// Get specific versions to mirror from filter (for whitelist with version constraints)
