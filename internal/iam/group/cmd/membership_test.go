@@ -17,6 +17,7 @@ limitations under the License.
 package group
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -27,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 )
@@ -73,6 +75,41 @@ func TestEnsureMember_CreatesGroupWhenMissing(t *testing.T) {
 	require.NoError(t, err)
 	members, _, _ := unstructured.NestedSlice(got.Object, "spec", "members")
 	assert.Len(t, members, 1)
+}
+
+// TestEnsureMember_NonNotFoundGetErrorPropagates is the symmetric guard for
+// the same class of bug we previously fixed in createOrUpdateGrant: a
+// non-NotFound Get failure (Forbidden, Timeout, transient API error) must
+// not fall through to Create. Otherwise we would either overwrite an
+// existing group we just couldn't read, or create one for a caller who
+// lacks visibility to it. The error must surface verbatim.
+func TestEnsureMember_NonNotFoundGetErrorPropagates(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dyn := fake.NewSimpleDynamicClientWithCustomListKinds(scheme, fakeListKinds())
+
+	sentinel := errors.New("simulated etcd timeout")
+	dyn.PrependReactor("get", "groups", func(_ clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, sentinel
+	})
+	// A Create reactor would let us assert "Create was never called" by
+	// failing loudly if it ever fires. The Get reactor above short-circuits
+	// the codepath, so this should never trigger.
+	createCalled := false
+	dyn.PrependReactor("create", "groups", func(_ clienttesting.Action) (bool, runtime.Object, error) {
+		createCalled = true
+		return false, nil, nil
+	})
+
+	_, err := EnsureMember(t.Context(), dyn,
+		"some-group", iamtypes.KindUser, "alice@example.com",
+		EnsureMemberOpts{CreateGroupIfMissing: true})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, sentinel,
+		"non-NotFound Get error must propagate to the caller")
+	assert.False(t, apierrors.IsNotFound(err),
+		"non-NotFound error must not be misclassified as NotFound; got %v", err)
+	assert.False(t, createCalled,
+		"Create must not be called when Get returned a non-NotFound error")
 }
 
 // TestEnsureMember_IsIdempotent verifies that adding the same member twice is

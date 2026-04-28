@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
@@ -51,7 +52,10 @@ func EnsureMember(ctx context.Context, dyn dynamic.Interface,
 	memberKindStr := string(memberKind)
 
 	obj, err := groupClient.Get(ctx, groupName, metav1.GetOptions{})
-	if err != nil {
+	switch {
+	case err == nil:
+		// fall through to the existing-group path below.
+	case apierrors.IsNotFound(err):
 		if !opts.CreateGroupIfMissing {
 			return EnsureMemberResult{}, fmt.Errorf("group %q not found: %w", groupName, err)
 		}
@@ -63,6 +67,12 @@ func EnsureMember(ctx context.Context, dyn dynamic.Interface,
 			return EnsureMemberResult{}, fmt.Errorf("creating group %q: %w", groupName, err)
 		}
 		return EnsureMemberResult{GroupCreated: true, Added: true}, nil
+	default:
+		// Any other Get failure (Forbidden, Timeout, transient API error) must
+		// not silently route into Create: that would either overwrite an
+		// existing group whose Get we couldn't read, or create one for a user
+		// who lacks permission to even see it. Surface the error.
+		return EnsureMemberResult{}, fmt.Errorf("getting group %q: %w", groupName, err)
 	}
 
 	if opts.CycleCheck && memberKind == iamtypes.KindGroup {
