@@ -52,35 +52,55 @@ func TestParseSubjectKind(t *testing.T) {
 	}
 }
 
-func TestParseScopeFlags(t *testing.T) {
+func TestParseScope(t *testing.T) {
 	tests := []struct {
 		name       string
+		scope      string
 		namespaces []string
-		cluster    bool
-		allNS      bool
 		want       iamtypes.Scope
+		wantNS     []string
+		wantLabels map[string]string
 		wantErr    string
 	}{
-		{name: "namespace", namespaces: []string{"dev"}, want: iamtypes.ScopeNamespace},
-		{name: "cluster", cluster: true, want: iamtypes.ScopeCluster},
-		{name: "all-namespaces", allNS: true, want: iamtypes.ScopeAllNamespaces},
+		{name: "namespace", namespaces: []string{"dev"}, want: iamtypes.ScopeNamespace, wantNS: []string{"dev"}},
+		{name: "namespace multi", namespaces: []string{"dev", "stage"}, want: iamtypes.ScopeNamespace, wantNS: []string{"dev", "stage"}},
+		{name: "scope cluster", scope: "cluster", want: iamtypes.ScopeCluster},
+		{name: "scope all-namespaces", scope: "all-namespaces", want: iamtypes.ScopeAllNamespaces},
+		{name: "scope all alias", scope: "all", want: iamtypes.ScopeAllNamespaces},
+		{name: "scope labels single", scope: "labels=team=platform", want: iamtypes.ScopeLabels, wantLabels: map[string]string{"team": "platform"}},
+		{name: "scope labels multi", scope: "labels=team=platform,tier=prod", want: iamtypes.ScopeLabels, wantLabels: map[string]string{"team": "platform", "tier": "prod"}},
 		{name: "none", wantErr: "one of"},
-		{name: "namespace+cluster", namespaces: []string{"dev"}, cluster: true, wantErr: "mutually exclusive"},
-		{name: "cluster+allNS", cluster: true, allNS: true, wantErr: "mutually exclusive"},
-		{name: "all three", namespaces: []string{"dev"}, cluster: true, allNS: true, wantErr: "mutually exclusive"},
+		{name: "namespace + scope mutually exclusive", scope: "cluster", namespaces: []string{"dev"}, wantErr: "mutually exclusive"},
+		{name: "invalid scope", scope: "global", wantErr: "invalid --scope"},
+		{name: "labels empty", scope: "labels=", wantErr: "labels=... must contain"},
+		{name: "labels malformed pair", scope: "labels=team", wantErr: "expected key=value"},
+		{name: "labels empty key", scope: "labels==prod", wantErr: "key and value must be non-empty"},
+		{name: "labels duplicate key", scope: "labels=team=a,team=b", wantErr: "duplicate label key"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseScopeFlags(tt.namespaces, tt.cluster, tt.allNS)
+			got, ns, labels, err := parseScope(tt.scope, tt.namespaces)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
-			} else {
-				require.NoError(t, err)
-				assert.Equal(t, tt.want, got)
+				return
 			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantNS, ns)
+			assert.Equal(t, tt.wantLabels, labels)
 		})
 	}
+}
+
+func TestParseLabelMatch(t *testing.T) {
+	got, err := parseLabelMatch("team=platform,tier=prod")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"team": "platform", "tier": "prod"}, got)
+
+	got, err = parseLabelMatch("k=v")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"k": "v"}, got)
 }
 
 func TestValidateAccessLevel(t *testing.T) {
@@ -127,6 +147,66 @@ func TestMaxAccessLevel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, maxAccessLevel(tt.levels))
+		})
+	}
+}
+
+// TestCanonicalGrantSpec_OldScopesJSONStable freezes the on-disk shape of
+// the canonical-spec annotation for the three pre-labels scopes. The field
+// is what `createOrUpdateGrant` uses to detect "same spec → no-op", and a
+// silent shape change (e.g. losing omitempty on LabelMatch, or changing the
+// field order Go's encoding/json emits for these exact fields) would treat
+// every previously-applied grant as needing an Update. That would break
+// idempotency on upgrade.
+func TestCanonicalGrantSpec_OldScopesJSONStable(t *testing.T) {
+	tests := []struct {
+		name string
+		spec *canonicalGrantSpec
+		want string
+	}{
+		{
+			name: "namespaced",
+			spec: &canonicalGrantSpec{
+				Model:            "current",
+				SubjectKind:      "User",
+				SubjectRef:       "anton",
+				SubjectPrincipal: "anton@abc.com",
+				AccessLevel:      "Admin",
+				ScopeType:        "namespace",
+				Namespaces:       []string{"dev"},
+			},
+			want: `{"model":"current","subjectKind":"User","subjectRef":"anton","subjectPrincipal":"anton@abc.com","accessLevel":"Admin","scopeType":"namespace","namespaces":["dev"],"allowScale":false,"portForwarding":false}`,
+		},
+		{
+			name: "cluster",
+			spec: &canonicalGrantSpec{
+				Model:            "current",
+				SubjectKind:      "Group",
+				SubjectRef:       "admins",
+				SubjectPrincipal: "admins",
+				AccessLevel:      "ClusterAdmin",
+				ScopeType:        "cluster",
+			},
+			want: `{"model":"current","subjectKind":"Group","subjectRef":"admins","subjectPrincipal":"admins","accessLevel":"ClusterAdmin","scopeType":"cluster","allowScale":false,"portForwarding":false}`,
+		},
+		{
+			name: "all-namespaces",
+			spec: &canonicalGrantSpec{
+				Model:            "current",
+				SubjectKind:      "User",
+				SubjectRef:       "anton",
+				SubjectPrincipal: "anton@abc.com",
+				AccessLevel:      "SuperAdmin",
+				ScopeType:        "all-namespaces",
+			},
+			want: `{"model":"current","subjectKind":"User","subjectRef":"anton","subjectPrincipal":"anton@abc.com","accessLevel":"SuperAdmin","scopeType":"all-namespaces","allowScale":false,"portForwarding":false}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.spec.JSON()
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

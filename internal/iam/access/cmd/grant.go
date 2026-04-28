@@ -41,18 +41,27 @@ For users, the subject is resolved by reading User.spec.email from the cluster,
 because the current authz model requires email as the subject name when user-authn
 is used.
 
-Exactly one scope flag is required (they are mutually exclusive):
+Specify the scope via -n/--namespace OR --scope (mutually exclusive):
 
-  -n/--namespace   Creates an AuthorizationRule per namespace (namespaced scope).
-                   Only User, PrivilegedUser, Editor, Admin levels are valid.
+  -n/--namespace NS   Creates an AuthorizationRule per namespace (namespaced scope).
+                      Repeat to target several namespaces at once.
+                      Only User, PrivilegedUser, Editor, Admin levels are valid.
 
-  --cluster        Creates a ClusterAuthorizationRule. The grant applies to all
-                   namespaces EXCEPT d8-* and kube-system (system namespaces).
-                   All access levels are valid, including ClusterEditor/ClusterAdmin/SuperAdmin.
+  --scope cluster     Creates a ClusterAuthorizationRule. The grant applies to
+                      every namespace EXCEPT system ones (d8-*, kube-system).
+                      All access levels are valid, including
+                      ClusterEditor / ClusterAdmin / SuperAdmin.
 
-  --all-namespaces Creates a ClusterAuthorizationRule with namespaceSelector.matchAny.
-                   The grant covers ALL namespaces including system namespaces.
-                   Use with caution — grants access to d8-system, kube-system, etc.
+  --scope all-namespaces
+                      Creates a ClusterAuthorizationRule with
+                      namespaceSelector.matchAny: true. Covers ALL namespaces
+                      including system ones (d8-system, kube-system, ...).
+                      Use with caution.
+
+  --scope labels=K=V[,K2=V2,...]
+                      Creates a ClusterAuthorizationRule with
+                      namespaceSelector.labelSelector.matchLabels = {K: V, ...}.
+                      Targets every namespace matching all of the given labels.
 
 Modifier flags --allow-scale and --port-forwarding add additional capabilities
 to the grant and can be combined with any scope.
@@ -92,10 +101,13 @@ var grantExample = templates.Examples(`
   d8 iam access grant user anton --access-level Admin -n dev -n stage
 
   # Grant ClusterAdmin cluster-wide (system namespaces excluded)
-  d8 iam access grant user anton --access-level ClusterAdmin --cluster
+  d8 iam access grant user anton --access-level ClusterAdmin --scope cluster
 
   # Grant ClusterAdmin to ALL namespaces including d8-system, kube-system
-  d8 iam access grant user anton --access-level ClusterAdmin --all-namespaces
+  d8 iam access grant user anton --access-level ClusterAdmin --scope all-namespaces
+
+  # Grant Editor only in namespaces labelled team=platform,tier=prod
+  d8 iam access grant group admins --access-level Editor --scope labels=team=platform,tier=prod
 
   # Grant Editor to a group with port-forwarding enabled
   d8 iam access grant group admins --access-level Editor -n dev --port-forwarding
@@ -123,9 +135,8 @@ func newGrantCommand() *cobra.Command {
 	}
 
 	cmd.Flags().String("access-level", "", "Access level: User, PrivilegedUser, Editor, Admin, ClusterEditor, ClusterAdmin, SuperAdmin")
-	cmd.Flags().StringSliceP("namespace", "n", nil, "Target namespace(s) for namespaced grants (repeatable)")
-	cmd.Flags().Bool("cluster", false, "Cluster scope: all namespaces EXCEPT system (d8-*, kube-system)")
-	cmd.Flags().Bool("all-namespaces", false, "Cluster scope: ALL namespaces INCLUDING system (d8-*, kube-system)")
+	cmd.Flags().StringSliceP("namespace", "n", nil, "Target namespace(s) for namespaced grants (repeatable). Mutually exclusive with --scope")
+	cmd.Flags().String("scope", "", "Cluster-wide scope: cluster | all-namespaces | labels=K=V[,K2=V2,...]. Mutually exclusive with -n/--namespace")
 	cmd.Flags().Bool("port-forwarding", false, "Allow port-forwarding")
 	cmd.Flags().Bool("allow-scale", false, "Allow scaling workloads")
 	cmd.Flags().Bool("dry-run", false, "Print the resource(s) that would be created without applying")
@@ -134,6 +145,7 @@ func newGrantCommand() *cobra.Command {
 
 	_ = cmd.RegisterFlagCompletionFunc("access-level", completeAccessLevels)
 	_ = cmd.RegisterFlagCompletionFunc("namespace", completeNamespacesFlag)
+	_ = cmd.RegisterFlagCompletionFunc("scope", completeScopeFlag)
 	_ = cmd.RegisterFlagCompletionFunc("output", utilk8s.CompleteOutputFormats("name", "yaml", "json"))
 	_ = cmd.RegisterFlagCompletionFunc("to", completeRuleRef)
 
@@ -151,8 +163,7 @@ func runGrant(cmd *cobra.Command, args []string) error {
 
 	accessLevel, _ := cmd.Flags().GetString("access-level")
 	namespaces, _ := cmd.Flags().GetStringSlice("namespace")
-	clusterFlag, _ := cmd.Flags().GetBool("cluster")
-	allNSFlag, _ := cmd.Flags().GetBool("all-namespaces")
+	scopeFlag, _ := cmd.Flags().GetString("scope")
 	portForwarding, _ := cmd.Flags().GetBool("port-forwarding")
 	allowScale, _ := cmd.Flags().GetBool("allow-scale")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -167,7 +178,7 @@ func runGrant(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	scopeType, err := parseScopeFlags(namespaces, clusterFlag, allNSFlag)
+	scopeType, scopeNS, labelMatch, err := parseScope(scopeFlag, namespaces)
 	if err != nil {
 		return err
 	}
@@ -202,7 +213,8 @@ func runGrant(cmd *cobra.Command, args []string) error {
 		subjectPrincipal: subjectPrincipal,
 		accessLevel:      accessLevel,
 		scopeType:        scopeType,
-		namespaces:       namespaces,
+		namespaces:       scopeNS,
+		labelMatch:       labelMatch,
 		allowScale:       allowScale,
 		portForwarding:   portForwarding,
 		dryRun:           dryRun,
@@ -221,6 +233,7 @@ type grantOpts struct {
 	accessLevel      string
 	scopeType        iamtypes.Scope
 	namespaces       []string
+	labelMatch       map[string]string
 	allowScale       bool
 	portForwarding   bool
 	dryRun           bool
@@ -239,6 +252,7 @@ func applyGrants(cmd *cobra.Command, dyn dynamic.Interface, opts grantOpts) erro
 		AccessLevel:      opts.accessLevel,
 		ScopeType:        opts.scopeType,
 		Namespaces:       opts.namespaces,
+		LabelMatch:       opts.labelMatch,
 		AllowScale:       opts.allowScale,
 		PortForwarding:   opts.portForwarding,
 	})
@@ -279,9 +293,9 @@ func applyGrants(cmd *cobra.Command, dyn dynamic.Interface, opts grantOpts) erro
 
 // canonicalGrantSpecs expands a canonicalGrantInput into one canonicalGrantSpec
 // per concrete object that will be created. Namespaced scope produces N specs
-// (one per namespace), cluster/all-namespaces produces a single spec. Used by
-// both applyGrants and revokeManagedGrants so the two flows agree on object
-// identity (since the d8-managed name is derived from the canonical spec).
+// (one per namespace), cluster/all-namespaces/labels produce a single spec.
+// Used by both applyGrants and revokeManagedGrants so the two flows agree on
+// object identity (since the d8-managed name is derived from the canonical spec).
 func canonicalGrantSpecs(in canonicalGrantInput) ([]*canonicalGrantSpec, error) {
 	base := &canonicalGrantSpec{
 		Model:            iamtypes.ModelCurrent,
@@ -311,6 +325,17 @@ func canonicalGrantSpecs(in canonicalGrantInput) ([]*canonicalGrantSpec, error) 
 		return specs, nil
 	case iamtypes.ScopeCluster, iamtypes.ScopeAllNamespaces:
 		return []*canonicalGrantSpec{base}, nil
+	case iamtypes.ScopeLabels:
+		if len(in.LabelMatch) == 0 {
+			return nil, errors.New("labels scope requires at least one K=V pair")
+		}
+		s := *base
+		// copy to avoid sharing the caller's map
+		s.LabelMatch = make(map[string]string, len(in.LabelMatch))
+		for k, v := range in.LabelMatch {
+			s.LabelMatch[k] = v
+		}
+		return []*canonicalGrantSpec{&s}, nil
 	default:
 		return nil, fmt.Errorf("unsupported scope %q", in.ScopeType)
 	}
@@ -326,7 +351,7 @@ func grantClient(dyn dynamic.Interface, spec *canonicalGrantSpec) (dynamic.Resou
 			return nil, fmt.Errorf("namespaced grant must target exactly one namespace, got %d", len(spec.Namespaces))
 		}
 		return dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace(spec.Namespaces[0]), nil
-	case iamtypes.ScopeCluster, iamtypes.ScopeAllNamespaces:
+	case iamtypes.ScopeCluster, iamtypes.ScopeAllNamespaces, iamtypes.ScopeLabels:
 		return dyn.Resource(iamtypes.ClusterAuthorizationRuleGVR), nil
 	default:
 		return nil, fmt.Errorf("unsupported scope %q", spec.ScopeType)
@@ -334,8 +359,8 @@ func grantClient(dyn dynamic.Interface, spec *canonicalGrantSpec) (dynamic.Resou
 }
 
 // buildGrantObject produces the Unstructured for a grant — AR for namespaced,
-// CAR for cluster/all-namespaces. The object kind/apiVersion/namespace branch
-// off ScopeType but the rest is shared.
+// CAR for cluster/all-namespaces/labels. The object kind/apiVersion/namespace
+// branch off ScopeType but the rest is shared.
 func buildGrantObject(spec *canonicalGrantSpec) (*unstructured.Unstructured, error) {
 	name, err := generateGrantName(spec)
 	if err != nil {
@@ -387,6 +412,21 @@ func buildGrantObject(spec *canonicalGrantSpec) (*unstructured.Unstructured, err
 		apiVersion = iamtypes.APIVersionDeckhouseV1
 		kind = iamtypes.KindClusterAuthorizationRule
 		ruleSpec["namespaceSelector"] = map[string]any{"matchAny": true}
+	case iamtypes.ScopeLabels:
+		if len(spec.LabelMatch) == 0 {
+			return nil, errors.New("labels scope requires at least one label pair")
+		}
+		apiVersion = iamtypes.APIVersionDeckhouseV1
+		kind = iamtypes.KindClusterAuthorizationRule
+		matchLabels := make(map[string]any, len(spec.LabelMatch))
+		for k, v := range spec.LabelMatch {
+			matchLabels[k] = v
+		}
+		ruleSpec["namespaceSelector"] = map[string]any{
+			"labelSelector": map[string]any{
+				"matchLabels": matchLabels,
+			},
+		}
 	default:
 		return nil, fmt.Errorf("unsupported scope %q", spec.ScopeType)
 	}
@@ -452,31 +492,61 @@ func parseSubjectKind(s string) (iamtypes.SubjectKind, error) {
 	}
 }
 
-func parseScopeFlags(namespaces []string, cluster, allNamespaces bool) (iamtypes.Scope, error) {
-	count := 0
-	if len(namespaces) > 0 {
-		count++
-	}
-	if cluster {
-		count++
-	}
-	if allNamespaces {
-		count++
-	}
-	if count == 0 {
-		return "", errors.New("one of -n/--namespace, --cluster, or --all-namespaces must be specified")
-	}
-	if count > 1 {
-		return "", errors.New("-n/--namespace, --cluster, and --all-namespaces are mutually exclusive")
+// parseScope translates the user-facing -n/--namespace and --scope flags into
+// a canonical (Scope, namespaces, labelMatch) triple. Exactly one of the two
+// flag sets must be set.
+func parseScope(scope string, namespaces []string) (iamtypes.Scope, []string, map[string]string, error) {
+	hasNS := len(namespaces) > 0
+	hasScope := scope != ""
+
+	switch {
+	case hasNS && hasScope:
+		return "", nil, nil, errors.New("-n/--namespace and --scope are mutually exclusive")
+	case !hasNS && !hasScope:
+		return "", nil, nil, errors.New("one of -n/--namespace or --scope must be specified")
+	case hasNS:
+		return iamtypes.ScopeNamespace, namespaces, nil, nil
 	}
 
-	if len(namespaces) > 0 {
-		return iamtypes.ScopeNamespace, nil
+	switch {
+	case scope == "cluster":
+		return iamtypes.ScopeCluster, nil, nil, nil
+	case scope == "all-namespaces", scope == "all":
+		return iamtypes.ScopeAllNamespaces, nil, nil, nil
+	case strings.HasPrefix(scope, "labels="):
+		labels, err := parseLabelMatch(strings.TrimPrefix(scope, "labels="))
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("--scope: %w", err)
+		}
+		return iamtypes.ScopeLabels, nil, labels, nil
+	default:
+		return "", nil, nil, fmt.Errorf("invalid --scope %q: expected one of cluster, all-namespaces, labels=K=V[,K2=V2,...]", scope)
 	}
-	if cluster {
-		return iamtypes.ScopeCluster, nil
+}
+
+// parseLabelMatch parses "K=V[,K2=V2,...]" into a deterministic map. Empty
+// keys, empty values and duplicate keys are rejected so the resulting
+// labelSelector cannot be ambiguous.
+func parseLabelMatch(s string) (map[string]string, error) {
+	if s == "" {
+		return nil, errors.New("labels=... must contain at least one K=V pair")
 	}
-	return iamtypes.ScopeAllNamespaces, nil
+	out := make(map[string]string)
+	for _, pair := range strings.Split(s, ",") {
+		kv := strings.SplitN(pair, "=", 2)
+		if len(kv) != 2 {
+			return nil, fmt.Errorf("invalid label pair %q: expected key=value", pair)
+		}
+		k, v := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
+		if k == "" || v == "" {
+			return nil, fmt.Errorf("invalid label pair %q: key and value must be non-empty", pair)
+		}
+		if _, dup := out[k]; dup {
+			return nil, fmt.Errorf("duplicate label key %q", k)
+		}
+		out[k] = v
+	}
+	return out, nil
 }
 
 func toAnyMap(m map[string]string) map[string]any {
@@ -495,10 +565,9 @@ func rejectFlagsInToMode(cmd *cobra.Command) error {
 	perSubjectHint := "for a per-subject capability on top of the existing rule, create a separate grant without --to: 'd8 iam access grant <subject> --access-level ... [scope] --port-forwarding --allow-scale'"
 
 	hints := map[string]string{
-		"access-level":   ruleSpecHint,
-		"namespace":      ruleSpecHint,
-		"cluster":        ruleSpecHint,
-		"all-namespaces": ruleSpecHint,
+		"access-level": ruleSpecHint,
+		"namespace":    ruleSpecHint,
+		"scope":        ruleSpecHint,
 		"port-forwarding": perSubjectHint +
 			" — note: setting it on a shared rule would affect every subject already on it",
 		"allow-scale": perSubjectHint +

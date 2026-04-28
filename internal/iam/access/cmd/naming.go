@@ -19,6 +19,7 @@ package access
 import (
 	"crypto/sha256"
 	"fmt"
+	"sort"
 	"strings"
 
 	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
@@ -100,6 +101,27 @@ func scopeNamePart(spec *canonicalGrantSpec) string {
 		return "cluster"
 	case iamtypes.ScopeAllNamespaces:
 		return "all"
+	case iamtypes.ScopeLabels:
+		// The full hash8 suffix at the end of the name already disambiguates
+		// labels-scoped grants on different K=V sets, but we still want a
+		// stable, recognisable middle segment so the object name self-documents
+		// "this is a labels-scoped grant" without needing to read annotations.
+		// We hash the sorted K=V pairs (encoding/json normalises maps the same
+		// way for the canonical-spec annotation).
+		keys := make([]string, 0, len(spec.LabelMatch))
+		for k := range spec.LabelMatch {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var b strings.Builder
+		for _, k := range keys {
+			b.WriteString(k)
+			b.WriteByte('=')
+			b.WriteString(spec.LabelMatch[k])
+			b.WriteByte(',')
+		}
+		h := sha256.Sum256([]byte(b.String()))
+		return fmt.Sprintf("labels-%x", h[:3])
 	default:
 		return "unknown"
 	}

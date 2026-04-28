@@ -88,6 +88,9 @@ const (
 	ScopeNamespace     Scope = "namespace"
 	ScopeCluster       Scope = "cluster"
 	ScopeAllNamespaces Scope = "all-namespaces"
+	// ScopeLabels selects namespaces by label via
+	// ClusterAuthorizationRule.spec.namespaceSelector.labelSelector.matchLabels.
+	ScopeLabels Scope = "labels"
 )
 
 // AccessModel is the internal authorization model identifier persisted on

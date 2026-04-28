@@ -17,7 +17,6 @@ limitations under the License.
 package access
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -110,12 +109,7 @@ func explainUser(cmd *cobra.Command, inv *accessInventory, userName, outputFmt s
 	if outputFmt == "json" {
 		item := buildUserAccessJSON(inv, userName)
 		item.Warnings = warnings
-		data, err := json.MarshalIndent(item, "", "  ")
-		if err != nil {
-			return err
-		}
-		fmt.Fprintln(cmd.OutOrStdout(), string(data))
-		return nil
+		return printStructured(cmd.OutOrStdout(), item, outputFmt)
 	}
 
 	w := cmd.OutOrStdout()
@@ -184,7 +178,7 @@ func explainGroup(cmd *cobra.Command, inv *accessInventory, groupName, outputFmt
 	warnings := collectGroupWarnings(inv, groupName, cycles)
 
 	if outputFmt == "json" {
-		return printGroupExplainJSON(cmd, inv, groupName, warnings)
+		return printStructured(cmd.OutOrStdout(), buildGroupExplainJSON(inv, groupName, warnings), outputFmt)
 	}
 
 	w := cmd.OutOrStdout()
@@ -270,50 +264,38 @@ func collectGroupWarnings(inv *accessInventory, groupName string, cycles map[str
 	return warnings
 }
 
-func printGroupExplainJSON(cmd *cobra.Command, inv *accessInventory, groupName string, warnings []string) error {
+// groupExplainJSON is the payload for "d8 iam access explain group ... -o json".
+// Lives here (not in list.go) because Members / Grants / Warnings are unique
+// to the explain command's contract — get group does not surface warnings.
+type groupExplainJSON struct {
+	Kind      string        `json:"kind"`
+	Name      string        `json:"name"`
+	Members   []memberJSON  `json:"members"`
+	Grants    []grantJSON   `json:"grants"`
+	Effective effectiveJSON `json:"effectiveSummary"`
+	Warnings  []string      `json:"warnings"`
+}
+
+func buildGroupExplainJSON(inv *accessInventory, groupName string, warnings []string) groupExplainJSON {
 	members := inv.GroupMembers[groupName]
 	grants := inv.GroupGrants(groupName)
 	summary := computeEffectiveSummary(grants)
 
-	type memberEntry struct {
-		Kind string `json:"kind"`
-		Name string `json:"name"`
+	memberItems := make([]memberJSON, 0, len(members))
+	for _, m := range members {
+		memberItems = append(memberItems, memberJSON{Kind: string(m.Kind), Name: m.Name})
 	}
-	type groupExplainJSON struct {
-		Kind      string        `json:"kind"`
-		Name      string        `json:"name"`
-		Members   []memberEntry `json:"members"`
-		Grants    []grantJSON   `json:"grants"`
-		Effective effectiveJSON `json:"effectiveSummary"`
-		Warnings  []string      `json:"warnings"`
+	grantItems := make([]grantJSON, 0, len(grants))
+	for _, g := range grants {
+		grantItems = append(grantItems, grantToJSON(&g, ""))
 	}
 
-	item := groupExplainJSON{
+	return groupExplainJSON{
 		Kind:      "GroupAccessExplanation",
 		Name:      groupName,
+		Members:   denil(memberItems),
+		Grants:    denil(grantItems),
 		Effective: summaryToJSON(summary),
-		Warnings:  warnings,
+		Warnings:  denil(warnings),
 	}
-	for _, m := range members {
-		item.Members = append(item.Members, memberEntry{Kind: string(m.Kind), Name: m.Name})
-	}
-	if item.Members == nil {
-		item.Members = []memberEntry{}
-	}
-	for _, g := range grants {
-		item.Grants = append(item.Grants, grantToJSON(&g, ""))
-	}
-	if item.Grants == nil {
-		item.Grants = []grantJSON{}
-	}
-	if item.Warnings == nil {
-		item.Warnings = []string{}
-	}
-
-	data, err := json.MarshalIndent(item, "", "  ")
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(cmd.OutOrStdout(), string(data))
-	return nil
 }

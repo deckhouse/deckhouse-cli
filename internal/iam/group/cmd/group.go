@@ -27,7 +27,13 @@ var groupLong = templates.LongDesc(`
 Manage Deckhouse local groups (user-authn).
 
 This command provides lifecycle operations for local Group CRs:
-Create, Delete, Get, List, and membership management via add-member / remove-member.
+Create, Delete, and membership management via add-member / remove-member.
+
+For viewing groups (single or list with effective access), use the
+top-level commands:
+
+    d8 iam get group <name>
+    d8 iam list groups
 
 © Flant JSC 2026`)
 
@@ -46,8 +52,6 @@ func NewCommand() *cobra.Command {
 	cmd.AddCommand(
 		newCreateCommand(),
 		newDeleteCommand(),
-		newGetCommand(),
-		newListCommand(),
 		newAddMemberCommand(),
 		newRemoveMemberCommand(),
 	)

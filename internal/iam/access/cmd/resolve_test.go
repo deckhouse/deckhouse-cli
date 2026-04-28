@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
@@ -217,9 +218,10 @@ func TestDetectGroupCycles(t *testing.T) {
 	})
 }
 
-func TestNormalizeClusterAuthRule(t *testing.T) {
+func TestNormalizeAuthRule_CAR(t *testing.T) {
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
+			"kind": "ClusterAuthorizationRule",
 			"metadata": map[string]any{
 				"name":   "test-rule",
 				"labels": map[string]any{"app.kubernetes.io/managed-by": "d8-cli"},
@@ -237,17 +239,20 @@ func TestNormalizeClusterAuthRule(t *testing.T) {
 		},
 	}
 
-	grants := normalizeClusterAuthRule(obj)
+	grants := normalizeAuthRule(obj)
 	assert.Len(t, grants, 2) // ServiceAccount filtered out
+	assert.Equal(t, iamtypes.KindClusterAuthorizationRule, grants[0].SourceKind)
+	assert.Equal(t, iamtypes.ScopeCluster, grants[0].ScopeType)
 	assert.Equal(t, iamtypes.KindUser, grants[0].SubjectKind)
 	assert.Equal(t, "anton@abc.com", grants[0].SubjectPrincipal)
 	assert.True(t, grants[0].ManagedByD8)
 	assert.Equal(t, iamtypes.KindGroup, grants[1].SubjectKind)
 }
 
-func TestNormalizeClusterAuthRule_AllNamespaces(t *testing.T) {
+func TestNormalizeAuthRule_AllNamespaces(t *testing.T) {
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
+			"kind": "ClusterAuthorizationRule",
 			"metadata": map[string]any{
 				"name": "all-ns-rule",
 			},
@@ -263,7 +268,62 @@ func TestNormalizeClusterAuthRule_AllNamespaces(t *testing.T) {
 		},
 	}
 
-	grants := normalizeClusterAuthRule(obj)
+	grants := normalizeAuthRule(obj)
 	assert.Len(t, grants, 1)
 	assert.Equal(t, iamtypes.ScopeAllNamespaces, grants[0].ScopeType)
+}
+
+func TestNormalizeAuthRule_LabelSelector(t *testing.T) {
+	// CAR with namespaceSelector.labelSelector.matchLabels => ScopeLabels.
+	obj := &unstructured.Unstructured{
+		Object: map[string]any{
+			"kind": "ClusterAuthorizationRule",
+			"metadata": map[string]any{
+				"name": "labels-rule",
+			},
+			"spec": map[string]any{
+				"accessLevel": "Admin",
+				"namespaceSelector": map[string]any{
+					"labelSelector": map[string]any{
+						"matchLabels": map[string]any{
+							"team": "platform",
+							"tier": "prod",
+						},
+					},
+				},
+				"subjects": []any{
+					map[string]any{"kind": "Group", "name": "platform"},
+				},
+			},
+		},
+	}
+
+	grants := normalizeAuthRule(obj)
+	require.Len(t, grants, 1)
+	assert.Equal(t, iamtypes.ScopeLabels, grants[0].ScopeType)
+}
+
+func TestNormalizeAuthRule_AR(t *testing.T) {
+	obj := &unstructured.Unstructured{
+		Object: map[string]any{
+			"kind": "AuthorizationRule",
+			"metadata": map[string]any{
+				"name":      "editors",
+				"namespace": "dev",
+			},
+			"spec": map[string]any{
+				"accessLevel": "Editor",
+				"subjects": []any{
+					map[string]any{"kind": "User", "name": "anton@abc.com"},
+				},
+			},
+		},
+	}
+
+	grants := normalizeAuthRule(obj)
+	require.Len(t, grants, 1)
+	assert.Equal(t, iamtypes.KindAuthorizationRule, grants[0].SourceKind)
+	assert.Equal(t, "dev", grants[0].SourceNamespace)
+	assert.Equal(t, iamtypes.ScopeNamespace, grants[0].ScopeType)
+	assert.Equal(t, []string{"dev"}, grants[0].ScopeNamespaces)
 }

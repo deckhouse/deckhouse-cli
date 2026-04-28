@@ -27,7 +27,13 @@ var userOperationLong = templates.LongDesc(`
 Manage Deckhouse local static users (user-authn).
 
 This command provides lifecycle operations for Dex local users:
-Create, Delete, Get, List, ResetPassword, Reset2FA, Lock, Unlock.
+Create, Delete, ResetPassword, Reset2FA, Lock, Unlock.
+
+For viewing users (single or list with effective access), use the
+top-level commands:
+
+    d8 iam get user <name>
+    d8 iam list users
 
 © Flant JSC 2026`)
 
@@ -47,13 +53,11 @@ func NewCommand() *cobra.Command {
 	cmd.AddCommand(
 		newCreateCommand(),
 		newDeleteCommand(),
-		newGetCommand(),
-		newListCommand(),
-		newReset2FACommand(),
 		newResetPasswordCommand(),
-		newLockCommand(),
-		newUnlockCommand(),
 	)
+	for _, def := range userOpDefs {
+		cmd.AddCommand(newUserOpCommand(def))
+	}
 
 	return cmd
 }

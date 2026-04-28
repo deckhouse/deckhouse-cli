@@ -19,7 +19,6 @@ package user
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -39,8 +38,9 @@ var createLong = templates.LongDesc(`
 Create a local static user in Deckhouse (User CR).
 
 The password can be provided interactively (--password-prompt), piped from stdin
-(--password-stdin), or auto-generated (--generate-password). If no password flag
-is given and stdin is a terminal, the command prompts interactively.
+(--password-stdin), auto-generated (--generate-password), or supplied as a
+pre-computed bcrypt hash (--password-hash). If no password flag is given and
+stdin is a terminal, the command prompts interactively.
 
 When --generate-password is used, the password is shown exactly once on stderr.
 
@@ -59,6 +59,9 @@ var createExample = templates.Examples(`
 
   # Create a user from a CI pipeline
   echo "s3cret" | d8 iam user create anton --email anton@abc.com --password-stdin
+
+  # Apply a pre-computed bcrypt hash
+  d8 iam user create anton --email anton@abc.com --password-hash '$2y$10$abcdef...'
 
   # Create a user and add to groups
   d8 iam user create anton --email anton@abc.com --generate-password --member-of admins --create-groups
@@ -80,9 +83,7 @@ func newCreateCommand() *cobra.Command {
 
 	cmd.Flags().String("email", "", "User email address (required, must be lowercase)")
 	_ = cmd.MarkFlagRequired("email")
-	cmd.Flags().Bool("password-prompt", false, "Read password interactively with hidden input")
-	cmd.Flags().Bool("password-stdin", false, "Read password from stdin (for CI/pipelines)")
-	cmd.Flags().Bool("generate-password", false, "Auto-generate a strong password (shown once on stderr)")
+	addPasswordFlags(cmd)
 	cmd.Flags().StringSlice("member-of", nil, "Add user to these groups (repeatable)")
 	cmd.Flags().Bool("create-groups", false, "Create groups specified by --member-of if they do not exist")
 	cmd.Flags().String("ttl", "", "User time-to-live (e.g. 24h, 30m). Can only be set once; expireAt will not update on change.")
@@ -101,9 +102,6 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
 	email, _ := cmd.Flags().GetString("email")
-	promptFlag, _ := cmd.Flags().GetBool("password-prompt")
-	stdinFlag, _ := cmd.Flags().GetBool("password-stdin")
-	generateFlag, _ := cmd.Flags().GetBool("generate-password")
 	memberOf, _ := cmd.Flags().GetStringSlice("member-of")
 	createGroups, _ := cmd.Flags().GetBool("create-groups")
 	ttl, _ := cmd.Flags().GetString("ttl")
@@ -126,28 +124,19 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: users with \"system:\" prefix may be rejected by the cluster\n")
 	}
 
-	mode, err := resolvePasswordMode(promptFlag, stdinFlag, generateFlag)
+	res, mode, err := resolvePasswordInput(cmd)
 	if err != nil {
 		return err
 	}
 
-	var plainPassword string
-	switch mode {
-	case passwordModePrompt:
-		plainPassword, err = readPasswordPrompt(int(os.Stdin.Fd()), cmd.ErrOrStderr())
-	case passwordModeStdin:
-		plainPassword, err = readPasswordStdin(os.Stdin)
-	case passwordModeGenerate:
-		plainPassword, err = generatePassword()
-	}
+	rawHash, err := res.rawBcryptHash()
 	if err != nil {
 		return err
 	}
-
-	encodedPassword, err := encodePasswordForDeckhouse(plainPassword)
-	if err != nil {
-		return err
-	}
+	// User.spec.password expects base64(<raw bcrypt hash>); the user-authn
+	// hook (get_dex_user_crds) decodes it and forwards the bytes to the Dex
+	// Password CR.
+	encodedPassword := encodePasswordForUserCR(rawHash)
 
 	obj := buildUserObject(name, email, encodedPassword, ttl)
 
@@ -170,7 +159,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	if mode == passwordModeGenerate {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Generated temporary password (shown once): %s\n", plainPassword)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Generated temporary password (shown once): %s\n", res.Plain)
 		fmt.Fprintf(cmd.ErrOrStderr(), "Note: first login may require password change depending on cluster password policy.\n")
 		fmt.Fprintf(cmd.ErrOrStderr(), "Note: if staticUsers2FA is enabled, the user will also need to enroll TOTP on first login.\n")
 	}

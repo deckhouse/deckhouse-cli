@@ -18,7 +18,6 @@ package access
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,7 +32,6 @@ import (
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/kubectl/pkg/util/templates"
-	sigsyaml "sigs.k8s.io/yaml"
 
 	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
@@ -88,59 +86,37 @@ func readSubjectRefs(obj *unstructured.Unstructured) []subjectRef {
 	return out
 }
 
-// ------------------------------ cobra ------------------------------
-
-var rulesLong = templates.LongDesc(`
-Inspect the raw authorization rules (ClusterAuthorizationRule and
-AuthorizationRule) that back "d8 iam access grant/revoke/explain".
-
-Unlike "d8 iam access list users|groups" (which aggregates effective access
-per subject), "d8 iam access rules list" shows the rules themselves — d8-managed
-and manual alike — in a single view so you can see "what objects exist and
-what they give".
-
-Use "d8 iam access rules get REF" for a detailed human view of one rule, with
-a reverse lookup from spec.subjects to local User/Group CRs.
-
-© Flant JSC 2026`)
-
-func newRulesCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "rules",
-		Short: "Inspect raw ClusterAuthorizationRule / AuthorizationRule objects",
-		Long:  rulesLong,
-	}
-	cmd.AddCommand(newRulesListCommand(), newRulesGetCommand())
-	return cmd
-}
-
 // ------------------------------ list ------------------------------
 
-var rulesListExample = templates.Examples(`
+var listRulesExample = templates.Examples(`
   # All rules in the cluster (both CARs and every AR across namespaces)
-  d8 iam access rules list
+  d8 iam list rules
 
   # Only ClusterAuthorizationRules
-  d8 iam access rules list --cluster
+  d8 iam list rules --cluster
 
   # Only AuthorizationRules from selected namespaces
-  d8 iam access rules list -n dev -n stage
+  d8 iam list rules -n dev -n stage
 
   # Only rules created by "d8 iam access grant"
-  d8 iam access rules list --managed-only
+  d8 iam list rules --managed-only
 
   # Only rules NOT created by d8-cli
-  d8 iam access rules list --manual-only
+  d8 iam list rules --manual-only
 
   # Machine-readable
-  d8 iam access rules list -o json
-  d8 iam access rules list -o yaml`)
+  d8 iam list rules -o json
+  d8 iam list rules -o yaml`)
 
-func newRulesListCommand() *cobra.Command {
+// NewListRulesCommand returns the cobra command behind "d8 iam list rules".
+// Exported so package listget can register it as a child of the top-level
+// "list" command.
+func NewListRulesCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:           "list",
+		Use:           "rules",
+		Aliases:       []string{"rule"},
 		Short:         "List ClusterAuthorizationRules and AuthorizationRules",
-		Example:       rulesListExample,
+		Example:       listRulesExample,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -193,37 +169,39 @@ func runRulesList(cmd *cobra.Command, _ []string) error {
 	sortRuleRows(rows)
 
 	switch outputFmt {
-	case "json":
-		return printRuleRowsJSON(cmd.OutOrStdout(), rows)
-	case "yaml":
-		return printRuleRowsYAML(cmd.OutOrStdout(), rows)
+	case "json", "yaml":
+		return printStructured(cmd.OutOrStdout(), buildRuleRowsJSON(rows), outputFmt)
 	case "table", "":
 		return printRuleRowsTable(cmd.OutOrStdout(), rows)
 	default:
-		return fmt.Errorf("unsupported output format %q; use table|json|yaml", outputFmt)
+		return fmt.Errorf("%w %q; use table|json|yaml", errUnsupportedFormat, outputFmt)
 	}
 }
 
 // ------------------------------ get ------------------------------
 
-var rulesGetExample = templates.Examples(`
+var getRuleExample = templates.Examples(`
   # Get a ClusterAuthorizationRule (full prefix or short)
-  d8 iam access rules get ClusterAuthorizationRule/superadmins
-  d8 iam access rules get CAR/superadmins
+  d8 iam get rule ClusterAuthorizationRule/superadmins
+  d8 iam get rule CAR/superadmins
 
   # Get an AuthorizationRule (namespace is part of the reference)
-  d8 iam access rules get AuthorizationRule/dev/editors
-  d8 iam access rules get AR/dev/editors
+  d8 iam get rule AuthorizationRule/dev/editors
+  d8 iam get rule AR/dev/editors
 
   # Machine-readable
-  d8 iam access rules get CAR/superadmins -o yaml
-  d8 iam access rules get AR/dev/editors -o json`)
+  d8 iam get rule CAR/superadmins -o yaml
+  d8 iam get rule AR/dev/editors -o json`)
 
-func newRulesGetCommand() *cobra.Command {
+// NewGetRuleCommand returns the cobra command behind "d8 iam get rule REF".
+// Exported so package listget can register it as a child of the top-level
+// "get" command.
+func NewGetRuleCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:               "get REF",
+		Use:               "rule REF",
+		Aliases:           []string{"rules"},
 		Short:             "Show a single CAR or AR with subjects, scope and reverse CR lookup",
-		Example:           rulesGetExample,
+		Example:           getRuleExample,
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeRuleRef,
 		SilenceErrors:     true,
@@ -260,6 +238,10 @@ func runRulesGet(cmd *cobra.Command, args []string) error {
 
 	switch outputFmt {
 	case "yaml", "json":
+		// PrintObject (not printStructured) for "get rule" because the user
+		// expects a real Kubernetes manifest with apiVersion/kind that they
+		// can pipe back into kubectl apply. printStructured operates on our
+		// internal ruleRow shape and would lose that contract.
 		return utilk8s.PrintObject(cmd.OutOrStdout(), obj, outputFmt)
 	case "text", "":
 		row := ruleRowFromObject(obj)
@@ -270,7 +252,7 @@ func runRulesGet(cmd *cobra.Command, args []string) error {
 		}
 		return printRuleRowText(cmd.OutOrStdout(), row, reverse)
 	default:
-		return fmt.Errorf("unsupported output format %q; use text|json|yaml", outputFmt)
+		return fmt.Errorf("%w %q; use text|json|yaml", errUnsupportedFormat, outputFmt)
 	}
 }
 
@@ -322,9 +304,10 @@ func ruleRowFromObject(obj *unstructured.Unstructured) ruleRow {
 	switch kind {
 	case iamtypes.KindClusterAuthorizationRule:
 		scopeType = iamtypes.ScopeCluster
-		matchAny, found, _ := unstructured.NestedBool(obj.Object, "spec", "namespaceSelector", "matchAny")
-		if found && matchAny {
+		if matchAny, found, _ := unstructured.NestedBool(obj.Object, "spec", "namespaceSelector", "matchAny"); found && matchAny {
 			scopeType = iamtypes.ScopeAllNamespaces
+		} else if matchLabels, found, _ := unstructured.NestedMap(obj.Object, "spec", "namespaceSelector", "labelSelector", "matchLabels"); found && len(matchLabels) > 0 {
+			scopeType = iamtypes.ScopeLabels
 		}
 	case iamtypes.KindAuthorizationRule:
 		scopeType = iamtypes.ScopeNamespace
@@ -517,6 +500,10 @@ func printRuleRowText(w io.Writer, r ruleRow, reverse map[string]string) error {
 }
 
 // ------------------------------ rendering: json/yaml ------------------------------
+//
+// YAML output is intentionally the same shape as JSON for symmetry with
+// other list commands in this package — we do NOT emit full Kubernetes
+// manifests here. Use "d8 iam get rule REF -o yaml" for the manifest view.
 
 type ruleJSON struct {
 	Kind           string        `json:"kind"`
@@ -537,7 +524,11 @@ type subjectJSON struct {
 }
 
 func ruleRowToJSON(r ruleRow) ruleJSON {
-	out := ruleJSON{
+	subjects := make([]subjectJSON, 0, len(r.Subjects))
+	for _, s := range r.Subjects {
+		subjects = append(subjects, subjectJSON{Kind: string(s.Kind), Name: s.Name})
+	}
+	return ruleJSON{
 		Kind:           r.Kind,
 		Name:           r.Name,
 		Namespace:      r.Namespace,
@@ -546,49 +537,17 @@ func ruleRowToJSON(r ruleRow) ruleJSON {
 		AllowScale:     r.AllowScale,
 		PortForwarding: r.PortForwarding,
 		ManagedByD8:    r.ManagedByD8,
+		Subjects:       denil(subjects),
 		CreationTime:   r.CreationTime,
 	}
-	for _, s := range r.Subjects {
-		out.Subjects = append(out.Subjects, subjectJSON{Kind: string(s.Kind), Name: s.Name})
-	}
-	if out.Subjects == nil {
-		out.Subjects = []subjectJSON{}
-	}
-	return out
 }
 
-func printRuleRowsJSON(w io.Writer, rows []ruleRow) error {
+func buildRuleRowsJSON(rows []ruleRow) []ruleJSON {
 	items := make([]ruleJSON, 0, len(rows))
 	for _, r := range rows {
 		items = append(items, ruleRowToJSON(r))
 	}
-	data, err := json.MarshalIndent(items, "", "  ")
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(w, string(data))
-	return nil
-}
-
-func printRuleRowsYAML(w io.Writer, rows []ruleRow) error {
-	// YAML output is intentionally the same shape as JSON for symmetry with
-	// other list commands in this package (we do not emit full Kubernetes
-	// manifests here — use "rules get -o yaml" for that).
-	items := make([]ruleJSON, 0, len(rows))
-	for _, r := range rows {
-		items = append(items, ruleRowToJSON(r))
-	}
-	data, err := json.Marshal(items)
-	if err != nil {
-		return err
-	}
-	// sigs.k8s.io/yaml keeps formatting consistent with utilk8s.PrintObject.
-	yamlBytes, err := sigsyaml.JSONToYAML(data)
-	if err != nil {
-		return err
-	}
-	fmt.Fprint(w, string(yamlBytes))
-	return nil
+	return items
 }
 
 // ------------------------------ refs ------------------------------

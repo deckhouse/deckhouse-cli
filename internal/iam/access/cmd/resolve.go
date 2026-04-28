@@ -110,8 +110,7 @@ func buildInventory(ctx context.Context, dyn dynamic.Interface) (*accessInventor
 		return nil, fmt.Errorf("listing ClusterAuthorizationRules: %w", err)
 	}
 	for _, car := range carList.Items {
-		grants := normalizeClusterAuthRule(&car)
-		inv.Grants = append(inv.Grants, grants...)
+		inv.Grants = append(inv.Grants, normalizeAuthRule(&car)...)
 	}
 
 	// Fetch AuthorizationRules from all namespaces
@@ -120,26 +119,47 @@ func buildInventory(ctx context.Context, dyn dynamic.Interface) (*accessInventor
 		return nil, fmt.Errorf("listing AuthorizationRules: %w", err)
 	}
 	for _, ar := range arList.Items {
-		grants := normalizeNamespacedAuthRule(&ar)
-		inv.Grants = append(inv.Grants, grants...)
+		inv.Grants = append(inv.Grants, normalizeAuthRule(&ar)...)
 	}
 
 	return inv, nil
 }
 
-func normalizeClusterAuthRule(obj *unstructured.Unstructured) []normalizedGrant {
-	name := obj.GetName()
-	labels := obj.GetLabels()
-	managedByD8 := labels[iamtypes.LabelManagedBy] == iamtypes.ManagedByValueCLI
-
+// normalizeAuthRule converts an AuthorizationRule or ClusterAuthorizationRule
+// into a flat list of normalizedGrant rows (one per non-ServiceAccount subject).
+// The CAR vs AR distinction lives entirely in the source kind and the scope:
+// CARs default to ScopeCluster but switch to ScopeAllNamespaces or ScopeLabels
+// based on namespaceSelector content; ARs are always ScopeNamespace.
+func normalizeAuthRule(obj *unstructured.Unstructured) []normalizedGrant {
+	managedByD8 := obj.GetLabels()[iamtypes.LabelManagedBy] == iamtypes.ManagedByValueCLI
 	accessLevel, _, _ := unstructured.NestedString(obj.Object, "spec", "accessLevel")
 	allowScale, _, _ := unstructured.NestedBool(obj.Object, "spec", "allowScale")
 	portForwarding, _, _ := unstructured.NestedBool(obj.Object, "spec", "portForwarding")
 
-	scopeType := iamtypes.ScopeCluster
-	matchAny, matchAnyFound, _ := unstructured.NestedBool(obj.Object, "spec", "namespaceSelector", "matchAny")
-	if matchAnyFound && matchAny {
-		scopeType = iamtypes.ScopeAllNamespaces
+	base := normalizedGrant{
+		SourceName:     obj.GetName(),
+		AccessLevel:    accessLevel,
+		AllowScale:     allowScale,
+		PortForwarding: portForwarding,
+		ManagedByD8:    managedByD8,
+	}
+
+	switch obj.GetKind() {
+	case iamtypes.KindClusterAuthorizationRule:
+		base.SourceKind = iamtypes.KindClusterAuthorizationRule
+		base.ScopeType = iamtypes.ScopeCluster
+		if matchAny, found, _ := unstructured.NestedBool(obj.Object, "spec", "namespaceSelector", "matchAny"); found && matchAny {
+			base.ScopeType = iamtypes.ScopeAllNamespaces
+		} else if matchLabels, found, _ := unstructured.NestedMap(obj.Object, "spec", "namespaceSelector", "labelSelector", "matchLabels"); found && len(matchLabels) > 0 {
+			base.ScopeType = iamtypes.ScopeLabels
+		}
+	case iamtypes.KindAuthorizationRule:
+		base.SourceKind = iamtypes.KindAuthorizationRule
+		base.SourceNamespace = obj.GetNamespace()
+		base.ScopeType = iamtypes.ScopeNamespace
+		base.ScopeNamespaces = []string{obj.GetNamespace()}
+	default:
+		return nil
 	}
 
 	var grants []normalizedGrant
@@ -147,49 +167,10 @@ func normalizeClusterAuthRule(obj *unstructured.Unstructured) []normalizedGrant 
 		if sub.Kind == iamtypes.KindServiceAccount {
 			continue
 		}
-		grants = append(grants, normalizedGrant{
-			SourceKind:       iamtypes.KindClusterAuthorizationRule,
-			SourceName:       name,
-			SubjectKind:      sub.Kind,
-			SubjectPrincipal: sub.Name,
-			AccessLevel:      accessLevel,
-			AllowScale:       allowScale,
-			PortForwarding:   portForwarding,
-			ScopeType:        scopeType,
-			ManagedByD8:      managedByD8,
-		})
-	}
-	return grants
-}
-
-func normalizeNamespacedAuthRule(obj *unstructured.Unstructured) []normalizedGrant {
-	name := obj.GetName()
-	ns := obj.GetNamespace()
-	labels := obj.GetLabels()
-	managedByD8 := labels[iamtypes.LabelManagedBy] == iamtypes.ManagedByValueCLI
-
-	accessLevel, _, _ := unstructured.NestedString(obj.Object, "spec", "accessLevel")
-	allowScale, _, _ := unstructured.NestedBool(obj.Object, "spec", "allowScale")
-	portForwarding, _, _ := unstructured.NestedBool(obj.Object, "spec", "portForwarding")
-
-	var grants []normalizedGrant
-	for _, sub := range readSubjectRefs(obj) {
-		if sub.Kind == iamtypes.KindServiceAccount {
-			continue
-		}
-		grants = append(grants, normalizedGrant{
-			SourceKind:       iamtypes.KindAuthorizationRule,
-			SourceName:       name,
-			SourceNamespace:  ns,
-			SubjectKind:      sub.Kind,
-			SubjectPrincipal: sub.Name,
-			AccessLevel:      accessLevel,
-			AllowScale:       allowScale,
-			PortForwarding:   portForwarding,
-			ScopeType:        iamtypes.ScopeNamespace,
-			ScopeNamespaces:  []string{ns},
-			ManagedByD8:      managedByD8,
-		})
+		g := base
+		g.SubjectKind = sub.Kind
+		g.SubjectPrincipal = sub.Name
+		grants = append(grants, g)
 	}
 	return grants
 }
@@ -301,7 +282,11 @@ func computeEffectiveSummary(grants []normalizedGrant) *effectiveSummary {
 			summary.PortForwarding = true
 		}
 		switch g.ScopeType {
-		case iamtypes.ScopeCluster, iamtypes.ScopeAllNamespaces:
+		case iamtypes.ScopeCluster, iamtypes.ScopeAllNamespaces, iamtypes.ScopeLabels:
+			// ScopeLabels still creates a CAR; without resolving the
+			// labelSelector against the live namespace list we cannot
+			// attribute it to specific namespaces, so treat it as a
+			// cluster-level grant for the summary view.
 			clusterLevels = append(clusterLevels, g.AccessLevel)
 		case iamtypes.ScopeNamespace:
 			for _, ns := range g.ScopeNamespaces {

@@ -59,19 +59,31 @@ func completeNamespacesFlag(cmd *cobra.Command, _ []string, toComplete string) (
 	return utilk8s.CompleteNamespaces(cmd, toComplete)
 }
 
-// completeRuleRef completes rule references in the form used by
-// "d8 iam access rules get". It progressively offers:
-//
-//	"CAR/<name>" — full list of ClusterAuthorizationRules
-//	"AR/<ns>/<name>" — full list of AuthorizationRules from every namespace
-//
-// Short prefixes (CAR, AR) are preferred in completion output because they
-// are less typing, but the long prefixes remain valid input.
-func completeRuleRef(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-	if len(args) >= 1 {
-		return nil, cobra.ShellCompDirectiveNoFileComp
-	}
+// completeScopeFlag offers static suggestions for --scope. The labels= form
+// is template-only because we cannot reasonably enumerate every possible
+// K=V pair the user might want.
+func completeScopeFlag(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	candidates := []string{"cluster", "all-namespaces", "labels="}
+	return utilk8s.FilterByPrefix(candidates, toComplete), cobra.ShellCompDirectiveNoFileComp | cobra.ShellCompDirectiveNoSpace
+}
 
+// completeRuleRef completes rule references in the forms accepted by
+// `d8 iam get rule REF` and the `--to`/`--from` flags of grant/revoke.
+//
+//	"CAR/<name>"        — full list of ClusterAuthorizationRules
+//	"AR/<ns>/<name>"    — full list of AuthorizationRules across all namespaces
+//
+// Short prefixes (CAR, AR) are preferred in completion output for less typing;
+// long prefixes remain valid input.
+//
+// NB: this function is used both as a positional ValidArgsFunction (where args
+// is empty when the REF arg is being typed) AND as a flag-value completer for
+// --to/--from (where args may already contain command positionals like
+// "user anton"). The previous implementation short-circuited on len(args)>=1,
+// which silently disabled completion for the flag-value case. Cobra invokes
+// the registered completer for the right slot regardless of unrelated args,
+// so we ignore args here.
+func completeRuleRef(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	dyn, err := utilk8s.NewDynamicClient(cmd)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp

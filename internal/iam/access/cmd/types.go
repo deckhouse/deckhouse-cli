@@ -72,6 +72,11 @@ func sliceToSet(s []string) map[string]bool {
 // and comparison. The typed Model/SubjectKind/ScopeType fields encode-decode
 // to plain JSON strings (Go's encoding/json treats `type X string` as a
 // string), so on-disk annotations stay byte-compatible with previous releases.
+//
+// LabelMatch is omitempty so cluster/all-namespaces/namespace specs hash to
+// the exact same JSON they did before this field was added (keeping
+// d8-managed object names stable across upgrades). It is only populated for
+// ScopeLabels.
 type canonicalGrantSpec struct {
 	Model            iamtypes.AccessModel `json:"model"`
 	SubjectKind      iamtypes.SubjectKind `json:"subjectKind"`
@@ -80,6 +85,7 @@ type canonicalGrantSpec struct {
 	AccessLevel      string               `json:"accessLevel"`
 	ScopeType        iamtypes.Scope       `json:"scopeType"`
 	Namespaces       []string             `json:"namespaces,omitempty"`
+	LabelMatch       map[string]string    `json:"labelMatch,omitempty"`
 	AllowScale       bool                 `json:"allowScale"`
 	PortForwarding   bool                 `json:"portForwarding"`
 }
@@ -92,6 +98,8 @@ func (c *canonicalGrantSpec) JSON() (string, error) {
 		sort.Strings(sorted)
 		cpy.Namespaces = sorted
 	}
+	// encoding/json sorts map keys alphabetically, so LabelMatch is already
+	// emitted deterministically — no extra normalisation needed here.
 	data, err := json.Marshal(&cpy)
 	if err != nil {
 		return "", err
@@ -156,6 +164,7 @@ type canonicalGrantInput struct {
 	AccessLevel      string
 	ScopeType        iamtypes.Scope
 	Namespaces       []string
+	LabelMatch       map[string]string
 	AllowScale       bool
 	PortForwarding   bool
 }

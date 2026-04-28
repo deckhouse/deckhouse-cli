@@ -22,6 +22,7 @@ import (
 
 	access "github.com/deckhouse/deckhouse-cli/internal/iam/access/cmd"
 	group "github.com/deckhouse/deckhouse-cli/internal/iam/group/cmd"
+	listget "github.com/deckhouse/deckhouse-cli/internal/iam/listget/cmd"
 	user "github.com/deckhouse/deckhouse-cli/internal/iam/user/cmd"
 )
 
@@ -29,10 +30,13 @@ var iamLong = templates.LongDesc(`
 Manage Deckhouse identity and access: users, groups, and access grants.
 
 Subcommands:
-  user    — manage local static users (user-authn Dex).
-  group   — manage local groups and their membership (user-authn).
-  access  — grant, revoke, list, and explain permissions backed by
-            AuthorizationRule and ClusterAuthorizationRule CRs (user-authz).
+  user    — manage local static users (user-authn Dex): create / delete /
+            reset-password / reset2fa / lock / unlock.
+  group   — manage local groups: create / delete and add-member / remove-member.
+  access  — grant, revoke, and explain permissions backed by AuthorizationRule
+            and ClusterAuthorizationRule CRs (user-authz).
+  get     — show one user / group / rule with its effective context.
+  list    — list users / groups / rules with effective context.
 
 Each subcommand accepts the standard --kubeconfig / --context flags
 (short: -k / --context) inherited from its own persistent flag set.
@@ -40,7 +44,7 @@ Each subcommand accepts the standard --kubeconfig / --context flags
 © Flant JSC 2026`)
 
 // NewCommand returns the "d8 iam" parent command that composes the user,
-// group, and access subcommands under a single namespace.
+// group, access, and the kubectl-style get/list subcommands.
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "iam",
@@ -54,6 +58,8 @@ func NewCommand() *cobra.Command {
 		user.NewCommand(),
 		group.NewCommand(),
 		access.NewCommand(),
+		listget.NewGetCommand(),
+		listget.NewListCommand(),
 	)
 
 	return cmd

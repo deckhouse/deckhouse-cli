@@ -26,11 +26,14 @@ import (
 var accessLong = templates.LongDesc(`
 Manage access grants in Deckhouse (current authz model).
 
-This command provides grant, revoke, list, and explain operations for
+This command provides grant, revoke, and explain operations for
 AuthorizationRule and ClusterAuthorizationRule custom resources.
 
 Only the current authorization model is supported in this version.
 Experimental model support is planned for a future release.
+
+For inspecting existing rules and effective access, use the top-level
+"d8 iam get" / "d8 iam list" commands.
 
 © Flant JSC 2026`)
 
@@ -48,9 +51,7 @@ func NewCommand() *cobra.Command {
 	cmd.AddCommand(
 		newGrantCommand(),
 		newRevokeCommand(),
-		newListCommand(),
 		newExplainCommand(),
-		newRulesCommand(),
 	)
 
 	return cmd

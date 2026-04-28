@@ -17,7 +17,6 @@ limitations under the License.
 package access
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -25,41 +24,18 @@ import (
 
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/printers"
-	"k8s.io/kubectl/pkg/util/templates"
 
 	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
-var listLong = templates.LongDesc(`
-List effective access for users and groups.
-
-This is not a raw CR listing. It aggregates information from Users, Groups,
-AuthorizationRules, and ClusterAuthorizationRules to show effective access.
-
-See the list of subcommands below or run "d8 iam access list SUBCOMMAND --help".
-
-© Flant JSC 2026`)
-
-func newListCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "list (users|groups|user <name>|group <name>)",
-		Short: "List effective access for users and groups",
-		Long:  listLong,
-	}
-
-	cmd.AddCommand(
-		newListUsersCommand(),
-		newListGroupsCommand(),
-		newListUserCommand(),
-		newListGroupCommand(),
-	)
-	return cmd
-}
-
-func newListUsersCommand() *cobra.Command {
+// NewListUsersCommand returns the cobra command behind "d8 iam list users".
+// It is exported so the top-level "iam list" parent (in package listget) can
+// register it without re-implementing the aggregation pipeline.
+func NewListUsersCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "users",
+		Aliases:       []string{"user"},
 		Short:         "List all users with their effective access",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
@@ -78,7 +54,7 @@ func newListUsersCommand() *cobra.Command {
 			}
 
 			if outputFmt == "json" {
-				return printUsersJSON(cmd, inv)
+				return printStructured(cmd.OutOrStdout(), buildUsersJSON(inv), outputFmt)
 			}
 
 			return printUsersTable(cmd, inv)
@@ -89,9 +65,11 @@ func newListUsersCommand() *cobra.Command {
 	return cmd
 }
 
-func newListGroupsCommand() *cobra.Command {
+// NewListGroupsCommand returns the cobra command behind "d8 iam list groups".
+func NewListGroupsCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "groups",
+		Aliases:       []string{"group"},
 		Short:         "List all groups with their effective access",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
@@ -110,7 +88,7 @@ func newListGroupsCommand() *cobra.Command {
 			}
 
 			if outputFmt == "json" {
-				return printGroupsJSON(cmd, inv)
+				return printStructured(cmd.OutOrStdout(), buildGroupsJSON(inv), outputFmt)
 			}
 
 			return printGroupsTable(cmd, inv)
@@ -121,15 +99,16 @@ func newListGroupsCommand() *cobra.Command {
 	return cmd
 }
 
-func newListUserCommand() *cobra.Command {
+// NewGetUserCommand returns the cobra command behind "d8 iam get user <name>".
+// Output is the aggregated access view: groups (direct + transitive),
+// direct/inherited grants, and the effective summary.
+func NewGetUserCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "user <name>",
-		Short: "Show detailed access for a specific user",
-		Args:  cobra.ExactArgs(1),
-		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			if len(args) >= 1 {
-				return nil, cobra.ShellCompDirectiveNoFileComp
-			}
+		Use:     "user <name>",
+		Aliases: []string{"users"},
+		Short:   "Show detailed access for a specific user",
+		Args:    cobra.ExactArgs(1),
+		ValidArgsFunction: func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 			return utilk8s.CompleteResourceNames(cmd, iamtypes.UserGVR, "", toComplete)
 		},
 		SilenceErrors: true,
@@ -152,27 +131,29 @@ func newListUserCommand() *cobra.Command {
 				return fmt.Errorf("user %q not found", userName)
 			}
 
-			if outputFmt == "json" {
-				return printUserDetailJSON(cmd, inv, userName)
+			switch outputFmt {
+			case "json", "yaml":
+				return printStructured(cmd.OutOrStdout(), buildUserAccessJSON(inv, userName), outputFmt)
+			case "table", "":
+				return printUserDetail(cmd, inv, userName)
+			default:
+				return fmt.Errorf("%w %q; use table|json|yaml", errUnsupportedFormat, outputFmt)
 			}
-
-			return printUserDetail(cmd, inv, userName)
 		},
 	}
-	cmd.Flags().StringP("output", "o", "table", "Output format: table|json")
-	_ = cmd.RegisterFlagCompletionFunc("output", utilk8s.CompleteOutputFormats("table", "json"))
+	cmd.Flags().StringP("output", "o", "table", "Output format: table|json|yaml")
+	_ = cmd.RegisterFlagCompletionFunc("output", utilk8s.CompleteOutputFormats("table", "json", "yaml"))
 	return cmd
 }
 
-func newListGroupCommand() *cobra.Command {
+// NewGetGroupCommand returns the cobra command behind "d8 iam get group <name>".
+func NewGetGroupCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "group <name>",
-		Short: "Show detailed access for a specific group",
-		Args:  cobra.ExactArgs(1),
-		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			if len(args) >= 1 {
-				return nil, cobra.ShellCompDirectiveNoFileComp
-			}
+		Use:     "group <name>",
+		Aliases: []string{"groups"},
+		Short:   "Show detailed access for a specific group",
+		Args:    cobra.ExactArgs(1),
+		ValidArgsFunction: func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 			return utilk8s.CompleteResourceNames(cmd, iamtypes.GroupGVR, "", toComplete)
 		},
 		SilenceErrors: true,
@@ -195,15 +176,18 @@ func newListGroupCommand() *cobra.Command {
 				return fmt.Errorf("group %q not found", groupName)
 			}
 
-			if outputFmt == "json" {
-				return printGroupDetailJSON(cmd, inv, groupName)
+			switch outputFmt {
+			case "json", "yaml":
+				return printStructured(cmd.OutOrStdout(), buildGroupDetailJSON(inv, groupName), outputFmt)
+			case "table", "":
+				return printGroupDetail(cmd, inv, groupName)
+			default:
+				return fmt.Errorf("%w %q; use table|json|yaml", errUnsupportedFormat, outputFmt)
 			}
-
-			return printGroupDetail(cmd, inv, groupName)
 		},
 	}
-	cmd.Flags().StringP("output", "o", "table", "Output format: table|json")
-	_ = cmd.RegisterFlagCompletionFunc("output", utilk8s.CompleteOutputFormats("table", "json"))
+	cmd.Flags().StringP("output", "o", "table", "Output format: table|json|yaml")
+	_ = cmd.RegisterFlagCompletionFunc("output", utilk8s.CompleteOutputFormats("table", "json", "yaml"))
 	return cmd
 }
 
@@ -433,23 +417,38 @@ func findViaGroup(inv *accessInventory, userName, grantGroupName string) string 
 	return grantGroupName
 }
 
-// --- JSON output ---
+// --- JSON output: shared types ---
+//
+// Every list/get JSON payload in this package is composed from the same
+// building blocks. Defining them once at package level (instead of inline
+// inside each printXxxJSON) keeps the wire format documented in one place
+// and lets buildUserAccessJSON / buildGroupExplainJSON share concrete
+// types like memberJSON and grantJSON.
+//
+// All slice fields go through denil() before being assigned so the JSON
+// output emits "[]" instead of "null" — that contract is part of our CLI
+// surface and tests pin it down.
 
 type userAccessJSON struct {
-	Kind    string `json:"kind"`
-	Subject struct {
-		Kind      string `json:"kind"`
-		RefName   string `json:"refName"`
-		Principal string `json:"principal"`
-	} `json:"subject"`
-	Groups struct {
-		Direct     []string `json:"direct"`
-		Transitive []string `json:"transitive"`
-	} `json:"groups"`
+	Kind    string         `json:"kind"`
+	Subject subjectJSONRef `json:"subject"`
+	Groups  groupsJSONRef  `json:"groups"`
+
 	DirectGrants    []grantJSON   `json:"directGrants"`
 	InheritedGrants []grantJSON   `json:"inheritedGrants"`
 	Effective       effectiveJSON `json:"effectiveSummary"`
 	Warnings        []string      `json:"warnings"`
+}
+
+type subjectJSONRef struct {
+	Kind      string `json:"kind"`
+	RefName   string `json:"refName"`
+	Principal string `json:"principal"`
+}
+
+type groupsJSONRef struct {
+	Direct     []string `json:"direct"`
+	Transitive []string `json:"transitive"`
 }
 
 type grantJSON struct {
@@ -486,6 +485,34 @@ type nsLevelJSON struct {
 	AccessLevel string   `json:"accessLevel"`
 	Namespaces  []string `json:"namespaces"`
 }
+
+// memberJSON is the shared shape for "kind/name" entries in group payloads.
+// It is consumed both by buildGroupDetailJSON ("d8 iam get group") and
+// buildGroupExplainJSON ("d8 iam access explain group"); having two
+// identical inline types as we did before invited drift.
+type memberJSON struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+
+// groupSummaryJSON is one entry in the "d8 iam list groups -o json" array.
+type groupSummaryJSON struct {
+	Name      string        `json:"name"`
+	Members   int           `json:"memberCount"`
+	Nested    int           `json:"nestedGroupCount"`
+	Grants    int           `json:"grantCount"`
+	Effective effectiveJSON `json:"effectiveSummary"`
+}
+
+// groupDetailJSON is the payload for "d8 iam get group <name> -o json|yaml".
+type groupDetailJSON struct {
+	Name      string        `json:"name"`
+	Members   []memberJSON  `json:"members"`
+	Grants    []grantJSON   `json:"grants"`
+	Effective effectiveJSON `json:"effectiveSummary"`
+}
+
+// --- JSON output: build helpers ---
 
 func grantToJSON(g *normalizedGrant, via string) grantJSON {
 	return grantJSON{
@@ -524,34 +551,18 @@ func summaryToJSON(s *effectiveSummary) effectiveJSON {
 	return ej
 }
 
-func printUsersJSON(cmd *cobra.Command, inv *accessInventory) error {
-	items := make([]userAccessJSON, 0, len(inv.Users))
+func buildUsersJSON(inv *accessInventory) []userAccessJSON {
 	users := make([]string, 0, len(inv.Users))
 	for u := range inv.Users {
 		users = append(users, u)
 	}
 	sort.Strings(users)
 
+	items := make([]userAccessJSON, 0, len(users))
 	for _, userName := range users {
 		items = append(items, buildUserAccessJSON(inv, userName))
 	}
-
-	data, err := json.MarshalIndent(items, "", "  ")
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(cmd.OutOrStdout(), string(data))
-	return nil
-}
-
-func printUserDetailJSON(cmd *cobra.Command, inv *accessInventory, userName string) error {
-	item := buildUserAccessJSON(inv, userName)
-	data, err := json.MarshalIndent(item, "", "  ")
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(cmd.OutOrStdout(), string(data))
-	return nil
+	return items
 }
 
 func buildUserAccessJSON(inv *accessInventory, userName string) userAccessJSON {
@@ -563,54 +574,42 @@ func buildUserAccessJSON(inv *accessInventory, userName string) userAccessJSON {
 	allGrants = append(allGrants, inheritedGrants...)
 	summary := computeEffectiveSummary(allGrants)
 
-	item := userAccessJSON{Kind: "AccessExplanation"}
-	item.Subject.Kind = string(iamtypes.KindUser)
-	item.Subject.RefName = userName
-	item.Subject.Principal = email
-	item.Groups.Direct = directGroups
-	item.Groups.Transitive = transitiveGroups
-	if item.Groups.Direct == nil {
-		item.Groups.Direct = []string{}
-	}
-	if item.Groups.Transitive == nil {
-		item.Groups.Transitive = []string{}
-	}
-
+	directGrantsJSON := make([]grantJSON, 0, len(directGrants))
 	for _, g := range directGrants {
-		item.DirectGrants = append(item.DirectGrants, grantToJSON(&g, ""))
+		directGrantsJSON = append(directGrantsJSON, grantToJSON(&g, ""))
 	}
+	inheritedGrantsJSON := make([]grantJSON, 0, len(inheritedGrants))
 	for _, g := range inheritedGrants {
 		via := findViaGroup(inv, userName, g.SubjectPrincipal)
-		item.InheritedGrants = append(item.InheritedGrants, grantToJSON(&g, via))
-	}
-	if item.DirectGrants == nil {
-		item.DirectGrants = []grantJSON{}
-	}
-	if item.InheritedGrants == nil {
-		item.InheritedGrants = []grantJSON{}
+		inheritedGrantsJSON = append(inheritedGrantsJSON, grantToJSON(&g, via))
 	}
 
-	item.Effective = summaryToJSON(summary)
-	item.Warnings = []string{}
-	return item
+	return userAccessJSON{
+		Kind: "AccessExplanation",
+		Subject: subjectJSONRef{
+			Kind:      string(iamtypes.KindUser),
+			RefName:   userName,
+			Principal: email,
+		},
+		Groups: groupsJSONRef{
+			Direct:     denil(directGroups),
+			Transitive: denil(transitiveGroups),
+		},
+		DirectGrants:    denil(directGrantsJSON),
+		InheritedGrants: denil(inheritedGrantsJSON),
+		Effective:       summaryToJSON(summary),
+		Warnings:        []string{},
+	}
 }
 
-func printGroupsJSON(cmd *cobra.Command, inv *accessInventory) error {
-	type groupJSON struct {
-		Name      string        `json:"name"`
-		Members   int           `json:"memberCount"`
-		Nested    int           `json:"nestedGroupCount"`
-		Grants    int           `json:"grantCount"`
-		Effective effectiveJSON `json:"effectiveSummary"`
-	}
-
+func buildGroupsJSON(inv *accessInventory) []groupSummaryJSON {
 	groups := make([]string, 0, len(inv.GroupMembers))
 	for g := range inv.GroupMembers {
 		groups = append(groups, g)
 	}
 	sort.Strings(groups)
 
-	items := make([]groupJSON, 0, len(groups))
+	items := make([]groupSummaryJSON, 0, len(groups))
 	for _, gName := range groups {
 		members := inv.GroupMembers[gName]
 		userCount, nestedCount := 0, 0
@@ -623,7 +622,7 @@ func printGroupsJSON(cmd *cobra.Command, inv *accessInventory) error {
 		}
 		grants := inv.GroupGrants(gName)
 		summary := computeEffectiveSummary(grants)
-		items = append(items, groupJSON{
+		items = append(items, groupSummaryJSON{
 			Name:      gName,
 			Members:   userCount,
 			Nested:    nestedCount,
@@ -631,50 +630,27 @@ func printGroupsJSON(cmd *cobra.Command, inv *accessInventory) error {
 			Effective: summaryToJSON(summary),
 		})
 	}
-
-	data, err := json.MarshalIndent(items, "", "  ")
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(cmd.OutOrStdout(), string(data))
-	return nil
+	return items
 }
 
-func printGroupDetailJSON(cmd *cobra.Command, inv *accessInventory, groupName string) error {
+func buildGroupDetailJSON(inv *accessInventory, groupName string) groupDetailJSON {
 	members := inv.GroupMembers[groupName]
 	grants := inv.GroupGrants(groupName)
 	summary := computeEffectiveSummary(grants)
 
-	type memberJSON struct {
-		Kind string `json:"kind"`
-		Name string `json:"name"`
-	}
-
-	type detailJSON struct {
-		Name      string        `json:"name"`
-		Members   []memberJSON  `json:"members"`
-		Grants    []grantJSON   `json:"grants"`
-		Effective effectiveJSON `json:"effectiveSummary"`
-	}
-
-	detail := detailJSON{Name: groupName, Effective: summaryToJSON(summary)}
+	memberItems := make([]memberJSON, 0, len(members))
 	for _, m := range members {
-		detail.Members = append(detail.Members, memberJSON{Kind: string(m.Kind), Name: m.Name})
+		memberItems = append(memberItems, memberJSON{Kind: string(m.Kind), Name: m.Name})
 	}
-	if detail.Members == nil {
-		detail.Members = []memberJSON{}
-	}
+	grantItems := make([]grantJSON, 0, len(grants))
 	for _, g := range grants {
-		detail.Grants = append(detail.Grants, grantToJSON(&g, ""))
-	}
-	if detail.Grants == nil {
-		detail.Grants = []grantJSON{}
+		grantItems = append(grantItems, grantToJSON(&g, ""))
 	}
 
-	data, err := json.MarshalIndent(detail, "", "  ")
-	if err != nil {
-		return err
+	return groupDetailJSON{
+		Name:      groupName,
+		Members:   denil(memberItems),
+		Grants:    denil(grantItems),
+		Effective: summaryToJSON(summary),
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), string(data))
-	return nil
 }

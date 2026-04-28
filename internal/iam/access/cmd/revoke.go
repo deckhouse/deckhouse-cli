@@ -41,10 +41,12 @@ SIMPLE MODE (recommended for most users):
   Revokes access that was previously granted with "d8 iam access grant".
   Uses the same flags to locate and delete the d8-managed object.
 
-      d8 iam access revoke user NAME --access-level LEVEL [scope flags]
+      d8 iam access revoke user NAME --access-level LEVEL [-n NS... | --scope ...]
 
   Only d8-managed objects (label app.kubernetes.io/managed-by=d8-cli)
-  are affected. Manual objects are never modified in this mode.
+  are affected. Manual objects are never modified in this mode. The scope
+  flags must match the original grant exactly (the d8-managed object name
+  is derived from the canonical spec).
 
 ADVANCED MODE (--from):
 
@@ -68,14 +70,17 @@ var revokeExample = templates.Examples(`
   d8 iam access revoke user anton --access-level Admin -n dev
 
   # Simple mode: revoke a cluster-scoped grant
-  d8 iam access revoke user anton --access-level ClusterAdmin --cluster
+  d8 iam access revoke user anton --access-level ClusterAdmin --scope cluster
+
+  # Simple mode: revoke a labels-scoped grant (must match the original --scope value)
+  d8 iam access revoke group admins --access-level Editor --scope labels=team=platform,tier=prod
 
   # Simple mode: revoke from a group
   d8 iam access revoke group admins --access-level Editor -n dev
 
   # Advanced mode: remove a user subject from a shared cluster rule (literal principal)
   d8 iam access revoke --from ClusterAuthorizationRule/my-rule user anton@example.com
-  
+
   # Advanced mode: remove a group subject and delete the rule if it becomes empty
   d8 iam access revoke --from AuthorizationRule/dev/my-rule group admins --delete-empty`)
 
@@ -92,9 +97,8 @@ func newRevokeCommand() *cobra.Command {
 	}
 
 	cmd.Flags().String("access-level", "", "Access level to revoke (for intent-based revoke)")
-	cmd.Flags().StringSliceP("namespace", "n", nil, "Target namespace(s) (for intent-based revoke)")
-	cmd.Flags().Bool("cluster", false, "Cluster-scoped revoke")
-	cmd.Flags().Bool("all-namespaces", false, "All-namespaces scoped revoke")
+	cmd.Flags().StringSliceP("namespace", "n", nil, "Target namespace(s) (for intent-based revoke). Mutually exclusive with --scope")
+	cmd.Flags().String("scope", "", "Cluster-wide scope: cluster | all-namespaces | labels=K=V[,K2=V2,...]. Mutually exclusive with -n/--namespace")
 	cmd.Flags().Bool("port-forwarding", false, "Match grants with port-forwarding enabled")
 	cmd.Flags().Bool("allow-scale", false, "Match grants with allow-scale enabled")
 	cmd.Flags().String("from", "", "Source object to revoke from: AuthorizationRule/<ns>/<name> or ClusterAuthorizationRule/<name>")
@@ -102,6 +106,7 @@ func newRevokeCommand() *cobra.Command {
 
 	_ = cmd.RegisterFlagCompletionFunc("access-level", completeAccessLevels)
 	_ = cmd.RegisterFlagCompletionFunc("namespace", completeNamespacesFlag)
+	_ = cmd.RegisterFlagCompletionFunc("scope", completeScopeFlag)
 	_ = cmd.RegisterFlagCompletionFunc("from", completeRuleRef)
 
 	return cmd
@@ -125,8 +130,7 @@ func runIntentBasedRevoke(cmd *cobra.Command, args []string) error {
 	subjectName := args[1]
 	accessLevel, _ := cmd.Flags().GetString("access-level")
 	namespaces, _ := cmd.Flags().GetStringSlice("namespace")
-	clusterFlag, _ := cmd.Flags().GetBool("cluster")
-	allNSFlag, _ := cmd.Flags().GetBool("all-namespaces")
+	scopeFlag, _ := cmd.Flags().GetString("scope")
 	portForwarding, _ := cmd.Flags().GetBool("port-forwarding")
 	allowScale, _ := cmd.Flags().GetBool("allow-scale")
 
@@ -139,7 +143,7 @@ func runIntentBasedRevoke(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	scopeType, err := parseScopeFlags(namespaces, clusterFlag, allNSFlag)
+	scopeType, scopeNS, labelMatch, err := parseScope(scopeFlag, namespaces)
 	if err != nil {
 		return err
 	}
@@ -166,7 +170,8 @@ func runIntentBasedRevoke(cmd *cobra.Command, args []string) error {
 		subjectPrincipal: subjectPrincipal,
 		accessLevel:      accessLevel,
 		scopeType:        scopeType,
-		namespaces:       namespaces,
+		namespaces:       scopeNS,
+		labelMatch:       labelMatch,
 		allowScale:       allowScale,
 		portForwarding:   portForwarding,
 	}
@@ -183,6 +188,7 @@ type revokeOpts struct {
 	accessLevel      string
 	scopeType        iamtypes.Scope
 	namespaces       []string
+	labelMatch       map[string]string
 	allowScale       bool
 	portForwarding   bool
 }
@@ -198,6 +204,7 @@ func revokeManagedGrants(cmd *cobra.Command, dyn dynamic.Interface, opts revokeO
 		AccessLevel:      opts.accessLevel,
 		ScopeType:        opts.scopeType,
 		Namespaces:       opts.namespaces,
+		LabelMatch:       opts.labelMatch,
 		AllowScale:       opts.allowScale,
 		PortForwarding:   opts.portForwarding,
 	})
@@ -228,7 +235,7 @@ func revokeClient(dyn dynamic.Interface, spec *canonicalGrantSpec) (dynamic.Reso
 		}
 		ns := spec.Namespaces[0]
 		return dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace(ns), iamtypes.KindAuthorizationRule, ns, nil
-	case iamtypes.ScopeCluster, iamtypes.ScopeAllNamespaces:
+	case iamtypes.ScopeCluster, iamtypes.ScopeAllNamespaces, iamtypes.ScopeLabels:
 		return dyn.Resource(iamtypes.ClusterAuthorizationRuleGVR), iamtypes.KindClusterAuthorizationRule, "", nil
 	default:
 		return nil, "", "", fmt.Errorf("unsupported scope %q", spec.ScopeType)

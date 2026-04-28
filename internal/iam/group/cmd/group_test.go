@@ -17,7 +17,6 @@ limitations under the License.
 package group
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -140,70 +139,3 @@ func TestGetGroupMembers(t *testing.T) {
 	})
 }
 
-func TestGetStatusErrors(t *testing.T) {
-	t.Run("errors under spec.status.errors", func(t *testing.T) {
-		obj := &unstructured.Unstructured{
-			Object: map[string]any{
-				"spec": map[string]any{
-					"status": map[string]any{
-						"errors": []any{
-							map[string]any{
-								"message": "user not found",
-								"objectRef": map[string]any{
-									"kind": "User",
-									"name": "deleted-user",
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-		errors := getStatusErrors(obj)
-		require.Len(t, errors, 1)
-		assert.Contains(t, errors[0], "user not found")
-		assert.Contains(t, errors[0], "User/deleted-user")
-	})
-
-	t.Run("no errors", func(t *testing.T) {
-		obj := &unstructured.Unstructured{
-			Object: map[string]any{
-				"spec": map[string]any{},
-			},
-		}
-		errors := getStatusErrors(obj)
-		assert.Empty(t, errors)
-	})
-}
-
-func TestPrintGroupDetail(t *testing.T) {
-	obj := &unstructured.Unstructured{
-		Object: map[string]any{
-			"apiVersion": "deckhouse.io/v1alpha1",
-			"kind":       "Group",
-			"metadata": map[string]any{
-				"name": "admins",
-			},
-			"spec": map[string]any{
-				"name": "admins",
-				"members": []any{
-					map[string]any{"kind": "User", "name": "anton"},
-					map[string]any{"kind": "Group", "name": "devs"},
-				},
-			},
-		},
-	}
-
-	var buf strings.Builder
-	cmd := NewCommand()
-	cmd.SetOut(&buf)
-	err := printGroupDetail(cmd, obj)
-	require.NoError(t, err)
-
-	output := buf.String()
-	assert.Contains(t, output, "Group: admins")
-	assert.Contains(t, output, "anton")
-	assert.Contains(t, output, "devs")
-	assert.Contains(t, output, "User members (1)")
-	assert.Contains(t, output, "Nested groups (1)")
-}
