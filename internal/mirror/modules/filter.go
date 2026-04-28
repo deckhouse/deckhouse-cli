@@ -146,7 +146,8 @@ func parseSemver(v string) (VersionConstraint, error) {
 }
 
 func (f *Filter) ShouldMirrorReleaseChannels(moduleName string) bool {
-	if c, ok := f.modules[moduleName]; ok && c.IsExact() {
+	constraint, hasConstraint := f.modules[moduleName]
+	if hasConstraint && constraint.IsExact() {
 		return false
 	}
 	return true
@@ -155,26 +156,27 @@ func (f *Filter) ShouldMirrorReleaseChannels(moduleName string) bool {
 // VersionsToMirror resolves module constraints from --include-module into concrete tags to pull.
 // Returns nil when no explicit version tags should be added for this module.
 func (f *Filter) VersionsToMirror(mod *Module) []string {
-	c, ok := f.modules[mod.Name]
-	if !ok {
+	constraint, hasConstraint := f.modules[mod.Name]
+	if !hasConstraint {
 		return nil
 	}
 
-	if c.IsExact() {
-		if e, ok := c.(*ExactTagConstraint); ok {
-			return []string{e.Tag()}
+	if constraint.IsExact() {
+		exact, isExactTag := constraint.(*ExactTagConstraint)
+		if !isExactTag {
+			return nil
 		}
-		return nil
+		return []string{exact.Tag()}
 	}
 
-	sc, ok := c.(*SemanticVersionConstraint)
-	if !ok {
+	semver, isSemver := constraint.(*SemanticVersionConstraint)
+	if !isSemver {
 		return nil
 	}
 
 	var tags []string
 	for _, v := range mod.Versions() {
-		if sc.Match(v) {
+		if semver.Match(v) {
 			tags = append(tags, "v"+v.String())
 		}
 	}
