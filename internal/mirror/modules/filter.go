@@ -152,6 +152,8 @@ func (f *Filter) ShouldMirrorReleaseChannels(moduleName string) bool {
 	return true
 }
 
+// VersionsToMirror resolves module constraints from --include-module into concrete tags to pull.
+// Returns nil when no explicit version tags should be added for this module.
 func (f *Filter) VersionsToMirror(mod *Module) []string {
 	c, ok := f.modules[mod.Name]
 	if !ok {
