@@ -127,10 +127,9 @@ func NewListRulesCommand() *cobra.Command {
 	cmd.Flags().Bool("cluster", false, "Only ClusterAuthorizationRules")
 	cmd.Flags().Bool("managed-only", false, "Only rules managed by d8-cli (label app.kubernetes.io/managed-by=d8-cli)")
 	cmd.Flags().Bool("manual-only", false, "Only rules NOT managed by d8-cli")
-	cmd.Flags().StringP("output", "o", "table", "Output format: table|json|yaml")
+	utilk8s.AddOutputFlag(cmd, "table", "table", "json", "yaml")
 
 	_ = cmd.RegisterFlagCompletionFunc("namespace", completeNamespacesFlag)
-	_ = cmd.RegisterFlagCompletionFunc("output", utilk8s.CompleteOutputFormats("table", "json", "yaml"))
 
 	return cmd
 }
@@ -208,8 +207,7 @@ func NewGetRuleCommand() *cobra.Command {
 		SilenceUsage:      true,
 		RunE:              runRulesGet,
 	}
-	cmd.Flags().StringP("output", "o", "text", "Output format: text|json|yaml")
-	_ = cmd.RegisterFlagCompletionFunc("output", utilk8s.CompleteOutputFormats("text", "json", "yaml"))
+	utilk8s.AddOutputFlag(cmd, "text", "text", "json", "yaml")
 	return cmd
 }
 

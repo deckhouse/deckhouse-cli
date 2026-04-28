@@ -23,7 +23,6 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/kubectl/pkg/util/templates"
 
@@ -32,100 +31,55 @@ import (
 )
 
 var revokeLong = templates.LongDesc(`
-Revoke access from a user or group.
+Revoke access previously granted with "d8 iam access grant".
 
-There are two modes of operation:
+The flags must match the original grant's scope/level — the d8-managed
+object name is derived from the canonical spec, so a mismatch yields a
+"not found" error rather than removing an unrelated rule.
 
-SIMPLE MODE (recommended for most users):
-
-  Revokes access that was previously granted with "d8 iam access grant".
-  Uses the same flags to locate and delete the d8-managed object.
-
-      d8 iam access revoke user NAME --access-level LEVEL [-n NS... | --scope ...]
-
-  Only d8-managed objects (label app.kubernetes.io/managed-by=d8-cli)
-  are affected. Manual objects are never modified in this mode. The scope
-  flags must match the original grant exactly (the d8-managed object name
-  is derived from the canonical spec).
-
-ADVANCED MODE (--from):
-
-  Removes a subject from any existing authorization rule, even if it was
-  not created by d8. Useful for shared rules or manual cleanup.
-
-      d8 iam access revoke --from ClusterAuthorizationRule/RULE user PRINCIPAL
-      d8 iam access revoke --from AuthorizationRule/NS/RULE  group GROUPNAME
-
-  PRINCIPAL is matched literally against spec.subjects[].name — use the
-  exact value from the rule (e.g. anton@example.com, not anton). No User
-  CR resolution is performed in this mode.
-
-  The rule is patched, not deleted. Use --delete-empty to delete the rule
-  if no subjects remain after removal.
+Only d8-managed objects (label app.kubernetes.io/managed-by=d8-cli) are
+affected. Manually maintained AuthorizationRules and
+ClusterAuthorizationRules are never touched; edit them with kubectl.
 
 © Flant JSC 2026`)
 
 var revokeExample = templates.Examples(`
-  # Simple mode: revoke a namespaced grant (mirrors the grant command)
+  # Revoke a namespaced grant (mirrors the grant command)
   d8 iam access revoke user anton --access-level Admin -n dev
 
-  # Simple mode: revoke a cluster-scoped grant
+  # Revoke a cluster-scoped grant
   d8 iam access revoke user anton --access-level ClusterAdmin --scope cluster
 
-  # Simple mode: revoke a labels-scoped grant (must match the original --scope value)
-  d8 iam access revoke group admins --access-level Editor --scope labels=team=platform,tier=prod
-
-  # Simple mode: revoke from a group
-  d8 iam access revoke group admins --access-level Editor -n dev
-
-  # Advanced mode: remove a user subject from a shared cluster rule (literal principal)
-  d8 iam access revoke --from ClusterAuthorizationRule/my-rule user anton@example.com
-
-  # Advanced mode: remove a group subject and delete the rule if it becomes empty
-  d8 iam access revoke --from AuthorizationRule/dev/my-rule group admins --delete-empty`)
+  # Revoke a labels-scoped grant (must match the original --scope value)
+  d8 iam access revoke group admins --access-level Editor --scope labels=team=platform,tier=prod`)
 
 func newRevokeCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:               "revoke (user|group) NAME [--access-level LEVEL scope | --from SOURCE]",
-		Short:             "Revoke access from a user or group (current authz model)",
+		Use:               "revoke (user|group) NAME --access-level LEVEL [scope]",
+		Short:             "Revoke a d8-managed access grant",
 		Long:              revokeLong,
 		Example:           revokeExample,
+		Args:              cobra.ExactArgs(2),
 		ValidArgsFunction: completeSubjectAndName,
 		SilenceErrors:     true,
 		SilenceUsage:      true,
 		RunE:              runRevoke,
 	}
 
-	cmd.Flags().String("access-level", "", "Access level to revoke (for intent-based revoke)")
-	cmd.Flags().StringSliceP("namespace", "n", nil, "Target namespace(s) (for intent-based revoke). Mutually exclusive with --scope")
+	cmd.Flags().String("access-level", "", "Access level to revoke")
+	cmd.Flags().StringSliceP("namespace", "n", nil, "Target namespace(s). Mutually exclusive with --scope")
 	cmd.Flags().String("scope", "", "Cluster-wide scope: cluster | all-namespaces | labels=K=V[,K2=V2,...]. Mutually exclusive with -n/--namespace")
 	cmd.Flags().Bool("port-forwarding", false, "Match grants with port-forwarding enabled")
 	cmd.Flags().Bool("allow-scale", false, "Match grants with allow-scale enabled")
-	cmd.Flags().String("from", "", "Source object to revoke from: AuthorizationRule/<ns>/<name> or ClusterAuthorizationRule/<name>")
-	cmd.Flags().Bool("delete-empty", false, "Delete the source object if subjects becomes empty (only with --from)")
 
 	_ = cmd.RegisterFlagCompletionFunc("access-level", completeAccessLevels)
 	_ = cmd.RegisterFlagCompletionFunc("namespace", completeNamespacesFlag)
 	_ = cmd.RegisterFlagCompletionFunc("scope", completeScopeFlag)
-	_ = cmd.RegisterFlagCompletionFunc("from", completeRuleRef)
 
 	return cmd
 }
 
 func runRevoke(cmd *cobra.Command, args []string) error {
-	fromFlag, _ := cmd.Flags().GetString("from")
-
-	if fromFlag != "" {
-		return runSourceBasedRevoke(cmd, args)
-	}
-	return runIntentBasedRevoke(cmd, args)
-}
-
-func runIntentBasedRevoke(cmd *cobra.Command, args []string) error {
-	if len(args) != 2 {
-		return errors.New("intent-based revoke requires: revoke (user|group) <name> --access-level <level> [scope]")
-	}
-
 	subjectKindStr := args[0]
 	subjectName := args[1]
 	accessLevel, _ := cmd.Flags().GetString("access-level")
@@ -135,7 +89,7 @@ func runIntentBasedRevoke(cmd *cobra.Command, args []string) error {
 	allowScale, _ := cmd.Flags().GetBool("allow-scale")
 
 	if accessLevel == "" {
-		return errors.New("--access-level is required for intent-based revoke")
+		return errors.New("--access-level is required")
 	}
 
 	subjectKind, err := parseSubjectKind(subjectKindStr)
@@ -178,9 +132,8 @@ func runIntentBasedRevoke(cmd *cobra.Command, args []string) error {
 	return revokeManagedGrants(cmd, dyn, opts)
 }
 
-// revokeOpts mirrors grantOpts: it captures every parameter of an
-// intent-based revoke so revokeManagedGrants doesn't need a 9-parameter
-// signature.
+// revokeOpts mirrors grantOpts: it captures every parameter of a revoke so
+// revokeManagedGrants doesn't need a 9-parameter signature.
 type revokeOpts struct {
 	subjectKind      iamtypes.SubjectKind
 	subjectRef       string
@@ -242,10 +195,10 @@ func revokeClient(dyn dynamic.Interface, spec *canonicalGrantSpec) (dynamic.Reso
 	}
 }
 
-// deleteManagedGrant deletes a d8-managed authorization rule (cluster or
-// namespaced — the caller picks the dynamic.ResourceInterface). Refuses to
-// touch objects that are not labelled as managed by d8-cli; that error path
-// is what tells users to switch to --from for manual cleanup.
+// deleteManagedGrant deletes a d8-managed authorization rule. Refuses to
+// touch objects that are not labelled as managed by d8-cli — manual cleanup
+// of shared rules is intentionally outside this command's contract; use
+// `kubectl edit` instead.
 func deleteManagedGrant(cmd *cobra.Command, client dynamic.ResourceInterface,
 	spec *canonicalGrantSpec, kind, ns string) error {
 	name, err := generateGrantName(spec)
@@ -261,7 +214,7 @@ func deleteManagedGrant(cmd *cobra.Command, client dynamic.ResourceInterface,
 	}
 
 	if obj.GetLabels()[iamtypes.LabelManagedBy] != iamtypes.ManagedByValueCLI {
-		return fmt.Errorf("%s is not managed by d8-cli; use --from to revoke from it explicitly", formatRuleRef(kind, ns, name))
+		return fmt.Errorf("%s is not managed by d8-cli; edit it manually with kubectl", formatRuleRef(kind, ns, name))
 	}
 
 	if err := client.Delete(cmd.Context(), name, metav1.DeleteOptions{}); err != nil {
@@ -282,98 +235,4 @@ func formatRuleRef(kind, ns, name string) string {
 		return fmt.Sprintf("%s/%s", kind, name)
 	}
 	return fmt.Sprintf("%s/%s/%s", kind, ns, name)
-}
-
-func runSourceBasedRevoke(cmd *cobra.Command, args []string) error {
-	fromFlag, _ := cmd.Flags().GetString("from")
-	deleteEmpty, _ := cmd.Flags().GetBool("delete-empty")
-
-	if len(args) != 2 {
-		return errors.New("source-based revoke requires: revoke --from <source> (user|group) <principal>")
-	}
-	subjectKind, err := parseSubjectKind(args[0])
-	if err != nil {
-		return err
-	}
-	// Principal is used literally — it must match spec.subjects[].name exactly.
-	// No User CR lookup here, because --from targets rules that may reference
-	// external identities or non-d8-managed subjects.
-	subjectName := args[1]
-
-	dyn, err := utilk8s.NewDynamicClient(cmd)
-	if err != nil {
-		return err
-	}
-
-	refKind, refNS, refName, err := parseRuleRef(fromFlag)
-	if err != nil {
-		return fmt.Errorf("invalid --from: %w", err)
-	}
-
-	var client dynamic.ResourceInterface
-	switch refKind {
-	case iamtypes.KindClusterAuthorizationRule:
-		client = dyn.Resource(iamtypes.ClusterAuthorizationRuleGVR)
-	case iamtypes.KindAuthorizationRule:
-		client = dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace(refNS)
-	default:
-		return fmt.Errorf("unsupported --from kind %q", refKind)
-	}
-	return revokeSubjectFromRule(cmd, client, refKind, refNS, refName, subjectKind, subjectName, deleteEmpty)
-}
-
-// revokeSubjectFromRule removes a single subject from any AR or CAR. The
-// dynamic.ResourceInterface argument is what makes the cluster vs namespaced
-// difference disappear; the kind/ns are kept around purely for human-readable
-// messages.
-func revokeSubjectFromRule(cmd *cobra.Command, client dynamic.ResourceInterface,
-	ruleKind, ns, ruleName string, subjectKind iamtypes.SubjectKind, subjectPrincipal string, deleteEmpty bool) error {
-	ref := formatRuleRef(ruleKind, ns, ruleName)
-
-	obj, err := client.Get(cmd.Context(), ruleName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("getting %s: %w", ref, err)
-	}
-
-	newSubjects, removed := removeSubject(obj, subjectKind, subjectPrincipal)
-	if !removed {
-		return fmt.Errorf("subject %s/%s not found in %s", subjectKind, subjectPrincipal, ref)
-	}
-
-	if len(newSubjects) == 0 && deleteEmpty {
-		if err := client.Delete(cmd.Context(), ruleName, metav1.DeleteOptions{}); err != nil {
-			return fmt.Errorf("deleting empty %s: %w", ref, err)
-		}
-		cmd.Printf("Deleted empty %s\n", ref)
-		return nil
-	}
-
-	if err := unstructured.SetNestedSlice(obj.Object, newSubjects, "spec", "subjects"); err != nil {
-		return fmt.Errorf("setting subjects on %s: %w", ref, err)
-	}
-	if _, err := client.Update(cmd.Context(), obj, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("updating %s: %w", ref, err)
-	}
-	cmd.Printf("Removed subject %s/%s from %s\n", subjectKind, subjectPrincipal, ref)
-	return nil
-}
-
-func removeSubject(obj *unstructured.Unstructured, kind iamtypes.SubjectKind, name string) ([]any, bool) {
-	subjects, _, _ := unstructured.NestedSlice(obj.Object, "spec", "subjects")
-	kindStr := string(kind)
-	var newSubjects []any
-	removed := false
-	for _, s := range subjects {
-		sub, ok := s.(map[string]any)
-		if !ok {
-			newSubjects = append(newSubjects, s)
-			continue
-		}
-		if fmt.Sprint(sub["kind"]) == kindStr && fmt.Sprint(sub["name"]) == name {
-			removed = true
-			continue
-		}
-		newSubjects = append(newSubjects, s)
-	}
-	return newSubjects, removed
 }

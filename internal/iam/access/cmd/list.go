@@ -29,9 +29,25 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
+// runInventory builds the access inventory once per command invocation and
+// hands it (plus the resolved -o value) to fn. Every list/get command in
+// this package goes through this helper so each only declares the actual
+// rendering, not the open-client / open-inventory boilerplate.
+func runInventory(cmd *cobra.Command, fn func(inv *accessInventory, outputFmt string) error) error {
+	dyn, err := utilk8s.NewDynamicClient(cmd)
+	if err != nil {
+		return err
+	}
+	inv, err := buildInventory(cmd.Context(), dyn)
+	if err != nil {
+		return err
+	}
+	outputFmt, _ := cmd.Flags().GetString("output")
+	return fn(inv, outputFmt)
+}
+
 // NewListUsersCommand returns the cobra command behind "d8 iam list users".
-// It is exported so the top-level "iam list" parent (in package listget) can
-// register it without re-implementing the aggregation pipeline.
+// Exported so package listget can register it under "d8 iam list".
 func NewListUsersCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "users",
@@ -41,27 +57,15 @@ func NewListUsersCommand() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			outputFmt, _ := cmd.Flags().GetString("output")
-
-			dyn, err := utilk8s.NewDynamicClient(cmd)
-			if err != nil {
-				return err
-			}
-
-			inv, err := buildInventory(cmd.Context(), dyn)
-			if err != nil {
-				return err
-			}
-
-			if outputFmt == "json" {
-				return printStructured(cmd.OutOrStdout(), buildUsersJSON(inv), outputFmt)
-			}
-
-			return printUsersTable(cmd, inv)
+			return runInventory(cmd, func(inv *accessInventory, outputFmt string) error {
+				if outputFmt == "json" {
+					return printStructured(cmd.OutOrStdout(), buildUsersJSON(inv), outputFmt)
+				}
+				return printUsersTable(cmd, inv)
+			})
 		},
 	}
-	cmd.Flags().StringP("output", "o", "table", "Output format: table|json")
-	_ = cmd.RegisterFlagCompletionFunc("output", utilk8s.CompleteOutputFormats("table", "json"))
+	utilk8s.AddOutputFlag(cmd, "table", "table", "json")
 	return cmd
 }
 
@@ -75,33 +79,22 @@ func NewListGroupsCommand() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			outputFmt, _ := cmd.Flags().GetString("output")
-
-			dyn, err := utilk8s.NewDynamicClient(cmd)
-			if err != nil {
-				return err
-			}
-
-			inv, err := buildInventory(cmd.Context(), dyn)
-			if err != nil {
-				return err
-			}
-
-			if outputFmt == "json" {
-				return printStructured(cmd.OutOrStdout(), buildGroupsJSON(inv), outputFmt)
-			}
-
-			return printGroupsTable(cmd, inv)
+			return runInventory(cmd, func(inv *accessInventory, outputFmt string) error {
+				if outputFmt == "json" {
+					return printStructured(cmd.OutOrStdout(), buildGroupsJSON(inv), outputFmt)
+				}
+				return printGroupsTable(cmd, inv)
+			})
 		},
 	}
-	cmd.Flags().StringP("output", "o", "table", "Output format: table|json")
-	_ = cmd.RegisterFlagCompletionFunc("output", utilk8s.CompleteOutputFormats("table", "json"))
+	utilk8s.AddOutputFlag(cmd, "table", "table", "json")
 	return cmd
 }
 
 // NewGetUserCommand returns the cobra command behind "d8 iam get user <name>".
-// Output is the aggregated access view: groups (direct + transitive),
-// direct/inherited grants, and the effective summary.
+// Output combines the user's identity, group memberships (direct +
+// transitive), direct/inherited grants, the effective summary, and any
+// warnings (group cycles, manual rules, orphaned subjects).
 func NewGetUserCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "user <name>",
@@ -115,34 +108,25 @@ func NewGetUserCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			userName := args[0]
-			outputFmt, _ := cmd.Flags().GetString("output")
-
-			dyn, err := utilk8s.NewDynamicClient(cmd)
-			if err != nil {
-				return err
-			}
-
-			inv, err := buildInventory(cmd.Context(), dyn)
-			if err != nil {
-				return err
-			}
-
-			if _, ok := inv.Users[userName]; !ok {
-				return fmt.Errorf("user %q not found", userName)
-			}
-
-			switch outputFmt {
-			case "json", "yaml":
-				return printStructured(cmd.OutOrStdout(), buildUserAccessJSON(inv, userName), outputFmt)
-			case "table", "":
-				return printUserDetail(cmd, inv, userName)
-			default:
-				return fmt.Errorf("%w %q; use table|json|yaml", errUnsupportedFormat, outputFmt)
-			}
+			return runInventory(cmd, func(inv *accessInventory, outputFmt string) error {
+				if _, ok := inv.Users[userName]; !ok {
+					return fmt.Errorf("user %q not found", userName)
+				}
+				warnings := userWarnings(inv, userName)
+				switch outputFmt {
+				case "json", "yaml":
+					payload := buildUserAccessJSON(inv, userName)
+					payload.Warnings = denil(warnings)
+					return printStructured(cmd.OutOrStdout(), payload, outputFmt)
+				case "table", "":
+					return printUserDetail(cmd, inv, userName, warnings)
+				default:
+					return fmt.Errorf("%w %q; use table|json|yaml", errUnsupportedFormat, outputFmt)
+				}
+			})
 		},
 	}
-	cmd.Flags().StringP("output", "o", "table", "Output format: table|json|yaml")
-	_ = cmd.RegisterFlagCompletionFunc("output", utilk8s.CompleteOutputFormats("table", "json", "yaml"))
+	utilk8s.AddOutputFlag(cmd, "table", "table", "json", "yaml")
 	return cmd
 }
 
@@ -160,34 +144,25 @@ func NewGetGroupCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			groupName := args[0]
-			outputFmt, _ := cmd.Flags().GetString("output")
-
-			dyn, err := utilk8s.NewDynamicClient(cmd)
-			if err != nil {
-				return err
-			}
-
-			inv, err := buildInventory(cmd.Context(), dyn)
-			if err != nil {
-				return err
-			}
-
-			if _, ok := inv.GroupMembers[groupName]; !ok {
-				return fmt.Errorf("group %q not found", groupName)
-			}
-
-			switch outputFmt {
-			case "json", "yaml":
-				return printStructured(cmd.OutOrStdout(), buildGroupDetailJSON(inv, groupName), outputFmt)
-			case "table", "":
-				return printGroupDetail(cmd, inv, groupName)
-			default:
-				return fmt.Errorf("%w %q; use table|json|yaml", errUnsupportedFormat, outputFmt)
-			}
+			return runInventory(cmd, func(inv *accessInventory, outputFmt string) error {
+				if _, ok := inv.GroupMembers[groupName]; !ok {
+					return fmt.Errorf("group %q not found", groupName)
+				}
+				warnings := groupWarnings(inv, groupName)
+				switch outputFmt {
+				case "json", "yaml":
+					payload := buildGroupDetailJSON(inv, groupName)
+					payload.Warnings = denil(warnings)
+					return printStructured(cmd.OutOrStdout(), payload, outputFmt)
+				case "table", "":
+					return printGroupDetail(cmd, inv, groupName, warnings)
+				default:
+					return fmt.Errorf("%w %q; use table|json|yaml", errUnsupportedFormat, outputFmt)
+				}
+			})
 		},
 	}
-	cmd.Flags().StringP("output", "o", "table", "Output format: table|json|yaml")
-	_ = cmd.RegisterFlagCompletionFunc("output", utilk8s.CompleteOutputFormats("table", "json", "yaml"))
+	utilk8s.AddOutputFlag(cmd, "table", "table", "json", "yaml")
 	return cmd
 }
 
@@ -255,7 +230,7 @@ func printGroupsTable(cmd *cobra.Command, inv *accessInventory) error {
 	return tw.Flush()
 }
 
-func printUserDetail(cmd *cobra.Command, inv *accessInventory, userName string) error {
+func printUserDetail(cmd *cobra.Command, inv *accessInventory, userName string, warnings []string) error {
 	w := cmd.OutOrStdout()
 	email := inv.Users[userName]
 	directGroups, transitiveGroups := inv.ResolveUserGroups(userName)
@@ -295,11 +270,12 @@ func printUserDetail(cmd *cobra.Command, inv *accessInventory, userName string) 
 
 	fmt.Fprintf(w, "\nEffective access summary:\n")
 	printEffectiveSummary(w, summary)
+	printWarnings(w, warnings)
 
 	return nil
 }
 
-func printGroupDetail(cmd *cobra.Command, inv *accessInventory, groupName string) error {
+func printGroupDetail(cmd *cobra.Command, inv *accessInventory, groupName string, warnings []string) error {
 	w := cmd.OutOrStdout()
 	members := inv.GroupMembers[groupName]
 	grants := inv.GroupGrants(groupName)
@@ -325,6 +301,7 @@ func printGroupDetail(cmd *cobra.Command, inv *accessInventory, groupName string
 
 	fmt.Fprintf(w, "\nEffective access summary:\n")
 	printEffectiveSummary(w, summary)
+	printWarnings(w, warnings)
 
 	return nil
 }
@@ -353,18 +330,13 @@ func printGrantToWriter(w io.Writer, g *normalizedGrant, via string) {
 	}
 }
 
-// formatGrantSource renders the source CAR/AR reference. Delegates to
-// formatRuleRef so list/explain/warning output and revoke output stay
-// byte-identical for the same triple (Kind, NS, Name).
 func formatGrantSource(g *normalizedGrant) string {
 	return formatRuleRef(g.SourceKind, g.SourceNamespace, g.SourceName)
 }
 
-// printEffectiveSummary renders the "cluster scope / namespaced scope /
-// port-forwarding / allow-scale" block used by both "access list" and
-// "access explain". The capability lines include the implicit-source note
-// when the capability is inherited from the SuperAdmin wildcard rather than
-// an explicit CAR flag.
+// printEffectiveSummary renders the cluster/namespaced/port-forwarding/
+// allow-scale block. Capability lines append capabilityNote() when the
+// capability is implicit (SuperAdmin wildcard) rather than an explicit flag.
 func printEffectiveSummary(w io.Writer, summary *effectiveSummary) {
 	if summary.ClusterLevel != "" {
 		fmt.Fprintf(w, "  cluster scope: %s\n", summary.ClusterLevel)
@@ -376,8 +348,16 @@ func printEffectiveSummary(w io.Writer, summary *effectiveSummary) {
 	fmt.Fprintf(w, "  allow-scale: %v%s\n", summary.AllowScale, capabilityNote(summary.AllowScaleImplicit))
 }
 
-// partitionMembersByKind splits Group.spec.members into user and nested-group
-// name slices, preserving the original order in each bucket.
+func printWarnings(w io.Writer, warnings []string) {
+	if len(warnings) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nWarnings:")
+	for _, warn := range warnings {
+		fmt.Fprintf(w, "  ! %s\n", warn)
+	}
+}
+
 func partitionMembersByKind(members []memberRef) ([]string, []string) {
 	var users, groups []string
 	for _, m := range members {
@@ -401,14 +381,12 @@ func printBulletList(w io.Writer, items []string) {
 }
 
 func findViaGroup(inv *accessInventory, userName, grantGroupName string) string {
-	directGroups, _ := inv.ResolveUserGroups(userName)
+	directGroups, transitiveGroups := inv.ResolveUserGroups(userName)
 	for _, g := range directGroups {
 		if g == grantGroupName {
 			return g
 		}
 	}
-	// If not a direct group, find indirect path
-	_, transitiveGroups := inv.ResolveUserGroups(userName)
 	for _, g := range transitiveGroups {
 		if g == grantGroupName {
 			return g + " (transitive)"
@@ -417,17 +395,74 @@ func findViaGroup(inv *accessInventory, userName, grantGroupName string) string 
 	return grantGroupName
 }
 
+// --- Warnings (folded in from the former "iam access explain") ---
+
+// userWarnings returns the same warning set that "iam access explain user"
+// used to surface: cycles in any group the user transits, and grants from
+// manual (non-d8-managed) rules so the operator knows that revoke cannot
+// touch them.
+func userWarnings(inv *accessInventory, userName string) []string {
+	if _, ok := inv.Users[userName]; !ok {
+		return nil
+	}
+	cycles := inv.DetectGroupCycles()
+	_, transitiveGroups := inv.ResolveUserGroups(userName)
+	directGrants, inheritedGrants := inv.UserGrants(userName)
+
+	var out []string
+	for _, g := range transitiveGroups {
+		if cycle, ok := cycles[g]; ok {
+			out = append(out, fmt.Sprintf("group cycle detected: %s", strings.Join(cycle, " -> ")))
+		}
+	}
+	for _, g := range directGrants {
+		if !g.ManagedByD8 {
+			out = append(out, fmt.Sprintf("direct grant from manual object: %s", formatGrantSource(&g)))
+		}
+	}
+	for _, g := range inheritedGrants {
+		if !g.ManagedByD8 {
+			out = append(out, fmt.Sprintf("inherited grant from manual object: %s (via group %s)",
+				formatGrantSource(&g), g.SubjectPrincipal))
+		}
+	}
+	return out
+}
+
+// groupWarnings reports cycles touching the group and members that point at
+// User/Group CRs that do not exist locally (orphaned references).
+func groupWarnings(inv *accessInventory, groupName string) []string {
+	if _, ok := inv.GroupMembers[groupName]; !ok {
+		return nil
+	}
+	cycles := inv.DetectGroupCycles()
+
+	var out []string
+	if cycle, ok := cycles[groupName]; ok {
+		out = append(out, fmt.Sprintf("group cycle detected: %s", strings.Join(cycle, " -> ")))
+	}
+	for _, m := range inv.GroupMembers[groupName] {
+		switch m.Kind {
+		case iamtypes.KindUser:
+			if _, ok := inv.Users[m.Name]; !ok {
+				out = append(out, fmt.Sprintf("user member %q not found as a local User CR (may be orphaned)", m.Name))
+			}
+		case iamtypes.KindGroup:
+			if _, ok := inv.GroupMembers[m.Name]; !ok {
+				out = append(out, fmt.Sprintf("nested group %q not found as a local Group CR", m.Name))
+			}
+		}
+	}
+	return out
+}
+
 // --- JSON output: shared types ---
 //
-// Every list/get JSON payload in this package is composed from the same
-// building blocks. Defining them once at package level (instead of inline
-// inside each printXxxJSON) keeps the wire format documented in one place
-// and lets buildUserAccessJSON / buildGroupExplainJSON share concrete
-// types like memberJSON and grantJSON.
-//
-// All slice fields go through denil() before being assigned so the JSON
-// output emits "[]" instead of "null" — that contract is part of our CLI
-// surface and tests pin it down.
+// Defining these once at package level (instead of inline in each
+// printXxxJSON) keeps the wire format documented in one place and lets
+// build-helpers share concrete types like memberJSON / grantJSON.
+// Slice fields go through denil() so JSON emits "[]" instead of "null"
+// — that contract is part of our CLI surface, locked down by tests.
 
 type userAccessJSON struct {
 	Kind    string         `json:"kind"`
@@ -486,16 +521,11 @@ type nsLevelJSON struct {
 	Namespaces  []string `json:"namespaces"`
 }
 
-// memberJSON is the shared shape for "kind/name" entries in group payloads.
-// It is consumed both by buildGroupDetailJSON ("d8 iam get group") and
-// buildGroupExplainJSON ("d8 iam access explain group"); having two
-// identical inline types as we did before invited drift.
 type memberJSON struct {
 	Kind string `json:"kind"`
 	Name string `json:"name"`
 }
 
-// groupSummaryJSON is one entry in the "d8 iam list groups -o json" array.
 type groupSummaryJSON struct {
 	Name      string        `json:"name"`
 	Members   int           `json:"memberCount"`
@@ -504,12 +534,12 @@ type groupSummaryJSON struct {
 	Effective effectiveJSON `json:"effectiveSummary"`
 }
 
-// groupDetailJSON is the payload for "d8 iam get group <name> -o json|yaml".
 type groupDetailJSON struct {
 	Name      string        `json:"name"`
 	Members   []memberJSON  `json:"members"`
 	Grants    []grantJSON   `json:"grants"`
 	Effective effectiveJSON `json:"effectiveSummary"`
+	Warnings  []string      `json:"warnings"`
 }
 
 // --- JSON output: build helpers ---
@@ -652,5 +682,6 @@ func buildGroupDetailJSON(inv *accessInventory, groupName string) groupDetailJSO
 		Members:   denil(memberItems),
 		Grants:    denil(grantItems),
 		Effective: summaryToJSON(summary),
+		Warnings:  []string{},
 	}
 }

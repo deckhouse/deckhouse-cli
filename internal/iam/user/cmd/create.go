@@ -88,9 +88,8 @@ func newCreateCommand() *cobra.Command {
 	cmd.Flags().Bool("create-groups", false, "Create groups specified by --member-of if they do not exist")
 	cmd.Flags().String("ttl", "", "User time-to-live (e.g. 24h, 30m). Can only be set once; expireAt will not update on change.")
 	cmd.Flags().Bool("dry-run", false, "Print the resource that would be created without applying")
-	cmd.Flags().StringP("output", "o", "name", "Output format: name|yaml|json")
+	utilk8s.AddOutputFlag(cmd, "name", "name", "yaml", "json")
 
-	_ = cmd.RegisterFlagCompletionFunc("output", utilk8s.CompleteOutputFormats("name", "yaml", "json"))
 	_ = cmd.RegisterFlagCompletionFunc("member-of", func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return utilk8s.CompleteResourceNames(cmd, iamtypes.GroupGVR, "", toComplete)
 	})

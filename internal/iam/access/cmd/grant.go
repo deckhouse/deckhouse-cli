@@ -19,7 +19,6 @@ package access
 import (
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/hashicorp/go-multierror"
@@ -37,93 +36,48 @@ import (
 var grantLong = templates.LongDesc(`
 Grant access to a user or group using the current authorization model.
 
-For users, the subject is resolved by reading User.spec.email from the cluster,
-because the current authz model requires email as the subject name when user-authn
-is used.
+For users, the subject is resolved by reading User.spec.email from the
+cluster, because the current authz model requires email as the subject
+name when user-authn is used.
 
 Specify the scope via -n/--namespace OR --scope (mutually exclusive):
 
-  -n/--namespace NS   Creates an AuthorizationRule per namespace (namespaced scope).
-                      Repeat to target several namespaces at once.
-                      Only User, PrivilegedUser, Editor, Admin levels are valid.
+  -n/--namespace NS        AuthorizationRule per namespace. Repeat to target
+                           several namespaces. User, PrivilegedUser, Editor,
+                           Admin levels only.
+  --scope cluster          ClusterAuthorizationRule, every namespace EXCEPT
+                           system ones (d8-*, kube-system).
+  --scope all-namespaces   ClusterAuthorizationRule with matchAny: true.
+                           Covers ALL namespaces, including system ones.
+  --scope labels=K=V[,...] ClusterAuthorizationRule with
+                           namespaceSelector.labelSelector.matchLabels.
 
-  --scope cluster     Creates a ClusterAuthorizationRule. The grant applies to
-                      every namespace EXCEPT system ones (d8-*, kube-system).
-                      All access levels are valid, including
-                      ClusterEditor / ClusterAdmin / SuperAdmin.
-
-  --scope all-namespaces
-                      Creates a ClusterAuthorizationRule with
-                      namespaceSelector.matchAny: true. Covers ALL namespaces
-                      including system ones (d8-system, kube-system, ...).
-                      Use with caution.
-
-  --scope labels=K=V[,K2=V2,...]
-                      Creates a ClusterAuthorizationRule with
-                      namespaceSelector.labelSelector.matchLabels = {K: V, ...}.
-                      Targets every namespace matching all of the given labels.
-
-Modifier flags --allow-scale and --port-forwarding add additional capabilities
-to the grant and can be combined with any scope.
-
-ADVANCED MODE (--to):
-
-  Adds a subject to an existing authorization rule instead of creating a new
-  d8-managed object. Useful when you want to extend a rule maintained
-  manually or shared across teams.
-
-      d8 iam access grant --to ClusterAuthorizationRule/RULE  user PRINCIPAL
-      d8 iam access grant --to AuthorizationRule/NS/RULE      group GROUPNAME
-
-  PRINCIPAL is written literally into spec.subjects[].name — for users pass
-  the exact principal expected by the authz module (typically the email),
-  not the User CR name. No User CR resolution is performed in this mode.
-
-  --to is strictly "add a subject". It never modifies accessLevel, scope,
-  allowScale or portForwarding of the target rule. Those fields apply to
-  ALL subjects of the rule, so changing them from CLI would silently affect
-  other principals — that is by design disallowed. Passing any of these
-  flags together with --to is an error.
-
-  Because RBAC is additive, the normal way to extend a subject's capabilities
-  is a separate d8-managed grant next to the existing rule:
-
-      d8 iam access grant user alice --access-level Admin -n dev --port-forwarding
-
-  If you really need to change a shared rule's flags for everyone on it, edit
-  the rule directly (kubectl edit), since that is a policy change, not a
-  per-subject grant.
+--allow-scale and --port-forwarding add capabilities to any scope.
 
 © Flant JSC 2026`)
 
 var grantExample = templates.Examples(`
-  # Grant Admin in specific namespaces
+  # Namespaced grants (one AR per --namespace)
   d8 iam access grant user anton --access-level Admin -n dev -n stage
 
-  # Grant ClusterAdmin cluster-wide (system namespaces excluded)
+  # Cluster-wide (no system namespaces)
   d8 iam access grant user anton --access-level ClusterAdmin --scope cluster
 
-  # Grant ClusterAdmin to ALL namespaces including d8-system, kube-system
+  # Cluster-wide including system namespaces
   d8 iam access grant user anton --access-level ClusterAdmin --scope all-namespaces
 
-  # Grant Editor only in namespaces labelled team=platform,tier=prod
+  # Match by namespace labels
   d8 iam access grant group admins --access-level Editor --scope labels=team=platform,tier=prod
 
-  # Grant Editor to a group with port-forwarding enabled
+  # Add port-forwarding capability
   d8 iam access grant group admins --access-level Editor -n dev --port-forwarding
 
-  # Dry-run to preview the manifest before applying
-  d8 iam access grant user anton --access-level Admin -n dev --dry-run -o yaml
-
-  # Advanced mode: add a user to an existing ClusterAuthorizationRule (literal principal)
-  d8 iam access grant --to ClusterAuthorizationRule/superadmins user new@example.com
-
-  # Advanced mode: add a group to an existing namespaced AuthorizationRule
-  d8 iam access grant --to AuthorizationRule/dev/shared-editors group devs`)
+  # Preview the manifest without applying
+  d8 iam access grant user anton --access-level Admin -n dev --dry-run -o yaml`)
 
 func newGrantCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:               "grant (user|group) NAME [--access-level LEVEL scope | --to SOURCE]",
+		Use:               "grant (user|group) NAME --access-level LEVEL [scope]",
 		Short:             "Grant access to a user or group (current authz model)",
 		Long:              grantLong,
 		Example:           grantExample,
@@ -140,24 +94,16 @@ func newGrantCommand() *cobra.Command {
 	cmd.Flags().Bool("port-forwarding", false, "Allow port-forwarding")
 	cmd.Flags().Bool("allow-scale", false, "Allow scaling workloads")
 	cmd.Flags().Bool("dry-run", false, "Print the resource(s) that would be created without applying")
-	cmd.Flags().StringP("output", "o", "name", "Output format: name|yaml|json")
-	cmd.Flags().String("to", "", "Existing rule to add the subject to: AuthorizationRule/<ns>/<name> or ClusterAuthorizationRule/<name>")
+	utilk8s.AddOutputFlag(cmd, "name", "name", "yaml", "json")
 
 	_ = cmd.RegisterFlagCompletionFunc("access-level", completeAccessLevels)
 	_ = cmd.RegisterFlagCompletionFunc("namespace", completeNamespacesFlag)
 	_ = cmd.RegisterFlagCompletionFunc("scope", completeScopeFlag)
-	_ = cmd.RegisterFlagCompletionFunc("output", utilk8s.CompleteOutputFormats("name", "yaml", "json"))
-	_ = cmd.RegisterFlagCompletionFunc("to", completeRuleRef)
 
 	return cmd
 }
 
 func runGrant(cmd *cobra.Command, args []string) error {
-	toFlag, _ := cmd.Flags().GetString("to")
-	if toFlag != "" {
-		return runSourceBasedGrant(cmd, args)
-	}
-
 	subjectKindStr := args[0]
 	subjectName := args[1]
 
@@ -170,7 +116,7 @@ func runGrant(cmd *cobra.Command, args []string) error {
 	outputFmt, _ := cmd.Flags().GetString("output")
 
 	if accessLevel == "" {
-		return errors.New("--access-level is required (or use --to to add a subject to an existing rule)")
+		return errors.New("--access-level is required")
 	}
 
 	subjectKind, err := parseSubjectKind(subjectKindStr)
@@ -555,134 +501,4 @@ func toAnyMap(m map[string]string) map[string]any {
 		result[k] = v
 	}
 	return result
-}
-
-// rejectFlagsInToMode fails fast if any flag incompatible with "--to add-subject"
-// mode is provided. Each flag gets a specific hint so the user knows which tool
-// to reach for instead.
-func rejectFlagsInToMode(cmd *cobra.Command) error {
-	ruleSpecHint := "this field applies to ALL subjects of the rule; change it with 'kubectl edit' on the rule, not via --to"
-	perSubjectHint := "for a per-subject capability on top of the existing rule, create a separate grant without --to: 'd8 iam access grant <subject> --access-level ... [scope] --port-forwarding --allow-scale'"
-
-	hints := map[string]string{
-		"access-level": ruleSpecHint,
-		"namespace":    ruleSpecHint,
-		"scope":        ruleSpecHint,
-		"port-forwarding": perSubjectHint +
-			" — note: setting it on a shared rule would affect every subject already on it",
-		"allow-scale": perSubjectHint +
-			" — note: setting it on a shared rule would affect every subject already on it",
-		"dry-run": "--dry-run is not supported with --to (subject add is applied via Update, not generated manifest)",
-	}
-
-	var offenders []string
-	for f := range hints {
-		if cmd.Flags().Changed(f) {
-			offenders = append(offenders, f)
-		}
-	}
-	if len(offenders) == 0 {
-		return nil
-	}
-	sort.Strings(offenders)
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "the following flag(s) are not allowed with --to: --%s\n", strings.Join(offenders, ", --"))
-	for _, f := range offenders {
-		fmt.Fprintf(&b, "  --%s: %s\n", f, hints[f])
-	}
-	return errors.New(b.String())
-}
-
-func runSourceBasedGrant(cmd *cobra.Command, args []string) error {
-	toFlag, _ := cmd.Flags().GetString("to")
-
-	// Hard-fail on any flag that would imply we are redefining the rule.
-	// port-forwarding and allow-scale in particular apply to ALL subjects of
-	// the target rule, so silently "applying" them via --to would silently
-	// mutate other principals' capabilities. That's unsafe and must be
-	// explicit — force the user to pick the right tool:
-	//   - per-subject capability  -> separate d8-managed grant (RBAC is additive)
-	//   - rule-wide policy change -> kubectl edit on the rule itself
-	if err := rejectFlagsInToMode(cmd); err != nil {
-		return err
-	}
-
-	if len(args) != 2 {
-		return errors.New("source-based grant requires: grant --to <source> (user|group) <principal>")
-	}
-	subjectKind, err := parseSubjectKind(args[0])
-	if err != nil {
-		return err
-	}
-	// Principal is used literally — it must exactly match the value that will
-	// land in spec.subjects[].name. No User CR lookup here, for symmetry with
-	// `revoke --from` and because shared rules may already carry a specific
-	// principal format (email, LDAP DN, etc).
-	subjectPrincipal := args[1]
-
-	dyn, err := utilk8s.NewDynamicClient(cmd)
-	if err != nil {
-		return err
-	}
-
-	refKind, refNS, refName, err := parseRuleRef(toFlag)
-	if err != nil {
-		return fmt.Errorf("invalid --to: %w", err)
-	}
-
-	var client dynamic.ResourceInterface
-	switch refKind {
-	case iamtypes.KindClusterAuthorizationRule:
-		client = dyn.Resource(iamtypes.ClusterAuthorizationRuleGVR)
-	case iamtypes.KindAuthorizationRule:
-		client = dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace(refNS)
-	default:
-		return fmt.Errorf("unsupported --to kind %q", refKind)
-	}
-	return addSubjectToRule(cmd, client, refKind, refNS, refName, subjectKind, subjectPrincipal)
-}
-
-// addSubjectToRule adds (kind,principal) to spec.subjects of the rule pointed
-// to by client. The cluster vs namespaced difference lives entirely in how
-// the caller built the dynamic.ResourceInterface; ref/ns are only used for
-// human messages.
-func addSubjectToRule(cmd *cobra.Command, client dynamic.ResourceInterface,
-	ruleKind, ns, ruleName string, subjectKind iamtypes.SubjectKind, subjectPrincipal string) error {
-	ref := formatRuleRef(ruleKind, ns, ruleName)
-
-	obj, err := client.Get(cmd.Context(), ruleName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("getting %s: %w", ref, err)
-	}
-
-	newSubjects, added := addSubject(obj, subjectKind, subjectPrincipal)
-	if !added {
-		cmd.Printf("Subject %s/%s already present in %s (no change)\n", subjectKind, subjectPrincipal, ref)
-		return nil
-	}
-
-	if err := unstructured.SetNestedSlice(obj.Object, newSubjects, "spec", "subjects"); err != nil {
-		return fmt.Errorf("setting subjects on %s: %w", ref, err)
-	}
-	if _, err := client.Update(cmd.Context(), obj, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("updating %s: %w", ref, err)
-	}
-	cmd.Printf("Added subject %s/%s to %s\n", subjectKind, subjectPrincipal, ref)
-	return nil
-}
-
-func addSubject(obj *unstructured.Unstructured, kind iamtypes.SubjectKind, name string) ([]any, bool) {
-	subjects, _, _ := unstructured.NestedSlice(obj.Object, "spec", "subjects")
-	kindStr := string(kind)
-	for _, s := range subjects {
-		sub, ok := s.(map[string]any)
-		if !ok {
-			continue
-		}
-		if fmt.Sprint(sub["kind"]) == kindStr && fmt.Sprint(sub["name"]) == name {
-			return subjects, false
-		}
-	}
-	return append(subjects, map[string]any{"kind": kindStr, "name": name}), true
 }

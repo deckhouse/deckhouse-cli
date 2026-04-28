@@ -51,7 +51,6 @@ func TestIAMTree(t *testing.T) {
 		"iam group remove-member",
 		"iam access grant",
 		"iam access revoke",
-		"iam access explain",
 
 		// New top-level read verbs (kubectl-style).
 		"iam get user",
@@ -70,6 +69,9 @@ func TestIAMTree(t *testing.T) {
 		"iam group list",
 		"iam access list",
 		"iam access rules",
+		// "explain" was folded into "iam get user/group" — same warnings,
+		// one command instead of two.
+		"iam access explain",
 	}
 
 	have := collectPaths(root)

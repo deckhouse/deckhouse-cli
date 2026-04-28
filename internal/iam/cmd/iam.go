@@ -30,16 +30,14 @@ var iamLong = templates.LongDesc(`
 Manage Deckhouse identity and access: users, groups, and access grants.
 
 Subcommands:
-  user    — manage local static users (user-authn Dex): create / delete /
-            reset-password / reset2fa / lock / unlock.
-  group   — manage local groups: create / delete and add-member / remove-member.
-  access  — grant, revoke, and explain permissions backed by AuthorizationRule
-            and ClusterAuthorizationRule CRs (user-authz).
-  get     — show one user / group / rule with its effective context.
-  list    — list users / groups / rules with effective context.
+  user    — local users (user-authn Dex): create/delete/reset-password/
+            reset2fa/lock/unlock.
+  group   — local groups: create/delete and add-member/remove-member.
+  access  — grant and revoke (current authz model).
+  get     — show one user/group/rule with effective access and warnings.
+  list    — list users/groups/rules with effective access.
 
-Each subcommand accepts the standard --kubeconfig / --context flags
-(short: -k / --context) inherited from its own persistent flag set.
+All subcommands accept the standard --kubeconfig / --context flags.
 
 © Flant JSC 2026`)
 

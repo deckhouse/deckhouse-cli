@@ -21,7 +21,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 )
@@ -241,37 +240,3 @@ func TestCanonicalGrantSpec_JSON_Deterministic(t *testing.T) {
 	assert.Equal(t, j1, j2, "namespace order should not affect canonical JSON")
 }
 
-func TestRemoveSubject(t *testing.T) {
-	t.Run("subject found", func(t *testing.T) {
-		obj := buildTestObj([]map[string]any{
-			{"kind": "User", "name": "anton@abc.com"},
-			{"kind": "Group", "name": "admins"},
-		})
-		newSubjects, removed := removeSubject(obj, iamtypes.KindUser, "anton@abc.com")
-		assert.True(t, removed)
-		assert.Len(t, newSubjects, 1)
-	})
-
-	t.Run("subject not found", func(t *testing.T) {
-		obj := buildTestObj([]map[string]any{
-			{"kind": "Group", "name": "admins"},
-		})
-		newSubjects, removed := removeSubject(obj, iamtypes.KindUser, "anton@abc.com")
-		assert.False(t, removed)
-		assert.Len(t, newSubjects, 1)
-	})
-}
-
-func buildTestObj(subjects []map[string]any) *unstructured.Unstructured {
-	var rawSubjects []any
-	for _, s := range subjects {
-		rawSubjects = append(rawSubjects, s)
-	}
-	return &unstructured.Unstructured{
-		Object: map[string]any{
-			"spec": map[string]any{
-				"subjects": rawSubjects,
-			},
-		},
-	}
-}

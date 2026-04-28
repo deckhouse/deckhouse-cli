@@ -25,32 +25,14 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 )
 
-// errUnsupportedFormat is returned by printStructured when the format
-// argument is neither "json" nor "yaml". Callers in this package wrap it
-// with the per-command list of accepted values, e.g.:
-//
-//	return fmt.Errorf("%w; use table|json|yaml", err)
-//
-// Tests assert via errors.Is.
+// errUnsupportedFormat is returned for an unknown -o value. Callers wrap it
+// with the per-command list of accepted formats; tests use errors.Is.
 var errUnsupportedFormat = errors.New("unsupported output format")
 
-// printStructured renders v as JSON or YAML on w.
-//
-// JSON path uses MarshalIndent with two-space indent and a trailing
-// newline (via Fprintln). The historic call sites in this package emitted
-// exactly that, so swapping them to printStructured stays byte-identical
-// for scripted consumers.
-//
-// YAML path goes JSON -> sigsyaml.JSONToYAML so json tags drive field
-// names. Every typed shape we print here (grantJSON, ruleJSON,
-// userAccessJSON, ...) declares only json tags; dual-tagging every struct
-// purely for one print path would be maintenance cost without benefit.
-// utilk8s.PrintObject takes the same JSON-then-YAML approach for
-// Unstructured manifests, keeping the two helpers symmetric.
-//
-// For Kubernetes manifests (user/group/grant create -o yaml) keep using
-// utilk8s.PrintObject — it preserves the apiVersion/kind layout and
-// supports the "name" format that is meaningful only for k8s objects.
+// printStructured renders v as JSON or YAML. YAML goes through json.Marshal +
+// sigsyaml.JSONToYAML so json tags drive field names — our typed shapes
+// declare only json tags. For Kubernetes manifests use utilk8s.PrintObject
+// instead, which preserves the apiVersion/kind layout.
 func printStructured(w io.Writer, v any, format string) error {
 	switch format {
 	case "json":
@@ -76,15 +58,8 @@ func printStructured(w io.Writer, v any, format string) error {
 	}
 }
 
-// denil normalises a nil slice to an empty (but non-nil) slice so JSON
-// encoding emits "[]" instead of "null". Every iam list/get JSON payload
-// in this package promises that contract so machine consumers can iterate
-// the field unconditionally.
-//
-// Returned by value rather than mutating through a pointer because every
-// call site in this package already assigns the field with the result of
-// a build step — chaining with denil keeps the call site one expression
-// instead of two statements.
+// denil turns a nil slice into an empty one so JSON emits "[]" instead of
+// "null". Returned by value to keep call sites one expression.
 func denil[T any](s []T) []T {
 	if s == nil {
 		return []T{}

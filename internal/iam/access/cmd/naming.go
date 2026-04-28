@@ -102,12 +102,9 @@ func scopeNamePart(spec *canonicalGrantSpec) string {
 	case iamtypes.ScopeAllNamespaces:
 		return "all"
 	case iamtypes.ScopeLabels:
-		// The full hash8 suffix at the end of the name already disambiguates
-		// labels-scoped grants on different K=V sets, but we still want a
-		// stable, recognisable middle segment so the object name self-documents
-		// "this is a labels-scoped grant" without needing to read annotations.
-		// We hash the sorted K=V pairs (encoding/json normalises maps the same
-		// way for the canonical-spec annotation).
+		// Stable middle segment so the object name self-documents as
+		// labels-scoped. Disambiguation against other label sets comes from
+		// the trailing hash8 of the full canonical spec.
 		keys := make([]string, 0, len(spec.LabelMatch))
 		for k := range spec.LabelMatch {
 			keys = append(keys, k)

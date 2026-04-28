@@ -26,13 +26,11 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
-// subjectKinds is the enum accepted as the first positional arg on
-// "d8 iam access grant", "d8 iam access revoke" and "d8 iam access explain".
+// subjectKinds is the first positional arg of grant/revoke.
 var subjectKinds = []string{"user", "group"}
 
-// allAccessLevelsList is exposed for flag completion. It points at the same
-// ordered slice that drives validation in types.go, so adding a new level
-// updates both sites at once.
+// allAccessLevelsList aliases the ordered slice in types.go so completion
+// and validation share a single source of truth.
 var allAccessLevelsList = allAccessLevelsOrdered
 
 // completeSubjectAndName completes "user|group NAME" positional pairs.
@@ -67,31 +65,18 @@ func completeScopeFlag(_ *cobra.Command, _ []string, toComplete string) ([]strin
 	return utilk8s.FilterByPrefix(candidates, toComplete), cobra.ShellCompDirectiveNoFileComp | cobra.ShellCompDirectiveNoSpace
 }
 
-// completeRuleRef completes rule references in the forms accepted by
-// `d8 iam get rule REF` and the `--to`/`--from` flags of grant/revoke.
-//
-//	"CAR/<name>"        — full list of ClusterAuthorizationRules
-//	"AR/<ns>/<name>"    — full list of AuthorizationRules across all namespaces
-//
-// Short prefixes (CAR, AR) are preferred in completion output for less typing;
-// long prefixes remain valid input.
-//
-// NB: this function is used both as a positional ValidArgsFunction (where args
-// is empty when the REF arg is being typed) AND as a flag-value completer for
-// --to/--from (where args may already contain command positionals like
-// "user anton"). The previous implementation short-circuited on len(args)>=1,
-// which silently disabled completion for the flag-value case. Cobra invokes
-// the registered completer for the right slot regardless of unrelated args,
-// so we ignore args here.
+// completeRuleRef completes "CAR/<name>" and "AR/<ns>/<name>" for
+// `d8 iam get rule REF`. Short prefixes (CAR, AR) are preferred in output;
+// long prefixes (ClusterAuthorizationRule, AuthorizationRule) are also
+// accepted as valid input.
 func completeRuleRef(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	dyn, err := utilk8s.NewDynamicClient(cmd)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 
-	// Decide which branches to populate based on the prefix already committed
-	// to by the user. For a partially-typed prefix (e.g. "C", "CA") we still
-	// want both — cobra's downstream filtering will narrow things down.
+	// Pick which branch to fetch by the committed prefix. Short prefixes
+	// like "C"/"CA" still query both — cobra filters the result.
 	wantCAR, wantAR := true, true
 	switch {
 	case strings.HasPrefix(toComplete, "CAR/"),

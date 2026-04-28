@@ -20,10 +20,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
+	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	sigsyaml "sigs.k8s.io/yaml"
 )
+
+// AddOutputFlag declares the standard "-o/--output" flag and its completion
+// in a single line. Default value and accepted formats are command-specific
+// so callers list them explicitly.
+func AddOutputFlag(cmd *cobra.Command, defaultFmt string, formats ...string) {
+	cmd.Flags().StringP("output", "o", defaultFmt, "Output format: "+strings.Join(formats, "|"))
+	_ = cmd.RegisterFlagCompletionFunc("output", CompleteOutputFormats(formats...))
+}
 
 // PrintObject writes an unstructured Kubernetes object to w in the given format.
 // Supported formats: "json", "yaml"; anything else prints Kind/Name.

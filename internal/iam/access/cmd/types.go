@@ -25,30 +25,22 @@ import (
 	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 )
 
-// namespacedAccessLevelsOrdered is the source of truth for access levels
-// allowed at namespace scope, listed from least to most privileged.
+// Access levels listed from least to most privileged. Used for validation,
+// completion, and error messages — order is part of the user-facing output.
 var namespacedAccessLevelsOrdered = []string{
 	"User", "PrivilegedUser", "Editor", "Admin",
 }
 
-// clusterOnlyAccessLevelsOrdered are the levels that only make sense at
-// cluster scope. Combined with namespacedAccessLevelsOrdered they form the
-// full set of access levels accepted by `d8 iam access grant`.
 var clusterOnlyAccessLevelsOrdered = []string{
 	"ClusterEditor", "ClusterAdmin", "SuperAdmin",
 }
 
-// allAccessLevelsOrdered is the full ordered list of access levels in
-// least-to-most privileged order. Used for completion and error messages
-// so user-facing output stays in a predictable order.
 var allAccessLevelsOrdered = append(
 	append([]string(nil), namespacedAccessLevelsOrdered...),
 	clusterOnlyAccessLevelsOrdered...,
 )
 
-// accessLevelOrder defines the hierarchy: higher index = more privileged.
-// Built from allAccessLevelsOrdered so a single rename keeps everything in
-// sync.
+// accessLevelOrder maps level → privilege rank (higher = more privileged).
 var accessLevelOrder = func() map[string]int {
 	m := make(map[string]int, len(allAccessLevelsOrdered))
 	for i, l := range allAccessLevelsOrdered {
@@ -69,14 +61,9 @@ func sliceToSet(s []string) map[string]bool {
 }
 
 // canonicalGrantSpec is the canonical representation of a grant for hashing
-// and comparison. The typed Model/SubjectKind/ScopeType fields encode-decode
-// to plain JSON strings (Go's encoding/json treats `type X string` as a
-// string), so on-disk annotations stay byte-compatible with previous releases.
-//
-// LabelMatch is omitempty so cluster/all-namespaces/namespace specs hash to
-// the exact same JSON they did before this field was added (keeping
-// d8-managed object names stable across upgrades). It is only populated for
-// ScopeLabels.
+// and comparison. Typed string fields encode to plain JSON strings, so the
+// on-disk annotation stays byte-compatible across releases. LabelMatch is
+// omitempty so non-labels scopes hash exactly as before this field was added.
 type canonicalGrantSpec struct {
 	Model            iamtypes.AccessModel `json:"model"`
 	SubjectKind      iamtypes.SubjectKind `json:"subjectKind"`
@@ -98,8 +85,7 @@ func (c *canonicalGrantSpec) JSON() (string, error) {
 		sort.Strings(sorted)
 		cpy.Namespaces = sorted
 	}
-	// encoding/json sorts map keys alphabetically, so LabelMatch is already
-	// emitted deterministically — no extra normalisation needed here.
+	// encoding/json sorts map keys, so LabelMatch is already deterministic.
 	data, err := json.Marshal(&cpy)
 	if err != nil {
 		return "", err
@@ -153,10 +139,8 @@ func maxAccessLevel(levels []string) string {
 	return best
 }
 
-// canonicalGrantInput captures the minimal subset of grant/revoke options
-// needed to expand a user-facing intent into one canonicalGrantSpec per
-// concrete object. It is intentionally a flat value type so callers don't
-// have to leak grantOpts/revokeOpts into shared helpers.
+// canonicalGrantInput is the flat value type shared by grant and revoke
+// callers, so neither has to leak its full *Opts struct into shared helpers.
 type canonicalGrantInput struct {
 	SubjectKind      iamtypes.SubjectKind
 	SubjectRef       string
