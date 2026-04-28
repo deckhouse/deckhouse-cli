@@ -180,6 +180,8 @@ type moduleData struct {
 func (svc *Service) pullModules(ctx context.Context) error {
 	logger := svc.userLogger
 
+	// Temporary workspace for module OCI layouts:
+	// - stores intermediate pulled images; final bundle is packed later.
 	tmpDir := filepath.Join(svc.workingDir, "modules")
 
 	// List all available modules
@@ -193,7 +195,7 @@ func (svc *Service) pullModules(ctx context.Context) error {
 		return nil
 	}
 
-	// Filter modules according to whitelist/blacklist
+	// Filter-out modules that are not allowed by the filter (blacklist or whitelist)
 	filteredModules := make([]moduleData, 0)
 	for _, moduleName := range moduleNames {
 		mod := &Module{
