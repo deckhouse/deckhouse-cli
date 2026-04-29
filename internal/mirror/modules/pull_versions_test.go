@@ -20,6 +20,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -27,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	dkpreg "github.com/deckhouse/deckhouse/pkg/registry"
 	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
@@ -40,25 +42,12 @@ const (
 	pullVersionsTestModule = "console"
 )
 
-// TestPullSingleModule_SemverConstraintExpandsToRegistryTags is a regression test
-// for the bug where `--include-module <name>@<semver>` ignored the registry's
-// list of module version tags and produced a download set containing only the
-// versions currently advertised on release channels.
-//
-// Before the fix, pullSingleModule built `&Module{Name, RegistryPath}` with
-// Releases == nil and passed it to Filter.VersionsToMirror. The semver branch
-// iterates mod.Releases, which was empty, so VersionsToMirror returned nil and
-// only the channel version made it into downloadList.Module.
-//
-// After the fix, pullSingleModule fetches the full tag list via
-// modulesService.Module(name).ListTags(ctx) and stores it in Module.Releases,
-// so the semver constraint matches every version in the registry that falls in
-// range.
+// Regression: --include-module <name>@<semver> must pull every matching tag
+// in the registry, not only the version currently on a release channel.
 func TestPullSingleModule_SemverConstraintExpandsToRegistryTags(t *testing.T) {
 	const channelVersion = "v1.45.2"
 
-	// Versions present in the fake registry. v1.39.0 is intentionally below the
-	// semver lower bound (^1.40.0 → >=1.40.0) and must be excluded by the filter.
+	// v1.39.0 is below the ^1.40.0 lower bound and must be excluded by the filter.
 	allVersions := []string{
 		"v1.39.0",
 		"v1.40.0",
@@ -71,57 +60,26 @@ func TestPullSingleModule_SemverConstraintExpandsToRegistryTags(t *testing.T) {
 	}
 
 	reg := upfake.NewRegistry(pullVersionsTestHost)
-
-	// Top-level "modules" repo: tags are module names.
-	// modulesService.ListTags returns ["console"].
 	reg.MustAddImage("modules", pullVersionsTestModule, pullVersionsImage(channelVersion))
-
-	// Per-module repo: tags are the versions available in the registry.
-	// modulesService.Module("console").ListTags returns the full version list.
 	for _, v := range allVersions {
 		reg.MustAddImage("modules/"+pullVersionsTestModule, v, pullVersionsImage(v))
 	}
-
-	// Release-channel repo: 5 channels, each pointing at the same channel version.
-	// extractVersionsFromReleaseChannels reads version.json from each.
 	for _, ch := range []string{"alpha", "beta", "early-access", "stable", "rock-solid"} {
 		reg.MustAddImage("modules/"+pullVersionsTestModule+"/release", ch, pullVersionsImage(channelVersion))
 	}
 
-	stubClient := pkgclient.Adapt(upfake.NewClient(reg))
-
-	// Whitelist filter: console@1.40.0 → semver ^1.40.0 (>=1.40.0 <2.0.0).
 	filter, err := NewFilter([]string{pullVersionsTestModule + "@1.40.0"}, FilterTypeWhitelist)
 	require.NoError(t, err)
 
-	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
-	userLogger := log.NewSLogger(slog.LevelWarn)
-
-	regSvc := registryservice.NewService(stubClient, pkg.NoEdition, logger)
-
-	svc := NewService(
-		regSvc,
-		t.TempDir(),
-		&Options{
-			BundleDir:     t.TempDir(),
-			Filter:        filter,
-			SkipVexImages: true, // VEX discovery is unrelated to this test.
-		},
-		logger,
-		userLogger,
-	)
-
+	svc := newPullVersionsService(t, pkgclient.Adapt(upfake.NewClient(reg)), filter)
 	require.NoError(t, svc.PullModules(context.Background()))
 
-	// After PullModules the per-module download list must contain all versions
-	// that match the filter, not only the channel version.
 	moduleDL := svc.modulesDownloadList.list[pullVersionsTestModule]
-	require.NotNil(t, moduleDL, "expected download list entry for module %q", pullVersionsTestModule)
+	require.NotNil(t, moduleDL)
 
 	got := make([]string, 0, len(moduleDL.Module))
 	for ref := range moduleDL.Module {
-		// extractInternalDigestImages can add @sha256: refs - we only care about
-		// version-tagged refs in this assertion.
+		// Skip @sha256: refs added by extractInternalDigestImages - the assertion is about version-tagged refs.
 		if strings.Contains(ref, "@sha256:") {
 			continue
 		}
@@ -138,21 +96,133 @@ func TestPullSingleModule_SemverConstraintExpandsToRegistryTags(t *testing.T) {
 		pullVersionsTestHost + "/modules/" + pullVersionsTestModule + ":v1.45.2",
 	}
 
-	assert.ElementsMatch(t, want, got,
-		"semver ^1.40.0 must expand to every matching tag in the registry, not only the channel version")
-
-	// v1.39.0 is below the lower bound; it must not be pulled.
-	assert.NotContains(t, got, pullVersionsTestHost+"/modules/"+pullVersionsTestModule+":v1.39.0",
-		"v1.39.0 is below ^1.40.0 lower bound and must be excluded")
+	assert.ElementsMatch(t, want, got)
+	assert.NotContains(t, got, pullVersionsTestHost+"/modules/"+pullVersionsTestModule+":v1.39.0")
 }
 
-// pullVersionsImage builds a minimal v1.Image with version.json so that
-// extractVersionsFromReleaseChannels and extractVersionJSON have something to
-// read. images_digests.json and extra_images.json are intentionally omitted -
-// downstream code tolerates missing files (debug-log + skip).
+// Exact-tag constraint takes a Filter branch that never reads Module.Releases,
+// so per-module ListTags must be skipped. Baseline = 2 (validateModulesAccess
+// + pullModules root listing).
+func TestPullSingleModule_ExactTagConstraintSkipsPerModuleListTags(t *testing.T) {
+	filter, err := NewFilter([]string{pullVersionsTestModule + "@=v1.40.0"}, FilterTypeWhitelist)
+	require.NoError(t, err)
+
+	counter := runPullModulesWithCounter(t, filter)
+
+	assert.Equal(t, int64(2), counter.calls.Load(),
+		"exact-tag constraint must skip per-module ListTags")
+}
+
+// In blacklist mode (no --include-module) modules without a filter entry
+// short-circuit in Filter.VersionsToMirror, so per-module ListTags must be
+// skipped. Saves N requests for N non-excluded modules.
+func TestPullSingleModule_BlacklistModeSkipsPerModuleListTags(t *testing.T) {
+	filter, err := NewFilter(nil, FilterTypeBlacklist)
+	require.NoError(t, err)
+
+	counter := runPullModulesWithCounter(t, filter)
+
+	assert.Equal(t, int64(2), counter.calls.Load(),
+		"blacklist mode must skip per-module ListTags for non-excluded modules")
+}
+
+// Counterpart to the two skip tests: semver constraint MUST trigger per-module
+// ListTags, otherwise the original bug resurfaces.
+func TestPullSingleModule_SemverConstraintTriggersPerModuleListTags(t *testing.T) {
+	filter, err := NewFilter([]string{pullVersionsTestModule + "@1.40.0"}, FilterTypeWhitelist)
+	require.NoError(t, err)
+
+	counter := runPullModulesWithCounter(t, filter)
+
+	assert.Equal(t, int64(3), counter.calls.Load(),
+		"semver constraint must trigger per-module ListTags exactly once")
+}
+
+// pullVersionsImage builds a v1.Image with only version.json.
+// images_digests.json and extra_images.json are intentionally omitted -
+// downstream code tolerates missing files.
 func pullVersionsImage(version string) v1.Image {
 	return upfake.NewImageBuilder().
 		WithFile("version.json", `{"version":"`+version+`"}`).
 		WithLabel("org.opencontainers.image.version", version).
 		MustBuild()
+}
+
+// listTagsCounter wraps a Client and counts ListTags calls. The counter is
+// shared across all sub-clients produced by WithSegment, so scoped calls
+// increment the same counter as the parent.
+type listTagsCounter struct {
+	dkpreg.Client
+	calls *atomic.Int64
+}
+
+func newListTagsCounter(c dkpreg.Client) *listTagsCounter {
+	return &listTagsCounter{Client: c, calls: new(atomic.Int64)}
+}
+
+func (c *listTagsCounter) WithSegment(segments ...string) dkpreg.Client {
+	return &listTagsCounter{
+		Client: c.Client.WithSegment(segments...),
+		calls:  c.calls,
+	}
+}
+
+func (c *listTagsCounter) ListTags(ctx context.Context, opts ...dkpreg.ListTagsOption) ([]string, error) {
+	c.calls.Add(1)
+	return c.Client.ListTags(ctx, opts...)
+}
+
+// pullVersionsBuildRegistry mirrors the production modules layout: top-level
+// "modules" repo, per-module repo with version tags, per-module "release" repo
+// with channel tags.
+func pullVersionsBuildRegistry() *upfake.Registry {
+	const channelVersion = "v1.45.2"
+
+	reg := upfake.NewRegistry(pullVersionsTestHost)
+
+	reg.MustAddImage("modules", pullVersionsTestModule, pullVersionsImage(channelVersion))
+
+	for _, v := range []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.45.2"} {
+		reg.MustAddImage("modules/"+pullVersionsTestModule, v, pullVersionsImage(v))
+	}
+
+	for _, ch := range []string{"alpha", "beta", "early-access", "stable", "rock-solid"} {
+		reg.MustAddImage("modules/"+pullVersionsTestModule+"/release", ch, pullVersionsImage(channelVersion))
+	}
+
+	return reg
+}
+
+// newPullVersionsService wires a Service against the given registry client and
+// filter with logging muted to warn-level. Used by tests that inspect the
+// resulting download list.
+func newPullVersionsService(t *testing.T, stubClient dkpreg.Client, filter *Filter) *Service {
+	t.Helper()
+
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+	regSvc := registryservice.NewService(stubClient, pkg.NoEdition, logger)
+
+	return NewService(
+		regSvc,
+		t.TempDir(),
+		&Options{
+			BundleDir:     t.TempDir(),
+			Filter:        filter,
+			SkipVexImages: true,
+		},
+		logger,
+		userLogger,
+	)
+}
+
+// runPullModulesWithCounter runs PullModules against a fresh fake registry
+// and returns the counter for ListTags assertions.
+func runPullModulesWithCounter(t *testing.T, filter *Filter) *listTagsCounter {
+	t.Helper()
+
+	counter := newListTagsCounter(upfake.NewClient(pullVersionsBuildRegistry()))
+	svc := newPullVersionsService(t, pkgclient.Adapt(counter), filter)
+	require.NoError(t, svc.PullModules(context.Background()))
+	return counter
 }

@@ -319,12 +319,19 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 		moduleVersions = svc.extractVersionsFromReleaseChannels(ctx, module.name)
 	}
 
-	// Fetch the full list of module tags from the registry so semver constraints
-	// in the filter can match against actual published versions, not just the
-	// versions currently advertised on release channels.
-	tags, err := svc.modulesService.Module(module.name).ListTags(ctx)
-	if err != nil {
-		return fmt.Errorf("list tags for module %s: %w", module.name, err)
+	// Fetch the full list of module tags from the registry only when the filter
+	// constraint actually needs them:
+	// - a semver constraint iterates Releases to pick matching versions.
+	// - Exact-tag constraints and modules without a constraint
+	// 	 (blacklist mode for non-excluded modules) never read Releases
+	//   so the network call is skipped to avoid wasted requests.
+	var tags []string
+	if constraint, hasConstraint := svc.options.Filter.GetConstraint(module.name); hasConstraint && !constraint.IsExact() {
+		var err error
+		tags, err = svc.modulesService.Module(module.name).ListTags(ctx)
+		if err != nil {
+			return fmt.Errorf("list tags for module %s: %w", module.name, err)
+		}
 	}
 
 	// Check for explicit version constraints from filter
