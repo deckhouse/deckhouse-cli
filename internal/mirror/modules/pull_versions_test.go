@@ -61,33 +61,119 @@ const (
 
 // Regression: --include-module <name>@<semver> must pull every matching tag
 // in the registry, not only the version currently on a release channel.
-func TestPullSingleModule_SemverConstraintExpandsToRegistryTags(t *testing.T) {
-	// v1.39.0 is below the ^1.40.0 lower bound and must be excluded by the filter.
+// Each subtest uses the same registry layout but a different constraint;
+// the spread of registry versions is wide enough to make the expected sets
+// of caret / tilde / range distinguishable.
+func TestPullSingleModule_SemverConstraintMatchesRegistryTags(t *testing.T) {
 	registryVersions := []string{
 		"v1.39.0",
 		"v1.40.0", "v1.40.1",
-		"v1.41.0", "v1.42.0", "v1.43.0", "v1.44.0",
-		"v1.45.2",
-	}
-	expectedVersions := []string{
-		"v1.40.0", "v1.40.1",
-		"v1.41.0", "v1.42.0", "v1.43.0", "v1.44.0",
-		"v1.45.2",
+		"v1.41.0",
+		"v1.42.0",
+		"v1.43.0",
+		channelVersion, // v1.45.2 - the version every release channel points at
 	}
 
-	filter, err := NewFilter([]string{testModule + "@1.40.0"}, FilterTypeWhitelist)
+	cases := []struct {
+		name           string
+		constraint     string   // value placed after "<module>@" in the filter
+		expected       []string // module versions expected in the download list
+		mustNotContain string   // a version that MUST be excluded (sanity check)
+	}{
+		{
+			// Implicit caret: bare version is expanded to ^X.Y.Z for legacy
+			// backward compatibility (see filter.go:parseVersionConstraint).
+			name:           "implicit_caret",
+			constraint:     "1.40.0",
+			expected:       []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.0", "v1.43.0", channelVersion},
+			mustNotContain: "v1.39.0",
+		},
+		{
+			// Explicit caret: same range as implicit. Verifies the parser
+			// treats both forms identically.
+			name:           "explicit_caret",
+			constraint:     "^1.40.0",
+			expected:       []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.0", "v1.43.0", channelVersion},
+			mustNotContain: "v1.39.0",
+		},
+		{
+			// Tilde: pinned to the same minor (>=1.40.0 <1.41.0).
+			// channelVersion is unrelated to the constraint but is always
+			// added to the download list because release channels are still
+			// pulled for any non-exact constraint.
+			name:           "tilde",
+			constraint:     "~1.40.0",
+			expected:       []string{"v1.40.0", "v1.40.1", channelVersion},
+			mustNotContain: "v1.41.0",
+		},
+		{
+			// Explicit range. The upper bound is exclusive, so v1.43.0
+			// must not appear in the result.
+			name:           "explicit_range",
+			constraint:     ">=1.40.0 <1.43.0",
+			expected:       []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.0", channelVersion},
+			mustNotContain: "v1.43.0",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			filter, err := NewFilter([]string{testModule + "@" + tc.constraint}, FilterTypeWhitelist)
+			require.NoError(t, err)
+
+			svc := newService(t, pkgclient.Adapt(upfake.NewClient(buildTestRegistry(registryVersions))), filter)
+			require.NoError(t, svc.PullModules(context.Background()))
+
+			dl := svc.modulesDownloadList.list[testModule]
+			require.NotNil(t, dl)
+
+			got := extractTaggedRefs(dl)
+			assert.ElementsMatch(t, taggedModuleRefs(testModule, tc.expected), got)
+			assert.NotContains(t, got, taggedRef(testModule, tc.mustNotContain),
+				"constraint %q must exclude %s", tc.constraint, tc.mustNotContain)
+		})
+	}
+}
+
+// Multiple --include-module flags must each apply their own constraint
+// independently; constraints on one module must not leak into another.
+// This case mixes a semver-constraint module with an exact-tag module to
+// also verify the two filter branches coexist correctly in one pull run.
+func TestPullSingleModule_MultipleModulesIndependentConstraints(t *testing.T) {
+	const (
+		consoleName   = "console"
+		commanderName = "commander"
+	)
+
+	reg := upfake.NewRegistry(testHost)
+	addModule(reg, consoleName, "v1.40.1", []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.45.2"})
+	addModule(reg, commanderName, "v0.5.1", []string{"v0.5.0", "v0.5.1", "v0.6.0"})
+
+	filter, err := NewFilter(
+		[]string{
+			consoleName + "@~1.40.0",    // tilde: only v1.40.x + channel snapshot
+			commanderName + "@=v0.6.0", // exact: only v0.6.0, no channels
+		},
+		FilterTypeWhitelist,
+	)
 	require.NoError(t, err)
 
-	svc := newService(t, pkgclient.Adapt(upfake.NewClient(buildTestRegistry(registryVersions))), filter)
+	svc := newService(t, pkgclient.Adapt(upfake.NewClient(reg)), filter)
 	require.NoError(t, svc.PullModules(context.Background()))
 
-	dl := svc.modulesDownloadList.list[testModule]
-	require.NotNil(t, dl)
+	consoleDL := svc.modulesDownloadList.list[consoleName]
+	require.NotNil(t, consoleDL)
+	assert.ElementsMatch(t,
+		taggedModuleRefs(consoleName, []string{"v1.40.0", "v1.40.1"}),
+		extractTaggedRefs(consoleDL),
+		"tilde constraint on console must match only v1.40.x (channel v1.40.1 dedups)")
 
-	got := extractTaggedRefs(dl)
-	assert.ElementsMatch(t, taggedModuleRefs(expectedVersions), got)
-	assert.NotContains(t, got, taggedRef("v1.39.0"),
-		"v1.39.0 is below ^1.40.0 lower bound and must be excluded")
+	commanderDL := svc.modulesDownloadList.list[commanderName]
+	require.NotNil(t, commanderDL)
+	assert.ElementsMatch(t,
+		taggedModuleRefs(commanderName, []string{"v0.6.0"}),
+		extractTaggedRefs(commanderDL),
+		"exact constraint on commander must match only v0.6.0 and skip channels")
 }
 
 // Exact-tag constraint takes a Filter branch that never reads Module.Releases,
@@ -127,22 +213,28 @@ func TestPullSingleModule_SemverConstraintTriggersPerModuleListTags(t *testing.T
 		"semver constraint must trigger per-module ListTags exactly once")
 }
 
-// buildTestRegistry returns a fake registry that mirrors the production
-// "modules/<name>" + "modules/<name>/release/<channel>" layout.
-// Pass moduleVersions to control the set of version-tagged module images.
-func buildTestRegistry(moduleVersions []string) *upfake.Registry {
-	reg := upfake.NewRegistry(testHost)
+// addModule populates a single module's images in the given registry,
+// mirroring the production "modules/<name>" + "modules/<name>/release/<channel>"
+// layout. All 5 release channels point at channelVer.
+func addModule(reg *upfake.Registry, name, channelVer string, versions []string) {
+	reg.MustAddImage("modules", name, makeVersionImage(channelVer))
 
-	reg.MustAddImage("modules", testModule, makeVersionImage(channelVersion))
-
-	for _, v := range moduleVersions {
-		reg.MustAddImage("modules/"+testModule, v, makeVersionImage(v))
+	for _, v := range versions {
+		reg.MustAddImage("modules/"+name, v, makeVersionImage(v))
 	}
 
 	for _, ch := range []string{"alpha", "beta", "early-access", "stable", "rock-solid"} {
-		reg.MustAddImage("modules/"+testModule+"/release", ch, makeVersionImage(channelVersion))
+		reg.MustAddImage("modules/"+name+"/release", ch, makeVersionImage(channelVer))
 	}
+}
 
+// buildTestRegistry returns a fake registry containing a single module
+// (testModule) with the given versions and channelVersion on every channel.
+// For multi-module fixtures, build the registry by hand and call addModule
+// for each module.
+func buildTestRegistry(moduleVersions []string) *upfake.Registry {
+	reg := upfake.NewRegistry(testHost)
+	addModule(reg, testModule, channelVersion, moduleVersions)
 	return reg
 }
 
@@ -158,16 +250,16 @@ func makeVersionImage(version string) v1.Image {
 
 // taggedRef returns the registry URL the production code uses for a single
 // version-tagged module image.
-func taggedRef(version string) string {
-	return testHost + "/modules/" + testModule + ":" + version
+func taggedRef(moduleName, version string) string {
+	return testHost + "/modules/" + moduleName + ":" + version
 }
 
-// taggedModuleRefs converts a list of versions into the registry URLs the
-// regression assertions expect to see in the download list.
-func taggedModuleRefs(versions []string) []string {
+// taggedModuleRefs converts a list of versions for a given module into the
+// registry URLs the regression assertions expect to see in the download list.
+func taggedModuleRefs(moduleName string, versions []string) []string {
 	refs := make([]string, 0, len(versions))
 	for _, v := range versions {
-		refs = append(refs, taggedRef(v))
+		refs = append(refs, taggedRef(moduleName, v))
 	}
 	return refs
 }
