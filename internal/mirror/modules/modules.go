@@ -329,7 +329,13 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 	if constraint, hasConstraint := svc.options.Filter.GetConstraint(module.name); hasConstraint && !constraint.IsExact() {
 		var err error
 		tags, err = svc.modulesService.Module(module.name).ListTags(ctx)
-		if err != nil {
+		switch {
+		case errors.Is(err, client.ErrImageNotFound):
+			// Module repository is missing or empty - registry inconsistency we can't
+			// act on. Continue with channel-only versions instead of failing the whole
+			// pull (same policy as validateModulesAccess).
+			svc.userLogger.Warnf("Skipping tag list for module %s: %v", module.name, err)
+		case err != nil:
 			return fmt.Errorf("list tags for module %s: %w", module.name, err)
 		}
 	}
