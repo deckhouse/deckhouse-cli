@@ -123,7 +123,7 @@ func parseVersionConstraint(v string) (VersionConstraint, error) {
 }
 
 func parseExact(body string) (VersionConstraint, error) {
-	// exac match, console@=1.38.1 = registry.deckhouse.io/deckhouse/ce/modules/console:v1.38.1
+	// exact match, console@=v1.38.1 -> registry.deckhouse.io/deckhouse/ce/modules/console:v1.38.1
 	tag, ch, _ := strings.Cut(body, "+")
 	if tag == "" {
 		return nil, fmt.Errorf("empty tag in %q", body)
