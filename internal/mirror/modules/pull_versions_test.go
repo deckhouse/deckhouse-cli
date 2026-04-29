@@ -38,341 +38,228 @@ import (
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
-// Shared test-fixture identifiers.
+// =============================================================================
+// Shared fixtures
+// =============================================================================
+
 const (
 	testHost       = "fake.registry"
-	testModule     = "console"
-	channelVersion = "v1.45.2"
+	testModuleName = "console"
+	channelVersion = "v1.45.2" // version every release channel points at
 )
 
-var defaultModuleVersions = []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.45.2"}
+// defaultRegistryVersions is a small but representative tag set for tests
+// that don't care about the exact list - a few patches and a few minors.
+var defaultRegistryVersions = []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.45.2"}
 
-// Each pullModules run calls ListTags twice at the root (validateModulesAccess
-// + module enumeration). Per-module ListTags adds one more call, but only for
-// non-exact (semver) constraints - exact and blacklist short-circuit.
-const (
-	baselineListTagsCalls int64 = 2
-	perModuleListTagsCall int64 = 1
-)
+// =============================================================================
+// Tests: which versions get pulled
+// =============================================================================
 
-// Regression: --include-module <name>@<semver> must pull every matching tag
-// from the registry, not only the version currently on a release channel.
-func TestPullSingleModule_SemverConstraintMatchesRegistryTags(t *testing.T) {
+// Regression for --include-module <name>@<semver>: every tag in the registry
+// that satisfies the semver constraint must end up in the download list,
+// not only the tag pinned by the release channel snapshot.
+func TestPullModules_SemverConstraintPullsAllMatchingTags(t *testing.T) {
 	registryVersions := []string{
 		"v1.39.0",
 		"v1.40.0", "v1.40.1",
-		"v1.41.0",
-		"v1.42.0",
-		"v1.43.0",
-		channelVersion, // v1.45.2 - the version every release channel points at
+		"v1.41.0", "v1.42.0", "v1.43.0",
+		channelVersion,
 	}
 
 	cases := []struct {
-		name           string
-		constraint     string   // value placed after "<module>@" in the filter
-		expected       []string // module versions expected in the download list
-		mustNotContain string   // a version that MUST be excluded (sanity check)
+		name       string
+		constraint string   // text after "<module>@" in --include-module
+		wantTags   []string // tags expected to land in the download list
+		rejectTag  string   // tag present in the registry that the constraint must reject
 	}{
 		{
-			// Bare version expands to ^X.Y.Z (legacy backward compat in parseVersionConstraint).
-			name:           "implicit_caret",
-			constraint:     "1.40.0",
-			expected:       []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.0", "v1.43.0", channelVersion},
-			mustNotContain: "v1.39.0",
+			name:       "implicit caret (1.40.0 -> ^1.40.0)",
+			constraint: "1.40.0",
+			wantTags:   []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.0", "v1.43.0", channelVersion},
+			rejectTag:  "v1.39.0",
 		},
 		{
-			// Explicit caret must produce the same range as implicit.
-			name:           "explicit_caret",
-			constraint:     "^1.40.0",
-			expected:       []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.0", "v1.43.0", channelVersion},
-			mustNotContain: "v1.39.0",
+			name:       "explicit caret (^1.40.0)",
+			constraint: "^1.40.0",
+			wantTags:   []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.0", "v1.43.0", channelVersion},
+			rejectTag:  "v1.39.0",
 		},
 		{
-			// Tilde pins to the same minor; channelVersion still arrives via release channels.
-			name:           "tilde",
-			constraint:     "~1.40.0",
-			expected:       []string{"v1.40.0", "v1.40.1", channelVersion},
-			mustNotContain: "v1.41.0",
+			name:       "tilde (~1.40.0 - patch only)",
+			constraint: "~1.40.0",
+			wantTags:   []string{"v1.40.0", "v1.40.1", channelVersion},
+			rejectTag:  "v1.41.0",
 		},
 		{
-			// Explicit range with exclusive upper bound.
-			name:           "explicit_range",
-			constraint:     ">=1.40.0 <1.43.0",
-			expected:       []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.0", channelVersion},
-			mustNotContain: "v1.43.0",
+			name:       "explicit range (>=1.40.0 <1.43.0)",
+			constraint: ">=1.40.0 <1.43.0",
+			wantTags:   []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.0", channelVersion},
+			rejectTag:  "v1.43.0",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			filter, err := NewFilter([]string{testModule + "@" + tc.constraint}, FilterTypeWhitelist)
-			require.NoError(t, err)
+			reg := singleModuleRegistry(testModuleName, channelVersion, registryVersions)
+			filter := mustNewFilter(t, FilterTypeWhitelist, testModuleName+"@"+tc.constraint)
+			svc := newService(t, pkgclient.Adapt(upfake.NewClient(reg)), filter)
 
-			svc := newService(t, pkgclient.Adapt(upfake.NewClient(buildTestRegistry(registryVersions))), filter)
 			require.NoError(t, svc.PullModules(context.Background()))
 
-			dl := svc.modulesDownloadList.list[testModule]
-			require.NotNil(t, dl)
-
-			got := extractTaggedRefs(dl)
-			assert.ElementsMatch(t, taggedModuleRefs(testModule, tc.expected), got)
-			assert.NotContains(t, got, taggedRef(testModule, tc.mustNotContain),
-				"constraint %q must exclude %s", tc.constraint, tc.mustNotContain)
+			got := pulledModuleVersionRefs(t, svc, testModuleName)
+			assert.ElementsMatch(t, taggedModuleRefs(testModuleName, tc.wantTags), got)
+			assert.NotContains(t, got, taggedModuleRef(testModuleName, tc.rejectTag),
+				"constraint %q must reject %s", tc.constraint, tc.rejectTag)
 		})
 	}
 }
 
-// Constraints on different --include-module flags must not leak across modules.
-// Mixes semver and exact constraints to also exercise both filter branches in one pull.
-func TestPullSingleModule_MultipleModulesIndependentConstraints(t *testing.T) {
+// Each --include-module flag carries its own constraint - the matcher must
+// scope to the named module and not leak across modules. Mixes a semver and
+// an exact constraint to exercise both filter branches in one shot.
+func TestPullModules_PerModuleConstraintIsolation(t *testing.T) {
 	const (
 		consoleName   = "console"
 		commanderName = "commander"
 	)
 
 	reg := upfake.NewRegistry(testHost)
-	addModule(reg, consoleName, "v1.40.1", []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.45.2"})
+	addModule(reg, consoleName, "v1.40.1", []string{"v1.40.0", "v1.40.1", "v1.41.0", channelVersion})
 	addModule(reg, commanderName, "v0.5.1", []string{"v0.5.0", "v0.5.1", "v0.6.0"})
 
-	filter, err := NewFilter(
-		[]string{
-			consoleName + "@~1.40.0",    // tilde: only v1.40.x + channel snapshot
-			commanderName + "@=v0.6.0", // exact: only v0.6.0, no channels
-		},
-		FilterTypeWhitelist,
+	filter := mustNewFilter(t, FilterTypeWhitelist,
+		consoleName+"@~1.40.0",   // tilde matches v1.40.x only
+		commanderName+"@=v0.6.0", // exact tag
 	)
-	require.NoError(t, err)
-
 	svc := newService(t, pkgclient.Adapt(upfake.NewClient(reg)), filter)
+
 	require.NoError(t, svc.PullModules(context.Background()))
 
-	consoleDL := svc.modulesDownloadList.list[consoleName]
-	require.NotNil(t, consoleDL)
 	assert.ElementsMatch(t,
 		taggedModuleRefs(consoleName, []string{"v1.40.0", "v1.40.1"}),
-		extractTaggedRefs(consoleDL),
-		"tilde constraint on console must match only v1.40.x (channel v1.40.1 dedups)")
-
-	commanderDL := svc.modulesDownloadList.list[commanderName]
-	require.NotNil(t, commanderDL)
+		pulledModuleVersionRefs(t, svc, consoleName),
+		"console: tilde must match only v1.40.x")
 	assert.ElementsMatch(t,
 		taggedModuleRefs(commanderName, []string{"v0.6.0"}),
-		extractTaggedRefs(commanderDL),
-		"exact constraint on commander must match only v0.6.0 and skip channels")
+		pulledModuleVersionRefs(t, svc, commanderName),
+		"commander: exact must match only v0.6.0 - no leak from console's tilde")
 }
 
-// Exact-tag branch never reads Module.Releases, so per-module ListTags is skipped.
-func TestPullSingleModule_ExactTagConstraintSkipsPerModuleListTags(t *testing.T) {
-	filter, err := NewFilter([]string{testModule + "@=v1.40.0"}, FilterTypeWhitelist)
-	require.NoError(t, err)
+// =============================================================================
+// Tests: per-module ListTags policy
+// =============================================================================
 
-	counter := runPullWithCounter(t, filter)
+// Per-module ListTags is only needed for non-exact constraints. The baseline
+// cost of a default pull or an exact-tag pull must not regress by adding an
+// unconditional per-module call.
+func TestPullModules_PerModuleListTagsCallCount(t *testing.T) {
+	// PullModules lists tags at the registry root twice:
+	//   - validateModulesAccess (reachability check)
+	//   - pullModules (module-name enumeration)
+	const baselineRootCalls int64 = 2
 
-	assert.Equal(t, baselineListTagsCalls, counter.calls.Load(),
-		"exact-tag constraint must skip per-module ListTags")
+	cases := []struct {
+		name        string
+		filterType  FilterType
+		filterExprs []string
+		wantExtra   int64 // extra ListTags calls on top of the baseline
+	}{
+		{
+			name:        "exact constraint skips per-module ListTags",
+			filterType:  FilterTypeWhitelist,
+			filterExprs: []string{testModuleName + "@=v1.40.0"},
+			wantExtra:   0,
+		},
+		{
+			name:        "blacklist filter (no constraint) skips per-module ListTags",
+			filterType:  FilterTypeBlacklist,
+			filterExprs: nil,
+			wantExtra:   0,
+		},
+		{
+			name:        "semver constraint triggers one per-module ListTags",
+			filterType:  FilterTypeWhitelist,
+			filterExprs: []string{testModuleName + "@1.40.0"},
+			wantExtra:   1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := singleModuleRegistry(testModuleName, channelVersion, defaultRegistryVersions)
+			counter := newListTagsCounter(upfake.NewClient(reg))
+			filter := mustNewFilter(t, tc.filterType, tc.filterExprs...)
+			svc := newService(t, pkgclient.Adapt(counter), filter)
+
+			require.NoError(t, svc.PullModules(context.Background()))
+
+			assert.Equal(t, baselineRootCalls+tc.wantExtra, counter.calls.Load())
+		})
+	}
 }
 
-// Blacklist mode short-circuits VersionsToMirror, so per-module ListTags is skipped.
-func TestPullSingleModule_BlacklistModeSkipsPerModuleListTags(t *testing.T) {
-	filter, err := NewFilter(nil, FilterTypeBlacklist)
-	require.NoError(t, err)
-
-	counter := runPullWithCounter(t, filter)
-
-	assert.Equal(t, baselineListTagsCalls, counter.calls.Load(),
-		"blacklist mode must skip per-module ListTags for non-excluded modules")
-}
-
-// Counter-check: semver constraint MUST trigger per-module ListTags, or the original bug returns.
-func TestPullSingleModule_SemverConstraintTriggersPerModuleListTags(t *testing.T) {
-	filter, err := NewFilter([]string{testModule + "@1.40.0"}, FilterTypeWhitelist)
-	require.NoError(t, err)
-
-	counter := runPullWithCounter(t, filter)
-
-	assert.Equal(t, baselineListTagsCalls+perModuleListTagsCall, counter.calls.Load(),
-		"semver constraint must trigger per-module ListTags exactly once")
-}
-
-// Missing module repo is warned and skipped (same policy as validateModulesAccess),
-// not propagated as a fatal error.
-func TestPullSingleModule_PerModuleListTagsImageNotFoundIsSkipped(t *testing.T) {
-	failingClient := newFailingListTagsClient(
-		upfake.NewClient(buildTestRegistry(defaultModuleVersions)),
-		[]string{"modules", testModule},
-		dkpreg.ErrImageNotFound,
-	)
-
-	filter, err := NewFilter([]string{testModule + "@1.40.0"}, FilterTypeWhitelist)
-	require.NoError(t, err)
-
-	svc := newService(t, pkgclient.Adapt(failingClient), filter)
-	require.NoError(t, svc.PullModules(context.Background()),
-		"pull must not fail when per-module ListTags reports the module repo is missing")
-
-	dl := svc.modulesDownloadList.list[testModule]
-	require.NotNil(t, dl)
-
-	// With per-module tag list skipped, only the channel snapshot contributes.
-	assert.ElementsMatch(t,
-		taggedModuleRefs(testModule, []string{channelVersion}),
-		extractTaggedRefs(dl),
-		"bundle should contain only the channel snapshot")
-}
-
-// Anything other than ErrImageNotFound is fail-fast: we cannot verify the
-// constraint and refuse to produce a silently-wrong partial bundle.
-func TestPullSingleModule_PerModuleListTagsTransientErrorFailsFast(t *testing.T) {
+// Per-module ListTags reuses validateModulesAccess's error policy:
+//   - ErrImageNotFound: warn-and-skip (the module repo simply isn't there).
+//   - any other error:  fail-fast (we cannot verify the constraint and refuse
+//     to silently produce a partial bundle).
+func TestPullModules_PerModuleListTagsErrorHandling(t *testing.T) {
 	transientErr := errors.New("simulated registry 503")
-	failingClient := newFailingListTagsClient(
-		upfake.NewClient(buildTestRegistry(defaultModuleVersions)),
-		[]string{"modules", testModule},
-		transientErr,
-	)
 
-	filter, err := NewFilter([]string{testModule + "@1.40.0"}, FilterTypeWhitelist)
-	require.NoError(t, err)
-
-	svc := newService(t, pkgclient.Adapt(failingClient), filter)
-	pullErr := svc.PullModules(context.Background())
-
-	require.Error(t, pullErr, "non-NotFound errors from per-module ListTags must propagate")
-	assert.ErrorIs(t, pullErr, transientErr, "wrapped error must preserve the underlying cause")
-	assert.Contains(t, pullErr.Error(), "list tags for module "+testModule)
-}
-
-// addModule mirrors the production "modules/<name>" + "modules/<name>/release/<channel>"
-// layout. All 5 release channels point at channelVer.
-func addModule(reg *upfake.Registry, name, channelVer string, versions []string) {
-	reg.MustAddImage("modules", name, makeVersionImage(channelVer))
-
-	for _, v := range versions {
-		reg.MustAddImage("modules/"+name, v, makeVersionImage(v))
+	cases := []struct {
+		name     string
+		injected error
+		wantErr  error    // nil = pull must succeed
+		wantTags []string // checked only on success - the channel snapshot is the sole contributor when per-module ListTags is skipped
+	}{
+		{
+			name:     "ErrImageNotFound is warned and skipped",
+			injected: dkpreg.ErrImageNotFound,
+			wantTags: []string{channelVersion},
+		},
+		{
+			name:     "transient error fails fast",
+			injected: transientErr,
+			wantErr:  transientErr,
+		},
 	}
 
-	for _, ch := range []string{"alpha", "beta", "early-access", "stable", "rock-solid"} {
-		reg.MustAddImage("modules/"+name+"/release", ch, makeVersionImage(channelVer))
-	}
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := singleModuleRegistry(testModuleName, channelVersion, defaultRegistryVersions)
+			client := newListTagsErrAtModule(upfake.NewClient(reg), tc.injected)
+			// Semver constraint to actually trigger the per-module ListTags.
+			filter := mustNewFilter(t, FilterTypeWhitelist, testModuleName+"@1.40.0")
+			svc := newService(t, pkgclient.Adapt(client), filter)
 
-// buildTestRegistry builds a single-module fixture. Multi-module tests should
-// call addModule directly on a fresh upfake.NewRegistry.
-func buildTestRegistry(moduleVersions []string) *upfake.Registry {
-	reg := upfake.NewRegistry(testHost)
-	addModule(reg, testModule, channelVersion, moduleVersions)
-	return reg
-}
+			err := svc.PullModules(context.Background())
 
-// makeVersionImage builds a v1.Image carrying only version.json. Missing
-// images_digests.json / extra_images.json is tolerated downstream.
-func makeVersionImage(version string) v1.Image {
-	return upfake.NewImageBuilder().
-		WithFile("version.json", `{"version":"`+version+`"}`).
-		WithLabel("org.opencontainers.image.version", version).
-		MustBuild()
-}
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+				assert.ElementsMatch(t,
+					taggedModuleRefs(testModuleName, tc.wantTags),
+					pulledModuleVersionRefs(t, svc, testModuleName))
+				return
+			}
 
-// taggedRef builds the registry URL production code uses for a single version-tagged image.
-func taggedRef(moduleName, version string) string {
-	return testHost + "/modules/" + moduleName + ":" + version
-}
-
-// taggedModuleRefs is taggedRef applied to a slice; convenient for ElementsMatch assertions.
-func taggedModuleRefs(moduleName string, versions []string) []string {
-	refs := make([]string, 0, len(versions))
-	for _, v := range versions {
-		refs = append(refs, taggedRef(moduleName, v))
-	}
-	return refs
-}
-
-// extractTaggedRefs returns tagged refs from the download list, dropping
-// @sha256: refs added by extra-image resolution (irrelevant to constraint tests).
-func extractTaggedRefs(dl *ImageDownloadList) []string {
-	refs := make([]string, 0, len(dl.Module))
-	for ref := range dl.Module {
-		if strings.Contains(ref, "@sha256:") {
-			continue
-		}
-		refs = append(refs, ref)
-	}
-	return refs
-}
-
-// listTagsCounter counts ListTags calls. The counter is shared across
-// sub-clients spawned by WithSegment, so all scoped calls increment one counter.
-type listTagsCounter struct {
-	dkpreg.Client
-	calls *atomic.Int64
-}
-
-func newListTagsCounter(c dkpreg.Client) *listTagsCounter {
-	return &listTagsCounter{Client: c, calls: new(atomic.Int64)}
-}
-
-func (c *listTagsCounter) WithSegment(segments ...string) dkpreg.Client {
-	return &listTagsCounter{
-		Client: c.Client.WithSegment(segments...),
-		calls:  c.calls,
+			require.Error(t, err)
+			assert.ErrorIs(t, err, tc.wantErr)
+			assert.Contains(t, err.Error(), "list tags for module "+testModuleName)
+		})
 	}
 }
 
-func (c *listTagsCounter) ListTags(ctx context.Context, opts ...dkpreg.ListTagsOption) ([]string, error) {
-	c.calls.Add(1)
-	return c.Client.ListTags(ctx, opts...)
-}
+// =============================================================================
+// Service & filter builders
+// =============================================================================
 
-// failingListTagsClient replaces ListTags with failErr only when the accumulated
-// WithSegment chain matches failOn exactly. Other paths pass through unchanged.
-type failingListTagsClient struct {
-	dkpreg.Client
-	segments []string
-	failOn   []string
-	failErr  error
-}
-
-func newFailingListTagsClient(c dkpreg.Client, failOn []string, failErr error) *failingListTagsClient {
-	return &failingListTagsClient{Client: c, failOn: failOn, failErr: failErr}
-}
-
-func (c *failingListTagsClient) WithSegment(segments ...string) dkpreg.Client {
-	next := make([]string, 0, len(c.segments)+len(segments))
-	next = append(next, c.segments...)
-	next = append(next, segments...)
-	return &failingListTagsClient{
-		Client:   c.Client.WithSegment(segments...),
-		segments: next,
-		failOn:   c.failOn,
-		failErr:  c.failErr,
-	}
-}
-
-func (c *failingListTagsClient) ListTags(ctx context.Context, opts ...dkpreg.ListTagsOption) ([]string, error) {
-	if segmentsEqual(c.segments, c.failOn) {
-		return nil, c.failErr
-	}
-	return c.Client.ListTags(ctx, opts...)
-}
-
-func segmentsEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// newService wires a Service against the given client and filter, muting logs.
-func newService(t *testing.T, stubClient dkpreg.Client, filter *Filter) *Service {
+// newService wires a Service against the given fake client, with logs muted.
+func newService(t *testing.T, client dkpreg.Client, filter *Filter) *Service {
 	t.Helper()
 
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
-	regSvc := registryservice.NewService(stubClient, pkg.NoEdition, logger)
+	regSvc := registryservice.NewService(client, pkg.NoEdition, logger)
 
 	return NewService(
 		regSvc,
@@ -387,12 +274,136 @@ func newService(t *testing.T, stubClient dkpreg.Client, filter *Filter) *Service
 	)
 }
 
-// runPullWithCounter runs PullModules against the default fixture, returning the call counter.
-func runPullWithCounter(t *testing.T, filter *Filter) *listTagsCounter {
+func mustNewFilter(t *testing.T, ftype FilterType, exprs ...string) *Filter {
 	t.Helper()
+	f, err := NewFilter(exprs, ftype)
+	require.NoError(t, err)
+	return f
+}
 
-	counter := newListTagsCounter(upfake.NewClient(buildTestRegistry(defaultModuleVersions)))
-	svc := newService(t, pkgclient.Adapt(counter), filter)
-	require.NoError(t, svc.PullModules(context.Background()))
-	return counter
+// =============================================================================
+// Registry fixture builders
+// =============================================================================
+
+// addModule populates a fake registry with one module's worth of refs:
+//
+//	modules:<name>                    - modules-list entry, points at channelVer
+//	modules/<name>:<v>                - one image per version
+//	modules/<name>/release:<channel>  - 5 release channels, all pointing at channelVer
+func addModule(reg *upfake.Registry, name, channelVer string, versions []string) {
+	reg.MustAddImage("modules", name, versionImage(channelVer))
+	for _, v := range versions {
+		reg.MustAddImage("modules/"+name, v, versionImage(v))
+	}
+	for _, ch := range []string{"alpha", "beta", "early-access", "stable", "rock-solid"} {
+		reg.MustAddImage("modules/"+name+"/release", ch, versionImage(channelVer))
+	}
+}
+
+// singleModuleRegistry builds a fake registry containing exactly one module.
+func singleModuleRegistry(name, channelVer string, versions []string) *upfake.Registry {
+	reg := upfake.NewRegistry(testHost)
+	addModule(reg, name, channelVer, versions)
+	return reg
+}
+
+// versionImage builds a v1.Image carrying only version.json. Missing
+// images_digests.json / extra_images.json is tolerated downstream.
+func versionImage(version string) v1.Image {
+	return upfake.NewImageBuilder().
+		WithFile("version.json", `{"version":"`+version+`"}`).
+		WithLabel("org.opencontainers.image.version", version).
+		MustBuild()
+}
+
+// =============================================================================
+// Assertion helpers
+// =============================================================================
+
+// taggedModuleRef is the registry URL the production code uses for a single
+// version-tagged module image.
+func taggedModuleRef(moduleName, version string) string {
+	return testHost + "/modules/" + moduleName + ":" + version
+}
+
+func taggedModuleRefs(moduleName string, versions []string) []string {
+	refs := make([]string, 0, len(versions))
+	for _, v := range versions {
+		refs = append(refs, taggedModuleRef(moduleName, v))
+	}
+	return refs
+}
+
+// pulledModuleVersionRefs returns the version-tagged refs the service recorded
+// for the given module, dropping @sha256: refs (these are added by extra-image
+// resolution and are not relevant to constraint tests).
+func pulledModuleVersionRefs(t *testing.T, svc *Service, moduleName string) []string {
+	t.Helper()
+	dl := svc.modulesDownloadList.Module(moduleName)
+	require.NotNil(t, dl, "no download list recorded for module %s", moduleName)
+
+	refs := make([]string, 0, len(dl.Module))
+	for ref := range dl.Module {
+		if strings.Contains(ref, "@sha256:") {
+			continue
+		}
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
+// =============================================================================
+// Test doubles
+// =============================================================================
+
+// listTagsCounter counts every ListTags call on this client and on any
+// sub-client spawned via WithSegment (the counter is shared across the chain).
+type listTagsCounter struct {
+	dkpreg.Client
+	calls *atomic.Int64
+}
+
+func newListTagsCounter(c dkpreg.Client) *listTagsCounter {
+	return &listTagsCounter{Client: c, calls: new(atomic.Int64)}
+}
+
+func (c *listTagsCounter) WithSegment(segments ...string) dkpreg.Client {
+	return &listTagsCounter{Client: c.Client.WithSegment(segments...), calls: c.calls}
+}
+
+func (c *listTagsCounter) ListTags(ctx context.Context, opts ...dkpreg.ListTagsOption) ([]string, error) {
+	c.calls.Add(1)
+	return c.Client.ListTags(ctx, opts...)
+}
+
+// listTagsErrAtModule returns the configured error from ListTags only at the
+// per-module path (modules/<name>, two segments below root). Root-level
+// ListTags - validateModulesAccess and module-name enumeration - pass through.
+type listTagsErrAtModule struct {
+	dkpreg.Client
+	depth int
+	err   error
+}
+
+// perModuleDepth is the WithSegment depth at which a client points at
+// modules/<name>: root -> "modules" -> "<name>".
+const perModuleDepth = 2
+
+func newListTagsErrAtModule(c dkpreg.Client, err error) *listTagsErrAtModule {
+	return &listTagsErrAtModule{Client: c, depth: 0, err: err}
+}
+
+func (c *listTagsErrAtModule) WithSegment(segments ...string) dkpreg.Client {
+	return &listTagsErrAtModule{
+		Client: c.Client.WithSegment(segments...),
+		depth:  c.depth + len(segments),
+		err:    c.err,
+	}
+}
+
+func (c *listTagsErrAtModule) ListTags(ctx context.Context, opts ...dkpreg.ListTagsOption) ([]string, error) {
+	if c.depth == perModuleDepth {
+		return nil, c.err
+	}
+	return c.Client.ListTags(ctx, opts...)
 }
