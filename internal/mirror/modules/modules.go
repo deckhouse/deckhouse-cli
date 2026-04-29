@@ -404,12 +404,14 @@ func (svc *Service) printDryRunPlan(moduleName string, downloadList *ImageDownlo
 
 // pullModuleImages pulls module images for the given versions (modules/<name>:vX.Y.Z).
 func (svc *Service) pullModuleImages(ctx context.Context, moduleName string, versions []string, downloadList *ImageDownloadList) error {
-	for _, version := range versions {
-		downloadList.Module[svc.rootURL+"/modules/"+moduleName+":"+version] = nil
+	// Guard against future call-order changes: other helpers also write to
+	// downloadList.Module, so checking versions directly is the only invariant.
+	if len(versions) == 0 {
+		return nil
 	}
 
-	if len(downloadList.Module) == 0 {
-		return nil
+	for _, version := range versions {
+		downloadList.Module[svc.rootURL+"/modules/"+moduleName+":"+version] = nil
 	}
 
 	config := puller.PullConfig{
