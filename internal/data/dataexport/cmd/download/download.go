@@ -41,6 +41,12 @@ const (
 	cmdName = "download"
 )
 
+const (
+	itemTypeDir  = "dir"
+	itemTypeFile = "file"
+	itemTypeLink = "link"
+)
+
 func cmdExamples() string {
 	resp := []string{
 		"  # Start exporter + Download + Stop for Filesystem",
@@ -185,13 +191,20 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 
 		err = forRespItems(resp.Body, func(item *dirItem) error {
 			subPath := item.Name
-			if item.Type == "dir" {
+			switch item.Type {
+			case itemTypeDir:
 				err = os.MkdirAll(filepath.Join(dstPath, subPath), os.ModePerm)
 				if err != nil {
 					return fmt.Errorf("Create dir error: %s", err.Error())
 				}
 				subPath += "/"
+			case itemTypeFile, itemTypeLink:
+				// downloadable, proceed below
+			default:
+				log.Warn("Skipping unsupported entry during filesystem download", slog.String("path", item.Name), slog.String("type", item.Type))
+				return nil
 			}
+
 			// Run subtask in a goroutine when semaphore capacity is available;
 			// otherwise process inline to avoid blocking on sem (prevents deadlock on wide trees).
 			select {
