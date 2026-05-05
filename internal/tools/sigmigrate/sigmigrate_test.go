@@ -317,6 +317,41 @@ func TestLoadFailedObjects_ExtendedRetryFormatIncludesGVR(t *testing.T) {
 	require.Equal(t, "v1", obj.GVR.Version)
 }
 
+func TestLoadFailedObjects_ExtendedRetryFormat_NamespacedObjects(t *testing.T) {
+	tmpDir := t.TempDir()
+	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.txt")
+	setCurrentRunState(&sigMigrateRunState{LegacyFailedRetryFile: legacyRetryFile})
+	defer setCurrentRunState(nil)
+
+	testData := strings.Join([]string{
+		"default|web-app|deployments|apps|v1",
+		"kube-system|coredns|configmaps||v1",
+	}, "\n") + "\n"
+
+	err := os.WriteFile(legacyRetryFile, []byte(testData), 0644)
+	require.NoError(t, err)
+
+	objects, err := loadFailedObjects()
+	require.NoError(t, err)
+	require.Len(t, objects, 2)
+
+	deployment := objects["default|web-app|deployments"]
+	require.Equal(t, "default", deployment.Namespace)
+	require.Equal(t, "web-app", deployment.Name)
+	require.Equal(t, "deployments", deployment.Kind)
+	require.Equal(t, "deployments", deployment.GVR.Resource)
+	require.Equal(t, "apps", deployment.GVR.Group)
+	require.Equal(t, "v1", deployment.GVR.Version)
+
+	configMap := objects["kube-system|coredns|configmaps"]
+	require.Equal(t, "kube-system", configMap.Namespace)
+	require.Equal(t, "coredns", configMap.Name)
+	require.Equal(t, "configmaps", configMap.Kind)
+	require.Equal(t, "configmaps", configMap.GVR.Resource)
+	require.Equal(t, "", configMap.GVR.Group)
+	require.Equal(t, "v1", configMap.GVR.Version)
+}
+
 func TestRecordFailure(t *testing.T) {
 	tmpDir := t.TempDir()
 	failedFile := filepath.Join(tmpDir, "failed_annotations.txt")
