@@ -40,6 +40,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/cmd/plugins"
 	"github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
+	cr "github.com/deckhouse/deckhouse-cli/internal/cr/cmd"
 	data "github.com/deckhouse/deckhouse-cli/internal/data/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/network"
@@ -106,6 +107,7 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(backup.NewCommand())
 	r.cmd.AddCommand(data.NewCommand())
 	r.cmd.AddCommand(mirror.NewCommand())
+	r.cmd.AddCommand(cr.NewCommand())
 	r.cmd.AddCommand(status.NewCommand())
 	r.cmd.AddCommand(useroperation.NewCommand())
 	r.cmd.AddCommand(network.NewCommand())
