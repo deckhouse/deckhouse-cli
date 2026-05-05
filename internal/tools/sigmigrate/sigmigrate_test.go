@@ -266,23 +266,55 @@ func TestLoadFailedObjects(t *testing.T) {
 	setCurrentRunState(runState)
 	defer setCurrentRunState(nil)
 
-	testData := "default|test-pod|pods\nkube-system|test-cm|configmaps\n|cluster-resource|clusterroles\n"
+	testData := "default|test-pod|pods\nkube-system|test-cm|configmaps\nclusterwide|worker|nodegroups\n|cluster-resource|clusterroles\n"
 	err := os.WriteFile(legacyRetryFile, []byte(testData), 0644)
 	require.NoError(t, err)
 
 	objects, err := loadFailedObjects()
 	require.NoError(t, err)
-	require.Len(t, objects, 2)
+	require.Len(t, objects, 3)
 
 	first := objects["default|test-pod|pods"]
 	require.Equal(t, "default", first.Namespace)
 	require.Equal(t, "test-pod", first.Name)
 	require.Equal(t, "pods", first.Kind)
+	require.Equal(t, "pods", first.GVR.Resource)
 
 	second := objects["kube-system|test-cm|configmaps"]
 	require.Equal(t, "kube-system", second.Namespace)
 	require.Equal(t, "test-cm", second.Name)
 	require.Equal(t, "configmaps", second.Kind)
+	require.Equal(t, "configmaps", second.GVR.Resource)
+
+	nodeGroup := objects["clusterwide|worker|nodegroups"]
+	require.Equal(t, "clusterwide", nodeGroup.Namespace)
+	require.Equal(t, "worker", nodeGroup.Name)
+	require.Equal(t, "nodegroups", nodeGroup.Kind)
+	require.Equal(t, "nodegroups", nodeGroup.GVR.Resource)
+}
+
+func TestLoadFailedObjects_ExtendedRetryFormatIncludesGVR(t *testing.T) {
+	tmpDir := t.TempDir()
+	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.txt")
+	setCurrentRunState(&sigMigrateRunState{LegacyFailedRetryFile: legacyRetryFile})
+	defer setCurrentRunState(nil)
+
+	// Extended format (future-proof for retry): namespace|name|kind|group|version
+	testData := "clusterwide|worker|nodegroups|deckhouse.io|v1\n"
+	err := os.WriteFile(legacyRetryFile, []byte(testData), 0644)
+	require.NoError(t, err)
+
+	objects, err := loadFailedObjects()
+	require.NoError(t, err)
+	require.Len(t, objects, 1)
+
+	obj := objects["clusterwide|worker|nodegroups"]
+	require.Equal(t, "clusterwide", obj.Namespace)
+	require.Equal(t, "worker", obj.Name)
+	require.Equal(t, "nodegroups", obj.Kind)
+	require.Equal(t, "nodegroups", obj.GVR.Resource)
+	require.Equal(t, "deckhouse.io", obj.GVR.Group)
+	require.Equal(t, "v1", obj.GVR.Version)
 }
 
 func TestRecordFailure(t *testing.T) {

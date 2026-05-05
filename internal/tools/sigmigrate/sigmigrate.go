@@ -771,7 +771,7 @@ func loadFailedObjects() (map[string]ObjectRef, error) {
 		}
 
 		parts := strings.Split(line, "|")
-		if len(parts) != 3 {
+		if len(parts) < 3 {
 			continue
 		}
 
@@ -783,20 +783,18 @@ func loadFailedObjects() (map[string]ObjectRef, error) {
 			continue
 		}
 
-		key := fmt.Sprintf("%s|%s|%s", namespace, name, kind)
-		// For retry, we need to reconstruct GVR - use a simple approach
-		// In production, you might want to store GVR in the file
-		resource := strings.ToLower(kind)
-		if !strings.HasSuffix(resource, "s") {
-			resource += "s"
+		gvr := schema.GroupVersionResource{Resource: strings.ToLower(kind)}
+		if len(parts) >= 5 {
+			gvr.Group = strings.TrimSpace(parts[3])
+			gvr.Version = strings.TrimSpace(parts[4])
 		}
+
+		key := fmt.Sprintf("%s|%s|%s", namespace, name, kind)
 		objects[key] = ObjectRef{
 			Namespace: namespace,
 			Name:      name,
 			Kind:      kind,
-			GVR: schema.GroupVersionResource{
-				Resource: resource,
-			},
+			GVR:       gvr,
 		}
 	}
 
@@ -817,7 +815,7 @@ func recordFailure(obj ObjectRef, errorMsg string) {
 		tracef("failed to append failed attempts file %s: %v", failedAttemptsFile, err)
 		return
 	}
-	_, _ = fmt.Fprintf(f, "%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind)
+	_, _ = fmt.Fprintf(f, "%s|%s|%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind, obj.GVR.Group, obj.GVR.Version)
 	_ = f.Sync()
 	_ = f.Close()
 
