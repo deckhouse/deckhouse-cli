@@ -263,9 +263,9 @@ func printUserDetail(cmd *cobra.Command, inv *accessInventory, userName string, 
 	if len(inheritedGrants) == 0 {
 		fmt.Fprintln(w, "  <none>")
 	}
+	idx := buildUserGroupIndex(inv, userName)
 	for _, g := range inheritedGrants {
-		via := findViaGroup(inv, userName, g.SubjectPrincipal)
-		printGrantToWriter(w, &g, via)
+		printGrantToWriter(w, &g, idx.findVia(g.SubjectPrincipal))
 	}
 
 	fmt.Fprintf(w, "\nEffective access summary:\n")
@@ -380,19 +380,39 @@ func printBulletList(w io.Writer, items []string) {
 	}
 }
 
-func findViaGroup(inv *accessInventory, userName, grantGroupName string) string {
+// userGroupIndex precomputes which groups of a user are direct and which
+// are transitive. We build it once per user and look up grant.SubjectPrincipal
+// in O(1) for every inherited grant, instead of walking the membership graph
+// from scratch on every grant via ResolveUserGroups.
+type userGroupIndex struct {
+	direct     map[string]bool
+	transitive map[string]bool
+}
+
+func buildUserGroupIndex(inv *accessInventory, userName string) userGroupIndex {
 	directGroups, transitiveGroups := inv.ResolveUserGroups(userName)
+	idx := userGroupIndex{
+		direct:     make(map[string]bool, len(directGroups)),
+		transitive: make(map[string]bool, len(transitiveGroups)),
+	}
 	for _, g := range directGroups {
-		if g == grantGroupName {
-			return g
-		}
+		idx.direct[g] = true
 	}
 	for _, g := range transitiveGroups {
-		if g == grantGroupName {
-			return g + " (transitive)"
-		}
+		idx.transitive[g] = true
 	}
-	return grantGroupName
+	return idx
+}
+
+func (idx userGroupIndex) findVia(grantGroupName string) string {
+	switch {
+	case idx.direct[grantGroupName]:
+		return grantGroupName
+	case idx.transitive[grantGroupName]:
+		return grantGroupName + " (transitive)"
+	default:
+		return grantGroupName
+	}
 }
 
 // --- Warnings (folded in from the former "iam access explain") ---
@@ -608,10 +628,10 @@ func buildUserAccessJSON(inv *accessInventory, userName string) userAccessJSON {
 	for _, g := range directGrants {
 		directGrantsJSON = append(directGrantsJSON, grantToJSON(&g, ""))
 	}
+	idx := buildUserGroupIndex(inv, userName)
 	inheritedGrantsJSON := make([]grantJSON, 0, len(inheritedGrants))
 	for _, g := range inheritedGrants {
-		via := findViaGroup(inv, userName, g.SubjectPrincipal)
-		inheritedGrantsJSON = append(inheritedGrantsJSON, grantToJSON(&g, via))
+		inheritedGrantsJSON = append(inheritedGrantsJSON, grantToJSON(&g, idx.findVia(g.SubjectPrincipal)))
 	}
 
 	return userAccessJSON{

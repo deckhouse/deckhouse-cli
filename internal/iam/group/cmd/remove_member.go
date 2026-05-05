@@ -17,12 +17,15 @@ limitations under the License.
 package group
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/kubectl/pkg/util/templates"
 
 	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
@@ -64,49 +67,78 @@ func newRemoveMemberCommand() *cobra.Command {
 				return err
 			}
 
-			ctx := cmd.Context()
-			groupClient := dyn.Resource(iamtypes.GroupGVR)
-
-			obj, err := groupClient.Get(ctx, groupName, metav1.GetOptions{})
+			removed, err := RemoveMember(cmd.Context(), dyn, groupName, memberKind, memberName)
 			if err != nil {
-				return fmt.Errorf("getting group %q: %w", groupName, err)
+				return err
 			}
 
-			rawMembers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "members")
-			memberKindStr := string(memberKind)
-			found := false
-			var newMembers []any
-			for _, item := range rawMembers {
-				m, ok := item.(map[string]any)
-				if !ok {
-					newMembers = append(newMembers, item)
-					continue
-				}
-				if fmt.Sprint(m["kind"]) == memberKindStr && fmt.Sprint(m["name"]) == memberName {
-					found = true
-					continue
-				}
-				newMembers = append(newMembers, item)
-			}
-
-			if !found {
-				cmd.Printf("Nothing to do: %s %q is not a member of group %q\n", strings.ToLower(memberKindStr), memberName, groupName)
+			memberKindStr := strings.ToLower(string(memberKind))
+			if !removed {
+				cmd.Printf("Nothing to do: %s %q is not a member of group %q\n", memberKindStr, memberName, groupName)
 				return nil
 			}
-
-			if err := unstructured.SetNestedSlice(obj.Object, newMembers, "spec", "members"); err != nil {
-				return fmt.Errorf("setting members: %w", err)
-			}
-
-			_, err = groupClient.Update(ctx, obj, metav1.UpdateOptions{})
-			if err != nil {
-				return fmt.Errorf("updating group %q: %w", groupName, err)
-			}
-
-			cmd.Printf("Removed %s %q from group %q\n", strings.ToLower(memberKindStr), memberName, groupName)
+			cmd.Printf("Removed %s %q from group %q\n", memberKindStr, memberName, groupName)
 			return nil
 		},
 	}
 
 	return cmd
+}
+
+// RemoveMember idempotently removes (memberKind, memberName) from the
+// spec.members of groupName, retrying on conflict. It returns:
+//   - removed=true  when an Update succeeded and dropped the member;
+//   - removed=false on a no-op (member was not present);
+//   - a non-nil error wrapping the underlying cause for any other failure.
+//
+// Exposed at package level so tests can drive the logic with a fake
+// dynamic client; the cobra command above is a thin wrapper around it.
+func RemoveMember(ctx context.Context, dyn dynamic.Interface,
+	groupName string, memberKind iamtypes.SubjectKind, memberName string) (bool, error) {
+	groupClient := dyn.Resource(iamtypes.GroupGVR)
+	memberKindStr := string(memberKind)
+	removed := false
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		obj, err := groupClient.Get(ctx, groupName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("getting group %q: %w", groupName, err)
+		}
+
+		rawMembers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "members")
+		found := false
+		var newMembers []any
+		for _, item := range rawMembers {
+			m, ok := item.(map[string]any)
+			if !ok {
+				newMembers = append(newMembers, item)
+				continue
+			}
+			if fmt.Sprint(m["kind"]) == memberKindStr && fmt.Sprint(m["name"]) == memberName {
+				found = true
+				continue
+			}
+			newMembers = append(newMembers, item)
+		}
+
+		if !found {
+			removed = false
+			return nil
+		}
+
+		if err := unstructured.SetNestedSlice(obj.Object, newMembers, "spec", "members"); err != nil {
+			return fmt.Errorf("setting members: %w", err)
+		}
+		// Surface conflict errors raw so retry.RetryOnConflict can classify
+		// and retry them on a fresh Get.
+		if _, err := groupClient.Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
+		removed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return removed, nil
 }

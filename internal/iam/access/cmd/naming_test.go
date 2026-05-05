@@ -224,6 +224,55 @@ func TestGenerateGrantName_Deterministic(t *testing.T) {
 	assert.Equal(t, name1, name2, "same spec should produce same name")
 }
 
+// TestGenerateGrantName_HashSurvivesTruncation locks down the contract that
+// the trailing hash8 (uniqueness suffix) is preserved even when the body of
+// the name overflows the Kubernetes 253-char DNS-subdomain limit.
+//
+// Two specs that differ only in the last few bytes of the canonical JSON
+// (e.g. very long allow-scale flag toggle on a long subject ref) must still
+// resolve to two distinct names — otherwise revoke can blow up an unrelated
+// grant.
+func TestGenerateGrantName_HashSurvivesTruncation(t *testing.T) {
+	// 220-char subjectRef pushes the body well past the limit. After
+	// sanitizeNamePart truncates the ref to 40 chars the body shouldn't
+	// actually overflow today, but we want the test to bite if anyone ever
+	// loosens that 40-char cap or grows scope/level segments.
+	longRef := strings.Repeat("a", 220)
+
+	spec1 := &canonicalGrantSpec{
+		Model:            "current",
+		SubjectKind:      "User",
+		SubjectRef:       longRef,
+		SubjectPrincipal: longRef + "@example.com",
+		AccessLevel:      "Admin",
+		ScopeType:        "namespace",
+		Namespaces:       []string{"dev"},
+	}
+	// Same shape but a different capability bit so the canonical-spec JSON,
+	// and hence the hash, differs from spec1 — but the human-readable body
+	// is byte-identical up to the trailing hash.
+	spec2 := *spec1
+	spec2.AllowScale = true
+
+	n1, err := generateGrantName(spec1)
+	require.NoError(t, err)
+	n2, err := generateGrantName(&spec2)
+	require.NoError(t, err)
+
+	assert.LessOrEqual(t, len(n1), 253, "name must fit DNS subdomain")
+	assert.LessOrEqual(t, len(n2), 253)
+	assert.NotEqual(t, n1, n2, "different specs must yield different names; the trailing hash must survive truncation")
+
+	// And the hash8 segment (8 hex chars) must be the actual suffix, not a
+	// prefix that got cut mid-byte.
+	for _, name := range []string{n1, n2} {
+		idx := strings.LastIndex(name, "-")
+		require.Greater(t, idx, 0, "name has no '-' separator: %q", name)
+		suffix := name[idx+1:]
+		assert.Len(t, suffix, 8, "trailing hash must be exactly 8 hex chars in %q", name)
+	}
+}
+
 func TestSanitizeNamePart(t *testing.T) {
 	tests := []struct {
 		input string

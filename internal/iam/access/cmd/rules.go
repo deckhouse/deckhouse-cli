@@ -333,7 +333,10 @@ func filterByManagement(rows []ruleRow, managedOnly, manualOnly bool) []ruleRow 
 	if !managedOnly && !manualOnly {
 		return rows
 	}
-	out := rows[:0]
+	// Allocate a fresh slice rather than reusing rows[:0]; sharing the backing
+	// array with the input slice would have us overwrite later rows still
+	// being scanned by the same loop.
+	out := make([]ruleRow, 0, len(rows))
 	for _, r := range rows {
 		switch {
 		case managedOnly && r.ManagedByD8:
@@ -513,7 +516,9 @@ type ruleJSON struct {
 	PortForwarding bool          `json:"portForwarding"`
 	ManagedByD8    bool          `json:"managedByD8Cli"`
 	Subjects       []subjectJSON `json:"subjects"`
-	CreationTime   time.Time     `json:"creationTimestamp,omitempty"`
+	// time.Time has no IsZero check in encoding/json's omitempty path, so we
+	// rely on Go 1.24's omitzero to drop the field for an unset timestamp.
+	CreationTime time.Time `json:"creationTimestamp,omitzero"`
 }
 
 type subjectJSON struct {

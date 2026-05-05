@@ -21,12 +21,14 @@ import (
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // CompleteResourceNames lists names of objects of the given GVR for shell
 // completion. Pass namespace="" for cluster-scoped resources or to list across
-// the default namespace for namespaced resources.
+// every namespace for namespaced resources; pass a concrete namespace to
+// restrict the listing to that namespace.
 //
 // Returns ShellCompDirectiveError if the cluster is unreachable; cobra renders
 // that as "no completions" in the shell rather than failing the command.
@@ -36,8 +38,13 @@ func CompleteResourceNames(cmd *cobra.Command, gvr schema.GroupVersionResource, 
 		return nil, cobra.ShellCompDirectiveError
 	}
 
-	ri := dyn.Resource(gvr)
-	list, err := ri.List(cmd.Context(), metav1.ListOptions{})
+	nri := dyn.Resource(gvr)
+	var list *unstructured.UnstructuredList
+	if namespace == "" {
+		list, err = nri.List(cmd.Context(), metav1.ListOptions{})
+	} else {
+		list, err = nri.Namespace(namespace).List(cmd.Context(), metav1.ListOptions{})
+	}
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveError
 	}

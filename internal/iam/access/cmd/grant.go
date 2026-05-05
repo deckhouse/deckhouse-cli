@@ -148,8 +148,16 @@ func runGrant(cmd *cobra.Command, args []string) error {
 		}
 	case iamtypes.KindGroup:
 		subjectPrincipal = subjectName
+		// Distinguish NotFound (legitimate — group may live in an external
+		// provider, e.g. LDAP) from other errors (Forbidden, Timeout) that
+		// would mislead the user into thinking the group is missing.
 		if _, err := dyn.Resource(iamtypes.GroupGVR).Get(cmd.Context(), subjectName, metav1.GetOptions{}); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: local Group CR %q not found. Grant may target an external provider group.\n", subjectName)
+			switch {
+			case apierrors.IsNotFound(err):
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: local Group CR %q not found. Grant may target an external provider group.\n", subjectName)
+			default:
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to look up local Group CR %q: %v\n", subjectName, err)
+			}
 		}
 	}
 

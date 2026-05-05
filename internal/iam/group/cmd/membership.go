@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/retry"
 
 	iamtypes "github.com/deckhouse/deckhouse-cli/internal/iam/types"
 )
@@ -51,60 +52,82 @@ func EnsureMember(ctx context.Context, dyn dynamic.Interface,
 	groupClient := dyn.Resource(iamtypes.GroupGVR)
 	memberKindStr := string(memberKind)
 
-	obj, err := groupClient.Get(ctx, groupName, metav1.GetOptions{})
-	switch {
-	case err == nil:
-		// fall through to the existing-group path below.
-	case apierrors.IsNotFound(err):
-		if !opts.CreateGroupIfMissing {
-			return EnsureMemberResult{}, fmt.Errorf("group %q not found: %w", groupName, err)
+	// Probe to handle the create-if-missing path. The actual Get→mutate→Update
+	// cycle below runs inside retry.RetryOnConflict so a parallel writer can't
+	// make our Update lose to its commit.
+	if _, err := groupClient.Get(ctx, groupName, metav1.GetOptions{}); err != nil {
+		switch {
+		case apierrors.IsNotFound(err):
+			if !opts.CreateGroupIfMissing {
+				return EnsureMemberResult{}, fmt.Errorf("group %q not found: %w", groupName, err)
+			}
+			newObj := buildGroupObject(groupName)
+			setSpecMembers(newObj, []any{
+				map[string]any{"kind": memberKindStr, "name": memberName},
+			})
+			if _, err := groupClient.Create(ctx, newObj, metav1.CreateOptions{}); err != nil {
+				return EnsureMemberResult{}, fmt.Errorf("creating group %q: %w", groupName, err)
+			}
+			return EnsureMemberResult{GroupCreated: true, Added: true}, nil
+		default:
+			// Any other Get failure (Forbidden, Timeout, transient API error)
+			// must not silently route into Create: that would either overwrite
+			// an existing group whose Get we couldn't read, or create one for
+			// a user who lacks permission to even see it.
+			return EnsureMemberResult{}, fmt.Errorf("getting group %q: %w", groupName, err)
 		}
-		newObj := buildGroupObject(groupName)
-		setSpecMembers(newObj, []any{
-			map[string]any{"kind": memberKindStr, "name": memberName},
-		})
-		if _, err := groupClient.Create(ctx, newObj, metav1.CreateOptions{}); err != nil {
-			return EnsureMemberResult{}, fmt.Errorf("creating group %q: %w", groupName, err)
-		}
-		return EnsureMemberResult{GroupCreated: true, Added: true}, nil
-	default:
-		// Any other Get failure (Forbidden, Timeout, transient API error) must
-		// not silently route into Create: that would either overwrite an
-		// existing group whose Get we couldn't read, or create one for a user
-		// who lacks permission to even see it. Surface the error.
-		return EnsureMemberResult{}, fmt.Errorf("getting group %q: %w", groupName, err)
 	}
 
-	if opts.CycleCheck && memberKind == iamtypes.KindGroup {
-		hasCycle, cyclePath, err := detectCycleCtx(ctx, dyn, groupName, memberName)
+	var result EnsureMemberResult
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		obj, err := groupClient.Get(ctx, groupName, metav1.GetOptions{})
 		if err != nil {
-			return EnsureMemberResult{}, fmt.Errorf("cycle detection failed: %w", err)
+			return fmt.Errorf("getting group %q: %w", groupName, err)
 		}
-		if hasCycle {
-			return EnsureMemberResult{}, fmt.Errorf("adding group %q to %q would create a cycle: %s",
-				memberName, groupName, strings.Join(cyclePath, " -> "))
-		}
-	}
 
-	members, _, _ := unstructured.NestedSlice(obj.Object, "spec", "members")
-	for _, m := range members {
-		member, ok := m.(map[string]any)
-		if !ok {
-			continue
+		if opts.CycleCheck && memberKind == iamtypes.KindGroup {
+			// Re-check on every retry: a conflict can be exactly because some
+			// other writer changed the membership graph in a way that newly
+			// introduces a cycle.
+			hasCycle, cyclePath, err := detectCycleCtx(ctx, dyn, groupName, memberName)
+			if err != nil {
+				return fmt.Errorf("cycle detection failed: %w", err)
+			}
+			if hasCycle {
+				return fmt.Errorf("adding group %q to %q would create a cycle: %s",
+					memberName, groupName, strings.Join(cyclePath, " -> "))
+			}
 		}
-		if fmt.Sprint(member["kind"]) == memberKindStr && fmt.Sprint(member["name"]) == memberName {
-			return EnsureMemberResult{AlreadyMember: true}, nil
-		}
-	}
 
-	members = append(members, map[string]any{"kind": memberKindStr, "name": memberName})
-	if err := unstructured.SetNestedSlice(obj.Object, members, "spec", "members"); err != nil {
-		return EnsureMemberResult{}, fmt.Errorf("setting members on group %q: %w", groupName, err)
+		members, _, _ := unstructured.NestedSlice(obj.Object, "spec", "members")
+		for _, m := range members {
+			member, ok := m.(map[string]any)
+			if !ok {
+				continue
+			}
+			if fmt.Sprint(member["kind"]) == memberKindStr && fmt.Sprint(member["name"]) == memberName {
+				result = EnsureMemberResult{AlreadyMember: true}
+				return nil
+			}
+		}
+
+		members = append(members, map[string]any{"kind": memberKindStr, "name": memberName})
+		if err := unstructured.SetNestedSlice(obj.Object, members, "spec", "members"); err != nil {
+			return fmt.Errorf("setting members on group %q: %w", groupName, err)
+		}
+		// Return the raw Update error: retry.RetryOnConflict inspects it via
+		// apierrors.IsConflict (which traverses %w chains), and a conflict here
+		// is exactly the case we want to retry on a fresh Get.
+		if _, err := groupClient.Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
+		result = EnsureMemberResult{Added: true}
+		return nil
+	})
+	if err != nil {
+		return EnsureMemberResult{}, err
 	}
-	if _, err := groupClient.Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
-		return EnsureMemberResult{}, fmt.Errorf("updating group %q: %w", groupName, err)
-	}
-	return EnsureMemberResult{Added: true}, nil
+	return result, nil
 }
 
 // EnsureMemberResult tells the caller what happened so it can print the right

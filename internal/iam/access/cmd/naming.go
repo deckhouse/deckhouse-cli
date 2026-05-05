@@ -26,8 +26,16 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 )
 
+// k8sNameMaxLen is the DNS-subdomain limit for a Kubernetes object name.
+const k8sNameMaxLen = 253
+
 // generateGrantName produces a deterministic name for a d8-managed grant object.
 // Format: d8-access-<subjectKind>-<subjectRef>-<scope>-<level>-<hash8>
+//
+// The trailing hash8 is what guarantees uniqueness across different canonical
+// specs that happen to share the same human-readable prefix (long emails,
+// long namespace names, etc). It must survive truncation, so we trim the
+// readable body and re-append the hash, never the other way around.
 func generateGrantName(spec *canonicalGrantSpec) (string, error) {
 	jsonStr, err := spec.JSON()
 	if err != nil {
@@ -37,19 +45,20 @@ func generateGrantName(spec *canonicalGrantSpec) (string, error) {
 	h := sha256.Sum256([]byte(jsonStr))
 	hash8 := fmt.Sprintf("%x", h[:4])
 
-	name := fmt.Sprintf("d8-access-%s-%s-%s-%s-%s",
+	body := fmt.Sprintf("d8-access-%s-%s-%s-%s",
 		strings.ToLower(string(spec.SubjectKind)),
 		sanitizeNamePart(spec.SubjectRef),
 		scopeNamePart(spec),
 		strings.ToLower(spec.AccessLevel),
-		hash8,
 	)
 
-	if len(name) > 253 {
-		name = name[:253]
+	// Reserve room for "-<hash8>" so the unique suffix is never truncated.
+	maxBody := k8sNameMaxLen - 1 - len(hash8)
+	if len(body) > maxBody {
+		body = strings.TrimRight(body[:maxBody], "-")
 	}
 
-	return name, nil
+	return body + "-" + hash8, nil
 }
 
 // grantLabels returns the standard labels for a d8-managed grant object.
