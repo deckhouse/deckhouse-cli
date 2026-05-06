@@ -180,6 +180,8 @@ type moduleData struct {
 func (svc *Service) pullModules(ctx context.Context) error {
 	logger := svc.userLogger
 
+	// Temporary workspace for module OCI layouts:
+	// - stores intermediate pulled images; final bundle is packed later.
 	tmpDir := filepath.Join(svc.workingDir, "modules")
 
 	// List all available modules
@@ -193,7 +195,7 @@ func (svc *Service) pullModules(ctx context.Context) error {
 		return nil
 	}
 
-	// Filter modules according to whitelist/blacklist
+	// Filter-out modules that are not allowed by the filter (blacklist or whitelist)
 	filteredModules := make([]moduleData, 0)
 	for _, moduleName := range moduleNames {
 		mod := &Module{
@@ -280,160 +282,222 @@ func (svc *Service) pullModules(ctx context.Context) error {
 }
 
 func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) error {
-	// Initialize download list for this module
 	downloadList := NewImageDownloadList(filepath.Join(svc.rootURL, "modules", module.name))
 	svc.modulesDownloadList.list[module.name] = downloadList
 
-	// Determine which release channels to pull based on filter
-	shouldPullReleaseChannels := svc.options.Filter.ShouldMirrorReleaseChannels(module.name)
-
-	// Get module release channel versions for image discovery
-	moduleVersions := make([]string, 0)
-
-	if shouldPullReleaseChannels && !svc.options.OnlyExtraImages {
-		// Fill release channels
-		for _, channel := range internal.GetAllDefaultReleaseChannels() {
-			downloadList.ModuleReleaseChannels[svc.rootURL+"/modules/"+module.name+"/release:"+channel] = nil
-		}
-
-		if !svc.options.DryRun {
-			// Pull release channels first to get version information
-			config := puller.PullConfig{
-				Name:             module.name + " release channels",
-				ImageSet:         downloadList.ModuleReleaseChannels,
-				Layout:           svc.layout.Module(module.name).ModulesReleaseChannels,
-				AllowMissingTags: true,
-				GetterService:    svc.modulesService.Module(module.name).ReleaseChannels(),
-			}
-
-			if err := svc.pullerService.PullImages(ctx, config); err != nil {
-				return fmt.Errorf("pull release channels: %w", err)
-			}
-		}
-
-		// Extract versions from release channels.
-		// Does not depend on PullImages above - calls GetImage() directly
-		// against the remote registry, not from the local OCI layout.
-		moduleVersions = svc.extractVersionsFromReleaseChannels(ctx, module.name)
+	channelVersions, err := svc.discoverChannelVersions(ctx, module.name, downloadList)
+	if err != nil {
+		return err
 	}
 
-	// Check for explicit version constraints from filter
-	mod := &Module{
-		Name:         module.name,
-		RegistryPath: module.registryPath,
+	tags, err := svc.listTagsIfConstrained(ctx, module.name)
+	if err != nil {
+		return err
 	}
 
-	// Get specific versions to mirror from filter (for whitelist with version constraints)
-	filterVersions := svc.options.Filter.VersionsToMirror(mod)
-	if len(filterVersions) > 0 {
-		moduleVersions = append(moduleVersions, filterVersions...)
-	}
+	moduleVersions := svc.mergeAndDedupeVersions(module.name, module.registryPath, channelVersions, tags)
 
-	// Deduplicate versions
-	moduleVersions = deduplicateStrings(moduleVersions)
-
-	// In dry-run mode: print what would be pulled and return without downloading blobs
 	if svc.options.DryRun {
-		svc.userLogger.InfoLn("[dry-run] Module '" + module.name + "' images that would be pulled:")
-		for ref := range downloadList.ModuleReleaseChannels {
-			svc.userLogger.InfoLn("  " + ref)
-		}
-		for _, version := range moduleVersions {
-			svc.userLogger.InfoLn("  " + svc.rootURL + "/modules/" + module.name + ":" + version)
-		}
-		if len(moduleVersions) > 0 {
-			svc.userLogger.InfoLn("  (extra images discovery requires a real pull)")
-		}
+		svc.printDryRunPlan(module.name, downloadList, moduleVersions)
 		return nil
 	}
 
-	// Skip main module images if only pulling extra images
 	if !svc.options.OnlyExtraImages {
-		// Fill module images for each version
-		for _, version := range moduleVersions {
-			downloadList.Module[svc.rootURL+"/modules/"+module.name+":"+version] = nil
+		if err := svc.pullModuleImages(ctx, module.name, moduleVersions, downloadList); err != nil {
+			return err
+		}
+		svc.pullReleaseVersionImages(ctx, module.name, moduleVersions, downloadList)
+		svc.pullInternalDigestImages(ctx, module.name, moduleVersions, downloadList)
+	}
+
+	if err := svc.pullExtraImages(ctx, module.name, moduleVersions, downloadList); err != nil {
+		return err
+	}
+
+	if !svc.options.SkipVexImages {
+		svc.pullVexImages(ctx, module.name, downloadList)
+	}
+
+	return nil
+}
+
+// discoverChannelVersions enqueues release-channel refs into downloadList,
+// optionally pulls them (skipped on DryRun), and returns versions extracted
+// from those channels.
+func (svc *Service) discoverChannelVersions(ctx context.Context, moduleName string, downloadList *ImageDownloadList) ([]string, error) {
+	if !svc.options.Filter.ShouldMirrorReleaseChannels(moduleName) || svc.options.OnlyExtraImages {
+		return nil, nil
+	}
+
+	for _, channel := range internal.GetAllDefaultReleaseChannels() {
+		downloadList.ModuleReleaseChannels[svc.rootURL+"/modules/"+moduleName+"/release:"+channel] = nil
+	}
+
+	if !svc.options.DryRun {
+		config := puller.PullConfig{
+			Name:             moduleName + " release channels",
+			ImageSet:         downloadList.ModuleReleaseChannels,
+			Layout:           svc.layout.Module(moduleName).ModulesReleaseChannels,
+			AllowMissingTags: true,
+			GetterService:    svc.modulesService.Module(moduleName).ReleaseChannels(),
 		}
 
-		// Pull module images
-		if len(downloadList.Module) > 0 {
-			config := puller.PullConfig{
-				Name:             module.name + " images",
-				ImageSet:         downloadList.Module,
-				Layout:           svc.layout.Module(module.name).Modules,
-				AllowMissingTags: true,
-				GetterService:    svc.modulesService.Module(module.name),
-			}
-
-			if err := svc.pullerService.PullImages(ctx, config); err != nil {
-				return fmt.Errorf("pull module images: %w", err)
-			}
-		}
-
-		// Also pull release images with version tags (modules/<name>/release:v1.x.x)
-		// These are in addition to channel tags (alpha, beta, etc.)
-		if len(moduleVersions) > 0 {
-			releaseVersionSet := make(map[string]*puller.ImageMeta)
-			for _, version := range moduleVersions {
-				releaseVersionSet[svc.rootURL+"/modules/"+module.name+"/release:"+version] = nil
-				downloadList.ModuleReleaseChannels[svc.rootURL+"/modules/"+module.name+"/release:"+version] = nil
-			}
-
-			config := puller.PullConfig{
-				Name:             module.name + " release versions",
-				ImageSet:         releaseVersionSet,
-				Layout:           svc.layout.Module(module.name).ModulesReleaseChannels,
-				AllowMissingTags: true,
-				GetterService:    svc.modulesService.Module(module.name).ReleaseChannels(),
-			}
-
-			if err := svc.pullerService.PullImages(ctx, config); err != nil {
-				svc.logger.Debug(fmt.Sprintf("Failed to pull release version images for %s: %v", module.name, err))
-				// Don't fail - version release images may not exist for all versions
-			}
-		}
-
-		// Extract and pull internal digest images from module versions (images_digests.json)
-		// These are internal images that module uses at runtime
-		digestImages := svc.extractInternalDigestImages(ctx, module.name, moduleVersions)
-		if len(digestImages) > 0 {
-			// Add digest images to download list
-			digestImageSet := make(map[string]*puller.ImageMeta)
-			for _, digestRef := range digestImages {
-				digestImageSet[digestRef] = nil
-				downloadList.Module[digestRef] = nil
-			}
-
-			config := puller.PullConfig{
-				Name:             module.name + " internal images",
-				ImageSet:         digestImageSet,
-				Layout:           svc.layout.Module(module.name).Modules,
-				AllowMissingTags: true,
-				GetterService:    svc.modulesService.Module(module.name),
-			}
-
-			if err := svc.pullerService.PullImages(ctx, config); err != nil {
-				svc.logger.Debug(fmt.Sprintf("Failed to pull internal digest images for %s: %v", module.name, err))
-				// Don't fail on missing internal images, just log warning
-			}
+		if err := svc.pullerService.PullImages(ctx, config); err != nil {
+			return nil, fmt.Errorf("pull release channels: %w", err)
 		}
 	}
 
-	// Extract and pull extra images from module versions
-	// Each extra image gets its own layout: modules/<name>/extra/<extra-name>/
-	extraImagesByName := svc.findExtraImages(ctx, module.name, moduleVersions)
+	// Calls GetImage() directly against the remote registry, not from the local
+	// OCI layout, so it works in DryRun too.
+	return svc.extractVersionsFromReleaseChannels(ctx, moduleName), nil
+}
+
+// listTagsIfConstrained returns the module's tag list, but only when the filter
+// has a non-exact (semver) constraint - exact-tag and no-constraint paths don't
+// read Releases. ErrImageNotFound is logged and treated as no tags (same policy
+// as validateModulesAccess for missing module repos).
+func (svc *Service) listTagsIfConstrained(ctx context.Context, moduleName string) ([]string, error) {
+	constraint, hasConstraint := svc.options.Filter.GetConstraint(moduleName)
+	if !hasConstraint || constraint.IsExact() {
+		return nil, nil
+	}
+
+	tags, err := svc.modulesService.Module(moduleName).ListTags(ctx)
+	switch {
+	case errors.Is(err, client.ErrImageNotFound):
+		svc.userLogger.Warnf("Skipping tag list for module %s: %v", moduleName, err)
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("list tags for module %s: %w", moduleName, err)
+	}
+	return tags, nil
+}
+
+// mergeAndDedupeVersions merges channel-derived versions with versions resolved
+// from filter constraints over the given tags, then deduplicates.
+func (svc *Service) mergeAndDedupeVersions(moduleName, registryPath string, channelVersions, tags []string) []string {
+	versions := append([]string(nil), channelVersions...)
+
+	mod := &Module{
+		Name:         moduleName,
+		RegistryPath: registryPath,
+		Releases:     tags,
+	}
+	versions = append(versions, svc.options.Filter.VersionsToMirror(mod)...)
+
+	return deduplicateStrings(versions)
+}
+
+// printDryRunPlan prints the set of refs that would be pulled, without downloading.
+func (svc *Service) printDryRunPlan(moduleName string, downloadList *ImageDownloadList, versions []string) {
+	svc.userLogger.InfoLn("[dry-run] Module '" + moduleName + "' images that would be pulled:")
+	for ref := range downloadList.ModuleReleaseChannels {
+		svc.userLogger.InfoLn("  " + ref)
+	}
+	for _, version := range versions {
+		svc.userLogger.InfoLn("  " + svc.rootURL + "/modules/" + moduleName + ":" + version)
+	}
+	if len(versions) > 0 {
+		svc.userLogger.InfoLn("  (extra images discovery requires a real pull)")
+	}
+}
+
+// pullModuleImages pulls module images for the given versions (modules/<name>:vX.Y.Z).
+func (svc *Service) pullModuleImages(ctx context.Context, moduleName string, versions []string, downloadList *ImageDownloadList) error {
+	// Guard against future call-order changes: other helpers also write to
+	// downloadList.Module, so checking versions directly is the only invariant.
+	if len(versions) == 0 {
+		return nil
+	}
+
+	for _, version := range versions {
+		downloadList.Module[svc.rootURL+"/modules/"+moduleName+":"+version] = nil
+	}
+
+	config := puller.PullConfig{
+		Name:             moduleName + " images",
+		ImageSet:         downloadList.Module,
+		Layout:           svc.layout.Module(moduleName).Modules,
+		AllowMissingTags: true,
+		GetterService:    svc.modulesService.Module(moduleName),
+	}
+
+	if err := svc.pullerService.PullImages(ctx, config); err != nil {
+		return fmt.Errorf("pull module images: %w", err)
+	}
+	return nil
+}
+
+// pullReleaseVersionImages pulls modules/<name>/release:vX.Y.Z tags in addition
+// to channel tags (alpha, beta, ...). These may not exist for every version, so
+// errors are logged at Debug and not propagated.
+func (svc *Service) pullReleaseVersionImages(ctx context.Context, moduleName string, versions []string, downloadList *ImageDownloadList) {
+	if len(versions) == 0 {
+		return
+	}
+
+	releaseVersionSet := make(map[string]*puller.ImageMeta)
+	for _, version := range versions {
+		releaseVersionSet[svc.rootURL+"/modules/"+moduleName+"/release:"+version] = nil
+		downloadList.ModuleReleaseChannels[svc.rootURL+"/modules/"+moduleName+"/release:"+version] = nil
+	}
+
+	config := puller.PullConfig{
+		Name:             moduleName + " release versions",
+		ImageSet:         releaseVersionSet,
+		Layout:           svc.layout.Module(moduleName).ModulesReleaseChannels,
+		AllowMissingTags: true,
+		GetterService:    svc.modulesService.Module(moduleName).ReleaseChannels(),
+	}
+
+	if err := svc.pullerService.PullImages(ctx, config); err != nil {
+		svc.logger.Debug(fmt.Sprintf("Failed to pull release version images for %s: %v", moduleName, err))
+	}
+}
+
+// pullInternalDigestImages discovers and pulls images referenced by
+// images_digests.json inside each module version. Errors are logged at Debug and
+// not propagated - missing internal images do not fail the whole module pull.
+func (svc *Service) pullInternalDigestImages(ctx context.Context, moduleName string, versions []string, downloadList *ImageDownloadList) {
+	digestImages := svc.extractInternalDigestImages(ctx, moduleName, versions)
+	if len(digestImages) == 0 {
+		return
+	}
+
+	digestImageSet := make(map[string]*puller.ImageMeta)
+	for _, digestRef := range digestImages {
+		digestImageSet[digestRef] = nil
+		downloadList.Module[digestRef] = nil
+	}
+
+	config := puller.PullConfig{
+		Name:             moduleName + " internal images",
+		ImageSet:         digestImageSet,
+		Layout:           svc.layout.Module(moduleName).Modules,
+		AllowMissingTags: true,
+		GetterService:    svc.modulesService.Module(moduleName),
+	}
+
+	if err := svc.pullerService.PullImages(ctx, config); err != nil {
+		svc.logger.Debug(fmt.Sprintf("Failed to pull internal digest images for %s: %v", moduleName, err))
+	}
+}
+
+// pullExtraImages discovers extra images declared by each module version and
+// pulls them into per-extra layouts (modules/<name>/extra/<extra-name>/).
+func (svc *Service) pullExtraImages(ctx context.Context, moduleName string, versions []string, downloadList *ImageDownloadList) error {
+	extraImagesByName := svc.findExtraImages(ctx, moduleName, versions)
 
 	for extraName, images := range extraImagesByName {
 		if len(images) == 0 {
 			continue
 		}
 
-		// Get or create layout for this extra image
-		extraLayout, err := svc.layout.Module(module.name).GetOrCreateExtraLayout(extraName)
+		extraLayout, err := svc.layout.Module(moduleName).GetOrCreateExtraLayout(extraName)
 		if err != nil {
 			return fmt.Errorf("create layout for extra image %s: %w", extraName, err)
 		}
 
-		// Build image set for this extra
 		imageSet := make(map[string]*puller.ImageMeta)
 		for _, img := range images {
 			imageSet[img.FullRef] = nil
@@ -441,24 +505,84 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 		}
 
 		config := puller.PullConfig{
-			Name:             module.name + "/" + extraName,
+			Name:             moduleName + "/" + extraName,
 			ImageSet:         imageSet,
 			Layout:           extraLayout,
 			AllowMissingTags: true,
-			GetterService:    svc.modulesService.Module(module.name).ExtraImage(extraName),
+			GetterService:    svc.modulesService.Module(moduleName).ExtraImage(extraName),
 		}
 
 		if err := svc.pullerService.PullImages(ctx, config); err != nil {
 			return fmt.Errorf("pull extra image %s: %w", extraName, err)
 		}
 	}
+	return nil
+}
 
-	if !svc.options.SkipVexImages {
-		// Find and pull VEX images for all module images
-		svc.pullVexImages(ctx, module.name, downloadList)
+// pullVexImages finds and pulls VEX attestation images for module images
+func (svc *Service) pullVexImages(ctx context.Context, moduleName string, downloadList *ImageDownloadList) {
+	allImages := make([]string, 0, len(downloadList.Module)+len(downloadList.ModuleExtra))
+
+	for img := range downloadList.Module {
+		allImages = append(allImages, img)
+	}
+	for img := range downloadList.ModuleExtra {
+		allImages = append(allImages, img)
 	}
 
-	return nil
+	// Find VEX images and add to a separate set for pulling
+	vexImageSet := make(map[string]*puller.ImageMeta)
+	for _, img := range allImages {
+		vexImageName, err := svc.findVexImage(ctx, moduleName, img)
+		if err != nil {
+			svc.logger.Debug(fmt.Sprintf("Failed to find VEX image for %s: %v", img, err))
+			continue
+		}
+		if vexImageName != "" {
+			svc.logger.Debug(fmt.Sprintf("Found VEX image: %s", vexImageName))
+			vexImageSet[vexImageName] = nil
+			downloadList.Module[vexImageName] = nil
+		}
+	}
+
+	// Pull VEX images if any found
+	if len(vexImageSet) > 0 {
+		config := puller.PullConfig{
+			Name:             moduleName + " VEX images",
+			ImageSet:         vexImageSet,
+			Layout:           svc.layout.Module(moduleName).Modules,
+			AllowMissingTags: true, // VEX images may not exist
+			GetterService:    svc.modulesService.Module(moduleName),
+		}
+
+		if err := svc.pullerService.PullImages(ctx, config); err != nil {
+			svc.logger.Debug(fmt.Sprintf("Failed to pull VEX images for %s: %v", moduleName, err))
+			// Don't fail on VEX image pull errors
+		}
+	}
+}
+
+// findVexImage checks if a VEX attestation image exists for the given image
+func (svc *Service) findVexImage(ctx context.Context, moduleName string, imageRef string) (string, error) {
+	// VEX image reference format: sha256-xxx.att
+	vexImageName := strings.Replace(strings.Replace(imageRef, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
+
+	// Extract tag from vex image name
+	splitIndex := strings.LastIndex(vexImageName, ":")
+	if splitIndex == -1 {
+		return "", nil
+	}
+	tag := vexImageName[splitIndex+1:]
+
+	err := svc.modulesService.Module(moduleName).CheckImageExists(ctx, tag)
+	if errors.Is(err, client.ErrImageNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+
+	return vexImageName, nil
 }
 
 // extractVersionsFromReleaseChannels extracts version tags from pulled release channel images
@@ -613,37 +737,6 @@ func extractExtraImagesJSON(img interface{ Extract() io.ReadCloser }) (map[strin
 	}
 }
 
-// digestRegex matches sha256 digests in images_digests.json
-var digestRegex = regexp.MustCompile(`sha256:[a-f0-9]{64}`)
-
-// extractImagesDigestsJSON extracts images_digests.json from module image
-// and returns list of sha256 digests. These are internal images that module uses at runtime.
-func extractImagesDigestsJSON(img interface{ Extract() io.ReadCloser }) ([]string, error) {
-	rc := img.Extract()
-	defer rc.Close()
-
-	tr := tar.NewReader(rc)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			return nil, fmt.Errorf("images_digests.json not found in image")
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		if hdr.Name == "images_digests.json" {
-			data, err := io.ReadAll(tr)
-			if err != nil {
-				return nil, fmt.Errorf("read images_digests.json: %w", err)
-			}
-			// Extract all sha256:... digests from JSON file
-			digests := digestRegex.FindAllString(string(data), -1)
-			return digests, nil
-		}
-	}
-}
-
 // extractInternalDigestImages extracts internal digest images from module versions.
 // It reads images_digests.json from each module version image and returns
 // list of image references in format "repo@sha256:..." which will be pulled
@@ -697,70 +790,35 @@ func (svc *Service) extractInternalDigestImages(ctx context.Context, moduleName 
 	return digestRefs
 }
 
-// pullVexImages finds and pulls VEX attestation images for module images
-func (svc *Service) pullVexImages(ctx context.Context, moduleName string, downloadList *ImageDownloadList) {
-	allImages := make([]string, 0, len(downloadList.Module)+len(downloadList.ModuleExtra))
+// digestRegex matches sha256 digests in images_digests.json
+var digestRegex = regexp.MustCompile(`sha256:[a-f0-9]{64}`)
 
-	for img := range downloadList.Module {
-		allImages = append(allImages, img)
-	}
-	for img := range downloadList.ModuleExtra {
-		allImages = append(allImages, img)
-	}
+// extractImagesDigestsJSON extracts images_digests.json from module image
+// and returns list of sha256 digests. These are internal images that module uses at runtime.
+func extractImagesDigestsJSON(img interface{ Extract() io.ReadCloser }) ([]string, error) {
+	rc := img.Extract()
+	defer rc.Close()
 
-	// Find VEX images and add to a separate set for pulling
-	vexImageSet := make(map[string]*puller.ImageMeta)
-	for _, img := range allImages {
-		vexImageName, err := svc.findVexImage(ctx, moduleName, img)
+	tr := tar.NewReader(rc)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil, fmt.Errorf("images_digests.json not found in image")
+		}
 		if err != nil {
-			svc.logger.Debug(fmt.Sprintf("Failed to find VEX image for %s: %v", img, err))
-			continue
-		}
-		if vexImageName != "" {
-			svc.logger.Debug(fmt.Sprintf("Found VEX image: %s", vexImageName))
-			vexImageSet[vexImageName] = nil
-			downloadList.Module[vexImageName] = nil
-		}
-	}
-
-	// Pull VEX images if any found
-	if len(vexImageSet) > 0 {
-		config := puller.PullConfig{
-			Name:             moduleName + " VEX images",
-			ImageSet:         vexImageSet,
-			Layout:           svc.layout.Module(moduleName).Modules,
-			AllowMissingTags: true, // VEX images may not exist
-			GetterService:    svc.modulesService.Module(moduleName),
+			return nil, err
 		}
 
-		if err := svc.pullerService.PullImages(ctx, config); err != nil {
-			svc.logger.Debug(fmt.Sprintf("Failed to pull VEX images for %s: %v", moduleName, err))
-			// Don't fail on VEX image pull errors
+		if hdr.Name == "images_digests.json" {
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				return nil, fmt.Errorf("read images_digests.json: %w", err)
+			}
+			// Extract all sha256:... digests from JSON file
+			digests := digestRegex.FindAllString(string(data), -1)
+			return digests, nil
 		}
 	}
-}
-
-// findVexImage checks if a VEX attestation image exists for the given image
-func (svc *Service) findVexImage(ctx context.Context, moduleName string, imageRef string) (string, error) {
-	// VEX image reference format: sha256-xxx.att
-	vexImageName := strings.Replace(strings.Replace(imageRef, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
-
-	// Extract tag from vex image name
-	splitIndex := strings.LastIndex(vexImageName, ":")
-	if splitIndex == -1 {
-		return "", nil
-	}
-	tag := vexImageName[splitIndex+1:]
-
-	err := svc.modulesService.Module(moduleName).CheckImageExists(ctx, tag)
-	if errors.Is(err, client.ErrImageNotFound) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-
-	return vexImageName, nil
 }
 
 // applyChannelAliases applies release channel tags to images with exact tag constraints

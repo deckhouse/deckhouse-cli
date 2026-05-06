@@ -54,6 +54,18 @@ func TestNewCommand(t *testing.T) {
 	assert.NotNil(t, cmd.Flags())
 }
 
+func TestNewCommandMutuallyExclusiveModuleFlags(t *testing.T) {
+	cmd := NewCommand()
+	cmd.PreRunE = nil
+	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
+	cmd.SetArgs([]string{"--include-module", "module-a", "--exclude-module", "module-b", "bundle-path"})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "include-module")
+	assert.Contains(t, err.Error(), "exclude-module")
+}
+
 func TestSetupLogger(t *testing.T) {
 	tests := []struct {
 		name        string

@@ -98,6 +98,7 @@ func NewCommand() *cobra.Command {
 	}
 
 	pullflags.AddFlags(pullCmd.Flags())
+	pullCmd.MarkFlagsMutuallyExclusive("include-module", "exclude-module")
 	pullflags.ParseEnvironmentVariables()
 
 	return pullCmd
@@ -375,14 +376,18 @@ func (p *Puller) validateModulesAccess() error {
 
 // createModuleFilter creates the appropriate module filter based on whitelist/blacklist
 func (p *Puller) createModuleFilter() (*modules.Filter, error) {
-	filterExpressions := pullflags.ModulesBlacklist
-	filterType := modules.FilterTypeBlacklist
+	// Flags are mutually exclusive:
+	// - --include-module: whitelist mode (mirror only listed modules);
+	// - otherwise: blacklist mode via --exclude-module (skip listed modules).
 	if pullflags.ModulesWhitelist != nil {
-		filterExpressions = pullflags.ModulesWhitelist
-		filterType = modules.FilterTypeWhitelist
+		filter, err := modules.NewFilter(pullflags.ModulesWhitelist, modules.FilterTypeWhitelist)
+		if err != nil {
+			return nil, fmt.Errorf("Prepare module filter: %w", err)
+		}
+		return filter, nil
 	}
 
-	filter, err := modules.NewFilter(filterExpressions, filterType)
+	filter, err := modules.NewFilter(pullflags.ModulesBlacklist, modules.FilterTypeBlacklist)
 	if err != nil {
 		return nil, fmt.Errorf("Prepare module filter: %w", err)
 	}
