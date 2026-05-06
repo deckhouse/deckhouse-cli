@@ -187,6 +187,46 @@ func TestLoadLocal_NestedIndexLayout(t *testing.T) {
 	}
 }
 
+// A layout produced by `cr pull --format oci` of a multi-arch image holds a
+// single nested index. Pushing it with --index must unwrap to that inner
+// index instead of returning the layout's top-level wrapper, otherwise the
+// registry stores a redundant 1-entry index around the real one and every
+// subsequent pull preserves the extra layer.
+func TestLoadLocal_NestedIndexLayout_AsIndexUnwraps(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "layout")
+	p, err := layout.Write(dir, empty.Index)
+	if err != nil {
+		t.Fatalf("layout.Write: %v", err)
+	}
+	inner, err := random.Index(32, 1, 2)
+	if err != nil {
+		t.Fatalf("random.Index: %v", err)
+	}
+	if err := p.AppendIndex(inner); err != nil {
+		t.Fatalf("AppendIndex: %v", err)
+	}
+	innerDigest, err := inner.Digest()
+	if err != nil {
+		t.Fatalf("inner.Digest: %v", err)
+	}
+
+	obj, err := LoadLocal(dir, true)
+	if err != nil {
+		t.Fatalf("LoadLocal asIndex=true: %v", err)
+	}
+	got, ok := obj.(v1.ImageIndex)
+	if !ok {
+		t.Fatalf("expected v1.ImageIndex, got %T", obj)
+	}
+	gotDigest, err := got.Digest()
+	if err != nil {
+		t.Fatalf("got.Digest: %v", err)
+	}
+	if gotDigest != innerDigest {
+		t.Errorf("expected inner index digest %s, got %s (wrapper not unwrapped)", innerDigest, gotDigest)
+	}
+}
+
 func TestLoadLocal_MultipleManifestsRequiresIndex(t *testing.T) {
 	dir := makeLayoutWithImages(t, 3)
 	if _, err := LoadLocal(dir, false); err == nil {

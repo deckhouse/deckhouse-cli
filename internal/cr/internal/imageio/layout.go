@@ -50,10 +50,10 @@ func SaveOCI(path string, imgs map[string]v1.Image, idxs map[string]v1.ImageInde
 //
 //	path is a file          -> docker tarball, returns v1.Image
 //	path is an OCI layout   -> contents determine the type:
-//	                           - asIndex = true                   -> v1.ImageIndex (the layout's top-level index)
-//	                           - exactly one image manifest       -> v1.Image
-//	                           - exactly one nested index         -> v1.ImageIndex
-//	                           - several entries without asIndex  -> error (ambiguous)
+//	                           - exactly one image manifest                 -> v1.Image
+//	                           - exactly one nested index                   -> v1.ImageIndex (unwrapped, --index optional)
+//	                           - several entries with asIndex = true        -> v1.ImageIndex (the layout's top-level index)
+//	                           - several entries without asIndex            -> error (ambiguous)
 func LoadLocal(path string, asIndex bool) (partial.WithRawManifest, error) {
 	stat, err := os.Stat(path)
 	if err != nil {
@@ -67,27 +67,35 @@ func LoadLocal(path string, asIndex bool) (partial.WithRawManifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read OCI layout %s: %w", path, err)
 	}
-	if asIndex {
-		return idx, nil
-	}
 
 	manifest, err := idx.IndexManifest()
 	if err != nil {
 		return nil, fmt.Errorf("read index manifest: %w", err)
 	}
-	if len(manifest.Manifests) != 1 {
-		return nil, fmt.Errorf("layout %s contains %d entries; pass --index to push as an index", path, len(manifest.Manifests))
+
+	// Single-entry layout: unwrap regardless of asIndex. The layout's
+	// top-level index.json is a "directory of contents" pointer, not the
+	// thing the user intends to publish. Pushing it as-is would store a
+	// redundant 1-entry wrapper in the registry (an index whose only
+	// manifest is the real index/image), and subsequent pulls would
+	// preserve that extra layer. asIndex stays meaningful only for layouts
+	// that actually need a fresh index built from multiple entries.
+	if len(manifest.Manifests) == 1 {
+		desc := manifest.Manifests[0]
+		switch {
+		case desc.MediaType.IsImage():
+			return idx.Image(desc.Digest)
+		case desc.MediaType.IsIndex():
+			return idx.ImageIndex(desc.Digest)
+		default:
+			return nil, fmt.Errorf("layout %s contains non-image entry (mediaType %q)", path, desc.MediaType)
+		}
 	}
 
-	desc := manifest.Manifests[0]
-	switch {
-	case desc.MediaType.IsImage():
-		return idx.Image(desc.Digest)
-	case desc.MediaType.IsIndex():
-		return idx.ImageIndex(desc.Digest)
-	default:
-		return nil, fmt.Errorf("layout %s contains non-image entry (mediaType %q); pass --index", path, desc.MediaType)
+	if !asIndex {
+		return nil, fmt.Errorf("layout %s contains %d entries; pass --index to push as an index", path, len(manifest.Manifests))
 	}
+	return idx, nil
 }
 
 func openOrCreateLayout(path string) (layout.Path, error) {
