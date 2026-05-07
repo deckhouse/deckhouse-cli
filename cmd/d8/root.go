@@ -42,6 +42,7 @@ import (
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
 	data "github.com/deckhouse/deckhouse-cli/internal/data/cmd"
 	iam "github.com/deckhouse/deckhouse-cli/internal/iam/cmd"
+	iamuser "github.com/deckhouse/deckhouse-cli/internal/iam/user/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/network"
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
@@ -108,6 +109,11 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(mirror.NewCommand())
 	r.cmd.AddCommand(status.NewCommand())
 	r.cmd.AddCommand(iam.NewCommand())
+	// Backward-compatibility shim for the four UserOperation commands that
+	// used to live at the top level (d8 user lock|unlock|reset-password|reset-2fa)
+	// before they moved under d8 iam user. Hidden from help; emits a stderr
+	// deprecation banner on each invocation pointing to the new path.
+	r.cmd.AddCommand(iamuser.NewDeprecatedTopLevelCommand())
 	r.cmd.AddCommand(network.NewCommand())
 	r.cmd.AddCommand(tools.NewCommand())
 	r.cmd.AddCommand(commands.NewVirtualizationCommand())
