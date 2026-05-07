@@ -2,6 +2,6 @@ groups:
   - name: "0"
     channels:
       - name: ea
-        version: 0.29.31
+        version: 0.29.32
       - name: stable
-        version: 0.29.31
+        version: 0.29.32
