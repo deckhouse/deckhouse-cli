@@ -14,22 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package plugins implements the `d8 plugins ...` command tree
-// (list, contract, install, update, remove) along with the wrappers
-// for individual plugins (see plugin.go) and the service-init logic
-// (see init.go).
-//
-// The cobra-subcommand implementations are split into domain files:
-//   - list.go         -- `d8 plugins list` + display helpers
-//   - contract.go     -- `d8 plugins contract <name>`
-//   - install.go      -- `d8 plugins install <name>` + install pipeline
-//   - update.go       -- `d8 plugins update <name>` / `update all`
-//   - remove.go       -- `d8 plugins remove <name>` / `remove all`
-//   - validators.go   -- requirement validation, contract cache,
-//     version helpers (used by list/install/contract)
-//
-// This file only wires the root cobra command and constructs the shared
-// PluginsCommand state.
 package plugins
 
 import (
