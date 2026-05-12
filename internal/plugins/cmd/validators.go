@@ -313,18 +313,36 @@ func (pc *PluginsCommand) validatePluginRequirementConditional(plugin *internal.
 	return nil
 }
 
+// debugPrintPendingRequirement prints a human-readable warning for a declared
+// requirement that d8 currently surfaces but does not enforce.
+//
+// Until the requirement enforcement is implemented, we print a warning to the user.
+//
+// Example:
+//
+//	!  <title>
+//	      key1: value1
+//	      key2: value2
+func debugPrintPendingRequirement(title string, kv ...[2]string) {
+	fmt.Fprintf(os.Stderr, "!  %s\n", title)
+	for _, p := range kv {
+		fmt.Fprintf(os.Stderr, "      %s: %s\n", p[0], p[1])
+	}
+}
+
 // validateKubernetesRequirement is a log-only stub (yet).
 //
 // For Kubernetes requirement:
 // - if the constraint is empty, skip silently
-// - if the constraint is not empty, log a warning
+// - if the constraint is not empty, print a warning
 func (pc *PluginsCommand) validateKubernetesRequirement(plugin *internal.Plugin) error {
 	if plugin.Requirements.Kubernetes.Constraint == "" {
 		return nil
 	}
-	pc.logger.Warn("plugin declares a Kubernetes version requirement but enforcement is not implemented yet",
-		slog.String("plugin", plugin.Name),
-		slog.String("constraint", plugin.Requirements.Kubernetes.Constraint),
+	debugPrintPendingRequirement(
+		"plugin declares a Kubernetes version requirement but enforcement is not implemented yet",
+		[2]string{"plugin", plugin.Name},
+		[2]string{"constraint", plugin.Requirements.Kubernetes.Constraint},
 	)
 	return nil
 }
@@ -335,17 +353,17 @@ func (pc *PluginsCommand) validateDeckhouseRequirement(plugin *internal.Plugin) 
 	if plugin.Requirements.Deckhouse.Constraint == "" {
 		return nil
 	}
-	pc.logger.Warn("plugin declares a Deckhouse version requirement but enforcement is not implemented yet",
-		slog.String("plugin", plugin.Name),
-		slog.String("constraint", plugin.Requirements.Deckhouse.Constraint),
+	debugPrintPendingRequirement(
+		"plugin declares a Deckhouse version requirement but enforcement is not implemented yet",
+		[2]string{"plugin", plugin.Name},
+		[2]string{"constraint", plugin.Requirements.Deckhouse.Constraint},
 	)
 	return nil
 }
 
 // validateModuleRequirement is a log-only stub. Mandatory, Conditional and
-// AnyOf sections are all surfaced via Warn so authors and operators see
-// the declared expectations even though d8 does not yet inspect the cluster
-// to verify them.
+// AnyOf sections are all surfaced so authors and operators see the declared
+// expectations even though d8 does not yet inspect the cluster to verify them.
 func (pc *PluginsCommand) validateModuleRequirement(plugin *internal.Plugin) error {
 	mods := plugin.Requirements.Modules
 	if len(mods.Mandatory) == 0 && len(mods.Conditional) == 0 && len(mods.AnyOf) == 0 {
@@ -353,17 +371,19 @@ func (pc *PluginsCommand) validateModuleRequirement(plugin *internal.Plugin) err
 	}
 
 	for _, m := range mods.Mandatory {
-		pc.logger.Warn("plugin declares a mandatory module requirement but enforcement is not implemented yet",
-			slog.String("plugin", plugin.Name),
-			slog.String("module", m.Name),
-			slog.String("constraint", m.Constraint),
+		debugPrintPendingRequirement(
+			"plugin declares a mandatory module requirement but enforcement is not implemented yet",
+			[2]string{"plugin", plugin.Name},
+			[2]string{"module", m.Name},
+			[2]string{"constraint", m.Constraint},
 		)
 	}
 	for _, m := range mods.Conditional {
-		pc.logger.Warn("plugin declares a conditional module requirement but enforcement is not implemented yet",
-			slog.String("plugin", plugin.Name),
-			slog.String("module", m.Name),
-			slog.String("constraint", m.Constraint),
+		debugPrintPendingRequirement(
+			"plugin declares a conditional module requirement but enforcement is not implemented yet",
+			[2]string{"plugin", plugin.Name},
+			[2]string{"module", m.Name},
+			[2]string{"constraint", m.Constraint},
 		)
 	}
 	for i, grp := range mods.AnyOf {
@@ -371,11 +391,12 @@ func (pc *PluginsCommand) validateModuleRequirement(plugin *internal.Plugin) err
 		for _, m := range grp.Modules {
 			names = append(names, m.Name)
 		}
-		pc.logger.Warn("plugin declares an anyOf module group but enforcement is not implemented yet",
-			slog.String("plugin", plugin.Name),
-			slog.Int("group_index", i),
-			slog.String("group_description", grp.Description),
-			slog.Any("modules", names),
+		debugPrintPendingRequirement(
+			"plugin declares an anyOf module group but enforcement is not implemented yet",
+			[2]string{"plugin", plugin.Name},
+			[2]string{"group_index", fmt.Sprintf("%d", i)},
+			[2]string{"group_description", grp.Description},
+			[2]string{"modules", strings.Join(names, ", ")},
 		)
 	}
 	return nil
