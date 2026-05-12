@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -127,15 +128,44 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 	s.log.Debug("Contract raw retrieved successfully", slog.String("contractraw", string(contractRaw)))
 
 	contract := new(PluginContract)
-	err = json.Unmarshal(contractRaw, contract)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal contract: %w", err)
+	if err := unmarshalContract(contractRaw, contract); err != nil {
+		return nil, err
 	}
 
 	s.log.Debug("Plugin contract parsed successfully", slog.String("plugin", pluginName), slog.String("tag", tag), slog.String("name", contract.Name), slog.String("version", contract.Version))
 
 	// Convert to domain entity
 	return ContractToDomain(contract), nil
+}
+
+// unmarshalContract decodes raw JSON into a PluginContract and rewrites
+// encoding/json's verbose default errors as user-actionable messages.
+// Used by every caller that turns a contract blob into a domain object so
+// the wording stays identical whether the source is an OCI annotation or
+// a local file.
+func unmarshalContract(raw []byte, dst *PluginContract) error {
+	err := json.Unmarshal(raw, dst)
+	if err == nil {
+		return nil
+	}
+
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		if (typeErr.Field == "requirements.modules" || typeErr.Field == "requirements.plugins") && typeErr.Value == "array" {
+			return fmt.Errorf("invalid contract: field %q must be an object with mandatory/conditional sections, got a JSON array", typeErr.Field)
+		}
+		if typeErr.Field != "" {
+			return fmt.Errorf("invalid contract: field %q has wrong JSON type (got %s)", typeErr.Field, typeErr.Value)
+		}
+		return fmt.Errorf("invalid contract: wrong JSON type (got %s)", typeErr.Value)
+	}
+
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return fmt.Errorf("invalid contract: malformed JSON at byte offset %d", syntaxErr.Offset)
+	}
+
+	return fmt.Errorf("invalid contract: %w", err)
 }
 
 // GetPluginContractFromFile reads the plugin contract from a file
@@ -146,9 +176,8 @@ func GetPluginContractFromFile(contractFilePath string) (*internal.Plugin, error
 	}
 
 	contract := new(PluginContract)
-	err = json.Unmarshal(contractBytes, contract)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal contract: %w", err)
+	if err := unmarshalContract(contractBytes, contract); err != nil {
+		return nil, err
 	}
 
 	return ContractToDomain(contract), nil

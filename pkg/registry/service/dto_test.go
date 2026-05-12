@@ -18,6 +18,7 @@ package service
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -55,12 +56,13 @@ func TestPluginContract_V2FieldsParsed(t *testing.T) {
 	}
 }
 
-// TestPluginContract_LegacyV1Rejected: flat-array form for plugins/modules is
-// no longer supported. Any contract still using it must surface a clear
-// unmarshal error rather than silently coercing into one of the v2 sections.
-func TestPluginContract_LegacyV1Rejected(t *testing.T) {
+// TestPluginContract_FlatArrayRejected: flat-array form for
+// requirements.modules / requirements.plugins isn't part of the schema
+// and must surface as an unmarshal error rather than silently coercing
+// into one of the mandatory/conditional sections.
+func TestPluginContract_FlatArrayRejected(t *testing.T) {
 	in := []byte(`{
-		"name":"legacy","version":"v1.0.0","description":"x",
+		"name":"x","version":"v1.0.0","description":"x",
 		"requirements":{
 			"modules":[{"name":"m","constraint":">=1.0.0"}],
 			"plugins":[{"name":"p","constraint":">=1.0.0"}]
@@ -68,6 +70,37 @@ func TestPluginContract_LegacyV1Rejected(t *testing.T) {
 	}`)
 	var c PluginContract
 	if err := json.Unmarshal(in, &c); err == nil {
-		t.Fatal("expected unmarshal error for v1 flat-array contract, got nil")
+		t.Fatal("expected unmarshal error for flat-array contract, got nil")
+	}
+}
+
+// TestUnmarshalContract_FriendlyArrayMessage: when a flat-array contract
+// hits the production unmarshal path (unmarshalContract, used by both the
+// OCI-annotation and file-load code paths), the error must be a
+// user-actionable "invalid contract" message naming the offending field
+// and the expected shape, NOT the raw encoding/json reflect-soup.
+func TestUnmarshalContract_FriendlyArrayMessage(t *testing.T) {
+	in := []byte(`{
+		"name":"x","version":"v1.0.0",
+		"requirements":{"modules":[{"name":"m","constraint":">=1.0.0"}]}
+	}`)
+	var c PluginContract
+	err := unmarshalContract(in, &c)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"invalid contract",
+		`"requirements.modules"`,
+		"mandatory/conditional sections",
+		"got a JSON array",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message missing %q\ngot: %s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "ModuleRequirementsGroupDTO") {
+		t.Errorf("error message still leaks internal Go type name:\n%s", msg)
 	}
 }
