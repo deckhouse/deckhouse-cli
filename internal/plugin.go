@@ -36,15 +36,24 @@ type Flag struct {
 	Name string
 }
 
-// Requirements represents plugin dependencies
+// Requirements represents plugin dependencies (v2 schema).
+//
+// v1 schema: flat array of plugin and module requirements
+// v2 schema: structured groups (with matchers anyOf, mandatory, conditional) + deckhouse
 type Requirements struct {
 	Kubernetes KubernetesRequirement
-	Modules    []ModuleRequirement
-	Plugins    []PluginRequirement
+	Deckhouse  DeckhouseRequirement
+	Modules    ModuleRequirementsGroup
+	Plugins    PluginRequirementsGroup
 }
 
 // KubernetesRequirement represents Kubernetes version constraint
 type KubernetesRequirement struct {
+	Constraint string
+}
+
+// DeckhouseRequirement represents a constraint on the Deckhouse cluster version.
+type DeckhouseRequirement struct {
 	Constraint string
 }
 
@@ -58,4 +67,29 @@ type ModuleRequirement struct {
 type PluginRequirement struct {
 	Name       string
 	Constraint string
+}
+
+// AnyOfGroup represents an "at least one of" group of module requirements.
+// Description is used in user-facing error messages.
+type AnyOfGroup struct {
+	Description string
+	Modules     []ModuleRequirement
+}
+
+// PluginRequirementsGroup splits plugin requirements into Mandatory and Conditional.
+//   - Mandatory: the dependent plugin must be installed AND satisfy the constraint.
+//   - Conditional: only enforced if the dependent plugin is installed; otherwise skipped.
+type PluginRequirementsGroup struct {
+	Mandatory   []PluginRequirement
+	Conditional []PluginRequirement
+}
+
+// ModuleRequirementsGroup splits module requirements into Mandatory, Conditional, and AnyOf.
+//   - Mandatory: the module must be in the cluster AND satisfy the constraint.
+//   - Conditional: only enforced if the module is in the cluster.
+//   - AnyOf: at least one module per group must be in the cluster and satisfy its constraint.
+type ModuleRequirementsGroup struct {
+	Mandatory   []ModuleRequirement
+	Conditional []ModuleRequirement
+	AnyOf       []AnyOfGroup
 }

@@ -226,41 +226,18 @@ func ContractToDomain(contract *PluginContract) *internal.Plugin {
 		Flags:       make([]internal.Flag, 0, len(contract.Flags)),
 	}
 
-	// Convert env vars
 	for _, envDTO := range contract.Env {
-		plugin.Env = append(plugin.Env, internal.EnvVar{
-			Name: envDTO.Name,
-		})
+		plugin.Env = append(plugin.Env, internal.EnvVar{Name: envDTO.Name})
 	}
-
-	// Convert flags
 	for _, flagDTO := range contract.Flags {
-		plugin.Flags = append(plugin.Flags, internal.Flag{
-			Name: flagDTO.Name,
-		})
+		plugin.Flags = append(plugin.Flags, internal.Flag{Name: flagDTO.Name})
 	}
 
-	// Convert requirements
 	plugin.Requirements = internal.Requirements{
-		Kubernetes: internal.KubernetesRequirement{
-			Constraint: contract.Requirements.Kubernetes.Constraint,
-		},
-		Modules: make([]internal.ModuleRequirement, 0, len(contract.Requirements.Modules)),
-		Plugins: make([]internal.PluginRequirement, 0, len(contract.Requirements.Plugins)),
-	}
-
-	for _, modDTO := range contract.Requirements.Modules {
-		plugin.Requirements.Modules = append(plugin.Requirements.Modules, internal.ModuleRequirement{
-			Name:       modDTO.Name,
-			Constraint: modDTO.Constraint,
-		})
-	}
-
-	for _, pluginDTO := range contract.Requirements.Plugins {
-		plugin.Requirements.Plugins = append(plugin.Requirements.Plugins, internal.PluginRequirement{
-			Name:       pluginDTO.Name,
-			Constraint: pluginDTO.Constraint,
-		})
+		Kubernetes: internal.KubernetesRequirement{Constraint: contract.Requirements.Kubernetes.Constraint},
+		Deckhouse:  internal.DeckhouseRequirement{Constraint: contract.Requirements.Deckhouse.Constraint},
+		Modules:    moduleGroupToDomain(contract.Requirements.Modules),
+		Plugins:    pluginGroupToDomain(contract.Requirements.Plugins),
 	}
 
 	return plugin
@@ -275,41 +252,97 @@ func DomainToContract(plugin *internal.Plugin) *PluginContract {
 		Env:         make([]EnvVarDTO, 0, len(plugin.Env)),
 		Flags:       make([]FlagDTO, 0, len(plugin.Flags)),
 		Requirements: RequirementsDTO{
-			Kubernetes: KubernetesRequirementDTO{
-				Constraint: plugin.Requirements.Kubernetes.Constraint,
-			},
-			Modules: make([]ModuleRequirementDTO, 0, len(plugin.Requirements.Modules)),
-			Plugins: make([]PluginRequirementDTO, 0, len(plugin.Requirements.Plugins)),
+			Kubernetes: KubernetesRequirementDTO{Constraint: plugin.Requirements.Kubernetes.Constraint},
+			Deckhouse:  DeckhouseRequirementDTO{Constraint: plugin.Requirements.Deckhouse.Constraint},
+			Modules:    moduleGroupToDTO(plugin.Requirements.Modules),
+			Plugins:    pluginGroupToDTO(plugin.Requirements.Plugins),
 		},
 	}
 
 	for _, env := range plugin.Env {
-		contract.Env = append(contract.Env, EnvVarDTO{
-			Name: env.Name,
-		})
+		contract.Env = append(contract.Env, EnvVarDTO{Name: env.Name})
 	}
-
 	for _, flag := range plugin.Flags {
-		contract.Flags = append(contract.Flags, FlagDTO{
-			Name: flag.Name,
-		})
-	}
-
-	for _, mod := range plugin.Requirements.Modules {
-		contract.Requirements.Modules = append(contract.Requirements.Modules, ModuleRequirementDTO{
-			Name:       mod.Name,
-			Constraint: mod.Constraint,
-		})
-	}
-
-	for _, plugin := range plugin.Requirements.Plugins {
-		contract.Requirements.Plugins = append(contract.Requirements.Plugins, PluginRequirementDTO{
-			Name:       plugin.Name,
-			Constraint: plugin.Constraint,
-		})
+		contract.Flags = append(contract.Flags, FlagDTO{Name: flag.Name})
 	}
 
 	return contract
+}
+
+func pluginGroupToDomain(g PluginRequirementsGroupDTO) internal.PluginRequirementsGroup {
+	return internal.PluginRequirementsGroup{
+		Mandatory:   pluginReqsToDomain(g.Mandatory),
+		Conditional: pluginReqsToDomain(g.Conditional),
+	}
+}
+
+func pluginGroupToDTO(g internal.PluginRequirementsGroup) PluginRequirementsGroupDTO {
+	return PluginRequirementsGroupDTO{
+		Mandatory:   pluginReqsToDTO(g.Mandatory),
+		Conditional: pluginReqsToDTO(g.Conditional),
+	}
+}
+
+func pluginReqsToDomain(reqs []PluginRequirementDTO) []internal.PluginRequirement {
+	out := make([]internal.PluginRequirement, 0, len(reqs))
+	for _, r := range reqs {
+		out = append(out, internal.PluginRequirement{Name: r.Name, Constraint: r.Constraint})
+	}
+	return out
+}
+
+func pluginReqsToDTO(reqs []internal.PluginRequirement) []PluginRequirementDTO {
+	out := make([]PluginRequirementDTO, 0, len(reqs))
+	for _, r := range reqs {
+		out = append(out, PluginRequirementDTO{Name: r.Name, Constraint: r.Constraint})
+	}
+	return out
+}
+
+func moduleGroupToDomain(g ModuleRequirementsGroupDTO) internal.ModuleRequirementsGroup {
+	anyOf := make([]internal.AnyOfGroup, 0, len(g.AnyOf))
+	for _, grp := range g.AnyOf {
+		anyOf = append(anyOf, internal.AnyOfGroup{
+			Description: grp.Description,
+			Modules:     moduleReqsToDomain(grp.Modules),
+		})
+	}
+	return internal.ModuleRequirementsGroup{
+		Mandatory:   moduleReqsToDomain(g.Mandatory),
+		Conditional: moduleReqsToDomain(g.Conditional),
+		AnyOf:       anyOf,
+	}
+}
+
+func moduleGroupToDTO(g internal.ModuleRequirementsGroup) ModuleRequirementsGroupDTO {
+	anyOf := make([]AnyOfGroupDTO, 0, len(g.AnyOf))
+	for _, grp := range g.AnyOf {
+		anyOf = append(anyOf, AnyOfGroupDTO{
+			Description: grp.Description,
+			Modules:     moduleReqsToDTO(grp.Modules),
+		})
+	}
+	return ModuleRequirementsGroupDTO{
+		Mandatory:   moduleReqsToDTO(g.Mandatory),
+		Conditional: moduleReqsToDTO(g.Conditional),
+		AnyOf:       anyOf,
+	}
+}
+
+func moduleReqsToDomain(reqs []ModuleRequirementDTO) []internal.ModuleRequirement {
+	out := make([]internal.ModuleRequirement, 0, len(reqs))
+	for _, r := range reqs {
+		out = append(out, internal.ModuleRequirement{Name: r.Name, Constraint: r.Constraint})
+	}
+	return out
+}
+
+func moduleReqsToDTO(reqs []internal.ModuleRequirement) []ModuleRequirementDTO {
+	out := make([]ModuleRequirementDTO, 0, len(reqs))
+	for _, r := range reqs {
+		out = append(out, ModuleRequirementDTO{Name: r.Name, Constraint: r.Constraint})
+	}
+	return out
 }
 
 // ListPlugins lists all available plugin names from the registry

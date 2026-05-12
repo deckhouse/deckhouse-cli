@@ -190,7 +190,7 @@ func (pc *PluginsCommand) validatePluginConflicts(plugin *internal.Plugin) error
 }
 
 func validatePluginConflict(plugin *internal.Plugin, installedPlugin *internal.Plugin) error {
-	for _, requirement := range installedPlugin.Requirements.Plugins {
+	for _, requirement := range installedPlugin.Requirements.Plugins.Mandatory {
 		// installed plugin requirement is the same as the plugin we are validating
 		if requirement.Name == plugin.Name {
 			constraint, err := semver.NewConstraint(requirement.Constraint)
@@ -219,7 +219,7 @@ func validatePluginConflict(plugin *internal.Plugin, installedPlugin *internal.P
 func (pc *PluginsCommand) validatePluginRequirement(plugin *internal.Plugin) (FailedConstraints, error) {
 	result := make(FailedConstraints)
 
-	for _, pluginRequirement := range plugin.Requirements.Plugins {
+	for _, pluginRequirement := range plugin.Requirements.Plugins.Mandatory {
 		// check if plugin is installed
 		installed, err := pc.checkInstalled(pluginRequirement.Name)
 		if err != nil {
