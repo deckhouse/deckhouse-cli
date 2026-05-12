@@ -19,9 +19,10 @@ package plugins
 import (
 	"fmt"
 	"os"
-	"path"
 
 	"github.com/spf13/cobra"
+
+	"github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/layout"
 )
 
 func (pc *PluginsCommand) pluginsRemoveCommand() *cobra.Command {
@@ -35,7 +36,7 @@ func (pc *PluginsCommand) pluginsRemoveCommand() *cobra.Command {
 			pluginName := args[0]
 			fmt.Printf("Removing plugin: %s\n", pluginName)
 
-			pluginDir := path.Join(pc.pluginDirectory, "plugins", pluginName)
+			pluginDir := layout.PluginDir(pc.pluginDirectory, pluginName)
 			fmt.Printf("Removing plugin from: %s\n", pluginDir)
 
 			err := os.RemoveAll(pluginDir)
@@ -45,7 +46,7 @@ func (pc *PluginsCommand) pluginsRemoveCommand() *cobra.Command {
 
 			fmt.Println("Cleaning up plugin files...")
 
-			os.Remove(path.Join(pc.pluginDirectory, "cache", "contracts", pluginName+".json"))
+			os.Remove(layout.ContractFile(pc.pluginDirectory, pluginName))
 
 			fmt.Printf("✓ Plugin '%s' successfully removed!\n", pluginName)
 
@@ -67,7 +68,7 @@ func (pc *PluginsCommand) pluginsRemoveAllCommand() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			fmt.Println("Removing all installed plugins...")
 
-			plugins, err := os.ReadDir(path.Join(pc.pluginDirectory, "plugins"))
+			plugins, err := os.ReadDir(layout.PluginsRoot(pc.pluginDirectory))
 			if err != nil {
 				return fmt.Errorf("failed to read plugins directory: %w", err)
 			}
@@ -75,7 +76,7 @@ func (pc *PluginsCommand) pluginsRemoveAllCommand() *cobra.Command {
 			fmt.Println("Found", len(plugins), "plugins to remove:")
 
 			for _, plugin := range plugins {
-				pluginDir := path.Join(pc.pluginDirectory, "plugins", plugin.Name())
+				pluginDir := layout.PluginDir(pc.pluginDirectory, plugin.Name())
 				fmt.Printf("Removing plugin from: %s\n", pluginDir)
 
 				err := os.RemoveAll(pluginDir)
@@ -85,7 +86,7 @@ func (pc *PluginsCommand) pluginsRemoveAllCommand() *cobra.Command {
 
 				fmt.Printf("Cleaning up plugin files for '%s'...\n", plugin.Name())
 
-				os.Remove(path.Join(pc.pluginDirectory, "cache", "contracts", plugin.Name()+".json"))
+				os.Remove(layout.ContractFile(pc.pluginDirectory, plugin.Name()))
 
 				fmt.Printf("✓ Plugin '%s' successfully removed!\n", plugin.Name())
 			}

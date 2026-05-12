@@ -24,19 +24,19 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path"
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
+	"github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/layout"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 // getInstalledPluginContract reads the cached contract from
 // <plugin-dir>/cache/contracts/<plugin>.json and converts it to a domain object.
 func (pc *PluginsCommand) getInstalledPluginContract(pluginName string) (*internal.Plugin, error) {
-	contractFile := path.Join(pc.pluginDirectory, "cache", "contracts", pluginName+".json")
+	contractFile := layout.ContractFile(pc.pluginDirectory, pluginName)
 
 	file, err := os.Open(contractFile)
 	if err != nil {
@@ -57,7 +57,7 @@ func (pc *PluginsCommand) getInstalledPluginContract(pluginName string) (*intern
 // getInstalledPluginVersion runs the installed plugin binary with "--version"
 // (or "version" as fallback) and parses the output as a semver value.
 func (pc *PluginsCommand) getInstalledPluginVersion(pluginName string) (*semver.Version, error) {
-	pluginBinaryPath := path.Join(pc.pluginDirectory, "plugins", pluginName, "current")
+	pluginBinaryPath := layout.CurrentLinkPath(pc.pluginDirectory, pluginName)
 	cmd := exec.Command(pluginBinaryPath, "--version")
 
 	output, err := cmd.Output()
@@ -162,7 +162,7 @@ func (pc *PluginsCommand) validateRequirements(plugin *internal.Plugin) (FailedC
 
 // check that installing version not make conflict with existing plugins requirements
 func (pc *PluginsCommand) validatePluginConflicts(plugin *internal.Plugin) error {
-	contractDir, err := os.ReadDir(path.Join(pc.pluginDirectory, "cache", "contracts"))
+	contractDir, err := os.ReadDir(layout.ContractsDir(pc.pluginDirectory))
 	// if no plugins installed, nothing to conflict
 	if err != nil && errors.Is(err, os.ErrNotExist) {
 		pc.logger.Debug("failed to read contract directory", slog.String("error", err.Error()))
@@ -173,7 +173,7 @@ func (pc *PluginsCommand) validatePluginConflicts(plugin *internal.Plugin) error
 	}
 
 	for _, contractFile := range contractDir {
-		pluginName := strings.TrimSuffix(contractFile.Name(), ".json")
+		pluginName := strings.TrimSuffix(contractFile.Name(), layout.ContractFileExt)
 
 		contract, err := pc.getInstalledPluginContract(pluginName)
 		if err != nil {

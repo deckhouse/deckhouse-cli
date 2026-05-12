@@ -20,7 +20,6 @@ import (
 	"errors"
 	"log/slog"
 	"os"
-	"path"
 
 	"github.com/spf13/cobra"
 
@@ -28,6 +27,7 @@ import (
 	client "github.com/deckhouse/deckhouse/pkg/registry"
 
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/flags"
+	"github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/layout"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -59,18 +59,16 @@ func NewCommand(logger *dkplog.Logger) *cobra.Command {
 			// init plugin services for subcommands after flags are parsed
 			pc.InitPluginServices()
 
-			err := os.MkdirAll(flags.DeckhousePluginsDir+"/plugins", 0755)
+			err := os.MkdirAll(layout.PluginsRoot(flags.DeckhousePluginsDir), 0755)
 			// if permission failed
 			if errors.Is(err, os.ErrPermission) {
 				pc.logger.Debug("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", flags.DeckhousePluginsDir), dkplog.Err(err))
 
-				homeDir, err := os.UserHomeDir()
+				pc.pluginDirectory, err = layout.HomeFallbackPath()
 				if err != nil {
 					logger.Debug("failed to receive home dir to create plugins dir", slog.String("error", err.Error()))
 					return
 				}
-
-				pc.pluginDirectory = path.Join(homeDir, ".deckhouse-cli")
 			}
 		},
 	}

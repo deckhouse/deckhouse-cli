@@ -22,14 +22,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path"
 	"path/filepath"
-	"strconv"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
+	"github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/layout"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -141,12 +140,14 @@ func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName string, 
 	return pc.installPlugin(ctx, pluginName, installVersion, options.resolvePluginsConflicts)
 }
 
-// pluginPaths bundles the three filesystem locations an install operates on.
+// pluginPaths bundles the filesystem locations an install operates on.
 // Created once by preparePluginDirs and threaded through the install pipeline.
 type pluginPaths struct {
-	pluginDir  string // <plugin-dir>/plugins/<name>
-	versionDir string // <plugin-dir>/plugins/<name>/v<major>
-	binaryPath string // <plugin-dir>/plugins/<name>/v<major>/<name>
+	pluginDir   string // <plugin-dir>/plugins/<name>
+	versionDir  string // <plugin-dir>/plugins/<name>/v<major>
+	binaryPath  string // <plugin-dir>/plugins/<name>/v<major>/<name>
+	lockPath    string // <plugin-dir>/plugins/<name>/v<major>/<name>.lock
+	currentLink string // <plugin-dir>/plugins/<name>/current
 }
 
 // installPlugin is the install pipeline orchestrator. Each step delegates to
@@ -158,7 +159,7 @@ func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, 
 		return err
 	}
 
-	release, err := pc.acquireInstallLock(paths.versionDir, pluginName)
+	release, err := pc.acquireInstallLock(paths.lockPath)
 	if err != nil {
 		return err
 	}
@@ -194,37 +195,31 @@ func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, 
 }
 
 // preparePluginDirs creates plugins/<name>/v<major> on disk and returns the
-// three paths derived from <pluginName, version> used by the rest of the pipeline.
+// paths derived from <pluginName, version> used by the rest of the pipeline.
 func (pc *PluginsCommand) preparePluginDirs(pluginName string, version *semver.Version) (pluginPaths, error) {
-	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin
-	pluginDir := path.Join(pc.pluginDirectory, "plugins", pluginName)
-	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+	major := int(version.Major())
+	paths := pluginPaths{
+		pluginDir:   layout.PluginDir(pc.pluginDirectory, pluginName),
+		versionDir:  layout.VersionDir(pc.pluginDirectory, pluginName, major),
+		binaryPath:  layout.BinaryPath(pc.pluginDirectory, pluginName, major),
+		lockPath:    layout.LockPath(pc.pluginDirectory, pluginName, major),
+		currentLink: layout.CurrentLinkPath(pc.pluginDirectory, pluginName),
+	}
+
+	if err := os.MkdirAll(paths.pluginDir, 0755); err != nil {
+		return pluginPaths{}, fmt.Errorf("failed to create plugin directory: %w", err)
+	}
+	if err := os.MkdirAll(paths.versionDir, 0755); err != nil {
 		return pluginPaths{}, fmt.Errorf("failed to create plugin directory: %w", err)
 	}
 
-	majorVersion := strconv.Itoa(int(version.Major()))
-
-	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1
-	versionDir := path.Join(pluginDir, "v"+majorVersion)
-	if err := os.MkdirAll(versionDir, 0755); err != nil {
-		return pluginPaths{}, fmt.Errorf("failed to create plugin directory: %w", err)
-	}
-
-	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1/example-plugin
-	return pluginPaths{
-		pluginDir:  pluginDir,
-		versionDir: versionDir,
-		binaryPath: path.Join(versionDir, pluginName),
-	}, nil
+	return paths, nil
 }
 
-// acquireInstallLock creates <versionDir>/<name>.lock; if the lock already
+// acquireInstallLock creates the lock file at lockFilePath; if it already
 // exists, returns an error without touching it. The caller must invoke the
 // returned release func when finished (typically via defer).
-func (pc *PluginsCommand) acquireInstallLock(versionDir, pluginName string) (func(), error) {
-	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/v1/example-plugin.lock
-	lockFilePath := path.Join(versionDir, pluginName+".lock")
-
+func (pc *PluginsCommand) acquireInstallLock(lockFilePath string) (func(), error) {
 	_, err := os.Stat(lockFilePath)
 	if err == nil {
 		// File exists, plugin is locked
@@ -318,16 +313,14 @@ func (pc *PluginsCommand) downloadAndExtract(ctx context.Context, pluginName str
 // linkCurrent (re)points <pluginDir>/current to the freshly installed binary
 // using an absolute target path.
 func (pc *PluginsCommand) linkCurrent(paths pluginPaths) error {
-	// example path: /opt/deckhouse/lib/deckhouse-cli/plugins/example-plugin/current
-	currentSymlink := path.Join(paths.pluginDir, "current")
-	_ = os.Remove(currentSymlink)
+	_ = os.Remove(paths.currentLink)
 
 	absPath, err := filepath.Abs(paths.binaryPath)
 	if err != nil {
 		return fmt.Errorf("failed to compute absolute path: %w", err)
 	}
 
-	if err := os.Symlink(absPath, currentSymlink); err != nil {
+	if err := os.Symlink(absPath, paths.currentLink); err != nil {
 		return fmt.Errorf("failed to create symlink: %w", err)
 	}
 	return nil
@@ -337,16 +330,12 @@ func (pc *PluginsCommand) linkCurrent(paths pluginPaths) error {
 // <plugin-dir>/cache/contracts/<name>.json for later lookups by
 // validatePluginConflicts and `d8 plugins list`.
 func (pc *PluginsCommand) cacheContract(pluginName string, plugin *internal.Plugin) error {
-	// example path: /opt/deckhouse/lib/deckhouse-cli/cache/contracts
-	contractDir := path.Join(pc.pluginDirectory, "cache", "contracts")
-	if err := os.MkdirAll(contractDir, 0755); err != nil {
+	if err := os.MkdirAll(layout.ContractsDir(pc.pluginDirectory), 0755); err != nil {
 		return fmt.Errorf("failed to create contract directory: %w", err)
 	}
 
-	// example path: /opt/deckhouse/lib/deckhouse-cli/cache/contracts/example-plugin.json
-	contractFilePath := path.Join(contractDir, pluginName+".json")
 	contract := service.DomainToContract(plugin)
-	contractFile, err := os.OpenFile(contractFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	contractFile, err := os.OpenFile(layout.ContractFile(pc.pluginDirectory, pluginName), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open contract file: %w", err)
 	}

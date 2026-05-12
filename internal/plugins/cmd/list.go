@@ -21,9 +21,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path"
 
 	"github.com/spf13/cobra"
+
+	"github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/layout"
 )
 
 // pluginDisplayInfo holds all information needed to display a plugin
@@ -100,7 +101,7 @@ func (pc *PluginsCommand) preparePluginsListData(ctx context.Context, showInstal
 
 // fetchInstalledPlugins retrieves installed plugins from filesystem
 func (pc *PluginsCommand) fetchInstalledPlugins() ([]pluginDisplayInfo, error) {
-	plugins, err := os.ReadDir(path.Join(pc.pluginDirectory, "plugins"))
+	plugins, err := os.ReadDir(layout.PluginsRoot(pc.pluginDirectory))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read plugins directory: %w", err)
 	}

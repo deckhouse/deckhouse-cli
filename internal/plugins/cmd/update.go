@@ -19,9 +19,10 @@ package plugins
 import (
 	"fmt"
 	"os"
-	"path"
 
 	"github.com/spf13/cobra"
+
+	"github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/layout"
 )
 
 func (pc *PluginsCommand) pluginsUpdateCommand() *cobra.Command {
@@ -56,7 +57,7 @@ func (pc *PluginsCommand) pluginsUpdateAllCommand() *cobra.Command {
 
 			fmt.Println("Updating all installed plugins...")
 
-			plugins, err := os.ReadDir(path.Join(pc.pluginDirectory, "plugins"))
+			plugins, err := os.ReadDir(layout.PluginsRoot(pc.pluginDirectory))
 			if err != nil {
 				return fmt.Errorf("failed to read plugins directory: %w", err)
 			}
