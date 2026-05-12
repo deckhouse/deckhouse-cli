@@ -18,6 +18,7 @@ package plugins
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -48,6 +49,37 @@ func NewPluginsCommand(logger *dkplog.Logger) *PluginsCommand {
 	}
 }
 
+// ensureInstallRoot creates <pluginDirectory>/plugins; on permission denied
+// falls back to ~/.deckhouse-cli, updates pc.pluginDirectory, and retries.
+func (pc *PluginsCommand) ensureInstallRoot() error {
+	err := os.MkdirAll(layout.PluginsRoot(pc.pluginDirectory), 0755)
+	if !errors.Is(err, os.ErrPermission) {
+		return err
+	}
+	pc.logger.Debug("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'",
+		slog.String("was", pc.pluginDirectory), dkplog.Err(err))
+	fallback, ferr := layout.HomeFallbackPath()
+	if ferr != nil {
+		return fmt.Errorf("home fallback: %w", ferr)
+	}
+	pc.pluginDirectory = fallback
+	return os.MkdirAll(layout.PluginsRoot(pc.pluginDirectory), 0755)
+}
+
+// cachedDescription returns the description from the on-disk plugin contract
+// cache, or "" if the cache is missing or unreadable.
+func (pc *PluginsCommand) cachedDescription(pluginName string) string {
+	contract, err := service.GetPluginContractFromFile(layout.ContractFile(pc.pluginDirectory, pluginName))
+	if err != nil {
+		pc.logger.Debug("failed to get plugin contract from cache", slog.String("error", err.Error()))
+		return ""
+	}
+	if contract == nil {
+		return ""
+	}
+	return contract.Description
+}
+
 func NewCommand(logger *dkplog.Logger) *cobra.Command {
 	pc := NewPluginsCommand(logger)
 
@@ -58,17 +90,8 @@ func NewCommand(logger *dkplog.Logger) *cobra.Command {
 		PersistentPreRun: func(_ *cobra.Command, _ []string) {
 			// init plugin services for subcommands after flags are parsed
 			pc.InitPluginServices()
-
-			err := os.MkdirAll(layout.PluginsRoot(flags.DeckhousePluginsDir), 0755)
-			// if permission failed
-			if errors.Is(err, os.ErrPermission) {
-				pc.logger.Debug("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", flags.DeckhousePluginsDir), dkplog.Err(err))
-
-				pc.pluginDirectory, err = layout.HomeFallbackPath()
-				if err != nil {
-					logger.Debug("failed to receive home dir to create plugins dir", slog.String("error", err.Error()))
-					return
-				}
+			if err := pc.ensureInstallRoot(); err != nil {
+				pc.logger.Warn("failed to ensure plugin root directory", slog.String("error", err.Error()))
 			}
 		},
 	}

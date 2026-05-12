@@ -16,19 +16,18 @@ limitations under the License.
 package plugins
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
+	"github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/layout"
 )
 
 const (
@@ -37,95 +36,64 @@ const (
 )
 
 // TODO: add options pattern
-func NewPluginCommand(commandName string, description string, aliases []string, logger *dkplog.Logger) *cobra.Command {
+func NewPluginCommand(commandName, description string, aliases []string, logger *dkplog.Logger) *cobra.Command {
 	pc := NewPluginsCommand(logger.Named("plugins-command"))
 
-	pluginContractFilePath := path.Join(pc.pluginDirectory, "cache", "contracts", "system.json")
-	pluginContract, err := service.GetPluginContractFromFile(pluginContractFilePath)
-	if err != nil {
-		logger.Debug("failed to get plugin contract from cache", slog.String("error", err.Error()))
-	}
-
-	if pluginContract != nil {
-		description = pluginContract.Description
-	}
-
-	// to check we can create directories here
-	// we try to create root plugins folder
-	err = os.MkdirAll(pc.pluginDirectory+"/plugins", 0755)
-	// if permission failed
-	if errors.Is(err, os.ErrPermission) {
-		pc.logger.Debug("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'", slog.String("new_path", pc.pluginDirectory), dkplog.Err(err))
-
-		pc.pluginDirectory, err = os.UserHomeDir()
-		if err != nil {
-			logger.Debug("failed to receive home dir to create plugins dir", slog.String("error", err.Error()))
-			return nil
-		}
-
-		pc.pluginDirectory = path.Join(pc.pluginDirectory, ".deckhouse-cli")
-	}
-
-	if err != nil {
-		logger.Warn("failed to create plugin root directory", slog.String("error", err.Error()))
+	if err := pc.ensureInstallRoot(); err != nil {
+		logger.Warn("failed to ensure plugin root directory", slog.String("error", err.Error()))
 		return nil
 	}
+	if cached := pc.cachedDescription(commandName); cached != "" {
+		description = cached
+	}
 
-	systemCmd := &cobra.Command{
+	return &cobra.Command{
 		Use:                commandName,
 		Short:              description,
 		Aliases:            aliases,
 		Long:               description,
 		DisableFlagParsing: true,
-		PreRun: func(_ *cobra.Command, _ []string) {
-			// init plugin services for subcommands after flags are parsed
-			pc.InitPluginServices()
-		},
+		PreRun:             func(_ *cobra.Command, _ []string) { pc.InitPluginServices() },
 		Run: func(cmd *cobra.Command, args []string) {
-			installed, err := pc.checkInstalled(commandName)
-			if err != nil {
-				fmt.Println("Error checking installed:", err)
-				os.Exit(1)
-			}
-
-			if !installed {
-				fmt.Println("Not installed, installing...")
-				err = pc.InstallPlugin(cmd.Context(), commandName)
-				if err != nil {
-					fmt.Println("Error installing:", err)
-					os.Exit(1)
-				}
-				fmt.Println("Installed successfully")
-			}
-
-			pluginPath := path.Join(pc.pluginDirectory, "plugins", commandName)
-			pluginBinaryPath := path.Join(pluginPath, "current")
-			absPath, err := filepath.Abs(pluginBinaryPath)
-			if err != nil {
-				logger.Warn("failed to compute absolute path", slog.String("error", err.Error()))
-				os.Exit(1)
-			}
-
-			logger.Debug("Executing plugin", slog.Any("args", args))
-
-			command := exec.CommandContext(cmd.Context(), absPath, args...)
-			command.Stdout = os.Stdout
-			command.Stderr = os.Stderr
-
-			err = command.Run()
-			if err != nil {
-				logger.Warn("Failed to run plugin", slog.String("error", err.Error()))
+			if err := pc.runInstalledPlugin(cmd.Context(), commandName, args); err != nil {
+				logger.Warn("plugin failed", slog.String("error", err.Error()))
 				os.Exit(1)
 			}
 		},
 	}
+}
 
-	return systemCmd
+// runInstalledPlugin ensures the plugin is installed and execs its binary with args.
+// stdin/stdout/stderr are inherited from the current process.
+func (pc *PluginsCommand) runInstalledPlugin(ctx context.Context, pluginName string, args []string) error {
+	installed, err := pc.checkInstalled(pluginName)
+	if err != nil {
+		return fmt.Errorf("check installed: %w", err)
+	}
+	if !installed {
+		fmt.Println("Not installed, installing...")
+		if err := pc.InstallPlugin(ctx, pluginName); err != nil {
+			return fmt.Errorf("install: %w", err)
+		}
+		fmt.Println("Installed successfully")
+	}
+
+	absPath, err := filepath.Abs(layout.CurrentLinkPath(pc.pluginDirectory, pluginName))
+	if err != nil {
+		return fmt.Errorf("absolute path: %w", err)
+	}
+
+	pc.logger.Debug("Executing plugin", slog.String("plugin", pluginName), slog.Any("args", args))
+	cmd := exec.CommandContext(ctx, absPath, args...)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("plugin run: %w", err)
+	}
+	return nil
 }
 
 func (pc *PluginsCommand) checkInstalled(commandName string) (bool, error) {
-	installedFile := path.Join(pc.pluginDirectory, "plugins", commandName, "current")
-	absPath, err := filepath.Abs(installedFile)
+	absPath, err := filepath.Abs(layout.CurrentLinkPath(pc.pluginDirectory, commandName))
 	if err != nil {
 		return false, fmt.Errorf("failed to compute absolute path: %w", err)
 	}
