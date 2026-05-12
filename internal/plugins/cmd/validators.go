@@ -151,6 +151,15 @@ func (pc *PluginsCommand) validateRequirements(plugin *internal.Plugin) (FailedC
 		return nil, fmt.Errorf("plugin requirements (conditional): %w", err)
 	}
 
+	// Cluster-side requirements - currently log-only, no enforcement.
+	// Real validation lands when cluster connectivity is added.
+	if err := pc.validateKubernetesRequirement(plugin); err != nil {
+		return nil, fmt.Errorf("kubernetes requirement: %w", err)
+	}
+	if err := pc.validateDeckhouseRequirement(plugin); err != nil {
+		return nil, fmt.Errorf("deckhouse requirement: %w", err)
+	}
+
 	pc.logger.Debug("validating module requirements", slog.String("plugin", plugin.Name))
 	if err := pc.validateModuleRequirement(plugin); err != nil {
 		return nil, fmt.Errorf("module requirements: %w", err)
@@ -304,7 +313,70 @@ func (pc *PluginsCommand) validatePluginRequirementConditional(plugin *internal.
 	return nil
 }
 
-func (pc *PluginsCommand) validateModuleRequirement(_ *internal.Plugin) error {
-	// TODO: Implement module requirement validation
+// validateKubernetesRequirement is a log-only stub (yet).
+//
+// For Kubernetes requirement:
+// - if the constraint is empty, skip silently
+// - if the constraint is not empty, log a warning
+func (pc *PluginsCommand) validateKubernetesRequirement(plugin *internal.Plugin) error {
+	if plugin.Requirements.Kubernetes.Constraint == "" {
+		return nil
+	}
+	pc.logger.Warn("plugin declares a Kubernetes version requirement but enforcement is not implemented yet",
+		slog.String("plugin", plugin.Name),
+		slog.String("constraint", plugin.Requirements.Kubernetes.Constraint),
+	)
+	return nil
+}
+
+// validateDeckhouseRequirement is a log-only stub. See validateKubernetesRequirement
+// for rationale; enforcement will land once Deckhouse version discovery is in place.
+func (pc *PluginsCommand) validateDeckhouseRequirement(plugin *internal.Plugin) error {
+	if plugin.Requirements.Deckhouse.Constraint == "" {
+		return nil
+	}
+	pc.logger.Warn("plugin declares a Deckhouse version requirement but enforcement is not implemented yet",
+		slog.String("plugin", plugin.Name),
+		slog.String("constraint", plugin.Requirements.Deckhouse.Constraint),
+	)
+	return nil
+}
+
+// validateModuleRequirement is a log-only stub. Mandatory, Conditional and
+// AnyOf sections are all surfaced via Warn so authors and operators see
+// the declared expectations even though d8 does not yet inspect the cluster
+// to verify them.
+func (pc *PluginsCommand) validateModuleRequirement(plugin *internal.Plugin) error {
+	mods := plugin.Requirements.Modules
+	if len(mods.Mandatory) == 0 && len(mods.Conditional) == 0 && len(mods.AnyOf) == 0 {
+		return nil
+	}
+
+	for _, m := range mods.Mandatory {
+		pc.logger.Warn("plugin declares a mandatory module requirement but enforcement is not implemented yet",
+			slog.String("plugin", plugin.Name),
+			slog.String("module", m.Name),
+			slog.String("constraint", m.Constraint),
+		)
+	}
+	for _, m := range mods.Conditional {
+		pc.logger.Warn("plugin declares a conditional module requirement but enforcement is not implemented yet",
+			slog.String("plugin", plugin.Name),
+			slog.String("module", m.Name),
+			slog.String("constraint", m.Constraint),
+		)
+	}
+	for i, grp := range mods.AnyOf {
+		names := make([]string, 0, len(grp.Modules))
+		for _, m := range grp.Modules {
+			names = append(names, m.Name)
+		}
+		pc.logger.Warn("plugin declares an anyOf module group but enforcement is not implemented yet",
+			slog.String("plugin", plugin.Name),
+			slog.Int("group_index", i),
+			slog.String("group_description", grp.Description),
+			slog.Any("modules", names),
+		)
+	}
 	return nil
 }
