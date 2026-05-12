@@ -16,11 +16,6 @@ limitations under the License.
 
 package service
 
-import (
-	"encoding/json"
-	"fmt"
-)
-
 // PluginContract represents the plugin contract metadata (DTO for JSON unmarshaling)
 type PluginContract struct {
 	Name         string          `json:"name"`
@@ -80,53 +75,16 @@ type AnyOfGroupDTO struct {
 }
 
 // PluginRequirementsGroupDTO splits plugin requirements into Mandatory and
-// Conditional sections. v1 flat arrays unmarshal into .Mandatory.
+// Conditional sections.
 type PluginRequirementsGroupDTO struct {
 	Mandatory   []PluginRequirementDTO `json:"mandatory,omitempty"`
 	Conditional []PluginRequirementDTO `json:"conditional,omitempty"`
 }
 
-// UnmarshalJSON accepts both v2 object form and v1 flat-array form.
-// v1 array contents are placed in .Mandatory.
-func (g *PluginRequirementsGroupDTO) UnmarshalJSON(data []byte) error {
-	type alias PluginRequirementsGroupDTO
-	var asGroup alias
-	if err := json.Unmarshal(data, &asGroup); err == nil {
-		*g = PluginRequirementsGroupDTO(asGroup)
-		return nil
-	}
-	var asArray []PluginRequirementDTO
-	if err := json.Unmarshal(data, &asArray); err == nil {
-		g.Mandatory = asArray
-		g.Conditional = nil
-		return nil
-	}
-	return fmt.Errorf("plugins requirements: expected array (v1) or object (v2)")
-}
-
 // ModuleRequirementsGroupDTO splits module requirements into Mandatory,
-// Conditional, and AnyOf sections. v1 flat arrays unmarshal into .Mandatory.
+// Conditional, and AnyOf sections.
 type ModuleRequirementsGroupDTO struct {
 	Mandatory   []ModuleRequirementDTO `json:"mandatory,omitempty"`
 	Conditional []ModuleRequirementDTO `json:"conditional,omitempty"`
 	AnyOf       []AnyOfGroupDTO        `json:"anyOf,omitempty"`
-}
-
-// UnmarshalJSON accepts both v2 object form and v1 flat-array form.
-// v1 array contents are placed in .Mandatory.
-func (g *ModuleRequirementsGroupDTO) UnmarshalJSON(data []byte) error {
-	type alias ModuleRequirementsGroupDTO
-	var asGroup alias
-	if err := json.Unmarshal(data, &asGroup); err == nil {
-		*g = ModuleRequirementsGroupDTO(asGroup)
-		return nil
-	}
-	var asArray []ModuleRequirementDTO
-	if err := json.Unmarshal(data, &asArray); err == nil {
-		g.Mandatory = asArray
-		g.Conditional = nil
-		g.AnyOf = nil
-		return nil
-	}
-	return fmt.Errorf("modules requirements: expected array (v1) or object (v2)")
 }

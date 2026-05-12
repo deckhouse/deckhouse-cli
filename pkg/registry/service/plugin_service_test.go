@@ -168,7 +168,7 @@ func TestGetPluginContract_Success(t *testing.T) {
 	// Arrange
 	mc := minimock.NewController(t)
 
-	contractJSON := `{"name": "test-plugin", "version": "v1.0.0", "description": "A test plugin", "env": [{"name": "TEST_ENV"}], "flags": [{"name": "--test-flag"}], "requirements": {"kubernetes": {"constraint": ">= 1.26"}, "modules": [{"name": "test-module", "constraint": ">= 1.0.0"}]}}`
+	contractJSON := `{"name": "test-plugin", "version": "v1.0.0", "description": "A test plugin", "env": [{"name": "TEST_ENV"}], "flags": [{"name": "--test-flag"}], "requirements": {"kubernetes": {"constraint": ">= 1.26"}, "modules": {"mandatory": [{"name": "test-module", "constraint": ">= 1.0.0"}]}}}`
 	contractB64 := base64.StdEncoding.EncodeToString([]byte(contractJSON))
 	manifestJSON := `{"annotations": {"` + service.PluginContractAnnotation + `": "` + contractB64 + `"}}`
 
@@ -221,7 +221,6 @@ func TestGetPluginContract_Success(t *testing.T) {
 		t.Errorf("Expected kubernetes constraint '>= 1.26', got '%s'", plugin.Requirements.Kubernetes.Constraint)
 	}
 
-	// v1-format flat array unmarshals into .Mandatory via smart-unmarshal.
 	if len(plugin.Requirements.Modules.Mandatory) != 1 {
 		t.Fatalf("Expected 1 mandatory module requirement, got %d", len(plugin.Requirements.Modules.Mandatory))
 	}
