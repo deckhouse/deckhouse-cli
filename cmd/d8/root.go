@@ -38,6 +38,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/cmd/commands"
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
+	cr "github.com/deckhouse/deckhouse-cli/internal/cr/cmd"
 	data "github.com/deckhouse/deckhouse-cli/internal/data/cmd"
 	iam "github.com/deckhouse/deckhouse-cli/internal/iam/cmd"
 	iamuser "github.com/deckhouse/deckhouse-cli/internal/iam/user/cmd"
@@ -107,6 +108,7 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(backup.NewCommand())
 	r.cmd.AddCommand(data.NewCommand())
 	r.cmd.AddCommand(mirror.NewCommand())
+	r.cmd.AddCommand(cr.NewCommand())
 	r.cmd.AddCommand(status.NewCommand())
 	r.cmd.AddCommand(iam.NewCommand())
 	// Backward-compatibility shim for the four UserOperation commands that
