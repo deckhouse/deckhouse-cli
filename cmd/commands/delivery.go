@@ -36,6 +36,13 @@ func NewDeliveryCommand() (*cobra.Command, context.Context) {
 
 	ctx := logging.WithLogger(terminationCtx)
 
+	const werfAlias = "dk"
+
+	if err := setWerfSelfInvocationCommand(werfAlias); err != nil {
+		graceful.Terminate(ctx, err, 1)
+		return nil, ctx
+	}
+
 	werfRootCmd, err := werfroot.ConstructRootCmd(ctx)
 	if err != nil {
 		graceful.Terminate(ctx, err, 1)
@@ -43,8 +50,8 @@ func NewDeliveryCommand() (*cobra.Command, context.Context) {
 	}
 
 	werfRootCmd.Use = "delivery-kit"
-	werfRootCmd.Aliases = []string{"dk"}
-	werfRootCmd = ReplaceCommandName("werf", "d8 dk", werfRootCmd)
+	werfRootCmd.Aliases = []string{werfAlias}
+	werfRootCmd = ReplaceCommandName("werf", fmt.Sprintf("d8 %s", werfAlias), werfRootCmd)
 	werfRootCmd.Short = "A set of tools for building, distributing, and deploying containerized applications"
 	werfRootCmd.Long = werfRootCmd.Short + "."
 	werfRootCmd.Long += `
@@ -56,6 +63,18 @@ LICENSE NOTE: The Deckhouse Delivery Kit functionality is exclusively available 
 	removeKubectlCmd(werfRootCmd)
 
 	return werfRootCmd, ctx
+}
+
+// setWerfSelfInvocationCommand sets environment variables to ensure werf knows how to call itself
+// (e.g., for "host cleanup" commands in the background).
+// It sets WERF_SELF_INVOCATION_COMMAND to the provided subcommand (e.g., "dk"),
+// while werf will detect the executable path automatically.
+func setWerfSelfInvocationCommand(subcommand string) error {
+	if err := os.Setenv("WERF_SELF_INVOCATION_COMMAND", subcommand); err != nil {
+		return fmt.Errorf("cannot set WERF_SELF_INVOCATION_COMMAND: %w", err)
+	}
+
+	return nil
 }
 
 func removeKubectlCmd(werfRootCmd *cobra.Command) {

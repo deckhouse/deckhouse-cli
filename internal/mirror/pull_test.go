@@ -9,19 +9,18 @@ import (
 	"testing"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	localreg "github.com/deckhouse/deckhouse/pkg/registry"
+	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	localreg "github.com/deckhouse/deckhouse/pkg/registry"
-	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 	localfake "github.com/deckhouse/deckhouse-cli/pkg/fake"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
+	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 // pullStubRootURL matches the default host used by NewRegistryClientStub.
@@ -36,6 +35,12 @@ func newPullService(
 	options *PullServiceOptions,
 ) *PullService {
 	t.Helper()
+	if options == nil {
+		options = &PullServiceOptions{}
+	}
+	if options.BundleDir == "" {
+		options.BundleDir = t.TempDir()
+	}
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 	regSvc := registryservice.NewService(stubClient, pkg.NoEdition, logger)
