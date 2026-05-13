@@ -25,7 +25,7 @@ import (
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 
-	d8flags "github.com/deckhouse/deckhouse-cli/cmd/plugins/flags"
+	d8flags "github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/flags"
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
