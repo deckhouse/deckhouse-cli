@@ -61,10 +61,19 @@ func (l *ImageDownloadList) FillDeckhouseImages(deckhouseVersions []string) {
 	}
 }
 
+// FillForChannels enqueues only release-channel:<channel> aliases (e.g.
+// release-channel:stable). The main Deckhouse and Install repositories are
+// intentionally left out: channel names like "alpha", "stable" or "lts" are
+// just aliases for the corresponding version tag, so pulling <root>:<channel>
+// in addition to <root>:<vX.Y.Z> would duplicate work in the best case and
+// fail in the worst case — e.g. when re-pulling from a registry that received
+// a `d8 mirror push` of a tag-based bundle (release-channel carries every
+// alias propagated by pullDeckhousePlatform, but the main repo only carries
+// version tags). Keeping channel aliases scoped to the release-channel layout
+// removes that whole class of inconsistency between source and intermediate
+// registries.
 func (l *ImageDownloadList) FillForChannels(channels []string) {
 	for _, channel := range channels {
-		l.Deckhouse[l.rootURL+":"+channel] = nil
-		l.DeckhouseInstall[path.Join(l.rootURL, internal.InstallSegment)+":"+channel] = nil
 		key := path.Join(l.rootURL, internal.ReleaseChannelSegment) + ":" + channel
 		if _, exists := l.DeckhouseReleaseChannel[key]; !exists {
 			l.DeckhouseReleaseChannel[key] = nil
