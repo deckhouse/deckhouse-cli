@@ -57,6 +57,17 @@ const (
 	completionMaxItems = 200
 )
 
+// Indirection layer for the two registry calls completion makes. Production
+// uses the real registry package; tests substitute upfake-backed adapters
+// so the suite never stands up an HTTP registry on localhost (which both
+// produced flaky timeouts under parallel `go test ./...` load and pulled
+// in real go-containerregistry transport machinery just to hand back a
+// fixed list of strings).
+var (
+	listCatalogFn = registry.ListCatalog
+	listTagsFn    = registry.ListTags
+)
+
 // errStopPagination breaks ListTags/ListCatalog iteration once we have
 // enough items. Treated as a clean stop, not an error.
 var errStopPagination = errors.New("stop pagination")
@@ -250,7 +261,7 @@ func tryListCatalog(cmd *cobra.Command, host string) []string {
 	opts := buildCompletionOpts(cmd)
 
 	var items []string
-	err := registry.ListCatalog(ctx, host, opts, func(repos []string) error {
+	err := listCatalogFn(ctx, host, opts, func(repos []string) error {
 		items = append(items, repos...)
 		if len(items) >= completionMaxItems {
 			return errStopPagination
@@ -273,7 +284,7 @@ func tryListTags(cmd *cobra.Command, repoRef string) []string {
 	opts := buildCompletionOpts(cmd)
 
 	var items []string
-	err := registry.ListTags(ctx, repoRef, opts, func(tags []string) error {
+	err := listTagsFn(ctx, repoRef, opts, func(tags []string) error {
 		items = append(items, tags...)
 		if len(items) >= completionMaxItems {
 			return errStopPagination
