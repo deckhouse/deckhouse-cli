@@ -38,6 +38,7 @@ D8 provides comprehensive cluster management capabilities:
 | Command | Purpose | Key Features |
 |---------|---------|--------------|
 | [**backup**](internal/backup/) | Backup operations | ETCD snapshots, configuration backups, data export |
+| [**cr**](internal/cr/) | Container registry tool | Pull/push images, list tags & repos, inspect manifests/configs, browse image filesystems |
 | [**mirror**](internal/mirror/) | Module mirroring | Registry operations, image synchronization, air-gapped deployments |
 | [**system**](internal/system/) | System diagnostics | Debug info collection, logs analysis, troubleshooting |
 | **user-operation** | Local user operations | Request `UserOperation` in `user-authn` (ResetPassword/Reset2FA/Lock/Unlock) |

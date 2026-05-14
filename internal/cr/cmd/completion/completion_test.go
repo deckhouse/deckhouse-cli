@@ -17,20 +17,22 @@ limitations under the License.
 package completion
 
 import (
-	"net/http"
-	"net/http/httptest"
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 
-	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/registry"
-	"github.com/google/go-containerregistry/pkg/v1/empty"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/spf13/cobra"
+
+	dkpreg "github.com/deckhouse/deckhouse/pkg/registry"
+	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
+
+	"github.com/deckhouse/deckhouse-cli/internal/cr/internal/registry"
 )
 
 // ---------- parseRef ----------
@@ -104,7 +106,14 @@ func TestNormalizeHost(t *testing.T) {
 	}
 }
 
-// ---------- network completion against in-memory registry ----------
+// ---------- network completion driven through upfake ----------
+//
+// These tests must NOT spin up an in-process HTTP registry. Instead they
+// substitute listTagsFn / listCatalogFn for the duration of the test with
+// thin adapters that delegate to an upfake-backed dkpreg.Client. That keeps
+// the suite hermetic (no localhost ports, no real HTTP, no transport
+// machinery) and immune to timeout flake when the broader `go test ./...`
+// run loads the box.
 
 func newTestCmd() *cobra.Command {
 	// completion functions read --insecure off cmd.Flags(); a leaf cobra.Command
@@ -116,26 +125,157 @@ func newTestCmd() *cobra.Command {
 	return cmd
 }
 
-// pushImage uploads an empty image to the test registry under refStr.
-func pushImage(t *testing.T, refStr string) {
+// fakeRegistryHarness wires the package-level listTagsFn / listCatalogFn
+// to a dkpreg.Client backed by an in-memory upfake.Registry. Each tag and
+// catalog request is also recorded so tests can assert on call counts and
+// the exact host/repo references that production code constructed.
+//
+// The fake registry's host MUST match the host the production code asks
+// about; mismatched hosts surface as "registry not configured" errors,
+// which is exactly the failure mode tryListTags / tryListCatalog must
+// swallow without crashing the shell.
+type fakeRegistryHarness struct {
+	host    string
+	client  dkpreg.Client
+	mu      sync.Mutex
+	tagRefs []string // repoRef args passed to listTagsFn
+	catRefs []string // regRef  args passed to listCatalogFn
+}
+
+// installFakeRegistry creates a fresh upfake-backed registry seeded with
+// the supplied repository -> tag list mapping, and installs adapter
+// implementations of listTagsFn / listCatalogFn for the duration of t.
+//
+// Call shape:
+//
+//	h := installFakeRegistry(t, "registry.example.com", map[string][]string{
+//	    "foo/bar": {"v1", "v2", "latest"},
+//	})
+//
+// The harness restores the production wiring on t.Cleanup.
+func installFakeRegistry(t *testing.T, host string, repoTags map[string][]string) *fakeRegistryHarness {
 	t.Helper()
-	ref, err := name.ParseReference(refStr, name.Insecure)
-	if err != nil {
-		t.Fatalf("parse %s: %v", refStr, err)
+
+	reg := upfake.NewRegistry(host)
+	// One reusable empty image is enough for completion-time tests: only
+	// repository names and tag strings are read by the completer.
+	img := upfake.NewImageBuilder().MustBuild()
+	for repo, tags := range repoTags {
+		for _, tag := range tags {
+			reg.MustAddImage(repo, tag, img)
+		}
 	}
-	if err := remote.Write(ref, empty.Image); err != nil {
-		t.Fatalf("push %s: %v", refStr, err)
+
+	h := &fakeRegistryHarness{
+		host:   host,
+		client: upfake.NewClient(reg),
 	}
+
+	origTags := listTagsFn
+	origCat := listCatalogFn
+
+	listTagsFn = func(ctx context.Context, repoRef string, _ *registry.Options, visit func([]string) error) error {
+		h.mu.Lock()
+		h.tagRefs = append(h.tagRefs, repoRef)
+		h.mu.Unlock()
+
+		scoped, err := h.scope(repoRef)
+		if err != nil {
+			return err
+		}
+		tags, err := scoped.ListTags(ctx)
+		if err != nil {
+			return err
+		}
+		return visit(tags)
+	}
+	listCatalogFn = func(ctx context.Context, regRef string, _ *registry.Options, visit func([]string) error) error {
+		h.mu.Lock()
+		h.catRefs = append(h.catRefs, regRef)
+		h.mu.Unlock()
+
+		scoped, err := h.scope(regRef)
+		if err != nil {
+			return err
+		}
+		repos, err := scoped.ListRepositories(ctx)
+		if err != nil {
+			return err
+		}
+		return visit(repos)
+	}
+
+	t.Cleanup(func() {
+		listTagsFn = origTags
+		listCatalogFn = origCat
+	})
+
+	return h
+}
+
+// scope translates a "host[/repo/path]" string into a dkpreg.Client whose
+// currentPath matches that location. Refs whose host does not match the
+// fake registry's host return an error so the production code's failure
+// path is exercised.
+func (h *fakeRegistryHarness) scope(ref string) (dkpreg.Client, error) {
+	host, repo, _ := strings.Cut(ref, "/")
+	if host == "" {
+		return nil, fmt.Errorf("fakeRegistryHarness: empty registry reference %q", ref)
+	}
+	if host != h.host {
+		return nil, fmt.Errorf("fakeRegistryHarness: host %q is not configured (want %q)", host, h.host)
+	}
+	if repo == "" {
+		// WithSegment() with no args scopes to the host root; ListRepositories
+		// then returns every registered repo.
+		return h.client.WithSegment(), nil
+	}
+	return h.client.WithSegment(strings.Split(repo, "/")...), nil
+}
+
+// tagCalls / catCalls return defensive copies of the recorded refs.
+func (h *fakeRegistryHarness) tagCalls() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, len(h.tagRefs))
+	copy(out, h.tagRefs)
+	return out
+}
+
+func (h *fakeRegistryHarness) catCalls() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, len(h.catRefs))
+	copy(out, h.catRefs)
+	return out
+}
+
+// installForbidNetwork swaps both registry indirections for stubs that
+// fail the test if invoked. Use to assert "the production code must not
+// have touched the registry layer at all" (digest refs, ls-with-tag).
+func installForbidNetwork(t *testing.T) {
+	t.Helper()
+	origTags := listTagsFn
+	origCat := listCatalogFn
+	listTagsFn = func(_ context.Context, repoRef string, _ *registry.Options, _ func([]string) error) error {
+		t.Errorf("listTagsFn must not be called for this case (got repoRef=%q)", repoRef)
+		return errors.New("listTagsFn called unexpectedly")
+	}
+	listCatalogFn = func(_ context.Context, regRef string, _ *registry.Options, _ func([]string) error) error {
+		t.Errorf("listCatalogFn must not be called for this case (got regRef=%q)", regRef)
+		return errors.New("listCatalogFn called unexpectedly")
+	}
+	t.Cleanup(func() {
+		listTagsFn = origTags
+		listCatalogFn = origCat
+	})
 }
 
 func TestImageRef_Tags(t *testing.T) {
-	srv := httptest.NewServer(registry.New())
-	t.Cleanup(srv.Close)
-	host := strings.TrimPrefix(srv.URL, "http://")
-
-	pushImage(t, host+"/foo/bar:v1")
-	pushImage(t, host+"/foo/bar:v2")
-	pushImage(t, host+"/foo/bar:latest")
+	const host = "registry.example.com"
+	h := installFakeRegistry(t, host, map[string][]string{
+		"foo/bar": {"v1", "v2", "latest"},
+	})
 
 	cmd := newTestCmd()
 	got, dir := ImageRef()(cmd, nil, host+"/foo/bar:")
@@ -153,16 +293,21 @@ func TestImageRef_Tags(t *testing.T) {
 	if dir&cobra.ShellCompDirectiveNoFileComp == 0 {
 		t.Errorf("expected NoFileComp directive, got %v", dir)
 	}
+	// Production must forward the parsed host+repo (not the user-typed
+	// trailing ':') to the registry layer, exactly once.
+	if calls := h.tagCalls(); !slices.Equal(calls, []string{host + "/foo/bar"}) {
+		t.Errorf("tagCalls = %v, want [%q]", calls, host+"/foo/bar")
+	}
+	if calls := h.catCalls(); len(calls) != 0 {
+		t.Errorf("ImageRef tag completion must not list the catalog, got %v", calls)
+	}
 }
 
 func TestImageRef_TagPrefix(t *testing.T) {
-	srv := httptest.NewServer(registry.New())
-	t.Cleanup(srv.Close)
-	host := strings.TrimPrefix(srv.URL, "http://")
-
-	pushImage(t, host+"/foo:v1")
-	pushImage(t, host+"/foo:v2")
-	pushImage(t, host+"/foo:rc")
+	const host = "registry.example.com"
+	h := installFakeRegistry(t, host, map[string][]string{
+		"foo": {"v1", "v2", "rc"},
+	})
 
 	cmd := newTestCmd()
 	got, _ := ImageRef()(cmd, nil, host+"/foo:v")
@@ -173,15 +318,17 @@ func TestImageRef_TagPrefix(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("v-prefixed tags:\n got  %v\n want %v", got, want)
 	}
+	if calls := h.tagCalls(); !slices.Equal(calls, []string{host + "/foo"}) {
+		t.Errorf("tagCalls = %v, want [%q]", calls, host+"/foo")
+	}
 }
 
 func TestRepoRef_Catalog(t *testing.T) {
-	srv := httptest.NewServer(registry.New())
-	t.Cleanup(srv.Close)
-	host := strings.TrimPrefix(srv.URL, "http://")
-
-	pushImage(t, host+"/alpha:1")
-	pushImage(t, host+"/beta:1")
+	const host = "registry.example.com"
+	h := installFakeRegistry(t, host, map[string][]string{
+		"alpha": {"1"},
+		"beta":  {"1"},
+	})
 
 	cmd := newTestCmd()
 	got, dir := RepoRef()(cmd, nil, host+"/")
@@ -195,40 +342,32 @@ func TestRepoRef_Catalog(t *testing.T) {
 	if dir&cobra.ShellCompDirectiveNoSpace == 0 {
 		t.Errorf("expected NoSpace directive, got %v", dir)
 	}
+	if calls := h.catCalls(); !slices.Equal(calls, []string{host}) {
+		t.Errorf("catCalls = %v, want [%q]", calls, host)
+	}
 }
 
 func TestRepoRef_NoTagsForLs(t *testing.T) {
 	// `cr ls REPO` does not accept a tag - if the user typed ':',
-	// completion must offer nothing rather than tags.
-	srv := httptest.NewServer(registry.New())
-	t.Cleanup(srv.Close)
-	host := strings.TrimPrefix(srv.URL, "http://")
-
-	pushImage(t, host+"/foo:v1")
+	// completion must short-circuit BEFORE touching the registry layer:
+	// listTagsFn / listCatalogFn must never be invoked.
+	installForbidNetwork(t)
 
 	cmd := newTestCmd()
-	got, _ := RepoRef()(cmd, nil, host+"/foo:")
+	got, _ := RepoRef()(cmd, nil, "registry.example.com/foo:")
 	if len(got) != 0 {
 		t.Errorf("RepoRef must not offer tags, got %v", got)
 	}
 }
 
-// Once the user types '@' the completer must short-circuit: no suggestions,
-// no doomed network calls. The handler counts incoming requests so the
-// "no network call" half of the contract is verified directly, not by
-// inferring it from an empty result.
+// Once the user types '@' the completer must short-circuit: no suggestions
+// AND no registry calls. installForbidNetwork would `t.Errorf` if either
+// indirection were touched, so the assertion is implicit.
 func TestImageRef_DigestRefMakesNoNetworkCall(t *testing.T) {
-	var calls int32
-	inner := registry.New()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
-		inner.ServeHTTP(w, r)
-	}))
-	t.Cleanup(srv.Close)
-	host := strings.TrimPrefix(srv.URL, "http://")
+	installForbidNetwork(t)
 
 	cmd := newTestCmd()
-	got, dir := ImageRef()(cmd, nil, host+"/repo@sha256:")
+	got, dir := ImageRef()(cmd, nil, "registry.example.com/repo@sha256:")
 
 	if len(got) != 0 {
 		t.Errorf("digest ref should yield no suggestions, got: %v", got)
@@ -236,26 +375,26 @@ func TestImageRef_DigestRefMakesNoNetworkCall(t *testing.T) {
 	if dir&cobra.ShellCompDirectiveNoFileComp == 0 {
 		t.Errorf("expected NoFileComp, got %v", dir)
 	}
-	if c := atomic.LoadInt32(&calls); c != 0 {
-		t.Errorf("digest ref must not contact the registry, got %d HTTP calls", c)
-	}
 }
 
 func TestImageRef_UnreachableHostNoCrash(t *testing.T) {
 	// An unreachable registry must degrade silently to no suggestions
-	// (not a stack trace in the user's terminal). We point at a closed
-	// port and assert the call returns without panicking.
-	srv := httptest.NewServer(registry.New())
-	srv.Close() // immediately close - subsequent calls will fail to connect
-	host := strings.TrimPrefix(srv.URL, "http://")
+	// (not a stack trace in the user's terminal). The fake is configured
+	// for "configured.example.com" but the user types a different host -
+	// scope() returns a "host not configured" error, which tryListTags
+	// must swallow.
+	h := installFakeRegistry(t, "configured.example.com", nil)
 
 	cmd := newTestCmd()
-	got, dir := ImageRef()(cmd, nil, host+"/anything:")
+	got, dir := ImageRef()(cmd, nil, "unreachable.example.com/anything:")
 	if len(got) != 0 {
 		t.Errorf("expected empty suggestions on unreachable registry, got %v", got)
 	}
 	if dir&cobra.ShellCompDirectiveNoFileComp == 0 {
 		t.Errorf("expected NoFileComp on failure, got %v", dir)
+	}
+	if calls := h.tagCalls(); !slices.Equal(calls, []string{"unreachable.example.com/anything"}) {
+		t.Errorf("tagCalls = %v, want [%q]", calls, "unreachable.example.com/anything")
 	}
 }
 
