@@ -95,11 +95,13 @@ func NewService(
 	return &Service{
 		registryService: registryService,
 		layout:          layout,
-		downloadList:    NewImageDownloadList(registryService.GetRoot()),
-		pullerService:   puller.NewPullerService(logger, userLogger),
-		options:         options,
-		logger:          logger,
-		userLogger:      userLogger,
+		// GetRoot() is edition-agnostic (e.g. <registry>/deckhouse); the installer
+		// lives at <root>/installer:<tag>, outside the edition segment.
+		downloadList:  NewImageDownloadList(registryService.GetRoot()),
+		pullerService: puller.NewPullerService(logger, userLogger),
+		options:       options,
+		logger:        logger,
+		userLogger:    userLogger,
 	}
 }
 

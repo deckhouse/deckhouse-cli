@@ -29,21 +29,27 @@ import (
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
+// DatabaseName identifies a security database (trivy-db, trivy-bdu, ...).
+type DatabaseName = string
+
+// ImageDownloadList queues security database images for the puller.
+//   - Inner values: nil until the puller fills them with metadata.
+//   - rootURL: used to build refs for display (logs, annotations), not HTTP.
 type ImageDownloadList struct {
 	rootURL string
 
-	Security map[string]map[string]*puller.ImageMeta
+	Security map[DatabaseName]map[puller.ImageRef]*puller.ImageMeta
 }
 
 func NewImageDownloadList(rootURL string) *ImageDownloadList {
 	return &ImageDownloadList{
 		rootURL:  rootURL,
-		Security: make(map[string]map[string]*puller.ImageMeta),
+		Security: make(map[DatabaseName]map[puller.ImageRef]*puller.ImageMeta),
 	}
 }
 
 func (l *ImageDownloadList) FillSecurityImages() {
-	imageReferences := map[string]string{
+	imageReferences := map[DatabaseName]puller.ImageRef{
 		internal.SecurityTrivyDBSegment:     path.Join(l.rootURL, internal.SecuritySegment, internal.SecurityTrivyDBSegment) + ":2",
 		internal.SecurityTrivyBDUSegment:    path.Join(l.rootURL, internal.SecuritySegment, internal.SecurityTrivyBDUSegment) + ":1",
 		internal.SecurityTrivyJavaDBSegment: path.Join(l.rootURL, internal.SecuritySegment, internal.SecurityTrivyJavaDBSegment) + ":1",
@@ -51,7 +57,7 @@ func (l *ImageDownloadList) FillSecurityImages() {
 	}
 
 	for name, ref := range imageReferences {
-		l.Security[name] = map[string]*puller.ImageMeta{
+		l.Security[name] = map[puller.ImageRef]*puller.ImageMeta{
 			ref: nil,
 		}
 	}
@@ -61,14 +67,14 @@ type ImageLayouts struct {
 	platform   v1.Platform
 	workingDir string
 
-	Security map[string]*regimage.ImageLayout
+	Security map[DatabaseName]*regimage.ImageLayout
 }
 
 func NewImageLayouts(rootFolder string) *ImageLayouts {
 	l := &ImageLayouts{
 		workingDir: rootFolder,
 		platform:   v1.Platform{Architecture: "amd64", OS: "linux"},
-		Security:   make(map[string]*regimage.ImageLayout, 1),
+		Security:   make(map[DatabaseName]*regimage.ImageLayout, 1),
 	}
 
 	return l
