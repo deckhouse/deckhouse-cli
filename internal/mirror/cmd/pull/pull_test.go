@@ -21,6 +21,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +40,19 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/validation"
 )
+
+// closedLocalAddr returns a host:port pair on 127.0.0.1 that is guaranteed not
+// to be listening. We bind to an OS-assigned port and immediately release it
+// so subsequent TCP connections are refused almost instantly. This is much
+// faster than relying on DNS+TCP timeouts to a non-existent public host.
+func closedLocalAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String()
+	require.NoError(t, l.Close())
+	return addr
+}
 
 func TestNewCommand(t *testing.T) {
 	cmd := NewCommand()
@@ -1049,7 +1063,11 @@ func TestPullerCleanupWorkingDirectory(t *testing.T) {
 }
 
 func TestPullerValidatePlatformAccess(t *testing.T) {
-	// Create a real access validator for testing
+	// Point at a closed local TCP port so each access attempt fails with
+	// "connection refused" almost instantly. Previously this test pointed at
+	// "test-registry.com" and waited on real DNS + TCP timeouts (~3s).
+	closedAddr := closedLocalAddr(t)
+
 	accessValidator := validation.NewRemoteRegistryAccessValidator()
 
 	cmd := &cobra.Command{}
@@ -1059,7 +1077,7 @@ func TestPullerValidatePlatformAccess(t *testing.T) {
 		cmd: cmd,
 		params: &params.PullParams{
 			BaseParams: params.BaseParams{
-				DeckhouseRegistryRepo: "test-registry.com",
+				DeckhouseRegistryRepo: closedAddr + "/deckhouse/ee",
 			},
 			DeckhouseTag: "v1.57.3",
 		},
@@ -1067,14 +1085,14 @@ func TestPullerValidatePlatformAccess(t *testing.T) {
 		validationOpts:  []validation.Option{validation.WithInsecure(true)},
 	}
 
-	// Test with invalid registry (should fail due to network)
 	err := puller.validatePlatformAccess()
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "Source registry is not accessible")
 }
 
 func TestPullerValidateModulesAccess(t *testing.T) {
-	// Create a real access validator for testing
+	closedAddr := closedLocalAddr(t)
+
 	accessValidator := validation.NewRemoteRegistryAccessValidator()
 
 	cmd := &cobra.Command{}
@@ -1084,7 +1102,7 @@ func TestPullerValidateModulesAccess(t *testing.T) {
 		cmd: cmd,
 		params: &params.PullParams{
 			BaseParams: params.BaseParams{
-				DeckhouseRegistryRepo: "test-registry.com",
+				DeckhouseRegistryRepo: closedAddr + "/deckhouse/ee",
 				ModulesPathSuffix:     "/modules",
 			},
 		},
@@ -1092,7 +1110,6 @@ func TestPullerValidateModulesAccess(t *testing.T) {
 		validationOpts:  []validation.Option{validation.WithInsecure(true)},
 	}
 
-	// Test with invalid registry (should fail)
 	err := puller.validateModulesAccess()
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "Source registry is not accessible")
@@ -1288,31 +1305,23 @@ func (m *mockLogger) Process(name string, fn func() error) error {
 }
 
 func TestPullerExecute(t *testing.T) {
+	// Use the in-memory upfake-backed stub registry instead of the real
+	// registry.deckhouse.ru so the test never makes outbound network calls.
+	// Without this (and without NoInstaller=true) the puller pulls
+	// `registry.deckhouse.ru/deckhouse:latest`, which historically made this
+	// single test take ~2 minutes.
+	t.Setenv("STUB_REGISTRY_CLIENT", "true")
+
 	tempDir := t.TempDir()
 
-	// Save original global variables
-	originalTempDir := pullflags.TempDir
-	originalImagesBundlePath := pullflags.ImagesBundlePath
-	originalNoPlatform := pullflags.NoPlatform
-	originalNoSecurityDB := pullflags.NoSecurityDB
-	originalNoModules := pullflags.NoModules
-	originalDoGOSTDigest := pullflags.DoGOSTDigest
+	defer saveFlagsAndRestore(t)()
 
-	defer func() {
-		pullflags.TempDir = originalTempDir
-		pullflags.ImagesBundlePath = originalImagesBundlePath
-		pullflags.NoPlatform = originalNoPlatform
-		pullflags.NoSecurityDB = originalNoSecurityDB
-		pullflags.NoModules = originalNoModules
-		pullflags.DoGOSTDigest = originalDoGOSTDigest
-	}()
-
-	// Set test values to skip actual operations
 	pullflags.TempDir = tempDir
 	pullflags.ImagesBundlePath = tempDir
 	pullflags.NoPlatform = true
 	pullflags.NoSecurityDB = true
 	pullflags.NoModules = true
+	pullflags.NoInstaller = true
 	pullflags.DoGOSTDigest = false
 
 	cmd := &cobra.Command{}
