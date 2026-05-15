@@ -18,6 +18,7 @@ package installer
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -44,7 +45,7 @@ func NewImageDownloadList(rootURL string) *ImageDownloadList {
 
 func (l *ImageDownloadList) FillInstallerImages(tagsToMirror []string) {
 	for _, tag := range tagsToMirror {
-		l.Installer[l.rootURL+internal.InstallerSegment+":"+tag] = nil
+		l.Installer[path.Join(l.rootURL, internal.InstallerSegment)+":"+tag] = nil
 	}
 }
 
