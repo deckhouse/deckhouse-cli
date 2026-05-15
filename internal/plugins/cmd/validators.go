@@ -136,24 +136,32 @@ func (pc *PluginsCommand) fetchLatestVersion(ctx context.Context, pluginName str
 type FailedConstraints map[string]*semver.Constraints
 
 func (pc *PluginsCommand) validateRequirements(plugin *internal.Plugin) (FailedConstraints, error) {
-	// validate plugin requirements
 	pc.logger.Debug("validating plugin requirements", slog.String("plugin", plugin.Name))
 
-	err := pc.validatePluginConflicts(plugin)
-	if err != nil {
+	if err := pc.validatePluginConflicts(plugin); err != nil {
 		return nil, fmt.Errorf("plugin conflicts: %w", err)
 	}
 
-	failedConstraints, err := pc.validatePluginRequirement(plugin)
+	failedConstraints, err := pc.validatePluginRequirementMandatory(plugin)
 	if err != nil {
-		return nil, fmt.Errorf("plugin requirements: %w", err)
+		return nil, fmt.Errorf("plugin requirements (mandatory): %w", err)
 	}
 
-	// validate module requirements
-	pc.logger.Debug("validating module requirements", slog.String("plugin", plugin.Name))
+	if err := pc.validatePluginRequirementConditional(plugin); err != nil {
+		return nil, fmt.Errorf("plugin requirements (conditional): %w", err)
+	}
 
-	err = pc.validateModuleRequirement(plugin)
-	if err != nil {
+	// Cluster-side requirements - currently log-only, no enforcement.
+	// Real validation lands when cluster connectivity is added.
+	if err := pc.validateKubernetesRequirement(plugin); err != nil {
+		return nil, fmt.Errorf("kubernetes requirement: %w", err)
+	}
+	if err := pc.validateDeckhouseRequirement(plugin); err != nil {
+		return nil, fmt.Errorf("deckhouse requirement: %w", err)
+	}
+
+	pc.logger.Debug("validating module requirements", slog.String("plugin", plugin.Name))
+	if err := pc.validateModuleRequirement(plugin); err != nil {
 		return nil, fmt.Errorf("module requirements: %w", err)
 	}
 
@@ -189,38 +197,54 @@ func (pc *PluginsCommand) validatePluginConflicts(plugin *internal.Plugin) error
 	return nil
 }
 
+// validatePluginConflict checks whether installing `plugin` violates any
+// constraint that the already-installed `installedPlugin` places on it.
+//
+// Both Mandatory and Conditional sections of installedPlugin's requirements
+// are inspected - if an existing plugin requires us, we must satisfy its
+// constraint regardless of whether the requirement is mandatory or conditional.
 func validatePluginConflict(plugin *internal.Plugin, installedPlugin *internal.Plugin) error {
-	for _, requirement := range installedPlugin.Requirements.Plugins {
-		// installed plugin requirement is the same as the plugin we are validating
-		if requirement.Name == plugin.Name {
-			constraint, err := semver.NewConstraint(requirement.Constraint)
-			if err != nil {
-				return fmt.Errorf("failed to parse constraint: %w", err)
-			}
+	candidates := make([]internal.PluginRequirement, 0,
+		len(installedPlugin.Requirements.Plugins.Mandatory)+len(installedPlugin.Requirements.Plugins.Conditional))
+	candidates = append(candidates, installedPlugin.Requirements.Plugins.Mandatory...)
+	candidates = append(candidates, installedPlugin.Requirements.Plugins.Conditional...)
 
-			version, err := semver.NewVersion(installedPlugin.Version)
-			if err != nil {
-				return fmt.Errorf("failed to parse version: %w", err)
-			}
-
-			if !constraint.Check(version) {
-				return fmt.Errorf("installing plugin %s %s will make conflict with existing plugin %s %s",
-					plugin.Name,
-					plugin.Version,
-					installedPlugin.Name,
-					constraint.String())
-			}
+	for _, requirement := range candidates {
+		if requirement.Name != plugin.Name {
+			continue
+		}
+		constraint, err := semver.NewConstraint(requirement.Constraint)
+		if err != nil {
+			return fmt.Errorf("failed to parse constraint: %w", err)
+		}
+		// Check the NEW plugin's version against the constraint -
+		// not installedPlugin.Version (that was a long-standing bug).
+		version, err := semver.NewVersion(plugin.Version)
+		if err != nil {
+			return fmt.Errorf("failed to parse version: %w", err)
+		}
+		if !constraint.Check(version) {
+			return fmt.Errorf("installing plugin %s %s conflicts with existing plugin %s which requires %s %s",
+				plugin.Name,
+				plugin.Version,
+				installedPlugin.Name,
+				plugin.Name,
+				constraint.String())
 		}
 	}
 
 	return nil
 }
 
-func (pc *PluginsCommand) validatePluginRequirement(plugin *internal.Plugin) (FailedConstraints, error) {
+// validatePluginRequirementMandatory enforces mandatory plugin requirements:
+//
+// For mandatory requirements:
+// - if the dependency is not installed, return a soft failure (FailedConstraints)
+// - if the dependency is installed but fails the constraint, return a hard error
+func (pc *PluginsCommand) validatePluginRequirementMandatory(plugin *internal.Plugin) (FailedConstraints, error) {
 	result := make(FailedConstraints)
 
-	for _, pluginRequirement := range plugin.Requirements.Plugins {
-		// check if plugin is installed
+	for _, pluginRequirement := range plugin.Requirements.Plugins.Mandatory {
 		installed, err := pc.checkInstalled(pluginRequirement.Name)
 		if err != nil {
 			return nil, fmt.Errorf("failed to check if plugin is installed: %w", err)
@@ -229,35 +253,151 @@ func (pc *PluginsCommand) validatePluginRequirement(plugin *internal.Plugin) (Fa
 			result[pluginRequirement.Name] = nil
 			continue
 		}
-
-		// check constraint
-		if pluginRequirement.Constraint != "" {
-			installedVersion, err := pc.getInstalledPluginVersion(pluginRequirement.Name)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get installed version: %w", err)
-			}
-
-			constraint, err := semver.NewConstraint(pluginRequirement.Constraint)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse constraint: %w", err)
-			}
-
-			if !constraint.Check(installedVersion) {
-				pc.logger.Warn("plugin requirement not satisfied",
-					slog.String("plugin", plugin.Name),
-					slog.String("requirement", pluginRequirement.Name),
-					slog.String("constraint", pluginRequirement.Constraint),
-					slog.String("installedVersion", installedVersion.Original()))
-
-				result[pluginRequirement.Name] = constraint
-			}
+		if pluginRequirement.Constraint == "" {
+			continue
+		}
+		installedVersion, err := pc.getInstalledPluginVersion(pluginRequirement.Name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get installed version: %w", err)
+		}
+		constraint, err := semver.NewConstraint(pluginRequirement.Constraint)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse constraint: %w", err)
+		}
+		if !constraint.Check(installedVersion) {
+			pc.logger.Warn("plugin requirement not satisfied",
+				slog.String("plugin", plugin.Name),
+				slog.String("requirement", pluginRequirement.Name),
+				slog.String("constraint", pluginRequirement.Constraint),
+				slog.String("installedVersion", installedVersion.Original()))
+			result[pluginRequirement.Name] = constraint
 		}
 	}
 
 	return result, nil
 }
 
-func (pc *PluginsCommand) validateModuleRequirement(_ *internal.Plugin) error {
-	// TODO: Implement module requirement validation
+// validatePluginRequirementConditional enforces conditional plugin requirements:
+//
+// For conditional requirements:
+//   - if the dependency is not installed, skip silently;
+//   - if the dependency is installed but fails the constraint, return a hard error
+func (pc *PluginsCommand) validatePluginRequirementConditional(plugin *internal.Plugin) error {
+	for _, pluginRequirement := range plugin.Requirements.Plugins.Conditional {
+		installed, err := pc.checkInstalled(pluginRequirement.Name)
+		if err != nil {
+			return fmt.Errorf("failed to check if plugin is installed: %w", err)
+		}
+		if !installed {
+			continue
+		}
+		if pluginRequirement.Constraint == "" {
+			continue
+		}
+		installedVersion, err := pc.getInstalledPluginVersion(pluginRequirement.Name)
+		if err != nil {
+			return fmt.Errorf("failed to get installed version: %w", err)
+		}
+		constraint, err := semver.NewConstraint(pluginRequirement.Constraint)
+		if err != nil {
+			return fmt.Errorf("failed to parse constraint: %w", err)
+		}
+		if !constraint.Check(installedVersion) {
+			return fmt.Errorf("conditional plugin requirement not satisfied: plugin %s %s installed but %s requires %s",
+				pluginRequirement.Name,
+				installedVersion.Original(),
+				plugin.Name,
+				pluginRequirement.Constraint)
+		}
+	}
+	return nil
+}
+
+// debugPrintPendingRequirement prints a human-readable warning for a declared
+// requirement that d8 currently surfaces but does not enforce.
+//
+// Until the requirement enforcement is implemented, we print a warning to the user.
+//
+// Example:
+//
+//	!  <title>
+//	      key1: value1
+//	      key2: value2
+func debugPrintPendingRequirement(title string, kv ...[2]string) {
+	fmt.Fprintf(os.Stderr, "!  %s\n", title)
+	for _, p := range kv {
+		fmt.Fprintf(os.Stderr, "      %s: %s\n", p[0], p[1])
+	}
+}
+
+// validateKubernetesRequirement is a log-only stub (yet).
+//
+// For Kubernetes requirement:
+// - if the constraint is empty, skip silently
+// - if the constraint is not empty, print a warning
+func (pc *PluginsCommand) validateKubernetesRequirement(plugin *internal.Plugin) error {
+	if plugin.Requirements.Kubernetes.Constraint == "" {
+		return nil
+	}
+	debugPrintPendingRequirement(
+		"plugin declares a Kubernetes version requirement but enforcement is not implemented yet",
+		[2]string{"plugin", plugin.Name},
+		[2]string{"constraint", plugin.Requirements.Kubernetes.Constraint},
+	)
+	return nil
+}
+
+// validateDeckhouseRequirement is a log-only stub. See validateKubernetesRequirement
+// for rationale; enforcement will land once Deckhouse version discovery is in place.
+func (pc *PluginsCommand) validateDeckhouseRequirement(plugin *internal.Plugin) error {
+	if plugin.Requirements.Deckhouse.Constraint == "" {
+		return nil
+	}
+	debugPrintPendingRequirement(
+		"plugin declares a Deckhouse version requirement but enforcement is not implemented yet",
+		[2]string{"plugin", plugin.Name},
+		[2]string{"constraint", plugin.Requirements.Deckhouse.Constraint},
+	)
+	return nil
+}
+
+// validateModuleRequirement is a log-only stub. Mandatory, Conditional and
+// AnyOf sections are all surfaced so authors and operators see the declared
+// expectations even though d8 does not yet inspect the cluster to verify them.
+func (pc *PluginsCommand) validateModuleRequirement(plugin *internal.Plugin) error {
+	mods := plugin.Requirements.Modules
+	if len(mods.Mandatory) == 0 && len(mods.Conditional) == 0 && len(mods.AnyOf) == 0 {
+		return nil
+	}
+
+	for _, m := range mods.Mandatory {
+		debugPrintPendingRequirement(
+			"plugin declares a mandatory module requirement but enforcement is not implemented yet",
+			[2]string{"plugin", plugin.Name},
+			[2]string{"module", m.Name},
+			[2]string{"constraint", m.Constraint},
+		)
+	}
+	for _, m := range mods.Conditional {
+		debugPrintPendingRequirement(
+			"plugin declares a conditional module requirement but enforcement is not implemented yet",
+			[2]string{"plugin", plugin.Name},
+			[2]string{"module", m.Name},
+			[2]string{"constraint", m.Constraint},
+		)
+	}
+	for i, grp := range mods.AnyOf {
+		names := make([]string, 0, len(grp.Modules))
+		for _, m := range grp.Modules {
+			names = append(names, m.Name)
+		}
+		debugPrintPendingRequirement(
+			"plugin declares an anyOf module group but enforcement is not implemented yet",
+			[2]string{"plugin", plugin.Name},
+			[2]string{"group_index", fmt.Sprintf("%d", i)},
+			[2]string{"group_description", grp.Description},
+			[2]string{"modules", strings.Join(names, ", ")},
+		)
+	}
 	return nil
 }
