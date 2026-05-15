@@ -45,6 +45,8 @@ const (
 	ModulesReleaseSegment = "release"
 	ModulesExtraSegment   = "extra"
 
+	InstallerSegment = "installer"
+
 	SecuritySegment = "security"
 
 	SecurityTrivyDBSegment     = "trivy-db"
