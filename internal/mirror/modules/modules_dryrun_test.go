@@ -26,11 +26,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 	"github.com/deckhouse/deckhouse-cli/pkg/fake"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
+	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 // TestDryRun_NoBundleFilesWritten verifies that PullModules in dry-run mode does
@@ -96,4 +99,81 @@ func TestDryRun_WorkingDirHasLayouts(t *testing.T) {
 	entries, err := os.ReadDir(bundleDir)
 	require.NoError(t, err)
 	assert.Empty(t, entries, "dry-run must not write any bundle files; found: %v", entries)
+}
+
+// TestModulesReleaseChannelDownloadList_FilledCorrectly verifies that PullModules
+// populates modulesDownloadList with the expected release-channel image reference
+// keys.  Each key is constructed by discoverChannelVersions as:
+//
+//	rootURL + "/modules/" + moduleName + "/release:" + channel
+func TestModulesReleaseChannelDownloadList_FilledCorrectly(t *testing.T) {
+	const moduleName = "console"
+	const channelVer = "v1.45.0"
+
+	reg := upfake.NewRegistry(testHost)
+	addModule(reg, moduleName, channelVer, []string{channelVer})
+
+	stubClient := pkgclient.Adapt(upfake.NewClient(reg))
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	regSvc := registryservice.NewService(stubClient, pkg.NoEdition, logger)
+
+	svc := NewService(
+		regSvc,
+		t.TempDir(),
+		&Options{
+			BundleDir:     t.TempDir(),
+			DryRun:        true,
+			SkipVexImages: true,
+		},
+		logger,
+		userLogger,
+	)
+
+	err := svc.PullModules(context.Background())
+	require.NoError(t, err)
+
+	moduleDL := svc.modulesDownloadList.Module(moduleName)
+	require.NotNil(t, moduleDL, "modulesDownloadList must have an entry for module %q", moduleName)
+
+	rootURL := regSvc.GetRoot()
+	for _, channel := range internal.GetAllDefaultReleaseChannels() {
+		expectedRef := rootURL + "/modules/" + moduleName + "/release:" + channel
+		_, ok := moduleDL.ModuleReleaseChannels[expectedRef]
+		assert.True(t, ok,
+			"modulesDownloadList[%q].ModuleReleaseChannels should contain ref %q; actual keys: %v",
+			moduleName, expectedRef, moduleDL.ModuleReleaseChannels)
+	}
+}
+
+// TestModulesDownloadList_NoBundleFilesWritten_WithFakeStub is a smoke test
+// that runs PullModules with the standard fake stub (which has no modules
+// published).  The expected outcome is success with an empty bundle directory.
+func TestModulesDownloadList_NoBundleFilesWritten_WithFakeStub(t *testing.T) {
+	bundleDir := t.TempDir()
+
+	stubClient := fake.NewRegistryClientStub()
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	regSvc := registryservice.NewService(stubClient, pkg.FEEdition, logger)
+
+	svc := NewService(
+		regSvc,
+		t.TempDir(),
+		&Options{
+			BundleDir: bundleDir,
+			DryRun:    true,
+		},
+		logger,
+		userLogger,
+	)
+
+	err := svc.PullModules(context.Background())
+	require.NoError(t, err)
+
+	entries, err := os.ReadDir(bundleDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "dry-run must not write any files to the bundle directory; found: %v", entries)
 }

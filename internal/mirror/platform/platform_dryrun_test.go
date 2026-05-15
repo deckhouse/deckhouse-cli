@@ -20,6 +20,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"testing"
 
@@ -28,9 +29,10 @@ import (
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
+	"github.com/deckhouse/deckhouse-cli/pkg/fake"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	"github.com/deckhouse/deckhouse-cli/pkg/fake"
 )
 
 // TestDryRun_NoBundleFilesWritten verifies that PullPlatform in dry-run mode does
@@ -91,4 +93,56 @@ func TestDryRun_NoOCILayoutCreated(t *testing.T) {
 	entries, err := os.ReadDir(bundleDir)
 	require.NoError(t, err)
 	assert.Empty(t, entries, "dry-run must not write any files to the bundle directory; found: %v", entries)
+}
+
+// TestPlatformDownloadList_FilledCorrectly verifies that PullPlatform in
+// dry-run mode populates every sub-map of downloadList with the expected image
+// reference keys for the requested version.  The key shapes are:
+//
+//	Deckhouse:                   rootURL + ":" + version
+//	DeckhouseInstall:            path.Join(rootURL, "install") + ":" + version
+//	DeckhouseInstallStandalone:  path.Join(rootURL, "install-standalone") + ":" + version
+//	DeckhouseReleaseChannel:     path.Join(rootURL, "release-channel") + ":" + channel|version
+func TestPlatformDownloadList_FilledCorrectly(t *testing.T) {
+	stubClient := fake.NewRegistryClientStub()
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	const targetTag = "v1.69.0"
+	svc := &Service{
+		deckhouseService: registryservice.NewDeckhouseService(stubClient, logger),
+		downloadList:     NewImageDownloadList(stubClient.GetRegistry()),
+		options:          &Options{TargetTag: targetTag, BundleDir: t.TempDir(), DryRun: true},
+		logger:           logger,
+		userLogger:       userLogger,
+	}
+
+	err := svc.PullPlatform(context.Background())
+	require.NoError(t, err)
+
+	rootURL := stubClient.GetRegistry()
+
+	assert.Contains(t, svc.downloadList.Deckhouse, rootURL+":"+targetTag,
+		"Deckhouse map must contain the requested version tag")
+
+	assert.Contains(t, svc.downloadList.DeckhouseInstall,
+		path.Join(rootURL, internal.InstallSegment)+":"+targetTag,
+		"DeckhouseInstall map must contain %q", internal.InstallSegment+":"+targetTag)
+
+	assert.Contains(t, svc.downloadList.DeckhouseInstallStandalone,
+		path.Join(rootURL, internal.InstallStandaloneSegment)+":"+targetTag,
+		"DeckhouseInstallStandalone map must contain %q", internal.InstallStandaloneSegment+":"+targetTag)
+
+	// v1.69.0 is the stable channel version — its channel alias must live only
+	// in the release-channel map, not in the main Deckhouse or Install maps.
+	assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel,
+		path.Join(rootURL, internal.ReleaseChannelSegment)+":stable",
+		"DeckhouseReleaseChannel map must contain the stable channel alias")
+
+	assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":stable",
+		"main Deckhouse map must not carry channel aliases")
+
+	assert.NotContains(t, svc.downloadList.DeckhouseInstall,
+		path.Join(rootURL, internal.InstallSegment)+":stable",
+		"DeckhouseInstall map must not carry channel aliases")
 }

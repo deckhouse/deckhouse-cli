@@ -191,3 +191,23 @@ func (l *ImageLayouts) AsList() []layout.Path {
 	}
 	return paths
 }
+
+// HasImages reports whether any sub-layout of this module contains at least
+// one image manifest.  Returns false when all layouts are empty (i.e. the
+// module was discovered but no images were pulled into it).
+func (l *ImageLayouts) HasImages() bool {
+	for _, lp := range l.AsList() {
+		index, err := lp.ImageIndex()
+		if err != nil {
+			continue
+		}
+		manifest, err := index.IndexManifest()
+		if err != nil {
+			continue
+		}
+		if len(manifest.Manifests) > 0 {
+			return true
+		}
+	}
+	return false
+}

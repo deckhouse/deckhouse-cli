@@ -877,6 +877,11 @@ func (svc *Service) packModules(modules []moduleData) error {
 				return fmt.Errorf("no layout found for module %s", module.name)
 			}
 
+			if !moduleLayout.HasImages() {
+				logger.Infof("Skipping %s: no images were pulled", pkgName)
+				return nil
+			}
+
 			var pkg io.Writer = chunked.NewChunkedFileWriter(bundleChunkSize, bundleDir, pkgName)
 			if bundleChunkSize == 0 {
 				f, err := os.Create(filepath.Join(bundleDir, pkgName))

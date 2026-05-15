@@ -99,6 +99,23 @@ func NewRegistryClientStub() localreg.Client {
 		reg.MustAddImage("", rt.tag, img)
 		reg.MustAddImage("install", rt.tag, img)
 		reg.MustAddImage("install-standalone", rt.tag, img)
+		reg.MustAddImage("installer", rt.tag, img)
+	}
+
+	// ---- security databases ----
+	// Each entry represents a well-known Trivy DB segment together with the
+	// fixed tag that FillSecurityImages hard-codes in security/layout.go.
+	securityImages := []struct {
+		segment string
+		tag     string
+	}{
+		{"security/trivy-db", "2"},
+		{"security/trivy-bdu", "1"},
+		{"security/trivy-java-db", "1"},
+		{"security/trivy-checks", "0"},
+	}
+	for _, si := range securityImages {
+		reg.MustAddImage(si.segment, si.tag, securityImage())
 	}
 
 	return pkgclient.Adapt(upfake.NewClient(reg))
@@ -122,4 +139,10 @@ func releaseChannelImage(version string) v1.Image {
 	return upfake.NewImageBuilder().
 		WithFile("version.json", fmt.Sprintf(`{"version":%q}`, version)).
 		MustBuild()
+}
+
+// securityImage creates a minimal stub v1.Image for a security database
+// repository (trivy-db, trivy-bdu, trivy-java-db, trivy-checks).
+func securityImage() v1.Image {
+	return upfake.NewImageBuilder().MustBuild()
 }

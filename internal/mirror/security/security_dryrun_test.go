@@ -20,6 +20,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"path"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -27,10 +28,11 @@ import (
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg"
+	"github.com/deckhouse/deckhouse-cli/pkg/fake"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	"github.com/deckhouse/deckhouse-cli/pkg/fake"
 )
 
 // TestDryRun_NoBundleFilesWritten verifies that PullSecurity in dry-run mode does
@@ -100,4 +102,65 @@ func TestDryRun_WorkingDirHasLayouts(t *testing.T) {
 	bundleEntries, err := os.ReadDir(bundleDir)
 	require.NoError(t, err)
 	assert.Empty(t, bundleEntries, "dry-run must not write any bundle files; found: %v", bundleEntries)
+}
+
+// TestSecurityDownloadList_FilledCorrectly verifies that PullSecurity populates
+// downloadList.Security with the expected image reference keys, one entry per
+// database name.  Each key is constructed by FillSecurityImages as:
+//
+//	path.Join(rootURL, "security", <segment>) + ":" + <tag>
+func TestSecurityDownloadList_FilledCorrectly(t *testing.T) {
+	workingDir := t.TempDir()
+	bundleDir := t.TempDir()
+
+	// pkg.NoEdition avoids double-scoping: the stub root already contains the
+	// full path "registry.deckhouse.ru/deckhouse/fe", so using FEEdition would
+	// prepend an extra "fe" segment when resolving security image paths.
+	stubClient := fake.NewRegistryClientStub()
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	regSvc := registryservice.NewService(stubClient, pkg.NoEdition, logger)
+
+	svc := NewService(
+		regSvc,
+		workingDir,
+		&Options{
+			BundleDir: bundleDir,
+			DryRun:    true,
+		},
+		logger,
+		userLogger,
+	)
+
+	err := svc.PullSecurity(context.Background())
+	require.NoError(t, err)
+
+	rootURL := regSvc.GetRoot()
+
+	// Each database must appear as its own sub-map key inside downloadList.Security.
+	expectedDatabases := []struct {
+		name string
+		tag  string
+	}{
+		{internal.SecurityTrivyDBSegment, "2"},
+		{internal.SecurityTrivyBDUSegment, "1"},
+		{internal.SecurityTrivyJavaDBSegment, "1"},
+		{internal.SecurityTrivyChecksSegment, "0"},
+	}
+
+	for _, db := range expectedDatabases {
+		imageSet, ok := svc.downloadList.Security[db.name]
+		assert.True(t, ok,
+			"downloadList.Security must contain an entry for database %q", db.name)
+		if !ok {
+			continue
+		}
+
+		expectedRef := path.Join(rootURL, internal.SecuritySegment, db.name) + ":" + db.tag
+		_, refOK := imageSet[expectedRef]
+		assert.True(t, refOK,
+			"downloadList.Security[%q] should contain ref %q; actual keys: %v",
+			db.name, expectedRef, imageSet)
+	}
 }
