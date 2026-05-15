@@ -18,11 +18,13 @@ package installer
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
@@ -43,7 +45,7 @@ func NewImageDownloadList(rootURL string) *ImageDownloadList {
 
 func (l *ImageDownloadList) FillInstallerImages(tagsToMirror []string) {
 	for _, tag := range tagsToMirror {
-		l.Installer[l.rootURL+":"+tag] = nil
+		l.Installer[path.Join(l.rootURL, internal.InstallerSegment)+":"+tag] = nil
 	}
 }
 
