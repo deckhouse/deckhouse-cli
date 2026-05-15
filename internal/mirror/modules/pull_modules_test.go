@@ -20,10 +20,12 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	golayout "github.com/google/go-containerregistry/pkg/v1/layout"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -406,4 +408,92 @@ func (c *listTagsErrAtModule) ListTags(ctx context.Context, opts ...dkpreg.ListT
 		return nil, c.err
 	}
 	return c.Client.ListTags(ctx, opts...)
+}
+
+// =============================================================================
+// Tests: empty module layouts are not packed into tars
+// =============================================================================
+
+// TestPullModules_EmptyModuleNotPacked verifies that when a module is present
+// in the registry listing but has no pullable images (all release channels are
+// missing and no version tags match), packModules skips it and does not create
+// an empty stub tar in the bundle directory.
+//
+// This is a regression guard for the scenario where `d8 mirror pull` is
+// interrupted or a module has no images for the mirrored version: previously
+// a ~5 KB skeleton tar (oci-layout + index.json + empty blobs/) was always
+// written for every discovered module.
+func TestPullModules_EmptyModuleNotPacked(t *testing.T) {
+	// Registry has the module listed but zero version images.
+	// The release-channel images are absent too (AllowMissingTags is true
+	// for channels, so the puller won't error — it just pulls nothing).
+	reg := upfake.NewRegistry(testHost)
+	reg.MustAddImage("modules", testModuleName, versionImage(channelVersion))
+	// Intentionally: no modules/<name>:<version> and no modules/<name>/release:<channel>.
+
+	bundleDir := t.TempDir()
+	svc := newService(t, pkgclient.Adapt(upfake.NewClient(reg)), nil)
+	svc.options.BundleDir = bundleDir
+
+	require.NoError(t, svc.PullModules(context.Background()))
+
+	entries, err := os.ReadDir(bundleDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries,
+		"bundle dir must stay empty when module has no images; got: %v", entries)
+}
+
+// TestPullModules_NonEmptyModulePacked is the positive counterpart: a module
+// with at least one pulled image must produce a non-empty tar in the bundle dir.
+func TestPullModules_NonEmptyModulePacked(t *testing.T) {
+	reg := singleModuleRegistry(testModuleName, channelVersion, defaultRegistryVersions)
+	bundleDir := t.TempDir()
+
+	svc := newService(t, pkgclient.Adapt(upfake.NewClient(reg)), nil)
+	svc.options.BundleDir = bundleDir
+
+	require.NoError(t, svc.PullModules(context.Background()))
+
+	entries, err := os.ReadDir(bundleDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "bundle dir must contain a tar for a module with images")
+
+	for _, e := range entries {
+		info, err := e.Info()
+		require.NoError(t, err)
+		assert.Greater(t, info.Size(), int64(5120),
+			"tar %q must be larger than 5120 bytes (the empty-layout skeleton)", e.Name())
+	}
+}
+
+// TestImageLayouts_HasImages_Empty verifies HasImages returns false when no
+// images have been appended to any of the module's sub-layouts.
+func TestImageLayouts_HasImages_Empty(t *testing.T) {
+	layouts, err := createOCIImageLayoutsForModule(t.TempDir())
+	require.NoError(t, err)
+	assert.False(t, layouts.HasImages(),
+		"HasImages must return false for a freshly created (empty) layout")
+}
+
+// TestImageLayouts_HasImages_WithImage verifies HasImages returns true once an
+// image has been appended to one of the module's sub-layouts.  The test does
+// not go through the full pull flow (which destroys layouts during packing)
+// but instead appends an image directly to the OCI layout path.
+func TestImageLayouts_HasImages_WithImage(t *testing.T) {
+	dir := t.TempDir()
+
+	layouts, err := createOCIImageLayoutsForModule(dir)
+	require.NoError(t, err)
+
+	assert.False(t, layouts.HasImages(), "freshly created layout must have no images before any append")
+
+	img := upfake.NewImageBuilder().
+		WithFile("version.json", `{"version":"v1.0.0"}`).
+		MustBuild()
+	err = layouts.Modules.Path().AppendImage(img,
+		golayout.WithAnnotations(map[string]string{"io.deckhouse.image.short_tag": "v1.0.0"}))
+	require.NoError(t, err)
+
+	assert.True(t, layouts.HasImages(),
+		"HasImages must return true after at least one image is appended")
 }
