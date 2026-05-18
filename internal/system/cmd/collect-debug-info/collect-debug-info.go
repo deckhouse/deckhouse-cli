@@ -19,6 +19,7 @@ package collectdebuginfo
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -28,21 +29,34 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
-var collectDebugInfoCmdLong = templates.LongDesc(`
-Collect debug info from Deckhouse Kubernetes Platform.
+var (
+	collectDebugInfoCmdLong = templates.LongDesc(`
+		Collect debug info from Deckhouse Kubernetes Platform.
+		
+		© Flant JSC 2025`)
 
-© Flant JSC 2025`)
+	collectDebugInfoCmdExample = templates.Examples(`
+		# The --exclude flag can be used to exclude specific elements from the archive build:
+		d8 system collect-debug-info --exclude ccm-logs,csi-controller-logs > deckhouse-debug-$(date +"%Y_%m_%d").tar.gz
+
+		# The --list-exclude flag can be used to list all elements that can be excluded from the archive build
+		d8 system collect-debug-info --list-exclude
+	`)
+)
 
 func NewCommand() *cobra.Command {
 	var (
-		excludeList []string
-		listExclude bool
+		excludeList     []string
+		listExclude     bool
+		commandTimeout  time.Duration
+		requestInterval time.Duration
 	)
 
 	collectDebugInfoCmd := &cobra.Command{
-		Use:           "collect-debug-info",
+		Use:           `collect-debug-info [flags] > deckhouse-debug-$(date +"%Y_%m_%d").tar.gz`,
 		Short:         "Collect debug info.",
 		Long:          collectDebugInfoCmdLong,
+		Example:       collectDebugInfoCmdExample,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
@@ -57,11 +71,13 @@ func NewCommand() *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return collectDebugInfo(cmd, listExclude, excludeList)
+			return collectDebugInfo(cmd, listExclude, excludeList, commandTimeout, requestInterval)
 		},
 	}
 	collectDebugInfoCmd.Flags().StringSliceVar(&excludeList, "exclude", []string{}, "Exclude specific files from the debug archive. Use comma-separated values")
 	collectDebugInfoCmd.Flags().BoolVarP(&listExclude, "list-exclude", "l", false, "List all files that can be excluded from the debug archive")
+	collectDebugInfoCmd.Flags().DurationVar(&commandTimeout, "command-timeout", 2*time.Minute, "Timeout for each individual debug command execution")
+	collectDebugInfoCmd.Flags().DurationVar(&requestInterval, "request-interval", 0, "Minimum interval between debug command executions to avoid overloading the cluster (e.g. 200ms, 500ms, 1s). Zero disables rate limiting (default 0s)")
 	return collectDebugInfoCmd
 }
 
@@ -72,7 +88,7 @@ func printExcludableFiles() {
 	}
 }
 
-func collectDebugInfo(cmd *cobra.Command, listExclude bool, excludeList []string) error {
+func collectDebugInfo(cmd *cobra.Command, listExclude bool, excludeList []string, commandTimeout time.Duration, requestInterval time.Duration) error {
 	if listExclude {
 		printExcludableFiles()
 		return nil
@@ -93,7 +109,7 @@ func collectDebugInfo(cmd *cobra.Command, listExclude bool, excludeList []string
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	if err = debugtar.Tarball(config, kubeCl, excludeList); err != nil {
+	if err = debugtar.Tarball(config, kubeCl, excludeList, commandTimeout, requestInterval); err != nil {
 		return fmt.Errorf("Error collecting debug info: %w", err)
 	}
 	return nil
