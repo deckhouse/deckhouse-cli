@@ -188,7 +188,7 @@ var debugCommands = []Command{
 	{
 		File:            "cert-manager-logs.txt",
 		Cmd:             "kubectl",
-		Args:            []string{"-n", "d8-cert-manager", "logs", "-l", "app=cert-manager", "--tail=3000"},
+		Args:            []string{"-n", "d8-cert-manager", "logs", "-l", "app=cert-manager", "--tail=3000", "--ignore-errors=true"},
 		RequiredModule:  "cert-manager",
 		ExpandPerModule: false,
 	},
@@ -301,32 +301,32 @@ var debugCommands = []Command{
 	{
 		File: "kube-system-control-plane-manager-logs.txt",
 		Cmd:  "kubectl",
-		Args: []string{"-n", "kube-system", "logs", "-l", "app=d8-control-plane-manager", "--tail=3000"},
+		Args: []string{"-n", "kube-system", "logs", "-l", "app=d8-control-plane-manager", "--tail=3000", "--ignore-errors=true"},
 	},
 	{
 		File: "kube-system-etcd-logs.txt",
 		Cmd:  "kubectl",
-		Args: []string{"-n", "kube-system", "logs", "-l", "component=etcd", "--tail=3000"},
+		Args: []string{"-n", "kube-system", "logs", "-l", "component=etcd", "--tail=3000", "--ignore-errors=true"},
 	},
 	{
 		File: "kube-system-kube-apiserver-logs.txt",
 		Cmd:  "kubectl",
-		Args: []string{"-n", "kube-system", "logs", "-l", "component=kube-apiserver", "--tail=3000"},
+		Args: []string{"-n", "kube-system", "logs", "-l", "component=kube-apiserver", "--tail=3000", "--ignore-errors=true"},
 	},
 	{
 		File: "kube-system-kube-controller-manager-logs.txt",
 		Cmd:  "kubectl",
-		Args: []string{"-n", "kube-system", "logs", "-l", "component=kube-controller-manager", "--tail=3000"},
+		Args: []string{"-n", "kube-system", "logs", "-l", "component=kube-controller-manager", "--tail=3000", "--ignore-errors=true"},
 	},
 	{
 		File: "kube-system-kube-scheduler-logs.txt",
 		Cmd:  "kubectl",
-		Args: []string{"-n", "kube-system", "logs", "-l", "component=kube-scheduler", "--tail=3000"},
+		Args: []string{"-n", "kube-system", "logs", "-l", "component=kube-scheduler", "--tail=3000", "--ignore-errors=true"},
 	},
 	{
 		File: "kube-system-kube-dns-logs.txt",
 		Cmd:  "kubectl",
-		Args: []string{"-n", "kube-system", "logs", "-l", "k8s-app=kube-dns", "--tail=3000"},
+		Args: []string{"-n", "kube-system", "logs", "-l", "k8s-app=kube-dns", "--tail=3000", "--ignore-errors=true"},
 	},
 	{
 		File: "prometheusremotewrites.json",
