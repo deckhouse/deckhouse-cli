@@ -36,9 +36,6 @@ var (
 		© Flant JSC 2025`)
 
 	collectDebugInfoCmdExample = templates.Examples(`
-		# Create a diagnostic archive with the d8 utility, redirecting its output (stdout) to a file:
-		d8 system collect-debug-info > deckhouse-debug-$(date +"%Y_%m_%d").tar.gz
-
 		# The --exclude flag can be used to exclude specific elements from the archive build:
 		d8 system collect-debug-info --exclude ccm-logs,csi-controller-logs > deckhouse-debug-$(date +"%Y_%m_%d").tar.gz
 
@@ -56,7 +53,7 @@ func NewCommand() *cobra.Command {
 	)
 
 	collectDebugInfoCmd := &cobra.Command{
-		Use:           "collect-debug-info",
+		Use:           `collect-debug-info [flags] > deckhouse-debug-$(date +"%Y_%m_%d").tar.gz`,
 		Short:         "Collect debug info.",
 		Long:          collectDebugInfoCmdLong,
 		Example:       collectDebugInfoCmdExample,
