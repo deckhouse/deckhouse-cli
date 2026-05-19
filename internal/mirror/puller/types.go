@@ -28,13 +28,16 @@ import (
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
+// ImageRef is a full image reference (e.g. registry.example.com/repo:tag).
+type ImageRef = string
+
 // ImageGetter is a function type for getting images from the registry
 type ImageGetter func(ctx context.Context, tag string, opts ...registry.ImageGetOption) (pkg.RegistryImage, error)
 
 // PullConfig encapsulates the configuration for pulling images
 type PullConfig struct {
 	Name             string
-	ImageSet         map[string]*ImageMeta
+	ImageSet         map[ImageRef]*ImageMeta
 	Layout           *regimage.ImageLayout
 	AllowMissingTags bool
 	GetterService    pkg.BasicService

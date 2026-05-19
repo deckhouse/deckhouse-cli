@@ -29,25 +29,28 @@ import (
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
+// ImageDownloadList queues image refs for the puller.
+//   - Values: nil until the puller fills them with metadata.
+//   - rootURL: used to build refs for display (logs, annotations), not HTTP.
 type ImageDownloadList struct {
 	rootURL string
 
-	Deckhouse                  map[string]*puller.ImageMeta
-	DeckhouseExtra             map[string]*puller.ImageMeta
-	DeckhouseInstall           map[string]*puller.ImageMeta
-	DeckhouseInstallStandalone map[string]*puller.ImageMeta
-	DeckhouseReleaseChannel    map[string]*puller.ImageMeta
+	Deckhouse                  map[puller.ImageRef]*puller.ImageMeta
+	DeckhouseExtra             map[puller.ImageRef]*puller.ImageMeta
+	DeckhouseInstall           map[puller.ImageRef]*puller.ImageMeta
+	DeckhouseInstallStandalone map[puller.ImageRef]*puller.ImageMeta
+	DeckhouseReleaseChannel    map[puller.ImageRef]*puller.ImageMeta
 }
 
 func NewImageDownloadList(rootURL string) *ImageDownloadList {
 	return &ImageDownloadList{
 		rootURL: rootURL,
 
-		Deckhouse:                  make(map[string]*puller.ImageMeta),
-		DeckhouseExtra:             make(map[string]*puller.ImageMeta),
-		DeckhouseInstall:           make(map[string]*puller.ImageMeta),
-		DeckhouseInstallStandalone: make(map[string]*puller.ImageMeta),
-		DeckhouseReleaseChannel:    make(map[string]*puller.ImageMeta),
+		Deckhouse:                  make(map[puller.ImageRef]*puller.ImageMeta),
+		DeckhouseExtra:             make(map[puller.ImageRef]*puller.ImageMeta),
+		DeckhouseInstall:           make(map[puller.ImageRef]*puller.ImageMeta),
+		DeckhouseInstallStandalone: make(map[puller.ImageRef]*puller.ImageMeta),
+		DeckhouseReleaseChannel:    make(map[puller.ImageRef]*puller.ImageMeta),
 	}
 }
 

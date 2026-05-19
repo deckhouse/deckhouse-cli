@@ -39,7 +39,15 @@ const (
 	standaloneInstallerServiceName      = "standalone_installer"
 )
 
-// DeckhouseService provides high-level operations for Deckhouse platform management
+// DeckhouseService is the root for platform images in registry.
+// Its client points to the deckhouse base chosen by Service.NewService
+// (with edition segment for upstream, without it for flat mirrors).
+// Sub-services provide access to paths under that base:
+//
+//	(self)                -> <base>                    (deckhouse main image)
+//	ReleaseChannels()     -> <base>/release-channel
+//	Installer()           -> <base>/install
+//	StandaloneInstaller() -> <base>/install-standalone
 type DeckhouseService struct {
 	client client.Client
 

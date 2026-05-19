@@ -92,7 +92,7 @@ func NewService(
 	return &Service{
 		securityService: registryService.Security(),
 		layout:          layout,
-		downloadList:    NewImageDownloadList(registryService.GetRoot()),
+		downloadList:    NewImageDownloadList(registryService.DeckhouseService().GetRoot()),
 		pullerService:   puller.NewPullerService(logger, userLogger),
 		options:         options,
 		logger:          logger,
