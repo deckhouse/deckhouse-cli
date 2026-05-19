@@ -333,6 +333,16 @@ func (svc *Service) discoverChannelVersions(ctx context.Context, moduleName stri
 		downloadList.ModuleReleaseChannels[svc.rootURL+"/modules/"+moduleName+"/release:"+channel] = nil
 	}
 
+	ltsExistsErr := svc.modulesService.Module(moduleName).ReleaseChannels().CheckImageExists(ctx, internal.LTSChannel)
+	if ltsExistsErr != nil && !errors.Is(ltsExistsErr, client.ErrImageNotFound) {
+		return nil, fmt.Errorf("check LTS release channel: %w", ltsExistsErr)
+	}
+
+	hasLTS := ltsExistsErr == nil
+	if hasLTS {
+		downloadList.ModuleReleaseChannels[svc.rootURL+"/modules/"+moduleName+"/release:"+internal.LTSChannel] = nil
+	}
+
 	if !svc.options.DryRun {
 		config := puller.PullConfig{
 			Name:             moduleName + " release channels",
