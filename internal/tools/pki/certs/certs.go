@@ -153,7 +153,7 @@ func RenderReport(w io.Writer, report *Report) {
 				"no",
 			)
 		}
-		tw.Flush() //nolint:errcheck
+		tw.Flush()
 	}
 
 	if len(report.CAs) > 0 {
@@ -170,7 +170,7 @@ func RenderReport(w io.Writer, report *Report) {
 				"no",
 			)
 		}
-		tw.Flush() //nolint:errcheck
+		tw.Flush()
 	}
 }
 
