@@ -25,8 +25,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	golayout "github.com/google/go-containerregistry/pkg/v1/layout"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	golayout "github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -34,6 +34,7 @@ import (
 	dkpreg "github.com/deckhouse/deckhouse/pkg/registry"
 	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
@@ -296,6 +297,7 @@ func addModule(reg *upfake.Registry, name, channelVer string, versions []string)
 	reg.MustAddImage("modules", name, versionImage(channelVer))
 	for _, v := range versions {
 		reg.MustAddImage("modules/"+name, v, versionImage(v))
+		reg.MustAddImage("modules/"+name+"/release", v, versionImage(v))
 	}
 	for _, ch := range []string{"alpha", "beta", "early-access", "stable", "rock-solid"} {
 		reg.MustAddImage("modules/"+name+"/release", ch, versionImage(channelVer))
@@ -307,6 +309,11 @@ func singleModuleRegistry(name, channelVer string, versions []string) *upfake.Re
 	reg := upfake.NewRegistry(testHost)
 	addModule(reg, name, channelVer, versions)
 	return reg
+}
+
+// addLTSReleaseChannel adds the optional LTS release channel (CSE editions).
+func addLTSReleaseChannel(reg *upfake.Registry, name, channelVer string) {
+	reg.MustAddImage("modules/"+name+"/release", internal.LTSChannel, versionImage(channelVer))
 }
 
 // versionImage builds a v1.Image carrying only version.json. Missing
@@ -326,6 +333,10 @@ func versionImage(version string) v1.Image {
 // version-tagged module image.
 func taggedModuleRef(moduleName, version string) string {
 	return testHost + "/modules/" + moduleName + ":" + version
+}
+
+func moduleReleaseChannelRef(moduleName, channel string) string {
+	return testHost + "/modules/" + moduleName + "/release:" + channel
 }
 
 func taggedModuleRefs(moduleName string, versions []string) []string {
@@ -496,4 +507,38 @@ func TestImageLayouts_HasImages_WithImage(t *testing.T) {
 
 	assert.True(t, layouts.HasImages(),
 		"HasImages must return true after at least one image is appended")
+}
+
+// =============================================================================
+// Tests: LTS release channel
+// =============================================================================
+
+// CSE editions expose an optional LTS release channel in addition to the five
+// default channels. discoverChannelVersions must detect it and include it in
+// the pull without failing.
+func TestPullModules_LTSChannel(t *testing.T) {
+	reg := singleModuleRegistry(testModuleName, channelVersion, defaultRegistryVersions)
+	addLTSReleaseChannel(reg, testModuleName, channelVersion)
+
+	bundleDir := t.TempDir()
+	svc := newService(t, pkgclient.Adapt(upfake.NewClient(reg)), nil)
+	svc.options.BundleDir = bundleDir
+
+	require.NoError(t, svc.PullModules(context.Background()))
+
+	moduleDL := svc.modulesDownloadList.Module(testModuleName)
+	require.NotNil(t, moduleDL, "modulesDownloadList must have an entry for module %q", testModuleName)
+
+	ltsRef := moduleReleaseChannelRef(testModuleName, internal.LTSChannel)
+	_, ok := moduleDL.ModuleReleaseChannels[ltsRef]
+	assert.True(t, ok,
+		"ModuleReleaseChannels should contain LTS ref %q; actual keys: %v",
+		ltsRef, moduleDL.ModuleReleaseChannels)
+
+	assert.Contains(t, pulledModuleVersionRefs(t, svc, testModuleName), taggedModuleRef(testModuleName, channelVersion),
+		"LTS channel must contribute %s to the pulled module versions", channelVersion)
+
+	entries, err := os.ReadDir(bundleDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "bundle dir must contain a tar when LTS channel pull succeeds")
 }
