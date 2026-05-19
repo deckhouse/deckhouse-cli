@@ -333,6 +333,11 @@ func (svc *Service) discoverChannelVersions(ctx context.Context, moduleName stri
 		downloadList.ModuleReleaseChannels[svc.rootURL+"/modules/"+moduleName+"/release:"+channel] = nil
 	}
 
+	// Add LTS channel if it exists
+	if err := svc.modulesService.Module(moduleName).ReleaseChannels().CheckImageExists(ctx, internal.LTSChannel); err == nil {
+		downloadList.ModuleReleaseChannels[svc.rootURL+"/modules/"+moduleName+"/release:"+internal.LTSChannel] = nil
+	}
+
 	if !svc.options.DryRun {
 		config := puller.PullConfig{
 			Name:             moduleName + " release channels",
@@ -589,7 +594,14 @@ func (svc *Service) findVexImage(ctx context.Context, moduleName string, imageRe
 func (svc *Service) extractVersionsFromReleaseChannels(ctx context.Context, moduleName string) []string {
 	versions := make([]string, 0)
 
-	for _, channel := range internal.GetAllDefaultReleaseChannels() {
+	channels := internal.GetAllDefaultReleaseChannels()
+
+	// Add LTS channel if it exists
+	if err := svc.modulesService.Module(moduleName).ReleaseChannels().CheckImageExists(ctx, internal.LTSChannel); err == nil {
+		channels = append(channels, internal.LTSChannel)
+	}
+
+	for _, channel := range channels {
 		img, err := svc.modulesService.Module(moduleName).ReleaseChannels().GetImage(ctx, channel)
 		if err != nil {
 			svc.logger.Debug(fmt.Sprintf("Failed to get release channel image for %s/%s: %v", moduleName, channel, err))
