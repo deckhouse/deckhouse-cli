@@ -250,6 +250,9 @@ func (pc *PluginsCommand) validatePluginRequirementMandatory(plugin *internal.Pl
 			return nil, fmt.Errorf("failed to check if plugin is installed: %w", err)
 		}
 		if !installed {
+			pc.logger.Warn("plugin requirement not installed",
+				slog.String("plugin", plugin.Name),
+				slog.String("requirement", pluginRequirement.Name))
 			result[pluginRequirement.Name] = nil
 			continue
 		}
