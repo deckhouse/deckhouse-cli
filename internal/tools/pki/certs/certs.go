@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -49,22 +50,54 @@ type Report struct {
 	CAs   []CAEntry
 }
 
+type multiUnwrapper interface {
+	Unwrap() []error
+}
+
 // BuildFullScanReport enumerates all known control-plane certificates and kubeconfig
 // client certificates, returning a report split into CAs and leaf certs.
 // certsDir is the PKI directory (e.g. /etc/kubernetes/pki).
 // kubeconfigDir is the directory containing kubeconfig files (e.g. /etc/kubernetes).
 // Callers that want the standard layout can pass filepath.Dir(certsDir).
 func BuildFullScanReport(certsDir, kubeconfigDir string) (*Report, error) {
-	pkiExpirations, err := pki.ListCertificateExpirations(pki.WithCertificatesDir(certsDir))
+	pkiExpirations, pkiErr := pki.ListCertificateExpirations(
+		pki.WithCertificatesDir(certsDir),
+		pki.WithIgnoreReadErrors(),
+	)
+	kcExpirations, kcErr := kubeconfig.ListClientCertificateExpirations(
+		kubeconfig.WithKubeconfigDir(kubeconfigDir),
+		kubeconfig.WithIgnoreReadErrors(),
+	)
+
+	hasExpirations := len(pkiExpirations) > 0 || len(kcExpirations) > 0
+
+	err := errors.Join(
+		parseFullScanError("PKI certificates", certsDir, pkiErr),
+		parseFullScanError("kubeconfig client certificates", kubeconfigDir, kcErr),
+	)
+	if err != nil && !hasExpirations {
+		return nil, fmt.Errorf("no control-plane certificates or kubeconfig client certificates found: %w", err)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("listing PKI certificates in %q: %w", certsDir, err)
+		return nil, err
+	}
+	if !hasExpirations {
+		return nil, fmt.Errorf("no control-plane certificates or kubeconfig client certificates found in %q and %q", certsDir, kubeconfigDir)
 	}
 
-	kcExpirations, err := kubeconfig.ListClientCertificateExpirations(kubeconfig.WithKubeconfigDir(kubeconfigDir))
-	if err != nil {
-		return nil, fmt.Errorf("listing kubeconfig client certificates in %q: %w", kubeconfigDir, err)
-	}
+	report := reportFromExpirations(pkiExpirations, kcExpirations)
 
+	sort.Slice(report.Certs, func(i, j int) bool {
+		return report.Certs[i].Name < report.Certs[j].Name
+	})
+	sort.Slice(report.CAs, func(i, j int) bool {
+		return report.CAs[i].Name < report.CAs[j].Name
+	})
+
+	return report, nil
+}
+
+func reportFromExpirations(pkiExpirations []pki.CertificateExpiration, kcExpirations []kubeconfig.ClientCertificateExpiration) *Report {
 	report := &Report{}
 
 	for _, exp := range pkiExpirations {
@@ -90,14 +123,33 @@ func BuildFullScanReport(certsDir, kubeconfigDir string) (*Report, error) {
 		})
 	}
 
-	sort.Slice(report.Certs, func(i, j int) bool {
-		return report.Certs[i].Name < report.Certs[j].Name
-	})
-	sort.Slice(report.CAs, func(i, j int) bool {
-		return report.CAs[i].Name < report.CAs[j].Name
-	})
+	return report
+}
 
-	return report, nil
+func parseFullScanError(subject, dir string, err error) error {
+	if err == nil || onlyNotExistErrors(err) {
+		return nil
+	}
+
+	return fmt.Errorf("listing %s in %q: %w", subject, dir, err)
+}
+
+func onlyNotExistErrors(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var multiErr multiUnwrapper
+	if errors.As(err, &multiErr) {
+		for _, nestedErr := range multiErr.Unwrap() {
+			if !onlyNotExistErrors(nestedErr) {
+				return false
+			}
+		}
+		return true
+	}
+
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // BuildSingleFileReport inspects a single file at path.

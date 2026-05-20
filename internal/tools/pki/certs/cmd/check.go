@@ -36,6 +36,9 @@ kubeconfig files under --kubeconfig-dir are checked.  Output is split into two
 sections – leaf certificates and certificate authorities – similar to
 "kubeadm certs check-expiration".
 
+Missing known files are skipped in full-scan mode, so on worker or arbiter
+nodes the command prints the artifacts that are actually present locally.
+
 --kubeconfig-dir defaults to the parent directory of --path, which matches the
 standard Kubernetes layout (/etc/kubernetes/pki → /etc/kubernetes).  Set it
 explicitly when using a non-default directory layout.

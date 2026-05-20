@@ -18,6 +18,14 @@ package certs
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -192,4 +200,79 @@ func TestPkiDisplayName(t *testing.T) {
 			assert.Equal(t, tt.want, pkiDisplayName(tt.input))
 		})
 	}
+}
+
+func TestBuildFullScanReport_ReturnsPartialReportWhenOnlySomeArtifactsExist(t *testing.T) {
+	t.Parallel()
+
+	certsDir := t.TempDir()
+	kubeconfigDir := t.TempDir()
+
+	require.NoError(t, writeTestCertificate(filepath.Join(certsDir, "ca.crt"), true))
+
+	report, err := BuildFullScanReport(certsDir, kubeconfigDir)
+	require.NoError(t, err)
+	require.NotNil(t, report)
+	require.Empty(t, report.Certs)
+	require.Len(t, report.CAs, 1)
+	assert.Equal(t, "ca", report.CAs[0].Name)
+}
+
+func TestBuildFullScanReport_ReturnsHelpfulErrorWhenNothingFound(t *testing.T) {
+	t.Parallel()
+
+	certsDir := t.TempDir()
+	kubeconfigDir := t.TempDir()
+
+	report, err := BuildFullScanReport(certsDir, kubeconfigDir)
+	require.Nil(t, report)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no control-plane certificates or kubeconfig client certificates found")
+}
+
+func TestBuildFullScanReport_FailsOnInvalidExistingCertificate(t *testing.T) {
+	t.Parallel()
+
+	certsDir := t.TempDir()
+	kubeconfigDir := t.TempDir()
+
+	require.NoError(t, writeTestCertificate(filepath.Join(certsDir, "front-proxy-ca.crt"), true))
+	require.NoError(t, os.WriteFile(filepath.Join(certsDir, "ca.crt"), []byte("not a certificate"), 0o600))
+
+	report, err := BuildFullScanReport(certsDir, kubeconfigDir)
+	require.Nil(t, report)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, `listing PKI certificates in "`)
+	assert.ErrorContains(t, err, "ca.crt")
+}
+
+func writeTestCertificate(path string, isCA bool) error {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return err
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: filepath.Base(path),
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		BasicConstraintsValid: true,
+		IsCA:                  isCA,
+	}
+
+	if isCA {
+		template.KeyUsage |= x509.KeyUsageCertSign
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		return err
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	return os.WriteFile(path, certPEM, 0o600)
 }
