@@ -95,11 +95,11 @@ func NewService(
 		// Security images live under the edition sub-tree (.../<edition>/security/...),
 		// so the downloadList key prefix must include the edition segment to match the
 		// repository scope served by registryService.Security().
-		downloadList: NewImageDownloadList(registryService.GetEditionRoot()),
-		pullerService:   puller.NewPullerService(logger, userLogger),
-		options:         options,
-		logger:          logger,
-		userLogger:      userLogger,
+		downloadList:  NewImageDownloadList(registryService.GetEditionRoot()),
+		pullerService: puller.NewPullerService(logger, userLogger),
+		options:       options,
+		logger:        logger,
+		userLogger:    userLogger,
 	}
 }
 
