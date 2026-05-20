@@ -489,6 +489,166 @@ func ltsOnlySourceStub(ver string) localreg.Client {
 	return pkgclient.Adapt(upfake.NewClient(reg))
 }
 
+// TestPullPlatform_FEEdition_DownloadListUsesEditionRoot is the regression for
+// the report that `d8 mirror pull --source=.../deckhouse/fe` enqueues entries
+// like "registry.deckhouse.ru/deckhouse/release-channel:<ch>" (without the
+// "fe" segment) alongside the correct
+// "registry.deckhouse.ru/deckhouse/fe/release-channel:<ch>" ones.
+//
+// The root cause was platform.NewService seeding the downloadList rootURL
+// from registryService.GetRoot() (non-edition root) while
+// getReleaseChannelVersionFromRegistry fed the same map with edition-scoped
+// keys obtained through deckhouseService. The fix is to seed the rootURL
+// with registryService.GetEditionRoot() so every key in the downloadList
+// carries the edition segment.
+//
+// We exercise the contract directly at the platform.NewService boundary so
+// the test does not depend on the fake registry's WithSegment semantics
+// (the in-memory fake intentionally exposes only the host via GetRegistry,
+// which would mask both the bug and the fix).
+func TestPullPlatform_FEEdition_DownloadListUsesEditionRoot(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	c := pkgclient.NewFromOptions("registry.deckhouse.ru/deckhouse")
+	regSvc := registryservice.NewService(c, pkg.FEEdition, logger)
+
+	svc := NewService(
+		regSvc,
+		t.TempDir(),
+		&Options{BundleDir: t.TempDir(), DryRun: true},
+		logger,
+		userLogger,
+	)
+
+	const editionRoot = "registry.deckhouse.ru/deckhouse/fe"
+
+	// The downloadList rootURL must point at the edition sub-tree. We probe it
+	// through FillDeckhouseImages, which uses rootURL to build the entry keys.
+	const probe = "v1.69.0"
+	svc.downloadList.FillDeckhouseImages([]string{probe})
+
+	assert.Contains(t, svc.downloadList.Deckhouse, editionRoot+":"+probe,
+		"FE main Deckhouse entry must live under the edition sub-tree")
+	assert.Contains(t, svc.downloadList.DeckhouseInstall,
+		editionRoot+"/install:"+probe,
+		"FE install entry must live under the edition sub-tree")
+	assert.Contains(t, svc.downloadList.DeckhouseInstallStandalone,
+		editionRoot+"/install-standalone:"+probe,
+		"FE standalone install entry must live under the edition sub-tree")
+	assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel,
+		editionRoot+"/release-channel:"+probe,
+		"FE release-channel version tag must live under the edition sub-tree")
+
+	const bareRoot = "registry.deckhouse.ru/deckhouse"
+	// Spot-check that no key was written under the bare (non-edition) root.
+	// These are the exact shapes that surfaced as duplicate pulls in the bug report.
+	assert.NotContains(t, svc.downloadList.Deckhouse, bareRoot+":"+probe)
+	assert.NotContains(t, svc.downloadList.DeckhouseInstall, bareRoot+"/install:"+probe)
+	assert.NotContains(t, svc.downloadList.DeckhouseReleaseChannel,
+		bareRoot+"/release-channel:"+probe)
+
+	// FillForChannels populates channel aliases — same rootURL must apply.
+	svc.downloadList.FillForChannels([]string{"stable", "alpha"})
+	assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel,
+		editionRoot+"/release-channel:stable",
+		"FE release-channel alias must live under the edition sub-tree")
+	assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel,
+		editionRoot+"/release-channel:alpha",
+		"FE release-channel alias must live under the edition sub-tree")
+	assert.NotContains(t, svc.downloadList.DeckhouseReleaseChannel,
+		bareRoot+"/release-channel:stable",
+		"non-edition-scoped duplicate must not be enqueued")
+}
+
+// TestPullPlatform_NoEdition_DownloadListUsesBareRoot is the companion of
+// TestPullPlatform_FEEdition_DownloadListUsesEditionRoot for the NoEdition
+// case. When no edition is configured GetEditionRoot must collapse to the
+// bare root so the downloadList keeps producing the original key shape used
+// by community / CSE sources.
+func TestPullPlatform_NoEdition_DownloadListUsesBareRoot(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	const bareRoot = "registry.example.com/deckhouse"
+	c := pkgclient.NewFromOptions(bareRoot)
+	regSvc := registryservice.NewService(c, pkg.NoEdition, logger)
+
+	svc := NewService(
+		regSvc,
+		t.TempDir(),
+		&Options{BundleDir: t.TempDir(), DryRun: true},
+		logger,
+		userLogger,
+	)
+
+	const probe = "v1.69.0"
+	svc.downloadList.FillDeckhouseImages([]string{probe})
+
+	assert.Contains(t, svc.downloadList.Deckhouse, bareRoot+":"+probe,
+		"with NoEdition the main Deckhouse entry must live at the bare root")
+	assert.Contains(t, svc.downloadList.DeckhouseInstall,
+		bareRoot+"/install:"+probe,
+		"with NoEdition install entries must live under the bare root")
+	assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel,
+		bareRoot+"/release-channel:"+probe,
+		"with NoEdition release-channel entries must live under the bare root")
+}
+
+// TestPullPlatform_AllEditions_DownloadListUsesEditionRoot sweeps every
+// concrete edition so that any future addition to pkg.Edition that is not
+// wired through to platform.NewService surfaces here as an explicit failure.
+func TestPullPlatform_AllEditions_DownloadListUsesEditionRoot(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	const bareRoot = "registry.deckhouse.ru/deckhouse"
+	editions := []pkg.Edition{
+		pkg.FEEdition,
+		pkg.EEEdition,
+		pkg.SEEdition,
+		pkg.SEPlusEdition,
+		pkg.BEEdition,
+		pkg.CEEdition,
+	}
+
+	const probe = "v1.69.0"
+
+	for _, edition := range editions {
+		t.Run("edition="+edition.String(), func(t *testing.T) {
+			c := pkgclient.NewFromOptions(bareRoot)
+			regSvc := registryservice.NewService(c, edition, logger)
+			svc := NewService(
+				regSvc,
+				t.TempDir(),
+				&Options{BundleDir: t.TempDir(), DryRun: true},
+				logger,
+				userLogger,
+			)
+
+			svc.downloadList.FillDeckhouseImages([]string{probe})
+			svc.downloadList.FillForChannels([]string{"stable"})
+
+			editionRoot := bareRoot + "/" + edition.String()
+			assert.Contains(t, svc.downloadList.Deckhouse, editionRoot+":"+probe)
+			assert.Contains(t, svc.downloadList.DeckhouseInstall,
+				editionRoot+"/install:"+probe)
+			assert.Contains(t, svc.downloadList.DeckhouseInstallStandalone,
+				editionRoot+"/install-standalone:"+probe)
+			assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel,
+				editionRoot+"/release-channel:"+probe)
+			assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel,
+				editionRoot+"/release-channel:stable")
+
+			assert.NotContains(t, svc.downloadList.Deckhouse, bareRoot+":"+probe,
+				"%s edition must not leak a duplicate at the bare root", edition)
+			assert.NotContains(t, svc.downloadList.DeckhouseReleaseChannel,
+				bareRoot+"/release-channel:stable",
+				"%s edition must not leak a duplicate channel alias at the bare root", edition)
+		})
+	}
+}
+
 // TestPullPlatform_LTSPull_ChannelAliasesLiveOnlyInReleaseChannel pins down the
 // shape of the bundle produced by `d8 mirror pull --deckhouse-tag <tag>` against
 // a CSE-like (LTS-only) registry. The invariant we lock in here is:

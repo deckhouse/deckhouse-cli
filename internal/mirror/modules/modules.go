@@ -121,7 +121,12 @@ func NewService(
 		options.Filter = filter
 	}
 
-	rootURL := registryService.GetRoot()
+	// rootURL must include the edition segment (e.g. .../deckhouse/fe) so that
+	// per-module references like <rootURL>/modules/<name>:<tag> resolve to the
+	// same path served by registryService.ModuleService(). registryService.GetRoot()
+	// would return the non-edition root and produce <root>/modules/<name>:<tag>,
+	// which mismatches the actual ModulesService scope.
+	rootURL := registryService.GetEditionRoot()
 
 	return &Service{
 		workingDir:          workingDir,
