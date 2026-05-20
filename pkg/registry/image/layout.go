@@ -97,10 +97,35 @@ func (l *ImageLayout) Path() layout.Path {
 	return l.wrapped
 }
 
+// AddImage stores img in the layout under tag.
+//
+// AddImage is idempotent for the (tag, digest) pair: if a previous call already
+// stored an image with the same tag and the same manifest digest, the second
+// call is a no-op. This matters because layout.Path.AppendImage always appends
+// a new descriptor to index.json — it has no notion of "update in place" — so
+// without this guard, callers that legitimately iterate over the same image
+// set more than once (for example, pulling the deckhouse image set, then
+// merging extra digests discovered from an installer and pulling the union
+// again) would silently produce duplicate descriptors with the same
+// io.deckhouse.image.short_tag annotation. Those duplicates later surface in
+// `mirror push` as the same tag being pushed multiple times.
+//
+// When the tag already exists but with a different digest, AddImage falls
+// through to AppendImage to preserve the previous re-tag behaviour; the push
+// pipeline deduplicates such cases with last-wins semantics.
 func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 	meta, err := img.GetMetadata()
 	if err != nil {
 		return fmt.Errorf("get image tag reference: %w", err)
+	}
+
+	newDigest := meta.GetDigest()
+	if existing, ok := l.metaByTag[tag]; ok {
+		if existingDigest := existing.GetDigest(); existingDigest != nil &&
+			newDigest != nil &&
+			*existingDigest == *newDigest {
+			return nil
+		}
 	}
 
 	// TODO: support nesting tags in image

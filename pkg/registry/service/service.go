@@ -36,6 +36,10 @@ const (
 // Service provides high-level registry operations using a registry client
 type Service struct {
 	client client.Client
+	// editionBase is the client scoped to the edition sub-path (or equal to
+	// client when no edition is configured). Services that live under the
+	// edition path (deckhouse, modules, security) are built on top of it.
+	editionBase client.Client
 
 	modulesService   *ModulesService
 	pluginService    *PluginService
@@ -61,6 +65,7 @@ func NewService(c client.Client, edition pkg.Edition, logger *log.Logger) *Servi
 	} else {
 		base = c.WithSegment(edition.String())
 	}
+	s.editionBase = base
 
 	s.modulesService = NewModulesService(base.WithSegment(moduleSegment), logger.Named("modules"))
 	s.deckhouseService = NewDeckhouseService(base, logger.Named("deckhouse"))
@@ -73,9 +78,19 @@ func NewService(c client.Client, edition pkg.Edition, logger *log.Logger) *Servi
 	return s
 }
 
-// GetRoot gets path of the registry root
+// GetRoot gets path of the registry root, without the edition segment.
+// This is the non-edition-scoped root (e.g. "registry.deckhouse.ru/deckhouse")
+// used for services that live outside the edition sub-tree (installer, plugins).
 func (s *Service) GetRoot() string {
 	return s.client.GetRegistry()
+}
+
+// GetEditionRoot returns the registry root scoped to the edition sub-path
+// (e.g. "registry.deckhouse.ru/deckhouse/fe"). When no edition is configured
+// the result equals GetRoot(). Use this when building references for services
+// that live under the edition sub-tree (deckhouse, modules, security).
+func (s *Service) GetEditionRoot() string {
+	return s.editionBase.GetRegistry()
 }
 
 // ModuleService returns the module service

@@ -195,6 +195,54 @@ func TestPushLayout_EmptyLayout(t *testing.T) {
 	assert.NoError(t, err, "PushLayout on an empty layout must not error")
 }
 
+// TestPushLayout_DeduplicatesByShortTag verifies that when an OCI layout
+// contains several descriptors with the same io.deckhouse.image.short_tag
+// annotation (which the libmirror layouts can produce by appending a new
+// descriptor instead of editing in place), PushLayout pushes that tag once
+// and ends up with the LAST descriptor in the registry. Pushing twice would
+// be wasteful and would produce a misleading "[1/N] ... v1.73.2" / "[K/N]
+// ... v1.73.2" sequence in the log.
+func TestPushLayout_DeduplicatesByShortTag(t *testing.T) {
+	const dupTag = "v1.73.2"
+
+	dir := t.TempDir()
+	imgLayout, err := regimage.NewImageLayout(dir)
+	require.NoError(t, err)
+	lp := imgLayout.Path()
+
+	imgA := upfake.NewImageBuilder().
+		WithFile("version.json", `{"version":"`+dupTag+`","build":"A"}`).
+		MustBuild()
+	imgB := upfake.NewImageBuilder().
+		WithFile("version.json", `{"version":"`+dupTag+`","build":"B"}`).
+		MustBuild()
+
+	require.NoError(t, lp.AppendImage(imgA, layout.WithAnnotations(map[string]string{
+		regimage.AnnotationImageShortTag: dupTag,
+	})))
+	require.NoError(t, lp.AppendImage(imgB, layout.WithAnnotations(map[string]string{
+		regimage.AnnotationImageShortTag: dupTag,
+	})))
+
+	digestB, err := imgB.Digest()
+	require.NoError(t, err)
+
+	reg := upfake.NewRegistry("push.example.io")
+	destClient := pkgclient.Adapt(upfake.NewClient(reg))
+
+	svc := newTestService(t)
+	require.NoError(t, svc.PushLayout(context.Background(), lp, destClient))
+
+	require.NoError(t, destClient.CheckImageExists(context.Background(), dupTag),
+		"tag %q must exist in destination after PushLayout", dupTag)
+
+	pushedDigest, err := destClient.GetDigest(context.Background(), dupTag)
+	require.NoError(t, err, "duplicated tag must be present in the destination registry")
+	require.NotNil(t, pushedDigest)
+	assert.Equal(t, digestB.String(), pushedDigest.String(),
+		"last descriptor for a duplicated short_tag must win")
+}
+
 // TestPushLayout_MultipleImages verifies that all annotated images in a layout
 // are pushed to the destination.
 func TestPushLayout_MultipleImages(t *testing.T) {

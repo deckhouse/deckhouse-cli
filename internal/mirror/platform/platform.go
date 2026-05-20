@@ -115,7 +115,13 @@ func NewService(
 		}
 	}
 
-	rootURL := registryService.GetRoot()
+	// rootURL must point at the edition sub-tree so that references inside
+	// downloadList (e.g. release-channel:<channel>) line up with the actual
+	// repository served by deckhouseService.ReleaseChannels(). Using the
+	// bare registryService.GetRoot() here would drop the edition segment for
+	// FE/EE/SE sources and cause duplicate <root>/release-channel:<channel>
+	// entries to be enqueued alongside the correct <root>/<edition>/release-channel:<channel>.
+	rootURL := registryService.GetEditionRoot()
 
 	return &Service{
 		deckhouseService: registryService.DeckhouseService(),

@@ -26,13 +26,22 @@ func OperateQueue(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOpt
 }
 
 func executeQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOption string) error {
+	out, err := fetchQueue(config, kubeCl, pathFromOption)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("%s\n", out)
+	return nil
+}
+
+func fetchQueue(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOption string) (string, error) {
 	const (
 		apiProtocol = "http"
 		apiEndpoint = "127.0.0.1"
 		apiPort     = "9652"
 		queuePath   = "queue"
 
-		labelSelector = "leader=true"
 		namespace     = "d8-system"
 		containerName = "deckhouse"
 	)
@@ -41,53 +50,78 @@ func executeQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, path
 	getAPI := []string{"curl", fullEndpointURL}
 	podName, err := utilk8s.GetDeckhousePod(kubeCl)
 	if err != nil {
-		return err
+		return "", err
 	}
 	executor, err := utilk8s.ExecInPod(config, kubeCl, getAPI, podName, namespace, containerName)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err = executor.StreamWithContext(
+	if err := executor.StreamWithContext(
 		context.Background(),
 		remotecommand.StreamOptions{
 			Stdout: &stdout,
 			Stderr: &stderr,
 		}); err != nil {
-		return err
+		return "", err
 	}
 
-	fmt.Printf("%s\n", stdout.String())
-	return nil
+	return stdout.String(), nil
 }
 
 func watchQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOption string) error {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(signals)
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	output := termenv.DefaultOutput()
+	output.AltScreen()
+	output.HideCursor()
+	defer func() {
+		output.ShowCursor()
+		output.ExitAltScreen()
+	}()
 
-	fmt.Println("Watching queue (press Ctrl+C to stop)...")
+	// Render frames into a single buffer and write them in one syscall so the
+	// terminal never has a chance to display a half-cleared screen. The
+	// "cursor home, write, clear to end of screen" pattern overwrites the
+	// previous frame in place instead of wiping it first, which is what was
+	// causing the visible blinking.
+	render := func() {
+		body, fetchErr := fetchQueue(config, kubeCl, pathFromOption)
+
+		var frame bytes.Buffer
+		// Move cursor to the top-left corner.
+		frame.WriteString("\x1b[H")
+		fmt.Fprintf(&frame, "Watching queue - %s (press Ctrl+C to stop)\n\n", time.Now().Format("15:04:05"))
+		if fetchErr != nil {
+			fmt.Fprintf(&frame, "Error fetching queue: %v\n", fetchErr)
+		} else {
+			frame.WriteString(body)
+			if len(body) == 0 || body[len(body)-1] != '\n' {
+				frame.WriteByte('\n')
+			}
+		}
+		// Erase everything from the cursor to the end of the screen so that
+		// leftover content from a longer previous frame is cleaned up.
+		frame.WriteString("\x1b[J")
+
+		_, _ = os.Stdout.Write(frame.Bytes())
+	}
+
+	render()
 
 	for {
 		select {
 		case <-signals:
-			fmt.Println("\nWatch stopped.")
 			return nil
 		case <-ticker.C:
-			output.ClearScreen()
-			output.MoveCursor(1, 1)
-			fmt.Printf("Watching queue - %s\n\n", time.Now().Format("15:04:05"))
-
-			err := executeQueueCommand(config, kubeCl, pathFromOption)
-			if err != nil {
-				fmt.Printf("Error fetching queue: %v\n", err)
-			}
+			render()
 		}
 	}
 }
