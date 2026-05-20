@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"time"
 
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
@@ -34,6 +35,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
+	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
 const (
@@ -84,14 +86,15 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 		return nil
 	}
 
-	s.userLogger.Infof("Pushing %d images", len(indexManifest.Manifests))
+	manifests := dedupManifestsByShortTag(indexManifest.Manifests, s.logger)
+	if len(manifests) == 0 {
+		return nil
+	}
 
-	for i, manifest := range indexManifest.Manifests {
-		tag := manifest.Annotations["io.deckhouse.image.short_tag"]
-		if tag == "" {
-			s.logger.Warn("Skipping image without short_tag annotation", slog.String("digest", manifest.Digest.String()))
-			continue
-		}
+	s.userLogger.Infof("Pushing %d images", len(manifests))
+
+	for i, manifest := range manifests {
+		tag := manifest.Annotations[regimage.AnnotationImageShortTag]
 
 		img, err := index.Image(manifest.Digest)
 		if err != nil {
@@ -102,7 +105,7 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 		err = retry.RunTask(
 			ctx,
 			s.userLogger,
-			fmt.Sprintf("[%d / %d] Pushing %s", i+1, len(indexManifest.Manifests), imageReferenceString),
+			fmt.Sprintf("[%d / %d] Pushing %s", i+1, len(manifests), imageReferenceString),
 			task.WithConstantRetries(pushRetryAttempts, pushRetryDelay, func(ctx context.Context) error {
 				if err := client.PushImage(ctx, tag, img); err != nil {
 					return fmt.Errorf("write %s:%s to registry: %w", client.GetRegistry(), tag, err)
@@ -115,6 +118,48 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 	}
 
 	return nil
+}
+
+// dedupManifestsByShortTag filters and deduplicates manifests for pushing.
+//
+// Descriptors without the io.deckhouse.image.short_tag annotation are skipped.
+// When several descriptors carry the same short_tag (which can happen because
+// layout.AppendDescriptor in libmirror layouts/images appends a new descriptor
+// instead of updating one in place), only the last one is kept. That matches
+// what the registry would store today: the loop used to push every duplicate,
+// and each subsequent push of the same tag silently overwrote the previous
+// one. Deduplicating here makes the push log accurate and avoids redundant
+// network work.
+func dedupManifestsByShortTag(descriptors []v1.Descriptor, logger *dkplog.Logger) []v1.Descriptor {
+	if len(descriptors) == 0 {
+		return nil
+	}
+
+	indexByTag := make(map[string]int, len(descriptors))
+	result := make([]v1.Descriptor, 0, len(descriptors))
+
+	for _, manifest := range descriptors {
+		tag := manifest.Annotations[regimage.AnnotationImageShortTag]
+		if tag == "" {
+			logger.Warn("Skipping image without short_tag annotation",
+				slog.String("digest", manifest.Digest.String()))
+			continue
+		}
+
+		if idx, ok := indexByTag[tag]; ok {
+			logger.Warn("Duplicate short_tag in OCI layout, keeping last descriptor",
+				slog.String("tag", tag),
+				slog.String("previous_digest", result[idx].Digest.String()),
+				slog.String("current_digest", manifest.Digest.String()))
+			result[idx] = manifest
+			continue
+		}
+
+		indexByTag[tag] = len(result)
+		result = append(result, manifest)
+	}
+
+	return result
 }
 
 // OpenPackage opens a package file, trying .tar first, then chunked
