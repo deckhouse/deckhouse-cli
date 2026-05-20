@@ -143,14 +143,13 @@ func RenderReport(w io.Writer, report *Report) {
 
 	if len(report.Certs) > 0 {
 		tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-		fmt.Fprintln(tw, "CERTIFICATE\tEXPIRES\tRESIDUAL TIME\tCERTIFICATE AUTHORITY\tEXTERNALLY MANAGED")
+		fmt.Fprintln(tw, "CERTIFICATE\tEXPIRES\tRESIDUAL TIME\tCERTIFICATE AUTHORITY")
 		for _, c := range report.Certs {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
 				c.Name,
 				c.Expires.UTC().Format("Jan 02, 2006 15:04 MST"),
 				residualTime(c.Expires, now),
 				c.Authority,
-				"no",
 			)
 		}
 		tw.Flush()
@@ -161,13 +160,12 @@ func RenderReport(w io.Writer, report *Report) {
 			fmt.Fprintln(w)
 		}
 		tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-		fmt.Fprintln(tw, "CERTIFICATE AUTHORITY\tEXPIRES\tRESIDUAL TIME\tEXTERNALLY MANAGED")
+		fmt.Fprintln(tw, "CERTIFICATE AUTHORITY\tEXPIRES\tRESIDUAL TIME")
 		for _, ca := range report.CAs {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+			fmt.Fprintf(tw, "%s\t%s\t%s\n",
 				ca.Name,
 				ca.Expires.UTC().Format("Jan 02, 2006 15:04 MST"),
 				residualTime(ca.Expires, now),
-				"no",
 			)
 		}
 		tw.Flush()

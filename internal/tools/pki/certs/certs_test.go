@@ -109,10 +109,8 @@ func TestRenderReport_CertsSection(t *testing.T) {
 	require.Contains(t, out, "EXPIRES")
 	require.Contains(t, out, "RESIDUAL TIME")
 	require.Contains(t, out, "CERTIFICATE AUTHORITY")
-	require.Contains(t, out, "EXTERNALLY MANAGED")
 	require.Contains(t, out, "apiserver")
 	require.Contains(t, out, "ca")
-	require.Contains(t, out, "no")
 }
 
 func TestRenderReport_CAsSection(t *testing.T) {
@@ -131,7 +129,6 @@ func TestRenderReport_CAsSection(t *testing.T) {
 	require.Contains(t, out, "CERTIFICATE AUTHORITY")
 	require.Contains(t, out, "EXPIRES")
 	require.Contains(t, out, "ca")
-	require.Contains(t, out, "no")
 }
 
 func TestRenderReport_BothSections(t *testing.T) {
