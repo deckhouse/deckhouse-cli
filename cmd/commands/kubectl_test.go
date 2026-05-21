@@ -17,6 +17,7 @@ limitations under the License.
 package commands
 
 import (
+	"bytes"
 	"testing"
 )
 
@@ -165,5 +166,49 @@ func TestD8CommandRegexCaptureGroups(t *testing.T) {
 	}
 	if matches[2] != expectedGroup2 {
 		t.Errorf("Group 2 (command): expected %q, got %q", expectedGroup2, matches[2])
+	}
+}
+
+func TestD8KubectlWriter(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "kubectl edit retry hint with backticks",
+			input:    "You can run `d8 replace -f /tmp/d8-edit-3418513019.yaml` to try this update again.\n",
+			expected: "You can run `d8 k replace -f /tmp/d8-edit-3418513019.yaml` to try this update again.\n",
+		},
+		{
+			name:     "non-matching content passes through unchanged",
+			input:    "error: the server doesn't have a resource type \"foobar\"\n",
+			expected: "error: the server doesn't have a resource type \"foobar\"\n",
+		},
+		{
+			name:     "multiple references on the same line",
+			input:    "Try `d8 get pods` or `d8 describe pod` for details.\n",
+			expected: "Try `d8 k get pods` or `d8 k describe pod` for details.\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := newD8KubectlWriter(&buf)
+
+			n, err := w.Write([]byte(tt.input))
+			if err != nil {
+				t.Fatalf("Write returned error: %v", err)
+			}
+
+			if n != len(tt.input) {
+				t.Errorf("Write returned n=%d, want %d (input length)", n, len(tt.input))
+			}
+
+			if got := buf.String(); got != tt.expected {
+				t.Errorf("\nInput:    %q\nExpected: %q\nGot:      %q", tt.input, tt.expected, got)
+			}
+		})
 	}
 }
