@@ -18,6 +18,7 @@ package modules
 
 import (
 	"fmt"
+	"regexp"
 
 	"github.com/Masterminds/semver/v3"
 )
@@ -30,14 +31,87 @@ type VersionConstraint interface {
 
 type SemanticVersionConstraint struct {
 	constraint *semver.Constraints
+	// anchors are versions explicitly named with an inclusive boundary
+	// operator (>=, <=) in the user's constraint string. These versions
+	// must round-trip through the latest-patch-per-minor filter — the user
+	// has named them by hand, so dropping them in favor of a newer patch
+	// in the same (major, minor) bucket would silently override an
+	// explicit user choice.
+	//
+	// Only `>=`, `<=` (and their reversed forms `=>`, `=<`) contribute
+	// anchors. Caret (`^`), tilde (`~`), and implicit constraints do not:
+	// those operators are shorthand for a range and the patch filter is
+	// free to collapse same-minor patches inside them.
+	anchors []*semver.Version
 }
+
+// anchorOpRegex captures version literals that follow an inclusive boundary
+// operator. Exclusive bounds (>, <) and shorthand operators (^, ~) are
+// intentionally excluded — see the anchors field doc above for the rationale.
+//
+// The version capture is deliberately permissive (any non-space, non-comma
+// run); the result is re-validated through semver.NewVersion before being
+// stored.
+var anchorOpRegex = regexp.MustCompile(`(?:>=|<=|=>|=<)\s*([^\s,]+)`)
 
 func NewSemanticVersionConstraint(c string) (*SemanticVersionConstraint, error) {
 	constraint, err := semver.NewConstraint(c)
 	if err != nil {
 		return nil, fmt.Errorf("invalid semantic version constraint %q: %w", c, err)
 	}
-	return &SemanticVersionConstraint{constraint: constraint}, nil
+
+	anchors, err := extractInclusiveAnchors(c)
+	if err != nil {
+		return nil, fmt.Errorf("invalid semantic version constraint %q: %w", c, err)
+	}
+
+	return &SemanticVersionConstraint{
+		constraint: constraint,
+		anchors:    anchors,
+	}, nil
+}
+
+// Anchors returns the versions explicitly named with an inclusive boundary
+// operator (>=, <=). Callers must re-check membership against the constraint
+// itself (Match) before consuming an anchor: an anchor that fails Match means
+// the user wrote a contradictory constraint (e.g. `>=2.0.0 <1.0.0`) and we
+// will not silently widen the range.
+func (s *SemanticVersionConstraint) Anchors() []*semver.Version {
+	return s.anchors
+}
+
+// extractInclusiveAnchors finds every >=X / <=X literal in the constraint
+// string and parses X with semver.NewVersion. Duplicates are removed.
+// The returned slice is nil when no inclusive boundary literals are present.
+func extractInclusiveAnchors(constraintStr string) ([]*semver.Version, error) {
+	matches := anchorOpRegex.FindAllStringSubmatch(constraintStr, -1)
+	if len(matches) == 0 {
+		return nil, nil
+	}
+
+	seen := make(map[string]struct{}, len(matches))
+	out := make([]*semver.Version, 0, len(matches))
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		raw := m[1]
+		if _, dup := seen[raw]; dup {
+			continue
+		}
+		seen[raw] = struct{}{}
+
+		v, err := semver.NewVersion(raw)
+		if err != nil {
+			// The constraint already passed semver.NewConstraint, so this
+			// only fires on programming errors in the regex (we'd extract
+			// something that the constraint parser had accepted but the
+			// version parser hadn't). Surface it as a real error.
+			return nil, fmt.Errorf("anchor %q not a valid semver: %w", raw, err)
+		}
+		out = append(out, v)
+	}
+	return out, nil
 }
 
 func (s *SemanticVersionConstraint) HasChannelAlias() bool {

@@ -250,7 +250,12 @@ func TestFilter_VersionsToMirror(t *testing.T) {
 		want   []string
 	}{
 		{
-			name: "happy path: semver constraint ^",
+			// Caret constraint: keep highest patch in every (major, minor)
+			// bucket inside ^1.3.0 = >=1.3.0 <2.0.0. The bucket 1.3.x
+			// degenerates to the single tag v1.3.0 (so v1.3.0 stays); 1.4.x
+			// has only v1.4.1 (so v1.4.1 stays). v1.0.0..v1.2.0 are below the
+			// constraint and stay out.
+			name: "happy path: semver constraint ^ keeps only latest patch per minor",
 			filter: Filter{
 				logger: logger,
 				modules: map[string]VersionConstraint{
@@ -276,7 +281,38 @@ func TestFilter_VersionsToMirror(t *testing.T) {
 				"v1.3.0", "v1.4.1"},
 		},
 		{
-			name: "semver constraint tilde ~ (>=1.3.0 <1.4.0)",
+			// Caret constraint with multiple patches in the same minor: only
+			// the highest patch (v1.3.3) survives the per-minor filter.
+			// v1.3.0 is dropped on purpose. This is the regression case for
+			// issue #220 (`code@v1.6.0` pulling every 1.6.x patch). Channel
+			// aliases are appended by the test harness because the constraint
+			// is non-exact (ShouldMirrorReleaseChannels=true).
+			name: "semver constraint ^ drops older patches in same minor",
+			filter: Filter{
+				logger: logger,
+				modules: map[string]VersionConstraint{
+					"module1": geConstraint("^1.3.0"),
+				},
+			},
+			mod: &Module{
+				Name: "module1",
+				Releases: []string{
+					"v1.0.0", "v1.1.0", "v1.2.0",
+					"v1.3.0", "v1.3.1", "v1.3.2", "v1.3.3",
+					"v1.4.0", "v1.4.1"},
+			},
+			want: []string{
+				internal.AlphaChannel,
+				internal.BetaChannel,
+				internal.EarlyAccessChannel,
+				internal.StableChannel,
+				internal.RockSolidChannel,
+				"v1.3.3", "v1.4.1"},
+		},
+		{
+			// Tilde constraint = >=1.3.0 <1.4.0, which is one (major, minor)
+			// bucket. Latest patch v1.3.3 is the only output.
+			name: "semver constraint tilde ~ (>=1.3.0 <1.4.0) keeps only the latest patch",
 			filter: Filter{
 				logger: logger,
 				modules: map[string]VersionConstraint{
@@ -299,9 +335,12 @@ func TestFilter_VersionsToMirror(t *testing.T) {
 				internal.EarlyAccessChannel,
 				internal.StableChannel,
 				internal.RockSolidChannel,
-				"v1.3.0", "v1.3.3"},
+				"v1.3.3"},
 		},
 		{
+			// Explicit range: each minor bucket inside [1.1.0, 1.3.0) collapses
+			// to its highest patch — here the registry has only one tag per
+			// minor, so all matched versions survive.
 			name: "semver constraint range >=1.1.0 <1.3.0",
 			filter: Filter{
 				logger: logger,
@@ -326,6 +365,175 @@ func TestFilter_VersionsToMirror(t *testing.T) {
 				internal.StableChannel,
 				internal.RockSolidChannel,
 				"v1.1.0", "v1.2.0"},
+		},
+		{
+			// Explicit range with multiple patches per minor: collapse to the
+			// highest patch in each (major, minor) AND keep the >= anchor.
+			// `>=1.6.0` literally names v1.6.0 — the equality is part of the
+			// operator, so v1.6.0 must round-trip. v1.7.x has no anchor (the
+			// upper bound `<1.8.0` is exclusive) so 1.7.x degenerates to its
+			// latest patch v1.7.1.
+			name: "semver range collapses non-anchor minors but preserves >= anchor",
+			filter: Filter{
+				logger: logger,
+				modules: map[string]VersionConstraint{
+					"module1": geConstraint(">=1.6.0 <1.8.0"),
+				},
+			},
+			mod: &Module{
+				Name: "module1",
+				Releases: []string{
+					"v1.6.0", "v1.6.1", "v1.6.2", "v1.6.3", "v1.6.4", "v1.6.5",
+					"v1.7.0", "v1.7.1",
+					"v1.8.0",
+				},
+			},
+			want: []string{
+				internal.AlphaChannel,
+				internal.BetaChannel,
+				internal.EarlyAccessChannel,
+				internal.StableChannel,
+				internal.RockSolidChannel,
+				"v1.6.0", "v1.6.5", "v1.7.1"},
+		},
+		{
+			// Bare `>=` constraint with no upper bound. The anchor is v1.40.0
+			// and it sits in a minor that has a newer patch (v1.40.1). Under
+			// pure latest-patch-per-minor semantics v1.40.0 would be dropped;
+			// the anchor exception keeps it in the result. v1.41.x has no
+			// anchor and collapses to its latest patch.
+			name: "bare >= preserves anchor and keeps latest patch in same minor",
+			filter: Filter{
+				logger: logger,
+				modules: map[string]VersionConstraint{
+					"module1": geConstraint(">=1.40.0"),
+				},
+			},
+			mod: &Module{
+				Name: "module1",
+				Releases: []string{
+					"v1.39.5",
+					"v1.40.0", "v1.40.1",
+					"v1.41.0", "v1.41.2",
+				},
+			},
+			want: []string{
+				internal.AlphaChannel,
+				internal.BetaChannel,
+				internal.EarlyAccessChannel,
+				internal.StableChannel,
+				internal.RockSolidChannel,
+				"v1.40.0", "v1.40.1", "v1.41.2"},
+		},
+		{
+			// `<=` is also an inclusive boundary. v1.42.5 must round-trip
+			// even though latest-patch-per-minor would prefer v1.42.7.
+			// Anchors stack: the lower bound `>=1.40.0` and the upper bound
+			// `<=1.42.5` are both honoured.
+			name: "<= preserves upper-bound anchor",
+			filter: Filter{
+				logger: logger,
+				modules: map[string]VersionConstraint{
+					"module1": geConstraint(">=1.40.0 <=1.42.5"),
+				},
+			},
+			mod: &Module{
+				Name: "module1",
+				Releases: []string{
+					"v1.40.0", "v1.40.1",
+					"v1.41.0",
+					"v1.42.0", "v1.42.5",
+					"v1.42.7", // Filtered out: above the upper bound.
+				},
+			},
+			want: []string{
+				internal.AlphaChannel,
+				internal.BetaChannel,
+				internal.EarlyAccessChannel,
+				internal.StableChannel,
+				internal.RockSolidChannel,
+				"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.5"},
+		},
+		{
+			// Strict `>` is exclusive — the named version is NOT an anchor
+			// because the user explicitly excluded it. v1.40.0 must NOT
+			// appear in the result; the 1.40.x bucket has only v1.40.1
+			// (which sits inside the >, so it stays via latest-patch).
+			name: "strict > does not create anchor",
+			filter: Filter{
+				logger: logger,
+				modules: map[string]VersionConstraint{
+					"module1": geConstraint(">1.40.0 <1.42.0"),
+				},
+			},
+			mod: &Module{
+				Name: "module1",
+				Releases: []string{
+					"v1.40.0", "v1.40.1",
+					"v1.41.0", "v1.41.3",
+				},
+			},
+			want: []string{
+				internal.AlphaChannel,
+				internal.BetaChannel,
+				internal.EarlyAccessChannel,
+				internal.StableChannel,
+				internal.RockSolidChannel,
+				"v1.40.1", "v1.41.3"},
+		},
+		{
+			// Caret is shorthand for a range — its lower bound is NOT an
+			// anchor. `^1.6.0` expands to `>=1.6.0 <2.0.0`; the implicit `>=`
+			// must not preserve v1.6.0 (issue #220 case: the user wrote
+			// `module@v1.6.0` and wants only the latest patch per minor).
+			name: "caret does not create anchor (issue #220 base case)",
+			filter: Filter{
+				logger: logger,
+				modules: map[string]VersionConstraint{
+					"module1": geConstraint("^1.6.0"),
+				},
+			},
+			mod: &Module{
+				Name: "module1",
+				Releases: []string{
+					"v1.6.0", "v1.6.1", "v1.6.2", "v1.6.3", "v1.6.4", "v1.6.5",
+					"v1.7.0", "v1.7.1",
+				},
+			},
+			want: []string{
+				internal.AlphaChannel,
+				internal.BetaChannel,
+				internal.EarlyAccessChannel,
+				internal.StableChannel,
+				internal.RockSolidChannel,
+				"v1.6.5", "v1.7.1"},
+		},
+		{
+			// Anchor refers to a tag the registry doesn't carry. We must
+			// not invent a tag — restoreInclusiveAnchors only restores
+			// anchors that exist in `available`. Result is just the
+			// latest-patch-per-minor set.
+			name: ">= anchor that the registry does not have is silently skipped",
+			filter: Filter{
+				logger: logger,
+				modules: map[string]VersionConstraint{
+					"module1": geConstraint(">=1.40.0"),
+				},
+			},
+			mod: &Module{
+				Name: "module1",
+				Releases: []string{
+					"v1.40.1", "v1.40.2",
+					"v1.41.0",
+				},
+			},
+			want: []string{
+				internal.AlphaChannel,
+				internal.BetaChannel,
+				internal.EarlyAccessChannel,
+				internal.StableChannel,
+				internal.RockSolidChannel,
+				"v1.40.2", "v1.41.0"},
 		},
 		{
 			name: "happy path: exact match",
