@@ -66,7 +66,7 @@ func NewCheckCommand() *cobra.Command {
 			if len(args) == 1 {
 				report, err = certs.BuildSingleFileReport(args[0])
 				if err != nil {
-					return fmt.Errorf("checking certificate %q: %w", args[0], err)
+					return fmt.Errorf("checking file %q: %w", args[0], err)
 				}
 			} else {
 				effectiveKubeconfigDir := kubeconfigDir
