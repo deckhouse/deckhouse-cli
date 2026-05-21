@@ -114,7 +114,9 @@ module-name[@version-constraint]
    --include-module mymodule@^1.3.0  # equivalent
    ```
    - Example: For available versions `v1.0.0, v1.1.0, v1.2.0, v1.3.0, v1.3.3, v1.4.1`
-   - Constraint `^1.3.0` includes: `v1.3.0, v1.3.3, v1.4.1`
+   - Constraint `^1.3.0` includes: `v1.3.3, v1.4.1`
+   - Only the highest patch in each `(major, minor)` series is kept, matching the platform release discovery rule. Use the exact-tag form (`=`) to pin a specific older patch.
+   - Versions currently pinned by release channels (alpha, beta, early-access, stable, rock-solid, lts) are pulled in addition, regardless of the patch filter.
    - Also pulls current versions from all release channels
 
 3. **Semver tilde constraint (~)** - Patch-level changes only
@@ -122,13 +124,20 @@ module-name[@version-constraint]
    --include-module mymodule@~1.3.0
    ```
    - Example: For available versions `v1.0.0, v1.1.0, v1.2.0, v1.3.0, v1.3.3, v1.4.1`
-   - Constraint `~1.3.0` (equivalent to `>=1.3.0 <1.4.0`) includes: `v1.3.0, v1.3.3`
+   - Constraint `~1.3.0` (equivalent to `>=1.3.0 <1.4.0`) includes: `v1.3.3` (latest patch of 1.3.x)
    - Also pulls current versions from all release channels
 
 4. **Semver range constraint** - Explicit version range
    ```bash
    --include-module mymodule@">=1.1.0 <1.3.0"
    ```
+   - Example: For available versions `v1.0.0, v1.1.0, v1.1.2, v1.2.0, v1.2.4, v1.3.0`
+   - Constraint `>=1.1.0 <1.3.0` includes: `v1.1.0, v1.1.2, v1.2.4`
+   - The latest patch in each `(major, minor)` is kept; **inclusive boundary operators (`>=`, `<=`) always preserve the named version**, even when a newer patch exists in the same minor. `>=1.1.0` literally means "v1.1.0 OR newer" — the equality is part of the operator.
+   - Strict bounds (`>`, `<`) do NOT preserve the named version; they exclude it by definition.
+   - Caret (`^`) and tilde (`~`) are syntactic shorthand for a range: their lower bounds are NOT anchors and the latest-patch-per-minor filter applies in full.
+   - Anchors that are not present in the registry are silently skipped — this command never invents a tag.
+   - Also pulls current versions from all release channels
 
 5. **Exact tag match (=)** - Single specific version
    ```bash

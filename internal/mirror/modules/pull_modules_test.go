@@ -59,46 +59,75 @@ var defaultRegistryVersions = []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.45.2
 // Tests: which versions get pulled
 // =============================================================================
 
-// Regression for --include-module <name>@<semver>: every tag in the registry
-// that satisfies the semver constraint must end up in the download list,
-// not only the tag pinned by the release channel snapshot.
+// Regression for --include-module <name>@<semver>: every (major, minor) bucket
+// in the registry that satisfies the semver constraint must contribute exactly
+// its highest patch to the download list. This pins down two contracts at the
+// pull-flow boundary:
+//
+//  1. Constraints reject everything outside their range (negative side).
+//  2. Constraints collapse same-minor patches to the latest one (the issue #220
+//     fix: without this, `module@v1.6.0` would pull v1.6.0..v1.6.5 verbatim).
+//
+// The version pinned by the release channel snapshot (`channelVersion`) is
+// always pulled in addition to the constraint-derived set, so it must appear
+// in every wantTags below.
 func TestPullModules_SemverConstraintPullsAllMatchingTags(t *testing.T) {
 	registryVersions := []string{
 		"v1.39.0",
+		// Two patches in 1.40.x to exercise the per-minor collapse.
 		"v1.40.0", "v1.40.1",
 		"v1.41.0", "v1.42.0", "v1.43.0",
 		channelVersion,
 	}
 
 	cases := []struct {
-		name       string
-		constraint string   // text after "<module>@" in --include-module
-		wantTags   []string // tags expected to land in the download list
-		rejectTag  string   // tag present in the registry that the constraint must reject
+		name        string
+		constraint  string   // text after "<module>@" in --include-module
+		wantTags    []string // tags expected to land in the download list
+		rejectTags  []string // tags present in the registry that the constraint must reject (out of range or older patch in same minor)
 	}{
 		{
-			name:       "implicit caret (1.40.0 -> ^1.40.0)",
+			// 1.40.x collapses to v1.40.1 (latest patch). 1.41/1.42/1.43 each
+			// have a single tag, so they survive untouched.
+			name:       "implicit caret (1.40.0 -> ^1.40.0) keeps only latest patch per minor",
 			constraint: "1.40.0",
-			wantTags:   []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.0", "v1.43.0", channelVersion},
-			rejectTag:  "v1.39.0",
+			wantTags:   []string{"v1.40.1", "v1.41.0", "v1.42.0", "v1.43.0", channelVersion},
+			rejectTags: []string{"v1.39.0", "v1.40.0"},
 		},
 		{
-			name:       "explicit caret (^1.40.0)",
+			name:       "explicit caret (^1.40.0) keeps only latest patch per minor",
 			constraint: "^1.40.0",
-			wantTags:   []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.0", "v1.43.0", channelVersion},
-			rejectTag:  "v1.39.0",
+			wantTags:   []string{"v1.40.1", "v1.41.0", "v1.42.0", "v1.43.0", channelVersion},
+			rejectTags: []string{"v1.39.0", "v1.40.0"},
 		},
 		{
-			name:       "tilde (~1.40.0 - patch only)",
+			// Tilde collapses everything to a single (1.40.x) bucket; only
+			// v1.40.1 (the latest patch) makes it through.
+			name:       "tilde (~1.40.0 - patch only) keeps only latest patch",
 			constraint: "~1.40.0",
-			wantTags:   []string{"v1.40.0", "v1.40.1", channelVersion},
-			rejectTag:  "v1.41.0",
+			wantTags:   []string{"v1.40.1", channelVersion},
+			rejectTags: []string{"v1.40.0", "v1.41.0"},
 		},
 		{
-			name:       "explicit range (>=1.40.0 <1.43.0)",
+			// `>=1.40.0` literally names v1.40.0 — the equality is part of
+			// the operator and the user's explicit ask MUST be honoured.
+			// v1.40.x has two patches: the anchor v1.40.0 stays AND the
+			// latest patch v1.40.1 stays. Other minors collapse to their
+			// latest patch as usual; v1.43.0 is excluded by the strict <
+			// upper bound.
+			name:       "explicit range (>=1.40.0 <1.43.0) preserves >= anchor and keeps latest patch per minor",
 			constraint: ">=1.40.0 <1.43.0",
 			wantTags:   []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.0", channelVersion},
-			rejectTag:  "v1.43.0",
+			rejectTags: []string{"v1.43.0"},
+		},
+		{
+			// Bare `>=1.40.0` with no upper bound. Anchor v1.40.0 is kept,
+			// 1.40.x latest patch v1.40.1 is also kept (per-minor rule),
+			// 1.41/1.42/1.43 collapse to their (only) tag.
+			name:       "bare >= preserves anchor and keeps latest patch in same minor",
+			constraint: ">=1.40.0",
+			wantTags:   []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.0", "v1.43.0", channelVersion},
+			rejectTags: []string{"v1.39.0"},
 		},
 	}
 
@@ -112,8 +141,10 @@ func TestPullModules_SemverConstraintPullsAllMatchingTags(t *testing.T) {
 
 			got := pulledModuleVersionRefs(t, svc, testModuleName)
 			assert.ElementsMatch(t, taggedModuleRefs(testModuleName, tc.wantTags), got)
-			assert.NotContains(t, got, taggedModuleRef(testModuleName, tc.rejectTag),
-				"constraint %q must reject %s", tc.constraint, tc.rejectTag)
+			for _, rejected := range tc.rejectTags {
+				assert.NotContains(t, got, taggedModuleRef(testModuleName, rejected),
+					"constraint %q must reject %s (out-of-range or older patch in same minor)", tc.constraint, rejected)
+			}
 		})
 	}
 }
@@ -121,6 +152,10 @@ func TestPullModules_SemverConstraintPullsAllMatchingTags(t *testing.T) {
 // Each --include-module flag carries its own constraint - the matcher must
 // scope to the named module and not leak across modules. Mixes a semver and
 // an exact constraint to exercise both filter branches in one shot.
+//
+// console is wired with two patches in the same minor (v1.40.0, v1.40.1) so
+// that the per-minor collapse rule is observable: only the latest patch
+// (v1.40.1) survives.
 func TestPullModules_PerModuleConstraintIsolation(t *testing.T) {
 	const (
 		consoleName   = "console"
@@ -132,7 +167,7 @@ func TestPullModules_PerModuleConstraintIsolation(t *testing.T) {
 	addModule(reg, commanderName, "v0.5.1", []string{"v0.5.0", "v0.5.1", "v0.6.0"})
 
 	filter := mustNewFilter(t, FilterTypeWhitelist,
-		consoleName+"@~1.40.0",   // tilde matches v1.40.x only
+		consoleName+"@~1.40.0",   // tilde matches v1.40.x; collapses to latest patch v1.40.1
 		commanderName+"@=v0.6.0", // exact tag
 	)
 	svc := newService(t, pkgclient.Adapt(upfake.NewClient(reg)), filter)
@@ -140,13 +175,80 @@ func TestPullModules_PerModuleConstraintIsolation(t *testing.T) {
 	require.NoError(t, svc.PullModules(context.Background()))
 
 	assert.ElementsMatch(t,
-		taggedModuleRefs(consoleName, []string{"v1.40.0", "v1.40.1"}),
+		taggedModuleRefs(consoleName, []string{"v1.40.1"}),
 		pulledModuleVersionRefs(t, svc, consoleName),
-		"console: tilde must match only v1.40.x")
+		"console: tilde must match only v1.40.x and collapse to the latest patch (v1.40.1)")
+	assert.NotContains(t, pulledModuleVersionRefs(t, svc, consoleName),
+		taggedModuleRef(consoleName, "v1.40.0"),
+		"console: older patch v1.40.0 must be dropped by the per-minor latest-patch filter")
 	assert.ElementsMatch(t,
 		taggedModuleRefs(commanderName, []string{"v0.6.0"}),
 		pulledModuleVersionRefs(t, svc, commanderName),
 		"commander: exact must match only v0.6.0 - no leak from console's tilde")
+}
+
+// TestPullModules_Issue220_LatestPatchPerMinor reproduces the exact registry
+// shape from https://github.com/deckhouse/deckhouse-cli/issues/220:
+//
+//	d8 mirror pull --include-module code@v1.6.0
+//
+// against a registry that publishes
+//
+//	v1.6.0, v1.6.1, v1.6.2, v1.6.3, v1.6.4, v1.6.5,
+//	v1.7.0, v1.7.1
+//
+// for the `code` module. Before the filterOnlyLatestPatches policy was
+// applied at the module-filter level, the implicit caret expansion of
+// `v1.6.0` (~ ^v1.6.0 ~ >=1.6.0 <2.0.0) made the puller download all eight
+// version-tagged release images. The user observed exactly this: 8 version
+// tags + 5 channel aliases = 13 release-channel pulls per module.
+//
+// Post-fix invariants:
+//   - The version-tagged module list MUST contain only the latest patch in
+//     each (major, minor) — v1.6.5 and v1.7.1.
+//   - Older patches in the same minor (v1.6.0..v1.6.4, v1.7.0) MUST be
+//     absent, because the user can re-pull them deliberately with
+//     `--include-module code@=v1.6.2`.
+//   - The release-channel set is a separate concern and is *not* re-asserted
+//     here; it is covered by TestPullModules_PerModuleConstraintIsolation
+//     and the LTS test below.
+func TestPullModules_Issue220_LatestPatchPerMinor(t *testing.T) {
+	const (
+		moduleName = "code"
+		// Channel snapshot points at the latest 1.6.x patch, the way a real
+		// dev registry would. This rules out the channel snapshot accidentally
+		// dragging an older patch back into the pull list.
+		issueChannelVersion = "v1.6.5"
+	)
+	registryVersions := []string{
+		"v1.6.0", "v1.6.1", "v1.6.2", "v1.6.3", "v1.6.4", "v1.6.5",
+		"v1.7.0", "v1.7.1",
+	}
+
+	reg := singleModuleRegistry(moduleName, issueChannelVersion, registryVersions)
+	filter := mustNewFilter(t, FilterTypeWhitelist, moduleName+"@v1.6.0")
+	svc := newService(t, pkgclient.Adapt(upfake.NewClient(reg)), filter)
+
+	require.NoError(t, svc.PullModules(context.Background()))
+
+	got := pulledModuleVersionRefs(t, svc, moduleName)
+
+	// Expected: only the latest patch per (major, minor). The channel snapshot
+	// (v1.6.5) coincides with the 1.6.x latest patch, so deduplication folds
+	// it in transparently.
+	wantLatestPatches := []string{"v1.6.5", "v1.7.1"}
+	assert.ElementsMatch(t,
+		taggedModuleRefs(moduleName, wantLatestPatches),
+		got,
+		"issue #220: --include-module code@v1.6.0 must collapse to one tag per minor")
+
+	// Negative side: every older patch the user reported as wasted MUST be
+	// absent from the pull list. This is the headline regression — losing
+	// any of these assertions means the optimization was undone.
+	for _, dropped := range []string{"v1.6.0", "v1.6.1", "v1.6.2", "v1.6.3", "v1.6.4", "v1.7.0"} {
+		assert.NotContains(t, got, taggedModuleRef(moduleName, dropped),
+			"issue #220: older patch %s must be dropped by the latest-patch-per-minor filter", dropped)
+	}
 }
 
 // =============================================================================

@@ -125,12 +125,20 @@ func AddFlags(flagSet *pflag.FlagSet) {
 		nil,
 		`Whitelist specific modules for downloading. Use one flag per each module. Disables blacklisting by --exclude-module."
 
+Semver constraints (caret, tilde, range) keep only the highest patch in each (major, minor) series, mirroring how platform releases are discovered.
+Versions explicitly named with an inclusive boundary operator (>= or <=) are always preserved — that boundary is part of the user's request and must round-trip even when a newer patch exists in the same minor.
+Use the exact-tag form (=) when you need a specific older patch unconditionally.
+
 Example:
-Available versions for <module-name>: v1.0.0, v1.1.0, v1.2.0, v1.3.0, v1.3.3, v1.4.1
+Available versions for <module-name>: v1.0.0, v1.1.0, v1.2.0, v1.3.0, v1.3.3, v1.4.0, v1.4.1
 
-module-name@1.3.0 → semver ^ constraint (^1.3.0): include v1.3.0, v1.3.3, v1.4.1. In addition pulls current versions from release channels
+module-name@1.3.0 → semver ^ constraint (^1.3.0): keep latest patch per minor — includes v1.3.3 (1.3.x) and v1.4.1 (1.4.x). Versions currently pinned by release channels are pulled in addition.
 
-module-name@~1.3.0 →  semver ~ constraint (>=1.3.0 <1.4.0): include only v1.3.0, v1.3.3. In addition pulls current versions from release channels
+module-name@~1.3.0 → semver ~ constraint (>=1.3.0 <1.4.0): keep latest patch per minor in range — includes v1.3.3. Versions currently pinned by release channels are pulled in addition.
+
+module-name@>=1.3.0 → range constraint with explicit >= anchor: keep latest patch per minor AND the named anchor v1.3.0 — includes v1.3.0 (anchor), v1.3.3 (1.3.x latest), v1.4.1 (1.4.x latest).
+
+module-name@>=1.3.0 <=1.4.0 → both anchors honoured: includes v1.3.0, v1.3.3, v1.4.0; v1.4.1 is excluded by the upper bound.
 
 module-name@=v1.3.0 → exact tag match: include only v1.3.0 and publish it to all release channels (alpha, beta, early-access, stable, rock-solid).
 
