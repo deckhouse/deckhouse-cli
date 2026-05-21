@@ -75,7 +75,7 @@ func NewCheckCommand() *cobra.Command {
 				}
 				report, err = certs.BuildFullScanReport(certsDir, effectiveKubeconfigDir)
 				if err != nil {
-					return fmt.Errorf("checking certificates in %q: %w", certsDir, err)
+					return fmt.Errorf("checking certificates in %q and kubeconfig files in %q: %w", certsDir, effectiveKubeconfigDir, err)
 				}
 			}
 
