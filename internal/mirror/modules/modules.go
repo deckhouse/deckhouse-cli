@@ -1036,17 +1036,18 @@ func (svc *Service) packModules(ctx context.Context, modules []moduleData) error
 
 		pkgName := "module-" + module.name + ".tar"
 
+		moduleLayout := svc.layout.Module(module.name)
+		if moduleLayout == nil {
+			return fmt.Errorf("no layout found for module %s", module.name)
+		}
+
+		// Skip modules that produced no images silently to avoid spamming
+		// the user with "Pack/Skipping/succeeded" triples for empty layouts.
+		if !moduleLayout.HasImages() {
+			continue
+		}
+
 		if err := logger.Process(fmt.Sprintf("Pack %s", pkgName), func() error {
-			moduleLayout := svc.layout.Module(module.name)
-			if moduleLayout == nil {
-				return fmt.Errorf("no layout found for module %s", module.name)
-			}
-
-			if !moduleLayout.HasImages() {
-				logger.Infof("Skipping %s: no images were pulled", pkgName)
-				return nil
-			}
-
 			// Pack from the module's working directory with prefix to create correct registry structure.
 			// This ensures the tar contains paths like "modules/<name>/index.json" instead of just "index.json".
 			moduleDir := filepath.Join(svc.layout.workingDir, module.name)
