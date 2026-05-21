@@ -36,6 +36,7 @@ import (
 	"github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/pack"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
@@ -49,6 +50,17 @@ import (
 type Options struct {
 	// SinceVersion specifies the minimum version to start mirroring from (optional)
 	SinceVersion *semver.Version
+	// IncludeConstraint narrows platform release discovery to a user-supplied
+	// semver constraint expression, mirroring the per-module constraint syntax
+	// accepted by --include-module. When set it replaces the default discovery
+	// window (rock-solid..alpha) — only registry tags matching the constraint
+	// are pulled, latest-patch-per-(major, minor) collapsing applies and
+	// release channels pointing outside the constraint are filtered out.
+	//
+	// IncludeConstraint is mutually exclusive with TargetTag: pinning one tag
+	// and selecting a range simultaneously is contradictory and the CLI
+	// rejects that combination before reaching this layer.
+	IncludeConstraint modules.VersionConstraint
 	// TargetTag specifies a specific tag to mirror instead of determining versions automatically
 	// it can be:
 	// semver f.e. vX.Y.Z
@@ -137,6 +149,18 @@ func NewService(
 // It validates access to the registry, determines which versions to mirror,
 // and prepares the image layouts for mirroring
 func (svc *Service) PullPlatform(ctx context.Context) error {
+	// An exact-tag --include-platform constraint (`=v1.65.0` /
+	// `=v1.65.0+stable`) is operationally identical to --deckhouse-tag: a
+	// single tag is pulled and downstream code propagates channel aliases
+	// from it. Synthesize TargetTag here so every later code path
+	// (validatePlatformAccess, findTagsToMirror, pullDeckhousePlatform's
+	// release-channel propagation) sees a uniform input. The CLI guarantees
+	// IncludeConstraint and TargetTag are not both set so this assignment
+	// cannot silently override a user-supplied --deckhouse-tag.
+	if exact, ok := svc.options.IncludeConstraint.(*modules.ExactTagConstraint); ok {
+		svc.options.TargetTag = exact.Tag()
+	}
+
 	err := svc.validatePlatformAccess(ctx)
 	if err != nil {
 		return fmt.Errorf("validate platform access: %w", err)
@@ -287,13 +311,26 @@ func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string)
 		}, nil
 	}
 
+	// When --include-platform supplies a semver range, prune channel snapshots
+	// that point outside it BEFORE expanding the discovery window so the
+	// expansion only inherits anchors the user can actually be served from
+	// the registry. Exact-tag constraints take the synthesized-TargetTag
+	// path in PullPlatform and never reach this branch.
+	semverConstraint, hasSemverConstraint := svc.options.IncludeConstraint.(*modules.SemanticVersionConstraint)
+	if hasSemverConstraint {
+		versions = filterVersionsByConstraint(versions, semverConstraint)
+		matchedChannels = filterChannelsByConstraint(matchedChannels, channelVersions, semverConstraint)
+	}
+
 	// For full discovery mode, expand version range
 	expandedVersions, err := svc.expandVersionRange(ctx, channelVersions, versions)
 	if err != nil {
 		return nil, err
 	}
 
-	// Filter out channels that are below the minimum version (SinceVersion/rock-solid)
+	// Filter out channels that are below the minimum version (SinceVersion/rock-solid).
+	// When IncludeConstraint is active the channel set was already constrained above;
+	// keep the lower-bound filter so SinceVersion still works in combination.
 	minVersion := svc.determineMinimumVersion(channelVersions)
 	filteredChannels := make([]string, 0, len(matchedChannels))
 	for _, ch := range matchedChannels {
@@ -436,40 +473,165 @@ func (svc *Service) tagMatchesChannel(tag, channelName string, channelVersion *s
 
 // expandVersionRange expands the version range for full discovery mode
 func (svc *Service) expandVersionRange(ctx context.Context, channelVersions channelVersions, baseVersions []*semver.Version) ([]*semver.Version, error) {
-	minVersion := svc.determineMinimumVersion(channelVersions)
-	maxVersion := channelVersions[internal.AlphaChannel]
+	semverConstraint, hasSemverConstraint := svc.options.IncludeConstraint.(*modules.SemanticVersionConstraint)
 
-	if maxVersion == nil {
-		// No alpha channel - return base versions only
-		return baseVersions, nil
+	if !hasSemverConstraint {
+		minVersion := svc.determineMinimumVersion(channelVersions)
+		maxVersion := channelVersions[internal.AlphaChannel]
+
+		if maxVersion == nil {
+			// No alpha channel - return base versions only
+			return baseVersions, nil
+		}
+
+		svc.userLogger.Debugf("listing deckhouse releases")
+
+		// Fetch all available tags
+		allTags, err := svc.deckhouseService.ReleaseChannels().ListTags(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("get tags from Deckhouse registry: %w", err)
+		}
+
+		// Filter and get latest patches
+		filteredVersions := filterVersionsBetween(minVersion, maxVersion, allTags)
+		latestPatches := filterOnlyLatestPatches(filteredVersions)
+
+		// Filter base channel versions by minVersion as well
+		filteredBase := baseVersions
+		if minVersion != nil {
+			nb := make([]*semver.Version, 0, len(baseVersions))
+			for _, v := range baseVersions {
+				if v == nil || v.LessThan(minVersion) {
+					continue
+				}
+				nb = append(nb, v)
+			}
+			filteredBase = nb
+		}
+
+		return append(filteredBase, latestPatches...), nil
 	}
 
-	svc.userLogger.Debugf("listing deckhouse releases")
+	// --include-platform semver path: the constraint owns both the lower and
+	// upper bounds, so we ignore rock-solid/alpha endpoints entirely. We still
+	// honour --since-version (when above the constraint's lower bound) to
+	// preserve the existing knob without surprising the user.
+	svc.userLogger.Debugf("listing deckhouse releases for --include-platform")
 
-	// Fetch all available tags
 	allTags, err := svc.deckhouseService.ReleaseChannels().ListTags(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get tags from Deckhouse registry: %w", err)
 	}
 
-	// Filter and get latest patches
-	filteredVersions := filterVersionsBetween(minVersion, maxVersion, allTags)
-	latestPatches := filterOnlyLatestPatches(filteredVersions)
-
-	// Filter base channel versions by minVersion as well
-	filteredBase := baseVersions
-	if minVersion != nil {
-		nb := make([]*semver.Version, 0, len(baseVersions))
-		for _, v := range baseVersions {
-			if v == nil || v.LessThan(minVersion) {
+	matched := parseTagsMatchingConstraint(allTags, semverConstraint)
+	if since := svc.options.SinceVersion; since != nil {
+		nb := make([]*semver.Version, 0, len(matched))
+		for _, v := range matched {
+			if v.LessThan(since) {
 				continue
 			}
 			nb = append(nb, v)
 		}
-		filteredBase = nb
+		matched = nb
 	}
 
-	return append(filteredBase, latestPatches...), nil
+	selected := filterOnlyLatestPatches(matched)
+	selected = restoreInclusiveAnchors(selected, matched, semverConstraint.Anchors())
+
+	return append(baseVersions, selected...), nil
+}
+
+// parseTagsMatchingConstraint walks the registry's tag list, drops anything
+// that is not a valid semver, and keeps only versions that satisfy the
+// constraint. Returning *semver.Version (rather than tag strings) lets the
+// caller share filterOnlyLatestPatches / restoreInclusiveAnchors with the
+// channel-version path.
+func parseTagsMatchingConstraint(tags []string, constraint *modules.SemanticVersionConstraint) []*semver.Version {
+	matched := make([]*semver.Version, 0, len(tags))
+	for _, tag := range tags {
+		v, err := semver.NewVersion(tag)
+		if err != nil {
+			continue
+		}
+		if constraint.Match(v) {
+			matched = append(matched, v)
+		}
+	}
+	return matched
+}
+
+// filterVersionsByConstraint retains only versions matching the constraint.
+// It is the counterpart of parseTagsMatchingConstraint but operates on
+// already-parsed semver values (channel snapshots in versionsToMirror).
+func filterVersionsByConstraint(versions []*semver.Version, constraint *modules.SemanticVersionConstraint) []*semver.Version {
+	out := make([]*semver.Version, 0, len(versions))
+	for _, v := range versions {
+		if v == nil {
+			continue
+		}
+		if constraint.Match(v) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// filterChannelsByConstraint drops release channels whose current snapshot
+// version falls outside the user-supplied constraint. Channels that resolve
+// to a missing version (defensive — fetchReleaseChannelVersions normally
+// guarantees this) are kept so we don't silently delete metadata for sources
+// we cannot evaluate against the constraint.
+func filterChannelsByConstraint(channels []string, channelVersions channelVersions, constraint *modules.SemanticVersionConstraint) []string {
+	out := make([]string, 0, len(channels))
+	for _, ch := range channels {
+		v, ok := channelVersions[ch]
+		if !ok || v == nil {
+			out = append(out, ch)
+			continue
+		}
+		if constraint.Match(v) {
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
+// restoreInclusiveAnchors re-adds anchor versions (the literals named with
+// `>=` / `<=` in the user's constraint) that filterOnlyLatestPatches would
+// otherwise drop in favour of a higher patch in the same (major, minor).
+// An anchor is only restored when the registry actually exposes it via
+// `available` so we never enqueue a tag the source does not have.
+func restoreInclusiveAnchors(selected, available []*semver.Version, anchors []*semver.Version) []*semver.Version {
+	if len(anchors) == 0 {
+		return selected
+	}
+
+	availableByKey := make(map[string]*semver.Version, len(available))
+	for _, v := range available {
+		if v == nil {
+			continue
+		}
+		availableByKey[v.String()] = v
+	}
+
+	selectedKeys := make(map[string]struct{}, len(selected))
+	for _, v := range selected {
+		selectedKeys[v.String()] = struct{}{}
+	}
+
+	for _, anchor := range anchors {
+		key := anchor.String()
+		if _, already := selectedKeys[key]; already {
+			continue
+		}
+		registryVersion, isAvailable := availableByKey[key]
+		if !isAvailable {
+			continue
+		}
+		selected = append(selected, registryVersion)
+		selectedKeys[key] = struct{}{}
+	}
+	return selected
 }
 
 // determineMinimumVersion determines the minimum version for mirroring based on configuration

@@ -47,6 +47,11 @@ type PullServiceOptions struct {
 	OnlyExtraImages bool
 	// IgnoreSuspend allows mirroring even if release channels are suspended
 	IgnoreSuspend bool
+	// PlatformConstraint selects platform releases by semver constraint
+	// (--include-platform). When non-nil it replaces the default
+	// rock-solid..alpha discovery window for the platform service. Exact-tag
+	// constraints are routed through TargetTag inside platform.PullPlatform.
+	PlatformConstraint modules.VersionConstraint
 	// ModuleFilter is the filter for module selection (whitelist/blacklist)
 	ModuleFilter *modules.Filter
 	// BundleDir is the directory to store the bundle
@@ -99,13 +104,14 @@ func NewPullService(
 			registryService,
 			tmpDir,
 			&platform.Options{
-				TargetTag:       targetTag,
-				BundleDir:       options.BundleDir,
-				BundleChunkSize: options.BundleChunkSize,
-				IgnoreSuspend:   options.IgnoreSuspend,
-				SkipVexImages:   options.SkipVexImages,
-				Timeout:         options.Timeout,
-				DryRun:          options.DryRun,
+				TargetTag:         targetTag,
+				IncludeConstraint: options.PlatformConstraint,
+				BundleDir:         options.BundleDir,
+				BundleChunkSize:   options.BundleChunkSize,
+				IgnoreSuspend:     options.IgnoreSuspend,
+				SkipVexImages:     options.SkipVexImages,
+				Timeout:           options.Timeout,
+				DryRun:            options.DryRun,
 			},
 			logger,
 			userLogger,

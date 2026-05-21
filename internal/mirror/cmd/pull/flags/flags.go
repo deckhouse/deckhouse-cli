@@ -23,6 +23,8 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/spf13/pflag"
+
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 )
 
 const (
@@ -45,6 +47,9 @@ var (
 
 	SinceVersionString string
 	SinceVersion       *semver.Version
+
+	PlatformConstraintString string
+	PlatformConstraint       modules.VersionConstraint
 
 	DeckhouseTag string
 	InstallerTag string
@@ -107,10 +112,35 @@ func AddFlags(flagSet *pflag.FlagSet) {
 		"Minimal Deckhouse release to pull. Ignored if above current Rock Solid release. Conflicts with --deckhouse-tag.",
 	)
 	flagSet.StringVar(
+		&PlatformConstraintString,
+		"include-platform",
+		"",
+		`Select platform releases to download by a semver constraint expression, using the same dialect as --include-module's version part.
+Conflicts with --since-version and --deckhouse-tag.
+
+Semver constraints (caret, tilde, range) keep only the highest patch in each (major, minor) series, mirroring the release-discovery rules used for full pulls.
+Versions explicitly named with an inclusive boundary operator (>= or <=) are always preserved — that boundary is part of the user's request and must round-trip even when a newer patch exists in the same minor.
+Use the exact-tag form (=) when you need to pin a specific tag, optionally propagating it to a release channel via the +channel suffix.
+
+Examples (available platform versions: v1.63.x, v1.64.x, v1.65.x, v1.66.x, v1.67.x, v1.68.x, v1.69.x, v1.70.x, v1.71.x):
+
+--include-platform ">=1.64 <=1.68" → bounded range: latest patch per minor in v1.64..v1.68, anchors v1.64.0 and v1.68.0 always preserved if present in the registry.
+
+--include-platform "~1.65.0" → semver ~ constraint (>=1.65.0 <1.66.0): latest v1.65.x patch only.
+
+--include-platform "^1.65.0" → semver ^ constraint (>=1.65.0 <2.0.0): latest patch per minor starting at v1.65.x.
+
+--include-platform "1.65.0" → implicit caret (^1.65.0): same as above; shorthand kept for parity with --include-module.
+
+--include-platform "=v1.65.3" → exact-tag pin: only v1.65.3 is pulled and propagated to all default release channels, just like --deckhouse-tag.
+
+--include-platform "=v1.65.3+stable" → exact-tag pin with channel suffix: only v1.65.3 is pulled (channel propagation matches --deckhouse-tag).`,
+	)
+	flagSet.StringVar(
 		&DeckhouseTag,
 		"deckhouse-tag",
 		"",
-		"Specific Deckhouse build tag to pull. Conflicts with --since-version. If registry contains release channel image for specified tag, all release channels in the bundle will be pointed to it.",
+		"Specific Deckhouse build tag to pull. Conflicts with --since-version and --include-platform. If registry contains release channel image for specified tag, all release channels in the bundle will be pointed to it.",
 	)
 	flagSet.StringVar(
 		&InstallerTag,
