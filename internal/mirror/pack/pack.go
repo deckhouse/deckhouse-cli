@@ -46,32 +46,46 @@ func Bundle(
 	bundleDir, pkgName string,
 	bundleChunkSize int64,
 	pack func(io.Writer) error,
-) (err error) {
+) error {
 	if bundleChunkSize > 0 {
-		cw := chunked.NewChunkedFileWriter(bundleChunkSize, bundleDir, pkgName)
-		defer func() {
-			if err != nil {
-				cw.Cleanup()
-			}
-		}()
-		if err = pack(cw); err != nil {
-			return fmt.Errorf("pack %s: %w", pkgName, err)
-		}
-		if err = cw.Close(); err != nil {
-			return fmt.Errorf("close %s: %w", pkgName, err)
-		}
-		// Respect cancellation just before publishing: don't rename a
-		// half-aborted set of chunks into their final names.
-		if cerr := ctx.Err(); cerr != nil {
-			err = cerr
-			return cerr
-		}
-		if err = cw.Finalize(); err != nil {
-			return fmt.Errorf("finalize %s: %w", pkgName, err)
-		}
-		return nil
+		return bundleChunked(ctx, bundleDir, pkgName, bundleChunkSize, pack)
 	}
+	return bundleSingle(ctx, bundleDir, pkgName, pack)
+}
 
+func bundleChunked(
+	ctx context.Context,
+	bundleDir, pkgName string,
+	bundleChunkSize int64,
+	pack func(io.Writer) error,
+) error {
+	cw := chunked.NewChunkedFileWriter(bundleChunkSize, bundleDir, pkgName)
+
+	if err := pack(cw); err != nil {
+		cw.Cleanup()
+		return fmt.Errorf("pack %s: %w", pkgName, err)
+	}
+	if err := cw.Close(); err != nil {
+		cw.Cleanup()
+		return fmt.Errorf("close %s: %w", pkgName, err)
+	}
+	// Respect cancellation just before publishing: don't rename a
+	// half-aborted set of chunks into their final names.
+	if cerr := ctx.Err(); cerr != nil {
+		cw.Cleanup()
+		return cerr
+	}
+	if err := cw.Finalize(); err != nil {
+		return fmt.Errorf("finalize %s: %w", pkgName, err)
+	}
+	return nil
+}
+
+func bundleSingle(
+	ctx context.Context,
+	bundleDir, pkgName string,
+	pack func(io.Writer) error,
+) error {
 	finalPath := filepath.Join(bundleDir, pkgName)
 	tmpPath := finalPath + ".tmp"
 
@@ -83,24 +97,21 @@ func Bundle(
 		return fmt.Errorf("create %s: %w", pkgName, err)
 	}
 
-	defer func() {
-		if err != nil {
-			_ = f.Close()
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
 	if err = pack(f); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("pack %s: %w", pkgName, err)
 	}
 	if err = f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close %s: %w", pkgName, err)
 	}
 	if cerr := ctx.Err(); cerr != nil {
-		err = cerr
+		_ = os.Remove(tmpPath)
 		return cerr
 	}
 	if err = os.Rename(tmpPath, finalPath); err != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename %s: %w", pkgName, err)
 	}
 	return nil

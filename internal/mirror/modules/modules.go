@@ -952,7 +952,6 @@ func (svc *Service) packModules(ctx context.Context, modules []moduleData) error
 	return nil
 }
 
-
 func getModuleNames(modules []moduleData) []string {
 	names := make([]string, len(modules))
 	for i, m := range modules {
