@@ -36,15 +36,21 @@ type FlagDTO struct {
 	Name string `json:"name"`
 }
 
-// RequirementsDTO represents requirements in JSON
+// RequirementsDTO represents requirements in JSON.
 type RequirementsDTO struct {
-	Kubernetes KubernetesRequirementDTO `json:"kubernetes,omitempty"`
-	Modules    []ModuleRequirementDTO   `json:"modules,omitempty"`
-	Plugins    []PluginRequirementDTO   `json:"plugins,omitempty"`
+	Kubernetes KubernetesRequirementDTO   `json:"kubernetes,omitempty"`
+	Deckhouse  DeckhouseRequirementDTO    `json:"deckhouse,omitempty"`
+	Modules    ModuleRequirementsGroupDTO `json:"modules,omitempty"`
+	Plugins    PluginRequirementsGroupDTO `json:"plugins,omitempty"`
 }
 
 // KubernetesRequirementDTO represents Kubernetes requirement in JSON
 type KubernetesRequirementDTO struct {
+	Constraint string `json:"constraint"`
+}
+
+// DeckhouseRequirementDTO represents a constraint on the running Deckhouse version.
+type DeckhouseRequirementDTO struct {
 	Constraint string `json:"constraint"`
 }
 
@@ -58,4 +64,27 @@ type ModuleRequirementDTO struct {
 type PluginRequirementDTO struct {
 	Name       string `json:"name"`
 	Constraint string `json:"constraint"`
+}
+
+// AnyOfGroupDTO represents an "at least one of" group of module requirements.
+// The Description is surfaced in user-facing error messages when no module in
+// the group satisfies the constraint.
+type AnyOfGroupDTO struct {
+	Description string                 `json:"description,omitempty"`
+	Modules     []ModuleRequirementDTO `json:"modules,omitempty"`
+}
+
+// PluginRequirementsGroupDTO splits plugin requirements into Mandatory and
+// Conditional sections.
+type PluginRequirementsGroupDTO struct {
+	Mandatory   []PluginRequirementDTO `json:"mandatory,omitempty"`
+	Conditional []PluginRequirementDTO `json:"conditional,omitempty"`
+}
+
+// ModuleRequirementsGroupDTO splits module requirements into Mandatory,
+// Conditional, and AnyOf sections.
+type ModuleRequirementsGroupDTO struct {
+	Mandatory   []ModuleRequirementDTO `json:"mandatory,omitempty"`
+	Conditional []ModuleRequirementDTO `json:"conditional,omitempty"`
+	AnyOf       []AnyOfGroupDTO        `json:"anyOf,omitempty"`
 }
