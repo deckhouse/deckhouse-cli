@@ -341,6 +341,8 @@ func debugPrintPendingRequirement(title string, kv ...[2]string) {
 // For Kubernetes requirement:
 // - if the constraint is empty, skip silently
 // - if the constraint is not empty, print a warning
+//
+//nolint:unparam // stub — will return real errors once enforcement is implemented
 func (pc *PluginsCommand) validateKubernetesRequirement(plugin *internal.Plugin) error {
 	if plugin.Requirements.Kubernetes.Constraint == "" {
 		return nil
@@ -355,6 +357,8 @@ func (pc *PluginsCommand) validateKubernetesRequirement(plugin *internal.Plugin)
 
 // validateDeckhouseRequirement is a log-only stub. See validateKubernetesRequirement
 // for rationale; enforcement will land once Deckhouse version discovery is in place.
+//
+//nolint:unparam // stub — will return real errors once enforcement is implemented
 func (pc *PluginsCommand) validateDeckhouseRequirement(plugin *internal.Plugin) error {
 	if plugin.Requirements.Deckhouse.Constraint == "" {
 		return nil
@@ -370,6 +374,8 @@ func (pc *PluginsCommand) validateDeckhouseRequirement(plugin *internal.Plugin) 
 // validateModuleRequirement is a log-only stub. Mandatory, Conditional and
 // AnyOf sections are all surfaced so authors and operators see the declared
 // expectations even though d8 does not yet inspect the cluster to verify them.
+//
+//nolint:unparam // stub — will return real errors once enforcement is implemented
 func (pc *PluginsCommand) validateModuleRequirement(plugin *internal.Plugin) error {
 	mods := plugin.Requirements.Modules
 	if len(mods.Mandatory) == 0 && len(mods.Conditional) == 0 && len(mods.AnyOf) == 0 {
