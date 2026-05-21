@@ -4,7 +4,7 @@ go 1.25.6
 
 require (
 	github.com/Masterminds/semver/v3 v3.3.1
-	github.com/deckhouse/deckhouse/go_lib/controlplane v0.0.0-20260519102525-fcde26a798e9
+	github.com/deckhouse/deckhouse/go_lib/controlplane v0.0.0-20260521055926-efd0886cc5da
 	github.com/deckhouse/deckhouse/pkg/log v0.2.0
 	github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260414112803-53a5662881d9
 	github.com/deckhouse/virtualization/src/cli v1.5.1
