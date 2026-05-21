@@ -99,6 +99,8 @@ func NewCommand() *cobra.Command {
 
 	pullflags.AddFlags(pullCmd.Flags())
 	pullCmd.MarkFlagsMutuallyExclusive("include-module", "exclude-module")
+	pullCmd.MarkFlagsMutuallyExclusive("include-platform", "deckhouse-tag")
+	pullCmd.MarkFlagsMutuallyExclusive("include-platform", "since-version")
 	pullflags.ParseEnvironmentVariables()
 
 	return pullCmd
@@ -281,19 +283,20 @@ func (p *Puller) Execute(ctx context.Context) error {
 		pullflags.TempDir,
 		pullflags.DeckhouseTag,
 		&mirror.PullServiceOptions{
-			SkipPlatform:    pullflags.NoPlatform,
-			SkipSecurity:    pullflags.NoSecurityDB,
-			SkipModules:     pullflags.NoModules,
-			SkipVexImages:   pullflags.SkipVexImages,
-			SkipInstaller:   pullflags.NoInstaller,
-			InstallerTag:    pullflags.InstallerTag,
-			OnlyExtraImages: pullflags.OnlyExtraImages,
-			IgnoreSuspend:   pullflags.IgnoreSuspend,
-			ModuleFilter:    filter,
-			BundleDir:       pullflags.ImagesBundlePath,
-			BundleChunkSize: pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
-			Timeout:         pullflags.MirrorTimeout,
-			DryRun:          pullflags.DryRun,
+			SkipPlatform:       pullflags.NoPlatform,
+			SkipSecurity:       pullflags.NoSecurityDB,
+			SkipModules:        pullflags.NoModules,
+			SkipVexImages:      pullflags.SkipVexImages,
+			SkipInstaller:      pullflags.NoInstaller,
+			InstallerTag:       pullflags.InstallerTag,
+			OnlyExtraImages:    pullflags.OnlyExtraImages,
+			IgnoreSuspend:      pullflags.IgnoreSuspend,
+			PlatformConstraint: pullflags.PlatformConstraint,
+			ModuleFilter:       filter,
+			BundleDir:          pullflags.ImagesBundlePath,
+			BundleChunkSize:    pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
+			Timeout:            pullflags.MirrorTimeout,
+			DryRun:             pullflags.DryRun,
 		},
 		logger.Named("pull"),
 		p.logger,

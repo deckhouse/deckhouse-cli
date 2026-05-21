@@ -28,6 +28,7 @@ import (
 	"github.com/spf13/cobra"
 
 	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 )
 
 func parseAndValidateParameters(_ *cobra.Command, args []string) error {
@@ -117,12 +118,25 @@ func parseAndValidateVersionFlags() error {
 	if pullflags.SinceVersionString != "" && pullflags.DeckhouseTag != "" {
 		return errors.New("Using both --deckhouse-tag and --since-version at the same time is ambiguous")
 	}
+	if pullflags.PlatformConstraintString != "" && pullflags.DeckhouseTag != "" {
+		return errors.New("Using both --deckhouse-tag and --include-platform at the same time is ambiguous")
+	}
+	if pullflags.PlatformConstraintString != "" && pullflags.SinceVersionString != "" {
+		return errors.New("Using both --since-version and --include-platform at the same time is ambiguous: --include-platform already expresses a lower bound (e.g. \">=1.64\")")
+	}
 
 	var err error
 	if pullflags.SinceVersionString != "" {
 		pullflags.SinceVersion, err = semver.NewVersion(pullflags.SinceVersionString)
 		if err != nil {
 			return fmt.Errorf("Parse minimal deckhouse version: %w", err)
+		}
+	}
+
+	if pullflags.PlatformConstraintString != "" {
+		pullflags.PlatformConstraint, err = modules.ParseVersionConstraint(pullflags.PlatformConstraintString)
+		if err != nil {
+			return fmt.Errorf("Parse --include-platform constraint: %w", err)
 		}
 	}
 

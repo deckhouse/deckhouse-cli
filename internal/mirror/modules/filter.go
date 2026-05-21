@@ -103,6 +103,23 @@ func (f *Filter) GetConstraint(moduleName string) (VersionConstraint, bool) {
 	return constraint, found
 }
 
+// ParseVersionConstraint turns a user-supplied constraint string into a
+// VersionConstraint. The syntax mirrors the `module-name@<constraint>` body
+// accepted by --include-module so any consumer (modules filter, platform
+// --include-platform, future call sites) speaks the same dialect:
+//
+//   - "=v1.2.3"           → exact tag (no channel propagation)
+//   - "=v1.2.3+stable"    → exact tag pinned to the named release channel
+//   - ">=1.2.0 <=1.3.0"   → semver range with inclusive anchors
+//   - "^1.2.0", "~1.2.0"  → semver shorthand
+//   - "1.2.0"             → implicit caret (^1.2.0), kept for backward compat
+//
+// An empty or whitespace-only input is rejected so callers see a clear error
+// instead of silently producing a no-op constraint.
+func ParseVersionConstraint(v string) (VersionConstraint, error) {
+	return parseVersionConstraint(v)
+}
+
 func parseVersionConstraint(v string) (VersionConstraint, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {

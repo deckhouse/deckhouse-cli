@@ -19,6 +19,7 @@ import (
 dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
 "github.com/deckhouse/deckhouse-cli/internal"
+"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 "github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 mlayouts "github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 "github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
@@ -457,6 +458,141 @@ func TestPullPlatform_DryRun_SinceVersion_FiltersOlderChannels(t *testing.T) {
 		assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":"+ch,
 "Deckhouse repo must not carry channel alias %s", ch)
 	}
+}
+
+// ---- --include-platform: semver constraint ----
+
+// includePlatformConstraint is a tiny test helper that constructs the same
+// VersionConstraint the CLI would build out of --include-platform.
+func includePlatformConstraint(t *testing.T, expr string) modules.VersionConstraint {
+	t.Helper()
+	c, err := modules.ParseVersionConstraint(expr)
+	require.NoError(t, err, "constraint %q must parse", expr)
+	return c
+}
+
+// TestPullPlatform_DryRun_IncludePlatform_RangeFiltersChannelsAndVersions
+// covers the user-facing scenario from the original feature request: pull
+// an inclusive [1.69, 1.71] window of platform releases (the equivalent of
+// "1.64..1.68" against the stub registry whose newest tag is v1.72.10).
+// Channel snapshots above the upper bound (alpha → v1.72.10) and below the
+// lower bound (rock-solid → v1.68.0) must be excluded; everything in between
+// must be present, plus the latest patch per minor inside the range.
+func TestPullPlatform_DryRun_IncludePlatform_RangeFiltersChannelsAndVersions(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := newDryRunService(
+		localfake.NewRegistryClientStub(),
+		&Options{IncludeConstraint: includePlatformConstraint(t, ">=1.69 <=1.71")},
+		logger,
+		userLogger,
+	)
+	require.NoError(t, svc.PullPlatform(context.Background()))
+
+	rootURL := stubRootURL
+	for _, ver := range []string{"v1.71.0", "v1.70.0", "v1.69.0"} {
+		assert.Contains(t, svc.downloadList.Deckhouse, rootURL+":"+ver,
+			"version %s is within the include-platform window and must be included", ver)
+	}
+	for _, ver := range []string{"v1.72.10", "v1.68.0"} {
+		assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":"+ver,
+			"version %s is outside the include-platform window and must be excluded", ver)
+	}
+	for _, ch := range []string{"beta", "early-access", "stable"} {
+		assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel,
+			rootURL+"/release-channel:"+ch,
+			"channel %s points inside the include-platform window and must survive", ch)
+	}
+	for _, ch := range []string{"alpha", "rock-solid"} {
+		assert.NotContains(t, svc.downloadList.DeckhouseReleaseChannel,
+			rootURL+"/release-channel:"+ch,
+			"channel %s points outside the include-platform window and must be dropped", ch)
+	}
+}
+
+// TestPullPlatform_DryRun_IncludePlatform_TildeKeepsSingleMinor exercises the
+// tilde shorthand (~X.Y.Z → >=X.Y.Z <X.(Y+1).0) so the constraint dialect we
+// expose matches what --include-module accepts.
+func TestPullPlatform_DryRun_IncludePlatform_TildeKeepsSingleMinor(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := newDryRunService(
+		localfake.NewRegistryClientStub(),
+		&Options{IncludeConstraint: includePlatformConstraint(t, "~1.69.0")},
+		logger,
+		userLogger,
+	)
+	require.NoError(t, svc.PullPlatform(context.Background()))
+
+	rootURL := stubRootURL
+	assert.Contains(t, svc.downloadList.Deckhouse, rootURL+":v1.69.0",
+		"v1.69.0 is the only minor that satisfies ~1.69.0 in the stub")
+	for _, ver := range []string{"v1.72.10", "v1.71.0", "v1.70.0", "v1.68.0"} {
+		assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":"+ver,
+			"version %s does not satisfy ~1.69.0 and must be excluded", ver)
+	}
+}
+
+// TestPullPlatform_DryRun_IncludePlatform_InclusiveAnchorPreserved encodes the
+// "anchors round-trip" contract for the platform path. With a stub that does
+// not expose multiple patches per minor the latest-patch filter is a no-op,
+// but exercising the anchor extractor here means a future bug that drops
+// `>=` literals will surface as a clear failure.
+func TestPullPlatform_DryRun_IncludePlatform_InclusiveAnchorPreserved(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := newDryRunService(
+		localfake.NewRegistryClientStub(),
+		&Options{IncludeConstraint: includePlatformConstraint(t, ">=1.69.0 <=1.70.0")},
+		logger,
+		userLogger,
+	)
+	require.NoError(t, svc.PullPlatform(context.Background()))
+
+	rootURL := stubRootURL
+	for _, ver := range []string{"v1.69.0", "v1.70.0"} {
+		assert.Contains(t, svc.downloadList.Deckhouse, rootURL+":"+ver,
+			"anchor version %s must be preserved by include-platform", ver)
+	}
+	for _, ver := range []string{"v1.72.10", "v1.71.0", "v1.68.0"} {
+		assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":"+ver,
+			"version %s is outside the anchored window", ver)
+	}
+}
+
+// TestPullPlatform_DryRun_IncludePlatform_ExactTagBehavesLikeTargetTag pins
+// down the contract that =vX.Y.Z is operationally identical to
+// --deckhouse-tag=vX.Y.Z. The exact-tag synthesis happens in PullPlatform
+// before validation, so the test asserts both the version download list
+// (only the pinned tag is present) and the channel propagation block (every
+// default channel points at the pinned tag, mirroring --deckhouse-tag).
+func TestPullPlatform_DryRun_IncludePlatform_ExactTagBehavesLikeTargetTag(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := newDryRunService(
+		localfake.NewRegistryClientStub(),
+		&Options{IncludeConstraint: includePlatformConstraint(t, "=v1.69.0")},
+		logger,
+		userLogger,
+	)
+	require.NoError(t, svc.PullPlatform(context.Background()))
+
+	rootURL := stubRootURL
+	assert.Contains(t, svc.downloadList.Deckhouse, rootURL+":v1.69.0")
+	for _, ver := range []string{"v1.72.10", "v1.71.0", "v1.70.0", "v1.68.0"} {
+		assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":"+ver,
+			"only the exactly-pinned tag must be enqueued for download")
+	}
+	// Synthesized TargetTag flows through findTagsToMirror which matches the
+	// pinned tag against channel snapshots; stable points at v1.69.0 in the
+	// stub so it must show up in the release-channel layout.
+	assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel,
+		rootURL+"/release-channel:stable",
+		"=v1.69.0 must propagate to stable because v1.69.0 is the stable channel version in the stub")
 }
 
 func TestPullPlatform_DryRun_SinceVersion_EqualToAlpha_OnlyAlpha(t *testing.T) {

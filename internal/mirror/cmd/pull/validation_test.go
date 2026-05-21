@@ -331,11 +331,12 @@ func TestValidationValidateImagesBundlePathArg(t *testing.T) {
 
 func TestValidationParseAndValidateVersionFlags(t *testing.T) {
 	tests := []struct {
-		name               string
-		sinceVersionString string
-		deckhouseTag       string
-		expectError        bool
-		errorMsg           string
+		name                     string
+		sinceVersionString       string
+		platformConstraintString string
+		deckhouseTag             string
+		expectError              bool
+		errorMsg                 string
 	}{
 		{
 			name:               "no version flags",
@@ -392,6 +393,46 @@ func TestValidationParseAndValidateVersionFlags(t *testing.T) {
 			deckhouseTag:       "",
 			expectError:        true,
 		},
+		{
+			name:                     "valid include-platform range",
+			platformConstraintString: ">=1.64 <=1.68",
+			expectError:              false,
+		},
+		{
+			name:                     "valid include-platform caret shorthand",
+			platformConstraintString: "1.65.0",
+			expectError:              false,
+		},
+		{
+			name:                     "valid include-platform exact tag",
+			platformConstraintString: "=v1.65.3",
+			expectError:              false,
+		},
+		{
+			name:                     "valid include-platform exact tag with channel suffix",
+			platformConstraintString: "=v1.65.3+stable",
+			expectError:              false,
+		},
+		{
+			name:                     "include-platform conflicts with deckhouse-tag",
+			platformConstraintString: ">=1.64 <=1.68",
+			deckhouseTag:             "v1.65.0",
+			expectError:              true,
+			errorMsg:                 "ambiguous",
+		},
+		{
+			name:                     "include-platform conflicts with since-version",
+			platformConstraintString: ">=1.64 <=1.68",
+			sinceVersionString:       "1.64.0",
+			expectError:              true,
+			errorMsg:                 "ambiguous",
+		},
+		{
+			name:                     "invalid include-platform constraint",
+			platformConstraintString: "not-a-constraint",
+			expectError:              true,
+			errorMsg:                 "Parse --include-platform constraint",
+		},
 	}
 
 	for _, tt := range tests {
@@ -399,16 +440,22 @@ func TestValidationParseAndValidateVersionFlags(t *testing.T) {
 			originalSinceVersionString := pullflags.SinceVersionString
 			originalDeckhouseTag := pullflags.DeckhouseTag
 			originalSinceVersion := pullflags.SinceVersion
+			originalPlatformConstraintString := pullflags.PlatformConstraintString
+			originalPlatformConstraint := pullflags.PlatformConstraint
 
 			defer func() {
 				pullflags.SinceVersionString = originalSinceVersionString
 				pullflags.DeckhouseTag = originalDeckhouseTag
 				pullflags.SinceVersion = originalSinceVersion
+				pullflags.PlatformConstraintString = originalPlatformConstraintString
+				pullflags.PlatformConstraint = originalPlatformConstraint
 			}()
 
 			pullflags.SinceVersionString = tt.sinceVersionString
 			pullflags.DeckhouseTag = tt.deckhouseTag
 			pullflags.SinceVersion = nil
+			pullflags.PlatformConstraintString = tt.platformConstraintString
+			pullflags.PlatformConstraint = nil
 
 			err := parseAndValidateVersionFlags()
 
@@ -422,6 +469,9 @@ func TestValidationParseAndValidateVersionFlags(t *testing.T) {
 				if tt.sinceVersionString != "" {
 					assert.NotNil(t, pullflags.SinceVersion)
 					assert.Equal(t, tt.sinceVersionString, pullflags.SinceVersion.String())
+				}
+				if tt.platformConstraintString != "" {
+					assert.NotNil(t, pullflags.PlatformConstraint, "constraint must be parsed")
 				}
 			}
 		})
