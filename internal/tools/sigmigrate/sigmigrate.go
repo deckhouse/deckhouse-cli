@@ -832,7 +832,7 @@ func loadFailedObjects() (map[string]ObjectRef, error) {
 			gvr.Version = strings.TrimSpace(parts[4])
 		}
 
-		key := fmt.Sprintf("%s|%s|%s", namespace, name, kind)
+		key := objectCollectionKey(namespace, name, gvr)
 		objects[key] = ObjectRef{
 			Namespace: namespace,
 			Name:      name,
@@ -1075,11 +1075,11 @@ func filterObjectsByIdentifier(objects map[string]ObjectRef, objectIdentifier st
 		return map[string]ObjectRef{}
 	}
 
-	key := fmt.Sprintf("%s|%s|%s", namespace, name, kind)
-
 	filtered := make(map[string]ObjectRef)
-	if object, exists := objects[key]; exists {
-		filtered[key] = object
+	for key, object := range objects {
+		if object.Namespace == namespace && object.Name == name && object.Kind == kind {
+			filtered[key] = object
+		}
 	}
 
 	return filtered
