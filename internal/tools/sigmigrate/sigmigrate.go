@@ -175,6 +175,60 @@ type ObjectRef struct {
 	GVR       schema.GroupVersionResource
 }
 
+func preferredVersionByGroup(apiGroupList *metav1.APIGroupList) map[string]string {
+	preferred := make(map[string]string)
+	if apiGroupList == nil {
+		return preferred
+	}
+
+	for _, group := range apiGroupList.Groups {
+		if group.Name == "" {
+			continue
+		}
+		if group.PreferredVersion.Version != "" {
+			preferred[group.Name] = group.PreferredVersion.Version
+		}
+	}
+
+	return preferred
+}
+
+func objectCollectionKey(namespace, name string, gvr schema.GroupVersionResource) string {
+	return fmt.Sprintf("%s|%s|%s|%s", namespace, name, gvr.Group, gvr.Resource)
+}
+
+func upsertCollectedObject(
+	objects map[string]ObjectRef,
+	namespace string,
+	name string,
+	gvr schema.GroupVersionResource,
+	preferredByGroup map[string]string,
+) {
+	key := objectCollectionKey(namespace, name, gvr)
+	candidate := ObjectRef{
+		Namespace: namespace,
+		Name:      name,
+		Kind:      gvr.Resource,
+		GVR:       gvr,
+	}
+
+	existing, exists := objects[key]
+	if !exists {
+		objects[key] = candidate
+		return
+	}
+
+	preferredVersion := preferredByGroup[gvr.Group]
+	if preferredVersion == "" {
+		// Keep first discovered version if preferred version is unknown.
+		return
+	}
+
+	if existing.GVR.Version != preferredVersion && gvr.Version == preferredVersion {
+		objects[key] = candidate
+	}
+}
+
 type SigMigrateConfig struct {
 	RetryFailed bool
 	KubectlAs   string
@@ -349,6 +403,7 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 		tracef("failed to discover API groups: %v", err)
 		return nil, fmt.Errorf("failed to discover API groups: %w", err)
 	}
+	preferredByGroup := preferredVersionByGroup(apiGroupList)
 
 	namespacedResources := []schema.GroupVersionResource{}
 	clusterResources := []schema.GroupVersionResource{}
@@ -459,13 +514,7 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 				namespace = "clusterwide"
 			}
 			name := item.GetName()
-			key := fmt.Sprintf("%s|%s|%s", namespace, name, gvr.Resource)
-			objects[key] = ObjectRef{
-				Namespace: namespace,
-				Name:      name,
-				Kind:      gvr.Resource,
-				GVR:       gvr,
-			}
+			upsertCollectedObject(objects, namespace, name, gvr, preferredByGroup)
 		}
 	}
 
@@ -492,13 +541,7 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 
 		for _, item := range list.Items {
 			name := item.GetName()
-			key := fmt.Sprintf("clusterwide|%s|%s", name, gvr.Resource)
-			objects[key] = ObjectRef{
-				Namespace: "clusterwide",
-				Name:      name,
-				Kind:      gvr.Resource,
-				GVR:       gvr,
-			}
+			upsertCollectedObject(objects, "clusterwide", name, gvr, preferredByGroup)
 		}
 	}
 
@@ -789,7 +832,7 @@ func loadFailedObjects() (map[string]ObjectRef, error) {
 			gvr.Version = strings.TrimSpace(parts[4])
 		}
 
-		key := fmt.Sprintf("%s|%s|%s", namespace, name, kind)
+		key := objectCollectionKey(namespace, name, gvr)
 		objects[key] = ObjectRef{
 			Namespace: namespace,
 			Name:      name,
@@ -1032,11 +1075,11 @@ func filterObjectsByIdentifier(objects map[string]ObjectRef, objectIdentifier st
 		return map[string]ObjectRef{}
 	}
 
-	key := fmt.Sprintf("%s|%s|%s", namespace, name, kind)
-
 	filtered := make(map[string]ObjectRef)
-	if object, exists := objects[key]; exists {
-		filtered[key] = object
+	for key, object := range objects {
+		if object.Namespace == namespace && object.Name == name && object.Kind == kind {
+			filtered[key] = object
+		}
 	}
 
 	return filtered

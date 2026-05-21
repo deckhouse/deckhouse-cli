@@ -21,7 +21,7 @@ d8 tools sig-migrate [flags]
 | `--log-level`  | Set the log level (INFO, DEBUG, TRACE)                                                                 | `DEBUG`                                     |
 | `--kubeconfig` | Path to the kubeconfig file to use for CLI requests                                                    | `$HOME/.kube/config` or `$KUBECONFIG`       |
 | `--context`    | The name of the kubeconfig context to use                                                              | `kubernetes-admin@kubernetes`               |
-| `--object`     | Process only one specific object in `namespace/name/kind` format (`clusterwide/name/kind` for cluster) | `""`                                        |
+| `--object`     | Process object(s) by `namespace/name/resource` (`clusterwide/name/resource` for cluster-scoped)         | `""`                                        |
 
 ## Usage Examples
 
@@ -91,7 +91,7 @@ d8 tools sig-migrate \
 
 1. **Resource Collection**: The command uses Kubernetes API discovery to automatically discover all available resources (both namespaced and cluster-wide).
 
-2. **Optional Object Filter**: If `--object` is specified, the command skips full resource fetching/listing and processes only the matching object (`namespace/name/kind`).
+2. **Optional Object Filter**: If `--object` is specified, the command skips full resource fetching/listing and processes matching object(s) by `namespace/name/resource`. If multiple API groups contain the same `namespace/name/resource`, all matching entries are selected.
 
 3. **Adding Annotation**: For each selected resource, an annotation `d8-migration=<timestamp>` is added, where `timestamp` is the current time in Unix timestamp format.
 
@@ -108,11 +108,11 @@ d8 tools sig-migrate \
 
 The command creates run-scoped files to track failed operations:
 
-- `/tmp/failed_annotations_<timestamp>.txt` - list of objects in `namespace|name|kind` format that failed to be processed
+- `/tmp/failed_annotations_<timestamp>.txt` - list of objects in `namespace|name|kind|group|version` format that failed to be processed
 - `/tmp/failed_errors_<timestamp>.txt` - detailed error information in `namespace|name|kind|error_message` format
 - `/tmp/skipped_objects_<timestamp>.txt` - skipped objects with reason/details
 
-For retry compatibility, failed annotations are also mirrored into legacy `/tmp/failed_annotations.txt` and `--retry` reads from that legacy file.
+For retry compatibility, failed annotations are also mirrored into legacy `/tmp/failed_annotations.txt` and `--retry` reads from that legacy file (supports both old `namespace|name|kind` and new `namespace|name|kind|group|version` lines).
 
 ### Automatic Failure Detection
 

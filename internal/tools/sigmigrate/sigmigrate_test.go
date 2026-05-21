@@ -113,9 +113,108 @@ func TestParseObjectIdentifier_InvalidFormat(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestPreferredVersionByGroup(t *testing.T) {
+	groups := &metav1.APIGroupList{
+		Groups: []metav1.APIGroup{
+			{
+				Name: "deckhouse.io",
+				PreferredVersion: metav1.GroupVersionForDiscovery{
+					GroupVersion: "deckhouse.io/v1",
+					Version:      "v1",
+				},
+			},
+			{
+				Name: "apps",
+				PreferredVersion: metav1.GroupVersionForDiscovery{
+					GroupVersion: "apps/v1",
+					Version:      "v1",
+				},
+			},
+		},
+	}
+
+	preferred := preferredVersionByGroup(groups)
+	require.Equal(t, "v1", preferred["deckhouse.io"])
+	require.Equal(t, "v1", preferred["apps"])
+}
+
+func TestUpsertCollectedObject_PrefersPreferredVersion(t *testing.T) {
+	objects := make(map[string]ObjectRef)
+	preferred := map[string]string{"deckhouse.io": "v1"}
+
+	upsertCollectedObject(
+		objects,
+		"clusterwide",
+		"worker",
+		schema.GroupVersionResource{Group: "deckhouse.io", Version: "v1alpha1", Resource: "nodegroups"},
+		preferred,
+	)
+	upsertCollectedObject(
+		objects,
+		"clusterwide",
+		"worker",
+		schema.GroupVersionResource{Group: "deckhouse.io", Version: "v1", Resource: "nodegroups"},
+		preferred,
+	)
+
+	obj := objects["clusterwide|worker|deckhouse.io|nodegroups"]
+	require.Equal(t, "v1", obj.GVR.Version)
+	require.Equal(t, "deckhouse.io", obj.GVR.Group)
+	require.Equal(t, "nodegroups", obj.GVR.Resource)
+}
+
+func TestLoadFailedObjects_DoesNotOverwriteSameNamespaceNameKindAcrossGroups(t *testing.T) {
+	tmpDir := t.TempDir()
+	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.txt")
+	setCurrentRunState(&sigMigrateRunState{LegacyFailedRetryFile: legacyRetryFile})
+	defer setCurrentRunState(nil)
+
+	testData := strings.Join([]string{
+		"clusterwide|worker|nodegroups|deckhouse.io|v1",
+		"clusterwide|worker|nodegroups|example.io|v1",
+	}, "\n") + "\n"
+
+	err := os.WriteFile(legacyRetryFile, []byte(testData), 0644)
+	require.NoError(t, err)
+
+	objects, err := loadFailedObjects()
+	require.NoError(t, err)
+	require.Len(t, objects, 2)
+
+	objDeckhouse := objects["clusterwide|worker|deckhouse.io|nodegroups"]
+	require.Equal(t, "deckhouse.io", objDeckhouse.GVR.Group)
+	require.Equal(t, "v1", objDeckhouse.GVR.Version)
+
+	objExample := objects["clusterwide|worker|example.io|nodegroups"]
+	require.Equal(t, "example.io", objExample.GVR.Group)
+	require.Equal(t, "v1", objExample.GVR.Version)
+}
+
+func TestFilterObjectsByIdentifier_ReturnsAllMatchingGroups(t *testing.T) {
+	objects := map[string]ObjectRef{
+		"clusterwide|worker|deckhouse.io|nodegroups": {
+			Namespace: "clusterwide",
+			Name:      "worker",
+			Kind:      "nodegroups",
+			GVR:       schema.GroupVersionResource{Group: "deckhouse.io", Version: "v1", Resource: "nodegroups"},
+		},
+		"clusterwide|worker|example.io|nodegroups": {
+			Namespace: "clusterwide",
+			Name:      "worker",
+			Kind:      "nodegroups",
+			GVR:       schema.GroupVersionResource{Group: "example.io", Version: "v1", Resource: "nodegroups"},
+		},
+	}
+
+	filtered := filterObjectsByIdentifier(objects, "clusterwide/worker/nodegroups")
+	require.Len(t, filtered, 2)
+	require.Contains(t, filtered, "clusterwide|worker|deckhouse.io|nodegroups")
+	require.Contains(t, filtered, "clusterwide|worker|example.io|nodegroups")
+}
+
 func TestFilterObjectsByIdentifier_SpecificObject(t *testing.T) {
 	objects := map[string]ObjectRef{
-		"default|cm-one|configmaps": {
+		"default|cm-one||configmaps": {
 			Namespace: "default",
 			Name:      "cm-one",
 			Kind:      "configmaps",
@@ -125,7 +224,7 @@ func TestFilterObjectsByIdentifier_SpecificObject(t *testing.T) {
 				Resource: "configmaps",
 			},
 		},
-		"kube-system|cm-two|configmaps": {
+		"kube-system|cm-two||configmaps": {
 			Namespace: "kube-system",
 			Name:      "cm-two",
 			Kind:      "configmaps",
@@ -139,13 +238,13 @@ func TestFilterObjectsByIdentifier_SpecificObject(t *testing.T) {
 
 	filtered := filterObjectsByIdentifier(objects, "kube-system/cm-two/configmaps")
 	require.Len(t, filtered, 1)
-	require.Contains(t, filtered, "kube-system|cm-two|configmaps")
-	require.Equal(t, "cm-two", filtered["kube-system|cm-two|configmaps"].Name)
+	require.Contains(t, filtered, "kube-system|cm-two||configmaps")
+	require.Equal(t, "cm-two", filtered["kube-system|cm-two||configmaps"].Name)
 }
 
 func TestFilterObjectsByIdentifier_NotFound(t *testing.T) {
 	objects := map[string]ObjectRef{
-		"default|cm-one|configmaps": {
+		"default|cm-one||configmaps": {
 			Namespace: "default",
 			Name:      "cm-one",
 			Kind:      "configmaps",
@@ -163,7 +262,7 @@ func TestFilterObjectsByIdentifier_NotFound(t *testing.T) {
 
 func TestFilterObjectsByIdentifier_InvalidFormat(t *testing.T) {
 	objects := map[string]ObjectRef{
-		"default|cm-one|configmaps": {
+		"default|cm-one||configmaps": {
 			Namespace: "default",
 			Name:      "cm-one",
 			Kind:      "configmaps",
@@ -274,19 +373,19 @@ func TestLoadFailedObjects(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, objects, 3)
 
-	first := objects["default|test-pod|pods"]
+	first := objects["default|test-pod||pods"]
 	require.Equal(t, "default", first.Namespace)
 	require.Equal(t, "test-pod", first.Name)
 	require.Equal(t, "pods", first.Kind)
 	require.Equal(t, "pods", first.GVR.Resource)
 
-	second := objects["kube-system|test-cm|configmaps"]
+	second := objects["kube-system|test-cm||configmaps"]
 	require.Equal(t, "kube-system", second.Namespace)
 	require.Equal(t, "test-cm", second.Name)
 	require.Equal(t, "configmaps", second.Kind)
 	require.Equal(t, "configmaps", second.GVR.Resource)
 
-	nodeGroup := objects["clusterwide|worker|nodegroups"]
+	nodeGroup := objects["clusterwide|worker||nodegroups"]
 	require.Equal(t, "clusterwide", nodeGroup.Namespace)
 	require.Equal(t, "worker", nodeGroup.Name)
 	require.Equal(t, "nodegroups", nodeGroup.Kind)
@@ -308,7 +407,7 @@ func TestLoadFailedObjects_ExtendedRetryFormatIncludesGVR(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, objects, 1)
 
-	obj := objects["clusterwide|worker|nodegroups"]
+	obj := objects["clusterwide|worker|deckhouse.io|nodegroups"]
 	require.Equal(t, "clusterwide", obj.Namespace)
 	require.Equal(t, "worker", obj.Name)
 	require.Equal(t, "nodegroups", obj.Kind)
@@ -335,7 +434,7 @@ func TestLoadFailedObjects_ExtendedRetryFormat_NamespacedObjects(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, objects, 2)
 
-	deployment := objects["default|web-app|deployments"]
+	deployment := objects["default|web-app|apps|deployments"]
 	require.Equal(t, "default", deployment.Namespace)
 	require.Equal(t, "web-app", deployment.Name)
 	require.Equal(t, "deployments", deployment.Kind)
@@ -343,7 +442,7 @@ func TestLoadFailedObjects_ExtendedRetryFormat_NamespacedObjects(t *testing.T) {
 	require.Equal(t, "apps", deployment.GVR.Group)
 	require.Equal(t, "v1", deployment.GVR.Version)
 
-	configMap := objects["kube-system|coredns|configmaps"]
+	configMap := objects["kube-system|coredns||configmaps"]
 	require.Equal(t, "kube-system", configMap.Namespace)
 	require.Equal(t, "coredns", configMap.Name)
 	require.Equal(t, "configmaps", configMap.Kind)

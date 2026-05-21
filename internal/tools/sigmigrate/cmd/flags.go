@@ -61,6 +61,6 @@ func addFlags(flags *pflag.FlagSet) {
 	flags.String(
 		"object",
 		"",
-		"Scan only a specific object in format <namespace>/<name>/<resource_name>. Use 'clusterwide' namespace for cluster-scoped resources. To get the resource name, use the 'kubectl api-resources' command.",
+		"Process objects by identifier in format <namespace>/<name>/<resource_name>. Use 'clusterwide' namespace for cluster-scoped resources. Resource name must match kubectl api-resources output.",
 	)
 }
