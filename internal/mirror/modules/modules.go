@@ -75,6 +75,17 @@ type Options struct {
 	Timeout time.Duration
 	// DryRun prints the pull plan without downloading any image blobs
 	DryRun bool
+	// ProxyRegistry replaces catalog-based discovery (ListTags of the
+	// modules root and per-module tag listings) with a sequential probe
+	// of individual version tags derived from the user's --include-module
+	// version constraint. It exists for proxy/caching registries that do
+	// not implement the registry catalog API but DO serve manifests for
+	// tags they cache.
+	//
+	// The CLI requires --include-module with explicit version anchors
+	// when ProxyRegistry is set so the probe has both a module name list
+	// and a per-module lower bound to start incrementing from.
+	ProxyRegistry bool
 }
 
 type Service struct {
@@ -160,6 +171,15 @@ func (svc *Service) PullModules(ctx context.Context) error {
 func (svc *Service) validateModulesAccess(ctx context.Context) error {
 	svc.logger.Debug("Validating access to the modules registry")
 
+	// Proxy registries typically refuse the catalog API entirely.
+	// We deliberately skip the listing access check here — the CLI has
+	// already required --include-module so we know exactly which
+	// modules to probe, and per-tag CheckImageExists/GetImage calls
+	// (used downstream) work fine against a proxy.
+	if svc.options.ProxyRegistry {
+		return nil
+	}
+
 	// For specific tags, check if the tag exists
 	_, err := svc.modulesService.ListTags(ctx)
 	if errors.Is(err, client.ErrImageNotFound) {
@@ -188,10 +208,15 @@ func (svc *Service) pullModules(ctx context.Context) error {
 	// - stores intermediate pulled images; final bundle is packed later.
 	tmpDir := filepath.Join(svc.workingDir, "modules")
 
-	// List all available modules
-	moduleNames, err := svc.modulesService.ListTags(ctx)
+	// Pick the module-name discovery path:
+	// - proxy registries can't enumerate the modules catalog, but the CLI
+	//   has guaranteed --include-module is set, so we read the names
+	//   directly from the whitelist filter and skip the listing call.
+	// - everywhere else, we discover names from the registry's tag list
+	//   and let the filter prune them.
+	moduleNames, err := svc.discoverModuleNames(ctx)
 	if err != nil {
-		return fmt.Errorf("list modules: %w", err)
+		return err
 	}
 
 	if len(moduleNames) == 0 {
@@ -393,14 +418,58 @@ func (svc *Service) discoverChannelVersions(ctx context.Context, moduleName stri
 	return svc.extractVersionsFromReleaseChannels(ctx, moduleName), nil
 }
 
+// discoverModuleNames returns the list of module names this run should
+// consider. The behaviour depends on whether the registry can be
+// enumerated:
+//
+//   - Default path: ListTags on the modules root returns every module
+//     the registry exposes. The filter (whitelist/blacklist) then prunes
+//     the result downstream.
+//   - Proxy-registry path: the catalog API is assumed unavailable. The
+//     CLI guarantees a whitelist filter is set, so the module names come
+//     straight from --include-module — we never call the registry here.
+//
+// Both paths return an empty slice (no error) when nothing is to be
+// pulled; the caller prints the standard "modules were not found"
+// warning so a misconfigured source still surfaces clearly.
+func (svc *Service) discoverModuleNames(ctx context.Context) ([]string, error) {
+	if svc.options.ProxyRegistry {
+		if svc.options.Filter == nil || !svc.options.Filter.IsWhitelist() {
+			// Defensive: validation should have rejected this combination
+			// (--proxy-registry needs --include-module). Surface a clear
+			// error so a future refactor of the CLI layer doesn't silently
+			// degrade into a no-op pull.
+			return nil, fmt.Errorf("--proxy-registry requires a whitelist of modules (--include-module)")
+		}
+		return svc.options.Filter.ModuleNames(), nil
+	}
+
+	moduleNames, err := svc.modulesService.ListTags(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list modules: %w", err)
+	}
+	return moduleNames, nil
+}
+
 // listTagsIfConstrained returns the module's tag list, but only when the filter
 // has a non-exact (semver) constraint - exact-tag and no-constraint paths don't
 // read Releases. ErrImageNotFound is logged and treated as no tags (same policy
 // as validateModulesAccess for missing module repos).
+//
+// In --proxy-registry mode the per-module catalog is unavailable, so we
+// probe the tags one by one with a forward semver walk seeded from the
+// constraint's lower bound (see ProbeAvailableVersions). The probe only
+// surfaces tags the registry actually serves, so the downstream
+// Filter.VersionsToMirror logic continues to apply its
+// latest-patch-per-minor and inclusive-anchor rules unmodified.
 func (svc *Service) listTagsIfConstrained(ctx context.Context, moduleName string) ([]string, error) {
 	constraint, hasConstraint := svc.options.Filter.GetConstraint(moduleName)
 	if !hasConstraint || constraint.IsExact() {
 		return nil, nil
+	}
+
+	if svc.options.ProxyRegistry {
+		return svc.probeModuleTags(ctx, moduleName, constraint)
 	}
 
 	tags, err := svc.modulesService.Module(moduleName).ListTags(ctx)
@@ -410,6 +479,48 @@ func (svc *Service) listTagsIfConstrained(ctx context.Context, moduleName string
 		return nil, nil
 	case err != nil:
 		return nil, fmt.Errorf("list tags for module %s: %w", moduleName, err)
+	}
+	return tags, nil
+}
+
+// probeModuleTags walks tags for a single module via HEAD requests
+// instead of asking the registry to enumerate them. Only versions that
+// the registry actually serves AND that satisfy the user's constraint
+// are returned — the rest of the pull pipeline is unchanged.
+//
+// The constraint must be a SemanticVersionConstraint here: exact-tag
+// constraints are filtered out by listTagsIfConstrained before reaching
+// this function, and a future constraint type would need its own
+// proxy-aware code path.
+func (svc *Service) probeModuleTags(ctx context.Context, moduleName string, constraint VersionConstraint) ([]string, error) {
+	semverConstraint, ok := constraint.(*SemanticVersionConstraint)
+	if !ok {
+		// Be loud — silently falling back to ListTags here would defeat
+		// the whole purpose of --proxy-registry on a registry that
+		// refuses catalog access.
+		return nil, fmt.Errorf("module %s: --proxy-registry only supports semver-style constraints, got %T", moduleName, constraint)
+	}
+
+	check := func(ctx context.Context, v *semver.Version) (bool, error) {
+		tag := "v" + v.String()
+		err := svc.modulesService.Module(moduleName).CheckImageExists(ctx, tag)
+		if err == nil {
+			return true, nil
+		}
+		if errors.Is(err, client.ErrImageNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("check module %s tag %q: %w", moduleName, tag, err)
+	}
+
+	versions, err := ProbeAvailableVersions(ctx, semverConstraint, check)
+	if err != nil {
+		return nil, fmt.Errorf("probe tags for module %s: %w", moduleName, err)
+	}
+
+	tags := make([]string, 0, len(versions))
+	for _, v := range versions {
+		tags = append(tags, "v"+v.String())
 	}
 	return tags, nil
 }

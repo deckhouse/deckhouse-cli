@@ -478,6 +478,165 @@ func TestValidationParseAndValidateVersionFlags(t *testing.T) {
 	}
 }
 
+func TestValidationValidateProxyRegistryFlag(t *testing.T) {
+	tests := []struct {
+		name                     string
+		proxyRegistry            bool
+		platformConstraintString string
+		deckhouseTag             string
+		sinceVersionString       string
+		modulesWhitelist         []string
+		noPlatform               bool
+		noModules                bool
+		onlyExtraImages          bool
+		expectError              bool
+		errorMsg                 string
+	}{
+		{
+			name:          "flag off — every other combination is a no-op",
+			proxyRegistry: false,
+			expectError:   false,
+		},
+		{
+			name:                     "happy path: platform constraint + module whitelist with explicit version",
+			proxyRegistry:            true,
+			platformConstraintString: ">=1.64.0 <=1.68.0",
+			modulesWhitelist:         []string{"prometheus@^1.0.0"},
+			expectError:              false,
+		},
+		{
+			name:                     "missing --include-platform when platform is on",
+			proxyRegistry:            true,
+			platformConstraintString: "",
+			modulesWhitelist:         []string{"prometheus@^1.0.0"},
+			expectError:              true,
+			errorMsg:                 "requires --include-platform",
+		},
+		{
+			name:                     "missing --include-module when modules are on",
+			proxyRegistry:            true,
+			platformConstraintString: "^1.64.0",
+			modulesWhitelist:         nil,
+			expectError:              true,
+			errorMsg:                 "requires --include-module",
+		},
+		{
+			name:                     "--include-module without explicit version is rejected",
+			proxyRegistry:            true,
+			platformConstraintString: "^1.64.0",
+			modulesWhitelist:         []string{"prometheus"},
+			expectError:              true,
+			errorMsg:                 "explicit version constraint",
+		},
+		{
+			name:                     "--no-platform skips the include-platform requirement",
+			proxyRegistry:            true,
+			noPlatform:               true,
+			modulesWhitelist:         []string{"prometheus@^1.0.0"},
+			expectError:              false,
+		},
+		{
+			name:                     "--no-modules skips the include-module requirement",
+			proxyRegistry:            true,
+			platformConstraintString: "^1.64.0",
+			noModules:                true,
+			modulesWhitelist:         nil,
+			expectError:              false,
+		},
+		{
+			name:          "--no-platform and --no-modules together is a no-op",
+			proxyRegistry: true,
+			noPlatform:    true,
+			noModules:     true,
+			expectError:   true,
+			errorMsg:      "nothing to do",
+		},
+		{
+			name:                     "--only-extra-images still requires --include-module even with --no-modules",
+			proxyRegistry:            true,
+			platformConstraintString: "^1.64.0",
+			noModules:                true,
+			onlyExtraImages:          true,
+			modulesWhitelist:         nil,
+			expectError:              true,
+			errorMsg:                 "requires --include-module",
+		},
+		{
+			name:                     "conflicts with --deckhouse-tag",
+			proxyRegistry:            true,
+			platformConstraintString: "^1.64.0",
+			modulesWhitelist:         []string{"prometheus@^1.0.0"},
+			deckhouseTag:             "v1.65.0",
+			expectError:              true,
+			errorMsg:                 "deckhouse-tag",
+		},
+		{
+			name:                     "conflicts with --since-version",
+			proxyRegistry:            true,
+			platformConstraintString: "^1.64.0",
+			modulesWhitelist:         []string{"prometheus@^1.0.0"},
+			sinceVersionString:       "1.50.0",
+			expectError:              true,
+			errorMsg:                 "since-version",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Snapshot global state — these flags are package-level.
+			originals := struct {
+				proxyRegistry            bool
+				platformConstraintString string
+				deckhouseTag             string
+				sinceVersionString       string
+				modulesWhitelist         []string
+				noPlatform               bool
+				noModules                bool
+				onlyExtraImages          bool
+			}{
+				proxyRegistry:            pullflags.ProxyRegistry,
+				platformConstraintString: pullflags.PlatformConstraintString,
+				deckhouseTag:             pullflags.DeckhouseTag,
+				sinceVersionString:       pullflags.SinceVersionString,
+				modulesWhitelist:         pullflags.ModulesWhitelist,
+				noPlatform:               pullflags.NoPlatform,
+				noModules:                pullflags.NoModules,
+				onlyExtraImages:          pullflags.OnlyExtraImages,
+			}
+			defer func() {
+				pullflags.ProxyRegistry = originals.proxyRegistry
+				pullflags.PlatformConstraintString = originals.platformConstraintString
+				pullflags.DeckhouseTag = originals.deckhouseTag
+				pullflags.SinceVersionString = originals.sinceVersionString
+				pullflags.ModulesWhitelist = originals.modulesWhitelist
+				pullflags.NoPlatform = originals.noPlatform
+				pullflags.NoModules = originals.noModules
+				pullflags.OnlyExtraImages = originals.onlyExtraImages
+			}()
+
+			pullflags.ProxyRegistry = tt.proxyRegistry
+			pullflags.PlatformConstraintString = tt.platformConstraintString
+			pullflags.DeckhouseTag = tt.deckhouseTag
+			pullflags.SinceVersionString = tt.sinceVersionString
+			pullflags.ModulesWhitelist = tt.modulesWhitelist
+			pullflags.NoPlatform = tt.noPlatform
+			pullflags.NoModules = tt.noModules
+			pullflags.OnlyExtraImages = tt.onlyExtraImages
+
+			err := validateProxyRegistryFlag()
+
+			if tt.expectError {
+				assert.Error(t, err)
+				if tt.errorMsg != "" {
+					assert.Contains(t, err.Error(), tt.errorMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestValidationValidateChunkSizeFlag(t *testing.T) {
 	tests := []struct {
 		name        string

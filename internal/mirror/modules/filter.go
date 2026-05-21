@@ -18,6 +18,7 @@ package modules
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
@@ -101,6 +102,30 @@ func (f *Filter) Len() int { return len(f.modules) }
 func (f *Filter) GetConstraint(moduleName string) (VersionConstraint, bool) {
 	constraint, found := f.modules[moduleName]
 	return constraint, found
+}
+
+// IsWhitelist reports whether the filter is operating in whitelist mode.
+// It exists so the modules service can take alternate code paths that
+// only make sense when a finite, user-supplied module list is available
+// (e.g. proxy-registry probing, which has no module catalog to enumerate).
+func (f *Filter) IsWhitelist() bool {
+	return f._type == FilterTypeWhitelist
+}
+
+// ModuleNames returns the names registered with the filter in
+// deterministic insertion-agnostic order (sorted). For a whitelist
+// filter this is exactly the set of modules the user named with
+// --include-module; for a blacklist filter it is the set the user
+// asked to exclude.
+//
+// The slice is freshly allocated so callers may mutate it freely.
+func (f *Filter) ModuleNames() []string {
+	names := make([]string, 0, len(f.modules))
+	for name := range f.modules {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // ParseVersionConstraint turns a user-supplied constraint string into a

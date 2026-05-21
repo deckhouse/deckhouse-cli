@@ -79,6 +79,17 @@ type Options struct {
 	Timeout time.Duration
 	// DryRun prints the pull plan without downloading any image blobs
 	DryRun bool
+	// ProxyRegistry replaces catalog-based release discovery (ListTags
+	// of the deckhouse release-channel repo) with a sequential probe of
+	// individual version tags derived from IncludeConstraint. It exists
+	// for proxy/caching registries that do not implement the registry
+	// catalog API but DO serve manifests for tags they cache.
+	//
+	// The CLI requires IncludeConstraint when ProxyRegistry is set so
+	// the probe has a defined starting point — without a lower bound
+	// from the user the probe would have to start from 0.0.0 and would
+	// never find anything.
+	ProxyRegistry bool
 }
 
 type Service struct {
@@ -516,14 +527,11 @@ func (svc *Service) expandVersionRange(ctx context.Context, channelVersions chan
 	// upper bounds, so we ignore rock-solid/alpha endpoints entirely. We still
 	// honour --since-version (when above the constraint's lower bound) to
 	// preserve the existing knob without surprising the user.
-	svc.userLogger.Debugf("listing deckhouse releases for --include-platform")
-
-	allTags, err := svc.deckhouseService.ReleaseChannels().ListTags(ctx)
+	matched, err := svc.discoverConstrainedPlatformVersions(ctx, semverConstraint)
 	if err != nil {
-		return nil, fmt.Errorf("get tags from Deckhouse registry: %w", err)
+		return nil, err
 	}
 
-	matched := parseTagsMatchingConstraint(allTags, semverConstraint)
 	if since := svc.options.SinceVersion; since != nil {
 		nb := make([]*semver.Version, 0, len(matched))
 		for _, v := range matched {
@@ -539,6 +547,57 @@ func (svc *Service) expandVersionRange(ctx context.Context, channelVersions chan
 	selected = restoreInclusiveAnchors(selected, matched, semverConstraint.Anchors())
 
 	return append(baseVersions, selected...), nil
+}
+
+// discoverConstrainedPlatformVersions returns every registry-served
+// platform version that satisfies the user's --include-platform
+// constraint. By default it pulls the full release-channel tag list and
+// filters it locally, which is fast but requires the source registry to
+// implement the catalog API.
+//
+// When --proxy-registry is set, the registry is treated as a
+// proxy/cache that does NOT implement the catalog API: we synthesise
+// the same set of versions by walking semver tags one HEAD-request at
+// a time via modules.ProbeAvailableVersions, starting from the
+// constraint's lower bound. The behaviour at this boundary is
+// equivalent to listing for any registry that fully populates its
+// catalog API; for proxies that don't, the probe is the only thing
+// that can find anything at all.
+func (svc *Service) discoverConstrainedPlatformVersions(ctx context.Context, semverConstraint *modules.SemanticVersionConstraint) ([]*semver.Version, error) {
+	if svc.options.ProxyRegistry {
+		svc.userLogger.Debugf("probing deckhouse releases for --include-platform via --proxy-registry")
+		matched, err := modules.ProbeAvailableVersions(ctx, semverConstraint, svc.releaseTagExists)
+		if err != nil {
+			return nil, fmt.Errorf("probe deckhouse releases: %w", err)
+		}
+		return matched, nil
+	}
+
+	svc.userLogger.Debugf("listing deckhouse releases for --include-platform")
+
+	allTags, err := svc.deckhouseService.ReleaseChannels().ListTags(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get tags from Deckhouse registry: %w", err)
+	}
+
+	return parseTagsMatchingConstraint(allTags, semverConstraint), nil
+}
+
+// releaseTagExists adapts the release-channel CheckImageExists call to
+// the modules.ProbeChecker signature. It maps the registry client's
+// "not found" sentinel to (false, nil) so the probe treats it as
+// "patch series ended" instead of aborting; every other error
+// (network, auth, unexpected status) propagates out to fail the pull.
+func (svc *Service) releaseTagExists(ctx context.Context, v *semver.Version) (bool, error) {
+	tag := "v" + v.String()
+	err := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, tag)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, client.ErrImageNotFound) {
+		return false, nil
+	}
+	return false, fmt.Errorf("check release tag %q: %w", tag, err)
 }
 
 // parseTagsMatchingConstraint walks the registry's tag list, drops anything
