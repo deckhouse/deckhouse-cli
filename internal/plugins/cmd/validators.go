@@ -239,8 +239,11 @@ func validatePluginConflict(plugin *internal.Plugin, installedPlugin *internal.P
 // validatePluginRequirementMandatory enforces mandatory plugin requirements:
 //
 // For mandatory requirements:
-// - if the dependency is not installed, return a soft failure (FailedConstraints)
-// - if the dependency is installed but fails the constraint, return a hard error
+
+//   - if the dependency is not installed, record a soft failure in FailedConstraints
+//   - if the dependency is installed but fails the constraint, record a soft failure in FailedConstraints
+//   - return a non-nil error only for operational failures such as install checks,
+//     version lookup failures, or invalid version constraints
 func (pc *PluginsCommand) validatePluginRequirementMandatory(plugin *internal.Plugin) (FailedConstraints, error) {
 	result := make(FailedConstraints)
 
