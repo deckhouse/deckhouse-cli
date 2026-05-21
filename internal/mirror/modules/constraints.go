@@ -43,6 +43,17 @@ type SemanticVersionConstraint struct {
 	// those operators are shorthand for a range and the patch filter is
 	// free to collapse same-minor patches inside them.
 	anchors []*semver.Version
+	// lowerBound is the smallest version literal that appears in the
+	// constraint string, regardless of which operator (^, ~, >=, =, etc.)
+	// preceded it. It is intended for callers that cannot list registry
+	// tags directly (proxy registries) and need a starting point to
+	// enumerate (major, minor, patch) by incrementing from a known
+	// version that the user has named.
+	//
+	// May be nil only when the constraint string contains no recognisable
+	// version literal, which is rejected by NewSemanticVersionConstraint
+	// before it reaches consumers.
+	lowerBound *semver.Version
 }
 
 // anchorOpRegex captures version literals that follow an inclusive boundary
@@ -53,6 +64,14 @@ type SemanticVersionConstraint struct {
 // run); the result is re-validated through semver.NewVersion before being
 // stored.
 var anchorOpRegex = regexp.MustCompile(`(?:>=|<=|=>|=<)\s*([^\s,]+)`)
+
+// versionLiteralRegex captures any version literal in the constraint string,
+// regardless of the operator preceding it (or absence thereof). Used by
+// LowerBound to find a sensible probing entry point when callers can't list
+// tags directly (e.g. proxy registries) and need to enumerate versions by
+// incrementing patch/minor/major starting from the constraint's lowest
+// explicitly-named version.
+var versionLiteralRegex = regexp.MustCompile(`v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+][0-9A-Za-z.\-]+)?`)
 
 func NewSemanticVersionConstraint(c string) (*SemanticVersionConstraint, error) {
 	constraint, err := semver.NewConstraint(c)
@@ -65,9 +84,15 @@ func NewSemanticVersionConstraint(c string) (*SemanticVersionConstraint, error) 
 		return nil, fmt.Errorf("invalid semantic version constraint %q: %w", c, err)
 	}
 
+	lower, err := extractLowerBound(c)
+	if err != nil {
+		return nil, fmt.Errorf("invalid semantic version constraint %q: %w", c, err)
+	}
+
 	return &SemanticVersionConstraint{
 		constraint: constraint,
 		anchors:    anchors,
+		lowerBound: lower,
 	}, nil
 }
 
@@ -78,6 +103,62 @@ func NewSemanticVersionConstraint(c string) (*SemanticVersionConstraint, error) 
 // will not silently widen the range.
 func (s *SemanticVersionConstraint) Anchors() []*semver.Version {
 	return s.anchors
+}
+
+// LowerBound returns the smallest version literal found in the constraint
+// string. This is the natural starting point for callers that enumerate
+// (major, minor, patch) by probing the registry one tag at a time (proxy
+// registry mode) — incrementing forward from a version the user has
+// explicitly named avoids scanning from v0.0.0.
+//
+// Returns nil only when the constraint string contained no recognisable
+// version literal. NewSemanticVersionConstraint refuses such constraints
+// so consumers can treat a nil result as a programming error.
+func (s *SemanticVersionConstraint) LowerBound() *semver.Version {
+	return s.lowerBound
+}
+
+// extractLowerBound walks every version literal that appears in the
+// constraint string (regardless of the operator preceding it) and returns
+// the smallest one. We deliberately ignore operators here: the goal is a
+// safe starting point for forward enumeration, not constraint semantics.
+//
+// Notes on operator-specific behaviour:
+//   - `^X.Y.Z` / `~X.Y.Z` / implicit `X.Y.Z`: the only literal is X.Y.Z
+//     and it is returned as-is.
+//   - `>=A <=B` (or any range with two literals): the smaller of A and B
+//     is returned so probing starts at the constraint's lower edge even
+//     when the user wrote the bounds in a non-canonical order.
+//   - `>A`: returned as A; the strict-greater semantics belong to Match,
+//     not to the enumeration start point.
+//
+// Returns an error only on the (defensive) case where a literal that the
+// regex extracted fails semver.NewVersion — which should be impossible
+// because semver.NewConstraint already validated the string.
+func extractLowerBound(constraintStr string) (*semver.Version, error) {
+	matches := versionLiteralRegex.FindAllString(constraintStr, -1)
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no version literal found in constraint")
+	}
+
+	var lowest *semver.Version
+	for _, raw := range matches {
+		v, err := semver.NewVersion(raw)
+		if err != nil {
+			// Defensive: the regex is permissive but constraint parsing
+			// already accepted the string upstream. Surface a clear error
+			// instead of silently dropping the literal.
+			return nil, fmt.Errorf("version literal %q not parseable: %w", raw, err)
+		}
+		if lowest == nil || v.LessThan(lowest) {
+			lowest = v
+		}
+	}
+
+	if lowest == nil {
+		return nil, fmt.Errorf("no parseable version literal in constraint")
+	}
+	return lowest, nil
 }
 
 // extractInclusiveAnchors finds every >=X / <=X literal in the constraint

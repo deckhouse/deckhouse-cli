@@ -84,6 +84,12 @@ d8 mirror pull <images-bundle-path> [flags]
 | `--force` | | Overwrite existing bundle packages if they conflict with current pull operation |
 | `--no-pull-resume` | | Do not continue last unfinished pull operation; start from scratch |
 
+#### Proxy/Cache Registry Discovery
+
+| Flag | Description |
+|------|-------------|
+| `--proxy-registry` | Pull from a proxy/caching registry that does not implement the registry catalog API. Discovers tags by probing individual semver versions instead of listing. Requires `--include-platform` and/or `--include-module`. See [Proxy Registry Mode](#proxy-registry-mode) for a summary and [PROXY-REGISTRY.md](./PROXY-REGISTRY.md) for the full reference. Cannot be combined with `--deckhouse-tag` or `--since-version` |
+
 #### Connection Options
 
 | Flag | Description |
@@ -136,6 +142,27 @@ d8 mirror pull /tmp/d8-bundle \
   --license $LICENSE_TOKEN \
   --include-platform "=v1.65.3"
 ```
+
+---
+
+### Proxy Registry Mode
+
+`--proxy-registry` adapts the pull command to source registries that act as a transparent proxy or cache in front of another registry and do **not** implement the registry catalog API (`/v2/_catalog`, `/v2/<name>/tags/list`). Instead of calling `ListTags`, the pull walks individual semver tags forward from a starting point you supply via `--include-platform` / `--include-module` and probes each one with a single manifest `HEAD` request.
+
+Minimal example:
+
+```bash
+d8 mirror pull /tmp/d8-bundle \
+  --source proxy.internal.company.com/deckhouse/ee \
+  --license $LICENSE_TOKEN \
+  --proxy-registry \
+  --include-platform ">=1.64.0 <=1.68.0" \
+  --include-module prometheus@^1.0.0
+```
+
+Full documentation — end-to-end pipeline diagram, walk algorithm, worked example with a step-by-step HEAD-request trace, HTTP response handling, per-component behaviour table, required flag combinations, performance characteristics, known limitations and more examples — lives in a dedicated document:
+
+**→ [PROXY-REGISTRY.md](./PROXY-REGISTRY.md)**
 
 ---
 
@@ -493,6 +520,8 @@ By default, the platform service discovers releases between the current `rock-so
 `--since-version` raises the lower bound above `rock-solid` when the user wants to skip older minors.
 
 `--include-platform` replaces this window with a user-supplied semver constraint, applying the same latest-patch-per-minor and inclusive-anchor rules as module version filtering. Channel snapshots outside the constraint are pruned so the bundle stays internally consistent.
+
+`--proxy-registry` replaces the catalog-based `ListTags` call entirely with a sequential forward-probe walk seeded from the constraint's lower bound. The latest-patch-per-minor and inclusive-anchor rules still apply to the result; only the way the candidate tag list is obtained changes. Full reference: [PROXY-REGISTRY.md](./PROXY-REGISTRY.md).
 
 ### Module Filtering Logic
 

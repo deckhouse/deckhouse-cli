@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -37,6 +38,9 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 		return err
 	}
 	if err = parseAndValidateVersionFlags(); err != nil {
+		return err
+	}
+	if err = validateProxyRegistryFlag(); err != nil {
 		return err
 	}
 	if err = validateImagesBundlePathArg(args); err != nil {
@@ -137,6 +141,67 @@ func parseAndValidateVersionFlags() error {
 		pullflags.PlatformConstraint, err = modules.ParseVersionConstraint(pullflags.PlatformConstraintString)
 		if err != nil {
 			return fmt.Errorf("Parse --include-platform constraint: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// validateProxyRegistryFlag enforces the combinations the proxy-registry
+// probe needs to work: each component that is actually being pulled (i.e.
+// not switched off via --no-platform / --no-modules / --only-extra-images)
+// must come with an explicit lower bound, because the probe cannot rely
+// on the registry's tag catalog and has to be told where to start
+// incrementing from.
+//
+// Notes:
+//   - --deckhouse-tag / --since-version conflicts: --deckhouse-tag asks
+//     for one tag (a tag-existence check is enough, no probe needed) and
+//     --since-version asks for "everything from X upward without an upper
+//     bound", which a probe cannot terminate safely. Both should use the
+//     non-proxy path instead.
+//   - --exclude-module is allowed but only meaningful when at least one
+//     --include-module remains, because the probe still needs concrete
+//     module names to walk.
+func validateProxyRegistryFlag() error {
+	if !pullflags.ProxyRegistry {
+		return nil
+	}
+
+	if pullflags.DeckhouseTag != "" {
+		return errors.New("--proxy-registry cannot be combined with --deckhouse-tag: pulling a single tag does not need a list-based discovery and uses the direct check-tag-exists path already")
+	}
+	if pullflags.SinceVersionString != "" {
+		return errors.New("--proxy-registry cannot be combined with --since-version: --since-version has no upper bound, so the probe cannot terminate. Use --include-platform with an explicit lower bound (and optional upper bound) instead")
+	}
+
+	needPlatform := !pullflags.NoPlatform
+	needModules := !pullflags.NoModules || pullflags.OnlyExtraImages
+
+	// At least one component must actually be pulled — otherwise the
+	// flag is a no-op against a registry that probably already failed
+	// to satisfy the user.
+	if !needPlatform && !needModules {
+		return errors.New("--proxy-registry has nothing to do: both --no-platform and --no-modules are set")
+	}
+
+	if needPlatform && pullflags.PlatformConstraintString == "" {
+		return errors.New("--proxy-registry requires --include-platform (or --no-platform to skip platform mirroring): the probe needs an explicit lower bound to start incrementing from")
+	}
+	if needModules {
+		if len(pullflags.ModulesWhitelist) == 0 {
+			return errors.New("--proxy-registry requires --include-module (or --no-modules to skip module mirroring): the probe needs explicit module names and version anchors to start incrementing from")
+		}
+		// Every --include-module entry must come with an explicit
+		// version part. The implicit ">=0.0.0" fallback used by the
+		// regular pull mode is poisonous for the probe: it starts at
+		// v0.0.0 and stops on the first not-found, silently skipping
+		// any module whose lowest tag is above v0.0.0 / v0.1.0 /
+		// v1.0.0. Bail out loudly so the user picks a real anchor.
+		for _, entry := range pullflags.ModulesWhitelist {
+			if !strings.Contains(entry, "@") {
+				return fmt.Errorf("--proxy-registry requires every --include-module entry to specify an explicit version constraint (e.g. %q@^1.0.0); without it the probe would start at v0.0.0 and miss everything", strings.TrimSpace(entry))
+			}
 		}
 	}
 

@@ -74,6 +74,16 @@ var (
 	OnlyExtraImages bool
 	SkipVexImages   bool
 
+	// ProxyRegistry switches platform/module release discovery from the
+	// catalog-based ListTags path to a sequential probe of explicit
+	// version tags. It exists for proxy/caching registries that do NOT
+	// implement the registry catalog API but DO serve manifests for tags
+	// they have cached. Requires --include-platform and/or --include-module
+	// so the probe has a defined entry point — without those flags the
+	// probe would have to start from 0.0.0 and the bundle would always
+	// come back empty.
+	ProxyRegistry bool
+
 	DryRun bool
 
 	MirrorTimeout time.Duration = -1
@@ -256,6 +266,18 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		"skip-vex-images",
 		false,
 		"Do not pull VEX images.",
+	)
+	flagSet.BoolVar(
+		&ProxyRegistry,
+		"proxy-registry",
+		false,
+		`Pull from a proxy/caching registry that does not implement the registry catalog API.
+
+Instead of calling the registry's "list tags" endpoint (which proxy registries typically return empty), this mode probes individual tags by incrementing patch -> minor -> major from the version explicitly named via --include-platform / --include-module. The probe stops once both a new patch and a new minor of the current major fail to resolve, then attempts the next major; if that also fails the probe terminates and downloads what was discovered.
+
+Requires --include-platform when platform is not skipped via --no-platform, and at least one --include-module when modules are not skipped via --no-modules. --exclude-module and --no-platform are respected.
+
+Cannot be combined with --deckhouse-tag or --since-version (use --include-platform's lower bound instead).`,
 	)
 	flagSet.BoolVar(
 		&DryRun,

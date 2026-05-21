@@ -64,6 +64,12 @@ type PullServiceOptions struct {
 	Timeout time.Duration
 	// DryRun prints the pull plan without downloading any image blobs
 	DryRun bool
+	// ProxyRegistry switches platform/module discovery from a single
+	// catalog ListTags call (which proxy registries typically return
+	// empty for) to a sequential probe of explicit version tags. The
+	// CLI guarantees that --include-platform and/or --include-module
+	// are supplied so the probe has a defined starting point.
+	ProxyRegistry bool
 }
 
 type PullService struct {
@@ -112,6 +118,7 @@ func NewPullService(
 				SkipVexImages:     options.SkipVexImages,
 				Timeout:           options.Timeout,
 				DryRun:            options.DryRun,
+				ProxyRegistry:     options.ProxyRegistry,
 			},
 			logger,
 			userLogger,
@@ -139,6 +146,7 @@ func NewPullService(
 				BundleChunkSize: options.BundleChunkSize,
 				Timeout:         options.Timeout,
 				DryRun:          options.DryRun,
+				ProxyRegistry:   options.ProxyRegistry,
 			},
 			logger,
 			userLogger,

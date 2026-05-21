@@ -101,6 +101,8 @@ func NewCommand() *cobra.Command {
 	pullCmd.MarkFlagsMutuallyExclusive("include-module", "exclude-module")
 	pullCmd.MarkFlagsMutuallyExclusive("include-platform", "deckhouse-tag")
 	pullCmd.MarkFlagsMutuallyExclusive("include-platform", "since-version")
+	pullCmd.MarkFlagsMutuallyExclusive("proxy-registry", "deckhouse-tag")
+	pullCmd.MarkFlagsMutuallyExclusive("proxy-registry", "since-version")
 	pullflags.ParseEnvironmentVariables()
 
 	return pullCmd
@@ -297,6 +299,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 			BundleChunkSize:    pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
 			Timeout:            pullflags.MirrorTimeout,
 			DryRun:             pullflags.DryRun,
+			ProxyRegistry:      pullflags.ProxyRegistry,
 		},
 		logger.Named("pull"),
 		p.logger,
