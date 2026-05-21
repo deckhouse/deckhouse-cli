@@ -19,6 +19,7 @@ package modules
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -554,6 +555,82 @@ func TestPullModules_EmptyModuleNotPacked(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, entries,
 		"bundle dir must stay empty when module has no images; got: %v", entries)
+}
+
+// TestPackModules_EmptyModuleIsSilent guards the user-facing log output for
+// modules whose layout has no pulled images: there must be no "Pack
+// module-<name>.tar" header, no "Skipping ... no images were pulled" line,
+// and no "succeeded in ..." footer. Together those three lines used to fire
+// for every empty module discovered during a partial or no-op pull, drowning
+// the real progress in screenfuls of noise (see d8pull output: dozens of
+// "Skipping module-<x>.tar: no images were pulled" entries for modules that
+// were never actually packed).
+//
+// The test wires an Info-level user logger bound to a captured stdout so that
+// any Process()/Infof() call inside packModules would actually be observable;
+// the populated module's Pack header is asserted as a positive control to
+// prove the capture pipeline is wired up.
+func TestPackModules_EmptyModuleIsSilent(t *testing.T) {
+	const (
+		fullMod  = "with-images"
+		emptyMod = "no-images"
+	)
+
+	reg := upfake.NewRegistry(testHost)
+	addModule(reg, fullMod, channelVersion, defaultRegistryVersions)
+	// Modules-list entry only - no version tags and no release channels.
+	// The puller will discover the module name but find nothing to pull,
+	// so the layout ends up empty and packModules must skip it silently.
+	reg.MustAddImage("modules", emptyMod, versionImage(channelVersion))
+
+	bundleDir := t.TempDir()
+	svc := newService(t, pkgclient.Adapt(upfake.NewClient(reg)), nil)
+	svc.options.BundleDir = bundleDir
+
+	// Capture user-facing log output by redirecting os.Stdout, then build a
+	// fresh Info-level SLogger bound to the redirected stdout. Constructing
+	// the logger AFTER the redirect is required because NewSLogger captures
+	// os.Stdout into its slog handler at construction time.
+	stdoutSave := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+	defer func() { os.Stdout = stdoutSave }()
+
+	// Drain the pipe concurrently so PullModules can't deadlock on a full
+	// pipe buffer if it logs more than the kernel buffer can hold.
+	var captured strings.Builder
+	drained := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&captured, r)
+		close(drained)
+	}()
+
+	svc.userLogger = log.NewSLogger(slog.LevelInfo)
+
+	runErr := svc.PullModules(context.Background())
+
+	require.NoError(t, w.Close())
+	<-drained
+	os.Stdout = stdoutSave
+	require.NoError(t, runErr)
+
+	out := captured.String()
+
+	// Positive control: the populated module went through the Pack pipeline,
+	// proving the log capture is wired up correctly. If this fails, the
+	// negative assertions below are vacuously true and the test is useless.
+	assert.Contains(t, out, "Pack module-"+fullMod+".tar",
+		"log-capture sanity: pack header for populated module must appear in captured output; got:\n%s", out)
+
+	// Headline regression: zero noise for the empty module.
+	emptyTar := "module-" + emptyMod + ".tar"
+	assert.NotContains(t, out, emptyTar,
+		"empty module must not appear anywhere in user-facing logs; got:\n%s", out)
+	assert.NotContains(t, out, "no images were pulled",
+		"the legacy 'Skipping ... no images were pulled' line must not appear; got:\n%s", out)
+	assert.NotContains(t, out, "Skipping module-",
+		"no per-module 'Skipping module-...' line must appear; got:\n%s", out)
 }
 
 // TestPullModules_NonEmptyModulePacked is the positive counterpart: a module
