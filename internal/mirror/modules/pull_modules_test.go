@@ -477,6 +477,137 @@ func TestPullModules_NonEmptyModulePacked(t *testing.T) {
 	}
 }
 
+// TestPullModules_InterruptedPullDoesNotProduceEmptyStubTars is the headline
+// regression for the user-reported bug: pulling a registry that lists many
+// modules, then cancelling mid-flight, must NOT leave behind a stub
+// ~5120-byte module-<name>.tar for every module that did not actually
+// download.  Before the fix, AllowMissingTags=true silently swallowed
+// context.Canceled returned by GetDigest, so the pull loop processed every
+// remaining module as a no-op and the pack phase produced one empty-skeleton
+// tar per module.
+func TestPullModules_InterruptedPullDoesNotProduceEmptyStubTars(t *testing.T) {
+	const (
+		earlyMod = "aaa-pulled-first"  // alphabetically first, will fully pull
+		lateMod  = "zzz-never-touched" // alphabetically last, will be cancelled out
+	)
+
+	reg := upfake.NewRegistry(testHost)
+	addModule(reg, earlyMod, channelVersion, defaultRegistryVersions)
+	addModule(reg, lateMod, channelVersion, defaultRegistryVersions)
+
+	bundleDir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Wire the fake client through a wrapper that cancels the user's context
+	// the moment a request hits the *second* module's path. That simulates
+	// the user pressing Ctrl+C while the pull moves from earlyMod onto
+	// lateMod — exactly the timing that produced the empty stub tars.
+	client := &cancelOnSecondModule{
+		Client:   upfake.NewClient(reg),
+		cancel:   cancel,
+		trigger:  "modules/" + lateMod,
+		canceled: new(atomic.Bool),
+	}
+
+	svc := newService(t, pkgclient.Adapt(client), nil)
+	svc.options.BundleDir = bundleDir
+
+	err := svc.PullModules(ctx)
+	require.NoError(t, err,
+		"PullModules must finish gracefully after cancellation (packing what was downloaded)")
+	require.True(t, client.canceled.Load(), "test bug: cancellation trigger never fired")
+
+	entries, err := os.ReadDir(bundleDir)
+	require.NoError(t, err)
+
+	var sawEarly bool
+	for _, e := range entries {
+		name := e.Name()
+
+		// The cancelled module must not produce any artifact - no .tar, no
+		// .tar.tmp left behind.
+		require.NotContains(t, name, lateMod,
+			"cancelled module %q must not appear in the bundle dir, found %q", lateMod, name)
+
+		// Anything that does end up in the bundle must be a real tar - the
+		// 5120-byte stub artifact that the user reported is exactly what we
+		// regress against here.
+		info, err := e.Info()
+		require.NoError(t, err)
+		require.Greater(t, info.Size(), int64(5120),
+			"bundle file %q has stub size %d (must be > 5120 bytes; that's the empty-layout skeleton)",
+			name, info.Size())
+
+		if name == "module-"+earlyMod+".tar" {
+			sawEarly = true
+		}
+	}
+
+	require.True(t, sawEarly,
+		"%s should have been pulled and packed before cancellation; entries=%v", earlyMod, entries)
+}
+
+// cancelOnSecondModule is a registry client wrapper that fires the supplied
+// cancel func the first time a method touches the configured trigger path.
+// Used by the interrupted-pull regression to simulate a user hitting Ctrl+C
+// at a well-defined point in the pull sequence.
+type cancelOnSecondModule struct {
+	dkpreg.Client
+	cancel   context.CancelFunc
+	trigger  string
+	scope    string
+	canceled *atomic.Bool
+}
+
+func (c *cancelOnSecondModule) WithSegment(segments ...string) dkpreg.Client {
+	next := c.scope
+	for _, s := range segments {
+		if next == "" {
+			next = s
+		} else {
+			next = next + "/" + s
+		}
+	}
+	return &cancelOnSecondModule{
+		Client:   c.Client.WithSegment(segments...),
+		cancel:   c.cancel,
+		trigger:  c.trigger,
+		scope:    next,
+		canceled: c.canceled,
+	}
+}
+
+func (c *cancelOnSecondModule) maybeCancel() {
+	if c.canceled.Load() {
+		return
+	}
+	if strings.HasPrefix(c.scope, c.trigger) {
+		c.canceled.Store(true)
+		c.cancel()
+	}
+}
+
+func (c *cancelOnSecondModule) GetDigest(ctx context.Context, tag string) (*v1.Hash, error) {
+	c.maybeCancel()
+	return c.Client.GetDigest(ctx, tag)
+}
+
+func (c *cancelOnSecondModule) GetImage(ctx context.Context, tag string, opts ...dkpreg.ImageGetOption) (dkpreg.Image, error) {
+	c.maybeCancel()
+	return c.Client.GetImage(ctx, tag, opts...)
+}
+
+func (c *cancelOnSecondModule) CheckImageExists(ctx context.Context, tag string) error {
+	c.maybeCancel()
+	return c.Client.CheckImageExists(ctx, tag)
+}
+
+func (c *cancelOnSecondModule) ListTags(ctx context.Context, opts ...dkpreg.ListTagsOption) ([]string, error) {
+	c.maybeCancel()
+	return c.Client.ListTags(ctx, opts...)
+}
+
 // TestImageLayouts_HasImages_Empty verifies HasImages returns false when no
 // images have been appended to any of the module's sub-layouts.
 func TestImageLayouts_HasImages_Empty(t *testing.T) {

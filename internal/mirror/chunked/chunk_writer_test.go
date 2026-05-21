@@ -29,11 +29,7 @@ import (
 )
 
 func TestChunkedFileWriterHappyPath(t *testing.T) {
-	workingDir := filepath.Join(os.TempDir(), "chunk_test")
-	require.NoError(t, os.MkdirAll(workingDir, 0o777))
-	t.Cleanup(func() {
-		_ = os.RemoveAll(workingDir)
-	})
+	workingDir := t.TempDir()
 
 	const testDatasetSize, chunkSize = 10 * 1024 * 1024, 3 * 1024 * 1024
 	sourceFile := make([]byte, testDatasetSize)
@@ -41,16 +37,68 @@ func TestChunkedFileWriterHappyPath(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, testDatasetSize, bytesGenerated)
 
+	w := NewChunkedFileWriter(chunkSize, workingDir, "d8.tar")
 	bytesWritten, err := io.CopyBuffer(
-		NewChunkedFileWriter(chunkSize, workingDir, "d8.tar"),
+		w,
 		bytes.NewReader(sourceFile),
 		make([]byte, 512*1024),
 	)
 	require.NoError(t, err)
 	require.Equal(t, int64(bytesGenerated), bytesWritten)
+	require.NoError(t, w.Close())
+	require.NoError(t, w.Finalize())
 
 	validateSizes(t, workingDir, testDatasetSize, chunkSize)
 	compareHashes(t, sourceFile, testDatasetSize, workingDir)
+}
+
+// TestChunkedFileWriterCleanupRemovesPartialChunks documents the contract
+// that callers rely on to keep the bundle directory clean after an
+// interrupted pack: every chunk file written so far must disappear from disk
+// when Cleanup is invoked, and crucially no file with the final .chunk name
+// must ever appear unless Finalize was called.
+func TestChunkedFileWriterCleanupRemovesPartialChunks(t *testing.T) {
+	workingDir := t.TempDir()
+
+	w := NewChunkedFileWriter(1024, workingDir, "module-foo.tar")
+	_, err := w.Write(bytes.Repeat([]byte("a"), 4096))
+	require.NoError(t, err)
+
+	entries, err := os.ReadDir(workingDir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		require.True(t, hasSuffix(e.Name(), tmpChunkSuffix),
+			"chunk %q should still be staged with %q suffix before Finalize", e.Name(), tmpChunkSuffix)
+	}
+
+	w.Cleanup()
+
+	entries, err = os.ReadDir(workingDir)
+	require.NoError(t, err)
+	require.Empty(t, entries, "Cleanup must remove every staged chunk")
+}
+
+// TestChunkedFileWriterFinalizePromotesAllChunks verifies the full lifecycle:
+// staged .tmp chunks must turn into their final .chunk names after Finalize.
+func TestChunkedFileWriterFinalizePromotesAllChunks(t *testing.T) {
+	workingDir := t.TempDir()
+
+	w := NewChunkedFileWriter(1024, workingDir, "module-foo.tar")
+	_, err := w.Write(bytes.Repeat([]byte("a"), 4096))
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	require.NoError(t, w.Finalize())
+
+	entries, err := os.ReadDir(workingDir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		require.Equal(t, ".chunk", filepath.Ext(e.Name()),
+			"chunk %q must lose the staging suffix after Finalize", e.Name())
+	}
+}
+
+func hasSuffix(name, suffix string) bool {
+	return len(name) >= len(suffix) && name[len(name)-len(suffix):] == suffix
 }
 
 func compareHashes(t *testing.T, sourceFile []byte, testDatasetSize int, workingDir string) {

@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -35,7 +34,7 @@ import (
 	"github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/pack"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
@@ -237,11 +236,27 @@ func (svc *Service) pullModules(ctx context.Context) error {
 		processName = "Pull Extra Images"
 	}
 
+	// pullCancelled is set when the user interrupts mid-pull. In that case we
+	// still want the post-processing + packing phase to finalize whatever was
+	// successfully downloaded so far, rather than throw it all away and leave
+	// the user with nothing for a multi-hour pull.
+	pullCancelled := false
 	err = logger.Process(processName, func() error {
 		for i, module := range filteredModules {
+			if err := ctx.Err(); err != nil {
+				logger.Warnf("Pull cancelled; %d/%d modules attempted, will pack already-downloaded modules", i, len(filteredModules))
+				pullCancelled = true
+				return nil
+			}
+
 			logger.Infof("[%d/%d] Processing module: %s", i+1, len(filteredModules), module.name)
 
 			if err := svc.pullSingleModule(ctx, module); err != nil {
+				if isContextErr(err) {
+					logger.Warnf("Pull of module %s cancelled, will pack already-downloaded modules", module.name)
+					pullCancelled = true
+					return nil
+				}
 				return fmt.Errorf("pull module %s: %w", module.name, err)
 			}
 		}
@@ -254,6 +269,16 @@ func (svc *Service) pullModules(ctx context.Context) error {
 	// Skip OCI layout post-processing in dry-run (layouts are empty)
 	if svc.options.DryRun {
 		return nil
+	}
+
+	// Decouple the post-pull phase from the cancellation context so that the
+	// last bit of packing finalizes for the modules that *did* download.
+	// Without this, a Ctrl+C during pull would still surface as ctx.Canceled
+	// inside bundle.PackWithPrefix and we would discard a multi-GB download
+	// that was already on disk.
+	postCtx := ctx
+	if pullCancelled {
+		postCtx = context.WithoutCancel(ctx)
 	}
 
 	err = logger.Process("Processing modules image indexes", func() error {
@@ -279,11 +304,17 @@ func (svc *Service) pullModules(ctx context.Context) error {
 	}
 
 	// Pack each module into separate tar
-	if err := svc.packModules(filteredModules); err != nil {
+	if err := svc.packModules(postCtx, filteredModules); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// isContextErr reports whether err is one of the context cancellation errors,
+// either directly or wrapped.
+func isContextErr(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) error {
@@ -879,13 +910,19 @@ func (svc *Service) applyChannelAliases(moduleName string) error {
 	return nil
 }
 
-func (svc *Service) packModules(modules []moduleData) error {
+func (svc *Service) packModules(ctx context.Context, modules []moduleData) error {
 	logger := svc.userLogger
 
 	bundleDir := svc.options.BundleDir
 	bundleChunkSize := svc.options.BundleChunkSize
 
 	for _, module := range modules {
+		// Honor cancellation between modules so a Ctrl+C during the pack
+		// phase doesn't keep producing more (potentially useless) tars.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		pkgName := "module-" + module.name + ".tar"
 
 		if err := logger.Process(fmt.Sprintf("Pack %s", pkgName), func() error {
@@ -899,24 +936,14 @@ func (svc *Service) packModules(modules []moduleData) error {
 				return nil
 			}
 
-			var pkg io.Writer = chunked.NewChunkedFileWriter(bundleChunkSize, bundleDir, pkgName)
-			if bundleChunkSize == 0 {
-				f, err := os.Create(filepath.Join(bundleDir, pkgName))
-				if err != nil {
-					return fmt.Errorf("create %s: %w", pkgName, err)
-				}
-				pkg = f
-			}
-
 			// Pack from the module's working directory with prefix to create correct registry structure.
 			// This ensures the tar contains paths like "modules/<name>/index.json" instead of just "index.json".
 			moduleDir := filepath.Join(svc.layout.workingDir, module.name)
 			tarPrefix := filepath.Join("modules", module.name)
-			if err := bundle.PackWithPrefix(context.Background(), moduleDir, tarPrefix, pkg); err != nil {
-				return fmt.Errorf("pack module %s: %w", pkgName, err)
-			}
 
-			return nil
+			return pack.Bundle(ctx, bundleDir, pkgName, bundleChunkSize, func(w io.Writer) error {
+				return bundle.PackWithPrefix(ctx, moduleDir, tarPrefix, w)
+			})
 		}); err != nil {
 			return err
 		}
