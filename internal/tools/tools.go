@@ -44,8 +44,8 @@ func NewCommand() *cobra.Command {
 		farconverter.NewCommand(),
 		gostsum.NewCommand(),
 		imagedigest.NewCommand(),
-		sigmigrate.NewCommand(),
 		pki.NewCommand(),
+		sigmigrate.NewCommand(),
 	)
 
 	return toolsCmd
