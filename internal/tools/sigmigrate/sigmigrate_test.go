@@ -113,6 +113,56 @@ func TestParseObjectIdentifier_InvalidFormat(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestPreferredVersionByGroup(t *testing.T) {
+	groups := &metav1.APIGroupList{
+		Groups: []metav1.APIGroup{
+			{
+				Name: "deckhouse.io",
+				PreferredVersion: metav1.GroupVersionForDiscovery{
+					GroupVersion: "deckhouse.io/v1",
+					Version:      "v1",
+				},
+			},
+			{
+				Name: "apps",
+				PreferredVersion: metav1.GroupVersionForDiscovery{
+					GroupVersion: "apps/v1",
+					Version:      "v1",
+				},
+			},
+		},
+	}
+
+	preferred := preferredVersionByGroup(groups)
+	require.Equal(t, "v1", preferred["deckhouse.io"])
+	require.Equal(t, "v1", preferred["apps"])
+}
+
+func TestUpsertCollectedObject_PrefersPreferredVersion(t *testing.T) {
+	objects := make(map[string]ObjectRef)
+	preferred := map[string]string{"deckhouse.io": "v1"}
+
+	upsertCollectedObject(
+		objects,
+		"clusterwide",
+		"worker",
+		schema.GroupVersionResource{Group: "deckhouse.io", Version: "v1alpha1", Resource: "nodegroups"},
+		preferred,
+	)
+	upsertCollectedObject(
+		objects,
+		"clusterwide",
+		"worker",
+		schema.GroupVersionResource{Group: "deckhouse.io", Version: "v1", Resource: "nodegroups"},
+		preferred,
+	)
+
+	obj := objects["clusterwide|worker|deckhouse.io|nodegroups"]
+	require.Equal(t, "v1", obj.GVR.Version)
+	require.Equal(t, "deckhouse.io", obj.GVR.Group)
+	require.Equal(t, "nodegroups", obj.GVR.Resource)
+}
+
 func TestFilterObjectsByIdentifier_SpecificObject(t *testing.T) {
 	objects := map[string]ObjectRef{
 		"default|cm-one|configmaps": {
