@@ -18,10 +18,16 @@ package chunked
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 )
+
+// tmpChunkSuffix is appended to in-flight chunk files so an aborted run leaves
+// behind a clearly-named partial file that can be cleaned up later, rather
+// than a half-written .chunk that looks like a finished artifact.
+const tmpChunkSuffix = ".tmp"
 
 type FileWriter struct {
 	chunkSize  int64
@@ -30,6 +36,13 @@ type FileWriter struct {
 	workingDir   string
 	baseFileName string
 	activeChunk  *os.File
+
+	// writtenChunks tracks paths of all chunk files we have created so far
+	// (relative to workingDir, with the .tmp suffix still attached).  On
+	// Finalize they are renamed to drop the suffix; on Cleanup they are
+	// removed.  Used to guarantee no half-finished artifacts survive a
+	// failed/interrupted run.
+	writtenChunks []string
 }
 
 func NewChunkedFileWriter(chunkSize int64, dirPath, baseFileName string) *FileWriter {
@@ -87,8 +100,44 @@ func (c *FileWriter) Write(p []byte) (int, error) {
 	}
 }
 
+// Close flushes and closes the currently-active chunk. It does NOT promote
+// the .tmp chunk paths to their final names: callers must invoke Finalize for
+// that, or Cleanup to discard everything.  This split lets the caller decide
+// after-the-fact whether the produced bundle is valid (e.g. only after Pack
+// returned without error) and avoids the previous behavior where a Ctrl+C
+// during packing left behind ready-looking .chunk files.
 func (c *FileWriter) Close() error {
 	return c.closeActiveChunk()
+}
+
+// Finalize promotes every successfully-written chunk from its temporary path
+// (<base>.NNNN.chunk.tmp) to the final path (<base>.NNNN.chunk).  Must be
+// called only after Close and only on a successful pack.
+func (c *FileWriter) Finalize() error {
+	var errs []error
+	for _, tmpRelPath := range c.writtenChunks {
+		tmp := filepath.Join(c.workingDir, tmpRelPath)
+		final := filepath.Join(c.workingDir, finalChunkName(tmpRelPath))
+		if err := os.Rename(tmp, final); err != nil {
+			errs = append(errs, fmt.Errorf("rename %s -> %s: %w", tmp, final, err))
+		}
+	}
+	c.writtenChunks = nil
+	return errors.Join(errs...)
+}
+
+// Cleanup removes any temporary chunk files this writer has created. Safe to
+// call multiple times. Use this when the operation failed or was cancelled so
+// no partial artifacts leak into the user's bundle directory.
+func (c *FileWriter) Cleanup() {
+	if c.activeChunk != nil {
+		_ = c.activeChunk.Close()
+		c.activeChunk = nil
+	}
+	for _, tmpRelPath := range c.writtenChunks {
+		_ = os.Remove(filepath.Join(c.workingDir, tmpRelPath))
+	}
+	c.writtenChunks = nil
 }
 
 func (c *FileWriter) swapActiveChunk() error {
@@ -99,12 +148,14 @@ func (c *FileWriter) swapActiveChunk() error {
 		c.chunkIndex++
 	}
 
-	newChunk, err := os.Create(filepath.Join(c.workingDir, fmt.Sprintf("%s.%04d.chunk", c.baseFileName, c.chunkIndex)))
+	tmpName := fmt.Sprintf("%s.%04d.chunk%s", c.baseFileName, c.chunkIndex, tmpChunkSuffix)
+	newChunk, err := os.Create(filepath.Join(c.workingDir, tmpName))
 	if err != nil {
 		return fmt.Errorf("Create new chunk file: %w", err)
 	}
 
 	c.activeChunk = newChunk
+	c.writtenChunks = append(c.writtenChunks, tmpName)
 	return nil
 }
 
@@ -116,6 +167,15 @@ func (c *FileWriter) closeActiveChunk() error {
 		if err := c.activeChunk.Close(); err != nil {
 			return fmt.Errorf("Close chunk: %w", err)
 		}
+		c.activeChunk = nil
 	}
 	return nil
+}
+
+// finalChunkName strips the temporary suffix from a chunk file name.
+func finalChunkName(tmpName string) string {
+	if len(tmpName) > len(tmpChunkSuffix) && tmpName[len(tmpName)-len(tmpChunkSuffix):] == tmpChunkSuffix {
+		return tmpName[:len(tmpName)-len(tmpChunkSuffix)]
+	}
+	return tmpName
 }

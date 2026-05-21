@@ -18,6 +18,7 @@ package puller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -31,6 +32,16 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
+
+// isContextErr reports whether err is one of the context cancellation errors,
+// either directly or wrapped. These errors must never be silently swallowed by
+// AllowMissingTags: doing so converts a Ctrl+C / timeout into a "tag not
+// found" no-op for every subsequent image and module, which in turn causes the
+// caller to produce stub artifacts (empty bundle tars) for downloads that
+// never actually completed.
+func isContextErr(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
 
 // PullerService handles the pulling of images from the registry
 type PullerService struct {
@@ -55,6 +66,15 @@ func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) erro
 
 	ps.userLogger.InfoLn("Pull " + config.Name + " meta")
 	for image, meta := range config.ImageSet {
+		// Bail out fast on cancellation. Without this check, a Ctrl+C in the
+		// middle of a large pull would cause every subsequent GetDigest call
+		// to fail with context.Canceled, which AllowMissingTags would then
+		// swallow - turning real cancellation into "tag not found" for every
+		// remaining image and module.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if meta != nil {
 			continue
 		}
@@ -85,6 +105,11 @@ func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) erro
 
 		digest, err := config.GetterService.GetDigest(ctx, tag)
 		if err != nil {
+			// AllowMissingTags should only mask "tag not found" style errors,
+			// not cancellation: see comment on isContextErr.
+			if isContextErr(err) {
+				return err
+			}
 			if config.AllowMissingTags {
 				continue
 			}
@@ -118,6 +143,12 @@ func (ps *PullerService) PullImageSet(
 	pullCount, totalCount := 1, len(imageSet)
 
 	for imageReference, imageMeta := range imageSet {
+		// Bail out on cancellation between images so we don't waste retry
+		// budget on a doomed operation.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		logger.Debugf("Preparing to pull image %s", imageReference)
 
 		err := retry.RunTask(
@@ -154,7 +185,11 @@ func (ps *PullerService) PullImageSet(
 				return nil
 			}))
 		if err != nil {
-			return fmt.Errorf("pull image %q: %w", imageMeta.TagReference, err)
+			ref := imageReference
+			if imageMeta != nil {
+				ref = imageMeta.TagReference
+			}
+			return fmt.Errorf("pull image %q: %w", ref, err)
 		}
 
 		pullCount++

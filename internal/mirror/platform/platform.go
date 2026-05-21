@@ -25,7 +25,6 @@ import (
 	"io"
 	"log/slog"
 	"maps"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -37,7 +36,7 @@ import (
 	"github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/pack"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
@@ -655,27 +654,9 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	}
 
 	if err := logger.Process("Pack Deckhouse images into platform.tar", func() error {
-		bundleChunkSize := svc.options.BundleChunkSize
-		bundleDir := svc.options.BundleDir
-
-		var platform io.Writer = chunked.NewChunkedFileWriter(
-			bundleChunkSize,
-			bundleDir,
-			"platform.tar",
-		)
-
-		if bundleChunkSize == 0 {
-			platform, err = os.Create(filepath.Join(bundleDir, "platform.tar"))
-			if err != nil {
-				return fmt.Errorf("create platform.tar: %w", err)
-			}
-		}
-
-		if err := bundle.Pack(context.Background(), svc.layout.workingDir, platform); err != nil {
-			return fmt.Errorf("pack platform.tar: %w", err)
-		}
-
-		return nil
+		return pack.Bundle(ctx, svc.options.BundleDir, "platform.tar", svc.options.BundleChunkSize, func(w io.Writer) error {
+			return bundle.Pack(ctx, svc.layout.workingDir, w)
+		})
 	}); err != nil {
 		return err
 	}

@@ -21,15 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"time"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/pack"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
@@ -195,27 +193,9 @@ func (svc *Service) pullSecurityDatabases(ctx context.Context) error {
 	}
 
 	if err := logger.Process("Pack security images into security.tar", func() error {
-		bundleChunkSize := svc.options.BundleChunkSize
-		bundleDir := svc.options.BundleDir
-
-		var security io.Writer = chunked.NewChunkedFileWriter(
-			bundleChunkSize,
-			bundleDir,
-			"security.tar",
-		)
-
-		if bundleChunkSize == 0 {
-			security, err = os.Create(filepath.Join(bundleDir, "security.tar"))
-			if err != nil {
-				return fmt.Errorf("create security.tar: %w", err)
-			}
-		}
-
-		if err := bundle.Pack(context.Background(), svc.layout.workingDir, security); err != nil {
-			return fmt.Errorf("pack security.tar: %w", err)
-		}
-
-		return nil
+		return pack.Bundle(ctx, svc.options.BundleDir, "security.tar", svc.options.BundleChunkSize, func(w io.Writer) error {
+			return bundle.Pack(ctx, svc.layout.workingDir, w)
+		})
 	}); err != nil {
 		return err
 	}
