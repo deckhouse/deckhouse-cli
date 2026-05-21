@@ -270,6 +270,122 @@ func TestPullPlatform_DryRun_CustomTag_OnlyThatTagInDownloadList(t *testing.T) {
 	assert.Len(t, svc.downloadList.DeckhouseInstallStandalone, 1)
 }
 
+// devRegistryStub mirrors the shape of a Deckhouse dev/CI registry such as
+// dev-registry.deckhouse.io/sys/deckhouse-oss: only a single PR-style tag is
+// published in the root, install, install-standalone repositories, and no
+// release-channel images exist at all (no LTS, no rock-solid, no stable, no
+// alpha/beta/early-access).
+//
+// It is intentionally narrower than ltsOnlySourceStub: this is the scenario
+// users hit when testing pre-release builds with `--deckhouse-tag prNNNNN`
+// against a registry that has never published any release-channel manifest.
+func devRegistryStub(prTag string) localreg.Client {
+	reg := upfake.NewRegistry(stubRootURL)
+
+	img := upfake.NewImageBuilder().
+		WithFile("version.json", `{"version":"`+prTag+`"}`).
+		WithFile("deckhouse/candi/images_digests.json", `{}`).
+		MustBuild()
+
+	reg.MustAddImage("", prTag, img)
+	reg.MustAddImage("install", prTag, img)
+	reg.MustAddImage("install-standalone", prTag, img)
+
+	return pkgclient.Adapt(upfake.NewClient(reg))
+}
+
+// TestPullPlatform_DryRun_CustomTag_NoReleaseChannelsInRegistry is the
+// regression for d8 mirror pull failing with
+//
+//	get rock-solid release version from registry: get rock-solid release channel data:
+//	GET .../release-channel/manifests/rock-solid: MANIFEST_UNKNOWN
+//
+// when invoked as
+//
+//	d8 mirror pull --deckhouse-tag prNNNNN --source dev-registry.../deckhouse-oss ...
+//
+// against a registry whose release-channel/ repository is empty.
+//
+// Before the fix `findTagsToMirror`/`versionsToMirrorFunc` (the legacy
+// implementation in v0.27.0) always iterated through every default channel
+// and bubbled up the missing rock-solid channel even though the user had
+// already pinned the exact tag with --deckhouse-tag. Pinning the tag must
+// short-circuit channel discovery entirely: the user has explicitly told the
+// CLI which build to mirror.
+//
+// Post-fix invariants exercised here:
+//   - PullPlatform must not return an error when no release-channel images
+//     are published and a custom tag is requested.
+//   - The downloadList must contain exactly the requested tag in Deckhouse,
+//     DeckhouseInstall and DeckhouseInstallStandalone.
+//   - DeckhouseReleaseChannel is allowed to be empty: there is nothing to
+//     download from release-channel/ when the registry never published any.
+func TestPullPlatform_DryRun_CustomTag_NoReleaseChannelsInRegistry(t *testing.T) {
+	const prTag = "pr17405"
+
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := newDryRunService(devRegistryStub(prTag), &Options{TargetTag: prTag}, logger, userLogger)
+	err := svc.PullPlatform(context.Background())
+	require.NoError(t, err,
+		"--deckhouse-tag must short-circuit release-channel discovery; missing channels are not fatal")
+
+	rootURL := stubRootURL
+	assert.Contains(t, svc.downloadList.Deckhouse, rootURL+":"+prTag)
+	assert.Contains(t, svc.downloadList.DeckhouseInstall, rootURL+"/install:"+prTag)
+	assert.Contains(t, svc.downloadList.DeckhouseInstallStandalone, rootURL+"/install-standalone:"+prTag)
+	assert.Len(t, svc.downloadList.Deckhouse, 1,
+		"only the requested tag must be enqueued for download")
+}
+
+// TestPullPlatform_DryRun_SemverTag_NoReleaseChannelsInRegistry is the same
+// regression as TestPullPlatform_DryRun_CustomTag_NoReleaseChannelsInRegistry
+// but for the semver-shaped --deckhouse-tag value (e.g. v1.69.0). The legacy
+// v0.27.0 code failed identically for both tag shapes because the bug lived in
+// the unconditional channel loop, not in tag classification.
+func TestPullPlatform_DryRun_SemverTag_NoReleaseChannelsInRegistry(t *testing.T) {
+	const semverTag = "v1.69.0"
+
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := newDryRunService(devRegistryStub(semverTag), &Options{TargetTag: semverTag}, logger, userLogger)
+	err := svc.PullPlatform(context.Background())
+	require.NoError(t, err,
+		"--deckhouse-tag must short-circuit release-channel discovery for semver tags too")
+
+	rootURL := stubRootURL
+	assert.Contains(t, svc.downloadList.Deckhouse, rootURL+":"+semverTag)
+	assert.Contains(t, svc.downloadList.DeckhouseInstall, rootURL+"/install:"+semverTag)
+	assert.Contains(t, svc.downloadList.DeckhouseInstallStandalone, rootURL+"/install-standalone:"+semverTag)
+}
+
+// TestService_versionsToMirror_CustomTag_NoReleaseChannels asserts at the
+// versionsToMirror level (one layer below PullPlatform) that requesting a
+// custom tag never propagates ErrSomeChannelsFailed as a hard error. This
+// pins down the contract independently of validatePlatformAccess so that
+// future refactors of the access check cannot mask a regression in the
+// channel-discovery short-circuit.
+func TestService_versionsToMirror_CustomTag_NoReleaseChannels(t *testing.T) {
+	const prTag = "pr17405"
+
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := newDryRunService(devRegistryStub(prTag), &Options{TargetTag: prTag}, logger, userLogger)
+
+	result, err := svc.versionsToMirror(context.Background(), []string{prTag})
+	require.NoError(t, err,
+		"versionsToMirror with explicit tag must tolerate registries without any release channels")
+	require.NotNil(t, result)
+
+	assert.Empty(t, result.Versions, "no semver versions should be discovered when channels are absent")
+	assert.Empty(t, result.Channels, "no channels should be matched when the registry has none")
+	assert.Equal(t, []string{prTag}, result.CustomTags,
+		"the requested non-semver tag must be propagated as a custom tag")
+}
+
 // ---- No TargetTag: full discovery ----
 
 func TestPullPlatform_DryRun_FullDiscovery_AllVersionsAndChannels(t *testing.T) {

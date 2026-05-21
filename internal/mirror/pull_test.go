@@ -390,6 +390,22 @@ func TestPull_FullStub_FullDiscovery(t *testing.T) {
 
 // TestPull_FullStub_CustomTag verifies Pull succeeds with a custom
 // (non-semver, non-channel) tag when that tag exists in the registry.
+//
+// This is the integration-level regression for the v0.27.0 bug where
+//
+//	d8 mirror pull --no-modules --no-security-db \
+//	  --source dev-registry.deckhouse.io/sys/deckhouse-oss \
+//	  --deckhouse-tag prNNNNN ...
+//
+// failed with `get rock-solid release version from registry: ... MANIFEST_UNKNOWN`
+// because the legacy versionsToMirror loop tried to read every default release
+// channel even when --deckhouse-tag pinned the exact build. Dev/CI registries
+// do not publish release-channel manifests, so the only valid behavior is to
+// short-circuit channel discovery whenever --deckhouse-tag is set. The
+// platform-package counterpart of this test lives at
+// TestPullPlatform_DryRun_CustomTag_NoReleaseChannelsInRegistry; this one
+// pins down the same contract through PullService.Pull, which is what the
+// real `d8 mirror pull` command goes through.
 func TestPull_FullStub_CustomTag(t *testing.T) {
 	reg := upfake.NewRegistry(pullStubRootURL)
 	img := upfake.NewImageBuilder().
@@ -407,6 +423,49 @@ func TestPull_FullStub_CustomTag(t *testing.T) {
 	})
 
 	require.NoError(t, svc.Pull(context.Background()))
+}
+
+// TestPull_DevRegistry_CustomTagWithNoChannels reproduces the v0.27.0 user
+// report end-to-end at the PullService boundary (the same boundary that
+// `d8 mirror pull` invokes). The registry shape mirrors what
+// dev-registry.deckhouse.io/sys/deckhouse-oss exposed in the report:
+//
+//   - root repo carries a single PR-style tag (e.g. pr17405)
+//   - install and install-standalone carry the same tag
+//   - release-channel/ is empty: no LTS, no rock-solid, no stable, no
+//     alpha/beta/early-access
+//
+// Combined with the user's --no-modules --no-security-db flags, this is the
+// exact failure surface of the report. The test guarantees that
+//
+//   - the "Skipped releases lookup as tag …" log line is honored: missing
+//     channels do not abort the pull;
+//   - non-fatal failures (404 / MANIFEST_UNKNOWN) on every channel are
+//     tolerated when --deckhouse-tag is set.
+//
+// Before commit 18d9f00 ([deckhouse-cli] fix tag mirroring (#292)) this
+// failed with `Find versions to mirror: get rock-solid release version
+// from registry: …`. After the fix it must succeed.
+func TestPull_DevRegistry_CustomTagWithNoChannels(t *testing.T) {
+	const prTag = "pr17405"
+
+	reg := upfake.NewRegistry(pullStubRootURL)
+	img := upfake.NewImageBuilder().
+		WithFile("version.json", `{"version":"`+prTag+`"}`).
+		WithFile("deckhouse/candi/images_digests.json", `{}`).
+		MustBuild()
+	reg.MustAddImage("", prTag, img)
+	reg.MustAddImage("install", prTag, img)
+	reg.MustAddImage("install-standalone", prTag, img)
+
+	svc := newPullService(t, pkgclient.Adapt(upfake.NewClient(reg)), prTag, &PullServiceOptions{
+		SkipSecurity:  true,
+		SkipModules:   true,
+		SkipInstaller: true,
+	})
+
+	require.NoError(t, svc.Pull(context.Background()),
+		"d8 mirror pull --deckhouse-tag must succeed against a dev registry without release-channel images")
 }
 
 // TestPull_FullStub_InstallerPresent verifies that when the "installer"
