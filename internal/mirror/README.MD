@@ -52,8 +52,9 @@ d8 mirror pull <images-bundle-path> [flags]
 
 | Flag | Description |
 |------|-------------|
-| `--since-version` | Minimal Deckhouse release to pull. Ignored if above current Rock Solid release. Conflicts with `--deckhouse-tag` |
-| `--deckhouse-tag` | Specific Deckhouse build tag to pull. Conflicts with `--since-version`. If the registry contains a release channel image for the specified tag, all release channels in the bundle will point to it |
+| `--since-version` | Minimal Deckhouse release to pull (lower bound, inclusive). Ignored if above current Rock Solid release. Conflicts with `--deckhouse-tag` and `--include-platform` |
+| `--include-platform` | Select platform releases by semver constraint (e.g. `">=1.64 <=1.68"`). Uses the same constraint dialect as `--include-module`. Conflicts with `--deckhouse-tag` and `--since-version`. See [Platform Version Filtering](#platform-version-filtering) |
+| `--deckhouse-tag` | Specific Deckhouse build tag to pull. Conflicts with `--since-version` and `--include-platform`. If the registry contains a release channel image for the specified tag, all release channels in the bundle will point to it |
 
 #### Module Filtering
 
@@ -90,6 +91,53 @@ d8 mirror pull <images-bundle-path> [flags]
 | `--tls-skip-verify` | Disable TLS certificate validation |
 | `--insecure` | Interact with registries over HTTP |
 | `--tmp-dir` | Path to temporary directory for processing. Ensure sufficient disk space for the entire bundle |
+
+### Platform Version Filtering
+
+The `--include-platform` flag accepts a semver constraint expression to pull only a specific window of platform releases. It uses exactly the same constraint dialect as the version part of `--include-module`.
+
+#### When to use
+
+| Goal | Recommended flag |
+|------|-----------------|
+| Pull all releases from a given minimum upward | `--since-version 1.64.0` |
+| Pull a bounded range (e.g. for an incremental update) | `--include-platform ">=1.64 <=1.68"` |
+| Pull every release of a single minor | `--include-platform "~1.65.0"` |
+| Pin a single exact release (same as `--deckhouse-tag`) | `--include-platform "=v1.65.3"` |
+
+#### Constraint syntax
+
+The same rules apply as for `--include-module` version constraints (see [Module Filtering](#module-filtering)):
+
+- **Latest-patch-per-minor collapsing** — for semver ranges, only the highest patch in each `(major, minor)` bucket is pulled. Inclusive boundary operators (`>=`, `<=`) always preserve the named version as an anchor even when a newer patch exists.
+- **Channel filtering** — release channels whose current snapshot points outside the constraint window are dropped from the bundle so no entry references an image that was not downloaded.
+- **Exact-tag form (`=`)** — operationally identical to `--deckhouse-tag`: a single tag is pulled and all default release channels in the bundle are pointed at it.
+
+#### Examples
+
+```bash
+# Pull releases v1.64.x through v1.68.x (incremental update scenario)
+d8 mirror pull /tmp/d8-bundle \
+  --license $LICENSE_TOKEN \
+  --include-platform ">=1.64 <=1.68"
+
+# Pull only the latest patch of v1.65.x
+d8 mirror pull /tmp/d8-bundle \
+  --license $LICENSE_TOKEN \
+  --include-platform "~1.65.0"
+
+# Pull every minor from v1.65 onward that the registry exposes
+d8 mirror pull /tmp/d8-bundle \
+  --license $LICENSE_TOKEN \
+  --include-platform "^1.65.0"
+
+# Pin an exact release (all channels point to v1.65.3)
+d8 mirror pull /tmp/d8-bundle \
+  --license $LICENSE_TOKEN \
+  --include-platform "=v1.65.3"
+```
+
+---
 
 ### Module Filtering
 
@@ -166,6 +214,11 @@ module-name[@version-constraint]
 # Download all modules
 d8 mirror pull /tmp/d8-bundle --license $LICENSE_TOKEN
 
+# Download a bounded range of platform releases (e.g. v1.64.x – v1.68.x)
+d8 mirror pull /tmp/d8-bundle \
+  --license $LICENSE_TOKEN \
+  --include-platform ">=1.64 <=1.68"
+
 # Download only specific modules
 d8 mirror pull /tmp/d8-bundle \
   --license $LICENSE_TOKEN \
@@ -176,6 +229,12 @@ d8 mirror pull /tmp/d8-bundle \
 d8 mirror pull /tmp/d8-bundle \
   --license $LICENSE_TOKEN \
   --include-module neuvector@^1.2.0
+
+# Combine platform range with a module filter
+d8 mirror pull /tmp/d8-bundle \
+  --license $LICENSE_TOKEN \
+  --include-platform ">=1.64 <=1.68" \
+  --include-module neuvector
 
 # Exclude specific modules
 d8 mirror pull /tmp/d8-bundle \
@@ -301,12 +360,20 @@ The same environment variables used by `d8 mirror pull` are also supported:
 
 1. **On a machine with internet access**, download the bundle:
    ```bash
+   # Full pull from a minimum version
    d8 mirror pull /tmp/deckhouse-bundle \
      --license $DECKHOUSE_LICENSE_TOKEN \
      --since-version 1.59.0 \
      --include-module prometheus \
      --include-module ingress-nginx \
      --images-bundle-chunk-size 10
+
+   # Or pull only a specific version window for an incremental update
+   d8 mirror pull /tmp/deckhouse-bundle \
+     --license $DECKHOUSE_LICENSE_TOKEN \
+     --include-platform ">=1.64 <=1.68" \
+     --include-module prometheus \
+     --include-module ingress-nginx
    ```
 
 2. **Transfer the bundle** to the air-gapped environment (USB drive, secure file transfer, etc.)
@@ -394,10 +461,11 @@ d8 mirror pull /tmp/bundle --license $LICENSE_TOKEN
 
 ### Version Management
 
-1. **Use `--since-version`:** To pull only newer releases, reducing bundle size
-2. **Specific Versions:** Use `--deckhouse-tag` for controlled, predictable deployments
-3. **Module Versioning:** Leverage semver constraints for flexible module version management
-4. **Release Channels:** Understand that pulling includes all configured release channels (alpha, beta, early-access, stable, rock-solid)
+1. **Use `--since-version`:** To pull all releases from a given minimum upward, reducing bundle size relative to a full pull
+2. **Use `--include-platform`:** To pull a bounded window of releases (e.g. `">=1.64 <=1.68"`) — useful for staged incremental updates where you want to move up a few minors at a time without pulling the entire channel history
+3. **Specific Versions:** Use `--deckhouse-tag` (or `--include-platform "=vX.Y.Z"`) for fully controlled, single-release deployments
+4. **Module Versioning:** Leverage semver constraints in `--include-module` for flexible module version management; `--include-platform` speaks the same dialect
+5. **Release Channels:** Pulling respects all configured release channels (alpha, beta, early-access, stable, rock-solid); channels whose snapshot falls outside an `--include-platform` constraint are automatically excluded from the bundle
 
 ### Bundle Management
 
@@ -418,11 +486,19 @@ The mirror system handles three primary component types:
 2. **Modules:** Optional Deckhouse modules with versioned releases
 3. **Security Databases:** Vulnerability scanning databases and related data
 
+### Platform Release Discovery
+
+By default, the platform service discovers releases between the current `rock-solid` channel version (lower bound) and the current `alpha` channel version (upper bound), keeping the highest patch per `(major, minor)`.
+
+`--since-version` raises the lower bound above `rock-solid` when the user wants to skip older minors.
+
+`--include-platform` replaces this window with a user-supplied semver constraint, applying the same latest-patch-per-minor and inclusive-anchor rules as module version filtering. Channel snapshots outside the constraint are pruned so the bundle stays internally consistent.
+
 ### Module Filtering Logic
 
 - **Whitelist Mode:** Only specified modules are included
 - **Blacklist Mode:** All modules except specified ones are included (default)
-- **Version Constraints:** Semver-based filtering for granular control
+- **Version Constraints:** Semver-based filtering for granular control (same dialect as `--include-platform`)
 - **Release Channels:** Each module can have multiple release channel versions
 
 ### Storage Layout
