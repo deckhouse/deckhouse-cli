@@ -32,8 +32,8 @@ require (
 	github.com/werf/3p-helm v0.0.0-20260211143448-0b619e3cc3bf
 	github.com/werf/common-go v0.0.0-20260414103517-0558f83edc6d
 	github.com/werf/logboek v0.6.1
-	github.com/werf/nelm v1.24.1-0.20260424100520-ccde5a15521e
-	github.com/werf/werf/v2 v2.63.1
+	github.com/werf/nelm v1.24.1
+	github.com/werf/werf/v2 v2.69.0
 	gitlab.com/greyxor/slogor v1.2.11
 	go.cypherpunks.ru/gogost/v5 v5.13.0
 	golang.org/x/crypto v0.49.0
@@ -179,7 +179,7 @@ require (
 	github.com/cyphar/filepath-securejoin v0.4.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
-	github.com/deckhouse/delivery-kit-sdk v1.1.0 // indirect
+	github.com/deckhouse/delivery-kit-sdk v1.2.0 // indirect
 	github.com/deckhouse/virtualization/api v1.5.1 // indirect
 	github.com/deislabs/oras v1.1.0 // indirect
 	github.com/denisenkom/go-mssqldb v0.12.2 // indirect
@@ -654,7 +654,7 @@ replace (
 	github.com/hashicorp/vault/sdk => flant.internal/team/foxtrot/stronghold.git/images/stronghold/sdk v1.16.18
 	github.com/jaguilar/vt100 => github.com/tonistiigi/vt100 v0.0.0-20190402012908-ad4c4a574305 // upstream not maintained
 	github.com/opencontainers/runc => github.com/opencontainers/runc v1.1.14
-	github.com/werf/werf/v2 => github.com/deckhouse/delivery-kit/v2 v2.68.0-dk
+	github.com/werf/werf/v2 => github.com/deckhouse/delivery-kit/v2 v2.69.0-dk
 	go.cypherpunks.ru/gogost/v5 v5.13.0 => github.com/flant/gogost/v5 v5.13.0
 	k8s.io/kube-openapi => k8s.io/kube-openapi v0.0.0-20240430033511-f0e62f92d13f
 )
