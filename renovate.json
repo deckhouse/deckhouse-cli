@@ -15,7 +15,9 @@
   "rebaseWhen": "conflicted",
   "ignorePaths": ["**/bin/**", "**/dist/**", "**/build/**", "**/.tmp/**", "**/testing/**"],
   "ignoreDeps": [
-    "werf/trdl-vault-actions"
+    "werf/trdl-vault-actions",
+    "github.com/werf/3p-helm",
+    "go.cypherpunks.ru/gogost/v5"
   ],
   "postUpdateOptions": [],
   "gomod": {
@@ -65,6 +67,12 @@
       "description": "Go toolchain updates grouped into a single PR",
       "matchDepNames": ["go", "golang"],
       "groupName": "go-toolchain"
+    },
+    {
+      "description": "Disable updates for private flant.internal packages (replace targets for hashicorp/vault, not accessible to Renovate)",
+      "matchManagers": ["gomod"],
+      "matchPackagePatterns": ["^flant\\.internal/"],
+      "enabled": false
     }
   ],
   "customManagers": [
