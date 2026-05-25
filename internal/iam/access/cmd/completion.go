@@ -46,6 +46,7 @@ func completeSubjectAndName(cmd *cobra.Command, args []string, toComplete string
 			return utilk8s.CompleteResourceNames(cmd, iamtypes.GroupGVR, "", toComplete)
 		}
 	}
+
 	return nil, cobra.ShellCompDirectiveNoFileComp
 }
 
@@ -78,6 +79,7 @@ func completeRuleRef(cmd *cobra.Command, _ []string, toComplete string) ([]strin
 	// Pick which branch to fetch by the committed prefix. Short prefixes
 	// like "C"/"CA" still query both — cobra filters the result.
 	wantCAR, wantAR := true, true
+
 	switch {
 	case strings.HasPrefix(toComplete, "CAR/"),
 		strings.HasPrefix(toComplete, "ClusterAuthorizationRule/"):
@@ -97,6 +99,7 @@ func completeRuleRef(cmd *cobra.Command, _ []string, toComplete string) ([]strin
 			}
 		}
 	}
+
 	if wantAR {
 		list, err := dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace("").List(cmd.Context(), metav1.ListOptions{})
 		if err == nil {

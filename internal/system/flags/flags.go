@@ -27,6 +27,7 @@ func AddPersistentFlags(cmd *cobra.Command) {
 	if p := os.Getenv("KUBECONFIG"); p != "" {
 		defaultKubeconfigPath = p
 	}
+
 	cmd.PersistentFlags().StringP(
 		"kubeconfig",
 		"k",

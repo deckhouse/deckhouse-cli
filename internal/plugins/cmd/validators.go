@@ -46,6 +46,7 @@ func (pc *PluginsCommand) getInstalledPluginContract(pluginName string) (*intern
 
 	contract := new(service.PluginContract)
 	dec := json.NewDecoder(file)
+
 	err = dec.Decode(contract)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal contract: %w", err)
@@ -127,6 +128,7 @@ func (pc *PluginsCommand) fetchLatestVersion(ctx context.Context, pluginName str
 		pc.logger.Warn("Failed to fetch latest version", slog.String("plugin", pluginName), slog.String("error", err.Error()))
 		return nil, fmt.Errorf("failed to fetch latest version: %w", err)
 	}
+
 	return latestVersion, nil
 }
 
@@ -156,11 +158,13 @@ func (pc *PluginsCommand) validateRequirements(plugin *internal.Plugin) (FailedC
 	if err := pc.validateKubernetesRequirement(plugin); err != nil {
 		return nil, fmt.Errorf("kubernetes requirement: %w", err)
 	}
+
 	if err := pc.validateDeckhouseRequirement(plugin); err != nil {
 		return nil, fmt.Errorf("deckhouse requirement: %w", err)
 	}
 
 	pc.logger.Debug("validating module requirements", slog.String("plugin", plugin.Name))
+
 	if err := pc.validateModuleRequirement(plugin); err != nil {
 		return nil, fmt.Errorf("module requirements: %w", err)
 	}
@@ -176,6 +180,7 @@ func (pc *PluginsCommand) validatePluginConflicts(plugin *internal.Plugin) error
 		pc.logger.Debug("failed to read contract directory", slog.String("error", err.Error()))
 		return nil
 	}
+
 	if err != nil {
 		return fmt.Errorf("failed to read contract directory: %w", err)
 	}
@@ -213,6 +218,7 @@ func validatePluginConflict(plugin *internal.Plugin, installedPlugin *internal.P
 		if requirement.Name != plugin.Name {
 			continue
 		}
+
 		constraint, err := semver.NewConstraint(requirement.Constraint)
 		if err != nil {
 			return fmt.Errorf("failed to parse constraint: %w", err)
@@ -223,6 +229,7 @@ func validatePluginConflict(plugin *internal.Plugin, installedPlugin *internal.P
 		if err != nil {
 			return fmt.Errorf("failed to parse version: %w", err)
 		}
+
 		if !constraint.Check(version) {
 			return fmt.Errorf("installing plugin %s %s conflicts with existing plugin %s which requires %s %s",
 				plugin.Name,
@@ -252,24 +259,30 @@ func (pc *PluginsCommand) validatePluginRequirementMandatory(plugin *internal.Pl
 		if err != nil {
 			return nil, fmt.Errorf("failed to check if plugin is installed: %w", err)
 		}
+
 		if !installed {
 			pc.logger.Warn("plugin requirement not installed",
 				slog.String("plugin", plugin.Name),
 				slog.String("requirement", pluginRequirement.Name))
 			result[pluginRequirement.Name] = nil
+
 			continue
 		}
+
 		if pluginRequirement.Constraint == "" {
 			continue
 		}
+
 		installedVersion, err := pc.getInstalledPluginVersion(pluginRequirement.Name)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get installed version: %w", err)
 		}
+
 		constraint, err := semver.NewConstraint(pluginRequirement.Constraint)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse constraint: %w", err)
 		}
+
 		if !constraint.Check(installedVersion) {
 			pc.logger.Warn("plugin requirement not satisfied",
 				slog.String("plugin", plugin.Name),
@@ -294,20 +307,25 @@ func (pc *PluginsCommand) validatePluginRequirementConditional(plugin *internal.
 		if err != nil {
 			return fmt.Errorf("failed to check if plugin is installed: %w", err)
 		}
+
 		if !installed {
 			continue
 		}
+
 		if pluginRequirement.Constraint == "" {
 			continue
 		}
+
 		installedVersion, err := pc.getInstalledPluginVersion(pluginRequirement.Name)
 		if err != nil {
 			return fmt.Errorf("failed to get installed version: %w", err)
 		}
+
 		constraint, err := semver.NewConstraint(pluginRequirement.Constraint)
 		if err != nil {
 			return fmt.Errorf("failed to parse constraint: %w", err)
 		}
+
 		if !constraint.Check(installedVersion) {
 			return fmt.Errorf("conditional plugin requirement not satisfied: plugin %s %s installed but %s requires %s",
 				pluginRequirement.Name,
@@ -316,6 +334,7 @@ func (pc *PluginsCommand) validatePluginRequirementConditional(plugin *internal.
 				pluginRequirement.Constraint)
 		}
 	}
+
 	return nil
 }
 
@@ -331,6 +350,7 @@ func (pc *PluginsCommand) validatePluginRequirementConditional(plugin *internal.
 //	      key2: value2
 func debugPrintPendingRequirement(title string, kv ...[2]string) {
 	fmt.Fprintf(os.Stderr, "!  %s\n", title)
+
 	for _, p := range kv {
 		fmt.Fprintf(os.Stderr, "      %s: %s\n", p[0], p[1])
 	}
@@ -347,11 +367,13 @@ func (pc *PluginsCommand) validateKubernetesRequirement(plugin *internal.Plugin)
 	if plugin.Requirements.Kubernetes.Constraint == "" {
 		return nil
 	}
+
 	debugPrintPendingRequirement(
 		"plugin declares a Kubernetes version requirement but enforcement is not implemented yet",
 		[2]string{"plugin", plugin.Name},
 		[2]string{"constraint", plugin.Requirements.Kubernetes.Constraint},
 	)
+
 	return nil
 }
 
@@ -363,11 +385,13 @@ func (pc *PluginsCommand) validateDeckhouseRequirement(plugin *internal.Plugin) 
 	if plugin.Requirements.Deckhouse.Constraint == "" {
 		return nil
 	}
+
 	debugPrintPendingRequirement(
 		"plugin declares a Deckhouse version requirement but enforcement is not implemented yet",
 		[2]string{"plugin", plugin.Name},
 		[2]string{"constraint", plugin.Requirements.Deckhouse.Constraint},
 	)
+
 	return nil
 }
 
@@ -390,6 +414,7 @@ func (pc *PluginsCommand) validateModuleRequirement(plugin *internal.Plugin) err
 			[2]string{"constraint", m.Constraint},
 		)
 	}
+
 	for _, m := range mods.Conditional {
 		debugPrintPendingRequirement(
 			"plugin declares a conditional module requirement but enforcement is not implemented yet",
@@ -398,11 +423,13 @@ func (pc *PluginsCommand) validateModuleRequirement(plugin *internal.Plugin) err
 			[2]string{"constraint", m.Constraint},
 		)
 	}
+
 	for i, grp := range mods.AnyOf {
 		names := make([]string, 0, len(grp.Modules))
 		for _, m := range grp.Modules {
 			names = append(names, m.Name)
 		}
+
 		debugPrintPendingRequirement(
 			"plugin declares an anyOf module group but enforcement is not implemented yet",
 			[2]string{"plugin", plugin.Name},
@@ -411,5 +438,6 @@ func (pc *PluginsCommand) validateModuleRequirement(plugin *internal.Plugin) err
 			[2]string{"modules", strings.Join(names, ", ")},
 		)
 	}
+
 	return nil
 }

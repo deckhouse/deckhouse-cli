@@ -41,6 +41,7 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE:          snapshotsModule,
 	}
+
 	return snapshotsCmd
 }
 
@@ -63,6 +64,7 @@ func snapshotsModule(cmd *cobra.Command, args []string) error {
 	}
 
 	pathFromOption := fmt.Sprintf("%s/snapshots.yaml", moduleName)
+
 	err = deckhouse.QueryAPI(config, kubeCl, pathFromOption)
 	if err != nil {
 		return fmt.Errorf("Error snapshot module: %w", err)

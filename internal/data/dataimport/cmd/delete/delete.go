@@ -22,6 +22,7 @@ func cmdExamples() string {
 	resp := []string{
 		fmt.Sprintf("  ... -n NAMESPACE %s DATAIMPORT_NAME", cmdName),
 	}
+
 	return strings.Join(resp, "\n")
 }
 
@@ -55,6 +56,7 @@ func parseArgs(args []string) ( /*diName*/ string, error) {
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
+
 	namespace, _ := cmd.Flags().GetString("namespace")
 
 	diName, err := parseArgs(args)
@@ -63,10 +65,12 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	flags := cmd.PersistentFlags()
+
 	safeClient, err := safeClient.NewSafeClient(flags)
 	if err != nil {
 		return err
 	}
+
 	rtClient, err := safeClient.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {
 		return err
@@ -78,5 +82,6 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	log.Info("Deleted DataImport", slog.String("name", diName), slog.String("namespace", namespace))
+
 	return nil
 }

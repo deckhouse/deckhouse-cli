@@ -33,16 +33,19 @@ func SaveOCI(path string, imgs map[string]v1.Image, idxs map[string]v1.ImageInde
 	if err != nil {
 		return err
 	}
+
 	for refStr, img := range imgs {
 		if err := p.AppendImage(img); err != nil {
 			return fmt.Errorf("append image %s: %w", refStr, err)
 		}
 	}
+
 	for refStr, idx := range idxs {
 		if err := p.AppendIndex(idx); err != nil {
 			return fmt.Errorf("append index %s: %w", refStr, err)
 		}
 	}
+
 	return nil
 }
 
@@ -59,6 +62,7 @@ func LoadLocal(path string, asIndex bool) (partial.WithRawManifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stat %s: %w", path, err)
 	}
+
 	if !stat.IsDir() {
 		return LoadTarball(path, "")
 	}
@@ -95,6 +99,7 @@ func LoadLocal(path string, asIndex bool) (partial.WithRawManifest, error) {
 	if !asIndex {
 		return nil, fmt.Errorf("layout %s contains %d entries; pass --index to push as an index", path, len(manifest.Manifests))
 	}
+
 	return idx, nil
 }
 
@@ -115,10 +120,12 @@ func openOrCreateLayout(path string) (layout.Path, error) {
 		if p, lerr := layout.FromPath(path); lerr == nil {
 			return p, nil
 		}
+
 		entries, rerr := os.ReadDir(path)
 		if rerr != nil {
 			return "", fmt.Errorf("read %s: %w", path, rerr)
 		}
+
 		if len(entries) > 0 {
 			return "", fmt.Errorf("%s exists, is not an OCI layout, and is not empty; refusing to overwrite", path)
 		}
@@ -128,5 +135,6 @@ func openOrCreateLayout(path string) (layout.Path, error) {
 	if err != nil {
 		return "", fmt.Errorf("create OCI layout %s: %w", path, err)
 	}
+
 	return p, nil
 }

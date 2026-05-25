@@ -77,7 +77,9 @@ func newRemoveMemberCommand() *cobra.Command {
 				cmd.Printf("Nothing to do: %s %q is not a member of group %q\n", memberKindStr, memberName, groupName)
 				return nil
 			}
+
 			cmd.Printf("Removed %s %q from group %q\n", memberKindStr, memberName, groupName)
+
 			return nil
 		},
 	}
@@ -107,17 +109,21 @@ func RemoveMember(ctx context.Context, dyn dynamic.Interface,
 
 		rawMembers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "members")
 		found := false
+
 		var newMembers []any
+
 		for _, item := range rawMembers {
 			m, ok := item.(map[string]any)
 			if !ok {
 				newMembers = append(newMembers, item)
 				continue
 			}
+
 			if fmt.Sprint(m["kind"]) == memberKindStr && fmt.Sprint(m["name"]) == memberName {
 				found = true
 				continue
 			}
+
 			newMembers = append(newMembers, item)
 		}
 
@@ -134,11 +140,14 @@ func RemoveMember(ctx context.Context, dyn dynamic.Interface,
 		if _, err := groupClient.Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
 			return err
 		}
+
 		removed = true
+
 		return nil
 	})
 	if err != nil {
 		return false, err
 	}
+
 	return removed, nil
 }

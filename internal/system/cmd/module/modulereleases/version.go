@@ -28,9 +28,11 @@ func NormalizeVersion(version string) string {
 	if version == "" {
 		return version
 	}
+
 	if !strings.HasPrefix(version, "v") {
 		return "v" + version
 	}
+
 	return version
 }
 
@@ -45,10 +47,12 @@ type NearestVersions struct {
 func SortReleasesByVersion(releases []ModuleReleaseInfo) {
 	sort.Slice(releases, func(i, j int) bool {
 		vi, errI := semver.NewVersion(NormalizeVersion(releases[i].Version))
+
 		vj, errJ := semver.NewVersion(NormalizeVersion(releases[j].Version))
 		if errI != nil || errJ != nil {
 			return releases[i].Version < releases[j].Version
 		}
+
 		return vi.LessThan(vj)
 	})
 }
@@ -62,11 +66,14 @@ func FindNearestVersions(releases []ModuleReleaseInfo, targetVersion string) Nea
 		return NearestVersions{}
 	}
 
-	var result NearestVersions
-	var lowerVersion, upperVersion *semver.Version
+	var (
+		result                     NearestVersions
+		lowerVersion, upperVersion *semver.Version
+	)
 
 	for i := range releases {
 		r := &releases[i]
+
 		v, err := semver.NewVersion(NormalizeVersion(r.Version))
 		if err != nil {
 			continue
@@ -99,5 +106,6 @@ func extractVersionFromName(name, moduleName string) string {
 	if strings.HasPrefix(name, prefix) {
 		return strings.TrimPrefix(name, prefix)
 	}
+
 	return ""
 }

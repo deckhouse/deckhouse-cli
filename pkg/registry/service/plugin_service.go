@@ -154,9 +154,11 @@ func unmarshalContract(raw []byte, dst *PluginContract) error {
 		if (typeErr.Field == "requirements.modules" || typeErr.Field == "requirements.plugins") && typeErr.Value == "array" {
 			return fmt.Errorf("invalid contract: field %q must be an object with mandatory/conditional sections, got a JSON array", typeErr.Field)
 		}
+
 		if typeErr.Field != "" {
 			return fmt.Errorf("invalid contract: field %q has wrong JSON type (got %s)", typeErr.Field, typeErr.Value)
 		}
+
 		return fmt.Errorf("invalid contract: wrong JSON type (got %s)", typeErr.Value)
 	}
 
@@ -191,6 +193,7 @@ func (s *PluginService) ExtractPlugin(ctx context.Context, pluginName, tag, dest
 	pluginClient := s.client.WithSegment(pluginName)
 
 	platform := &v1.Platform{Architecture: runtime.GOARCH, OS: runtime.GOOS}
+
 	img, err := pluginClient.GetImage(ctx, tag, regclient.WithPlatform{Platform: platform})
 	if err != nil {
 		return fmt.Errorf("failed to get image: %w", err)
@@ -217,6 +220,7 @@ func (s *PluginService) extractPluginFromTar(r io.Reader, destination, pluginNam
 		if err == io.EOF {
 			break // End of archive
 		}
+
 		if err != nil {
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
@@ -258,6 +262,7 @@ func ContractToDomain(contract *PluginContract) *internal.Plugin {
 	for _, envDTO := range contract.Env {
 		plugin.Env = append(plugin.Env, internal.EnvVar{Name: envDTO.Name})
 	}
+
 	for _, flagDTO := range contract.Flags {
 		plugin.Flags = append(plugin.Flags, internal.Flag{Name: flagDTO.Name})
 	}
@@ -291,6 +296,7 @@ func DomainToContract(plugin *internal.Plugin) *PluginContract {
 	for _, env := range plugin.Env {
 		contract.Env = append(contract.Env, EnvVarDTO{Name: env.Name})
 	}
+
 	for _, flag := range plugin.Flags {
 		contract.Flags = append(contract.Flags, FlagDTO{Name: flag.Name})
 	}
@@ -317,6 +323,7 @@ func pluginReqsToDomain(reqs []PluginRequirementDTO) []internal.PluginRequiremen
 	for _, r := range reqs {
 		out = append(out, internal.PluginRequirement{Name: r.Name, Constraint: r.Constraint})
 	}
+
 	return out
 }
 
@@ -325,6 +332,7 @@ func pluginReqsToDTO(reqs []internal.PluginRequirement) []PluginRequirementDTO {
 	for _, r := range reqs {
 		out = append(out, PluginRequirementDTO{Name: r.Name, Constraint: r.Constraint})
 	}
+
 	return out
 }
 
@@ -336,6 +344,7 @@ func moduleGroupToDomain(g ModuleRequirementsGroupDTO) internal.ModuleRequiremen
 			Modules:     moduleReqsToDomain(grp.Modules),
 		})
 	}
+
 	return internal.ModuleRequirementsGroup{
 		Mandatory:   moduleReqsToDomain(g.Mandatory),
 		Conditional: moduleReqsToDomain(g.Conditional),
@@ -351,6 +360,7 @@ func moduleGroupToDTO(g internal.ModuleRequirementsGroup) ModuleRequirementsGrou
 			Modules:     moduleReqsToDTO(grp.Modules),
 		})
 	}
+
 	return ModuleRequirementsGroupDTO{
 		Mandatory:   moduleReqsToDTO(g.Mandatory),
 		Conditional: moduleReqsToDTO(g.Conditional),
@@ -363,6 +373,7 @@ func moduleReqsToDomain(reqs []ModuleRequirementDTO) []internal.ModuleRequiremen
 	for _, r := range reqs {
 		out = append(out, internal.ModuleRequirement{Name: r.Name, Constraint: r.Constraint})
 	}
+
 	return out
 }
 
@@ -371,6 +382,7 @@ func moduleReqsToDTO(reqs []internal.ModuleRequirement) []ModuleRequirementDTO {
 	for _, r := range reqs {
 		out = append(out, ModuleRequirementDTO{Name: r.Name, Constraint: r.Constraint})
 	}
+
 	return out
 }
 
@@ -386,6 +398,7 @@ func (s *PluginService) ListPlugins(ctx context.Context) ([]string, error) {
 	if err != nil {
 		s.log.Warn("Failed to list repositories from registry. The registry may not allow catalog access or you may need special permissions.",
 			slog.String("error", err.Error()))
+
 		return nil, fmt.Errorf("failed to list repositories (registry may not allow catalog access): %w", err)
 	}
 

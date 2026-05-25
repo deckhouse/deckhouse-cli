@@ -36,6 +36,7 @@ func BackupClusterRoles(
 			Kind:       "ClusterRole",
 			APIVersion: rbacv1.SchemeGroupVersion.String(),
 		}
+
 		return &item
 	}), nil
 }
@@ -61,6 +62,7 @@ func BackupClusterRoleBindings(
 			Kind:       "ClusterRoleBinding",
 			APIVersion: rbacv1.SchemeGroupVersion.String(),
 		}
+
 		return &item
 	}), nil
 }

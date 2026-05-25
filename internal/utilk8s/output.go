@@ -44,15 +44,18 @@ func PrintObject(w io.Writer, obj *unstructured.Unstructured, format string) err
 		if err != nil {
 			return fmt.Errorf("marshalling JSON: %w", err)
 		}
+
 		fmt.Fprintln(w, string(data))
 	case "yaml":
 		data, err := sigsyaml.Marshal(obj.Object)
 		if err != nil {
 			return fmt.Errorf("marshalling YAML: %w", err)
 		}
+
 		fmt.Fprint(w, string(data))
 	default:
 		fmt.Fprintf(w, "%s/%s\n", obj.GetKind(), obj.GetName())
 	}
+
 	return nil
 }

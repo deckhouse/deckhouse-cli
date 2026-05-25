@@ -79,6 +79,7 @@ func grantAnnotations(spec *canonicalGrantSpec) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return map[string]string{
 		iamtypes.AnnotationAccessSubjectRef:       spec.SubjectRef,
 		iamtypes.AnnotationAccessSubjectPrincipal: spec.SubjectPrincipal,
@@ -91,11 +92,14 @@ func sanitizeNamePart(s string) string {
 	s = strings.ToLower(s)
 	s = strings.ReplaceAll(s, "@", "-at-")
 	s = strings.ReplaceAll(s, ".", "-")
+
 	s = strings.ReplaceAll(s, "_", "-")
 	if len(s) > 40 {
 		s = s[:40]
 	}
+
 	s = strings.TrimRight(s, "-")
+
 	return s
 }
 
@@ -105,6 +109,7 @@ func scopeNamePart(spec *canonicalGrantSpec) string {
 		if len(spec.Namespaces) == 1 {
 			return spec.Namespaces[0]
 		}
+
 		return "multi-ns"
 	case iamtypes.ScopeCluster:
 		return "cluster"
@@ -118,7 +123,9 @@ func scopeNamePart(spec *canonicalGrantSpec) string {
 		for k := range spec.LabelMatch {
 			keys = append(keys, k)
 		}
+
 		sort.Strings(keys)
+
 		var b strings.Builder
 		for _, k := range keys {
 			b.WriteString(k)
@@ -126,7 +133,9 @@ func scopeNamePart(spec *canonicalGrantSpec) string {
 			b.WriteString(spec.LabelMatch[k])
 			b.WriteByte(',')
 		}
+
 		h := sha256.Sum256([]byte(b.String()))
+
 		return fmt.Sprintf("labels-%x", h[:3])
 	default:
 		return "unknown"

@@ -50,10 +50,12 @@ func getWaitFlags(cmd *cobra.Command) (waitFlags, error) {
 	if err != nil {
 		return waitFlags{}, err
 	}
+
 	timeoutVal, err := cmd.Flags().GetDuration("timeout")
 	if err != nil {
 		return waitFlags{}, err
 	}
+
 	return waitFlags{wait: waitVal, timeout: timeoutVal}, nil
 }
 
@@ -87,6 +89,7 @@ func runUserOperation(cmd *cobra.Command, dyn dynamic.Interface, req userOpReque
 	// Nano-second precision avoids collisions when several UserOperation
 	// commands are issued within the same wall-clock second (CI, retries, etc.).
 	name := fmt.Sprintf("%s%d", req.NamePrefix, time.Now().UnixNano())
+
 	spec := map[string]any{
 		"user":          req.User,
 		"type":          req.OpType,
@@ -120,11 +123,14 @@ func runUserOperation(cmd *cobra.Command, dyn dynamic.Interface, req userOpReque
 	}
 
 	phase, _, _ := unstructured.NestedString(result.Object, "status", "phase")
+
 	message, _, _ := unstructured.NestedString(result.Object, "status", "message")
 	if phase == "Failed" {
 		return fmt.Errorf("%s failed: %s", req.OpType, message)
 	}
+
 	cmd.Printf("Succeeded: %s\n", name)
+
 	return nil
 }
 
@@ -157,5 +163,6 @@ func waitUserOperation(ctx context.Context, dyn dynamic.Interface, name string, 
 	if err != nil {
 		return nil, err
 	}
+
 	return obj, nil
 }

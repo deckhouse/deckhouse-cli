@@ -33,10 +33,12 @@ import (
 // Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, dynamicClient dynamic.Interface) statusresult.StatusResult {
 	alerts, err := getClusterAlerts(ctx, dynamicClient)
+
 	output := color.RedString("Error getting cluster alerts: %v\n", err)
 	if err == nil {
 		output = formatClusterAlerts(alerts)
 	}
+
 	return statusresult.StatusResult{
 		Title:  "Cluster Alerts",
 		Level:  0,
@@ -57,24 +59,29 @@ func getClusterAlerts(ctx context.Context, dynamicCl dynamic.Interface) ([]Clust
 		Version:  "v1alpha1",
 		Resource: "clusteralerts",
 	}
+
 	alertList, err := dynamicCl.Resource(gvr).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list cluster alerts: %w", err)
 	}
+
 	alerts := make([]ClusterAlert, 0, len(alertList.Items))
 	for _, item := range alertList.Items {
 		alert, ok := ClusterAlertProcessing(item.Object)
 		if !ok {
 			continue
 		}
+
 		alerts = append(alerts, alert)
 	}
+
 	return alerts, nil
 }
 
 // Processing converts raw resource data into a structured format for easier output and analysis.
 func ClusterAlertProcessing(item map[string]interface{}) (ClusterAlert, bool) {
 	alertSpecMap, ok1 := item["alert"].(map[string]interface{})
+
 	statusMap, ok2 := item["status"].(map[string]interface{})
 	if !ok1 || !ok2 {
 		return ClusterAlert{}, false
@@ -82,6 +89,7 @@ func ClusterAlertProcessing(item map[string]interface{}) (ClusterAlert, bool) {
 
 	name, ok3 := alertSpecMap["name"].(string)
 	phase, ok5 := statusMap["alertStatus"].(string)
+
 	severity, ok4 := alertSpecMap["severityLevel"].(string)
 	if !ok4 {
 		severity = "N/A"
@@ -111,9 +119,11 @@ func formatClusterAlerts(alerts []ClusterAlert) string {
 
 	countMap := make(map[AlertKey]int)
 	maxNameLen := len("ALERT")
+
 	for _, alert := range alerts {
 		key := AlertKey{Severity: alert.Severity, Name: alert.Name}
 		countMap[key]++
+
 		nameLen := len([]rune(alert.Name))
 		if nameLen > maxNameLen {
 			maxNameLen = nameLen
@@ -126,14 +136,17 @@ func formatClusterAlerts(alerts []ClusterAlert) string {
 	for key := range countMap {
 		sortedKeys = append(sortedKeys, key)
 	}
+
 	sort.SliceStable(sortedKeys, func(i, j int) bool {
 		if sortedKeys[i].Severity == sortedKeys[j].Severity {
 			return sortedKeys[i].Name < sortedKeys[j].Name
 		}
+
 		return sortedKeys[i].Severity < sortedKeys[j].Severity
 	})
 
 	var sb strings.Builder
+
 	yellow := color.New(color.FgYellow).SprintFunc()
 	sb.WriteString(yellow("┌ Cluster Alerts:\n"))
 	sb.WriteString(yellow(fmt.Sprintf("├ %-10s %-*s %s\n", "SEVERITY", nameColWidth, "ALERT", "SUM")))
@@ -143,6 +156,7 @@ func formatClusterAlerts(alerts []ClusterAlert) string {
 		if i == len(sortedKeys)-1 {
 			prefix = "└"
 		}
+
 		truncName := truncateName(key.Name, nameColWidth)
 		count := countMap[key]
 
@@ -174,8 +188,10 @@ func truncateName(name string, width int) string {
 	if len(nameRunes) <= width {
 		return name
 	}
+
 	if width < 3 {
 		return "..."
 	}
+
 	return string(nameRunes[:width-3]) + "..."
 }

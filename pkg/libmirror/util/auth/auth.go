@@ -48,12 +48,14 @@ func MakeRemoteRegistryRequestOptions(authProvider authn.Authenticator, insecure
 	if err != nil {
 		panic(err)
 	}
+
 	puller, err := remote.NewPuller(r...)
 	if err != nil {
 		panic(err)
 	}
 
 	r = append(r, remote.Reuse(puller), remote.Reuse(pusher))
+
 	return n, r
 }
 

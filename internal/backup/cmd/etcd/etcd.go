@@ -62,6 +62,7 @@ func NewCommand() *cobra.Command {
 	}
 
 	addFlags(etcdCmd.Flags())
+
 	return etcdCmd
 }
 
@@ -80,6 +81,7 @@ var (
 
 func etcd(cmd *cobra.Command, args []string) error {
 	log.SetFlags(log.LstdFlags)
+
 	if len(args) != 1 {
 		return fmt.Errorf("This command requires exactly 1 argument")
 	}
@@ -148,6 +150,7 @@ func etcd(cmd *cobra.Command, args []string) error {
 			log.Printf("%s: Fail, %v\n", etcdPodName, err)
 			continue
 		}
+
 		if !snapshotStreamingSupported {
 			log.Printf("%s: etcd instance does not support snapshot streaming\n", etcdPodName)
 			continue
@@ -155,9 +158,11 @@ func etcd(cmd *cobra.Command, args []string) error {
 
 		if err = streamCommand(kubeCl, config, pipeExecOpts, etcdPodName, etcdPodNamespace, stdout, stderr); err != nil {
 			log.Printf("%s: Fail, %v\n", etcdPodName, err)
+
 			if verboseLog {
 				log.Println("STDERR:", stderr.String())
 			}
+
 			continue
 		}
 
@@ -170,6 +175,7 @@ func etcd(cmd *cobra.Command, args []string) error {
 		}
 
 		log.Println("Snapshot successfully taken from", etcdPodName)
+
 		return nil
 	}
 
@@ -195,6 +201,7 @@ func checkEtcdInstanceSupportsSnapshotStreaming(
 		if verboseLog {
 			log.Println("HELP STDERR:", stderr.String())
 		}
+
 		return false, fmt.Errorf("streamCommand: %w", err)
 	}
 
@@ -213,6 +220,7 @@ func streamCommand(
 	stdout, stderr io.Writer,
 ) error {
 	scheme := runtime.NewScheme()
+
 	parameterCodec := runtime.NewParameterCodec(scheme)
 	if err := v1.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("Failed to create parameter codec: %w", err)

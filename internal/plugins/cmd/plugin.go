@@ -43,6 +43,7 @@ func NewPluginCommand(commandName, description string, aliases []string, logger 
 		logger.Warn("failed to ensure plugin root directory", slog.String("error", err.Error()))
 		return nil
 	}
+
 	if cached := pc.cachedDescription(commandName); cached != "" {
 		description = cached
 	}
@@ -70,11 +71,14 @@ func (pc *PluginsCommand) runInstalledPlugin(ctx context.Context, pluginName str
 	if err != nil {
 		return fmt.Errorf("check installed: %w", err)
 	}
+
 	if !installed {
 		fmt.Println("Not installed, installing...")
+
 		if err := pc.InstallPlugin(ctx, pluginName); err != nil {
 			return fmt.Errorf("install: %w", err)
 		}
+
 		fmt.Println("Installed successfully")
 	}
 
@@ -85,10 +89,12 @@ func (pc *PluginsCommand) runInstalledPlugin(ctx context.Context, pluginName str
 
 	pc.logger.Debug("Executing plugin", slog.String("plugin", pluginName), slog.Any("args", args))
 	cmd := exec.CommandContext(ctx, absPath, args...)
+
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("plugin run: %w", err)
 	}
+
 	return nil
 }
 

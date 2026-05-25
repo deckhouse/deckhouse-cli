@@ -41,6 +41,7 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE:          valuesModule,
 	}
+
 	return valuesCmd
 }
 
@@ -48,6 +49,7 @@ func valuesModule(cmd *cobra.Command, args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("this command requires exactly 1 argument: module name")
 	}
+
 	moduleName := args[0]
 
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
@@ -66,6 +68,7 @@ func valuesModule(cmd *cobra.Command, args []string) error {
 	}
 
 	pathFromOption := fmt.Sprintf("%s/values.yaml", moduleName)
+
 	err = deckhouse.QueryAPI(config, kubeCl, pathFromOption)
 	if err != nil {
 		return fmt.Errorf("Error print values: %w", err)

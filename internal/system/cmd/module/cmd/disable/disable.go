@@ -42,6 +42,7 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE:          disableModule,
 	}
+
 	return disableCmd
 }
 
@@ -49,6 +50,7 @@ func disableModule(cmd *cobra.Command, args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("this command requires exactly 1 argument: module name")
 	}
+
 	moduleName := args[0]
 
 	dynamicClient, err := cli.GetDynamicClient(cmd)

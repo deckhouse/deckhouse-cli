@@ -106,6 +106,7 @@ func NewCommand() *cobra.Command {
 
 	addFlags(pushCmd.Flags())
 	ParseEnvironmentVariables()
+
 	return pushCmd
 }
 
@@ -114,6 +115,7 @@ func setupLogger() *log.SLogger {
 	if log.DebugLogLevel() >= 3 {
 		logLevel = slog.LevelDebug
 	}
+
 	return log.NewSLogger(logLevel)
 }
 
@@ -135,6 +137,7 @@ func buildPushParams(logger params.Logger) *params.PushParams {
 			Images: 1,
 		},
 	}
+
 	return pushParams
 }
 
@@ -146,6 +149,7 @@ func validateRegistryAccess(ctx context.Context, pushParams *params.PushParams) 
 	}
 
 	accessValidator := validation.NewRemoteRegistryAccessValidator()
+
 	err := accessValidator.ValidateWriteAccessForRepo(ctx, path.Join(pushParams.RegistryHost, pushParams.RegistryPath), opts...)
 	if err != nil {
 		return fmt.Errorf("validate write access to registry %s: %w", path.Join(pushParams.RegistryHost, pushParams.RegistryPath), err)
@@ -164,6 +168,7 @@ type Pusher struct {
 func NewPusher() *Pusher {
 	logger := setupLogger()
 	pushParams := buildPushParams(logger)
+
 	return &Pusher{
 		logger:     logger,
 		pushParams: pushParams,
@@ -182,6 +187,7 @@ func (p *Pusher) Execute() error {
 		if diag := errdetect.Diagnose(err); diag != nil {
 			return diag
 		}
+
 		return err
 	}
 
@@ -189,6 +195,7 @@ func (p *Pusher) Execute() error {
 		if diag := errdetect.Diagnose(err); diag != nil {
 			return diag
 		}
+
 		return err
 	}
 
@@ -245,6 +252,7 @@ func (p *Pusher) executeNewPush() error {
 			p.logger.WarnLn("Operation cancelled by user")
 			return nil
 		}
+
 		return fmt.Errorf("push to registry: %w", err)
 	}
 

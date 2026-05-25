@@ -46,5 +46,6 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&CNINodeMigrationList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
+
 	return nil
 }

@@ -63,6 +63,7 @@ func ResolvePublish(
 
 	// User didn't set the flag, run autodetection.
 	log.Info("Auto-detecting publish mode")
+
 	return DetectPublish(ctx, rtClient, sClient, log)
 }
 
@@ -105,8 +106,8 @@ func DetectPublish(
 	// which also covers TLS handshake and DNS resolve. Without it the HTTP client inherits
 	// the default kubeconfig timeout (typically 30s).
 	probeClient.SetProbeEndpoint(ProbeTimeout, targetURL, kubeServiceServerName)
-	probeRtClient, err := probeClient.NewRTClient()
 
+	probeRtClient, err := probeClient.NewRTClient()
 	if err != nil {
 		return false, ErrAutoDetectWithHint
 	}
@@ -153,6 +154,7 @@ func DetectPublish(
 
 	// Same service identity via both paths -> internal endpoint is reachable.
 	log.Info("Publish autodetect: internal endpoint is reachable, selecting publish=false")
+
 	return false, nil
 }
 

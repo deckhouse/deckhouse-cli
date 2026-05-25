@@ -78,16 +78,22 @@ func (s *SLogger) WarnLn(a ...any) {
 
 func (s *SLogger) Process(topic string, run func() error) error {
 	start := time.Now()
+
 	s.delegate.Info(strings.Repeat("║", s.processDepth) + "╔ " + topic)
 	s.processDepth++
+
 	defer func() { s.processDepth-- }()
+
 	if err := run(); err != nil {
 		s.delegate.Error(
 			strings.Repeat("║", s.processDepth-1)+topic+" failed",
 			"error", err)
+
 		return err
 	}
+
 	s.delegate.Info(strings.Repeat("║", s.processDepth-1) + "╚ " + topic + " succeeded in " + time.Since(start).String())
+
 	return nil
 }
 
@@ -97,6 +103,7 @@ func (s *SLogger) formatRecord(template string, args ...any) string {
 	if template == "" {
 		msg := &strings.Builder{}
 		msg.WriteString(prefix)
+
 		for _, arg := range args {
 			fmt.Fprintf(msg, " %v", arg)
 		}

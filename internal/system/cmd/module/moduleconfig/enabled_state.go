@@ -79,9 +79,11 @@ func SetEnabledState(dynamicClient dynamic.Interface, name string, state Enabled
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert the '%s' module config: %w", name, err)
 		}
+
 		if _, err = resourceClient.Create(ctx, obj, metav1.CreateOptions{}); err != nil {
 			return nil, parseOperationError(name, err)
 		}
+
 		return &Result{Status: Changed}, nil
 	}
 
@@ -95,9 +97,11 @@ func SetEnabledState(dynamicClient dynamic.Interface, name string, state Enabled
 	if err != nil {
 		return nil, err
 	}
+
 	if _, err = resourceClient.Patch(ctx, name, types.MergePatchType, enabledSpec, metav1.PatchOptions{}); err != nil {
 		return nil, parseOperationError(name, err)
 	}
+
 	return &Result{Status: Changed}, nil
 }
 
@@ -115,6 +119,7 @@ func isInState(obj *unstructured.Unstructured, desiredState EnabledState) bool {
 	}
 
 	desiredEnabled := desiredState == Enabled
+
 	return enabled == desiredEnabled
 }
 
@@ -129,6 +134,7 @@ func parseOperationError(moduleName string, err error) error {
 		if len(matches) > 1 {
 			return &ExperimentalModuleError{ModuleName: matches[1]}
 		}
+
 		return &ExperimentalModuleError{ModuleName: moduleName}
 	}
 
@@ -149,6 +155,7 @@ func createModuleConfig(name string, state EnabledState) (*unstructured.Unstruct
 		},
 	}
 	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(newCfg)
+
 	return &unstructured.Unstructured{Object: content}, err
 }
 

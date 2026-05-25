@@ -37,6 +37,7 @@ func WithConstantRetries(maxRetries uint, waitInterval time.Duration, payload fu
 	if task.maxRetries == 0 {
 		task.maxRetries = 1
 	}
+
 	if task.waitInterval <= 0 {
 		task.waitInterval = time.Second
 	}

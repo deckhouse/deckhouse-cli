@@ -50,8 +50,10 @@ auto-detects whether the file is a kubeconfig or a PEM certificate.
 
 // NewCheckCommand returns the "certs check" leaf command.
 func NewCheckCommand() *cobra.Command {
-	var certsDir string
-	var kubeconfigDir string
+	var (
+		certsDir      string
+		kubeconfigDir string
+	)
 
 	checkCmd := &cobra.Command{
 		Use:     "check [PATH]",
@@ -60,8 +62,10 @@ func NewCheckCommand() *cobra.Command {
 		Args:    cobra.MaximumNArgs(1),
 		Example: "  d8 tools pki certs check\n  d8 tools pki certs check /etc/kubernetes/pki/apiserver.crt\n  d8 tools pki certs check /etc/kubernetes/admin.conf\n  d8 tools pki certs check --path /opt/k8s/pki --kubeconfig-dir /opt/k8s",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var report *certs.Report
-			var err error
+			var (
+				report *certs.Report
+				err    error
+			)
 
 			if len(args) == 1 {
 				report, err = certs.BuildSingleFileReport(args[0])
@@ -73,6 +77,7 @@ func NewCheckCommand() *cobra.Command {
 				if effectiveKubeconfigDir == "" {
 					effectiveKubeconfigDir = filepath.Dir(certsDir)
 				}
+
 				report, err = certs.BuildFullScanReport(certsDir, effectiveKubeconfigDir)
 				if err != nil {
 					return fmt.Errorf("checking certificates in %q and kubeconfig files in %q: %w", certsDir, effectiveKubeconfigDir, err)
@@ -80,6 +85,7 @@ func NewCheckCommand() *cobra.Command {
 			}
 
 			certs.RenderReport(cmd.OutOrStdout(), report)
+
 			return nil
 		},
 	}

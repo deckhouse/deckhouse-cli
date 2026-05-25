@@ -128,8 +128,10 @@ func NewService(
 
 	// layout is nil in dry-run mode; pullDeckhousePlatformDryRun does not use it.
 	var layout *ImageLayouts
+
 	if !options.DryRun {
 		var err error
+
 		layout, err = createOCIImageLayoutsForPlatform(tmpDir)
 		if err != nil {
 			//TODO: handle error
@@ -343,6 +345,7 @@ func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string)
 	// When IncludeConstraint is active the channel set was already constrained above;
 	// keep the lower-bound filter so SinceVersion still works in combination.
 	minVersion := svc.determineMinimumVersion(channelVersions)
+
 	filteredChannels := make([]string, 0, len(matchedChannels))
 	for _, ch := range matchedChannels {
 		if minVersion != nil {
@@ -350,6 +353,7 @@ func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string)
 				continue
 			}
 		}
+
 		filteredChannels = append(filteredChannels, ch)
 	}
 
@@ -374,8 +378,10 @@ func (svc *Service) parseInputTags(tags []string) parsedTags {
 			if !internal.ChannelIsValid(tag) {
 				result.customTags = append(result.customTags, tag)
 			}
+
 			continue
 		}
+
 		result.semverVersions = append(result.semverVersions, version)
 	}
 
@@ -413,6 +419,7 @@ func (svc *Service) fetchReleaseChannelVersions(ctx context.Context) (channelVer
 		if hasLTS && errors.Is(err, client.ErrImageNotFound) {
 			continue
 		}
+
 		channelResults[channel] = releaseChannelVersionResult{ver: version, err: err}
 	}
 
@@ -460,6 +467,7 @@ func (svc *Service) matchChannelsToTags(requestedTags []string, channelVersions 
 			versions = append(versions, version)
 			matchedChannels[channel] = struct{}{}
 		}
+
 		return versions, mapKeysToSlice(matchedChannels)
 	}
 
@@ -469,6 +477,7 @@ func (svc *Service) matchChannelsToTags(requestedTags []string, channelVersions 
 			if svc.tagMatchesChannel(tag, channel, version) {
 				versions = append(versions, version)
 				matchedChannels[channel] = struct{}{}
+
 				break
 			}
 		}
@@ -515,8 +524,10 @@ func (svc *Service) expandVersionRange(ctx context.Context, channelVersions chan
 				if v == nil || v.LessThan(minVersion) {
 					continue
 				}
+
 				nb = append(nb, v)
 			}
+
 			filteredBase = nb
 		}
 
@@ -538,8 +549,10 @@ func (svc *Service) expandVersionRange(ctx context.Context, channelVersions chan
 			if v.LessThan(since) {
 				continue
 			}
+
 			nb = append(nb, v)
 		}
+
 		matched = nb
 	}
 
@@ -566,10 +579,12 @@ func (svc *Service) expandVersionRange(ctx context.Context, channelVersions chan
 func (svc *Service) discoverConstrainedPlatformVersions(ctx context.Context, semverConstraint *modules.SemanticVersionConstraint) ([]*semver.Version, error) {
 	if svc.options.ProxyRegistry {
 		svc.userLogger.Debugf("probing deckhouse releases for --include-platform via --proxy-registry")
+
 		matched, err := modules.ProbeAvailableVersions(ctx, semverConstraint, svc.releaseTagExists)
 		if err != nil {
 			return nil, fmt.Errorf("probe deckhouse releases: %w", err)
 		}
+
 		return matched, nil
 	}
 
@@ -590,13 +605,16 @@ func (svc *Service) discoverConstrainedPlatformVersions(ctx context.Context, sem
 // (network, auth, unexpected status) propagates out to fail the pull.
 func (svc *Service) releaseTagExists(ctx context.Context, v *semver.Version) (bool, error) {
 	tag := "v" + v.String()
+
 	err := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, tag)
 	if err == nil {
 		return true, nil
 	}
+
 	if errors.Is(err, client.ErrImageNotFound) {
 		return false, nil
 	}
+
 	return false, fmt.Errorf("check release tag %q: %w", tag, err)
 }
 
@@ -612,10 +630,12 @@ func parseTagsMatchingConstraint(tags []string, constraint *modules.SemanticVers
 		if err != nil {
 			continue
 		}
+
 		if constraint.Match(v) {
 			matched = append(matched, v)
 		}
 	}
+
 	return matched
 }
 
@@ -628,10 +648,12 @@ func filterVersionsByConstraint(versions []*semver.Version, constraint *modules.
 		if v == nil {
 			continue
 		}
+
 		if constraint.Match(v) {
 			out = append(out, v)
 		}
 	}
+
 	return out
 }
 
@@ -648,10 +670,12 @@ func filterChannelsByConstraint(channels []string, channelVersions channelVersio
 			out = append(out, ch)
 			continue
 		}
+
 		if constraint.Match(v) {
 			out = append(out, ch)
 		}
 	}
+
 	return out
 }
 
@@ -670,6 +694,7 @@ func restoreInclusiveAnchors(selected, available []*semver.Version, anchors []*s
 		if v == nil {
 			continue
 		}
+
 		availableByKey[v.String()] = v
 	}
 
@@ -683,13 +708,16 @@ func restoreInclusiveAnchors(selected, available []*semver.Version, anchors []*s
 		if _, already := selectedKeys[key]; already {
 			continue
 		}
+
 		registryVersion, isAvailable := availableByKey[key]
 		if !isAvailable {
 			continue
 		}
+
 		selected = append(selected, registryVersion)
 		selectedKeys[key] = struct{}{}
 	}
+
 	return selected
 }
 
@@ -718,6 +746,7 @@ func mapKeysToSlice(m map[string]struct{}) []string {
 	for key := range m {
 		keys = append(keys, key)
 	}
+
 	return keys
 }
 
@@ -812,6 +841,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	}
 
 	var prevDigests = make(map[string]struct{}, 0)
+
 	for _, tag := range uniqueImages {
 		svc.userLogger.Infof("Extracting images digests from Deckhouse installer %s", tag)
 
@@ -868,6 +898,7 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 				return fmt.Errorf("Sorting index manifests of %s: %w", l, err)
 			}
 		}
+
 		return nil
 	})
 	if err != nil {
@@ -976,6 +1007,7 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 	result := make(map[string]*puller.ImageMeta, len(images))
 
 	const scanPrintInterval = 20
+
 	counter := 0
 
 	if svc.options.SkipVexImages {
@@ -1000,6 +1032,7 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 	}
 
 	logger.Infof("Searching for VEX images")
+
 	for image := range images {
 		counter++
 		if counter%scanPrintInterval == 0 {
@@ -1177,6 +1210,7 @@ func deduplicateVersions(versions []*semver.Version) []semver.Version {
 		if v == nil {
 			continue
 		}
+
 		m[v.String()] = struct{}{}
 	}
 

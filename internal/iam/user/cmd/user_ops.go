@@ -61,6 +61,7 @@ var userOpDefs = []userOpDef{
 			if _, err := time.ParseDuration(args[1]); err != nil {
 				return nil, fmt.Errorf("invalid lockDuration %q: %w", args[1], err)
 			}
+
 			return map[string]any{
 				"lock": map[string]any{"for": args[1]},
 			}, nil
@@ -96,17 +97,21 @@ func newUserOpCommand(def userOpDef) *cobra.Command {
 		SilenceUsage:      true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var extra map[string]any
+
 			if def.BuildExtraSpec != nil {
 				e, err := def.BuildExtraSpec(args)
 				if err != nil {
 					return err
 				}
+
 				extra = e
 			}
+
 			dyn, err := utilk8s.NewDynamicClient(cmd)
 			if err != nil {
 				return err
 			}
+
 			return runUserOperation(cmd, dyn, userOpRequest{
 				NamePrefix: def.NamePrefix,
 				OpType:     def.OpType,
@@ -116,5 +121,6 @@ func newUserOpCommand(def userOpDef) *cobra.Command {
 		},
 	}
 	addWaitFlags(cmd)
+
 	return cmd
 }

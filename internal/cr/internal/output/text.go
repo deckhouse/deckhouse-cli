@@ -32,16 +32,20 @@ func WriteEntriesText(w io.Writer, entries []imagefs.Entry, long bool) error {
 		if e.IsDir() {
 			path += "/"
 		}
+
 		if long {
 			if _, err := fmt.Fprintf(w, "%-11s %8s  %s\n", e.ModeStr, HumanSize(e.Size), path); err != nil {
 				return err
 			}
+
 			continue
 		}
+
 		if _, err := fmt.Fprintln(w, path); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -51,11 +55,14 @@ func HumanSize(n int64) string {
 	if n < unit {
 		return fmt.Sprintf("%d B", n)
 	}
+
 	div, exp := unit, 0
 	for v := n / unit; v >= unit; v /= unit {
 		div *= unit
 		exp++
 	}
+
 	units := "KMGTPE"
+
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), units[exp])
 }

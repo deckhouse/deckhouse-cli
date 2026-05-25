@@ -47,9 +47,12 @@ files deleted by upper layers are reported as not-found.`,
 			if err != nil {
 				return err
 			}
+
 			_, err = cmd.OutOrStdout().Write(content)
+
 			return err
 		},
 	}
+
 	return cmd
 }

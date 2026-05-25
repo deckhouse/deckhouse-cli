@@ -39,6 +39,7 @@ func initProgressBar(totalSize int64) (*mpb.Progress, *mpb.Bar) {
 	if totalSize > 0 {
 		return p, p.AddBar(totalSize, defaultOption...)
 	}
+
 	return p, p.AddBar(totalSize, unknownSizeOption...)
 }
 
@@ -77,6 +78,7 @@ func BarCallback(ctx context.Context) Callback {
 		if totalSize <= 0 {
 			bar.SetTotal(written, true)
 		}
+
 		p.Wait()
 
 		return nil
@@ -100,6 +102,7 @@ func CopyWithContext(ctx context.Context, dst io.Writer, src io.Reader) (int64, 
 			return src.Read(p)
 		}
 	}))
+
 	return written, err
 }
 
@@ -114,6 +117,7 @@ func (dpb *DownloadBar) Init(contentLength int64) {
 		// we don't need a bar visible
 		return
 	}
+
 	dpb.p, dpb.bar = initProgressBar(contentLength)
 }
 
@@ -125,6 +129,7 @@ func (dpb *DownloadBar) IncrBy(n int) {
 	if dpb.bar == nil {
 		return
 	}
+
 	dpb.bar.IncrBy(n)
 }
 
@@ -132,6 +137,7 @@ func (dpb *DownloadBar) Abort(drop bool) {
 	if dpb.bar == nil {
 		return
 	}
+
 	dpb.bar.Abort(drop)
 }
 
@@ -139,6 +145,7 @@ func (dpb *DownloadBar) Wait() {
 	if dpb.bar == nil {
 		return
 	}
+
 	dpb.p.Wait()
 }
 
@@ -155,6 +162,7 @@ func (upb *UploadBar) InitUpload(totalSize int64, r io.Reader) {
 		upb.r = r
 		return
 	}
+
 	upb.progress, upb.bar = initProgressBar(totalSize)
 	upb.r = upb.bar.ProxyReader(r)
 }
@@ -168,6 +176,7 @@ func (upb *UploadBar) Init(totalSize int64) {
 		// we don't need a bar visible
 		return
 	}
+
 	upb.progress, upb.bar = initProgressBar(totalSize)
 }
 
@@ -175,6 +184,7 @@ func (upb *UploadBar) IncrBy(n int) {
 	if upb.bar == nil {
 		return
 	}
+
 	upb.bar.IncrBy(n)
 }
 
@@ -182,6 +192,7 @@ func (upb *UploadBar) Terminate() {
 	if upb.bar == nil {
 		return
 	}
+
 	upb.bar.Abort(true)
 }
 

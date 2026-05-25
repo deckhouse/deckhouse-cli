@@ -106,5 +106,6 @@ func (l *ImageLayouts) AsList() []layout.Path {
 	for _, layout := range l.Security {
 		paths = append(paths, layout.Path())
 	}
+
 	return paths
 }

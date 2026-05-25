@@ -61,13 +61,16 @@ func EnsureMember(ctx context.Context, dyn dynamic.Interface,
 			if !opts.CreateGroupIfMissing {
 				return EnsureMemberResult{}, fmt.Errorf("group %q not found: %w", groupName, err)
 			}
+
 			newObj := buildGroupObject(groupName)
 			setSpecMembers(newObj, []any{
 				map[string]any{"kind": memberKindStr, "name": memberName},
 			})
+
 			if _, err := groupClient.Create(ctx, newObj, metav1.CreateOptions{}); err != nil {
 				return EnsureMemberResult{}, fmt.Errorf("creating group %q: %w", groupName, err)
 			}
+
 			return EnsureMemberResult{GroupCreated: true, Added: true}, nil
 		default:
 			// Any other Get failure (Forbidden, Timeout, transient API error)
@@ -79,6 +82,7 @@ func EnsureMember(ctx context.Context, dyn dynamic.Interface,
 	}
 
 	var result EnsureMemberResult
+
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		obj, err := groupClient.Get(ctx, groupName, metav1.GetOptions{})
 		if err != nil {
@@ -93,6 +97,7 @@ func EnsureMember(ctx context.Context, dyn dynamic.Interface,
 			if err != nil {
 				return fmt.Errorf("cycle detection failed: %w", err)
 			}
+
 			if hasCycle {
 				return fmt.Errorf("adding group %q to %q would create a cycle: %s",
 					memberName, groupName, strings.Join(cyclePath, " -> "))
@@ -105,6 +110,7 @@ func EnsureMember(ctx context.Context, dyn dynamic.Interface,
 			if !ok {
 				continue
 			}
+
 			if fmt.Sprint(member["kind"]) == memberKindStr && fmt.Sprint(member["name"]) == memberName {
 				result = EnsureMemberResult{AlreadyMember: true}
 				return nil
@@ -121,12 +127,15 @@ func EnsureMember(ctx context.Context, dyn dynamic.Interface,
 		if _, err := groupClient.Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
 			return err
 		}
+
 		result = EnsureMemberResult{Added: true}
+
 		return nil
 	})
 	if err != nil {
 		return EnsureMemberResult{}, err
 	}
+
 	return result, nil
 }
 
@@ -149,9 +158,11 @@ func detectCycleCtx(ctx context.Context, dyn dynamic.Interface, parentGroup, chi
 
 	groupKindStr := string(iamtypes.KindGroup)
 	adj := make(map[string][]string)
+
 	for i := range allGroups.Items {
 		g := &allGroups.Items[i]
 		gName := g.GetName()
+
 		members, _ := getGroupMembers(g)
 		for _, m := range members {
 			if fmt.Sprint(m["kind"]) == groupKindStr {
@@ -159,32 +170,43 @@ func detectCycleCtx(ctx context.Context, dyn dynamic.Interface, parentGroup, chi
 			}
 		}
 	}
+
 	adj[parentGroup] = append(adj[parentGroup], childGroup)
 
 	visited := make(map[string]bool)
-	var path []string
-	var dfs func(string) bool
+
+	var (
+		path []string
+		dfs  func(string) bool
+	)
+
 	dfs = func(node string) bool {
 		if node == parentGroup {
 			path = append(path, node)
 			return true
 		}
+
 		if visited[node] {
 			return false
 		}
+
 		visited[node] = true
+
 		path = append(path, node)
 		for _, next := range adj[node] {
 			if dfs(next) {
 				return true
 			}
 		}
+
 		path = path[:len(path)-1]
+
 		return false
 	}
 	if dfs(childGroup) {
 		return true, path, nil
 	}
+
 	return false, nil, nil
 }
 

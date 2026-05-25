@@ -30,6 +30,7 @@ type BackupOptions struct {
 
 func NewBackup(sink io.Writer, opts BackupOptions) *Backup {
 	w := sink
+
 	var gzipWriter *gzip.Writer
 	if opts.Compress {
 		gzipWriter = gzip.NewWriter(w)
@@ -54,6 +55,7 @@ func (b *Backup) PutObject(object runtime.Object) error {
 	metadataAccessor.SetManagedFields(nil)
 
 	kind := object.GetObjectKind().GroupVersionKind().Kind
+
 	name, namespace := metadataAccessor.GetName(), metadataAccessor.GetNamespace()
 	if namespace == "" {
 		namespace = "Cluster-Scoped"

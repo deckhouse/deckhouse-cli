@@ -33,10 +33,12 @@ func Fetch(ctx context.Context, ref string, opts *Options) (v1.Image, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse reference %q: %w", ref, err)
 	}
+
 	img, err := remote.Image(parsed, opts.remoteWithContext(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s: %w", ref, err)
 	}
+
 	return img, nil
 }
 
@@ -47,10 +49,12 @@ func FetchDescriptor(ctx context.Context, ref string, opts *Options) (*remote.De
 	if err != nil {
 		return nil, fmt.Errorf("parse reference %q: %w", ref, err)
 	}
+
 	desc, err := remote.Get(parsed, opts.remoteWithContext(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("fetch descriptor %s: %w", ref, err)
 	}
+
 	return desc, nil
 }
 
@@ -64,16 +68,21 @@ func (o *Options) remoteWithContext(ctx context.Context) []remote.Option {
 	if ctx == nil {
 		ctx = o.Context
 	}
+
 	out := make([]remote.Option, 0, len(o.Remote)+3)
+
 	out = append(out, o.Remote...)
 	if o.Keychain != nil {
 		out = append(out, remote.WithAuthFromKeychain(o.Keychain))
 	}
+
 	if o.Platform != nil {
 		out = append(out, remote.WithPlatform(*o.Platform))
 	}
+
 	if ctx != nil {
 		out = append(out, remote.WithContext(ctx))
 	}
+
 	return out
 }

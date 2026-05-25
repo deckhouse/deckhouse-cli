@@ -40,9 +40,11 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 	if err = parseAndValidateRegistryURLArg(args); err != nil {
 		return err
 	}
+
 	if err = validateRegistryCredentials(); err != nil {
 		return err
 	}
+
 	if err = validateImagesBundlePathArg(args); err != nil {
 		return err
 	}
@@ -52,6 +54,7 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 
 func validateImagesBundlePathArg(args []string) error {
 	ImagesBundlePath = filepath.Clean(args[0])
+
 	s, err := os.Stat(ImagesBundlePath)
 	if err != nil {
 		return fmt.Errorf("could not read images bundle: %w", err)
@@ -62,6 +65,7 @@ func validateImagesBundlePathArg(args []string) error {
 		if err != nil {
 			return fmt.Errorf("could not list files in bundle directory: %w", err)
 		}
+
 		dirEntries = lo.Filter(dirEntries, func(item os.DirEntry, _ int) bool {
 			ext := filepath.Ext(item.Name())
 			return ext == ".tar" || ext == ".chunk"
@@ -81,6 +85,7 @@ func validateImagesBundlePathArg(args []string) error {
 		if TempDir == "" {
 			TempDir = filepath.Join(filepath.Dir(ImagesBundlePath), ".tmp", mirror.TmpMirrorFolderName)
 		}
+
 		return nil
 	}
 
@@ -91,6 +96,7 @@ func validateRegistryCredentials() error {
 	if RegistryPassword != "" && RegistryUsername == "" {
 		return errors.New("registry username not specified")
 	}
+
 	return nil
 }
 
@@ -110,11 +116,14 @@ func parseAndValidateRegistryURLArg(args []string) error {
 	if err != nil {
 		return fmt.Errorf("Validate registry address: %w", err)
 	}
+
 	RegistryHost = registryURL.Host
 	RegistryPath = registryURL.Path
+
 	if RegistryHost == "" {
 		return errors.New("<registry> you provided contains no registry host. Please specify registry address correctly")
 	}
+
 	if len(RegistryPath) < 2 || len(RegistryPath) > 255 {
 		return errors.New("repository part must be between 2 and 255 characters in length. Please specify registry repo path correctly")
 	}

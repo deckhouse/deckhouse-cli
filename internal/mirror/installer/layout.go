@@ -57,6 +57,7 @@ type ImageLayouts struct {
 
 func NewImageLayouts(rootFolder string) (*ImageLayouts, error) {
 	layoutPath := filepath.Join(rootFolder, "installer")
+
 	image, err := regimage.NewImageLayout(layoutPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create image layout: %w", err)

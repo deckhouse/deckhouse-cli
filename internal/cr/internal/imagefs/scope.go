@@ -27,17 +27,21 @@ func FilterBySubpath(entries []Entry, subpath string) []Entry {
 	if subpath == "" {
 		return entries
 	}
+
 	sub := NormalizeScopePath(subpath)
 	if sub == "." {
 		return entries
 	}
+
 	prefix := sub + "/"
+
 	out := make([]Entry, 0, len(entries))
 	for _, e := range entries {
 		if e.Path == sub || strings.HasPrefix(e.Path, prefix) {
 			out = append(out, e)
 		}
 	}
+
 	return out
 }
 
@@ -50,5 +54,6 @@ func NormalizeScopePath(raw string) string {
 	if v == "" {
 		return "."
 	}
+
 	return strings.TrimPrefix(path.Clean(v), "./")
 }

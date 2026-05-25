@@ -39,6 +39,7 @@ func isNetworkError(err error) bool {
 	if err == nil {
 		return false
 	}
+
 	errStr := err.Error()
 	if strings.Contains(errStr, "EOF") ||
 		strings.Contains(errStr, "connection refused") ||
@@ -58,6 +59,7 @@ func isNetworkError(err error) bool {
 		strings.Contains(errStr, "connection reset by peer") {
 		return true
 	}
+
 	return false
 }
 
@@ -99,28 +101,35 @@ func RunWatch() error {
 			if err != nil {
 				// Clear footer before warning
 				clearFooter(footerLines)
+
 				if isNetworkError(err) || apiDown {
 					if !apiDown {
 						fmt.Printf(
 							"[%s] ⏳ API Server is temporarily unavailable (restarting). Waiting!\n",
 							time.Now().Format("15:04:05"),
 						)
+
 						apiDown = true
 					}
+
 					footerLines = 0
+
 					if lastPhaseMsg != "" {
 						termWidth := getTermWidth()
 						if termWidth <= 0 {
 							termWidth = 80
 						}
+
 						footerLines = printFooter(lastPhaseMsg, termWidth)
 					}
 				} else {
 					msg := fmt.Sprintf("⚠️ Error finding active migration: %v", err)
+
 					termWidth := getTermWidth()
 					if termWidth <= 0 {
 						termWidth = 80
 					}
+
 					footerLines = printFooter(msg, termWidth)
 				}
 
@@ -133,6 +142,7 @@ func RunWatch() error {
 
 			if apiDown {
 				fmt.Printf("[%s] ⚡️ API Server is back online\n", time.Now().Format("15:04:05"))
+
 				apiDown = false
 			}
 
@@ -143,6 +153,7 @@ func RunWatch() error {
 				} else {
 					fmt.Println("🔎 No active migration found")
 				}
+
 				return nil
 			}
 
@@ -170,6 +181,7 @@ func RunWatch() error {
 					c.Type, c.Status, c.Reason, c.Message)
 
 				var icon string
+
 				shouldPrint := false
 				isProgress := false
 
@@ -204,6 +216,7 @@ func RunWatch() error {
 								c.Message,
 								stepDuration.Round(time.Second))
 						}
+
 						printedEvents[eventKey] = true
 					}
 
@@ -219,6 +232,7 @@ func RunWatch() error {
 				failKey := fmt.Sprintf("fail|%s|%s", f.Node, f.Reason)
 				if !printedEvents[failKey] {
 					fmt.Printf("⚠️ Node %s failed: %s\n", f.Node, f.Reason)
+
 					printedEvents[failKey] = true
 				}
 			}
@@ -230,8 +244,10 @@ func RunWatch() error {
 					fmt.Printf("🎉 CNI switch to '%s' completed successfully! (Total time: %s)\n",
 						activeMigration.Spec.TargetCNI,
 						totalDuration.Round(time.Second))
+
 					return nil
 				}
+
 				if cond.Status == metav1.ConditionFalse && cond.Reason == "Error" {
 					return ErrMigrationFailed
 				}
@@ -246,6 +262,7 @@ func RunWatch() error {
 					phaseMsg += fmt.Sprintf(" (Failed Nodes: %d)", count)
 				}
 			}
+
 			lastPhaseMsg = phaseMsg
 
 			if phaseMsg != "" {
@@ -253,6 +270,7 @@ func RunWatch() error {
 				if termWidth <= 0 {
 					termWidth = 80
 				}
+
 				lines := printFooter(phaseMsg, termWidth)
 				footerLines += lines
 			}
@@ -271,6 +289,7 @@ func getTermWidth() int {
 	if err != nil {
 		return 80
 	}
+
 	return width
 }
 

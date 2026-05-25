@@ -130,6 +130,7 @@ func (l *ImageLayouts) AsList() []layout.Path {
 	layoutPathType := reflect.TypeOf(layout.Path(""))
 
 	paths := make([]layout.Path, 0)
+
 	for i := 0; i < layoutsValue.NumField(); i++ {
 		if layoutsValue.Field(i).Type() != layoutPathType {
 			continue

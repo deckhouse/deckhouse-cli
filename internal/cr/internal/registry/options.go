@@ -73,7 +73,9 @@ func (o *Options) WithPlatform(p *v1.Platform) *Options {
 	if p == nil {
 		return o
 	}
+
 	o.Platform = p
+
 	return o
 }
 

@@ -50,6 +50,7 @@ func Bundle(
 	if bundleChunkSize > 0 {
 		return bundleChunked(ctx, bundleDir, pkgName, bundleChunkSize, pack)
 	}
+
 	return bundleSingle(ctx, bundleDir, pkgName, pack)
 }
 
@@ -65,6 +66,7 @@ func bundleChunked(
 		cw.Cleanup()
 		return fmt.Errorf("pack %s: %w", pkgName, err)
 	}
+
 	if err := cw.Close(); err != nil {
 		cw.Cleanup()
 		return fmt.Errorf("close %s: %w", pkgName, err)
@@ -75,9 +77,11 @@ func bundleChunked(
 		cw.Cleanup()
 		return cerr
 	}
+
 	if err := cw.Finalize(); err != nil {
 		return fmt.Errorf("finalize %s: %w", pkgName, err)
 	}
+
 	return nil
 }
 
@@ -100,19 +104,24 @@ func bundleSingle(
 	if err = pack(f); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
+
 		return fmt.Errorf("pack %s: %w", pkgName, err)
 	}
+
 	if err = f.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close %s: %w", pkgName, err)
 	}
+
 	if cerr := ctx.Err(); cerr != nil {
 		_ = os.Remove(tmpPath)
 		return cerr
 	}
+
 	if err = os.Rename(tmpPath, finalPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename %s: %w", pkgName, err)
 	}
+
 	return nil
 }

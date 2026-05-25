@@ -55,6 +55,7 @@ func newAddMemberCommand() *cobra.Command {
 	}
 
 	cmd.Flags().Bool("create-group", false, "Create the target group if it does not exist")
+
 	return cmd
 }
 
@@ -63,6 +64,7 @@ func runAddMember(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
 	createGroup, _ := cmd.Flags().GetBool("create-group")
 
 	memberKind, err := normalizeMemberKind(kindStr)
@@ -86,6 +88,7 @@ func runAddMember(cmd *cobra.Command, args []string) error {
 		if !createGroup && apierrors.IsNotFound(err) {
 			return fmt.Errorf("%w (use --create-group to create it)", err)
 		}
+
 		return err
 	}
 
@@ -98,6 +101,7 @@ func runAddMember(cmd *cobra.Command, args []string) error {
 	case res.Added:
 		cmd.Printf("Added %s %q to group %q\n", strings.ToLower(string(memberKind)), memberName, groupName)
 	}
+
 	return nil
 }
 

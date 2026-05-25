@@ -46,6 +46,7 @@ func cmdExamples() string {
 		fmt.Sprintf(`  ... -n target-namespace %s my-file-volume /mydir/testdir/`, cmdName),
 		fmt.Sprintf(`  ... -n target-namespace %s my-block-volume`, cmdName),
 	}
+
 	return strings.Join(resp, "\n")
 }
 
@@ -101,11 +102,13 @@ func downloadFunc(
 	}
 
 	var req *http.Request
+
 	switch volumeMode {
 	case "Filesystem":
 		if srcPath == "" || srcPath[len(srcPath)-1:] != "/" {
 			return fmt.Errorf("invalid source path: '%s'", srcPath)
 		}
+
 		dataURL, err := neturl.JoinPath(url, srcPath)
 		if err != nil {
 			return err
@@ -128,16 +131,19 @@ func downloadFunc(
 
 	if resp.StatusCode != http.StatusOK {
 		const maxLen = 4096
+
 		msg, err := io.ReadAll(io.LimitReader(resp.Body, maxLen))
 		if err != nil {
 			return fmt.Errorf("Backend response \"%s\"", resp.Status)
 		}
+
 		return fmt.Errorf("Backend response \"%s\" Msg: %s", resp.Status, string(msg))
 	}
 
 	switch volumeMode {
 	case "Block":
 		body := ""
+
 		if contLen := resp.Header.Get("Content-Length"); contLen != "" {
 			// Convert raw bytes value to human-readable size using k8s quantity library.
 			// We deliberately ignore conversion errors and fallback to raw bytes if any.
@@ -150,6 +156,7 @@ func downloadFunc(
 			// Ensure the size information is printed on a dedicated line for better readability.
 			body += "\n"
 		}
+
 		return foo(strings.NewReader(body))
 	case "Filesystem":
 		return foo(resp.Body)
@@ -174,6 +181,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	flags := cmd.PersistentFlags()
 	safeClient.SupportNoAuth = false
+
 	sClient, err := safeClient.NewSafeClient(flags)
 	if err != nil {
 		return err
@@ -206,9 +214,9 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		if err == io.EOF {
 			err = nil
 		}
+
 		return err
 	})
-
 	if err != nil {
 		return err
 	}

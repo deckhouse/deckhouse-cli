@@ -65,6 +65,7 @@ func NewService(c client.Client, edition pkg.Edition, logger *log.Logger) *Servi
 	} else {
 		base = c.WithSegment(edition.String())
 	}
+
 	s.editionBase = base
 
 	s.modulesService = NewModulesService(base.WithSegment(moduleSegment), logger.Named("modules"))

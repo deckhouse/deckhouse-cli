@@ -105,11 +105,13 @@ func (l *ModulesImageLayouts) Module(moduleName string) *ImageLayouts {
 // AsList returns a list of layout.Path's from all modules. Undefined path's are not included in the list.
 func (l *ModulesImageLayouts) AsList() []layout.Path {
 	var paths []layout.Path
+
 	for _, imgLayout := range l.list {
 		if imgLayout != nil {
 			paths = append(paths, imgLayout.AsList()...)
 		}
 	}
+
 	return paths
 }
 
@@ -165,12 +167,14 @@ func (l *ImageLayouts) GetOrCreateExtraLayout(extraName string) (*regimage.Image
 
 	// Create layout at modules/<module-name>/extra/<extra-name>/
 	layoutPath := filepath.Join(l.workingDir, "extra", extraName)
+
 	layout, err := regimage.NewImageLayout(layoutPath)
 	if err != nil {
 		return nil, fmt.Errorf("create extra image layout for %s: %w", extraName, err)
 	}
 
 	l.ExtraImages[extraName] = layout
+
 	return layout, nil
 }
 
@@ -180,6 +184,7 @@ func (l *ImageLayouts) AsList() []layout.Path {
 	if l.Modules != nil {
 		paths = append(paths, l.Modules.Path())
 	}
+
 	if l.ModulesReleaseChannels != nil {
 		paths = append(paths, l.ModulesReleaseChannels.Path())
 	}
@@ -189,6 +194,7 @@ func (l *ImageLayouts) AsList() []layout.Path {
 			paths = append(paths, extraLayout.Path())
 		}
 	}
+
 	return paths
 }
 
@@ -201,13 +207,16 @@ func (l *ImageLayouts) HasImages() bool {
 		if err != nil {
 			continue
 		}
+
 		manifest, err := index.IndexManifest()
 		if err != nil {
 			continue
 		}
+
 		if len(manifest.Manifests) > 0 {
 			return true
 		}
 	}
+
 	return false
 }

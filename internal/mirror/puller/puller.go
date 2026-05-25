@@ -65,6 +65,7 @@ func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) erro
 	ps.userLogger.InfoLn("Beginning to pull " + config.Name)
 
 	ps.userLogger.InfoLn("Pull " + config.Name + " meta")
+
 	for image, meta := range config.ImageSet {
 		// Bail out fast on cancellation. Without this check, a Ctrl+C in the
 		// middle of a large pull would cause every subsequent GetDigest call
@@ -110,6 +111,7 @@ func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) erro
 			if isContextErr(err) {
 				return err
 			}
+
 			if config.AllowMissingTags {
 				continue
 			}
@@ -189,6 +191,7 @@ func (ps *PullerService) PullImageSet(
 			if imageMeta != nil {
 				ref = imageMeta.TagReference
 			}
+
 			return fmt.Errorf("pull image %q: %w", ref, err)
 		}
 

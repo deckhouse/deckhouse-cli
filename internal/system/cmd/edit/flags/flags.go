@@ -35,5 +35,6 @@ func defaultEditor() string {
 	if ed == "" {
 		ed = "vi"
 	}
+
 	return ed
 }

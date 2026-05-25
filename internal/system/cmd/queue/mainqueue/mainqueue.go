@@ -43,6 +43,7 @@ func NewCommand() *cobra.Command {
 		RunE:          mainQueue,
 	}
 	flags.AddFlags(listCmd.Flags())
+
 	return listCmd
 }
 

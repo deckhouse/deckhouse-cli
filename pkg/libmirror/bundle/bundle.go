@@ -32,6 +32,7 @@ import (
 
 func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName string) error {
 	var err error
+
 	tarReader := tar.NewReader(source)
 
 	// support old behavior when inside "module-<name>.tar" isn't have modules/<name> folder
@@ -62,22 +63,27 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 		if err = os.MkdirAll(filepath.Dir(writePath), 0o755); err != nil {
 			return fmt.Errorf("setup dir tree: %w", err)
 		}
+
 		bundleFile, err := os.OpenFile(writePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 		if err != nil {
 			return fmt.Errorf("create file: %w", err)
 		}
+
 		if _, err = io.Copy(bundleFile, tarReader); err != nil {
 			return fmt.Errorf("write %q: %w", writePath, err)
 		}
+
 		if err = bundleFile.Sync(); err != nil {
 			return fmt.Errorf("write %q: %w", writePath, err)
 		}
+
 		if err = bundleFile.Close(); err != nil {
 			return fmt.Errorf("write %q: %w", writePath, err)
 		}
 	}
 
 	from := filepath.Join(targetPath, "tmp")
+
 	to := targetPath
 	if isLegacyModule {
 		to = filepath.Join(targetPath, "modules", moduleName)
@@ -90,6 +96,7 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 		if err != nil {
 			return fmt.Errorf("move module from tmp: %w", err)
 		}
+
 		return nil
 	}
 
@@ -129,13 +136,16 @@ func PackWithPrefix(ctx context.Context, sourcePath string, prefix string, sink 
 
 func packFuncWithPrefix(ctx context.Context, pathPrefix string, tarPrefix string, writer *tar.Writer) filepath.WalkFunc {
 	unixEpochStart := time.Unix(0, 0)
+
 	return func(path string, info fs.FileInfo, err error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+
 		if err != nil {
 			return err
 		}
+
 		if path == pathPrefix || info.IsDir() {
 			return nil
 		}
@@ -150,6 +160,7 @@ func packFuncWithPrefix(ctx context.Context, pathPrefix string, tarPrefix string
 		if tarPrefix != "" {
 			pathInTar = tarPrefix + "/" + pathInTar
 		}
+
 		err = writer.WriteHeader(&tar.Header{
 			Typeflag: tar.TypeReg,
 			Format:   tar.FormatGNU,

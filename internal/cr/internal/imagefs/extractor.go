@@ -51,29 +51,36 @@ func ExtractMerged(ctx context.Context, img v1.Image, destDir string) (ExtractSt
 	if err != nil {
 		return ExtractStats{}, fmt.Errorf("get layers: %w", err)
 	}
+
 	absDest, err := filepath.Abs(destDir)
 	if err != nil {
 		return ExtractStats{}, fmt.Errorf("resolve dest: %w", err)
 	}
+
 	if err := os.MkdirAll(absDest, 0o755); err != nil {
 		return ExtractStats{}, fmt.Errorf("create dest: %w", err)
 	}
 
 	var stats ExtractStats
+
 	for i, layer := range layers {
 		if err := ctx.Err(); err != nil {
 			return stats, err
 		}
+
 		rc, err := layer.Uncompressed()
 		if err != nil {
 			return stats, fmt.Errorf("layer %d: uncompress: %w", i+1, err)
 		}
+
 		err = extractTarTo(ctx, rc, absDest, &stats)
 		_ = rc.Close()
+
 		if err != nil {
 			return stats, fmt.Errorf("layer %d: %w", i+1, err)
 		}
 	}
+
 	return stats, nil
 }
 
@@ -82,6 +89,7 @@ func extractTarTo(ctx context.Context, rc io.Reader, destAbs string, stats *Extr
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+
 		name := normalizePath(hdr.Name)
 		if name == "." {
 			return nil
@@ -101,15 +109,18 @@ func extractTarTo(ctx context.Context, rc io.Reader, destAbs string, stats *Extr
 			if err := ensureNoSymlinkComponents(destAbs, absPath, true); err != nil {
 				return err
 			}
+
 			if err := os.MkdirAll(absPath, fs.FileMode(hdr.Mode&0o777)|0o700); err != nil {
 				return fmt.Errorf("mkdir %s: %w", absPath, err)
 			}
+
 			stats.Dirs++
 
 		case tar.TypeReg:
 			if err := ensureNoSymlinkComponents(destAbs, absPath, true); err != nil {
 				return err
 			}
+
 			if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
 				return fmt.Errorf("mkdir parent %s: %w", absPath, err)
 			}
@@ -120,18 +131,23 @@ func extractTarTo(ctx context.Context, rc io.Reader, destAbs string, stats *Extr
 			if err := clearStalePath(absPath); err != nil {
 				return err
 			}
+
 			f, err := os.OpenFile(absPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fs.FileMode(hdr.Mode&0o777))
 			if err != nil {
 				return fmt.Errorf("create %s: %w", absPath, err)
 			}
+
 			n, err := io.Copy(f, r)
 			closeErr := f.Close()
+
 			if err != nil {
 				return fmt.Errorf("write %s: %w", absPath, err)
 			}
+
 			if closeErr != nil {
 				return fmt.Errorf("close %s: %w", absPath, closeErr)
 			}
+
 			stats.Files++
 			stats.TotalSize += n
 
@@ -139,43 +155,55 @@ func extractTarTo(ctx context.Context, rc io.Reader, destAbs string, stats *Extr
 			if err := ensureNoSymlinkComponents(destAbs, absPath, true); err != nil {
 				return err
 			}
+
 			linkname, err := resolveSymlinkTarget(destAbs, absPath, hdr.Linkname)
 			if err != nil {
 				return err
 			}
+
 			if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
 				return fmt.Errorf("mkdir parent %s: %w", absPath, err)
 			}
+
 			if err := clearStalePath(absPath); err != nil {
 				return err
 			}
+
 			if err := os.Symlink(linkname, absPath); err != nil {
 				return fmt.Errorf("symlink %s -> %s: %w", absPath, linkname, err)
 			}
+
 			stats.Symlinks++
 
 		case tar.TypeLink:
 			if err := ensureNoSymlinkComponents(destAbs, absPath, true); err != nil {
 				return err
 			}
+
 			if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
 				return fmt.Errorf("mkdir parent %s: %w", absPath, err)
 			}
+
 			linkTarget, err := safeJoin(destAbs, normalizePath(hdr.Linkname))
 			if err != nil {
 				return err
 			}
+
 			if err := ensureNoSymlinkComponents(destAbs, linkTarget, false); err != nil {
 				return err
 			}
+
 			if err := clearStalePath(absPath); err != nil {
 				return err
 			}
+
 			if err := os.Link(linkTarget, absPath); err != nil {
 				return fmt.Errorf("hardlink %s -> %s: %w", absPath, linkTarget, err)
 			}
+
 			stats.Hardlinks++
 		}
+
 		return nil
 	})
 }
@@ -185,17 +213,22 @@ func applyWhiteout(destAbs, target string, opaque bool) error {
 	if opaque && t == "." {
 		return clearDirContents(destAbs)
 	}
+
 	absPath, err := safeJoin(destAbs, t)
 	if err != nil {
 		return err
 	}
+
 	if err := ensureNoSymlinkComponents(destAbs, absPath, false); err != nil {
 		return err
 	}
+
 	if opaque {
 		return clearDirContents(absPath)
 	}
+
 	_ = os.RemoveAll(absPath)
+
 	return nil
 }
 
@@ -213,6 +246,7 @@ func clearStalePath(path string) error {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
+
 		return fmt.Errorf("lstat %s: %w", path, err)
 	}
 	// Lstat on a symlink does NOT set IsDir even when the target is a
@@ -221,11 +255,14 @@ func clearStalePath(path string) error {
 		if err := os.RemoveAll(path); err != nil {
 			return fmt.Errorf("remove stale dir %s: %w", path, err)
 		}
+
 		return nil
 	}
+
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("remove stale entry %s: %w", path, err)
 	}
+
 	return nil
 }
 
@@ -240,15 +277,19 @@ func clearDirContents(dir string) error {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
+
 		return fmt.Errorf("read whiteout dir %s: %w", dir, err)
 	}
+
 	var errs []error
+
 	for _, e := range entries {
 		entryPath := filepath.Join(dir, e.Name())
 		if rerr := os.RemoveAll(entryPath); rerr != nil {
 			errs = append(errs, fmt.Errorf("remove %s: %w", entryPath, rerr))
 		}
 	}
+
 	return errors.Join(errs...)
 }
 
@@ -256,10 +297,12 @@ func safeJoin(base, rel string) (string, error) {
 	if slices.Contains(strings.Split(filepath.ToSlash(rel), "/"), "..") {
 		return "", fmt.Errorf("unsafe path (contains ..): %q", rel)
 	}
+
 	joined := filepath.Clean(filepath.Join(base, filepath.FromSlash(rel)))
 	if !withinBase(base, joined) {
 		return "", fmt.Errorf("unsafe path (escapes destination): %q", rel)
 	}
+
 	return joined, nil
 }
 
@@ -271,6 +314,7 @@ func withinBase(base, path string) bool {
 	if err != nil {
 		return false
 	}
+
 	return rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "..")
 }
 
@@ -278,31 +322,40 @@ func ensureNoSymlinkComponents(base, absPath string, allowFinalMissing bool) err
 	if !withinBase(base, absPath) {
 		return fmt.Errorf("unsafe path (escapes destination): %q", absPath)
 	}
+
 	rel, err := filepath.Rel(base, absPath)
 	if err != nil {
 		return fmt.Errorf("resolve relative path: %w", err)
 	}
+
 	if rel == "." {
 		return nil
 	}
+
 	cur := base
+
 	parts := strings.Split(rel, string(filepath.Separator))
 	for i, part := range parts {
 		cur = filepath.Join(cur, part)
+
 		info, err := os.Lstat(cur)
 		if err != nil {
 			if os.IsNotExist(err) {
 				if allowFinalMissing && i == len(parts)-1 {
 					return nil
 				}
+
 				continue
 			}
+
 			return fmt.Errorf("lstat %s: %w", cur, err)
 		}
+
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("unsafe path (symlink component): %q", cur)
 		}
 	}
+
 	return nil
 }
 
@@ -317,6 +370,7 @@ func resolveSymlinkTarget(destAbs, linkPathAbs, target string) (string, error) {
 	if target == "" {
 		return "", fmt.Errorf("unsafe symlink target (empty)")
 	}
+
 	if err := ensureNoSymlinkComponents(destAbs, filepath.Dir(linkPathAbs), false); err != nil {
 		return "", err
 	}
@@ -329,10 +383,12 @@ func resolveSymlinkTarget(destAbs, linkPathAbs, target string) (string, error) {
 		if !withinBase(destAbs, rooted) {
 			return "", fmt.Errorf("unsafe symlink target (escapes destination): %q", target)
 		}
+
 		rel, err := filepath.Rel(filepath.Dir(linkPathAbs), rooted)
 		if err != nil {
 			return "", fmt.Errorf("resolve symlink target %q: %w", target, err)
 		}
+
 		return rel, nil
 	}
 
@@ -340,5 +396,6 @@ func resolveSymlinkTarget(destAbs, linkPathAbs, target string) (string, error) {
 	if !withinBase(destAbs, resolved) {
 		return "", fmt.Errorf("unsafe symlink target (escapes destination): %q", target)
 	}
+
 	return target, nil
 }

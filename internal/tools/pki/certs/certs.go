@@ -78,9 +78,11 @@ func BuildFullScanReport(certsDir, kubeconfigDir string) (*Report, error) {
 	if err != nil && !hasExpirations {
 		return nil, fmt.Errorf("no control-plane certificates or kubeconfig client certificates found: %w", err)
 	}
+
 	if err != nil {
 		return nil, err
 	}
+
 	if !hasExpirations {
 		return nil, fmt.Errorf("no control-plane certificates or kubeconfig client certificates found in %q and %q", certsDir, kubeconfigDir)
 	}
@@ -146,6 +148,7 @@ func onlyNotExistErrors(err error) bool {
 				return false
 			}
 		}
+
 		return true
 	}
 
@@ -179,6 +182,7 @@ func BuildSingleFileReport(path string) (*Report, error) {
 				Authority: pkiDisplayName(string(certExp.Authority)),
 			}}
 		}
+
 		return report, nil
 	}
 
@@ -196,6 +200,7 @@ func RenderReport(w io.Writer, report *Report) {
 	if len(report.Certs) > 0 {
 		tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
 		fmt.Fprintln(tw, "CERTIFICATE\tEXPIRES\tRESIDUAL TIME\tCERTIFICATE AUTHORITY")
+
 		for _, c := range report.Certs {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
 				c.Name,
@@ -204,6 +209,7 @@ func RenderReport(w io.Writer, report *Report) {
 				c.Authority,
 			)
 		}
+
 		tw.Flush()
 	}
 
@@ -211,8 +217,10 @@ func RenderReport(w io.Writer, report *Report) {
 		if len(report.Certs) > 0 {
 			fmt.Fprintln(w)
 		}
+
 		tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
 		fmt.Fprintln(tw, "CERTIFICATE AUTHORITY\tEXPIRES\tRESIDUAL TIME")
+
 		for _, ca := range report.CAs {
 			fmt.Fprintf(tw, "%s\t%s\t%s\n",
 				ca.Name,
@@ -220,6 +228,7 @@ func RenderReport(w io.Writer, report *Report) {
 				residualTime(ca.Expires, now),
 			)
 		}
+
 		tw.Flush()
 	}
 }
@@ -232,15 +241,20 @@ func residualTime(notAfter, now time.Time) string {
 	if !notAfter.After(now) {
 		return "expired"
 	}
+
 	d := notAfter.Sub(now)
+
 	totalDays := int(d.Hours() / 24)
 	if totalDays < 1 {
 		return "< 1 day"
 	}
+
 	if totalDays < 365 {
 		return fmt.Sprintf("%dd", totalDays)
 	}
+
 	years := totalDays / 365
+
 	return fmt.Sprintf("%dy", years)
 }
 

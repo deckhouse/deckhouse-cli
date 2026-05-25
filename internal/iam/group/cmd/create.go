@@ -70,6 +70,7 @@ func newCreateCommand() *cobra.Command {
 
 	cmd.Flags().Bool("dry-run", false, "Print the resource that would be created without applying")
 	utilk8s.AddOutputFlag(cmd, "name", "name", "yaml", "json")
+
 	return cmd
 }
 

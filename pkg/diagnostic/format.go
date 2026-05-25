@@ -43,6 +43,7 @@ func (t textStyler) style(text string, ansiCodes ...string) string {
 	if !t.enabled {
 		return text
 	}
+
 	return strings.Join(ansiCodes, "") + text + ansiReset
 }
 
@@ -58,6 +59,7 @@ func newTextStyler() textStyler {
 	if os.Getenv("NO_COLOR") != "" {
 		return textStyler{}
 	}
+
 	return textStyler{
 		enabled: os.Getenv("FORCE_COLOR") != "" || term.IsTerminal(int(os.Stderr.Fd())),
 	}
@@ -77,6 +79,7 @@ func (e *HelpfulError) Format() string {
 
 	var b strings.Builder
 	b.WriteString("\n" + t.danger("error") + t.header(": "+e.Category) + "\n")
+
 	if e.OriginalErr != nil {
 		chain := unwrapChain(e.OriginalErr)
 		for i, msg := range chain {
@@ -84,16 +87,19 @@ func (e *HelpfulError) Format() string {
 			b.WriteString("  " + indent + t.hint("╰─▶ ") + msg + "\n")
 		}
 	}
+
 	b.WriteString("\n")
 
 	for _, s := range e.Suggestions {
 		b.WriteString("  " + t.warn("* "+s.Cause) + "\n")
+
 		for _, sol := range s.Solutions {
 			b.WriteString("    " + t.hint("-> ") + sol + "\n")
 		}
 	}
 
 	b.WriteString("\n")
+
 	return b.String()
 }
 
@@ -111,6 +117,7 @@ func unwrapChain(err error) []string {
 
 		full := err.Error()
 		innerText := inner.Error()
+
 		context := strings.TrimSuffix(full, ": "+innerText)
 		if context == full {
 			// Can't extract prefix cleanly - use full message and stop

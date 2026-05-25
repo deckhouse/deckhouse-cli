@@ -91,6 +91,7 @@ func (v *RemoteRegistryAccessValidator) ValidateReadAccessForImage(ctx context.C
 		if errmatch.IsImageNotFound(err) {
 			return ErrImageUnavailable
 		}
+
 		return err
 	}
 
@@ -116,6 +117,7 @@ func (v *RemoteRegistryAccessValidator) ValidateWriteAccessForRepo(ctx context.C
 	if err = remote.Write(ref, syntheticImage, remoteOpts...); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -127,6 +129,7 @@ func (v *RemoteRegistryAccessValidator) useOptions(opts []Option) *options {
 	for _, opt := range opts {
 		opt(o)
 	}
+
 	return o
 }
 

@@ -24,16 +24,20 @@ func getGroupMembers(obj *unstructured.Unstructured) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if !found {
 		return nil, nil
 	}
+
 	result := make([]map[string]any, 0, len(raw))
 	for _, item := range raw {
 		m, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
+
 		result = append(result, m)
 	}
+
 	return result, nil
 }

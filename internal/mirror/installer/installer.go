@@ -118,9 +118,11 @@ func (svc *Service) PullInstaller(ctx context.Context) error {
 
 	if svc.options.DryRun {
 		svc.userLogger.InfoLn("[dry-run] Installer images that would be pulled:")
+
 		for ref := range svc.downloadList.Installer {
 			svc.userLogger.InfoLn("  " + ref)
 		}
+
 		return nil
 	}
 

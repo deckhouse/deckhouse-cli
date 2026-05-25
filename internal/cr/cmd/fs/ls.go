@@ -27,6 +27,7 @@ import (
 
 func newLsCmd(opts *registry.Options) *cobra.Command {
 	var longForm bool
+
 	cmd := &cobra.Command{
 		Use:   "ls IMAGE [PATH]",
 		Short: "List files inside a container image",
@@ -39,6 +40,7 @@ stripped, so "/etc" and "etc" are equivalent. Output paths are tar-relative
 		ValidArgsFunction: completion.ImageThenInImagePath(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref := args[0]
+
 			subpath := ""
 			if len(args) == 2 {
 				subpath = args[1]
@@ -53,11 +55,13 @@ stripped, so "/etc" and "etc" are equivalent. Output paths are tar-relative
 			if err != nil {
 				return err
 			}
+
 			entries = imagefs.FilterBySubpath(entries, subpath)
 
 			return output.WriteEntriesText(cmd.OutOrStdout(), entries, longForm)
 		},
 	}
 	cmd.Flags().BoolVarP(&longForm, "long", "l", false, "Long format with mode and size")
+
 	return cmd
 }

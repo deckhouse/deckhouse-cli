@@ -62,17 +62,21 @@ func NewCommand() *cobra.Command {
 
 func runStatus(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
+
 	restConfig, kubeCl, err := setupK8sClients(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to setup Kubernetes client: %w", err)
 	}
+
 	color.Cyan("\n┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓")
 	color.Cyan("┃      Cluster Status Report     ┃")
 	color.Cyan("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n")
+
 	results := executeAll(ctx, restConfig, kubeCl)
 	for _, result := range results {
 		fmt.Println(result.Output)
 	}
+
 	return nil
 }
 

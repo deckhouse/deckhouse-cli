@@ -38,6 +38,7 @@ func BackupConfigMaps(
 				Kind:       "ConfigMap",
 				APIVersion: corev1.SchemeGroupVersion.String(),
 			}
+
 			return &item
 		})
 	})

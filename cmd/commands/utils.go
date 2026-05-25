@@ -29,5 +29,6 @@ func ReplaceCommandName(from, to string, c *cobra.Command) *cobra.Command {
 	for _, sub := range c.Commands() {
 		ReplaceCommandName(from, to, sub)
 	}
+
 	return c
 }

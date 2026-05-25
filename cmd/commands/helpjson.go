@@ -87,6 +87,7 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 
 	if cmd.Use == "d8" {
 		flagSet := flag.NewFlagSet("globalFlags", flag.ExitOnError)
+
 		plainTextFlags := []string{
 			"version:v:version for d8",
 			"help:h:help for d8",
@@ -104,6 +105,7 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	}
 
 	var subcommands []CommandInfo
+
 	for _, subCmd := range cmd.Commands() {
 		if !subCmd.Hidden {
 			subcommands = append(subcommands, extractCommands(subCmd))

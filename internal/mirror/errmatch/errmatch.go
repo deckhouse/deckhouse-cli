@@ -40,6 +40,7 @@ func IsImageNotFound(err error) bool {
 	// String fallback: HEAD responses have no body per HTTP spec, so transport.Error.Errors
 	// is empty. Also covers registries that return plain text instead of structured JSON.
 	errMsg := err.Error()
+
 	return strings.Contains(errMsg, "MANIFEST_UNKNOWN") || strings.Contains(errMsg, "404 Not Found")
 }
 

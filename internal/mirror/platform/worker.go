@@ -55,6 +55,7 @@ func (cw *ConcurrentWorker[T, R]) Do(inputs []T, handler func(input T) (R, error
 
 	for _, input := range inputs {
 		semaphore <- struct{}{}
+
 		wg.Add(1)
 
 		go func(input T) {

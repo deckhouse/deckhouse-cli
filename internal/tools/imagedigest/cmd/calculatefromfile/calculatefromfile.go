@@ -35,6 +35,7 @@ func NewCommand() *cobra.Command {
 			if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
 				return err
 			}
+
 			return nil
 		},
 		RunE: runCalculateFromFile,
@@ -47,12 +48,14 @@ func runCalculateFromFile(cmd *cobra.Command, args []string) error {
 	filename := args[0]
 
 	reader := os.Stdin
+
 	if filename != "-" {
 		file, err := os.Open(filename)
 		if err != nil {
 			return fmt.Errorf("failed to open file: %w", err)
 		}
 		defer file.Close()
+
 		reader = file
 	}
 

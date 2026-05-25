@@ -38,8 +38,10 @@ func Whiteout(name string) (string, bool) {
 		if dir == "." || dir == "/" {
 			return ".", true
 		}
+
 		return strings.TrimPrefix(dir, "./"), true
 	}
+
 	if target, ok := strings.CutPrefix(base, whiteoutPrefix); ok {
 		// Reject malformed markers whose suffix is empty (".wh.") or just
 		// a dot (".wh..") - both would resolve to the directory itself
@@ -48,10 +50,13 @@ func Whiteout(name string) (string, bool) {
 		if target == "" || target == "." {
 			return "", false
 		}
+
 		if dir == "." || dir == "/" {
 			return target, false
 		}
+
 		return path.Join(strings.TrimPrefix(dir, "./"), target), false
 	}
+
 	return "", false
 }

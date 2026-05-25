@@ -71,6 +71,7 @@ func (c *FileWriter) Write(p []byte) (int, error) {
 
 	buf := bytes.NewBuffer(p)
 	bytesWritten := 0
+
 	for {
 		for c.chunkSize-chunkStat.Size() > 0 {
 			s := buf.Next(512 * 1024)
@@ -80,6 +81,7 @@ func (c *FileWriter) Write(p []byte) (int, error) {
 
 			written, err := c.activeChunk.Write(s)
 			bytesWritten += written
+
 			if err != nil {
 				return 0, fmt.Errorf("Write to chunk: %w", err)
 			}
@@ -93,6 +95,7 @@ func (c *FileWriter) Write(p []byte) (int, error) {
 		if err = c.swapActiveChunk(); err != nil {
 			return 0, fmt.Errorf("Swap active chunk: %w", err)
 		}
+
 		chunkStat, err = c.activeChunk.Stat()
 		if err != nil {
 			return 0, fmt.Errorf("Read chunk size: %w", err)
@@ -115,14 +118,18 @@ func (c *FileWriter) Close() error {
 // called only after Close and only on a successful pack.
 func (c *FileWriter) Finalize() error {
 	var errs []error
+
 	for _, tmpRelPath := range c.writtenChunks {
 		tmp := filepath.Join(c.workingDir, tmpRelPath)
+
 		final := filepath.Join(c.workingDir, finalChunkName(tmpRelPath))
 		if err := os.Rename(tmp, final); err != nil {
 			errs = append(errs, fmt.Errorf("rename %s -> %s: %w", tmp, final, err))
 		}
 	}
+
 	c.writtenChunks = nil
+
 	return errors.Join(errs...)
 }
 
@@ -134,9 +141,11 @@ func (c *FileWriter) Cleanup() {
 		_ = c.activeChunk.Close()
 		c.activeChunk = nil
 	}
+
 	for _, tmpRelPath := range c.writtenChunks {
 		_ = os.Remove(filepath.Join(c.workingDir, tmpRelPath))
 	}
+
 	c.writtenChunks = nil
 }
 
@@ -145,10 +154,12 @@ func (c *FileWriter) swapActiveChunk() error {
 		if err := c.closeActiveChunk(); err != nil {
 			return fmt.Errorf("Close active chunk file: %w", err)
 		}
+
 		c.chunkIndex++
 	}
 
 	tmpName := fmt.Sprintf("%s.%04d.chunk%s", c.baseFileName, c.chunkIndex, tmpChunkSuffix)
+
 	newChunk, err := os.Create(filepath.Join(c.workingDir, tmpName))
 	if err != nil {
 		return fmt.Errorf("Create new chunk file: %w", err)
@@ -156,6 +167,7 @@ func (c *FileWriter) swapActiveChunk() error {
 
 	c.activeChunk = newChunk
 	c.writtenChunks = append(c.writtenChunks, tmpName)
+
 	return nil
 }
 
@@ -164,11 +176,14 @@ func (c *FileWriter) closeActiveChunk() error {
 		if err := c.activeChunk.Sync(); err != nil {
 			return fmt.Errorf("Flush chunk: %w", err)
 		}
+
 		if err := c.activeChunk.Close(); err != nil {
 			return fmt.Errorf("Close chunk: %w", err)
 		}
+
 		c.activeChunk = nil
 	}
+
 	return nil
 }
 
@@ -177,5 +192,6 @@ func finalChunkName(tmpName string) string {
 	if len(tmpName) > len(tmpChunkSuffix) && tmpName[len(tmpName)-len(tmpChunkSuffix):] == tmpChunkSuffix {
 		return tmpName[:len(tmpName)-len(tmpChunkSuffix)]
 	}
+
 	return tmpName
 }

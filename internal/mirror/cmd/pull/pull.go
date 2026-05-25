@@ -114,6 +114,7 @@ func pull(cmd *cobra.Command, _ []string) error {
 	if parentCtx == nil {
 		parentCtx = context.Background()
 	}
+
 	ctx, cancel := signal.NotifyContext(parentCtx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -126,9 +127,11 @@ func pull(cmd *cobra.Command, _ []string) error {
 			puller.logger.WarnLn("Operation cancelled by user")
 			return nil
 		}
+
 		if diag := errdetect.Diagnose(err); diag != nil {
 			return diag
 		}
+
 		return fmt.Errorf("pull failed: %w", err)
 	}
 
@@ -140,6 +143,7 @@ func setupLogger() *log.SLogger {
 	if log.DebugLogLevel() >= 3 {
 		logLevel = slog.LevelDebug
 	}
+
 	return log.NewSLogger(logLevel)
 }
 
@@ -173,6 +177,7 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 		DeckhouseTag:          pullflags.DeckhouseTag,
 		SinceVersion:          pullflags.SinceVersion,
 	}
+
 	return mirrorCtx
 }
 
@@ -312,6 +317,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 			p.logger.WarnLn("Operation cancelled by user")
 			return nil
 		}
+
 		return fmt.Errorf("pull from registry: %w", err)
 	}
 
@@ -334,6 +340,7 @@ func (p *Puller) cleanupWorkingDirectory() error {
 			return fmt.Errorf("Cleanup last unfinished pull data: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -349,6 +356,7 @@ func (p *Puller) validatePlatformAccess() error {
 	targetTags = append(targetTags, internal.StableChannel, internal.LTSChannel)
 
 	var accessErr error
+
 	for _, targetTag := range targetTags {
 		imageRef := p.params.DeckhouseRegistryRepo + ":" + targetTag
 
@@ -371,12 +379,14 @@ func (p *Puller) validatePlatformAccess() error {
 // validateModulesAccess validates access to the modules registry
 func (p *Puller) validateModulesAccess() error {
 	modulesRepo := path.Join(p.params.DeckhouseRegistryRepo, p.params.ModulesPathSuffix)
+
 	ctx, cancel := context.WithTimeout(p.cmd.Context(), 15*time.Second)
 	defer cancel()
 
 	if err := p.accessValidator.ValidateListAccessForRepo(ctx, modulesRepo, p.validationOpts...); err != nil {
 		return fmt.Errorf("Source registry is not accessible: %w", err)
 	}
+
 	return nil
 }
 
@@ -390,6 +400,7 @@ func (p *Puller) createModuleFilter() (*modules.Filter, error) {
 		if err != nil {
 			return nil, fmt.Errorf("Prepare module filter: %w", err)
 		}
+
 		return filter, nil
 	}
 
@@ -397,6 +408,7 @@ func (p *Puller) createModuleFilter() (*modules.Filter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Prepare module filter: %w", err)
 	}
+
 	return filter, nil
 }
 
@@ -418,6 +430,7 @@ func (p *Puller) computeGOSTDigests() error {
 		})
 
 		merr := &multierror.Error{}
+
 		parallel.ForEach(bundlePackages, func(bundlePackage os.DirEntry, _ int) {
 			file, err := os.Open(filepath.Join(p.params.BundleDir, bundlePackage.Name()))
 			if err != nil {
@@ -437,6 +450,7 @@ func (p *Puller) computeGOSTDigests() error {
 				merr = multierror.Append(merr, fmt.Errorf("Could not write digest to .gostsum file: %w", err))
 			}
 		})
+
 		return merr.ErrorOrNil()
 	})
 }
@@ -451,6 +465,7 @@ func (p *Puller) finalCleanup() error {
 
 	pullDirExists := false
 	otherEntries := 0
+
 	for _, entry := range entries {
 		if entry.Name() == mirror.TmpMirrorFolderName && entry.IsDir() {
 			pullDirExists = true

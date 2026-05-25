@@ -39,6 +39,7 @@ func (svc *Service) writeDeckhouseReleaseManifests(
 	releaseChannelsImagesLayout *image.ImageLayout,
 ) error {
 	manifests := &bytes.Buffer{}
+
 	for _, version := range versionTagsToMirror {
 		versionReleaseImage, err := releaseChannelsImagesLayout.GetImage(version)
 		if err != nil {
@@ -62,6 +63,7 @@ func (svc *Service) writeDeckhouseReleaseManifests(
 	if err := os.MkdirAll(filepath.Dir(pathToManifestYAML), 0o775); err != nil {
 		return fmt.Errorf("Create DeckhouseReleases manifest file: %w", err)
 	}
+
 	manifestFile, err := os.Create(pathToManifestYAML)
 	if err != nil {
 		return fmt.Errorf("Create DeckhouseReleases manifest file: %w", err)
@@ -74,6 +76,7 @@ func (svc *Service) writeDeckhouseReleaseManifests(
 	if err = manifestFile.Sync(); err != nil {
 		return fmt.Errorf("Write DeckhouseReleases manifest file: %w", err)
 	}
+
 	if err = manifestFile.Close(); err != nil {
 		return fmt.Errorf("Write DeckhouseReleases manifest file: %w", err)
 	}
@@ -83,12 +86,14 @@ func (svc *Service) writeDeckhouseReleaseManifests(
 
 func generateDeckhouseRelease(versionTag string, releaseInfo *releaseInfo) ([]byte, error) {
 	const githubReleaseChangelogLinkBase = "https://github.com/deckhouse/deckhouse/releases/tag"
+
 	version, err := semver.NewVersion(versionTag)
 	if err != nil {
 		return nil, fmt.Errorf("Parse version tag %q: %w", versionTag, err)
 	}
 
 	var disruptions []string
+
 	if len(releaseInfo.Disruptions) > 0 {
 		disruptionsVersion := fmt.Sprintf("%d.%d", version.Major(), version.Minor())
 		disruptions = releaseInfo.Disruptions[disruptionsVersion]
@@ -128,6 +133,7 @@ func extractReleaseInfoForDeckhouseRelease(versionReleaseImage v1.Image) (*relea
 	if err != nil {
 		return nil, fmt.Errorf("Extract changelog from release image: %w", err)
 	}
+
 	rawReleaseData, err := images.ExtractFileFromImage(versionReleaseImage, "version.json")
 	if err != nil {
 		return nil, fmt.Errorf("Extract release data from release image: %w", err)
@@ -139,6 +145,7 @@ func extractReleaseInfoForDeckhouseRelease(versionReleaseImage v1.Image) (*relea
 	if err = yaml.Unmarshal(rawReleaseData.Bytes(), release); err != nil {
 		return nil, fmt.Errorf("Extract release data from release image: %w", err)
 	}
+
 	if err = yaml.Unmarshal(rawChangelog.Bytes(), &release.Changelog); err != nil {
 		return nil, fmt.Errorf("Extract release data from release image: %w", err)
 	}

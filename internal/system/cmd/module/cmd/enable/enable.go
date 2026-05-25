@@ -43,6 +43,7 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE:          enableModule,
 	}
+
 	return enableCmd
 }
 
@@ -50,6 +51,7 @@ func enableModule(cmd *cobra.Command, args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("this command requires exactly 1 argument: module name")
 	}
+
 	moduleName := args[0]
 
 	dynamicClient, err := cli.GetDynamicClient(cmd)
@@ -71,8 +73,10 @@ func enableModule(cmd *cobra.Command, args []string) error {
 			fmt.Fprintln(os.Stderr)
 			fmt.Fprintln(os.Stderr, "Or run:")
 			fmt.Fprintln(os.Stderr, "  kubectl patch mc deckhouse --type=merge -p '{\"spec\":{\"settings\":{\"allowExperimentalModules\":true}}}'")
+
 			return fmt.Errorf("module '%s' is experimental", expErr.ModuleName)
 		}
+
 		return fmt.Errorf("failed to enable module: %w", err)
 	}
 

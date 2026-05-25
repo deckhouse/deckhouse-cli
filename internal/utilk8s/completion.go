@@ -39,12 +39,14 @@ func CompleteResourceNames(cmd *cobra.Command, gvr schema.GroupVersionResource, 
 	}
 
 	nri := dyn.Resource(gvr)
+
 	var list *unstructured.UnstructuredList
 	if namespace == "" {
 		list, err = nri.List(cmd.Context(), metav1.ListOptions{})
 	} else {
 		list, err = nri.Namespace(namespace).List(cmd.Context(), metav1.ListOptions{})
 	}
+
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveError
 	}
@@ -56,6 +58,7 @@ func CompleteResourceNames(cmd *cobra.Command, gvr schema.GroupVersionResource, 
 			names = append(names, n)
 		}
 	}
+
 	return names, cobra.ShellCompDirectiveNoFileComp
 }
 
@@ -73,6 +76,7 @@ func FilterByPrefix(values []string, toComplete string) []string {
 			out = append(out, v)
 		}
 	}
+
 	return out
 }
 

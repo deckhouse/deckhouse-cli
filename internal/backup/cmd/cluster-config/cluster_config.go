@@ -48,6 +48,7 @@ func NewCommand() *cobra.Command {
 	}
 
 	addFlags(clusterConfigCmd.Flags())
+
 	return clusterConfigCmd
 }
 
@@ -74,6 +75,7 @@ func backupConfigs(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
 	namespaces, err := getNamespacesFromCluster(kubeCl)
 	if err != nil {
 		return err
@@ -83,9 +85,11 @@ func backupConfigs(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("Failed to create temp file: %v", err)
 	}
+
 	defer func() {
 		os.Remove(tarFile.Name())
 	}()
+
 	backup := tarball.NewBackup(tarFile, tarball.BackupOptions{Compress: compress})
 
 	backupStages := []*BackupStage{
@@ -124,9 +128,11 @@ func backupConfigs(cmd *cobra.Command, args []string) error {
 	if err = backup.Close(); err != nil {
 		return fmt.Errorf("close tarball failed: %w", err)
 	}
+
 	if err = tarFile.Sync(); err != nil {
 		return fmt.Errorf("tarball flush failed: %w", err)
 	}
+
 	if err = tarFile.Close(); err != nil {
 		return fmt.Errorf("tarball close failed: %w", err)
 	}
@@ -143,9 +149,11 @@ func getNamespacesFromCluster(kubeCl *kubernetes.Clientset) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Failed to list namespaces: %w", err)
 	}
+
 	namespaces := lo.Map(namespaceList.Items, func(ns corev1.Namespace, _ int) string {
 		return ns.Name
 	})
+
 	return namespaces, nil
 }
 
@@ -166,5 +174,6 @@ func setupK8sClients(cmd *cobra.Command) (*rest.Config, *kubernetes.Clientset, *
 	}
 
 	dynamicCl := dynamic.New(kubeCl.RESTClient())
+
 	return restConfig, kubeCl, dynamicCl, nil
 }

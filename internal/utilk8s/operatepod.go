@@ -23,13 +23,16 @@ func GetDeckhousePod(kubeCl kubernetes.Interface) (string, error) {
 	if len(pods.Items) == 0 {
 		return "", fmt.Errorf("no pods deckhouse available in namespace d8-system")
 	}
+
 	pod := pods.Items[0]
 	podName := pod.Name
+
 	return podName, nil
 }
 
 func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, cmdLine []string, podName string, namespace string, containerName string) (remotecommand.Executor, error) {
 	scheme := runtime.NewScheme()
+
 	parameterCodec := runtime.NewParameterCodec(scheme)
 	if err := v1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("Failed to create parameter codec: %w", err)
@@ -54,5 +57,6 @@ func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, cmdLine []strin
 	if err != nil {
 		return nil, fmt.Errorf("Creating SPDY executor for Pod %s: %v", podName, err)
 	}
+
 	return executor, nil
 }

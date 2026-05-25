@@ -37,6 +37,7 @@ func (e *HelpfulError) Error() string {
 	if e.OriginalErr == nil {
 		return e.Category
 	}
+
 	return e.Category + ": " + e.OriginalErr.Error()
 }
 

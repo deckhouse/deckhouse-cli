@@ -38,13 +38,16 @@ func WalkTar(rc io.Reader, fn func(*tar.Header, io.Reader) error) error {
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
+
 		if err != nil {
 			return fmt.Errorf("tar next: %w", err)
 		}
+
 		if err := fn(hdr, tr); err != nil {
 			if errors.Is(err, ErrStopWalk) {
 				return nil
 			}
+
 			return err
 		}
 	}
@@ -55,10 +58,12 @@ func WalkTar(rc io.Reader, fn func(*tar.Header, io.Reader) error) error {
 func normalizePath(p string) string {
 	p = strings.TrimPrefix(p, "./")
 	p = strings.TrimPrefix(p, "/")
+
 	p = strings.TrimSuffix(p, "/")
 	if p == "" {
 		return "."
 	}
+
 	return path.Clean(p)
 }
 
@@ -67,5 +72,6 @@ func isAncestor(ancestor, descendant string) bool {
 	if ancestor == "." {
 		return descendant != "."
 	}
+
 	return strings.HasPrefix(descendant, ancestor+"/")
 }

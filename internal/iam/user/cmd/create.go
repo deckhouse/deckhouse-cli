@@ -110,9 +110,11 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if err := validateUserName(name); err != nil {
 		return err
 	}
+
 	if err := validateEmail(email); err != nil {
 		return err
 	}
+
 	if ttl != "" {
 		if err := validateTTL(ttl); err != nil {
 			return err
@@ -165,6 +167,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	if len(memberOf) > 0 {
 		var errs *multierror.Error
+
 		for _, groupName := range memberOf {
 			if _, err := group.EnsureMember(cmd.Context(), dyn, groupName, iamtypes.KindUser, name, group.EnsureMemberOpts{
 				CreateGroupIfMissing: createGroups,
@@ -173,6 +176,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 				errs = multierror.Append(errs, err)
 			}
 		}
+
 		if errs.ErrorOrNil() != nil {
 			return fmt.Errorf("User %s created, but failed to update %d group(s): %w",
 				name, errs.Len(), errs)
@@ -209,6 +213,7 @@ func validateUserName(name string) error {
 	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
 		return fmt.Errorf("invalid user name %q: %s", name, strings.Join(errs, "; "))
 	}
+
 	return nil
 }
 
@@ -216,12 +221,15 @@ func validateEmail(email string) error {
 	if email == "" {
 		return errors.New("--email is required")
 	}
+
 	if email != strings.ToLower(email) {
 		return fmt.Errorf("email must be lowercase, got %q", email)
 	}
+
 	if !strings.Contains(email, "@") {
 		return fmt.Errorf("email %q does not look like a valid email address", email)
 	}
+
 	return nil
 }
 
@@ -230,8 +238,10 @@ func validateTTL(ttl string) error {
 	if err != nil {
 		return fmt.Errorf("invalid --ttl %q: %w (expected like 24h, 30m, 1h30m)", ttl, err)
 	}
+
 	if d <= 0 {
 		return fmt.Errorf("invalid --ttl %q: must be positive", ttl)
 	}
+
 	return nil
 }

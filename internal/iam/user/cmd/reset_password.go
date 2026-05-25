@@ -74,6 +74,7 @@ func newResetPasswordCommand() *cobra.Command {
 
 	addPasswordFlags(cmd)
 	addWaitFlags(cmd)
+
 	return cmd
 }
 
@@ -115,5 +116,6 @@ func runResetPassword(cmd *cobra.Command, args []string) error {
 	if mode == passwordModeGenerate {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Generated new password (shown once): %s\n", res.Plain)
 	}
+
 	return nil
 }

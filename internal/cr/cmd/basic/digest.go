@@ -34,6 +34,7 @@ func NewDigestCmd(opts *registry.Options) *cobra.Command {
 		tarballPath string
 		fullRef     bool
 	)
+
 	cmd := &cobra.Command{
 		Use:   "digest [IMAGE]",
 		Short: "Print the digest of an image",
@@ -48,6 +49,7 @@ selects an entry by tag (the first entry is used if omitted).
 			if fullRef && tarballPath != "" {
 				return errors.New("--full-ref cannot be combined with --tarball")
 			}
+
 			if tarballPath == "" && len(args) == 0 {
 				return errors.New("image reference required when --tarball is not used")
 			}
@@ -68,12 +70,15 @@ selects an entry by tag (the first entry is used if omitted).
 			if err != nil {
 				return fmt.Errorf("parse reference %q: %w", args[0], err)
 			}
+
 			_, err = fmt.Fprintln(w, ref.Context().Digest(digest))
+
 			return err
 		},
 	}
 	cmd.Flags().StringVar(&tarballPath, "tarball", "", "Read the digest from a local tarball instead of the registry")
 	cmd.Flags().BoolVar(&fullRef, "full-ref", false, "Print the full image reference with digest (registry/repo@sha256:...); incompatible with --tarball")
+
 	return cmd
 }
 
@@ -86,13 +91,16 @@ func resolveDigest(ctx context.Context, tarballPath string, args []string, opts 
 	if len(args) > 0 {
 		tag = args[0]
 	}
+
 	img, err := imageio.LoadTarball(tarballPath, tag)
 	if err != nil {
 		return "", err
 	}
+
 	d, err := img.Digest()
 	if err != nil {
 		return "", fmt.Errorf("compute digest: %w", err)
 	}
+
 	return d.String(), nil
 }

@@ -162,21 +162,25 @@ func (r *RootCommand) Execute() error {
 		case helm_v3.IsPluginError(err):
 			common.ShutdownTelemetry(ctx, helm_v3.PluginErrorCode(err))
 			graceful.Terminate(ctx, err, helm_v3.PluginErrorCode(err))
+
 			return err
 		case errors.Is(err, action.ErrChangesPlanned):
 			common.ShutdownTelemetry(ctx, 2)
 			logs.FlushLogs()
 			graceful.Terminate(ctx, action.ErrChangesPlanned, 2)
+
 			return err
 		}
 
 		common.ShutdownTelemetry(ctx, 1)
 		graceful.Terminate(ctx, err, 1)
+
 		return err
 	}
 
 	common.ShutdownTelemetry(ctx, 0)
 	logs.FlushLogs()
+
 	return nil
 }
 
@@ -192,6 +196,7 @@ func execute() {
 		} else {
 			fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
 		}
+
 		os.Exit(1)
 	}
 }

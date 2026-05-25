@@ -39,9 +39,11 @@ func NewCommand() *cobra.Command {
 			debug, _ := cmd.Flags().GetBool("debug")
 
 			zerolog.SetGlobalLevel(zerolog.InfoLevel)
+
 			if !ojson {
 				log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout})
 			}
+
 			if debug {
 				zerolog.SetGlobalLevel(zerolog.DebugLevel)
 			}

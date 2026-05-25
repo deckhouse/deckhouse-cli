@@ -63,19 +63,24 @@ func setupRootFlags(cmd *cobra.Command, opts *registry.Options) {
 		*opts = *registry.New()
 		opts.WithContext(c.Context())
 		applyVerbose(verbose)
+
 		if insecure {
 			opts.WithInsecure().WithTransport(registry.InsecureTransport())
 		}
+
 		if ndLayers {
 			opts.WithNondistributable()
 		}
+
 		if platform != "" {
 			p, err := v1.ParsePlatform(platform)
 			if err != nil {
 				return fmt.Errorf("parse --platform: %w", err)
 			}
+
 			opts.WithPlatform(p)
 		}
+
 		return nil
 	}
 }
@@ -89,5 +94,6 @@ func applyVerbose(verbose bool) {
 		logs.Debug.SetOutput(os.Stderr)
 		return
 	}
+
 	logs.Debug.SetOutput(io.Discard)
 }

@@ -46,6 +46,7 @@ var accessLevelOrder = func() map[string]int {
 	for i, l := range allAccessLevelsOrdered {
 		m[l] = i
 	}
+
 	return m
 }()
 
@@ -57,6 +58,7 @@ func sliceToSet(s []string) map[string]bool {
 	for _, v := range s {
 		m[v] = true
 	}
+
 	return m
 }
 
@@ -90,6 +92,7 @@ func (c *canonicalGrantSpec) JSON() (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	return string(data), nil
 }
 
@@ -118,17 +121,21 @@ func validateAccessLevel(level string, namespaced bool) error {
 			return fmt.Errorf("access level %q is not valid for namespaced scope; valid levels: %s",
 				level, strings.Join(namespacedAccessLevelsOrdered, ", "))
 		}
+
 		return nil
 	}
+
 	if !allAccessLevels[level] {
 		return fmt.Errorf("invalid access level %q; valid levels: %s",
 			level, strings.Join(allAccessLevelsOrdered, ", "))
 	}
+
 	return nil
 }
 
 func maxAccessLevel(levels []string) string {
 	best := ""
+
 	bestOrder := -1
 	for _, l := range levels {
 		if ord, ok := accessLevelOrder[l]; ok && ord > bestOrder {
@@ -136,6 +143,7 @@ func maxAccessLevel(levels []string) string {
 			bestOrder = ord
 		}
 	}
+
 	return best
 }
 

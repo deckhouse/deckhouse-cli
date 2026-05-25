@@ -48,6 +48,7 @@ func NewCommand() *cobra.Command {
 		RunE:          getLogDeckhouse,
 	}
 	AddFlags(logCmd.Flags())
+
 	return logCmd
 }
 
@@ -71,6 +72,7 @@ func getLogDeckhouse(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("Failed to get Deckhouse pod: %w", err)
 	}
+
 	logOptions := &v1.PodLogOptions{
 		Container: "deckhouse",
 		Follow:    Follow,
@@ -78,16 +80,19 @@ func getLogDeckhouse(cmd *cobra.Command, _ []string) error {
 	if Tail > 0 {
 		logOptions.TailLines = &Tail
 	}
+
 	if Since != "" {
 		duration, _ := time.ParseDuration(Since)
 		logOptions.SinceSeconds = ptr.To(int64(duration.Seconds()))
 	}
+
 	if SinceTime != "" {
 		t, _ := time.Parse(time.DateTime, SinceTime)
 		logOptions.SinceTime = &metav1.Time{Time: t}
 	}
 
 	req := kubeCl.CoreV1().Pods("d8-system").GetLogs(podName, logOptions)
+
 	stream, err := req.Stream(context.Background())
 	if err != nil {
 		return fmt.Errorf("error opening log stream: %v", err)
@@ -99,5 +104,6 @@ func getLogDeckhouse(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf(
 			"error reading logs: %v", err)
 	}
+
 	return nil
 }

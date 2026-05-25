@@ -56,10 +56,12 @@ func RunCleanup() error {
 
 	for _, m := range migrations.Items {
 		fmt.Printf("Deleting CNIMigration '%s'...", m.Name)
+
 		if err := rtClient.Delete(ctx, &m); err != nil {
 			if !errors.IsNotFound(err) {
 				return fmt.Errorf("deleting CNIMigration %s: %w", m.Name, err)
 			}
+
 			fmt.Println(" already deleted")
 		} else {
 			fmt.Println(" done")
@@ -67,5 +69,6 @@ func RunCleanup() error {
 	}
 
 	fmt.Println("🎉 Cleanup triggered. The cluster-internal controllers will handle the rest")
+
 	return nil
 }

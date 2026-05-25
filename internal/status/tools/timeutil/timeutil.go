@@ -26,10 +26,12 @@ func AgeAgo(t time.Time) string {
 	if t.IsZero() {
 		return "<unknown>"
 	}
+
 	duration := time.Since(t)
 	if duration < 0 {
 		duration = 0
 	}
+
 	return formatDuration(duration)
 }
 
@@ -38,10 +40,12 @@ func AgeAgoStr(ts string) string {
 	if ts == "" {
 		return "<unknown>"
 	}
+
 	t, err := time.Parse(time.RFC3339, ts)
 	if err != nil {
 		return "Parse Error"
 	}
+
 	return AgeAgo(t)
 }
 
@@ -57,16 +61,19 @@ func formatDuration(d time.Duration) string {
 		if hours > 0 {
 			return fmt.Sprintf("%dd %dh", days, hours)
 		}
+
 		return fmt.Sprintf("%dd", days)
 	case hours > 0:
 		if minutes > 0 {
 			return fmt.Sprintf("%dh %dm", hours, minutes)
 		}
+
 		return fmt.Sprintf("%dh", hours)
 	case minutes > 0:
 		if seconds > 0 {
 			return fmt.Sprintf("%dm %ds", minutes, seconds)
 		}
+
 		return fmt.Sprintf("%dm", minutes)
 	default:
 		return fmt.Sprintf("%ds", seconds)

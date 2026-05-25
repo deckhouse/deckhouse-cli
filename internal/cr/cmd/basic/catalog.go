@@ -30,6 +30,7 @@ import (
 
 func NewCatalogCmd(opts *registry.Options) *cobra.Command {
 	var fullRef bool
+
 	cmd := &cobra.Command{
 		Use:               "catalog REGISTRY",
 		Short:             "List the repositories in a registry",
@@ -40,6 +41,7 @@ func NewCatalogCmd(opts *registry.Options) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&fullRef, "full-ref", false, "Print the full repository reference (registry/repo)")
+
 	return cmd
 }
 
@@ -50,10 +52,12 @@ func runCatalog(ctx context.Context, w io.Writer, src string, fullRef bool, opts
 			if fullRef {
 				line = path.Join(src, repo)
 			}
+
 			if _, err := fmt.Fprintln(w, line); err != nil {
 				return err
 			}
 		}
+
 		return nil
 	})
 }

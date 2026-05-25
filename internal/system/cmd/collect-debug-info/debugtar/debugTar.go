@@ -374,15 +374,19 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 	}
 
 	var tickCh <-chan time.Time
+
 	if requestInterval > 0 {
 		ticker := time.NewTicker(requestInterval)
 		defer ticker.Stop()
+
 		tickCh = ticker.C
 	}
 
 	var stdout, stderr bytes.Buffer
+
 	gzipWriter := gzip.NewWriter(os.Stdout)
 	defer gzipWriter.Close()
+
 	tarWriter := tar.NewWriter(gzipWriter)
 	defer tarWriter.Close()
 
@@ -396,6 +400,7 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 		}
 
 		fullCommand := append([]string{cmd.Cmd}, cmd.Args...)
+
 		executor, err := utilk8s.ExecInPod(config, kubeCl, fullCommand, podName, namespace, containerName)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: failed to create executor for %s: %v\n", cmd.File, err)
@@ -407,6 +412,7 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 			Stdout: &stdout,
 			Stderr: &stderr,
 		})
+
 		cancel()
 
 		if streamErr != nil {
@@ -420,9 +426,11 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 		if err = cmd.writeToTar(tarWriter, stdout.Bytes()); err != nil {
 			return fmt.Errorf("failed to write tar file %s: %w", cmd.File, err)
 		}
+
 		stdout.Reset()
 		stderr.Reset()
 	}
+
 	return nil
 }
 
@@ -434,12 +442,14 @@ func fetchActiveModules(
 	timeout time.Duration,
 ) (map[string]bool, error) {
 	cmdLine := []string{"kubectl", "get", "module", "-o", "json"}
+
 	executor, err := utilk8s.ExecInPod(config, kubeCl, cmdLine, podName, namespace, containerName)
 	if err != nil {
 		return nil, fmt.Errorf("create executor: %w", err)
 	}
 
 	var stdout, stderr bytes.Buffer
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -461,6 +471,7 @@ func fetchActiveModules(
 			active[item.Metadata.Name] = true
 		}
 	}
+
 	return active, nil
 }
 
@@ -471,9 +482,11 @@ func filterAndExpandCommands(commands []Command, activeModules map[string]bool) 
 			result = append(result, cmd)
 			continue
 		}
+
 		if len(activeModules) == 0 {
 			continue
 		}
+
 		if cmd.ExpandPerModule {
 			matchedModules := matchingModules(activeModules, cmd.RequiredModule)
 			for _, moduleName := range matchedModules {
@@ -492,17 +505,21 @@ func filterAndExpandCommands(commands []Command, activeModules map[string]bool) 
 			}
 		}
 	}
+
 	return result
 }
 
 func matchingModules(activeModules map[string]bool, required string) []string {
 	var matched []string
+
 	for name := range activeModules {
 		if isModuleMatch(name, required) {
 			matched = append(matched, name)
 		}
 	}
+
 	sort.Strings(matched)
+
 	return matched
 }
 
@@ -515,6 +532,7 @@ func replaceModuleName(args []string, moduleName string) []string {
 	for i, arg := range args {
 		expanded[i] = strings.ReplaceAll(arg, "{module-name}", moduleName)
 	}
+
 	return expanded
 }
 
@@ -540,6 +558,7 @@ func excludeBaseName(file string) string {
 	name := strings.TrimSuffix(file, ".json")
 	name = strings.TrimSuffix(name, ".txt")
 	name = strings.TrimSuffix(name, "-{module-name}")
+
 	return name
 }
 
@@ -549,6 +568,7 @@ func isFileExcluded(fileName string, excludeMap map[string]bool) bool {
 	}
 
 	base := strings.TrimSuffix(fileName, ".json")
+
 	base = strings.TrimSuffix(base, ".txt")
 	if excludeMap[base] {
 		return true
@@ -559,11 +579,13 @@ func isFileExcluded(fileName string, excludeMap map[string]bool) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
 func GetExcludableFiles() []string {
 	seen := make(map[string]bool, len(debugCommands))
+
 	files := make([]string, 0, len(debugCommands))
 	for _, cmd := range debugCommands {
 		name := excludeBaseName(cmd.File)
@@ -572,6 +594,8 @@ func GetExcludableFiles() []string {
 			files = append(files, name)
 		}
 	}
+
 	sort.Strings(files)
+
 	return files
 }

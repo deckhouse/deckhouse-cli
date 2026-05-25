@@ -44,6 +44,7 @@ func NewCommand() *cobra.Command {
 	}
 	flags.AddFlags(listCmd.Flags())
 	AddFlags(listCmd.Flags())
+
 	return listCmd
 }
 

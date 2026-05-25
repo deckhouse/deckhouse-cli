@@ -90,6 +90,7 @@ func containsSlash(s string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -98,6 +99,7 @@ func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) a
 	if d8flags.SourceRegistryLogin != "" {
 		logger.Debug("Using explicit credentials from flags",
 			slog.String("username", d8flags.SourceRegistryLogin))
+
 		return authn.FromConfig(authn.AuthConfig{
 			Username: d8flags.SourceRegistryLogin,
 			Password: d8flags.SourceRegistryPassword,
@@ -107,6 +109,7 @@ func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) a
 	// Priority 2: License token from flags
 	if d8flags.DeckhouseLicenseToken != "" {
 		logger.Debug("Using license token from flags")
+
 		return authn.FromConfig(authn.AuthConfig{
 			Username: "license-token",
 			Password: d8flags.DeckhouseLicenseToken,
@@ -115,10 +118,13 @@ func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) a
 
 	// Priority 3: Try to get credentials from Docker config (~/.docker/config.json)
 	// Parse the registry hostname to create a Registry object for DefaultKeychain
-	var reg name.Registry
-	var err error
+	var (
+		reg name.Registry
+		err error
+	)
 
 	// If registryHost contains a slash, it might be a full path - extract just the host
+
 	if containsSlash(registryHost) {
 		ref, parseErr := name.ParseReference(registryHost)
 		if parseErr == nil {
@@ -126,12 +132,14 @@ func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) a
 		} else {
 			// Fallback: just use the part before the first slash
 			idx := 0
+
 			for i := 0; i < len(registryHost); i++ {
 				if registryHost[i] == '/' {
 					idx = i
 					break
 				}
 			}
+
 			reg, err = name.NewRegistry(registryHost[:idx])
 		}
 	} else {
@@ -147,6 +155,7 @@ func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) a
 			if err == nil && (cfg.Username != "" || cfg.Password != "" || cfg.Auth != "" || cfg.IdentityToken != "") {
 				logger.Debug("Using credentials from Docker config",
 					slog.String("registry", reg.String()))
+
 				return auth
 			}
 		}
@@ -155,5 +164,6 @@ func getPluginRegistryAuthProvider(registryHost string, logger *dkplog.Logger) a
 	// Priority 4: Anonymous access
 	logger.Debug("Using anonymous access for registry",
 		slog.String("registry", registryHost))
+
 	return authn.Anonymous
 }

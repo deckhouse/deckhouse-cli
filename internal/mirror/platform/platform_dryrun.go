@@ -36,6 +36,7 @@ func (svc *Service) pullDeckhousePlatformDryRun(ctx context.Context, tagsToMirro
 	logger.Infof("Searching for Deckhouse built-in modules digests")
 
 	var prevDigests = make(map[string]struct{})
+
 	for _, tag := range tagsToMirror {
 		logger.Infof("[dry-run] Streaming installer metadata for %s from registry", tag)
 
@@ -56,26 +57,31 @@ func (svc *Service) pullDeckhousePlatformDryRun(ctx context.Context, tagsToMirro
 	svc.userLogger.InfoLn("[dry-run] Platform images that would be pulled:")
 
 	svc.userLogger.Infof("  Deckhouse components: %d images", len(svc.downloadList.Deckhouse))
+
 	for _, ref := range slices.Sorted(maps.Keys(svc.downloadList.Deckhouse)) {
 		svc.userLogger.InfoLn("    " + ref)
 	}
 
 	svc.userLogger.Infof("  Release channels: %d", len(svc.downloadList.DeckhouseReleaseChannel))
+
 	for _, ref := range slices.Sorted(maps.Keys(svc.downloadList.DeckhouseReleaseChannel)) {
 		svc.userLogger.InfoLn("    " + ref)
 	}
 
 	svc.userLogger.Infof("  Installer: %d", len(svc.downloadList.DeckhouseInstall))
+
 	for _, ref := range slices.Sorted(maps.Keys(svc.downloadList.DeckhouseInstall)) {
 		svc.userLogger.InfoLn("    " + ref)
 	}
 
 	svc.userLogger.Infof("  Standalone installer: %d", len(svc.downloadList.DeckhouseInstallStandalone))
+
 	for _, ref := range slices.Sorted(maps.Keys(svc.downloadList.DeckhouseInstallStandalone)) {
 		svc.userLogger.InfoLn("    " + ref)
 	}
 
 	svc.userLogger.Infof("  Total: %d platform images", totalImages)
+
 	return nil
 }
 
@@ -102,6 +108,7 @@ func (svc *Service) extractImageDigestsFromRemote(
 		if err := json.NewDecoder(tagsFile).Decode(&tags); err != nil {
 			return nil, fmt.Errorf("decode %s: %w", imagesTagsFile, err)
 		}
+
 		for _, nameTagTuple := range tags {
 			for _, imageID := range nameTagTuple {
 				ref := rootURL + ":" + imageID
@@ -111,7 +118,9 @@ func (svc *Service) extractImageDigestsFromRemote(
 				}
 			}
 		}
+
 		svc.userLogger.Infof("Deckhouse digests found: %d", len(result))
+
 		return result, nil
 	}
 
@@ -120,10 +129,12 @@ func (svc *Service) extractImageDigestsFromRemote(
 	if err != nil {
 		return nil, fmt.Errorf("extract %s from installer %q: %w", imagesDigestsFile, tag, err)
 	}
+
 	var digests map[string]map[string]string
 	if err := json.NewDecoder(digestsFile).Decode(&digests); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", imagesDigestsFile, err)
 	}
+
 	for _, nameDigestTuple := range digests {
 		for _, imageID := range nameDigestTuple {
 			ref := rootURL + "@" + imageID
@@ -135,5 +146,6 @@ func (svc *Service) extractImageDigestsFromRemote(
 	}
 
 	svc.userLogger.Infof("Deckhouse digests found: %d", len(result))
+
 	return result, nil
 }

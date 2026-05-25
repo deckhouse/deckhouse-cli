@@ -39,6 +39,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 			if len(args) != 1 {
 				return fmt.Errorf("invalid arguments")
 			}
+
 			return nil
 		},
 	}
@@ -60,6 +61,7 @@ func cmdExamples() string {
 		"  # Upload without resume, split into 4 chunks",
 		fmt.Sprintf("    ... %s NAME -n NAMESPACE -P -d /dst/path -f ./file -c 4", cmdName),
 	}
+
 	return strings.Join(resp, "\n")
 }
 
@@ -71,6 +73,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	resume, _ := cmd.Flags().GetBool("resume")
 
 	flags := cmd.PersistentFlags()
+
 	httpClient, err := client.NewSafeClient(flags)
 	if err != nil {
 		return err
@@ -102,6 +105,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	permOctal := defaultFilePermissions
 	uid := os.Getuid()
 	gid := os.Getgid()
+
 	if pathToFile != "" && pathToFile != "-" {
 		if fi, statErr := os.Stat(pathToFile); statErr == nil {
 			permOctal = fmt.Sprintf("%04o", fi.Mode().Perm())
@@ -131,11 +135,13 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 func upload(ctx context.Context, _ *slog.Logger, httpClient *client.SafeClient, url string, filePath string, chunks int, permOctal string, uid, gid int, resume bool) error {
 	var offset int64
+
 	if resume {
 		off, err := util.CheckUploadProgress(ctx, httpClient, url)
 		if err != nil {
 			return err
 		}
+
 		offset = off
 	}
 
@@ -162,16 +168,19 @@ func upload(ctx context.Context, _ *slog.Logger, httpClient *client.SafeClient, 
 
 	for offset < totalSize {
 		remaining := totalSize - offset
+
 		sendLen := chunkSize
 		if sendLen > remaining {
 			sendLen = remaining
 		}
 
 		section := io.NewSectionReader(file, offset, sendLen)
+
 		req, err := http.NewRequest(http.MethodPut, url, io.NopCloser(section))
 		if err != nil {
 			return err
 		}
+
 		req = req.WithContext(ctx)
 
 		req.Header.Set("X-Content-Length", strconv.FormatInt(totalSize, 10))
@@ -185,6 +194,7 @@ func upload(ctx context.Context, _ *slog.Logger, httpClient *client.SafeClient, 
 			if err != nil {
 				return err
 			}
+
 			defer func() {
 				_, _ = io.Copy(io.Discard, resp.Body)
 				_ = resp.Body.Close()
@@ -199,14 +209,18 @@ func upload(ctx context.Context, _ *slog.Logger, httpClient *client.SafeClient, 
 				offset += sendLen
 				return nil
 			}
+
 			nextOffset, err := strconv.ParseInt(nextOffsetStr, 10, 64)
 			if err != nil {
 				return fmt.Errorf("invalid X-Next-Offset: %s: %w", nextOffsetStr, err)
 			}
+
 			if nextOffset < offset {
 				return fmt.Errorf("server returned X-Next-Offset (%d) smaller than current offset (%d)", nextOffset, offset)
 			}
+
 			offset = nextOffset
+
 			return nil
 		}(); err != nil {
 			return err

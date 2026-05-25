@@ -32,6 +32,7 @@ func completeGroupOnly(cmd *cobra.Command, args []string, toComplete string) ([]
 	if len(args) >= 1 {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
+
 	return utilk8s.CompleteResourceNames(cmd, iamtypes.GroupGVR, "", toComplete)
 }
 
@@ -51,5 +52,6 @@ func completeMemberArgs(cmd *cobra.Command, args []string, toComplete string) ([
 			return utilk8s.CompleteResourceNames(cmd, iamtypes.GroupGVR, "", toComplete)
 		}
 	}
+
 	return nil, cobra.ShellCompDirectiveNoFileComp
 }

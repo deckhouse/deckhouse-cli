@@ -42,6 +42,7 @@ func NewCommand() *cobra.Command {
 		RunE:          listModule,
 	}
 	flags.AddFlags(listCmd.Flags())
+
 	return listCmd
 }
 

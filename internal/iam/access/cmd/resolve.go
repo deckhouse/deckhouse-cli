@@ -35,10 +35,12 @@ func resolveUserEmail(ctx context.Context, dyn dynamic.Interface, userName strin
 	if err != nil {
 		return "", fmt.Errorf("getting User %q to resolve email: %w", userName, err)
 	}
+
 	email, found, _ := unstructured.NestedString(obj.Object, "spec", "email")
 	if !found || email == "" {
 		return "", fmt.Errorf("User %q has no spec.email", userName)
 	}
+
 	return email, nil
 }
 
@@ -73,8 +75,10 @@ func buildInventory(ctx context.Context, dyn dynamic.Interface) (*accessInventor
 	if err != nil {
 		return nil, fmt.Errorf("listing Users: %w", err)
 	}
+
 	for _, u := range userList.Items {
 		name := u.GetName()
+
 		email, _, _ := unstructured.NestedString(u.Object, "spec", "email")
 		if email != "" {
 			inv.Users[name] = email
@@ -87,20 +91,25 @@ func buildInventory(ctx context.Context, dyn dynamic.Interface) (*accessInventor
 	if err != nil {
 		return nil, fmt.Errorf("listing Groups: %w", err)
 	}
+
 	for _, g := range groupList.Items {
 		gName := g.GetName()
 		rawMembers, _, _ := unstructured.NestedSlice(g.Object, "spec", "members")
+
 		var members []memberRef
+
 		for _, item := range rawMembers {
 			m, ok := item.(map[string]any)
 			if !ok {
 				continue
 			}
+
 			members = append(members, memberRef{
 				Kind: iamtypes.SubjectKind(fmt.Sprint(m["kind"])),
 				Name: fmt.Sprint(m["name"]),
 			})
 		}
+
 		inv.GroupMembers[gName] = members
 	}
 
@@ -109,6 +118,7 @@ func buildInventory(ctx context.Context, dyn dynamic.Interface) (*accessInventor
 	if err != nil {
 		return nil, fmt.Errorf("listing ClusterAuthorizationRules: %w", err)
 	}
+
 	for _, car := range carList.Items {
 		inv.Grants = append(inv.Grants, normalizeAuthRule(&car)...)
 	}
@@ -118,6 +128,7 @@ func buildInventory(ctx context.Context, dyn dynamic.Interface) (*accessInventor
 	if err != nil {
 		return nil, fmt.Errorf("listing AuthorizationRules: %w", err)
 	}
+
 	for _, ar := range arList.Items {
 		inv.Grants = append(inv.Grants, normalizeAuthRule(&ar)...)
 	}
@@ -147,6 +158,7 @@ func normalizeAuthRule(obj *unstructured.Unstructured) []normalizedGrant {
 	switch obj.GetKind() {
 	case iamtypes.KindClusterAuthorizationRule:
 		base.SourceKind = iamtypes.KindClusterAuthorizationRule
+
 		base.ScopeType = iamtypes.ScopeCluster
 		if matchAny, found, _ := unstructured.NestedBool(obj.Object, "spec", "namespaceSelector", "matchAny"); found && matchAny {
 			base.ScopeType = iamtypes.ScopeAllNamespaces
@@ -163,21 +175,25 @@ func normalizeAuthRule(obj *unstructured.Unstructured) []normalizedGrant {
 	}
 
 	var grants []normalizedGrant
+
 	for _, sub := range readSubjectRefs(obj) {
 		if sub.Kind == iamtypes.KindServiceAccount {
 			continue
 		}
+
 		g := base
 		g.SubjectKind = sub.Kind
 		g.SubjectPrincipal = sub.Name
 		grants = append(grants, g)
 	}
+
 	return grants
 }
 
 // ResolveUserGroups computes direct and transitive group memberships for a user.
 func (inv *accessInventory) ResolveUserGroups(userName string) ([]string, []string) {
 	directSet := make(map[string]bool)
+
 	for gName, members := range inv.GroupMembers {
 		for _, m := range members {
 			if m.Kind == iamtypes.KindUser && m.Name == userName {
@@ -187,12 +203,16 @@ func (inv *accessInventory) ResolveUserGroups(userName string) ([]string, []stri
 	}
 
 	visited := make(map[string]bool)
+
 	var walk func(string)
+
 	walk = func(g string) {
 		if visited[g] {
 			return
 		}
+
 		visited[g] = true
+
 		for parentGroup, members := range inv.GroupMembers {
 			for _, m := range members {
 				if m.Kind == iamtypes.KindGroup && m.Name == g {
@@ -210,13 +230,16 @@ func (inv *accessInventory) ResolveUserGroups(userName string) ([]string, []stri
 	for g := range directSet {
 		direct = append(direct, g)
 	}
+
 	sort.Strings(direct)
 
 	transitive := make([]string, 0, len(visited))
 	for g := range visited {
 		transitive = append(transitive, g)
 	}
+
 	sort.Strings(transitive)
+
 	return direct, transitive
 }
 
@@ -231,6 +254,7 @@ func (inv *accessInventory) UserGrants(userName string) ([]normalizedGrant, []no
 	}
 
 	var directGrants, inheritedGrants []normalizedGrant
+
 	for _, grant := range inv.Grants {
 		if grant.SubjectKind == iamtypes.KindUser && grant.SubjectPrincipal == email {
 			directGrants = append(directGrants, grant)
@@ -238,17 +262,20 @@ func (inv *accessInventory) UserGrants(userName string) ([]normalizedGrant, []no
 			inheritedGrants = append(inheritedGrants, grant)
 		}
 	}
+
 	return directGrants, inheritedGrants
 }
 
 // GroupGrants returns grants assigned directly to a group.
 func (inv *accessInventory) GroupGrants(groupName string) []normalizedGrant {
 	var grants []normalizedGrant
+
 	for _, grant := range inv.Grants {
 		if grant.SubjectKind == iamtypes.KindGroup && grant.SubjectPrincipal == groupName {
 			grants = append(grants, grant)
 		}
 	}
+
 	return grants
 }
 
@@ -272,15 +299,18 @@ func computeEffectiveSummary(grants []normalizedGrant) *effectiveSummary {
 	}
 
 	var clusterLevels []string
+
 	nsLevels := make(map[string][]string)
 
 	for _, g := range grants {
 		if g.AllowScale {
 			summary.AllowScale = true
 		}
+
 		if g.PortForwarding {
 			summary.PortForwarding = true
 		}
+
 		switch g.ScopeType {
 		case iamtypes.ScopeCluster, iamtypes.ScopeAllNamespaces, iamtypes.ScopeLabels:
 			// ScopeLabels still creates a CAR; without resolving the
@@ -309,6 +339,7 @@ func computeEffectiveSummary(grants []normalizedGrant) *effectiveSummary {
 			summary.PortForwarding = true
 			summary.PortForwardingImplicit = true
 		}
+
 		if !summary.AllowScale {
 			summary.AllowScale = true
 			summary.AllowScaleImplicit = true
@@ -324,6 +355,7 @@ func capabilityNote(implicit bool) string {
 	if implicit {
 		return " (implicit via SuperAdmin wildcard)"
 	}
+
 	return ""
 }
 
@@ -338,6 +370,7 @@ func (s *effectiveSummary) String() string {
 	for ns, level := range s.Namespaced {
 		levelNS[level] = append(levelNS[level], ns)
 	}
+
 	for level, nss := range levelNS {
 		sort.Strings(nss)
 		parts = append(parts, fmt.Sprintf("%s[%s]", level, strings.Join(nss, ",")))
@@ -346,7 +379,9 @@ func (s *effectiveSummary) String() string {
 	if len(parts) == 0 {
 		return "<none>"
 	}
+
 	sort.Strings(parts)
+
 	return strings.Join(parts, ", ")
 }
 
@@ -354,29 +389,36 @@ func (s *effectiveSummary) String() string {
 func (inv *accessInventory) DetectGroupCycles() map[string][]string {
 	cycles := make(map[string][]string)
 	visited := make(map[string]int) // 0=unvisited, 1=visiting, 2=done
+
 	var path []string
 
 	var dfs func(string)
+
 	dfs = func(g string) {
 		if visited[g] == 2 {
 			return
 		}
+
 		if visited[g] == 1 {
 			// Found cycle
 			cycleStart := -1
+
 			for i, p := range path {
 				if p == g {
 					cycleStart = i
 					break
 				}
 			}
+
 			if cycleStart >= 0 {
 				cycle := append([]string{}, path[cycleStart:]...)
 				cycle = append(cycle, g)
 				cycles[g] = cycle
 			}
+
 			return
 		}
+
 		visited[g] = 1
 		path = append(path, g)
 

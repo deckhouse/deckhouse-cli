@@ -33,17 +33,21 @@ func SaveTarball(path string, imgs map[string]v1.Image) error {
 	if len(imgs) == 0 {
 		return fmt.Errorf("save tarball %s: at least one image is required", path)
 	}
+
 	refToImage := make(map[name.Reference]v1.Image, len(imgs))
 	for refStr, img := range imgs {
 		ref, err := name.ParseReference(refStr)
 		if err != nil {
 			return fmt.Errorf("parse reference %q: %w", refStr, err)
 		}
+
 		refToImage[ref] = img
 	}
+
 	if err := tarball.MultiRefWriteToFile(path, refToImage); err != nil {
 		return fmt.Errorf("write tarball %s: %w", path, err)
 	}
+
 	return nil
 }
 
@@ -55,17 +59,21 @@ func SaveLegacy(path string, imgs map[string]v1.Image) error {
 	if len(imgs) == 0 {
 		return fmt.Errorf("save legacy tarball %s: at least one image is required", path)
 	}
+
 	tagToImage := make(map[name.Tag]v1.Image, len(imgs))
 	for refStr, img := range imgs {
 		tag, err := name.NewTag(refStr)
 		if err != nil {
 			return fmt.Errorf("parse tag %q (legacy tarballs require tagged refs): %w", refStr, err)
 		}
+
 		tagToImage[tag] = img
 	}
+
 	if err := tarball.MultiWriteToFile(path, tagToImage); err != nil {
 		return fmt.Errorf("write legacy tarball %s: %w", path, err)
 	}
+
 	return nil
 }
 
@@ -77,15 +85,19 @@ func LoadTarball(path, tag string) (v1.Image, error) {
 		if err != nil {
 			return nil, fmt.Errorf("load tarball %s: %w", path, err)
 		}
+
 		return img, nil
 	}
+
 	ref, err := name.NewTag(tag)
 	if err != nil {
 		return nil, fmt.Errorf("parse tag %q: %w", tag, err)
 	}
+
 	img, err := tarball.ImageFromPath(path, &ref)
 	if err != nil {
 		return nil, fmt.Errorf("load tarball %s with tag %s: %w", path, tag, err)
 	}
+
 	return img, nil
 }

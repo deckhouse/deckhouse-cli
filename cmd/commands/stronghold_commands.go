@@ -35,6 +35,7 @@ func sortedSynopsisKeys(synopses map[string]string) []string {
 	for k := range synopses {
 		keys = append(keys, k)
 	}
+
 	sort.Strings(keys)
 
 	return keys
@@ -45,6 +46,7 @@ func sortedCommandKeys(nodes map[string]*commandNode) []string {
 	for k := range nodes {
 		keys = append(keys, k)
 	}
+
 	sort.Strings(keys)
 
 	return keys
@@ -68,6 +70,7 @@ func buildCommandTree(synopses map[string]string) map[string]*commandNode {
 		if len(parts) == 0 {
 			continue
 		}
+
 		synopsis := synopses[key]
 
 		nodes := roots
@@ -80,9 +83,11 @@ func buildCommandTree(synopses map[string]string) map[string]*commandNode {
 				}
 				nodes[part] = node
 			}
+
 			if i == len(parts)-1 {
 				node.synopsis = synopsis
 			}
+
 			nodes = node.children
 		}
 	}
@@ -137,5 +142,6 @@ func buildCobraCommands(nodes map[string]*commandNode, pathPrefix []string) []*c
 func StrongholdSubcommands() []*cobra.Command {
 	synopses := vaultcommand.CommandSynopses()
 	tree := buildCommandTree(synopses)
+
 	return buildCobraCommands(tree, nil)
 }

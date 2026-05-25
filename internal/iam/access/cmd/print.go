@@ -40,18 +40,23 @@ func printStructured(w io.Writer, v any, format string) error {
 		if err != nil {
 			return fmt.Errorf("marshalling JSON: %w", err)
 		}
+
 		_, err = fmt.Fprintln(w, string(data))
+
 		return err
 	case "yaml":
 		jsonData, err := json.Marshal(v)
 		if err != nil {
 			return fmt.Errorf("marshalling JSON for YAML conversion: %w", err)
 		}
+
 		yamlData, err := sigsyaml.JSONToYAML(jsonData)
 		if err != nil {
 			return fmt.Errorf("converting JSON to YAML: %w", err)
 		}
+
 		_, err = fmt.Fprint(w, string(yamlData))
+
 		return err
 	default:
 		return fmt.Errorf("%w %q", errUnsupportedFormat, format)
@@ -64,5 +69,6 @@ func denil[T any](s []T) []T {
 	if s == nil {
 		return []T{}
 	}
+
 	return s
 }

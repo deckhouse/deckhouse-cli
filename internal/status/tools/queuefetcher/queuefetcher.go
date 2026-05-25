@@ -83,9 +83,11 @@ func (q *DeckhouseQueueFetcher) findLeaderPod(ctx context.Context) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("failed to list pods: %w", err)
 	}
+
 	if len(pods.Items) == 0 {
 		return "", fmt.Errorf("no Deckhouse leader pods found with label %s", labelSelector)
 	}
+
 	return pods.Items[0].Name, nil
 }
 
@@ -108,7 +110,9 @@ func (q *DeckhouseQueueFetcher) execQueueList(ctx context.Context, podName strin
 	if err != nil {
 		return "", fmt.Errorf("failed to initialize SPDY executor: %w", err)
 	}
+
 	var stdout, stderr strings.Builder
+
 	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
 		Stdout: &stdout,
 		Stderr: &stderr,
@@ -116,9 +120,11 @@ func (q *DeckhouseQueueFetcher) execQueueList(ctx context.Context, podName strin
 	if err != nil {
 		return "", fmt.Errorf("failed to execute command: %w", err)
 	}
+
 	if stderr.Len() > 0 {
 		return "", fmt.Errorf("stderr: %s", stderr.String())
 	}
+
 	return stdout.String(), nil
 }
 
@@ -126,8 +132,12 @@ func (q *DeckhouseQueueFetcher) execQueueList(ctx context.Context, podName strin
 func processDeckhouseQueue(raw string) DeckhouseQueue {
 	lines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
 	header := ""
-	var tasks []DeckhouseQueueTask
-	var summary []string
+
+	var (
+		tasks   []DeckhouseQueueTask
+		summary []string
+	)
+
 	inSummary := false
 	taskRegexp := regexp.MustCompile(`^(\d+)\.\s+(.+)$`)
 
@@ -136,11 +146,13 @@ func processDeckhouseQueue(raw string) DeckhouseQueue {
 		if line == "" {
 			continue
 		}
+
 		switch {
 		case i == 0 && strings.HasPrefix(line, "Queue "):
 			header = line
 		case strings.HasPrefix(line, "Summary:"):
 			inSummary = true
+
 			summary = append(summary, line)
 		case inSummary:
 			summary = append(summary, line)
@@ -155,6 +167,7 @@ func processDeckhouseQueue(raw string) DeckhouseQueue {
 			summary = append(summary, line)
 		}
 	}
+
 	return DeckhouseQueue{
 		Header:  header,
 		Tasks:   tasks,

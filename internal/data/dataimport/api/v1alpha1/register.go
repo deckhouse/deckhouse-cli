@@ -44,5 +44,6 @@ func AddKnownTypes(scheme *runtime.Scheme) error {
 		&DataImportList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
+
 	return nil
 }

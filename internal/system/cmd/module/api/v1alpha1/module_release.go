@@ -77,10 +77,12 @@ type ModuleReleaseStatus struct {
 // ModuleReleaseFromUnstructured converts an unstructured object to ModuleRelease.
 func ModuleReleaseFromUnstructured(obj *unstructured.Unstructured) (*ModuleRelease, error) {
 	var release ModuleRelease
+
 	err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &release)
 	if err != nil {
 		return nil, err
 	}
+
 	return &release, nil
 }
 

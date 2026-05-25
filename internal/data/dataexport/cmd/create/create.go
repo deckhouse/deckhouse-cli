@@ -42,6 +42,7 @@ func cmdExamples() string {
 		"  # Start data exporting with extra flags",
 		fmt.Sprintf("    ... %s --kubeconfig='kube_tmp.conf' -n target-namespace --ttl 17m export-name pvc/test-pvc-name", cmdName),
 	}
+
 	return strings.Join(resp, "\n")
 }
 
@@ -72,11 +73,14 @@ func parseArgs(args []string) ( /*deName*/ string /*volumeKind*/, string /*volum
 	if len(args) != 2 {
 		return "", "", "", fmt.Errorf("invalid arguments")
 	}
+
 	deName = args[0]
+
 	resourceTypeAndName := strings.Split(args[1], "/")
 	if len(resourceTypeAndName) != 2 {
 		return "", "", "", fmt.Errorf("invalid volume format, expect: <type>/<name>")
 	}
+
 	volumeKind, volumeName = strings.ToLower(resourceTypeAndName[0]), resourceTypeAndName[1]
 	switch volumeKind {
 	case "pvc", "persistentvolumeclaim":
@@ -97,6 +101,7 @@ func parseArgs(args []string) ( /*deName*/ string /*volumeKind*/, string /*volum
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
+
 	namespace, _ := cmd.Flags().GetString("namespace")
 	ttl, _ := cmd.Flags().GetString("ttl")
 
@@ -106,10 +111,12 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	flags := cmd.PersistentFlags()
+
 	sc, err := safeClient.NewSafeClient(flags)
 	if err != nil {
 		return err
 	}
+
 	rtClient, err := sc.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {
 		return err
@@ -131,5 +138,6 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	log.Info("DataExport created", slog.String("name", deName), slog.String("namespace", namespace))
+
 	return nil
 }

@@ -80,6 +80,7 @@ func applyNowRelease(cmd *cobra.Command, args []string) error {
 		if errors.IsNotFound(err) {
 			return cli.SuggestSuitableReleasesOnNotFound(dynamicClient, moduleName, version, modulereleases.CanBeAppliedNow)
 		}
+
 		return fmt.Errorf("failed to get module release: %w", err)
 	}
 
@@ -87,9 +88,11 @@ func applyNowRelease(cmd *cobra.Command, args []string) error {
 	if release.IsApplyNow {
 		fmt.Fprintf(os.Stderr, "%s Module release '%s' already has apply-now annotation.\n", cli.MsgInfo, release.Name)
 		fmt.Fprintf(os.Stderr, "   Phase: %s\n", release.Phase)
+
 		if release.Message != "" {
 			fmt.Fprintf(os.Stderr, "   Message: %s\n", release.Message)
 		}
+
 		return nil
 	}
 
@@ -97,10 +100,13 @@ func applyNowRelease(cmd *cobra.Command, args []string) error {
 	if release.Phase != v1alpha1.ModuleReleasePhasePending {
 		fmt.Fprintf(os.Stderr, "%s Module release '%s' is not in Pending phase.\n", cli.MsgWarn, release.Name)
 		fmt.Fprintf(os.Stderr, "   Current phase: %s\n", release.Phase)
+
 		if release.Message != "" {
 			fmt.Fprintf(os.Stderr, "   Message: %s\n", release.Message)
 		}
+
 		fmt.Fprintln(os.Stderr, "\nOnly releases in 'Pending' phase can be applied.")
+
 		return nil
 	}
 
@@ -109,6 +115,7 @@ func applyNowRelease(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to set apply-now annotation: %w", err)
 	}
+
 	fmt.Printf("%s Module release '%s' marked for immediate deployment.\n", cli.MsgInfo, release.Name)
 	fmt.Println("   The release will be applied immediately, bypassing update windows.")
 

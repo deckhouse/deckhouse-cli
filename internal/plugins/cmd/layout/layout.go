@@ -95,5 +95,6 @@ func HomeFallbackPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to determine user home directory: %w", err)
 	}
+
 	return path.Join(home, HomeFallbackDir), nil
 }

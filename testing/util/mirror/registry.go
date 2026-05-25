@@ -39,6 +39,7 @@ type ListableBlobHandler struct {
 func (h *ListableBlobHandler) Get(ctx context.Context, repo string, hash v1.Hash) (io.ReadCloser, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
 	h.ingestedBlobs = append(h.ingestedBlobs, hash.String())
 
 	return h.BlobHandler.Get(ctx, repo, hash)
@@ -67,6 +68,7 @@ func SetupEmptyRegistryRepo(useTLS bool) ( /*host*/ string /*repoPath*/, string,
 
 	host = strings.TrimPrefix(server.URL, "http://")
 	repoPath = "/deckhouse/ee"
+
 	if useTLS {
 		host = strings.TrimPrefix(server.URL, "https://")
 	}
