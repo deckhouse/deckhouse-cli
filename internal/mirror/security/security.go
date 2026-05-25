@@ -147,11 +147,13 @@ func (svc *Service) pullSecurityDatabases(ctx context.Context) error {
 
 	if svc.options.DryRun {
 		svc.userLogger.InfoLn("[dry-run] Security database images that would be pulled:")
+
 		for _, imageSet := range svc.downloadList.Security {
 			for ref := range imageSet {
 				svc.userLogger.InfoLn("  " + ref)
 			}
 		}
+
 		return nil
 	}
 
@@ -186,6 +188,7 @@ func (svc *Service) pullSecurityDatabases(ctx context.Context) error {
 				return fmt.Errorf("sorting index manifests of %s: %w", l, err)
 			}
 		}
+
 		return nil
 	})
 	if err != nil {

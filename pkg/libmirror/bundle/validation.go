@@ -52,6 +52,7 @@ func ValidateUnpackedPackage(mandatoryLayouts map[string]string) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", layoutDescription, err)
 		}
+
 		index, err := l.ImageIndex()
 		if err != nil {
 			return fmt.Errorf("%s image index: %w", layoutDescription, err)

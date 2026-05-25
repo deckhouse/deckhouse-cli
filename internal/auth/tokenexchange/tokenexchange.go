@@ -125,15 +125,19 @@ func (c *Config) Validate() error {
 	if c.DexURL == "" {
 		errs = multierror.Append(errs, fmt.Errorf("--dex-url is required"))
 	}
+
 	if c.ClientID == "" {
 		errs = multierror.Append(errs, fmt.Errorf("--client-id is required"))
 	}
+
 	if c.ClientSecret == "" {
 		errs = multierror.Append(errs, fmt.Errorf("--client-secret is required"))
 	}
+
 	if c.SubjectToken == "" {
 		errs = multierror.Append(errs, fmt.Errorf("--subject-token is required"))
 	}
+
 	if c.ConnectorID == "" {
 		errs = multierror.Append(errs, fmt.Errorf("--connector-id is required"))
 	}
@@ -192,10 +196,12 @@ func (c *Client) Exchange() (*Response, error) {
 // buildTokenURL constructs the Dex token endpoint URL.
 func (c *Client) buildTokenURL() (string, error) {
 	baseURL := strings.TrimSuffix(c.config.DexURL, "/")
+
 	tokenURL, err := url.JoinPath(baseURL, "/token")
 	if err != nil {
 		return "", err
 	}
+
 	return tokenURL, nil
 }
 
@@ -211,6 +217,7 @@ func (c *Client) buildFormData() url.Values {
 	if subjectTokenType == "" {
 		subjectTokenType = "id_token"
 	}
+
 	if subjectTokenType == "id_token" {
 		data.Set("subject_token_type", TokenTypeIDToken)
 	} else {
@@ -222,6 +229,7 @@ func (c *Client) buildFormData() url.Values {
 	if scope == "" {
 		scope = DefaultScope
 	}
+
 	data.Set("scope", scope)
 
 	// Set requested token type
@@ -229,6 +237,7 @@ func (c *Client) buildFormData() url.Values {
 	if requestedTokenType == "" {
 		requestedTokenType = "id_token"
 	}
+
 	if requestedTokenType == "id_token" {
 		data.Set("requested_token_type", TokenTypeIDToken)
 	} else {
@@ -254,6 +263,7 @@ func (c *Client) handleErrorResponse(statusCode int, body []byte) error {
 	if hint != "" {
 		return fmt.Errorf("token exchange failed (status %d): %s\nHint: %s", statusCode, baseMsg, hint)
 	}
+
 	return fmt.Errorf("token exchange failed (status %d): %s", statusCode, baseMsg)
 }
 
@@ -305,6 +315,7 @@ func createHTTPClient(cfg *Config) (*http.Client, error) {
 		if !caCertPool.AppendCertsFromPEM(caCert) {
 			return nil, fmt.Errorf("failed to parse CA certificate")
 		}
+
 		tlsConfig.RootCAs = caCertPool
 	}
 

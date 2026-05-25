@@ -56,13 +56,17 @@ func (pc *PluginsCommand) ensureInstallRoot() error {
 	if !errors.Is(err, os.ErrPermission) {
 		return err
 	}
+
 	pc.logger.Debug("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'",
 		slog.String("was", pc.pluginDirectory), dkplog.Err(err))
+
 	fallback, ferr := layout.HomeFallbackPath()
 	if ferr != nil {
 		return fmt.Errorf("home fallback: %w", ferr)
 	}
+
 	pc.pluginDirectory = fallback
+
 	return os.MkdirAll(layout.PluginsRoot(pc.pluginDirectory), 0755)
 }
 
@@ -74,9 +78,11 @@ func (pc *PluginsCommand) cachedDescription(pluginName string) string {
 		pc.logger.Debug("failed to get plugin contract from cache", slog.String("error", err.Error()))
 		return ""
 	}
+
 	if contract == nil {
 		return ""
 	}
+
 	return contract.Description
 }
 
@@ -90,6 +96,7 @@ func NewCommand(logger *dkplog.Logger) *cobra.Command {
 		PersistentPreRun: func(_ *cobra.Command, _ []string) {
 			// init plugin services for subcommands after flags are parsed
 			pc.InitPluginServices()
+
 			if err := pc.ensureInstallRoot(); err != nil {
 				pc.logger.Warn("failed to ensure plugin root directory", slog.String("error", err.Error()))
 			}

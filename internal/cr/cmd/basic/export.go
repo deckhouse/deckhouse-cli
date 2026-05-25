@@ -58,6 +58,7 @@ Examples:
 			if len(args) > 1 {
 				dst = args[1]
 			}
+
 			return runExport(cmd, args[0], dst, opts)
 		},
 	}
@@ -76,6 +77,7 @@ func runExport(cmd *cobra.Command, src, dst string, opts *registry.Options) erro
 
 	exportErr := exportImage(img, w)
 	closeErr := closeFn()
+
 	if exportErr != nil {
 		// File-sink target is now a half-written tar that callers would
 		// likely consume by mistake (`tar tf` happily reads short streams).
@@ -83,8 +85,10 @@ func runExport(cmd *cobra.Command, src, dst string, opts *registry.Options) erro
 		if dst != "-" {
 			_ = os.Remove(dst)
 		}
+
 		return exportErr
 	}
+
 	return closeErr
 }
 
@@ -102,28 +106,35 @@ func exportImage(img v1.Image, w io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("get layers: %w", err)
 	}
+
 	if len(layers) == 1 {
 		mt, err := layers[0].MediaType()
 		if err != nil {
 			return fmt.Errorf("media type: %w", err)
 		}
+
 		if !mt.IsLayer() {
 			rc, err := layers[0].Uncompressed()
 			if err != nil {
 				return fmt.Errorf("uncompress: %w", err)
 			}
 			defer rc.Close()
+
 			if _, err := io.Copy(w, rc); err != nil {
 				return fmt.Errorf("copy: %w", err)
 			}
+
 			return nil
 		}
 	}
+
 	rc := mutate.Extract(img)
 	defer rc.Close()
+
 	if _, err := io.Copy(w, rc); err != nil {
 		return fmt.Errorf("copy: %w", err)
 	}
+
 	return nil
 }
 
@@ -131,14 +142,17 @@ func openExportSink(cmd *cobra.Command, dst string) (io.Writer, func() error, er
 	if dst == "-" {
 		return cmd.OutOrStdout(), func() error { return nil }, nil
 	}
+
 	f, err := os.Create(dst)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create %s: %w", dst, err)
 	}
+
 	return f, func() error {
 		if err := f.Close(); err != nil {
 			return fmt.Errorf("close %s: %w", dst, err)
 		}
+
 		return nil
 	}, nil
 }

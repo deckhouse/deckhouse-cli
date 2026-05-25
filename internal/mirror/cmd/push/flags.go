@@ -72,6 +72,7 @@ func ParseEnvironmentVariables() {
 			// TODO: Add logger
 			fmt.Println("Failed to parse timeout duration from environment variable D8_MIRROR_TIMEOUT: ", err)
 		}
+
 		if err == nil && timeout >= 0 {
 			MirrorTimeout = timeout
 		}

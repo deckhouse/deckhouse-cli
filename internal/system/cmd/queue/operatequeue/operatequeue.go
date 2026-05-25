@@ -32,6 +32,7 @@ func executeQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, path
 	}
 
 	fmt.Printf("%s\n", out)
+
 	return nil
 }
 
@@ -48,17 +49,22 @@ func fetchQueue(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOptio
 
 	fullEndpointURL := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, queuePath, pathFromOption)
 	getAPI := []string{"curl", fullEndpointURL}
+
 	podName, err := utilk8s.GetDeckhousePod(kubeCl)
 	if err != nil {
 		return "", err
 	}
+
 	executor, err := utilk8s.ExecInPod(config, kubeCl, getAPI, podName, namespace, containerName)
 	if err != nil {
 		return "", err
 	}
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+	var (
+		stdout bytes.Buffer
+		stderr bytes.Buffer
+	)
+
 	if err := executor.StreamWithContext(
 		context.Background(),
 		remotecommand.StreamOptions{
@@ -73,6 +79,7 @@ func fetchQueue(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOptio
 
 func watchQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOption string) error {
 	signals := make(chan os.Signal, 1)
+
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
@@ -82,6 +89,7 @@ func watchQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, pathFr
 	output := termenv.DefaultOutput()
 	output.AltScreen()
 	output.HideCursor()
+
 	defer func() {
 		output.ShowCursor()
 		output.ExitAltScreen()
@@ -99,10 +107,12 @@ func watchQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, pathFr
 		// Move cursor to the top-left corner.
 		frame.WriteString("\x1b[H")
 		fmt.Fprintf(&frame, "Watching queue - %s (press Ctrl+C to stop)\n\n", time.Now().Format("15:04:05"))
+
 		if fetchErr != nil {
 			fmt.Fprintf(&frame, "Error fetching queue: %v\n", fetchErr)
 		} else {
 			frame.WriteString(body)
+
 			if len(body) == 0 || body[len(body)-1] != '\n' {
 				frame.WriteByte('\n')
 			}

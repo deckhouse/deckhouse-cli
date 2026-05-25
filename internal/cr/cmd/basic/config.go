@@ -36,7 +36,9 @@ resolved to a single image via --platform.`,
 			if err != nil {
 				return err
 			}
+
 			_, err = cmd.OutOrStdout().Write(data)
+
 			return err
 		},
 	}

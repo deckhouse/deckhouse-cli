@@ -34,10 +34,12 @@ import (
 // Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, dynamicClient dynamic.Interface) statusresult.StatusResult {
 	releases, err := getDeckhouseReleases(ctx, dynamicClient)
+
 	output := color.RedString("Error getting Deckhouse releases: %v\n", err)
 	if err == nil {
 		output = formatDeckhouseReleases(releases)
 	}
+
 	return statusresult.StatusResult{
 		Title:  "Deckhouse Releases",
 		Level:  0,
@@ -71,6 +73,7 @@ func getDeckhouseReleases(ctx context.Context, dynamicCl dynamic.Interface) ([]D
 		if !ok {
 			continue
 		}
+
 		releases = append(releases, release)
 	}
 
@@ -111,6 +114,7 @@ func formatDeckhouseReleases(releases []DeckhouseRelease) string {
 	}
 
 	var sb strings.Builder
+
 	yellow := color.New(color.FgYellow).SprintFunc()
 
 	sb.WriteString(yellow("┌ Deckhouse Releases:\n"))
@@ -132,5 +136,6 @@ func formatDeckhouseReleases(releases []DeckhouseRelease) string {
 			timeAgo,
 			message)
 	}
+
 	return sb.String()
 }

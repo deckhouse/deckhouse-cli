@@ -33,6 +33,7 @@ func ValidateParameters(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("Invalid --kubeconfig: %w", err)
 	}
+
 	if !stats.Mode().IsRegular() {
 		return fmt.Errorf("Invalid --kubeconfig: %s is not a regular file", kubeconfigPath)
 	}

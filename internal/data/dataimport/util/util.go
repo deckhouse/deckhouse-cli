@@ -26,6 +26,7 @@ const (
 
 func GetDataImport(ctx context.Context, diName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataImport, error) {
 	diObj := &v1alpha1.DataImport{}
+
 	err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: diName}, diObj)
 	if err != nil {
 		return nil, fmt.Errorf("kube Get dataimport: %s", err.Error())
@@ -38,6 +39,7 @@ func GetDataImport(ctx context.Context, diName, namespace string, rtClient ctrlr
 					diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name,
 					condition.Message, condition.Reason)
 			}
+
 			break
 		}
 	}
@@ -53,6 +55,7 @@ func DeleteDataImport(ctx context.Context, diName, namespace string, rtClient ct
 		},
 	}
 	err := rtClient.Delete(ctx, diObj)
+
 	return err
 }
 
@@ -90,6 +93,7 @@ func CreateDataImport(
 	if err := rtClient.Create(ctx, obj); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("DataImport create error: %s", err.Error())
 	}
+
 	return nil
 }
 
@@ -110,15 +114,18 @@ func GetDataImportWithRestart(
 		}
 
 		var notReadyErr error
+
 		for _, condition := range diObj.Status.Conditions {
 			if condition.Type == "Expired" && condition.Status == "True" {
 				if err := DeleteDataImport(ctx, diName, namespace, rtClient); err != nil {
 					return nil, err
 				}
+
 				pvcTemplate := &v1alpha1.PersistentVolumeClaimTemplateSpec{}
 				if diObj.Spec.TargetRef.PvcTemplate != nil {
 					pvcTemplate = diObj.Spec.TargetRef.PvcTemplate
 				}
+
 				if err := CreateDataImport(
 					ctx,
 					diName,
@@ -132,6 +139,7 @@ func GetDataImportWithRestart(
 					return nil, err
 				}
 			}
+
 			if condition.Type == "Ready" {
 				if condition.Status != "True" {
 					notReadyErr = fmt.Errorf("DataImport %s/%s is not Ready: %s (%s)",
@@ -158,6 +166,7 @@ func GetDataImportWithRestart(
 		if notReadyErr == nil {
 			return diObj, nil
 		}
+
 		if i > maxRetryAttempts {
 			return nil, notReadyErr
 		}
@@ -168,6 +177,7 @@ func GetDataImportWithRestart(
 				slog.String("status", notReadyErr.Error()),
 				slog.Int("attempt", i))
 		}
+
 		time.Sleep(retryInterval * time.Second)
 	}
 }
@@ -179,9 +189,11 @@ func PrepareUpload(
 	sClient *safeClient.SafeClient,
 	log *slog.Logger,
 ) ( /*url*/ string /*volumeMode*/, string /*subClient*/, *safeClient.SafeClient, error) {
-	var url, volumeMode string
-	var subClient *safeClient.SafeClient
-	var decodedBytes []byte
+	var (
+		url, volumeMode string
+		subClient       *safeClient.SafeClient
+		decodedBytes    []byte
+	)
 
 	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {
@@ -190,6 +202,7 @@ func PrepareUpload(
 
 	// Fetch the current state so we can reconcile Spec.Publish before waiting.
 	diObj := new(v1alpha1.DataImport)
+
 	err = rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: diName}, diObj)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to get dataImport: %w", err)
@@ -209,11 +222,13 @@ func PrepareUpload(
 	}
 
 	var podURL string
+
 	switch {
 	case publish:
 		if diObj.Status.PublicURL == "" {
 			return "", "", nil, fmt.Errorf("empty PublicURL")
 		}
+
 		podURL = diObj.Status.PublicURL
 	case diObj.Status.URL != "":
 		podURL = diObj.Status.URL
@@ -288,6 +303,7 @@ func CheckUploadProgress(ctx context.Context, httpClient *safeClient.SafeClient,
 	if err != nil {
 		return 0, err
 	}
+
 	resp, err := httpClient.HTTPDo(req.WithContext(ctx))
 	if err != nil {
 		return 0, err
@@ -300,8 +316,10 @@ func CheckUploadProgress(ctx context.Context, httpClient *safeClient.SafeClient,
 			if serverOffset, perr := strconv.ParseInt(next, 10, 64); perr == nil && serverOffset >= 0 {
 				return serverOffset, nil
 			}
+
 			return 0, fmt.Errorf("invalid X-Next-Offset header")
 		}
+
 		return 0, nil
 	case http.StatusNotFound:
 		return 0, nil

@@ -28,6 +28,7 @@ func ValidateParameters(cmd *cobra.Command, _ []string) error {
 		"yaml": true,
 		"text": true,
 	}
+
 	outputFormat, _ := cmd.Flags().GetString("output")
 	if _, valid := allowedOutput[outputFormat]; !valid {
 		return fmt.Errorf("please provide valid output: text, yaml, json. Got '%s', try --help", outputFormat)

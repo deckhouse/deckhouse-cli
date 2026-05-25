@@ -42,8 +42,10 @@ type pluginsListData struct {
 }
 
 func (pc *PluginsCommand) pluginsListCommand() *cobra.Command {
-	var showInstalledOnly bool
-	var showAvailableOnly bool
+	var (
+		showInstalledOnly bool
+		showAvailableOnly bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -116,6 +118,7 @@ func (pc *PluginsCommand) fetchInstalledPlugins() ([]pluginDisplayInfo, error) {
 				Version:     "ERROR",
 				Description: err.Error(),
 			})
+
 			continue
 		}
 
@@ -126,6 +129,7 @@ func (pc *PluginsCommand) fetchInstalledPlugins() ([]pluginDisplayInfo, error) {
 				Version:     version.Original(),
 				Description: "failed to get description",
 			})
+
 			continue
 		}
 
@@ -242,6 +246,7 @@ func (pc *PluginsCommand) printAvailableSection(data *pluginsListData) {
 		fmt.Println("You can still use specific plugins if you know their names:")
 		fmt.Println("  - Use 'plugins contract <name>' to view plugin details")
 		fmt.Println("  - Use 'plugins install <name>' to install a plugin")
+
 		return
 	}
 

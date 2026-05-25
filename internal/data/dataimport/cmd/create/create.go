@@ -42,6 +42,7 @@ func cmdExamples() string {
 		"  # Create DataImport",
 		fmt.Sprintf("    ... %s my-import -n d8-storage-volume-data-manager -f - --ttl 2m --publish --wffc", cmdName),
 	}
+
 	return strings.Join(resp, "\n")
 }
 
@@ -57,6 +58,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 			if len(args) != 1 {
 				return fmt.Errorf("invalid arguments")
 			}
+
 			return nil
 		},
 	}
@@ -81,6 +83,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	wffc, _ := cmd.Flags().GetBool("wffc")
 
 	flags := cmd.PersistentFlags()
+
 	sc, err := safeClient.NewSafeClient(flags)
 	if err != nil {
 		return err
@@ -105,6 +108,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		if pvcSpec.Namespace == "" {
 			return fmt.Errorf("namespace is required")
 		}
+
 		namespace = pvcSpec.Namespace
 	}
 
@@ -121,6 +125,8 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	if err := util.CreateDataImport(ctx, name, namespace, ttl, publish, wffc, pvcSpec, rtClient); err != nil {
 		return err
 	}
+
 	log.Info("DataImport created", slog.String("name", name), slog.String("namespace", namespace))
+
 	return nil
 }

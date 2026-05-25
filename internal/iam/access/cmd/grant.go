@@ -140,6 +140,7 @@ func runGrant(cmd *cobra.Command, args []string) error {
 	}
 
 	var subjectPrincipal string
+
 	switch subjectKind {
 	case iamtypes.KindUser:
 		subjectPrincipal, err = resolveUserEmail(cmd.Context(), dyn, subjectName)
@@ -174,6 +175,7 @@ func runGrant(cmd *cobra.Command, args []string) error {
 		dryRun:           dryRun,
 		outputFmt:        outputFmt,
 	}
+
 	return applyGrants(cmd, dyn, opts)
 }
 
@@ -215,11 +217,13 @@ func applyGrants(cmd *cobra.Command, dyn dynamic.Interface, opts grantOpts) erro
 	}
 
 	var errs *multierror.Error
+
 	for _, spec := range specs {
 		client, err := grantClient(dyn, spec)
 		if err != nil {
 			return err
 		}
+
 		obj, err := buildGrantObject(spec)
 		if err != nil {
 			return err
@@ -229,6 +233,7 @@ func applyGrants(cmd *cobra.Command, dyn dynamic.Interface, opts grantOpts) erro
 			if err := utilk8s.PrintObject(cmd.OutOrStdout(), obj, opts.outputFmt); err != nil {
 				return err
 			}
+
 			continue
 		}
 
@@ -236,12 +241,15 @@ func applyGrants(cmd *cobra.Command, dyn dynamic.Interface, opts grantOpts) erro
 		if err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to create grant for %s: %v\n", grantHumanScope(spec), err)
 			errs = multierror.Append(errs, fmt.Errorf("%s: %w", grantHumanScope(spec), err))
+
 			continue
 		}
+
 		if err := utilk8s.PrintObject(cmd.OutOrStdout(), result, opts.outputFmt); err != nil {
 			return err
 		}
 	}
+
 	return errs.ErrorOrNil()
 }
 
@@ -267,15 +275,18 @@ func canonicalGrantSpecs(in canonicalGrantInput) ([]*canonicalGrantSpec, error) 
 		if len(in.Namespaces) == 0 {
 			return nil, errors.New("namespaced grant requires at least one namespace")
 		}
+
 		specs := make([]*canonicalGrantSpec, 0, len(in.Namespaces))
 		for _, ns := range in.Namespaces {
 			if ns == "" {
 				return nil, errors.New("namespace name must not be empty")
 			}
+
 			s := *base
 			s.Namespaces = []string{ns}
 			specs = append(specs, &s)
 		}
+
 		return specs, nil
 	case iamtypes.ScopeCluster, iamtypes.ScopeAllNamespaces:
 		return []*canonicalGrantSpec{base}, nil
@@ -283,12 +294,14 @@ func canonicalGrantSpecs(in canonicalGrantInput) ([]*canonicalGrantSpec, error) 
 		if len(in.LabelMatch) == 0 {
 			return nil, errors.New("labels scope requires at least one K=V pair")
 		}
+
 		s := *base
 		// copy to avoid sharing the caller's map
 		s.LabelMatch = make(map[string]string, len(in.LabelMatch))
 		for k, v := range in.LabelMatch {
 			s.LabelMatch[k] = v
 		}
+
 		return []*canonicalGrantSpec{&s}, nil
 	default:
 		return nil, fmt.Errorf("unsupported scope %q", in.ScopeType)
@@ -304,6 +317,7 @@ func grantClient(dyn dynamic.Interface, spec *canonicalGrantSpec) (dynamic.Resou
 		if len(spec.Namespaces) != 1 {
 			return nil, fmt.Errorf("namespaced grant must target exactly one namespace, got %d", len(spec.Namespaces))
 		}
+
 		return dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace(spec.Namespaces[0]), nil
 	case iamtypes.ScopeCluster, iamtypes.ScopeAllNamespaces, iamtypes.ScopeLabels:
 		return dyn.Resource(iamtypes.ClusterAuthorizationRuleGVR), nil
@@ -320,7 +334,9 @@ func buildGrantObject(spec *canonicalGrantSpec) (*unstructured.Unstructured, err
 	if err != nil {
 		return nil, err
 	}
+
 	labels := grantLabels(spec)
+
 	annotations, err := grantAnnotations(spec)
 	if err != nil {
 		return nil, err
@@ -345,6 +361,7 @@ func buildGrantObject(spec *canonicalGrantSpec) (*unstructured.Unstructured, err
 	}
 
 	var apiVersion, kind string
+
 	switch spec.ScopeType {
 	case iamtypes.ScopeNamespace:
 		// canonicalGrantSpecs guarantees exactly one namespace per spec for
@@ -353,9 +370,11 @@ func buildGrantObject(spec *canonicalGrantSpec) (*unstructured.Unstructured, err
 		if len(spec.Namespaces) != 1 {
 			return nil, fmt.Errorf("namespaced grant must target exactly one namespace, got %d", len(spec.Namespaces))
 		}
+
 		if spec.Namespaces[0] == "" {
 			return nil, errors.New("namespaced grant has empty namespace")
 		}
+
 		apiVersion = iamtypes.APIVersionDeckhouseV1Alpha1
 		kind = iamtypes.KindAuthorizationRule
 		metadata["namespace"] = spec.Namespaces[0]
@@ -370,12 +389,15 @@ func buildGrantObject(spec *canonicalGrantSpec) (*unstructured.Unstructured, err
 		if len(spec.LabelMatch) == 0 {
 			return nil, errors.New("labels scope requires at least one label pair")
 		}
+
 		apiVersion = iamtypes.APIVersionDeckhouseV1
 		kind = iamtypes.KindClusterAuthorizationRule
+
 		matchLabels := make(map[string]any, len(spec.LabelMatch))
 		for k, v := range spec.LabelMatch {
 			matchLabels[k] = v
 		}
+
 		ruleSpec["namespaceSelector"] = map[string]any{
 			"labelSelector": map[string]any{
 				"matchLabels": matchLabels,
@@ -412,12 +434,15 @@ func createOrUpdateGrant(cmd *cobra.Command, client dynamic.ResourceInterface,
 	switch {
 	case err == nil:
 		existingAnnot := existing.GetAnnotations()
+
 		newAnnot := obj.GetAnnotations()
 		if existingAnnot[iamtypes.AnnotationAccessCanonicalSpec] == newAnnot[iamtypes.AnnotationAccessCanonicalSpec] {
 			cmd.PrintErrf("%s/%s unchanged\n", scope, name)
 			return existing, nil
 		}
+
 		obj.SetResourceVersion(existing.GetResourceVersion())
+
 		return client.Update(cmd.Context(), obj, metav1.UpdateOptions{})
 	case apierrors.IsNotFound(err):
 		return client.Create(cmd.Context(), obj, metav1.CreateOptions{})
@@ -432,6 +457,7 @@ func grantHumanScope(spec *canonicalGrantSpec) string {
 	if spec.ScopeType == iamtypes.ScopeNamespace && len(spec.Namespaces) == 1 {
 		return iamtypes.KindAuthorizationRule + "/" + spec.Namespaces[0]
 	}
+
 	return iamtypes.KindClusterAuthorizationRule
 }
 
@@ -472,6 +498,7 @@ func parseScope(scope string, namespaces []string) (iamtypes.Scope, []string, ma
 		if err != nil {
 			return "", nil, nil, fmt.Errorf("--scope: %w", err)
 		}
+
 		return iamtypes.ScopeLabels, nil, labels, nil
 	default:
 		return "", nil, nil, fmt.Errorf("invalid --scope %q: expected one of cluster, all-namespaces, labels=K=V[,K2=V2,...]", scope)
@@ -485,21 +512,27 @@ func parseLabelMatch(s string) (map[string]string, error) {
 	if s == "" {
 		return nil, errors.New("labels=... must contain at least one K=V pair")
 	}
+
 	out := make(map[string]string)
+
 	for _, pair := range strings.Split(s, ",") {
 		kv := strings.SplitN(pair, "=", 2)
 		if len(kv) != 2 {
 			return nil, fmt.Errorf("invalid label pair %q: expected key=value", pair)
 		}
+
 		k, v := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
 		if k == "" || v == "" {
 			return nil, fmt.Errorf("invalid label pair %q: key and value must be non-empty", pair)
 		}
+
 		if _, dup := out[k]; dup {
 			return nil, fmt.Errorf("duplicate label key %q", k)
 		}
+
 		out[k] = v
 	}
+
 	return out, nil
 }
 
@@ -508,5 +541,6 @@ func toAnyMap(m map[string]string) map[string]any {
 	for k, v := range m {
 		result[k] = v
 	}
+
 	return result
 }

@@ -28,8 +28,10 @@ import (
 )
 
 func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
-	var version string
-	var useMajor int
+	var (
+		version  string
+		useMajor int
+	)
 
 	cmd := &cobra.Command{
 		Use:   "contract [plugin-name]",
@@ -56,8 +58,10 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 					slog.String("plugin", pluginName),
 					slog.String("tag", tag),
 					slog.String("error", err.Error()))
+
 				return fmt.Errorf("failed to get plugin contract: %w", err)
 			}
+
 			contract := service.DomainToContract(plugin)
 
 			// Display contract
@@ -65,10 +69,12 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("failed to marshal contract to JSON: %w", err)
 			}
+
 			yamlBytes, err := yaml.JSONToYAML(jsonBytes)
 			if err != nil {
 				return fmt.Errorf("failed to convert JSON to YAML: %w", err)
 			}
+
 			fmt.Println(string(yamlBytes))
 
 			return nil

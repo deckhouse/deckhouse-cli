@@ -33,9 +33,11 @@ func NewDynamicClient(cmd *cobra.Command) (dynamic.Interface, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup Kubernetes client: %w", err)
 	}
+
 	dyn, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
 	}
+
 	return dyn, nil
 }

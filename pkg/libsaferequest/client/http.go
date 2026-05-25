@@ -24,14 +24,17 @@ var (
 
 func newRestConfig(flags ...*pflag.FlagSet) (*rest.Config, error) {
 	kubeConfigFlags := genericclioptions.ConfigFlags{}
+
 	if len(flags) == 0 {
 		flags = []*pflag.FlagSet{pflag.CommandLine}
 	}
+
 	for _, f := range flags {
 		if flags != nil {
 			kubeConfigFlags.AddFlags(f)
 		}
 	}
+
 	restConfig, err := kubeConfigFlags.ToRESTConfig()
 	if err != nil {
 		return nil, err
@@ -55,6 +58,7 @@ func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return &SafeClient{restConfig}, nil
 }
 
@@ -146,12 +150,14 @@ func (c *SafeClient) NewRTClient(schemeFuncs ...func(s *apiruntime.Scheme) error
 	}
 
 	schemeFuncs = append(schemeFuncs, kubescheme.AddToScheme)
+
 	scheme := apiruntime.NewScheme()
 	for _, f := range schemeFuncs {
 		if err := f(scheme); err != nil {
 			return nil, err
 		}
 	}
+
 	clientOpts := ctrlrtclient.Options{
 		Scheme: scheme,
 	}
@@ -185,11 +191,14 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 		if !ok {
 			return transport
 		}
+
 		clonedTrasport := transport.Clone()
 		if clonedTrasport.TLSClientConfig == nil {
 			clonedTrasport.TLSClientConfig = &tls.Config{}
 		}
+
 		clonedTrasport.TLSClientConfig.RootCAs = sysPool
+
 		return clonedTrasport
 	}
 }

@@ -84,6 +84,7 @@ func BackupCustomResources(
 
 	cwResources := lo.Map(clusterwideResourcesToBackup, func(resource *customResourceDescription, _ int) []runtime.Object {
 		query := dynamic.ResourceInterface(dynamicCl.Resource(resource.gvr))
+
 		list, err := query.List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			log.Fatalf("Failed to list %s: %v", resource.gvr, err)

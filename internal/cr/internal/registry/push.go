@@ -36,21 +36,26 @@ func Push(ctx context.Context, ref string, obj partial.WithRawManifest, opts *Op
 	if obj == nil {
 		return v1.Hash{}, fmt.Errorf("push %s: object is nil", ref)
 	}
+
 	parsed, err := name.ParseReference(ref, opts.Name...)
 	if err != nil {
 		return v1.Hash{}, fmt.Errorf("parse reference %q: %w", ref, err)
 	}
+
 	remoteOpts := opts.remoteWithContext(ctx)
+
 	switch t := obj.(type) {
 	case v1.Image:
 		if err := remote.Write(parsed, t, remoteOpts...); err != nil {
 			return v1.Hash{}, fmt.Errorf("push image %s: %w", ref, err)
 		}
+
 		return t.Digest()
 	case v1.ImageIndex:
 		if err := remote.WriteIndex(parsed, t, remoteOpts...); err != nil {
 			return v1.Hash{}, fmt.Errorf("push index %s: %w", ref, err)
 		}
+
 		return t.Digest()
 	default:
 		return v1.Hash{}, fmt.Errorf("push %s: unsupported type %T", ref, obj)

@@ -77,6 +77,7 @@ func ProbeAvailableVersions(
 	if constraint == nil {
 		return nil, errors.New("probe requires a non-nil constraint")
 	}
+
 	if check == nil {
 		return nil, errors.New("probe requires a non-nil checker")
 	}
@@ -107,12 +108,14 @@ func ProbeAvailableVersions(
 		if err != nil {
 			return false, err
 		}
+
 		if !exists {
 			return false, nil
 		}
 
 		found = append(found, v)
 		patch++
+
 		return true, nil
 	}
 
@@ -123,6 +126,7 @@ func ProbeAvailableVersions(
 			if err != nil {
 				return nil, err
 			}
+
 			if !advanced {
 				break
 			}
@@ -133,10 +137,12 @@ func ProbeAvailableVersions(
 		// patch right after it.
 		minor++
 		patch = 0
+
 		advanced, err := probeOne()
 		if err != nil {
 			return nil, err
 		}
+
 		if advanced {
 			continue
 		}
@@ -145,10 +151,12 @@ func ProbeAvailableVersions(
 		major++
 		minor = 0
 		patch = 0
+
 		advanced, err = probeOne()
 		if err != nil {
 			return nil, err
 		}
+
 		if advanced {
 			continue
 		}

@@ -32,6 +32,7 @@ func NewPullCmd(opts *registry.Options) *cobra.Command {
 		cachePath string
 		format    string
 	)
+
 	cmd := &cobra.Command{
 		Use:   "pull IMAGE... PATH",
 		Short: "Pull one or more remote images to a local path",
@@ -76,6 +77,7 @@ On interruption (Ctrl+C):
 	cmd.Flags().StringVar(&format, "format", imageio.PullFormatTarball,
 		fmt.Sprintf("Output format (one of: %s, %s, %s)", imageio.PullFormatTarball, imageio.PullFormatLegacy, imageio.PullFormatOCI))
 	_ = cmd.RegisterFlagCompletionFunc("format", completion.Static(completion.PullFormats()...))
+
 	return cmd
 }
 
@@ -87,6 +89,7 @@ func runPull(cmd *cobra.Command, args []string, format, cachePath string, opts *
 	srcList, dst := args[:len(args)-1], args[len(args)-1]
 
 	keepIndex := format == imageio.PullFormatOCI
+
 	resolved, err := image.Resolve(cmd.Context(), srcList, keepIndex, cachePath, opts)
 	if err != nil {
 		return err

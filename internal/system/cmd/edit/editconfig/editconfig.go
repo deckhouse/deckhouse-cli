@@ -49,6 +49,7 @@ func BaseEditConfigCMD(cmd *cobra.Command, _ string, secret, dataKey string) err
 	if err != nil {
 		return err
 	}
+
 	defer func() {
 		_ = tempFile.Close()
 		_ = os.Remove(tempFile.Name())
@@ -58,6 +59,7 @@ func BaseEditConfigCMD(cmd *cobra.Command, _ string, secret, dataKey string) err
 	cmdExec.Stdin = os.Stdin
 	cmdExec.Stdout = os.Stdout
 	cmdExec.Stderr = os.Stderr
+
 	err = cmdExec.Run()
 	if err != nil {
 		return fmt.Errorf("Error opening in editor: %w", err)
@@ -76,6 +78,7 @@ func BaseEditConfigCMD(cmd *cobra.Command, _ string, secret, dataKey string) err
 	if err != nil {
 		return fmt.Errorf("Error encoding secret: %w", err)
 	}
+
 	_, err = kubeCl.CoreV1().
 		Secrets("kube-system").Patch(context.TODO(), secret, types.MergePatchType, encodedValue, metav1.PatchOptions{})
 	if err != nil {
@@ -83,6 +86,7 @@ func BaseEditConfigCMD(cmd *cobra.Command, _ string, secret, dataKey string) err
 	}
 
 	fmt.Println("Secret updated successfully")
+
 	return err
 }
 
@@ -96,6 +100,7 @@ func writeSecretTmp(secretConfig *v1.Secret, dataKey string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Error writing decoded data to file: %w", err)
 	}
+
 	if err = tempFile.Sync(); err != nil {
 		return nil, fmt.Errorf("Sync temp file buffers to disk: %w", err)
 	}

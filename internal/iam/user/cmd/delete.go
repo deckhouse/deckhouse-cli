@@ -83,11 +83,14 @@ func newDeleteCommand() *cobra.Command {
 			if keepMemberships {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: --keep-memberships set; user %q may still be referenced in Group memberships. Use \"d8 iam group remove-member\" to clean up.\n", name)
 			}
+
 			cmd.Printf("User %s deleted\n", name)
+
 			return nil
 		},
 	}
 	cmd.Flags().Bool("keep-memberships", false, "Do not remove the user from local Group spec.members; only delete the User CR")
+
 	return cmd
 }
 
@@ -105,7 +108,9 @@ func cleanupUserFromGroups(ctx context.Context, cmd *cobra.Command, dyn dynamic.
 	}
 
 	cleaned := 0
+
 	var errs *multierror.Error
+
 	userKindStr := string(iamtypes.KindUser)
 
 	for i := range groups.Items {
@@ -123,8 +128,10 @@ func cleanupUserFromGroups(ctx context.Context, cmd *cobra.Command, dyn dynamic.
 			errs = multierror.Append(errs, fmt.Errorf("group %q: %w", groupName, err))
 			continue
 		}
+
 		if removed {
 			cleaned++
+
 			fmt.Fprintf(cmd.ErrOrStderr(), "Removed user %q from group %q\n", userName, groupName)
 		}
 	}
@@ -133,9 +140,11 @@ func cleanupUserFromGroups(ctx context.Context, cmd *cobra.Command, dyn dynamic.
 		return fmt.Errorf("failed to clean up user %q from %d group(s): %w",
 			userName, errs.Len(), errs)
 	}
+
 	if cleaned > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Cleaned %d group membership(s) of user %q\n", cleaned, userName)
 	}
+
 	return nil
 }
 
@@ -156,16 +165,19 @@ func removeUserFromGroup(ctx context.Context, groupClient dynamic.NamespaceableR
 		raw, _, _ := unstructured.NestedSlice(obj.Object, "spec", "members")
 		filtered := make([]any, 0, len(raw))
 		found := false
+
 		for _, item := range raw {
 			m, ok := item.(map[string]any)
 			if !ok {
 				filtered = append(filtered, item)
 				continue
 			}
+
 			if fmt.Sprint(m["kind"]) == userKindStr && fmt.Sprint(m["name"]) == userName {
 				found = true
 				continue
 			}
+
 			filtered = append(filtered, item)
 		}
 
@@ -182,9 +194,12 @@ func removeUserFromGroup(ctx context.Context, groupClient dynamic.NamespaceableR
 		if _, err := groupClient.Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
 			return err
 		}
+
 		removed = true
+
 		return nil
 	})
+
 	return removed, err
 }
 
@@ -195,9 +210,11 @@ func groupContainsMember(obj *unstructured.Unstructured, kindStr, name string) b
 		if !ok {
 			continue
 		}
+
 		if fmt.Sprint(m["kind"]) == kindStr && fmt.Sprint(m["name"]) == name {
 			return true
 		}
 	}
+
 	return false
 }

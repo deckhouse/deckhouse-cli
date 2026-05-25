@@ -32,10 +32,12 @@ import (
 // Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, kubeCl kubernetes.Interface) statusresult.StatusResult {
 	nodes, err := getMasterNodes(ctx, kubeCl)
+
 	output := color.RedString("Error getting master nodes: %v\n", err)
 	if err == nil {
 		output = formatMasterNodes(nodes)
 	}
+
 	return statusresult.StatusResult{
 		Title:  "Master Nodes",
 		Level:  0,
@@ -58,6 +60,7 @@ func getMasterNodes(ctx context.Context, kubeCl kubernetes.Interface) ([]corev1.
 	if err != nil {
 		return nil, fmt.Errorf("failed to list master nodes: %w", err)
 	}
+
 	return nodes.Items, nil
 }
 
@@ -73,12 +76,14 @@ func masterNodeStatus(node corev1.Node) MasterNodeStatus {
 
 func nodeReadyStatus(node corev1.Node) string {
 	status := "NotReady"
+
 	for _, cond := range node.Status.Conditions {
 		if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
 			status = "Ready"
 			break
 		}
 	}
+
 	return status
 }
 
@@ -88,6 +93,7 @@ func nodeInternalIP(node corev1.Node) string {
 			return addr.Address
 		}
 	}
+
 	return "<none>"
 }
 
@@ -99,12 +105,15 @@ func formatMasterNodes(nodes []corev1.Node) string {
 
 	statuses := make([]MasterNodeStatus, 0, len(nodes))
 	maxNameLen := len("NAME")
+
 	for _, node := range nodes {
 		status := masterNodeStatus(node)
+
 		nameRuneLen := len([]rune(status.Name))
 		if nameRuneLen > maxNameLen {
 			maxNameLen = nameRuneLen
 		}
+
 		statuses = append(statuses, status)
 	}
 
@@ -126,6 +135,7 @@ func formatMasterNodes(nodes []corev1.Node) string {
 		if i == len(statuses)-1 {
 			prefix = "└"
 		}
+
 		nodeName := truncateName(s.Name, nameColWidth)
 		fmt.Fprintf(&sb, "%s %-*s %-*s %-*s %s\n",
 			yellow(prefix),
@@ -156,8 +166,10 @@ func truncateName(str string, maxRunes int) string {
 	if len(runes) <= maxRunes {
 		return str
 	}
+
 	if maxRunes > 3 {
 		return string(runes[:maxRunes-3]) + "..."
 	}
+
 	return string(runes[:maxRunes])
 }

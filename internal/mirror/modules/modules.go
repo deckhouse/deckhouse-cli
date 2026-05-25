@@ -50,12 +50,14 @@ type Module struct {
 
 func (m *Module) Versions() []*semver.Version {
 	versions := make([]*semver.Version, 0)
+
 	for _, release := range m.Releases {
 		v, err := semver.NewVersion(release)
 		if err == nil {
 			versions = append(versions, v)
 		}
 	}
+
 	return versions
 }
 
@@ -226,6 +228,7 @@ func (svc *Service) pullModules(ctx context.Context) error {
 
 	// Filter-out modules that are not allowed by the filter (blacklist or whitelist)
 	filteredModules := make([]moduleData, 0)
+
 	for _, moduleName := range moduleNames {
 		mod := &Module{
 			Name:         moduleName,
@@ -254,6 +257,7 @@ func (svc *Service) pullModules(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create OCI image layouts for modules: %w", err)
 	}
+
 	svc.layout = moduleImagesLayout
 
 	processName := "Pull Modules"
@@ -266,11 +270,14 @@ func (svc *Service) pullModules(ctx context.Context) error {
 	// successfully downloaded so far, rather than throw it all away and leave
 	// the user with nothing for a multi-hour pull.
 	pullCancelled := false
+
 	err = logger.Process(processName, func() error {
 		for i, module := range filteredModules {
 			if err := ctx.Err(); err != nil {
 				logger.Warnf("Pull cancelled; %d/%d modules attempted, will pack already-downloaded modules", i, len(filteredModules))
+
 				pullCancelled = true
+
 				return nil
 			}
 
@@ -279,12 +286,16 @@ func (svc *Service) pullModules(ctx context.Context) error {
 			if err := svc.pullSingleModule(ctx, module); err != nil {
 				if isContextErr(err) {
 					logger.Warnf("Pull of module %s cancelled, will pack already-downloaded modules", module.name)
+
 					pullCancelled = true
+
 					return nil
 				}
+
 				return fmt.Errorf("pull module %s: %w", module.name, err)
 			}
 		}
+
 		return nil
 	})
 	if err != nil {
@@ -313,6 +324,7 @@ func (svc *Service) pullModules(ctx context.Context) error {
 				return fmt.Errorf("sorting index manifests of %s: %w", l, err)
 			}
 		}
+
 		return nil
 	})
 	if err != nil {
@@ -367,6 +379,7 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 		if err := svc.pullModuleImages(ctx, module.name, moduleVersions, downloadList); err != nil {
 			return err
 		}
+
 		svc.pullReleaseVersionImages(ctx, module.name, moduleVersions, downloadList)
 		svc.pullInternalDigestImages(ctx, module.name, moduleVersions, downloadList)
 	}
@@ -441,6 +454,7 @@ func (svc *Service) discoverModuleNames(ctx context.Context) ([]string, error) {
 			// degrade into a no-op pull.
 			return nil, fmt.Errorf("--proxy-registry requires a whitelist of modules (--include-module)")
 		}
+
 		return svc.options.Filter.ModuleNames(), nil
 	}
 
@@ -448,6 +462,7 @@ func (svc *Service) discoverModuleNames(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list modules: %w", err)
 	}
+
 	return moduleNames, nil
 }
 
@@ -480,6 +495,7 @@ func (svc *Service) listTagsIfConstrained(ctx context.Context, moduleName string
 	case err != nil:
 		return nil, fmt.Errorf("list tags for module %s: %w", moduleName, err)
 	}
+
 	return tags, nil
 }
 
@@ -503,13 +519,16 @@ func (svc *Service) probeModuleTags(ctx context.Context, moduleName string, cons
 
 	check := func(ctx context.Context, v *semver.Version) (bool, error) {
 		tag := "v" + v.String()
+
 		err := svc.modulesService.Module(moduleName).CheckImageExists(ctx, tag)
 		if err == nil {
 			return true, nil
 		}
+
 		if errors.Is(err, client.ErrImageNotFound) {
 			return false, nil
 		}
+
 		return false, fmt.Errorf("check module %s tag %q: %w", moduleName, tag, err)
 	}
 
@@ -522,6 +541,7 @@ func (svc *Service) probeModuleTags(ctx context.Context, moduleName string, cons
 	for _, v := range versions {
 		tags = append(tags, "v"+v.String())
 	}
+
 	return tags, nil
 }
 
@@ -543,12 +563,15 @@ func (svc *Service) mergeAndDedupeVersions(moduleName, registryPath string, chan
 // printDryRunPlan prints the set of refs that would be pulled, without downloading.
 func (svc *Service) printDryRunPlan(moduleName string, downloadList *ImageDownloadList, versions []string) {
 	svc.userLogger.InfoLn("[dry-run] Module '" + moduleName + "' images that would be pulled:")
+
 	for ref := range downloadList.ModuleReleaseChannels {
 		svc.userLogger.InfoLn("  " + ref)
 	}
+
 	for _, version := range versions {
 		svc.userLogger.InfoLn("  " + svc.rootURL + "/modules/" + moduleName + ":" + version)
 	}
+
 	if len(versions) > 0 {
 		svc.userLogger.InfoLn("  (extra images discovery requires a real pull)")
 	}
@@ -577,6 +600,7 @@ func (svc *Service) pullModuleImages(ctx context.Context, moduleName string, ver
 	if err := svc.pullerService.PullImages(ctx, config); err != nil {
 		return fmt.Errorf("pull module images: %w", err)
 	}
+
 	return nil
 }
 
@@ -668,6 +692,7 @@ func (svc *Service) pullExtraImages(ctx context.Context, moduleName string, vers
 			return fmt.Errorf("pull extra image %s: %w", extraName, err)
 		}
 	}
+
 	return nil
 }
 
@@ -678,18 +703,21 @@ func (svc *Service) pullVexImages(ctx context.Context, moduleName string, downlo
 	for img := range downloadList.Module {
 		allImages = append(allImages, img)
 	}
+
 	for img := range downloadList.ModuleExtra {
 		allImages = append(allImages, img)
 	}
 
 	// Find VEX images and add to a separate set for pulling
 	vexImageSet := make(map[string]*puller.ImageMeta)
+
 	for _, img := range allImages {
 		vexImageName, err := svc.findVexImage(ctx, moduleName, img)
 		if err != nil {
 			svc.logger.Debug(fmt.Sprintf("Failed to find VEX image for %s: %v", img, err))
 			continue
 		}
+
 		if vexImageName != "" {
 			svc.logger.Debug(fmt.Sprintf("Found VEX image: %s", vexImageName))
 			vexImageSet[vexImageName] = nil
@@ -724,12 +752,14 @@ func (svc *Service) findVexImage(ctx context.Context, moduleName string, imageRe
 	if splitIndex == -1 {
 		return "", nil
 	}
+
 	tag := vexImageName[splitIndex+1:]
 
 	err := svc.modulesService.Module(moduleName).CheckImageExists(ctx, tag)
 	if errors.Is(err, client.ErrImageNotFound) {
 		return "", nil
 	}
+
 	if err != nil {
 		return "", err
 	}
@@ -761,12 +791,14 @@ func (svc *Service) extractVersionsFromReleaseChannels(ctx context.Context, modu
 			svc.logger.Debug(fmt.Sprintf("Failed to extract version.json for %s/%s: %v", moduleName, channel, err))
 			continue
 		}
+
 		if versionJSON.Version != "" {
 			version := versionJSON.Version
 			// Ensure version has "v" prefix (some may already have it)
 			if !strings.HasPrefix(version, "v") {
 				version = "v" + version
 			}
+
 			versions = append(versions, version)
 		}
 	}
@@ -789,6 +821,7 @@ func extractVersionJSON(img interface{ Extract() io.ReadCloser }) (*versionJSON,
 		if err == io.EOF {
 			return nil, fmt.Errorf("version.json not found in image")
 		}
+
 		if err != nil {
 			return nil, err
 		}
@@ -798,6 +831,7 @@ func extractVersionJSON(img interface{ Extract() io.ReadCloser }) (*versionJSON,
 			if err := json.NewDecoder(tr).Decode(&version); err != nil {
 				return nil, fmt.Errorf("parse version.json: %w", err)
 			}
+
 			return &version, nil
 		}
 	}
@@ -846,6 +880,7 @@ func (svc *Service) findExtraImages(ctx context.Context, moduleName string, vers
 
 		for imageName, tagValue := range extraImagesJSON {
 			var imageTag string
+
 			switch v := tagValue.(type) {
 			case float64:
 				imageTag = fmt.Sprintf("%.0f", v)
@@ -882,6 +917,7 @@ func extractExtraImagesJSON(img interface{ Extract() io.ReadCloser }) (map[strin
 		if err == io.EOF {
 			return nil, fmt.Errorf("extra_images.json not found in image")
 		}
+
 		if err != nil {
 			return nil, err
 		}
@@ -891,6 +927,7 @@ func extractExtraImagesJSON(img interface{ Extract() io.ReadCloser }) (map[strin
 			if err := json.NewDecoder(tr).Decode(&extraImages); err != nil {
 				return nil, fmt.Errorf("parse extra_images.json: %w", err)
 			}
+
 			return extraImages, nil
 		}
 	}
@@ -902,6 +939,7 @@ func extractExtraImagesJSON(img interface{ Extract() io.ReadCloser }) (map[strin
 // and stored with tag = hex part of digest.
 func (svc *Service) extractInternalDigestImages(ctx context.Context, moduleName string, versions []string) []string {
 	seenDigests := make(map[string]struct{})
+
 	var digestRefs []string
 
 	moduleRepo := svc.rootURL + "/modules/" + moduleName
@@ -937,6 +975,7 @@ func (svc *Service) extractInternalDigestImages(ctx context.Context, moduleName 
 			if _, seen := seenDigests[digest]; seen {
 				continue
 			}
+
 			seenDigests[digest] = struct{}{}
 
 			// Create reference in format repo@sha256:...
@@ -964,6 +1003,7 @@ func extractImagesDigestsJSON(img interface{ Extract() io.ReadCloser }) ([]strin
 		if err == io.EOF {
 			return nil, fmt.Errorf("images_digests.json not found in image")
 		}
+
 		if err != nil {
 			return nil, err
 		}
@@ -975,6 +1015,7 @@ func extractImagesDigestsJSON(img interface{ Extract() io.ReadCloser }) ([]strin
 			}
 			// Extract all sha256:... digests from JSON file
 			digests := digestRegex.FindAllString(string(data), -1)
+
 			return digests, nil
 		}
 	}
@@ -1002,6 +1043,7 @@ func (svc *Service) applyChannelAliases(moduleName string) error {
 		if errors.Is(err, layouts.ErrImageNotFound) {
 			return nil
 		}
+
 		return err
 	}
 
@@ -1069,11 +1111,13 @@ func getModuleNames(modules []moduleData) []string {
 	for i, m := range modules {
 		names[i] = m.name
 	}
+
 	return names
 }
 
 func deduplicateStrings(items []string) []string {
 	seen := make(map[string]struct{})
+
 	result := make([]string, 0, len(items))
 	for _, item := range items {
 		if _, ok := seen[item]; !ok {
@@ -1081,6 +1125,7 @@ func deduplicateStrings(items []string) []string {
 			result = append(result, item)
 		}
 	}
+
 	return result
 }
 
@@ -1097,6 +1142,7 @@ func createOCIImageLayoutsForModules(
 		if err != nil {
 			return nil, fmt.Errorf("create OCI image layouts for module %s: %w", moduleName, err)
 		}
+
 		layouts.list[moduleName] = moduleLayouts
 	}
 

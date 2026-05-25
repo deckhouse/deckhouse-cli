@@ -31,6 +31,7 @@ import (
 // Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, kubeCl kubernetes.Interface, restConfig *rest.Config) statusresult.StatusResult {
 	fetcher := queuefetcher.New(kubeCl, restConfig)
+
 	queue, err := fetcher.GetQueue(ctx)
 	if err != nil {
 		return statusresult.StatusResult{
@@ -39,6 +40,7 @@ func Status(ctx context.Context, kubeCl kubernetes.Interface, restConfig *rest.C
 			Output: color.RedString("Error getting Deckhouse queue: %v", err),
 		}
 	}
+
 	return statusresult.StatusResult{
 		Title:  "Deckhouse Queue",
 		Level:  0,
@@ -69,14 +71,17 @@ func formatDeckhouseQueue(queue queuefetcher.DeckhouseQueue) string {
 		if i == len(queue.Summary)-1 {
 			prefix = "└"
 		}
+
 		if strings.HasPrefix(sum, "Summary:") {
 			sb.WriteString(yellow(prefix+" ") + blue(sum) + "\n")
 		} else {
 			sb.WriteString(yellow(prefix+" ") + sum + "\n")
 		}
 	}
+
 	if queue.Header == "" && len(queue.Tasks) == 0 && len(queue.Summary) == 0 {
 		sb.WriteString(yellow("│ ") + "no queue information available\n")
 	}
+
 	return sb.String()
 }

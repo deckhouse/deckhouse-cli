@@ -41,6 +41,7 @@ func NewCommand() *cobra.Command {
 		RunE:          editProviderClusterConfig,
 	}
 	flags.AddFlags(providerClusterConfigurationCmd.Flags())
+
 	return providerClusterConfigurationCmd
 }
 
@@ -49,5 +50,6 @@ func editProviderClusterConfig(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("Error updating secret: %w", err)
 	}
+
 	return err
 }

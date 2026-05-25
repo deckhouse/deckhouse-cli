@@ -112,12 +112,14 @@ func completeRepositoryNames(cmd *cobra.Command, args []string, toComplete strin
 	defer cancel()
 
 	repoClient := dynamicClient.Resource(packageRepositoryGVR)
+
 	list, err := repoClient.List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveError
 	}
 
 	var names []string
+
 	for _, item := range list.Items {
 		name := item.GetName()
 		if strings.HasPrefix(name, toComplete) {
@@ -142,6 +144,7 @@ func runScan(cmd *cobra.Command, repositoryName string, opts *scanOptions) error
 		if errors.IsNotFound(err) {
 			return fmt.Errorf("PackageRepository '%s' not found", repositoryName)
 		}
+
 		return fmt.Errorf("failed to get PackageRepository: %w", err)
 	}
 
@@ -152,11 +155,14 @@ func runScan(cmd *cobra.Command, repositoryName string, opts *scanOptions) error
 		if err != nil {
 			return fmt.Errorf("failed to marshal operation: %w", err)
 		}
+
 		fmt.Printf("%s Would create PackageRepositoryOperation:\n---\n%s", cli.MsgInfo, string(yamlBytes))
+
 		return nil
 	}
 
 	operationClient := dynamicClient.Resource(packageRepositoryOperationGVR)
+
 	created, err := operationClient.Create(ctx, operation, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to create PackageRepositoryOperation: %w", err)

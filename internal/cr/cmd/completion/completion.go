@@ -103,13 +103,16 @@ func parseRef(s string) refParts {
 	if s == "" {
 		return refParts{kind: kindEmpty}
 	}
+
 	host, pathPart, found := strings.Cut(s, "/")
 	if !found {
 		return refParts{kind: kindHost, host: s}
 	}
+
 	if pathPart == "" {
 		return refParts{kind: kindHostSlash, host: host}
 	}
+
 	if before, _, found := strings.Cut(pathPart, "@"); found {
 		return refParts{
 			kind:     kindRepoDigest,
@@ -117,6 +120,7 @@ func parseRef(s string) refParts {
 			repoPath: strings.TrimRight(before, "/"),
 		}
 	}
+
 	if i := strings.LastIndex(pathPart, ":"); i != -1 {
 		return refParts{
 			kind:     kindRepoColon,
@@ -165,10 +169,12 @@ func Static(values ...string) cobra.CompletionFunc {
 // for the first positional, image completion for the rest.
 func PathThenImage() cobra.CompletionFunc {
 	imgFn := ImageRef()
+
 	return func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) == 0 {
 			return nil, cobra.ShellCompDirectiveDefault
 		}
+
 		return imgFn(cmd, args, toComplete)
 	}
 }
@@ -177,10 +183,12 @@ func PathThenImage() cobra.CompletionFunc {
 // completion for the first positional, file completion for the rest.
 func ImageThenPath() cobra.CompletionFunc {
 	imgFn := ImageRef()
+
 	return func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) == 0 {
 			return imgFn(cmd, args, toComplete)
 		}
+
 		return nil, cobra.ShellCompDirectiveDefault
 	}
 }
@@ -192,10 +200,12 @@ func ImageThenPath() cobra.CompletionFunc {
 // returned to avoid misleading the user with local file suggestions.
 func ImageThenInImagePath() cobra.CompletionFunc {
 	imgFn := ImageRef()
+
 	return func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) == 0 {
 			return imgFn(cmd, args, toComplete)
 		}
+
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 }
@@ -219,6 +229,7 @@ func completeRefValue(cmd *cobra.Command, toComplete string, withTags bool) ([]s
 		if len(repos) == 0 {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
+
 		suggestions := make([]string, 0, len(repos))
 		for _, r := range repos {
 			suggestions = append(suggestions, parts.host+"/"+r)
@@ -238,17 +249,22 @@ func completeRefValue(cmd *cobra.Command, toComplete string, withTags bool) ([]s
 		if !withTags {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
+
 		repoFull := parts.host + "/" + parts.repoPath
+
 		tags := tryListTags(cmd, repoFull)
 		if len(tags) == 0 {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
+
 		suggestions := make([]string, 0, len(tags))
 		for _, t := range tags {
 			suggestions = append(suggestions, repoFull+":"+t)
 		}
+
 		return filterByPrefix(suggestions, toComplete), cobra.ShellCompDirectiveNoFileComp
 	}
+
 	return nil, cobra.ShellCompDirectiveNoFileComp
 }
 
@@ -258,22 +274,27 @@ func completeRefValue(cmd *cobra.Command, toComplete string, withTags bool) ([]s
 func tryListCatalog(cmd *cobra.Command, host string) []string {
 	ctx, cancel := completionContext(cmd)
 	defer cancel()
+
 	opts := buildCompletionOpts(cmd)
 
 	var items []string
+
 	err := listCatalogFn(ctx, host, opts, func(repos []string) error {
 		items = append(items, repos...)
 		if len(items) >= completionMaxItems {
 			return errStopPagination
 		}
+
 		return nil
 	})
 	if err != nil && !errors.Is(err, errStopPagination) {
 		return nil
 	}
+
 	if len(items) > completionMaxItems {
 		items = items[:completionMaxItems]
 	}
+
 	return items
 }
 
@@ -281,22 +302,27 @@ func tryListCatalog(cmd *cobra.Command, host string) []string {
 func tryListTags(cmd *cobra.Command, repoRef string) []string {
 	ctx, cancel := completionContext(cmd)
 	defer cancel()
+
 	opts := buildCompletionOpts(cmd)
 
 	var items []string
+
 	err := listTagsFn(ctx, repoRef, opts, func(tags []string) error {
 		items = append(items, tags...)
 		if len(items) >= completionMaxItems {
 			return errStopPagination
 		}
+
 		return nil
 	})
 	if err != nil && !errors.Is(err, errStopPagination) {
 		return nil
 	}
+
 	if len(items) > completionMaxItems {
 		items = items[:completionMaxItems]
 	}
+
 	return items
 }
 
@@ -305,6 +331,7 @@ func completionContext(cmd *cobra.Command) (context.Context, context.CancelFunc)
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	return context.WithTimeout(ctx, completionTimeout)
 }
 
@@ -318,11 +345,13 @@ func buildCompletionOpts(cmd *cobra.Command) *registry.Options {
 	if insecure, err := cmd.Flags().GetBool(rootflagnames.Insecure); err == nil && insecure {
 		opts.WithInsecure().WithTransport(registry.InsecureTransport())
 	}
+
 	if platform, err := cmd.Flags().GetString(rootflagnames.Platform); err == nil && platform != "" {
 		if p, err := v1.ParsePlatform(platform); err == nil {
 			opts.WithPlatform(p)
 		}
 	}
+
 	return opts
 }
 
@@ -335,10 +364,12 @@ func dockerConfigDir() string {
 	if d := os.Getenv("DOCKER_CONFIG"); d != "" {
 		return d
 	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
+
 	return filepath.Join(home, ".docker")
 }
 
@@ -352,10 +383,12 @@ func loadDockerConfigRegistries() []string {
 	if dir == "" {
 		return nil
 	}
+
 	data, err := os.ReadFile(filepath.Join(dir, "config.json"))
 	if err != nil {
 		return nil
 	}
+
 	var cfg struct {
 		Auths       map[string]json.RawMessage `json:"auths"`
 		CredHelpers map[string]string          `json:"credHelpers"`
@@ -363,26 +396,34 @@ func loadDockerConfigRegistries() []string {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil
 	}
+
 	seen := make(map[string]struct{}, len(cfg.Auths)+len(cfg.CredHelpers))
+
 	var hosts []string
+
 	add := func(raw string) {
 		h := normalizeHost(raw)
 		if h == "" {
 			return
 		}
+
 		if _, dup := seen[h]; dup {
 			return
 		}
+
 		seen[h] = struct{}{}
 		hosts = append(hosts, h)
 	}
 	for k := range cfg.Auths {
 		add(k)
 	}
+
 	for k := range cfg.CredHelpers {
 		add(k)
 	}
+
 	sort.Strings(hosts)
+
 	return hosts
 }
 
@@ -391,10 +432,12 @@ func loadDockerConfigRegistries() []string {
 func normalizeHost(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "https://")
+
 	s = strings.TrimPrefix(s, "http://")
 	if i := strings.Index(s, "/"); i != -1 {
 		s = s[:i]
 	}
+
 	return s
 }
 
@@ -404,11 +447,13 @@ func filterByPrefix(items []string, prefix string) []string {
 	if prefix == "" {
 		return items
 	}
+
 	out := make([]string, 0, len(items))
 	for _, item := range items {
 		if strings.HasPrefix(item, prefix) {
 			out = append(out, item)
 		}
 	}
+
 	return out
 }

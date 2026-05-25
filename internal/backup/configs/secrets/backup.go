@@ -38,6 +38,7 @@ func BackupSecrets(
 				Kind:       "Secret",
 				APIVersion: corev1.SchemeGroupVersion.String(),
 			}
+
 			return &secret
 		})
 	})

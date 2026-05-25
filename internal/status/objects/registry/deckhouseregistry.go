@@ -32,10 +32,12 @@ import (
 // Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, kubeCl kubernetes.Interface) statusresult.StatusResult {
 	info, err := getDeckhouseRegistry(ctx, kubeCl)
+
 	output := color.RedString("Error getting Deckhouse registry: %v\n", err)
 	if err == nil {
 		output = formatDeckhouseRegistry(info)
 	}
+
 	return statusresult.StatusResult{
 		Title:  "Deckhouse Registry",
 		Level:  0,
@@ -54,6 +56,7 @@ func getDeckhouseRegistry(ctx context.Context, kubeCl kubernetes.Interface) (dec
 	if err != nil {
 		return deckhouseRegistry{}, fmt.Errorf("failed to get secret: %w", err)
 	}
+
 	return deckhouseRegistryProcessing(secret)
 }
 
@@ -64,12 +67,15 @@ func deckhouseRegistryProcessing(secret *v1.Secret) (deckhouseRegistry, error) {
 	if registryData, found := secret.Data["imagesRegistry"]; found {
 		dr.Registry = string(registryData)
 	}
+
 	if schemeData, found := secret.Data["scheme"]; found {
 		dr.Scheme = string(schemeData)
 	}
+
 	if dr.Registry == "" {
 		return deckhouseRegistry{}, fmt.Errorf("'imagesRegistry' not found")
 	}
+
 	if dr.Scheme == "" {
 		return deckhouseRegistry{}, fmt.Errorf("'scheme' not found")
 	}
@@ -85,6 +91,7 @@ func formatDeckhouseRegistry(info deckhouseRegistry) string {
 	if strings.TrimSpace(info.Registry) != "" {
 		registry = info.Registry
 	}
+
 	scheme := "not found"
 	if strings.TrimSpace(info.Scheme) != "" {
 		scheme = info.Scheme

@@ -33,10 +33,12 @@ import (
 // Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, dynamicClient dynamic.Interface) statusresult.StatusResult {
 	modules, err := getModules(ctx, dynamicClient)
+
 	output := color.RedString("Error getting modules: %v\n", err)
 	if err == nil {
 		output = formatModules(modules)
 	}
+
 	return statusresult.StatusResult{
 		Title:  "Modules",
 		Level:  0,
@@ -60,21 +62,26 @@ func getModules(ctx context.Context, dynamicCl dynamic.Interface) ([]CNIModule, 
 		Version:  "v1alpha1",
 		Resource: "modules",
 	}
+
 	moduleList, err := dynamicCl.Resource(gvr).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list modules: %w", err)
 	}
+
 	modules := make([]CNIModule, 0, len(moduleList.Items))
 	for _, item := range moduleList.Items {
 		if !strings.Contains(item.GetName(), "cni") {
 			continue
 		}
+
 		module, ok := CNIModuleProcessing(item.Object)
 		if !ok {
 			continue
 		}
+
 		modules = append(modules, module)
 	}
+
 	return modules, nil
 }
 
@@ -107,15 +114,18 @@ func CNIModuleProcessing(item map[string]interface{}) (CNIModule, bool) {
 
 	enabled := "False"
 	ready := "False"
+
 	for _, c := range conditionsRaw {
 		cond, ok := c.(map[string]interface{})
 		if !ok {
 			continue
 		}
+
 		conditionType, ok := cond["type"].(string)
 		if !ok {
 			continue
 		}
+
 		status, ok := cond["status"].(string)
 		if !ok {
 			continue
@@ -125,6 +135,7 @@ func CNIModuleProcessing(item map[string]interface{}) (CNIModule, bool) {
 			conditionType == constant.ModuleConditionEnabledByModuleManager {
 			enabled = status
 		}
+
 		if conditionType == constant.ModuleConditionIsReady {
 			ready = status
 		}
@@ -145,15 +156,19 @@ func formatModules(modules []CNIModule) string {
 	if len(modules) == 0 {
 		return color.YellowString("❗ No CNI modules found\n")
 	}
+
 	var sb strings.Builder
+
 	yellow := color.New(color.FgYellow).SprintFunc()
 	sb.WriteString(yellow("┌ CNI in cluster:\n"))
 	sb.WriteString(yellow(fmt.Sprintf("├ %-18s %-8s %-10s %-12s %-8s %-8s\n", "NAME", "WEIGHT", "SOURCE", "PHASE", "ENABLED", "READY")))
+
 	for i, module := range modules {
 		prefix := "├"
 		if i == len(modules)-1 {
 			prefix = "└"
 		}
+
 		name := module.Name
 		weight := module.Weight
 		source := module.Source
@@ -169,5 +184,6 @@ func formatModules(modules []CNIModule) string {
 			enabled,
 			ready)
 	}
+
 	return sb.String()
 }

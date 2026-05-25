@@ -401,6 +401,7 @@ func authStatusCode(err error) int {
 	if errors.As(err, &transportErr) {
 		return transportErr.StatusCode
 	}
+
 	return 0
 }
 
@@ -451,6 +452,7 @@ func serverStatusCode(err error) int {
 	if errors.As(err, &transportErr) {
 		return transportErr.StatusCode
 	}
+
 	return 0
 }
 
@@ -464,6 +466,7 @@ func dnsHostname(err error) string {
 	if errors.As(err, &dnsErr) {
 		return dnsErr.Name
 	}
+
 	return ""
 }
 
@@ -506,6 +509,7 @@ func networkAddr(err error) string {
 	if errors.As(err, &opErr) && opErr.Addr != nil {
 		return opErr.Addr.String()
 	}
+
 	return ""
 }
 

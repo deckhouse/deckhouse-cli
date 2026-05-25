@@ -47,13 +47,16 @@ func ListCatalog(ctx context.Context, regRef string, opts *Options, visit func(r
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+
 		page, err := catalogger.Next(ctx)
 		if err != nil {
 			return fmt.Errorf("read next catalog page: %w", err)
 		}
+
 		if err := visit(page.Repos); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }

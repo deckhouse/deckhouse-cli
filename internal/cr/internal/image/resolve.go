@@ -59,6 +59,7 @@ func Resolve(ctx context.Context, srcList []string, keepMultiArchIndex bool, cac
 		if _, dup := seen[src]; dup {
 			return nil, fmt.Errorf("duplicate source reference %q", src)
 		}
+
 		seen[src] = struct{}{}
 	}
 
@@ -85,12 +86,15 @@ func Resolve(ctx context.Context, srcList []string, keepMultiArchIndex bool, cac
 			if err != nil {
 				return nil, fmt.Errorf("read index %s: %w", src, err)
 			}
+
 			if fsCache != nil {
 				// Without this, --cache-path was a no-op for OCI pulls of
 				// multi-arch images (the most common shape, e.g. alpine).
 				idx = cache.ImageIndex(idx, fsCache)
 			}
+
 			out.Indices[src] = idx
+
 			continue
 		}
 
@@ -98,10 +102,13 @@ func Resolve(ctx context.Context, srcList []string, keepMultiArchIndex bool, cac
 		if err != nil {
 			return nil, fmt.Errorf("read image %s: %w", src, err)
 		}
+
 		if fsCache != nil {
 			img = cache.Image(img, fsCache)
 		}
+
 		out.Images[src] = img
 	}
+
 	return out, nil
 }

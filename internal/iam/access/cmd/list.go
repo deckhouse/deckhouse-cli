@@ -38,11 +38,14 @@ func runInventory(cmd *cobra.Command, fn func(inv *accessInventory, outputFmt st
 	if err != nil {
 		return err
 	}
+
 	inv, err := buildInventory(cmd.Context(), dyn)
 	if err != nil {
 		return err
 	}
+
 	outputFmt, _ := cmd.Flags().GetString("output")
+
 	return fn(inv, outputFmt)
 }
 
@@ -61,11 +64,13 @@ func NewListUsersCommand() *cobra.Command {
 				if outputFmt == "json" {
 					return printStructured(cmd.OutOrStdout(), buildUsersJSON(inv), outputFmt)
 				}
+
 				return printUsersTable(cmd, inv)
 			})
 		},
 	}
 	utilk8s.AddOutputFlag(cmd, "table", "table", "json")
+
 	return cmd
 }
 
@@ -83,11 +88,13 @@ func NewListGroupsCommand() *cobra.Command {
 				if outputFmt == "json" {
 					return printStructured(cmd.OutOrStdout(), buildGroupsJSON(inv), outputFmt)
 				}
+
 				return printGroupsTable(cmd, inv)
 			})
 		},
 	}
 	utilk8s.AddOutputFlag(cmd, "table", "table", "json")
+
 	return cmd
 }
 
@@ -108,15 +115,19 @@ func NewGetUserCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			userName := args[0]
+
 			return runInventory(cmd, func(inv *accessInventory, outputFmt string) error {
 				if _, ok := inv.Users[userName]; !ok {
 					return fmt.Errorf("user %q not found", userName)
 				}
+
 				warnings := userWarnings(inv, userName)
+
 				switch outputFmt {
 				case "json", "yaml":
 					payload := buildUserAccessJSON(inv, userName)
 					payload.Warnings = denil(warnings)
+
 					return printStructured(cmd.OutOrStdout(), payload, outputFmt)
 				case "table", "":
 					return printUserDetail(cmd, inv, userName, warnings)
@@ -127,6 +138,7 @@ func NewGetUserCommand() *cobra.Command {
 		},
 	}
 	utilk8s.AddOutputFlag(cmd, "table", "table", "json", "yaml")
+
 	return cmd
 }
 
@@ -144,15 +156,19 @@ func NewGetGroupCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			groupName := args[0]
+
 			return runInventory(cmd, func(inv *accessInventory, outputFmt string) error {
 				if _, ok := inv.GroupMembers[groupName]; !ok {
 					return fmt.Errorf("group %q not found", groupName)
 				}
+
 				warnings := groupWarnings(inv, groupName)
+
 				switch outputFmt {
 				case "json", "yaml":
 					payload := buildGroupDetailJSON(inv, groupName)
 					payload.Warnings = denil(warnings)
+
 					return printStructured(cmd.OutOrStdout(), payload, outputFmt)
 				case "table", "":
 					return printGroupDetail(cmd, inv, groupName, warnings)
@@ -163,6 +179,7 @@ func NewGetGroupCommand() *cobra.Command {
 		},
 	}
 	utilk8s.AddOutputFlag(cmd, "table", "table", "json", "yaml")
+
 	return cmd
 }
 
@@ -176,6 +193,7 @@ func printUsersTable(cmd *cobra.Command, inv *accessInventory) error {
 	for u := range inv.Users {
 		users = append(users, u)
 	}
+
 	sort.Strings(users)
 
 	for _, userName := range users {
@@ -197,6 +215,7 @@ func printUsersTable(cmd *cobra.Command, inv *accessInventory) error {
 			len(directGrants), len(inheritedGrants),
 			summary.String())
 	}
+
 	return tw.Flush()
 }
 
@@ -208,11 +227,13 @@ func printGroupsTable(cmd *cobra.Command, inv *accessInventory) error {
 	for g := range inv.GroupMembers {
 		groups = append(groups, g)
 	}
+
 	sort.Strings(groups)
 
 	for _, groupName := range groups {
 		members := inv.GroupMembers[groupName]
 		userCount, nestedCount := 0, 0
+
 		for _, m := range members {
 			if m.Kind == iamtypes.KindGroup {
 				nestedCount++
@@ -227,6 +248,7 @@ func printGroupsTable(cmd *cobra.Command, inv *accessInventory) error {
 		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%s\n",
 			groupName, userCount, nestedCount, len(grants), summary.String())
 	}
+
 	return tw.Flush()
 }
 
@@ -252,17 +274,21 @@ func printUserDetail(cmd *cobra.Command, inv *accessInventory, userName string, 
 	}
 
 	fmt.Fprintf(w, "\nDirect access:\n")
+
 	if len(directGrants) == 0 {
 		fmt.Fprintln(w, "  <none>")
 	}
+
 	for _, g := range directGrants {
 		printGrantToWriter(w, &g, "")
 	}
 
 	fmt.Fprintf(w, "\nInherited access:\n")
+
 	if len(inheritedGrants) == 0 {
 		fmt.Fprintln(w, "  <none>")
 	}
+
 	idx := buildUserGroupIndex(inv, userName)
 	for _, g := range inheritedGrants {
 		printGrantToWriter(w, &g, idx.findVia(g.SubjectPrincipal))
@@ -292,9 +318,11 @@ func printGroupDetail(cmd *cobra.Command, inv *accessInventory, groupName string
 	printBulletList(w, groupMembers)
 
 	fmt.Fprintf(w, "\nGrants (%d):\n", len(grants))
+
 	if len(grants) == 0 {
 		fmt.Fprintln(w, "  <none>")
 	}
+
 	for _, g := range grants {
 		printGrantToWriter(w, &g, "")
 	}
@@ -311,6 +339,7 @@ func printGrantToWriter(w io.Writer, g *normalizedGrant, via string) {
 	if g.ScopeType == iamtypes.ScopeNamespace && len(g.ScopeNamespaces) > 0 {
 		scope = fmt.Sprintf("namespaces %s", strings.Join(g.ScopeNamespaces, ", "))
 	}
+
 	managed := ""
 	if g.ManagedByD8 {
 		managed = " [d8-managed]"
@@ -319,12 +348,15 @@ func printGrantToWriter(w io.Writer, g *normalizedGrant, via string) {
 	fmt.Fprintf(w, "  - %s\n", g.AccessLevel)
 	fmt.Fprintf(w, "    Scope: %s\n", scope)
 	fmt.Fprintf(w, "    Source: %s%s\n", formatGrantSource(g), managed)
+
 	if via != "" {
 		fmt.Fprintf(w, "    Via: group %s\n", via)
 	}
+
 	if g.AllowScale {
 		fmt.Fprintln(w, "    allow-scale: true")
 	}
+
 	if g.PortForwarding {
 		fmt.Fprintln(w, "    port-forwarding: true")
 	}
@@ -341,9 +373,11 @@ func printEffectiveSummary(w io.Writer, summary *effectiveSummary) {
 	if summary.ClusterLevel != "" {
 		fmt.Fprintf(w, "  cluster scope: %s\n", summary.ClusterLevel)
 	}
+
 	for ns, level := range summary.Namespaced {
 		fmt.Fprintf(w, "  namespaced scope: %s(%s)\n", level, ns)
 	}
+
 	fmt.Fprintf(w, "  port-forwarding: %v%s\n", summary.PortForwarding, capabilityNote(summary.PortForwardingImplicit))
 	fmt.Fprintf(w, "  allow-scale: %v%s\n", summary.AllowScale, capabilityNote(summary.AllowScaleImplicit))
 }
@@ -352,7 +386,9 @@ func printWarnings(w io.Writer, warnings []string) {
 	if len(warnings) == 0 {
 		return
 	}
+
 	fmt.Fprintln(w, "\nWarnings:")
+
 	for _, warn := range warnings {
 		fmt.Fprintf(w, "  ! %s\n", warn)
 	}
@@ -360,6 +396,7 @@ func printWarnings(w io.Writer, warnings []string) {
 
 func partitionMembersByKind(members []memberRef) ([]string, []string) {
 	var users, groups []string
+
 	for _, m := range members {
 		if m.Kind == iamtypes.KindGroup {
 			groups = append(groups, m.Name)
@@ -367,6 +404,7 @@ func partitionMembersByKind(members []memberRef) ([]string, []string) {
 			users = append(users, m.Name)
 		}
 	}
+
 	return users, groups
 }
 
@@ -375,6 +413,7 @@ func printBulletList(w io.Writer, items []string) {
 		fmt.Fprintln(w, "  <none>")
 		return
 	}
+
 	for _, item := range items {
 		fmt.Fprintf(w, "  - %s\n", item)
 	}
@@ -391,6 +430,7 @@ type userGroupIndex struct {
 
 func buildUserGroupIndex(inv *accessInventory, userName string) userGroupIndex {
 	directGroups, transitiveGroups := inv.ResolveUserGroups(userName)
+
 	idx := userGroupIndex{
 		direct:     make(map[string]bool, len(directGroups)),
 		transitive: make(map[string]bool, len(transitiveGroups)),
@@ -398,9 +438,11 @@ func buildUserGroupIndex(inv *accessInventory, userName string) userGroupIndex {
 	for _, g := range directGroups {
 		idx.direct[g] = true
 	}
+
 	for _, g := range transitiveGroups {
 		idx.transitive[g] = true
 	}
+
 	return idx
 }
 
@@ -425,27 +467,32 @@ func userWarnings(inv *accessInventory, userName string) []string {
 	if _, ok := inv.Users[userName]; !ok {
 		return nil
 	}
+
 	cycles := inv.DetectGroupCycles()
 	_, transitiveGroups := inv.ResolveUserGroups(userName)
 	directGrants, inheritedGrants := inv.UserGrants(userName)
 
 	var out []string
+
 	for _, g := range transitiveGroups {
 		if cycle, ok := cycles[g]; ok {
 			out = append(out, fmt.Sprintf("group cycle detected: %s", strings.Join(cycle, " -> ")))
 		}
 	}
+
 	for _, g := range directGrants {
 		if !g.ManagedByD8 {
 			out = append(out, fmt.Sprintf("direct grant from manual object: %s", formatGrantSource(&g)))
 		}
 	}
+
 	for _, g := range inheritedGrants {
 		if !g.ManagedByD8 {
 			out = append(out, fmt.Sprintf("inherited grant from manual object: %s (via group %s)",
 				formatGrantSource(&g), g.SubjectPrincipal))
 		}
 	}
+
 	return out
 }
 
@@ -455,12 +502,14 @@ func groupWarnings(inv *accessInventory, groupName string) []string {
 	if _, ok := inv.GroupMembers[groupName]; !ok {
 		return nil
 	}
+
 	cycles := inv.DetectGroupCycles()
 
 	var out []string
 	if cycle, ok := cycles[groupName]; ok {
 		out = append(out, fmt.Sprintf("group cycle detected: %s", strings.Join(cycle, " -> ")))
 	}
+
 	for _, m := range inv.GroupMembers[groupName] {
 		switch m.Kind {
 		case iamtypes.KindUser:
@@ -473,6 +522,7 @@ func groupWarnings(inv *accessInventory, groupName string) []string {
 			}
 		}
 	}
+
 	return out
 }
 
@@ -593,6 +643,7 @@ func summaryToJSON(s *effectiveSummary) effectiveJSON {
 	for ns, level := range s.Namespaced {
 		levelNS[level] = append(levelNS[level], ns)
 	}
+
 	for level, nss := range levelNS {
 		sort.Strings(nss)
 		ej.Namespaces = append(ej.Namespaces, nsLevelJSON{AccessLevel: level, Namespaces: nss})
@@ -606,12 +657,14 @@ func buildUsersJSON(inv *accessInventory) []userAccessJSON {
 	for u := range inv.Users {
 		users = append(users, u)
 	}
+
 	sort.Strings(users)
 
 	items := make([]userAccessJSON, 0, len(users))
 	for _, userName := range users {
 		items = append(items, buildUserAccessJSON(inv, userName))
 	}
+
 	return items
 }
 
@@ -628,7 +681,9 @@ func buildUserAccessJSON(inv *accessInventory, userName string) userAccessJSON {
 	for _, g := range directGrants {
 		directGrantsJSON = append(directGrantsJSON, grantToJSON(&g, ""))
 	}
+
 	idx := buildUserGroupIndex(inv, userName)
+
 	inheritedGrantsJSON := make([]grantJSON, 0, len(inheritedGrants))
 	for _, g := range inheritedGrants {
 		inheritedGrantsJSON = append(inheritedGrantsJSON, grantToJSON(&g, idx.findVia(g.SubjectPrincipal)))
@@ -657,12 +712,14 @@ func buildGroupsJSON(inv *accessInventory) []groupSummaryJSON {
 	for g := range inv.GroupMembers {
 		groups = append(groups, g)
 	}
+
 	sort.Strings(groups)
 
 	items := make([]groupSummaryJSON, 0, len(groups))
 	for _, gName := range groups {
 		members := inv.GroupMembers[gName]
 		userCount, nestedCount := 0, 0
+
 		for _, m := range members {
 			if m.Kind == iamtypes.KindGroup {
 				nestedCount++
@@ -670,6 +727,7 @@ func buildGroupsJSON(inv *accessInventory) []groupSummaryJSON {
 				userCount++
 			}
 		}
+
 		grants := inv.GroupGrants(gName)
 		summary := computeEffectiveSummary(grants)
 		items = append(items, groupSummaryJSON{
@@ -680,6 +738,7 @@ func buildGroupsJSON(inv *accessInventory) []groupSummaryJSON {
 			Effective: summaryToJSON(summary),
 		})
 	}
+
 	return items
 }
 
@@ -692,6 +751,7 @@ func buildGroupDetailJSON(inv *accessInventory, groupName string) groupDetailJSO
 	for _, m := range members {
 		memberItems = append(memberItems, memberJSON{Kind: string(m.Kind), Name: m.Name})
 	}
+
 	grantItems := make([]grantJSON, 0, len(grants))
 	for _, g := range grants {
 		grantItems = append(grantItems, grantToJSON(&g, ""))

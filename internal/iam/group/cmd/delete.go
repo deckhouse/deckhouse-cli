@@ -48,6 +48,7 @@ func newDeleteCommand() *cobra.Command {
 			}
 
 			cmd.Printf("Group %s deleted\n", name)
+
 			return nil
 		},
 	}

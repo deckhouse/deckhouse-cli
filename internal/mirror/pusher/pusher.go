@@ -67,6 +67,7 @@ func (s *Service) PackageExists(bundleDir, pkgName string) bool {
 	if _, err := os.Stat(packagePath + ".chunk000"); err == nil {
 		return true
 	}
+
 	return false
 }
 
@@ -102,6 +103,7 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 		}
 
 		imageReferenceString := fmt.Sprintf("%s:%s", client.GetRegistry(), tag)
+
 		err = retry.RunTask(
 			ctx,
 			s.userLogger,
@@ -110,6 +112,7 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 				if err := client.PushImage(ctx, tag, img); err != nil {
 					return fmt.Errorf("write %s:%s to registry: %w", client.GetRegistry(), tag, err)
 				}
+
 				return nil
 			}))
 		if err != nil {
@@ -143,6 +146,7 @@ func dedupManifestsByShortTag(descriptors []v1.Descriptor, logger *dkplog.Logger
 		if tag == "" {
 			logger.Warn("Skipping image without short_tag annotation",
 				slog.String("digest", manifest.Digest.String()))
+
 			continue
 		}
 
@@ -152,6 +156,7 @@ func dedupManifestsByShortTag(descriptors []v1.Descriptor, logger *dkplog.Logger
 				slog.String("previous_digest", result[idx].Digest.String()),
 				slog.String("current_digest", manifest.Digest.String()))
 			result[idx] = manifest
+
 			continue
 		}
 
@@ -165,6 +170,7 @@ func dedupManifestsByShortTag(descriptors []v1.Descriptor, logger *dkplog.Logger
 // OpenPackage opens a package file, trying .tar first, then chunked
 func (s *Service) OpenPackage(bundleDir, pkgName string) (io.ReadCloser, error) {
 	p := filepath.Join(bundleDir, pkgName+".tar")
+
 	pkg, err := os.Open(p)
 	switch {
 	case os.IsNotExist(err):

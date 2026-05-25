@@ -54,6 +54,7 @@ func (t *RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 		t.sizes = append(t.sizes, resp.ContentLength)
 		resp.Body = bar.ProxyReader(resp.Body)
 	}
+
 	return resp, err
 }
 

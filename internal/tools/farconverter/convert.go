@@ -79,7 +79,9 @@ type List struct {
 
 func Convert(_ *cobra.Command, args []string) error {
 	input := args[0]
+
 	var rules []RawRule
+
 	log.Printf("Convert rules from %q", input)
 
 	data, err := os.ReadFile(input)
@@ -103,6 +105,7 @@ func Convert(_ *cobra.Command, args []string) error {
 	if _, err = buf.WriteTo(os.Stdout); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -129,6 +132,7 @@ func convert(path string, rules []RawRule) FalcoAuditRule {
 					result.Spec.RequiredK8sAuditPluginVersion = plugin["version"].(string)
 				}
 			}
+
 			continue
 		}
 
@@ -139,6 +143,7 @@ func convert(path string, rules []RawRule) FalcoAuditRule {
 					Condition: r["condition"].(string),
 				},
 			})
+
 			continue
 		}
 
@@ -149,6 +154,7 @@ func convert(path string, rules []RawRule) FalcoAuditRule {
 					Items: r["items"].([]any),
 				},
 			})
+
 			continue
 		}
 
@@ -183,6 +189,7 @@ func convert(path string, rules []RawRule) FalcoAuditRule {
 			}
 
 			result.Spec.Rules = append(result.Spec.Rules, FalcoAuditRuleSpecRule{Rule: ruleToAdd})
+
 			continue
 		}
 	}
@@ -195,5 +202,6 @@ func nameFromPath(path string) string {
 	path, _, _ = strings.Cut(path, ".")
 	path = slug.Make(path)
 	path = strcase.ToKebab(path)
+
 	return path
 }

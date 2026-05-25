@@ -35,6 +35,7 @@ func RunSwitch(targetCNI string) error {
 	if err != nil {
 		return fmt.Errorf("asking for confirmation: %w", err)
 	}
+
 	if !confirmed {
 		fmt.Println("Operation cancelled by user")
 		return ErrCancelled
@@ -58,6 +59,7 @@ func RunSwitch(targetCNI string) error {
 	if err != nil {
 		return fmt.Errorf("checking for existing migration: %w", err)
 	}
+
 	if existingMigration != nil {
 		return fmt.Errorf("a CNI migration (%s) is already in progress. "+
 			"Please use 'd8 network cni-migration watch' to monitor it or 'd8 network cni-migration cleanup' to abort it",

@@ -116,6 +116,7 @@ func (svc *PushService) Push(ctx context.Context) error {
 	if err := os.MkdirAll(dirPath, dirPermissions); err != nil {
 		return fmt.Errorf("create unified directory: %w", err)
 	}
+
 	defer func() {
 		if err := os.RemoveAll(dirPath); err != nil {
 			svc.logger.Warn("Failed to cleanup unified directory",
@@ -180,6 +181,7 @@ func (svc *PushService) findPackages(entries []os.DirEntry) []string {
 		if strings.HasSuffix(name, ".tar") {
 			pkgName := strings.TrimSuffix(name, ".tar")
 			packagesSet[pkgName] = struct{}{}
+
 			continue
 		}
 
@@ -194,6 +196,7 @@ func (svc *PushService) findPackages(entries []os.DirEntry) []string {
 	for pkg := range packagesSet {
 		packages = append(packages, pkg)
 	}
+
 	slices.Sort(packages)
 
 	return packages
@@ -270,10 +273,13 @@ func (svc *PushService) findLayouts(rootDir string) ([]string, error) {
 		if err != nil {
 			return err
 		}
+
 		if d.IsDir() || d.Name() != "index.json" {
 			return nil
 		}
+
 		layouts = append(layouts, filepath.Dir(path))
+
 		return nil
 	})
 	if err != nil {
@@ -281,6 +287,7 @@ func (svc *PushService) findLayouts(rootDir string) ([]string, error) {
 	}
 
 	slices.Sort(layouts)
+
 	return layouts, nil
 }
 
@@ -292,14 +299,17 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 		svc.logger.Warn("Failed to check layout",
 			slog.String("path", layoutDir),
 			slog.Any("error", err))
+
 		return nil
 	}
+
 	if !hasImages {
 		return nil
 	}
 
 	// Build registry segment from relative path
 	relPath, _ := filepath.Rel(rootDir, layoutDir)
+
 	segment := ""
 	if relPath != "." {
 		segment = relPath
@@ -311,6 +321,7 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 
 	// Create client with appropriate segments
 	targetClient := svc.client
+
 	if segment != "" {
 		// Apply each path component as a segment
 		for _, seg := range strings.Split(segment, string(os.PathSeparator)) {
@@ -330,6 +341,7 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 // layoutHasImages checks if an OCI layout has any images to push.
 func (svc *PushService) layoutHasImages(layoutDir string) (bool, error) {
 	layoutPath := layout.Path(layoutDir)
+
 	index, err := layoutPath.ImageIndex()
 	if err != nil {
 		return false, fmt.Errorf("read index: %w", err)
@@ -356,11 +368,13 @@ func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string) 
 			svc.userLogger.InfoLn("No modules directory found, skipping modules index")
 			return nil
 		}
+
 		return fmt.Errorf("read modules directory %q: %w", modulesDir, err)
 	}
 
 	// Find all module directories
 	var moduleNames []string
+
 	for _, entry := range entries {
 		if entry.IsDir() {
 			moduleNames = append(moduleNames, entry.Name())
@@ -399,5 +413,6 @@ func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string) 
 	}
 
 	svc.userLogger.Infof("Modules index created successfully")
+
 	return nil
 }

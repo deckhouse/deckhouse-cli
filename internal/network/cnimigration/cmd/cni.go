@@ -75,6 +75,7 @@ func NewCommand() *cobra.Command {
 	cmd.AddCommand(NewCmdCniMigrationSwitch())
 	cmd.AddCommand(NewCmdCniMigrationWatch())
 	cmd.AddCommand(NewCmdCniMigrationCleanup())
+
 	return cmd
 }
 
@@ -90,6 +91,7 @@ func NewCmdCniMigrationSwitch() *cobra.Command {
 					return nil
 				}
 			}
+
 			return fmt.Errorf(
 				"invalid --to-cni value %q. Supported values are: %s",
 				targetCNI,
@@ -104,14 +106,17 @@ func NewCmdCniMigrationSwitch() *cobra.Command {
 				if errors.Is(err, cni.ErrCancelled) {
 					return
 				}
+
 				log.Fatalf("❌ Error running switch command: %v", err)
 			}
 
 			fmt.Println()
+
 			if err := cni.RunWatch(); err != nil {
 				if errors.Is(err, cni.ErrMigrationFailed) {
 					os.Exit(1)
 				}
+
 				log.Fatalf("❌ Error monitoring switch progress: %v", err)
 			}
 		},
@@ -135,10 +140,12 @@ func NewCmdCniMigrationWatch() *cobra.Command {
 				if errors.Is(err, cni.ErrMigrationFailed) {
 					os.Exit(1)
 				}
+
 				log.Fatalf("❌ Error running watch command: %v", err)
 			}
 		},
 	}
+
 	return cmd
 }
 
@@ -153,5 +160,6 @@ func NewCmdCniMigrationCleanup() *cobra.Command {
 			}
 		},
 	}
+
 	return cmd
 }

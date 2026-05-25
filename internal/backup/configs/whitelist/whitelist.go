@@ -34,6 +34,7 @@ func (f *BakedInFilter) Matches(obj runtime.Object) bool {
 		log.Printf("%s does not contain metadata to filter with", obj.GetObjectKind().GroupVersionKind().String())
 		return false
 	}
+
 	apiVersion, kind := obj.GetObjectKind().GroupVersionKind().ToAPIVersionAndKind()
 	name, namespace := metadataAccessor.GetName(), metadataAccessor.GetNamespace()
 

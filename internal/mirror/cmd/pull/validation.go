@@ -37,18 +37,23 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 	if err = validateSourceRegistry(); err != nil {
 		return err
 	}
+
 	if err = parseAndValidateVersionFlags(); err != nil {
 		return err
 	}
+
 	if err = validateProxyRegistryFlag(); err != nil {
 		return err
 	}
+
 	if err = validateImagesBundlePathArg(args); err != nil {
 		return err
 	}
+
 	if err = validateTmpPath(args); err != nil {
 		return err
 	}
+
 	if err = validateChunkSizeFlag(); err != nil {
 		return err
 	}
@@ -71,9 +76,11 @@ func validateSourceRegistry() error {
 	if err != nil {
 		return fmt.Errorf("Validate source registry parameter: %w", err)
 	}
+
 	if registryURL.Host == "" {
 		return errors.New("--source you provided contains no registry host. Please specify source registry host address correctly")
 	}
+
 	if registryURL.Path == "" {
 		return errors.New("--source you provided contains no registry path. Please specify source registry repo path correctly")
 	}
@@ -87,12 +94,14 @@ func validateImagesBundlePathArg(args []string) error {
 	}
 
 	pullflags.ImagesBundlePath = filepath.Clean(args[0])
+
 	pathInfo, err := os.Stat(pullflags.ImagesBundlePath)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		if err = os.MkdirAll(pullflags.ImagesBundlePath, 0755); err != nil {
 			return fmt.Errorf("Create bundle directory at %s: %w", pullflags.ImagesBundlePath, err)
 		}
+
 		return validateImagesBundlePathArg(args)
 	case err != nil:
 		return err
@@ -122,9 +131,11 @@ func parseAndValidateVersionFlags() error {
 	if pullflags.SinceVersionString != "" && pullflags.DeckhouseTag != "" {
 		return errors.New("Using both --deckhouse-tag and --since-version at the same time is ambiguous")
 	}
+
 	if pullflags.PlatformConstraintString != "" && pullflags.DeckhouseTag != "" {
 		return errors.New("Using both --deckhouse-tag and --include-platform at the same time is ambiguous")
 	}
+
 	if pullflags.PlatformConstraintString != "" && pullflags.SinceVersionString != "" {
 		return errors.New("Using both --since-version and --include-platform at the same time is ambiguous: --include-platform already expresses a lower bound (e.g. \">=1.64\")")
 	}
@@ -171,6 +182,7 @@ func validateProxyRegistryFlag() error {
 	if pullflags.DeckhouseTag != "" {
 		return errors.New("--proxy-registry cannot be combined with --deckhouse-tag: pulling a single tag does not need a list-based discovery and uses the direct check-tag-exists path already")
 	}
+
 	if pullflags.SinceVersionString != "" {
 		return errors.New("--proxy-registry cannot be combined with --since-version: --since-version has no upper bound, so the probe cannot terminate. Use --include-platform with an explicit lower bound (and optional upper bound) instead")
 	}
@@ -188,6 +200,7 @@ func validateProxyRegistryFlag() error {
 	if needPlatform && pullflags.PlatformConstraintString == "" {
 		return errors.New("--proxy-registry requires --include-platform (or --no-platform to skip platform mirroring): the probe needs an explicit lower bound to start incrementing from")
 	}
+
 	if needModules {
 		if len(pullflags.ModulesWhitelist) == 0 {
 			return errors.New("--proxy-registry requires --include-module (or --no-modules to skip module mirroring): the probe needs explicit module names and version anchors to start incrementing from")
@@ -220,8 +233,10 @@ func validateTmpPath(_ []string) error {
 	if pullflags.TempDir == "" {
 		pullflags.TempDir = filepath.Join(pullflags.ImagesBundlePath, ".tmp")
 	}
+
 	if err := os.MkdirAll(pullflags.TempDir, 0755); err != nil {
 		return fmt.Errorf("Error creating temp directory at %s: %w", pullflags.TempDir, err)
 	}
+
 	return nil
 }

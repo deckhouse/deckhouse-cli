@@ -59,16 +59,20 @@ func NewFilter(filterExpressions []string, filterType FilterType) (*Filter, erro
 
 	for _, filterExpr := range filterExpressions {
 		moduleName, versionStr, hasVersion := strings.Cut(strings.TrimSpace(filterExpr), "@")
+
 		moduleName = strings.TrimSpace(moduleName)
 		if moduleName == "" {
 			return nil, fmt.Errorf("Malformed filter expression %q: empty module name", filterExpr)
 		}
+
 		if _, moduleRedeclared := filter.modules[moduleName]; moduleRedeclared {
 			return nil, fmt.Errorf("Malformed filter expression: module %s is declared multiple times", moduleName)
 		}
+
 		if !hasVersion {
 			constraint, _ := NewSemanticVersionConstraint(">=0.0.0")
 			filter.modules[moduleName] = constraint
+
 			continue
 		}
 
@@ -124,7 +128,9 @@ func (f *Filter) ModuleNames() []string {
 	for name := range f.modules {
 		names = append(names, name)
 	}
+
 	sort.Strings(names)
+
 	return names
 }
 
@@ -150,6 +156,7 @@ func parseVersionConstraint(v string) (VersionConstraint, error) {
 	if v == "" {
 		return nil, fmt.Errorf("empty constraint")
 	}
+
 	switch v[0] {
 	// has user defined constraint (nothing to do)
 	case '=', '>', '<', '~', '^':
@@ -172,11 +179,13 @@ func parseExact(body string) (VersionConstraint, error) {
 	if tag == "" {
 		return nil, fmt.Errorf("empty tag in %q", body)
 	}
+
 	if ch != "" {
 		if internal.ChannelIsValid(ch) {
 			return NewExactTagConstraintWithChannel(tag, ch), nil
 		}
 	}
+
 	return NewExactTagConstraint(tag), nil
 }
 
@@ -186,6 +195,7 @@ func parseSemver(v string) (VersionConstraint, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid semver %q: %w", v, err)
 	}
+
 	return c, nil
 }
 
@@ -194,6 +204,7 @@ func (f *Filter) ShouldMirrorReleaseChannels(moduleName string) bool {
 	if hasConstraint && constraint.IsExact() {
 		return false
 	}
+
 	return true
 }
 
@@ -231,6 +242,7 @@ func (f *Filter) VersionsToMirror(mod *Module) []string {
 		if !isExactTag {
 			return nil
 		}
+
 		return []string{exact.Tag()}
 	}
 
@@ -240,6 +252,7 @@ func (f *Filter) VersionsToMirror(mod *Module) []string {
 	}
 
 	matched := make([]*semver.Version, 0)
+
 	for _, v := range mod.Versions() {
 		if semverConstraint.Match(v) {
 			matched = append(matched, v)
@@ -253,6 +266,7 @@ func (f *Filter) VersionsToMirror(mod *Module) []string {
 	for _, v := range selected {
 		tags = append(tags, "v"+v.String())
 	}
+
 	return tags
 }
 
@@ -278,6 +292,7 @@ func restoreInclusiveAnchors(selected, available []*semver.Version, anchors []*s
 		if v == nil {
 			continue
 		}
+
 		availableByKey[v.String()] = v
 	}
 
@@ -291,13 +306,16 @@ func restoreInclusiveAnchors(selected, available []*semver.Version, anchors []*s
 		if _, already := selectedKeys[key]; already {
 			continue
 		}
+
 		registryVersion, isAvailable := availableByKey[key]
 		if !isAvailable {
 			continue
 		}
+
 		selected = append(selected, registryVersion)
 		selectedKeys[key] = struct{}{}
 	}
+
 	return selected
 }
 
@@ -316,7 +334,9 @@ func filterOnlyLatestPatches(versions []*semver.Version) []*semver.Version {
 		if v == nil {
 			continue
 		}
+
 		key := majorMinor{major: v.Major(), minor: v.Minor()}
+
 		current, ok := latest[key]
 		if !ok || v.GreaterThan(current) {
 			latest[key] = v
@@ -327,5 +347,6 @@ func filterOnlyLatestPatches(versions []*semver.Version) []*semver.Version {
 	for _, v := range latest {
 		result = append(result, v)
 	}
+
 	return result
 }

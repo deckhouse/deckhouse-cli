@@ -41,6 +41,7 @@ func NewCommand() *cobra.Command {
 		RunE:          editClusterConfig,
 	}
 	flags.AddFlags(clusterConfigurationCmd.Flags())
+
 	return clusterConfigurationCmd
 }
 
@@ -49,5 +50,6 @@ func editClusterConfig(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("Error updating secret: %w", err)
 	}
+
 	return err
 }

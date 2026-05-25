@@ -19,6 +19,7 @@ func Gostsum(cmd *cobra.Command, args []string) error {
 	}
 
 	var hasher hash.Hash
+
 	switch length {
 	case 256:
 		hasher = streebog256.New()
@@ -34,24 +35,31 @@ func Gostsum(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+
 		if _, err = fmt.Println(checksum); err != nil {
 			return err
 		}
+
 		return nil
 	}
 
 	// Have a set of file paths to hash provided as args
-	var reader io.Reader
-	var checksum string
+	var (
+		reader   io.Reader
+		checksum string
+	)
+
 	for _, filepath := range args {
 		reader, err = os.Open(filepath)
 		if err != nil {
 			return fmt.Errorf("%s: %w", filepath, err)
 		}
+
 		checksum, err = digest(bufio.NewReader(reader), hasher)
 		if err != nil {
 			return err
 		}
+
 		if _, err = fmt.Println(filepath+":", checksum); err != nil {
 			return err
 		}

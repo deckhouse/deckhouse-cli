@@ -46,6 +46,7 @@ var maxRetryAttempts = 60
 
 func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
 	deObj := &v1alpha1.DataExport{}
+
 	err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: deName}, deObj)
 	if err != nil {
 		return nil, fmt.Errorf("kube Get dataexport: %s", err.Error())
@@ -59,6 +60,7 @@ func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlr
 					deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name,
 					condition.Message, condition.Reason)
 			}
+
 			break
 		}
 	}
@@ -85,6 +87,7 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 					if err := DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
 						return nil, err
 					}
+
 					if err := CreateDataExport(
 						ctx,
 						deName, namespace, "",
@@ -120,6 +123,7 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 		if returnErr == nil {
 			break
 		}
+
 		if i > maxRetryAttempts {
 			return nil, fmt.Errorf("%w\n\nTo inspect DataExport status, run:\n  d8 k -n %s get de %s -o yaml",
 				returnErr, namespace, deName)
@@ -133,6 +137,7 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 				slog.String("timeout_in", remaining.String()),
 				slog.Int("attempt", i))
 		}
+
 		time.Sleep(time.Second * 3)
 	}
 
@@ -141,6 +146,7 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 
 func CreateDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, ttl string, rtClient ctrlrtclient.Client) (string, error) {
 	var volumeKind, volumeName string
+
 	lowerCaseDeName := strings.ToLower(deName)
 
 	switch {
@@ -192,6 +198,7 @@ func CreateDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, n
 	if err != nil {
 		return deName, err
 	}
+
 	log.Info("DataExport creating", slog.String("name", deName), slog.String("namespace", namespace))
 
 	return deName, nil
@@ -221,6 +228,7 @@ func CreateDataExport(ctx context.Context, deName, namespace, ttl, volumeKind, v
 			Publish: publish,
 		},
 	}
+
 	err := rtClient.Create(ctx, deCfg)
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("DataExporter create error: %s", err.Error())
@@ -236,6 +244,7 @@ func DeleteDataExport(ctx context.Context, deName, namespace string, rtClient ct
 			Namespace: namespace,
 		},
 	}
+
 	err := rtClient.Delete(ctx, deObj)
 	if err != nil {
 		return err
@@ -249,6 +258,7 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 
 	// Fetch the current state so we can reconcile Spec.Publish before waiting.
 	deObj := new(v1alpha1.DataExport)
+
 	err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: deName}, deObj)
 	if err != nil {
 		return "", "", "", fmt.Errorf("failed to get dataExport: %w", err)
@@ -262,6 +272,7 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 	}
 
 	log.Info("Waiting for DataExport to be ready", slog.String("name", deName), slog.String("namespace", namespace))
+
 	deObj, err = GetDataExportWithRestart(ctx, deName, namespace, rtClient, log)
 	if err != nil {
 		return "", "", "", err
@@ -292,9 +303,11 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 }
 
 func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, sClient *safeClient.SafeClient) (string, string, *safeClient.SafeClient, error) {
-	var url, volumeMode string
-	var subClient *safeClient.SafeClient
-	var decodedBytes []byte
+	var (
+		url, volumeMode string
+		subClient       *safeClient.SafeClient
+		decodedBytes    []byte
+	)
 
 	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {

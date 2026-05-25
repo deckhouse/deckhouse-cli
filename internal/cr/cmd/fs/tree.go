@@ -43,6 +43,7 @@ func newTreeCmd(opts *registry.Options) *cobra.Command {
 		dirsFirst bool
 		showSize  bool
 	)
+
 	cmd := &cobra.Command{
 		Use:   "tree IMAGE [PATH]",
 		Short: "Show the filesystem of a container image as a tree",
@@ -56,6 +57,7 @@ The merged filesystem is rendered.`,
 		ValidArgsFunction: completion.ImageThenInImagePath(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref := args[0]
+
 			root := ""
 			if len(args) == 2 {
 				root = imagefs.NormalizeScopePath(args[1])
@@ -75,49 +77,60 @@ The merged filesystem is rendered.`,
 			}
 
 			tree := buildTree(entries, root)
+
 			rootLabel := "/"
 			if root != "" {
 				rootLabel = "/" + root
 			}
+
 			return writeTreeText(cmd.OutOrStdout(), tree, rootLabel, maxDepth, dirsFirst, showSize)
 		},
 	}
 	cmd.Flags().IntVarP(&maxDepth, "depth", "L", 0, "Max depth to descend (0 = unlimited)")
 	cmd.Flags().BoolVar(&dirsFirst, "dirsfirst", false, "List directories before files")
 	cmd.Flags().BoolVar(&showSize, "size", false, "Show file sizes (human-readable: B / KB / MB)")
+
 	return cmd
 }
 
 func buildTree(entries []imagefs.Entry, root string) *treeNode {
 	tree := &treeNode{name: root, isDir: true, children: make(map[string]*treeNode)}
+
 	for _, e := range entries {
 		if e.Type == imagefs.TypeWhiteout {
 			continue
 		}
+
 		rel := e.Path
 		if root != "" {
 			if rel == root {
 				tree.entry = e
 				continue
 			}
+
 			prefix := root + "/"
 			if !strings.HasPrefix(rel, prefix) {
 				continue
 			}
+
 			rel = strings.TrimPrefix(rel, prefix)
 		}
+
 		insert(tree, rel, e)
 	}
+
 	return tree
 }
 
 func insert(parent *treeNode, rel string, entry imagefs.Entry) {
 	parts := strings.Split(rel, "/")
 	cur := parent
+
 	for i, part := range parts {
 		if part == "" {
 			continue
 		}
+
 		child, ok := cur.children[part]
 		if !ok {
 			child = &treeNode{name: part, children: make(map[string]*treeNode)}
@@ -131,10 +144,12 @@ func insert(parent *treeNode, rel string, entry imagefs.Entry) {
 		// "etc/passwd" (file under it) could flip "etc" back to non-dir
 		// after its children were registered, hiding the subtree.
 		isDirNow := i < len(parts)-1 || entry.IsDir()
+
 		child.isDir = child.isDir || isDirNow
 		if i == len(parts)-1 {
 			child.entry = entry
 		}
+
 		cur = child
 	}
 }
@@ -143,6 +158,7 @@ func writeTreeText(w io.Writer, tree *treeNode, rootLabel string, maxDepth int, 
 	if _, err := fmt.Fprintln(w, rootLabel); err != nil {
 		return err
 	}
+
 	return writeSubtree(w, tree, "", 1, maxDepth, dirsFirst, showSize)
 }
 
@@ -150,10 +166,12 @@ func writeSubtree(w io.Writer, node *treeNode, prefix string, depth, maxDepth in
 	if maxDepth > 0 && depth > maxDepth {
 		return nil
 	}
+
 	names := make([]string, 0, len(node.children))
 	for n := range node.children {
 		names = append(names, n)
 	}
+
 	sortChildren(names, node.children, dirsFirst)
 
 	for i, name := range names {
@@ -161,27 +179,33 @@ func writeSubtree(w io.Writer, node *treeNode, prefix string, depth, maxDepth in
 		isLast := i == len(names)-1
 		branch := "├── "
 		nextPrefix := prefix + "│   "
+
 		if isLast {
 			branch = "└── "
 			nextPrefix = prefix + "    "
 		}
+
 		displayName := name
 		if child.isDir {
 			displayName += "/"
 		}
+
 		line := prefix + branch + displayName
 		if !child.isDir && showSize {
 			line += "  " + output.HumanSize(child.entry.Size)
 		}
+
 		if _, err := fmt.Fprintln(w, line); err != nil {
 			return err
 		}
+
 		if child.isDir {
 			if err := writeSubtree(w, child, nextPrefix, depth+1, maxDepth, dirsFirst, showSize); err != nil {
 				return err
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -194,6 +218,7 @@ func sortChildren(names []string, children map[string]*treeNode, dirsFirst bool)
 				return di
 			}
 		}
+
 		return ni < nj
 	})
 }

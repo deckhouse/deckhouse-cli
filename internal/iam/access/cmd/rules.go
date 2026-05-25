@@ -72,17 +72,20 @@ func (r ruleRow) ref() string {
 // shape — e.g. rules get — see exactly what is on the object).
 func readSubjectRefs(obj *unstructured.Unstructured) []subjectRef {
 	raw, _, _ := unstructured.NestedSlice(obj.Object, "spec", "subjects")
+
 	out := make([]subjectRef, 0, len(raw))
 	for _, s := range raw {
 		m, ok := s.(map[string]any)
 		if !ok {
 			continue
 		}
+
 		out = append(out, subjectRef{
 			Kind: iamtypes.SubjectKind(fmt.Sprint(m["kind"])),
 			Name: fmt.Sprint(m["name"]),
 		})
 	}
+
 	return out
 }
 
@@ -208,6 +211,7 @@ func NewGetRuleCommand() *cobra.Command {
 		RunE:              runRulesGet,
 	}
 	utilk8s.AddOutputFlag(cmd, "text", "text", "json", "yaml")
+
 	return cmd
 }
 
@@ -216,6 +220,7 @@ func runRulesGet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
 	outputFmt, _ := cmd.Flags().GetString("output")
 
 	dyn, err := utilk8s.NewDynamicClient(cmd)
@@ -224,12 +229,14 @@ func runRulesGet(cmd *cobra.Command, args []string) error {
 	}
 
 	var obj *unstructured.Unstructured
+
 	switch refKind {
 	case iamtypes.KindClusterAuthorizationRule:
 		obj, err = dyn.Resource(iamtypes.ClusterAuthorizationRuleGVR).Get(cmd.Context(), refName, metav1.GetOptions{})
 	case iamtypes.KindAuthorizationRule:
 		obj, err = dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace(refNS).Get(cmd.Context(), refName, metav1.GetOptions{})
 	}
+
 	if err != nil {
 		return fmt.Errorf("getting %s: %w", args[0], err)
 	}
@@ -243,11 +250,13 @@ func runRulesGet(cmd *cobra.Command, args []string) error {
 		return utilk8s.PrintObject(cmd.OutOrStdout(), obj, outputFmt)
 	case "text", "":
 		row := ruleRowFromObject(obj)
+
 		reverse, err := reverseSubjectLookup(cmd.Context(), dyn, row.Subjects)
 		if err != nil {
 			// Reverse lookup is a best-effort nicety; degrade rather than fail.
 			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: reverse lookup of subjects failed: %v\n", err)
 		}
+
 		return printRuleRowText(cmd.OutOrStdout(), row, reverse)
 	default:
 		return fmt.Errorf("%w %q; use text|json|yaml", errUnsupportedFormat, outputFmt)
@@ -264,6 +273,7 @@ func collectRuleRows(ctx context.Context, dyn dynamic.Interface, includeCARs, in
 		if err != nil {
 			return nil, fmt.Errorf("listing ClusterAuthorizationRules: %w", err)
 		}
+
 		for i := range list.Items {
 			rows = append(rows, ruleRowFromObject(&list.Items[i]))
 		}
@@ -274,11 +284,13 @@ func collectRuleRows(ctx context.Context, dyn dynamic.Interface, includeCARs, in
 		if len(nsFilter) > 0 {
 			nsToList = nsFilter
 		}
+
 		for _, ns := range nsToList {
 			list, err := dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
 			if err != nil {
 				return nil, fmt.Errorf("listing AuthorizationRules in %q: %w", ns, err)
 			}
+
 			for i := range list.Items {
 				rows = append(rows, ruleRowFromObject(&list.Items[i]))
 			}
@@ -297,8 +309,12 @@ func ruleRowFromObject(obj *unstructured.Unstructured) ruleRow {
 
 	kind := obj.GetKind()
 	ns := obj.GetNamespace()
-	var scopeType iamtypes.Scope
-	var scopeNamespaces []string
+
+	var (
+		scopeType       iamtypes.Scope
+		scopeNamespaces []string
+	)
+
 	switch kind {
 	case iamtypes.KindClusterAuthorizationRule:
 		scopeType = iamtypes.ScopeCluster
@@ -345,6 +361,7 @@ func filterByManagement(rows []ruleRow, managedOnly, manualOnly bool) []ruleRow 
 			out = append(out, r)
 		}
 	}
+
 	return out
 }
 
@@ -356,9 +373,11 @@ func sortRuleRows(rows []ruleRow) {
 			// namespaced ones, matching operator mental model.
 			return rows[i].Kind < rows[j].Kind
 		}
+
 		if rows[i].Namespace != rows[j].Namespace {
 			return rows[i].Namespace < rows[j].Namespace
 		}
+
 		return rows[i].Name < rows[j].Name
 	})
 }
@@ -381,6 +400,7 @@ func managedByColumn(r ruleRow) string {
 	if r.ManagedByD8 {
 		return iamtypes.ManagedByValueCLI
 	}
+
 	return "manual"
 }
 
@@ -389,12 +409,15 @@ func capsColumn(r ruleRow) string {
 	if r.AllowScale {
 		caps = append(caps, "scale")
 	}
+
 	if r.PortForwarding {
 		caps = append(caps, "pfwd")
 	}
+
 	if len(caps) == 0 {
 		return "-"
 	}
+
 	return strings.Join(caps, ",")
 }
 
@@ -412,6 +435,7 @@ func printRuleRowsTable(w io.Writer, rows []ruleRow) error {
 		if ns == "" {
 			ns = "-"
 		}
+
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
 			shortKind(r.Kind),
 			ns,
@@ -424,6 +448,7 @@ func printRuleRowsTable(w io.Writer, rows []ruleRow) error {
 			humanAge(r.CreationTime),
 		)
 	}
+
 	return tw.Flush()
 }
 
@@ -431,9 +456,11 @@ func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
+
 	if max <= 1 {
 		return s[:max]
 	}
+
 	return s[:max-1] + "…"
 }
 
@@ -444,6 +471,7 @@ func humanAge(t time.Time) string {
 	if t.IsZero() {
 		return "-"
 	}
+
 	return duration.HumanDuration(time.Since(t))
 }
 
@@ -453,28 +481,34 @@ func printRuleRowText(w io.Writer, r ruleRow, reverse map[string]string) error {
 	fmt.Fprintf(w, "=== %s ===\n", r.ref())
 	fmt.Fprintf(w, "  Kind:         %s\n", r.Kind)
 	fmt.Fprintf(w, "  Name:         %s\n", r.Name)
+
 	if r.Namespace != "" {
 		fmt.Fprintf(w, "  Namespace:    %s\n", r.Namespace)
 	}
+
 	accessLevel := r.AccessLevel
 	if accessLevel == "" {
 		accessLevel = "<unset>"
 	}
+
 	fmt.Fprintf(w, "  Access level: %s\n", accessLevel)
 	fmt.Fprintf(w, "  Scope:        %s\n", r.ScopeType)
 	fmt.Fprintf(w, "  Allow scale:  %v\n", r.AllowScale)
 	fmt.Fprintf(w, "  Port forward: %v\n", r.PortForwarding)
 	fmt.Fprintf(w, "  Managed by:   %s\n", managedByColumn(r))
+
 	if !r.CreationTime.IsZero() {
 		fmt.Fprintf(w, "  Age:          %s (%s)\n", humanAge(r.CreationTime), r.CreationTime.UTC().Format(time.RFC3339))
 	}
 
 	fmt.Fprintf(w, "\n=== Subjects (%d) ===\n", len(r.Subjects))
+
 	if len(r.Subjects) == 0 {
 		fmt.Fprintln(w, "  <none>")
 	} else {
 		for _, s := range r.Subjects {
 			key := string(s.Kind) + "/" + s.Name
+
 			local := reverse[key]
 			switch local {
 			case "":
@@ -531,6 +565,7 @@ func ruleRowToJSON(r ruleRow) ruleJSON {
 	for _, s := range r.Subjects {
 		subjects = append(subjects, subjectJSON{Kind: string(s.Kind), Name: s.Name})
 	}
+
 	return ruleJSON{
 		Kind:           r.Kind,
 		Name:           r.Name,
@@ -550,6 +585,7 @@ func buildRuleRowsJSON(rows []ruleRow) []ruleJSON {
 	for _, r := range rows {
 		items = append(items, ruleRowToJSON(r))
 	}
+
 	return items
 }
 
@@ -574,11 +610,13 @@ func parseRuleRef(ref string) (string, string, string, error) {
 		if len(parts) != 2 {
 			return "", "", "", fmt.Errorf("%w %q: ClusterAuthorizationRule reference must be of the form ClusterAuthorizationRule/NAME", ErrInvalidRuleRef, ref)
 		}
+
 		return iamtypes.KindClusterAuthorizationRule, "", parts[1], nil
 	case iamtypes.KindAuthorizationRule, "AR", "ar":
 		if len(parts) != 3 {
 			return "", "", "", fmt.Errorf("%w %q: AuthorizationRule reference must be of the form AuthorizationRule/NAMESPACE/NAME", ErrInvalidRuleRef, ref)
 		}
+
 		return iamtypes.KindAuthorizationRule, parts[1], parts[2], nil
 	default:
 		return "", "", "", fmt.Errorf("%w %q: unknown rule kind %q (use ClusterAuthorizationRule, AuthorizationRule, CAR or AR)", ErrInvalidRuleRef, ref, parts[0])
@@ -596,6 +634,7 @@ func reverseSubjectLookup(ctx context.Context, dyn dynamic.Interface, subjects [
 	result := make(map[string]string)
 	needUsers := false
 	needGroups := false
+
 	for _, s := range subjects {
 		switch s.Kind {
 		case iamtypes.KindUser:
@@ -610,18 +649,22 @@ func reverseSubjectLookup(ctx context.Context, dyn dynamic.Interface, subjects [
 		if err != nil {
 			return nil, fmt.Errorf("listing Users: %w", err)
 		}
+
 		emailToCR := make(map[string]string, len(userList.Items))
 		for i := range userList.Items {
 			u := &userList.Items[i]
+
 			email, _, _ := unstructured.NestedString(u.Object, "spec", "email")
 			if email != "" {
 				emailToCR[email] = u.GetName()
 			}
 		}
+
 		for _, s := range subjects {
 			if s.Kind != iamtypes.KindUser {
 				continue
 			}
+
 			if cr, ok := emailToCR[s.Name]; ok {
 				result[string(iamtypes.KindUser)+"/"+s.Name] = cr
 			}
@@ -633,14 +676,17 @@ func reverseSubjectLookup(ctx context.Context, dyn dynamic.Interface, subjects [
 		if err != nil {
 			return nil, fmt.Errorf("listing Groups: %w", err)
 		}
+
 		present := make(map[string]bool, len(groupList.Items))
 		for i := range groupList.Items {
 			present[groupList.Items[i].GetName()] = true
 		}
+
 		for _, s := range subjects {
 			if s.Kind != iamtypes.KindGroup {
 				continue
 			}
+
 			if present[s.Name] {
 				result[string(iamtypes.KindGroup)+"/"+s.Name] = s.Name
 			}

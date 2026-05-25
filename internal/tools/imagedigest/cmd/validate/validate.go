@@ -35,6 +35,7 @@ func NewCommand() *cobra.Command {
 			if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
 				return err
 			}
+
 			return nil
 		},
 		RunE: runValidate,
@@ -69,12 +70,15 @@ func runValidate(cmd *cobra.Command, args []string) error {
 
 		if fix {
 			log.Info().Msg("Fix GOST Image Digest")
+
 			newDigest, fixErr := imagedigest.PullAnnotatePush(imageName, opts...)
 			if fixErr != nil {
 				log.Fatal().Err(fixErr).Msg("AddGostImageDigest")
 			}
+
 			log.Info().Msgf("GOST Image Digest: %s", newDigest)
 			log.Info().Msg("Added successfully")
+
 			return nil
 		}
 

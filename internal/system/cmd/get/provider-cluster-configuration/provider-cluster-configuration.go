@@ -39,6 +39,7 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE:          getProviderClusterConfig,
 	}
+
 	return providerClusterConfigurationCmd
 }
 
@@ -47,5 +48,6 @@ func getProviderClusterConfig(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("Error getting secret: %w", err)
 	}
+
 	return nil
 }

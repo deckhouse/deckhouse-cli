@@ -103,6 +103,7 @@ func newDeprecatedResetPasswordCommand() *cobra.Command {
 			fmt.Fprintln(cmd.ErrOrStderr(),
 				"Warning: 'd8 user reset-password <user> <hash>' is deprecated; "+
 					"please use 'd8 iam user reset-password <user> --password-hash <hash>' instead.")
+
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -126,6 +127,7 @@ func newDeprecatedResetPasswordCommand() *cobra.Command {
 		},
 	}
 	addWaitFlags(cmd)
+
 	return cmd
 }
 
@@ -141,10 +143,13 @@ func deprecateForward(sub *cobra.Command, newPath string) *cobra.Command {
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"Warning: 'd8 user %s' is deprecated; please use '%s' instead.\n",
 			cmd.Name(), newPath)
+
 		if origPre != nil {
 			return origPre(cmd, args)
 		}
+
 		return nil
 	}
+
 	return sub
 }

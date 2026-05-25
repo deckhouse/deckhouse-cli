@@ -181,6 +181,7 @@ func runTokenExchange(flags *tokenExchangeFlags) error {
 	case "json":
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
+
 		if err := encoder.Encode(resp); err != nil {
 			return fmt.Errorf("failed to encode response: %w", err)
 		}

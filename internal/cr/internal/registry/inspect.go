@@ -28,6 +28,7 @@ func FetchManifest(ctx context.Context, ref string, opts *Options) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
+
 	return desc.Manifest, nil
 }
 
@@ -38,10 +39,12 @@ func FetchConfig(ctx context.Context, ref string, opts *Options) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
+
 	cfg, err := img.RawConfigFile()
 	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", ref, err)
 	}
+
 	return cfg, nil
 }
 
@@ -51,5 +54,6 @@ func FetchDigest(ctx context.Context, ref string, opts *Options) (string, error)
 	if err != nil {
 		return "", err
 	}
+
 	return desc.Digest.String(), nil
 }

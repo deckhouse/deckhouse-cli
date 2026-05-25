@@ -36,7 +36,9 @@ registry returned them. Suitable for piping to jq or for signature verification.
 			if err != nil {
 				return err
 			}
+
 			_, err = cmd.OutOrStdout().Write(data)
+
 			return err
 		},
 	}

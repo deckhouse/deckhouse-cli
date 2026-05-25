@@ -56,12 +56,14 @@ func completeModuleReleaseAndVersion(cmd *cobra.Command, args []string, toComple
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveError
 		}
+
 		return filterByPrefix(modules, toComplete), cobra.ShellCompDirectiveNoFileComp
 	case completingVersion:
 		versions, err := modulereleases.FindVersions(dynamicClient, args[0], match)
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveError
 		}
+
 		return filterVersionsByPrefix(versions, toComplete), cobra.ShellCompDirectiveNoFileComp
 	default:
 		return nil, cobra.ShellCompDirectiveNoFileComp
@@ -73,12 +75,15 @@ func filterByPrefix(items []string, prefix string) []string {
 	if prefix == "" {
 		return items
 	}
+
 	var filtered []string
+
 	for _, item := range items {
 		if strings.HasPrefix(item, prefix) {
 			filtered = append(filtered, item)
 		}
 	}
+
 	return filtered
 }
 
@@ -96,6 +101,7 @@ func filterVersionsByPrefix(versions []string, prefix string) []string {
 	returnWithV := strings.HasPrefix(prefix, "v")
 
 	var filtered []string
+
 	for _, version := range versions {
 		versionWithoutV := strings.TrimPrefix(version, "v")
 		if strings.HasPrefix(versionWithoutV, prefixWithoutV) {
@@ -106,5 +112,6 @@ func filterVersionsByPrefix(versions []string, prefix string) []string {
 			}
 		}
 	}
+
 	return filtered
 }

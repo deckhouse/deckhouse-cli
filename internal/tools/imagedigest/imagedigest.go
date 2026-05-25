@@ -57,6 +57,7 @@ type ImageInfo struct {
 func CalculateGostHash(data []byte) []byte {
 	hasher := gost34112012256.New()
 	hasher.Write(data)
+
 	return hasher.Sum(nil)
 }
 
@@ -66,6 +67,7 @@ func CalculateGostHashFromReader(r io.Reader) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return CalculateGostHash(data), nil
 }
 
@@ -86,10 +88,12 @@ func ExtractSortedLayerDigests(image v1.Image) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		digests = append(digests, digest.String())
 	}
 
 	slices.Sort(digests)
+
 	return digests, nil
 }
 
@@ -105,6 +109,7 @@ func ReadGostAnnotation(image v1.Image) (string, bool, error) {
 	if !ok {
 		log.Debug().Msg("the image does not contain gost digest")
 	}
+
 	return digest, ok, nil
 }
 
@@ -125,9 +130,11 @@ func CalculateImageGostDigest(image v1.Image) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if len(digests) == 0 {
 		return nil, fmt.Errorf("invalid layers hash data: no layers found")
 	}
+
 	return CalculateGostHash([]byte(strings.Join(digests, ""))), nil
 }
 
@@ -138,7 +145,9 @@ func AnnotateWithGostDigest(image v1.Image) (v1.Image, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+
 	digestHex := hex.EncodeToString(digest)
+
 	return AddGostAnnotation(image, digestHex), digestHex, nil
 }
 
@@ -149,6 +158,7 @@ func ValidateGostDigest(image v1.Image) (*ValidationResult, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if !ok {
 		return nil, fmt.Errorf("image does not contain GOST digest annotation (%s)", GostDigestAnnotationKey)
 	}
@@ -166,6 +176,7 @@ func ValidateGostDigest(image v1.Image) (*ValidationResult, error) {
 	if err := compareDigests(stored, calculated); err != nil {
 		return result, err
 	}
+
 	return result, nil
 }
 
@@ -180,6 +191,7 @@ func compareDigests(storedHex string, calculatedHash []byte) error {
 		return fmt.Errorf("GOST digest mismatch: stored=%s, calculated=%s",
 			storedHex, hex.EncodeToString(calculatedHash))
 	}
+
 	return nil
 }
 
@@ -193,6 +205,7 @@ func PullAndCalculate(imageName string, opts ...crane.Option) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return CalculateImageGostDigest(image)
 }
 
@@ -212,6 +225,7 @@ func PullAnnotatePush(imageName string, opts ...crane.Option) (string, error) {
 	if err := crane.Push(annotated, imageName, opts...); err != nil {
 		return "", err
 	}
+
 	return digestHex, nil
 }
 
@@ -221,6 +235,7 @@ func PullAndValidate(imageName string, opts ...crane.Option) (*ValidationResult,
 	if err != nil {
 		return nil, err
 	}
+
 	return ValidateGostDigest(image)
 }
 
@@ -236,12 +251,14 @@ func GetImageInfo(name string, image v1.Image) (*ImageInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	info.Digest = imageDigest.String()
 
 	gostDigest, ok, err := ReadGostAnnotation(image)
 	if err != nil {
 		return nil, err
 	}
+
 	if ok {
 		info.GostDigest = gostDigest
 	}
@@ -250,6 +267,7 @@ func GetImageInfo(name string, image v1.Image) (*ImageInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	info.LayerDigests = layerDigests
 
 	log.Debug().Interface("imageInfo", info).Msg("ImageMetadata")

@@ -36,6 +36,7 @@ func ExtractFileFromImage(img v1.Image, fileName string) (*bytes.Buffer, error) 
 	// We should go down from the top layer to the bottom one to fetch the most
 	// recent version of the file in question
 	slices.Reverse(layers)
+
 	for _, layer := range layers {
 		// Do not use layer.Uncompressed() here. We decompress layers ourselves because
 		// decompressor that is built into go-containerregistry is bugged and sometimes

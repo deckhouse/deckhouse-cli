@@ -37,17 +37,21 @@ func MergedFS(img v1.Image) ([]Entry, error) {
 	}
 
 	fileMap := make(map[string]Entry)
+
 	for i, layer := range layers {
 		rc, err := layer.Uncompressed()
 		if err != nil {
 			return nil, fmt.Errorf("uncompress layer %d: %w", i+1, err)
 		}
+
 		err = mergeLayer(rc, fileMap)
 		_ = rc.Close()
+
 		if err != nil {
 			return nil, fmt.Errorf("layer %d: %w", i+1, err)
 		}
 	}
+
 	return sortedEntries(fileMap), nil
 }
 
@@ -59,6 +63,7 @@ func ReadFile(img v1.Image, filePath string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get layers: %w", err)
 	}
+
 	want := normalizePath(filePath)
 
 	for i := len(layers) - 1; i >= 0; i-- {
@@ -66,6 +71,7 @@ func ReadFile(img v1.Image, filePath string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("layer %d: %w", i+1, err)
 		}
+
 		switch status {
 		case readFound:
 			return content, nil
@@ -75,6 +81,7 @@ func ReadFile(img v1.Image, filePath string) ([]byte, error) {
 			return nil, fmt.Errorf("%w: %s", ErrNotFound, filePath)
 		}
 	}
+
 	return nil, fmt.Errorf("%w: %s", ErrNotFound, filePath)
 }
 
@@ -122,6 +129,7 @@ func readFromLayer(layer v1.Layer, wantPath string) ([]byte, readStatus, error) 
 		hasReal    bool
 		deleted    bool
 	)
+
 	err = WalkTar(rc, func(hdr *tar.Header, r io.Reader) error {
 		name := normalizePath(hdr.Name)
 		if target, opaque := Whiteout(name); target != "" || opaque {
@@ -129,37 +137,49 @@ func readFromLayer(layer v1.Layer, wantPath string) ([]byte, readStatus, error) 
 			if t == wantPath || isAncestor(t, wantPath) {
 				deleted = true
 			}
+
 			return nil
 		}
+
 		if name != wantPath {
 			return nil
 		}
+
 		hasReal = true
+
 		if !isRegularTarFile(hdr.Typeflag) {
 			realStatus = readNonRegular
 			content = nil
+
 			return nil
 		}
+
 		b, rerr := io.ReadAll(io.LimitReader(r, maxReadFileSize+1))
 		if rerr != nil {
 			return rerr
 		}
+
 		if int64(len(b)) > maxReadFileSize {
 			return fmt.Errorf("%w: %s (limit %d bytes)", ErrFileTooLarge, wantPath, maxReadFileSize)
 		}
+
 		content = b
 		realStatus = readFound
+
 		return nil
 	})
 	if err != nil {
 		return nil, readMissing, err
 	}
+
 	if hasReal {
 		return content, realStatus, nil
 	}
+
 	if deleted {
 		return nil, readDeleted, nil
 	}
+
 	return nil, readMissing, nil
 }
 
@@ -185,16 +205,20 @@ func mergeLayer(rc io.Reader, fileMap map[string]Entry) error {
 
 	if err := WalkTar(rc, func(hdr *tar.Header, _ io.Reader) error {
 		name := normalizePath(hdr.Name)
+
 		target, opaque := Whiteout(name)
 		if opaque {
 			opaques[normalizePath(target)] = struct{}{}
 			return nil
 		}
+
 		if target != "" {
 			whiteouts[normalizePath(target)] = struct{}{}
 			return nil
 		}
+
 		thisLayer[name] = headerToEntry(hdr)
+
 		return nil
 	}); err != nil {
 		return err
@@ -202,26 +226,32 @@ func mergeLayer(rc io.Reader, fileMap map[string]Entry) error {
 
 	for wt := range whiteouts {
 		delete(fileMap, wt)
+
 		for k := range fileMap {
 			if isAncestor(wt, k) {
 				delete(fileMap, k)
 			}
 		}
 	}
+
 	for dir := range opaques {
 		if dir == "." {
 			for k := range fileMap {
 				delete(fileMap, k)
 			}
+
 			continue
 		}
+
 		for k := range fileMap {
 			if isAncestor(dir, k) {
 				delete(fileMap, k)
 			}
 		}
 	}
+
 	maps.Copy(fileMap, thisLayer)
+
 	return nil
 }
 
@@ -230,12 +260,15 @@ func sortedEntries(m map[string]Entry) []Entry {
 	for _, e := range m {
 		out = append(out, e)
 	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+
 	return out
 }
 
 func headerToEntry(hdr *tar.Header) Entry {
 	mode := fs.FileMode(hdr.Mode & 0o777)
+
 	entryType := mapType(hdr.Typeflag)
 	switch entryType {
 	case TypeDir:
@@ -243,6 +276,7 @@ func headerToEntry(hdr *tar.Header) Entry {
 	case TypeSymlink:
 		mode |= fs.ModeSymlink
 	}
+
 	return Entry{
 		Path:     normalizePath(hdr.Name),
 		Type:     entryType,

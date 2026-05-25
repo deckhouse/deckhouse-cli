@@ -94,7 +94,9 @@ func wrapRunE(cmd *cobra.Command) {
 			os.Stderr = w
 
 			err = originalRunE(cmd, args)
+
 			w.Close()
+
 			os.Stderr = oldStderr
 
 			// Read the captured output
@@ -125,6 +127,7 @@ func getDebugImage(cmd *cobra.Command) (string, error) {
 	if val, err := cmd.InheritedFlags().GetString("kubeconfig"); err == nil {
 		configFlags.KubeConfig = &val
 	}
+
 	if val, err := cmd.InheritedFlags().GetString("context"); err == nil {
 		configFlags.Context = &val
 	}
@@ -140,6 +143,7 @@ func getDebugImage(cmd *cobra.Command) (string, error) {
 	}
 
 	var ErrGenericImageFetch = errors.New("Cannot get debug image from cluster, please specify --image explicitly")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -191,6 +195,7 @@ func NewKubectlCommand() *cobra.Command {
 	wrapRunE(kubectlCmd)
 
 	var debugCmd *cobra.Command
+
 	for _, cmd := range kubectlCmd.Commands() {
 		if cmd.Name() == "debug" {
 			debugCmd = cmd
@@ -231,6 +236,7 @@ func NewKubectlCommand() *cobra.Command {
 					fmt.Fprintf(os.Stderr, "Continuing with default kubectl behavior...\n")
 				} else {
 					fmt.Fprintf(os.Stderr, "Using debug container image: %s\n", debugImage)
+
 					if err := cmd.Flags().Set("image", debugImage); err != nil {
 						fmt.Fprintf(os.Stderr, "Warning: cannot set debug image flag: %v\n", err)
 					}
@@ -241,6 +247,7 @@ func NewKubectlCommand() *cobra.Command {
 		if originalPersistentPreRunE != nil {
 			return originalPersistentPreRunE(cmd, args)
 		}
+
 		panic("originalPersistentPreRunE is nil, cannot proceed")
 	}
 

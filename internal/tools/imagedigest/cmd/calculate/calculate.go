@@ -36,6 +36,7 @@ func NewCommand() *cobra.Command {
 			if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
 				return err
 			}
+
 			return nil
 		},
 		RunE: runCalculate,

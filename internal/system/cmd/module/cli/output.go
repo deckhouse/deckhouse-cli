@@ -50,6 +50,7 @@ func SuggestSuitableReleasesOnNotFound(dynamicClient dynamic.Interface, moduleNa
 	}
 
 	fmt.Fprintln(os.Stderr)
+
 	return ReleaseNotFoundError(moduleName, version)
 }
 
@@ -66,9 +67,11 @@ func PrintNearestVersionSuggestions(releases []modulereleases.ModuleReleaseInfo,
 	}
 
 	fmt.Fprintln(os.Stderr, "\nPerhaps you meant one of these?")
+
 	if nearest.Lower != nil {
 		fmt.Fprintf(os.Stderr, "   • %s (previous version)\n", nearest.Lower.Version)
 	}
+
 	if nearest.Upper != nil {
 		fmt.Fprintf(os.Stderr, "   • %s (next version)\n", nearest.Upper.Version)
 	}
@@ -77,6 +80,7 @@ func PrintNearestVersionSuggestions(releases []modulereleases.ModuleReleaseInfo,
 // PrintPendingReleases prints a list of available pending releases.
 func PrintPendingReleases(releases []modulereleases.ModuleReleaseInfo) {
 	fmt.Fprintln(os.Stderr, "\nAvailable pending releases:")
+
 	for _, r := range releases {
 		fmt.Fprintf(os.Stderr, "   • %s\n", r.Version)
 	}
@@ -89,6 +93,7 @@ func PrintNoReleasesHelp(dynamicClient dynamic.Interface, moduleName string) {
 	if len(allReleases) > 0 {
 		fmt.Fprintf(os.Stderr, "\nNo pending releases available for module '%s'.\n", moduleName)
 		fmt.Fprintln(os.Stderr, "All releases may already be deployed.")
+
 		return
 	}
 
@@ -110,7 +115,9 @@ func PrintSimilarModules(dynamicClient dynamic.Interface, moduleName string) {
 
 	// Find modules with similar prefix
 	prefix := moduleName[:min(similarModulePrefixLen, len(moduleName))]
+
 	var similar []string
+
 	for _, m := range modules {
 		if strings.HasPrefix(m, prefix) {
 			similar = append(similar, m)
@@ -119,6 +126,7 @@ func PrintSimilarModules(dynamicClient dynamic.Interface, moduleName string) {
 
 	if len(similar) > 0 {
 		fmt.Fprintln(os.Stderr, "\nSimilar modules:")
+
 		for _, m := range similar {
 			fmt.Fprintf(os.Stderr, "   • %s\n", m)
 		}
@@ -126,6 +134,7 @@ func PrintSimilarModules(dynamicClient dynamic.Interface, moduleName string) {
 
 	if len(modules) <= maxModulesToList {
 		fmt.Fprintln(os.Stderr, "\nAll available modules:")
+
 		for _, m := range modules {
 			fmt.Fprintf(os.Stderr, "   • %s\n", m)
 		}

@@ -58,5 +58,6 @@ func BaseGetConfigCMD(cmd *cobra.Command, _ string, secret, dataKey string) erro
 	}
 
 	fmt.Print(string(data))
+
 	return nil
 }

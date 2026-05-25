@@ -46,13 +46,16 @@ func ListTags(ctx context.Context, repoRef string, opts *Options, visit func(tag
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+
 		page, err := lister.Next(ctx)
 		if err != nil {
 			return fmt.Errorf("read next tag page: %w", err)
 		}
+
 		if err := visit(page.Tags); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }

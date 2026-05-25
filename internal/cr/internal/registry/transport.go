@@ -29,5 +29,6 @@ import (
 func InsecureTransport() http.RoundTripper {
 	t := remote.DefaultTransport.(*http.Transport).Clone()
 	t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // user-opted via --insecure
+
 	return t
 }

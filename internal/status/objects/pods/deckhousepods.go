@@ -33,10 +33,12 @@ import (
 // Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, kubeCl kubernetes.Interface) statusresult.StatusResult {
 	pods, err := getDeckhousePods(ctx, kubeCl)
+
 	output := color.RedString("Error getting Deckhouse pods: %v\n", err)
 	if err == nil {
 		output = formatDeckhousePods(pods)
 	}
+
 	return statusresult.StatusResult{
 		Title:  "Deckhouse Pods",
 		Level:  0,
@@ -65,6 +67,7 @@ func getDeckhousePods(ctx context.Context, kubeCl kubernetes.Interface) ([]deckh
 	for _, pod := range pods.Items {
 		infor = append(infor, deckhousePodProcessing(pod))
 	}
+
 	return infor, nil
 }
 
@@ -82,10 +85,12 @@ func deckhousePodProcessing(pod corev1.Pod) deckhousePod {
 	}
 
 	readyCount, restarts := 0, 0
+
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.Ready {
 			readyCount++
 		}
+
 		restarts += int(cs.RestartCount)
 	}
 
@@ -105,6 +110,7 @@ func formatDeckhousePods(infor []deckhousePod) string {
 	}
 
 	var sb strings.Builder
+
 	yellow := color.New(color.FgYellow).SprintFunc()
 
 	sb.WriteString(yellow("┌ Deckhouse Pods Status:\n"))
@@ -115,6 +121,7 @@ func formatDeckhousePods(infor []deckhousePod) string {
 		if i == len(infor)-1 {
 			prefix = "└"
 		}
+
 		fmt.Fprintf(&sb, "%s%-29s %-8s %-12s %-10d %s\n",
 			yellow(prefix+" "),
 			info.Name,
@@ -123,5 +130,6 @@ func formatDeckhousePods(infor []deckhousePod) string {
 			info.Restarts,
 			info.Age)
 	}
+
 	return sb.String()
 }

@@ -33,9 +33,11 @@ import (
 )
 
 func (pc *PluginsCommand) pluginsInstallCommand() *cobra.Command {
-	var version string
-	var useMajor int
-	var resolvePluginsConflicts bool
+	var (
+		version                 string
+		useMajor                int
+		resolvePluginsConflicts bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "install [plugin-name]",
@@ -110,6 +112,7 @@ func (pc *PluginsCommand) InstallPlugin(ctx context.Context, pluginName string, 
 
 	if options.version != "" {
 		var err error
+
 		installVersion, err = semver.NewVersion(options.version)
 		if err != nil {
 			return fmt.Errorf("failed to parse version: %w", err)
@@ -191,6 +194,7 @@ func (pc *PluginsCommand) installPlugin(ctx context.Context, pluginName string, 
 	}
 
 	fmt.Printf("✓ Plugin '%s' successfully installed!\n", pluginName)
+
 	return nil
 }
 
@@ -209,6 +213,7 @@ func (pc *PluginsCommand) preparePluginDirs(pluginName string, version *semver.V
 	if err := os.MkdirAll(paths.pluginDir, 0755); err != nil {
 		return pluginPaths{}, fmt.Errorf("failed to create plugin directory: %w", err)
 	}
+
 	if err := os.MkdirAll(paths.versionDir, 0755); err != nil {
 		return pluginPaths{}, fmt.Errorf("failed to create plugin directory: %w", err)
 	}
@@ -234,6 +239,7 @@ func (pc *PluginsCommand) acquireInstallLock(lockFilePath string) (func(), error
 	if err != nil {
 		return nil, fmt.Errorf("failed to create lock file: %w", err)
 	}
+
 	lockFile.Close()
 
 	return func() { os.Remove(lockFilePath) }, nil
@@ -268,14 +274,17 @@ func (pc *PluginsCommand) validateAndResolveConflicts(ctx context.Context, plugi
 	if err != nil {
 		return fmt.Errorf("failed to validate requirements: %w", err)
 	}
+
 	if len(failedConstraints) > 0 && !resolvePluginsConflicts {
 		return fmt.Errorf("plugin requirements not satisfied")
 	}
+
 	if len(failedConstraints) > 0 && resolvePluginsConflicts {
 		if err := pc.resolvePluginConflicts(ctx, failedConstraints); err != nil {
 			return fmt.Errorf("failed to resolve conflicts: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -286,9 +295,11 @@ func (pc *PluginsCommand) backupOldBinary(binaryPath string) error {
 	if err != nil || info.IsDir() {
 		return nil
 	}
+
 	if err := os.Rename(binaryPath, binaryPath+".old"); err != nil {
 		return fmt.Errorf("failed to save old version: %w", err)
 	}
+
 	return nil
 }
 
@@ -296,6 +307,7 @@ func (pc *PluginsCommand) backupOldBinary(binaryPath string) error {
 // binary to <binaryPath>.
 func (pc *PluginsCommand) downloadAndExtract(ctx context.Context, pluginName string, version *semver.Version, binaryPath string) error {
 	tag := version.Original()
+
 	fmt.Printf("Installing to: %s\n", binaryPath)
 	fmt.Println("Downloading and extracting plugin...")
 
@@ -305,8 +317,10 @@ func (pc *PluginsCommand) downloadAndExtract(ctx context.Context, pluginName str
 			slog.String("tag", tag),
 			slog.String("destination", binaryPath),
 			slog.String("error", err.Error()))
+
 		return fmt.Errorf("failed to extract plugin: %w", err)
 	}
+
 	return nil
 }
 
@@ -323,6 +337,7 @@ func (pc *PluginsCommand) linkCurrent(paths pluginPaths) error {
 	if err := os.Symlink(absPath, paths.currentLink); err != nil {
 		return fmt.Errorf("failed to create symlink: %w", err)
 	}
+
 	return nil
 }
 
@@ -335,6 +350,7 @@ func (pc *PluginsCommand) cacheContract(pluginName string, plugin *internal.Plug
 	}
 
 	contract := service.DomainToContract(plugin)
+
 	contractFile, err := os.OpenFile(layout.ContractFile(pc.pluginDirectory, pluginName), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open contract file: %w", err)
@@ -348,6 +364,7 @@ func (pc *PluginsCommand) cacheContract(pluginName string, plugin *internal.Plug
 	if err := enc.Encode(contract); err != nil {
 		return fmt.Errorf("failed to cache contract: %w", err)
 	}
+
 	return nil
 }
 

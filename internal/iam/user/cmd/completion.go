@@ -30,5 +30,6 @@ func completeUserNames(cmd *cobra.Command, args []string, toComplete string) ([]
 	if len(args) >= 1 {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
+
 	return utilk8s.CompleteResourceNames(cmd, iamtypes.UserGVR, "", toComplete)
 }

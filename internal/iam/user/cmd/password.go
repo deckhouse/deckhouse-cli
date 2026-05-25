@@ -71,15 +71,19 @@ func resolvePasswordMode(prompt, stdin, generate bool, hash string) (passwordMod
 	if prompt {
 		count++
 	}
+
 	if stdin {
 		count++
 	}
+
 	if generate {
 		count++
 	}
+
 	if hash != "" {
 		count++
 	}
+
 	if count > 1 {
 		return passwordModeNone, fmt.Errorf(
 			"only one of --%s, --%s, --%s, --%s may be specified",
@@ -101,6 +105,7 @@ func resolvePasswordMode(prompt, stdin, generate bool, hash string) (passwordMod
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		return passwordModePrompt, nil
 	}
+
 	return passwordModeNone, fmt.Errorf(
 		"stdin is not a terminal; use --%s, --%s or --%s",
 		flagPasswordStdin, flagPasswordGenerate, flagPasswordHash,
@@ -136,6 +141,7 @@ func resolvePasswordInput(cmd *cobra.Command) (passwordResult, passwordMode, err
 		if err := validateBcryptHash(hashFlag); err != nil {
 			return passwordResult{}, mode, err
 		}
+
 		return passwordResult{Hash: hashFlag}, mode, nil
 	case passwordModePrompt:
 		p, err := readPasswordPrompt(int(os.Stdin.Fd()), cmd.ErrOrStderr())
@@ -147,6 +153,7 @@ func resolvePasswordInput(cmd *cobra.Command) (passwordResult, passwordMode, err
 		p, err := generatePassword()
 		return passwordResult{Plain: p}, mode, err
 	}
+
 	return passwordResult{}, mode, errors.New("no password source configured")
 }
 
@@ -157,10 +164,12 @@ func (r passwordResult) rawBcryptHash() (string, error) {
 	if r.Hash != "" {
 		return r.Hash, nil
 	}
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(r.Plain), bcryptCost)
 	if err != nil {
 		return "", fmt.Errorf("hashing password: %w", err)
 	}
+
 	return string(hash), nil
 }
 
@@ -168,15 +177,21 @@ func (r passwordResult) rawBcryptHash() (string, error) {
 // stdinFd is the file descriptor to read from; out receives prompts.
 func readPasswordPrompt(stdinFd int, out io.Writer) (string, error) {
 	fmt.Fprint(out, "Enter password: ")
+
 	pw1, err := term.ReadPassword(stdinFd)
+
 	fmt.Fprintln(out)
+
 	if err != nil {
 		return "", fmt.Errorf("reading password: %w", err)
 	}
 
 	fmt.Fprint(out, "Confirm password: ")
+
 	pw2, err := term.ReadPassword(stdinFd)
+
 	fmt.Fprintln(out)
+
 	if err != nil {
 		return "", fmt.Errorf("reading password confirmation: %w", err)
 	}
@@ -184,9 +199,11 @@ func readPasswordPrompt(stdinFd int, out io.Writer) (string, error) {
 	if string(pw1) != string(pw2) {
 		return "", errors.New("passwords do not match")
 	}
+
 	if len(pw1) == 0 {
 		return "", errors.New("password must not be empty")
 	}
+
 	return string(pw1), nil
 }
 
@@ -197,12 +214,15 @@ func readPasswordStdin(r io.Reader) (string, error) {
 		if err := scanner.Err(); err != nil {
 			return "", fmt.Errorf("reading password from stdin: %w", err)
 		}
+
 		return "", errors.New("no password provided on stdin")
 	}
+
 	pw := strings.TrimRight(scanner.Text(), "\r\n")
 	if pw == "" {
 		return "", errors.New("password must not be empty")
 	}
+
 	return pw, nil
 }
 
@@ -212,6 +232,7 @@ func generatePassword() (string, error) {
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generating random password: %w", err)
 	}
+
 	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b), nil
 }
 
@@ -231,6 +252,7 @@ func encodePasswordForDeckhouse(plain string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("hashing password: %w", err)
 	}
+
 	return encodePasswordForUserCR(string(hash)), nil
 }
 
@@ -242,8 +264,10 @@ func validateBcryptHash(s string) error {
 	if !strings.HasPrefix(s, "$2") {
 		return fmt.Errorf("--%s value does not look like a bcrypt hash (expected to start with $2a$ or $2y$)", flagPasswordHash)
 	}
+
 	if _, err := bcrypt.Cost([]byte(s)); err != nil {
 		return fmt.Errorf("--%s value is not a valid bcrypt hash: %w", flagPasswordHash, err)
 	}
+
 	return nil
 }

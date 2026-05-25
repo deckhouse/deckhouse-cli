@@ -35,6 +35,7 @@ func NewPushCmd(opts *registry.Options) *cobra.Command {
 		asIndex       bool
 		imageRefsPath string
 	)
+
 	cmd := &cobra.Command{
 		Use:   "push PATH IMAGE",
 		Short: "Push a local image to a registry",
@@ -51,6 +52,7 @@ write it to a file. --image-refs overwrites the target file if it exists.`,
 	}
 	cmd.Flags().BoolVar(&asIndex, "index", false, "Push a multi-manifest OCI layout as an index (OCI layout dirs only)")
 	cmd.Flags().StringVar(&imageRefsPath, "image-refs", "", "Persist the pushed reference (with digest) to this file")
+
 	return cmd
 }
 
@@ -80,6 +82,8 @@ func runPush(ctx context.Context, w io.Writer, path, tagRef string, asIndex bool
 			return fmt.Errorf("write image refs %s: %w", imageRefsPath, err)
 		}
 	}
+
 	_, err = fmt.Fprintln(w, fullRef)
+
 	return err
 }

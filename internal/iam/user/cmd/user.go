@@ -55,6 +55,7 @@ func NewCommand() *cobra.Command {
 		newDeleteCommand(),
 		newResetPasswordCommand(),
 	)
+
 	for _, def := range userOpDefs {
 		cmd.AddCommand(newUserOpCommand(def))
 	}

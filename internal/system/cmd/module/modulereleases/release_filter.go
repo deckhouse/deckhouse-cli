@@ -49,6 +49,7 @@ func FindReleases(dynamicClient dynamic.Interface, moduleName string, match Rele
 	}
 
 	var result []ModuleReleaseInfo
+
 	for _, r := range releases {
 		if match(r) {
 			result = append(result, r)
@@ -56,6 +57,7 @@ func FindReleases(dynamicClient dynamic.Interface, moduleName string, match Rele
 	}
 
 	SortReleasesByVersion(result)
+
 	return result, nil
 }
 
@@ -71,6 +73,7 @@ func FindVersions(dynamicClient dynamic.Interface, moduleName string, match Rele
 	for _, r := range releases {
 		versions = append(versions, NormalizeVersion(r.Version))
 	}
+
 	return versions, nil
 }
 
@@ -82,6 +85,7 @@ func ListModuleNames(dynamicClient dynamic.Interface) ([]string, error) {
 	}
 
 	moduleSet := make(map[string]struct{})
+
 	for _, r := range releases {
 		if r.ModuleName != "" {
 			moduleSet[r.ModuleName] = struct{}{}
@@ -92,6 +96,7 @@ func ListModuleNames(dynamicClient dynamic.Interface) ([]string, error) {
 	for m := range moduleSet {
 		modules = append(modules, m)
 	}
+
 	sort.Strings(modules)
 
 	return modules, nil

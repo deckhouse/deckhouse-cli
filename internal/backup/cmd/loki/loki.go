@@ -60,6 +60,7 @@ func NewCommand() *cobra.Command {
 		RunE:          backupLoki,
 	}
 	addFlags(lokiCmd.Flags())
+
 	return lokiCmd
 }
 
@@ -128,6 +129,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("error get end timestamp for loki: %w", err)
 	}
+
 	chunkSize := time.Duration(chunkDaysFlag) * 24 * time.Hour
 	for chunkEnd := endDumpTimestamp; chunkEnd > 0; chunkEnd -= chunkSize.Nanoseconds() {
 		chunkStart := chunkEnd - chunkSize.Nanoseconds()
@@ -137,6 +139,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 				return err
 			}
 		}
+
 		curlParamStreamList := CurlRequest{
 			BaseURL: "series",
 			Params: map[string]string{
@@ -147,6 +150,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 		}
 
 		streamListDumpCurl := curlParamStreamList.GenerateCurlCommand()
+
 		_, streamListDumpJSON, err := getLogWithRetry(config, kubeCl, streamListDumpCurl)
 		if err != nil {
 			return fmt.Errorf("error get stream list JSON from loki: %w", err)
@@ -164,6 +168,7 @@ func backupLoki(cmd *cobra.Command, _ []string) error {
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -172,6 +177,7 @@ func fetchLogs(chunkStart, endDumpTimestamp int64, token string, r map[string]st
 	for key, value := range r {
 		filters = append(filters, fmt.Sprintf(`%s=%q`, key, value))
 	}
+
 	q := fmt.Sprintf(`{%s}`, strings.Join(filters, ", "))
 
 	chunkEnd := endDumpTimestamp
@@ -188,6 +194,7 @@ func fetchLogs(chunkStart, endDumpTimestamp int64, token string, r map[string]st
 			AuthToken: token,
 		}
 		dumpLogCurl := curlParamDumpLog.GenerateCurlCommand()
+
 		dumpLogCurlJSON, _, err := getLogWithRetry(config, kubeCl, dumpLogCurl)
 		if err != nil {
 			return fmt.Errorf("error get JSON from Loki: %w", err)
@@ -203,32 +210,39 @@ func fetchLogs(chunkStart, endDumpTimestamp int64, token string, r map[string]st
 				if err != nil {
 					return fmt.Errorf("error converting timestamp: %w", err)
 				}
+
 				timestampUtc := time.Unix(0, timestampInt64).UTC()
 				fmt.Printf("Timestamp: [%v], Log: %s\n", timestampUtc, entry[1])
 			}
 		}
 		// get last timestamp value from stream Loki api response to use pagination and get all log strings.
 		lastLog := dumpLogCurlJSON.Data.Result[0].Values[len(dumpLogCurlJSON.Data.Result[0].Values)-1][0]
+
 		lastTimestamp, err := strconv.ParseInt(lastLog, 10, 64)
 		if err != nil {
 			return fmt.Errorf("error converting timestamp: %w", err)
 		}
+
 		chunkEnd = lastTimestamp
 	}
+
 	return nil
 }
 
 func (c *CurlRequest) GenerateCurlCommand() []string {
 	curlParts := []string{"curl", "--insecure", "-v"}
+
 	curlParts = append(curlParts, fmt.Sprintf("%s/%s", lokiURL, c.BaseURL))
 	for key, value := range c.Params {
 		if value != "" {
 			curlParts = append(curlParts, []string{"--data-urlencode", fmt.Sprintf("%s=%s", key, value)}...)
 		}
 	}
+
 	if c.AuthToken != "" {
 		curlParts = append(curlParts, []string{"-H", fmt.Sprintf("Authorization: Bearer %s", c.AuthToken)}...)
 	}
+
 	return curlParts
 }
 
@@ -240,10 +254,12 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 		if err != nil {
 			return nil, nil, err
 		}
+
 		executor, err := utilk8s.ExecInPod(config, kubeCl, fullCommand, podName, namespaceDeckhouse, containerName)
 		if err != nil {
 			return nil, nil, err
 		}
+
 		if err = executor.StreamWithContext(
 			context.Background(),
 			remotecommand.StreamOptions{
@@ -256,25 +272,32 @@ func getLogTimestamp(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 
 		if apiURLLoki == fmt.Sprintf("%s/series", lokiURL) {
 			var series SeriesAPI
+
 			if !json.Valid(stdout.Bytes()) {
 				return nil, nil, fmt.Errorf("error response from loki api: %s", stdout.String())
 			}
+
 			err = json.Unmarshal(stdout.Bytes(), &series)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed unmarshal loki response: %w", err)
 			}
+
 			return nil, &series, nil
 		} else if apiURLLoki == fmt.Sprintf("%s/query_range", lokiURL) {
 			var queryRange QueryRange
+
 			if !json.Valid(stdout.Bytes()) {
 				return nil, nil, fmt.Errorf("error response from loki api: %s", stdout.String())
 			}
+
 			err = json.Unmarshal(stdout.Bytes(), &queryRange)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed unmarshal loki response: %w", err)
 			}
+
 			return &queryRange, nil, nil
 		}
+
 		stdout.Reset()
 	}
 
@@ -287,6 +310,7 @@ func parseEndTimestampFromFlag(dateStr string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("error parsing date: %w, please provide correct date", err)
 	}
+
 	return end.UnixNano(), nil
 }
 
@@ -303,6 +327,7 @@ func fetchEndTimestampFromLoki(config *rest.Config, kubeCl kubernetes.Interface,
 	}
 
 	curlCmd := curlParam.GenerateCurlCommand()
+
 	response, _, err := getLogWithRetryFunc(config, kubeCl, curlCmd)
 	if err != nil {
 		return 0, fmt.Errorf("error get latest timestamp JSON from loki: %w", err)
@@ -325,6 +350,7 @@ func getEndTimestamp(config *rest.Config, kubeCl kubernetes.Interface, token str
 	if endTimestamp != "" {
 		return parseEndTimestampFromFlag(endTimestamp)
 	}
+
 	return fetchEndTimestampFromLoki(config, kubeCl, token)
 }
 
@@ -333,6 +359,7 @@ func getStartTimestamp() (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("error parsing date: %w, please provide correct date", err)
 	}
+
 	startTimestampNanoSec := start.UnixNano()
 
 	return startTimestampNanoSec, nil
@@ -348,6 +375,7 @@ func getTokenLokiSa(kubeCl kubernetes.Interface) (string, error) {
 	if !exists {
 		return "", fmt.Errorf("token not found in secret: %w", err)
 	}
+
 	return string(tokenBase64), err
 }
 
@@ -367,10 +395,12 @@ func getLogWithRetry(config *rest.Config, kubeCl kubernetes.Interface, fullComma
 			if err != nil {
 				return fmt.Errorf("error get JSON response from loki: %w", err)
 			}
+
 			return nil
 		}))
 	if err != nil {
 		return nil, nil, fmt.Errorf("error get JSON from loki: %w", err)
 	}
+
 	return QueryRangeDump, SeriesAPIDump, nil
 }

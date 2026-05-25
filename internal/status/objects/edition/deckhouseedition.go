@@ -32,10 +32,12 @@ import (
 // Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, kubeCl kubernetes.Interface) statusresult.StatusResult {
 	edition, err := getDeckhouseEdition(ctx, kubeCl)
+
 	output := color.RedString("Error getting Deckhouse edition: %v\n", err)
 	if err == nil {
 		output = formatDeckhouseEdition(edition)
 	}
+
 	return statusresult.StatusResult{
 		Title:  "Deckhouse Edition",
 		Level:  0,
@@ -53,6 +55,7 @@ func getDeckhouseEdition(ctx context.Context, kubeCl kubernetes.Interface) (deck
 	if err != nil {
 		return deckhouseEditionInfo{}, fmt.Errorf("failed to get deployment: %w", err)
 	}
+
 	return deckhouseEditionProcessing(deployment)
 }
 
@@ -62,14 +65,17 @@ func deckhouseEditionProcessing(deployment *appsv1.Deployment) (deckhouseEdition
 	if !found {
 		return deckhouseEditionInfo{}, fmt.Errorf("annotation 'core.deckhouse.io/edition' not found in deployment")
 	}
+
 	return deckhouseEditionInfo{Edition: edition}, nil
 }
 
 // Format returns a readable view of resource status for CLI display.
 func formatDeckhouseEdition(info deckhouseEditionInfo) string {
 	var sb strings.Builder
+
 	yellow := color.New(color.FgYellow).SprintFunc()
 	sb.WriteString(yellow("┌ Deckhouse Edition:\n"))
 	fmt.Fprintf(&sb, "%s %s\n", yellow("└"), info.Edition)
+
 	return sb.String()
 }

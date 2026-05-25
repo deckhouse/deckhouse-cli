@@ -37,6 +37,7 @@ func ShouldCleanup(cleanup, cleanupExplicit bool) bool {
 	if cleanupExplicit {
 		return cleanup
 	}
+
 	return AskYesNoWithTimeout(
 		"DataExport will auto-delete in 30 sec [press y+Enter to delete now, n+Enter to cancel]",
 		time.Second*30,
@@ -51,15 +52,20 @@ func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 
 	// Buffered channel avoids blocking send if timeout branch wins first.
 	inputChan := make(chan string, 1)
+
 	go func() {
 		reader := bufio.NewReader(os.Stdin)
+
 		for {
 			fmt.Printf("%s: ", prompt)
+
 			input, err := reader.ReadString('\n')
 			if err != nil {
 				// Read errors (EOF/closed stdin/etc.) can repeat forever; fall back once and exit.
 				fmt.Println("Error reading input, chosen default value: no.")
+
 				inputChan <- defaultInputOnErr
+
 				return
 			}
 
@@ -78,6 +84,7 @@ func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 		if input == "n" || input == "no" {
 			return false
 		}
+
 		return true
 	case <-time.After(timeout):
 		fmt.Printf("\n")

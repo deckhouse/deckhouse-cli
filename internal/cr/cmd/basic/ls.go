@@ -36,6 +36,7 @@ func NewLsCmd(opts *registry.Options) *cobra.Command {
 		fullRef        bool
 		omitDigestTags bool
 	)
+
 	cmd := &cobra.Command{
 		Use:               "ls REPO",
 		Short:             "List the tags in a repository",
@@ -47,16 +48,19 @@ func NewLsCmd(opts *registry.Options) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&fullRef, "full-ref", false, "Print the full image reference (registry/repo:tag)")
 	cmd.Flags().BoolVarP(&omitDigestTags, "omit-digest-tags", "O", false, "Skip digest-based tags (sha256-*) created by signing tools")
+
 	return cmd
 }
 
 func runLs(ctx context.Context, w io.Writer, src string, fullRef, omitDigestTags bool, opts *registry.Options) error {
 	var repo name.Repository
+
 	if fullRef {
 		r, err := name.NewRepository(src, opts.Name...)
 		if err != nil {
 			return fmt.Errorf("parse repository %q: %w", src, err)
 		}
+
 		repo = r
 	}
 
@@ -65,14 +69,17 @@ func runLs(ctx context.Context, w io.Writer, src string, fullRef, omitDigestTags
 			if omitDigestTags && strings.HasPrefix(tag, digestTagPrefix) {
 				continue
 			}
+
 			line := tag
 			if fullRef {
 				line = repo.Tag(tag).String()
 			}
+
 			if _, err := fmt.Fprintln(w, line); err != nil {
 				return err
 			}
 		}
+
 		return nil
 	})
 }

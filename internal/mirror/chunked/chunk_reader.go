@@ -35,8 +35,10 @@ type FileReader struct {
 func Open(baseDir, baseFileName string) (*FileReader, error) {
 	chunkIndex := 0
 	chunks := make([]*os.File, 0)
+
 	for {
 		chunkName := fmt.Sprintf("%s.%04d.chunk", baseFileName, chunkIndex)
+
 		chunk, err := os.Open(filepath.Join(baseDir, chunkName))
 		switch {
 		case errors.Is(err, os.ErrNotExist) && chunkIndex == 0:
@@ -61,10 +63,12 @@ func (f *FileReader) Read(p []byte) (int, error) {
 
 func (f *FileReader) Close() error {
 	err := &multierror.Error{}
+
 	for _, chunk := range f.chunks {
 		if chErr := chunk.Close(); chErr != nil {
 			err = multierror.Append(err, fmt.Errorf("closing chunk %s: %w", chunk.Name(), chErr))
 		}
 	}
+
 	return err.ErrorOrNil()
 }

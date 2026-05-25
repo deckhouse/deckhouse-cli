@@ -115,6 +115,7 @@ func runRevoke(cmd *cobra.Command, args []string) error {
 	}
 
 	var subjectPrincipal string
+
 	switch subjectKind {
 	case iamtypes.KindUser:
 		subjectPrincipal, err = resolveUserEmail(cmd.Context(), dyn, subjectName)
@@ -138,6 +139,7 @@ func runRevoke(cmd *cobra.Command, args []string) error {
 		dryRun:           dryRun,
 		outputFmt:        outputFmt,
 	}
+
 	return revokeManagedGrants(cmd, dyn, opts)
 }
 
@@ -177,15 +179,18 @@ func revokeManagedGrants(cmd *cobra.Command, dyn dynamic.Interface, opts revokeO
 	}
 
 	var errs *multierror.Error
+
 	for _, spec := range specs {
 		client, kind, ns, err := revokeClient(dyn, spec)
 		if err != nil {
 			return err
 		}
+
 		if err := deleteManagedGrant(cmd, client, spec, kind, ns, opts.dryRun, opts.outputFmt); err != nil {
 			errs = multierror.Append(errs, err)
 		}
 	}
+
 	return errs.ErrorOrNil()
 }
 
@@ -197,7 +202,9 @@ func revokeClient(dyn dynamic.Interface, spec *canonicalGrantSpec) (dynamic.Reso
 		if len(spec.Namespaces) != 1 {
 			return nil, "", "", fmt.Errorf("namespaced revoke must target exactly one namespace, got %d", len(spec.Namespaces))
 		}
+
 		ns := spec.Namespaces[0]
+
 		return dyn.Resource(iamtypes.AuthorizationRuleGVR).Namespace(ns), iamtypes.KindAuthorizationRule, ns, nil
 	case iamtypes.ScopeCluster, iamtypes.ScopeAllNamespaces, iamtypes.ScopeLabels:
 		return dyn.Resource(iamtypes.ClusterAuthorizationRuleGVR), iamtypes.KindClusterAuthorizationRule, "", nil
@@ -225,6 +232,7 @@ func deleteManagedGrant(cmd *cobra.Command, client dynamic.ResourceInterface,
 	if err != nil {
 		ref := formatRuleRef(kind, ns, name)
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: d8-managed %s not found\n", ref)
+
 		return fmt.Errorf("%s: %w", ref, err)
 	}
 
@@ -243,10 +251,12 @@ func deleteManagedGrant(cmd *cobra.Command, client dynamic.ResourceInterface,
 	if err := client.Delete(cmd.Context(), name, metav1.DeleteOptions{}); err != nil {
 		ref := formatRuleRef(kind, ns, name)
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to delete %s: %v\n", ref, err)
+
 		return fmt.Errorf("%s: %w", ref, err)
 	}
 
 	cmd.Printf("Revoked: %s\n", formatRuleRef(kind, ns, name))
+
 	return nil
 }
 
@@ -257,5 +267,6 @@ func formatRuleRef(kind, ns, name string) string {
 	if ns == "" {
 		return fmt.Sprintf("%s/%s", kind, name)
 	}
+
 	return fmt.Sprintf("%s/%s/%s", kind, ns, name)
 }

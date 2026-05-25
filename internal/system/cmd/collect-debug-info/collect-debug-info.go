@@ -78,11 +78,13 @@ func NewCommand() *cobra.Command {
 	collectDebugInfoCmd.Flags().BoolVarP(&listExclude, "list-exclude", "l", false, "List all files that can be excluded from the debug archive")
 	collectDebugInfoCmd.Flags().DurationVar(&commandTimeout, "command-timeout", 2*time.Minute, "Timeout for each individual debug command execution")
 	collectDebugInfoCmd.Flags().DurationVar(&requestInterval, "request-interval", 0, "Minimum interval between debug command executions to avoid overloading the cluster (e.g. 200ms, 500ms, 1s). Zero disables rate limiting (default 0s)")
+
 	return collectDebugInfoCmd
 }
 
 func printExcludableFiles() {
 	fmt.Println("List of possible data to exclude:")
+
 	for _, fileName := range debugtar.GetExcludableFiles() {
 		fmt.Println(fileName)
 	}
@@ -112,5 +114,6 @@ func collectDebugInfo(cmd *cobra.Command, listExclude bool, excludeList []string
 	if err = debugtar.Tarball(config, kubeCl, excludeList, commandTimeout, requestInterval); err != nil {
 		return fmt.Errorf("Error collecting debug info: %w", err)
 	}
+
 	return nil
 }

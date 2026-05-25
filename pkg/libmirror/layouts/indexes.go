@@ -51,6 +51,7 @@ func (a indexManifestAnnotations) MarshalJSON() ([]byte, error) {
 
 	buf := bytes.Buffer{}
 	buf.WriteRune('{')
+
 	for _, key := range names {
 		buf.WriteRune('"')
 		buf.WriteString(key)
@@ -58,8 +59,10 @@ func (a indexManifestAnnotations) MarshalJSON() ([]byte, error) {
 		buf.WriteString(a[key])
 		buf.Write([]byte(`",`))
 	}
+
 	js := buf.Bytes()
 	js[len(js)-1] = '}'
+
 	return js, nil
 }
 
@@ -82,6 +85,7 @@ func SortIndexManifests(l layout.Path) error {
 	sort.Slice(indexManifest.Manifests, func(i, j int) bool {
 		ref1 := indexManifest.Manifests[i].Annotations["org.opencontainers.image.ref.name"]
 		ref2 := indexManifest.Manifests[j].Annotations["org.opencontainers.image.ref.name"]
+
 		return ref1 < ref2
 	})
 
@@ -89,6 +93,7 @@ func SortIndexManifests(l layout.Path) error {
 	if err != nil {
 		return fmt.Errorf("Marshal image index manifest: %w", err)
 	}
+
 	if err = l.WriteFile("index.json", rawManifest, os.ModePerm); err != nil {
 		return fmt.Errorf("Write image index manifest: %w", err)
 	}
@@ -103,6 +108,7 @@ func FindImageByTag(l layout.Path, tag string) (v1.Image, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	indexManifest, err := index.IndexManifest()
 	if err != nil {
 		return nil, err
@@ -152,6 +158,7 @@ func CreateEmptyImageLayout(path string) (layout.Path, error) {
 	if err != nil {
 		return "", fmt.Errorf("create index.json: %w", err)
 	}
+
 	if err = os.WriteFile(indexFilePath, rawJSON, 0o644); err != nil {
 		return "", fmt.Errorf("create index.json: %w", err)
 	}
@@ -160,6 +167,7 @@ func CreateEmptyImageLayout(path string) (layout.Path, error) {
 	if err != nil {
 		return "", fmt.Errorf("create oci-layout: %w", err)
 	}
+
 	if err = os.WriteFile(layoutFilePath, rawJSON, 0o644); err != nil {
 		return "", fmt.Errorf("create oci-layout: %w", err)
 	}
@@ -172,6 +180,7 @@ func FindImageDescriptorByTag(l layout.Path, tag string) (v1.Descriptor, error) 
 	if err != nil {
 		return v1.Descriptor{}, err
 	}
+
 	indexManifest, err := index.IndexManifest()
 	if err != nil {
 		return v1.Descriptor{}, err
@@ -193,6 +202,7 @@ func TagImage(l layout.Path, imageDigest v1.Hash, tag string) error {
 	if err != nil {
 		return err
 	}
+
 	indexManifest, err := index.IndexManifest()
 	if err != nil {
 		return err
@@ -205,10 +215,12 @@ func TagImage(l layout.Path, imageDigest v1.Hash, tag string) error {
 			if found {
 				imageDescriptor.Annotations["org.opencontainers.image.ref.name"] = imageRepo + ":" + tag
 			}
+
 			imageDescriptor.Annotations["io.deckhouse.image.short_tag"] = tag
 			if err = l.AppendDescriptor(imageDescriptor); err != nil {
 				return fmt.Errorf("append descriptor %s: %w", tag, err)
 			}
+
 			return nil
 		}
 	}

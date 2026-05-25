@@ -60,6 +60,7 @@ func cmdExamples() string {
 		"  # Start exporter + Download + Stop for VirtualDiskSnapshot (Block)",
 		fmt.Sprintf("    ... %s -n target-namespace vds/my-virtualdisk-snapshot -o file.img", cmdName),
 	}
+
 	return strings.Join(resp, "\n")
 }
 
@@ -106,21 +107,26 @@ func forRespItems(jsonStream io.ReadCloser, workFunc func(*dirItem) error) error
 			if err != nil {
 				return err
 			}
+
 			if t != json.Delim('[') {
 				return fmt.Errorf("JSON items is not list")
 			}
+
 			break
 		}
+
 		dec.More()
 	}
 
 	// read items
 	for dec.More() {
 		var i dirItem
+
 		err := dec.Decode(&i)
 		if err != nil {
 			break
 		}
+
 		err = workFunc(&i)
 		if err != nil {
 			return err
@@ -132,6 +138,7 @@ func forRespItems(jsonStream io.ReadCloser, workFunc func(*dirItem) error) error
 	if err != nil {
 		return err
 	}
+
 	if t != json.Delim(']') {
 		return fmt.Errorf("items loading is not completed")
 	}
@@ -150,6 +157,7 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 	}
 
 	req, _ := http.NewRequest(http.MethodGet, dataURL, nil)
+
 	resp, err := sClient.HTTPDo(req)
 	if err != nil {
 		return fmt.Errorf("HTTPDo: %s", err.Error())
@@ -168,15 +176,18 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 	}
 
 	if srcPath != "" && srcPath[len(srcPath)-1:] == "/" {
-		var wg sync.WaitGroup
-		var mu sync.Mutex
-		var firstErr error
+		var (
+			wg       sync.WaitGroup
+			mu       sync.Mutex
+			firstErr error
+		)
 
 		// Keep only the first non-nil sub-download error.
 		setFirstErr := func(subPath string, subErr error) {
 			if subErr == nil {
 				return
 			}
+
 			mu.Lock()
 			if firstErr == nil {
 				firstErr = fmt.Errorf("download %s: %w", filepath.Join(srcPath, subPath), subErr)
@@ -197,6 +208,7 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 				if err != nil {
 					return fmt.Errorf("Create dir error: %s", err.Error())
 				}
+
 				subPath += "/"
 			case itemTypeFile, itemTypeLink:
 				// downloadable, proceed below
@@ -210,11 +222,13 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 			select {
 			case sem <- struct{}{}:
 				wg.Add(1)
+
 				go func(sp string) {
 					defer func() {
 						<-sem
 						wg.Done()
 					}()
+
 					downloadOne(sp)
 				}(subPath)
 			default:
@@ -228,8 +242,10 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 		}
 
 		wg.Wait()
+
 		return firstErr
 	}
+
 	if dstPath != "" {
 		// Create out file
 		out, err := os.Create(dstPath)
@@ -242,6 +258,7 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 		if err != nil {
 			return err
 		}
+
 		log.Info("Downloaded file", slog.String("path", dstPath))
 	} else {
 		_, err = io.Copy(os.Stdout, resp.Body)
@@ -267,10 +284,12 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	flags := cmd.PersistentFlags()
 	safeClient.SupportNoAuth = false
+
 	sClient, err := safeClient.NewSafeClient(flags)
 	if err != nil {
 		return err
 	}
+
 	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {
 		return err
@@ -303,12 +322,14 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		if srcPath == "" {
 			return fmt.Errorf("invalid source path: '%s'", srcPath)
 		}
+
 		if dstPath == "" {
 			pathList := strings.Split(srcPath, "/")
 			dstPath = pathList[len(pathList)-1]
 		}
 	case "Block":
 		srcPath = ""
+
 		if dstPath == "" {
 			dstPath = deName
 		}
@@ -317,7 +338,9 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	log.Info("Start downloading", slog.String("url", url+srcPath), slog.String("dstPath", dstPath))
+
 	sem := make(chan struct{}, 10)
+
 	err = recursiveDownload(ctx, subClient, log, sem, url, srcPath, dstPath)
 	if err != nil {
 		log.Error("Not all files have been downloaded", slog.String("error", err.Error()))

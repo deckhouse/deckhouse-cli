@@ -29,6 +29,7 @@ import (
 
 func newExtractCmd(opts *registry.Options) *cobra.Command {
 	var outputDir string
+
 	cmd := &cobra.Command{
 		Use:   "extract IMAGE",
 		Short: "Extract a container image filesystem to a local directory",
@@ -59,10 +60,12 @@ re-materialized from layer 0.`,
 			fmt.Fprintf(w, "  symlinks:  %d\n", stats.Symlinks)
 			fmt.Fprintf(w, "  hardlinks: %d\n", stats.Hardlinks)
 			fmt.Fprintf(w, "  total:     %s (%d bytes)\n", output.HumanSize(stats.TotalSize), stats.TotalSize)
+
 			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&outputDir, "output", "o", "", "Write the filesystem into this directory")
 	_ = cmd.MarkFlagRequired("output")
+
 	return cmd
 }

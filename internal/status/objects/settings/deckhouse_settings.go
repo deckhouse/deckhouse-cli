@@ -34,10 +34,12 @@ import (
 // Status orchestrates retrieval, processing, and formatting of the resource's current status.
 func Status(ctx context.Context, dynamicClient dynamic.Interface) statusresult.StatusResult {
 	settings, err := getModuleConfigSettings(ctx, dynamicClient)
+
 	output := color.RedString("Error getting ModuleConfig settings: %v", err)
 	if err == nil {
 		output = formatModuleConfigSettings(settings)
 	}
+
 	return statusresult.StatusResult{
 		Title:  "Deckhouse ModuleConfig",
 		Level:  0,
@@ -87,6 +89,7 @@ func configSettingsFromMapProcessing(settings map[string]interface{}) []ConfigSe
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].Key < result[j].Key
 	})
+
 	return result
 }
 
@@ -101,9 +104,11 @@ func configSettingsProcessing(key string, data interface{}) ConfigSetting {
 		for k, v := range m {
 			children = append(children, configSettingsProcessing(k, v))
 		}
+
 		sort.Slice(children, func(i, j int) bool {
 			return children[i].Key < children[j].Key
 		})
+
 		return ConfigSetting{
 			Key:      key,
 			Children: children,
@@ -117,6 +122,7 @@ func configSettingsProcessing(key string, data interface{}) ConfigSetting {
 			itemKey := fmt.Sprintf("#%d", i)
 			items = append(items, configSettingsProcessing(itemKey, elem))
 		}
+
 		return ConfigSetting{
 			Key:   key,
 			Items: items,
@@ -143,6 +149,7 @@ func formatModuleConfigSettings(settings []ConfigSetting) string {
 		isLast := i == len(settings)-1
 		sb.WriteString(formatSettingLine(setting, "", nil, isLast, 0))
 	}
+
 	return sb.String()
 }
 
@@ -156,6 +163,7 @@ func formatSettingLine(setting ConfigSetting, indent string, prefixStack []bool,
 	if isLast {
 		lineOperator = "└"
 	}
+
 	coloredLineOperator := lineOperator
 	if level == 0 {
 		coloredLineOperator = color.New(color.FgYellow).Sprint(lineOperator)
@@ -170,11 +178,14 @@ func formatSettingLine(setting ConfigSetting, indent string, prefixStack []bool,
 	// Map/Struct (has "children").
 	if len(setting.Children) > 0 {
 		fmt.Fprintf(&sb, "%s%s %s:\n", prefix, coloredLineOperator, setting.Key)
+
 		newPrefixStack := append([]bool{}, prefixStack...)
+
 		newPrefixStack = append(newPrefixStack, !isLast)
 		for i, child := range setting.Children {
 			sb.WriteString(formatSettingLine(child, indent+"    ", newPrefixStack, i == len(setting.Children)-1, level+1))
 		}
+
 		return sb.String()
 	}
 
@@ -182,24 +193,31 @@ func formatSettingLine(setting ConfigSetting, indent string, prefixStack []bool,
 	if len(setting.Items) > 0 {
 		allScalars := areAllItemsScalars(setting.Items)
 		fmt.Fprintf(&sb, "%s%s %s:\n", prefix, coloredLineOperator, setting.Key)
+
 		newPrefixStack := append([]bool{}, prefixStack...)
 		newPrefixStack = append(newPrefixStack, !isLast)
+
 		if allScalars {
 			for i, item := range setting.Items {
 				fmt.Fprintf(&sb, "%s│   %s %s\n", prefix, mapLineOp(i == len(setting.Items)-1), item.Value)
 			}
+
 			return sb.String()
 		}
+
 		indentForArray := indent + "    "
+
 		for i, item := range setting.Items {
 			itemIsLast := i == len(setting.Items)-1
 			for j, child := range item.Children {
 				sb.WriteString(formatSettingLine(child, indentForArray, newPrefixStack, j == len(item.Children)-1, level+2))
 			}
+
 			if len(item.Children) == 0 && item.Value != "" {
 				fmt.Fprintf(&sb, "%s│   %s %s\n", prefix, mapLineOp(itemIsLast), item.Value)
 			}
 		}
+
 		return sb.String()
 	}
 
@@ -211,7 +229,9 @@ func buildPrefix(prefixStack []bool) string {
 	if len(prefixStack) == 0 {
 		return ""
 	}
+
 	var sb strings.Builder
+
 	for _, needPipe := range prefixStack {
 		if needPipe {
 			sb.WriteString("│   ")
@@ -219,6 +239,7 @@ func buildPrefix(prefixStack []bool) string {
 			sb.WriteString("    ")
 		}
 	}
+
 	return sb.String()
 }
 
@@ -229,6 +250,7 @@ func areAllItemsScalars(items []ConfigSetting) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -237,5 +259,6 @@ func mapLineOp(isLast bool) string {
 	if isLast {
 		return "└"
 	}
+
 	return "├"
 }

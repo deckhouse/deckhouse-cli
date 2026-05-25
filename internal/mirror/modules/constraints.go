@@ -142,6 +142,7 @@ func extractLowerBound(constraintStr string) (*semver.Version, error) {
 	}
 
 	var lowest *semver.Version
+
 	for _, raw := range matches {
 		v, err := semver.NewVersion(raw)
 		if err != nil {
@@ -150,6 +151,7 @@ func extractLowerBound(constraintStr string) (*semver.Version, error) {
 			// instead of silently dropping the literal.
 			return nil, fmt.Errorf("version literal %q not parseable: %w", raw, err)
 		}
+
 		if lowest == nil || v.LessThan(lowest) {
 			lowest = v
 		}
@@ -158,6 +160,7 @@ func extractLowerBound(constraintStr string) (*semver.Version, error) {
 	if lowest == nil {
 		return nil, fmt.Errorf("no parseable version literal in constraint")
 	}
+
 	return lowest, nil
 }
 
@@ -171,15 +174,18 @@ func extractInclusiveAnchors(constraintStr string) ([]*semver.Version, error) {
 	}
 
 	seen := make(map[string]struct{}, len(matches))
+
 	out := make([]*semver.Version, 0, len(matches))
 	for _, m := range matches {
 		if len(m) < 2 {
 			continue
 		}
+
 		raw := m[1]
 		if _, dup := seen[raw]; dup {
 			continue
 		}
+
 		seen[raw] = struct{}{}
 
 		v, err := semver.NewVersion(raw)
@@ -190,8 +196,10 @@ func extractInclusiveAnchors(constraintStr string) ([]*semver.Version, error) {
 			// version parser hadn't). Surface it as a real error.
 			return nil, fmt.Errorf("anchor %q not a valid semver: %w", raw, err)
 		}
+
 		out = append(out, v)
 	}
+
 	return out, nil
 }
 
