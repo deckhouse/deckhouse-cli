@@ -1,3 +1,104 @@
 {
-  "$schema": "https://docs.renovatebot.com/renovate-schema.json"
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    ":timezone(Europe/Moscow)",
+    ":enableVulnerabilityAlertsWithLabel(security)"
+  ],
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 10,
+  "prHourlyLimit": 2,
+  "labels": ["dependencies", "renovate"],
+  "rangeStrategy": "replace",
+  "rebaseWhen": "conflicted",
+  "ignorePaths": ["**/bin/**", "**/dist/**", "**/build/**", "**/.tmp/**", "**/testing/**"],
+  "ignoreDeps": [
+    "werf/trdl-vault-actions"
+  ],
+  "postUpdateOptions": [],
+  "gomod": {
+    "enabled": true
+  },
+  "vulnerabilityAlerts": {
+    "labels": ["security"],
+    "schedule": ["at any time"]
+  },
+  "packageRules": [
+    {
+      "description": "Group k8s.io/*",
+      "matchManagers": ["gomod"],
+      "matchPackagePatterns": ["^k8s\\.io/", "^sigs\\.k8s\\.io/"],
+      "groupName": "kubernetes"
+    },
+    {
+      "description": "Group werf/*",
+      "matchManagers": ["gomod"],
+      "matchPackagePatterns": ["^github\\.com/werf/"],
+      "groupName": "werf"
+    },
+    {
+      "description": "Group deckhouse/*",
+      "matchManagers": ["gomod"],
+      "matchPackagePatterns": ["^github\\.com/deckhouse/"],
+      "groupName": "deckhouse"
+    },
+    {
+      "description": "Group hashicorp/* (including vault — major upgrades require manual review)",
+      "matchManagers": ["gomod"],
+      "matchPackagePatterns": ["^github\\.com/hashicorp/"],
+      "groupName": "hashicorp"
+    },
+    {
+      "description": "All github-actions in a single PR",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Major updates get separate PRs and require manual review",
+      "matchUpdateTypes": ["major"],
+      "labels": ["dependencies", "renovate", "major-update"],
+      "addLabels": ["needs-review"]
+    },
+    {
+      "description": "Go toolchain updates grouped into a single PR",
+      "matchDepNames": ["go", "golang"],
+      "groupName": "go-toolchain"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "kubectlVersion in Taskfile.yml — track kubernetes/kubernetes releases",
+      "fileMatch": ["^Taskfile\\.ya?ml$"],
+      "matchStrings": [
+        "kubectlVersion:\\s*(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "kubernetes/kubernetes",
+      "extractVersionTemplate": "^(?<version>v\\d+\\.\\d+\\.\\d+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "GOLANGCI_LINT_VERSION in release workflow",
+      "fileMatch": ["^\\.github/workflows/.+\\.ya?ml$"],
+      "matchStrings": [
+        "GOLANGCI_LINT_VERSION:\\s*['\"]?(?<currentValue>v\\d+\\.\\d+\\.\\d+)['\"]?"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "golangci/golangci-lint",
+      "extractVersionTemplate": "^(?<version>v\\d+\\.\\d+\\.\\d+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "go-version in setup-go steps, synced with golang-version datasource",
+      "fileMatch": ["^\\.github/workflows/.+\\.ya?ml$"],
+      "matchStrings": [
+        "go-version:\\s*['\"](?<currentValue>\\d+\\.\\d+(?:\\.\\d+)?)['\"]"
+      ],
+      "datasourceTemplate": "golang-version",
+      "depNameTemplate": "go"
+    }
+  ]
 }
