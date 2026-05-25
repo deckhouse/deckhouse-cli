@@ -35,6 +35,7 @@ func NewCommand() *cobra.Command {
 	}
 
 	certsCmd.AddCommand(NewCheckCommand())
+	certsCmd.AddCommand(NewRenewCommand())
 
 	return certsCmd
 }
