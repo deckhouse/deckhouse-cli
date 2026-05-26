@@ -44,17 +44,21 @@ import (
 
 const (
 	annotationKey            = "d8-migration"
-	annotationKeyToRemove    = "d8-migration-"
+	annotationKeyToRemove    = "d8-migration"
 	switchAccount            = "system:serviceaccount:d8-multitenancy-manager:multitenancy-manager"
-	legacyFailedAttemptsFile = "/tmp/failed_annotations.txt"
-	legacyErrorLogFile       = "/tmp/failed_errors.txt"
-	legacySkippedObjectsFile = "/tmp/skipped_objects.txt"
+	legacyFailedAttemptsFile = "/tmp/failed_annotations.log"
+	legacyErrorLogFile       = "/tmp/failed_errors.log"
+	legacySkippedObjectsFile = "/tmp/skipped_objects.log"
 	runTimestampFormat       = "20060102T150405Z"
 	maxWorkerCount           = 256
 	maxRequestRetries        = 5
 	requestTimeout           = 30 * time.Second
 	baseRetryDelay           = 200 * time.Millisecond
 	defaultWorkerCount       = 10
+	defaultClientQPS         = 50
+	defaultClientBurst       = 100
+	progressPrintInterval    = 500 * time.Millisecond
+	progressPercentStep      = 2
 )
 
 var runStateMu sync.RWMutex
@@ -66,12 +70,16 @@ var currentRunState *sigMigrateRunState
 // sigMigrateRunState stores paths and resources for one command run.
 type sigMigrateRunState struct {
 	RunID                 string
+	LogLevel              string
 	FailedAttemptsFile    string
 	ErrorLogFile          string
 	SkippedObjectsFile    string
 	TraceLogFile          string
 	LegacyFailedRetryFile string
 	traceFile             *os.File
+	failedAttemptsWriter  *os.File
+	errorLogWriter        *os.File
+	skippedObjectsWriter  *os.File
 }
 
 func newSigMigrateRunState(now time.Time) *sigMigrateRunState {
@@ -79,9 +87,9 @@ func newSigMigrateRunState(now time.Time) *sigMigrateRunState {
 
 	return &sigMigrateRunState{
 		RunID:                 runID,
-		FailedAttemptsFile:    fmt.Sprintf("/tmp/failed_annotations_%s.txt", runID),
-		ErrorLogFile:          fmt.Sprintf("/tmp/failed_errors_%s.txt", runID),
-		SkippedObjectsFile:    fmt.Sprintf("/tmp/skipped_objects_%s.txt", runID),
+		FailedAttemptsFile:    fmt.Sprintf("/tmp/failed_annotations_%s.log", runID),
+		ErrorLogFile:          fmt.Sprintf("/tmp/failed_errors_%s.log", runID),
+		SkippedObjectsFile:    fmt.Sprintf("/tmp/skipped_objects_%s.log", runID),
 		TraceLogFile:          fmt.Sprintf("/tmp/sigmigrate_trace_%s.log", runID),
 		LegacyFailedRetryFile: legacyFailedAttemptsFile,
 	}
@@ -138,6 +146,11 @@ func tracef(format string, args ...interface{}) {
 	if _, err := fmt.Fprintf(state.traceFile, "%s TRACE %s\n", time.Now().UTC().Format(time.RFC3339Nano), message); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write trace log file %s: %v\n", state.TraceLogFile, err)
 	}
+}
+
+func isTraceVerboseEnabled() bool {
+	level := strings.ToUpper(getCurrentRunState().LogLevel)
+	return level == "TRACE"
 }
 
 func syncLegacyRetryFile() error {
@@ -254,7 +267,8 @@ type SigMigrateConfig struct {
 	Kubeconfig  string
 	Context     string
 	Object      string
-	Workers     int
+	Workers       int
+	MeasureStages bool
 }
 
 func SigMigrate(cmd *cobra.Command, _ []string) error {
@@ -298,6 +312,11 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 	}
 	config.Workers = normalizeWorkerCount(config.Workers)
 
+	config.MeasureStages, err = cmd.Flags().GetBool("measure-stages")
+	if err != nil {
+		return fmt.Errorf("failed to get measure-stages flag: %w", err)
+	}
+
 	runState := newSigMigrateRunState(time.Now())
 
 	traceFile, traceOpenErr := os.OpenFile(runState.TraceLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -307,9 +326,11 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 		runState.traceFile = traceFile
 	}
 
+	runState.LogLevel = config.LogLevel
 	setCurrentRunState(runState)
 
 	defer func() {
+		closeRunStateWriters(runState)
 		if runState.traceFile != nil {
 			traceWriteMu.Lock()
 			_ = runState.traceFile.Sync()
@@ -325,10 +346,12 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 		}
 	}()
 
-	tracef("sig-migrate started: retry=%t, object=%q, log-level=%s, threads=%d", config.RetryFailed, config.Object, config.LogLevel, config.Workers)
+	tracef("sig-migrate started: retry=%t, object=%q, log-level=%s, threads=%d, measure-stages=%t", config.RetryFailed, config.Object, config.LogLevel, config.Workers, config.MeasureStages)
 	tracef("run artifacts: failed=%s, errors=%s, skipped=%s, trace=%s", getFailedAttemptsFilePath(), getErrorLogFilePath(), getSkippedObjectsFilePath(), runState.TraceLogFile)
 	tracef("legacy retry compatibility file: %s", getLegacyRetryFilePath())
 
+	commandStart := time.Now()
+	clientsStartedAt := time.Now()
 	restConfig, _, err := utilk8s.SetupK8sClientSet(config.Kubeconfig, config.Context)
 	if err != nil {
 		tracef("failed to setup Kubernetes client: %v", err)
@@ -337,6 +360,12 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 
 	// Setup impersonation
 	restConfig.Impersonate.UserName = config.KubectlAs
+	if restConfig.QPS <= 0 || restConfig.QPS < defaultClientQPS {
+		restConfig.QPS = defaultClientQPS
+	}
+	if restConfig.Burst <= 0 || restConfig.Burst < defaultClientBurst {
+		restConfig.Burst = defaultClientBurst
+	}
 
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
 	if err != nil {
@@ -349,8 +378,10 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 		tracef("failed to create dynamic client: %v", err)
 		return fmt.Errorf("failed to create dynamic client: %w", err)
 	}
+	clientsDuration := time.Since(clientsStartedAt)
 
 	var objects map[string]ObjectRef
+	objectCollectionStartedAt := time.Now()
 
 	switch {
 	case config.Object != "" && !config.RetryFailed:
@@ -405,6 +436,8 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 		color.Cyan("\nTotal objects collected: %d\n", len(objects))
 	}
 
+	objectCollectionDuration := time.Since(objectCollectionStartedAt)
+
 	if len(objects) == 0 {
 		color.Red("No objects available for annotation. Exiting.")
 		tracef("no objects available for annotation")
@@ -427,14 +460,29 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to create switch dynamic client: %w", err)
 	}
 
+	migrationStartedAt := time.Now()
 	timestamp := time.Now().Unix()
 	unsupportedTypes := make(map[string]bool)
 
 	annotateObjects(dynamicClient, switchDynamicClient, objects, timestamp, unsupportedTypes, config.LogLevel, config.Workers)
+	migrationDuration := time.Since(migrationStartedAt)
 
+	postChecksStartedAt := time.Now()
 	// Check if there were any failed annotations
 	checkFailedAnnotations()
+	postChecksDuration := time.Since(postChecksStartedAt)
 	tracef("sig-migrate completed")
+
+	if config.MeasureStages {
+		totalDuration := time.Since(commandStart)
+		color.Cyan("\nStage timing summary:")
+		color.Cyan("  Clients initialization: %s", clientsDuration)
+		color.Cyan("  Objects collection:    %s", objectCollectionDuration)
+		color.Cyan("  Migration:             %s", migrationDuration)
+		color.Cyan("  Post-checks:           %s", postChecksDuration)
+		color.Cyan("  Total:                 %s\n", totalDuration)
+		tracef("stage timing summary: clients=%s collection=%s migration=%s post-checks=%s total=%s", clientsDuration, objectCollectionDuration, migrationDuration, postChecksDuration, totalDuration)
+	}
 
 	return nil
 }
@@ -516,6 +564,8 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 	var objectsMu sync.Mutex
 	var processed int64
 	totalResources := int64(len(resources))
+	lastProgressPercent := -1
+	lastProgressPrintedAt := time.Now()
 
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
@@ -536,10 +586,12 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 					tracef("error listing %s: %v", info.gvr.String(), err)
 					current := atomic.AddInt64(&processed, 1)
 					if logLevel != "TRACE" {
-						progress := int((current * 100) / totalResources)
-						greenProgress := color.New(color.FgGreen).SprintFunc()
 						progressMu.Lock()
-						fmt.Printf("\rCalculating: [%s] Processed Resource: %s                                ", greenProgress(fmt.Sprintf("%d%%", progress)), info.gvr.Resource)
+						if shouldEmitProgress(current, totalResources, &lastProgressPercent, &lastProgressPrintedAt) {
+							progress := int((current * 100) / totalResources)
+							greenProgress := color.New(color.FgGreen).SprintFunc()
+							fmt.Printf("\rCalculating: [%s] Processed Resource: %s                                ", greenProgress(fmt.Sprintf("%d%%", progress)), info.gvr.Resource)
+						}
 						progressMu.Unlock()
 					}
 					continue
@@ -558,10 +610,12 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 
 				current := atomic.AddInt64(&processed, 1)
 				if logLevel != "TRACE" {
-					progress := int((current * 100) / totalResources)
-					greenProgress := color.New(color.FgGreen).SprintFunc()
 					progressMu.Lock()
-					fmt.Printf("\rCalculating: [%s] Processed Resource: %s                                ", greenProgress(fmt.Sprintf("%d%%", progress)), info.gvr.Resource)
+					if shouldEmitProgress(current, totalResources, &lastProgressPercent, &lastProgressPrintedAt) {
+						progress := int((current * 100) / totalResources)
+						greenProgress := color.New(color.FgGreen).SprintFunc()
+						fmt.Printf("\rCalculating: [%s] Processed Resource: %s                                ", greenProgress(fmt.Sprintf("%d%%", progress)), info.gvr.Resource)
+					}
 					progressMu.Unlock()
 				}
 			}
@@ -610,6 +664,8 @@ func annotateObjects(
 	var unsupportedMu sync.RWMutex
 	var processed int64
 	total := int64(len(items))
+	lastProgressPercent := -1
+	lastProgressPrintedAt := time.Now()
 
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
@@ -627,7 +683,9 @@ func annotateObjects(
 					current := atomic.AddInt64(&processed, 1)
 					if logLevel != "TRACE" {
 						progressMu.Lock()
-						printAnnotationProgress(current, total, obj)
+						if shouldEmitProgress(current, total, &lastProgressPercent, &lastProgressPrintedAt) {
+							printAnnotationProgress(current, total, obj)
+						}
 						progressMu.Unlock()
 					}
 					continue
@@ -636,14 +694,18 @@ func annotateObjects(
 				if logLevel == "TRACE" {
 					color.Cyan("\n[TRACE] Processing object: Kind=%s, Namespace=%s, Name=%s, GVR=%s\n", obj.Kind, obj.Namespace, obj.Name, obj.GVR.String())
 				}
-				tracef("processing object kind=%s namespace=%s name=%s gvr=%s", obj.Kind, obj.Namespace, obj.Name, obj.GVR.String())
+				if isTraceVerboseEnabled() {
+					tracef("processing object kind=%s namespace=%s name=%s gvr=%s", obj.Kind, obj.Namespace, obj.Name, obj.GVR.String())
+				}
 
 				processObjectAnnotation(dynamicClient, switchDynamicClient, obj, timestamp, unsupportedTypes, &unsupportedMu, logLevel)
 
 				current := atomic.AddInt64(&processed, 1)
 				if logLevel != "TRACE" {
 					progressMu.Lock()
-					printAnnotationProgress(current, total, obj)
+					if shouldEmitProgress(current, total, &lastProgressPercent, &lastProgressPrintedAt) {
+						printAnnotationProgress(current, total, obj)
+					}
 					progressMu.Unlock()
 				}
 			}
@@ -777,6 +839,43 @@ func printAnnotationProgress(current, total int64, obj ObjectRef) {
 	fmt.Printf("\rProgress: [%s] Annotating: Kind=%s, Namespace=%s, Name=%s                    ", greenProgress(fmt.Sprintf("%d%%", progress)), obj.Kind, obj.Namespace, obj.Name)
 }
 
+func shouldEmitProgress(current, total int64, lastPercent *int, lastPrintedAt *time.Time) bool {
+	if total <= 0 {
+		return false
+	}
+
+	progress := int((current * 100) / total)
+	now := time.Now()
+
+	if current >= total {
+		*lastPercent = progress
+		*lastPrintedAt = now
+		return true
+	}
+
+	if *lastPercent < 0 {
+		*lastPercent = progress
+		*lastPrintedAt = now
+		return true
+	}
+
+	if now.Sub(*lastPrintedAt) >= progressPrintInterval {
+		if progress > *lastPercent {
+			*lastPercent = progress
+		}
+		*lastPrintedAt = now
+		return true
+	}
+
+	if progress-*lastPercent >= progressPercentStep {
+		*lastPercent = progress
+		*lastPrintedAt = now
+		return true
+	}
+
+	return false
+}
+
 func processObjectAnnotation(
 	dynamicClient dynamic.Interface,
 	switchDynamicClient dynamic.Interface,
@@ -869,37 +968,17 @@ func processObjectAnnotation(
 }
 
 func addAnnotation(client dynamic.ResourceInterface, name, key, value, logLevel string) error {
-	obj, err := withRetryResult("get "+name+" for add annotation", logLevel, func(ctx context.Context) (*unstructured.Unstructured, error) {
-		return client.Get(ctx, name, metav1.GetOptions{})
-	})
-	if err != nil {
-		if logLevel == "TRACE" {
-			color.Cyan("\n[TRACE] Get failed for %s: %v\n", name, err)
-		}
-
-		tracef("get failed for %s: %s", name, formatServerErrorDetails(err))
-
-		return err
-	}
-
 	if logLevel == "TRACE" {
 		color.Cyan("\n[TRACE] Running annotation command: add %s=%s to %s\n", key, value, name)
-		color.Cyan("[TRACE] Object UID: %s, ResourceVersion: %s\n", obj.GetUID(), obj.GetResourceVersion())
 	}
 
-	tracef("add annotation key=%s value=%s object=%s uid=%s rv=%s", key, value, name, obj.GetUID(), obj.GetResourceVersion())
-
-	annotations := obj.GetAnnotations()
-	if annotations == nil {
-		annotations = make(map[string]string)
+	if isTraceVerboseEnabled() {
+		tracef("add annotation key=%s value=%s object=%s", key, value, name)
 	}
-
-	annotations[key] = value
-	obj.SetAnnotations(annotations)
 
 	patch := map[string]interface{}{
 		"metadata": map[string]interface{}{
-			"annotations": annotations,
+			"annotations": map[string]string{key: value},
 		},
 	}
 
@@ -913,7 +992,9 @@ func addAnnotation(client dynamic.ResourceInterface, name, key, value, logLevel 
 		color.Cyan("[TRACE] Calling Patch with MergePatchType for %s\n", name)
 	}
 
-	tracef("patch payload for %s: %s", name, string(patchBytes))
+	if isTraceVerboseEnabled() {
+		tracef("patch payload for %s: %s", name, string(patchBytes))
+	}
 
 	// Try MergePatchType first
 	err = withRetry("patch merge "+name, logLevel, func(ctx context.Context) error {
@@ -964,7 +1045,8 @@ func removeAnnotation(client dynamic.ResourceInterface, name, keyPrefix, logLeve
 		return nil
 	}
 
-	// Remove all annotations that start with keyPrefix
+	// Remove all annotations that start with keyPrefix.
+	// With keyPrefix="d8-migration" this removes both d8-migration and d8-migration-* keys.
 	modified := false
 
 	for key := range annotations {
@@ -1050,6 +1132,46 @@ func loadFailedObjects() (map[string]ObjectRef, error) {
 	return objects, nil
 }
 
+func getOrOpenRunWriter(current **os.File, path string) (*os.File, error) {
+	if *current != nil {
+		return *current, nil
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	*current = f
+
+	return f, nil
+}
+
+func closeRunStateWriters(state *sigMigrateRunState) {
+	if state == nil {
+		return
+	}
+
+	fileWriteMu.Lock()
+	defer fileWriteMu.Unlock()
+
+	if state.failedAttemptsWriter != nil {
+		_ = state.failedAttemptsWriter.Sync()
+		_ = state.failedAttemptsWriter.Close()
+		state.failedAttemptsWriter = nil
+	}
+	if state.errorLogWriter != nil {
+		_ = state.errorLogWriter.Sync()
+		_ = state.errorLogWriter.Close()
+		state.errorLogWriter = nil
+	}
+	if state.skippedObjectsWriter != nil {
+		_ = state.skippedObjectsWriter.Sync()
+		_ = state.skippedObjectsWriter.Close()
+		state.skippedObjectsWriter = nil
+	}
+}
+
 func recordFailure(obj ObjectRef, errorMsg string) {
 	failedAttemptsFile := getFailedAttemptsFilePath()
 	errorLogFile := getErrorLogFilePath()
@@ -1059,33 +1181,25 @@ func recordFailure(obj ObjectRef, errorMsg string) {
 	fileWriteMu.Lock()
 	defer fileWriteMu.Unlock()
 
-	// Append to failed attempts file
-	f, err := os.OpenFile(failedAttemptsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	state := getCurrentRunState()
+
+	failedWriter, err := getOrOpenRunWriter(&state.failedAttemptsWriter, failedAttemptsFile)
 	if err != nil {
-		// If we can't write to the file, log to stderr as fallback
 		fmt.Fprintf(os.Stderr, "Warning: failed to write to %s: %v\n", failedAttemptsFile, err)
 		tracef("failed to append failed attempts file %s: %v", failedAttemptsFile, err)
-
 		return
 	}
 
-	_, _ = fmt.Fprintf(f, "%s|%s|%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind, obj.GVR.Group, obj.GVR.Version)
-	_ = f.Sync()
-	_ = f.Close()
+	_, _ = fmt.Fprintf(failedWriter, "%s|%s|%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind, obj.GVR.Group, obj.GVR.Version)
 
-	// Append to error log file
-	f, err = os.OpenFile(errorLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	errorWriter, err := getOrOpenRunWriter(&state.errorLogWriter, errorLogFile)
 	if err != nil {
-		// If we can't write to the file, log to stderr as fallback
 		fmt.Fprintf(os.Stderr, "Warning: failed to write to %s: %v\n", errorLogFile, err)
 		tracef("failed to append error log file %s: %v", errorLogFile, err)
-
 		return
 	}
 
-	_, _ = fmt.Fprintf(f, "%s|%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind, errorMsg)
-	_ = f.Sync()
-	_ = f.Close()
+	_, _ = fmt.Fprintf(errorWriter, "%s|%s|%s|%s\n", obj.Namespace, obj.Name, obj.Kind, errorMsg)
 }
 
 func recordSkippedObject(obj ObjectRef, reason string, details string) {
@@ -1096,21 +1210,18 @@ func recordSkippedObject(obj ObjectRef, reason string, details string) {
 	fileWriteMu.Lock()
 	defer fileWriteMu.Unlock()
 
-	// Append to skipped objects file
-	f, err := os.OpenFile(skippedObjectsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	state := getCurrentRunState()
+
+	skippedWriter, err := getOrOpenRunWriter(&state.skippedObjectsWriter, skippedObjectsFile)
 	if err != nil {
-		// If we can't write to the file, log to stderr as fallback
 		fmt.Fprintf(os.Stderr, "Warning: failed to write to %s: %v\n", skippedObjectsFile, err)
 		tracef("failed to append skipped objects file %s: %v", skippedObjectsFile, err)
-
 		return
 	}
 
 	timestamp := time.Now().Format(time.RFC3339)
 	gvrStr := obj.GVR.String()
-	_, _ = fmt.Fprintf(f, "%s|%s|%s|%s|%s|%s|%s\n", timestamp, obj.Namespace, obj.Name, obj.Kind, gvrStr, reason, details)
-	_ = f.Sync()
-	_ = f.Close()
+	_, _ = fmt.Fprintf(skippedWriter, "%s|%s|%s|%s|%s|%s|%s\n", timestamp, obj.Namespace, obj.Name, obj.Kind, gvrStr, reason, details)
 }
 
 func shouldRetryWithSwitchAccount(errMsg string) bool {

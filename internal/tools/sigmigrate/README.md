@@ -100,19 +100,19 @@ d8 tools sig-migrate \
 5. **Error Handling**:
    - If a resource does not support annotations (MethodNotAllowed), it is added to the list of unsupported types and skipped in the future.
    - If the operation is forbidden for the current service account, the command automatically attempts to use an alternative service account (`system:serviceaccount:d8-multitenancy-manager:multitenancy-manager`).
-   - Each run writes failed/skipped artifacts to run-scoped files in `/tmp` with a timestamp suffix (for example: `/tmp/failed_annotations_20260414T151625Z.txt`, `/tmp/failed_errors_20260414T151625Z.txt`, `/tmp/skipped_objects_20260414T151625Z.txt`).
-   - For backward-compatible retry UX, the latest failed annotations are also synced to legacy `/tmp/failed_annotations.txt`, so `--retry` continues to work without extra arguments.
+   - Each run writes failed/skipped artifacts to run-scoped files in `/tmp` with a timestamp suffix (for example: `/tmp/failed_annotations_20260414T151625Z.log`, `/tmp/failed_errors_20260414T151625Z.log`, `/tmp/skipped_objects_20260414T151625Z.log`).
+   - For backward-compatible retry UX, the latest failed annotations are also synced to legacy `/tmp/failed_annotations.log`, so `--retry` continues to work without extra arguments.
    - A dedicated trace debug log is written to `/tmp/sigmigrate_trace_<timestamp>.log` with detailed execution/error diagnostics.
 
 ## Retry Files
 
 The command creates run-scoped files to track failed operations:
 
-- `/tmp/failed_annotations_<timestamp>.txt` - list of objects in `namespace|name|kind|group|version` format that failed to be processed
-- `/tmp/failed_errors_<timestamp>.txt` - detailed error information in `namespace|name|kind|error_message` format
-- `/tmp/skipped_objects_<timestamp>.txt` - skipped objects with reason/details
+- `/tmp/failed_annotations_<timestamp>.log` - list of objects in `namespace|name|kind|group|version` format that failed to be processed
+- `/tmp/failed_errors_<timestamp>.log` - detailed error information in `namespace|name|kind|error_message` format
+- `/tmp/skipped_objects_<timestamp>.log` - skipped objects with reason/details
 
-For retry compatibility, failed annotations are also mirrored into legacy `/tmp/failed_annotations.txt` and `--retry` reads from that legacy file (supports both old `namespace|name|kind` and new `namespace|name|kind|group|version` lines).
+For retry compatibility, failed annotations are also mirrored into legacy `/tmp/failed_annotations.log` and `--retry` reads from that legacy file (supports both old `namespace|name|kind` and new `namespace|name|kind|group|version` lines).
 
 ### Automatic Failure Detection
 
@@ -128,8 +128,8 @@ Example output when failures occur:
 ⚠️  Migration completed with 5 failed object(s).
 
 Some objects could not be annotated. Please check the error details:
-  Error log file: /tmp/failed_errors_<timestamp>.txt
-  Failed objects list: /tmp/failed_annotations_<timestamp>.txt
+  Error log file: /tmp/failed_errors_<timestamp>.log
+  Failed objects list: /tmp/failed_annotations_<timestamp>.log
   Trace log file: /tmp/sigmigrate_trace_<timestamp>.log
 
 To investigate the issues:

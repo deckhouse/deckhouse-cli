@@ -74,4 +74,10 @@ func addFlags(flags *pflag.FlagSet) {
 		defaultThreads,
 		"Number of worker threads for resource discovery and migration. Values <=0 use default.",
 	)
+
+	flags.Bool(
+		"measure-stages",
+		false,
+		"Print execution time for major migration stages.",
+	)
 }

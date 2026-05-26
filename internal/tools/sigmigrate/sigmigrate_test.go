@@ -168,7 +168,7 @@ func TestUpsertCollectedObject_PrefersPreferredVersion(t *testing.T) {
 
 func TestLoadFailedObjects_DoesNotOverwriteSameNamespaceNameKindAcrossGroups(t *testing.T) {
 	tmpDir := t.TempDir()
-	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.txt")
+	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.log")
 	setCurrentRunState(&sigMigrateRunState{LegacyFailedRetryFile: legacyRetryFile})
 	defer setCurrentRunState(nil)
 
@@ -360,7 +360,7 @@ func TestRemoveAnnotation(t *testing.T) {
 
 func TestLoadFailedObjects(t *testing.T) {
 	tmpDir := t.TempDir()
-	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.txt")
+	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.log")
 	runState := &sigMigrateRunState{
 		LegacyFailedRetryFile: legacyRetryFile,
 	}
@@ -397,7 +397,7 @@ func TestLoadFailedObjects(t *testing.T) {
 
 func TestLoadFailedObjects_ExtendedRetryFormatIncludesGVR(t *testing.T) {
 	tmpDir := t.TempDir()
-	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.txt")
+	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.log")
 	setCurrentRunState(&sigMigrateRunState{LegacyFailedRetryFile: legacyRetryFile})
 	defer setCurrentRunState(nil)
 
@@ -421,7 +421,7 @@ func TestLoadFailedObjects_ExtendedRetryFormatIncludesGVR(t *testing.T) {
 
 func TestLoadFailedObjects_ExtendedRetryFormat_NamespacedObjects(t *testing.T) {
 	tmpDir := t.TempDir()
-	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.txt")
+	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.log")
 	setCurrentRunState(&sigMigrateRunState{LegacyFailedRetryFile: legacyRetryFile})
 	defer setCurrentRunState(nil)
 
@@ -456,8 +456,8 @@ func TestLoadFailedObjects_ExtendedRetryFormat_NamespacedObjects(t *testing.T) {
 
 func TestRecordFailure(t *testing.T) {
 	tmpDir := t.TempDir()
-	failedFile := filepath.Join(tmpDir, "failed_annotations.txt")
-	errorFile := filepath.Join(tmpDir, "failed_errors.txt")
+	failedFile := filepath.Join(tmpDir, "failed_annotations.log")
+	errorFile := filepath.Join(tmpDir, "failed_errors.log")
 
 	obj := ObjectRef{
 		Namespace: "default",
@@ -547,8 +547,8 @@ func TestAnnotateObjects_UnsupportedType(t *testing.T) {
 
 func TestRecordFailure_FileWrite(t *testing.T) {
 	tmpDir := t.TempDir()
-	failedFile := filepath.Join(tmpDir, "failed_annotations.txt")
-	errorFile := filepath.Join(tmpDir, "failed_errors.txt")
+	failedFile := filepath.Join(tmpDir, "failed_annotations.log")
+	errorFile := filepath.Join(tmpDir, "failed_errors.log")
 
 	obj := ObjectRef{
 		Namespace: "test-ns",
@@ -564,22 +564,22 @@ func TestRecordFailure_FileWrite(t *testing.T) {
 
 	// Verify files were created
 	_, err := os.Stat(failedFile)
-	require.NoError(t, err, "failed_annotations.txt should be created")
+	require.NoError(t, err, "failed_annotations.log should be created")
 
 	_, err = os.Stat(errorFile)
-	require.NoError(t, err, "failed_errors.txt should be created")
+	require.NoError(t, err, "failed_errors.log should be created")
 
-	// Verify content of failed_annotations.txt
+	// Verify content of failed_annotations.log
 	failedData, err := os.ReadFile(failedFile)
 	require.NoError(t, err)
 	expectedFailedLine := "test-ns|test-resource|pods\n"
-	require.Equal(t, expectedFailedLine, string(failedData), "failed_annotations.txt should contain correct data")
+	require.Equal(t, expectedFailedLine, string(failedData), "failed_annotations.log should contain correct data")
 
-	// Verify content of failed_errors.txt
+	// Verify content of failed_errors.log
 	errorData, err := os.ReadFile(errorFile)
 	require.NoError(t, err)
 	expectedErrorLine := "test-ns|test-resource|pods|test error message\n"
-	require.Equal(t, expectedErrorLine, string(errorData), "failed_errors.txt should contain correct data")
+	require.Equal(t, expectedErrorLine, string(errorData), "failed_errors.log should contain correct data")
 
 	// Test appending multiple failures
 	obj2 := ObjectRef{
@@ -623,9 +623,9 @@ func TestAnnotateObjects_ErrorRecording(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.txt")
-	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.txt")
-	runSkippedFile := filepath.Join(tmpDir, "skipped_run.txt")
+	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.log")
+	runSkippedFile := filepath.Join(tmpDir, "skipped_run.log")
 	setCurrentRunState(&sigMigrateRunState{
 		FailedAttemptsFile: runFailedFile,
 		ErrorLogFile:       runErrorFile,
@@ -650,8 +650,8 @@ func TestAnnotateObjects_ErrorRecording(t *testing.T) {
 
 func TestSyncLegacyRetryFile(t *testing.T) {
 	tmpDir := t.TempDir()
-	runFile := filepath.Join(tmpDir, "failed_annotations_run.txt")
-	legacyFile := filepath.Join(tmpDir, "failed_annotations.txt")
+	runFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	legacyFile := filepath.Join(tmpDir, "failed_annotations.log")
 
 	err := os.WriteFile(runFile, []byte("ns|obj|pods\n"), 0644)
 	require.NoError(t, err)
@@ -697,9 +697,9 @@ func TestNewSigMigrateRunState_GeneratesSaltedPaths(t *testing.T) {
 	state := newSigMigrateRunState(ts)
 
 	require.Equal(t, "20260414T151625Z", state.RunID)
-	require.Equal(t, "/tmp/failed_annotations_20260414T151625Z.txt", state.FailedAttemptsFile)
-	require.Equal(t, "/tmp/failed_errors_20260414T151625Z.txt", state.ErrorLogFile)
-	require.Equal(t, "/tmp/skipped_objects_20260414T151625Z.txt", state.SkippedObjectsFile)
+	require.Equal(t, "/tmp/failed_annotations_20260414T151625Z.log", state.FailedAttemptsFile)
+	require.Equal(t, "/tmp/failed_errors_20260414T151625Z.log", state.ErrorLogFile)
+	require.Equal(t, "/tmp/skipped_objects_20260414T151625Z.log", state.SkippedObjectsFile)
 	require.Equal(t, "/tmp/sigmigrate_trace_20260414T151625Z.log", state.TraceLogFile)
 	require.Equal(t, legacyFailedAttemptsFile, state.LegacyFailedRetryFile)
 }
@@ -794,9 +794,9 @@ func TestWithRetry_NoRetryForNonRetryableError(t *testing.T) {
 
 func TestRecordFailure_ConcurrentWrites(t *testing.T) {
 	tmpDir := t.TempDir()
-	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.txt")
-	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.txt")
-	runSkippedFile := filepath.Join(tmpDir, "skipped_run.txt")
+	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.log")
+	runSkippedFile := filepath.Join(tmpDir, "skipped_run.log")
 	setCurrentRunState(&sigMigrateRunState{
 		FailedAttemptsFile: runFailedFile,
 		ErrorLogFile:       runErrorFile,
@@ -864,9 +864,9 @@ func TestAnnotateObjects_ManyObjectsWithWorkers(t *testing.T) {
 	dynamicClient := fake.NewSimpleDynamicClient(scheme, objs...)
 
 	tmpDir := t.TempDir()
-	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.txt")
-	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.txt")
-	runSkippedFile := filepath.Join(tmpDir, "skipped_run.txt")
+	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.log")
+	runSkippedFile := filepath.Join(tmpDir, "skipped_run.log")
 	setCurrentRunState(&sigMigrateRunState{
 		FailedAttemptsFile: runFailedFile,
 		ErrorLogFile:       runErrorFile,
@@ -906,9 +906,9 @@ func TestAnnotateObjects_SimpleRun(t *testing.T) {
 	dynamicClient := fake.NewSimpleDynamicClient(scheme, obj1, obj2)
 
 	tmpDir := t.TempDir()
-	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.txt")
-	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.txt")
-	runSkippedFile := filepath.Join(tmpDir, "skipped_run.txt")
+	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.log")
+	runSkippedFile := filepath.Join(tmpDir, "skipped_run.log")
 	setCurrentRunState(&sigMigrateRunState{
 		FailedAttemptsFile: runFailedFile,
 		ErrorLogFile:       runErrorFile,
@@ -964,10 +964,10 @@ func TestRetryFlow_LoadFailedAndAnnotate(t *testing.T) {
 	dynamicClient := fake.NewSimpleDynamicClient(scheme, obj)
 
 	tmpDir := t.TempDir()
-	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.txt")
-	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.txt")
-	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.txt")
-	runSkippedFile := filepath.Join(tmpDir, "skipped_run.txt")
+	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.log")
+	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.log")
+	runSkippedFile := filepath.Join(tmpDir, "skipped_run.log")
 
 	retryData := strings.Join([]string{
 		"default|retry-cm|configmaps||v1",
