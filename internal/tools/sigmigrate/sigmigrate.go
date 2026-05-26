@@ -19,16 +19,20 @@ package sigmigrate
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
@@ -41,15 +45,21 @@ import (
 const (
 	annotationKey            = "d8-migration"
 	annotationKeyToRemove    = "d8-migration-"
-	defaultKubectlAs         = "system:serviceaccount:d8-system:deckhouse"
 	switchAccount            = "system:serviceaccount:d8-multitenancy-manager:multitenancy-manager"
 	legacyFailedAttemptsFile = "/tmp/failed_annotations.txt"
 	legacyErrorLogFile       = "/tmp/failed_errors.txt"
 	legacySkippedObjectsFile = "/tmp/skipped_objects.txt"
 	runTimestampFormat       = "20060102T150405Z"
+	maxWorkerCount           = 256
+	maxRequestRetries        = 5
+	requestTimeout           = 30 * time.Second
+	baseRetryDelay           = 200 * time.Millisecond
+	defaultWorkerCount       = 10
 )
 
 var runStateMu sync.RWMutex
+var fileWriteMu sync.Mutex
+var traceWriteMu sync.Mutex
 
 var currentRunState *sigMigrateRunState
 
@@ -123,6 +133,8 @@ func tracef(format string, args ...interface{}) {
 	}
 
 	message := fmt.Sprintf(format, args...)
+	traceWriteMu.Lock()
+	defer traceWriteMu.Unlock()
 	if _, err := fmt.Fprintf(state.traceFile, "%s TRACE %s\n", time.Now().UTC().Format(time.RFC3339Nano), message); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write trace log file %s: %v\n", state.TraceLogFile, err)
 	}
@@ -242,6 +254,7 @@ type SigMigrateConfig struct {
 	Kubeconfig  string
 	Context     string
 	Object      string
+	Workers     int
 }
 
 func SigMigrate(cmd *cobra.Command, _ []string) error {
@@ -279,6 +292,12 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to get object flag: %w", err)
 	}
 
+	config.Workers, err = cmd.Flags().GetInt("threads")
+	if err != nil {
+		return fmt.Errorf("failed to get threads flag: %w", err)
+	}
+	config.Workers = normalizeWorkerCount(config.Workers)
+
 	runState := newSigMigrateRunState(time.Now())
 
 	traceFile, traceOpenErr := os.OpenFile(runState.TraceLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -292,8 +311,10 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 
 	defer func() {
 		if runState.traceFile != nil {
+			traceWriteMu.Lock()
 			_ = runState.traceFile.Sync()
 			_ = runState.traceFile.Close()
+			traceWriteMu.Unlock()
 		}
 
 		setCurrentRunState(nil)
@@ -304,7 +325,7 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 		}
 	}()
 
-	tracef("sig-migrate started: retry=%t, object=%q, log-level=%s", config.RetryFailed, config.Object, config.LogLevel)
+	tracef("sig-migrate started: retry=%t, object=%q, log-level=%s, threads=%d", config.RetryFailed, config.Object, config.LogLevel, config.Workers)
 	tracef("run artifacts: failed=%s, errors=%s, skipped=%s, trace=%s", getFailedAttemptsFilePath(), getErrorLogFilePath(), getSkippedObjectsFilePath(), runState.TraceLogFile)
 	tracef("legacy retry compatibility file: %s", getLegacyRetryFilePath())
 
@@ -375,7 +396,7 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 
 		color.Cyan("Loaded %d objects for retry from %s.\n", len(objects), getLegacyRetryFilePath())
 	default:
-		objects, err = collectAllObjects(discoveryClient, dynamicClient, config.LogLevel)
+		objects, err = collectAllObjects(discoveryClient, dynamicClient, config.LogLevel, config.Workers)
 		if err != nil {
 			tracef("failed to collect objects: %v", err)
 			return fmt.Errorf("failed to collect objects: %w", err)
@@ -409,7 +430,7 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 	timestamp := time.Now().Unix()
 	unsupportedTypes := make(map[string]bool)
 
-	annotateObjects(dynamicClient, switchDynamicClient, objects, timestamp, unsupportedTypes, config.LogLevel)
+	annotateObjects(dynamicClient, switchDynamicClient, objects, timestamp, unsupportedTypes, config.LogLevel, config.Workers)
 
 	// Check if there were any failed annotations
 	checkFailedAnnotations()
@@ -418,10 +439,14 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClient dynamic.Interface, logLevel string) (map[string]ObjectRef, error) {
+type resourceInfo struct {
+	gvr        schema.GroupVersionResource
+	namespaced bool
+}
+
+func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClient dynamic.Interface, logLevel string, workers int) (map[string]ObjectRef, error) {
 	objects := make(map[string]ObjectRef)
 
-	// Get all API groups first (similar to kubectl api-resources)
 	apiGroupList, err := discoveryClient.ServerGroups()
 	if err != nil {
 		tracef("failed to discover API groups: %v", err)
@@ -430,25 +455,11 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 
 	preferredByGroup := preferredVersionByGroup(apiGroupList)
 
-	namespacedResources := []schema.GroupVersionResource{}
-	clusterResources := []schema.GroupVersionResource{}
-
-	// Track resources by GVR to collect all unique API versions
-	// This allows us to process both core API resources and custom resources (like apps.kruise.io)
-	type resourceInfo struct {
-		gvr        schema.GroupVersionResource
-		namespaced bool
-	}
-
 	resourceMap := make(map[string]resourceInfo)
-
-	// Iterate through all API groups and their versions (like kubectl api-resources does)
 	for _, group := range apiGroupList.Groups {
 		for _, version := range group.Versions {
-			// Get resources for this specific group version
 			apiResourceList, err := discoveryClient.ServerResourcesForGroupVersion(version.GroupVersion)
 			if err != nil {
-				// Log but continue - some groups may fail (e.g., metrics)
 				if logLevel == "TRACE" {
 					fmt.Printf("Warning: failed to get resources for %s: %v\n", version.GroupVersion, err)
 				}
@@ -463,39 +474,20 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 				continue
 			}
 
-			// Skip metrics and other API groups that don't support standard operations
-			// These groups typically only support read operations
 			if gv.Group == "metrics.k8s.io" || gv.Group == "custom.metrics.k8s.io" || gv.Group == "external.metrics.k8s.io" {
 				continue
 			}
 
 			for _, apiResource := range apiResourceList.APIResources {
-				// Skip subresources
 				if strings.Contains(apiResource.Name, "/") {
 					continue
 				}
-
-				// Skip resources that don't support list
-				if !contains(apiResource.Verbs, "list") {
+				if !contains(apiResource.Verbs, "list") || !contains(apiResource.Verbs, "patch") {
 					continue
 				}
 
-				// Skip resources that don't support patch (needed for annotations)
-				if !contains(apiResource.Verbs, "patch") {
-					continue
-				}
-
-				gvr := schema.GroupVersionResource{
-					Group:    gv.Group,
-					Version:  gv.Version,
-					Resource: apiResource.Name,
-				}
-
-				// Use full GVR string as key to collect all unique API versions
-				// This allows us to process both core API (apps/v1/daemonsets) and custom resources (apps.kruise.io/v1alpha1/daemonsets)
+				gvr := schema.GroupVersionResource{Group: gv.Group, Version: gv.Version, Resource: apiResource.Name}
 				resourceKey := gvr.String()
-
-				// Only add if we haven't seen this exact GVR before
 				if _, exists := resourceMap[resourceKey]; !exists {
 					resourceMap[resourceKey] = resourceInfo{gvr: gvr, namespaced: apiResource.Namespaced}
 				}
@@ -503,84 +495,84 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 		}
 	}
 
-	// Convert map to slices
+	resources := make([]resourceInfo, 0, len(resourceMap))
 	for _, info := range resourceMap {
-		if info.namespaced {
-			namespacedResources = append(namespacedResources, info.gvr)
-		} else {
-			clusterResources = append(clusterResources, info.gvr)
-		}
+		resources = append(resources, info)
 	}
 
-	totalResources := len(namespacedResources) + len(clusterResources)
-	currentResource := 0
-
-	// Process namespaced resources
-	for _, gvr := range namespacedResources {
-		currentResource++
-		progress := (currentResource * 100) / totalResources
-
-		if logLevel == "TRACE" {
-			fmt.Printf("\nFetching resource: %s\n", gvr.String())
-		} else {
-			greenProgress := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("\rCalculating: [%s] Processing Namespaced Resource: %s                                ", greenProgress(fmt.Sprintf("%d%%", progress)), gvr.Resource)
-		}
-
-		resourceClient := dynamicClient.Resource(gvr)
-
-		list, err := resourceClient.List(context.TODO(), metav1.ListOptions{})
-		if err != nil {
-			if logLevel == "TRACE" {
-				fmt.Printf("Error listing %s: %v\n", gvr.String(), err)
-			}
-
-			tracef("error listing %s: %v", gvr.String(), err)
-
-			continue
-		}
-
-		for _, item := range list.Items {
-			namespace := item.GetNamespace()
-			if namespace == "" {
-				namespace = "clusterwide"
-			}
-
-			name := item.GetName()
-			upsertCollectedObject(objects, namespace, name, gvr, preferredByGroup)
-		}
+	if len(resources) == 0 {
+		fmt.Println()
+		return objects, nil
 	}
 
-	// Process cluster resources
-	for _, gvr := range clusterResources {
-		currentResource++
-		progress := (currentResource * 100) / totalResources
-
-		if logLevel == "TRACE" {
-			fmt.Printf("\nFetching resource: %s\n", gvr.String())
-		} else {
-			greenProgress := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("\rCalculating: [%s] Processing Cluster Resource: %s                                 ", greenProgress(fmt.Sprintf("%d%%", progress)), gvr.Resource)
-		}
-
-		resourceClient := dynamicClient.Resource(gvr)
-
-		list, err := resourceClient.List(context.TODO(), metav1.ListOptions{})
-		if err != nil {
-			if logLevel == "TRACE" {
-				fmt.Printf("Error listing %s: %v\n", gvr.String(), err)
-			}
-
-			tracef("error listing %s: %v", gvr.String(), err)
-
-			continue
-		}
-
-		for _, item := range list.Items {
-			name := item.GetName()
-			upsertCollectedObject(objects, "clusterwide", name, gvr, preferredByGroup)
-		}
+	workerCount := normalizeWorkerCount(workers)
+	if workerCount > len(resources) {
+		workerCount = len(resources)
 	}
+
+	jobs := make(chan resourceInfo)
+	var wg sync.WaitGroup
+	var progressMu sync.Mutex
+	var objectsMu sync.Mutex
+	var processed int64
+	totalResources := int64(len(resources))
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for info := range jobs {
+				if logLevel == "TRACE" {
+					fmt.Printf("\nFetching resource: %s\n", info.gvr.String())
+				}
+
+				list, err := withRetryResult("list "+info.gvr.String(), logLevel, func(ctx context.Context) (*unstructured.UnstructuredList, error) {
+					return dynamicClient.Resource(info.gvr).List(ctx, metav1.ListOptions{})
+				})
+				if err != nil {
+					if logLevel == "TRACE" {
+						fmt.Printf("Error listing %s: %v\n", info.gvr.String(), err)
+					}
+					tracef("error listing %s: %v", info.gvr.String(), err)
+					current := atomic.AddInt64(&processed, 1)
+					if logLevel != "TRACE" {
+						progress := int((current * 100) / totalResources)
+						greenProgress := color.New(color.FgGreen).SprintFunc()
+						progressMu.Lock()
+						fmt.Printf("\rCalculating: [%s] Processed Resource: %s                                ", greenProgress(fmt.Sprintf("%d%%", progress)), info.gvr.Resource)
+						progressMu.Unlock()
+					}
+					continue
+				}
+
+				objectsMu.Lock()
+				for _, item := range list.Items {
+					namespace := item.GetNamespace()
+					if namespace == "" {
+						namespace = "clusterwide"
+					}
+					name := item.GetName()
+					upsertCollectedObject(objects, namespace, name, info.gvr, preferredByGroup)
+				}
+				objectsMu.Unlock()
+
+				current := atomic.AddInt64(&processed, 1)
+				if logLevel != "TRACE" {
+					progress := int((current * 100) / totalResources)
+					greenProgress := color.New(color.FgGreen).SprintFunc()
+					progressMu.Lock()
+					fmt.Printf("\rCalculating: [%s] Processed Resource: %s                                ", greenProgress(fmt.Sprintf("%d%%", progress)), info.gvr.Resource)
+					progressMu.Unlock()
+				}
+			}
+		}()
+	}
+
+	for _, info := range resources {
+		jobs <- info
+	}
+	close(jobs)
+	wg.Wait()
 
 	fmt.Println()
 
@@ -594,154 +586,292 @@ func annotateObjects(
 	timestamp int64,
 	unsupportedTypes map[string]bool,
 	logLevel string,
+	workers int,
 ) {
-	currentObject := 0
 	totalObjects := len(objects)
+	if totalObjects == 0 {
+		fmt.Println()
+		return
+	}
 
+	items := make([]ObjectRef, 0, totalObjects)
 	for _, obj := range objects {
-		var err error
+		items = append(items, obj)
+	}
 
-		if unsupportedTypes[obj.Kind] {
-			if logLevel == "DEBUG" || logLevel == "TRACE" {
-				color.Yellow("\nSkipping type that does not support annotation: %s\n", obj.Kind)
-			}
+	workerCount := normalizeWorkerCount(workers)
+	if workerCount > len(items) {
+		workerCount = len(items)
+	}
 
-			recordSkippedObject(obj, "MethodNotSupported", fmt.Sprintf("Resource type %s does not support PATCH operation", obj.Kind))
+	jobs := make(chan ObjectRef)
+	var wg sync.WaitGroup
+	var progressMu sync.Mutex
+	var unsupportedMu sync.RWMutex
+	var processed int64
+	total := int64(len(items))
 
-			continue
-		}
-
-		currentObject++
-		progress := (currentObject * 100) / totalObjects
-		greenProgress := color.New(color.FgGreen).SprintFunc()
-		fmt.Printf("\rProgress: [%s] Annotating: Kind=%s, Namespace=%s, Name=%s                    ", greenProgress(fmt.Sprintf("%d%%", progress)), obj.Kind, obj.Namespace, obj.Name)
-
-		if logLevel == "TRACE" {
-			color.Cyan("\n[TRACE] Processing object: Kind=%s, Namespace=%s, Name=%s, GVR=%s\n", obj.Kind, obj.Namespace, obj.Name, obj.GVR.String())
-		}
-
-		tracef("processing object kind=%s namespace=%s name=%s gvr=%s", obj.Kind, obj.Namespace, obj.Name, obj.GVR.String())
-
-		resourceClient := dynamicClient.Resource(obj.GVR)
-
-		var objClient dynamic.ResourceInterface
-		if obj.Namespace == "clusterwide" {
-			objClient = resourceClient
-		} else {
-			objClient = resourceClient.Namespace(obj.Namespace)
-		}
-
-		// Add annotation
-		err = addAnnotation(objClient, obj.Name, annotationKey, fmt.Sprintf("%d", timestamp), logLevel)
-		if err != nil {
-			errStr := err.Error()
-
-			// First, check for permission denied - try with different service account
-			// This should be checked BEFORE MethodNotSupported, as permission errors
-			// can sometimes be reported as "method not allowed"
-			if shouldRetryWithSwitchAccount(errStr) {
-				color.Yellow("\nRetrying with different service account: %s for %s/%s/%s\n", switchAccount, obj.Kind, obj.Namespace, obj.Name)
-				tracef("retrying with switch account %s for %s/%s/%s", switchAccount, obj.Kind, obj.Namespace, obj.Name)
-				switchResourceClient := switchDynamicClient.Resource(obj.GVR)
-
-				var switchObjClient dynamic.ResourceInterface
-				if obj.Namespace == "clusterwide" {
-					switchObjClient = switchResourceClient
-				} else {
-					switchObjClient = switchResourceClient.Namespace(obj.Namespace)
-				}
-
-				err = addAnnotation(switchObjClient, obj.Name, annotationKey, fmt.Sprintf("%d", timestamp), logLevel)
-				if err != nil {
-					// If it still fails with MethodNotSupported after switching accounts, then it's truly unsupported
-					if errors.IsMethodNotSupported(err) {
-						if logLevel == "TRACE" {
-							color.Cyan("\n[TRACE] MethodNotSupported error after switching account: %v\n", err)
-						}
-
-						tracef("method not supported after switch account for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
-						unsupportedTypes[obj.Kind] = true
-						color.Yellow("\nAdding %s to unsupported annotation types due to MethodNotSupported (after trying switch account).\n", obj.Kind)
-						recordSkippedObject(obj, "MethodNotSupported", fmt.Sprintf("After switching to account %s: %v", switchAccount, err))
-
-						continue
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for obj := range jobs {
+				unsupportedMu.RLock()
+				skipKind := unsupportedTypes[obj.Kind]
+				unsupportedMu.RUnlock()
+				if skipKind {
+					if logLevel == "DEBUG" || logLevel == "TRACE" {
+						color.Yellow("\nSkipping type that does not support annotation: %s\n", obj.Kind)
 					}
-
-					color.Red("\nFailed to add annotation after switching accounts for %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
-					color.Yellow("Retry Details: %v\n", err)
-					tracef("failed to add annotation after switch account for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
-					recordFailure(obj, err.Error())
-
+					recordSkippedObject(obj, "MethodNotSupported", fmt.Sprintf("Resource type %s does not support PATCH operation", obj.Kind))
+					current := atomic.AddInt64(&processed, 1)
+					if logLevel != "TRACE" {
+						progressMu.Lock()
+						printAnnotationProgress(current, total, obj)
+						progressMu.Unlock()
+					}
 					continue
 				}
-				// Success with switch account, continue to next object
-				continue
-			}
 
-			// Check for unsupported method (resource type doesn't support annotations)
-			// Only mark as unsupported if it's truly MethodNotSupported AND not a permission issue
-			if errors.IsMethodNotSupported(err) {
 				if logLevel == "TRACE" {
-					color.Cyan("\n[TRACE] MethodNotSupported error: %v\n", err)
-					color.Cyan("[TRACE] Error details for %s/%s/%s: %s\n", obj.Kind, obj.Namespace, obj.Name, errStr)
-					// Check if it's a StatusError to get more details
-					if statusErr, ok := err.(*errors.StatusError); ok {
-						color.Cyan("[TRACE] Status code: %d\n", statusErr.Status().Code)
-						color.Cyan("[TRACE] Status reason: %s\n", statusErr.Status().Reason)
-						color.Cyan("[TRACE] Status message: %s\n", statusErr.Status().Message)
-					}
+					color.Cyan("\n[TRACE] Processing object: Kind=%s, Namespace=%s, Name=%s, GVR=%s\n", obj.Kind, obj.Namespace, obj.Name, obj.GVR.String())
 				}
+				tracef("processing object kind=%s namespace=%s name=%s gvr=%s", obj.Kind, obj.Namespace, obj.Name, obj.GVR.String())
 
-				tracef("method not supported for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
-				unsupportedTypes[obj.Kind] = true
-				color.Yellow("\nAdding %s to unsupported annotation types due to MethodNotSupported.\n", obj.Kind)
-				recordSkippedObject(obj, "MethodNotSupported", fmt.Sprintf("Error: %v", err))
+				processObjectAnnotation(dynamicClient, switchDynamicClient, obj, timestamp, unsupportedTypes, &unsupportedMu, logLevel)
 
-				continue
-			}
-
-			// Record all other errors (excluding not-found cases - skip retry for these)
-			isNotFound := errors.IsNotFound(err) || strings.Contains(strings.ToLower(errStr), "not found")
-
-			if isNotFound {
-				skipReason, skipDetails := classifyNotFoundError(err)
-				color.Yellow("\nSkipping %s/%s/%s: %s\n", obj.Kind, obj.Namespace, obj.Name, skipDetails)
-				tracef("skipping object %s/%s/%s: reason=%s details=%s", obj.Kind, obj.Namespace, obj.Name, skipReason, skipDetails)
-				recordSkippedObject(obj, skipReason, skipDetails)
-			} else {
-				// Other errors - definitely record them
-				color.Red("\nFailed to add annotation to %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
-				color.Yellow("Details: %v\n", err)
-				tracef("failed to add annotation for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
-				recordFailure(obj, errStr)
-			}
-
-			continue
-		}
-
-		// Remove annotation
-		err = removeAnnotation(objClient, obj.Name, annotationKeyToRemove, logLevel)
-		if err != nil {
-			// Skip MethodNotSupported and NotFound errors - no need to record them
-			// MethodNotSupported: resource type doesn't support PATCH (already known from addAnnotation)
-			// NotFound: object was deleted, no point in retrying
-			if !errors.IsMethodNotSupported(err) && !errors.IsNotFound(err) {
-				errStr := err.Error()
-				if !strings.Contains(errStr, "Not found") && !strings.Contains(errStr, "not found") {
-					color.Red("\nFailed to remove annotation from %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
-					color.Yellow("Details: %v\n", err)
-					tracef("failed to remove annotation for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
-					recordFailure(obj, errStr)
+				current := atomic.AddInt64(&processed, 1)
+				if logLevel != "TRACE" {
+					progressMu.Lock()
+					printAnnotationProgress(current, total, obj)
+					progressMu.Unlock()
 				}
 			}
-		}
+		}()
 	}
+
+	for _, obj := range items {
+		jobs <- obj
+	}
+	close(jobs)
+	wg.Wait()
 
 	fmt.Println()
 }
 
+func normalizeWorkerCount(workers int) int {
+	if workers <= 0 {
+		return defaultWorkerCount
+	}
+	if workers > maxWorkerCount {
+		return maxWorkerCount
+	}
+	return workers
+}
+
+func withRetry(operation, logLevel string, fn func(ctx context.Context) error) error {
+	var lastErr error
+	for attempt := 0; attempt < maxRequestRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		err := fn(ctx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+		if !shouldRetryRequestError(err) || attempt == maxRequestRetries-1 {
+			return err
+		}
+
+		delay := baseRetryDelay * time.Duration(1<<attempt)
+		if logLevel == "TRACE" || logLevel == "DEBUG" {
+			tracef("retrying operation=%s attempt=%d/%d delay=%s err=%s", operation, attempt+1, maxRequestRetries, delay, formatServerErrorDetails(err))
+		}
+		time.Sleep(delay)
+	}
+
+	return lastErr
+}
+
+func withRetryResult[T any](operation, logLevel string, fn func(ctx context.Context) (T, error)) (T, error) {
+	var zero T
+	var lastErr error
+	for attempt := 0; attempt < maxRequestRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		result, err := fn(ctx)
+		cancel()
+		if err == nil {
+			return result, nil
+		}
+
+		lastErr = err
+		if !shouldRetryRequestError(err) || attempt == maxRequestRetries-1 {
+			return zero, err
+		}
+
+		delay := baseRetryDelay * time.Duration(1<<attempt)
+		if logLevel == "TRACE" || logLevel == "DEBUG" {
+			tracef("retrying operation=%s attempt=%d/%d delay=%s err=%s", operation, attempt+1, maxRequestRetries, delay, formatServerErrorDetails(err))
+		}
+		time.Sleep(delay)
+	}
+
+	return zero, lastErr
+}
+
+func shouldRetryRequestError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if errors.IsTooManyRequests(err) || errors.IsServerTimeout(err) || errors.IsTimeout(err) || errors.IsServiceUnavailable(err) {
+		return true
+	}
+
+	if statusErr, ok := err.(*errors.StatusError); ok {
+		code := statusErr.Status().Code
+		if code == 429 || code == 408 || code >= 500 {
+			return true
+		}
+	}
+
+	if os.IsTimeout(err) {
+		return true
+	}
+
+	var netErr net.Error
+	if stderrors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return true
+		}
+		type temporary interface{ Temporary() bool }
+		if te, ok := any(netErr).(temporary); ok && te.Temporary() {
+			return true
+		}
+	}
+
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "connection reset by peer") || strings.Contains(msg, "too many requests") || strings.Contains(msg, "eof") {
+		return true
+	}
+
+	return false
+}
+
+func getObjectClient(client dynamic.Interface, obj ObjectRef) dynamic.ResourceInterface {
+	resourceClient := client.Resource(obj.GVR)
+	if obj.Namespace == "clusterwide" {
+		return resourceClient
+	}
+
+	return resourceClient.Namespace(obj.Namespace)
+}
+
+func printAnnotationProgress(current, total int64, obj ObjectRef) {
+	if total <= 0 {
+		return
+	}
+	progress := int((current * 100) / total)
+	greenProgress := color.New(color.FgGreen).SprintFunc()
+	fmt.Printf("\rProgress: [%s] Annotating: Kind=%s, Namespace=%s, Name=%s                    ", greenProgress(fmt.Sprintf("%d%%", progress)), obj.Kind, obj.Namespace, obj.Name)
+}
+
+func processObjectAnnotation(
+	dynamicClient dynamic.Interface,
+	switchDynamicClient dynamic.Interface,
+	obj ObjectRef,
+	timestamp int64,
+	unsupportedTypes map[string]bool,
+	unsupportedMu *sync.RWMutex,
+	logLevel string,
+) {
+	objClient := getObjectClient(dynamicClient, obj)
+	err := addAnnotation(objClient, obj.Name, annotationKey, fmt.Sprintf("%d", timestamp), logLevel)
+	if err != nil {
+		errStr := err.Error()
+
+		if shouldRetryWithSwitchAccount(errStr) {
+			color.Yellow("\nRetrying with different service account: %s for %s/%s/%s\n", switchAccount, obj.Kind, obj.Namespace, obj.Name)
+			tracef("retrying with switch account %s for %s/%s/%s", switchAccount, obj.Kind, obj.Namespace, obj.Name)
+			switchObjClient := getObjectClient(switchDynamicClient, obj)
+
+			err = addAnnotation(switchObjClient, obj.Name, annotationKey, fmt.Sprintf("%d", timestamp), logLevel)
+			if err != nil {
+				if errors.IsMethodNotSupported(err) {
+					if logLevel == "TRACE" {
+						color.Cyan("\n[TRACE] MethodNotSupported error after switching account: %v\n", err)
+					}
+					tracef("method not supported after switch account for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
+					unsupportedMu.Lock()
+					unsupportedTypes[obj.Kind] = true
+					unsupportedMu.Unlock()
+					color.Yellow("\nAdding %s to unsupported annotation types due to MethodNotSupported (after trying switch account).\n", obj.Kind)
+					recordSkippedObject(obj, "MethodNotSupported", fmt.Sprintf("After switching to account %s: %v", switchAccount, err))
+					return
+				}
+				color.Red("\nFailed to add annotation after switching accounts for %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
+				color.Yellow("Retry Details: %v\n", err)
+				tracef("failed to add annotation after switch account for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
+				recordFailure(obj, err.Error())
+				return
+			}
+			return
+		}
+
+		if errors.IsMethodNotSupported(err) {
+			if logLevel == "TRACE" {
+				color.Cyan("\n[TRACE] MethodNotSupported error: %v\n", err)
+				color.Cyan("[TRACE] Error details for %s/%s/%s: %s\n", obj.Kind, obj.Namespace, obj.Name, errStr)
+				if statusErr, ok := err.(*errors.StatusError); ok {
+					color.Cyan("[TRACE] Status code: %d\n", statusErr.Status().Code)
+					color.Cyan("[TRACE] Status reason: %s\n", statusErr.Status().Reason)
+					color.Cyan("[TRACE] Status message: %s\n", statusErr.Status().Message)
+				}
+			}
+			tracef("method not supported for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
+			unsupportedMu.Lock()
+			unsupportedTypes[obj.Kind] = true
+			unsupportedMu.Unlock()
+			color.Yellow("\nAdding %s to unsupported annotation types due to MethodNotSupported.\n", obj.Kind)
+			recordSkippedObject(obj, "MethodNotSupported", fmt.Sprintf("Error: %v", err))
+			return
+		}
+
+		isNotFound := errors.IsNotFound(err) || strings.Contains(strings.ToLower(errStr), "not found")
+		if isNotFound {
+			skipReason, skipDetails := classifyNotFoundError(err)
+			color.Yellow("\nSkipping %s/%s/%s: %s\n", obj.Kind, obj.Namespace, obj.Name, skipDetails)
+			tracef("skipping object %s/%s/%s: reason=%s details=%s", obj.Kind, obj.Namespace, obj.Name, skipReason, skipDetails)
+			recordSkippedObject(obj, skipReason, skipDetails)
+			return
+		}
+
+		color.Red("\nFailed to add annotation to %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
+		color.Yellow("Details: %v\n", err)
+		tracef("failed to add annotation for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
+		recordFailure(obj, errStr)
+		return
+	}
+
+	err = removeAnnotation(objClient, obj.Name, annotationKeyToRemove, logLevel)
+	if err != nil {
+		if !errors.IsMethodNotSupported(err) && !errors.IsNotFound(err) {
+			errStr := err.Error()
+			if !strings.Contains(errStr, "Not found") && !strings.Contains(errStr, "not found") {
+				color.Red("\nFailed to remove annotation from %s/%s/%s\n", obj.Kind, obj.Namespace, obj.Name)
+				color.Yellow("Details: %v\n", err)
+				tracef("failed to remove annotation for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
+				recordFailure(obj, errStr)
+			}
+		}
+	}
+}
+
 func addAnnotation(client dynamic.ResourceInterface, name, key, value, logLevel string) error {
-	obj, err := client.Get(context.TODO(), name, metav1.GetOptions{})
+	obj, err := withRetryResult("get "+name+" for add annotation", logLevel, func(ctx context.Context) (*unstructured.Unstructured, error) {
+		return client.Get(ctx, name, metav1.GetOptions{})
+	})
 	if err != nil {
 		if logLevel == "TRACE" {
 			color.Cyan("\n[TRACE] Get failed for %s: %v\n", name, err)
@@ -786,7 +916,10 @@ func addAnnotation(client dynamic.ResourceInterface, name, key, value, logLevel 
 	tracef("patch payload for %s: %s", name, string(patchBytes))
 
 	// Try MergePatchType first
-	_, err = client.Patch(context.TODO(), name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+	err = withRetry("patch merge "+name, logLevel, func(ctx context.Context) error {
+		_, patchErr := client.Patch(ctx, name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+		return patchErr
+	})
 	if err != nil {
 		// If MergePatchType fails with MethodNotSupported, try StrategicMergePatchType
 		// This is needed for some resources like pods
@@ -796,7 +929,10 @@ func addAnnotation(client dynamic.ResourceInterface, name, key, value, logLevel 
 			}
 
 			tracef("merge patch type not supported for %s, retry with StrategicMergePatchType", name)
-			_, err = client.Patch(context.TODO(), name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+			err = withRetry("patch strategic "+name, logLevel, func(ctx context.Context) error {
+				_, patchErr := client.Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+				return patchErr
+			})
 		}
 
 		if err != nil && logLevel == "TRACE" {
@@ -811,8 +947,10 @@ func addAnnotation(client dynamic.ResourceInterface, name, key, value, logLevel 
 	return err
 }
 
-func removeAnnotation(client dynamic.ResourceInterface, name, keyPrefix, _ string) error {
-	obj, err := client.Get(context.TODO(), name, metav1.GetOptions{})
+func removeAnnotation(client dynamic.ResourceInterface, name, keyPrefix, logLevel string) error {
+	obj, err := withRetryResult("get "+name+" for remove annotation", logLevel, func(ctx context.Context) (*unstructured.Unstructured, error) {
+		return client.Get(ctx, name, metav1.GetOptions{})
+	})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil
@@ -852,8 +990,10 @@ func removeAnnotation(client dynamic.ResourceInterface, name, keyPrefix, _ strin
 		return fmt.Errorf("failed to marshal patch: %w", err)
 	}
 
-	_, err = client.Patch(context.TODO(), name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
-
+	err = withRetry("patch remove annotation "+name, logLevel, func(ctx context.Context) error {
+		_, patchErr := client.Patch(ctx, name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+		return patchErr
+	})
 	return err
 }
 
@@ -916,6 +1056,9 @@ func recordFailure(obj ObjectRef, errorMsg string) {
 
 	tracef("recording failure for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, errorMsg)
 
+	fileWriteMu.Lock()
+	defer fileWriteMu.Unlock()
+
 	// Append to failed attempts file
 	f, err := os.OpenFile(failedAttemptsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -949,6 +1092,9 @@ func recordSkippedObject(obj ObjectRef, reason string, details string) {
 	skippedObjectsFile := getSkippedObjectsFilePath()
 
 	tracef("recording skipped object %s/%s/%s: reason=%s details=%s", obj.Kind, obj.Namespace, obj.Name, reason, details)
+
+	fileWriteMu.Lock()
+	defer fileWriteMu.Unlock()
 
 	// Append to skipped objects file
 	f, err := os.OpenFile(skippedObjectsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)

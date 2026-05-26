@@ -22,6 +22,11 @@ import (
 	"github.com/spf13/pflag"
 )
 
+const (
+	defaultKubectlAs = "system:serviceaccount:d8-system:deckhouse"
+	defaultThreads   = 10
+)
+
 func addFlags(flags *pflag.FlagSet) {
 	flags.Bool(
 		"retry",
@@ -31,7 +36,7 @@ func addFlags(flags *pflag.FlagSet) {
 
 	flags.String(
 		"as",
-		"system:serviceaccount:d8-system:deckhouse",
+		defaultKubectlAs,
 		"Specify a Kubernetes service account for the kubectl operations (impersonation).",
 	)
 
@@ -62,5 +67,11 @@ func addFlags(flags *pflag.FlagSet) {
 		"object",
 		"",
 		"Process objects by identifier in format <namespace>/<name>/<resource_name>. Use 'clusterwide' namespace for cluster-scoped resources. Resource name must match kubectl api-resources output.",
+	)
+
+	flags.Int(
+		"threads",
+		defaultThreads,
+		"Number of worker threads for resource discovery and migration. Values <=0 use default.",
 	)
 }
