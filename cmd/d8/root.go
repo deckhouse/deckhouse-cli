@@ -44,6 +44,7 @@ import (
 	iamuser "github.com/deckhouse/deckhouse-cli/internal/iam/user/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
 	network "github.com/deckhouse/deckhouse-cli/internal/network"
+	packagecmd "github.com/deckhouse/deckhouse-cli/internal/packagecmd"
 	plugins "github.com/deckhouse/deckhouse-cli/internal/plugins/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/flags"
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
@@ -128,8 +129,9 @@ func (r *RootCommand) registerCommands() {
 		r.cmd.AddCommand(system.NewCommand())
 	} else {
 		r.cmd.AddCommand(plugins.NewPluginCommand(plugins.SystemPluginName, "Operate system options in DKP", []string{"s", "p", "platform"}, r.logger.Named("system-command")))
-		r.cmd.AddCommand(plugins.NewPluginCommand(plugins.PackagePluginName, "Package swiss tool", []string{}, r.logger.Named("package-command")))
 	}
+
+	r.cmd.AddCommand(packagecmd.NewCommand())
 
 	r.cmd.AddCommand(plugins.NewCommand(r.logger.Named("plugins-command")))
 }

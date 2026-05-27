@@ -1,16 +1,12 @@
 package cmd
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/pkg/cmd/bootstrap"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/pkg/cmd/build"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/pkg/cmd/verify"
 )
-
-var Version = "dev"
 
 // NewCmdRoot creates the root command for bootstrapping, building, verifying,
 // and inspecting package plugin metadata.
@@ -26,16 +22,6 @@ This plugin helps you:
 	• Manage package lifecycle with semantic versioning
 `,
 	}
-
-	cmd.AddCommand(&cobra.Command{
-		Use:   "version",
-		Short: "Print version",
-		Example: `  # Print version
-  package version`,
-		Run: func(_ *cobra.Command, _ []string) {
-			fmt.Println(Version)
-		},
-	})
 
 	cmd.AddCommand(bootstrap.NewCmdBootstrap())
 	cmd.AddCommand(build.NewCmdBuild())

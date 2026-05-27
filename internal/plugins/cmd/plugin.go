@@ -31,8 +31,7 @@ import (
 )
 
 const (
-	SystemPluginName  = "system"
-	PackagePluginName = "package"
+	SystemPluginName = "system"
 )
 
 // TODO: add options pattern
