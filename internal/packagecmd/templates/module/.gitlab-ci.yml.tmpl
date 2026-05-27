@@ -1,0 +1,114 @@
+include:
+  - project: 'team/foxtrot/packages-gitlab-ci'
+    ref: main
+    file: 'templates/Setup.gitlab-ci.yml'
+  - project: 'team/foxtrot/packages-gitlab-ci'
+    ref: main
+    file: 'templates/Build.gitlab-ci.yml'
+  - project: 'team/foxtrot/packages-gitlab-ci'
+    ref: main
+    file: 'templates/Publish.gitlab-ci.yml'
+
+variables:
+  PACKAGE_NAME: {{ .PackageName }}
+
+  # The package pipeline expects the variables below to be configured in
+  # GitLab CI/CD variables. Keep them out of this file to avoid committing
+  # environment-specific registry URLs or credentials.
+  # DEV_PACKAGES_REGISTRY:
+  # DEV_PACKAGES_REGISTRY_LOGIN:
+  # DEV_PACKAGES_REGISTRY_PASSWORD:
+
+  # PACKAGES_REGISTRY:
+  # PACKAGES_REGISTRY_LOGIN:
+  # PACKAGES_REGISTRY_PASSWORD:
+
+  # PLUGINS_REGISTRY:
+  # PLUGINS_REGISTRY_LOGIN:
+  # PLUGINS_REGISTRY_PASSWORD:
+
+default:
+  tags:
+  - werf-2-stable
+
+# --- Test stage ---
+Gotest:
+  extends: .go-test
+  allow_failure: false
+
+
+# --- Lint stage ---
+Golangci-lint:
+  extends: .golangci-lint
+
+Verify:
+  extends: .verify
+  variables:
+    PACKAGES_REGISTRY: $DEV_PACKAGES_REGISTRY
+    PACKAGES_REGISTRY_LOGIN: $DEV_PACKAGES_REGISTRY_LOGIN
+    PACKAGES_REGISTRY_PASSWORD: $DEV_PACKAGES_REGISTRY_PASSWORD
+
+# --- Build ---
+Build dev:
+  extends: .build
+  variables:
+    PACKAGES_REGISTRY: $DEV_PACKAGES_REGISTRY
+    PACKAGES_REGISTRY_LOGIN: $DEV_PACKAGES_REGISTRY_LOGIN
+    PACKAGES_REGISTRY_PASSWORD: $DEV_PACKAGES_REGISTRY_PASSWORD
+  rules:
+  - if: $CI_COMMIT_TAG
+
+Build prod:
+  extends: .build
+  variables:
+    WERF_FINAL_IMAGES_ONLY: "true" # Only push final images to prod registry
+  needs:
+  - Gotest
+  - Golangci-lint
+  - Verify
+  rules:
+  - if: $CI_COMMIT_TAG
+    when: manual
+
+
+# --- Publish ---
+
+# Set the package release channels here
+# https://gitlab.com/gitlab-org/gitlab/-/issues/423553#note_2442315670
+.editions-matrix:
+  parallel:
+    matrix:
+      - RELEASE_CHANNEL:
+          - alpha
+          - beta
+          - early-access
+          - stable
+          - rock-solid
+
+Publish dev:
+  stage: publish
+  extends:
+  - .publish
+  - .editions-matrix
+  variables:
+    PACKAGES_REGISTRY: $DEV_PACKAGES_REGISTRY
+    PACKAGES_REGISTRY_LOGIN: $DEV_PACKAGES_REGISTRY_LOGIN
+    PACKAGES_REGISTRY_PASSWORD: $DEV_PACKAGES_REGISTRY_PASSWORD
+  needs:
+  - Build dev
+  rules:
+  - if: $CI_COMMIT_TAG
+
+Publish prod:
+  stage: publish
+  extends:
+  - .publish
+  - .editions-matrix
+  variables:
+    PACKAGES_REGISTRY: $PACKAGES_REGISTRY
+  needs:
+  - job: Build prod
+    optional: true
+  rules:
+  - if: $CI_COMMIT_TAG
+    when: manual

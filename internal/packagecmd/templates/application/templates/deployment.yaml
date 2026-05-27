@@ -1,0 +1,49 @@
+{{- define "server_resources" }}
+cpu: 30m
+memory: 70Mi
+{{- end }}
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Application.Instance.Name }}-server
+spec:
+  revisionHistoryLimit: 2
+  replicas: {{ .Application.Settings.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app: {{ .Application.Instance.Name }}-server
+  template:
+    metadata:
+      labels:
+        app: {{ .Application.Instance.Name }}-server
+    spec:
+      priorityClassName: develop
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: {{ .Application.Instance.Name }}-registrysecret
+      containers:
+        - name: server
+          image: {{ index .Application.Package.Images "echo" }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - -text={{ .Application.Settings.msg | default "hello world" | quote}}
+          ports:
+            - name: http
+              containerPort: 5678
+              protocol: TCP
+          resources:
+            requests:
+              ephemeral-storage: 50Mi
+              {{- include "server_resources" . | nindent 14 }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL

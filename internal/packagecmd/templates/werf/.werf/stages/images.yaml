@@ -1,0 +1,15 @@
+{{- $ImagesBuildFiles := .Files.Glob "images/*/{Dockerfile,werf.inc.yaml}" -}}
+
+{{- if $ImagesBuildFiles -}}
+  {{- range $path, $content := $ImagesBuildFiles }}
+    {{- $ctx := (dict "ImageName" ($path | split "/")._1) }}
+---
+    {{- if not (regexMatch "/werf.inc.yaml$" $path) }}
+image: images/{{ $ctx.ImageName }}
+context: images/{{ $ctx.ImageName }}
+dockerfile: Dockerfile
+    {{- else }}
+{{ tpl $content $ctx }}
+    {{- end }}
+  {{- end }}
+{{- end }}

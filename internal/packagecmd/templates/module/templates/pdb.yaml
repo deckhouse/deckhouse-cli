@@ -1,0 +1,11 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: server
+  namespace: test
+  {{- include "helm_lib_module_labels" (list . (dict "app" "server")) | nindent 2 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: server

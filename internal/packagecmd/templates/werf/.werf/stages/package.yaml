@@ -1,0 +1,60 @@
+---
+image: definition
+from: alpine:3.20
+final: false
+git:
+  - add: /changelog.yaml
+    to: /changelog.yaml
+  - add: /package.yaml
+    to: /package.yaml
+{{- if .Files.Glob "openapi/*" }}
+  - add: /openapi
+    to: /openapi
+{{- end }}
+{{- if .Files.Glob "docs/*" }}
+  - add: /docs
+    to: /docs
+{{- end }}
+shell:
+  install:
+    - apk add --no-cache yq
+    - echo -n '{"version":"{{ env "PACKAGE_TAG" }}"}' > version.json
+    - export PACKAGE_TAG={{ env "PACKAGE_TAG" }}
+    - yq -i ".version = \"${PACKAGE_TAG}\"" /package.yaml
+---
+image: package
+fromImage: scratch
+import:
+{{- if .Files.Exists "hooks/hooks.yaml" }}
+  - image: hooks
+    add: /usr/local/bin/hooks
+    to: /hooks/batchhooks
+    after: setup
+{{- end }}
+  - image: definition
+    add: /package.yaml
+    to: /package.yaml
+    after: setup
+  - image: digests
+    add: /images_digests.json
+    to: /images_digests.json
+    after: setup
+imageSpec:
+  config:
+    labels:
+      io.deckhouse.package.type: '{{ (.Files.Get "package.yaml" | fromYaml).type }}'
+      io.deckhouse.package.apiVersion: v1
+git:
+  - add: /
+    to: /
+    excludePaths:
+      - hooks
+    includePaths:
+      - charts
+      - .helmignore
+      - docs
+      - openapi
+      - templates
+      - changelog.yaml
+      - oss.yaml
+      - icon.*

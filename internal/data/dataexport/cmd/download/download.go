@@ -189,9 +189,11 @@ func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log 
 			}
 
 			mu.Lock()
+
 			if firstErr == nil {
 				firstErr = fmt.Errorf("download %s: %w", filepath.Join(srcPath, subPath), subErr)
 			}
+
 			mu.Unlock()
 		}
 

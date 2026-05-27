@@ -34,7 +34,7 @@ bin/
 # Release assets
 d8
 dist/
-build/
+/build/
 tmp/
 
 # Entrypoint for the application

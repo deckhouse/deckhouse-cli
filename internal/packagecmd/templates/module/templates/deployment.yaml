@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server
+  namespace: test
+  {{- include "helm_lib_module_labels" (list . (dict "app" "server")) | nindent 2 }}
+spec:
+  revisionHistoryLimit: 2
+  replicas: {{ .Values.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app: server
+  template:
+    metadata:
+      labels:
+        app: server
+    spec:
+      priorityClassName: develop
+      imagePullSecrets:
+          - name: registrysecret
+      containers:
+        - name: server
+          image: {{ include "helm_lib_module_image" (list . "echo") }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - -text={{ .Values.msg | default "hello world" | quote}}
+          ports:
+            - name: http
+              containerPort: 5678
+              protocol: TCP
+          resources:
+            requests:
+              {{- include "helm_lib_module_ephemeral_storage_only_logs" . | nindent 14 }}
+          {{- include "helm_lib_module_container_security_context_run_as_user_deckhouse_pss_restricted" . | nindent 10 }}
+          {{- "readOnlyRootFilesystem: true" | nindent 12 }}
+      {{- include "helm_lib_module_pod_security_context_run_as_user_deckhouse" . | nindent 6 }}

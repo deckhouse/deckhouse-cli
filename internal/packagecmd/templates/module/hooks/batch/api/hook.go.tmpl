@@ -1,0 +1,62 @@
+package api
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/deckhouse/module-sdk/pkg"
+	objectpatch "github.com/deckhouse/module-sdk/pkg/object-patch"
+	"github.com/deckhouse/module-sdk/pkg/registry"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+func init() {
+	registry.RegisterFunc(config, handle)
+}
+
+const (
+	snapshotName = "apiservers"
+)
+
+var config = &pkg.HookConfig{
+	Kubernetes: []pkg.KubernetesConfig{
+		{
+			Name:       snapshotName,
+			APIVersion: "v1",
+			Kind:       "Pod",
+			NamespaceSelector: &pkg.NamespaceSelector{
+				NameSelector: &pkg.NameSelector{
+					MatchNames: []string{"kube-system"},
+				},
+			},
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"component": "kube-apiserver"},
+			},
+			JqFilter: ".metadata.name",
+		},
+	},
+}
+
+func handle(_ context.Context, input *pkg.HookInput) error {
+	input.Logger.Info("discover api-servers")
+
+	pods, err := objectpatch.UnmarshalToStruct[string](input.Snapshots, snapshotName)
+	if err != nil {
+		return err
+	}
+
+	input.Logger.Info("discovered api server", slog.Any("pods", pods))
+
+	input.Values.Set("internal.apiServers", pods)
+
+	start := input.Values.Get("internal.test").String()
+	if start == "" {
+		now := time.Now().String()
+		input.Logger.Info(fmt.Sprintf("hook set internal.test to %s", now), slog.Any("pods", pods))
+		input.Values.Set("internal.test", now)
+	}
+
+	return nil
+}

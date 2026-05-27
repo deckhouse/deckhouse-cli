@@ -1,0 +1,101 @@
+version: "1"
+
+linters:
+  # Controls checks for files and directories that are allowed in an application package root.
+  layout:
+    # Caps the maximum severity emitted by the layout linter.
+    impact: error
+    rules:
+      # Rejects .werf/ and werf.yaml in the package root.
+      no-werf:
+        impact: error
+      # Reports Chart.yaml in the package root; package metadata belongs in package.yaml.
+      no-chart:
+        impact: warn
+      # Rejects .helmignore in the package root; it is generated during build.
+      no-helmignore:
+        impact: error
+      # Requires .gitignore to exist in the package root.
+      gitignore:
+        impact: warn
+      # Requires changelog.yaml to exist in the package root.
+      changelog:
+        impact: error
+      # Requires docs/ to exist in the package root.
+      docs:
+        impact: error
+      # Requires icon.<ext> to exist in the package root (one of png/webp/jpg/jpeg/svg).
+      icon:
+        impact: warn
+
+  # Controls checks for Kubernetes resource templates.
+  # The instance-prefix and instance-namespace rules always run at the linter-level severity
+  # because they encode hard multi-instance contracts.
+  templates:
+    # Caps the maximum severity emitted by the templates linter.
+    impact: error
+    rules:
+      # Requires every pod controller (Deployment, StatefulSet) to be covered by a PodDisruptionBudget.
+      pdb:
+        impact: error
+      # Requires Service ports to declare a named (non-numeric) target port.
+      service-port:
+        impact: error
+      # Requires every pod controller to have a matching VerticalPodAutoscaler with valid bounds.
+      vpa:
+        impact: error
+
+  # Controls checks for documentation files.
+  docs:
+    # Caps the maximum severity emitted by the docs linter.
+    impact: error
+    rules:
+      # Requires docs/README.md to exist and be non-empty.
+      readme:
+        impact: error
+      # Requires top-level English docs/*.md files to have Russian .ru.md counterparts.
+      bilingual:
+        impact: error
+      # Rejects cyrillic characters in English documentation files.
+      cyrillic-in-english:
+        impact: error
+
+  # Controls checks for Docker images shipped in the package (under images/).
+  images:
+    # Caps the maximum severity emitted by the images linter.
+    impact: error
+    rules:
+      # Validates image patch placement, file naming, and README references.
+      patches:
+        impact: error
+
+  # Controls checks for the package icon (icon.<ext> at the package root).
+  # Existence is enforced separately by the layout linter's icon rule.
+  icon:
+    # Caps the maximum severity emitted by the icon linter.
+    impact: error
+    rules:
+      # Requires the icon content to match the format declared by its extension.
+      ext:
+        impact: error
+      # Caps the icon file size at 150 KB on disk.
+      size:
+        impact: error
+      # Caps the rendered icon at 300x300 pixels (skipped for vector formats with no rasterized size).
+      shape:
+        impact: error
+
+  # Controls checks for optional open source software metadata in oss.yaml.
+  oss:
+    # Caps the maximum severity emitted by the oss linter.
+    impact: error
+    rules:
+      # Requires oss.yaml to be valid YAML when present.
+      parse:
+        impact: error
+      # Requires component fields id/name/description/link/license to be non-empty.
+      fields:
+        impact: error
+      # Validates version and versions field usage for each component.
+      version:
+        impact: error

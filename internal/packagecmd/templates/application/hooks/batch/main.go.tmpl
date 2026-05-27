@@ -1,0 +1,13 @@
+package main
+
+import (
+	"hooks/settings"
+
+	"github.com/deckhouse/module-sdk/pkg/app"
+
+	_ "hooks/triggers"
+)
+
+func main() {
+	app.Run(app.WithSettingsCheck(settings.Check))
+}

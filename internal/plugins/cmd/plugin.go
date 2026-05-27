@@ -31,8 +31,8 @@ import (
 )
 
 const (
-	SystemPluginName  = "system"
-	PackagePluginName = "package"
+	SystemPluginName = "system"
+	// PackagePluginName = "package" TODO(Glitchy-Sheep): will be added later during full plugin system implementation
 )
 
 // TODO: add options pattern
