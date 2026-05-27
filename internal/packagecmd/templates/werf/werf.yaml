@@ -1,0 +1,21 @@
+project: package
+configVersion: 1
+build:
+  imageSpec:
+    clearHistory: true
+    config:
+      clearWerfLabels: true
+      removeLabels:
+        - /.*/
+
+{{- if .Files.Exists "hooks/hooks.yaml" }}
+{{ tpl (.Files.Get "hooks/hooks.yaml") $ }}
+{{- end }}
+
+{{ tpl (.Files.Get ".werf/scratch/scratch.yaml") $ }}
+{{- if .Files.Exists "images" }}
+{{ tpl (.Files.Get ".werf/stages/images.yaml") $ }}
+{{ tpl (.Files.Get ".werf/stages/digests.yaml") $ }}
+{{- end }}
+{{ tpl (.Files.Get ".werf/stages/package.yaml") $ }}
+{{ tpl (.Files.Get ".werf/stages/release.yaml") $ }}

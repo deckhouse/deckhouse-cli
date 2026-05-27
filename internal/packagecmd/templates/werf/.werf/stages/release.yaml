@@ -1,0 +1,26 @@
+---
+image: release
+fromImage: scratch
+import:
+  - image: definition
+    add: /
+    to: /
+    after: install
+    includePaths:
+      - version.json
+      - changelog.yaml
+      - package.yaml
+      - openapi
+      - docs
+{{- if .Files.Glob "icon.*" }}
+git:
+  - add: /
+    to: /
+    includePaths:
+      - icon.*
+{{- end }}
+imageSpec:
+  config:
+    labels:
+      io.deckhouse.package.type: '{{ (.Files.Get "package.yaml" | fromYaml).type }}'
+      io.deckhouse.package.apiVersion: v1

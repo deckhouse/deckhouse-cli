@@ -1,0 +1,27 @@
+---
+image: hooks
+from: golang:1.25-alpine
+final: false
+git:
+  - add: /
+    to: /usr/src
+    includePaths:
+      - hooks/batch
+    stageDependencies:
+      setup:
+        - '**/go.mod'
+        - '**/go.sum'
+      install:
+        - '**/*.go'
+mount:
+  - fromPath: ~/go-pkg-cache
+    to: /go/pkg
+shell:
+  setup:
+    - export GOMODCACHE=/go/pkg
+    - cd /usr/src/hooks/batch
+    - go mod download
+  install:
+    - |
+      cd /usr/src/hooks/batch
+      CGO_ENABLED=0 go build -gcflags=all="-l -B" -ldflags="-w -s" -o /usr/local/bin/hooks *.go

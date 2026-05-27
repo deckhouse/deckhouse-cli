@@ -4,7 +4,7 @@
 *.so
 *.dylib
 
-# Test binary, build with `go test -c`
+# Test binary, build with go test -c
 *.test
 
 # Output of the go coverage tool, specifically when used with LiteIDE
@@ -22,20 +22,21 @@
 .idea/
 .vscode
 venv/
-out/
 
 # macOS Finder files
 *.DS_Store
 ._*
 
-# Dev environment
-bin/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*batchhook*
 
-# Release assets
-d8
-dist/
-/build/
-tmp/
+layers/
+layers2/
+*.tar
 
-# Entrypoint for the application
-!/cmd/d8
+base_images.yml
+build_report.json

@@ -1,0 +1,41 @@
+{{- /* Find all images digests */ -}}
+  {{- $ImagesIDList := list }}
+  {{- $Images := tpl (.Files.Get ".werf/stages/images.yaml") . }}
+
+  {{- range $ImageManifest := regexSplit "\n?---[ \t]*\n" $Images -1 }}
+  {{- $ImageManifest := $ImageManifest | fromYaml }}
+  {{- if $ImageManifest.image }}
+  {{- if ne $ImageManifest.final false }}
+  {{- $ImagesIDList = append $ImagesIDList $ImageManifest.image }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+
+# Images Digest: a files with all image digests to be able to use them in helm templates
+---
+image: digests
+final: false
+from: alpine:3.20
+dependencies:
+  {{- range $ImageID := $ImagesIDList }}
+  {{- $ImageNameCamel  := $ImageID | splitList "/" | last  | camelcase | untitle }}
+- image: {{ $ImageID }}
+  before: setup
+  imports:
+    - type: ImageDigest
+      targetEnv: PACKAGE_IMAGE_DIGEST_{{ $ImageNameCamel }}
+  {{- end }}
+shell:
+  setup:
+    - apk add --no-cache jq
+    - |
+      env | grep PACKAGE_IMAGE_DIGEST | jq -Rn '
+        reduce inputs as $i (
+          {};
+          . * (
+            $i | ltrimstr("PACKAGE_IMAGE_DIGEST_") | sub("=";"_") |
+            split("_") as [$imageName, $digest] |
+            {($imageName): $digest}
+          )
+        )
+      ' > /images_digests.json

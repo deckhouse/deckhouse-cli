@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: server
+  namespace: test
+  {{- include "helm_lib_module_labels" (list . (dict "app" "server")) | nindent 2 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: server
+  ports:
+    - port: 5678
+      targetPort: http
+      protocol: TCP
+      name: http

@@ -1,0 +1,8 @@
+$schema: http://json-schema.org/schema#
+type: object
+properties:
+  replicas:
+    type: integer
+    default: 1
+  msg:
+    type: string

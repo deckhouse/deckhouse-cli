@@ -1,0 +1,13 @@
+x-extend:
+  schema: settings.yaml
+type: object
+properties:
+  internal:
+    type: object
+    default: {}
+    properties:
+      triggers:
+        type: array
+        default: []
+        items:
+          type: string

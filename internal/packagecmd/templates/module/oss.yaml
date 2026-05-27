@@ -1,0 +1,9 @@
+# OSS (Open Source Software) components used by this package
+# List third-party components and their licenses for compliance
+- id: echo-server
+  version: "1.0"
+  name: Echoserver
+  link: https://ealenn.github.io/Echo-Server/
+  description: An echoserver.
+  logo: https://ealenn.github.io/Echo-Server/assets/images/ping-pong.png
+  license: Apache License 2.0

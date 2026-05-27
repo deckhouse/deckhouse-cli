@@ -1,0 +1,51 @@
+package triggers
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+
+	"github.com/deckhouse/module-sdk/pkg"
+	objectpatch "github.com/deckhouse/module-sdk/pkg/object-patch"
+	"github.com/deckhouse/module-sdk/pkg/registry"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+var _ = registry.RegisterFunc(config, handle)
+
+const (
+	snapshotName = "triggers"
+)
+
+var config = &pkg.ApplicationHookConfig{
+	Queue: "triggers",
+	Kubernetes: []pkg.ApplicationKubernetesConfig{
+		{
+			Name:       snapshotName,
+			APIVersion: "v1",
+			Kind:       "Pod",
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"trigger.io/trigger": "trigger"},
+			},
+			JqFilter: ".metadata.name",
+		},
+	},
+}
+
+func handle(_ context.Context, input *pkg.ApplicationHookInput) error {
+	input.Logger.Info("discover triggers")
+
+	pods, err := objectpatch.UnmarshalToStruct[string](input.Snapshots, snapshotName)
+	if err != nil {
+		return err
+	}
+
+	input.Logger.Info("discovered triggers", slog.Any("pods", pods))
+	input.Values.Set("internal.triggers", pods)
+
+	if len(pods) > 3 {
+		return errors.New("pods trigger error")
+	}
+
+	return nil
+}

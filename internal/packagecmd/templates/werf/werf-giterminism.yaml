@@ -1,0 +1,12 @@
+giterminismConfigVersion: 1
+config:
+  goTemplateRendering:	# The rules for the Go-template functions
+    allowEnvVariables:
+      - PACKAGE_TAG
+    allowUncommittedFiles:
+      - .werf/**
+  stapel:
+    mount:
+      allowBuildDir: true
+      allowFromPaths:
+        - ~/go-pkg-cache

@@ -1,0 +1,17 @@
+x-extend:
+  schema: settings.yaml
+type: object
+properties:
+  internal:
+    type: object
+    default: {}
+    properties:
+      apiServers:
+        type: array
+        default: []
+        items:
+          type: string
+      test:
+        type: string
+        default: ""
+
