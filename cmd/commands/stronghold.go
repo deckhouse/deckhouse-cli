@@ -19,6 +19,8 @@ package commands
 import (
 	vaultcommand "github.com/hashicorp/vault/command"
 	"github.com/spf13/cobra"
+
+	"github.com/deckhouse/deckhouse-cli/internal/strongholddiscovery"
 )
 
 func NewStrongholdCommand() *cobra.Command {
@@ -29,7 +31,7 @@ func NewStrongholdCommand() *cobra.Command {
 		SilenceUsage:       true,
 		DisableFlagParsing: true,
 		Run: func(_ *cobra.Command, args []string) {
-			vaultcommand.Run(args)
+			runStronghold(args)
 		},
 	}
 
@@ -38,4 +40,9 @@ func NewStrongholdCommand() *cobra.Command {
 	}
 
 	return strongholdCmd
+}
+
+func runStronghold(args []string) {
+	strongholddiscovery.ApplyFromCluster()
+	vaultcommand.Run(args)
 }
