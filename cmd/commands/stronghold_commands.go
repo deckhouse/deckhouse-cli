@@ -96,7 +96,7 @@ func buildCommandTree(synopses map[string]string) map[string]*commandNode {
 }
 
 // buildCobraCommands recursively converts a commandNode tree into cobra commands.
-// Each command delegates execution to vaultcommand.Run with the appropriate
+// Each command delegates execution to runStronghold with the appropriate
 // command path prefix, preserving the original vault CLI behavior.
 func buildCobraCommands(nodes map[string]*commandNode, pathPrefix []string) []*cobra.Command {
 	keys := sortedCommandKeys(nodes)
@@ -117,7 +117,7 @@ func buildCobraCommands(nodes map[string]*commandNode, pathPrefix []string) []*c
 					fullArgs := make([]string, 0, len(path)+len(args))
 					fullArgs = append(fullArgs, path...)
 					fullArgs = append(fullArgs, args...)
-					vaultcommand.Run(fullArgs)
+					runStronghold(fullArgs)
 				}
 			}(vaultPath),
 		}
