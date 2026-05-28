@@ -9,7 +9,10 @@
 //  3. `enum`, preferring `default` if set, else the first enum value.
 //  4. Object walk — explicit `type: object`, structural `properties`, or
 //     composition keywords (allOf / oneOf / anyOf) contribute properties.
-//  5. `default` (deep-copied so callers may mutate the result).
+//     If `default` is a map, it is overlaid on top of the walked properties
+//     (same precedence rule as `x-example`), so a schema can declare both
+//     a property set and a richer default map without losing either.
+//  5. `default` for non-object schemas (deep-copied so callers may mutate).
 //  6. Array walk — one element synthesized from `items.schema`.
 //  7. Scalar placeholder by type: 123 for integer/number, true for boolean,
 //     a pattern-matching string via reggen for string.
@@ -132,7 +135,16 @@ func synthesizeValue(s *spec.Schema) (any, error) {
 	}
 
 	if isObject(s) {
-		return synthesizeObject(s)
+		base, err := synthesizeObject(s)
+		if err != nil {
+			return nil, err
+		}
+
+		if def, ok := s.Default.(map[string]any); ok {
+			deepMergeOverride(base, def)
+		}
+
+		return base, nil
 	}
 
 	if s.Default != nil {
