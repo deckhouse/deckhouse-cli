@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -50,44 +49,48 @@ type Report struct {
 	CAs   []CAEntry
 }
 
-type multiUnwrapper interface {
-	Unwrap() []error
-}
-
 // BuildFullScanReport enumerates all known control-plane certificates and kubeconfig
 // client certificates, returning a report split into CAs and leaf certs.
 // certsDir is the PKI directory (e.g. /etc/kubernetes/pki).
 // kubeconfigDir is the directory containing kubeconfig files (e.g. /etc/kubernetes).
 // Callers that want the standard layout can pass filepath.Dir(certsDir).
 func BuildFullScanReport(certsDir, kubeconfigDir string) (*Report, error) {
-	pkiExpirations, pkiErr := pki.ListCertificateExpirations(
-		pki.WithCertificatesDir(certsDir),
-		pki.WithIgnoreReadErrors(),
-	)
-	kcExpirations, kcErr := kubeconfig.ListClientCertificateExpirations(
-		kubeconfig.WithKubeconfigDir(kubeconfigDir),
-		kubeconfig.WithIgnoreReadErrors(),
-	)
+	pkiReport := pki.ListCertificateExpirations(pki.WithCertificatesDir(certsDir))
+	kcReport := kubeconfig.ListClientCertificateExpirations(kubeconfig.WithKubeconfigDir(kubeconfigDir))
 
-	hasExpirations := len(pkiExpirations) > 0 || len(kcExpirations) > 0
+	report := &Report{}
+	var readErrs []error
 
-	err := errors.Join(
-		parseFullScanError("PKI certificates", certsDir, pkiErr),
-		parseFullScanError("kubeconfig client certificates", kubeconfigDir, kcErr),
-	)
-	if err != nil && !hasExpirations {
-		return nil, fmt.Errorf("no control-plane certificates or kubeconfig client certificates found: %w", err)
+	for _, e := range pkiReport.Entries {
+		switch {
+		case e.Err == nil:
+			appendPKIEntry(report, e.Name, e.NotAfter, e.IsCA, e.Authority)
+		case isCertMissing(e.Err):
+			// Missing — silent: worker/arbiter nodes dont carry the full PKI.
+		default:
+			readErrs = append(readErrs, e.Err)
+		}
 	}
 
-	if err != nil {
-		return nil, err
+	for _, e := range kcReport.Entries {
+		switch {
+		case e.Err == nil:
+			appendKubeconfigEntry(report, e.File, e.NotAfter)
+		case isKubeconfigMissing(e.Err):
+			// Missing — silent.
+		default:
+			readErrs = append(readErrs, e.Err)
+		}
 	}
 
-	if !hasExpirations {
+	if len(readErrs) > 0 {
+		return nil, fmt.Errorf("listing PKI certificates in %q and kubeconfig client certificates in %q: %w",
+			certsDir, kubeconfigDir, errors.Join(readErrs...))
+	}
+
+	if len(report.Certs) == 0 && len(report.CAs) == 0 {
 		return nil, fmt.Errorf("no control-plane certificates or kubeconfig client certificates found in %q and %q", certsDir, kubeconfigDir)
 	}
-
-	report := reportFromExpirations(pkiExpirations, kcExpirations)
 
 	sort.Slice(report.Certs, func(i, j int) bool {
 		return report.Certs[i].Name < report.Certs[j].Name
@@ -99,60 +102,14 @@ func BuildFullScanReport(certsDir, kubeconfigDir string) (*Report, error) {
 	return report, nil
 }
 
-func reportFromExpirations(pkiExpirations []pki.CertificateExpiration, kcExpirations []kubeconfig.ClientCertificateExpiration) *Report {
-	report := &Report{}
-
-	for _, exp := range pkiExpirations {
-		if exp.IsCA {
-			report.CAs = append(report.CAs, CAEntry{
-				Name:    pkiDisplayName(exp.Name),
-				Expires: exp.NotAfter,
-			})
-		} else {
-			report.Certs = append(report.Certs, CertEntry{
-				Name:      pkiDisplayName(exp.Name),
-				Expires:   exp.NotAfter,
-				Authority: pkiDisplayName(string(exp.Authority)),
-			})
-		}
-	}
-
-	for _, exp := range kcExpirations {
-		report.Certs = append(report.Certs, CertEntry{
-			Name:      kubeconfigDisplayName(exp.File),
-			Expires:   exp.NotAfter,
-			Authority: string(pki.CACertName),
-		})
-	}
-
-	return report
+func isCertMissing(err error) bool {
+	var missing *pki.MissingError
+	return errors.As(err, &missing)
 }
 
-func parseFullScanError(subject, dir string, err error) error {
-	if err == nil || onlyNotExistErrors(err) {
-		return nil
-	}
-
-	return fmt.Errorf("listing %s in %q: %w", subject, dir, err)
-}
-
-func onlyNotExistErrors(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	var multiErr multiUnwrapper
-	if errors.As(err, &multiErr) {
-		for _, nestedErr := range multiErr.Unwrap() {
-			if !onlyNotExistErrors(nestedErr) {
-				return false
-			}
-		}
-
-		return true
-	}
-
-	return errors.Is(err, fs.ErrNotExist)
+func isKubeconfigMissing(err error) bool {
+	var missing *kubeconfig.MissingError
+	return errors.As(err, &missing)
 }
 
 // BuildSingleFileReport inspects a single file at path.
@@ -161,28 +118,15 @@ func onlyNotExistErrors(err error) bool {
 func BuildSingleFileReport(path string) (*Report, error) {
 	kcExp, kcErr := kubeconfig.GetClientCertificateExpiration(path)
 	if kcErr == nil {
-		return &Report{
-			Certs: []CertEntry{{
-				Name:      kubeconfigDisplayName(kcExp.File),
-				Expires:   kcExp.NotAfter,
-				Authority: string(pki.CACertName),
-			}},
-		}, nil
+		report := &Report{}
+		appendKubeconfigEntry(report, kcExp.File, kcExp.NotAfter)
+		return report, nil
 	}
 
 	certExp, certErr := pki.GetCertificateExpiration(path)
 	if certErr == nil {
 		report := &Report{}
-		if certExp.IsCA {
-			report.CAs = []CAEntry{{Name: pkiDisplayName(certExp.Name), Expires: certExp.NotAfter}}
-		} else {
-			report.Certs = []CertEntry{{
-				Name:      pkiDisplayName(certExp.Name),
-				Expires:   certExp.NotAfter,
-				Authority: pkiDisplayName(string(certExp.Authority)),
-			}}
-		}
-
+		appendPKIEntry(report, certExp.Name, certExp.NotAfter, certExp.IsCA, certExp.Authority)
 		return report, nil
 	}
 
@@ -190,6 +134,31 @@ func BuildSingleFileReport(path string) (*Report, error) {
 		fmt.Errorf("kubeconfig: %w", kcErr),
 		fmt.Errorf("certificate: %w", certErr),
 	)
+}
+
+// appendPKIEntry appends a leaf cert or CA entry to report depending on IsCA.
+func appendPKIEntry(report *Report, name string, notAfter time.Time, isCA bool, authority pki.RootCertName) {
+	if isCA {
+		report.CAs = append(report.CAs, CAEntry{
+			Name:    pkiDisplayName(name),
+			Expires: notAfter,
+		})
+		return
+	}
+	report.Certs = append(report.Certs, CertEntry{
+		Name:      pkiDisplayName(name),
+		Expires:   notAfter,
+		Authority: pkiDisplayName(string(authority)),
+	})
+}
+
+// appendKubeconfigEntry appends a kubeconfig client cert entry. Always a leaf cert signed by the cluster CA.
+func appendKubeconfigEntry(report *Report, file kubeconfig.File, notAfter time.Time) {
+	report.Certs = append(report.Certs, CertEntry{
+		Name:      kubeconfigDisplayName(file),
+		Expires:   notAfter,
+		Authority: string(pki.CACertName),
+	})
 }
 
 // RenderReport writes the certificate expiration report to w in two sections:
