@@ -47,16 +47,7 @@ func RunRenewAll(w io.Writer, certsDir, kubeconfigDirOverride string, dryRun boo
 		leafOpts = append(leafOpts, pki.WithRenewExtraIP(extraIP))
 	}
 
-	leafReport := pki.RenewCertificates(leafOpts...)
-	for _, e := range leafReport.Entries {
-		line := formatLeafEntry(pki.LeafDescription(e.Name), e)
-		fmt.Fprintln(w, line)
-		if e.Err != nil {
-			warnings = append(warnings, line)
-			continue
-		}
-		usedCAs[e.Authority] = struct{}{}
-	}
+	warnings = append(warnings, collectLeafWarnings(w, pki.RenewCertificates(leafOpts...), usedCAs)...)
 
 	kcOpts := []kubeconfig.RenewOption{
 		kubeconfig.WithRenewKubeconfigDir(kcDir),
@@ -66,16 +57,7 @@ func RunRenewAll(w io.Writer, certsDir, kubeconfigDirOverride string, dryRun boo
 		kcOpts = append(kcOpts, kubeconfig.WithDryRun())
 	}
 
-	kcReport := kubeconfig.RenewClientCerts(kcOpts...)
-	for _, e := range kcReport.Entries {
-		line := formatKubeconfigEntry(kubeconfig.FileDescription(e.File), e)
-		fmt.Fprintln(w, line)
-		if e.Err != nil {
-			warnings = append(warnings, line)
-			continue
-		}
-		usedCAs[pki.CACertName] = struct{}{} // kubeconfig client certs are signed by ca
-	}
+	warnings = append(warnings, collectKubeconfigWarnings(w, kubeconfig.RenewClientCerts(kcOpts...), usedCAs)...)
 
 	warnings = append(warnings, checkCAsOutliveRenewed(w, certsDir, usedCAs)...)
 
@@ -119,20 +101,8 @@ func renewSingleLeaf(w io.Writer, path string, name pki.LeafCertName, pkiDir str
 		opts = append(opts, pki.WithDryRun())
 	}
 
-	var warnings []string
 	usedCAs := map[pki.RootCertName]struct{}{}
-
-	report := pki.RenewCertificates(opts...)
-	for _, e := range report.Entries {
-		line := formatLeafEntry(pki.LeafDescription(e.Name), e)
-		fmt.Fprintln(w, line)
-		if e.Err != nil {
-			warnings = append(warnings, line)
-			continue
-		}
-		usedCAs[e.Authority] = struct{}{}
-	}
-
+	warnings := collectLeafWarnings(w, pki.RenewCertificates(opts...), usedCAs)
 	warnings = append(warnings, checkCAsOutliveRenewed(w, pkiDir, usedCAs)...)
 
 	printDryRunFooter(w, dryRun)
@@ -151,27 +121,14 @@ func renewSingleKubeconfig(w io.Writer, path string, file kubeconfig.File, certs
 	opts := []kubeconfig.RenewOption{
 		kubeconfig.WithRenewKubeconfigDir(kcDir),
 		kubeconfig.WithRenewPKIDir(certsDirOverride),
+		kubeconfig.WithRenewFiles(file),
 	}
 	if dryRun {
 		opts = append(opts, kubeconfig.WithDryRun())
 	}
 
-	var warnings []string
 	usedCAs := map[pki.RootCertName]struct{}{}
-
-	entry := kubeconfig.KubeconfigRenewEntry{
-		File: file,
-		Path: path,
-		Err:  kubeconfig.RenewClientCert(file, opts...),
-	}
-	line := formatKubeconfigEntry(kubeconfig.FileDescription(file), entry)
-	fmt.Fprintln(w, line)
-	if entry.Err != nil {
-		warnings = append(warnings, line)
-	} else {
-		usedCAs[pki.CACertName] = struct{}{} // kubeconfig client certs are signed by ca
-	}
-
+	warnings := collectKubeconfigWarnings(w, kubeconfig.RenewClientCerts(opts...), usedCAs)
 	warnings = append(warnings, checkCAsOutliveRenewed(w, certsDirOverride, usedCAs)...)
 
 	printDryRunFooter(w, dryRun)
@@ -211,7 +168,7 @@ func checkCAsOutliveRenewed(w io.Writer, certsDir string, usedCAs map[pki.RootCe
 	var warnings []string
 	for _, e := range report.Entries {
 		if e.Err != nil {
-			// CA read failure here is already surfaced via leaf renew skips.
+			// A CA read failure here is already surfaced via the renew entry above.
 			continue
 		}
 		if e.NotAfter.Before(threshold) {
@@ -228,7 +185,37 @@ func warningsError(warnings []string) error {
 	if len(warnings) == 0 {
 		return nil
 	}
-	return fmt.Errorf("%d warning(s) during renewal:\n%s", len(warnings), strings.Join(warnings, "\n"))
+	return fmt.Errorf("%d certificate(s) not renewed; see output above", len(warnings))
+}
+
+// collectLeafWarnings prints a progress line for every leaf renewal entry
+func collectLeafWarnings(w io.Writer, report pki.PKIRenewReport, usedCAs map[pki.RootCertName]struct{}) []string {
+	var warnings []string
+	for _, e := range report.Entries {
+		line := formatLeafEntry(pki.LeafDescription(e.Name), e)
+		fmt.Fprintln(w, line)
+		if e.Err != nil {
+			warnings = append(warnings, line)
+			continue
+		}
+		usedCAs[e.Authority] = struct{}{}
+	}
+	return warnings
+}
+
+// collectKubeconfigWarnings mirrors collectLeafWarnings for kubeconfigs
+func collectKubeconfigWarnings(w io.Writer, report kubeconfig.KubeconfigRenewReport, usedCAs map[pki.RootCertName]struct{}) []string {
+	var warnings []string
+	for _, e := range report.Entries {
+		line := formatKubeconfigEntry(kubeconfig.FileDescription(e.File), e)
+		fmt.Fprintln(w, line)
+		if e.Err != nil {
+			warnings = append(warnings, line)
+			continue
+		}
+		usedCAs[pki.CACertName] = struct{}{}
+	}
+	return warnings
 }
 
 func formatLeafEntry(desc string, e pki.PKIRenewEntry) string {
