@@ -156,8 +156,11 @@ func isTraceVerboseEnabled() bool {
 	return level == "TRACE"
 }
 
-func syncLegacyRetryFile() error {
-	state := getCurrentRunState()
+func syncLegacyRetryFileForState(state *sigMigrateRunState) error {
+	if state == nil {
+		state = getCurrentRunState()
+	}
+
 	srcFile := state.FailedAttemptsFile
 
 	dstFile := state.LegacyFailedRetryFile
@@ -181,6 +184,10 @@ func syncLegacyRetryFile() error {
 	tracef("synced retry compatibility file: %s -> %s", srcFile, dstFile)
 
 	return nil
+}
+
+func syncLegacyRetryFile() error {
+	return syncLegacyRetryFileForState(getCurrentRunState())
 }
 
 func truncateFile(path string) {
@@ -336,7 +343,7 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 	setCurrentRunState(runState)
 
 	defer func() {
-		if syncErr := syncLegacyRetryFile(); syncErr != nil {
+		if syncErr := syncLegacyRetryFileForState(runState); syncErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to sync legacy retry file: %v\n", syncErr)
 		}
 	}()

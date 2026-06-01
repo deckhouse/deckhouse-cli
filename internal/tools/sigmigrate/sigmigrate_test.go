@@ -670,6 +670,30 @@ func TestSyncLegacyRetryFile(t *testing.T) {
 	require.Equal(t, "ns|obj|pods\n", string(legacyData))
 }
 
+func TestSyncLegacyRetryFileForState_WorksAfterCurrentRunStateReset(t *testing.T) {
+	tmpDir := t.TempDir()
+	runFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	legacyFile := filepath.Join(tmpDir, "failed_annotations.log")
+
+	err := os.WriteFile(runFile, []byte("ns|obj|pods\n"), 0644)
+	require.NoError(t, err)
+
+	runState := &sigMigrateRunState{
+		FailedAttemptsFile:    runFile,
+		LegacyFailedRetryFile: legacyFile,
+	}
+
+	// Simulate cleanup where global run state is already reset.
+	setCurrentRunState(nil)
+
+	err = syncLegacyRetryFileForState(runState)
+	require.NoError(t, err)
+
+	legacyData, err := os.ReadFile(legacyFile)
+	require.NoError(t, err)
+	require.Equal(t, "ns|obj|pods\n", string(legacyData))
+}
+
 func TestTracefWritesContent(t *testing.T) {
 	tmpDir := t.TempDir()
 	tracePath := filepath.Join(tmpDir, "sigmigrate_trace.log")
