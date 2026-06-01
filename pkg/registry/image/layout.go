@@ -213,6 +213,41 @@ func (l *ImageLayout) GetMeta(tag string) (*ImageMeta, error) {
 	return meta, nil
 }
 
+// CountManifests returns the total image-manifest count across the given layout
+// paths. It feeds the pull summary's per-phase image counts, read from the OCI
+// layouts before packing deletes them (bundle.Pack) - no extra registry call.
+// Unreadable paths (e.g. layouts absent in a dry-run) are skipped.
+func CountManifests(paths []layout.Path) int {
+	return CountManifestsMatching(paths, func(map[string]string) bool { return true })
+}
+
+// CountManifestsMatching counts manifests whose descriptor annotations satisfy
+// match. It feeds summary subsets in the same single pass - notably the VEX
+// tally (".att" short-tag). Unreadable paths are skipped, as in CountManifests.
+func CountManifestsMatching(paths []layout.Path, match func(annotations map[string]string) bool) int {
+	total := 0
+
+	for _, lp := range paths {
+		index, err := lp.ImageIndex()
+		if err != nil {
+			continue
+		}
+
+		manifest, err := index.IndexManifest()
+		if err != nil {
+			continue
+		}
+
+		for _, desc := range manifest.Manifests {
+			if match(desc.Annotations) {
+				total++
+			}
+		}
+	}
+
+	return total
+}
+
 func SplitImageRefByRepoAndTag(imageReferenceString string) (string, string) {
 	splitIndex := strings.LastIndex(imageReferenceString, ":")
 	repo := imageReferenceString[:splitIndex]
