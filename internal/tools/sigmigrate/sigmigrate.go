@@ -44,7 +44,7 @@ import (
 
 const (
 	annotationKey            = "d8-migration"
-	annotationKeyToRemove    = "d8-migration"
+	annotationKeyToRemove    = "d8-migration-"
 	switchAccount            = "system:serviceaccount:d8-multitenancy-manager:multitenancy-manager"
 	legacyFailedAttemptsFile = "/tmp/failed_annotations.log"
 	legacyErrorLogFile       = "/tmp/failed_errors.log"
@@ -54,7 +54,8 @@ const (
 	maxRequestRetries        = 5
 	requestTimeout           = 30 * time.Second
 	baseRetryDelay           = 200 * time.Millisecond
-	defaultWorkerCount       = 10
+	DefaultWorkerCount       = 10
+	defaultWorkerCount       = DefaultWorkerCount
 	defaultClientQPS         = 50
 	defaultClientBurst       = 100
 	progressPrintInterval    = 500 * time.Millisecond
@@ -293,6 +294,8 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to get log-level flag: %w", err)
 	}
 
+	config.LogLevel = normalizeLogLevel(config.LogLevel)
+
 	config.Kubeconfig, err = cmd.Flags().GetString("kubeconfig")
 	if err != nil {
 		return fmt.Errorf("failed to get kubeconfig flag: %w", err)
@@ -333,6 +336,11 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 	setCurrentRunState(runState)
 
 	defer func() {
+		if syncErr := syncLegacyRetryFile(); syncErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to sync legacy retry file: %v\n", syncErr)
+		}
+	}()
+	defer func() {
 		closeRunStateWriters(runState)
 
 		if runState.traceFile != nil {
@@ -343,11 +351,6 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 		}
 
 		setCurrentRunState(nil)
-	}()
-	defer func() {
-		if syncErr := syncLegacyRetryFile(); syncErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to sync legacy retry file: %v\n", syncErr)
-		}
 	}()
 
 	tracef("sig-migrate started: retry=%t, object=%q, log-level=%s, threads=%d, measure-stages=%t", config.RetryFailed, config.Object, config.LogLevel, config.Workers, config.MeasureStages)
@@ -775,6 +778,15 @@ func normalizeWorkerCount(workers int) int {
 	return workers
 }
 
+func normalizeLogLevel(level string) string {
+	normalized := strings.ToUpper(strings.TrimSpace(level))
+	if normalized == "" {
+		return "DEBUG"
+	}
+
+	return normalized
+}
+
 func withRetry(operation, logLevel string, fn func(ctx context.Context) error) error {
 	var lastErr error
 
@@ -1118,7 +1130,8 @@ func removeAnnotation(client dynamic.ResourceInterface, name, keyPrefix, logLeve
 	}
 
 	// Remove all annotations that start with keyPrefix.
-	// With keyPrefix="d8-migration" this removes both d8-migration and d8-migration-* keys.
+	// With keyPrefix="d8-migration-" this removes only legacy d8-migration-* keys
+	// and keeps the canonical d8-migration annotation set by this command.
 	modified := false
 
 	for key := range annotations {

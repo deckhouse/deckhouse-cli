@@ -759,6 +759,26 @@ func TestNormalizeWorkerCount(t *testing.T) {
 	}
 }
 
+func TestNormalizeLogLevel(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "empty defaults to debug", input: "", expected: "DEBUG"},
+		{name: "whitespace defaults to debug", input: "   ", expected: "DEBUG"},
+		{name: "lowercase converted to uppercase", input: "trace", expected: "TRACE"},
+		{name: "mixed case converted to uppercase", input: "dEbUg", expected: "DEBUG"},
+		{name: "trim spaces", input: " info ", expected: "INFO"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.expected, normalizeLogLevel(tt.input))
+		})
+	}
+}
+
 func TestShouldRetryRequestError(t *testing.T) {
 	require.True(t, shouldRetryRequestError(apierrors.NewTooManyRequests("too many", 1)))
 	require.True(t, shouldRetryRequestError(apierrors.NewTimeoutError("timeout", 1)))
@@ -1009,12 +1029,12 @@ func TestSingleObjectMigration_ByIdentifier(t *testing.T) {
 		&unstructured.Unstructured{Object: map[string]interface{}{
 			"apiVersion": "v1",
 			"kind":       "ConfigMap",
-			"metadata": map[string]interface{}{"name": "target", "namespace": "default"},
+			"metadata":   map[string]interface{}{"name": "target", "namespace": "default"},
 		}},
 		&unstructured.Unstructured{Object: map[string]interface{}{
 			"apiVersion": "v1",
 			"kind":       "ConfigMap",
-			"metadata": map[string]interface{}{"name": "other", "namespace": "default"},
+			"metadata":   map[string]interface{}{"name": "other", "namespace": "default"},
 		}},
 	}
 	dynamicClient := fake.NewSimpleDynamicClient(scheme, objs...)
