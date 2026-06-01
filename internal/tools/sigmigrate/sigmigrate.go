@@ -44,7 +44,7 @@ import (
 
 const (
 	annotationKey            = "d8-migration"
-	annotationKeyToRemove    = "d8-migration-"
+	annotationKeyToRemove    = "d8-migration"
 	switchAccount            = "system:serviceaccount:d8-multitenancy-manager:multitenancy-manager"
 	legacyFailedAttemptsFile = "/tmp/failed_annotations.log"
 	legacyErrorLogFile       = "/tmp/failed_errors.log"
@@ -783,6 +783,15 @@ func normalizeWorkerCount(workers int) int {
 	}
 
 	return workers
+}
+
+func normalizeLogLevel(level string) string {
+	normalized := strings.ToUpper(strings.TrimSpace(level))
+	if normalized == "" {
+		return "DEBUG"
+	}
+
+	return normalized
 }
 
 func normalizeLogLevel(level string) string {
