@@ -44,7 +44,7 @@ import (
 
 const (
 	annotationKey            = "d8-migration"
-	annotationKeyToRemove    = "d8-migration"
+	annotationKeyToRemove    = "d8-migration-"
 	switchAccount            = "system:serviceaccount:d8-multitenancy-manager:multitenancy-manager"
 	legacyFailedAttemptsFile = "/tmp/failed_annotations.log"
 	legacyErrorLogFile       = "/tmp/failed_errors.log"
@@ -343,11 +343,6 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 	setCurrentRunState(runState)
 
 	defer func() {
-		if syncErr := syncLegacyRetryFileForState(runState); syncErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to sync legacy retry file: %v\n", syncErr)
-		}
-	}()
-	defer func() {
 		closeRunStateWriters(runState)
 
 		if runState.traceFile != nil {
@@ -355,6 +350,10 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 			_ = runState.traceFile.Sync()
 			_ = runState.traceFile.Close()
 			traceWriteMu.Unlock()
+		}
+
+		if syncErr := syncLegacyRetryFileForState(runState); syncErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to sync legacy retry file: %v\n", syncErr)
 		}
 
 		setCurrentRunState(nil)
