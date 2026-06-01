@@ -71,10 +71,15 @@ type PushServiceOptions struct {
 //	│   ├── trivy-bdu/
 //	│   ├── trivy-java-db/
 //	│   └── trivy-checks/
-//	└── modules/                       # Modules
-//	    └── <module-name>/
+//	├── modules/                       # Modules
+//	│   └── <module-name>/
+//	│       ├── index.json
+//	│       ├── release/
+//	│       └── <extra-name>/
+//	└── packages/                      # Packages
+//	    └── <package-name>/
 //	        ├── index.json
-//	        ├── release/
+//	        ├── version/
 //	        └── <extra-name>/
 type PushService struct {
 	client     client.Client
@@ -138,8 +143,15 @@ func (svc *PushService) Push(ctx context.Context) error {
 	}
 
 	// Create modules index (deckhouse/modules:<module-name> tags for discovery)
-	return svc.userLogger.Process("Create modules index", func() error {
+	if err := svc.userLogger.Process("Create modules index", func() error {
 		return svc.createModulesIndex(ctx, dirPath)
+	}); err != nil {
+		return err
+	}
+
+	// Create packages index (deckhouse/packages:<package-name> tags for discovery)
+	return svc.userLogger.Process("Create packages index", func() error {
+		return svc.createPackagesIndex(ctx, dirPath)
 	})
 }
 
@@ -413,6 +425,68 @@ func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string) 
 	}
 
 	svc.userLogger.Infof("Modules index created successfully")
+
+	return nil
+}
+
+// createPackagesIndex creates the packages index in the registry.
+// This pushes a small random image for each package with tag = package name
+// to deckhouse/packages repo, enabling package discovery via ListTags.
+func (svc *PushService) createPackagesIndex(ctx context.Context, rootDir string) error {
+	packagesDir := filepath.Join(rootDir, internal.PackagesSegment)
+
+	// Check if packages directory exists
+	entries, err := os.ReadDir(packagesDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			svc.userLogger.InfoLn("No packages directory found, skipping packages index")
+			return nil
+		}
+
+		return fmt.Errorf("read packages directory %q: %w", packagesDir, err)
+	}
+
+	// Find all package directories
+	var packageNames []string
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			packageNames = append(packageNames, entry.Name())
+		}
+	}
+
+	if len(packageNames) == 0 {
+		svc.userLogger.InfoLn("No packages found, skipping packages index")
+		return nil
+	}
+
+	slices.Sort(packageNames)
+	svc.userLogger.Infof("Creating packages index with %d packages", len(packageNames))
+
+	// Get client scoped to packages repo
+	packagesClient := svc.client.WithSegment(internal.PackagesSegment)
+
+	// Push a small random image for each package with tag = package name
+	for _, packageName := range packageNames {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		svc.userLogger.Infof("Creating index tag: %s:%s", packagesClient.GetRegistry(), packageName)
+
+		// Create minimal random image (32 bytes, 1 layer)
+		img, err := random.Image(32, 1)
+		if err != nil {
+			return fmt.Errorf("create random image for package discovery tag %s: %w", packageName, err)
+		}
+
+		// Push with package name as tag
+		if err := packagesClient.PushImage(ctx, packageName, img); err != nil {
+			return fmt.Errorf("push package index tag %s to registry %s: %w", packageName, packagesClient.GetRegistry(), err)
+		}
+	}
+
+	svc.userLogger.Infof("Packages index created successfully")
 
 	return nil
 }

@@ -99,6 +99,7 @@ func NewCommand() *cobra.Command {
 
 	pullflags.AddFlags(pullCmd.Flags())
 	pullCmd.MarkFlagsMutuallyExclusive("include-module", "exclude-module")
+	pullCmd.MarkFlagsMutuallyExclusive("include-package", "exclude-package")
 	pullCmd.MarkFlagsMutuallyExclusive("include-platform", "deckhouse-tag")
 	pullCmd.MarkFlagsMutuallyExclusive("include-platform", "since-version")
 	pullCmd.MarkFlagsMutuallyExclusive("proxy-registry", "deckhouse-tag")
@@ -155,6 +156,7 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 			SkipTLSVerification:   pullflags.TLSSkipVerify,
 			DeckhouseRegistryRepo: pullflags.SourceRegistryRepo,
 			ModulesPathSuffix:     pullflags.ModulesPathSuffix,
+			PackagesPathSuffix:    pullflags.PackagesPathSuffix,
 			RegistryAuth:          getSourceRegistryAuthProvider(),
 			BundleDir:             pullflags.ImagesBundlePath,
 			WorkingDir: filepath.Join(
@@ -171,6 +173,7 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 		SkipPlatform:          pullflags.NoPlatform,
 		SkipSecurityDatabases: pullflags.NoSecurityDB,
 		SkipModules:           pullflags.NoModules,
+		SkipPackages:          pullflags.NoPackages,
 		SkipInstaller:         pullflags.NoInstaller,
 		OnlyExtraImages:       pullflags.OnlyExtraImages,
 		IgnoreSuspend:         pullflags.IgnoreSuspend,
@@ -285,6 +288,12 @@ func (p *Puller) Execute(ctx context.Context) error {
 		return err
 	}
 
+	// Create package filter from CLI flags
+	packageFilter, err := p.createPackageFilter()
+	if err != nil {
+		return err
+	}
+
 	svc := mirror.NewPullService(
 		registryservice.NewService(c, edition, logger),
 		pullflags.TempDir,
@@ -293,6 +302,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 			SkipPlatform:       pullflags.NoPlatform,
 			SkipSecurity:       pullflags.NoSecurityDB,
 			SkipModules:        pullflags.NoModules,
+			SkipPackages:       pullflags.NoPackages,
 			SkipVexImages:      pullflags.SkipVexImages,
 			SkipInstaller:      pullflags.NoInstaller,
 			InstallerTag:       pullflags.InstallerTag,
@@ -300,6 +310,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 			IgnoreSuspend:      pullflags.IgnoreSuspend,
 			PlatformConstraint: pullflags.PlatformConstraint,
 			ModuleFilter:       filter,
+			PackageFilter:      packageFilter,
 			BundleDir:          pullflags.ImagesBundlePath,
 			BundleChunkSize:    pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
 			Timeout:            pullflags.MirrorTimeout,
@@ -407,6 +418,27 @@ func (p *Puller) createModuleFilter() (*modules.Filter, error) {
 	filter, err := modules.NewFilter(pullflags.ModulesBlacklist, modules.FilterTypeBlacklist)
 	if err != nil {
 		return nil, fmt.Errorf("Prepare module filter: %w", err)
+	}
+
+	return filter, nil
+}
+
+// createPackageFilter creates the appropriate package filter based on whitelist/blacklist.
+// Packages reuse the modules filter because selection logic (names + semver
+// constraints) is identical.
+func (p *Puller) createPackageFilter() (*modules.Filter, error) {
+	if pullflags.PackagesWhitelist != nil {
+		filter, err := modules.NewFilter(pullflags.PackagesWhitelist, modules.FilterTypeWhitelist)
+		if err != nil {
+			return nil, fmt.Errorf("Prepare package filter: %w", err)
+		}
+
+		return filter, nil
+	}
+
+	filter, err := modules.NewFilter(pullflags.PackagesBlacklist, modules.FilterTypeBlacklist)
+	if err != nil {
+		return nil, fmt.Errorf("Prepare package filter: %w", err)
 	}
 
 	return filter, nil

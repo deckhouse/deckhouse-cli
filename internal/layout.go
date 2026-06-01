@@ -36,6 +36,12 @@ import "path"
 //	<root>/modules/<module-name>:<version>                    - Module main image
 //	<root>/modules/<module-name>/release:<channel>            - Module release channel metadata
 //	<root>/modules/<module-name>/extra/<extra-name>:<version> - Module extra images
+//
+// Packages (same shape as modules, but under packages/ with a version/ release segment):
+//
+//	<root>/packages/<package-name>:<version>                    - Package main image
+//	<root>/packages/<package-name>/version:<channel>            - Package version channel metadata
+//	<root>/packages/<package-name>/extra/<extra-name>:<version> - Package extra images
 const (
 	InstallSegment           = "install"
 	InstallStandaloneSegment = "install-standalone"
@@ -44,6 +50,10 @@ const (
 	ModulesSegment        = "modules"
 	ModulesReleaseSegment = "release"
 	ModulesExtraSegment   = "extra"
+
+	PackagesSegment        = "packages"
+	PackagesVersionSegment = "version"
+	PackagesExtraSegment   = "extra"
 
 	InstallerSegment = "installer"
 
@@ -64,6 +74,10 @@ var pathByMirrorType = map[MirrorType]string{
 	// Module paths are relative to modules/<module-name>/ directory
 	MirrorTypeModules:                "",                    // Module main image at root of module dir
 	MirrorTypeModulesReleaseChannels: ModulesReleaseSegment, // modules/<name>/release
+
+	// Package paths are relative to packages/<package-name>/ directory
+	MirrorTypePackages:                "",                     // Package main image at root of package dir
+	MirrorTypePackagesVersionChannels: PackagesVersionSegment, // packages/<name>/version
 
 	MirrorTypeSecurity:                   SecuritySegment,
 	MirrorTypeSecurityTrivyDBSegment:     path.Join(SecuritySegment, SecurityTrivyDBSegment),

@@ -46,6 +46,13 @@ func MandatoryLayoutsForModule(modulePkgDir string) map[string]string {
 	}
 }
 
+func MandatoryLayoutsForPackage(packagePkgDir string) map[string]string {
+	return map[string]string{
+		"package root layout":             packagePkgDir,
+		"package version channels layout": filepath.Join(packagePkgDir, "version"),
+	}
+}
+
 func ValidateUnpackedPackage(mandatoryLayouts map[string]string) error {
 	for layoutDescription, fsPath := range mandatoryLayouts {
 		l, err := layout.FromPath(fsPath)

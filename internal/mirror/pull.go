@@ -25,6 +25,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/installer"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/packages"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/platform"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/security"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
@@ -39,6 +40,8 @@ type PullServiceOptions struct {
 	SkipSecurity bool
 	// SkipModules skips pulling module images
 	SkipModules bool
+	// SkipPackages skips pulling package images
+	SkipPackages bool
 	// SkipInstaller skips pulling installer images
 	SkipInstaller bool
 	// InstallerTag is the tag for the installer image
@@ -54,6 +57,9 @@ type PullServiceOptions struct {
 	PlatformConstraint modules.VersionConstraint
 	// ModuleFilter is the filter for module selection (whitelist/blacklist)
 	ModuleFilter *modules.Filter
+	// PackageFilter is the filter for package selection (whitelist/blacklist).
+	// Packages reuse the modules filter because selection logic is identical.
+	PackageFilter *modules.Filter
 	// BundleDir is the directory to store the bundle
 	BundleDir string
 	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
@@ -78,6 +84,7 @@ type PullService struct {
 	platformService  *platform.Service
 	securityService  *security.Service
 	modulesService   *modules.Service
+	packagesService  *packages.Service
 	installerService *installer.Service
 
 	options *PullServiceOptions
@@ -151,6 +158,22 @@ func NewPullService(
 			logger,
 			userLogger,
 		),
+		packagesService: packages.NewService(
+			registryService,
+			tmpDir,
+			&packages.Options{
+				Filter:          options.PackageFilter,
+				OnlyExtraImages: options.OnlyExtraImages,
+				SkipVexImages:   options.SkipVexImages,
+				BundleDir:       options.BundleDir,
+				BundleChunkSize: options.BundleChunkSize,
+				Timeout:         options.Timeout,
+				DryRun:          options.DryRun,
+				ProxyRegistry:   options.ProxyRegistry,
+			},
+			logger,
+			userLogger,
+		),
 		installerService: installer.NewService(
 			registryService,
 			tmpDir,
@@ -205,6 +228,13 @@ func (svc *PullService) Pull(ctx context.Context) error {
 		err := svc.modulesService.PullModules(ctx)
 		if err != nil {
 			return fmt.Errorf("pull modules: %w", err)
+		}
+	}
+
+	if !svc.options.SkipPackages || svc.options.OnlyExtraImages {
+		err := svc.packagesService.PullPackages(ctx)
+		if err != nil {
+			return fmt.Errorf("pull packages: %w", err)
 		}
 	}
 
