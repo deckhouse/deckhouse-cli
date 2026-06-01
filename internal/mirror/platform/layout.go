@@ -19,7 +19,6 @@ package platform
 import (
 	"fmt"
 	"path"
-	"reflect"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
@@ -124,20 +123,19 @@ func (l *ImageLayouts) setLayoutByMirrorType(rootFolder string, mirrorType inter
 	return nil
 }
 
-// AsList returns a list of layout.Path's in it. Undefined path's are not included in the list.
+// AsList returns the layout.Path of every defined sub-layout. Nil sub-layouts
+// (for example, those never created in dry-run) are skipped.
 func (l *ImageLayouts) AsList() []layout.Path {
-	layoutsValue := reflect.ValueOf(l).Elem()
-	layoutPathType := reflect.TypeOf(layout.Path(""))
+	paths := make([]layout.Path, 0, 4)
 
-	paths := make([]layout.Path, 0)
-
-	for i := 0; i < layoutsValue.NumField(); i++ {
-		if layoutsValue.Field(i).Type() != layoutPathType {
-			continue
-		}
-
-		if pathValue := layoutsValue.Field(i).String(); pathValue != "" {
-			paths = append(paths, layout.Path(pathValue))
+	for _, sub := range []*regimage.ImageLayout{
+		l.Deckhouse,
+		l.DeckhouseInstall,
+		l.DeckhouseInstallStandalone,
+		l.DeckhouseReleaseChannel,
+	} {
+		if sub != nil {
+			paths = append(paths, sub.Path())
 		}
 	}
 

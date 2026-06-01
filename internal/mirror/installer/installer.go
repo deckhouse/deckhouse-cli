@@ -30,6 +30,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -63,6 +64,15 @@ type Service struct {
 
 	// options contains service configuration
 	options *Options
+
+	// pulledImages caches the number of image manifests pulled into the OCI
+	// layout, captured before packing. 
+	// 
+    // We need this to calculate Stats() after packing.
+	// The pack step deletes every layout file
+	// as it writes it into the tar (see bundle.Pack), so the count must be taken
+	// before packing, not in Stats() which runs afterwards.
+	pulledImages int
 
 	// logger is for internal debug logging
 	logger *dkplog.Logger
@@ -178,6 +188,11 @@ func (svc *Service) pullInstaller(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("pull installer: %w", err)
 	}
+
+	// Capture the manifest count before packing: bundle.Pack deletes every
+	// layout file as it tars it, so counting after the pack step would read an
+	// emptied layout and report zero.
+	svc.pulledImages = image.CountManifests(svc.layout.AsList())
 
 	if err := logger.Process("Pack Deckhouse images into installer.tar", func() error {
 		return pack.Bundle(ctx, svc.options.BundleDir, "installer.tar", svc.options.BundleChunkSize, func(w io.Writer) error {
