@@ -19,8 +19,9 @@ package cmd
 import (
 	"os"
 
-	"github.com/deckhouse/deckhouse-cli/internal/tools/sigmigrate"
 	"github.com/spf13/pflag"
+
+	"github.com/deckhouse/deckhouse-cli/internal/tools/sigmigrate"
 )
 
 const (
