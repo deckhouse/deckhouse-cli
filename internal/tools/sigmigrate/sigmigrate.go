@@ -794,15 +794,6 @@ func normalizeLogLevel(level string) string {
 	return normalized
 }
 
-func normalizeLogLevel(level string) string {
-	normalized := strings.ToUpper(strings.TrimSpace(level))
-	if normalized == "" {
-		return "DEBUG"
-	}
-
-	return normalized
-}
-
 func withRetry(operation, logLevel string, fn func(ctx context.Context) error) error {
 	var lastErr error
 
