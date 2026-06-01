@@ -184,20 +184,26 @@ func (l *ImageLayouts) AsList() []layout.Path {
 // package was discovered but no images were pulled into it).
 func (l *ImageLayouts) HasImages() bool {
 	for _, lp := range l.AsList() {
-		index, err := lp.ImageIndex()
-		if err != nil {
-			continue
-		}
-
-		manifest, err := index.IndexManifest()
-		if err != nil {
-			continue
-		}
-
-		if len(manifest.Manifests) > 0 {
+		if LayoutHasManifests(lp) {
 			return true
 		}
 	}
 
 	return false
+}
+
+// LayoutHasManifests reports whether the OCI layout at the given path contains
+// at least one image manifest.
+func LayoutHasManifests(lp layout.Path) bool {
+	index, err := lp.ImageIndex()
+	if err != nil {
+		return false
+	}
+
+	manifest, err := index.IndexManifest()
+	if err != nil {
+		return false
+	}
+
+	return len(manifest.Manifests) > 0
 }

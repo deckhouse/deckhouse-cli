@@ -238,5 +238,13 @@ func (svc *PullService) Pull(ctx context.Context) error {
 		}
 	}
 
+	// The package release-image catalog (package-versions) is always cloned
+	// into the bundle, regardless of which components are mirrored or whether
+	// packages are skipped via --no-packages. This keeps the bundle's package
+	// release metadata in sync on every mirror operation.
+	if err := svc.packagesService.PullPackageVersions(ctx); err != nil {
+		return fmt.Errorf("pull package release images: %w", err)
+	}
+
 	return nil
 }

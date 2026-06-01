@@ -122,9 +122,33 @@ func Pack(ctx context.Context, sourcePath string, sink io.Writer) error {
 // For example, PackWithPrefix(ctx, "/tmp/module", "modules/stronghold", sink) will create
 // tar entries like "modules/stronghold/index.json" instead of just "index.json".
 func PackWithPrefix(ctx context.Context, sourcePath string, prefix string, sink io.Writer) error {
+	return PackSourcesWithPrefix(ctx, sink, PackSource{Dir: sourcePath, Prefix: prefix})
+}
+
+// PackSource describes one directory to be packed into a tar stream.
+type PackSource struct {
+	// Dir is the source directory on disk whose contents are packed.
+	Dir string
+	// Prefix is prepended to every entry's path inside the tar.
+	Prefix string
+	// ExcludeDirs lists directories (by path) to skip together with their
+	// descendants. It is used to keep a nested OCI layout (e.g. a package's
+	// version/ sub-layout) out of an archive that is produced separately.
+	ExcludeDirs []string
+}
+
+// PackSourcesWithPrefix packs several (dir, prefix) sources into a single tar
+// stream written to sink. It is the multi-source counterpart of
+// PackWithPrefix and is used to aggregate layouts from many packages into one
+// archive (e.g. package-versions.tar).
+func PackSourcesWithPrefix(ctx context.Context, sink io.Writer, sources ...PackSource) error {
 	tarWriter := tar.NewWriter(sink)
-	if err := filepath.Walk(sourcePath, packFuncWithPrefix(ctx, sourcePath, prefix, tarWriter)); err != nil {
-		return fmt.Errorf("pack mirrored images into tar: %w", err)
+
+	for _, src := range sources {
+		walkFn := packFuncWithPrefix(ctx, src.Dir, src.Prefix, src.ExcludeDirs, tarWriter)
+		if err := filepath.Walk(src.Dir, walkFn); err != nil {
+			return fmt.Errorf("pack mirrored images into tar: %w", err)
+		}
 	}
 
 	if err := tarWriter.Close(); err != nil {
@@ -134,8 +158,13 @@ func PackWithPrefix(ctx context.Context, sourcePath string, prefix string, sink 
 	return nil
 }
 
-func packFuncWithPrefix(ctx context.Context, pathPrefix string, tarPrefix string, writer *tar.Writer) filepath.WalkFunc {
+func packFuncWithPrefix(ctx context.Context, pathPrefix string, tarPrefix string, excludeDirs []string, writer *tar.Writer) filepath.WalkFunc {
 	unixEpochStart := time.Unix(0, 0)
+
+	excluded := make(map[string]struct{}, len(excludeDirs))
+	for _, d := range excludeDirs {
+		excluded[filepath.Clean(d)] = struct{}{}
+	}
 
 	return func(path string, info fs.FileInfo, err error) error {
 		if ctx.Err() != nil {
@@ -144,6 +173,12 @@ func packFuncWithPrefix(ctx context.Context, pathPrefix string, tarPrefix string
 
 		if err != nil {
 			return err
+		}
+
+		if info.IsDir() {
+			if _, skip := excluded[filepath.Clean(path)]; skip {
+				return filepath.SkipDir
+			}
 		}
 
 		if path == pathPrefix || info.IsDir() {

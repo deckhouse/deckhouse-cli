@@ -52,6 +52,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -153,6 +154,134 @@ func (svc *Service) PullPackages(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// PullPackageVersions pulls the release/version images of every package and
+// packs them into a single shared archive (package-versions.tar).
+//
+// Unlike PullPackages this runs on EVERY mirror operation, independently of
+// which components are being mirrored and of the --no-packages flag, so the
+// package release-image catalog is always cloned into the bundle. Release
+// images may therefore be duplicated between this archive and the per-package
+// archives produced by PullPackages — that duplication is intentional.
+func (svc *Service) PullPackageVersions(ctx context.Context) error {
+	logger := svc.userLogger
+
+	names, err := svc.discoverPackageNames(ctx)
+	if err != nil {
+		// A registry without a packages catalog must never break the rest of
+		// the mirror operation: just skip the package-versions archive.
+		logger.Warnf("Skipping package release images (package-versions): %v", err)
+		return nil
+	}
+
+	if len(names) == 0 {
+		return nil
+	}
+
+	if svc.options.DryRun {
+		logger.InfoLn("[dry-run] package-versions archive would contain release images for: " + strings.Join(names, ", "))
+		return nil
+	}
+
+	// Dedicated working dir so this never collides with the per-package pull
+	// working dir (".../packages") used by PullPackages.
+	versionsRoot := filepath.Join(svc.workingDir, "package-versions")
+
+	sources := make([]bundle.PackSource, 0, len(names))
+
+	err = logger.Process("Pull Package Release Images", func() error {
+		for i, name := range names {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+
+			logger.Infof("[%d/%d] Pulling release images for package: %s", i+1, len(names), name)
+
+			versionDir := filepath.Join(versionsRoot, name, internal.PackagesVersionSegment)
+
+			versionLayout, err := regimage.NewImageLayout(versionDir)
+			if err != nil {
+				return fmt.Errorf("create version layout for package %s: %w", name, err)
+			}
+
+			if err := svc.pullAllVersionImages(ctx, name, versionLayout); err != nil {
+				if isContextErr(err) {
+					return err
+				}
+
+				logger.Warnf("Failed to pull release images for package %s: %v", name, err)
+
+				continue
+			}
+
+			if err := layouts.SortIndexManifests(versionLayout.Path()); err != nil {
+				return fmt.Errorf("sort index manifests for package %s: %w", name, err)
+			}
+
+			// Skip packages whose version repo produced no images.
+			if !LayoutHasManifests(versionLayout.Path()) {
+				continue
+			}
+
+			sources = append(sources, bundle.PackSource{
+				Dir:    versionDir,
+				Prefix: filepath.Join(internal.PackagesSegment, name, internal.PackagesVersionSegment),
+			})
+		}
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	if len(sources) == 0 {
+		logger.InfoLn("No package release images found, skipping package-versions archive")
+		return nil
+	}
+
+	return logger.Process("Pack package-versions.tar", func() error {
+		return pack.Bundle(ctx, svc.options.BundleDir, "package-versions.tar", svc.options.BundleChunkSize, func(w io.Writer) error {
+			return bundle.PackSourcesWithPrefix(ctx, w, sources...)
+		})
+	})
+}
+
+// pullAllVersionImages pulls every release/version image for a single package
+// (default release channels, the LTS channel when present, and the version
+// tags advertised by those channels) into the provided layout.
+func (svc *Service) pullAllVersionImages(ctx context.Context, packageName string, versionLayout *regimage.ImageLayout) error {
+	pkgSvc := svc.packagesService.Package(packageName)
+
+	imageSet := make(map[string]*puller.ImageMeta)
+
+	for _, channel := range internal.GetAllDefaultReleaseChannels() {
+		imageSet[svc.versionRef(packageName, channel)] = nil
+	}
+
+	if err := pkgSvc.VersionChannels().CheckImageExists(ctx, internal.LTSChannel); err == nil {
+		imageSet[svc.versionRef(packageName, internal.LTSChannel)] = nil
+	}
+
+	// Version tags (vX.Y.Z) advertised by the channels' version.json.
+	for _, version := range svc.extractVersionsFromVersionChannels(ctx, packageName) {
+		imageSet[svc.versionRef(packageName, version)] = nil
+	}
+
+	if len(imageSet) == 0 {
+		return nil
+	}
+
+	config := puller.PullConfig{
+		Name:             packageName + " release images",
+		ImageSet:         imageSet,
+		Layout:           versionLayout,
+		AllowMissingTags: true,
+		GetterService:    pkgSvc.VersionChannels(),
+	}
+
+	return svc.pullerService.PullImages(ctx, config)
 }
 
 // validatePackagesAccess validates access to the packages registry.
