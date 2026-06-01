@@ -159,10 +159,16 @@ func checkCAsOutliveRenewed(w io.Writer, certsDir string, usedCAs map[pki.RootCe
 		cas = append(cas, ca)
 	}
 
-	report := pki.ListCertificateExpirations(
+	report, err := pki.ListCertificateExpirations(
 		pki.WithCertificatesDir(certsDir),
 		pki.WithRootCertificates(cas...),
 	)
+	if err != nil {
+		// It shouldn't happen, but return error through as a warning.
+		line := fmt.Sprintf("WARNING: cannot check CA expiration: %v", err)
+		fmt.Fprintln(w, line)
+		return []string{line}
+	}
 
 	threshold := time.Now().Add(constants.CertificateValidityPeriod)
 	var warnings []string

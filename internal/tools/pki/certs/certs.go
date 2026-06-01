@@ -55,7 +55,10 @@ type Report struct {
 // kubeconfigDir is the directory containing kubeconfig files (e.g. /etc/kubernetes).
 // Callers that want the standard layout can pass filepath.Dir(certsDir).
 func BuildFullScanReport(certsDir, kubeconfigDir string) (*Report, error) {
-	pkiReport := pki.ListCertificateExpirations(pki.WithCertificatesDir(certsDir))
+	pkiReport, err := pki.ListCertificateExpirations(pki.WithCertificatesDir(certsDir))
+	if err != nil {
+		return nil, fmt.Errorf("listing PKI certificates in %q: %w", certsDir, err)
+	}
 	kcReport := kubeconfig.ListClientCertificateExpirations(kubeconfig.WithKubeconfigDir(kubeconfigDir))
 
 	report := &Report{}
