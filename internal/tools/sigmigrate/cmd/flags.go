@@ -19,12 +19,12 @@ package cmd
 import (
 	"os"
 
+	"github.com/deckhouse/deckhouse-cli/internal/tools/sigmigrate"
 	"github.com/spf13/pflag"
 )
 
 const (
 	defaultKubectlAs = "system:serviceaccount:d8-system:deckhouse"
-	defaultThreads   = 10
 )
 
 func addFlags(flags *pflag.FlagSet) {
@@ -71,7 +71,7 @@ func addFlags(flags *pflag.FlagSet) {
 
 	flags.Int(
 		"threads",
-		defaultThreads,
+		sigmigrate.DefaultWorkerCount,
 		"Number of worker threads for resource discovery and migration. Values <=0 use default.",
 	)
 
