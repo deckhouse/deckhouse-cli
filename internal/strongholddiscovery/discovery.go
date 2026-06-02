@@ -117,6 +117,11 @@ func ApplyFromCluster() {
 	if needAddr {
 		if addr, err := discoverAddr(ctx, kubeCl); err == nil {
 			_ = os.Setenv(AddrEnv, addr)
+			if needCA {
+				if ca, err := discoverCA(ctx, kubeCl); err == nil {
+					_ = os.Setenv(CABytesEnv, ca)
+				}
+			}
 		}
 	}
 
@@ -126,11 +131,6 @@ func ApplyFromCluster() {
 		}
 	}
 
-	if needCA {
-		if ca, err := discoverCA(ctx, kubeCl); err == nil {
-			_ = os.Setenv(CABytesEnv, ca)
-		}
-	}
 }
 
 func kubeClient() (kubernetes.Interface, error) {
