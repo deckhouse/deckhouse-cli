@@ -26,6 +26,8 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -238,10 +240,98 @@ func NewPuller(cmd *cobra.Command) *Puller {
 }
 
 func (p *Puller) Execute(ctx context.Context) error {
+	configureSummaryColor()
+
 	if err := p.cleanupWorkingDirectory(); err != nil {
 		return err
 	}
 
+	svc, err := p.buildPullService()
+	if err != nil {
+		return err
+	}
+
+	start := time.Now()
+	// Pull always returns a non-nil summary, even on error.
+	summary, err := svc.Pull(ctx)
+	summary.Elapsed = time.Since(start)
+
+	// Edition is parsed from the source registry path (no registry call); empty
+	// for a custom registry, where the renderer omits the Edition line.
+	_, edition := registryservice.GetEditionFromRegistryPath(p.params.DeckhouseRegistryRepo)
+	summary.Edition = string(edition)
+
+	// pullErr is nil for success and for a graceful Ctrl+C (which still renders a
+	// partial summary); non-nil for a hard failure (which also renders, then
+	// propagates so the exit code is non-zero).
+	pullErr := classifyPullOutcome(summary, err)
+
+	// Dry-run never writes a bundle, so there is nothing to size or clean up.
+	if pullflags.DryRun {
+		p.renderSummary(summary)
+		return pullErr
+	}
+
+	// Size whatever was packed (possibly partial). An unreadable dir just omits
+	// the bundle block; it does not change the outcome.
+	if bundleStats, bundleErr := p.collectBundleStats(); bundleErr != nil {
+		p.logger.Warnf("Could not collect bundle statistics for summary: %v", bundleErr)
+	} else {
+		summary.Bundle = bundleStats
+	}
+
+	// Cancelled or failed: render what completed, then stop.
+	if summary.Cancelled || summary.Failed {
+		p.renderSummary(summary)
+
+		if summary.Cancelled {
+			p.logger.WarnLn("Operation cancelled by user")
+		}
+
+		return pullErr
+	}
+
+	// GOST digest failure: the bundle was built but has no valid checksums, so
+	// it counts as failed. Render it (FAILED state), then propagate.
+	if err := p.computeGOSTDigests(); err != nil {
+		summary.Failed = true
+		p.renderSummary(summary)
+
+		return err
+	}
+
+	p.renderSummary(summary)
+
+	return p.finalCleanup()
+}
+
+// renderSummary prints the end-of-pull summary block. PullService.Pull always
+// returns a non-nil summary, so no nil-guard is needed here.
+func (p *Puller) renderSummary(summary *mirror.PullSummary) {
+	p.logger.InfoLn(renderPullSummary(summary, pullflags.VerboseSummary))
+}
+
+// classifyPullOutcome records the pull's terminal state on the summary and
+// returns the error Execute should propagate:
+//   - nil error        -> success, returns nil;
+//   - context.Canceled -> Cancelled, returns nil (a graceful interrupt is a clean exit);
+//   - any other error  -> Failed, returns the wrapped error.
+func classifyPullOutcome(summary *mirror.PullSummary, err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, context.Canceled):
+		summary.Cancelled = true
+		return nil
+	default:
+		summary.Failed = true
+		return fmt.Errorf("pull from registry: %w", err)
+	}
+}
+
+// buildPullService assembles the registry client and the PullService from the
+// CLI flags and the Puller parameters.
+func (p *Puller) buildPullService() (*mirror.PullService, error) {
 	logger := dkplog.NewNop()
 
 	if log.DebugLogLevel() >= 3 {
@@ -284,13 +374,13 @@ func (p *Puller) Execute(ctx context.Context) error {
 	// Create module filter from CLI flags
 	filter, err := p.createModuleFilter()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Create package filter from CLI flags
 	packageFilter, err := p.createPackageFilter()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	svc := mirror.NewPullService(
@@ -320,27 +410,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 		p.logger,
 	)
 
-	err = svc.Pull(ctx)
-	if err != nil {
-		// Handle context cancellation gracefully
-		if errors.Is(err, context.Canceled) {
-			p.logger.WarnLn("Operation cancelled by user")
-			return nil
-		}
-
-		return fmt.Errorf("pull from registry: %w", err)
-	}
-
-	if pullflags.DryRun {
-		p.logger.InfoLn("[dry-run] Done. No images were downloaded.")
-		return nil
-	}
-
-	if err := p.computeGOSTDigests(); err != nil {
-		return err
-	}
-
-	return p.finalCleanup()
+	return svc, nil
 }
 
 // cleanupWorkingDirectory handles cleanup of the working directory if needed
@@ -441,6 +511,79 @@ func (p *Puller) createPackageFilter() (*modules.Filter, error) {
 	}
 
 	return filter, nil
+}
+
+// collectBundleStats walks the bundle directory and accounts for the produced
+// artifacts. Chunked artifacts (named "<base>.NNNN.chunk", see
+// internal/mirror/chunked) are collapsed into a single logical entry keyed by
+// "<base>" so that, for example, "module-foo.tar.0000.chunk" and
+// "module-foo.tar.0001.chunk" report as one "module-foo.tar" with two chunks.
+// Single-file artifacts ("<name>.tar") report as one entry with zero chunks.
+func (p *Puller) collectBundleStats() (mirror.BundleStats, error) {
+	entries, err := os.ReadDir(p.params.BundleDir)
+	if err != nil {
+		return mirror.BundleStats{}, fmt.Errorf("read bundle directory: %w", err)
+	}
+
+	grouped := make(map[string]*mirror.BundleFile)
+
+	var totalBytes int64
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+
+		ext := filepath.Ext(name)
+		if ext != ".tar" && ext != ".chunk" {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		logicalName := name
+		isChunk := false
+
+		if ext == ".chunk" {
+			// "module-foo.tar.0003.chunk" -> "module-foo.tar"
+			base := strings.TrimSuffix(name, ext) // "module-foo.tar.0003"
+			if idx := strings.LastIndex(base, "."); idx != -1 {
+				base = base[:idx] // "module-foo.tar"
+			}
+
+			logicalName = base
+			isChunk = true
+		}
+
+		file, ok := grouped[logicalName]
+		if !ok {
+			file = &mirror.BundleFile{Name: logicalName}
+			grouped[logicalName] = file
+		}
+
+		file.Bytes += info.Size()
+		if isChunk {
+			file.Chunks++
+		}
+
+		totalBytes += info.Size()
+	}
+
+	files := make([]mirror.BundleFile, 0, len(grouped))
+	for _, file := range grouped {
+		files = append(files, *file)
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Name < files[j].Name
+	})
+
+	return mirror.BundleStats{Files: files, TotalBytes: totalBytes}, nil
 }
 
 // computeGOSTDigests computes GOST digests for the bundle if enabled
