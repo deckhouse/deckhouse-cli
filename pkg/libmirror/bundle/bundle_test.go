@@ -96,6 +96,200 @@ func TestUnpackMergesCollidingIndexes(t *testing.T) {
 	require.ElementsMatch(t, fullTags, gotTags, "all tags must survive the merge of colliding index.json files")
 }
 
+// TestUnpackMergesThreeArchives verifies the merge accumulates across more than
+// two archives unpacked into the same layout path.
+func TestUnpackMergesThreeArchives(t *testing.T) {
+	unpackDir, err := os.MkdirTemp(os.TempDir(), "unpack_merge3_test")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(unpackDir) })
+
+	const layoutPath = "packages/foo/version/index.json"
+
+	require.NoError(t, Unpack(context.TODO(), bytes.NewReader(makeIndexTar(t, layoutPath, []string{"v1.0.0"})), unpackDir, "package-a"))
+	require.NoError(t, Unpack(context.TODO(), bytes.NewReader(makeIndexTar(t, layoutPath, []string{"v1.1.0"})), unpackDir, "package-b"))
+	require.NoError(t, Unpack(context.TODO(), bytes.NewReader(makeIndexTar(t, layoutPath, []string{"v1.2.0"})), unpackDir, "package-c"))
+
+	gotTags := readIndexTags(t, filepath.Join(unpackDir, layoutPath))
+	require.ElementsMatch(t, []string{"v1.0.0", "v1.1.0", "v1.2.0"}, gotTags)
+}
+
+// TestUnpackSubsetFirstThenFull verifies that the truncated archive arriving
+// first does not prevent the full archive's extra tags from being added.
+func TestUnpackSubsetFirstThenFull(t *testing.T) {
+	unpackDir, err := os.MkdirTemp(os.TempDir(), "unpack_subset_first_test")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(unpackDir) })
+
+	const layoutPath = "packages/foo/version/index.json"
+
+	require.NoError(t, Unpack(context.TODO(), bytes.NewReader(makeIndexTar(t, layoutPath, []string{"stable", "v1.2.0"})), unpackDir, "package-versions"))
+	require.NoError(t, Unpack(context.TODO(), bytes.NewReader(makeIndexTar(t, layoutPath, []string{"stable", "v1.0.0", "v1.1.0", "v1.2.0"})), unpackDir, "package-foo"))
+
+	gotTags := readIndexTags(t, filepath.Join(unpackDir, layoutPath))
+	require.ElementsMatch(t, []string{"stable", "v1.0.0", "v1.1.0", "v1.2.0"}, gotTags)
+}
+
+// TestUnpackNoCollisionKeepsSingleIndex verifies the common case where a layout
+// path appears in only one archive: the index is moved as-is.
+func TestUnpackNoCollisionKeepsSingleIndex(t *testing.T) {
+	unpackDir, err := os.MkdirTemp(os.TempDir(), "unpack_no_collision_test")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(unpackDir) })
+
+	const layoutPath = "packages/foo/version/index.json"
+
+	tags := []string{"stable", "v2.0.0"}
+	require.NoError(t, Unpack(context.TODO(), bytes.NewReader(makeIndexTar(t, layoutPath, tags)), unpackDir, "package-foo"))
+
+	gotTags := readIndexTags(t, filepath.Join(unpackDir, layoutPath))
+	require.ElementsMatch(t, tags, gotTags)
+}
+
+func TestMergeIndexJSON(t *testing.T) {
+	t.Run("union deduplicates identical descriptors", func(t *testing.T) {
+		dir := t.TempDir()
+		dst := filepath.Join(dir, "dst.json")
+		src := filepath.Join(dir, "src.json")
+
+		writeIndexFile(t, dst, []string{"stable", "v1.0.0", "v1.1.0", "v1.2.0"})
+		writeIndexFile(t, src, []string{"stable", "v1.2.0"})
+
+		require.NoError(t, mergeIndexJSON(src, dst))
+
+		merged := readOCIIndexFile(t, dst)
+		require.Len(t, merged.Manifests, 4, "shared tags must not be duplicated")
+		require.ElementsMatch(t, []string{"stable", "v1.0.0", "v1.1.0", "v1.2.0"}, tagsOf(merged))
+	})
+
+	t.Run("same tag with distinct digests are both kept", func(t *testing.T) {
+		dir := t.TempDir()
+		dst := filepath.Join(dir, "dst.json")
+		src := filepath.Join(dir, "src.json")
+
+		writeIndexWithDescriptors(t, dst, []v1.Descriptor{descriptorFor("stable", "aaaa")})
+		writeIndexWithDescriptors(t, src, []v1.Descriptor{descriptorFor("stable", "bbbb")})
+
+		require.NoError(t, mergeIndexJSON(src, dst))
+
+		merged := readOCIIndexFile(t, dst)
+		require.Len(t, merged.Manifests, 2, "same tag pointing at different digests must both survive")
+	})
+
+	t.Run("result is sorted by ref name", func(t *testing.T) {
+		dir := t.TempDir()
+		dst := filepath.Join(dir, "dst.json")
+		src := filepath.Join(dir, "src.json")
+
+		writeIndexFile(t, dst, []string{"v1.2.0", "stable"})
+		writeIndexFile(t, src, []string{"v1.0.0", "v1.1.0"})
+
+		require.NoError(t, mergeIndexJSON(src, dst))
+
+		refs := make([]string, 0)
+		for _, m := range readOCIIndexFile(t, dst).Manifests {
+			refs = append(refs, m.Annotations[refNameAnnotation])
+		}
+
+		require.IsIncreasing(t, refs, "manifests must be deterministically sorted by ref name")
+	})
+
+	t.Run("schema and media type fall back to source when destination lacks them", func(t *testing.T) {
+		dir := t.TempDir()
+		dst := filepath.Join(dir, "dst.json")
+		src := filepath.Join(dir, "src.json")
+
+		// Destination missing schemaVersion/mediaType.
+		require.NoError(t, os.WriteFile(dst, []byte(`{"manifests":[]}`), 0o600))
+		writeIndexFile(t, src, []string{"v1.0.0"})
+
+		require.NoError(t, mergeIndexJSON(src, dst))
+
+		merged := readOCIIndexFile(t, dst)
+		require.Equal(t, int64(2), merged.SchemaVersion)
+		require.Equal(t, "application/vnd.oci.image.index.v1+json", string(merged.MediaType))
+		require.ElementsMatch(t, []string{"v1.0.0"}, tagsOf(merged))
+	})
+
+	t.Run("invalid source json returns error", func(t *testing.T) {
+		dir := t.TempDir()
+		dst := filepath.Join(dir, "dst.json")
+		src := filepath.Join(dir, "src.json")
+
+		writeIndexFile(t, dst, []string{"v1.0.0"})
+		require.NoError(t, os.WriteFile(src, []byte("{not json"), 0o600))
+
+		require.Error(t, mergeIndexJSON(src, dst))
+	})
+
+	t.Run("missing source file returns error", func(t *testing.T) {
+		dir := t.TempDir()
+		dst := filepath.Join(dir, "dst.json")
+		writeIndexFile(t, dst, []string{"v1.0.0"})
+
+		require.Error(t, mergeIndexJSON(filepath.Join(dir, "does-not-exist.json"), dst))
+	})
+}
+
+func descriptorFor(tag, hexSeed string) v1.Descriptor {
+	hex := hexSeed
+	for len(hex) < 64 {
+		hex += "0"
+	}
+
+	return v1.Descriptor{
+		MediaType: "application/vnd.oci.image.manifest.v1+json",
+		Size:      123,
+		Digest:    v1.Hash{Algorithm: "sha256", Hex: hex[:64]},
+		Annotations: map[string]string{
+			refNameAnnotation: "example.com/packages/foo/version:" + tag,
+		},
+	}
+}
+
+func writeIndexFile(t *testing.T, path string, tags []string) {
+	t.Helper()
+
+	descriptors := make([]v1.Descriptor, 0, len(tags))
+	for _, tag := range tags {
+		descriptors = append(descriptors, descriptorFor(tag, hexDigestForTag(tag)))
+	}
+
+	writeIndexWithDescriptors(t, path, descriptors)
+}
+
+func writeIndexWithDescriptors(t *testing.T, path string, descriptors []v1.Descriptor) {
+	t.Helper()
+
+	index := ociIndex{
+		SchemaVersion: 2,
+		MediaType:     "application/vnd.oci.image.index.v1+json",
+		Manifests:     descriptors,
+	}
+
+	raw, err := json.MarshalIndent(index, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, raw, 0o600))
+}
+
+func readOCIIndexFile(t *testing.T, path string) *ociIndex {
+	t.Helper()
+
+	index, err := readOCIIndex(path)
+	require.NoError(t, err)
+
+	return index
+}
+
+func tagsOf(index *ociIndex) []string {
+	tags := make([]string, 0, len(index.Manifests))
+	for _, m := range index.Manifests {
+		_, tag, _ := strings.Cut(m.Annotations[refNameAnnotation], ":")
+		tags = append(tags, tag)
+	}
+
+	return tags
+}
+
 // makeIndexTar builds an in-memory tar with a single OCI index.json at indexPath,
 // containing one manifest per tag (distinct digests).
 func makeIndexTar(t *testing.T, indexPath string, tags []string) []byte {
