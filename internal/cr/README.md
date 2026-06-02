@@ -12,7 +12,9 @@ listing tags, inspecting manifests and configs, and exploring image contents
 file-by-file.
 
 Authentication piggybacks on the standard Docker config
-(`~/.docker/config.json`), so `docker login` / `d8 login` work transparently.
+(`~/.docker/config.json`), so `d8 cr login` / `docker login` work
+transparently. You can also pass `--username`/`--password` to any command for
+one-off credentials without touching the config.
 
 ---
 
@@ -83,6 +85,18 @@ manifest, config, digest, all `fs *`, export). With `--format oci`, `pull`
 keeps the entire index by default - omit `--platform` and you get every
 platform on disk; pass it and you narrow down to one.
 
+### Authentication
+
+- **`login`** - verify credentials against a registry and persist them to the
+  Docker config (`~/.docker/config.json`, honouring `$DOCKER_CONFIG` and any
+  configured credential helper / store), exactly like `docker login`. Once
+  logged in, every other `d8 cr` command authenticates transparently.
+  Username and password come from `--username`/`--password`; omit either to be
+  prompted interactively (the password is read without echo).
+- **Inline credentials** - the persistent `--username`/`--password` flags work
+  on every command, letting CI pass one-off credentials (and override whatever
+  the Docker config holds) without a prior `login`.
+
 ### Security and connectivity
 
 - **TLS by default**, with `--insecure` to opt into plain HTTP and skip
@@ -110,6 +124,7 @@ platform on disk; pass it and you narrow down to one.
 
 ```
 d8 cr
+├── login [REGISTRY]           Log in to a registry and save credentials
 ├── pull IMAGE... PATH         Pull image(s) to a tarball or OCI layout
 ├── push PATH IMAGE            Push a tarball or OCI layout to a registry
 ├── export IMAGE [TARBALL]     Stream the merged filesystem as a tar
@@ -135,6 +150,8 @@ These persistent flags apply to every `d8 cr` subcommand:
 | `--insecure` | Allow plain HTTP and skip TLS verification |
 | `--allow-nondistributable-artifacts` | Include non-distributable (foreign) layers when pushing |
 | `--platform os/arch[/variant][:osversion]` | Resolve multi-arch indices to a specific platform (image-level commands only) |
+| `-u`, `--username` | Registry username (overrides the Docker config; use with `--password`) |
+| `-p`, `--password` | Registry password or token (overrides the Docker config; use with `--username`) |
 
 ---
 
@@ -276,6 +293,22 @@ diff \
 
 A copy-pasteable cheat-sheet of the most common invocations.
 
+### Log in
+
+```bash
+# Prompt for username and password
+d8 cr login registry.internal
+
+# Non-interactive (e.g. CI)
+d8 cr login registry.internal --username robot --password "$TOKEN"
+
+# Log in to Docker Hub (default registry when REGISTRY is omitted)
+d8 cr login --username alice --password "$TOKEN"
+
+# Skip login entirely: pass credentials to any command directly
+d8 cr pull --username robot --password "$TOKEN" registry.internal/app:v1 ./app.tar
+```
+
 ### Pull
 
 ```bash
@@ -409,11 +442,11 @@ single-responsibility packages:
 | Package | Responsibility |
 |---|---|
 | `internal/cr/cmd` | Root cobra command, persistent flags, integration tests |
-| `internal/cr/cmd/basic` | Top-level subcommands: `pull`, `push`, `export`, `ls`, `catalog`, `manifest`, `config`, `digest` |
+| `internal/cr/cmd/basic` | Top-level subcommands: `login`, `pull`, `push`, `export`, `ls`, `catalog`, `manifest`, `config`, `digest` |
 | `internal/cr/cmd/fs` | `fs` subtree: `ls`, `cat`, `tree`, `extract` |
 | `internal/cr/cmd/completion` | Shell-completion helpers (bounded, fail-silent) |
 | `internal/cr/cmd/rootflagnames` | Single source of truth for persistent flag names |
-| `internal/cr/internal/registry` | Thin domain layer over `go-containerregistry` (fetch / push / list / options) |
+| `internal/cr/internal/registry` | Thin domain layer over `go-containerregistry` (fetch / push / list / login / options) |
 | `internal/cr/internal/image` | Pure operations over `v1.Image` / `v1.ImageIndex` (multi-arch resolve, ...) |
 | `internal/cr/internal/imageio` | Disk I/O: tarball + OCI image-layout load/save |
 | `internal/cr/internal/imagefs` | Merged-filesystem reader with whiteout handling and safe extraction |
