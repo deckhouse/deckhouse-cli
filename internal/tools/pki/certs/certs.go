@@ -71,7 +71,7 @@ func BuildFullScanReport(certsDir, kubeconfigDir string) (*Report, error) {
 		case e.Err == nil:
 			appendPKIEntry(report, e.Name, e.NotAfter, e.IsCA, e.Authority)
 		case isCertMissing(e.Err):
-			// Missing — silent: worker/arbiter nodes dont carry the full PKI.
+			// Missing — silent: worker/arbiter nodes don't carry the full PKI.
 		default:
 			readErrs = append(readErrs, e.Err)
 		}

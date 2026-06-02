@@ -36,9 +36,9 @@ No cluster configuration is required — this command is designed for emergency
 recovery when the Kubernetes API is unavailable.
 
 The signing CA must be present on disk and must not be expired. If the CA private
-key is absent (external CA), the certificate is skipped. If the CA certificate has
-expired, the command stops with an error — renewing leaf certificates against an
-expired CA is pointless because chain validation will fail.
+key is absent (external CA), or the CA certificate has expired, the certificate
+is skipped; renewing leaf certificates against an expired CA is pointless because
+chain validation will fail. The command exits non-zero if any certificate was skipped.
 
 After renewal, restart kube-apiserver, kube-controller-manager, kube-scheduler
 and etcd so that the new certificates take effect or reboot the node/kubelet.

@@ -199,7 +199,7 @@ func warningsError(warnings int) error {
 		return nil
 	}
 
-	return fmt.Errorf("%d certificate(s) not renewed; see output above", warnings)
+	return fmt.Errorf("%d warning(s) emitted; see output above", warnings)
 }
 
 // collectLeafWarnings prints a progress line for every leaf renewal entry
