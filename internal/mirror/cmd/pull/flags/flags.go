@@ -58,6 +58,9 @@ var (
 	ModulesWhitelist  []string
 	ModulesBlacklist  []string
 
+	PackagesWhitelist []string
+	PackagesBlacklist []string
+
 	SourceRegistryRepo     = EnterpriseEditionRepo // Fallback to EE if nothing was given as source.
 	SourceRegistryLogin    string
 	SourceRegistryPassword string
@@ -70,6 +73,7 @@ var (
 	NoPlatform      bool
 	NoSecurityDB    bool
 	NoModules       bool
+	NoPackages      bool
 	NoInstaller     bool
 	OnlyExtraImages bool
 	SkipVexImages   bool
@@ -200,6 +204,20 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		"/modules",
 		"Suffix to append to source repo path to locate modules.",
 	)
+	flagSet.StringArrayVar(
+		&PackagesWhitelist,
+		"include-package",
+		nil,
+		`Whitelist specific packages for downloading. Use one flag per each package. Disables blacklisting by --exclude-package.
+
+Packages are mirrored exactly like modules (same name@version constraint dialect), but live under the packages/ registry segment with their release metadata under packages/<name>/version.`,
+	)
+	flagSet.StringArrayVar(
+		&PackagesBlacklist,
+		"exclude-package",
+		nil,
+		`Blacklist specific packages from downloading. Format is "package-name[@version]". Use one flag per each package. Overridden by use of --include-package.`,
+	)
 	flagSet.Int64VarP(
 		&ImagesBundleChunkSizeGB,
 		"images-bundle-chunk-size",
@@ -248,6 +266,12 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		"no-modules",
 		false,
 		"Do not pull Deckhouse modules into bundle.",
+	)
+	flagSet.BoolVar(
+		&NoPackages,
+		"no-packages",
+		false,
+		"Do not pull Deckhouse packages into bundle.",
 	)
 	flagSet.BoolVar(
 		&NoInstaller,

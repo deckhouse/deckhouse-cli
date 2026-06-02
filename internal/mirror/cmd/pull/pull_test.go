@@ -1262,6 +1262,7 @@ func TestPullFunction(t *testing.T) {
 	originalNoPlatform := pullflags.NoPlatform
 	originalNoSecurityDB := pullflags.NoSecurityDB
 	originalNoModules := pullflags.NoModules
+	originalNoPackages := pullflags.NoPackages
 	originalNoInstaller := pullflags.NoInstaller
 
 	defer func() {
@@ -1271,6 +1272,7 @@ func TestPullFunction(t *testing.T) {
 		pullflags.NoPlatform = originalNoPlatform
 		pullflags.NoSecurityDB = originalNoSecurityDB
 		pullflags.NoModules = originalNoModules
+		pullflags.NoPackages = originalNoPackages
 		pullflags.NoInstaller = originalNoInstaller
 	}()
 
@@ -1281,6 +1283,7 @@ func TestPullFunction(t *testing.T) {
 	pullflags.NoPlatform = true
 	pullflags.NoSecurityDB = true
 	pullflags.NoModules = true
+	pullflags.NoPackages = true
 	pullflags.NoInstaller = true
 
 	cmd := &cobra.Command{}

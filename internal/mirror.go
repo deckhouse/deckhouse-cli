@@ -30,4 +30,6 @@ const (
 	MirrorTypeSecurityTrivyBDUSegment
 	MirrorTypeSecurityTrivyJavaDBSegment
 	MirrorTypeSecurityTrivyChecksSegment
+	MirrorTypePackages
+	MirrorTypePackagesVersionChannels
 )

@@ -20,14 +20,29 @@ import (
 	"archive/tar"
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/types"
+)
+
+const (
+	// indexFileName is the OCI image index file name. Multiple bundle archives may
+	// carry the same layout path (e.g. packages/<name>/version) while exposing
+	// different tag subsets, so colliding index.json files must be merged rather
+	// than overwritten when unpacking into a shared directory.
+	indexFileName = "index.json"
+
+	refNameAnnotation = "org.opencontainers.image.ref.name"
 )
 
 func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName string) error {
@@ -122,9 +137,33 @@ func Pack(ctx context.Context, sourcePath string, sink io.Writer) error {
 // For example, PackWithPrefix(ctx, "/tmp/module", "modules/stronghold", sink) will create
 // tar entries like "modules/stronghold/index.json" instead of just "index.json".
 func PackWithPrefix(ctx context.Context, sourcePath string, prefix string, sink io.Writer) error {
+	return PackSourcesWithPrefix(ctx, sink, PackSource{Dir: sourcePath, Prefix: prefix})
+}
+
+// PackSource describes one directory to be packed into a tar stream.
+type PackSource struct {
+	// Dir is the source directory on disk whose contents are packed.
+	Dir string
+	// Prefix is prepended to every entry's path inside the tar.
+	Prefix string
+	// ExcludeDirs lists directories (by path) to skip together with their
+	// descendants. It is used to keep a nested OCI layout (e.g. a package's
+	// version/ sub-layout) out of an archive that is produced separately.
+	ExcludeDirs []string
+}
+
+// PackSourcesWithPrefix packs several (dir, prefix) sources into a single tar
+// stream written to sink. It is the multi-source counterpart of
+// PackWithPrefix and is used to aggregate layouts from many packages into one
+// archive (e.g. package-versions.tar).
+func PackSourcesWithPrefix(ctx context.Context, sink io.Writer, sources ...PackSource) error {
 	tarWriter := tar.NewWriter(sink)
-	if err := filepath.Walk(sourcePath, packFuncWithPrefix(ctx, sourcePath, prefix, tarWriter)); err != nil {
-		return fmt.Errorf("pack mirrored images into tar: %w", err)
+
+	for _, src := range sources {
+		walkFn := packFuncWithPrefix(ctx, src.Dir, src.Prefix, src.ExcludeDirs, tarWriter)
+		if err := filepath.Walk(src.Dir, walkFn); err != nil {
+			return fmt.Errorf("pack mirrored images into tar: %w", err)
+		}
 	}
 
 	if err := tarWriter.Close(); err != nil {
@@ -134,8 +173,13 @@ func PackWithPrefix(ctx context.Context, sourcePath string, prefix string, sink 
 	return nil
 }
 
-func packFuncWithPrefix(ctx context.Context, pathPrefix string, tarPrefix string, writer *tar.Writer) filepath.WalkFunc {
+func packFuncWithPrefix(ctx context.Context, pathPrefix string, tarPrefix string, excludeDirs []string, writer *tar.Writer) filepath.WalkFunc {
 	unixEpochStart := time.Unix(0, 0)
+
+	excluded := make(map[string]struct{}, len(excludeDirs))
+	for _, d := range excludeDirs {
+		excluded[filepath.Clean(d)] = struct{}{}
+	}
 
 	return func(path string, info fs.FileInfo, err error) error {
 		if ctx.Err() != nil {
@@ -144,6 +188,12 @@ func packFuncWithPrefix(ctx context.Context, pathPrefix string, tarPrefix string
 
 		if err != nil {
 			return err
+		}
+
+		if info.IsDir() {
+			if _, skip := excluded[filepath.Clean(path)]; skip {
+				return filepath.SkipDir
+			}
 		}
 
 		if path == pathPrefix || info.IsDir() {
@@ -214,6 +264,27 @@ func moveFiles(from, to string) error {
 		fromPath := filepath.Join(from, file.Name())
 		toPath := filepath.Join(to, file.Name())
 
+		// Two archives can target the same OCI layout: they share blobs (named by
+		// unique content hash, so no collision) but each carries its own index.json.
+		// A plain rename would let the last archive's index overwrite the previous
+		// one, dropping the tags it didn't include even though their blobs are
+		// already on disk. Merge the manifests instead to keep every tag.
+		if file.Name() == indexFileName {
+			if _, statErr := os.Stat(toPath); statErr == nil {
+				if err = mergeIndexJSON(fromPath, toPath); err != nil {
+					return fmt.Errorf("merge index.json: %w", err)
+				}
+
+				if err = os.Remove(fromPath); err != nil {
+					return fmt.Errorf("remove merged source index: %w", err)
+				}
+
+				continue
+			} else if !errors.Is(statErr, fs.ErrNotExist) {
+				return fmt.Errorf("stat destination index: %w", statErr)
+			}
+		}
+
 		err = os.Rename(fromPath, toPath)
 		if err != nil {
 			return fmt.Errorf("move file: %w", err)
@@ -221,4 +292,89 @@ func moveFiles(from, to string) error {
 	}
 
 	return nil
+}
+
+// ociIndex is a minimal representation of an OCI image index (index.json)
+// sufficient to merge manifest lists from multiple archives.
+type ociIndex struct {
+	SchemaVersion int64             `json:"schemaVersion"`
+	MediaType     types.MediaType   `json:"mediaType,omitempty"`
+	Manifests     []v1.Descriptor   `json:"manifests"`
+	Annotations   map[string]string `json:"annotations,omitempty"`
+	Subject       *v1.Descriptor    `json:"subject,omitempty"`
+}
+
+// mergeIndexJSON merges the OCI image index at srcPath into the one at dstPath,
+// writing the union back to dstPath. Manifests are deduplicated by digest paired
+// with their ref.name annotation so layouts that share blobs but expose different
+// tag subsets don't lose tags when unpacked into the same directory.
+func mergeIndexJSON(srcPath, dstPath string) error {
+	srcIndex, err := readOCIIndex(srcPath)
+	if err != nil {
+		return fmt.Errorf("read source index %q: %w", srcPath, err)
+	}
+
+	dstIndex, err := readOCIIndex(dstPath)
+	if err != nil {
+		return fmt.Errorf("read destination index %q: %w", dstPath, err)
+	}
+
+	if dstIndex.SchemaVersion == 0 {
+		dstIndex.SchemaVersion = srcIndex.SchemaVersion
+	}
+
+	if dstIndex.MediaType == "" {
+		dstIndex.MediaType = srcIndex.MediaType
+	}
+
+	manifestKey := func(d v1.Descriptor) string {
+		return d.Digest.String() + "\x00" + d.Annotations[refNameAnnotation]
+	}
+
+	seen := make(map[string]struct{}, len(dstIndex.Manifests)+len(srcIndex.Manifests))
+	merged := make([]v1.Descriptor, 0, len(dstIndex.Manifests)+len(srcIndex.Manifests))
+
+	for _, list := range [][]v1.Descriptor{dstIndex.Manifests, srcIndex.Manifests} {
+		for _, descriptor := range list {
+			key := manifestKey(descriptor)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+
+			seen[key] = struct{}{}
+
+			merged = append(merged, descriptor)
+		}
+	}
+
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Annotations[refNameAnnotation] < merged[j].Annotations[refNameAnnotation]
+	})
+
+	dstIndex.Manifests = merged
+
+	raw, err := json.MarshalIndent(dstIndex, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal merged index: %w", err)
+	}
+
+	if err = os.WriteFile(dstPath, raw, 0o600); err != nil {
+		return fmt.Errorf("write merged index %q: %w", dstPath, err)
+	}
+
+	return nil
+}
+
+func readOCIIndex(path string) (*ociIndex, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	index := &ociIndex{}
+	if err = json.Unmarshal(raw, index); err != nil {
+		return nil, fmt.Errorf("parse index: %w", err)
+	}
+
+	return index, nil
 }
