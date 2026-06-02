@@ -58,9 +58,8 @@ var (
 	ModulesWhitelist  []string
 	ModulesBlacklist  []string
 
-	PackagesPathSuffix string
-	PackagesWhitelist  []string
-	PackagesBlacklist  []string
+	PackagesWhitelist []string
+	PackagesBlacklist []string
 
 	SourceRegistryRepo     = EnterpriseEditionRepo // Fallback to EE if nothing was given as source.
 	SourceRegistryLogin    string
@@ -218,12 +217,6 @@ Packages are mirrored exactly like modules (same name@version constraint dialect
 		"exclude-package",
 		nil,
 		`Blacklist specific packages from downloading. Format is "package-name[@version]". Use one flag per each package. Overridden by use of --include-package.`,
-	)
-	flagSet.StringVar(
-		&PackagesPathSuffix,
-		"packages-path-suffix",
-		"/packages",
-		"Suffix to append to source repo path to locate packages.",
 	)
 	flagSet.Int64VarP(
 		&ImagesBundleChunkSizeGB,

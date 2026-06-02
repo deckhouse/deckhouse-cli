@@ -156,7 +156,6 @@ func buildPullParams(logger params.Logger) *params.PullParams {
 			SkipTLSVerification:   pullflags.TLSSkipVerify,
 			DeckhouseRegistryRepo: pullflags.SourceRegistryRepo,
 			ModulesPathSuffix:     pullflags.ModulesPathSuffix,
-			PackagesPathSuffix:    pullflags.PackagesPathSuffix,
 			RegistryAuth:          getSourceRegistryAuthProvider(),
 			BundleDir:             pullflags.ImagesBundlePath,
 			WorkingDir: filepath.Join(
