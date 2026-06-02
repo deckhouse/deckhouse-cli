@@ -59,9 +59,11 @@ func BuildFullScanReport(certsDir, kubeconfigDir string) (*Report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing PKI certificates in %q: %w", certsDir, err)
 	}
+
 	kcReport := kubeconfig.ListClientCertificateExpirations(kubeconfig.WithKubeconfigDir(kubeconfigDir))
 
 	report := &Report{}
+
 	var readErrs []error
 
 	for _, e := range pkiReport.Entries {
@@ -123,6 +125,7 @@ func BuildSingleFileReport(path string) (*Report, error) {
 	if kcErr == nil {
 		report := &Report{}
 		appendKubeconfigEntry(report, kcExp.File, kcExp.NotAfter)
+
 		return report, nil
 	}
 
@@ -130,6 +133,7 @@ func BuildSingleFileReport(path string) (*Report, error) {
 	if certErr == nil {
 		report := &Report{}
 		appendPKIEntry(report, certExp.Name, certExp.NotAfter, certExp.IsCA, certExp.Authority)
+
 		return report, nil
 	}
 
@@ -146,8 +150,10 @@ func appendPKIEntry(report *Report, name string, notAfter time.Time, isCA bool, 
 			Name:    pkiDisplayName(name),
 			Expires: notAfter,
 		})
+
 		return
 	}
+
 	report.Certs = append(report.Certs, CertEntry{
 		Name:      pkiDisplayName(name),
 		Expires:   notAfter,

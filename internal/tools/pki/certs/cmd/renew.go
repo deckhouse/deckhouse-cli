@@ -68,9 +68,11 @@ func NewRenewCommand() *cobra.Command {
 			if len(args) == 0 {
 				return cmd.Usage()
 			}
+
 			if len(args) > 1 {
 				return fmt.Errorf("accepts exactly one argument (PATH), received %d", len(args))
 			}
+
 			return certs.RunRenewSingle(cmd.OutOrStdout(), args[0], certsDir, kubeconfigDir, dryRun)
 		},
 	}
@@ -87,6 +89,7 @@ func NewRenewCommand() *cobra.Command {
 					return fmt.Errorf("--san accepts only an IP address, got %q", san)
 				}
 			}
+
 			return certs.RunRenewAll(cmd.OutOrStdout(), certsDir, kubeconfigDir, dryRun, extraIP)
 		},
 	}

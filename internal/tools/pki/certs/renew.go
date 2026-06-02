@@ -37,12 +37,14 @@ func RunRenewAll(w io.Writer, certsDir, kubeconfigDirOverride string, dryRun boo
 	printDryRunBanner(w, dryRun)
 
 	var warnings []string
+
 	usedCAs := map[pki.RootCertName]struct{}{}
 
 	leafOpts := []pki.RenewOption{pki.WithRenewDir(certsDir)}
 	if dryRun {
 		leafOpts = append(leafOpts, pki.WithDryRun())
 	}
+
 	if extraIP != nil {
 		leafOpts = append(leafOpts, pki.WithRenewExtraIP(extraIP))
 	}
@@ -76,9 +78,11 @@ func RunRenewSingle(w io.Writer, path, certsDir, kubeconfigDirOverride string, d
 	if certErr != nil {
 		return fmt.Errorf("cannot determine file type for %q: not a recognizable kubeconfig or PEM certificate: %w", path, certErr)
 	}
+
 	if certExp.IsCA {
 		return fmt.Errorf("CA certificate renewal is not supported: %q", path)
 	}
+
 	return renewSingleLeaf(w, path, pki.LeafCertName(certExp.Name), certsDir, dryRun)
 }
 
@@ -86,6 +90,7 @@ func effectiveKubeconfigDir(certsDir, override string) string {
 	if override != "" {
 		return override
 	}
+
 	return filepath.Dir(certsDir)
 }
 
@@ -167,16 +172,20 @@ func checkCAsOutliveRenewed(w io.Writer, certsDir string, usedCAs map[pki.RootCe
 		// It shouldn't happen, but return error through as a warning.
 		line := fmt.Sprintf("WARNING: cannot check CA expiration: %v", err)
 		fmt.Fprintln(w, line)
+
 		return []string{line}
 	}
 
 	threshold := time.Now().Add(constants.CertificateValidityPeriod)
+
 	var warnings []string
+
 	for _, e := range report.Entries {
 		if e.Err != nil {
 			// A CA read failure here is already surfaced via the renew entry above.
 			continue
 		}
+
 		if e.NotAfter.Before(threshold) {
 			line := fmt.Sprintf("WARNING: CA %q expires %s, sooner than the renewed certificates — rotate the CA: %s",
 				e.Name, e.NotAfter.UTC().Format("Jan 02, 2006 15:04 MST"), e.Path)
@@ -184,6 +193,7 @@ func checkCAsOutliveRenewed(w io.Writer, certsDir string, usedCAs map[pki.RootCe
 			warnings = append(warnings, line)
 		}
 	}
+
 	return warnings
 }
 
@@ -191,36 +201,45 @@ func warningsError(warnings []string) error {
 	if len(warnings) == 0 {
 		return nil
 	}
+
 	return fmt.Errorf("%d certificate(s) not renewed; see output above", len(warnings))
 }
 
 // collectLeafWarnings prints a progress line for every leaf renewal entry
 func collectLeafWarnings(w io.Writer, report pki.PKIRenewReport, usedCAs map[pki.RootCertName]struct{}) []string {
 	var warnings []string
+
 	for _, e := range report.Entries {
 		line := formatLeafEntry(pki.LeafDescription(e.Name), e)
 		fmt.Fprintln(w, line)
+
 		if e.Err != nil {
 			warnings = append(warnings, line)
 			continue
 		}
+
 		usedCAs[e.Authority] = struct{}{}
 	}
+
 	return warnings
 }
 
 // collectKubeconfigWarnings mirrors collectLeafWarnings for kubeconfigs
 func collectKubeconfigWarnings(w io.Writer, report kubeconfig.KubeconfigRenewReport, usedCAs map[pki.RootCertName]struct{}) []string {
 	var warnings []string
+
 	for _, e := range report.Entries {
 		line := formatKubeconfigEntry(kubeconfig.FileDescription(e.File), e)
 		fmt.Fprintln(w, line)
+
 		if e.Err != nil {
 			warnings = append(warnings, line)
 			continue
 		}
+
 		usedCAs[pki.CACertName] = struct{}{}
 	}
+
 	return warnings
 }
 
