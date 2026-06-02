@@ -20,6 +20,12 @@ import (
 	"os"
 
 	"github.com/spf13/pflag"
+
+	"github.com/deckhouse/deckhouse-cli/internal/tools/sigmigrate"
+)
+
+const (
+	defaultKubectlAs = "system:serviceaccount:d8-system:deckhouse"
 )
 
 func addFlags(flags *pflag.FlagSet) {
@@ -31,7 +37,7 @@ func addFlags(flags *pflag.FlagSet) {
 
 	flags.String(
 		"as",
-		"system:serviceaccount:d8-system:deckhouse",
+		defaultKubectlAs,
 		"Specify a Kubernetes service account for the kubectl operations (impersonation).",
 	)
 
@@ -62,5 +68,17 @@ func addFlags(flags *pflag.FlagSet) {
 		"object",
 		"",
 		"Process objects by identifier in format <namespace>/<name>/<resource_name>. Use 'clusterwide' namespace for cluster-scoped resources. Resource name must match kubectl api-resources output.",
+	)
+
+	flags.Int(
+		"threads",
+		sigmigrate.DefaultWorkerCount,
+		"Number of worker threads for resource discovery and migration. Values <=0 use default.",
+	)
+
+	flags.Bool(
+		"measure-stages",
+		false,
+		"Print execution time for major migration stages.",
 	)
 }

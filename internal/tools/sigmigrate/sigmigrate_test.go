@@ -18,9 +18,12 @@ package sigmigrate
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -165,7 +168,7 @@ func TestUpsertCollectedObject_PrefersPreferredVersion(t *testing.T) {
 
 func TestLoadFailedObjects_DoesNotOverwriteSameNamespaceNameKindAcrossGroups(t *testing.T) {
 	tmpDir := t.TempDir()
-	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.txt")
+	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.log")
 	setCurrentRunState(&sigMigrateRunState{LegacyFailedRetryFile: legacyRetryFile})
 	defer setCurrentRunState(nil)
 
@@ -357,7 +360,7 @@ func TestRemoveAnnotation(t *testing.T) {
 
 func TestLoadFailedObjects(t *testing.T) {
 	tmpDir := t.TempDir()
-	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.txt")
+	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.log")
 	runState := &sigMigrateRunState{
 		LegacyFailedRetryFile: legacyRetryFile,
 	}
@@ -394,7 +397,7 @@ func TestLoadFailedObjects(t *testing.T) {
 
 func TestLoadFailedObjects_ExtendedRetryFormatIncludesGVR(t *testing.T) {
 	tmpDir := t.TempDir()
-	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.txt")
+	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.log")
 	setCurrentRunState(&sigMigrateRunState{LegacyFailedRetryFile: legacyRetryFile})
 	defer setCurrentRunState(nil)
 
@@ -418,7 +421,7 @@ func TestLoadFailedObjects_ExtendedRetryFormatIncludesGVR(t *testing.T) {
 
 func TestLoadFailedObjects_ExtendedRetryFormat_NamespacedObjects(t *testing.T) {
 	tmpDir := t.TempDir()
-	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.txt")
+	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.log")
 	setCurrentRunState(&sigMigrateRunState{LegacyFailedRetryFile: legacyRetryFile})
 	defer setCurrentRunState(nil)
 
@@ -453,8 +456,8 @@ func TestLoadFailedObjects_ExtendedRetryFormat_NamespacedObjects(t *testing.T) {
 
 func TestRecordFailure(t *testing.T) {
 	tmpDir := t.TempDir()
-	failedFile := filepath.Join(tmpDir, "failed_annotations.txt")
-	errorFile := filepath.Join(tmpDir, "failed_errors.txt")
+	failedFile := filepath.Join(tmpDir, "failed_annotations.log")
+	errorFile := filepath.Join(tmpDir, "failed_errors.log")
 
 	obj := ObjectRef{
 		Namespace: "default",
@@ -528,7 +531,7 @@ func TestAnnotateObjects_UnsupportedType(t *testing.T) {
 	}
 
 	// Should skip unsupported types
-	annotateObjects(dynamicClient, dynamicClient, objects, 1234567890, unsupportedTypes, "DEBUG")
+	annotateObjects(dynamicClient, dynamicClient, objects, 1234567890, unsupportedTypes, "DEBUG", 4)
 
 	// Verify object was not modified
 	resourceClient := dynamicClient.Resource(gvr).Namespace("default")
@@ -544,8 +547,8 @@ func TestAnnotateObjects_UnsupportedType(t *testing.T) {
 
 func TestRecordFailure_FileWrite(t *testing.T) {
 	tmpDir := t.TempDir()
-	failedFile := filepath.Join(tmpDir, "failed_annotations.txt")
-	errorFile := filepath.Join(tmpDir, "failed_errors.txt")
+	failedFile := filepath.Join(tmpDir, "failed_annotations.log")
+	errorFile := filepath.Join(tmpDir, "failed_errors.log")
 
 	obj := ObjectRef{
 		Namespace: "test-ns",
@@ -561,22 +564,22 @@ func TestRecordFailure_FileWrite(t *testing.T) {
 
 	// Verify files were created
 	_, err := os.Stat(failedFile)
-	require.NoError(t, err, "failed_annotations.txt should be created")
+	require.NoError(t, err, "failed_annotations.log should be created")
 
 	_, err = os.Stat(errorFile)
-	require.NoError(t, err, "failed_errors.txt should be created")
+	require.NoError(t, err, "failed_errors.log should be created")
 
-	// Verify content of failed_annotations.txt
+	// Verify content of failed_annotations.log
 	failedData, err := os.ReadFile(failedFile)
 	require.NoError(t, err)
 	expectedFailedLine := "test-ns|test-resource|pods\n"
-	require.Equal(t, expectedFailedLine, string(failedData), "failed_annotations.txt should contain correct data")
+	require.Equal(t, expectedFailedLine, string(failedData), "failed_annotations.log should contain correct data")
 
-	// Verify content of failed_errors.txt
+	// Verify content of failed_errors.log
 	errorData, err := os.ReadFile(errorFile)
 	require.NoError(t, err)
 	expectedErrorLine := "test-ns|test-resource|pods|test error message\n"
-	require.Equal(t, expectedErrorLine, string(errorData), "failed_errors.txt should contain correct data")
+	require.Equal(t, expectedErrorLine, string(errorData), "failed_errors.log should contain correct data")
 
 	// Test appending multiple failures
 	obj2 := ObjectRef{
@@ -620,9 +623,9 @@ func TestAnnotateObjects_ErrorRecording(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.txt")
-	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.txt")
-	runSkippedFile := filepath.Join(tmpDir, "skipped_run.txt")
+	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.log")
+	runSkippedFile := filepath.Join(tmpDir, "skipped_run.log")
 	setCurrentRunState(&sigMigrateRunState{
 		FailedAttemptsFile: runFailedFile,
 		ErrorLogFile:       runErrorFile,
@@ -631,7 +634,7 @@ func TestAnnotateObjects_ErrorRecording(t *testing.T) {
 	defer setCurrentRunState(nil)
 
 	unsupportedTypes := make(map[string]bool)
-	annotateObjects(dynamicClient, dynamicClient, objects, 1234567890, unsupportedTypes, "DEBUG")
+	annotateObjects(dynamicClient, dynamicClient, objects, 1234567890, unsupportedTypes, "DEBUG", 4)
 
 	// NotFound errors are classified as skipped and should be written to skipped file.
 	skippedData, err := os.ReadFile(runSkippedFile)
@@ -647,8 +650,8 @@ func TestAnnotateObjects_ErrorRecording(t *testing.T) {
 
 func TestSyncLegacyRetryFile(t *testing.T) {
 	tmpDir := t.TempDir()
-	runFile := filepath.Join(tmpDir, "failed_annotations_run.txt")
-	legacyFile := filepath.Join(tmpDir, "failed_annotations.txt")
+	runFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	legacyFile := filepath.Join(tmpDir, "failed_annotations.log")
 
 	err := os.WriteFile(runFile, []byte("ns|obj|pods\n"), 0644)
 	require.NoError(t, err)
@@ -660,6 +663,30 @@ func TestSyncLegacyRetryFile(t *testing.T) {
 	defer setCurrentRunState(nil)
 
 	err = syncLegacyRetryFile()
+	require.NoError(t, err)
+
+	legacyData, err := os.ReadFile(legacyFile)
+	require.NoError(t, err)
+	require.Equal(t, "ns|obj|pods\n", string(legacyData))
+}
+
+func TestSyncLegacyRetryFileForState_WorksAfterCurrentRunStateReset(t *testing.T) {
+	tmpDir := t.TempDir()
+	runFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	legacyFile := filepath.Join(tmpDir, "failed_annotations.log")
+
+	err := os.WriteFile(runFile, []byte("ns|obj|pods\n"), 0644)
+	require.NoError(t, err)
+
+	runState := &sigMigrateRunState{
+		FailedAttemptsFile:    runFile,
+		LegacyFailedRetryFile: legacyFile,
+	}
+
+	// Simulate cleanup where global run state is already reset.
+	setCurrentRunState(nil)
+
+	err = syncLegacyRetryFileForState(runState)
 	require.NoError(t, err)
 
 	legacyData, err := os.ReadFile(legacyFile)
@@ -694,9 +721,9 @@ func TestNewSigMigrateRunState_GeneratesSaltedPaths(t *testing.T) {
 	state := newSigMigrateRunState(ts)
 
 	require.Equal(t, "20260414T151625Z", state.RunID)
-	require.Equal(t, "/tmp/failed_annotations_20260414T151625Z.txt", state.FailedAttemptsFile)
-	require.Equal(t, "/tmp/failed_errors_20260414T151625Z.txt", state.ErrorLogFile)
-	require.Equal(t, "/tmp/skipped_objects_20260414T151625Z.txt", state.SkippedObjectsFile)
+	require.Equal(t, "/tmp/failed_annotations_20260414T151625Z.log", state.FailedAttemptsFile)
+	require.Equal(t, "/tmp/failed_errors_20260414T151625Z.log", state.ErrorLogFile)
+	require.Equal(t, "/tmp/skipped_objects_20260414T151625Z.log", state.SkippedObjectsFile)
 	require.Equal(t, "/tmp/sigmigrate_trace_20260414T151625Z.log", state.TraceLogFile)
 	require.Equal(t, legacyFailedAttemptsFile, state.LegacyFailedRetryFile)
 }
@@ -735,6 +762,339 @@ func TestIsResourceEndpointNotFound(t *testing.T) {
 
 	require.True(t, isResourceEndpointNotFound(err))
 	require.False(t, isResourceEndpointNotFound(apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "test-cm")))
+}
+
+func TestNormalizeWorkerCount(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    int
+		expected int
+	}{
+		{name: "negative defaults", input: -10, expected: defaultWorkerCount},
+		{name: "zero defaults", input: 0, expected: defaultWorkerCount},
+		{name: "valid value", input: 32, expected: 32},
+		{name: "value above max is capped", input: maxWorkerCount + 100, expected: maxWorkerCount},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.expected, normalizeWorkerCount(tt.input))
+		})
+	}
+}
+
+func TestNormalizeLogLevel(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "empty defaults to debug", input: "", expected: "DEBUG"},
+		{name: "whitespace defaults to debug", input: "   ", expected: "DEBUG"},
+		{name: "lowercase converted to uppercase", input: "trace", expected: "TRACE"},
+		{name: "mixed case converted to uppercase", input: "dEbUg", expected: "DEBUG"},
+		{name: "trim spaces", input: " info ", expected: "INFO"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.expected, normalizeLogLevel(tt.input))
+		})
+	}
+}
+
+func TestShouldRetryRequestError(t *testing.T) {
+	require.True(t, shouldRetryRequestError(apierrors.NewTooManyRequests("too many", 1)))
+	require.True(t, shouldRetryRequestError(apierrors.NewTimeoutError("timeout", 1)))
+	require.False(t, shouldRetryRequestError(apierrors.NewBadRequest("bad request")))
+}
+
+func TestWithRetryResult_RetriesAndSucceeds(t *testing.T) {
+	attempts := 0
+
+	result, err := withRetryResult("test-retry", "DEBUG", func(_ context.Context) (string, error) {
+		attempts++
+		if attempts < 3 {
+			return "", apierrors.NewTooManyRequests("rate limited", 1)
+		}
+		return "ok", nil
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "ok", result)
+	require.Equal(t, 3, attempts)
+}
+
+func TestWithRetry_NoRetryForNonRetryableError(t *testing.T) {
+	attempts := 0
+	err := withRetry("test-no-retry", "DEBUG", func(_ context.Context) error {
+		attempts++
+		return apierrors.NewBadRequest("invalid")
+	})
+
+	require.Error(t, err)
+	require.Equal(t, 1, attempts)
+}
+
+func TestRecordFailure_ConcurrentWrites(t *testing.T) {
+	tmpDir := t.TempDir()
+	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.log")
+	runSkippedFile := filepath.Join(tmpDir, "skipped_run.log")
+	setCurrentRunState(&sigMigrateRunState{
+		FailedAttemptsFile: runFailedFile,
+		ErrorLogFile:       runErrorFile,
+		SkippedObjectsFile: runSkippedFile,
+	})
+	defer setCurrentRunState(nil)
+
+	const total = 100
+	var wg sync.WaitGroup
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			obj := ObjectRef{
+				Namespace: "default",
+				Name:      fmt.Sprintf("obj-%d", idx),
+				Kind:      "configmaps",
+				GVR: schema.GroupVersionResource{
+					Group:    "",
+					Version:  "v1",
+					Resource: "configmaps",
+				},
+			}
+			recordFailure(obj, "boom")
+		}(i)
+	}
+	wg.Wait()
+
+	failedData, err := os.ReadFile(runFailedFile)
+	require.NoError(t, err)
+	errorData, err := os.ReadFile(runErrorFile)
+	require.NoError(t, err)
+
+	failedLines := strings.Split(strings.TrimSpace(string(failedData)), "\n")
+	errorLines := strings.Split(strings.TrimSpace(string(errorData)), "\n")
+	require.Len(t, failedLines, total)
+	require.Len(t, errorLines, total)
+}
+
+func TestAnnotateObjects_ManyObjectsWithWorkers(t *testing.T) {
+	scheme := runtime.NewScheme()
+	gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+
+	const total = 120
+	objs := make([]runtime.Object, 0, total)
+	input := make(map[string]ObjectRef, total)
+	for i := 0; i < total; i++ {
+		name := "cm-" + strconv.Itoa(i)
+		objs = append(objs, &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": "default",
+			},
+		}})
+		input["default|"+name+"||configmaps"] = ObjectRef{
+			Namespace: "default",
+			Name:      name,
+			Kind:      "configmaps",
+			GVR:       gvr,
+		}
+	}
+
+	dynamicClient := fake.NewSimpleDynamicClient(scheme, objs...)
+
+	tmpDir := t.TempDir()
+	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.log")
+	runSkippedFile := filepath.Join(tmpDir, "skipped_run.log")
+	setCurrentRunState(&sigMigrateRunState{
+		FailedAttemptsFile: runFailedFile,
+		ErrorLogFile:       runErrorFile,
+		SkippedObjectsFile: runSkippedFile,
+	})
+	defer setCurrentRunState(nil)
+
+	annotateObjects(dynamicClient, dynamicClient, input, 1234567890, map[string]bool{}, "DEBUG", 16)
+
+	_, err := os.Stat(runFailedFile)
+	require.True(t, os.IsNotExist(err), "failed file should not be created on successful bulk annotate")
+	_, err = os.Stat(runErrorFile)
+	require.True(t, os.IsNotExist(err), "error file should not be created on successful bulk annotate")
+}
+
+func TestAnnotateObjects_SimpleRun(t *testing.T) {
+	scheme := runtime.NewScheme()
+	gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+
+	obj1 := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]interface{}{
+			"name":      "cm-1",
+			"namespace": "default",
+		},
+	}}
+	obj2 := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]interface{}{
+			"name":      "cm-2",
+			"namespace": "default",
+		},
+	}}
+
+	dynamicClient := fake.NewSimpleDynamicClient(scheme, obj1, obj2)
+
+	tmpDir := t.TempDir()
+	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.log")
+	runSkippedFile := filepath.Join(tmpDir, "skipped_run.log")
+	setCurrentRunState(&sigMigrateRunState{
+		FailedAttemptsFile: runFailedFile,
+		ErrorLogFile:       runErrorFile,
+		SkippedObjectsFile: runSkippedFile,
+	})
+	defer setCurrentRunState(nil)
+
+	objects := map[string]ObjectRef{
+		"default|cm-1||configmaps": {
+			Namespace: "default",
+			Name:      "cm-1",
+			Kind:      "configmaps",
+			GVR:       gvr,
+		},
+		"default|cm-2||configmaps": {
+			Namespace: "default",
+			Name:      "cm-2",
+			Kind:      "configmaps",
+			GVR:       gvr,
+		},
+	}
+
+	timestamp := int64(1234567890)
+	annotateObjects(dynamicClient, dynamicClient, objects, timestamp, map[string]bool{}, "DEBUG", 4)
+
+	client := dynamicClient.Resource(gvr).Namespace("default")
+	updated1, err := client.Get(context.TODO(), "cm-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, strconv.FormatInt(timestamp, 10), updated1.GetAnnotations()[annotationKey])
+
+	updated2, err := client.Get(context.TODO(), "cm-2", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, strconv.FormatInt(timestamp, 10), updated2.GetAnnotations()[annotationKey])
+
+	_, err = os.Stat(runFailedFile)
+	require.True(t, os.IsNotExist(err), "failed file should not exist on successful run")
+	_, err = os.Stat(runErrorFile)
+	require.True(t, os.IsNotExist(err), "error file should not exist on successful run")
+}
+
+func TestRetryFlow_LoadFailedAndAnnotate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+
+	obj := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]interface{}{
+			"name":      "retry-cm",
+			"namespace": "default",
+		},
+	}}
+	dynamicClient := fake.NewSimpleDynamicClient(scheme, obj)
+
+	tmpDir := t.TempDir()
+	legacyRetryFile := filepath.Join(tmpDir, "failed_annotations_legacy.log")
+	runFailedFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	runErrorFile := filepath.Join(tmpDir, "failed_errors_run.log")
+	runSkippedFile := filepath.Join(tmpDir, "skipped_run.log")
+
+	retryData := strings.Join([]string{
+		"default|retry-cm|configmaps||v1",
+		"default|missing-cm|configmaps||v1",
+	}, "\n") + "\n"
+	err := os.WriteFile(legacyRetryFile, []byte(retryData), 0644)
+	require.NoError(t, err)
+
+	setCurrentRunState(&sigMigrateRunState{
+		LegacyFailedRetryFile: legacyRetryFile,
+		FailedAttemptsFile:    runFailedFile,
+		ErrorLogFile:          runErrorFile,
+		SkippedObjectsFile:    runSkippedFile,
+	})
+	defer setCurrentRunState(nil)
+
+	objects, err := loadFailedObjects()
+	require.NoError(t, err)
+	require.Len(t, objects, 2)
+
+	timestamp := int64(1234567890)
+	annotateObjects(dynamicClient, dynamicClient, objects, timestamp, map[string]bool{}, "DEBUG", 8)
+
+	updated, err := dynamicClient.Resource(gvr).Namespace("default").Get(context.TODO(), "retry-cm", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, strconv.FormatInt(timestamp, 10), updated.GetAnnotations()[annotationKey])
+
+	skippedData, err := os.ReadFile(runSkippedFile)
+	require.NoError(t, err)
+	require.Contains(t, string(skippedData), "default|missing-cm|configmaps")
+	require.Contains(t, string(skippedData), "NotFound")
+}
+
+func TestSingleObjectMigration_ByIdentifier(t *testing.T) {
+	scheme := runtime.NewScheme()
+	gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+
+	objs := []runtime.Object{
+		&unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]interface{}{"name": "target", "namespace": "default"},
+		}},
+		&unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]interface{}{"name": "other", "namespace": "default"},
+		}},
+	}
+	dynamicClient := fake.NewSimpleDynamicClient(scheme, objs...)
+
+	allObjects := map[string]ObjectRef{
+		"default|target||configmaps": {
+			Namespace: "default",
+			Name:      "target",
+			Kind:      "configmaps",
+			GVR:       gvr,
+		},
+		"default|other||configmaps": {
+			Namespace: "default",
+			Name:      "other",
+			Kind:      "configmaps",
+			GVR:       gvr,
+		},
+	}
+
+	filtered := filterObjectsByIdentifier(allObjects, "default/target/configmaps")
+	require.Len(t, filtered, 1)
+
+	timestamp := int64(1234567890)
+	annotateObjects(dynamicClient, dynamicClient, filtered, timestamp, map[string]bool{}, "DEBUG", 2)
+
+	client := dynamicClient.Resource(gvr).Namespace("default")
+	target, err := client.Get(context.TODO(), "target", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, strconv.FormatInt(timestamp, 10), target.GetAnnotations()[annotationKey])
+
+	other, err := client.Get(context.TODO(), "other", metav1.GetOptions{})
+	require.NoError(t, err)
+	if other.GetAnnotations() != nil {
+		_, exists := other.GetAnnotations()[annotationKey]
+		require.False(t, exists, "non-target object should remain unchanged")
+	}
 }
 
 func TestFormatServerErrorDetails_StatusError(t *testing.T) {
