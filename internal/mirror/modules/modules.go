@@ -509,8 +509,8 @@ func (svc *Service) listTagsIfConstrained(ctx context.Context, moduleName string
 // this function, and a future constraint type would need its own
 // proxy-aware code path.
 func (svc *Service) probeModuleTags(ctx context.Context, moduleName string, constraint VersionConstraint) ([]string, error) {
-	semverConstraint, ok := constraint.(*SemanticVersionConstraint)
-	if !ok {
+	semverConstraints := SemverConstraintsOf(constraint)
+	if len(semverConstraints) == 0 {
 		// Be loud — silently falling back to ListTags here would defeat
 		// the whole purpose of --proxy-registry on a registry that
 		// refuses catalog access.
@@ -532,14 +532,17 @@ func (svc *Service) probeModuleTags(ctx context.Context, moduleName string, cons
 		return false, fmt.Errorf("check module %s tag %q: %w", moduleName, tag, err)
 	}
 
-	versions, err := ProbeAvailableVersions(ctx, semverConstraint, check)
-	if err != nil {
-		return nil, fmt.Errorf("probe tags for module %s: %w", moduleName, err)
-	}
+	tags := make([]string, 0)
 
-	tags := make([]string, 0, len(versions))
-	for _, v := range versions {
-		tags = append(tags, "v"+v.String())
+	for _, semverConstraint := range semverConstraints {
+		versions, err := ProbeAvailableVersions(ctx, semverConstraint, check)
+		if err != nil {
+			return nil, fmt.Errorf("probe tags for module %s: %w", moduleName, err)
+		}
+
+		for _, v := range versions {
+			tags = append(tags, "v"+v.String())
+		}
 	}
 
 	return tags, nil
@@ -1028,32 +1031,40 @@ func (svc *Service) applyChannelAliases(moduleName string) error {
 		return nil
 	}
 
-	exact, ok := constraint.(*ExactTagConstraint)
-	if !ok {
-		return nil
-	}
-
 	moduleLayout := svc.layout.Module(moduleName)
 	if moduleLayout == nil || moduleLayout.ModulesReleaseChannels == nil {
 		return nil
 	}
 
-	desc, err := layouts.FindImageDescriptorByTag(moduleLayout.ModulesReleaseChannels.Path(), exact.Tag())
-	if err != nil {
-		if errors.Is(err, layouts.ErrImageNotFound) {
-			return nil
-		}
+	exacts := ExactConstraintsOf(constraint)
 
-		return err
-	}
+	// A single pinned tag without an explicit +channel suffix is published to
+	// every release channel (the historical --deckhouse-tag-like behaviour).
+	// When several tags are pinned at once, propagating each to all channels
+	// would just clobber one another, so only tags that name their own channel
+	// (=vX.Y.Z+stable) are aliased; the rest are simply pulled as-is.
+	propagateToAllChannels := len(exacts) == 1 && !exacts[0].HasChannelAlias()
 
-	if exact.HasChannelAlias() {
-		if err := layouts.TagImage(moduleLayout.ModulesReleaseChannels.Path(), desc.Digest, exact.Channel()); err != nil {
+	for _, exact := range exacts {
+		desc, err := layouts.FindImageDescriptorByTag(moduleLayout.ModulesReleaseChannels.Path(), exact.Tag())
+		if err != nil {
+			if errors.Is(err, layouts.ErrImageNotFound) {
+				continue
+			}
+
 			return err
 		}
-	} else {
-		// Tag all channels with this version
-		for _, channel := range append(internal.GetAllDefaultReleaseChannels(), internal.LTSChannel) {
+
+		var channels []string
+
+		switch {
+		case exact.HasChannelAlias():
+			channels = []string{exact.Channel()}
+		case propagateToAllChannels:
+			channels = append(internal.GetAllDefaultReleaseChannels(), internal.LTSChannel)
+		}
+
+		for _, channel := range channels {
 			if err := layouts.TagImage(moduleLayout.ModulesReleaseChannels.Path(), desc.Digest, channel); err != nil {
 				return err
 			}
