@@ -27,4 +27,6 @@ const (
 	Insecure              = "insecure"
 	AllowNondistributable = "allow-nondistributable-artifacts"
 	Platform              = "platform"
+	Username              = "username"
+	Password              = "password"
 )

@@ -39,6 +39,12 @@ type Options struct {
 	Platform *v1.Platform
 	Keychain authn.Keychain
 	Context  context.Context
+
+	// Transport mirrors the http.RoundTripper installed via WithTransport.
+	// remote.* receives it through o.Remote; we also keep a direct handle so
+	// auth-only flows (e.g. Login) that talk to the registry transport
+	// package can honour --insecure without re-deriving it from o.Remote.
+	Transport http.RoundTripper
 }
 
 // New returns Options seeded with the default Docker keychain and a
@@ -95,6 +101,29 @@ func (o *Options) WithNondistributable() *Options {
 // WithTransport installs a custom HTTP transport (typically a clone of
 // remote.DefaultTransport with TLS skip-verify toggled).
 func (o *Options) WithTransport(t http.RoundTripper) *Options {
+	o.Transport = t
 	o.Remote = append(o.Remote, remote.WithTransport(t))
 	return o
+}
+
+// staticKeychain authenticates every registry with a single set of
+// credentials. Used when the user passes --username/--password so all cr
+// commands can talk to the registry without a prior `cr login`.
+type staticKeychain struct {
+	auth authn.Authenticator
+}
+
+func (k staticKeychain) Resolve(authn.Resource) (authn.Authenticator, error) {
+	return k.auth, nil
+}
+
+// NewStaticKeychain returns a keychain that always resolves to the given
+// username/password, regardless of the target registry.
+func NewStaticKeychain(username, password string) authn.Keychain {
+	return staticKeychain{
+		auth: authn.FromConfig(authn.AuthConfig{
+			Username: username,
+			Password: password,
+		}),
+	}
 }

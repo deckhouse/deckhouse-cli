@@ -34,7 +34,8 @@ const (
 transfer (pull/push), and browse contents.
 
 Authentication uses the Docker config (~/.docker/config.json) - run
-"d8 login" first if the registry requires credentials.
+"d8 cr login" (or "docker login") first if the registry requires
+credentials, or pass --username/--password to any command directly.
 `
 )
 
@@ -52,6 +53,7 @@ func NewCommand() *cobra.Command {
 
 	setupRootFlags(cr, opts)
 	cr.AddCommand(
+		basic.NewLoginCmd(opts),
 		basic.NewPullCmd(opts),
 		basic.NewPushCmd(opts),
 		basic.NewExportCmd(opts),

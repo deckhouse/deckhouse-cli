@@ -43,6 +43,8 @@ func setupRootFlags(cmd *cobra.Command, opts *registry.Options) {
 		insecure bool
 		ndLayers bool
 		platform string
+		username string
+		password string
 	)
 
 	flags := cmd.PersistentFlags()
@@ -50,6 +52,8 @@ func setupRootFlags(cmd *cobra.Command, opts *registry.Options) {
 	flags.BoolVar(&insecure, rootflagnames.Insecure, false, "Allow plain HTTP and skip TLS verification (localhost and RFC1918 hosts already auto-allow HTTP)")
 	flags.BoolVar(&ndLayers, rootflagnames.AllowNondistributable, false, "Include non-distributable (foreign) layers when pushing")
 	flags.StringVar(&platform, rootflagnames.Platform, "", "Resolve images to platform os/arch[/variant][:osversion] (image-level commands only)")
+	flags.StringVarP(&username, rootflagnames.Username, "u", "", "Registry username (overrides the Docker config; use with --password)")
+	flags.StringVarP(&password, rootflagnames.Password, "p", "", "Registry password or token (overrides the Docker config; use with --username)")
 	// No completion for --platform on purpose: the set of platforms a given
 	// image actually serves depends on its manifest list, which we cannot
 	// know at flag-completion time (the IMAGE arg may not even be typed
@@ -79,6 +83,13 @@ func setupRootFlags(cmd *cobra.Command, opts *registry.Options) {
 			}
 
 			opts.WithPlatform(p)
+		}
+
+		// Inline credentials win over whatever the Docker keychain would
+		// resolve, so a one-off `--username/--password` works without a
+		// prior `cr login`. `cr login` itself reads the same flags directly.
+		if username != "" {
+			opts.WithKeychain(registry.NewStaticKeychain(username, password))
 		}
 
 		return nil
