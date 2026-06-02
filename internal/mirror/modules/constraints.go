@@ -257,3 +257,101 @@ func (e *ExactTagConstraint) IsExact() bool {
 func (e *ExactTagConstraint) HasChannelAlias() bool {
 	return e.channel != ""
 }
+
+// MultiConstraint is the OR-combination of several constraints declared for
+// the same name. It is produced when a user repeats a name on the command
+// line, e.g. `--include-package test@=v0.0.2 --include-package test@=v0.0.3`,
+// so that all of the named versions are pulled instead of only the last one.
+//
+// A value Match-es when ANY sub-constraint matches. It is considered exact
+// only when EVERY sub-constraint is exact (so a set of pinned tags keeps the
+// "no release-channel discovery, no tag listing" fast paths), and it advertises
+// a channel alias when ANY sub-constraint does.
+type MultiConstraint struct {
+	constraints []VersionConstraint
+}
+
+// Constraints returns the sub-constraints in declaration order.
+func (m *MultiConstraint) Constraints() []VersionConstraint {
+	return m.constraints
+}
+
+func (m *MultiConstraint) Match(version interface{}) bool {
+	for _, c := range m.constraints {
+		if c.Match(version) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (m *MultiConstraint) IsExact() bool {
+	for _, c := range m.constraints {
+		if !c.IsExact() {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (m *MultiConstraint) HasChannelAlias() bool {
+	for _, c := range m.constraints {
+		if c.HasChannelAlias() {
+			return true
+		}
+	}
+
+	return false
+}
+
+// mergeConstraints OR-combines an already-registered constraint with an
+// additional one declared for the same name, flattening nested
+// MultiConstraints so repeated declarations stay a single flat list.
+func mergeConstraints(existing, additional VersionConstraint) VersionConstraint {
+	if multi, ok := existing.(*MultiConstraint); ok {
+		multi.constraints = append(multi.constraints, additional)
+		return multi
+	}
+
+	return &MultiConstraint{constraints: []VersionConstraint{existing, additional}}
+}
+
+// ExactConstraintsOf flattens a constraint into the exact-tag constraints it
+// contains. A plain ExactTagConstraint yields itself; a MultiConstraint yields
+// every exact sub-constraint; anything else yields nothing.
+func ExactConstraintsOf(c VersionConstraint) []*ExactTagConstraint {
+	switch t := c.(type) {
+	case *ExactTagConstraint:
+		return []*ExactTagConstraint{t}
+	case *MultiConstraint:
+		var out []*ExactTagConstraint
+		for _, sub := range t.constraints {
+			out = append(out, ExactConstraintsOf(sub)...)
+		}
+
+		return out
+	default:
+		return nil
+	}
+}
+
+// SemverConstraintsOf flattens a constraint into the semantic-version
+// constraints it contains, used by the proxy-registry probe which can only
+// walk semver ranges.
+func SemverConstraintsOf(c VersionConstraint) []*SemanticVersionConstraint {
+	switch t := c.(type) {
+	case *SemanticVersionConstraint:
+		return []*SemanticVersionConstraint{t}
+	case *MultiConstraint:
+		var out []*SemanticVersionConstraint
+		for _, sub := range t.constraints {
+			out = append(out, SemverConstraintsOf(sub)...)
+		}
+
+		return out
+	default:
+		return nil
+	}
+}

@@ -269,6 +269,15 @@ func (svc *Service) pullAllVersionImages(ctx context.Context, packageName string
 		imageSet[svc.versionRef(packageName, version)] = nil
 	}
 
+	// Every tag served under packages/<name>/version, so that all version
+	// images are cloned regardless of the --include-package filter and even
+	// when the package publishes no release channels (e.g. dev packages that
+	// only have a packages/<name>/version:vX.Y.Z tag). Channel-only discovery
+	// above would otherwise miss those and skip the package entirely.
+	for _, tag := range svc.listAllVersionTags(ctx, packageName) {
+		imageSet[svc.versionRef(packageName, tag)] = nil
+	}
+
 	if len(imageSet) == 0 {
 		return nil
 	}
@@ -282,6 +291,25 @@ func (svc *Service) pullAllVersionImages(ctx context.Context, packageName string
 	}
 
 	return svc.pullerService.PullImages(ctx, config)
+}
+
+// listAllVersionTags enumerates every tag published under
+// packages/<name>/version (both release channels and vX.Y.Z version tags).
+//
+// The package-versions archive must clone all version images independently of
+// the --include-package filter, so this intentionally does not consult the
+// filter constraint. A registry that refuses to enumerate the version repo
+// (missing repo or a proxy registry without catalog support) is not fatal: the
+// channel-based discovery in pullAllVersionImages still applies and we just
+// skip the extra tags here.
+func (svc *Service) listAllVersionTags(ctx context.Context, packageName string) []string {
+	tags, err := svc.packagesService.Package(packageName).VersionChannels().ListTags(ctx)
+	if err != nil {
+		svc.logger.Debug(fmt.Sprintf("Failed to list version tags for package %s: %v", packageName, err))
+		return nil
+	}
+
+	return tags
 }
 
 // validatePackagesAccess validates access to the packages registry.
@@ -580,8 +608,8 @@ func (svc *Service) listTagsIfConstrained(ctx context.Context, packageName strin
 // probePackageTags walks tags for a single package via HEAD requests instead
 // of asking the registry to enumerate them.
 func (svc *Service) probePackageTags(ctx context.Context, packageName string, constraint modules.VersionConstraint) ([]string, error) {
-	semverConstraint, ok := constraint.(*modules.SemanticVersionConstraint)
-	if !ok {
+	semverConstraints := modules.SemverConstraintsOf(constraint)
+	if len(semverConstraints) == 0 {
 		return nil, fmt.Errorf("package %s: --proxy-registry only supports semver-style constraints, got %T", packageName, constraint)
 	}
 
@@ -600,14 +628,17 @@ func (svc *Service) probePackageTags(ctx context.Context, packageName string, co
 		return false, fmt.Errorf("check package %s tag %q: %w", packageName, tag, err)
 	}
 
-	versions, err := modules.ProbeAvailableVersions(ctx, semverConstraint, check)
-	if err != nil {
-		return nil, fmt.Errorf("probe tags for package %s: %w", packageName, err)
-	}
+	tags := make([]string, 0)
 
-	tags := make([]string, 0, len(versions))
-	for _, v := range versions {
-		tags = append(tags, "v"+v.String())
+	for _, semverConstraint := range semverConstraints {
+		versions, err := modules.ProbeAvailableVersions(ctx, semverConstraint, check)
+		if err != nil {
+			return nil, fmt.Errorf("probe tags for package %s: %w", packageName, err)
+		}
+
+		for _, v := range versions {
+			tags = append(tags, "v"+v.String())
+		}
 	}
 
 	return tags, nil
@@ -1070,31 +1101,39 @@ func (svc *Service) applyChannelAliases(packageName string) error {
 		return nil
 	}
 
-	exact, ok := constraint.(*modules.ExactTagConstraint)
-	if !ok {
-		return nil
-	}
-
 	packageLayout := svc.layout.Package(packageName)
 	if packageLayout == nil || packageLayout.PackageVersionChannels == nil {
 		return nil
 	}
 
-	desc, err := layouts.FindImageDescriptorByTag(packageLayout.PackageVersionChannels.Path(), exact.Tag())
-	if err != nil {
-		if errors.Is(err, layouts.ErrImageNotFound) {
-			return nil
-		}
+	exacts := modules.ExactConstraintsOf(constraint)
 
-		return err
-	}
+	// A single pinned tag without an explicit +channel suffix is published to
+	// every release channel. When several tags are pinned at once, propagating
+	// each to all channels would clobber one another, so only tags that name
+	// their own channel (=vX.Y.Z+stable) are aliased; the rest are pulled as-is.
+	propagateToAllChannels := len(exacts) == 1 && !exacts[0].HasChannelAlias()
 
-	if exact.HasChannelAlias() {
-		if err := layouts.TagImage(packageLayout.PackageVersionChannels.Path(), desc.Digest, exact.Channel()); err != nil {
+	for _, exact := range exacts {
+		desc, err := layouts.FindImageDescriptorByTag(packageLayout.PackageVersionChannels.Path(), exact.Tag())
+		if err != nil {
+			if errors.Is(err, layouts.ErrImageNotFound) {
+				continue
+			}
+
 			return err
 		}
-	} else {
-		for _, channel := range append(internal.GetAllDefaultReleaseChannels(), internal.LTSChannel) {
+
+		var channels []string
+
+		switch {
+		case exact.HasChannelAlias():
+			channels = []string{exact.Channel()}
+		case propagateToAllChannels:
+			channels = append(internal.GetAllDefaultReleaseChannels(), internal.LTSChannel)
+		}
+
+		for _, channel := range channels {
 			if err := layouts.TagImage(packageLayout.PackageVersionChannels.Path(), desc.Digest, channel); err != nil {
 				return err
 			}

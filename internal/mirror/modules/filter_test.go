@@ -61,9 +61,9 @@ func TestNewFilter(t *testing.T) {
 			wantErr:     true,
 		},
 		{
-			name:        "duplicate module",
+			name:        "duplicate module is merged, not rejected",
 			expressions: []string{"module@1.2.3", "module@2.3.4"},
-			wantErr:     true,
+			wantErr:     false,
 		},
 	}
 
@@ -554,6 +554,33 @@ func TestFilter_VersionsToMirror(t *testing.T) {
 					"v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.3.3", "v1.4.1"},
 			},
 			want: []string{"v1.3.0"},
+		},
+		{
+			// Several exact tags pinned for the same name (the user repeated
+			// --include-package test@=vX). They merge into a MultiConstraint
+			// of exacts, which stays exact so no release channels are added,
+			// and every pinned tag is pulled.
+			name: "multiple exact tags pinned for the same name pull all of them",
+			filter: Filter{
+				logger: logger,
+				modules: map[string]VersionConstraint{
+					"module1": mergeConstraints(
+						mergeConstraints(
+							NewExactTagConstraint("v0.0.2"),
+							NewExactTagConstraint("v0.0.3"),
+						),
+						NewExactTagConstraint("v0.0.8"),
+					),
+				},
+			},
+			mod: &Module{
+				Name: "module1",
+				Releases: []string{
+					internal.AlphaChannel,
+					internal.StableChannel,
+					"v0.0.1", "v0.0.2", "v0.0.3", "v0.0.4", "v0.0.8"},
+			},
+			want: []string{"v0.0.2", "v0.0.3", "v0.0.8"},
 		},
 	}
 	for _, tt := range tests {

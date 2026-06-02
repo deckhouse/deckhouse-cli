@@ -58,30 +58,34 @@ func NewFilter(filterExpressions []string, filterType FilterType) (*Filter, erro
 	}
 
 	for _, filterExpr := range filterExpressions {
-		moduleName, versionStr, hasVersion := strings.Cut(strings.TrimSpace(filterExpr), "@")
+		name, versionStr, hasVersion := strings.Cut(strings.TrimSpace(filterExpr), "@")
 
-		moduleName = strings.TrimSpace(moduleName)
-		if moduleName == "" {
-			return nil, fmt.Errorf("Malformed filter expression %q: empty module name", filterExpr)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil, fmt.Errorf("Malformed filter expression %q: empty name", filterExpr)
 		}
 
-		if _, moduleRedeclared := filter.modules[moduleName]; moduleRedeclared {
-			return nil, fmt.Errorf("Malformed filter expression: module %s is declared multiple times", moduleName)
-		}
-
+		var constraint VersionConstraint
 		if !hasVersion {
-			constraint, _ := NewSemanticVersionConstraint(">=0.0.0")
-			filter.modules[moduleName] = constraint
+			constraint, _ = NewSemanticVersionConstraint(">=0.0.0")
+		} else {
+			var err error
+			constraint, err = parseVersionConstraint(versionStr)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		// Repeating a name is allowed and OR-combines the constraints, so a
+		// user can pull several pinned versions at once, e.g.
+		// `--include-package test@=v0.0.2 --include-package test@=v0.0.3`.
+		if existing, redeclared := filter.modules[name]; redeclared {
+			filter.modules[name] = mergeConstraints(existing, constraint)
 
 			continue
 		}
 
-		constraint, err := parseVersionConstraint(versionStr)
-		if err != nil {
-			return nil, err
-		}
-
-		filter.modules[moduleName] = constraint
+		filter.modules[name] = constraint
 	}
 
 	return filter, nil
@@ -237,6 +241,21 @@ func (f *Filter) VersionsToMirror(mod *Module) []string {
 		return nil
 	}
 
+	return deduplicateTags(versionsForConstraint(constraint, mod))
+}
+
+// versionsForConstraint resolves a single constraint (or, recursively, every
+// sub-constraint of a MultiConstraint) into concrete tags to pull.
+func versionsForConstraint(constraint VersionConstraint, mod *Module) []string {
+	if multi, ok := constraint.(*MultiConstraint); ok {
+		var tags []string
+		for _, sub := range multi.constraints {
+			tags = append(tags, versionsForConstraint(sub, mod)...)
+		}
+
+		return tags
+	}
+
 	if constraint.IsExact() {
 		exact, isExactTag := constraint.(*ExactTagConstraint)
 		if !isExactTag {
@@ -268,6 +287,28 @@ func (f *Filter) VersionsToMirror(mod *Module) []string {
 	}
 
 	return tags
+}
+
+// deduplicateTags removes duplicate tags while preserving first-seen order,
+// so overlapping sub-constraints of a MultiConstraint don't yield repeats.
+func deduplicateTags(tags []string) []string {
+	if len(tags) == 0 {
+		return tags
+	}
+
+	seen := make(map[string]struct{}, len(tags))
+	out := make([]string, 0, len(tags))
+
+	for _, tag := range tags {
+		if _, dup := seen[tag]; dup {
+			continue
+		}
+
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+
+	return out
 }
 
 // restoreInclusiveAnchors re-introduces any anchor versions (named via >=/<=
