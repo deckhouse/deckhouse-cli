@@ -66,9 +66,10 @@ func RunRenewAll(w io.Writer, certsDir, kubeconfigDirOverride string, dryRun boo
 }
 
 // RunRenewSingle renews a single artifact identified by path: it auto-detects whether path is a kubeconfig file or a PEM leaf certificate.
-func RunRenewSingle(w io.Writer, path, certsDir, kubeconfigDirOverride string, dryRun bool) error {
+// For artifacts outside the default /etc/kubernetes layout, --path must be set explicitly.
+func RunRenewSingle(w io.Writer, path, certsDir, kubeconfigDirOverride string, dryRun, pathExplicit bool) error {
 	if kcExp, err := kubeconfig.GetClientCertificateExpiration(path); err == nil {
-		return renewSingleKubeconfig(w, path, kcExp.File, certsDir, kubeconfigDirOverride, dryRun)
+		return renewSingleKubeconfig(w, path, kcExp.File, certsDir, kubeconfigDirOverride, dryRun, pathExplicit)
 	}
 
 	certExp, certErr := pki.GetCertificateExpiration(path)
@@ -112,7 +113,7 @@ func renewSingleLeaf(w io.Writer, path string, name pki.LeafCertName, pkiDir str
 	return warningsError(warnings)
 }
 
-func renewSingleKubeconfig(w io.Writer, path string, file kubeconfig.File, certsDirOverride, kcDirOverride string, dryRun bool) error {
+func renewSingleKubeconfig(w io.Writer, path string, file kubeconfig.File, certsDir, kcDirOverride string, dryRun, pathExplicit bool) error {
 	printDryRunBanner(w, dryRun)
 
 	kcDir := kcDirOverride
@@ -120,9 +121,14 @@ func renewSingleKubeconfig(w io.Writer, path string, file kubeconfig.File, certs
 		kcDir = filepath.Dir(filepath.Clean(path))
 	}
 
+	if !pathExplicit && filepath.Clean(certsDir) != filepath.Join(kcDir, "pki") {
+		return fmt.Errorf("kubeconfig %q is outside the default /etc/kubernetes layout; pass --path with its PKI directory (e.g. %q)",
+			path, filepath.Join(kcDir, "pki"))
+	}
+
 	opts := []kubeconfig.RenewOption{
 		kubeconfig.WithRenewKubeconfigDir(kcDir),
-		kubeconfig.WithRenewPKIDir(certsDirOverride),
+		kubeconfig.WithRenewPKIDir(certsDir),
 		kubeconfig.WithRenewFiles(file),
 	}
 	if dryRun {
@@ -131,7 +137,7 @@ func renewSingleKubeconfig(w io.Writer, path string, file kubeconfig.File, certs
 
 	usedCAs := map[pki.RootCertName]struct{}{}
 	warnings := collectKubeconfigWarnings(w, kubeconfig.RenewClientCerts(opts...), usedCAs)
-	warnings += checkCAsOutliveRenewed(w, certsDirOverride, usedCAs)
+	warnings += checkCAsOutliveRenewed(w, certsDir, usedCAs)
 
 	printDryRunFooter(w, dryRun)
 

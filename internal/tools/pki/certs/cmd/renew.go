@@ -57,7 +57,7 @@ func NewRenewCommand() *cobra.Command {
 		Use:   "renew (all | PATH)",
 		Short: "Renew control-plane certificates and kubeconfig client certificates",
 		Long:  renewLong,
-		Args:  cobra.ArbitraryArgs,
+		Args:  cobra.ExactArgs(1),
 		Example: "  d8 tools pki certs renew all\n" +
 			"  d8 tools pki certs renew all --dry-run\n" +
 			"  d8 tools pki certs renew all --san 192.168.0.5\n" +
@@ -65,15 +65,9 @@ func NewRenewCommand() *cobra.Command {
 			"  d8 tools pki certs renew /etc/kubernetes/admin.conf\n" +
 			"  d8 tools pki certs renew all --path /opt/k8s/pki --kubeconfig-dir /opt/k8s",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				return cmd.Usage()
-			}
+			pathExplicit := cmd.Flags().Changed("path")
 
-			if len(args) > 1 {
-				return fmt.Errorf("accepts exactly one argument (PATH), received %d", len(args))
-			}
-
-			return certs.RunRenewSingle(cmd.OutOrStdout(), args[0], certsDir, kubeconfigDir, dryRun)
+			return certs.RunRenewSingle(cmd.OutOrStdout(), args[0], certsDir, kubeconfigDir, dryRun, pathExplicit)
 		},
 	}
 
