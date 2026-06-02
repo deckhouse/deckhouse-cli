@@ -103,6 +103,7 @@ func (o *Options) WithNondistributable() *Options {
 func (o *Options) WithTransport(t http.RoundTripper) *Options {
 	o.Transport = t
 	o.Remote = append(o.Remote, remote.WithTransport(t))
+
 	return o
 }
 

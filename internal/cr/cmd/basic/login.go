@@ -112,6 +112,7 @@ func resolveCredentials(in io.Reader, out io.Writer, username, password string) 
 
 		if f, ok := in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
 			b, err := term.ReadPassword(int(f.Fd()))
+
 			fmt.Fprintln(out)
 
 			if err != nil {
