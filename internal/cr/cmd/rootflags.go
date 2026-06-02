@@ -86,10 +86,19 @@ func setupRootFlags(cmd *cobra.Command, opts *registry.Options) {
 		}
 
 		// Inline credentials win over whatever the Docker keychain would
-		// resolve, so a one-off `--username/--password` works without a
-		// prior `cr login`. `cr login` itself reads the same flags directly.
-		if username != "" {
-			opts.WithKeychain(registry.NewStaticKeychain(username, password))
+		// resolve, so a one-off `--username/--password` works without a prior
+		// `cr login`. Both halves are required together here: a lone
+		// `--password` (or `--username`) would otherwise be silently dropped
+		// and the command would fall back to the Docker config, masking the
+		// mistake with a confusing 401. `login` is exempt - it reads the flags
+		// directly and prompts for whichever half is missing.
+		if c.Name() != "login" {
+			switch {
+			case username != "" && password != "":
+				opts.WithKeychain(registry.NewStaticKeychain(username, password))
+			case username != "" || password != "":
+				return fmt.Errorf("--%s and --%s must be used together", rootflagnames.Username, rootflagnames.Password)
+			}
 		}
 
 		return nil
