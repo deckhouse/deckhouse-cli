@@ -70,6 +70,7 @@ func NewFilter(filterExpressions []string, filterType FilterType) (*Filter, erro
 			constraint, _ = NewSemanticVersionConstraint(">=0.0.0")
 		} else {
 			var err error
+
 			constraint, err = parseVersionConstraint(versionStr)
 			if err != nil {
 				return nil, err
@@ -248,7 +249,7 @@ func (f *Filter) VersionsToMirror(mod *Module) []string {
 // sub-constraint of a MultiConstraint) into concrete tags to pull.
 func versionsForConstraint(constraint VersionConstraint, mod *Module) []string {
 	if multi, ok := constraint.(*MultiConstraint); ok {
-		var tags []string
+		var tags = make([]string, 0, len(multi.constraints))
 		for _, sub := range multi.constraints {
 			tags = append(tags, versionsForConstraint(sub, mod)...)
 		}
