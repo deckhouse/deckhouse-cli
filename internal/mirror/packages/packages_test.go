@@ -307,6 +307,31 @@ func TestPullPackages_PerPackageListTagsErrorHandling(t *testing.T) {
 	}
 }
 
+// TestPullPackages_MissingPackagesRepoSkipsGracefully is the regression test for
+// the bug where a registry without a /packages repository failed the entire
+// pull instead of skipping the packages phase. The public registry reports the
+// missing repo as a NAME_UNKNOWN transport error (not ErrImageNotFound), so both
+// root-level ListTags probes - validatePackagesAccess and discoverPackageNames -
+// must treat either signal as "no packages here".
+func TestPullPackages_MissingPackagesRepoSkipsGracefully(t *testing.T) {
+	cases := map[string]error{
+		"NAME_UNKNOWN transport error": errors.New("NAME_UNKNOWN: repository name not known to registry"),
+		"ErrImageNotFound":             dkpreg.ErrImageNotFound,
+	}
+
+	for name, injected := range cases {
+		t.Run(name, func(t *testing.T) {
+			reg := upfake.NewRegistry(testHost)
+			client := &listTagsAlwaysErr{Client: upfake.NewClient(reg), err: injected}
+
+			svc := newService(t, pkgclient.Adapt(client), nil)
+
+			require.NoError(t, svc.PullPackages(context.Background()),
+				"a registry without a /packages repo must skip the phase, not fail the pull")
+		})
+	}
+}
+
 // =============================================================================
 // Tests: empty package layouts are not packed into tars
 // =============================================================================
@@ -962,6 +987,23 @@ func (c *listTagsErrAtPackage) ListTags(ctx context.Context, opts ...dkpreg.List
 		return nil, c.err
 	}
 	return c.Client.ListTags(ctx, opts...)
+}
+
+// listTagsAlwaysErr returns a fixed error from every ListTags call, at any depth.
+// It simulates a registry whose packages repository does not exist: the root
+// packages ListTags (validatePackagesAccess, then discoverPackageNames) is the
+// first thing PullPackages probes.
+type listTagsAlwaysErr struct {
+	dkpreg.Client
+	err error
+}
+
+func (c *listTagsAlwaysErr) WithSegment(segments ...string) dkpreg.Client {
+	return &listTagsAlwaysErr{Client: c.Client.WithSegment(segments...), err: c.err}
+}
+
+func (c *listTagsAlwaysErr) ListTags(_ context.Context, _ ...dkpreg.ListTagsOption) ([]string, error) {
+	return nil, c.err
 }
 
 // cancelOnSecondPackage is a registry client wrapper that fires the supplied

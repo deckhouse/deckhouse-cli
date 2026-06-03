@@ -46,6 +46,7 @@ import (
 	"github.com/deckhouse/deckhouse/pkg/registry/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/errmatch"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/pack"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
@@ -329,8 +330,12 @@ func (svc *Service) validatePackagesAccess(ctx context.Context) error {
 		return nil
 	}
 
+	// A registry without a packages catalog reports it as either ErrImageNotFound
+	// or a NAME_UNKNOWN transport error (the public registry returns the latter).
+	// Both mean "no packages here": skip the phase instead of failing the pull,
+	// matching the graceful skip in PullPackageVersions.
 	_, err := svc.packagesService.ListTags(ctx)
-	if errors.Is(err, client.ErrImageNotFound) {
+	if errors.Is(err, client.ErrImageNotFound) || errmatch.IsRepoNotFound(err) {
 		svc.userLogger.Warnf("Skipping pull of packages: %v", err)
 
 		return nil
@@ -600,6 +605,13 @@ func (svc *Service) discoverPackageNames(ctx context.Context) ([]string, error) 
 
 	packageNames, err := svc.packagesService.ListTags(ctx)
 	if err != nil {
+		// A missing packages repository (ErrImageNotFound, or a NAME_UNKNOWN
+		// transport error from the public registry) means there are no packages
+		// to mirror: report an empty set rather than failing the pull.
+		if errors.Is(err, client.ErrImageNotFound) || errmatch.IsRepoNotFound(err) {
+			return nil, nil
+		}
+
 		return nil, fmt.Errorf("list packages: %w", err)
 	}
 
