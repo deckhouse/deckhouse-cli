@@ -174,9 +174,10 @@ func normalizeAuthRule(obj *unstructured.Unstructured) []normalizedGrant {
 		return nil
 	}
 
-	var grants []normalizedGrant
+	subjects := readSubjectRefs(obj)
+	grants := make([]normalizedGrant, 0, len(subjects))
 
-	for _, sub := range readSubjectRefs(obj) {
+	for _, sub := range subjects {
 		if sub.Kind == iamtypes.KindServiceAccount {
 			continue
 		}
@@ -360,7 +361,7 @@ func capabilityNote(implicit bool) string {
 }
 
 func (s *effectiveSummary) String() string {
-	var parts []string
+	parts := make([]string, 0, len(s.Namespaced)+1)
 	if s.ClusterLevel != "" {
 		parts = append(parts, s.ClusterLevel+"[*]")
 	}
