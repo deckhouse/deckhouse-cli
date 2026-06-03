@@ -25,6 +25,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/cmd/disable"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/cmd/enable"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/cmd/list"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/cmd/maintenance"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/cmd/snapshots"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/cmd/values"
 )
@@ -48,6 +49,7 @@ func NewCommand() *cobra.Command {
 		// Module state (ModuleConfig)
 		enable.NewCommand(),
 		disable.NewCommand(),
+		maintenance.NewCommand(),
 
 		// Inspection
 		list.NewCommand(),
