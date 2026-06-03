@@ -256,6 +256,10 @@ func (svc *PullService) Pull(ctx context.Context) (*PullSummary, error) {
 		if err := svc.packagesService.PullPackages(ctx); err != nil {
 			return summary, fmt.Errorf("pull packages: %w", err)
 		}
+
+		summary.Packages = toPackagesStats(svc.packagesService.Stats())
+	} else {
+		summary.Packages.Skipped = true
 	}
 
 	// The package release-image catalog (package-versions) is always cloned
@@ -293,6 +297,21 @@ func toModulesStats(s modules.ModulesStats) ModulesStats {
 		Attempted:       s.Attempted,
 		OnlyExtraImages: s.OnlyExtraImages,
 		Modules:         mods,
+		TotalImages:     s.TotalImages,
+		TotalVEX:        s.TotalVEX,
+	}
+}
+
+func toPackagesStats(s packages.PackagesStats) PackagesStats {
+	pkgs := make([]PackageStat, 0, len(s.Packages))
+	for _, p := range s.Packages {
+		pkgs = append(pkgs, PackageStat{Name: p.Name, Images: p.Images, VEX: p.VEX, Versions: p.Versions})
+	}
+
+	return PackagesStats{
+		Attempted:       s.Attempted,
+		OnlyExtraImages: s.OnlyExtraImages,
+		Packages:        pkgs,
 		TotalImages:     s.TotalImages,
 		TotalVEX:        s.TotalVEX,
 	}

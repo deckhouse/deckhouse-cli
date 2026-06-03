@@ -95,6 +95,10 @@ type Service struct {
 	// options contains service configuration
 	options *Options
 
+	// packageStats accumulates per-package pull accounting, keyed by package name.
+	// See packagePullStat for what each field holds and when it is filled.
+	packageStats map[packageName]packagePullStat
+
 	// rootURL is the base registry URL for packages images
 	rootURL string
 
@@ -134,6 +138,7 @@ func NewService(
 		packagesDownloadList: NewPackagesDownloadList(rootURL),
 		pullerService:        puller.NewPullerService(logger, userLogger),
 		options:              options,
+		packageStats:         make(map[packageName]packagePullStat),
 		rootURL:              rootURL,
 		logger:               logger,
 		userLogger:           userLogger,
@@ -469,6 +474,11 @@ func (svc *Service) pullPackages(ctx context.Context) error {
 		}
 	}
 
+	// Capture per-package manifest counts before packing: bundle.Pack deletes
+	// every layout file as it tars it, so counting after the pack step would
+	// read emptied layouts and report zero.
+	svc.capturePulledImages(filteredPackages)
+
 	// Pack each package into separate tar
 	if err := svc.packPackages(postCtx, filteredPackages); err != nil {
 		return err
@@ -499,8 +509,23 @@ func (svc *Service) pullSinglePackage(ctx context.Context, pkg packageData) erro
 
 	packageVersions := svc.mergeAndDedupeVersions(pkg.name, pkg.registryPath, channelVersions, tags)
 
+	// Record the resolved versions for the summary. Happens before download, so
+	// it is populated in dry-run too.
+	stat := svc.packageStats[pkg.name]
+	stat.versions = packageVersions
+	svc.packageStats[pkg.name] = stat
+
 	if svc.options.DryRun {
 		svc.printDryRunPlan(pkg.name, downloadList, packageVersions)
+
+		// Record the planned version images so the end-of-pull summary counts
+		// them, mirroring the references printDryRunPlan prints. Extra images are
+		// not resolved in dry-run (they require a real pull), so the per-package
+		// count stays "version channels + versions".
+		for _, version := range packageVersions {
+			downloadList.Package[svc.packageRef(pkg.name, version)] = nil
+		}
+
 		return nil
 	}
 

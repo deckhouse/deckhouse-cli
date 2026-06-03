@@ -81,6 +81,34 @@ type ModulesStats struct {
 	TotalVEX int
 }
 
+// PackageStat is one package's contribution to the pull.
+type PackageStat struct {
+	Name   string
+	Images int
+	// VEX is how many of Images are VEX attestations (a subset of Images).
+	VEX int
+	// Versions are the resolved package versions that will be (or were) pulled,
+	// e.g. ["v1.45.2", "v1.44.0"]. Available in dry-run too.
+	Versions []string
+}
+
+// PackagesStats aggregates per-package image accounting.
+type PackagesStats struct {
+	// Skipped is true when packages were disabled and OnlyExtraImages is off.
+	Skipped bool
+	// Attempted is true when the packages phase ran.
+	Attempted bool
+	// OnlyExtraImages reflects the --only-extra-images mode.
+	OnlyExtraImages bool
+	// Packages holds the per-package breakdown, sorted by name.
+	Packages []PackageStat
+	// TotalImages is the sum of images across all packages.
+	TotalImages int
+	// TotalVEX is the number of VEX attestations across all packages, a subset of
+	// TotalImages.
+	TotalVEX int
+}
+
 // BundleFile is one logical bundle artifact (platform.tar, installer.tar,
 // security.tar, module-<name>.tar), possibly spread over .NNNN.chunk files.
 type BundleFile struct {
@@ -120,6 +148,7 @@ type PullSummary struct {
 	Installer ComponentStats
 	Security  SecurityStats
 	Modules   ModulesStats
+	Packages  PackagesStats
 
 	// Bundle is populated by the CLI from the bundle directory (real pull only).
 	Bundle BundleStats

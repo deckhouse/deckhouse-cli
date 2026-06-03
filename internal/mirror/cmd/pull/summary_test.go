@@ -45,7 +45,7 @@ func TestRenderPullSummary(t *testing.T) {
 		skippedCount int // -1 to skip the assertion
 	}{
 		{
-			name: "real pull verbose lists modules",
+			name: "real pull verbose lists modules and packages",
 			summary: &mirror.PullSummary{
 				Elapsed:   14*time.Minute + 32*time.Second,
 				Platform:  mirror.ComponentStats{Attempted: true, Images: 412},
@@ -57,6 +57,13 @@ func TestRenderPullSummary(t *testing.T) {
 					Modules: []mirror.ModuleStat{
 						{Name: "commander", Images: 57},
 						{Name: "console", Images: 43},
+					},
+				},
+				Packages: mirror.PackagesStats{
+					Attempted:   true,
+					TotalImages: 30,
+					Packages: []mirror.PackageStat{
+						{Name: "scanner", Images: 30, Versions: []string{"v1.45.2"}},
 					},
 				},
 				Bundle: mirror.BundleStats{
@@ -75,6 +82,8 @@ func TestRenderPullSummary(t *testing.T) {
 				"Security:", "4/4 databases",
 				"2 modules",
 				"commander", "console",
+				"Packages:", "1 packages",
+				"scanner", "[v1.45.2]",
 				"Bundle artifacts (3 files)", // 2 chunks + 1 single tar
 				"(2 chunks)",
 				"TOTAL",
@@ -214,24 +223,30 @@ func TestRenderPullSummary(t *testing.T) {
 				Installer: mirror.ComponentStats{Attempted: true, Images: 2},
 				Security:  mirror.SecurityStats{Skipped: true},
 				Modules:   mirror.ModulesStats{Skipped: true},
+				Packages:  mirror.PackagesStats{Skipped: true},
 			},
 			contains: []string{
-				"Platform:", "Security:", "Modules:",
+				"Platform:", "Security:", "Modules:", "Packages:",
 				"Installer:", "included",
 			},
-			skippedCount: 3, // Platform, Security, Modules
+			skippedCount: 4, // Platform, Security, Modules, Packages
 		},
 		{
-			name: "zero modules attempted",
+			name: "zero modules and packages attempted",
 			summary: &mirror.PullSummary{
 				Modules: mirror.ModulesStats{
 					Attempted:   true,
 					TotalImages: 0,
 					Modules:     []mirror.ModuleStat{},
 				},
+				Packages: mirror.PackagesStats{
+					Attempted:   true,
+					TotalImages: 0,
+					Packages:    []mirror.PackageStat{},
+				},
 			},
-			contains:     []string{"0 modules"},
-			notContains:  []string{"skipped", "more modules", "images"},
+			contains:     []string{"0 modules", "0 packages"},
+			notContains:  []string{"skipped", "more modules", "more packages", "images"},
 			skippedCount: 0,
 		},
 		{
@@ -285,6 +300,68 @@ func TestRenderPullSummary(t *testing.T) {
 			skippedCount: -1,
 		},
 		{
+			name: "package versions and VEX listed per package in verbose",
+			summary: &mirror.PullSummary{
+				Packages: mirror.PackagesStats{
+					Attempted:   true,
+					TotalImages: 84,
+					TotalVEX:    9,
+					Packages: []mirror.PackageStat{
+						{Name: "scanner", Images: 60, VEX: 9, Versions: []string{"v2.1.0", "v2.0.3"}},
+						{Name: "console", Images: 24, VEX: 0, Versions: []string{"v1.45.2"}},
+					},
+				},
+			},
+			verbose: true,
+			contains: []string{
+				"2 packages", "9 VEXes",
+				"scanner", "[v2.1.0, v2.0.3]", "(9 VEX)",
+				"console", "[v1.45.2]",
+			},
+			// No image counts; console has 0 VEX -> no per-package VEX note for it.
+			notContains:  []string{"84", "(0 VEX)", "images", "including"},
+			skippedCount: -1,
+		},
+		{
+			name: "package versions are sorted newest-first by semver",
+			summary: &mirror.PullSummary{
+				Packages: mirror.PackagesStats{
+					Attempted:   true,
+					TotalImages: 5,
+					Packages: []mirror.PackageStat{
+						// Resolved in arbitrary order; must render sorted, newest first.
+						{Name: "scanner", Images: 5, Versions: []string{"v1.5.4", "v10.0.1", "v1.10.3", "v1.9.16"}},
+					},
+				},
+			},
+			verbose:      true,
+			contains:     []string{"[v10.0.1, v1.10.3, v1.9.16, v1.5.4]"},
+			skippedCount: -1,
+		},
+		{
+			name: "only extra packages",
+			summary: &mirror.PullSummary{
+				Packages: mirror.PackagesStats{
+					Attempted:       true,
+					OnlyExtraImages: true,
+					TotalImages:     8,
+					Packages:        []mirror.PackageStat{{Name: "scanner", Images: 8}},
+				},
+			},
+			contains:     []string{"1 packages", "extra images only"},
+			skippedCount: -1,
+		},
+		{
+			name: "packages skipped while other phases never ran",
+			summary: &mirror.PullSummary{
+				Packages: mirror.PackagesStats{Skipped: true},
+			},
+			// Packages: skipped; the other phases are zero-valued -> "not pulled".
+			contains:     []string{"Packages:", "skipped"},
+			notContains:  []string{"0 packages"},
+			skippedCount: 1,
+		},
+		{
 			name: "cancelled partial",
 			summary: &mirror.PullSummary{
 				Cancelled: true,
@@ -331,16 +408,17 @@ func TestRenderPullSummary(t *testing.T) {
 			skippedCount: -1,
 		},
 		{
-			name: "everything skipped renders four skipped lines and no body",
+			name: "everything skipped renders five skipped lines and no body",
 			summary: &mirror.PullSummary{
 				Platform:  mirror.ComponentStats{Skipped: true},
 				Installer: mirror.ComponentStats{Skipped: true},
 				Security:  mirror.SecurityStats{Skipped: true},
 				Modules:   mirror.ModulesStats{Skipped: true},
+				Packages:  mirror.PackagesStats{Skipped: true},
 			},
-			contains:     []string{"Platform:", "Installer:", "Security:", "Modules:"},
+			contains:     []string{"Platform:", "Installer:", "Security:", "Modules:", "Packages:"},
 			notContains:  []string{"Bundle artifacts", "VEX", "not pulled"},
-			skippedCount: 4,
+			skippedCount: 5,
 		},
 	}
 

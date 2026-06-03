@@ -79,9 +79,9 @@ func configureSummaryColor() {
 // It is emitted through a single logger call so the structured-logging handler
 // stamps a timestamp only once, at the top of the block.
 //
-// When verbose is true, the modules section lists every module with its
-// resolved versions (and VEX count, when present); otherwise it prints only the
-// aggregate "N modules" line.
+// When verbose is true, the modules and packages sections list every entry with
+// its resolved versions (and VEX count, when present); otherwise they print only
+// the aggregate "N modules" / "N packages" lines.
 func renderPullSummary(s *mirror.PullSummary, verbose bool) string {
 	var b strings.Builder
 
@@ -98,6 +98,7 @@ func renderPullSummary(s *mirror.PullSummary, verbose bool) string {
 	writeComponent(&b, "Installer", s.Installer)
 	writeSecurity(&b, s.Security)
 	writeModules(&b, s.Modules, verbose)
+	writePackages(&b, s.Packages, verbose)
 
 	if !s.DryRun && len(s.Bundle.Files) > 0 {
 		b.WriteString(bar() + "\n")
@@ -277,6 +278,59 @@ func writeModules(b *strings.Builder, m mirror.ModulesStats, verbose bool) {
 		line := ms.Name
 		if moduleVex != "" || versions != "" {
 			line = fmt.Sprintf("%-*s%s%s", nameWidth, ms.Name, moduleVex, versions)
+		}
+
+		fmt.Fprintf(b, "%s     %s\n", bar(), line)
+	}
+}
+
+func writePackages(b *strings.Builder, p mirror.PackagesStats, verbose bool) {
+	label := cLabel(padLabel("Packages"))
+
+	if p.Skipped {
+		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cDim("skipped"))
+		return
+	}
+
+	if !p.Attempted {
+		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cWarn("not pulled"))
+		return
+	}
+
+	// Aggregate: package count, "extra images only" when applicable, and total VEX.
+	// No image count by design.
+	parts := []string{cCount(fmt.Sprint(len(p.Packages))) + " " + cDim("packages")}
+	if p.OnlyExtraImages {
+		parts = append(parts, cDim("extra images only"))
+	}
+
+	if p.TotalVEX > 0 {
+		parts = append(parts, cVEX(fmt.Sprintf("%d VEXes", p.TotalVEX)))
+	}
+
+	fmt.Fprintf(b, "%s %s %s\n", bar(), label, strings.Join(parts, "  "+cDim("·")+"  "))
+
+	// Per-package breakdown only in verbose mode (--verbose-summary).
+	if !verbose {
+		return
+	}
+
+	for _, ps := range p.Packages {
+		versions := ""
+		if len(ps.Versions) > 0 {
+			versions = "  " + cVersion("["+strings.Join(sortVersions(ps.Versions), ", ")+"]")
+		}
+
+		packageVex := ""
+		if ps.VEX > 0 {
+			packageVex = "  " + cVEX(fmt.Sprintf("(%d VEX)", ps.VEX))
+		}
+
+		// Name, VEX subset when present, then versions in []. Pad the name only
+		// when something follows, to avoid trailing whitespace.
+		line := ps.Name
+		if packageVex != "" || versions != "" {
+			line = fmt.Sprintf("%-*s%s%s", nameWidth, ps.Name, packageVex, versions)
 		}
 
 		fmt.Fprintf(b, "%s     %s\n", bar(), line)
