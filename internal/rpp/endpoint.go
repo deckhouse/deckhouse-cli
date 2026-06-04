@@ -1,0 +1,135 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package rpp
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"net/url"
+	"strconv"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+)
+
+const (
+	// proxyNamespace is where registry-packages-proxy and its objects live.
+	proxyNamespace = "d8-cloud-instance-manager"
+
+	// proxyPodSelector selects the registry-packages-proxy pods.
+	proxyPodSelector = "app=registry-packages-proxy"
+
+	// proxyIngressName is the Ingress the registry-packages-proxy module creates for
+	// the public /v1/images route (host registry-packages-proxy.<publicDomain>).
+	proxyIngressName = "registry-packages-proxy"
+
+	// proxyPort is the kube-rbac-proxy port that fronts the proxy on every master node.
+	proxyPort = 4219
+
+	// proxyScheme is the endpoint scheme (kube-rbac-proxy serves HTTPS).
+	proxyScheme = "https"
+)
+
+// chooseDiscoveredEndpoint resolves the proxy endpoint when none was given
+// explicitly. It PREFERS the public Ingress (a valid TLS certificate, reachable
+// from a workstation) and falls back to in-cluster pod IPs (which need
+// --rpp-insecure-skip-tls-verify and cluster-network reachability). The second
+// return value names the source ("ingress" / "pod") for logging.
+func chooseDiscoveredEndpoint(ctx context.Context, kube kubernetes.Interface) (string, string, error) {
+	endpoint, err := DiscoverIngressEndpoint(ctx, kube)
+	if err == nil {
+		return endpoint, "ingress", nil
+	}
+
+	endpoints, err := DiscoverEndpoints(ctx, kube)
+	if err != nil {
+		return "", "", err
+	}
+
+	return endpoints[0], "pod", nil
+}
+
+// DiscoverIngressEndpoint returns the public proxy endpoint (https://<host>) taken
+// from the registry-packages-proxy Ingress. This path has a valid TLS certificate
+// and is reachable from outside the cluster - the right default for a workstation.
+// It errors if the Ingress is absent or has no host, so the caller can fall back to
+// in-cluster pod discovery.
+func DiscoverIngressEndpoint(ctx context.Context, kube kubernetes.Interface) (string, error) {
+	ingress, err := kube.NetworkingV1().Ingresses(proxyNamespace).Get(ctx, proxyIngressName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("get registry-packages-proxy ingress: %w", err)
+	}
+
+	for _, rule := range ingress.Spec.Rules {
+		if rule.Host != "" {
+			return (&url.URL{Scheme: proxyScheme, Host: rule.Host}).String(), nil
+		}
+	}
+
+	return "", fmt.Errorf("registry-packages-proxy ingress %q has no host", proxyIngressName)
+}
+
+// DiscoverEndpoints returns proxy endpoint base URLs by listing the
+// registry-packages-proxy pods and joining each ready, running pod IP with the
+// proxy port. Pods that are terminating or not yet ready are skipped, so callers
+// do not dial draining or not-yet-serving proxies.
+//
+// These are master-node pod IPs, reachable from inside the cluster network. A
+// workstation outside the cluster usually cannot reach them and should pass an
+// explicit endpoint (for example the public Ingress) instead.
+func DiscoverEndpoints(ctx context.Context, kube kubernetes.Interface) ([]string, error) {
+	pods, err := kube.CoreV1().Pods(proxyNamespace).List(ctx, metav1.ListOptions{LabelSelector: proxyPodSelector})
+	if err != nil {
+		return nil, fmt.Errorf("list registry-packages-proxy pods: %w", err)
+	}
+
+	endpoints := make([]string, 0, len(pods.Items))
+
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if !podIsServing(pod) {
+			continue
+		}
+
+		base := url.URL{Scheme: proxyScheme, Host: net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(proxyPort))}
+		endpoints = append(endpoints, base.String())
+	}
+
+	if len(endpoints) == 0 {
+		return nil, fmt.Errorf("no ready registry-packages-proxy pods found in namespace %q", proxyNamespace)
+	}
+
+	return endpoints, nil
+}
+
+// podIsServing reports whether the pod is a usable proxy endpoint: running, not
+// terminating, with an assigned IP and a Ready condition that is true.
+func podIsServing(pod *corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodRunning || pod.DeletionTimestamp != nil || pod.Status.PodIP == "" {
+		return false
+	}
+
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+
+	return false
+}
