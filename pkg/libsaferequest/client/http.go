@@ -1,16 +1,19 @@
 package client
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
 	"github.com/spf13/pflag"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/kubernetes"
 	kubescheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth" // load all auth plugins
 	"k8s.io/client-go/rest"
@@ -205,4 +208,30 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 
 func (c *SafeClient) Copy() *SafeClient {
 	return &SafeClient{rest.CopyConfig(c.restConfig)}
+}
+
+// ServerHost returns the Kubernetes API server URL from the rest config (e.g. "https://cluster.example.com").
+func (c *SafeClient) ServerHost() string {
+	if c.restConfig == nil {
+		return ""
+	}
+
+	return c.restConfig.Host
+}
+
+// AggregatedGet issues an authenticated GET to a Kubernetes aggregated API absolute path
+// and returns the raw response body stream. The caller is responsible for closing the body.
+// Unlike HTTPDo, it uses the Discovery REST client which handles all auth methods (exec, OIDC, etc.).
+func (c *SafeClient) AggregatedGet(ctx context.Context, absPath string) (io.ReadCloser, error) {
+	cs, err := kubernetes.NewForConfig(c.restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("build kubernetes clientset: %w", err)
+	}
+
+	stream, err := cs.Discovery().RESTClient().Get().AbsPath(absPath).Stream(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("aggregated GET %s: %w", absPath, err)
+	}
+
+	return stream, nil
 }
