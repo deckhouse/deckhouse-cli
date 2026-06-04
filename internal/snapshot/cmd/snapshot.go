@@ -23,6 +23,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/download"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/list"
 )
 
 const (
@@ -30,11 +31,11 @@ const (
 
 	debugEnvVar = "D8_SNAPSHOT_DEBUG"
 
-	cmdShort = "Snapshot operations (download namespace snapshots)"
+	cmdShort = "Snapshot operations (list, download namespace snapshots)"
 
 	cmdLong = `Manage Deckhouse namespace snapshots.
 
-The snapshot command lets you download namespace manifests captured by the
+The snapshot command lets you list and download namespace manifests captured by the
 state-snapshotter module. The Snapshot CR must already exist and be Ready.
 
 Future sub-commands will support uploading archives and restoring manifests.`
@@ -59,6 +60,7 @@ func NewCommand() *cobra.Command {
 	log := setupLogger()
 
 	root.AddCommand(download.NewCommand(log))
+	root.AddCommand(list.NewCommand(log))
 
 	return root
 }
