@@ -81,7 +81,7 @@ func configureSummaryColor() {
 //
 // When verbose is true, the modules and packages sections list every entry with
 // its resolved versions (and VEX count, when present); otherwise they print only
-// the aggregate "N modules" / "N packages" lines.
+// the aggregate count (the category label already names what is counted).
 func renderPullSummary(s *mirror.PullSummary, verbose bool) string {
 	var b strings.Builder
 
@@ -244,9 +244,9 @@ func writeModules(b *strings.Builder, m mirror.ModulesStats, verbose bool) {
 		return
 	}
 
-	// Aggregate: module count, "extra images only" when applicable, and total VEX.
-	// No image count by design.
-	parts := []string{cCount(fmt.Sprint(len(m.Modules))) + " " + cDim("modules")}
+	// Aggregate: bare count (the "Modules:" label already names the category),
+	// "extra images only" when applicable, and total VEX. No image count by design.
+	parts := []string{cCount(fmt.Sprint(len(m.Modules)))}
 	if m.OnlyExtraImages {
 		parts = append(parts, cDim("extra images only"))
 	}
@@ -297,9 +297,9 @@ func writePackages(b *strings.Builder, p mirror.PackagesStats, verbose bool) {
 		return
 	}
 
-	// Aggregate: package count, "extra images only" when applicable, and total VEX.
-	// No image count by design.
-	parts := []string{cCount(fmt.Sprint(len(p.Packages))) + " " + cDim("packages")}
+	// Aggregate: bare count (the "Packages:" label already names the category),
+	// "extra images only" when applicable, and total VEX. No image count by design.
+	parts := []string{cCount(fmt.Sprint(len(p.Packages)))}
 	if p.OnlyExtraImages {
 		parts = append(parts, cDim("extra images only"))
 	}

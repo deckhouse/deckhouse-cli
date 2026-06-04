@@ -80,9 +80,9 @@ func TestRenderPullSummary(t *testing.T) {
 				"Platform:", "included",
 				"Installer:",
 				"Security:", "4/4 databases",
-				"2 modules",
+				"Modules:    2",
 				"commander", "console",
-				"Packages:", "1 packages",
+				"Packages:   1",
 				"scanner", "[v1.45.2]",
 				"Bundle artifacts (3 files)", // 2 chunks + 1 single tar
 				"(2 chunks)",
@@ -171,7 +171,7 @@ func TestRenderPullSummary(t *testing.T) {
 			},
 			verbose: false,
 			contains: []string{
-				"2 modules",
+				"Modules:    2",
 			},
 			// Without --verbose-summary the individual module names must not appear.
 			notContains:  []string{"commander", "console", "images"},
@@ -188,7 +188,7 @@ func TestRenderPullSummary(t *testing.T) {
 			},
 			verbose: true,
 			contains: []string{
-				"20 modules",
+				"Modules:    20",
 				"moda", "modt", // first and last of the 20
 			},
 			notContains:  []string{"more modules", "images"},
@@ -245,7 +245,7 @@ func TestRenderPullSummary(t *testing.T) {
 					Packages:    []mirror.PackageStat{},
 				},
 			},
-			contains:     []string{"0 modules", "0 packages"},
+			contains:     []string{"Modules:    0", "Packages:   0"},
 			notContains:  []string{"skipped", "more modules", "more packages", "images"},
 			skippedCount: 0,
 		},
@@ -264,7 +264,7 @@ func TestRenderPullSummary(t *testing.T) {
 			},
 			verbose: true,
 			contains: []string{
-				"2 modules", "12 VEXes",
+				"Modules:    2", "12 VEXes",
 				"commander", "(12 VEX)",
 			},
 			// console has 0 VEX -> no per-module VEX note for it.
@@ -282,7 +282,7 @@ func TestRenderPullSummary(t *testing.T) {
 				},
 			},
 			verbose:      true,
-			contains:     []string{"1 modules"},
+			contains:     []string{"Modules:    1"},
 			notContains:  []string{"VEX", "including", "images"},
 			skippedCount: -1,
 		},
@@ -296,7 +296,7 @@ func TestRenderPullSummary(t *testing.T) {
 					Modules:         []mirror.ModuleStat{{Name: "commander", Images: 12}},
 				},
 			},
-			contains:     []string{"1 modules", "extra images only"},
+			contains:     []string{"Modules:    1", "extra images only"},
 			skippedCount: -1,
 		},
 		{
@@ -314,7 +314,7 @@ func TestRenderPullSummary(t *testing.T) {
 			},
 			verbose: true,
 			contains: []string{
-				"2 packages", "9 VEXes",
+				"Packages:   2", "9 VEXes",
 				"scanner", "[v2.1.0, v2.0.3]", "(9 VEX)",
 				"console", "[v1.45.2]",
 			},
@@ -348,7 +348,7 @@ func TestRenderPullSummary(t *testing.T) {
 					Packages:        []mirror.PackageStat{{Name: "scanner", Images: 8}},
 				},
 			},
-			contains:     []string{"1 packages", "extra images only"},
+			contains:     []string{"Packages:   1", "extra images only"},
 			skippedCount: -1,
 		},
 		{
@@ -358,7 +358,7 @@ func TestRenderPullSummary(t *testing.T) {
 			},
 			// Packages: skipped; the other phases are zero-valued -> "not pulled".
 			contains:     []string{"Packages:", "skipped"},
-			notContains:  []string{"0 packages"},
+			notContains:  []string{"Packages:   0"},
 			skippedCount: 1,
 		},
 		{
@@ -374,7 +374,7 @@ func TestRenderPullSummary(t *testing.T) {
 				"not pulled",
 			},
 			// A phase that never ran must not masquerade as available/empty.
-			notContains:  []string{"not available in this edition", "0 modules"},
+			notContains:  []string{"not available in this edition", "Modules:    0"},
 			skippedCount: -1,
 		},
 		{

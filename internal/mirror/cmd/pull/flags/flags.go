@@ -90,10 +90,10 @@ var (
 
 	DryRun bool
 
-	// VerboseSummary lists every module in the end-of-pull summary with its
-	// resolved versions (plus a VEX count when the module has VEX attestations).
-	// Without it, only the aggregate "N modules" line is printed. It changes the
-	// printout only, not which images are pulled.
+	// VerboseSummary lists every module and package in the end-of-pull summary
+	// with its resolved versions (plus a VEX count when it has VEX attestations).
+	// Without it, only the aggregate counts are printed. It changes the printout
+	// only, not which images are pulled.
 	VerboseSummary bool
 
 	MirrorTimeout time.Duration = -1
@@ -319,7 +319,7 @@ Cannot be combined with --deckhouse-tag or --since-version (use --include-platfo
 		&VerboseSummary,
 		"verbose-summary",
 		false,
-		"List every module in the end-of-pull summary with its resolved versions (and VEX count, when present), instead of just the totals. Output only - it does not change what is pulled.",
+		"List every module and package in the end-of-pull summary with its resolved versions (and VEX count, when present), instead of just the totals. Output only - it does not change what is pulled.",
 	)
 	flagSet.BoolVar(
 		&TLSSkipVerify,

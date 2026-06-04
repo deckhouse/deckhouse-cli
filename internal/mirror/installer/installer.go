@@ -65,13 +65,9 @@ type Service struct {
 	// options contains service configuration
 	options *Options
 
-	// pulledImages caches the number of image manifests pulled into the OCI
-	// layout, captured before packing. 
-	// 
-    // We need this to calculate Stats() after packing.
-	// The pack step deletes every layout file
-	// as it writes it into the tar (see bundle.Pack), so the count must be taken
-	// before packing, not in Stats() which runs afterwards.
+	// pulledImages caches the image-manifest count pulled into the OCI layout,
+	// captured before packing: bundle.Pack deletes each layout file as it tars
+	// it, so the count must be taken now, not in Stats() which runs afterwards.
 	pulledImages int
 
 	// logger is for internal debug logging
