@@ -417,8 +417,8 @@ github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/deckarep/golang-set/v2 v2.6.0 h1:XfcQbWM1LlMB8BsJ8N9vW5ehnnPVIw0je80NsVHagjM=
 github.com/deckarep/golang-set/v2 v2.6.0/go.mod h1:VAky9rY/yGXJOLEDv3OMci+7wtDpOF4IN+y82NBOac4=
-github.com/deckhouse/deckhouse/go_lib/controlplane v0.0.0-20260521055926-efd0886cc5da h1:qTCPtAjVY+EWX056Vf/DHbS/wlMc9Kw1mCLKya63O+0=
-github.com/deckhouse/deckhouse/go_lib/controlplane v0.0.0-20260521055926-efd0886cc5da/go.mod h1:sSsmzJpe+mL3xEtlzae0kywYBjMS/tnw3TyaQ2X77hQ=
+github.com/deckhouse/deckhouse/go_lib/controlplane v0.0.0-20260602082302-91957e5e124e h1:Nvr0bV5Xetjhsb9ibjwuTaoZb854yy3W7jhhWpPNBEQ=
+github.com/deckhouse/deckhouse/go_lib/controlplane v0.0.0-20260602082302-91957e5e124e/go.mod h1:LXzIV70U2qmIKPwLHqreCT8dbfYV1w6Qn2Tdb+jU5gY=
 github.com/deckhouse/deckhouse/pkg/log v0.2.0 h1:6tmZQLwNb1o/hP1gzJQBjcwfA/bubbgObovXzxq+Exo=
 github.com/deckhouse/deckhouse/pkg/log v0.2.0/go.mod h1:pbAxTSDcPmwyl3wwKDcEB3qdxHnRxqTV+J0K+sha8bw=
 github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260414112803-53a5662881d9 h1:Il2d6wB6SdgjmD5ojC48qT9eQyITuANzIFjSd0DCdUI=
