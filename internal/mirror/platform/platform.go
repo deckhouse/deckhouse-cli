@@ -105,6 +105,16 @@ type Service struct {
 	// options contains service configuration
 	options *Options
 
+	// pulledImages caches the number of image manifests that were pulled into
+	// the OCI layouts, captured before packing. Needed for Stats() which runs afterwards.
+	pulledImages int
+
+	// resolvedVersions and resolvedChannels record the release versions and
+	// channels selected by findTagsToMirror, for the end-of-pull summary. They
+	// are set before any download, so they are populated in dry-run too.
+	resolvedVersions []string
+	resolvedChannels []string
+
 	// logger is for internal debug logging
 	logger *dkplog.Logger
 	// userLogger is for user-facing informational messages
@@ -183,6 +193,11 @@ func (svc *Service) PullPlatform(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("find tags to mirror: %w", err)
 	}
+
+	// Record the resolved versions/channels for the summary. Happens before any
+	// download, so the data is available in dry-run as well.
+	svc.resolvedVersions = tagsToMirror
+	svc.resolvedChannels = channelsToMirror
 
 	svc.downloadList.FillDeckhouseImages(tagsToMirror)
 	svc.downloadList.FillForChannels(channelsToMirror)
@@ -904,6 +919,11 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	if err != nil {
 		return fmt.Errorf("Processing image indexes: %w", err)
 	}
+
+	// Capture the manifest count before packing: bundle.Pack deletes every
+	// layout file as it tars it, so counting after the pack step would read an
+	// emptied layout and report zero.
+	svc.pulledImages = image.CountManifests(svc.layout.AsList())
 
 	if err := logger.Process("Pack Deckhouse images into platform.tar", func() error {
 		return pack.Bundle(ctx, svc.options.BundleDir, "platform.tar", svc.options.BundleChunkSize, func(w io.Writer) error {

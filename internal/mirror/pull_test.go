@@ -132,7 +132,7 @@ func TestPull_EmptyRegistry_ReturnsPlatformError(t *testing.T) {
 		SkipInstaller: true,
 	})
 
-	err := svc.Pull(context.Background())
+	_, err := svc.Pull(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "pull platform")
 }
@@ -146,7 +146,7 @@ func TestPull_MissingTargetTag_ReturnsPlatformError(t *testing.T) {
 		SkipInstaller: true,
 	})
 
-	err := svc.Pull(context.Background())
+	_, err := svc.Pull(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "pull platform")
 	assert.Contains(t, err.Error(), "v9.99.0")
@@ -184,7 +184,7 @@ func TestPull_SuspendedChannel_ReturnsError(t *testing.T) {
 		IgnoreSuspend: false,
 	})
 
-	err := svc.Pull(context.Background())
+	_, err := svc.Pull(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "pull platform")
 	assert.Contains(t, err.Error(), "suspended")
@@ -204,7 +204,10 @@ func TestPull_DefaultStub_Succeeds(t *testing.T) {
 		SkipInstaller: true,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }
 
 // TestPull_AllChannelTags verifies Pull succeeds for each of the five
@@ -218,7 +221,10 @@ func TestPull_AllChannelTags(t *testing.T) {
 				SkipModules:   true,
 				SkipInstaller: true,
 			})
-			require.NoError(t, svc.Pull(context.Background()))
+			{
+				_, err := svc.Pull(context.Background())
+				require.NoError(t, err)
+			}
 		})
 	}
 }
@@ -232,7 +238,10 @@ func TestPull_EmptyTargetTag_FullDiscovery(t *testing.T) {
 		SkipInstaller: true,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }
 
 // TestPull_IgnoreSuspend_AllowsSuspendedChannel verifies that
@@ -277,7 +286,10 @@ func TestPull_IgnoreSuspend_AllowsSuspendedChannel(t *testing.T) {
 		IgnoreSuspend: true,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }
 
 // TestPull_SkipPlatform_AlwaysSucceeds verifies that SkipPlatform=true
@@ -292,7 +304,10 @@ func TestPull_SkipPlatform_AlwaysSucceeds(t *testing.T) {
 		SkipInstaller: true,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }
 
 // TestPull_SkipAll_EmptyRegistry verifies Pull succeeds when every
@@ -307,7 +322,10 @@ func TestPull_SkipAll_EmptyRegistry(t *testing.T) {
 		SkipInstaller: true,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }
 
 // TestPull_InstallerGracefulSkip verifies that when the "installer"
@@ -321,7 +339,10 @@ func TestPull_InstallerGracefulSkip(t *testing.T) {
 		SkipInstaller: false,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }
 
 // TestPull_SecurityGracefulSkip verifies that when the security repo is
@@ -335,7 +356,10 @@ func TestPull_SecurityGracefulSkip(t *testing.T) {
 		SkipSecurity:  false,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }
 
 // TestPull_ModulesGracefulSkip verifies that when no modules exist in
@@ -348,7 +372,10 @@ func TestPull_ModulesGracefulSkip(t *testing.T) {
 		SkipModules:   false,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }
 
 // TestPull_SkipVexImages_DoesNotError verifies the SkipVexImages flag
@@ -361,7 +388,10 @@ func TestPull_SkipVexImages_DoesNotError(t *testing.T) {
 		SkipInstaller: true,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -375,7 +405,54 @@ func TestPull_FullStub_AllServicesActive(t *testing.T) {
 		SkipVexImages: true,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
+}
+
+// TestPull_FullStub_SummaryPopulated is the orchestration-level regression test
+// for the summary feature: it asserts that a real (non-dry-run) pull returns a
+// summary whose per-category counts are non-zero and survive packing. This
+// pins both the count-capture-before-pack fix (counting after bundle.Pack would
+// read emptied layouts and report zero) and the mapper functions that copy the
+// per-service stat structs into the summary.
+func TestPull_FullStub_SummaryPopulated(t *testing.T) {
+	svc := newPullService(t, fullStub(), "v1.69.0", &PullServiceOptions{
+		InstallerTag:  "v1.69.0",
+		SkipVexImages: true,
+	})
+
+	summary, err := svc.Pull(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	require.False(t, summary.DryRun)
+
+	// Platform: at least the deckhouse, install, install-standalone and
+	// release-channel images for v1.69.0 were pulled.
+	assert.True(t, summary.Platform.Attempted)
+	assert.False(t, summary.Platform.Skipped)
+	assert.Greater(t, summary.Platform.Images, 0,
+		"platform image count must survive packing")
+
+	// Installer: a single installer image.
+	assert.True(t, summary.Installer.Attempted)
+	assert.Equal(t, 1, summary.Installer.Images)
+
+	// Security: trivy-db is available in the stub, so the edition is reported
+	// as available with at least one database pulled.
+	assert.True(t, summary.Security.Attempted)
+	assert.True(t, summary.Security.Available)
+	assert.Equal(t, 4, summary.Security.AvailableDatabases)
+	assert.Greater(t, summary.Security.Databases, 0)
+
+	// Modules: the stub exposes two module names but no pullable version or
+	// release-channel images for them, so the phase runs (Attempted) yet pulls
+	// nothing - zero-image modules are correctly omitted from the breakdown.
+	// (Real module counting is exercised end-to-end against a live registry; the
+	// stub only carries module names, not their contents.)
+	assert.True(t, summary.Modules.Attempted)
+	assert.False(t, summary.Modules.Skipped)
 }
 
 // TestPull_FullStub_FullDiscovery verifies full-discovery mode (empty
@@ -385,7 +462,10 @@ func TestPull_FullStub_FullDiscovery(t *testing.T) {
 		SkipVexImages: true,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }
 
 // TestPull_FullStub_CustomTag verifies Pull succeeds with a custom
@@ -422,7 +502,10 @@ func TestPull_FullStub_CustomTag(t *testing.T) {
 		SkipInstaller: true,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }
 
 // TestPull_DevRegistry_CustomTagWithNoChannels reproduces the v0.27.0 user
@@ -464,7 +547,8 @@ func TestPull_DevRegistry_CustomTagWithNoChannels(t *testing.T) {
 		SkipInstaller: true,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()),
+	_, pullErr := svc.Pull(context.Background())
+	require.NoError(t, pullErr,
 		"d8 mirror pull --deckhouse-tag must succeed against a dev registry without release-channel images")
 }
 
@@ -478,7 +562,10 @@ func TestPull_FullStub_InstallerPresent(t *testing.T) {
 		SkipInstaller: false,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }
 
 // TestPull_FullStub_SecurityPresent verifies that when the security
@@ -491,7 +578,10 @@ func TestPull_FullStub_SecurityPresent(t *testing.T) {
 		SkipSecurity:  false,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }
 
 // TestPull_FullStub_ModulesPresent verifies that when modules exist in
@@ -504,7 +594,10 @@ func TestPull_FullStub_ModulesPresent(t *testing.T) {
 		SkipModules:   false,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }
 
 // TestPull_FullStub_AllServices verifies Pull returns nil when all four
@@ -515,5 +608,8 @@ func TestPull_FullStub_AllServices(t *testing.T) {
 		SkipVexImages: true,
 	})
 
-	require.NoError(t, svc.Pull(context.Background()))
+	{
+		_, err := svc.Pull(context.Background())
+		require.NoError(t, err)
+	}
 }

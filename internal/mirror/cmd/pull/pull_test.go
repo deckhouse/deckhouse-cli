@@ -19,6 +19,7 @@ package pull
 import (
 	"context"
 	"crypto/md5"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -36,9 +37,9 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/validation"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/validation"
 )
 
 // closedLocalAddr returns a host:port pair on 127.0.0.1 that is guaranteed not
@@ -1341,6 +1342,36 @@ func TestPullerExecuteWithCleanupFailure(t *testing.T) {
 	// This test is platform-dependent and may not work reliably
 	// The main cleanup functionality is tested in TestPullerFinalCleanup
 	t.Skip("Skipping platform-dependent cleanup failure test")
+}
+
+// TestClassifyPullOutcome covers the terminal-state decision Execute makes from
+// PullService.Pull's error: it sets Cancelled/Failed on the summary and decides
+// which error (if any) propagates to the process exit code.
+func TestClassifyPullOutcome(t *testing.T) {
+	t.Run("success sets no terminal flag and returns nil", func(t *testing.T) {
+		s := &mirror.PullSummary{}
+		require.NoError(t, classifyPullOutcome(s, nil))
+		assert.False(t, s.Cancelled)
+		assert.False(t, s.Failed)
+	})
+
+	t.Run("context.Canceled marks Cancelled and is a clean exit", func(t *testing.T) {
+		s := &mirror.PullSummary{}
+		// Wrapped, as the phases return it (e.g. "pull modules: context canceled").
+		require.NoError(t, classifyPullOutcome(s, fmt.Errorf("pull modules: %w", context.Canceled)))
+		assert.True(t, s.Cancelled)
+		assert.False(t, s.Failed)
+	})
+
+	t.Run("hard error marks Failed and propagates wrapped", func(t *testing.T) {
+		s := &mirror.PullSummary{}
+		err := classifyPullOutcome(s, errors.New("registry unreachable"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "pull from registry")
+		assert.Contains(t, err.Error(), "registry unreachable")
+		assert.True(t, s.Failed)
+		assert.False(t, s.Cancelled)
+	})
 }
 
 // Benchmark tests

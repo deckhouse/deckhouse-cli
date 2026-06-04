@@ -60,6 +60,18 @@ type Service struct {
 	// options contains service configuration
 	options *Options
 
+	// available records whether security databases exist in the source
+	// registry, as determined by securityDatabasesAvailable during
+	// PullSecurity. It is false for editions without security databases
+	// (e.g. CE, BE, SE) and feeds the end-of-pull summary.
+	available bool
+
+	// pulledDatabases caches how many of the security databases actually
+	// received at least one image, captured before packing. The pack step
+	// deletes every layout file as it tars it (see bundle.Pack), so the count
+	// must be taken before packing, not in Stats() which runs afterwards.
+	pulledDatabases int
+
 	// logger is for internal debug logging
 	logger *dkplog.Logger
 	// userLogger is for user-facing informational messages
@@ -108,6 +120,8 @@ func (svc *Service) PullSecurity(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("check security databases availability: %w", err)
 	}
+
+	svc.available = available
 
 	if !available {
 		return nil
@@ -194,6 +208,11 @@ func (svc *Service) pullSecurityDatabases(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("processing security image indexes: %w", err)
 	}
+
+	// Capture how many databases actually received images before packing:
+	// bundle.Pack deletes every layout file as it tars it, so counting after the
+	// pack step would read emptied layouts and report zero.
+	svc.pulledDatabases = svc.countPulledDatabases()
 
 	if err := logger.Process("Pack security images into security.tar", func() error {
 		return pack.Bundle(ctx, svc.options.BundleDir, "security.tar", svc.options.BundleChunkSize, func(w io.Writer) error {

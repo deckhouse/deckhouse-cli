@@ -17,9 +17,11 @@ limitations under the License.
 package image_test
 
 import (
+	"strings"
 	"testing"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -132,4 +134,34 @@ func TestAddImage_NewDescriptorForSameTagDifferentDigest(t *testing.T) {
 	require.NotNil(t, meta.GetDigest())
 	assert.Equal(t, digestB.String(), meta.GetDigest().String(),
 		"in-memory metadata for the tag must reflect the latest AddImage call")
+}
+
+// TestCountManifestsMatching verifies that CountManifestsMatching counts only
+// the descriptors whose short-tag annotation satisfies the predicate - the
+// mechanism the summary uses to separate VEX attestations (".att" tags) from
+// regular images that share the same layout.
+func TestCountManifestsMatching(t *testing.T) {
+	l, err := regimage.NewImageLayout(t.TempDir())
+	require.NoError(t, err)
+
+	img := func(v string) v1.Image {
+		return upfake.NewImageBuilder().WithFile("version.json", `{"v":"`+v+`"}`).MustBuild()
+	}
+	// Two regular images and one VEX attestation, all in the same layout.
+	require.NoError(t, l.AddImage(wrapImage(t, img("a"), "example.io/repo:v1.0.0"), "v1.0.0"))
+	require.NoError(t, l.AddImage(wrapImage(t, img("b"), "example.io/repo:v2.0.0"), "v2.0.0"))
+	require.NoError(t, l.AddImage(wrapImage(t, img("c"), "example.io/repo:sha256-abc.att"), "sha256-abc.att"))
+
+	paths := []layout.Path{l.Path()}
+
+	assert.Equal(t, 3, regimage.CountManifests(paths),
+		"CountManifests must count every manifest")
+
+	vex := regimage.CountManifestsMatching(paths, func(a map[string]string) bool {
+		return strings.HasSuffix(a[regimage.AnnotationImageShortTag], ".att")
+	})
+	assert.Equal(t, 1, vex, "only the .att manifest must match the VEX predicate")
+
+	none := regimage.CountManifestsMatching(paths, func(map[string]string) bool { return false })
+	assert.Equal(t, 0, none, "a never-true predicate matches nothing")
 }

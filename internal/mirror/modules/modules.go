@@ -105,6 +105,10 @@ type Service struct {
 	// options contains service configuration
 	options *Options
 
+	// moduleStats accumulates per-module pull accounting, keyed by module name.
+	// See modulePullStat for what each field holds and when it is filled.
+	moduleStats map[moduleName]modulePullStat
+
 	// rootURL is the base registry URL for modules images
 	rootURL string
 
@@ -147,6 +151,7 @@ func NewService(
 		pullerService:       puller.NewPullerService(logger, userLogger),
 		options:             options,
 		rootURL:             rootURL,
+		moduleStats:         make(map[moduleName]modulePullStat),
 		logger:              logger,
 		userLogger:          userLogger,
 	}
@@ -340,6 +345,11 @@ func (svc *Service) pullModules(ctx context.Context) error {
 		}
 	}
 
+	// Capture per-module manifest counts before packing: bundle.Pack deletes
+	// every layout file as it tars it, so counting after the pack step would
+	// read emptied layouts and report zero.
+	svc.capturePulledImages(filteredModules)
+
 	// Pack each module into separate tar
 	if err := svc.packModules(postCtx, filteredModules); err != nil {
 		return err
@@ -370,8 +380,23 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 
 	moduleVersions := svc.mergeAndDedupeVersions(module.name, module.registryPath, channelVersions, tags)
 
+	// Record the resolved versions for the summary. Happens before download, so
+	// it is populated in dry-run too.
+	stat := svc.moduleStats[module.name]
+	stat.versions = moduleVersions
+	svc.moduleStats[module.name] = stat
+
 	if svc.options.DryRun {
 		svc.printDryRunPlan(module.name, downloadList, moduleVersions)
+
+		// Record the planned version images so the end-of-pull summary counts
+		// them, mirroring the references printDryRunPlan prints. Extra images
+		// are not resolved in dry-run (they require a real pull), so the
+		// per-module count stays "release channels + versions".
+		for _, version := range moduleVersions {
+			downloadList.Module[svc.rootURL+"/modules/"+module.name+":"+version] = nil
+		}
+
 		return nil
 	}
 

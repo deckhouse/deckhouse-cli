@@ -197,45 +197,69 @@ func NewPullService(
 	}
 }
 
-// Pull downloads Deckhouse components from registry
-func (svc *PullService) Pull(ctx context.Context) error {
+// Pull downloads Deckhouse components from registry.
+//
+// It returns a PullSummary describing what was pulled (or planned, in dry-run).
+// The summary is assembled incrementally as each phase completes, and is
+// returned even on error so that callers can render a partial summary after a
+// graceful cancellation.
+func (svc *PullService) Pull(ctx context.Context) (*PullSummary, error) {
+	summary := &PullSummary{DryRun: svc.options.DryRun}
+
 	if svc.options.SkipVexImages {
 		svc.userLogger.WarnLn("The skip-vex-images flag was detected: Vulnerability scanning may not work correctly when this flag is used.")
 	}
 
-	if !svc.options.SkipPlatform {
-		err := svc.platformService.PullPlatform(ctx)
-		if err != nil {
-			return fmt.Errorf("pull platform: %w", err)
+	if svc.options.SkipPlatform {
+		summary.Platform.Skipped = true
+	} else {
+		if err := svc.platformService.PullPlatform(ctx); err != nil {
+			return summary, fmt.Errorf("pull platform: %w", err)
 		}
+
+		ps := svc.platformService.Stats()
+		summary.Platform = ComponentStats{Attempted: ps.Attempted, Images: ps.Images, Versions: ps.Versions, Channels: ps.Channels}
 	}
 
-	if !svc.options.SkipInstaller {
-		err := svc.installerService.PullInstaller(ctx)
-		if err != nil {
-			return fmt.Errorf("pull installer: %w", err)
+	if svc.options.SkipInstaller {
+		summary.Installer.Skipped = true
+	} else {
+		if err := svc.installerService.PullInstaller(ctx); err != nil {
+			return summary, fmt.Errorf("pull installer: %w", err)
 		}
+
+		is := svc.installerService.Stats()
+		summary.Installer = ComponentStats{Attempted: is.Attempted, Images: is.Images, Versions: []string{is.Tag}}
 	}
 
-	if !svc.options.SkipSecurity {
-		err := svc.securityService.PullSecurity(ctx)
-		if err != nil {
-			return fmt.Errorf("pull security databases: %w", err)
+	if svc.options.SkipSecurity {
+		summary.Security.Skipped = true
+	} else {
+		if err := svc.securityService.PullSecurity(ctx); err != nil {
+			return summary, fmt.Errorf("pull security databases: %w", err)
 		}
+
+		summary.Security = toSecurityStats(svc.securityService.Stats())
 	}
 
 	if !svc.options.SkipModules || svc.options.OnlyExtraImages {
-		err := svc.modulesService.PullModules(ctx)
-		if err != nil {
-			return fmt.Errorf("pull modules: %w", err)
+		if err := svc.modulesService.PullModules(ctx); err != nil {
+			return summary, fmt.Errorf("pull modules: %w", err)
 		}
+
+		summary.Modules = toModulesStats(svc.modulesService.Stats())
+	} else {
+		summary.Modules.Skipped = true
 	}
 
 	if !svc.options.SkipPackages || svc.options.OnlyExtraImages {
-		err := svc.packagesService.PullPackages(ctx)
-		if err != nil {
-			return fmt.Errorf("pull packages: %w", err)
+		if err := svc.packagesService.PullPackages(ctx); err != nil {
+			return summary, fmt.Errorf("pull packages: %w", err)
 		}
+
+		summary.Packages = toPackagesStats(svc.packagesService.Stats())
+	} else {
+		summary.Packages.Skipped = true
 	}
 
 	// The package release-image catalog (package-versions) is always cloned
@@ -243,8 +267,52 @@ func (svc *PullService) Pull(ctx context.Context) error {
 	// packages are skipped via --no-packages. This keeps the bundle's package
 	// release metadata in sync on every mirror operation.
 	if err := svc.packagesService.PullPackageVersions(ctx); err != nil {
-		return fmt.Errorf("pull package release images: %w", err)
+		return summary, fmt.Errorf("pull package release images: %w", err)
 	}
 
-	return nil
+	return summary, nil
+}
+
+// The mapper functions below copy each service's package-local stat struct into
+// the corresponding summary type. The structs are duplicated to keep the
+// service packages decoupled from package mirror, which imports them (so the
+// dependency cannot be reversed).
+
+func toSecurityStats(s security.SecurityStats) SecurityStats {
+	return SecurityStats{
+		Attempted:          s.Attempted,
+		Available:          s.Available,
+		Databases:          s.Databases,
+		AvailableDatabases: s.AvailableDatabases,
+	}
+}
+
+func toModulesStats(s modules.ModulesStats) ModulesStats {
+	mods := make([]ModuleStat, 0, len(s.Modules))
+	for _, m := range s.Modules {
+		mods = append(mods, ModuleStat{Name: m.Name, Images: m.Images, VEX: m.VEX, Versions: m.Versions})
+	}
+
+	return ModulesStats{
+		Attempted:       s.Attempted,
+		OnlyExtraImages: s.OnlyExtraImages,
+		Modules:         mods,
+		TotalImages:     s.TotalImages,
+		TotalVEX:        s.TotalVEX,
+	}
+}
+
+func toPackagesStats(s packages.PackagesStats) PackagesStats {
+	pkgs := make([]PackageStat, 0, len(s.Packages))
+	for _, p := range s.Packages {
+		pkgs = append(pkgs, PackageStat{Name: p.Name, Images: p.Images, VEX: p.VEX, Versions: p.Versions})
+	}
+
+	return PackagesStats{
+		Attempted:       s.Attempted,
+		OnlyExtraImages: s.OnlyExtraImages,
+		Packages:        pkgs,
+		TotalImages:     s.TotalImages,
+		TotalVEX:        s.TotalVEX,
+	}
 }
