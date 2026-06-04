@@ -85,9 +85,9 @@ type PluginRequirementsGroup struct {
 }
 
 // ModuleRequirementsGroup splits module requirements into Mandatory, Conditional, and AnyOf.
-//   - Mandatory: the module must be in the cluster AND satisfy the constraint.
-//   - Conditional: only enforced if the module is in the cluster.
-//   - AnyOf: at least one module per group must be in the cluster and satisfy its constraint.
+//   - Mandatory: the module must be enabled AND satisfy the constraint.
+//   - Conditional: only enforced if the module is enabled.
+//   - AnyOf: at least one module per group must be enabled and satisfy its constraint.
 type ModuleRequirementsGroup struct {
 	Mandatory   []ModuleRequirement
 	Conditional []ModuleRequirement

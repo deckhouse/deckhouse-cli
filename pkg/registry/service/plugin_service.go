@@ -128,7 +128,7 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 	s.log.Debug("Contract raw retrieved successfully", slog.String("contractraw", string(contractRaw)))
 
 	contract := new(PluginContract)
-	if err := unmarshalContract(contractRaw, contract); err != nil {
+	if err := UnmarshalContract(contractRaw, contract); err != nil {
 		return nil, err
 	}
 
@@ -138,12 +138,11 @@ func (s *PluginService) GetPluginContract(ctx context.Context, pluginName, tag s
 	return ContractToDomain(contract), nil
 }
 
-// unmarshalContract decodes raw JSON into a PluginContract and rewrites
-// encoding/json's verbose default errors as user-actionable messages.
-// Used by every caller that turns a contract blob into a domain object so
-// the wording stays identical whether the source is an OCI annotation or
-// a local file.
-func unmarshalContract(raw []byte, dst *PluginContract) error {
+// UnmarshalContract decodes raw contract JSON into dst and rewrites
+// encoding/json's verbose default errors as user-actionable messages, so the
+// wording stays identical regardless of the source (OCI annotation, cache file,
+// or a tar entry served by registry-packages-proxy).
+func UnmarshalContract(raw []byte, dst *PluginContract) error {
 	err := json.Unmarshal(raw, dst)
 	if err == nil {
 		return nil
@@ -178,7 +177,7 @@ func GetPluginContractFromFile(contractFilePath string) (*internal.Plugin, error
 	}
 
 	contract := new(PluginContract)
-	if err := unmarshalContract(contractBytes, contract); err != nil {
+	if err := UnmarshalContract(contractBytes, contract); err != nil {
 		return nil, err
 	}
 
