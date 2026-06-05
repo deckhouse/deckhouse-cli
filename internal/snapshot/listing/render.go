@@ -112,19 +112,11 @@ func continuation(isLast bool) string {
 	return "│  "
 }
 
-// objectKey returns a deduplication key for an object.
-func objectKey(obj ObjectView) string {
-	return obj.APIVersion + "|" + obj.Kind + "|" + obj.Namespace + "|" + obj.Name
-}
-
 // printNodeHuman recursively renders a node using box-drawing connectors.
 // prefix is the accumulated column string from parent levels.
 // isLast is true when this node is the last sibling in its parent's list.
 // isRoot is true only for the top-level node, which prints without a connector.
-//
-// Objects already captured by any direct child node are omitted from the
-// current level so each object appears exactly once in the most specific
-// position.
+// The model is pre-deduped by dedupTree, so nv.Objects is iterated directly.
 func printNodeHuman(w io.Writer, nv *NodeView, prefix string, isLast, isRoot bool) {
 	countStr := ""
 	if nv.ObjectCount >= 0 {
@@ -142,28 +134,10 @@ func printNodeHuman(w io.Writer, nv *NodeView, prefix string, isLast, isRoot boo
 		childPrefix += continuation(isLast)
 	}
 
-	// Build a set of object keys covered by direct children so they are not
-	// repeated at this level.
-	childKeys := make(map[string]struct{})
-
-	for _, child := range nv.Children {
-		for _, obj := range child.Objects {
-			childKeys[objectKey(obj)] = struct{}{}
-		}
-	}
-
-	var ownObjects []ObjectView
-
-	for _, obj := range nv.Objects {
-		if _, covered := childKeys[objectKey(obj)]; !covered {
-			ownObjects = append(ownObjects, obj)
-		}
-	}
-
-	total := len(ownObjects) + len(nv.Children)
+	total := len(nv.Objects) + len(nv.Children)
 	idx := 0
 
-	for _, obj := range ownObjects {
+	for _, obj := range nv.Objects {
 		idx++
 
 		name := obj.Name

@@ -156,6 +156,8 @@ func BuildFromCluster(ctx context.Context, sc *safeClient.SafeClient, rtClient c
 			nv.Objects = objs
 			nv.ObjectCount = len(objs)
 		}
+
+		dedupTree(rootView)
 	}
 
 	return &Tree{
@@ -239,10 +241,7 @@ func BuildFromArchive(opts Options, log *slog.Logger) (*Tree, error) {
 	for id, nv := range nodeMap {
 		objs := objsByNode[id]
 		nv.ObjectCount = len(objs)
-
-		if opts.WithObjects {
-			nv.Objects = objs
-		}
+		nv.Objects = objs // always attach for dedup; cleared below if !WithObjects
 	}
 
 	rootID := meta.Selection.RootNodeID
@@ -257,6 +256,16 @@ func BuildFromArchive(opts Options, log *slog.Logger) (*Tree, error) {
 		if rootView == nil {
 			return nil, fmt.Errorf("node %q not found in archive; check the ID in indexes/nodes.jsonl", opts.NodeFilter)
 		}
+	}
+
+	dedupTree(rootView)
+
+	if meta.Selection.Mode == archive.SelectionObject {
+		pruneEmpty(rootView)
+	}
+
+	if !opts.WithObjects {
+		clearObjects(rootView)
 	}
 
 	return &Tree{
@@ -319,6 +328,73 @@ func findNodeView(nv *NodeView, id string) *NodeView {
 	}
 
 	return nil
+}
+
+// objectKey returns a stable deduplication identity for an object.
+func objectKey(o ObjectView) string {
+	return o.APIVersion + "|" + o.Kind + "|" + o.Namespace + "|" + o.Name
+}
+
+// dedupTree keeps each object only at the deepest node that captured it and
+// resets ObjectCount to the number of retained objects. Returns the set of
+// all object keys present anywhere in nv's subtree.
+func dedupTree(nv *NodeView) map[string]struct{} {
+	childKeys := make(map[string]struct{})
+	subtreeKeys := make(map[string]struct{})
+
+	for _, c := range nv.Children {
+		for k := range dedupTree(c) {
+			childKeys[k] = struct{}{}
+			subtreeKeys[k] = struct{}{}
+		}
+	}
+
+	kept := make([]ObjectView, 0, len(nv.Objects))
+
+	for _, o := range nv.Objects {
+		k := objectKey(o)
+		subtreeKeys[k] = struct{}{}
+
+		if _, dup := childKeys[k]; dup {
+			continue
+		}
+
+		kept = append(kept, o)
+	}
+
+	nv.Objects = kept
+	nv.ObjectCount = len(kept)
+
+	return subtreeKeys
+}
+
+// clearObjects recursively sets Objects to nil while preserving ObjectCount.
+// Used after dedupTree when --objects is not requested.
+func clearObjects(nv *NodeView) {
+	nv.Objects = nil
+
+	for _, c := range nv.Children {
+		clearObjects(c)
+	}
+}
+
+// pruneEmpty removes child subtrees that contain zero objects (own count +
+// all descendants). Returns the total object count in nv's subtree.
+// The root node itself is never removed by this function.
+func pruneEmpty(nv *NodeView) int {
+	total := nv.ObjectCount
+	kept := nv.Children[:0]
+
+	for _, c := range nv.Children {
+		if sub := pruneEmpty(c); sub > 0 {
+			kept = append(kept, c)
+			total += sub
+		}
+	}
+
+	nv.Children = kept
+
+	return total
 }
 
 // objectViewFromJSON parses a raw manifest JSON byte slice into an ObjectView.

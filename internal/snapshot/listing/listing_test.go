@@ -231,10 +231,17 @@ func stubBuildTree(_ context.Context, _ ctrlrtclient.Client, _, _ string) (*sour
 	return stubRootNode, nil
 }
 
-func stubFetchManifests(_ context.Context, _ *safeClient.SafeClient, _ *source.Node) ([][]byte, error) {
-	return [][]byte{
-		[]byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cm1","namespace":"demo"}}`),
-	}, nil
+func stubFetchManifests(_ context.Context, _ *safeClient.SafeClient, n *source.Node) ([][]byte, error) {
+	switch n.ID {
+	case "Snapshot--child":
+		return [][]byte{
+			[]byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cm2","namespace":"demo"}}`),
+		}, nil
+	default:
+		return [][]byte{
+			[]byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cm1","namespace":"demo"}}`),
+		}, nil
+	}
 }
 
 func TestBuildFromCluster_Tree(t *testing.T) {
@@ -288,6 +295,7 @@ func TestBuildFromCluster_WithObjects(t *testing.T) {
 		t.Fatalf("BuildFromCluster: %v", err)
 	}
 
+	// root gets cm1 (exclusive); child gets cm2 (exclusive) — no overlap, no dedup effect.
 	if tree.Root.ObjectCount != 1 {
 		t.Fatalf("root.ObjectCount = %d, want 1", tree.Root.ObjectCount)
 	}
@@ -299,4 +307,230 @@ func TestBuildFromCluster_WithObjects(t *testing.T) {
 	if tree.Root.Objects[0].Kind != "ConfigMap" {
 		t.Fatalf("root.Objects[0].Kind = %q, want ConfigMap", tree.Root.Objects[0].Kind)
 	}
+}
+
+func TestBuildFromCluster_Dedup(t *testing.T) {
+	listing.SetBuildTreeFunc(stubBuildTree)
+
+	// Both root and child return the same "shared" object plus a unique one.
+	listing.SetFetchManifestsFunc(func(_ context.Context, _ *safeClient.SafeClient, n *source.Node) ([][]byte, error) {
+		shared := []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"shared","namespace":"demo"}}`)
+
+		if n.ID == "Snapshot--child" {
+			return [][]byte{shared}, nil
+		}
+
+		unique := []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"root-only","namespace":"demo"}}`)
+
+		return [][]byte{unique, shared}, nil
+	})
+
+	t.Cleanup(func() {
+		listing.ResetFuncs()
+	})
+
+	tree, err := listing.BuildFromCluster(context.Background(), nil, nil, listing.Options{
+		Namespace:    "demo",
+		SnapshotName: "my-snap",
+		WithObjects:  true,
+	}, testLog())
+	if err != nil {
+		t.Fatalf("BuildFromCluster dedup: %v", err)
+	}
+
+	// "shared" is captured by child → removed from root; root keeps only "root-only".
+	if tree.Root.ObjectCount != 1 {
+		t.Fatalf("root.ObjectCount = %d, want 1 after dedup", tree.Root.ObjectCount)
+	}
+
+	if tree.Root.Objects[0].Name != "root-only" {
+		t.Fatalf("root.Objects[0].Name = %q, want root-only", tree.Root.Objects[0].Name)
+	}
+
+	child := tree.Root.Children[0]
+
+	if child.ObjectCount != 1 {
+		t.Fatalf("child.ObjectCount = %d, want 1", child.ObjectCount)
+	}
+
+	if child.Objects[0].Name != "shared" {
+		t.Fatalf("child.Objects[0].Name = %q, want shared", child.Objects[0].Name)
+	}
+}
+
+func TestBuildFromArchive_Dedup(t *testing.T) {
+	dir := t.TempDir()
+
+	shared := []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"shared","namespace":"demo"}}`)
+	rootOnly := []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"root-only","namespace":"demo"}}`)
+
+	meta := archive.Meta{
+		Magic: archive.Magic, SchemaVersion: archive.SchemaVersion, ArchiveID: "dedup-test",
+		CreatedAt: time.Now().UTC(),
+		CreatedBy: archive.Creator{Tool: "d8", Version: "test"},
+		Source: archive.Source{
+			Cluster:             archive.Cluster{Server: "https://test.example.com"},
+			Namespace:           "demo",
+			RootSnapshot:        archive.SnapshotRef{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Resource: "snapshots", Name: "root"},
+			RootSnapshotContent: archive.SnapshotContentRef{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "SnapshotContent", Name: "sc-root"},
+		},
+		Selection: archive.Selection{
+			Mode:            archive.SelectionFull,
+			RootNodeID:      "Snapshot--root",
+			SelectedNodeIDs: []string{"Snapshot--root", "Snapshot--child"},
+		},
+	}
+
+	w, err := archive.NewDirWriter(dir, meta)
+	if err != nil {
+		t.Fatalf("NewDirWriter: %v", err)
+	}
+
+	for _, nr := range []archive.NodeRecord{
+		{ID: "Snapshot--root", Kind: "Snapshot", Name: "root", Namespace: "demo", Children: []string{"Snapshot--child"}},
+		{ID: "Snapshot--child", Kind: "Snapshot", Name: "child", Namespace: "demo", ParentID: "Snapshot--root", Children: []string{}},
+	} {
+		if err := w.AppendNode(nr); err != nil {
+			t.Fatalf("AppendNode: %v", err)
+		}
+	}
+
+	for _, item := range []struct {
+		nodeID string
+		raw    []byte
+	}{
+		{"Snapshot--root", rootOnly},
+		{"Snapshot--root", shared},  // shared also in child
+		{"Snapshot--child", shared}, // deepest captures shared
+	} {
+		rec, err := w.AddObject(item.nodeID, item.raw)
+		if err != nil {
+			t.Fatalf("AddObject: %v", err)
+		}
+
+		if err := w.AppendObject(rec); err != nil {
+			t.Fatalf("AppendObject: %v", err)
+		}
+	}
+
+	if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	tree, err := listing.BuildFromArchive(listing.Options{ArchiveDir: dir, WithObjects: true}, testLog())
+	if err != nil {
+		t.Fatalf("BuildFromArchive dedup: %v", err)
+	}
+
+	// root had [root-only, shared]; shared moves to child → root keeps only root-only.
+	if tree.Root.ObjectCount != 1 {
+		t.Fatalf("root.ObjectCount = %d, want 1 after dedup", tree.Root.ObjectCount)
+	}
+
+	if tree.Root.Objects[0].Name != "root-only" {
+		t.Fatalf("root.Objects[0].Name = %q, want root-only", tree.Root.Objects[0].Name)
+	}
+
+	child := tree.Root.Children[0]
+
+	if child.ObjectCount != 1 {
+		t.Fatalf("child.ObjectCount = %d, want 1", child.ObjectCount)
+	}
+
+	if child.Objects[0].Name != "shared" {
+		t.Fatalf("child.Objects[0].Name = %q, want shared", child.Objects[0].Name)
+	}
+}
+
+func TestBuildFromArchive_ObjectModePrune(t *testing.T) {
+	makeObjectArchive := func(t *testing.T, objectNodeID string) string {
+		t.Helper()
+
+		dir := t.TempDir()
+
+		raw := []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"selected","namespace":"demo"}}`)
+
+		meta := archive.Meta{
+			Magic: archive.Magic, SchemaVersion: archive.SchemaVersion, ArchiveID: "obj-prune-test",
+			CreatedAt: time.Now().UTC(),
+			CreatedBy: archive.Creator{Tool: "d8", Version: "test"},
+			Source: archive.Source{
+				Cluster:             archive.Cluster{Server: "https://test.example.com"},
+				Namespace:           "demo",
+				RootSnapshot:        archive.SnapshotRef{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Resource: "snapshots", Name: "root"},
+				RootSnapshotContent: archive.SnapshotContentRef{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "SnapshotContent", Name: "sc-root"},
+			},
+			Selection: archive.Selection{
+				Mode:            archive.SelectionObject,
+				RootNodeID:      "Snapshot--root",
+				SelectedNodeIDs: []string{"Snapshot--root", "Snapshot--child-a", "Snapshot--child-b"},
+			},
+		}
+
+		w, err := archive.NewDirWriter(dir, meta)
+		if err != nil {
+			t.Fatalf("NewDirWriter: %v", err)
+		}
+
+		for _, nr := range []archive.NodeRecord{
+			{ID: "Snapshot--root", Kind: "Snapshot", Name: "root", Namespace: "demo", Children: []string{"Snapshot--child-a", "Snapshot--child-b"}},
+			{ID: "Snapshot--child-a", Kind: "Snapshot", Name: "child-a", Namespace: "demo", ParentID: "Snapshot--root", Children: []string{}},
+			{ID: "Snapshot--child-b", Kind: "Snapshot", Name: "child-b", Namespace: "demo", ParentID: "Snapshot--root", Children: []string{}},
+		} {
+			if err := w.AppendNode(nr); err != nil {
+				t.Fatalf("AppendNode: %v", err)
+			}
+		}
+
+		rec, err := w.AddObject(objectNodeID, raw)
+		if err != nil {
+			t.Fatalf("AddObject: %v", err)
+		}
+
+		if err := w.AppendObject(rec); err != nil {
+			t.Fatalf("AppendObject: %v", err)
+		}
+
+		if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}); err != nil {
+			t.Fatalf("Finalize: %v", err)
+		}
+
+		return dir
+	}
+
+	t.Run("object_at_root_children_pruned", func(t *testing.T) {
+		dir := makeObjectArchive(t, "Snapshot--root")
+
+		tree, err := listing.BuildFromArchive(listing.Options{ArchiveDir: dir, WithObjects: true}, testLog())
+		if err != nil {
+			t.Fatalf("BuildFromArchive: %v", err)
+		}
+
+		if tree.Root.ObjectCount != 1 {
+			t.Fatalf("root.ObjectCount = %d, want 1", tree.Root.ObjectCount)
+		}
+
+		// Both empty children must be pruned.
+		if len(tree.Root.Children) != 0 {
+			t.Fatalf("expected 0 children after pruning, got %d", len(tree.Root.Children))
+		}
+	})
+
+	t.Run("object_at_child_a_child_b_pruned", func(t *testing.T) {
+		dir := makeObjectArchive(t, "Snapshot--child-a")
+
+		tree, err := listing.BuildFromArchive(listing.Options{ArchiveDir: dir, WithObjects: true}, testLog())
+		if err != nil {
+			t.Fatalf("BuildFromArchive: %v", err)
+		}
+
+		// child-b has no objects; child-a has one → only child-a kept.
+		if len(tree.Root.Children) != 1 {
+			t.Fatalf("expected 1 child after pruning, got %d", len(tree.Root.Children))
+		}
+
+		if tree.Root.Children[0].ID != "Snapshot--child-a" {
+			t.Fatalf("surviving child = %q, want Snapshot--child-a", tree.Root.Children[0].ID)
+		}
+	})
 }
