@@ -145,6 +145,12 @@ func (r *DirReader) Progress() (map[string]ProgressRecord, error) {
 	return readProgressFile(filepath.Join(r.dir, dirIndexes, fileProgress))
 }
 
+// VolumeProgress reads indexes/volumes.jsonl and returns a map of VolumeProgressRecords
+// keyed by VolumeProgressKey (nodeID+"/"+vscName). The last record for each key wins.
+func (r *DirReader) VolumeProgress() (map[string]VolumeProgressRecord, error) {
+	return readVolumeProgressFile(filepath.Join(r.dir, dirIndexes, fileVolumes))
+}
+
 // readProgressFile reads a progress JSONL file and returns a map of records
 // keyed by node ID. A truncated trailing line is silently skipped.
 // The function is used by both DirReader.Progress and OpenForResume.

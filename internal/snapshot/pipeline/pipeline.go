@@ -62,17 +62,29 @@ type Options struct {
 	// identity is found and Fresh is false. It returns true to proceed with
 	// overwrite. When nil and Fresh is false, Run returns an error.
 	OverwritePromptFn func(dir string) bool
+
+	// IncludeManifests controls whether manifests are downloaded (default true).
+	IncludeManifests bool
+
+	// IncludeVolumes controls whether volume data is downloaded (default true).
+	IncludeVolumes bool
+
+	// DataExportTTL is the TTL for auto-created DataExport objects used during
+	// volume download. Defaults to defaultDataExportTTL when empty.
+	DataExportTTL string
 }
 
 const (
-	defaultRetries    = 3
-	defaultRetryDelay = 2 * time.Second
+	defaultRetries       = 3
+	defaultRetryDelay    = 2 * time.Second
+	defaultDataExportTTL = "30m"
 )
 
-// BuildTreeFunc and FetchManifestsFunc are overridable seams for tests.
+// BuildTreeFunc, FetchManifestsFunc, and DownloadNodeVolumesFunc are overridable seams for tests.
 var (
-	BuildTreeFunc      = source.BuildTree
-	FetchManifestsFunc = source.FetchManifests
+	BuildTreeFunc           = source.BuildTree
+	FetchManifestsFunc      = source.FetchManifests
+	DownloadNodeVolumesFunc = downloadNodeVolumes
 )
 
 // failedNode records a download failure for one tree node.
@@ -118,6 +130,7 @@ func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtcli
 	var (
 		w                *archive.DirWriter
 		existingProgress map[string]archive.ProgressRecord
+		existingVolProg  map[string]archive.VolumeProgressRecord
 	)
 
 	if needFresh {
@@ -129,13 +142,14 @@ func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtcli
 		}
 
 		existingProgress = make(map[string]archive.ProgressRecord)
+		existingVolProg = make(map[string]archive.VolumeProgressRecord)
 	} else {
-		w, existingProgress, err = archive.OpenForResume(opts.OutputDir)
+		w, existingProgress, existingVolProg, err = archive.OpenForResume(opts.OutputDir)
 		if err != nil {
 			return fmt.Errorf("open archive for resume at %s: %w", opts.OutputDir, err)
 		}
 
-		if isNoop(nodes, existingProgress, opts.OutputDir) {
+		if isNoop(nodes, existingProgress, existingVolProg, opts.OutputDir) {
 			w.Close()
 			log.Info("archive already up to date", "path", opts.OutputDir)
 
@@ -145,20 +159,33 @@ func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtcli
 		log.Info("resuming existing archive", "path", opts.OutputDir)
 	}
 
+	// Apply defaults for include flags: if both are false (zero values), enable both.
+	if !opts.IncludeManifests && !opts.IncludeVolumes {
+		opts.IncludeManifests = true
+		opts.IncludeVolumes = true
+	}
+
+	if opts.DataExportTTL == "" {
+		opts.DataExportTTL = defaultDataExportTTL
+	}
+
 	objFilter, err := source.BuildObjectFilter(opts.ObjectFilter)
 	if err != nil {
 		return err
 	}
 
 	dl := &downloader{
-		sClient:          sClient,
-		writer:           w,
-		filter:           objFilter,
-		retries:          retries,
-		retryDelay:       retryDelay,
-		existingProgress: existingProgress,
-		outputDir:        opts.OutputDir,
-		log:              log,
+		sClient:             sClient,
+		rtClient:            rtClient,
+		writer:              w,
+		filter:              objFilter,
+		retries:             retries,
+		retryDelay:          retryDelay,
+		existingProgress:    existingProgress,
+		existingVolProgress: existingVolProg,
+		outputDir:           opts.OutputDir,
+		opts:                opts,
+		log:                 log,
 	}
 
 	var failed []failedNode
@@ -172,7 +199,7 @@ func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtcli
 
 	liveNodeRecs := source.ToNodeRecords(nodes)
 	complete := len(failed) == 0
-	idx := buildIndex(mode, opts.NodeFilter != "")
+	idx := buildIndex(mode, opts.NodeFilter != "", opts.IncludeVolumes)
 
 	summary, err := w.Finalize(idx, liveNodeRecs, complete)
 	if err != nil {
@@ -180,7 +207,7 @@ func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtcli
 	}
 
 	if complete {
-		log.Info("archive complete", "path", opts.OutputDir, "nodes", summary.Nodes, "objects", summary.Objects)
+		log.Info("archive complete", "path", opts.OutputDir, "nodes", summary.Nodes, "objects", summary.Objects, "volumes", summary.Volumes)
 
 		return nil
 	}
@@ -188,22 +215,25 @@ func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtcli
 	return buildFailureSummary(failed, opts)
 }
 
-// downloader bundles the dependencies for per-node manifest fetching.
+// downloader bundles the dependencies for per-node manifest and volume fetching.
 type downloader struct {
-	sClient          *safeClient.SafeClient
-	writer           *archive.DirWriter
-	filter           source.ObjectFilter
-	retries          int
-	retryDelay       time.Duration
-	existingProgress map[string]archive.ProgressRecord
-	outputDir        string
-	log              *slog.Logger
+	sClient             *safeClient.SafeClient
+	rtClient            ctrlrtclient.Client
+	writer              *archive.DirWriter
+	filter              source.ObjectFilter
+	retries             int
+	retryDelay          time.Duration
+	existingProgress    map[string]archive.ProgressRecord
+	existingVolProgress map[string]archive.VolumeProgressRecord
+	outputDir           string
+	opts                Options
+	log                 *slog.Logger
 }
 
-// processNode downloads manifests for n, skipping it if already satisfied by
-// the existing progress. Retries transient errors up to d.retries times.
+// processNode downloads manifests and/or volumes for n, skipping it if already
+// satisfied by the existing progress. Retries transient errors up to d.retries times.
 func (d *downloader) processNode(ctx context.Context, n *source.Node) error {
-	if isNodeSatisfied(n, d.existingProgress, d.outputDir) {
+	if isNodeSatisfied(n, d.existingProgress, d.existingVolProgress, d.outputDir) {
 		d.log.Debug("node already satisfied, skipping", "node", n.ID)
 
 		return nil
@@ -233,8 +263,43 @@ func (d *downloader) processNode(ctx context.Context, n *source.Node) error {
 	return fmt.Errorf("node %s failed after %d attempt(s): %w", n.ID, d.retries, lastErr)
 }
 
-// fetchAndStoreNode performs a single fetch-and-store cycle for one node.
+// fetchAndStoreNode performs a single fetch-and-store cycle for one node
+// (manifests and/or volumes, depending on Options).
 func (d *downloader) fetchAndStoreNode(ctx context.Context, n *source.Node) error {
+	if d.opts.IncludeManifests {
+		if err := d.fetchAndStoreManifests(ctx, n); err != nil {
+			return err
+		}
+	}
+
+	if d.opts.IncludeVolumes && n.HasData {
+		if err := DownloadNodeVolumesFunc(ctx, d.rtClient, d.sClient, d.writer, n, d.existingVolProgress, d.opts, d.log); err != nil {
+			return fmt.Errorf("download volumes for %s: %w", n.ID, err)
+		}
+	}
+
+	return nil
+}
+
+// fetchAndStoreManifests downloads and persists manifests for one node.
+func (d *downloader) fetchAndStoreManifests(ctx context.Context, n *source.Node) error {
+	// Skip if manifests already complete for this node.
+	if rec, ok := d.existingProgress[n.ID]; ok && rec.ContentRef == n.BoundSnapshotContentName {
+		allBlobs := true
+
+		for _, obj := range rec.Objects {
+			if _, err := os.Stat(filepath.Join(d.outputDir, obj.Blob)); err != nil {
+				allBlobs = false
+				break
+			}
+		}
+
+		if allBlobs {
+			d.log.Debug("manifests already complete, skipping", "node", n.ID)
+			return nil
+		}
+	}
+
 	d.log.Debug("fetching manifests", "node", n.ID)
 
 	rawObjects, err := FetchManifestsFunc(ctx, d.sClient, n)
@@ -280,7 +345,9 @@ func (d *downloader) fetchAndStoreNode(ctx context.Context, n *source.Node) erro
 		return err
 	}
 
-	d.log.Debug("node done", "node", n.ID, "objects", len(filtered))
+	d.existingProgress[n.ID] = prec
+
+	d.log.Debug("node manifests done", "node", n.ID, "objects", len(filtered))
 
 	return nil
 }
@@ -370,13 +437,13 @@ func handleOverwrite(dir, reason string, opts Options, log *slog.Logger) error {
 
 // isNoop returns true when all live nodes are satisfied by the existing
 // progress and a COMPLETE sentinel is present.
-func isNoop(nodes []*source.Node, progress map[string]archive.ProgressRecord, dir string) bool {
+func isNoop(nodes []*source.Node, progress map[string]archive.ProgressRecord, volProgress map[string]archive.VolumeProgressRecord, dir string) bool {
 	if !archive.IsComplete(dir) {
 		return false
 	}
 
 	for _, n := range nodes {
-		if !isNodeSatisfied(n, progress, dir) {
+		if !isNodeSatisfied(n, progress, volProgress, dir) {
 			return false
 		}
 	}
@@ -384,9 +451,9 @@ func isNoop(nodes []*source.Node, progress map[string]archive.ProgressRecord, di
 	return true
 }
 
-// isNodeSatisfied reports whether a live node's blobs are already on disk and
-// its ContentRef (boundSnapshotContentName) matches the progress record.
-func isNodeSatisfied(n *source.Node, progress map[string]archive.ProgressRecord, dir string) bool {
+// isNodeSatisfied reports whether a live node's manifests and volumes are already
+// complete on disk and the ContentRef matches the progress record.
+func isNodeSatisfied(n *source.Node, progress map[string]archive.ProgressRecord, volProgress map[string]archive.VolumeProgressRecord, dir string) bool {
 	rec, ok := progress[n.ID]
 	if !ok {
 		return false
@@ -399,6 +466,17 @@ func isNodeSatisfied(n *source.Node, progress map[string]archive.ProgressRecord,
 	for _, obj := range rec.Objects {
 		if _, err := os.Stat(filepath.Join(dir, obj.Blob)); err != nil {
 			return false
+		}
+	}
+
+	if n.HasData {
+		for _, dr := range n.DataRefs {
+			key := archive.VolumeProgressKey(n.ID, dr.VSCName)
+
+			vrec, ok := volProgress[key]
+			if !ok || !vrec.Complete {
+				return false
+			}
 		}
 	}
 
@@ -520,12 +598,12 @@ func buildArchiveMeta(
 
 // buildIndex constructs the Index written to index.json.
 // Summary counts are filled by DirWriter.Finalize.
-func buildIndex(mode archive.SelectionMode, isPartial bool) archive.Index {
+func buildIndex(mode archive.SelectionMode, isPartial, includeVolumes bool) archive.Index {
 	return archive.Index{
 		SchemaVersion: archive.SchemaVersion,
 		Capabilities: archive.IndexCapabilities{
 			Manifests:            true,
-			Volumes:              false,
+			Volumes:              includeVolumes,
 			RestoreFromArchive:   true,
 			UploadableAsSnapshot: false,
 			PartialSelection:     isPartial || mode != archive.SelectionFull,

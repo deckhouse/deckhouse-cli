@@ -395,7 +395,7 @@ func TestOpenForResume(t *testing.T) {
 	}
 
 	// Second run: open for resume.
-	w2, existing, err := archive.OpenForResume(dir)
+	w2, existing, _, err := archive.OpenForResume(dir)
 	if err != nil {
 		t.Fatalf("OpenForResume: %v", err)
 	}
@@ -509,7 +509,7 @@ func TestProgressFile_TruncatedLineTolerance(t *testing.T) {
 	f.Close()
 
 	// OpenForResume should tolerate the truncated line.
-	w2, existing, err := archive.OpenForResume(dir)
+	w2, existing, _, err := archive.OpenForResume(dir)
 	if err != nil {
 		t.Fatalf("OpenForResume with truncated progress: %v", err)
 	}

@@ -33,11 +33,23 @@ import (
 )
 
 const (
-	snapshotGroup    = "storage.deckhouse.io"
-	snapshotVersion  = "v1alpha1"
-	snapshotKind     = "Snapshot"
-	snapshotResource = "snapshots"
+	snapshotGroup           = "storage.deckhouse.io"
+	snapshotVersion         = "v1alpha1"
+	snapshotKind            = "Snapshot"
+	snapshotResource        = "snapshots"
+	snapshotContentResource = "snapshotcontents"
+	snapshotContentKind     = "SnapshotContent"
 )
+
+// DataRef describes one volume data binding from SnapshotContent.status.dataRefs[].
+type DataRef struct {
+	// VSCName is the name of the cluster-scoped VolumeSnapshotContent holding the volume data.
+	VSCName string
+	// PVCName is the name of the original PVC that was snapshotted.
+	PVCName string
+	// PVCNamespace is the namespace of the original PVC.
+	PVCNamespace string
+}
 
 // Node is one entry in the in-memory snapshot tree built from Kubernetes CR statuses.
 type Node struct {
@@ -57,6 +69,11 @@ type Node struct {
 
 	// BoundSnapshotContentName is status.boundSnapshotContentName of the snapshot CR.
 	BoundSnapshotContentName string
+
+	// DataRefs holds the volume data bindings from SnapshotContent.status.dataRefs[].
+	// HasData is true when len(DataRefs) > 0.
+	DataRefs []DataRef
+	HasData  bool
 
 	ParentID string
 	Children []*Node
@@ -157,6 +174,15 @@ func ToNodeRecord(n *Node) archive.NodeRecord {
 		children = append(children, c.ID)
 	}
 
+	dataRefs := make([]archive.VolumeDataRef, 0, len(n.DataRefs))
+	for _, dr := range n.DataRefs {
+		dataRefs = append(dataRefs, archive.VolumeDataRef{
+			VSCName:      dr.VSCName,
+			PVCName:      dr.PVCName,
+			PVCNamespace: dr.PVCNamespace,
+		})
+	}
+
 	return archive.NodeRecord{
 		ID:                       n.ID,
 		APIVersion:               n.APIVersion,
@@ -166,7 +192,8 @@ func ToNodeRecord(n *Node) archive.NodeRecord {
 		ParentID:                 n.ParentID,
 		Children:                 children,
 		BoundSnapshotContentName: n.BoundSnapshotContentName,
-		HasData:                  false, // volume data is a future phase
+		DataRefs:                 dataRefs,
+		HasData:                  n.HasData,
 	}
 }
 
@@ -195,6 +222,11 @@ func fetchSnapshotNode(ctx context.Context, client ctrlrtclient.Client,
 
 	boundContent, _, _ := unstructured.NestedString(obj.Object, "status", "boundSnapshotContentName")
 
+	var dataRefs []DataRef
+	if boundContent != "" {
+		dataRefs, _ = fetchDataRefs(ctx, client, boundContent)
+	}
+
 	node := &Node{
 		ID:                       archive.NodeID(kind, name),
 		APIVersion:               gvk.GroupVersion().String(),
@@ -205,10 +237,71 @@ func fetchSnapshotNode(ctx context.Context, client ctrlrtclient.Client,
 		UID:                      string(obj.GetUID()),
 		ResourceVersion:          obj.GetResourceVersion(),
 		BoundSnapshotContentName: boundContent,
+		DataRefs:                 dataRefs,
+		HasData:                  len(dataRefs) > 0,
 		ParentID:                 parentID,
 	}
 
 	return node, nil
+}
+
+// fetchDataRefs reads SnapshotContent.status.dataRefs[] and returns the bindings.
+// Errors are silently suppressed so a missing or unready SnapshotContent does not
+// block manifest download.
+func fetchDataRefs(ctx context.Context, client ctrlrtclient.Client, snapshotContentName string) ([]DataRef, error) {
+	contentGVK := schema.GroupVersionKind{
+		Group:   snapshotGroup,
+		Version: snapshotVersion,
+		Kind:    snapshotContentKind,
+	}
+
+	obj := new(unstructured.Unstructured)
+	obj.SetGroupVersionKind(contentGVK)
+
+	if err := client.Get(ctx, ctrlrtclient.ObjectKey{Name: snapshotContentName}, obj); err != nil {
+		return nil, fmt.Errorf("get SnapshotContent %s: %w", snapshotContentName, err)
+	}
+
+	rawRefs, _, _ := unstructured.NestedSlice(obj.Object, "status", "dataRefs")
+	if len(rawRefs) == 0 {
+		return nil, nil
+	}
+
+	refs := make([]DataRef, 0, len(rawRefs))
+	for _, raw := range rawRefs {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		targetMap, _, _ := unstructured.NestedMap(m, "target")
+
+		artifactMap, _, _ := unstructured.NestedMap(m, "artifact")
+		if targetMap == nil || artifactMap == nil {
+			continue
+		}
+
+		artifactKind, _ := artifactMap["kind"].(string)
+		if artifactKind != "VolumeSnapshotContent" {
+			continue
+		}
+
+		vscName, _ := artifactMap["name"].(string)
+		pvcName, _ := targetMap["pvcName"].(string)
+		pvcNS, _ := targetMap["pvcNamespace"].(string)
+
+		if vscName == "" {
+			continue
+		}
+
+		refs = append(refs, DataRef{
+			VSCName:      vscName,
+			PVCName:      pvcName,
+			PVCNamespace: pvcNS,
+		})
+	}
+
+	return refs, nil
 }
 
 // populateChildren recursively fetches children listed in status.childrenSnapshotRefs.

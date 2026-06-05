@@ -157,17 +157,28 @@ type IndexSummary struct {
 	Complete bool `json:"complete"`
 }
 
+// VolumeDataRef is a single volume data binding persisted in NodeRecord.
+type VolumeDataRef struct {
+	// VSCName is the cluster-scoped VolumeSnapshotContent name.
+	VSCName string `json:"vscName"`
+	// PVCName is the name of the original PVC.
+	PVCName string `json:"pvcName,omitempty"`
+	// PVCNamespace is the namespace of the original PVC.
+	PVCNamespace string `json:"pvcNamespace,omitempty"`
+}
+
 // NodeRecord is one line in indexes/nodes.jsonl.
 type NodeRecord struct {
-	ID                       string   `json:"id"`
-	APIVersion               string   `json:"apiVersion"`
-	Kind                     string   `json:"kind"`
-	Name                     string   `json:"name"`
-	Namespace                string   `json:"namespace,omitempty"`
-	ParentID                 string   `json:"parentId,omitempty"`
-	Children                 []string `json:"children"`
-	BoundSnapshotContentName string   `json:"boundSnapshotContentName,omitempty"`
-	HasData                  bool     `json:"hasData"`
+	ID                       string          `json:"id"`
+	APIVersion               string          `json:"apiVersion"`
+	Kind                     string          `json:"kind"`
+	Name                     string          `json:"name"`
+	Namespace                string          `json:"namespace,omitempty"`
+	ParentID                 string          `json:"parentId,omitempty"`
+	Children                 []string        `json:"children"`
+	BoundSnapshotContentName string          `json:"boundSnapshotContentName,omitempty"`
+	DataRefs                 []VolumeDataRef `json:"dataRefs,omitempty"`
+	HasData                  bool            `json:"hasData"`
 }
 
 // ObjectRecord is one line in indexes/objects.jsonl.
@@ -189,6 +200,22 @@ type ProgressRecord struct {
 	NodeID     string         `json:"nodeId"`
 	ContentRef string         `json:"contentRef"` // boundSnapshotContentName at download time
 	Objects    []ObjectRecord `json:"objects"`
+}
+
+// VolumeProgressRecord is one line in indexes/volumes.jsonl.
+// It is appended after a single volume download completes (complete=true) or
+// after a partial block download (complete=false, bytesDone records the offset).
+// Key for resume: NodeID + "/" + VSCName.
+type VolumeProgressRecord struct {
+	NodeID     string `json:"nodeId"`
+	VSCName    string `json:"vscName"`
+	PVCName    string `json:"pvcName,omitempty"`
+	VolumeMode string `json:"volumeMode"` // "Block" or "Filesystem"
+	// BytesDone is the number of bytes written so far (block mode only; 0 for filesystem).
+	BytesDone int64 `json:"bytesDone,omitempty"`
+	// BytesTotal is the total size in bytes (block mode; may be 0 if unknown).
+	BytesTotal int64 `json:"bytesTotal,omitempty"`
+	Complete   bool  `json:"complete"`
 }
 
 // ArchiveIdentity is the minimal set of fields used to recognise whether an

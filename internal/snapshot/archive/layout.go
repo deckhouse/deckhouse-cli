@@ -42,6 +42,7 @@ const (
 	fileNodes    = "nodes.jsonl"
 	fileObjects  = "objects.jsonl"
 	fileProgress = "progress.jsonl"
+	fileVolumes  = "volumes.jsonl"
 )
 
 // Blob naming: two-level sharding by digest prefix.

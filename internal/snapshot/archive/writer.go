@@ -31,14 +31,18 @@ import (
 
 // DirWriter writes a snapshot archive to a directory on the local filesystem.
 // Progress is checkpointed durably to indexes/progress.jsonl after each node.
+// Volume progress is checkpointed to indexes/volumes.jsonl after each volume download.
 // Finalize regenerates nodes.jsonl, objects.jsonl, and index.json from the
 // accumulated ProgressRecords, so indexes survive a crash and resume.
 type DirWriter struct {
-	dir             string
-	progressFile    *os.File
-	progressWriter  *bufio.Writer
-	progressRecords []ProgressRecord
-	seenDigests     map[string]int64
+	dir                   string
+	progressFile          *os.File
+	progressWriter        *bufio.Writer
+	progressRecords       []ProgressRecord
+	seenDigests           map[string]int64
+	volumeProgressFile    *os.File
+	volumeProgressWriter  *bufio.Writer
+	volumeProgressRecords []VolumeProgressRecord
 }
 
 // NewDirWriter creates the archive directory structure, writes archive.json,
@@ -66,22 +70,36 @@ func NewDirWriter(dir string, meta Meta) (*DirWriter, error) {
 		return nil, fmt.Errorf("create progress index: %w", err)
 	}
 
+	volProgressF, err := os.Create(filepath.Join(dir, dirIndexes, fileVolumes))
+	if err != nil {
+		progressF.Close()
+		return nil, fmt.Errorf("create volume progress index: %w", err)
+	}
+
 	return &DirWriter{
-		dir:            dir,
-		progressFile:   progressF,
-		progressWriter: bufio.NewWriter(progressF),
-		seenDigests:    make(map[string]int64),
+		dir:                  dir,
+		progressFile:         progressF,
+		progressWriter:       bufio.NewWriter(progressF),
+		seenDigests:          make(map[string]int64),
+		volumeProgressFile:   volProgressF,
+		volumeProgressWriter: bufio.NewWriter(volProgressF),
 	}, nil
 }
 
 // OpenForResume opens an existing archive directory for incremental download.
 // It reads the existing progress records and rebuilds the seenDigests set so
 // blobs that are already on disk are not re-downloaded.
-// Returns the writer and a map of existing progress records keyed by node ID.
-func OpenForResume(dir string) (*DirWriter, map[string]ProgressRecord, error) {
+// Returns the writer, a map of existing manifest progress records keyed by node ID,
+// and a map of volume progress records keyed by "nodeID/vscName".
+func OpenForResume(dir string) (*DirWriter, map[string]ProgressRecord, map[string]VolumeProgressRecord, error) {
 	existing, err := readProgressFile(filepath.Join(dir, dirIndexes, fileProgress))
 	if err != nil {
-		return nil, nil, fmt.Errorf("read progress: %w", err)
+		return nil, nil, nil, fmt.Errorf("read progress: %w", err)
+	}
+
+	existingVol, err := readVolumeProgressFile(filepath.Join(dir, dirIndexes, fileVolumes))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("read volume progress: %w", err)
 	}
 
 	seenDigests := make(map[string]int64, len(existing)*4)
@@ -98,24 +116,41 @@ func OpenForResume(dir string) (*DirWriter, map[string]ProgressRecord, error) {
 		0o644,
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open progress for append: %w", err)
+		return nil, nil, nil, fmt.Errorf("open progress for append: %w", err)
+	}
+
+	volProgressF, err := os.OpenFile(
+		filepath.Join(dir, dirIndexes, fileVolumes),
+		os.O_APPEND|os.O_WRONLY|os.O_CREATE,
+		0o644,
+	)
+	if err != nil {
+		progressF.Close()
+		return nil, nil, nil, fmt.Errorf("open volume progress for append: %w", err)
 	}
 
 	precs := make([]ProgressRecord, 0, len(existing))
-
 	for _, prec := range existing {
 		precs = append(precs, prec)
 	}
 
-	w := &DirWriter{
-		dir:             dir,
-		progressFile:    progressF,
-		progressWriter:  bufio.NewWriter(progressF),
-		progressRecords: precs,
-		seenDigests:     seenDigests,
+	volPrecs := make([]VolumeProgressRecord, 0, len(existingVol))
+	for _, vrec := range existingVol {
+		volPrecs = append(volPrecs, vrec)
 	}
 
-	return w, existing, nil
+	w := &DirWriter{
+		dir:                   dir,
+		progressFile:          progressF,
+		progressWriter:        bufio.NewWriter(progressF),
+		progressRecords:       precs,
+		seenDigests:           seenDigests,
+		volumeProgressFile:    volProgressF,
+		volumeProgressWriter:  bufio.NewWriter(volProgressF),
+		volumeProgressRecords: volPrecs,
+	}
+
+	return w, existing, existingVol, nil
 }
 
 // AddObject content-addresses rawJSON and writes a gzipped blob atomically
@@ -176,11 +211,49 @@ func (w *DirWriter) AddObject(nodeID string, rawJSON []byte) (ObjectRecord, erro
 	return rec, nil
 }
 
-// Close closes the progress file without finalising the archive.
+// Close closes the progress files without finalising the archive.
 // Use it when aborting an in-progress write (e.g. noop early exit).
 func (w *DirWriter) Close() {
 	_ = w.progressWriter.Flush()
 	_ = w.progressFile.Close()
+
+	if w.volumeProgressWriter != nil {
+		_ = w.volumeProgressWriter.Flush()
+	}
+
+	if w.volumeProgressFile != nil {
+		_ = w.volumeProgressFile.Close()
+	}
+}
+
+// AppendVolumeProgress records a volume download progress durably.
+// It is appended to volumes.jsonl and fsynced before returning.
+func (w *DirWriter) AppendVolumeProgress(rec VolumeProgressRecord) error {
+	if err := appendJSONLRecord(w.volumeProgressWriter, rec); err != nil {
+		return fmt.Errorf("append volume progress for %s/%s: %w", rec.NodeID, rec.VSCName, err)
+	}
+
+	if err := w.volumeProgressWriter.Flush(); err != nil {
+		return fmt.Errorf("flush volume progress for %s/%s: %w", rec.NodeID, rec.VSCName, err)
+	}
+
+	if err := w.volumeProgressFile.Sync(); err != nil {
+		return fmt.Errorf("sync volume progress for %s/%s: %w", rec.NodeID, rec.VSCName, err)
+	}
+
+	w.volumeProgressRecords = append(w.volumeProgressRecords, rec)
+
+	return nil
+}
+
+// VolumeProgressKey returns the map key for a VolumeProgressRecord.
+func VolumeProgressKey(nodeID, vscName string) string {
+	return nodeID + "/" + vscName
+}
+
+// DataDir returns the absolute path to the data/ directory within the archive.
+func (w *DirWriter) DataDir() string {
+	return filepath.Join(w.dir, dirData)
 }
 
 // AppendProgress records a node's completion durably. It must be called only
@@ -207,10 +280,22 @@ func (w *DirWriter) AppendProgress(rec ProgressRecord) error {
 // Finalize regenerates nodes.jsonl and objects.jsonl from the accumulated
 // progress records and the live node list, writes index.json, GCs orphan blobs,
 // and writes the COMPLETE sentinel when complete is true.
-// It closes the progress file before writing the generated files.
+// It closes the progress files before writing the generated files.
 func (w *DirWriter) Finalize(idx Index, liveNodes []NodeRecord, complete bool) (IndexSummary, error) {
 	if err := w.progressFile.Close(); err != nil {
 		return IndexSummary{}, fmt.Errorf("close progress file: %w", err)
+	}
+
+	if w.volumeProgressWriter != nil {
+		if err := w.volumeProgressWriter.Flush(); err != nil {
+			return IndexSummary{}, fmt.Errorf("flush volume progress file: %w", err)
+		}
+	}
+
+	if w.volumeProgressFile != nil {
+		if err := w.volumeProgressFile.Close(); err != nil {
+			return IndexSummary{}, fmt.Errorf("close volume progress file: %w", err)
+		}
 	}
 
 	// Deduplicate progress records by nodeID: last write wins (handles update case).
@@ -260,10 +345,20 @@ func (w *DirWriter) Finalize(idx Index, liveNodes []NodeRecord, complete bool) (
 		return IndexSummary{}, fmt.Errorf("gc blobs: %w", err)
 	}
 
+	// Count complete volumes.
+	volumeCount := 0
+
+	for _, vrec := range w.volumeProgressRecords {
+		if vrec.Complete {
+			volumeCount++
+		}
+	}
+
 	// Write index.json.
 	summary := IndexSummary{
 		Nodes:    len(liveNodes),
 		Objects:  objectCount,
+		Volumes:  volumeCount,
 		Complete: complete,
 	}
 	idx.Summary = summary
@@ -315,6 +410,49 @@ func writeJSONLFile(path string, fn func(*json.Encoder) error) error {
 	defer f.Close()
 
 	return fn(json.NewEncoder(f))
+}
+
+// readVolumeProgressFile reads volumes.jsonl and returns a map of VolumeProgressRecords
+// keyed by VolumeProgressKey (nodeID+"/"+vscName). When multiple records for the same
+// key are present, the last one wins. A truncated trailing line is silently skipped.
+func readVolumeProgressFile(path string) (map[string]VolumeProgressRecord, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]VolumeProgressRecord), nil
+		}
+
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+
+	defer f.Close()
+
+	result := make(map[string]VolumeProgressRecord)
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1*1024*1024)
+
+	for sc.Scan() {
+		line := sc.Text()
+
+		if line == "" {
+			continue
+		}
+
+		var rec VolumeProgressRecord
+
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			break
+		}
+
+		result[VolumeProgressKey(rec.NodeID, rec.VSCName)] = rec
+	}
+
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("scan %s: %w", path, err)
+	}
+
+	return result, nil
 }
 
 // gcBlobs removes blob files under blobDir that are not in referenced.
