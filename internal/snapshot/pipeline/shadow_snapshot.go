@@ -352,13 +352,13 @@ func ensureShadowVSRestoreSize(
 
 	log.Debug("propagating restoreSize from original VSC to shadow VS", "vs_name", vsName, "restore_size", restoreSize)
 
-	patch := &unstructured.Unstructured{}
-	patch.SetGroupVersionKind(shadowVSGVK)
-	patch.SetName(vsName)
-	patch.SetNamespace(namespace)
-	_ = unstructured.SetNestedField(patch.Object, restoreSize, "status", "restoreSize")
+	// Use the fetched vs as both the base and the mutation target so that
+	// its metadata.resourceVersion is preserved in the PATCH request.
+	// A fresh Unstructured without resourceVersion causes a validation error.
+	base := vs.DeepCopy()
+	_ = unstructured.SetNestedField(vs.Object, restoreSize, "status", "restoreSize")
 
-	return c.Status().Patch(ctx, patch, ctrlrtclient.MergeFrom(vs))
+	return c.Status().Patch(ctx, vs, ctrlrtclient.MergeFrom(base))
 }
 
 // deleteShadowObjects removes the shadow VolumeSnapshot and VolumeSnapshotContent,
