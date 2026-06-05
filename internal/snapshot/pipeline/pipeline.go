@@ -72,6 +72,10 @@ type Options struct {
 	// DataExportTTL is the TTL for auto-created DataExport objects used during
 	// volume download. Defaults to defaultDataExportTTL when empty.
 	DataExportTTL string
+
+	// VolumeCompression sets the compression algorithm for downloaded volume data.
+	// Accepted values: "gzip" (default), "none".
+	VolumeCompression string
 }
 
 const (
@@ -169,6 +173,10 @@ func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtcli
 		opts.DataExportTTL = defaultDataExportTTL
 	}
 
+	if opts.VolumeCompression == "" {
+		opts.VolumeCompression = CompressionGzip
+	}
+
 	objFilter, err := source.BuildObjectFilter(opts.ObjectFilter)
 	if err != nil {
 		return err
@@ -199,7 +207,7 @@ func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtcli
 
 	liveNodeRecs := source.ToNodeRecords(nodes)
 	complete := len(failed) == 0
-	idx := buildIndex(mode, opts.NodeFilter != "", opts.IncludeVolumes)
+	idx := buildIndex(mode, opts.NodeFilter != "", opts.IncludeVolumes, opts.VolumeCompression)
 
 	summary, err := w.Finalize(idx, liveNodeRecs, complete)
 	if err != nil {
@@ -598,7 +606,12 @@ func buildArchiveMeta(
 
 // buildIndex constructs the Index written to index.json.
 // Summary counts are filled by DirWriter.Finalize.
-func buildIndex(mode archive.SelectionMode, isPartial, includeVolumes bool) archive.Index {
+func buildIndex(mode archive.SelectionMode, isPartial, includeVolumes bool, volumeCompression string) archive.Index {
+	volFormat := "per-file-gzip"
+	if volumeCompression == CompressionNone {
+		volFormat = "raw"
+	}
+
 	return archive.Index{
 		SchemaVersion: archive.SchemaVersion,
 		Capabilities: archive.IndexCapabilities{
@@ -613,6 +626,10 @@ func buildIndex(mode archive.SelectionMode, isPartial, includeVolumes bool) arch
 			Format:      "json",
 			Compression: "gzip-per-object",
 			SourceKind:  "aggregated-subtree",
+		},
+		VolumeModel: archive.IndexVolumeModel{
+			Format:      volFormat,
+			Compression: volumeCompression,
 		},
 		Catalogs: archive.IndexCatalogs{
 			Nodes:   "indexes/nodes.jsonl",

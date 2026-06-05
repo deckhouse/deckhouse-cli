@@ -38,15 +38,16 @@ const (
 )
 
 const (
-	flagOutput     = "output"
-	flagNode       = "node"
-	flagObject     = "object"
-	flagFresh      = "fresh"
-	flagRetries    = "retries"
-	flagRetryDelay = "retry-delay"
-	flagManifests  = "manifests"
-	flagVolumes    = "volumes"
-	flagTTL        = "ttl"
+	flagOutput            = "output"
+	flagNode              = "node"
+	flagObject            = "object"
+	flagFresh             = "fresh"
+	flagRetries           = "retries"
+	flagRetryDelay        = "retry-delay"
+	flagManifests         = "manifests"
+	flagVolumes           = "volumes"
+	flagTTL               = "ttl"
+	flagVolumeCompression = "volume-compression"
 )
 
 const (
@@ -56,22 +57,33 @@ const (
 into a structured local directory:
 
   archive.json   - archive identity and selection metadata
-  index.json     - capabilities, catalog paths, summary counts
+  index.json     - capabilities, catalog paths, summary counts (incl. volumeModel)
   COMPLETE       - sentinel written last; absent means incomplete
   indexes/       - nodes.jsonl, objects.jsonl, progress.jsonl, volumes.jsonl
-  manifests/     - content-addressed manifest blobs
-  data/          - downloaded volume data (block: .img files; filesystem: dirs)
+  manifests/     - content-addressed gzip manifest blobs
+  data/          - downloaded volume data
+
+Volume data on-disk format (default --volume-compression=gzip):
+  Block volumes:      data/<nodeID>/<vsc>.img.gz
+                      Multi-member gzip; each member is ~64 MiB.
+                      Resume: byte-level (Range header + truncate to last checkpoint).
+  Filesystem volumes: data/<nodeID>/<pvcName>/<file>.gz (each file gzip'd individually)
+                      Resume: per-file (existing .gz files are skipped).
+
+Use --volume-compression=none to store volume data uncompressed.
+  Block volumes:      data/<nodeID>/<vsc>.img  (HTTP Range resume)
+  Filesystem volumes: data/<nodeID>/<pvcName>/<file>  (volume-level resume only)
 
 The Snapshot must already exist and be in Ready state. If it is not Ready,
 the command exits with an error and prints the kubectl command to inspect it.
 
 If the output directory already contains a download for the same snapshot, the
-command resumes where it left off.
+command resumes where it left off (per-file for filesystem, per-byte for block gzip).
 
-By default both manifests and volume data are downloaded. Use --manifests=false
-or --volumes=false to skip either. Volume data is downloaded by creating a
-temporary DataExport (kind=VolumeSnapshotContent) per volume, waiting for it
-to become Ready, streaming the data, and deleting the DataExport.`
+Volume data is downloaded by creating a temporary shadow VolumeSnapshotContent
++ VolumeSnapshot pair that points at the original snapshot handle, creating a
+DataExport (kind=VolumeSnapshot) against it, streaming the data, and cleaning
+up all temporary objects afterwards.`
 
 	cmdExample = `  # Download manifests and volumes from a snapshot
   d8 snapshot download my-ns demo-snapshot
@@ -120,6 +132,7 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 	cmd.Flags().Bool(flagManifests, true, "download Kubernetes resource manifests (default true; use --manifests=false to skip)")
 	cmd.Flags().Bool(flagVolumes, true, "download volume data via DataExport (default true; use --volumes=false to skip)")
 	cmd.Flags().String(flagTTL, "", "TTL for auto-created DataExport objects during volume download (e.g. 1h; default 30m)")
+	cmd.Flags().String(flagVolumeCompression, "gzip", `compression for downloaded volume data: "gzip" (default) or "none"`)
 
 	return cmd
 }
@@ -136,6 +149,7 @@ func run(cmd *cobra.Command, args []string, log *slog.Logger) error {
 	includeManifests, _ := cmd.Flags().GetBool(flagManifests)
 	includeVolumes, _ := cmd.Flags().GetBool(flagVolumes)
 	dataExportTTL, _ := cmd.Flags().GetString(flagTTL)
+	volumeCompression, _ := cmd.Flags().GetString(flagVolumeCompression)
 
 	if outputDir == "" {
 		outputDir = fmt.Sprintf("%s-%s", namespace, snapshotName)
@@ -171,6 +185,7 @@ func run(cmd *cobra.Command, args []string, log *slog.Logger) error {
 		IncludeManifests:  includeManifests,
 		IncludeVolumes:    includeVolumes,
 		DataExportTTL:     dataExportTTL,
+		VolumeCompression: volumeCompression,
 	}
 
 	return pipeline.Run(ctx, sClient, rtClient, opts, log)

@@ -321,6 +321,137 @@ func TestVolumeProgressTruncatedLineTolerance(t *testing.T) {
 	}
 }
 
+// TestAppendVolumeProgress_CompressionFields verifies that Compression and
+// CompressedBytes are persisted and re-read correctly.
+func TestAppendVolumeProgress_CompressionFields(t *testing.T) {
+	dir := t.TempDir()
+
+	w, err := archive.NewDirWriter(dir, newTestMeta("vol-compression"))
+	if err != nil {
+		t.Fatalf("NewDirWriter: %v", err)
+	}
+
+	// Write a partial gzip-block record with CompressedBytes.
+	partial := archive.VolumeProgressRecord{
+		NodeID:          "Snapshot--snap",
+		VSCName:         "vsc-block",
+		VolumeMode:      "Block",
+		Compression:     "gzip",
+		BytesDone:       64 * 1024 * 1024,
+		BytesTotal:      128 * 1024 * 1024,
+		CompressedBytes: 40 * 1024 * 1024,
+		Complete:        false,
+	}
+
+	if err := w.AppendVolumeProgress(partial); err != nil {
+		t.Fatalf("AppendVolumeProgress partial: %v", err)
+	}
+
+	// Write a complete record that supersedes the partial one.
+	complete := archive.VolumeProgressRecord{
+		NodeID:          "Snapshot--snap",
+		VSCName:         "vsc-block",
+		VolumeMode:      "Block",
+		Compression:     "gzip",
+		BytesDone:       128 * 1024 * 1024,
+		BytesTotal:      128 * 1024 * 1024,
+		CompressedBytes: 78 * 1024 * 1024,
+		Complete:        true,
+	}
+
+	if err := w.AppendVolumeProgress(complete); err != nil {
+		t.Fatalf("AppendVolumeProgress complete: %v", err)
+	}
+
+	w.Close()
+
+	r, err := archive.OpenDir(dir)
+	if err != nil {
+		t.Fatalf("OpenDir: %v", err)
+	}
+
+	progs, err := r.VolumeProgress()
+	if err != nil {
+		t.Fatalf("VolumeProgress: %v", err)
+	}
+
+	key := archive.VolumeProgressKey("Snapshot--snap", "vsc-block")
+
+	got, ok := progs[key]
+	if !ok {
+		t.Fatalf("key %q not found in volume progress", key)
+	}
+
+	if got.Compression != "gzip" {
+		t.Errorf("Compression = %q, want %q", got.Compression, "gzip")
+	}
+
+	if got.CompressedBytes != 78*1024*1024 {
+		t.Errorf("CompressedBytes = %d, want %d", got.CompressedBytes, 78*1024*1024)
+	}
+
+	if !got.Complete {
+		t.Error("expected Complete = true (last record wins)")
+	}
+}
+
+// TestAppendVolumeProgress_BackwardsCompat verifies that records written without
+// Compression or CompressedBytes (old format) are still readable.
+func TestAppendVolumeProgress_BackwardsCompat(t *testing.T) {
+	dir := t.TempDir()
+
+	w, err := archive.NewDirWriter(dir, newTestMeta("vol-compat"))
+	if err != nil {
+		t.Fatalf("NewDirWriter: %v", err)
+	}
+
+	// Old-format record: no Compression, no CompressedBytes.
+	old := archive.VolumeProgressRecord{
+		NodeID:     "Snapshot--snap",
+		VSCName:    "vsc-old",
+		VolumeMode: "Block",
+		BytesDone:  1024,
+		BytesTotal: 1024,
+		Complete:   true,
+	}
+
+	if err := w.AppendVolumeProgress(old); err != nil {
+		t.Fatalf("AppendVolumeProgress: %v", err)
+	}
+
+	w.Close()
+
+	r, err := archive.OpenDir(dir)
+	if err != nil {
+		t.Fatalf("OpenDir: %v", err)
+	}
+
+	progs, err := r.VolumeProgress()
+	if err != nil {
+		t.Fatalf("VolumeProgress: %v", err)
+	}
+
+	key := archive.VolumeProgressKey("Snapshot--snap", "vsc-old")
+
+	got, ok := progs[key]
+	if !ok {
+		t.Fatalf("key %q not found", key)
+	}
+
+	// Empty Compression is acceptable for old records.
+	if got.Compression != "" {
+		t.Errorf("Compression = %q, want empty string for old records", got.Compression)
+	}
+
+	if got.CompressedBytes != 0 {
+		t.Errorf("CompressedBytes = %d, want 0 for old records", got.CompressedBytes)
+	}
+
+	if !got.Complete {
+		t.Error("expected Complete = true")
+	}
+}
+
 // contains is a minimal strings.Contains helper to avoid importing strings.
 func contains(s, sub string) bool {
 	for i := range s {

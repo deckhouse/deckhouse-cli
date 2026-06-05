@@ -115,6 +115,7 @@ type Index struct {
 	SchemaVersion string             `json:"schemaVersion"`
 	Capabilities  IndexCapabilities  `json:"capabilities"`
 	ManifestModel IndexManifestModel `json:"manifestModel"`
+	VolumeModel   IndexVolumeModel   `json:"volumeModel"`
 	Catalogs      IndexCatalogs      `json:"catalogs"`
 	Paths         IndexPaths         `json:"paths"`
 	Summary       IndexSummary       `json:"summary"`
@@ -135,6 +136,15 @@ type IndexManifestModel struct {
 	Format      string `json:"format"`
 	Compression string `json:"compression"`
 	SourceKind  string `json:"sourceKind"`
+}
+
+// IndexVolumeModel describes how volume data files are stored on disk.
+type IndexVolumeModel struct {
+	// Format is either "per-file-gzip" (each file/block image is individually gzip'd)
+	// or "raw" (no compression).
+	Format string `json:"format"`
+	// Compression is "gzip" or "none".
+	Compression string `json:"compression"`
 }
 
 // IndexCatalogs lists the relative paths of the JSONL index files.
@@ -211,11 +221,18 @@ type VolumeProgressRecord struct {
 	VSCName    string `json:"vscName"`
 	PVCName    string `json:"pvcName,omitempty"`
 	VolumeMode string `json:"volumeMode"` // "Block" or "Filesystem"
-	// BytesDone is the number of bytes written so far (block mode only; 0 for filesystem).
+	// Compression is "gzip" or "none". Empty means "none" for backwards compat.
+	Compression string `json:"compression,omitempty"`
+	// BytesDone is the number of uncompressed source bytes downloaded so far
+	// (block mode only; 0 for filesystem).
 	BytesDone int64 `json:"bytesDone,omitempty"`
-	// BytesTotal is the total size in bytes (block mode; may be 0 if unknown).
+	// BytesTotal is the total uncompressed size in bytes (block mode; may be 0 if unknown).
 	BytesTotal int64 `json:"bytesTotal,omitempty"`
-	Complete   bool  `json:"complete"`
+	// CompressedBytes is the number of compressed bytes durably written to disk
+	// (block gzip mode only). Used to truncate a half-written trailing gzip member
+	// on resume. 0 for filesystem or raw block.
+	CompressedBytes int64 `json:"compressedBytes,omitempty"`
+	Complete        bool  `json:"complete"`
 }
 
 // ArchiveIdentity is the minimal set of fields used to recognise whether an
