@@ -141,10 +141,6 @@ func TestDirWriterRoundtrip(t *testing.T) {
 		HasData:    false,
 	}
 
-	if err := w.AppendNode(nodeRec); err != nil {
-		t.Fatalf("AppendNode: %v", err)
-	}
-
 	rawCM := []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cm1","namespace":"demo"}}`)
 	rawDeploy := []byte(`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"my-deploy","namespace":"demo"}}`)
 
@@ -153,17 +149,9 @@ func TestDirWriterRoundtrip(t *testing.T) {
 		t.Fatalf("AddObject(cm): %v", err)
 	}
 
-	if err := w.AppendObject(obj1); err != nil {
-		t.Fatalf("AppendObject(cm): %v", err)
-	}
-
 	obj2, err := w.AddObject("Snapshot--ns-snap", rawDeploy)
 	if err != nil {
 		t.Fatalf("AddObject(deploy): %v", err)
-	}
-
-	if err := w.AppendObject(obj2); err != nil {
-		t.Fatalf("AppendObject(deploy): %v", err)
 	}
 
 	// Dedup: same object again must return the same digest without rewriting the blob.
@@ -178,6 +166,16 @@ func TestDirWriterRoundtrip(t *testing.T) {
 
 	if obj1b.Size == 0 {
 		t.Fatalf("dedup: expected non-zero Size on deduplicated record")
+	}
+
+	// Record progress for the node (only 2 unique objects despite 3 AddObject calls).
+	prec := archive.ProgressRecord{
+		NodeID:  "Snapshot--ns-snap",
+		Objects: []archive.ObjectRecord{obj1, obj2},
+	}
+
+	if err := w.AppendProgress(prec); err != nil {
+		t.Fatalf("AppendProgress: %v", err)
 	}
 
 	idx := archive.Index{
@@ -200,7 +198,7 @@ func TestDirWriterRoundtrip(t *testing.T) {
 		},
 	}
 
-	if _, err := w.Finalize(idx); err != nil {
+	if _, err := w.Finalize(idx, []archive.NodeRecord{nodeRec}, true); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
 
@@ -249,6 +247,400 @@ func TestDirWriterRoundtrip(t *testing.T) {
 	// NodeID on the returned record must equal the node ID passed in.
 	if obj1.NodeID != "Snapshot--ns-snap" {
 		t.Fatalf("obj1.NodeID = %q, want %q", obj1.NodeID, "Snapshot--ns-snap")
+	}
+}
+
+// Identity and resume tests.
+
+func TestArchiveIdentity_Equal(t *testing.T) {
+	base := archive.ArchiveIdentity{
+		Namespace:       "demo",
+		Snapshot:        "my-snap",
+		Mode:            archive.SelectionFull,
+		RootNodeID:      "Snapshot--my-snap",
+		SelectedNodeIDs: []string{"Snapshot--my-snap"},
+	}
+
+	t.Run("equal_identical", func(t *testing.T) {
+		if !base.Equal(base) {
+			t.Fatal("identical identities should be equal")
+		}
+	})
+
+	t.Run("equal_sorted_nodes", func(t *testing.T) {
+		other := base
+		other.SelectedNodeIDs = []string{"Snapshot--my-snap"}
+
+		if !base.Equal(other) {
+			t.Fatal("same sorted node IDs should be equal")
+		}
+	})
+
+	t.Run("mismatch_namespace", func(t *testing.T) {
+		other := base
+		other.Namespace = "other-ns"
+
+		if base.Equal(other) {
+			t.Fatal("different namespace should not be equal")
+		}
+	})
+
+	t.Run("mismatch_snapshot", func(t *testing.T) {
+		other := base
+		other.Snapshot = "other-snap"
+
+		if base.Equal(other) {
+			t.Fatal("different snapshot should not be equal")
+		}
+	})
+
+	t.Run("mismatch_mode", func(t *testing.T) {
+		other := base
+		other.Mode = archive.SelectionSubtree
+
+		if base.Equal(other) {
+			t.Fatal("different mode should not be equal")
+		}
+	})
+
+	t.Run("mismatch_object_filter", func(t *testing.T) {
+		other := base
+		other.ObjectFilter = "v1/ConfigMap/cm1"
+
+		if base.Equal(other) {
+			t.Fatal("different objectFilter should not be equal")
+		}
+	})
+
+	t.Run("mismatch_selected_nodes", func(t *testing.T) {
+		other := base
+		other.SelectedNodeIDs = []string{"Snapshot--my-snap", "Snapshot--child"}
+
+		if base.Equal(other) {
+			t.Fatal("different selectedNodeIDs should not be equal")
+		}
+	})
+}
+
+func TestIdentityOf_SortsNodeIDs(t *testing.T) {
+	meta := archive.Meta{
+		Source: archive.Source{
+			Namespace:    "demo",
+			RootSnapshot: archive.SnapshotRef{Name: "snap"},
+		},
+		Selection: archive.Selection{
+			Mode:            archive.SelectionFull,
+			RootNodeID:      "Snapshot--snap",
+			SelectedNodeIDs: []string{"Snapshot--z", "Snapshot--a", "Snapshot--m"},
+		},
+	}
+
+	id := archive.IdentityOf(meta)
+
+	want := []string{"Snapshot--a", "Snapshot--m", "Snapshot--z"}
+
+	for i, got := range id.SelectedNodeIDs {
+		if got != want[i] {
+			t.Fatalf("SelectedNodeIDs[%d] = %q, want %q", i, got, want[i])
+		}
+	}
+}
+
+func TestOpenForResume(t *testing.T) {
+	dir := t.TempDir()
+
+	rawCM := []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cm1","namespace":"demo"}}`)
+
+	meta := archive.Meta{
+		Magic:         archive.Magic,
+		SchemaVersion: archive.SchemaVersion,
+		ArchiveID:     "resume-test-001",
+		CreatedAt:     time.Now().UTC(),
+		CreatedBy:     archive.Creator{Tool: "d8", Version: "test"},
+		Source: archive.Source{
+			Cluster:             archive.Cluster{Server: "https://test.example.com"},
+			Namespace:           "demo",
+			RootSnapshot:        archive.SnapshotRef{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Resource: "snapshots", Name: "ns-snap"},
+			RootSnapshotContent: archive.SnapshotContentRef{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "SnapshotContent", Name: "sc-root"},
+		},
+		Selection: archive.Selection{
+			Mode:            archive.SelectionFull,
+			RootNodeID:      "Snapshot--ns-snap",
+			SelectedNodeIDs: []string{"Snapshot--ns-snap"},
+		},
+	}
+
+	// First run: write one node then simulate a crash (no Finalize, no COMPLETE).
+	w1, err := archive.NewDirWriter(dir, meta)
+	if err != nil {
+		t.Fatalf("first NewDirWriter: %v", err)
+	}
+
+	obj1, err := w1.AddObject("Snapshot--ns-snap", rawCM)
+	if err != nil {
+		t.Fatalf("first AddObject: %v", err)
+	}
+
+	prec1 := archive.ProgressRecord{NodeID: "Snapshot--ns-snap", ContentRef: "sc-root", Objects: []archive.ObjectRecord{obj1}}
+
+	if err := w1.AppendProgress(prec1); err != nil {
+		t.Fatalf("first AppendProgress: %v", err)
+	}
+
+	// Simulate crash: do NOT call Finalize. Just close the progress file.
+	w1.Close()
+
+	if archive.IsComplete(dir) {
+		t.Fatal("COMPLETE should not exist after simulated crash")
+	}
+
+	// Second run: open for resume.
+	w2, existing, err := archive.OpenForResume(dir)
+	if err != nil {
+		t.Fatalf("OpenForResume: %v", err)
+	}
+
+	if len(existing) != 1 {
+		t.Fatalf("expected 1 existing progress record, got %d", len(existing))
+	}
+
+	rec, ok := existing["Snapshot--ns-snap"]
+	if !ok {
+		t.Fatal("missing progress record for Snapshot--ns-snap")
+	}
+
+	if rec.ContentRef != "sc-root" {
+		t.Fatalf("ContentRef = %q, want sc-root", rec.ContentRef)
+	}
+
+	// Finalize without downloading anything new (resume carries forward).
+	nodeRec := archive.NodeRecord{ID: "Snapshot--ns-snap", Kind: "Snapshot", Name: "ns-snap", Children: []string{}}
+
+	summary, err := w2.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}, []archive.NodeRecord{nodeRec}, true)
+	if err != nil {
+		t.Fatalf("resume Finalize: %v", err)
+	}
+
+	if !archive.IsComplete(dir) {
+		t.Fatal("COMPLETE should exist after successful resume")
+	}
+
+	if summary.Objects != 1 {
+		t.Fatalf("summary.Objects = %d, want 1", summary.Objects)
+	}
+}
+
+func TestFinalizeIncompleteMissingComplete(t *testing.T) {
+	dir := t.TempDir()
+
+	meta := archive.Meta{
+		Magic:         archive.Magic,
+		SchemaVersion: archive.SchemaVersion,
+		ArchiveID:     "incomplete-test",
+		CreatedAt:     time.Now().UTC(),
+		CreatedBy:     archive.Creator{Tool: "d8", Version: "test"},
+		Source: archive.Source{
+			Namespace:    "demo",
+			RootSnapshot: archive.SnapshotRef{Name: "ns-snap"},
+		},
+		Selection: archive.Selection{Mode: archive.SelectionFull, RootNodeID: "Snapshot--ns-snap"},
+	}
+
+	w, err := archive.NewDirWriter(dir, meta)
+	if err != nil {
+		t.Fatalf("NewDirWriter: %v", err)
+	}
+
+	// Finalize with complete=false → COMPLETE must NOT exist.
+	if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}, nil, false); err != nil {
+		t.Fatalf("Finalize incomplete: %v", err)
+	}
+
+	if archive.IsComplete(dir) {
+		t.Fatal("COMPLETE must not exist for incomplete archive")
+	}
+}
+
+func TestProgressFile_TruncatedLineTolerance(t *testing.T) {
+	dir := t.TempDir()
+
+	meta := archive.Meta{
+		Magic:         archive.Magic,
+		SchemaVersion: archive.SchemaVersion,
+		ArchiveID:     "trunc-test",
+		CreatedAt:     time.Now().UTC(),
+		CreatedBy:     archive.Creator{Tool: "d8", Version: "test"},
+		Source: archive.Source{
+			Namespace:    "demo",
+			RootSnapshot: archive.SnapshotRef{Name: "snap"},
+		},
+		Selection: archive.Selection{Mode: archive.SelectionFull, RootNodeID: "Snapshot--snap"},
+	}
+
+	w, err := archive.NewDirWriter(dir, meta)
+	if err != nil {
+		t.Fatalf("NewDirWriter: %v", err)
+	}
+
+	raw := []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cm","namespace":"demo"}}`)
+
+	obj, err := w.AddObject("Snapshot--snap", raw)
+	if err != nil {
+		t.Fatalf("AddObject: %v", err)
+	}
+
+	prec := archive.ProgressRecord{NodeID: "Snapshot--snap", ContentRef: "sc-1", Objects: []archive.ObjectRecord{obj}}
+
+	if err := w.AppendProgress(prec); err != nil {
+		t.Fatalf("AppendProgress: %v", err)
+	}
+
+	w.Close()
+
+	// Append a truncated line to simulate a crash mid-write.
+	progressPath := filepath.Join(dir, "indexes", "progress.jsonl")
+
+	f, err := os.OpenFile(progressPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open progress for truncation test: %v", err)
+	}
+
+	_, _ = f.WriteString(`{"nodeId":"Snapshot--snap","contentRef":"sc-2","objects":[`) // truncated!
+	f.Close()
+
+	// OpenForResume should tolerate the truncated line.
+	w2, existing, err := archive.OpenForResume(dir)
+	if err != nil {
+		t.Fatalf("OpenForResume with truncated progress: %v", err)
+	}
+
+	defer w2.Close()
+
+	if len(existing) != 1 {
+		t.Fatalf("expected 1 valid progress record (truncated line skipped), got %d", len(existing))
+	}
+
+	if existing["Snapshot--snap"].ContentRef != "sc-1" {
+		t.Fatalf("expected ContentRef=sc-1 from first valid record, got %q", existing["Snapshot--snap"].ContentRef)
+	}
+}
+
+func TestWipeDir(t *testing.T) {
+	dir := t.TempDir()
+
+	meta := archive.Meta{
+		Magic:         archive.Magic,
+		SchemaVersion: archive.SchemaVersion,
+		ArchiveID:     "wipe-test",
+		CreatedAt:     time.Now().UTC(),
+		Source: archive.Source{
+			Namespace:    "demo",
+			RootSnapshot: archive.SnapshotRef{Name: "snap"},
+		},
+		Selection: archive.Selection{Mode: archive.SelectionFull, RootNodeID: "Snapshot--snap"},
+	}
+
+	w, err := archive.NewDirWriter(dir, meta)
+	if err != nil {
+		t.Fatalf("NewDirWriter: %v", err)
+	}
+
+	raw := []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cm","namespace":"demo"}}`)
+
+	obj, err := w.AddObject("Snapshot--snap", raw)
+	if err != nil {
+		t.Fatalf("AddObject: %v", err)
+	}
+
+	prec := archive.ProgressRecord{NodeID: "Snapshot--snap", Objects: []archive.ObjectRecord{obj}}
+
+	if err := w.AppendProgress(prec); err != nil {
+		t.Fatalf("AppendProgress: %v", err)
+	}
+
+	nodeRec := archive.NodeRecord{ID: "Snapshot--snap", Children: []string{}}
+
+	if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}, []archive.NodeRecord{nodeRec}, true); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	if !archive.IsComplete(dir) {
+		t.Fatal("expected COMPLETE before wipe")
+	}
+
+	if err := archive.WipeDir(dir); err != nil {
+		t.Fatalf("WipeDir: %v", err)
+	}
+
+	if archive.IsComplete(dir) {
+		t.Fatal("COMPLETE should be removed after wipe")
+	}
+
+	// archive.json should be gone.
+	if _, err := os.Stat(filepath.Join(dir, "archive.json")); !os.IsNotExist(err) {
+		t.Fatal("archive.json should be removed after wipe")
+	}
+
+	// Dir itself should still exist.
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("directory should still exist after wipe: %v", err)
+	}
+}
+
+func TestOrphanBlobGC(t *testing.T) {
+	dir := t.TempDir()
+
+	meta := archive.Meta{
+		Magic:         archive.Magic,
+		SchemaVersion: archive.SchemaVersion,
+		ArchiveID:     "gc-test",
+		CreatedAt:     time.Now().UTC(),
+		Source: archive.Source{
+			Namespace:    "demo",
+			RootSnapshot: archive.SnapshotRef{Name: "snap"},
+		},
+		Selection: archive.Selection{Mode: archive.SelectionFull, RootNodeID: "Snapshot--snap"},
+	}
+
+	w, err := archive.NewDirWriter(dir, meta)
+	if err != nil {
+		t.Fatalf("NewDirWriter: %v", err)
+	}
+
+	cm1 := []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cm1","namespace":"demo"}}`)
+	cm2 := []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cm2","namespace":"demo"}}`)
+
+	obj1, err := w.AddObject("Snapshot--snap", cm1)
+	if err != nil {
+		t.Fatalf("AddObject cm1: %v", err)
+	}
+
+	obj2, err := w.AddObject("Snapshot--snap", cm2)
+	if err != nil {
+		t.Fatalf("AddObject cm2: %v", err)
+	}
+
+	// Only record obj1 in progress; obj2's blob should be GC'd.
+	prec := archive.ProgressRecord{NodeID: "Snapshot--snap", Objects: []archive.ObjectRecord{obj1}}
+
+	if err := w.AppendProgress(prec); err != nil {
+		t.Fatalf("AppendProgress: %v", err)
+	}
+
+	nodeRec := archive.NodeRecord{ID: "Snapshot--snap", Children: []string{}}
+
+	if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}, []archive.NodeRecord{nodeRec}, true); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	// obj1 blob must still exist.
+	if _, err := os.Stat(filepath.Join(dir, obj1.Blob)); err != nil {
+		t.Fatalf("obj1 blob must survive GC: %v", err)
+	}
+
+	// obj2 blob must have been GC'd.
+	if _, err := os.Stat(filepath.Join(dir, obj2.Blob)); err == nil {
+		t.Fatal("obj2 blob should have been removed by GC")
 	}
 }
 

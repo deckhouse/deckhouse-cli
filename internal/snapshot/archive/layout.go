@@ -39,8 +39,9 @@ const (
 
 // JSONL index files under dirIndexes.
 const (
-	fileNodes   = "nodes.jsonl"
-	fileObjects = "objects.jsonl"
+	fileNodes    = "nodes.jsonl"
+	fileObjects  = "objects.jsonl"
+	fileProgress = "progress.jsonl"
 )
 
 // Blob naming: two-level sharding by digest prefix.

@@ -19,8 +19,12 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,16 +47,58 @@ type Options struct {
 	// ObjectFilter is the --object flag value for single-object filtering.
 	// Format: <apiVersion>/<Kind>/<name> (e.g. "apps/v1/Deployment/my-deploy")
 	ObjectFilter string
+
+	// Fresh forces a clean overwrite of an existing archive without prompting.
+	Fresh bool
+
+	// Retries is the number of download attempts per node (0 → default 3).
+	Retries int
+
+	// RetryDelay is the base delay between retries (0 → default 2s).
+	// The actual delay doubles on each attempt (exponential back-off).
+	RetryDelay time.Duration
+
+	// OverwritePromptFn is called when an existing archive with a different
+	// identity is found and Fresh is false. It returns true to proceed with
+	// overwrite. When nil and Fresh is false, Run returns an error.
+	OverwritePromptFn func(dir string) bool
 }
 
-// BuildTreeFunc and FetchManifestsFunc are overridable seams for the tree build and manifest fetch steps.
+const (
+	defaultRetries    = 3
+	defaultRetryDelay = 2 * time.Second
+)
+
+// BuildTreeFunc and FetchManifestsFunc are overridable seams for tests.
 var (
 	BuildTreeFunc      = source.BuildTree
 	FetchManifestsFunc = source.FetchManifests
 )
 
-// Run executes the full manifest-download pipeline.
+// failedNode records a download failure for one tree node.
+type failedNode struct {
+	ID  string
+	Err error
+}
+
+// Run executes the full manifest-download pipeline with resume and retry support.
+//
+// Decision flow:
+//   - absent/empty output dir                      → fresh download
+//   - valid archive, same identity, COMPLETE+up-to-date → noop
+//   - valid archive, same identity, incomplete/stale   → resume
+//   - valid archive, different identity OR non-archive non-empty → overwrite (prompt or --fresh)
 func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtclient.Client, opts Options, log *slog.Logger) error {
+	retries := opts.Retries
+	if retries <= 0 {
+		retries = defaultRetries
+	}
+
+	retryDelay := opts.RetryDelay
+	if retryDelay <= 0 {
+		retryDelay = defaultRetryDelay
+	}
+
 	log.Info("checking Snapshot readiness", "namespace", opts.Namespace, "snapshot", opts.SnapshotName)
 
 	root, selected, nodes, err := prepareTree(ctx, rtClient, opts, log)
@@ -61,17 +107,42 @@ func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtcli
 	}
 
 	mode := selectionModeFor(opts)
-	meta := buildArchiveMeta(sClient, root, selected, nodes, opts, mode)
+	liveMeta := buildArchiveMeta(sClient, root, selected, nodes, opts, mode)
+	liveID := archive.IdentityOf(liveMeta)
 
-	log.Info("creating archive directory", "path", opts.OutputDir)
-
-	w, err := archive.NewDirWriter(opts.OutputDir, meta)
+	needFresh, err := resolveOutputDir(opts.OutputDir, liveID, opts, log)
 	if err != nil {
-		return fmt.Errorf("initialise archive at %s: %w", opts.OutputDir, err)
+		return err
 	}
 
-	if err := writeNodeRecords(w, nodes); err != nil {
-		return err
+	var (
+		w                *archive.DirWriter
+		existingProgress map[string]archive.ProgressRecord
+	)
+
+	if needFresh {
+		log.Info("creating archive directory", "path", opts.OutputDir)
+
+		w, err = archive.NewDirWriter(opts.OutputDir, liveMeta)
+		if err != nil {
+			return fmt.Errorf("initialise archive at %s: %w", opts.OutputDir, err)
+		}
+
+		existingProgress = make(map[string]archive.ProgressRecord)
+	} else {
+		w, existingProgress, err = archive.OpenForResume(opts.OutputDir)
+		if err != nil {
+			return fmt.Errorf("open archive for resume at %s: %w", opts.OutputDir, err)
+		}
+
+		if isNoop(nodes, existingProgress, opts.OutputDir) {
+			w.Close()
+			log.Info("archive already up to date", "path", opts.OutputDir)
+
+			return nil
+		}
+
+		log.Info("resuming existing archive", "path", opts.OutputDir)
 	}
 
 	objFilter, err := source.BuildObjectFilter(opts.ObjectFilter)
@@ -79,30 +150,91 @@ func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtcli
 		return err
 	}
 
-	dl := newDownloader(sClient, w, objFilter, log)
+	dl := &downloader{
+		sClient:          sClient,
+		writer:           w,
+		filter:           objFilter,
+		retries:          retries,
+		retryDelay:       retryDelay,
+		existingProgress: existingProgress,
+		outputDir:        opts.OutputDir,
+		log:              log,
+	}
+
+	var failed []failedNode
 
 	for _, n := range nodes {
 		if err := dl.processNode(ctx, n); err != nil {
-			return err
+			failed = append(failed, failedNode{ID: n.ID, Err: err})
+			log.Warn("node failed, continuing best-effort", "node", n.ID, "err", err)
 		}
 	}
 
-	return finalize(w, mode, opts, log)
+	liveNodeRecs := source.ToNodeRecords(nodes)
+	complete := len(failed) == 0
+	idx := buildIndex(mode, opts.NodeFilter != "")
+
+	summary, err := w.Finalize(idx, liveNodeRecs, complete)
+	if err != nil {
+		return fmt.Errorf("finalise archive: %w", err)
+	}
+
+	if complete {
+		log.Info("archive complete", "path", opts.OutputDir, "nodes", summary.Nodes, "objects", summary.Objects)
+
+		return nil
+	}
+
+	return buildFailureSummary(failed, opts)
 }
 
 // downloader bundles the dependencies for per-node manifest fetching.
 type downloader struct {
-	sClient *safeClient.SafeClient
-	writer  *archive.DirWriter
-	filter  source.ObjectFilter
-	log     *slog.Logger
+	sClient          *safeClient.SafeClient
+	writer           *archive.DirWriter
+	filter           source.ObjectFilter
+	retries          int
+	retryDelay       time.Duration
+	existingProgress map[string]archive.ProgressRecord
+	outputDir        string
+	log              *slog.Logger
 }
 
-func newDownloader(sc *safeClient.SafeClient, w *archive.DirWriter, f source.ObjectFilter, log *slog.Logger) *downloader {
-	return &downloader{sClient: sc, writer: w, filter: f, log: log}
-}
-
+// processNode downloads manifests for n, skipping it if already satisfied by
+// the existing progress. Retries transient errors up to d.retries times.
 func (d *downloader) processNode(ctx context.Context, n *source.Node) error {
+	if isNodeSatisfied(n, d.existingProgress, d.outputDir) {
+		d.log.Debug("node already satisfied, skipping", "node", n.ID)
+
+		return nil
+	}
+
+	var lastErr error
+
+	for attempt := range d.retries {
+		if attempt > 0 {
+			delay := d.retryDelay * time.Duration(1<<uint(attempt-1))
+			d.log.Debug("retrying node", "node", n.ID, "attempt", attempt+1, "delay", delay)
+			time.Sleep(delay)
+		}
+
+		lastErr = d.fetchAndStoreNode(ctx, n)
+		if lastErr == nil {
+			return nil
+		}
+
+		if errors.Is(lastErr, context.Canceled) || errors.Is(lastErr, context.DeadlineExceeded) {
+			return lastErr
+		}
+
+		d.log.Warn("fetch attempt failed", "node", n.ID, "attempt", attempt+1, "err", lastErr)
+	}
+
+	return fmt.Errorf("node %s failed after %d attempt(s): %w", n.ID, d.retries, lastErr)
+}
+
+// fetchAndStoreNode performs a single fetch-and-store cycle for one node.
+func (d *downloader) fetchAndStoreNode(ctx context.Context, n *source.Node) error {
 	d.log.Debug("fetching manifests", "node", n.ID)
 
 	rawObjects, err := FetchManifestsFunc(ctx, d.sClient, n)
@@ -111,13 +243,14 @@ func (d *downloader) processNode(ctx context.Context, n *source.Node) error {
 	}
 
 	filtered := rawObjects
+
 	if d.filter != nil {
 		filtered = filtered[:0]
 
 		for _, raw := range rawObjects {
-			keep, err := d.filter(raw)
-			if err != nil {
-				return fmt.Errorf("apply object filter: %w", err)
+			keep, filterErr := d.filter(raw)
+			if filterErr != nil {
+				return fmt.Errorf("apply object filter: %w", filterErr)
 			}
 
 			if keep {
@@ -126,20 +259,168 @@ func (d *downloader) processNode(ctx context.Context, n *source.Node) error {
 		}
 	}
 
+	objRecs := make([]archive.ObjectRecord, 0, len(filtered))
+
 	for _, raw := range filtered {
-		objRec, err := d.writer.AddObject(n.ID, raw)
-		if err != nil {
-			return fmt.Errorf("add object from %s: %w", n.ID, err)
+		objRec, addErr := d.writer.AddObject(n.ID, raw)
+		if addErr != nil {
+			return fmt.Errorf("add object from %s: %w", n.ID, addErr)
 		}
 
-		if err := d.writer.AppendObject(objRec); err != nil {
-			return err
-		}
+		objRecs = append(objRecs, objRec)
+	}
+
+	prec := archive.ProgressRecord{
+		NodeID:     n.ID,
+		ContentRef: n.BoundSnapshotContentName,
+		Objects:    objRecs,
+	}
+
+	if err := d.writer.AppendProgress(prec); err != nil {
+		return err
 	}
 
 	d.log.Debug("node done", "node", n.ID, "objects", len(filtered))
 
 	return nil
+}
+
+// resolveOutputDir inspects the output directory and decides whether to start
+// fresh. It handles wiping when overwrite is confirmed via Fresh or the prompt.
+// Returns needFresh=true for a clean write, false to resume.
+func resolveOutputDir(dir string, liveID archive.ArchiveIdentity, opts Options, log *slog.Logger) (bool, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+				return false, fmt.Errorf("create output dir %s: %w", dir, mkErr)
+			}
+
+			return true, nil
+		}
+
+		return false, fmt.Errorf("stat output dir %s: %w", dir, err)
+	}
+
+	if !info.IsDir() {
+		return false, fmt.Errorf("output path %s exists and is not a directory", dir)
+	}
+
+	// Check if dir is effectively empty (only possibly COMPLETE or similar).
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, fmt.Errorf("read output dir %s: %w", dir, err)
+	}
+
+	if len(entries) == 0 {
+		return true, nil
+	}
+
+	// Try to read as a d8 snapshot archive.
+	r, openErr := archive.OpenDir(dir)
+	if openErr != nil {
+		// Not a d8 archive or damaged; fall through to overwrite handling.
+		return false, handleOverwrite(dir, "not a snapshot archive (or archive.json is missing/invalid)", opts, log)
+	}
+
+	existingMeta, metaErr := r.Meta()
+	if metaErr != nil || existingMeta.Magic != archive.Magic {
+		return false, handleOverwrite(dir, "archive.json has unexpected content", opts, log)
+	}
+
+	existingID := archive.IdentityOf(existingMeta)
+	if existingID.Equal(liveID) {
+		// Same target: resume (caller will check noop after opening for resume).
+		return false, nil
+	}
+
+	// Different identity: overwrite.
+	reason := fmt.Sprintf("existing archive targets %s/%s (%s), requested %s/%s (%s)",
+		existingMeta.Source.Namespace, existingMeta.Source.RootSnapshot.Name, existingMeta.Selection.Mode,
+		liveID.Namespace, liveID.Snapshot, liveID.Mode)
+
+	if err := handleOverwrite(dir, reason, opts, log); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+// handleOverwrite either wipes the directory (Fresh=true or prompt returned true)
+// or returns an error instructing the user how to proceed.
+func handleOverwrite(dir, reason string, opts Options, log *slog.Logger) error {
+	if opts.Fresh {
+		log.Info("overwriting existing directory (--fresh)", "path", dir, "reason", reason)
+
+		return archive.WipeDir(dir)
+	}
+
+	if opts.OverwritePromptFn != nil && opts.OverwritePromptFn(dir) {
+		log.Info("overwriting existing directory (confirmed)", "path", dir)
+
+		return archive.WipeDir(dir)
+	}
+
+	if opts.OverwritePromptFn == nil {
+		return fmt.Errorf("directory %q contains different content (%s); use --fresh to overwrite or choose a different -o", dir, reason)
+	}
+
+	return fmt.Errorf("overwrite of %q declined; choose a different -o or use --fresh", dir)
+}
+
+// isNoop returns true when all live nodes are satisfied by the existing
+// progress and a COMPLETE sentinel is present.
+func isNoop(nodes []*source.Node, progress map[string]archive.ProgressRecord, dir string) bool {
+	if !archive.IsComplete(dir) {
+		return false
+	}
+
+	for _, n := range nodes {
+		if !isNodeSatisfied(n, progress, dir) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isNodeSatisfied reports whether a live node's blobs are already on disk and
+// its ContentRef (boundSnapshotContentName) matches the progress record.
+func isNodeSatisfied(n *source.Node, progress map[string]archive.ProgressRecord, dir string) bool {
+	rec, ok := progress[n.ID]
+	if !ok {
+		return false
+	}
+
+	if rec.ContentRef != n.BoundSnapshotContentName {
+		return false
+	}
+
+	for _, obj := range rec.Objects {
+		if _, err := os.Stat(filepath.Join(dir, obj.Blob)); err != nil {
+			return false
+		}
+	}
+
+	return true
+}
+
+// buildFailureSummary formats an error describing which nodes failed and how
+// to resume.
+func buildFailureSummary(failed []failedNode, opts Options) error {
+	lines := make([]string, 0, len(failed)+2)
+	lines = append(lines, fmt.Sprintf("%d node(s) failed to download:", len(failed)))
+
+	for _, f := range failed {
+		lines = append(lines, fmt.Sprintf("  %s: %v", f.ID, f.Err))
+	}
+
+	lines = append(lines, fmt.Sprintf(
+		"Re-run the same command to resume the remaining downloads:\n  d8 snapshot download %s %s -o %s",
+		opts.Namespace, opts.SnapshotName, opts.OutputDir,
+	))
+
+	return errors.New(strings.Join(lines, "\n"))
 }
 
 // prepareTree reads the snapshot readiness, builds and selects the node tree.
@@ -174,31 +455,6 @@ func selectionModeFor(opts Options) archive.SelectionMode {
 	return archive.SelectionFull
 }
 
-// writeNodeRecords appends a NodeRecord for every node in the list.
-func writeNodeRecords(w *archive.DirWriter, nodes []*source.Node) error {
-	for _, n := range nodes {
-		if err := w.AppendNode(source.ToNodeRecord(n)); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// finalize builds the index, calls Finalize, and logs the result.
-func finalize(w *archive.DirWriter, mode archive.SelectionMode, opts Options, log *slog.Logger) error {
-	idx := buildIndex(mode, opts.NodeFilter != "")
-
-	summary, err := w.Finalize(idx)
-	if err != nil {
-		return fmt.Errorf("finalise archive: %w", err)
-	}
-
-	log.Info("archive complete", "path", opts.OutputDir, "nodes", summary.Nodes, "objects", summary.Objects)
-
-	return nil
-}
-
 // buildArchiveMeta constructs the Meta written to archive.json.
 func buildArchiveMeta(
 	sClient *safeClient.SafeClient,
@@ -220,6 +476,7 @@ func buildArchiveMeta(
 	}
 
 	selectedNodeIDs := make([]string, 0, len(nodes))
+
 	for _, n := range nodes {
 		selectedNodeIDs = append(selectedNodeIDs, n.ID)
 	}
@@ -239,10 +496,12 @@ func buildArchiveMeta(
 			},
 			Namespace: opts.Namespace,
 			RootSnapshot: archive.SnapshotRef{
-				APIVersion: root.APIVersion,
-				Kind:       root.Kind,
-				Resource:   root.Resource,
-				Name:       root.Name,
+				APIVersion:      root.APIVersion,
+				Kind:            root.Kind,
+				Resource:        root.Resource,
+				Name:            root.Name,
+				UID:             root.UID,
+				ResourceVersion: root.ResourceVersion,
 			},
 			RootSnapshotContent: archive.SnapshotContentRef{
 				APIVersion: root.APIVersion,
@@ -253,6 +512,7 @@ func buildArchiveMeta(
 		Selection: archive.Selection{
 			Mode:            mode,
 			RootNodeID:      rootNodeID,
+			ObjectFilter:    opts.ObjectFilter,
 			SelectedNodeIDs: selectedNodeIDs,
 		},
 	}

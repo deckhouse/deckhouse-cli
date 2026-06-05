@@ -137,6 +137,59 @@ func (r *DirReader) ForEachObject(fn func(ObjectRecord) error) error {
 	return sc.Err()
 }
 
+// Progress reads indexes/progress.jsonl and returns a map of ProgressRecords
+// keyed by node ID. When multiple records for the same node ID are present
+// (update case), the last one wins.
+// A truncated trailing line (crash mid-write) is silently skipped.
+func (r *DirReader) Progress() (map[string]ProgressRecord, error) {
+	return readProgressFile(filepath.Join(r.dir, dirIndexes, fileProgress))
+}
+
+// readProgressFile reads a progress JSONL file and returns a map of records
+// keyed by node ID. A truncated trailing line is silently skipped.
+// The function is used by both DirReader.Progress and OpenForResume.
+func readProgressFile(path string) (map[string]ProgressRecord, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]ProgressRecord), nil
+		}
+
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+
+	defer f.Close()
+
+	result := make(map[string]ProgressRecord)
+
+	sc := bufio.NewScanner(f)
+	// Use a 10 MB buffer to accommodate nodes with many objects.
+	sc.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+	for sc.Scan() {
+		line := sc.Text()
+
+		if line == "" {
+			continue
+		}
+
+		var rec ProgressRecord
+
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			// Tolerate a truncated trailing line from a crash by breaking out.
+			break
+		}
+
+		result[rec.NodeID] = rec
+	}
+
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("scan %s: %w", path, err)
+	}
+
+	return result, nil
+}
+
 // readJSON reads a JSON file and unmarshals it into v.
 func readJSON(path string, v any) error {
 	data, err := os.ReadFile(path)

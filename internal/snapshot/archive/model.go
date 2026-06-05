@@ -31,7 +31,10 @@ limitations under the License.
 //	  data/         - reserved for future volume data
 package archive
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 const (
 	// Magic is the fixed string in archive.json that identifies the format.
@@ -100,9 +103,11 @@ type SnapshotContentRef struct {
 
 // Selection describes which part of the snapshot was included.
 type Selection struct {
-	Mode            SelectionMode `json:"mode"`
-	RootNodeID      string        `json:"rootNodeId"`
-	SelectedNodeIDs []string      `json:"selectedNodeIds"`
+	Mode       SelectionMode `json:"mode"`
+	RootNodeID string        `json:"rootNodeId"`
+	// ObjectFilter is the --object flag value that was used, if any.
+	ObjectFilter    string   `json:"objectFilter,omitempty"`
+	SelectedNodeIDs []string `json:"selectedNodeIds"`
 }
 
 // Index is the top-level structure of index.json.
@@ -175,4 +180,62 @@ type ObjectRecord struct {
 	Digest     string `json:"digest"`
 	Size       int64  `json:"size"`
 	Blob       string `json:"blob"`
+}
+
+// ProgressRecord is one line in indexes/progress.jsonl.
+// It is written durably after a node's blobs are flushed and fsync'd.
+// Finalize regenerates nodes.jsonl and objects.jsonl from the accumulated records.
+type ProgressRecord struct {
+	NodeID     string         `json:"nodeId"`
+	ContentRef string         `json:"contentRef"` // boundSnapshotContentName at download time
+	Objects    []ObjectRecord `json:"objects"`
+}
+
+// ArchiveIdentity is the minimal set of fields used to recognise whether an
+// existing archive covers the same download target as a new invocation.
+// UID is intentionally excluded so that a re-created snapshot is treated as
+// the same target with updated content rather than a different one.
+type ArchiveIdentity struct {
+	Namespace       string        `json:"namespace"`
+	Snapshot        string        `json:"snapshot"`
+	Mode            SelectionMode `json:"mode"`
+	RootNodeID      string        `json:"rootNodeId"`
+	ObjectFilter    string        `json:"objectFilter,omitempty"`
+	SelectedNodeIDs []string      `json:"selectedNodeIds"`
+}
+
+// IdentityOf extracts an ArchiveIdentity from a Meta.
+// SelectedNodeIDs are sorted so that Equal is order-independent.
+func IdentityOf(m Meta) ArchiveIdentity {
+	ids := append([]string(nil), m.Selection.SelectedNodeIDs...)
+	sort.Strings(ids)
+
+	return ArchiveIdentity{
+		Namespace:       m.Source.Namespace,
+		Snapshot:        m.Source.RootSnapshot.Name,
+		Mode:            m.Selection.Mode,
+		RootNodeID:      m.Selection.RootNodeID,
+		ObjectFilter:    m.Selection.ObjectFilter,
+		SelectedNodeIDs: ids,
+	}
+}
+
+// Equal reports whether two identities cover the same snapshot selection.
+func (a ArchiveIdentity) Equal(b ArchiveIdentity) bool {
+	if a.Namespace != b.Namespace ||
+		a.Snapshot != b.Snapshot ||
+		a.Mode != b.Mode ||
+		a.RootNodeID != b.RootNodeID ||
+		a.ObjectFilter != b.ObjectFilter ||
+		len(a.SelectedNodeIDs) != len(b.SelectedNodeIDs) {
+		return false
+	}
+
+	for i := range a.SelectedNodeIDs {
+		if a.SelectedNodeIDs[i] != b.SelectedNodeIDs[i] {
+			return false
+		}
+	}
+
+	return true
 }

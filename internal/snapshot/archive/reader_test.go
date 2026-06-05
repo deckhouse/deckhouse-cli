@@ -85,7 +85,7 @@ func TestDirReader_Meta(t *testing.T) {
 
 	idx := archive.Index{SchemaVersion: archive.SchemaVersion}
 
-	if _, err := w.Finalize(idx); err != nil {
+	if _, err := w.Finalize(idx, nil, true); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
 
@@ -115,10 +115,8 @@ func TestDirReader_Meta(t *testing.T) {
 func TestDirReader_Index(t *testing.T) {
 	dir, w := buildTestArchive(t)
 
-	if err := w.AppendNode(archive.NodeRecord{
+	nodeRec := archive.NodeRecord{
 		ID: "Snapshot--my-snap", Kind: "Snapshot", Name: "my-snap", Children: []string{},
-	}); err != nil {
-		t.Fatalf("AppendNode: %v", err)
 	}
 
 	idx := archive.Index{
@@ -126,7 +124,7 @@ func TestDirReader_Index(t *testing.T) {
 		Capabilities:  archive.IndexCapabilities{Manifests: true},
 	}
 
-	if _, err := w.Finalize(idx); err != nil {
+	if _, err := w.Finalize(idx, []archive.NodeRecord{nodeRec}, true); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
 
@@ -157,13 +155,7 @@ func TestDirReader_Nodes(t *testing.T) {
 		{ID: "Snapshot--child", Kind: "Snapshot", Name: "child", ParentID: "Snapshot--my-snap", Children: []string{}},
 	}
 
-	for _, nr := range nodes {
-		if err := w.AppendNode(nr); err != nil {
-			t.Fatalf("AppendNode %s: %v", nr.ID, err)
-		}
-	}
-
-	if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}); err != nil {
+	if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}, nodes, true); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
 
@@ -198,18 +190,24 @@ func TestDirReader_ForEachObject(t *testing.T) {
 		[]byte(`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"app","namespace":"demo"}}`),
 	}
 
+	var objs []archive.ObjectRecord
+
 	for _, raw := range raws {
 		rec, err := w.AddObject("Snapshot--my-snap", raw)
 		if err != nil {
 			t.Fatalf("AddObject: %v", err)
 		}
 
-		if err := w.AppendObject(rec); err != nil {
-			t.Fatalf("AppendObject: %v", err)
-		}
+		objs = append(objs, rec)
 	}
 
-	if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}); err != nil {
+	prec := archive.ProgressRecord{NodeID: "Snapshot--my-snap", Objects: objs}
+
+	if err := w.AppendProgress(prec); err != nil {
+		t.Fatalf("AppendProgress: %v", err)
+	}
+
+	if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}, nil, true); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
 

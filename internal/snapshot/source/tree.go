@@ -51,6 +51,10 @@ type Node struct {
 	Name      string
 	Namespace string
 
+	// UID and ResourceVersion are populated from the object metadata.
+	UID             string
+	ResourceVersion string
+
 	// BoundSnapshotContentName is status.boundSnapshotContentName of the snapshot CR.
 	BoundSnapshotContentName string
 
@@ -134,6 +138,17 @@ func FlatNodes(n *Node) []*Node {
 	return result
 }
 
+// ToNodeRecords converts a slice of Nodes to archive.NodeRecords.
+func ToNodeRecords(nodes []*Node) []archive.NodeRecord {
+	recs := make([]archive.NodeRecord, len(nodes))
+
+	for i, n := range nodes {
+		recs[i] = ToNodeRecord(n)
+	}
+
+	return recs
+}
+
 // ToNodeRecord converts a Node to an archive.NodeRecord for writing to nodes.jsonl.
 func ToNodeRecord(n *Node) archive.NodeRecord {
 	children := make([]string, 0, len(n.Children))
@@ -187,6 +202,8 @@ func fetchSnapshotNode(ctx context.Context, client ctrlrtclient.Client,
 		Resource:                 resource,
 		Name:                     name,
 		Namespace:                namespace,
+		UID:                      string(obj.GetUID()),
+		ResourceVersion:          obj.GetResourceVersion(),
 		BoundSnapshotContentName: boundContent,
 		ParentID:                 parentID,
 	}

@@ -79,20 +79,19 @@ func buildTestArchiveDir(t *testing.T) string {
 		{ID: "Snapshot--child", Kind: "Snapshot", Name: "child", Namespace: "demo", ParentID: "Snapshot--my-snap", Children: []string{}},
 	}
 
-	for _, nr := range nodes {
-		if err := w.AppendNode(nr); err != nil {
-			t.Fatalf("AppendNode %s: %v", nr.ID, err)
-		}
-	}
-
-	raws := []struct {
+	type rawItem struct {
 		nodeID string
 		raw    []byte
-	}{
+	}
+
+	raws := []rawItem{
 		{"Snapshot--my-snap", []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cm1","namespace":"demo"}}`)},
 		{"Snapshot--my-snap", []byte(`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"app","namespace":"demo"}}`)},
 		{"Snapshot--child", []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cm2","namespace":"demo"}}`)},
 	}
+
+	// Group objects by node and write progress records.
+	nodeObjs := make(map[string][]archive.ObjectRecord)
 
 	for _, item := range raws {
 		rec, err := w.AddObject(item.nodeID, item.raw)
@@ -100,12 +99,18 @@ func buildTestArchiveDir(t *testing.T) string {
 			t.Fatalf("AddObject: %v", err)
 		}
 
-		if err := w.AppendObject(rec); err != nil {
-			t.Fatalf("AppendObject: %v", err)
+		nodeObjs[item.nodeID] = append(nodeObjs[item.nodeID], rec)
+	}
+
+	for _, nr := range nodes {
+		prec := archive.ProgressRecord{NodeID: nr.ID, Objects: nodeObjs[nr.ID]}
+
+		if err := w.AppendProgress(prec); err != nil {
+			t.Fatalf("AppendProgress %s: %v", nr.ID, err)
 		}
 	}
 
-	if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}); err != nil {
+	if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}, nodes, true); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
 
@@ -381,39 +386,42 @@ func TestBuildFromArchive_Dedup(t *testing.T) {
 		},
 	}
 
+	nodeRecs := []archive.NodeRecord{
+		{ID: "Snapshot--root", Kind: "Snapshot", Name: "root", Namespace: "demo", Children: []string{"Snapshot--child"}},
+		{ID: "Snapshot--child", Kind: "Snapshot", Name: "child", Namespace: "demo", ParentID: "Snapshot--root", Children: []string{}},
+	}
+
 	w, err := archive.NewDirWriter(dir, meta)
 	if err != nil {
 		t.Fatalf("NewDirWriter: %v", err)
 	}
 
-	for _, nr := range []archive.NodeRecord{
-		{ID: "Snapshot--root", Kind: "Snapshot", Name: "root", Namespace: "demo", Children: []string{"Snapshot--child"}},
-		{ID: "Snapshot--child", Kind: "Snapshot", Name: "child", Namespace: "demo", ParentID: "Snapshot--root", Children: []string{}},
+	// root has [rootOnly, shared]; child has [shared].
+	rootOnlyRec, err := w.AddObject("Snapshot--root", rootOnly)
+	if err != nil {
+		t.Fatalf("AddObject rootOnly: %v", err)
+	}
+
+	sharedAtRoot, err := w.AddObject("Snapshot--root", shared)
+	if err != nil {
+		t.Fatalf("AddObject shared@root: %v", err)
+	}
+
+	sharedAtChild, err := w.AddObject("Snapshot--child", shared)
+	if err != nil {
+		t.Fatalf("AddObject shared@child: %v", err)
+	}
+
+	for _, prec := range []archive.ProgressRecord{
+		{NodeID: "Snapshot--root", Objects: []archive.ObjectRecord{rootOnlyRec, sharedAtRoot}},
+		{NodeID: "Snapshot--child", Objects: []archive.ObjectRecord{sharedAtChild}},
 	} {
-		if err := w.AppendNode(nr); err != nil {
-			t.Fatalf("AppendNode: %v", err)
+		if err := w.AppendProgress(prec); err != nil {
+			t.Fatalf("AppendProgress: %v", err)
 		}
 	}
 
-	for _, item := range []struct {
-		nodeID string
-		raw    []byte
-	}{
-		{"Snapshot--root", rootOnly},
-		{"Snapshot--root", shared},  // shared also in child
-		{"Snapshot--child", shared}, // deepest captures shared
-	} {
-		rec, err := w.AddObject(item.nodeID, item.raw)
-		if err != nil {
-			t.Fatalf("AddObject: %v", err)
-		}
-
-		if err := w.AppendObject(rec); err != nil {
-			t.Fatalf("AppendObject: %v", err)
-		}
-	}
-
-	if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}); err != nil {
+	if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}, nodeRecs, true); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
 
@@ -467,31 +475,29 @@ func TestBuildFromArchive_ObjectModePrune(t *testing.T) {
 			},
 		}
 
+		nodeRecs := []archive.NodeRecord{
+			{ID: "Snapshot--root", Kind: "Snapshot", Name: "root", Namespace: "demo", Children: []string{"Snapshot--child-a", "Snapshot--child-b"}},
+			{ID: "Snapshot--child-a", Kind: "Snapshot", Name: "child-a", Namespace: "demo", ParentID: "Snapshot--root", Children: []string{}},
+			{ID: "Snapshot--child-b", Kind: "Snapshot", Name: "child-b", Namespace: "demo", ParentID: "Snapshot--root", Children: []string{}},
+		}
+
 		w, err := archive.NewDirWriter(dir, meta)
 		if err != nil {
 			t.Fatalf("NewDirWriter: %v", err)
 		}
 
-		for _, nr := range []archive.NodeRecord{
-			{ID: "Snapshot--root", Kind: "Snapshot", Name: "root", Namespace: "demo", Children: []string{"Snapshot--child-a", "Snapshot--child-b"}},
-			{ID: "Snapshot--child-a", Kind: "Snapshot", Name: "child-a", Namespace: "demo", ParentID: "Snapshot--root", Children: []string{}},
-			{ID: "Snapshot--child-b", Kind: "Snapshot", Name: "child-b", Namespace: "demo", ParentID: "Snapshot--root", Children: []string{}},
-		} {
-			if err := w.AppendNode(nr); err != nil {
-				t.Fatalf("AppendNode: %v", err)
-			}
-		}
-
-		rec, err := w.AddObject(objectNodeID, raw)
+		objRec, err := w.AddObject(objectNodeID, raw)
 		if err != nil {
 			t.Fatalf("AddObject: %v", err)
 		}
 
-		if err := w.AppendObject(rec); err != nil {
-			t.Fatalf("AppendObject: %v", err)
+		prec := archive.ProgressRecord{NodeID: objectNodeID, Objects: []archive.ObjectRecord{objRec}}
+
+		if err := w.AppendProgress(prec); err != nil {
+			t.Fatalf("AppendProgress: %v", err)
 		}
 
-		if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}); err != nil {
+		if _, err := w.Finalize(archive.Index{SchemaVersion: archive.SchemaVersion}, nodeRecs, true); err != nil {
 			t.Fatalf("Finalize: %v", err)
 		}
 

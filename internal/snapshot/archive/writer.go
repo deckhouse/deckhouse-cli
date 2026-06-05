@@ -23,24 +23,26 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
 )
 
 // DirWriter writes a snapshot archive to a directory on the local filesystem.
+// Progress is checkpointed durably to indexes/progress.jsonl after each node.
+// Finalize regenerates nodes.jsonl, objects.jsonl, and index.json from the
+// accumulated ProgressRecords, so indexes survive a crash and resume.
 type DirWriter struct {
-	dir           string
-	nodesWriter   *bufio.Writer
-	objectsWriter *bufio.Writer
-	nodesFile     *os.File
-	objectsFile   *os.File
-	seenDigests   map[string]int64
-	nodeCount     int
-	objectCount   int
+	dir             string
+	progressFile    *os.File
+	progressWriter  *bufio.Writer
+	progressRecords []ProgressRecord
+	seenDigests     map[string]int64
 }
 
-// NewDirWriter creates the archive directory structure and opens index files for writing.
+// NewDirWriter creates the archive directory structure, writes archive.json,
+// and opens progress.jsonl for writing.
 func NewDirWriter(dir string, meta Meta) (*DirWriter, error) {
 	for _, sub := range []string{dirIndexes, dirObjects, dirData} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
@@ -59,50 +61,66 @@ func NewDirWriter(dir string, meta Meta) (*DirWriter, error) {
 		return nil, fmt.Errorf("write %s: %w", fileArchive, err)
 	}
 
-	nodesF, err := os.Create(filepath.Join(dir, dirIndexes, fileNodes))
+	progressF, err := os.Create(filepath.Join(dir, dirIndexes, fileProgress))
 	if err != nil {
-		return nil, fmt.Errorf("create nodes index: %w", err)
-	}
-
-	objectsF, err := os.Create(filepath.Join(dir, dirIndexes, fileObjects))
-	if err != nil {
-		nodesF.Close()
-
-		return nil, fmt.Errorf("create objects index: %w", err)
+		return nil, fmt.Errorf("create progress index: %w", err)
 	}
 
 	return &DirWriter{
-		dir:           dir,
-		nodesFile:     nodesF,
-		nodesWriter:   bufio.NewWriter(nodesF),
-		objectsFile:   objectsF,
-		objectsWriter: bufio.NewWriter(objectsF),
-		seenDigests:   make(map[string]int64),
+		dir:            dir,
+		progressFile:   progressF,
+		progressWriter: bufio.NewWriter(progressF),
+		seenDigests:    make(map[string]int64),
 	}, nil
 }
 
-// AppendNode writes one NodeRecord to the nodes index.
-func (w *DirWriter) AppendNode(rec NodeRecord) error {
-	if err := appendRecord(w.nodesWriter, &w.nodeCount, rec); err != nil {
-		return fmt.Errorf("append node %s: %w", rec.ID, err)
+// OpenForResume opens an existing archive directory for incremental download.
+// It reads the existing progress records and rebuilds the seenDigests set so
+// blobs that are already on disk are not re-downloaded.
+// Returns the writer and a map of existing progress records keyed by node ID.
+func OpenForResume(dir string) (*DirWriter, map[string]ProgressRecord, error) {
+	existing, err := readProgressFile(filepath.Join(dir, dirIndexes, fileProgress))
+	if err != nil {
+		return nil, nil, fmt.Errorf("read progress: %w", err)
 	}
 
-	return nil
-}
+	seenDigests := make(map[string]int64, len(existing)*4)
 
-// AppendObject writes one ObjectRecord to the objects index.
-func (w *DirWriter) AppendObject(rec ObjectRecord) error {
-	if err := appendRecord(w.objectsWriter, &w.objectCount, rec); err != nil {
-		return fmt.Errorf("append object %s/%s/%s: %w", rec.APIVersion, rec.Kind, rec.Name, err)
+	for _, prec := range existing {
+		for _, obj := range prec.Objects {
+			seenDigests[obj.Digest] = obj.Size
+		}
 	}
 
-	return nil
+	progressF, err := os.OpenFile(
+		filepath.Join(dir, dirIndexes, fileProgress),
+		os.O_APPEND|os.O_WRONLY|os.O_CREATE,
+		0o644,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open progress for append: %w", err)
+	}
+
+	precs := make([]ProgressRecord, 0, len(existing))
+
+	for _, prec := range existing {
+		precs = append(precs, prec)
+	}
+
+	w := &DirWriter{
+		dir:             dir,
+		progressFile:    progressF,
+		progressWriter:  bufio.NewWriter(progressF),
+		progressRecords: precs,
+		seenDigests:     seenDigests,
+	}
+
+	return w, existing, nil
 }
 
-// AddObject content-addresses rawJSON, writes a gzipped blob if not yet present,
-// and returns a populated ObjectRecord ready for AppendObject.
-// map[string]any is used because manifests are arbitrary Kubernetes objects with
-// no fixed Go type; re-marshalling produces canonical key order for a stable digest.
+// AddObject content-addresses rawJSON and writes a gzipped blob atomically
+// (write to .tmp → fsync → rename) to prevent half-written blobs surviving a crash.
+// Returns a populated ObjectRecord ready for inclusion in a ProgressRecord.
 func (w *DirWriter) AddObject(nodeID string, rawJSON []byte) (ObjectRecord, error) {
 	var obj map[string]any
 
@@ -147,7 +165,7 @@ func (w *DirWriter) AddObject(nodeID string, rawJSON []byte) (ObjectRecord, erro
 		return ObjectRecord{}, fmt.Errorf("create blob dir for %s: %w", digest, err)
 	}
 
-	written, err := writeGzipBlob(blobAbs, canonical)
+	written, err := writeGzipBlobAtomic(blobAbs, canonical)
 	if err != nil {
 		return ObjectRecord{}, fmt.Errorf("write blob %s: %w", digest, err)
 	}
@@ -158,31 +176,96 @@ func (w *DirWriter) AddObject(nodeID string, rawJSON []byte) (ObjectRecord, erro
 	return rec, nil
 }
 
-// Finalize flushes all index writers, writes index.json, and creates the COMPLETE sentinel.
-// It returns a populated IndexSummary with the final counts.
-func (w *DirWriter) Finalize(idx Index) (IndexSummary, error) {
-	if err := w.nodesWriter.Flush(); err != nil {
-		return IndexSummary{}, fmt.Errorf("flush nodes index: %w", err)
+// Close closes the progress file without finalising the archive.
+// Use it when aborting an in-progress write (e.g. noop early exit).
+func (w *DirWriter) Close() {
+	_ = w.progressWriter.Flush()
+	_ = w.progressFile.Close()
+}
+
+// AppendProgress records a node's completion durably. It must be called only
+// after all blobs for the node are written and their writes are durable on disk.
+// The record is appended to progress.jsonl and fsynced before returning.
+func (w *DirWriter) AppendProgress(rec ProgressRecord) error {
+	if err := appendJSONLRecord(w.progressWriter, rec); err != nil {
+		return fmt.Errorf("append progress for %s: %w", rec.NodeID, err)
 	}
 
-	if err := w.objectsWriter.Flush(); err != nil {
-		return IndexSummary{}, fmt.Errorf("flush objects index: %w", err)
+	if err := w.progressWriter.Flush(); err != nil {
+		return fmt.Errorf("flush progress for %s: %w", rec.NodeID, err)
 	}
 
-	if err := w.nodesFile.Close(); err != nil {
-		return IndexSummary{}, fmt.Errorf("close nodes file: %w", err)
+	if err := w.progressFile.Sync(); err != nil {
+		return fmt.Errorf("sync progress for %s: %w", rec.NodeID, err)
 	}
 
-	if err := w.objectsFile.Close(); err != nil {
-		return IndexSummary{}, fmt.Errorf("close objects file: %w", err)
+	w.progressRecords = append(w.progressRecords, rec)
+
+	return nil
+}
+
+// Finalize regenerates nodes.jsonl and objects.jsonl from the accumulated
+// progress records and the live node list, writes index.json, GCs orphan blobs,
+// and writes the COMPLETE sentinel when complete is true.
+// It closes the progress file before writing the generated files.
+func (w *DirWriter) Finalize(idx Index, liveNodes []NodeRecord, complete bool) (IndexSummary, error) {
+	if err := w.progressFile.Close(); err != nil {
+		return IndexSummary{}, fmt.Errorf("close progress file: %w", err)
 	}
 
+	// Deduplicate progress records by nodeID: last write wins (handles update case).
+	finalByNode := make(map[string]ProgressRecord, len(w.progressRecords))
+
+	for _, prec := range w.progressRecords {
+		finalByNode[prec.NodeID] = prec
+	}
+
+	// Regenerate nodes.jsonl from liveNodes.
+	if err := writeJSONLFile(filepath.Join(w.dir, dirIndexes, fileNodes), func(enc *json.Encoder) error {
+		for _, nr := range liveNodes {
+			if err := enc.Encode(nr); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}); err != nil {
+		return IndexSummary{}, fmt.Errorf("write nodes.jsonl: %w", err)
+	}
+
+	// Regenerate objects.jsonl from all final progress records.
+	objectCount := 0
+
+	referencedBlobs := make(map[string]struct{}, len(finalByNode)*4)
+
+	if err := writeJSONLFile(filepath.Join(w.dir, dirIndexes, fileObjects), func(enc *json.Encoder) error {
+		for _, prec := range finalByNode {
+			for _, obj := range prec.Objects {
+				if err := enc.Encode(obj); err != nil {
+					return err
+				}
+
+				referencedBlobs[filepath.Join(w.dir, obj.Blob)] = struct{}{}
+				objectCount++
+			}
+		}
+
+		return nil
+	}); err != nil {
+		return IndexSummary{}, fmt.Errorf("write objects.jsonl: %w", err)
+	}
+
+	// GC blobs that are no longer referenced by any progress record.
+	if err := gcBlobs(filepath.Join(w.dir, dirObjects), referencedBlobs); err != nil {
+		return IndexSummary{}, fmt.Errorf("gc blobs: %w", err)
+	}
+
+	// Write index.json.
 	summary := IndexSummary{
-		Nodes:    w.nodeCount,
-		Objects:  w.objectCount,
-		Complete: true,
+		Nodes:    len(liveNodes),
+		Objects:  objectCount,
+		Complete: complete,
 	}
-
 	idx.Summary = summary
 
 	data, err := json.MarshalIndent(idx, "", "  ")
@@ -194,18 +277,63 @@ func (w *DirWriter) Finalize(idx Index) (IndexSummary, error) {
 		return IndexSummary{}, fmt.Errorf("write %s: %w", fileIndex, err)
 	}
 
-	completeFile := filepath.Join(w.dir, fileComplete)
-	stamp := []byte(time.Now().UTC().Format(time.RFC3339) + "\n")
+	// Write COMPLETE sentinel last; absent means download is incomplete.
+	if complete {
+		stamp := []byte(time.Now().UTC().Format(time.RFC3339) + "\n")
 
-	if err = os.WriteFile(completeFile, stamp, 0o644); err != nil {
-		return IndexSummary{}, fmt.Errorf("write %s: %w", fileComplete, err)
+		if err = os.WriteFile(filepath.Join(w.dir, fileComplete), stamp, 0o644); err != nil {
+			return IndexSummary{}, fmt.Errorf("write %s: %w", fileComplete, err)
+		}
 	}
 
 	return summary, nil
 }
 
-// appendRecord serializes rec as a JSONL line into bw and increments *count.
-func appendRecord(bw *bufio.Writer, count *int, rec any) error {
+// WipeDir removes all archive content from dir, keeping the directory itself,
+// so that NewDirWriter can be called on the same path for a fresh download.
+func WipeDir(dir string) error {
+	for _, f := range []string{fileArchive, fileIndex, fileComplete} {
+		_ = os.Remove(filepath.Join(dir, f))
+	}
+
+	for _, sub := range []string{dirIndexes, dirObjects, dirData} {
+		if err := os.RemoveAll(filepath.Join(dir, sub)); err != nil {
+			return fmt.Errorf("remove %s: %w", sub, err)
+		}
+	}
+
+	return nil
+}
+
+// writeJSONLFile creates (or truncates) path and calls fn with an encoder.
+func writeJSONLFile(path string, fn func(*json.Encoder) error) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+
+	defer f.Close()
+
+	return fn(json.NewEncoder(f))
+}
+
+// gcBlobs removes blob files under blobDir that are not in referenced.
+func gcBlobs(blobDir string, referenced map[string]struct{}) error {
+	return filepath.WalkDir(blobDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+
+		if _, ok := referenced[path]; !ok {
+			_ = os.Remove(path)
+		}
+
+		return nil
+	})
+}
+
+// appendJSONLRecord serializes rec as a JSONL line into bw.
+func appendJSONLRecord(bw *bufio.Writer, rec any) error {
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return err
@@ -215,13 +343,7 @@ func appendRecord(bw *bufio.Writer, count *int, rec any) error {
 		return err
 	}
 
-	if err = bw.WriteByte('\n'); err != nil {
-		return err
-	}
-
-	*count++
-
-	return nil
+	return bw.WriteByte('\n')
 }
 
 // extractIdentity pulls apiVersion, kind, name, and namespace from a decoded manifest.
@@ -240,26 +362,47 @@ func extractIdentity(obj map[string]any) (string, string, string, string) {
 	return apiVersion, kind, name, ns
 }
 
-// writeGzipBlob writes data to path as a gzip-compressed file and returns the compressed size.
-func writeGzipBlob(path string, data []byte) (int64, error) {
-	f, err := os.Create(path)
+// writeGzipBlobAtomic writes data as gzip to path using a tmp→fsync→rename
+// sequence so a crash leaves either the complete blob or nothing.
+func writeGzipBlobAtomic(path string, data []byte) (int64, error) {
+	tmpPath := path + ".tmp"
+
+	f, err := os.Create(tmpPath)
 	if err != nil {
 		return 0, err
 	}
 
-	defer f.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	gz := gzip.NewWriter(f)
 
 	if _, err = gz.Write(data); err != nil {
+		f.Close()
+
 		return 0, err
 	}
 
 	if err = gz.Close(); err != nil {
+		f.Close()
+
 		return 0, err
 	}
 
-	info, err := f.Stat()
+	if err = f.Sync(); err != nil {
+		f.Close()
+
+		return 0, err
+	}
+
+	if err = f.Close(); err != nil {
+		return 0, err
+	}
+
+	if err = os.Rename(tmpPath, path); err != nil {
+		return 0, err
+	}
+
+	info, err := os.Stat(path)
 	if err != nil {
 		return 0, err
 	}
