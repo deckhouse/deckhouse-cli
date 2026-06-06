@@ -19,7 +19,6 @@ package pipeline_test
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync/atomic"
 	"testing"
 
@@ -48,20 +47,10 @@ func stubNodeWithData() *source.Node {
 	}
 }
 
-// noopDownloadVolumes is a DownloadNodeVolumesFunc stub that succeeds immediately.
-func noopDownloadVolumes(
-	_ context.Context,
-	_ ctrlrtclient.Client,
-	_ *safeClient.SafeClient,
-	w *archive.DirWriter,
-	n *source.Node,
-	_ map[string]archive.VolumeProgressRecord,
-	_ pipeline.Options,
-	_ *slog.Logger,
-) error {
-	for _, dr := range n.DataRefs {
-		if err := w.AppendVolumeProgress(archive.VolumeProgressRecord{
-			NodeID:     n.ID,
+func noopDownloadVolumes(_ context.Context, req pipeline.NodeVolumesRequest) error {
+	for _, dr := range req.Node.DataRefs {
+		if err := req.Writer.AppendVolumeProgress(archive.VolumeProgressRecord{
+			NodeID:     req.Node.ID,
 			VSCName:    dr.VSCName,
 			PVCName:    dr.PVCName,
 			VolumeMode: "Block",
@@ -76,17 +65,7 @@ func noopDownloadVolumes(
 	return nil
 }
 
-// failDownloadVolumes is a DownloadNodeVolumesFunc stub that always returns an error.
-func failDownloadVolumes(
-	_ context.Context,
-	_ ctrlrtclient.Client,
-	_ *safeClient.SafeClient,
-	_ *archive.DirWriter,
-	_ *source.Node,
-	_ map[string]archive.VolumeProgressRecord,
-	_ pipeline.Options,
-	_ *slog.Logger,
-) error {
+func failDownloadVolumes(_ context.Context, _ pipeline.NodeVolumesRequest) error {
 	return fmt.Errorf("simulated volume download failure")
 }
 
@@ -95,7 +74,7 @@ func setupVolumeSeams(
 	t *testing.T,
 	buildFn func(context.Context, ctrlrtclient.Client, string, string) (*source.Node, error),
 	fetchFn func(context.Context, *safeClient.SafeClient, *source.Node) ([][]byte, error),
-	volFn func(context.Context, ctrlrtclient.Client, *safeClient.SafeClient, *archive.DirWriter, *source.Node, map[string]archive.VolumeProgressRecord, pipeline.Options, *slog.Logger) error,
+	volFn func(context.Context, pipeline.NodeVolumesRequest) error,
 ) {
 	t.Helper()
 
@@ -132,16 +111,7 @@ func stubBuildTreeWithData(_ context.Context, _ ctrlrtclient.Client, _, _ string
 func TestRun_IncludeVolumes_Noop(t *testing.T) {
 	var volCalls atomic.Int32
 
-	countingVol := func(
-		_ context.Context,
-		_ ctrlrtclient.Client,
-		_ *safeClient.SafeClient,
-		_ *archive.DirWriter,
-		_ *source.Node,
-		_ map[string]archive.VolumeProgressRecord,
-		_ pipeline.Options,
-		_ *slog.Logger,
-	) error {
+	countingVol := func(_ context.Context, _ pipeline.NodeVolumesRequest) error {
 		volCalls.Add(1)
 		return nil
 	}
@@ -171,18 +141,9 @@ func TestRun_IncludeVolumes_Noop(t *testing.T) {
 func TestRun_IncludeVolumes_Success(t *testing.T) {
 	var volCalls atomic.Int32
 
-	countingVol := func(
-		ctx context.Context,
-		rc ctrlrtclient.Client,
-		sc *safeClient.SafeClient,
-		w *archive.DirWriter,
-		n *source.Node,
-		evp map[string]archive.VolumeProgressRecord,
-		opts pipeline.Options,
-		log *slog.Logger,
-	) error {
+	countingVol := func(ctx context.Context, req pipeline.NodeVolumesRequest) error {
 		volCalls.Add(1)
-		return noopDownloadVolumes(ctx, rc, sc, w, n, evp, opts, log)
+		return noopDownloadVolumes(ctx, req)
 	}
 
 	setupVolumeSeams(t, stubBuildTreeWithData, stubFetchManifests, countingVol)
@@ -241,18 +202,9 @@ func TestRun_Volumes_Resume(t *testing.T) {
 	var volCalls atomic.Int32
 
 	// First run: record volume progress.
-	countingVol := func(
-		ctx context.Context,
-		rc ctrlrtclient.Client,
-		sc *safeClient.SafeClient,
-		w *archive.DirWriter,
-		n *source.Node,
-		evp map[string]archive.VolumeProgressRecord,
-		opts pipeline.Options,
-		log *slog.Logger,
-	) error {
+	countingVol := func(ctx context.Context, req pipeline.NodeVolumesRequest) error {
 		volCalls.Add(1)
-		return noopDownloadVolumes(ctx, rc, sc, w, n, evp, opts, log)
+		return noopDownloadVolumes(ctx, req)
 	}
 
 	setupVolumeSeams(t, stubBuildTreeWithData, stubFetchManifests, countingVol)
@@ -291,18 +243,9 @@ func TestRun_Volumes_Resume(t *testing.T) {
 func TestRun_DefaultBothEnabled(t *testing.T) {
 	var volCalls atomic.Int32
 
-	countingVol := func(
-		ctx context.Context,
-		rc ctrlrtclient.Client,
-		sc *safeClient.SafeClient,
-		w *archive.DirWriter,
-		n *source.Node,
-		evp map[string]archive.VolumeProgressRecord,
-		opts pipeline.Options,
-		log *slog.Logger,
-	) error {
+	countingVol := func(ctx context.Context, req pipeline.NodeVolumesRequest) error {
 		volCalls.Add(1)
-		return noopDownloadVolumes(ctx, rc, sc, w, n, evp, opts, log)
+		return noopDownloadVolumes(ctx, req)
 	}
 
 	setupVolumeSeams(t, stubBuildTreeWithData, stubFetchManifests, countingVol)
@@ -329,16 +272,7 @@ func TestRun_DefaultBothEnabled(t *testing.T) {
 func TestRun_NodeWithoutData_NoVolumeCall(t *testing.T) {
 	var volCalls atomic.Int32
 
-	countingVol := func(
-		_ context.Context,
-		_ ctrlrtclient.Client,
-		_ *safeClient.SafeClient,
-		_ *archive.DirWriter,
-		_ *source.Node,
-		_ map[string]archive.VolumeProgressRecord,
-		_ pipeline.Options,
-		_ *slog.Logger,
-	) error {
+	countingVol := func(_ context.Context, _ pipeline.NodeVolumesRequest) error {
 		volCalls.Add(1)
 		return nil
 	}

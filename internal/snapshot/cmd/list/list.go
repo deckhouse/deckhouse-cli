@@ -14,34 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package list implements the `d8 snapshot list` sub-command.
 package list
 
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/listing"
+	snapshotlog "github.com/deckhouse/deckhouse-cli/internal/snapshot/log"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
-	cmdName = "list"
-)
-
-const (
-	flagArchive = "archive"
-	flagNode    = "node"
-	flagObjects = "objects"
-	flagOutput  = "output"
-)
-
-const (
-	cmdShort = "List snapshot nodes and objects"
-
 	cmdLong = `List the snapshot node tree (and optionally the manifest objects) from a
 live cluster Snapshot CR or a local archive directory produced by "d8 snapshot download".
 
@@ -67,43 +53,37 @@ Output format defaults to human-readable text; use -o json or -o yaml for struct
 )
 
 // NewCommand returns the cobra command for `d8 snapshot list`.
-func NewCommand(log *slog.Logger) *cobra.Command {
+func NewCommand() *cobra.Command {
+
 	cmd := &cobra.Command{
-		Use:     cmdName + " [<namespace> <snapshot>]",
+		Use:     "list [<namespace> <snapshot>]",
 		Aliases: []string{"ls"},
-		Short:   cmdShort,
+		Short:   "List snapshot nodes and objects",
 		Long:    cmdLong,
 		Example: cmdExample,
-		Args: func(cmd *cobra.Command, args []string) error {
-			if cmd.Flags().Changed(flagArchive) {
-				return cobra.NoArgs(cmd, args)
-			}
-
-			return cobra.ExactArgs(2)(cmd, args)
-		},
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(cmd, args, log)
-		},
+		Args:    args,
+		RunE:    run,
 	}
 
-	cmd.Flags().String(flagArchive, "", "path to a local archive directory (offline; no cluster required)")
-	cmd.Flags().String(flagNode, "", "show only the subtree rooted at this node ID")
-	cmd.Flags().Bool(flagObjects, false, "include per-node manifest object listing")
-	cmd.Flags().StringP(flagOutput, "o", listing.FormatHuman, "output format: human, json, yaml")
+	cmd.Flags().String("archive", "", "path to a local archive directory (offline; no cluster required)")
+	cmd.Flags().String("node", "", "show only the subtree rooted at this node ID")
+	cmd.Flags().Bool("objects", false, "include per-node manifest object listing")
+	cmd.Flags().StringP("output", "o", listing.FormatHuman, "output format: human, json, yaml")
 
 	return cmd
 }
 
-func run(cmd *cobra.Command, args []string, log *slog.Logger) error {
-	archiveDir, _ := cmd.Flags().GetString(flagArchive)
-	nodeFilter, _ := cmd.Flags().GetString(flagNode)
-	withObjects, _ := cmd.Flags().GetBool(flagObjects)
-	format, _ := cmd.Flags().GetString(flagOutput)
-
-	opts := listing.Options{
-		NodeFilter:  nodeFilter,
-		WithObjects: withObjects,
+func args(cmd *cobra.Command, args []string) error {
+	if cmd.Flags().Changed("archive") {
+		return cobra.NoArgs(cmd, args)
 	}
+
+	return cobra.ExactArgs(2)(cmd, args)
+}
+
+func run(cmd *cobra.Command, args []string) error {
+	log := snapshotlog.New()
+	opts, format := newOptions(cmd, args)
 
 	ctx := cmd.Context()
 	if ctx == nil {
@@ -112,16 +92,18 @@ func run(cmd *cobra.Command, args []string, log *slog.Logger) error {
 
 	var tree *listing.Tree
 
-	if archiveDir != "" {
-		opts.ArchiveDir = archiveDir
-
+	// list from archive
+	if opts.ArchiveDir != "" {
 		t, err := listing.BuildFromArchive(opts, log)
 		if err != nil {
 			return fmt.Errorf("read archive: %w", err)
 		}
 
 		tree = t
-	} else {
+	}
+
+	// list from cluster
+	if tree == nil {
 		opts.Namespace, opts.SnapshotName = args[0], args[1]
 
 		safeClient.SupportNoAuth = false
@@ -145,4 +127,23 @@ func run(cmd *cobra.Command, args []string, log *slog.Logger) error {
 	}
 
 	return listing.Render(cmd.OutOrStdout(), tree, format)
+}
+
+func newOptions(cmd *cobra.Command, args []string) (listing.Options, string) {
+	archiveDir, _ := cmd.Flags().GetString("archive")
+	nodeFilter, _ := cmd.Flags().GetString("node")
+	withObjects, _ := cmd.Flags().GetBool("objects")
+	format, _ := cmd.Flags().GetString("output")
+
+	opts := listing.Options{
+		ArchiveDir:  archiveDir,
+		NodeFilter:  nodeFilter,
+		WithObjects: withObjects,
+	}
+
+	if archiveDir == "" {
+		opts.Namespace, opts.SnapshotName = args[0], args[1]
+	}
+
+	return opts, format
 }

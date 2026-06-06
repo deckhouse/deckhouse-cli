@@ -21,23 +21,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
-// ManifestFetcher fetches raw manifest bytes from the aggregated API for one node.
+const manifestAPIBase = "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1"
+
 type ManifestFetcher func(ctx context.Context, sClient *safeClient.SafeClient, node *Node) ([][]byte, error)
 
-// FetchManifests is the default ManifestFetcher implementation.
-// It issues a single aggregated GET against the state-snapshotter API and
-// returns the decoded JSON objects as individual raw byte slices.
 var FetchManifests ManifestFetcher = fetchManifests
 
 func fetchManifests(ctx context.Context, sClient *safeClient.SafeClient, node *Node) ([][]byte, error) {
-	path := archive.AggregatedPath(node.Namespace, node.Resource, node.Name)
-
-	body, err := sClient.AggregatedGet(ctx, path)
+	body, err := sClient.AggregatedGet(ctx, manifestPath(node))
 	if err != nil {
 		return nil, fmt.Errorf("aggregated GET for node %s: %w", node.ID, err)
 	}
@@ -52,13 +48,17 @@ func fetchManifests(ctx context.Context, sClient *safeClient.SafeClient, node *N
 	return objects, nil
 }
 
-// ObjectFilter is an optional predicate for --object filtering.
-// When non-nil it is applied after fetching to keep only matching objects.
+func manifestPath(node *Node) string {
+	return strings.Join([]string{
+		manifestAPIBase,
+		"namespaces", node.Namespace,
+		node.Resource, node.Name,
+		"manifests",
+	}, "/")
+}
+
 type ObjectFilter func(rawJSON []byte) (bool, error)
 
-// BuildObjectFilter returns an ObjectFilter that matches a single object by the --object flag value.
-// Flag format: <apiVersion>/<Kind>/<name>, e.g. "apps/v1/Deployment/my-deploy".
-// Returns nil when objectFlag is empty.
 func BuildObjectFilter(objectFlag string) (ObjectFilter, error) {
 	if objectFlag == "" {
 		return nil, nil

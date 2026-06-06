@@ -17,37 +17,26 @@ limitations under the License.
 package cmd
 
 import (
-	"log/slog"
-	"os"
-
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/download"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/list"
 )
 
-const (
-	cmdName = "snapshot"
-
-	debugEnvVar = "D8_SNAPSHOT_DEBUG"
-
-	cmdShort = "Snapshot operations (list, download namespace snapshots)"
-
-	cmdLong = `Manage Deckhouse namespace snapshots.
+const snapshotLong = `Manage Deckhouse namespace snapshots.
 
 The snapshot command lets you list and download namespace manifests captured by the
 state-snapshotter module. The Snapshot CR must already exist and be Ready.
 
 Future sub-commands will support uploading archives and restoring manifests.`
-)
 
 // NewCommand returns the top-level snapshot cobra command (alias: snap).
 func NewCommand() *cobra.Command {
-	root := &cobra.Command{
-		Use:           cmdName,
+	snapshotCmd := &cobra.Command{
+		Use:           "snapshot",
 		Aliases:       []string{"snap"},
-		Short:         cmdShort,
-		Long:          cmdLong,
+		Short:         "Snapshot operations (list, download namespace snapshots)",
+		Long:          snapshotLong,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Run: func(cmd *cobra.Command, _ []string) {
@@ -55,27 +44,10 @@ func NewCommand() *cobra.Command {
 		},
 	}
 
-	root.SetOut(os.Stdout)
+	snapshotCmd.AddCommand(
+		download.NewCommand(),
+		list.NewCommand(),
+	)
 
-	log := setupLogger()
-
-	root.AddCommand(download.NewCommand(log))
-	root.AddCommand(list.NewCommand(log))
-
-	return root
-}
-
-func setupLogger() *slog.Logger {
-	level := slog.LevelInfo
-	if debugEnabled() {
-		level = slog.LevelDebug
-	}
-
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-}
-
-func debugEnabled() bool {
-	v := os.Getenv(debugEnvVar)
-
-	return v != "" && v != "0" && v != "false"
+	return snapshotCmd
 }

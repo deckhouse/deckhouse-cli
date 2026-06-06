@@ -14,14 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package download implements the `d8 snapshot download` sub-command.
 package download
 
 import (
 	"bufio"
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -29,30 +27,12 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	snapshotlog "github.com/deckhouse/deckhouse-cli/internal/snapshot/log"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
-	cmdName = "download"
-)
-
-const (
-	flagOutput            = "output"
-	flagNode              = "node"
-	flagObject            = "object"
-	flagFresh             = "fresh"
-	flagRetries           = "retries"
-	flagRetryDelay        = "retry-delay"
-	flagManifests         = "manifests"
-	flagVolumes           = "volumes"
-	flagTTL               = "ttl"
-	flagVolumeCompression = "volume-compression"
-)
-
-const (
-	cmdShort = "Download snapshot manifests and volume data to a local directory"
-
 	cmdLong = `Download manifests and volume data from a Deckhouse namespace Snapshot
 into a structured local directory:
 
@@ -111,49 +91,33 @@ up all temporary objects afterwards.`
 )
 
 // NewCommand returns the cobra command for `d8 snapshot download`.
-func NewCommand(log *slog.Logger) *cobra.Command {
+func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     cmdName + " <namespace> <snapshot>",
-		Short:   cmdShort,
+		Use:     "download <namespace> <snapshot>",
+		Short:   "Download snapshot manifests and volume data to a local directory",
 		Long:    cmdLong,
 		Example: cmdExample,
 		Args:    cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(cmd, args, log)
-		},
+		RunE:    run,
 	}
 
-	cmd.Flags().StringP(flagOutput, "o", "", "destination directory (default: ./<namespace>-<snapshot>)")
-	cmd.Flags().String(flagNode, "", "download only the subtree rooted at this node ID (e.g. VirtualDiskSnapshot--root-disk)")
-	cmd.Flags().String(flagObject, "", "download a single object, format: <apiVersion>/<Kind>/<name> (e.g. apps/v1/Deployment/my-deploy)")
-	cmd.Flags().Bool(flagFresh, false, "overwrite an existing archive without prompting")
-	cmd.Flags().Int(flagRetries, 3, "number of download attempts per node before giving up")
-	cmd.Flags().Duration(flagRetryDelay, 2*time.Second, "base delay between retries (doubles on each attempt)")
-	cmd.Flags().Bool(flagManifests, true, "download Kubernetes resource manifests (default true; use --manifests=false to skip)")
-	cmd.Flags().Bool(flagVolumes, true, "download volume data via DataExport (default true; use --volumes=false to skip)")
-	cmd.Flags().String(flagTTL, "", "TTL for auto-created DataExport objects during volume download (e.g. 1h; default 30m)")
-	cmd.Flags().String(flagVolumeCompression, "gzip", `compression for downloaded volume data: "gzip" (default) or "none"`)
+	cmd.Flags().StringP("output", "o", "", "destination directory (default: ./<namespace>-<snapshot>)")
+	cmd.Flags().String("node", "", "download only the subtree rooted at this node ID (e.g. VirtualDiskSnapshot--root-disk)")
+	cmd.Flags().String("object", "", "download a single object, format: <apiVersion>/<Kind>/<name> (e.g. apps/v1/Deployment/my-deploy)")
+	cmd.Flags().Bool("fresh", false, "overwrite an existing archive without prompting")
+	cmd.Flags().Int("retries", 3, "number of download attempts per node before giving up")
+	cmd.Flags().Duration("retry-delay", 2*time.Second, "base delay between retries (doubles on each attempt)")
+	cmd.Flags().Bool("manifests", true, "download Kubernetes resource manifests (default true; use --manifests=false to skip)")
+	cmd.Flags().Bool("volumes", true, "download volume data via DataExport (default true; use --volumes=false to skip)")
+	cmd.Flags().String("ttl", "", "TTL for auto-created DataExport objects during volume download (e.g. 1h; default 30m)")
+	cmd.Flags().String("volume-compression", "gzip", `compression for downloaded volume data: "gzip" (default) or "none"`)
 
 	return cmd
 }
 
-func run(cmd *cobra.Command, args []string, log *slog.Logger) error {
-	namespace, snapshotName := args[0], args[1]
-
-	outputDir, _ := cmd.Flags().GetString(flagOutput)
-	nodeID, _ := cmd.Flags().GetString(flagNode)
-	objectFilter, _ := cmd.Flags().GetString(flagObject)
-	fresh, _ := cmd.Flags().GetBool(flagFresh)
-	retries, _ := cmd.Flags().GetInt(flagRetries)
-	retryDelay, _ := cmd.Flags().GetDuration(flagRetryDelay)
-	includeManifests, _ := cmd.Flags().GetBool(flagManifests)
-	includeVolumes, _ := cmd.Flags().GetBool(flagVolumes)
-	dataExportTTL, _ := cmd.Flags().GetString(flagTTL)
-	volumeCompression, _ := cmd.Flags().GetString(flagVolumeCompression)
-
-	if outputDir == "" {
-		outputDir = fmt.Sprintf("%s-%s", namespace, snapshotName)
-	}
+func run(cmd *cobra.Command, args []string) error {
+	log := snapshotlog.New()
+	opts := newOptions(cmd, args)
 
 	safeClient.SupportNoAuth = false
 
@@ -172,7 +136,28 @@ func run(cmd *cobra.Command, args []string, log *slog.Logger) error {
 		ctx = context.Background()
 	}
 
-	opts := pipeline.Options{
+	return pipeline.Run(ctx, sClient, rtClient, opts, log)
+}
+
+func newOptions(cmd *cobra.Command, args []string) pipeline.Options {
+	namespace, snapshotName := args[0], args[1]
+
+	outputDir, _ := cmd.Flags().GetString("output")
+	nodeID, _ := cmd.Flags().GetString("node")
+	objectFilter, _ := cmd.Flags().GetString("object")
+	fresh, _ := cmd.Flags().GetBool("fresh")
+	retries, _ := cmd.Flags().GetInt("retries")
+	retryDelay, _ := cmd.Flags().GetDuration("retry-delay")
+	includeManifests, _ := cmd.Flags().GetBool("manifests")
+	includeVolumes, _ := cmd.Flags().GetBool("volumes")
+	dataExportTTL, _ := cmd.Flags().GetString("ttl")
+	volumeCompression, _ := cmd.Flags().GetString("volume-compression")
+
+	if outputDir == "" {
+		outputDir = fmt.Sprintf("%s-%s", namespace, snapshotName)
+	}
+
+	return pipeline.Options{
 		Namespace:         namespace,
 		SnapshotName:      snapshotName,
 		OutputDir:         outputDir,
@@ -187,8 +172,6 @@ func run(cmd *cobra.Command, args []string, log *slog.Logger) error {
 		DataExportTTL:     dataExportTTL,
 		VolumeCompression: volumeCompression,
 	}
-
-	return pipeline.Run(ctx, sClient, rtClient, opts, log)
 }
 
 // overwritePrompt returns a prompt function that asks the user interactively

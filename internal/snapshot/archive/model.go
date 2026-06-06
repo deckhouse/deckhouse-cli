@@ -14,21 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package archive defines the on-disk format for a Deckhouse snapshot archive.
-//
-// Directory layout:
-//
-//	<output>/
-//	  archive.json  - archive identity and selection metadata
-//	  index.json    - capabilities, catalog paths, summary counts
-//	  COMPLETE      - empty sentinel written last; absent means incomplete
-//	  indexes/
-//	    nodes.jsonl    - one line per snapshot tree node
-//	    objects.jsonl  - one line per downloaded manifest object
-//	  manifests/
-//	    objects/
-//	      <aa>/<bb>/o-<sha256hex>.json.gz  - content-addressed manifest blob
-//	  data/         - reserved for future volume data
 package archive
 
 import (
@@ -37,14 +22,10 @@ import (
 )
 
 const (
-	// Magic is the fixed string in archive.json that identifies the format.
-	Magic = "deckhouse.snapshot.archive"
-
-	// SchemaVersion is the current format version.
+	Magic         = "deckhouse.snapshot.archive"
 	SchemaVersion = "v1alpha1"
 )
 
-// SelectionMode describes which portion of the snapshot was downloaded.
 type SelectionMode string
 
 const (
@@ -53,7 +34,6 @@ const (
 	SelectionObject  SelectionMode = "object"
 )
 
-// Meta is the top-level structure of archive.json.
 type Meta struct {
 	Magic         string    `json:"magic"`
 	SchemaVersion string    `json:"schemaVersion"`
@@ -64,13 +44,11 @@ type Meta struct {
 	Selection     Selection `json:"selection"`
 }
 
-// Creator records the tool that produced the archive.
 type Creator struct {
 	Tool    string `json:"tool"`
 	Version string `json:"version"`
 }
 
-// Source describes the cluster and Snapshot that was downloaded.
 type Source struct {
 	Cluster             Cluster            `json:"cluster"`
 	Namespace           string             `json:"namespace"`
@@ -78,13 +56,11 @@ type Source struct {
 	RootSnapshotContent SnapshotContentRef `json:"rootSnapshotContent"`
 }
 
-// Cluster holds cluster identity fields available at download time.
 type Cluster struct {
 	Server string `json:"server"`
 	UID    string `json:"uid,omitempty"`
 }
 
-// SnapshotRef points to the Kubernetes Snapshot object that was the source.
 type SnapshotRef struct {
 	APIVersion      string `json:"apiVersion"`
 	Kind            string `json:"kind"`
@@ -94,23 +70,20 @@ type SnapshotRef struct {
 	ResourceVersion string `json:"resourceVersion,omitempty"`
 }
 
-// SnapshotContentRef points to the SnapshotContent bound to the root Snapshot.
 type SnapshotContentRef struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`
 	Name       string `json:"name"`
 }
 
-// Selection describes which part of the snapshot was included.
 type Selection struct {
 	Mode       SelectionMode `json:"mode"`
 	RootNodeID string        `json:"rootNodeId"`
-	// ObjectFilter is the --object flag value that was used, if any.
+
 	ObjectFilter    string   `json:"objectFilter,omitempty"`
 	SelectedNodeIDs []string `json:"selectedNodeIds"`
 }
 
-// Index is the top-level structure of index.json.
 type Index struct {
 	SchemaVersion string             `json:"schemaVersion"`
 	Capabilities  IndexCapabilities  `json:"capabilities"`
@@ -121,7 +94,6 @@ type Index struct {
 	Summary       IndexSummary       `json:"summary"`
 }
 
-// IndexCapabilities enumerates features present in this archive.
 type IndexCapabilities struct {
 	Manifests            bool `json:"manifests"`
 	Volumes              bool `json:"volumes"`
@@ -131,35 +103,27 @@ type IndexCapabilities struct {
 	Resumable            bool `json:"resumable"`
 }
 
-// IndexManifestModel describes how manifests are encoded.
 type IndexManifestModel struct {
 	Format      string `json:"format"`
 	Compression string `json:"compression"`
 	SourceKind  string `json:"sourceKind"`
 }
 
-// IndexVolumeModel describes how volume data files are stored on disk.
 type IndexVolumeModel struct {
-	// Format is either "per-file-gzip" (each file/block image is individually gzip'd)
-	// or "raw" (no compression).
-	Format string `json:"format"`
-	// Compression is "gzip" or "none".
+	Format      string `json:"format"`
 	Compression string `json:"compression"`
 }
 
-// IndexCatalogs lists the relative paths of the JSONL index files.
 type IndexCatalogs struct {
 	Nodes   string `json:"nodes"`
 	Objects string `json:"objects"`
 }
 
-// IndexPaths lists the base directories for blobs.
 type IndexPaths struct {
 	ManifestsRoot string `json:"manifestsRoot"`
 	DataRoot      string `json:"dataRoot"`
 }
 
-// IndexSummary holds aggregate counts written by Finalize.
 type IndexSummary struct {
 	Nodes    int  `json:"nodes"`
 	Objects  int  `json:"objects"`
@@ -167,17 +131,12 @@ type IndexSummary struct {
 	Complete bool `json:"complete"`
 }
 
-// VolumeDataRef is a single volume data binding persisted in NodeRecord.
 type VolumeDataRef struct {
-	// VSCName is the cluster-scoped VolumeSnapshotContent name.
-	VSCName string `json:"vscName"`
-	// PVCName is the name of the original PVC.
-	PVCName string `json:"pvcName,omitempty"`
-	// PVCNamespace is the namespace of the original PVC.
+	VSCName      string `json:"vscName"`
+	PVCName      string `json:"pvcName,omitempty"`
 	PVCNamespace string `json:"pvcNamespace,omitempty"`
 }
 
-// NodeRecord is one line in indexes/nodes.jsonl.
 type NodeRecord struct {
 	ID                       string          `json:"id"`
 	APIVersion               string          `json:"apiVersion"`
@@ -191,7 +150,6 @@ type NodeRecord struct {
 	HasData                  bool            `json:"hasData"`
 }
 
-// ObjectRecord is one line in indexes/objects.jsonl.
 type ObjectRecord struct {
 	NodeID     string `json:"nodeId"`
 	APIVersion string `json:"apiVersion"`
@@ -203,7 +161,6 @@ type ObjectRecord struct {
 	Blob       string `json:"blob"`
 }
 
-// ProgressRecord is one line in indexes/progress.jsonl.
 // It is written durably after a node's blobs are flushed and fsync'd.
 // Finalize regenerates nodes.jsonl and objects.jsonl from the accumulated records.
 type ProgressRecord struct {
@@ -212,9 +169,6 @@ type ProgressRecord struct {
 	Objects    []ObjectRecord `json:"objects"`
 }
 
-// VolumeProgressRecord is one line in indexes/volumes.jsonl.
-// It is appended after a single volume download completes (complete=true) or
-// after a partial block download (complete=false, bytesDone records the offset).
 // Key for resume: NodeID + "/" + VSCName.
 type VolumeProgressRecord struct {
 	NodeID     string `json:"nodeId"`
@@ -235,11 +189,9 @@ type VolumeProgressRecord struct {
 	Complete        bool  `json:"complete"`
 }
 
-// ArchiveIdentity is the minimal set of fields used to recognise whether an
-// existing archive covers the same download target as a new invocation.
 // UID is intentionally excluded so that a re-created snapshot is treated as
 // the same target with updated content rather than a different one.
-type ArchiveIdentity struct {
+type Identity struct {
 	Namespace       string        `json:"namespace"`
 	Snapshot        string        `json:"snapshot"`
 	Mode            SelectionMode `json:"mode"`
@@ -248,13 +200,12 @@ type ArchiveIdentity struct {
 	SelectedNodeIDs []string      `json:"selectedNodeIds"`
 }
 
-// IdentityOf extracts an ArchiveIdentity from a Meta.
 // SelectedNodeIDs are sorted so that Equal is order-independent.
-func IdentityOf(m Meta) ArchiveIdentity {
+func IdentityOf(m Meta) Identity {
 	ids := append([]string(nil), m.Selection.SelectedNodeIDs...)
 	sort.Strings(ids)
 
-	return ArchiveIdentity{
+	return Identity{
 		Namespace:       m.Source.Namespace,
 		Snapshot:        m.Source.RootSnapshot.Name,
 		Mode:            m.Selection.Mode,
@@ -264,8 +215,7 @@ func IdentityOf(m Meta) ArchiveIdentity {
 	}
 }
 
-// Equal reports whether two identities cover the same snapshot selection.
-func (a ArchiveIdentity) Equal(b ArchiveIdentity) bool {
+func (a Identity) Equal(b Identity) bool {
 	if a.Namespace != b.Namespace ||
 		a.Snapshot != b.Snapshot ||
 		a.Mode != b.Mode ||

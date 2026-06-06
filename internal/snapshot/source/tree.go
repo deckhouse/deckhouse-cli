@@ -14,8 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package source reads the snapshot tree from the Kubernetes API
-// and fetches manifest content via the aggregated API.
 package source
 
 import (

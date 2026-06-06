@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package pipeline orchestrates the snapshot manifest download workflow.
 package pipeline
 
 import (
@@ -34,47 +33,23 @@ import (
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
-// Options holds user-specified parameters for the download pipeline.
 type Options struct {
 	Namespace    string
 	SnapshotName string
 	OutputDir    string
 
-	// NodeFilter is the node ID for subtree selection (--node flag).
-	// Empty means the full snapshot is downloaded.
-	NodeFilter string
-
-	// ObjectFilter is the --object flag value for single-object filtering.
-	// Format: <apiVersion>/<Kind>/<name> (e.g. "apps/v1/Deployment/my-deploy")
+	NodeFilter   string
 	ObjectFilter string
+	Fresh        bool
+	Retries      int
+	RetryDelay   time.Duration
 
-	// Fresh forces a clean overwrite of an existing archive without prompting.
-	Fresh bool
-
-	// Retries is the number of download attempts per node (0 → default 3).
-	Retries int
-
-	// RetryDelay is the base delay between retries (0 → default 2s).
-	// The actual delay doubles on each attempt (exponential back-off).
-	RetryDelay time.Duration
-
-	// OverwritePromptFn is called when an existing archive with a different
-	// identity is found and Fresh is false. It returns true to proceed with
-	// overwrite. When nil and Fresh is false, Run returns an error.
 	OverwritePromptFn func(dir string) bool
 
-	// IncludeManifests controls whether manifests are downloaded (default true).
 	IncludeManifests bool
+	IncludeVolumes   bool
 
-	// IncludeVolumes controls whether volume data is downloaded (default true).
-	IncludeVolumes bool
-
-	// DataExportTTL is the TTL for auto-created DataExport objects used during
-	// volume download. Defaults to defaultDataExportTTL when empty.
-	DataExportTTL string
-
-	// VolumeCompression sets the compression algorithm for downloaded volume data.
-	// Accepted values: "gzip" (default), "none".
+	DataExportTTL     string
 	VolumeCompression string
 }
 
@@ -84,37 +59,25 @@ const (
 	defaultDataExportTTL = "30m"
 )
 
-// BuildTreeFunc, FetchManifestsFunc, and DownloadNodeVolumesFunc are overridable seams for tests.
 var (
 	BuildTreeFunc           = source.BuildTree
 	FetchManifestsFunc      = source.FetchManifests
 	DownloadNodeVolumesFunc = downloadNodeVolumes
 )
 
-// failedNode records a download failure for one tree node.
 type failedNode struct {
 	ID  string
 	Err error
 }
 
-// Run executes the full manifest-download pipeline with resume and retry support.
-//
-// Decision flow:
-//   - absent/empty output dir                      → fresh download
-//   - valid archive, same identity, COMPLETE+up-to-date → noop
-//   - valid archive, same identity, incomplete/stale   → resume
-//   - valid archive, different identity OR non-archive non-empty → overwrite (prompt or --fresh)
+type archiveSession struct {
+	writer           *archive.DirWriter
+	existingProgress map[string]archive.ProgressRecord
+	existingVolProg  map[string]archive.VolumeProgressRecord
+	noop             bool
+}
+
 func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtclient.Client, opts Options, log *slog.Logger) error {
-	retries := opts.Retries
-	if retries <= 0 {
-		retries = defaultRetries
-	}
-
-	retryDelay := opts.RetryDelay
-	if retryDelay <= 0 {
-		retryDelay = defaultRetryDelay
-	}
-
 	log.Info("checking Snapshot readiness", "namespace", opts.Namespace, "snapshot", opts.SnapshotName)
 
 	root, selected, nodes, err := prepareTree(ctx, rtClient, opts, log)
@@ -126,74 +89,20 @@ func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtcli
 	liveMeta := buildArchiveMeta(sClient, root, selected, nodes, opts, mode)
 	liveID := archive.IdentityOf(liveMeta)
 
-	needFresh, err := resolveOutputDir(opts.OutputDir, liveID, opts, log)
+	session, err := openArchiveSession(opts, liveMeta, liveID, nodes, log)
 	if err != nil {
 		return err
 	}
 
-	var (
-		w                *archive.DirWriter
-		existingProgress map[string]archive.ProgressRecord
-		existingVolProg  map[string]archive.VolumeProgressRecord
-	)
-
-	if needFresh {
-		log.Info("creating archive directory", "path", opts.OutputDir)
-
-		w, err = archive.NewDirWriter(opts.OutputDir, liveMeta)
-		if err != nil {
-			return fmt.Errorf("initialise archive at %s: %w", opts.OutputDir, err)
-		}
-
-		existingProgress = make(map[string]archive.ProgressRecord)
-		existingVolProg = make(map[string]archive.VolumeProgressRecord)
-	} else {
-		w, existingProgress, existingVolProg, err = archive.OpenForResume(opts.OutputDir)
-		if err != nil {
-			return fmt.Errorf("open archive for resume at %s: %w", opts.OutputDir, err)
-		}
-
-		if isNoop(nodes, existingProgress, existingVolProg, opts.OutputDir) {
-			w.Close()
-			log.Info("archive already up to date", "path", opts.OutputDir)
-
-			return nil
-		}
-
-		log.Info("resuming existing archive", "path", opts.OutputDir)
+	if session.noop {
+		return nil
 	}
 
-	// Apply defaults for include flags: if both are false (zero values), enable both.
-	if !opts.IncludeManifests && !opts.IncludeVolumes {
-		opts.IncludeManifests = true
-		opts.IncludeVolumes = true
-	}
+	opts = normalizeOptions(opts)
 
-	if opts.DataExportTTL == "" {
-		opts.DataExportTTL = defaultDataExportTTL
-	}
-
-	if opts.VolumeCompression == "" {
-		opts.VolumeCompression = CompressionGzip
-	}
-
-	objFilter, err := source.BuildObjectFilter(opts.ObjectFilter)
+	dl, err := newDownloader(sClient, rtClient, session, opts, log)
 	if err != nil {
 		return err
-	}
-
-	dl := &downloader{
-		sClient:             sClient,
-		rtClient:            rtClient,
-		writer:              w,
-		filter:              objFilter,
-		retries:             retries,
-		retryDelay:          retryDelay,
-		existingProgress:    existingProgress,
-		existingVolProgress: existingVolProg,
-		outputDir:           opts.OutputDir,
-		opts:                opts,
-		log:                 log,
 	}
 
 	var failed []failedNode
@@ -209,7 +118,7 @@ func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtcli
 	complete := len(failed) == 0
 	idx := buildIndex(mode, opts.NodeFilter != "", opts.IncludeVolumes, opts.VolumeCompression)
 
-	summary, err := w.Finalize(idx, liveNodeRecs, complete)
+	summary, err := session.writer.Finalize(idx, liveNodeRecs, complete)
 	if err != nil {
 		return fmt.Errorf("finalise archive: %w", err)
 	}
@@ -223,7 +132,108 @@ func Run(ctx context.Context, sClient *safeClient.SafeClient, rtClient ctrlrtcli
 	return buildFailureSummary(failed, opts)
 }
 
-// downloader bundles the dependencies for per-node manifest and volume fetching.
+func normalizeOptions(opts Options) Options {
+	if opts.Retries <= 0 {
+		opts.Retries = defaultRetries
+	}
+
+	if opts.RetryDelay <= 0 {
+		opts.RetryDelay = defaultRetryDelay
+	}
+
+	if !opts.IncludeManifests && !opts.IncludeVolumes {
+		opts.IncludeManifests = true
+		opts.IncludeVolumes = true
+	}
+
+	if opts.DataExportTTL == "" {
+		opts.DataExportTTL = defaultDataExportTTL
+	}
+
+	if opts.VolumeCompression == "" {
+		opts.VolumeCompression = CompressionGzip
+	}
+
+	return opts
+}
+
+func openArchiveSession(opts Options, liveMeta archive.Meta, liveID archive.Identity, nodes []*source.Node, log *slog.Logger) (archiveSession, error) {
+	needFresh, err := resolveOutputDir(opts.OutputDir, liveID, opts, log)
+	if err != nil {
+		return archiveSession{}, err
+	}
+
+	if needFresh {
+		return newArchiveSession(opts.OutputDir, liveMeta, log)
+	}
+
+	return resumeArchiveSession(opts.OutputDir, nodes, log)
+}
+
+func newArchiveSession(outputDir string, liveMeta archive.Meta, log *slog.Logger) (archiveSession, error) {
+	log.Info("creating archive directory", "path", outputDir)
+
+	w, err := archive.NewDirWriter(outputDir, liveMeta)
+	if err != nil {
+		return archiveSession{}, fmt.Errorf("initialise archive at %s: %w", outputDir, err)
+	}
+
+	return archiveSession{
+		writer:           w,
+		existingProgress: make(map[string]archive.ProgressRecord),
+		existingVolProg:  make(map[string]archive.VolumeProgressRecord),
+	}, nil
+}
+
+func resumeArchiveSession(outputDir string, nodes []*source.Node, log *slog.Logger) (archiveSession, error) {
+	w, existingProgress, existingVolProg, err := archive.OpenForResume(outputDir)
+	if err != nil {
+		return archiveSession{}, fmt.Errorf("open archive for resume at %s: %w", outputDir, err)
+	}
+
+	if isNoop(nodes, existingProgress, existingVolProg, outputDir) {
+		w.Close()
+		log.Info("archive already up to date", "path", outputDir)
+
+		return archiveSession{noop: true}, nil
+	}
+
+	log.Info("resuming existing archive", "path", outputDir)
+
+	return archiveSession{
+		writer:           w,
+		existingProgress: existingProgress,
+		existingVolProg:  existingVolProg,
+	}, nil
+}
+
+func newDownloader(
+	sClient *safeClient.SafeClient,
+	rtClient ctrlrtclient.Client,
+	session archiveSession,
+	opts Options,
+	log *slog.Logger,
+) (*downloader, error) {
+	filter, err := source.BuildObjectFilter(opts.ObjectFilter)
+	if err != nil {
+		return nil, err
+	}
+
+	return &downloader{
+		sClient:             sClient,
+		rtClient:            rtClient,
+		writer:              session.writer,
+		filter:              filter,
+		retries:             opts.Retries,
+		retryDelay:          opts.RetryDelay,
+		existingProgress:    session.existingProgress,
+		existingVolProgress: session.existingVolProg,
+		outputDir:           opts.OutputDir,
+		opts:                opts,
+		log:                 log,
+	}, nil
+}
+
 type downloader struct {
 	sClient             *safeClient.SafeClient
 	rtClient            ctrlrtclient.Client
@@ -238,8 +248,6 @@ type downloader struct {
 	log                 *slog.Logger
 }
 
-// processNode downloads manifests and/or volumes for n, skipping it if already
-// satisfied by the existing progress. Retries transient errors up to d.retries times.
 func (d *downloader) processNode(ctx context.Context, n *source.Node) error {
 	if isNodeSatisfied(n, d.existingProgress, d.existingVolProgress, d.outputDir) {
 		d.log.Debug("node already satisfied, skipping", "node", n.ID)
@@ -271,8 +279,6 @@ func (d *downloader) processNode(ctx context.Context, n *source.Node) error {
 	return fmt.Errorf("node %s failed after %d attempt(s): %w", n.ID, d.retries, lastErr)
 }
 
-// fetchAndStoreNode performs a single fetch-and-store cycle for one node
-// (manifests and/or volumes, depending on Options).
 func (d *downloader) fetchAndStoreNode(ctx context.Context, n *source.Node) error {
 	if d.opts.IncludeManifests {
 		if err := d.fetchAndStoreManifests(ctx, n); err != nil {
@@ -281,7 +287,16 @@ func (d *downloader) fetchAndStoreNode(ctx context.Context, n *source.Node) erro
 	}
 
 	if d.opts.IncludeVolumes && n.HasData {
-		if err := DownloadNodeVolumesFunc(ctx, d.rtClient, d.sClient, d.writer, n, d.existingVolProgress, d.opts, d.log); err != nil {
+		req := NodeVolumesRequest{
+			SafeClient:          d.sClient,
+			Writer:              d.writer,
+			Node:                n,
+			ExistingVolProgress: d.existingVolProgress,
+			Options:             d.opts,
+			Log:                 d.log,
+		}
+
+		if err := DownloadNodeVolumesFunc(ctx, req); err != nil {
 			return fmt.Errorf("download volumes for %s: %w", n.ID, err)
 		}
 	}
@@ -289,64 +304,93 @@ func (d *downloader) fetchAndStoreNode(ctx context.Context, n *source.Node) erro
 	return nil
 }
 
-// fetchAndStoreManifests downloads and persists manifests for one node.
 func (d *downloader) fetchAndStoreManifests(ctx context.Context, n *source.Node) error {
-	// Skip if manifests already complete for this node.
-	if rec, ok := d.existingProgress[n.ID]; ok && rec.ContentRef == n.BoundSnapshotContentName {
-		allBlobs := true
+	if d.manifestsComplete(n) {
+		d.log.Debug("manifests already complete, skipping", "node", n.ID)
 
-		for _, obj := range rec.Objects {
-			if _, err := os.Stat(filepath.Join(d.outputDir, obj.Blob)); err != nil {
-				allBlobs = false
-				break
-			}
-		}
-
-		if allBlobs {
-			d.log.Debug("manifests already complete, skipping", "node", n.ID)
-			return nil
-		}
+		return nil
 	}
 
 	d.log.Debug("fetching manifests", "node", n.ID)
 
-	rawObjects, err := FetchManifestsFunc(ctx, d.sClient, n)
+	filtered, err := d.fetchFilteredManifests(ctx, n)
 	if err != nil {
-		return fmt.Errorf("fetch manifests for %s: %w", n.ID, err)
+		return err
 	}
 
-	filtered := rawObjects
+	objRecs, err := d.storeManifests(n.ID, filtered)
+	if err != nil {
+		return err
+	}
 
-	if d.filter != nil {
-		filtered = filtered[:0]
+	return d.appendManifestProgress(n, objRecs, len(filtered))
+}
 
-		for _, raw := range rawObjects {
-			keep, filterErr := d.filter(raw)
-			if filterErr != nil {
-				return fmt.Errorf("apply object filter: %w", filterErr)
-			}
+func (d *downloader) manifestsComplete(n *source.Node) bool {
+	rec, ok := d.existingProgress[n.ID]
+	if !ok {
+		return false
+	}
 
-			if keep {
-				filtered = append(filtered, raw)
-			}
+	if rec.ContentRef != n.BoundSnapshotContentName {
+		return false
+	}
+
+	for _, obj := range rec.Objects {
+		if _, err := os.Stat(filepath.Join(d.outputDir, obj.Blob)); err != nil {
+			return false
 		}
 	}
 
-	objRecs := make([]archive.ObjectRecord, 0, len(filtered))
+	return true
+}
 
-	for _, raw := range filtered {
-		objRec, addErr := d.writer.AddObject(n.ID, raw)
+func (d *downloader) fetchFilteredManifests(ctx context.Context, n *source.Node) ([][]byte, error) {
+	rawObjects, err := FetchManifestsFunc(ctx, d.sClient, n)
+	if err != nil {
+		return nil, fmt.Errorf("fetch manifests for %s: %w", n.ID, err)
+	}
+
+	if d.filter == nil {
+		return rawObjects, nil
+	}
+
+	filtered := rawObjects[:0]
+
+	for _, raw := range rawObjects {
+		keep, filterErr := d.filter(raw)
+		if filterErr != nil {
+			return nil, fmt.Errorf("apply object filter: %w", filterErr)
+		}
+
+		if keep {
+			filtered = append(filtered, raw)
+		}
+	}
+
+	return filtered, nil
+}
+
+func (d *downloader) storeManifests(nodeID string, objects [][]byte) ([]archive.ObjectRecord, error) {
+	objRecs := make([]archive.ObjectRecord, 0, len(objects))
+
+	for _, raw := range objects {
+		objRec, addErr := d.writer.AddObject(nodeID, raw)
 		if addErr != nil {
-			return fmt.Errorf("add object from %s: %w", n.ID, addErr)
+			return nil, fmt.Errorf("add object from %s: %w", nodeID, addErr)
 		}
 
 		objRecs = append(objRecs, objRec)
 	}
 
+	return objRecs, nil
+}
+
+func (d *downloader) appendManifestProgress(n *source.Node, objects []archive.ObjectRecord, objectCount int) error {
 	prec := archive.ProgressRecord{
 		NodeID:     n.ID,
 		ContentRef: n.BoundSnapshotContentName,
-		Objects:    objRecs,
+		Objects:    objects,
 	}
 
 	if err := d.writer.AppendProgress(prec); err != nil {
@@ -355,7 +399,7 @@ func (d *downloader) fetchAndStoreManifests(ctx context.Context, n *source.Node)
 
 	d.existingProgress[n.ID] = prec
 
-	d.log.Debug("node manifests done", "node", n.ID, "objects", len(filtered))
+	d.log.Debug("node manifests done", "node", n.ID, "objects", objectCount)
 
 	return nil
 }
@@ -363,7 +407,7 @@ func (d *downloader) fetchAndStoreManifests(ctx context.Context, n *source.Node)
 // resolveOutputDir inspects the output directory and decides whether to start
 // fresh. It handles wiping when overwrite is confirmed via Fresh or the prompt.
 // Returns needFresh=true for a clean write, false to resume.
-func resolveOutputDir(dir string, liveID archive.ArchiveIdentity, opts Options, log *slog.Logger) (bool, error) {
+func resolveOutputDir(dir string, liveID archive.Identity, opts Options, log *slog.Logger) (bool, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -30,7 +30,13 @@ const (
 	FormatYAML  = "yaml"
 )
 
-// Render writes the tree to w in the requested format (human, json, yaml).
+const (
+	connectorLast   = "└─ "
+	connectorMiddle = "├─ "
+	prefixLast      = "   "
+	prefixMiddle    = "│  "
+)
+
 func Render(w io.Writer, t *Tree, format string) error {
 	switch format {
 	case FormatJSON:
@@ -76,12 +82,7 @@ func renderHuman(w io.Writer, t *Tree) error {
 		fmt.Fprintf(w, "Source:    archive\n")
 		fmt.Fprintf(w, "Directory: %s\n", t.Source.ArchiveDir)
 		fmt.Fprintf(w, "ArchiveID: %s\n", t.Source.ArchiveID)
-
-		if t.Complete {
-			fmt.Fprintf(w, "Complete:  yes\n")
-		} else {
-			fmt.Fprintf(w, "Complete:  no (COMPLETE sentinel absent)\n")
-		}
+		fmt.Fprintf(w, "Complete:  %s\n", completeStatus(t.Complete))
 	}
 
 	fmt.Fprintf(w, "Selection: %s\n", t.Selection)
@@ -94,41 +95,48 @@ func renderHuman(w io.Writer, t *Tree) error {
 	return nil
 }
 
-// connector returns the tree branch glyph for a sibling entry.
+func completeStatus(complete bool) string {
+	if complete {
+		return "yes"
+	}
+
+	return "no (COMPLETE sentinel absent)"
+}
+
 func connector(isLast bool) string {
 	if isLast {
-		return "└─ "
+		return connectorLast
 	}
 
-	return "├─ "
+	return connectorMiddle
 }
 
-// continuation returns the vertical-line prefix used under a sibling entry.
 func continuation(isLast bool) string {
 	if isLast {
-		return "   "
+		return prefixLast
 	}
 
-	return "│  "
+	return prefixMiddle
 }
 
-// printNodeHuman recursively renders a node using box-drawing connectors.
-// prefix is the accumulated column string from parent levels.
-// isLast is true when this node is the last sibling in its parent's list.
-// isRoot is true only for the top-level node, which prints without a connector.
-// The model is pre-deduped by dedupTree, so nv.Objects is iterated directly.
 func printNodeHuman(w io.Writer, nv *NodeView, prefix string, isLast, isRoot bool) {
-	countStr := ""
+	var countStr string
 	if nv.ObjectCount >= 0 {
 		countStr = fmt.Sprintf("  (%d objects)", nv.ObjectCount)
 	}
 
 	if isRoot {
 		fmt.Fprintf(w, "%s  %s/%s%s\n", nv.ID, nv.Kind, nv.Name, countStr)
-	} else {
-		fmt.Fprintf(w, "%s%s%s  %s/%s%s\n", prefix, connector(isLast), nv.ID, nv.Kind, nv.Name, countStr)
+		printNodeChildren(w, nv, prefix, isRoot, isLast)
+
+		return
 	}
 
+	fmt.Fprintf(w, "%s%s%s  %s/%s%s\n", prefix, connector(isLast), nv.ID, nv.Kind, nv.Name, countStr)
+	printNodeChildren(w, nv, prefix, isRoot, isLast)
+}
+
+func printNodeChildren(w io.Writer, nv *NodeView, prefix string, isRoot, isLast bool) {
 	childPrefix := prefix
 	if !isRoot {
 		childPrefix += continuation(isLast)

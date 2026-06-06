@@ -24,13 +24,16 @@ import (
 	"path/filepath"
 )
 
-// DirReader reads a snapshot archive directory written by DirWriter.
+const (
+	jsonlInitialBufferSize      = 64 * 1024
+	progressMaxBufferSize       = 10 * 1024 * 1024
+	volumeProgressMaxBufferSize = 1024 * 1024
+)
+
 type DirReader struct {
 	dir string
 }
 
-// OpenDir opens an archive directory for reading.
-// Returns an error if the directory or archive.json is absent.
 func OpenDir(dir string) (*DirReader, error) {
 	if _, err := os.Stat(dir); err != nil {
 		return nil, fmt.Errorf("archive directory %q: %w", dir, err)
@@ -43,7 +46,6 @@ func OpenDir(dir string) (*DirReader, error) {
 	return &DirReader{dir: dir}, nil
 }
 
-// Meta reads and parses archive.json.
 func (r *DirReader) Meta() (Meta, error) {
 	var m Meta
 
@@ -54,7 +56,6 @@ func (r *DirReader) Meta() (Meta, error) {
 	return m, nil
 }
 
-// Index reads and parses index.json.
 func (r *DirReader) Index() (Index, error) {
 	var idx Index
 
@@ -65,8 +66,6 @@ func (r *DirReader) Index() (Index, error) {
 	return idx, nil
 }
 
-// Nodes reads indexes/nodes.jsonl and returns all NodeRecords.
-// Lines are decoded one at a time to avoid buffering the entire file.
 func (r *DirReader) Nodes() ([]NodeRecord, error) {
 	path := filepath.Join(r.dir, dirIndexes, fileNodes)
 
@@ -103,8 +102,6 @@ func (r *DirReader) Nodes() ([]NodeRecord, error) {
 	return records, nil
 }
 
-// ForEachObject streams indexes/objects.jsonl and calls fn for each ObjectRecord.
-// fn is called in order; iteration stops and the error is returned if fn returns one.
 func (r *DirReader) ForEachObject(fn func(ObjectRecord) error) error {
 	path := filepath.Join(r.dir, dirIndexes, fileObjects)
 
@@ -137,16 +134,6 @@ func (r *DirReader) ForEachObject(fn func(ObjectRecord) error) error {
 	return sc.Err()
 }
 
-// Progress reads indexes/progress.jsonl and returns a map of ProgressRecords
-// keyed by node ID. When multiple records for the same node ID are present
-// (update case), the last one wins.
-// A truncated trailing line (crash mid-write) is silently skipped.
-func (r *DirReader) Progress() (map[string]ProgressRecord, error) {
-	return readProgressFile(filepath.Join(r.dir, dirIndexes, fileProgress))
-}
-
-// VolumeProgress reads indexes/volumes.jsonl and returns a map of VolumeProgressRecords
-// keyed by VolumeProgressKey (nodeID+"/"+vscName). The last record for each key wins.
 func (r *DirReader) VolumeProgress() (map[string]VolumeProgressRecord, error) {
 	return readVolumeProgressFile(filepath.Join(r.dir, dirIndexes, fileVolumes))
 }
@@ -169,8 +156,7 @@ func readProgressFile(path string) (map[string]ProgressRecord, error) {
 	result := make(map[string]ProgressRecord)
 
 	sc := bufio.NewScanner(f)
-	// Use a 10 MB buffer to accommodate nodes with many objects.
-	sc.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	sc.Buffer(make([]byte, 0, jsonlInitialBufferSize), progressMaxBufferSize)
 
 	for sc.Scan() {
 		line := sc.Text()
@@ -196,7 +182,6 @@ func readProgressFile(path string) (map[string]ProgressRecord, error) {
 	return result, nil
 }
 
-// readJSON reads a JSON file and unmarshals it into v.
 func readJSON(path string, v any) error {
 	data, err := os.ReadFile(path)
 	if err != nil {

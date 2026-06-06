@@ -55,186 +55,169 @@ const (
 	CompressionNone = "none"
 )
 
-// downloadNodeVolumes downloads all volume data for node n into the archive data directory.
-//
-// For each DataRef the function:
-//  1. Creates a temporary shadow VolumeSnapshotContent + VolumeSnapshot pointing at the
-//     original VSC's snapshotHandle (CLI-side bridging; no server-side changes needed).
-//  2. Creates a DataExport (kind=VolumeSnapshot) targeting the shadow VS.
-//  3. Downloads the data into the archive data directory.
-//  4. Cleans up the DataExport and shadow objects on exit.
-//
-// Already-complete volumes (per existingVolProgress) are skipped.
-func downloadNodeVolumes(
-	ctx context.Context,
-	_ ctrlrtclient.Client,
-	sClient *safeClient.SafeClient,
-	w *archive.DirWriter,
-	n *source.Node,
-	existingVolProgress map[string]archive.VolumeProgressRecord,
-	opts Options,
-	log *slog.Logger,
-) error {
-	// Create an rtClient that knows about the DataExport CRD.
-	deRTClient, err := sClient.NewRTClient(deV1alpha1.AddToScheme)
+type NodeVolumesRequest struct {
+	SafeClient          *safeClient.SafeClient
+	Writer              *archive.DirWriter
+	Node                *source.Node
+	ExistingVolProgress map[string]archive.VolumeProgressRecord
+	Options             Options
+	Log                 *slog.Logger
+}
+
+type volumeDownloader struct {
+	sClient             *safeClient.SafeClient
+	writer              *archive.DirWriter
+	node                *source.Node
+	existingVolProgress map[string]archive.VolumeProgressRecord
+	opts                Options
+	log                 *slog.Logger
+}
+
+type volumeData struct {
+	nodeID      string
+	ref         source.DataRef
+	baseURL     string
+	existing    archive.VolumeProgressRecord
+	compression string
+	outDir      string
+}
+
+func downloadNodeVolumes(ctx context.Context, req NodeVolumesRequest) error {
+	d := newVolumeDownloader(req)
+	deRTClient, err := d.sClient.NewRTClient(deV1alpha1.AddToScheme)
 	if err != nil {
 		return fmt.Errorf("build DataExport client: %w", err)
 	}
 
-	for _, dr := range n.DataRefs {
-		key := archive.VolumeProgressKey(n.ID, dr.VSCName)
-		if rec, ok := existingVolProgress[key]; ok && rec.Complete {
-			log.Debug("volume already complete, skipping", "node", n.ID, "vsc", dr.VSCName)
+	for _, dr := range d.node.DataRefs {
+		if d.volumeComplete(dr) {
 			continue
 		}
 
-		if err := downloadOneVolume(ctx, deRTClient, sClient, w, n, dr, existingVolProgress, opts, log); err != nil {
-			return fmt.Errorf("download volume %s (node %s): %w", dr.VSCName, n.ID, err)
+		if err := d.downloadOne(ctx, deRTClient, dr); err != nil {
+			return fmt.Errorf("download volume %s (node %s): %w", dr.VSCName, d.node.ID, err)
 		}
 	}
 
 	return nil
 }
 
-// downloadOneVolume downloads a single volume identified by dr using the shadow
-// VolumeSnapshotContent+VolumeSnapshot approach:
-//
-//  1. Creates a pre-provisioned shadow VSC pointing at origVSC.status.snapshotHandle.
-//  2. Creates a shadow VS with StorageClass/volume-mode annotations.
-//  3. Waits for external-snapshotter to bind and mark the shadow VS readyToUse.
-//  4. Creates a DataExport(kind=VolumeSnapshot) targeting the shadow VS.
-//  5. Downloads via util.PrepareDownloadFunc.
-//  6. Deferred cleanup removes the DataExport and shadow pair.
-func downloadOneVolume(
-	ctx context.Context,
-	deRTClient ctrlrtclient.Client,
-	sClient *safeClient.SafeClient,
-	w *archive.DirWriter,
-	n *source.Node,
-	dr source.DataRef,
-	existingVolProgress map[string]archive.VolumeProgressRecord,
-	opts Options,
-	log *slog.Logger,
-) error {
-	log.Info("preparing shadow snapshot pair for volume", "node", n.ID, "vsc", dr.VSCName)
+func newVolumeDownloader(req NodeVolumesRequest) *volumeDownloader {
+	return &volumeDownloader{
+		sClient:             req.SafeClient,
+		writer:              req.Writer,
+		node:                req.Node,
+		existingVolProgress: req.ExistingVolProgress,
+		opts:                req.Options,
+		log:                 req.Log,
+	}
+}
 
-	shadowVSName, cleanupShadow, err := createAndWaitShadowPair(ctx, deRTClient, n.ID, n.Namespace, dr, log)
+func (d *volumeDownloader) volumeComplete(dr source.DataRef) bool {
+	key := archive.VolumeProgressKey(d.node.ID, dr.VSCName)
+	rec, ok := d.existingVolProgress[key]
+	if !ok || !rec.Complete {
+		return false
+	}
+
+	d.log.Debug("volume already complete, skipping", "node", d.node.ID, "vsc", dr.VSCName)
+
+	return true
+}
+
+func (d *volumeDownloader) downloadOne(ctx context.Context, deRTClient ctrlrtclient.Client, dr source.DataRef) error {
+	d.log.Info("preparing shadow snapshot pair for volume", "node", d.node.ID, "vsc", dr.VSCName)
+
+	shadowVSName, cleanupShadow, err := createAndWaitShadowPair(ctx, deRTClient, d.node.ID, d.node.Namespace, dr, d.log)
 	defer cleanupShadow()
 
 	if err != nil {
 		return fmt.Errorf("create shadow snapshot pair for %s: %w", dr.VSCName, err)
 	}
 
-	deName := volumeDataExportName(n.ID, dr.VSCName)
+	deName := volumeDataExportName(d.node.ID, dr.VSCName)
 
-	log.Info("creating DataExport for volume", "node", n.ID, "vsc", dr.VSCName, "de", deName, "shadowVS", shadowVSName)
+	d.log.Info("creating DataExport for volume", "node", d.node.ID, "vsc", dr.VSCName, "de", deName, "shadowVS", shadowVSName)
 
-	if err := util.CreateDataExport(ctx, deName, n.Namespace, opts.DataExportTTL,
+	if err := util.CreateDataExport(ctx, deName, d.node.Namespace, d.opts.DataExportTTL,
 		dataio.VolumeSnapshotKind, shadowVSName, false, deRTClient); err != nil {
 		return fmt.Errorf("create DataExport %s: %w", deName, err)
 	}
 
 	defer func() {
-		if delErr := util.DeleteDataExport(context.Background(), deName, n.Namespace, deRTClient); delErr != nil {
-			log.Warn("failed to delete DataExport", "de", deName, "err", delErr)
+		if delErr := util.DeleteDataExport(context.Background(), deName, d.node.Namespace, deRTClient); delErr != nil {
+			d.log.Warn("failed to delete DataExport", "de", deName, "err", delErr)
 		}
 	}()
 
-	downloadURL, volumeMode, subClient, err := util.PrepareDownloadFunc(ctx, log, deName, n.Namespace, false, sClient)
+	downloadURL, volumeMode, subClient, err := util.PrepareDownloadFunc(ctx, d.log, deName, d.node.Namespace, false, d.sClient)
 	if err != nil {
 		return fmt.Errorf("prepare download for DataExport %s: %w", deName, err)
 	}
 
-	compression := opts.VolumeCompression
+	compression := d.opts.VolumeCompression
 	if compression == "" {
 		compression = CompressionGzip
 	}
 
-	log.Info("downloading volume data", "node", n.ID, "vsc", dr.VSCName, "mode", volumeMode, "compression", compression)
+	d.log.Info("downloading volume data", "node", d.node.ID, "vsc", dr.VSCName, "mode", volumeMode, "compression", compression)
 
-	key := archive.VolumeProgressKey(n.ID, dr.VSCName)
-	existing := existingVolProgress[key]
+	key := archive.VolumeProgressKey(d.node.ID, dr.VSCName)
+	volume := volumeData{
+		nodeID:      d.node.ID,
+		ref:         dr,
+		baseURL:     downloadURL,
+		existing:    d.existingVolProgress[key],
+		compression: compression,
+	}
 
 	switch volumeMode {
 	case "Block":
-		if err := downloadBlockVolume(ctx, subClient, w, n.ID, dr, downloadURL, existing, compression, log); err != nil {
-			return err
-		}
+		return d.downloadBlock(ctx, subClient, volume)
 	case "Filesystem":
-		if err := downloadFilesystemVolume(ctx, subClient, w, n.ID, dr, downloadURL, compression, log); err != nil {
-			return err
-		}
+		return d.downloadFilesystem(ctx, subClient, volume)
 	default:
 		return fmt.Errorf("unsupported volumeMode %q for VSC %s", volumeMode, dr.VSCName)
 	}
-
-	return nil
 }
 
-// downloadBlockVolume downloads a block-mode volume.
-//
-// When compression == "gzip", the output is a multi-member gzip file (<vsc>.img.gz).
-// Each chunk (blockGzipChunkSize) is written as one independent gzip member and
-// synced, so on resume the file can be safely truncated to the last checkpoint's
-// CompressedBytes before appending the next member.
-//
-// When compression == "none", the output is a raw .img file with HTTP Range resume.
-func downloadBlockVolume(
-	ctx context.Context,
-	sClient *safeClient.SafeClient,
-	w *archive.DirWriter,
-	nodeID string,
-	dr source.DataRef,
-	baseURL string,
-	existing archive.VolumeProgressRecord,
-	compression string,
-	log *slog.Logger,
-) error {
-	outDir := filepath.Join(w.DataDir(), nodeID)
+func (d *volumeDownloader) downloadBlock(ctx context.Context, sClient *safeClient.SafeClient, volume volumeData) error {
+	outDir := filepath.Join(d.writer.DataDir(), volume.nodeID)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", outDir, err)
 	}
 
-	if compression == CompressionGzip {
-		return downloadBlockVolumeGzip(ctx, sClient, w, nodeID, dr, baseURL, outDir, existing, log)
+	volume.outDir = outDir
+
+	if volume.compression == CompressionGzip {
+		return d.downloadBlockGzip(ctx, sClient, volume)
 	}
 
-	return downloadBlockVolumeRaw(ctx, sClient, w, nodeID, dr, baseURL, outDir, existing, log)
+	return d.downloadBlockRaw(ctx, sClient, volume)
 }
 
-// downloadBlockVolumeRaw downloads a block volume without compression (raw .img).
-func downloadBlockVolumeRaw(
-	ctx context.Context,
-	sClient *safeClient.SafeClient,
-	w *archive.DirWriter,
-	nodeID string,
-	dr source.DataRef,
-	baseURL string,
-	outDir string,
-	existing archive.VolumeProgressRecord,
-	log *slog.Logger,
-) error {
-	outPath := filepath.Join(outDir, dr.VSCName+".img")
+func (d *volumeDownloader) downloadBlockRaw(ctx context.Context, sClient *safeClient.SafeClient, volume volumeData) error {
+	outPath := filepath.Join(volume.outDir, volume.ref.VSCName+".img")
 
 	var offset int64
 	if info, err := os.Stat(outPath); err == nil {
 		offset = info.Size()
 	}
 
-	if offset > 0 && existing.BytesTotal > 0 && offset >= existing.BytesTotal {
-		return w.AppendVolumeProgress(archive.VolumeProgressRecord{
-			NodeID:      nodeID,
-			VSCName:     dr.VSCName,
-			PVCName:     dr.PVCName,
+	if offset > 0 && volume.existing.BytesTotal > 0 && offset >= volume.existing.BytesTotal {
+		return d.writer.AppendVolumeProgress(archive.VolumeProgressRecord{
+			NodeID:      volume.nodeID,
+			VSCName:     volume.ref.VSCName,
+			PVCName:     volume.ref.PVCName,
 			VolumeMode:  "Block",
 			Compression: CompressionNone,
 			BytesDone:   offset,
-			BytesTotal:  existing.BytesTotal,
+			BytesTotal:  volume.existing.BytesTotal,
 			Complete:    true,
 		})
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, volume.baseURL, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
@@ -255,13 +238,7 @@ func downloadBlockVolumeRaw(
 		return fmt.Errorf("unexpected status %d downloading block volume: %s", resp.StatusCode, body)
 	}
 
-	flags := os.O_WRONLY | os.O_CREATE
-	if offset > 0 && resp.StatusCode == http.StatusPartialContent {
-		flags |= os.O_APPEND
-	} else {
-		flags |= os.O_TRUNC
-		offset = 0
-	}
+	flags, offset := blockOutputFlags(offset, resp.StatusCode)
 
 	f, err := os.OpenFile(outPath, flags, 0o644)
 	if err != nil {
@@ -276,20 +253,14 @@ func downloadBlockVolumeRaw(
 	}
 
 	totalBytes := offset + written
-	bytesTotal := resp.ContentLength
+	bytesTotal := blockBytesTotal(resp.ContentLength, offset, totalBytes)
 
-	if bytesTotal < 0 {
-		bytesTotal = totalBytes
-	} else if offset > 0 {
-		bytesTotal = offset + resp.ContentLength
-	}
+	d.log.Info("block volume downloaded", "node", volume.nodeID, "vsc", volume.ref.VSCName, "bytes", totalBytes)
 
-	log.Info("block volume downloaded", "node", nodeID, "vsc", dr.VSCName, "bytes", totalBytes)
-
-	return w.AppendVolumeProgress(archive.VolumeProgressRecord{
-		NodeID:      nodeID,
-		VSCName:     dr.VSCName,
-		PVCName:     dr.PVCName,
+	return d.writer.AppendVolumeProgress(archive.VolumeProgressRecord{
+		NodeID:      volume.nodeID,
+		VSCName:     volume.ref.VSCName,
+		PVCName:     volume.ref.PVCName,
 		VolumeMode:  "Block",
 		Compression: CompressionNone,
 		BytesDone:   totalBytes,
@@ -298,45 +269,47 @@ func downloadBlockVolumeRaw(
 	})
 }
 
-// downloadBlockVolumeGzip downloads a block volume as a multi-member gzip file.
-//
-// Resume: if existing.CompressedBytes > 0, the output file is truncated to that
-// size (dropping any half-written trailing member), then the server is asked for
-// Range: bytes=existing.BytesDone- so we continue from the right source offset.
-// Each blockGzipChunkSize is one independent gzip member; after each member
-// a partial progress record is written so BytesDone + CompressedBytes are durable.
-func downloadBlockVolumeGzip(
-	ctx context.Context,
-	sClient *safeClient.SafeClient,
-	w *archive.DirWriter,
-	nodeID string,
-	dr source.DataRef,
-	baseURL string,
-	outDir string,
-	existing archive.VolumeProgressRecord,
-	log *slog.Logger,
-) error {
-	outPath := filepath.Join(outDir, dr.VSCName+".img.gz")
+func blockOutputFlags(offset int64, statusCode int) (int, int64) {
+	flags := os.O_WRONLY | os.O_CREATE
+	if offset > 0 && statusCode == http.StatusPartialContent {
+		return flags | os.O_APPEND, offset
+	}
 
-	srcOffset := existing.BytesDone
-	compressedLen := existing.CompressedBytes
+	return flags | os.O_TRUNC, 0
+}
 
-	// Already complete from a previous run?
-	if srcOffset > 0 && existing.BytesTotal > 0 && srcOffset >= existing.BytesTotal {
-		return w.AppendVolumeProgress(archive.VolumeProgressRecord{
-			NodeID:          nodeID,
-			VSCName:         dr.VSCName,
-			PVCName:         dr.PVCName,
+func blockBytesTotal(contentLength, offset, totalBytes int64) int64 {
+	if contentLength < 0 {
+		return totalBytes
+	}
+
+	if offset > 0 {
+		return offset + contentLength
+	}
+
+	return contentLength
+}
+
+func (d *volumeDownloader) downloadBlockGzip(ctx context.Context, sClient *safeClient.SafeClient, volume volumeData) error {
+	outPath := filepath.Join(volume.outDir, volume.ref.VSCName+".img.gz")
+
+	srcOffset := volume.existing.BytesDone
+	compressedLen := volume.existing.CompressedBytes
+
+	if srcOffset > 0 && volume.existing.BytesTotal > 0 && srcOffset >= volume.existing.BytesTotal {
+		return d.writer.AppendVolumeProgress(archive.VolumeProgressRecord{
+			NodeID:          volume.nodeID,
+			VSCName:         volume.ref.VSCName,
+			PVCName:         volume.ref.PVCName,
 			VolumeMode:      "Block",
 			Compression:     CompressionGzip,
 			BytesDone:       srcOffset,
-			BytesTotal:      existing.BytesTotal,
+			BytesTotal:      volume.existing.BytesTotal,
 			CompressedBytes: compressedLen,
 			Complete:        true,
 		})
 	}
 
-	// Open (or create) the output file for append.
 	f, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE, 0o644)
 	if err != nil {
 		return fmt.Errorf("open gzip output %s: %w", outPath, err)
@@ -344,7 +317,6 @@ func downloadBlockVolumeGzip(
 
 	defer f.Close()
 
-	// Truncate to the last durable checkpoint to discard any half-written member.
 	if compressedLen > 0 {
 		if err := f.Truncate(compressedLen); err != nil {
 			return fmt.Errorf("truncate gzip output to checkpoint %d: %w", compressedLen, err)
@@ -355,8 +327,7 @@ func downloadBlockVolumeGzip(
 		return fmt.Errorf("seek to end of gzip output: %w", err)
 	}
 
-	// Fetch data starting at source offset.
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, volume.baseURL, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
@@ -377,13 +348,11 @@ func downloadBlockVolumeGzip(
 		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, body)
 	}
 
-	// Compute total uncompressed size.
 	var bytesTotal int64
 	if resp.ContentLength >= 0 {
 		bytesTotal = srcOffset + resp.ContentLength
 	}
 
-	// Stream body in chunks; each chunk = one independent gzip member.
 	buf := make([]byte, blockGzipChunkSize)
 
 	for {
@@ -402,11 +371,10 @@ func downloadBlockVolumeGzip(
 
 			compressedLen = info.Size()
 
-			// Checkpoint after every member (complete=false until final).
-			if appendErr := w.AppendVolumeProgress(archive.VolumeProgressRecord{
-				NodeID:          nodeID,
-				VSCName:         dr.VSCName,
-				PVCName:         dr.PVCName,
+			if appendErr := d.writer.AppendVolumeProgress(archive.VolumeProgressRecord{
+				NodeID:          volume.nodeID,
+				VSCName:         volume.ref.VSCName,
+				PVCName:         volume.ref.PVCName,
 				VolumeMode:      "Block",
 				Compression:     CompressionGzip,
 				BytesDone:       srcOffset,
@@ -431,12 +399,12 @@ func downloadBlockVolumeGzip(
 		bytesTotal = srcOffset
 	}
 
-	log.Info("block volume downloaded (gzip)", "node", nodeID, "vsc", dr.VSCName, "srcBytes", srcOffset, "compressedBytes", compressedLen)
+	d.log.Info("block volume downloaded (gzip)", "node", volume.nodeID, "vsc", volume.ref.VSCName, "srcBytes", srcOffset, "compressedBytes", compressedLen)
 
-	return w.AppendVolumeProgress(archive.VolumeProgressRecord{
-		NodeID:          nodeID,
-		VSCName:         dr.VSCName,
-		PVCName:         dr.PVCName,
+	return d.writer.AppendVolumeProgress(archive.VolumeProgressRecord{
+		NodeID:          volume.nodeID,
+		VSCName:         volume.ref.VSCName,
+		PVCName:         volume.ref.PVCName,
 		VolumeMode:      "Block",
 		Compression:     CompressionGzip,
 		BytesDone:       srcOffset,
@@ -463,47 +431,45 @@ func appendGzipMember(f *os.File, data []byte) error {
 	return f.Sync()
 }
 
-// downloadFilesystemVolume recursively downloads a filesystem-mode volume.
-//
-// When compression == "gzip", each file is stored as <name>.gz (atomic tmp→rename).
-// A file is skipped on resume if its .gz already exists (atomicity guarantees it is complete).
-// When compression == "none", files are stored as plain files (same behaviour as before).
-func downloadFilesystemVolume(
-	ctx context.Context,
-	sClient *safeClient.SafeClient,
-	w *archive.DirWriter,
-	nodeID string,
-	dr source.DataRef,
-	baseURL string,
-	compression string,
-	log *slog.Logger,
-) error {
-	dirName := dr.PVCName
+type filesystemDownloader struct {
+	sClient *safeClient.SafeClient
+	log     *slog.Logger
+	sem     chan struct{}
+	baseURL string
+	useGzip bool
+}
+
+func (d *volumeDownloader) downloadFilesystem(ctx context.Context, sClient *safeClient.SafeClient, volume volumeData) error {
+	dirName := volume.ref.PVCName
 	if dirName == "" {
-		dirName = dr.VSCName
+		dirName = volume.ref.VSCName
 	}
 
-	outDir := filepath.Join(w.DataDir(), nodeID, dirName)
+	outDir := filepath.Join(d.writer.DataDir(), volume.nodeID, dirName)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", outDir, err)
 	}
 
-	sem := make(chan struct{}, concurrentFileDownloads)
+	fs := filesystemDownloader{
+		sClient: sClient,
+		log:     d.log,
+		sem:     make(chan struct{}, concurrentFileDownloads),
+		baseURL: volume.baseURL,
+		useGzip: volume.compression == CompressionGzip,
+	}
 
-	useGzip := compression == CompressionGzip
-
-	if err := recursiveVolumeDownload(ctx, sClient, log, sem, baseURL, "/", outDir, useGzip); err != nil {
+	if err := fs.download(ctx, "/", outDir); err != nil {
 		return fmt.Errorf("recursive download: %w", err)
 	}
 
-	log.Info("filesystem volume downloaded", "node", nodeID, "vsc", dr.VSCName, "dir", outDir, "compression", compression)
+	d.log.Info("filesystem volume downloaded", "node", volume.nodeID, "vsc", volume.ref.VSCName, "dir", outDir, "compression", volume.compression)
 
-	return w.AppendVolumeProgress(archive.VolumeProgressRecord{
-		NodeID:      nodeID,
-		VSCName:     dr.VSCName,
-		PVCName:     dr.PVCName,
+	return d.writer.AppendVolumeProgress(archive.VolumeProgressRecord{
+		NodeID:      volume.nodeID,
+		VSCName:     volume.ref.VSCName,
+		PVCName:     volume.ref.PVCName,
 		VolumeMode:  "Filesystem",
-		Compression: compression,
+		Compression: volume.compression,
 		Complete:    true,
 	})
 }
@@ -513,29 +479,30 @@ type dirItem struct {
 	Type string `json:"type"`
 }
 
-func recursiveVolumeDownload(ctx context.Context, sClient *safeClient.SafeClient, log *slog.Logger, sem chan struct{}, baseURL, srcPath, dstDir string, useGzip bool) error {
+func (d *filesystemDownloader) download(ctx context.Context, srcPath, dstDir string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	isDir := srcPath == "" || srcPath[len(srcPath)-1] == '/'
 
-	// Per-file resume: skip HTTP request entirely when the .gz already exists.
-	// This is only safe for leaf files (not directories whose listing may change).
-	if !isDir && useGzip {
+	if !isDir && d.useGzip {
 		if _, err := os.Stat(dstDir + ".gz"); err == nil {
 			return nil
 		}
 	}
 
-	dataURL, err := neturl.JoinPath(baseURL, srcPath)
+	dataURL, err := neturl.JoinPath(d.baseURL, srcPath)
 	if err != nil {
 		return err
 	}
 
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, dataURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dataURL, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
 
-	resp, err := sClient.HTTPDo(req)
+	resp, err := d.sClient.HTTPDo(req)
 	if err != nil {
 		return fmt.Errorf("HTTPDo: %w", err)
 	}
@@ -548,100 +515,118 @@ func recursiveVolumeDownload(ctx context.Context, sClient *safeClient.SafeClient
 	}
 
 	if isDir {
-		var (
-			wg       sync.WaitGroup
-			mu       sync.Mutex
-			firstErr error
-		)
-
-		setFirstErr := func(subErr error) {
-			if subErr == nil {
-				return
-			}
-
-			mu.Lock()
-
-			if firstErr == nil {
-				firstErr = subErr
-			}
-
-			mu.Unlock()
-		}
-
-		dec := json.NewDecoder(resp.Body)
-
-		for {
-			t, err := dec.Token()
-			if err != nil {
-				break
-			}
-
-			if t == "items" {
-				if _, err := dec.Token(); err != nil {
-					break
-				}
-
-				break
-			}
-		}
-
-		for dec.More() {
-			var item dirItem
-
-			if err := dec.Decode(&item); err != nil {
-				break
-			}
-
-			subPath := item.Name
-
-			switch item.Type {
-			case "dir":
-				if mkErr := os.MkdirAll(filepath.Join(dstDir, subPath), 0o755); mkErr != nil {
-					return mkErr
-				}
-
-				subPath += "/"
-			case "file", "link":
-				// downloadable
-			default:
-				log.Warn("skipping unsupported entry", "path", item.Name, "type", item.Type)
-				continue
-			}
-
-			sp := subPath
-			downloadOne := func() {
-				setFirstErr(recursiveVolumeDownload(ctx, sClient, log, sem, baseURL, srcPath+sp, filepath.Join(dstDir, sp), useGzip))
-			}
-
-			select {
-			case sem <- struct{}{}:
-				wg.Add(1)
-
-				go func() {
-					defer func() { <-sem; wg.Done() }()
-
-					downloadOne()
-				}()
-			default:
-				downloadOne()
-			}
-		}
-
-		wg.Wait()
-
-		return firstErr
+		return d.downloadDir(ctx, resp.Body, srcPath, dstDir)
 	}
 
-	// Leaf file.
 	if srcPath == "" || srcPath == "/" {
 		return nil
 	}
 
-	if useGzip {
+	if d.useGzip {
 		return writeGzipFileAtomic(resp.Body, dstDir)
 	}
 
 	return writeRawFile(resp.Body, dstDir)
+}
+
+func (d *filesystemDownloader) downloadDir(ctx context.Context, body io.Reader, srcPath, dstDir string) error {
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+	)
+
+	setFirstErr := func(subErr error) {
+		if subErr == nil {
+			return
+		}
+
+		mu.Lock()
+
+		if firstErr == nil {
+			firstErr = subErr
+		}
+
+		mu.Unlock()
+	}
+
+	dec := json.NewDecoder(body)
+	if err := seekItemsArray(dec); err != nil {
+		return err
+	}
+
+	for dec.More() {
+		var item dirItem
+
+		if err := dec.Decode(&item); err != nil {
+			break
+		}
+
+		subPath, ok, err := d.prepareDirItem(dstDir, item)
+		if err != nil {
+			return err
+		}
+
+		if !ok {
+			continue
+		}
+
+		sp := subPath
+		downloadOne := func() {
+			setFirstErr(d.download(ctx, srcPath+sp, filepath.Join(dstDir, sp)))
+		}
+
+		select {
+		case d.sem <- struct{}{}:
+			wg.Add(1)
+
+			go func() {
+				defer func() { <-d.sem; wg.Done() }()
+
+				downloadOne()
+			}()
+		default:
+			downloadOne()
+		}
+	}
+
+	wg.Wait()
+
+	return firstErr
+}
+
+func seekItemsArray(dec *json.Decoder) error {
+	for {
+		t, err := dec.Token()
+		if err != nil {
+			return nil
+		}
+
+		if t != "items" {
+			continue
+		}
+
+		_, _ = dec.Token()
+
+		return nil
+	}
+}
+
+func (d *filesystemDownloader) prepareDirItem(dstDir string, item dirItem) (string, bool, error) {
+	switch item.Type {
+	case "dir":
+		if err := os.MkdirAll(filepath.Join(dstDir, item.Name), 0o755); err != nil {
+			return "", false, err
+		}
+
+		return item.Name + "/", true, nil
+	case "file", "link":
+		return item.Name, true, nil
+	default:
+		d.log.Warn("skipping unsupported entry", "path", item.Name, "type", item.Type)
+
+		return "", false, nil
+	}
 }
 
 // writeGzipFileAtomic compresses body and writes it to path+".gz" atomically

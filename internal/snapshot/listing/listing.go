@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package listing builds and renders snapshot tree views from cluster or local archive sources.
 package listing
 
 import (
@@ -30,7 +29,6 @@ import (
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
-// Options controls which part of the snapshot is shown.
 type Options struct {
 	Namespace    string
 	SnapshotName string
@@ -39,7 +37,6 @@ type Options struct {
 	WithObjects  bool
 }
 
-// Source describes where the tree data came from.
 type Source struct {
 	Kind       string `json:"kind"` // "cluster" or "archive"
 	Cluster    string `json:"cluster,omitempty"`
@@ -49,7 +46,6 @@ type Source struct {
 	ArchiveID  string `json:"archiveId,omitempty"`
 }
 
-// ObjectView is one manifest entry in a node listing.
 type ObjectView struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`
@@ -59,7 +55,6 @@ type ObjectView struct {
 	Size       int64  `json:"size,omitempty"`
 }
 
-// NodeView is one node in the snapshot tree.
 type NodeView struct {
 	ID                       string       `json:"id"`
 	APIVersion               string       `json:"apiVersion"`
@@ -73,7 +68,6 @@ type NodeView struct {
 	Children                 []*NodeView  `json:"children,omitempty"`
 }
 
-// Tree is the top-level view model returned by both builders.
 type Tree struct {
 	Source    Source                `json:"source"`
 	Selection archive.SelectionMode `json:"selection"`
@@ -81,29 +75,24 @@ type Tree struct {
 	Root      *NodeView             `json:"root"`
 }
 
-// Overridable seams for the tree build and manifest fetch steps.
 var (
 	buildTreeFunc      = source.BuildTree
 	fetchManifestsFunc = source.FetchManifests
 )
 
-// SetBuildTreeFunc replaces the build-tree seam; intended for tests.
 func SetBuildTreeFunc(f func(ctx context.Context, client ctrlrtclient.Client, namespace, name string) (*source.Node, error)) {
 	buildTreeFunc = f
 }
 
-// SetFetchManifestsFunc replaces the manifest-fetch seam; intended for tests.
 func SetFetchManifestsFunc(f source.ManifestFetcher) {
 	fetchManifestsFunc = f
 }
 
-// ResetFuncs restores both seams to their production defaults.
 func ResetFuncs() {
 	buildTreeFunc = source.BuildTree
 	fetchManifestsFunc = source.FetchManifests
 }
 
-// BuildFromCluster reads the live Snapshot tree from the Kubernetes API.
 func BuildFromCluster(ctx context.Context, sc *safeClient.SafeClient, rtClient ctrlrtclient.Client, opts Options, log *slog.Logger) (*Tree, error) {
 	log.Debug("building snapshot tree from cluster", "namespace", opts.Namespace, "snapshot", opts.SnapshotName)
 
@@ -127,37 +116,9 @@ func BuildFromCluster(ctx context.Context, sc *safeClient.SafeClient, rtClient c
 	rootView := nodeToView(selected, opts.WithObjects)
 
 	if opts.WithObjects {
-		nodes := source.FlatNodes(selected)
-
-		for _, n := range nodes {
-			nv := findNodeView(rootView, n.ID)
-			if nv == nil {
-				continue
-			}
-
-			rawObjects, err := fetchManifestsFunc(ctx, sc, n)
-			if err != nil {
-				return nil, fmt.Errorf("fetch manifests for %s: %w", n.ID, err)
-			}
-
-			objs := make([]ObjectView, 0, len(rawObjects))
-
-			for _, raw := range rawObjects {
-				ov, err := objectViewFromJSON(raw)
-				if err != nil {
-					log.Debug("skip unparseable manifest", "node", n.ID, "err", err)
-
-					continue
-				}
-
-				objs = append(objs, ov)
-			}
-
-			nv.Objects = objs
-			nv.ObjectCount = len(objs)
+		if err := attachClusterObjects(ctx, sc, selected, rootView, log); err != nil {
+			return nil, err
 		}
-
-		dedupTree(rootView)
 	}
 
 	return &Tree{
@@ -172,7 +133,6 @@ func BuildFromCluster(ctx context.Context, sc *safeClient.SafeClient, rtClient c
 	}, nil
 }
 
-// BuildFromArchive reads a local archive directory produced by `d8 snapshot download`.
 func BuildFromArchive(opts Options, log *slog.Logger) (*Tree, error) {
 	log.Debug("building snapshot tree from archive", "dir", opts.ArchiveDir)
 
@@ -191,71 +151,16 @@ func BuildFromArchive(opts Options, log *slog.Logger) (*Tree, error) {
 		return nil, err
 	}
 
-	nodeMap := make(map[string]*NodeView, len(nodes))
+	nodeMap := nodeViewsFromRecords(nodes)
+	wireNodeChildren(nodeMap, nodes)
 
-	for _, nr := range nodes {
-		nv := &NodeView{
-			ID:                       nr.ID,
-			APIVersion:               nr.APIVersion,
-			Kind:                     nr.Kind,
-			Name:                     nr.Name,
-			Namespace:                nr.Namespace,
-			ParentID:                 nr.ParentID,
-			BoundSnapshotContentName: nr.BoundSnapshotContentName,
-			ObjectCount:              0,
-		}
-
-		nodeMap[nr.ID] = nv
-	}
-
-	// Wire children.
-	for _, nr := range nodes {
-		for _, childID := range nr.Children {
-			child, ok := nodeMap[childID]
-			if !ok {
-				continue
-			}
-
-			nodeMap[nr.ID].Children = append(nodeMap[nr.ID].Children, child)
-		}
-	}
-
-	// Group objects by node.
-	objsByNode := make(map[string][]ObjectView)
-
-	if err := reader.ForEachObject(func(or archive.ObjectRecord) error {
-		objsByNode[or.NodeID] = append(objsByNode[or.NodeID], ObjectView{
-			APIVersion: or.APIVersion,
-			Kind:       or.Kind,
-			Name:       or.Name,
-			Namespace:  or.Namespace,
-			Digest:     or.Digest,
-			Size:       or.Size,
-		})
-
-		return nil
-	}); err != nil {
+	if err := attachArchiveObjects(reader, nodeMap); err != nil {
 		return nil, fmt.Errorf("read objects index: %w", err)
 	}
 
-	for id, nv := range nodeMap {
-		objs := objsByNode[id]
-		nv.ObjectCount = len(objs)
-		nv.Objects = objs // always attach for dedup; cleared below if !WithObjects
-	}
-
-	rootID := meta.Selection.RootNodeID
-	rootView, ok := nodeMap[rootID]
-
-	if !ok {
-		return nil, fmt.Errorf("root node %q not found in nodes.jsonl", rootID)
-	}
-
-	if opts.NodeFilter != "" {
-		rootView = findNodeView(rootView, opts.NodeFilter)
-		if rootView == nil {
-			return nil, fmt.Errorf("node %q not found in archive; check the ID in indexes/nodes.jsonl", opts.NodeFilter)
-		}
+	rootView, err := archiveRootView(meta, nodeMap, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	dedupTree(rootView)
@@ -280,7 +185,133 @@ func BuildFromArchive(opts Options, log *slog.Logger) (*Tree, error) {
 	}, nil
 }
 
-// selectionModeFor maps opts flags to an archive.SelectionMode.
+func attachClusterObjects(ctx context.Context, sc *safeClient.SafeClient, selected *source.Node, rootView *NodeView, log *slog.Logger) error {
+	for _, n := range source.FlatNodes(selected) {
+		nv := findNodeView(rootView, n.ID)
+		if nv == nil {
+			continue
+		}
+
+		rawObjects, err := fetchManifestsFunc(ctx, sc, n)
+		if err != nil {
+			return fmt.Errorf("fetch manifests for %s: %w", n.ID, err)
+		}
+
+		nv.Objects = objectViewsFromRaw(rawObjects, n.ID, log)
+		nv.ObjectCount = len(nv.Objects)
+	}
+
+	dedupTree(rootView)
+
+	return nil
+}
+
+func objectViewsFromRaw(rawObjects [][]byte, nodeID string, log *slog.Logger) []ObjectView {
+	objs := make([]ObjectView, 0, len(rawObjects))
+
+	for _, raw := range rawObjects {
+		ov, err := objectViewFromJSON(raw)
+		if err != nil {
+			log.Debug("skip unparseable manifest", "node", nodeID, "err", err)
+
+			continue
+		}
+
+		objs = append(objs, ov)
+	}
+
+	return objs
+}
+
+func nodeViewsFromRecords(nodes []archive.NodeRecord) map[string]*NodeView {
+	nodeMap := make(map[string]*NodeView, len(nodes))
+
+	for _, nr := range nodes {
+		nodeMap[nr.ID] = &NodeView{
+			ID:                       nr.ID,
+			APIVersion:               nr.APIVersion,
+			Kind:                     nr.Kind,
+			Name:                     nr.Name,
+			Namespace:                nr.Namespace,
+			ParentID:                 nr.ParentID,
+			BoundSnapshotContentName: nr.BoundSnapshotContentName,
+			ObjectCount:              0,
+		}
+	}
+
+	return nodeMap
+}
+
+func wireNodeChildren(nodeMap map[string]*NodeView, nodes []archive.NodeRecord) {
+	for _, nr := range nodes {
+		parent := nodeMap[nr.ID]
+		if parent == nil {
+			continue
+		}
+
+		for _, childID := range nr.Children {
+			child := nodeMap[childID]
+			if child == nil {
+				continue
+			}
+
+			parent.Children = append(parent.Children, child)
+		}
+	}
+}
+
+func attachArchiveObjects(reader *archive.DirReader, nodeMap map[string]*NodeView) error {
+	objsByNode, err := objectsByNode(reader)
+	if err != nil {
+		return err
+	}
+
+	for id, nv := range nodeMap {
+		objs := objsByNode[id]
+		nv.ObjectCount = len(objs)
+		nv.Objects = objs
+	}
+
+	return nil
+}
+
+func objectsByNode(reader *archive.DirReader) (map[string][]ObjectView, error) {
+	result := make(map[string][]ObjectView)
+
+	err := reader.ForEachObject(func(or archive.ObjectRecord) error {
+		result[or.NodeID] = append(result[or.NodeID], ObjectView{
+			APIVersion: or.APIVersion,
+			Kind:       or.Kind,
+			Name:       or.Name,
+			Namespace:  or.Namespace,
+			Digest:     or.Digest,
+			Size:       or.Size,
+		})
+
+		return nil
+	})
+
+	return result, err
+}
+
+func archiveRootView(meta archive.Meta, nodeMap map[string]*NodeView, opts Options) (*NodeView, error) {
+	rootView := nodeMap[meta.Selection.RootNodeID]
+	if rootView == nil {
+		return nil, fmt.Errorf("root node %q not found in nodes.jsonl", meta.Selection.RootNodeID)
+	}
+
+	if opts.NodeFilter == "" {
+		return rootView, nil
+	}
+
+	filtered := findNodeView(rootView, opts.NodeFilter)
+	if filtered == nil {
+		return nil, fmt.Errorf("node %q not found in archive; check the ID in indexes/nodes.jsonl", opts.NodeFilter)
+	}
+
+	return filtered, nil
+}
+
 func selectionModeFor(opts Options) archive.SelectionMode {
 	if opts.NodeFilter != "" {
 		return archive.SelectionSubtree
@@ -289,8 +320,6 @@ func selectionModeFor(opts Options) archive.SelectionMode {
 	return archive.SelectionFull
 }
 
-// nodeToView converts a source.Node tree to a NodeView tree.
-// WithObjects is not populated here; the caller fills Objects after fetching.
 func nodeToView(n *source.Node, withObjects bool) *NodeView {
 	objectCount := -1 // unknown until fetched
 	if withObjects {
@@ -315,7 +344,6 @@ func nodeToView(n *source.Node, withObjects bool) *NodeView {
 	return nv
 }
 
-// findNodeView does a DFS to find the NodeView with the given ID.
 func findNodeView(nv *NodeView, id string) *NodeView {
 	if nv.ID == id {
 		return nv
@@ -330,7 +358,6 @@ func findNodeView(nv *NodeView, id string) *NodeView {
 	return nil
 }
 
-// objectKey returns a stable deduplication identity for an object.
 func objectKey(o ObjectView) string {
 	return o.APIVersion + "|" + o.Kind + "|" + o.Namespace + "|" + o.Name
 }
@@ -368,8 +395,6 @@ func dedupTree(nv *NodeView) map[string]struct{} {
 	return subtreeKeys
 }
 
-// clearObjects recursively sets Objects to nil while preserving ObjectCount.
-// Used after dedupTree when --objects is not requested.
 func clearObjects(nv *NodeView) {
 	nv.Objects = nil
 
@@ -397,7 +422,6 @@ func pruneEmpty(nv *NodeView) int {
 	return total
 }
 
-// objectViewFromJSON parses a raw manifest JSON byte slice into an ObjectView.
 func objectViewFromJSON(raw []byte) (ObjectView, error) {
 	var m map[string]any
 

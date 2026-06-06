@@ -84,15 +84,6 @@ func TestNodeID(t *testing.T) {
 	}
 }
 
-func TestAggregatedPath(t *testing.T) {
-	got := archive.AggregatedPath("demo", "snapshots", "my-snap")
-	want := "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/demo/snapshots/my-snap/manifests"
-
-	if got != want {
-		t.Fatalf("AggregatedPath = %q, want %q", got, want)
-	}
-}
-
 // Writer roundtrip test.
 
 func TestDirWriterRoundtrip(t *testing.T) {
@@ -252,8 +243,8 @@ func TestDirWriterRoundtrip(t *testing.T) {
 
 // Identity and resume tests.
 
-func TestArchiveIdentity_Equal(t *testing.T) {
-	base := archive.ArchiveIdentity{
+func TestIdentity_Equal(t *testing.T) {
+	base := archive.Identity{
 		Namespace:       "demo",
 		Snapshot:        "my-snap",
 		Mode:            archive.SelectionFull,

@@ -14,9 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package pipeline_test exercises volume compression behaviour by driving the
-// exported DownloadNodeVolumesFunc seam and by directly replicating the
-// filesystem-download helpers (which are unexported) through HTTP test servers.
 package pipeline_test
 
 import (
@@ -26,7 +23,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -35,12 +31,8 @@ import (
 	"testing"
 	"time"
 
-	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
-
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
-	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 // ---- helpers ----------------------------------------------------------------
@@ -407,24 +399,15 @@ func TestFilesystemVolumeNone_RawFiles(t *testing.T) {
 func TestRun_VolumeCompression_Default(t *testing.T) {
 	var gotCompression string
 
-	checkCompVol := func(
-		_ context.Context,
-		_ ctrlrtclient.Client,
-		_ *safeClient.SafeClient,
-		w *archive.DirWriter,
-		n *source.Node,
-		_ map[string]archive.VolumeProgressRecord,
-		opts pipeline.Options,
-		_ *slog.Logger,
-	) error {
-		gotCompression = opts.VolumeCompression
+	checkCompVol := func(_ context.Context, req pipeline.NodeVolumesRequest) error {
+		gotCompression = req.Options.VolumeCompression
 
-		for _, dr := range n.DataRefs {
-			if err := w.AppendVolumeProgress(archive.VolumeProgressRecord{
-				NodeID:      n.ID,
+		for _, dr := range req.Node.DataRefs {
+			if err := req.Writer.AppendVolumeProgress(archive.VolumeProgressRecord{
+				NodeID:      req.Node.ID,
 				VSCName:     dr.VSCName,
 				VolumeMode:  "Block",
-				Compression: opts.VolumeCompression,
+				Compression: req.Options.VolumeCompression,
 				BytesDone:   1024,
 				BytesTotal:  1024,
 				Complete:    true,
@@ -462,24 +445,15 @@ func TestRun_VolumeCompression_Default(t *testing.T) {
 func TestRun_VolumeCompression_None(t *testing.T) {
 	var gotCompression string
 
-	checkCompVol := func(
-		_ context.Context,
-		_ ctrlrtclient.Client,
-		_ *safeClient.SafeClient,
-		w *archive.DirWriter,
-		n *source.Node,
-		_ map[string]archive.VolumeProgressRecord,
-		opts pipeline.Options,
-		_ *slog.Logger,
-	) error {
-		gotCompression = opts.VolumeCompression
+	checkCompVol := func(_ context.Context, req pipeline.NodeVolumesRequest) error {
+		gotCompression = req.Options.VolumeCompression
 
-		for _, dr := range n.DataRefs {
-			if err := w.AppendVolumeProgress(archive.VolumeProgressRecord{
-				NodeID:      n.ID,
+		for _, dr := range req.Node.DataRefs {
+			if err := req.Writer.AppendVolumeProgress(archive.VolumeProgressRecord{
+				NodeID:      req.Node.ID,
 				VSCName:     dr.VSCName,
 				VolumeMode:  "Block",
-				Compression: opts.VolumeCompression,
+				Compression: req.Options.VolumeCompression,
 				BytesDone:   1024,
 				BytesTotal:  1024,
 				Complete:    true,

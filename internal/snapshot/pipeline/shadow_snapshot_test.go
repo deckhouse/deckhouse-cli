@@ -200,7 +200,7 @@ func TestBuildShadowVS_RequiredFields(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func makeStorageClass(name, provisioner string) *unstructured.Unstructured {
-	obj := &unstructured.Unstructured{}
+	obj := new(unstructured.Unstructured)
 	obj.SetGroupVersionKind(schema.GroupVersionKind{Group: "storage.k8s.io", Version: "v1", Kind: "StorageClass"})
 	obj.SetName(name)
 	_ = unstructured.SetNestedField(obj.Object, provisioner, "provisioner")
@@ -261,7 +261,7 @@ func TestResolveStorageClassForDriver_MultipleClasses(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func makeOrigVSC(sourceVolumeMode string) *unstructured.Unstructured {
-	obj := &unstructured.Unstructured{}
+	obj := new(unstructured.Unstructured)
 	obj.SetGroupVersionKind(shadowVSCGVK)
 	obj.SetName("original-vsc")
 
@@ -273,7 +273,7 @@ func makeOrigVSC(sourceVolumeMode string) *unstructured.Unstructured {
 }
 
 func makePVC(name, ns, volumeMode string) *unstructured.Unstructured {
-	obj := &unstructured.Unstructured{}
+	obj := new(unstructured.Unstructured)
 	obj.SetGroupVersionKind(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "PersistentVolumeClaim"})
 	obj.SetName(name)
 	obj.SetNamespace(ns)

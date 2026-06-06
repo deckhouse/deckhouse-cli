@@ -71,7 +71,7 @@ func shadowVSName(nodeID, origVSCName string) string {
 // readOrigVSC fetches the original (state-snapshotter-owned) VolumeSnapshotContent
 // and verifies it has a non-empty status.snapshotHandle.
 func readOrigVSC(ctx context.Context, c ctrlrtclient.Client, vscName string) (*unstructured.Unstructured, error) {
-	obj := &unstructured.Unstructured{}
+	obj := new(unstructured.Unstructured)
 	obj.SetGroupVersionKind(shadowVSCGVK)
 
 	if err := c.Get(ctx, ctrlrtclient.ObjectKey{Name: vscName}, obj); err != nil {
@@ -166,7 +166,7 @@ func buildShadowVS(vsName, vscName, namespace, vscClassName, storageClass, volum
 // resolveStorageClassForDriver lists all StorageClasses and returns the name of
 // the first one whose provisioner field matches the given CSI driver.
 func resolveStorageClassForDriver(ctx context.Context, c ctrlrtclient.Client, driver string) (string, error) {
-	scList := &unstructured.UnstructuredList{}
+	scList := new(unstructured.UnstructuredList)
 	scList.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "storage.k8s.io",
 		Version: "v1",
@@ -198,7 +198,7 @@ func detectVolumeMode(ctx context.Context, c ctrlrtclient.Client, origVSC *unstr
 	}
 
 	if dr.PVCName != "" && dr.PVCNamespace != "" {
-		pvc := &unstructured.Unstructured{}
+		pvc := new(unstructured.Unstructured)
 		pvc.SetGroupVersionKind(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "PersistentVolumeClaim"})
 
 		if err := c.Get(ctx, ctrlrtclient.ObjectKey{Namespace: dr.PVCNamespace, Name: dr.PVCName}, pvc); err == nil {
@@ -221,7 +221,7 @@ func waitShadowVSReady(ctx context.Context, c ctrlrtclient.Client, name, namespa
 			return fmt.Errorf("timed out waiting for shadow VolumeSnapshot %s/%s to become ready", namespace, name)
 		}
 
-		obj := &unstructured.Unstructured{}
+		obj := new(unstructured.Unstructured)
 		obj.SetGroupVersionKind(shadowVSGVK)
 
 		err := c.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: name}, obj)
@@ -229,23 +229,36 @@ func waitShadowVSReady(ctx context.Context, c ctrlrtclient.Client, name, namespa
 			if !apierrors.IsNotFound(err) {
 				return fmt.Errorf("get shadow VolumeSnapshot %s/%s: %w", namespace, name, err)
 			}
-		} else {
-			readyToUse, _, _ := unstructured.NestedBool(obj.Object, "status", "readyToUse")
-			boundVSC, _, _ := unstructured.NestedString(obj.Object, "status", "boundVolumeSnapshotContentName")
 
-			if readyToUse && boundVSC != "" {
-				log.Debug("shadow VolumeSnapshot is ready", "name", name, "namespace", namespace)
-				return nil
+			if err := waitShadowPoll(ctx); err != nil {
+				return err
 			}
 
-			log.Debug("waiting for shadow VolumeSnapshot", "name", name, "readyToUse", readyToUse, "boundVSC", boundVSC)
+			continue
 		}
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(shadowWaitInterval):
+		readyToUse, _, _ := unstructured.NestedBool(obj.Object, "status", "readyToUse")
+		boundVSC, _, _ := unstructured.NestedString(obj.Object, "status", "boundVolumeSnapshotContentName")
+
+		if readyToUse && boundVSC != "" {
+			log.Debug("shadow VolumeSnapshot is ready", "name", name, "namespace", namespace)
+			return nil
 		}
+
+		log.Debug("waiting for shadow VolumeSnapshot", "name", name, "readyToUse", readyToUse, "boundVSC", boundVSC)
+
+		if err := waitShadowPoll(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+func waitShadowPoll(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(shadowWaitInterval):
+		return nil
 	}
 }
 
@@ -332,7 +345,7 @@ func ensureShadowVSRestoreSize(
 	origVSC *unstructured.Unstructured,
 	log *slog.Logger,
 ) error {
-	vs := &unstructured.Unstructured{}
+	vs := new(unstructured.Unstructured)
 	vs.SetGroupVersionKind(shadowVSGVK)
 
 	if err := c.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: vsName}, vs); err != nil {
@@ -365,7 +378,7 @@ func ensureShadowVSRestoreSize(
 // logging but not propagating errors (best-effort cleanup in defer blocks).
 // VS is deleted before VSC to allow the controller to observe the VS deletion.
 func deleteShadowObjects(ctx context.Context, c ctrlrtclient.Client, vscName, vsName, namespace string, log *slog.Logger) {
-	vsObj := &unstructured.Unstructured{}
+	vsObj := new(unstructured.Unstructured)
 	vsObj.SetGroupVersionKind(shadowVSGVK)
 	vsObj.SetName(vsName)
 	vsObj.SetNamespace(namespace)
@@ -374,7 +387,7 @@ func deleteShadowObjects(ctx context.Context, c ctrlrtclient.Client, vscName, vs
 		log.Warn("failed to delete shadow VolumeSnapshot", "name", vsName, "namespace", namespace, "err", err)
 	}
 
-	vscObj := &unstructured.Unstructured{}
+	vscObj := new(unstructured.Unstructured)
 	vscObj.SetGroupVersionKind(shadowVSCGVK)
 	vscObj.SetName(vscName)
 
