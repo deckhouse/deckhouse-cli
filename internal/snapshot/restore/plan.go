@@ -260,8 +260,12 @@ func Build(archiveDir string, opts Options) (*RestorePlan, error) {
 
 	// Pass 3: build manifestOps from the collected objects, skipping PVCs
 	// that will be handled by DataImport.
+	// Deduplicate by (apiVersion/kind/name): the same object may appear in multiple
+	// snapshot nodes (e.g. a disk captured both by its own snapshot and by a VM snapshot
+	// that lists it as a dependency). SSA is idempotent, but we avoid double-counting.
 	var manifestOps []ManifestOp
 	if opts.Mode != ModeDataOnly {
+		seen := make(map[string]bool)
 		for _, op := range allOps {
 			rec := op.rec
 			data := op.data
@@ -274,6 +278,12 @@ func Build(archiveDir string, opts Options) (*RestorePlan, error) {
 				// PVC without data: strip binding fields to avoid "Lost" state in the new cluster.
 				data = stripPVCBindingFields(data)
 			}
+
+			dedupKey := rec.APIVersion + "/" + rec.Kind + "/" + rec.Namespace + "/" + rec.Name
+			if seen[dedupKey] {
+				continue
+			}
+			seen[dedupKey] = true
 
 			manifestOps = append(manifestOps, ManifestOp{
 				NodeID:     rec.NodeID,
