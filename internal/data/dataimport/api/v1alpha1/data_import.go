@@ -44,7 +44,7 @@ type DataImportList struct {
 type DataImportSpec struct {
 	TTL                  string                  `json:"ttl"`
 	Publish              bool                    `json:"publish,omitempty"`
-	WaitForFirstConsumer bool                    `json:"waitForFirstConsumer,omitempty"`
+	WaitForFirstConsumer bool                    `json:"waitForFirstConsumer"`
 	TargetRef            DataImportTargetRefSpec `json:"targetRef"`
 }
 
