@@ -285,8 +285,8 @@ func fetchDataRefs(ctx context.Context, client ctrlrtclient.Client, snapshotCont
 		}
 
 		vscName, _ := artifactMap["name"].(string)
-		pvcName, _ := targetMap["pvcName"].(string)
-		pvcNS, _ := targetMap["pvcNamespace"].(string)
+		pvcName, _ := targetMap["name"].(string)
+		pvcNS, _ := targetMap["namespace"].(string)
 
 		if vscName == "" {
 			continue

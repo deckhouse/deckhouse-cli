@@ -56,8 +56,8 @@ func TestFetchDataRefs_WithVSCRef(t *testing.T) {
 	dataRefs := []any{
 		map[string]any{
 			"target": map[string]any{
-				"pvcName":      "my-pvc",
-				"pvcNamespace": "demo",
+				"name":      "my-pvc",
+				"namespace": "demo",
 			},
 			"artifact": map[string]any{
 				"kind": "VolumeSnapshotContent",
@@ -101,8 +101,8 @@ func TestFetchDataRefs_NonVSCKindSkipped(t *testing.T) {
 	dataRefs := []any{
 		map[string]any{
 			"target": map[string]any{
-				"pvcName":      "other-pvc",
-				"pvcNamespace": "demo",
+				"name":      "other-pvc",
+				"namespace": "demo",
 			},
 			"artifact": map[string]any{
 				"kind": "PersistentVolumeClaim",
@@ -163,8 +163,8 @@ func TestBuildTree_WithDataRefs(t *testing.T) {
 	dataRefs := []any{
 		map[string]any{
 			"target": map[string]any{
-				"pvcName":      "vol-pvc",
-				"pvcNamespace": "demo",
+				"name":      "vol-pvc",
+				"namespace": "demo",
 			},
 			"artifact": map[string]any{
 				"kind": "VolumeSnapshotContent",
