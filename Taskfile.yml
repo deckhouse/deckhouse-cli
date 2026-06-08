@@ -40,6 +40,7 @@ vars:
 
   cgoTags: "clionly dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp osusergo exclude_graphdriver_devicemapper netgo no_devmapper static_build cni"
   goTags: "clionly dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp"
+  testsumFormat: '{{if eq .GITHUB_ACTIONS "true"}}github-actions{{else}}pkgname-and-test-fails{{end}}'
 
   cgoDevLDFlags: "-linkmode external -extldflags=-static -s -w -X 'github.com/deckhouse/deckhouse-cli/internal/version.Version=local-dev' {{ .werfLDFlags }}"
   goDevLDFlags: "-s -w -X 'github.com/deckhouse/deckhouse-cli/internal/version.Version=local-dev' {{ .werfLDFlags }}"
@@ -91,7 +92,7 @@ tasks:
   _test:go:
     internal: true
     cmds:
-      - go test -count=1 -tags="{{ .cgoTags }}" ./...
+      - go run gotest.tools/gotestsum@latest -f {{ .testsumFormat }} -- -count=1 -tags="{{ .cgoTags }}" ./...
 
   build:
     desc: Build d8 binary for personal usage
