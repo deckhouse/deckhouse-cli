@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	neturl "net/url"
@@ -296,6 +297,83 @@ func EnsureDataImportPublish(
 	}
 
 	return nil
+}
+
+// FinishUpload signals the importer pod that all data has been uploaded by
+// sending POST /api/v1/finished. This triggers the volume populator to finalise.
+func FinishUpload(ctx context.Context, httpClient *safeClient.SafeClient, podURL string) error {
+	finishURL, err := neturl.JoinPath(podURL, "api/v1/finished")
+	if err != nil {
+		return fmt.Errorf("build finish URL: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, finishURL, http.NoBody)
+	if err != nil {
+		return fmt.Errorf("build POST /api/v1/finished request: %w", err)
+	}
+
+	req.ContentLength = 0
+
+	resp, err := httpClient.HTTPDo(req)
+	if err != nil {
+		return fmt.Errorf("POST /api/v1/finished: %w", err)
+	}
+
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("POST /api/v1/finished returned status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// WaitUploadCompleted polls the DataImport until both UploadFinished=True and
+// Completed=True conditions are observed, or the context is cancelled.
+func WaitUploadCompleted(ctx context.Context, diName, namespace string, rtClient ctrlrtclient.Client, log *slog.Logger) error {
+	for i := 0; ; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		diObj := &v1alpha1.DataImport{}
+		if err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: diName}, diObj); err != nil {
+			return fmt.Errorf("get DataImport: %w", err)
+		}
+
+		uploadFinished, completed := false, false
+
+		for _, cond := range diObj.Status.Conditions {
+			switch cond.Type {
+			case "UploadFinished":
+				uploadFinished = cond.Status == "True"
+			case "Completed":
+				completed = cond.Status == "True"
+			}
+		}
+
+		if uploadFinished && completed {
+			return nil
+		}
+
+		if i >= maxRetryAttempts {
+			return fmt.Errorf("DataImport %s/%s did not complete (UploadFinished=%v, Completed=%v)",
+				namespace, diName, uploadFinished, completed)
+		}
+
+		if i > 0 && i%5 == 0 {
+			log.Info("Waiting for DataImport upload to complete",
+				slog.String("name", diName),
+				slog.Bool("uploadFinished", uploadFinished),
+				slog.Bool("completed", completed),
+				slog.Int("attempt", i))
+		}
+
+		time.Sleep(retryInterval * time.Second)
+	}
 }
 
 func CheckUploadProgress(ctx context.Context, httpClient *safeClient.SafeClient, targetURL string) (int64, error) {

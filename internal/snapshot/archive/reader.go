@@ -18,8 +18,10 @@ package archive
 
 import (
 	"bufio"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -136,6 +138,36 @@ func (r *DirReader) ForEachObject(fn func(ObjectRecord) error) error {
 
 func (r *DirReader) VolumeProgress() (map[string]VolumeProgressRecord, error) {
 	return readVolumeProgressFile(filepath.Join(r.dir, dirIndexes, fileVolumes))
+}
+
+// Dir returns the archive root directory.
+func (r *DirReader) Dir() string {
+	return r.dir
+}
+
+// ReadObjectBlob opens the gzip-compressed manifest blob referenced by rec,
+// decompresses it, and returns the raw JSON bytes.
+func (r *DirReader) ReadObjectBlob(rec ObjectRecord) ([]byte, error) {
+	path := filepath.Join(r.dir, rec.Blob)
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open blob %s: %w", rec.Blob, err)
+	}
+	defer f.Close()
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, fmt.Errorf("gzip reader for blob %s: %w", rec.Blob, err)
+	}
+	defer gz.Close()
+
+	data, err := io.ReadAll(gz)
+	if err != nil {
+		return nil, fmt.Errorf("read blob %s: %w", rec.Blob, err)
+	}
+
+	return data, nil
 }
 
 // readProgressFile reads a progress JSONL file and returns a map of records

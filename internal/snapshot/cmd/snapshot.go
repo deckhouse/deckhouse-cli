@@ -21,24 +21,26 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/download"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/list"
+	restoreCmd "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/restore"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/tree"
 )
 
 const snapshotLong = `Manage Deckhouse namespace snapshots.
 
-The snapshot command lets you list, inspect, and download namespace manifests
-captured by the state-snapshotter module.
+The snapshot command lets you list, inspect, download, and restore namespace
+manifests captured by the state-snapshotter module.
 
   list     - list Snapshot CRs in the cluster (all namespaces or one with -n)
   tree     - show the node tree and objects of a single Snapshot CR
-  download - download snapshot manifests and volume data to a local directory`
+  download - download snapshot manifests and volume data to a local directory
+  restore  - restore objects and volumes from a local archive`
 
 // NewCommand returns the top-level snapshot cobra command (alias: snap).
 func NewCommand() *cobra.Command {
 	snapshotCmd := &cobra.Command{
 		Use:           "snapshot",
 		Aliases:       []string{"snap"},
-		Short:         "Snapshot operations (list, tree, download)",
+		Short:         "Snapshot operations (list, tree, download, restore)",
 		Long:          snapshotLong,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -51,6 +53,7 @@ func NewCommand() *cobra.Command {
 		list.NewCommand(),
 		tree.NewCommand(),
 		download.NewCommand(),
+		restoreCmd.NewCommand(),
 	)
 
 	return snapshotCmd
