@@ -210,8 +210,9 @@ func Build(archiveDir string, opts Options) (*RestorePlan, error) {
 
 	// Pass 2: build VolumeOps first so we know which PVCs are covered by DataImport.
 	// VolumeOps are the ground truth — derived directly from nodes+volProgress.
+	// When --object is set the user wants a single object; skip volume restore entirely.
 	var volumeOps []VolumeOp
-	if opts.Mode != ModeManifestsOnly {
+	if opts.Mode != ModeManifestsOnly && opts.ObjectFilter == "" {
 		for _, node := range selectedNodes {
 			if !node.HasData {
 				continue

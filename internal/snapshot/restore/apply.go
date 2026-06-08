@@ -54,32 +54,29 @@ func (a *Applier) DryRunPhase(ctx context.Context, plan *RestorePlan) ([]Resolve
 	for _, op := range plan.Manifests {
 		data := op.Data
 
-		for {
-			err := a.applyOne(ctx, data, plan.Opts.TargetNamespace, true, false)
-			if err == nil {
-				resolved = append(resolved, ResolvedOp{Op: op, Data: data})
-				break
+		err := a.applyOne(ctx, data, plan.Opts.TargetNamespace, true, false)
+		if err != nil && (apierrors.IsConflict(err) || apierrors.IsInvalid(err)) && !plan.Opts.NoEdit {
+			a.Log.Warn("dry-run conflict — opening editor",
+				slog.String("kind", op.Kind),
+				slog.String("name", op.Name),
+				slog.String("err", err.Error()),
+			)
+
+			edited, editErr := editManifest(op, data, err)
+			if editErr != nil {
+				return nil, fmt.Errorf("editor for %s/%s: %w", op.Kind, op.Name, editErr)
 			}
 
-			if (apierrors.IsConflict(err) || apierrors.IsInvalid(err)) && !plan.Opts.NoEdit {
-				a.Log.Warn("dry-run conflict — opening editor",
-					slog.String("kind", op.Kind),
-					slog.String("name", op.Name),
-					slog.String("err", err.Error()),
-				)
+			data = edited
+			err = a.applyOne(ctx, data, plan.Opts.TargetNamespace, true, false)
+		}
 
-				edited, editErr := editManifest(op, data, err)
-				if editErr != nil {
-					return nil, fmt.Errorf("editor for %s/%s: %w", op.Kind, op.Name, editErr)
-				}
-
-				data = edited
-				continue
-			}
-
+		if err != nil {
 			return nil, fmt.Errorf("dry-run failed for %s/%s %s: %w",
 				op.APIVersion, op.Kind, op.Name, err)
 		}
+
+		resolved = append(resolved, ResolvedOp{Op: op, Data: data})
 	}
 
 	return resolved, nil
