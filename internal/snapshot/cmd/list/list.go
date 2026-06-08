@@ -22,128 +22,72 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/listing"
-	snapshotlog "github.com/deckhouse/deckhouse-cli/internal/snapshot/log"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/inventory"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
-	cmdLong = `List the snapshot node tree (and optionally the manifest objects) from a
-live cluster Snapshot CR or a local archive directory produced by "d8 snapshot download".
+	cmdLong = `List Snapshot CRs in the cluster.
 
-Cluster mode (default): requires a reachable cluster and a Ready Snapshot CR.
-Archive mode (--archive): reads from a local directory, no cluster connection needed.
+By default all namespaces are shown. Use -n/--namespace to restrict to one namespace.
 
-Output format defaults to human-readable text; use -o json or -o yaml for structured output.`
+Output format defaults to human-readable table; use -o json or -o yaml for structured output.`
 
-	cmdExample = `  # List snapshot node tree from the cluster
-  d8 snapshot list snap-test my-snap
+	cmdExample = `  # List all snapshots across all namespaces
+  d8 snapshot list
 
-  # List with per-node object counts and manifest details
-  d8 snapshot list snap-test my-snap --objects
+  # List snapshots in a specific namespace
+  d8 snapshot list -n my-ns
 
-  # List only a subtree
-  d8 snapshot list snap-test my-snap --node Snapshot--child-snap
-
-  # List from a local archive directory
-  d8 snapshot list --archive ./snap-test-my-snap
-
-  # List archive objects in JSON
-  d8 snapshot list --archive ./snap-test-my-snap --objects -o json`
+  # Output as JSON
+  d8 snapshot list -n my-ns -o json`
 )
 
 // NewCommand returns the cobra command for `d8 snapshot list`.
 func NewCommand() *cobra.Command {
-
 	cmd := &cobra.Command{
-		Use:     "list [<namespace> <snapshot>]",
+		Use:     "list",
 		Aliases: []string{"ls"},
-		Short:   "List snapshot nodes and objects",
+		Short:   "List Snapshot CRs in the cluster",
 		Long:    cmdLong,
 		Example: cmdExample,
-		Args:    args,
+		Args:    cobra.NoArgs,
 		RunE:    run,
 	}
 
-	cmd.Flags().String("archive", "", "path to a local archive directory (offline; no cluster required)")
-	cmd.Flags().String("node", "", "show only the subtree rooted at this node ID")
-	cmd.Flags().Bool("objects", false, "include per-node manifest object listing")
-	cmd.Flags().StringP("output", "o", listing.FormatHuman, "output format: human, json, yaml")
+	cmd.Flags().StringP("namespace", "n", "", "namespace to list snapshots in (default: all namespaces)")
+	cmd.Flags().StringP("output", "o", inventory.FormatHuman, "output format: human, json, yaml")
 
 	return cmd
 }
 
-func args(cmd *cobra.Command, args []string) error {
-	if cmd.Flags().Changed("archive") {
-		return cobra.NoArgs(cmd, args)
-	}
-
-	return cobra.ExactArgs(2)(cmd, args)
-}
-
-func run(cmd *cobra.Command, args []string) error {
-	log := snapshotlog.New()
-	opts, format := newOptions(cmd, args)
+func run(cmd *cobra.Command, _ []string) error {
+	namespace, _ := cmd.Flags().GetString("namespace")
+	format, _ := cmd.Flags().GetString("output")
 
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	var tree *listing.Tree
+	safeClient.SupportNoAuth = false
 
-	// list from archive
-	if opts.ArchiveDir != "" {
-		t, err := listing.BuildFromArchive(opts, log)
-		if err != nil {
-			return fmt.Errorf("read archive: %w", err)
-		}
-
-		tree = t
+	sc, err := safeClient.NewSafeClient(cmd.PersistentFlags())
+	if err != nil {
+		return fmt.Errorf("build kube client: %w", err)
 	}
 
-	// list from cluster
-	if tree == nil {
-		opts.Namespace, opts.SnapshotName = args[0], args[1]
-
-		safeClient.SupportNoAuth = false
-
-		sc, err := safeClient.NewSafeClient(cmd.PersistentFlags())
-		if err != nil {
-			return fmt.Errorf("build kube client: %w", err)
-		}
-
-		rtClient, err := sc.NewRTClient()
-		if err != nil {
-			return fmt.Errorf("build runtime client: %w", err)
-		}
-
-		t, err := listing.BuildFromCluster(ctx, sc, rtClient, opts, log)
-		if err != nil {
-			return err
-		}
-
-		tree = t
+	rtClient, err := sc.NewRTClient()
+	if err != nil {
+		return fmt.Errorf("build runtime client: %w", err)
 	}
 
-	return listing.Render(cmd.OutOrStdout(), tree, format)
-}
-
-func newOptions(cmd *cobra.Command, args []string) (listing.Options, string) {
-	archiveDir, _ := cmd.Flags().GetString("archive")
-	nodeFilter, _ := cmd.Flags().GetString("node")
-	withObjects, _ := cmd.Flags().GetBool("objects")
-	format, _ := cmd.Flags().GetString("output")
-
-	opts := listing.Options{
-		ArchiveDir:  archiveDir,
-		NodeFilter:  nodeFilter,
-		WithObjects: withObjects,
+	infos, err := inventory.List(ctx, rtClient, namespace)
+	if err != nil {
+		return err
 	}
 
-	if archiveDir == "" {
-		opts.Namespace, opts.SnapshotName = args[0], args[1]
-	}
+	showNamespace := namespace == ""
 
-	return opts, format
+	return inventory.Render(cmd.OutOrStdout(), infos, format, showNamespace)
 }
