@@ -30,7 +30,7 @@ const snapshotLong = `Manage Deckhouse namespace snapshots.
 The snapshot command lets you list, inspect, download, and restore namespace
 manifests captured by the state-snapshotter module.
 
-  list     - list Snapshot CRs in the cluster (all namespaces or one with -n)
+  list     - list Snapshot CRs (default: current kubeconfig namespace; -A for all; -n for one)
   tree     - show the node tree and objects of a single Snapshot CR
   download - download snapshot manifests and volume data to a local directory
   restore  - restore objects and volumes from a local archive`

@@ -65,42 +65,46 @@ Volume data is downloaded by creating a temporary shadow VolumeSnapshotContent
 DataExport (kind=VolumeSnapshot) against it, streaming the data, and cleaning
 up all temporary objects afterwards.`
 
-	cmdExample = `  # Download manifests and volumes from a snapshot
-  d8 snapshot download my-ns demo-snapshot
+	cmdExample = `  # Download manifests and volumes from a snapshot in the current kubeconfig namespace
+  d8 snapshot download demo-snapshot
+
+  # Download from a snapshot in a specific namespace
+  d8 snapshot download demo-snapshot -n my-ns
 
   # Download to a specific directory
-  d8 snapshot download my-ns demo-snapshot -o /tmp/snap-archive
+  d8 snapshot download demo-snapshot -n my-ns -o /tmp/snap-archive
 
   # Resume a partial download
-  d8 snapshot download my-ns demo-snapshot -o /tmp/snap-archive
+  d8 snapshot download demo-snapshot -n my-ns -o /tmp/snap-archive
 
   # Force a clean re-download, ignoring any existing archive
-  d8 snapshot download my-ns demo-snapshot -o /tmp/snap-archive --fresh
+  d8 snapshot download demo-snapshot -n my-ns -o /tmp/snap-archive --fresh
 
   # Download only manifests (skip volume data)
-  d8 snapshot download my-ns demo-snapshot --volumes=false
+  d8 snapshot download demo-snapshot -n my-ns --volumes=false
 
   # Download only volume data (skip manifests)
-  d8 snapshot download my-ns demo-snapshot --manifests=false
+  d8 snapshot download demo-snapshot -n my-ns --manifests=false
 
   # Download only a subtree rooted at a specific node
-  d8 snapshot download my-ns demo-snapshot --node VirtualDiskSnapshot--root-disk
+  d8 snapshot download demo-snapshot -n my-ns --node VirtualDiskSnapshot--root-disk
 
   # Download a single object (client-side filter)
-  d8 snapshot download my-ns demo-snapshot --object apps/v1/Deployment/my-deploy`
+  d8 snapshot download demo-snapshot -n my-ns --object apps/v1/Deployment/my-deploy`
 )
 
 // NewCommand returns the cobra command for `d8 snapshot download`.
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "download <namespace> <snapshot>",
+		Use:     "download <snapshot>",
 		Short:   "Download snapshot manifests and volume data to a local directory",
 		Long:    cmdLong,
 		Example: cmdExample,
-		Args:    cobra.ExactArgs(2),
+		Args:    cobra.ExactArgs(1),
 		RunE:    run,
 	}
 
+	cmd.Flags().StringP("namespace", "n", "", "namespace of the snapshot (default: current kubeconfig namespace)")
 	cmd.Flags().StringP("output", "o", "", "destination directory (default: ./<namespace>-<snapshot>)")
 	cmd.Flags().String("node", "", "download only the subtree rooted at this node ID (e.g. VirtualDiskSnapshot--root-disk)")
 	cmd.Flags().String("object", "", "download a single object, format: <apiVersion>/<Kind>/<name> (e.g. apps/v1/Deployment/my-deploy)")
@@ -140,7 +144,12 @@ func run(cmd *cobra.Command, args []string) error {
 }
 
 func newOptions(cmd *cobra.Command, args []string) pipeline.Options {
-	namespace, snapshotName := args[0], args[1]
+	snapshotName := args[0]
+
+	namespace, _ := cmd.Flags().GetString("namespace")
+	if namespace == "" {
+		namespace = safeClient.DefaultNamespace()
+	}
 
 	outputDir, _ := cmd.Flags().GetString("output")
 	nodeID, _ := cmd.Flags().GetString("node")

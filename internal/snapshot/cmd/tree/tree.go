@@ -28,34 +28,40 @@ import (
 )
 
 const (
-	cmdLong = `Show the snapshot node tree (and optionally the manifest objects) from a
-live cluster Snapshot CR or a local archive directory produced by "d8 snapshot download".
+	cmdLong = `Show the snapshot node tree and manifest objects from a live cluster Snapshot CR
+or a local archive directory produced by "d8 snapshot download".
+
+By default, per-node manifest objects are included in the output.
+Use --no-objects to show only the node tree without object details.
 
 Cluster mode (default): requires a reachable cluster and a Ready Snapshot CR.
 Archive mode (--archive): reads from a local directory, no cluster connection needed.
 
 Output format defaults to human-readable text; use -o json or -o yaml for structured output.`
 
-	cmdExample = `  # Show snapshot node tree from the cluster
-  d8 snapshot tree snap-test my-snap
+	cmdExample = `  # Show snapshot node tree with objects from the cluster (current kubeconfig namespace)
+  d8 snapshot tree my-snap
 
-  # Show with per-node object counts and manifest details
-  d8 snapshot tree snap-test my-snap --objects
+  # Show snapshot node tree with objects from a specific namespace
+  d8 snapshot tree my-snap -n snap-test
+
+  # Show only the node tree (no object details)
+  d8 snapshot tree my-snap -n snap-test --no-objects
 
   # Show only a subtree
-  d8 snapshot tree snap-test my-snap --node Snapshot--child-snap
+  d8 snapshot tree my-snap -n snap-test --node Snapshot--child-snap
 
   # Show from a local archive directory
   d8 snapshot tree --archive ./snap-test-my-snap
 
-  # Show archive objects in JSON
-  d8 snapshot tree --archive ./snap-test-my-snap --objects -o json`
+  # Show archive tree without objects in JSON
+  d8 snapshot tree --archive ./snap-test-my-snap --no-objects -o json`
 )
 
 // NewCommand returns the cobra command for `d8 snapshot tree`.
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "tree <namespace> <snapshot>",
+		Use:     "tree <snapshot>",
 		Short:   "Show snapshot node tree and objects",
 		Long:    cmdLong,
 		Example: cmdExample,
@@ -63,9 +69,10 @@ func NewCommand() *cobra.Command {
 		RunE:    run,
 	}
 
+	cmd.Flags().StringP("namespace", "n", "", "namespace of the snapshot (default: current kubeconfig namespace)")
 	cmd.Flags().String("archive", "", "path to a local archive directory (offline; no cluster required)")
 	cmd.Flags().String("node", "", "show only the subtree rooted at this node ID")
-	cmd.Flags().Bool("objects", false, "include per-node manifest object listing")
+	cmd.Flags().Bool("no-objects", false, "show only the node tree, omit per-node manifest objects")
 	cmd.Flags().StringP("output", "o", listing.FormatHuman, "output format: human, json, yaml")
 
 	return cmd
@@ -76,12 +83,12 @@ func args(cmd *cobra.Command, args []string) error {
 		return cobra.NoArgs(cmd, args)
 	}
 
-	return cobra.ExactArgs(2)(cmd, args)
+	return cobra.ExactArgs(1)(cmd, args)
 }
 
-func run(cmd *cobra.Command, args []string) error {
+func run(cmd *cobra.Command, positional []string) error {
 	log := snapshotlog.New()
-	opts, format := newOptions(cmd, args)
+	opts, format := newOptions(cmd, positional)
 
 	ctx := cmd.Context()
 	if ctx == nil {
@@ -102,8 +109,6 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// tree from cluster
 	if tree == nil {
-		opts.Namespace, opts.SnapshotName = args[0], args[1]
-
 		safeClient.SupportNoAuth = false
 
 		sc, err := safeClient.NewSafeClient(cmd.PersistentFlags())
@@ -127,20 +132,27 @@ func run(cmd *cobra.Command, args []string) error {
 	return listing.Render(cmd.OutOrStdout(), tree, format)
 }
 
-func newOptions(cmd *cobra.Command, args []string) (listing.Options, string) {
+func newOptions(cmd *cobra.Command, positional []string) (listing.Options, string) {
 	archiveDir, _ := cmd.Flags().GetString("archive")
 	nodeFilter, _ := cmd.Flags().GetString("node")
-	withObjects, _ := cmd.Flags().GetBool("objects")
+	noObjects, _ := cmd.Flags().GetBool("no-objects")
 	format, _ := cmd.Flags().GetString("output")
 
 	opts := listing.Options{
 		ArchiveDir:  archiveDir,
 		NodeFilter:  nodeFilter,
-		WithObjects: withObjects,
+		WithObjects: !noObjects,
 	}
 
 	if archiveDir == "" {
-		opts.Namespace, opts.SnapshotName = args[0], args[1]
+		opts.SnapshotName = positional[0]
+
+		namespace, _ := cmd.Flags().GetString("namespace")
+		if namespace == "" {
+			namespace = safeClient.DefaultNamespace()
+		}
+
+		opts.Namespace = namespace
 	}
 
 	return opts, format

@@ -29,12 +29,17 @@ import (
 const (
 	cmdLong = `List Snapshot CRs in the cluster.
 
-By default all namespaces are shown. Use -n/--namespace to restrict to one namespace.
+By default, snapshots from the current kubeconfig namespace are shown.
+Use -A/--all-namespaces to list across all namespaces, or -n/--namespace
+to target a specific namespace.
 
 Output format defaults to human-readable table; use -o json or -o yaml for structured output.`
 
-	cmdExample = `  # List all snapshots across all namespaces
+	cmdExample = `  # List snapshots in the current kubeconfig namespace
   d8 snapshot list
+
+  # List snapshots across all namespaces
+  d8 snapshot list -A
 
   # List snapshots in a specific namespace
   d8 snapshot list -n my-ns
@@ -55,7 +60,8 @@ func NewCommand() *cobra.Command {
 		RunE:    run,
 	}
 
-	cmd.Flags().StringP("namespace", "n", "", "namespace to list snapshots in (default: all namespaces)")
+	cmd.Flags().StringP("namespace", "n", "", "namespace to list snapshots in (default: current kubeconfig namespace)")
+	cmd.Flags().BoolP("all-namespaces", "A", false, "list snapshots across all namespaces")
 	cmd.Flags().StringP("output", "o", inventory.FormatHuman, "output format: human, json, yaml")
 
 	return cmd
@@ -63,7 +69,25 @@ func NewCommand() *cobra.Command {
 
 func run(cmd *cobra.Command, _ []string) error {
 	namespace, _ := cmd.Flags().GetString("namespace")
+	allNamespaces, _ := cmd.Flags().GetBool("all-namespaces")
 	format, _ := cmd.Flags().GetString("output")
+
+	if allNamespaces && namespace != "" {
+		return fmt.Errorf("--all-namespaces and --namespace are mutually exclusive")
+	}
+
+	var showNamespace bool
+
+	switch {
+	case allNamespaces:
+		namespace = ""
+		showNamespace = true
+	case namespace != "":
+		showNamespace = false
+	default:
+		namespace = safeClient.DefaultNamespace()
+		showNamespace = false
+	}
 
 	ctx := cmd.Context()
 	if ctx == nil {
@@ -86,8 +110,6 @@ func run(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-
-	showNamespace := namespace == ""
 
 	return inventory.Render(cmd.OutOrStdout(), infos, format, showNamespace)
 }

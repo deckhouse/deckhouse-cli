@@ -46,10 +46,10 @@ Restore flow (default):
      from the archive, send POST /api/v1/finished, wait for Completed.
 
 Namespace handling:
-  All namespaced objects are applied to <namespace> regardless of what
-  namespace they had in the archive. Cluster-scoped objects (Namespace, CRD …)
-  are applied as-is. The original metadata.namespace in manifests is NOT
-  rewritten on disk.
+  All namespaced objects are applied to the target namespace (specified via -n)
+  regardless of what namespace they had in the archive. Cluster-scoped objects
+  (Namespace, CRD …) are applied as-is. The original metadata.namespace in
+  manifests is NOT rewritten on disk.
 
 PVC handling (Mode=All):
   A PVC that has volume data in the archive is NOT applied as a plain manifest.
@@ -57,45 +57,49 @@ PVC handling (Mode=All):
   via the volume populator. This is the local equivalent of what the server-side
   manifests-with-data-restoration endpoint does.`
 
-	cmdExample = `  # Restore everything (manifests + volumes) from an archive into namespace "demo"
-  d8 snapshot restore demo --archive ./ns-snap
+	cmdExample = `  # Restore everything (manifests + volumes) from an archive into the current kubeconfig namespace
+  d8 snapshot restore --archive ./ns-snap
+
+  # Restore into a specific namespace
+  d8 snapshot restore --archive ./ns-snap -n demo
 
   # Dry-run only — show what would be applied, without touching the cluster
-  d8 snapshot restore demo --archive ./ns-snap --dry-run
+  d8 snapshot restore --archive ./ns-snap -n demo --dry-run
 
   # Restore only Kubernetes manifests (skip volume data upload)
-  d8 snapshot restore demo --archive ./ns-snap --manifests-only
+  d8 snapshot restore --archive ./ns-snap -n demo --manifests-only
 
   # Restore only volume data (skip manifest apply)
-  d8 snapshot restore demo --archive ./ns-snap --data-only
+  d8 snapshot restore --archive ./ns-snap -n demo --data-only
 
   # Restore only the subtree rooted at a specific node
-  d8 snapshot restore demo --archive ./ns-snap --node VirtualDiskSnapshot--root
+  d8 snapshot restore --archive ./ns-snap -n demo --node VirtualDiskSnapshot--root
 
   # Restore a single object
-  d8 snapshot restore demo --archive ./ns-snap --object apps/v1/Deployment/my-app
+  d8 snapshot restore --archive ./ns-snap -n demo --object apps/v1/Deployment/my-app
 
   # Skip conflict editor (CI mode) — any conflict fails immediately
-  d8 snapshot restore demo --archive ./ns-snap --no-edit
+  d8 snapshot restore --archive ./ns-snap -n demo --no-edit
 
   # Force-resolve all SSA field-ownership conflicts
-  d8 snapshot restore demo --archive ./ns-snap --force-conflicts
+  d8 snapshot restore --archive ./ns-snap -n demo --force-conflicts
 
   # Allow restoring from an archive that has no COMPLETE sentinel
-  d8 snapshot restore demo --archive ./ns-snap --allow-incomplete`
+  d8 snapshot restore --archive ./ns-snap -n demo --allow-incomplete`
 )
 
 // NewCommand returns the cobra command for "d8 snapshot restore".
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "restore <namespace>",
+		Use:     "restore",
 		Short:   "Restore objects and volumes from a local snapshot archive",
 		Long:    cmdLong,
 		Example: cmdExample,
-		Args:    cobra.ExactArgs(1),
+		Args:    cobra.NoArgs,
 		RunE:    run,
 	}
 
+	cmd.Flags().StringP("namespace", "n", "", "target namespace to restore into (default: current kubeconfig namespace)")
 	cmd.Flags().String("archive", "", "path to a local archive directory created by `d8 snapshot download` (required)")
 	_ = cmd.MarkFlagRequired("archive")
 
@@ -113,8 +117,11 @@ func NewCommand() *cobra.Command {
 	return cmd
 }
 
-func run(cmd *cobra.Command, args []string) error {
-	targetNS := args[0]
+func run(cmd *cobra.Command, _ []string) error {
+	targetNS, _ := cmd.Flags().GetString("namespace")
+	if targetNS == "" {
+		targetNS = safeClient.DefaultNamespace()
+	}
 
 	archiveDir, _ := cmd.Flags().GetString("archive")
 	manifestsOnly, _ := cmd.Flags().GetBool("manifests-only")
