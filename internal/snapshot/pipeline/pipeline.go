@@ -662,7 +662,7 @@ func buildIndex(mode archive.SelectionMode, isPartial, includeVolumes bool, volu
 			Manifests:            true,
 			Volumes:              includeVolumes,
 			RestoreFromArchive:   true,
-			UploadableAsSnapshot: false,
+			UploadableAsSnapshot: true,
 			PartialSelection:     isPartial || mode != archive.SelectionFull,
 			Resumable:            true,
 		},

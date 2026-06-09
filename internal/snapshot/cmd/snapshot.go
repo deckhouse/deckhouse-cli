@@ -23,17 +23,19 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/list"
 	restoreCmd "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/restore"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/tree"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/upload"
 )
 
 const snapshotLong = `Manage Deckhouse namespace snapshots.
 
-The snapshot command lets you list, inspect, download, and restore namespace
+The snapshot command lets you list, inspect, download, restore, and upload namespace
 manifests captured by the state-snapshotter module.
 
   list     - list Snapshot CRs (default: current kubeconfig namespace; -A for all; -n for one)
   tree     - show the node tree and objects of a single Snapshot CR
   download - download snapshot manifests and volume data to a local directory
-  restore  - restore objects and volumes from a local archive`
+  restore  - restore objects and volumes from a local archive
+  upload   - upload a local archive as a durable Ready Snapshot on the cluster`
 
 // NewCommand returns the top-level snapshot cobra command (alias: snap).
 func NewCommand() *cobra.Command {
@@ -54,6 +56,7 @@ func NewCommand() *cobra.Command {
 		tree.NewCommand(),
 		download.NewCommand(),
 		restoreCmd.NewCommand(),
+		upload.NewCommand(),
 	)
 
 	return snapshotCmd
