@@ -14,34 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package plugins
+package pluginscmd
 
 import (
-	"context"
 	"fmt"
-	"log/slog"
-	"os"
 
 	"github.com/spf13/cobra"
 
-	"github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/layout"
+	"github.com/deckhouse/deckhouse-cli/internal/plugins"
 )
 
-// pluginDisplayInfo holds all information needed to display a plugin
-type pluginDisplayInfo struct {
-	Name        string
-	Version     string
-	Description string
-}
-
-// pluginsListData holds all data for the list command
-type pluginsListData struct {
-	Installed     []pluginDisplayInfo
-	Available     []pluginDisplayInfo
-	RegistryError error
-}
-
-func (pc *PluginsCommand) pluginsListCommand() *cobra.Command {
+func newListCommand(manager *plugins.Manager) *cobra.Command {
 	var (
 		showInstalledOnly bool
 		showAvailableOnly bool
@@ -50,15 +33,15 @@ func (pc *PluginsCommand) pluginsListCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List Deckhouse CLI plugins",
-		Long:  "Display detailed information about installed plugins and available plugins from the registry",
+		Long: "Show installed plugins.\n\n" +
+			"The registry-packages-proxy serves no catalog, so available plugins cannot be\n" +
+			"listed - check a plugin by name with 'd8 plugins versions <name>' instead.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx := cmd.Context()
-
 			// Prepare all data before printing
-			data := pc.preparePluginsListData(ctx, showInstalledOnly, showAvailableOnly)
+			data := manager.List(cmd.Context(), showInstalledOnly, showAvailableOnly)
 
 			// Print all prepared data
-			pc.printPluginsList(data, showInstalledOnly, showAvailableOnly)
+			printPluginsList(data, showInstalledOnly, showAvailableOnly)
 
 			return nil
 		},
@@ -70,150 +53,21 @@ func (pc *PluginsCommand) pluginsListCommand() *cobra.Command {
 	return cmd
 }
 
-// preparePluginsListData fetches and prepares all data needed for display
-func (pc *PluginsCommand) preparePluginsListData(ctx context.Context, showInstalledOnly, showAvailableOnly bool) *pluginsListData {
-	data := &pluginsListData{
-		Installed: []pluginDisplayInfo{},
-		Available: []pluginDisplayInfo{},
-	}
-
-	// Fetch installed plugins if needed
-	if !showAvailableOnly {
-		installed, err := pc.fetchInstalledPlugins()
-		if err != nil {
-			pc.logger.Warn("Failed to fetch installed plugins", slog.String("error", err.Error()))
-		} else {
-			data.Installed = installed
-		}
-	}
-
-	// Fetch available plugins from registry if needed
-	if !showInstalledOnly {
-		available, err := pc.fetchAvailablePlugins(ctx)
-		if err != nil {
-			pc.logger.Warn("Failed to fetch available plugins", slog.String("error", err.Error()))
-			data.RegistryError = err
-		} else {
-			data.Available = available
-		}
-	}
-
-	return data
-}
-
-// fetchInstalledPlugins retrieves installed plugins from filesystem
-func (pc *PluginsCommand) fetchInstalledPlugins() ([]pluginDisplayInfo, error) {
-	plugins, err := os.ReadDir(layout.PluginsRoot(pc.pluginDirectory))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read plugins directory: %w", err)
-	}
-
-	res := make([]pluginDisplayInfo, 0, len(plugins))
-
-	for _, plugin := range plugins {
-		version, err := pc.getInstalledPluginVersion(plugin.Name())
-		if err != nil {
-			res = append(res, pluginDisplayInfo{
-				Name:        plugin.Name(),
-				Version:     "ERROR",
-				Description: err.Error(),
-			})
-
-			continue
-		}
-
-		contract, err := pc.getInstalledPluginContract(plugin.Name())
-		if err != nil {
-			res = append(res, pluginDisplayInfo{
-				Name:        plugin.Name(),
-				Version:     version.Original(),
-				Description: "failed to get description",
-			})
-
-			continue
-		}
-
-		displayInfo := pluginDisplayInfo{
-			Name:        plugin.Name(),
-			Version:     version.Original(),
-			Description: contract.Description,
-		}
-
-		res = append(res, displayInfo)
-	}
-
-	return res, nil
-}
-
-// fetchAvailablePlugins retrieves and prepares available plugins from registry
-func (pc *PluginsCommand) fetchAvailablePlugins(ctx context.Context) ([]pluginDisplayInfo, error) {
-	pluginNames, err := pc.service.ListPlugins(ctx)
-	if err != nil {
-		pc.logger.Warn("Failed to list plugins", slog.String("error", err.Error()))
-		return nil, fmt.Errorf("failed to list plugins: %w", err)
-	}
-
-	if len(pluginNames) == 0 {
-		return []pluginDisplayInfo{}, nil
-	}
-
-	plugins := make([]pluginDisplayInfo, 0, len(pluginNames))
-
-	// Fetch contract for each plugin to get version and description
-	for _, pluginName := range pluginNames {
-		plugin := pluginDisplayInfo{
-			Name: pluginName,
-		}
-
-		// fetch versions to get latest version
-		latestVersion, err := pc.fetchLatestVersion(ctx, pluginName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch latest version: %w", err)
-		}
-
-		// Get the latest version contract
-		contract, err := pc.service.GetPluginContract(ctx, pluginName, latestVersion.Original())
-		if err != nil {
-			// Log the error for debugging
-			pc.logger.Warn("Failed to get plugin contract",
-				slog.String("plugin", pluginName),
-				slog.String("tag", latestVersion.Original()),
-				slog.String("error", err.Error()))
-
-			// Show ERROR in version column and error description in description column
-			plugin.Version = "ERROR"
-			plugin.Description = "failed to get plugin contract"
-		} else {
-			plugin.Version = latestVersion.Original()
-			plugin.Description = contract.Description
-
-			// Truncate description if too long
-			if len(plugin.Description) > 40 {
-				plugin.Description = plugin.Description[:37] + "..."
-			}
-		}
-
-		plugins = append(plugins, plugin)
-	}
-
-	return plugins, nil
-}
-
 // printPluginsList prints all prepared data
-func (pc *PluginsCommand) printPluginsList(data *pluginsListData, showInstalledOnly, showAvailableOnly bool) {
+func printPluginsList(data *plugins.ListResult, showInstalledOnly, showAvailableOnly bool) {
 	// Print installed plugins section
 	if !showAvailableOnly {
-		pc.printInstalledSection(data)
+		printInstalledSection(data)
 	}
 
 	// Print available plugins section
 	if !showInstalledOnly {
-		pc.printAvailableSection(data)
+		printAvailableSection(data)
 	}
 }
 
 // printInstalledSection prints the installed plugins section
-func (pc *PluginsCommand) printInstalledSection(data *pluginsListData) {
+func printInstalledSection(data *plugins.ListResult) {
 	fmt.Println("Installed Plugins:")
 	fmt.Println("-------------------------------------------")
 	fmt.Printf("%-20s %-15s %-40s\n", "NAME", "VERSION", "DESCRIPTION")
@@ -233,7 +87,7 @@ func (pc *PluginsCommand) printInstalledSection(data *pluginsListData) {
 }
 
 // printAvailableSection prints the available plugins section
-func (pc *PluginsCommand) printAvailableSection(data *pluginsListData) {
+func printAvailableSection(data *plugins.ListResult) {
 	fmt.Println("Available Plugins in Registry:")
 	fmt.Println("-------------------------------------------")
 

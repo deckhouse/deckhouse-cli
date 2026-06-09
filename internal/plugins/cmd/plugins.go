@@ -14,100 +14,69 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package plugins
+// Package pluginscmd implements the `d8 plugins` command tree and the
+// per-plugin wrapper command on top of the internal/plugins machinery.
+package pluginscmd
 
 import (
-	"errors"
-	"fmt"
 	"log/slog"
-	"os"
 
 	"github.com/spf13/cobra"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
-	client "github.com/deckhouse/deckhouse/pkg/registry"
 
-	"github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/flags"
-	"github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/layout"
-	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
+	"github.com/deckhouse/deckhouse-cli/internal/plugins"
+	"github.com/deckhouse/deckhouse-cli/internal/plugins/autoupdate"
+	"github.com/deckhouse/deckhouse-cli/internal/plugins/flags"
+	rppflags "github.com/deckhouse/deckhouse-cli/internal/rpp/flags"
 )
 
-// PluginsCommand holds shared state for every `d8 plugins ...` subcommand
-// and is also reused by the per-plugin wrapper command (see plugin.go).
-type PluginsCommand struct {
-	service              *service.PluginService
-	pluginRegistryClient client.Client
-	pluginDirectory      string
-
-	logger *dkplog.Logger
-}
-
-func NewPluginsCommand(logger *dkplog.Logger) *PluginsCommand {
-	return &PluginsCommand{
-		pluginDirectory: flags.DeckhousePluginsDir,
-		logger:          logger,
-	}
-}
-
-// ensureInstallRoot creates <pluginDirectory>/plugins; on permission denied
-// falls back to ~/.deckhouse-cli, updates pc.pluginDirectory, and retries.
-func (pc *PluginsCommand) ensureInstallRoot() error {
-	err := os.MkdirAll(layout.PluginsRoot(pc.pluginDirectory), 0755)
-	if !errors.Is(err, os.ErrPermission) {
-		return err
-	}
-
-	pc.logger.Debug("use homedir instead of default d8 plugins path in '/opt/deckhouse/lib/deckhouse-cli'",
-		slog.String("was", pc.pluginDirectory), dkplog.Err(err))
-
-	fallback, ferr := layout.HomeFallbackPath()
-	if ferr != nil {
-		return fmt.Errorf("home fallback: %w", ferr)
-	}
-
-	pc.pluginDirectory = fallback
-
-	return os.MkdirAll(layout.PluginsRoot(pc.pluginDirectory), 0755)
-}
-
-// cachedDescription returns the description from the on-disk plugin contract
-// cache, or "" if the cache is missing or unreadable.
-func (pc *PluginsCommand) cachedDescription(pluginName string) string {
-	contract, err := service.GetPluginContractFromFile(layout.ContractFile(pc.pluginDirectory, pluginName))
-	if err != nil {
-		pc.logger.Debug("failed to get plugin contract from cache", slog.String("error", err.Error()))
-		return ""
-	}
-
-	if contract == nil {
-		return ""
-	}
-
-	return contract.Description
-}
-
+// NewCommand returns the `d8 plugins` command tree for managing plugins.
 func NewCommand(logger *dkplog.Logger) *cobra.Command {
-	pc := NewPluginsCommand(logger)
+	manager := plugins.NewManager(logger)
 
 	cmd := &cobra.Command{
-		Use:    "plugins",
-		Short:  "Manage Deckhouse CLI plugins",
+		Use:   "plugins",
+		Short: "Manage Deckhouse CLI plugins",
+		Long: "Manage Deckhouse CLI plugins.\n\n" +
+			"Plugins are pulled from the in-cluster registry-packages-proxy, authenticated by the\n" +
+			"current kubeconfig identity.\n\n" +
+			"Installed plugins are updated automatically in the background (within their current major, to\n" +
+			"the latest cluster-compatible version, periodically). Update on demand with\n" +
+			"'d8 plugins update <name>' or 'd8 plugins update all'.\n\n" +
+			"Environment variables:\n" +
+			"  " + flags.EnvSkipClusterChecks + "=1  skip cluster-side plugin requirement checks\n" +
+			"  " + autoupdate.EnvDisableAutoUpdate + "=1   disable background auto-update of installed plugins\n" +
+			"  " + flags.EnvPluginsDir + "                plugins directory (same as --plugins-dir)\n" +
+			"  " + rppflags.EnvEndpoint + "                   registry-packages-proxy base URL\n" +
+			"  " + rppflags.EnvCAFile + "                    PEM CA bundle for proxy TLS verification\n" +
+			"  KUBECONFIG                        path to the kubeconfig file",
 		Hidden: true,
-		PersistentPreRun: func(_ *cobra.Command, _ []string) {
-			// init plugin services for subcommands after flags are parsed
-			pc.InitPluginServices()
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			// The plugins directory was captured at registration time, BEFORE flag
+			// parsing - re-read it here so --plugins-dir is honored (the env
+			// path DECKHOUSE_CLI_PATH is applied earlier, at registration).
+			manager.SetDirectory(flags.DeckhousePluginsDir)
 
-			if err := pc.ensureInstallRoot(); err != nil {
-				pc.logger.Warn("failed to ensure plugin root directory", slog.String("error", err.Error()))
+			// init plugin services for subcommands after flags are parsed
+			if err := manager.InitPluginServices(cmd.Context()); err != nil {
+				return err
 			}
+
+			if err := manager.EnsureInstallRoot(); err != nil {
+				logger.Warn("failed to ensure plugin root directory", slog.String("error", err.Error()))
+			}
+
+			return nil
 		},
 	}
 
-	cmd.AddCommand(pc.pluginsListCommand())
-	cmd.AddCommand(pc.pluginsContractCommand())
-	cmd.AddCommand(pc.pluginsInstallCommand())
-	cmd.AddCommand(pc.pluginsUpdateCommand())
-	cmd.AddCommand(pc.pluginsRemoveCommand())
+	cmd.AddCommand(newListCommand(manager))
+	cmd.AddCommand(newVersionsCommand(manager))
+	cmd.AddCommand(newContractCommand(manager, logger))
+	cmd.AddCommand(newInstallCommand(manager))
+	cmd.AddCommand(newUpdateCommand(manager))
+	cmd.AddCommand(newRemoveCommand(manager))
 
 	flags.AddFlags(cmd.PersistentFlags())
 
