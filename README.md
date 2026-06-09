@@ -200,6 +200,11 @@ For any specific platform:
 `task build:dist:darwin:arm64`
 `task build:dist:windows:amd64`
 
+### Dependency updates
+
+Dependencies are updated automatically via [Renovate](https://docs.renovatebot.com/).
+See the auto-created `Dependency Dashboard` issue to track or trigger updates manually.
+
 ---
 
 ## 🔗 Links
