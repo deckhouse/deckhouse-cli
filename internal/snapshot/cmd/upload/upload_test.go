@@ -304,7 +304,7 @@ func TestBuildImportNodes(t *testing.T) {
 		},
 	}
 
-	result := buildImportNodes(nodes)
+	result := buildImportNodes(nodes, "")
 	if len(result) != 2 {
 		t.Fatalf("expected 2 import nodes, got %d", len(result))
 	}
@@ -333,16 +333,52 @@ func TestBuildImportNodes(t *testing.T) {
 	}
 }
 
+func TestBuildImportNodes_RootNameOverride(t *testing.T) {
+	nodes := []archive.NodeRecord{
+		{
+			ID:         "Snapshot--old-name",
+			APIVersion: "storage.deckhouse.io/v1alpha1",
+			Kind:       "Snapshot",
+			Name:       "old-name",
+			ParentID:   "",
+			Children:   []string{"child1"},
+		},
+		{
+			ID:         "child1",
+			APIVersion: "demo.deckhouse.io/v1alpha1",
+			Kind:       "DemoVirtualDiskSnapshot",
+			Name:       "disk-snap",
+			ParentID:   "Snapshot--old-name",
+		},
+	}
+
+	result := buildImportNodes(nodes, "new-name")
+	if len(result) != 2 {
+		t.Fatalf("expected 2 nodes, got %d", len(result))
+	}
+	if result[0]["name"] != "new-name" {
+		t.Errorf("root name = %v, want new-name", result[0]["name"])
+	}
+	if result[0]["id"] != "Snapshot--old-name" {
+		t.Errorf("root id should be unchanged: %v", result[0]["id"])
+	}
+	// Child name must not be changed.
+	if result[1]["name"] != "disk-snap" {
+		t.Errorf("child name = %v, want disk-snap", result[1]["name"])
+	}
+}
+
 // ── buildImportVolumes ────────────────────────────────────────────────────────
 
 func TestBuildImportVolumes(t *testing.T) {
 	vols := []restore.VolumeOp{
 		{NodeID: "node1", PVCName: "my-pvc", VolumeMode: "Block", VSCName: "vsc1"},
-		{NodeID: "node2", PVCName: "", VolumeMode: "Filesystem", VSCName: "vsc2"},
+		{NodeID: "node1", PVCName: "my-pvc2", VolumeMode: "Filesystem", VSCName: "vsc2"},
 	}
+	// Keyed by VSCName so two volumes on the same node don't collide.
 	staging := map[string]string{
-		"node1": "staging-node1",
-		"node2": "staging-node2",
+		"vsc1": "staging-vsc1",
+		"vsc2": "staging-vsc2",
 	}
 
 	result := buildImportVolumes(vols, staging)
@@ -350,11 +386,12 @@ func TestBuildImportVolumes(t *testing.T) {
 		t.Fatalf("expected 2 volumes, got %d", len(result))
 	}
 
-	if result[0]["stagingPVCName"] != "staging-node1" {
-		t.Errorf("node1 stagingPVCName = %v", result[0]["stagingPVCName"])
+	// JSON key must match API tag `json:"stagingPvcName"`.
+	if result[0]["stagingPvcName"] != "staging-vsc1" {
+		t.Errorf("vsc1 stagingPvcName = %v", result[0]["stagingPvcName"])
 	}
-	if result[1]["stagingPVCName"] != "staging-node2" {
-		t.Errorf("node2 stagingPVCName = %v", result[1]["stagingPVCName"])
+	if result[1]["stagingPvcName"] != "staging-vsc2" {
+		t.Errorf("vsc2 stagingPvcName = %v", result[1]["stagingPvcName"])
 	}
 }
 
@@ -366,8 +403,8 @@ func TestBuildImportVolumesFallback(t *testing.T) {
 	staging := map[string]string{}
 
 	result := buildImportVolumes(vols, staging)
-	if result[0]["stagingPVCName"] != "my-pvc" {
-		t.Errorf("fallback stagingPVCName = %v, want my-pvc", result[0]["stagingPVCName"])
+	if result[0]["stagingPvcName"] != "my-pvc" {
+		t.Errorf("fallback stagingPvcName = %v, want my-pvc", result[0]["stagingPvcName"])
 	}
 }
 

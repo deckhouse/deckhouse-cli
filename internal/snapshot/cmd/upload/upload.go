@@ -193,8 +193,9 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// ── Step 3: upload volumes ─────────────────────────────────────────────
 
-	// stagingPVCByNode maps nodeID → staging PVC name (set after DataImport completes).
-	stagingPVCByNode := make(map[string]string)
+	// stagingPVCByVSC maps VSCName → staging PVC name (set after DataImport completes).
+	// Keyed by VSCName (unique per volume) because a single node can have multiple volumes.
+	stagingPVCByVSC := make(map[string]string)
 
 	// Build VolumeOps for data nodes.
 	opts := restore.Options{
@@ -242,7 +243,7 @@ func run(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("resolve staging PVC for volume %s: %w", vol.VSCName, err)
 			}
 
-			stagingPVCByNode[vol.NodeID] = resolvedPVC
+			stagingPVCByVSC[vol.VSCName] = resolvedPVC
 			fmt.Fprintf(errW, "    → staging PVC: %s\n", resolvedPVC)
 		}
 	}
@@ -279,8 +280,8 @@ func run(cmd *cobra.Command, args []string) error {
 	// ── Step 5: create SnapshotImportRequest ──────────────────────────────
 	fmt.Fprintf(errW, "\nPhase 3: creating SnapshotImportRequest …\n")
 
-	importNodes := buildImportNodes(nodes)
-	importVolumes := buildImportVolumes(plan.Volumes, stagingPVCByNode)
+	importNodes := buildImportNodes(nodes, snapshotName)
+	importVolumes := buildImportVolumes(plan.Volumes, stagingPVCByVSC)
 
 	sirObj := buildImportRequest(sirName, targetNS, snapshotName, importNodes, importVolumes, scMapping, ttl)
 	if err := rtClient.Create(ctx, sirObj); err != nil {
@@ -372,9 +373,15 @@ func buildManifestChunkObject(name, namespace, sirName, nodeID string, index, to
 }
 
 // buildImportNodes converts archive NodeRecords into import request nodes.
-func buildImportNodes(nodes []archive.NodeRecord) []map[string]interface{} {
+// rootSnapshotName overrides the name of the root node (parentID == "" and kind Snapshot)
+// so that the user-supplied target name is used instead of the original archive name.
+func buildImportNodes(nodes []archive.NodeRecord, rootSnapshotName string) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(nodes))
 	for _, n := range nodes {
+		name := n.Name
+		if n.ParentID == "" && n.Kind == "Snapshot" && rootSnapshotName != "" {
+			name = rootSnapshotName
+		}
 		children := make([]interface{}, 0, len(n.Children))
 		for _, c := range n.Children {
 			children = append(children, c)
@@ -383,7 +390,7 @@ func buildImportNodes(nodes []archive.NodeRecord) []map[string]interface{} {
 			"id":         n.ID,
 			"apiVersion": n.APIVersion,
 			"kind":       n.Kind,
-			"name":       n.Name,
+			"name":       name,
 			"parentId":   n.ParentID,
 			"children":   children,
 			"hasData":    n.HasData,
@@ -393,10 +400,11 @@ func buildImportNodes(nodes []archive.NodeRecord) []map[string]interface{} {
 }
 
 // buildImportVolumes constructs the volumes slice for the SnapshotImportRequest spec.
-func buildImportVolumes(vols []restore.VolumeOp, stagingPVCByNode map[string]string) []map[string]interface{} {
+// stagingPVCByVSC maps VSCName → actual staging PVC name resolved after DataImport completes.
+func buildImportVolumes(vols []restore.VolumeOp, stagingPVCByVSC map[string]string) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(vols))
 	for _, v := range vols {
-		stagingPVC := stagingPVCByNode[v.NodeID]
+		stagingPVC := stagingPVCByVSC[v.VSCName]
 		if stagingPVC == "" {
 			stagingPVC = stagingPVCName(v)
 		}
@@ -404,7 +412,7 @@ func buildImportVolumes(vols []restore.VolumeOp, stagingPVCByNode map[string]str
 			"nodeId":         v.NodeID,
 			"pvcName":        v.PVCName,
 			"volumeMode":     v.VolumeMode,
-			"stagingPVCName": stagingPVC,
+			"stagingPvcName": stagingPVC, // matches API json:"stagingPvcName"
 		})
 	}
 	return result
