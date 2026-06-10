@@ -32,8 +32,8 @@ limitations under the License.
 //   - Every downloaded binary is smoke-tested (`--version`) before it becomes
 //     active; a corrupt or wrong-platform artifact never replaces a working d8.
 //   - After ordinary commands d8 prints a one-line notice when a newer version
-//     is cached; the cache is refreshed by a detached background child at most
-//     once per TTL. D8_DISABLE_UPDATE_NOTIFY=1 turns all of it off.
+//     is cached; the root hook refreshes that cache synchronously (bounded and
+//     best-effort) at most once per TTL. D8_DISABLE_UPDATE_NOTIFY=1 turns it off.
 //
 // Wiring: the cobra commands live in the cmd subpackage; this package holds
 // the update flow (update.go), the store (store.go) and the notice (notify.go).
