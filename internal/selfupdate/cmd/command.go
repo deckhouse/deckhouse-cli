@@ -21,6 +21,8 @@ package selfupdatecmd
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -179,10 +181,27 @@ func newUpdater(ctx context.Context, cmd *cobra.Command, logger *dkplog.Logger) 
 	return buildUpdater(ctx, kubeconfig, kubeContext, logger)
 }
 
-// newDefaultUpdater builds an Updater with the default kubeconfig resolution (the
-// KUBECONFIG env var or ~/.kube/config), for the flag-less root hook.
+// newDefaultUpdater builds an Updater with the default kubeconfig resolution
+// ($KUBECONFIG, else ~/.kube/config), for the flag-less root hook.
 func newDefaultUpdater(ctx context.Context, logger *dkplog.Logger) (*selfupdate.Updater, error) {
-	return buildUpdater(ctx, "", "", logger)
+	return buildUpdater(ctx, defaultKubeconfigPath(), "", logger)
+}
+
+// defaultKubeconfigPath resolves the kubeconfig for the flag-less root hook:
+// $KUBECONFIG when set, otherwise ~/.kube/config. SetupK8sClientSet needs an
+// explicit path - given an empty one it does not fall back to these defaults, so
+// the hook must resolve them itself (a missing file then degrades to no notice).
+func defaultKubeconfigPath() string {
+	if v := os.Getenv("KUBECONFIG"); v != "" {
+		return v
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	return filepath.Join(home, ".kube", "config")
 }
 
 // buildUpdater builds an Updater backed by the registry-packages-proxy.
