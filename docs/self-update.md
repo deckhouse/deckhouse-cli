@@ -11,7 +11,6 @@
 **Contents:** [Access](#how-access-works) · [Commands](#commands) ·
 [Version store](#how-versions-are-stored) ·
 [Switching & rollback](#switching-and-rollback) ·
-[Update notice](#update-notice) ·
 [Flags & env](#flags-and-environment-variables) ·
 [Troubleshooting](#troubleshooting)
 
@@ -68,7 +67,6 @@ kubectl create clusterrolebinding d8-cli-download \
 | `d8 cli versions` (alias: `list`) | lists published versions, newest first |
 | `d8 cli update [--version X]` | installs a version and switches to it |
 | `d8 cli use <version>` | switches to a version; instant if it is already installed |
-| `d8 cli cron` | prints crontab instructions for automatic daily updates; changes nothing itself |
 
 ```console
 $ d8 cli check
@@ -123,25 +121,6 @@ $ d8 cli use v0.13.0            # repeated: "deckhouse-cli is already at v0.13.0
 - `d8 cli use <TAB>` completes the locally installed versions (enable shell
   completion with `d8 completion`).
 
-## Update notice
-
-After a successful command, d8 may print one line to stderr:
-
-```
-A newer deckhouse-cli is available: v0.14.0 (current v0.13.1). Run 'd8 cli update' to upgrade.
-```
-
-- The notice is read from a local cache, instantly and offline.
-- That cache is refreshed synchronously after a command (bounded by a short
-  timeout), at most once per day - so it never meaningfully slows you down.
-- d8 only **notifies** - it never replaces itself without your command.
-- Opt out with `D8_DISABLE_UPDATE_NOTIFY=1`. Plugin auto-update is a separate
-  mechanism with its own `D8_DISABLE_PLUGIN_AUTO_UPDATE=1`.
-
-> [!TIP]
-> To run updates unattended, schedule `d8 cli update` in a cron job -
-> `d8 cli cron` prints a ready-to-paste crontab line for that.
-
 ## Flags and environment variables
 
 | Flag | Env | Purpose |
@@ -150,7 +129,6 @@ A newer deckhouse-cli is available: v0.14.0 (current v0.13.1). Run 'd8 cli updat
 | `--rpp-endpoint` | `D8_RPP_ENDPOINT` | proxy base URL; discovered from the cluster when empty |
 | `--rpp-ca-file` | `D8_RPP_CA_FILE` | PEM CA bundle to verify the proxy TLS certificate |
 | `--rpp-insecure-skip-tls-verify` | - | skip proxy TLS verification (debugging only) |
-| - | `D8_DISABLE_UPDATE_NOTIFY=1` | disable the d8 update notice and its refresh |
 
 ## Troubleshooting
 
@@ -163,4 +141,3 @@ A newer deckhouse-cli is available: v0.14.0 (current v0.13.1). Run 'd8 cli updat
 | `x509: ... doesn't contain any IP SANs` | you are connecting to a pod IP instead of the Ingress host | set `--rpp-endpoint https://registry-packages-proxy.<publicDomain>` |
 | `deckhouse-cli is already up to date` | you run the latest version | use `--version X` to install an exact (older) one |
 | `d8 cli use X` downloads although X was installed before | the local store was cleaned, or X was installed on another machine/user | it will download once and stay installed |
-| update notice never appears | dev build of d8, or the notice disabled | notices are shown only for released (semver) builds |

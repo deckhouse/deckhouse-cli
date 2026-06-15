@@ -1,7 +1,7 @@
 # d8 self-update (`d8 cli`)
 
 The `internal/selfupdate` package updates the `d8` binary itself through the
-cluster and unobtrusively notifies about newer versions.
+cluster.
 
 ## Why
 
@@ -19,12 +19,6 @@ cluster and unobtrusively notifies about newer versions.
 | `d8 cli update [--version X]` | installs the version into the store and repoints `current` at it |
 | `d8 cli use <version>` | switches to a version: an installed one is a pure symlink repoint (instant, offline), a missing one is downloaded first |
 | `d8 cli versions` *(alias `list`)* | lists published versions newest-first; the current one is starred, locally installed ones are marked `installed` |
-| `d8 cli cron` | prints ready-to-paste crontab instructions for automatic daily updates; a no-op - it changes nothing itself |
-
-No separate cron mechanism is needed: a cron job simply runs the same
-`d8 cli update` (idempotent). `d8 cli cron` prints the exact line to add;
-it embeds the stable PATH symlink, never the resolved store path - a resolved
-path would pin the job to one version forever.
 
 ## The version store and the `current` symlink (`store.go`)
 
@@ -123,25 +117,10 @@ Platform tags (`rpp_source.go`):
 - `ExtractBinary` downloads `<tag>-<os>-<arch>` first and falls back to the bare
   `<tag>` (legacy / platform-neutral publishing) on 404.
 
-## How the notice works (notify)
-
-- After a successful command, `d8` prints a single line to stderr if the cache
-  records a version newer than the current one - instantly and offline (no
-  network on the hot path).
-- If the cache is older than the TTL (24h), the root hook refreshes it
-  synchronously over the network, bounded by a short timeout (`RefreshNoticeCache`
-  in `cmd/command.go`). No background process - the CLI never spawns itself.
-- Cache: `~/.cache/deckhouse-cli/update-check.json`, atomic writes in `cache.go`.
-- The timestamp is stamped BEFORE the network call: a failed refresh still backs
-  off for the full TTL instead of retrying on every command.
-- When it stays silent: dev builds (non-semver version),
-  `completion`/`help`/`--version`, and the `d8 cli ...` commands themselves.
-
 ## Switches
 
 | Need | How |
 |---|---|
-| disable the d8 update notice and its refresh | `D8_DISABLE_UPDATE_NOTIFY=1` |
 | explicit RPP endpoint | `--rpp-endpoint` / `D8_RPP_ENDPOINT` |
 | custom CA / skip TLS verification | `--rpp-ca-file` / `--rpp-insecure-skip-tls-verify` |
 | identity | `-k/--kubeconfig`, `--context` |
@@ -159,18 +138,14 @@ Platform tags (`rpp_source.go`):
 
 | File | Responsibility |
 |---|---|
-| `cmd/command.go` | the `d8 cli ...` cobra commands; building the `Updater` from flags |
+| `cmd/command.go` | the `d8 cli ...` cobra commands; building the `Updater` |
 | `cmd/list.go` | `d8 cli versions`: rendering the version list |
 | `cmd/use.go` | `d8 cli use`: switching versions, store-first; shell completion |
 | `update.go` | `Updater` and `SwitchTo`: version selection, store install, repoint, migration |
 | `store.go` | the version store + `current` symlink (`~/.deckhouse-cli/cli`) |
 | `source.go` / `rpp_source.go` | the `Source` interface and its RPP implementation |
-| `notify.go` | the cached notice and its synchronous refresh |
-| `cache.go` | the TTL cache of the version check (atomic stamp file) |
 
 Related:
 
 - `internal/rpp` - the HTTP client for the proxy (transport, discovery, tar extraction);
-- `internal/lockfile` - the file lock (shared with plugin installs);
-- `internal/plugins/autoupdate` - plugin auto-update; unlike this package it
-  does spawn a detached background child.
+- `internal/lockfile` - the file lock (shared with plugin installs).

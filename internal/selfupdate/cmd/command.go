@@ -15,15 +15,12 @@ limitations under the License.
 */
 
 // Package selfupdatecmd implements the `d8 cli` command tree on top of the
-// internal/selfupdate machinery (store, updater, notify cache).
+// internal/selfupdate machinery (store, updater).
 package selfupdatecmd
 
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -37,10 +34,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 )
 
-// refreshTimeout bounds the synchronous notice refresh so a slow or unreachable
-// cluster cannot stall the foreground command for long.
-const refreshTimeout = 3 * time.Second
-
 // NewCommand returns the `d8 cli` command tree for managing the d8 binary itself.
 // It reaches the registry-packages-proxy with the caller's kubeconfig identity.
 func NewCommand(logger *dkplog.Logger) *cobra.Command {
@@ -48,20 +41,17 @@ func NewCommand(logger *dkplog.Logger) *cobra.Command {
 		Use:   "cli",
 		Short: "Manage the deckhouse-cli (d8) binary",
 		Long: "Check for and install newer deckhouse-cli versions via the in-cluster registry-packages-proxy.\n\n" +
-			"d8 does not update itself automatically - it only shows a one-line notice when a newer version\n" +
-			"is available. Update on demand with 'd8 cli update', or automate it with 'd8 cli cron'.\n\n" +
+			"Update on demand with 'd8 cli update'.\n\n" +
 			"Environment variables:\n" +
-			"  " + selfupdate.EnvDisableUpdateNotify + "=1  disable the d8 update notice and its refresh\n" +
-			"  " + rppflags.EnvEndpoint + "             registry-packages-proxy base URL (otherwise discovered from the cluster)\n" +
-			"  " + rppflags.EnvCAFile + "              PEM CA bundle to verify the proxy TLS certificate\n" +
-			"  KUBECONFIG                  path to the kubeconfig file",
+			"  " + rppflags.EnvEndpoint + "  registry-packages-proxy base URL (otherwise discovered from the cluster)\n" +
+			"  " + rppflags.EnvCAFile + "   PEM CA bundle to verify the proxy TLS certificate\n" +
+			"  KUBECONFIG       path to the kubeconfig file",
 	}
 
 	cmd.AddCommand(newCheckCommand(logger))
 	cmd.AddCommand(newUpdateCommand(logger))
 	cmd.AddCommand(newUseCommand(logger))
 	cmd.AddCommand(newVersionsCommand(logger))
-	cmd.AddCommand(newCronCommand())
 
 	systemflags.AddPersistentFlags(cmd)
 	rppflags.AddFlags(cmd.PersistentFlags())
@@ -144,34 +134,6 @@ func newUpdateCommand(logger *dkplog.Logger) *cobra.Command {
 	return cmd
 }
 
-// RefreshNoticeCache refreshes the d8 update-notice cache synchronously when it is
-// stale, bounded by refreshTimeout. It is called from the root hook after a command
-// (at most once per cache TTL), so a later notice reflects the latest version. It
-// reaches the proxy with the default kubeconfig identity, is best-effort and silent,
-// and never updates d8 - it only learns the latest available version.
-func RefreshNoticeCache(ctx context.Context, logger *dkplog.Logger) {
-	if !selfupdate.RefreshDue() {
-		return
-	}
-
-	// Stamp before the network call so a failure still backs off for the full TTL.
-	selfupdate.MarkChecked()
-
-	cctx, cancel := context.WithTimeout(ctx, refreshTimeout)
-	defer cancel()
-
-	updater, err := newDefaultUpdater(cctx, logger)
-	if err != nil {
-		logger.Debug("skipping update-notice refresh: no updater", dkplog.Err(err))
-
-		return
-	}
-
-	if err := selfupdate.RefreshCache(cctx, updater, version.Version); err != nil {
-		logger.Debug("update-notice refresh failed", dkplog.Err(err))
-	}
-}
-
 // newUpdater builds an Updater reached with the kubeconfig identity from the
 // command's flags.
 func newUpdater(ctx context.Context, cmd *cobra.Command, logger *dkplog.Logger) (*selfupdate.Updater, error) {
@@ -179,29 +141,6 @@ func newUpdater(ctx context.Context, cmd *cobra.Command, logger *dkplog.Logger) 
 	kubeContext, _ := cmd.Flags().GetString("context")
 
 	return buildUpdater(ctx, kubeconfig, kubeContext, logger)
-}
-
-// newDefaultUpdater builds an Updater with the default kubeconfig resolution
-// ($KUBECONFIG, else ~/.kube/config), for the flag-less root hook.
-func newDefaultUpdater(ctx context.Context, logger *dkplog.Logger) (*selfupdate.Updater, error) {
-	return buildUpdater(ctx, defaultKubeconfigPath(), "", logger)
-}
-
-// defaultKubeconfigPath resolves the kubeconfig for the flag-less root hook:
-// $KUBECONFIG when set, otherwise ~/.kube/config. SetupK8sClientSet needs an
-// explicit path - given an empty one it does not fall back to these defaults, so
-// the hook must resolve them itself (a missing file then degrades to no notice).
-func defaultKubeconfigPath() string {
-	if v := os.Getenv("KUBECONFIG"); v != "" {
-		return v
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-
-	return filepath.Join(home, ".kube", "config")
 }
 
 // buildUpdater builds an Updater backed by the registry-packages-proxy.

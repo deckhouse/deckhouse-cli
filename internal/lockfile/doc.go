@@ -19,7 +19,7 @@ limitations under the License.
 // # Problem
 //
 // Self-update and plugin install/update rewrite binaries, symlinks, and caches on
-// disk. Foreground commands and background auto-update can run at the same time;
+// disk. Two such commands can run concurrently (separate terminals or scripts);
 // without a cross-process lock they would step on each other.
 //
 // # Call sites

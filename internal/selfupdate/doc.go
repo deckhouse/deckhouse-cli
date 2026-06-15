@@ -31,12 +31,9 @@ limitations under the License.
 //     atomic repoint - no file copying, no sudo.
 //   - Every downloaded binary is smoke-tested (`--version`) before it becomes
 //     active; a corrupt or wrong-platform artifact never replaces a working d8.
-//   - After ordinary commands d8 prints a one-line notice when a newer version
-//     is cached; the root hook refreshes that cache synchronously (bounded and
-//     best-effort) at most once per TTL. D8_DISABLE_UPDATE_NOTIFY=1 turns it off.
 //
 // Wiring: the cobra commands live in the cmd subpackage; this package holds
-// the update flow (update.go), the store (store.go) and the notice (notify.go).
-// Downloads go through the Source interface (source.go) backed by internal/rpp.
+// the update flow (update.go) and the store (store.go). Downloads go through
+// the Source interface (source.go) backed by internal/rpp.
 // Details, trade-offs, and the full file map are in README.md next to this file.
 package selfupdate

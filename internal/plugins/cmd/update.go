@@ -22,7 +22,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/plugins"
-	"github.com/deckhouse/deckhouse-cli/internal/plugins/autoupdate"
 )
 
 func newUpdateCommand(manager *plugins.Manager) *cobra.Command {
@@ -31,9 +30,7 @@ func newUpdateCommand(manager *plugins.Manager) *cobra.Command {
 		Short: "Update an installed plugin",
 		Long: "Update an installed plugin to the newest version compatible with this cluster,\n" +
 			"within its current major version. To cross majors or pick an exact version, use\n" +
-			"'d8 plugins install <name> --use-major N' or '... --version X'.\n\n" +
-			"Installed plugins are also auto-updated in the background on use;\n" +
-			"set " + autoupdate.EnvDisableAutoUpdate + "=1 to turn that off.",
+			"'d8 plugins install <name> --use-major N' or '... --version X'.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pluginName := args[0]

@@ -26,7 +26,6 @@ import (
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/internal/plugins"
-	"github.com/deckhouse/deckhouse-cli/internal/plugins/autoupdate"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/flags"
 	rppflags "github.com/deckhouse/deckhouse-cli/internal/rpp/flags"
 )
@@ -41,12 +40,9 @@ func NewCommand(logger *dkplog.Logger) *cobra.Command {
 		Long: "Manage Deckhouse CLI plugins.\n\n" +
 			"Plugins are pulled from the in-cluster registry-packages-proxy, authenticated by the\n" +
 			"current kubeconfig identity.\n\n" +
-			"Installed plugins are updated automatically in the background (within their current major, to\n" +
-			"the latest cluster-compatible version, periodically). Update on demand with\n" +
-			"'d8 plugins update <name>' or 'd8 plugins update all'.\n\n" +
+			"Update on demand with 'd8 plugins update <name>' or 'd8 plugins update all'.\n\n" +
 			"Environment variables:\n" +
 			"  " + flags.EnvSkipClusterChecks + "=1  skip cluster-side plugin requirement checks\n" +
-			"  " + autoupdate.EnvDisableAutoUpdate + "=1   disable background auto-update of installed plugins\n" +
 			"  " + flags.EnvPluginsDir + "                plugins directory (same as --plugins-dir)\n" +
 			"  " + rppflags.EnvEndpoint + "                   registry-packages-proxy base URL\n" +
 			"  " + rppflags.EnvCAFile + "                    PEM CA bundle for proxy TLS verification\n" +

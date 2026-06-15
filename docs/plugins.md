@@ -5,7 +5,7 @@ Plugins are versioned binaries distributed through the cluster registry.
 
 **Contents:** [Source](#plugin-source) · [Commands](#commands) ·
 [Versions & majors](#versions-majors-and-switching) ·
-[Requirements](#requirements) · [Auto-update](#automatic-plugin-updates) ·
+[Requirements](#requirements) ·
 [Flags & env](#flags-and-environment-variables) ·
 [Troubleshooting](#troubleshooting)
 
@@ -97,20 +97,6 @@ Error: plugin requirements not satisfied      # e.g. requires plugin delivery-ki
 - `--skip-cluster-checks` (or `D8_PLUGINS_SKIP_CLUSTER_CHECKS=1`) - skip
   cluster-side checks, e.g. in air-gapped scenarios.
 
-## Automatic plugin updates
-
-Installed plugins are kept fresh automatically:
-
-- d8 updates them in the background to the newest cluster-compatible version
-  **within their major**.
-- At most once per 6 hours; never blocks your commands.
-
-Opting out:
-
-- `D8_DISABLE_PLUGIN_AUTO_UPDATE=1` - disable the background plugin auto-update;
-- `D8_DISABLE_UPDATE_NOTIFY=1` - independent switch for the d8 self-update notice
-  (does not affect plugin auto-update).
-
 ## Flags and environment variables
 
 | Flag | Env | Purpose |
@@ -121,8 +107,6 @@ Opting out:
 | `--rpp-endpoint` | `D8_RPP_ENDPOINT` | proxy base URL; discovered from the cluster when empty |
 | `--rpp-ca-file` | `D8_RPP_CA_FILE` | PEM CA bundle to verify the proxy TLS certificate |
 | `--rpp-insecure-skip-tls-verify` | - | skip proxy TLS verification (debugging only) |
-| - | `D8_DISABLE_PLUGIN_AUTO_UPDATE=1` | disable background plugin auto-update only |
-| - | `D8_DISABLE_UPDATE_NOTIFY=1` | disable the d8 self-update notice and its refresh (not plugin updates) |
 
 ## Troubleshooting
 

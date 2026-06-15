@@ -35,10 +35,9 @@ func (m *Manager) UpdateAll(ctx context.Context) error {
 		return fmt.Errorf("failed to read plugins directory: %w", err)
 	}
 
-	// A non-root install lives in the home fallback (~/.deckhouse-cli); the
-	// background scheduler (internal/plugins/autoupdate) detects it there, so
-	// this update must look there too when the configured root has nothing -
-	// otherwise the scheduled child is a permanent silent no-op.
+	// A non-root install lives in the home fallback (~/.deckhouse-cli), so this
+	// update must look there too when the configured root has nothing - otherwise
+	// `d8 plugins update all` would be a silent no-op for that install.
 	if len(plugins) == 0 && m.switchToFallbackRoot() {
 		if plugins, err = m.InstalledPluginNames(); err != nil {
 			return fmt.Errorf("failed to read plugins directory: %w", err)

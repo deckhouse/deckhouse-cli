@@ -1,7 +1,7 @@
 # d8 plugins
 
 The `internal/plugins` package manages d8 plugins: standalone binaries
-published to an OCI registry that d8 installs, keeps up to date, and runs as if
+published to an OCI registry that d8 installs, updates, and runs as if
 they were native subcommands. The machinery lives in this package (the
 `Manager`); the `d8 plugins` cobra commands are a thin layer on top of it in
 `internal/plugins/cmd` (package `pluginscmd`), one file per command - the same
@@ -21,7 +21,7 @@ split `internal/selfupdate` / `internal/selfupdate/cmd` uses.
 |---|---|
 | `d8 plugins install <name> [--version X] [--use-major N] [--force]` | install or switch a plugin version |
 | `d8 plugins update <name>` | update to the newest cluster-compatible version within the current major |
-| `d8 plugins update all` | the same for every installed plugin (also run by the background auto-update) |
+| `d8 plugins update all` | the same for every installed plugin |
 | `d8 plugins list [--installed\|--available]` | list plugins |
 | `d8 plugins versions <name>` | list all published versions of one plugin (installed one marked; same verb as `d8 cli versions`) |
 | `d8 plugins contract <name>` | show a plugin's contract |
@@ -90,10 +90,9 @@ A failure at any step leaves the previous version installed and working.
 - Updates stay **within the installed major**; crossing majors requires an
   explicit `--use-major N`. The major is read from disk (the `current`
   symlink), so a broken binary cannot drop the pin.
-- **Downgrade guard**: the implicit path (including the unattended background
-  update) never installs a version older than the installed one - e.g. when the
-  newest tag's contract is temporarily unreadable. Downgrades are explicit only
-  (`--version`, `--use-major`).
+- **Downgrade guard**: the implicit path never installs a version older than the
+  installed one - e.g. when the newest tag's contract is temporarily unreadable.
+  Downgrades are explicit only (`--version`, `--use-major`).
 - Pre-releases (`rc`/`alpha`/`beta`) are never picked by default; install them
   via `--version`.
 - An unreachable cluster or a malformed contract is a hard error, not a silent
@@ -114,20 +113,6 @@ A failure at any step leaves the previous version installed and working.
 - Escape hatch for air-gapped setups: `--skip-cluster-checks` /
   `D8_PLUGINS_SKIP_CLUSTER_CHECKS=1` (downgrades the check to a warning).
 
-## Background auto-update
-
-- After any ordinary d8 command (not `d8 cli ...`, not `d8 plugins ...`, not
-  completion/help/version), a detached `d8 plugins update all` is spawned at
-  most once per 6h.
-- Guards: TTL stamp in `~/.cache/deckhouse-cli/plugin-update-check.json`
-  (stamped BEFORE spawning - no process storms; if the stamp cannot be written,
-  nothing is spawned), nothing installed - no child, Windows - skipped.
-- The child updates only actually installed plugins, within their majors, to
-  cluster-compatible versions; it inherits the environment but not the parent's
-  flags.
-- Opt-out: `D8_DISABLE_PLUGIN_AUTO_UPDATE=1`. This is independent of the d8
-  self-update notice, which has its own `D8_DISABLE_UPDATE_NOTIFY=1`.
-
 ## Running a plugin (the wrapper)
 
 - All arguments are forwarded verbatim (the wrapper parses no flags itself).
@@ -145,15 +130,13 @@ A failure at any step leaves the previous version installed and working.
 | identity (rpp + cluster checks) | `-k/--kubeconfig`, `--context` |
 | RPP endpoint / TLS | `--rpp-endpoint`, `--rpp-ca-file`, `--rpp-insecure-skip-tls-verify` |
 | skip cluster-side requirement checks | `--skip-cluster-checks` / `D8_PLUGINS_SKIP_CLUSTER_CHECKS=1` |
-| disable background auto-update | `D8_DISABLE_PLUGIN_AUTO_UPDATE=1` |
 
 ## Boundaries and deliberate decisions
 
 - Listing the full plugin catalog over RPP is not supported (the proxy has no
   catalog endpoint); install/update by name works.
 - Idempotency compares the version reported by the binary itself; a plugin that
-  prints a non-semver banner is reinstalled by the background update (bounded
-  to once per TTL).
+  prints a non-semver banner is re-pulled on every explicit `update`.
 - The image stream is not digest-verified - trust rests on the TLS channel and
   the kubeconfig identity; artifact health is checked by the smoke test.
 - Plugin-to-plugin dependency backtracking during version selection is out of
@@ -175,7 +158,6 @@ A failure at any step leaves the previous version installed and working.
 | `source.go` / `rpp_source.go` / `init.go` | the `PluginSource` interface, its RPP implementation, source wiring |
 | `layout/` | on-disk path layout |
 | `flags/` | the `d8 plugins` flag set |
-| `autoupdate/` | scheduling the detached background `update all` (no command state; called from root.go) |
 | `cmd/` | the `d8 plugins ...` command tree and the per-plugin wrapper command, one file per command |
 
 Related: `internal/rpp` (proxy HTTP client), `internal/lockfile` (install lock),
