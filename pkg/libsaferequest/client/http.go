@@ -206,3 +206,10 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 func (c *SafeClient) Copy() *SafeClient {
 	return &SafeClient{rest.CopyConfig(c.restConfig)}
 }
+
+// RESTConfig returns the underlying *rest.Config. It is read-only by convention; callers that
+// need to mutate it should Copy() first. It is required to build absolute kube-apiserver URLs
+// (Host + AbsPath) for aggregated subresource calls that need custom headers (e.g. Range / X-Offset).
+func (c *SafeClient) RESTConfig() *rest.Config {
+	return c.restConfig
+}
