@@ -77,10 +77,10 @@ func (s *rppPluginSource) GetPluginContract(ctx context.Context, pluginName, tag
 	// The proxy serves no manifest/annotations, so reading the contract needs a
 	// full image pull; an install therefore pulls the image twice (here and in
 	// ExtractPlugin). Plugin images are small, so this is acceptable for now.
-	// The Descriptor (a manifest digest, not a hash of the gzip-tar body) cannot
-	// verify this stream, so it is ignored; trust rests on the TLS-authenticated
-	// proxy channel. Artifact-level verification is deferred (see ExtractPlugin).
-	body, _, err := s.client.PullImage(ctx, ref, tag)
+	// The stream is not integrity-checked (the proxy exposes no per-artifact
+	// hash); trust rests on the TLS-authenticated proxy channel. Artifact-level
+	// verification is deferred (see ExtractPlugin).
+	body, err := s.client.PullImage(ctx, ref, tag)
 	if err != nil {
 		return nil, err
 	}
@@ -111,10 +111,10 @@ func (s *rppPluginSource) ExtractPlugin(ctx context.Context, pluginName, tag, de
 	}
 
 	// The binary is written and later exec'd WITHOUT artifact-level verification:
-	// the Descriptor is a manifest digest, not a hash of this stream, so it cannot
-	// validate the bytes. Trust rests on the TLS-authenticated proxy channel for
+	// the proxy exposes no per-artifact hash of this stream, so the bytes cannot
+	// be validated here. Trust rests on the TLS-authenticated proxy channel for
 	// now; per-layer digest verification is deferred to a later stage.
-	body, _, err := s.client.PullImage(ctx, ref, tag)
+	body, err := s.client.PullImage(ctx, ref, tag)
 	if err != nil {
 		return err
 	}

@@ -69,25 +69,19 @@ func TestClientListTagsForPlugin(t *testing.T) {
 }
 
 func TestClientPullImage(t *testing.T) {
-	const (
-		digest  = "sha256:deadbeef"
-		payload = "fake-tar-gz-bytes"
-	)
+	const payload = "fake-tar-gz-bytes"
 
 	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodGet, r.Method)
 		assert.Equal(t, "/v1/images/deckhouse-cli/tags/v0.13.1", r.URL.Path)
 
 		w.Header().Set("Content-Type", "application/x-gzip")
-		w.Header().Set(headerDockerContentDigest, digest)
 		_, _ = io.WriteString(w, payload)
 	})
 
-	body, desc, err := client.PullImage(context.Background(), CLIImage(), "v0.13.1")
+	body, err := client.PullImage(context.Background(), CLIImage(), "v0.13.1")
 	require.NoError(t, err)
 	defer func() { _ = body.Close() }()
-
-	assert.Equal(t, digest, desc.Digest)
 
 	got, err := io.ReadAll(body)
 	require.NoError(t, err)
@@ -160,7 +154,7 @@ func TestClientInvalidTagDoesNotCallServer(t *testing.T) {
 		t.Fatal("server must not be called for an invalid tag")
 	})
 
-	_, _, err := client.PullImage(context.Background(), CLIImage(), "with/slash")
+	_, err := client.PullImage(context.Background(), CLIImage(), "with/slash")
 	require.ErrorIs(t, err, ErrInvalidImage)
 }
 

@@ -34,9 +34,8 @@ import (
 )
 
 const (
-	headerAccept              = "Accept"
-	headerDockerContentDigest = "Docker-Content-Digest"
-	mediaTypeJSON             = "application/json"
+	headerAccept  = "Accept"
+	mediaTypeJSON = "application/json"
 
 	loggerName = "rpp"
 
@@ -48,18 +47,6 @@ const (
 	// into the error message.
 	maxBodySnippetBytes = 256
 )
-
-// Descriptor identifies an image tag by its manifest digest, taken from the
-// Docker-Content-Digest response header. Digest is the reliable comparison key
-// (for example against an installed version).
-//
-// Size is the response Content-Length when the proxy reports one and -1 when it
-// is unknown (a streamed or chunked body), so callers must not assume a real
-// byte count.
-type Descriptor struct {
-	Digest string
-	Size   int64
-}
 
 // options holds the TLS settings used to build the proxy HTTP transport.
 type options struct {
@@ -225,27 +212,28 @@ func (c *Client) ListTags(ctx context.Context, ref ImageRef) ([]string, error) {
 // contract when present, are files inside it). The caller owns the returned
 // reader and must close it.
 //
-// The stream is returned as-is: this method performs NO integrity check, so the
-// caller must verify the bytes against the returned Descriptor.Digest and may
-// want to cap the read with an io.LimitReader.
-func (c *Client) PullImage(ctx context.Context, ref ImageRef, tag string) (io.ReadCloser, Descriptor, error) {
+// The stream is returned as-is: this method performs NO integrity check (the
+// proxy exposes only a manifest digest, not a hash of the gzip-tar body), so
+// trust rests on the TLS-authenticated proxy channel; the caller may want to cap
+// the read with an io.LimitReader.
+func (c *Client) PullImage(ctx context.Context, ref ImageRef, tag string) (io.ReadCloser, error) {
 	if err := validateTag(tag); err != nil {
-		return nil, Descriptor{}, err
+		return nil, err
 	}
 
 	c.logger.Debug("pulling image", slog.String("image", ref.String()), slog.String("tag", tag))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+ref.tagPath(tag), nil)
 	if err != nil {
-		return nil, Descriptor{}, fmt.Errorf("build pull request: %w", err)
+		return nil, fmt.Errorf("build pull request: %w", err)
 	}
 
 	resp, err := c.do(req)
 	if err != nil {
-		return nil, Descriptor{}, err
+		return nil, err
 	}
 
-	return resp.Body, descriptorFromResponse(resp), nil
+	return resp.Body, nil
 }
 
 // do executes the request and, on a non-2xx status, closes the body and maps the
@@ -305,11 +293,4 @@ func bodySnippet(r io.Reader) string {
 	}, msg)
 
 	return ": " + msg
-}
-
-func descriptorFromResponse(resp *http.Response) Descriptor {
-	return Descriptor{
-		Digest: resp.Header.Get(headerDockerContentDigest),
-		Size:   resp.ContentLength,
-	}
 }

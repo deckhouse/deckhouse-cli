@@ -86,10 +86,10 @@ func (s *rppSource) ExtractBinary(ctx context.Context, tag, destination string) 
 }
 
 func (s *rppSource) extract(ctx context.Context, tag, destination string) error {
-	// As for plugins, the stream is trusted via the TLS-authenticated proxy channel;
-	// the Descriptor is a manifest digest, not a hash of the body, so artifact-level
+	// As for plugins, the stream is trusted via the TLS-authenticated proxy
+	// channel; the proxy exposes no per-artifact hash, so artifact-level
 	// verification is deferred to a later stage.
-	body, _, err := s.client.PullImage(ctx, rpp.CLIImage(), tag)
+	body, err := s.client.PullImage(ctx, rpp.CLIImage(), tag)
 	if err != nil {
 		return err
 	}
