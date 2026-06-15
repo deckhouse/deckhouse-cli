@@ -17,6 +17,7 @@ limitations under the License.
 package plugins
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -24,30 +25,30 @@ import (
 )
 
 // Remove deletes an installed plugin from disk: its install directory and the
-// cached contract.
+// cached contract. It is idempotent (removing a plugin that is not installed is a
+// no-op) and holds the plugin's install lock so it cannot race a concurrent
+// install of the same plugin.
 func (m *Manager) Remove(pluginName string) error {
 	if err := ValidatePluginName(pluginName); err != nil {
 		return err
 	}
 
 	pluginDir := layout.PluginDir(m.pluginDirectory, pluginName)
-	fmt.Printf("Removing plugin from: %s\n", pluginDir)
 
-	err := os.RemoveAll(pluginDir)
-	if err != nil {
-		return fmt.Errorf("failed to remove plugin directory: %w", err)
+	// Nothing installed: stay idempotent and skip locking - the lock file lives
+	// inside pluginDir, so there is nothing to serialize against and no parent to
+	// create it under.
+	if _, err := os.Stat(pluginDir); errors.Is(err, os.ErrNotExist) {
+		fmt.Printf("Plugin '%s' is not installed.\n", pluginName)
+
+		return nil
 	}
 
-	fmt.Println("Cleaning up plugin files...")
-
-	os.Remove(layout.ContractFile(m.pluginDirectory, pluginName))
-
-	fmt.Printf("✓ Plugin '%s' successfully removed!\n", pluginName)
-
-	return nil
+	return m.removeLocked(pluginName, pluginDir)
 }
 
-// RemoveAll deletes every plugin found under the plugins root.
+// RemoveAll deletes every plugin found under the plugins root, each under its own
+// install lock.
 func (m *Manager) RemoveAll() error {
 	plugins, err := os.ReadDir(layout.PluginsRoot(m.pluginDirectory))
 	if err != nil {
@@ -57,20 +58,41 @@ func (m *Manager) RemoveAll() error {
 	fmt.Println("Found", len(plugins), "plugins to remove:")
 
 	for _, plugin := range plugins {
-		pluginDir := layout.PluginDir(m.pluginDirectory, plugin.Name())
-		fmt.Printf("Removing plugin from: %s\n", pluginDir)
-
-		err := os.RemoveAll(pluginDir)
-		if err != nil {
-			return fmt.Errorf("failed to remove plugin directory: %w", err)
+		if !plugin.IsDir() {
+			continue
 		}
 
-		fmt.Printf("Cleaning up plugin files for '%s'...\n", plugin.Name())
-
-		os.Remove(layout.ContractFile(m.pluginDirectory, plugin.Name()))
-
-		fmt.Printf("✓ Plugin '%s' successfully removed!\n", plugin.Name())
+		if err := m.removeLocked(plugin.Name(), layout.PluginDir(m.pluginDirectory, plugin.Name())); err != nil {
+			return err
+		}
 	}
+
+	return nil
+}
+
+// removeLocked deletes one plugin's install directory and cached contract while
+// holding the plugin's install lock. The same lock guards installs, so a remove
+// can no longer delete a directory out from under a concurrent install (which
+// would corrupt it); a concurrent install instead fails fast with the lock error.
+func (m *Manager) removeLocked(pluginName, pluginDir string) error {
+	release, err := m.acquireInstallLock(layout.InstallLockPath(m.pluginDirectory, pluginName))
+	if err != nil {
+		return err
+	}
+
+	defer release()
+
+	fmt.Printf("Removing plugin from: %s\n", pluginDir)
+
+	if err := os.RemoveAll(pluginDir); err != nil {
+		return fmt.Errorf("failed to remove plugin directory: %w", err)
+	}
+
+	fmt.Println("Cleaning up plugin files...")
+
+	_ = os.Remove(layout.ContractFile(m.pluginDirectory, pluginName))
+
+	fmt.Printf("✓ Plugin '%s' successfully removed!\n", pluginName)
 
 	return nil
 }
