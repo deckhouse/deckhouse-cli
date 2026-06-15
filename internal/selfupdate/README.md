@@ -128,9 +128,6 @@ Platform tags (`rpp_source.go`):
 ## Boundaries and deliberate decisions
 
 - Windows is not supported: a running `.exe` cannot be replaced.
-- The image stream is not digest-verified - trust rests on the TLS channel to
-  the proxy and the kubeconfig identity; artifact health is checked by the
-  smoke test.
 - The client does not follow redirects: the Bearer token must never travel to a
   foreign host.
 

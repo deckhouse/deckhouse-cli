@@ -137,8 +137,6 @@ A failure at any step leaves the previous version installed and working.
   catalog endpoint); install/update by name works.
 - Idempotency compares the version reported by the binary itself; a plugin that
   prints a non-semver banner is re-pulled on every explicit `update`.
-- The image stream is not digest-verified - trust rests on the TLS channel and
-  the kubeconfig identity; artifact health is checked by the smoke test.
 - Plugin-to-plugin dependency backtracking during version selection is out of
   scope (conflicts are enforced at install time).
 
