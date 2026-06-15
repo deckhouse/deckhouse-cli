@@ -389,32 +389,46 @@ func TestInstallPluginDownloadFailureRestoresPreviousBinary(t *testing.T) {
 	assert.Contains(t, string(restored), "v1.0.0", "the restored binary is the previous one, not the truncated download")
 
 	_, oldErr := os.Stat(v1 + ".old")
-	assert.True(t, os.IsNotExist(oldErr), ".old was consumed by the restore")
+	assert.True(t, os.IsNotExist(oldErr), "no .old is created: the download fails before the backup step")
 }
 
-func TestRestoreOldBinary(t *testing.T) {
+func TestBackupOldBinaryKeepsLiveBinary(t *testing.T) {
 	dir := t.TempDir()
 	m := testManager()
 
-	// With a .old backup: the new binary is removed and the old one is restored.
 	bin := filepath.Join(dir, "p")
-	require.NoError(t, os.WriteFile(bin, []byte("new"), 0o755))
-	require.NoError(t, os.WriteFile(bin+".old", []byte("old"), 0o755))
+	require.NoError(t, os.WriteFile(bin, []byte("old-content"), 0o755))
 
-	m.restoreOldBinary(bin)
+	require.NoError(t, m.backupOldBinary(bin))
 
-	restored, err := os.ReadFile(bin)
+	live, err := os.ReadFile(bin)
 	require.NoError(t, err)
-	assert.Equal(t, "old", string(restored), "previous binary restored")
+	assert.Equal(t, "old-content", string(live),
+		"the live binary stays in place (copied, not moved) - no missing-file window during the swap")
+
+	backup, err := os.ReadFile(bin + ".old")
+	require.NoError(t, err)
+	assert.Equal(t, "old-content", string(backup), ".old holds a copy of the previous binary")
+}
+
+func TestRemoveOldBackup(t *testing.T) {
+	dir := t.TempDir()
+	m := testManager()
+
+	// backupOldBinary copies (not moves) the live binary, so after a failed swap the
+	// original is still in place; cleanup only drops the redundant .old copy.
+	bin := filepath.Join(dir, "p")
+	require.NoError(t, os.WriteFile(bin, []byte("current"), 0o755))
+	require.NoError(t, os.WriteFile(bin+".old", []byte("current"), 0o755))
+
+	m.removeOldBackup(bin)
+
+	kept, err := os.ReadFile(bin)
+	require.NoError(t, err)
+	assert.Equal(t, "current", string(kept), "the live binary is left untouched")
 	_, err = os.Stat(bin + ".old")
-	assert.True(t, os.IsNotExist(err), ".old consumed by the rename")
+	assert.True(t, os.IsNotExist(err), ".old backup removed")
 
-	// Without a .old backup (fresh install): the bad binary is just removed.
-	fresh := filepath.Join(dir, "fresh")
-	require.NoError(t, os.WriteFile(fresh, []byte("new"), 0o755))
-
-	m.restoreOldBinary(fresh)
-
-	_, err = os.Stat(fresh)
-	assert.True(t, os.IsNotExist(err), "bad binary removed when there is nothing to restore")
+	// No .old present: no-op, no panic.
+	require.NotPanics(t, func() { m.removeOldBackup(filepath.Join(dir, "missing")) })
 }
