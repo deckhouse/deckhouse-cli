@@ -29,6 +29,9 @@ import (
 	seCreate "github.com/deckhouse/deckhouse-cli/internal/snapshot/snapexport/cmd/create"
 	seDelete "github.com/deckhouse/deckhouse-cli/internal/snapshot/snapexport/cmd/delete"
 	seDownload "github.com/deckhouse/deckhouse-cli/internal/snapshot/snapexport/cmd/download"
+	siCreate "github.com/deckhouse/deckhouse-cli/internal/snapshot/snapimport/cmd/create"
+	siDelete "github.com/deckhouse/deckhouse-cli/internal/snapshot/snapimport/cmd/delete"
+	siUpload "github.com/deckhouse/deckhouse-cli/internal/snapshot/snapimport/cmd/upload"
 )
 
 const cmdName = "snapshot"
@@ -61,6 +64,17 @@ func NewCommand() *cobra.Command {
 		seDelete.NewCommand(ctx, logger),
 	)
 
-	root.AddCommand(exportCmd)
+	importCmd := &cobra.Command{
+		Use:   "import",
+		Short: "Import a Snapshot hierarchy (SnapshotImport)",
+		Run:   func(cmd *cobra.Command, _ []string) { _ = cmd.Help() },
+	}
+	importCmd.AddCommand(
+		siCreate.NewCommand(ctx, logger),
+		siUpload.NewCommand(ctx, logger),
+		siDelete.NewCommand(ctx, logger),
+	)
+
+	root.AddCommand(exportCmd, importCmd)
 	return root
 }
