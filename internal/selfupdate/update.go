@@ -349,8 +349,8 @@ func maxSemver(tags []string) *semver.Version {
 			continue
 		}
 
-		// Auto-update tracks stable releases only; pre-releases (rc/alpha/beta) are
-		// installable explicitly via --version.
+		// The default update tracks stable releases only; pre-releases (rc/alpha/beta)
+		// are installable explicitly via --version.
 		if version.Prerelease() != "" {
 			continue
 		}

@@ -28,9 +28,9 @@ import (
 
 const (
 	// tlsHandshakeTimeout / responseHeaderTimeout bound connection setup and the
-	// wait for response headers, so a wedged proxy cannot hang a command (or a
-	// detached background child) forever. Body streaming is intentionally
-	// unbounded - image downloads may legitimately take minutes.
+	// wait for response headers, so a wedged proxy cannot hang a command forever.
+	// Body streaming is intentionally unbounded - image downloads may legitimately
+	// take minutes.
 	tlsHandshakeTimeout   = 10 * time.Second
 	responseHeaderTimeout = 30 * time.Second
 )

@@ -84,8 +84,7 @@ func (m *Manager) switchToFallbackRoot() bool {
 // InstalledPluginNames returns the plugins that are actually installed under the
 // plugins root - a directory with a `current` symlink. A leftover directory from a
 // failed install has no symlink and is excluded, so it cannot become an install
-// target for a plugin the user never had (UpdateAll also runs unattended in the
-// background).
+// target for a plugin the user never had.
 func (m *Manager) InstalledPluginNames() ([]string, error) {
 	entries, err := os.ReadDir(layout.PluginsRoot(m.pluginDirectory))
 	if err != nil {

@@ -170,10 +170,10 @@ func (m *Manager) InstallPlugin(ctx context.Context, pluginName string, opts ...
 		return err
 	}
 
-	// Downgrade guard for the implicit path (incl. the unattended background
-	// update): when the newest tag's contract is temporarily unreadable, selection
-	// falls back to an older version - that must not silently downgrade a newer
-	// installed plugin. Explicit --version / --use-major bypass this by design.
+	// Downgrade guard for the implicit path: when the newest tag's contract is
+	// temporarily unreadable, selection falls back to an older version - that must
+	// not silently downgrade a newer installed plugin. Explicit --version /
+	// --use-major bypass this by design.
 	if !explicitMajor && m.installedIsNewerThan(pluginName, installVersion) {
 		fmt.Printf("Selected %s is older than the installed version; keeping the installed version "+
 			"(use --version to downgrade explicitly).\n", installVersion.Original())
@@ -187,8 +187,8 @@ func (m *Manager) InstallPlugin(ctx context.Context, pluginName string, opts ...
 // inheritInstalledMajor returns the major version to pin an implicit update to:
 // the major of the installed plugin, or -1 (consider all majors) for a fresh
 // install. The major is read from disk (the `current` symlink), not by running
-// the binary, so a broken binary cannot drop the pin and let the unattended
-// background update cross a major.
+// the binary, so a broken binary cannot drop the pin and let an implicit update
+// cross a major.
 func (m *Manager) inheritInstalledMajor(pluginName string) int {
 	installed, _ := m.checkInstalled(pluginName)
 	if !installed {
@@ -357,9 +357,9 @@ func (m *Manager) preparePluginDirs(pluginName string, version *semver.Version) 
 }
 
 // acquireInstallLock serializes installs of the plugin. A lock orphaned by a
-// hard-killed install (older than installLockStaleAfter) is reclaimed - the
-// background installer makes such orphans plausible, so recover instead of
-// failing forever. The caller must invoke the returned release func when
+// hard-killed install (older than installLockStaleAfter) is reclaimed - a
+// Ctrl-C'd or crashed install makes such orphans plausible, so recover instead
+// of failing forever. The caller must invoke the returned release func when
 // finished (typically via defer).
 func (m *Manager) acquireInstallLock(lockFilePath string) (func(), error) {
 	release, err := lockfile.Acquire(lockFilePath, installLockStaleAfter, func(age time.Duration) {
@@ -501,8 +501,8 @@ func pluginBinaryVersion(ctx context.Context, binaryPath string) (*semver.Versio
 
 // installedMajorFromDisk returns the major the plugin's `current` symlink points
 // at, read from the on-disk v<major> directory WITHOUT running the binary - so a
-// broken/hung binary cannot lose the major pin and let the (unattended) background
-// update silently cross a major.
+// broken/hung binary cannot lose the major pin and let an implicit update
+// silently cross a major.
 func (m *Manager) installedMajorFromDisk(pluginName string) (int, bool) {
 	target, err := os.Readlink(layout.CurrentLinkPath(m.pluginDirectory, pluginName))
 	if err != nil {
@@ -519,8 +519,8 @@ func (m *Manager) installedMajorFromDisk(pluginName string) (int, bool) {
 }
 
 // pluginAlreadyAtVersion reports whether the major's binary is already the selected
-// version, so an install/background-update is a no-op (idempotency; see ADR safe
-// update "skip if already installed").
+// version, so an install/update is a no-op (idempotency; see ADR safe update
+// "skip if already installed").
 func (m *Manager) pluginAlreadyAtVersion(ctx context.Context, binaryPath string, version *semver.Version) bool {
 	if _, err := os.Stat(binaryPath); err != nil {
 		return false
