@@ -75,7 +75,7 @@ func TestDiscoverEndpoints(t *testing.T) {
 		proxyPod("no-ip", "", corev1.PodRunning, true, false),
 	)
 
-	endpoints, err := DiscoverEndpoints(context.Background(), kube)
+	endpoints, err := discoverEndpoints(context.Background(), kube)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"https://10.0.0.1:4219"}, endpoints)
 }
@@ -85,20 +85,20 @@ func TestDiscoverEndpointsNoneServing(t *testing.T) {
 		proxyPod("not-ready", "10.0.0.2", corev1.PodRunning, false, false),
 	)
 
-	_, err := DiscoverEndpoints(context.Background(), kube)
+	_, err := discoverEndpoints(context.Background(), kube)
 	require.Error(t, err)
 }
 
 func TestDiscoverIngressEndpoint(t *testing.T) {
 	kube := fake.NewSimpleClientset(proxyIngress("registry-packages-proxy.example.com"))
 
-	endpoint, err := DiscoverIngressEndpoint(context.Background(), kube)
+	endpoint, err := discoverIngressEndpoint(context.Background(), kube)
 	require.NoError(t, err)
 	assert.Equal(t, "https://registry-packages-proxy.example.com", endpoint)
 }
 
 func TestDiscoverIngressEndpointAbsent(t *testing.T) {
-	_, err := DiscoverIngressEndpoint(context.Background(), fake.NewSimpleClientset())
+	_, err := discoverIngressEndpoint(context.Background(), fake.NewSimpleClientset())
 	require.Error(t, err)
 }
 

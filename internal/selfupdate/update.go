@@ -194,7 +194,7 @@ func SwitchTo(ctx context.Context, exePath, tag string, store *Store, logger *dk
 		return SwitchResult{}, fmt.Errorf("create version store: %w", err)
 	}
 
-	release, err := acquireLock(store.LockPath(), logger)
+	release, err := acquireLock(store.lockPath(), logger)
 	if err != nil {
 		return SwitchResult{}, err
 	}
@@ -212,25 +212,25 @@ func SwitchTo(ctx context.Context, exePath, tag string, store *Store, logger *dk
 		retain(ctx, store, exePath, version.Version, logger)
 	}
 
-	if !store.Has(tag) {
+	if !store.has(tag) {
 		if stage == nil {
 			return SwitchResult{}, fmt.Errorf("version %s is not in the local store", tag)
 		}
 
-		if err := store.Install(ctx, tag, stage); err != nil {
+		if err := store.install(ctx, tag, stage); err != nil {
 			return SwitchResult{}, err
 		}
 	}
 
 	// Fresh installs were smoke-tested while staged; pre-existing entries are
 	// re-checked before they become the active binary.
-	if err := smokeTest(ctx, store.BinaryPath(tag)); err != nil {
+	if err := smokeTest(ctx, store.binaryPath(tag)); err != nil {
 		return SwitchResult{}, err
 	}
 
 	result := SwitchResult{PrevTag: store.CurrentTag()}
 
-	if err := store.SwitchCurrent(tag); err != nil {
+	if err := store.switchCurrent(tag); err != nil {
 		return SwitchResult{}, err
 	}
 
@@ -258,7 +258,7 @@ func migratePathEntry(exePath string, store *Store) error {
 		return withPrivilegeHint(exePath, fmt.Errorf("back up current binary: %w", err))
 	}
 
-	if err := os.Symlink(store.CurrentLinkPath(), exePath); err != nil {
+	if err := os.Symlink(store.currentLinkPath(), exePath); err != nil {
 		if restoreErr := os.Rename(oldPath, exePath); restoreErr != nil {
 			return fmt.Errorf("replacing the binary with a symlink failed (%w); restoring the previous binary also failed (%v) - restore it manually from %s",
 				err, restoreErr, oldPath)

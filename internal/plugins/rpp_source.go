@@ -47,7 +47,7 @@ const (
 	maxContractBytes = 1 << 20
 )
 
-// rppPluginSource adapts the registry-packages-proxy client to PluginSource.
+// rppPluginSource adapts the registry-packages-proxy client to pluginSource.
 type rppPluginSource struct {
 	client *rpp.Client
 	logger *dkplog.Logger
@@ -57,7 +57,7 @@ func newRppPluginSource(client *rpp.Client, logger *dkplog.Logger) *rppPluginSou
 	return &rppPluginSource{client: client, logger: logger}
 }
 
-var _ PluginSource = (*rppPluginSource)(nil)
+var _ pluginSource = (*rppPluginSource)(nil)
 
 func (s *rppPluginSource) ListPluginTags(ctx context.Context, pluginName string) ([]string, error) {
 	ref, err := rpp.PluginImage(pluginName)

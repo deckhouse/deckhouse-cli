@@ -48,9 +48,9 @@ func TestStoreArchiveAndResolve(t *testing.T) {
 
 	src := writeTestBinary(t, dir, "binary", "PAYLOAD")
 	require.NoError(t, store.Archive(context.Background(), src, "v1.2.3"))
-	require.True(t, store.Has("v1.2.3"))
+	require.True(t, store.has("v1.2.3"))
 
-	info, err := os.Stat(store.BinaryPath("v1.2.3"))
+	info, err := os.Stat(store.binaryPath("v1.2.3"))
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o755), info.Mode().Perm(), "stored binary must be executable")
 
@@ -69,7 +69,7 @@ func TestStoreArchiveKeepsExistingEntry(t *testing.T) {
 	second := writeTestBinary(t, dir, "second", "SECOND")
 	require.NoError(t, store.Archive(context.Background(), second, "v1.0.0"))
 
-	got, err := os.ReadFile(store.BinaryPath("v1.0.0"))
+	got, err := os.ReadFile(store.binaryPath("v1.0.0"))
 	require.NoError(t, err)
 	assert.Equal(t, testScript("FIRST"), string(got), "a published version is immutable - the existing entry wins")
 }
@@ -86,11 +86,11 @@ func TestStoreInstallRejectsCorruptBinary(t *testing.T) {
 	dir := t.TempDir()
 	store := &Store{root: filepath.Join(dir, "cli")}
 
-	err := store.Install(context.Background(), "v1.0.0", func(dst string) error {
+	err := store.install(context.Background(), "v1.0.0", func(dst string) error {
 		return os.WriteFile(dst, []byte("not a program"), 0o755)
 	})
 	require.Error(t, err, "a binary failing the smoke test must not be installed")
-	assert.False(t, store.Has("v1.0.0"))
+	assert.False(t, store.has("v1.0.0"))
 }
 
 func TestStoreListSkipsGarbageAndSortsNewestFirst(t *testing.T) {
@@ -122,21 +122,21 @@ func TestStoreSwitchCurrentAndCurrentTag(t *testing.T) {
 	store := &Store{root: filepath.Join(dir, "cli")}
 
 	assert.Empty(t, store.CurrentTag(), "no link yet - no current tag")
-	require.Error(t, store.SwitchCurrent("v1.0.0"), "cannot switch to a version that is not installed")
+	require.Error(t, store.switchCurrent("v1.0.0"), "cannot switch to a version that is not installed")
 
 	src := writeTestBinary(t, dir, "binary", "PAYLOAD")
 	for _, tag := range []string{"v1.0.0", "v2.0.0"} {
 		require.NoError(t, store.Archive(context.Background(), src, tag))
 	}
 
-	require.NoError(t, store.SwitchCurrent("v1.0.0"))
+	require.NoError(t, store.switchCurrent("v1.0.0"))
 	assert.Equal(t, "v1.0.0", store.CurrentTag())
 
 	// Repointing is an atomic replace; reading through the link follows the chain.
-	require.NoError(t, store.SwitchCurrent("v2.0.0"))
+	require.NoError(t, store.switchCurrent("v2.0.0"))
 	assert.Equal(t, "v2.0.0", store.CurrentTag())
 
-	got, err := os.ReadFile(store.CurrentLinkPath())
+	got, err := os.ReadFile(store.currentLinkPath())
 	require.NoError(t, err)
 	assert.Equal(t, testScript("PAYLOAD"), string(got))
 }
@@ -148,7 +148,7 @@ func TestStoreContains(t *testing.T) {
 	src := writeTestBinary(t, dir, "binary", "PAYLOAD")
 	require.NoError(t, store.Archive(context.Background(), src, "v1.0.0"))
 
-	inStore, err := filepath.EvalSymlinks(store.BinaryPath("v1.0.0"))
+	inStore, err := filepath.EvalSymlinks(store.binaryPath("v1.0.0"))
 	require.NoError(t, err)
 	assert.True(t, store.Contains(inStore))
 
@@ -160,11 +160,11 @@ func TestStoreContains(t *testing.T) {
 func TestNilStoreIsNoop(t *testing.T) {
 	var store *Store
 
-	assert.False(t, store.Has("v1.0.0"))
+	assert.False(t, store.has("v1.0.0"))
 	assert.Nil(t, store.List())
 	assert.Empty(t, store.Resolve(semver.MustParse("1.0.0")))
 	assert.Empty(t, store.CurrentTag())
 	assert.False(t, store.Contains("/usr/local/bin/d8"))
 	assert.NoError(t, store.Archive(context.Background(), "/dev/null", "v1.0.0"))
-	assert.Error(t, store.Install(context.Background(), "v1.0.0", nil))
+	assert.Error(t, store.install(context.Background(), "v1.0.0", nil))
 }

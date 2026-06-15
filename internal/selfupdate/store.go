@@ -85,29 +85,29 @@ func NewStoreAt(root string) *Store {
 	return &Store{root: root}
 }
 
-// BinaryPath returns the path the binary for tag is stored under (whether or
+// binaryPath returns the path the binary for tag is stored under (whether or
 // not it exists).
-func (s *Store) BinaryPath(tag string) string {
+func (s *Store) binaryPath(tag string) string {
 	return filepath.Join(s.root, storeVersionsDirName, tag, storeBinaryName)
 }
 
-// CurrentLinkPath returns the stable `current` symlink the PATH entry points at.
-func (s *Store) CurrentLinkPath() string {
+// currentLinkPath returns the stable `current` symlink the PATH entry points at.
+func (s *Store) currentLinkPath() string {
 	return filepath.Join(s.root, storeCurrentLinkName)
 }
 
-// LockPath returns the lock file serializing store mutations.
-func (s *Store) LockPath() string {
+// lockPath returns the lock file serializing store mutations.
+func (s *Store) lockPath() string {
 	return filepath.Join(s.root, storeLockName)
 }
 
-// Has reports whether tag's binary is present in the store.
-func (s *Store) Has(tag string) bool {
+// has reports whether tag's binary is present in the store.
+func (s *Store) has(tag string) bool {
 	if s == nil {
 		return false
 	}
 
-	info, err := os.Stat(s.BinaryPath(tag))
+	info, err := os.Stat(s.binaryPath(tag))
 
 	return err == nil && info.Mode().IsRegular()
 }
@@ -146,7 +146,7 @@ func (s *Store) List() []*semver.Version {
 		}
 
 		v, err := semver.NewVersion(entry.Name())
-		if err != nil || !s.Has(entry.Name()) {
+		if err != nil || !s.has(entry.Name()) {
 			continue
 		}
 
@@ -165,7 +165,7 @@ func (s *Store) CurrentTag() string {
 		return ""
 	}
 
-	target, err := os.Readlink(s.CurrentLinkPath())
+	target, err := os.Readlink(s.currentLinkPath())
 	if err != nil {
 		return ""
 	}
@@ -180,14 +180,14 @@ func (s *Store) CurrentTag() string {
 	return tag
 }
 
-// SwitchCurrent atomically repoints the `current` symlink at tag's binary. The
+// switchCurrent atomically repoints the `current` symlink at tag's binary. The
 // target is relative (versions/<tag>/d8), so the layout survives a moved home.
-func (s *Store) SwitchCurrent(tag string) error {
-	if !s.Has(tag) {
+func (s *Store) switchCurrent(tag string) error {
+	if !s.has(tag) {
 		return fmt.Errorf("version %s is not in the store", tag)
 	}
 
-	staged := s.CurrentLinkPath() + storeStagedSuffix
+	staged := s.currentLinkPath() + storeStagedSuffix
 	_ = os.Remove(staged)
 
 	target := filepath.Join(storeVersionsDirName, tag, storeBinaryName)
@@ -195,7 +195,7 @@ func (s *Store) SwitchCurrent(tag string) error {
 		return fmt.Errorf("stage current symlink: %w", err)
 	}
 
-	if err := os.Rename(staged, s.CurrentLinkPath()); err != nil {
+	if err := os.Rename(staged, s.currentLinkPath()); err != nil {
 		_ = os.Remove(staged)
 
 		return fmt.Errorf("switch current symlink: %w", err)
@@ -219,12 +219,12 @@ func (s *Store) Contains(path string) bool {
 	return strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
-// Install materializes tag in the store via fetch (which writes the binary to
+// install materializes tag in the store via fetch (which writes the binary to
 // the path it is given), smoke-testing the staged file BEFORE the entry becomes
 // visible - a corrupt artifact never lands under its final name (where `list`
 // would mark it installed and completion would suggest it). An existing entry
 // is kept as is: a published version is immutable.
-func (s *Store) Install(ctx context.Context, tag string, fetch func(dst string) error) error {
+func (s *Store) install(ctx context.Context, tag string, fetch func(dst string) error) error {
 	if s == nil {
 		return fmt.Errorf("version store is unavailable")
 	}
@@ -233,11 +233,11 @@ func (s *Store) Install(ctx context.Context, tag string, fetch func(dst string) 
 		return fmt.Errorf("tag %q is not a semver version: %w", tag, err)
 	}
 
-	if s.Has(tag) {
+	if s.has(tag) {
 		return nil
 	}
 
-	binPath := s.BinaryPath(tag)
+	binPath := s.binaryPath(tag)
 	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
 		return fmt.Errorf("create version store entry: %w", err)
 	}
@@ -273,7 +273,7 @@ func (s *Store) Archive(ctx context.Context, srcPath, tag string) error {
 		return nil
 	}
 
-	return s.Install(ctx, tag, func(dst string) error {
+	return s.install(ctx, tag, func(dst string) error {
 		return copyFile(srcPath, dst)
 	})
 }

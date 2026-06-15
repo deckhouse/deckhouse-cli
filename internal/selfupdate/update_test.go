@@ -108,16 +108,16 @@ func TestApplyMigratesPlainInstallAndKeepsBackup(t *testing.T) {
 	assert.Equal(t, newBinary, string(got))
 
 	assert.Equal(t, "v1.0.0", store.CurrentTag())
-	assert.True(t, store.Has("v1.0.0"))
+	assert.True(t, store.has("v1.0.0"))
 
 	backup, err := os.ReadFile(exePath + OldSuffix)
 	require.NoError(t, err)
 	assert.Equal(t, "OLD", string(backup))
 
-	_, err = os.Stat(store.BinaryPath("v1.0.0") + storeStagedSuffix)
+	_, err = os.Stat(store.binaryPath("v1.0.0") + storeStagedSuffix)
 	assert.True(t, os.IsNotExist(err), "staged store entry must be cleaned up")
 
-	_, err = os.Stat(store.LockPath())
+	_, err = os.Stat(store.lockPath())
 	assert.True(t, os.IsNotExist(err), "lock file must be released")
 }
 
@@ -189,6 +189,6 @@ func TestApplyRejectsBinaryThatFailsSmokeTest(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "OLD", string(got), "original binary must be untouched on failure")
 
-	assert.False(t, store.Has("v1.0.0"), "a corrupt artifact must not land in the store")
+	assert.False(t, store.has("v1.0.0"), "a corrupt artifact must not land in the store")
 	assert.Empty(t, store.CurrentTag(), "current must not be switched on failure")
 }

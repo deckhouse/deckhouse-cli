@@ -696,7 +696,7 @@ func (m *Manager) filterMajorVersion(versions []string, majorVersion int) []stri
 	return res
 }
 
-func (m *Manager) resolvePluginConflicts(ctx context.Context, failedConstraints FailedConstraints) error {
+func (m *Manager) resolvePluginConflicts(ctx context.Context, failedConstraints failedConstraints) error {
 	// for each failed constraint, try to install the plugin
 	for pluginName := range failedConstraints {
 		m.logger.Debug("resolving plugin conflict", slog.String("plugin", pluginName))

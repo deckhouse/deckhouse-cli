@@ -30,7 +30,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/requirements"
 )
 
-// fakeSelectSource is a PluginSource returning fixed tags and per-tag contracts,
+// fakeSelectSource is a pluginSource returning fixed tags and per-tag contracts,
 // counting GetPluginContract calls so cache behaviour can be asserted.
 type fakeSelectSource struct {
 	tags          []string

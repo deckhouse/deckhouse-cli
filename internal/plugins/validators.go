@@ -92,12 +92,12 @@ func (m *Manager) LatestVersion(ctx context.Context, pluginName string) (*semver
 	return candidates[0], nil
 }
 
-// FailedConstraints holds plugin requirements that were not satisfied during
+// failedConstraints holds plugin requirements that were not satisfied during
 // installation: a nil value means the plugin is missing entirely, a non-nil
 // value carries the constraint that the currently installed version fails.
-type FailedConstraints map[string]*semver.Constraints
+type failedConstraints map[string]*semver.Constraints
 
-func (m *Manager) validateRequirements(ctx context.Context, plugin *internal.Plugin) (FailedConstraints, error) {
+func (m *Manager) validateRequirements(ctx context.Context, plugin *internal.Plugin) (failedConstraints, error) {
 	m.logger.Debug("validating plugin requirements", slog.String("plugin", plugin.Name))
 
 	if err := m.validatePluginConflicts(plugin); err != nil {
@@ -193,12 +193,12 @@ func validatePluginConflict(plugin *internal.Plugin, installedPlugin *internal.P
 }
 
 // validatePluginRequirementMandatory enforces mandatory plugin requirements:
-//   - if the dependency is not installed, record a soft failure in FailedConstraints;
+//   - if the dependency is not installed, record a soft failure in failedConstraints;
 //   - if the dependency is installed but fails the constraint, record a soft failure;
 //   - return a non-nil error only for operational failures (install check, version
 //     lookup, invalid constraint).
-func (m *Manager) validatePluginRequirementMandatory(plugin *internal.Plugin) (FailedConstraints, error) {
-	result := make(FailedConstraints)
+func (m *Manager) validatePluginRequirementMandatory(plugin *internal.Plugin) (failedConstraints, error) {
+	result := make(failedConstraints)
 
 	for _, pluginRequirement := range plugin.Requirements.Plugins.Mandatory {
 		installed, err := m.checkInstalled(pluginRequirement.Name)

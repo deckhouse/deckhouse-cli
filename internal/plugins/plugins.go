@@ -34,7 +34,7 @@ import (
 // and the per-plugin wrapper command (see internal/plugins/cmd): it installs,
 // updates, removes, lists and runs plugins from the configured source.
 type Manager struct {
-	service         PluginSource
+	service         pluginSource
 	pluginDirectory string
 
 	// clusterStateCache memoizes the cluster snapshot used to enforce cluster-side

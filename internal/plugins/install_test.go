@@ -34,7 +34,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
 )
 
-// fakeInstallSource is a PluginSource whose ExtractPlugin writes a caller-supplied
+// fakeInstallSource is a pluginSource whose ExtractPlugin writes a caller-supplied
 // binary, so the install pipeline (smoke test, rollback) can be exercised on disk.
 type fakeInstallSource struct {
 	contract *internal.Plugin

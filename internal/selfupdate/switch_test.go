@@ -42,10 +42,10 @@ func TestSwitchToStoredVersionRepointsSymlink(t *testing.T) {
 		require.NoError(t, store.Archive(context.Background(), src, marker+".0.0"))
 	}
 
-	require.NoError(t, store.SwitchCurrent("v1.0.0"))
+	require.NoError(t, store.switchCurrent("v1.0.0"))
 
 	// A managed install: the running binary resolves into the store.
-	exePath, err := filepath.EvalSymlinks(store.BinaryPath("v1.0.0"))
+	exePath, err := filepath.EvalSymlinks(store.binaryPath("v1.0.0"))
 	require.NoError(t, err)
 
 	res, err := SwitchTo(context.Background(), exePath, "v2.0.0", store, dkplog.NewNop(), nil)
@@ -55,9 +55,9 @@ func TestSwitchToStoredVersionRepointsSymlink(t *testing.T) {
 	assert.Equal(t, "v1.0.0", res.PrevTag)
 	assert.Equal(t, "v2.0.0", store.CurrentTag())
 
-	assert.True(t, store.Has("v1.0.0"), "the displaced version stays installed")
+	assert.True(t, store.has("v1.0.0"), "the displaced version stays installed")
 
-	got, err := os.ReadFile(store.CurrentLinkPath())
+	got, err := os.ReadFile(store.currentLinkPath())
 	require.NoError(t, err)
 	assert.Equal(t, testScript("v2"), string(got))
 }
@@ -93,7 +93,7 @@ func TestSwitchToSeedsRunningVersion(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.True(t, res.Migrated)
-	assert.True(t, store.Has("v0.9.0"), "the running binary must be seeded into the store")
+	assert.True(t, store.has("v0.9.0"), "the running binary must be seeded into the store")
 	assert.Equal(t, "v0.9.0", store.CurrentTag())
 
 	got, err := os.ReadFile(exePath) // PATH symlink -> current -> stored binary

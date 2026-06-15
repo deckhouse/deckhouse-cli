@@ -156,7 +156,7 @@ func (m *Manager) ensurePluginRequirements(ctx context.Context, contract *intern
 		return nil
 	}
 
-	// FailedConstraints values: nil = dependency missing, *Constraints = wrong version.
+	// failedConstraints values: nil = dependency missing, *Constraints = wrong version.
 	parts := make([]string, 0, len(failed))
 	for name, constraint := range failed {
 		if constraint == nil {

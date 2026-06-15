@@ -52,12 +52,12 @@ const (
 // --rpp-insecure-skip-tls-verify and cluster-network reachability). The second
 // return value names the source ("ingress" / "pod") for logging.
 func chooseDiscoveredEndpoint(ctx context.Context, kube kubernetes.Interface) (string, string, error) {
-	endpoint, err := DiscoverIngressEndpoint(ctx, kube)
+	endpoint, err := discoverIngressEndpoint(ctx, kube)
 	if err == nil {
 		return endpoint, "ingress", nil
 	}
 
-	endpoints, err := DiscoverEndpoints(ctx, kube)
+	endpoints, err := discoverEndpoints(ctx, kube)
 	if err != nil {
 		return "", "", err
 	}
@@ -65,12 +65,12 @@ func chooseDiscoveredEndpoint(ctx context.Context, kube kubernetes.Interface) (s
 	return endpoints[0], "pod", nil
 }
 
-// DiscoverIngressEndpoint returns the public proxy endpoint (https://<host>) taken
+// discoverIngressEndpoint returns the public proxy endpoint (https://<host>) taken
 // from the registry-packages-proxy Ingress. This path has a valid TLS certificate
 // and is reachable from outside the cluster - the right default for a workstation.
 // It errors if the Ingress is absent or has no host, so the caller can fall back to
 // in-cluster pod discovery.
-func DiscoverIngressEndpoint(ctx context.Context, kube kubernetes.Interface) (string, error) {
+func discoverIngressEndpoint(ctx context.Context, kube kubernetes.Interface) (string, error) {
 	ingress, err := kube.NetworkingV1().Ingresses(proxyNamespace).Get(ctx, proxyIngressName, metav1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("get registry-packages-proxy ingress: %w", err)
@@ -85,7 +85,7 @@ func DiscoverIngressEndpoint(ctx context.Context, kube kubernetes.Interface) (st
 	return "", fmt.Errorf("registry-packages-proxy ingress %q has no host", proxyIngressName)
 }
 
-// DiscoverEndpoints returns proxy endpoint base URLs by listing the
+// discoverEndpoints returns proxy endpoint base URLs by listing the
 // registry-packages-proxy pods and joining each ready, running pod IP with the
 // proxy port. Pods that are terminating or not yet ready are skipped, so callers
 // do not dial draining or not-yet-serving proxies.
@@ -93,7 +93,7 @@ func DiscoverIngressEndpoint(ctx context.Context, kube kubernetes.Interface) (st
 // These are master-node pod IPs, reachable from inside the cluster network. A
 // workstation outside the cluster usually cannot reach them and should pass an
 // explicit endpoint (for example the public Ingress) instead.
-func DiscoverEndpoints(ctx context.Context, kube kubernetes.Interface) ([]string, error) {
+func discoverEndpoints(ctx context.Context, kube kubernetes.Interface) ([]string, error) {
 	pods, err := kube.CoreV1().Pods(proxyNamespace).List(ctx, metav1.ListOptions{LabelSelector: proxyPodSelector})
 	if err != nil {
 		return nil, fmt.Errorf("list registry-packages-proxy pods: %w", err)

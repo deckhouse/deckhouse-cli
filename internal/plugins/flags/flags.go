@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	DefaultDeckhousePluginsDir = "/opt/deckhouse/lib/deckhouse-cli"
+	defaultDeckhousePluginsDir = "/opt/deckhouse/lib/deckhouse-cli"
 
 	// Env* constants are the single source of truth for the environment variable
 	// names: functional reads and help texts must reference them, never literals.
@@ -38,7 +38,7 @@ const (
 
 // CLI Parameters
 var (
-	DeckhousePluginsDir = DefaultDeckhousePluginsDir
+	DeckhousePluginsDir = defaultDeckhousePluginsDir
 
 	// Kubeconfig and KubeContext locate the cluster; used to reach the
 	// registry-packages-proxy and to enforce cluster-side plugin requirements
