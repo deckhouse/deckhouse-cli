@@ -64,13 +64,6 @@ func gzipTar(t *testing.T, files map[string]tarFile) []byte {
 	return buf.Bytes()
 }
 
-func TestRppSourceListPluginsUnsupported(t *testing.T) {
-	src := newRppPluginSource(nil, dkplog.NewNop())
-
-	_, err := src.ListPlugins(context.Background())
-	require.ErrorIs(t, err, errListPluginsUnsupported)
-}
-
 func newTestRppSource(t *testing.T, body []byte) *rppPluginSource {
 	t.Helper()
 

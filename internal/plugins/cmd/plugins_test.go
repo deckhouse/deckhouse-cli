@@ -57,8 +57,8 @@ func TestPluginsDirFlagIsHonored(t *testing.T) {
 	// --plugins-dir flag is parsed later and must still take effect.
 	//
 	// Startup eagerly builds the registry-packages-proxy client, so point the
-	// kubeconfig and endpoint at throwaway values: 'list --installed' reads only
-	// the local plugins dir and makes no request, so no cluster is needed.
+	// kubeconfig and endpoint at throwaway values: 'list' reads only the local
+	// plugins dir and makes no request, so no cluster is needed.
 	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
 	require.NoError(t, os.WriteFile(kubeconfig, []byte(minimalKubeconfig), 0o600))
 
@@ -73,7 +73,7 @@ func TestPluginsDirFlagIsHonored(t *testing.T) {
 
 	cmd := NewCommand(dkplog.NewNop())
 	cmd.SetContext(context.Background())
-	cmd.SetArgs([]string{"list", "--installed", "--plugins-dir", dir})
+	cmd.SetArgs([]string{"list", "--plugins-dir", dir})
 	cmd.SetOut(io.Discard)
 
 	require.NoError(t, cmd.Execute())

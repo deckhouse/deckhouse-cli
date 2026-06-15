@@ -22,11 +22,12 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal"
 )
 
-// PluginSource is the backend the plugin commands pull from: it lists plugins and
-// their versions, reads a plugin contract, and extracts a plugin binary to disk.
-// The in-cluster registry-packages-proxy client (rppPluginSource) implements it.
+// PluginSource is the backend the plugin commands pull from: it lists a plugin's
+// versions, reads a plugin contract, and extracts a plugin binary to disk. The
+// in-cluster registry-packages-proxy client (rppPluginSource) implements it.
+// Listing the whole catalog is not part of the contract: the proxy serves only
+// allow-listed images by exact name and exposes no catalog endpoint.
 type PluginSource interface {
-	ListPlugins(ctx context.Context) ([]string, error)
 	ListPluginTags(ctx context.Context, pluginName string) ([]string, error)
 	GetPluginContract(ctx context.Context, pluginName, tag string) (*internal.Plugin, error)
 	ExtractPlugin(ctx context.Context, pluginName, tag, destination string) error

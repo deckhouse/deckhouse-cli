@@ -50,8 +50,6 @@ type fakeInstallSource struct {
 	contractByTag map[string]*internal.Plugin
 }
 
-func (f *fakeInstallSource) ListPlugins(context.Context) ([]string, error) { return nil, nil }
-
 func (f *fakeInstallSource) ListPluginTags(_ context.Context, pluginName string) ([]string, error) {
 	f.listedTags = append(f.listedTags, pluginName)
 

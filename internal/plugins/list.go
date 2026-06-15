@@ -17,18 +17,12 @@ limitations under the License.
 package plugins
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"os"
 
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
 )
-
-// maxPluginDescLen caps a description in the available-plugins listing so a long
-// contract description does not break the table layout (over the limit it is
-// elided with a trailing "...").
-const maxPluginDescLen = 40
 
 // PluginInfo holds all information needed to display a plugin
 type PluginInfo struct {
@@ -37,42 +31,19 @@ type PluginInfo struct {
 	Description string
 }
 
-// ListResult holds all data for the list command
-type ListResult struct {
-	Installed     []PluginInfo
-	Available     []PluginInfo
-	RegistryError error
-}
+// List returns the installed plugins. The registry-packages-proxy serves only
+// allow-listed images by exact name and exposes no catalog endpoint, so the set
+// of available plugins cannot be listed - a plugin is inspected by name with
+// `d8 plugins versions <name>`.
+func (m *Manager) List() []PluginInfo {
+	installed, err := m.fetchInstalledPlugins()
+	if err != nil {
+		m.logger.Warn("Failed to fetch installed plugins", slog.String("error", err.Error()))
 
-// List fetches and prepares all data needed for display
-func (m *Manager) List(ctx context.Context, showInstalledOnly, showAvailableOnly bool) *ListResult {
-	data := &ListResult{
-		Installed: []PluginInfo{},
-		Available: []PluginInfo{},
+		return []PluginInfo{}
 	}
 
-	// Fetch installed plugins if needed
-	if !showAvailableOnly {
-		installed, err := m.fetchInstalledPlugins()
-		if err != nil {
-			m.logger.Warn("Failed to fetch installed plugins", slog.String("error", err.Error()))
-		} else {
-			data.Installed = installed
-		}
-	}
-
-	// Fetch available plugins from registry if needed
-	if !showInstalledOnly {
-		available, err := m.fetchAvailablePlugins(ctx)
-		if err != nil {
-			m.logger.Warn("Failed to fetch available plugins", slog.String("error", err.Error()))
-			data.RegistryError = err
-		} else {
-			data.Available = available
-		}
-	}
-
-	return data
+	return installed
 }
 
 // fetchInstalledPlugins retrieves installed plugins from filesystem
@@ -117,61 +88,4 @@ func (m *Manager) fetchInstalledPlugins() ([]PluginInfo, error) {
 	}
 
 	return res, nil
-}
-
-// fetchAvailablePlugins retrieves and prepares available plugins from registry
-func (m *Manager) fetchAvailablePlugins(ctx context.Context) ([]PluginInfo, error) {
-	pluginNames, err := m.service.ListPlugins(ctx)
-	if err != nil {
-		// The error (including errListPluginsUnsupported from the proxy source) is
-		// surfaced as RegistryError by the caller, which prints a "catalog listing
-		// unavailable, install by name" hint - the whole listing is not failed.
-		m.logger.Warn("Failed to list plugins", slog.String("error", err.Error()))
-
-		return nil, fmt.Errorf("failed to list plugins: %w", err)
-	}
-
-	if len(pluginNames) == 0 {
-		return []PluginInfo{}, nil
-	}
-
-	plugins := make([]PluginInfo, 0, len(pluginNames))
-
-	// Fetch contract for each plugin to get version and description
-	for _, pluginName := range pluginNames {
-		plugin := PluginInfo{
-			Name: pluginName,
-		}
-
-		// fetch versions to get latest version
-		latestVersion, err := m.LatestVersion(ctx, pluginName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch latest version: %w", err)
-		}
-
-		// Get the latest version contract
-		contract, err := m.service.GetPluginContract(ctx, pluginName, latestVersion.Original())
-		if err != nil {
-			// Log the error for debugging
-			m.logger.Warn("Failed to get plugin contract",
-				slog.String("plugin", pluginName),
-				slog.String("tag", latestVersion.Original()),
-				slog.String("error", err.Error()))
-
-			// Show ERROR in version column and error description in description column
-			plugin.Version = "ERROR"
-			plugin.Description = "failed to get plugin contract"
-		} else {
-			plugin.Version = latestVersion.Original()
-			plugin.Description = contract.Description
-
-			if len(plugin.Description) > maxPluginDescLen {
-				plugin.Description = plugin.Description[:maxPluginDescLen-3] + "..."
-			}
-		}
-
-		plugins = append(plugins, plugin)
-	}
-
-	return plugins, nil
 }

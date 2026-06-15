@@ -18,7 +18,6 @@ package plugins
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
 
@@ -37,10 +36,6 @@ type fakeSelectSource struct {
 	tags          []string
 	contracts     map[string]*internal.Plugin
 	contractCalls map[string]int
-}
-
-func (f *fakeSelectSource) ListPlugins(context.Context) ([]string, error) {
-	return nil, errors.New("not supported")
 }
 
 func (f *fakeSelectSource) ListPluginTags(context.Context, string) ([]string, error) {

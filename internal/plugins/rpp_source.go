@@ -18,7 +18,6 @@ package plugins
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 
@@ -48,10 +47,6 @@ const (
 	maxContractBytes = 1 << 20
 )
 
-// errListPluginsUnsupported is returned by the proxy source for ListPlugins: the
-// proxy serves only allow-listed images and exposes no catalog endpoint.
-var errListPluginsUnsupported = errors.New("registry-packages-proxy does not support listing all plugins")
-
 // rppPluginSource adapts the registry-packages-proxy client to PluginSource.
 type rppPluginSource struct {
 	client *rpp.Client
@@ -63,12 +58,6 @@ func newRppPluginSource(client *rpp.Client, logger *dkplog.Logger) *rppPluginSou
 }
 
 var _ PluginSource = (*rppPluginSource)(nil)
-
-// ListPlugins is unsupported over the proxy: it serves only allow-listed images
-// (deckhouse-cli and deckhouse-cli/plugins/<name>) and has no catalog endpoint.
-func (s *rppPluginSource) ListPlugins(context.Context) ([]string, error) {
-	return nil, errListPluginsUnsupported
-}
 
 func (s *rppPluginSource) ListPluginTags(ctx context.Context, pluginName string) ([]string, error) {
 	ref, err := rpp.PluginImage(pluginName)

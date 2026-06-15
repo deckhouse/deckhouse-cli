@@ -22,7 +22,7 @@ split `internal/selfupdate` / `internal/selfupdate/cmd` uses.
 | `d8 plugins install <name> [--version X] [--use-major N] [--force]` | install or switch a plugin version |
 | `d8 plugins update <name>` | update to the newest cluster-compatible version within the current major |
 | `d8 plugins update all` | the same for every installed plugin |
-| `d8 plugins list [--installed\|--available]` | list plugins |
+| `d8 plugins list` | list installed plugins (the proxy serves no catalog, so available plugins cannot be listed) |
 | `d8 plugins versions <name>` | list all published versions of one plugin (installed one marked; same verb as `d8 cli versions`) |
 | `d8 plugins contract <name>` | show a plugin's contract |
 | `d8 plugins remove <name>` | remove an installed plugin |
