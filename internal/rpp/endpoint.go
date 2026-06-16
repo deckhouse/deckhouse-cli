@@ -57,12 +57,12 @@ func chooseDiscoveredEndpoint(ctx context.Context, kube kubernetes.Interface) (s
 		return endpoint, "ingress", nil
 	}
 
-	endpoints, err := discoverEndpoints(ctx, kube)
+	endpoint, err = discoverEndpoint(ctx, kube)
 	if err != nil {
 		return "", "", err
 	}
 
-	return endpoints[0], "pod", nil
+	return endpoint, "pod", nil
 }
 
 // discoverIngressEndpoint returns the public proxy endpoint (https://<host>) taken
@@ -85,21 +85,20 @@ func discoverIngressEndpoint(ctx context.Context, kube kubernetes.Interface) (st
 	return "", fmt.Errorf("registry-packages-proxy ingress %q has no host", proxyIngressName)
 }
 
-// discoverEndpoints returns proxy endpoint base URLs by listing the
-// registry-packages-proxy pods and joining each ready, running pod IP with the
+// discoverEndpoint returns a proxy endpoint base URL by listing the
+// registry-packages-proxy pods and joining the first ready, running pod IP with the
 // proxy port. Pods that are terminating or not yet ready are skipped, so callers
-// do not dial draining or not-yet-serving proxies.
+// do not dial draining or not-yet-serving proxies. There is no failover, so a
+// single serving pod is enough.
 //
-// These are master-node pod IPs, reachable from inside the cluster network. A
-// workstation outside the cluster usually cannot reach them and should pass an
+// This is a master-node pod IP, reachable from inside the cluster network. A
+// workstation outside the cluster usually cannot reach it and should pass an
 // explicit endpoint (for example the public Ingress) instead.
-func discoverEndpoints(ctx context.Context, kube kubernetes.Interface) ([]string, error) {
+func discoverEndpoint(ctx context.Context, kube kubernetes.Interface) (string, error) {
 	pods, err := kube.CoreV1().Pods(proxyNamespace).List(ctx, metav1.ListOptions{LabelSelector: proxyPodSelector})
 	if err != nil {
-		return nil, fmt.Errorf("list registry-packages-proxy pods: %w", err)
+		return "", fmt.Errorf("list registry-packages-proxy pods: %w", err)
 	}
-
-	endpoints := make([]string, 0, len(pods.Items))
 
 	for i := range pods.Items {
 		pod := &pods.Items[i]
@@ -108,14 +107,11 @@ func discoverEndpoints(ctx context.Context, kube kubernetes.Interface) ([]string
 		}
 
 		base := url.URL{Scheme: proxyScheme, Host: net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(proxyPort))}
-		endpoints = append(endpoints, base.String())
+
+		return base.String(), nil
 	}
 
-	if len(endpoints) == 0 {
-		return nil, fmt.Errorf("no ready registry-packages-proxy pods found in namespace %q", proxyNamespace)
-	}
-
-	return endpoints, nil
+	return "", fmt.Errorf("no ready registry-packages-proxy pods found in namespace %q", proxyNamespace)
 }
 
 // podIsServing reports whether the pod is a usable proxy endpoint: running, not

@@ -33,12 +33,10 @@ func newRemoveCommand(manager *plugins.Manager) *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			pluginName := args[0]
-			if err := plugins.ValidatePluginName(pluginName); err != nil {
-				return err
-			}
 
 			fmt.Printf("Removing plugin: %s\n", pluginName)
 
+			// Manager.Remove validates the name before touching the filesystem.
 			return manager.Remove(pluginName)
 		},
 	}

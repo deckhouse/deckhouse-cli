@@ -134,17 +134,12 @@ func newUpdateCommand(logger *dkplog.Logger) *cobra.Command {
 	return cmd
 }
 
-// newUpdater builds an Updater reached with the kubeconfig identity from the
-// command's flags.
+// newUpdater builds an Updater backed by the registry-packages-proxy, reached
+// with the kubeconfig identity from the command's flags.
 func newUpdater(ctx context.Context, cmd *cobra.Command, logger *dkplog.Logger) (*selfupdate.Updater, error) {
 	kubeconfig, _ := cmd.Flags().GetString("kubeconfig")
 	kubeContext, _ := cmd.Flags().GetString("context")
 
-	return buildUpdater(ctx, kubeconfig, kubeContext, logger)
-}
-
-// buildUpdater builds an Updater backed by the registry-packages-proxy.
-func buildUpdater(ctx context.Context, kubeconfig, kubeContext string, logger *dkplog.Logger) (*selfupdate.Updater, error) {
 	restConfig, kube, err := utilk8s.SetupK8sClientSet(kubeconfig, kubeContext)
 	if err != nil {
 		return nil, fmt.Errorf("set up kubernetes client: %w", err)

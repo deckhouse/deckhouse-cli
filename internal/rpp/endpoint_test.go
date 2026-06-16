@@ -66,26 +66,26 @@ func conditionStatus(ready bool) corev1.ConditionStatus {
 	return corev1.ConditionFalse
 }
 
-func TestDiscoverEndpoints(t *testing.T) {
+func TestDiscoverEndpoint(t *testing.T) {
 	kube := fake.NewSimpleClientset(
-		proxyPod("serving", "10.0.0.1", corev1.PodRunning, true, false),
 		proxyPod("not-ready", "10.0.0.2", corev1.PodRunning, false, false),
 		proxyPod("terminating", "10.0.0.3", corev1.PodRunning, true, true),
 		proxyPod("pending", "10.0.0.4", corev1.PodPending, false, false),
 		proxyPod("no-ip", "", corev1.PodRunning, true, false),
+		proxyPod("serving", "10.0.0.1", corev1.PodRunning, true, false),
 	)
 
-	endpoints, err := discoverEndpoints(context.Background(), kube)
+	endpoint, err := discoverEndpoint(context.Background(), kube)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"https://10.0.0.1:4219"}, endpoints)
+	assert.Equal(t, "https://10.0.0.1:4219", endpoint)
 }
 
-func TestDiscoverEndpointsNoneServing(t *testing.T) {
+func TestDiscoverEndpointNoneServing(t *testing.T) {
 	kube := fake.NewSimpleClientset(
 		proxyPod("not-ready", "10.0.0.2", corev1.PodRunning, false, false),
 	)
 
-	_, err := discoverEndpoints(context.Background(), kube)
+	_, err := discoverEndpoint(context.Background(), kube)
 	require.Error(t, err)
 }
 
