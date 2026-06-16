@@ -301,7 +301,7 @@ func TestInstallPluginSmokeFailureRollsBack(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "current is never repointed at a broken binary")
 
 	_, binErr := os.Stat(layout.BinaryPath(root, "p", 1))
-	assert.True(t, os.IsNotExist(binErr), "the broken binary is removed on rollback (fresh install, no .old)")
+	assert.True(t, os.IsNotExist(binErr), "the broken binary is removed on rollback (fresh install)")
 }
 
 func TestInstallPluginDoesNotDowngradeOnContractError(t *testing.T) {
@@ -425,50 +425,6 @@ func TestInstallPluginDownloadFailureRestoresPreviousBinary(t *testing.T) {
 	require.Error(t, err, "a failed download aborts the install")
 
 	restored, err := os.ReadFile(v1)
-	require.NoError(t, err, "the previous binary is back in place after a failed download")
-	assert.Contains(t, string(restored), "v1.0.0", "the restored binary is the previous one, not the truncated download")
-
-	_, oldErr := os.Stat(v1 + ".old")
-	assert.True(t, os.IsNotExist(oldErr), "no .old is created: the download fails before the backup step")
-}
-
-func TestBackupOldBinaryKeepsLiveBinary(t *testing.T) {
-	dir := t.TempDir()
-	m := testManager()
-
-	bin := filepath.Join(dir, "p")
-	require.NoError(t, os.WriteFile(bin, []byte("old-content"), 0o755))
-
-	require.NoError(t, m.backupOldBinary(bin))
-
-	live, err := os.ReadFile(bin)
-	require.NoError(t, err)
-	assert.Equal(t, "old-content", string(live),
-		"the live binary stays in place (copied, not moved) - no missing-file window during the swap")
-
-	backup, err := os.ReadFile(bin + ".old")
-	require.NoError(t, err)
-	assert.Equal(t, "old-content", string(backup), ".old holds a copy of the previous binary")
-}
-
-func TestRemoveOldBackup(t *testing.T) {
-	dir := t.TempDir()
-	m := testManager()
-
-	// backupOldBinary copies (not moves) the live binary, so after a failed swap the
-	// original is still in place; cleanup only drops the redundant .old copy.
-	bin := filepath.Join(dir, "p")
-	require.NoError(t, os.WriteFile(bin, []byte("current"), 0o755))
-	require.NoError(t, os.WriteFile(bin+".old", []byte("current"), 0o755))
-
-	m.removeOldBackup(bin)
-
-	kept, err := os.ReadFile(bin)
-	require.NoError(t, err)
-	assert.Equal(t, "current", string(kept), "the live binary is left untouched")
-	_, err = os.Stat(bin + ".old")
-	assert.True(t, os.IsNotExist(err), ".old backup removed")
-
-	// No .old present: no-op, no panic.
-	require.NotPanics(t, func() { m.removeOldBackup(filepath.Join(dir, "missing")) })
+	require.NoError(t, err, "the installed binary is untouched after a failed download")
+	assert.Contains(t, string(restored), "v1.0.0", "the installed binary is the previous one, not the truncated download")
 }

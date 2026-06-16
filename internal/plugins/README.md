@@ -76,8 +76,8 @@ The RPP source reads the `contract.yaml` file from the image tar.
 6. Smoke-test the staged binary (`--version`, fallback `version`; only a clean
    exit is required) - a corrupt or wrong-platform artifact is rejected before
    it replaces anything.
-7. Back up the old binary (`.old`), atomically swap the new one in, write the
-   contract cache, then atomically repoint `current`.
+7. Atomically swap the new binary in (rename over the live one - the original is
+   untouched on failure), write the contract cache, then atomically repoint `current`.
 
 A failure at any step leaves the previous version installed and working.
 

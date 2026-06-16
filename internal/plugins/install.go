@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -311,16 +310,9 @@ func (m *Manager) installPlugin(ctx context.Context, pluginName string, version 
 		return err
 	}
 
-	if err := m.backupOldBinary(paths.binaryPath); err != nil {
-		return err
-	}
-
 	// Atomically replace the live binary (rename over it), so `current` never
-	// points at a missing file. On failure the original is untouched - just drop
-	// the redundant .old copy.
+	// points at a missing file. On failure the original is untouched.
 	if err := os.Rename(stagedPath, paths.binaryPath); err != nil {
-		m.removeOldBackup(paths.binaryPath)
-
 		return fmt.Errorf("install new binary: %w", err)
 	}
 
@@ -462,47 +454,6 @@ func unsatisfiedNames(fc failedConstraints) []string {
 	return names
 }
 
-// backupOldBinary copies an already-installed binary to <binaryPath>.old, leaving
-// the live binary in place. The new binary is swapped in by an atomic rename over
-// binaryPath, so binaryPath is never momentarily absent - a concurrent
-// `d8 <plugin>` resolving the `current` symlink cannot hit a missing-file window.
-// No-op if no binary is present yet.
-func (m *Manager) backupOldBinary(binaryPath string) error {
-	info, err := os.Stat(binaryPath)
-	if err != nil || info.IsDir() {
-		return nil
-	}
-
-	if err := copyFile(binaryPath, binaryPath+".old", info.Mode()); err != nil {
-		return fmt.Errorf("failed to save old version: %w", err)
-	}
-
-	return nil
-}
-
-// copyFile copies src to dst, creating or truncating dst with the given mode.
-func copyFile(src, dst string, mode os.FileMode) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-
-	defer func() { _ = in.Close() }()
-
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-	if err != nil {
-		return err
-	}
-
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-
-		return err
-	}
-
-	return out.Close()
-}
-
 // pluginVersionProbe runs the binary at binaryPath with "--version" (falling back
 // to "version") and returns its stdout. It succeeds if either invocation exits
 // cleanly; the returned error on failure carries a tail of the binary's stderr so
@@ -623,13 +574,6 @@ func (m *Manager) smokeTestPlugin(ctx context.Context, pluginName, binaryPath st
 	}
 
 	return nil
-}
-
-// removeOldBackup drops the <binaryPath>.old copy made before a swap. backupOldBinary
-// copies (not moves) the live binary, so a failed swap leaves the original in place
-// untouched - there is nothing to restore, only the now-redundant backup to clean up.
-func (m *Manager) removeOldBackup(binaryPath string) {
-	_ = os.Remove(binaryPath + ".old")
 }
 
 // downloadAndExtract pulls the plugin image tag and writes the embedded
