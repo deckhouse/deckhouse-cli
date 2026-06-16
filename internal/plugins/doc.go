@@ -55,6 +55,21 @@ limitations under the License.
 //  6. A symlink is pointed at the current major version.
 //  7. The plugin is exec'd with the forwarded arguments.
 //
+// # On-disk layout
+//
+// Installed plugins live under the install root: /opt/deckhouse/lib/deckhouse-cli
+// by default (override with --plugins-dir / DECKHOUSE_CLI_PATH; ~/.deckhouse-cli
+// when the default is not writable). Concrete paths:
+//
+//	<root>/plugins/<name>/v<major>/<name>   plugin binary (one per major version)
+//	<root>/plugins/<name>/current           symlink to the active major's binary
+//	<root>/plugins/<name>/install.lock      install lock (one per plugin)
+//	<root>/cache/contracts/<name>.json      cached contract
+//
+// Versions are kept per major; the `current` symlink selects the active one, so
+// switching is an atomic repoint - the same idea selfupdate uses for d8 itself.
+// Package internal/plugins/layout holds the authoritative path builders.
+//
 // # What the plugin system is made of
 //
 //  1. Discover - learn what plugins exist and what their contracts declare.

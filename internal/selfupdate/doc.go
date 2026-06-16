@@ -28,7 +28,9 @@ limitations under the License.
 //
 //   - Versions are kept in a per-user store (~/.deckhouse-cli/cli/versions/<tag>/d8);
 //     the active one is selected by the `current` symlink, so switching is an
-//     atomic repoint - no file copying, no sudo.
+//     atomic repoint - no file copying, no sudo. The PATH entry (e.g.
+//     /opt/deckhouse/bin/d8) is a one-time-created symlink to that `current`, with
+//     the original binary kept as <exe>.old. Full layout: store.go.
 //   - Every downloaded binary is smoke-tested (`--version`) before it becomes
 //     active; a corrupt or wrong-platform artifact never replaces a working d8.
 //
