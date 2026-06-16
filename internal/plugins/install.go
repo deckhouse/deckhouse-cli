@@ -27,7 +27,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -417,7 +416,9 @@ func (m *Manager) validateAndResolveConflicts(ctx context.Context, plugin *inter
 	}
 
 	if len(failedConstraints) > 0 && !resolvePluginsConflicts {
-		return fmt.Errorf("plugin requirements not satisfied")
+		return fmt.Errorf("plugin %q has unsatisfied plugin requirements: %s; "+
+			"install the missing plugins first, or re-run with --resolve-plugins-conflicts to install them automatically",
+			plugin.Name, failedConstraints.describe())
 	}
 
 	if len(failedConstraints) > 0 && resolvePluginsConflicts {
@@ -434,24 +435,13 @@ func (m *Manager) validateAndResolveConflicts(ctx context.Context, plugin *inter
 		}
 
 		if len(remaining) > 0 {
-			return fmt.Errorf("plugin requirements still not satisfied after resolution: %s", strings.Join(unsatisfiedNames(remaining), ", "))
+			return fmt.Errorf("plugin %q still has unsatisfied requirements after --resolve-plugins-conflicts: %s; "+
+				"the dependency may not be published as a plugin, or no published version satisfies the constraint",
+				plugin.Name, remaining.describe())
 		}
 	}
 
 	return nil
-}
-
-// unsatisfiedNames returns the dependency names from a failedConstraints map,
-// sorted for a stable error message.
-func unsatisfiedNames(fc failedConstraints) []string {
-	names := make([]string, 0, len(fc))
-	for name := range fc {
-		names = append(names, name)
-	}
-
-	sort.Strings(names)
-
-	return names
 }
 
 // pluginVersionProbe runs the binary at binaryPath with "--version" (falling back

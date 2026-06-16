@@ -380,8 +380,31 @@ func TestValidateAndResolveConflictsFailsWhenResolutionCannotSatisfy(t *testing.
 	// gate would otherwise turn into a blocked plugin.
 	err = m.validateAndResolveConflicts(context.Background(), p, true)
 	require.Error(t, err, "resolution that cannot satisfy the constraint must fail the install")
-	assert.Contains(t, err.Error(), "still not satisfied after resolution")
-	assert.Contains(t, err.Error(), "dep")
+	assert.Contains(t, err.Error(), "still has unsatisfied requirements after --resolve-plugins-conflicts")
+	assert.Contains(t, err.Error(), "dep (must satisfy >=2.0.0)", "the error names the dependency and its constraint")
+}
+
+func TestValidateAndResolveConflictsNamesMissingPluginAndHints(t *testing.T) {
+	m := testManager()
+	m.pluginDirectory = t.TempDir()
+	m.clusterStateCache = &requirements.ClusterState{}
+
+	// A plugin needs "dep", which is not installed; without --resolve-plugins-conflicts
+	// the failure must name the dependency and point at the way to fix it.
+	p := &internal.Plugin{
+		Name:    "p",
+		Version: "v1.0.0",
+		Requirements: internal.Requirements{
+			Plugins: internal.PluginRequirementsGroup{
+				Mandatory: []internal.PluginRequirement{{Name: "dep"}},
+			},
+		},
+	}
+
+	err := m.validateAndResolveConflicts(context.Background(), p, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dep (not installed)", "the error names the missing dependency")
+	assert.Contains(t, err.Error(), "--resolve-plugins-conflicts", "the error hints at the way to auto-install it")
 }
 
 func TestInstallPluginRejectsInvalidName(t *testing.T) {

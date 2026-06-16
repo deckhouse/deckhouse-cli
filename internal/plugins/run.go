@@ -23,8 +23,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
-	"strings"
 	"syscall"
 	"time"
 
@@ -156,19 +154,7 @@ func (m *Manager) ensurePluginRequirements(ctx context.Context, contract *intern
 		return nil
 	}
 
-	// failedConstraints values: nil = dependency missing, *Constraints = wrong version.
-	parts := make([]string, 0, len(failed))
-	for name, constraint := range failed {
-		if constraint == nil {
-			parts = append(parts, fmt.Sprintf("%s (not installed)", name))
-		} else {
-			parts = append(parts, fmt.Sprintf("%s (must satisfy %s)", name, constraint))
-		}
-	}
-
-	sort.Strings(parts)
-
-	return fmt.Errorf("plugin %q requirements not satisfied: %s", contract.Name, strings.Join(parts, "; "))
+	return fmt.Errorf("plugin %q requirements not satisfied: %s", contract.Name, failed.describe())
 }
 
 // isLocalPluginInvocation reports whether the forwarded args are a purely local

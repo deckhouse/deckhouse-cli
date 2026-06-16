@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -96,6 +97,27 @@ func (m *Manager) LatestVersion(ctx context.Context, pluginName string) (*semver
 // installation: a nil value means the plugin is missing entirely, a non-nil
 // value carries the constraint that the currently installed version fails.
 type failedConstraints map[string]*semver.Constraints
+
+// describe renders the unsatisfied requirements as a sorted, human-readable list:
+//
+//	"delivery-kit (not installed); foo (must satisfy >=2.0.0)"
+//
+// nil value = dependency missing; non-nil = installed but fails the constraint.
+func (fc failedConstraints) describe() string {
+	parts := make([]string, 0, len(fc))
+
+	for name, constraint := range fc {
+		if constraint == nil {
+			parts = append(parts, fmt.Sprintf("%s (not installed)", name))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s (must satisfy %s)", name, constraint))
+		}
+	}
+
+	sort.Strings(parts)
+
+	return strings.Join(parts, "; ")
+}
 
 func (m *Manager) validateRequirements(ctx context.Context, plugin *internal.Plugin) (failedConstraints, error) {
 	m.logger.Debug("validating plugin requirements", slog.String("plugin", plugin.Name))
@@ -207,7 +229,7 @@ func (m *Manager) validatePluginRequirementMandatory(plugin *internal.Plugin) (f
 		}
 
 		if !installed {
-			m.logger.Warn("plugin requirement not installed",
+			m.logger.Debug("plugin requirement not installed",
 				slog.String("plugin", plugin.Name),
 				slog.String("requirement", pluginRequirement.Name))
 			result[pluginRequirement.Name] = nil
@@ -230,7 +252,7 @@ func (m *Manager) validatePluginRequirementMandatory(plugin *internal.Plugin) (f
 		}
 
 		if !constraint.Check(installedVersion) {
-			m.logger.Warn("plugin requirement not satisfied",
+			m.logger.Debug("plugin requirement not satisfied",
 				slog.String("plugin", plugin.Name),
 				slog.String("requirement", pluginRequirement.Name),
 				slog.String("constraint", pluginRequirement.Constraint),
