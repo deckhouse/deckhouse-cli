@@ -36,6 +36,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/requirements"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
+	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -98,27 +99,45 @@ func (m *Manager) LatestVersion(ctx context.Context, pluginName string) (*semver
 // value carries the constraint that the currently installed version fails.
 type failedConstraints map[string]*semver.Constraints
 
-// describe renders the unsatisfied requirements as a sorted, bulleted list - one
-// per line, indented to sit under an error header:
-//
-//   - delivery-kit (not installed)
-//   - foo (must satisfy >=2.0.0)
+// helpfulError turns unsatisfied requirements into a HelpfulError, so the top-level
+// handler renders them with semantic color (cmd/d8/root.go) - one "cause -> fix"
+// pair per dependency. resolvable adds the --resolve-plugins-conflicts hint (install
+// only; the run-time gate and the post-resolve recheck cannot use it).
 //
 // nil value = dependency missing; non-nil = installed but fails the constraint.
-func (fc failedConstraints) describe() string {
-	parts := make([]string, 0, len(fc))
+func (fc failedConstraints) helpfulError(category string, resolvable bool) *diagnostic.HelpfulError {
+	names := make([]string, 0, len(fc))
+	for name := range fc {
+		names = append(names, name)
+	}
 
-	for name, constraint := range fc {
-		if constraint == nil {
-			parts = append(parts, fmt.Sprintf("  - %s (not installed)", name))
+	sort.Strings(names)
+
+	suggestions := make([]diagnostic.Suggestion, 0, len(names))
+
+	for _, name := range names {
+		// Defense-in-depth: requirement names come from contract.yaml.
+		safe := printable(name)
+
+		if constraint := fc[name]; constraint == nil {
+			solutions := []string{fmt.Sprintf("install it: d8 plugins install %s", safe)}
+			if resolvable {
+				solutions = append(solutions, "or re-run this install with --resolve-plugins-conflicts to pull it automatically")
+			}
+
+			suggestions = append(suggestions, diagnostic.Suggestion{
+				Cause:     fmt.Sprintf("%s is not installed", safe),
+				Solutions: solutions,
+			})
 		} else {
-			parts = append(parts, fmt.Sprintf("  - %s (must satisfy %s)", name, constraint))
+			suggestions = append(suggestions, diagnostic.Suggestion{
+				Cause:     fmt.Sprintf("%s must satisfy %s", safe, constraint),
+				Solutions: []string{fmt.Sprintf("install a matching version: d8 plugins install %s --version <version>", safe)},
+			})
 		}
 	}
 
-	sort.Strings(parts)
-
-	return strings.Join(parts, "\n")
+	return &diagnostic.HelpfulError{Category: category, Suggestions: suggestions}
 }
 
 func (m *Manager) validateRequirements(ctx context.Context, plugin *internal.Plugin) (failedConstraints, error) {

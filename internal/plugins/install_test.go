@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/requirements"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
+	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
 // fakeInstallSource is a pluginSource whose ExtractPlugin writes a caller-supplied
@@ -380,8 +382,13 @@ func TestValidateAndResolveConflictsFailsWhenResolutionCannotSatisfy(t *testing.
 	// gate would otherwise turn into a blocked plugin.
 	err = m.validateAndResolveConflicts(context.Background(), p, true)
 	require.Error(t, err, "resolution that cannot satisfy the constraint must fail the install")
-	assert.Contains(t, err.Error(), "still has unsatisfied requirements after --resolve-plugins-conflicts")
-	assert.Contains(t, err.Error(), "dep (must satisfy >=2.0.0)", "the error names the dependency and its constraint")
+
+	var he *diagnostic.HelpfulError
+	require.ErrorAs(t, err, &he, "the failure is a HelpfulError so the CLI renders it with color")
+	assert.Contains(t, he.Category, "still has unsatisfied requirements after --resolve-plugins-conflicts")
+
+	_, ok := findSuggestion(he, "dep must satisfy >=2.0.0")
+	assert.True(t, ok, "the diagnostic names the dependency and its constraint")
 }
 
 func TestValidateAndResolveConflictsNamesMissingPluginAndHints(t *testing.T) {
@@ -403,8 +410,14 @@ func TestValidateAndResolveConflictsNamesMissingPluginAndHints(t *testing.T) {
 
 	err := m.validateAndResolveConflicts(context.Background(), p, false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "dep (not installed)", "the error names the missing dependency")
-	assert.Contains(t, err.Error(), "--resolve-plugins-conflicts", "the error hints at the way to auto-install it")
+
+	var he *diagnostic.HelpfulError
+	require.ErrorAs(t, err, &he)
+
+	missing, ok := findSuggestion(he, "dep is not installed")
+	require.True(t, ok, "the diagnostic names the missing dependency")
+	assert.Contains(t, strings.Join(missing.Solutions, " "), "--resolve-plugins-conflicts",
+		"it hints at the way to auto-install it")
 }
 
 func TestInstallPluginRejectsInvalidName(t *testing.T) {

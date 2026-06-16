@@ -18,13 +18,58 @@ package plugins
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"github.com/Masterminds/semver/v3"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	d8flags "github.com/deckhouse/deckhouse-cli/internal/plugins/flags"
+	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
+
+// findSuggestion returns the suggestion whose Cause matches exactly. Shared by the
+// install- and run-time tests that assert on the requirement diagnostic.
+func findSuggestion(he *diagnostic.HelpfulError, cause string) (diagnostic.Suggestion, bool) {
+	for _, s := range he.Suggestions {
+		if s.Cause == cause {
+			return s, true
+		}
+	}
+
+	return diagnostic.Suggestion{}, false
+}
+
+func TestFailedConstraintsHelpfulError(t *testing.T) {
+	wrongVersion, err := semver.NewConstraint(">=2.0.0")
+	require.NoError(t, err)
+
+	fc := failedConstraints{
+		"zeta":  nil,          // missing entirely
+		"alpha": wrongVersion, // installed but incompatible
+	}
+
+	he := fc.helpfulError("header text", true)
+	assert.Equal(t, "header text", he.Category)
+	require.Len(t, he.Suggestions, 2)
+
+	// Suggestions are sorted by dependency name: alpha before zeta.
+	assert.Equal(t, "alpha must satisfy >=2.0.0", he.Suggestions[0].Cause)
+	assert.Contains(t, strings.Join(he.Suggestions[0].Solutions, " "), "--version",
+		"a version mismatch suggests installing a matching version")
+
+	assert.Equal(t, "zeta is not installed", he.Suggestions[1].Cause)
+	assert.Contains(t, strings.Join(he.Suggestions[1].Solutions, " "), "--resolve-plugins-conflicts",
+		"a missing dep offers the auto-install flag when resolvable")
+
+	// resolvable=false drops the --resolve-plugins-conflicts hint.
+	plain := fc.helpfulError("header text", false)
+	missing, ok := findSuggestion(plain, "zeta is not installed")
+	require.True(t, ok)
+	assert.NotContains(t, strings.Join(missing.Solutions, " "), "--resolve-plugins-conflicts")
+}
 
 func TestSkipClusterChecksDowngradesEnforcement(t *testing.T) {
 	prev := d8flags.SkipClusterChecks

@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/fatih/color"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/lockfile"
@@ -378,16 +379,19 @@ func (m *Manager) acquireInstallLock(lockFilePath string) (func(), error) {
 func (m *Manager) fetchAndDisplayContract(ctx context.Context, pluginName string, version *semver.Version) (*internal.Plugin, error) {
 	tag := version.Original()
 
-	fmt.Printf("Installing plugin: %s\n", pluginName)
-	fmt.Printf("Tag: %s\n", tag)
+	// Cyan-bold key labels. fatih/color drops ANSI on a non-TTY and under NO_COLOR.
+	key := color.New(color.FgCyan, color.Bold)
+
+	fmt.Printf("%s %s\n", key.Sprint("Installing plugin:"), pluginName)
+	fmt.Printf("%s %s\n", key.Sprint("Tag:"), tag)
 
 	plugin, err := m.PluginContract(ctx, pluginName, tag)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get plugin contract: %w", err)
 	}
 
-	fmt.Printf("Plugin: %s %s\n", printable(plugin.Name), printable(plugin.Version))
-	fmt.Printf("Description: %s\n", printable(plugin.Description))
+	fmt.Printf("%s %s %s\n", key.Sprint("Plugin:"), printable(plugin.Name), printable(plugin.Version))
+	fmt.Printf("%s %s\n", key.Sprint("Description:"), printable(plugin.Description))
 
 	return plugin, nil
 }
@@ -416,9 +420,8 @@ func (m *Manager) validateAndResolveConflicts(ctx context.Context, plugin *inter
 	}
 
 	if len(failedConstraints) > 0 && !resolvePluginsConflicts {
-		return fmt.Errorf("plugin %q has unsatisfied plugin requirements:\n\n%s\n\n"+
-			"  Hint: install the missing plugins first, or re-run with --resolve-plugins-conflicts to install them automatically",
-			plugin.Name, failedConstraints.describe())
+		return failedConstraints.helpfulError(
+			fmt.Sprintf("plugin %q has unsatisfied requirements", plugin.Name), true)
 	}
 
 	if len(failedConstraints) > 0 && resolvePluginsConflicts {
@@ -435,9 +438,8 @@ func (m *Manager) validateAndResolveConflicts(ctx context.Context, plugin *inter
 		}
 
 		if len(remaining) > 0 {
-			return fmt.Errorf("plugin %q still has unsatisfied requirements after --resolve-plugins-conflicts:\n\n%s\n\n"+
-				"  Hint: check that the dependency is published as a plugin and that a published version satisfies the constraint",
-				plugin.Name, remaining.describe())
+			return remaining.helpfulError(
+				fmt.Sprintf("plugin %q still has unsatisfied requirements after --resolve-plugins-conflicts", plugin.Name), false)
 		}
 	}
 

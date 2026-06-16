@@ -27,6 +27,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/requirements"
+	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
 func envValue(env []string, key string) (string, bool) {
@@ -134,8 +135,12 @@ func TestEnsurePluginRequirementsReportsMissingDependency(t *testing.T) {
 
 	err := m.ensurePluginRequirements(context.Background(), contract)
 	require.Error(t, err, "a missing mandatory plugin dependency blocks the run")
-	assert.Contains(t, err.Error(), "delivery")
-	assert.Contains(t, err.Error(), "not installed")
+
+	var he *diagnostic.HelpfulError
+	require.ErrorAs(t, err, &he)
+
+	_, ok := findSuggestion(he, "delivery is not installed")
+	assert.True(t, ok, "the run-time gate names the missing dependency")
 }
 
 func TestEnsurePluginRequirementsPassesWhenSatisfied(t *testing.T) {
