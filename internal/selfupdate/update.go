@@ -236,6 +236,8 @@ func SwitchTo(ctx context.Context, exePath, tag string, store *Store, logger *dk
 
 	if !managed {
 		if err := migratePathEntry(exePath, store); err != nil {
+			restorePreviousCurrent(store, result.PrevTag, logger)
+
 			return SwitchResult{}, err
 		}
 
@@ -268,6 +270,23 @@ func migratePathEntry(exePath string, store *Store) error {
 	}
 
 	return nil
+}
+
+// restorePreviousCurrent undoes switchCurrent after the PATH migration failed, so a
+// failed switch does not leave `current` pointing at a version the PATH binary was
+// never repointed to. Best-effort: the store lives in the user's home.
+func restorePreviousCurrent(store *Store, prevTag string, logger *dkplog.Logger) {
+	var err error
+	if prevTag == "" {
+		err = os.Remove(store.currentLinkPath())
+	} else {
+		err = store.switchCurrent(prevTag)
+	}
+
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		logger.Debug("could not restore previous current after failed migration",
+			slog.String("previous", prevTag), dkplog.Err(err))
+	}
 }
 
 // retain seeds the store with binPath under tag, best-effort: a failure (notably

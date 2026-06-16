@@ -172,6 +172,31 @@ func TestApplyMigrationPermissionErrorGetsPrivilegeHint(t *testing.T) {
 	assert.Equal(t, "OLD", string(got), "original binary must be untouched on failure")
 }
 
+func TestApplyMigrationFailureRollsBackCurrent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+
+	dir := t.TempDir()
+	exeDir := filepath.Join(dir, "bin")
+	require.NoError(t, os.MkdirAll(exeDir, 0o755))
+	exePath := filepath.Join(exeDir, "d8")
+	require.NoError(t, os.WriteFile(exePath, []byte("OLD"), 0o755))
+
+	// Read-only PATH dir: migratePathEntry's rename fails after current was switched.
+	require.NoError(t, os.Chmod(exeDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(exeDir, 0o755) })
+
+	store := &Store{root: filepath.Join(dir, "store")}
+	updater := NewUpdater(fakeSource{tags: []string{"v1.0.0"}, binaryContent: "#!/bin/sh\nexit 0\n"}, store, dkplog.NewNop())
+
+	_, err := updater.applyTo(context.Background(), exePath, "v1.0.0")
+	require.Error(t, err)
+
+	assert.Empty(t, store.CurrentTag(),
+		"a failed migration must roll current back (fresh install: cleared), not leave it on the new tag")
+}
+
 func TestApplyRejectsBinaryThatFailsSmokeTest(t *testing.T) {
 	dir := t.TempDir()
 	exePath := filepath.Join(dir, "d8")
