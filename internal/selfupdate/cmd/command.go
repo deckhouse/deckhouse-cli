@@ -30,6 +30,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/rpp"
 	rppflags "github.com/deckhouse/deckhouse-cli/internal/rpp/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/selfupdate"
+	"github.com/deckhouse/deckhouse-cli/internal/selfupdate/cmd/errdetect"
 	systemflags "github.com/deckhouse/deckhouse-cli/internal/system/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
@@ -67,7 +68,31 @@ func NewCommand(logger *dkplog.Logger) *cobra.Command {
 	systemflags.AddPersistentFlags(cmd)
 	rppflags.AddFlags(cmd.PersistentFlags())
 
+	wrapProxyDiagnostics(cmd)
+
 	return cmd
+}
+
+// wrapProxyDiagnostics turns recognized registry-packages-proxy failures into
+// colored diagnostics at the command level (per pkg/diagnostic: classify in the
+// command, never in root.go). It wraps every RunE in the tree; errdetect.Diagnose
+// returns nil for non-proxy and already-diagnosed errors, leaving them untouched.
+func wrapProxyDiagnostics(cmd *cobra.Command) {
+	if cmd.RunE != nil {
+		inner := cmd.RunE
+		cmd.RunE = func(c *cobra.Command, args []string) error {
+			err := inner(c, args)
+			if diag := errdetect.Diagnose(err); diag != nil {
+				return diag
+			}
+
+			return err
+		}
+	}
+
+	for _, sub := range cmd.Commands() {
+		wrapProxyDiagnostics(sub)
+	}
 }
 
 func newCheckCommand(logger *dkplog.Logger) *cobra.Command {
