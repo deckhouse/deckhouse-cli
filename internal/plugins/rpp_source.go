@@ -32,7 +32,7 @@ import (
 
 const (
 	// pluginBinaryEntryName is the file inside a plugin image that holds the
-	// executable, matching the direct-registry extractor's convention.
+	// executable.
 	pluginBinaryEntryName = "plugin"
 
 	// pluginContractEntryName is the file inside a plugin image that holds the
@@ -92,7 +92,7 @@ func (s *rppPluginSource) GetPluginContract(ctx context.Context, pluginName, tag
 	if !found {
 		// Plugin images do not carry a contract yet, so surface just name+version:
 		// install can proceed and the cluster/plugin requirement checks have nothing
-		// to enforce. This mirrors the registry source's empty-annotation behavior.
+		// to enforce.
 		s.logger.Debug("plugin image has no contract file", slog.String("plugin", pluginName), slog.String("tag", tag))
 
 		return &internal.Plugin{Name: pluginName, Version: tag}, nil
@@ -122,8 +122,7 @@ func (s *rppPluginSource) ExtractPlugin(ctx context.Context, pluginName, tag, de
 }
 
 // contractFromBytes decodes a contract file, backfilling identity from the request
-// so a present-but-degenerate contract still yields a usable name/version, matching
-// the registry source. The shared decoder keeps error wording identical across sources.
+// so a present-but-degenerate contract still yields a usable name/version.
 func contractFromBytes(raw []byte, pluginName, tag string) (*internal.Plugin, error) {
 	// The contract file is YAML (contract.yaml); the shared decoder expects JSON.
 	jsonRaw, err := yaml.YAMLToJSON(raw)

@@ -44,8 +44,7 @@ the plugin routes are `/v1/images/deckhouse-cli/plugins/<name>/...`.
 - `contract.yaml` - the contract: name, version, description, requested env
   vars, flags, and `requirements` (Kubernetes / Deckhouse / modules / plugins).
 
-The registry source can also read the contract from the OCI annotation
-(base64 JSON); the RPP source reads the `contract.yaml` file from the image tar.
+The RPP source reads the `contract.yaml` file from the image tar.
 
 ## On-disk layout
 

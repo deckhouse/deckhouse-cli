@@ -44,8 +44,7 @@ func TestUpdateAllSkipsGhostDirsWithoutInstall(t *testing.T) {
 
 	// A ghost dir left by a failed install: a version dir exists but there is no
 	// `current` symlink. It is NOT an installed plugin and must not become a fresh
-	// install of something the user never had (UpdateAll also runs unattended in
-	// the background).
+	// install of something the user never had.
 	require.NoError(t, os.MkdirAll(layout.VersionDir(root, "ghost", 1), 0o755))
 
 	require.NoError(t, m.UpdateAll(context.Background()), "a ghost dir is skipped, not treated as an update failure")
@@ -67,8 +66,8 @@ func TestInstalledPluginNames(t *testing.T) {
 
 func TestUpdateAllFallsBackToHomeInstallRoot(t *testing.T) {
 	// A non-root install lives in ~/.deckhouse-cli while the configured root is
-	// empty; the background child runs `update all` against the configured root
-	// and must still find (and update) the fallback install.
+	// empty; `d8 plugins update all` runs against the configured root and must
+	// still find (and update) the fallback install.
 	t.Setenv("HOME", t.TempDir())
 
 	fallback, err := layout.HomeFallbackPath()
