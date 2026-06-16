@@ -344,6 +344,46 @@ func TestInstallPluginDoesNotDowngradeOnContractError(t *testing.T) {
 	assert.Equal(t, "1.3.0", version.String(), "the installed newer version is kept, not silently downgraded")
 }
 
+func TestValidateAndResolveConflictsFailsWhenResolutionCannotSatisfy(t *testing.T) {
+	root := t.TempDir()
+	m := testManager()
+	m.pluginDirectory = root
+	m.clusterStateCache = &requirements.ClusterState{}
+
+	// A dependency is installed at v1.0.0 and only v1.0.0 is published, so nothing
+	// the resolver can install will satisfy a ">= 2.0.0" requirement.
+	depBin := layout.BinaryPath(root, "dep", 1)
+	require.NoError(t, os.MkdirAll(filepath.Dir(depBin), 0o755))
+	writeScriptBinary(t, filepath.Dir(depBin), "dep", "v1.0.0", 0)
+	absDep, err := filepath.Abs(depBin)
+	require.NoError(t, err)
+	require.NoError(t, os.Symlink(absDep, layout.CurrentLinkPath(root, "dep")))
+
+	m.service = &fakeInstallSource{
+		tags:     []string{"v1.0.0"},
+		contract: &internal.Plugin{Name: "dep", Version: "v1.0.0"},
+		extract:  func(dest string) error { return os.WriteFile(dest, []byte("x"), 0o755) },
+	}
+
+	p := &internal.Plugin{
+		Name:    "p",
+		Version: "v1.0.0",
+		Requirements: internal.Requirements{
+			Plugins: internal.PluginRequirementsGroup{
+				Mandatory: []internal.PluginRequirement{{Name: "dep", Constraint: ">= 2.0.0"}},
+			},
+		},
+	}
+
+	// Resolution installs the latest available dep (v1.0.0), which still fails the
+	// constraint; the call must report failure, not the silent success the run-time
+	// gate would otherwise turn into a blocked plugin.
+	err = m.validateAndResolveConflicts(context.Background(), p, true)
+	require.Error(t, err, "resolution that cannot satisfy the constraint must fail the install")
+	assert.Contains(t, err.Error(), "still not satisfied after resolution")
+	assert.Contains(t, err.Error(), "dep")
+}
+
 func TestInstallPluginRejectsInvalidName(t *testing.T) {
 	m := testManager()
 	m.pluginDirectory = t.TempDir()

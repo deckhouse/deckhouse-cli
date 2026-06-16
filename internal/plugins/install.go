@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -431,9 +432,34 @@ func (m *Manager) validateAndResolveConflicts(ctx context.Context, plugin *inter
 		if err := m.resolvePluginConflicts(ctx, failedConstraints); err != nil {
 			return fmt.Errorf("failed to resolve conflicts: %w", err)
 		}
+
+		// Resolution installs the latest cluster-compatible dependency, which may
+		// still fail the requiring plugin's constraint. Re-validate so a partial
+		// resolution surfaces here, not as a blocked plugin at first run.
+		remaining, err := m.validateRequirements(ctx, plugin)
+		if err != nil {
+			return fmt.Errorf("failed to validate requirements: %w", err)
+		}
+
+		if len(remaining) > 0 {
+			return fmt.Errorf("plugin requirements still not satisfied after resolution: %s", strings.Join(unsatisfiedNames(remaining), ", "))
+		}
 	}
 
 	return nil
+}
+
+// unsatisfiedNames returns the dependency names from a failedConstraints map,
+// sorted for a stable error message.
+func unsatisfiedNames(fc failedConstraints) []string {
+	names := make([]string, 0, len(fc))
+	for name := range fc {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return names
 }
 
 // backupOldBinary copies an already-installed binary to <binaryPath>.old, leaving
