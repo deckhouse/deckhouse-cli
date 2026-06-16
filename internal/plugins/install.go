@@ -416,8 +416,8 @@ func (m *Manager) validateAndResolveConflicts(ctx context.Context, plugin *inter
 	}
 
 	if len(failedConstraints) > 0 && !resolvePluginsConflicts {
-		return fmt.Errorf("plugin %q has unsatisfied plugin requirements: %s; "+
-			"install the missing plugins first, or re-run with --resolve-plugins-conflicts to install them automatically",
+		return fmt.Errorf("plugin %q has unsatisfied plugin requirements:\n\n%s\n\n"+
+			"  Hint: install the missing plugins first, or re-run with --resolve-plugins-conflicts to install them automatically",
 			plugin.Name, failedConstraints.describe())
 	}
 
@@ -435,8 +435,8 @@ func (m *Manager) validateAndResolveConflicts(ctx context.Context, plugin *inter
 		}
 
 		if len(remaining) > 0 {
-			return fmt.Errorf("plugin %q still has unsatisfied requirements after --resolve-plugins-conflicts: %s; "+
-				"the dependency may not be published as a plugin, or no published version satisfies the constraint",
+			return fmt.Errorf("plugin %q still has unsatisfied requirements after --resolve-plugins-conflicts:\n\n%s\n\n"+
+				"  Hint: check that the dependency is published as a plugin and that a published version satisfies the constraint",
 				plugin.Name, remaining.describe())
 		}
 	}

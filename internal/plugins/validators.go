@@ -98,9 +98,11 @@ func (m *Manager) LatestVersion(ctx context.Context, pluginName string) (*semver
 // value carries the constraint that the currently installed version fails.
 type failedConstraints map[string]*semver.Constraints
 
-// describe renders the unsatisfied requirements as a sorted, human-readable list:
+// describe renders the unsatisfied requirements as a sorted, bulleted list - one
+// per line, indented to sit under an error header:
 //
-//	"delivery-kit (not installed); foo (must satisfy >=2.0.0)"
+//   - delivery-kit (not installed)
+//   - foo (must satisfy >=2.0.0)
 //
 // nil value = dependency missing; non-nil = installed but fails the constraint.
 func (fc failedConstraints) describe() string {
@@ -108,15 +110,15 @@ func (fc failedConstraints) describe() string {
 
 	for name, constraint := range fc {
 		if constraint == nil {
-			parts = append(parts, fmt.Sprintf("%s (not installed)", name))
+			parts = append(parts, fmt.Sprintf("  - %s (not installed)", name))
 		} else {
-			parts = append(parts, fmt.Sprintf("%s (must satisfy %s)", name, constraint))
+			parts = append(parts, fmt.Sprintf("  - %s (must satisfy %s)", name, constraint))
 		}
 	}
 
 	sort.Strings(parts)
 
-	return strings.Join(parts, "; ")
+	return strings.Join(parts, "\n")
 }
 
 func (m *Manager) validateRequirements(ctx context.Context, plugin *internal.Plugin) (failedConstraints, error) {
