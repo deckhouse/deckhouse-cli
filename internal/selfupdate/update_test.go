@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+
+	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
 // fakeSource serves fixed tags and writes binaryContent as the extracted binary.
@@ -165,7 +168,12 @@ func TestApplyMigrationPermissionErrorGetsPrivilegeHint(t *testing.T) {
 
 	_, err := updater.applyTo(context.Background(), exePath, "v1.0.0")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "sudo", "a permission failure points the user at sudo")
+
+	var he *diagnostic.HelpfulError
+	require.ErrorAs(t, err, &he, "a permission failure is a HelpfulError so the CLI colors it")
+	require.Len(t, he.Suggestions, 1)
+	assert.Contains(t, strings.Join(he.Suggestions[0].Solutions, " "), "sudo",
+		"the diagnostic points the user at sudo")
 
 	got, err := os.ReadFile(exePath)
 	require.NoError(t, err)

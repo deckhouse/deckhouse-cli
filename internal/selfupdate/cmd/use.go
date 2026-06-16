@@ -68,7 +68,7 @@ func newUseCommand(logger *dkplog.Logger) *cobra.Command {
 			if store.Contains(exePath) {
 				if tag := store.CurrentTag(); tag != "" {
 					if cur, err := semver.NewVersion(tag); err == nil && cur.Equal(requested) {
-						fmt.Printf("deckhouse-cli is already at %s.\n", tag)
+						fmt.Printf("deckhouse-cli is already at %s.\n", verCur.Sprint(tag))
 
 						return nil
 					}
@@ -82,7 +82,7 @@ func newUseCommand(logger *dkplog.Logger) *cobra.Command {
 					return err
 				}
 
-				fmt.Printf("Switched deckhouse-cli to %s (installed locally).\n", stored)
+				fmt.Printf("%s Switched deckhouse-cli to %s (installed locally).\n", okMark.Sprint("✓"), verNew.Sprint(stored))
 				printSwitchNotes(res)
 
 				return nil
@@ -97,7 +97,7 @@ func newUseCommand(logger *dkplog.Logger) *cobra.Command {
 					return err
 				}
 
-				fmt.Printf("Switched deckhouse-cli to %s (taken from the running binary).\n", version.Version)
+				fmt.Printf("%s Switched deckhouse-cli to %s (taken from the running binary).\n", okMark.Sprint("✓"), verNew.Sprint(version.Version))
 				printSwitchNotes(res)
 
 				return nil
@@ -108,14 +108,14 @@ func newUseCommand(logger *dkplog.Logger) *cobra.Command {
 				return err
 			}
 
-			fmt.Printf("Version %s is not installed locally, downloading...\n", requested.Original())
+			fmt.Printf("Version %s is not installed locally, downloading...\n", verNew.Sprint(requested.Original()))
 
 			res, err := updater.Apply(cmd.Context(), requested.Original())
 			if err != nil {
 				return err
 			}
 
-			fmt.Printf("Switched deckhouse-cli to %s.\n", requested.Original())
+			fmt.Printf("%s Switched deckhouse-cli to %s.\n", okMark.Sprint("✓"), verNew.Sprint(requested.Original()))
 			printSwitchNotes(res)
 
 			return nil
@@ -130,7 +130,7 @@ func printSwitchNotes(res selfupdate.SwitchResult) {
 	}
 
 	if res.PrevTag != "" {
-		fmt.Printf("Previous version %s remains installed - switch back with 'd8 cli use %s'.\n", res.PrevTag, res.PrevTag)
+		fmt.Printf("Previous version %s remains installed - switch back with 'd8 cli use %s'.\n", verOld.Sprint(res.PrevTag), res.PrevTag)
 	}
 }
 

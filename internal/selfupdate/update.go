@@ -35,6 +35,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/lockfile"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
+	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
 const (
@@ -302,11 +303,27 @@ func retain(ctx context.Context, store *Store, binPath, tag string, logger *dkpl
 // withPrivilegeHint augments a permission error with a hint, since the install
 // directory (e.g. /opt/deckhouse/bin) is usually root-owned.
 func withPrivilegeHint(exePath string, err error) error {
-	if errors.Is(err, os.ErrPermission) {
-		return fmt.Errorf("%w (updating %s requires elevated privileges; try running with sudo)", err, filepath.Dir(exePath))
+	if !errors.Is(err, os.ErrPermission) {
+		return err
 	}
 
-	return err
+	dir := filepath.Dir(exePath)
+
+	// HelpfulError so the top-level handler (cmd/d8/root.go) renders it with color
+	// and the actionable solutions, instead of the bare error prefix.
+	return &diagnostic.HelpfulError{
+		Category:    fmt.Sprintf("updating d8 needs write access to %s", dir),
+		OriginalErr: err,
+		Suggestions: []diagnostic.Suggestion{
+			{
+				Cause: fmt.Sprintf("%s is not writable by the current user", dir),
+				Solutions: []string{
+					"re-run the command with sudo",
+					"or install d8 in a user-writable directory (for example ~/.local/bin) and retry",
+				},
+			},
+		},
+	}
 }
 
 // smokeTest runs the freshly downloaded binary with --version so a corrupt or

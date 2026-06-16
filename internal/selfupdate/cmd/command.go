@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
@@ -32,6 +33,16 @@ import (
 	systemflags "github.com/deckhouse/deckhouse-cli/internal/system/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
+)
+
+// Output styling, aligned with `d8 cli versions` (list.go): green = the version being
+// moved to, cyan+bold = the active version, faint = a superseded version. fatih/color
+// drops ANSI on a non-TTY and under NO_COLOR.
+var (
+	okMark = color.New(color.FgGreen, color.Bold)
+	verNew = color.New(color.FgGreen)
+	verCur = color.New(color.FgCyan, color.Bold)
+	verOld = color.New(color.Faint)
 )
 
 // NewCommand returns the `d8 cli` command tree for managing the d8 binary itself.
@@ -76,9 +87,10 @@ func newCheckCommand(logger *dkplog.Logger) *cobra.Command {
 			}
 
 			if newer {
-				fmt.Printf("A newer deckhouse-cli is available: %s (current: %s). Run 'd8 cli update' to upgrade.\n", latest, version.Version)
+				fmt.Printf("A newer deckhouse-cli is available: %s (current: %s). Run 'd8 cli update' to upgrade.\n",
+					verNew.Sprint(latest), verOld.Sprint(version.Version))
 			} else {
-				fmt.Printf("deckhouse-cli is up to date (%s).\n", version.Version)
+				fmt.Printf("deckhouse-cli is up to date (%s).\n", verCur.Sprint(version.Version))
 			}
 
 			return nil
@@ -107,7 +119,7 @@ func newUpdateCommand(logger *dkplog.Logger) *cobra.Command {
 				}
 
 				if !newer {
-					fmt.Printf("deckhouse-cli is already up to date (%s).\n", version.Version)
+					fmt.Printf("deckhouse-cli is already up to date (%s).\n", verCur.Sprint(version.Version))
 
 					return nil
 				}
@@ -115,14 +127,14 @@ func newUpdateCommand(logger *dkplog.Logger) *cobra.Command {
 				tag = latest
 			}
 
-			fmt.Printf("Updating deckhouse-cli to %s...\n", tag)
+			fmt.Printf("Updating deckhouse-cli to %s...\n", verNew.Sprint(tag))
 
 			res, err := updater.Apply(cmd.Context(), tag)
 			if err != nil {
 				return err
 			}
 
-			fmt.Printf("deckhouse-cli updated to %s.\n", tag)
+			fmt.Printf("%s deckhouse-cli updated to %s.\n", okMark.Sprint("✓"), verNew.Sprint(tag))
 			printSwitchNotes(res)
 
 			return nil
