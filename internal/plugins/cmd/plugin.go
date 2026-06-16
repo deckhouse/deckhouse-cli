@@ -41,8 +41,10 @@ func NewPluginCommand(commandName, description string, aliases []string, logger 
 	manager := plugins.NewManager(logger.Named("plugins-command"))
 
 	if err := manager.EnsureInstallRoot(); err != nil {
+		// Warn but keep building the command: a nil return makes the caller's
+		// cobra.AddCommand panic and takes down the whole CLI. RunInstalled
+		// surfaces the root error at invocation time.
 		logger.Warn("failed to ensure plugin root directory", slog.String("error", err.Error()))
-		return nil
 	}
 
 	// Drive the help text from the cached contract (description + declared flags/env).

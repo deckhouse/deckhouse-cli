@@ -17,11 +17,17 @@ limitations under the License.
 package pluginscmd
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
+	"github.com/deckhouse/deckhouse-cli/internal/plugins/flags"
 )
 
 func TestWithContractHelp(t *testing.T) {
@@ -54,4 +60,20 @@ func TestWithContractHelpMarksUnprovidedEnv(t *testing.T) {
 func TestWithContractHelpNoFlagsOrEnv(t *testing.T) {
 	help := withContractHelp("just a description", &internal.Plugin{Name: "p"})
 	assert.Equal(t, "just a description", help, "no extra sections when the contract declares none")
+}
+
+func TestNewPluginCommandReturnsCommandWhenInstallRootFails(t *testing.T) {
+	// Make EnsureInstallRoot fail with a non-permission error (a path component is a
+	// regular file -> ENOTDIR), so no home fallback is attempted and the test is hermetic.
+	tmp := t.TempDir()
+	blocker := filepath.Join(tmp, "blocker")
+	require.NoError(t, os.WriteFile(blocker, nil, 0o644))
+
+	orig := flags.DeckhousePluginsDir
+	flags.DeckhousePluginsDir = filepath.Join(blocker, "sub")
+	t.Cleanup(func() { flags.DeckhousePluginsDir = orig })
+
+	cmd := NewPluginCommand("system", "Operate system options", []string{"s"}, dkplog.NewNop())
+	require.NotNil(t, cmd, "a failed install root must not yield a nil command (nil panics cobra.AddCommand)")
+	assert.Equal(t, "system", cmd.Use)
 }
