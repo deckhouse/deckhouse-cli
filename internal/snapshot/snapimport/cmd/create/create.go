@@ -24,13 +24,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	v1alpha1 "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	snaputil "github.com/deckhouse/deckhouse-cli/internal/snapshot/util"
 )
 
 // NewCommand builds "d8 snapshot import create".
 func NewCommand(ctx context.Context, _ *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:           "create <import-name> --snapshot <snapshot-name>",
+		Use:           "create <import-name> --target <name>",
 		Short:         "Create a SnapshotImport that prepares upload endpoints for a snapshot bundle",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
@@ -40,19 +41,28 @@ func NewCommand(ctx context.Context, _ *slog.Logger) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringP("namespace", "n", "", "namespace to import into (default: "+snaputil.DefaultNamespace+")")
-	cmd.Flags().String("snapshot", "", "desired name of the root Snapshot to (re)create (required)")
+	cmd.Flags().String("target", "", "desired name of the recreated (root or re-rooted child) snapshot (required)")
+	cmd.Flags().String("child-name", "", "import only this child snapshot from the uploaded bundle (server-side re-root)")
+	cmd.Flags().String("child-kind", "", "kind of the child snapshot to import (with --child-name)")
+	cmd.Flags().String("child-api-version", "", "apiVersion of the child snapshot to import (with --child-name)")
+	cmd.Flags().String("ttl", "30m", "idle time-to-live for the import's upload endpoints")
 	cmd.Flags().StringArray("storage-class-map", nil, "remap a source StorageClass to a target one, as src=dst (repeatable)")
 	cmd.Flags().Bool("publish", false, "expose upload endpoints outside the cluster")
-	_ = cmd.MarkFlagRequired("snapshot")
+	_ = cmd.MarkFlagRequired("target")
 	return cmd
 }
 
 func run(ctx context.Context, cmd *cobra.Command, name string) error {
 	ns := snaputil.ResolveNamespace(cmd)
-	snapshot, _ := cmd.Flags().GetString("snapshot")
+	target, _ := cmd.Flags().GetString("target")
+	ttl, _ := cmd.Flags().GetString("ttl")
 	publish, _ := cmd.Flags().GetBool("publish")
 	mapEntries, _ := cmd.Flags().GetStringArray("storage-class-map")
 
+	child, err := childRef(cmd)
+	if err != nil {
+		return err
+	}
 	scMapping, err := parseStorageClassMap(mapEntries)
 	if err != nil {
 		return err
@@ -62,19 +72,45 @@ func run(ctx context.Context, cmd *cobra.Command, name string) error {
 	if err != nil {
 		return err
 	}
-	created, err := snaputil.EnsureSnapshotImport(ctx, rt, ns, name, snapshot, scMapping, publish)
+	created, err := snaputil.EnsureSnapshotImport(ctx, rt, ns, name, target, child, ttl, scMapping, publish)
 	if err != nil {
 		return err
 	}
 	if created {
-		fmt.Fprintf(cmd.OutOrStdout(), "SnapshotImport %s/%s created (snapshot %q); upload the bundle with 'd8 snapshot import upload %s -d <dir>'\n",
-			ns, name, snapshot, name)
+		fmt.Fprintf(cmd.OutOrStdout(), "SnapshotImport %s/%s created (target %q%s); upload the bundle with 'd8 snapshot import upload %s -d <dir>'\n",
+			ns, name, target, childDesc(child), name)
 		return nil
 	}
 	// The object already existed and its spec was NOT updated; do not claim the new flags took effect.
-	fmt.Fprintf(cmd.OutOrStdout(), "SnapshotImport %s/%s already exists; its spec was left unchanged. To apply a different --snapshot or --storage-class-map, delete it first: 'd8 snapshot import delete %s'\n",
+	fmt.Fprintf(cmd.OutOrStdout(), "SnapshotImport %s/%s already exists; its spec was left unchanged. To apply different flags, delete it first: 'd8 snapshot import delete %s'\n",
 		ns, name, name)
 	return nil
+}
+
+// childRef builds the optional spec.childSnapshot from the --child-* flags. --child-name is the
+// trigger: without it no re-root is requested; with it the kind/apiVersion default server-side.
+func childRef(cmd *cobra.Command) (*v1alpha1.SnapshotReference, error) {
+	childName, _ := cmd.Flags().GetString("child-name")
+	childKind, _ := cmd.Flags().GetString("child-kind")
+	childAPIVersion, _ := cmd.Flags().GetString("child-api-version")
+	if childName == "" {
+		if childKind != "" || childAPIVersion != "" {
+			return nil, fmt.Errorf("--child-kind/--child-api-version require --child-name")
+		}
+		return nil, nil
+	}
+	return &v1alpha1.SnapshotReference{APIVersion: childAPIVersion, Kind: childKind, Name: childName}, nil
+}
+
+func childDesc(child *v1alpha1.SnapshotReference) string {
+	if child == nil {
+		return ""
+	}
+	kind := child.Kind
+	if kind == "" {
+		kind = "child"
+	}
+	return fmt.Sprintf(", re-rooted at %s %q", kind, child.Name)
 }
 
 func parseStorageClassMap(entries []string) (map[string]string, error) {

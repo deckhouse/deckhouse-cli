@@ -21,12 +21,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	v1alpha1 "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	snaputil "github.com/deckhouse/deckhouse-cli/internal/snapshot/util"
 )
 
@@ -48,6 +46,10 @@ func NewCommand(ctx context.Context, _ *slog.Logger) *cobra.Command {
 	return cmd
 }
 
+// run is status-driven: it uploads the index as an opaque blob, then follows the per-node URLs the
+// controller publishes in status.snapshots[] (after server-side re-root) to upload manifests and
+// volume data. The CLI never parses the index, so the node set always comes from status, not the
+// bundle — which is what makes spec.childSnapshot re-root transparent to the client.
 func run(ctx context.Context, cmd *cobra.Command, name string) error {
 	ns := snaputil.ResolveNamespace(cmd)
 	dir, _ := cmd.Flags().GetString("dir")
@@ -58,23 +60,16 @@ func run(ctx context.Context, cmd *cobra.Command, name string) error {
 	if err != nil {
 		return fmt.Errorf("read index: %w", err)
 	}
-	idx, err := snaputil.ParseIndex(rawIndex)
-	if err != nil {
-		return err
-	}
-	if fs := filesystemDataNodes(idx); len(fs) > 0 {
-		return fmt.Errorf("filesystem volume mode is not yet supported by the CLI; affected nodes: %s", strings.Join(fs, ", "))
-	}
 
 	sc, rt, api, err := snaputil.NewClients(cmd)
 	if err != nil {
 		return err
 	}
 
-	// The import must be created first (it carries the snapshot name + storage class mapping).
+	// The import must be created first (it carries targetName + childSnapshot + storage class mapping).
 	if _, gerr := snaputil.GetSnapshotImport(ctx, rt, ns, name); gerr != nil {
 		if apierrors.IsNotFound(gerr) {
-			return fmt.Errorf("SnapshotImport %s/%s not found; create it first with 'd8 snapshot import create %s --snapshot <name>'", ns, name, name)
+			return fmt.Errorf("SnapshotImport %s/%s not found; create it first with 'd8 snapshot import create %s --target <name>'", ns, name, name)
 		}
 		return gerr
 	}
@@ -84,63 +79,65 @@ func run(ctx context.Context, cmd *cobra.Command, name string) error {
 		return err
 	}
 
-	// 1. Index (drives the controller's node resolution); reuse the bytes already read above.
+	// 1. Index (opaque blob, as-is). It drives the controller's node resolution + re-root.
 	if uerr := api.UploadBlob(ctx, imp.Status.IndexUploadURL, rawIndex, true); uerr != nil {
 		return fmt.Errorf("upload index: %w", uerr)
 	}
 
-	// 2. Per-node manifests, then the whole-tree commit.
-	for i := range idx.Snapshots {
-		node := &idx.Snapshots[i]
-		mraw, rerr := os.ReadFile(snaputil.ManifestPath(dir, node.ID))
+	// 2. Wait for the per-node view (post re-root), then upload each node's manifests by its own URL.
+	imp, err = snaputil.WaitImportSnapshots(ctx, rt, ns, name, snaputil.DefaultTimeout, progress)
+	if err != nil {
+		return err
+	}
+	for i := range imp.Status.Snapshots {
+		entry := &imp.Status.Snapshots[i]
+		mraw, rerr := os.ReadFile(snaputil.ManifestPath(dir, entry.SnapshotID))
 		if rerr != nil {
-			return fmt.Errorf("read manifests for %s: %w", node.ID, rerr)
+			return fmt.Errorf("read manifests for %s: %w", entry.SnapshotID, rerr)
 		}
-		if uerr := api.UploadBlob(ctx, snaputil.ManifestsNodePath(imp.Status.ManifestsUploadURL, node.ID), mraw, true); uerr != nil {
-			return fmt.Errorf("upload manifests for %s: %w", node.ID, uerr)
+		if uerr := api.UploadBlob(ctx, entry.ManifestsUploadURL, mraw, true); uerr != nil {
+			return fmt.Errorf("upload manifests for %s: %w", entry.SnapshotID, uerr)
 		}
 	}
+	// Top-level manifests commit flips ManifestsReceived once every per-node manifest is in.
 	if uerr := api.UploadBlob(ctx, imp.Status.ManifestsUploadURL, nil, true); uerr != nil {
 		return fmt.Errorf("commit manifests: %w", uerr)
 	}
-	fmt.Fprintf(out, "uploaded index + manifests for %d node(s)\n", len(idx.Snapshots))
+	fmt.Fprintf(out, "uploaded index + manifests for %d node(s)\n", len(imp.Status.Snapshots))
 
-	// 3. Wait for per-data upload endpoints, then upload each block image.
+	// 3. Wait for per-data upload endpoints, then upload each node's volume data by volume mode.
 	imp, err = snaputil.WaitImportDataUploadsReady(ctx, rt, ns, name, snaputil.DefaultTimeout, progress)
 	if err != nil {
 		return err
 	}
-	dataByID := snaputil.ImportDataEntryByID(imp.Status.DataSnapshots)
-	for i := range idx.Snapshots {
-		node := &idx.Snapshots[i]
-		if !node.HasData || node.Data == nil {
-			continue
+	for i := range imp.Status.Snapshots {
+		entry := &imp.Status.Snapshots[i]
+		if entry.VolumeMode == "" {
+			continue // dataless node
 		}
-		entry, ok := dataByID[node.ID]
-		if !ok || !entry.UploadReady || entry.UploadURL == "" {
-			return fmt.Errorf("upload endpoint for node %s is not ready", node.ID)
+		if !entry.UploadReady || entry.UploadURL == "" {
+			return fmt.Errorf("upload endpoint for node %s is not ready", entry.SnapshotID)
 		}
-		progress(fmt.Sprintf("uploading data for %s...", node.ID))
-		if uerr := snaputil.UploadBlock(ctx, sc, entry.UploadURL, entry.UploadCA, snaputil.DataPath(dir, node.ID)); uerr != nil {
-			return fmt.Errorf("upload data for %s: %w", node.ID, uerr)
+		progress(fmt.Sprintf("uploading %s data for %s...", entry.VolumeMode, entry.SnapshotID))
+		switch entry.VolumeMode {
+		case snaputil.VolumeModeBlock:
+			if uerr := snaputil.UploadBlock(ctx, sc, entry.UploadURL, entry.UploadCA, snaputil.DataPath(dir, entry.SnapshotID)); uerr != nil {
+				return fmt.Errorf("upload data for %s: %w", entry.SnapshotID, uerr)
+			}
+		case snaputil.VolumeModeFilesystem:
+			if uerr := snaputil.UploadFilesystem(ctx, sc, entry.UploadURL, entry.UploadCA, snaputil.DataDirPath(dir, entry.SnapshotID)); uerr != nil {
+				return fmt.Errorf("upload data for %s: %w", entry.SnapshotID, uerr)
+			}
+		default:
+			return fmt.Errorf("node %s has unknown volumeMode %q", entry.SnapshotID, entry.VolumeMode)
 		}
 	}
 
-	// 4. Wait for the controller to capture + pre-provision the whole tree.
-	if _, werr := snaputil.WaitImportReady(ctx, rt, ns, name, snaputil.DefaultTimeout, progress); werr != nil {
-		return werr
+	// 4. Wait for the controller to capture + pre-provision the (re-rooted) tree.
+	imp, err = snaputil.WaitImportReady(ctx, rt, ns, name, snaputil.DefaultTimeout, progress)
+	if err != nil {
+		return err
 	}
-	fmt.Fprintf(out, "SnapshotImport %s/%s is Ready; snapshot %q restored\n", ns, name, idx.RootSnapshot.Name)
+	fmt.Fprintf(out, "SnapshotImport %s/%s is Ready; snapshot %q restored\n", ns, name, imp.Spec.TargetName)
 	return nil
-}
-
-func filesystemDataNodes(idx *v1alpha1.Index) []string {
-	var fs []string
-	for i := range idx.Snapshots {
-		n := &idx.Snapshots[i]
-		if n.HasData && n.Data != nil && n.Data.VolumeMode == snaputil.VolumeModeFilesystem {
-			fs = append(fs, n.ID)
-		}
-	}
-	return fs
 }

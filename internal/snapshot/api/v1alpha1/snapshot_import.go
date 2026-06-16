@@ -26,6 +26,7 @@ const (
 	SnapshotImportConditionManifestsReceived = "ManifestsReceived"
 	SnapshotImportConditionUploadsPrepared   = "UploadsPrepared"
 	SnapshotImportConditionCaptured          = "Captured"
+	SnapshotImportConditionDataReceived      = "DataReceived"
 	SnapshotImportConditionReady             = "Ready"
 )
 
@@ -38,6 +39,12 @@ const (
 	// SnapshotImportReasonDataSizeUnknown marks UploadsPrepared=False when a data node's volume size
 	// is unknown/zero in the uploaded index, so a PVC cannot be sized. The bundle must be regenerated.
 	SnapshotImportReasonDataSizeUnknown = "DataSizeUnknown"
+	// SnapshotImportReasonChildNotFound marks the import failed-closed when spec.childSnapshot does
+	// not match any node in the uploaded bundle.
+	SnapshotImportReasonChildNotFound = "ChildSnapshotNotFound"
+	// SnapshotImportReasonNameConflict marks Ready=False when a target object name already exists in
+	// the namespace and is not owned by this import.
+	SnapshotImportReasonNameConflict = "NameConflict"
 )
 
 // SnapshotImport orchestrates uploading (importing) a whole Snapshot hierarchy.
@@ -58,8 +65,17 @@ type SnapshotImportList struct {
 
 // SnapshotImportSpec is the desired state of a SnapshotImport.
 type SnapshotImportSpec struct {
-	// SnapshotName is the desired name of the root Snapshot to (re)create on import.
-	SnapshotName string `json:"snapshotName"`
+	// TargetName is the desired name of the recreated root snapshot in this namespace. When
+	// ChildSnapshot is empty it names the recreated root of the uploaded bundle; when ChildSnapshot
+	// selects a child, it names that re-rooted child.
+	TargetName string `json:"targetName"`
+	// ChildSnapshot optionally selects a single child snapshot from the uploaded bundle to import as
+	// the new root (server-side re-root). Empty imports the bundle's own root. When set, apiVersion,
+	// kind and name must all match a node present in the uploaded bundle exactly.
+	ChildSnapshot *SnapshotReference `json:"childSnapshot,omitempty"`
+	// TTL is the idle time-to-live for the import's upload endpoints (e.g. "30m"). Required by the
+	// server CRD.
+	TTL string `json:"ttl,omitempty"`
 	// StorageClassMapping optionally remaps source StorageClass names to target names.
 	StorageClassMapping map[string]string `json:"storageClassMapping,omitempty"`
 	// Publish exposes upload endpoints outside the cluster (Ingress/Route) when true.
@@ -69,23 +85,31 @@ type SnapshotImportSpec struct {
 // SnapshotImportStatus is the observed state of a SnapshotImport.
 type SnapshotImportStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-	// IndexUploadURL is where the client uploads the hierarchy index.
+	// IndexUploadURL is where the client uploads the hierarchy index (opaque blob, as-is).
 	IndexUploadURL string `json:"indexUploadURL,omitempty"`
-	// ManifestsUploadURL is where the client uploads the whole-tree manifests archive.
+	// ManifestsUploadURL is the top-level manifests upload endpoint; an empty finalize PUT here flips
+	// the ManifestsReceived gate after every per-node manifest has been uploaded.
 	ManifestsUploadURL string `json:"manifestsUploadURL,omitempty"`
-	// DataSnapshots lists per-data-snapshot upload endpoints.
-	DataSnapshots []SnapshotImportDataEntry `json:"dataSnapshots,omitempty"`
+	// Snapshots is the flat, per-node import view of the (possibly re-rooted) bundle: one entry per
+	// node carrying its per-node manifests upload URL and, for data nodes, the data upload endpoint
+	// and capture progress. Published after server-side re-root.
+	Snapshots []SnapshotImportSnapshotEntry `json:"snapshots,omitempty"`
 	// Conditions represent the latest observations.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// SnapshotImportDataEntry is one data snapshot's upload endpoint and capture progress.
-type SnapshotImportDataEntry struct {
+// SnapshotImportSnapshotEntry is one snapshot node's import view: its per-node manifests upload URL
+// plus, for a data node, the volume data upload endpoint and capture progress.
+type SnapshotImportSnapshotEntry struct {
 	// SnapshotID is the stable archive identifier "<kind>--<namespace>--<name>" from the index.
 	SnapshotID string `json:"snapshotID"`
-	// UploadURL is the endpoint to upload this snapshot's volume data.
+	// VolumeMode is the data volume mode (Block or Filesystem); empty for dataless nodes.
+	VolumeMode string `json:"volumeMode,omitempty"`
+	// ManifestsUploadURL is where the client uploads this single node's own manifests (?node=).
+	ManifestsUploadURL string `json:"manifestsUploadURL,omitempty"`
+	// UploadURL is the endpoint to upload this snapshot's volume data (data nodes only).
 	UploadURL string `json:"uploadURL,omitempty"`
-	// UploadCA is the base64 PEM CA bundle to trust when talking to the upload endpoint.
+	// UploadCA is the base64 PEM CA bundle to trust when uploading to the internal UploadURL.
 	UploadCA string `json:"uploadCA,omitempty"`
 	// UploadReady indicates the populating PVC + importer endpoint are ready to receive data.
 	UploadReady bool `json:"uploadReady,omitempty"`

@@ -25,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
@@ -71,15 +72,39 @@ func condTrue(conditions []metav1.Condition, condType string) bool {
 	return apimeta.IsStatusConditionTrue(conditions, condType)
 }
 
+// ResolveResource maps a snapshot apiVersion/kind to its plural resource name (e.g. Snapshot ->
+// snapshots, DemoVirtualDiskSnapshot -> demovirtualdisksnapshots), defaulting an empty apiVersion/kind
+// to the namespaced root Snapshot. The plural names the /view aggregated subresource the CLI builds
+// itself for in-cluster `d8 snapshot list`.
+func ResolveResource(rt ctrlclient.Client, apiVersion, kind string) (string, error) {
+	if apiVersion == "" {
+		apiVersion = DefaultSnapshotAPIVersion
+	}
+	if kind == "" {
+		kind = DefaultSnapshotKind
+	}
+	gv, err := schema.ParseGroupVersion(apiVersion)
+	if err != nil {
+		return "", fmt.Errorf("parse apiVersion %q: %w", apiVersion, err)
+	}
+	mapping, err := rt.RESTMapper().RESTMapping(schema.GroupKind{Group: gv.Group, Kind: kind}, gv.Version)
+	if err != nil {
+		return "", fmt.Errorf("resolve resource for %s/%s: %w", apiVersion, kind, err)
+	}
+	return mapping.Resource.Resource, nil
+}
+
 // ---- SnapshotExport ----
 
-// EnsureSnapshotExport creates the SnapshotExport if absent (AlreadyExists tolerated).
-func EnsureSnapshotExport(ctx context.Context, rt ctrlclient.Client, ns, name, snapshotName string, publish bool) error {
+// EnsureSnapshotExport creates the SnapshotExport if absent (AlreadyExists tolerated). ref is the
+// typed snapshot reference (apiVersion/kind default server-side to the namespaced root Snapshot).
+func EnsureSnapshotExport(ctx context.Context, rt ctrlclient.Client, ns, name string, ref v1alpha1.SnapshotReference, ttl string, publish bool) error {
 	obj := &v1alpha1.SnapshotExport{
 		TypeMeta:   metav1.TypeMeta{APIVersion: v1alpha1.SchemeGroupVersion.String(), Kind: "SnapshotExport"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: v1alpha1.SnapshotExportSpec{
-			SnapshotRef: v1alpha1.LocalSnapshotRef{Name: snapshotName},
+			SnapshotRef: ref,
+			TTL:         ttl,
 			Publish:     publish,
 		},
 	}
@@ -143,12 +168,14 @@ func WaitSnapshotExportReady(ctx context.Context, rt ctrlclient.Client, ns, name
 // untouched — a SnapshotImport spec is immutable once the controller starts driving it). Callers must
 // report this accurately so the user is not misled into believing a new --snapshot/--storage-class-map
 // took effect on a pre-existing import.
-func EnsureSnapshotImport(ctx context.Context, rt ctrlclient.Client, ns, name, snapshotName string, scMapping map[string]string, publish bool) (created bool, err error) {
+func EnsureSnapshotImport(ctx context.Context, rt ctrlclient.Client, ns, name, targetName string, child *v1alpha1.SnapshotReference, ttl string, scMapping map[string]string, publish bool) (created bool, err error) {
 	obj := &v1alpha1.SnapshotImport{
 		TypeMeta:   metav1.TypeMeta{APIVersion: v1alpha1.SchemeGroupVersion.String(), Kind: "SnapshotImport"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: v1alpha1.SnapshotImportSpec{
-			SnapshotName:        snapshotName,
+			TargetName:          targetName,
+			ChildSnapshot:       child,
+			TTL:                 ttl,
 			StorageClassMapping: scMapping,
 			Publish:             publish,
 		},
@@ -209,9 +236,59 @@ func WaitImportUploadURLs(ctx context.Context, rt ctrlclient.Client, ns, name st
 	}
 }
 
+// terminalImportFailure scans the import's conditions for a known fail-closed reason (bad spec,
+// unresolvable bundle) and returns a descriptive error so the wait loops abort instead of spinning to
+// the deadline. It returns nil while the import is still converging.
+func terminalImportFailure(imp *v1alpha1.SnapshotImport, name string) error {
+	for i := range imp.Status.Conditions {
+		c := &imp.Status.Conditions[i]
+		if c.Status != metav1.ConditionFalse {
+			continue
+		}
+		switch c.Reason {
+		case v1alpha1.SnapshotImportReasonChildNotFound:
+			return fmt.Errorf("childSnapshot not found in the uploaded bundle: %s; fix --child-* and re-create the import ('d8 snapshot import delete %s')", c.Message, name)
+		case v1alpha1.SnapshotImportReasonNameConflict:
+			return fmt.Errorf("name conflict in the target namespace: %s; choose a different --target or remove the conflicting object", c.Message)
+		case v1alpha1.SnapshotImportReasonStorageClassMappingRequired:
+			return fmt.Errorf("storage class mapping required: %s; delete and re-create the import with --storage-class-map src=dst ('d8 snapshot import delete %s')", c.Message, name)
+		case v1alpha1.SnapshotImportReasonDataSizeUnknown:
+			return fmt.Errorf("a data node has unknown volume size: %s; the export bundle must be regenerated", c.Message)
+		}
+	}
+	return nil
+}
+
+// WaitImportSnapshots polls until the per-node status.snapshots[] is published (after server-side
+// re-root) with a per-node manifests upload URL on every node, so the client can upload manifests by
+// following those URLs rather than parsing the index.
+func WaitImportSnapshots(ctx context.Context, rt ctrlclient.Client, ns, name string, timeout time.Duration, progress func(string)) (*v1alpha1.SnapshotImport, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		imp, err := GetSnapshotImport(ctx, rt, ns, name)
+		if err != nil {
+			return nil, err
+		}
+		if ferr := terminalImportFailure(imp, name); ferr != nil {
+			return imp, ferr
+		}
+		if len(imp.Status.Snapshots) > 0 && allManifestsURLs(imp.Status.Snapshots) {
+			return imp, nil
+		}
+		if time.Now().After(deadline) {
+			return imp, fmt.Errorf("timed out waiting for SnapshotImport %s/%s per-node manifests endpoints", ns, name)
+		}
+		if progress != nil {
+			progress(fmt.Sprintf("waiting for per-node manifests endpoints on %s/%s...", ns, name))
+		}
+		if err := sleep(ctx, DefaultPollInterval); err != nil {
+			return nil, err
+		}
+	}
+}
+
 // WaitImportDataUploadsReady polls until every data node has an upload endpoint ready. It fails fast
-// when the controller reports a StorageClass mapping is required (the user must re-create the import
-// with spec.storageClassMapping).
+// when the controller reports a terminal failure (StorageClass mapping required, unknown size, etc.).
 func WaitImportDataUploadsReady(ctx context.Context, rt ctrlclient.Client, ns, name string, timeout time.Duration, progress func(string)) (*v1alpha1.SnapshotImport, error) {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -219,19 +296,14 @@ func WaitImportDataUploadsReady(ctx context.Context, rt ctrlclient.Client, ns, n
 		if err != nil {
 			return nil, err
 		}
-		if c := apimeta.FindStatusCondition(imp.Status.Conditions, v1alpha1.SnapshotImportConditionUploadsPrepared); c != nil && c.Status == metav1.ConditionFalse {
-			switch c.Reason {
-			case v1alpha1.SnapshotImportReasonStorageClassMappingRequired:
-				return imp, fmt.Errorf("storage class mapping required: %s; delete and re-create the import with --storage-class-map src=dst ('d8 snapshot import delete %s')", c.Message, name)
-			case v1alpha1.SnapshotImportReasonDataSizeUnknown:
-				return imp, fmt.Errorf("a data node has unknown volume size: %s; the export bundle must be regenerated", c.Message)
-			}
+		if ferr := terminalImportFailure(imp, name); ferr != nil {
+			return imp, ferr
 		}
 		// Gate readiness on the authoritative UploadsPrepared=True condition (set atomically once every
 		// endpoint is ready), not on the data-entry slice alone — the controller may publish entries
 		// incrementally, so an early "all current entries ready" check can return a partial set.
 		if condTrue(imp.Status.Conditions, v1alpha1.SnapshotImportConditionUploadsPrepared) &&
-			(len(imp.Status.DataSnapshots) == 0 || allUploadReady(imp.Status.DataSnapshots)) {
+			allDataUploadReady(imp.Status.Snapshots) {
 			return imp, nil
 		}
 		if time.Now().After(deadline) {
@@ -269,27 +341,39 @@ func WaitImportReady(ctx context.Context, rt ctrlclient.Client, ns, name string,
 	}
 }
 
-func allUploadReady(entries []v1alpha1.SnapshotImportDataEntry) bool {
+// allManifestsURLs reports whether every node has a per-node manifests upload URL.
+func allManifestsURLs(entries []v1alpha1.SnapshotImportSnapshotEntry) bool {
 	for i := range entries {
-		if !entries[i].UploadReady {
+		if entries[i].ManifestsUploadURL == "" {
 			return false
 		}
 	}
 	return true
 }
 
-// ExportDataEntryByID indexes export data entries by snapshot id.
-func ExportDataEntryByID(entries []v1alpha1.SnapshotExportDataEntry) map[string]v1alpha1.SnapshotExportDataEntry {
-	m := make(map[string]v1alpha1.SnapshotExportDataEntry, len(entries))
+// allDataUploadReady reports whether every data node (VolumeMode != "") has an upload endpoint ready.
+// Dataless nodes never get an upload endpoint and must not block readiness.
+func allDataUploadReady(entries []v1alpha1.SnapshotImportSnapshotEntry) bool {
+	for i := range entries {
+		if entries[i].VolumeMode != "" && !entries[i].UploadReady {
+			return false
+		}
+	}
+	return true
+}
+
+// ExportSnapshotEntryByID indexes export per-node entries by snapshot id.
+func ExportSnapshotEntryByID(entries []v1alpha1.SnapshotExportSnapshotEntry) map[string]v1alpha1.SnapshotExportSnapshotEntry {
+	m := make(map[string]v1alpha1.SnapshotExportSnapshotEntry, len(entries))
 	for _, e := range entries {
 		m[e.SnapshotID] = e
 	}
 	return m
 }
 
-// ImportDataEntryByID indexes import data entries by snapshot id.
-func ImportDataEntryByID(entries []v1alpha1.SnapshotImportDataEntry) map[string]v1alpha1.SnapshotImportDataEntry {
-	m := make(map[string]v1alpha1.SnapshotImportDataEntry, len(entries))
+// ImportSnapshotEntryByID indexes import per-node entries by snapshot id.
+func ImportSnapshotEntryByID(entries []v1alpha1.SnapshotImportSnapshotEntry) map[string]v1alpha1.SnapshotImportSnapshotEntry {
+	m := make(map[string]v1alpha1.SnapshotImportSnapshotEntry, len(entries))
 	for _, e := range entries {
 		m[e.SnapshotID] = e
 	}

@@ -39,6 +39,24 @@ import (
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
+// subresAPIPrefix is the namespaced aggregated-subresource AbsPath prefix. For the server-side /view
+// (consumed by `d8 snapshot list` in-cluster) there is no SnapshotExport CR to publish the URL, so
+// the CLI builds it itself: <prefix>/<ns>/<resource>/<name>/view.
+const subresAPIPrefix = "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces"
+
+// Default snapshot GVK: a bare snapshotRef / `d8 snapshot list <name>` targets the namespaced root
+// Snapshot.
+const (
+	DefaultSnapshotAPIVersion = "storage.deckhouse.io/v1alpha1"
+	DefaultSnapshotKind       = "Snapshot"
+)
+
+// ViewAbsPath builds the aggregated /view subresource AbsPath for a snapshot identified by its plural
+// resource (snapshots for the namespace root, or a domain plural for a subtree).
+func ViewAbsPath(ns, resource, name string) string {
+	return fmt.Sprintf("%s/%s/%s/%s/view", subresAPIPrefix, ns, resource, name)
+}
+
 // apiUploadChunkBytes bounds a single aggregated-subresource append. The server caps a chunk at
 // 512 KiB (maxImportUploadChunkBytes), so stay comfortably below that.
 const apiUploadChunkBytes = 256 * 1024

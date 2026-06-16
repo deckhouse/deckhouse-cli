@@ -21,15 +21,23 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"io/fs"
+	"log/slog"
 	"net/http"
 	neturl "net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/deckhouse/deckhouse-cli/internal/data/fswalk"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
+
+// dataFilesAPIPath is the data-pod filesystem protocol root. Directory listings and per-file
+// GET/PUT hang off this path (mirrors d8 data export/import).
+const dataFilesAPIPath = "api/v1/files"
 
 // dataChunkBytes is the per-PUT body size for data-pod block uploads.
 const dataChunkBytes = 4 * 1024 * 1024
@@ -412,4 +420,162 @@ func dataHeadOffset(ctx context.Context, client httpDoer, url string) (int64, er
 		}
 	}
 	return 0, nil
+}
+
+// DownloadFilesystem recursively downloads the Filesystem-mode volume served under <base>/api/v1/files
+// into dstDir, reusing the shared data-exporter listing walker (bounded parallelism, per-file resume
+// via the local partial). It trusts the per-endpoint CA (caB64), like DownloadBlock.
+func DownloadFilesystem(ctx context.Context, sc *safeClient.SafeClient, base, caB64, dstDir string, log *slog.Logger) error {
+	client, err := dataPodClient(sc, caB64)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return err
+	}
+	sem := make(chan struct{}, fswalk.DefaultConcurrency)
+	// A trailing-slash srcPath makes the walker treat api/v1/files as a directory and descend it.
+	return fswalk.RecursiveDownload(ctx, client, log, sem, strings.TrimSuffix(base, "/"), dataFilesAPIPath+"/", dstDir)
+}
+
+// UploadFilesystem recursively uploads the local directory tree srcDir to the importer's Filesystem
+// endpoint: each regular file is PUT (resumably) to <base>/api/v1/files/<relpath> carrying its size +
+// permissions, then a single POST /api/v1/finished signals completion. Symlinks and special files are
+// skipped (a known-limitation of the bundle layout). It trusts the per-endpoint CA (caB64).
+func UploadFilesystem(ctx context.Context, sc *safeClient.SafeClient, base, caB64, srcDir string) error {
+	client, err := dataPodClient(sc, caB64)
+	if err != nil {
+		return err
+	}
+	return uploadFilesystem(ctx, client, base, srcDir)
+}
+
+// uploadFilesystem is the testable core of UploadFilesystem against an already-resolved client.
+func uploadFilesystem(ctx context.Context, client httpDoer, base, srcDir string) error {
+	walkErr := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			// Non-regular entries (symlinks, devices, sockets) are not represented in the bundle.
+			return nil
+		}
+		rel, rerr := filepath.Rel(srcDir, path)
+		if rerr != nil {
+			return rerr
+		}
+		return uploadFile(ctx, client, base, path, filepath.ToSlash(rel))
+	})
+	if walkErr != nil {
+		return walkErr
+	}
+	return finishUpload(ctx, client, base)
+}
+
+// uploadFile uploads a single regular file to <base>/api/v1/files/<rel> (resumable, X-Offset).
+func uploadFile(ctx context.Context, client httpDoer, base, localPath, rel string) error {
+	fileURL, err := neturl.JoinPath(base, dataFilesAPIPath, rel)
+	if err != nil {
+		return err
+	}
+
+	f, err := os.Open(localPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	total := fi.Size()
+	perm := fmt.Sprintf("%04o", fi.Mode().Perm())
+
+	offset, err := dataHeadOffset(ctx, client, fileURL)
+	if err != nil {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
+	}
+
+	converges := 0
+	for offset < total {
+		sendLen := int64(dataChunkBytes)
+		if offset+sendLen > total {
+			sendLen = total - offset
+		}
+		next, conflicted, uerr := putFileChunk(ctx, client, fileURL, f, offset, sendLen, total, perm)
+		if uerr != nil {
+			return fmt.Errorf("upload %s: %w", rel, uerr)
+		}
+		if conflicted {
+			converges++
+			if converges > dataMaxConverge {
+				return fmt.Errorf("upload %s did not converge after %d server conflicts", rel, dataMaxConverge)
+			}
+			if next < 0 || next > total {
+				return fmt.Errorf("upload %s: server returned out-of-range offset %d (size %d)", rel, next, total)
+			}
+			offset = next
+			continue
+		}
+		if next <= offset {
+			return fmt.Errorf("upload %s stalled at offset %d", rel, offset)
+		}
+		offset = next
+	}
+	// An empty file still needs one PUT so the importer materialises it.
+	if total == 0 {
+		if _, _, uerr := putFileChunk(ctx, client, fileURL, f, 0, 0, 0, perm); uerr != nil {
+			return fmt.Errorf("upload %s (empty): %w", rel, uerr)
+		}
+	}
+	return nil
+}
+
+// putFileChunk PUTs one chunk [offset,offset+sendLen) of a filesystem file, carrying the total size
+// and permissions. It mirrors putBlock's X-Offset / X-Next-Offset / 409 resync contract.
+func putFileChunk(ctx context.Context, client httpDoer, url string, f *os.File, offset, sendLen, total int64, perm string) (int64, bool, error) {
+	req, rerr := http.NewRequestWithContext(ctx, http.MethodPut, url, io.NopCloser(io.NewSectionReader(f, offset, sendLen)))
+	if rerr != nil {
+		return 0, false, rerr
+	}
+	req.ContentLength = sendLen
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(io.NewSectionReader(f, offset, sendLen)), nil
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Content-Length", strconv.FormatInt(total, 10))
+	req.Header.Set("X-Offset", strconv.FormatInt(offset, 10))
+	req.Header.Set("X-Attribute-Permissions", perm)
+	resp, derr := client.HTTPDo(req)
+	if derr != nil {
+		return 0, false, derr
+	}
+	defer drainClose(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+
+	next := offset + sendLen
+	hasNext := false
+	if v := resp.Header.Get("X-Next-Offset"); v != "" {
+		if n, perr := strconv.ParseInt(v, 10, 64); perr == nil && n >= 0 {
+			next = n
+			hasNext = true
+		}
+	}
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusAccepted, http.StatusCreated, http.StatusNoContent:
+		return next, false, nil
+	case http.StatusConflict:
+		if !hasNext {
+			return 0, false, fmt.Errorf("%s (offset %d): 409 without X-Next-Offset, cannot converge: %s", url, offset, string(body))
+		}
+		return next, true, nil
+	default:
+		return 0, false, fmt.Errorf("%s (offset %d): %s: %s", url, offset, resp.Status, string(body))
+	}
 }

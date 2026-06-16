@@ -32,6 +32,7 @@ import (
 	siCreate "github.com/deckhouse/deckhouse-cli/internal/snapshot/snapimport/cmd/create"
 	siDelete "github.com/deckhouse/deckhouse-cli/internal/snapshot/snapimport/cmd/delete"
 	siUpload "github.com/deckhouse/deckhouse-cli/internal/snapshot/snapimport/cmd/upload"
+	snapList "github.com/deckhouse/deckhouse-cli/internal/snapshot/snaplist/cmd/list"
 )
 
 const cmdName = "snapshot"
@@ -75,6 +76,6 @@ func NewCommand() *cobra.Command {
 		siDelete.NewCommand(ctx, logger),
 	)
 
-	root.AddCommand(exportCmd, importCmd)
+	root.AddCommand(exportCmd, importCmd, snapList.NewCommand(ctx, logger))
 	return root
 }

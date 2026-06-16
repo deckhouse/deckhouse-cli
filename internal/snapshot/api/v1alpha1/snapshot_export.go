@@ -26,9 +26,14 @@ const (
 	SnapshotExportConditionDataReady = "DataReady"
 )
 
-// LocalSnapshotRef references a root Snapshot in the same namespace as the referrer.
-type LocalSnapshotRef struct {
-	Name string `json:"name"`
+// SnapshotReference is a typed reference to a snapshot object by GroupVersionKind and name, within
+// the referrer's namespace. APIVersion and Kind are optional: empty values default server-side to the
+// namespaced root Snapshot (storage.deckhouse.io/v1alpha1, kind Snapshot), so a bare {name} keeps
+// referencing a whole Snapshot.
+type SnapshotReference struct {
+	APIVersion string `json:"apiVersion,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	Name       string `json:"name"`
 }
 
 // SnapshotExport orchestrates downloading (exporting) a whole Snapshot hierarchy.
@@ -49,8 +54,13 @@ type SnapshotExportList struct {
 
 // SnapshotExportSpec is the desired state of a SnapshotExport.
 type SnapshotExportSpec struct {
-	// SnapshotRef references the root Snapshot (same namespace) to export.
-	SnapshotRef LocalSnapshotRef `json:"snapshotRef"`
+	// SnapshotRef is a typed reference to the snapshot to export (same namespace). It may be the
+	// namespaced root Snapshot (the default when kind/apiVersion are empty) or any domain snapshot CR,
+	// in which case the export covers that node and its subtree only.
+	SnapshotRef SnapshotReference `json:"snapshotRef"`
+	// TTL is the idle time-to-live for the export's data endpoints (e.g. "30m"). Required by the
+	// server CRD.
+	TTL string `json:"ttl,omitempty"`
 	// Publish exposes the endpoints outside the cluster (Ingress/Route) when true.
 	Publish bool `json:"publish,omitempty"`
 }
@@ -58,24 +68,41 @@ type SnapshotExportSpec struct {
 // SnapshotExportStatus is the observed state of a SnapshotExport.
 type SnapshotExportStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-	// IndexURL serves the hierarchy index (snapshot tree + per-snapshot data metadata).
+	// IndexURL serves the opaque hierarchy index blob. The CLI downloads it verbatim and never parses
+	// it: everything the client needs is mirrored per node in Snapshots.
 	IndexURL string `json:"indexURL,omitempty"`
-	// ManifestsURL serves the whole-tree manifests archive.
-	ManifestsURL string `json:"manifestsURL,omitempty"`
-	// DataSnapshots lists per-data-snapshot export endpoints.
-	DataSnapshots []SnapshotExportDataEntry `json:"dataSnapshots,omitempty"`
+	// Snapshots is the flat, per-node export view: one entry per snapshot in the exported (sub)tree,
+	// carrying that node's own manifests URL and, for data nodes, volume metadata and a download URL.
+	Snapshots []SnapshotExportSnapshotEntry `json:"snapshots,omitempty"`
 	// Conditions represent the latest observations (Ready, DataReady).
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// SnapshotExportDataEntry is one data leaf's export endpoint.
-type SnapshotExportDataEntry struct {
+// SnapshotExportSnapshotEntry is one snapshot node's export view: its own manifests URL plus, for a
+// data node, the volume metadata and data download endpoint. The CLI follows these URLs without
+// parsing the index blob.
+type SnapshotExportSnapshotEntry struct {
 	// SnapshotID is the stable archive identifier "<kind>--<namespace>--<name>".
 	SnapshotID string `json:"snapshotID"`
-	// DataURL is the endpoint to download this snapshot's volume data.
+	// ManifestsURL serves this single node's own manifests (the per-node ?node= aggregated endpoint).
+	ManifestsURL string `json:"manifestsURL,omitempty"`
+	// HasData is true when this node carries a data volume (DataURL is populated once ready).
+	HasData bool `json:"hasData,omitempty"`
+	// VolumeMode is the data volume mode (Block or Filesystem); it selects the data endpoint and the
+	// on-disk layout. Empty for dataless nodes.
+	VolumeMode string `json:"volumeMode,omitempty"`
+	// StorageClassName is the source volume's StorageClass (informational). Empty for dataless nodes.
+	StorageClassName string `json:"storageClassName,omitempty"`
+	// FsType is the source volume filesystem type, when known.
+	FsType string `json:"fsType,omitempty"`
+	// AccessModes are the source volume access modes, when known.
+	AccessModes []string `json:"accessModes,omitempty"`
+	// Size is the data volume size in bytes; 0 if unknown.
+	Size int64 `json:"size,omitempty"`
+	// DataURL is the endpoint to download this node's volume data (data nodes only).
 	DataURL string `json:"dataURL,omitempty"`
-	// DataCA is the base64 PEM CA bundle to trust when talking to the data endpoint.
+	// DataCA is the base64 PEM CA bundle to trust when downloading from the internal DataURL.
 	DataCA string `json:"dataCA,omitempty"`
-	// Ready indicates the data endpoint is serving.
+	// Ready indicates the data endpoint is serving (restored PVC bound + DataExport ready).
 	Ready bool `json:"ready,omitempty"`
 }

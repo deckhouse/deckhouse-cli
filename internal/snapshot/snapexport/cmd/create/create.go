@@ -23,6 +23,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	v1alpha1 "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	snaputil "github.com/deckhouse/deckhouse-cli/internal/snapshot/util"
 )
 
@@ -30,7 +31,7 @@ import (
 func NewCommand(ctx context.Context, _ *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "create <export-name> --snapshot <snapshot-name>",
-		Short:         "Create a SnapshotExport for a snapshot hierarchy",
+		Short:         "Create a SnapshotExport for a snapshot hierarchy (or a typed subtree)",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -39,7 +40,10 @@ func NewCommand(ctx context.Context, _ *slog.Logger) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringP("namespace", "n", "", "namespace of the snapshot and export (default: "+snaputil.DefaultNamespace+")")
-	cmd.Flags().String("snapshot", "", "name of the root Snapshot to export (required)")
+	cmd.Flags().String("snapshot", "", "name of the snapshot to export (required)")
+	cmd.Flags().String("kind", snaputil.DefaultSnapshotKind, "kind of the snapshot to export (e.g. Snapshot, DemoVirtualDiskSnapshot)")
+	cmd.Flags().String("api-version", snaputil.DefaultSnapshotAPIVersion, "apiVersion of the snapshot to export")
+	cmd.Flags().String("ttl", "30m", "idle time-to-live for the export's data endpoints")
 	cmd.Flags().Bool("publish", false, "expose endpoints outside the cluster")
 	cmd.Flags().Bool("wait", false, "wait until the export is Ready")
 	_ = cmd.MarkFlagRequired("snapshot")
@@ -49,17 +53,22 @@ func NewCommand(ctx context.Context, _ *slog.Logger) *cobra.Command {
 func run(ctx context.Context, cmd *cobra.Command, name string) error {
 	ns := snaputil.ResolveNamespace(cmd)
 	snapshot, _ := cmd.Flags().GetString("snapshot")
+	kind, _ := cmd.Flags().GetString("kind")
+	apiVersion, _ := cmd.Flags().GetString("api-version")
+	ttl, _ := cmd.Flags().GetString("ttl")
 	publish, _ := cmd.Flags().GetBool("publish")
 	wait, _ := cmd.Flags().GetBool("wait")
+
+	ref := v1alpha1.SnapshotReference{APIVersion: apiVersion, Kind: kind, Name: snapshot}
 
 	_, rt, _, err := snaputil.NewClients(cmd)
 	if err != nil {
 		return err
 	}
-	if err := snaputil.EnsureSnapshotExport(ctx, rt, ns, name, snapshot, publish); err != nil {
+	if err := snaputil.EnsureSnapshotExport(ctx, rt, ns, name, ref, ttl, publish); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "SnapshotExport %s/%s created for snapshot %q\n", ns, name, snapshot)
+	fmt.Fprintf(cmd.OutOrStdout(), "SnapshotExport %s/%s created for %s %q\n", ns, name, kind, snapshot)
 
 	if wait {
 		if _, err := snaputil.WaitSnapshotExportReady(ctx, rt, ns, name, snaputil.DefaultTimeout,

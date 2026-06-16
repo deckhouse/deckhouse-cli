@@ -26,16 +26,16 @@ import (
 )
 
 // DeepCopyInto copies the receiver into out.
-func (in *LocalSnapshotRef) DeepCopyInto(out *LocalSnapshotRef) {
+func (in *SnapshotReference) DeepCopyInto(out *SnapshotReference) {
 	*out = *in
 }
 
-// DeepCopy creates a new LocalSnapshotRef.
-func (in *LocalSnapshotRef) DeepCopy() *LocalSnapshotRef {
+// DeepCopy creates a new SnapshotReference.
+func (in *SnapshotReference) DeepCopy() *SnapshotReference {
 	if in == nil {
 		return nil
 	}
-	out := new(LocalSnapshotRef)
+	out := new(SnapshotReference)
 	in.DeepCopyInto(out)
 	return out
 }
@@ -118,10 +118,12 @@ func (in *SnapshotExportSpec) DeepCopy() *SnapshotExportSpec {
 // DeepCopyInto copies the receiver into out.
 func (in *SnapshotExportStatus) DeepCopyInto(out *SnapshotExportStatus) {
 	*out = *in
-	if in.DataSnapshots != nil {
-		in, out := &in.DataSnapshots, &out.DataSnapshots
-		*out = make([]SnapshotExportDataEntry, len(*in))
-		copy(*out, *in)
+	if in.Snapshots != nil {
+		in, out := &in.Snapshots, &out.Snapshots
+		*out = make([]SnapshotExportSnapshotEntry, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
 	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
@@ -143,16 +145,21 @@ func (in *SnapshotExportStatus) DeepCopy() *SnapshotExportStatus {
 }
 
 // DeepCopyInto copies the receiver into out.
-func (in *SnapshotExportDataEntry) DeepCopyInto(out *SnapshotExportDataEntry) {
+func (in *SnapshotExportSnapshotEntry) DeepCopyInto(out *SnapshotExportSnapshotEntry) {
 	*out = *in
+	if in.AccessModes != nil {
+		in, out := &in.AccessModes, &out.AccessModes
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 }
 
-// DeepCopy creates a new SnapshotExportDataEntry.
-func (in *SnapshotExportDataEntry) DeepCopy() *SnapshotExportDataEntry {
+// DeepCopy creates a new SnapshotExportSnapshotEntry.
+func (in *SnapshotExportSnapshotEntry) DeepCopy() *SnapshotExportSnapshotEntry {
 	if in == nil {
 		return nil
 	}
-	out := new(SnapshotExportDataEntry)
+	out := new(SnapshotExportSnapshotEntry)
 	in.DeepCopyInto(out)
 	return out
 }
@@ -219,6 +226,11 @@ func (in *SnapshotImportList) DeepCopyObject() runtime.Object {
 // DeepCopyInto copies the receiver into out.
 func (in *SnapshotImportSpec) DeepCopyInto(out *SnapshotImportSpec) {
 	*out = *in
+	if in.ChildSnapshot != nil {
+		in, out := &in.ChildSnapshot, &out.ChildSnapshot
+		*out = new(SnapshotReference)
+		**out = **in
+	}
 	if in.StorageClassMapping != nil {
 		in, out := &in.StorageClassMapping, &out.StorageClassMapping
 		*out = make(map[string]string, len(*in))
@@ -241,9 +253,9 @@ func (in *SnapshotImportSpec) DeepCopy() *SnapshotImportSpec {
 // DeepCopyInto copies the receiver into out.
 func (in *SnapshotImportStatus) DeepCopyInto(out *SnapshotImportStatus) {
 	*out = *in
-	if in.DataSnapshots != nil {
-		in, out := &in.DataSnapshots, &out.DataSnapshots
-		*out = make([]SnapshotImportDataEntry, len(*in))
+	if in.Snapshots != nil {
+		in, out := &in.Snapshots, &out.Snapshots
+		*out = make([]SnapshotImportSnapshotEntry, len(*in))
 		copy(*out, *in)
 	}
 	if in.Conditions != nil {
@@ -266,16 +278,16 @@ func (in *SnapshotImportStatus) DeepCopy() *SnapshotImportStatus {
 }
 
 // DeepCopyInto copies the receiver into out.
-func (in *SnapshotImportDataEntry) DeepCopyInto(out *SnapshotImportDataEntry) {
+func (in *SnapshotImportSnapshotEntry) DeepCopyInto(out *SnapshotImportSnapshotEntry) {
 	*out = *in
 }
 
-// DeepCopy creates a new SnapshotImportDataEntry.
-func (in *SnapshotImportDataEntry) DeepCopy() *SnapshotImportDataEntry {
+// DeepCopy creates a new SnapshotImportSnapshotEntry.
+func (in *SnapshotImportSnapshotEntry) DeepCopy() *SnapshotImportSnapshotEntry {
 	if in == nil {
 		return nil
 	}
-	out := new(SnapshotImportDataEntry)
+	out := new(SnapshotImportSnapshotEntry)
 	in.DeepCopyInto(out)
 	return out
 }

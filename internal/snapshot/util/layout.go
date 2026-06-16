@@ -22,34 +22,45 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	v1alpha1 "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 )
 
-// On-disk export bundle layout (also consumed by import):
+// On-disk export bundle layout (also consumed by import). The CLI is status-driven: it never parses
+// index.json, it only stores it verbatim and follows the per-node URLs published in CR status.
 //
-//	<dir>/index.json                  the hierarchy index
+//	<dir>/index.json                  the opaque hierarchy index blob (stored as-is, never parsed)
+//	<dir>/view.json                   the stable SnapshotView projection (for `d8 snapshot list --dir`)
 //	<dir>/manifests/<nodeID>.json     each node's own manifests
-//	<dir>/data/<nodeID>.img           each data node's block-volume image
+//	<dir>/data/<nodeID>.img           each Block data node's raw volume image
+//	<dir>/data/<nodeID>/...           each Filesystem data node's directory tree
 const (
 	indexFileName    = "index.json"
+	viewFileName     = "view.json"
 	manifestsDirName = "manifests"
 	dataDirName      = "data"
 )
 
-// IndexPath returns the index file path within a bundle dir.
+// IndexPath returns the opaque index blob path within a bundle dir.
 func IndexPath(dir string) string { return filepath.Join(dir, indexFileName) }
+
+// ViewPath returns the SnapshotView projection path within a bundle dir.
+func ViewPath(dir string) string { return filepath.Join(dir, viewFileName) }
 
 // ManifestPath returns a node's manifest file path within a bundle dir.
 func ManifestPath(dir, nodeID string) string {
 	return filepath.Join(dir, manifestsDirName, sanitizeID(nodeID)+".json")
 }
 
-// DataPath returns a data node's block image path within a bundle dir.
+// DataPath returns a Block data node's raw image path within a bundle dir.
 func DataPath(dir, nodeID string) string {
 	return filepath.Join(dir, dataDirName, sanitizeID(nodeID)+".img")
+}
+
+// DataDirPath returns a Filesystem data node's directory-tree root within a bundle dir.
+func DataDirPath(dir, nodeID string) string {
+	return filepath.Join(dir, dataDirName, sanitizeID(nodeID))
 }
 
 // EnsureBundleDirs creates the manifests/ and data/ subdirs.
@@ -74,89 +85,58 @@ func WriteFileAtomic(path string, data []byte) error {
 	return os.Rename(tmp, path)
 }
 
-// ReadIndexFile reads and parses the bundle index.
-func ReadIndexFile(dir string) (*v1alpha1.Index, error) {
-	raw, err := os.ReadFile(IndexPath(dir))
-	if err != nil {
-		return nil, fmt.Errorf("read index: %w", err)
-	}
-	return ParseIndex(raw)
-}
-
-// ParseIndex unmarshals and validates an index blob.
-func ParseIndex(raw []byte) (*v1alpha1.Index, error) {
-	idx := &v1alpha1.Index{}
-	if err := json.Unmarshal(raw, idx); err != nil {
-		return nil, fmt.Errorf("parse index: %w", err)
-	}
-	if idx.Version == "" || len(idx.Snapshots) == 0 {
-		return nil, fmt.Errorf("index is empty or missing version")
-	}
-	if idx.Version != v1alpha1.IndexVersion {
-		return nil, fmt.Errorf("unsupported index version %q (this CLI understands %q)", idx.Version, v1alpha1.IndexVersion)
-	}
-	return idx, nil
-}
-
 func sanitizeID(id string) string {
 	return strings.NewReplacer("/", "_", string(os.PathSeparator), "_").Replace(id)
 }
 
-// PrintTree renders the snapshot hierarchy as an indented tree, annotating data nodes with their
-// volume metadata. PrintArchive renders the same content as a flat, machine-friendly listing.
-func PrintTree(w io.Writer, idx *v1alpha1.Index) {
-	byID := map[string]*v1alpha1.IndexSnapshot{}
-	for i := range idx.Snapshots {
-		byID[idx.Snapshots[i].ID] = &idx.Snapshots[i]
+// ParseView unmarshals and validates a SnapshotView blob (the stable projection consumed by
+// `d8 snapshot list`). Unlike the opaque index, the view IS meant to be parsed by clients.
+func ParseView(raw []byte) (*v1alpha1.SnapshotView, error) {
+	view := &v1alpha1.SnapshotView{}
+	if err := json.Unmarshal(raw, view); err != nil {
+		return nil, fmt.Errorf("parse view: %w", err)
 	}
-	var walk func(id, prefix string, last bool)
-	walk = func(id, prefix string, last bool) {
-		n := byID[id]
-		if n == nil {
-			return
-		}
+	if view.Root.Name == "" {
+		return nil, fmt.Errorf("view is empty (no root)")
+	}
+	return view, nil
+}
+
+// RenderView renders a SnapshotView as an indented tree, annotating data nodes with their volume
+// metadata. It walks only the stable view shape; the internal index is never consulted.
+func RenderView(w io.Writer, view *v1alpha1.SnapshotView) {
+	var walk func(n *v1alpha1.SnapshotViewNode, prefix string, root, last bool)
+	walk = func(n *v1alpha1.SnapshotViewNode, prefix string, root, last bool) {
 		branch := "├── "
 		childPrefix := prefix + "│   "
 		if last {
 			branch = "└── "
 			childPrefix = prefix + "    "
 		}
-		if prefix == "" {
+		if root {
 			branch = ""
 		}
-		fmt.Fprintf(w, "%s%s%s/%s [%s]%s\n", prefix, branch, n.Kind, n.Name, n.Namespace, dataSuffix(n))
-		children := append([]string(nil), n.Children...)
-		sort.Strings(children)
-		for i, c := range children {
-			walk(c, childPrefix, i == len(children)-1)
+		fmt.Fprintf(w, "%s%s%s/%s [%s]%s\n", prefix, branch, n.Kind, n.Name, n.Namespace, viewDataSuffix(n))
+		for i := range n.Children {
+			walk(&n.Children[i], childPrefix, false, i == len(n.Children)-1)
 		}
 	}
-	walk(idx.RootSnapshot.ID, "", true)
+	walk(&view.Root, "", true, true)
 }
 
-// PrintArchive renders a flat per-node listing.
-func PrintArchive(w io.Writer, idx *v1alpha1.Index) {
-	fmt.Fprintf(w, "version: %s\nroot: %s\n", idx.Version, idx.RootSnapshot.ID)
-	for i := range idx.Snapshots {
-		n := &idx.Snapshots[i]
-		fmt.Fprintf(w, "- %s\t%s/%s [%s]%s\n", n.ID, n.Kind, n.Name, n.Namespace, dataSuffix(n))
-	}
-}
-
-func dataSuffix(n *v1alpha1.IndexSnapshot) string {
-	if !n.HasData || n.Data == nil {
+func viewDataSuffix(n *v1alpha1.SnapshotViewNode) string {
+	if !n.HasData {
 		return ""
 	}
-	d := n.Data
 	parts := []string{}
-	if d.VolumeMode != "" {
-		parts = append(parts, d.VolumeMode)
+	if n.VolumeMode != "" {
+		parts = append(parts, n.VolumeMode)
 	}
-	if d.StorageClassName != "" {
-		parts = append(parts, "sc="+d.StorageClassName)
+	if n.SizeBytes > 0 {
+		parts = append(parts, humanBytes(n.SizeBytes))
 	}
-	if d.Size > 0 {
-		parts = append(parts, humanBytes(d.Size))
+	if len(parts) == 0 {
+		return " (data)"
 	}
 	return " (data: " + strings.Join(parts, ", ") + ")"
 }

@@ -18,33 +18,21 @@ package download
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
-	neturl "net/url"
-	"os"
-	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/spf13/cobra"
 
 	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
+	"github.com/deckhouse/deckhouse-cli/internal/data/fswalk"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
 	cmdName = "download"
-)
-
-const (
-	itemTypeDir  = "dir"
-	itemTypeFile = "file"
-	itemTypeLink = "link"
 )
 
 func cmdExamples() string {
@@ -85,191 +73,6 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd.Flags().Bool("cleanup", false, "Delete auto-created DataExport without prompting (--cleanup=true to delete, --cleanup=false to keep)")
 
 	return cmd
-}
-
-type dirItem struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
-}
-
-func forRespItems(jsonStream io.ReadCloser, workFunc func(*dirItem) error) error {
-	dec := json.NewDecoder(jsonStream)
-
-	// find items list
-	for {
-		t, err := dec.Token()
-		if err != nil {
-			return err
-		}
-
-		if t == "items" {
-			t, err := dec.Token()
-			if err != nil {
-				return err
-			}
-
-			if t != json.Delim('[') {
-				return fmt.Errorf("JSON items is not list")
-			}
-
-			break
-		}
-
-		dec.More()
-	}
-
-	// read items
-	for dec.More() {
-		var i dirItem
-
-		err := dec.Decode(&i)
-		if err != nil {
-			break
-		}
-
-		err = workFunc(&i)
-		if err != nil {
-			return err
-		}
-	}
-
-	// check items list closed
-	t, err := dec.Token()
-	if err != nil {
-		return err
-	}
-
-	if t != json.Delim(']') {
-		return fmt.Errorf("items loading is not completed")
-	}
-
-	return nil
-}
-
-func recursiveDownload(ctx context.Context, sClient *safeClient.SafeClient, log *slog.Logger, sem chan struct{}, url, srcPath, dstPath string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	dataURL, err := neturl.JoinPath(url, srcPath)
-	if err != nil {
-		return err
-	}
-
-	req, _ := http.NewRequest(http.MethodGet, dataURL, nil)
-
-	resp, err := sClient.HTTPDo(req)
-	if err != nil {
-		return fmt.Errorf("HTTPDo: %s", err.Error())
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		if resp.ContentLength > 0 {
-			msg, err := io.ReadAll(io.LimitReader(resp.Body, 1000))
-			if err == nil {
-				return fmt.Errorf("Backend response \"%s\" Msg: %s", resp.Status, string(msg))
-			}
-		}
-
-		return fmt.Errorf("Backend response \"%s\"", resp.Status)
-	}
-
-	if srcPath != "" && srcPath[len(srcPath)-1:] == "/" {
-		var (
-			wg       sync.WaitGroup
-			mu       sync.Mutex
-			firstErr error
-		)
-
-		// Keep only the first non-nil sub-download error.
-		setFirstErr := func(subPath string, subErr error) {
-			if subErr == nil {
-				return
-			}
-
-			mu.Lock()
-
-			if firstErr == nil {
-				firstErr = fmt.Errorf("download %s: %w", filepath.Join(srcPath, subPath), subErr)
-			}
-
-			mu.Unlock()
-		}
-
-		downloadOne := func(subPath string) {
-			subErr := recursiveDownload(ctx, sClient, log, sem, url, srcPath+subPath, filepath.Join(dstPath, subPath))
-			setFirstErr(subPath, subErr)
-		}
-
-		err = forRespItems(resp.Body, func(item *dirItem) error {
-			subPath := item.Name
-			switch item.Type {
-			case itemTypeDir:
-				err = os.MkdirAll(filepath.Join(dstPath, subPath), os.ModePerm)
-				if err != nil {
-					return fmt.Errorf("Create dir error: %s", err.Error())
-				}
-
-				subPath += "/"
-			case itemTypeFile, itemTypeLink:
-				// downloadable, proceed below
-			default:
-				log.Warn("Skipping unsupported entry during filesystem download", slog.String("path", item.Name), slog.String("type", item.Type))
-				return nil
-			}
-
-			// Run subtask in a goroutine when semaphore capacity is available;
-			// otherwise process inline to avoid blocking on sem (prevents deadlock on wide trees).
-			select {
-			case sem <- struct{}{}:
-				wg.Add(1)
-
-				go func(sp string) {
-					defer func() {
-						<-sem
-						wg.Done()
-					}()
-
-					downloadOne(sp)
-				}(subPath)
-			default:
-				downloadOne(subPath)
-			}
-
-			return nil
-		})
-		if err != nil {
-			return fmt.Errorf("Response body (%s) error: %s", srcPath, err.Error())
-		}
-
-		wg.Wait()
-
-		return firstErr
-	}
-
-	if dstPath != "" {
-		// Create out file
-		out, err := os.Create(dstPath)
-		if err != nil {
-			return err
-		}
-		defer out.Close()
-
-		_, err = io.Copy(out, resp.Body)
-		if err != nil {
-			return err
-		}
-
-		log.Info("Downloaded file", slog.String("path", dstPath))
-	} else {
-		_, err = io.Copy(os.Stdout, resp.Body)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
@@ -341,9 +144,9 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	log.Info("Start downloading", slog.String("url", url+srcPath), slog.String("dstPath", dstPath))
 
-	sem := make(chan struct{}, 10)
+	sem := make(chan struct{}, fswalk.DefaultConcurrency)
 
-	err = recursiveDownload(ctx, subClient, log, sem, url, srcPath, dstPath)
+	err = fswalk.RecursiveDownload(ctx, subClient, log, sem, url, srcPath, dstPath)
 	if err != nil {
 		log.Error("Not all files have been downloaded", slog.String("error", err.Error()))
 	} else {
