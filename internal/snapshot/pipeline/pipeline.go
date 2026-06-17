@@ -37,10 +37,9 @@ import (
 
 // nodeTask is a planned work item for one snapshot node.
 type nodeTask struct {
-	node          *source.Node
-	nodeDir       string // final target directory (may differ from primary on collision)
-	state         archive.NodeState
-	presentChunks []int // non-nil only for NodeStateBlockPartial
+	node    *source.Node
+	nodeDir string // final target directory (may differ from primary on collision)
+	state   archive.NodeState
 }
 
 // Run builds the snapshot tree, scans the output directory for resume state, and
@@ -114,10 +113,9 @@ func collectNodeTasks(root *source.Node, outputDir string) ([]nodeTask, error) {
 // plan carries the already-computed resume state and target directory for node.
 func collectDFS(node *source.Node, plan archive.NodeResumePlan, tasks *[]nodeTask) error {
 	*tasks = append(*tasks, nodeTask{
-		node:          node,
-		nodeDir:       plan.TargetDir,
-		state:         plan.State,
-		presentChunks: plan.PresentChunkIndices,
+		node:    node,
+		nodeDir: plan.TargetDir,
+		state:   plan.State,
 	})
 
 	if len(node.Children) == 0 {
