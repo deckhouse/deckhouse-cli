@@ -42,6 +42,36 @@ type SnapshotYAML struct {
 	SourceRef string `json:"sourceRef,omitempty"`
 	// Checksum is the locally-computed node integrity digest.
 	Checksum NodeChecksum `json:"checksum"`
+	// Volume is populated for volume nodes (node.Binding != nil) and omitted for
+	// snapshot nodes. It records the captured PVC and its durable data artifact.
+	// snapshot.yaml is excluded from ComputeNodeChecksum/VerifyNode, so this field
+	// does not affect the integrity digest.
+	Volume *VolumeInfo `json:"volume,omitempty"`
+}
+
+// VolumeObjectRef is a reference to a Kubernetes object stored in the volume block
+// of snapshot.yaml. It captures the identity fields needed to correlate the archive
+// entry with live cluster resources.
+type VolumeObjectRef struct {
+	// APIVersion is the apiVersion of the referenced object.
+	APIVersion string `json:"apiVersion"`
+	// Kind is the kind of the referenced object.
+	Kind string `json:"kind"`
+	// Name is the metadata.name of the referenced object.
+	Name string `json:"name"`
+	// Namespace is the namespace of the referenced object. Omitted for cluster-scoped objects.
+	Namespace string `json:"namespace,omitempty"`
+	// UID is the metadata.uid of the referenced object. Omitted when unknown.
+	UID string `json:"uid,omitempty"`
+}
+
+// VolumeInfo describes the captured volume associated with a volume node.
+// It is written into the volume block of snapshot.yaml so the archive is self-describing.
+type VolumeInfo struct {
+	// Target is the source PVC that was captured (its apiVersion/kind/name/namespace/uid).
+	Target VolumeObjectRef `json:"target"`
+	// Artifact is the VolumeSnapshotContent that holds the durable data artifact.
+	Artifact VolumeObjectRef `json:"artifact"`
 }
 
 // NodeChecksum is the locally-computed integrity digest for one node directory.

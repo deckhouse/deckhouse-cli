@@ -115,6 +115,11 @@ func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeD
 // <nodeDir>/snapshot.yaml. It must be called after all manifests and volume data
 // for the node are fully written.
 //
+// For volume nodes (node.Binding != nil) the snapshot.yaml carries a volume block
+// that records the captured PVC (Target) and its data artifact (Artifact). For
+// snapshot nodes the volume block is omitted (omitempty). The volume block does not
+// affect ComputeNodeChecksum because snapshot.yaml is excluded from the digest.
+//
 // FinalizeNode is idempotent: each call recomputes the checksum and overwrites
 // snapshot.yaml with the fresh value. The pipeline calls it once per node after
 // both WriteNodeManifests and any volume download have completed.
@@ -131,6 +136,23 @@ func FinalizeNode(nodeDir string, node *source.Node) error {
 		Namespace:  node.Namespace,
 		SourceRef:  node.SourceRef,
 		Checksum:   checksum,
+	}
+
+	if node.Binding != nil {
+		sy.Volume = &archive.VolumeInfo{
+			Target: archive.VolumeObjectRef{
+				APIVersion: node.Binding.Target.APIVersion,
+				Kind:       node.Binding.Target.Kind,
+				Name:       node.Binding.Target.Name,
+				Namespace:  node.Binding.Target.Namespace,
+				UID:        string(node.Binding.Target.UID),
+			},
+			Artifact: archive.VolumeObjectRef{
+				APIVersion: node.Binding.Artifact.APIVersion,
+				Kind:       node.Binding.Artifact.Kind,
+				Name:       node.Binding.Artifact.Name,
+			},
+		}
 	}
 
 	if err := archive.WriteSnapshotYAML(nodeDir, sy); err != nil {
