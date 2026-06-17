@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package staging_test
+package archive_test
 
 import (
 	"bytes"
@@ -24,7 +24,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/staging"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
 
 // errAfterReader returns data bytes then returns errTrigger on the next Read.
@@ -52,7 +52,7 @@ func TestWriteFileAtomic_success(t *testing.T) {
 	path := filepath.Join(dir, "out.txt")
 	content := []byte("hello atomic world")
 
-	err := staging.WriteFileAtomic(path, bytes.NewReader(content))
+	err := archive.WriteFileAtomic(path, bytes.NewReader(content))
 	if err != nil {
 		t.Fatalf("WriteFileAtomic: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestWriteFileAtomic_errorLeavesNoFinalFile(t *testing.T) {
 		err:  errors.New("simulated read failure"),
 	}
 
-	err := staging.WriteFileAtomic(path, r)
+	err := archive.WriteFileAtomic(path, r)
 	if err == nil {
 		t.Fatal("expected error from WriteFileAtomic, got nil")
 	}
@@ -111,7 +111,7 @@ func TestAtomicWriter_commitProducesCorrectContent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "data.bin")
 
-	aw, err := staging.NewAtomicWriter(path)
+	aw, err := archive.NewAtomicWriter(path)
 	if err != nil {
 		t.Fatalf("NewAtomicWriter: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestAtomicWriter_abortLeavesNoFinalFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "aborted.bin")
 
-	aw, err := staging.NewAtomicWriter(path)
+	aw, err := archive.NewAtomicWriter(path)
 	if err != nil {
 		t.Fatalf("NewAtomicWriter: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestWriteFileAtomic_emptyReader(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "empty.txt")
 
-	err := staging.WriteFileAtomic(path, bytes.NewReader(nil))
+	err := archive.WriteFileAtomic(path, bytes.NewReader(nil))
 	if err != nil {
 		t.Fatalf("WriteFileAtomic empty: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestEnsureDir_createsAndIsDurable(t *testing.T) {
 	base := t.TempDir()
 	nested := filepath.Join(base, "a", "b", "c")
 
-	if err := staging.EnsureDir(nested); err != nil {
+	if err := archive.EnsureDir(nested); err != nil {
 		t.Fatalf("EnsureDir: %v", err)
 	}
 
@@ -219,11 +219,11 @@ func TestEnsureDir_idempotent(t *testing.T) {
 
 	dir := t.TempDir()
 
-	if err := staging.EnsureDir(dir); err != nil {
+	if err := archive.EnsureDir(dir); err != nil {
 		t.Fatalf("first EnsureDir: %v", err)
 	}
 
-	if err := staging.EnsureDir(dir); err != nil {
+	if err := archive.EnsureDir(dir); err != nil {
 		t.Fatalf("second EnsureDir (idempotent): %v", err)
 	}
 }
@@ -236,17 +236,17 @@ func TestWriteFileAtomic_parentDirSynced(t *testing.T) {
 	base := t.TempDir()
 	sub := filepath.Join(base, "sub")
 
-	if err := staging.EnsureDir(sub); err != nil {
+	if err := archive.EnsureDir(sub); err != nil {
 		t.Fatalf("EnsureDir: %v", err)
 	}
 
 	path := filepath.Join(sub, "file.txt")
 
-	err := staging.WriteFileAtomic(path, bytes.NewReader([]byte("durable")))
+	err := archive.WriteFileAtomic(path, bytes.NewReader([]byte("durable")))
 	if err != nil {
 		t.Fatalf("WriteFileAtomic: %v", err)
 	}
 }
 
 // Ensure AtomicWriter satisfies io.Writer at compile time.
-var _ io.Writer = (*staging.AtomicWriter)(nil)
+var _ io.Writer = (*archive.AtomicWriter)(nil)

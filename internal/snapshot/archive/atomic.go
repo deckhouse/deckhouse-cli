@@ -14,9 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package staging provides helpers for the snapshot archive staging tree:
-// deterministic path naming and crash-safe (atomic) file I/O.
-package staging
+// Package archive: deterministic naming + crash-safe file I/O for the snapshot output tree.
+package archive
 
 import (
 	"fmt"

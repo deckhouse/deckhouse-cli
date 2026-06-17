@@ -14,12 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package staging_test
+package archive_test
 
 import (
 	"testing"
 
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/staging"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
 
 func TestNodeDirName(t *testing.T) {
@@ -41,7 +41,7 @@ func TestNodeDirName(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.kind+"/"+tc.name, func(t *testing.T) {
-			got := staging.NodeDirName(tc.kind, tc.name)
+			got := archive.NodeDirName(tc.kind, tc.name)
 			if got != tc.want {
 				t.Errorf("NodeDirName(%q, %q) = %q; want %q", tc.kind, tc.name, got, tc.want)
 			}
@@ -50,12 +50,12 @@ func TestNodeDirName(t *testing.T) {
 }
 
 func TestNodeDirNameRootIsNamespace(t *testing.T) {
-	// The root node directory is the namespace itself — callers pass the namespace
-	// as-is and do not call NodeDirName for the root.  This test documents the
-	// convention by asserting that a namespace string used directly is correct.
-	const ns = "snapshot-demo-tree"
+	// The root node directory is the user-supplied output name — callers pass it
+	// directly and do not call NodeDirName for the root. This test documents the
+	// convention by asserting that such a name used directly is correct.
+	const outputDir = "my-snapshot-backup"
 
-	if ns != ns { // always true; guards the constant above for future readers
+	if outputDir != outputDir { // always true; guards the constant above for future readers
 		t.Fatal("invariant violated")
 	}
 }
@@ -83,7 +83,7 @@ func TestManifestFileName(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.kind+"/"+tc.name+"/"+tc.apiGroup, func(t *testing.T) {
-			got := staging.ManifestFileName(tc.kind, tc.name, tc.apiGroup)
+			got := archive.ManifestFileName(tc.kind, tc.name, tc.apiGroup)
 			if got != tc.want {
 				t.Errorf("ManifestFileName(%q, %q, %q) = %q; want %q",
 					tc.kind, tc.name, tc.apiGroup, got, tc.want)
@@ -95,8 +95,8 @@ func TestManifestFileName(t *testing.T) {
 func TestManifestFileNameCollisionFallbackOnlyWhenAPIGroupGiven(t *testing.T) {
 	// The collision fallback (dot-separator + apiGroup) MUST NOT appear when
 	// apiGroup is empty, even if the kind and name would collide in theory.
-	normal := staging.ManifestFileName("Pod", "foo", "")
-	withGroup := staging.ManifestFileName("Pod", "foo", "core")
+	normal := archive.ManifestFileName("Pod", "foo", "")
+	withGroup := archive.ManifestFileName("Pod", "foo", "core")
 
 	if normal != "pod_foo.yaml" {
 		t.Errorf("normal form: got %q; want pod_foo.yaml", normal)
@@ -107,54 +107,26 @@ func TestManifestFileNameCollisionFallbackOnlyWhenAPIGroupGiven(t *testing.T) {
 	}
 }
 
-func TestBlockDataName(t *testing.T) {
+func TestFsFileName(t *testing.T) {
 	t.Helper()
 
 	tests := []struct {
-		kind string
-		name string
-		want string
+		relPath string
+		want    string
 	}{
-		{"PersistentVolumeClaim", "disk-vm-pvc", "persistentvolumeclaim_disk-vm-pvc.img.zst"},
-		{"PersistentVolumeClaim", "orphan-data", "persistentvolumeclaim_orphan-data.img.zst"},
-		{"VirtualDisk", "disk-standalone", "virtualdisk_disk-standalone.img.zst"},
+		{"file1.txt", "file1.txt.zst"},
+		{"sub/file.txt", "sub/file.txt.zst"},
+		{"a/b/c.jpg", "a/b/c.jpg.zst"},
+		{"noext", "noext.zst"},
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.kind+"/"+tc.name, func(t *testing.T) {
-			got := staging.BlockDataName(tc.kind, tc.name)
+		t.Run(tc.relPath, func(t *testing.T) {
+			got := archive.FsFileName(tc.relPath)
 			if got != tc.want {
-				t.Errorf("BlockDataName(%q, %q) = %q; want %q", tc.kind, tc.name, got, tc.want)
+				t.Errorf("FsFileName(%q) = %q; want %q", tc.relPath, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestFsDataName(t *testing.T) {
-	t.Helper()
-
-	tests := []struct {
-		kind string
-		name string
-		want string
-	}{
-		{"PersistentVolumeClaim", "fs-pvc", "persistentvolumeclaim_fs-pvc.fs.tar.zst"},
-		{"VirtualDisk", "fs-disk", "virtualdisk_fs-disk.fs.tar.zst"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.kind+"/"+tc.name, func(t *testing.T) {
-			got := staging.FsDataName(tc.kind, tc.name)
-			if got != tc.want {
-				t.Errorf("FsDataName(%q, %q) = %q; want %q", tc.kind, tc.name, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestChecksumsFileName(t *testing.T) {
-	if staging.ChecksumsFileName != "checksums.sha256" {
-		t.Errorf("ChecksumsFileName = %q; want checksums.sha256", staging.ChecksumsFileName)
 	}
 }
 
@@ -176,7 +148,7 @@ func TestChunkFileName(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.want, func(t *testing.T) {
-			got := staging.ChunkFileName(tc.i)
+			got := archive.ChunkFileName(tc.i)
 			if got != tc.want {
 				t.Errorf("ChunkFileName(%d) = %q; want %q", tc.i, got, tc.want)
 			}
@@ -184,47 +156,31 @@ func TestChunkFileName(t *testing.T) {
 	}
 }
 
-func TestBlockStagingDirName(t *testing.T) {
+func TestConstants(t *testing.T) {
 	t.Helper()
 
-	tests := []struct {
-		kind string
-		name string
-		want string
-	}{
-		{"PersistentVolumeClaim", "disk-vm-pvc", "persistentvolumeclaim_disk-vm-pvc.img.zst.d"},
-		{"VirtualDisk", "standalone", "virtualdisk_standalone.img.zst.d"},
+	if archive.SnapshotYAMLName != "snapshot.yaml" {
+		t.Errorf("SnapshotYAMLName = %q; want snapshot.yaml", archive.SnapshotYAMLName)
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.kind+"/"+tc.name, func(t *testing.T) {
-			got := staging.BlockStagingDirName(tc.kind, tc.name)
-			if got != tc.want {
-				t.Errorf("BlockStagingDirName(%q, %q) = %q; want %q", tc.kind, tc.name, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestFsStagingDirName(t *testing.T) {
-	t.Helper()
-
-	tests := []struct {
-		kind string
-		name string
-		want string
-	}{
-		{"PersistentVolumeClaim", "fs-pvc", "persistentvolumeclaim_fs-pvc.fs.d"},
-		{"VirtualDisk", "fs-disk", "virtualdisk_fs-disk.fs.d"},
+	if archive.ManifestsDirName != "manifests" {
+		t.Errorf("ManifestsDirName = %q; want manifests", archive.ManifestsDirName)
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.kind+"/"+tc.name, func(t *testing.T) {
-			got := staging.FsStagingDirName(tc.kind, tc.name)
-			if got != tc.want {
-				t.Errorf("FsStagingDirName(%q, %q) = %q; want %q", tc.kind, tc.name, got, tc.want)
-			}
-		})
+	if archive.SnapshotsDirName != "snapshots" {
+		t.Errorf("SnapshotsDirName = %q; want snapshots", archive.SnapshotsDirName)
+	}
+
+	if archive.DataBlockName != "data.img.zst" {
+		t.Errorf("DataBlockName = %q; want data.img.zst", archive.DataBlockName)
+	}
+
+	if archive.DataDirName != "data" {
+		t.Errorf("DataDirName = %q; want data", archive.DataDirName)
+	}
+
+	if archive.BlockChunksDirName != "data.img.zst.d" {
+		t.Errorf("BlockChunksDirName = %q; want data.img.zst.d", archive.BlockChunksDirName)
 	}
 }
 
@@ -233,35 +189,23 @@ func TestDeterminism(t *testing.T) {
 	const kind = "VirtualDisk"
 	const name = "my-disk"
 
-	if staging.NodeDirName(kind, name) != staging.NodeDirName(kind, name) {
+	if archive.NodeDirName(kind, name) != archive.NodeDirName(kind, name) {
 		t.Error("NodeDirName is not deterministic")
 	}
 
-	if staging.ManifestFileName(kind, name, "") != staging.ManifestFileName(kind, name, "") {
+	if archive.ManifestFileName(kind, name, "") != archive.ManifestFileName(kind, name, "") {
 		t.Error("ManifestFileName (normal) is not deterministic")
 	}
 
-	if staging.ManifestFileName(kind, name, "virt.io") != staging.ManifestFileName(kind, name, "virt.io") {
+	if archive.ManifestFileName(kind, name, "virt.io") != archive.ManifestFileName(kind, name, "virt.io") {
 		t.Error("ManifestFileName (collision) is not deterministic")
 	}
 
-	if staging.BlockDataName(kind, name) != staging.BlockDataName(kind, name) {
-		t.Error("BlockDataName is not deterministic")
+	if archive.FsFileName("sub/data.bin") != archive.FsFileName("sub/data.bin") {
+		t.Error("FsFileName is not deterministic")
 	}
 
-	if staging.FsDataName(kind, name) != staging.FsDataName(kind, name) {
-		t.Error("FsDataName is not deterministic")
-	}
-
-	if staging.ChunkFileName(7) != staging.ChunkFileName(7) {
+	if archive.ChunkFileName(7) != archive.ChunkFileName(7) {
 		t.Error("ChunkFileName is not deterministic")
-	}
-
-	if staging.BlockStagingDirName(kind, name) != staging.BlockStagingDirName(kind, name) {
-		t.Error("BlockStagingDirName is not deterministic")
-	}
-
-	if staging.FsStagingDirName(kind, name) != staging.FsStagingDirName(kind, name) {
-		t.Error("FsStagingDirName is not deterministic")
 	}
 }
