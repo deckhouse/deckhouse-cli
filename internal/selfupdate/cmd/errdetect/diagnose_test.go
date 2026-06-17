@@ -40,6 +40,7 @@ func TestDiagnose(t *testing.T) {
 		{"403", rpp.ErrForbidden, "forbidden (403)", "cli-download"},
 		{"404", rpp.ErrNotFound, "version not found (404)", "d8 cli versions"},
 		{"5xx", rpp.ErrUpstream, "upstream error (5xx)", "registry-packages-proxy pods"},
+		{"discovery", rpp.ErrEndpointDiscovery, "endpoint discovery via the Kubernetes API failed", "--rpp-endpoint"},
 	}
 
 	for _, tc := range cases {

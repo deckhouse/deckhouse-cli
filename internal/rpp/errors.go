@@ -28,6 +28,13 @@ var (
 	// ErrInvalidEndpoint means the proxy endpoint URL is empty or not an https URL with a host.
 	ErrInvalidEndpoint = errors.New("invalid proxy endpoint")
 
+	// ErrEndpointDiscovery means the proxy endpoint could not be discovered through
+	// the Kubernetes API (the kubeconfig 'server:'): the API was unreachable, its
+	// certificate was invalid, the identity was rejected, or no usable proxy was
+	// found. It is the kube-API leg, not the proxy itself - bypass it with an
+	// explicit endpoint (--rpp-endpoint / D8_RPP_ENDPOINT).
+	ErrEndpointDiscovery = errors.New("registry-packages-proxy endpoint discovery failed")
+
 	// ErrInvalidCA means the supplied CA bundle contained no usable certificates.
 	ErrInvalidCA = errors.New("invalid CA bundle")
 

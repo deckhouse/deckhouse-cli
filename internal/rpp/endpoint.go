@@ -18,12 +18,14 @@ package rpp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -46,20 +48,33 @@ const (
 	proxyScheme = "https"
 )
 
+// errIngressUnusable marks the Ingress lookup as "the API answered, but the
+// Ingress is absent or has no host" - the only case where the in-cluster pod
+// fallback is worth trying. A transport/TLS/auth failure reaching the API is NOT
+// this: it would fail pod listing identically, so it is surfaced as-is.
+var errIngressUnusable = errors.New("registry-packages-proxy ingress unusable")
+
 // chooseDiscoveredEndpoint resolves the proxy endpoint when none was given
 // explicitly. It PREFERS the public Ingress (a valid TLS certificate, reachable
 // from a workstation) and falls back to in-cluster pod IPs (which need
 // --rpp-insecure-skip-tls-verify and cluster-network reachability). The second
 // return value names the source ("ingress" / "pod") for logging.
+//
+// Only an unusable Ingress (see errIngressUnusable) triggers the pod fallback.
+// Any other error is an API-leg failure, surfaced as ErrEndpointDiscovery.
 func chooseDiscoveredEndpoint(ctx context.Context, kube kubernetes.Interface) (string, string, error) {
 	endpoint, err := discoverIngressEndpoint(ctx, kube)
 	if err == nil {
 		return endpoint, "ingress", nil
 	}
 
+	if !errors.Is(err, errIngressUnusable) {
+		return "", "", fmt.Errorf("%w: %w", ErrEndpointDiscovery, err)
+	}
+
 	endpoint, err = discoverEndpoint(ctx, kube)
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("%w: %w", ErrEndpointDiscovery, err)
 	}
 
 	return endpoint, "pod", nil
@@ -68,11 +83,17 @@ func chooseDiscoveredEndpoint(ctx context.Context, kube kubernetes.Interface) (s
 // discoverIngressEndpoint returns the public proxy endpoint (https://<host>) taken
 // from the registry-packages-proxy Ingress. This path has a valid TLS certificate
 // and is reachable from outside the cluster - the right default for a workstation.
-// It errors if the Ingress is absent or has no host, so the caller can fall back to
-// in-cluster pod discovery.
+//
+// An absent Ingress or one with no host yields errIngressUnusable, signalling the
+// caller to try the in-cluster pod fallback. Any other error is returned raw so
+// the caller can surface the API-leg failure instead of falling back.
 func discoverIngressEndpoint(ctx context.Context, kube kubernetes.Interface) (string, error) {
 	ingress, err := kube.NetworkingV1().Ingresses(proxyNamespace).Get(ctx, proxyIngressName, metav1.GetOptions{})
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", fmt.Errorf("%w: ingress %q not found", errIngressUnusable, proxyIngressName)
+		}
+
 		return "", fmt.Errorf("get registry-packages-proxy ingress: %w", err)
 	}
 
@@ -82,7 +103,7 @@ func discoverIngressEndpoint(ctx context.Context, kube kubernetes.Interface) (st
 		}
 	}
 
-	return "", fmt.Errorf("registry-packages-proxy ingress %q has no host", proxyIngressName)
+	return "", fmt.Errorf("%w: ingress %q has no host", errIngressUnusable, proxyIngressName)
 }
 
 // discoverEndpoint returns a proxy endpoint base URL by listing the

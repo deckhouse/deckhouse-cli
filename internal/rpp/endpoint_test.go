@@ -18,6 +18,7 @@ package rpp
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,7 +26,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 )
 
 func proxyIngress(host string) *networkingv1.Ingress {
@@ -100,6 +103,15 @@ func TestDiscoverIngressEndpoint(t *testing.T) {
 func TestDiscoverIngressEndpointAbsent(t *testing.T) {
 	_, err := discoverIngressEndpoint(context.Background(), fake.NewSimpleClientset())
 	require.Error(t, err)
+	assert.ErrorIs(t, err, errIngressUnusable, "an absent Ingress signals the pod fallback")
+}
+
+func TestDiscoverIngressEndpointNoHost(t *testing.T) {
+	kube := fake.NewSimpleClientset(proxyIngress(""))
+
+	_, err := discoverIngressEndpoint(context.Background(), kube)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errIngressUnusable, "an Ingress with no host signals the pod fallback")
 }
 
 func TestChooseDiscoveredEndpointPrefersIngress(t *testing.T) {
@@ -124,4 +136,22 @@ func TestChooseDiscoveredEndpointFallsBackToPods(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "https://10.0.0.1:4219", endpoint)
 	assert.Equal(t, "pod", source)
+}
+
+func TestChooseDiscoveredEndpointSurfacesAPIFailure(t *testing.T) {
+	// A transport/TLS failure reaching the API (not an absent Ingress) is surfaced
+	// as ErrEndpointDiscovery, not masked by falling back to pod listing - even
+	// when a serving pod exists.
+	kube := fake.NewSimpleClientset(
+		proxyPod("serving", "10.0.0.1", corev1.PodRunning, true, false),
+	)
+	kube.PrependReactor("get", "ingresses", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("tls: failed to verify certificate")
+	})
+
+	_, _, err := chooseDiscoveredEndpoint(context.Background(), kube)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrEndpointDiscovery)
+	assert.NotErrorIs(t, err, errIngressUnusable)
+	assert.Contains(t, err.Error(), "tls: failed to verify certificate")
 }
