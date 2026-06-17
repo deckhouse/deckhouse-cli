@@ -18,8 +18,6 @@ package exporter
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -32,6 +30,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/naming"
 )
 
 // ArtifactKindVolumeSnapshotContent is the expected Artifact.Kind value in a
@@ -70,10 +70,11 @@ const shadowVSPollInterval = 3 * time.Second
 // shadow VolumeSnapshot share this name). The name is derived from the
 // artifact VolumeSnapshotContent name so resume is idempotent.
 // Result is always ≤ 22 chars, well within the 63-char DNS label limit.
+//
+// The formula is defined in internal/snapshot/naming so that the snapshot tree
+// builder can derive the same name without importing the data-plane exporter.
 func ShadowName(artifactName string) string {
-	h := sha256.Sum256([]byte(artifactName))
-
-	return "d8-ss-" + hex.EncodeToString(h[:8])
+	return naming.ShadowName(artifactName)
 }
 
 // EnsureShadowPair idempotently creates a shadow VolumeSnapshotContent +
