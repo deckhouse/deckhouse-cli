@@ -82,6 +82,13 @@ type Config struct {
 	// When nil a KubeManifestSource backed by KubeClient is used.
 	ManifestSource source.ManifestSource
 
+	// WaitShadowVS is called after EnsureShadowPair and before OpenExport to
+	// ensure the shadow VolumeSnapshot has both readyToUse=true and a non-nil
+	// restoreSize. Inside each poll it re-asserts the restoreSize from the real
+	// VolumeSnapshotContent onto the shadow VSC, counteracting CSI sidecar
+	// overwrites. When nil, defaults to exporter.WaitShadowVSReady.
+	WaitShadowVS func(ctx context.Context, c client.Client, log *slog.Logger, namespace, shadowName, realVSCName string) error
+
 	// OpenExport opens a DataExport for the given shadow VolumeSnapshot name and
 	// returns an Export ready for data transfer.  When nil SafeClient must be
 	// non-nil and the production path (exporter.OpenExport) is used.
@@ -127,6 +134,10 @@ func applyDefaults(cfg Config) Config {
 
 	if cfg.ManifestSource == nil && cfg.KubeClient != nil {
 		cfg.ManifestSource = source.NewKubeManifestSource(cfg.KubeClient)
+	}
+
+	if cfg.WaitShadowVS == nil {
+		cfg.WaitShadowVS = exporter.WaitShadowVSReady
 	}
 
 	if cfg.OpenExport == nil && cfg.SafeClient != nil {

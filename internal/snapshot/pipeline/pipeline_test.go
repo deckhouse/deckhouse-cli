@@ -22,10 +22,12 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,6 +48,13 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
 )
+
+// noopWaitShadowVS is a WaitShadowVS stub for tests that do not exercise the
+// shadow VS readiness wait (e.g. happy-path tests using a fake kube client
+// where no snapshot-controller runs to set status).
+func noopWaitShadowVS(_ context.Context, _ client.Client, _ *slog.Logger, _, _, _ string) error {
+	return nil
+}
 
 const (
 	testNS        = "test-ns"
@@ -79,6 +88,7 @@ func TestPipeline_HappyPath(t *testing.T) {
 		Workers:              1,
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
+		WaitShadowVS:         noopWaitShadowVS,
 		OpenExport: func(_ context.Context, namespace, _ string, _ string) (*exporter.Export, error) {
 			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
 		},
@@ -143,6 +153,7 @@ func TestPipeline_CleanupAfterError(t *testing.T) {
 		OutputDir:    outputDir,
 		Workers:      1,
 		KubeClient:   c,
+		WaitShadowVS: noopWaitShadowVS,
 		OpenExport: func(_ context.Context, _, _, _ string) (*exporter.Export, error) {
 			return nil, errors.New("simulated DataExport creation failure")
 		},
@@ -191,6 +202,7 @@ func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
 		OutputDir:    outputDir,
 		Workers:      1,
 		KubeClient:   c,
+		WaitShadowVS: noopWaitShadowVS,
 		OpenExport: func(_ context.Context, _, _, _ string) (*exporter.Export, error) {
 			t.Error("OpenExport must not be called when data.img.zst already exists")
 			return nil, errors.New("unexpected OpenExport call")
@@ -412,6 +424,7 @@ func TestPipeline_ShadowMetaFromLivePVC(t *testing.T) {
 		Workers:              1,
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
+		WaitShadowVS:         noopWaitShadowVS,
 		OpenExport: func(ctx context.Context, namespace, vsName string, ttl string) (*exporter.Export, error) {
 			// Inspect the shadow VS that was created before OpenExport is called.
 			var shadowVS snapv1.VolumeSnapshot
@@ -421,6 +434,7 @@ func TestPipeline_ShadowMetaFromLivePVC(t *testing.T) {
 					VolumeMode:   shadowVS.Annotations[exporter.AnnotationVolumeMode],
 				}
 			}
+
 			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
 		},
 	}
@@ -540,6 +554,7 @@ spec:
 		Workers:              1,
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
+		WaitShadowVS:         noopWaitShadowVS,
 		OpenExport: func(ctx context.Context, namespace, vsName string, ttl string) (*exporter.Export, error) {
 			var shadowVS snapv1.VolumeSnapshot
 			if err2 := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: vsName}, &shadowVS); err2 == nil {
@@ -548,6 +563,7 @@ spec:
 					VolumeMode:   shadowVS.Annotations[exporter.AnnotationVolumeMode],
 				}
 			}
+
 			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
 		},
 	}
@@ -559,6 +575,55 @@ spec:
 		"shadow VS must carry storage-class annotation from PVC manifest")
 	assert.Equal(t, "Block", capturedMeta.VolumeMode,
 		"shadow VS must carry volume-mode annotation from PVC manifest")
+}
+
+// TestPipeline_WaitShadowVSCalledBeforeExport verifies that WaitShadowVS is
+// invoked after EnsureShadowPair but before OpenExport so that the DataExport
+// is only created once the shadow VS has a non-nil restoreSize.
+func TestPipeline_WaitShadowVSCalledBeforeExport(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("B"), 600)
+	srv := makeBlockServer(t, rawBlock)
+
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	var mu sync.Mutex
+	var callOrder []string
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		WaitShadowVS: func(_ context.Context, _ client.Client, _ *slog.Logger, _, _, _ string) error {
+			mu.Lock()
+			callOrder = append(callOrder, "WaitShadowVS")
+			mu.Unlock()
+
+			return nil
+		},
+		OpenExport: func(_ context.Context, namespace, _ string, _ string) (*exporter.Export, error) {
+			mu.Lock()
+			callOrder = append(callOrder, "OpenExport")
+			mu.Unlock()
+
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	err := pipeline.Run(context.Background(), cfg)
+	require.NoError(t, err)
+
+	// WaitShadowVS must appear before OpenExport in the call log.
+	require.Len(t, callOrder, 2, "expected exactly WaitShadowVS then OpenExport")
+	assert.Equal(t, "WaitShadowVS", callOrder[0], "WaitShadowVS must be called first")
+	assert.Equal(t, "OpenExport", callOrder[1], "OpenExport must be called after WaitShadowVS")
 }
 
 // makeUnstructuredSnap builds an unstructured snapshot object for kinds not
