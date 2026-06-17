@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -133,17 +134,37 @@ func (s *KubeManifestSource) fetchChunk(ctx context.Context, info snapshotapi.Ch
 	return decodeJSONObjects(raw)
 }
 
-// verifyChecksum computes sha256(compressed) and compares the base64-encoded
-// digest to expected, returning ErrChecksumMismatch on mismatch.
+// verifyChecksum checks that sha256(compressed) matches expected.
+//
+// Real state-snapshotter producers encode the checksum as lowercase hex
+// (hex.EncodeToString). This function accepts both hex (primary) and
+// base64.StdEncoding (compat) to tolerate any encoding already in the wild.
+// It compares raw digest bytes, so the same hash is accepted regardless of
+// how it was serialised. If expected is neither valid hex nor valid base64,
+// a non-ErrChecksumMismatch error is returned so callers can distinguish a
+// real corruption from a format problem.
 func verifyChecksum(compressed []byte, expected string) error {
 	sum := sha256.Sum256(compressed)
-	got := base64.StdEncoding.EncodeToString(sum[:])
 
-	if got != expected {
-		return fmt.Errorf("%w: got %q, want %q", ErrChecksumMismatch, got, expected)
+	// Try hex first — the format emitted by production state-snapshotter controllers.
+	if expectedBytes, err := hex.DecodeString(expected); err == nil {
+		if !bytes.Equal(sum[:], expectedBytes) {
+			return fmt.Errorf("%w: got %q, want %q", ErrChecksumMismatch, hex.EncodeToString(sum[:]), expected)
+		}
+
+		return nil
 	}
 
-	return nil
+	// Fall back to base64 for any producer that serialises the digest differently.
+	if expectedBytes, err := base64.StdEncoding.DecodeString(expected); err == nil {
+		if !bytes.Equal(sum[:], expectedBytes) {
+			return fmt.Errorf("%w: got %q, want %q", ErrChecksumMismatch, hex.EncodeToString(sum[:]), expected)
+		}
+
+		return nil
+	}
+
+	return fmt.Errorf("chunk checksum has unrecognized encoding: %q", expected)
 }
 
 // decodeJSONObjects unmarshals a JSON array of Kubernetes object maps into
