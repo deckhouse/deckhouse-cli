@@ -100,11 +100,14 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 		return nil, fmt.Errorf("node %s/%s (content %q): %w", kind, name, boundContentName, ErrMultipleVolumes)
 	}
 
+	sourceRef := obj.GetAnnotations()[snapshotapi.AnnotationSourceRef]
+
 	node := &Node{
 		APIVersion:             apiVersion,
 		Kind:                   kind,
 		Name:                   name,
 		Namespace:              b.namespace,
+		SourceRef:              sourceRef,
 		ManifestCheckpointName: content.Status.ManifestCheckpointName,
 		DataRefs:               content.Status.DataRefs,
 		Parent:                 parent,
