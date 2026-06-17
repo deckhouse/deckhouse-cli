@@ -72,8 +72,10 @@ const (
 //
 //	root (manifests: root-cm)
 //	  └─ vm-snap (VirtualMachineSnapshot, manifests: vm-cm)
-//	       ├─ disk-block (VirtualDiskSnapshot, block volume)
-//	       └─ disk-fs   (VirtualDiskSnapshot, fs volume)
+//	       ├─ disk-block (VirtualDiskSnapshot, snapshot node)
+//	       │    └─ volumesnapshot_<shadow-block>/ (volume node, block data)
+//	       └─ disk-fs   (VirtualDiskSnapshot, snapshot node)
+//	            └─ volumesnapshot_<shadow-fs>/ (volume node, filesystem data)
 //
 // After the first run all nodes are complete. A second run (resume) must be a no-op.
 func TestPipeline_E2E_FullTree(t *testing.T) {
@@ -140,25 +142,53 @@ func TestPipeline_E2E_FullTree(t *testing.T) {
 	require.NoError(t, err, "vm-snap snapshots/ must exist")
 
 	// ── disk-block node assertions ────────────────────────────────────────────
+	// disk-block is now a snapshot node: no data.img.zst directly; the block
+	// data lives inside its VolumeSnapshot child.
 	blockDir := filepath.Join(vmDir, archive.SnapshotsDirName,
 		archive.NodeDirName(e2eDiskKind, e2eBlockDisk))
 	assertE2ENodeComplete(t, blockDir)
 
-	blockFile := filepath.Join(blockDir, archive.DataBlockName)
+	_, noBlockPayload := os.Stat(filepath.Join(blockDir, archive.DataBlockName))
+	require.True(t, os.IsNotExist(noBlockPayload),
+		"disk-block snapshot node must not carry data.img.zst directly")
+
+	// disk-block must have a snapshots/ dir for its VolumeSnapshot child.
+	_, err = os.Stat(filepath.Join(blockDir, archive.SnapshotsDirName))
+	require.NoError(t, err, "disk-block snapshots/ must exist")
+
+	blockVolumeDir := filepath.Join(blockDir, archive.SnapshotsDirName,
+		archive.NodeDirName("VolumeSnapshot", blockShadow))
+	assertE2ENodeComplete(t, blockVolumeDir)
+
+	blockFile := filepath.Join(blockVolumeDir, archive.DataBlockName)
 	_, err = os.Stat(blockFile)
-	require.NoError(t, err, "disk-block data.img.zst must exist")
+	require.NoError(t, err, "disk-block volume node data.img.zst must exist")
 
 	// Verify decoded block data equals the original.
 	require.Equal(t, rawBlock, e2eDecodeZstdFile(t, blockFile))
 
 	// ── disk-fs node assertions ───────────────────────────────────────────────
+	// disk-fs is now a snapshot node: no data/ directly; the filesystem data
+	// lives inside its VolumeSnapshot child.
 	fsDir := filepath.Join(vmDir, archive.SnapshotsDirName,
 		archive.NodeDirName(e2eDiskKind, e2eFSDisk))
 	assertE2ENodeComplete(t, fsDir)
 
-	dataDir := filepath.Join(fsDir, archive.DataDirName)
+	_, noFSPayload := os.Stat(filepath.Join(fsDir, archive.DataDirName))
+	require.True(t, os.IsNotExist(noFSPayload),
+		"disk-fs snapshot node must not carry data/ directly")
+
+	// disk-fs must have a snapshots/ dir for its VolumeSnapshot child.
+	_, err = os.Stat(filepath.Join(fsDir, archive.SnapshotsDirName))
+	require.NoError(t, err, "disk-fs snapshots/ must exist")
+
+	fsVolumeDir := filepath.Join(fsDir, archive.SnapshotsDirName,
+		archive.NodeDirName("VolumeSnapshot", fsShadow))
+	assertE2ENodeComplete(t, fsVolumeDir)
+
+	dataDir := filepath.Join(fsVolumeDir, archive.DataDirName)
 	_, err = os.Stat(dataDir)
-	require.NoError(t, err, "disk-fs data/ must exist")
+	require.NoError(t, err, "disk-fs volume node data/ must exist")
 
 	for _, f := range fsFiles {
 		zstPath := filepath.Join(dataDir, f.rel+".zst")

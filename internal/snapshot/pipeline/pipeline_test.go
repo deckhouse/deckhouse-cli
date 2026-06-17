@@ -69,8 +69,31 @@ const (
 	snapshotterAPIVersion = "state-snapshotter.deckhouse.io/v1alpha1"
 )
 
+// volumeNodeDir returns the directory for the VolumeSnapshot child of disk-snap.
+// With the volume-as-node layout, each DataRef on disk-snap's SnapshotContent
+// materialises as a VolumeSnapshot child node under disk-snap/snapshots/.
+func volumeNodeDir(diskSnapDir string) string {
+	shadowName := exporter.ShadowName(diskVSCName)
+
+	return filepath.Join(diskSnapDir, archive.SnapshotsDirName, archive.NodeDirName("VolumeSnapshot", shadowName))
+}
+
 // TestPipeline_HappyPath verifies the full download pipeline against a fake
 // Kubernetes client and an httptest block-volume server.
+//
+// Layout after the run:
+//
+//	outputDir/ (root Snapshot node)
+//	  manifests/configmap_test-cfg.yaml
+//	  snapshots/
+//	    virtualdisksnapshot_disk-snap/ (snapshot node — no data payload)
+//	      snapshots/
+//	        volumesnapshot_<shadow>/ (volume node — carries block data)
+//	          manifests/
+//	          data.img.zst
+//	          snapshot.yaml
+//	      snapshot.yaml
+//	  snapshot.yaml
 func TestPipeline_HappyPath(t *testing.T) {
 	// Raw block data for the child disk snapshot.
 	rawBlock := bytes.Repeat([]byte("B"), 600)
@@ -100,7 +123,7 @@ func TestPipeline_HappyPath(t *testing.T) {
 	// Root node must be complete.
 	assertNodeComplete(t, outputDir)
 
-	// Root must have a manifests/ dir with one ConfigMap file.
+	// Root must have a manifests/ dir with one ConfigMap file (DataRef PVCs excluded).
 	manifestsDir := filepath.Join(outputDir, archive.ManifestsDirName)
 	entries, err := os.ReadDir(manifestsDir)
 	require.NoError(t, err)
@@ -110,20 +133,34 @@ func TestPipeline_HappyPath(t *testing.T) {
 	_, err = os.Stat(filepath.Join(outputDir, archive.SnapshotsDirName))
 	require.NoError(t, err, "root snapshots/ directory must exist")
 
-	// Child block-volume node must be complete and data.img.zst must exist.
-	childDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+	// disk-snap is now a snapshot node: complete, but no data.img.zst.
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 		archive.NodeDirName(childKind, diskSnapName))
-	assertNodeComplete(t, childDir)
+	assertNodeComplete(t, diskSnapDir)
 
-	_, err = os.Stat(filepath.Join(childDir, archive.DataBlockName))
-	require.NoError(t, err, "child data.img.zst must exist")
+	_, noDataErr := os.Stat(filepath.Join(diskSnapDir, archive.DataBlockName))
+	require.True(t, os.IsNotExist(noDataErr),
+		"snapshot node must not have data.img.zst directly")
+
+	// disk-snap must have a snapshots/ dir (because it has a volume child).
+	_, err = os.Stat(filepath.Join(diskSnapDir, archive.SnapshotsDirName))
+	require.NoError(t, err, "disk-snap snapshots/ directory must exist")
+
+	// Volume node must be complete and data.img.zst must exist.
+	volDir := volumeNodeDir(diskSnapDir)
+	assertNodeComplete(t, volDir)
+
+	_, err = os.Stat(filepath.Join(volDir, archive.DataBlockName))
+	require.NoError(t, err, "volume node data.img.zst must exist")
 
 	// Second run must be a no-op: snapshot.yaml mtime must not change.
 	rootYAML := filepath.Join(outputDir, archive.SnapshotYAMLName)
-	childYAML := filepath.Join(childDir, archive.SnapshotYAMLName)
+	diskSnapYAML := filepath.Join(diskSnapDir, archive.SnapshotYAMLName)
+	volYAML := filepath.Join(volDir, archive.SnapshotYAMLName)
 
 	rootMod := statMtime(t, rootYAML)
-	childMod := statMtime(t, childYAML)
+	diskSnapMod := statMtime(t, diskSnapYAML)
+	volMod := statMtime(t, volYAML)
 
 	// Sleep briefly so that any writes would produce a different mtime.
 	time.Sleep(20 * time.Millisecond)
@@ -131,8 +168,12 @@ func TestPipeline_HappyPath(t *testing.T) {
 	err = pipeline.Run(context.Background(), cfg)
 	require.NoError(t, err)
 
-	require.Equal(t, rootMod, statMtime(t, rootYAML), "root snapshot.yaml must not be rewritten on second run")
-	require.Equal(t, childMod, statMtime(t, childYAML), "child snapshot.yaml must not be rewritten on second run")
+	require.Equal(t, rootMod, statMtime(t, rootYAML),
+		"root snapshot.yaml must not be rewritten on second run")
+	require.Equal(t, diskSnapMod, statMtime(t, diskSnapYAML),
+		"disk-snap snapshot.yaml must not be rewritten on second run")
+	require.Equal(t, volMod, statMtime(t, volYAML),
+		"volume node snapshot.yaml must not be rewritten on second run")
 }
 
 // TestPipeline_CleanupAfterError verifies that shadow VS/VSC are deleted even when
@@ -177,21 +218,23 @@ func TestPipeline_CleanupAfterError(t *testing.T) {
 }
 
 // TestPipeline_BlockResumeAfterMerge verifies that when data.img.zst already exists
-// in a node directory (crash-after-merge-before-snapshot.yaml window), the pipeline
-// skips shadow pair creation and DataExport entirely and only calls FinalizeNode.
+// in a volume node directory (crash-after-merge-before-snapshot.yaml window), the
+// pipeline skips shadow pair creation and DataExport entirely and only calls FinalizeNode.
 func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
 	t.Parallel()
 
 	c := buildFakeClient(t)
 	outputDir := t.TempDir()
 
-	// Pre-create the child node directory with data.img.zst but no snapshot.yaml,
+	// Pre-create the volume node directory with data.img.zst but no snapshot.yaml,
 	// simulating a crash after block chunks were merged but before FinalizeNode ran.
-	childDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 		archive.NodeDirName(childKind, diskSnapName))
-	require.NoError(t, os.MkdirAll(childDir, 0o755))
+	volDir := volumeNodeDir(diskSnapDir)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(volDir, archive.ManifestsDirName), 0o755))
 	require.NoError(t, os.WriteFile(
-		filepath.Join(childDir, archive.DataBlockName),
+		filepath.Join(volDir, archive.DataBlockName),
 		[]byte("pre-merged-block-data"),
 		0o644,
 	))
@@ -212,8 +255,8 @@ func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
 	err := pipeline.Run(context.Background(), cfg)
 	require.NoError(t, err)
 
-	// FinalizeNode must have been called: child directory must now be complete.
-	assertNodeComplete(t, childDir)
+	// FinalizeNode must have been called: volume node directory must now be complete.
+	assertNodeComplete(t, volDir)
 }
 
 // assertNodeComplete checks that snapshot.yaml exists in dir and VerifyNode passes.
@@ -299,6 +342,7 @@ func buildFakeClient(t *testing.T) client.Client {
 	childSnap := makeUnstructuredSnap(childAPIVersion, childKind, testNS, diskSnapName, "sc-disk")
 
 	// Child SnapshotContent: one block DataRef pointing at the source PVC, no manifests.
+	// With the new tree model this DataRef materialises as a VolumeSnapshot child node.
 	childContent := &snapshotapi.SnapshotContent{
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-disk"},
@@ -450,7 +494,7 @@ func TestPipeline_ShadowMetaFromLivePVC(t *testing.T) {
 
 // TestPipeline_ShadowMetaFromManifest verifies that when the source PVC is gone
 // from the cluster, storageClass and volumeMode are read from the captured PVC
-// manifest already on disk under <nodeDir>/manifests/.
+// manifest already on disk under the volume node's manifests/ directory.
 func TestPipeline_ShadowMetaFromManifest(t *testing.T) {
 	t.Parallel()
 
@@ -523,13 +567,16 @@ func TestPipeline_ShadowMetaFromManifest(t *testing.T) {
 
 	outputDir := t.TempDir()
 
-	// Pre-create the child node manifests/ directory with a PVC manifest so that
+	// Pre-create the volume node's manifests/ directory with the PVC manifest so that
 	// resolveShadowMeta can fall back to it when the live PVC is absent.
-	// processNode will call ensureNodeSubdirs (idempotent) and then WriteNodeManifests
-	// (no-op: ManifestCheckpointName is empty), leaving the pre-written file intact.
-	childDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+	//
+	// With the volume-as-node layout, the PVC manifest lives in the volume node's own
+	// manifests/ dir. In production WriteVolumeManifest writes it; in this test we
+	// pre-populate it because sc-disk has no ManifestCheckpointName.
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 		archive.NodeDirName(childKind, diskSnapName))
-	manifDir := filepath.Join(childDir, archive.ManifestsDirName)
+	volDir := volumeNodeDir(diskSnapDir)
+	manifDir := filepath.Join(volDir, archive.ManifestsDirName)
 	require.NoError(t, os.MkdirAll(manifDir, 0o755))
 
 	pvcManifest := `apiVersion: v1

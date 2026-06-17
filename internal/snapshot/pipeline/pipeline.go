@@ -137,6 +137,10 @@ func collectDFS(node *source.Node, plan archive.NodeResumePlan, tasks *[]nodeTas
 
 // processNode executes all download and finalization steps for one node task.
 // It is called concurrently by the worker pool.
+//
+// Volume nodes (task.node.Binding != nil) are handled by processVolumeNode.
+// Snapshot nodes (task.node.Binding == nil) write their manifests (excluding
+// DataRef-target PVCs) and finalize; they do not download any volume data.
 func processNode(ctx context.Context, cfg Config, enc *compress.Encoder, task nodeTask) error {
 	if task.state == archive.NodeStateDone {
 		cfg.Log.Info("node already complete, skipping",
@@ -146,7 +150,13 @@ func processNode(ctx context.Context, cfg Config, enc *compress.Encoder, task no
 		return nil
 	}
 
-	if err := ensureNodeSubdirs(task.nodeDir, len(task.node.Children) > 0); err != nil {
+	if task.node.Binding != nil {
+		return processVolumeNode(ctx, cfg, enc, task)
+	}
+
+	// Snapshot node: ensure subdirs, write manifests (excluding DataRef PVCs), finalize.
+	withSnapshots := len(task.node.Children) > 0
+	if err := ensureNodeSubdirs(task.nodeDir, withSnapshots); err != nil {
 		return fmt.Errorf("ensure subdirs for %s/%s: %w", task.node.Kind, task.node.Name, err)
 	}
 
@@ -154,25 +164,47 @@ func processNode(ctx context.Context, cfg Config, enc *compress.Encoder, task no
 		return fmt.Errorf("write manifests for %s/%s: %w", task.node.Kind, task.node.Name, err)
 	}
 
-	if len(task.node.DataRefs) > 0 {
-		blockPath := filepath.Join(task.nodeDir, archive.DataBlockName)
+	if err := volume.FinalizeNode(task.nodeDir, task.node); err != nil {
+		return fmt.Errorf("finalize %s/%s: %w", task.node.Kind, task.node.Name, err)
+	}
 
-		_, statErr := os.Stat(blockPath)
-		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-			return fmt.Errorf("stat %s: %w", blockPath, statErr)
-		}
+	cfg.Log.Info("node complete",
+		slog.String("kind", task.node.Kind),
+		slog.String("name", task.node.Name))
 
-		blockAlreadyMerged := statErr == nil
-		if blockAlreadyMerged {
-			cfg.Log.Info("block volume already merged, skipping download",
-				slog.String("kind", task.node.Kind),
-				slog.String("name", task.node.Name))
-		}
+	return nil
+}
 
-		if !blockAlreadyMerged {
-			if err := downloadVolume(ctx, cfg, enc, task.node, task.nodeDir, task.node.DataRefs[0]); err != nil {
-				return fmt.Errorf("download volume for %s/%s: %w", task.node.Kind, task.node.Name, err)
-			}
+// processVolumeNode handles a volume node (task.node.Binding != nil).
+// It writes the captured PVC manifest, applies the block-resume guard, downloads
+// the volume data, and finalizes the node directory.
+// Volume nodes are always leaves: no snapshots/ subdirectory is created.
+func processVolumeNode(ctx context.Context, cfg Config, enc *compress.Encoder, task nodeTask) error {
+	if err := ensureNodeSubdirs(task.nodeDir, false); err != nil {
+		return fmt.Errorf("ensure subdirs for %s/%s: %w", task.node.Kind, task.node.Name, err)
+	}
+
+	if err := volume.WriteVolumeManifest(ctx, cfg.ManifestSource, task.nodeDir, task.node); err != nil {
+		return fmt.Errorf("write volume manifest for %s/%s: %w", task.node.Kind, task.node.Name, err)
+	}
+
+	blockPath := filepath.Join(task.nodeDir, archive.DataBlockName)
+
+	_, statErr := os.Stat(blockPath)
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("stat %s: %w", blockPath, statErr)
+	}
+
+	blockAlreadyMerged := statErr == nil
+	if blockAlreadyMerged {
+		cfg.Log.Info("block volume already merged, skipping download",
+			slog.String("kind", task.node.Kind),
+			slog.String("name", task.node.Name))
+	}
+
+	if !blockAlreadyMerged {
+		if err := downloadVolume(ctx, cfg, enc, task.node, task.nodeDir); err != nil {
+			return fmt.Errorf("download volume for %s/%s: %w", task.node.Kind, task.node.Name, err)
 		}
 	}
 
@@ -204,14 +236,17 @@ func ensureNodeSubdirs(nodeDir string, withSnapshots bool) error {
 // downloadVolume creates the shadow VS/VSC pair for the artifact, opens a
 // DataExport, downloads the volume data (block or filesystem), and cleans up
 // the shadow pair and export on completion or error.
+//
+// node.Binding must be non-nil (guaranteed for volume nodes).
 func downloadVolume(
 	ctx context.Context,
 	cfg Config,
 	enc *compress.Encoder,
 	node *source.Node,
 	nodeDir string,
-	binding snapshotapi.SnapshotDataBinding,
 ) error {
+	binding := node.Binding
+
 	if binding.Artifact.Kind != exporter.ArtifactKindVolumeSnapshotContent {
 		return fmt.Errorf("unsupported artifact kind %q for %s/%s (want VolumeSnapshotContent)",
 			binding.Artifact.Kind, node.Kind, node.Name)
