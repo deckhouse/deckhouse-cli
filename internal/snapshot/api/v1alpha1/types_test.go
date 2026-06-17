@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -236,6 +237,126 @@ func TestManifestCheckpointContentChunkUnmarshal(t *testing.T) {
 
 	if chunk.Spec.Checksum != "deadbeef" {
 		t.Errorf("checksum: got %q", chunk.Spec.Checksum)
+	}
+}
+
+func TestSnapshot_DeepCopyObject_NoAliasing(t *testing.T) {
+	t.Parallel()
+
+	orig := &Snapshot{
+		Status: SnapshotStatus{
+			ChildrenSnapshotRefs: []SnapshotChildRef{
+				{APIVersion: "v1", Kind: "Snapshot", Name: "child-a"},
+			},
+			Conditions: []metav1.Condition{
+				{Type: "Ready", Status: "True", Reason: "All"},
+			},
+		},
+	}
+
+	cp := orig.DeepCopyObject().(*Snapshot)
+
+	cp.Status.ChildrenSnapshotRefs[0].Name = "mutated"
+	cp.Status.Conditions[0].Type = "Mutated"
+
+	if orig.Status.ChildrenSnapshotRefs[0].Name != "child-a" {
+		t.Errorf("ChildrenSnapshotRefs aliased: orig was mutated")
+	}
+
+	if orig.Status.Conditions[0].Type != "Ready" {
+		t.Errorf("Conditions aliased: orig was mutated")
+	}
+}
+
+func TestSnapshotContent_DeepCopyObject_NoAliasing(t *testing.T) {
+	t.Parallel()
+
+	orig := &SnapshotContent{
+		Status: SnapshotContentStatus{
+			ChildrenSnapshotContentRefs: []SnapshotContentChildRef{{Name: "child-a"}},
+			DataRefs: []SnapshotDataBinding{
+				{TargetUID: "uid-1"},
+			},
+			Conditions: []metav1.Condition{
+				{Type: "Ready", Status: "True", Reason: "All"},
+			},
+		},
+	}
+
+	cp := orig.DeepCopyObject().(*SnapshotContent)
+
+	cp.Status.ChildrenSnapshotContentRefs[0].Name = "mutated"
+	cp.Status.DataRefs[0].TargetUID = "mutated"
+	cp.Status.Conditions[0].Type = "Mutated"
+
+	if orig.Status.ChildrenSnapshotContentRefs[0].Name != "child-a" {
+		t.Errorf("ChildrenSnapshotContentRefs aliased: orig was mutated")
+	}
+
+	if orig.Status.DataRefs[0].TargetUID != "uid-1" {
+		t.Errorf("DataRefs aliased: orig was mutated")
+	}
+
+	if orig.Status.Conditions[0].Type != "Ready" {
+		t.Errorf("Conditions aliased: orig was mutated")
+	}
+}
+
+func TestManifestCheckpoint_DeepCopyObject_NoAliasing(t *testing.T) {
+	t.Parallel()
+
+	ref := &ObjectReference{Name: "req-a", Namespace: "ns"}
+	orig := &ManifestCheckpoint{
+		Spec: ManifestCheckpointSpec{
+			ManifestCaptureRequestRef: ref,
+		},
+		Status: ManifestCheckpointStatus{
+			Chunks: []ChunkInfo{
+				{Name: "chunk-0", Index: 0},
+			},
+			Conditions: []metav1.Condition{
+				{Type: "Ready", Status: "True", Reason: "All"},
+			},
+		},
+	}
+
+	cp := orig.DeepCopyObject().(*ManifestCheckpoint)
+
+	cp.Spec.ManifestCaptureRequestRef.Name = "mutated"
+	cp.Status.Chunks[0].Name = "mutated"
+	cp.Status.Conditions[0].Type = "Mutated"
+
+	if orig.Spec.ManifestCaptureRequestRef.Name != "req-a" {
+		t.Errorf("ManifestCaptureRequestRef aliased: orig was mutated")
+	}
+
+	if orig.Status.Chunks[0].Name != "chunk-0" {
+		t.Errorf("Chunks aliased: orig was mutated")
+	}
+
+	if orig.Status.Conditions[0].Type != "Ready" {
+		t.Errorf("Conditions aliased: orig was mutated")
+	}
+}
+
+func TestSnapshotList_DeepCopyObject_NoAliasing(t *testing.T) {
+	t.Parallel()
+
+	orig := &SnapshotList{
+		Items: []Snapshot{
+			{
+				Status: SnapshotStatus{
+					ChildrenSnapshotRefs: []SnapshotChildRef{{Name: "child-a"}},
+				},
+			},
+		},
+	}
+
+	cp := orig.DeepCopyObject().(*SnapshotList)
+	cp.Items[0].Status.ChildrenSnapshotRefs[0].Name = "mutated"
+
+	if orig.Items[0].Status.ChildrenSnapshotRefs[0].Name != "child-a" {
+		t.Errorf("SnapshotList item slice aliased: orig was mutated")
 	}
 }
 
