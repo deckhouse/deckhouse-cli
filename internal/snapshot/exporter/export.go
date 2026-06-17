@@ -62,6 +62,19 @@ func (e *Export) Release(ctx context.Context, c client.Client) error {
 	return ReleaseDataExport(ctx, c, e.namespace, e.deName)
 }
 
+// NewExport constructs an Export from pre-built components.
+// Intended for testing and alternative transport implementations that bypass
+// the production DataExport lifecycle.
+func NewExport(namespace, deName, volumeMode, baseURL string, fetcher *Fetcher) *Export {
+	return &Export{
+		deName:     deName,
+		namespace:  namespace,
+		volumeMode: volumeMode,
+		baseURL:    baseURL,
+		fetcher:    fetcher,
+	}
+}
+
 // OpenExport creates (or re-uses) a DataExport targeting shadowVSName, waits
 // until it is Ready, and returns an Export ready for data transfer.
 //
