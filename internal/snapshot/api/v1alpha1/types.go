@@ -41,11 +41,28 @@ type Snapshot struct {
 	Status SnapshotStatus `json:"status,omitempty"`
 }
 
+// DeepCopyInto copies all fields of s into out, making a fully independent copy.
+func (s *Snapshot) DeepCopyInto(out *Snapshot) {
+	*out = *s
+	s.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+
+	if s.Status.ChildrenSnapshotRefs != nil {
+		out.Status.ChildrenSnapshotRefs = make([]SnapshotChildRef, len(s.Status.ChildrenSnapshotRefs))
+		copy(out.Status.ChildrenSnapshotRefs, s.Status.ChildrenSnapshotRefs)
+	}
+
+	if s.Status.Conditions != nil {
+		out.Status.Conditions = make([]metav1.Condition, len(s.Status.Conditions))
+		copy(out.Status.Conditions, s.Status.Conditions)
+	}
+}
+
 // DeepCopyObject implements runtime.Object.
 func (s *Snapshot) DeepCopyObject() runtime.Object {
-	out := *s
+	out := new(Snapshot)
+	s.DeepCopyInto(out)
 
-	return &out
+	return out
 }
 
 // SnapshotList is a list of Snapshot objects.
@@ -57,14 +74,18 @@ type SnapshotList struct {
 
 // DeepCopyObject implements runtime.Object.
 func (s *SnapshotList) DeepCopyObject() runtime.Object {
-	out := *s
+	out := new(SnapshotList)
+	*out = *s
+	s.ListMeta.DeepCopyInto(&out.ListMeta)
 
 	if s.Items != nil {
 		out.Items = make([]Snapshot, len(s.Items))
-		copy(out.Items, s.Items)
+		for i := range s.Items {
+			s.Items[i].DeepCopyInto(&out.Items[i])
+		}
 	}
 
-	return &out
+	return out
 }
 
 // SnapshotSpec describes the desired snapshot configuration.
@@ -103,11 +124,33 @@ type SnapshotContent struct {
 	Status SnapshotContentStatus `json:"status,omitempty"`
 }
 
+// DeepCopyInto copies all fields of s into out, making a fully independent copy.
+func (s *SnapshotContent) DeepCopyInto(out *SnapshotContent) {
+	*out = *s
+	s.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+
+	if s.Status.ChildrenSnapshotContentRefs != nil {
+		out.Status.ChildrenSnapshotContentRefs = make([]SnapshotContentChildRef, len(s.Status.ChildrenSnapshotContentRefs))
+		copy(out.Status.ChildrenSnapshotContentRefs, s.Status.ChildrenSnapshotContentRefs)
+	}
+
+	if s.Status.DataRefs != nil {
+		out.Status.DataRefs = make([]SnapshotDataBinding, len(s.Status.DataRefs))
+		copy(out.Status.DataRefs, s.Status.DataRefs)
+	}
+
+	if s.Status.Conditions != nil {
+		out.Status.Conditions = make([]metav1.Condition, len(s.Status.Conditions))
+		copy(out.Status.Conditions, s.Status.Conditions)
+	}
+}
+
 // DeepCopyObject implements runtime.Object.
 func (s *SnapshotContent) DeepCopyObject() runtime.Object {
-	out := *s
+	out := new(SnapshotContent)
+	s.DeepCopyInto(out)
 
-	return &out
+	return out
 }
 
 // SnapshotContentList is a list of SnapshotContent objects.
@@ -119,14 +162,18 @@ type SnapshotContentList struct {
 
 // DeepCopyObject implements runtime.Object.
 func (s *SnapshotContentList) DeepCopyObject() runtime.Object {
-	out := *s
+	out := new(SnapshotContentList)
+	*out = *s
+	s.ListMeta.DeepCopyInto(&out.ListMeta)
 
 	if s.Items != nil {
 		out.Items = make([]SnapshotContent, len(s.Items))
-		copy(out.Items, s.Items)
+		for i := range s.Items {
+			s.Items[i].DeepCopyInto(&out.Items[i])
+		}
 	}
 
-	return &out
+	return out
 }
 
 // SnapshotContentSpec describes the desired state of a SnapshotContent.
@@ -193,11 +240,33 @@ type ManifestCheckpoint struct {
 	Status ManifestCheckpointStatus `json:"status,omitempty"`
 }
 
+// DeepCopyInto copies all fields of m into out, making a fully independent copy.
+func (m *ManifestCheckpoint) DeepCopyInto(out *ManifestCheckpoint) {
+	*out = *m
+	m.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+
+	if m.Spec.ManifestCaptureRequestRef != nil {
+		ref := *m.Spec.ManifestCaptureRequestRef
+		out.Spec.ManifestCaptureRequestRef = &ref
+	}
+
+	if m.Status.Chunks != nil {
+		out.Status.Chunks = make([]ChunkInfo, len(m.Status.Chunks))
+		copy(out.Status.Chunks, m.Status.Chunks)
+	}
+
+	if m.Status.Conditions != nil {
+		out.Status.Conditions = make([]metav1.Condition, len(m.Status.Conditions))
+		copy(out.Status.Conditions, m.Status.Conditions)
+	}
+}
+
 // DeepCopyObject implements runtime.Object.
 func (m *ManifestCheckpoint) DeepCopyObject() runtime.Object {
-	out := *m
+	out := new(ManifestCheckpoint)
+	m.DeepCopyInto(out)
 
-	return &out
+	return out
 }
 
 // ManifestCheckpointList is a list of ManifestCheckpoint objects.
@@ -209,14 +278,18 @@ type ManifestCheckpointList struct {
 
 // DeepCopyObject implements runtime.Object.
 func (m *ManifestCheckpointList) DeepCopyObject() runtime.Object {
-	out := *m
+	out := new(ManifestCheckpointList)
+	*out = *m
+	m.ListMeta.DeepCopyInto(&out.ListMeta)
 
 	if m.Items != nil {
 		out.Items = make([]ManifestCheckpoint, len(m.Items))
-		copy(out.Items, m.Items)
+		for i := range m.Items {
+			m.Items[i].DeepCopyInto(&out.Items[i])
+		}
 	}
 
-	return &out
+	return out
 }
 
 // ManifestCheckpointSpec describes the source of a ManifestCheckpoint.
@@ -251,11 +324,18 @@ type ManifestCheckpointContentChunk struct {
 	Spec ManifestCheckpointContentChunkSpec `json:"spec"`
 }
 
+// DeepCopyInto copies all fields of m into out, making a fully independent copy.
+func (m *ManifestCheckpointContentChunk) DeepCopyInto(out *ManifestCheckpointContentChunk) {
+	*out = *m
+	m.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+}
+
 // DeepCopyObject implements runtime.Object.
 func (m *ManifestCheckpointContentChunk) DeepCopyObject() runtime.Object {
-	out := *m
+	out := new(ManifestCheckpointContentChunk)
+	m.DeepCopyInto(out)
 
-	return &out
+	return out
 }
 
 // ManifestCheckpointContentChunkList is a list of ManifestCheckpointContentChunk objects.
@@ -267,14 +347,18 @@ type ManifestCheckpointContentChunkList struct {
 
 // DeepCopyObject implements runtime.Object.
 func (m *ManifestCheckpointContentChunkList) DeepCopyObject() runtime.Object {
-	out := *m
+	out := new(ManifestCheckpointContentChunkList)
+	*out = *m
+	m.ListMeta.DeepCopyInto(&out.ListMeta)
 
 	if m.Items != nil {
 		out.Items = make([]ManifestCheckpointContentChunk, len(m.Items))
-		copy(out.Items, m.Items)
+		for i := range m.Items {
+			m.Items[i].DeepCopyInto(&out.Items[i])
+		}
 	}
 
-	return &out
+	return out
 }
 
 // ManifestCheckpointContentChunkSpec holds the payload of one manifest chunk.
