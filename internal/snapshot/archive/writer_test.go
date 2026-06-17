@@ -73,96 +73,6 @@ func kubeObj(apiVersion, kind, name string) unstructured.Unstructured {
 	}
 }
 
-// TestEnsureNodeDir_CreatesFresh verifies that a new node directory is created with manifests/.
-func TestEnsureNodeDir_CreatesFresh(t *testing.T) {
-	tmp := t.TempDir()
-
-	nodeDir, resume, err := EnsureNodeDir(tmp, "Pod", "my-pod", false)
-	if err != nil {
-		t.Fatalf("EnsureNodeDir: %v", err)
-	}
-
-	if resume {
-		t.Error("expected resume=false for fresh directory")
-	}
-
-	wantDir := filepath.Join(tmp, "pod_my-pod")
-	if nodeDir != wantDir {
-		t.Errorf("nodeDir: got %q, want %q", nodeDir, wantDir)
-	}
-
-	if _, err := os.Stat(filepath.Join(nodeDir, ManifestsDirName)); err != nil {
-		t.Errorf("manifests/ not created: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(nodeDir, SnapshotsDirName)); err == nil {
-		t.Error("snapshots/ should not be created when withSnapshots=false")
-	}
-}
-
-// TestEnsureNodeDir_WithSnapshots verifies that snapshots/ is created when requested.
-func TestEnsureNodeDir_WithSnapshots(t *testing.T) {
-	tmp := t.TempDir()
-
-	nodeDir, _, err := EnsureNodeDir(tmp, "VirtualDisk", "disk-vm", true)
-	if err != nil {
-		t.Fatalf("EnsureNodeDir: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(nodeDir, ManifestsDirName)); err != nil {
-		t.Errorf("manifests/ not created: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(nodeDir, SnapshotsDirName)); err != nil {
-		t.Errorf("snapshots/ not created: %v", err)
-	}
-}
-
-// TestEnsureNodeDir_SkipOnMatch verifies that a complete existing node returns resume=true.
-func TestEnsureNodeDir_SkipOnMatch(t *testing.T) {
-	tmp := t.TempDir()
-	_ = makeCompleteNode(t, tmp, "Pod", "web")
-
-	nodeDir, resume, err := EnsureNodeDir(tmp, "Pod", "web", false)
-	if err != nil {
-		t.Fatalf("EnsureNodeDir: %v", err)
-	}
-
-	if !resume {
-		t.Error("expected resume=true for complete existing directory")
-	}
-
-	wantDir := filepath.Join(tmp, "pod_web")
-	if nodeDir != wantDir {
-		t.Errorf("nodeDir: got %q, want %q", nodeDir, wantDir)
-	}
-}
-
-// TestEnsureNodeDir_ReusePartial verifies that an incomplete node is returned for writing.
-func TestEnsureNodeDir_ReusePartial(t *testing.T) {
-	tmp := t.TempDir()
-
-	// Create a partial node directory (manifests/ present but no snapshot.yaml).
-	partialDir := filepath.Join(tmp, NodeDirName("Pod", "partial"))
-
-	if err := os.MkdirAll(filepath.Join(partialDir, ManifestsDirName), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	nodeDir, resume, err := EnsureNodeDir(tmp, "Pod", "partial", false)
-	if err != nil {
-		t.Fatalf("EnsureNodeDir: %v", err)
-	}
-
-	if resume {
-		t.Error("expected resume=false for partial directory")
-	}
-
-	if nodeDir != partialDir {
-		t.Errorf("nodeDir: got %q, want %q", nodeDir, partialDir)
-	}
-}
-
 // TestCollisionNodeDir verifies the path format for a collision directory.
 func TestCollisionNodeDir(t *testing.T) {
 	got := CollisionNodeDir("/output", "Pod", "my-pod", "abcd1234")
@@ -181,14 +91,10 @@ func TestCollisionNodeDir_CreateAndUse(t *testing.T) {
 	// The "old" complete node.
 	_ = makeCompleteNode(t, tmp, "Pod", "my-pod")
 
-	// EnsureNodeDir signals resume because the primary dir is complete.
-	_, resume, err := EnsureNodeDir(tmp, "Pod", "my-pod", false)
-	if err != nil {
-		t.Fatalf("EnsureNodeDir: %v", err)
-	}
-
-	if !resume {
-		t.Fatal("expected resume=true for the old complete directory")
+	// Verify the primary dir is complete.
+	primaryDir := filepath.Join(tmp, NodeDirName("Pod", "my-pod"))
+	if err := VerifyNode(primaryDir); err != nil {
+		t.Fatalf("expected primary dir to be complete: %v", err)
 	}
 
 	// Pipeline detects a different snapshot; allocate a collision path.
@@ -212,23 +118,13 @@ func TestCollisionNodeDir_CreateAndUse(t *testing.T) {
 	}
 }
 
-// TestChildNodeDir verifies the child node path is under snapshots/.
-func TestChildNodeDir(t *testing.T) {
-	got := ChildNodeDir("/output/pod_web", "VirtualDisk", "disk-a")
-	want := "/output/pod_web/snapshots/virtualdisk_disk-a"
-
-	if got != want {
-		t.Errorf("ChildNodeDir: got %q, want %q", got, want)
-	}
-}
-
 // TestWriteManifest_Normal verifies that a manifest is written to manifests/.
 func TestWriteManifest_Normal(t *testing.T) {
 	tmp := t.TempDir()
-	nodeDir, _, err := EnsureNodeDir(tmp, "Pod", "web", false)
+	nodeDir := filepath.Join(tmp, NodeDirName("Pod", "web"))
 
-	if err != nil {
-		t.Fatalf("EnsureNodeDir: %v", err)
+	if err := EnsureDir(filepath.Join(nodeDir, ManifestsDirName)); err != nil {
+		t.Fatalf("EnsureDir: %v", err)
 	}
 
 	obj := kubeObj("v1", "ConfigMap", "app-config")
@@ -255,10 +151,10 @@ func TestWriteManifest_Normal(t *testing.T) {
 // TestWriteManifest_Idempotent verifies that rewriting the same object does not create duplicates.
 func TestWriteManifest_Idempotent(t *testing.T) {
 	tmp := t.TempDir()
-	nodeDir, _, err := EnsureNodeDir(tmp, "Pod", "web", false)
+	nodeDir := filepath.Join(tmp, NodeDirName("Pod", "web"))
 
-	if err != nil {
-		t.Fatalf("EnsureNodeDir: %v", err)
+	if err := EnsureDir(filepath.Join(nodeDir, ManifestsDirName)); err != nil {
+		t.Fatalf("EnsureDir: %v", err)
 	}
 
 	obj := kubeObj("v1", "ConfigMap", "my-cm")
@@ -285,10 +181,10 @@ func TestWriteManifest_Idempotent(t *testing.T) {
 // but different API groups produce two distinct files.
 func TestWriteManifest_CollisionAPIGroup(t *testing.T) {
 	tmp := t.TempDir()
-	nodeDir, _, err := EnsureNodeDir(tmp, "Pod", "web", false)
+	nodeDir := filepath.Join(tmp, NodeDirName("Pod", "web"))
 
-	if err != nil {
-		t.Fatalf("EnsureNodeDir: %v", err)
+	if err := EnsureDir(filepath.Join(nodeDir, ManifestsDirName)); err != nil {
+		t.Fatalf("EnsureDir: %v", err)
 	}
 
 	// First object: core ConfigMap (apiVersion "v1", group "").
@@ -336,10 +232,14 @@ func TestWriteManifest_CollisionAPIGroup(t *testing.T) {
 // TestWriteManifest_Tree tests a small multi-manifest node.
 func TestWriteManifest_Tree(t *testing.T) {
 	tmp := t.TempDir()
-	nodeDir, _, err := EnsureNodeDir(tmp, "VirtualDisk", "disk-a", true)
+	nodeDir := filepath.Join(tmp, NodeDirName("VirtualDisk", "disk-a"))
 
-	if err != nil {
-		t.Fatalf("EnsureNodeDir: %v", err)
+	if err := EnsureDir(filepath.Join(nodeDir, ManifestsDirName)); err != nil {
+		t.Fatalf("EnsureDir: %v", err)
+	}
+
+	if err := EnsureDir(filepath.Join(nodeDir, SnapshotsDirName)); err != nil {
+		t.Fatalf("EnsureDir: %v", err)
 	}
 
 	objs := []unstructured.Unstructured{

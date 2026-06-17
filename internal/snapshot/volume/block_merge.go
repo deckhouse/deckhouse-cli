@@ -55,9 +55,13 @@ func MergeBlockChunks(nodeDir string, totalSize, chunkSize int64) error {
 	// Verify all chunks are present before writing anything.
 	for i := range numChunks {
 		p := filepath.Join(chunkDir, archive.ChunkFileName(i))
-		if _, err := os.Stat(p); os.IsNotExist(err) {
+
+		_, err := os.Stat(p)
+		if os.IsNotExist(err) {
 			return fmt.Errorf("chunk %d (%s): %w", i, p, ErrMissingChunk)
-		} else if err != nil {
+		}
+
+		if err != nil {
 			return fmt.Errorf("stat chunk %d: %w", i, err)
 		}
 	}
