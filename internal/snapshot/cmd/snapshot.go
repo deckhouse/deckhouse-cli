@@ -17,11 +17,15 @@ limitations under the License.
 package snapshot
 
 import (
+	"context"
+	"log/slog"
+
 	"github.com/spf13/cobra"
+
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/download"
 )
 
 // NewCommand returns the root cobra command for the `d8 snapshot` command group.
-// Subcommands (e.g. download) are attached by the command wiring layer.
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "snapshot",
@@ -32,6 +36,11 @@ func NewCommand() *cobra.Command {
 			_ = cmd.Help()
 		},
 	}
+
+	ctx := context.Background()
+	log := slog.Default()
+
+	cmd.AddCommand(download.NewCommand(ctx, log))
 
 	return cmd
 }
