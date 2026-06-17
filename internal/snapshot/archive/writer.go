@@ -27,51 +27,6 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 )
 
-// EnsureNodeDir creates and initialises a node directory inside parentDir.
-// The directory name is NodeDirName(kind, name).
-//
-// Behaviour:
-//   - No existing directory: created with manifests/ (and snapshots/ if withSnapshots);
-//     returns (nodeDir, false, nil).
-//   - Existing directory with a valid snapshot.yaml (VerifyNode passes): the node is
-//     already complete; returns (nodeDir, true, nil). The caller should skip downloading.
-//   - Existing directory that fails VerifyNode (partial or corrupt): subdirs are
-//     re-ensured for continued writing; returns (nodeDir, false, nil).
-func EnsureNodeDir(parentDir, kind, name string, withSnapshots bool) (string, bool, error) {
-	nodeDir := filepath.Join(parentDir, NodeDirName(kind, name))
-
-	if _, statErr := os.Stat(nodeDir); statErr == nil {
-		if verifyErr := VerifyNode(nodeDir); verifyErr == nil {
-			return nodeDir, true, nil
-		}
-
-		if err := ensureSubdirs(nodeDir, withSnapshots); err != nil {
-			return "", false, err
-		}
-
-		return nodeDir, false, nil
-	}
-
-	if err := EnsureDir(nodeDir); err != nil {
-		return "", false, err
-	}
-
-	if err := ensureSubdirs(nodeDir, withSnapshots); err != nil {
-		return "", false, err
-	}
-
-	return nodeDir, false, nil
-}
-
-// ChildNodeDir returns the path where a child node directory will be placed:
-//
-//	<parentNodeDir>/snapshots/<NodeDirName(childKind,childName)>
-//
-// It does not create the directory; use EnsureNodeDir with the snapshots/ path as parentDir.
-func ChildNodeDir(parentNodeDir, childKind, childName string) string {
-	return filepath.Join(parentNodeDir, SnapshotsDirName, NodeDirName(childKind, childName))
-}
-
 // CollisionNodeDir returns the path for a node directory with a short-checksum suffix:
 //
 //	<parentDir>/<NodeDirName(kind,name)>__<short>
@@ -113,19 +68,6 @@ func WriteManifest(nodeDir string, obj unstructured.Unstructured) error {
 	qualifiedPath := filepath.Join(nodeDir, ManifestsDirName, ManifestFileName(kind, name, newGroup))
 
 	return writeManifestYAML(qualifiedPath, obj)
-}
-
-// ensureSubdirs creates manifests/ (always) and snapshots/ (when withSnapshots) inside nodeDir.
-func ensureSubdirs(nodeDir string, withSnapshots bool) error {
-	if err := EnsureDir(filepath.Join(nodeDir, ManifestsDirName)); err != nil {
-		return err
-	}
-
-	if !withSnapshots {
-		return nil
-	}
-
-	return EnsureDir(filepath.Join(nodeDir, SnapshotsDirName))
 }
 
 // writeManifestYAML marshals the unstructured object to YAML and writes it atomically to path.

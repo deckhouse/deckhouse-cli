@@ -406,9 +406,9 @@ func TestBuildTree_SourceRefAnnotation(t *testing.T) {
 	for _, ch := range tree.Children {
 		if ch.Name == "disk-with-ref" {
 			withRef = ch
-		} else {
-			withoutRef = ch
+			continue
 		}
+		withoutRef = ch
 	}
 
 	if withRef == nil || withoutRef == nil {
