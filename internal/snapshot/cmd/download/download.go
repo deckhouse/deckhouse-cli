@@ -1,0 +1,213 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package download implements the `d8 snapshot download` command.
+package download
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"path/filepath"
+	"strings"
+
+	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+	"github.com/spf13/cobra"
+
+	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
+	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
+	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
+)
+
+const (
+	cmdUse = "download"
+
+	flagOutput               = "output"
+	flagTTL                  = "ttl"
+	flagWorkers              = "workers"
+	flagPerVolumeConcurrency = "per-volume-concurrency"
+	flagChunkSize            = "chunk-size"
+)
+
+// NewCommand builds the `d8 snapshot download` cobra command.
+func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:           cmdUse + " <namespace> <snapshot>",
+		Short:         "Download a snapshot to a local directory tree",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Example: `  # Download snapshot "my-snap" from namespace "default" into directory ./out
+  d8 snapshot download default my-snap -o out
+
+  # Download with faster compression and more concurrent workers
+  d8 snapshot download default my-snap -o out --workers 8 --per-volume-concurrency 8`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return Run(ctx, log, cmd, args)
+		},
+	}
+
+	cmd.Flags().StringP(flagOutput, "o", "", "root output directory (required)")
+	cmd.Flags().String(flagTTL, "2h", "DataExport TTL (e.g. 2h, 30m)")
+	cmd.Flags().Int(flagWorkers, 4, "maximum number of nodes downloaded concurrently")
+	cmd.Flags().Int(flagPerVolumeConcurrency, 4, "maximum parallel chunk/file downloads per volume")
+	cmd.Flags().String(flagChunkSize, "", "block-volume chunk size (e.g. 256Mi); defaults to 256Mi")
+
+	return cmd
+}
+
+// Run validates flags, builds the pipeline config, and executes the download.
+func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
+	namespace := args[0]
+	snapshotName := args[1]
+
+	outputDir, err := cmd.Flags().GetString(flagOutput)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagOutput, err)
+	}
+
+	if outputDir == "" {
+		return fmt.Errorf("--%s is required", flagOutput)
+	}
+
+	outputDir, err = filepath.Abs(outputDir)
+	if err != nil {
+		return fmt.Errorf("resolving output path: %w", err)
+	}
+
+	ttl, err := cmd.Flags().GetString(flagTTL)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagTTL, err)
+	}
+
+	workers, err := cmd.Flags().GetInt(flagWorkers)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagWorkers, err)
+	}
+
+	perVolume, err := cmd.Flags().GetInt(flagPerVolumeConcurrency)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagPerVolumeConcurrency, err)
+	}
+
+	chunkSizeStr, err := cmd.Flags().GetString(flagChunkSize)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagChunkSize, err)
+	}
+
+	chunkSize, err := parseChunkSize(chunkSizeStr)
+	if err != nil {
+		return fmt.Errorf("parsing --%s: %w", flagChunkSize, err)
+	}
+
+	safeClient.SupportNoAuth = false
+
+	sc, err := safeClient.NewSafeClient(cmd.PersistentFlags())
+	if err != nil {
+		return fmt.Errorf("building kube client: %w", err)
+	}
+
+	kubeClient, err := sc.NewRTClient(
+		snapshotapi.AddToScheme,
+		deapi.AddToScheme,
+		snapv1.AddToScheme,
+	)
+	if err != nil {
+		return fmt.Errorf("building runtime client: %w", err)
+	}
+
+	cfg := pipeline.Config{
+		Namespace:            namespace,
+		RootSnapshot:         snapshotName,
+		OutputDir:            outputDir,
+		Workers:              workers,
+		PerVolumeConcurrency: perVolume,
+		ChunkSize:            chunkSize,
+		TTL:                  ttl,
+		KubeClient:           kubeClient,
+		SafeClient:           sc,
+		Log:                  log,
+	}
+
+	log.Info("starting snapshot download",
+		slog.String("namespace", namespace),
+		slog.String("snapshot", snapshotName),
+		slog.String("output_dir", outputDir),
+	)
+
+	if err := pipeline.Run(ctx, cfg); err != nil {
+		return fmt.Errorf("snapshot download failed: %w", err)
+	}
+
+	log.Info("snapshot download complete", slog.String("output_dir", outputDir))
+
+	return nil
+}
+
+// parseChunkSize converts a human-readable size string (e.g. "256Mi", "128M")
+// into bytes. An empty string returns 0, which the pipeline interprets as
+// volume.DefaultChunkSize (256 MiB).
+func parseChunkSize(s string) (int64, error) {
+	if s == "" {
+		return 0, nil
+	}
+
+	// Normalise "Mi" -> "MiB" style variants for resource.Quantity.
+	s = strings.TrimSpace(s)
+
+	var mult int64 = 1
+
+	switch {
+	case strings.HasSuffix(s, "GiB") || strings.HasSuffix(s, "Gi"):
+		mult = 1024 * 1024 * 1024
+		s = strings.TrimRightFunc(s, func(r rune) bool { return r == 'B' || r == 'i' || r == 'G' })
+	case strings.HasSuffix(s, "MiB") || strings.HasSuffix(s, "Mi"):
+		mult = 1024 * 1024
+		s = strings.TrimRightFunc(s, func(r rune) bool { return r == 'B' || r == 'i' || r == 'M' })
+	case strings.HasSuffix(s, "KiB") || strings.HasSuffix(s, "Ki"):
+		mult = 1024
+		s = strings.TrimRightFunc(s, func(r rune) bool { return r == 'B' || r == 'i' || r == 'K' })
+	case strings.HasSuffix(s, "GB") || strings.HasSuffix(s, "G"):
+		mult = 1000 * 1000 * 1000
+		s = strings.TrimRightFunc(s, func(r rune) bool { return r == 'B' || r == 'G' })
+	case strings.HasSuffix(s, "MB") || strings.HasSuffix(s, "M"):
+		mult = 1000 * 1000
+		s = strings.TrimRightFunc(s, func(r rune) bool { return r == 'B' || r == 'M' })
+	case strings.HasSuffix(s, "KB") || strings.HasSuffix(s, "K"):
+		mult = 1000
+		s = strings.TrimRightFunc(s, func(r rune) bool { return r == 'B' || r == 'K' })
+	}
+
+	var n int64
+
+	_, err := fmt.Sscanf(s, "%d", &n)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size %q: %w", s, err)
+	}
+
+	if n <= 0 {
+		return 0, fmt.Errorf("chunk size must be positive, got %d", n)
+	}
+
+	result := n * mult
+	if result < volume.DefaultChunkSize/16 {
+		return 0, fmt.Errorf("chunk size %d bytes is too small (minimum %d bytes)", result, volume.DefaultChunkSize/16)
+	}
+
+	return result, nil
+}
