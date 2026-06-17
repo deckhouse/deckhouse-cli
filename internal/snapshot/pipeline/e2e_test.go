@@ -267,8 +267,6 @@ func makeE2EBlockServer(t *testing.T, rawData []byte) *httptest.Server {
 func makeE2EFSServer(t *testing.T, files []fsE2EFile) *httptest.Server {
 	t.Helper()
 
-	var srv *httptest.Server
-
 	fileMap := make(map[string][]byte, len(files))
 	for _, f := range files {
 		fileMap[f.rel] = f.content
@@ -279,24 +277,18 @@ func makeE2EFSServer(t *testing.T, files []fsE2EFile) *httptest.Server {
 		switch r.URL.Path {
 		case "/api/v1/files/":
 			w.Header().Set("Content-Type", "application/json")
-			listing := fmt.Sprintf(
+			_, _ = io.WriteString(w,
 				`{"apiVersion":"v1","items":[`+
-					`{"name":"alpha.txt","type":"file","uri":"%s/api/v1/files/alpha.txt","attributes":{}},`+
-					`{"name":"subdir","type":"directory","uri":"%s/api/v1/files/subdir/","attributes":{}}`+
-					`]}`,
-				srv.URL, srv.URL,
-			)
-			_, _ = io.WriteString(w, listing)
+					`{"name":"alpha.txt","type":"file","uri":"alpha.txt","attributes":{}},`+
+					`{"name":"subdir","type":"dir","uri":"subdir/","attributes":{}}`+
+					`]}`)
 
 		case "/api/v1/files/subdir/":
 			w.Header().Set("Content-Type", "application/json")
-			listing := fmt.Sprintf(
+			_, _ = io.WriteString(w,
 				`{"apiVersion":"v1","items":[`+
-					`{"name":"beta.txt","type":"file","uri":"%s/api/v1/files/subdir/beta.txt","attributes":{}}`+
-					`]}`,
-				srv.URL,
-			)
-			_, _ = io.WriteString(w, listing)
+					`{"name":"beta.txt","type":"file","uri":"subdir/beta.txt","attributes":{}}`+
+					`]}`)
 
 		case "/api/v1/files/alpha.txt":
 			_, _ = w.Write(fileMap["alpha.txt"])
@@ -309,7 +301,7 @@ func makeE2EFSServer(t *testing.T, files []fsE2EFile) *httptest.Server {
 		}
 	})
 
-	srv = httptest.NewServer(mux)
+	srv := httptest.NewServer(mux)
 
 	t.Cleanup(srv.Close)
 

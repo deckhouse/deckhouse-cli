@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 
@@ -65,7 +66,7 @@ func DownloadFilesystemVolume(
 	}
 
 	// Collect all file jobs via a recursive listing walk (serial).
-	jobs, err := collectFSFiles(ctx, fetcher, filesRootURL, "")
+	jobs, err := collectFSFiles(ctx, fetcher, filesRootURL, filesRootURL, "")
 	if err != nil {
 		return fmt.Errorf("list filesystem volume: %w", err)
 	}
@@ -99,8 +100,20 @@ func DownloadFilesystemVolume(
 }
 
 // collectFSFiles recursively walks the listing at dirURL, accumulating file jobs.
+// filesRootURL is the absolute URL of the volume root; item URIs are resolved
+// against it because the data-exporter returns root-relative paths, not absolute URLs.
 // relPrefix is the path prefix for items inside this directory (forward-slash).
-func collectFSFiles(ctx context.Context, fetcher *exporter.Fetcher, dirURL, relPrefix string) ([]fsFileJob, error) {
+func collectFSFiles(ctx context.Context, fetcher *exporter.Fetcher, dirURL, filesRootURL, relPrefix string) ([]fsFileJob, error) {
+	base, err := url.Parse(filesRootURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse files root URL %q: %w", filesRootURL, err)
+	}
+
+	return collectFSFilesRec(ctx, fetcher, dirURL, base, relPrefix)
+}
+
+// collectFSFilesRec is the internal recursive worker for collectFSFiles.
+func collectFSFilesRec(ctx context.Context, fetcher *exporter.Fetcher, dirURL string, base *url.URL, relPrefix string) ([]fsFileJob, error) {
 	items, err := fetcher.ListDir(ctx, dirURL)
 	if err != nil {
 		return nil, fmt.Errorf("list %s: %w", dirURL, err)
@@ -109,15 +122,22 @@ func collectFSFiles(ctx context.Context, fetcher *exporter.Fetcher, dirURL, relP
 	var jobs []fsFileJob
 
 	for _, item := range items {
+		ref, err := url.Parse(item.URI)
+		if err != nil {
+			return nil, fmt.Errorf("parse item URI %q: %w", item.URI, err)
+		}
+
+		absURI := base.ResolveReference(ref).String()
+
 		switch item.Type {
 		case "file":
 			relPath := relPrefix + item.Name
-			jobs = append(jobs, fsFileJob{relPath: relPath, uri: item.URI})
+			jobs = append(jobs, fsFileJob{relPath: relPath, uri: absURI})
 
-		case "directory":
+		case "dir":
 			subPrefix := relPrefix + item.Name + "/"
 
-			subJobs, err := collectFSFiles(ctx, fetcher, item.URI, subPrefix)
+			subJobs, err := collectFSFilesRec(ctx, fetcher, absURI, base, subPrefix)
 			if err != nil {
 				return nil, err
 			}

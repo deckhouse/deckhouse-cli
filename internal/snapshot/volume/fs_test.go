@@ -19,7 +19,6 @@ package volume_test
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -58,34 +57,26 @@ func fsTestServer(t *testing.T) (*httptest.Server, []fsTestFile) {
 		{relPath: "subdir/nested.txt", content: []byte("nested-content")},
 	}
 
-	var srv *httptest.Server
 	mux := http.NewServeMux()
 
-	// Root listing.
+	// Root listing: URIs are root-relative paths (real data-exporter contract).
 	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
-		// Switch on the request path to serve either a directory listing or a file.
 		switch r.URL.Path {
 		case "/files/":
 			w.Header().Set("Content-Type", "application/json")
-			listing := fmt.Sprintf(
+			_, _ = io.WriteString(w,
 				`{"apiVersion":"v1","items":[`+
-					`{"name":"root.txt","type":"file","uri":"%s/files/root.txt","attributes":{}},`+
-					`{"name":"subdir","type":"directory","uri":"%s/files/subdir/","attributes":{}},`+
+					`{"name":"root.txt","type":"file","uri":"root.txt","attributes":{}},`+
+					`{"name":"subdir","type":"dir","uri":"subdir/","attributes":{}},`+
 					`{"name":"symlink.txt","type":"link","uri":"","targetPath":"/other","attributes":{}}`+
-					`]}`,
-				srv.URL, srv.URL,
-			)
-			_, _ = io.WriteString(w, listing)
+					`]}`)
 
 		case "/files/subdir/":
 			w.Header().Set("Content-Type", "application/json")
-			listing := fmt.Sprintf(
+			_, _ = io.WriteString(w,
 				`{"apiVersion":"v1","items":[`+
-					`{"name":"nested.txt","type":"file","uri":"%s/files/subdir/nested.txt","attributes":{}}`+
-					`]}`,
-				srv.URL,
-			)
-			_, _ = io.WriteString(w, listing)
+					`{"name":"nested.txt","type":"file","uri":"subdir/nested.txt","attributes":{}}`+
+					`]}`)
 
 		case "/files/root.txt":
 			_, _ = w.Write(files[0].content)
@@ -98,7 +89,7 @@ func fsTestServer(t *testing.T) (*httptest.Server, []fsTestFile) {
 		}
 	})
 
-	srv = httptest.NewServer(mux)
+	srv := httptest.NewServer(mux)
 
 	t.Cleanup(srv.Close)
 
