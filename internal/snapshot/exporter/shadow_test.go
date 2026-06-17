@@ -1,0 +1,289 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package exporter_test
+
+import (
+	"context"
+	"testing"
+
+	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
+)
+
+func newSnapScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+
+	err := snapv1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	err = corev1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	return scheme
+}
+
+func makeRealVSC(name, driver, snapshotHandle string) *snapv1.VolumeSnapshotContent {
+	handle := snapshotHandle
+
+	return &snapv1.VolumeSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Spec: snapv1.VolumeSnapshotContentSpec{
+			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
+			Driver:         driver,
+			Source: snapv1.VolumeSnapshotContentSource{
+				SnapshotHandle: &handle,
+			},
+			VolumeSnapshotRef: corev1.ObjectReference{
+				Name:      "original-vs",
+				Namespace: "original-ns",
+			},
+		},
+	}
+}
+
+func TestShadowName(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		artifactName string
+		wantPrefix   string
+		wantLen      int
+	}{
+		{
+			artifactName: "snapcontent-00000000-0000-0000-0000-000000000000",
+			wantPrefix:   "d8-ss-",
+			wantLen:      22,
+		},
+		{
+			artifactName: "short",
+			wantPrefix:   "d8-ss-",
+			wantLen:      22,
+		},
+		{
+			// Very long name — result must still be ≤ 63 chars.
+			artifactName: "snapcontent-" + string(make([]byte, 200)),
+			wantPrefix:   "d8-ss-",
+			wantLen:      22,
+		},
+	}
+
+	for _, tc := range cases {
+		name := exporter.ShadowName(tc.artifactName)
+		assert.Equal(t, tc.wantLen, len(name), "artifact=%q got %q", tc.artifactName, name)
+		assert.True(t, len(name) <= 63, "must be ≤ 63 chars, got %d: %s", len(name), name)
+	}
+
+	// Determinism.
+	a := exporter.ShadowName("foo")
+	b := exporter.ShadowName("foo")
+	assert.Equal(t, a, b)
+
+	// Two different artifacts produce different shadow names.
+	assert.NotEqual(t, exporter.ShadowName("foo"), exporter.ShadowName("bar"))
+}
+
+func TestEnsureShadowPair_CreatesObjects(t *testing.T) {
+	t.Parallel()
+
+	const (
+		artifactName   = "snapcontent-aabbccdd"
+		namespace      = "test-ns"
+		driver         = "csi.test.driver"
+		snapshotHandle = "snap-handle-123"
+	)
+
+	scheme := newSnapScheme(t)
+	realVSC := makeRealVSC(artifactName, driver, snapshotHandle)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(realVSC).Build()
+
+	ctx := context.Background()
+
+	shadowVS, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName)
+	require.NoError(t, err)
+	require.NotNil(t, shadowVS)
+
+	pairName := exporter.ShadowName(artifactName)
+
+	// Shadow VS should be in namespace with correct source.
+	assert.Equal(t, pairName, shadowVS.Name)
+	assert.Equal(t, namespace, shadowVS.Namespace)
+	require.NotNil(t, shadowVS.Spec.Source.VolumeSnapshotContentName)
+	assert.Equal(t, pairName, *shadowVS.Spec.Source.VolumeSnapshotContentName)
+
+	// Shadow VSC must exist with correct fields.
+	var shadowVSC snapv1.VolumeSnapshotContent
+
+	err = c.Get(ctx, types.NamespacedName{Name: pairName}, &shadowVSC)
+	require.NoError(t, err)
+
+	assert.Equal(t, snapv1.VolumeSnapshotContentRetain, shadowVSC.Spec.DeletionPolicy)
+	assert.Equal(t, driver, shadowVSC.Spec.Driver)
+	require.NotNil(t, shadowVSC.Spec.Source.SnapshotHandle)
+	assert.Equal(t, snapshotHandle, *shadowVSC.Spec.Source.SnapshotHandle)
+	assert.Equal(t, pairName, shadowVSC.Spec.VolumeSnapshotRef.Name)
+	assert.Equal(t, namespace, shadowVSC.Spec.VolumeSnapshotRef.Namespace)
+	assert.Equal(t, "VolumeSnapshot", shadowVSC.Spec.VolumeSnapshotRef.Kind)
+}
+
+func TestEnsureShadowPair_Idempotent(t *testing.T) {
+	t.Parallel()
+
+	const (
+		artifactName   = "snapcontent-idempotent"
+		namespace      = "test-ns"
+		driver         = "csi.idempotent"
+		snapshotHandle = "snap-handle-idempotent"
+	)
+
+	scheme := newSnapScheme(t)
+	realVSC := makeRealVSC(artifactName, driver, snapshotHandle)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(realVSC).Build()
+
+	ctx := context.Background()
+
+	vs1, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName)
+	require.NoError(t, err)
+
+	vs2, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName)
+	require.NoError(t, err)
+
+	// Both calls should return an object with the same name.
+	assert.Equal(t, vs1.Name, vs2.Name)
+
+	// Exactly one shadow VSC should exist.
+	var vscList snapv1.VolumeSnapshotContentList
+
+	err = c.List(ctx, &vscList)
+	require.NoError(t, err)
+
+	shadowCount := 0
+
+	for _, v := range vscList.Items {
+		if v.Name == exporter.ShadowName(artifactName) {
+			shadowCount++
+		}
+	}
+
+	assert.Equal(t, 1, shadowCount, "expected exactly one shadow VSC")
+}
+
+func TestEnsureShadowPair_MissingArtifact(t *testing.T) {
+	t.Parallel()
+
+	scheme := newSnapScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	ctx := context.Background()
+
+	_, err := exporter.EnsureShadowPair(ctx, c, "ns", "does-not-exist")
+	require.Error(t, err)
+}
+
+func TestEnsureShadowPair_NoSnapshotHandle(t *testing.T) {
+	t.Parallel()
+
+	scheme := newSnapScheme(t)
+
+	noHandleVSC := &snapv1.VolumeSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "no-handle-vsc"},
+		Spec: snapv1.VolumeSnapshotContentSpec{
+			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
+			Driver:         "csi.test",
+			Source:         snapv1.VolumeSnapshotContentSource{
+				// SnapshotHandle is nil — dynamically provisioned VSC has VolumeHandle instead.
+			},
+			VolumeSnapshotRef: corev1.ObjectReference{Name: "vs", Namespace: "ns"},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(noHandleVSC).Build()
+
+	ctx := context.Background()
+
+	_, err := exporter.EnsureShadowPair(ctx, c, "ns", "no-handle-vsc")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "snapshotHandle")
+}
+
+func TestCleanupShadowPair_DeletesObjects(t *testing.T) {
+	t.Parallel()
+
+	const (
+		artifactName   = "snapcontent-cleanup"
+		namespace      = "test-ns"
+		driver         = "csi.cleanup"
+		snapshotHandle = "snap-handle-cleanup"
+	)
+
+	scheme := newSnapScheme(t)
+	realVSC := makeRealVSC(artifactName, driver, snapshotHandle)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(realVSC).Build()
+
+	ctx := context.Background()
+
+	_, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName)
+	require.NoError(t, err)
+
+	err = exporter.CleanupShadowPair(ctx, c, namespace, artifactName)
+	require.NoError(t, err)
+
+	pairName := exporter.ShadowName(artifactName)
+
+	// Shadow VS must be gone.
+	var shadowVS snapv1.VolumeSnapshot
+
+	err = c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: pairName}, &shadowVS)
+	assert.True(t, kubeerrors.IsNotFound(err), "shadow VS should be deleted")
+
+	// Shadow VSC must be gone.
+	var shadowVSC snapv1.VolumeSnapshotContent
+
+	err = c.Get(ctx, types.NamespacedName{Name: pairName}, &shadowVSC)
+	assert.True(t, kubeerrors.IsNotFound(err), "shadow VSC should be deleted")
+
+	// Real VSC must still exist.
+	var realVSCAfter snapv1.VolumeSnapshotContent
+
+	err = c.Get(ctx, types.NamespacedName{Name: artifactName}, &realVSCAfter)
+	require.NoError(t, err, "real VSC must not be deleted")
+}
+
+func TestCleanupShadowPair_Idempotent(t *testing.T) {
+	t.Parallel()
+
+	scheme := newSnapScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	ctx := context.Background()
+
+	// Cleanup with nothing pre-created — should not error.
+	err := exporter.CleanupShadowPair(ctx, c, "ns", "nonexistent-artifact")
+	assert.NoError(t, err)
+}
