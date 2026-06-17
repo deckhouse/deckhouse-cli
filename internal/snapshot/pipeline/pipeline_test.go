@@ -21,6 +21,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -118,6 +119,45 @@ func TestPipeline_HappyPath(t *testing.T) {
 
 	require.Equal(t, rootMod, statMtime(t, rootYAML), "root snapshot.yaml must not be rewritten on second run")
 	require.Equal(t, childMod, statMtime(t, childYAML), "child snapshot.yaml must not be rewritten on second run")
+}
+
+// TestPipeline_BlockResumeAfterMerge verifies that when data.img.zst already exists
+// in a node directory (crash-after-merge-before-snapshot.yaml window), the pipeline
+// skips shadow pair creation and DataExport entirely and only calls FinalizeNode.
+func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
+	t.Parallel()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	// Pre-create the child node directory with data.img.zst but no snapshot.yaml,
+	// simulating a crash after block chunks were merged but before FinalizeNode ran.
+	childDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	require.NoError(t, os.MkdirAll(childDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(childDir, archive.DataBlockName),
+		[]byte("pre-merged-block-data"),
+		0o644,
+	))
+
+	cfg := pipeline.Config{
+		Namespace:    testNS,
+		RootSnapshot: rootSnapshot,
+		OutputDir:    outputDir,
+		Workers:      1,
+		KubeClient:   c,
+		OpenExport: func(_ context.Context, _, _, _ string) (*exporter.Export, error) {
+			t.Error("OpenExport must not be called when data.img.zst already exists")
+			return nil, errors.New("unexpected OpenExport call")
+		},
+	}
+
+	err := pipeline.Run(context.Background(), cfg)
+	require.NoError(t, err)
+
+	// FinalizeNode must have been called: child directory must now be complete.
+	assertNodeComplete(t, childDir)
 }
 
 // assertNodeComplete checks that snapshot.yaml exists in dir and VerifyNode passes.

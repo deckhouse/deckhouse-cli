@@ -18,8 +18,10 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 
 	"golang.org/x/sync/errgroup"
@@ -158,8 +160,24 @@ func processNode(ctx context.Context, cfg Config, enc *compress.Encoder, task no
 	}
 
 	if len(task.node.DataRefs) > 0 {
-		if err := downloadVolume(ctx, cfg, enc, task.node, task.nodeDir, task.node.DataRefs[0]); err != nil {
-			return fmt.Errorf("download volume for %s/%s: %w", task.node.Kind, task.node.Name, err)
+		blockPath := filepath.Join(task.nodeDir, archive.DataBlockName)
+
+		_, statErr := os.Stat(blockPath)
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("stat %s: %w", blockPath, statErr)
+		}
+
+		blockAlreadyMerged := statErr == nil
+		if blockAlreadyMerged {
+			cfg.Log.Info("block volume already merged, skipping download",
+				slog.String("kind", task.node.Kind),
+				slog.String("name", task.node.Name))
+		}
+
+		if !blockAlreadyMerged {
+			if err := downloadVolume(ctx, cfg, enc, task.node, task.nodeDir, task.node.DataRefs[0]); err != nil {
+				return fmt.Errorf("download volume for %s/%s: %w", task.node.Kind, task.node.Name, err)
+			}
 		}
 	}
 
