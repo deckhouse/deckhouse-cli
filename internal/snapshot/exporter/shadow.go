@@ -27,6 +27,7 @@ import (
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -34,6 +35,24 @@ import (
 // SnapshotDataBinding when the data path used the CSI snapshot driver.
 // Callers should verify this before calling EnsureShadowPair.
 const ArtifactKindVolumeSnapshotContent = "VolumeSnapshotContent"
+
+// Annotation keys placed on the shadow VolumeSnapshot so that the data-export
+// controller can derive the storageClass and volumeMode for the export PVC.
+// These must match the constants in storage-volume-data-manager
+// (VirtualizationAnnotationStorageClassNameKey / VirtualizationAnnotationVolumeModeKey).
+const (
+	AnnotationStorageClassName = "virtualization.deckhouse.io/storage-class-name"
+	AnnotationVolumeMode       = "virtualization.deckhouse.io/volume-mode"
+)
+
+// ShadowMeta carries the storage metadata sourced from the original PVC that
+// backed the CSI snapshot. It is injected as annotations on the shadow
+// VolumeSnapshot so that the data-export controller can provision the export PVC
+// with the correct storageClass and volumeMode.
+type ShadowMeta struct {
+	StorageClass string
+	VolumeMode   string
+}
 
 // ShadowName returns a deterministic Kubernetes-safe name for the shadow pair
 // (both the cluster-scoped shadow VolumeSnapshotContent and the namespaced
@@ -52,10 +71,14 @@ func ShadowName(artifactName string) string {
 // VolumeSnapshot in namespace. The shadow VS can then be referenced in a
 // DataExport.
 //
-// The real VolumeSnapshotContent is fetched to copy its driver and
-// snapshotHandle. The shadow VSC uses deletionPolicy=Retain so that cleanup
+// The real VolumeSnapshotContent is fetched to copy its driver, snapshotHandle,
+// and restoreSize. The shadow VSC uses deletionPolicy=Retain so that cleanup
 // removes only the shadow objects; the underlying storage snapshot is
 // preserved.
+//
+// meta carries the storageClass and volumeMode of the original source PVC and
+// is injected as annotations on the shadow VS so that the data-export controller
+// can resolve the export PVC without needing the live source PVC.
 //
 // Returns the shadow VolumeSnapshot (newly created or pre-existing).
 func EnsureShadowPair(
@@ -63,6 +86,7 @@ func EnsureShadowPair(
 	c client.Client,
 	namespace string,
 	artifactName string,
+	meta ShadowMeta,
 ) (*snapv1.VolumeSnapshot, error) {
 	realVSC := &snapv1.VolumeSnapshotContent{}
 
@@ -81,7 +105,16 @@ func EnsureShadowPair(
 		return nil, err
 	}
 
-	return ensureShadowVS(ctx, c, namespace, pairName)
+	// Propagate restoreSize from the real VSC to the shadow VSC so the
+	// snapshot-controller can sync it to the shadow VS status.restoreSize.
+	// The data-export controller requires a non-nil VS.status.restoreSize.
+	if realVSC.Status != nil && realVSC.Status.RestoreSize != nil {
+		if err := setVSCRestoreSize(ctx, c, pairName, *realVSC.Status.RestoreSize); err != nil {
+			return nil, fmt.Errorf("set restoreSize on shadow VSC %q: %w", pairName, err)
+		}
+	}
+
+	return ensureShadowVS(ctx, c, namespace, pairName, meta)
 }
 
 // resolveSnapshotHandle returns the CSI snapshot identifier for the given
@@ -106,6 +139,30 @@ func resolveSnapshotHandle(vsc *snapv1.VolumeSnapshotContent) (string, error) {
 	}
 
 	return "", fmt.Errorf("no snapshotHandle available (snapshot may not be ready yet)")
+}
+
+// setVSCRestoreSize updates the shadow VSC's status.restoreSize to restoreSize
+// (bytes) when it is not yet set, wrapped in RetryOnConflict.
+func setVSCRestoreSize(ctx context.Context, c client.Client, name string, restoreSize int64) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		shadowVSC := &snapv1.VolumeSnapshotContent{}
+
+		if err := c.Get(ctx, types.NamespacedName{Name: name}, shadowVSC); err != nil {
+			return err
+		}
+
+		if shadowVSC.Status != nil && shadowVSC.Status.RestoreSize != nil {
+			return nil
+		}
+
+		if shadowVSC.Status == nil {
+			shadowVSC.Status = &snapv1.VolumeSnapshotContentStatus{}
+		}
+
+		shadowVSC.Status.RestoreSize = &restoreSize
+
+		return c.Status().Update(ctx, shadowVSC)
+	})
 }
 
 func ensureShadowVSC(
@@ -158,6 +215,7 @@ func ensureShadowVS(
 	c client.Client,
 	namespace string,
 	name string,
+	meta ShadowMeta,
 ) (*snapv1.VolumeSnapshot, error) {
 	existing := &snapv1.VolumeSnapshot{}
 
@@ -170,10 +228,20 @@ func ensureShadowVS(
 		return nil, fmt.Errorf("get shadow VolumeSnapshot %q: %w", name, err)
 	}
 
+	annotations := map[string]string{}
+	if meta.StorageClass != "" {
+		annotations[AnnotationStorageClassName] = meta.StorageClass
+	}
+
+	if meta.VolumeMode != "" {
+		annotations[AnnotationVolumeMode] = meta.VolumeMode
+	}
+
 	vs := &snapv1.VolumeSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
+			Name:        name,
+			Namespace:   namespace,
+			Annotations: annotations,
 		},
 		Spec: snapv1.VolumeSnapshotSpec{
 			Source: snapv1.VolumeSnapshotSource{

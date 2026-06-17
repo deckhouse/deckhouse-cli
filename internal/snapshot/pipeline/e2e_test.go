@@ -397,6 +397,12 @@ func buildE2EFakeClient(t *testing.T) client.Client {
 			DataRefs: []snapshotapi.SnapshotDataBinding{
 				{
 					TargetUID: "uid-block",
+					Target: snapshotapi.SnapshotSubjectRef{
+						APIVersion: "v1",
+						Kind:       "PersistentVolumeClaim",
+						Namespace:  e2eNS,
+						Name:       "pvc-block-source",
+					},
 					Artifact: snapshotapi.SnapshotDataArtifactRef{
 						APIVersion: "snapshot.storage.k8s.io/v1",
 						Kind:       "VolumeSnapshotContent",
@@ -417,6 +423,12 @@ func buildE2EFakeClient(t *testing.T) client.Client {
 			DataRefs: []snapshotapi.SnapshotDataBinding{
 				{
 					TargetUID: "uid-fs",
+					Target: snapshotapi.SnapshotSubjectRef{
+						APIVersion: "v1",
+						Kind:       "PersistentVolumeClaim",
+						Namespace:  e2eNS,
+						Name:       "pvc-fs-source",
+					},
 					Artifact: snapshotapi.SnapshotDataArtifactRef{
 						APIVersion: "snapshot.storage.k8s.io/v1",
 						Kind:       "VolumeSnapshotContent",
@@ -464,12 +476,34 @@ func buildE2EFakeClient(t *testing.T) client.Client {
 		},
 	}
 
+	// ── Source PVCs (needed by resolveShadowMeta) ────────────────────────────
+	blockVolumeMode := corev1.PersistentVolumeBlock
+	blockStorageClass := "csi-e2e-block-sc"
+	sourcePVCBlock := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "pvc-block-source", Namespace: e2eNS},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &blockStorageClass,
+			VolumeMode:       &blockVolumeMode,
+		},
+	}
+
+	fsVolumeMode := corev1.PersistentVolumeFilesystem
+	fsStorageClass := "csi-e2e-fs-sc"
+	sourcePVCFS := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "pvc-fs-source", Namespace: e2eNS},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &fsStorageClass,
+			VolumeMode:       &fsVolumeMode,
+		},
+	}
+
 	typed := []client.Object{
 		rootSnap, rootContent, rootMCP, rootChunk,
 		vmContent, vmMCP, vmChunk,
 		blockContent,
 		fsContent,
 		realBlockVSC, realFSVSC,
+		sourcePVCBlock, sourcePVCFS,
 	}
 
 	return fake.NewClientBuilder().

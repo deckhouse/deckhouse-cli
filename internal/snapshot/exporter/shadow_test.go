@@ -155,7 +155,7 @@ func TestEnsureShadowPair_CreatesObjects(t *testing.T) {
 
 	ctx := context.Background()
 
-	shadowVS, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName)
+	shadowVS, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName, exporter.ShadowMeta{})
 	require.NoError(t, err)
 	require.NotNil(t, shadowVS)
 
@@ -198,10 +198,10 @@ func TestEnsureShadowPair_Idempotent(t *testing.T) {
 
 	ctx := context.Background()
 
-	vs1, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName)
+	vs1, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName, exporter.ShadowMeta{})
 	require.NoError(t, err)
 
-	vs2, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName)
+	vs2, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName, exporter.ShadowMeta{})
 	require.NoError(t, err)
 
 	// Both calls should return an object with the same name.
@@ -232,7 +232,7 @@ func TestEnsureShadowPair_MissingArtifact(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, err := exporter.EnsureShadowPair(ctx, c, "ns", "does-not-exist")
+	_, err := exporter.EnsureShadowPair(ctx, c, "ns", "does-not-exist", exporter.ShadowMeta{})
 	require.Error(t, err)
 }
 
@@ -260,7 +260,7 @@ func TestEnsureShadowPair_NoSnapshotHandle(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, err := exporter.EnsureShadowPair(ctx, c, "ns", "no-handle-vsc")
+	_, err := exporter.EnsureShadowPair(ctx, c, "ns", "no-handle-vsc", exporter.ShadowMeta{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "snapshotHandle")
 }
@@ -285,7 +285,7 @@ func TestEnsureShadowPair_DynamicVSCUsesStatus(t *testing.T) {
 
 	ctx := context.Background()
 
-	shadowVS, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName)
+	shadowVS, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName, exporter.ShadowMeta{})
 	require.NoError(t, err)
 	require.NotNil(t, shadowVS)
 
@@ -323,7 +323,7 @@ func TestEnsureShadowPair_PreProvisionedFallback(t *testing.T) {
 
 	ctx := context.Background()
 
-	shadowVS, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName)
+	shadowVS, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName, exporter.ShadowMeta{})
 	require.NoError(t, err)
 	require.NotNil(t, shadowVS)
 
@@ -337,6 +337,82 @@ func TestEnsureShadowPair_PreProvisionedFallback(t *testing.T) {
 	require.NotNil(t, shadowVSC.Spec.Source.SnapshotHandle)
 	assert.Equal(t, snapshotHandle, *shadowVSC.Spec.Source.SnapshotHandle)
 	assert.Equal(t, driver, shadowVSC.Spec.Driver)
+}
+
+// TestEnsureShadowPair_SetsRestoreSize verifies that when the real VSC has
+// status.restoreSize the shadow VSC's status.restoreSize is set to match.
+func TestEnsureShadowPair_SetsRestoreSize(t *testing.T) {
+	t.Parallel()
+
+	const (
+		artifactName   = "snapcontent-restoresize"
+		namespace      = "test-ns"
+		driver         = "csi.test"
+		snapshotHandle = "snap-handle-rs"
+		restoreSize    = int64(1073741824) // 1 GiB
+	)
+
+	scheme := newSnapScheme(t)
+	realVSC := makeRealVSC(artifactName, driver, snapshotHandle)
+	realVSC.Status = &snapv1.VolumeSnapshotContentStatus{
+		SnapshotHandle: &[]string{snapshotHandle}[0],
+		RestoreSize:    &[]int64{restoreSize}[0],
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(realVSC).
+		WithStatusSubresource(&snapv1.VolumeSnapshotContent{}).
+		Build()
+
+	ctx := context.Background()
+
+	_, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName, exporter.ShadowMeta{})
+	require.NoError(t, err)
+
+	pairName := exporter.ShadowName(artifactName)
+
+	var shadowVSC snapv1.VolumeSnapshotContent
+
+	err = c.Get(ctx, types.NamespacedName{Name: pairName}, &shadowVSC)
+	require.NoError(t, err)
+
+	require.NotNil(t, shadowVSC.Status, "shadow VSC status must be set")
+	require.NotNil(t, shadowVSC.Status.RestoreSize, "shadow VSC status.restoreSize must be set")
+	assert.Equal(t, restoreSize, *shadowVSC.Status.RestoreSize)
+}
+
+// TestEnsureShadowPair_SetsAnnotations verifies that the shadow VolumeSnapshot
+// receives the storage-class and volume-mode annotations from ShadowMeta.
+func TestEnsureShadowPair_SetsAnnotations(t *testing.T) {
+	t.Parallel()
+
+	const (
+		artifactName   = "snapcontent-annotations"
+		namespace      = "test-ns"
+		driver         = "csi.test"
+		snapshotHandle = "snap-handle-ann"
+		storageClass   = "csi-ceph-rbd"
+		volumeMode     = "Block"
+	)
+
+	scheme := newSnapScheme(t)
+	realVSC := makeRealVSC(artifactName, driver, snapshotHandle)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(realVSC).Build()
+
+	ctx := context.Background()
+
+	meta := exporter.ShadowMeta{StorageClass: storageClass, VolumeMode: volumeMode}
+
+	shadowVS, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName, meta)
+	require.NoError(t, err)
+	require.NotNil(t, shadowVS)
+
+	require.NotNil(t, shadowVS.Annotations)
+	assert.Equal(t, storageClass, shadowVS.Annotations[exporter.AnnotationStorageClassName],
+		"shadow VS must carry storage-class annotation")
+	assert.Equal(t, volumeMode, shadowVS.Annotations[exporter.AnnotationVolumeMode],
+		"shadow VS must carry volume-mode annotation")
 }
 
 func TestCleanupShadowPair_DeletesObjects(t *testing.T) {
@@ -355,7 +431,7 @@ func TestCleanupShadowPair_DeletesObjects(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName)
+	_, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName, exporter.ShadowMeta{})
 	require.NoError(t, err)
 
 	err = exporter.CleanupShadowPair(ctx, c, namespace, artifactName)

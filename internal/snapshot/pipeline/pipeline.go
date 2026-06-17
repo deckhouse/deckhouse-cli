@@ -26,6 +26,10 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	corev1 "k8s.io/api/core/v1"
+	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+	sigsyaml "sigs.k8s.io/yaml"
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -223,7 +227,12 @@ func downloadVolume(
 
 	artifactName := binding.Artifact.Name
 
-	shadowVS, err := exporter.EnsureShadowPair(ctx, cfg.KubeClient, node.Namespace, artifactName)
+	meta, err := resolveShadowMeta(ctx, cfg, nodeDir, binding.Target)
+	if err != nil {
+		return fmt.Errorf("resolve shadow metadata for artifact %s: %w", artifactName, err)
+	}
+
+	shadowVS, err := exporter.EnsureShadowPair(ctx, cfg.KubeClient, node.Namespace, artifactName, meta)
 	if err != nil {
 		return fmt.Errorf("ensure shadow pair for artifact %s: %w", artifactName, err)
 	}
@@ -305,4 +314,84 @@ func nodeIdentity(node *source.Node) archive.NodeIdentity {
 		Namespace:  node.Namespace,
 		SourceRef:  node.SourceRef,
 	}
+}
+
+// resolveShadowMeta resolves the storageClass and volumeMode of the source PVC
+// (target) that was snapshotted. It tries a live API lookup first; if the PVC
+// is gone it falls back to the captured manifest written under
+// <nodeDir>/manifests/. Returns an error if both attempts fail or if the PVC
+// does not carry both fields.
+func resolveShadowMeta(
+	ctx context.Context,
+	cfg Config,
+	nodeDir string,
+	target snapshotapi.SnapshotSubjectRef,
+) (exporter.ShadowMeta, error) {
+	pvc := &corev1.PersistentVolumeClaim{}
+
+	err := cfg.KubeClient.Get(ctx, types.NamespacedName{Namespace: target.Namespace, Name: target.Name}, pvc)
+	if err != nil && !kubeerrors.IsNotFound(err) {
+		return exporter.ShadowMeta{}, fmt.Errorf("get source PVC %s/%s: %w", target.Namespace, target.Name, err)
+	}
+
+	if err == nil {
+		return shadowMetaFromPVC(pvc)
+	}
+
+	return shadowMetaFromManifest(nodeDir, target.Name)
+}
+
+// shadowMetaFromPVC extracts storageClass and volumeMode from a live PVC.
+func shadowMetaFromPVC(pvc *corev1.PersistentVolumeClaim) (exporter.ShadowMeta, error) {
+	var meta exporter.ShadowMeta
+
+	if pvc.Spec.StorageClassName != nil && *pvc.Spec.StorageClassName != "" {
+		meta.StorageClass = *pvc.Spec.StorageClassName
+	}
+
+	if pvc.Spec.VolumeMode != nil {
+		meta.VolumeMode = string(*pvc.Spec.VolumeMode)
+	}
+
+	if meta.StorageClass == "" || meta.VolumeMode == "" {
+		return exporter.ShadowMeta{}, fmt.Errorf(
+			"source PVC %s/%s is missing required fields: storageClassName=%q volumeMode=%q",
+			pvc.Namespace, pvc.Name, meta.StorageClass, meta.VolumeMode)
+	}
+
+	return meta, nil
+}
+
+// shadowMetaFromManifest reads the captured PVC manifest from
+// <nodeDir>/manifests/persistentvolumeclaim_<pvcName>.yaml and extracts
+// storageClass and volumeMode.
+func shadowMetaFromManifest(nodeDir, pvcName string) (exporter.ShadowMeta, error) {
+	manifestPath := filepath.Join(nodeDir, archive.ManifestsDirName,
+		archive.ManifestFileName("PersistentVolumeClaim", pvcName, ""))
+
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return exporter.ShadowMeta{}, fmt.Errorf(
+			"source PVC %q not found live and manifest not readable (%s): %w",
+			pvcName, manifestPath, err)
+	}
+
+	var obj map[string]interface{}
+
+	if err := sigsyaml.Unmarshal(data, &obj); err != nil {
+		return exporter.ShadowMeta{}, fmt.Errorf("parse manifest %s: %w", manifestPath, err)
+	}
+
+	spec, _ := obj["spec"].(map[string]interface{})
+
+	storageClass, _ := spec["storageClassName"].(string)
+	volumeMode, _ := spec["volumeMode"].(string)
+
+	if storageClass == "" || volumeMode == "" {
+		return exporter.ShadowMeta{}, fmt.Errorf(
+			"manifest %s is missing required fields: storageClassName=%q volumeMode=%q",
+			manifestPath, storageClass, volumeMode)
+	}
+
+	return exporter.ShadowMeta{StorageClass: storageClass, VolumeMode: volumeMode}, nil
 }
