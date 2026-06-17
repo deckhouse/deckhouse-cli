@@ -72,20 +72,12 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
-	sem := make(chan struct{}, cfg.Workers)
+	g.SetLimit(cfg.Workers)
 
 	for _, t := range tasks {
 		task := t
 
 		g.Go(func() error {
-			select {
-			case sem <- struct{}{}:
-			case <-gctx.Done():
-				return gctx.Err()
-			}
-
-			defer func() { <-sem }()
-
 			return processNode(gctx, cfg, enc, task)
 		})
 	}
