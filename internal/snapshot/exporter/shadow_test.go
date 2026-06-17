@@ -18,13 +18,16 @@ package exporter_test
 
 import (
 	"context"
+	"log/slog"
 	"testing"
+	"time"
 
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -469,4 +472,195 @@ func TestCleanupShadowPair_Idempotent(t *testing.T) {
 	// Cleanup with nothing pre-created — should not error.
 	err := exporter.CleanupShadowPair(ctx, c, "ns", "nonexistent-artifact")
 	assert.NoError(t, err)
+}
+
+// TestWaitShadowVSReady_Ready verifies that WaitShadowVSReady returns nil
+// immediately when the shadow VS already has readyToUse=true and a non-nil
+// restoreSize.
+func TestWaitShadowVSReady_Ready(t *testing.T) {
+	t.Parallel()
+
+	const (
+		shadowName  = "d8-ss-ready"
+		namespace   = "ns"
+		realVSCName = "vsc-real"
+	)
+
+	scheme := newSnapScheme(t)
+
+	readyToUse := true
+	restoreSize := resource.MustParse("1Gi")
+	shadowVS := &snapv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: shadowName, Namespace: namespace},
+		Status: &snapv1.VolumeSnapshotStatus{
+			ReadyToUse:  &readyToUse,
+			RestoreSize: &restoreSize,
+		},
+	}
+	realVSC := &snapv1.VolumeSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: realVSCName},
+		Spec: snapv1.VolumeSnapshotContentSpec{
+			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
+			Driver:         "csi.test",
+			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &[]string{"h"}[0]},
+			VolumeSnapshotRef: corev1.ObjectReference{
+				Name: shadowName, Namespace: namespace,
+			},
+		},
+	}
+	shadowVSC := &snapv1.VolumeSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: shadowName},
+		Spec: snapv1.VolumeSnapshotContentSpec{
+			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
+			Driver:         "csi.test",
+			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &[]string{"h"}[0]},
+			VolumeSnapshotRef: corev1.ObjectReference{
+				Name: shadowName, Namespace: namespace,
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(shadowVS, realVSC, shadowVSC).
+		WithStatusSubresource(&snapv1.VolumeSnapshotContent{}).
+		Build()
+
+	ctx := context.Background()
+
+	err := exporter.WaitShadowVSReady(ctx, c, slog.Default(), namespace, shadowName, realVSCName)
+	require.NoError(t, err, "should return immediately when shadow VS is already ready")
+}
+
+// TestWaitShadowVSReady_Timeout verifies that WaitShadowVSReady returns an
+// error containing the diagnostic message and ErrShadowNotReady when the
+// context expires before the shadow VS becomes ready.
+func TestWaitShadowVSReady_Timeout(t *testing.T) {
+	t.Parallel()
+
+	const (
+		shadowName  = "d8-ss-timeout"
+		namespace   = "ns"
+		realVSCName = "vsc-real-timeout"
+	)
+
+	scheme := newSnapScheme(t)
+
+	// Shadow VS with no status — never ready.
+	shadowVS := &snapv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: shadowName, Namespace: namespace},
+	}
+	realVSC := &snapv1.VolumeSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: realVSCName},
+		Spec: snapv1.VolumeSnapshotContentSpec{
+			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
+			Driver:         "csi.test",
+			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &[]string{"h"}[0]},
+			VolumeSnapshotRef: corev1.ObjectReference{
+				Name: shadowName, Namespace: namespace,
+			},
+		},
+	}
+	shadowVSC := &snapv1.VolumeSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: shadowName},
+		Spec: snapv1.VolumeSnapshotContentSpec{
+			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
+			Driver:         "csi.test",
+			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &[]string{"h"}[0]},
+			VolumeSnapshotRef: corev1.ObjectReference{
+				Name: shadowName, Namespace: namespace,
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(shadowVS, realVSC, shadowVSC).
+		Build()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	err := exporter.WaitShadowVSReady(ctx, c, slog.Default(), namespace, shadowName, realVSCName)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, exporter.ErrShadowNotReady,
+		"error must wrap ErrShadowNotReady")
+	assert.Contains(t, err.Error(), shadowName,
+		"diagnostic must name the shadow VS")
+	assert.Contains(t, err.Error(), realVSCName,
+		"diagnostic must name the real VSC")
+}
+
+// TestWaitShadowVSReady_SetsVSCRestoreSize verifies that WaitShadowVSReady
+// re-asserts the restoreSize from the real VSC onto the shadow VSC during
+// the first poll before returning (when the shadow VS is already ready).
+func TestWaitShadowVSReady_SetsVSCRestoreSize(t *testing.T) {
+	t.Parallel()
+
+	const (
+		shadowName   = "d8-ss-setrs"
+		namespace    = "ns"
+		realVSCName  = "vsc-real-setrs"
+		restoreBytes = int64(2147483648) // 2 GiB
+	)
+
+	scheme := newSnapScheme(t)
+
+	readyToUse := true
+	vsRestoreSize := resource.MustParse("2Gi")
+	shadowVS := &snapv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: shadowName, Namespace: namespace},
+		Status: &snapv1.VolumeSnapshotStatus{
+			ReadyToUse:  &readyToUse,
+			RestoreSize: &vsRestoreSize,
+		},
+	}
+
+	// Real VSC has status.restoreSize so the loop will re-assert it on shadow VSC.
+	realVSC := &snapv1.VolumeSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: realVSCName},
+		Spec: snapv1.VolumeSnapshotContentSpec{
+			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
+			Driver:         "csi.test",
+			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &[]string{"h"}[0]},
+			VolumeSnapshotRef: corev1.ObjectReference{
+				Name: shadowName, Namespace: namespace,
+			},
+		},
+		Status: &snapv1.VolumeSnapshotContentStatus{
+			RestoreSize: &[]int64{restoreBytes}[0],
+		},
+	}
+
+	// Shadow VSC starts without status.restoreSize.
+	shadowVSC := &snapv1.VolumeSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: shadowName},
+		Spec: snapv1.VolumeSnapshotContentSpec{
+			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
+			Driver:         "csi.test",
+			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &[]string{"h"}[0]},
+			VolumeSnapshotRef: corev1.ObjectReference{
+				Name: shadowName, Namespace: namespace,
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(shadowVS, realVSC, shadowVSC).
+		WithStatusSubresource(&snapv1.VolumeSnapshotContent{}).
+		Build()
+
+	ctx := context.Background()
+
+	err := exporter.WaitShadowVSReady(ctx, c, slog.Default(), namespace, shadowName, realVSCName)
+	require.NoError(t, err, "should return immediately when shadow VS is already ready")
+
+	// Shadow VSC must now have restoreSize set from the real VSC.
+	var updatedShadowVSC snapv1.VolumeSnapshotContent
+
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: shadowName}, &updatedShadowVSC))
+	require.NotNil(t, updatedShadowVSC.Status, "shadow VSC status must be set")
+	require.NotNil(t, updatedShadowVSC.Status.RestoreSize, "shadow VSC status.restoreSize must be set")
+	assert.Equal(t, restoreBytes, *updatedShadowVSC.Status.RestoreSize)
 }

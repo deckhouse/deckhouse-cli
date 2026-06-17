@@ -20,7 +20,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log/slog"
+	"time"
 
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -53,6 +56,14 @@ type ShadowMeta struct {
 	StorageClass string
 	VolumeMode   string
 }
+
+// ErrShadowNotReady is returned by WaitShadowVSReady when the context deadline
+// expires before the shadow VolumeSnapshot reports readyToUse=true with a
+// non-nil restoreSize.
+var ErrShadowNotReady = errors.New("shadow VS did not become ready with a non-nil restoreSize")
+
+// shadowVSPollInterval is how often WaitShadowVSReady re-checks the shadow VS.
+const shadowVSPollInterval = 3 * time.Second
 
 // ShadowName returns a deterministic Kubernetes-safe name for the shadow pair
 // (both the cluster-scoped shadow VolumeSnapshotContent and the namespaced
@@ -163,6 +174,89 @@ func setVSCRestoreSize(ctx context.Context, c client.Client, name string, restor
 
 		return c.Status().Update(ctx, shadowVSC)
 	})
+}
+
+// WaitShadowVSReady polls the shadow VolumeSnapshot (shadowName in namespace)
+// until both status.readyToUse==true and status.restoreSize!=nil.
+//
+// Inside each poll iteration it re-reads the real VolumeSnapshotContent
+// (realVSCName) and re-asserts its restoreSize onto the shadow VSC via
+// setVSCRestoreSize. This counteracts the CSI snapshotter sidecar, which on
+// pre-provisioned content reconciles the VSC status from the driver and may
+// clear a value that was set manually.
+//
+// The data-export controller hard-requires a non-nil VS.status.restoreSize to
+// provision the export PVC. Only after this function returns should a
+// DataExport be created for the shadow VS.
+//
+// The caller must bound the wait via ctx. On expiry the function returns
+// ErrShadowNotReady wrapped with a diagnostic that names the shadow VS/VSC and
+// the real VSC restoreSize (if known).
+func WaitShadowVSReady(
+	ctx context.Context,
+	c client.Client,
+	log *slog.Logger,
+	namespace,
+	shadowName,
+	realVSCName string,
+) error {
+	var lastRealRestoreSize *int64
+
+	for {
+		realVSC := new(snapv1.VolumeSnapshotContent)
+		if getErr := c.Get(ctx, types.NamespacedName{Name: realVSCName}, realVSC); getErr == nil {
+			if realVSC.Status != nil && realVSC.Status.RestoreSize != nil {
+				lastRealRestoreSize = realVSC.Status.RestoreSize
+
+				if assertErr := setVSCRestoreSize(ctx, c, shadowName, *realVSC.Status.RestoreSize); assertErr != nil {
+					log.Warn("re-assert shadow VSC restoreSize failed (will retry)",
+						slog.String("shadow_vsc", shadowName),
+						slog.String("error", assertErr.Error()))
+				}
+			}
+		}
+
+		shadowVS := new(snapv1.VolumeSnapshot)
+		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: shadowName}, shadowVS); err != nil {
+			return fmt.Errorf("get shadow VolumeSnapshot %s/%s: %w", namespace, shadowName, err)
+		}
+
+		if isVSReadyWithSize(shadowVS) {
+			return nil
+		}
+
+		log.Info("waiting for shadow VS readyToUse and restoreSize",
+			slog.String("namespace", namespace),
+			slog.String("shadow", shadowName))
+
+		select {
+		case <-ctx.Done():
+			var realRestoreStr string
+
+			if lastRealRestoreSize != nil {
+				realRestoreStr = fmt.Sprintf("%d bytes", *lastRealRestoreSize)
+			} else {
+				realRestoreStr = "unknown (real VSC has no status.restoreSize)"
+			}
+
+			return fmt.Errorf(
+				"shadow VS %s/%s did not become ready within the deadline "+
+					"(real VSC %s restoreSize=%s); "+
+					"the data-export controller requires VS.status.restoreSize != nil to provision the export PVC; "+
+					"verify that the CSI snapshotter sidecar has reconciled the snapshot status: %w",
+				namespace, shadowName, realVSCName, realRestoreStr, ErrShadowNotReady)
+		case <-time.After(shadowVSPollInterval):
+		}
+	}
+}
+
+// isVSReadyWithSize reports whether vs has readyToUse=true and a non-nil
+// restoreSize, which are the preconditions the data-export controller requires
+// before it will accept a VolumeSnapshot as an export source.
+func isVSReadyWithSize(vs *snapv1.VolumeSnapshot) bool {
+	return vs.Status != nil &&
+		vs.Status.ReadyToUse != nil && *vs.Status.ReadyToUse &&
+		vs.Status.RestoreSize != nil
 }
 
 func ensureShadowVSC(

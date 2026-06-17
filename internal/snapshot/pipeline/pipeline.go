@@ -243,6 +243,10 @@ func downloadVolume(
 		}
 	}()
 
+	if err := cfg.WaitShadowVS(ctx, cfg.KubeClient, cfg.Log, node.Namespace, shadowVS.Name, artifactName); err != nil {
+		return fmt.Errorf("wait for shadow VS %s ready: %w", shadowVS.Name, err)
+	}
+
 	exp, err := cfg.OpenExport(ctx, node.Namespace, shadowVS.Name, cfg.TTL)
 	if err != nil {
 		return fmt.Errorf("open DataExport for shadow VS %s: %w", shadowVS.Name, err)

@@ -99,6 +99,7 @@ func TestPipeline_E2E_FullTree(t *testing.T) {
 		Workers:              2,
 		PerVolumeConcurrency: 2,
 		KubeClient:           c,
+		WaitShadowVS:         noopWaitShadowVS,
 		OpenExport: func(_ context.Context, namespace, shadowVSName, _ string) (*exporter.Export, error) {
 			switch shadowVSName {
 			case blockShadow:
