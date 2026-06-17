@@ -88,7 +88,7 @@ func EnsureShadowPair(
 	artifactName string,
 	meta ShadowMeta,
 ) (*snapv1.VolumeSnapshot, error) {
-	realVSC := &snapv1.VolumeSnapshotContent{}
+	realVSC := new(snapv1.VolumeSnapshotContent)
 
 	if err := c.Get(ctx, types.NamespacedName{Name: artifactName}, realVSC); err != nil {
 		return nil, fmt.Errorf("get source VolumeSnapshotContent %q: %w", artifactName, err)
@@ -145,7 +145,7 @@ func resolveSnapshotHandle(vsc *snapv1.VolumeSnapshotContent) (string, error) {
 // (bytes) when it is not yet set, wrapped in RetryOnConflict.
 func setVSCRestoreSize(ctx context.Context, c client.Client, name string, restoreSize int64) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		shadowVSC := &snapv1.VolumeSnapshotContent{}
+		shadowVSC := new(snapv1.VolumeSnapshotContent)
 
 		if err := c.Get(ctx, types.NamespacedName{Name: name}, shadowVSC); err != nil {
 			return err
@@ -173,7 +173,7 @@ func ensureShadowVSC(
 	driver string,
 	snapshotHandle string,
 ) error {
-	existing := &snapv1.VolumeSnapshotContent{}
+	existing := new(snapv1.VolumeSnapshotContent)
 
 	err := c.Get(ctx, types.NamespacedName{Name: name}, existing)
 	if err == nil {
@@ -217,7 +217,7 @@ func ensureShadowVS(
 	name string,
 	meta ShadowMeta,
 ) (*snapv1.VolumeSnapshot, error) {
-	existing := &snapv1.VolumeSnapshot{}
+	existing := new(snapv1.VolumeSnapshot)
 
 	err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, existing)
 	if err == nil {

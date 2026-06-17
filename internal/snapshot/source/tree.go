@@ -91,7 +91,7 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 		return nil, fmt.Errorf("%s %s/%s: status.boundSnapshotContentName is empty (not yet bound)", apiVersion, kind, name)
 	}
 
-	content := &snapshotapi.SnapshotContent{}
+	content := new(snapshotapi.SnapshotContent)
 	if err := b.client.Get(ctx, types.NamespacedName{Name: boundContentName}, content); err != nil {
 		return nil, fmt.Errorf("fetch SnapshotContent %q for %s %s/%s: %w", boundContentName, apiVersion, kind, name, err)
 	}
@@ -141,7 +141,7 @@ func fetchUnstructured(ctx context.Context, c client.Client, namespace, apiVersi
 		return nil, fmt.Errorf("parse apiVersion %q: %w", apiVersion, err)
 	}
 
-	obj := &unstructured.Unstructured{}
+	obj := new(unstructured.Unstructured)
 	obj.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   gv.Group,
 		Version: gv.Version,

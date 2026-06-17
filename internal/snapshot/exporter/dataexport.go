@@ -57,7 +57,7 @@ func EnsureDataExport(
 ) (*deapi.DataExport, error) {
 	deName := DataExportName(shadowVSName)
 
-	existing := &deapi.DataExport{}
+	existing := new(deapi.DataExport)
 
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, existing)
 	if err == nil {
@@ -91,7 +91,7 @@ func EnsureDataExport(
 	}
 
 	// Re-fetch so the returned object carries the server-assigned resource version.
-	fetched := &deapi.DataExport{}
+	fetched := new(deapi.DataExport)
 
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, fetched); err != nil {
 		return nil, fmt.Errorf("get DataExport %q after create: %w", deName, err)
@@ -114,7 +114,7 @@ func WaitReady(
 	deName string,
 ) (*deapi.DataExport, error) {
 	for {
-		de := &deapi.DataExport{}
+		de := new(deapi.DataExport)
 
 		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, de); err != nil {
 			return nil, fmt.Errorf("get DataExport %q: %w", deName, err)
@@ -149,7 +149,7 @@ func WaitReady(
 // ReleaseDataExport deletes the DataExport named deName in namespace.
 // NotFound is treated as success so the call is idempotent.
 func ReleaseDataExport(ctx context.Context, c client.Client, namespace, deName string) error {
-	de := &deapi.DataExport{}
+	de := new(deapi.DataExport)
 
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, de)
 	if kubeerrors.IsNotFound(err) {
