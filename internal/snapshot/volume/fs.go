@@ -78,20 +78,12 @@ func DownloadFilesystemVolume(
 
 	// Download jobs in parallel with bounded concurrency.
 	g, gctx := errgroup.WithContext(ctx)
-	sem := make(chan struct{}, workers)
+	g.SetLimit(workers)
 
 	for _, job := range jobs {
 		j := job
 
 		g.Go(func() error {
-			select {
-			case sem <- struct{}{}:
-			case <-gctx.Done():
-				return gctx.Err()
-			}
-
-			defer func() { <-sem }()
-
 			return downloadFSFile(gctx, log, dataDir, j, fetcher, enc)
 		})
 	}

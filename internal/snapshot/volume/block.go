@@ -82,20 +82,12 @@ func DownloadBlockChunks(
 		slog.Int("workers", workers))
 
 	g, gctx := errgroup.WithContext(ctx)
-	sem := make(chan struct{}, workers)
+	g.SetLimit(workers)
 
 	for i := range numChunks {
 		chunkIdx := i
 
 		g.Go(func() error {
-			select {
-			case sem <- struct{}{}:
-			case <-gctx.Done():
-				return gctx.Err()
-			}
-
-			defer func() { <-sem }()
-
 			return downloadChunk(gctx, log, chunkDir, blockURL, chunkIdx, chunkSize, totalSize, fetcher, enc)
 		})
 	}
