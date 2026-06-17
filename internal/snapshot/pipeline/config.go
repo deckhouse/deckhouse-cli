@@ -51,14 +51,22 @@ type Config struct {
 	OutputDir string
 
 	// Workers is the maximum number of nodes processed concurrently (default: 4).
+	// For block volumes each worker holds up to PerVolumeConcurrency chunks in
+	// memory simultaneously; worst-case RSS ≈ Workers × PerVolumeConcurrency ×
+	// (ChunkSize + compressed frame overhead).  With defaults 4×4×256 MiB this
+	// is roughly 4–5 GiB.  Reduce Workers or ChunkSize on memory-constrained hosts.
 	Workers int
 
 	// PerVolumeConcurrency is the maximum number of parallel chunk or file
 	// downloads per volume (default: 4).
+	// Multiplied with Workers and ChunkSize it determines the worst-case RSS;
+	// see Workers for the peak formula.
 	PerVolumeConcurrency int
 
 	// ChunkSize is the raw-byte size for block-volume chunks.
-	// Defaults to volume.DefaultChunkSize when zero.
+	// Defaults to volume.DefaultChunkSize (256 MiB) when zero.
+	// Each in-flight block chunk is buffered fully in memory (raw bytes read
+	// via io.ReadAll plus the encoded zstd frame); see Workers for the peak formula.
 	ChunkSize int64
 
 	// TTL is the DataExport TTL string (e.g. "2h").  Defaults to "2h".
