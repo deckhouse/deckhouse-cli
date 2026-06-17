@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"testing"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
 
@@ -109,8 +110,9 @@ func TestNewCommand_Defaults(t *testing.T) {
 	log := slog.Default()
 	cmd := NewCommand(ctx, log)
 
-	if cmd.Use != cmdUse+" <namespace> <snapshot>" {
-		t.Fatalf("unexpected Use: %q", cmd.Use)
+	wantUse := cmdUse + " [flags] <snapshot>"
+	if cmd.Use != wantUse {
+		t.Fatalf("unexpected Use: got %q, want %q", cmd.Use, wantUse)
 	}
 
 	if !cmd.SilenceUsage {
@@ -159,20 +161,42 @@ func TestNewCommand_Defaults(t *testing.T) {
 	}
 }
 
-func TestNewCommand_RequiresTwoArgs(t *testing.T) {
+func TestNewCommand_NamespaceFlagDefault(t *testing.T) {
 	t.Helper()
 
 	ctx := context.Background()
 	log := slog.Default()
 	cmd := NewCommand(ctx, log)
 
-	err := cmd.Args(cmd, []string{"only-one"})
-	if err == nil {
-		t.Fatal("expected error with one positional arg, got nil")
+	ns, err := cmd.Flags().GetString(flagNamespace)
+	if err != nil {
+		t.Fatalf("getting namespace flag: %v", err)
 	}
 
-	err = cmd.Args(cmd, []string{"ns", "snap"})
-	if err != nil {
-		t.Fatalf("expected no error with two positional args, got: %v", err)
+	if ns != dataio.Namespace {
+		t.Fatalf("default namespace: got %q, want %q", ns, dataio.Namespace)
+	}
+}
+
+func TestNewCommand_RequiresOneArg(t *testing.T) {
+	t.Helper()
+
+	ctx := context.Background()
+	log := slog.Default()
+	cmd := NewCommand(ctx, log)
+
+	// Zero args: must error.
+	if err := cmd.Args(cmd, []string{}); err == nil {
+		t.Fatal("expected error with zero positional args, got nil")
+	}
+
+	// One arg (snapshot name only): must succeed.
+	if err := cmd.Args(cmd, []string{"my-snap"}); err != nil {
+		t.Fatalf("expected no error with one positional arg, got: %v", err)
+	}
+
+	// Two args: must error (namespace is now a flag, not a positional arg).
+	if err := cmd.Args(cmd, []string{"ns", "snap"}); err == nil {
+		t.Fatal("expected error with two positional args, got nil")
 	}
 }

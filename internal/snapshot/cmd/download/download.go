@@ -27,6 +27,7 @@ import (
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/spf13/cobra"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
@@ -37,6 +38,7 @@ import (
 const (
 	cmdUse = "download"
 
+	flagNamespace            = "namespace"
 	flagOutput               = "output"
 	flagTTL                  = "ttl"
 	flagWorkers              = "workers"
@@ -47,21 +49,22 @@ const (
 // NewCommand builds the `d8 snapshot download` cobra command.
 func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:           cmdUse + " <namespace> <snapshot>",
+		Use:           cmdUse + " [flags] <snapshot>",
 		Short:         "Download a snapshot to a local directory tree",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Example: `  # Download snapshot "my-snap" from namespace "default" into directory ./out
-  d8 snapshot download default my-snap -o out
+  d8 snapshot download my-snap -n default -o out
 
   # Download with faster compression and more concurrent workers
-  d8 snapshot download default my-snap -o out --workers 8 --per-volume-concurrency 8`,
-		Args: cobra.ExactArgs(2),
+  d8 snapshot download my-snap -n default -o out --workers 8 --per-volume-concurrency 8`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(ctx, log, cmd, args)
 		},
 	}
 
+	cmd.Flags().StringP(flagNamespace, "n", dataio.Namespace, "snapshot namespace")
 	cmd.Flags().StringP(flagOutput, "o", "", "root output directory (required)")
 	cmd.Flags().String(flagTTL, "2h", "DataExport TTL (e.g. 2h, 30m)")
 	cmd.Flags().Int(flagWorkers, 4, "maximum number of nodes downloaded concurrently")
@@ -73,8 +76,12 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 
 // Run validates flags, builds the pipeline config, and executes the download.
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
-	namespace := args[0]
-	snapshotName := args[1]
+	namespace, err := cmd.Flags().GetString(flagNamespace)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagNamespace, err)
+	}
+
+	snapshotName := args[0]
 
 	outputDir, err := cmd.Flags().GetString(flagOutput)
 	if err != nil {
