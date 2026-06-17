@@ -43,6 +43,11 @@ type Node struct {
 	// For the root it is the user-supplied namespace; children inherit it.
 	Namespace string
 
+	// SourceRef is the value of the state-snapshotter.deckhouse.io/source-ref
+	// annotation on the snapshot CR. It records the identity of the original
+	// captured object. Empty when the annotation is absent (typically the root).
+	SourceRef string
+
 	// ManifestCheckpointName is the cluster-scoped ManifestCheckpoint name for
 	// this node's own-scope manifests. Empty if no manifest capture ran.
 	ManifestCheckpointName string

@@ -353,6 +353,77 @@ func TestBuildTree_UnboundNode(t *testing.T) {
 	}
 }
 
+// makeUnstructuredSnapWithSourceRef builds an unstructured snapshot object that carries
+// the state-snapshotter.deckhouse.io/source-ref annotation.
+func makeUnstructuredSnapWithSourceRef(apiVersion, kind, namespace, name, contentName, sourceRef string) *unstructured.Unstructured {
+	obj := makeUnstructuredSnap(apiVersion, kind, namespace, name, contentName, nil)
+	obj.SetAnnotations(map[string]string{
+		snapshotapi.AnnotationSourceRef: sourceRef,
+	})
+
+	return obj
+}
+
+// TestBuildTree_SourceRefAnnotation verifies that the source-ref annotation is captured
+// when present and that its absence results in an empty SourceRef (no error).
+func TestBuildTree_SourceRefAnnotation(t *testing.T) {
+	t.Helper()
+
+	scheme := makeScheme(t)
+
+	root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
+		{APIVersion: demoAPI, Kind: "DemoVirtualDiskSnapshot", Name: "disk-with-ref"},
+		{APIVersion: demoAPI, Kind: "DemoVirtualDiskSnapshot", Name: "disk-without-ref"},
+	})
+	scRoot := makeContent("sc-root", "mcp-root", nil)
+
+	diskWithRef := makeUnstructuredSnapWithSourceRef(demoAPI, "DemoVirtualDiskSnapshot", testNS, "disk-with-ref", "sc-disk-ref", "pvc/some-pvc")
+	scDiskRef := makeContent("sc-disk-ref", "mcp-disk-ref", nil)
+
+	diskWithoutRef := makeUnstructuredSnap(demoAPI, "DemoVirtualDiskSnapshot", testNS, "disk-without-ref", "sc-disk-noref", nil)
+	scDiskNoRef := makeContent("sc-disk-noref", "mcp-disk-noref", nil)
+
+	c := buildFakeClient(scheme,
+		[]client.Object{root, scRoot, scDiskRef, scDiskNoRef},
+		[]*unstructured.Unstructured{diskWithRef, diskWithoutRef},
+	)
+
+	tree, err := BuildTree(context.Background(), c, testNS, "root")
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+
+	if tree.SourceRef != "" {
+		t.Errorf("root SourceRef: got %q, want empty", tree.SourceRef)
+	}
+
+	if len(tree.Children) != 2 {
+		t.Fatalf("children: %d, want 2", len(tree.Children))
+	}
+
+	var withRef, withoutRef *Node
+
+	for _, ch := range tree.Children {
+		if ch.Name == "disk-with-ref" {
+			withRef = ch
+		} else {
+			withoutRef = ch
+		}
+	}
+
+	if withRef == nil || withoutRef == nil {
+		t.Fatal("could not find expected children")
+	}
+
+	if withRef.SourceRef != "pvc/some-pvc" {
+		t.Errorf("disk-with-ref SourceRef: got %q, want %q", withRef.SourceRef, "pvc/some-pvc")
+	}
+
+	if withoutRef.SourceRef != "" {
+		t.Errorf("disk-without-ref SourceRef: got %q, want empty", withoutRef.SourceRef)
+	}
+}
+
 // TestBuildTree_ChildNamespace verifies that children are fetched in the root namespace.
 func TestBuildTree_ChildNamespace(t *testing.T) {
 	t.Helper()
