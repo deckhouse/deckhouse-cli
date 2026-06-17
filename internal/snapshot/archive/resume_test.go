@@ -84,9 +84,6 @@ func TestScanNode_NoPrimaryDir(t *testing.T) {
 		t.Errorf("TargetDir = %q, want %q", plan.TargetDir, want)
 	}
 
-	if len(plan.PresentChunkIndices) != 0 {
-		t.Errorf("PresentChunkIndices should be empty, got %v", plan.PresentChunkIndices)
-	}
 }
 
 func TestScanNode_CompleteNodeIdentityMatch(t *testing.T) {
@@ -209,10 +206,8 @@ func TestScanNode_BlockPartialWithTmp(t *testing.T) {
 		t.Error("stale .tmp file should have been removed")
 	}
 
-	// present chunks: indices 0 and 2 (sorted)
-	if len(plan.PresentChunkIndices) != 2 || plan.PresentChunkIndices[0] != 0 || plan.PresentChunkIndices[1] != 2 {
-		t.Errorf("PresentChunkIndices = %v, want [0 2]", plan.PresentChunkIndices)
-	}
+	// block worker re-derives present chunks by os.Stat in downloadChunk; no
+	// PresentChunkIndices field on NodeResumePlan.
 }
 
 func TestScanNode_FSPartial(t *testing.T) {

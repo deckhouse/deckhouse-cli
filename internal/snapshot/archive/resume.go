@@ -21,9 +21,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -75,15 +72,7 @@ type NodeResumePlan struct {
 
 	// State describes the on-disk condition found during scanning.
 	State NodeState
-
-	// PresentChunkIndices lists the zero-based indices for which chunk_NNNNN.zst
-	// already exists inside BlockChunksDirName.  Populated only when State is
-	// NodeStateBlockPartial; nil otherwise.
-	PresentChunkIndices []int
 }
-
-// chunkNameRe matches "chunk_NNNNN.zst" and captures the five-digit decimal index.
-var chunkNameRe = regexp.MustCompile(`^chunk_(\d{5})\.zst$`)
 
 // ScanNode inspects parentDir for an existing node directory whose name is
 // NodeDirName(id.Kind, id.Name), removes any stale *.tmp files, and returns a
@@ -144,16 +133,7 @@ func classifyPartialDir(primaryDir string) (NodeResumePlan, error) {
 	chunkDir := filepath.Join(primaryDir, BlockChunksDirName)
 
 	if _, err := os.Stat(chunkDir); err == nil {
-		indices, err := presentChunkIndices(chunkDir)
-		if err != nil {
-			return NodeResumePlan{}, err
-		}
-
-		return NodeResumePlan{
-			TargetDir:           primaryDir,
-			State:               NodeStateBlockPartial,
-			PresentChunkIndices: indices,
-		}, nil
+		return NodeResumePlan{TargetDir: primaryDir, State: NodeStateBlockPartial}, nil
 	}
 
 	dataDir := filepath.Join(primaryDir, DataDirName)
@@ -172,39 +152,6 @@ func matchesIdentity(sy SnapshotYAML, id NodeIdentity) bool {
 		sy.Name == id.Name &&
 		sy.Namespace == id.Namespace &&
 		sy.SourceRef == id.SourceRef
-}
-
-// presentChunkIndices scans chunkDir for files named chunk_NNNNN.zst and
-// returns the sorted list of their zero-based indices.
-func presentChunkIndices(chunkDir string) ([]int, error) {
-	entries, err := os.ReadDir(chunkDir)
-	if err != nil {
-		return nil, fmt.Errorf("read chunk dir %s: %w", chunkDir, err)
-	}
-
-	indices := make([]int, 0, len(entries))
-
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-
-		m := chunkNameRe.FindStringSubmatch(e.Name())
-		if m == nil {
-			continue
-		}
-
-		idx, parseErr := strconv.Atoi(m[1])
-		if parseErr != nil {
-			continue
-		}
-
-		indices = append(indices, idx)
-	}
-
-	sort.Ints(indices)
-
-	return indices, nil
 }
 
 // ErrIdentityMismatch is returned by ScanAbsolute when the target directory
