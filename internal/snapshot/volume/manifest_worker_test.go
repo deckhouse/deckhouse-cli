@@ -483,6 +483,165 @@ func TestWriteVolumeManifest_ErrorWhenPVCMissing(t *testing.T) {
 	}
 }
 
+func TestFinalizeNode_VolumeNodeWritesVolumeBlock(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	// One manifest so the checksum is non-trivial.
+	if err := archive.WriteManifest(nodeDir, makeObjWithUID("v1", "PersistentVolumeClaim", "my-pvc", "uid-abc")); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	binding := &snapshotapi.SnapshotDataBinding{
+		TargetUID: "uid-abc",
+		Target: snapshotapi.SnapshotSubjectRef{
+			APIVersion: "v1",
+			Kind:       "PersistentVolumeClaim",
+			Name:       "my-pvc",
+			Namespace:  "ns",
+			UID:        "uid-abc",
+		},
+		Artifact: snapshotapi.SnapshotDataArtifactRef{
+			APIVersion: "snapshot.storage.k8s.io/v1",
+			Kind:       "VolumeSnapshotContent",
+			Name:       "vsc-xyz",
+		},
+	}
+
+	node := &source.Node{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "d8-ss-aabbccdd",
+		Namespace:  "ns",
+		SourceRef:  "uid-abc",
+		Binding:    binding,
+	}
+
+	if err := volume.FinalizeNode(nodeDir, node); err != nil {
+		t.Fatalf("FinalizeNode: %v", err)
+	}
+
+	sy, err := archive.ReadSnapshotYAML(nodeDir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if sy.Volume == nil {
+		t.Fatal("Volume block must be present for a volume node")
+	}
+
+	if sy.Volume.Target.Name != "my-pvc" {
+		t.Errorf("Volume.Target.Name: got %q, want %q", sy.Volume.Target.Name, "my-pvc")
+	}
+
+	if sy.Volume.Target.UID != "uid-abc" {
+		t.Errorf("Volume.Target.UID: got %q, want %q", sy.Volume.Target.UID, "uid-abc")
+	}
+
+	if sy.Volume.Artifact.Name != "vsc-xyz" {
+		t.Errorf("Volume.Artifact.Name: got %q, want %q", sy.Volume.Artifact.Name, "vsc-xyz")
+	}
+
+	if sy.Volume.Artifact.Kind != "VolumeSnapshotContent" {
+		t.Errorf("Volume.Artifact.Kind: got %q, want %q", sy.Volume.Artifact.Kind, "VolumeSnapshotContent")
+	}
+
+	// VerifyNode must pass (Volume field does not affect the digest).
+	if err := archive.VerifyNode(nodeDir); err != nil {
+		t.Errorf("VerifyNode must pass for volume node: %v", err)
+	}
+}
+
+func TestFinalizeNode_SnapshotNodeOmitsVolumeBlock(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	if err := archive.WriteManifest(nodeDir, makeObj("v1", "ConfigMap", "cm")); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	node := &source.Node{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-1",
+		Namespace:  "ns",
+	}
+
+	if err := volume.FinalizeNode(nodeDir, node); err != nil {
+		t.Fatalf("FinalizeNode: %v", err)
+	}
+
+	sy, err := archive.ReadSnapshotYAML(nodeDir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if sy.Volume != nil {
+		t.Errorf("Volume block must be nil for a snapshot node, got %+v", sy.Volume)
+	}
+
+	if err := archive.VerifyNode(nodeDir); err != nil {
+		t.Errorf("VerifyNode must pass for snapshot node: %v", err)
+	}
+}
+
+// TestFinalizeNode_VolumeBlockDoesNotAffectVerify is a regression test asserting that
+// adding the volume block to snapshot.yaml does not invalidate the node checksum.
+func TestFinalizeNode_VolumeBlockDoesNotAffectVerify(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	if err := archive.WriteManifest(nodeDir, makeObjWithUID("v1", "PersistentVolumeClaim", "pvc", "uid-1")); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	binding := &snapshotapi.SnapshotDataBinding{
+		TargetUID: "uid-1",
+		Target: snapshotapi.SnapshotSubjectRef{
+			APIVersion: "v1",
+			Kind:       "PersistentVolumeClaim",
+			Name:       "pvc",
+			Namespace:  "ns",
+			UID:        "uid-1",
+		},
+		Artifact: snapshotapi.SnapshotDataArtifactRef{
+			APIVersion: "snapshot.storage.k8s.io/v1",
+			Kind:       "VolumeSnapshotContent",
+			Name:       "vsc-1",
+		},
+	}
+
+	node := &source.Node{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "d8-ss-reg-test",
+		Namespace:  "ns",
+		Binding:    binding,
+	}
+
+	// First finalize — writes Volume block.
+	if err := volume.FinalizeNode(nodeDir, node); err != nil {
+		t.Fatalf("FinalizeNode: %v", err)
+	}
+
+	// VerifyNode must pass without any changes to the content files.
+	if err := archive.VerifyNode(nodeDir); err != nil {
+		t.Errorf("VerifyNode regression: Volume block must not affect checksum: %v", err)
+	}
+
+	// Second finalize is idempotent.
+	if err := volume.FinalizeNode(nodeDir, node); err != nil {
+		t.Fatalf("second FinalizeNode: %v", err)
+	}
+
+	if err := archive.VerifyNode(nodeDir); err != nil {
+		t.Errorf("VerifyNode after second FinalizeNode: %v", err)
+	}
+}
+
 func TestWriteVolumeManifest_EmptyCheckpointName(t *testing.T) {
 	t.Parallel()
 
