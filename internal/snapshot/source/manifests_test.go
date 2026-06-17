@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -33,7 +34,8 @@ import (
 )
 
 // encodeChunk gzip-compresses and base64-encodes a JSON array of objects,
-// returning the encoded data and the base64(sha256(compressed)) checksum.
+// returning the encoded data and the hex(sha256(compressed)) checksum.
+// Hex is the format emitted by production state-snapshotter controllers.
 func encodeChunk(t *testing.T, objs []map[string]interface{}) (data, checksum string) {
 	t.Helper()
 
@@ -58,7 +60,7 @@ func encodeChunk(t *testing.T, objs []map[string]interface{}) (data, checksum st
 	sum := sha256.Sum256(compressed)
 
 	return base64.StdEncoding.EncodeToString(compressed),
-		base64.StdEncoding.EncodeToString(sum[:])
+		hex.EncodeToString(sum[:])
 }
 
 // makeManifestCheckpoint builds a ManifestCheckpoint CR for the fake client.
@@ -281,6 +283,92 @@ func TestFetchNodeManifests_CorruptGzip(t *testing.T) {
 	_, err := src.FetchNodeManifests(context.Background(), "mcp-corrupt")
 	if err == nil {
 		t.Fatal("expected error on corrupt gzip, got nil")
+	}
+}
+
+// TestVerifyChecksum covers the four cases: hex (primary), base64 (compat),
+// genuine byte-level corruption, and an undecodable expected string.
+func TestVerifyChecksum(t *testing.T) {
+	t.Helper()
+
+	// Build a small payload whose sha256 we can compute precisely.
+	payload := []byte("test payload for checksum verification")
+	sum := sha256.Sum256(payload)
+
+	hexExpected := hex.EncodeToString(sum[:])
+	b64Expected := base64.StdEncoding.EncodeToString(sum[:])
+
+	// Corrupt payload: flip the first byte.
+	corruptPayload := make([]byte, len(payload))
+	copy(corruptPayload, payload)
+	corruptPayload[0] ^= 0xFF
+
+	cases := []struct {
+		name         string
+		data         []byte
+		expected     string
+		wantErr      bool
+		wantMismatch bool
+	}{
+		{
+			name:     "hex expected (primary cluster format)",
+			data:     payload,
+			expected: hexExpected,
+			wantErr:  false,
+		},
+		{
+			name:     "base64 expected (compat path)",
+			data:     payload,
+			expected: b64Expected,
+			wantErr:  false,
+		},
+		{
+			name:         "genuine corruption detected via hex expected",
+			data:         corruptPayload,
+			expected:     hexExpected,
+			wantErr:      true,
+			wantMismatch: true,
+		},
+		{
+			name:         "genuine corruption detected via base64 expected",
+			data:         corruptPayload,
+			expected:     b64Expected,
+			wantErr:      true,
+			wantMismatch: true,
+		},
+		{
+			name:         "undecodable expected string",
+			data:         payload,
+			expected:     "not-hex-not-base64!!!",
+			wantErr:      true,
+			wantMismatch: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyChecksum(tc.data, tc.expected)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+
+				if tc.wantMismatch && !errors.Is(err, ErrChecksumMismatch) {
+					t.Errorf("expected ErrChecksumMismatch, got: %v", err)
+				}
+
+				if !tc.wantMismatch && errors.Is(err, ErrChecksumMismatch) {
+					t.Errorf("did not expect ErrChecksumMismatch, but got it: %v", err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 
