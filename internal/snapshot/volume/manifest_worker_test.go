@@ -24,7 +24,9 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 
+	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
@@ -285,5 +287,232 @@ func TestWriteNodeManifests_FetchError(t *testing.T) {
 
 	if !errors.Is(err, want) {
 		t.Errorf("expected wrapped backend error, got: %v", err)
+	}
+}
+
+// makeObjWithUID builds a minimal unstructured object with a UID.
+func makeObjWithUID(apiVersion, kind, name string, uid types.UID) unstructured.Unstructured {
+	obj := makeObj(apiVersion, kind, name)
+	obj.SetUID(uid)
+
+	return obj
+}
+
+func TestWriteNodeManifests_ExcludesDataRefPVCs(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	// The checkpoint has two PVCs (both DataRef targets) and one ConfigMap.
+	objs := []unstructured.Unstructured{
+		makeObjWithUID("v1", "PersistentVolumeClaim", "pvc-disk", "uid-disk"),
+		makeObjWithUID("v1", "PersistentVolumeClaim", "pvc-extra", "uid-extra"),
+		makeObj("v1", "ConfigMap", "owner-cm"),
+	}
+
+	node := &source.Node{
+		APIVersion:             "storage.deckhouse.io/v1alpha1",
+		Kind:                   "Snapshot",
+		Name:                   "snap-ex",
+		ManifestCheckpointName: "mc-ex",
+		DataRefs: []snapshotapi.SnapshotDataBinding{
+			{TargetUID: "uid-disk", Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-disk"}},
+			{TargetUID: "uid-extra", Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-extra"}},
+		},
+	}
+
+	src := &stubManifestSource{objs: objs}
+
+	if err := volume.WriteNodeManifests(context.Background(), src, nodeDir, node); err != nil {
+		t.Fatalf("WriteNodeManifests: %v", err)
+	}
+
+	manifestsDir := filepath.Join(nodeDir, archive.ManifestsDirName)
+
+	// Only the ConfigMap must be written; the two DataRef PVCs must be excluded.
+	cmPath := filepath.Join(manifestsDir, "configmap_owner-cm.yaml")
+	if _, err := os.Stat(cmPath); err != nil {
+		t.Errorf("expected configmap_owner-cm.yaml: %v", err)
+	}
+
+	for _, name := range []string{"persistentvolumeclaim_pvc-disk.yaml", "persistentvolumeclaim_pvc-extra.yaml"} {
+		path := filepath.Join(manifestsDir, name)
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("DataRef PVC %s must not be written; err=%v", name, err)
+		}
+	}
+}
+
+func TestWriteNodeManifests_ExcludesByNameFallback(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	// PVC object has no UID in the captured manifest (uid field absent / empty).
+	pvcNoUID := makeObj("v1", "PersistentVolumeClaim", "pvc-nouid")
+
+	objs := []unstructured.Unstructured{
+		pvcNoUID,
+		makeObj("v1", "ConfigMap", "cm-keep"),
+	}
+
+	node := &source.Node{
+		ManifestCheckpointName: "mc-fallback",
+		DataRefs: []snapshotapi.SnapshotDataBinding{
+			{TargetUID: "", Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-nouid"}},
+		},
+	}
+
+	src := &stubManifestSource{objs: objs}
+
+	if err := volume.WriteNodeManifests(context.Background(), src, nodeDir, node); err != nil {
+		t.Fatalf("WriteNodeManifests: %v", err)
+	}
+
+	manifestsDir := filepath.Join(nodeDir, archive.ManifestsDirName)
+
+	if _, err := os.Stat(filepath.Join(manifestsDir, "configmap_cm-keep.yaml")); err != nil {
+		t.Errorf("configmap_cm-keep.yaml must be written: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(manifestsDir, "persistentvolumeclaim_pvc-nouid.yaml")); !os.IsNotExist(err) {
+		t.Errorf("DataRef PVC with no UID must still be excluded by name fallback; err=%v", err)
+	}
+}
+
+func TestWriteVolumeManifest_WritesMatchingPVC(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	pvc := makeObjWithUID("v1", "PersistentVolumeClaim", "pvc-target", "uid-target")
+	objs := []unstructured.Unstructured{
+		makeObj("v1", "ConfigMap", "other-cm"),
+		pvc,
+	}
+
+	binding := snapshotapi.SnapshotDataBinding{
+		TargetUID: "uid-target",
+		Target:    snapshotapi.SnapshotSubjectRef{Name: "pvc-target"},
+		Artifact:  snapshotapi.SnapshotDataArtifactRef{Name: "vsc-1"},
+	}
+
+	volNode := &source.Node{
+		APIVersion:             "snapshot.storage.k8s.io/v1",
+		Kind:                   "VolumeSnapshot",
+		Name:                   "d8-ss-aabbccdd",
+		ManifestCheckpointName: "mc-parent",
+		Binding:                &binding,
+	}
+
+	src := &stubManifestSource{objs: objs}
+
+	if err := volume.WriteVolumeManifest(context.Background(), src, nodeDir, volNode); err != nil {
+		t.Fatalf("WriteVolumeManifest: %v", err)
+	}
+
+	manifestsDir := filepath.Join(nodeDir, archive.ManifestsDirName)
+
+	// Only the matching PVC must be written.
+	pvcPath := filepath.Join(manifestsDir, "persistentvolumeclaim_pvc-target.yaml")
+	if _, err := os.Stat(pvcPath); err != nil {
+		t.Errorf("expected persistentvolumeclaim_pvc-target.yaml: %v", err)
+	}
+
+	// The ConfigMap must NOT be written.
+	cmPath := filepath.Join(manifestsDir, "configmap_other-cm.yaml")
+	if _, err := os.Stat(cmPath); !os.IsNotExist(err) {
+		t.Errorf("ConfigMap must not be written by WriteVolumeManifest; err=%v", err)
+	}
+}
+
+func TestWriteVolumeManifest_MatchByNameFallback(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	// PVC in checkpoint has no UID; binding has no TargetUID either.
+	pvcNoUID := makeObj("v1", "PersistentVolumeClaim", "pvc-byname")
+	objs := []unstructured.Unstructured{pvcNoUID}
+
+	binding := snapshotapi.SnapshotDataBinding{
+		TargetUID: "",
+		Target:    snapshotapi.SnapshotSubjectRef{Name: "pvc-byname"},
+	}
+
+	volNode := &source.Node{
+		ManifestCheckpointName: "mc-byname",
+		Binding:                &binding,
+	}
+
+	src := &stubManifestSource{objs: objs}
+
+	if err := volume.WriteVolumeManifest(context.Background(), src, nodeDir, volNode); err != nil {
+		t.Fatalf("WriteVolumeManifest by name: %v", err)
+	}
+
+	pvcPath := filepath.Join(nodeDir, archive.ManifestsDirName, "persistentvolumeclaim_pvc-byname.yaml")
+	if _, err := os.Stat(pvcPath); err != nil {
+		t.Errorf("expected persistentvolumeclaim_pvc-byname.yaml: %v", err)
+	}
+}
+
+func TestWriteVolumeManifest_ErrorWhenPVCMissing(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	// Checkpoint has only a ConfigMap, not the target PVC.
+	objs := []unstructured.Unstructured{makeObj("v1", "ConfigMap", "stray-cm")}
+
+	binding := snapshotapi.SnapshotDataBinding{
+		TargetUID: "uid-missing",
+		Target:    snapshotapi.SnapshotSubjectRef{Name: "pvc-missing"},
+	}
+
+	volNode := &source.Node{
+		ManifestCheckpointName: "mc-missing",
+		Binding:                &binding,
+	}
+
+	src := &stubManifestSource{objs: objs}
+
+	err := volume.WriteVolumeManifest(context.Background(), src, nodeDir, volNode)
+	if err == nil {
+		t.Fatal("expected error when target PVC is absent from checkpoint, got nil")
+	}
+}
+
+func TestWriteVolumeManifest_EmptyCheckpointName(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	// Even though the source has objects, an empty checkpoint name is a no-op.
+	objs := []unstructured.Unstructured{makeObj("v1", "PersistentVolumeClaim", "pvc-1")}
+
+	binding := snapshotapi.SnapshotDataBinding{
+		TargetUID: "uid-1",
+		Target:    snapshotapi.SnapshotSubjectRef{Name: "pvc-1"},
+	}
+
+	volNode := &source.Node{
+		ManifestCheckpointName: "",
+		Binding:                &binding,
+	}
+
+	src := &stubManifestSource{objs: objs}
+
+	if err := volume.WriteVolumeManifest(context.Background(), src, nodeDir, volNode); err != nil {
+		t.Fatalf("WriteVolumeManifest with empty checkpoint: %v", err)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(nodeDir, archive.ManifestsDirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(entries) != 0 {
+		t.Errorf("expected no files written for empty checkpoint, got %d", len(entries))
 	}
 }
