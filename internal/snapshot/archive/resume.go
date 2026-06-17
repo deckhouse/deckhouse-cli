@@ -207,6 +207,50 @@ func presentChunkIndices(chunkDir string) ([]int, error) {
 	return indices, nil
 }
 
+// ErrIdentityMismatch is returned by ScanAbsolute when the target directory
+// contains a complete snapshot whose stored identity does not match the planned node.
+// The caller must choose a different output path rather than overwriting the data.
+var ErrIdentityMismatch = errors.New("output directory belongs to a different snapshot")
+
+// ScanAbsolute classifies the on-disk state of an absolute node directory path,
+// removing stale *.tmp files.  Unlike ScanNode it does not derive the path from
+// a parent directory + NodeDirName convention, and it does not redirect to a
+// collision-suffixed path on identity mismatch.  Instead it returns ErrIdentityMismatch
+// so the caller can abort and ask the user to choose a different output path.
+//
+// Suitable for the root output directory where the path name is user-controlled.
+func ScanAbsolute(nodeDir string, id NodeIdentity) (NodeResumePlan, error) {
+	_, statErr := os.Stat(nodeDir)
+
+	if errors.Is(statErr, os.ErrNotExist) {
+		return NodeResumePlan{TargetDir: nodeDir, State: NodeStatePending}, nil
+	}
+
+	if statErr != nil {
+		return NodeResumePlan{}, fmt.Errorf("stat %s: %w", nodeDir, statErr)
+	}
+
+	if err := removeTmpFiles(nodeDir); err != nil {
+		return NodeResumePlan{}, err
+	}
+
+	if verifyErr := VerifyNode(nodeDir); verifyErr == nil {
+		sy, err := ReadSnapshotYAML(nodeDir)
+		if err != nil {
+			return NodeResumePlan{}, fmt.Errorf("read snapshot.yaml in %s: %w", nodeDir, err)
+		}
+
+		if !matchesIdentity(sy, id) {
+			return NodeResumePlan{}, fmt.Errorf("%w: %s contains %s/%s, expected %s/%s",
+				ErrIdentityMismatch, nodeDir, sy.Kind, sy.Name, id.Kind, id.Name)
+		}
+
+		return NodeResumePlan{TargetDir: nodeDir, State: NodeStateDone}, nil
+	}
+
+	return classifyPartialDir(nodeDir)
+}
+
 // removeTmpFiles deletes every *.tmp file found anywhere under dir.
 func removeTmpFiles(dir string) error {
 	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
