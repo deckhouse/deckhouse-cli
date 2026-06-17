@@ -48,6 +48,12 @@ const DefaultChunkSize = 256 * 1024 * 1024 // 256 MiB
 // Already-complete chunks (final file exists) are skipped. Stale *.tmp files
 // are cleaned before a chunk is fetched. workers bounds parallelism; the first
 // error cancels all in-flight work.
+//
+// Memory note: each in-flight worker buffers a full raw chunk (io.ReadAll) plus
+// the encoded zstd frame simultaneously.  Worst-case RSS for this call alone is
+// workers × (chunkSize + compressed frame size).  The outer pipeline multiplies
+// this by the number of concurrent nodes (pipeline.Config.Workers); total peak
+// ≈ pipeline.Config.Workers × workers × (chunkSize + frame).
 func DownloadBlockChunks(
 	ctx context.Context,
 	log *slog.Logger,
