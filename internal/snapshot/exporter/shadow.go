@@ -70,17 +70,42 @@ func EnsureShadowPair(
 		return nil, fmt.Errorf("get source VolumeSnapshotContent %q: %w", artifactName, err)
 	}
 
-	if realVSC.Spec.Source.SnapshotHandle == nil {
-		return nil, fmt.Errorf("source VolumeSnapshotContent %q has no snapshotHandle", artifactName)
+	snapshotHandle, err := resolveSnapshotHandle(realVSC)
+	if err != nil {
+		return nil, fmt.Errorf("source VolumeSnapshotContent %q: %w", artifactName, err)
 	}
 
 	pairName := ShadowName(artifactName)
 
-	if err := ensureShadowVSC(ctx, c, pairName, namespace, realVSC.Spec.Driver, *realVSC.Spec.Source.SnapshotHandle); err != nil {
+	if err := ensureShadowVSC(ctx, c, pairName, namespace, realVSC.Spec.Driver, snapshotHandle); err != nil {
 		return nil, err
 	}
 
 	return ensureShadowVS(ctx, c, namespace, pairName)
+}
+
+// resolveSnapshotHandle returns the CSI snapshot identifier for the given
+// VolumeSnapshotContent, trying the authoritative location first.
+//
+// Resolution order:
+//  1. status.snapshotHandle — populated by the CSI snapshotter sidecar for
+//     both dynamically-provisioned and bound pre-provisioned content. This is
+//     the authoritative source once the snapshot is ready.
+//  2. spec.source.snapshotHandle — set only for statically pre-provisioned
+//     content (when the snapshot already exists in the storage backend). Used
+//     as a fallback for VSCs whose status has not been written yet.
+//
+// If neither field is set the snapshot is not yet ready and an error is returned.
+func resolveSnapshotHandle(vsc *snapv1.VolumeSnapshotContent) (string, error) {
+	if vsc.Status != nil && vsc.Status.SnapshotHandle != nil && *vsc.Status.SnapshotHandle != "" {
+		return *vsc.Status.SnapshotHandle, nil
+	}
+
+	if vsc.Spec.Source.SnapshotHandle != nil && *vsc.Spec.Source.SnapshotHandle != "" {
+		return *vsc.Spec.Source.SnapshotHandle, nil
+	}
+
+	return "", fmt.Errorf("no snapshotHandle available (snapshot may not be ready yet)")
 }
 
 func ensureShadowVSC(

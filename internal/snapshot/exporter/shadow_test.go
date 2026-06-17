@@ -47,6 +47,8 @@ func newSnapScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+// makeRealVSC builds a pre-provisioned VolumeSnapshotContent (spec.source.snapshotHandle set).
+// This is the format used when a snapshot already exists in the storage backend.
 func makeRealVSC(name, driver, snapshotHandle string) *snapv1.VolumeSnapshotContent {
 	handle := snapshotHandle
 
@@ -64,6 +66,34 @@ func makeRealVSC(name, driver, snapshotHandle string) *snapv1.VolumeSnapshotCont
 				Name:      "original-vs",
 				Namespace: "original-ns",
 			},
+		},
+	}
+}
+
+// makeDynamicVSC builds a dynamically-provisioned VolumeSnapshotContent.
+// spec.source.volumeHandle holds the source PVC volume id; the CSI snapshotter
+// sidecar populates status.snapshotHandle once the snapshot is ready.
+func makeDynamicVSC(name, driver, volumeHandle, statusSnapshotHandle string) *snapv1.VolumeSnapshotContent {
+	vh := volumeHandle
+	sh := statusSnapshotHandle
+
+	return &snapv1.VolumeSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Spec: snapv1.VolumeSnapshotContentSpec{
+			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
+			Driver:         driver,
+			Source: snapv1.VolumeSnapshotContentSource{
+				VolumeHandle: &vh,
+			},
+			VolumeSnapshotRef: corev1.ObjectReference{
+				Name:      "original-vs",
+				Namespace: "original-ns",
+			},
+		},
+		Status: &snapv1.VolumeSnapshotContentStatus{
+			SnapshotHandle: &sh,
 		},
 	}
 }
@@ -206,6 +236,9 @@ func TestEnsureShadowPair_MissingArtifact(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestEnsureShadowPair_NoSnapshotHandle verifies that a VSC with neither
+// status.snapshotHandle nor spec.source.snapshotHandle yields a clear error
+// mentioning "snapshotHandle".
 func TestEnsureShadowPair_NoSnapshotHandle(t *testing.T) {
 	t.Parallel()
 
@@ -217,7 +250,7 @@ func TestEnsureShadowPair_NoSnapshotHandle(t *testing.T) {
 			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
 			Driver:         "csi.test",
 			Source:         snapv1.VolumeSnapshotContentSource{
-				// SnapshotHandle is nil — dynamically provisioned VSC has VolumeHandle instead.
+				// Neither VolumeHandle nor SnapshotHandle; no Status yet.
 			},
 			VolumeSnapshotRef: corev1.ObjectReference{Name: "vs", Namespace: "ns"},
 		},
@@ -230,6 +263,80 @@ func TestEnsureShadowPair_NoSnapshotHandle(t *testing.T) {
 	_, err := exporter.EnsureShadowPair(ctx, c, "ns", "no-handle-vsc")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "snapshotHandle")
+}
+
+// TestEnsureShadowPair_DynamicVSCUsesStatus verifies that a dynamically-provisioned
+// VSC (spec.source.volumeHandle + status.snapshotHandle) produces a shadow VSC
+// whose snapshotHandle comes from status, not spec.
+func TestEnsureShadowPair_DynamicVSCUsesStatus(t *testing.T) {
+	t.Parallel()
+
+	const (
+		artifactName         = "snapcontent-dynamic"
+		namespace            = "test-ns"
+		driver               = "csi.dynamic.driver"
+		volumeHandle         = "pvc-00000000-0000-0000-0000-000000000001"
+		statusSnapshotHandle = "snap-49913f45-dynamic"
+	)
+
+	scheme := newSnapScheme(t)
+	dynamicVSC := makeDynamicVSC(artifactName, driver, volumeHandle, statusSnapshotHandle)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dynamicVSC).Build()
+
+	ctx := context.Background()
+
+	shadowVS, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName)
+	require.NoError(t, err)
+	require.NotNil(t, shadowVS)
+
+	pairName := exporter.ShadowName(artifactName)
+
+	// Shadow VSC must carry the status.snapshotHandle, not the volumeHandle.
+	var shadowVSC snapv1.VolumeSnapshotContent
+
+	err = c.Get(ctx, types.NamespacedName{Name: pairName}, &shadowVSC)
+	require.NoError(t, err)
+
+	require.NotNil(t, shadowVSC.Spec.Source.SnapshotHandle)
+	assert.Equal(t, statusSnapshotHandle, *shadowVSC.Spec.Source.SnapshotHandle,
+		"shadow VSC must use status.snapshotHandle, not the volumeHandle")
+	assert.Equal(t, driver, shadowVSC.Spec.Driver)
+}
+
+// TestEnsureShadowPair_PreProvisionedFallback verifies that a pre-provisioned VSC
+// (spec.source.snapshotHandle set, no status written yet) still produces a correct
+// shadow pair via the spec fallback path.
+func TestEnsureShadowPair_PreProvisionedFallback(t *testing.T) {
+	t.Parallel()
+
+	const (
+		artifactName   = "snapcontent-preprov"
+		namespace      = "test-ns"
+		driver         = "csi.preprov.driver"
+		snapshotHandle = "snap-preprov-handle"
+	)
+
+	scheme := newSnapScheme(t)
+	// VSC with spec.source.snapshotHandle only, no status.
+	preProvVSC := makeRealVSC(artifactName, driver, snapshotHandle)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(preProvVSC).Build()
+
+	ctx := context.Background()
+
+	shadowVS, err := exporter.EnsureShadowPair(ctx, c, namespace, artifactName)
+	require.NoError(t, err)
+	require.NotNil(t, shadowVS)
+
+	pairName := exporter.ShadowName(artifactName)
+
+	var shadowVSC snapv1.VolumeSnapshotContent
+
+	err = c.Get(ctx, types.NamespacedName{Name: pairName}, &shadowVSC)
+	require.NoError(t, err)
+
+	require.NotNil(t, shadowVSC.Spec.Source.SnapshotHandle)
+	assert.Equal(t, snapshotHandle, *shadowVSC.Spec.Source.SnapshotHandle)
+	assert.Equal(t, driver, shadowVSC.Spec.Driver)
 }
 
 func TestCleanupShadowPair_DeletesObjects(t *testing.T) {
