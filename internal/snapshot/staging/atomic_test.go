@@ -1,0 +1,252 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package staging_test
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/staging"
+)
+
+// errAfterReader returns data bytes then returns errTrigger on the next Read.
+type errAfterReader struct {
+	data []byte
+	pos  int
+	err  error
+}
+
+func (r *errAfterReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, r.err
+	}
+
+	n := copy(p, r.data[r.pos:])
+	r.pos += n
+
+	return n, nil
+}
+
+func TestWriteFileAtomic_success(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.txt")
+	content := []byte("hello atomic world")
+
+	err := staging.WriteFileAtomic(path, bytes.NewReader(content))
+	if err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+
+	// The final file must exist with correct content.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	if !bytes.Equal(got, content) {
+		t.Errorf("content mismatch: got %q; want %q", got, content)
+	}
+
+	// No leftover .tmp on success.
+	_, err = os.Stat(path + ".tmp")
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Error("expected .tmp to be absent after successful WriteFileAtomic")
+	}
+}
+
+func TestWriteFileAtomic_errorLeavesNoFinalFile(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.txt")
+
+	// Reader that delivers some bytes then fails — simulates a mid-write error
+	// before any rename could happen.
+	r := &errAfterReader{
+		data: []byte("partial data"),
+		err:  errors.New("simulated read failure"),
+	}
+
+	err := staging.WriteFileAtomic(path, r)
+	if err == nil {
+		t.Fatal("expected error from WriteFileAtomic, got nil")
+	}
+
+	// Final file must not exist.
+	_, statErr := os.Stat(path)
+	if !errors.Is(statErr, os.ErrNotExist) {
+		t.Error("final file must not exist after a write error")
+	}
+
+	// The .tmp should also be cleaned up by Abort.
+	_, statErr = os.Stat(path + ".tmp")
+	if !errors.Is(statErr, os.ErrNotExist) {
+		t.Error(".tmp should be removed by Abort")
+	}
+}
+
+func TestAtomicWriter_commitProducesCorrectContent(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.bin")
+
+	aw, err := staging.NewAtomicWriter(path)
+	if err != nil {
+		t.Fatalf("NewAtomicWriter: %v", err)
+	}
+
+	chunks := [][]byte{[]byte("chunk1"), []byte("chunk2"), []byte("chunk3")}
+
+	for _, c := range chunks {
+		if _, err := aw.Write(c); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+
+	if err := aw.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	want := []byte("chunk1chunk2chunk3")
+
+	if !bytes.Equal(got, want) {
+		t.Errorf("content mismatch: got %q; want %q", got, want)
+	}
+
+	_, err = os.Stat(path + ".tmp")
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Error(".tmp must be absent after Commit")
+	}
+}
+
+func TestAtomicWriter_abortLeavesNoFinalFile(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "aborted.bin")
+
+	aw, err := staging.NewAtomicWriter(path)
+	if err != nil {
+		t.Fatalf("NewAtomicWriter: %v", err)
+	}
+
+	if _, err := aw.Write([]byte("some data")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	aw.Abort()
+
+	_, err = os.Stat(path)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Error("final file must not exist after Abort")
+	}
+
+	_, err = os.Stat(path + ".tmp")
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Error(".tmp must be absent after Abort")
+	}
+}
+
+func TestWriteFileAtomic_emptyReader(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.txt")
+
+	err := staging.WriteFileAtomic(path, bytes.NewReader(nil))
+	if err != nil {
+		t.Fatalf("WriteFileAtomic empty: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+
+	if info.Size() != 0 {
+		t.Errorf("expected empty file, got size %d", info.Size())
+	}
+}
+
+func TestEnsureDir_createsAndIsDurable(t *testing.T) {
+	t.Helper()
+
+	base := t.TempDir()
+	nested := filepath.Join(base, "a", "b", "c")
+
+	if err := staging.EnsureDir(nested); err != nil {
+		t.Fatalf("EnsureDir: %v", err)
+	}
+
+	info, err := os.Stat(nested)
+	if err != nil {
+		t.Fatalf("Stat after EnsureDir: %v", err)
+	}
+
+	if !info.IsDir() {
+		t.Error("expected a directory")
+	}
+}
+
+func TestEnsureDir_idempotent(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	if err := staging.EnsureDir(dir); err != nil {
+		t.Fatalf("first EnsureDir: %v", err)
+	}
+
+	if err := staging.EnsureDir(dir); err != nil {
+		t.Fatalf("second EnsureDir (idempotent): %v", err)
+	}
+}
+
+func TestWriteFileAtomic_parentDirSynced(t *testing.T) {
+	// Smoke test: WriteFileAtomic into a newly created dir does not error,
+	// confirming that parent-dir fsync succeeds in a temp filesystem.
+	t.Helper()
+
+	base := t.TempDir()
+	sub := filepath.Join(base, "sub")
+
+	if err := staging.EnsureDir(sub); err != nil {
+		t.Fatalf("EnsureDir: %v", err)
+	}
+
+	path := filepath.Join(sub, "file.txt")
+
+	err := staging.WriteFileAtomic(path, bytes.NewReader([]byte("durable")))
+	if err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+}
+
+// Ensure AtomicWriter satisfies io.Writer at compile time.
+var _ io.Writer = (*staging.AtomicWriter)(nil)
