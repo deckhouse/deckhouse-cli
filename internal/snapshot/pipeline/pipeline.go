@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -229,8 +230,14 @@ func downloadVolume(
 		return fmt.Errorf("ensure shadow pair for artifact %s: %w", artifactName, err)
 	}
 
+	// cleanupCtx is deliberately not derived from ctx so that cleanup still runs
+	// when ctx is cancelled (e.g. by errgroup on sibling error or by SIGINT).
+	// A bounded timeout prevents cleanup from hanging forever.
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cleanupCancel()
+
 	defer func() {
-		if cleanErr := exporter.CleanupShadowPair(ctx, cfg.KubeClient, node.Namespace, artifactName); cleanErr != nil {
+		if cleanErr := exporter.CleanupShadowPair(cleanupCtx, cfg.KubeClient, node.Namespace, artifactName); cleanErr != nil {
 			cfg.Log.Warn("failed to cleanup shadow pair",
 				slog.String("artifact", artifactName),
 				slog.String("error", cleanErr.Error()))
@@ -243,7 +250,7 @@ func downloadVolume(
 	}
 
 	defer func() {
-		if relErr := exp.Release(ctx, cfg.KubeClient); relErr != nil {
+		if relErr := exp.Release(cleanupCtx, cfg.KubeClient); relErr != nil {
 			cfg.Log.Warn("failed to release DataExport",
 				slog.String("shadow_vs", shadowVS.Name),
 				slog.String("error", relErr.Error()))

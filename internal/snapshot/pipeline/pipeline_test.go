@@ -30,11 +30,14 @@ import (
 	"time"
 
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -119,6 +122,46 @@ func TestPipeline_HappyPath(t *testing.T) {
 
 	require.Equal(t, rootMod, statMtime(t, rootYAML), "root snapshot.yaml must not be rewritten on second run")
 	require.Equal(t, childMod, statMtime(t, childYAML), "child snapshot.yaml must not be rewritten on second run")
+}
+
+// TestPipeline_CleanupAfterError verifies that shadow VS/VSC are deleted even when
+// the parent context is cancelled (e.g. by errgroup on sibling error or SIGINT).
+// The deferred cleanup must use a non-cancellable context so it runs after ctx.Done().
+func TestPipeline_CleanupAfterError(t *testing.T) {
+	t.Parallel()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	// OpenExport always fails, simulating a cluster-level download error.
+	// The errgroup cancels the shared gctx when this error propagates;
+	// cleanup defers must still delete shadow objects despite the cancelled ctx.
+	cfg := pipeline.Config{
+		Namespace:    testNS,
+		RootSnapshot: rootSnapshot,
+		OutputDir:    outputDir,
+		Workers:      1,
+		KubeClient:   c,
+		OpenExport: func(_ context.Context, _, _, _ string) (*exporter.Export, error) {
+			return nil, errors.New("simulated DataExport creation failure")
+		},
+	}
+
+	err := pipeline.Run(context.Background(), cfg)
+	require.Error(t, err, "expected pipeline to fail when OpenExport errors")
+
+	// Shadow VS and VSC must have been cleaned up despite the failed run.
+	pairName := exporter.ShadowName(diskVSCName)
+
+	var shadowVS snapv1.VolumeSnapshot
+	vsErr := c.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: pairName}, &shadowVS)
+	assert.True(t, kubeerrors.IsNotFound(vsErr),
+		"shadow VS must be deleted after error cleanup; got err=%v", vsErr)
+
+	var shadowVSC snapv1.VolumeSnapshotContent
+	vscErr := c.Get(context.Background(), types.NamespacedName{Name: pairName}, &shadowVSC)
+	assert.True(t, kubeerrors.IsNotFound(vscErr),
+		"shadow VSC must be deleted after error cleanup; got err=%v", vscErr)
 }
 
 // TestPipeline_BlockResumeAfterMerge verifies that when data.img.zst already exists
