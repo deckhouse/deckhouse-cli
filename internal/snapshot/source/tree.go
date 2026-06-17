@@ -27,17 +27,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/naming"
 )
 
 // ErrCycle is returned when a cycle or duplicate reference is detected in the snapshot tree.
 var ErrCycle = errors.New("cycle detected in snapshot tree")
 
-// ErrMultipleVolumes is returned when a snapshot node has more than one dataRefs entry.
-// The one-volume-per-node invariant is enforced at tree-build time.
-var ErrMultipleVolumes = errors.New("node has more than one data volume")
-
 // rootAPIVersion is the apiVersion of the root Snapshot CR.
 const rootAPIVersion = snapshotapi.StorageGroup + "/" + snapshotapi.Version
+
+// volumeSnapshotAPIVersion is the apiVersion used for VolumeSnapshot volume nodes.
+const volumeSnapshotAPIVersion = "snapshot.storage.k8s.io/v1"
 
 // BuildTree fetches the root Snapshot by name and recursively resolves the full snapshot
 // tree by following status.childrenSnapshotRefs.
@@ -45,12 +45,15 @@ const rootAPIVersion = snapshotapi.StorageGroup + "/" + snapshotapi.Version
 // Each node's SnapshotContent is resolved via status.boundSnapshotContentName; the
 // ManifestCheckpointName and DataRefs are taken from the content's status.
 //
-// All nodes are namespace-local: child refs carry no namespace field and are always
-// fetched in the same namespace as the root. The function does one typed Get per node
-// and never lists.
+// All snapshot nodes are namespace-local: child refs carry no namespace field and are
+// always fetched in the same namespace as the root. The function does one typed Get per
+// node and never lists.
 //
-// Returns ErrCycle if a duplicate ref is encountered, ErrMultipleVolumes if any node
-// has more than one dataRefs entry.
+// Each element of a node's DataRefs is materialised as a VolumeSnapshot child node (leaf)
+// appended after the snapshot children. Volume nodes are not recursed and are not subject
+// to cycle detection.
+//
+// Returns ErrCycle if a duplicate snapshot ref is encountered.
 func BuildTree(ctx context.Context, c client.Client, namespace, rootName string) (*Node, error) {
 	v := &treeBuilder{
 		client:    c,
@@ -96,10 +99,6 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 		return nil, fmt.Errorf("fetch SnapshotContent %q for %s %s/%s: %w", boundContentName, apiVersion, kind, name, err)
 	}
 
-	if len(content.Status.DataRefs) > 1 {
-		return nil, fmt.Errorf("node %s/%s (content %q): %w", kind, name, boundContentName, ErrMultipleVolumes)
-	}
-
 	sourceRef := obj.GetAnnotations()[snapshotapi.AnnotationSourceRef]
 
 	node := &Node{
@@ -118,7 +117,7 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 		return nil, fmt.Errorf("%s %s/%s: status.childrenSnapshotRefs: %w", apiVersion, kind, name, err)
 	}
 
-	node.Children = make([]*Node, 0, len(childRefs))
+	node.Children = make([]*Node, 0, len(childRefs)+len(content.Status.DataRefs))
 
 	for _, ref := range childRefs {
 		child, err := b.visit(ctx, ref.APIVersion, ref.Kind, ref.Name, node)
@@ -127,6 +126,27 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 		}
 
 		node.Children = append(node.Children, child)
+	}
+
+	// Append one VolumeSnapshot leaf node per captured volume (dataRef). Volume nodes
+	// are leaves: they are not added to the cycle-detection set and not recursed.
+	// The binding is copied from the slice so that later mutations to the source
+	// SnapshotContent's DataRefs do not alias the node's Binding pointer.
+	for i := range content.Status.DataRefs {
+		binding := content.Status.DataRefs[i]
+
+		volumeNode := &Node{
+			APIVersion:             volumeSnapshotAPIVersion,
+			Kind:                   "VolumeSnapshot",
+			Name:                   naming.ShadowName(binding.Artifact.Name),
+			Namespace:              b.namespace,
+			SourceRef:              binding.TargetUID,
+			ManifestCheckpointName: content.Status.ManifestCheckpointName,
+			Parent:                 node,
+			Binding:                &binding,
+		}
+
+		node.Children = append(node.Children, volumeNode)
 	}
 
 	return node, nil

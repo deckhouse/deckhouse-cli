@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/naming"
 )
 
 const (
@@ -141,13 +142,14 @@ func buildFakeClient(scheme *runtime.Scheme, typed []client.Object, unstructured
 	return builder.Build()
 }
 
-// TestBuildTree_SimpleTree verifies that a root Snapshot with typed children resolves correctly.
+// TestBuildTree_SimpleTree verifies that a root Snapshot with a typed child resolves
+// correctly, and that the child's single dataRef produces a VolumeSnapshot leaf.
 func TestBuildTree_SimpleTree(t *testing.T) {
 	t.Helper()
 
 	scheme := makeScheme(t)
 
-	// root -> child1 -> (no children)
+	// root -> child1 -> (no snapshot children, one dataRef)
 	root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
 		{APIVersion: rootAPIVersion, Kind: "Snapshot", Name: "child1"},
 	})
@@ -183,6 +185,7 @@ func TestBuildTree_SimpleTree(t *testing.T) {
 		t.Errorf("root dataRefs len: got %d, want 0", len(tree.DataRefs))
 	}
 
+	// root has one snapshot child (child1); root has no dataRefs so no volume children.
 	if len(tree.Children) != 1 {
 		t.Fatalf("root children len: got %d, want 1", len(tree.Children))
 	}
@@ -209,8 +212,44 @@ func TestBuildTree_SimpleTree(t *testing.T) {
 		t.Errorf("child1 dataRefs[0].TargetUID: got %q", c1.DataRefs[0].TargetUID)
 	}
 
-	if len(c1.Children) != 0 {
-		t.Errorf("child1 children len: got %d, want 0", len(c1.Children))
+	// child1 has no snapshot children but one dataRef -> one VolumeSnapshot child.
+	if len(c1.Children) != 1 {
+		t.Fatalf("child1 children len: got %d, want 1 (volume node)", len(c1.Children))
+	}
+
+	vol := c1.Children[0]
+
+	if vol.Kind != "VolumeSnapshot" {
+		t.Errorf("volume node kind: got %q, want VolumeSnapshot", vol.Kind)
+	}
+
+	wantName := naming.ShadowName("vsc-uid-1")
+	if vol.Name != wantName {
+		t.Errorf("volume node name: got %q, want %q", vol.Name, wantName)
+	}
+
+	if vol.SourceRef != "uid-1" {
+		t.Errorf("volume node SourceRef: got %q, want uid-1", vol.SourceRef)
+	}
+
+	if vol.Parent != c1 {
+		t.Errorf("volume node parent should be child1")
+	}
+
+	if vol.Binding == nil {
+		t.Fatal("volume node Binding is nil")
+	}
+
+	if vol.Binding.TargetUID != "uid-1" {
+		t.Errorf("volume node Binding.TargetUID: got %q, want uid-1", vol.Binding.TargetUID)
+	}
+
+	if len(vol.Children) != 0 {
+		t.Errorf("volume node is a leaf: got %d children, want 0", len(vol.Children))
+	}
+
+	if vol.DataRefs != nil {
+		t.Errorf("volume node DataRefs should be nil")
 	}
 }
 
@@ -245,6 +284,7 @@ func TestBuildTree_DeepTree(t *testing.T) {
 		t.Fatalf("BuildTree: %v", err)
 	}
 
+	// root has one snapshot child (vm-snap); root has no dataRefs.
 	if len(tree.Children) != 1 {
 		t.Fatalf("root children: %d, want 1", len(tree.Children))
 	}
@@ -259,6 +299,7 @@ func TestBuildTree_DeepTree(t *testing.T) {
 		t.Errorf("vm mcp: got %q", vm.ManifestCheckpointName)
 	}
 
+	// vm-snap has one snapshot child (disk-snap); vm has no dataRefs.
 	if len(vm.Children) != 1 {
 		t.Fatalf("vm children: %d, want 1", len(vm.Children))
 	}
@@ -284,10 +325,30 @@ func TestBuildTree_DeepTree(t *testing.T) {
 	if disk.Parent != vm {
 		t.Errorf("disk parent should be vm")
 	}
+
+	// disk has no snapshot children; it has one dataRef -> one VolumeSnapshot child.
+	if len(disk.Children) != 1 {
+		t.Fatalf("disk children: %d, want 1 (volume node)", len(disk.Children))
+	}
+
+	vol := disk.Children[0]
+
+	if vol.Kind != "VolumeSnapshot" {
+		t.Errorf("volume node kind: got %q, want VolumeSnapshot", vol.Kind)
+	}
+
+	if vol.Parent != disk {
+		t.Errorf("volume node parent should be disk")
+	}
+
+	if vol.Binding == nil || vol.Binding.TargetUID != "uid-disk" {
+		t.Errorf("volume node Binding: got %v", vol.Binding)
+	}
 }
 
-// TestBuildTree_MultipleVolumesError verifies that >1 dataRefs returns ErrMultipleVolumes.
-func TestBuildTree_MultipleVolumesError(t *testing.T) {
+// TestBuildTree_TwoDataRefs_ProducesTwoVolumeNodes verifies that a SnapshotContent with
+// two dataRefs produces two VolumeSnapshot child nodes with correct fields.
+func TestBuildTree_TwoDataRefs_ProducesTwoVolumeNodes(t *testing.T) {
 	t.Helper()
 
 	scheme := makeScheme(t)
@@ -299,14 +360,185 @@ func TestBuildTree_MultipleVolumesError(t *testing.T) {
 	})
 
 	c := buildFakeClient(scheme, []client.Object{root, scRoot}, nil)
-	_, err := BuildTree(context.Background(), c, testNS, "root")
 
-	if err == nil {
-		t.Fatal("expected ErrMultipleVolumes, got nil")
+	tree, err := BuildTree(context.Background(), c, testNS, "root")
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
 	}
 
-	if !errors.Is(err, ErrMultipleVolumes) {
-		t.Errorf("expected ErrMultipleVolumes, got: %v", err)
+	// root has no snapshot children; two dataRefs -> two VolumeSnapshot children.
+	if len(tree.Children) != 2 {
+		t.Fatalf("children: got %d, want 2", len(tree.Children))
+	}
+
+	for i, vol := range tree.Children {
+		if vol.Kind != "VolumeSnapshot" {
+			t.Errorf("child[%d] kind: got %q, want VolumeSnapshot", i, vol.Kind)
+		}
+
+		if vol.APIVersion != volumeSnapshotAPIVersion {
+			t.Errorf("child[%d] apiVersion: got %q, want %q", i, vol.APIVersion, volumeSnapshotAPIVersion)
+		}
+
+		if vol.Namespace != testNS {
+			t.Errorf("child[%d] namespace: got %q, want %q", i, vol.Namespace, testNS)
+		}
+
+		if vol.Parent != tree {
+			t.Errorf("child[%d] parent should be root", i)
+		}
+
+		if vol.Binding == nil {
+			t.Fatalf("child[%d] Binding is nil", i)
+		}
+
+		if vol.DataRefs != nil {
+			t.Errorf("child[%d] DataRefs should be nil (volume node is a leaf)", i)
+		}
+
+		if len(vol.Children) != 0 {
+			t.Errorf("child[%d] Children should be empty (volume node is a leaf)", i)
+		}
+	}
+
+	// Check ordering matches dataRefs order and names/SourceRef are correct.
+	vol0 := tree.Children[0]
+	if vol0.SourceRef != "uid-1" {
+		t.Errorf("child[0] SourceRef: got %q, want uid-1", vol0.SourceRef)
+	}
+
+	wantName0 := naming.ShadowName("vsc-uid-1")
+	if vol0.Name != wantName0 {
+		t.Errorf("child[0] Name: got %q, want %q", vol0.Name, wantName0)
+	}
+
+	if vol0.Binding.TargetUID != "uid-1" {
+		t.Errorf("child[0] Binding.TargetUID: got %q, want uid-1", vol0.Binding.TargetUID)
+	}
+
+	vol1 := tree.Children[1]
+	if vol1.SourceRef != "uid-2" {
+		t.Errorf("child[1] SourceRef: got %q, want uid-2", vol1.SourceRef)
+	}
+
+	wantName1 := naming.ShadowName("vsc-uid-2")
+	if vol1.Name != wantName1 {
+		t.Errorf("child[1] Name: got %q, want %q", vol1.Name, wantName1)
+	}
+
+	if vol1.Binding.TargetUID != "uid-2" {
+		t.Errorf("child[1] Binding.TargetUID: got %q, want uid-2", vol1.Binding.TargetUID)
+	}
+
+	// ManifestCheckpointName on a volume node is the parent's checkpoint.
+	if vol0.ManifestCheckpointName != "mcp-root" {
+		t.Errorf("child[0] ManifestCheckpointName: got %q, want mcp-root", vol0.ManifestCheckpointName)
+	}
+}
+
+// TestBuildTree_ZeroDataRefs_NoVolumeNodes verifies that a node with no dataRefs
+// produces no volume child nodes.
+func TestBuildTree_ZeroDataRefs_NoVolumeNodes(t *testing.T) {
+	t.Helper()
+
+	scheme := makeScheme(t)
+
+	root := makeSnapshot("root", "sc-root", nil)
+	scRoot := makeContent("sc-root", "mcp-root", nil) // no dataRefs
+
+	c := buildFakeClient(scheme, []client.Object{root, scRoot}, nil)
+
+	tree, err := BuildTree(context.Background(), c, testNS, "root")
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+
+	if len(tree.Children) != 0 {
+		t.Errorf("expected no children, got %d", len(tree.Children))
+	}
+}
+
+// TestBuildTree_SnapshotChildrenBeforeVolumeChildren verifies that snapshot children
+// (from childrenSnapshotRefs) appear before volume children (from dataRefs).
+func TestBuildTree_SnapshotChildrenBeforeVolumeChildren(t *testing.T) {
+	t.Helper()
+
+	scheme := makeScheme(t)
+
+	// root has one snapshot child AND one dataRef.
+	root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
+		{APIVersion: rootAPIVersion, Kind: "Snapshot", Name: "snap-child"},
+	})
+	snapChild := makeSnapshot("snap-child", "sc-snap-child", nil)
+	scRoot := makeContent("sc-root", "mcp-root", []snapshotapi.SnapshotDataBinding{dataBinding("uid-vol")})
+	scSnapChild := makeContent("sc-snap-child", "mcp-snap-child", nil)
+
+	c := buildFakeClient(scheme, []client.Object{root, snapChild, scRoot, scSnapChild}, nil)
+
+	tree, err := BuildTree(context.Background(), c, testNS, "root")
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+
+	// root: one snapshot child + one volume child = 2 total.
+	if len(tree.Children) != 2 {
+		t.Fatalf("root children: got %d, want 2", len(tree.Children))
+	}
+
+	first := tree.Children[0]
+	second := tree.Children[1]
+
+	if first.Kind != "Snapshot" {
+		t.Errorf("first child should be the snapshot child, got kind %q", first.Kind)
+	}
+
+	if first.Name != "snap-child" {
+		t.Errorf("first child name: got %q, want snap-child", first.Name)
+	}
+
+	if second.Kind != "VolumeSnapshot" {
+		t.Errorf("second child should be the volume node, got kind %q", second.Kind)
+	}
+}
+
+// TestBuildTree_LoopCopyIndependence verifies that the Binding pointer on a volume node
+// is an independent copy: it does not alias the source SnapshotContent's DataRefs slice,
+// so mutations to the source after BuildTree do not affect Node.Binding.
+func TestBuildTree_LoopCopyIndependence(t *testing.T) {
+	t.Helper()
+
+	scheme := makeScheme(t)
+
+	binding := dataBinding("uid-x")
+	root := makeSnapshot("root", "sc-root", nil)
+	scRoot := makeContent("sc-root", "mcp-root", []snapshotapi.SnapshotDataBinding{binding})
+
+	c := buildFakeClient(scheme, []client.Object{root, scRoot}, nil)
+
+	tree, err := BuildTree(context.Background(), c, testNS, "root")
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+
+	if len(tree.Children) != 1 {
+		t.Fatalf("children: got %d, want 1", len(tree.Children))
+	}
+
+	vol := tree.Children[0]
+	if vol.Binding == nil {
+		t.Fatal("Binding is nil")
+	}
+
+	// Record the original TargetUID from the tree.
+	originalUID := vol.Binding.TargetUID
+
+	// Mutate the source binding (simulating a caller modifying the content slice).
+	binding.TargetUID = "mutated"
+
+	// The node's Binding must be unaffected because it holds its own copy.
+	if vol.Binding.TargetUID != originalUID {
+		t.Errorf("Binding.TargetUID was mutated to %q; expected independent copy %q",
+			vol.Binding.TargetUID, originalUID)
 	}
 }
 
@@ -397,6 +629,7 @@ func TestBuildTree_SourceRefAnnotation(t *testing.T) {
 		t.Errorf("root SourceRef: got %q, want empty", tree.SourceRef)
 	}
 
+	// root has two snapshot children; root has no dataRefs so no volume children.
 	if len(tree.Children) != 2 {
 		t.Fatalf("children: %d, want 2", len(tree.Children))
 	}

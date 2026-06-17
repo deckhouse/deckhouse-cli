@@ -27,13 +27,23 @@ import (
 // All nodes in a tree share the same namespace (the root Snapshot namespace).
 // Cross-namespace references are structurally impossible: SnapshotChildRef carries
 // no namespace field, and the tree builder always fetches children in the root namespace.
+//
+// There are two flavours of node:
+//   - Snapshot nodes (Binding == nil): represent a snapshot CR in the tree hierarchy.
+//     Their DataRefs are the raw volume bindings from the bound SnapshotContent; each
+//     binding materialises as a separate VolumeSnapshot child node under snapshots/.
+//   - Volume nodes (Binding != nil): represent one captured volume. Kind is always
+//     "VolumeSnapshot"; Name is naming.ShadowName(binding.Artifact.Name); DataRefs and
+//     Children are always nil. These are leaves in the tree.
 type Node struct {
 	// APIVersion is the apiVersion of the snapshot CR for this node
 	// (e.g. "storage.deckhouse.io/v1alpha1" or a domain-specific group).
+	// Volume nodes use "snapshot.storage.k8s.io/v1".
 	APIVersion string
 
 	// Kind is the kind of the snapshot CR for this node
 	// (e.g. "Snapshot", "DemoVirtualMachineSnapshot").
+	// Volume nodes always have Kind == "VolumeSnapshot".
 	Kind string
 
 	// Name is the metadata.name of the snapshot CR.
@@ -46,19 +56,31 @@ type Node struct {
 	// SourceRef is the value of the state-snapshotter.deckhouse.io/source-ref
 	// annotation on the snapshot CR. It records the identity of the original
 	// captured object. Empty when the annotation is absent (typically the root).
+	// For volume nodes it is set to the binding's TargetUID (the captured PVC UID).
 	SourceRef string
 
 	// ManifestCheckpointName is the cluster-scoped ManifestCheckpoint name for
 	// this node's own-scope manifests. Empty if no manifest capture ran.
+	// For volume nodes it is the PARENT snapshot node's checkpoint name (the
+	// captured PVC manifest lives in the parent's checkpoint).
 	ManifestCheckpointName string
 
 	// DataRefs holds the volume-to-artifact bindings from the bound SnapshotContent.
-	// The tree builder enforces that len(DataRefs) <= 1 (ErrMultipleVolumes otherwise).
+	// Each binding is materialised as a separate VolumeSnapshot child node; the
+	// DataRefs slice is retained on the snapshot node for manifest routing.
+	// Nil for volume nodes.
 	DataRefs []snapshotapi.SnapshotDataBinding
+
+	// Binding is non-nil for volume nodes only. It carries the SnapshotDataBinding
+	// that gave rise to this volume node (copied from the parent's DataRefs slice so
+	// that modifications to the source slice do not affect the tree).
+	Binding *snapshotapi.SnapshotDataBinding
 
 	// Parent is the parent node. Nil for the root.
 	Parent *Node
 
-	// Children are the direct child nodes in the order they appear in childrenSnapshotRefs.
+	// Children are the direct child nodes: snapshot children first (in
+	// childrenSnapshotRefs order), then volume children (in DataRefs order).
+	// Always nil for volume nodes (they are leaves).
 	Children []*Node
 }
