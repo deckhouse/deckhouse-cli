@@ -48,10 +48,11 @@ import (
 )
 
 const (
-	testNS       = "test-ns"
-	rootSnapshot = "my-snap"
-	diskSnapName = "disk-snap"
-	diskVSCName  = "vsc-disk"
+	testNS        = "test-ns"
+	rootSnapshot  = "my-snap"
+	diskSnapName  = "disk-snap"
+	diskVSCName   = "vsc-disk"
+	sourcePVCName = "pvc-disk-source"
 
 	storageAPIVersion     = "storage.deckhouse.io/v1alpha1"
 	childAPIVersion       = "demo.deckhouse.io/v1alpha1"
@@ -285,7 +286,7 @@ func buildFakeClient(t *testing.T) client.Client {
 	// Child snapshot (unstructured — domain-specific kind not in the scheme).
 	childSnap := makeUnstructuredSnap(childAPIVersion, childKind, testNS, diskSnapName, "sc-disk")
 
-	// Child SnapshotContent: one block DataRef, no manifests.
+	// Child SnapshotContent: one block DataRef pointing at the source PVC, no manifests.
 	childContent := &snapshotapi.SnapshotContent{
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-disk"},
@@ -293,6 +294,12 @@ func buildFakeClient(t *testing.T) client.Client {
 			DataRefs: []snapshotapi.SnapshotDataBinding{
 				{
 					TargetUID: "uid-disk",
+					Target: snapshotapi.SnapshotSubjectRef{
+						APIVersion: "v1",
+						Kind:       "PersistentVolumeClaim",
+						Namespace:  testNS,
+						Name:       sourcePVCName,
+					},
 					Artifact: snapshotapi.SnapshotDataArtifactRef{
 						APIVersion: "snapshot.storage.k8s.io/v1",
 						Kind:       "VolumeSnapshotContent",
@@ -322,7 +329,18 @@ func buildFakeClient(t *testing.T) client.Client {
 		},
 	}
 
-	typed := []client.Object{rootSnap, rootContent, mcp, mcpChunk, childContent, realVSC}
+	// Source PVC — needed by resolveShadowMeta.
+	fsMode := corev1.PersistentVolumeFilesystem
+	storageClass := "csi-ceph-rbd"
+	sourcePVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: sourcePVCName, Namespace: testNS},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &storageClass,
+			VolumeMode:       &fsMode,
+		},
+	}
+
+	typed := []client.Object{rootSnap, rootContent, mcp, mcpChunk, childContent, realVSC, sourcePVC}
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -369,6 +387,178 @@ func makeManifestChunk(t *testing.T, name, checkpointName string, index int) *sn
 			ObjectsCount:   1,
 		},
 	}
+}
+
+// TestPipeline_ShadowMetaFromLivePVC verifies that downloadVolume injects
+// storageClass and volumeMode annotations on the shadow VS when the source PVC
+// is present live in the cluster.
+func TestPipeline_ShadowMetaFromLivePVC(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("B"), 600)
+	srv := makeBlockServer(t, rawBlock)
+
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	var capturedMeta exporter.ShadowMeta
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		OpenExport: func(ctx context.Context, namespace, vsName string, ttl string) (*exporter.Export, error) {
+			// Inspect the shadow VS that was created before OpenExport is called.
+			var shadowVS snapv1.VolumeSnapshot
+			if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: vsName}, &shadowVS); err == nil {
+				capturedMeta = exporter.ShadowMeta{
+					StorageClass: shadowVS.Annotations[exporter.AnnotationStorageClassName],
+					VolumeMode:   shadowVS.Annotations[exporter.AnnotationVolumeMode],
+				}
+			}
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	err := pipeline.Run(context.Background(), cfg)
+	require.NoError(t, err)
+
+	assert.Equal(t, "csi-ceph-rbd", capturedMeta.StorageClass,
+		"shadow VS must carry storage-class annotation from source PVC")
+	assert.Equal(t, "Filesystem", capturedMeta.VolumeMode,
+		"shadow VS must carry volume-mode annotation from source PVC")
+}
+
+// TestPipeline_ShadowMetaFromManifest verifies that when the source PVC is gone
+// from the cluster, storageClass and volumeMode are read from the captured PVC
+// manifest already on disk under <nodeDir>/manifests/.
+func TestPipeline_ShadowMetaFromManifest(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("B"), 600)
+	srv := makeBlockServer(t, rawBlock)
+
+	defer srv.Close()
+
+	// Build a fake client WITHOUT the source PVC (simulating a deleted PVC).
+	scheme := buildScheme(t)
+	snapshotHandle := "snap-handle-mf"
+	realVSC := &snapv1.VolumeSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: diskVSCName},
+		Spec: snapv1.VolumeSnapshotContentSpec{
+			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
+			Driver:         "test.driver",
+			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &snapshotHandle},
+			VolumeSnapshotRef: corev1.ObjectReference{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshot",
+				Name:       "placeholder",
+				Namespace:  "default",
+			},
+		},
+	}
+
+	rootSnap := &snapshotapi.Snapshot{
+		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "Snapshot"},
+		ObjectMeta: metav1.ObjectMeta{Name: rootSnapshot, Namespace: testNS},
+		Status: snapshotapi.SnapshotStatus{
+			BoundSnapshotContentName: "sc-root-mf",
+			ChildrenSnapshotRefs: []snapshotapi.SnapshotChildRef{
+				{APIVersion: childAPIVersion, Kind: childKind, Name: diskSnapName},
+			},
+		},
+	}
+	rootContent := &snapshotapi.SnapshotContent{
+		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
+		ObjectMeta: metav1.ObjectMeta{Name: "sc-root-mf"},
+	}
+	childContent := &snapshotapi.SnapshotContent{
+		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
+		ObjectMeta: metav1.ObjectMeta{Name: "sc-disk"},
+		Status: snapshotapi.SnapshotContentStatus{
+			DataRefs: []snapshotapi.SnapshotDataBinding{
+				{
+					TargetUID: "uid-disk",
+					Target: snapshotapi.SnapshotSubjectRef{
+						APIVersion: "v1",
+						Kind:       "PersistentVolumeClaim",
+						Namespace:  testNS,
+						Name:       sourcePVCName,
+					},
+					Artifact: snapshotapi.SnapshotDataArtifactRef{
+						APIVersion: "snapshot.storage.k8s.io/v1",
+						Kind:       "VolumeSnapshotContent",
+						Name:       diskVSCName,
+					},
+				},
+			},
+		},
+	}
+	childSnap := makeUnstructuredSnap(childAPIVersion, childKind, testNS, diskSnapName, "sc-disk")
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(rootSnap, rootContent, childContent, realVSC).
+		WithObjects(childSnap).
+		Build()
+
+	outputDir := t.TempDir()
+
+	// Pre-create the child node manifests/ directory with a PVC manifest so that
+	// resolveShadowMeta can fall back to it when the live PVC is absent.
+	// processNode will call ensureNodeSubdirs (idempotent) and then WriteNodeManifests
+	// (no-op: ManifestCheckpointName is empty), leaving the pre-written file intact.
+	childDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	manifDir := filepath.Join(childDir, archive.ManifestsDirName)
+	require.NoError(t, os.MkdirAll(manifDir, 0o755))
+
+	pvcManifest := `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ` + sourcePVCName + `
+  namespace: ` + testNS + `
+spec:
+  storageClassName: csi-ceph-rbd-from-manifest
+  volumeMode: Block
+`
+	manifestPath := filepath.Join(manifDir,
+		archive.ManifestFileName("PersistentVolumeClaim", sourcePVCName, ""))
+	require.NoError(t, os.WriteFile(manifestPath, []byte(pvcManifest), 0o644))
+
+	var capturedMeta exporter.ShadowMeta
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		OpenExport: func(ctx context.Context, namespace, vsName string, ttl string) (*exporter.Export, error) {
+			var shadowVS snapv1.VolumeSnapshot
+			if err2 := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: vsName}, &shadowVS); err2 == nil {
+				capturedMeta = exporter.ShadowMeta{
+					StorageClass: shadowVS.Annotations[exporter.AnnotationStorageClassName],
+					VolumeMode:   shadowVS.Annotations[exporter.AnnotationVolumeMode],
+				}
+			}
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	err := pipeline.Run(context.Background(), cfg)
+	require.NoError(t, err)
+
+	assert.Equal(t, "csi-ceph-rbd-from-manifest", capturedMeta.StorageClass,
+		"shadow VS must carry storage-class annotation from PVC manifest")
+	assert.Equal(t, "Block", capturedMeta.VolumeMode,
+		"shadow VS must carry volume-mode annotation from PVC manifest")
 }
 
 // makeUnstructuredSnap builds an unstructured snapshot object for kinds not
