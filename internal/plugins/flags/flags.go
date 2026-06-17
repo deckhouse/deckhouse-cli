@@ -36,7 +36,6 @@ const (
 	EnvPluginsDir = "DECKHOUSE_CLI_PATH"
 )
 
-// CLI Parameters
 var (
 	DeckhousePluginsDir = defaultDeckhousePluginsDir
 

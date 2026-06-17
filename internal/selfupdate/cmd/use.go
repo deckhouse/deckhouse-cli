@@ -136,8 +136,8 @@ func printSwitchNotes(res selfupdate.SwitchResult) {
 
 // completeStoredVersions offers the locally installed versions for `d8 cli use
 // <TAB>`. Completion must stay instant and side-effect-free (the same contract
-// root.go enforces for __complete), so it reads only the store - the versions
-// that switch offline are exactly the ones worth suggesting.
+// root.go enforces for __complete), so it reads only the store.
+// Versions that switch offline are exactly the ones worth suggesting.
 func completeStoredVersions(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	if len(args) != 0 {
 		return nil, cobra.ShellCompDirectiveNoFileComp

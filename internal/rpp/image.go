@@ -39,7 +39,7 @@ const (
 )
 
 // pluginNamePattern is the OCI repository path-component grammar (lowercase
-// alphanumerics joined by single ./_/- separators). The proxy allowlist
+// alphanumerics joined by single ./_/- separators). The proxy allow-list
 // addresses a plugin as exactly one such component; anything else cannot name a
 // published plugin and would only smuggle URL metacharacters into the route.
 var pluginNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`)

@@ -94,10 +94,10 @@ func LoadClusterState(ctx context.Context, kubeCl kubernetes.Interface, dynamicC
 	}, nil
 }
 
-// clusterKubernetesVersion returns the API server version. A failure to REACH the
-// API server is a hard error (the whole snapshot is unusable); a version string
-// that cannot be parsed yields nil (so a module/Deckhouse-only plugin is not
-// blocked - a declared Kubernetes requirement fails later in its validator).
+// clusterKubernetesVersion returns the API server version.
+// A failure to REACH the API server is a hard error: the whole snapshot is unusable.
+// An unparseable version string yields nil, so a module/Deckhouse-only plugin is not
+// blocked; a declared Kubernetes requirement then fails later in its validator.
 func clusterKubernetesVersion(kubeCl kubernetes.Interface, logger *dkplog.Logger) (*semver.Version, error) {
 	info, err := kubeCl.Discovery().ServerVersion()
 	if err != nil {
@@ -162,8 +162,8 @@ func clusterModules(ctx context.Context, dynamicCl dynamic.Interface) (map[strin
 
 // moduleEnabled reports whether a module is on. It mirrors the repo convention
 // (internal/status/objects/cni_modules): enabled when either the module-config or
-// the module-manager condition is True, so a module the operator has enabled is not
-// reported off during a reconcile window where only one condition has flipped.
+// the module-manager condition is True. The OR avoids reporting an enabled module
+// as off mid-reconcile, when only one condition has flipped.
 func moduleEnabled(obj map[string]any) bool {
 	conditions, found, err := unstructured.NestedSlice(obj, "status", "conditions")
 	if !found || err != nil {

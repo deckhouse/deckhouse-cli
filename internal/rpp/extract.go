@@ -29,9 +29,12 @@ import (
 
 // The proxy serves images as a gzipped tar of the (flattened) filesystem. The
 // helpers below pull a single named file out of that stream by its base name, so
-// callers do not duplicate gzip/tar plumbing. They are safe against path
-// traversal: the destination is caller-supplied, the archive name is used only
-// for a base-name match, and non-regular entries (symlinks, dirs) are skipped.
+// callers do not duplicate gzip/tar plumbing.
+//
+// Safe against path traversal:
+//   - destination is caller-supplied
+//   - the archive name is used only for a base-name match
+//   - non-regular entries (symlinks, dirs) are skipped
 
 const (
 	// ExecutableMode is the mode forced on extracted binaries so they are always

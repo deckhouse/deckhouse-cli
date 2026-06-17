@@ -27,11 +27,10 @@ import (
 )
 
 // NewClusterClient builds a Client for the proxy reachable from the given cluster
-// connection. The endpoint is used as-is when set, otherwise it is discovered:
-// the public Ingress is preferred (valid TLS, reachable from a workstation) with a
-// fallback to in-cluster pod IPs. caFile / insecure select TLS verification
-// (mutually exclusive; New reports the contradiction). It centralizes the wiring
-// shared by every command that talks to the proxy.
+// connection. The endpoint is used as-is when set, otherwise discovered (Ingress
+// preferred, pod IPs as fallback; see chooseDiscoveredEndpoint).
+// caFile / insecure select TLS verification (mutually exclusive; New reports the
+// contradiction).
 func NewClusterClient(
 	ctx context.Context,
 	kube kubernetes.Interface,

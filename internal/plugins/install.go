@@ -105,17 +105,18 @@ func InstallWithResolvePluginsConflicts() InstallOption {
 	}
 }
 
-// InstallPlugin installs (or switches to) a plugin version: it selects the version,
-// validates requirements, lays out plugins/<name>/v<major>, swaps the binary in and
-// points `current` at it, and caches the contract. Behaviour is tuned via the
-// InstallWith* options (version, major, force, resolve-conflicts); with no options it
-// installs the newest cluster-compatible version within the installed major.
+// InstallPlugin installs or switches to a plugin version.
+// Steps: select the version, validate requirements, lay out
+// plugins/<name>/v<major>, swap the binary in, point `current` at it, cache
+// the contract.
+// Tune behaviour with the InstallWith* options (version, major, force,
+// resolve-conflicts). With no options it installs the newest cluster-compatible
+// version within the installed major.
 func (m *Manager) InstallPlugin(ctx context.Context, pluginName string, opts ...InstallOption) error {
 	if err := ValidatePluginName(pluginName); err != nil {
 		return err
 	}
 
-	// check if version is specified
 	var installVersion *semver.Version
 
 	options := &installOptions{
@@ -232,9 +233,11 @@ type pluginPaths struct {
 	currentLink string // <plugin-dir>/plugins/<name>/current
 }
 
-// installPlugin is the install pipeline orchestrator. Each step delegates to a
-// focused helper below; the order is significant (validate before switch, stage and
-// smoke-test before swapping the live binary, cache the contract before linking).
+// installPlugin orchestrates the install pipeline. Each step delegates to a
+// focused helper below. The order matters:
+//   - validate before switch
+//   - stage and smoke-test before swapping the live binary
+//   - cache the contract before linking
 func (m *Manager) installPlugin(ctx context.Context, pluginName string, version *semver.Version, resolvePluginsConflicts, force bool) error {
 	paths, err := m.preparePluginDirs(pluginName, version)
 	if err != nil {
@@ -272,12 +275,13 @@ func (m *Manager) installPlugin(ctx context.Context, pluginName string, version 
 		return err
 	}
 
-	// Selected version already on disk (a different major/version is current): just
-	// repoint the symlink - the "switch between installed versions" path, no
-	// re-download. Requirements were validated just above. --force falls through to a
-	// full re-pull (e.g. a corrupted on-disk binary or a republished tag).
-	// The contract is cached BEFORE the link flips: a failure in between then
-	// over-enforces the new contract on the old binary (fails closed) instead of
+	// Selected version already on disk (a different major/version is current):
+	// repoint the symlink, no re-download. Requirements were validated just above.
+	// --force instead falls through to a full re-pull (corrupted on-disk binary,
+	// republished tag).
+	//
+	// Cache the contract BEFORE flipping the link. A failure in between then
+	// over-enforces the new contract on the old binary (fails closed), rather than
 	// running the new binary gated by the old contract.
 	if alreadyAtVersion {
 		if err := m.cacheContract(pluginName, plugin); err != nil {
@@ -353,10 +357,10 @@ func (m *Manager) preparePluginDirs(pluginName string, version *semver.Version) 
 }
 
 // acquireInstallLock serializes installs of the plugin. A lock orphaned by a
-// hard-killed install (older than installLockStaleAfter) is reclaimed - a
-// Ctrl-C'd or crashed install makes such orphans plausible, so recover instead
-// of failing forever. The caller must invoke the returned release func when
-// finished (typically via defer).
+// hard-killed install (older than installLockStaleAfter) is reclaimed: a Ctrl-C'd
+// or crashed install leaves such orphans, so recover instead of failing forever.
+// The caller must invoke the returned release func when finished (typically via
+// defer).
 func (m *Manager) acquireInstallLock(lockFilePath string) (func(), error) {
 	release, err := lockfile.Acquire(lockFilePath, installLockStaleAfter, func(age time.Duration) {
 		m.logger.Warn("reclaiming a stale plugin install lock",
@@ -552,11 +556,12 @@ func (m *Manager) isCurrentBinary(paths pluginPaths) bool {
 	return target == abs
 }
 
-// smokeTestPlugin verifies the freshly extracted binary executes cleanly when asked
-// for its version, so a corrupt/incompatible artifact (wrong arch, missing libs,
-// crash) is rejected before it is linked as current. It only requires a clean exit,
-// NOT parseable version output, so a plugin that prints a human-readable banner is
-// not rejected (version parsing is reserved for the version-comparison paths).
+// smokeTestPlugin verifies the freshly extracted binary runs cleanly when asked
+// for its version. A corrupt or incompatible artifact (wrong arch, missing libs,
+// crash) is rejected before it is linked as current.
+// It requires only a clean exit, not parseable version output: a plugin that
+// prints a human-readable banner is not rejected. Version parsing is reserved
+// for the version-comparison paths.
 func (m *Manager) smokeTestPlugin(ctx context.Context, pluginName, binaryPath string) error {
 	ctx, cancel := context.WithTimeout(ctx, pluginProbeTimeout)
 	defer cancel()
@@ -679,7 +684,6 @@ func (m *Manager) filterMajorVersion(versions []string, majorVersion int) []stri
 }
 
 func (m *Manager) resolvePluginConflicts(ctx context.Context, failedConstraints failedConstraints) error {
-	// for each failed constraint, try to install the plugin
 	for pluginName := range failedConstraints {
 		m.logger.Debug("resolving plugin conflict", slog.String("plugin", pluginName))
 

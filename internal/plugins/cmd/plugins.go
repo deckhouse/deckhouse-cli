@@ -84,8 +84,8 @@ func NewCommand(logger *dkplog.Logger) *cobra.Command {
 
 // wrapProxyDiagnostics turns recognized registry-packages-proxy failures into
 // colored diagnostics at the command level (per pkg/diagnostic: classify in the
-// command, never in root.go). It wraps every RunE in the tree; errdetect.Diagnose
-// returns nil for non-proxy and already-diagnosed errors, leaving them untouched.
+// command, never in root.go). It wraps every RunE in the tree. errdetect.Diagnose
+// returns nil for non-proxy and already-diagnosed errors, so those pass through.
 func wrapProxyDiagnostics(cmd *cobra.Command) {
 	if cmd.RunE != nil {
 		inner := cmd.RunE

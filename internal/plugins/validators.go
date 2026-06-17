@@ -99,10 +99,11 @@ func (m *Manager) LatestVersion(ctx context.Context, pluginName string) (*semver
 // value carries the constraint that the currently installed version fails.
 type failedConstraints map[string]*semver.Constraints
 
-// helpfulError turns unsatisfied requirements into a HelpfulError, so the top-level
-// handler renders them with semantic color (cmd/d8/root.go) - one "cause -> fix"
-// pair per dependency. resolvable adds the --resolve-plugins-conflicts hint (install
-// only; the run-time gate and the post-resolve recheck cannot use it).
+// helpfulError turns unsatisfied requirements into a HelpfulError. The top-level
+// handler (cmd/d8/root.go) renders it with semantic color: one "cause -> fix"
+// pair per dependency.
+// resolvable adds the --resolve-plugins-conflicts hint. Install-only: the
+// run-time gate and the post-resolve recheck cannot use it.
 //
 // nil value = dependency missing; non-nil = installed but fails the constraint.
 func (fc failedConstraints) helpfulError(category string, resolvable bool) *diagnostic.HelpfulError {
@@ -286,8 +287,6 @@ func (m *Manager) validatePluginRequirementMandatory(plugin *internal.Plugin) (f
 }
 
 // validatePluginRequirementConditional enforces conditional plugin requirements:
-//
-// For conditional requirements:
 //   - if the dependency is not installed, skip silently;
 //   - if the dependency is installed but fails the constraint, return a hard error
 func (m *Manager) validatePluginRequirementConditional(plugin *internal.Plugin) error {

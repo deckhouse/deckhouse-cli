@@ -24,7 +24,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
 )
 
-// PluginInfo holds all information needed to display a plugin
+// PluginInfo is one installed plugin's name, version and description for display.
 type PluginInfo struct {
 	Name        string
 	Version     string
@@ -46,7 +46,7 @@ func (m *Manager) List() []PluginInfo {
 	return installed
 }
 
-// fetchInstalledPlugins retrieves installed plugins from filesystem
+// fetchInstalledPlugins reads the installed plugins from the plugins root on disk.
 func (m *Manager) fetchInstalledPlugins() ([]PluginInfo, error) {
 	plugins, err := os.ReadDir(layout.PluginsRoot(m.pluginDirectory))
 	if err != nil {

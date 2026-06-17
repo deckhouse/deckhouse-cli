@@ -24,10 +24,10 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal"
 )
 
-// UnmarshalContract decodes raw contract JSON into dst and rewrites
-// encoding/json's verbose default errors as user-actionable messages, so the
-// wording stays identical regardless of the source (cache file or a tar entry
-// served by registry-packages-proxy).
+// UnmarshalContract decodes raw contract JSON into dst.
+// It rewrites encoding/json's default errors as user-actionable messages.
+// Wording stays identical across sources: a cache file or a
+// registry-packages-proxy tar entry.
 func UnmarshalContract(raw []byte, dst *PluginContract) error {
 	err := json.Unmarshal(raw, dst)
 	if err == nil {

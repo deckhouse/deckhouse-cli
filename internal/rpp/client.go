@@ -145,10 +145,9 @@ func NewWithHTTPClient(baseURL string, httpClient *http.Client, logger *dkplog.L
 }
 
 func newClient(baseURL string, httpClient *http.Client, logger *dkplog.Logger) *Client {
-	// The transport stamps the kubeconfig credential on EVERY hop, so following a
-	// redirect would replay it to whatever host the response names. The proxy
-	// serves /v1/images directly (no 3xx on the happy path; verified live), so
-	// refuse redirects and let the 3xx surface as an unexpected-status error.
+	// Refuse redirects: the transport stamps the kubeconfig credential on every
+	// hop, so a redirect would replay it to whatever host the response names.
+	// A 3xx then surfaces as an unexpected-status error.
 	// The caller's client is copied, not mutated.
 	guarded := *httpClient
 	guarded.CheckRedirect = func(*http.Request, []*http.Request) error {
@@ -212,10 +211,9 @@ func (c *Client) ListTags(ctx context.Context, ref ImageRef) ([]string, error) {
 // contract when present, are files inside it). The caller owns the returned
 // reader and must close it.
 //
-// The stream is returned as-is: this method performs NO integrity check (the
-// proxy exposes only a manifest digest, not a hash of the gzip-tar body), so
-// trust rests on the TLS-authenticated proxy channel; the caller may want to cap
-// the read with an io.LimitReader.
+// No integrity check: the proxy exposes only a manifest digest, not a hash of
+// the gzip-tar body. Trust rests on the TLS-authenticated proxy channel.
+// The caller may want to cap the read with an io.LimitReader.
 func (c *Client) PullImage(ctx context.Context, ref ImageRef, tag string) (io.ReadCloser, error) {
 	if err := validateTag(tag); err != nil {
 		return nil, err

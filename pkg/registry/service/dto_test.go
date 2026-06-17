@@ -74,11 +74,11 @@ func TestPluginContract_FlatArrayRejected(t *testing.T) {
 	}
 }
 
-// TestUnmarshalContract_FriendlyArrayMessage: when a flat-array contract
-// hits the production unmarshal path (UnmarshalContract, used by the
-// OCI-annotation, file-load and registry-packages-proxy code paths), the error
-// must be a user-actionable "invalid contract" message naming the offending
-// field and the expected shape, NOT the raw encoding/json reflect-soup.
+// A flat-array contract must produce a user-actionable error.
+// The message names the offending field and the expected shape,
+// not the raw encoding/json type error.
+// UnmarshalContract is the shared path for OCI annotations,
+// file loads, and registry-packages-proxy.
 func TestUnmarshalContract_FriendlyArrayMessage(t *testing.T) {
 	in := []byte(`{
 		"name":"x","version":"v1.0.0",

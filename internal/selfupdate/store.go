@@ -57,11 +57,12 @@ const (
 //	<root>/versions/<version>/d8
 //
 // The PATH entry (e.g. /opt/deckhouse/bin/d8) is a one-time-created symlink to
-// <root>/current, so switching never touches root-owned directories. The store
-// is deliberately addressed by its own well-known paths and never through
-// os.Executable(): on Linux /proc/self/exe resolves to the symlink TARGET, so
-// "replace whatever the executable resolves to" would overwrite a stored
-// version in place instead of repointing the link.
+// <root>/current, so switching never touches root-owned directories.
+//
+// Addressed by its own well-known paths, never via os.Executable().
+// On Linux /proc/self/exe resolves to the symlink TARGET: "replace what
+// the executable resolves to" would overwrite a stored version in place
+// instead of repointing the link.
 //
 // A nil *Store is a valid no-op store (all read methods are nil-safe), so
 // callers degrade gracefully when the home directory cannot be resolved.
@@ -219,11 +220,11 @@ func (s *Store) Contains(path string) bool {
 	return strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
-// install materializes tag in the store via fetch (which writes the binary to
-// the path it is given), smoke-testing the staged file BEFORE the entry becomes
-// visible - a corrupt artifact never lands under its final name (where `list`
-// would mark it installed and completion would suggest it). An existing entry
-// is kept as is: a published version is immutable.
+// install materializes tag in the store via fetch (fetch writes the binary
+// to the path it is given). The staged file is smoke-tested BEFORE the entry
+// becomes visible: a corrupt artifact never lands under its final name, where
+// `list` would mark it installed and completion would suggest it.
+// An existing entry is kept as is: a published version is immutable.
 func (s *Store) install(ctx context.Context, tag string, fetch func(dst string) error) error {
 	if s == nil {
 		return fmt.Errorf("version store is unavailable")

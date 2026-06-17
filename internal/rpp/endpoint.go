@@ -106,11 +106,10 @@ func discoverIngressEndpoint(ctx context.Context, kube kubernetes.Interface) (st
 	return "", fmt.Errorf("%w: ingress %q has no host", errIngressUnusable, proxyIngressName)
 }
 
-// discoverEndpoint returns a proxy endpoint base URL by listing the
-// registry-packages-proxy pods and joining the first ready, running pod IP with the
-// proxy port. Pods that are terminating or not yet ready are skipped, so callers
-// do not dial draining or not-yet-serving proxies. There is no failover, so a
-// single serving pod is enough.
+// discoverEndpoint returns a proxy endpoint base URL from the first serving
+// registry-packages-proxy pod (running, ready, with an IP), joined to the proxy
+// port. Terminating and not-yet-ready pods are skipped. No failover: one serving
+// pod is enough.
 //
 // This is a master-node pod IP, reachable from inside the cluster network. A
 // workstation outside the cluster usually cannot reach it and should pass an

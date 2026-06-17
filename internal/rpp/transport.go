@@ -44,11 +44,12 @@ const (
 // Server trust is established from opts - a custom CA bundle, or the system
 // roots by default, or skipped entirely when insecure.
 //
-// restConfig is copied, so the caller's config is never mutated. The kubeconfig
-// Proxy setting is preserved, so RPP traffic egresses through the same HTTP proxy
-// (if any) the kubeconfig configured for the API server. The identity is attached
-// to every request regardless of target host, so the returned client must be used
-// only against the proxy endpoint.
+// Notes:
+//   - restConfig is copied; the caller's config is never mutated.
+//   - The kubeconfig Proxy setting is kept, so RPP traffic uses the same HTTP
+//     proxy (if any) as API-server traffic.
+//   - The identity is attached to every request, so use the client only against
+//     the proxy endpoint.
 func buildHTTPClient(restConfig *rest.Config, opts options) (*http.Client, error) {
 	cfg := rest.CopyConfig(restConfig)
 
@@ -105,13 +106,15 @@ func certPoolWith(caPEM []byte) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// withTunedTransport returns a transport wrapper that clones the base
-// *http.Transport, bounds connection setup (TLS handshake, response-header
-// wait), overrides the root CAs when pool is non-nil, then applies any
-// pre-existing wrapper (e.g. an OIDC auth-provider) on top. The tuning must hit
-// the raw base transport, so it runs innermost. If the base is not an
-// *http.Transport the request fails closed instead of proceeding without the
-// intended trust and bounds.
+// withTunedTransport returns a transport wrapper that, innermost to outermost:
+//   - clones the base *http.Transport
+//   - bounds connection setup (TLS handshake, response-header wait)
+//   - overrides the root CAs when pool is non-nil
+//   - applies any pre-existing wrapper (e.g. an OIDC auth-provider) on top
+//
+// Tuning must hit the raw base transport, so it runs innermost. If the base is
+// not an *http.Transport the request fails closed, rather than proceeding without
+// the intended trust and bounds.
 func withTunedTransport(prev func(http.RoundTripper) http.RoundTripper, pool *x509.CertPool) func(http.RoundTripper) http.RoundTripper {
 	return func(rt http.RoundTripper) http.RoundTripper {
 		base, ok := rt.(*http.Transport)

@@ -107,12 +107,12 @@ func (m *Manager) selectLatestCompatible(ctx context.Context, pluginName string,
 		pluginName, strings.Join(rejected, "; "))
 }
 
-// clusterCompatible reports whether the plugin's cluster-side requirements are met,
-// reusing the enforcement validators (clusterChecks) read-only. A genuine
-// unmet requirement yields (false, reason, nil); the err return is for cases where
-// compatibility cannot be determined (cluster unreachable) or an operational error
-// in the contract (e.g. a malformed constraint) - both must NOT be masked as merely
-// "incompatible" and trigger a downgrade.
+// clusterCompatible reports whether the plugin's cluster-side requirements are
+// met, reusing the enforcement validators (clusterChecks) read-only. A genuine
+// unmet requirement yields (false, reason, nil).
+// The err return covers cases where compatibility cannot be determined (cluster
+// unreachable) or an operational contract error (e.g. a malformed constraint).
+// These must NOT be masked as merely "incompatible" and trigger a downgrade.
 func (m *Manager) clusterCompatible(ctx context.Context, plugin *internal.Plugin) (bool, string, error) {
 	if !requirements.HasClusterRequirements(plugin) || d8flags.SkipClusterChecks {
 		return true, "", nil

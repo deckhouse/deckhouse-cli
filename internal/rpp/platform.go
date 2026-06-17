@@ -19,9 +19,8 @@ package rpp
 import "runtime"
 
 // PlatformSuffix is the "-<os>-<arch>" tag suffix of the current platform
-// (e.g. "-linux-amd64"), matching the publishing convention for per-platform
-// artifacts: one single-platform image per tag, as the plugin CI already
-// publishes ("<tag>-darwin-arm64").
+// (e.g. "-linux-amd64"). Matches the publishing convention: one single-platform
+// image per tag (e.g. "<tag>-darwin-arm64").
 func PlatformSuffix() string {
 	return "-" + runtime.GOOS + "-" + runtime.GOARCH
 }

@@ -89,12 +89,12 @@ func HasClusterRequirements(plugin *internal.Plugin) bool {
 		len(requirements.Modules.AnyOf) > 0
 }
 
-// normalizedForConstraint prepares a version for constraint matching. Build
-// metadata is always dropped. A pre-release is kept only when it looks like a
-// genuine release candidate (rc/alpha/beta/…), so boundary constraints still treat
-// an RC as below its GA. CI/build markers ("v1.77.0-main+abc", "v1.28.3-eks-1-30")
-// are NOT real pre-releases - they are stripped so an ordinary floor like ">= 1.0"
-// matches them. Trade-off: for genuine RCs this means ">= 1.30" excludes 1.30.0-rc.1.
+// normalizedForConstraint prepares a version for constraint matching.
+// Build metadata is always dropped. The pre-release segment depends on its kind:
+//   - genuine RC (rc/alpha/beta/etc.): kept, so boundary constraints treat an RC as below its GA;
+//   - CI/build markers ("v1.77.0-main+abc", "v1.28.3-eks-1-30"): stripped, so a plain floor like ">= 1.0" matches them.
+//
+// Trade-off: for genuine RCs, ">= 1.30" excludes 1.30.0-rc.1.
 func normalizedForConstraint(v *semver.Version) *semver.Version {
 	pre := v.Prerelease()
 	if pre != "" && IsGenuinePrerelease(pre) {
@@ -266,10 +266,10 @@ func (c *Checker) checkModuleConstraint(pluginName string, requirement internal.
 }
 
 // checkAnyOfModules passes if at least one module in the group is enabled and
-// satisfies its constraint; otherwise it returns a descriptive error. Unlike the
-// mandatory/conditional paths, an enabled-but-unversioned module does NOT satisfy a
-// versioned alternative here (there may be a verifiable candidate). A malformed
-// constraint is an operational error and propagates rather than being swallowed.
+// satisfies its constraint; otherwise it returns a descriptive error.
+// An enabled-but-unversioned module does NOT satisfy a versioned alternative here
+// (unlike the mandatory/conditional paths): another candidate may be verifiable.
+// A malformed constraint is operational and propagates, not swallowed as "none satisfied".
 func (c *Checker) checkAnyOfModules(pluginName string, index int, group internal.AnyOfGroup, state *ClusterState) error {
 	if len(group.Modules) == 0 {
 		return nil

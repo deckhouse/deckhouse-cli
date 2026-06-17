@@ -48,8 +48,7 @@ func NewPluginCommand(commandName, description string, aliases []string, logger 
 	}
 
 	// Drive the help text from the cached contract (description + declared flags/env).
-	// The plugin contract carries only names (no command tree), so this lists what is
-	// available rather than building a sub-command hierarchy.
+	// The contract carries only names, so this lists what is available.
 	short, long := description, description
 
 	if contract, err := manager.InstalledPluginContract(commandName); err == nil && contract != nil {
@@ -65,10 +64,10 @@ func NewPluginCommand(commandName, description string, aliases []string, logger 
 		Short:   short,
 		Aliases: aliases,
 		Long:    long,
-		// Flags are forwarded verbatim to the plugin binary, so the wrapper cannot
-		// parse d8-level flags: the registry-packages-proxy is configured by env
-		// only (KUBECONFIG, D8_RPP_*). The source is initialized lazily in
-		// RunInstalled, so an already-installed plugin needs no cluster access.
+		// Flags are forwarded verbatim, so the wrapper parses no d8-level flags.
+		// The registry-packages-proxy is configured by env only (KUBECONFIG, D8_RPP_*).
+		// The source initializes lazily in RunInstalled: an already-installed
+		// plugin needs no cluster access.
 		DisableFlagParsing: true,
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := manager.RunInstalled(cmd.Context(), commandName, args); err != nil {

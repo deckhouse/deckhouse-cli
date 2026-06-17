@@ -118,9 +118,9 @@ func (m *Manager) RunInstalled(ctx context.Context, pluginName string, args []st
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 
 	// On ctx cancellation (d8's SIGINT/SIGTERM handling) forward SIGTERM and give
-	// the plugin a grace period instead of the CommandContext default - an
-	// immediate SIGKILL that would deny the plugin any cleanup. The terminal's own
-	// Ctrl-C reaches the child anyway via the process group.
+	// the plugin a grace period. The CommandContext default is an immediate SIGKILL
+	// that would deny the plugin any cleanup. The terminal's own Ctrl-C reaches the
+	// child anyway via the process group.
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = pluginStopGracePeriod
 
@@ -138,11 +138,13 @@ func (m *Manager) RunInstalled(ctx context.Context, pluginName string, args []st
 	return nil
 }
 
-// ensurePluginRequirements enforces the plugin's contract requirements before it is
-// launched (ADR: check before run, not only at install). It is a hard gate, like
-// install: an unsatisfied Kubernetes/Deckhouse/module/plugin requirement - or an
-// unreachable cluster for a plugin that declares cluster requirements - blocks the
-// run. The wrapper forwards flags to the plugin, so the override here is the env var
+// ensurePluginRequirements enforces the plugin's contract requirements before
+// launch (ADR: check before run, not only at install). It is a hard gate, like
+// install. The run is blocked when:
+//   - a Kubernetes/Deckhouse/module/plugin requirement is unsatisfied, or
+//   - the cluster is unreachable and the plugin declares cluster requirements.
+//
+// The wrapper forwards flags to the plugin, so the override here is the env var
 // D8_PLUGINS_SKIP_CLUSTER_CHECKS=1 (surfaced in the cluster-unreachable error).
 func (m *Manager) ensurePluginRequirements(ctx context.Context, contract *internal.Plugin) error {
 	failed, err := m.validateRequirements(ctx, contract)

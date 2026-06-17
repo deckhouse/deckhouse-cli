@@ -53,8 +53,8 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 			"retry shortly, or check the registry-packages-proxy pods in d8-cloud-instance-manager")
 	case errors.Is(err, rpp.ErrEndpointDiscovery):
 		return help(err, "registry-packages-proxy: endpoint discovery via the Kubernetes API failed",
-			"discovery reaches the proxy through your kubeconfig's API server, which was unreachable or presented an invalid certificate",
-			"this is the Kubernetes API endpoint (kubeconfig 'server:'), not the proxy - confirm it is reachable and its TLS certificate is valid for that host",
+			"discovery reaches the proxy through your kubeconfig's API server; that server was unreachable or presented an invalid certificate",
+			"this is the Kubernetes API endpoint (kubeconfig 'server:'), not the proxy; confirm it is reachable with a valid TLS certificate for that host",
 			"skip discovery: pass --rpp-endpoint https://registry-packages-proxy.<publicDomain> (or set D8_RPP_ENDPOINT)",
 			"on a master node, point the kubeconfig at the local API (https://127.0.0.1:6445, CA /etc/kubernetes/pki/ca.crt) with an OIDC token")
 	default:
