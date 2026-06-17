@@ -74,7 +74,7 @@ func NewKubeManifestSource(c client.Client) *KubeManifestSource {
 // decodes base64(gzip(json[])) payloads, and returns user objects with plumbing
 // kinds removed.
 func (s *KubeManifestSource) FetchNodeManifests(ctx context.Context, manifestCheckpointName string) ([]unstructured.Unstructured, error) {
-	mc := &snapshotapi.ManifestCheckpoint{}
+	mc := new(snapshotapi.ManifestCheckpoint)
 	if err := s.client.Get(ctx, types.NamespacedName{Name: manifestCheckpointName}, mc); err != nil {
 		return nil, fmt.Errorf("get ManifestCheckpoint %q: %w", manifestCheckpointName, err)
 	}
@@ -103,7 +103,7 @@ func (s *KubeManifestSource) FetchNodeManifests(ctx context.Context, manifestChe
 // fetchChunk fetches one ManifestCheckpointContentChunk by name, verifies its
 // optional checksum, decompresses the gzip payload, and decodes the JSON array.
 func (s *KubeManifestSource) fetchChunk(ctx context.Context, info snapshotapi.ChunkInfo) ([]unstructured.Unstructured, error) {
-	chunk := &snapshotapi.ManifestCheckpointContentChunk{}
+	chunk := new(snapshotapi.ManifestCheckpointContentChunk)
 	if err := s.client.Get(ctx, types.NamespacedName{Name: info.Name}, chunk); err != nil {
 		return nil, fmt.Errorf("get ManifestCheckpointContentChunk %q: %w", info.Name, err)
 	}

@@ -302,7 +302,7 @@ func TestReleaseDataExport_Deletes(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the DataExport is gone.
-	check := &deapi.DataExport{}
+	check := new(deapi.DataExport)
 	getErr := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: deName}, check)
 	require.Error(t, getErr, "DataExport should be deleted")
 }
