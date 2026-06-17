@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -213,6 +214,35 @@ func TestWaitReady_Expired(t *testing.T) {
 	_, err := exporter.WaitReady(ctx, c, slog.Default(), namespace, deName)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, exporter.ErrExpired), "expected ErrExpired, got: %v", err)
+}
+
+func TestWaitReady_DeadlineExceeded(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace    = "test-ns"
+		shadowVSName = "d8-ss-never-ready"
+	)
+
+	deName := exporter.DataExportName(shadowVSName)
+
+	scheme := newDEScheme(t)
+
+	de := &deapi.DataExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deName,
+			Namespace: namespace,
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(de).Build()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+
+	_, err := exporter.WaitReady(ctx, c, slog.Default(), namespace, deName)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded), "expected context.DeadlineExceeded, got: %v", err)
 }
 
 func TestWaitReady_ContextCancelled(t *testing.T) {

@@ -17,7 +17,6 @@ limitations under the License.
 package download
 
 import (
-	"context"
 	"log/slog"
 	"testing"
 
@@ -106,9 +105,8 @@ func TestParseChunkSize_DefaultMinimum(t *testing.T) {
 func TestNewCommand_Defaults(t *testing.T) {
 	t.Helper()
 
-	ctx := context.Background()
 	log := slog.Default()
-	cmd := NewCommand(ctx, log)
+	cmd := NewCommand(log)
 
 	wantUse := cmdUse + " [flags] <snapshot>"
 	if cmd.Use != wantUse {
@@ -164,9 +162,8 @@ func TestNewCommand_Defaults(t *testing.T) {
 func TestNewCommand_NamespaceFlagDefault(t *testing.T) {
 	t.Helper()
 
-	ctx := context.Background()
 	log := slog.Default()
-	cmd := NewCommand(ctx, log)
+	cmd := NewCommand(log)
 
 	ns, err := cmd.Flags().GetString(flagNamespace)
 	if err != nil {
@@ -181,9 +178,8 @@ func TestNewCommand_NamespaceFlagDefault(t *testing.T) {
 func TestNewCommand_RequiresOneArg(t *testing.T) {
 	t.Helper()
 
-	ctx := context.Background()
 	log := slog.Default()
-	cmd := NewCommand(ctx, log)
+	cmd := NewCommand(log)
 
 	// Zero args: must error.
 	if err := cmd.Args(cmd, []string{}); err == nil {

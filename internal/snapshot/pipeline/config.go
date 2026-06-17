@@ -21,6 +21,7 @@ package pipeline
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -34,6 +35,7 @@ const (
 	defaultWorkers              = 4
 	defaultPerVolumeConcurrency = 4
 	defaultTTL                  = "2h"
+	defaultReadinessTimeout     = 5 * time.Minute
 )
 
 // Config holds all parameters for a snapshot download run.
@@ -81,6 +83,10 @@ type Config struct {
 	// (when OpenExport is nil).  May be nil in tests that supply OpenExport.
 	SafeClient *safeClient.SafeClient
 
+	// ReadinessTimeout is how long OpenExport waits for a DataExport to become
+	// Ready before returning an error.  Defaults to 5 minutes.
+	ReadinessTimeout time.Duration
+
 	// Log is the structured logger.  Defaults to slog.Default() when nil.
 	Log *slog.Logger
 }
@@ -103,6 +109,10 @@ func applyDefaults(cfg Config) Config {
 		cfg.ZstdLevel = compress.LevelDefault
 	}
 
+	if cfg.ReadinessTimeout <= 0 {
+		cfg.ReadinessTimeout = defaultReadinessTimeout
+	}
+
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
@@ -115,8 +125,12 @@ func applyDefaults(cfg Config) Config {
 		sc := cfg.SafeClient
 		log := cfg.Log
 		c := cfg.KubeClient
+		timeout := cfg.ReadinessTimeout
 		cfg.OpenExport = func(ctx context.Context, namespace, shadowVSName, ttl string) (*exporter.Export, error) {
-			return exporter.OpenExport(ctx, log, c, namespace, shadowVSName, ttl, sc)
+			waitCtx, waitCancel := context.WithTimeout(ctx, timeout)
+			defer waitCancel()
+
+			return exporter.OpenExport(waitCtx, log, c, namespace, shadowVSName, ttl, sc)
 		}
 	}
 

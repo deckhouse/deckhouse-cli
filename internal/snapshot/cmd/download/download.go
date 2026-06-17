@@ -21,8 +21,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/spf13/cobra"
@@ -47,7 +50,7 @@ const (
 )
 
 // NewCommand builds the `d8 snapshot download` cobra command.
-func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
+func NewCommand(log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           cmdUse + " [flags] <snapshot>",
 		Short:         "Download a snapshot to a local directory tree",
@@ -60,7 +63,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
   d8 snapshot download my-snap -n default -o out --workers 8 --per-volume-concurrency 8`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return Run(ctx, log, cmd, args)
+			return Run(log, cmd, args)
 		},
 	}
 
@@ -75,7 +78,17 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 }
 
 // Run validates flags, builds the pipeline config, and executes the download.
-func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
+// It derives a signal-cancellable context from cmd.Context() so that Ctrl-C
+// (SIGINT) and SIGTERM cleanly stop the download.
+func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
+	parentCtx := cmd.Context()
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+
+	ctx, cancel := signal.NotifyContext(parentCtx, os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	namespace, err := cmd.Flags().GetString(flagNamespace)
 	if err != nil {
 		return fmt.Errorf("reading --%s flag: %w", flagNamespace, err)

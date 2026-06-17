@@ -17,7 +17,6 @@ limitations under the License.
 package snapshot
 
 import (
-	"context"
 	"log/slog"
 
 	"github.com/spf13/cobra"
@@ -37,10 +36,9 @@ func NewCommand() *cobra.Command {
 		},
 	}
 
-	ctx := context.Background()
 	log := slog.Default()
 
-	cmd.AddCommand(download.NewCommand(ctx, log))
+	cmd.AddCommand(download.NewCommand(log))
 
 	return cmd
 }
