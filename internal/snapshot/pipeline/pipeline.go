@@ -337,11 +337,21 @@ func downloadFS(ctx context.Context, cfg Config, enc *compress.Encoder, nodeDir 
 }
 
 // nodeIdentity converts a source.Node into an archive.NodeIdentity for resume scanning.
+// DirName is set to node.SourceName (the captured object name from the source-ref
+// annotation) when available, falling back to the CR name for nodes without a
+// source annotation. The on-disk directory derives from DirName; identity
+// matching (snapshot.yaml fields) always uses Name (the CR name) and SourceRef.
 func nodeIdentity(node *source.Node) archive.NodeIdentity {
+	dirName := node.SourceName
+	if dirName == "" {
+		dirName = node.Name
+	}
+
 	return archive.NodeIdentity{
 		APIVersion: node.APIVersion,
 		Kind:       node.Kind,
 		Name:       node.Name,
+		DirName:    dirName,
 		Namespace:  node.Namespace,
 		SourceRef:  node.SourceRef,
 	}
