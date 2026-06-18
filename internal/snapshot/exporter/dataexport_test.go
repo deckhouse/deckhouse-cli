@@ -245,6 +245,56 @@ func TestWaitReady_DeadlineExceeded(t *testing.T) {
 	assert.True(t, errors.Is(err, context.DeadlineExceeded), "expected context.DeadlineExceeded, got: %v", err)
 }
 
+// TestWaitReady_DeadlineError_ContainsHintAndStatus verifies that the error returned
+// on context deadline contains the inspection hint and the last observed DataExport
+// status, so the user can immediately query the object for more details.
+func TestWaitReady_DeadlineError_ContainsHintAndStatus(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace    = "test-ns"
+		shadowVSName = "d8-ss-hint-check"
+		lastReason   = "TargetNotReady"
+		lastMessage  = "volume not provisioned yet"
+	)
+
+	deName := exporter.DataExportName(shadowVSName)
+
+	scheme := newDEScheme(t)
+
+	// DataExport with a known Ready condition reason so we can assert it appears in the error.
+	de := &deapi.DataExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deName,
+			Namespace: namespace,
+		},
+		Status: deapi.DataExportStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:    "Ready",
+					Status:  metav1.ConditionFalse,
+					Reason:  lastReason,
+					Message: lastMessage,
+				},
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(de).WithStatusSubresource(de).Build()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+
+	_, err := exporter.WaitReady(ctx, c, slog.Default(), namespace, deName)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded),
+		"error must wrap context.DeadlineExceeded; got: %v", err)
+	assert.Contains(t, err.Error(), "d8 k -n "+namespace+" get dataexport "+deName,
+		"error must contain the inspection hint")
+	assert.Contains(t, err.Error(), lastReason,
+		"error must contain the last observed Ready condition reason")
+}
+
 func TestWaitReady_ContextCancelled(t *testing.T) {
 	t.Parallel()
 

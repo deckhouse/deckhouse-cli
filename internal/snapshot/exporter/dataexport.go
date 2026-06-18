@@ -39,6 +39,10 @@ var ErrExpired = errors.New("DataExport expired")
 // default than the 2-minute interactive default.
 const defaultDataExportTTL = "2h"
 
+// logEveryN is the poll-attempt cadence at which WaitReady emits a progress log.
+// With a 3 s poll interval, every 5 attempts ≈ 15 s.
+const logEveryN = 5
+
 // DataExportName derives a deterministic DataExport CR name from the shadow
 // VolumeSnapshot name. The result fits in a DNS-1123 label.
 func DataExportName(shadowVSName string) string {
@@ -100,12 +104,37 @@ func EnsureDataExport(
 	return fetched, nil
 }
 
+// readyConditionStatus returns a short status string from the DataExport conditions.
+// It returns "reason: message" from the Ready condition, or "URL not assigned yet"
+// when no Ready condition is present and the URL is still empty.
+func readyConditionStatus(conds []metav1.Condition, hasURL bool) string {
+	for _, cond := range conds {
+		if cond.Type == "Ready" {
+			msg := cond.Reason
+			if cond.Message != "" {
+				msg += ": " + cond.Message
+			}
+
+			return msg
+		}
+	}
+
+	if !hasURL {
+		return "URL not assigned yet"
+	}
+
+	return "waiting"
+}
+
 // WaitReady polls the DataExport named deName until:
 //   - its Ready condition is True and Status.URL is populated → returns the DE,
 //   - its Expired condition is True → returns a wrapped ErrExpired,
-//   - ctx is cancelled → returns ctx.Err().
+//   - ctx is cancelled or its deadline is exceeded → returns a wrapped ctx.Err()
+//     that includes the last observed DataExport status and an inspection hint.
 //
-// The poll interval is 3 s. Callers set a deadline via ctx to bound the wait.
+// The poll interval is 3 s. A log line is emitted on the first poll and every
+// logEveryN polls (≈15 s) to avoid spamming output while the export initialises.
+// Callers set a deadline via ctx to bound the wait.
 func WaitReady(
 	ctx context.Context,
 	c client.Client,
@@ -113,7 +142,9 @@ func WaitReady(
 	namespace,
 	deName string,
 ) (*deapi.DataExport, error) {
-	for {
+	var lastStatus string
+
+	for attempt := 0; ; attempt++ {
 		de := new(deapi.DataExport)
 
 		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, de); err != nil {
@@ -134,13 +165,30 @@ func WaitReady(
 			}
 		}
 
-		log.Info("waiting for DataExport to be ready",
-			slog.String("namespace", namespace),
-			slog.String("name", deName))
+		lastStatus = readyConditionStatus(de.Status.Conditions, de.Status.URL != "")
+
+		if attempt == 0 || attempt%logEveryN == 0 {
+			attrs := make([]slog.Attr, 0, 5)
+			attrs = append(attrs,
+				slog.String("namespace", namespace),
+				slog.String("name", deName),
+				slog.String("status", lastStatus),
+				slog.Int("attempt", attempt),
+			)
+
+			if deadline, ok := ctx.Deadline(); ok {
+				attrs = append(attrs, slog.String("timeout_in", time.Until(deadline).Round(time.Second).String()))
+			}
+
+			log.LogAttrs(ctx, slog.LevelInfo, "waiting for DataExport to be ready", attrs...)
+		}
 
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, fmt.Errorf(
+				"%w; DataExport status: %s\n\nTo inspect DataExport status, run:\n  d8 k -n %s get dataexport %s -o yaml",
+				ctx.Err(), lastStatus, namespace, deName,
+			)
 		case <-time.After(3 * time.Second):
 		}
 	}
