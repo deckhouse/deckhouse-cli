@@ -734,14 +734,14 @@ func TestPipeline_E2E_MultiVolume(t *testing.T) {
 	_, err = os.Stat(blockPVCManifest)
 	require.NoError(t, err, "block volume node must have PVC manifest")
 
-	// Block volume node snapshot.yaml must carry a Volume block.
+	// Block volume node snapshot.yaml must carry a Volumes entry.
 	blockSY, err := archive.ReadSnapshotYAML(blockVolDir)
 	require.NoError(t, err, "ReadSnapshotYAML for block volume node")
-	require.NotNil(t, blockSY.Volume, "block volume node snapshot.yaml must carry Volume block")
-	require.Equal(t, e2eMultiBlockPVC, blockSY.Volume.Target.Name,
-		"block volume Volume.Target.Name must match block PVC")
-	require.Equal(t, e2eMultiBlockVSC, blockSY.Volume.Artifact.Name,
-		"block volume Volume.Artifact.Name must match block VSC")
+	require.Len(t, blockSY.Volumes, 1, "block volume node snapshot.yaml must carry one Volumes entry")
+	require.Equal(t, e2eMultiBlockPVC, blockSY.Volumes[0].Target.Name,
+		"block volume Volumes[0].Target.Name must match block PVC")
+	require.Equal(t, e2eMultiBlockVSC, blockSY.Volumes[0].Artifact.Name,
+		"block volume Volumes[0].Artifact.Name must match block VSC")
 
 	// ── Filesystem volume node ────────────────────────────────────────────────
 	fsVolDir := filepath.Join(multiDiskDir, archive.SnapshotsDirName,
@@ -764,14 +764,14 @@ func TestPipeline_E2E_MultiVolume(t *testing.T) {
 	_, err = os.Stat(fsPVCManifest)
 	require.NoError(t, err, "fs volume node must have PVC manifest")
 
-	// FS volume node snapshot.yaml must carry a Volume block.
+	// FS volume node snapshot.yaml must carry a Volumes entry.
 	fsSY, err := archive.ReadSnapshotYAML(fsVolDir)
 	require.NoError(t, err, "ReadSnapshotYAML for fs volume node")
-	require.NotNil(t, fsSY.Volume, "fs volume node snapshot.yaml must carry Volume block")
-	require.Equal(t, e2eMultiFSPVC, fsSY.Volume.Target.Name,
-		"fs volume Volume.Target.Name must match fs PVC")
-	require.Equal(t, e2eMultiFSVSC, fsSY.Volume.Artifact.Name,
-		"fs volume Volume.Artifact.Name must match fs VSC")
+	require.Len(t, fsSY.Volumes, 1, "fs volume node snapshot.yaml must carry one Volumes entry")
+	require.Equal(t, e2eMultiFSPVC, fsSY.Volumes[0].Target.Name,
+		"fs volume Volumes[0].Target.Name must match fs PVC")
+	require.Equal(t, e2eMultiFSVSC, fsSY.Volumes[0].Artifact.Name,
+		"fs volume Volumes[0].Artifact.Name must match fs VSC")
 
 	// ── Resume: second run must be a no-op ────────────────────────────────────
 	mtimes := e2eCollectMtimes(t, outputDir)

@@ -40,8 +40,12 @@ type fsFileJob struct {
 }
 
 // DownloadFilesystemVolume recursively lists the filesystem volume starting at
-// filesRootURL and downloads each file into nodeDir/data/<relpath>.zst, preserving
+// filesRootURL and downloads each file into dataDir/<relpath>.zst, preserving
 // directory structure. Symlink items ("link") are recorded but not followed.
+//
+// dataDir is the absolute path to the target data directory (the caller
+// constructs it using archive.DataDirName or archive.MultiVolumeDir for
+// multi-volume layouts).
 //
 // Already-complete destination files are skipped. Stale *.tmp files are removed
 // before a download attempt. workers bounds parallelism; the first error cancels
@@ -49,7 +53,7 @@ type fsFileJob struct {
 func DownloadFilesystemVolume(
 	ctx context.Context,
 	log *slog.Logger,
-	nodeDir string,
+	dataDir string,
 	filesRootURL string,
 	workers int,
 	fetcher *exporter.Fetcher,
@@ -58,8 +62,6 @@ func DownloadFilesystemVolume(
 	if workers <= 0 {
 		workers = 1
 	}
-
-	dataDir := filepath.Join(nodeDir, archive.DataDirName)
 
 	if err := archive.EnsureDir(dataDir); err != nil {
 		return fmt.Errorf("create data dir %s: %w", dataDir, err)

@@ -39,11 +39,14 @@ import (
 // and keeps the chunk-file count manageable for large volumes.
 const DefaultChunkSize = 256 * 1024 * 1024 // 256 MiB
 
-// DownloadBlockChunks downloads all chunks of a block volume into the temporary
-// chunk directory nodeDir/data.img.zst.d/. Chunk k covers raw bytes
-// [k*chunkSize, min((k+1)*chunkSize, totalSize)). Each chunk is fetched via a
-// Range GET, encoded as an independent zstd frame, and atomically written as
-// chunk_NNNNN.zst.
+// DownloadBlockChunks downloads all chunks of a block volume into chunkDir.
+// Chunk k covers raw bytes [k*chunkSize, min((k+1)*chunkSize, totalSize)).
+// Each chunk is fetched via a Range GET, encoded as an independent zstd frame,
+// and atomically written as chunk_NNNNN.zst.
+//
+// chunkDir is the absolute path to the chunk directory (the caller constructs it
+// using archive.BlockChunksDirName or archive.BlockChunksDirNameFor for
+// multi-volume layouts).
 //
 // Already-complete chunks (final file exists) are skipped. Stale *.tmp files
 // are cleaned before a chunk is fetched. workers bounds parallelism; the first
@@ -57,7 +60,7 @@ const DefaultChunkSize = 256 * 1024 * 1024 // 256 MiB
 func DownloadBlockChunks(
 	ctx context.Context,
 	log *slog.Logger,
-	nodeDir string,
+	chunkDir string,
 	blockURL string,
 	totalSize int64,
 	chunkSize int64,
@@ -72,8 +75,6 @@ func DownloadBlockChunks(
 	if workers <= 0 {
 		workers = 1
 	}
-
-	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
 
 	if err := archive.EnsureDir(chunkDir); err != nil {
 		return fmt.Errorf("create chunk dir %s: %w", chunkDir, err)

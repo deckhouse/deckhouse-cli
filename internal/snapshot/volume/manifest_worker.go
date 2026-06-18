@@ -34,9 +34,11 @@ import (
 // archive.WriteManifest. Collision fallback (same kind+name but different API group)
 // is handled transparently by WriteManifest.
 //
-// PersistentVolumeClaims that correspond to OwnDataRefs (node.OwnDataRefs[].Target)
-// are excluded: for non-aggregator nodes the captured PVC manifest belongs in the node's
-// own data download path, not in the shared manifests/ directory.
+// PersistentVolumeClaims that are targets of orphan leaf volume children
+// (node.Children[i].Binding != nil) are excluded: for aggregator nodes the
+// captured PVC manifests belong in each leaf node's own manifests/ directory.
+// PVCs from node.OwnDataRefs are NOT excluded — they are co-located with the
+// volume data in the node's own manifests/ (spec §3.9.2).
 // Matching is by metadata.uid first; if the uid is absent in the captured manifest,
 // it falls back to metadata.name.
 //
@@ -55,7 +57,7 @@ func WriteNodeManifests(ctx context.Context, src source.ManifestSource, nodeDir 
 		return fmt.Errorf("fetch manifests for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
-	excluded := buildDataRefExclusion(node.OwnDataRefs)
+	excluded := buildLeafChildExclusion(node.Children)
 
 	for _, obj := range objs {
 		if isExcludedDataRefPVC(obj, excluded) {
@@ -192,27 +194,33 @@ func bindingToVolumeInfo(b *snapshotapi.SnapshotDataBinding) archive.VolumeInfo 
 }
 
 // dataRefExclusion holds PVC identifiers to skip when writing snapshot node manifests.
-// For non-aggregator nodes the captured PVC manifest for each OwnDataRef volume is
-// written alongside the volume data; it is excluded from the shared manifests/ dir.
+// For aggregator nodes the captured PVC manifest for each orphan leaf child is
+// written into the leaf's own manifests/ dir and excluded from the aggregator's.
 type dataRefExclusion struct {
 	uids  map[string]struct{}
 	names map[string]struct{}
 }
 
-// buildDataRefExclusion constructs an exclusion set from a snapshot node's DataRefs.
-func buildDataRefExclusion(dataRefs []snapshotapi.SnapshotDataBinding) dataRefExclusion {
+// buildLeafChildExclusion constructs an exclusion set from the orphan leaf volume
+// children of a snapshot node. Children with Binding != nil are leaf nodes whose
+// target PVC manifest belongs in the leaf's own directory.
+func buildLeafChildExclusion(children []*source.Node) dataRefExclusion {
 	ex := dataRefExclusion{
-		uids:  make(map[string]struct{}, len(dataRefs)),
-		names: make(map[string]struct{}, len(dataRefs)),
+		uids:  make(map[string]struct{}, len(children)),
+		names: make(map[string]struct{}, len(children)),
 	}
 
-	for _, ref := range dataRefs {
-		if ref.TargetUID != "" {
-			ex.uids[ref.TargetUID] = struct{}{}
+	for _, child := range children {
+		if child.Binding == nil {
+			continue
 		}
 
-		if ref.Target.Name != "" {
-			ex.names[ref.Target.Name] = struct{}{}
+		if child.Binding.TargetUID != "" {
+			ex.uids[child.Binding.TargetUID] = struct{}{}
+		}
+
+		if child.Binding.Target.Name != "" {
+			ex.names[child.Binding.Target.Name] = struct{}{}
 		}
 	}
 
