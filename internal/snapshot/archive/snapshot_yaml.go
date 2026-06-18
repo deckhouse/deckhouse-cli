@@ -47,11 +47,18 @@ type SnapshotYAML struct {
 	SourceName string `json:"sourceName,omitempty"`
 	// Checksum is the locally-computed node integrity digest.
 	Checksum NodeChecksum `json:"checksum"`
-	// Volume is populated for volume nodes (node.Binding != nil) and omitted for
-	// snapshot nodes. It records the captured PVC and its durable data artifact.
-	// snapshot.yaml is excluded from ComputeNodeChecksum/VerifyNode, so this field
-	// does not affect the integrity digest.
-	Volume *VolumeInfo `json:"volume,omitempty"`
+	// Volumes lists the captured PVC volumes owned by this node.
+	//
+	//   - Snapshot nodes (non-aggregator) that own ≥1 OwnDataRefs carry one
+	//     VolumeInfo per binding.
+	//   - Orphan leaf volume nodes (Binding != nil) carry exactly one entry
+	//     derived from the single Binding.
+	//   - Aggregator snapshot nodes and purely-manifest nodes carry no volumes
+	//     and the field is omitted (omitempty).
+	//
+	// snapshot.yaml is excluded from ComputeNodeChecksum/VerifyNode, so this
+	// field does not affect the integrity digest.
+	Volumes []VolumeInfo `json:"volumes,omitempty"`
 }
 
 // VolumeObjectRef is a reference to a Kubernetes object stored in the volume block

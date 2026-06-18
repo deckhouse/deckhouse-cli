@@ -116,10 +116,14 @@ func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeD
 // <nodeDir>/snapshot.yaml. It must be called after all manifests and volume data
 // for the node are fully written.
 //
-// For volume nodes (node.Binding != nil) the snapshot.yaml carries a volume block
-// that records the captured PVC (Target) and its data artifact (Artifact). For
-// snapshot nodes the volume block is omitted (omitempty). The volume block does not
-// affect ComputeNodeChecksum because snapshot.yaml is excluded from the digest.
+// The snapshot.yaml Volumes list is populated as follows:
+//   - Orphan leaf volume nodes (node.Binding != nil): one VolumeInfo from Binding.
+//   - Non-aggregator snapshot nodes (node.OwnDataRefs non-empty): one VolumeInfo
+//     per OwnDataRef binding.
+//   - All other nodes (aggregators and manifest-only): Volumes is nil (omitted).
+//
+// The Volumes field does not affect ComputeNodeChecksum because snapshot.yaml is
+// excluded from the integrity digest.
 //
 // FinalizeNode is idempotent: each call recomputes the checksum and overwrites
 // snapshot.yaml with the fresh value. The pipeline calls it once per node after
@@ -138,23 +142,7 @@ func FinalizeNode(nodeDir string, node *source.Node) error {
 		SourceRef:  node.SourceRef,
 		SourceName: node.SourceName,
 		Checksum:   checksum,
-	}
-
-	if node.Binding != nil {
-		sy.Volume = &archive.VolumeInfo{
-			Target: archive.VolumeObjectRef{
-				APIVersion: node.Binding.Target.APIVersion,
-				Kind:       node.Binding.Target.Kind,
-				Name:       node.Binding.Target.Name,
-				Namespace:  node.Binding.Target.Namespace,
-				UID:        string(node.Binding.Target.UID),
-			},
-			Artifact: archive.VolumeObjectRef{
-				APIVersion: node.Binding.Artifact.APIVersion,
-				Kind:       node.Binding.Artifact.Kind,
-				Name:       node.Binding.Artifact.Name,
-			},
-		}
+		Volumes:    buildVolumesList(node),
 	}
 
 	if err := archive.WriteSnapshotYAML(nodeDir, sy); err != nil {
@@ -162,6 +150,45 @@ func FinalizeNode(nodeDir string, node *source.Node) error {
 	}
 
 	return nil
+}
+
+// buildVolumesList constructs the Volumes list for snapshot.yaml from a node.
+// Returns nil (omitted) when the node owns no volumes.
+func buildVolumesList(node *source.Node) []archive.VolumeInfo {
+	// Orphan leaf volume node: single Binding.
+	if node.Binding != nil {
+		return []archive.VolumeInfo{bindingToVolumeInfo(node.Binding)}
+	}
+
+	// Non-aggregator snapshot node: one entry per OwnDataRef.
+	if len(node.OwnDataRefs) == 0 {
+		return nil
+	}
+
+	vols := make([]archive.VolumeInfo, len(node.OwnDataRefs))
+	for i := range node.OwnDataRefs {
+		vols[i] = bindingToVolumeInfo(&node.OwnDataRefs[i])
+	}
+
+	return vols
+}
+
+// bindingToVolumeInfo converts a SnapshotDataBinding to a VolumeInfo.
+func bindingToVolumeInfo(b *snapshotapi.SnapshotDataBinding) archive.VolumeInfo {
+	return archive.VolumeInfo{
+		Target: archive.VolumeObjectRef{
+			APIVersion: b.Target.APIVersion,
+			Kind:       b.Target.Kind,
+			Name:       b.Target.Name,
+			Namespace:  b.Target.Namespace,
+			UID:        string(b.Target.UID),
+		},
+		Artifact: archive.VolumeObjectRef{
+			APIVersion: b.Artifact.APIVersion,
+			Kind:       b.Artifact.Kind,
+			Name:       b.Artifact.Name,
+		},
+	}
 }
 
 // dataRefExclusion holds PVC identifiers to skip when writing snapshot node manifests.
