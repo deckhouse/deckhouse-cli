@@ -96,8 +96,8 @@ func TestSnapshotYAML_RoundTrip_WithoutVolume(t *testing.T) {
 		t.Errorf("Checksum.Hex: got %q, want %q", got.Checksum.Hex, want.Checksum.Hex)
 	}
 
-	if got.Volume != nil {
-		t.Errorf("Volume must be nil for a snapshot node, got %+v", got.Volume)
+	if len(got.Volumes) != 0 {
+		t.Errorf("Volumes must be empty for a snapshot node without OwnDataRefs, got %+v", got.Volumes)
 	}
 }
 
@@ -111,7 +111,7 @@ func TestSnapshotYAML_RoundTrip_WithVolume(t *testing.T) {
 		t.Fatalf("ComputeNodeChecksum: %v", err)
 	}
 
-	wantVolume := &archive.VolumeInfo{
+	wantVol := archive.VolumeInfo{
 		Target: archive.VolumeObjectRef{
 			APIVersion: "v1",
 			Kind:       "PersistentVolumeClaim",
@@ -132,7 +132,7 @@ func TestSnapshotYAML_RoundTrip_WithVolume(t *testing.T) {
 		Name:       "d8-ss-aabbccdd",
 		Namespace:  "ns-a",
 		Checksum:   checksum,
-		Volume:     wantVolume,
+		Volumes:    []archive.VolumeInfo{wantVol},
 	}
 
 	if err := archive.WriteSnapshotYAML(dir, want); err != nil {
@@ -144,24 +144,83 @@ func TestSnapshotYAML_RoundTrip_WithVolume(t *testing.T) {
 		t.Fatalf("ReadSnapshotYAML: %v", err)
 	}
 
-	if got.Volume == nil {
-		t.Fatal("Volume must not be nil for a volume node")
+	if len(got.Volumes) != 1 {
+		t.Fatalf("Volumes length: got %d, want 1", len(got.Volumes))
 	}
 
-	if got.Volume.Target.Name != wantVolume.Target.Name {
-		t.Errorf("Volume.Target.Name: got %q, want %q", got.Volume.Target.Name, wantVolume.Target.Name)
+	gotVol := got.Volumes[0]
+
+	if gotVol.Target.Name != wantVol.Target.Name {
+		t.Errorf("Volumes[0].Target.Name: got %q, want %q", gotVol.Target.Name, wantVol.Target.Name)
 	}
 
-	if got.Volume.Target.UID != wantVolume.Target.UID {
-		t.Errorf("Volume.Target.UID: got %q, want %q", got.Volume.Target.UID, wantVolume.Target.UID)
+	if gotVol.Target.UID != wantVol.Target.UID {
+		t.Errorf("Volumes[0].Target.UID: got %q, want %q", gotVol.Target.UID, wantVol.Target.UID)
 	}
 
-	if got.Volume.Artifact.Name != wantVolume.Artifact.Name {
-		t.Errorf("Volume.Artifact.Name: got %q, want %q", got.Volume.Artifact.Name, wantVolume.Artifact.Name)
+	if gotVol.Artifact.Name != wantVol.Artifact.Name {
+		t.Errorf("Volumes[0].Artifact.Name: got %q, want %q", gotVol.Artifact.Name, wantVol.Artifact.Name)
 	}
 
-	if got.Volume.Artifact.APIVersion != wantVolume.Artifact.APIVersion {
-		t.Errorf("Volume.Artifact.APIVersion: got %q, want %q", got.Volume.Artifact.APIVersion, wantVolume.Artifact.APIVersion)
+	if gotVol.Artifact.APIVersion != wantVol.Artifact.APIVersion {
+		t.Errorf("Volumes[0].Artifact.APIVersion: got %q, want %q", gotVol.Artifact.APIVersion, wantVol.Artifact.APIVersion)
+	}
+}
+
+// TestSnapshotYAML_RoundTrip_MultiVolume verifies that N>1 volumes are correctly
+// serialised and deserialised.
+func TestSnapshotYAML_RoundTrip_MultiVolume(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	vols := []archive.VolumeInfo{
+		{
+			Target:   archive.VolumeObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a", UID: "uid-a"},
+			Artifact: archive.VolumeObjectRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-a"},
+		},
+		{
+			Target:   archive.VolumeObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-b", UID: "uid-b"},
+			Artifact: archive.VolumeObjectRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-b"},
+		},
+	}
+
+	want := archive.SnapshotYAML{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "multi-snap",
+		Checksum:   checksum,
+		Volumes:    vols,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, want); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	got, err := archive.ReadSnapshotYAML(dir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if len(got.Volumes) != len(vols) {
+		t.Fatalf("Volumes length: got %d, want %d", len(got.Volumes), len(vols))
+	}
+
+	for i, wv := range vols {
+		gv := got.Volumes[i]
+
+		if gv.Target.Name != wv.Target.Name {
+			t.Errorf("Volumes[%d].Target.Name: got %q, want %q", i, gv.Target.Name, wv.Target.Name)
+		}
+
+		if gv.Artifact.Name != wv.Artifact.Name {
+			t.Errorf("Volumes[%d].Artifact.Name: got %q, want %q", i, gv.Artifact.Name, wv.Artifact.Name)
+		}
 	}
 }
 
@@ -192,8 +251,8 @@ func TestSnapshotYAML_OmitemptyVolume(t *testing.T) {
 		t.Fatalf("ReadFile snapshot.yaml: %v", err)
 	}
 
-	if strings.Contains(string(raw), "volume:") {
-		t.Errorf("snapshot.yaml must not contain 'volume:' key when Volume is nil; got:\n%s", raw)
+	if strings.Contains(string(raw), "volumes:") {
+		t.Errorf("snapshot.yaml must not contain 'volumes:' key when Volumes is nil; got:\n%s", raw)
 	}
 }
 
@@ -317,24 +376,26 @@ func TestSnapshotYAML_ChecksumUnaffectedByVolumeField(t *testing.T) {
 		t.Fatalf("ComputeNodeChecksum before write: %v", err)
 	}
 
-	// Write snapshot.yaml with a Volume block.
+	// Write snapshot.yaml with a Volumes block.
 	sy := archive.SnapshotYAML{
 		APIVersion: "snapshot.storage.k8s.io/v1",
 		Kind:       "VolumeSnapshot",
 		Name:       "vol-node",
 		Checksum:   checksum1,
-		Volume: &archive.VolumeInfo{
-			Target: archive.VolumeObjectRef{
-				APIVersion: "v1",
-				Kind:       "PersistentVolumeClaim",
-				Name:       "pvc-a",
-				Namespace:  "ns",
-				UID:        "uid-111",
-			},
-			Artifact: archive.VolumeObjectRef{
-				APIVersion: "snapshot.storage.k8s.io/v1",
-				Kind:       "VolumeSnapshotContent",
-				Name:       "vsc-aaa",
+		Volumes: []archive.VolumeInfo{
+			{
+				Target: archive.VolumeObjectRef{
+					APIVersion: "v1",
+					Kind:       "PersistentVolumeClaim",
+					Name:       "pvc-a",
+					Namespace:  "ns",
+					UID:        "uid-111",
+				},
+				Artifact: archive.VolumeObjectRef{
+					APIVersion: "snapshot.storage.k8s.io/v1",
+					Kind:       "VolumeSnapshotContent",
+					Name:       "vsc-aaa",
+				},
 			},
 		},
 	}

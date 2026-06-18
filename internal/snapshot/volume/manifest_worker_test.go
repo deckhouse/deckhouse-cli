@@ -527,24 +527,26 @@ func TestFinalizeNode_VolumeNodeWritesVolumeBlock(t *testing.T) {
 		t.Fatalf("ReadSnapshotYAML: %v", err)
 	}
 
-	if sy.Volume == nil {
-		t.Fatal("Volume block must be present for a volume node")
+	if len(sy.Volumes) != 1 {
+		t.Fatalf("Volumes length: got %d, want 1 for a leaf volume node", len(sy.Volumes))
 	}
 
-	if sy.Volume.Target.Name != "my-pvc" {
-		t.Errorf("Volume.Target.Name: got %q, want %q", sy.Volume.Target.Name, "my-pvc")
+	vol := sy.Volumes[0]
+
+	if vol.Target.Name != "my-pvc" {
+		t.Errorf("Volumes[0].Target.Name: got %q, want %q", vol.Target.Name, "my-pvc")
 	}
 
-	if sy.Volume.Target.UID != "uid-abc" {
-		t.Errorf("Volume.Target.UID: got %q, want %q", sy.Volume.Target.UID, "uid-abc")
+	if vol.Target.UID != "uid-abc" {
+		t.Errorf("Volumes[0].Target.UID: got %q, want %q", vol.Target.UID, "uid-abc")
 	}
 
-	if sy.Volume.Artifact.Name != "vsc-xyz" {
-		t.Errorf("Volume.Artifact.Name: got %q, want %q", sy.Volume.Artifact.Name, "vsc-xyz")
+	if vol.Artifact.Name != "vsc-xyz" {
+		t.Errorf("Volumes[0].Artifact.Name: got %q, want %q", vol.Artifact.Name, "vsc-xyz")
 	}
 
-	if sy.Volume.Artifact.Kind != "VolumeSnapshotContent" {
-		t.Errorf("Volume.Artifact.Kind: got %q, want %q", sy.Volume.Artifact.Kind, "VolumeSnapshotContent")
+	if vol.Artifact.Kind != "VolumeSnapshotContent" {
+		t.Errorf("Volumes[0].Artifact.Kind: got %q, want %q", vol.Artifact.Kind, "VolumeSnapshotContent")
 	}
 
 	// VerifyNode must pass (Volume field does not affect the digest).
@@ -578,8 +580,8 @@ func TestFinalizeNode_SnapshotNodeOmitsVolumeBlock(t *testing.T) {
 		t.Fatalf("ReadSnapshotYAML: %v", err)
 	}
 
-	if sy.Volume != nil {
-		t.Errorf("Volume block must be nil for a snapshot node, got %+v", sy.Volume)
+	if len(sy.Volumes) != 0 {
+		t.Errorf("Volumes must be empty for a snapshot node without OwnDataRefs, got %+v", sy.Volumes)
 	}
 
 	if err := archive.VerifyNode(nodeDir); err != nil {
@@ -639,6 +641,126 @@ func TestFinalizeNode_VolumeBlockDoesNotAffectVerify(t *testing.T) {
 
 	if err := archive.VerifyNode(nodeDir); err != nil {
 		t.Errorf("VerifyNode after second FinalizeNode: %v", err)
+	}
+}
+
+// TestFinalizeNode_SnapshotNodeWithOwnDataRefs verifies that a non-aggregator
+// snapshot node with OwnDataRefs writes one VolumeInfo per binding into Volumes.
+func TestFinalizeNode_SnapshotNodeWithOwnDataRefs(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	if err := archive.WriteManifest(nodeDir, makeObj("v1", "ConfigMap", "snap-cm")); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	node := &source.Node{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "snap-multi",
+		Namespace:  "ns",
+		OwnDataRefs: []snapshotapi.SnapshotDataBinding{
+			{
+				TargetUID: "uid-pvc-a",
+				Target: snapshotapi.SnapshotSubjectRef{
+					APIVersion: "v1",
+					Kind:       "PersistentVolumeClaim",
+					Name:       "pvc-a",
+					Namespace:  "ns",
+					UID:        "uid-pvc-a",
+				},
+				Artifact: snapshotapi.SnapshotDataArtifactRef{
+					APIVersion: "snapshot.storage.k8s.io/v1",
+					Kind:       "VolumeSnapshotContent",
+					Name:       "vsc-a",
+				},
+			},
+			{
+				TargetUID: "uid-pvc-b",
+				Target: snapshotapi.SnapshotSubjectRef{
+					APIVersion: "v1",
+					Kind:       "PersistentVolumeClaim",
+					Name:       "pvc-b",
+					Namespace:  "ns",
+					UID:        "uid-pvc-b",
+				},
+				Artifact: snapshotapi.SnapshotDataArtifactRef{
+					APIVersion: "snapshot.storage.k8s.io/v1",
+					Kind:       "VolumeSnapshotContent",
+					Name:       "vsc-b",
+				},
+			},
+		},
+	}
+
+	if err := volume.FinalizeNode(nodeDir, node); err != nil {
+		t.Fatalf("FinalizeNode: %v", err)
+	}
+
+	sy, err := archive.ReadSnapshotYAML(nodeDir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if len(sy.Volumes) != 2 {
+		t.Fatalf("Volumes length: got %d, want 2", len(sy.Volumes))
+	}
+
+	if sy.Volumes[0].Target.Name != "pvc-a" {
+		t.Errorf("Volumes[0].Target.Name: got %q, want pvc-a", sy.Volumes[0].Target.Name)
+	}
+
+	if sy.Volumes[1].Target.Name != "pvc-b" {
+		t.Errorf("Volumes[1].Target.Name: got %q, want pvc-b", sy.Volumes[1].Target.Name)
+	}
+
+	if sy.Volumes[0].Artifact.Name != "vsc-a" {
+		t.Errorf("Volumes[0].Artifact.Name: got %q, want vsc-a", sy.Volumes[0].Artifact.Name)
+	}
+
+	if sy.Volumes[1].Artifact.Name != "vsc-b" {
+		t.Errorf("Volumes[1].Artifact.Name: got %q, want vsc-b", sy.Volumes[1].Artifact.Name)
+	}
+
+	// VerifyNode must pass: Volumes does not affect the digest.
+	if err := archive.VerifyNode(nodeDir); err != nil {
+		t.Errorf("VerifyNode after FinalizeNode with OwnDataRefs: %v", err)
+	}
+}
+
+// TestFinalizeNode_NoVolumesOmitted verifies that a purely manifest node (no Binding,
+// no OwnDataRefs) produces a snapshot.yaml with Volumes omitted entirely.
+func TestFinalizeNode_NoVolumesOmitted(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	if err := archive.WriteManifest(nodeDir, makeObj("v1", "ConfigMap", "cm")); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	node := &source.Node{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-no-vol",
+	}
+
+	if err := volume.FinalizeNode(nodeDir, node); err != nil {
+		t.Fatalf("FinalizeNode: %v", err)
+	}
+
+	sy, err := archive.ReadSnapshotYAML(nodeDir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if len(sy.Volumes) != 0 {
+		t.Errorf("Volumes must be empty for a no-volume node, got %+v", sy.Volumes)
+	}
+
+	if err := archive.VerifyNode(nodeDir); err != nil {
+		t.Errorf("VerifyNode: %v", err)
 	}
 }
 
