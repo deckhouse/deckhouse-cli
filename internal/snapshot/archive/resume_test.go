@@ -26,10 +26,17 @@ import (
 
 // makeCompleteNode creates a node directory under parent with one manifest file
 // and a valid snapshot.yaml (checksum computed from the manifest).
+// The directory is named NodeDirName(kind, dirName) where dirName = id.DirName if
+// set, else the name parameter.
 func makeCompleteNode(t *testing.T, parent, kind, name string, id archive.NodeIdentity) string {
 	t.Helper()
 
-	nodeDir := filepath.Join(parent, archive.NodeDirName(kind, name))
+	dirPart := name
+	if id.DirName != "" {
+		dirPart = id.DirName
+	}
+
+	nodeDir := filepath.Join(parent, archive.NodeDirName(kind, dirPart))
 
 	if err := os.MkdirAll(filepath.Join(nodeDir, archive.ManifestsDirName), 0o755); err != nil {
 		t.Fatalf("mkdir manifests: %v", err)
@@ -78,12 +85,44 @@ func TestScanNode_NoPrimaryDir(t *testing.T) {
 		t.Errorf("state = %v, want NodeStatePending", plan.State)
 	}
 
+	// When DirName is empty the directory falls back to the CR name.
 	want := filepath.Join(parent, archive.NodeDirName("VirtualDiskSnapshot", "disk-1"))
 
 	if plan.TargetDir != want {
 		t.Errorf("TargetDir = %q, want %q", plan.TargetDir, want)
 	}
+}
 
+func TestScanNode_NoPrimaryDir_DirName(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	id := archive.NodeIdentity{
+		Kind:    "VirtualDiskSnapshot",
+		Name:    "snap-cr-abc",
+		DirName: "source-disk",
+	}
+
+	plan, err := archive.ScanNode(parent, id)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if plan.State != archive.NodeStatePending {
+		t.Errorf("state = %v, want NodeStatePending", plan.State)
+	}
+
+	// Directory must derive from DirName, not from the CR name.
+	want := filepath.Join(parent, archive.NodeDirName("VirtualDiskSnapshot", "source-disk"))
+
+	if plan.TargetDir != want {
+		t.Errorf("TargetDir = %q, want %q", plan.TargetDir, want)
+	}
+
+	if plan.TargetDir == filepath.Join(parent, archive.NodeDirName("VirtualDiskSnapshot", "snap-cr-abc")) {
+		t.Error("TargetDir must not derive from CR name when DirName is set")
+	}
 }
 
 func TestScanNode_CompleteNodeIdentityMatch(t *testing.T) {
@@ -110,10 +149,52 @@ func TestScanNode_CompleteNodeIdentityMatch(t *testing.T) {
 		t.Errorf("state = %v, want NodeStateDone", plan.State)
 	}
 
+	// DirName not set → falls back to Name.
 	want := filepath.Join(parent, archive.NodeDirName(id.Kind, id.Name))
 
 	if plan.TargetDir != want {
 		t.Errorf("TargetDir = %q, want %q", plan.TargetDir, want)
+	}
+}
+
+// TestScanNode_CompleteNodeIdentityMatch_DirName verifies that when DirName differs
+// from Name the on-disk path uses DirName while identity matching uses Name+SourceRef.
+func TestScanNode_CompleteNodeIdentityMatch_DirName(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	id := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "snap-cr-abc", // CR name — stored in snapshot.yaml, used for identity
+		DirName:    "source-disk", // on-disk dir component, derived from the source object
+		Namespace:  "default",
+		SourceRef:  `{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"VirtualDisk","name":"source-disk"}`,
+	}
+
+	makeCompleteNode(t, parent, id.Kind, id.Name, id)
+
+	plan, err := archive.ScanNode(parent, id)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if plan.State != archive.NodeStateDone {
+		t.Errorf("state = %v, want NodeStateDone", plan.State)
+	}
+
+	// Directory derives from DirName ("source-disk"), not from the CR name.
+	want := filepath.Join(parent, archive.NodeDirName(id.Kind, "source-disk"))
+
+	if plan.TargetDir != want {
+		t.Errorf("TargetDir = %q, want %q", plan.TargetDir, want)
+	}
+
+	// Sanity: the CR-name-based path must NOT be the result.
+	crNameDir := filepath.Join(parent, archive.NodeDirName(id.Kind, "snap-cr-abc"))
+	if plan.TargetDir == crNameDir {
+		t.Error("TargetDir must derive from DirName, not from the CR name")
 	}
 }
 
@@ -157,6 +238,59 @@ func TestScanNode_CompleteNodeIdentityMismatch(t *testing.T) {
 
 	if plan.TargetDir == primaryDir {
 		t.Error("TargetDir must not be the primary directory on identity mismatch")
+	}
+}
+
+// TestScanNode_CollisionUseDirName verifies that when DirName is set the collision
+// path also derives from DirName and uses it as the directory-name component.
+func TestScanNode_CollisionUseDirName(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+
+	// Existing complete node stored under the DirName-based path for identity A.
+	idA := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "snap-cr-a",
+		DirName:    "source-disk",
+		Namespace:  "default",
+		SourceRef:  "vd/disk-a",
+	}
+
+	makeCompleteNode(t, parent, idA.Kind, idA.Name, idA)
+
+	// New planned node has the same DirName (same source object name) but a
+	// different CR name and SourceRef → identity mismatch → collision redirect.
+	idB := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "snap-cr-b",
+		DirName:    "source-disk",
+		Namespace:  "default",
+		SourceRef:  "vd/disk-b",
+	}
+
+	plan, err := archive.ScanNode(parent, idB)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if plan.State != archive.NodeStatePending {
+		t.Errorf("state = %v, want NodeStatePending", plan.State)
+	}
+
+	// Collision path must be under the DirName-based prefix, not the CR name.
+	dirNameBase := archive.NodeDirName("VirtualDiskSnapshot", "source-disk")
+
+	if !filepath.IsAbs(plan.TargetDir) {
+		t.Errorf("TargetDir %q is not absolute", plan.TargetDir)
+	}
+
+	base := filepath.Base(plan.TargetDir)
+	if len(base) < len(dirNameBase) || base[:len(dirNameBase)] != dirNameBase {
+		t.Errorf("collision TargetDir base %q does not start with %q", base, dirNameBase)
 	}
 }
 

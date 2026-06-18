@@ -58,9 +58,17 @@ const (
 type NodeIdentity struct {
 	APIVersion string
 	Kind       string
-	Name       string
-	Namespace  string
-	SourceRef  string
+	// Name is the CR metadata.name used for resume identity matching (stored in
+	// snapshot.yaml and compared by matchesIdentity). It is NOT the on-disk dir name.
+	Name string
+	// DirName is the on-disk directory-name component: NodeDirName(Kind, DirName).
+	// For domain snapshot nodes it is the source-ref .name (the captured object name);
+	// for orphan leaf volume nodes it is the captured PVC name.
+	// When empty, Name is used as the fallback (root nodes that use ScanAbsolute
+	// with a user-supplied path and domain nodes without a source annotation).
+	DirName   string
+	Namespace string
+	SourceRef string
 }
 
 // NodeResumePlan is the result of scanning one planned node on disk.
@@ -74,18 +82,34 @@ type NodeResumePlan struct {
 	State NodeState
 }
 
+// nodeDirComponent returns the directory-name component for id.
+// It uses id.DirName when set and falls back to id.Name (for nodes without a
+// source annotation and for backward compatibility with code that does not set DirName).
+func nodeDirComponent(id NodeIdentity) string {
+	if id.DirName != "" {
+		return id.DirName
+	}
+
+	return id.Name
+}
+
 // ScanNode inspects parentDir for an existing node directory whose name is
-// NodeDirName(id.Kind, id.Name), removes any stale *.tmp files, and returns a
-// NodeResumePlan describing the on-disk state for the planned node.
+// NodeDirName(id.Kind, nodeDirComponent(id)), removes any stale *.tmp files,
+// and returns a NodeResumePlan describing the on-disk state for the planned node.
+//
+// The directory name is derived from id.DirName (the source object name) when set,
+// falling back to id.Name (the CR name) for nodes without a source annotation.
+// Identity matching (matchesIdentity) still uses id.Name and id.SourceRef, which
+// are the values written into snapshot.yaml.
 //
 // Collision rule: if the primary directory is complete (VerifyNode passes) but
 // its stored identity does not match id, the primary directory belongs to a
 // different node.  ScanNode returns NodeStatePending with TargetDir set to
-// CollisionNodeDir(parentDir, id.Kind, id.Name, short), where short is derived
-// from the existing complete node's checksum.  This prevents the pipeline from
-// overwriting unrelated completed data.
+// CollisionNodeDir(parentDir, id.Kind, nodeDirComponent(id), short), where short
+// is derived from the existing complete node's checksum.  This prevents the
+// pipeline from overwriting unrelated completed data.
 func ScanNode(parentDir string, id NodeIdentity) (NodeResumePlan, error) {
-	primaryDir := filepath.Join(parentDir, NodeDirName(id.Kind, id.Name))
+	primaryDir := filepath.Join(parentDir, NodeDirName(id.Kind, nodeDirComponent(id)))
 
 	_, statErr := os.Stat(primaryDir)
 	if errors.Is(statErr, os.ErrNotExist) {
@@ -123,7 +147,7 @@ func classifyCompleteDir(parentDir, primaryDir string, id NodeIdentity) (NodeRes
 	// Redirect the new node to a stable collision-suffixed path so the existing
 	// complete data is not overwritten.
 	short := ShortChecksum(sy.Checksum.Hex)
-	collisionDir := CollisionNodeDir(parentDir, id.Kind, id.Name, short)
+	collisionDir := CollisionNodeDir(parentDir, id.Kind, nodeDirComponent(id), short)
 
 	return NodeResumePlan{TargetDir: collisionDir, State: NodeStatePending}, nil
 }
