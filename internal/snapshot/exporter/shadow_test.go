@@ -532,6 +532,62 @@ func TestWaitShadowVSReady_Ready(t *testing.T) {
 	require.NoError(t, err, "should return immediately when shadow VS is already ready")
 }
 
+// TestWaitShadowVSReady_DeadlineError_ContainsHint verifies that the error
+// returned on context expiry contains the inspection hint so the user can
+// immediately query the shadow VolumeSnapshot for more details.
+func TestWaitShadowVSReady_DeadlineError_ContainsHint(t *testing.T) {
+	t.Parallel()
+
+	const (
+		shadowName  = "d8-ss-hint"
+		namespace   = "ns-hint"
+		realVSCName = "vsc-real-hint"
+	)
+
+	scheme := newSnapScheme(t)
+
+	shadowVS := &snapv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: shadowName, Namespace: namespace},
+	}
+	realVSC := &snapv1.VolumeSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: realVSCName},
+		Spec: snapv1.VolumeSnapshotContentSpec{
+			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
+			Driver:         "csi.test",
+			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &[]string{"h"}[0]},
+			VolumeSnapshotRef: corev1.ObjectReference{
+				Name: shadowName, Namespace: namespace,
+			},
+		},
+	}
+	shadowVSC := &snapv1.VolumeSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: shadowName},
+		Spec: snapv1.VolumeSnapshotContentSpec{
+			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
+			Driver:         "csi.test",
+			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &[]string{"h"}[0]},
+			VolumeSnapshotRef: corev1.ObjectReference{
+				Name: shadowName, Namespace: namespace,
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(shadowVS, realVSC, shadowVSC).
+		Build()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	err := exporter.WaitShadowVSReady(ctx, c, slog.Default(), namespace, shadowName, realVSCName)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, exporter.ErrShadowNotReady,
+		"error must wrap ErrShadowNotReady")
+	assert.Contains(t, err.Error(), "d8 k -n "+namespace+" get volumesnapshot "+shadowName,
+		"deadline error must contain the inspection hint")
+}
+
 // TestWaitShadowVSReady_Timeout verifies that WaitShadowVSReady returns an
 // error containing the diagnostic message and ErrShadowNotReady when the
 // context expires before the shadow VS becomes ready.

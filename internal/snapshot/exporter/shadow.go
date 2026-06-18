@@ -177,6 +177,25 @@ func setVSCRestoreSize(ctx context.Context, c client.Client, name string, restor
 	})
 }
 
+// shadowVSSubState returns a short status string describing why the shadow VS
+// is not yet ready. It includes the real VSC restoreSize for diagnostic context.
+func shadowVSSubState(vs *snapv1.VolumeSnapshot, lastRealRestoreSize *int64) string {
+	restoreStr := "unknown"
+	if lastRealRestoreSize != nil {
+		restoreStr = fmt.Sprintf("%d", *lastRealRestoreSize)
+	}
+
+	if vs.Status == nil || vs.Status.ReadyToUse == nil {
+		return "shadow VS not created yet (real VSC restoreSize=" + restoreStr + ")"
+	}
+
+	if !*vs.Status.ReadyToUse {
+		return "waiting for readyToUse (real VSC restoreSize=" + restoreStr + ")"
+	}
+
+	return "waiting for restoreSize (real VSC restoreSize=" + restoreStr + ")"
+}
+
 // WaitShadowVSReady polls the shadow VolumeSnapshot (shadowName in namespace)
 // until both status.readyToUse==true and status.restoreSize!=nil.
 //
@@ -190,9 +209,12 @@ func setVSCRestoreSize(ctx context.Context, c client.Client, name string, restor
 // provision the export PVC. Only after this function returns should a
 // DataExport be created for the shadow VS.
 //
+// A log line is emitted on the first poll and every logEveryN polls (≈15 s).
+// Each line surfaces the sub-state (not created / waiting readyToUse / waiting
+// restoreSize) and the real VSC restoreSize for debugging.
+//
 // The caller must bound the wait via ctx. On expiry the function returns
-// ErrShadowNotReady wrapped with a diagnostic that names the shadow VS/VSC and
-// the real VSC restoreSize (if known).
+// ErrShadowNotReady wrapped with a full diagnostic and an inspection hint.
 func WaitShadowVSReady(
 	ctx context.Context,
 	c client.Client,
@@ -203,7 +225,7 @@ func WaitShadowVSReady(
 ) error {
 	var lastRealRestoreSize *int64
 
-	for {
+	for attempt := 0; ; attempt++ {
 		realVSC := new(snapv1.VolumeSnapshotContent)
 		if getErr := c.Get(ctx, types.NamespacedName{Name: realVSCName}, realVSC); getErr == nil {
 			if realVSC.Status != nil && realVSC.Status.RestoreSize != nil {
@@ -226,9 +248,22 @@ func WaitShadowVSReady(
 			return nil
 		}
 
-		log.Info("waiting for shadow VS readyToUse and restoreSize",
-			slog.String("namespace", namespace),
-			slog.String("shadow", shadowName))
+		if attempt == 0 || attempt%logEveryN == 0 {
+			status := shadowVSSubState(shadowVS, lastRealRestoreSize)
+			attrs := make([]slog.Attr, 0, 5)
+			attrs = append(attrs,
+				slog.String("namespace", namespace),
+				slog.String("shadow", shadowName),
+				slog.String("status", status),
+				slog.Int("attempt", attempt),
+			)
+
+			if deadline, ok := ctx.Deadline(); ok {
+				attrs = append(attrs, slog.String("timeout_in", time.Until(deadline).Round(time.Second).String()))
+			}
+
+			log.LogAttrs(ctx, slog.LevelInfo, "waiting for shadow VS readyToUse and restoreSize", attrs...)
+		}
 
 		select {
 		case <-ctx.Done():
@@ -244,8 +279,11 @@ func WaitShadowVSReady(
 				"shadow VS %s/%s did not become ready within the deadline "+
 					"(real VSC %s restoreSize=%s); "+
 					"the data-export controller requires VS.status.restoreSize != nil to provision the export PVC; "+
-					"verify that the CSI snapshotter sidecar has reconciled the snapshot status: %w",
-				namespace, shadowName, realVSCName, realRestoreStr, ErrShadowNotReady)
+					"verify that the CSI snapshotter sidecar has reconciled the snapshot status: %w"+
+					"\n\nTo inspect shadow VolumeSnapshot status, run:\n  d8 k -n %s get volumesnapshot %s -o yaml",
+				namespace, shadowName, realVSCName, realRestoreStr, ErrShadowNotReady,
+				namespace, shadowName,
+			)
 		case <-time.After(shadowVSPollInterval):
 		}
 	}
