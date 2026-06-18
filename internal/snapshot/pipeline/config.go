@@ -32,10 +32,11 @@ import (
 )
 
 const (
-	defaultWorkers              = 4
-	defaultPerVolumeConcurrency = 4
-	defaultTTL                  = "2h"
-	defaultReadinessTimeout     = 5 * time.Minute
+	defaultWorkers                = 4
+	defaultPerVolumeConcurrency   = 4
+	defaultTTL                    = "2h"
+	defaultReadinessTimeout       = 5 * time.Minute
+	defaultShadowReadinessTimeout = 5 * time.Minute
 )
 
 // Config holds all parameters for a snapshot download run.
@@ -102,6 +103,14 @@ type Config struct {
 	// Ready before returning an error.  Defaults to 5 minutes.
 	ReadinessTimeout time.Duration
 
+	// ShadowReadinessTimeout is how long downloadVolumeBinding waits for the
+	// shadow VolumeSnapshot to report readyToUse=true and a non-nil restoreSize
+	// before returning an error.  On expiry the rich WaitShadowVSReady deadline
+	// error is returned (which includes an inspection hint) and the shadow pair
+	// is still cleaned up via the cancel-proof cleanupCtx.
+	// Defaults to 5 minutes (same as ReadinessTimeout).
+	ShadowReadinessTimeout time.Duration
+
 	// Log is the structured logger.  Defaults to slog.Default() when nil.
 	Log *slog.Logger
 }
@@ -126,6 +135,10 @@ func applyDefaults(cfg Config) Config {
 
 	if cfg.ReadinessTimeout <= 0 {
 		cfg.ReadinessTimeout = defaultReadinessTimeout
+	}
+
+	if cfg.ShadowReadinessTimeout <= 0 {
+		cfg.ShadowReadinessTimeout = defaultShadowReadinessTimeout
 	}
 
 	if cfg.Log == nil {
