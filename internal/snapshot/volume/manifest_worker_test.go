@@ -298,16 +298,36 @@ func makeObjWithUID(apiVersion, kind, name string, uid types.UID) unstructured.U
 	return obj
 }
 
-func TestWriteNodeManifests_ExcludesDataRefPVCs(t *testing.T) {
+// TestWriteNodeManifests_ExcludesLeafChildPVCs verifies that PVCs matching orphan
+// leaf volume children (Children[i].Binding != nil) are excluded from the aggregator
+// node's manifests/ directory (they belong in each leaf node's own manifests/).
+func TestWriteNodeManifests_ExcludesLeafChildPVCs(t *testing.T) {
 	t.Parallel()
 
 	nodeDir := setupNodeDir(t)
 
-	// The checkpoint has two PVCs (both DataRef targets) and one ConfigMap.
+	// The checkpoint has two PVCs (leaf-child targets) and one ConfigMap.
 	objs := []unstructured.Unstructured{
 		makeObjWithUID("v1", "PersistentVolumeClaim", "pvc-disk", "uid-disk"),
 		makeObjWithUID("v1", "PersistentVolumeClaim", "pvc-extra", "uid-extra"),
 		makeObj("v1", "ConfigMap", "owner-cm"),
+	}
+
+	leafA := &source.Node{
+		Kind: "VolumeSnapshot",
+		Name: "pvc-disk",
+		Binding: &snapshotapi.SnapshotDataBinding{
+			TargetUID: "uid-disk",
+			Target:    snapshotapi.SnapshotSubjectRef{Name: "pvc-disk"},
+		},
+	}
+	leafB := &source.Node{
+		Kind: "VolumeSnapshot",
+		Name: "pvc-extra",
+		Binding: &snapshotapi.SnapshotDataBinding{
+			TargetUID: "uid-extra",
+			Target:    snapshotapi.SnapshotSubjectRef{Name: "pvc-extra"},
+		},
 	}
 
 	node := &source.Node{
@@ -315,10 +335,7 @@ func TestWriteNodeManifests_ExcludesDataRefPVCs(t *testing.T) {
 		Kind:                   "Snapshot",
 		Name:                   "snap-ex",
 		ManifestCheckpointName: "mc-ex",
-		OwnDataRefs: []snapshotapi.SnapshotDataBinding{
-			{TargetUID: "uid-disk", Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-disk"}},
-			{TargetUID: "uid-extra", Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-extra"}},
-		},
+		Children:               []*source.Node{leafA, leafB},
 	}
 
 	src := &stubManifestSource{objs: objs}
@@ -329,7 +346,7 @@ func TestWriteNodeManifests_ExcludesDataRefPVCs(t *testing.T) {
 
 	manifestsDir := filepath.Join(nodeDir, archive.ManifestsDirName)
 
-	// Only the ConfigMap must be written; the two DataRef PVCs must be excluded.
+	// Only the ConfigMap must be written; the two leaf-child PVCs must be excluded.
 	cmPath := filepath.Join(manifestsDir, "configmap_owner-cm.yaml")
 	if _, err := os.Stat(cmPath); err != nil {
 		t.Errorf("expected configmap_owner-cm.yaml: %v", err)
@@ -338,12 +355,14 @@ func TestWriteNodeManifests_ExcludesDataRefPVCs(t *testing.T) {
 	for _, name := range []string{"persistentvolumeclaim_pvc-disk.yaml", "persistentvolumeclaim_pvc-extra.yaml"} {
 		path := filepath.Join(manifestsDir, name)
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Errorf("DataRef PVC %s must not be written; err=%v", name, err)
+			t.Errorf("leaf-child PVC %s must not be written to aggregator manifests/; err=%v", name, err)
 		}
 	}
 }
 
-func TestWriteNodeManifests_ExcludesByNameFallback(t *testing.T) {
+// TestWriteNodeManifests_ExcludesLeafChildByNameFallback verifies that a leaf child
+// with no UID in its Binding is still excluded by name.
+func TestWriteNodeManifests_ExcludesLeafChildByNameFallback(t *testing.T) {
 	t.Parallel()
 
 	nodeDir := setupNodeDir(t)
@@ -356,11 +375,18 @@ func TestWriteNodeManifests_ExcludesByNameFallback(t *testing.T) {
 		makeObj("v1", "ConfigMap", "cm-keep"),
 	}
 
+	leaf := &source.Node{
+		Kind: "VolumeSnapshot",
+		Name: "pvc-nouid",
+		Binding: &snapshotapi.SnapshotDataBinding{
+			TargetUID: "",
+			Target:    snapshotapi.SnapshotSubjectRef{Name: "pvc-nouid"},
+		},
+	}
+
 	node := &source.Node{
 		ManifestCheckpointName: "mc-fallback",
-		OwnDataRefs: []snapshotapi.SnapshotDataBinding{
-			{TargetUID: "", Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-nouid"}},
-		},
+		Children:               []*source.Node{leaf},
 	}
 
 	src := &stubManifestSource{objs: objs}
@@ -376,7 +402,48 @@ func TestWriteNodeManifests_ExcludesByNameFallback(t *testing.T) {
 	}
 
 	if _, err := os.Stat(filepath.Join(manifestsDir, "persistentvolumeclaim_pvc-nouid.yaml")); !os.IsNotExist(err) {
-		t.Errorf("DataRef PVC with no UID must still be excluded by name fallback; err=%v", err)
+		t.Errorf("leaf-child PVC with no UID must be excluded by name fallback; err=%v", err)
+	}
+}
+
+// TestWriteNodeManifests_KeepsOwnDataRefPVCs verifies that PVCs from OwnDataRefs are
+// NOT excluded from manifests/. For non-aggregator nodes the PVC manifest is
+// co-located with the volume data in the node's own manifests/ directory (spec §3.9.2).
+func TestWriteNodeManifests_KeepsOwnDataRefPVCs(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	// Checkpoint has a PVC matching an OwnDataRef and one ConfigMap.
+	objs := []unstructured.Unstructured{
+		makeObjWithUID("v1", "PersistentVolumeClaim", "pvc-own", "uid-own"),
+		makeObj("v1", "ConfigMap", "snap-cm"),
+	}
+
+	node := &source.Node{
+		APIVersion:             "demo.deckhouse.io/v1alpha1",
+		Kind:                   "VirtualDiskSnapshot",
+		Name:                   "vds-1",
+		ManifestCheckpointName: "mc-own",
+		OwnDataRefs: []snapshotapi.SnapshotDataBinding{
+			{TargetUID: "uid-own", Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-own"}},
+		},
+	}
+
+	src := &stubManifestSource{objs: objs}
+
+	if err := volume.WriteNodeManifests(context.Background(), src, nodeDir, node); err != nil {
+		t.Fatalf("WriteNodeManifests: %v", err)
+	}
+
+	manifestsDir := filepath.Join(nodeDir, archive.ManifestsDirName)
+
+	// Both the ConfigMap and the OwnDataRef PVC must be written.
+	for _, name := range []string{"configmap_snap-cm.yaml", "persistentvolumeclaim_pvc-own.yaml"} {
+		path := filepath.Join(manifestsDir, name)
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected %s to be written (OwnDataRef PVCs are kept in node manifests/): %v", name, err)
+		}
 	}
 }
 

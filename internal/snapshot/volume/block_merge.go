@@ -30,27 +30,29 @@ import (
 // chunk files are absent, preventing a gap-free merge.
 var ErrMissingChunk = errors.New("block chunk missing")
 
-// MergeBlockChunks concatenates all chunk_%05d.zst files from the temporary
-// chunk directory (nodeDir/data.img.zst.d/) into nodeDir/data.img.zst in
-// strict ascending-index order.
+// MergeBlockChunks concatenates all chunk_%05d.zst files from chunkDir into
+// outPath in strict ascending-index order.
+//
+// chunkDir is the absolute path to the directory containing the chunk files
+// (e.g. nodeDir/data.img.zst.d or nodeDir/data/<pvc>.img.zst.d for
+// multi-volume layouts). outPath is the absolute destination path for the
+// merged block file (e.g. nodeDir/data.img.zst or nodeDir/data/<pvc>.img.zst).
 //
 // Pre-conditions (enforced):
 //   - All chunks 0 .. ceil(totalSize/chunkSize)-1 must be present.
 //   - If any chunk is missing, ErrMissingChunk is returned and no output is written.
 //
 // Post-conditions on success:
-//   - nodeDir/data.img.zst is a fully durable (fsynced) multi-frame zstd stream.
+//   - outPath is a fully durable (fsynced) multi-frame zstd stream.
 //   - The chunk directory and all its contents are removed.
 //
 // chunkSize ≤ 0 falls back to DefaultChunkSize.
-func MergeBlockChunks(nodeDir string, totalSize, chunkSize int64) error {
+func MergeBlockChunks(chunkDir, outPath string, totalSize, chunkSize int64) error {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
 
 	numChunks := int((totalSize + chunkSize - 1) / chunkSize)
-	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
-	finalPath := filepath.Join(nodeDir, archive.DataBlockName)
 
 	// Verify all chunks are present before writing anything.
 	for i := range numChunks {
@@ -66,10 +68,10 @@ func MergeBlockChunks(nodeDir string, totalSize, chunkSize int64) error {
 		}
 	}
 
-	// Concatenate chunks in order into data.img.zst via AtomicWriter.
-	aw, err := archive.NewAtomicWriter(finalPath)
+	// Concatenate chunks in order via AtomicWriter.
+	aw, err := archive.NewAtomicWriter(outPath)
 	if err != nil {
-		return fmt.Errorf("open atomic writer for %s: %w", finalPath, err)
+		return fmt.Errorf("open atomic writer for %s: %w", outPath, err)
 	}
 
 	for i := range numChunks {
@@ -82,7 +84,7 @@ func MergeBlockChunks(nodeDir string, totalSize, chunkSize int64) error {
 	}
 
 	if err := aw.Commit(); err != nil {
-		return fmt.Errorf("commit %s: %w", finalPath, err)
+		return fmt.Errorf("commit %s: %w", outPath, err)
 	}
 
 	// Remove the temporary chunk directory after successful commit.

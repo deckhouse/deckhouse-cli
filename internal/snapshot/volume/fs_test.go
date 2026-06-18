@@ -109,12 +109,13 @@ func TestDownloadFilesystemVolume_DownloadsTree(t *testing.T) {
 	}
 
 	nodeDir := t.TempDir()
+	dataDir := filepath.Join(nodeDir, archive.DataDirName)
 	rootURL := srv.URL + "/files/"
 
 	err = volume.DownloadFilesystemVolume(
 		context.Background(),
 		slog.Default(),
-		nodeDir,
+		dataDir,
 		rootURL,
 		2,
 		newFSFetcher(srv),
@@ -127,7 +128,7 @@ func TestDownloadFilesystemVolume_DownloadsTree(t *testing.T) {
 	// Verify each expected file.
 	for _, f := range files {
 		destRel := filepath.FromSlash(archive.FsFileName(f.relPath))
-		destPath := filepath.Join(nodeDir, archive.DataDirName, destRel)
+		destPath := filepath.Join(dataDir, destRel)
 
 		raw, err := os.ReadFile(destPath)
 		if err != nil {
@@ -142,7 +143,7 @@ func TestDownloadFilesystemVolume_DownloadsTree(t *testing.T) {
 	}
 
 	// The link must NOT produce an output file.
-	linkDest := filepath.Join(nodeDir, archive.DataDirName, "symlink.txt.zst")
+	linkDest := filepath.Join(dataDir, "symlink.txt.zst")
 	if _, err := os.Stat(linkDest); !os.IsNotExist(err) {
 		t.Error("symlink should not produce an output file")
 	}
@@ -157,10 +158,11 @@ func TestDownloadFilesystemVolume_SkipsExistingFiles(t *testing.T) {
 	}
 
 	nodeDir := t.TempDir()
+	dataDir := filepath.Join(nodeDir, archive.DataDirName)
 	rootURL := srv.URL + "/files/"
 
 	// First run.
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), nodeDir, rootURL, 1, newFSFetcher(srv), enc); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), dataDir, rootURL, 1, newFSFetcher(srv), enc); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 
@@ -174,7 +176,7 @@ func TestDownloadFilesystemVolume_SkipsExistingFiles(t *testing.T) {
 
 	for _, f := range files {
 		destRel := filepath.FromSlash(archive.FsFileName(f.relPath))
-		destPath := filepath.Join(nodeDir, archive.DataDirName, destRel)
+		destPath := filepath.Join(dataDir, destRel)
 
 		fi, err := os.Stat(destPath)
 		if err != nil {
@@ -185,7 +187,7 @@ func TestDownloadFilesystemVolume_SkipsExistingFiles(t *testing.T) {
 	}
 
 	// Second run (all files already present).
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), nodeDir, rootURL, 1, newFSFetcher(srv), enc); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), dataDir, rootURL, 1, newFSFetcher(srv), enc); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 
@@ -224,7 +226,7 @@ func TestDownloadFilesystemVolume_CleansStaleTmp(t *testing.T) {
 
 	rootURL := srv.URL + "/files/"
 
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), nodeDir, rootURL, 1, newFSFetcher(srv), enc); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), dataDir, rootURL, 1, newFSFetcher(srv), enc); err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 

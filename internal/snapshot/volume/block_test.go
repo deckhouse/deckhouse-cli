@@ -115,10 +115,12 @@ func TestDownloadBlockChunks_Basic(t *testing.T) {
 	// 10-byte chunks: chunks 0-1 are 10 bytes each, chunk 2 is 9 bytes → 3 chunks.
 	const chunkSize = 10
 
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
 	err = volume.DownloadBlockChunks(
 		context.Background(),
 		slog.Default(),
-		nodeDir,
+		chunkDir,
 		blockURL,
 		totalSize,
 		chunkSize,
@@ -128,7 +130,6 @@ func TestDownloadBlockChunks_Basic(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
 	names := listChunkFiles(t, chunkDir)
 
 	wantChunks := int((totalSize + chunkSize - 1) / chunkSize) // = 3
@@ -156,10 +157,12 @@ func TestDownloadBlockChunks_ConcatDecodesCorrectly(t *testing.T) {
 
 	const chunkSize = 10
 
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
 	err = volume.DownloadBlockChunks(
 		context.Background(),
 		slog.Default(),
-		nodeDir,
+		chunkDir,
 		blockURL,
 		totalSize,
 		chunkSize,
@@ -169,7 +172,6 @@ func TestDownloadBlockChunks_ConcatDecodesCorrectly(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
 	names := listChunkFiles(t, chunkDir)
 
 	// Decode each chunk and concatenate; result must equal original payload.
@@ -200,11 +202,13 @@ func TestDownloadBlockChunks_SkipsExistingChunks(t *testing.T) {
 
 	const chunkSize = 10
 
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
 	// First download.
 	err = volume.DownloadBlockChunks(
 		context.Background(),
 		slog.Default(),
-		nodeDir,
+		chunkDir,
 		blockURL,
 		totalSize,
 		chunkSize,
@@ -213,8 +217,6 @@ func TestDownloadBlockChunks_SkipsExistingChunks(t *testing.T) {
 		enc,
 	)
 	require.NoError(t, err)
-
-	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
 
 	// Record modification times of all chunk files.
 	names := listChunkFiles(t, chunkDir)
@@ -231,7 +233,7 @@ func TestDownloadBlockChunks_SkipsExistingChunks(t *testing.T) {
 	err = volume.DownloadBlockChunks(
 		context.Background(),
 		slog.Default(),
-		nodeDir,
+		chunkDir,
 		blockURL,
 		totalSize,
 		chunkSize,
@@ -278,7 +280,7 @@ func TestDownloadBlockChunks_CleansStaleTemp(t *testing.T) {
 	err = volume.DownloadBlockChunks(
 		context.Background(),
 		slog.Default(),
-		nodeDir,
+		chunkDir,
 		blockURL,
 		totalSize,
 		chunkSize,
@@ -315,11 +317,12 @@ func TestDownloadBlockChunks_ChunkBoundaries(t *testing.T) {
 	require.NoError(t, err)
 
 	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
 
 	err = volume.DownloadBlockChunks(
 		context.Background(),
 		slog.Default(),
-		nodeDir,
+		chunkDir,
 		blockURL,
 		int64(len(payload)),
 		chunkSize,
@@ -329,7 +332,6 @@ func TestDownloadBlockChunks_ChunkBoundaries(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
 	names := listChunkFiles(t, chunkDir)
 
 	assert.Len(t, names, 3, "expected 3 chunks")

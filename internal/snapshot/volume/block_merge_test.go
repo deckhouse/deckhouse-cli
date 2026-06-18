@@ -74,6 +74,7 @@ func decodeZstdStream(t *testing.T, data []byte) []byte {
 func TestMergeBlockChunks_MergesInOrder(t *testing.T) {
 	nodeDir := t.TempDir()
 	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	outPath := filepath.Join(nodeDir, archive.DataBlockName)
 
 	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -90,12 +91,12 @@ func TestMergeBlockChunks_MergesInOrder(t *testing.T) {
 
 	makeChunkFrames(t, chunkDir, payloads)
 
-	if err := volume.MergeBlockChunks(nodeDir, totalSize, chunkSize); err != nil {
+	if err := volume.MergeBlockChunks(chunkDir, outPath, totalSize, chunkSize); err != nil {
 		t.Fatalf("MergeBlockChunks: %v", err)
 	}
 
 	// data.img.zst must exist.
-	finalPath := filepath.Join(nodeDir, archive.DataBlockName)
+	finalPath := outPath
 	raw, err := os.ReadFile(finalPath)
 	if err != nil {
 		t.Fatalf("read data.img.zst: %v", err)
@@ -113,6 +114,7 @@ func TestMergeBlockChunks_MergesInOrder(t *testing.T) {
 func TestMergeBlockChunks_ChunkDirRemovedAfterSuccess(t *testing.T) {
 	nodeDir := t.TempDir()
 	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	outPath := filepath.Join(nodeDir, archive.DataBlockName)
 
 	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -124,7 +126,7 @@ func TestMergeBlockChunks_ChunkDirRemovedAfterSuccess(t *testing.T) {
 
 	makeChunkFrames(t, chunkDir, payloads)
 
-	if err := volume.MergeBlockChunks(nodeDir, totalSize, chunkSize); err != nil {
+	if err := volume.MergeBlockChunks(chunkDir, outPath, totalSize, chunkSize); err != nil {
 		t.Fatalf("MergeBlockChunks: %v", err)
 	}
 
@@ -136,6 +138,7 @@ func TestMergeBlockChunks_ChunkDirRemovedAfterSuccess(t *testing.T) {
 func TestMergeBlockChunks_MissingChunkErrors(t *testing.T) {
 	nodeDir := t.TempDir()
 	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	outPath := filepath.Join(nodeDir, archive.DataBlockName)
 
 	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -162,7 +165,7 @@ func TestMergeBlockChunks_MissingChunkErrors(t *testing.T) {
 	chunkSize := int64(4)
 	totalSize := int64(12)
 
-	err = volume.MergeBlockChunks(nodeDir, totalSize, chunkSize)
+	err = volume.MergeBlockChunks(chunkDir, outPath, totalSize, chunkSize)
 	if err == nil {
 		t.Fatal("expected error for missing chunk, got nil")
 	}
@@ -171,16 +174,16 @@ func TestMergeBlockChunks_MissingChunkErrors(t *testing.T) {
 		t.Errorf("expected ErrMissingChunk, got: %v", err)
 	}
 
-	// data.img.zst must NOT have been written.
-	finalPath := filepath.Join(nodeDir, archive.DataBlockName)
-	if _, statErr := os.Stat(finalPath); !os.IsNotExist(statErr) {
-		t.Error("data.img.zst should not exist when merge fails due to missing chunk")
+	// outPath must NOT have been written.
+	if _, statErr := os.Stat(outPath); !os.IsNotExist(statErr) {
+		t.Error("output file should not exist when merge fails due to missing chunk")
 	}
 }
 
 func TestMergeBlockChunks_DefaultChunkSize(t *testing.T) {
 	nodeDir := t.TempDir()
 	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	outPath := filepath.Join(nodeDir, archive.DataBlockName)
 
 	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -193,14 +196,13 @@ func TestMergeBlockChunks_DefaultChunkSize(t *testing.T) {
 	makeChunkFrames(t, chunkDir, [][]byte{payload})
 
 	// Pass chunkSize=0 to trigger DefaultChunkSize fallback.
-	if err := volume.MergeBlockChunks(nodeDir, totalSize, 0); err != nil {
+	if err := volume.MergeBlockChunks(chunkDir, outPath, totalSize, 0); err != nil {
 		t.Fatalf("MergeBlockChunks with default chunk size: %v", err)
 	}
 
-	finalPath := filepath.Join(nodeDir, archive.DataBlockName)
-	raw, err := os.ReadFile(finalPath)
+	raw, err := os.ReadFile(outPath)
 	if err != nil {
-		t.Fatalf("read data.img.zst: %v", err)
+		t.Fatalf("read output file: %v", err)
 	}
 
 	decoded := decodeZstdStream(t, raw)
