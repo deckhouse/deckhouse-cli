@@ -209,3 +209,97 @@ func TestDeterminism(t *testing.T) {
 		t.Error("ChunkFileName is not deterministic")
 	}
 }
+
+func TestMultiVolumeBlockName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		pvc  string
+		want string
+	}{
+		{"pvc-disk-a", "data/pvc-disk-a.img.zst"},
+		{"my-pvc", "data/my-pvc.img.zst"},
+		{"disk.with.dots", "data/disk.with.dots.img.zst"},
+	}
+
+	for _, tc := range tests {
+		got := archive.MultiVolumeBlockName(tc.pvc)
+		if got != tc.want {
+			t.Errorf("MultiVolumeBlockName(%q) = %q; want %q", tc.pvc, got, tc.want)
+		}
+	}
+}
+
+func TestMultiVolumeDir(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		pvc  string
+		want string
+	}{
+		{"pvc-disk-a", "data/pvc-disk-a"},
+		{"my-pvc", "data/my-pvc"},
+		{"disk.with.dots", "data/disk.with.dots"},
+	}
+
+	for _, tc := range tests {
+		got := archive.MultiVolumeDir(tc.pvc)
+		if got != tc.want {
+			t.Errorf("MultiVolumeDir(%q) = %q; want %q", tc.pvc, got, tc.want)
+		}
+	}
+}
+
+func TestBlockChunksDirNameFor(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		pvc  string
+		want string
+	}{
+		{"pvc-disk-a", "data/pvc-disk-a.img.zst.d"},
+		{"my-pvc", "data/my-pvc.img.zst.d"},
+		{"disk.with.dots", "data/disk.with.dots.img.zst.d"},
+	}
+
+	for _, tc := range tests {
+		got := archive.BlockChunksDirNameFor(tc.pvc)
+		if got != tc.want {
+			t.Errorf("BlockChunksDirNameFor(%q) = %q; want %q", tc.pvc, got, tc.want)
+		}
+	}
+}
+
+// TestMultiVolumeHelpers_Consistency verifies that the three multi-volume helpers
+// are mutually consistent: the block name, the FS dir, and the chunk dir all share
+// the same pvc prefix under data/ and are distinct from each other and from the
+// single-volume flat names.
+func TestMultiVolumeHelpers_Consistency(t *testing.T) {
+	t.Parallel()
+
+	const pvc = "my-pvc"
+
+	blockName := archive.MultiVolumeBlockName(pvc)
+	fsDir := archive.MultiVolumeDir(pvc)
+	chunkDir := archive.BlockChunksDirNameFor(pvc)
+
+	// All three must be distinct.
+	if blockName == fsDir || blockName == chunkDir || fsDir == chunkDir {
+		t.Errorf("helpers not distinct: block=%q fs=%q chunk=%q", blockName, fsDir, chunkDir)
+	}
+
+	// All three must differ from the single-volume flat names.
+	for _, multi := range []string{blockName, fsDir, chunkDir} {
+		if multi == archive.DataBlockName {
+			t.Errorf("%q must not equal DataBlockName", multi)
+		}
+
+		if multi == archive.DataDirName {
+			t.Errorf("%q must not equal DataDirName", multi)
+		}
+
+		if multi == archive.BlockChunksDirName {
+			t.Errorf("%q must not equal BlockChunksDirName", multi)
+		}
+	}
+}

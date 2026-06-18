@@ -20,6 +20,7 @@ package archive
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -84,4 +85,39 @@ func FsFileName(relPath string) string {
 // "chunk_00000.zst" through "chunk_99999.zst".
 func ChunkFileName(i int) string {
 	return fmt.Sprintf("chunk_%05d.zst", i)
+}
+
+// Multi-volume layout helpers (N > 1 own data references in a node).
+//
+// Layout rules:
+//
+//	1 own volume  → flat:  data.img.zst (block) or data/ (FS)
+//	N > 1 volumes → namespaced under data/:
+//	                  data/<pvc>.img.zst  (block)
+//	                  data/<pvc>/         (FS, per-file .zst entries underneath)
+//
+// The checksum walk covers all files under data/ recursively, so both the flat
+// and multi-volume layouts are covered by ComputeNodeChecksum with no changes.
+
+// MultiVolumeBlockName returns the relative path for a block-volume zstd stream
+// in the N>1 multi-volume layout: "data/<pvc>.img.zst".
+// For the single-volume flat case use DataBlockName directly.
+func MultiVolumeBlockName(pvc string) string {
+	return filepath.Join(DataDirName, pvc+".img.zst")
+}
+
+// MultiVolumeDir returns the relative path for a filesystem-volume directory
+// in the N>1 multi-volume layout: "data/<pvc>".
+// Per-file compressed entries live under "data/<pvc>/<relpath>.zst".
+// For the single-volume flat case use DataDirName directly.
+func MultiVolumeDir(pvc string) string {
+	return filepath.Join(DataDirName, pvc)
+}
+
+// BlockChunksDirNameFor returns the relative path of the temporary chunk directory
+// for a named PVC volume in the N>1 multi-volume layout: "data/<pvc>.img.zst.d".
+// Chunks accumulate here during download and are merged into MultiVolumeBlockName(pvc)
+// on completion.  For the single-volume flat case use BlockChunksDirName directly.
+func BlockChunksDirNameFor(pvc string) string {
+	return filepath.Join(DataDirName, pvc+".img.zst.d")
 }
