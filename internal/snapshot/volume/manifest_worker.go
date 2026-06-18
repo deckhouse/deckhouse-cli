@@ -34,10 +34,11 @@ import (
 // archive.WriteManifest. Collision fallback (same kind+name but different API group)
 // is handled transparently by WriteManifest.
 //
-// PersistentVolumeClaims that correspond to volume DataRefs (node.DataRefs[].Target)
-// are excluded: they belong in each volume child node's own manifests/ directory,
-// not in the snapshot node's. Matching is by metadata.uid first; if the uid is
-// absent in the captured manifest, it falls back to metadata.name.
+// PersistentVolumeClaims that correspond to OwnDataRefs (node.OwnDataRefs[].Target)
+// are excluded: for non-aggregator nodes the captured PVC manifest belongs in the node's
+// own data download path, not in the shared manifests/ directory.
+// Matching is by metadata.uid first; if the uid is absent in the captured manifest,
+// it falls back to metadata.name.
 //
 // When node.ManifestCheckpointName is empty, no manifests exist and the function
 // returns immediately (valid state).
@@ -54,7 +55,7 @@ func WriteNodeManifests(ctx context.Context, src source.ManifestSource, nodeDir 
 		return fmt.Errorf("fetch manifests for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
-	excluded := buildDataRefExclusion(node.DataRefs)
+	excluded := buildDataRefExclusion(node.OwnDataRefs)
 
 	for _, obj := range objs {
 		if isExcludedDataRefPVC(obj, excluded) {
@@ -164,8 +165,8 @@ func FinalizeNode(nodeDir string, node *source.Node) error {
 }
 
 // dataRefExclusion holds PVC identifiers to skip when writing snapshot node manifests.
-// The captured PVC manifest for each data volume belongs in the corresponding volume
-// child node's own manifests/ directory instead.
+// For non-aggregator nodes the captured PVC manifest for each OwnDataRef volume is
+// written alongside the volume data; it is excluded from the shared manifests/ dir.
 type dataRefExclusion struct {
 	uids  map[string]struct{}
 	names map[string]struct{}

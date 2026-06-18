@@ -315,7 +315,7 @@ func TestWriteNodeManifests_ExcludesDataRefPVCs(t *testing.T) {
 		Kind:                   "Snapshot",
 		Name:                   "snap-ex",
 		ManifestCheckpointName: "mc-ex",
-		DataRefs: []snapshotapi.SnapshotDataBinding{
+		OwnDataRefs: []snapshotapi.SnapshotDataBinding{
 			{TargetUID: "uid-disk", Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-disk"}},
 			{TargetUID: "uid-extra", Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-extra"}},
 		},
@@ -358,7 +358,7 @@ func TestWriteNodeManifests_ExcludesByNameFallback(t *testing.T) {
 
 	node := &source.Node{
 		ManifestCheckpointName: "mc-fallback",
-		DataRefs: []snapshotapi.SnapshotDataBinding{
+		OwnDataRefs: []snapshotapi.SnapshotDataBinding{
 			{TargetUID: "", Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-nouid"}},
 		},
 	}

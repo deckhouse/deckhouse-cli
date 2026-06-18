@@ -30,23 +30,26 @@ import (
 //
 // There are two flavours of node:
 //   - Snapshot nodes (Binding == nil): represent a snapshot CR in the tree hierarchy.
-//     Their DataRefs are the raw volume bindings from the bound SnapshotContent; each
-//     binding materialises as a separate VolumeSnapshot child node under snapshots/.
-//   - Volume nodes (Binding != nil): represent one captured volume. Kind is always
-//     "VolumeSnapshot"; Name is naming.ShadowName(binding.Artifact.Name); DataRefs and
-//     Children are always nil. These are leaves in the tree.
+//     They carry OwnDataRefs when the node owns its volume data directly (non-aggregator
+//     domain nodes such as DemoVirtualDiskSnapshot). When the node is an aggregator (has
+//     VolumeSnapshot visibility-leaf children), OwnDataRefs is nil and the data is
+//     represented by orphan leaf children in the Children slice.
+//   - Orphan leaf volume nodes (Binding != nil): represent one captured standalone PVC.
+//     Kind is always "VolumeSnapshot"; APIVersion is "snapshot.storage.k8s.io/v1".
+//     OwnDataRefs and Children are always nil. These are leaves in the tree.
 type Node struct {
 	// APIVersion is the apiVersion of the snapshot CR for this node
 	// (e.g. "storage.deckhouse.io/v1alpha1" or a domain-specific group).
-	// Volume nodes use "snapshot.storage.k8s.io/v1".
+	// Orphan leaf volume nodes use "snapshot.storage.k8s.io/v1".
 	APIVersion string
 
 	// Kind is the kind of the snapshot CR for this node
 	// (e.g. "Snapshot", "DemoVirtualMachineSnapshot").
-	// Volume nodes always have Kind == "VolumeSnapshot".
+	// Orphan leaf volume nodes always have Kind == "VolumeSnapshot".
 	Kind string
 
 	// Name is the metadata.name of the snapshot CR.
+	// For orphan leaf nodes it is the captured PVC name (dataRef.Target.Name).
 	Name string
 
 	// Namespace is the namespace of the snapshot CR.
@@ -56,31 +59,31 @@ type Node struct {
 	// SourceRef is the value of the state-snapshotter.deckhouse.io/source-ref
 	// annotation on the snapshot CR. It records the identity of the original
 	// captured object. Empty when the annotation is absent (typically the root).
-	// For volume nodes it is set to the binding's TargetUID (the captured PVC UID).
+	// For orphan leaf volume nodes it is set to the binding's TargetUID (the captured PVC UID).
 	// Resume identity and checksums use this raw value; directory naming uses SourceName.
 	SourceRef string
 
 	// SourceName is the .name field from the source-ref annotation, identifying
 	// the original captured object by its Kubernetes metadata.name.
 	// For domain snapshot nodes it is parsed from SourceRef (best-effort; empty on parse error).
-	// For VolumeSnapshot leaf nodes it is set to the captured PVC name (Binding.Target.Name).
+	// For orphan leaf volume nodes it is set to the captured PVC name (Binding.Target.Name).
 	// Empty for the root node (which carries no source-ref annotation).
 	SourceName string
 
 	// ManifestCheckpointName is the cluster-scoped ManifestCheckpoint name for
 	// this node's own-scope manifests. Empty if no manifest capture ran.
-	// For volume nodes it is the PARENT snapshot node's checkpoint name (the
-	// captured PVC manifest lives in the parent's checkpoint).
+	// For orphan leaf volume nodes it is the PARENT aggregator node's checkpoint name
+	// (the captured PVC manifest lives in the parent's checkpoint).
 	ManifestCheckpointName string
 
-	// DataRefs holds the volume-to-artifact bindings from the bound SnapshotContent.
-	// Each binding is materialised as a separate VolumeSnapshot child node; the
-	// DataRefs slice is retained on the snapshot node for manifest routing.
-	// Nil for volume nodes.
-	DataRefs []snapshotapi.SnapshotDataBinding
+	// OwnDataRefs holds the volume-to-artifact bindings for this non-aggregator snapshot node.
+	// The volume data for each entry is downloaded directly into this node's directory.
+	// Nil for aggregator nodes (which expose their volumes through orphan leaf children)
+	// and nil for orphan leaf volume nodes (which use Binding instead).
+	OwnDataRefs []snapshotapi.SnapshotDataBinding
 
-	// Binding is non-nil for volume nodes only. It carries the SnapshotDataBinding
-	// that gave rise to this volume node (copied from the parent's DataRefs slice so
+	// Binding is non-nil for orphan leaf volume nodes only. It carries the SnapshotDataBinding
+	// that gave rise to this leaf node (copied from the parent aggregator's dataRefs slice so
 	// that modifications to the source slice do not affect the tree).
 	Binding *snapshotapi.SnapshotDataBinding
 
@@ -88,7 +91,7 @@ type Node struct {
 	Parent *Node
 
 	// Children are the direct child nodes: snapshot children first (in
-	// childrenSnapshotRefs order), then volume children (in DataRefs order).
-	// Always nil for volume nodes (they are leaves).
+	// childrenSnapshotRefs order), then orphan leaf volume children for aggregator
+	// nodes (in dataRefs order). Always nil for orphan leaf volume nodes (they are leaves).
 	Children []*Node
 }
