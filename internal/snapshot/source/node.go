@@ -57,7 +57,15 @@ type Node struct {
 	// annotation on the snapshot CR. It records the identity of the original
 	// captured object. Empty when the annotation is absent (typically the root).
 	// For volume nodes it is set to the binding's TargetUID (the captured PVC UID).
+	// Resume identity and checksums use this raw value; directory naming uses SourceName.
 	SourceRef string
+
+	// SourceName is the .name field from the source-ref annotation, identifying
+	// the original captured object by its Kubernetes metadata.name.
+	// For domain snapshot nodes it is parsed from SourceRef (best-effort; empty on parse error).
+	// For VolumeSnapshot leaf nodes it is set to the captured PVC name (Binding.Target.Name).
+	// Empty for the root node (which carries no source-ref annotation).
+	SourceName string
 
 	// ManifestCheckpointName is the cluster-scoped ManifestCheckpoint name for
 	// this node's own-scope manifests. Empty if no manifest capture ran.

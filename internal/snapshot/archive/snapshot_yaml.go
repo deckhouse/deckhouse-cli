@@ -40,6 +40,11 @@ type SnapshotYAML struct {
 	// SourceRef carries the source-ref annotation from the snapshot CR, recording
 	// the identity of the original captured object.
 	SourceRef string `json:"sourceRef,omitempty"`
+	// SourceName is the .name field from the source-ref annotation — the Kubernetes
+	// metadata.name of the original captured object. Omitted when empty (root node,
+	// annotation absent, or parse error). Does not affect ComputeNodeChecksum because
+	// snapshot.yaml is excluded from the integrity digest.
+	SourceName string `json:"sourceName,omitempty"`
 	// Checksum is the locally-computed node integrity digest.
 	Checksum NodeChecksum `json:"checksum"`
 	// Volume is populated for volume nodes (node.Binding != nil) and omitted for
