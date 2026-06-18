@@ -80,6 +80,9 @@ const (
 	e2eDelDisk     = "del-disk"
 	e2eDelVSC      = "vsc-del-block"
 	e2eDelPVC      = "del-pvc"
+
+	// Orphan-leaf test constants.
+	e2eAggRootSnap = "e2e-agg-root"
 )
 
 // TestPipeline_E2E_FullTree runs the full pipeline against a fake kube client and
@@ -87,10 +90,10 @@ const (
 //
 //	root (manifests: root-cm)
 //	  └─ vm-snap (VirtualMachineSnapshot, manifests: vm-cm)
-//	       ├─ disk-block (VirtualDiskSnapshot, snapshot node)
-//	       │    └─ volumesnapshot_<shadow-block>/ (volume node, block data)
-//	       └─ disk-fs   (VirtualDiskSnapshot, snapshot node)
-//	            └─ volumesnapshot_<shadow-fs>/ (volume node, filesystem data)
+//	       ├─ disk-block (VirtualDiskSnapshot, non-aggregator, 1 OwnDataRef → block)
+//	       │    data.img.zst    (block data directly in the node dir)
+//	       └─ disk-fs   (VirtualDiskSnapshot, non-aggregator, 1 OwnDataRef → fs)
+//	            data/           (filesystem data directly in the node dir)
 //
 // After the first run all nodes are complete. A second run (resume) must be a no-op.
 func TestPipeline_E2E_FullTree(t *testing.T) {
@@ -157,56 +160,41 @@ func TestPipeline_E2E_FullTree(t *testing.T) {
 	require.NoError(t, err, "vm-snap snapshots/ must exist")
 
 	// ── disk-block node assertions ────────────────────────────────────────────
-	// disk-block is now a snapshot node: no data.img.zst directly; the block
-	// data lives inside its VolumeSnapshot child.
+	// disk-block is a non-aggregator: it owns one DataRef, so data.img.zst lives
+	// directly in the node directory (flat layout). No snapshots/ subdirectory.
 	blockDir := filepath.Join(vmDir, archive.SnapshotsDirName,
 		archive.NodeDirName(e2eDiskKind, e2eBlockDisk))
 	assertE2ENodeComplete(t, blockDir)
 
-	_, noBlockPayload := os.Stat(filepath.Join(blockDir, archive.DataBlockName))
-	require.True(t, os.IsNotExist(noBlockPayload),
-		"disk-block snapshot node must not carry data.img.zst directly")
-
-	// disk-block must have a snapshots/ dir for its VolumeSnapshot child.
-	_, err = os.Stat(filepath.Join(blockDir, archive.SnapshotsDirName))
-	require.NoError(t, err, "disk-block snapshots/ must exist")
-
-	blockVolumeDir := filepath.Join(blockDir, archive.SnapshotsDirName,
-		archive.NodeDirName("VolumeSnapshot", blockShadow))
-	assertE2ENodeComplete(t, blockVolumeDir)
-
-	blockFile := filepath.Join(blockVolumeDir, archive.DataBlockName)
+	blockFile := filepath.Join(blockDir, archive.DataBlockName)
 	_, err = os.Stat(blockFile)
-	require.NoError(t, err, "disk-block volume node data.img.zst must exist")
+	require.NoError(t, err, "disk-block data.img.zst must exist directly in the node dir")
+
+	// Non-aggregator nodes with no children must not have a snapshots/ subdir.
+	_, noSnapshotsErr := os.Stat(filepath.Join(blockDir, archive.SnapshotsDirName))
+	require.True(t, os.IsNotExist(noSnapshotsErr),
+		"disk-block must not have a snapshots/ subdir (no children)")
 
 	// Verify decoded block data equals the original.
 	require.Equal(t, rawBlock, e2eDecodeZstdFile(t, blockFile))
 
 	// ── disk-fs node assertions ───────────────────────────────────────────────
-	// disk-fs is now a snapshot node: no data/ directly; the filesystem data
-	// lives inside its VolumeSnapshot child.
+	// disk-fs is a non-aggregator: filesystem data lives directly in data/ inside
+	// the node directory (flat layout). No snapshots/ subdirectory.
 	fsDir := filepath.Join(vmDir, archive.SnapshotsDirName,
 		archive.NodeDirName(e2eDiskKind, e2eFSDisk))
 	assertE2ENodeComplete(t, fsDir)
 
-	_, noFSPayload := os.Stat(filepath.Join(fsDir, archive.DataDirName))
-	require.True(t, os.IsNotExist(noFSPayload),
-		"disk-fs snapshot node must not carry data/ directly")
+	fsDataDir := filepath.Join(fsDir, archive.DataDirName)
+	_, err = os.Stat(fsDataDir)
+	require.NoError(t, err, "disk-fs data/ must exist directly in the node dir")
 
-	// disk-fs must have a snapshots/ dir for its VolumeSnapshot child.
-	_, err = os.Stat(filepath.Join(fsDir, archive.SnapshotsDirName))
-	require.NoError(t, err, "disk-fs snapshots/ must exist")
-
-	fsVolumeDir := filepath.Join(fsDir, archive.SnapshotsDirName,
-		archive.NodeDirName("VolumeSnapshot", fsShadow))
-	assertE2ENodeComplete(t, fsVolumeDir)
-
-	dataDir := filepath.Join(fsVolumeDir, archive.DataDirName)
-	_, err = os.Stat(dataDir)
-	require.NoError(t, err, "disk-fs volume node data/ must exist")
+	_, noSnapshotsFSErr := os.Stat(filepath.Join(fsDir, archive.SnapshotsDirName))
+	require.True(t, os.IsNotExist(noSnapshotsFSErr),
+		"disk-fs must not have a snapshots/ subdir (no children)")
 
 	for _, f := range fsFiles {
-		zstPath := filepath.Join(dataDir, f.rel+".zst")
+		zstPath := filepath.Join(fsDataDir, f.rel+".zst")
 		require.Equal(t, f.content, e2eDecodeZstdFile(t, zstPath),
 			"disk-fs file %s content mismatch", f.rel)
 	}
@@ -425,7 +413,9 @@ func buildE2EFakeClient(t *testing.T) client.Client {
 
 	vmChunk := makeE2EManifestChunk(t, "chunk-e2e-vm-0", "mcp-e2e-vm", 0, e2eVMCMName)
 
-	// ── disk-block unstructured ───────────────────────────────────────────────
+	// ── disk-block unstructured (non-aggregator: no childrenSnapshotRefs) ─────
+	// Its DataRef in blockContent becomes an OwnDataRef on the node;
+	// block data is downloaded directly into the disk-block node directory.
 	blockSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eDiskKind, e2eNS, e2eBlockDisk, "sc-e2e-block", nil)
 
 	blockContent := &snapshotapi.SnapshotContent{
@@ -451,7 +441,7 @@ func buildE2EFakeClient(t *testing.T) client.Client {
 		},
 	}
 
-	// ── disk-fs unstructured ──────────────────────────────────────────────────
+	// ── disk-fs unstructured (non-aggregator: no childrenSnapshotRefs) ────────
 	fsSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eDiskKind, e2eNS, e2eFSDisk, "sc-e2e-fs", nil)
 
 	fsContent := &snapshotapi.SnapshotContent{
@@ -641,17 +631,20 @@ func makeE2EManifestChunkWithPayload(t *testing.T, name, checkpointName string, 
 	}
 }
 
-// TestPipeline_E2E_MultiVolume verifies that a single snapshot node with TWO dataRefs
-// (one Block and one Filesystem) produces two separate VolumeSnapshot child nodes,
-// each with the correct data payload and the captured PVC manifest, while the parent
-// snapshot node's manifests/ excludes both DataRef PVCs.
+// TestPipeline_E2E_MultiVolume verifies that a single non-aggregator snapshot node
+// with TWO OwnDataRefs (one Block and one Filesystem) lays out its data using the
+// multi-volume layout: data/<pvc>.img.zst and data/<pvc>/ directly in the same node
+// directory. No extra child nodes are created.
 //
 // Tree:
 //
 //	e2e-multi-root (Snapshot, no manifests)
-//	  └─ multi-disk (VirtualDiskSnapshot, manifests: multi-cfg + block-pvc + fs-pvc)
-//	       ├─ volumesnapshot_<block-shadow>/ (volume node, block data)
-//	       └─ volumesnapshot_<fs-shadow>/   (volume node, filesystem data)
+//	  └─ multi-disk (VirtualDiskSnapshot, non-aggregator, 2 OwnDataRefs)
+//	       data/pvc-multi-block.img.zst   (block volume)
+//	       data/pvc-multi-fs/             (filesystem volume)
+//	       manifests/configmap_multi-cfg.yaml
+//	       manifests/persistentvolumeclaim_pvc-multi-block.yaml  (included: OwnDataRef)
+//	       manifests/persistentvolumeclaim_pvc-multi-fs.yaml     (included: OwnDataRef)
 func TestPipeline_E2E_MultiVolume(t *testing.T) {
 	rawBlock := bytes.Repeat([]byte("M"), e2eBlockSize)
 	// Use the same file names that makeE2EFSServer hardcodes in its directory listing.
@@ -696,82 +689,58 @@ func TestPipeline_E2E_MultiVolume(t *testing.T) {
 		archive.NodeDirName(e2eDiskKind, e2eMultiDisk))
 	assertE2ENodeComplete(t, multiDiskDir)
 
-	// multi-disk must have snapshots/ for its two volume children.
-	_, err := os.Stat(filepath.Join(multiDiskDir, archive.SnapshotsDirName))
-	require.NoError(t, err, "multi-disk snapshots/ must exist")
+	// Non-aggregator with multiple OwnDataRefs: no snapshots/ subdir.
+	_, noSnaps := os.Stat(filepath.Join(multiDiskDir, archive.SnapshotsDirName))
+	require.True(t, os.IsNotExist(noSnaps),
+		"multi-disk must not have a snapshots/ subdir (no children)")
 
-	// multi-disk manifests/ must have the ConfigMap but NOT the two DataRef PVCs.
+	// No flat data.img.zst; data lives under data/<pvc>.*
+	_, noFlatBlock := os.Stat(filepath.Join(multiDiskDir, archive.DataBlockName))
+	require.True(t, os.IsNotExist(noFlatBlock),
+		"multi-disk must not carry flat data.img.zst (multi-volume layout)")
+
+	// multi-disk manifests/ must include ConfigMap and BOTH OwnDataRef PVCs.
+	// OwnDataRef PVCs are not excluded (only orphan leaf child PVCs are excluded).
 	manifestsDir := filepath.Join(multiDiskDir, archive.ManifestsDirName)
-	require.NoError(t, func() error {
-		_, e := os.Stat(filepath.Join(manifestsDir, "configmap_multi-cfg.yaml"))
-		return e
-	}(), "multi-disk manifests/ must include ConfigMap")
+	_, err := os.Stat(filepath.Join(manifestsDir, "configmap_multi-cfg.yaml"))
+	require.NoError(t, err, "multi-disk manifests/ must include ConfigMap")
 
 	for _, pvcName := range []string{e2eMultiBlockPVC, e2eMultiFSPVC} {
 		pvcFile := fmt.Sprintf("persistentvolumeclaim_%s.yaml", pvcName)
 		_, statErr := os.Stat(filepath.Join(manifestsDir, pvcFile))
-		require.True(t, os.IsNotExist(statErr),
-			"multi-disk manifests/ must NOT include DataRef PVC %s", pvcName)
+		require.NoError(t, statErr,
+			"multi-disk manifests/ must include OwnDataRef PVC %s", pvcName)
 	}
 
-	// multi-disk must have NO direct data payload.
-	_, noBlock := os.Stat(filepath.Join(multiDiskDir, archive.DataBlockName))
-	require.True(t, os.IsNotExist(noBlock), "multi-disk snapshot node must not carry data.img.zst")
+	// ── Block volume (multi-volume layout) ────────────────────────────────────
+	blockVolPath := filepath.Join(multiDiskDir, archive.MultiVolumeBlockName(e2eMultiBlockPVC))
+	_, err = os.Stat(blockVolPath)
+	require.NoError(t, err, "multi-disk block volume data/<pvc>.img.zst must exist")
+	require.Equal(t, rawBlock, e2eDecodeZstdFile(t, blockVolPath))
 
-	// ── Block volume node ─────────────────────────────────────────────────────
-	blockVolDir := filepath.Join(multiDiskDir, archive.SnapshotsDirName,
-		archive.NodeDirName("VolumeSnapshot", blockShadow))
-	assertE2ENodeComplete(t, blockVolDir)
-
-	blockFile := filepath.Join(blockVolDir, archive.DataBlockName)
-	_, err = os.Stat(blockFile)
-	require.NoError(t, err, "block volume node data.img.zst must exist")
-	require.Equal(t, rawBlock, e2eDecodeZstdFile(t, blockFile))
-
-	// Block volume node must carry the captured PVC manifest.
-	blockPVCManifest := filepath.Join(blockVolDir, archive.ManifestsDirName,
-		fmt.Sprintf("persistentvolumeclaim_%s.yaml", e2eMultiBlockPVC))
-	_, err = os.Stat(blockPVCManifest)
-	require.NoError(t, err, "block volume node must have PVC manifest")
-
-	// Block volume node snapshot.yaml must carry a Volumes entry.
-	blockSY, err := archive.ReadSnapshotYAML(blockVolDir)
-	require.NoError(t, err, "ReadSnapshotYAML for block volume node")
-	require.Len(t, blockSY.Volumes, 1, "block volume node snapshot.yaml must carry one Volumes entry")
-	require.Equal(t, e2eMultiBlockPVC, blockSY.Volumes[0].Target.Name,
-		"block volume Volumes[0].Target.Name must match block PVC")
-	require.Equal(t, e2eMultiBlockVSC, blockSY.Volumes[0].Artifact.Name,
-		"block volume Volumes[0].Artifact.Name must match block VSC")
-
-	// ── Filesystem volume node ────────────────────────────────────────────────
-	fsVolDir := filepath.Join(multiDiskDir, archive.SnapshotsDirName,
-		archive.NodeDirName("VolumeSnapshot", fsShadow))
-	assertE2ENodeComplete(t, fsVolDir)
-
-	dataDir := filepath.Join(fsVolDir, archive.DataDirName)
-	_, err = os.Stat(dataDir)
-	require.NoError(t, err, "fs volume node data/ must exist")
+	// ── Filesystem volume (multi-volume layout) ───────────────────────────────
+	fsVolDir := filepath.Join(multiDiskDir, archive.MultiVolumeDir(e2eMultiFSPVC))
+	_, err = os.Stat(fsVolDir)
+	require.NoError(t, err, "multi-disk fs volume data/<pvc>/ must exist")
 
 	for _, f := range fsFiles {
-		zstPath := filepath.Join(dataDir, f.rel+".zst")
+		zstPath := filepath.Join(fsVolDir, f.rel+".zst")
 		require.Equal(t, f.content, e2eDecodeZstdFile(t, zstPath),
-			"fs volume file %s content mismatch", f.rel)
+			"multi-disk fs file %s content mismatch", f.rel)
 	}
 
-	// FS volume node must carry the captured PVC manifest.
-	fsPVCManifest := filepath.Join(fsVolDir, archive.ManifestsDirName,
-		fmt.Sprintf("persistentvolumeclaim_%s.yaml", e2eMultiFSPVC))
-	_, err = os.Stat(fsPVCManifest)
-	require.NoError(t, err, "fs volume node must have PVC manifest")
-
-	// FS volume node snapshot.yaml must carry a Volumes entry.
-	fsSY, err := archive.ReadSnapshotYAML(fsVolDir)
-	require.NoError(t, err, "ReadSnapshotYAML for fs volume node")
-	require.Len(t, fsSY.Volumes, 1, "fs volume node snapshot.yaml must carry one Volumes entry")
-	require.Equal(t, e2eMultiFSPVC, fsSY.Volumes[0].Target.Name,
-		"fs volume Volumes[0].Target.Name must match fs PVC")
-	require.Equal(t, e2eMultiFSVSC, fsSY.Volumes[0].Artifact.Name,
-		"fs volume Volumes[0].Artifact.Name must match fs VSC")
+	// snapshot.yaml must carry two Volumes entries (one per OwnDataRef).
+	multiSY, err := archive.ReadSnapshotYAML(multiDiskDir)
+	require.NoError(t, err, "ReadSnapshotYAML for multi-disk node")
+	require.Len(t, multiSY.Volumes, 2, "multi-disk snapshot.yaml must carry two Volumes entries")
+	require.Equal(t, e2eMultiBlockPVC, multiSY.Volumes[0].Target.Name,
+		"Volumes[0].Target.Name must match block PVC")
+	require.Equal(t, e2eMultiBlockVSC, multiSY.Volumes[0].Artifact.Name,
+		"Volumes[0].Artifact.Name must match block VSC")
+	require.Equal(t, e2eMultiFSPVC, multiSY.Volumes[1].Target.Name,
+		"Volumes[1].Target.Name must match fs PVC")
+	require.Equal(t, e2eMultiFSVSC, multiSY.Volumes[1].Artifact.Name,
+		"Volumes[1].Artifact.Name must match fs VSC")
 
 	// ── Resume: second run must be a no-op ────────────────────────────────────
 	mtimes := e2eCollectMtimes(t, outputDir)
@@ -786,7 +755,7 @@ func TestPipeline_E2E_MultiVolume(t *testing.T) {
 }
 
 // buildMultiVolumeFakeClient constructs the fake kube client for TestPipeline_E2E_MultiVolume.
-// The tree has a single snapshot node (multi-disk) with two dataRefs: one Block and one Filesystem.
+// The tree has a single snapshot node (multi-disk) with two OwnDataRefs: one Block and one Filesystem.
 func buildMultiVolumeFakeClient(t *testing.T) client.Client {
 	t.Helper()
 
@@ -812,10 +781,12 @@ func buildMultiVolumeFakeClient(t *testing.T) client.Client {
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-multi-root"},
 	}
 
-	// multi-disk: VirtualDiskSnapshot with TWO dataRefs (block + fs).
+	// multi-disk: VirtualDiskSnapshot with TWO OwnDataRefs (block + fs).
+	// No childrenSnapshotRefs → non-aggregator → multi-volume layout in node dir.
 	multiDiskSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eDiskKind, e2eNS, e2eMultiDisk, "sc-multi-disk", nil)
 
 	// sc-multi-disk checkpoint has: configmap + block-pvc + fs-pvc.
+	// All three will appear in multi-disk/manifests/ (OwnDataRef PVCs are not excluded).
 	multiDiskPayload := fmt.Sprintf(
 		`[`+
 			`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"multi-cfg","namespace":%q}},`+
@@ -948,21 +919,22 @@ func buildMultiVolumeFakeClient(t *testing.T) client.Client {
 }
 
 // TestPipeline_E2E_DeletedPVC verifies that when the source PVC no longer exists in the
-// cluster, the pipeline resolves shadow metadata from the captured PVC manifest that
-// WriteVolumeManifest wrote into the volume node's manifests/ directory.
+// cluster, the pipeline resolves shadow metadata from the captured PVC manifest written
+// by WriteNodeManifests into the node's manifests/ directory.
 //
-// This tests the full end-to-end path of the manifest fallback:
+// This tests the full end-to-end path of the manifest fallback for a non-aggregator node:
 //  1. del-disk's SnapshotContent checkpoint contains the del-pvc manifest.
-//  2. WriteVolumeManifest writes it to the volume node's manifests/ dir.
+//  2. WriteNodeManifests writes it to del-disk/manifests/ before volume download.
 //  3. The live PVC GET returns NotFound (not in fake client).
-//  4. resolveShadowMeta falls back to reading manifests/persistentvolumeclaim_del-pvc.yaml.
+//  4. resolveShadowMeta falls back to reading del-disk/manifests/persistentvolumeclaim_del-pvc.yaml.
 //  5. The download succeeds with the correct storageClass and volumeMode from the manifest.
 //
 // Tree:
 //
 //	e2e-del-root (Snapshot)
-//	  └─ del-disk (VirtualDiskSnapshot, checkpoint contains del-pvc manifest)
-//	       └─ volumesnapshot_<del-shadow>/ (volume node, block data via manifest fallback)
+//	  └─ del-disk (VirtualDiskSnapshot, non-aggregator, 1 OwnDataRef → block via manifest fallback)
+//	       data.img.zst   (block data directly in the node dir)
+//	       manifests/persistentvolumeclaim_del-pvc.yaml
 func TestPipeline_E2E_DeletedPVC(t *testing.T) {
 	rawBlock := bytes.Repeat([]byte("D"), e2eBlockSize)
 	blockSrv := makeE2EBlockServer(t, rawBlock)
@@ -1002,27 +974,24 @@ func TestPipeline_E2E_DeletedPVC(t *testing.T) {
 
 	require.NoError(t, pipeline.Run(context.Background(), cfg))
 
-	// del-disk snapshot node must be complete.
+	// del-disk is a non-aggregator: block data lands directly in its node dir.
 	delDiskDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 		archive.NodeDirName(e2eDiskKind, e2eDelDisk))
 	assertE2ENodeComplete(t, delDiskDir)
 
-	// Volume node must be complete with the block data.
-	delVolDir := filepath.Join(delDiskDir, archive.SnapshotsDirName,
-		archive.NodeDirName("VolumeSnapshot", delShadow))
-	assertE2ENodeComplete(t, delVolDir)
-
-	blockFile := filepath.Join(delVolDir, archive.DataBlockName)
+	// Block data must be in the node dir directly (flat layout).
+	blockFile := filepath.Join(delDiskDir, archive.DataBlockName)
 	_, err := os.Stat(blockFile)
-	require.NoError(t, err, "del volume node data.img.zst must exist")
+	require.NoError(t, err, "del-disk data.img.zst must exist directly in the node dir")
 	require.Equal(t, rawBlock, e2eDecodeZstdFile(t, blockFile),
-		"del volume data must match original rawBlock")
+		"del-disk volume data must match original rawBlock")
 
-	// The captured PVC manifest must be in the volume node's manifests/.
-	pvcManifestPath := filepath.Join(delVolDir, archive.ManifestsDirName,
+	// The captured PVC manifest must be in del-disk/manifests/ (written by WriteNodeManifests
+	// from the checkpoint before volume download, so resolveShadowMeta can fall back to it).
+	pvcManifestPath := filepath.Join(delDiskDir, archive.ManifestsDirName,
 		fmt.Sprintf("persistentvolumeclaim_%s.yaml", e2eDelPVC))
 	_, err = os.Stat(pvcManifestPath)
-	require.NoError(t, err, "del volume node must have the captured PVC manifest from checkpoint")
+	require.NoError(t, err, "del-disk must have the captured PVC manifest in its manifests/")
 
 	// Shadow VS annotations must come from the manifest fallback (not live PVC).
 	require.Equal(t, "csi-del-sc", capturedMeta.StorageClass,
@@ -1057,9 +1026,13 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-del-root"},
 	}
 
+	// del-disk: non-aggregator (no childrenSnapshotRefs).
+	// Its DataRef becomes an OwnDataRef; the live PVC is absent (deleted).
 	delDiskSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eDiskKind, e2eNS, e2eDelDisk, "sc-del-disk", nil)
 
 	// The del-disk checkpoint contains ONLY the del-pvc manifest (the live PVC is gone).
+	// WriteNodeManifests writes it to del-disk/manifests/ before volume download,
+	// so resolveShadowMeta can fall back to it when the live PVC is not found.
 	delPayload := fmt.Sprintf(
 		`[{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":%q,"namespace":%q,"uid":"uid-del"},"spec":{"storageClassName":"csi-del-sc","volumeMode":"Block"}}]`,
 		e2eDelPVC, e2eNS,
@@ -1129,5 +1102,246 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 		WithScheme(scheme).
 		WithObjects(typed...).
 		WithObjects(delDiskSnap).
+		Build()
+}
+
+// TestPipeline_E2E_OrphanPVCLeaf verifies the aggregator + orphan-leaf model:
+// a snapshot node with a VolumeSnapshot visibility-leaf in its childrenSnapshotRefs
+// is treated as an aggregator. Its DataRefs become orphan leaf volume nodes, each
+// rooted at snapshots/volumesnapshot_<pvcName>/.
+//
+// Assertions:
+//  1. The aggregator node has snapshots/ (for the orphan leaf) but no data payload.
+//  2. The aggregator manifests/ includes only non-PVC manifests (ConfigMap);
+//     the orphan leaf's PVC is excluded from the aggregator.
+//  3. The orphan leaf node has data.img.zst and its captured PVC manifest.
+//  4. The directory name uses the PVC name (SourceName), not the shadow VS name.
+//
+// Tree:
+//
+//	e2e-agg-root (Snapshot)
+//	  └─ agg-snap (VirtualDiskSnapshot, aggregator: visibility-leaf in childrenSnapshotRefs)
+//	       manifests/configmap_agg-cm.yaml    (PVC excluded from aggregator manifests)
+//	       snapshots/
+//	         volumesnapshot_pvc-agg/          (orphan leaf named after PVC, not shadow VS)
+//	           data.img.zst
+//	           manifests/persistentvolumeclaim_pvc-agg.yaml
+func TestPipeline_E2E_OrphanPVCLeaf(t *testing.T) {
+	rawBlock := bytes.Repeat([]byte("A"), e2eBlockSize)
+	blockSrv := makeE2EBlockServer(t, rawBlock)
+
+	// Shadow VS name derived from the artifact VSC (same convention as all other tests).
+	aggShadow := exporter.ShadowName("vsc-agg")
+
+	c := buildOrphanLeafFakeClient(t)
+	outputDir := t.TempDir()
+
+	cfg := pipeline.Config{
+		Namespace:            e2eNS,
+		RootSnapshot:         e2eAggRootSnap,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		WaitShadowVS:         noopWaitShadowVS,
+		OpenExport: func(_ context.Context, namespace, shadowVSName, _ string) (*exporter.Export, error) {
+			if shadowVSName != aggShadow {
+				return nil, fmt.Errorf("e2e-agg: unknown shadow VS %q", shadowVSName)
+			}
+
+			return exporter.NewExport(namespace, "de-agg", "Block", blockSrv.URL, exporter.NewFetcher(blockSrv.Client())), nil
+		},
+	}
+
+	require.NoError(t, pipeline.Run(context.Background(), cfg))
+
+	// agg-snap is the aggregator node.
+	aggSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(e2eDiskKind, "agg-snap"))
+	assertE2ENodeComplete(t, aggSnapDir)
+
+	// Aggregator must have a snapshots/ dir for the orphan leaf child.
+	_, err := os.Stat(filepath.Join(aggSnapDir, archive.SnapshotsDirName))
+	require.NoError(t, err, "aggregator snapshots/ must exist for the orphan leaf")
+
+	// Aggregator must have NO data payload — data lives in the leaf, not here.
+	_, noBlock := os.Stat(filepath.Join(aggSnapDir, archive.DataBlockName))
+	require.True(t, os.IsNotExist(noBlock), "aggregator must not carry data.img.zst")
+
+	_, noData := os.Stat(filepath.Join(aggSnapDir, archive.DataDirName))
+	require.True(t, os.IsNotExist(noData), "aggregator must not carry data/ dir")
+
+	// Aggregator manifests/ must include the ConfigMap but NOT the orphan leaf's PVC.
+	manifestsDir := filepath.Join(aggSnapDir, archive.ManifestsDirName)
+	_, err = os.Stat(filepath.Join(manifestsDir, "configmap_agg-cm.yaml"))
+	require.NoError(t, err, "aggregator manifests/ must include ConfigMap")
+
+	_, statErr := os.Stat(filepath.Join(manifestsDir, "persistentvolumeclaim_pvc-agg.yaml"))
+	require.True(t, os.IsNotExist(statErr),
+		"aggregator manifests/ must NOT include orphan leaf PVC (it belongs in the leaf dir)")
+
+	// Orphan leaf node: directory name is volumesnapshot_<pvcName> (SourceName = PVC name).
+	// The visibility-leaf VS name "nss-vs-agg-pvc" is not used for directory naming.
+	leafDir := filepath.Join(aggSnapDir, archive.SnapshotsDirName,
+		archive.NodeDirName("VolumeSnapshot", "pvc-agg"))
+	assertE2ENodeComplete(t, leafDir)
+
+	// Orphan leaf must carry the block data.
+	blockFile := filepath.Join(leafDir, archive.DataBlockName)
+	_, err = os.Stat(blockFile)
+	require.NoError(t, err, "orphan leaf data.img.zst must exist")
+	require.Equal(t, rawBlock, e2eDecodeZstdFile(t, blockFile), "orphan leaf block data mismatch")
+
+	// Orphan leaf manifests/ must carry the captured PVC manifest.
+	pvcManifestPath := filepath.Join(leafDir, archive.ManifestsDirName,
+		"persistentvolumeclaim_pvc-agg.yaml")
+	_, err = os.Stat(pvcManifestPath)
+	require.NoError(t, err, "orphan leaf manifests/ must include the captured PVC manifest")
+
+	// ── Resume: second run must be a no-op ────────────────────────────────────
+	mtimes := e2eCollectMtimes(t, outputDir)
+	time.Sleep(20 * time.Millisecond)
+
+	require.NoError(t, pipeline.Run(context.Background(), cfg))
+
+	for path, before := range mtimes {
+		after := statMtime(t, path)
+		require.Equal(t, before, after, "snapshot.yaml mtime changed on resume: %s", path)
+	}
+}
+
+// buildOrphanLeafFakeClient constructs the fake kube client for TestPipeline_E2E_OrphanPVCLeaf.
+// The agg-snap snapshot has a VolumeSnapshot visibility-leaf in its childrenSnapshotRefs,
+// making the tree builder treat it as an aggregator: its DataRef becomes an orphan leaf child.
+func buildOrphanLeafFakeClient(t *testing.T) client.Client {
+	t.Helper()
+
+	scheme := buildScheme(t)
+
+	rootSnap := &snapshotapi.Snapshot{
+		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "Snapshot"},
+		ObjectMeta: metav1.ObjectMeta{Name: e2eAggRootSnap, Namespace: e2eNS},
+		Status: snapshotapi.SnapshotStatus{
+			BoundSnapshotContentName: "sc-agg-root",
+			ChildrenSnapshotRefs: []snapshotapi.SnapshotChildRef{
+				{APIVersion: e2eVMAPIVersion, Kind: e2eDiskKind, Name: "agg-snap"},
+			},
+		},
+	}
+
+	rootContent := &snapshotapi.SnapshotContent{
+		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
+		ObjectMeta: metav1.ObjectMeta{Name: "sc-agg-root"},
+	}
+
+	// agg-snap has a VolumeSnapshot visibility-leaf in childrenSnapshotRefs.
+	// The tree builder recognises the leaf (apiVersion snapshot.storage.k8s.io/v1 / kind
+	// VolumeSnapshot) and does NOT fetch it. Instead it sets hasVisibilityLeaves=true and
+	// converts the content DataRefs into orphan leaf children.
+	aggSnap := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": e2eVMAPIVersion,
+			"kind":       e2eDiskKind,
+			"metadata": map[string]interface{}{
+				"name":      "agg-snap",
+				"namespace": e2eNS,
+			},
+			"status": map[string]interface{}{
+				"boundSnapshotContentName": "sc-agg",
+				"childrenSnapshotRefs": []interface{}{
+					map[string]interface{}{
+						"apiVersion": "snapshot.storage.k8s.io/v1",
+						"kind":       "VolumeSnapshot",
+						"name":       "nss-vs-agg-pvc",
+					},
+				},
+			},
+		},
+	}
+
+	// Checkpoint for agg-snap: ConfigMap + pvc-agg manifest.
+	// ConfigMap goes to aggregator manifests/; pvc-agg goes to orphan leaf manifests/.
+	aggPayload := fmt.Sprintf(
+		`[`+
+			`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"agg-cm","namespace":%q}},`+
+			`{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"pvc-agg","namespace":%q,"uid":"uid-agg-pvc"},"spec":{"storageClassName":"csi-agg-sc","volumeMode":"Block"}}`+
+			`]`,
+		e2eNS, e2eNS,
+	)
+
+	aggMCP := &snapshotapi.ManifestCheckpoint{
+		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotterAPIVersion, Kind: "ManifestCheckpoint"},
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-agg"},
+		Spec:       snapshotapi.ManifestCheckpointSpec{SourceNamespace: e2eNS},
+		Status: snapshotapi.ManifestCheckpointStatus{
+			TotalObjects: 2,
+			Chunks:       []snapshotapi.ChunkInfo{{Index: 0, Name: "chunk-agg-0", ObjectsCount: 2}},
+		},
+	}
+
+	aggChunk := makeE2EManifestChunkWithPayload(t, "chunk-agg-0", "mcp-agg", 0, aggPayload)
+
+	aggContent := &snapshotapi.SnapshotContent{
+		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
+		ObjectMeta: metav1.ObjectMeta{Name: "sc-agg"},
+		Status: snapshotapi.SnapshotContentStatus{
+			ManifestCheckpointName: "mcp-agg",
+			DataRefs: []snapshotapi.SnapshotDataBinding{
+				{
+					TargetUID: "uid-agg-pvc",
+					Target: snapshotapi.SnapshotSubjectRef{
+						APIVersion: "v1",
+						Kind:       "PersistentVolumeClaim",
+						Namespace:  e2eNS,
+						Name:       "pvc-agg",
+						UID:        "uid-agg-pvc",
+					},
+					Artifact: snapshotapi.SnapshotDataArtifactRef{
+						APIVersion: "snapshot.storage.k8s.io/v1",
+						Kind:       "VolumeSnapshotContent",
+						Name:       "vsc-agg",
+					},
+				},
+			},
+		},
+	}
+
+	aggHandle := "handle-agg"
+	realAggVSC := &snapv1.VolumeSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "vsc-agg"},
+		Spec: snapv1.VolumeSnapshotContentSpec{
+			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
+			Driver:         "test.driver",
+			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &aggHandle},
+			VolumeSnapshotRef: corev1.ObjectReference{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshot",
+				Name:       "placeholder-agg",
+				Namespace:  "default",
+			},
+		},
+	}
+
+	// Live PVC for resolveShadowMeta (shadow meta comes from live PVC in this test).
+	aggMode := corev1.PersistentVolumeBlock
+	aggSC := "csi-agg-sc"
+	liveAggPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "pvc-agg", Namespace: e2eNS},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &aggSC,
+			VolumeMode:       &aggMode,
+		},
+	}
+
+	typed := []client.Object{
+		rootSnap, rootContent,
+		aggContent, aggMCP, aggChunk,
+		realAggVSC, liveAggPVC,
+	}
+
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(typed...).
+		WithObjects(aggSnap).
 		Build()
 }
