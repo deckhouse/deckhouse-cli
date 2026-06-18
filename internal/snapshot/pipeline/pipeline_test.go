@@ -653,6 +653,53 @@ func TestPipeline_WaitShadowVSCalledBeforeExport(t *testing.T) {
 	assert.Equal(t, "OpenExport", callOrder[1], "OpenExport must be called after WaitShadowVS")
 }
 
+// TestPipeline_ShadowReadinessTimeout verifies that when the shadow VS wait
+// exceeds ShadowReadinessTimeout the pipeline returns an error and still
+// cleans up the shadow VS and VSC via the cancel-proof cleanupCtx.
+func TestPipeline_ShadowReadinessTimeout(t *testing.T) {
+	t.Parallel()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	cfg := pipeline.Config{
+		Namespace:              testNS,
+		RootSnapshot:           rootSnapshot,
+		OutputDir:              outputDir,
+		Workers:                1,
+		KubeClient:             c,
+		ShadowReadinessTimeout: 10 * time.Millisecond,
+		WaitShadowVS: func(ctx context.Context, _ client.Client, _ *slog.Logger, _, _, _ string) error {
+			<-ctx.Done()
+
+			return ctx.Err()
+		},
+		OpenExport: func(_ context.Context, _, _, _ string) (*exporter.Export, error) {
+			t.Error("OpenExport must not be called when shadow VS wait times out")
+
+			return nil, errors.New("unexpected OpenExport call")
+		},
+	}
+
+	err := pipeline.Run(context.Background(), cfg)
+	require.Error(t, err, "expected pipeline to fail when shadow VS wait times out")
+
+	// Shadow VS and VSC must have been cleaned up despite the timeout.
+	pairName := exporter.ShadowName(diskVSCName)
+
+	var shadowVS snapv1.VolumeSnapshot
+
+	vsErr := c.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: pairName}, &shadowVS)
+	assert.True(t, kubeerrors.IsNotFound(vsErr),
+		"shadow VS must be deleted after timeout cleanup; got err=%v", vsErr)
+
+	var shadowVSC snapv1.VolumeSnapshotContent
+
+	vscErr := c.Get(context.Background(), types.NamespacedName{Name: pairName}, &shadowVSC)
+	assert.True(t, kubeerrors.IsNotFound(vscErr),
+		"shadow VSC must be deleted after timeout cleanup; got err=%v", vscErr)
+}
+
 // makeUnstructuredSnap builds an unstructured snapshot object for kinds not
 // registered in the scheme (e.g. VirtualDiskSnapshot).
 func makeUnstructuredSnap(apiVersion, kind, namespace, name, contentName string) *unstructured.Unstructured {

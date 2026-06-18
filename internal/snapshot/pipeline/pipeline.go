@@ -381,7 +381,10 @@ func downloadVolumeBinding(
 		}
 	}()
 
-	if err := cfg.WaitShadowVS(ctx, cfg.KubeClient, cfg.Log, namespace, shadowVS.Name, artifactName); err != nil {
+	shadowCtx, shadowCancel := context.WithTimeout(ctx, cfg.ShadowReadinessTimeout)
+	defer shadowCancel()
+
+	if err := cfg.WaitShadowVS(shadowCtx, cfg.KubeClient, cfg.Log, namespace, shadowVS.Name, artifactName); err != nil {
 		return fmt.Errorf("wait for shadow VS %s ready: %w", shadowVS.Name, err)
 	}
 
