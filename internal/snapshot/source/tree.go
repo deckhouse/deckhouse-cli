@@ -27,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/naming"
 )
 
 // ErrCycle is returned when a cycle or duplicate reference is detected in the snapshot tree.
@@ -36,7 +35,7 @@ var ErrCycle = errors.New("cycle detected in snapshot tree")
 // rootAPIVersion is the apiVersion of the root Snapshot CR.
 const rootAPIVersion = snapshotapi.StorageGroup + "/" + snapshotapi.Version
 
-// volumeSnapshotAPIVersion is the apiVersion used for VolumeSnapshot volume nodes.
+// volumeSnapshotAPIVersion is the apiVersion of CSI VolumeSnapshot visibility-leaf nodes.
 const volumeSnapshotAPIVersion = "snapshot.storage.k8s.io/v1"
 
 // BuildTree fetches the root Snapshot by name and recursively resolves the full snapshot
@@ -49,9 +48,15 @@ const volumeSnapshotAPIVersion = "snapshot.storage.k8s.io/v1"
 // always fetched in the same namespace as the root. The function does one typed Get per
 // node and never lists.
 //
-// Each element of a node's DataRefs is materialised as a VolumeSnapshot child node (leaf)
-// appended after the snapshot children. Volume nodes are not recursed and are not subject
-// to cycle detection.
+// childrenSnapshotRefs are partitioned into two sets:
+//   - Domain refs (apiVersion != "snapshot.storage.k8s.io/v1" or kind != "VolumeSnapshot")
+//     are recursed normally via boundSnapshotContentName.
+//   - VolumeSnapshot visibility-leaf refs (apiVersion == "snapshot.storage.k8s.io/v1" and
+//     kind == "VolumeSnapshot") are NOT fetched or recursed. Their presence signals that
+//     this node is an aggregator: all content.DataRefs become orphan leaf volume nodes.
+//
+// When a node has no visibility-leaf children, its content.DataRefs are stored in
+// OwnDataRefs and no leaf children are created (data lives directly in the node's dir).
 //
 // Returns ErrCycle if a duplicate snapshot ref is encountered.
 func BuildTree(ctx context.Context, c client.Client, namespace, rootName string) (*Node, error) {
@@ -102,7 +107,6 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 	sourceRef := obj.GetAnnotations()[snapshotapi.AnnotationSourceRef]
 
 	// Parse the source-ref annotation to extract the source object name (best-effort).
-	// An absent or malformed annotation is not fatal; SourceName will be left empty.
 	var sourceName string
 	if id, err := ParseSourceRef(sourceRef); err == nil {
 		sourceName = id.Name
@@ -116,18 +120,20 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 		SourceRef:              sourceRef,
 		SourceName:             sourceName,
 		ManifestCheckpointName: content.Status.ManifestCheckpointName,
-		DataRefs:               content.Status.DataRefs,
 		Parent:                 parent,
 	}
 
-	childRefs, err := extractChildRefs(obj)
+	allChildRefs, err := extractChildRefs(obj)
 	if err != nil {
 		return nil, fmt.Errorf("%s %s/%s: status.childrenSnapshotRefs: %w", apiVersion, kind, name, err)
 	}
 
-	node.Children = make([]*Node, 0, len(childRefs)+len(content.Status.DataRefs))
+	// Partition childRefs into domain refs (to recurse) and visibility-leaf refs (discriminator only).
+	domainRefs, hasVisibilityLeaves := partitionChildRefs(allChildRefs)
 
-	for _, ref := range childRefs {
+	node.Children = make([]*Node, 0, len(domainRefs)+len(content.Status.DataRefs))
+
+	for _, ref := range domainRefs {
 		child, err := b.visit(ctx, ref.APIVersion, ref.Kind, ref.Name, node)
 		if err != nil {
 			return nil, err
@@ -136,29 +142,64 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 		node.Children = append(node.Children, child)
 	}
 
-	// Append one VolumeSnapshot leaf node per captured volume (dataRef). Volume nodes
-	// are leaves: they are not added to the cycle-detection set and not recursed.
-	// The binding is copied from the slice so that later mutations to the source
-	// SnapshotContent's DataRefs do not alias the node's Binding pointer.
-	for i := range content.Status.DataRefs {
-		binding := content.Status.DataRefs[i]
+	if hasVisibilityLeaves {
+		// Aggregator: expose each dataRef as an orphan leaf volume node.
+		// OwnDataRefs stays nil; volume data is addressed through the leaf's Binding.
+		for i := range content.Status.DataRefs {
+			binding := content.Status.DataRefs[i]
 
-		volumeNode := &Node{
-			APIVersion:             volumeSnapshotAPIVersion,
-			Kind:                   "VolumeSnapshot",
-			Name:                   naming.ShadowName(binding.Artifact.Name),
-			Namespace:              b.namespace,
-			SourceRef:              binding.TargetUID,
-			SourceName:             binding.Target.Name,
-			ManifestCheckpointName: content.Status.ManifestCheckpointName,
-			Parent:                 node,
-			Binding:                &binding,
+			leafNode := &Node{
+				APIVersion:             volumeSnapshotAPIVersion,
+				Kind:                   "VolumeSnapshot",
+				Name:                   binding.Target.Name,
+				Namespace:              b.namespace,
+				SourceRef:              binding.TargetUID,
+				SourceName:             binding.Target.Name,
+				ManifestCheckpointName: content.Status.ManifestCheckpointName,
+				Parent:                 node,
+				Binding:                &binding,
+			}
+
+			node.Children = append(node.Children, leafNode)
 		}
 
-		node.Children = append(node.Children, volumeNode)
+		return node, nil
+	}
+
+	// Non-aggregator: data lives directly in this node.
+	// Copy the slice so callers cannot alias content.Status.DataRefs.
+	if len(content.Status.DataRefs) > 0 {
+		own := make([]snapshotapi.SnapshotDataBinding, len(content.Status.DataRefs))
+		copy(own, content.Status.DataRefs)
+		node.OwnDataRefs = own
 	}
 
 	return node, nil
+}
+
+// partitionChildRefs splits childRefs into domain refs (to recurse) and reports whether
+// any VolumeSnapshot visibility-leaf refs were found. Visibility-leaf refs are identified
+// by apiVersion == "snapshot.storage.k8s.io/v1" and kind == "VolumeSnapshot".
+// They are NOT included in the returned slice and are never fetched.
+func partitionChildRefs(refs []snapshotapi.SnapshotChildRef) ([]snapshotapi.SnapshotChildRef, bool) {
+	domain := make([]snapshotapi.SnapshotChildRef, 0, len(refs))
+	hasLeaves := false
+
+	for _, ref := range refs {
+		if isVisibilityLeaf(ref) {
+			hasLeaves = true
+		} else {
+			domain = append(domain, ref)
+		}
+	}
+
+	return domain, hasLeaves
+}
+
+// isVisibilityLeaf reports whether a child ref is a CSI VolumeSnapshot visibility-leaf.
+// Mirrors state-snapshotter pkg/snapshot.IsVolumeSnapshotVisibilityLeaf.
+func isVisibilityLeaf(ref snapshotapi.SnapshotChildRef) bool {
+	return ref.APIVersion == volumeSnapshotAPIVersion && ref.Kind == "VolumeSnapshot"
 }
 
 // fetchUnstructured fetches any namespaced Kubernetes object by apiVersion/kind/name
