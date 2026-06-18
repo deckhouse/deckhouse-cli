@@ -101,12 +101,20 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 
 	sourceRef := obj.GetAnnotations()[snapshotapi.AnnotationSourceRef]
 
+	// Parse the source-ref annotation to extract the source object name (best-effort).
+	// An absent or malformed annotation is not fatal; SourceName will be left empty.
+	var sourceName string
+	if id, err := ParseSourceRef(sourceRef); err == nil {
+		sourceName = id.Name
+	}
+
 	node := &Node{
 		APIVersion:             apiVersion,
 		Kind:                   kind,
 		Name:                   name,
 		Namespace:              b.namespace,
 		SourceRef:              sourceRef,
+		SourceName:             sourceName,
 		ManifestCheckpointName: content.Status.ManifestCheckpointName,
 		DataRefs:               content.Status.DataRefs,
 		Parent:                 parent,
@@ -141,6 +149,7 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 			Name:                   naming.ShadowName(binding.Artifact.Name),
 			Namespace:              b.namespace,
 			SourceRef:              binding.TargetUID,
+			SourceName:             binding.Target.Name,
 			ManifestCheckpointName: content.Status.ManifestCheckpointName,
 			Parent:                 node,
 			Binding:                &binding,

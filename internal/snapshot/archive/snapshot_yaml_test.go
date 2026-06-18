@@ -197,6 +197,112 @@ func TestSnapshotYAML_OmitemptyVolume(t *testing.T) {
 	}
 }
 
+func TestSnapshotYAML_RoundTrip_WithSourceName(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	want := archive.SnapshotYAML{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-2",
+		Namespace:  "ns-b",
+		SourceRef:  `{"apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns-b","name":"my-pvc","uid":"uid-xyz"}`,
+		SourceName: "my-pvc",
+		Checksum:   checksum,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, want); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	got, err := archive.ReadSnapshotYAML(dir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if got.SourceName != want.SourceName {
+		t.Errorf("SourceName: got %q, want %q", got.SourceName, want.SourceName)
+	}
+}
+
+func TestSnapshotYAML_OmitemptySourceName(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	// SourceName empty → must be absent from YAML output.
+	sy := archive.SnapshotYAML{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-omit-sn",
+		Checksum:   checksum,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, sy); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, archive.SnapshotYAMLName))
+	if err != nil {
+		t.Fatalf("ReadFile snapshot.yaml: %v", err)
+	}
+
+	if strings.Contains(string(raw), "sourceName:") {
+		t.Errorf("snapshot.yaml must not contain 'sourceName:' key when SourceName is empty; got:\n%s", raw)
+	}
+}
+
+// TestSnapshotYAML_ChecksumUnaffectedBySourceNameField is a regression test that
+// confirms adding the SourceName field to snapshot.yaml does NOT change the node
+// checksum (because snapshot.yaml is excluded from ComputeNodeChecksum).
+func TestSnapshotYAML_ChecksumUnaffectedBySourceNameField(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum1, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum before write: %v", err)
+	}
+
+	sy := archive.SnapshotYAML{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-sn-regression",
+		SourceName: "some-vm",
+		Checksum:   checksum1,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, sy); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	checksum2, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum after write: %v", err)
+	}
+
+	if checksum1.Hex != checksum2.Hex {
+		t.Errorf("checksum changed after writing snapshot.yaml with SourceName (snapshot.yaml must be excluded):\nbefore %q\nafter  %q",
+			checksum1.Hex, checksum2.Hex)
+	}
+
+	if err := archive.VerifyNode(dir); err != nil {
+		t.Errorf("VerifyNode must pass after adding SourceName field: %v", err)
+	}
+}
+
 // TestSnapshotYAML_ChecksumUnaffectedByVolumeField is a regression test that
 // confirms adding the Volume field to snapshot.yaml does NOT change the node
 // checksum (because snapshot.yaml is excluded from ComputeNodeChecksum).

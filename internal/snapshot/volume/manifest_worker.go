@@ -135,6 +135,7 @@ func FinalizeNode(nodeDir string, node *source.Node) error {
 		Name:       node.Name,
 		Namespace:  node.Namespace,
 		SourceRef:  node.SourceRef,
+		SourceName: node.SourceName,
 		Checksum:   checksum,
 	}
 
