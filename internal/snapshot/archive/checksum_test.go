@@ -318,3 +318,69 @@ func TestVerifyNode_Missing(t *testing.T) {
 		t.Errorf("expected ErrSnapshotYAMLMissing, got: %v", err)
 	}
 }
+
+// TestComputeNodeChecksum_MultiVolumeLayout verifies that the multi-volume layout
+// (data/<pvc>.img.zst for block volumes and data/<pvc>/<file>.zst for FS volumes)
+// is fully covered by ComputeNodeChecksum without any code changes to checksum.go.
+// The checksum must be deterministic (same content → same digest) and must change
+// when any volume file is mutated.
+func TestComputeNodeChecksum_MultiVolumeLayout(t *testing.T) {
+	nodeDir := makeNodeDir(t)
+
+	// Manifest.
+	writeFile(t, filepath.Join(nodeDir, ManifestsDirName, "virtualdisksnapshot_snap.yaml"), "kind: VirtualDiskSnapshot\n")
+
+	// Block-volume PVC-a in multi-volume layout: data/pvc-a.img.zst.
+	writeFile(t, filepath.Join(nodeDir, MultiVolumeBlockName("pvc-a")), "block-content-a")
+
+	// FS-volume PVC-b in multi-volume layout: data/pvc-b/<file>.zst.
+	writeFile(t, filepath.Join(nodeDir, MultiVolumeDir("pvc-b"), "etc", "config.txt.zst"), "fs-content-b")
+
+	c1, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("first compute: %v", err)
+	}
+
+	if c1.Algorithm != "sha256" {
+		t.Errorf("algorithm: got %q, want sha256", c1.Algorithm)
+	}
+
+	if len(c1.Hex) != 64 {
+		t.Errorf("hex length: got %d, want 64", len(c1.Hex))
+	}
+
+	// Second call must produce the identical digest (determinism / order-independence).
+	c2, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("second compute: %v", err)
+	}
+
+	if c1.Hex != c2.Hex {
+		t.Errorf("non-deterministic: %q vs %q", c1.Hex, c2.Hex)
+	}
+
+	// Mutating the block-volume file must change the checksum.
+	writeFile(t, filepath.Join(nodeDir, MultiVolumeBlockName("pvc-a")), "block-content-a-modified")
+
+	c3, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("third compute: %v", err)
+	}
+
+	if c1.Hex == c3.Hex {
+		t.Error("checksum did not change after mutating data/<pvc>.img.zst")
+	}
+
+	// Restore and mutate the FS-volume file instead.
+	writeFile(t, filepath.Join(nodeDir, MultiVolumeBlockName("pvc-a")), "block-content-a")
+	writeFile(t, filepath.Join(nodeDir, MultiVolumeDir("pvc-b"), "etc", "config.txt.zst"), "fs-content-b-modified")
+
+	c4, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("fourth compute: %v", err)
+	}
+
+	if c1.Hex == c4.Hex {
+		t.Error("checksum did not change after mutating data/<pvc>/<file>.zst")
+	}
+}
