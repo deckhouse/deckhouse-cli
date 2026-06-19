@@ -145,6 +145,11 @@ func processNode(ctx context.Context, cfg Config, task nodeTask) error {
 		return nil
 	}
 
+	cfg.Log.Info("processing node",
+		slog.String("kind", task.node.Kind),
+		slog.String("name", task.node.Name),
+		slog.String("resume_state", nodeStateName(task.state)))
+
 	if task.node.Binding != nil {
 		return processVolumeNode(ctx, cfg, task)
 	}
@@ -471,6 +476,25 @@ func downloadFS(ctx context.Context, cfg Config, tarPath, stagingDir string, exp
 	}
 
 	return volume.DownloadFilesystemVolume(ctx, cfg.Log, tarPath, stagingDir, filesURL, cfg.PerVolumeConcurrency, exp.Fetcher())
+}
+
+// nodeStateName returns a human-readable label for a NodeState, used in log output
+// so that the classification produced by the resume scan is visible to operators.
+func nodeStateName(s archive.NodeState) string {
+	switch s {
+	case archive.NodeStatePending:
+		return "pending"
+	case archive.NodeStateBlockPartial:
+		return "block_partial"
+	case archive.NodeStateFSPartial:
+		return "fs_partial"
+	case archive.NodeStateManifestsOnly:
+		return "manifests_only"
+	case archive.NodeStateDone:
+		return "done"
+	default:
+		return "unknown"
+	}
 }
 
 // nodeIdentity converts a source.Node into an archive.NodeIdentity for resume scanning.
