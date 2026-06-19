@@ -240,6 +240,50 @@ func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
 	assertNodeComplete(t, diskSnapDir)
 }
 
+// TestPipeline_FSResumeAfterTar verifies that when data.tar already exists in a
+// node directory (crash-after-tar-assembly-before-snapshot.yaml window), the
+// pipeline skips shadow pair creation and DataExport entirely and only calls
+// FinalizeNode.
+func TestPipeline_FSResumeAfterTar(t *testing.T) {
+	t.Parallel()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	// Pre-create disk-snap's directory with data.tar but no snapshot.yaml,
+	// simulating a crash after the FS tar was assembled but before FinalizeNode ran.
+	// disk-snap is a non-aggregator: it downloads its OwnDataRef flat into its own dir.
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+
+	require.NoError(t, os.MkdirAll(filepath.Join(diskSnapDir, archive.ManifestsDirName), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(diskSnapDir, archive.FsTarName),
+		[]byte("pre-assembled-fs-tar"),
+		0o644,
+	))
+
+	cfg := pipeline.Config{
+		Namespace:    testNS,
+		RootSnapshot: rootSnapshot,
+		OutputDir:    outputDir,
+		Workers:      1,
+		KubeClient:   c,
+		WaitShadowVS: noopWaitShadowVS,
+		OpenExport: func(_ context.Context, _, _, _ string) (*exporter.Export, error) {
+			t.Error("OpenExport must not be called when data.tar already exists")
+
+			return nil, errors.New("unexpected OpenExport call")
+		},
+	}
+
+	err := pipeline.Run(context.Background(), cfg)
+	require.NoError(t, err)
+
+	// FinalizeNode must have been called: disk-snap directory must now be complete.
+	assertNodeComplete(t, diskSnapDir)
+}
+
 // assertNodeComplete checks that snapshot.yaml exists in dir and VerifyNode passes.
 func assertNodeComplete(t *testing.T, dir string) {
 	t.Helper()
