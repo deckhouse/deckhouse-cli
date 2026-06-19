@@ -189,19 +189,29 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask) error {
 		return fmt.Errorf("write volume manifest for %s/%s: %w", task.node.Kind, task.node.Name, err)
 	}
 
+	dest := flatDest(task.nodeDir, cfg.Compression.Ext())
+
 	_, blockAlreadyMerged, err := archive.FindBlockData(task.nodeDir)
 	if err != nil {
 		return fmt.Errorf("find block data in %s: %w", task.nodeDir, err)
 	}
 
-	if blockAlreadyMerged {
+	fsTarDone, err := fsTarComplete(dest.fsTarPath)
+	if err != nil {
+		return fmt.Errorf("check fs tar in %s: %w", task.nodeDir, err)
+	}
+
+	switch {
+	case blockAlreadyMerged:
 		cfg.Log.Info("block volume already merged, skipping download",
 			slog.String("kind", task.node.Kind),
 			slog.String("name", task.node.Name))
-	}
-
-	if !blockAlreadyMerged {
-		if err := downloadVolumeBinding(ctx, cfg, task.node.Binding, task.node.Namespace, task.nodeDir, flatDest(task.nodeDir, cfg.Compression.Ext())); err != nil {
+	case fsTarDone:
+		cfg.Log.Info("fs tar already complete, skipping download",
+			slog.String("kind", task.node.Kind),
+			slog.String("name", task.node.Name))
+	default:
+		if err := downloadVolumeBinding(ctx, cfg, task.node.Binding, task.node.Namespace, task.nodeDir, dest); err != nil {
 			return fmt.Errorf("download volume for %s/%s: %w", task.node.Kind, task.node.Name, err)
 		}
 	}
@@ -235,6 +245,8 @@ func downloadOwnDataRefs(
 
 	if len(refs) == 1 {
 		// Flat single-volume layout: reuse the same paths as leaf volume nodes.
+		dest := flatDest(nodeDir, cfg.Compression.Ext())
+
 		_, found, err := archive.FindBlockData(nodeDir)
 		if err != nil {
 			return fmt.Errorf("find block data in %s: %w", nodeDir, err)
@@ -248,7 +260,20 @@ func downloadOwnDataRefs(
 			return nil
 		}
 
-		return downloadVolumeBinding(ctx, cfg, &refs[0], node.Namespace, nodeDir, flatDest(nodeDir, cfg.Compression.Ext()))
+		fsTarDone, err := fsTarComplete(dest.fsTarPath)
+		if err != nil {
+			return fmt.Errorf("check fs tar in %s: %w", nodeDir, err)
+		}
+
+		if fsTarDone {
+			cfg.Log.Info("fs tar already complete, skipping download",
+				slog.String("kind", node.Kind),
+				slog.String("name", node.Name))
+
+			return nil
+		}
+
+		return downloadVolumeBinding(ctx, cfg, &refs[0], node.Namespace, nodeDir, dest)
 	}
 
 	// Multi-volume layout: one shadow pair + DataExport per binding.
@@ -264,6 +289,18 @@ func downloadOwnDataRefs(
 
 		if statErr == nil {
 			cfg.Log.Info("block volume already merged, skipping",
+				slog.String("pvc", pvc))
+
+			continue
+		}
+
+		fsTarDone, err := fsTarComplete(dest.fsTarPath)
+		if err != nil {
+			return fmt.Errorf("check fs tar for pvc %s: %w", pvc, err)
+		}
+
+		if fsTarDone {
+			cfg.Log.Info("fs tar already complete, skipping",
 				slog.String("pvc", pvc))
 
 			continue
@@ -501,6 +538,22 @@ func shadowMetaFromPVC(pvc *corev1.PersistentVolumeClaim) (exporter.ShadowMeta, 
 	}
 
 	return meta, nil
+}
+
+// fsTarComplete reports whether the assembled filesystem tar at tarPath already
+// exists. Returns (true, nil) when found, (false, nil) when absent, and
+// (false, err) for any other stat error.
+func fsTarComplete(tarPath string) (bool, error) {
+	_, err := os.Stat(tarPath)
+	if err == nil {
+		return true, nil
+	}
+
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+
+	return false, err
 }
 
 // shadowMetaFromManifest reads the captured PVC manifest from
