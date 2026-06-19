@@ -39,8 +39,9 @@ var ErrSnapshotYAMLMissing = errors.New("snapshot.yaml not found")
 //
 // Covered files (in sorted-relpath order):
 //   - manifests/*.yaml
-//   - data.img.zst (if present)
-//   - data/**/*.zst (if data/ directory is present)
+//   - data.bin[.<ext>] (block volume, single-volume flat layout, if present)
+//   - data.tar (filesystem volume, single-volume flat layout, if present)
+//   - data/<pvc>.bin[.<ext>] / data/<pvc>.tar (multi-volume layout, if data/ present)
 //
 // Excluded: snapshot.yaml itself and the snapshots/ child directory.
 //

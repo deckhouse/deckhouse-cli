@@ -161,7 +161,7 @@ func TestPipeline_E2E_FullTree(t *testing.T) {
 	require.NoError(t, err, "vm-snap snapshots/ must exist")
 
 	// ── disk-block node assertions ────────────────────────────────────────────
-	// disk-block is a non-aggregator: it owns one DataRef, so data.img.zst lives
+	// disk-block is a non-aggregator: it owns one DataRef, so data.bin.zst lives
 	// directly in the node directory (flat layout). No snapshots/ subdirectory.
 	blockDir := filepath.Join(vmDir, archive.SnapshotsDirName,
 		archive.NodeDirName(e2eDiskKind, e2eBlockDisk))
@@ -960,7 +960,7 @@ func buildMultiVolumeFakeClient(t *testing.T) client.Client {
 //
 //	e2e-del-root (Snapshot)
 //	  └─ del-disk (VirtualDiskSnapshot, non-aggregator, 1 OwnDataRef → block via manifest fallback)
-//	       data.img.zst   (block data directly in the node dir)
+//	       data.bin.zst   (block data directly in the node dir)
 //	       manifests/persistentvolumeclaim_del-pvc.yaml
 func TestPipeline_E2E_DeletedPVC(t *testing.T) {
 	rawBlock := bytes.Repeat([]byte("D"), e2eBlockSize)
@@ -1141,7 +1141,7 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 //  1. The aggregator node has snapshots/ (for the orphan leaf) but no data payload.
 //  2. The aggregator manifests/ includes only non-PVC manifests (ConfigMap);
 //     the orphan leaf's PVC is excluded from the aggregator.
-//  3. The orphan leaf node has data.img.zst and its captured PVC manifest.
+//  3. The orphan leaf node has data.bin.zst and its captured PVC manifest.
 //  4. The directory name uses the PVC name (SourceName), not the shadow VS name.
 //
 // Tree:
@@ -1151,7 +1151,7 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 //	       manifests/configmap_agg-cm.yaml    (PVC excluded from aggregator manifests)
 //	       snapshots/
 //	         volumesnapshot_pvc-agg/          (orphan leaf named after PVC, not shadow VS)
-//	           data.img.zst
+//	           data.bin.zst
 //	           manifests/persistentvolumeclaim_pvc-agg.yaml
 func TestPipeline_E2E_OrphanPVCLeaf(t *testing.T) {
 	rawBlock := bytes.Repeat([]byte("A"), e2eBlockSize)

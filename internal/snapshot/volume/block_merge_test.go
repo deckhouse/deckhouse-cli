@@ -97,7 +97,7 @@ func TestMergeBlockChunks_MergesInOrder(t *testing.T) {
 	finalPath := outPath
 	raw, err := os.ReadFile(finalPath)
 	if err != nil {
-		t.Fatalf("read data.img.zst: %v", err)
+		t.Fatalf("read merged block file: %v", err)
 	}
 
 	// Decode the multi-frame stream; result must equal payload concat.
