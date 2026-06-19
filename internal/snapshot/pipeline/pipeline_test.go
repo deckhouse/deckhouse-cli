@@ -813,3 +813,104 @@ func TestPipeline_NoneCompression(t *testing.T) {
 	require.NoError(t, readErr)
 	require.Equal(t, rawBlock, got, "none-compressed block data must match original")
 }
+
+// TestPipeline_PartialChunkResume verifies the block_partial resume path: when a node's
+// data.bin.d/ chunk directory already holds some (but not all) chunk files and there is
+// no snapshot.yaml, the pipeline fetches only the missing byte ranges, merges all chunks,
+// removes data.bin.d/, and finalizes the node.
+func TestPipeline_PartialChunkResume(t *testing.T) {
+	t.Parallel()
+
+	const (
+		testChunkSize int64 = 100 // 3 × 100 = 300 bytes → 3 chunks
+		testTotalSize int64 = 300
+	)
+
+	rawBlock := bytes.Repeat([]byte("Z"), int(testTotalSize))
+
+	// Track which Range GET headers the server receives.
+	var (
+		mu            sync.Mutex
+		fetchedRanges []string
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/block", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			mu.Lock()
+			fetchedRanges = append(fetchedRanges, r.Header.Get("Range"))
+			mu.Unlock()
+		}
+
+		http.ServeContent(w, r, "data", time.Time{}, bytes.NewReader(rawBlock))
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	codec, err := compress.New("zstd", 0)
+	require.NoError(t, err)
+
+	// Pre-seed chunk 0 as a real zstd frame, simulating a crash after the first
+	// chunk was downloaded but before the remaining chunks were fetched.
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
+	require.NoError(t, os.MkdirAll(chunkDir, 0o755))
+
+	chunk0Frame, err := codec.EncodeFrame(rawBlock[:testChunkSize])
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())),
+		chunk0Frame,
+		0o644,
+	))
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		ChunkSize:            testChunkSize,
+		KubeClient:           c,
+		Compression:          codec,
+		WaitShadowVS:         noopWaitShadowVS,
+		OpenExport: func(_ context.Context, namespace, _ string, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-partial-resume", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	require.NoError(t, pipeline.Run(context.Background(), cfg))
+
+	// (a) Chunk 0 must not have been re-fetched; chunks 1 and 2 must have been fetched.
+	mu.Lock()
+	gotRanges := append([]string(nil), fetchedRanges...)
+	mu.Unlock()
+
+	for _, hdr := range gotRanges {
+		require.NotEqual(t, "bytes=0-99", hdr,
+			"chunk 0 was pre-seeded and must not be re-fetched")
+	}
+
+	require.Contains(t, gotRanges, "bytes=100-199", "chunk 1 must be fetched")
+	require.Contains(t, gotRanges, "bytes=200-299", "chunk 2 must be fetched")
+
+	// (b) Merged data.bin.zst must decode to the original rawBlock.
+	blockFile := filepath.Join(diskSnapDir, archive.DataBlockName(codec.Ext()))
+	compressed, readErr := os.ReadFile(blockFile)
+	require.NoError(t, readErr)
+	require.Equal(t, rawBlock, decodeZstdBlock(t, compressed),
+		"merged block must decode to original bytes")
+
+	// (c) The node must be fully finalized.
+	assertNodeComplete(t, diskSnapDir)
+
+	// (d) The chunk directory must have been removed after merge.
+	_, statErr := os.Stat(chunkDir)
+	require.True(t, os.IsNotExist(statErr), "data.bin.d/ must be removed after merge")
+}
