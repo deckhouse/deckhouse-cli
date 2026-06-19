@@ -14,8 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package compress provides zstd compression helpers for snapshot output files.
-// CRC is always enabled so integrity errors are detectable at decode time.
 package compress
 
 import (
@@ -81,7 +79,36 @@ func (e *Encoder) EncodeStream(dst io.Writer, src io.Reader) error {
 // concatenated; the result is a valid multi-frame zstd stream that decodes
 // to the concatenation of all original inputs.
 // Use this to encode individual block-volume chunks before merging them
-// into data.img.zst.
+// into data.bin.zst.
 func (e *Encoder) EncodeFrame(src []byte) ([]byte, error) {
 	return e.enc.EncodeAll(src, nil), nil
+}
+
+// zstdCodec wraps Encoder to implement the Codec interface.
+type zstdCodec struct {
+	enc *Encoder
+}
+
+// newZstdCodec constructs a zstdCodec at the given level.
+// level == 0 uses LevelDefault; any other positive value is forwarded directly.
+func newZstdCodec(level int) (Codec, error) {
+	l := LevelDefault
+	if level > 0 {
+		l = Level(level)
+	}
+
+	enc, err := NewEncoder(l)
+	if err != nil {
+		return nil, err
+	}
+
+	return &zstdCodec{enc: enc}, nil
+}
+
+func (*zstdCodec) Name() string { return "zstd" }
+
+func (*zstdCodec) Ext() string { return ".zst" }
+
+func (z *zstdCodec) EncodeFrame(src []byte) ([]byte, error) {
+	return z.enc.EncodeFrame(src)
 }
