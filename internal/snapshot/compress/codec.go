@@ -51,9 +51,10 @@ const DefaultCodecName = "zstd"
 type codecFactory func(level int) (Codec, error)
 
 // codecRegistry maps codec names to factory functions.
-// New codecs (gzip, lz4) are added here when their files are introduced.
 var codecRegistry = map[string]codecFactory{
 	"zstd": newZstdCodec,
+	"gzip": newGzipCodec,
+	"lz4":  newLz4Codec,
 	"none": func(_ int) (Codec, error) { return noneCodec{}, nil },
 }
 
