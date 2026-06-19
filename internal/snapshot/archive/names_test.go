@@ -391,28 +391,6 @@ func TestMultiVolumeTarStagingDirName(t *testing.T) {
 	}
 }
 
-// TestMultiVolumeDir_Deprecated verifies the deprecated MultiVolumeDir still returns
-// the legacy path for backward compatibility with old code.
-func TestMultiVolumeDir_Deprecated(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		pvc  string
-		want string
-	}{
-		{"pvc-disk-a", "data/pvc-disk-a"},
-		{"my-pvc", "data/my-pvc"},
-		{"disk.with.dots", "data/disk.with.dots"},
-	}
-
-	for _, tc := range tests {
-		got := archive.MultiVolumeDir(tc.pvc)
-		if got != tc.want {
-			t.Errorf("MultiVolumeDir(%q) = %q; want %q", tc.pvc, got, tc.want)
-		}
-	}
-}
-
 func TestBlockChunksDirNameFor(t *testing.T) {
 	t.Parallel()
 

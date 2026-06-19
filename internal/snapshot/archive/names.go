@@ -167,14 +167,6 @@ func MultiVolumeTarStagingDirName(pvc string) string {
 	return filepath.Join(DataDirName, pvc+".tar.d")
 }
 
-// MultiVolumeDir returns the relative path for a filesystem-volume staging directory
-// in the N>1 multi-volume layout: "data/<pvc>". Kept for backward compatibility.
-//
-// Deprecated: use MultiVolumeTarStagingDirName for new code.
-func MultiVolumeDir(pvc string) string {
-	return filepath.Join(DataDirName, pvc)
-}
-
 // BlockChunksDirNameFor returns the relative path of the temporary chunk directory
 // for a named PVC volume in the N>1 multi-volume layout: "data/<pvc>.bin.d".
 // Chunks accumulate here during download and are merged into MultiVolumeBlockName(pvc, ext)
