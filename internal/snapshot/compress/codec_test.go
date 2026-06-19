@@ -18,10 +18,13 @@ package compress_test
 
 import (
 	"bytes"
+	stdgzip "compress/gzip"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/pierrec/lz4/v4"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 )
@@ -69,7 +72,7 @@ func TestNew_None(t *testing.T) {
 	}
 }
 
-func TestNames_ContainsZstdAndNone(t *testing.T) {
+func TestNames_ContainsAllCodecs(t *testing.T) {
 	t.Helper()
 
 	names := compress.Names()
@@ -79,7 +82,7 @@ func TestNames_ContainsZstdAndNone(t *testing.T) {
 		found[n] = true
 	}
 
-	for _, want := range []string{"zstd", "none"} {
+	for _, want := range []string{"zstd", "gzip", "lz4", "none"} {
 		if !found[want] {
 			t.Errorf("Names() does not contain %q; got %v", want, names)
 		}
@@ -233,5 +236,201 @@ func TestCodec_NoneEncodeFrame_IsolatedCopy(t *testing.T) {
 
 	if out[0] == 'X' {
 		t.Error("none EncodeFrame returned alias to input; mutation of src visible in output")
+	}
+}
+
+func TestNew_Gzip(t *testing.T) {
+	t.Helper()
+
+	c, err := compress.New("gzip", 0)
+	if err != nil {
+		t.Fatalf("New(gzip): %v", err)
+	}
+
+	if c.Name() != "gzip" {
+		t.Errorf("Name() = %q; want %q", c.Name(), "gzip")
+	}
+
+	if c.Ext() != ".gz" {
+		t.Errorf("Ext() = %q; want %q", c.Ext(), ".gz")
+	}
+}
+
+func TestNew_Lz4(t *testing.T) {
+	t.Helper()
+
+	c, err := compress.New("lz4", 0)
+	if err != nil {
+		t.Fatalf("New(lz4): %v", err)
+	}
+
+	if c.Name() != "lz4" {
+		t.Errorf("Name() = %q; want %q", c.Name(), "lz4")
+	}
+
+	if c.Ext() != ".lz4" {
+		t.Errorf("Ext() = %q; want %q", c.Ext(), ".lz4")
+	}
+}
+
+func TestCodec_GzipEncodeFrame_RoundTrip(t *testing.T) {
+	t.Helper()
+
+	c, err := compress.New("gzip", 0)
+	if err != nil {
+		t.Fatalf("New(gzip): %v", err)
+	}
+
+	src := bytes.Repeat([]byte("hello gzip codec "), 100)
+
+	frame, err := c.EncodeFrame(src)
+	if err != nil {
+		t.Fatalf("EncodeFrame(gzip): %v", err)
+	}
+
+	r, err := stdgzip.NewReader(bytes.NewReader(frame))
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+
+	defer func() { _ = r.Close() }()
+
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("io.ReadAll(gzip): %v", err)
+	}
+
+	if !bytes.Equal(got, src) {
+		t.Errorf("gzip round-trip mismatch: len got=%d want=%d", len(got), len(src))
+	}
+}
+
+func TestCodec_GzipEncodeFrame_ConcatenatedFrames(t *testing.T) {
+	// Concatenated gzip streams must decode to the concatenation of their inputs.
+	t.Helper()
+
+	c, err := compress.New("gzip", 0)
+	if err != nil {
+		t.Fatalf("New(gzip): %v", err)
+	}
+
+	chunks := [][]byte{
+		bytes.Repeat([]byte("alpha"), 100),
+		bytes.Repeat([]byte("beta-"), 100),
+	}
+
+	var frames []byte
+
+	var plain []byte
+
+	for _, ch := range chunks {
+		frame, encErr := c.EncodeFrame(ch)
+		if encErr != nil {
+			t.Fatalf("EncodeFrame(gzip): %v", encErr)
+		}
+
+		frames = append(frames, frame...)
+		plain = append(plain, ch...)
+	}
+
+	var got []byte
+
+	rd := bytes.NewReader(frames)
+
+	for rd.Len() > 0 {
+		r, openErr := stdgzip.NewReader(rd)
+		if openErr != nil {
+			t.Fatalf("gzip.NewReader: %v", openErr)
+		}
+
+		chunk, readErr := io.ReadAll(r)
+		if readErr != nil {
+			t.Fatalf("io.ReadAll: %v", readErr)
+		}
+
+		_ = r.Close()
+
+		got = append(got, chunk...)
+	}
+
+	if !bytes.Equal(got, plain) {
+		t.Errorf("gzip concatenated frames mismatch: len got=%d want=%d", len(got), len(plain))
+	}
+}
+
+func TestCodec_Lz4EncodeFrame_RoundTrip(t *testing.T) {
+	t.Helper()
+
+	c, err := compress.New("lz4", 0)
+	if err != nil {
+		t.Fatalf("New(lz4): %v", err)
+	}
+
+	src := bytes.Repeat([]byte("hello lz4 codec "), 100)
+
+	frame, err := c.EncodeFrame(src)
+	if err != nil {
+		t.Fatalf("EncodeFrame(lz4): %v", err)
+	}
+
+	r := lz4.NewReader(bytes.NewReader(frame))
+
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("lz4 decode: %v", err)
+	}
+
+	if !bytes.Equal(got, src) {
+		t.Errorf("lz4 round-trip mismatch: len got=%d want=%d", len(got), len(src))
+	}
+}
+
+func TestCodec_Lz4EncodeFrame_ConcatenatedFrames(t *testing.T) {
+	// Concatenated LZ4 frames decode to the concatenation of their inputs.
+	// pierrec/lz4/v4 returns EOF after each frame; a per-frame reader loop is required
+	// (the same pattern used in block_merge when decompressing a merged .lz4 file).
+	t.Helper()
+
+	c, err := compress.New("lz4", 0)
+	if err != nil {
+		t.Fatalf("New(lz4): %v", err)
+	}
+
+	chunks := [][]byte{
+		bytes.Repeat([]byte("alpha"), 100),
+		bytes.Repeat([]byte("beta-"), 100),
+	}
+
+	var frames []byte
+
+	var plain []byte
+
+	for _, ch := range chunks {
+		frame, encErr := c.EncodeFrame(ch)
+		if encErr != nil {
+			t.Fatalf("EncodeFrame(lz4): %v", encErr)
+		}
+
+		frames = append(frames, frame...)
+		plain = append(plain, ch...)
+	}
+
+	underlying := bytes.NewReader(frames)
+
+	var got []byte
+
+	for underlying.Len() > 0 {
+		r := lz4.NewReader(underlying)
+
+		chunk, readErr := io.ReadAll(r)
+		if readErr != nil {
+			t.Fatalf("lz4 decode frame: %v", readErr)
+		}
+
+		got = append(got, chunk...)
+	}
+
+	if !bytes.Equal(got, plain) {
+		t.Errorf("lz4 concatenated frames mismatch: len got=%d want=%d", len(got), len(plain))
 	}
 }
