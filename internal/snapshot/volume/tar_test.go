@@ -183,7 +183,7 @@ func TestWriteTar_Defaults(t *testing.T) {
 	assert.Equal(t, int64(0o644), headers[0].Mode, "default file mode")
 	assert.Equal(t, 0, headers[0].Uid, "default uid")
 	assert.Equal(t, 0, headers[0].Gid, "default gid")
-	// PAX stores timestamps as Unix seconds; zero time.Time{} round-trips as epoch 0.
+	// Zero Mtime is normalized to Unix epoch 0 before writing; reads back as epoch 0.
 	assert.Equal(t, int64(0), headers[0].ModTime.Unix(), "default mtime is epoch 0")
 
 	assert.Equal(t, int64(0o755), headers[1].Mode, "default dir mode")
@@ -224,6 +224,38 @@ func TestWriteTar_Empty(t *testing.T) {
 
 	headers, _ := readTar(t, outPath)
 	assert.Empty(t, headers)
+}
+
+// TestWriteTar_ZeroMtime verifies that a zero-value TarEntry.Mtime is normalized
+// to Unix epoch 0 (not year 0001) in the assembled tar, for all three entry types.
+func TestWriteTar_ZeroMtime(t *testing.T) {
+	t.Parallel()
+
+	stagingDir := t.TempDir()
+	outputDir := t.TempDir()
+
+	writeStagingFile(t, stagingDir, "file.txt", []byte("data"))
+
+	entries := []volume.TarEntry{
+		{RelPath: "file.txt", Type: "file"},
+		{RelPath: "mydir", Type: "dir"},
+		{RelPath: "sym", Type: "link", Linkname: "file.txt"},
+	}
+
+	outPath := filepath.Join(outputDir, "data.tar")
+
+	err := volume.WriteTar(outPath, stagingDir, entries)
+	require.NoError(t, err)
+
+	headers, _ := readTar(t, outPath)
+	require.Len(t, headers, 3)
+
+	epoch := time.Unix(0, 0).UTC()
+
+	for _, hdr := range headers {
+		assert.True(t, epoch.Equal(hdr.ModTime),
+			"entry %q: zero Mtime must produce epoch 0, got %v", hdr.Name, hdr.ModTime)
+	}
 }
 
 func TestWriteTar_PAXFormat(t *testing.T) {
