@@ -105,7 +105,7 @@ func TestDownloadBlockChunks_Basic(t *testing.T) {
 	blockURL := srv.URL + "/api/v1/block"
 	fetcher := exporter.NewFetcher(srv.Client())
 
-	enc, err := compress.NewEncoder(compress.LevelFastest)
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
 
 	nodeDir := t.TempDir()
@@ -126,7 +126,7 @@ func TestDownloadBlockChunks_Basic(t *testing.T) {
 		chunkSize,
 		2,
 		fetcher,
-		enc,
+		codec,
 	)
 	require.NoError(t, err)
 
@@ -136,7 +136,7 @@ func TestDownloadBlockChunks_Basic(t *testing.T) {
 	assert.Len(t, names, wantChunks, "expected %d chunk files", wantChunks)
 
 	for i, name := range names {
-		assert.Equal(t, archive.ChunkFileName(i), name, "chunk %d filename", i)
+		assert.Equal(t, archive.ChunkFileName(i, codec.Ext()), name, "chunk %d filename", i)
 	}
 }
 
@@ -149,7 +149,7 @@ func TestDownloadBlockChunks_ConcatDecodesCorrectly(t *testing.T) {
 	blockURL := srv.URL + "/api/v1/block"
 	fetcher := exporter.NewFetcher(srv.Client())
 
-	enc, err := compress.NewEncoder(compress.LevelFastest)
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
 
 	nodeDir := t.TempDir()
@@ -168,7 +168,7 @@ func TestDownloadBlockChunks_ConcatDecodesCorrectly(t *testing.T) {
 		chunkSize,
 		1,
 		fetcher,
-		enc,
+		codec,
 	)
 	require.NoError(t, err)
 
@@ -194,7 +194,7 @@ func TestDownloadBlockChunks_SkipsExistingChunks(t *testing.T) {
 	blockURL := srv.URL + "/api/v1/block"
 	fetcher := exporter.NewFetcher(srv.Client())
 
-	enc, err := compress.NewEncoder(compress.LevelFastest)
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
 
 	nodeDir := t.TempDir()
@@ -214,7 +214,7 @@ func TestDownloadBlockChunks_SkipsExistingChunks(t *testing.T) {
 		chunkSize,
 		1,
 		fetcher,
-		enc,
+		codec,
 	)
 	require.NoError(t, err)
 
@@ -239,7 +239,7 @@ func TestDownloadBlockChunks_SkipsExistingChunks(t *testing.T) {
 		chunkSize,
 		1,
 		fetcher,
-		enc,
+		codec,
 	)
 	require.NoError(t, err)
 
@@ -261,7 +261,7 @@ func TestDownloadBlockChunks_CleansStaleTemp(t *testing.T) {
 	blockURL := srv.URL + "/api/v1/block"
 	fetcher := exporter.NewFetcher(srv.Client())
 
-	enc, err := compress.NewEncoder(compress.LevelFastest)
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
 
 	nodeDir := t.TempDir()
@@ -273,7 +273,7 @@ func TestDownloadBlockChunks_CleansStaleTemp(t *testing.T) {
 	require.NoError(t, os.MkdirAll(chunkDir, 0o755))
 
 	// Place a stale .tmp for chunk 0 to simulate a previous aborted attempt.
-	staleFile := filepath.Join(chunkDir, archive.ChunkFileName(0)+".tmp")
+	staleFile := filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".tmp")
 	require.NoError(t, os.WriteFile(staleFile, []byte("stale"), 0o644))
 
 	// Download should remove the stale tmp and succeed.
@@ -286,7 +286,7 @@ func TestDownloadBlockChunks_CleansStaleTemp(t *testing.T) {
 		chunkSize,
 		1,
 		fetcher,
-		enc,
+		codec,
 	)
 	require.NoError(t, err)
 
@@ -295,7 +295,7 @@ func TestDownloadBlockChunks_CleansStaleTemp(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "stale tmp should be removed")
 
 	// Final chunk file must exist.
-	finalFile := filepath.Join(chunkDir, archive.ChunkFileName(0))
+	finalFile := filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext()))
 	_, err = os.Stat(finalFile)
 	assert.NoError(t, err, "final chunk file must exist")
 }
@@ -313,7 +313,7 @@ func TestDownloadBlockChunks_ChunkBoundaries(t *testing.T) {
 	blockURL := srv.URL + "/api/v1/block"
 	fetcher := exporter.NewFetcher(srv.Client())
 
-	enc, err := compress.NewEncoder(compress.LevelFastest)
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
 
 	nodeDir := t.TempDir()
@@ -328,7 +328,7 @@ func TestDownloadBlockChunks_ChunkBoundaries(t *testing.T) {
 		chunkSize,
 		1,
 		fetcher,
-		enc,
+		codec,
 	)
 	require.NoError(t, err)
 

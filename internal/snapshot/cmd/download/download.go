@@ -33,6 +33,7 @@ import (
 	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
@@ -41,12 +42,14 @@ import (
 const (
 	cmdUse = "download"
 
-	flagNamespace            = "namespace"
-	flagOutput               = "output"
-	flagTTL                  = "ttl"
-	flagWorkers              = "workers"
-	flagPerVolumeConcurrency = "per-volume-concurrency"
-	flagChunkSize            = "chunk-size"
+	flagNamespace              = "namespace"
+	flagOutput                 = "output"
+	flagTTL                    = "ttl"
+	flagWorkers                = "workers"
+	flagPerVolumeConcurrency   = "per-volume-concurrency"
+	flagChunkSize              = "chunk-size"
+	flagVolumeCompression      = "volume-compression"
+	flagVolumeCompressionLevel = "volume-compression-level"
 )
 
 // NewCommand builds the `d8 snapshot download` cobra command.
@@ -60,7 +63,15 @@ func NewCommand(log *slog.Logger) *cobra.Command {
   d8 snapshot download my-snap -n default -o out
 
   # Download with faster compression and more concurrent workers
-  d8 snapshot download my-snap -n default -o out --workers 8 --per-volume-concurrency 8`,
+  d8 snapshot download my-snap -n default -o out --workers 8 --per-volume-concurrency 8
+
+  # Download block volumes with lz4 compression (faster, larger output)
+  d8 snapshot download my-snap -n default -o out --volume-compression lz4
+
+  # Download block volumes without compression
+  d8 snapshot download my-snap -n default -o out --volume-compression none
+
+  # Note: filesystem volumes always produce data.tar regardless of --volume-compression`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(log, cmd, args)
@@ -73,6 +84,10 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 	cmd.Flags().Int(flagWorkers, 4, "maximum number of nodes downloaded concurrently")
 	cmd.Flags().Int(flagPerVolumeConcurrency, 4, "maximum parallel chunk/file downloads per volume")
 	cmd.Flags().String(flagChunkSize, "", "block-volume chunk size (e.g. 256Mi); defaults to 256Mi")
+	cmd.Flags().String(flagVolumeCompression, compress.DefaultCodecName,
+		"block-volume compression codec ("+strings.Join(compress.Names(), ", ")+"); filesystem volumes always write data.tar and ignore this flag")
+	cmd.Flags().Int(flagVolumeCompressionLevel, 0,
+		"compression level for the selected codec (0 = codec default)")
 
 	return cmd
 }
@@ -135,6 +150,22 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("parsing --%s: %w", flagChunkSize, err)
 	}
 
+	codecName, err := cmd.Flags().GetString(flagVolumeCompression)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagVolumeCompression, err)
+	}
+
+	compressionLevel, err := cmd.Flags().GetInt(flagVolumeCompressionLevel)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagVolumeCompressionLevel, err)
+	}
+
+	codec, err := compress.New(codecName, compressionLevel)
+	if err != nil {
+		return fmt.Errorf("invalid --%s %q (valid codecs: %s): %w",
+			flagVolumeCompression, codecName, strings.Join(compress.Names(), ", "), err)
+	}
+
 	safeClient.SupportNoAuth = false
 
 	sc, err := safeClient.NewSafeClient(cmd.PersistentFlags())
@@ -159,6 +190,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		PerVolumeConcurrency: perVolume,
 		ChunkSize:            chunkSize,
 		TTL:                  ttl,
+		Compression:          codec,
 		KubeClient:           kubeClient,
 		SafeClient:           sc,
 		Log:                  log,

@@ -41,8 +41,8 @@ const DefaultChunkSize = 256 * 1024 * 1024 // 256 MiB
 
 // DownloadBlockChunks downloads all chunks of a block volume into chunkDir.
 // Chunk k covers raw bytes [k*chunkSize, min((k+1)*chunkSize, totalSize)).
-// Each chunk is fetched via a Range GET, encoded as an independent zstd frame,
-// and atomically written as chunk_NNNNN.zst.
+// Each chunk is fetched via a Range GET, encoded as an independent frame using
+// codec, and atomically written as chunk_NNNNN[.<ext>] where ext is codec.Ext().
 //
 // chunkDir is the absolute path to the chunk directory (the caller constructs it
 // using archive.BlockChunksDirName or archive.BlockChunksDirNameFor for
@@ -53,7 +53,7 @@ const DefaultChunkSize = 256 * 1024 * 1024 // 256 MiB
 // error cancels all in-flight work.
 //
 // Memory note: each in-flight worker buffers a full raw chunk (io.ReadAll) plus
-// the encoded zstd frame simultaneously.  Worst-case RSS for this call alone is
+// the encoded frame simultaneously.  Worst-case RSS for this call alone is
 // workers × (chunkSize + compressed frame size).  The outer pipeline multiplies
 // this by the number of concurrent nodes (pipeline.Config.Workers); total peak
 // ≈ pipeline.Config.Workers × workers × (chunkSize + frame).
@@ -66,7 +66,7 @@ func DownloadBlockChunks(
 	chunkSize int64,
 	workers int,
 	fetcher *exporter.Fetcher,
-	enc *compress.Encoder,
+	codec compress.Codec,
 ) error {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
@@ -95,14 +95,14 @@ func DownloadBlockChunks(
 		chunkIdx := i
 
 		g.Go(func() error {
-			return downloadChunk(gctx, log, chunkDir, blockURL, chunkIdx, chunkSize, totalSize, fetcher, enc)
+			return downloadChunk(gctx, log, chunkDir, blockURL, chunkIdx, chunkSize, totalSize, fetcher, codec)
 		})
 	}
 
 	return g.Wait()
 }
 
-// downloadChunk fetches one chunk, encodes it as a zstd frame, and writes it
+// downloadChunk fetches one chunk, encodes it with codec, and writes it
 // atomically. It is safe to call concurrently from multiple goroutines.
 func downloadChunk(
 	ctx context.Context,
@@ -113,9 +113,9 @@ func downloadChunk(
 	chunkSize int64,
 	totalSize int64,
 	fetcher *exporter.Fetcher,
-	enc *compress.Encoder,
+	codec compress.Codec,
 ) error {
-	finalPath := filepath.Join(chunkDir, archive.ChunkFileName(chunkIdx))
+	finalPath := filepath.Join(chunkDir, archive.ChunkFileName(chunkIdx, codec.Ext()))
 
 	// Skip chunks that are already complete.
 	if _, err := os.Stat(finalPath); err == nil {
@@ -152,7 +152,7 @@ func downloadChunk(
 		return fmt.Errorf("read chunk %d body: %w", chunkIdx, err)
 	}
 
-	frame, err := enc.EncodeFrame(raw)
+	frame, err := codec.EncodeFrame(raw)
 	if err != nil {
 		return fmt.Errorf("encode chunk %d: %w", chunkIdx, err)
 	}
