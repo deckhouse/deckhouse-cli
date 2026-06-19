@@ -33,6 +33,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+	lz4 "github.com/pierrec/lz4/v4"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,6 +44,7 @@ import (
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
 )
@@ -1371,4 +1373,141 @@ func buildOrphanLeafFakeClient(t *testing.T) client.Client {
 		WithObjects(typed...).
 		WithObjects(aggSnap).
 		Build()
+}
+
+// TestPipeline_BlockCodecMatrix verifies that block-volume download+merge produces the
+// correct data.bin[.<ext>] file for every supported codec (zstd, lz4, gzip, none) and
+// that the merged file decodes back to the original raw bytes.
+func TestPipeline_BlockCodecMatrix(t *testing.T) {
+	t.Parallel()
+
+	// rawBlock must span multiple chunks to exercise multi-chunk merge per codec.
+	rawBlock := bytes.Repeat([]byte("C"), e2eBlockSize)
+
+	cases := []struct {
+		codec string
+		ext   string
+	}{
+		{"zstd", ".zst"},
+		{"lz4", ".lz4"},
+		{"gzip", ".gz"},
+		{"none", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.codec, func(t *testing.T) {
+			t.Parallel()
+
+			srv := makeBlockServer(t, rawBlock)
+			defer srv.Close()
+
+			c := buildFakeClient(t)
+			outputDir := t.TempDir()
+
+			codec, err := compress.New(tc.codec, 0)
+			require.NoError(t, err)
+
+			cfg := pipeline.Config{
+				Namespace:            testNS,
+				RootSnapshot:         rootSnapshot,
+				OutputDir:            outputDir,
+				Workers:              1,
+				PerVolumeConcurrency: 1,
+				KubeClient:           c,
+				Compression:          codec,
+				WaitShadowVS:         noopWaitShadowVS,
+				OpenExport: func(_ context.Context, namespace, _ string, _ string) (*exporter.Export, error) {
+					return exporter.NewExport(namespace, "de-"+tc.codec, "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+				},
+			}
+
+			require.NoError(t, pipeline.Run(context.Background(), cfg))
+
+			diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+				archive.NodeDirName(childKind, diskSnapName))
+
+			blockFile := filepath.Join(diskSnapDir, archive.DataBlockName(tc.ext))
+			_, statErr := os.Stat(blockFile)
+			require.NoError(t, statErr, "codec %s: expected %s to exist", tc.codec, archive.DataBlockName(tc.ext))
+
+			foundPath, found, findErr := archive.FindBlockData(diskSnapDir)
+			require.NoError(t, findErr)
+			require.True(t, found, "codec %s: FindBlockData must find a file", tc.codec)
+			require.Equal(t, blockFile, foundPath, "codec %s: only the expected file must exist", tc.codec)
+
+			compressed, readErr := os.ReadFile(blockFile)
+			require.NoError(t, readErr)
+			decoded := decodeBlockFile(t, tc.codec, compressed)
+			require.Equal(t, rawBlock, decoded, "codec %s: decoded bytes must match original", tc.codec)
+		})
+	}
+}
+
+// decodeBlockFile decodes a merged block-volume file using the matching decoder for codecName.
+func decodeBlockFile(t *testing.T, codecName string, data []byte) []byte {
+	t.Helper()
+
+	switch codecName {
+	case "zstd":
+		return decodeZstdBlock(t, data)
+	case "lz4":
+		return decodeLZ4Block(t, data)
+	case "gzip":
+		return decodeGzipBlock(t, data)
+	case "none":
+		return data
+	default:
+		t.Fatalf("decodeBlockFile: unknown codec %q", codecName)
+		return nil
+	}
+}
+
+// decodeZstdBlock decodes a multi-frame zstd stream (concatenated per-chunk frames).
+func decodeZstdBlock(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	dec, err := zstd.NewReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	defer dec.Close()
+
+	var buf bytes.Buffer
+
+	_, err = buf.ReadFrom(dec)
+	require.NoError(t, err)
+
+	return buf.Bytes()
+}
+
+// decodeLZ4Block decodes a multi-frame LZ4 stream (concatenated per-chunk frames).
+func decodeLZ4Block(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	r := lz4.NewReader(bytes.NewReader(data))
+
+	_, err := buf.ReadFrom(r)
+	require.NoError(t, err)
+
+	return buf.Bytes()
+}
+
+// decodeGzipBlock decodes a stream of concatenated gzip members (one per chunk).
+func decodeGzipBlock(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	r := bytes.NewReader(data)
+	var buf bytes.Buffer
+
+	for r.Len() > 0 {
+		gz, err := gzip.NewReader(r)
+		require.NoError(t, err)
+
+		_, err = io.Copy(&buf, gz)
+		require.NoError(t, err)
+
+		require.NoError(t, gz.Close())
+	}
+
+	return buf.Bytes()
 }
