@@ -73,8 +73,11 @@ type Config struct {
 	// TTL is the DataExport TTL string (e.g. "2h").  Defaults to "2h".
 	TTL string
 
-	// ZstdLevel is the zstd compression level.  Defaults to compress.LevelDefault.
-	ZstdLevel compress.Level
+	// Compression is the codec used for block-volume frames and determines the
+	// output filename extension (e.g. ".zst" → data.bin.zst).
+	// When nil, applyDefaults creates a zstd codec at LevelDefault.
+	// Filesystem volumes always write uncompressed data.tar and ignore this field.
+	Compression compress.Codec
 
 	// KubeClient performs all Kubernetes API calls.  Required.
 	KubeClient client.Client
@@ -129,8 +132,14 @@ func applyDefaults(cfg Config) Config {
 		cfg.TTL = defaultTTL
 	}
 
-	if cfg.ZstdLevel == 0 {
-		cfg.ZstdLevel = compress.LevelDefault
+	if cfg.Compression == nil {
+		codec, err := compress.New(compress.DefaultCodecName, 0)
+		if err != nil {
+			// DefaultCodecName is a compile-time constant; this is unreachable in production.
+			panic("compress.New default codec failed: " + err.Error())
+		}
+
+		cfg.Compression = codec
 	}
 
 	if cfg.ReadinessTimeout <= 0 {
