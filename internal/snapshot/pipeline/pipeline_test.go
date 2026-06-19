@@ -45,6 +45,7 @@ import (
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
 )
@@ -82,7 +83,7 @@ const (
 //	  snapshots/
 //	    virtualdisksnapshot_disk-snap/ (non-aggregator; 1 OwnDataRef → flat layout)
 //	      manifests/
-//	      data.img.zst
+//	      data.bin.zst
 //	      snapshot.yaml
 //	  snapshot.yaml
 func TestPipeline_HappyPath(t *testing.T) {
@@ -124,13 +125,13 @@ func TestPipeline_HappyPath(t *testing.T) {
 	_, err = os.Stat(filepath.Join(outputDir, archive.SnapshotsDirName))
 	require.NoError(t, err, "root snapshots/ directory must exist")
 
-	// disk-snap is a non-aggregator: complete, with data.img.zst in its own dir.
+	// disk-snap is a non-aggregator: complete, with data.bin.zst in its own dir.
 	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 		archive.NodeDirName(childKind, diskSnapName))
 	assertNodeComplete(t, diskSnapDir)
 
-	_, err = os.Stat(filepath.Join(diskSnapDir, archive.DataBlockName))
-	require.NoError(t, err, "non-aggregator node must have data.img.zst directly")
+	_, err = os.Stat(filepath.Join(diskSnapDir, archive.DataBlockName(".zst")))
+	require.NoError(t, err, "non-aggregator node must have data.bin.zst directly")
 
 	// disk-snap has no children, so no snapshots/ subdir.
 	_, noSnapErr := os.Stat(filepath.Join(diskSnapDir, archive.SnapshotsDirName))
@@ -197,7 +198,7 @@ func TestPipeline_CleanupAfterError(t *testing.T) {
 		"shadow VSC must be deleted after error cleanup; got err=%v", vscErr)
 }
 
-// TestPipeline_BlockResumeAfterMerge verifies that when data.img.zst already exists
+// TestPipeline_BlockResumeAfterMerge verifies that when data.bin.zst already exists
 // in a node directory (crash-after-merge-before-snapshot.yaml window), the pipeline
 // skips shadow pair creation and DataExport entirely and only calls FinalizeNode.
 func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
@@ -206,7 +207,7 @@ func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
 	c := buildFakeClient(t)
 	outputDir := t.TempDir()
 
-	// Pre-create disk-snap's directory with data.img.zst but no snapshot.yaml,
+	// Pre-create disk-snap's directory with data.bin.zst but no snapshot.yaml,
 	// simulating a crash after block chunks were merged but before FinalizeNode ran.
 	// disk-snap is a non-aggregator: it downloads its OwnDataRef flat into its own dir.
 	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
@@ -214,7 +215,7 @@ func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(filepath.Join(diskSnapDir, archive.ManifestsDirName), 0o755))
 	require.NoError(t, os.WriteFile(
-		filepath.Join(diskSnapDir, archive.DataBlockName),
+		filepath.Join(diskSnapDir, archive.DataBlockName(".zst")),
 		[]byte("pre-merged-block-data"),
 		0o644,
 	))
@@ -716,4 +717,55 @@ func makeUnstructuredSnap(apiVersion, kind, namespace, name, contentName string)
 			},
 		},
 	}
+}
+
+// TestPipeline_NoneCompression verifies that when Compression is set to the
+// "none" codec the pipeline produces data.bin (no extension) for block volumes.
+func TestPipeline_NoneCompression(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("N"), 600)
+	srv := makeBlockServer(t, rawBlock)
+
+	defer srv.Close()
+
+	noneCodec, err := compress.New("none", 0)
+	require.NoError(t, err, "compress.New(none, 0)")
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		Compression:          noneCodec,
+		WaitShadowVS:         noopWaitShadowVS,
+		OpenExport: func(_ context.Context, namespace, _ string, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-none", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	require.NoError(t, pipeline.Run(context.Background(), cfg))
+
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	assertNodeComplete(t, diskSnapDir)
+
+	// none codec → no extension: data.bin (not data.bin.zst)
+	noneBlockPath := filepath.Join(diskSnapDir, archive.DataBlockName(""))
+	_, statErr := os.Stat(noneBlockPath)
+	require.NoError(t, statErr, "none-compressed block must produce data.bin (no extension)")
+
+	// The compressed file with .zst extension must NOT exist.
+	_, statZstErr := os.Stat(filepath.Join(diskSnapDir, archive.DataBlockName(".zst")))
+	require.True(t, os.IsNotExist(statZstErr),
+		"none-compression must not produce data.bin.zst")
+
+	got, readErr := os.ReadFile(noneBlockPath)
+	require.NoError(t, readErr)
+	require.Equal(t, rawBlock, got, "none-compressed block data must match original")
 }

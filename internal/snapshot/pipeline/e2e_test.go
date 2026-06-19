@@ -17,6 +17,7 @@ limitations under the License.
 package pipeline_test
 
 import (
+	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -91,9 +92,9 @@ const (
 //	root (manifests: root-cm)
 //	  └─ vm-snap (VirtualMachineSnapshot, manifests: vm-cm)
 //	       ├─ disk-block (VirtualDiskSnapshot, non-aggregator, 1 OwnDataRef → block)
-//	       │    data.img.zst    (block data directly in the node dir)
+//	       │    data.bin.zst    (block data directly in the node dir)
 //	       └─ disk-fs   (VirtualDiskSnapshot, non-aggregator, 1 OwnDataRef → fs)
-//	            data/           (filesystem data directly in the node dir)
+//	            data.tar        (filesystem tar directly in the node dir)
 //
 // After the first run all nodes are complete. A second run (resume) must be a no-op.
 func TestPipeline_E2E_FullTree(t *testing.T) {
@@ -166,9 +167,9 @@ func TestPipeline_E2E_FullTree(t *testing.T) {
 		archive.NodeDirName(e2eDiskKind, e2eBlockDisk))
 	assertE2ENodeComplete(t, blockDir)
 
-	blockFile := filepath.Join(blockDir, archive.DataBlockName)
+	blockFile := filepath.Join(blockDir, archive.DataBlockName(".zst"))
 	_, err = os.Stat(blockFile)
-	require.NoError(t, err, "disk-block data.img.zst must exist directly in the node dir")
+	require.NoError(t, err, "disk-block data.bin.zst must exist directly in the node dir")
 
 	// Non-aggregator nodes with no children must not have a snapshots/ subdir.
 	_, noSnapshotsErr := os.Stat(filepath.Join(blockDir, archive.SnapshotsDirName))
@@ -185,18 +186,18 @@ func TestPipeline_E2E_FullTree(t *testing.T) {
 		archive.NodeDirName(e2eDiskKind, e2eFSDisk))
 	assertE2ENodeComplete(t, fsDir)
 
-	fsDataDir := filepath.Join(fsDir, archive.DataDirName)
-	_, err = os.Stat(fsDataDir)
-	require.NoError(t, err, "disk-fs data/ must exist directly in the node dir")
+	fsTarPath := filepath.Join(fsDir, archive.FsTarName)
+	_, err = os.Stat(fsTarPath)
+	require.NoError(t, err, "disk-fs data.tar must exist directly in the node dir")
 
 	_, noSnapshotsFSErr := os.Stat(filepath.Join(fsDir, archive.SnapshotsDirName))
 	require.True(t, os.IsNotExist(noSnapshotsFSErr),
 		"disk-fs must not have a snapshots/ subdir (no children)")
 
 	for _, f := range fsFiles {
-		zstPath := filepath.Join(fsDataDir, f.rel+".zst")
-		require.Equal(t, f.content, e2eDecodeZstdFile(t, zstPath),
-			"disk-fs file %s content mismatch", f.rel)
+		got, tarErr := readTarEntry(t, fsTarPath, f.rel)
+		require.NoError(t, tarErr, "disk-fs tar read %s", f.rel)
+		require.Equal(t, f.content, got, "disk-fs file %s content mismatch", f.rel)
 	}
 
 	// ── Resume: second run must be a no-op ────────────────────────────────────
@@ -244,6 +245,32 @@ func e2eDecodeZstdFile(t *testing.T, path string) []byte {
 	require.NoError(t, err, "decode zstd for %s", path)
 
 	return out
+}
+
+// readTarEntry opens a tar archive at tarPath and returns the contents of the
+// entry with the given name. Returns an error if the entry is not found.
+func readTarEntry(t *testing.T, tarPath, entryName string) ([]byte, error) {
+	t.Helper()
+
+	f, err := os.Open(tarPath)
+	require.NoError(t, err, "open tar %s", tarPath)
+
+	defer f.Close()
+
+	tr := tar.NewReader(f)
+
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil, fmt.Errorf("entry %q not found in %s", entryName, tarPath)
+		}
+
+		require.NoError(t, err, "read tar header in %s", tarPath)
+
+		if hdr.Name == entryName {
+			return io.ReadAll(tr)
+		}
+	}
 }
 
 // e2eCollectMtimes walks the output dir and collects the mtime of every
@@ -633,15 +660,15 @@ func makeE2EManifestChunkWithPayload(t *testing.T, name, checkpointName string, 
 
 // TestPipeline_E2E_MultiVolume verifies that a single non-aggregator snapshot node
 // with TWO OwnDataRefs (one Block and one Filesystem) lays out its data using the
-// multi-volume layout: data/<pvc>.img.zst and data/<pvc>/ directly in the same node
+// multi-volume layout: data/<pvc>.bin.zst and data/<pvc>.tar directly in the same node
 // directory. No extra child nodes are created.
 //
 // Tree:
 //
 //	e2e-multi-root (Snapshot, no manifests)
 //	  └─ multi-disk (VirtualDiskSnapshot, non-aggregator, 2 OwnDataRefs)
-//	       data/pvc-multi-block.img.zst   (block volume)
-//	       data/pvc-multi-fs/             (filesystem volume)
+//	       data/pvc-multi-block.bin.zst   (block volume)
+//	       data/pvc-multi-fs.tar          (filesystem volume)
 //	       manifests/configmap_multi-cfg.yaml
 //	       manifests/persistentvolumeclaim_pvc-multi-block.yaml  (included: OwnDataRef)
 //	       manifests/persistentvolumeclaim_pvc-multi-fs.yaml     (included: OwnDataRef)
@@ -694,10 +721,10 @@ func TestPipeline_E2E_MultiVolume(t *testing.T) {
 	require.True(t, os.IsNotExist(noSnaps),
 		"multi-disk must not have a snapshots/ subdir (no children)")
 
-	// No flat data.img.zst; data lives under data/<pvc>.*
-	_, noFlatBlock := os.Stat(filepath.Join(multiDiskDir, archive.DataBlockName))
+	// No flat data.bin.zst; data lives under data/<pvc>.*
+	_, noFlatBlock := os.Stat(filepath.Join(multiDiskDir, archive.DataBlockName(".zst")))
 	require.True(t, os.IsNotExist(noFlatBlock),
-		"multi-disk must not carry flat data.img.zst (multi-volume layout)")
+		"multi-disk must not carry flat data.bin.zst (multi-volume layout)")
 
 	// multi-disk manifests/ must include ConfigMap and BOTH OwnDataRef PVCs.
 	// OwnDataRef PVCs are not excluded (only orphan leaf child PVCs are excluded).
@@ -713,20 +740,20 @@ func TestPipeline_E2E_MultiVolume(t *testing.T) {
 	}
 
 	// ── Block volume (multi-volume layout) ────────────────────────────────────
-	blockVolPath := filepath.Join(multiDiskDir, archive.MultiVolumeBlockName(e2eMultiBlockPVC))
+	blockVolPath := filepath.Join(multiDiskDir, archive.MultiVolumeBlockName(e2eMultiBlockPVC, ".zst"))
 	_, err = os.Stat(blockVolPath)
-	require.NoError(t, err, "multi-disk block volume data/<pvc>.img.zst must exist")
+	require.NoError(t, err, "multi-disk block volume data/<pvc>.bin.zst must exist")
 	require.Equal(t, rawBlock, e2eDecodeZstdFile(t, blockVolPath))
 
 	// ── Filesystem volume (multi-volume layout) ───────────────────────────────
-	fsVolDir := filepath.Join(multiDiskDir, archive.MultiVolumeDir(e2eMultiFSPVC))
-	_, err = os.Stat(fsVolDir)
-	require.NoError(t, err, "multi-disk fs volume data/<pvc>/ must exist")
+	fsVolTar := filepath.Join(multiDiskDir, archive.MultiVolumeTarName(e2eMultiFSPVC))
+	_, err = os.Stat(fsVolTar)
+	require.NoError(t, err, "multi-disk fs volume data/<pvc>.tar must exist")
 
 	for _, f := range fsFiles {
-		zstPath := filepath.Join(fsVolDir, f.rel+".zst")
-		require.Equal(t, f.content, e2eDecodeZstdFile(t, zstPath),
-			"multi-disk fs file %s content mismatch", f.rel)
+		got, tarErr := readTarEntry(t, fsVolTar, f.rel)
+		require.NoError(t, tarErr, "multi-disk fs tar read %s", f.rel)
+		require.Equal(t, f.content, got, "multi-disk fs file %s content mismatch", f.rel)
 	}
 
 	// snapshot.yaml must carry two Volumes entries (one per OwnDataRef).
@@ -980,9 +1007,9 @@ func TestPipeline_E2E_DeletedPVC(t *testing.T) {
 	assertE2ENodeComplete(t, delDiskDir)
 
 	// Block data must be in the node dir directly (flat layout).
-	blockFile := filepath.Join(delDiskDir, archive.DataBlockName)
+	blockFile := filepath.Join(delDiskDir, archive.DataBlockName(".zst"))
 	_, err := os.Stat(blockFile)
-	require.NoError(t, err, "del-disk data.img.zst must exist directly in the node dir")
+	require.NoError(t, err, "del-disk data.bin.zst must exist directly in the node dir")
 	require.Equal(t, rawBlock, e2eDecodeZstdFile(t, blockFile),
 		"del-disk volume data must match original rawBlock")
 
@@ -1165,8 +1192,8 @@ func TestPipeline_E2E_OrphanPVCLeaf(t *testing.T) {
 	require.NoError(t, err, "aggregator snapshots/ must exist for the orphan leaf")
 
 	// Aggregator must have NO data payload — data lives in the leaf, not here.
-	_, noBlock := os.Stat(filepath.Join(aggSnapDir, archive.DataBlockName))
-	require.True(t, os.IsNotExist(noBlock), "aggregator must not carry data.img.zst")
+	_, noBlock := os.Stat(filepath.Join(aggSnapDir, archive.DataBlockName(".zst")))
+	require.True(t, os.IsNotExist(noBlock), "aggregator must not carry data.bin.zst")
 
 	_, noData := os.Stat(filepath.Join(aggSnapDir, archive.DataDirName))
 	require.True(t, os.IsNotExist(noData), "aggregator must not carry data/ dir")
@@ -1187,9 +1214,9 @@ func TestPipeline_E2E_OrphanPVCLeaf(t *testing.T) {
 	assertE2ENodeComplete(t, leafDir)
 
 	// Orphan leaf must carry the block data.
-	blockFile := filepath.Join(leafDir, archive.DataBlockName)
+	blockFile := filepath.Join(leafDir, archive.DataBlockName(".zst"))
 	_, err = os.Stat(blockFile)
-	require.NoError(t, err, "orphan leaf data.img.zst must exist")
+	require.NoError(t, err, "orphan leaf data.bin.zst must exist")
 	require.Equal(t, rawBlock, e2eDecodeZstdFile(t, blockFile), "orphan leaf block data mismatch")
 
 	// Orphan leaf manifests/ must carry the captured PVC manifest.
