@@ -30,24 +30,23 @@ import (
 // chunk files are absent, preventing a gap-free merge.
 var ErrMissingChunk = errors.New("block chunk missing")
 
-// MergeBlockChunks concatenates all chunk_%05d.zst files from chunkDir into
-// outPath in strict ascending-index order.
+// MergeBlockChunks concatenates all chunk_%05d[.<ext>] files from chunkDir into
+// outPath in strict ascending-index order. ext is the codec extension (e.g. ".zst");
+// use "" for the none codec.
 //
-// chunkDir is the absolute path to the directory containing the chunk files
-// (e.g. nodeDir/data.img.zst.d or nodeDir/data/<pvc>.img.zst.d for
-// multi-volume layouts). outPath is the absolute destination path for the
-// merged block file (e.g. nodeDir/data.img.zst or nodeDir/data/<pvc>.img.zst).
+// chunkDir is the absolute path to the directory containing the chunk files.
+// outPath is the absolute destination path for the merged block file.
 //
 // Pre-conditions (enforced):
 //   - All chunks 0 .. ceil(totalSize/chunkSize)-1 must be present.
 //   - If any chunk is missing, ErrMissingChunk is returned and no output is written.
 //
 // Post-conditions on success:
-//   - outPath is a fully durable (fsynced) multi-frame zstd stream.
+//   - outPath is a fully durable (fsynced) multi-frame stream.
 //   - The chunk directory and all its contents are removed.
 //
 // chunkSize ≤ 0 falls back to DefaultChunkSize.
-func MergeBlockChunks(chunkDir, outPath string, totalSize, chunkSize int64) error {
+func MergeBlockChunks(chunkDir, outPath string, totalSize, chunkSize int64, ext string) error {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
@@ -56,7 +55,7 @@ func MergeBlockChunks(chunkDir, outPath string, totalSize, chunkSize int64) erro
 
 	// Verify all chunks are present before writing anything.
 	for i := range numChunks {
-		p := filepath.Join(chunkDir, archive.ChunkFileName(i))
+		p := filepath.Join(chunkDir, archive.ChunkFileName(i, ext))
 
 		_, err := os.Stat(p)
 		if os.IsNotExist(err) {
@@ -75,7 +74,7 @@ func MergeBlockChunks(chunkDir, outPath string, totalSize, chunkSize int64) erro
 	}
 
 	for i := range numChunks {
-		p := filepath.Join(chunkDir, archive.ChunkFileName(i))
+		p := filepath.Join(chunkDir, archive.ChunkFileName(i, ext))
 
 		if err := copyFile(aw, p); err != nil {
 			aw.Abort()

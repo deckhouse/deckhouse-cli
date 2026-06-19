@@ -21,7 +21,7 @@ import (
 	"testing"
 
 	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 )
 
 func TestParseChunkSize_EmptyReturnsZero(t *testing.T) {
@@ -88,8 +88,8 @@ func TestParseChunkSize(t *testing.T) {
 func TestParseChunkSize_DefaultMinimum(t *testing.T) {
 	t.Helper()
 
-	// Exactly DefaultChunkSize should parse fine.
-	def := int64(volume.DefaultChunkSize)
+	// Exactly DefaultChunkSize (256 MiB) should parse fine.
+	const defaultChunkSize = 256 * 1024 * 1024 // mirrors volume.DefaultChunkSize
 	s := "256Mi"
 
 	n, err := parseChunkSize(s)
@@ -97,8 +97,8 @@ func TestParseChunkSize_DefaultMinimum(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if n != def {
-		t.Fatalf("got %d, want %d", n, def)
+	if n != defaultChunkSize {
+		t.Fatalf("got %d, want %d", n, defaultChunkSize)
 	}
 }
 
@@ -194,5 +194,55 @@ func TestNewCommand_RequiresOneArg(t *testing.T) {
 	// Two args: must error (namespace is now a flag, not a positional arg).
 	if err := cmd.Args(cmd, []string{"ns", "snap"}); err == nil {
 		t.Fatal("expected error with two positional args, got nil")
+	}
+}
+
+func TestNewCommand_CompressionFlagDefaults(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	codec, err := cmd.Flags().GetString(flagVolumeCompression)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagVolumeCompression, err)
+	}
+
+	if codec != "zstd" {
+		t.Fatalf("default codec: got %q, want %q", codec, "zstd")
+	}
+
+	level, err := cmd.Flags().GetInt(flagVolumeCompressionLevel)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagVolumeCompressionLevel, err)
+	}
+
+	if level != 0 {
+		t.Fatalf("default compression level: got %d, want 0", level)
+	}
+}
+
+func TestParseCompressionCodec_ValidNames(t *testing.T) {
+	t.Helper()
+
+	for _, name := range []string{"zstd", "lz4", "gzip", "none"} {
+		t.Run(name, func(t *testing.T) {
+			c, err := compress.New(name, 0)
+			if err != nil {
+				t.Fatalf("compress.New(%q, 0) unexpected error: %v", name, err)
+			}
+
+			if c == nil {
+				t.Fatalf("compress.New(%q, 0) returned nil codec", name)
+			}
+		})
+	}
+}
+
+func TestParseCompressionCodec_UnknownName(t *testing.T) {
+	t.Helper()
+
+	_, err := compress.New("bogus-codec", 0)
+	if err == nil {
+		t.Fatal("expected error for unknown codec name, got nil")
 	}
 }
