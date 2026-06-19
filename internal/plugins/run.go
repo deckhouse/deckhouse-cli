@@ -156,7 +156,7 @@ func (m *Manager) ensurePluginRequirements(ctx context.Context, contract *intern
 		return nil
 	}
 
-	return failed.helpfulError(fmt.Sprintf("plugin %q requirements not satisfied", contract.Name), false)
+	return failed.helpfulError(fmt.Sprintf("plugin %q requirements not satisfied", contract.Name))
 }
 
 // isLocalPluginInvocation reports whether the forwarded args are a purely local

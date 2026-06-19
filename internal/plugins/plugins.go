@@ -46,6 +46,11 @@ type Manager struct {
 	// Not safe for concurrent use - Manager is per-invocation, run sequentially.
 	contractCache map[string]*internal.Plugin
 
+	// tagsCache memoizes a plugin's published tags by name. The dependency planner
+	// probes the same dep across several candidate paths, so this keeps the tag
+	// listing to one registry call per plugin within a command run.
+	tagsCache map[string][]string
+
 	logger *dkplog.Logger
 }
 

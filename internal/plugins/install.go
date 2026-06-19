@@ -73,10 +73,9 @@ func ValidatePluginName(name string) error {
 }
 
 type installOptions struct {
-	version                 string
-	majorVersion            int
-	resolvePluginsConflicts bool
-	force                   bool
+	version      string
+	majorVersion int
+	force        bool
 }
 
 type InstallOption func(*installOptions)
@@ -99,25 +98,17 @@ func InstallWithVersion(version string) InstallOption {
 	}
 }
 
-func InstallWithResolvePluginsConflicts() InstallOption {
-	return func(opts *installOptions) {
-		opts.resolvePluginsConflicts = true
-	}
-}
-
 // InstallPlugin installs or switches to a plugin version.
 // Steps: select the version, validate requirements, lay out
 // plugins/<name>/v<major>, swap the binary in, point `current` at it, cache
 // the contract.
-// Tune behaviour with the InstallWith* options (version, major, force,
-// resolve-conflicts). With no options it installs the newest cluster-compatible
-// version within the installed major.
+// Tune behaviour with the InstallWith* options (version, major, force). With no
+// options it installs the newest cluster-compatible version within the installed
+// major. A plugin's mandatory dependencies are always installed/upgraded first.
 func (m *Manager) InstallPlugin(ctx context.Context, pluginName string, opts ...InstallOption) error {
 	if err := ValidatePluginName(pluginName); err != nil {
 		return err
 	}
-
-	var installVersion *semver.Version
 
 	options := &installOptions{
 		majorVersion: -1,
@@ -127,22 +118,26 @@ func (m *Manager) InstallPlugin(ctx context.Context, pluginName string, opts ...
 		opt(options)
 	}
 
-	// A major given explicitly via --use-major may move in any direction; only
-	// the implicit selection below gets the downgrade guard.
+	// A major given explicitly via --use-major may move in any direction (and lets
+	// dependencies cross their own major too); only the implicit selection below
+	// gets the downgrade guard.
 	explicitMajor := options.majorVersion >= 0
 
 	if options.version != "" {
-		var err error
-
-		installVersion, err = semver.NewVersion(options.version)
+		installVersion, err := semver.NewVersion(options.version)
 		if err != nil {
 			return fmt.Errorf("failed to parse version: %w", err)
 		}
 
-		return m.installPlugin(ctx, pluginName, installVersion, options.resolvePluginsConflicts, options.force)
+		plan, err := m.planForExplicit(ctx, pluginName, installVersion, explicitMajor)
+		if err != nil {
+			return err
+		}
+
+		return m.installPlugin(ctx, pluginName, installVersion, plan, options.force)
 	}
 
-	versions, err := m.service.ListPluginTags(ctx, pluginName)
+	versions, err := m.listTags(ctx, pluginName)
 	if err != nil {
 		return fmt.Errorf("failed to list plugin tags: %w", err)
 	}
@@ -161,8 +156,10 @@ func (m *Manager) InstallPlugin(ctx context.Context, pluginName string, opts ...
 		}
 	}
 
-	// Requirements-aware selection: newest version compatible with this cluster.
-	installVersion, err = m.selectLatestCompatible(ctx, pluginName, versions)
+	// Requirements-aware selection: newest version whose cluster requirements AND
+	// plugin->plugin dependency chain are satisfiable, plus the plan to realize that
+	// chain. allowMajorCross=explicitMajor lets dependencies cross their major.
+	installVersion, plan, err := m.selectTopWithPlan(ctx, pluginName, versions, explicitMajor)
 	if err != nil {
 		if options.majorVersion >= 0 {
 			return fmt.Errorf("%w (search was limited to major %d; pass --use-major to consider another major)",
@@ -172,9 +169,10 @@ func (m *Manager) InstallPlugin(ctx context.Context, pluginName string, opts ...
 		return err
 	}
 
-	// Downgrade guard for the implicit path: when the newest tag's contract is
-	// temporarily unreadable, selection falls back to an older version - that must
-	// not silently downgrade a newer installed plugin. Explicit --version /
+	// Downgrade guard for the implicit path: selection may fall back to an older
+	// version (newer contracts unreadable, or their dependencies unresolvable) - that
+	// must not silently downgrade a newer installed plugin. The plan is dropped here,
+	// so no dependency is installed for a candidate we abandon. Explicit --version /
 	// --use-major bypass this by design.
 	if !explicitMajor && m.installedIsNewerThan(pluginName, installVersion) {
 		fmt.Printf("Selected %s is older than the installed version; keeping the installed version "+
@@ -183,7 +181,27 @@ func (m *Manager) InstallPlugin(ctx context.Context, pluginName string, opts ...
 		return nil
 	}
 
-	return m.installPlugin(ctx, pluginName, installVersion, options.resolvePluginsConflicts, options.force)
+	return m.installPlugin(ctx, pluginName, installVersion, plan, options.force)
+}
+
+// planForExplicit builds the dependency plan for an exact (--version) install.
+// allowMajorCross lets dependencies cross their own major to satisfy a constraint.
+func (m *Manager) planForExplicit(ctx context.Context, pluginName string, version *semver.Version, allowMajorCross bool) (*resolutionPlan, error) {
+	contract, err := m.PluginContract(ctx, pluginName, version.Original())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get plugin contract: %w", err)
+	}
+
+	plan, reason, err := m.planFor(ctx, contract, allowMajorCross)
+	if err != nil {
+		return nil, err
+	}
+
+	if reason != nil {
+		return nil, fmt.Errorf("cannot install %s %s: %s", pluginName, version.Original(), reason.summary())
+	}
+
+	return plan, nil
 }
 
 // inheritInstalledMajor returns the major version to pin an implicit update to:
@@ -238,7 +256,17 @@ type pluginPaths struct {
 //   - validate before switch
 //   - stage and smoke-test before swapping the live binary
 //   - cache the contract before linking
-func (m *Manager) installPlugin(ctx context.Context, pluginName string, version *semver.Version, resolvePluginsConflicts, force bool) error {
+func (m *Manager) installPlugin(ctx context.Context, pluginName string, version *semver.Version, plan *resolutionPlan, force bool) error {
+	// Install/upgrade dependencies first (dependency-first order) so the plugin's
+	// requirements are satisfied before it is validated and linked.
+	if plan != nil && !plan.isEmpty() {
+		m.printPlan(pluginName, plan)
+
+		if err := m.executePlan(ctx, plan); err != nil {
+			return err
+		}
+	}
+
 	paths, err := m.preparePluginDirs(pluginName, version)
 	if err != nil {
 		return err
@@ -258,7 +286,11 @@ func (m *Manager) installPlugin(ctx context.Context, pluginName string, version 
 	// Already current at the selected version: no switch happens, so nothing to do
 	// (execution is still gated by the pre-run requirement check). --force re-pulls.
 	if alreadyAtVersion && m.isCurrentBinary(paths) {
-		fmt.Printf("Plugin '%s' is already at %s, nothing to do (use --force to reinstall).\n", pluginName, version.Original())
+		if plan != nil && !plan.isEmpty() {
+			fmt.Printf("Plugin '%s' is already at %s; installed its missing dependencies.\n", pluginName, version.Original())
+		} else {
+			fmt.Printf("Plugin '%s' is already at %s, nothing to do (use --force to reinstall).\n", pluginName, version.Original())
+		}
 
 		return nil
 	}
@@ -271,7 +303,7 @@ func (m *Manager) installPlugin(ctx context.Context, pluginName string, version 
 		return err
 	}
 
-	if err := m.validateAndResolveConflicts(ctx, plugin, resolvePluginsConflicts); err != nil {
+	if err := m.validateInstalledRequirements(ctx, plugin); err != nil {
 		return err
 	}
 
@@ -412,10 +444,11 @@ func printable(s string) string {
 	}, s)
 }
 
-// validateAndResolveConflicts runs validateRequirements; if requirements are
-// not satisfied and resolvePluginsConflicts is true, attempts to fix them
-// recursively; otherwise returns an error.
-func (m *Manager) validateAndResolveConflicts(ctx context.Context, plugin *internal.Plugin, resolvePluginsConflicts bool) error {
+// validateInstalledRequirements enforces the plugin's requirements right before the
+// switch. By this point the planner has already installed/upgraded the dependency
+// chain, so this is the final guard: any remaining unmet requirement (e.g. a
+// dependency removed by hand) fails with an actionable error.
+func (m *Manager) validateInstalledRequirements(ctx context.Context, plugin *internal.Plugin) error {
 	m.logger.Debug("validating requirements", slog.String("plugin", plugin.Name))
 
 	failedConstraints, err := m.validateRequirements(ctx, plugin)
@@ -423,27 +456,30 @@ func (m *Manager) validateAndResolveConflicts(ctx context.Context, plugin *inter
 		return fmt.Errorf("failed to validate requirements: %w", err)
 	}
 
-	if len(failedConstraints) > 0 && !resolvePluginsConflicts {
+	if len(failedConstraints) > 0 {
 		return failedConstraints.helpfulError(
-			fmt.Sprintf("plugin %q has unsatisfied requirements", plugin.Name), true)
+			fmt.Sprintf("plugin %q has unsatisfied requirements", plugin.Name))
 	}
 
-	if len(failedConstraints) > 0 && resolvePluginsConflicts {
-		if err := m.resolvePluginConflicts(ctx, failedConstraints); err != nil {
-			return fmt.Errorf("failed to resolve conflicts: %w", err)
-		}
+	return nil
+}
 
-		// Resolution installs the latest cluster-compatible dependency, which may
-		// still fail the requiring plugin's constraint. Re-validate so a partial
-		// resolution surfaces here, not as a blocked plugin at first run.
-		remaining, err := m.validateRequirements(ctx, plugin)
-		if err != nil {
-			return fmt.Errorf("failed to validate requirements: %w", err)
-		}
+// printPlan shows the dependency installs/upgrades a plugin install will perform.
+func (m *Manager) printPlan(pluginName string, plan *resolutionPlan) {
+	fmt.Printf("Plugin '%s' requires installing/upgrading %d dependency plugin(s):\n", pluginName, len(plan.steps))
 
-		if len(remaining) > 0 {
-			return remaining.helpfulError(
-				fmt.Sprintf("plugin %q still has unsatisfied requirements after --resolve-plugins-conflicts", plugin.Name), false)
+	for _, step := range plan.steps {
+		fmt.Printf("  - %s %s\n", step.pluginName, step.version.Original())
+	}
+}
+
+// executePlan installs the planned dependencies in dependency-first order. Each
+// dependency goes through the full atomic install pipeline with its own lock; the
+// plan is already flattened, so each step installs with no further planning.
+func (m *Manager) executePlan(ctx context.Context, plan *resolutionPlan) error {
+	for _, step := range plan.steps {
+		if err := m.installPlugin(ctx, step.pluginName, step.version, newResolutionPlan(), false); err != nil {
+			return fmt.Errorf("install dependency %s %s: %w", step.pluginName, step.version.Original(), err)
 		}
 	}
 
@@ -681,17 +717,4 @@ func (m *Manager) filterMajorVersion(versions []string, majorVersion int) []stri
 	}
 
 	return res
-}
-
-func (m *Manager) resolvePluginConflicts(ctx context.Context, failedConstraints failedConstraints) error {
-	for pluginName := range failedConstraints {
-		m.logger.Debug("resolving plugin conflict", slog.String("plugin", pluginName))
-
-		err := m.InstallPlugin(ctx, pluginName, InstallWithResolvePluginsConflicts())
-		if err != nil {
-			return fmt.Errorf("failed to install plugin: %w", err)
-		}
-	}
-
-	return nil
 }

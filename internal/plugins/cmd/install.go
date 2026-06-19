@@ -24,10 +24,9 @@ import (
 
 func newInstallCommand(manager *plugins.Manager) *cobra.Command {
 	var (
-		version                 string
-		useMajor                int
-		resolvePluginsConflicts bool
-		force                   bool
+		version  string
+		useMajor int
+		force    bool
 	)
 
 	cmd := &cobra.Command{
@@ -35,6 +34,8 @@ func newInstallCommand(manager *plugins.Manager) *cobra.Command {
 		Short: "Install a Deckhouse CLI plugin",
 		Long: "Install a plugin: the newest version compatible with this cluster by default,\n" +
 			"an exact one with --version.\n\n" +
+			"Plugins this one depends on are installed/upgraded automatically. With --use-major\n" +
+			"dependencies may also cross their own major to satisfy a constraint.\n\n" +
 			"A version already on disk is activated by repointing the 'current' symlink -\n" +
 			"no download. Plugin requirements are always checked before the switch.",
 		Args: cobra.ExactArgs(1),
@@ -47,10 +48,6 @@ func newInstallCommand(manager *plugins.Manager) *cobra.Command {
 				plugins.InstallWithMajorVersion(useMajor),
 			}
 
-			if resolvePluginsConflicts {
-				opts = append(opts, plugins.InstallWithResolvePluginsConflicts())
-			}
-
 			if force {
 				opts = append(opts, plugins.InstallWithForce())
 			}
@@ -60,8 +57,7 @@ func newInstallCommand(manager *plugins.Manager) *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&version, "version", "", "Exact version to install. Skips compatibility selection and may install a pre-release.")
-	cmd.Flags().IntVar(&useMajor, "use-major", -1, "Pin to a specific major version. By default an update stays within the installed plugin's major; pass this to cross majors.")
-	cmd.Flags().BoolVar(&resolvePluginsConflicts, "resolve-plugins-conflicts", false, "Automatically install missing plugins this one requires.")
+	cmd.Flags().IntVar(&useMajor, "use-major", -1, "Pin to a specific major version. By default an install/update stays within the installed plugin's major; pass this to cross majors (dependencies may cross theirs too).")
 	cmd.Flags().BoolVar(&force, "force", false, "Reinstall even if the selected version is already installed (re-pull + re-verify).")
 
 	return cmd

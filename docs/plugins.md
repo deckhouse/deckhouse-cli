@@ -92,8 +92,8 @@ $ d8 plugins install package
 Error: plugin requirements not satisfied      # e.g. requires plugin delivery-kit
 ```
 
-- `--resolve-plugins-conflicts` - install missing required plugins
-  automatically.
+Plugins this one depends on are installed/upgraded automatically.
+
 - `--skip-cluster-checks` (or `D8_PLUGINS_SKIP_CLUSTER_CHECKS=1`) - skip
   cluster-side checks, e.g. in air-gapped scenarios.
 
@@ -113,5 +113,5 @@ Error: plugin requirements not satisfied      # e.g. requires plugin delivery-ki
 | Symptom | Cause | Fix |
 |---|---|---|
 | `image or tag not found` (404) on a plugin | the plugin is not published in this cluster's registry | check with `d8 plugins versions <name>`; publishing is the plugin CI's job |
-| `plugin requirements not satisfied` | the contract requires other plugins or cluster versions/modules | see `d8 plugins contract <name>`; `--resolve-plugins-conflicts` for plugin deps |
+| `plugin requirements not satisfied` | the contract requires other plugins or cluster versions/modules | see `d8 plugins contract <name>`; plugin deps are auto-installed, cluster requirements are not |
 | 401 / 403 / `x509: ...` reaching the proxy | access or TLS issue with the registry-packages-proxy | see [self-update.md - Troubleshooting](self-update.md#troubleshooting) - the access model is shared |

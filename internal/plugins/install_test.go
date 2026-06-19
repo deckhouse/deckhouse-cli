@@ -31,8 +31,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
-	"github.com/deckhouse/deckhouse-cli/internal/plugins/requirements"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
+	"github.com/deckhouse/deckhouse-cli/internal/plugins/requirements"
 	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
@@ -241,7 +241,7 @@ func TestInstallPluginSwitchesToInstalledVersionWithoutDownload(t *testing.T) {
 	require.NoError(t, os.Symlink(v1, layout.CurrentLinkPath(root, "p")))
 
 	// Installing the already-present v2 must repoint current WITHOUT downloading.
-	err := m.installPlugin(context.Background(), "p", semver.MustParse("v2.0.0"), false, false)
+	err := m.installPlugin(context.Background(), "p", semver.MustParse("v2.0.0"), nil, false)
 	require.NoError(t, err)
 	assert.False(t, extractCalled, "switching to an installed version must not re-download")
 
@@ -275,7 +275,7 @@ func TestInstallPluginSwitchBlockedByRequirements(t *testing.T) {
 
 	// Switching to the already-installed v2 must be BLOCKED: its requirements are not
 	// met, and requirements are checked before the symlink switch.
-	err := m.installPlugin(context.Background(), "p", semver.MustParse("v2.0.0"), false, false)
+	err := m.installPlugin(context.Background(), "p", semver.MustParse("v2.0.0"), nil, false)
 	require.Error(t, err, "switch is blocked when the target version's requirements are unmet")
 
 	target, err := os.Readlink(layout.CurrentLinkPath(root, "p"))
@@ -296,7 +296,7 @@ func TestInstallPluginSmokeFailureRollsBack(t *testing.T) {
 		},
 	}
 
-	err := m.installPlugin(context.Background(), "p", semver.MustParse("v1.0.0"), false, false)
+	err := m.installPlugin(context.Background(), "p", semver.MustParse("v1.0.0"), nil, false)
 	require.Error(t, err, "a smoke-test failure aborts the install")
 
 	_, statErr := os.Lstat(layout.CurrentLinkPath(root, "p"))
@@ -346,26 +346,19 @@ func TestInstallPluginDoesNotDowngradeOnContractError(t *testing.T) {
 	assert.Equal(t, "1.3.0", version.String(), "the installed newer version is kept, not silently downgraded")
 }
 
-func TestValidateAndResolveConflictsFailsWhenResolutionCannotSatisfy(t *testing.T) {
+func TestValidateInstalledRequirementsFailsOnUnsatisfiedDep(t *testing.T) {
 	root := t.TempDir()
 	m := testManager()
 	m.pluginDirectory = root
 	m.clusterStateCache = &requirements.ClusterState{}
 
-	// A dependency is installed at v1.0.0 and only v1.0.0 is published, so nothing
-	// the resolver can install will satisfy a ">= 2.0.0" requirement.
+	// dep is installed at v1.0.0; plugin p requires dep >= 2.0.0 -> unsatisfied.
 	depBin := layout.BinaryPath(root, "dep", 1)
 	require.NoError(t, os.MkdirAll(filepath.Dir(depBin), 0o755))
 	writeScriptBinary(t, filepath.Dir(depBin), "dep", "v1.0.0", 0)
 	absDep, err := filepath.Abs(depBin)
 	require.NoError(t, err)
 	require.NoError(t, os.Symlink(absDep, layout.CurrentLinkPath(root, "dep")))
-
-	m.service = &fakeInstallSource{
-		tags:     []string{"v1.0.0"},
-		contract: &internal.Plugin{Name: "dep", Version: "v1.0.0"},
-		extract:  func(dest string) error { return os.WriteFile(dest, []byte("x"), 0o755) },
-	}
 
 	p := &internal.Plugin{
 		Name:    "p",
@@ -377,27 +370,26 @@ func TestValidateAndResolveConflictsFailsWhenResolutionCannotSatisfy(t *testing.
 		},
 	}
 
-	// Resolution installs the latest available dep (v1.0.0), which still fails the
-	// constraint; the call must report failure, not the silent success the run-time
-	// gate would otherwise turn into a blocked plugin.
-	err = m.validateAndResolveConflicts(context.Background(), p, true)
-	require.Error(t, err, "resolution that cannot satisfy the constraint must fail the install")
+	// The final pre-switch guard fails when a dependency constraint is unmet (e.g. a
+	// dependency removed by hand, or one the planner could not satisfy).
+	err = m.validateInstalledRequirements(context.Background(), p)
+	require.Error(t, err, "an unsatisfied dependency constraint must fail the install")
 
 	var he *diagnostic.HelpfulError
 	require.ErrorAs(t, err, &he, "the failure is a HelpfulError so the CLI renders it with color")
-	assert.Contains(t, he.Category, "still has unsatisfied requirements after --resolve-plugins-conflicts")
+	assert.Contains(t, he.Category, "has unsatisfied requirements")
 
 	_, ok := findSuggestion(he, "dep must satisfy >=2.0.0")
 	assert.True(t, ok, "the diagnostic names the dependency and its constraint")
 }
 
-func TestValidateAndResolveConflictsNamesMissingPluginAndHints(t *testing.T) {
+func TestValidateInstalledRequirementsNamesMissingDep(t *testing.T) {
 	m := testManager()
 	m.pluginDirectory = t.TempDir()
 	m.clusterStateCache = &requirements.ClusterState{}
 
-	// A plugin needs "dep", which is not installed; without --resolve-plugins-conflicts
-	// the failure must name the dependency and point at the way to fix it.
+	// A plugin needs "dep", which is not installed; the failure must name the
+	// dependency and point at how to install it.
 	p := &internal.Plugin{
 		Name:    "p",
 		Version: "v1.0.0",
@@ -408,7 +400,7 @@ func TestValidateAndResolveConflictsNamesMissingPluginAndHints(t *testing.T) {
 		},
 	}
 
-	err := m.validateAndResolveConflicts(context.Background(), p, false)
+	err := m.validateInstalledRequirements(context.Background(), p)
 	require.Error(t, err)
 
 	var he *diagnostic.HelpfulError
@@ -416,8 +408,8 @@ func TestValidateAndResolveConflictsNamesMissingPluginAndHints(t *testing.T) {
 
 	missing, ok := findSuggestion(he, "dep is not installed")
 	require.True(t, ok, "the diagnostic names the missing dependency")
-	assert.Contains(t, strings.Join(missing.Solutions, " "), "--resolve-plugins-conflicts",
-		"it hints at the way to auto-install it")
+	assert.Contains(t, strings.Join(missing.Solutions, " "), "d8 plugins install dep",
+		"it points at how to install the dependency")
 }
 
 func TestInstallPluginRejectsInvalidName(t *testing.T) {
@@ -457,7 +449,7 @@ func TestInstallPluginDownloadFailureRestoresPreviousBinary(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.Symlink(absV1, layout.CurrentLinkPath(root, "p")))
 
-	err = m.installPlugin(context.Background(), "p", semver.MustParse("v1.1.0"), false, false)
+	err = m.installPlugin(context.Background(), "p", semver.MustParse("v1.1.0"), nil, false)
 	require.Error(t, err, "a failed download aborts the install")
 
 	restored, err := os.ReadFile(v1)

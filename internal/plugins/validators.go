@@ -81,7 +81,7 @@ func (m *Manager) getInstalledPluginVersion(pluginName string) (*semver.Version,
 // selection uses (select.go), so `plugins list`/`contract` never advertise a
 // pre-release that a default install would not pick.
 func (m *Manager) LatestVersion(ctx context.Context, pluginName string) (*semver.Version, error) {
-	versions, err := m.service.ListPluginTags(ctx, pluginName)
+	versions, err := m.listTags(ctx, pluginName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list plugin tags: %w", err)
 	}
@@ -102,11 +102,9 @@ type failedConstraints map[string]*semver.Constraints
 // helpfulError turns unsatisfied requirements into a HelpfulError. The top-level
 // handler (cmd/d8/root.go) renders it with semantic color: one "cause -> fix"
 // pair per dependency.
-// resolvable adds the --resolve-plugins-conflicts hint. Install-only: the
-// run-time gate and the post-resolve recheck cannot use it.
 //
 // nil value = dependency missing; non-nil = installed but fails the constraint.
-func (fc failedConstraints) helpfulError(category string, resolvable bool) *diagnostic.HelpfulError {
+func (fc failedConstraints) helpfulError(category string) *diagnostic.HelpfulError {
 	names := make([]string, 0, len(fc))
 	for name := range fc {
 		names = append(names, name)
@@ -121,14 +119,9 @@ func (fc failedConstraints) helpfulError(category string, resolvable bool) *diag
 		safe := printable(name)
 
 		if constraint := fc[name]; constraint == nil {
-			solutions := []string{fmt.Sprintf("install it: d8 plugins install %s", safe)}
-			if resolvable {
-				solutions = append(solutions, "or re-run this install with --resolve-plugins-conflicts to pull it automatically")
-			}
-
 			suggestions = append(suggestions, diagnostic.Suggestion{
 				Cause:     fmt.Sprintf("%s is not installed", safe),
-				Solutions: solutions,
+				Solutions: []string{fmt.Sprintf("install it: d8 plugins install %s", safe)},
 			})
 		} else {
 			suggestions = append(suggestions, diagnostic.Suggestion{

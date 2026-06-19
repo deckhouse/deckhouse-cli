@@ -25,20 +25,26 @@ import (
 )
 
 func newUpdateCommand(manager *plugins.Manager) *cobra.Command {
+	var useMajor int
+
 	cmd := &cobra.Command{
 		Use:   "update <plugin-name>",
 		Short: "Update an installed plugin",
 		Long: "Update an installed plugin to the newest version compatible with this cluster,\n" +
-			"within its current major version. To cross majors or pick an exact version, use\n" +
-			"'d8 plugins install <name> --use-major N' or '... --version X'.",
+			"within its current major version. Plugins it depends on are installed/upgraded\n" +
+			"automatically.\n\n" +
+			"To cross majors use --use-major N (dependencies may then cross their major too)\n" +
+			"or pick an exact version with 'd8 plugins install <name> --version X'.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pluginName := args[0]
 			fmt.Printf("Updating plugin: %s\n", pluginName)
 
-			return manager.InstallPlugin(cmd.Context(), pluginName)
+			return manager.InstallPlugin(cmd.Context(), pluginName, plugins.InstallWithMajorVersion(useMajor))
 		},
 	}
+
+	cmd.Flags().IntVar(&useMajor, "use-major", -1, "Cross to a specific major version (dependencies may cross theirs too). By default the update stays within the installed major.")
 
 	// Add subcommands
 	cmd.AddCommand(newUpdateAllCommand(manager))
@@ -50,7 +56,7 @@ func newUpdateAllCommand(manager *plugins.Manager) *cobra.Command {
 	return &cobra.Command{
 		Use:   "all",
 		Short: "Update all installed plugins",
-		Long:  "Update all installed plugins to their latest available versions",
+		Long:  "Update all installed plugins to their newest cluster-compatible version within each plugin's current major.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			fmt.Println("Updating all installed plugins...")
 

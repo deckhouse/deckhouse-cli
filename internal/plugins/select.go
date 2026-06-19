@@ -55,24 +55,60 @@ func (m *Manager) PluginContract(ctx context.Context, pluginName, tag string) (*
 	return contract, nil
 }
 
-// selectLatestCompatible returns the newest stable version (from the given tags)
-// whose CLUSTER-side requirements are satisfied. It walks versions newest to oldest
-// and returns the first compatible one, so a too-new release that needs a newer
-// cluster is skipped in favour of an older, working version. Genuine pre-releases
-// (rc/alpha/beta) are excluded from the default pick (install them via --version).
-//
-// Scope: this considers ONLY cluster requirements (Kubernetes/Deckhouse/modules).
-// plugin->plugin conflicts and requirements are still enforced later at install
-// time (validateRequirements) and are not backtracked over during selection.
-func (m *Manager) selectLatestCompatible(ctx context.Context, pluginName string, tags []string) (*semver.Version, error) {
-	candidates := stableVersions(sortedSemverDesc(tags))
-	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no stable version found for plugin %q (use --version to install a pre-release)", pluginName)
+// listTags returns a plugin's published tags, memoized per name for the command
+// run. The dependency planner probes the same dep across several candidate paths,
+// so this keeps the listing to one registry call per plugin.
+func (m *Manager) listTags(ctx context.Context, pluginName string) ([]string, error) {
+	if tags, ok := m.tagsCache[pluginName]; ok {
+		return tags, nil
 	}
+
+	tags, err := m.service.ListPluginTags(ctx, pluginName)
+	if err != nil {
+		return nil, err
+	}
+
+	if m.tagsCache == nil {
+		m.tagsCache = make(map[string][]string)
+	}
+
+	m.tagsCache[pluginName] = tags
+
+	return tags, nil
+}
+
+// deepCheckFunc decides whether a cluster-compatible candidate is acceptable. It
+// returns ok=false with a short reason to skip to an older version, or err for an
+// operational failure that must stop selection (never masked as "try older").
+type deepCheckFunc func(ctx context.Context, contract *internal.Plugin) (ok bool, reason string, err error)
+
+// selectCompatible walks stable versions newest->oldest and returns the first that
+// (a) matches constraint (nil = any), (b) is cluster-compatible, and (c) passes
+// deepCheck (nil = skip). It returns:
+//   - (version, rejected, nil) on success - rejected lists the newer versions skipped,
+//   - (nil, rejected, nil) when no candidate qualifies (the caller reports it),
+//   - (nil, nil, err) only on an operational failure (cluster/contract hard error).
+//
+// A too-new release needing a newer cluster is skipped for an older, working one.
+// Genuine pre-releases (rc/alpha/beta) are excluded (install them via --version).
+// Scope of the built-in checks is cluster-only (Kubernetes/Deckhouse/modules);
+// plugin->plugin dependency resolvability is layered in via deepCheck (the planner).
+func (m *Manager) selectCompatible(
+	ctx context.Context,
+	pluginName string,
+	tags []string,
+	constraint *semver.Constraints,
+	deepCheck deepCheckFunc,
+) (*semver.Version, []string, error) {
+	candidates := stableVersions(sortedSemverDesc(tags))
 
 	rejected := make([]string, 0, len(candidates))
 
-	for i, version := range candidates {
+	for _, version := range candidates {
+		if constraint != nil && !constraint.Check(version) {
+			continue
+		}
+
 		contract, err := m.PluginContract(ctx, pluginName, version.Original())
 		if err != nil {
 			// GetPluginContract has no typed not-found, so a transient registry error
@@ -88,22 +124,41 @@ func (m *Manager) selectLatestCompatible(ctx context.Context, pluginName string,
 		if err != nil {
 			// Cluster unreachable or a broken contract (operational) - hard stop, same
 			// as enforcement; do not silently mask it by trying an older version.
-			return nil, err
+			return nil, nil, err
 		}
 
-		if compatible {
-			if i != 0 {
-				fmt.Printf("Selected %s (newest compatible; %s is not compatible with this cluster)\n",
-					version.Original(), candidates[0].Original())
+		if !compatible {
+			rejected = append(rejected, fmt.Sprintf("%s (%s)", version.Original(), reason))
+
+			continue
+		}
+
+		if deepCheck != nil {
+			ok, reason, err := deepCheck(ctx, contract)
+			if err != nil {
+				return nil, nil, err
 			}
 
-			return version, nil
+			if !ok {
+				rejected = append(rejected, fmt.Sprintf("%s (%s)", version.Original(), reason))
+
+				continue
+			}
 		}
 
-		rejected = append(rejected, fmt.Sprintf("%s (%s)", version.Original(), reason))
+		return version, rejected, nil
 	}
 
-	return nil, fmt.Errorf("no compatible version of plugin %q for this cluster; rejected: %s",
+	return nil, rejected, nil
+}
+
+// noCompatibleError builds the "nothing usable" error from the rejected list.
+func noCompatibleError(pluginName string, rejected []string) error {
+	if len(rejected) == 0 {
+		return fmt.Errorf("no stable version found for plugin %q (use --version to install a pre-release)", pluginName)
+	}
+
+	return fmt.Errorf("no compatible version of plugin %q for this cluster; rejected: %s",
 		pluginName, strings.Join(rejected, "; "))
 }
 

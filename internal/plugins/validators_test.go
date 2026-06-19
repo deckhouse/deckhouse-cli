@@ -51,7 +51,7 @@ func TestFailedConstraintsHelpfulError(t *testing.T) {
 		"alpha": wrongVersion, // installed but incompatible
 	}
 
-	he := fc.helpfulError("header text", true)
+	he := fc.helpfulError("header text")
 	assert.Equal(t, "header text", he.Category)
 	require.Len(t, he.Suggestions, 2)
 
@@ -61,14 +61,8 @@ func TestFailedConstraintsHelpfulError(t *testing.T) {
 		"a version mismatch suggests installing a matching version")
 
 	assert.Equal(t, "zeta is not installed", he.Suggestions[1].Cause)
-	assert.Contains(t, strings.Join(he.Suggestions[1].Solutions, " "), "--resolve-plugins-conflicts",
-		"a missing dep offers the auto-install flag when resolvable")
-
-	// resolvable=false drops the --resolve-plugins-conflicts hint.
-	plain := fc.helpfulError("header text", false)
-	missing, ok := findSuggestion(plain, "zeta is not installed")
-	require.True(t, ok)
-	assert.NotContains(t, strings.Join(missing.Solutions, " "), "--resolve-plugins-conflicts")
+	assert.Contains(t, strings.Join(he.Suggestions[1].Solutions, " "), "d8 plugins install zeta",
+		"a missing dep points at how to install it")
 }
 
 func TestSkipClusterChecksDowngradesEnforcement(t *testing.T) {

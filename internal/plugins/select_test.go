@@ -67,6 +67,23 @@ func k8sContract(version, constraint string) *internal.Plugin {
 	}
 }
 
+// selectLatest exercises the production cluster-only descent: newest stable,
+// cluster-compatible version, or an error when none qualifies.
+func selectLatest(t *testing.T, m *Manager, tags []string) (*semver.Version, error) {
+	t.Helper()
+
+	version, rejected, err := m.selectCompatible(context.Background(), "p", tags, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if version == nil {
+		return nil, noCompatibleError("p", rejected)
+	}
+
+	return version, nil
+}
+
 func TestSortedSemverDesc(t *testing.T) {
 	got := sortedSemverDesc([]string{"v1.0.0", "v2.0.0", "latest", "v1.5.0"})
 
@@ -86,7 +103,7 @@ func TestSelectLatestCompatiblePicksNewestCompatible(t *testing.T) {
 	}}
 	m.clusterStateCache = &requirements.ClusterState{Kubernetes: semver.MustParse("v1.28.3")}
 
-	got, err := m.selectLatestCompatible(context.Background(), "p", tags)
+	got, err := selectLatest(t, m, tags)
 	require.NoError(t, err)
 	assert.Equal(t, "v1.1.0", got.Original(), "skips the too-new v1.2.0, picks newest compatible")
 }
@@ -101,7 +118,7 @@ func TestSelectLatestCompatibleNewestWhenAllCompatible(t *testing.T) {
 	}}
 	m.clusterStateCache = &requirements.ClusterState{Kubernetes: semver.MustParse("v1.28.3")}
 
-	got, err := m.selectLatestCompatible(context.Background(), "p", tags)
+	got, err := selectLatest(t, m, tags)
 	require.NoError(t, err)
 	assert.Equal(t, "v1.2.0", got.Original())
 }
@@ -115,7 +132,7 @@ func TestSelectLatestCompatibleNoneCompatible(t *testing.T) {
 	}}
 	m.clusterStateCache = &requirements.ClusterState{Kubernetes: semver.MustParse("v1.28.3")}
 
-	_, err := m.selectLatestCompatible(context.Background(), "p", tags)
+	_, err := selectLatest(t, m, tags)
 	require.Error(t, err)
 }
 
@@ -132,7 +149,7 @@ func TestSelectLatestCompatibleSkipChecksPicksNewest(t *testing.T) {
 	}}
 	// No clusterStateCache and no cluster: skip must avoid consulting it at all.
 
-	got, err := m.selectLatestCompatible(context.Background(), "p", tags)
+	got, err := selectLatest(t, m, tags)
 	require.NoError(t, err)
 	assert.Equal(t, "v2.0.0", got.Original())
 }
@@ -146,7 +163,7 @@ func TestSelectLatestCompatibleExcludesPrereleases(t *testing.T) {
 		"v1.0.0":      {Name: "p", Version: "v1.0.0"},
 	}}
 
-	got, err := m.selectLatestCompatible(context.Background(), "p", tags)
+	got, err := selectLatest(t, m, tags)
 	require.NoError(t, err)
 	assert.Equal(t, "v1.0.0", got.Original(), "pre-release excluded from default pick")
 }
@@ -162,7 +179,7 @@ func TestSelectLatestCompatibleMalformedContractHardStops(t *testing.T) {
 	}}
 	m.clusterStateCache = &requirements.ClusterState{Kubernetes: semver.MustParse("v1.28.3")}
 
-	_, err := m.selectLatestCompatible(context.Background(), "p", tags)
+	_, err := selectLatest(t, m, tags)
 	require.Error(t, err, "operational error must not be masked as incompatibility")
 }
 

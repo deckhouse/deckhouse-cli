@@ -20,7 +20,7 @@ split `internal/selfupdate` / `internal/selfupdate/cmd` uses.
 | Command | What it does |
 |---|---|
 | `d8 plugins install <name> [--version X] [--use-major N] [--force]` | install or switch a plugin version |
-| `d8 plugins update <name>` | update to the newest cluster-compatible version within the current major |
+| `d8 plugins update <name> [--use-major N]` | update to the newest cluster-compatible version within the current major |
 | `d8 plugins update all` | the same for every installed plugin |
 | `d8 plugins list` | list installed plugins (the proxy serves no catalog, so available plugins cannot be listed) |
 | `d8 plugins versions <name>` | list all published versions of one plugin (installed one marked; same verb as `d8 cli versions`) |
@@ -84,8 +84,10 @@ A failure at any step leaves the previous version installed and working.
 ## Version selection policy
 
 - Default pick: the **newest stable** semver tag whose **cluster-side
-  requirements are satisfied** - versions are probed newest to oldest and the
-  first compatible one wins (a too-new release does not block updates).
+  requirements are satisfied** AND whose **plugin->plugin dependency chain is
+  resolvable** - versions are probed newest to oldest and the first that passes
+  both wins (a too-new release, or one whose dependencies cannot be satisfied,
+  does not block updates).
 - Updates stay **within the installed major**; crossing majors requires an
   explicit `--use-major N`. The major is read from disk (the `current`
   symlink), so a broken binary cannot drop the pin.
@@ -103,9 +105,11 @@ A failure at any step leaves the previous version installed and working.
   mandatory/conditional/anyOf): verified against a one-shot cluster snapshot
   (the `requirements/` package); the cluster is queried only when the plugin
   actually declares such requirements, so contract-less plugins install offline.
-- **Plugin-to-plugin**: conflicts with already installed plugins and their
-  constraints; `--resolve-plugins-conflicts` tries to install missing
-  dependencies.
+- **Plugin-to-plugin**: a plugin's mandatory dependencies are installed and
+  upgraded automatically (the resolution planner: constraint-aware, newest
+  satisfying version, within each dependency's own major - or across it when
+  `--use-major` cascades). Conflicts with already-installed plugins skip a
+  candidate during selection.
 - **At runtime**: the wrapper re-validates requirements before EVERY plugin run
   (the gate is skipped for purely local queries: `--help`, `--version`,
   `completion`).
@@ -136,8 +140,10 @@ A failure at any step leaves the previous version installed and working.
   catalog endpoint); install/update by name works.
 - Idempotency compares the version reported by the binary itself; a plugin that
   prints a non-semver banner is re-pulled on every explicit `update`.
-- Plugin-to-plugin dependency backtracking during version selection is out of
-  scope (conflicts are enforced at install time).
+- Dependency resolution is dry-run during selection (a candidate whose chain
+  cannot be resolved is skipped); the chain is actually installed only for the
+  finally chosen version. Recursion has a cycle guard and a depth cap.
+- Dependencies are only upgraded, never downgraded, to satisfy a constraint.
 
 ## Package map
 
