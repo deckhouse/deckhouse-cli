@@ -17,6 +17,8 @@ limitations under the License.
 package archive_test
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -107,24 +109,36 @@ func TestManifestFileNameCollisionFallbackOnlyWhenAPIGroupGiven(t *testing.T) {
 	}
 }
 
-func TestFsFileName(t *testing.T) {
+func TestFsTarName(t *testing.T) {
+	t.Parallel()
+
+	if archive.FsTarName != "data.tar" {
+		t.Errorf("FsTarName = %q; want data.tar", archive.FsTarName)
+	}
+
+	if archive.FsTarStagingDirName != "data.tar.d" {
+		t.Errorf("FsTarStagingDirName = %q; want data.tar.d", archive.FsTarStagingDirName)
+	}
+}
+
+func TestDataBlockName(t *testing.T) {
 	t.Helper()
 
 	tests := []struct {
-		relPath string
-		want    string
+		ext  string
+		want string
 	}{
-		{"file1.txt", "file1.txt.zst"},
-		{"sub/file.txt", "sub/file.txt.zst"},
-		{"a/b/c.jpg", "a/b/c.jpg.zst"},
-		{"noext", "noext.zst"},
+		{".zst", "data.bin.zst"},
+		{".lz4", "data.bin.lz4"},
+		{".gz", "data.bin.gz"},
+		{"", "data.bin"},
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.relPath, func(t *testing.T) {
-			got := archive.FsFileName(tc.relPath)
+		t.Run(tc.want, func(t *testing.T) {
+			got := archive.DataBlockName(tc.ext)
 			if got != tc.want {
-				t.Errorf("FsFileName(%q) = %q; want %q", tc.relPath, got, tc.want)
+				t.Errorf("DataBlockName(%q) = %q; want %q", tc.ext, got, tc.want)
 			}
 		})
 	}
@@ -135,22 +149,22 @@ func TestChunkFileName(t *testing.T) {
 
 	tests := []struct {
 		i    int
+		ext  string
 		want string
 	}{
-		{0, "chunk_00000.zst"},
-		{1, "chunk_00001.zst"},
-		{9, "chunk_00009.zst"},
-		{10, "chunk_00010.zst"},
-		{99999, "chunk_99999.zst"},
-		// Verify zero-padding is exactly 5 digits.
-		{42, "chunk_00042.zst"},
+		{0, ".zst", "chunk_00000.zst"},
+		{1, ".lz4", "chunk_00001.lz4"},
+		{9, ".gz", "chunk_00009.gz"},
+		{10, "", "chunk_00010"},
+		{99999, ".zst", "chunk_99999.zst"},
+		{42, ".zst", "chunk_00042.zst"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.want, func(t *testing.T) {
-			got := archive.ChunkFileName(tc.i)
+			got := archive.ChunkFileName(tc.i, tc.ext)
 			if got != tc.want {
-				t.Errorf("ChunkFileName(%d) = %q; want %q", tc.i, got, tc.want)
+				t.Errorf("ChunkFileName(%d, %q) = %q; want %q", tc.i, tc.ext, got, tc.want)
 			}
 		})
 	}
@@ -171,17 +185,115 @@ func TestConstants(t *testing.T) {
 		t.Errorf("SnapshotsDirName = %q; want snapshots", archive.SnapshotsDirName)
 	}
 
-	if archive.DataBlockName != "data.img.zst" {
-		t.Errorf("DataBlockName = %q; want data.img.zst", archive.DataBlockName)
+	if archive.DataBlockBase != "data.bin" {
+		t.Errorf("DataBlockBase = %q; want data.bin", archive.DataBlockBase)
 	}
 
 	if archive.DataDirName != "data" {
 		t.Errorf("DataDirName = %q; want data", archive.DataDirName)
 	}
 
-	if archive.BlockChunksDirName != "data.img.zst.d" {
-		t.Errorf("BlockChunksDirName = %q; want data.img.zst.d", archive.BlockChunksDirName)
+	if archive.BlockChunksDirName != "data.bin.d" {
+		t.Errorf("BlockChunksDirName = %q; want data.bin.d", archive.BlockChunksDirName)
 	}
+
+	if archive.FsTarName != "data.tar" {
+		t.Errorf("FsTarName = %q; want data.tar", archive.FsTarName)
+	}
+
+	if archive.FsTarStagingDirName != "data.tar.d" {
+		t.Errorf("FsTarStagingDirName = %q; want data.tar.d", archive.FsTarStagingDirName)
+	}
+}
+
+func TestFindBlockData(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no file", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+
+		path, found, err := archive.FindBlockData(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if found {
+			t.Errorf("found = true, want false (no file present)")
+		}
+
+		if path != "" {
+			t.Errorf("path = %q, want empty", path)
+		}
+	})
+
+	t.Run("zstd file", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+		want := filepath.Join(dir, "data.bin.zst")
+
+		if err := os.WriteFile(want, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		path, found, err := archive.FindBlockData(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !found {
+			t.Error("found = false, want true")
+		}
+
+		if path != want {
+			t.Errorf("path = %q, want %q", path, want)
+		}
+	})
+
+	t.Run("none codec (no ext)", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+		want := filepath.Join(dir, "data.bin")
+
+		if err := os.WriteFile(want, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		path, found, err := archive.FindBlockData(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !found {
+			t.Error("found = false, want true")
+		}
+
+		if path != want {
+			t.Errorf("path = %q, want %q", path, want)
+		}
+	})
+
+	t.Run("excludes staging dir", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+
+		if err := os.MkdirAll(filepath.Join(dir, "data.bin.d"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		path, found, err := archive.FindBlockData(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if found {
+			t.Errorf("found = true, want false (only staging dir present): path=%q", path)
+		}
+	})
 }
 
 func TestDeterminism(t *testing.T) {
@@ -201,12 +313,20 @@ func TestDeterminism(t *testing.T) {
 		t.Error("ManifestFileName (collision) is not deterministic")
 	}
 
-	if archive.FsFileName("sub/data.bin") != archive.FsFileName("sub/data.bin") {
-		t.Error("FsFileName is not deterministic")
+	if archive.FsTarName != archive.FsTarName {
+		t.Error("FsTarName is not deterministic")
 	}
 
-	if archive.ChunkFileName(7) != archive.ChunkFileName(7) {
+	if archive.MultiVolumeTarName("my-pvc") != archive.MultiVolumeTarName("my-pvc") {
+		t.Error("MultiVolumeTarName is not deterministic")
+	}
+
+	if archive.ChunkFileName(7, ".zst") != archive.ChunkFileName(7, ".zst") {
 		t.Error("ChunkFileName is not deterministic")
+	}
+
+	if archive.DataBlockName(".zst") != archive.DataBlockName(".zst") {
+		t.Error("DataBlockName is not deterministic")
 	}
 }
 
@@ -215,22 +335,65 @@ func TestMultiVolumeBlockName(t *testing.T) {
 
 	tests := []struct {
 		pvc  string
+		ext  string
 		want string
 	}{
-		{"pvc-disk-a", "data/pvc-disk-a.img.zst"},
-		{"my-pvc", "data/my-pvc.img.zst"},
-		{"disk.with.dots", "data/disk.with.dots.img.zst"},
+		{"pvc-disk-a", ".zst", "data/pvc-disk-a.bin.zst"},
+		{"my-pvc", ".lz4", "data/my-pvc.bin.lz4"},
+		{"disk.with.dots", "", "data/disk.with.dots.bin"},
 	}
 
 	for _, tc := range tests {
-		got := archive.MultiVolumeBlockName(tc.pvc)
+		got := archive.MultiVolumeBlockName(tc.pvc, tc.ext)
 		if got != tc.want {
-			t.Errorf("MultiVolumeBlockName(%q) = %q; want %q", tc.pvc, got, tc.want)
+			t.Errorf("MultiVolumeBlockName(%q, %q) = %q; want %q", tc.pvc, tc.ext, got, tc.want)
 		}
 	}
 }
 
-func TestMultiVolumeDir(t *testing.T) {
+func TestMultiVolumeTarName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		pvc  string
+		want string
+	}{
+		{"pvc-disk-a", "data/pvc-disk-a.tar"},
+		{"my-pvc", "data/my-pvc.tar"},
+		{"disk.with.dots", "data/disk.with.dots.tar"},
+	}
+
+	for _, tc := range tests {
+		got := archive.MultiVolumeTarName(tc.pvc)
+		if got != tc.want {
+			t.Errorf("MultiVolumeTarName(%q) = %q; want %q", tc.pvc, got, tc.want)
+		}
+	}
+}
+
+func TestMultiVolumeTarStagingDirName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		pvc  string
+		want string
+	}{
+		{"pvc-disk-a", "data/pvc-disk-a.tar.d"},
+		{"my-pvc", "data/my-pvc.tar.d"},
+		{"disk.with.dots", "data/disk.with.dots.tar.d"},
+	}
+
+	for _, tc := range tests {
+		got := archive.MultiVolumeTarStagingDirName(tc.pvc)
+		if got != tc.want {
+			t.Errorf("MultiVolumeTarStagingDirName(%q) = %q; want %q", tc.pvc, got, tc.want)
+		}
+	}
+}
+
+// TestMultiVolumeDir_Deprecated verifies the deprecated MultiVolumeDir still returns
+// the legacy path for backward compatibility with old code.
+func TestMultiVolumeDir_Deprecated(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -257,9 +420,9 @@ func TestBlockChunksDirNameFor(t *testing.T) {
 		pvc  string
 		want string
 	}{
-		{"pvc-disk-a", "data/pvc-disk-a.img.zst.d"},
-		{"my-pvc", "data/my-pvc.img.zst.d"},
-		{"disk.with.dots", "data/disk.with.dots.img.zst.d"},
+		{"pvc-disk-a", "data/pvc-disk-a.bin.d"},
+		{"my-pvc", "data/my-pvc.bin.d"},
+		{"disk.with.dots", "data/disk.with.dots.bin.d"},
 	}
 
 	for _, tc := range tests {
@@ -270,36 +433,45 @@ func TestBlockChunksDirNameFor(t *testing.T) {
 	}
 }
 
-// TestMultiVolumeHelpers_Consistency verifies that the three multi-volume helpers
-// are mutually consistent: the block name, the FS dir, and the chunk dir all share
-// the same pvc prefix under data/ and are distinct from each other and from the
+// TestMultiVolumeHelpers_Consistency verifies that the multi-volume helpers are
+// mutually consistent: block name, FS tar name, staging dirs, and chunk dir all
+// share the pvc prefix under data/ and are distinct from each other and from the
 // single-volume flat names.
 func TestMultiVolumeHelpers_Consistency(t *testing.T) {
 	t.Parallel()
 
 	const pvc = "my-pvc"
+	const ext = ".zst"
 
-	blockName := archive.MultiVolumeBlockName(pvc)
-	fsDir := archive.MultiVolumeDir(pvc)
+	blockName := archive.MultiVolumeBlockName(pvc, ext)
+	tarName := archive.MultiVolumeTarName(pvc)
+	tarStaging := archive.MultiVolumeTarStagingDirName(pvc)
 	chunkDir := archive.BlockChunksDirNameFor(pvc)
 
-	// All three must be distinct.
-	if blockName == fsDir || blockName == chunkDir || fsDir == chunkDir {
-		t.Errorf("helpers not distinct: block=%q fs=%q chunk=%q", blockName, fsDir, chunkDir)
+	// All four must be distinct.
+	names := []string{blockName, tarName, tarStaging, chunkDir}
+	for i := range names {
+		for j := i + 1; j < len(names); j++ {
+			if names[i] == names[j] {
+				t.Errorf("helpers not distinct: [%d]=%q == [%d]=%q", i, names[i], j, names[j])
+			}
+		}
 	}
 
-	// All three must differ from the single-volume flat names.
-	for _, multi := range []string{blockName, fsDir, chunkDir} {
-		if multi == archive.DataBlockName {
-			t.Errorf("%q must not equal DataBlockName", multi)
-		}
+	// All four must differ from the single-volume flat names.
+	flats := map[string]string{
+		"DataBlockName":       archive.DataBlockName(ext),
+		"FsTarName":           archive.FsTarName,
+		"FsTarStagingDirName": archive.FsTarStagingDirName,
+		"BlockChunksDirName":  archive.BlockChunksDirName,
+		"DataDirName":         archive.DataDirName,
+	}
 
-		if multi == archive.DataDirName {
-			t.Errorf("%q must not equal DataDirName", multi)
-		}
-
-		if multi == archive.BlockChunksDirName {
-			t.Errorf("%q must not equal BlockChunksDirName", multi)
+	for _, multi := range names {
+		for flatLabel, flat := range flats {
+			if multi == flat {
+				t.Errorf("%q must not equal flat %s=%q", multi, flatLabel, flat)
+			}
 		}
 	}
 }

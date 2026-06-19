@@ -15,11 +15,13 @@ limitations under the License.
 */
 
 // Package archive provides deterministic naming helpers for the snapshot output tree.
-// All functions are pure and free of I/O.
+// All functions are pure and free of I/O, except FindBlockData which performs a
+// directory glob to locate an existing block-volume file.
 package archive
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -36,18 +38,66 @@ const (
 	// Present only when a node has children.
 	SnapshotsDirName = "snapshots"
 
-	// DataBlockName is the filename for a completed block-volume zstd stream.
-	DataBlockName = "data.img.zst"
+	// DataBlockBase is the base filename (without codec extension) for the completed
+	// block-volume output file. The actual filename is DataBlockName(codec.Ext()).
+	DataBlockBase = "data.bin"
 
-	// DataDirName is the directory name for a filesystem-volume (per-file .zst tree).
+	// FsTarName is the output filename for a single-volume filesystem volume.
+	// The content is a plain uncompressed PAX tar.
+	FsTarName = "data.tar"
+
+	// FsTarStagingDirName is the temporary directory that holds raw per-file downloads
+	// while a filesystem volume is being assembled. It lives next to data.tar inside
+	// the node directory and is removed after the tar is assembled.
+	FsTarStagingDirName = "data.tar.d"
+
+	// DataDirName is the top-level directory for multi-volume output files.
+	//
+	// Multi-volume block files:       data/<pvc>.bin[.<ext>]
+	// Multi-volume FS tar files:      data/<pvc>.tar
+	// Multi-volume block staging:     data/<pvc>.bin.d/
+	// Multi-volume FS staging:        data/<pvc>.tar.d/
 	DataDirName = "data"
 
 	// BlockChunksDirName is the temporary directory that holds individual block-volume
-	// zstd frames while the volume is being downloaded. It lives next to DataBlockName
-	// inside the node directory and is removed after the frames are merged into
-	// DataBlockName.
-	BlockChunksDirName = DataBlockName + ".d"
+	// frames while the volume is being downloaded. It lives next to the merged output
+	// file inside the node directory and is removed after the frames are merged.
+	BlockChunksDirName = DataBlockBase + ".d"
 )
+
+// DataBlockName returns the output filename for a block-volume with the given
+// codec extension. ext is codec.Ext() (e.g. ".zst", ".lz4", ".gz", or "" for none).
+// Examples: DataBlockName(".zst") → "data.bin.zst", DataBlockName("") → "data.bin".
+func DataBlockName(ext string) string {
+	return DataBlockBase + ext
+}
+
+// FindBlockData searches nodeDir for a completed block-volume file (any file
+// whose name starts with DataBlockBase, excluding the staging directory
+// DataBlockBase+".d"). The first non-directory match is returned as an absolute
+// path. The second return value is false when no such file exists. An I/O error
+// is returned in the third return value.
+func FindBlockData(nodeDir string) (string, bool, error) {
+	pattern := filepath.Join(nodeDir, DataBlockBase+"*")
+
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return "", false, fmt.Errorf("glob block data in %s: %w", nodeDir, err)
+	}
+
+	for _, m := range matches {
+		info, statErr := os.Stat(m)
+		if statErr != nil {
+			continue
+		}
+
+		if !info.IsDir() {
+			return m, true, nil
+		}
+	}
+
+	return "", false, nil
+}
 
 // NodeDirName returns the directory name for a child snapshot node.
 // The name is "<kindlower>_<name>" per the directory-tree layout rules.
@@ -73,51 +123,62 @@ func ManifestFileName(kind, name, apiGroup string) string {
 	return k + "." + apiGroup + "_" + name + ".yaml"
 }
 
-// FsFileName returns the output path for a single filesystem file under data/.
-// The source relative path is preserved and ".zst" is appended.
-// Example: FsFileName("sub/file.txt") → "sub/file.txt.zst".
-func FsFileName(relPath string) string {
-	return relPath + ".zst"
-}
-
 // ChunkFileName returns the filename for block-volume chunk index i inside
-// BlockChunksDirName. Indices are zero-padded to five digits:
-// "chunk_00000.zst" through "chunk_99999.zst".
-func ChunkFileName(i int) string {
-	return fmt.Sprintf("chunk_%05d.zst", i)
+// BlockChunksDirName. Indices are zero-padded to five digits. ext is the codec
+// extension (e.g. ".zst", ".lz4", ".gz", or "" for the none codec).
+// Examples: ChunkFileName(0, ".zst") → "chunk_00000.zst", ChunkFileName(3, "") → "chunk_00003".
+func ChunkFileName(i int, ext string) string {
+	return fmt.Sprintf("chunk_%05d%s", i, ext)
 }
 
 // Multi-volume layout helpers (N > 1 own data references in a node).
 //
 // Layout rules:
 //
-//	1 own volume  → flat:  data.img.zst (block) or data/ (FS)
+//	1 own volume  → flat:  data.bin[.<ext>] (block) or data.tar (FS)
 //	N > 1 volumes → namespaced under data/:
-//	                  data/<pvc>.img.zst  (block)
-//	                  data/<pvc>/         (FS, per-file .zst entries underneath)
+//	                  data/<pvc>.bin[.<ext>]  (block)
+//	                  data/<pvc>.tar          (FS)
 //
-// The checksum walk covers all files under data/ recursively, so both the flat
-// and multi-volume layouts are covered by ComputeNodeChecksum with no changes.
+// The checksum walk covers all files under data/ recursively (staging dirs
+// whose names end with ".d" are skipped), so both layouts are covered by
+// ComputeNodeChecksum without extra configuration.
 
-// MultiVolumeBlockName returns the relative path for a block-volume zstd stream
-// in the N>1 multi-volume layout: "data/<pvc>.img.zst".
-// For the single-volume flat case use DataBlockName directly.
-func MultiVolumeBlockName(pvc string) string {
-	return filepath.Join(DataDirName, pvc+".img.zst")
+// MultiVolumeBlockName returns the relative path for a block-volume output file
+// in the N>1 multi-volume layout: "data/<pvc>.bin[.<ext>]".
+// ext is codec.Ext() (e.g. ".zst", ".lz4", ".gz", or "" for none).
+// For the single-volume flat case use DataBlockName(ext) directly.
+func MultiVolumeBlockName(pvc, ext string) string {
+	return filepath.Join(DataDirName, pvc+".bin"+ext)
 }
 
-// MultiVolumeDir returns the relative path for a filesystem-volume directory
-// in the N>1 multi-volume layout: "data/<pvc>".
-// Per-file compressed entries live under "data/<pvc>/<relpath>.zst".
-// For the single-volume flat case use DataDirName directly.
+// MultiVolumeTarName returns the relative path for a filesystem-volume tar file
+// in the N>1 multi-volume layout: "data/<pvc>.tar".
+// For the single-volume flat case use FsTarName directly.
+func MultiVolumeTarName(pvc string) string {
+	return filepath.Join(DataDirName, pvc+".tar")
+}
+
+// MultiVolumeTarStagingDirName returns the relative path of the temporary staging
+// directory for a filesystem-volume in the N>1 multi-volume layout: "data/<pvc>.tar.d".
+// Raw files are staged here during download then assembled into MultiVolumeTarName(pvc).
+// For the single-volume flat case use FsTarStagingDirName directly.
+func MultiVolumeTarStagingDirName(pvc string) string {
+	return filepath.Join(DataDirName, pvc+".tar.d")
+}
+
+// MultiVolumeDir returns the relative path for a filesystem-volume staging directory
+// in the N>1 multi-volume layout: "data/<pvc>". Kept for backward compatibility.
+//
+// Deprecated: use MultiVolumeTarStagingDirName for new code.
 func MultiVolumeDir(pvc string) string {
 	return filepath.Join(DataDirName, pvc)
 }
 
 // BlockChunksDirNameFor returns the relative path of the temporary chunk directory
-// for a named PVC volume in the N>1 multi-volume layout: "data/<pvc>.img.zst.d".
-// Chunks accumulate here during download and are merged into MultiVolumeBlockName(pvc)
+// for a named PVC volume in the N>1 multi-volume layout: "data/<pvc>.bin.d".
+// Chunks accumulate here during download and are merged into MultiVolumeBlockName(pvc, ext)
 // on completion.  For the single-volume flat case use BlockChunksDirName directly.
 func BlockChunksDirNameFor(pvc string) string {
-	return filepath.Join(DataDirName, pvc+".img.zst.d")
+	return filepath.Join(DataDirName, pvc+".bin.d")
 }

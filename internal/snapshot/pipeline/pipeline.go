@@ -56,9 +56,9 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("pipeline: OpenExport must be set (supply SafeClient or set OpenExport directly)")
 	}
 
-	enc, err := compress.NewEncoder(cfg.ZstdLevel)
+	codec, err := compress.New(compress.DefaultCodecName, int(cfg.ZstdLevel))
 	if err != nil {
-		return fmt.Errorf("create zstd encoder: %w", err)
+		return fmt.Errorf("create block codec: %w", err)
 	}
 
 	root, err := source.BuildTree(ctx, cfg.KubeClient, cfg.Namespace, cfg.RootSnapshot)
@@ -78,7 +78,7 @@ func Run(ctx context.Context, cfg Config) error {
 		task := t
 
 		g.Go(func() error {
-			return processNode(gctx, cfg, enc, task)
+			return processNode(gctx, cfg, codec, task)
 		})
 	}
 
@@ -142,7 +142,7 @@ func collectDFS(node *source.Node, plan archive.NodeResumePlan, tasks *[]nodeTas
 // Snapshot nodes with OwnDataRefs download their own volume data directly into
 // the node directory (flat for 1 ref; multi-volume for >1). Aggregator snapshot
 // nodes (no OwnDataRefs, may have orphan leaf children) write manifests only.
-func processNode(ctx context.Context, cfg Config, enc *compress.Encoder, task nodeTask) error {
+func processNode(ctx context.Context, cfg Config, codec compress.Codec, task nodeTask) error {
 	if task.state == archive.NodeStateDone {
 		cfg.Log.Info("node already complete, skipping",
 			slog.String("kind", task.node.Kind),
@@ -152,7 +152,7 @@ func processNode(ctx context.Context, cfg Config, enc *compress.Encoder, task no
 	}
 
 	if task.node.Binding != nil {
-		return processVolumeNode(ctx, cfg, enc, task)
+		return processVolumeNode(ctx, cfg, codec, task)
 	}
 
 	// Snapshot node: ensure subdirs, write manifests, then download own data if present.
@@ -166,7 +166,7 @@ func processNode(ctx context.Context, cfg Config, enc *compress.Encoder, task no
 	}
 
 	if len(task.node.OwnDataRefs) > 0 {
-		if err := downloadOwnDataRefs(ctx, cfg, enc, task.node, task.nodeDir); err != nil {
+		if err := downloadOwnDataRefs(ctx, cfg, codec, task.node, task.nodeDir); err != nil {
 			return fmt.Errorf("download own volumes for %s/%s: %w", task.node.Kind, task.node.Name, err)
 		}
 	}
@@ -186,7 +186,7 @@ func processNode(ctx context.Context, cfg Config, enc *compress.Encoder, task no
 // It writes the captured PVC manifest, applies the block-resume guard, downloads
 // the volume data, and finalizes the node directory.
 // Volume nodes are always leaves: no snapshots/ subdirectory is created.
-func processVolumeNode(ctx context.Context, cfg Config, enc *compress.Encoder, task nodeTask) error {
+func processVolumeNode(ctx context.Context, cfg Config, codec compress.Codec, task nodeTask) error {
 	if err := ensureNodeSubdirs(task.nodeDir, false); err != nil {
 		return fmt.Errorf("ensure subdirs for %s/%s: %w", task.node.Kind, task.node.Name, err)
 	}
@@ -195,14 +195,11 @@ func processVolumeNode(ctx context.Context, cfg Config, enc *compress.Encoder, t
 		return fmt.Errorf("write volume manifest for %s/%s: %w", task.node.Kind, task.node.Name, err)
 	}
 
-	blockPath := filepath.Join(task.nodeDir, archive.DataBlockName)
-
-	_, statErr := os.Stat(blockPath)
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return fmt.Errorf("stat %s: %w", blockPath, statErr)
+	_, blockAlreadyMerged, err := archive.FindBlockData(task.nodeDir)
+	if err != nil {
+		return fmt.Errorf("find block data in %s: %w", task.nodeDir, err)
 	}
 
-	blockAlreadyMerged := statErr == nil
 	if blockAlreadyMerged {
 		cfg.Log.Info("block volume already merged, skipping download",
 			slog.String("kind", task.node.Kind),
@@ -210,7 +207,7 @@ func processVolumeNode(ctx context.Context, cfg Config, enc *compress.Encoder, t
 	}
 
 	if !blockAlreadyMerged {
-		if err := downloadVolumeBinding(ctx, cfg, enc, task.node.Binding, task.node.Namespace, task.nodeDir, flatDest(task.nodeDir)); err != nil {
+		if err := downloadVolumeBinding(ctx, cfg, codec, task.node.Binding, task.node.Namespace, task.nodeDir, flatDest(task.nodeDir, codec.Ext())); err != nil {
 			return fmt.Errorf("download volume for %s/%s: %w", task.node.Kind, task.node.Name, err)
 		}
 	}
@@ -229,15 +226,15 @@ func processVolumeNode(ctx context.Context, cfg Config, enc *compress.Encoder, t
 // downloadOwnDataRefs downloads all OwnDataRef volumes for a non-aggregator snapshot
 // node into nodeDir.
 //
-//   - One OwnDataRef: flat layout — data.img.zst / data/ directly in nodeDir, with
-//     the block-resume guard (skip if data.img.zst already exists).
-//   - Two or more OwnDataRefs: multi-volume layout — data/<pvc>.img.zst / data/<pvc>/
-//     per volume. The resume guard is per-pvc (skip if MultiVolumeBlockName exists).
+//   - One OwnDataRef: flat layout — data.bin[.<ext>] / data.tar directly in nodeDir,
+//     with the block-resume guard (skip if any data.bin* file already exists).
+//   - Two or more OwnDataRefs: multi-volume layout — data/<pvc>.bin[.<ext>] / data/<pvc>.tar
+//     per volume. The resume guard is per-pvc (skip if the specific MultiVolumeBlockName exists).
 //     Shadow VS/VSC + DataExport lifecycle is independent per volume.
 func downloadOwnDataRefs(
 	ctx context.Context,
 	cfg Config,
-	enc *compress.Encoder,
+	codec compress.Codec,
 	node *source.Node,
 	nodeDir string,
 ) error {
@@ -245,14 +242,12 @@ func downloadOwnDataRefs(
 
 	if len(refs) == 1 {
 		// Flat single-volume layout: reuse the same paths as leaf volume nodes.
-		blockPath := filepath.Join(nodeDir, archive.DataBlockName)
-
-		_, statErr := os.Stat(blockPath)
-		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-			return fmt.Errorf("stat %s: %w", blockPath, statErr)
+		_, found, err := archive.FindBlockData(nodeDir)
+		if err != nil {
+			return fmt.Errorf("find block data in %s: %w", nodeDir, err)
 		}
 
-		if statErr == nil {
+		if found {
 			cfg.Log.Info("block volume already merged, skipping download",
 				slog.String("kind", node.Kind),
 				slog.String("name", node.Name))
@@ -260,14 +255,14 @@ func downloadOwnDataRefs(
 			return nil
 		}
 
-		return downloadVolumeBinding(ctx, cfg, enc, &refs[0], node.Namespace, nodeDir, flatDest(nodeDir))
+		return downloadVolumeBinding(ctx, cfg, codec, &refs[0], node.Namespace, nodeDir, flatDest(nodeDir, codec.Ext()))
 	}
 
 	// Multi-volume layout: one shadow pair + DataExport per binding.
 	for i := range refs {
 		ref := &refs[i]
 		pvc := ref.Target.Name
-		dest := multiDest(nodeDir, pvc)
+		dest := multiDest(nodeDir, pvc, codec.Ext())
 
 		_, statErr := os.Stat(dest.blockPath)
 		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
@@ -281,7 +276,7 @@ func downloadOwnDataRefs(
 			continue
 		}
 
-		if err := downloadVolumeBinding(ctx, cfg, enc, ref, node.Namespace, nodeDir, dest); err != nil {
+		if err := downloadVolumeBinding(ctx, cfg, codec, ref, node.Namespace, nodeDir, dest); err != nil {
 			return fmt.Errorf("download volume for pvc %s: %w", pvc, err)
 		}
 	}
@@ -308,29 +303,36 @@ func ensureNodeSubdirs(nodeDir string, withSnapshots bool) error {
 type volumeDestPaths struct {
 	// chunkDir is the directory that receives block chunk files during download.
 	chunkDir string
-	// blockPath is the merged block output file (data.img.zst or data/<pvc>.img.zst).
+	// blockPath is the merged block output file (data.bin[.<ext>] or data/<pvc>.bin[.<ext>]).
 	blockPath string
-	// fsDataDir is the directory that receives filesystem files (data/ or data/<pvc>/).
-	fsDataDir string
+	// fsTarPath is the final assembled tar file (data.tar or data/<pvc>.tar).
+	fsTarPath string
+	// fsTarStagingDir is the temporary directory for raw per-file downloads
+	// (data.tar.d/ or data/<pvc>.tar.d/).
+	fsTarStagingDir string
 }
 
 // flatDest returns the single-volume flat destination paths for nodeDir.
+// ext is codec.Ext() and determines the block file name suffix.
 // Used for leaf volume nodes and snapshot nodes with exactly one OwnDataRef.
-func flatDest(nodeDir string) volumeDestPaths {
+func flatDest(nodeDir, ext string) volumeDestPaths {
 	return volumeDestPaths{
-		chunkDir:  filepath.Join(nodeDir, archive.BlockChunksDirName),
-		blockPath: filepath.Join(nodeDir, archive.DataBlockName),
-		fsDataDir: filepath.Join(nodeDir, archive.DataDirName),
+		chunkDir:        filepath.Join(nodeDir, archive.BlockChunksDirName),
+		blockPath:       filepath.Join(nodeDir, archive.DataBlockName(ext)),
+		fsTarPath:       filepath.Join(nodeDir, archive.FsTarName),
+		fsTarStagingDir: filepath.Join(nodeDir, archive.FsTarStagingDirName),
 	}
 }
 
 // multiDest returns the per-pvc multi-volume destination paths for nodeDir.
+// ext is codec.Ext() and determines the block file name suffix.
 // Used for snapshot nodes with more than one OwnDataRef.
-func multiDest(nodeDir, pvc string) volumeDestPaths {
+func multiDest(nodeDir, pvc, ext string) volumeDestPaths {
 	return volumeDestPaths{
-		chunkDir:  filepath.Join(nodeDir, archive.BlockChunksDirNameFor(pvc)),
-		blockPath: filepath.Join(nodeDir, archive.MultiVolumeBlockName(pvc)),
-		fsDataDir: filepath.Join(nodeDir, archive.MultiVolumeDir(pvc)),
+		chunkDir:        filepath.Join(nodeDir, archive.BlockChunksDirNameFor(pvc)),
+		blockPath:       filepath.Join(nodeDir, archive.MultiVolumeBlockName(pvc, ext)),
+		fsTarPath:       filepath.Join(nodeDir, archive.MultiVolumeTarName(pvc)),
+		fsTarStagingDir: filepath.Join(nodeDir, archive.MultiVolumeTarStagingDirName(pvc)),
 	}
 }
 
@@ -344,7 +346,7 @@ func multiDest(nodeDir, pvc string) volumeDestPaths {
 func downloadVolumeBinding(
 	ctx context.Context,
 	cfg Config,
-	enc *compress.Encoder,
+	codec compress.Codec,
 	binding *snapshotapi.SnapshotDataBinding,
 	namespace string,
 	nodeDir string,
@@ -407,15 +409,15 @@ func downloadVolumeBinding(
 
 	switch exp.VolumeMode() {
 	case "Block":
-		return downloadBlock(ctx, cfg, enc, dest, exp)
+		return downloadBlock(ctx, cfg, codec, dest, exp)
 	case "Filesystem":
-		return downloadFS(ctx, cfg, enc, dest.fsDataDir, exp)
+		return downloadFS(ctx, cfg, dest.fsTarPath, dest.fsTarStagingDir, exp)
 	default:
 		return fmt.Errorf("unsupported volume mode %q for artifact %s", exp.VolumeMode(), artifactName)
 	}
 }
 
-func downloadBlock(ctx context.Context, cfg Config, enc *compress.Encoder, dest volumeDestPaths, exp *exporter.Export) error {
+func downloadBlock(ctx context.Context, cfg Config, codec compress.Codec, dest volumeDestPaths, exp *exporter.Export) error {
 	blockURL, err := exporter.BlockURL(exp.BaseURL())
 	if err != nil {
 		return fmt.Errorf("build block URL: %w", err)
@@ -426,20 +428,20 @@ func downloadBlock(ctx context.Context, cfg Config, enc *compress.Encoder, dest 
 		return fmt.Errorf("HEAD block volume: %w", err)
 	}
 
-	if err := volume.DownloadBlockChunks(ctx, cfg.Log, dest.chunkDir, blockURL, totalSize, cfg.ChunkSize, cfg.PerVolumeConcurrency, exp.Fetcher(), enc); err != nil {
+	if err := volume.DownloadBlockChunks(ctx, cfg.Log, dest.chunkDir, blockURL, totalSize, cfg.ChunkSize, cfg.PerVolumeConcurrency, exp.Fetcher(), codec); err != nil {
 		return fmt.Errorf("download block chunks: %w", err)
 	}
 
-	return volume.MergeBlockChunks(dest.chunkDir, dest.blockPath, totalSize, cfg.ChunkSize)
+	return volume.MergeBlockChunks(dest.chunkDir, dest.blockPath, totalSize, cfg.ChunkSize, codec.Ext())
 }
 
-func downloadFS(ctx context.Context, cfg Config, enc *compress.Encoder, dataDir string, exp *exporter.Export) error {
+func downloadFS(ctx context.Context, cfg Config, tarPath, stagingDir string, exp *exporter.Export) error {
 	filesURL, err := exporter.FilesURL(exp.BaseURL())
 	if err != nil {
 		return fmt.Errorf("build files URL: %w", err)
 	}
 
-	return volume.DownloadFilesystemVolume(ctx, cfg.Log, dataDir, filesURL, cfg.PerVolumeConcurrency, exp.Fetcher(), enc)
+	return volume.DownloadFilesystemVolume(ctx, cfg.Log, tarPath, stagingDir, filesURL, cfg.PerVolumeConcurrency, exp.Fetcher())
 }
 
 // nodeIdentity converts a source.Node into an archive.NodeIdentity for resume scanning.

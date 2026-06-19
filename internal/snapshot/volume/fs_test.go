@@ -17,6 +17,7 @@ limitations under the License.
 package volume_test
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"io"
@@ -26,10 +27,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
@@ -100,144 +99,194 @@ func newFSFetcher(srv *httptest.Server) *exporter.Fetcher {
 	return exporter.NewFetcher(srv.Client())
 }
 
+// readTarContents reads all regular-file entries from a tar file and returns a
+// map of relPath → raw bytes.
+func readTarContents(t *testing.T, tarPath string) map[string][]byte {
+	t.Helper()
+
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatalf("open tar %s: %v", tarPath, err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	result := map[string][]byte{}
+	tr := tar.NewReader(f)
+
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			t.Fatalf("read tar header: %v", err)
+		}
+
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("read tar entry %s: %v", hdr.Name, err)
+		}
+
+		result[hdr.Name] = data
+	}
+
+	return result
+}
+
 func TestDownloadFilesystemVolume_DownloadsTree(t *testing.T) {
 	srv, files := fsTestServer(t)
 
-	enc, err := compress.NewEncoder(compress.LevelDefault)
-	if err != nil {
-		t.Fatalf("compress.NewEncoder: %v", err)
-	}
-
 	nodeDir := t.TempDir()
-	dataDir := filepath.Join(nodeDir, archive.DataDirName)
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
 	rootURL := srv.URL + "/files/"
 
-	err = volume.DownloadFilesystemVolume(
+	err := volume.DownloadFilesystemVolume(
 		context.Background(),
 		slog.Default(),
-		dataDir,
+		tarPath,
+		stagingDir,
 		rootURL,
 		2,
 		newFSFetcher(srv),
-		enc,
 	)
 	if err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 
-	// Verify each expected file.
-	for _, f := range files {
-		destRel := filepath.FromSlash(archive.FsFileName(f.relPath))
-		destPath := filepath.Join(dataDir, destRel)
-
-		raw, err := os.ReadFile(destPath)
-		if err != nil {
-			t.Fatalf("read %s: %v", destPath, err)
-		}
-
-		decoded := decodeZstdStream(t, raw)
-
-		if !bytes.Equal(decoded, f.content) {
-			t.Errorf("file %s: got %q, want %q", f.relPath, decoded, f.content)
-		}
+	// Tar must exist.
+	if _, err := os.Stat(tarPath); err != nil {
+		t.Fatalf("data.tar not created: %v", err)
 	}
 
-	// The link must NOT produce an output file.
-	linkDest := filepath.Join(dataDir, "symlink.txt.zst")
-	if _, err := os.Stat(linkDest); !os.IsNotExist(err) {
-		t.Error("symlink should not produce an output file")
+	// Staging dir must be cleaned up.
+	if _, err := os.Stat(stagingDir); !os.IsNotExist(err) {
+		t.Error("staging dir should have been removed after tar assembly")
+	}
+
+	// Verify each expected file is in the tar with correct content.
+	entries := readTarContents(t, tarPath)
+
+	for _, f := range files {
+		data, ok := entries[f.relPath]
+		if !ok {
+			t.Errorf("tar missing entry %q", f.relPath)
+
+			continue
+		}
+
+		if !bytes.Equal(data, f.content) {
+			t.Errorf("entry %q: got %q, want %q", f.relPath, data, f.content)
+		}
 	}
 }
 
-func TestDownloadFilesystemVolume_SkipsExistingFiles(t *testing.T) {
-	srv, files := fsTestServer(t)
-
-	enc, err := compress.NewEncoder(compress.LevelDefault)
-	if err != nil {
-		t.Fatalf("compress.NewEncoder: %v", err)
-	}
+func TestDownloadFilesystemVolume_SkipsIfTarExists(t *testing.T) {
+	srv, _ := fsTestServer(t)
 
 	nodeDir := t.TempDir()
-	dataDir := filepath.Join(nodeDir, archive.DataDirName)
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	// Pre-create a tar to simulate a completed prior download.
+	if err := os.WriteFile(tarPath, []byte("existing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fi1, _ := os.Stat(tarPath)
+
 	rootURL := srv.URL + "/files/"
 
-	// First run.
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), dataDir, rootURL, 1, newFSFetcher(srv), enc); err != nil {
-		t.Fatalf("first run: %v", err)
-	}
-
-	// Capture modification times.
-	type modEntry struct {
-		path    string
-		modTime time.Time
-	}
-
-	var modTimes []modEntry
-
-	for _, f := range files {
-		destRel := filepath.FromSlash(archive.FsFileName(f.relPath))
-		destPath := filepath.Join(dataDir, destRel)
-
-		fi, err := os.Stat(destPath)
-		if err != nil {
-			t.Fatalf("stat after first run: %v", err)
-		}
-
-		modTimes = append(modTimes, modEntry{path: destPath, modTime: fi.ModTime()})
-	}
-
-	// Second run (all files already present).
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), dataDir, rootURL, 1, newFSFetcher(srv), enc); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv)); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 
-	for _, m := range modTimes {
-		fi, err := os.Stat(m.path)
-		if err != nil {
-			t.Fatalf("stat after second run: %v", err)
-		}
+	// Tar must not have been replaced.
+	fi2, err := os.Stat(tarPath)
+	if err != nil {
+		t.Fatalf("stat after second run: %v", err)
+	}
 
-		if !fi.ModTime().Equal(m.modTime) {
-			t.Errorf("file %s was modified on second run (should be skipped)", m.path)
-		}
+	if !fi2.ModTime().Equal(fi1.ModTime()) {
+		t.Error("data.tar was overwritten when it already existed (should be skipped)")
 	}
 }
 
 func TestDownloadFilesystemVolume_CleansStaleTmp(t *testing.T) {
 	srv, _ := fsTestServer(t)
 
-	enc, err := compress.NewEncoder(compress.LevelDefault)
-	if err != nil {
-		t.Fatalf("compress.NewEncoder: %v", err)
-	}
-
 	nodeDir := t.TempDir()
-	dataDir := filepath.Join(nodeDir, archive.DataDirName)
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
 
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Plant a stale .tmp for root.txt.zst.
-	staleTmp := filepath.Join(dataDir, "root.txt.zst.tmp")
+	// Plant a stale .tmp inside the staging dir.
+	staleTmp := filepath.Join(stagingDir, "root.txt.tmp")
 	if err := os.WriteFile(staleTmp, []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	rootURL := srv.URL + "/files/"
 
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), dataDir, rootURL, 1, newFSFetcher(srv), enc); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv)); err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 
-	// Stale .tmp must be gone.
+	// Stale .tmp must be gone (staging dir removed entirely on success).
 	if _, err := os.Stat(staleTmp); !os.IsNotExist(err) {
 		t.Error("stale .tmp should have been removed")
 	}
 
-	// Final file must exist.
-	dest := filepath.Join(dataDir, "root.txt.zst")
-	if _, err := os.Stat(dest); err != nil {
-		t.Errorf("root.txt.zst should exist after download: %v", err)
+	// Final tar must exist.
+	if _, err := os.Stat(tarPath); err != nil {
+		t.Errorf("data.tar should exist after download: %v", err)
+	}
+}
+
+func TestDownloadFilesystemVolume_LinkNotInTar(t *testing.T) {
+	srv, _ := fsTestServer(t)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	rootURL := srv.URL + "/files/"
+
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv)); err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	tr := tar.NewReader(f)
+
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			t.Fatalf("read tar: %v", err)
+		}
+
+		// Symlinks in the test server have no body and targetPath="/other";
+		// they should be written as TypeSymlink entries, not TypeReg entries.
+		if hdr.Name == "symlink.txt" && hdr.Typeflag == tar.TypeReg {
+			t.Error("symlink was written as a regular file entry in the tar")
+		}
 	}
 }

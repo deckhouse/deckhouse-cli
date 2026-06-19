@@ -134,9 +134,23 @@ func collectNodeFiles(nodeDir string) ([]string, error) {
 		}
 	}
 
-	blockPath := filepath.Join(nodeDir, DataBlockName)
-	if _, err := os.Stat(blockPath); err == nil {
-		paths = append(paths, DataBlockName)
+	absBlockPath, blockFound, findErr := FindBlockData(nodeDir)
+	if findErr != nil {
+		return nil, fmt.Errorf("find block data in %s: %w", nodeDir, findErr)
+	}
+
+	if blockFound {
+		rel, relErr := filepath.Rel(nodeDir, absBlockPath)
+		if relErr != nil {
+			return nil, relErr
+		}
+
+		paths = append(paths, rel)
+	}
+
+	// Single-volume filesystem tar (data.tar).
+	if _, statErr := os.Stat(filepath.Join(nodeDir, FsTarName)); statErr == nil {
+		paths = append(paths, FsTarName)
 	}
 
 	dataDir := filepath.Join(nodeDir, DataDirName)
@@ -149,6 +163,12 @@ func collectNodeFiles(nodeDir string) ([]string, error) {
 			}
 
 			if d.IsDir() {
+				// Skip staging directories (names ending in ".d"):
+				// data/<pvc>.bin.d/ (block chunks) and data/<pvc>.tar.d/ (FS raw files).
+				if strings.HasSuffix(d.Name(), ".d") {
+					return filepath.SkipDir
+				}
+
 				return nil
 			}
 
