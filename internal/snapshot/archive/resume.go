@@ -37,9 +37,9 @@ const (
 	// skip already-present chunks and resume from where it left off.
 	NodeStateBlockPartial
 
-	// NodeStateFSPartial means the data/ directory exists but snapshot.yaml is
-	// absent.  Already-present per-file .zst files will be skipped by the
-	// filesystem downloader.
+	// NodeStateFSPartial means the flat FS tar staging dir (FsTarStagingDirName) or
+	// the multi-volume data/ directory exists but snapshot.yaml is absent.
+	// The filesystem downloader will skip already-staged raw files and resume assembly.
 	NodeStateFSPartial
 
 	// NodeStateManifestsOnly means manifests/ (or data.img.zst) is present but
@@ -154,15 +154,18 @@ func classifyCompleteDir(parentDir, primaryDir string, id NodeIdentity) (NodeRes
 
 // classifyPartialDir classifies an existing but incomplete node directory.
 func classifyPartialDir(primaryDir string) (NodeResumePlan, error) {
-	chunkDir := filepath.Join(primaryDir, BlockChunksDirName)
-
-	if _, err := os.Stat(chunkDir); err == nil {
+	// Block chunk staging dir (single-volume block download in progress).
+	if _, err := os.Stat(filepath.Join(primaryDir, BlockChunksDirName)); err == nil {
 		return NodeResumePlan{TargetDir: primaryDir, State: NodeStateBlockPartial}, nil
 	}
 
-	dataDir := filepath.Join(primaryDir, DataDirName)
+	// Flat FS tar staging dir (single-volume filesystem download in progress).
+	if _, err := os.Stat(filepath.Join(primaryDir, FsTarStagingDirName)); err == nil {
+		return NodeResumePlan{TargetDir: primaryDir, State: NodeStateFSPartial}, nil
+	}
 
-	if _, err := os.Stat(dataDir); err == nil {
+	// Multi-volume data/ directory (multi-volume layout, block or FS).
+	if _, err := os.Stat(filepath.Join(primaryDir, DataDirName)); err == nil {
 		return NodeResumePlan{TargetDir: primaryDir, State: NodeStateFSPartial}, nil
 	}
 

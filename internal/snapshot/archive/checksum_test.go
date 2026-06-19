@@ -55,7 +55,7 @@ func writeFile(t *testing.T, path, content string) {
 func TestComputeNodeChecksum_Deterministic(t *testing.T) {
 	nodeDir := makeNodeDir(t)
 	writeFile(t, filepath.Join(nodeDir, ManifestsDirName, "configmap_app.yaml"), "kind: ConfigMap\nname: app\n")
-	writeFile(t, filepath.Join(nodeDir, DataBlockName), "fake-block-data")
+	writeFile(t, filepath.Join(nodeDir, DataBlockName(".zst")), "fake-block-data")
 
 	c1, err := ComputeNodeChecksum(nodeDir)
 	if err != nil {
@@ -152,17 +152,17 @@ func TestComputeNodeChecksum_ExcludesSnapshotsDir(t *testing.T) {
 	}
 }
 
-// TestComputeNodeChecksum_FsVolume verifies that data/ files are covered by the checksum.
+// TestComputeNodeChecksum_FsVolume verifies that the flat data.tar is covered by the checksum.
 func TestComputeNodeChecksum_FsVolume(t *testing.T) {
 	nodeDir := makeNodeDir(t)
-	writeFile(t, filepath.Join(nodeDir, DataDirName, "file.txt.zst"), "compressed-content-1")
+	writeFile(t, filepath.Join(nodeDir, FsTarName), "tar-content-v1")
 
 	before, err := ComputeNodeChecksum(nodeDir)
 	if err != nil {
 		t.Fatalf("before: %v", err)
 	}
 
-	writeFile(t, filepath.Join(nodeDir, DataDirName, "file.txt.zst"), "compressed-content-2")
+	writeFile(t, filepath.Join(nodeDir, FsTarName), "tar-content-v2")
 
 	after, err := ComputeNodeChecksum(nodeDir)
 	if err != nil {
@@ -170,7 +170,31 @@ func TestComputeNodeChecksum_FsVolume(t *testing.T) {
 	}
 
 	if before.Hex == after.Hex {
-		t.Error("checksum did not change after mutating fs volume file")
+		t.Error("checksum did not change after mutating fs volume tar")
+	}
+}
+
+// TestComputeNodeChecksum_FsVolume_StagingExcluded verifies that the flat FS staging
+// directory (data.tar.d/) and its contents are NOT included in the checksum.
+func TestComputeNodeChecksum_FsVolume_StagingExcluded(t *testing.T) {
+	nodeDir := makeNodeDir(t)
+	writeFile(t, filepath.Join(nodeDir, FsTarName), "tar-content")
+
+	base, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("base: %v", err)
+	}
+
+	// Writing a file inside the staging dir must NOT change the checksum.
+	writeFile(t, filepath.Join(nodeDir, FsTarStagingDirName, "rawfile.txt"), "raw")
+
+	after, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+
+	if base.Hex != after.Hex {
+		t.Error("staging dir data.tar.d/ was unexpectedly included in the checksum")
 	}
 }
 
@@ -320,21 +344,19 @@ func TestVerifyNode_Missing(t *testing.T) {
 }
 
 // TestComputeNodeChecksum_MultiVolumeLayout verifies that the multi-volume layout
-// (data/<pvc>.img.zst for block volumes and data/<pvc>/<file>.zst for FS volumes)
-// is fully covered by ComputeNodeChecksum without any code changes to checksum.go.
-// The checksum must be deterministic (same content → same digest) and must change
-// when any volume file is mutated.
+// (data/<pvc>.bin.zst for block volumes and data/<pvc>.tar for FS volumes) is
+// fully covered by ComputeNodeChecksum.  Staging directories are excluded.
 func TestComputeNodeChecksum_MultiVolumeLayout(t *testing.T) {
 	nodeDir := makeNodeDir(t)
 
 	// Manifest.
 	writeFile(t, filepath.Join(nodeDir, ManifestsDirName, "virtualdisksnapshot_snap.yaml"), "kind: VirtualDiskSnapshot\n")
 
-	// Block-volume PVC-a in multi-volume layout: data/pvc-a.img.zst.
-	writeFile(t, filepath.Join(nodeDir, MultiVolumeBlockName("pvc-a")), "block-content-a")
+	// Block-volume PVC-a in multi-volume layout: data/pvc-a.bin.zst.
+	writeFile(t, filepath.Join(nodeDir, MultiVolumeBlockName("pvc-a", ".zst")), "block-content-a")
 
-	// FS-volume PVC-b in multi-volume layout: data/pvc-b/<file>.zst.
-	writeFile(t, filepath.Join(nodeDir, MultiVolumeDir("pvc-b"), "etc", "config.txt.zst"), "fs-content-b")
+	// FS-volume PVC-b in multi-volume layout: data/pvc-b.tar.
+	writeFile(t, filepath.Join(nodeDir, MultiVolumeTarName("pvc-b")), "tar-content-b")
 
 	c1, err := ComputeNodeChecksum(nodeDir)
 	if err != nil {
@@ -360,7 +382,7 @@ func TestComputeNodeChecksum_MultiVolumeLayout(t *testing.T) {
 	}
 
 	// Mutating the block-volume file must change the checksum.
-	writeFile(t, filepath.Join(nodeDir, MultiVolumeBlockName("pvc-a")), "block-content-a-modified")
+	writeFile(t, filepath.Join(nodeDir, MultiVolumeBlockName("pvc-a", ".zst")), "block-content-a-modified")
 
 	c3, err := ComputeNodeChecksum(nodeDir)
 	if err != nil {
@@ -368,12 +390,12 @@ func TestComputeNodeChecksum_MultiVolumeLayout(t *testing.T) {
 	}
 
 	if c1.Hex == c3.Hex {
-		t.Error("checksum did not change after mutating data/<pvc>.img.zst")
+		t.Error("checksum did not change after mutating data/<pvc>.bin.zst")
 	}
 
-	// Restore and mutate the FS-volume file instead.
-	writeFile(t, filepath.Join(nodeDir, MultiVolumeBlockName("pvc-a")), "block-content-a")
-	writeFile(t, filepath.Join(nodeDir, MultiVolumeDir("pvc-b"), "etc", "config.txt.zst"), "fs-content-b-modified")
+	// Restore and mutate the FS-volume tar instead.
+	writeFile(t, filepath.Join(nodeDir, MultiVolumeBlockName("pvc-a", ".zst")), "block-content-a")
+	writeFile(t, filepath.Join(nodeDir, MultiVolumeTarName("pvc-b")), "tar-content-b-modified")
 
 	c4, err := ComputeNodeChecksum(nodeDir)
 	if err != nil {
@@ -381,6 +403,18 @@ func TestComputeNodeChecksum_MultiVolumeLayout(t *testing.T) {
 	}
 
 	if c1.Hex == c4.Hex {
-		t.Error("checksum did not change after mutating data/<pvc>/<file>.zst")
+		t.Error("checksum did not change after mutating data/<pvc>.tar")
+	}
+
+	// Staging directory contents must NOT affect the checksum.
+	writeFile(t, filepath.Join(nodeDir, MultiVolumeTarStagingDirName("pvc-b"), "rawfile.txt"), "raw")
+
+	c5, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("fifth compute: %v", err)
+	}
+
+	if c4.Hex != c5.Hex {
+		t.Error("staging directory data/<pvc>.tar.d/ was unexpectedly included in the checksum")
 	}
 }

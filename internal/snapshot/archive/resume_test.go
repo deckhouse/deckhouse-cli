@@ -308,14 +308,14 @@ func TestScanNode_BlockPartialWithTmp(t *testing.T) {
 	}
 
 	// two valid chunks
-	for _, name := range []string{archive.ChunkFileName(0), archive.ChunkFileName(2)} {
+	for _, name := range []string{archive.ChunkFileName(0, ".zst"), archive.ChunkFileName(2, ".zst")} {
 		if err := os.WriteFile(filepath.Join(chunkDir, name), []byte("data"), 0o644); err != nil {
 			t.Fatalf("write chunk: %v", err)
 		}
 	}
 
 	// one stale .tmp that must be removed
-	tmpPath := filepath.Join(chunkDir, archive.ChunkFileName(1)+".tmp")
+	tmpPath := filepath.Join(chunkDir, archive.ChunkFileName(1, ".zst")+".tmp")
 
 	if err := os.WriteFile(tmpPath, []byte("partial"), 0o644); err != nil {
 		t.Fatalf("write tmp: %v", err)
@@ -351,18 +351,19 @@ func TestScanNode_FSPartial(t *testing.T) {
 	id := archive.NodeIdentity{Kind: "VirtualDiskSnapshot", Name: "disk-fs"}
 	nodeDir := filepath.Join(parent, archive.NodeDirName(id.Kind, id.Name))
 
+	// Multi-volume data/ directory triggers FSPartial.
 	dataDir := filepath.Join(nodeDir, archive.DataDirName)
 
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatalf("mkdir dataDir: %v", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(dataDir, "file1.zst"), []byte("z"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dataDir, "pvc-a.tar"), []byte("z"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
 
 	// stale .tmp inside data/ must be removed
-	tmpPath := filepath.Join(dataDir, "file2.zst.tmp")
+	tmpPath := filepath.Join(dataDir, "pvc-b.tar.tmp")
 
 	if err := os.WriteFile(tmpPath, []byte("partial"), 0o644); err != nil {
 		t.Fatalf("write tmp: %v", err)
@@ -384,6 +385,39 @@ func TestScanNode_FSPartial(t *testing.T) {
 
 	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
 		t.Error("stale .tmp file should have been removed")
+	}
+}
+
+func TestScanNode_FSTarStagingPartial(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	id := archive.NodeIdentity{Kind: "VirtualDiskSnapshot", Name: "disk-fstar"}
+	nodeDir := filepath.Join(parent, archive.NodeDirName(id.Kind, id.Name))
+
+	// Flat FS tar staging dir (data.tar.d/) triggers FSPartial.
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		t.Fatalf("mkdir stagingDir: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(stagingDir, "root.txt"), []byte("raw"), 0o644); err != nil {
+		t.Fatalf("write staged file: %v", err)
+	}
+
+	plan, err := archive.ScanNode(parent, id)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if plan.State != archive.NodeStateFSPartial {
+		t.Errorf("state = %v, want NodeStateFSPartial", plan.State)
+	}
+
+	if plan.TargetDir != nodeDir {
+		t.Errorf("TargetDir = %q, want %q", plan.TargetDir, nodeDir)
 	}
 }
 
