@@ -42,9 +42,9 @@ const (
 	// The filesystem downloader will skip already-staged raw files and resume assembly.
 	NodeStateFSPartial
 
-	// NodeStateManifestsOnly means manifests/ (or data.img.zst) is present but
-	// there is no volume download in progress and no snapshot.yaml.  The pipeline
-	// should call FinalizeNode once volume data is ready.
+	// NodeStateManifestsOnly means manifests/ is present but there is no volume
+	// download in progress (no chunk dir, no FS staging dir, no data.bin or data.tar)
+	// and no snapshot.yaml.  The pipeline should call FinalizeNode once volume data is ready.
 	NodeStateManifestsOnly
 
 	// NodeStateDone means snapshot.yaml exists and VerifyNode passes.  The

@@ -228,7 +228,7 @@ func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
 		KubeClient:   c,
 		WaitShadowVS: noopWaitShadowVS,
 		OpenExport: func(_ context.Context, _, _, _ string) (*exporter.Export, error) {
-			t.Error("OpenExport must not be called when data.img.zst already exists")
+			t.Error("OpenExport must not be called when data.bin.zst already exists")
 			return nil, errors.New("unexpected OpenExport call")
 		},
 	}

@@ -58,8 +58,7 @@ func NewEncoder(level Level) (*Encoder, error) {
 
 // EncodeStream compresses src into a single self-contained zstd stream and
 // writes it to dst. The stream carries a CRC checksum.
-// Use this for whole-file compression: one block volume → data.img.zst,
-// or one filesystem file → <file>.zst.
+// Use this for block volume chunks written into the staging directory.
 func (e *Encoder) EncodeStream(dst io.Writer, src io.Reader) error {
 	w, err := zstd.NewWriter(dst, zstd.WithEncoderCRC(true), zstd.WithEncoderLevel(e.level))
 	if err != nil {

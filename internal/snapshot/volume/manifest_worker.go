@@ -114,7 +114,7 @@ func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeD
 }
 
 // FinalizeNode computes the node integrity checksum over all current files in
-// nodeDir (manifests/*.yaml, data.img.zst, data/**/*.zst) and atomically writes
+// nodeDir (manifests/*.yaml, data.bin[.<ext>], data.tar, data/<pvc>.*) and atomically writes
 // <nodeDir>/snapshot.yaml. It must be called after all manifests and volume data
 // for the node are fully written.
 //
