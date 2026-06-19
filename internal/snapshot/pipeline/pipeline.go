@@ -33,7 +33,6 @@ import (
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
@@ -56,11 +55,6 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("pipeline: OpenExport must be set (supply SafeClient or set OpenExport directly)")
 	}
 
-	codec, err := compress.New(compress.DefaultCodecName, int(cfg.ZstdLevel))
-	if err != nil {
-		return fmt.Errorf("create block codec: %w", err)
-	}
-
 	root, err := source.BuildTree(ctx, cfg.KubeClient, cfg.Namespace, cfg.RootSnapshot)
 	if err != nil {
 		return fmt.Errorf("build snapshot tree: %w", err)
@@ -78,7 +72,7 @@ func Run(ctx context.Context, cfg Config) error {
 		task := t
 
 		g.Go(func() error {
-			return processNode(gctx, cfg, codec, task)
+			return processNode(gctx, cfg, task)
 		})
 	}
 
@@ -142,7 +136,7 @@ func collectDFS(node *source.Node, plan archive.NodeResumePlan, tasks *[]nodeTas
 // Snapshot nodes with OwnDataRefs download their own volume data directly into
 // the node directory (flat for 1 ref; multi-volume for >1). Aggregator snapshot
 // nodes (no OwnDataRefs, may have orphan leaf children) write manifests only.
-func processNode(ctx context.Context, cfg Config, codec compress.Codec, task nodeTask) error {
+func processNode(ctx context.Context, cfg Config, task nodeTask) error {
 	if task.state == archive.NodeStateDone {
 		cfg.Log.Info("node already complete, skipping",
 			slog.String("kind", task.node.Kind),
@@ -152,7 +146,7 @@ func processNode(ctx context.Context, cfg Config, codec compress.Codec, task nod
 	}
 
 	if task.node.Binding != nil {
-		return processVolumeNode(ctx, cfg, codec, task)
+		return processVolumeNode(ctx, cfg, task)
 	}
 
 	// Snapshot node: ensure subdirs, write manifests, then download own data if present.
@@ -166,7 +160,7 @@ func processNode(ctx context.Context, cfg Config, codec compress.Codec, task nod
 	}
 
 	if len(task.node.OwnDataRefs) > 0 {
-		if err := downloadOwnDataRefs(ctx, cfg, codec, task.node, task.nodeDir); err != nil {
+		if err := downloadOwnDataRefs(ctx, cfg, task.node, task.nodeDir); err != nil {
 			return fmt.Errorf("download own volumes for %s/%s: %w", task.node.Kind, task.node.Name, err)
 		}
 	}
@@ -186,7 +180,7 @@ func processNode(ctx context.Context, cfg Config, codec compress.Codec, task nod
 // It writes the captured PVC manifest, applies the block-resume guard, downloads
 // the volume data, and finalizes the node directory.
 // Volume nodes are always leaves: no snapshots/ subdirectory is created.
-func processVolumeNode(ctx context.Context, cfg Config, codec compress.Codec, task nodeTask) error {
+func processVolumeNode(ctx context.Context, cfg Config, task nodeTask) error {
 	if err := ensureNodeSubdirs(task.nodeDir, false); err != nil {
 		return fmt.Errorf("ensure subdirs for %s/%s: %w", task.node.Kind, task.node.Name, err)
 	}
@@ -207,7 +201,7 @@ func processVolumeNode(ctx context.Context, cfg Config, codec compress.Codec, ta
 	}
 
 	if !blockAlreadyMerged {
-		if err := downloadVolumeBinding(ctx, cfg, codec, task.node.Binding, task.node.Namespace, task.nodeDir, flatDest(task.nodeDir, codec.Ext())); err != nil {
+		if err := downloadVolumeBinding(ctx, cfg, task.node.Binding, task.node.Namespace, task.nodeDir, flatDest(task.nodeDir, cfg.Compression.Ext())); err != nil {
 			return fmt.Errorf("download volume for %s/%s: %w", task.node.Kind, task.node.Name, err)
 		}
 	}
@@ -234,7 +228,6 @@ func processVolumeNode(ctx context.Context, cfg Config, codec compress.Codec, ta
 func downloadOwnDataRefs(
 	ctx context.Context,
 	cfg Config,
-	codec compress.Codec,
 	node *source.Node,
 	nodeDir string,
 ) error {
@@ -255,14 +248,14 @@ func downloadOwnDataRefs(
 			return nil
 		}
 
-		return downloadVolumeBinding(ctx, cfg, codec, &refs[0], node.Namespace, nodeDir, flatDest(nodeDir, codec.Ext()))
+		return downloadVolumeBinding(ctx, cfg, &refs[0], node.Namespace, nodeDir, flatDest(nodeDir, cfg.Compression.Ext()))
 	}
 
 	// Multi-volume layout: one shadow pair + DataExport per binding.
 	for i := range refs {
 		ref := &refs[i]
 		pvc := ref.Target.Name
-		dest := multiDest(nodeDir, pvc, codec.Ext())
+		dest := multiDest(nodeDir, pvc, cfg.Compression.Ext())
 
 		_, statErr := os.Stat(dest.blockPath)
 		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
@@ -276,7 +269,7 @@ func downloadOwnDataRefs(
 			continue
 		}
 
-		if err := downloadVolumeBinding(ctx, cfg, codec, ref, node.Namespace, nodeDir, dest); err != nil {
+		if err := downloadVolumeBinding(ctx, cfg, ref, node.Namespace, nodeDir, dest); err != nil {
 			return fmt.Errorf("download volume for pvc %s: %w", pvc, err)
 		}
 	}
@@ -346,7 +339,6 @@ func multiDest(nodeDir, pvc, ext string) volumeDestPaths {
 func downloadVolumeBinding(
 	ctx context.Context,
 	cfg Config,
-	codec compress.Codec,
 	binding *snapshotapi.SnapshotDataBinding,
 	namespace string,
 	nodeDir string,
@@ -409,7 +401,7 @@ func downloadVolumeBinding(
 
 	switch exp.VolumeMode() {
 	case "Block":
-		return downloadBlock(ctx, cfg, codec, dest, exp)
+		return downloadBlock(ctx, cfg, dest, exp)
 	case "Filesystem":
 		return downloadFS(ctx, cfg, dest.fsTarPath, dest.fsTarStagingDir, exp)
 	default:
@@ -417,7 +409,7 @@ func downloadVolumeBinding(
 	}
 }
 
-func downloadBlock(ctx context.Context, cfg Config, codec compress.Codec, dest volumeDestPaths, exp *exporter.Export) error {
+func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *exporter.Export) error {
 	blockURL, err := exporter.BlockURL(exp.BaseURL())
 	if err != nil {
 		return fmt.Errorf("build block URL: %w", err)
@@ -428,11 +420,11 @@ func downloadBlock(ctx context.Context, cfg Config, codec compress.Codec, dest v
 		return fmt.Errorf("HEAD block volume: %w", err)
 	}
 
-	if err := volume.DownloadBlockChunks(ctx, cfg.Log, dest.chunkDir, blockURL, totalSize, cfg.ChunkSize, cfg.PerVolumeConcurrency, exp.Fetcher(), codec); err != nil {
+	if err := volume.DownloadBlockChunks(ctx, cfg.Log, dest.chunkDir, blockURL, totalSize, cfg.ChunkSize, cfg.PerVolumeConcurrency, exp.Fetcher(), cfg.Compression); err != nil {
 		return fmt.Errorf("download block chunks: %w", err)
 	}
 
-	return volume.MergeBlockChunks(dest.chunkDir, dest.blockPath, totalSize, cfg.ChunkSize, codec.Ext())
+	return volume.MergeBlockChunks(dest.chunkDir, dest.blockPath, totalSize, cfg.ChunkSize, cfg.Compression.Ext())
 }
 
 func downloadFS(ctx context.Context, cfg Config, tarPath, stagingDir string, exp *exporter.Export) error {
