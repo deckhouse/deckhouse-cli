@@ -43,7 +43,9 @@ type TarEntry struct {
 	UID int
 	// GID is the owner group ID; zero is used as-is.
 	GID int
-	// Mtime is the modification time; zero value writes epoch 0 as the mtime.
+	// Mtime is the modification time. A zero value is normalized to Unix epoch 0
+	// (time.Unix(0,0).UTC()) before writing the tar header, so the output is
+	// deterministic and does not depend on how archive/tar handles time.Time{}.
 	Mtime time.Time
 	// Linkname is the symlink target; only meaningful for "link" entries.
 	Linkname string
@@ -105,6 +107,18 @@ func writeEntry(tw *tar.Writer, stagingDir string, e TarEntry) error {
 	}
 }
 
+// normalizeMtime returns t unchanged when non-zero, and time.Unix(0,0).UTC()
+// when t is the zero value. This ensures the PAX mtime extension is always
+// written with a defined value rather than relying on archive/tar's handling
+// of time.Time{} (year 0001).
+func normalizeMtime(t time.Time) time.Time {
+	if t.IsZero() {
+		return time.Unix(0, 0).UTC()
+	}
+
+	return t
+}
+
 func writeFileEntry(tw *tar.Writer, stagingDir string, e TarEntry) error {
 	mode := e.Mode
 	if mode == 0 {
@@ -132,7 +146,7 @@ func writeFileEntry(tw *tar.Writer, stagingDir string, e TarEntry) error {
 		Mode:     int64(mode.Perm()),
 		Uid:      e.UID,
 		Gid:      e.GID,
-		ModTime:  e.Mtime,
+		ModTime:  normalizeMtime(e.Mtime),
 		Size:     info.Size(),
 	}
 
@@ -165,7 +179,7 @@ func writeDirEntry(tw *tar.Writer, e TarEntry) error {
 		Mode:     int64(mode.Perm()),
 		Uid:      e.UID,
 		Gid:      e.GID,
-		ModTime:  e.Mtime,
+		ModTime:  normalizeMtime(e.Mtime),
 	}
 
 	if err := tw.WriteHeader(hdr); err != nil {
@@ -189,7 +203,7 @@ func writeLinkEntry(tw *tar.Writer, e TarEntry) error {
 		Mode:     int64(mode.Perm()),
 		Uid:      e.UID,
 		Gid:      e.GID,
-		ModTime:  e.Mtime,
+		ModTime:  normalizeMtime(e.Mtime),
 	}
 
 	if err := tw.WriteHeader(hdr); err != nil {
