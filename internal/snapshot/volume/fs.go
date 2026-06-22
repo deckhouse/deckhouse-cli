@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -291,8 +292,16 @@ func stageCompressedFile(
 }
 
 // parseItemAttrs extracts file metadata from the data-exporter listing attributes map.
-// Missing or unrecognised attribute values produce zero values (sensible defaults
-// are applied by WriteTar: 0644 for files, 0755 for dirs, 0777 for links).
+// The real data-exporter (storage-volume-data-manager, images/data-exporter,
+// prepareAttributesStat) emits these keys and types:
+//   - "permissions": octal string via fmt.Sprintf("%#o", perm), e.g. "0644"
+//   - "modtime":     RFC3339 string (time.RFC3339)
+//   - "uid", "gid": JSON numbers (decoded as float64 by encoding/json)
+//   - "size":        JSON number (files only; not consumed here)
+//   - "hash.md5":    optional hex string; not consumed here
+//
+// Missing or unrecognised attribute values produce zero values; sensible defaults
+// are applied by WriteTar: 0644 for files, 0755 for dirs, 0777 for links.
 func parseItemAttrs(attrs map[string]any) (fs.FileMode, int, int, time.Time) {
 	var mode fs.FileMode
 
@@ -300,9 +309,16 @@ func parseItemAttrs(attrs map[string]any) (fs.FileMode, int, int, time.Time) {
 
 	var mtime time.Time
 
-	if v, ok := attrs["mode"]; ok {
-		if n, ok := v.(float64); ok {
-			mode = fs.FileMode(uint32(n))
+	// "permissions" is an octal string, e.g. "0644". Accept float64 as a
+	// forward-compat fallback for hypothetical future numeric encoding.
+	if v, ok := attrs["permissions"]; ok {
+		switch p := v.(type) {
+		case string:
+			if n, parseErr := strconv.ParseUint(p, 8, 32); parseErr == nil {
+				mode = fs.FileMode(n)
+			}
+		case float64:
+			mode = fs.FileMode(uint32(p))
 		}
 	}
 
@@ -318,15 +334,14 @@ func parseItemAttrs(attrs map[string]any) (fs.FileMode, int, int, time.Time) {
 		}
 	}
 
-	if v, ok := attrs["mtime"]; ok {
-		switch n := v.(type) {
-		case float64:
-			sec := int64(n)
-			nsec := int64((n - float64(sec)) * 1e9)
-			mtime = time.Unix(sec, nsec)
-		case string:
-			if parsed, parseErr := time.Parse(time.RFC3339Nano, n); parseErr == nil {
-				mtime = parsed
+	// "modtime" is an RFC3339 string. Accept RFC3339Nano as a fallback for
+	// sub-second precision if the exporter ever emits it.
+	if v, ok := attrs["modtime"]; ok {
+		if s, ok := v.(string); ok {
+			if t, parseErr := time.Parse(time.RFC3339, s); parseErr == nil {
+				mtime = t
+			} else if t, parseErr := time.Parse(time.RFC3339Nano, s); parseErr == nil {
+				mtime = t
 			}
 		}
 	}
