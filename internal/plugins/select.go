@@ -19,7 +19,6 @@ package plugins
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sort"
 	"strings"
 
@@ -119,13 +118,10 @@ func (m *Manager) selectCompatible(
 
 		contract, err := m.PluginContract(ctx, pluginName, version.Original())
 		if err != nil {
-			// GetPluginContract has no typed not-found, so a transient registry error
-			// is indistinguishable from "no contract"; both demote to an older version.
-			m.logger.Warn("skipping version: contract unavailable",
-				slog.String("plugin", pluginName), slog.String("version", version.Original()), slog.String("error", err.Error()))
-			rejected = append(rejected, rejectedCandidate{version.Original(), &unsatisfiableReason{kind: reasonContractUnavailable, detail: "contract unavailable"}})
-
-			continue
+			// A missing contract is not an error - GetPluginContract returns name+version
+			// for a contract-less image. So any error here is operational (registry/proxy
+			// unreachable): hard stop, never silently demote to an older version.
+			return nil, nil, err
 		}
 
 		compatible, reason, err := m.clusterCompatible(ctx, contract)

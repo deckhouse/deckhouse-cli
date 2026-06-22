@@ -40,11 +40,15 @@ the plugin routes are `/v1/images/deckhouse-cli/plugins/<name>/...`.
 
 ## What a plugin image contains
 
-- `plugin` - the executable;
-- `contract.yaml` - the contract: name, version, description, requested env
-  vars, flags, and `requirements` (Kubernetes / Deckhouse / modules / plugins).
+- `plugin` - the executable, in the image layers;
+- the contract - name, version, description, requested env vars, flags, and
+  `requirements` (Kubernetes / Deckhouse / modules / plugins) - published as a
+  base64-JSON `contract` annotation on the image manifest.
 
-The RPP source reads the `contract.yaml` file from the image tar.
+The RPP source fetches the raw image manifest over the proxy `manifests/<ref>`
+route (a single manifest fetch, no layer pull) and reads the contract from its
+base64-JSON `contract` annotation itself. The binary is pulled separately (full
+image, over the `images/<version>` route) only when a plugin is installed.
 
 ## On-disk layout
 

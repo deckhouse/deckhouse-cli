@@ -18,6 +18,8 @@ package plugins
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 
@@ -30,22 +32,25 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
-const (
-	// pluginBinaryEntryName is the file inside a plugin image that holds the
-	// executable.
-	pluginBinaryEntryName = "plugin"
+// pluginBinaryEntryName is the file inside a plugin image that holds the executable.
+const pluginBinaryEntryName = "plugin"
 
-	// pluginContractEntryName is the file inside a plugin image that holds the
-	// contract. The proxy serves the image as a tar (not via OCI annotations), so
-	// the contract travels as a file. Confirmed against the plugin build CI
-	// (d8-package-plugin: a scratch image with /plugin and /contract.yaml). A
-	// missing contract is still tolerated for older / contract-less images.
-	pluginContractEntryName = "contract.yaml"
+// contractAnnotation is the manifest annotation key that carries the plugin
+// contract as base64-encoded JSON.
+const contractAnnotation = "contract"
 
-	// maxContractBytes caps the contract read so a malformed image cannot exhaust
-	// memory; real contracts are a few KiB.
-	maxContractBytes = 1 << 20
-)
+// imageManifest is the subset of an OCI/Docker image manifest or index the CLI
+// reads: the top-level annotations (where the plugin contract lives) and, for an
+// index, the child descriptors so it can follow one when the index itself carries
+// no contract.
+type imageManifest struct {
+	Annotations map[string]string    `json:"annotations,omitempty"`
+	Manifests   []manifestDescriptor `json:"manifests,omitempty"`
+}
+
+type manifestDescriptor struct {
+	Digest string `json:"digest"`
+}
 
 // rppPluginSource adapts the registry-packages-proxy client to pluginSource.
 type rppPluginSource struct {
@@ -74,31 +79,74 @@ func (s *rppPluginSource) GetPluginContract(ctx context.Context, pluginName, tag
 		return nil, err
 	}
 
-	// The proxy serves no manifest/annotations, so reading the contract needs a
-	// full image pull; an install therefore pulls the image twice (here and in
-	// ExtractPlugin). Plugin images are small, so this is acceptable for now.
-	body, err := s.client.PullImage(ctx, ref, tag)
+	// The contract is a manifest annotation, so a manifest fetch is enough - no
+	// image/layer pull. The proxy returns the raw manifest; the contract key and its
+	// base64 encoding are CLI knowledge, decoded here. The binary still needs a full
+	// pull in ExtractPlugin.
+	encoded, err := s.contractAnnotation(ctx, ref, tag)
 	if err != nil {
 		return nil, err
 	}
 
-	defer func() { _ = body.Close() }()
-
-	raw, found, err := rpp.ReadFile(body, pluginContractEntryName, maxContractBytes)
-	if err != nil {
-		return nil, fmt.Errorf("read contract for plugin %q: %w", pluginName, err)
-	}
-
-	if !found {
-		// Plugin images do not carry a contract yet, so surface just name+version:
-		// install can proceed and the cluster/plugin requirement checks have nothing
-		// to enforce.
-		s.logger.Debug("plugin image has no contract file", slog.String("plugin", pluginName), slog.String("tag", tag))
+	if encoded == "" {
+		// No contract annotation anywhere: surface just name+version. Install can
+		// proceed and the cluster/plugin requirement checks have nothing to enforce.
+		s.logger.Debug("plugin image has no contract annotation", slog.String("plugin", pluginName), slog.String("tag", tag))
 
 		return &internal.Plugin{Name: pluginName, Version: tag}, nil
 	}
 
-	return contractFromBytes(raw, pluginName, tag)
+	contract, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		// A present but malformed annotation is a publishing bug, not a contract-less
+		// plugin - surface it rather than silently degrading to name+version.
+		return nil, fmt.Errorf("decode contract annotation for plugin %q: %w", pluginName, err)
+	}
+
+	return contractFromBytes(contract, pluginName, tag)
+}
+
+// contractAnnotation returns the base64 "contract" annotation for ref:tag, or ""
+// when absent. A multi-platform tag points at an index; the contract is platform-
+// independent, so it may sit on the index or on its (identical) child manifests.
+// When the index carries none, the first child is followed - one extra manifest
+// fetch, still no layer pull.
+func (s *rppPluginSource) contractAnnotation(ctx context.Context, ref rpp.ImageRef, tag string) (string, error) {
+	man, err := s.fetchManifest(ctx, ref, tag)
+	if err != nil {
+		return "", err
+	}
+
+	if encoded := man.Annotations[contractAnnotation]; encoded != "" {
+		return encoded, nil
+	}
+
+	if len(man.Manifests) == 0 {
+		return "", nil
+	}
+
+	child, err := s.fetchManifest(ctx, ref, man.Manifests[0].Digest)
+	if err != nil {
+		return "", err
+	}
+
+	return child.Annotations[contractAnnotation], nil
+}
+
+// fetchManifest fetches and decodes the raw manifest for ref addressed by refOrDigest
+// (a tag or a child digest).
+func (s *rppPluginSource) fetchManifest(ctx context.Context, ref rpp.ImageRef, refOrDigest string) (imageManifest, error) {
+	raw, err := s.client.GetManifest(ctx, ref, refOrDigest)
+	if err != nil {
+		return imageManifest{}, fmt.Errorf("get manifest for plugin %q: %w", ref.String(), err)
+	}
+
+	var man imageManifest
+	if err := json.Unmarshal(raw, &man); err != nil {
+		return imageManifest{}, fmt.Errorf("decode manifest for plugin %q: %w", ref.String(), err)
+	}
+
+	return man, nil
 }
 
 func (s *rppPluginSource) ExtractPlugin(ctx context.Context, pluginName, tag, destination string) error {
@@ -121,10 +169,11 @@ func (s *rppPluginSource) ExtractPlugin(ctx context.Context, pluginName, tag, de
 	return nil
 }
 
-// contractFromBytes decodes a contract file, backfilling identity from the request
-// so a present-but-degenerate contract still yields a usable name/version.
+// contractFromBytes decodes a contract, backfilling identity from the request so a
+// present-but-degenerate contract still yields a usable name/version.
 func contractFromBytes(raw []byte, pluginName, tag string) (*internal.Plugin, error) {
-	// The contract file is YAML (contract.yaml); the shared decoder expects JSON.
+	// The decoded annotation is JSON; YAMLToJSON is a tolerant pass-through (valid
+	// JSON is valid YAML) and the shared decoder expects JSON.
 	jsonRaw, err := yaml.YAMLToJSON(raw)
 	if err != nil {
 		return nil, fmt.Errorf("decode contract for plugin %q: %w", pluginName, err)

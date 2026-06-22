@@ -29,14 +29,14 @@ limitations under the License.
 // # What d8-cli can do with plugins
 //
 //   - Download them.
-//   - Validate their dependencies (requirements declared in contract.yaml that plugins declare).
+//   - Validate their dependencies (requirements the plugin declares in its contract).
 //   - Run them as if they were native subcommands.
 //
 // # Where a plugin lives
 //
 // A plugin lives in the cluster's OCI registry, reached exclusively through the
-// in-cluster registry-packages-proxy. The image carries the plugin binary and a
-// contract.yaml file that describes the plugin:
+// in-cluster registry-packages-proxy. The image carries the plugin binary in its
+// layers and a contract, published as a manifest annotation, that describes the plugin:
 //
 //   - name;
 //   - version;

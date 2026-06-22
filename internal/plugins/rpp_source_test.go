@@ -21,6 +21,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -96,10 +99,45 @@ func TestRppSourceExtractPlugin(t *testing.T) {
 	assert.NotZero(t, info.Mode()&0o100, "extracted binary must be executable")
 }
 
-func TestRppSourceGetPluginContractBackfillsIdentity(t *testing.T) {
-	src := newTestRppSource(t, gzipTar(t, map[string]tarFile{
-		pluginContractEntryName: {content: `{}`, mode: 0o644},
+// newTestRppManifestSource serves the /manifests route, returning the given status
+// and (for 200) a raw manifest body. The contract tests read the contract from the
+// manifest annotation rather than pulling the image.
+func newTestRppManifestSource(t *testing.T, status int, manifestJSON string) *rppPluginSource {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/images/deckhouse-cli/plugins/stronghold/manifests/v1.0.0", r.URL.Path)
+
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		_, _ = io.WriteString(w, manifestJSON)
 	}))
+	t.Cleanup(srv.Close)
+
+	client := rpp.NewWithHTTPClient(srv.URL, srv.Client(), dkplog.NewNop())
+
+	return newRppPluginSource(client, dkplog.NewNop())
+}
+
+// manifestWithContract renders a minimal manifest carrying contractJSON as the
+// base64-encoded "contract" annotation - the exact shape the CLI decodes.
+func manifestWithContract(t *testing.T, contractJSON string) string {
+	t.Helper()
+
+	encoded := base64.StdEncoding.EncodeToString([]byte(contractJSON))
+	raw, err := json.Marshal(imageManifest{Annotations: map[string]string{contractAnnotation: encoded}})
+	require.NoError(t, err)
+
+	return string(raw)
+}
+
+func TestRppSourceGetPluginContractBackfillsIdentity(t *testing.T) {
+	src := newTestRppManifestSource(t, http.StatusOK, manifestWithContract(t, `{}`))
 
 	plugin, err := src.GetPluginContract(context.Background(), "stronghold", "v1.0.0")
 	require.NoError(t, err)
@@ -108,7 +146,8 @@ func TestRppSourceGetPluginContractBackfillsIdentity(t *testing.T) {
 }
 
 func TestRppSourceGetPluginContractTolerantWhenAbsent(t *testing.T) {
-	src := newTestRppSource(t, gzipTar(t, map[string]tarFile{"plugin": {content: "BINARY", mode: 0o755}}))
+	// A manifest with no contract annotation is tolerated as name+version only.
+	src := newTestRppManifestSource(t, http.StatusOK, `{"annotations":{}}`)
 
 	plugin, err := src.GetPluginContract(context.Background(), "stronghold", "v1.0.0")
 	require.NoError(t, err)
@@ -116,15 +155,58 @@ func TestRppSourceGetPluginContractTolerantWhenAbsent(t *testing.T) {
 	assert.Equal(t, "v1.0.0", plugin.Version)
 }
 
-func TestRppSourceGetPluginContractParsesFile(t *testing.T) {
-	// The real contract ships as YAML (contract.yaml), as produced by the plugin CI.
-	contract := "name: stronghold\nversion: v1.0.0\ndescription: d\n"
-	src := newTestRppSource(t, gzipTar(t, map[string]tarFile{
-		pluginContractEntryName: {content: contract, mode: 0o644},
-	}))
+func TestRppSourceGetPluginContractParsesContract(t *testing.T) {
+	src := newTestRppManifestSource(t, http.StatusOK,
+		manifestWithContract(t, `{"name":"stronghold","version":"v1.0.0","description":"d"}`))
 
 	plugin, err := src.GetPluginContract(context.Background(), "stronghold", "v1.0.0")
 	require.NoError(t, err)
 	assert.Equal(t, "stronghold", plugin.Name)
 	assert.Equal(t, "d", plugin.Description)
+}
+
+func TestRppSourceGetPluginContractFollowsIndexToChild(t *testing.T) {
+	// Multi-platform plugin: the tag points at an index with no top-level contract;
+	// the contract lives on the child manifest. The CLI follows the first child by
+	// digest and reads it there.
+	const childDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	const indexJSON = `{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":"` + childDigest + `"}]}`
+	child := manifestWithContract(t, `{"name":"stronghold","version":"v1.0.0","description":"from-child"}`)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/images/deckhouse-cli/plugins/stronghold/manifests/v1.0.0":
+			_, _ = io.WriteString(w, indexJSON)
+		case "/v1/images/deckhouse-cli/plugins/stronghold/manifests/" + childDigest:
+			_, _ = io.WriteString(w, child)
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	src := newRppPluginSource(rpp.NewWithHTTPClient(srv.URL, srv.Client(), dkplog.NewNop()), dkplog.NewNop())
+
+	plugin, err := src.GetPluginContract(context.Background(), "stronghold", "v1.0.0")
+	require.NoError(t, err)
+	assert.Equal(t, "stronghold", plugin.Name)
+	assert.Equal(t, "from-child", plugin.Description)
+}
+
+func TestRppSourceGetPluginContractRejectsMalformedAnnotation(t *testing.T) {
+	// A present but non-base64 contract annotation is a publishing bug, not a
+	// contract-less plugin - it must surface as an error.
+	src := newTestRppManifestSource(t, http.StatusOK, `{"annotations":{"contract":"!!not-base64!!"}}`)
+
+	_, err := src.GetPluginContract(context.Background(), "stronghold", "v1.0.0")
+	require.Error(t, err)
+}
+
+func TestRppSourceGetPluginContractPropagatesError(t *testing.T) {
+	// An operational failure (5xx) must surface as an error, not a tolerated absence.
+	src := newTestRppManifestSource(t, http.StatusInternalServerError, "")
+
+	_, err := src.GetPluginContract(context.Background(), "stronghold", "v1.0.0")
+	require.Error(t, err)
 }

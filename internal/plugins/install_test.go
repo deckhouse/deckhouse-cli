@@ -306,7 +306,7 @@ func TestInstallPluginSmokeFailureRollsBack(t *testing.T) {
 	assert.True(t, os.IsNotExist(binErr), "the broken binary is removed on rollback (fresh install)")
 }
 
-func TestInstallPluginDoesNotDowngradeOnContractError(t *testing.T) {
+func TestInstallPluginHardStopsOnContractError(t *testing.T) {
 	root := t.TempDir()
 	m := testManager()
 	m.pluginDirectory = root
@@ -315,8 +315,9 @@ func TestInstallPluginDoesNotDowngradeOnContractError(t *testing.T) {
 	src := &fakeInstallSource{
 		tags: []string{"v1.2.0", "v1.3.0"},
 		contractByTag: map[string]*internal.Plugin{
-			// v1.3.0 is deliberately absent: its contract fetch fails transiently,
-			// so selection falls back to v1.2.0.
+			// v1.3.0 is deliberately absent: its contract fetch fails (operational
+			// error). That must stop selection, not silently demote to v1.2.0 - a
+			// missing contract is signalled separately (without an error).
 			"v1.2.0": {Name: "p", Version: "v1.2.0"},
 		},
 		extract: func(dest string) error {
@@ -336,14 +337,14 @@ func TestInstallPluginDoesNotDowngradeOnContractError(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.Symlink(absV1, layout.CurrentLinkPath(root, "p")))
 
-	require.NoError(t, m.InstallPlugin(context.Background(), "p"),
-		"a transient contract error on the newest tag is not an install failure")
+	require.Error(t, m.InstallPlugin(context.Background(), "p"),
+		"an operational contract error must stop selection, not silently demote")
 
-	assert.False(t, extractCalled, "the older selection must not be installed over a newer installed version")
+	assert.False(t, extractCalled, "nothing is installed when contract resolution fails")
 
 	version, err := pluginBinaryVersion(context.Background(), v1)
 	require.NoError(t, err)
-	assert.Equal(t, "1.3.0", version.String(), "the installed newer version is kept, not silently downgraded")
+	assert.Equal(t, "1.3.0", version.String(), "the installed version is left untouched")
 }
 
 func TestValidateInstalledRequirementsFailsOnUnsatisfiedDep(t *testing.T) {
