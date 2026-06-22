@@ -18,9 +18,9 @@ package download
 
 import (
 	"log/slog"
+	"strings"
 	"testing"
 
-	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 )
 
@@ -170,8 +170,23 @@ func TestNewCommand_NamespaceFlagDefault(t *testing.T) {
 		t.Fatalf("getting namespace flag: %v", err)
 	}
 
-	if ns != dataio.Namespace {
-		t.Fatalf("default namespace: got %q, want %q", ns, dataio.Namespace)
+	if ns != "" {
+		t.Fatalf("default namespace: got %q, want empty string (namespace is required)", ns)
+	}
+}
+
+func TestRun_RequiresNamespace(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	err := Run(slog.Default(), cmd, []string{"my-snap"})
+	if err == nil {
+		t.Fatal("expected error when namespace is empty, got nil")
+	}
+
+	if !strings.Contains(err.Error(), flagNamespace) {
+		t.Fatalf("expected error to mention %q, got: %v", flagNamespace, err)
 	}
 }
 

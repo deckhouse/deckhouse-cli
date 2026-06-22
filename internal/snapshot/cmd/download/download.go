@@ -30,7 +30,6 @@ import (
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/spf13/cobra"
 
-	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
@@ -78,7 +77,7 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringP(flagNamespace, "n", dataio.Namespace, "snapshot namespace")
+	cmd.Flags().StringP(flagNamespace, "n", "", "snapshot namespace (required)")
 	cmd.Flags().StringP(flagOutput, "o", "", "root output directory (required)")
 	cmd.Flags().String(flagTTL, "2h", "DataExport TTL (e.g. 2h, 30m)")
 	cmd.Flags().Int(flagWorkers, 4, "maximum number of nodes downloaded concurrently")
@@ -107,6 +106,10 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	namespace, err := cmd.Flags().GetString(flagNamespace)
 	if err != nil {
 		return fmt.Errorf("reading --%s flag: %w", flagNamespace, err)
+	}
+
+	if namespace == "" {
+		return fmt.Errorf("--%s is required", flagNamespace)
 	}
 
 	snapshotName := args[0]
