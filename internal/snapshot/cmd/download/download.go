@@ -43,6 +43,7 @@ const (
 
 	flagNamespace              = "namespace"
 	flagOutput                 = "output"
+	flagNode                   = "node"
 	flagTTL                    = "ttl"
 	flagWorkers                = "workers"
 	flagPerVolumeConcurrency   = "per-volume-concurrency"
@@ -70,6 +71,12 @@ func NewCommand(log *slog.Logger) *cobra.Command {
   # Download block volumes without compression
   d8 snapshot download my-snap -n default -o out --volume-compression none
 
+  # Download only a single node (disk snapshot) and its subtree
+  d8 snapshot download my-snap -n default -o out --node DemoVirtualDiskSnapshot/nss-child-abc123
+
+  # Download only the root snapshot (equivalent to a full download)
+  d8 snapshot download my-snap -n default -o out --node Snapshot/my-snap
+
   # Note: filesystem volumes always produce data.tar regardless of --volume-compression`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -79,6 +86,7 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "snapshot namespace (required)")
 	cmd.Flags().StringP(flagOutput, "o", "", "root output directory (required)")
+	cmd.Flags().String(flagNode, "", "restrict download to a single node subtree; format '<Kind>/<name>' (e.g. --node DemoVirtualDiskSnapshot/nss-child-abc, --node Snapshot/my-snap)")
 	cmd.Flags().String(flagTTL, "2h", "DataExport TTL (e.g. 2h, 30m)")
 	cmd.Flags().Int(flagWorkers, 4, "maximum number of nodes downloaded concurrently")
 	cmd.Flags().Int(flagPerVolumeConcurrency, 4, "maximum parallel chunk/file downloads per volume")
@@ -169,6 +177,16 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 			flagVolumeCompression, codecName, strings.Join(compress.Names(), ", "), err)
 	}
 
+	nodeFlag, err := cmd.Flags().GetString(flagNode)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagNode, err)
+	}
+
+	selectedKind, selectedName, err := parseNodeFlag(nodeFlag)
+	if err != nil {
+		return fmt.Errorf("invalid --%s %q: %w", flagNode, nodeFlag, err)
+	}
+
 	safeClient.SupportNoAuth = false
 
 	sc, err := safeClient.NewSafeClient(cmd.PersistentFlags())
@@ -196,6 +214,8 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		Compression:          codec,
 		KubeClient:           kubeClient,
 		SafeClient:           sc,
+		SelectedNodeKind:     selectedKind,
+		SelectedNodeName:     selectedName,
 		Log:                  log,
 	}
 
@@ -212,6 +232,37 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	log.Info("snapshot download complete", slog.String("output_dir", outputDir))
 
 	return nil
+}
+
+// parseNodeFlag parses a --node flag value "<Kind>/<name>" into its components.
+// An empty string returns empty strings and no error (full-tree download).
+// The value must contain exactly one "/" with a non-empty kind and name on each side.
+func parseNodeFlag(s string) (string, string, error) {
+	if s == "" {
+		return "", "", nil
+	}
+
+	idx := strings.IndexByte(s, '/')
+	if idx < 0 {
+		return "", "", fmt.Errorf("expected format '<Kind>/<name>', got %q: missing '/'", s)
+	}
+
+	kind := s[:idx]
+	name := s[idx+1:]
+
+	if kind == "" {
+		return "", "", fmt.Errorf("kind must not be empty in %q", s)
+	}
+
+	if name == "" {
+		return "", "", fmt.Errorf("name must not be empty in %q", s)
+	}
+
+	if strings.Contains(name, "/") {
+		return "", "", fmt.Errorf("name must not contain '/' in %q; expected exactly one '/'", s)
+	}
+
+	return kind, name, nil
 }
 
 // parseChunkSize converts a human-readable size string (e.g. "256Mi", "128M")
