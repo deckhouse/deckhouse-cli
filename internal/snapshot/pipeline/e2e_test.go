@@ -197,9 +197,11 @@ func TestPipeline_E2E_FullTree(t *testing.T) {
 		"disk-fs must not have a snapshots/ subdir (no children)")
 
 	for _, f := range fsFiles {
-		got, tarErr := readTarEntry(t, fsTarPath, f.rel)
-		require.NoError(t, tarErr, "disk-fs tar read %s", f.rel)
-		require.Equal(t, f.content, got, "disk-fs file %s content mismatch", f.rel)
+		// Per-file-compressed model: entries named <relPath>.zst (default zstd codec).
+		entryName := f.rel + ".zst"
+		compressed, tarErr := readTarEntry(t, fsTarPath, entryName)
+		require.NoError(t, tarErr, "disk-fs tar must have entry %s", entryName)
+		require.Equal(t, f.content, e2eDecodeZstdBytes(t, compressed), "disk-fs file %s content mismatch", f.rel)
 	}
 
 	// ── Resume: second run must be a no-op ────────────────────────────────────
@@ -245,6 +247,21 @@ func e2eDecodeZstdFile(t *testing.T, path string) []byte {
 
 	out, err := io.ReadAll(dec)
 	require.NoError(t, err, "decode zstd for %s", path)
+
+	return out
+}
+
+// e2eDecodeZstdBytes decompresses a zstd-encoded byte slice.
+func e2eDecodeZstdBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	dec, err := zstd.NewReader(bytes.NewReader(data))
+	require.NoError(t, err, "zstd.NewReader")
+
+	defer dec.Close()
+
+	out, err := io.ReadAll(dec)
+	require.NoError(t, err, "decode zstd bytes")
 
 	return out
 }
@@ -752,9 +769,11 @@ func TestPipeline_E2E_MultiVolume(t *testing.T) {
 	require.NoError(t, err, "multi-disk fs volume data/<pvc>.tar must exist")
 
 	for _, f := range fsFiles {
-		got, tarErr := readTarEntry(t, fsVolTar, f.rel)
-		require.NoError(t, tarErr, "multi-disk fs tar read %s", f.rel)
-		require.Equal(t, f.content, got, "multi-disk fs file %s content mismatch", f.rel)
+		// Per-file-compressed model: entries named <relPath>.zst (default zstd codec).
+		entryName := f.rel + ".zst"
+		compressed, tarErr := readTarEntry(t, fsVolTar, entryName)
+		require.NoError(t, tarErr, "multi-disk fs tar must have entry %s", entryName)
+		require.Equal(t, f.content, e2eDecodeZstdBytes(t, compressed), "multi-disk fs file %s content mismatch", f.rel)
 	}
 
 	// snapshot.yaml must carry two Volumes entries (one per OwnDataRef).
@@ -1519,4 +1538,66 @@ func decodeGzipBlock(t *testing.T, data []byte) []byte {
 	}
 
 	return buf.Bytes()
+}
+
+// TestPipeline_E2E_FSNoneCodecEntries verifies that when codec=none is selected,
+// data.tar file entries carry plain names (no extension suffix) and uncompressed bytes.
+// This complements TestPipeline_E2E_FullTree (which uses the default zstd codec).
+func TestPipeline_E2E_FSNoneCodecEntries(t *testing.T) {
+	fsFiles := []fsE2EFile{
+		{rel: "alpha.txt", content: []byte("hello-alpha")},
+		{rel: "subdir/beta.txt", content: []byte("hello-beta")},
+	}
+
+	blockSrv := makeE2EBlockServer(t, bytes.Repeat([]byte("Z"), e2eBlockSize))
+	fsSrv := makeE2EFSServer(t, fsFiles)
+
+	c := buildE2EFakeClient(t)
+	outputDir := t.TempDir()
+
+	blockShadow := exporter.ShadowName(e2eBlockVSC)
+	fsShadow := exporter.ShadowName(e2eFSVSC)
+
+	noneCodec, err := compress.New("none", 0)
+	require.NoError(t, err)
+
+	cfg := pipeline.Config{
+		Namespace:            e2eNS,
+		RootSnapshot:         e2eRootSnap,
+		OutputDir:            outputDir,
+		Workers:              2,
+		PerVolumeConcurrency: 2,
+		KubeClient:           c,
+		Compression:          noneCodec,
+		WaitShadowVS:         noopWaitShadowVS,
+		OpenExport: func(_ context.Context, namespace, shadowVSName, _ string) (*exporter.Export, error) {
+			switch shadowVSName {
+			case blockShadow:
+				return exporter.NewExport(namespace, "de-block-none", "Block", blockSrv.URL, exporter.NewFetcher(blockSrv.Client())), nil
+			case fsShadow:
+				return exporter.NewExport(namespace, "de-fs-none", "Filesystem", fsSrv.URL, exporter.NewFetcher(fsSrv.Client())), nil
+			default:
+				return nil, fmt.Errorf("e2e-none: unknown shadow VS %q", shadowVSName)
+			}
+		},
+	}
+
+	require.NoError(t, pipeline.Run(context.Background(), cfg))
+
+	// Locate the FS node directory.
+	vmDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(e2eVMKind, e2eVMSnap))
+	fsDir := filepath.Join(vmDir, archive.SnapshotsDirName,
+		archive.NodeDirName(e2eDiskKind, e2eFSDisk))
+
+	fsTarPath := filepath.Join(fsDir, archive.FsTarName)
+	_, err = os.Stat(fsTarPath)
+	require.NoError(t, err, "disk-fs data.tar must exist with none codec")
+
+	// codec=none: entries keep plain names (no extension suffix) and hold uncompressed bytes.
+	for _, f := range fsFiles {
+		got, tarErr := readTarEntry(t, fsTarPath, f.rel)
+		require.NoError(t, tarErr, "none-codec tar must have plain entry %s", f.rel)
+		require.Equal(t, f.content, got, "none-codec file %s content mismatch", f.rel)
+	}
 }

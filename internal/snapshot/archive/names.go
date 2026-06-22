@@ -43,7 +43,8 @@ const (
 	DataBlockBase = "data.bin"
 
 	// FsTarName is the output filename for a single-volume filesystem volume.
-	// The content is a plain uncompressed PAX tar.
+	// The tar container is uncompressed; each file entry inside is individually
+	// compressed with the selected codec and named <path><ext> (ext empty for none).
 	FsTarName = "data.tar"
 
 	// FsTarStagingDirName is the temporary directory that holds raw per-file downloads
