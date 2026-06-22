@@ -745,6 +745,117 @@ func TestPipeline_ShadowReadinessTimeout(t *testing.T) {
 		"shadow VSC must be deleted after timeout cleanup; got err=%v", vscErr)
 }
 
+// TestPipeline_SubtreeSelection verifies that when SelectedNodeKind/SelectedNodeName
+// identify a direct child of the root, only that node (and its descendants) is
+// downloaded. The root directory gets content-free scaffold directories (snapshots/)
+// but no snapshot.yaml or manifests/.
+//
+// Tree used by buildFakeClient:
+//
+//	outputDir/                         ← root Snapshot (scaffold only)
+//	  snapshots/
+//	    virtualdisksnapshot_disk-snap/ ← selected node (fully downloaded)
+//	      manifests/
+//	      data.bin.zst
+//	      snapshot.yaml
+func TestPipeline_SubtreeSelection(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("S"), 600)
+	srv := makeBlockServer(t, rawBlock)
+
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		WaitShadowVS:         noopWaitShadowVS,
+		SelectedNodeKind:     childKind,
+		SelectedNodeName:     diskSnapName,
+		OpenExport: func(_ context.Context, namespace, _ string, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-subtree", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	require.NoError(t, pipeline.Run(context.Background(), cfg))
+
+	// Root dir must NOT have a snapshot.yaml — it was not processed, only scaffolded.
+	_, err := os.Stat(filepath.Join(outputDir, archive.SnapshotYAMLName))
+	require.True(t, os.IsNotExist(err),
+		"root snapshot.yaml must not exist when only a subtree was selected")
+
+	// Root dir must NOT have a manifests/ directory.
+	_, err = os.Stat(filepath.Join(outputDir, archive.ManifestsDirName))
+	require.True(t, os.IsNotExist(err),
+		"root manifests/ must not exist when only a subtree was selected")
+
+	// The selected node must be fully complete at its real path.
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	assertNodeComplete(t, diskSnapDir)
+
+	// The selected node must have its block-volume data.
+	_, err = os.Stat(filepath.Join(diskSnapDir, archive.DataBlockName(".zst")))
+	require.NoError(t, err, "selected node must have data.bin.zst")
+
+	// Resume: a second run must not overwrite the completed node.
+	diskYAML := filepath.Join(diskSnapDir, archive.SnapshotYAMLName)
+	diskMod := statMtime(t, diskYAML)
+
+	time.Sleep(20 * time.Millisecond)
+
+	require.NoError(t, pipeline.Run(context.Background(), cfg))
+	require.Equal(t, diskMod, statMtime(t, diskYAML),
+		"disk-snap snapshot.yaml must not be rewritten on second run")
+}
+
+// TestPipeline_SubtreeRootSelection verifies that selecting the root node by kind
+// and name produces the same result as a full-tree download (both root and child
+// nodes are fully processed).
+func TestPipeline_SubtreeRootSelection(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("R"), 600)
+	srv := makeBlockServer(t, rawBlock)
+
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		WaitShadowVS:         noopWaitShadowVS,
+		SelectedNodeKind:     "Snapshot",
+		SelectedNodeName:     rootSnapshot,
+		OpenExport: func(_ context.Context, namespace, _ string, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-root-sel", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	require.NoError(t, pipeline.Run(context.Background(), cfg))
+
+	// Root node must be complete (same as full-tree download).
+	assertNodeComplete(t, outputDir)
+
+	// Child node must also be complete.
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	assertNodeComplete(t, diskSnapDir)
+}
+
 // makeUnstructuredSnap builds an unstructured snapshot object for kinds not
 // registered in the scheme (e.g. VirtualDiskSnapshot).
 func makeUnstructuredSnap(apiVersion, kind, namespace, name, contentName string) *unstructured.Unstructured {
