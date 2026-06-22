@@ -68,9 +68,8 @@ func NewUpdater(source Source, store *Store, logger *dkplog.Logger) *Updater {
 }
 
 // Versions returns the published release versions sorted newest-first. Tags that
-// are not valid semver are skipped (foreign platforms' suffixed tags survive the
-// source normalization as raw strings, but they parse fine and are kept - they
-// carry their suffix as a pre-release marker).
+// are not valid semver are skipped. Tags are plain version strings (one
+// multi-platform index per release); the proxy picks the platform at pull time.
 func (u *Updater) Versions(ctx context.Context) ([]*semver.Version, error) {
 	tags, err := u.source.ListTags(ctx)
 	if err != nil {

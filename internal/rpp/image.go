@@ -34,8 +34,12 @@ const (
 	// imagesPathPrefix is the proxy route prefix for CLI image operations.
 	imagesPathPrefix = "/v1/images/"
 
-	// tagsPathSegment is the route segment that lists or addresses tags.
+	// tagsPathSegment is the route segment that lists the image tags.
 	tagsPathSegment = "tags"
+
+	// imagesPathSegment is the route segment that addresses a single version's
+	// image for download (/v1/images/<image>/images/<version>).
+	imagesPathSegment = "images"
 )
 
 // pluginNamePattern is the OCI repository path-component grammar (lowercase
@@ -86,15 +90,15 @@ func (r ImageRef) tagsPath() string {
 	return imagesPathPrefix + r.path + "/" + tagsPathSegment
 }
 
-// tagPath is the route that addresses a single tag of the image. The tag is
+// imagePath is the route that downloads a single version's image. The version is
 // path-escaped as defense in depth; after validateTag this is a no-op, but it
 // keeps URL metacharacters out of the route even if validation ever loosens.
-func (r ImageRef) tagPath(tag string) string {
-	return r.tagsPath() + "/" + url.PathEscape(tag)
+func (r ImageRef) imagePath(version string) string {
+	return imagesPathPrefix + r.path + "/" + imagesPathSegment + "/" + url.PathEscape(version)
 }
 
 // validateTag rejects strings that cannot be a registry tag, so the proxy route
-// (anchored on the final /tags/<tag> segment) cannot be altered by a crafted
+// (the final version/ref path segment) cannot be altered by a crafted
 // --version value (slashes, ?, #, leading dots).
 func validateTag(tag string) error {
 	if tag == "" {

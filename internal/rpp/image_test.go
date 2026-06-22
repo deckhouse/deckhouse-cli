@@ -28,7 +28,7 @@ func TestCLIImage(t *testing.T) {
 
 	assert.Equal(t, "deckhouse-cli", ref.String())
 	assert.Equal(t, "/v1/images/deckhouse-cli/tags", ref.tagsPath())
-	assert.Equal(t, "/v1/images/deckhouse-cli/tags/v1.2.3", ref.tagPath("v1.2.3"))
+	assert.Equal(t, "/v1/images/deckhouse-cli/images/v1.2.3", ref.imagePath("v1.2.3"))
 }
 
 func TestPluginImage(t *testing.T) {
@@ -38,7 +38,7 @@ func TestPluginImage(t *testing.T) {
 
 		assert.Equal(t, "deckhouse-cli/plugins/stronghold", ref.String())
 		assert.Equal(t, "/v1/images/deckhouse-cli/plugins/stronghold/tags", ref.tagsPath())
-		assert.Equal(t, "/v1/images/deckhouse-cli/plugins/stronghold/tags/v2.0.0", ref.tagPath("v2.0.0"))
+		assert.Equal(t, "/v1/images/deckhouse-cli/plugins/stronghold/images/v2.0.0", ref.imagePath("v2.0.0"))
 	})
 
 	t.Run("empty name is rejected", func(t *testing.T) {

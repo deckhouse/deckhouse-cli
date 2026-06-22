@@ -15,11 +15,18 @@ limitations under the License.
 */
 
 // Package rpp is a client for the Deckhouse registry-packages-proxy (RPP) CLI
-// routes: GET /v1/images/<image>/tags and /v1/images/<image>/tags/<tag>.
+// routes:
+//
+//   - GET /v1/images/<image>/tags             - list available versions
+//   - GET /v1/images/<image>/images/<version> - download a version's image
 //
 // It lets deckhouse-cli list available versions of itself and its plugins and
 // download their images. All traffic goes to the in-cluster proxy and is
 // authenticated with the caller's kubeconfig identity; no separate registry
 // credentials are needed, because the proxy fetches from the backing registry
 // on the CLI's behalf.
+//
+// Pulls carry a ?platform=<os>-<arch> query (from the running binary's
+// GOOS/GOARCH) so the proxy selects the matching image from a multi-platform
+// index. A proxy too old to honor it falls back to its default platform.
 package rpp

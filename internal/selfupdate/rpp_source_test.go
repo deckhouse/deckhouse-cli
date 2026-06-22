@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -71,33 +72,22 @@ func TestVersionsSortsNewestFirstAndSkipsGarbage(t *testing.T) {
 	assert.Equal(t, []string{"v0.14.0", "v0.13.1", "v0.13.0"}, got)
 }
 
-// TestRPPSourceListTagsNormalizesPlatformTags checks that this platform's
-// "-<os>-<arch>" suffix is stripped (so the Updater can select the version),
-// while foreign-platform and bare tags pass through untouched.
-func TestRPPSourceListTagsNormalizesPlatformTags(t *testing.T) {
+// TestRPPSourceListTagsReturnsPlainVersions checks that tags pass through as plain
+// version strings - platform selection happens at pull time, not in the tag.
+func TestRPPSourceListTagsReturnsPlainVersions(t *testing.T) {
 	source := newTestRPPSource(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/images/deckhouse-cli/tags", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"name": "deckhouse-cli",
-			"tags": []string{
-				"v0.13.1",                        // legacy bare tag
-				"v0.14.0" + rpp.PlatformSuffix(), // ours -> normalized
-				"v0.14.0-windows-amd64",          // foreign -> raw passthrough
-				"v0.14.1" + rpp.PlatformSuffix(), // ours -> normalized
-				"v0.14.1",                        // bare duplicate of ours -> deduped
-			},
+			"tags": []string{"v0.13.1", "v0.14.0", "v0.14.1"},
 		})
 	})
 
 	tags, err := source.ListTags(context.Background())
 	require.NoError(t, err)
-	assert.ElementsMatch(t,
-		[]string{"v0.13.1", "v0.14.0", "v0.14.0-windows-amd64", "v0.14.1"},
-		tags,
-	)
+	assert.Equal(t, []string{"v0.13.1", "v0.14.0", "v0.14.1"}, tags)
 
-	// End to end through the Updater: the platform tag must win the selection,
-	// and the foreign platform tag must never be picked (parses as pre-release).
+	// End to end through the Updater: the newest stable version wins.
 	updater := NewUpdater(source, nil, dkplog.NewNop())
 	latest, newer, err := updater.LatestVersion(context.Background(), "v0.13.1")
 	require.NoError(t, err)
@@ -105,16 +95,17 @@ func TestRPPSourceListTagsNormalizesPlatformTags(t *testing.T) {
 	assert.Equal(t, "v0.14.1", latest)
 }
 
-// TestRPPSourceExtractPrefersPlatformTag checks that the bare version selected by
-// the Updater is resolved back to this platform's tag on download.
-func TestRPPSourceExtractPrefersPlatformTag(t *testing.T) {
+// TestRPPSourceExtractPullsTagWithPlatformQuery checks that the binary is fetched
+// by its plain tag, with the current platform carried on the ?platform= query.
+func TestRPPSourceExtractPullsTagWithPlatformQuery(t *testing.T) {
 	tarball := gzipTarWithD8(t, "PLATFORM-BINARY")
 
 	var requested []string
+	var gotPlatform string
 
 	source := newTestRPPSource(t, func(w http.ResponseWriter, r *http.Request) {
 		requested = append(requested, r.URL.Path)
-		require.Equal(t, "/v1/images/deckhouse-cli/tags/v0.14.0"+rpp.PlatformSuffix(), r.URL.Path)
+		gotPlatform = r.URL.Query().Get("platform")
 		_, _ = w.Write(tarball)
 	})
 
@@ -124,44 +115,13 @@ func TestRPPSourceExtractPrefersPlatformTag(t *testing.T) {
 	got, err := os.ReadFile(destination)
 	require.NoError(t, err)
 	assert.Equal(t, "PLATFORM-BINARY", string(got))
-	assert.Len(t, requested, 1, "the platform tag must be fetched directly, no extra round-trips")
+	assert.Equal(t, []string{"/v1/images/deckhouse-cli/images/v0.14.0"}, requested)
+	assert.Equal(t, runtime.GOOS+"-"+runtime.GOARCH, gotPlatform)
 }
 
-// TestRPPSourceExtractFallsBackToBareTag checks legacy/platform-neutral publishing:
-// when the platform tag is absent (404), the bare tag is downloaded instead.
-func TestRPPSourceExtractFallsBackToBareTag(t *testing.T) {
-	tarball := gzipTarWithD8(t, "BARE-BINARY")
-
-	var requested []string
-
-	source := newTestRPPSource(t, func(w http.ResponseWriter, r *http.Request) {
-		requested = append(requested, r.URL.Path)
-
-		if r.URL.Path == "/v1/images/deckhouse-cli/tags/v0.13.1" {
-			_, _ = w.Write(tarball)
-
-			return
-		}
-
-		http.Error(w, "not found", http.StatusNotFound)
-	})
-
-	destination := filepath.Join(t.TempDir(), "d8.new")
-	require.NoError(t, source.ExtractBinary(context.Background(), "v0.13.1", destination))
-
-	got, err := os.ReadFile(destination)
-	require.NoError(t, err)
-	assert.Equal(t, "BARE-BINARY", string(got))
-	assert.Equal(t, []string{
-		"/v1/images/deckhouse-cli/tags/v0.13.1" + rpp.PlatformSuffix(),
-		"/v1/images/deckhouse-cli/tags/v0.13.1",
-	}, requested, "platform tag tried first, bare tag second")
-}
-
-// TestRPPSourceExtractPropagatesNonNotFoundErrors checks that the fallback fires
-// only on 404: a 403 on the platform tag must surface as-is, not mask itself with
-// a second request.
-func TestRPPSourceExtractPropagatesNonNotFoundErrors(t *testing.T) {
+// TestRPPSourceExtractPropagatesErrors checks that a non-2xx from the proxy
+// surfaces as-is in a single request.
+func TestRPPSourceExtractPropagatesErrors(t *testing.T) {
 	var requests int
 
 	source := newTestRPPSource(t, func(w http.ResponseWriter, _ *http.Request) {

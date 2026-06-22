@@ -18,8 +18,6 @@ package selfupdate
 
 import (
 	"context"
-	"errors"
-	"strings"
 
 	"github.com/deckhouse/deckhouse-cli/internal/rpp"
 )
@@ -30,11 +28,9 @@ const cliBinaryEntryName = "d8"
 
 // rppSource extracts deckhouse-cli releases through the registry-packages-proxy.
 //
-// Tags may be published per platform ("v1.2.3-linux-amd64", one single-platform
-// image per tag - the same convention the plugin CI uses). The source hides that
-// from the Updater: ListTags reports such tags as their bare version, and
-// ExtractBinary resolves the bare version back to the platform tag, falling back
-// to the bare tag itself for platform-neutral/legacy publishing.
+// Releases are published as multi-platform image indexes under plain version tags
+// ("v1.2.3"). The proxy selects the current platform's image from the index when
+// PullImage sends its ?platform= query, so tags are plain versions here.
 type rppSource struct {
 	client *rpp.Client
 }
@@ -46,46 +42,17 @@ func NewRPPSource(client *rpp.Client) Source {
 	return &rppSource{client: client}
 }
 
-// ListTags returns the available release tags normalized for the current
-// platform: "v1.2.3-<os>-<arch>" of THIS platform becomes "v1.2.3", tags of other
-// platforms pass through raw (their suffix parses as a semver pre-release, so the
-// Updater never auto-selects them).
+// ListTags returns the available release tags. Tags are plain version strings;
+// the proxy selects the per-platform image at pull time (PullImage's ?platform=
+// query), so there is nothing to normalize here.
 func (s *rppSource) ListTags(ctx context.Context) ([]string, error) {
-	tags, err := s.client.ListTags(ctx, rpp.CLIImage())
-	if err != nil {
-		return nil, err
-	}
-
-	suffix := rpp.PlatformSuffix()
-	seen := make(map[string]struct{}, len(tags))
-	normalized := make([]string, 0, len(tags))
-
-	for _, tag := range tags {
-		tag = strings.TrimSuffix(tag, suffix)
-		if _, ok := seen[tag]; ok {
-			continue
-		}
-
-		seen[tag] = struct{}{}
-		normalized = append(normalized, tag)
-	}
-
-	return normalized, nil
+	return s.client.ListTags(ctx, rpp.CLIImage())
 }
 
-// ExtractBinary downloads the d8 binary for tag, preferring the per-platform tag
-// ("<tag>-<os>-<arch>") and falling back to the bare tag when the platform tag is
-// not published.
+// ExtractBinary downloads the d8 binary for tag. The proxy resolves the current
+// platform's image from the tag's multi-platform index (PullImage attaches the
+// ?platform= query).
 func (s *rppSource) ExtractBinary(ctx context.Context, tag, destination string) error {
-	err := s.extract(ctx, tag+rpp.PlatformSuffix(), destination)
-	if errors.Is(err, rpp.ErrNotFound) {
-		return s.extract(ctx, tag, destination)
-	}
-
-	return err
-}
-
-func (s *rppSource) extract(ctx context.Context, tag, destination string) error {
 	body, err := s.client.PullImage(ctx, rpp.CLIImage(), tag)
 	if err != nil {
 		return err
