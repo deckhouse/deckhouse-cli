@@ -77,7 +77,9 @@ func NewCommand(log *slog.Logger) *cobra.Command {
   # Download only the root snapshot (equivalent to a full download)
   d8 snapshot download my-snap -n default -o out --node Snapshot/my-snap
 
-  # Note: filesystem volumes always produce data.tar regardless of --volume-compression`,
+  # Note: filesystem volumes always produce data.tar (uncompressed container);
+  # file entries inside data.tar are individually compressed with the selected codec
+  # (codec=none writes plain uncompressed entries)`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(log, cmd, args)
@@ -92,7 +94,8 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 	cmd.Flags().Int(flagPerVolumeConcurrency, 4, "maximum parallel chunk/file downloads per volume")
 	cmd.Flags().String(flagChunkSize, "", "block-volume chunk size (e.g. 256Mi); defaults to 256Mi")
 	cmd.Flags().String(flagVolumeCompression, compress.DefaultCodecName,
-		"block-volume compression codec ("+strings.Join(compress.Names(), ", ")+"); filesystem volumes always write data.tar and ignore this flag")
+		"volume compression codec ("+strings.Join(compress.Names(), ", ")+
+			"); block volumes: data.bin[.<ext>]; filesystem volumes: per-file compressed entries inside an uncompressed data.tar container")
 	cmd.Flags().Int(flagVolumeCompressionLevel, 0,
 		"compression level for the selected codec (0 = codec default)")
 
