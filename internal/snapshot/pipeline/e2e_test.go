@@ -359,15 +359,15 @@ func makeE2EFSServer(t *testing.T, files []fsE2EFile) *httptest.Server {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w,
 				`{"apiVersion":"v1","items":[`+
-					`{"name":"alpha.txt","type":"file","uri":"alpha.txt","attributes":{}},`+
-					`{"name":"subdir","type":"dir","uri":"subdir/","attributes":{}}`+
+					`{"name":"alpha.txt","type":"file","uri":"alpha.txt","attributes":{"permissions":"0644","modtime":"2024-03-01T12:00:00Z","uid":0,"gid":0,"size":11}},`+
+					`{"name":"subdir","type":"dir","uri":"subdir/","attributes":{"permissions":"0755","modtime":"2024-03-01T12:00:00Z","uid":0,"gid":0}}`+
 					`]}`)
 
 		case "/api/v1/files/subdir/":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w,
 				`{"apiVersion":"v1","items":[`+
-					`{"name":"beta.txt","type":"file","uri":"subdir/beta.txt","attributes":{}}`+
+					`{"name":"beta.txt","type":"file","uri":"subdir/beta.txt","attributes":{"permissions":"0644","modtime":"2024-03-01T12:00:00Z","uid":0,"gid":0,"size":10}}`+
 					`]}`)
 
 		case "/api/v1/files/alpha.txt":

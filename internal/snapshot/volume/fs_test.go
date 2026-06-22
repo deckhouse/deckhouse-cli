@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 
@@ -395,6 +396,37 @@ func TestDownloadFilesystemVolume_StagesCompressed(t *testing.T) {
 	}
 }
 
+// readTarHeaders reads all entries from a tar file and returns a map of
+// entry name → *tar.Header so callers can assert header fields.
+func readTarHeaders(t *testing.T, tarPath string) map[string]*tar.Header {
+	t.Helper()
+
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatalf("open tar %s: %v", tarPath, err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	result := map[string]*tar.Header{}
+	tr := tar.NewReader(f)
+
+	for {
+		hdr, hdrErr := tr.Next()
+		if hdrErr == io.EOF {
+			break
+		}
+
+		if hdrErr != nil {
+			t.Fatalf("read tar header: %v", hdrErr)
+		}
+
+		result[hdr.Name] = hdr
+	}
+
+	return result
+}
+
 func TestDownloadFilesystemVolume_SkipsExistingCompressedStaged(t *testing.T) {
 	// An already-staged compressed file must not be re-downloaded.
 	// Proof: pre-stage root.txt.zst with a sentinel payload; verify that the
@@ -462,4 +494,92 @@ func TestDownloadFilesystemVolume_SkipsExistingCompressedStaged(t *testing.T) {
 	}
 
 	t.Error("tar entry root.txt.zst not found")
+}
+
+func TestDownloadFilesystemVolume_RealisticAttributes(t *testing.T) {
+	// The real data-exporter emits "permissions" (octal string) and "modtime"
+	// (RFC3339 string), not "mode"/"mtime". Verify that mode, mtime, uid, and
+	// gid are preserved in the assembled data.tar headers.
+	// A symlink with "permissions":"0750" must not get the default 0777 applied.
+	const timeStr = "2024-01-15T10:30:00Z"
+
+	wantMtime, err := time.Parse(time.RFC3339, timeStr)
+	if err != nil {
+		t.Fatalf("parse mtime: %v", err)
+	}
+
+	fileContent := []byte("hello")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w,
+				`{"apiVersion":"v1","items":[`+
+					`{"name":"file.txt","type":"file","uri":"file.txt","attributes":{"permissions":"0640","modtime":"`+timeStr+`","uid":1000,"gid":2000,"size":5}},`+
+					`{"name":"link.lnk","type":"link","uri":"","targetPath":"/target","attributes":{"permissions":"0750","modtime":"`+timeStr+`","uid":0,"gid":0}}`+
+					`]}`)
+
+		case "/files/file.txt":
+			_, _ = w.Write(fileContent)
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.Default(),
+		tarPath,
+		stagingDir,
+		srv.URL+"/files/",
+		1,
+		newFSFetcher(srv),
+		mustCodec(t, "none"),
+	); err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	headers := readTarHeaders(t, tarPath)
+
+	// File entry: mode, mtime, uid, gid must match served attributes (not defaults).
+	fileHdr, ok := headers["file.txt"]
+	if !ok {
+		t.Fatal("tar missing entry file.txt")
+	}
+
+	if fileHdr.Mode != 0o640 {
+		t.Errorf("file.txt Mode = %04o; want 0640", fileHdr.Mode)
+	}
+
+	if !fileHdr.ModTime.Equal(wantMtime) {
+		t.Errorf("file.txt ModTime = %v; want %v", fileHdr.ModTime, wantMtime)
+	}
+
+	if fileHdr.Uid != 1000 {
+		t.Errorf("file.txt Uid = %d; want 1000", fileHdr.Uid)
+	}
+
+	if fileHdr.Gid != 2000 {
+		t.Errorf("file.txt Gid = %d; want 2000", fileHdr.Gid)
+	}
+
+	// Symlink entry: "permissions":"0750" must be preserved, not replaced by the 0777 default.
+	linkHdr, ok := headers["link.lnk"]
+	if !ok {
+		t.Fatal("tar missing entry link.lnk")
+	}
+
+	if linkHdr.Mode != 0o750 {
+		t.Errorf("link.lnk Mode = %04o; want 0750", linkHdr.Mode)
+	}
 }
