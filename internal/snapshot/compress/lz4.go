@@ -19,6 +19,7 @@ package compress
 import (
 	"bytes"
 	"fmt"
+	"io"
 
 	"github.com/pierrec/lz4/v4"
 )
@@ -37,6 +38,22 @@ func newLz4Codec(level int) (Codec, error) {
 func (*lz4Codec) Name() string { return "lz4" }
 
 func (*lz4Codec) Ext() string { return ".lz4" }
+
+// EncodeStream compresses src into dst as one complete LZ4 frame.
+func (l *lz4Codec) EncodeStream(dst io.Writer, src io.Reader) error {
+	w := lz4.NewWriter(dst)
+
+	if err := w.Apply(lz4.CompressionLevelOption(l.level)); err != nil {
+		return fmt.Errorf("lz4: apply options: %w", err)
+	}
+
+	if _, err := io.Copy(w, src); err != nil {
+		_ = w.Close()
+		return fmt.Errorf("lz4: copy: %w", err)
+	}
+
+	return w.Close()
+}
 
 // EncodeFrame compresses src into one complete LZ4 frame.
 func (l *lz4Codec) EncodeFrame(src []byte) ([]byte, error) {

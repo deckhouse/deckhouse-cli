@@ -19,6 +19,7 @@ package compress
 import (
 	"bytes"
 	"fmt"
+	"io"
 
 	kgzip "github.com/klauspost/compress/gzip"
 )
@@ -41,6 +42,21 @@ func newGzipCodec(level int) (Codec, error) {
 func (*gzipCodec) Name() string { return "gzip" }
 
 func (*gzipCodec) Ext() string { return ".gz" }
+
+// EncodeStream compresses src into dst as one complete gzip stream.
+func (g *gzipCodec) EncodeStream(dst io.Writer, src io.Reader) error {
+	w, err := kgzip.NewWriterLevel(dst, g.level)
+	if err != nil {
+		return fmt.Errorf("gzip: new writer: %w", err)
+	}
+
+	if _, err := io.Copy(w, src); err != nil {
+		_ = w.Close()
+		return fmt.Errorf("gzip: copy: %w", err)
+	}
+
+	return w.Close()
+}
 
 // EncodeFrame compresses src into one complete gzip stream.
 func (g *gzipCodec) EncodeFrame(src []byte) ([]byte, error) {

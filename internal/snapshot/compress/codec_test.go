@@ -434,3 +434,116 @@ func TestCodec_Lz4EncodeFrame_ConcatenatedFrames(t *testing.T) {
 		t.Errorf("lz4 concatenated frames mismatch: len got=%d want=%d", len(got), len(plain))
 	}
 }
+
+func TestCodec_ZstdEncodeStream_RoundTrip(t *testing.T) {
+	t.Helper()
+
+	c, err := compress.New("zstd", 0)
+	if err != nil {
+		t.Fatalf("New(zstd): %v", err)
+	}
+
+	src := bytes.Repeat([]byte("hello zstd stream "), 200)
+
+	var buf bytes.Buffer
+
+	if err := c.EncodeStream(&buf, bytes.NewReader(src)); err != nil {
+		t.Fatalf("EncodeStream(zstd): %v", err)
+	}
+
+	dec, decErr := zstd.NewReader(nil)
+	if decErr != nil {
+		t.Fatalf("zstd.NewReader: %v", decErr)
+	}
+
+	defer dec.Close()
+
+	got, decErr := dec.DecodeAll(buf.Bytes(), nil)
+	if decErr != nil {
+		t.Fatalf("zstd DecodeAll: %v", decErr)
+	}
+
+	if !bytes.Equal(got, src) {
+		t.Errorf("zstd EncodeStream round-trip mismatch: len got=%d want=%d", len(got), len(src))
+	}
+}
+
+func TestCodec_GzipEncodeStream_RoundTrip(t *testing.T) {
+	t.Helper()
+
+	c, err := compress.New("gzip", 0)
+	if err != nil {
+		t.Fatalf("New(gzip): %v", err)
+	}
+
+	src := bytes.Repeat([]byte("hello gzip stream "), 200)
+
+	var buf bytes.Buffer
+
+	if err := c.EncodeStream(&buf, bytes.NewReader(src)); err != nil {
+		t.Fatalf("EncodeStream(gzip): %v", err)
+	}
+
+	r, openErr := stdgzip.NewReader(&buf)
+	if openErr != nil {
+		t.Fatalf("gzip.NewReader: %v", openErr)
+	}
+
+	defer func() { _ = r.Close() }()
+
+	got, readErr := io.ReadAll(r)
+	if readErr != nil {
+		t.Fatalf("gzip ReadAll: %v", readErr)
+	}
+
+	if !bytes.Equal(got, src) {
+		t.Errorf("gzip EncodeStream round-trip mismatch: len got=%d want=%d", len(got), len(src))
+	}
+}
+
+func TestCodec_Lz4EncodeStream_RoundTrip(t *testing.T) {
+	t.Helper()
+
+	c, err := compress.New("lz4", 0)
+	if err != nil {
+		t.Fatalf("New(lz4): %v", err)
+	}
+
+	src := bytes.Repeat([]byte("hello lz4 stream "), 200)
+
+	var buf bytes.Buffer
+
+	if err := c.EncodeStream(&buf, bytes.NewReader(src)); err != nil {
+		t.Fatalf("EncodeStream(lz4): %v", err)
+	}
+
+	got, readErr := io.ReadAll(lz4.NewReader(&buf))
+	if readErr != nil {
+		t.Fatalf("lz4 ReadAll: %v", readErr)
+	}
+
+	if !bytes.Equal(got, src) {
+		t.Errorf("lz4 EncodeStream round-trip mismatch: len got=%d want=%d", len(got), len(src))
+	}
+}
+
+func TestCodec_NoneEncodeStream_Passthrough(t *testing.T) {
+	t.Helper()
+
+	c, err := compress.New("none", 0)
+	if err != nil {
+		t.Fatalf("New(none): %v", err)
+	}
+
+	src := []byte("none stream passthrough — byte-identical")
+
+	var buf bytes.Buffer
+
+	if err := c.EncodeStream(&buf, bytes.NewReader(src)); err != nil {
+		t.Fatalf("EncodeStream(none): %v", err)
+	}
+
+	if !bytes.Equal(buf.Bytes(), src) {
+		t.Errorf("none EncodeStream passthrough mismatch: got %q want %q", buf.Bytes(), src)
+	}
+}

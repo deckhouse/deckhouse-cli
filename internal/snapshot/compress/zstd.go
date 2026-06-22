@@ -111,3 +111,7 @@ func (*zstdCodec) Ext() string { return ".zst" }
 func (z *zstdCodec) EncodeFrame(src []byte) ([]byte, error) {
 	return z.enc.EncodeFrame(src)
 }
+
+func (z *zstdCodec) EncodeStream(dst io.Writer, src io.Reader) error {
+	return z.enc.EncodeStream(dst, src)
+}
