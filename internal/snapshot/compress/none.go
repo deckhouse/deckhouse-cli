@@ -16,7 +16,11 @@ limitations under the License.
 
 package compress
 
-import "bytes"
+import (
+	"bytes"
+	"fmt"
+	"io"
+)
 
 // noneCodec passes raw bytes through without compression.
 // Ext returns "" so the output file is named data.bin with no extension suffix.
@@ -30,4 +34,14 @@ func (noneCodec) Ext() string { return "" }
 // A copy is returned so callers may not alias or mutate the input through the output.
 func (noneCodec) EncodeFrame(src []byte) ([]byte, error) {
 	return bytes.Clone(src), nil
+}
+
+// EncodeStream copies src to dst byte-for-byte (passthrough, no compression).
+func (noneCodec) EncodeStream(dst io.Writer, src io.Reader) error {
+	_, err := io.Copy(dst, src)
+	if err != nil {
+		return fmt.Errorf("none: passthrough: %w", err)
+	}
+
+	return nil
 }
