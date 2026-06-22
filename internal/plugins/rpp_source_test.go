@@ -68,7 +68,7 @@ func newTestRppSource(t *testing.T, body []byte) *rppPluginSource {
 	t.Helper()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/v1/images/deckhouse-cli/plugins/stronghold/tags/v1.0.0", r.URL.Path)
+		assert.Equal(t, "/v1/images/deckhouse-cli/plugins/stronghold/images/v1.0.0", r.URL.Path)
 
 		w.Header().Set("Content-Type", "application/x-gzip")
 		_, _ = w.Write(body)

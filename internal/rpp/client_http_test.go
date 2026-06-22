@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -73,7 +74,8 @@ func TestClientPullImage(t *testing.T) {
 
 	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodGet, r.Method)
-		assert.Equal(t, "/v1/images/deckhouse-cli/tags/v0.13.1", r.URL.Path)
+		assert.Equal(t, "/v1/images/deckhouse-cli/images/v0.13.1", r.URL.Path)
+		assert.Equal(t, runtime.GOOS+"-"+runtime.GOARCH, r.URL.Query().Get("platform"))
 
 		w.Header().Set("Content-Type", "application/x-gzip")
 		_, _ = io.WriteString(w, payload)

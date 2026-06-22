@@ -107,15 +107,15 @@ Version selection:
 - pre-releases (`rc`/`alpha`/`beta`) are installed only explicitly via
   `--version` (which also allows a downgrade).
 
-Platform tags (`rpp_source.go`):
+Platforms (`rpp_source.go`):
 
-- releases may be published per platform, one single-platform image per tag
-  (`v1.2.3-linux-amd64` - the same convention the plugin CI uses);
-- `ListTags` reports this platform's tags as their bare version (so the Updater
-  selects them) and passes other platforms' tags through raw - their suffix
-  parses as a semver pre-release and is never auto-selected;
-- `ExtractBinary` downloads `<tag>-<os>-<arch>` first and falls back to the bare
-  `<tag>` (legacy / platform-neutral publishing) on 404.
+- releases are published as multi-platform OCI image indexes under plain version
+  tags (`v1.2.3`);
+- `ListTags` returns those plain version tags as-is;
+- `ExtractBinary` pulls the plain tag; the client attaches `?platform=<os>/<arch>`
+  (see `internal/rpp`), so the proxy resolves the matching per-platform child
+  manifest from the index. The proxy must be recent enough to honor the query -
+  see [internal/rpp](../rpp).
 
 ## Switches
 
