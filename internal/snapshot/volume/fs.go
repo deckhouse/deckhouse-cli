@@ -19,7 +19,6 @@ package volume
 import (
 	"context"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/url"
@@ -30,6 +29,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 )
 
@@ -48,12 +48,13 @@ type fsItem struct {
 }
 
 // DownloadFilesystemVolume downloads all files from the data-exporter filesystem
-// volume at filesRootURL, stages them as raw bytes under stagingDir, then
-// assembles a single uncompressed PAX tar at tarPath.
+// volume at filesRootURL, stages each file as a compressed blob named
+// <relPath><codec.Ext()> under stagingDir, then assembles a single uncompressed
+// PAX tar at tarPath whose file entries carry the compressed names and bytes.
 //
 // If tarPath already exists the whole operation is skipped (resume: tar complete).
-// Already-staged files under stagingDir are not re-downloaded (partial resume).
-// The stagingDir is removed on successful tar assembly.
+// An already-staged compressed file <relPath><ext> is not re-downloaded (partial
+// resume). The stagingDir is removed on successful tar assembly.
 //
 // workers bounds the parallelism for file downloads; the first error cancels all
 // in-flight downloads.
@@ -65,6 +66,7 @@ func DownloadFilesystemVolume(
 	filesRootURL string,
 	workers int,
 	fetcher *exporter.Fetcher,
+	codec compress.Codec,
 ) error {
 	// Resume: completed tar → skip entirely.
 	if _, err := os.Stat(tarPath); err == nil {
@@ -107,7 +109,7 @@ func DownloadFilesystemVolume(
 		item := it
 
 		g.Go(func() error {
-			return stageRawFile(gctx, log, stagingDir, item, fetcher)
+			return stageCompressedFile(gctx, log, stagingDir, item, codec, fetcher)
 		})
 	}
 
@@ -115,11 +117,20 @@ func DownloadFilesystemVolume(
 		return fmt.Errorf("stage filesystem files: %w", err)
 	}
 
+	// File entries in the tar carry the compressed name <relPath><ext> so that
+	// the tar container holds the already-compressed blobs (no re-compression).
+	// Dir and link entries keep their original relPath (no extension suffix).
+	ext := codec.Ext()
 	entries := make([]TarEntry, 0, len(items))
 
 	for _, it := range items {
+		relPath := it.relPath
+		if it.itemType == "file" {
+			relPath += ext
+		}
+
 		entries = append(entries, TarEntry{
-			RelPath:  it.relPath,
+			RelPath:  relPath,
 			Type:     it.itemType,
 			Mode:     it.mode,
 			UID:      it.uid,
@@ -216,17 +227,21 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 	return result, nil
 }
 
-// stageRawFile downloads one file as raw bytes and writes it atomically to
-// stagingDir/<relPath>. Already-complete destination files are skipped.
-// Stale *.tmp files are removed before the download attempt.
-func stageRawFile(
+// stageCompressedFile downloads one file, compresses it with codec, and writes
+// the result atomically to stagingDir/<relPath><codec.Ext()>.
+// Already-complete destination files are skipped (resume).
+// Stale <destPath>.tmp files are removed before the download attempt.
+// Compression is streaming: the HTTP body is piped through codec.EncodeStream
+// so no whole-file buffering occurs.
+func stageCompressedFile(
 	ctx context.Context,
 	log *slog.Logger,
 	stagingDir string,
 	item fsItem,
+	codec compress.Codec,
 	fetcher *exporter.Fetcher,
 ) error {
-	destPath := filepath.Join(stagingDir, filepath.FromSlash(item.relPath))
+	destPath := filepath.Join(stagingDir, filepath.FromSlash(item.relPath+codec.Ext()))
 
 	if _, err := os.Stat(destPath); err == nil {
 		log.Info("staging file already present, skipping", slog.String("path", item.relPath))
@@ -260,7 +275,7 @@ func stageRawFile(
 		return fmt.Errorf("open atomic writer for %s: %w", destPath, err)
 	}
 
-	if _, err := io.Copy(aw, body); err != nil {
+	if err := codec.EncodeStream(aw, body); err != nil {
 		aw.Abort()
 
 		return fmt.Errorf("stage %s: %w", item.relPath, err)

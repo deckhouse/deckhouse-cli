@@ -28,7 +28,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
@@ -99,6 +102,18 @@ func newFSFetcher(srv *httptest.Server) *exporter.Fetcher {
 	return exporter.NewFetcher(srv.Client())
 }
 
+// mustCodec creates a compress.Codec by name or fails the test.
+func mustCodec(t *testing.T, name string) compress.Codec {
+	t.Helper()
+
+	c, err := compress.New(name, 0)
+	if err != nil {
+		t.Fatalf("compress.New(%q): %v", name, err)
+	}
+
+	return c
+}
+
 // readTarContents reads all regular-file entries from a tar file and returns a
 // map of relPath → raw bytes.
 func readTarContents(t *testing.T, tarPath string) map[string][]byte {
@@ -155,6 +170,7 @@ func TestDownloadFilesystemVolume_DownloadsTree(t *testing.T) {
 		rootURL,
 		2,
 		newFSFetcher(srv),
+		mustCodec(t, "none"),
 	)
 	if err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
@@ -203,7 +219,7 @@ func TestDownloadFilesystemVolume_SkipsIfTarExists(t *testing.T) {
 
 	rootURL := srv.URL + "/files/"
 
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv)); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), mustCodec(t, "none")); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 
@@ -237,7 +253,7 @@ func TestDownloadFilesystemVolume_CleansStaleTmp(t *testing.T) {
 
 	rootURL := srv.URL + "/files/"
 
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv)); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), mustCodec(t, "none")); err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 
@@ -260,7 +276,7 @@ func TestDownloadFilesystemVolume_LinkNotInTar(t *testing.T) {
 	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
 	rootURL := srv.URL + "/files/"
 
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv)); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), mustCodec(t, "none")); err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 
@@ -289,4 +305,161 @@ func TestDownloadFilesystemVolume_LinkNotInTar(t *testing.T) {
 			t.Error("symlink was written as a regular file entry in the tar")
 		}
 	}
+}
+
+func TestDownloadFilesystemVolume_StagesCompressed(t *testing.T) {
+	// With a non-none codec, each file is staged as <relPath><ext> containing
+	// the compressed bytes; the tar entries carry those compressed names too.
+	srv, files := fsTestServer(t)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	rootURL := srv.URL + "/files/"
+
+	codec := mustCodec(t, "zstd")
+
+	err := volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.Default(),
+		tarPath,
+		stagingDir,
+		rootURL,
+		2,
+		newFSFetcher(srv),
+		codec,
+	)
+	if err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	// The tar should have compressed entries named <relPath>.zst.
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatalf("open tar: %v", err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	dec, decErr := zstd.NewReader(nil)
+	if decErr != nil {
+		t.Fatalf("zstd.NewReader: %v", decErr)
+	}
+
+	defer dec.Close()
+
+	tr := tar.NewReader(f)
+	found := map[string][]byte{}
+
+	for {
+		hdr, nextErr := tr.Next()
+		if nextErr == io.EOF {
+			break
+		}
+
+		if nextErr != nil {
+			t.Fatalf("read tar: %v", nextErr)
+		}
+
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		compressed, readErr := io.ReadAll(tr)
+		if readErr != nil {
+			t.Fatalf("read tar entry %s: %v", hdr.Name, readErr)
+		}
+
+		// Each regular entry must be a valid zstd stream.
+		plain, decErr := dec.DecodeAll(compressed, nil)
+		if decErr != nil {
+			t.Fatalf("entry %q: zstd decode failed: %v", hdr.Name, decErr)
+		}
+
+		found[hdr.Name] = plain
+	}
+
+	for _, fixture := range files {
+		wantName := fixture.relPath + ".zst"
+
+		plain, ok := found[wantName]
+		if !ok {
+			t.Errorf("tar missing compressed entry %q", wantName)
+
+			continue
+		}
+
+		if !bytes.Equal(plain, fixture.content) {
+			t.Errorf("entry %q: decoded %q, want %q", wantName, plain, fixture.content)
+		}
+	}
+}
+
+func TestDownloadFilesystemVolume_SkipsExistingCompressedStaged(t *testing.T) {
+	// An already-staged compressed file must not be re-downloaded.
+	// Proof: pre-stage root.txt.zst with a sentinel payload; verify that the
+	// tar entry root.txt.zst still carries that sentinel (not bytes from server).
+	srv, _ := fsTestServer(t)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	rootURL := srv.URL + "/files/"
+
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-stage root.txt with a sentinel that is NOT the server's content.
+	// stageCompressedFile must skip it when it sees the file already present.
+	sentinel := []byte("sentinel-not-server-content")
+	preStaged := filepath.Join(stagingDir, "root.txt.zst")
+
+	if err := os.WriteFile(preStaged, sentinel, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	codec := mustCodec(t, "zstd")
+
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), codec); err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	// The staging dir is removed; the tar must have the sentinel as-is.
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatalf("open tar: %v", err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	tr := tar.NewReader(f)
+
+	for {
+		hdr, nextErr := tr.Next()
+		if nextErr == io.EOF {
+			break
+		}
+
+		if nextErr != nil {
+			t.Fatalf("read tar: %v", nextErr)
+		}
+
+		if hdr.Name != "root.txt.zst" {
+			continue
+		}
+
+		got, readErr := io.ReadAll(tr)
+		if readErr != nil {
+			t.Fatalf("read entry: %v", readErr)
+		}
+
+		if !bytes.Equal(got, sentinel) {
+			t.Errorf("root.txt.zst content = %q; want sentinel %q (file was re-downloaded)", got, sentinel)
+		}
+
+		return
+	}
+
+	t.Error("tar entry root.txt.zst not found")
 }
