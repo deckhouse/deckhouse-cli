@@ -338,9 +338,12 @@ func parseItemAttrs(attrs map[string]any) (fs.FileMode, int, int, time.Time) {
 	// sub-second precision if the exporter ever emits it.
 	if v, ok := attrs["modtime"]; ok {
 		if s, ok := v.(string); ok {
-			if t, parseErr := time.Parse(time.RFC3339, s); parseErr == nil {
-				mtime = t
-			} else if t, parseErr := time.Parse(time.RFC3339Nano, s); parseErr == nil {
+			t, err := time.Parse(time.RFC3339, s)
+			if err != nil {
+				t, err = time.Parse(time.RFC3339Nano, s)
+			}
+
+			if err == nil {
 				mtime = t
 			}
 		}
