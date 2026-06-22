@@ -18,6 +18,7 @@ package volume_test
 
 import (
 	"archive/tar"
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -282,4 +284,78 @@ func TestWriteTar_PAXFormat(t *testing.T) {
 	require.Len(t, headers, 1)
 
 	assert.Equal(t, tar.FormatPAX, headers[0].Format, "tar format must be PAX")
+}
+
+// TestWriteTar_CompressedFileEntries verifies that when file TarEntries carry
+// a compressed name (<relPath><ext>) pointing to a pre-compressed staging file,
+// WriteTar copies the compressed bytes verbatim into the tar under that name.
+// Dir and link entries keep their plain relPath (no extension suffix).
+// Extracting + per-file decoding must reproduce the original bytes.
+func TestWriteTar_CompressedFileEntries(t *testing.T) {
+	t.Parallel()
+
+	// mustCodec is defined in fs_test.go (same package).
+	codec := mustCodec(t, "zstd")
+	ext := codec.Ext()
+
+	stagingDir := t.TempDir()
+	outputDir := t.TempDir()
+
+	alphaOrig := []byte("alpha-original-content")
+	betaOrig := []byte("beta-original-content")
+
+	var alphaBuf, betaBuf bytes.Buffer
+
+	require.NoError(t, codec.EncodeStream(&alphaBuf, bytes.NewReader(alphaOrig)))
+	require.NoError(t, codec.EncodeStream(&betaBuf, bytes.NewReader(betaOrig)))
+
+	// Staging files are named <relPath><ext>, mirroring stageCompressedFile output.
+	writeStagingFile(t, stagingDir, "alpha.txt"+ext, alphaBuf.Bytes())
+	writeStagingFile(t, stagingDir, "sub/beta.txt"+ext, betaBuf.Bytes())
+
+	entries := []volume.TarEntry{
+		{RelPath: "alpha.txt" + ext, Type: "file"},
+		{RelPath: "sub/", Type: "dir"},
+		{RelPath: "sub/beta.txt" + ext, Type: "file"},
+		{RelPath: "link.txt", Type: "link", Linkname: "alpha.txt" + ext},
+	}
+
+	outPath := filepath.Join(outputDir, "data.tar")
+
+	require.NoError(t, volume.WriteTar(outPath, stagingDir, entries))
+
+	headers, contents := readTar(t, outPath)
+
+	// Sorted order: "alpha.txt.zst" < "link.txt" < "sub/" < "sub/beta.txt.zst"
+	require.Len(t, headers, 4)
+
+	// File entries carry the compressed name (<relPath><ext>).
+	assert.Equal(t, "alpha.txt"+ext, headers[0].Name)
+	assert.Equal(t, byte(tar.TypeReg), headers[0].Typeflag)
+
+	// Link entries keep the plain name — no codec extension suffix.
+	assert.Equal(t, "link.txt", headers[1].Name)
+	assert.Equal(t, byte(tar.TypeSymlink), headers[1].Typeflag)
+
+	// Dir entries keep the plain name — no codec extension suffix.
+	assert.Equal(t, "sub/", headers[2].Name)
+	assert.Equal(t, byte(tar.TypeDir), headers[2].Typeflag)
+
+	// Nested file entry also carries the compressed name.
+	assert.Equal(t, "sub/beta.txt"+ext, headers[3].Name)
+	assert.Equal(t, byte(tar.TypeReg), headers[3].Typeflag)
+
+	// Extracting + per-file decoding must reproduce the original bytes.
+	dec, err := zstd.NewReader(nil)
+	require.NoError(t, err)
+
+	defer dec.Close()
+
+	alphaDecoded, err := dec.DecodeAll(contents["alpha.txt"+ext], nil)
+	require.NoError(t, err, "decode alpha.txt entry")
+	assert.Equal(t, alphaOrig, alphaDecoded)
+
+	betaDecoded, err := dec.DecodeAll(contents["sub/beta.txt"+ext], nil)
+	require.NoError(t, err, "decode sub/beta.txt entry")
+	assert.Equal(t, betaOrig, betaDecoded)
 }
