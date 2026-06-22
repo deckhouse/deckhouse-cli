@@ -965,14 +965,17 @@ func buildMultiVolumeFakeClient(t *testing.T) client.Client {
 		Build()
 }
 
-// TestPipeline_E2E_DeletedPVC verifies that a non-aggregator OwnDataRef node excludes
-// the backing PVC manifest from its manifests/ directory even when the checkpoint
-// contains the PVC object. The pipeline resolves shadow metadata from the live PVC.
+// TestPipeline_E2E_DeletedPVC verifies that a non-aggregator OwnDataRef node with a
+// genuinely deleted backing PVC still downloads successfully. The live PVC is absent
+// from the cluster. Shadow metadata (storageClass, volumeMode) is resolved from the
+// node's ManifestCheckpoint via shadowMetaFromCheckpoint, not from the absent live PVC
+// and not from an on-disk manifest (excluded from disk by the OwnDataRef rule).
 //
 //  1. del-disk's SnapshotContent checkpoint contains the del-pvc manifest.
 //  2. WriteNodeManifests excludes the PVC (OwnDataRef rule); del-disk/manifests/ has no PVC file.
-//  3. The live PVC is present in the cluster; resolveShadowMeta uses it directly.
-//  4. The download succeeds with the correct storageClass and volumeMode.
+//  3. The live PVC is absent (genuinely deleted); resolveShadowMeta falls back to the checkpoint.
+//  4. shadowMetaFromCheckpoint reads storageClass and volumeMode from the captured PVC object.
+//  5. The download succeeds with the correct storageClass and volumeMode from the checkpoint.
 //
 // Tree:
 //
@@ -1039,17 +1042,18 @@ func TestPipeline_E2E_DeletedPVC(t *testing.T) {
 	require.True(t, os.IsNotExist(pvcStatErr),
 		"del-disk must NOT have the backing PVC manifest in its manifests/ (OwnDataRef PVC excluded)")
 
-	// Shadow VS annotations come from the live PVC lookup.
+	// Shadow VS annotations come from the ManifestCheckpoint fallback (live PVC is absent).
 	require.Equal(t, "csi-del-sc", capturedMeta.StorageClass,
-		"storageClass must be resolved from live PVC")
+		"storageClass must be resolved from ManifestCheckpoint fallback")
 	require.Equal(t, "Block", capturedMeta.VolumeMode,
-		"volumeMode must be resolved from live PVC")
+		"volumeMode must be resolved from ManifestCheckpoint fallback")
 }
 
 // buildDeletedPVCFakeClient constructs the fake kube client for TestPipeline_E2E_DeletedPVC.
-// The checkpoint for del-disk contains the del-pvc manifest, but WriteNodeManifests now
-// excludes OwnDataRef PVCs from the node's manifests/ directory. The live PVC is present
-// in the fake client so that resolveShadowMeta uses the live lookup path.
+// The checkpoint for del-disk contains the del-pvc manifest with storageClass and volumeMode.
+// The live PVC is deliberately absent from the fake client so that resolveShadowMeta must
+// fall back to shadowMetaFromCheckpoint. WriteNodeManifests excludes the PVC from
+// del-disk/manifests/ per the OwnDataRef rule; the on-disk file is also intentionally absent.
 func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 	t.Helper()
 
@@ -1138,21 +1142,13 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 		},
 	}
 
-	// Live PVC for resolveShadowMeta (present in cluster).
-	delVolumeMode := corev1.PersistentVolumeBlock
-	delStorageClass := "csi-del-sc"
-	liveDelPVC := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: e2eDelPVC, Namespace: e2eNS},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			StorageClassName: &delStorageClass,
-			VolumeMode:       &delVolumeMode,
-		},
-	}
+	// The live PVC is intentionally absent: resolveShadowMeta must fall back to
+	// shadowMetaFromCheckpoint, reading storageClass/volumeMode from mcp-del-disk.
 
 	typed := []client.Object{
 		rootSnap, rootContent,
 		delContent, delMCP, delChunk,
-		realDelVSC, liveDelPVC,
+		realDelVSC,
 	}
 
 	return fake.NewClientBuilder().

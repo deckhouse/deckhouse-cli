@@ -517,9 +517,10 @@ func TestPipeline_ShadowMetaFromLivePVC(t *testing.T) {
 		"shadow VS must carry volume-mode annotation from source PVC")
 }
 
-// TestPipeline_ShadowMetaFromManifest verifies that when the source PVC is gone
-// from the cluster, storageClass and volumeMode are read from the captured PVC
-// manifest already on disk under the volume node's manifests/ directory.
+// TestPipeline_ShadowMetaFromManifest verifies that when the source PVC is gone from
+// the cluster, storageClass and volumeMode are resolved from the node's ManifestCheckpoint
+// via shadowMetaFromCheckpoint. The on-disk manifest is intentionally absent (excluded by
+// the OwnDataRef rule); only the checkpoint contains the captured PVC object.
 func TestPipeline_ShadowMetaFromManifest(t *testing.T) {
 	t.Parallel()
 
@@ -529,7 +530,11 @@ func TestPipeline_ShadowMetaFromManifest(t *testing.T) {
 	defer srv.Close()
 
 	// Build a fake client WITHOUT the source PVC (simulating a deleted PVC).
+	// sc-disk carries a ManifestCheckpointName so shadowMetaFromCheckpoint can look
+	// up the PVC object from the checkpoint. The PVC is captured in the checkpoint
+	// with storageClass="csi-ceph-rbd-from-checkpoint" and volumeMode="Block".
 	scheme := buildScheme(t)
+
 	snapshotHandle := "snap-handle-mf"
 	realVSC := &snapv1.VolumeSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: diskVSCName},
@@ -556,14 +561,19 @@ func TestPipeline_ShadowMetaFromManifest(t *testing.T) {
 			},
 		},
 	}
+
 	rootContent := &snapshotapi.SnapshotContent{
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-root-mf"},
 	}
+
+	// sc-disk sets ManifestCheckpointName so that the deleted-PVC fallback path
+	// in resolveShadowMeta can reach the captured PVC object via FetchNodeManifests.
 	childContent := &snapshotapi.SnapshotContent{
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-disk"},
 		Status: snapshotapi.SnapshotContentStatus{
+			ManifestCheckpointName: "mcp-disk-mf",
 			DataRefs: []snapshotapi.SnapshotDataBinding{
 				{
 					TargetUID: "uid-disk",
@@ -582,40 +592,25 @@ func TestPipeline_ShadowMetaFromManifest(t *testing.T) {
 			},
 		},
 	}
+
 	childSnap := makeUnstructuredSnap(childAPIVersion, childKind, testNS, diskSnapName, "sc-disk")
+
+	// The checkpoint captures the PVC with the storageClass and volumeMode that
+	// shadowMetaFromCheckpoint should surface when the live PVC is absent.
+	pvcPayload := `[{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"` +
+		sourcePVCName + `","namespace":"` + testNS + `"}` +
+		`,"spec":{"storageClassName":"csi-ceph-rbd-from-checkpoint","volumeMode":"Block"}}]`
+
+	diskMCP := makeMFManifestCheckpoint("mcp-disk-mf")
+	diskChunk := makeMFManifestChunk(t, "mcp-disk-mf-chunk-0", "mcp-disk-mf", 0, pvcPayload)
 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(rootSnap, rootContent, childContent, realVSC).
+		WithObjects(rootSnap, rootContent, childContent, realVSC, diskMCP, diskChunk).
 		WithObjects(childSnap).
 		Build()
 
 	outputDir := t.TempDir()
-
-	// Pre-create disk-snap's manifests/ directory with the PVC manifest so that
-	// resolveShadowMeta can fall back to it when the live PVC is absent.
-	//
-	// disk-snap is a non-aggregator that downloads its OwnDataRef directly;
-	// resolveShadowMeta looks in nodeDir/manifests/ (nodeDir = diskSnapDir).
-	// In production WriteNodeManifests writes the PVC manifest, but sc-disk has no
-	// ManifestCheckpointName in this test, so we pre-populate it.
-	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
-		archive.NodeDirName(childKind, diskSnapName))
-	manifDir := filepath.Join(diskSnapDir, archive.ManifestsDirName)
-	require.NoError(t, os.MkdirAll(manifDir, 0o755))
-
-	pvcManifest := `apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: ` + sourcePVCName + `
-  namespace: ` + testNS + `
-spec:
-  storageClassName: csi-ceph-rbd-from-manifest
-  volumeMode: Block
-`
-	manifestPath := filepath.Join(manifDir,
-		archive.ManifestFileName("PersistentVolumeClaim", sourcePVCName, ""))
-	require.NoError(t, os.WriteFile(manifestPath, []byte(pvcManifest), 0o644))
 
 	var capturedMeta exporter.ShadowMeta
 
@@ -629,6 +624,7 @@ spec:
 		WaitShadowVS:         noopWaitShadowVS,
 		OpenExport: func(ctx context.Context, namespace, vsName string, ttl string) (*exporter.Export, error) {
 			var shadowVS snapv1.VolumeSnapshot
+
 			if err2 := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: vsName}, &shadowVS); err2 == nil {
 				capturedMeta = exporter.ShadowMeta{
 					StorageClass: shadowVS.Annotations[exporter.AnnotationStorageClassName],
@@ -643,10 +639,48 @@ spec:
 	err := pipeline.Run(context.Background(), cfg)
 	require.NoError(t, err)
 
-	assert.Equal(t, "csi-ceph-rbd-from-manifest", capturedMeta.StorageClass,
-		"shadow VS must carry storage-class annotation from PVC manifest")
+	assert.Equal(t, "csi-ceph-rbd-from-checkpoint", capturedMeta.StorageClass,
+		"shadow VS must carry storage-class annotation resolved from ManifestCheckpoint")
 	assert.Equal(t, "Block", capturedMeta.VolumeMode,
-		"shadow VS must carry volume-mode annotation from PVC manifest")
+		"shadow VS must carry volume-mode annotation resolved from ManifestCheckpoint")
+}
+
+// makeMFManifestCheckpoint builds a ManifestCheckpoint for the deleted-PVC manifest test.
+func makeMFManifestCheckpoint(name string) *snapshotapi.ManifestCheckpoint {
+	return &snapshotapi.ManifestCheckpoint{
+		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotterAPIVersion, Kind: "ManifestCheckpoint"},
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       snapshotapi.ManifestCheckpointSpec{SourceNamespace: testNS},
+		Status: snapshotapi.ManifestCheckpointStatus{
+			TotalObjects: 1,
+			Chunks:       []snapshotapi.ChunkInfo{{Index: 0, Name: name + "-chunk-0", ObjectsCount: 1}},
+		},
+	}
+}
+
+// makeMFManifestChunk encodes an arbitrary JSON array into a ManifestCheckpointContentChunk.
+func makeMFManifestChunk(t *testing.T, name, checkpointName string, index int, jsonPayload string) *snapshotapi.ManifestCheckpointContentChunk {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	gz := gzip.NewWriter(&buf)
+	_, err := gz.Write([]byte(jsonPayload))
+	require.NoError(t, err)
+	require.NoError(t, gz.Close())
+
+	encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
+
+	return &snapshotapi.ManifestCheckpointContentChunk{
+		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotterAPIVersion, Kind: "ManifestCheckpointContentChunk"},
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: snapshotapi.ManifestCheckpointContentChunkSpec{
+			CheckpointName: checkpointName,
+			Index:          index,
+			Data:           encoded,
+			ObjectsCount:   1,
+		},
+	}
 }
 
 // TestPipeline_WaitShadowVSCalledBeforeExport verifies that WaitShadowVS is
