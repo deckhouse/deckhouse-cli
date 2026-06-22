@@ -73,10 +73,11 @@ type Config struct {
 	// TTL is the DataExport TTL string (e.g. "2h").  Defaults to "2h".
 	TTL string
 
-	// Compression is the codec used for block-volume frames and determines the
-	// output filename extension (e.g. ".zst" → data.bin.zst).
-	// When nil, applyDefaults creates a zstd codec at LevelDefault.
-	// Filesystem volumes always write uncompressed data.tar and ignore this field.
+	// Compression is the codec used for volume data encoding. For block volumes it
+	// determines the chunk frame encoding and the output filename extension
+	// (e.g. ".zst" → data.bin.zst). For filesystem volumes each file inside data.tar
+	// is individually compressed with this codec: entry names become <path><ext>
+	// (ext is empty for codec=none). When nil, applyDefaults creates a zstd codec.
 	Compression compress.Codec
 
 	// KubeClient performs all Kubernetes API calls.  Required.
