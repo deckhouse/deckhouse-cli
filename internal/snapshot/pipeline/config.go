@@ -114,6 +114,17 @@ type Config struct {
 	// Defaults to 5 minutes (same as ReadinessTimeout).
 	ShadowReadinessTimeout time.Duration
 
+	// SelectedNodeKind and SelectedNodeName identify a single snapshot-CR node to
+	// download together with its full subtree. When both are set, Run builds the
+	// full tree (needed for path naming and ancestor scaffolding) and restricts
+	// processing to the selected node and its descendants. Ancestor directories
+	// between OutputDir and the selected node are created as content-free scaffolding
+	// (no snapshot.yaml, no manifests/, no data, no sibling subtrees) so the
+	// selected node sits at its real path under OutputDir.
+	// When either value is empty the full tree is downloaded.
+	SelectedNodeKind string
+	SelectedNodeName string
+
 	// Log is the structured logger.  Defaults to slog.Default() when nil.
 	Log *slog.Logger
 }

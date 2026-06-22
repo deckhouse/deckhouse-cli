@@ -60,7 +60,12 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("build snapshot tree: %w", err)
 	}
 
-	tasks, err := collectNodeTasks(root, cfg.OutputDir)
+	processRoot, startDir, err := resolveSubtreeRoot(root, cfg)
+	if err != nil {
+		return err
+	}
+
+	tasks, err := collectNodeTasks(processRoot, startDir)
 	if err != nil {
 		return fmt.Errorf("scan output directory: %w", err)
 	}
@@ -127,6 +132,85 @@ func collectDFS(node *source.Node, plan archive.NodeResumePlan, tasks *[]nodeTas
 	}
 
 	return nil
+}
+
+// resolveSubtreeRoot returns the node to start processing from and its on-disk
+// directory. When neither SelectedNodeKind nor SelectedNodeName is set in cfg it
+// returns (root, cfg.OutputDir) for a full-tree download. When both are set it
+// finds the node in the already-built tree, scaffolds content-free ancestor
+// directories under cfg.OutputDir so the selected node sits at its real path, and
+// returns (selectedNode, selectedNodeDir).
+func resolveSubtreeRoot(root *source.Node, cfg Config) (*source.Node, string, error) {
+	if cfg.SelectedNodeKind == "" || cfg.SelectedNodeName == "" {
+		return root, cfg.OutputDir, nil
+	}
+
+	selected, ancestors, err := source.FindNode(root, cfg.SelectedNodeKind, cfg.SelectedNodeName)
+	if err != nil {
+		return nil, "", fmt.Errorf("find node %s/%s: %w", cfg.SelectedNodeKind, cfg.SelectedNodeName, err)
+	}
+
+	selectedDir, err := buildSubtreeScaffold(cfg.OutputDir, selected, ancestors)
+	if err != nil {
+		return nil, "", fmt.Errorf("scaffold for %s/%s: %w", cfg.SelectedNodeKind, cfg.SelectedNodeName, err)
+	}
+
+	return selected, selectedDir, nil
+}
+
+// buildSubtreeScaffold creates the content-free ancestor directory chain so the
+// selected node lands at its real path under outputDir, and returns the absolute
+// directory path for the selected node.
+//
+// When the selected node is the root (len(ancestors) == 0) outputDir is returned
+// directly — no scaffold directories are created because the root already occupies
+// the user-supplied output directory.
+//
+// For deeper selections the path is built ancestor-by-ancestor:
+//
+//	outputDir/
+//	  snapshots/<ancestor[1]-dir>/        ← scaffold (no content)
+//	    snapshots/<ancestor[2]-dir>/      ← scaffold (no content)
+//	      …
+//	        snapshots/<selected-dir>/     ← subtree root (returned)
+//
+// Scaffold directories are created with archive.EnsureDir (os.MkdirAll). They hold
+// no snapshot.yaml, no manifests/, no data, and no sibling subtrees.
+func buildSubtreeScaffold(outputDir string, selected *source.Node, ancestors []*source.Node) (string, error) {
+	if len(ancestors) == 0 {
+		// selected IS the root; it occupies outputDir directly.
+		return outputDir, nil
+	}
+
+	// Walk ancestors after the root (ancestors[0]), which is represented by outputDir.
+	current := outputDir
+
+	for _, anc := range ancestors[1:] {
+		current = filepath.Join(current, archive.SnapshotsDirName, archive.NodeDirName(anc.Kind, nodeDirOf(anc)))
+
+		if err := archive.EnsureDir(current); err != nil {
+			return "", fmt.Errorf("create scaffold dir %s: %w", current, err)
+		}
+	}
+
+	// Place the selected node inside the last ancestor's snapshots/ subdirectory.
+	selectedDir := filepath.Join(current, archive.SnapshotsDirName, archive.NodeDirName(selected.Kind, nodeDirOf(selected)))
+
+	if err := archive.EnsureDir(selectedDir); err != nil {
+		return "", fmt.Errorf("create subtree root dir %s: %w", selectedDir, err)
+	}
+
+	return selectedDir, nil
+}
+
+// nodeDirOf returns the directory-name component for node. It returns node.SourceName
+// when set and falls back to node.Name, mirroring the DirName logic in nodeIdentity.
+func nodeDirOf(node *source.Node) string {
+	if node.SourceName != "" {
+		return node.SourceName
+	}
+
+	return node.Name
 }
 
 // processNode executes all download and finalization steps for one node task.
