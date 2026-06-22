@@ -672,8 +672,7 @@ func makeE2EManifestChunkWithPayload(t *testing.T, name, checkpointName string, 
 //	       data/pvc-multi-block.bin.zst   (block volume)
 //	       data/pvc-multi-fs.tar          (filesystem volume)
 //	       manifests/configmap_multi-cfg.yaml
-//	       manifests/persistentvolumeclaim_pvc-multi-block.yaml  (included: OwnDataRef)
-//	       manifests/persistentvolumeclaim_pvc-multi-fs.yaml     (included: OwnDataRef)
+//	       (OwnDataRef PVC manifests excluded — data captured in volume payload)
 func TestPipeline_E2E_MultiVolume(t *testing.T) {
 	rawBlock := bytes.Repeat([]byte("M"), e2eBlockSize)
 	// Use the same file names that makeE2EFSServer hardcodes in its directory listing.
@@ -728,8 +727,8 @@ func TestPipeline_E2E_MultiVolume(t *testing.T) {
 	require.True(t, os.IsNotExist(noFlatBlock),
 		"multi-disk must not carry flat data.bin.zst (multi-volume layout)")
 
-	// multi-disk manifests/ must include ConfigMap and BOTH OwnDataRef PVCs.
-	// OwnDataRef PVCs are not excluded (only orphan leaf child PVCs are excluded).
+	// multi-disk manifests/ must include the ConfigMap but NOT the OwnDataRef PVCs.
+	// OwnDataRef PVC data is captured in the volume payload; their manifests are excluded.
 	manifestsDir := filepath.Join(multiDiskDir, archive.ManifestsDirName)
 	_, err := os.Stat(filepath.Join(manifestsDir, "configmap_multi-cfg.yaml"))
 	require.NoError(t, err, "multi-disk manifests/ must include ConfigMap")
@@ -737,8 +736,8 @@ func TestPipeline_E2E_MultiVolume(t *testing.T) {
 	for _, pvcName := range []string{e2eMultiBlockPVC, e2eMultiFSPVC} {
 		pvcFile := fmt.Sprintf("persistentvolumeclaim_%s.yaml", pvcName)
 		_, statErr := os.Stat(filepath.Join(manifestsDir, pvcFile))
-		require.NoError(t, statErr,
-			"multi-disk manifests/ must include OwnDataRef PVC %s", pvcName)
+		require.True(t, os.IsNotExist(statErr),
+			"multi-disk manifests/ must NOT include OwnDataRef PVC %s (data in volume payload)", pvcName)
 	}
 
 	// ── Block volume (multi-volume layout) ────────────────────────────────────
@@ -815,7 +814,7 @@ func buildMultiVolumeFakeClient(t *testing.T) client.Client {
 	multiDiskSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eDiskKind, e2eNS, e2eMultiDisk, "sc-multi-disk", nil)
 
 	// sc-multi-disk checkpoint has: configmap + block-pvc + fs-pvc.
-	// All three will appear in multi-disk/manifests/ (OwnDataRef PVCs are not excluded).
+	// Only the ConfigMap appears in multi-disk/manifests/; OwnDataRef PVCs are excluded.
 	multiDiskPayload := fmt.Sprintf(
 		`[`+
 			`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"multi-cfg","namespace":%q}},`+
@@ -947,23 +946,21 @@ func buildMultiVolumeFakeClient(t *testing.T) client.Client {
 		Build()
 }
 
-// TestPipeline_E2E_DeletedPVC verifies that when the source PVC no longer exists in the
-// cluster, the pipeline resolves shadow metadata from the captured PVC manifest written
-// by WriteNodeManifests into the node's manifests/ directory.
+// TestPipeline_E2E_DeletedPVC verifies that a non-aggregator OwnDataRef node excludes
+// the backing PVC manifest from its manifests/ directory even when the checkpoint
+// contains the PVC object. The pipeline resolves shadow metadata from the live PVC.
 //
-// This tests the full end-to-end path of the manifest fallback for a non-aggregator node:
 //  1. del-disk's SnapshotContent checkpoint contains the del-pvc manifest.
-//  2. WriteNodeManifests writes it to del-disk/manifests/ before volume download.
-//  3. The live PVC GET returns NotFound (not in fake client).
-//  4. resolveShadowMeta falls back to reading del-disk/manifests/persistentvolumeclaim_del-pvc.yaml.
-//  5. The download succeeds with the correct storageClass and volumeMode from the manifest.
+//  2. WriteNodeManifests excludes the PVC (OwnDataRef rule); del-disk/manifests/ has no PVC file.
+//  3. The live PVC is present in the cluster; resolveShadowMeta uses it directly.
+//  4. The download succeeds with the correct storageClass and volumeMode.
 //
 // Tree:
 //
 //	e2e-del-root (Snapshot)
-//	  └─ del-disk (VirtualDiskSnapshot, non-aggregator, 1 OwnDataRef → block via manifest fallback)
+//	  └─ del-disk (VirtualDiskSnapshot, non-aggregator, 1 OwnDataRef → block)
 //	       data.bin.zst   (block data directly in the node dir)
-//	       manifests/persistentvolumeclaim_del-pvc.yaml
+//	       (no persistentvolumeclaim_del-pvc.yaml — OwnDataRef PVC manifest excluded)
 func TestPipeline_E2E_DeletedPVC(t *testing.T) {
 	rawBlock := bytes.Repeat([]byte("D"), e2eBlockSize)
 	blockSrv := makeE2EBlockServer(t, rawBlock)
@@ -1015,22 +1012,25 @@ func TestPipeline_E2E_DeletedPVC(t *testing.T) {
 	require.Equal(t, rawBlock, e2eDecodeZstdFile(t, blockFile),
 		"del-disk volume data must match original rawBlock")
 
-	// The captured PVC manifest must be in del-disk/manifests/ (written by WriteNodeManifests
-	// from the checkpoint before volume download, so resolveShadowMeta can fall back to it).
+	// The OwnDataRef PVC manifest must NOT be in del-disk/manifests/; the new rule
+	// excludes backing PVC manifests from data-owning domain nodes.
 	pvcManifestPath := filepath.Join(delDiskDir, archive.ManifestsDirName,
 		fmt.Sprintf("persistentvolumeclaim_%s.yaml", e2eDelPVC))
-	_, err = os.Stat(pvcManifestPath)
-	require.NoError(t, err, "del-disk must have the captured PVC manifest in its manifests/")
+	_, pvcStatErr := os.Stat(pvcManifestPath)
+	require.True(t, os.IsNotExist(pvcStatErr),
+		"del-disk must NOT have the backing PVC manifest in its manifests/ (OwnDataRef PVC excluded)")
 
-	// Shadow VS annotations must come from the manifest fallback (not live PVC).
+	// Shadow VS annotations come from the live PVC lookup.
 	require.Equal(t, "csi-del-sc", capturedMeta.StorageClass,
-		"storageClass must be resolved from captured PVC manifest")
+		"storageClass must be resolved from live PVC")
 	require.Equal(t, "Block", capturedMeta.VolumeMode,
-		"volumeMode must be resolved from captured PVC manifest")
+		"volumeMode must be resolved from live PVC")
 }
 
 // buildDeletedPVCFakeClient constructs the fake kube client for TestPipeline_E2E_DeletedPVC.
-// The del-pvc is intentionally NOT seeded in the fake client to simulate a deleted PVC.
+// The checkpoint for del-disk contains the del-pvc manifest, but WriteNodeManifests now
+// excludes OwnDataRef PVCs from the node's manifests/ directory. The live PVC is present
+// in the fake client so that resolveShadowMeta uses the live lookup path.
 func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 	t.Helper()
 
@@ -1056,12 +1056,11 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 	}
 
 	// del-disk: non-aggregator (no childrenSnapshotRefs).
-	// Its DataRef becomes an OwnDataRef; the live PVC is absent (deleted).
+	// Its DataRef becomes an OwnDataRef.
 	delDiskSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eDiskKind, e2eNS, e2eDelDisk, "sc-del-disk", nil)
 
-	// The del-disk checkpoint contains ONLY the del-pvc manifest (the live PVC is gone).
-	// WriteNodeManifests writes it to del-disk/manifests/ before volume download,
-	// so resolveShadowMeta can fall back to it when the live PVC is not found.
+	// The del-disk checkpoint contains the del-pvc manifest (also present as a live PVC).
+	// WriteNodeManifests will exclude the PVC from del-disk/manifests/ per the OwnDataRef rule.
 	delPayload := fmt.Sprintf(
 		`[{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":%q,"namespace":%q,"uid":"uid-del"},"spec":{"storageClassName":"csi-del-sc","volumeMode":"Block"}}]`,
 		e2eDelPVC, e2eNS,
@@ -1120,11 +1119,21 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 		},
 	}
 
-	// NOTE: del-pvc is intentionally NOT seeded here.
+	// Live PVC for resolveShadowMeta (present in cluster).
+	delVolumeMode := corev1.PersistentVolumeBlock
+	delStorageClass := "csi-del-sc"
+	liveDelPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: e2eDelPVC, Namespace: e2eNS},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &delStorageClass,
+			VolumeMode:       &delVolumeMode,
+		},
+	}
+
 	typed := []client.Object{
 		rootSnap, rootContent,
 		delContent, delMCP, delChunk,
-		realDelVSC,
+		realDelVSC, liveDelPVC,
 	}
 
 	return fake.NewClientBuilder().
