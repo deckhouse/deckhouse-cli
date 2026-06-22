@@ -406,10 +406,11 @@ func TestWriteNodeManifests_ExcludesLeafChildByNameFallback(t *testing.T) {
 	}
 }
 
-// TestWriteNodeManifests_KeepsOwnDataRefPVCs verifies that PVCs from OwnDataRefs are
-// NOT excluded from manifests/. For non-aggregator nodes the PVC manifest is
-// co-located with the volume data in the node's own manifests/ directory (spec §3.9.2).
-func TestWriteNodeManifests_KeepsOwnDataRefPVCs(t *testing.T) {
+// TestWriteNodeManifests_ExcludesOwnDataRefPVCs verifies that PVCs from OwnDataRefs are
+// excluded from manifests/. For non-aggregator data-owning nodes the PVC data is
+// captured in the volume payload (data.bin[.<ext>]/data.tar); the manifest must not
+// appear alongside the domain object manifest.
+func TestWriteNodeManifests_ExcludesOwnDataRefPVCs(t *testing.T) {
 	t.Parallel()
 
 	nodeDir := setupNodeDir(t)
@@ -438,12 +439,13 @@ func TestWriteNodeManifests_KeepsOwnDataRefPVCs(t *testing.T) {
 
 	manifestsDir := filepath.Join(nodeDir, archive.ManifestsDirName)
 
-	// Both the ConfigMap and the OwnDataRef PVC must be written.
-	for _, name := range []string{"configmap_snap-cm.yaml", "persistentvolumeclaim_pvc-own.yaml"} {
-		path := filepath.Join(manifestsDir, name)
-		if _, err := os.Stat(path); err != nil {
-			t.Errorf("expected %s to be written (OwnDataRef PVCs are kept in node manifests/): %v", name, err)
-		}
+	// The ConfigMap must be written; the OwnDataRef PVC must be excluded.
+	if _, err := os.Stat(filepath.Join(manifestsDir, "configmap_snap-cm.yaml")); err != nil {
+		t.Errorf("expected configmap_snap-cm.yaml to be written: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(manifestsDir, "persistentvolumeclaim_pvc-own.yaml")); !os.IsNotExist(err) {
+		t.Errorf("OwnDataRef PVC must be excluded from node manifests/; err=%v", err)
 	}
 }
 
