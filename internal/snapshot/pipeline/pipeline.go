@@ -30,6 +30,7 @@ import (
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
@@ -52,6 +53,10 @@ func Run(ctx context.Context, cfg Config) error {
 
 	if cfg.OpenExport == nil {
 		return fmt.Errorf("pipeline: OpenExport must be set (supply SafeClient or set OpenExport directly)")
+	}
+
+	if cfg.ManifestSource == nil {
+		return fmt.Errorf("pipeline: ManifestSource must be set (supply AggClient or set ManifestSource directly)")
 	}
 
 	root, err := source.BuildTree(ctx, cfg.KubeClient, cfg.Namespace, cfg.RootSnapshot)
@@ -299,7 +304,7 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask) error {
 			slog.String("kind", task.node.Kind),
 			slog.String("name", task.node.Name))
 	default:
-		if err := downloadVolumeBinding(ctx, cfg, task.node.Binding, task.node.Namespace, task.node.ManifestCheckpointName, dest); err != nil {
+		if err := downloadVolumeBinding(ctx, cfg, task.node.Binding, task.node.Namespace, task.node.ManifestScopeRef(), dest); err != nil {
 			return fmt.Errorf("download volume for %s/%s: %w", task.node.Kind, task.node.Name, err)
 		}
 	}
@@ -361,7 +366,7 @@ func downloadOwnDataRefs(
 			return nil
 		}
 
-		return downloadVolumeBinding(ctx, cfg, &refs[0], node.Namespace, node.ManifestCheckpointName, dest)
+		return downloadVolumeBinding(ctx, cfg, &refs[0], node.Namespace, node.Ref(), dest)
 	}
 
 	// Multi-volume layout: one shadow pair + DataExport per binding.
@@ -394,7 +399,7 @@ func downloadOwnDataRefs(
 			continue
 		}
 
-		if err := downloadVolumeBinding(ctx, cfg, ref, node.Namespace, node.ManifestCheckpointName, dest); err != nil {
+		if err := downloadVolumeBinding(ctx, cfg, ref, node.Namespace, node.Ref(), dest); err != nil {
 			return fmt.Errorf("download volume for pvc %s: %w", pvc, err)
 		}
 	}
@@ -459,15 +464,15 @@ func multiDest(nodeDir, pvc, ext string) volumeDestPaths {
 // up the shadow pair and export on completion or error.
 //
 // namespace is the Kubernetes namespace for the shadow VS/VSC and DataExport.
-// manifestCheckpointName is the node's ManifestCheckpoint name used as a fallback
-// when the live source PVC is no longer present.
+// scopeRef addresses the node whose manifests-download holds the captured source PVC,
+// used as a fallback when the live source PVC is no longer present.
 // dest specifies where block chunks, the merged block file, and filesystem files go.
 func downloadVolumeBinding(
 	ctx context.Context,
 	cfg Config,
 	binding *snapshotapi.SnapshotDataBinding,
 	namespace string,
-	manifestCheckpointName string,
+	scopeRef aggapi.NodeRef,
 	dest volumeDestPaths,
 ) error {
 	if binding.Artifact.Kind != exporter.ArtifactKindVolumeSnapshotContent {
@@ -477,7 +482,7 @@ func downloadVolumeBinding(
 
 	artifactName := binding.Artifact.Name
 
-	meta, err := resolveShadowMeta(ctx, cfg, manifestCheckpointName, binding.Target)
+	meta, err := resolveShadowMeta(ctx, cfg, scopeRef, binding.Target)
 	if err != nil {
 		return fmt.Errorf("resolve shadow metadata for artifact %s: %w", artifactName, err)
 	}
@@ -604,15 +609,15 @@ func nodeIdentity(node *source.Node) archive.NodeIdentity {
 
 // resolveShadowMeta resolves the storageClass and volumeMode of the source PVC
 // (target) that was snapshotted. It tries a live API lookup first; if the PVC
-// is gone it falls back to the node's ManifestCheckpoint (in-memory via
-// ManifestSource). The checkpoint always contains the captured PVC object even
+// is gone it falls back to the node's own-scope manifests (fetched via
+// ManifestSource). Those manifests always contain the captured PVC object even
 // when WriteNodeManifests excludes it from disk per the OwnDataRef policy, so
 // this path works even for deleted captured PVCs. Returns an error if both
 // attempts fail or if the PVC does not carry both required fields.
 func resolveShadowMeta(
 	ctx context.Context,
 	cfg Config,
-	manifestCheckpointName string,
+	scopeRef aggapi.NodeRef,
 	target snapshotapi.SnapshotSubjectRef,
 ) (exporter.ShadowMeta, error) {
 	pvc := &corev1.PersistentVolumeClaim{}
@@ -626,7 +631,7 @@ func resolveShadowMeta(
 		return shadowMetaFromPVC(pvc)
 	}
 
-	return shadowMetaFromCheckpoint(ctx, cfg, manifestCheckpointName, target.Name)
+	return shadowMetaFromManifests(ctx, cfg, scopeRef, target.Name)
 }
 
 // shadowMetaFromPVC extracts storageClass and volumeMode from a live PVC.
@@ -666,29 +671,23 @@ func fsTarComplete(tarPath string) (bool, error) {
 	return false, err
 }
 
-// shadowMetaFromCheckpoint resolves storageClass and volumeMode by fetching the
-// node's ManifestCheckpoint via ManifestSource and locating the PVC object by name.
-// The checkpoint always contains the captured PVC even when WriteNodeManifests
+// shadowMetaFromManifests resolves storageClass and volumeMode by fetching the
+// node's own-scope manifests via ManifestSource and locating the PVC object by name.
+// The manifests always contain the captured PVC even when WriteNodeManifests
 // excludes it from disk per the OwnDataRef policy. This function must not read
 // from <nodeDir>/manifests/ because that file is intentionally absent for
 // data-owning domain nodes with a deleted backing PVC.
-func shadowMetaFromCheckpoint(
+func shadowMetaFromManifests(
 	ctx context.Context,
 	cfg Config,
-	manifestCheckpointName string,
+	scopeRef aggapi.NodeRef,
 	pvcName string,
 ) (exporter.ShadowMeta, error) {
-	if manifestCheckpointName == "" {
-		return exporter.ShadowMeta{}, fmt.Errorf(
-			"source PVC %q not found live and node has no ManifestCheckpoint to resolve shadow metadata from",
-			pvcName)
-	}
-
-	manifests, err := cfg.ManifestSource.FetchNodeManifests(ctx, manifestCheckpointName)
+	manifests, err := cfg.ManifestSource.FetchNodeManifests(ctx, scopeRef)
 	if err != nil {
 		return exporter.ShadowMeta{}, fmt.Errorf(
-			"fetch checkpoint %q to resolve shadow metadata for PVC %q: %w",
-			manifestCheckpointName, pvcName, err)
+			"fetch manifests of %s/%s to resolve shadow metadata for PVC %q: %w",
+			scopeRef.Kind, scopeRef.Name, pvcName, err)
 	}
 
 	for _, obj := range manifests {
@@ -703,14 +702,14 @@ func shadowMetaFromCheckpoint(
 
 		if storageClass == "" || volumeMode == "" {
 			return exporter.ShadowMeta{}, fmt.Errorf(
-				"checkpoint %q PVC %q is missing required fields: storageClassName=%q volumeMode=%q",
-				manifestCheckpointName, pvcName, storageClass, volumeMode)
+				"%s/%s manifests PVC %q is missing required fields: storageClassName=%q volumeMode=%q",
+				scopeRef.Kind, scopeRef.Name, pvcName, storageClass, volumeMode)
 		}
 
 		return exporter.ShadowMeta{StorageClass: storageClass, VolumeMode: volumeMode}, nil
 	}
 
 	return exporter.ShadowMeta{}, fmt.Errorf(
-		"source PVC %q not found in checkpoint %q (PVC was deleted and not captured in the checkpoint)",
-		pvcName, manifestCheckpointName)
+		"source PVC %q not found in manifests of %s/%s (PVC was deleted and not captured)",
+		pvcName, scopeRef.Kind, scopeRef.Name)
 }

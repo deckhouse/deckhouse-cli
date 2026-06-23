@@ -206,3 +206,14 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 func (c *SafeClient) Copy() *SafeClient {
 	return &SafeClient{rest.CopyConfig(c.restConfig)}
 }
+
+// RESTConfig returns a deep copy of the underlying *rest.Config so callers (e.g. the
+// aggregated-API client) can build their own discovery REST client without mutating
+// or depending on the SafeClient's auth handling.
+func (c *SafeClient) RESTConfig() *rest.Config {
+	if c.restConfig == nil {
+		return nil
+	}
+
+	return rest.CopyConfig(c.restConfig)
+}

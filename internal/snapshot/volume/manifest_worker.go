@@ -44,17 +44,12 @@ import (
 // Matching is by metadata.uid first; if the uid is absent in the captured manifest,
 // it falls back to metadata.name.
 //
-// When node.ManifestCheckpointName is empty, no manifests exist and the function
-// returns immediately (valid state).
+// The manifests are fetched from the node's own manifests-download subresource.
 //
 // The operation is idempotent: rewriting an already-present object with the same
 // kind, name, and API group is a no-op.
 func WriteNodeManifests(ctx context.Context, src source.ManifestSource, nodeDir string, node *source.Node) error {
-	if node.ManifestCheckpointName == "" {
-		return nil
-	}
-
-	objs, err := src.FetchNodeManifests(ctx, node.ManifestCheckpointName)
+	objs, err := src.FetchNodeManifests(ctx, node.Ref())
 	if err != nil {
 		return fmt.Errorf("fetch manifests for %s/%s: %w", node.Kind, node.Name, err)
 	}
@@ -74,24 +69,22 @@ func WriteNodeManifests(ctx context.Context, src source.ManifestSource, nodeDir 
 	return nil
 }
 
-// WriteVolumeManifest fetches the parent checkpoint objects via src and writes the
-// single PVC that corresponds to the volume node's Binding.Target into
+// WriteVolumeManifest fetches the manifests in the volume node's scope via src and
+// writes the single PVC that corresponds to the volume node's Binding.Target into
 // <volumeDir>/manifests/persistentvolumeclaim_<name>.yaml.
+//
+// For orphan leaf volume nodes the captured PVC manifest lives in the parent
+// aggregator node's own manifests, so the scope ref is the parent ref (see
+// source.Node.ManifestScopeRef).
 //
 // The target PVC is matched by metadata.uid first (when both the binding's TargetUID
 // and the captured object's uid are non-empty); otherwise by metadata.name.
 //
-// When volNode.ManifestCheckpointName is empty, no checkpoint data is available and
-// the function returns nil (no-op). Callers that need the manifest for shadow-meta
-// resolution will fall back to a live PVC lookup.
-//
-// Returns an error if the target PVC is not present in the checkpoint (when one exists).
+// Returns an error if the target PVC is not present in the fetched manifests.
 func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeDir string, volNode *source.Node) error {
-	if volNode.ManifestCheckpointName == "" {
-		return nil
-	}
+	scopeRef := volNode.ManifestScopeRef()
 
-	objs, err := src.FetchNodeManifests(ctx, volNode.ManifestCheckpointName)
+	objs, err := src.FetchNodeManifests(ctx, scopeRef)
 	if err != nil {
 		return fmt.Errorf("fetch manifests for volume node %s: %w", volNode.Name, err)
 	}
@@ -111,8 +104,8 @@ func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeD
 		return archive.WriteManifest(volumeDir, obj)
 	}
 
-	return fmt.Errorf("target PVC %q (uid=%q) not found in checkpoint %q",
-		targetName, targetUID, volNode.ManifestCheckpointName)
+	return fmt.Errorf("target PVC %q (uid=%q) not found in manifests of %s/%s",
+		targetName, targetUID, scopeRef.Kind, scopeRef.Name)
 }
 
 // FinalizeNode computes the node integrity checksum over all current files in

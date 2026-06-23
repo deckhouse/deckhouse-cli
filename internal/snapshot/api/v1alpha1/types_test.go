@@ -137,109 +137,6 @@ func TestSnapshotContentUnmarshal(t *testing.T) {
 	}
 }
 
-func TestManifestCheckpointUnmarshal(t *testing.T) {
-	t.Helper()
-
-	raw := `{
-		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
-		"kind": "ManifestCheckpoint",
-		"metadata": {"name": "mcp-xyz"},
-		"spec": {"sourceNamespace": "default"},
-		"status": {
-			"chunks": [
-				{
-					"name": "chunk-0",
-					"index": 0,
-					"objectsCount": 42,
-					"sizeBytes": 4096,
-					"checksum": "abc123"
-				}
-			],
-			"totalObjects": 42,
-			"totalSizeBytes": 4096
-		}
-	}`
-
-	var mcp ManifestCheckpoint
-
-	if err := json.Unmarshal([]byte(raw), &mcp); err != nil {
-		t.Fatalf("unmarshal ManifestCheckpoint: %v", err)
-	}
-
-	if mcp.Name != "mcp-xyz" {
-		t.Errorf("name: got %q", mcp.Name)
-	}
-
-	if len(mcp.Status.Chunks) != 1 {
-		t.Fatalf("chunks len: got %d, want 1", len(mcp.Status.Chunks))
-	}
-
-	chunk := mcp.Status.Chunks[0]
-
-	if chunk.Name != "chunk-0" {
-		t.Errorf("chunk name: got %q", chunk.Name)
-	}
-
-	if chunk.Index != 0 {
-		t.Errorf("chunk index: got %d", chunk.Index)
-	}
-
-	if chunk.ObjectsCount != 42 {
-		t.Errorf("objectsCount: got %d", chunk.ObjectsCount)
-	}
-
-	if chunk.SizeBytes != 4096 {
-		t.Errorf("sizeBytes: got %d", chunk.SizeBytes)
-	}
-
-	if chunk.Checksum != "abc123" {
-		t.Errorf("checksum: got %q", chunk.Checksum)
-	}
-}
-
-func TestManifestCheckpointContentChunkUnmarshal(t *testing.T) {
-	t.Helper()
-
-	raw := `{
-		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
-		"kind": "ManifestCheckpointContentChunk",
-		"metadata": {"name": "chunk-abc-0"},
-		"spec": {
-			"checkpointName": "mcp-xyz",
-			"index": 0,
-			"data": "H4sIAAAAAAAA/w==",
-			"objectsCount": 3,
-			"checksum": "deadbeef"
-		}
-	}`
-
-	var chunk ManifestCheckpointContentChunk
-
-	if err := json.Unmarshal([]byte(raw), &chunk); err != nil {
-		t.Fatalf("unmarshal ManifestCheckpointContentChunk: %v", err)
-	}
-
-	if chunk.Spec.CheckpointName != "mcp-xyz" {
-		t.Errorf("checkpointName: got %q", chunk.Spec.CheckpointName)
-	}
-
-	if chunk.Spec.Index != 0 {
-		t.Errorf("index: got %d", chunk.Spec.Index)
-	}
-
-	if chunk.Spec.Data != "H4sIAAAAAAAA/w==" {
-		t.Errorf("data: got %q", chunk.Spec.Data)
-	}
-
-	if chunk.Spec.ObjectsCount != 3 {
-		t.Errorf("objectsCount: got %d", chunk.Spec.ObjectsCount)
-	}
-
-	if chunk.Spec.Checksum != "deadbeef" {
-		t.Errorf("checksum: got %q", chunk.Spec.Checksum)
-	}
-}
-
 func TestSnapshot_DeepCopyObject_NoAliasing(t *testing.T) {
 	t.Parallel()
 
@@ -302,43 +199,6 @@ func TestSnapshotContent_DeepCopyObject_NoAliasing(t *testing.T) {
 	}
 }
 
-func TestManifestCheckpoint_DeepCopyObject_NoAliasing(t *testing.T) {
-	t.Parallel()
-
-	ref := &ObjectReference{Name: "req-a", Namespace: "ns"}
-	orig := &ManifestCheckpoint{
-		Spec: ManifestCheckpointSpec{
-			ManifestCaptureRequestRef: ref,
-		},
-		Status: ManifestCheckpointStatus{
-			Chunks: []ChunkInfo{
-				{Name: "chunk-0", Index: 0},
-			},
-			Conditions: []metav1.Condition{
-				{Type: "Ready", Status: "True", Reason: "All"},
-			},
-		},
-	}
-
-	cp := orig.DeepCopyObject().(*ManifestCheckpoint)
-
-	cp.Spec.ManifestCaptureRequestRef.Name = "mutated"
-	cp.Status.Chunks[0].Name = "mutated"
-	cp.Status.Conditions[0].Type = "Mutated"
-
-	if orig.Spec.ManifestCaptureRequestRef.Name != "req-a" {
-		t.Errorf("ManifestCaptureRequestRef aliased: orig was mutated")
-	}
-
-	if orig.Status.Chunks[0].Name != "chunk-0" {
-		t.Errorf("Chunks aliased: orig was mutated")
-	}
-
-	if orig.Status.Conditions[0].Type != "Ready" {
-		t.Errorf("Conditions aliased: orig was mutated")
-	}
-}
-
 func TestSnapshotList_DeepCopyObject_NoAliasing(t *testing.T) {
 	t.Parallel()
 
@@ -377,10 +237,6 @@ func TestAddToScheme(t *testing.T) {
 		{"SnapshotList", &SnapshotList{}},
 		{"SnapshotContent", &SnapshotContent{}},
 		{"SnapshotContentList", &SnapshotContentList{}},
-		{"ManifestCheckpoint", &ManifestCheckpoint{}},
-		{"ManifestCheckpointList", &ManifestCheckpointList{}},
-		{"ManifestCheckpointContentChunk", &ManifestCheckpointContentChunk{}},
-		{"ManifestCheckpointContentChunkList", &ManifestCheckpointContentChunkList{}},
 	}
 
 	for _, tc := range cases {

@@ -19,6 +19,7 @@ limitations under the License.
 package source
 
 import (
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 )
 
@@ -70,12 +71,6 @@ type Node struct {
 	// Empty for the root node (which carries no source-ref annotation).
 	SourceName string
 
-	// ManifestCheckpointName is the cluster-scoped ManifestCheckpoint name for
-	// this node's own-scope manifests. Empty if no manifest capture ran.
-	// For orphan leaf volume nodes it is the PARENT aggregator node's checkpoint name
-	// (the captured PVC manifest lives in the parent's checkpoint).
-	ManifestCheckpointName string
-
 	// OwnDataRefs holds the volume-to-artifact bindings for this non-aggregator snapshot node.
 	// The volume data for each entry is downloaded directly into this node's directory.
 	// Nil for aggregator nodes (which expose their volumes through orphan leaf children)
@@ -94,4 +89,30 @@ type Node struct {
 	// childrenSnapshotRefs order), then orphan leaf volume children for aggregator
 	// nodes (in dataRefs order). Always nil for orphan leaf volume nodes (they are leaves).
 	Children []*Node
+}
+
+// Ref returns the aggregated-API node reference that addresses this node's own
+// manifests-download subresource.
+func (n *Node) Ref() aggapi.NodeRef {
+	return aggapi.NodeRef{
+		APIVersion: n.APIVersion,
+		Kind:       n.Kind,
+		Name:       n.Name,
+		Namespace:  n.Namespace,
+	}
+}
+
+// ManifestScopeRef returns the node whose manifests-download contains this node's
+// captured PVC manifest.
+//
+// For orphan leaf volume nodes (Binding != nil) the captured PVC manifest lives in
+// the PARENT aggregator node's own manifests (the aggregator's checkpoint captured
+// the standalone PVCs), so the parent ref is returned. For all other nodes the
+// manifests are addressed by the node's own ref.
+func (n *Node) ManifestScopeRef() aggapi.NodeRef {
+	if n.Binding != nil && n.Parent != nil {
+		return n.Parent.Ref()
+	}
+
+	return n.Ref()
 }

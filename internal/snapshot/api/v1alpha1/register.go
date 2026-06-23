@@ -22,20 +22,16 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// API group and version constants for both snapshot CRD groups.
+// API group and version constants for the snapshot CRD group.
 const (
-	StorageGroup     = "storage.deckhouse.io"
-	SnapshotterGroup = "state-snapshotter.deckhouse.io"
-	Version          = "v1alpha1"
+	StorageGroup = "storage.deckhouse.io"
+	Version      = "v1alpha1"
 )
 
-var (
-	storageGV     = schema.GroupVersion{Group: StorageGroup, Version: Version}
-	snapshotterGV = schema.GroupVersion{Group: SnapshotterGroup, Version: Version}
-)
+var storageGV = schema.GroupVersion{Group: StorageGroup, Version: Version}
 
-// AddToScheme registers all snapshot CRD types (both API groups) into the given scheme.
-// Call once during controller-runtime client setup.
+// AddToScheme registers the storage.deckhouse.io snapshot CRD types into the given
+// scheme. Call once during controller-runtime client setup.
 func AddToScheme(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(storageGV,
 		&Snapshot{},
@@ -44,14 +40,6 @@ func AddToScheme(scheme *runtime.Scheme) error {
 		&SnapshotContentList{},
 	)
 	metav1.AddToGroupVersion(scheme, storageGV)
-
-	scheme.AddKnownTypes(snapshotterGV,
-		&ManifestCheckpoint{},
-		&ManifestCheckpointList{},
-		&ManifestCheckpointContentChunk{},
-		&ManifestCheckpointContentChunkList{},
-	)
-	metav1.AddToGroupVersion(scheme, snapshotterGV)
 
 	return nil
 }
