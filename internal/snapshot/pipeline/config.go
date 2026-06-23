@@ -25,6 +25,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
@@ -83,8 +84,13 @@ type Config struct {
 	// KubeClient performs all Kubernetes API calls.  Required.
 	KubeClient client.Client
 
-	// ManifestSource fetches own-scope manifest chunks.
-	// When nil a KubeManifestSource backed by KubeClient is used.
+	// AggClient is the aggregated subresource API client used to fetch per-node
+	// manifests via manifests-download. When ManifestSource is nil and AggClient is
+	// set, applyDefaults builds an AggregatedManifestSource from it.
+	AggClient *aggapi.Client
+
+	// ManifestSource fetches own-scope node manifests.
+	// When nil an AggregatedManifestSource backed by AggClient is used.
 	ManifestSource source.ManifestSource
 
 	// WaitShadowVS is called after EnsureShadowPair and before OpenExport to
@@ -166,8 +172,8 @@ func applyDefaults(cfg Config) Config {
 		cfg.Log = slog.Default()
 	}
 
-	if cfg.ManifestSource == nil && cfg.KubeClient != nil {
-		cfg.ManifestSource = source.NewKubeManifestSource(cfg.KubeClient)
+	if cfg.ManifestSource == nil && cfg.AggClient != nil {
+		cfg.ManifestSource = source.NewAggregatedManifestSource(cfg.AggClient)
 	}
 
 	if cfg.WaitShadowVS == nil {

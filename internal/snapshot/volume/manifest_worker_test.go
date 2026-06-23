@@ -26,19 +26,21 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
 
-// stubManifestSource is a test-only ManifestSource that returns a pre-seeded list.
+// stubManifestSource is a test-only ManifestSource that returns a pre-seeded list
+// regardless of the requested node ref (each test wires a single source).
 type stubManifestSource struct {
 	objs []unstructured.Unstructured
 	err  error
 }
 
-func (s *stubManifestSource) FetchNodeManifests(_ context.Context, _ string) ([]unstructured.Unstructured, error) {
+func (s *stubManifestSource) FetchNodeManifests(_ context.Context, _ aggapi.NodeRef) ([]unstructured.Unstructured, error) {
 	return s.objs, s.err
 }
 
@@ -74,11 +76,10 @@ func TestWriteNodeManifests_WritesFiles(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion:             "storage.deckhouse.io/v1alpha1",
-		Kind:                   "Snapshot",
-		Name:                   "snap-1",
-		Namespace:              "default",
-		ManifestCheckpointName: "mc-1",
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-1",
+		Namespace:  "default",
 	}
 
 	src := &stubManifestSource{objs: objs}
@@ -110,7 +111,7 @@ func TestWriteNodeManifests_CollisionFallback(t *testing.T) {
 		makeObj("apps/v1", "Pod", "my-pod"),
 	}
 
-	node := &source.Node{ManifestCheckpointName: "mc-collision"}
+	node := &source.Node{}
 	src := &stubManifestSource{objs: objs}
 
 	if err := volume.WriteNodeManifests(context.Background(), src, nodeDir, node); err != nil {
@@ -132,32 +133,11 @@ func TestWriteNodeManifests_CollisionFallback(t *testing.T) {
 	}
 }
 
-func TestWriteNodeManifests_EmptyCheckpointName(t *testing.T) {
-	nodeDir := setupNodeDir(t)
-
-	node := &source.Node{ManifestCheckpointName: ""}
-	src := &stubManifestSource{objs: []unstructured.Unstructured{makeObj("v1", "Secret", "s")}}
-
-	if err := volume.WriteNodeManifests(context.Background(), src, nodeDir, node); err != nil {
-		t.Fatalf("WriteNodeManifests with empty checkpoint: %v", err)
-	}
-
-	// No files should be written because checkpoint name is empty.
-	entries, err := os.ReadDir(filepath.Join(nodeDir, archive.ManifestsDirName))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(entries) != 0 {
-		t.Errorf("expected no files written for empty checkpoint, got %d", len(entries))
-	}
-}
-
 func TestWriteNodeManifests_Idempotent(t *testing.T) {
 	nodeDir := setupNodeDir(t)
 
 	objs := []unstructured.Unstructured{makeObj("v1", "ConfigMap", "cm1")}
-	node := &source.Node{ManifestCheckpointName: "mc-idem"}
+	node := &source.Node{}
 	src := &stubManifestSource{objs: objs}
 
 	// First call.
@@ -278,7 +258,7 @@ func TestWriteNodeManifests_FetchError(t *testing.T) {
 	want := errors.New("backend unavailable")
 	src := &stubManifestSource{err: want}
 
-	node := &source.Node{ManifestCheckpointName: "mc-err"}
+	node := &source.Node{}
 
 	err := volume.WriteNodeManifests(context.Background(), src, nodeDir, node)
 	if err == nil {
@@ -331,11 +311,10 @@ func TestWriteNodeManifests_ExcludesLeafChildPVCs(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion:             "storage.deckhouse.io/v1alpha1",
-		Kind:                   "Snapshot",
-		Name:                   "snap-ex",
-		ManifestCheckpointName: "mc-ex",
-		Children:               []*source.Node{leafA, leafB},
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-ex",
+		Children:   []*source.Node{leafA, leafB},
 	}
 
 	src := &stubManifestSource{objs: objs}
@@ -385,8 +364,7 @@ func TestWriteNodeManifests_ExcludesLeafChildByNameFallback(t *testing.T) {
 	}
 
 	node := &source.Node{
-		ManifestCheckpointName: "mc-fallback",
-		Children:               []*source.Node{leaf},
+		Children: []*source.Node{leaf},
 	}
 
 	src := &stubManifestSource{objs: objs}
@@ -422,10 +400,9 @@ func TestWriteNodeManifests_ExcludesOwnDataRefPVCs(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion:             "demo.deckhouse.io/v1alpha1",
-		Kind:                   "VirtualDiskSnapshot",
-		Name:                   "vds-1",
-		ManifestCheckpointName: "mc-own",
+		APIVersion: "demo.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "vds-1",
 		OwnDataRefs: []snapshotapi.SnapshotDataBinding{
 			{TargetUID: "uid-own", Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-own"}},
 		},
@@ -467,11 +444,10 @@ func TestWriteVolumeManifest_WritesMatchingPVC(t *testing.T) {
 	}
 
 	volNode := &source.Node{
-		APIVersion:             "snapshot.storage.k8s.io/v1",
-		Kind:                   "VolumeSnapshot",
-		Name:                   "d8-ss-aabbccdd",
-		ManifestCheckpointName: "mc-parent",
-		Binding:                &binding,
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "d8-ss-aabbccdd",
+		Binding:    &binding,
 	}
 
 	src := &stubManifestSource{objs: objs}
@@ -510,8 +486,7 @@ func TestWriteVolumeManifest_MatchByNameFallback(t *testing.T) {
 	}
 
 	volNode := &source.Node{
-		ManifestCheckpointName: "mc-byname",
-		Binding:                &binding,
+		Binding: &binding,
 	}
 
 	src := &stubManifestSource{objs: objs}
@@ -540,8 +515,7 @@ func TestWriteVolumeManifest_ErrorWhenPVCMissing(t *testing.T) {
 	}
 
 	volNode := &source.Node{
-		ManifestCheckpointName: "mc-missing",
-		Binding:                &binding,
+		Binding: &binding,
 	}
 
 	src := &stubManifestSource{objs: objs}
@@ -830,39 +804,5 @@ func TestFinalizeNode_NoVolumesOmitted(t *testing.T) {
 
 	if err := archive.VerifyNode(nodeDir); err != nil {
 		t.Errorf("VerifyNode: %v", err)
-	}
-}
-
-func TestWriteVolumeManifest_EmptyCheckpointName(t *testing.T) {
-	t.Parallel()
-
-	nodeDir := setupNodeDir(t)
-
-	// Even though the source has objects, an empty checkpoint name is a no-op.
-	objs := []unstructured.Unstructured{makeObj("v1", "PersistentVolumeClaim", "pvc-1")}
-
-	binding := snapshotapi.SnapshotDataBinding{
-		TargetUID: "uid-1",
-		Target:    snapshotapi.SnapshotSubjectRef{Name: "pvc-1"},
-	}
-
-	volNode := &source.Node{
-		ManifestCheckpointName: "",
-		Binding:                &binding,
-	}
-
-	src := &stubManifestSource{objs: objs}
-
-	if err := volume.WriteVolumeManifest(context.Background(), src, nodeDir, volNode); err != nil {
-		t.Fatalf("WriteVolumeManifest with empty checkpoint: %v", err)
-	}
-
-	entries, err := os.ReadDir(filepath.Join(nodeDir, archive.ManifestsDirName))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(entries) != 0 {
-		t.Errorf("expected no files written for empty checkpoint, got %d", len(entries))
 	}
 }

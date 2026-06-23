@@ -42,7 +42,8 @@ const volumeSnapshotAPIVersion = "snapshot.storage.k8s.io/v1"
 // tree by following status.childrenSnapshotRefs.
 //
 // Each node's SnapshotContent is resolved via status.boundSnapshotContentName; the
-// ManifestCheckpointName and DataRefs are taken from the content's status.
+// DataRefs (volume-to-artifact bindings) are taken from the content's status. Node
+// manifests are fetched separately via the aggregated manifests-download subresource.
 //
 // All snapshot nodes are namespace-local: child refs carry no namespace field and are
 // always fetched in the same namespace as the root. The function does one typed Get per
@@ -113,14 +114,13 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 	}
 
 	node := &Node{
-		APIVersion:             apiVersion,
-		Kind:                   kind,
-		Name:                   name,
-		Namespace:              b.namespace,
-		SourceRef:              sourceRef,
-		SourceName:             sourceName,
-		ManifestCheckpointName: content.Status.ManifestCheckpointName,
-		Parent:                 parent,
+		APIVersion: apiVersion,
+		Kind:       kind,
+		Name:       name,
+		Namespace:  b.namespace,
+		SourceRef:  sourceRef,
+		SourceName: sourceName,
+		Parent:     parent,
 	}
 
 	allChildRefs, err := extractChildRefs(obj)
@@ -149,15 +149,14 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 			binding := content.Status.DataRefs[i]
 
 			leafNode := &Node{
-				APIVersion:             volumeSnapshotAPIVersion,
-				Kind:                   "VolumeSnapshot",
-				Name:                   binding.Target.Name,
-				Namespace:              b.namespace,
-				SourceRef:              binding.TargetUID,
-				SourceName:             binding.Target.Name,
-				ManifestCheckpointName: content.Status.ManifestCheckpointName,
-				Parent:                 node,
-				Binding:                &binding,
+				APIVersion: volumeSnapshotAPIVersion,
+				Kind:       "VolumeSnapshot",
+				Name:       binding.Target.Name,
+				Namespace:  b.namespace,
+				SourceRef:  binding.TargetUID,
+				SourceName: binding.Target.Name,
+				Parent:     node,
+				Binding:    &binding,
 			}
 
 			node.Children = append(node.Children, leafNode)

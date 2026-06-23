@@ -18,9 +18,7 @@ package pipeline_test
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
-	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -64,10 +62,9 @@ const (
 	diskVSCName   = "vsc-disk"
 	sourcePVCName = "pvc-disk-source"
 
-	storageAPIVersion     = "storage.deckhouse.io/v1alpha1"
-	childAPIVersion       = "demo.deckhouse.io/v1alpha1"
-	childKind             = "VirtualDiskSnapshot"
-	snapshotterAPIVersion = "state-snapshotter.deckhouse.io/v1alpha1"
+	storageAPIVersion = "storage.deckhouse.io/v1alpha1"
+	childAPIVersion   = "demo.deckhouse.io/v1alpha1"
+	childKind         = "VirtualDiskSnapshot"
 )
 
 // TestPipeline_HappyPath verifies the full download pipeline against a fake
@@ -109,7 +106,7 @@ func TestPipeline_HappyPath(t *testing.T) {
 		},
 	}
 
-	err := pipeline.Run(context.Background(), cfg)
+	err := runPipeline(context.Background(), cfg)
 	require.NoError(t, err)
 
 	// Root node must be complete.
@@ -148,7 +145,7 @@ func TestPipeline_HappyPath(t *testing.T) {
 	// Sleep briefly so that any writes would produce a different mtime.
 	time.Sleep(20 * time.Millisecond)
 
-	err = pipeline.Run(context.Background(), cfg)
+	err = runPipeline(context.Background(), cfg)
 	require.NoError(t, err)
 
 	require.Equal(t, rootMod, statMtime(t, rootYAML),
@@ -181,7 +178,7 @@ func TestPipeline_CleanupAfterError(t *testing.T) {
 		},
 	}
 
-	err := pipeline.Run(context.Background(), cfg)
+	err := runPipeline(context.Background(), cfg)
 	require.Error(t, err, "expected pipeline to fail when OpenExport errors")
 
 	// Shadow VS and VSC must have been cleaned up despite the failed run.
@@ -233,7 +230,7 @@ func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
 		},
 	}
 
-	err := pipeline.Run(context.Background(), cfg)
+	err := runPipeline(context.Background(), cfg)
 	require.NoError(t, err)
 
 	// FinalizeNode must have been called: disk-snap directory must now be complete.
@@ -277,7 +274,7 @@ func TestPipeline_FSResumeAfterTar(t *testing.T) {
 		},
 	}
 
-	err := pipeline.Run(context.Background(), cfg)
+	err := runPipeline(context.Background(), cfg)
 	require.NoError(t, err)
 
 	// FinalizeNode must have been called: disk-snap directory must now be complete.
@@ -340,28 +337,12 @@ func buildFakeClient(t *testing.T) client.Client {
 		},
 	}
 
-	// Root SnapshotContent: has manifests, no volume.
+	// Root SnapshotContent: own-node manifests are served by the stub ManifestSource,
+	// keyed by node ref; the content itself carries no volume DataRefs here.
 	rootContent := &snapshotapi.SnapshotContent{
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-root"},
-		Status: snapshotapi.SnapshotContentStatus{
-			ManifestCheckpointName: "mcp-root",
-		},
 	}
-
-	// ManifestCheckpoint for the root.
-	mcp := &snapshotapi.ManifestCheckpoint{
-		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotterAPIVersion, Kind: "ManifestCheckpoint"},
-		ObjectMeta: metav1.ObjectMeta{Name: "mcp-root"},
-		Spec:       snapshotapi.ManifestCheckpointSpec{SourceNamespace: testNS},
-		Status: snapshotapi.ManifestCheckpointStatus{
-			TotalObjects: 1,
-			Chunks:       []snapshotapi.ChunkInfo{{Index: 0, Name: "mcp-root-chunk-0", ObjectsCount: 1}},
-		},
-	}
-
-	// ManifestCheckpointContentChunk: one ConfigMap.
-	mcpChunk := makeManifestChunk(t, "mcp-root-chunk-0", "mcp-root", 0)
 
 	// Child snapshot (unstructured — domain-specific kind not in the scheme).
 	childSnap := makeUnstructuredSnap(childAPIVersion, childKind, testNS, diskSnapName, "sc-disk")
@@ -421,7 +402,7 @@ func buildFakeClient(t *testing.T) client.Client {
 		},
 	}
 
-	typed := []client.Object{rootSnap, rootContent, mcp, mcpChunk, childContent, realVSC, sourcePVC}
+	typed := []client.Object{rootSnap, rootContent, childContent, realVSC, sourcePVC}
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -440,34 +421,6 @@ func buildScheme(t *testing.T) *runtime.Scheme {
 	require.NoError(t, corev1.AddToScheme(scheme))
 
 	return scheme
-}
-
-// makeManifestChunk creates a ManifestCheckpointContentChunk with one ConfigMap encoded
-// as base64(gzip(json[])).
-func makeManifestChunk(t *testing.T, name, checkpointName string, index int) *snapshotapi.ManifestCheckpointContentChunk {
-	t.Helper()
-
-	const jsonPayload = `[{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"test-cfg","namespace":"test-ns"}}]`
-
-	var buf bytes.Buffer
-
-	gz := gzip.NewWriter(&buf)
-	_, err := gz.Write([]byte(jsonPayload))
-	require.NoError(t, err)
-	require.NoError(t, gz.Close())
-
-	encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
-
-	return &snapshotapi.ManifestCheckpointContentChunk{
-		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotterAPIVersion, Kind: "ManifestCheckpointContentChunk"},
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: snapshotapi.ManifestCheckpointContentChunkSpec{
-			CheckpointName: checkpointName,
-			Index:          index,
-			Data:           encoded,
-			ObjectsCount:   1,
-		},
-	}
 }
 
 // TestPipeline_ShadowMetaFromLivePVC verifies that downloadVolume injects
@@ -508,7 +461,7 @@ func TestPipeline_ShadowMetaFromLivePVC(t *testing.T) {
 		},
 	}
 
-	err := pipeline.Run(context.Background(), cfg)
+	err := runPipeline(context.Background(), cfg)
 	require.NoError(t, err)
 
 	assert.Equal(t, "csi-ceph-rbd", capturedMeta.StorageClass,
@@ -518,9 +471,10 @@ func TestPipeline_ShadowMetaFromLivePVC(t *testing.T) {
 }
 
 // TestPipeline_ShadowMetaFromManifest verifies that when the source PVC is gone from
-// the cluster, storageClass and volumeMode are resolved from the node's ManifestCheckpoint
-// via shadowMetaFromCheckpoint. The on-disk manifest is intentionally absent (excluded by
-// the OwnDataRef rule); only the checkpoint contains the captured PVC object.
+// the cluster, storageClass and volumeMode are resolved from the node's own-scope
+// manifests via shadowMetaFromManifests. The on-disk manifest is intentionally absent
+// (excluded by the OwnDataRef rule); only the aggregated manifests-download surface
+// (the stub ManifestSource, keyed by node ref) carries the captured PVC object.
 func TestPipeline_ShadowMetaFromManifest(t *testing.T) {
 	t.Parallel()
 
@@ -529,10 +483,10 @@ func TestPipeline_ShadowMetaFromManifest(t *testing.T) {
 
 	defer srv.Close()
 
-	// Build a fake client WITHOUT the source PVC (simulating a deleted PVC).
-	// sc-disk carries a ManifestCheckpointName so shadowMetaFromCheckpoint can look
-	// up the PVC object from the checkpoint. The PVC is captured in the checkpoint
-	// with storageClass="csi-ceph-rbd-from-checkpoint" and volumeMode="Block".
+	// Build a fake client WITHOUT the source PVC (simulating a deleted PVC). The disk-snap
+	// node's own manifests (seeded in testManifestSource keyed by the disk-snap ref) carry
+	// the captured PVC with storageClass="csi-ceph-rbd-from-checkpoint" and volumeMode="Block",
+	// so shadowMetaFromManifests can resolve the shadow metadata.
 	scheme := buildScheme(t)
 
 	snapshotHandle := "snap-handle-mf"
@@ -567,13 +521,13 @@ func TestPipeline_ShadowMetaFromManifest(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-root-mf"},
 	}
 
-	// sc-disk sets ManifestCheckpointName so that the deleted-PVC fallback path
-	// in resolveShadowMeta can reach the captured PVC object via FetchNodeManifests.
+	// sc-disk's DataRef materialises disk-snap as a non-aggregator OwnDataRef node.
+	// Its captured PVC (with storageClass/volumeMode) is provided by the stub
+	// ManifestSource keyed by the disk-snap ref, not by this SnapshotContent.
 	childContent := &snapshotapi.SnapshotContent{
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-disk"},
 		Status: snapshotapi.SnapshotContentStatus{
-			ManifestCheckpointName: "mcp-disk-mf",
 			DataRefs: []snapshotapi.SnapshotDataBinding{
 				{
 					TargetUID: "uid-disk",
@@ -595,18 +549,9 @@ func TestPipeline_ShadowMetaFromManifest(t *testing.T) {
 
 	childSnap := makeUnstructuredSnap(childAPIVersion, childKind, testNS, diskSnapName, "sc-disk")
 
-	// The checkpoint captures the PVC with the storageClass and volumeMode that
-	// shadowMetaFromCheckpoint should surface when the live PVC is absent.
-	pvcPayload := `[{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"` +
-		sourcePVCName + `","namespace":"` + testNS + `"}` +
-		`,"spec":{"storageClassName":"csi-ceph-rbd-from-checkpoint","volumeMode":"Block"}}]`
-
-	diskMCP := makeMFManifestCheckpoint("mcp-disk-mf")
-	diskChunk := makeMFManifestChunk(t, "mcp-disk-mf-chunk-0", "mcp-disk-mf", 0, pvcPayload)
-
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(rootSnap, rootContent, childContent, realVSC, diskMCP, diskChunk).
+		WithObjects(rootSnap, rootContent, childContent, realVSC).
 		WithObjects(childSnap).
 		Build()
 
@@ -636,51 +581,13 @@ func TestPipeline_ShadowMetaFromManifest(t *testing.T) {
 		},
 	}
 
-	err := pipeline.Run(context.Background(), cfg)
+	err := runPipeline(context.Background(), cfg)
 	require.NoError(t, err)
 
 	assert.Equal(t, "csi-ceph-rbd-from-checkpoint", capturedMeta.StorageClass,
 		"shadow VS must carry storage-class annotation resolved from ManifestCheckpoint")
 	assert.Equal(t, "Block", capturedMeta.VolumeMode,
 		"shadow VS must carry volume-mode annotation resolved from ManifestCheckpoint")
-}
-
-// makeMFManifestCheckpoint builds a ManifestCheckpoint for the deleted-PVC manifest test.
-func makeMFManifestCheckpoint(name string) *snapshotapi.ManifestCheckpoint {
-	return &snapshotapi.ManifestCheckpoint{
-		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotterAPIVersion, Kind: "ManifestCheckpoint"},
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       snapshotapi.ManifestCheckpointSpec{SourceNamespace: testNS},
-		Status: snapshotapi.ManifestCheckpointStatus{
-			TotalObjects: 1,
-			Chunks:       []snapshotapi.ChunkInfo{{Index: 0, Name: name + "-chunk-0", ObjectsCount: 1}},
-		},
-	}
-}
-
-// makeMFManifestChunk encodes an arbitrary JSON array into a ManifestCheckpointContentChunk.
-func makeMFManifestChunk(t *testing.T, name, checkpointName string, index int, jsonPayload string) *snapshotapi.ManifestCheckpointContentChunk {
-	t.Helper()
-
-	var buf bytes.Buffer
-
-	gz := gzip.NewWriter(&buf)
-	_, err := gz.Write([]byte(jsonPayload))
-	require.NoError(t, err)
-	require.NoError(t, gz.Close())
-
-	encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
-
-	return &snapshotapi.ManifestCheckpointContentChunk{
-		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotterAPIVersion, Kind: "ManifestCheckpointContentChunk"},
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: snapshotapi.ManifestCheckpointContentChunkSpec{
-			CheckpointName: checkpointName,
-			Index:          index,
-			Data:           encoded,
-			ObjectsCount:   1,
-		},
-	}
 }
 
 // TestPipeline_WaitShadowVSCalledBeforeExport verifies that WaitShadowVS is
@@ -723,7 +630,7 @@ func TestPipeline_WaitShadowVSCalledBeforeExport(t *testing.T) {
 		},
 	}
 
-	err := pipeline.Run(context.Background(), cfg)
+	err := runPipeline(context.Background(), cfg)
 	require.NoError(t, err)
 
 	// WaitShadowVS must appear before OpenExport in the call log.
@@ -760,7 +667,7 @@ func TestPipeline_ShadowReadinessTimeout(t *testing.T) {
 		},
 	}
 
-	err := pipeline.Run(context.Background(), cfg)
+	err := runPipeline(context.Background(), cfg)
 	require.Error(t, err, "expected pipeline to fail when shadow VS wait times out")
 
 	// Shadow VS and VSC must have been cleaned up despite the timeout.
@@ -818,7 +725,7 @@ func TestPipeline_SubtreeSelection(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, pipeline.Run(context.Background(), cfg))
+	require.NoError(t, runPipeline(context.Background(), cfg))
 
 	// Root dir must NOT have a snapshot.yaml — it was not processed, only scaffolded.
 	_, err := os.Stat(filepath.Join(outputDir, archive.SnapshotYAMLName))
@@ -845,7 +752,7 @@ func TestPipeline_SubtreeSelection(t *testing.T) {
 
 	time.Sleep(20 * time.Millisecond)
 
-	require.NoError(t, pipeline.Run(context.Background(), cfg))
+	require.NoError(t, runPipeline(context.Background(), cfg))
 	require.Equal(t, diskMod, statMtime(t, diskYAML),
 		"disk-snap snapshot.yaml must not be rewritten on second run")
 }
@@ -879,7 +786,7 @@ func TestPipeline_SubtreeRootSelection(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, pipeline.Run(context.Background(), cfg))
+	require.NoError(t, runPipeline(context.Background(), cfg))
 
 	// Root node must be complete (same as full-tree download).
 	assertNodeComplete(t, outputDir)
@@ -938,7 +845,7 @@ func TestPipeline_NoneCompression(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, pipeline.Run(context.Background(), cfg))
+	require.NoError(t, runPipeline(context.Background(), cfg))
 
 	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 		archive.NodeDirName(childKind, diskSnapName))
@@ -1030,7 +937,7 @@ func TestPipeline_PartialChunkResume(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, pipeline.Run(context.Background(), cfg))
+	require.NoError(t, runPipeline(context.Background(), cfg))
 
 	// (a) Chunk 0 must not have been re-fetched; chunks 1 and 2 must have been fetched.
 	mu.Lock()

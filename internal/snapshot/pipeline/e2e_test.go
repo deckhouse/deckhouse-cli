@@ -21,7 +21,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -135,7 +134,7 @@ func TestPipeline_E2E_FullTree(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, pipeline.Run(context.Background(), cfg))
+	require.NoError(t, runPipeline(context.Background(), cfg))
 
 	// ── Root node assertions ──────────────────────────────────────────────────
 	assertE2ENodeComplete(t, outputDir)
@@ -208,7 +207,7 @@ func TestPipeline_E2E_FullTree(t *testing.T) {
 	mtimes := e2eCollectMtimes(t, outputDir)
 	time.Sleep(20 * time.Millisecond)
 
-	require.NoError(t, pipeline.Run(context.Background(), cfg))
+	require.NoError(t, runPipeline(context.Background(), cfg))
 
 	for path, before := range mtimes {
 		after := statMtime(t, path)
@@ -410,27 +409,11 @@ func buildE2EFakeClient(t *testing.T) client.Client {
 		},
 	}
 
-	// Root SnapshotContent: manifests, no volume.
+	// Root SnapshotContent: no volume (own manifests served by the stub ManifestSource).
 	rootContent := &snapshotapi.SnapshotContent{
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-e2e-root"},
-		Status: snapshotapi.SnapshotContentStatus{
-			ManifestCheckpointName: "mcp-e2e-root",
-		},
 	}
-
-	// ManifestCheckpoint for root.
-	rootMCP := &snapshotapi.ManifestCheckpoint{
-		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotterAPIVersion, Kind: "ManifestCheckpoint"},
-		ObjectMeta: metav1.ObjectMeta{Name: "mcp-e2e-root"},
-		Spec:       snapshotapi.ManifestCheckpointSpec{SourceNamespace: e2eNS},
-		Status: snapshotapi.ManifestCheckpointStatus{
-			TotalObjects: 1,
-			Chunks:       []snapshotapi.ChunkInfo{{Index: 0, Name: "chunk-e2e-root-0", ObjectsCount: 1}},
-		},
-	}
-
-	rootChunk := makeE2EManifestChunk(t, "chunk-e2e-root-0", "mcp-e2e-root", 0, e2eRootCMName)
 
 	// ── vm-snap unstructured ──────────────────────────────────────────────────
 	vmSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eVMKind, e2eNS, e2eVMSnap, "sc-e2e-vm",
@@ -442,22 +425,7 @@ func buildE2EFakeClient(t *testing.T) client.Client {
 	vmContent := &snapshotapi.SnapshotContent{
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-e2e-vm"},
-		Status: snapshotapi.SnapshotContentStatus{
-			ManifestCheckpointName: "mcp-e2e-vm",
-		},
 	}
-
-	vmMCP := &snapshotapi.ManifestCheckpoint{
-		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotterAPIVersion, Kind: "ManifestCheckpoint"},
-		ObjectMeta: metav1.ObjectMeta{Name: "mcp-e2e-vm"},
-		Spec:       snapshotapi.ManifestCheckpointSpec{SourceNamespace: e2eNS},
-		Status: snapshotapi.ManifestCheckpointStatus{
-			TotalObjects: 1,
-			Chunks:       []snapshotapi.ChunkInfo{{Index: 0, Name: "chunk-e2e-vm-0", ObjectsCount: 1}},
-		},
-	}
-
-	vmChunk := makeE2EManifestChunk(t, "chunk-e2e-vm-0", "mcp-e2e-vm", 0, e2eVMCMName)
 
 	// ── disk-block unstructured (non-aggregator: no childrenSnapshotRefs) ─────
 	// Its DataRef in blockContent becomes an OwnDataRef on the node;
@@ -572,8 +540,8 @@ func buildE2EFakeClient(t *testing.T) client.Client {
 	}
 
 	typed := []client.Object{
-		rootSnap, rootContent, rootMCP, rootChunk,
-		vmContent, vmMCP, vmChunk,
+		rootSnap, rootContent,
+		vmContent,
 		blockContent,
 		fsContent,
 		realBlockVSC, realFSVSC,
@@ -585,37 +553,6 @@ func buildE2EFakeClient(t *testing.T) client.Client {
 		WithObjects(typed...).
 		WithObjects(vmSnap, blockSnap, fsSnap).
 		Build()
-}
-
-// makeE2EManifestChunk encodes a single ConfigMap named cmName into a
-// ManifestCheckpointContentChunk as base64(gzip(json[])).
-func makeE2EManifestChunk(t *testing.T, name, checkpointName string, index int, cmName string) *snapshotapi.ManifestCheckpointContentChunk {
-	t.Helper()
-
-	payload := fmt.Sprintf(
-		`[{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":%q,"namespace":%q}}]`,
-		cmName, e2eNS,
-	)
-
-	var buf bytes.Buffer
-
-	gz := gzip.NewWriter(&buf)
-	_, err := gz.Write([]byte(payload))
-	require.NoError(t, err)
-	require.NoError(t, gz.Close())
-
-	encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
-
-	return &snapshotapi.ManifestCheckpointContentChunk{
-		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotterAPIVersion, Kind: "ManifestCheckpointContentChunk"},
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: snapshotapi.ManifestCheckpointContentChunkSpec{
-			CheckpointName: checkpointName,
-			Index:          index,
-			Data:           encoded,
-			ObjectsCount:   1,
-		},
-	}
 }
 
 // makeUnstructuredE2ENode builds an unstructured snapshot object (for domain-specific
@@ -647,32 +584,6 @@ func makeUnstructuredE2ENode(
 				"namespace": namespace,
 			},
 			"status": status,
-		},
-	}
-}
-
-// makeE2EManifestChunkWithPayload encodes an arbitrary JSON array payload into a
-// ManifestCheckpointContentChunk as base64(gzip(payload)).
-func makeE2EManifestChunkWithPayload(t *testing.T, name, checkpointName string, index int, jsonPayload string) *snapshotapi.ManifestCheckpointContentChunk {
-	t.Helper()
-
-	var buf bytes.Buffer
-
-	gz := gzip.NewWriter(&buf)
-	_, err := gz.Write([]byte(jsonPayload))
-	require.NoError(t, err)
-	require.NoError(t, gz.Close())
-
-	encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
-
-	return &snapshotapi.ManifestCheckpointContentChunk{
-		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotterAPIVersion, Kind: "ManifestCheckpointContentChunk"},
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: snapshotapi.ManifestCheckpointContentChunkSpec{
-			CheckpointName: checkpointName,
-			Index:          index,
-			Data:           encoded,
-			ObjectsCount:   1,
 		},
 	}
 }
@@ -727,7 +638,7 @@ func TestPipeline_E2E_MultiVolume(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, pipeline.Run(context.Background(), cfg))
+	require.NoError(t, runPipeline(context.Background(), cfg))
 
 	// multi-disk snapshot node.
 	multiDiskDir := filepath.Join(outputDir, archive.SnapshotsDirName,
@@ -793,7 +704,7 @@ func TestPipeline_E2E_MultiVolume(t *testing.T) {
 	mtimes := e2eCollectMtimes(t, outputDir)
 	time.Sleep(20 * time.Millisecond)
 
-	require.NoError(t, pipeline.Run(context.Background(), cfg))
+	require.NoError(t, runPipeline(context.Background(), cfg))
 
 	for path, before := range mtimes {
 		after := statMtime(t, path)
@@ -830,38 +741,15 @@ func buildMultiVolumeFakeClient(t *testing.T) client.Client {
 
 	// multi-disk: VirtualDiskSnapshot with TWO OwnDataRefs (block + fs).
 	// No childrenSnapshotRefs → non-aggregator → multi-volume layout in node dir.
+	// Its own manifests (ConfigMap + both OwnDataRef PVCs) are served by the stub
+	// ManifestSource keyed by the multi-disk node ref; only the ConfigMap reaches
+	// multi-disk/manifests/ since OwnDataRef PVCs are excluded.
 	multiDiskSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eDiskKind, e2eNS, e2eMultiDisk, "sc-multi-disk", nil)
-
-	// sc-multi-disk checkpoint has: configmap + block-pvc + fs-pvc.
-	// Only the ConfigMap appears in multi-disk/manifests/; OwnDataRef PVCs are excluded.
-	multiDiskPayload := fmt.Sprintf(
-		`[`+
-			`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"multi-cfg","namespace":%q}},`+
-			`{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":%q,"namespace":%q,"uid":"uid-multi-block"},"spec":{"storageClassName":"csi-multi-block","volumeMode":"Block"}},`+
-			`{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":%q,"namespace":%q,"uid":"uid-multi-fs"},"spec":{"storageClassName":"csi-multi-fs","volumeMode":"Filesystem"}}`+
-			`]`,
-		e2eNS,
-		e2eMultiBlockPVC, e2eNS,
-		e2eMultiFSPVC, e2eNS,
-	)
-
-	multiDiskMCP := &snapshotapi.ManifestCheckpoint{
-		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotterAPIVersion, Kind: "ManifestCheckpoint"},
-		ObjectMeta: metav1.ObjectMeta{Name: "mcp-multi-disk"},
-		Spec:       snapshotapi.ManifestCheckpointSpec{SourceNamespace: e2eNS},
-		Status: snapshotapi.ManifestCheckpointStatus{
-			TotalObjects: 3,
-			Chunks:       []snapshotapi.ChunkInfo{{Index: 0, Name: "chunk-multi-disk-0", ObjectsCount: 3}},
-		},
-	}
-
-	multiDiskChunk := makeE2EManifestChunkWithPayload(t, "chunk-multi-disk-0", "mcp-multi-disk", 0, multiDiskPayload)
 
 	multiDiskContent := &snapshotapi.SnapshotContent{
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-multi-disk"},
 		Status: snapshotapi.SnapshotContentStatus{
-			ManifestCheckpointName: "mcp-multi-disk",
 			DataRefs: []snapshotapi.SnapshotDataBinding{
 				{
 					TargetUID: "uid-multi-block",
@@ -953,7 +841,7 @@ func buildMultiVolumeFakeClient(t *testing.T) client.Client {
 
 	typed := []client.Object{
 		rootSnap, rootContent,
-		multiDiskContent, multiDiskMCP, multiDiskChunk,
+		multiDiskContent,
 		realBlockVSC, realFSVSC,
 		liveBlockPVC, liveFSPVC,
 	}
@@ -968,14 +856,14 @@ func buildMultiVolumeFakeClient(t *testing.T) client.Client {
 // TestPipeline_E2E_DeletedPVC verifies that a non-aggregator OwnDataRef node with a
 // genuinely deleted backing PVC still downloads successfully. The live PVC is absent
 // from the cluster. Shadow metadata (storageClass, volumeMode) is resolved from the
-// node's ManifestCheckpoint via shadowMetaFromCheckpoint, not from the absent live PVC
+// node's own-scope manifests via shadowMetaFromManifests, not from the absent live PVC
 // and not from an on-disk manifest (excluded from disk by the OwnDataRef rule).
 //
-//  1. del-disk's SnapshotContent checkpoint contains the del-pvc manifest.
+//  1. del-disk's own manifests (stub ManifestSource) contain the del-pvc manifest.
 //  2. WriteNodeManifests excludes the PVC (OwnDataRef rule); del-disk/manifests/ has no PVC file.
-//  3. The live PVC is absent (genuinely deleted); resolveShadowMeta falls back to the checkpoint.
-//  4. shadowMetaFromCheckpoint reads storageClass and volumeMode from the captured PVC object.
-//  5. The download succeeds with the correct storageClass and volumeMode from the checkpoint.
+//  3. The live PVC is absent (genuinely deleted); resolveShadowMeta falls back to those manifests.
+//  4. shadowMetaFromManifests reads storageClass and volumeMode from the captured PVC object.
+//  5. The download succeeds with the correct storageClass and volumeMode from the manifests.
 //
 // Tree:
 //
@@ -1020,7 +908,7 @@ func TestPipeline_E2E_DeletedPVC(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, pipeline.Run(context.Background(), cfg))
+	require.NoError(t, runPipeline(context.Background(), cfg))
 
 	// del-disk is a non-aggregator: block data lands directly in its node dir.
 	delDiskDir := filepath.Join(outputDir, archive.SnapshotsDirName,
@@ -1042,18 +930,19 @@ func TestPipeline_E2E_DeletedPVC(t *testing.T) {
 	require.True(t, os.IsNotExist(pvcStatErr),
 		"del-disk must NOT have the backing PVC manifest in its manifests/ (OwnDataRef PVC excluded)")
 
-	// Shadow VS annotations come from the ManifestCheckpoint fallback (live PVC is absent).
+	// Shadow VS annotations come from the manifests fallback (live PVC is absent).
 	require.Equal(t, "csi-del-sc", capturedMeta.StorageClass,
-		"storageClass must be resolved from ManifestCheckpoint fallback")
+		"storageClass must be resolved from the manifests fallback")
 	require.Equal(t, "Block", capturedMeta.VolumeMode,
-		"volumeMode must be resolved from ManifestCheckpoint fallback")
+		"volumeMode must be resolved from the manifests fallback")
 }
 
 // buildDeletedPVCFakeClient constructs the fake kube client for TestPipeline_E2E_DeletedPVC.
-// The checkpoint for del-disk contains the del-pvc manifest with storageClass and volumeMode.
-// The live PVC is deliberately absent from the fake client so that resolveShadowMeta must
-// fall back to shadowMetaFromCheckpoint. WriteNodeManifests excludes the PVC from
-// del-disk/manifests/ per the OwnDataRef rule; the on-disk file is also intentionally absent.
+// The stub ManifestSource serves del-disk's own manifests, including the del-pvc manifest
+// with storageClass and volumeMode. The live PVC is deliberately absent from the fake client
+// so that resolveShadowMeta must fall back to shadowMetaFromManifests. WriteNodeManifests
+// excludes the PVC from del-disk/manifests/ per the OwnDataRef rule; the on-disk file is also
+// intentionally absent.
 func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 	t.Helper()
 
@@ -1079,33 +968,15 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 	}
 
 	// del-disk: non-aggregator (no childrenSnapshotRefs).
-	// Its DataRef becomes an OwnDataRef.
+	// Its DataRef becomes an OwnDataRef. The captured del-pvc manifest (carrying the
+	// storageClass/volumeMode that shadowMetaFromManifests must surface when the live
+	// PVC is absent) is served by the stub ManifestSource keyed by the del-disk node ref.
 	delDiskSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eDiskKind, e2eNS, e2eDelDisk, "sc-del-disk", nil)
-
-	// The del-disk checkpoint contains the del-pvc manifest (also present as a live PVC).
-	// WriteNodeManifests will exclude the PVC from del-disk/manifests/ per the OwnDataRef rule.
-	delPayload := fmt.Sprintf(
-		`[{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":%q,"namespace":%q,"uid":"uid-del"},"spec":{"storageClassName":"csi-del-sc","volumeMode":"Block"}}]`,
-		e2eDelPVC, e2eNS,
-	)
-
-	delMCP := &snapshotapi.ManifestCheckpoint{
-		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotterAPIVersion, Kind: "ManifestCheckpoint"},
-		ObjectMeta: metav1.ObjectMeta{Name: "mcp-del-disk"},
-		Spec:       snapshotapi.ManifestCheckpointSpec{SourceNamespace: e2eNS},
-		Status: snapshotapi.ManifestCheckpointStatus{
-			TotalObjects: 1,
-			Chunks:       []snapshotapi.ChunkInfo{{Index: 0, Name: "chunk-del-disk-0", ObjectsCount: 1}},
-		},
-	}
-
-	delChunk := makeE2EManifestChunkWithPayload(t, "chunk-del-disk-0", "mcp-del-disk", 0, delPayload)
 
 	delContent := &snapshotapi.SnapshotContent{
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-del-disk"},
 		Status: snapshotapi.SnapshotContentStatus{
-			ManifestCheckpointName: "mcp-del-disk",
 			DataRefs: []snapshotapi.SnapshotDataBinding{
 				{
 					TargetUID: "uid-del",
@@ -1147,7 +1018,7 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 
 	typed := []client.Object{
 		rootSnap, rootContent,
-		delContent, delMCP, delChunk,
+		delContent,
 		realDelVSC,
 	}
 
@@ -1206,7 +1077,7 @@ func TestPipeline_E2E_OrphanPVCLeaf(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, pipeline.Run(context.Background(), cfg))
+	require.NoError(t, runPipeline(context.Background(), cfg))
 
 	// agg-snap is the aggregator node.
 	aggSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
@@ -1255,7 +1126,7 @@ func TestPipeline_E2E_OrphanPVCLeaf(t *testing.T) {
 	mtimes := e2eCollectMtimes(t, outputDir)
 	time.Sleep(20 * time.Millisecond)
 
-	require.NoError(t, pipeline.Run(context.Background(), cfg))
+	require.NoError(t, runPipeline(context.Background(), cfg))
 
 	for path, before := range mtimes {
 		after := statMtime(t, path)
@@ -1312,33 +1183,14 @@ func buildOrphanLeafFakeClient(t *testing.T) client.Client {
 		},
 	}
 
-	// Checkpoint for agg-snap: ConfigMap + pvc-agg manifest.
-	// ConfigMap goes to aggregator manifests/; pvc-agg goes to orphan leaf manifests/.
-	aggPayload := fmt.Sprintf(
-		`[`+
-			`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"agg-cm","namespace":%q}},`+
-			`{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"pvc-agg","namespace":%q,"uid":"uid-agg-pvc"},"spec":{"storageClassName":"csi-agg-sc","volumeMode":"Block"}}`+
-			`]`,
-		e2eNS, e2eNS,
-	)
-
-	aggMCP := &snapshotapi.ManifestCheckpoint{
-		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotterAPIVersion, Kind: "ManifestCheckpoint"},
-		ObjectMeta: metav1.ObjectMeta{Name: "mcp-agg"},
-		Spec:       snapshotapi.ManifestCheckpointSpec{SourceNamespace: e2eNS},
-		Status: snapshotapi.ManifestCheckpointStatus{
-			TotalObjects: 2,
-			Chunks:       []snapshotapi.ChunkInfo{{Index: 0, Name: "chunk-agg-0", ObjectsCount: 2}},
-		},
-	}
-
-	aggChunk := makeE2EManifestChunkWithPayload(t, "chunk-agg-0", "mcp-agg", 0, aggPayload)
-
+	// agg-snap own manifests (served by the stub ManifestSource keyed by the agg-snap
+	// node ref): ConfigMap + pvc-agg. The ConfigMap goes to the aggregator manifests/;
+	// pvc-agg is excluded there and instead written into the orphan leaf manifests/
+	// (the leaf resolves its captured PVC via the parent's ManifestScopeRef).
 	aggContent := &snapshotapi.SnapshotContent{
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-agg"},
 		Status: snapshotapi.SnapshotContentStatus{
-			ManifestCheckpointName: "mcp-agg",
 			DataRefs: []snapshotapi.SnapshotDataBinding{
 				{
 					TargetUID: "uid-agg-pvc",
@@ -1388,7 +1240,7 @@ func buildOrphanLeafFakeClient(t *testing.T) client.Client {
 
 	typed := []client.Object{
 		rootSnap, rootContent,
-		aggContent, aggMCP, aggChunk,
+		aggContent,
 		realAggVSC, liveAggPVC,
 	}
 
@@ -1445,7 +1297,7 @@ func TestPipeline_BlockCodecMatrix(t *testing.T) {
 				},
 			}
 
-			require.NoError(t, pipeline.Run(context.Background(), cfg))
+			require.NoError(t, runPipeline(context.Background(), cfg))
 
 			diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 				archive.NodeDirName(childKind, diskSnapName))
@@ -1578,7 +1430,7 @@ func TestPipeline_E2E_FSNoneCodecEntries(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, pipeline.Run(context.Background(), cfg))
+	require.NoError(t, runPipeline(context.Background(), cfg))
 
 	// Locate the FS node directory.
 	vmDir := filepath.Join(outputDir, archive.SnapshotsDirName,

@@ -169,10 +169,6 @@ func TestBuildTree_DiskNode_OwnDataRefs(t *testing.T) {
 		t.Errorf("root name: got %q, want %q", tree.Name, "root")
 	}
 
-	if tree.ManifestCheckpointName != "mcp-root" {
-		t.Errorf("root mcp: got %q, want %q", tree.ManifestCheckpointName, "mcp-root")
-	}
-
 	if tree.Parent != nil {
 		t.Errorf("root parent should be nil")
 	}
@@ -194,10 +190,6 @@ func TestBuildTree_DiskNode_OwnDataRefs(t *testing.T) {
 
 	if c1.Parent != tree {
 		t.Errorf("child1 parent should be root")
-	}
-
-	if c1.ManifestCheckpointName != "mcp-child1" {
-		t.Errorf("child1 mcp: got %q", c1.ManifestCheckpointName)
 	}
 
 	// child1 is a non-aggregator disk node: one dataRef in OwnDataRefs, zero children.
@@ -326,11 +318,6 @@ func TestBuildTree_Aggregator_VisibilityLeafProducesOrphanLeaves(t *testing.T) {
 		t.Errorf("leaf must have no children, got %d", len(leaf.Children))
 	}
 
-	// ManifestCheckpointName on the leaf is the parent aggregator's checkpoint.
-	if leaf.ManifestCheckpointName != "mcp-root" {
-		t.Errorf("leaf ManifestCheckpointName: got %q, want mcp-root", leaf.ManifestCheckpointName)
-	}
-
 	if leaf.Parent != tree {
 		t.Errorf("leaf Parent must be root")
 	}
@@ -432,10 +419,6 @@ func TestBuildTree_DeepTree(t *testing.T) {
 		t.Errorf("vm kind: got %q", vm.Kind)
 	}
 
-	if vm.ManifestCheckpointName != "mcp-vm" {
-		t.Errorf("vm mcp: got %q", vm.ManifestCheckpointName)
-	}
-
 	// vm-snap has one snapshot child (disk-snap); vm has no dataRefs.
 	if len(vm.Children) != 1 {
 		t.Fatalf("vm children: %d, want 1", len(vm.Children))
@@ -445,10 +428,6 @@ func TestBuildTree_DeepTree(t *testing.T) {
 
 	if disk.Kind != "DemoVirtualDiskSnapshot" {
 		t.Errorf("disk kind: got %q", disk.Kind)
-	}
-
-	if disk.ManifestCheckpointName != "mcp-disk" {
-		t.Errorf("disk mcp: got %q", disk.ManifestCheckpointName)
 	}
 
 	// disk is a non-aggregator node: one dataRef in OwnDataRefs, no children.

@@ -31,6 +31,7 @@ import (
 	"github.com/spf13/cobra"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
@@ -206,6 +207,11 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("building runtime client: %w", err)
 	}
 
+	aggClient, err := aggapi.NewClientForConfig(sc.RESTConfig(), kubeClient.RESTMapper())
+	if err != nil {
+		return fmt.Errorf("building aggregated API client: %w", err)
+	}
+
 	cfg := pipeline.Config{
 		Namespace:            namespace,
 		RootSnapshot:         snapshotName,
@@ -216,6 +222,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		TTL:                  ttl,
 		Compression:          codec,
 		KubeClient:           kubeClient,
+		AggClient:            aggClient,
 		SafeClient:           sc,
 		SelectedNodeKind:     selectedKind,
 		SelectedNodeName:     selectedName,
