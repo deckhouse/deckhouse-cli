@@ -22,13 +22,14 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/download"
+	restorecmd "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/restore"
 )
 
 // NewCommand returns the root cobra command for the `d8 snapshot` command group.
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "snapshot",
-		Short:         "Snapshot operations (download)",
+		Short:         "Snapshot operations (download, restore)",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Run: func(cmd *cobra.Command, _ []string) {
@@ -39,6 +40,7 @@ func NewCommand() *cobra.Command {
 	log := slog.Default()
 
 	cmd.AddCommand(download.NewCommand(log))
+	cmd.AddCommand(restorecmd.NewCommand(log))
 
 	return cmd
 }
