@@ -34,8 +34,10 @@ import (
 func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 	// The registry is always the last argument. The bundle path is an optional
 	// first argument; when it is omitted, packages must be provided via --file.
-	var registryArg string
-	var bundleArg []string
+	var (
+		registryArg string
+		bundleArg   []string
+	)
 
 	switch len(args) {
 	case 1:
