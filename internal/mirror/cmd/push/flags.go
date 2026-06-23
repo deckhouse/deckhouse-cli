@@ -63,6 +63,12 @@ func addFlags(flagSet *pflag.FlagSet) {
 		"/modules",
 		"Suffix to append to source repo path to locate modules.",
 	)
+	flagSet.StringArrayVar(
+		&Files,
+		"file",
+		nil,
+		"`Path` to a tar or chunked package to push. May be repeated to push multiple packages. Can be used instead of the bundle directory argument or combined with it.",
+	)
 }
 
 func ParseEnvironmentVariables() {

@@ -56,6 +56,11 @@ var (
 	Insecure         bool
 	TLSSkipVerify    bool
 	ImagesBundlePath string
+	Files            []string
+
+	// Packages holds the resolved list of tar/chunked package archive paths to push,
+	// assembled from the bundle directory argument and/or the --file flag.
+	Packages []string
 
 	MirrorTimeout time.Duration = -1
 )
@@ -92,6 +97,7 @@ func NewCommand() *cobra.Command {
 		Use:           "push <images-bundle-path> <registry>",
 		Short:         "Copy Deckhouse Kubernetes Platform distribution to the third-party registry",
 		Long:          pushLong,
+		Args:          cobra.RangeArgs(1, 2),
 		ValidArgs:     []string{"images-bundle-path", "registry"},
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -239,6 +245,7 @@ func (p *Pusher) executeNewPush() error {
 		client,
 		&mirror.PushServiceOptions{
 			BundleDir:  p.pushParams.BundleDir,
+			Packages:   Packages,
 			WorkingDir: p.pushParams.WorkingDir,
 		},
 		logger.Named("push"),
