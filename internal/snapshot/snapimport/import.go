@@ -1,0 +1,603 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package snapimport
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"time"
+
+	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
+
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
+)
+
+const (
+	defaultTimeout      = 20 * time.Minute
+	defaultPollInterval = 3 * time.Second
+
+	condManifestsReady = "ManifestsReady"
+	condVolumesReady   = "VolumesReady"
+	condChildrenReady  = "ChildrenReady"
+)
+
+// snapshotContentGVR is the cluster-scoped core SnapshotContent resource.
+var snapshotContentGVR = schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents"}
+
+// ManifestUploader posts a node's manifests-and-children-refs-upload payload. It is
+// satisfied by *aggapi.Client and stubbed in tests.
+type ManifestUploader interface {
+	UploadManifests(ctx context.Context, ref aggapi.NodeRef, body []byte) ([]byte, error)
+}
+
+// uploadPayload is the manifests-and-children-refs-upload request body.
+type uploadPayload struct {
+	Manifests json.RawMessage `json:"manifests"`
+	ChildRefs []ChildRef      `json:"childRefs"`
+}
+
+// Config holds all parameters for one import run.
+type Config struct {
+	// Namespace is the target namespace the snapshot tree is reconstructed into.
+	Namespace string
+	// InputDir is the root archive directory produced by `d8 snapshot download`.
+	InputDir string
+	// TTL is the DataImport TTL used for data-leaf imports.
+	TTL string
+	// Timeout bounds the per-node readiness/completion waits.
+	Timeout time.Duration
+	// PollInterval is the readiness polling cadence.
+	PollInterval time.Duration
+
+	// Uploader posts manifests-and-children-refs-upload (aggregated API).
+	Uploader ManifestUploader
+	// Volumes imports data-leaf volume bytes (DataImport + HTTP upload).
+	Volumes VolumeImporter
+	// Dynamic creates import-mode CRs and reads readiness status.
+	Dynamic dynamic.Interface
+	// Mapper resolves node GVKs to resources.
+	Mapper meta.RESTMapper
+	// Log receives progress output.
+	Log *slog.Logger
+}
+
+// Run imports a local snapshot archive into the target namespace. It plans the tree
+// bottom-up, then:
+//  1. creates every import-mode CR TOP-DOWN (parents first) so each child carries a
+//     child->parent ownerRef stamped with the parent's server-assigned UID (the API
+//     server requires a non-empty uid on ownerReferences, and the state-snapshotter
+//     import binders resolve a leaf's parent SnapshotContent through that ownerRef);
+//  2. uploads EVERY node's manifests plus its direct child refs (pass 2a) BEFORE importing
+//     any volume bytes (pass 2b). The two are sequenced, not interleaved, because a data
+//     leaf's SVDM DataImport stays Pending ("awaiting target leaf bound SnapshotContent")
+//     until the leaf VolumeSnapshot is bound, which needs the parent SnapshotContent, which
+//     needs the parent's manifests upload — so finishing a leaf (including waiting on its
+//     DataImport) before its ancestors' manifests are up would deadlock until timeout;
+//
+// finally waiting for the root Snapshot and its bound SnapshotContent to become Ready.
+func Run(ctx context.Context, cfg Config) error {
+	cfg = applyDefaults(cfg)
+
+	if err := validate(cfg); err != nil {
+		return err
+	}
+
+	plan, err := BuildPlan(cfg.InputDir)
+	if err != nil {
+		return fmt.Errorf("build import plan: %w", err)
+	}
+
+	if len(plan) == 0 {
+		return fmt.Errorf("archive %q contains no snapshot nodes", cfg.InputDir)
+	}
+
+	root := plan[len(plan)-1]
+	if !root.isStructural() {
+		return fmt.Errorf("archive root %s/%s is not a core Snapshot; only core Snapshot trees can be imported", root.Kind, root.Name)
+	}
+
+	if err := preflight(plan); err != nil {
+		return err
+	}
+
+	cfg.Log.Info("importing snapshot archive",
+		slog.String("namespace", cfg.Namespace),
+		slog.String("input", cfg.InputDir),
+		slog.String("root", root.Name),
+		slog.Int("nodes", len(plan)))
+
+	parents := buildParentIndex(plan)
+
+	// Pass 1 (top-down): create import-mode markers so child->parent ownerRefs can carry
+	// the parent UID.
+	if err := cfg.createMarkers(ctx, plan, parents); err != nil {
+		return err
+	}
+
+	// Pass 2a: upload every node's manifests + child refs first, so all SnapshotContents can
+	// materialize and every data-leaf VolumeSnapshot gets a bound SnapshotContent (the
+	// precondition for its DataImport to leave Pending). Bottom-up keeps a parent's upload
+	// after its children's, matching the capture order.
+	for i := range plan {
+		if err := uploadNodeManifests(ctx, cfg, plan[i]); err != nil {
+			return err
+		}
+	}
+
+	// Pass 2b: import each data leaf's volume bytes. The DataImport is created here (just
+	// before the upload) so its idle TTL window stays minimal.
+	for i := range plan {
+		if err := importNodeData(ctx, cfg, plan[i]); err != nil {
+			return err
+		}
+	}
+
+	return waitRootReady(ctx, cfg, root)
+}
+
+// preflight rejects, before any cluster mutation, archives the CLI cannot client-drive:
+// unsupported node kinds, filesystem-volume data leaves (data.tar), and data leaves that
+// carry no block data file. This prevents leaving orphaned import CRs / DataImports behind
+// when a later node would fail.
+func preflight(plan []PlannedNode) error {
+	for _, node := range plan {
+		if !node.supported() {
+			return unsupportedNodeError(node)
+		}
+
+		if node.FilesystemData {
+			return fmt.Errorf("import of %s/%s carries filesystem-volume data (data.tar), which this CLI cannot yet "+
+				"re-import; only block-volume data leaves are supported", node.Kind, node.Name)
+		}
+
+		if node.isVolumeSnapshotLeaf() && !node.HasBlockData() {
+			return fmt.Errorf("data leaf %s/%s has no block volume data file (data.bin) in the archive", node.Kind, node.Name)
+		}
+	}
+
+	return nil
+}
+
+// createMarkers creates every import-mode CR top-down (reverse post-order = parents before
+// children) so a child's parent already exists and exposes a UID. Data-leaf markers
+// reference their (not-yet-created) DataImport by its deterministic name; the DataImport
+// itself is created bottom-up in pass 2 immediately before the upload, so its idle TTL
+// does not start ticking while earlier siblings are still uploading.
+func (cfg Config) createMarkers(ctx context.Context, plan []PlannedNode, parents map[string]int) error {
+	uids := make(map[string]types.UID, len(plan))
+
+	for i := len(plan) - 1; i >= 0; i-- {
+		node := plan[i]
+
+		var dataImportName string
+
+		if node.isVolumeSnapshotLeaf() {
+			dataImportName = cfg.Volumes.DataImportName(node)
+		}
+
+		marker, err := importMarkerCR(node, cfg.Namespace, dataImportName)
+		if err != nil {
+			return err
+		}
+
+		if pi, ok := parents[nodeKey(node)]; ok {
+			parent := plan[pi]
+
+			puid, known := uids[nodeKey(parent)]
+			if !known {
+				return fmt.Errorf("internal: parent %s/%s of %s/%s was not created before it",
+					parent.Kind, parent.Name, node.Kind, node.Name)
+			}
+
+			marker.SetOwnerReferences([]metav1.OwnerReference{parentOwnerReference(node, parent, puid)})
+		}
+
+		uid, err := cfg.ensureMarker(ctx, marker)
+		if err != nil {
+			return fmt.Errorf("create import CR %s/%s: %w", node.Kind, node.Name, err)
+		}
+
+		uids[nodeKey(node)] = uid
+	}
+
+	return nil
+}
+
+// uploadNode uploads one node's manifests + direct child refs, then, for a data leaf,
+// creates its DataImport and imports the volume bytes back-to-back so the importer's idle
+// TTL window stays minimal.
+// importNodeData imports a data leaf's volume bytes (no-op for non-leaf nodes). It creates
+// the leaf's DataImport and streams its block data back-to-back so the importer's idle TTL
+// window stays minimal. It must run only after every node's manifests are uploaded (pass 2a)
+// so the leaf VolumeSnapshot already has a bound SnapshotContent.
+func importNodeData(ctx context.Context, cfg Config, node PlannedNode) error {
+	if !node.isVolumeSnapshotLeaf() {
+		return nil
+	}
+
+	cfg.Log.Info("importing volume data",
+		slog.String("kind", node.Kind),
+		slog.String("name", node.Name))
+
+	diName, err := cfg.Volumes.EnsureDataImport(ctx, node, cfg.Namespace)
+	if err != nil {
+		return fmt.Errorf("ensure DataImport for %s/%s: %w", node.Kind, node.Name, err)
+	}
+
+	if err := cfg.Volumes.UploadVolumeData(ctx, node, diName, cfg.Namespace); err != nil {
+		return fmt.Errorf("import volume data for %s/%s: %w", node.Kind, node.Name, err)
+	}
+
+	return nil
+}
+
+// buildParentIndex maps each child node key to the plan index of its parent node, derived
+// from each node's recorded direct child refs.
+func buildParentIndex(plan []PlannedNode) map[string]int {
+	idx := make(map[string]int)
+	for i := range plan {
+		for _, c := range plan[i].Children {
+			idx[refKey(c.APIVersion, c.Kind, c.Name)] = i
+		}
+	}
+
+	return idx
+}
+
+// nodeKey is the stable identity (apiVersion/kind/name) of a planned node.
+func nodeKey(n PlannedNode) string {
+	return refKey(n.APIVersion, n.Kind, n.Name)
+}
+
+// refKey builds the stable identity key shared by nodeKey and buildParentIndex.
+func refKey(apiVersion, kind, name string) string {
+	return apiVersion + "|" + kind + "|" + name
+}
+
+// parentOwnerReference builds the child->parent Snapshot ownerRef the state-snapshotter
+// import binders resolve to discover a leaf's parent SnapshotContent. It mirrors the
+// capture-path semantics: a structural child Snapshot is controller-owned by its parent,
+// while a CSI VolumeSnapshot leaf is a visibility leaf owned for lifecycle/GC only
+// (Controller intentionally unset).
+func parentOwnerReference(child, parent PlannedNode, parentUID types.UID) metav1.OwnerReference {
+	ref := metav1.OwnerReference{
+		APIVersion: parent.APIVersion,
+		Kind:       parent.Kind,
+		Name:       parent.Name,
+		UID:        parentUID,
+	}
+
+	if !child.isVolumeSnapshotLeaf() {
+		controller := true
+		ref.Controller = &controller
+	}
+
+	return ref
+}
+
+// uploadNodeManifests POSTs the node's own manifests plus its direct child refs.
+func uploadNodeManifests(ctx context.Context, cfg Config, node PlannedNode) error {
+	manifestsJSON, err := marshalManifests(node.Manifests)
+	if err != nil {
+		return fmt.Errorf("marshal manifests for %s/%s: %w", node.Kind, node.Name, err)
+	}
+
+	childRefs := node.Children
+	if childRefs == nil {
+		childRefs = []ChildRef{}
+	}
+
+	body, err := json.Marshal(uploadPayload{Manifests: manifestsJSON, ChildRefs: childRefs})
+	if err != nil {
+		return fmt.Errorf("marshal upload payload for %s/%s: %w", node.Kind, node.Name, err)
+	}
+
+	if _, err := cfg.Uploader.UploadManifests(ctx, node.Ref(cfg.Namespace), body); err != nil {
+		return fmt.Errorf("upload manifests for %s/%s: %w", node.Kind, node.Name, err)
+	}
+
+	return nil
+}
+
+// marshalManifests renders the node's own manifests as a JSON array (the shape the
+// server expects in the upload payload's "manifests" field).
+func marshalManifests(manifests []unstructured.Unstructured) (json.RawMessage, error) {
+	items := make([]map[string]interface{}, 0, len(manifests))
+	for i := range manifests {
+		items = append(items, manifests[i].Object)
+	}
+
+	return json.Marshal(items)
+}
+
+// ensureMarker creates the import-mode CR when absent and returns its UID. On idempotent
+// re-runs (the CR already exists) it reuses the live UID and patches in any desired
+// child->parent ownerRef that a previous partial run did not yet stamp. It never clobbers
+// the live spec.
+func (cfg Config) ensureMarker(ctx context.Context, obj *unstructured.Unstructured) (types.UID, error) {
+	gvk := obj.GroupVersionKind()
+
+	mapping, err := cfg.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		return "", fmt.Errorf("resolve resource for %s: %w", gvk.String(), err)
+	}
+
+	ri := cfg.Dynamic.Resource(mapping.Resource).Namespace(obj.GetNamespace())
+
+	existing, err := ri.Get(ctx, obj.GetName(), metav1.GetOptions{})
+	if err == nil {
+		return reconcileExistingMarker(ctx, ri, existing, obj.GetOwnerReferences())
+	} else if !kubeerrors.IsNotFound(err) {
+		return "", fmt.Errorf("get: %w", err)
+	}
+
+	created, err := ri.Create(ctx, obj, metav1.CreateOptions{})
+	if err != nil {
+		if !kubeerrors.IsAlreadyExists(err) {
+			return "", fmt.Errorf("create: %w", err)
+		}
+
+		got, gErr := ri.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if gErr != nil {
+			return "", fmt.Errorf("get after AlreadyExists: %w", gErr)
+		}
+
+		return reconcileExistingMarker(ctx, ri, got, obj.GetOwnerReferences())
+	}
+
+	return created.GetUID(), nil
+}
+
+// reconcileExistingMarker handles a pre-existing CR sharing the marker's name. It first
+// refuses to touch an object that is NOT in import mode (a capture-mode Snapshot/VolumeSnapshot
+// that merely shares the name) so importing into a populated namespace cannot mutate live
+// production objects; only then does it reconcile the child->parent ownerRefs.
+func reconcileExistingMarker(ctx context.Context, ri dynamic.ResourceInterface, existing *unstructured.Unstructured, desired []metav1.OwnerReference) (types.UID, error) {
+	if !isImportModeMarker(existing) {
+		return "", fmt.Errorf("%s %s/%s already exists and is not in import mode "+
+			"(neither spec.source.import nor spec.source.dataImportName is set); refusing to mutate a pre-existing "+
+			"object — import into a fresh namespace", existing.GetKind(), existing.GetNamespace(), existing.GetName())
+	}
+
+	return reconcileMarkerOwnerRefs(ctx, ri, existing, desired)
+}
+
+// isImportModeMarker reports whether a live CR is an import-mode marker: a structural
+// Snapshot carries spec.source.import, a CSI VolumeSnapshot leaf carries a non-empty
+// spec.source.dataImportName.
+func isImportModeMarker(obj *unstructured.Unstructured) bool {
+	if _, found, _ := unstructured.NestedMap(obj.Object, "spec", "source", "import"); found {
+		return true
+	}
+
+	name, _, _ := unstructured.NestedString(obj.Object, "spec", "source", "dataImportName")
+
+	return name != ""
+}
+
+// reconcileMarkerOwnerRefs patches any desired child->parent ownerRef a previous partial
+// run did not yet stamp onto the live CR, then returns its UID. It never clobbers the spec.
+func reconcileMarkerOwnerRefs(ctx context.Context, ri dynamic.ResourceInterface, existing *unstructured.Unstructured, desired []metav1.OwnerReference) (types.UID, error) {
+	if addOwnerRefs(existing, desired) {
+		updated, err := ri.Update(ctx, existing, metav1.UpdateOptions{})
+		if err != nil {
+			return "", fmt.Errorf("ensure ownerRefs: %w", err)
+		}
+
+		existing = updated
+	}
+
+	return existing.GetUID(), nil
+}
+
+// addOwnerRefs reconciles obj's ownerReferences toward desired: it appends any missing ref
+// and, for a ref already present (matched by apiVersion/kind/name), refreshes its
+// UID/Controller/BlockOwnerDeletion when they drifted. The UID refresh matters on a retried
+// import where the parent was deleted and recreated with a new server-assigned UID: the
+// state-snapshotter import binders resolve a leaf's parent through this ownerRef and reject
+// a stale UID, so a matching-but-outdated ref must be updated, not left as-is. It never
+// removes refs and reports whether obj changed.
+func addOwnerRefs(obj *unstructured.Unstructured, desired []metav1.OwnerReference) bool {
+	if len(desired) == 0 {
+		return false
+	}
+
+	refs := obj.GetOwnerReferences()
+	changed := false
+
+	for _, d := range desired {
+		idx := indexOwnerRef(refs, d)
+		if idx < 0 {
+			refs = append(refs, d)
+			changed = true
+
+			continue
+		}
+
+		if !ownerRefEquivalent(refs[idx], d) {
+			refs[idx] = d
+			changed = true
+		}
+	}
+
+	if changed {
+		obj.SetOwnerReferences(refs)
+	}
+
+	return changed
+}
+
+// indexOwnerRef returns the index of the ref matching want by apiVersion/kind/name, or -1.
+func indexOwnerRef(refs []metav1.OwnerReference, want metav1.OwnerReference) int {
+	for i, r := range refs {
+		if r.APIVersion == want.APIVersion && r.Kind == want.Kind && r.Name == want.Name {
+			return i
+		}
+	}
+
+	return -1
+}
+
+// ownerRefEquivalent reports whether two ownerRefs already sharing apiVersion/kind/name also
+// agree on the fields the import binders depend on: the parent UID and the controller and
+// blockOwnerDeletion flags.
+func ownerRefEquivalent(a, b metav1.OwnerReference) bool {
+	return a.UID == b.UID &&
+		boolPtrEqual(a.Controller, b.Controller) &&
+		boolPtrEqual(a.BlockOwnerDeletion, b.BlockOwnerDeletion)
+}
+
+func boolPtrEqual(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	return *a == *b
+}
+
+// waitRootReady blocks until the root Snapshot is Ready=True and its bound SnapshotContent
+// reports all four legs (ManifestsReady, VolumesReady, ChildrenReady, Ready) True.
+func waitRootReady(ctx context.Context, cfg Config, root PlannedNode) error {
+	gvr, err := cfg.snapshotResource()
+	if err != nil {
+		return err
+	}
+
+	cfg.Log.Info("waiting for root Snapshot to become Ready", slog.String("name", root.Name))
+
+	content, err := waitSnapshotReady(ctx, cfg, gvr, root.Name)
+	if err != nil {
+		return err
+	}
+
+	return waitSnapshotContentReady(ctx, cfg, content)
+}
+
+// waitSnapshotReady waits for the Snapshot to be Ready=True and returns its bound
+// SnapshotContent name.
+func waitSnapshotReady(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, name string) (string, error) {
+	deadline := time.Now().Add(cfg.Timeout)
+
+	for {
+		snap, err := cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("get Snapshot %s/%s: %w", cfg.Namespace, name, err)
+		}
+
+		if conditionTrue(snap, conditionReady) {
+			content, _, _ := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
+			if content != "" {
+				return content, nil
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("timeout waiting for Snapshot %s/%s to become Ready", cfg.Namespace, name)
+		}
+
+		if !sleepCtx(ctx, cfg.PollInterval) {
+			return "", ctx.Err()
+		}
+	}
+}
+
+// waitSnapshotContentReady waits for the cluster-scoped SnapshotContent to report all
+// readiness legs True.
+func waitSnapshotContentReady(ctx context.Context, cfg Config, name string) error {
+	cfg.Log.Info("waiting for SnapshotContent to become Ready", slog.String("name", name))
+
+	deadline := time.Now().Add(cfg.Timeout)
+
+	for {
+		content, err := cfg.Dynamic.Resource(snapshotContentGVR).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("get SnapshotContent %s: %w", name, err)
+		}
+
+		if conditionTrue(content, condManifestsReady) &&
+			conditionTrue(content, condVolumesReady) &&
+			conditionTrue(content, condChildrenReady) &&
+			conditionTrue(content, conditionReady) {
+			cfg.Log.Info("SnapshotContent is Ready", slog.String("name", name))
+
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for SnapshotContent %s to become Ready", name)
+		}
+
+		if !sleepCtx(ctx, cfg.PollInterval) {
+			return ctx.Err()
+		}
+	}
+}
+
+// snapshotResource resolves the core Snapshot resource.
+func (cfg Config) snapshotResource() (schema.GroupVersionResource, error) {
+	mapping, err := cfg.Mapper.RESTMapping(schema.GroupKind{Group: aggapi.StorageGroup, Kind: snapshotKind}, "v1alpha1")
+	if err != nil {
+		return schema.GroupVersionResource{}, fmt.Errorf("resolve Snapshot resource: %w", err)
+	}
+
+	return mapping.Resource, nil
+}
+
+// applyDefaults fills zero-valued optional fields with their defaults.
+func applyDefaults(cfg Config) Config {
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = defaultTimeout
+	}
+
+	if cfg.PollInterval <= 0 {
+		cfg.PollInterval = defaultPollInterval
+	}
+
+	if cfg.Log == nil {
+		cfg.Log = slog.Default()
+	}
+
+	return cfg
+}
+
+// validate checks that all required dependencies and identifiers are set.
+func validate(cfg Config) error {
+	switch {
+	case cfg.Namespace == "":
+		return fmt.Errorf("import: Namespace must be set")
+	case cfg.InputDir == "":
+		return fmt.Errorf("import: InputDir must be set")
+	case cfg.Uploader == nil:
+		return fmt.Errorf("import: Uploader must be set")
+	case cfg.Volumes == nil:
+		return fmt.Errorf("import: Volumes importer must be set")
+	case cfg.Dynamic == nil:
+		return fmt.Errorf("import: Dynamic client must be set")
+	case cfg.Mapper == nil:
+		return fmt.Errorf("import: Mapper must be set")
+	default:
+		return nil
+	}
+}

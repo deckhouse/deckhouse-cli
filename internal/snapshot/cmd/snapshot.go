@@ -23,13 +23,14 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/download"
 	restorecmd "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/restore"
+	snapimportcmd "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/snapimport"
 )
 
 // NewCommand returns the root cobra command for the `d8 snapshot` command group.
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "snapshot",
-		Short:         "Snapshot operations (download, restore)",
+		Short:         "Snapshot operations (download, restore, import)",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Run: func(cmd *cobra.Command, _ []string) {
@@ -41,6 +42,7 @@ func NewCommand() *cobra.Command {
 
 	cmd.AddCommand(download.NewCommand(log))
 	cmd.AddCommand(restorecmd.NewCommand(log))
+	cmd.AddCommand(snapimportcmd.NewCommand(log))
 
 	return cmd
 }
