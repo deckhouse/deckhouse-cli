@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 )
 
 // ErrExpired is returned by WaitReady when the DataExport enters the Expired
@@ -84,8 +85,9 @@ func EnsureDataExport(
 		Spec: deapi.DataexportSpec{
 			TTL: ttl,
 			TargetRef: deapi.TargetRefSpec{
-				Kind: "VolumeSnapshot",
-				Name: shadowVSName,
+				Group:    aggapi.VolumeSnapshotGroup,
+				Resource: aggapi.VolumeSnapshotResource,
+				Name:     shadowVSName,
 			},
 		},
 	}
