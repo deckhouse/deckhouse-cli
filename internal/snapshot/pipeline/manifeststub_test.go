@@ -129,11 +129,6 @@ func testManifestSource() *manifestStub {
 		// buildE2EFakeClient tree (e2e_test.go).
 		add(snapRef(e2eRootSnap, e2eNS), configMapManifest(e2eRootCMName, e2eNS)).
 		add(nodeRef(e2eVMAPIVersion, e2eVMKind, e2eVMSnap, e2eNS), configMapManifest(e2eVMCMName, e2eNS)).
-		// buildMultiVolumeFakeClient tree: multi-disk own manifests (ConfigMap + two OwnDataRef PVCs).
-		add(nodeRef(e2eVMAPIVersion, e2eDiskKind, e2eMultiDisk, e2eNS),
-			configMapManifest("multi-cfg", e2eNS),
-			pvcManifest(e2eMultiBlockPVC, e2eNS, "uid-multi-block", "csi-multi-block", "Block"),
-			pvcManifest(e2eMultiFSPVC, e2eNS, "uid-multi-fs", "csi-multi-fs", "Filesystem")).
 		// buildDeletedPVCFakeClient tree: del-disk own manifests carry the (deleted-live) PVC.
 		add(nodeRef(e2eVMAPIVersion, e2eDiskKind, e2eDelDisk, e2eNS),
 			pvcManifest(e2eDelPVC, e2eNS, "uid-del", "csi-del-sc", "Block")).
