@@ -42,8 +42,9 @@ const volumeSnapshotAPIVersion = "snapshot.storage.k8s.io/v1"
 // tree by following status.childrenSnapshotRefs.
 //
 // Each node's SnapshotContent is resolved via status.boundSnapshotContentName; the
-// DataRefs (volume-to-artifact bindings) are taken from the content's status. Node
-// manifests are fetched separately via the aggregated manifests-download subresource.
+// single DataRef (Variant A, cardinality ≤1) is taken from the content's status.DataRef
+// via DataRefList(). Node manifests are fetched separately via the aggregated
+// manifests-download subresource.
 //
 // All snapshot nodes are namespace-local: child refs carry no namespace field and are
 // always fetched in the same namespace as the root. The function does one typed Get per
@@ -54,10 +55,13 @@ const volumeSnapshotAPIVersion = "snapshot.storage.k8s.io/v1"
 //     are recursed normally via boundSnapshotContentName.
 //   - VolumeSnapshot visibility-leaf refs (apiVersion == "snapshot.storage.k8s.io/v1" and
 //     kind == "VolumeSnapshot") are NOT fetched or recursed. Their presence signals that
-//     this node is an aggregator: all content.DataRefs become orphan leaf volume nodes.
+//     this node is an aggregator: content.DataRefList() (0 or 1 binding) produces the
+//     orphan leaf volume node(s). Under Variant A the aggregator content keeps DataRef=nil,
+//     so no orphan leaves are produced here; C2 (datarefs-leaf-resolve) replaces this
+//     aggregator branch with the VS-lookup model.
 //
-// When a node has no visibility-leaf children, its content.DataRefs are stored in
-// OwnDataRefs and no leaf children are created (data lives directly in the node's dir).
+// When a node has no visibility-leaf children, its content.DataRefList() (0 or 1 binding)
+// is stored in OwnDataRefs and no leaf children are created (data lives in the node's dir).
 //
 // Returns ErrCycle if a duplicate snapshot ref is encountered.
 func BuildTree(ctx context.Context, c client.Client, namespace, rootName string) (*Node, error) {
@@ -131,7 +135,8 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 	// Partition childRefs into domain refs (to recurse) and visibility-leaf refs (discriminator only).
 	domainRefs, hasVisibilityLeaves := partitionChildRefs(allChildRefs)
 
-	node.Children = make([]*Node, 0, len(domainRefs)+len(content.Status.DataRefs))
+	dataRefs := content.DataRefList()
+	node.Children = make([]*Node, 0, len(domainRefs)+len(dataRefs))
 
 	for _, ref := range domainRefs {
 		child, err := b.visit(ctx, ref.APIVersion, ref.Kind, ref.Name, node)
@@ -143,10 +148,13 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 	}
 
 	if hasVisibilityLeaves {
-		// Aggregator: expose each dataRef as an orphan leaf volume node.
-		// OwnDataRefs stays nil; volume data is addressed through the leaf's Binding.
-		for i := range content.Status.DataRefs {
-			binding := content.Status.DataRefs[i]
+		// Aggregator: expose each dataRef (0 or 1 under Variant A) as an orphan leaf
+		// volume node. OwnDataRefs stays nil; volume data is addressed via leaf.Binding.
+		// Under the real Variant A contract the aggregator content keeps DataRef=nil, so
+		// dataRefs is empty here and no orphan leaves are created. The datarefs-leaf-resolve
+		// task will replace this branch with the VS-lookup model (C2).
+		for i := range dataRefs {
+			binding := dataRefs[i]
 
 			leafNode := &Node{
 				APIVersion: volumeSnapshotAPIVersion,
@@ -166,10 +174,10 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 	}
 
 	// Non-aggregator: data lives directly in this node.
-	// Copy the slice so callers cannot alias content.Status.DataRefs.
-	if len(content.Status.DataRefs) > 0 {
-		own := make([]snapshotapi.SnapshotDataBinding, len(content.Status.DataRefs))
-		copy(own, content.Status.DataRefs)
+	// Copy the slice so callers cannot alias the DataRefList result.
+	if len(dataRefs) > 0 {
+		own := make([]snapshotapi.SnapshotDataBinding, len(dataRefs))
+		copy(own, dataRefs)
 		node.OwnDataRefs = own
 	}
 
