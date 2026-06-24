@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 
 	"github.com/Masterminds/semver/v3"
 
@@ -78,9 +79,16 @@ func (m *Manager) listTags(ctx context.Context, pluginName string) ([]string, er
 }
 
 // deepCheckFunc decides whether a cluster-compatible candidate is acceptable. It
-// returns ok=false with a short reason to skip to an older version, or err for an
-// operational failure that must stop selection (never masked as "try older").
-type deepCheckFunc func(ctx context.Context, contract *internal.Plugin) (ok bool, reason string, err error)
+// returns ok=false with a structured reason to skip to an older version, or err
+// for an operational failure that must stop selection (never masked as "try older").
+type deepCheckFunc func(ctx context.Context, contract *internal.Plugin) (ok bool, reason *unsatisfiableReason, err error)
+
+// rejectedCandidate is a version skipped during selection, kept with its
+// structured reason so the terminal error can group dependency problems.
+type rejectedCandidate struct {
+	version string
+	reason  *unsatisfiableReason
+}
 
 // selectCompatible walks stable versions newest->oldest and returns the first that
 // (a) matches constraint (nil = any), (b) is cluster-compatible, and (c) passes
@@ -99,10 +107,10 @@ func (m *Manager) selectCompatible(
 	tags []string,
 	constraint *semver.Constraints,
 	deepCheck deepCheckFunc,
-) (*semver.Version, []string, error) {
+) (*semver.Version, []rejectedCandidate, error) {
 	candidates := stableVersions(sortedSemverDesc(tags))
 
-	rejected := make([]string, 0, len(candidates))
+	rejected := make([]rejectedCandidate, 0, len(candidates))
 
 	for _, version := range candidates {
 		if constraint != nil && !constraint.Check(version) {
@@ -115,7 +123,7 @@ func (m *Manager) selectCompatible(
 			// is indistinguishable from "no contract"; both demote to an older version.
 			m.logger.Warn("skipping version: contract unavailable",
 				slog.String("plugin", pluginName), slog.String("version", version.Original()), slog.String("error", err.Error()))
-			rejected = append(rejected, fmt.Sprintf("%s (contract unavailable)", version.Original()))
+			rejected = append(rejected, rejectedCandidate{version.Original(), &unsatisfiableReason{kind: reasonContractUnavailable, detail: "contract unavailable"}})
 
 			continue
 		}
@@ -128,7 +136,7 @@ func (m *Manager) selectCompatible(
 		}
 
 		if !compatible {
-			rejected = append(rejected, fmt.Sprintf("%s (%s)", version.Original(), reason))
+			rejected = append(rejected, rejectedCandidate{version.Original(), &unsatisfiableReason{kind: reasonClusterIncompatible, detail: reason}})
 
 			continue
 		}
@@ -140,7 +148,7 @@ func (m *Manager) selectCompatible(
 			}
 
 			if !ok {
-				rejected = append(rejected, fmt.Sprintf("%s (%s)", version.Original(), reason))
+				rejected = append(rejected, rejectedCandidate{version.Original(), reason})
 
 				continue
 			}
@@ -152,10 +160,11 @@ func (m *Manager) selectCompatible(
 	return nil, rejected, nil
 }
 
-// noCompatibleError builds the "nothing usable" error as a HelpfulError. Each
-// rejected version becomes a cause line; a trailing suggestion carries the fixes.
-// The top-level handler renders it (category, causes, actionable solutions).
-func noCompatibleError(pluginName string, rejected []string) error {
+// noCompatibleError builds the terminal "nothing usable" error as a HelpfulError.
+// When every rejection is dependency-related it leads with "unresolved
+// dependencies" and one suggestion per missing dependency; otherwise it falls back
+// to a per-version listing. The top-level handler renders it.
+func noCompatibleError(pluginName string, rejected []rejectedCandidate) error {
 	if len(rejected) == 0 {
 		return &diagnostic.HelpfulError{
 			Category: fmt.Sprintf("no stable version of plugin %q is published", pluginName),
@@ -166,13 +175,20 @@ func noCompatibleError(pluginName string, rejected []string) error {
 		}
 	}
 
+	if allDependencyReasons(rejected) {
+		return &diagnostic.HelpfulError{
+			Category:    fmt.Sprintf("cannot install plugin %q: unresolved dependencies", pluginName),
+			Suggestions: dependencySuggestions(rejected),
+		}
+	}
+
 	suggestions := make([]diagnostic.Suggestion, 0, len(rejected)+1)
-	for _, r := range rejected {
-		suggestions = append(suggestions, diagnostic.Suggestion{Cause: r})
+	for _, rc := range rejected {
+		suggestions = append(suggestions, diagnostic.Suggestion{Cause: fmt.Sprintf("%s: %s", rc.version, rc.reason.summary())})
 	}
 
 	suggestions = append(suggestions, diagnostic.Suggestion{
-		Cause: "every published version was rejected",
+		Cause: "no version could be installed",
 		Solutions: []string{
 			fmt.Sprintf("inspect a version's requirements: d8 plugins contract %s", pluginName),
 			fmt.Sprintf("or install an exact version: d8 plugins install %s --version <version>", pluginName),
@@ -180,9 +196,81 @@ func noCompatibleError(pluginName string, rejected []string) error {
 	})
 
 	return &diagnostic.HelpfulError{
-		Category:    fmt.Sprintf("no installable version of plugin %q", pluginName),
+		Category:    fmt.Sprintf("cannot install plugin %q: no installable version", pluginName),
 		Suggestions: suggestions,
 	}
+}
+
+// allDependencyReasons reports whether every rejection is an unresolved-dependency
+// problem (so the message can lead with "unresolved dependencies").
+func allDependencyReasons(rejected []rejectedCandidate) bool {
+	for _, rc := range rejected {
+		if rc.reason == nil || !rc.reason.kind.isDependency() {
+			return false
+		}
+	}
+
+	return true
+}
+
+// dependencySuggestions builds one suggestion per distinct unresolved dependency
+// (deduped by kind+name, since several rejected versions often share one).
+func dependencySuggestions(rejected []rejectedCandidate) []diagnostic.Suggestion {
+	seen := make(map[string]bool, len(rejected))
+	suggestions := make([]diagnostic.Suggestion, 0, len(rejected))
+
+	for _, rc := range rejected {
+		key := fmt.Sprintf("%d:%s", rc.reason.kind, rc.reason.pluginName)
+		if seen[key] {
+			continue
+		}
+
+		seen[key] = true
+
+		suggestions = append(suggestions, dependencySuggestion(rc.reason))
+	}
+
+	return suggestions
+}
+
+// dependencySuggestion renders one missing dependency as a cause + fix.
+func dependencySuggestion(r *unsatisfiableReason) diagnostic.Suggestion {
+	dep := r.pluginName
+
+	switch r.kind {
+	case reasonDepNotPublished:
+		return diagnostic.Suggestion{
+			Cause:     withChain(fmt.Sprintf("required plugin %q is not published", dep), r.path),
+			Solutions: []string{fmt.Sprintf("publish it under deckhouse-cli/plugins/%s", dep)},
+		}
+	case reasonDepNoVersion:
+		cause := fmt.Sprintf("no compatible version of required plugin %q", dep)
+		if r.constraint != "" {
+			cause = fmt.Sprintf("no version of required plugin %q satisfies %s", dep, r.constraint)
+		}
+
+		return diagnostic.Suggestion{
+			Cause:     withChain(cause, r.path),
+			Solutions: []string{fmt.Sprintf("publish a matching version of %q", dep)},
+		}
+	case reasonDepCycle:
+		return diagnostic.Suggestion{
+			Cause:     fmt.Sprintf("dependency cycle: %s", strings.Join(r.path, " -> ")),
+			Solutions: []string{"break the cycle in the plugins' contracts"},
+		}
+	default:
+		return diagnostic.Suggestion{Cause: r.summary()}
+	}
+}
+
+// withChain appends "(needed by: a -> b -> c)" for a transitive dependency (the
+// path is deeper than the direct request); a direct dependency needs no chain.
+func withChain(cause string, path []string) string {
+	if len(path) > 2 {
+		return cause + fmt.Sprintf("\n    (needed by: %s)", strings.Join(path, " -> "))
+	}
+
+	return cause
 }
 
 // clusterCompatible reports whether the plugin's cluster-side requirements are

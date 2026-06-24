@@ -242,10 +242,70 @@ func TestSelectTopWithPlanUnpublishedDepIsHelpful(t *testing.T) {
 
 	_, _, err := m.selectTopWithPlan(context.Background(), "package", []string{"v0.0.21"}, false)
 	var he *diagnostic.HelpfulError
-	require.ErrorAs(t, err, &he, "a no-installable-version failure is a HelpfulError")
-	assert.Contains(t, he.Category, `no installable version of plugin "package"`)
-	assert.Contains(t, he.Format(), "not published as deckhouse-cli/plugins/delivery-kit",
-		"the rendered message names the missing dependency")
+	require.ErrorAs(t, err, &he, "an unresolved-dependency failure is a HelpfulError")
+	assert.Equal(t, `cannot install plugin "package": unresolved dependencies`, he.Category)
+
+	out := he.Format()
+	assert.Contains(t, out, `required plugin "delivery-kit" is not published`)
+	assert.Contains(t, out, "publish it under deckhouse-cli/plugins/delivery-kit")
+	assert.NotContains(t, out, "(needed by:", "a direct dependency needs no chain")
+}
+
+func TestSelectTopWithPlanTransitiveDepNamesChain(t *testing.T) {
+	// package -> delivery-kit -> x (x unpublished): the message names x and the chain.
+	src := &multiPluginSource{
+		tags:        map[string][]string{"package": {"v0.0.21"}, "delivery-kit": {"v1.0.0"}},
+		unpublished: map[string]bool{"x": true},
+		contracts: map[string]map[string]*internal.Plugin{
+			"package":      {"v0.0.21": requires("package", "v0.0.21", "delivery-kit", "")},
+			"delivery-kit": {"v1.0.0": requires("delivery-kit", "v1.0.0", "x", "")},
+		},
+	}
+	m := plannerManager(t, src)
+
+	_, _, err := m.selectTopWithPlan(context.Background(), "package", []string{"v0.0.21"}, false)
+	var he *diagnostic.HelpfulError
+	require.ErrorAs(t, err, &he)
+
+	out := he.Format()
+	assert.Contains(t, out, `required plugin "x" is not published`)
+	assert.Contains(t, out, "(needed by: package -> delivery-kit -> x)")
+}
+
+func TestSelectTopDeduplicatesDependencySuggestions(t *testing.T) {
+	// Two versions blocked by the same missing dependency collapse to one suggestion.
+	src := &multiPluginSource{
+		tags:        map[string][]string{"package": {"v0.0.21", "v0.0.20"}},
+		unpublished: map[string]bool{"delivery-kit": true},
+		contracts: map[string]map[string]*internal.Plugin{
+			"package": {
+				"v0.0.21": requires("package", "v0.0.21", "delivery-kit", ""),
+				"v0.0.20": requires("package", "v0.0.20", "delivery-kit", ""),
+			},
+		},
+	}
+	m := plannerManager(t, src)
+
+	_, _, err := m.selectTopWithPlan(context.Background(), "package", []string{"v0.0.21", "v0.0.20"}, false)
+	var he *diagnostic.HelpfulError
+	require.ErrorAs(t, err, &he)
+	assert.Len(t, he.Suggestions, 1, "both versions blocked by the same dependency -> one suggestion")
+}
+
+func TestPlanForExplicitUnresolvedDepIsHelpful(t *testing.T) {
+	src := &multiPluginSource{
+		unpublished: map[string]bool{"delivery-kit": true},
+		contracts: map[string]map[string]*internal.Plugin{
+			"package": {"v0.0.21": requires("package", "v0.0.21", "delivery-kit", "")},
+		},
+	}
+	m := plannerManager(t, src)
+
+	_, err := m.planForExplicit(context.Background(), "package", semver.MustParse("v0.0.21"), false)
+	var he *diagnostic.HelpfulError
+	require.ErrorAs(t, err, &he)
+	assert.Contains(t, he.Category, "unresolved dependencies")
+	assert.Contains(t, he.Format(), `required plugin "delivery-kit" is not published`)
 }
 
 func TestPlannerUpgradesInstalledDepWithinMajor(t *testing.T) {

@@ -211,6 +211,13 @@ func (m *Manager) planForExplicit(ctx context.Context, pluginName string, versio
 	}
 
 	if reason != nil {
+		if reason.kind.isDependency() {
+			return nil, &diagnostic.HelpfulError{
+				Category:    fmt.Sprintf("cannot install plugin %q %s: unresolved dependencies", pluginName, version.Original()),
+				Suggestions: []diagnostic.Suggestion{dependencySuggestion(reason)},
+			}
+		}
+
 		return nil, &diagnostic.HelpfulError{
 			Category: fmt.Sprintf("cannot install plugin %q %s", pluginName, version.Original()),
 			Suggestions: []diagnostic.Suggestion{{

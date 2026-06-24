@@ -73,10 +73,35 @@ func mergeNewSteps(dst, src *resolutionPlan) {
 	maps.Copy(dst.byName, src.byName)
 }
 
+// reasonKind classifies why a candidate was rejected, so the terminal error can
+// group dependency problems under one "unresolved dependencies" message and keep
+// non-dependency failures (cluster, conflict) out of it.
+type reasonKind int
+
+const (
+	reasonOther reasonKind = iota
+	reasonDepNotPublished
+	reasonDepNoVersion
+	reasonDepCycle
+	reasonClusterIncompatible
+	reasonContractUnavailable
+	reasonReverseConflict
+)
+
+func (k reasonKind) isDependency() bool {
+	switch k {
+	case reasonDepNotPublished, reasonDepNoVersion, reasonDepCycle:
+		return true
+	default:
+		return false
+	}
+}
+
 // unsatisfiableReason explains why a candidate cannot be resolved. It is a soft
 // "skip this candidate" signal, distinct from an operational error (which must
 // hard-stop and is returned as a plain error).
 type unsatisfiableReason struct {
+	kind       reasonKind
 	pluginName string
 	constraint string
 	detail     string
@@ -205,7 +230,7 @@ func (m *Manager) reverseConflictReason(plugin *internal.Plugin) (*unsatisfiable
 		}
 
 		if err := validatePluginConflict(plugin, installed); err != nil {
-			return &unsatisfiableReason{pluginName: name, detail: "reverse conflict: " + err.Error()}, nil
+			return &unsatisfiableReason{kind: reasonReverseConflict, pluginName: name, detail: "reverse conflict: " + err.Error()}, nil
 		}
 	}
 
@@ -254,7 +279,7 @@ func (m *Manager) resolveMandatoryDep(
 	path []string,
 ) (*unsatisfiableReason, error) {
 	if visited[req.Name] {
-		return &unsatisfiableReason{pluginName: req.Name, path: append(slices.Clone(path), req.Name), detail: "dependency cycle"}, nil
+		return &unsatisfiableReason{kind: reasonDepCycle, pluginName: req.Name, path: append(slices.Clone(path), req.Name), detail: "dependency cycle"}, nil
 	}
 
 	var constraint *semver.Constraints
@@ -347,6 +372,7 @@ func (m *Manager) selectDepVersion(
 		// (auth, proxy, transport) still hard-stop.
 		if errors.Is(err, rpp.ErrNotFound) {
 			return &unsatisfiableReason{
+				kind:       reasonDepNotPublished,
 				pluginName: depName,
 				path:       depPath,
 				detail:     fmt.Sprintf("not published as deckhouse-cli/plugins/%s", depName),
@@ -383,22 +409,22 @@ func (m *Manager) selectDepVersion(
 	visited[depName] = true
 	defer delete(visited, depName)
 
-	deepCheck := func(ctx context.Context, contract *internal.Plugin) (bool, string, error) {
+	deepCheck := func(ctx context.Context, contract *internal.Plugin) (bool, *unsatisfiableReason, error) {
 		sub := newResolutionPlan()
 		maps.Copy(sub.byName, plan.byName)
 
 		reason, err := m.resolveInto(ctx, contract, sub, visited, allowMajorCross, depth+1, depPath)
 		if err != nil {
-			return false, "", err
+			return false, nil, err
 		}
 
 		if reason != nil {
-			return false, reason.summary(), nil
+			return false, reason, nil
 		}
 
 		mergeNewSteps(plan, sub)
 
-		return true, "", nil
+		return true, nil, nil
 	}
 
 	version, rejected, err := m.selectCompatible(ctx, depName, candidates, constraint, deepCheck)
@@ -407,16 +433,18 @@ func (m *Manager) selectDepVersion(
 	}
 
 	if version == nil {
-		detail := "no compatible version found"
-		if len(rejected) > 0 {
-			detail = "no compatible version (" + strings.Join(rejected, "; ") + ")"
+		// A single version blocked by its own (deeper) dependency: surface that leaf
+		// reason directly so the chain names the real culprit, not just this dep.
+		if len(rejected) == 1 && rejected[0].reason != nil && rejected[0].reason.kind.isDependency() {
+			return rejected[0].reason, nil
 		}
 
 		return &unsatisfiableReason{
+			kind:       reasonDepNoVersion,
 			pluginName: depName,
 			path:       depPath,
 			constraint: constraintString(constraint),
-			detail:     detail,
+			detail:     "no compatible version",
 		}, nil
 	}
 
@@ -470,19 +498,19 @@ func (m *Manager) selectTopWithPlan(
 ) (*semver.Version, *resolutionPlan, error) {
 	plan := newResolutionPlan()
 
-	deepCheck := func(ctx context.Context, contract *internal.Plugin) (bool, string, error) {
+	deepCheck := func(ctx context.Context, contract *internal.Plugin) (bool, *unsatisfiableReason, error) {
 		candidatePlan, reason, err := m.planFor(ctx, contract, allowMajorCross)
 		if err != nil {
-			return false, "", err
+			return false, nil, err
 		}
 
 		if reason != nil {
-			return false, reason.summary(), nil
+			return false, reason, nil
 		}
 
 		plan = candidatePlan
 
-		return true, "", nil
+		return true, nil, nil
 	}
 
 	version, rejected, err := m.selectCompatible(ctx, pluginName, versions, nil, deepCheck)
@@ -495,7 +523,12 @@ func (m *Manager) selectTopWithPlan(
 	}
 
 	if len(rejected) > 0 {
-		fmt.Printf("Selected %s (newer version(s) skipped: %s)\n", version.Original(), strings.Join(rejected, "; "))
+		skipped := make([]string, len(rejected))
+		for i, rc := range rejected {
+			skipped[i] = fmt.Sprintf("%s (%s)", rc.version, rc.reason.summary())
+		}
+
+		fmt.Printf("Selected %s (newer version(s) skipped: %s)\n", version.Original(), strings.Join(skipped, "; "))
 	}
 
 	return version, plan, nil
