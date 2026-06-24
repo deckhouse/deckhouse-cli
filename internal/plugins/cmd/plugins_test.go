@@ -71,7 +71,7 @@ func TestPluginsDirFlagIsHonored(t *testing.T) {
 
 	dir := t.TempDir() + "/custom-root"
 
-	cmd := NewCommand(dkplog.NewNop())
+	cmd := NewCommand(dkplog.NewNop(), nil)
 	cmd.SetContext(context.Background())
 	cmd.SetArgs([]string{"list", "--plugins-dir", dir})
 	cmd.SetOut(io.Discard)

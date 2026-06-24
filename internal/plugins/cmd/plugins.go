@@ -32,8 +32,12 @@ import (
 )
 
 // NewCommand returns the `d8 plugins` command tree for managing plugins.
-func NewCommand(logger *dkplog.Logger) *cobra.Command {
+// builtinCommands are built-in command names that satisfy a plugin dependency of
+// the same name (e.g. delivery-kit) until such capabilities ship as standalone
+// plugins.
+func NewCommand(logger *dkplog.Logger, builtinCommands []string) *cobra.Command {
 	manager := plugins.NewManager(logger)
+	manager.SetBuiltinCommands(builtinCommands)
 
 	cmd := &cobra.Command{
 		Use:   "plugins",

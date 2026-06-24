@@ -28,6 +28,11 @@ import (
 	"github.com/werf/werf/v2/pkg/storage/synchronization/server"
 )
 
+// DeliveryKitCommandName is the top-level command name for the built-in werf
+// re-skin. A plugin contract uses this same name to depend on delivery-kit
+// while it ships as a built-in command rather than a standalone plugin.
+const DeliveryKitCommandName = "delivery-kit"
+
 func NewDeliveryCommand() (*cobra.Command, context.Context) {
 	server.DefaultAddress = "https://delivery-sync.deckhouse.ru"
 
@@ -49,7 +54,7 @@ func NewDeliveryCommand() (*cobra.Command, context.Context) {
 		return nil, ctx
 	}
 
-	werfRootCmd.Use = "delivery-kit"
+	werfRootCmd.Use = DeliveryKitCommandName
 	werfRootCmd.Aliases = []string{werfAlias}
 	werfRootCmd = ReplaceCommandName("werf", fmt.Sprintf("d8 %s", werfAlias), werfRootCmd)
 	werfRootCmd.Short = "A set of tools for building, distributing, and deploying containerized applications"

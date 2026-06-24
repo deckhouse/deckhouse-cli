@@ -51,6 +51,12 @@ type Manager struct {
 	// listing to one registry call per plugin within a command run.
 	tagsCache map[string][]string
 
+	// builtins are d8 built-in command names that satisfy a plugin dependency of
+	// the same name by their mere presence - a bridge for capabilities not yet
+	// shipped as standalone plugins (e.g. delivery-kit). Set via
+	// SetBuiltinCommands; nil for Managers that never resolve dependencies.
+	builtins map[string]struct{}
+
 	logger *dkplog.Logger
 }
 
