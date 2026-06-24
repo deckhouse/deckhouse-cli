@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
+	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
 // UpdateAll updates every installed plugin to its newest cluster-compatible
@@ -51,7 +52,15 @@ func (m *Manager) UpdateAll(ctx context.Context) error {
 
 	for _, plugin := range plugins {
 		if err := m.InstallPlugin(ctx, plugin); err != nil {
-			fmt.Printf("✗ %s: %v\n", plugin, err)
+			// Render a child HelpfulError in full so the per-plugin failure keeps
+			// its cause/solution detail instead of flattening to one line.
+			var he *diagnostic.HelpfulError
+			if errors.As(err, &he) {
+				fmt.Printf("✗ %s:\n%s", plugin, he.Format())
+			} else {
+				fmt.Printf("✗ %s: %v\n", plugin, err)
+			}
+
 			failed = append(failed, plugin)
 		}
 	}

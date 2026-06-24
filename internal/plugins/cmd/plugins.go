@@ -55,8 +55,14 @@ func NewCommand(logger *dkplog.Logger) *cobra.Command {
 			// path DECKHOUSE_CLI_PATH is applied earlier, at registration).
 			manager.SetDirectory(flags.DeckhousePluginsDir)
 
-			// init plugin services for subcommands after flags are parsed
+			// init plugin services for subcommands after flags are parsed.
+			// PersistentPreRunE is outside wrapProxyDiagnostics, so classify
+			// proxy/discovery failures here too.
 			if err := manager.InitPluginServices(cmd.Context()); err != nil {
+				if diag := errdetect.Diagnose(err); diag != nil {
+					return diag
+				}
+
 				return err
 			}
 

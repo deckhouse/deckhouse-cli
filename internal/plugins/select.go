@@ -21,13 +21,13 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"strings"
 
 	"github.com/Masterminds/semver/v3"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	d8flags "github.com/deckhouse/deckhouse-cli/internal/plugins/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/requirements"
+	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
 // PluginContract fetches a plugin contract, memoizing it per name@tag for the
@@ -152,14 +152,37 @@ func (m *Manager) selectCompatible(
 	return nil, rejected, nil
 }
 
-// noCompatibleError builds the "nothing usable" error from the rejected list.
+// noCompatibleError builds the "nothing usable" error as a HelpfulError. Each
+// rejected version becomes a cause line; a trailing suggestion carries the fixes.
+// The top-level handler renders it (category, causes, actionable solutions).
 func noCompatibleError(pluginName string, rejected []string) error {
 	if len(rejected) == 0 {
-		return fmt.Errorf("no stable version found for plugin %q (use --version to install a pre-release)", pluginName)
+		return &diagnostic.HelpfulError{
+			Category: fmt.Sprintf("no stable version of plugin %q is published", pluginName),
+			Suggestions: []diagnostic.Suggestion{{
+				Cause:     "only pre-releases (rc, alpha, beta) exist",
+				Solutions: []string{fmt.Sprintf("install a pre-release explicitly: d8 plugins install %s --version <version>", pluginName)},
+			}},
+		}
 	}
 
-	return fmt.Errorf("no compatible version of plugin %q; rejected: %s",
-		pluginName, strings.Join(rejected, "; "))
+	suggestions := make([]diagnostic.Suggestion, 0, len(rejected)+1)
+	for _, r := range rejected {
+		suggestions = append(suggestions, diagnostic.Suggestion{Cause: r})
+	}
+
+	suggestions = append(suggestions, diagnostic.Suggestion{
+		Cause: "every published version was rejected",
+		Solutions: []string{
+			fmt.Sprintf("inspect a version's requirements: d8 plugins contract %s", pluginName),
+			fmt.Sprintf("or install an exact version: d8 plugins install %s --version <version>", pluginName),
+		},
+	})
+
+	return &diagnostic.HelpfulError{
+		Category:    fmt.Sprintf("no installable version of plugin %q", pluginName),
+		Suggestions: suggestions,
+	}
 }
 
 // clusterCompatible reports whether the plugin's cluster-side requirements are

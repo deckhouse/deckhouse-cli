@@ -37,6 +37,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/lockfile"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
+	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -162,6 +163,18 @@ func (m *Manager) InstallPlugin(ctx context.Context, pluginName string, opts ...
 	installVersion, plan, err := m.selectTopWithPlan(ctx, pluginName, versions, explicitMajor)
 	if err != nil {
 		if options.majorVersion >= 0 {
+			// The selection error is a HelpfulError; add the major hint as a
+			// solution so it survives rendering (a %w wrap would be dropped).
+			var he *diagnostic.HelpfulError
+			if errors.As(err, &he) {
+				he.Suggestions = append(he.Suggestions, diagnostic.Suggestion{
+					Cause:     fmt.Sprintf("the search was limited to major %d", options.majorVersion),
+					Solutions: []string{"pass --use-major to consider another major"},
+				})
+
+				return err
+			}
+
 			return fmt.Errorf("%w (search was limited to major %d; pass --use-major to consider another major)",
 				err, options.majorVersion)
 		}
@@ -198,7 +211,13 @@ func (m *Manager) planForExplicit(ctx context.Context, pluginName string, versio
 	}
 
 	if reason != nil {
-		return nil, fmt.Errorf("cannot install %s %s: %s", pluginName, version.Original(), reason.summary())
+		return nil, &diagnostic.HelpfulError{
+			Category: fmt.Sprintf("cannot install plugin %q %s", pluginName, version.Original()),
+			Suggestions: []diagnostic.Suggestion{{
+				Cause:     reason.summary(),
+				Solutions: []string{fmt.Sprintf("inspect the plugin's requirements: d8 plugins contract %s", pluginName)},
+			}},
+		}
 	}
 
 	return plan, nil

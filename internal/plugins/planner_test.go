@@ -32,6 +32,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/requirements"
 	"github.com/deckhouse/deckhouse-cli/internal/rpp"
+	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
 // multiPluginSource is a pluginSource serving several plugins, for planner and
@@ -225,6 +226,26 @@ func TestPlannerNonNotFoundDepErrorHardStops(t *testing.T) {
 	require.Nil(t, plan)
 	require.Nil(t, reason, "an operational error is not a skippable reason")
 	assert.ErrorIs(t, err, rpp.ErrUnauthorized, "the sentinel is preserved for errdetect")
+}
+
+func TestSelectTopWithPlanUnpublishedDepIsHelpful(t *testing.T) {
+	// When the only version is rejected for a missing dependency, the install
+	// failure is a structured HelpfulError that names the dependency.
+	src := &multiPluginSource{
+		tags:        map[string][]string{"package": {"v0.0.21"}},
+		unpublished: map[string]bool{"delivery-kit": true},
+		contracts: map[string]map[string]*internal.Plugin{
+			"package": {"v0.0.21": requires("package", "v0.0.21", "delivery-kit", "")},
+		},
+	}
+	m := plannerManager(t, src)
+
+	_, _, err := m.selectTopWithPlan(context.Background(), "package", []string{"v0.0.21"}, false)
+	var he *diagnostic.HelpfulError
+	require.ErrorAs(t, err, &he, "a no-installable-version failure is a HelpfulError")
+	assert.Contains(t, he.Category, `no installable version of plugin "package"`)
+	assert.Contains(t, he.Format(), "not published as deckhouse-cli/plugins/delivery-kit",
+		"the rendered message names the missing dependency")
 }
 
 func TestPlannerUpgradesInstalledDepWithinMajor(t *testing.T) {
