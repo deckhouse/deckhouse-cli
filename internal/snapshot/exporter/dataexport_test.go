@@ -18,6 +18,7 @@ package exporter_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"testing"
@@ -31,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 )
 
@@ -83,9 +85,17 @@ func TestEnsureDataExport_Creates(t *testing.T) {
 
 	assert.Equal(t, exporter.DataExportName(shadowVSName), de.Name)
 	assert.Equal(t, namespace, de.Namespace)
-	assert.Equal(t, "VolumeSnapshot", de.Spec.TargetRef.Kind)
+	assert.Equal(t, aggapi.VolumeSnapshotGroup, de.Spec.TargetRef.Group)
+	assert.Equal(t, aggapi.VolumeSnapshotResource, de.Spec.TargetRef.Resource)
 	assert.Equal(t, shadowVSName, de.Spec.TargetRef.Name)
 	assert.Equal(t, ttl, de.Spec.TTL)
+
+	// Marshal round-trip: the JSON must carry a non-empty "resource" key — the field
+	// the API server rejects when absent (server-side structural CRD validation).
+	raw, marshalErr := json.Marshal(de.Spec.TargetRef)
+	require.NoError(t, marshalErr)
+	assert.Contains(t, string(raw), `"resource":"volumesnapshots"`, "targetRef JSON must contain populated resource key")
+	assert.NotContains(t, string(raw), `"kind"`, "obsolete kind field must not appear in targetRef JSON")
 }
 
 func TestEnsureDataExport_DefaultTTL(t *testing.T) {
@@ -137,8 +147,9 @@ func makeReadyDE(namespace, shadowVSName, baseURL, volumeMode string) *deapi.Dat
 		Spec: deapi.DataexportSpec{
 			TTL: "2h",
 			TargetRef: deapi.TargetRefSpec{
-				Kind: "VolumeSnapshot",
-				Name: shadowVSName,
+				Group:    aggapi.VolumeSnapshotGroup,
+				Resource: aggapi.VolumeSnapshotResource,
+				Name:     shadowVSName,
 			},
 		},
 		Status: deapi.DataExportStatus{
