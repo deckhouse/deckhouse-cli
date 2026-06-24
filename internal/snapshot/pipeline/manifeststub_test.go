@@ -132,8 +132,12 @@ func testManifestSource() *manifestStub {
 		// buildDeletedPVCFakeClient tree: del-disk own manifests carry the (deleted-live) PVC.
 		add(nodeRef(e2eVMAPIVersion, e2eDiskKind, e2eDelDisk, e2eNS),
 			pvcManifest(e2eDelPVC, e2eNS, "uid-del", "csi-del-sc", "Block")).
-		// buildOrphanLeafFakeClient tree: aggregator own manifests (ConfigMap + orphan-leaf PVC).
+		// buildOrphanLeafFakeClient tree: aggregator own manifests carry only the ConfigMap;
+		// the orphan leaf's PVC manifest is keyed under the leaf's own ManifestScopeRef (VS ref).
 		add(nodeRef(e2eVMAPIVersion, e2eDiskKind, "agg-snap", e2eNS),
-			configMapManifest("agg-cm", e2eNS),
+			configMapManifest("agg-cm", e2eNS)).
+		// Orphan leaf PVC manifest keyed by the leaf's ManifestScopeRef (VS CR ref).
+		// WriteVolumeManifest fetches from ManifestScopeRef = VolumeSnapshot ref.
+		add(nodeRef("snapshot.storage.k8s.io/v1", "VolumeSnapshot", "nss-vs-agg-pvc", e2eNS),
 			pvcManifest("pvc-agg", e2eNS, "uid-agg-pvc", "csi-agg-sc", "Block"))
 }

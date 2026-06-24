@@ -879,10 +879,11 @@ func buildOrphanLeafFakeClient(t *testing.T) client.Client {
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-agg-root"},
 	}
 
-	// agg-snap has a VolumeSnapshot visibility-leaf in childrenSnapshotRefs.
-	// The tree builder recognises the leaf (apiVersion snapshot.storage.k8s.io/v1 / kind
-	// VolumeSnapshot) and does NOT fetch it. Instead it sets hasVisibilityLeaves=true and
-	// converts the content DataRefs into orphan leaf children.
+	// agg-snap has a VolumeSnapshot visibility-leaf in its childrenSnapshotRefs (Variant A).
+	// The tree builder calls visitVisibilityLeaf("nss-vs-agg-pvc"): it fetches the VS,
+	// reads status.boundSnapshotContentName → "sc-agg-child", fetches that child content,
+	// and takes the orphan leaf Binding from sc-agg-child.status.dataRef.
+	// The aggregator content (sc-agg) has no own dataRef.
 	aggSnap := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": e2eVMAPIVersion,
@@ -904,13 +905,33 @@ func buildOrphanLeafFakeClient(t *testing.T) client.Client {
 		},
 	}
 
-	// agg-snap own manifests (served by the stub ManifestSource keyed by the agg-snap
-	// node ref): ConfigMap + pvc-agg. The ConfigMap goes to the aggregator manifests/;
-	// pvc-agg is excluded there and instead written into the orphan leaf manifests/
-	// (the leaf resolves its captured PVC via the parent's ManifestScopeRef).
+	// Aggregator SnapshotContent (sc-agg): no own dataRef (Variant A).
 	aggContent := &snapshotapi.SnapshotContent{
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-agg"},
+	}
+
+	// VolumeSnapshot visibility-leaf: carries status.boundSnapshotContentName → sc-agg-child.
+	// visitVisibilityLeaf fetches this object to locate the child SnapshotContent.
+	aggVS := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "snapshot.storage.k8s.io/v1",
+			"kind":       "VolumeSnapshot",
+			"metadata": map[string]interface{}{
+				"name":      "nss-vs-agg-pvc",
+				"namespace": e2eNS,
+			},
+			"status": map[string]interface{}{
+				"boundSnapshotContentName": "sc-agg-child",
+			},
+		},
+	}
+
+	// Child SnapshotContent (sc-agg-child): carries the single dataRef for pvc-agg.
+	// This is the Binding source for the orphan leaf node (Variant A).
+	aggChildContent := &snapshotapi.SnapshotContent{
+		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
+		ObjectMeta: metav1.ObjectMeta{Name: "sc-agg-child"},
 		Status: snapshotapi.SnapshotContentStatus{
 			DataRef: &snapshotapi.SnapshotDataBinding{
 				TargetUID: "uid-agg-pvc",
@@ -960,13 +981,14 @@ func buildOrphanLeafFakeClient(t *testing.T) client.Client {
 	typed := []client.Object{
 		rootSnap, rootContent,
 		aggContent,
+		aggChildContent,
 		realAggVSC, liveAggPVC,
 	}
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(typed...).
-		WithObjects(aggSnap).
+		WithObjects(aggSnap, aggVS).
 		Build()
 }
 
