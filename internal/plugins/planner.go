@@ -22,12 +22,14 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
 
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
+	"github.com/deckhouse/deckhouse-cli/internal/rpp"
 )
 
 // maxResolveDepth bounds the dependency recursion. The visited-set already stops
@@ -78,12 +80,20 @@ type unsatisfiableReason struct {
 	pluginName string
 	constraint string
 	detail     string
+	// path is the dependency chain from the requested plugin down to pluginName.
+	// Renders as "via a -> b -> c". Empty or single-element for a directly
+	// requested plugin.
+	path []string
 }
 
 func (r *unsatisfiableReason) summary() string {
 	msg := r.detail
 	if r.pluginName != "" {
-		msg = fmt.Sprintf("dependency %q: %s", r.pluginName, r.detail)
+		if len(r.path) > 1 {
+			msg = fmt.Sprintf("dependency %q (via %s): %s", r.pluginName, strings.Join(r.path, " -> "), r.detail)
+		} else {
+			msg = fmt.Sprintf("dependency %q: %s", r.pluginName, r.detail)
+		}
 	}
 
 	if r.constraint != "" {
@@ -108,7 +118,7 @@ func (m *Manager) planFor(ctx context.Context, plugin *internal.Plugin, allowMaj
 	plan := newResolutionPlan()
 	visited := map[string]bool{plugin.Name: true}
 
-	reason, err := m.resolveInto(ctx, plugin, plan, visited, allowMajorCross, 0)
+	reason, err := m.resolveInto(ctx, plugin, plan, visited, allowMajorCross, 0, []string{plugin.Name})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -129,6 +139,7 @@ func (m *Manager) resolveInto(
 	visited map[string]bool,
 	allowMajorCross bool,
 	depth int,
+	path []string,
 ) (*unsatisfiableReason, error) {
 	if depth > maxResolveDepth {
 		return nil, fmt.Errorf("plugin dependency chain for %q exceeds the maximum depth of %d", plugin.Name, maxResolveDepth)
@@ -160,7 +171,7 @@ func (m *Manager) resolveInto(
 	// Mandatory deps: must be satisfiable (installed/planned at a good version, or
 	// installable/upgradable).
 	for _, req := range plugin.Requirements.Plugins.Mandatory {
-		reason, err := m.resolveMandatoryDep(ctx, req, plan, visited, allowMajorCross, depth)
+		reason, err := m.resolveMandatoryDep(ctx, req, plan, visited, allowMajorCross, depth, path)
 		if err != nil {
 			return nil, err
 		}
@@ -240,9 +251,10 @@ func (m *Manager) resolveMandatoryDep(
 	visited map[string]bool,
 	allowMajorCross bool,
 	depth int,
+	path []string,
 ) (*unsatisfiableReason, error) {
 	if visited[req.Name] {
-		return &unsatisfiableReason{pluginName: req.Name, detail: "dependency cycle"}, nil
+		return &unsatisfiableReason{pluginName: req.Name, path: append(slices.Clone(path), req.Name), detail: "dependency cycle"}, nil
 	}
 
 	var constraint *semver.Constraints
@@ -279,7 +291,7 @@ func (m *Manager) resolveMandatoryDep(
 		// Installed but out of constraint: fall through to upgrade it.
 	}
 
-	reason, err := m.selectDepVersion(ctx, req.Name, constraint, plan, visited, allowMajorCross, depth)
+	reason, err := m.selectDepVersion(ctx, req.Name, constraint, plan, visited, allowMajorCross, depth, path)
 	if err != nil {
 		return nil, err
 	}
@@ -324,9 +336,23 @@ func (m *Manager) selectDepVersion(
 	visited map[string]bool,
 	allowMajorCross bool,
 	depth int,
+	path []string,
 ) (*unsatisfiableReason, error) {
+	depPath := append(slices.Clone(path), depName)
+
 	tags, err := m.listTags(ctx, depName)
 	if err != nil {
+		// An unpublished mandatory dependency makes this candidate unsatisfiable
+		// (skip to an older version), not an operational failure. Other errors
+		// (auth, proxy, transport) still hard-stop.
+		if errors.Is(err, rpp.ErrNotFound) {
+			return &unsatisfiableReason{
+				pluginName: depName,
+				path:       depPath,
+				detail:     fmt.Sprintf("not published as deckhouse-cli/plugins/%s", depName),
+			}, nil
+		}
+
 		return nil, fmt.Errorf("list tags for %q: %w", depName, err)
 	}
 
@@ -361,7 +387,7 @@ func (m *Manager) selectDepVersion(
 		sub := newResolutionPlan()
 		maps.Copy(sub.byName, plan.byName)
 
-		reason, err := m.resolveInto(ctx, contract, sub, visited, allowMajorCross, depth+1)
+		reason, err := m.resolveInto(ctx, contract, sub, visited, allowMajorCross, depth+1, depPath)
 		if err != nil {
 			return false, "", err
 		}
@@ -375,16 +401,22 @@ func (m *Manager) selectDepVersion(
 		return true, "", nil
 	}
 
-	version, _, err := m.selectCompatible(ctx, depName, candidates, constraint, deepCheck)
+	version, rejected, err := m.selectCompatible(ctx, depName, candidates, constraint, deepCheck)
 	if err != nil {
 		return nil, err
 	}
 
 	if version == nil {
+		detail := "no compatible version found"
+		if len(rejected) > 0 {
+			detail = "no compatible version (" + strings.Join(rejected, "; ") + ")"
+		}
+
 		return &unsatisfiableReason{
 			pluginName: depName,
+			path:       depPath,
 			constraint: constraintString(constraint),
-			detail:     "no compatible version found",
+			detail:     detail,
 		}, nil
 	}
 

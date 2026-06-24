@@ -158,7 +158,7 @@ func noCompatibleError(pluginName string, rejected []string) error {
 		return fmt.Errorf("no stable version found for plugin %q (use --version to install a pre-release)", pluginName)
 	}
 
-	return fmt.Errorf("no compatible version of plugin %q for this cluster; rejected: %s",
+	return fmt.Errorf("no compatible version of plugin %q; rejected: %s",
 		pluginName, strings.Join(rejected, "; "))
 }
 

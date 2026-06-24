@@ -31,6 +31,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/requirements"
+	"github.com/deckhouse/deckhouse-cli/internal/rpp"
 )
 
 // multiPluginSource is a pluginSource serving several plugins, for planner and
@@ -39,9 +40,23 @@ import (
 type multiPluginSource struct {
 	tags      map[string][]string
 	contracts map[string]map[string]*internal.Plugin
+	// unpublished names return an rpp.ErrNotFound from ListPluginTags, emulating a
+	// dependency that is not published in the registry (a 404 from the proxy).
+	unpublished map[string]bool
+	// tagErrors returns a specific error for a name, for non-404 failures
+	// (auth, proxy, transport) that must hard-stop rather than skip.
+	tagErrors map[string]error
 }
 
 func (s *multiPluginSource) ListPluginTags(_ context.Context, name string) ([]string, error) {
+	if err, ok := s.tagErrors[name]; ok {
+		return nil, err
+	}
+
+	if s.unpublished[name] {
+		return nil, fmt.Errorf("%s: %w", name, rpp.ErrNotFound)
+	}
+
 	tags, ok := s.tags[name]
 	if !ok {
 		return nil, fmt.Errorf("no such plugin %q", name)
@@ -136,6 +151,82 @@ func TestPlannerInstallsMissingMandatoryDep(t *testing.T) {
 	assert.Equal(t, "v1.3.0", planStepVersions(plan)["foo"], "newest satisfying version is planned")
 }
 
+func TestPlannerUnpublishedDepIsReasonWithChain(t *testing.T) {
+	src := &multiPluginSource{
+		unpublished: map[string]bool{"foo": true},
+		contracts:   map[string]map[string]*internal.Plugin{},
+	}
+	m := plannerManager(t, src)
+
+	top := requires("p", "v1.0.0", "foo", "")
+
+	plan, reason, err := m.planFor(context.Background(), top, false)
+	require.NoError(t, err, "an unpublished dependency is not an operational error")
+	require.Nil(t, plan)
+	require.NotNil(t, reason, "the candidate is unsatisfiable, not a hard stop")
+	assert.Equal(t, `dependency "foo" (via p -> foo): not published as deckhouse-cli/plugins/foo`, reason.summary())
+}
+
+func TestPlannerSkipsDepVersionWithUnpublishedSubdep(t *testing.T) {
+	// dk v2 needs the unpublished "x"; dk v1 has no deps. Resolution falls back to v1.
+	src := &multiPluginSource{
+		tags:        map[string][]string{"dk": {"v2.0.0", "v1.0.0"}},
+		unpublished: map[string]bool{"x": true},
+		contracts: map[string]map[string]*internal.Plugin{
+			"dk": {
+				"v2.0.0": requires("dk", "v2.0.0", "x", ""),
+				"v1.0.0": {Name: "dk", Version: "v1.0.0"},
+			},
+		},
+	}
+	m := plannerManager(t, src)
+
+	top := requires("p", "v1.0.0", "dk", "")
+
+	plan, reason, err := m.planFor(context.Background(), top, false)
+	require.NoError(t, err)
+	require.Nil(t, reason, "dk v1 satisfies the requirement")
+	assert.Equal(t, "v1.0.0", planStepVersions(plan)["dk"], "skips dk v2 whose subdep is unpublished")
+}
+
+func TestPlannerDeepUnpublishedDepNamesTheChain(t *testing.T) {
+	// p -> dk (only v2) -> x (unpublished). The failure must name x and the full chain.
+	src := &multiPluginSource{
+		tags:        map[string][]string{"dk": {"v2.0.0"}},
+		unpublished: map[string]bool{"x": true},
+		contracts: map[string]map[string]*internal.Plugin{
+			"dk": {"v2.0.0": requires("dk", "v2.0.0", "x", "")},
+		},
+	}
+	m := plannerManager(t, src)
+
+	top := requires("p", "v1.0.0", "dk", "")
+
+	_, reason, err := m.planFor(context.Background(), top, false)
+	require.NoError(t, err)
+	require.NotNil(t, reason)
+	assert.Contains(t, reason.summary(), "not published as deckhouse-cli/plugins/x")
+	assert.Contains(t, reason.summary(), "via p -> dk -> x")
+}
+
+func TestPlannerNonNotFoundDepErrorHardStops(t *testing.T) {
+	// A non-404 dependency error (auth, proxy, transport) must hard-stop the whole
+	// install, not skip to an older version, and must preserve the sentinel.
+	src := &multiPluginSource{
+		tagErrors: map[string]error{"dk": fmt.Errorf("dk: %w", rpp.ErrUnauthorized)},
+		contracts: map[string]map[string]*internal.Plugin{},
+	}
+	m := plannerManager(t, src)
+
+	top := requires("p", "v1.0.0", "dk", "")
+
+	plan, reason, err := m.planFor(context.Background(), top, false)
+	require.Error(t, err)
+	require.Nil(t, plan)
+	require.Nil(t, reason, "an operational error is not a skippable reason")
+	assert.ErrorIs(t, err, rpp.ErrUnauthorized, "the sentinel is preserved for errdetect")
+}
+
 func TestPlannerUpgradesInstalledDepWithinMajor(t *testing.T) {
 	src := &multiPluginSource{
 		tags: map[string][]string{"foo": {"v1.0.0", "v1.2.0", "v1.5.0", "v2.0.0"}},
@@ -224,6 +315,8 @@ func TestPlannerCycleIsUnsatisfiable(t *testing.T) {
 	_, reason, err := m.planFor(ctx, src.contracts["a"]["v1.0.0"], false)
 	require.NoError(t, err)
 	require.NotNil(t, reason, "a self-referential dependency chain is unsatisfiable, not an infinite loop")
+	assert.Contains(t, reason.summary(), "dependency cycle")
+	assert.Contains(t, reason.summary(), "via a -> b -> a", "the cycle is shown as a chain")
 }
 
 func TestPlannerConditionalDepWrongVersionUnsatisfiable(t *testing.T) {
