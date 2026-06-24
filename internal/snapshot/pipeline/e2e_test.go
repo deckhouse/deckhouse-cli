@@ -40,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -985,10 +986,43 @@ func buildOrphanLeafFakeClient(t *testing.T) client.Client {
 		realAggVSC, liveAggPVC,
 	}
 
+	// aggVS is an unstructured snapshot.storage.k8s.io/v1 VolumeSnapshot carrying
+	// status.boundSnapshotContentName — a Deckhouse-extended field absent from the
+	// upstream snapv1.VolumeSnapshotStatus struct. Because buildScheme registers the
+	// typed snapv1.VolumeSnapshot, the fake-client tracker's
+	// convertFromUnstructuredIfNecessary round-trips every unstructured VS through
+	// that typed struct on storage, silently dropping the fork field.
+	//
+	// We cannot remove VolumeSnapshot from the scheme: shadow operations (EnsureShadowPair /
+	// CleanupShadowPair) use typed *snapv1.VolumeSnapshot and require scheme registration.
+	//
+	// Fix (test-only): use a Get interceptor to re-inject status.boundSnapshotContentName
+	// specifically for the leaf VS when it is retrieved as *unstructured.Unstructured by
+	// visitVisibilityLeaf. This preserves the production tree.go contract unchanged and
+	// leaves all other operations (typed shadow-VS Get/Create/Delete) unaffected.
+	leafVSInject := interceptor.Funcs{
+		Get: func(ctx context.Context, underlying client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := underlying.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			u, ok := obj.(*unstructured.Unstructured)
+			if !ok ||
+				u.GetAPIVersion() != "snapshot.storage.k8s.io/v1" ||
+				u.GetKind() != "VolumeSnapshot" ||
+				key.Namespace != e2eNS ||
+				key.Name != "nss-vs-agg-pvc" {
+				return nil
+			}
+			_ = unstructured.SetNestedField(u.Object, "sc-agg-child", "status", "boundSnapshotContentName")
+			return nil
+		},
+	}
+
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(typed...).
 		WithObjects(aggSnap, aggVS).
+		WithInterceptorFuncs(leafVSInject).
 		Build()
 }
 
