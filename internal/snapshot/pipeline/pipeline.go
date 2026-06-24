@@ -26,12 +26,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
-	corev1 "k8s.io/api/core/v1"
-	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
-	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
@@ -52,7 +48,7 @@ func Run(ctx context.Context, cfg Config) error {
 	cfg = applyDefaults(cfg)
 
 	if cfg.OpenExport == nil {
-		return fmt.Errorf("pipeline: OpenExport must be set (supply SafeClient or set OpenExport directly)")
+		return fmt.Errorf("pipeline: OpenExport must be set (supply SafeClient+AggClient or set OpenExport directly)")
 	}
 
 	if cfg.ManifestSource == nil {
@@ -304,7 +300,7 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask) error {
 			slog.String("kind", task.node.Kind),
 			slog.String("name", task.node.Name))
 	default:
-		if err := downloadVolumeBinding(ctx, cfg, task.node.Binding, task.node.Namespace, task.node.ManifestScopeRef(), dest); err != nil {
+		if err := downloadVolumeBinding(ctx, cfg, task.node.Ref(), task.node.Namespace, dest); err != nil {
 			return fmt.Errorf("download volume for %s/%s: %w", task.node.Kind, task.node.Name, err)
 		}
 	}
@@ -327,7 +323,7 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask) error {
 //     with the block-resume guard (skip if any data.bin* file already exists).
 //   - Two or more OwnDataRefs: multi-volume layout — data/<pvc>.bin[.<ext>] / data/<pvc>.tar
 //     per volume. The resume guard is per-pvc (skip if the specific MultiVolumeBlockName exists).
-//     Shadow VS/VSC + DataExport lifecycle is independent per volume.
+//     DataExport lifecycle is independent per volume.
 func downloadOwnDataRefs(
 	ctx context.Context,
 	cfg Config,
@@ -366,10 +362,11 @@ func downloadOwnDataRefs(
 			return nil
 		}
 
-		return downloadVolumeBinding(ctx, cfg, &refs[0], node.Namespace, node.Ref(), dest)
+		return downloadVolumeBinding(ctx, cfg, node.Ref(), node.Namespace, dest)
 	}
 
-	// Multi-volume layout: one shadow pair + DataExport per binding.
+	// Multi-volume layout: one DataExport per binding. Each binding shares the same
+	// snapshot leaf ref (node.Ref()); the pvc name is used only for output file naming.
 	for i := range refs {
 		ref := &refs[i]
 		pvc := ref.Target.Name
@@ -399,7 +396,7 @@ func downloadOwnDataRefs(
 			continue
 		}
 
-		if err := downloadVolumeBinding(ctx, cfg, ref, node.Namespace, node.Ref(), dest); err != nil {
+		if err := downloadVolumeBinding(ctx, cfg, node.Ref(), node.Namespace, dest); err != nil {
 			return fmt.Errorf("download volume for pvc %s: %w", pvc, err)
 		}
 	}
@@ -459,75 +456,45 @@ func multiDest(nodeDir, pvc, ext string) volumeDestPaths {
 	}
 }
 
-// downloadVolumeBinding creates the shadow VS/VSC pair for the artifact, opens a
-// DataExport, downloads the volume data (block or filesystem) to dest, and cleans
-// up the shadow pair and export on completion or error.
+// downloadVolumeBinding opens a DataExport for the snapshot leaf identified by
+// leafRef, downloads the volume data (block or filesystem) to dest, and releases
+// the DataExport on completion or error.
 //
-// namespace is the Kubernetes namespace for the shadow VS/VSC and DataExport.
-// scopeRef addresses the node whose manifests-download holds the captured source PVC,
-// used as a fallback when the live source PVC is no longer present.
+// leafRef addresses the snapshot leaf CR that the DataExport controller will
+// resolve via leaf.status.boundSnapshotContentName → SnapshotContent → dataRef.
+// For CSI VolumeSnapshot visibility-leaves leafRef.Kind == "VolumeSnapshot"; for
+// domain snapshot nodes it carries the domain group and kind.
+//
+// namespace is the Kubernetes namespace for the DataExport.
 // dest specifies where block chunks, the merged block file, and filesystem files go.
 func downloadVolumeBinding(
 	ctx context.Context,
 	cfg Config,
-	binding *snapshotapi.SnapshotDataBinding,
+	leafRef aggapi.NodeRef,
 	namespace string,
-	scopeRef aggapi.NodeRef,
 	dest volumeDestPaths,
 ) error {
-	if binding.Artifact.Kind != exporter.ArtifactKindVolumeSnapshotContent {
-		return fmt.Errorf("unsupported artifact kind %q (want VolumeSnapshotContent)",
-			binding.Artifact.Kind)
-	}
-
-	artifactName := binding.Artifact.Name
-
-	meta, err := resolveShadowMeta(ctx, cfg, scopeRef, binding.Target)
+	exp, err := cfg.OpenExport(ctx, namespace, leafRef, cfg.TTL)
 	if err != nil {
-		return fmt.Errorf("resolve shadow metadata for artifact %s: %w", artifactName, err)
+		return fmt.Errorf("open DataExport for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
 	}
 
-	shadowVS, err := exporter.EnsureShadowPair(ctx, cfg.KubeClient, namespace, artifactName, meta)
-	if err != nil {
-		return fmt.Errorf("ensure shadow pair for artifact %s: %w", artifactName, err)
-	}
-
-	// cleanupCtx is deliberately not derived from ctx so that cleanup still runs
+	// cleanupCtx is deliberately not derived from ctx so that release still runs
 	// when ctx is cancelled (e.g. by errgroup on sibling error or by SIGINT).
-	// A bounded timeout prevents cleanup from hanging forever.
+	// A bounded timeout prevents release from hanging forever.
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cleanupCancel()
 
 	defer func() {
-		if cleanErr := exporter.CleanupShadowPair(cleanupCtx, cfg.KubeClient, namespace, artifactName); cleanErr != nil {
-			cfg.Log.Warn("failed to cleanup shadow pair",
-				slog.String("artifact", artifactName),
-				slog.String("error", cleanErr.Error()))
-		}
-	}()
-
-	shadowCtx, shadowCancel := context.WithTimeout(ctx, cfg.ShadowReadinessTimeout)
-	defer shadowCancel()
-
-	if err := cfg.WaitShadowVS(shadowCtx, cfg.KubeClient, cfg.Log, namespace, shadowVS.Name, artifactName); err != nil {
-		return fmt.Errorf("wait for shadow VS %s ready: %w", shadowVS.Name, err)
-	}
-
-	exp, err := cfg.OpenExport(ctx, namespace, shadowVS.Name, cfg.TTL)
-	if err != nil {
-		return fmt.Errorf("open DataExport for shadow VS %s: %w", shadowVS.Name, err)
-	}
-
-	defer func() {
 		if relErr := exp.Release(cleanupCtx, cfg.KubeClient); relErr != nil {
 			cfg.Log.Warn("failed to release DataExport",
-				slog.String("shadow_vs", shadowVS.Name),
+				slog.String("leaf", leafRef.Name),
 				slog.String("error", relErr.Error()))
 		}
 	}()
 
 	cfg.Log.Info("downloading volume",
-		slog.String("artifact", artifactName),
+		slog.String("leaf", leafRef.Name),
 		slog.String("volume_mode", exp.VolumeMode()))
 
 	switch exp.VolumeMode() {
@@ -536,7 +503,7 @@ func downloadVolumeBinding(
 	case "Filesystem":
 		return downloadFS(ctx, cfg, dest.fsTarPath, dest.fsTarStagingDir, exp)
 	default:
-		return fmt.Errorf("unsupported volume mode %q for artifact %s", exp.VolumeMode(), artifactName)
+		return fmt.Errorf("unsupported volume mode %q for leaf %s/%s", exp.VolumeMode(), leafRef.Kind, leafRef.Name)
 	}
 }
 
@@ -607,54 +574,6 @@ func nodeIdentity(node *source.Node) archive.NodeIdentity {
 	}
 }
 
-// resolveShadowMeta resolves the storageClass and volumeMode of the source PVC
-// (target) that was snapshotted. It tries a live API lookup first; if the PVC
-// is gone it falls back to the node's own-scope manifests (fetched via
-// ManifestSource). Those manifests always contain the captured PVC object even
-// when WriteNodeManifests excludes it from disk per the OwnDataRef policy, so
-// this path works even for deleted captured PVCs. Returns an error if both
-// attempts fail or if the PVC does not carry both required fields.
-func resolveShadowMeta(
-	ctx context.Context,
-	cfg Config,
-	scopeRef aggapi.NodeRef,
-	target snapshotapi.SnapshotSubjectRef,
-) (exporter.ShadowMeta, error) {
-	pvc := &corev1.PersistentVolumeClaim{}
-
-	err := cfg.KubeClient.Get(ctx, types.NamespacedName{Namespace: target.Namespace, Name: target.Name}, pvc)
-	if err != nil && !kubeerrors.IsNotFound(err) {
-		return exporter.ShadowMeta{}, fmt.Errorf("get source PVC %s/%s: %w", target.Namespace, target.Name, err)
-	}
-
-	if err == nil {
-		return shadowMetaFromPVC(pvc)
-	}
-
-	return shadowMetaFromManifests(ctx, cfg, scopeRef, target.Name)
-}
-
-// shadowMetaFromPVC extracts storageClass and volumeMode from a live PVC.
-func shadowMetaFromPVC(pvc *corev1.PersistentVolumeClaim) (exporter.ShadowMeta, error) {
-	var meta exporter.ShadowMeta
-
-	if pvc.Spec.StorageClassName != nil && *pvc.Spec.StorageClassName != "" {
-		meta.StorageClass = *pvc.Spec.StorageClassName
-	}
-
-	if pvc.Spec.VolumeMode != nil {
-		meta.VolumeMode = string(*pvc.Spec.VolumeMode)
-	}
-
-	if meta.StorageClass == "" || meta.VolumeMode == "" {
-		return exporter.ShadowMeta{}, fmt.Errorf(
-			"source PVC %s/%s is missing required fields: storageClassName=%q volumeMode=%q",
-			pvc.Namespace, pvc.Name, meta.StorageClass, meta.VolumeMode)
-	}
-
-	return meta, nil
-}
-
 // fsTarComplete reports whether the assembled filesystem tar at tarPath already
 // exists. Returns (true, nil) when found, (false, nil) when absent, and
 // (false, err) for any other stat error.
@@ -669,47 +588,4 @@ func fsTarComplete(tarPath string) (bool, error) {
 	}
 
 	return false, err
-}
-
-// shadowMetaFromManifests resolves storageClass and volumeMode by fetching the
-// node's own-scope manifests via ManifestSource and locating the PVC object by name.
-// The manifests always contain the captured PVC even when WriteNodeManifests
-// excludes it from disk per the OwnDataRef policy. This function must not read
-// from <nodeDir>/manifests/ because that file is intentionally absent for
-// data-owning domain nodes with a deleted backing PVC.
-func shadowMetaFromManifests(
-	ctx context.Context,
-	cfg Config,
-	scopeRef aggapi.NodeRef,
-	pvcName string,
-) (exporter.ShadowMeta, error) {
-	manifests, err := cfg.ManifestSource.FetchNodeManifests(ctx, scopeRef)
-	if err != nil {
-		return exporter.ShadowMeta{}, fmt.Errorf(
-			"fetch manifests of %s/%s to resolve shadow metadata for PVC %q: %w",
-			scopeRef.Kind, scopeRef.Name, pvcName, err)
-	}
-
-	for _, obj := range manifests {
-		if obj.GetKind() != "PersistentVolumeClaim" || obj.GetName() != pvcName {
-			continue
-		}
-
-		spec, _ := obj.Object["spec"].(map[string]interface{})
-
-		storageClass, _ := spec["storageClassName"].(string)
-		volumeMode, _ := spec["volumeMode"].(string)
-
-		if storageClass == "" || volumeMode == "" {
-			return exporter.ShadowMeta{}, fmt.Errorf(
-				"%s/%s manifests PVC %q is missing required fields: storageClassName=%q volumeMode=%q",
-				scopeRef.Kind, scopeRef.Name, pvcName, storageClass, volumeMode)
-		}
-
-		return exporter.ShadowMeta{StorageClass: storageClass, VolumeMode: volumeMode}, nil
-	}
-
-	return exporter.ShadowMeta{}, fmt.Errorf(
-		"source PVC %q not found in manifests of %s/%s (PVC was deleted and not captured)",
-		pvcName, scopeRef.Kind, scopeRef.Name)
 }

@@ -28,7 +28,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 )
 
 // ErrExpired is returned by WaitReady when the DataExport enters the Expired
@@ -44,23 +43,30 @@ const defaultDataExportTTL = "2h"
 // With a 3 s poll interval, every 5 attempts ≈ 15 s.
 const logEveryN = 5
 
-// DataExportName derives a deterministic DataExport CR name from the shadow
-// VolumeSnapshot name. The result fits in a DNS-1123 label.
-func DataExportName(shadowVSName string) string {
-	return "de-" + shadowVSName
+// DataExportName derives a deterministic DataExport CR name from the snapshot
+// leaf CR name. The result fits in a DNS-1123 label.
+func DataExportName(leafName string) string {
+	return "de-" + leafName
 }
 
 // EnsureDataExport idempotently creates a DataExport in namespace targeting
-// the shadow VolumeSnapshot shadowVSName with the given TTL (empty → "2h").
-// Returns the DataExport object (newly created or pre-existing).
+// the snapshot leaf CR identified by {group, resource, leafName} with the given
+// TTL (empty → "2h"). Returns the DataExport object (newly created or pre-existing).
+//
+// group and resource must identify a namespaced snapshot CR (e.g.
+// "snapshot.storage.k8s.io" / "volumesnapshots" for a CSI VolumeSnapshot leaf, or
+// the domain group / resource for a domain snapshot CR). The controller routes any
+// such targetRef through its resource-agnostic categorySnapshot path.
 func EnsureDataExport(
 	ctx context.Context,
 	c client.Client,
 	namespace,
-	shadowVSName,
+	group,
+	resource,
+	leafName,
 	ttl string,
 ) (*deapi.DataExport, error) {
-	deName := DataExportName(shadowVSName)
+	deName := DataExportName(leafName)
 
 	existing := new(deapi.DataExport)
 
@@ -85,9 +91,9 @@ func EnsureDataExport(
 		Spec: deapi.DataexportSpec{
 			TTL: ttl,
 			TargetRef: deapi.TargetRefSpec{
-				Group:    aggapi.VolumeSnapshotGroup,
-				Resource: aggapi.VolumeSnapshotResource,
-				Name:     shadowVSName,
+				Group:    group,
+				Resource: resource,
+				Name:     leafName,
 			},
 		},
 	}

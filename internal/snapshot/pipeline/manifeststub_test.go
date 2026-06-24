@@ -94,7 +94,7 @@ func configMapManifest(name, namespace string) unstructured.Unstructured {
 }
 
 // pvcManifest builds a PersistentVolumeClaim manifest object carrying storageClassName
-// and volumeMode so shadow-meta resolution can read them.
+// and volumeMode, used to verify manifest capture and OwnDataRef PVC exclusion.
 func pvcManifest(name, namespace, uid, storageClass, volumeMode string) unstructured.Unstructured {
 	meta := map[string]interface{}{"name": name}
 	if namespace != "" {
@@ -123,13 +123,13 @@ func testManifestSource() *manifestStub {
 	return newManifestStub().
 		// buildFakeClient tree (pipeline_test.go): root carries one ConfigMap.
 		add(snapRef(rootSnapshot, testNS), configMapManifest("test-cfg", testNS)).
-		// TestPipeline_ShadowMetaFromManifest: disk-snap own manifests carry the captured PVC.
+		// disk-snap own manifests carry the captured PVC (used by OwnDataRef PVC exclusion tests).
 		add(nodeRef(childAPIVersion, childKind, diskSnapName, testNS),
 			pvcManifest(sourcePVCName, testNS, "uid-disk", "csi-ceph-rbd-from-checkpoint", "Block")).
 		// buildE2EFakeClient tree (e2e_test.go).
 		add(snapRef(e2eRootSnap, e2eNS), configMapManifest(e2eRootCMName, e2eNS)).
 		add(nodeRef(e2eVMAPIVersion, e2eVMKind, e2eVMSnap, e2eNS), configMapManifest(e2eVMCMName, e2eNS)).
-		// buildDeletedPVCFakeClient tree: del-disk own manifests carry the (deleted-live) PVC.
+		// buildDeletedPVCFakeClient tree: del-disk own manifests carry the captured PVC.
 		add(nodeRef(e2eVMAPIVersion, e2eDiskKind, e2eDelDisk, e2eNS),
 			pvcManifest(e2eDelPVC, e2eNS, "uid-del", "csi-del-sc", "Block")).
 		// buildOrphanLeafFakeClient tree: aggregator own manifests carry only the ConfigMap;

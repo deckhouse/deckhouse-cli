@@ -75,8 +75,9 @@ func NewExport(namespace, deName, volumeMode, baseURL string, fetcher *Fetcher) 
 	}
 }
 
-// OpenExport creates (or re-uses) a DataExport targeting shadowVSName, waits
-// until it is Ready, and returns an Export ready for data transfer.
+// OpenExport creates (or re-uses) a DataExport targeting the snapshot leaf
+// identified by {group, resource, leafName}, waits until it is Ready, and
+// returns an Export ready for data transfer.
 //
 // An isolated copy of sClient is built for the HTTP Fetcher so that CA
 // injection does not mutate the caller's client.
@@ -85,13 +86,15 @@ func OpenExport(
 	log *slog.Logger,
 	c client.Client,
 	namespace,
-	shadowVSName,
+	group,
+	resource,
+	leafName,
 	ttl string,
 	sc *safeClient.SafeClient,
 ) (*Export, error) {
-	de, err := EnsureDataExport(ctx, c, namespace, shadowVSName, ttl)
+	de, err := EnsureDataExport(ctx, c, namespace, group, resource, leafName, ttl)
 	if err != nil {
-		return nil, fmt.Errorf("ensure DataExport for shadow VS %q: %w", shadowVSName, err)
+		return nil, fmt.Errorf("ensure DataExport for leaf %q: %w", leafName, err)
 	}
 
 	ready, err := WaitReady(ctx, c, log, namespace, de.Name)

@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,18 +28,14 @@ import (
 	"testing"
 	"time"
 
-	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
-	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
@@ -48,18 +43,10 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
 )
 
-// noopWaitShadowVS is a WaitShadowVS stub for tests that do not exercise the
-// shadow VS readiness wait (e.g. happy-path tests using a fake kube client
-// where no snapshot-controller runs to set status).
-func noopWaitShadowVS(_ context.Context, _ client.Client, _ *slog.Logger, _, _, _ string) error {
-	return nil
-}
-
 const (
 	testNS        = "test-ns"
 	rootSnapshot  = "my-snap"
 	diskSnapName  = "disk-snap"
-	diskVSCName   = "vsc-disk"
 	sourcePVCName = "pvc-disk-source"
 
 	storageAPIVersion = "storage.deckhouse.io/v1alpha1"
@@ -100,8 +87,7 @@ func TestPipeline_HappyPath(t *testing.T) {
 		Workers:              1,
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
-		WaitShadowVS:         noopWaitShadowVS,
-		OpenExport: func(_ context.Context, namespace, _ string, _ string) (*exporter.Export, error) {
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
 			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
 		},
 	}
@@ -154,50 +140,32 @@ func TestPipeline_HappyPath(t *testing.T) {
 		"disk-snap snapshot.yaml must not be rewritten on second run")
 }
 
-// TestPipeline_CleanupAfterError verifies that shadow VS/VSC are deleted even when
-// the parent context is cancelled (e.g. by errgroup on sibling error or SIGINT).
-// The deferred cleanup must use a non-cancellable context so it runs after ctx.Done().
-func TestPipeline_CleanupAfterError(t *testing.T) {
+// TestPipeline_OpenExportErrorReleasesCleanly verifies that when OpenExport fails
+// the pipeline returns an error and no DataExport objects linger.
+func TestPipeline_OpenExportErrorReleasesCleanly(t *testing.T) {
 	t.Parallel()
 
 	c := buildFakeClient(t)
 	outputDir := t.TempDir()
 
-	// OpenExport always fails, simulating a cluster-level download error.
-	// The errgroup cancels the shared gctx when this error propagates;
-	// cleanup defers must still delete shadow objects despite the cancelled ctx.
 	cfg := pipeline.Config{
 		Namespace:    testNS,
 		RootSnapshot: rootSnapshot,
 		OutputDir:    outputDir,
 		Workers:      1,
 		KubeClient:   c,
-		WaitShadowVS: noopWaitShadowVS,
-		OpenExport: func(_ context.Context, _, _, _ string) (*exporter.Export, error) {
+		OpenExport: func(_ context.Context, _ string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
 			return nil, errors.New("simulated DataExport creation failure")
 		},
 	}
 
 	err := runPipeline(context.Background(), cfg)
 	require.Error(t, err, "expected pipeline to fail when OpenExport errors")
-
-	// Shadow VS and VSC must have been cleaned up despite the failed run.
-	pairName := exporter.ShadowName(diskVSCName)
-
-	var shadowVS snapv1.VolumeSnapshot
-	vsErr := c.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: pairName}, &shadowVS)
-	assert.True(t, kubeerrors.IsNotFound(vsErr),
-		"shadow VS must be deleted after error cleanup; got err=%v", vsErr)
-
-	var shadowVSC snapv1.VolumeSnapshotContent
-	vscErr := c.Get(context.Background(), types.NamespacedName{Name: pairName}, &shadowVSC)
-	assert.True(t, kubeerrors.IsNotFound(vscErr),
-		"shadow VSC must be deleted after error cleanup; got err=%v", vscErr)
 }
 
 // TestPipeline_BlockResumeAfterMerge verifies that when data.bin.zst already exists
 // in a node directory (crash-after-merge-before-snapshot.yaml window), the pipeline
-// skips shadow pair creation and DataExport entirely and only calls FinalizeNode.
+// skips DataExport creation entirely and only calls FinalizeNode.
 func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
 	t.Parallel()
 
@@ -223,8 +191,7 @@ func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
 		OutputDir:    outputDir,
 		Workers:      1,
 		KubeClient:   c,
-		WaitShadowVS: noopWaitShadowVS,
-		OpenExport: func(_ context.Context, _, _, _ string) (*exporter.Export, error) {
+		OpenExport: func(_ context.Context, _ string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
 			t.Error("OpenExport must not be called when data.bin.zst already exists")
 			return nil, errors.New("unexpected OpenExport call")
 		},
@@ -239,8 +206,7 @@ func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
 
 // TestPipeline_FSResumeAfterTar verifies that when data.tar already exists in a
 // node directory (crash-after-tar-assembly-before-snapshot.yaml window), the
-// pipeline skips shadow pair creation and DataExport entirely and only calls
-// FinalizeNode.
+// pipeline skips DataExport creation entirely and only calls FinalizeNode.
 func TestPipeline_FSResumeAfterTar(t *testing.T) {
 	t.Parallel()
 
@@ -266,8 +232,7 @@ func TestPipeline_FSResumeAfterTar(t *testing.T) {
 		OutputDir:    outputDir,
 		Workers:      1,
 		KubeClient:   c,
-		WaitShadowVS: noopWaitShadowVS,
-		OpenExport: func(_ context.Context, _, _, _ string) (*exporter.Export, error) {
+		OpenExport: func(_ context.Context, _ string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
 			t.Error("OpenExport must not be called when data.tar already exists")
 
 			return nil, errors.New("unexpected OpenExport call")
@@ -364,43 +329,13 @@ func buildFakeClient(t *testing.T) client.Client {
 				Artifact: snapshotapi.SnapshotDataArtifactRef{
 					APIVersion: "snapshot.storage.k8s.io/v1",
 					Kind:       "VolumeSnapshotContent",
-					Name:       diskVSCName,
+					Name:       "vsc-disk",
 				},
 			},
 		},
 	}
 
-	// Real VolumeSnapshotContent — needed by EnsureShadowPair.
-	snapshotHandle := "snap-handle-1"
-	realVSC := &snapv1.VolumeSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: diskVSCName},
-		Spec: snapv1.VolumeSnapshotContentSpec{
-			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
-			Driver:         "test.driver",
-			Source: snapv1.VolumeSnapshotContentSource{
-				SnapshotHandle: &snapshotHandle,
-			},
-			VolumeSnapshotRef: corev1.ObjectReference{
-				APIVersion: "snapshot.storage.k8s.io/v1",
-				Kind:       "VolumeSnapshot",
-				Name:       "placeholder",
-				Namespace:  "default",
-			},
-		},
-	}
-
-	// Source PVC — needed by resolveShadowMeta.
-	fsMode := corev1.PersistentVolumeFilesystem
-	storageClass := "csi-ceph-rbd"
-	sourcePVC := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: sourcePVCName, Namespace: testNS},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			StorageClassName: &storageClass,
-			VolumeMode:       &fsMode,
-		},
-	}
-
-	typed := []client.Object{rootSnap, rootContent, childContent, realVSC, sourcePVC}
+	typed := []client.Object{rootSnap, rootContent, childContent}
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -415,16 +350,14 @@ func buildScheme(t *testing.T) *runtime.Scheme {
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, snapshotapi.AddToScheme(scheme))
-	require.NoError(t, snapv1.AddToScheme(scheme))
-	require.NoError(t, corev1.AddToScheme(scheme))
 
 	return scheme
 }
 
-// TestPipeline_ShadowMetaFromLivePVC verifies that downloadVolume injects
-// storageClass and volumeMode annotations on the shadow VS when the source PVC
-// is present live in the cluster.
-func TestPipeline_ShadowMetaFromLivePVC(t *testing.T) {
+// TestPipeline_LeafTargetRef verifies that OpenExport receives the correct snapshot
+// leaf NodeRef (not a shadow VS name) when a domain snapshot node downloads its
+// OwnDataRef volume.
+func TestPipeline_LeafTargetRef(t *testing.T) {
 	t.Parallel()
 
 	rawBlock := bytes.Repeat([]byte("B"), 600)
@@ -435,7 +368,7 @@ func TestPipeline_ShadowMetaFromLivePVC(t *testing.T) {
 	c := buildFakeClient(t)
 	outputDir := t.TempDir()
 
-	var capturedMeta exporter.ShadowMeta
+	var capturedRef aggapi.NodeRef
 
 	cfg := pipeline.Config{
 		Namespace:            testNS,
@@ -444,17 +377,8 @@ func TestPipeline_ShadowMetaFromLivePVC(t *testing.T) {
 		Workers:              1,
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
-		WaitShadowVS:         noopWaitShadowVS,
-		OpenExport: func(ctx context.Context, namespace, vsName string, ttl string) (*exporter.Export, error) {
-			// Inspect the shadow VS that was created before OpenExport is called.
-			var shadowVS snapv1.VolumeSnapshot
-			if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: vsName}, &shadowVS); err == nil {
-				capturedMeta = exporter.ShadowMeta{
-					StorageClass: shadowVS.Annotations[exporter.AnnotationStorageClassName],
-					VolumeMode:   shadowVS.Annotations[exporter.AnnotationVolumeMode],
-				}
-			}
-
+		OpenExport: func(_ context.Context, namespace string, leafRef aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			capturedRef = leafRef
 			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
 		},
 	}
@@ -462,224 +386,15 @@ func TestPipeline_ShadowMetaFromLivePVC(t *testing.T) {
 	err := runPipeline(context.Background(), cfg)
 	require.NoError(t, err)
 
-	assert.Equal(t, "csi-ceph-rbd", capturedMeta.StorageClass,
-		"shadow VS must carry storage-class annotation from source PVC")
-	assert.Equal(t, "Filesystem", capturedMeta.VolumeMode,
-		"shadow VS must carry volume-mode annotation from source PVC")
-}
-
-// TestPipeline_ShadowMetaFromManifest verifies that when the source PVC is gone from
-// the cluster, storageClass and volumeMode are resolved from the node's own-scope
-// manifests via shadowMetaFromManifests. The on-disk manifest is intentionally absent
-// (excluded by the OwnDataRef rule); only the aggregated manifests-download surface
-// (the stub ManifestSource, keyed by node ref) carries the captured PVC object.
-func TestPipeline_ShadowMetaFromManifest(t *testing.T) {
-	t.Parallel()
-
-	rawBlock := bytes.Repeat([]byte("B"), 600)
-	srv := makeBlockServer(t, rawBlock)
-
-	defer srv.Close()
-
-	// Build a fake client WITHOUT the source PVC (simulating a deleted PVC). The disk-snap
-	// node's own manifests (seeded in testManifestSource keyed by the disk-snap ref) carry
-	// the captured PVC with storageClass="csi-ceph-rbd-from-checkpoint" and volumeMode="Block",
-	// so shadowMetaFromManifests can resolve the shadow metadata.
-	scheme := buildScheme(t)
-
-	snapshotHandle := "snap-handle-mf"
-	realVSC := &snapv1.VolumeSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: diskVSCName},
-		Spec: snapv1.VolumeSnapshotContentSpec{
-			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
-			Driver:         "test.driver",
-			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &snapshotHandle},
-			VolumeSnapshotRef: corev1.ObjectReference{
-				APIVersion: "snapshot.storage.k8s.io/v1",
-				Kind:       "VolumeSnapshot",
-				Name:       "placeholder",
-				Namespace:  "default",
-			},
-		},
-	}
-
-	rootSnap := &snapshotapi.Snapshot{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "Snapshot"},
-		ObjectMeta: metav1.ObjectMeta{Name: rootSnapshot, Namespace: testNS},
-		Status: snapshotapi.SnapshotStatus{
-			BoundSnapshotContentName: "sc-root-mf",
-			ChildrenSnapshotRefs: []snapshotapi.SnapshotChildRef{
-				{APIVersion: childAPIVersion, Kind: childKind, Name: diskSnapName},
-			},
-		},
-	}
-
-	rootContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-root-mf"},
-	}
-
-	// sc-disk's DataRef materialises disk-snap as a non-aggregator OwnDataRef node.
-	// Its captured PVC (with storageClass/volumeMode) is provided by the stub
-	// ManifestSource keyed by the disk-snap ref, not by this SnapshotContent.
-	childContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-disk"},
-		Status: snapshotapi.SnapshotContentStatus{
-			DataRef: &snapshotapi.SnapshotDataBinding{
-				TargetUID: "uid-disk",
-				Target: snapshotapi.SnapshotSubjectRef{
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Namespace:  testNS,
-					Name:       sourcePVCName,
-				},
-				Artifact: snapshotapi.SnapshotDataArtifactRef{
-					APIVersion: "snapshot.storage.k8s.io/v1",
-					Kind:       "VolumeSnapshotContent",
-					Name:       diskVSCName,
-				},
-			},
-		},
-	}
-
-	childSnap := makeUnstructuredSnap(childAPIVersion, childKind, testNS, diskSnapName, "sc-disk")
-
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(rootSnap, rootContent, childContent, realVSC).
-		WithObjects(childSnap).
-		Build()
-
-	outputDir := t.TempDir()
-
-	var capturedMeta exporter.ShadowMeta
-
-	cfg := pipeline.Config{
-		Namespace:            testNS,
-		RootSnapshot:         rootSnapshot,
-		OutputDir:            outputDir,
-		Workers:              1,
-		PerVolumeConcurrency: 1,
-		KubeClient:           c,
-		WaitShadowVS:         noopWaitShadowVS,
-		OpenExport: func(ctx context.Context, namespace, vsName string, ttl string) (*exporter.Export, error) {
-			var shadowVS snapv1.VolumeSnapshot
-
-			if err2 := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: vsName}, &shadowVS); err2 == nil {
-				capturedMeta = exporter.ShadowMeta{
-					StorageClass: shadowVS.Annotations[exporter.AnnotationStorageClassName],
-					VolumeMode:   shadowVS.Annotations[exporter.AnnotationVolumeMode],
-				}
-			}
-
-			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
-		},
-	}
-
-	err := runPipeline(context.Background(), cfg)
-	require.NoError(t, err)
-
-	assert.Equal(t, "csi-ceph-rbd-from-checkpoint", capturedMeta.StorageClass,
-		"shadow VS must carry storage-class annotation resolved from ManifestCheckpoint")
-	assert.Equal(t, "Block", capturedMeta.VolumeMode,
-		"shadow VS must carry volume-mode annotation resolved from ManifestCheckpoint")
-}
-
-// TestPipeline_WaitShadowVSCalledBeforeExport verifies that WaitShadowVS is
-// invoked after EnsureShadowPair but before OpenExport so that the DataExport
-// is only created once the shadow VS has a non-nil restoreSize.
-func TestPipeline_WaitShadowVSCalledBeforeExport(t *testing.T) {
-	t.Parallel()
-
-	rawBlock := bytes.Repeat([]byte("B"), 600)
-	srv := makeBlockServer(t, rawBlock)
-
-	defer srv.Close()
-
-	c := buildFakeClient(t)
-	outputDir := t.TempDir()
-
-	var mu sync.Mutex
-	var callOrder []string
-
-	cfg := pipeline.Config{
-		Namespace:            testNS,
-		RootSnapshot:         rootSnapshot,
-		OutputDir:            outputDir,
-		Workers:              1,
-		PerVolumeConcurrency: 1,
-		KubeClient:           c,
-		WaitShadowVS: func(_ context.Context, _ client.Client, _ *slog.Logger, _, _, _ string) error {
-			mu.Lock()
-			callOrder = append(callOrder, "WaitShadowVS")
-			mu.Unlock()
-
-			return nil
-		},
-		OpenExport: func(_ context.Context, namespace, _ string, _ string) (*exporter.Export, error) {
-			mu.Lock()
-			callOrder = append(callOrder, "OpenExport")
-			mu.Unlock()
-
-			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
-		},
-	}
-
-	err := runPipeline(context.Background(), cfg)
-	require.NoError(t, err)
-
-	// WaitShadowVS must appear before OpenExport in the call log.
-	require.Len(t, callOrder, 2, "expected exactly WaitShadowVS then OpenExport")
-	assert.Equal(t, "WaitShadowVS", callOrder[0], "WaitShadowVS must be called first")
-	assert.Equal(t, "OpenExport", callOrder[1], "OpenExport must be called after WaitShadowVS")
-}
-
-// TestPipeline_ShadowReadinessTimeout verifies that when the shadow VS wait
-// exceeds ShadowReadinessTimeout the pipeline returns an error and still
-// cleans up the shadow VS and VSC via the cancel-proof cleanupCtx.
-func TestPipeline_ShadowReadinessTimeout(t *testing.T) {
-	t.Parallel()
-
-	c := buildFakeClient(t)
-	outputDir := t.TempDir()
-
-	cfg := pipeline.Config{
-		Namespace:              testNS,
-		RootSnapshot:           rootSnapshot,
-		OutputDir:              outputDir,
-		Workers:                1,
-		KubeClient:             c,
-		ShadowReadinessTimeout: 10 * time.Millisecond,
-		WaitShadowVS: func(ctx context.Context, _ client.Client, _ *slog.Logger, _, _, _ string) error {
-			<-ctx.Done()
-
-			return ctx.Err()
-		},
-		OpenExport: func(_ context.Context, _, _, _ string) (*exporter.Export, error) {
-			t.Error("OpenExport must not be called when shadow VS wait times out")
-
-			return nil, errors.New("unexpected OpenExport call")
-		},
-	}
-
-	err := runPipeline(context.Background(), cfg)
-	require.Error(t, err, "expected pipeline to fail when shadow VS wait times out")
-
-	// Shadow VS and VSC must have been cleaned up despite the timeout.
-	pairName := exporter.ShadowName(diskVSCName)
-
-	var shadowVS snapv1.VolumeSnapshot
-
-	vsErr := c.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: pairName}, &shadowVS)
-	assert.True(t, kubeerrors.IsNotFound(vsErr),
-		"shadow VS must be deleted after timeout cleanup; got err=%v", vsErr)
-
-	var shadowVSC snapv1.VolumeSnapshotContent
-
-	vscErr := c.Get(context.Background(), types.NamespacedName{Name: pairName}, &shadowVSC)
-	assert.True(t, kubeerrors.IsNotFound(vscErr),
-		"shadow VSC must be deleted after timeout cleanup; got err=%v", vscErr)
+	// OpenExport must receive the disk-snap domain snapshot ref, not a shadow VS.
+	require.Equal(t, childAPIVersion, capturedRef.APIVersion,
+		"OpenExport must receive the domain snapshot APIVersion")
+	require.Equal(t, childKind, capturedRef.Kind,
+		"OpenExport must receive the domain snapshot Kind")
+	require.Equal(t, diskSnapName, capturedRef.Name,
+		"OpenExport must receive the domain snapshot Name")
+	require.Equal(t, testNS, capturedRef.Namespace,
+		"OpenExport must receive the correct Namespace")
 }
 
 // TestPipeline_SubtreeSelection verifies that when SelectedNodeKind/SelectedNodeName
@@ -713,10 +428,9 @@ func TestPipeline_SubtreeSelection(t *testing.T) {
 		Workers:              1,
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
-		WaitShadowVS:         noopWaitShadowVS,
 		SelectedNodeKind:     childKind,
 		SelectedNodeName:     diskSnapName,
-		OpenExport: func(_ context.Context, namespace, _ string, _ string) (*exporter.Export, error) {
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
 			return exporter.NewExport(namespace, "de-subtree", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
 		},
 	}
@@ -774,10 +488,9 @@ func TestPipeline_SubtreeRootSelection(t *testing.T) {
 		Workers:              1,
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
-		WaitShadowVS:         noopWaitShadowVS,
 		SelectedNodeKind:     "Snapshot",
 		SelectedNodeName:     rootSnapshot,
-		OpenExport: func(_ context.Context, namespace, _ string, _ string) (*exporter.Export, error) {
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
 			return exporter.NewExport(namespace, "de-root-sel", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
 		},
 	}
@@ -835,8 +548,7 @@ func TestPipeline_NoneCompression(t *testing.T) {
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
 		Compression:          noneCodec,
-		WaitShadowVS:         noopWaitShadowVS,
-		OpenExport: func(_ context.Context, namespace, _ string, _ string) (*exporter.Export, error) {
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
 			return exporter.NewExport(namespace, "de-none", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
 		},
 	}
@@ -927,8 +639,7 @@ func TestPipeline_PartialChunkResume(t *testing.T) {
 		ChunkSize:            testChunkSize,
 		KubeClient:           c,
 		Compression:          codec,
-		WaitShadowVS:         noopWaitShadowVS,
-		OpenExport: func(_ context.Context, namespace, _ string, _ string) (*exporter.Export, error) {
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
 			return exporter.NewExport(namespace, "de-partial-resume", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
 		},
 	}
