@@ -132,7 +132,12 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	err = util.CreateDataExport(ctx, deName, namespace, ttl, volumeKind, volumeName, publish, rtClient)
+	group, resource, err := dataio.KindToGroupResource(volumeKind)
+	if err != nil {
+		return err
+	}
+
+	err = util.CreateDataExport(ctx, deName, namespace, ttl, group, resource, volumeName, publish, rtClient)
 	if err != nil {
 		return err
 	}

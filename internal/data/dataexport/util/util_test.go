@@ -13,7 +13,6 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 )
 
@@ -35,39 +34,44 @@ func TestCreateDataExporterIfNeeded(t *testing.T) {
 	logger := slog.Default()
 
 	tests := []struct {
-		name          string
-		input         string
-		expectName    string
-		expectKind    string
-		expectCreated bool
+		name           string
+		input          string
+		expectName     string
+		expectGroup    string
+		expectResource string
+		expectCreated  bool
 	}{
 		{
-			name:          "PVC short alias",
-			input:         "pvc/myvol",
-			expectName:    "de-pvc-myvol",
-			expectKind:    dataio.PersistentVolumeClaimKind,
-			expectCreated: true,
+			name:           "PVC short alias",
+			input:          "pvc/myvol",
+			expectName:     "de-pvc-myvol",
+			expectGroup:    "",
+			expectResource: "persistentvolumeclaims",
+			expectCreated:  true,
 		},
 		{
-			name:          "PVC long alias",
-			input:         "persistentvolumeclaim/myvol",
-			expectName:    "de-pvc-myvol",
-			expectKind:    dataio.PersistentVolumeClaimKind,
-			expectCreated: true,
+			name:           "PVC long alias",
+			input:          "persistentvolumeclaim/myvol",
+			expectName:     "de-pvc-myvol",
+			expectGroup:    "",
+			expectResource: "persistentvolumeclaims",
+			expectCreated:  true,
 		},
 		{
-			name:          "VolumeSnapshot short alias",
-			input:         "vs/snap1",
-			expectName:    "de-vs-snap1",
-			expectKind:    dataio.VolumeSnapshotKind,
-			expectCreated: true,
+			name:           "VolumeSnapshot short alias",
+			input:          "vs/snap1",
+			expectName:     "de-vs-snap1",
+			expectGroup:    "snapshot.storage.k8s.io",
+			expectResource: "volumesnapshots",
+			expectCreated:  true,
 		},
 		{
-			name:          "VolumeSnapshot long alias",
-			input:         "volumesnapshot/snap1",
-			expectName:    "de-vs-snap1",
-			expectKind:    dataio.VolumeSnapshotKind,
-			expectCreated: true,
+			name:           "VolumeSnapshot long alias",
+			input:          "volumesnapshot/snap1",
+			expectName:     "de-vs-snap1",
+			expectGroup:    "snapshot.storage.k8s.io",
+			expectResource: "volumesnapshots",
+			expectCreated:  true,
 		},
 		{
 			name:          "Existing DataExport name",
@@ -76,32 +80,36 @@ func TestCreateDataExporterIfNeeded(t *testing.T) {
 			expectCreated: false,
 		},
 		{
-			name:          "VirtualDisk short alias",
-			input:         "vd/mydisk",
-			expectName:    "de-vd-mydisk",
-			expectKind:    dataio.VirtualDiskKind,
-			expectCreated: true,
+			name:           "VirtualDisk short alias",
+			input:          "vd/mydisk",
+			expectName:     "de-vd-mydisk",
+			expectGroup:    "virtualization.deckhouse.io",
+			expectResource: "virtualdisks",
+			expectCreated:  true,
 		},
 		{
-			name:          "VirtualDisk long alias",
-			input:         "virtualdisk/mydisk",
-			expectName:    "de-vd-mydisk",
-			expectKind:    dataio.VirtualDiskKind,
-			expectCreated: true,
+			name:           "VirtualDisk long alias",
+			input:          "virtualdisk/mydisk",
+			expectName:     "de-vd-mydisk",
+			expectGroup:    "virtualization.deckhouse.io",
+			expectResource: "virtualdisks",
+			expectCreated:  true,
 		},
 		{
-			name:          "VirtualDiskSnapshot short alias",
-			input:         "vds/snap2",
-			expectName:    "de-vds-snap2",
-			expectKind:    dataio.VirtualDiskSnapshotKind,
-			expectCreated: true,
+			name:           "VirtualDiskSnapshot short alias",
+			input:          "vds/snap2",
+			expectName:     "de-vds-snap2",
+			expectGroup:    "virtualization.deckhouse.io",
+			expectResource: "virtualdisksnapshots",
+			expectCreated:  true,
 		},
 		{
-			name:          "VirtualDiskSnapshot long alias",
-			input:         "virtualdisksnapshot/snap2",
-			expectName:    "de-vds-snap2",
-			expectKind:    dataio.VirtualDiskSnapshotKind,
-			expectCreated: true,
+			name:           "VirtualDiskSnapshot long alias",
+			input:          "virtualdisksnapshot/snap2",
+			expectName:     "de-vds-snap2",
+			expectGroup:    "virtualization.deckhouse.io",
+			expectResource: "virtualdisksnapshots",
+			expectCreated:  true,
 		},
 	}
 
@@ -117,7 +125,8 @@ func TestCreateDataExporterIfNeeded(t *testing.T) {
 			getErr := c.Get(ctx, ctrlclient.ObjectKey{Name: tt.expectName, Namespace: "test-ns"}, &de)
 			if tt.expectCreated {
 				require.NoError(t, getErr)
-				require.Equal(t, tt.expectKind, de.Spec.TargetRef.Kind)
+				require.Equal(t, tt.expectGroup, de.Spec.TargetRef.Group)
+				require.Equal(t, tt.expectResource, de.Spec.TargetRef.Resource)
 				require.Equal(t, "2m", de.Spec.TTL)
 			} else {
 				require.True(t, apierrors.IsNotFound(getErr))

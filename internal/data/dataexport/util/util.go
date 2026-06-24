@@ -91,7 +91,8 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 					if err := CreateDataExport(
 						ctx,
 						deName, namespace, "",
-						deObj.Spec.TargetRef.Kind,
+						deObj.Spec.TargetRef.Group,
+						deObj.Spec.TargetRef.Resource,
 						deObj.Spec.TargetRef.Name,
 						deObj.Spec.Publish, rtClient,
 					); err != nil {
@@ -194,7 +195,12 @@ func CreateDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, n
 		return deName, nil
 	}
 
-	err := CreateDataExport(ctx, deName, namespace, ttl, volumeKind, volumeName, publish, rtClient)
+	group, resource, err := dataio.KindToGroupResource(volumeKind)
+	if err != nil {
+		return deName, err
+	}
+
+	err = CreateDataExport(ctx, deName, namespace, ttl, group, resource, volumeName, publish, rtClient)
 	if err != nil {
 		return deName, err
 	}
@@ -204,7 +210,10 @@ func CreateDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, n
 	return deName, nil
 }
 
-func CreateDataExport(ctx context.Context, deName, namespace, ttl, volumeKind, volumeName string, publish bool, rtClient ctrlrtclient.Client) error {
+// CreateDataExport creates a DataExport CR targeting the resource identified by group, resource, and volumeName.
+// group is the API group ("" for core, e.g. "snapshot.storage.k8s.io" for VolumeSnapshot).
+// resource is the plural resource name (e.g. "volumesnapshots", "persistentvolumeclaims").
+func CreateDataExport(ctx context.Context, deName, namespace, ttl, group, resource, volumeName string, publish bool, rtClient ctrlrtclient.Client) error {
 	if ttl == "" {
 		ttl = dataio.DefaultTTL
 	}
@@ -222,8 +231,9 @@ func CreateDataExport(ctx context.Context, deName, namespace, ttl, volumeKind, v
 		Spec: v1alpha1.DataexportSpec{
 			TTL: ttl,
 			TargetRef: v1alpha1.TargetRefSpec{
-				Kind: volumeKind,
-				Name: volumeName,
+				Group:    group,
+				Resource: resource,
+				Name:     volumeName,
 			},
 			Publish: publish,
 		},
@@ -291,9 +301,8 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 		return "", "", "", fmt.Errorf("invalid URL")
 	}
 
-	volumeKind := deObj.Spec.TargetRef.Kind
-	if !slices.Contains([]string{dataio.PersistentVolumeClaimKind, dataio.VolumeSnapshotKind, dataio.VirtualDiskKind, dataio.VirtualDiskSnapshotKind}, volumeKind) {
-		return "", "", "", fmt.Errorf("invalid volume kind: %s", volumeKind)
+	if !slices.Contains([]string{"persistentvolumeclaims", "volumesnapshots", "virtualdisks", "virtualdisksnapshots"}, deObj.Spec.TargetRef.Resource) {
+		return "", "", "", fmt.Errorf("invalid volume resource: %s", deObj.Spec.TargetRef.Resource)
 	}
 
 	volumeMode = deObj.Status.VolumeMode
