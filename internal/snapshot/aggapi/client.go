@@ -255,6 +255,32 @@ func (c *Client) resourceFor(ref NodeRef) (string, error) {
 	return mapping.Resource.Resource, nil
 }
 
+// LeafDataExportTarget resolves the DataExport targetRef {group, resource} for a snapshot
+// leaf node. CSI VolumeSnapshot leaves use the fixed constants VolumeSnapshotGroup /
+// VolumeSnapshotResource. All other kinds are resolved via the RESTMapper.
+//
+// This is used to build a DataExport that the storage-volume-data-manager controller
+// can route through its resource-agnostic snapshot export path (categorySnapshot):
+// group/resource must identify a namespaced snapshot CR so the controller can read
+// its status.boundSnapshotContentName → SnapshotContent → status.dataRef.
+func (c *Client) LeafDataExportTarget(ref NodeRef) (group, resource string, err error) {
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return "", "", fmt.Errorf("parse apiVersion %q: %w", ref.APIVersion, err)
+	}
+
+	if ref.IsVolumeSnapshotLeaf() {
+		return VolumeSnapshotGroup, VolumeSnapshotResource, nil
+	}
+
+	res, err := c.resourceFor(ref)
+	if err != nil {
+		return "", "", err
+	}
+
+	return gv.Group, res, nil
+}
+
 // subresourceGroupVersion returns the aggregated subresource group and version that
 // serves restore/upload for a node of the given GVK:
 //   - CSI VolumeSnapshot leaves -> the VS-connector group.

@@ -31,17 +31,14 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
-	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	lz4 "github.com/pierrec/lz4/v4"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
@@ -104,9 +101,6 @@ func TestPipeline_E2E_FullTree(t *testing.T) {
 	c := buildE2EFakeClient(t)
 	outputDir := t.TempDir()
 
-	blockShadow := exporter.ShadowName(e2eBlockVSC)
-	fsShadow := exporter.ShadowName(e2eFSVSC)
-
 	cfg := pipeline.Config{
 		Namespace:            e2eNS,
 		RootSnapshot:         e2eRootSnap,
@@ -114,15 +108,14 @@ func TestPipeline_E2E_FullTree(t *testing.T) {
 		Workers:              2,
 		PerVolumeConcurrency: 2,
 		KubeClient:           c,
-		WaitShadowVS:         noopWaitShadowVS,
-		OpenExport: func(_ context.Context, namespace, shadowVSName, _ string) (*exporter.Export, error) {
-			switch shadowVSName {
-			case blockShadow:
+		OpenExport: func(_ context.Context, namespace string, leafRef aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			switch leafRef.Name {
+			case e2eBlockDisk:
 				return exporter.NewExport(namespace, "de-block", "Block", blockSrv.URL, exporter.NewFetcher(blockSrv.Client())), nil
-			case fsShadow:
+			case e2eFSDisk:
 				return exporter.NewExport(namespace, "de-fs", "Filesystem", fsSrv.URL, exporter.NewFetcher(fsSrv.Client())), nil
 			default:
-				return nil, fmt.Errorf("e2e: unknown shadow VS %q", shadowVSName)
+				return nil, fmt.Errorf("e2e: unknown leaf %q", leafRef.Name)
 			}
 		},
 	}
@@ -470,71 +463,11 @@ func buildE2EFakeClient(t *testing.T) client.Client {
 		},
 	}
 
-	// ── Real VolumeSnapshotContents (needed by EnsureShadowPair) ─────────────
-	blockHandle := "handle-block-1"
-	realBlockVSC := &snapv1.VolumeSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: e2eBlockVSC},
-		Spec: snapv1.VolumeSnapshotContentSpec{
-			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
-			Driver:         "test.driver",
-			Source: snapv1.VolumeSnapshotContentSource{
-				SnapshotHandle: &blockHandle,
-			},
-			VolumeSnapshotRef: corev1.ObjectReference{
-				APIVersion: "snapshot.storage.k8s.io/v1",
-				Kind:       "VolumeSnapshot",
-				Name:       "placeholder-block",
-				Namespace:  "default",
-			},
-		},
-	}
-
-	fsHandle := "handle-fs-1"
-	realFSVSC := &snapv1.VolumeSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: e2eFSVSC},
-		Spec: snapv1.VolumeSnapshotContentSpec{
-			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
-			Driver:         "test.driver",
-			Source: snapv1.VolumeSnapshotContentSource{
-				SnapshotHandle: &fsHandle,
-			},
-			VolumeSnapshotRef: corev1.ObjectReference{
-				APIVersion: "snapshot.storage.k8s.io/v1",
-				Kind:       "VolumeSnapshot",
-				Name:       "placeholder-fs",
-				Namespace:  "default",
-			},
-		},
-	}
-
-	// ── Source PVCs (needed by resolveShadowMeta) ────────────────────────────
-	blockVolumeMode := corev1.PersistentVolumeBlock
-	blockStorageClass := "csi-e2e-block-sc"
-	sourcePVCBlock := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "pvc-block-source", Namespace: e2eNS},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			StorageClassName: &blockStorageClass,
-			VolumeMode:       &blockVolumeMode,
-		},
-	}
-
-	fsVolumeMode := corev1.PersistentVolumeFilesystem
-	fsStorageClass := "csi-e2e-fs-sc"
-	sourcePVCFS := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "pvc-fs-source", Namespace: e2eNS},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			StorageClassName: &fsStorageClass,
-			VolumeMode:       &fsVolumeMode,
-		},
-	}
-
 	typed := []client.Object{
 		rootSnap, rootContent,
 		vmContent,
 		blockContent,
 		fsContent,
-		realBlockVSC, realFSVSC,
-		sourcePVCBlock, sourcePVCFS,
 	}
 
 	return fake.NewClientBuilder().
@@ -579,15 +512,11 @@ func makeUnstructuredE2ENode(
 
 // TestPipeline_E2E_DeletedPVC verifies that a non-aggregator OwnDataRef node with a
 // genuinely deleted backing PVC still downloads successfully. The live PVC is absent
-// from the cluster. Shadow metadata (storageClass, volumeMode) is resolved from the
-// node's own-scope manifests via shadowMetaFromManifests, not from the absent live PVC
-// and not from an on-disk manifest (excluded from disk by the OwnDataRef rule).
+// from the cluster. The download succeeds because the pipeline targets the snapshot leaf
+// CR (del-disk VirtualDiskSnapshot) directly — the PVC existence is irrelevant.
 //
-//  1. del-disk's own manifests (stub ManifestSource) contain the del-pvc manifest.
-//  2. WriteNodeManifests excludes the PVC (OwnDataRef rule); del-disk/manifests/ has no PVC file.
-//  3. The live PVC is absent (genuinely deleted); resolveShadowMeta falls back to those manifests.
-//  4. shadowMetaFromManifests reads storageClass and volumeMode from the captured PVC object.
-//  5. The download succeeds with the correct storageClass and volumeMode from the manifests.
+// The OwnDataRef PVC manifest (carried by the node's own ManifestSource) is excluded
+// from del-disk/manifests/ per the OwnDataRef PVC exclusion rule.
 //
 // Tree:
 //
@@ -599,10 +528,6 @@ func TestPipeline_E2E_DeletedPVC(t *testing.T) {
 	rawBlock := bytes.Repeat([]byte("D"), e2eBlockSize)
 	blockSrv := makeE2EBlockServer(t, rawBlock)
 
-	delShadow := exporter.ShadowName(e2eDelVSC)
-
-	var capturedMeta exporter.ShadowMeta
-
 	c := buildDeletedPVCFakeClient(t)
 	outputDir := t.TempDir()
 
@@ -613,19 +538,9 @@ func TestPipeline_E2E_DeletedPVC(t *testing.T) {
 		Workers:              1,
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
-		WaitShadowVS:         noopWaitShadowVS,
-		OpenExport: func(ctx context.Context, namespace, shadowVSName, _ string) (*exporter.Export, error) {
-			if shadowVSName != delShadow {
-				return nil, fmt.Errorf("e2e-del: unknown shadow VS %q", shadowVSName)
-			}
-
-			// Capture the shadow VS annotations set from the manifest fallback.
-			var shadowVS snapv1.VolumeSnapshot
-			if getErr := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: shadowVSName}, &shadowVS); getErr == nil {
-				capturedMeta = exporter.ShadowMeta{
-					StorageClass: shadowVS.Annotations[exporter.AnnotationStorageClassName],
-					VolumeMode:   shadowVS.Annotations[exporter.AnnotationVolumeMode],
-				}
+		OpenExport: func(_ context.Context, namespace string, leafRef aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			if leafRef.Name != e2eDelDisk {
+				return nil, fmt.Errorf("e2e-del: unexpected leaf %q", leafRef.Name)
 			}
 
 			return exporter.NewExport(namespace, "de-del", "Block", blockSrv.URL, exporter.NewFetcher(blockSrv.Client())), nil
@@ -653,20 +568,12 @@ func TestPipeline_E2E_DeletedPVC(t *testing.T) {
 	_, pvcStatErr := os.Stat(pvcManifestPath)
 	require.True(t, os.IsNotExist(pvcStatErr),
 		"del-disk must NOT have the backing PVC manifest in its manifests/ (OwnDataRef PVC excluded)")
-
-	// Shadow VS annotations come from the manifests fallback (live PVC is absent).
-	require.Equal(t, "csi-del-sc", capturedMeta.StorageClass,
-		"storageClass must be resolved from the manifests fallback")
-	require.Equal(t, "Block", capturedMeta.VolumeMode,
-		"volumeMode must be resolved from the manifests fallback")
 }
 
 // buildDeletedPVCFakeClient constructs the fake kube client for TestPipeline_E2E_DeletedPVC.
-// The stub ManifestSource serves del-disk's own manifests, including the del-pvc manifest
-// with storageClass and volumeMode. The live PVC is deliberately absent from the fake client
-// so that resolveShadowMeta must fall back to shadowMetaFromManifests. WriteNodeManifests
-// excludes the PVC from del-disk/manifests/ per the OwnDataRef rule; the on-disk file is also
-// intentionally absent.
+// The stub ManifestSource serves del-disk's own manifests, including the del-pvc manifest.
+// The live PVC is deliberately absent from the fake client; this is transparent to the
+// pipeline since it targets the leaf CR (VirtualDiskSnapshot) directly.
 func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 	t.Helper()
 
@@ -692,9 +599,6 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 	}
 
 	// del-disk: non-aggregator (no childrenSnapshotRefs).
-	// Its DataRef becomes an OwnDataRef. The captured del-pvc manifest (carrying the
-	// storageClass/volumeMode that shadowMetaFromManifests must surface when the live
-	// PVC is absent) is served by the stub ManifestSource keyed by the del-disk node ref.
 	delDiskSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eDiskKind, e2eNS, e2eDelDisk, "sc-del-disk", nil)
 
 	delContent := &snapshotapi.SnapshotContent{
@@ -719,29 +623,12 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 		},
 	}
 
-	delHandle := "handle-del-block"
-	realDelVSC := &snapv1.VolumeSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: e2eDelVSC},
-		Spec: snapv1.VolumeSnapshotContentSpec{
-			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
-			Driver:         "test.driver",
-			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &delHandle},
-			VolumeSnapshotRef: corev1.ObjectReference{
-				APIVersion: "snapshot.storage.k8s.io/v1",
-				Kind:       "VolumeSnapshot",
-				Name:       "placeholder-del",
-				Namespace:  "default",
-			},
-		},
-	}
-
-	// The live PVC is intentionally absent: resolveShadowMeta must fall back to
-	// shadowMetaFromCheckpoint, reading storageClass/volumeMode from mcp-del-disk.
+	// The live PVC is intentionally absent from the cluster; the pipeline targets
+	// the del-disk leaf CR directly so the missing PVC is invisible to the download.
 
 	typed := []client.Object{
 		rootSnap, rootContent,
 		delContent,
-		realDelVSC,
 	}
 
 	return fake.NewClientBuilder().
@@ -756,12 +643,15 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 // is treated as an aggregator. Its DataRefs become orphan leaf volume nodes, each
 // rooted at snapshots/volumesnapshot_<pvcName>/.
 //
+// The OpenExport closure receives the orphan leaf's NodeRef
+// (APIVersion=snapshot.storage.k8s.io/v1, Kind=VolumeSnapshot, Name=<VS CR name>).
+//
 // Assertions:
 //  1. The aggregator node has snapshots/ (for the orphan leaf) but no data payload.
 //  2. The aggregator manifests/ includes only non-PVC manifests (ConfigMap);
 //     the orphan leaf's PVC is excluded from the aggregator.
 //  3. The orphan leaf node has data.bin.zst and its captured PVC manifest.
-//  4. The directory name uses the PVC name (SourceName), not the shadow VS name.
+//  4. The directory name uses the PVC name (SourceName), not the VS CR name.
 //
 // Tree:
 //
@@ -769,15 +659,12 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 //	  └─ agg-snap (VirtualDiskSnapshot, aggregator: visibility-leaf in childrenSnapshotRefs)
 //	       manifests/configmap_agg-cm.yaml    (PVC excluded from aggregator manifests)
 //	       snapshots/
-//	         volumesnapshot_pvc-agg/          (orphan leaf named after PVC, not shadow VS)
+//	         volumesnapshot_pvc-agg/          (orphan leaf named after PVC, not VS CR)
 //	           data.bin.zst
 //	           manifests/persistentvolumeclaim_pvc-agg.yaml
 func TestPipeline_E2E_OrphanPVCLeaf(t *testing.T) {
 	rawBlock := bytes.Repeat([]byte("A"), e2eBlockSize)
 	blockSrv := makeE2EBlockServer(t, rawBlock)
-
-	// Shadow VS name derived from the artifact VSC (same convention as all other tests).
-	aggShadow := exporter.ShadowName("vsc-agg")
 
 	c := buildOrphanLeafFakeClient(t)
 	outputDir := t.TempDir()
@@ -789,10 +676,10 @@ func TestPipeline_E2E_OrphanPVCLeaf(t *testing.T) {
 		Workers:              1,
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
-		WaitShadowVS:         noopWaitShadowVS,
-		OpenExport: func(_ context.Context, namespace, shadowVSName, _ string) (*exporter.Export, error) {
-			if shadowVSName != aggShadow {
-				return nil, fmt.Errorf("e2e-agg: unknown shadow VS %q", shadowVSName)
+		OpenExport: func(_ context.Context, namespace string, leafRef aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			// The orphan leaf's Ref() uses the VolumeSnapshot CR name ("nss-vs-agg-pvc").
+			if leafRef.Name != "nss-vs-agg-pvc" {
+				return nil, fmt.Errorf("e2e-agg: unexpected leaf %q", leafRef.Name)
 			}
 
 			return exporter.NewExport(namespace, "de-agg", "Block", blockSrv.URL, exporter.NewFetcher(blockSrv.Client())), nil
@@ -859,6 +746,10 @@ func TestPipeline_E2E_OrphanPVCLeaf(t *testing.T) {
 // buildOrphanLeafFakeClient constructs the fake kube client for TestPipeline_E2E_OrphanPVCLeaf.
 // The agg-snap snapshot has a VolumeSnapshot visibility-leaf in its childrenSnapshotRefs,
 // making the tree builder treat it as an aggregator: its DataRef becomes an orphan leaf child.
+//
+// Because snapv1.VolumeSnapshot is NOT registered in the scheme, the fake client stores and
+// returns the aggVS unstructured object verbatim — no round-trip conversion occurs and the
+// custom status.boundSnapshotContentName field is preserved without any interceptor.
 func buildOrphanLeafFakeClient(t *testing.T) client.Client {
 	t.Helper()
 
@@ -914,6 +805,8 @@ func buildOrphanLeafFakeClient(t *testing.T) client.Client {
 
 	// VolumeSnapshot visibility-leaf: carries status.boundSnapshotContentName → sc-agg-child.
 	// visitVisibilityLeaf fetches this object to locate the child SnapshotContent.
+	// snapv1.VolumeSnapshot is NOT registered in the scheme, so the fake client stores
+	// and retrieves this unstructured object verbatim (no conversion drops custom fields).
 	aggVS := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "snapshot.storage.k8s.io/v1",
@@ -952,77 +845,16 @@ func buildOrphanLeafFakeClient(t *testing.T) client.Client {
 		},
 	}
 
-	aggHandle := "handle-agg"
-	realAggVSC := &snapv1.VolumeSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "vsc-agg"},
-		Spec: snapv1.VolumeSnapshotContentSpec{
-			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
-			Driver:         "test.driver",
-			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &aggHandle},
-			VolumeSnapshotRef: corev1.ObjectReference{
-				APIVersion: "snapshot.storage.k8s.io/v1",
-				Kind:       "VolumeSnapshot",
-				Name:       "placeholder-agg",
-				Namespace:  "default",
-			},
-		},
-	}
-
-	// Live PVC for resolveShadowMeta (shadow meta comes from live PVC in this test).
-	aggMode := corev1.PersistentVolumeBlock
-	aggSC := "csi-agg-sc"
-	liveAggPVC := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "pvc-agg", Namespace: e2eNS},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			StorageClassName: &aggSC,
-			VolumeMode:       &aggMode,
-		},
-	}
-
 	typed := []client.Object{
 		rootSnap, rootContent,
 		aggContent,
 		aggChildContent,
-		realAggVSC, liveAggPVC,
-	}
-
-	// aggVS is an unstructured snapshot.storage.k8s.io/v1 VolumeSnapshot carrying
-	// status.boundSnapshotContentName — a Deckhouse-extended field absent from the
-	// upstream snapv1.VolumeSnapshotStatus struct. Because buildScheme registers the
-	// typed snapv1.VolumeSnapshot, the fake-client tracker's
-	// convertFromUnstructuredIfNecessary round-trips every unstructured VS through
-	// that typed struct on storage, silently dropping the fork field.
-	//
-	// We cannot remove VolumeSnapshot from the scheme: shadow operations (EnsureShadowPair /
-	// CleanupShadowPair) use typed *snapv1.VolumeSnapshot and require scheme registration.
-	//
-	// Fix (test-only): use a Get interceptor to re-inject status.boundSnapshotContentName
-	// specifically for the leaf VS when it is retrieved as *unstructured.Unstructured by
-	// visitVisibilityLeaf. This preserves the production tree.go contract unchanged and
-	// leaves all other operations (typed shadow-VS Get/Create/Delete) unaffected.
-	leafVSInject := interceptor.Funcs{
-		Get: func(ctx context.Context, underlying client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			if err := underlying.Get(ctx, key, obj, opts...); err != nil {
-				return err
-			}
-			u, ok := obj.(*unstructured.Unstructured)
-			if !ok ||
-				u.GetAPIVersion() != "snapshot.storage.k8s.io/v1" ||
-				u.GetKind() != "VolumeSnapshot" ||
-				key.Namespace != e2eNS ||
-				key.Name != "nss-vs-agg-pvc" {
-				return nil
-			}
-			_ = unstructured.SetNestedField(u.Object, "sc-agg-child", "status", "boundSnapshotContentName")
-			return nil
-		},
 	}
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(typed...).
 		WithObjects(aggSnap, aggVS).
-		WithInterceptorFuncs(leafVSInject).
 		Build()
 }
 
@@ -1066,8 +898,7 @@ func TestPipeline_BlockCodecMatrix(t *testing.T) {
 				PerVolumeConcurrency: 1,
 				KubeClient:           c,
 				Compression:          codec,
-				WaitShadowVS:         noopWaitShadowVS,
-				OpenExport: func(_ context.Context, namespace, _ string, _ string) (*exporter.Export, error) {
+				OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
 					return exporter.NewExport(namespace, "de-"+tc.codec, "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
 				},
 			}
@@ -1178,9 +1009,6 @@ func TestPipeline_E2E_FSNoneCodecEntries(t *testing.T) {
 	c := buildE2EFakeClient(t)
 	outputDir := t.TempDir()
 
-	blockShadow := exporter.ShadowName(e2eBlockVSC)
-	fsShadow := exporter.ShadowName(e2eFSVSC)
-
 	noneCodec, err := compress.New("none", 0)
 	require.NoError(t, err)
 
@@ -1192,15 +1020,14 @@ func TestPipeline_E2E_FSNoneCodecEntries(t *testing.T) {
 		PerVolumeConcurrency: 2,
 		KubeClient:           c,
 		Compression:          noneCodec,
-		WaitShadowVS:         noopWaitShadowVS,
-		OpenExport: func(_ context.Context, namespace, shadowVSName, _ string) (*exporter.Export, error) {
-			switch shadowVSName {
-			case blockShadow:
+		OpenExport: func(_ context.Context, namespace string, leafRef aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			switch leafRef.Name {
+			case e2eBlockDisk:
 				return exporter.NewExport(namespace, "de-block-none", "Block", blockSrv.URL, exporter.NewFetcher(blockSrv.Client())), nil
-			case fsShadow:
+			case e2eFSDisk:
 				return exporter.NewExport(namespace, "de-fs-none", "Filesystem", fsSrv.URL, exporter.NewFetcher(fsSrv.Client())), nil
 			default:
-				return nil, fmt.Errorf("e2e-none: unknown shadow VS %q", shadowVSName)
+				return nil, fmt.Errorf("e2e-none: unknown leaf %q", leafRef.Name)
 			}
 		},
 	}

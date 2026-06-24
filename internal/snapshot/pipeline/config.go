@@ -20,6 +20,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -33,11 +34,10 @@ import (
 )
 
 const (
-	defaultWorkers                = 4
-	defaultPerVolumeConcurrency   = 4
-	defaultTTL                    = "2h"
-	defaultReadinessTimeout       = 5 * time.Minute
-	defaultShadowReadinessTimeout = 5 * time.Minute
+	defaultWorkers              = 4
+	defaultPerVolumeConcurrency = 4
+	defaultTTL                  = "2h"
+	defaultReadinessTimeout     = 5 * time.Minute
 )
 
 // Config holds all parameters for a snapshot download run.
@@ -85,25 +85,24 @@ type Config struct {
 	KubeClient client.Client
 
 	// AggClient is the aggregated subresource API client used to fetch per-node
-	// manifests via manifests-download. When ManifestSource is nil and AggClient is
-	// set, applyDefaults builds an AggregatedManifestSource from it.
+	// manifests via manifests-download and to resolve leaf snapshot CR group/resource
+	// for DataExport targetRef. When ManifestSource is nil and AggClient is set,
+	// applyDefaults builds an AggregatedManifestSource from it.
 	AggClient *aggapi.Client
 
 	// ManifestSource fetches own-scope node manifests.
 	// When nil an AggregatedManifestSource backed by AggClient is used.
 	ManifestSource source.ManifestSource
 
-	// WaitShadowVS is called after EnsureShadowPair and before OpenExport to
-	// ensure the shadow VolumeSnapshot has both readyToUse=true and a non-nil
-	// restoreSize. Inside each poll it re-asserts the restoreSize from the real
-	// VolumeSnapshotContent onto the shadow VSC, counteracting CSI sidecar
-	// overwrites. When nil, defaults to exporter.WaitShadowVSReady.
-	WaitShadowVS func(ctx context.Context, c client.Client, log *slog.Logger, namespace, shadowName, realVSCName string) error
-
-	// OpenExport opens a DataExport for the given shadow VolumeSnapshot name and
-	// returns an Export ready for data transfer.  When nil SafeClient must be
-	// non-nil and the production path (exporter.OpenExport) is used.
-	OpenExport func(ctx context.Context, namespace, shadowVSName, ttl string) (*exporter.Export, error)
+	// OpenExport opens a DataExport for the given snapshot leaf NodeRef and
+	// returns an Export ready for data transfer. When nil SafeClient and AggClient
+	// must be non-nil and the production path (exporter.OpenExport) is used.
+	//
+	// leafRef identifies the snapshot leaf CR to target: for CSI VolumeSnapshot
+	// leaves its APIVersion/Kind are "snapshot.storage.k8s.io/v1"/"VolumeSnapshot";
+	// for domain snapshot CRs they carry the domain group and kind. The DataExport
+	// targetRef is derived from leafRef via the AggClient RESTMapper.
+	OpenExport func(ctx context.Context, namespace string, leafRef aggapi.NodeRef, ttl string) (*exporter.Export, error)
 
 	// SafeClient is used for DataExport HTTP connections in the production path
 	// (when OpenExport is nil).  May be nil in tests that supply OpenExport.
@@ -112,14 +111,6 @@ type Config struct {
 	// ReadinessTimeout is how long OpenExport waits for a DataExport to become
 	// Ready before returning an error.  Defaults to 5 minutes.
 	ReadinessTimeout time.Duration
-
-	// ShadowReadinessTimeout is how long downloadVolumeBinding waits for the
-	// shadow VolumeSnapshot to report readyToUse=true and a non-nil restoreSize
-	// before returning an error.  On expiry the rich WaitShadowVSReady deadline
-	// error is returned (which includes an inspection hint) and the shadow pair
-	// is still cleaned up via the cancel-proof cleanupCtx.
-	// Defaults to 5 minutes (same as ReadinessTimeout).
-	ShadowReadinessTimeout time.Duration
 
 	// SelectedNodeKind and SelectedNodeName identify a single snapshot-CR node to
 	// download together with its full subtree. When both are set, Run builds the
@@ -164,10 +155,6 @@ func applyDefaults(cfg Config) Config {
 		cfg.ReadinessTimeout = defaultReadinessTimeout
 	}
 
-	if cfg.ShadowReadinessTimeout <= 0 {
-		cfg.ShadowReadinessTimeout = defaultShadowReadinessTimeout
-	}
-
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
@@ -176,20 +163,23 @@ func applyDefaults(cfg Config) Config {
 		cfg.ManifestSource = source.NewAggregatedManifestSource(cfg.AggClient)
 	}
 
-	if cfg.WaitShadowVS == nil {
-		cfg.WaitShadowVS = exporter.WaitShadowVSReady
-	}
-
-	if cfg.OpenExport == nil && cfg.SafeClient != nil {
+	if cfg.OpenExport == nil && cfg.SafeClient != nil && cfg.AggClient != nil {
 		sc := cfg.SafeClient
 		log := cfg.Log
 		c := cfg.KubeClient
 		timeout := cfg.ReadinessTimeout
-		cfg.OpenExport = func(ctx context.Context, namespace, shadowVSName, ttl string) (*exporter.Export, error) {
+		aggClient := cfg.AggClient
+
+		cfg.OpenExport = func(ctx context.Context, namespace string, leafRef aggapi.NodeRef, ttl string) (*exporter.Export, error) {
+			group, resource, err := aggClient.LeafDataExportTarget(leafRef)
+			if err != nil {
+				return nil, fmt.Errorf("resolve DataExport target for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
+			}
+
 			waitCtx, waitCancel := context.WithTimeout(ctx, timeout)
 			defer waitCancel()
 
-			return exporter.OpenExport(waitCtx, log, c, namespace, shadowVSName, ttl, sc)
+			return exporter.OpenExport(waitCtx, log, c, namespace, group, resource, leafRef.Name, ttl, sc)
 		}
 	}
 

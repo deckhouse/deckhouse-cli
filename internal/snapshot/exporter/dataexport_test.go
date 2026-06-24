@@ -51,17 +51,17 @@ func TestDataExportName(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		shadowVSName string
-		wantName     string
+		leafName string
+		wantName string
 	}{
-		{shadowVSName: "d8-ss-aabb1122ccdd3344", wantName: "de-d8-ss-aabb1122ccdd3344"},
-		{shadowVSName: "my-shadow", wantName: "de-my-shadow"},
-		{shadowVSName: "", wantName: "de-"},
+		{leafName: "my-disk-snap", wantName: "de-my-disk-snap"},
+		{leafName: "nss-vs-pvc", wantName: "de-nss-vs-pvc"},
+		{leafName: "", wantName: "de-"},
 	}
 
 	for _, tc := range cases {
-		got := exporter.DataExportName(tc.shadowVSName)
-		assert.Equal(t, tc.wantName, got, "shadowVSName=%q", tc.shadowVSName)
+		got := exporter.DataExportName(tc.leafName)
+		assert.Equal(t, tc.wantName, got, "leafName=%q", tc.leafName)
 	}
 }
 
@@ -69,9 +69,11 @@ func TestEnsureDataExport_Creates(t *testing.T) {
 	t.Parallel()
 
 	const (
-		namespace    = "test-ns"
-		shadowVSName = "d8-ss-deadbeef12345678"
-		ttl          = "3h"
+		namespace = "test-ns"
+		group     = "snapshot.storage.k8s.io"
+		resource  = "volumesnapshots"
+		leafName  = "my-vs-leaf"
+		ttl       = "3h"
 	)
 
 	scheme := newDEScheme(t)
@@ -79,15 +81,15 @@ func TestEnsureDataExport_Creates(t *testing.T) {
 
 	ctx := context.Background()
 
-	de, err := exporter.EnsureDataExport(ctx, c, namespace, shadowVSName, ttl)
+	de, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, leafName, ttl)
 	require.NoError(t, err)
 	require.NotNil(t, de)
 
-	assert.Equal(t, exporter.DataExportName(shadowVSName), de.Name)
+	assert.Equal(t, exporter.DataExportName(leafName), de.Name)
 	assert.Equal(t, namespace, de.Namespace)
-	assert.Equal(t, aggapi.VolumeSnapshotGroup, de.Spec.TargetRef.Group)
-	assert.Equal(t, aggapi.VolumeSnapshotResource, de.Spec.TargetRef.Resource)
-	assert.Equal(t, shadowVSName, de.Spec.TargetRef.Name)
+	assert.Equal(t, group, de.Spec.TargetRef.Group)
+	assert.Equal(t, resource, de.Spec.TargetRef.Resource)
+	assert.Equal(t, leafName, de.Spec.TargetRef.Name)
 	assert.Equal(t, ttl, de.Spec.TTL)
 
 	// Marshal round-trip: the JSON must carry a non-empty "resource" key — the field
@@ -98,13 +100,40 @@ func TestEnsureDataExport_Creates(t *testing.T) {
 	assert.NotContains(t, string(raw), `"kind"`, "obsolete kind field must not appear in targetRef JSON")
 }
 
+func TestEnsureDataExport_DomainLeaf(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		group     = "demo.deckhouse.io"
+		resource  = "virtualdisksnapshots"
+		leafName  = "disk-snap-1"
+		ttl       = "1h"
+	)
+
+	scheme := newDEScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	ctx := context.Background()
+
+	de, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, leafName, ttl)
+	require.NoError(t, err)
+	require.NotNil(t, de)
+
+	assert.Equal(t, exporter.DataExportName(leafName), de.Name)
+	assert.Equal(t, group, de.Spec.TargetRef.Group)
+	assert.Equal(t, resource, de.Spec.TargetRef.Resource)
+	assert.Equal(t, leafName, de.Spec.TargetRef.Name)
+}
+
 func TestEnsureDataExport_DefaultTTL(t *testing.T) {
 	t.Parallel()
 
 	scheme := newDEScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	de, err := exporter.EnsureDataExport(context.Background(), c, "ns", "shadow-vs", "")
+	de, err := exporter.EnsureDataExport(context.Background(), c, "ns",
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, "leaf-vs", "")
 	require.NoError(t, err)
 
 	// Empty TTL should be replaced by the built-in default (non-empty).
@@ -115,8 +144,8 @@ func TestEnsureDataExport_Idempotent(t *testing.T) {
 	t.Parallel()
 
 	const (
-		namespace    = "test-ns"
-		shadowVSName = "d8-ss-idempotent"
+		namespace = "test-ns"
+		leafName  = "idempotent-vs"
 	)
 
 	scheme := newDEScheme(t)
@@ -124,10 +153,12 @@ func TestEnsureDataExport_Idempotent(t *testing.T) {
 
 	ctx := context.Background()
 
-	de1, err := exporter.EnsureDataExport(ctx, c, namespace, shadowVSName, "1h")
+	de1, err := exporter.EnsureDataExport(ctx, c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, leafName, "1h")
 	require.NoError(t, err)
 
-	de2, err := exporter.EnsureDataExport(ctx, c, namespace, shadowVSName, "1h")
+	de2, err := exporter.EnsureDataExport(ctx, c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, leafName, "1h")
 	require.NoError(t, err)
 
 	assert.Equal(t, de1.Name, de2.Name)
@@ -136,8 +167,8 @@ func TestEnsureDataExport_Idempotent(t *testing.T) {
 
 // makeReadyDE returns a DataExport pre-populated with the Ready condition and a URL
 // so that WaitReady exits on its first iteration without sleeping.
-func makeReadyDE(namespace, shadowVSName, baseURL, volumeMode string) *deapi.DataExport {
-	deName := exporter.DataExportName(shadowVSName)
+func makeReadyDE(namespace, leafName, baseURL, volumeMode string) *deapi.DataExport {
+	deName := exporter.DataExportName(leafName)
 
 	return &deapi.DataExport{
 		ObjectMeta: metav1.ObjectMeta{
@@ -149,7 +180,7 @@ func makeReadyDE(namespace, shadowVSName, baseURL, volumeMode string) *deapi.Dat
 			TargetRef: deapi.TargetRefSpec{
 				Group:    aggapi.VolumeSnapshotGroup,
 				Resource: aggapi.VolumeSnapshotResource,
-				Name:     shadowVSName,
+				Name:     leafName,
 			},
 		},
 		Status: deapi.DataExportStatus{
@@ -170,14 +201,14 @@ func TestWaitReady_AlreadyReady(t *testing.T) {
 	t.Parallel()
 
 	const (
-		namespace    = "test-ns"
-		shadowVSName = "d8-ss-ready"
-		baseURL      = "https://exporter.example.com"
-		volumeMode   = "Block"
+		namespace  = "test-ns"
+		leafName   = "ready-vs"
+		baseURL    = "https://exporter.example.com"
+		volumeMode = "Block"
 	)
 
 	scheme := newDEScheme(t)
-	de := makeReadyDE(namespace, shadowVSName, baseURL, volumeMode)
+	de := makeReadyDE(namespace, leafName, baseURL, volumeMode)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(de).WithStatusSubresource(de).Build()
 
 	ctx := context.Background()
@@ -194,11 +225,11 @@ func TestWaitReady_Expired(t *testing.T) {
 	t.Parallel()
 
 	const (
-		namespace    = "test-ns"
-		shadowVSName = "d8-ss-expired"
+		namespace = "test-ns"
+		leafName  = "expired-vs"
 	)
 
-	deName := exporter.DataExportName(shadowVSName)
+	deName := exporter.DataExportName(leafName)
 
 	scheme := newDEScheme(t)
 
@@ -231,11 +262,11 @@ func TestWaitReady_DeadlineExceeded(t *testing.T) {
 	t.Parallel()
 
 	const (
-		namespace    = "test-ns"
-		shadowVSName = "d8-ss-never-ready"
+		namespace = "test-ns"
+		leafName  = "never-ready-vs"
 	)
 
-	deName := exporter.DataExportName(shadowVSName)
+	deName := exporter.DataExportName(leafName)
 
 	scheme := newDEScheme(t)
 
@@ -263,13 +294,13 @@ func TestWaitReady_DeadlineError_ContainsHintAndStatus(t *testing.T) {
 	t.Parallel()
 
 	const (
-		namespace    = "test-ns"
-		shadowVSName = "d8-ss-hint-check"
-		lastReason   = "TargetNotReady"
-		lastMessage  = "volume not provisioned yet"
+		namespace   = "test-ns"
+		leafName    = "hint-check-vs"
+		lastReason  = "TargetNotReady"
+		lastMessage = "volume not provisioned yet"
 	)
 
-	deName := exporter.DataExportName(shadowVSName)
+	deName := exporter.DataExportName(leafName)
 
 	scheme := newDEScheme(t)
 
@@ -310,11 +341,11 @@ func TestWaitReady_ContextCancelled(t *testing.T) {
 	t.Parallel()
 
 	const (
-		namespace    = "test-ns"
-		shadowVSName = "d8-ss-pending"
+		namespace = "test-ns"
+		leafName  = "pending-vs"
 	)
 
-	deName := exporter.DataExportName(shadowVSName)
+	deName := exporter.DataExportName(leafName)
 
 	scheme := newDEScheme(t)
 
@@ -340,11 +371,11 @@ func TestReleaseDataExport_Deletes(t *testing.T) {
 	t.Parallel()
 
 	const (
-		namespace    = "test-ns"
-		shadowVSName = "d8-ss-releaseme"
+		namespace = "test-ns"
+		leafName  = "releaseme-vs"
 	)
 
-	deName := exporter.DataExportName(shadowVSName)
+	deName := exporter.DataExportName(leafName)
 
 	scheme := newDEScheme(t)
 
