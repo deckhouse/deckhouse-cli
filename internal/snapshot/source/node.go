@@ -78,16 +78,17 @@ type Node struct {
 	OwnDataRefs []snapshotapi.SnapshotDataBinding
 
 	// Binding is non-nil for orphan leaf volume nodes only. It carries the SnapshotDataBinding
-	// that gave rise to this leaf node (copied from the parent aggregator's dataRefs slice so
-	// that modifications to the source slice do not affect the tree).
+	// resolved from the child SnapshotContent (the VolumeSnapshot's own bound content, Variant A).
+	// Modifications to the source content do not affect this copy.
 	Binding *snapshotapi.SnapshotDataBinding
 
 	// Parent is the parent node. Nil for the root.
 	Parent *Node
 
-	// Children are the direct child nodes: snapshot children first (in
+	// Children are the direct child nodes: domain snapshot children first (in
 	// childrenSnapshotRefs order), then orphan leaf volume children for aggregator
-	// nodes (in dataRefs order). Always nil for orphan leaf volume nodes (they are leaves).
+	// nodes (in VolumeSnapshot visibility-leaf ref order). Always nil for orphan leaf
+	// volume nodes (they are leaves).
 	Children []*Node
 }
 
@@ -102,17 +103,17 @@ func (n *Node) Ref() aggapi.NodeRef {
 	}
 }
 
-// ManifestScopeRef returns the node whose manifests-download contains this node's
-// captured PVC manifest.
+// ManifestScopeRef returns the aggregated-API node reference used to fetch this node's
+// own-scope manifests (manifests-download subresource).
 //
-// For orphan leaf volume nodes (Binding != nil) the captured PVC manifest lives in
-// the PARENT aggregator node's own manifests (the aggregator's checkpoint captured
-// the standalone PVCs), so the parent ref is returned. For all other nodes the
-// manifests are addressed by the node's own ref.
+// For domain snapshot nodes this is the node's own ref (its snapshot CR identity →
+// own ManifestCheckpoint).
+//
+// For orphan leaf volume nodes (Binding != nil) this is also the node's own ref:
+// APIVersion=snapshot.storage.k8s.io/v1, Kind=VolumeSnapshot, Name=VS CR name. The
+// VolumeSnapshot connector (subresources.snapshot.storage.k8s.io) resolves this ref via
+// VolumeSnapshot.status.boundSnapshotContentName to the leaf's own child SnapshotContent
+// ManifestCheckpoint (which holds the captured PVC manifest).
 func (n *Node) ManifestScopeRef() aggapi.NodeRef {
-	if n.Binding != nil && n.Parent != nil {
-		return n.Parent.Ref()
-	}
-
 	return n.Ref()
 }
