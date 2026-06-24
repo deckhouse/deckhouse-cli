@@ -13,16 +13,21 @@ The key distinction from a no-op:
 |------|-------------|---------|
 | Validate registry access | yes | yes |
 | Resolve versions / channels | yes | yes |
-| Pull installer to tmpDir | yes | **yes** (needed to read `images_digests.json`) |
+| Read installer `images_digests.json` (platform) | via OCI layout in tmpDir | **streamed from the registry** (no layout) |
+| Stage installer/security/module OCI layout dirs in tmpDir | yes (with blobs) | **scaffolding only** (no image blobs) |
 | Pull release-channel metadata | yes | yes |
 | Download platform/module/security blobs | yes | **no** |
 | Write `platform.tar`, `security.tar`, module tarballs | yes | **no** |
 | Write `deckhousereleases.yaml` | yes | **no** |
 | Compute GOST digests | yes | **no** |
 
-Installer OCI layouts land in `--tmp-dir` (or `<bundle-path>/.tmp`) so the tool can
-extract the built-in image digest list from `deckhouse/candi/images_digests.json`.  
-The **bundle directory** (first positional argument) remains empty.
+In dry-run the **platform** service streams the built-in image digest list
+(`images_tags.json` / `images_digests.json`) straight from the remote installer image,
+layer by layer, without writing an OCI layout. The `installer`, `security` and `modules`
+services still create their OCI layout directories under `--tmp-dir` (or
+`<bundle-path>/.tmp`), but in dry-run they pull no image blobs (only layout scaffolding),
+so `--tmp-dir` ends up non-empty while the **bundle directory** (first positional
+argument) remains empty.
 
 ---
 
@@ -51,18 +56,22 @@ Expected output (abbreviated):
 ```
 INFO  Skipped releases lookup as tag "v1.69.0" is specifically requested with --deckhouse-tag
 INFO  Deckhouse releases to pull: [1.69.0]
-INFO  ╔ Pull release channels and installers
-INFO  ║ [1 / 1] Pulling registry.deckhouse.io/deckhouse/install:v1.69.0
-INFO  ╚ Pull release channels and installers succeeded in …
-INFO  Extracting images digests from Deckhouse installer v1.69.0
+INFO  Searching for Deckhouse built-in modules digests
+INFO  [dry-run] Streaming installer metadata for v1.69.0 from registry
 INFO  Deckhouse digests found: 319
-INFO  Found 320 images
 INFO  [dry-run] Platform images that would be pulled:
-INFO    registry.deckhouse.io/deckhouse/fe@sha256:…
-INFO    registry.deckhouse.io/deckhouse/fe/release-channel:v1.69.0
+INFO    Deckhouse components: 319 images
+INFO      registry.deckhouse.io/deckhouse/fe@sha256:…
+INFO    Release channels: 1
+INFO      registry.deckhouse.io/deckhouse/fe/release-channel:v1.69.0
+INFO    Installer: 1
+INFO      registry.deckhouse.io/deckhouse/fe/install:v1.69.0
+INFO    Standalone installer: 1
+INFO    Total: 322 platform images
+INFO  [dry-run] Installer images that would be pulled:
 INFO    registry.deckhouse.io/deckhouse/fe/install:v1.69.0
   …
-INFO  [dry-run] Done. No images were downloaded.
+  No images were downloaded (dry-run).
 ```
 
 ### All components
@@ -134,7 +143,7 @@ go test ./internal/mirror/... -run 'TestDryRun' -v -timeout 120s
 # Pull-command level (flag registration, no bundle output, exit 0)
 go test ./internal/mirror/cmd/pull/ -run 'TestDryRun' -v
 
-# Platform service level (installer pulled to tmpDir, bundle stays empty)
+# Platform service level (digests streamed, no platform OCI layout, bundle stays empty)
 go test ./internal/mirror/platform/ -run 'TestDryRun' -v
 ```
 
@@ -148,7 +157,8 @@ go test ./internal/mirror/platform/ -run 'TestDryRun' -v
 | `TestDryRunWithDeckhouseTag` | specific `--deckhouse-tag` works in dry-run |
 | `TestDryRunExitsZeroOnSuccess` | `Execute()` returns `nil` |
 | `TestDryRun_NoBundleFilesWritten` | platform service: bundleDir empty |
-| `TestDryRun_InstallerPulledToTmpDir` | platform service: `<tmpDir>/platform/install/` exists |
+| `TestDryRun_NoOCILayoutCreated` | platform service: `<tmpDir>/platform/install/` is **not** created (digests are streamed) |
+| `TestDryRun_WorkingDirHasLayouts` | installer / security service: OCI layout dir staged in workingDir, bundleDir empty |
 
 ### Integration smoke test (real registry)
 
@@ -171,9 +181,10 @@ D8_TEST_LICENSE_TOKEN=<token> \
 
 The test asserts:
 1. `Execute()` returns `nil`
-2. The bundle directory is **empty** — no `.tar` output
-3. The tmp directory is **non-empty** — OCI layouts were written (installer pull), proving
-   `images_digests.json` extraction was attempted
+2. The bundle directory has no `.tar` / `.chunk` output
+3. The tmp directory is **non-empty** - the `installer`, `security` and `modules` services
+   stage OCI layout scaffolding there (no image blobs); the platform digest list itself is
+   streamed from the registry, not staged
 
 Sample passing output:
 
@@ -181,10 +192,11 @@ Sample passing output:
 === RUN   TestDryRunRealRegistry
 …
 INFO  Deckhouse digests found: 319
-INFO  Found 320 images
 INFO  [dry-run] Platform images that would be pulled:
-INFO    registry.deckhouse.io/deckhouse/fe@sha256:e927fc9…
-  … 320 lines …
+INFO    Deckhouse components: 319 images
+INFO      registry.deckhouse.io/deckhouse/fe@sha256:e927fc9…
+INFO    Total: 322 platform images
+  … more dry-run plans for installer / security / modules …
     pull_realregistry_test.go:94: tmpDir files written during dry-run: 51
     pull_realregistry_test.go:95: bundleDir entries (must be 0): 0
 --- PASS: TestDryRunRealRegistry (79.99s)
@@ -203,13 +215,12 @@ Puller.Execute()
             │    ├─ findTagsToMirror()                    ← real network call
             │    ├─ downloadList.FillDeckhouseImages()    ← in-memory
             │    └─ pullDeckhousePlatform()
-            │         ├─ pullDeckhouseReleaseChannels()   ← writes to tmpDir
-            │         ├─ pullInstallers()                 ← writes to tmpDir ← KEY STEP
-            │         ├─ pullStandaloneInstallers()       ← writes to tmpDir
-            │         │   (pullDeckhouseImages SKIPPED in dry-run)
-            │         ├─ ExtractImageDigestsFromInstaller ← reads images_digests.json
-            │         └─ [dry-run guard] print plan → return nil
-            │              (no platform.tar written)
+            │         └─ [DryRun] pullDeckhousePlatformDryRun()
+            │              ├─ extractImageDigestsFromRemote()  ← streams images_tags.json /
+            │              │      images_digests.json from the remote image (no OCI layout)
+            │              └─ print plan → return nil
+            │            (pullDeckhouseReleaseChannels / pullInstallers /
+            │             pullStandaloneInstallers / pullDeckhouseImages all SKIPPED)
             ├─ installer.Service.PullInstaller()         [DryRun=true]
             │    ├─ validateInstallerAccess()
             │    ├─ findTagsToMirror()
@@ -225,15 +236,16 @@ Puller.Execute()
                  └─ [dry-run guard] print plan → return nil
 
   After Pull() returns:
-    if DryRun → print "[dry-run] Done." → return nil
+    if DryRun → print summary "No images were downloaded (dry-run)." → return nil
     else      → computeGOSTDigests, finalCleanup
 ```
 
-The installer image **is** pulled to `tmpDir` in dry-run mode because
-`images_digests.json` inside it is the only source for the ~300 component image
-digest references that the platform bundle would contain. Without this step,
-dry-run could only report the 5–10 top-level image tags, missing the vast majority
-of what a real pull actually downloads.
+The platform service reads `images_digests.json` (or `images_tags.json`) **without**
+pulling the installer to `tmpDir`: `extractImageDigestsFromRemote` streams just the layer
+containing that file straight from the registry. It is the only source for the ~300
+component image digest references that the platform bundle would contain - without it,
+dry-run could only report the 5-10 top-level image tags, missing the vast majority of
+what a real pull actually downloads.
 
 ---
 
@@ -241,9 +253,9 @@ of what a real pull actually downloads.
 
 | Location | Created in dry-run? | Description |
 |----------|---------------------|-------------|
-| `<tmpDir>/platform/install/` | **yes** | Installer OCI layout |
-| `<tmpDir>/platform/install-standalone/` | **yes** | Standalone installer OCI layout |
-| `<tmpDir>/platform/release/` | **yes** | Release-channel metadata OCI layout |
+| `<tmpDir>/platform/...` | **no** | Platform digests are streamed; no platform OCI layout is written |
+| `<tmpDir>/installer/` | **yes** | Installer OCI layout dir (scaffolding only, no blobs) |
+| `<tmpDir>/security*/`, `<tmpDir>/modules*/` | **yes** | Security / module OCI layout dirs (scaffolding only, no blobs) |
 | `<bundleDir>/platform.tar` | no | Not created |
 | `<bundleDir>/security.tar` | no | Not created |
 | `<bundleDir>/modules-*.tar` | no | Not created |

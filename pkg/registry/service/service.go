@@ -28,7 +28,6 @@ import (
 const (
 	moduleSegment   = "modules"
 	packageSegment  = "packages"
-	pluginSegment   = "plugins"
 	securitySegment = "security"
 
 	securityServiceName = "security"
@@ -44,7 +43,6 @@ type Service struct {
 
 	modulesService   *ModulesService
 	packagesService  *PackagesService
-	pluginService    *PluginService
 	deckhouseService *DeckhouseService
 	security         *SecurityServices
 	installer        *InstallerServices
@@ -76,7 +74,6 @@ func NewService(c client.Client, edition pkg.Edition, logger *log.Logger) *Servi
 	s.security = NewSecurityServices(securityServiceName, base.WithSegment(securitySegment), logger.Named("security"))
 
 	// services that are not scoped by edition
-	s.pluginService = NewPluginService(c.WithSegment(pluginSegment), logger.Named("plugins"))
 	s.installer = NewInstallerServices(installerServiceName, c.WithSegment("installer"), logger.Named("installer"))
 
 	return s
@@ -105,11 +102,6 @@ func (s *Service) ModuleService() *ModulesService {
 // PackageService returns the packages service
 func (s *Service) PackageService() *PackagesService {
 	return s.packagesService
-}
-
-// PluginService returns the plugin service
-func (s *Service) PluginService() *PluginService {
-	return s.pluginService
 }
 
 // DeckhouseService returns the deckhouse service

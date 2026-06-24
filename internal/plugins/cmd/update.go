@@ -14,59 +14,54 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package plugins
+package pluginscmd
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 
-	"github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/layout"
+	"github.com/deckhouse/deckhouse-cli/internal/plugins"
 )
 
-func (pc *PluginsCommand) pluginsUpdateCommand() *cobra.Command {
+func newUpdateCommand(manager *plugins.Manager) *cobra.Command {
+	var useMajor int
+
 	cmd := &cobra.Command{
-		Use:   "update [plugin-name]",
+		Use:   "update <plugin-name>",
 		Short: "Update an installed plugin",
-		Long:  "Update a specific plugin to its latest available version",
-		Args:  cobra.ExactArgs(1),
+		Long: "Update an installed plugin to the newest version compatible with this cluster,\n" +
+			"within its current major version. Plugins it depends on are installed/upgraded\n" +
+			"automatically.\n\n" +
+			"To cross majors use --use-major N (dependencies may then cross their major too)\n" +
+			"or pick an exact version with 'd8 plugins install <name> --version X'.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pluginName := args[0]
 			fmt.Printf("Updating plugin: %s\n", pluginName)
 
-			ctx := cmd.Context()
-
-			return pc.InstallPlugin(ctx, pluginName)
+			return manager.InstallPlugin(cmd.Context(), pluginName, plugins.InstallWithMajorVersion(useMajor))
 		},
 	}
 
+	cmd.Flags().IntVar(&useMajor, "use-major", -1, "Cross to a specific major version (dependencies may cross theirs too). By default the update stays within the installed major.")
+
 	// Add subcommands
-	cmd.AddCommand(pc.pluginsUpdateAllCommand())
+	cmd.AddCommand(newUpdateAllCommand(manager))
 
 	return cmd
 }
 
-func (pc *PluginsCommand) pluginsUpdateAllCommand() *cobra.Command {
-	cmd := &cobra.Command{
+func newUpdateAllCommand(manager *plugins.Manager) *cobra.Command {
+	return &cobra.Command{
 		Use:   "all",
 		Short: "Update all installed plugins",
-		Long:  "Update all installed plugins to their latest available versions",
+		Long:  "Update all installed plugins to their newest cluster-compatible version within each plugin's current major.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx := cmd.Context()
-
 			fmt.Println("Updating all installed plugins...")
 
-			plugins, err := os.ReadDir(layout.PluginsRoot(pc.pluginDirectory))
-			if err != nil {
-				return fmt.Errorf("failed to read plugins directory: %w", err)
-			}
-
-			for _, plugin := range plugins {
-				err := pc.InstallPlugin(ctx, plugin.Name())
-				if err != nil {
-					return fmt.Errorf("failed to update plugin: %w", err)
-				}
+			if err := manager.UpdateAll(cmd.Context()); err != nil {
+				return err
 			}
 
 			fmt.Println("✓ All plugins updated successfully!")
@@ -74,6 +69,4 @@ func (pc *PluginsCommand) pluginsUpdateAllCommand() *cobra.Command {
 			return nil
 		},
 	}
-
-	return cmd
 }

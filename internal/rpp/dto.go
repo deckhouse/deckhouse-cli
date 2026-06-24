@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,6 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package flags defines the shared CLI flag set used by the d8 plugins
-// management subcommands and consumed during registry client initialisation.
-package flags
+package rpp
+
+// tagListResponse is the JSON body of GET /v1/images/<image>/tags as served by
+// the proxy cliHandler.
+type tagListResponse struct {
+	Name string   `json:"name"`
+	Tags []string `json:"tags"`
+}
