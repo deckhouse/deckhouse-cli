@@ -134,9 +134,15 @@ func (s *SnapshotContent) DeepCopyInto(out *SnapshotContent) {
 		copy(out.Status.ChildrenSnapshotContentRefs, s.Status.ChildrenSnapshotContentRefs)
 	}
 
-	if s.Status.DataRefs != nil {
-		out.Status.DataRefs = make([]SnapshotDataBinding, len(s.Status.DataRefs))
-		copy(out.Status.DataRefs, s.Status.DataRefs)
+	if s.Status.DataRef != nil {
+		dr := *s.Status.DataRef
+
+		if s.Status.DataRef.AccessModes != nil {
+			dr.AccessModes = make([]string, len(s.Status.DataRef.AccessModes))
+			copy(dr.AccessModes, s.Status.DataRef.AccessModes)
+		}
+
+		out.Status.DataRef = &dr
 	}
 
 	if s.Status.Conditions != nil {
@@ -178,8 +184,6 @@ func (s *SnapshotContentList) DeepCopyObject() runtime.Object {
 
 // SnapshotContentSpec describes the desired state of a SnapshotContent.
 type SnapshotContentSpec struct {
-	BackupRepositoryName string `json:"backupRepositoryName,omitempty"`
-
 	// DeletionPolicy controls whether the controller may delete this SnapshotContent.
 	DeletionPolicy string `json:"deletionPolicy,omitempty"`
 }
@@ -192,8 +196,10 @@ type SnapshotContentStatus struct {
 	// ChildrenSnapshotContentRefs lists direct child SnapshotContent objects in the snapshot tree.
 	ChildrenSnapshotContentRefs []SnapshotContentChildRef `json:"childrenSnapshotContentRefs,omitempty"`
 
-	// DataRefs lists PVC-target-to-data-artifact bindings for this snapshot node.
-	DataRefs []SnapshotDataBinding `json:"dataRefs,omitempty"`
+	// DataRef is the single PVC-target-to-data-artifact binding for this logical snapshot node.
+	// Variant A (cardinality ≤1): a node carries at most one data artifact; multiple volumes are
+	// represented as separate child volume nodes (childrenSnapshotContentRefs), never as a list here.
+	DataRef *SnapshotDataBinding `json:"dataRef,omitempty"`
 
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
@@ -221,10 +227,43 @@ type SnapshotDataArtifactRef struct {
 	Name       string `json:"name"`
 }
 
-// SnapshotDataBinding associates a PVC target with its captured data artifact on one SnapshotContent.
+// SnapshotDataBinding associates the single PVC target of a logical snapshot node with its captured
+// data artifact. Variant A (cardinality ≤1): a SnapshotContent carries at most ONE dataRef; multiple
+// volumes are modeled as child volume nodes (each its own SnapshotContent), never as a list on one node.
+// Field names and types mirror state-snapshotter/api/storage/v1alpha1/snapshotcontent_types.go:97-137.
 type SnapshotDataBinding struct {
-	// TargetUID is the map key (PersistentVolumeClaim UID).
-	TargetUID string                  `json:"targetUID"`
-	Target    SnapshotSubjectRef      `json:"target"`
-	Artifact  SnapshotDataArtifactRef `json:"artifact"`
+	// TargetUID identifies the captured PersistentVolumeClaim (its UID) backing this node's data.
+	TargetUID string `json:"targetUID"`
+
+	// Target identifies the PVC (and related metadata) captured in MCP for this binding.
+	Target SnapshotSubjectRef `json:"target"`
+
+	// Artifact references the cluster-scoped durable data artifact (for example VolumeSnapshotContent).
+	Artifact SnapshotDataArtifactRef `json:"artifact"`
+
+	// VolumeMode records the source volume mode (Block or Filesystem).
+	VolumeMode string `json:"volumeMode,omitempty"`
+
+	// FsType records the source filesystem type (Filesystem volumes only).
+	FsType string `json:"fsType,omitempty"`
+
+	// AccessModes records the source PVC access modes (e.g. ReadWriteOnce, ReadWriteMany).
+	AccessModes []string `json:"accessModes,omitempty"`
+
+	// StorageClassName records the source StorageClass of the captured volume.
+	StorageClassName string `json:"storageClassName,omitempty"`
+
+	// Size records the real allocated size of the captured volume (e.g. "10Gi"),
+	// taken from the data artifact (VolumeSnapshotContent.status.restoreSize).
+	Size string `json:"size,omitempty"`
+}
+
+// DataRefList returns status.dataRef as a slice of length 0 or 1. Variant A keeps cardinality ≤1
+// on a node; this bridge lets callers iterate the single binding without special-casing the nil pointer.
+func (s *SnapshotContent) DataRefList() []SnapshotDataBinding {
+	if s.Status.DataRef == nil {
+		return nil
+	}
+
+	return []SnapshotDataBinding{*s.Status.DataRef}
 }

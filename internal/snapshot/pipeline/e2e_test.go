@@ -69,14 +69,6 @@ const (
 	// Keep small for unit-test speed.
 	e2eBlockSize = 300
 
-	// Multi-volume test constants.
-	e2eMultiRootSnap = "e2e-multi-root"
-	e2eMultiDisk     = "multi-disk"
-	e2eMultiBlockVSC = "vsc-multi-block"
-	e2eMultiFSVSC    = "vsc-multi-fs"
-	e2eMultiBlockPVC = "pvc-multi-block"
-	e2eMultiFSPVC    = "pvc-multi-fs"
-
 	// Deleted-PVC test constants.
 	e2eDelRootSnap = "e2e-del-root"
 	e2eDelDisk     = "del-disk"
@@ -436,20 +428,18 @@ func buildE2EFakeClient(t *testing.T) client.Client {
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-e2e-block"},
 		Status: snapshotapi.SnapshotContentStatus{
-			DataRefs: []snapshotapi.SnapshotDataBinding{
-				{
-					TargetUID: "uid-block",
-					Target: snapshotapi.SnapshotSubjectRef{
-						APIVersion: "v1",
-						Kind:       "PersistentVolumeClaim",
-						Namespace:  e2eNS,
-						Name:       "pvc-block-source",
-					},
-					Artifact: snapshotapi.SnapshotDataArtifactRef{
-						APIVersion: "snapshot.storage.k8s.io/v1",
-						Kind:       "VolumeSnapshotContent",
-						Name:       e2eBlockVSC,
-					},
+			DataRef: &snapshotapi.SnapshotDataBinding{
+				TargetUID: "uid-block",
+				Target: snapshotapi.SnapshotSubjectRef{
+					APIVersion: "v1",
+					Kind:       "PersistentVolumeClaim",
+					Namespace:  e2eNS,
+					Name:       "pvc-block-source",
+				},
+				Artifact: snapshotapi.SnapshotDataArtifactRef{
+					APIVersion: "snapshot.storage.k8s.io/v1",
+					Kind:       "VolumeSnapshotContent",
+					Name:       e2eBlockVSC,
 				},
 			},
 		},
@@ -462,20 +452,18 @@ func buildE2EFakeClient(t *testing.T) client.Client {
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-e2e-fs"},
 		Status: snapshotapi.SnapshotContentStatus{
-			DataRefs: []snapshotapi.SnapshotDataBinding{
-				{
-					TargetUID: "uid-fs",
-					Target: snapshotapi.SnapshotSubjectRef{
-						APIVersion: "v1",
-						Kind:       "PersistentVolumeClaim",
-						Namespace:  e2eNS,
-						Name:       "pvc-fs-source",
-					},
-					Artifact: snapshotapi.SnapshotDataArtifactRef{
-						APIVersion: "snapshot.storage.k8s.io/v1",
-						Kind:       "VolumeSnapshotContent",
-						Name:       e2eFSVSC,
-					},
+			DataRef: &snapshotapi.SnapshotDataBinding{
+				TargetUID: "uid-fs",
+				Target: snapshotapi.SnapshotSubjectRef{
+					APIVersion: "v1",
+					Kind:       "PersistentVolumeClaim",
+					Namespace:  e2eNS,
+					Name:       "pvc-fs-source",
+				},
+				Artifact: snapshotapi.SnapshotDataArtifactRef{
+					APIVersion: "snapshot.storage.k8s.io/v1",
+					Kind:       "VolumeSnapshotContent",
+					Name:       e2eFSVSC,
 				},
 			},
 		},
@@ -586,271 +574,6 @@ func makeUnstructuredE2ENode(
 			"status": status,
 		},
 	}
-}
-
-// TestPipeline_E2E_MultiVolume verifies that a single non-aggregator snapshot node
-// with TWO OwnDataRefs (one Block and one Filesystem) lays out its data using the
-// multi-volume layout: data/<pvc>.bin.zst and data/<pvc>.tar directly in the same node
-// directory. No extra child nodes are created.
-//
-// Tree:
-//
-//	e2e-multi-root (Snapshot, no manifests)
-//	  └─ multi-disk (VirtualDiskSnapshot, non-aggregator, 2 OwnDataRefs)
-//	       data/pvc-multi-block.bin.zst   (block volume)
-//	       data/pvc-multi-fs.tar          (filesystem volume)
-//	       manifests/configmap_multi-cfg.yaml
-//	       (OwnDataRef PVC manifests excluded — data captured in volume payload)
-func TestPipeline_E2E_MultiVolume(t *testing.T) {
-	rawBlock := bytes.Repeat([]byte("M"), e2eBlockSize)
-	// Use the same file names that makeE2EFSServer hardcodes in its directory listing.
-	fsFiles := []fsE2EFile{
-		{rel: "alpha.txt", content: []byte("multi-alpha")},
-		{rel: "subdir/beta.txt", content: []byte("multi-beta")},
-	}
-
-	blockSrv := makeE2EBlockServer(t, rawBlock)
-	fsSrv := makeE2EFSServer(t, fsFiles)
-
-	c := buildMultiVolumeFakeClient(t)
-	outputDir := t.TempDir()
-
-	blockShadow := exporter.ShadowName(e2eMultiBlockVSC)
-	fsShadow := exporter.ShadowName(e2eMultiFSVSC)
-
-	cfg := pipeline.Config{
-		Namespace:            e2eNS,
-		RootSnapshot:         e2eMultiRootSnap,
-		OutputDir:            outputDir,
-		Workers:              2,
-		PerVolumeConcurrency: 2,
-		KubeClient:           c,
-		WaitShadowVS:         noopWaitShadowVS,
-		OpenExport: func(_ context.Context, namespace, shadowVSName, _ string) (*exporter.Export, error) {
-			switch shadowVSName {
-			case blockShadow:
-				return exporter.NewExport(namespace, "de-multi-block", "Block", blockSrv.URL, exporter.NewFetcher(blockSrv.Client())), nil
-			case fsShadow:
-				return exporter.NewExport(namespace, "de-multi-fs", "Filesystem", fsSrv.URL, exporter.NewFetcher(fsSrv.Client())), nil
-			default:
-				return nil, fmt.Errorf("e2e-multi: unknown shadow VS %q", shadowVSName)
-			}
-		},
-	}
-
-	require.NoError(t, runPipeline(context.Background(), cfg))
-
-	// multi-disk snapshot node.
-	multiDiskDir := filepath.Join(outputDir, archive.SnapshotsDirName,
-		archive.NodeDirName(e2eDiskKind, e2eMultiDisk))
-	assertE2ENodeComplete(t, multiDiskDir)
-
-	// Non-aggregator with multiple OwnDataRefs: no snapshots/ subdir.
-	_, noSnaps := os.Stat(filepath.Join(multiDiskDir, archive.SnapshotsDirName))
-	require.True(t, os.IsNotExist(noSnaps),
-		"multi-disk must not have a snapshots/ subdir (no children)")
-
-	// No flat data.bin.zst; data lives under data/<pvc>.*
-	_, noFlatBlock := os.Stat(filepath.Join(multiDiskDir, archive.DataBlockName(".zst")))
-	require.True(t, os.IsNotExist(noFlatBlock),
-		"multi-disk must not carry flat data.bin.zst (multi-volume layout)")
-
-	// multi-disk manifests/ must include the ConfigMap but NOT the OwnDataRef PVCs.
-	// OwnDataRef PVC data is captured in the volume payload; their manifests are excluded.
-	manifestsDir := filepath.Join(multiDiskDir, archive.ManifestsDirName)
-	_, err := os.Stat(filepath.Join(manifestsDir, "configmap_multi-cfg.yaml"))
-	require.NoError(t, err, "multi-disk manifests/ must include ConfigMap")
-
-	for _, pvcName := range []string{e2eMultiBlockPVC, e2eMultiFSPVC} {
-		pvcFile := fmt.Sprintf("persistentvolumeclaim_%s.yaml", pvcName)
-		_, statErr := os.Stat(filepath.Join(manifestsDir, pvcFile))
-		require.True(t, os.IsNotExist(statErr),
-			"multi-disk manifests/ must NOT include OwnDataRef PVC %s (data in volume payload)", pvcName)
-	}
-
-	// ── Block volume (multi-volume layout) ────────────────────────────────────
-	blockVolPath := filepath.Join(multiDiskDir, archive.MultiVolumeBlockName(e2eMultiBlockPVC, ".zst"))
-	_, err = os.Stat(blockVolPath)
-	require.NoError(t, err, "multi-disk block volume data/<pvc>.bin.zst must exist")
-	require.Equal(t, rawBlock, e2eDecodeZstdFile(t, blockVolPath))
-
-	// ── Filesystem volume (multi-volume layout) ───────────────────────────────
-	fsVolTar := filepath.Join(multiDiskDir, archive.MultiVolumeTarName(e2eMultiFSPVC))
-	_, err = os.Stat(fsVolTar)
-	require.NoError(t, err, "multi-disk fs volume data/<pvc>.tar must exist")
-
-	for _, f := range fsFiles {
-		// Per-file-compressed model: entries named <relPath>.zst (default zstd codec).
-		entryName := f.rel + ".zst"
-		compressed, tarErr := readTarEntry(t, fsVolTar, entryName)
-		require.NoError(t, tarErr, "multi-disk fs tar must have entry %s", entryName)
-		require.Equal(t, f.content, e2eDecodeZstdBytes(t, compressed), "multi-disk fs file %s content mismatch", f.rel)
-	}
-
-	// snapshot.yaml must carry two Volumes entries (one per OwnDataRef).
-	multiSY, err := archive.ReadSnapshotYAML(multiDiskDir)
-	require.NoError(t, err, "ReadSnapshotYAML for multi-disk node")
-	require.Len(t, multiSY.Volumes, 2, "multi-disk snapshot.yaml must carry two Volumes entries")
-	require.Equal(t, e2eMultiBlockPVC, multiSY.Volumes[0].Target.Name,
-		"Volumes[0].Target.Name must match block PVC")
-	require.Equal(t, e2eMultiBlockVSC, multiSY.Volumes[0].Artifact.Name,
-		"Volumes[0].Artifact.Name must match block VSC")
-	require.Equal(t, e2eMultiFSPVC, multiSY.Volumes[1].Target.Name,
-		"Volumes[1].Target.Name must match fs PVC")
-	require.Equal(t, e2eMultiFSVSC, multiSY.Volumes[1].Artifact.Name,
-		"Volumes[1].Artifact.Name must match fs VSC")
-
-	// ── Resume: second run must be a no-op ────────────────────────────────────
-	mtimes := e2eCollectMtimes(t, outputDir)
-	time.Sleep(20 * time.Millisecond)
-
-	require.NoError(t, runPipeline(context.Background(), cfg))
-
-	for path, before := range mtimes {
-		after := statMtime(t, path)
-		require.Equal(t, before, after, "snapshot.yaml mtime changed on resume: %s", path)
-	}
-}
-
-// buildMultiVolumeFakeClient constructs the fake kube client for TestPipeline_E2E_MultiVolume.
-// The tree has a single snapshot node (multi-disk) with two OwnDataRefs: one Block and one Filesystem.
-func buildMultiVolumeFakeClient(t *testing.T) client.Client {
-	t.Helper()
-
-	scheme := buildScheme(t)
-
-	// Root snapshot (no children, no manifests).
-	rootSnap := &snapshotapi.Snapshot{
-		TypeMeta: metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "Snapshot"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      e2eMultiRootSnap,
-			Namespace: e2eNS,
-		},
-		Status: snapshotapi.SnapshotStatus{
-			BoundSnapshotContentName: "sc-multi-root",
-			ChildrenSnapshotRefs: []snapshotapi.SnapshotChildRef{
-				{APIVersion: e2eVMAPIVersion, Kind: e2eDiskKind, Name: e2eMultiDisk},
-			},
-		},
-	}
-
-	rootContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-multi-root"},
-	}
-
-	// multi-disk: VirtualDiskSnapshot with TWO OwnDataRefs (block + fs).
-	// No childrenSnapshotRefs → non-aggregator → multi-volume layout in node dir.
-	// Its own manifests (ConfigMap + both OwnDataRef PVCs) are served by the stub
-	// ManifestSource keyed by the multi-disk node ref; only the ConfigMap reaches
-	// multi-disk/manifests/ since OwnDataRef PVCs are excluded.
-	multiDiskSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eDiskKind, e2eNS, e2eMultiDisk, "sc-multi-disk", nil)
-
-	multiDiskContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-multi-disk"},
-		Status: snapshotapi.SnapshotContentStatus{
-			DataRefs: []snapshotapi.SnapshotDataBinding{
-				{
-					TargetUID: "uid-multi-block",
-					Target: snapshotapi.SnapshotSubjectRef{
-						APIVersion: "v1",
-						Kind:       "PersistentVolumeClaim",
-						Namespace:  e2eNS,
-						Name:       e2eMultiBlockPVC,
-						UID:        "uid-multi-block",
-					},
-					Artifact: snapshotapi.SnapshotDataArtifactRef{
-						APIVersion: "snapshot.storage.k8s.io/v1",
-						Kind:       "VolumeSnapshotContent",
-						Name:       e2eMultiBlockVSC,
-					},
-				},
-				{
-					TargetUID: "uid-multi-fs",
-					Target: snapshotapi.SnapshotSubjectRef{
-						APIVersion: "v1",
-						Kind:       "PersistentVolumeClaim",
-						Namespace:  e2eNS,
-						Name:       e2eMultiFSPVC,
-						UID:        "uid-multi-fs",
-					},
-					Artifact: snapshotapi.SnapshotDataArtifactRef{
-						APIVersion: "snapshot.storage.k8s.io/v1",
-						Kind:       "VolumeSnapshotContent",
-						Name:       e2eMultiFSVSC,
-					},
-				},
-			},
-		},
-	}
-
-	// Real VSCs for EnsureShadowPair.
-	blockHandle := "handle-multi-block"
-	realBlockVSC := &snapv1.VolumeSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: e2eMultiBlockVSC},
-		Spec: snapv1.VolumeSnapshotContentSpec{
-			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
-			Driver:         "test.driver",
-			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &blockHandle},
-			VolumeSnapshotRef: corev1.ObjectReference{
-				APIVersion: "snapshot.storage.k8s.io/v1",
-				Kind:       "VolumeSnapshot",
-				Name:       "placeholder-multi-block",
-				Namespace:  "default",
-			},
-		},
-	}
-
-	fsHandle := "handle-multi-fs"
-	realFSVSC := &snapv1.VolumeSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: e2eMultiFSVSC},
-		Spec: snapv1.VolumeSnapshotContentSpec{
-			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
-			Driver:         "test.driver",
-			Source:         snapv1.VolumeSnapshotContentSource{SnapshotHandle: &fsHandle},
-			VolumeSnapshotRef: corev1.ObjectReference{
-				APIVersion: "snapshot.storage.k8s.io/v1",
-				Kind:       "VolumeSnapshot",
-				Name:       "placeholder-multi-fs",
-				Namespace:  "default",
-			},
-		},
-	}
-
-	// Live source PVCs for resolveShadowMeta (present in cluster).
-	blockMode := corev1.PersistentVolumeBlock
-	blockSC := "csi-multi-block"
-	liveBlockPVC := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: e2eMultiBlockPVC, Namespace: e2eNS},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			StorageClassName: &blockSC,
-			VolumeMode:       &blockMode,
-		},
-	}
-
-	fsMode := corev1.PersistentVolumeFilesystem
-	fsSC := "csi-multi-fs"
-	liveFSPVC := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: e2eMultiFSPVC, Namespace: e2eNS},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			StorageClassName: &fsSC,
-			VolumeMode:       &fsMode,
-		},
-	}
-
-	typed := []client.Object{
-		rootSnap, rootContent,
-		multiDiskContent,
-		realBlockVSC, realFSVSC,
-		liveBlockPVC, liveFSPVC,
-	}
-
-	return fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(typed...).
-		WithObjects(multiDiskSnap).
-		Build()
 }
 
 // TestPipeline_E2E_DeletedPVC verifies that a non-aggregator OwnDataRef node with a
@@ -977,21 +700,19 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-del-disk"},
 		Status: snapshotapi.SnapshotContentStatus{
-			DataRefs: []snapshotapi.SnapshotDataBinding{
-				{
-					TargetUID: "uid-del",
-					Target: snapshotapi.SnapshotSubjectRef{
-						APIVersion: "v1",
-						Kind:       "PersistentVolumeClaim",
-						Namespace:  e2eNS,
-						Name:       e2eDelPVC,
-						UID:        "uid-del",
-					},
-					Artifact: snapshotapi.SnapshotDataArtifactRef{
-						APIVersion: "snapshot.storage.k8s.io/v1",
-						Kind:       "VolumeSnapshotContent",
-						Name:       e2eDelVSC,
-					},
+			DataRef: &snapshotapi.SnapshotDataBinding{
+				TargetUID: "uid-del",
+				Target: snapshotapi.SnapshotSubjectRef{
+					APIVersion: "v1",
+					Kind:       "PersistentVolumeClaim",
+					Namespace:  e2eNS,
+					Name:       e2eDelPVC,
+					UID:        "uid-del",
+				},
+				Artifact: snapshotapi.SnapshotDataArtifactRef{
+					APIVersion: "snapshot.storage.k8s.io/v1",
+					Kind:       "VolumeSnapshotContent",
+					Name:       e2eDelVSC,
 				},
 			},
 		},
@@ -1191,21 +912,19 @@ func buildOrphanLeafFakeClient(t *testing.T) client.Client {
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-agg"},
 		Status: snapshotapi.SnapshotContentStatus{
-			DataRefs: []snapshotapi.SnapshotDataBinding{
-				{
-					TargetUID: "uid-agg-pvc",
-					Target: snapshotapi.SnapshotSubjectRef{
-						APIVersion: "v1",
-						Kind:       "PersistentVolumeClaim",
-						Namespace:  e2eNS,
-						Name:       "pvc-agg",
-						UID:        "uid-agg-pvc",
-					},
-					Artifact: snapshotapi.SnapshotDataArtifactRef{
-						APIVersion: "snapshot.storage.k8s.io/v1",
-						Kind:       "VolumeSnapshotContent",
-						Name:       "vsc-agg",
-					},
+			DataRef: &snapshotapi.SnapshotDataBinding{
+				TargetUID: "uid-agg-pvc",
+				Target: snapshotapi.SnapshotSubjectRef{
+					APIVersion: "v1",
+					Kind:       "PersistentVolumeClaim",
+					Namespace:  e2eNS,
+					Name:       "pvc-agg",
+					UID:        "uid-agg-pvc",
+				},
+				Artifact: snapshotapi.SnapshotDataArtifactRef{
+					APIVersion: "snapshot.storage.k8s.io/v1",
+					Kind:       "VolumeSnapshotContent",
+					Name:       "vsc-agg",
 				},
 			},
 		},

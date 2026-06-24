@@ -72,6 +72,10 @@ func TestSnapshotUnmarshal(t *testing.T) {
 	}
 }
 
+// TestSnapshotContentUnmarshal verifies that the REAL producer JSON key "dataRef"
+// (singular object, Variant A) unmarshals correctly including all extended fields.
+// This test proves the JSON key contract matches state-snapshotter:
+// snapshotcontent_types.go:149-153 (DataRef *SnapshotDataBinding, json:"dataRef").
 func TestSnapshotContentUnmarshal(t *testing.T) {
 	t.Helper()
 
@@ -82,7 +86,7 @@ func TestSnapshotContentUnmarshal(t *testing.T) {
 		"status": {
 			"manifestCheckpointName": "mcp-xyz",
 			"childrenSnapshotContentRefs": [{"name": "sc-child"}],
-			"dataRefs": [{
+			"dataRef": {
 				"targetUID": "uid-1",
 				"target": {
 					"apiVersion": "v1",
@@ -95,8 +99,12 @@ func TestSnapshotContentUnmarshal(t *testing.T) {
 					"apiVersion": "snapshot.storage.k8s.io/v1",
 					"kind": "VolumeSnapshotContent",
 					"name": "vsc-1"
-				}
-			}]
+				},
+				"volumeMode": "Block",
+				"storageClassName": "csi-ceph-rbd",
+				"accessModes": ["ReadWriteOnce"],
+				"size": "10Gi"
+			}
 		}
 	}`
 
@@ -118,14 +126,14 @@ func TestSnapshotContentUnmarshal(t *testing.T) {
 		t.Errorf("child name: got %q", sc.Status.ChildrenSnapshotContentRefs[0].Name)
 	}
 
-	if len(sc.Status.DataRefs) != 1 {
-		t.Fatalf("dataRefs len: got %d, want 1", len(sc.Status.DataRefs))
+	if sc.Status.DataRef == nil {
+		t.Fatal("dataRef must not be nil")
 	}
 
-	dr := sc.Status.DataRefs[0]
+	dr := sc.Status.DataRef
 
 	if dr.TargetUID != "uid-1" {
-		t.Errorf("targetUID: got %q, want %q", dr.TargetUID, "uid-1")
+		t.Errorf("targetUID: got %q, want uid-1", dr.TargetUID)
 	}
 
 	if dr.Target.Kind != "PersistentVolumeClaim" {
@@ -134,6 +142,38 @@ func TestSnapshotContentUnmarshal(t *testing.T) {
 
 	if dr.Artifact.Kind != "VolumeSnapshotContent" {
 		t.Errorf("artifact kind: got %q", dr.Artifact.Kind)
+	}
+
+	if dr.VolumeMode != "Block" {
+		t.Errorf("volumeMode: got %q, want Block", dr.VolumeMode)
+	}
+
+	if dr.StorageClassName != "csi-ceph-rbd" {
+		t.Errorf("storageClassName: got %q, want csi-ceph-rbd", dr.StorageClassName)
+	}
+
+	if len(dr.AccessModes) != 1 || dr.AccessModes[0] != "ReadWriteOnce" {
+		t.Errorf("accessModes: got %v, want [ReadWriteOnce]", dr.AccessModes)
+	}
+
+	if dr.Size != "10Gi" {
+		t.Errorf("size: got %q, want 10Gi", dr.Size)
+	}
+
+	// DataRefList bridge: returns a 0/1 slice.
+	list := sc.DataRefList()
+	if len(list) != 1 {
+		t.Fatalf("DataRefList len: got %d, want 1", len(list))
+	}
+
+	if list[0].TargetUID != "uid-1" {
+		t.Errorf("DataRefList[0].TargetUID: got %q", list[0].TargetUID)
+	}
+
+	// Absent dataRef → nil DataRefList.
+	var empty SnapshotContent
+	if empty.DataRefList() != nil {
+		t.Errorf("DataRefList on nil DataRef: got %v, want nil", empty.DataRefList())
 	}
 }
 
@@ -171,8 +211,9 @@ func TestSnapshotContent_DeepCopyObject_NoAliasing(t *testing.T) {
 	orig := &SnapshotContent{
 		Status: SnapshotContentStatus{
 			ChildrenSnapshotContentRefs: []SnapshotContentChildRef{{Name: "child-a"}},
-			DataRefs: []SnapshotDataBinding{
-				{TargetUID: "uid-1"},
+			DataRef: &SnapshotDataBinding{
+				TargetUID:   "uid-1",
+				AccessModes: []string{"ReadWriteOnce"},
 			},
 			Conditions: []metav1.Condition{
 				{Type: "Ready", Status: "True", Reason: "All"},
@@ -183,15 +224,20 @@ func TestSnapshotContent_DeepCopyObject_NoAliasing(t *testing.T) {
 	cp := orig.DeepCopyObject().(*SnapshotContent)
 
 	cp.Status.ChildrenSnapshotContentRefs[0].Name = "mutated"
-	cp.Status.DataRefs[0].TargetUID = "mutated"
+	cp.Status.DataRef.TargetUID = "mutated"
+	cp.Status.DataRef.AccessModes[0] = "mutated"
 	cp.Status.Conditions[0].Type = "Mutated"
 
 	if orig.Status.ChildrenSnapshotContentRefs[0].Name != "child-a" {
 		t.Errorf("ChildrenSnapshotContentRefs aliased: orig was mutated")
 	}
 
-	if orig.Status.DataRefs[0].TargetUID != "uid-1" {
-		t.Errorf("DataRefs aliased: orig was mutated")
+	if orig.Status.DataRef.TargetUID != "uid-1" {
+		t.Errorf("DataRef.TargetUID aliased: orig was mutated")
+	}
+
+	if orig.Status.DataRef.AccessModes[0] != "ReadWriteOnce" {
+		t.Errorf("DataRef.AccessModes aliased: orig was mutated")
 	}
 
 	if orig.Status.Conditions[0].Type != "Ready" {

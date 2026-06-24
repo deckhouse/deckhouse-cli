@@ -348,25 +348,23 @@ func buildFakeClient(t *testing.T) client.Client {
 	childSnap := makeUnstructuredSnap(childAPIVersion, childKind, testNS, diskSnapName, "sc-disk")
 
 	// Child SnapshotContent: one block DataRef pointing at the source PVC, no manifests.
-	// With the new tree model this DataRef materialises as a VolumeSnapshot child node.
+	// This DataRef materialises disk-snap as a non-aggregator OwnDataRef node.
 	childContent := &snapshotapi.SnapshotContent{
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-disk"},
 		Status: snapshotapi.SnapshotContentStatus{
-			DataRefs: []snapshotapi.SnapshotDataBinding{
-				{
-					TargetUID: "uid-disk",
-					Target: snapshotapi.SnapshotSubjectRef{
-						APIVersion: "v1",
-						Kind:       "PersistentVolumeClaim",
-						Namespace:  testNS,
-						Name:       sourcePVCName,
-					},
-					Artifact: snapshotapi.SnapshotDataArtifactRef{
-						APIVersion: "snapshot.storage.k8s.io/v1",
-						Kind:       "VolumeSnapshotContent",
-						Name:       diskVSCName,
-					},
+			DataRef: &snapshotapi.SnapshotDataBinding{
+				TargetUID: "uid-disk",
+				Target: snapshotapi.SnapshotSubjectRef{
+					APIVersion: "v1",
+					Kind:       "PersistentVolumeClaim",
+					Namespace:  testNS,
+					Name:       sourcePVCName,
+				},
+				Artifact: snapshotapi.SnapshotDataArtifactRef{
+					APIVersion: "snapshot.storage.k8s.io/v1",
+					Kind:       "VolumeSnapshotContent",
+					Name:       diskVSCName,
 				},
 			},
 		},
@@ -528,20 +526,18 @@ func TestPipeline_ShadowMetaFromManifest(t *testing.T) {
 		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
 		ObjectMeta: metav1.ObjectMeta{Name: "sc-disk"},
 		Status: snapshotapi.SnapshotContentStatus{
-			DataRefs: []snapshotapi.SnapshotDataBinding{
-				{
-					TargetUID: "uid-disk",
-					Target: snapshotapi.SnapshotSubjectRef{
-						APIVersion: "v1",
-						Kind:       "PersistentVolumeClaim",
-						Namespace:  testNS,
-						Name:       sourcePVCName,
-					},
-					Artifact: snapshotapi.SnapshotDataArtifactRef{
-						APIVersion: "snapshot.storage.k8s.io/v1",
-						Kind:       "VolumeSnapshotContent",
-						Name:       diskVSCName,
-					},
+			DataRef: &snapshotapi.SnapshotDataBinding{
+				TargetUID: "uid-disk",
+				Target: snapshotapi.SnapshotSubjectRef{
+					APIVersion: "v1",
+					Kind:       "PersistentVolumeClaim",
+					Namespace:  testNS,
+					Name:       sourcePVCName,
+				},
+				Artifact: snapshotapi.SnapshotDataArtifactRef{
+					APIVersion: "snapshot.storage.k8s.io/v1",
+					Kind:       "VolumeSnapshotContent",
+					Name:       diskVSCName,
 				},
 			},
 		},
