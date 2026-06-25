@@ -839,6 +839,114 @@ func TestRun_DryRun_SkipsWait(t *testing.T) {
 	}
 }
 
+// TestRun_Preflight_DryRunFailureAborts verifies that when the implicit dry-run pass
+// rejects an object (Invalid error), Run aborts before any real apply and no object
+// is persisted in the cluster.
+func TestRun_Preflight_DryRunFailureAborts(t *testing.T) {
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+	dyn := newFakeDynamic(readySnapshot())
+
+	// Reject all SSA patches on configmaps, simulating admission failure.
+	dyn.PrependReactor("patch", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		pa, ok := action.(clienttesting.PatchAction)
+		if !ok || pa.GetPatchType() != types.ApplyPatchType {
+			return false, nil, nil
+		}
+
+		return true, nil, kubeerrors.NewInvalid(
+			schema.GroupKind{Kind: "ConfigMap"},
+			"cm-1",
+			field.ErrorList{field.Forbidden(field.NewPath("spec"), "rejected by webhook")},
+		)
+	})
+
+	err := Run(context.Background(), baseConfig(src, dyn))
+	if err == nil {
+		t.Fatal("expected preflight error, got nil")
+	}
+
+	if !contains(err.Error(), "dry-run preflight") {
+		t.Errorf("error %q does not mention 'dry-run preflight'", err.Error())
+	}
+
+	// Nothing must be persisted since the dry-run failed before the real apply.
+	_, getErr := dyn.Resource(cmGVR).Namespace(testNS).Get(context.Background(), "cm-1", metav1.GetOptions{})
+	if !kubeerrors.IsNotFound(getErr) {
+		t.Errorf("expected NotFound after dry-run failure, got %v", getErr)
+	}
+}
+
+// TestRun_Preflight_RealApplyAfterDryRun verifies that when the dry-run pass succeeds,
+// the real apply pass runs exactly once per object, resulting in a persisted object.
+// The SSA patch is intercepted to count calls: dry-run=1 + real=1 = 2 total.
+func TestRun_Preflight_RealApplyAfterDryRun(t *testing.T) {
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+	dyn := newFakeDynamic(readySnapshot())
+
+	var patchCount int
+
+	dyn.PrependReactor("patch", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		pa, ok := action.(clienttesting.PatchAction)
+		if !ok || pa.GetPatchType() != types.ApplyPatchType {
+			return false, nil, nil
+		}
+
+		patchCount++
+
+		return false, nil, nil // let the SSA reactor proceed normally
+	})
+
+	if err := Run(context.Background(), baseConfig(src, dyn)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if patchCount != 2 {
+		t.Errorf("expected 2 SSA patches (1 dry-run + 1 real apply), got %d", patchCount)
+	}
+
+	cm, err := dyn.Resource(cmGVR).Namespace(testNS).Get(context.Background(), "cm-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("ConfigMap not persisted after real apply: %v", err)
+	}
+
+	val, _, _ := unstructured.NestedString(cm.Object, "data", "k")
+	if val != "v" {
+		t.Errorf("ConfigMap data.k: got %q, want %q", val, "v")
+	}
+}
+
+// TestRun_ExplicitDryRun_OnlyOnePass verifies that when Config.DryRun is true, only the
+// single (implicit/dry-run) apply pass runs and the real apply is skipped. Exactly one
+// SSA patch per object is expected.
+func TestRun_ExplicitDryRun_OnlyOnePass(t *testing.T) {
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+	dyn := newFakeDynamic(readySnapshot())
+
+	var patchCount int
+
+	dyn.PrependReactor("patch", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		pa, ok := action.(clienttesting.PatchAction)
+		if !ok || pa.GetPatchType() != types.ApplyPatchType {
+			return false, nil, nil
+		}
+
+		patchCount++
+
+		return false, nil, nil
+	})
+
+	cfg := baseConfig(src, dyn)
+	cfg.DryRun = true
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run with DryRun: %v", err)
+	}
+
+	if patchCount != 1 {
+		t.Errorf("expected 1 SSA patch (dry-run only, no real apply), got %d", patchCount)
+	}
+}
+
 func TestIsNotFoundIntegration(t *testing.T) {
 	// Sanity: the fake dynamic client returns a NotFound recognised by kubeerrors.
 	dyn := newFakeDynamic()
