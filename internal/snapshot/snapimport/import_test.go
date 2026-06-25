@@ -48,6 +48,7 @@ var (
 	snapshotGVR        = schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshots"}
 	contentGVR         = schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents"}
 	volumeSnapshotGVRt = schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
+	demoDiskSnapGVR    = schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots"}
 )
 
 type uploadCall struct {
@@ -124,9 +125,21 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 		snapshotGVR:        "SnapshotList",
 		contentGVR:         "SnapshotContentList",
 		volumeSnapshotGVRt: "VolumeSnapshotList",
+		demoDiskSnapGVR:    "DemoVirtualDiskSnapshotList",
 	}
 
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, objs...)
+}
+
+// testDomainMapper extends testMapper with the DemoVirtualDiskSnapshot GVK so tests that
+// drive domain data leaves can resolve their resource plural via the RESTMapper.
+func testDomainMapper() meta.RESTMapper {
+	m := meta.NewDefaultRESTMapper(nil)
+	m.Add(schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
+
+	return m
 }
 
 const rootSnapshotUID = "root-uid"
@@ -374,6 +387,135 @@ func TestRun_LeafManifestsArrayShape(t *testing.T) {
 
 	if len(items) != 1 || items[0]["kind"] != "PersistentVolumeClaim" {
 		t.Errorf("leaf manifests = %v, want one PersistentVolumeClaim", items)
+	}
+}
+
+// buildDomainDataLeafArchive creates: root Snapshot → DemoVirtualDiskSnapshot with block
+// data and a SourceObjectRef. Returns the root dir.
+func buildDomainDataLeafArchive(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "storage.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+		namespace:  "src",
+	})
+
+	leafDir := childDir(root, "DemoVirtualDiskSnapshot", "dvd-snap-1")
+	writeArchiveNode(t, leafDir, archiveNode{
+		apiVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "DemoVirtualDiskSnapshot",
+		name:       "dvd-snap-1",
+		namespace:  "src",
+		blockData:  []byte("rawbytes"),
+		sourceObjectRef: &archive.SourceObjectRef{
+			APIVersion: "demo.deckhouse.io/v1alpha1",
+			Kind:       "DemoVirtualDisk",
+			Name:       "disk-a",
+		},
+	})
+
+	return root
+}
+
+// TestRun_DomainDataLeaf_EndToEnd verifies that a root Snapshot → domain data leaf
+// (DemoVirtualDiskSnapshot with block data + SourceObjectRef) flows through the full
+// import pipeline: markers are created top-down (root first, then the domain leaf),
+// manifests are uploaded for both nodes, and the domain leaf's volume data is imported.
+func TestRun_DomainDataLeaf_EndToEnd(t *testing.T) {
+	root := buildDomainDataLeafArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Mapper = testDomainMapper()
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Two manifest uploads: domain leaf (post-order = leaf first) then root.
+	if len(up.calls) != 2 {
+		t.Fatalf("expected 2 manifest uploads, got %d", len(up.calls))
+	}
+
+	if up.calls[0].ref.Kind != "DemoVirtualDiskSnapshot" || up.calls[0].ref.Name != "dvd-snap-1" {
+		t.Errorf("first upload = %s/%s, want DemoVirtualDiskSnapshot/dvd-snap-1", up.calls[0].ref.Kind, up.calls[0].ref.Name)
+	}
+
+	if up.calls[1].ref.Kind != "Snapshot" || up.calls[1].ref.Name != "root" {
+		t.Errorf("second upload = %s/%s, want Snapshot/root", up.calls[1].ref.Kind, up.calls[1].ref.Name)
+	}
+
+	// Volume data imported for the domain leaf (importNodeData handles isDomainDataLeaf).
+	if len(vol.ensure) != 1 || vol.ensure[0] != "dvd-snap-1" {
+		t.Errorf("EnsureDataImport calls = %v, want [dvd-snap-1]", vol.ensure)
+	}
+
+	if len(vol.upload) != 1 || vol.upload[0] != "dvd-snap-1" {
+		t.Errorf("UploadVolumeData calls = %v, want [dvd-snap-1]", vol.upload)
+	}
+
+	// The domain leaf import-mode CR must have been created with spec.dataSource.name and
+	// spec.sourceRef set.
+	leafObj, err := dyn.Resource(demoDiskSnapGVR).Namespace(targetNS).Get(context.Background(), "dvd-snap-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("DemoVirtualDiskSnapshot import CR not created: %v", err)
+	}
+
+	dsName, _, _ := unstructured.NestedString(leafObj.Object, "spec", "dataSource", "name")
+	if dsName != "dvd-snap-1" {
+		t.Errorf("spec.dataSource.name = %q, want %q", dsName, "dvd-snap-1")
+	}
+
+	srcKind, _, _ := unstructured.NestedString(leafObj.Object, "spec", "sourceRef", "kind")
+	if srcKind != "DemoVirtualDisk" {
+		t.Errorf("spec.sourceRef.kind = %q, want DemoVirtualDisk", srcKind)
+	}
+
+	// The domain leaf carries a child->parent ownerRef pointing to the root Snapshot.
+	refs := leafObj.GetOwnerReferences()
+	if len(refs) != 1 {
+		t.Fatalf("domain leaf ownerReferences = %d, want 1 (parent Snapshot)", len(refs))
+	}
+
+	ref := refs[0]
+	if ref.Kind != "Snapshot" || ref.Name != "root" {
+		t.Errorf("domain leaf parent ownerRef = %s/%s, want Snapshot/root", ref.Kind, ref.Name)
+	}
+
+	// A domain data leaf is a controller-owned child (unlike CSI VS leaves which are not).
+	if ref.Controller == nil || !*ref.Controller {
+		t.Errorf("domain data leaf parent ownerRef should be controller-owned")
+	}
+}
+
+// TestLeafTargetRef_DomainLeaf verifies that leafTargetRef resolves the group/resource for
+// a domain data leaf via the RESTMapper, using the real producer's group constant.
+func TestLeafTargetRef_DomainLeaf(t *testing.T) {
+	leaf := PlannedNode{
+		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "DemoVirtualDiskSnapshot",
+		Name:       "dvd-snap-1",
+		DataFile:   "/archive/data.bin",
+	}
+
+	group, resource, err := leafTargetRef(leaf, testDomainMapper())
+	if err != nil {
+		t.Fatalf("leafTargetRef: %v", err)
+	}
+
+	if group != "demo.state-snapshotter.deckhouse.io" {
+		t.Errorf("group = %q, want demo.state-snapshotter.deckhouse.io", group)
+	}
+
+	if resource != "demovirtualdisksnapshots" {
+		t.Errorf("resource = %q, want demovirtualdisksnapshots", resource)
 	}
 }
 
