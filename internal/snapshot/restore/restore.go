@@ -34,6 +34,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -58,9 +59,21 @@ const (
 	readyConditionType = "Ready"
 	pvcPhaseBound      = "Bound"
 
+	// volumeSnapshotGroup is the CSI VolumeSnapshot API group. Readiness is
+	// determined by status.readyToUse (bool), not by conditions.
+	volumeSnapshotGroup = "snapshot.storage.k8s.io"
+
 	defaultTimeout      = 10 * time.Minute
 	defaultPollInterval = 2 * time.Second
 )
+
+// leafRef identifies a volume-snapshot leaf referenced by a PVC's spec.dataSourceRef
+// or spec.dataSource (apiGroup + kind + name). Used as a dedup key.
+type leafRef struct {
+	group string
+	kind  string
+	name  string
+}
 
 // Source reads the apply-ready manifest array for a snapshot subtree from the
 // state-snapshotter aggregated API. It is satisfied by *aggapi.Client and stubbed in tests.
@@ -135,6 +148,14 @@ func Run(ctx context.Context, cfg Config) error {
 
 	if len(objs) == 0 {
 		return fmt.Errorf("restore manifests for %s/%s are empty", cfg.Namespace, cfg.Snapshot)
+	}
+
+	// Preflight: verify every PVC data-source leaf exists and is ready before
+	// applying anything. The API server does not validate cross-object existence
+	// of spec.dataSourceRef at admission, so an absent leaf causes a PVC to stay
+	// Pending forever without this check.
+	if err := preflightLeaves(ctx, cfg, objs); err != nil {
+		return err
 	}
 
 	cfg.Log.Info("applying restore manifests",
@@ -235,6 +256,118 @@ func preflight(ctx context.Context, cfg Config) error {
 	}
 
 	return nil
+}
+
+// preflightLeaves verifies that every volume-snapshot leaf referenced by a PVC
+// spec.dataSourceRef or spec.dataSource exists and is ready in cfg.Namespace.
+// All failures are aggregated into a single actionable error so the user can fix
+// them in one pass. This check is always active (read-only; also strengthens dry-run).
+func preflightLeaves(ctx context.Context, cfg Config, objs []unstructured.Unstructured) error {
+	refs := collectLeafRefs(objs)
+	if len(refs) == 0 {
+		return nil
+	}
+
+	var errs []string
+
+	for _, ref := range refs {
+		gvr, namespaced, err := cfg.resourceForGroupKind(ref.group, ref.kind)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s/%s: cannot resolve resource: %v", ref.kind, ref.name, err))
+
+			continue
+		}
+
+		var ri dynamic.ResourceInterface
+		if namespaced {
+			ri = cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace)
+		} else {
+			ri = cfg.Dynamic.Resource(gvr)
+		}
+
+		obj, getErr := ri.Get(ctx, ref.name, metav1.GetOptions{})
+		if kubeerrors.IsNotFound(getErr) {
+			errs = append(errs, fmt.Sprintf("%s/%s: missing", ref.kind, ref.name))
+
+			continue
+		}
+
+		if getErr != nil {
+			errs = append(errs, fmt.Sprintf("%s/%s: get error: %v", ref.kind, ref.name, getErr))
+
+			continue
+		}
+
+		if !isLeafReady(obj, ref) {
+			errs = append(errs, fmt.Sprintf("%s/%s: not ready", ref.kind, ref.name))
+		}
+	}
+
+	if len(errs) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("volume-snapshot leaves not ready: %s", strings.Join(errs, "; "))
+}
+
+// collectLeafRefs scans decoded objects for PVCs and returns the distinct volume-snapshot
+// leaves referenced by spec.dataSourceRef and spec.dataSource. Both fields carry
+// {apiGroup, kind, name}; duplicates are deduplicated by {group, kind, name}.
+func collectLeafRefs(objs []unstructured.Unstructured) []leafRef {
+	seen := make(map[leafRef]struct{})
+	refs := make([]leafRef, 0)
+
+	for i := range objs {
+		obj := &objs[i]
+		if obj.GetKind() != pvcKind {
+			continue
+		}
+
+		for _, fieldPath := range [][]string{
+			{"spec", "dataSourceRef"},
+			{"spec", "dataSource"},
+		} {
+			m, found, _ := unstructured.NestedMap(obj.Object, fieldPath...)
+			if !found || len(m) == 0 {
+				continue
+			}
+
+			group, _, _ := unstructured.NestedString(m, "apiGroup")
+			kind, _, _ := unstructured.NestedString(m, "kind")
+			name, _, _ := unstructured.NestedString(m, "name")
+
+			if kind == "" || name == "" {
+				continue
+			}
+
+			ref := leafRef{group: group, kind: kind, name: name}
+			if _, ok := seen[ref]; !ok {
+				seen[ref] = struct{}{}
+				refs = append(refs, ref)
+			}
+		}
+	}
+
+	return refs
+}
+
+// isLeafReady reports whether a volume-snapshot leaf object is ready to serve as a
+// PVC data source. For CSI VolumeSnapshots (snapshot.storage.k8s.io), readiness is
+// status.readyToUse==true. For domain kinds (VirtualDiskSnapshot, etc.), readiness
+// is either status.phase=="Ready" or a Ready=True condition.
+func isLeafReady(obj *unstructured.Unstructured, ref leafRef) bool {
+	if ref.group == volumeSnapshotGroup {
+		ready, found, _ := unstructured.NestedBool(obj.Object, "status", "readyToUse")
+
+		return found && ready
+	}
+
+	phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
+	if phase == "Ready" {
+		return true
+	}
+
+	return isConditionTrue(obj, readyConditionType)
 }
 
 // applyAll upserts every object in order and returns the refs of restored PVCs.
@@ -393,6 +526,18 @@ func (cfg Config) resourceFor(gvk schema.GroupVersionKind) (schema.GroupVersionR
 	mapping, err := cfg.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	if err != nil {
 		return schema.GroupVersionResource{}, false, fmt.Errorf("resolve resource for %s: %w", gvk.String(), err)
+	}
+
+	return mapping.Resource, mapping.Scope.Name() == meta.RESTScopeNameNamespace, nil
+}
+
+// resourceForGroupKind resolves a GroupKind to its preferred-version resource without
+// requiring a known version. Used by preflightLeaves where only apiGroup+kind are known
+// (spec.dataSourceRef / spec.dataSource do not carry the API version).
+func (cfg Config) resourceForGroupKind(group, kind string) (schema.GroupVersionResource, bool, error) {
+	mapping, err := cfg.Mapper.RESTMapping(schema.GroupKind{Group: group, Kind: kind})
+	if err != nil {
+		return schema.GroupVersionResource{}, false, fmt.Errorf("resolve resource for %s/%s: %w", group, kind, err)
 	}
 
 	return mapping.Resource, mapping.Scope.Name() == meta.RESTScopeNameNamespace, nil
