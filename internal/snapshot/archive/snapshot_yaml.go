@@ -45,6 +45,11 @@ type SnapshotYAML struct {
 	// annotation absent, or parse error). Does not affect ComputeNodeChecksum because
 	// snapshot.yaml is excluded from the integrity digest.
 	SourceName string `json:"sourceName,omitempty"`
+	// SourceObjectRef carries the structured spec.sourceRef from a domain snapshot CR
+	// ({apiVersion,kind,name} of the source object). Absent for core Snapshot nodes and
+	// CSI VolumeSnapshot data leaves. Does not affect ComputeNodeChecksum because
+	// snapshot.yaml is excluded from the integrity digest.
+	SourceObjectRef *SourceObjectRef `json:"sourceObjectRef,omitempty"`
 	// Checksum is the locally-computed node integrity digest.
 	Checksum NodeChecksum `json:"checksum"`
 	// Volumes lists the captured PVC volumes owned by this node.
@@ -59,6 +64,19 @@ type SnapshotYAML struct {
 	// snapshot.yaml is excluded from ComputeNodeChecksum/VerifyNode, so this
 	// field does not affect the integrity digest.
 	Volumes []VolumeInfo `json:"volumes,omitempty"`
+}
+
+// SourceObjectRef is the structured spec.sourceRef from a domain snapshot CR, persisted
+// in snapshot.yaml so the import side can recreate the CR in import mode. The fields
+// mirror the domain CR's spec.sourceRef (apiVersion/kind/name of the source object).
+// Omitted for core Snapshot nodes and CSI VolumeSnapshot data leaves.
+type SourceObjectRef struct {
+	// APIVersion is the apiVersion of the source object (e.g. "demo.deckhouse.io/v1alpha1").
+	APIVersion string `json:"apiVersion"`
+	// Kind is the kind of the source object (e.g. "DemoVirtualDisk").
+	Kind string `json:"kind"`
+	// Name is the metadata.name of the source object.
+	Name string `json:"name"`
 }
 
 // VolumeObjectRef is a reference to a Kubernetes object stored in the volume block
