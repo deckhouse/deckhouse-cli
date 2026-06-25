@@ -115,6 +115,11 @@ type Config struct {
 	Mapper meta.RESTMapper
 	// Log receives progress output.
 	Log *slog.Logger
+
+	// silenceApplyLog suppresses the per-object "would apply"/"applied" log line in
+	// applyObject. Run sets it true on the implicit dry-run preflight config so operators
+	// only see those messages on an explicit --dry-run request; it is never a CLI flag.
+	silenceApplyLog bool
 }
 
 // pvcRef identifies a restored PVC to wait on.
@@ -186,6 +191,9 @@ func Run(ctx context.Context, cfg Config) error {
 	// Any admission failure here aborts before any real apply.
 	dryRunCfg := cfg
 	dryRunCfg.DryRun = true
+	// Silence per-object log for the implicit pass; keep it when the user requested
+	// --dry-run because this is then the only apply pass the user sees output from.
+	dryRunCfg.silenceApplyLog = !cfg.DryRun
 
 	if _, err := applyAll(ctx, dryRunCfg, objs); err != nil {
 		return fmt.Errorf("dry-run preflight: %w", err)
@@ -468,16 +476,18 @@ func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured
 		return "", fmt.Errorf("apply: %w", patchErr)
 	}
 
-	if cfg.DryRun {
-		cfg.Log.Info("would apply",
-			slog.String("kind", obj.GetKind()),
-			slog.String("name", obj.GetName()),
-			slog.String("namespace", ns))
-	} else {
-		cfg.Log.Info("applied",
-			slog.String("kind", obj.GetKind()),
-			slog.String("name", obj.GetName()),
-			slog.String("namespace", ns))
+	if !cfg.silenceApplyLog {
+		if cfg.DryRun {
+			cfg.Log.Info("would apply",
+				slog.String("kind", obj.GetKind()),
+				slog.String("name", obj.GetName()),
+				slog.String("namespace", ns))
+		} else {
+			cfg.Log.Info("applied",
+				slog.String("kind", obj.GetKind()),
+				slog.String("name", obj.GetName()),
+				slog.String("namespace", ns))
+		}
 	}
 
 	return ns, nil
