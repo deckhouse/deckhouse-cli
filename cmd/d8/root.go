@@ -129,7 +129,7 @@ func (r *RootCommand) registerCommands() {
 
 	r.cmd.AddCommand(packagecmd.NewCommand())
 
-	r.cmd.AddCommand(pluginscmd.NewCommand(r.logger.Named("plugins-command")))
+	r.cmd.AddCommand(pluginscmd.NewCommand(r.logger.Named("plugins-command"), []string{commands.DeliveryKitCommandName}))
 
 	r.cmd.AddCommand(selfupdatecmd.NewCommand(r.logger.Named("cli-command")))
 }

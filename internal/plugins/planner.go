@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"os"
 	"slices"
@@ -242,6 +243,12 @@ func (m *Manager) reverseConflictReason(plugin *internal.Plugin) (*unsatisfiable
 // out-of-constraint conditional dependency makes the candidate unsatisfiable (a
 // conditional dependency is not auto-upgraded).
 func (m *Manager) conditionalReason(req internal.PluginRequirement, plan *resolutionPlan) (*unsatisfiableReason, error) {
+	if m.isBuiltinCommand(req.Name) {
+		// Provided by a built-in command: the conditional dependency is satisfied;
+		// its version constraint is not enforced for a built-in.
+		return nil, nil
+	}
+
 	version, present, err := m.effectiveVersion(req.Name, plan)
 	if err != nil {
 		return nil, err
@@ -278,6 +285,16 @@ func (m *Manager) resolveMandatoryDep(
 	depth int,
 	path []string,
 ) (*unsatisfiableReason, error) {
+	if m.isBuiltinCommand(req.Name) {
+		// A built-in command of this name provides the capability: the dependency
+		// is satisfied by presence. A built-in cannot be upgraded, so any version
+		// constraint is not enforced; no plan step, no registry lookup.
+		m.logger.Debug("mandatory dependency satisfied by built-in command",
+			slog.String("plugin_dependency", req.Name))
+
+		return nil, nil
+	}
+
 	if visited[req.Name] {
 		return &unsatisfiableReason{kind: reasonDepCycle, pluginName: req.Name, path: append(slices.Clone(path), req.Name), detail: "dependency cycle"}, nil
 	}

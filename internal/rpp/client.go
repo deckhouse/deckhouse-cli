@@ -37,11 +37,23 @@ const (
 	headerAccept  = "Accept"
 	mediaTypeJSON = "application/json"
 
+	// acceptManifest lists the OCI and Docker manifest/index media types a raw
+	// manifest fetch may return. The proxy passes the upstream manifest through
+	// verbatim, so either an image manifest or a multi-platform index can arrive.
+	acceptManifest = "application/vnd.oci.image.manifest.v1+json," +
+		"application/vnd.oci.image.index.v1+json," +
+		"application/vnd.docker.distribution.manifest.v2+json," +
+		"application/vnd.docker.distribution.manifest.list.v2+json"
+
 	loggerName = "rpp"
 
 	// maxTagsResponseBytes caps the tags JSON read so a misbehaving endpoint cannot
 	// make the client buffer an unbounded response; real tag lists are a few KiB.
 	maxTagsResponseBytes int64 = 4 << 20
+
+	// maxManifestResponseBytes caps the manifest read; real manifests (even with an
+	// embedded base64 contract annotation) are a few KiB.
+	maxManifestResponseBytes int64 = 1 << 20
 
 	// maxBodySnippetBytes bounds how much of an error response body is echoed
 	// into the error message.
@@ -238,6 +250,39 @@ func (c *Client) PullImage(ctx context.Context, ref ImageRef, version string) (i
 	}
 
 	return resp.Body, nil
+}
+
+// GetManifest fetches the raw image manifest for a version without pulling layers.
+// The plugin contract lives as a base64-JSON annotation inside it; the caller reads
+// it from the returned bytes. The manifest is platform-independent (it is the index
+// for a multi-platform image), so no platform is sent.
+func (c *Client) GetManifest(ctx context.Context, image ImageRef, ref string) ([]byte, error) {
+	if err := validateRef(ref); err != nil {
+		return nil, err
+	}
+
+	c.logger.Debug("getting manifest", slog.String("image", image.String()), slog.String("ref", ref))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+image.manifestPath(ref), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build manifest request: %w", err)
+	}
+
+	req.Header.Set(headerAccept, acceptManifest)
+
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("read manifest for %q: %w", image.String(), err)
+	}
+
+	return raw, nil
 }
 
 // do executes the request and, on a non-2xx status, closes the body and maps the

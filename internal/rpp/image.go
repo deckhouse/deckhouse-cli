@@ -40,6 +40,11 @@ const (
 	// imagesPathSegment is the route segment that addresses a single version's
 	// image for download (/v1/images/<image>/images/<version>).
 	imagesPathSegment = "images"
+
+	// manifestsPathSegment is the route segment that returns an image's raw
+	// manifest (/v1/images/<image>/manifests/<ref>). The plugin contract is a
+	// base64-JSON annotation inside that manifest; the CLI reads it from there.
+	manifestsPathSegment = "manifests"
 )
 
 // pluginNamePattern is the OCI repository path-component grammar (lowercase
@@ -52,6 +57,11 @@ var pluginNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`)
 // starting with a separator. A string outside it (e.g. with ?, # or a leading
 // dot) cannot be a real registry tag and must not reach the request URL.
 var tagPattern = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$`)
+
+// digestPattern is the OCI digest grammar (algorithm:hex), e.g. sha256:<64 hex>.
+// The manifest route also accepts a digest ref (used to follow an index to a
+// child manifest), so it must pass validation alongside a tag.
+var digestPattern = regexp.MustCompile(`^[a-z0-9]+:[a-fA-F0-9]{32,}$`)
 
 // ImageRef identifies an image the proxy is allowed to serve over /v1/images:
 // either the deckhouse-cli binary or a single plugin. Construct it through
@@ -97,6 +107,13 @@ func (r ImageRef) imagePath(version string) string {
 	return imagesPathPrefix + r.path + "/" + imagesPathSegment + "/" + url.PathEscape(version)
 }
 
+// manifestPath is the route that returns an image's raw manifest. The ref is
+// path-escaped as defense in depth; after validateRef this is a no-op, but it
+// keeps URL metacharacters out of the route even if validation ever loosens.
+func (r ImageRef) manifestPath(ref string) string {
+	return imagesPathPrefix + r.path + "/" + manifestsPathSegment + "/" + url.PathEscape(ref)
+}
+
 // validateTag rejects strings that cannot be a registry tag, so the proxy route
 // (the final version/ref path segment) cannot be altered by a crafted
 // --version value (slashes, ?, #, leading dots).
@@ -110,4 +127,14 @@ func validateTag(tag string) error {
 	}
 
 	return nil
+}
+
+// validateRef accepts a registry tag or a digest. The manifest route takes either:
+// a version tag from the caller, or a child digest when following an index.
+func validateRef(ref string) error {
+	if tagPattern.MatchString(ref) || digestPattern.MatchString(ref) {
+		return nil
+	}
+
+	return fmt.Errorf("%w: %q is not a valid tag or digest", ErrInvalidImage, ref)
 }

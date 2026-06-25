@@ -19,6 +19,7 @@ limitations under the License.
 //
 //   - GET /v1/images/<image>/tags             - list available versions
 //   - GET /v1/images/<image>/images/<version> - download a version's image
+//   - GET /v1/images/<image>/manifests/<ref>  - fetch an image's raw manifest
 //
 // It lets deckhouse-cli list available versions of itself and its plugins and
 // download their images. All traffic goes to the in-cluster proxy and is

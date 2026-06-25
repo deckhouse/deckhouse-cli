@@ -238,6 +238,14 @@ func (m *Manager) validatePluginRequirementMandatory(plugin *internal.Plugin) (f
 	result := make(failedConstraints)
 
 	for _, pluginRequirement := range plugin.Requirements.Plugins.Mandatory {
+		if m.isBuiltinCommand(pluginRequirement.Name) {
+			m.logger.Debug("mandatory plugin requirement satisfied by built-in command",
+				slog.String("plugin", plugin.Name),
+				slog.String("requirement", pluginRequirement.Name))
+
+			continue
+		}
+
 		installed, err := m.checkInstalled(pluginRequirement.Name)
 		if err != nil {
 			return nil, fmt.Errorf("failed to check if plugin is installed: %w", err)
@@ -284,6 +292,10 @@ func (m *Manager) validatePluginRequirementMandatory(plugin *internal.Plugin) (f
 //   - if the dependency is installed but fails the constraint, return a hard error
 func (m *Manager) validatePluginRequirementConditional(plugin *internal.Plugin) error {
 	for _, pluginRequirement := range plugin.Requirements.Plugins.Conditional {
+		if m.isBuiltinCommand(pluginRequirement.Name) {
+			continue
+		}
+
 		installed, err := m.checkInstalled(pluginRequirement.Name)
 		if err != nil {
 			return fmt.Errorf("failed to check if plugin is installed: %w", err)

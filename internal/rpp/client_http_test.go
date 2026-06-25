@@ -90,6 +90,27 @@ func TestClientPullImage(t *testing.T) {
 	assert.Equal(t, payload, string(got))
 }
 
+func TestClientGetManifest(t *testing.T) {
+	const manifestJSON = `{"annotations":{"contract":"e30="}}`
+
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/v1/images/deckhouse-cli/plugins/foo/manifests/v1.0.0", r.URL.Path)
+		assert.Empty(t, r.URL.Query().Get("platform"), "manifest is platform-independent")
+		assert.Equal(t, acceptManifest, r.Header.Get(headerAccept))
+
+		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		_, _ = io.WriteString(w, manifestJSON)
+	})
+
+	ref, err := PluginImage("foo")
+	require.NoError(t, err)
+
+	raw, err := client.GetManifest(context.Background(), ref, "v1.0.0")
+	require.NoError(t, err)
+	assert.Equal(t, manifestJSON, string(raw))
+}
+
 func TestClientStatusErrorMapping(t *testing.T) {
 	tests := []struct {
 		name    string

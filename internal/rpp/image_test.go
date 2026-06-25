@@ -86,3 +86,19 @@ func TestValidateTag(t *testing.T) {
 		}
 	})
 }
+
+func TestValidateRef(t *testing.T) {
+	t.Run("a tag is accepted", func(t *testing.T) {
+		require.NoError(t, validateRef("v1.2.3"))
+	})
+
+	t.Run("a digest is accepted", func(t *testing.T) {
+		require.NoError(t, validateRef("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"))
+	})
+
+	t.Run("metacharacters are rejected", func(t *testing.T) {
+		for _, ref := range []string{"", "with/slash", "sha256:zzzz", "v1?x=y", "sha256:"} {
+			assert.ErrorIs(t, validateRef(ref), ErrInvalidImage, "ref %q must be rejected", ref)
+		}
+	})
+}

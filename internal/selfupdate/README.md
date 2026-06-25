@@ -112,7 +112,7 @@ Platforms (`rpp_source.go`):
 - releases are published as multi-platform OCI image indexes under plain version
   tags (`v1.2.3`);
 - `ListTags` returns those plain version tags as-is;
-- `ExtractBinary` pulls the plain tag; the client attaches `?platform=<os>/<arch>`
+- `ExtractBinary` pulls the plain tag; the client attaches `?platform=<os>-<arch>`
   (see `internal/rpp`), so the proxy resolves the matching per-platform child
   manifest from the index. The proxy must be recent enough to honor the query -
   see [internal/rpp](../rpp).
