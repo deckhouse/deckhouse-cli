@@ -81,10 +81,12 @@ func isCompressedBlockFile(path string) bool {
 }
 
 // resolveBlockSource yields a seekable, raw (decompressed) block file ready for upload plus
-// its size and a cleanup func. A raw archive file (data.bin) is used in place with a no-op
-// cleanup — avoiding a full second on-disk copy; a compressed file is decompressed into a
-// temp file that cleanup removes.
-func resolveBlockSource(dataFile string) (path string, size int64, cleanup func(), err error) {
+// its size and a cleanup func. tempDir is the directory for the decompressed temp file; pass
+// filepath.Dir(dataFile) to keep it on the same filesystem as the archive (the default when
+// no explicit --temp-dir is given). A raw archive file (data.bin) is used in place with a
+// no-op cleanup — avoiding a full second on-disk copy; a compressed file is decompressed into
+// a temp file that cleanup removes.
+func resolveBlockSource(dataFile, tempDir string) (path string, size int64, cleanup func(), err error) {
 	if !isCompressedBlockFile(dataFile) {
 		info, sErr := os.Stat(dataFile)
 		if sErr != nil {
@@ -94,7 +96,7 @@ func resolveBlockSource(dataFile string) (path string, size int64, cleanup func(
 		return dataFile, info.Size(), func() {}, nil
 	}
 
-	tmpPath, sz, dErr := decompressToTemp(dataFile, os.TempDir())
+	tmpPath, sz, dErr := decompressToTemp(dataFile, tempDir)
 	if dErr != nil {
 		return "", 0, nil, dErr
 	}
