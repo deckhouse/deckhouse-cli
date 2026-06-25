@@ -71,6 +71,14 @@ type Config struct {
 	// PollInterval is the readiness polling cadence.
 	PollInterval time.Duration
 
+	// SelectedNodeKind restricts the import to a single node subtree when non-empty.
+	// After BuildPlan the plan is filtered to the selected node and its descendants.
+	// The selected node becomes the import root for waitRootReady; it must be a core
+	// Snapshot or a CSI VolumeSnapshot data leaf (domain aggregators are rejected).
+	SelectedNodeKind string
+	// SelectedNodeName is the name of the selected node. Required when SelectedNodeKind is set.
+	SelectedNodeName string
+
 	// Uploader posts manifests-and-children-refs-upload (aggregated API).
 	Uploader ManifestUploader
 	// Volumes imports data-leaf volume bytes (DataImport + HTTP upload).
@@ -113,9 +121,31 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("archive %q contains no snapshot nodes", cfg.InputDir)
 	}
 
+	if cfg.SelectedNodeKind != "" {
+		plan, err = filterPlanToSubtree(plan, cfg.SelectedNodeKind, cfg.SelectedNodeName)
+		if err != nil {
+			return fmt.Errorf("filter archive to selected node %s/%s: %w", cfg.SelectedNodeKind, cfg.SelectedNodeName, err)
+		}
+	}
+
 	root := plan[len(plan)-1]
-	if !root.isStructural() {
-		return fmt.Errorf("archive root %s/%s is not a core Snapshot; only core Snapshot trees can be imported", root.Kind, root.Name)
+
+	if cfg.SelectedNodeKind == "" {
+		// Full import: the archive root must be a core Snapshot.
+		if !root.isStructural() {
+			return fmt.Errorf("archive root %s/%s is not a core Snapshot; only core Snapshot trees can be imported", root.Kind, root.Name)
+		}
+	} else {
+		// Subtree import: the selected root must be independently importable (core Snapshot
+		// or CSI VolumeSnapshot data leaf). Domain aggregators expose no client-settable
+		// import marker and must be reconstructed by their domain controller.
+		if !root.isStructural() && !root.isVolumeSnapshotLeaf() {
+			return fmt.Errorf(
+				"selected node %s/%s is a domain aggregator that the CLI cannot import client-side: "+
+					"only core Snapshot subtrees and CSI VolumeSnapshot data leaves can be selected as import root; "+
+					"domain/demo intermediate nodes expose no client-settable import marker",
+				root.Kind, root.Name)
+		}
 	}
 
 	if err := preflight(plan); err != nil {
@@ -477,9 +507,15 @@ func boolPtrEqual(a, b *bool) bool {
 	return *a == *b
 }
 
-// waitRootReady blocks until the root Snapshot is Ready=True and its bound SnapshotContent
-// reports all four legs (ManifestsReady, VolumesReady, ChildrenReady, Ready) True.
+// waitRootReady blocks until the import root is fully materialised:
+//   - core Snapshot: wait for Snapshot Ready=True then its bound SnapshotContent all-legs Ready.
+//   - CSI VolumeSnapshot leaf (single-leaf subtree import): wait for the leaf's bound
+//     SnapshotContent to report all-legs Ready.
 func waitRootReady(ctx context.Context, cfg Config, root PlannedNode) error {
+	if root.isVolumeSnapshotLeaf() {
+		return waitLeafReady(ctx, cfg, root)
+	}
+
 	gvr, err := cfg.snapshotResource()
 	if err != nil {
 		return err
@@ -493,6 +529,40 @@ func waitRootReady(ctx context.Context, cfg Config, root PlannedNode) error {
 	}
 
 	return waitSnapshotContentReady(ctx, cfg, content)
+}
+
+// waitLeafReady waits for a CSI VolumeSnapshot leaf's bound SnapshotContent to become Ready.
+// It first polls the leaf VolumeSnapshot until status.boundSnapshotContentName is populated,
+// then delegates to waitSnapshotContentReady. Used when the import root is a single data leaf.
+func waitLeafReady(ctx context.Context, cfg Config, leaf PlannedNode) error {
+	gvr, err := cfg.volumeSnapshotResource()
+	if err != nil {
+		return err
+	}
+
+	cfg.Log.Info("waiting for leaf VolumeSnapshot to become bound", slog.String("name", leaf.Name))
+
+	deadline := time.Now().Add(cfg.Timeout)
+
+	for {
+		vs, getErr := cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace).Get(ctx, leaf.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return fmt.Errorf("get VolumeSnapshot %s/%s: %w", cfg.Namespace, leaf.Name, getErr)
+		}
+
+		content, _, _ := unstructured.NestedString(vs.Object, "status", "boundSnapshotContentName")
+		if content != "" {
+			return waitSnapshotContentReady(ctx, cfg, content)
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for VolumeSnapshot %s/%s to become bound", cfg.Namespace, leaf.Name)
+		}
+
+		if !sleepCtx(ctx, cfg.PollInterval) {
+			return ctx.Err()
+		}
+	}
 }
 
 // waitSnapshotReady waits for the Snapshot to be Ready=True and returns its bound
@@ -563,6 +633,78 @@ func (cfg Config) snapshotResource() (schema.GroupVersionResource, error) {
 	}
 
 	return mapping.Resource, nil
+}
+
+// volumeSnapshotResource resolves the CSI VolumeSnapshot resource.
+func (cfg Config) volumeSnapshotResource() (schema.GroupVersionResource, error) {
+	mapping, err := cfg.Mapper.RESTMapping(
+		schema.GroupKind{Group: aggapi.VolumeSnapshotGroup, Kind: volumeSnapshotKind},
+		aggapi.VSConnectorVersion)
+	if err != nil {
+		return schema.GroupVersionResource{}, fmt.Errorf("resolve VolumeSnapshot resource: %w", err)
+	}
+
+	return mapping.Resource, nil
+}
+
+// filterPlanToSubtree finds the node with the given kind and name in plan and returns the
+// post-ordered subtree rooted at that node (selected node + all descendants). The plan's
+// relative order is preserved so the result remains in bottom-up (post-order) order.
+func filterPlanToSubtree(plan []PlannedNode, kind, name string) ([]PlannedNode, error) {
+	// Index nodes by their identity key for O(1) child lookup.
+	byKey := make(map[string]PlannedNode, len(plan))
+
+	for _, n := range plan {
+		byKey[nodeKey(n)] = n
+	}
+
+	// Find the selected node (match by kind+name; apiVersion may vary across domains).
+	var selected PlannedNode
+
+	found := false
+
+	for _, n := range plan {
+		if n.Kind == kind && n.Name == name {
+			selected = n
+			found = true
+
+			break
+		}
+	}
+
+	if !found {
+		return nil, fmt.Errorf("node %s/%s not found in archive", kind, name)
+	}
+
+	// BFS from the selected node to collect all descendant keys.
+	inSubtree := make(map[string]struct{})
+	queue := []PlannedNode{selected}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		inSubtree[nodeKey(cur)] = struct{}{}
+
+		for _, c := range cur.Children {
+			key := refKey(c.APIVersion, c.Kind, c.Name)
+			if _, visited := inSubtree[key]; !visited {
+				if child, ok := byKey[key]; ok {
+					queue = append(queue, child)
+				}
+			}
+		}
+	}
+
+	// Filter the plan preserving post-order.
+	filtered := make([]PlannedNode, 0, len(inSubtree))
+
+	for _, n := range plan {
+		if _, ok := inSubtree[nodeKey(n)]; ok {
+			filtered = append(filtered, n)
+		}
+	}
+
+	return filtered, nil
 }
 
 // applyDefaults fills zero-valued optional fields with their defaults.

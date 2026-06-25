@@ -135,3 +135,87 @@ func TestNewCommand_RejectsPositionalArgs(t *testing.T) {
 		t.Fatal("expected error with a positional arg, got nil")
 	}
 }
+
+func TestNewCommand_NodeFlagDefault(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	node, err := cmd.Flags().GetString(flagNode)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagNode, err)
+	}
+
+	if node != "" {
+		t.Fatalf("default --%s: got %q, want empty string", flagNode, node)
+	}
+}
+
+func TestParseNodeFlag(t *testing.T) {
+	t.Helper()
+
+	cases := []struct {
+		input     string
+		wantKind  string
+		wantName  string
+		wantError bool
+	}{
+		{"", "", "", false},
+		{"VolumeSnapshot/pvc-1", "VolumeSnapshot", "pvc-1", false},
+		{"Snapshot/my-snap", "Snapshot", "my-snap", false},
+		{"DemoVirtualMachineSnapshot/vm-abc", "DemoVirtualMachineSnapshot", "vm-abc", false},
+		{"noslash", "", "", true},
+		{"/noKind", "", "", true},
+		{"noName/", "", "", true},
+		{"Kind/extra/slash", "", "", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			kind, name, err := parseNodeFlag(tc.input)
+
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("parseNodeFlag(%q): expected error, got nil", tc.input)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("parseNodeFlag(%q): unexpected error: %v", tc.input, err)
+			}
+
+			if kind != tc.wantKind || name != tc.wantName {
+				t.Errorf("parseNodeFlag(%q) = (%q, %q), want (%q, %q)", tc.input, kind, name, tc.wantKind, tc.wantName)
+			}
+		})
+	}
+}
+
+func TestRun_NodeFlag_InvalidFormat(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	if err := cmd.Flags().Set(flagNamespace, "restored"); err != nil {
+		t.Fatalf("setting %s flag: %v", flagNamespace, err)
+	}
+
+	if err := cmd.Flags().Set(flagInput, t.TempDir()); err != nil {
+		t.Fatalf("setting %s flag: %v", flagInput, err)
+	}
+
+	if err := cmd.Flags().Set(flagNode, "badformat"); err != nil {
+		t.Fatalf("setting %s flag: %v", flagNode, err)
+	}
+
+	err := Run(slog.Default(), cmd, nil)
+	if err == nil {
+		t.Fatal("expected error for invalid --node format, got nil")
+	}
+
+	if !strings.Contains(err.Error(), flagNode) {
+		t.Errorf("expected error to mention %q, got: %v", flagNode, err)
+	}
+}

@@ -508,3 +508,235 @@ func TestAddOwnerRefs_NoOpWhenUnchanged(t *testing.T) {
 		t.Error("addOwnerRefs should be a no-op when the desired ref already matches")
 	}
 }
+
+// buildThreeLevelArchive writes: root Snapshot -> domain child -> VS leaf with block data.
+// Returns the root dir.
+func buildThreeLevelArchive(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "storage.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+		namespace:  "src",
+	})
+
+	domain := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
+	writeArchiveNode(t, domain, archiveNode{
+		apiVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "DemoVirtualMachineSnapshot",
+		name:       "vm-1",
+		namespace:  "src",
+	})
+
+	leaf := childDir(domain, "VolumeSnapshot", "pvc-1")
+	writeArchiveNode(t, leaf, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		namespace:  "src",
+		blockData:  []byte("rawbytes"),
+	})
+
+	return root
+}
+
+// readyImportLeafVS returns a CSI VolumeSnapshot in import mode that the controller has
+// already bound, so waitLeafReady can read its status.boundSnapshotContentName.
+func readyImportLeafVS() *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "snapshot.storage.k8s.io/v1",
+		"kind":       "VolumeSnapshot",
+		"metadata":   map[string]interface{}{"namespace": targetNS, "name": "pvc-1", "uid": "vs-uid"},
+		"spec": map[string]interface{}{
+			"source": map[string]interface{}{"dataImportName": "pvc-1"},
+		},
+		"status": map[string]interface{}{
+			"boundSnapshotContentName": "content-leaf",
+		},
+	}}
+}
+
+// readyLeafContent returns a SnapshotContent (for a single data-leaf import) with all
+// four readiness conditions True.
+func readyLeafContent() *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"kind":       "SnapshotContent",
+		"metadata":   map[string]interface{}{"name": "content-leaf"},
+		"status": map[string]interface{}{
+			"conditions": readyConditions("ManifestsReady", "VolumesReady", "ChildrenReady", "Ready"),
+		},
+	}}
+}
+
+// TestFilterPlanToSubtree_SelectLeaf verifies that filtering to a VolumeSnapshot leaf
+// returns only that leaf in post-order.
+func TestFilterPlanToSubtree_SelectLeaf(t *testing.T) {
+	root := buildThreeLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	filtered, err := filterPlanToSubtree(plan, "VolumeSnapshot", "pvc-1")
+	if err != nil {
+		t.Fatalf("filterPlanToSubtree: %v", err)
+	}
+
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 node in subtree, got %d", len(filtered))
+	}
+
+	if filtered[0].Kind != "VolumeSnapshot" || filtered[0].Name != "pvc-1" {
+		t.Errorf("subtree node = %s/%s, want VolumeSnapshot/pvc-1", filtered[0].Kind, filtered[0].Name)
+	}
+}
+
+// TestFilterPlanToSubtree_SelectDomainSubtree verifies that filtering to the domain node
+// returns [VS leaf, domain node] in post-order (leaf first, domain last).
+func TestFilterPlanToSubtree_SelectDomainSubtree(t *testing.T) {
+	root := buildThreeLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	filtered, err := filterPlanToSubtree(plan, "DemoVirtualMachineSnapshot", "vm-1")
+	if err != nil {
+		t.Fatalf("filterPlanToSubtree: %v", err)
+	}
+
+	if len(filtered) != 2 {
+		t.Fatalf("expected 2 nodes in subtree (leaf + domain), got %d", len(filtered))
+	}
+
+	// Post-order: leaf first, domain last.
+	if filtered[0].Kind != "VolumeSnapshot" || filtered[0].Name != "pvc-1" {
+		t.Errorf("first node = %s/%s, want VolumeSnapshot/pvc-1", filtered[0].Kind, filtered[0].Name)
+	}
+
+	if filtered[1].Kind != "DemoVirtualMachineSnapshot" || filtered[1].Name != "vm-1" {
+		t.Errorf("last node = %s/%s, want DemoVirtualMachineSnapshot/vm-1", filtered[1].Kind, filtered[1].Name)
+	}
+}
+
+// TestFilterPlanToSubtree_SelectRoot verifies that filtering to the root returns the
+// entire plan unchanged.
+func TestFilterPlanToSubtree_SelectRoot(t *testing.T) {
+	root := buildThreeLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	filtered, err := filterPlanToSubtree(plan, "Snapshot", "root")
+	if err != nil {
+		t.Fatalf("filterPlanToSubtree: %v", err)
+	}
+
+	if len(filtered) != len(plan) {
+		t.Errorf("selecting root should return full plan (%d nodes), got %d", len(plan), len(filtered))
+	}
+}
+
+// TestFilterPlanToSubtree_NotFound verifies that a missing kind/name returns an error.
+func TestFilterPlanToSubtree_NotFound(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if _, err := filterPlanToSubtree(plan, "Snapshot", "nonexistent"); err == nil {
+		t.Fatal("expected error for missing node, got nil")
+	}
+}
+
+// TestRun_SelectedNode_AggregatorFails verifies that selecting a domain aggregator node
+// as the import root fails fast before any cluster mutation.
+func TestRun_SelectedNode_AggregatorFails(t *testing.T) {
+	root := buildThreeLevelArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.SelectedNodeKind = "DemoVirtualMachineSnapshot"
+	cfg.SelectedNodeName = "vm-1"
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error selecting a domain aggregator, got nil")
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 {
+		t.Errorf("no cluster mutations should occur on aggregator-selection error: uploads=%d ensures=%d", len(up.calls), len(vol.ensure))
+	}
+}
+
+// TestRun_SelectedNode_SingleLeafWorks verifies that importing a single VolumeSnapshot
+// leaf subtree succeeds: only that leaf is processed and waitLeafReady resolves the
+// bound SnapshotContent to completion.
+func TestRun_SelectedNode_SingleLeafWorks(t *testing.T) {
+	// Single-node archive: the root directory IS the VS leaf.
+	leafDir := t.TempDir()
+	writeArchiveNode(t, leafDir, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		namespace:  "src",
+		blockData:  []byte("rawbytes"),
+	})
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyImportLeafVS(), readyLeafContent())
+
+	cfg := baseConfig(leafDir, up, vol, dyn)
+	cfg.SelectedNodeKind = "VolumeSnapshot"
+	cfg.SelectedNodeName = "pvc-1"
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run with single leaf selected: %v", err)
+	}
+
+	// One manifest upload for the leaf.
+	if len(up.calls) != 1 {
+		t.Errorf("expected 1 manifest upload for single-leaf import, got %d", len(up.calls))
+	}
+
+	// Volume data imported for the leaf.
+	if len(vol.ensure) != 1 || vol.ensure[0] != "pvc-1" {
+		t.Errorf("EnsureDataImport calls = %v, want [pvc-1]", vol.ensure)
+	}
+}
+
+// TestRun_SelectedNode_UnknownNodeFails verifies that selecting a node that does not
+// exist in the archive returns an error.
+func TestRun_SelectedNode_UnknownNodeFails(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	up := &stubUploader{}
+	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+
+	cfg := baseConfig(root, up, &stubVolumes{}, dyn)
+	cfg.SelectedNodeKind = "Snapshot"
+	cfg.SelectedNodeName = "no-such-snapshot"
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error for missing selected node, got nil")
+	}
+
+	if len(up.calls) != 0 {
+		t.Errorf("no uploads should happen when selected node is not found, got %d", len(up.calls))
+	}
+}

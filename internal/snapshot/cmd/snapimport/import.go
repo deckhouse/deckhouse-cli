@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -43,6 +44,7 @@ const (
 
 	flagNamespace = "namespace"
 	flagInput     = "input"
+	flagNode      = "node"
 	flagTTL       = "ttl"
 	flagTimeout   = "timeout"
 
@@ -74,6 +76,10 @@ VolumeSnapshot is bound, which requires its ancestors' manifests to already be p
 After the whole tree is uploaded it waits for the root Snapshot and its bound SnapshotContent
 to become Ready, leaving the namespace ready for 'd8 snapshot restore'.
 
+--node restricts the import to a single node and its descendants. The selected node becomes
+the import root; it must be a core Snapshot or a CSI VolumeSnapshot data leaf. Domain
+intermediate nodes (e.g. DemoVirtualMachineSnapshot) cannot be selected as the import root.
+
 Scope and limitations:
   - Only core Snapshot trees and CSI VolumeSnapshot data leaves can be imported client-side.
     Domain/demo snapshot nodes (e.g. intermediate DemoVirtualMachineSnapshot) expose no
@@ -86,6 +92,9 @@ Scope and limitations:
 		Example: `  # Import the archive in ./out into namespace "restored"
   d8 snapshot import -n restored -i ./out
 
+  # Import only a single VolumeSnapshot data leaf and its subtree
+  d8 snapshot import -n restored -i ./out --node VolumeSnapshot/pvc-1
+
   # Import with a longer DataImport TTL and overall timeout
   d8 snapshot import -n restored -i ./out --ttl 4h --timeout 30m`,
 		Args: cobra.NoArgs,
@@ -96,6 +105,7 @@ Scope and limitations:
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "target namespace to import into (required)")
 	cmd.Flags().StringP(flagInput, "i", "", "root archive directory produced by 'd8 snapshot download' (required)")
+	cmd.Flags().String(flagNode, "", "restrict import to a single node subtree; format '<Kind>/<name>' (e.g. --node VolumeSnapshot/pvc-1)")
 	cmd.Flags().String(flagTTL, defaultImportTTL, "idle TTL for each data-leaf DataImport (e.g. 2h, 30m); must exceed the importer's provisioning and post-upload completion time")
 	cmd.Flags().Duration(flagTimeout, 20*time.Minute, "timeout for per-node readiness/completion waits")
 
@@ -133,6 +143,16 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 	inputDir, err = filepath.Abs(inputDir)
 	if err != nil {
 		return fmt.Errorf("resolving input path: %w", err)
+	}
+
+	nodeFlag, err := cmd.Flags().GetString(flagNode)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagNode, err)
+	}
+
+	selectedKind, selectedName, err := parseNodeFlag(nodeFlag)
+	if err != nil {
+		return fmt.Errorf("invalid --%s %q: %w", flagNode, nodeFlag, err)
 	}
 
 	ttl, err := cmd.Flags().GetString(flagTTL)
@@ -173,15 +193,17 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 	volumes := snapimport.NewClusterVolumeImporter(dynClient, sc, ttl, timeout, 3*time.Second, log)
 
 	cfg := snapimport.Config{
-		Namespace: namespace,
-		InputDir:  inputDir,
-		TTL:       ttl,
-		Timeout:   timeout,
-		Uploader:  aggClient,
-		Volumes:   volumes,
-		Dynamic:   dynClient,
-		Mapper:    kubeClient.RESTMapper(),
-		Log:       log,
+		Namespace:        namespace,
+		InputDir:         inputDir,
+		SelectedNodeKind: selectedKind,
+		SelectedNodeName: selectedName,
+		TTL:              ttl,
+		Timeout:          timeout,
+		Uploader:         aggClient,
+		Volumes:          volumes,
+		Dynamic:          dynClient,
+		Mapper:           kubeClient.RESTMapper(),
+		Log:              log,
 	}
 
 	log.Info("starting snapshot import",
@@ -196,4 +218,35 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 	log.Info("snapshot import complete", slog.String("namespace", namespace))
 
 	return nil
+}
+
+// parseNodeFlag parses a --node flag value "<Kind>/<name>" into its components.
+// An empty string returns empty strings and no error (full-archive import).
+// The value must contain exactly one "/" with a non-empty kind and name on each side.
+func parseNodeFlag(s string) (string, string, error) {
+	if s == "" {
+		return "", "", nil
+	}
+
+	idx := strings.IndexByte(s, '/')
+	if idx < 0 {
+		return "", "", fmt.Errorf("expected format '<Kind>/<name>', got %q: missing '/'", s)
+	}
+
+	kind := s[:idx]
+	name := s[idx+1:]
+
+	if kind == "" {
+		return "", "", fmt.Errorf("kind must not be empty in %q", s)
+	}
+
+	if name == "" {
+		return "", "", fmt.Errorf("name must not be empty in %q", s)
+	}
+
+	if strings.Contains(name, "/") {
+		return "", "", fmt.Errorf("name must not contain '/' in %q; expected exactly one '/'", s)
+	}
+
+	return kind, name, nil
 }
