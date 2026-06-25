@@ -19,6 +19,7 @@ package snapimport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -159,14 +160,15 @@ func Run(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("archive root %s/%s is not a core Snapshot; only core Snapshot trees can be imported", root.Kind, root.Name)
 		}
 	} else {
-		// Subtree import: the selected root must be independently importable (core Snapshot
-		// or CSI VolumeSnapshot data leaf). Domain aggregators expose no client-settable
-		// import marker and must be reconstructed by their domain controller.
-		if !root.isStructural() && !root.isVolumeSnapshotLeaf() {
+		// Subtree import: the selected root must be independently importable — a core
+		// Snapshot, a CSI VolumeSnapshot data leaf, or a domain data leaf. Domain
+		// aggregators expose no client-settable import marker and must be reconstructed
+		// by their domain controller.
+		if root.isDomainAggregator() {
 			return fmt.Errorf(
-				"selected node %s/%s is a domain aggregator that the CLI cannot import client-side: "+
-					"only core Snapshot subtrees and CSI VolumeSnapshot data leaves can be selected as import root; "+
-					"domain/demo intermediate nodes expose no client-settable import marker",
+				"selected node %s/%s is a domain aggregator that cannot be imported client-side: "+
+					"domain aggregators must be reconstructed by their domain controller; "+
+					"select a supported node with --node <Kind>/<name> (e.g. a CSI VolumeSnapshot or domain data leaf)",
 				root.Kind, root.Name)
 		}
 	}
@@ -224,22 +226,91 @@ func Run(ctx context.Context, cfg Config) error {
 	return waitRootReady(ctx, cfg, root)
 }
 
-// preflight rejects, before any cluster mutation, archives the CLI cannot client-drive:
-// unsupported node kinds and VolumeSnapshot data leaves that carry neither block data
-// (data.bin*) nor filesystem data (data.tar). This prevents leaving orphaned import CRs
-// / DataImports behind when a later node would fail.
+// preflight rejects, before any cluster mutation, archives the CLI cannot client-drive.
+// It classifies each node and emits ONE actionable error that lists every unsupported
+// domain aggregator and every data leaf blocked by an aggregator ancestor, with a
+// --node suggestion for importing supported subtrees directly.
+//
+// VS data leaves missing their volume data file are also rejected here.
 func preflight(plan []PlannedNode) error {
 	for _, node := range plan {
-		if !node.supported() {
-			return unsupportedNodeError(node)
-		}
-
 		if node.isVolumeSnapshotLeaf() && !node.HasBlockData() && !node.FilesystemData {
 			return fmt.Errorf("data leaf %s/%s has no volume data file (data.bin or data.tar) in the archive", node.Kind, node.Name)
 		}
 	}
 
-	return nil
+	parents := buildParentIndex(plan)
+
+	var aggNames []string
+	var blockedDescs []string
+
+	for _, node := range plan {
+		if node.isDomainAggregator() {
+			aggNames = append(aggNames, fmt.Sprintf("%s/%s", node.Kind, node.Name))
+
+			continue
+		}
+
+		if node.isDomainDataLeaf() {
+			if blocker := aggregatorAncestor(plan, parents, node); blocker != nil {
+				blockedDescs = append(blockedDescs, fmt.Sprintf(
+					"%s/%s (blocked by aggregator %s/%s; use --node %s/%s to import it directly)",
+					node.Kind, node.Name, blocker.Kind, blocker.Name, node.Kind, node.Name))
+			}
+		}
+	}
+
+	if len(aggNames) == 0 && len(blockedDescs) == 0 {
+		return nil
+	}
+
+	return aggregatorPreflightError(aggNames, blockedDescs)
+}
+
+// aggregatorPreflightError builds the single actionable error for an archive that contains
+// domain aggregators and/or data leaves blocked by them.
+func aggregatorPreflightError(aggNames, blockedDescs []string) error {
+	var b strings.Builder
+
+	if len(aggNames) > 0 {
+		fmt.Fprintf(&b, "%d domain aggregator node(s) cannot be imported client-side (%s); "+
+			"domain aggregators must be reconstructed by their domain controller (server-side import)",
+			len(aggNames), strings.Join(aggNames, ", "))
+	}
+
+	if len(blockedDescs) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("; ")
+		}
+
+		fmt.Fprintf(&b, "%d data leaf(s) blocked by aggregator ancestor(s): %s",
+			len(blockedDescs), strings.Join(blockedDescs, "; "))
+	}
+
+	b.WriteString("; use --node <Kind>/<name> to select a supported subtree for import")
+
+	return errors.New(b.String())
+}
+
+// aggregatorAncestor walks the parent chain of node and returns the first domain
+// aggregator ancestor, or nil when all ancestors are structural or data leaves.
+func aggregatorAncestor(plan []PlannedNode, parents map[string]int, node PlannedNode) *PlannedNode {
+	key := nodeKey(node)
+
+	for {
+		pi, ok := parents[key]
+		if !ok {
+			return nil
+		}
+
+		parent := &plan[pi]
+
+		if parent.isDomainAggregator() {
+			return parent
+		}
+
+		key = nodeKey(*parent)
+	}
 }
 
 // preflightNamespace checks, before any cluster mutation, that the target namespace
@@ -612,9 +683,15 @@ func boolPtrEqual(a, b *bool) bool {
 //   - core Snapshot: wait for Snapshot Ready=True then its bound SnapshotContent all-legs Ready.
 //   - CSI VolumeSnapshot leaf (single-leaf subtree import): wait for the leaf's bound
 //     SnapshotContent to report all-legs Ready.
+//   - domain data leaf: wait for the leaf's bound SnapshotContent to report all-legs Ready
+//     (uses the domain leaf's own GVR resolved via cfg.Mapper).
 func waitRootReady(ctx context.Context, cfg Config, root PlannedNode) error {
 	if root.isVolumeSnapshotLeaf() {
 		return waitLeafReady(ctx, cfg, root)
+	}
+
+	if root.isDomainDataLeaf() {
+		return waitDomainLeafReady(ctx, cfg, root)
 	}
 
 	gvr, err := cfg.snapshotResource()
@@ -664,6 +741,57 @@ func waitLeafReady(ctx context.Context, cfg Config, leaf PlannedNode) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// waitDomainLeafReady waits for a domain data leaf's bound SnapshotContent to become Ready.
+// It resolves the leaf's GVR via cfg.Mapper, polls the leaf until
+// status.boundSnapshotContentName is populated, then delegates to waitSnapshotContentReady.
+func waitDomainLeafReady(ctx context.Context, cfg Config, leaf PlannedNode) error {
+	gvr, err := cfg.domainLeafResource(leaf)
+	if err != nil {
+		return err
+	}
+
+	cfg.Log.Info("waiting for domain data leaf to become bound",
+		slog.String("kind", leaf.Kind),
+		slog.String("name", leaf.Name))
+
+	deadline := time.Now().Add(cfg.Timeout)
+
+	for {
+		obj, getErr := cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace).Get(ctx, leaf.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return fmt.Errorf("get %s %s/%s: %w", leaf.Kind, cfg.Namespace, leaf.Name, getErr)
+		}
+
+		content, _, _ := unstructured.NestedString(obj.Object, "status", "boundSnapshotContentName")
+		if content != "" {
+			return waitSnapshotContentReady(ctx, cfg, content)
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for %s %s/%s to become bound", leaf.Kind, cfg.Namespace, leaf.Name)
+		}
+
+		if !sleepCtx(ctx, cfg.PollInterval) {
+			return ctx.Err()
+		}
+	}
+}
+
+// domainLeafResource resolves the namespaced GVR for a domain data leaf using cfg.Mapper.
+func (cfg Config) domainLeafResource(leaf PlannedNode) (schema.GroupVersionResource, error) {
+	gv, err := schema.ParseGroupVersion(leaf.APIVersion)
+	if err != nil {
+		return schema.GroupVersionResource{}, fmt.Errorf("parse apiVersion %q for domain leaf %s/%s: %w", leaf.APIVersion, leaf.Kind, leaf.Name, err)
+	}
+
+	mapping, err := cfg.Mapper.RESTMapping(schema.GroupKind{Group: gv.Group, Kind: leaf.Kind}, gv.Version)
+	if err != nil {
+		return schema.GroupVersionResource{}, fmt.Errorf("resolve resource for domain leaf %s/%s: %w", leaf.Kind, leaf.Name, err)
+	}
+
+	return mapping.Resource, nil
 }
 
 // waitSnapshotReady waits for the Snapshot to be Ready=True and returns its bound

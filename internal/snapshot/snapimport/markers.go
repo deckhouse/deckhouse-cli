@@ -44,11 +44,19 @@ func (n PlannedNode) isVolumeSnapshotLeaf() bool {
 
 // supported reports whether the CLI can client-drive the import of this node kind.
 // Core Snapshot trees, CSI VolumeSnapshot data leaves, and domain data leaves (e.g.
-// DemoVirtualDiskSnapshot with volume data) are supported. Intermediate domain aggregator
-// nodes that carry no volume data (e.g. DemoVirtualMachineSnapshot) are not: they expose
-// no client-settable import marker and must be reconstructed by their domain controller.
+// DemoVirtualDiskSnapshot with volume data) are supported. Domain aggregator nodes
+// (e.g. DemoVirtualMachineSnapshot with no own volume data) are not: they require a
+// server-side import path and cannot be imported client-side.
 func (n PlannedNode) supported() bool {
 	return n.isStructural() || n.isVolumeSnapshotLeaf() || n.isDomainDataLeaf()
+}
+
+// isDomainAggregator reports whether the node is a domain aggregator: a domain-kind
+// snapshot that carries no own volume data (only child snapshot refs). Domain aggregators
+// cannot be imported client-side — they require the server's genericbinder import path
+// to materialise a parent SnapshotContent, which is a server-side-only operation.
+func (n PlannedNode) isDomainAggregator() bool {
+	return !n.isStructural() && !n.isVolumeSnapshotLeaf() && !n.isDomainDataLeaf()
 }
 
 // importMarkerCR builds the minimal import-mode CR the server requires to exist before
@@ -114,11 +122,11 @@ func importMarkerCR(node PlannedNode, namespace, dataImportName string) (*unstru
 	return obj, nil
 }
 
-// unsupportedNodeError returns a clear, actionable error for node kinds the CLI cannot
-// client-drive during import.
+// unsupportedNodeError returns a clear, actionable error for domain aggregator nodes the
+// CLI cannot client-drive during import. Called from importMarkerCR default case.
 func unsupportedNodeError(node PlannedNode) error {
-	return fmt.Errorf("import of %s/%s is not supported by this CLI: only core Snapshot trees and "+
-		"CSI VolumeSnapshot data leaves can be imported client-side; domain/demo snapshot nodes "+
-		"(e.g. intermediate DemoVirtualMachineSnapshot) expose no client-settable import marker and "+
-		"must be reconstructed by their domain controller", node.Kind, node.Name)
+	return fmt.Errorf("import of %s/%s is not supported by this CLI: "+
+		"domain aggregator nodes (e.g. intermediate DemoVirtualMachineSnapshot) "+
+		"require a server-side import path and cannot be imported client-side; "+
+		"use --node <Kind>/<name> to import a supported subtree", node.Kind, node.Name)
 }

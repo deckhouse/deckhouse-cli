@@ -82,13 +82,18 @@ After the whole tree is uploaded it waits for the root Snapshot and its bound Sn
 to become Ready, leaving the namespace ready for 'd8 snapshot restore'.
 
 --node restricts the import to a single node and its descendants. The selected node becomes
-the import root; it must be a core Snapshot or a CSI VolumeSnapshot data leaf. Domain
-intermediate nodes (e.g. DemoVirtualMachineSnapshot) cannot be selected as the import root.
+the import root; it must be a core Snapshot, a CSI VolumeSnapshot data leaf, or a domain
+data leaf (e.g. DemoVirtualDiskSnapshot). Domain aggregator nodes (e.g.
+DemoVirtualMachineSnapshot) cannot be selected as the import root.
 
 Scope and limitations:
-  - Only core Snapshot trees and CSI VolumeSnapshot data leaves can be imported client-side.
-    Domain/demo snapshot nodes (e.g. intermediate DemoVirtualMachineSnapshot) expose no
-    client-settable import marker and must be reconstructed by their domain controller.
+  - Core Snapshot trees, CSI VolumeSnapshot data leaves, and domain data leaves (e.g.
+    DemoVirtualDiskSnapshot with volume data) can be imported client-side.
+  - Full domain aggregator trees (e.g. a DemoVirtualMachineSnapshot subtree that contains
+    child DemoVirtualDiskSnapshot nodes) require a server-side import path: the domain
+    controller must reconstruct the aggregator from its children's SnapshotContents, which
+    is not a client-drivable operation. To import an individual disk snapshot from such a
+    tree, use --node <DomainDataLeafKind>/<name> (e.g. --node DemoVirtualDiskSnapshot/dvd-1).
   - Both block-volume and filesystem-volume data leaves are supported.
   - Importing requires RBAC to create DataImport (storage-volume-data-manager) and to call
     the manifests-and-children-refs-upload subresource (e.g. an admin kubeconfig); the

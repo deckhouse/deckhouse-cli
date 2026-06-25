@@ -1231,3 +1231,111 @@ func TestRun_AllowExisting_ProceedsWithWarning(t *testing.T) {
 		t.Error("expected at least one warning log from preflightNamespace, got none")
 	}
 }
+
+// buildAggregatorWithDomainLeafArchive creates a three-level archive:
+//
+//	root Snapshot → DemoVirtualMachineSnapshot/vm-1 (aggregator, no volume data)
+//	             → DemoVirtualDiskSnapshot/dvd-1 (domain data leaf, block data + SourceObjectRef)
+func buildAggregatorWithDomainLeafArchive(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "storage.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+		namespace:  "src",
+	})
+
+	aggDir := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
+	writeArchiveNode(t, aggDir, archiveNode{
+		apiVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "DemoVirtualMachineSnapshot",
+		name:       "vm-1",
+		namespace:  "src",
+	})
+
+	leafDir := childDir(aggDir, "DemoVirtualDiskSnapshot", "dvd-1")
+	writeArchiveNode(t, leafDir, archiveNode{
+		apiVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "DemoVirtualDiskSnapshot",
+		name:       "dvd-1",
+		namespace:  "src",
+		blockData:  []byte("rawbytes"),
+		sourceObjectRef: &archive.SourceObjectRef{
+			APIVersion: "demo.deckhouse.io/v1alpha1",
+			Kind:       "DemoVirtualDisk",
+			Name:       "disk-a",
+		},
+	})
+
+	return root
+}
+
+// TestPreflight_AggregatorBlocksDataLeaf verifies that a plan containing a domain aggregator
+// (DemoVirtualMachineSnapshot) is rejected by preflight with ONE actionable error that:
+//   - names the aggregator as unsupported
+//   - names the blocked data leaf and its blocking aggregator
+//   - mentions --node for importing a supported subtree
+func TestPreflight_AggregatorBlocksDataLeaf(t *testing.T) {
+	archiveRoot := buildAggregatorWithDomainLeafArchive(t)
+
+	plan, err := BuildPlan(archiveRoot)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	preflightErr := preflight(plan)
+	if preflightErr == nil {
+		t.Fatal("expected preflight error for domain aggregator, got nil")
+	}
+
+	msg := preflightErr.Error()
+
+	if !strings.Contains(msg, "DemoVirtualMachineSnapshot/vm-1") {
+		t.Errorf("preflight error should name the unsupported aggregator DemoVirtualMachineSnapshot/vm-1; got: %s", msg)
+	}
+
+	if !strings.Contains(msg, "DemoVirtualDiskSnapshot/dvd-1") {
+		t.Errorf("preflight error should name the blocked data leaf DemoVirtualDiskSnapshot/dvd-1; got: %s", msg)
+	}
+
+	if !strings.Contains(msg, "blocked by aggregator") {
+		t.Errorf("preflight error should mention 'blocked by aggregator'; got: %s", msg)
+	}
+
+	if !strings.Contains(msg, "--node") {
+		t.Errorf("preflight error should reference --node flag; got: %s", msg)
+	}
+}
+
+// TestPreflight_DomainDataLeafDirectlyUnderRootPasses verifies that a plan with a domain data
+// leaf directly under the root Snapshot (no aggregator ancestor) passes preflight.
+func TestPreflight_DomainDataLeafDirectlyUnderRootPasses(t *testing.T) {
+	archiveRoot := buildDomainDataLeafArchive(t)
+
+	plan, err := BuildPlan(archiveRoot)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if err := preflight(plan); err != nil {
+		t.Errorf("expected preflight to pass for domain data leaf under root, got: %v", err)
+	}
+}
+
+// TestPreflight_VSLeafPasses verifies that a plan with a CSI VolumeSnapshot data leaf
+// directly under the root Snapshot passes preflight.
+func TestPreflight_VSLeafPasses(t *testing.T) {
+	archiveRoot := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(archiveRoot)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if err := preflight(plan); err != nil {
+		t.Errorf("expected preflight to pass for VS leaf under root, got: %v", err)
+	}
+}
