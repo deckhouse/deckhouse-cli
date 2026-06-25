@@ -474,6 +474,159 @@ func TestImportFSFromTar_SkipsNonRegularEntries(t *testing.T) {
 	}
 }
 
+func TestPutFile_EmptyFile_CreatesViaSinglePUT(t *testing.T) {
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "empty.txt")
+
+	if err := os.WriteFile(localPath, []byte{}, 0o644); err != nil {
+		t.Fatalf("write empty local file: %v", err)
+	}
+
+	putCount := 0
+
+	var capturedHeaders http.Header
+
+	modTime := time.Date(2026, 3, 1, 8, 0, 0, 0, time.UTC)
+	attrs := fileAttrs{Perm: 0o644, UID: 500, GID: 500, ModTime: modTime}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusNotFound)
+
+			return
+		}
+
+		putCount++
+		capturedHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "empty.txt", localPath, attrs); err != nil {
+		t.Fatalf("putFile: %v", err)
+	}
+
+	if putCount != 1 {
+		t.Fatalf("expected exactly 1 PUT for a 0-byte file, got %d", putCount)
+	}
+
+	if got := capturedHeaders.Get("X-Content-Length"); got != "0" {
+		t.Errorf("X-Content-Length = %q, want 0", got)
+	}
+
+	if got := capturedHeaders.Get("X-Offset"); got != "0" {
+		t.Errorf("X-Offset = %q, want 0", got)
+	}
+
+	required := []string{"X-Attribute-Permissions", "X-Attribute-Uid", "X-Attribute-Gid"}
+	for _, h := range required {
+		if capturedHeaders.Get(h) == "" {
+			t.Errorf("missing required header %q on empty-file PUT", h)
+		}
+	}
+}
+
+func TestPutFile_EmptyFile_AlreadyExists_NoPUT(t *testing.T) {
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "empty.txt")
+
+	if err := os.WriteFile(localPath, []byte{}, 0o644); err != nil {
+		t.Fatalf("write empty local file: %v", err)
+	}
+
+	putCalled := false
+
+	attrs := fileAttrs{Perm: 0o644, UID: 0, GID: 0, ModTime: time.Now()}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+
+		if r.Method == http.MethodHead {
+			// HEAD 200 with no X-Next-Offset → final file already exists.
+			w.WriteHeader(http.StatusOK)
+
+			return
+		}
+
+		putCalled = true
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "empty.txt", localPath, attrs); err != nil {
+		t.Fatalf("putFile: %v", err)
+	}
+
+	if putCalled {
+		t.Error("PUT must not be issued when HEAD indicates the final file already exists (0-byte file)")
+	}
+}
+
+func TestImportFSFromTar_EmptyFileIsUploaded(t *testing.T) {
+	modTime := time.Date(2026, 2, 10, 12, 0, 0, 0, time.UTC)
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	addTarEntry(t, tw, "empty.txt", []byte{}, 0o644, 10, 20, modTime)
+	addTarEntry(t, tw, "nonempty.txt", []byte("data"), 0o644, 10, 20, modTime)
+	_ = tw.Close()
+
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "data.tar")
+
+	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	cap := &fsCapture{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusNotFound)
+
+			return
+		}
+
+		body, _ := io.ReadAll(r.Body)
+		relPath := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
+		cap.record(relPath, body, r.Header.Clone())
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger()); err != nil {
+		t.Fatalf("importFSFromTar: %v", err)
+	}
+
+	emptyUpload, ok := cap.find("empty.txt")
+	if !ok {
+		t.Fatal("empty.txt was not uploaded (zero-byte file silently dropped)")
+	}
+
+	if len(emptyUpload.body) != 0 {
+		t.Errorf("empty.txt body = %d bytes, want 0", len(emptyUpload.body))
+	}
+
+	if got := emptyUpload.headers.Get("X-Content-Length"); got != "0" {
+		t.Errorf("empty.txt X-Content-Length = %q, want 0", got)
+	}
+
+	if _, ok := cap.find("nonempty.txt"); !ok {
+		t.Fatal("nonempty.txt not uploaded")
+	}
+
+	cap.mu.Lock()
+	total := len(cap.uploads)
+	cap.mu.Unlock()
+
+	if total != 2 {
+		t.Errorf("expected 2 uploads, got %d", total)
+	}
+}
+
 func TestPutFile_FinishedPostUsesSharedEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	localPath := filepath.Join(dir, "file.txt")
