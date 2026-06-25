@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -92,6 +93,11 @@ type Config struct {
 	// may decompress a block volume into a temporary file, so the worst-case peak
 	// temporary disk usage is Workers × (size of the largest decompressed volume).
 	Workers int
+	// AllowExisting, when true, downgrades the namespace preflight conflict check to a
+	// warning instead of an error. Import-mode markers from a prior run of this import
+	// are never treated as conflicts regardless of this flag. When false (default), the
+	// run aborts before any cluster mutation if conflicting non-import-mode objects exist.
+	AllowExisting bool
 	// Mapper resolves node GVKs to resources.
 	Mapper meta.RESTMapper
 	// Log receives progress output.
@@ -162,6 +168,10 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
+	if err := preflightNamespace(ctx, cfg, plan); err != nil {
+		return err
+	}
+
 	cfg.Log.Info("importing snapshot archive",
 		slog.String("namespace", cfg.Namespace),
 		slog.String("input", cfg.InputDir),
@@ -228,6 +238,69 @@ func preflight(plan []PlannedNode) error {
 	}
 
 	return nil
+}
+
+// preflightNamespace checks, before any cluster mutation, that the target namespace
+// contains no foreign (non-import-mode) objects sharing a name with a planned node.
+// Pre-existing import-mode markers from a prior run of this import are never conflicts.
+// Conflicts are aggregated into a single actionable error. With cfg.AllowExisting true,
+// conflicts are downgraded to a warning; reconcileExistingMarker protection is unaffected.
+func preflightNamespace(ctx context.Context, cfg Config, plan []PlannedNode) error {
+	var conflicts []string
+
+	for _, node := range plan {
+		gv, parseErr := schema.ParseGroupVersion(node.APIVersion)
+		if parseErr != nil {
+			return fmt.Errorf("parse apiVersion %q for %s/%s: %w", node.APIVersion, node.Kind, node.Name, parseErr)
+		}
+
+		gvk := gv.WithKind(node.Kind)
+
+		mapping, mapErr := cfg.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		if mapErr != nil {
+			return fmt.Errorf("resolve resource for %s: %w", gvk.String(), mapErr)
+		}
+
+		obj, getErr := cfg.resourceInterface(mapping).Get(ctx, node.Name, metav1.GetOptions{})
+		if kubeerrors.IsNotFound(getErr) {
+			continue
+		}
+
+		if getErr != nil {
+			return fmt.Errorf("checking namespace for %s/%s: %w", node.Kind, node.Name, getErr)
+		}
+
+		if !isImportModeMarker(obj) {
+			conflicts = append(conflicts, fmt.Sprintf("%s %s", node.Kind, node.Name))
+		}
+	}
+
+	if len(conflicts) == 0 {
+		return nil
+	}
+
+	if cfg.AllowExisting {
+		cfg.Log.Warn("namespace preflight: conflicting objects in target namespace; proceeding due to --allow-existing",
+			slog.String("namespace", cfg.Namespace),
+			slog.String("conflicts", strings.Join(conflicts, ", ")))
+
+		return nil
+	}
+
+	return fmt.Errorf("target namespace %q contains %d object(s) not in import mode; "+
+		"import into a fresh namespace or use --allow-existing to skip this check: %s",
+		cfg.Namespace, len(conflicts), strings.Join(conflicts, ", "))
+}
+
+// resourceInterface returns the dynamic resource interface scoped for the given REST
+// mapping: namespace-scoped resources are narrowed to cfg.Namespace; cluster-scoped
+// resources use the namespaceable interface directly (which implements ResourceInterface).
+func (cfg Config) resourceInterface(mapping *meta.RESTMapping) dynamic.ResourceInterface {
+	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+		return cfg.Dynamic.Resource(mapping.Resource).Namespace(cfg.Namespace)
+	}
+
+	return cfg.Dynamic.Resource(mapping.Resource)
 }
 
 // createMarkers creates every import-mode CR top-down (reverse post-order = parents before
