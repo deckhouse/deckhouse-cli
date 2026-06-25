@@ -45,8 +45,11 @@ const (
 	flagNamespace = "namespace"
 	flagInput     = "input"
 	flagNode      = "node"
+	flagWorkers   = "workers"
 	flagTTL       = "ttl"
 	flagTimeout   = "timeout"
+
+	defaultImportWorkers = 4
 
 	// defaultImportTTL is the default per-DataImport TTL. The DataImport TTL is an idle
 	// timer (it counts down only while no bytes are being written), so it must comfortably
@@ -106,6 +109,7 @@ Scope and limitations:
 	cmd.Flags().StringP(flagNamespace, "n", "", "target namespace to import into (required)")
 	cmd.Flags().StringP(flagInput, "i", "", "root archive directory produced by 'd8 snapshot download' (required)")
 	cmd.Flags().String(flagNode, "", "restrict import to a single node subtree; format '<Kind>/<name>' (e.g. --node VolumeSnapshot/pvc-1)")
+	cmd.Flags().Int(flagWorkers, defaultImportWorkers, "maximum number of data-leaf volume uploads to run in parallel (each worker may decompress a block volume to a temp file)")
 	cmd.Flags().String(flagTTL, defaultImportTTL, "idle TTL for each data-leaf DataImport (e.g. 2h, 30m); must exceed the importer's provisioning and post-upload completion time")
 	cmd.Flags().Duration(flagTimeout, 20*time.Minute, "timeout for per-node readiness/completion waits")
 
@@ -155,6 +159,11 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("invalid --%s %q: %w", flagNode, nodeFlag, err)
 	}
 
+	workers, err := cmd.Flags().GetInt(flagWorkers)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagWorkers, err)
+	}
+
 	ttl, err := cmd.Flags().GetString(flagTTL)
 	if err != nil {
 		return fmt.Errorf("reading --%s flag: %w", flagTTL, err)
@@ -197,6 +206,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		InputDir:         inputDir,
 		SelectedNodeKind: selectedKind,
 		SelectedNodeName: selectedName,
+		Workers:          workers,
 		TTL:              ttl,
 		Timeout:          timeout,
 		Uploader:         aggClient,

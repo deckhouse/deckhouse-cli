@@ -19,10 +19,14 @@ package snapimport
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -155,7 +159,7 @@ func readyContent() *unstructured.Unstructured {
 	}}
 }
 
-func baseConfig(input string, up *stubUploader, vol *stubVolumes, dyn *dynamicfake.FakeDynamicClient) Config {
+func baseConfig(input string, up *stubUploader, vol VolumeImporter, dyn *dynamicfake.FakeDynamicClient) Config {
 	return Config{
 		Namespace:    targetNS,
 		InputDir:     input,
@@ -738,5 +742,177 @@ func TestRun_SelectedNode_UnknownNodeFails(t *testing.T) {
 
 	if len(up.calls) != 0 {
 		t.Errorf("no uploads should happen when selected node is not found, got %d", len(up.calls))
+	}
+}
+
+// buildMultiLeafArchive creates a root Snapshot with n CSI VolumeSnapshot leaves, each
+// carrying block data. Returns the root dir and the leaf names (leaf-0 … leaf-(n-1)).
+func buildMultiLeafArchive(t *testing.T, n int) (string, []string) {
+	t.Helper()
+
+	root := t.TempDir()
+
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "storage.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+		namespace:  "src",
+	})
+
+	names := make([]string, 0, n)
+
+	for i := range n {
+		name := fmt.Sprintf("leaf-%d", i)
+		names = append(names, name)
+
+		leaf := childDir(root, "VolumeSnapshot", name)
+		writeArchiveNode(t, leaf, archiveNode{
+			apiVersion: "snapshot.storage.k8s.io/v1",
+			kind:       "VolumeSnapshot",
+			name:       name,
+			namespace:  "src",
+			blockData:  []byte("rawbytes"),
+		})
+	}
+
+	return root, names
+}
+
+// concStubVolumes tracks the peak concurrency of UploadVolumeData calls so tests can
+// assert that errgroup.SetLimit(Workers) is honoured.
+type concStubVolumes struct {
+	inflight atomic.Int64
+	maxSeen  atomic.Int64
+	mu       sync.Mutex
+	imported []string
+}
+
+func (s *concStubVolumes) DataImportName(leaf PlannedNode) string { return leaf.Name }
+
+func (s *concStubVolumes) EnsureDataImport(_ context.Context, leaf PlannedNode, _ string) (string, error) {
+	return leaf.Name, nil
+}
+
+func (s *concStubVolumes) UploadVolumeData(ctx context.Context, leaf PlannedNode, _, _ string) error {
+	cur := s.inflight.Add(1)
+	defer s.inflight.Add(-1)
+
+	// CAS loop to update max (race-safe without locking).
+	for {
+		prev := s.maxSeen.Load()
+		if cur <= prev {
+			break
+		}
+
+		if s.maxSeen.CompareAndSwap(prev, cur) {
+			break
+		}
+	}
+
+	// Brief pause so goroutines overlap and the peak is observable.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	s.mu.Lock()
+	s.imported = append(s.imported, leaf.Name)
+	s.mu.Unlock()
+
+	return nil
+}
+
+// TestRun_Pass2b_ConcurrencyBounded verifies that pass 2b runs data-leaf volume uploads
+// with at most cfg.Workers goroutines in flight at once.
+func TestRun_Pass2b_ConcurrencyBounded(t *testing.T) {
+	const numLeaves = 6
+	const workers = 2
+
+	root, _ := buildMultiLeafArchive(t, numLeaves)
+
+	vol := &concStubVolumes{}
+	up := &stubUploader{}
+	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Workers = workers
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	vol.mu.Lock()
+	imported := len(vol.imported)
+	vol.mu.Unlock()
+
+	if imported != numLeaves {
+		t.Errorf("expected %d leaves imported, got %d", numLeaves, imported)
+	}
+
+	max := vol.maxSeen.Load()
+	if max > workers {
+		t.Errorf("peak concurrency = %d, want <= %d (Workers limit not honoured)", max, workers)
+	}
+}
+
+// errorOnceStubVolumes causes one named leaf to fail immediately; all other leaves block
+// until ctx is cancelled, recording that they were properly cancelled by the errgroup.
+type errorOnceStubVolumes struct {
+	errorLeaf string
+	mu        sync.Mutex
+	cancelled []string
+}
+
+func (s *errorOnceStubVolumes) DataImportName(leaf PlannedNode) string { return leaf.Name }
+
+func (s *errorOnceStubVolumes) EnsureDataImport(_ context.Context, leaf PlannedNode, _ string) (string, error) {
+	return leaf.Name, nil
+}
+
+func (s *errorOnceStubVolumes) UploadVolumeData(ctx context.Context, leaf PlannedNode, _, _ string) error {
+	if leaf.Name == s.errorLeaf {
+		return fmt.Errorf("injected upload error for %s", leaf.Name)
+	}
+
+	// Block until errgroup cancels ctx when the failing leaf returns its error.
+	<-ctx.Done()
+
+	s.mu.Lock()
+	s.cancelled = append(s.cancelled, leaf.Name)
+	s.mu.Unlock()
+
+	return ctx.Err()
+}
+
+// TestRun_Pass2b_ErrorCancelsSiblings verifies that when one data-leaf upload fails
+// the errgroup cancels the derived ctx, unblocking sibling goroutines that are waiting.
+func TestRun_Pass2b_ErrorCancelsSiblings(t *testing.T) {
+	// Two leaves: leaf-0 errors immediately; leaf-1 blocks until ctx is cancelled.
+	root, _ := buildMultiLeafArchive(t, 2)
+
+	vol := &errorOnceStubVolumes{errorLeaf: "leaf-0"}
+	up := &stubUploader{}
+	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Workers = 2 // both leaves start simultaneously
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error from failing leaf, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "injected upload error") {
+		t.Errorf("expected injected error message, got: %v", err)
+	}
+
+	// The sibling leaf must have been cancelled (not leaked or hung).
+	vol.mu.Lock()
+	numCancelled := len(vol.cancelled)
+	vol.mu.Unlock()
+
+	if numCancelled == 0 {
+		t.Error("expected sibling leaf to be cancelled via errgroup context, got 0 cancelled")
 	}
 }
