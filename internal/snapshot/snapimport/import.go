@@ -93,6 +93,13 @@ type Config struct {
 	// may decompress a block volume into a temporary file, so the worst-case peak
 	// temporary disk usage is Workers × (size of the largest decompressed volume).
 	Workers int
+	// TempDir is the directory for decompressed block-volume temporary files. When empty
+	// (the default), the importer uses filepath.Dir(leaf.DataFile) — the archive node
+	// directory — which is on the same filesystem as the compressed source and therefore
+	// guaranteed to have space for at least one decompressed copy. Set via --temp-dir to
+	// redirect temps to a dedicated scratch volume. Worst-case peak disk usage:
+	// Workers × (size of the largest decompressed volume).
+	TempDir string
 	// AllowExisting, when true, downgrades the namespace preflight conflict check to a
 	// warning instead of an error. Import-mode markers from a prior run of this import
 	// are never treated as conflicts regardless of this flag. When false (default), the

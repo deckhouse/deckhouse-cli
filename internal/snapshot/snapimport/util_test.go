@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
@@ -100,7 +101,7 @@ func TestResolveBlockSource_RawUsedInPlace(t *testing.T) {
 		t.Fatalf("write raw: %v", err)
 	}
 
-	path, size, cleanup, err := resolveBlockSource(rawPath)
+	path, size, cleanup, err := resolveBlockSource(rawPath, dir)
 	if err != nil {
 		t.Fatalf("resolveBlockSource(raw): %v", err)
 	}
@@ -120,8 +121,12 @@ func TestResolveBlockSource_RawUsedInPlace(t *testing.T) {
 	}
 }
 
+// TestResolveBlockSource_CompressedDecompressedToTemp verifies that a zstd-compressed
+// block source is decompressed into a temp file under the explicit tempDir, that the
+// decompressed bytes round-trip, and that cleanup removes the temp file.
 func TestResolveBlockSource_CompressedDecompressedToTemp(t *testing.T) {
-	dir := t.TempDir()
+	srcDir := t.TempDir()
+	tempDir := t.TempDir()
 	payload := bytes.Repeat([]byte("abc"), 1000)
 
 	codec, err := compress.New("zstd", 0)
@@ -134,18 +139,22 @@ func TestResolveBlockSource_CompressedDecompressedToTemp(t *testing.T) {
 		t.Fatalf("EncodeFrame: %v", err)
 	}
 
-	srcPath := filepath.Join(dir, "data.bin.zst")
+	srcPath := filepath.Join(srcDir, "data.bin.zst")
 	if err := os.WriteFile(srcPath, frame, 0o600); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
 
-	path, size, cleanup, err := resolveBlockSource(srcPath)
+	path, size, cleanup, err := resolveBlockSource(srcPath, tempDir)
 	if err != nil {
 		t.Fatalf("resolveBlockSource(compressed): %v", err)
 	}
 
 	if path == srcPath {
 		t.Error("compressed source must be decompressed into a temp file, not used in place")
+	}
+
+	if !strings.HasPrefix(path, tempDir) {
+		t.Errorf("temp file path = %q must be under explicit tempDir %q", path, tempDir)
 	}
 
 	if size != int64(len(payload)) {

@@ -25,6 +25,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -88,22 +89,30 @@ type clusterVolumeImporter struct {
 	poll time.Duration
 	wait time.Duration
 	log  *slog.Logger
+	// tempDir is the directory for decompressed block-volume temporary files. When empty,
+	// sendVolumeData defaults to filepath.Dir(leaf.DataFile) — next to the archive node
+	// on the same filesystem as the compressed source. Override via --temp-dir.
+	// Worst-case peak disk usage: Workers × (size of the largest decompressed volume).
+	tempDir string
 }
 
 // NewClusterVolumeImporter builds the live VolumeImporter. ttl is the DataImport TTL,
-// wait bounds the per-DataImport readiness/completion waits, and poll is the polling cadence.
+// wait bounds the per-DataImport readiness/completion waits, poll is the polling cadence,
+// and tempDir is the scratch directory for decompressed block-volume temp files (empty =
+// auto-select filepath.Dir(leaf.DataFile), keeping temps on the same filesystem as the archive).
 func NewClusterVolumeImporter(
 	dyn dynamic.Interface,
 	sc *safeClient.SafeClient,
 	ttl string,
 	wait, poll time.Duration,
+	tempDir string,
 	log *slog.Logger,
 ) VolumeImporter {
 	if log == nil {
 		log = slog.Default()
 	}
 
-	return &clusterVolumeImporter{dyn: dyn, sc: sc, ttl: ttl, poll: poll, wait: wait, log: log}
+	return &clusterVolumeImporter{dyn: dyn, sc: sc, ttl: ttl, poll: poll, wait: wait, tempDir: tempDir, log: log}
 }
 
 // DataImportName returns the deterministic DataImport name for the leaf (its own name).
@@ -296,7 +305,14 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 		}
 
 	case volumeModeBlock:
-		srcPath, size, cleanup, err := resolveBlockSource(leaf.DataFile)
+		// Default the temp dir to the archive node directory — same filesystem as the
+		// compressed source, so it always has room for at least one decompressed volume.
+		effectiveTempDir := c.tempDir
+		if effectiveTempDir == "" {
+			effectiveTempDir = filepath.Dir(leaf.DataFile)
+		}
+
+		srcPath, size, cleanup, err := resolveBlockSource(leaf.DataFile, effectiveTempDir)
 		if err != nil {
 			return err
 		}
