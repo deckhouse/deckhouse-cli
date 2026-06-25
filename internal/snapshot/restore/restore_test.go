@@ -52,6 +52,7 @@ var (
 	pvcGVR      = schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumeclaims"}
 	cmGVR       = schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
 	pvGVR       = schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumes"}
+	vsGVR       = schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
 )
 
 // stubSource records the call and returns a canned manifest array body.
@@ -73,12 +74,20 @@ func (s *stubSource) RestoreManifests(_ context.Context, ref aggapi.NodeRef, tar
 }
 
 // testMapper resolves every kind the restore tests apply, with the right scope.
+// defaultGroupVersions are required for version-less RESTMapping(gk) lookups used
+// by preflightLeaves when resolving spec.dataSourceRef / spec.dataSource targets
+// (those fields carry apiGroup+kind but no version).
 func testMapper() meta.RESTMapper {
-	m := meta.NewDefaultRESTMapper(nil)
+	m := meta.NewDefaultRESTMapper([]schema.GroupVersion{
+		{Group: "", Version: "v1"},
+		{Group: "storage.deckhouse.io", Version: "v1alpha1"},
+		{Group: "snapshot.storage.k8s.io", Version: "v1"},
+	})
 	m.Add(schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolumeClaim"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolume"}, meta.RESTScopeRoot)
+	m.Add(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}, meta.RESTScopeNamespace)
 
 	return m
 }
@@ -175,6 +184,7 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 		pvcGVR:      "PersistentVolumeClaimList",
 		cmGVR:       "ConfigMapList",
 		pvGVR:       "PersistentVolumeList",
+		vsGVR:       "VolumeSnapshotList",
 	}
 
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, objs...)
@@ -218,6 +228,22 @@ func readySnapshot() *unstructured.Unstructured {
 			"conditions": []interface{}{
 				map[string]interface{}{"type": "Ready", "status": "True"},
 			},
+		},
+	}}
+}
+
+// readyVolumeSnapshot returns a CSI VolumeSnapshot with status.readyToUse=true,
+// satisfying the leaf preflight check for PVCs that reference it.
+func readyVolumeSnapshot(name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "snapshot.storage.k8s.io/v1",
+		"kind":       "VolumeSnapshot",
+		"metadata": map[string]interface{}{
+			"namespace": testNS,
+			"name":      name,
+		},
+		"status": map[string]interface{}{
+			"readyToUse": true,
 		},
 	}}
 }
@@ -267,7 +293,7 @@ func baseConfig(src Source, dyn dynamic.Interface) Config {
 // root ref is addressed correctly, and namespaced objects inherit the target namespace.
 func TestRun_AppliesAllObjects(t *testing.T) {
 	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"), pvcManifest("pvc-1", ""))}
-	dyn := newFakeDynamic(readySnapshot())
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"))
 
 	if err := Run(context.Background(), baseConfig(src, dyn)); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -433,7 +459,7 @@ func TestRun_WaitBound(t *testing.T) {
 	}}
 
 	src := &stubSource{body: mustArray(t, pvcManifest("pvc-1", ""))}
-	dyn := newFakeDynamic(readySnapshot(), existing)
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), existing)
 
 	cfg := baseConfig(src, dyn)
 	cfg.Wait = true
@@ -447,7 +473,7 @@ func TestRun_WaitBound(t *testing.T) {
 // TestRun_WaitTimeout returns a timeout error when a restored PVC never binds.
 func TestRun_WaitTimeout(t *testing.T) {
 	src := &stubSource{body: mustArray(t, pvcManifest("pvc-1", "Pending"))}
-	dyn := newFakeDynamic(readySnapshot())
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"))
 
 	cfg := baseConfig(src, dyn)
 	cfg.Wait = true
@@ -657,7 +683,7 @@ func TestRun_ImmutableUpdateActionable(t *testing.T) {
 	}}
 
 	src := &stubSource{body: mustArray(t, pvcManifest("pvc-1", ""))}
-	dyn := newFakeDynamic(readySnapshot(), existing)
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), existing)
 
 	dyn.PrependReactor("patch", "persistentvolumeclaims", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		pa, ok := action.(clienttesting.PatchAction)
@@ -827,7 +853,7 @@ func TestRun_DryRun_NoObjectPersisted(t *testing.T) {
 // if the wait loop were entered with a very short timeout it would return a timeout error.
 func TestRun_DryRun_SkipsWait(t *testing.T) {
 	src := &stubSource{body: mustArray(t, pvcManifest("pvc-1", ""))}
-	dyn := newFakeDynamic(readySnapshot())
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"))
 
 	cfg := baseConfig(src, dyn)
 	cfg.DryRun = true
@@ -836,6 +862,86 @@ func TestRun_DryRun_SkipsWait(t *testing.T) {
 
 	if err := Run(context.Background(), cfg); err != nil {
 		t.Fatalf("Run with DryRun+Wait: %v", err)
+	}
+}
+
+// TestRun_LeafPreflight_MissingAborts verifies that a missing VolumeSnapshot leaf
+// causes Run to abort with an actionable error naming the leaf, without applying any object.
+func TestRun_LeafPreflight_MissingAborts(t *testing.T) {
+	// PVC references "vs-1" via spec.dataSourceRef; "vs-1" is not seeded in the fake.
+	src := &stubSource{body: mustArray(t, pvcManifest("pvc-1", ""))}
+	dyn := newFakeDynamic(readySnapshot())
+
+	err := Run(context.Background(), baseConfig(src, dyn))
+	if err == nil {
+		t.Fatal("expected error for missing leaf, got nil")
+	}
+
+	if !contains(err.Error(), "VolumeSnapshot") || !contains(err.Error(), "vs-1") || !contains(err.Error(), "missing") {
+		t.Errorf("error %q is not actionable about missing leaf", err.Error())
+	}
+
+	// No object must be applied since we aborted before any apply pass.
+	_, getErr := dyn.Resource(pvcGVR).Namespace(testNS).Get(context.Background(), "pvc-1", metav1.GetOptions{})
+	if !kubeerrors.IsNotFound(getErr) {
+		t.Errorf("expected NotFound for unapplied PVC, got %v", getErr)
+	}
+}
+
+// TestRun_LeafPreflight_NotReadyAborts verifies that a VolumeSnapshot with
+// status.readyToUse=false causes Run to abort with a "not ready" error.
+func TestRun_LeafPreflight_NotReadyAborts(t *testing.T) {
+	notReadyVS := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "snapshot.storage.k8s.io/v1",
+		"kind":       "VolumeSnapshot",
+		"metadata":   map[string]interface{}{"namespace": testNS, "name": "vs-1"},
+		"status":     map[string]interface{}{"readyToUse": false},
+	}}
+
+	src := &stubSource{body: mustArray(t, pvcManifest("pvc-1", ""))}
+	dyn := newFakeDynamic(readySnapshot(), notReadyVS)
+
+	err := Run(context.Background(), baseConfig(src, dyn))
+	if err == nil {
+		t.Fatal("expected error for not-ready leaf, got nil")
+	}
+
+	if !contains(err.Error(), "vs-1") || !contains(err.Error(), "not ready") {
+		t.Errorf("error %q is not actionable about not-ready leaf", err.Error())
+	}
+}
+
+// TestRun_LeafPreflight_ReadyProceeds verifies that when the referenced VolumeSnapshot
+// leaf is present and readyToUse=true, the preflight passes and the restore proceeds.
+func TestRun_LeafPreflight_ReadyProceeds(t *testing.T) {
+	src := &stubSource{body: mustArray(t, pvcManifest("pvc-1", ""))}
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"))
+
+	if err := Run(context.Background(), baseConfig(src, dyn)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	_, err := dyn.Resource(pvcGVR).Namespace(testNS).Get(context.Background(), "pvc-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("PVC not applied after successful preflight: %v", err)
+	}
+}
+
+// TestRun_LeafPreflight_NoPVCDataSource verifies that a PVC with no dataSourceRef or
+// dataSource does not require any leaf and the restore proceeds without error.
+func TestRun_LeafPreflight_NoPVCDataSource(t *testing.T) {
+	pvcNoRef := map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"metadata":   map[string]interface{}{"name": "pvc-plain"},
+		"spec":       map[string]interface{}{},
+	}
+
+	src := &stubSource{body: mustArray(t, pvcNoRef)}
+	dyn := newFakeDynamic(readySnapshot())
+
+	if err := Run(context.Background(), baseConfig(src, dyn)); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 }
 
