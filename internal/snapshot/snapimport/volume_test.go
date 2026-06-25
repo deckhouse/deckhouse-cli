@@ -17,13 +17,17 @@ limitations under the License.
 package snapimport
 
 import (
+	gotar "archive/tar"
 	"bytes"
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +36,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
 
 // recordingDoer captures the requests putBlock/postFinished send and returns canned responses.
@@ -318,5 +324,84 @@ func TestEnsureDataImport_RecreatesExpired(t *testing.T) {
 
 	if conditionTrue(got, conditionExpired) {
 		t.Errorf("recreated DataImport must not carry the Expired condition")
+	}
+}
+
+// TestSendVolumeData_FSLeaf_UsesTarFile is the regression test for the wiring bug
+// introduced in import-fs-tar-source: UploadVolumeData's Filesystem branch was calling
+// importFSFromTar with leaf.DataFile (the block-data glob result, always empty for FS
+// leaves), instead of leaf.TarFile. With an empty DataFile, os.Open("") fails immediately.
+// This test calls sendVolumeData directly with FilesystemData=true, DataFile="" and a real
+// TarFile path; it would fail before the fix (os.Open("")) and must pass after.
+func TestSendVolumeData_FSLeaf_UsesTarFile(t *testing.T) {
+	// Build a real data.tar with one zstd-compressed file entry.
+	content := []byte("hello filesystem import regression")
+	compressed := zstdCompress(t, content)
+
+	var tarBuf bytes.Buffer
+
+	tw := gotar.NewWriter(&tarBuf)
+	addTarEntry(t, tw, "file.txt.zst", compressed, 0o644, 1000, 2000, time.Now())
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, archive.FsTarName)
+
+	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	// PlannedNode carries FilesystemData=true and an empty DataFile (the wiring bug target).
+	// Before the fix, sendVolumeData called importFSFromTar with leaf.DataFile (""),
+	// causing os.Open("") to fail.
+	leaf := PlannedNode{
+		APIVersion:     "snapshot.storage.k8s.io/v1",
+		Kind:           "VolumeSnapshot",
+		Name:           "pvc-1",
+		FilesystemData: true,
+		DataFile:       "",
+		TarFile:        tarPath,
+	}
+
+	var mu sync.Mutex
+
+	var putPaths []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+
+		switch r.Method {
+		case http.MethodHead:
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPut:
+			mu.Lock()
+			putPaths = append(putPaths, strings.TrimPrefix(r.URL.Path, "/api/v1/files/"))
+			mu.Unlock()
+
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+		}
+	}))
+	defer srv.Close()
+
+	imp := &clusterVolumeImporter{log: discardLogger()}
+
+	if err := imp.sendVolumeData(context.Background(), plainHTTPDoer{}, srv.URL, volumeModeFilesystem, leaf, targetNS, "pvc-1"); err != nil {
+		t.Fatalf("sendVolumeData with FS leaf and valid TarFile: %v", err)
+	}
+
+	mu.Lock()
+	n := len(putPaths)
+	mu.Unlock()
+
+	// At least one PUT must have reached the server (the decompressed "file.txt" entry).
+	if n == 0 {
+		t.Error("expected at least one PUT (FS entry uploaded via TarFile), got none")
 	}
 }

@@ -66,9 +66,11 @@ type PlannedNode struct {
 	// (data.bin[.<ext>]) when present; empty when the node carries no importable
 	// block volume data.
 	DataFile string
-	// FilesystemData is true when the node carries filesystem-volume data (data.tar),
-	// which the CLI cannot yet re-import.
+	// FilesystemData is true when the node carries filesystem-volume data (data.tar).
 	FilesystemData bool
+	// TarFile is the absolute path to the node's filesystem-volume data file (data.tar).
+	// It is always set when FilesystemData is true.
+	TarFile string
 }
 
 // Ref returns the node's aggregated-API node ref (target namespace applied by the caller).
@@ -171,8 +173,10 @@ func readNode(dir string) (PlannedNode, error) {
 		node.DataFile = blockData
 	}
 
-	if _, statErr := os.Stat(filepath.Join(dir, archive.FsTarName)); statErr == nil {
+	tarPath := filepath.Join(dir, archive.FsTarName)
+	if _, statErr := os.Stat(tarPath); statErr == nil {
 		node.FilesystemData = true
+		node.TarFile = tarPath
 	}
 
 	return node, nil

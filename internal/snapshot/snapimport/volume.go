@@ -268,13 +268,26 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 		return err
 	}
 
+	if err := c.sendVolumeData(ctx, httpClient, url, volumeMode, leaf, namespace, diName); err != nil {
+		return err
+	}
+
+	return c.waitDataImportCompleted(ctx, diName, namespace)
+}
+
+// sendVolumeData streams the volume payload (FS tar or raw block data) to the importer
+// and signals end-of-upload via postFinished. It does NOT poll for DataImport completion;
+// the caller must invoke waitDataImportCompleted afterwards.
+// Using leaf.TarFile (not leaf.DataFile) for the FS path is essential: DataFile holds the
+// block-data glob result (data.bin*), which is always empty for FS-only leaves.
+func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient httpDoer, url, volumeMode string, leaf PlannedNode, namespace, diName string) error {
 	switch volumeMode {
 	case volumeModeFilesystem:
 		c.log.Info("uploading filesystem data",
 			slog.String("namespace", namespace),
 			slog.String("dataimport", diName))
 
-		if err := importFSFromTar(ctx, httpClient, url, leaf.DataFile, c.log); err != nil {
+		if err := importFSFromTar(ctx, httpClient, url, leaf.TarFile, c.log); err != nil {
 			return fmt.Errorf("upload filesystem data for %s/%s: %w", namespace, diName, err)
 		}
 
@@ -287,6 +300,7 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 		if err != nil {
 			return err
 		}
+
 		defer cleanup()
 
 		blockURL, err := neturl.JoinPath(url, uploadBlockSubpath)
@@ -311,7 +325,7 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 		return fmt.Errorf("DataImport %s/%s reports unsupported volumeMode %q", namespace, diName, volumeMode)
 	}
 
-	return c.waitDataImportCompleted(ctx, diName, namespace)
+	return nil
 }
 
 // uploadClient builds an isolated SafeClient that trusts the importer's status.ca.

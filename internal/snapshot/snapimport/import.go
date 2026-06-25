@@ -218,22 +218,17 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 // preflight rejects, before any cluster mutation, archives the CLI cannot client-drive:
-// unsupported node kinds, filesystem-volume data leaves (data.tar), and data leaves that
-// carry no block data file. This prevents leaving orphaned import CRs / DataImports behind
-// when a later node would fail.
+// unsupported node kinds and VolumeSnapshot data leaves that carry neither block data
+// (data.bin*) nor filesystem data (data.tar). This prevents leaving orphaned import CRs
+// / DataImports behind when a later node would fail.
 func preflight(plan []PlannedNode) error {
 	for _, node := range plan {
 		if !node.supported() {
 			return unsupportedNodeError(node)
 		}
 
-		if node.FilesystemData {
-			return fmt.Errorf("import of %s/%s carries filesystem-volume data (data.tar), which this CLI cannot yet "+
-				"re-import; only block-volume data leaves are supported", node.Kind, node.Name)
-		}
-
-		if node.isVolumeSnapshotLeaf() && !node.HasBlockData() {
-			return fmt.Errorf("data leaf %s/%s has no block volume data file (data.bin) in the archive", node.Kind, node.Name)
+		if node.isVolumeSnapshotLeaf() && !node.HasBlockData() && !node.FilesystemData {
+			return fmt.Errorf("data leaf %s/%s has no volume data file (data.bin or data.tar) in the archive", node.Kind, node.Name)
 		}
 	}
 
