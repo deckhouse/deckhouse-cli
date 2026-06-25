@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	clienttesting "k8s.io/client-go/testing"
@@ -678,6 +679,163 @@ func TestRun_ImmutableUpdateActionable(t *testing.T) {
 
 	if !contains(err.Error(), "immutable") || !contains(err.Error(), "delete it") {
 		t.Errorf("error %q is not actionable about immutability", err.Error())
+	}
+}
+
+// patchCaptureDynamic is a minimal dynamic.Interface stub that captures PatchOptions
+// for verifying that applyObject passes the correct options to ri.Patch.
+// All methods except Resource, Namespace, and Patch panic if called.
+type patchCaptureDynamic struct {
+	gotOpts []metav1.PatchOptions
+}
+
+func (d *patchCaptureDynamic) Resource(_ schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
+	return &patchCaptureResource{d: d}
+}
+
+type patchCaptureResource struct {
+	d *patchCaptureDynamic
+}
+
+func (r *patchCaptureResource) Namespace(_ string) dynamic.ResourceInterface { return r }
+
+func (r *patchCaptureResource) Patch(_ context.Context, _ string, _ types.PatchType, data []byte, opts metav1.PatchOptions, _ ...string) (*unstructured.Unstructured, error) {
+	r.d.gotOpts = append(r.d.gotOpts, opts)
+
+	obj := &unstructured.Unstructured{}
+	if err := json.Unmarshal(data, &obj.Object); err != nil {
+		return nil, err
+	}
+
+	return obj, nil
+}
+
+func (r *patchCaptureResource) Create(_ context.Context, _ *unstructured.Unstructured, _ metav1.CreateOptions, _ ...string) (*unstructured.Unstructured, error) {
+	panic("patchCaptureResource: Create not implemented")
+}
+
+func (r *patchCaptureResource) Update(_ context.Context, _ *unstructured.Unstructured, _ metav1.UpdateOptions, _ ...string) (*unstructured.Unstructured, error) {
+	panic("patchCaptureResource: Update not implemented")
+}
+
+func (r *patchCaptureResource) UpdateStatus(_ context.Context, _ *unstructured.Unstructured, _ metav1.UpdateOptions) (*unstructured.Unstructured, error) {
+	panic("patchCaptureResource: UpdateStatus not implemented")
+}
+
+func (r *patchCaptureResource) Delete(_ context.Context, _ string, _ metav1.DeleteOptions, _ ...string) error {
+	panic("patchCaptureResource: Delete not implemented")
+}
+
+func (r *patchCaptureResource) DeleteCollection(_ context.Context, _ metav1.DeleteOptions, _ metav1.ListOptions) error {
+	panic("patchCaptureResource: DeleteCollection not implemented")
+}
+
+func (r *patchCaptureResource) Get(_ context.Context, _ string, _ metav1.GetOptions, _ ...string) (*unstructured.Unstructured, error) {
+	panic("patchCaptureResource: Get not implemented")
+}
+
+func (r *patchCaptureResource) List(_ context.Context, _ metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+	panic("patchCaptureResource: List not implemented")
+}
+
+func (r *patchCaptureResource) Watch(_ context.Context, _ metav1.ListOptions) (watch.Interface, error) {
+	panic("patchCaptureResource: Watch not implemented")
+}
+
+func (r *patchCaptureResource) Apply(_ context.Context, _ string, _ *unstructured.Unstructured, _ metav1.ApplyOptions, _ ...string) (*unstructured.Unstructured, error) {
+	panic("patchCaptureResource: Apply not implemented")
+}
+
+func (r *patchCaptureResource) ApplyStatus(_ context.Context, _ string, _ *unstructured.Unstructured, _ metav1.ApplyOptions) (*unstructured.Unstructured, error) {
+	panic("patchCaptureResource: ApplyStatus not implemented")
+}
+
+// TestApplyObject_DryRunOptions verifies that applyObject passes DryRun:[All] in the
+// PatchOptions when Config.DryRun is true. The fake dynamic client (dynamicfake) does not
+// forward PatchOptions to recorded actions, so this test calls applyObject directly with a
+// patchCaptureDynamic stub that captures the options passed to ri.Patch.
+func TestApplyObject_DryRunOptions(t *testing.T) {
+	mock := &patchCaptureDynamic{}
+
+	cfg := Config{
+		Namespace: testNS,
+		DryRun:    true,
+		Dynamic:   mock,
+		Mapper:    testMapper(),
+		Log:       discardLogger(),
+	}
+
+	obj := &unstructured.Unstructured{Object: configMapManifest("cm-1")}
+
+	ns, err := applyObject(context.Background(), cfg, obj)
+	if err != nil {
+		t.Fatalf("applyObject: %v", err)
+	}
+
+	if ns != testNS {
+		t.Errorf("namespace: got %q, want %q", ns, testNS)
+	}
+
+	if len(mock.gotOpts) != 1 {
+		t.Fatalf("expected 1 Patch call, got %d", len(mock.gotOpts))
+	}
+
+	opts := mock.gotOpts[0]
+	if len(opts.DryRun) != 1 || opts.DryRun[0] != metav1.DryRunAll {
+		t.Errorf("DryRun options: got %v, want [%q]", opts.DryRun, metav1.DryRunAll)
+	}
+}
+
+// TestRun_DryRun_NoObjectPersisted verifies that with DryRun=true, objects are not
+// persisted in the cluster. A reactor simulates server dry-run by returning success
+// without writing to the tracker; a subsequent Get must return NotFound.
+func TestRun_DryRun_NoObjectPersisted(t *testing.T) {
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+	dyn := newFakeDynamic(readySnapshot())
+
+	// Simulate server dry-run: intercept the SSA apply and return the patch body
+	// without writing to the tracker.
+	dyn.PrependReactor("patch", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		pa, ok := action.(clienttesting.PatchAction)
+		if !ok || pa.GetPatchType() != types.ApplyPatchType {
+			return false, nil, nil
+		}
+
+		obj := &unstructured.Unstructured{}
+		if jsonErr := json.Unmarshal(pa.GetPatch(), &obj.Object); jsonErr != nil {
+			return true, nil, jsonErr
+		}
+
+		return true, obj, nil
+	})
+
+	cfg := baseConfig(src, dyn)
+	cfg.DryRun = true
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run with DryRun: %v", err)
+	}
+
+	_, err := dyn.Resource(cmGVR).Namespace(testNS).Get(context.Background(), "cm-1", metav1.GetOptions{})
+	if !kubeerrors.IsNotFound(err) {
+		t.Errorf("expected NotFound after dry-run apply, got %v", err)
+	}
+}
+
+// TestRun_DryRun_SkipsWait verifies that DryRun=true prevents entering the --wait PVC
+// bind loop even when Wait=true. The PVC in the manifest is not pre-seeded as Bound, so
+// if the wait loop were entered with a very short timeout it would return a timeout error.
+func TestRun_DryRun_SkipsWait(t *testing.T) {
+	src := &stubSource{body: mustArray(t, pvcManifest("pvc-1", ""))}
+	dyn := newFakeDynamic(readySnapshot())
+
+	cfg := baseConfig(src, dyn)
+	cfg.DryRun = true
+	cfg.Wait = true
+	cfg.Timeout = 50 * time.Millisecond
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run with DryRun+Wait: %v", err)
 	}
 }
 

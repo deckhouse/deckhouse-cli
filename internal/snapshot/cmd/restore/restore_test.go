@@ -75,6 +75,21 @@ func TestNewCommand_NamespaceFlagDefault(t *testing.T) {
 	}
 }
 
+func TestNewCommand_DryRunFlagDefault(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	dryRun, err := cmd.Flags().GetBool(flagDryRun)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagDryRun, err)
+	}
+
+	if dryRun {
+		t.Fatalf("default --%s: got true, want false", flagDryRun)
+	}
+}
+
 func TestRun_RequiresNamespace(t *testing.T) {
 	t.Helper()
 

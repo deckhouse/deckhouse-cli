@@ -40,6 +40,7 @@ const (
 	cmdUse = "restore"
 
 	flagNamespace = "namespace"
+	flagDryRun    = "dry-run"
 	flagWait      = "wait"
 	flagTimeout   = "timeout"
 )
@@ -66,11 +67,19 @@ The server compiles the whole subtree in one call; every returned object is appl
 PersistentVolumeClaims already carry spec.dataSourceRef pointing at the VolumeSnapshot (or
 VirtualDiskSnapshot for domain disks) present in the namespace, so CSI provisions the data.
 
+--dry-run sends every apply with DryRunAll so the API server validates and admits objects
+(schema validation, webhooks, immutable-field checks) without persisting them. Use it to
+preflight a restore before committing. The --wait loop is skipped in dry-run mode because
+no objects are actually created.
+
 --wait only tracks PersistentVolumeClaims that appear in the restored manifest set. Disk-backed
 PVCs for domain objects are recreated asynchronously by the domain controller (not part of this
 output), so they are not awaited; the command may return before such volumes finish provisioning.`,
 		Example: `  # Restore snapshot "my-snap" in namespace "default"
   d8 snapshot restore my-snap -n default
+
+  # Preflight: validate all objects without applying them
+  d8 snapshot restore my-snap -n default --dry-run
 
   # Restore and wait for the restored PVCs to become Bound
   d8 snapshot restore my-snap -n default --wait --timeout 15m`,
@@ -81,6 +90,7 @@ output), so they are not awaited; the command may return before such volumes fin
 	}
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "snapshot namespace; also the restore target namespace (required)")
+	cmd.Flags().Bool(flagDryRun, false, "validate objects via DryRunAll without persisting; skips --wait (use to preflight a restore)")
 	cmd.Flags().Bool(flagWait, false, "wait for restored PersistentVolumeClaims to become Bound (only PVCs in the manifest set; domain disk-backed PVCs created asynchronously are not awaited)")
 	cmd.Flags().Duration(flagTimeout, 10*time.Minute, "timeout for the --wait Bound check")
 
@@ -109,6 +119,11 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	}
 
 	snapshotName := args[0]
+
+	dryRun, err := cmd.Flags().GetBool(flagDryRun)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagDryRun, err)
+	}
 
 	wait, err := cmd.Flags().GetBool(flagWait)
 	if err != nil {
@@ -148,6 +163,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	cfg := restore.Config{
 		Namespace: namespace,
 		Snapshot:  snapshotName,
+		DryRun:    dryRun,
 		Wait:      wait,
 		Timeout:   timeout,
 		Source:    aggClient,
