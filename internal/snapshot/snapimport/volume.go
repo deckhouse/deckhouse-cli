@@ -193,7 +193,7 @@ func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf Plann
 		return name, nil
 	}
 
-	return "", fmt.Errorf("DataImport %s/%s did not converge (repeated create/expire races)", namespace, name)
+	return "", fmt.Errorf("data import %s/%s did not converge (repeated create/expire races)", namespace, name)
 }
 
 // alignDataImportTTL patches a reused DataImport's spec.ttl to the current run's TTL when it
@@ -342,7 +342,7 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 		}
 
 	default:
-		return fmt.Errorf("DataImport %s/%s reports unsupported volumeMode %q", namespace, diName, volumeMode)
+		return fmt.Errorf("data import %s/%s reports unsupported volumeMode %q", namespace, diName, volumeMode)
 	}
 
 	return nil
@@ -381,7 +381,7 @@ func (c *clusterVolumeImporter) waitDataImportReady(ctx context.Context, name, n
 		// A DataImport whose idle TTL elapses before the endpoint comes up never becomes
 		// Ready; surface that terminal state instead of waiting out the whole timeout.
 		if conditionTrue(di, conditionExpired) {
-			return nil, fmt.Errorf("DataImport %s/%s expired before becoming Ready (idle TTL elapsed); increase --ttl or retry", namespace, name)
+			return nil, fmt.Errorf("data import %s/%s expired before becoming Ready (idle TTL elapsed); increase --ttl or retry", namespace, name)
 		}
 
 		url, _, _ := unstructured.NestedString(di.Object, "status", "url")
