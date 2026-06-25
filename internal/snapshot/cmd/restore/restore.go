@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,6 +41,7 @@ const (
 	cmdUse = "restore"
 
 	flagNamespace = "namespace"
+	flagNode      = "node"
 	flagDryRun    = "dry-run"
 	flagWait      = "wait"
 	flagTimeout   = "timeout"
@@ -67,6 +69,10 @@ The server compiles the whole subtree in one call; every returned object is appl
 PersistentVolumeClaims already carry spec.dataSourceRef pointing at the VolumeSnapshot (or
 VirtualDiskSnapshot for domain disks) present in the namespace, so CSI provisions the data.
 
+--node restricts the restore to a single node subtree. The root Snapshot must still be
+Ready (the subtree data lives under the same snapshot); only the manifest compilation is
+scoped to the selected node.
+
 --dry-run sends every apply with DryRunAll so the API server validates and admits objects
 (schema validation, webhooks, immutable-field checks) without persisting them. Use it to
 preflight a restore before committing. The --wait loop is skipped in dry-run mode because
@@ -77,6 +83,9 @@ PVCs for domain objects are recreated asynchronously by the domain controller (n
 output), so they are not awaited; the command may return before such volumes finish provisioning.`,
 		Example: `  # Restore snapshot "my-snap" in namespace "default"
   d8 snapshot restore my-snap -n default
+
+  # Restore only a single disk-snapshot node and its subtree
+  d8 snapshot restore my-snap -n default --node DemoVirtualDiskSnapshot/nss-child-abc123
 
   # Preflight: validate all objects without applying them
   d8 snapshot restore my-snap -n default --dry-run
@@ -90,6 +99,7 @@ output), so they are not awaited; the command may return before such volumes fin
 	}
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "snapshot namespace; also the restore target namespace (required)")
+	cmd.Flags().String(flagNode, "", "restrict restore to a single node subtree; format '<Kind>/<name>' (e.g. --node DemoVirtualDiskSnapshot/nss-child-abc123)")
 	cmd.Flags().Bool(flagDryRun, false, "validate objects via DryRunAll without persisting; skips --wait (use to preflight a restore)")
 	cmd.Flags().Bool(flagWait, false, "wait for restored PersistentVolumeClaims to become Bound (only PVCs in the manifest set; domain disk-backed PVCs created asynchronously are not awaited)")
 	cmd.Flags().Duration(flagTimeout, 10*time.Minute, "timeout for the --wait Bound check")
@@ -119,6 +129,16 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	}
 
 	snapshotName := args[0]
+
+	nodeFlag, err := cmd.Flags().GetString(flagNode)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagNode, err)
+	}
+
+	selectedKind, selectedName, err := parseNodeFlag(nodeFlag)
+	if err != nil {
+		return fmt.Errorf("invalid --%s %q: %w", flagNode, nodeFlag, err)
+	}
 
 	dryRun, err := cmd.Flags().GetBool(flagDryRun)
 	if err != nil {
@@ -161,15 +181,17 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	}
 
 	cfg := restore.Config{
-		Namespace: namespace,
-		Snapshot:  snapshotName,
-		DryRun:    dryRun,
-		Wait:      wait,
-		Timeout:   timeout,
-		Source:    aggClient,
-		Dynamic:   dynClient,
-		Mapper:    kubeClient.RESTMapper(),
-		Log:       log,
+		Namespace:        namespace,
+		Snapshot:         snapshotName,
+		SelectedNodeKind: selectedKind,
+		SelectedNodeName: selectedName,
+		DryRun:           dryRun,
+		Wait:             wait,
+		Timeout:          timeout,
+		Source:           aggClient,
+		Dynamic:          dynClient,
+		Mapper:           kubeClient.RESTMapper(),
+		Log:              log,
 	}
 
 	log.Info("starting snapshot restore",
@@ -187,4 +209,35 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	)
 
 	return nil
+}
+
+// parseNodeFlag parses a --node flag value "<Kind>/<name>" into its components.
+// An empty string returns empty strings and no error (full-tree restore).
+// The value must contain exactly one "/" with a non-empty kind and name on each side.
+func parseNodeFlag(s string) (string, string, error) {
+	if s == "" {
+		return "", "", nil
+	}
+
+	idx := strings.IndexByte(s, '/')
+	if idx < 0 {
+		return "", "", fmt.Errorf("expected format '<Kind>/<name>', got %q: missing '/'", s)
+	}
+
+	kind := s[:idx]
+	name := s[idx+1:]
+
+	if kind == "" {
+		return "", "", fmt.Errorf("kind must not be empty in %q", s)
+	}
+
+	if name == "" {
+		return "", "", fmt.Errorf("name must not be empty in %q", s)
+	}
+
+	if strings.Contains(name, "/") {
+		return "", "", fmt.Errorf("name must not contain '/' in %q; expected exactly one '/'", s)
+	}
+
+	return kind, name, nil
 }
