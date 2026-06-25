@@ -28,12 +28,13 @@ import (
 
 // archiveNode describes one node to materialise in a test archive.
 type archiveNode struct {
-	apiVersion string
-	kind       string
-	name       string
-	namespace  string
-	manifests  []map[string]interface{}
-	blockData  []byte
+	apiVersion      string
+	kind            string
+	name            string
+	namespace       string
+	manifests       []map[string]interface{}
+	blockData       []byte
+	sourceObjectRef *archive.SourceObjectRef
 }
 
 // writeArchiveNode writes snapshot.yaml, manifests/ and optional data.bin into dir.
@@ -45,10 +46,11 @@ func writeArchiveNode(t *testing.T, dir string, n archiveNode) {
 	}
 
 	if err := archive.WriteSnapshotYAML(dir, archive.SnapshotYAML{
-		APIVersion: n.apiVersion,
-		Kind:       n.kind,
-		Name:       n.name,
-		Namespace:  n.namespace,
+		APIVersion:      n.apiVersion,
+		Kind:            n.kind,
+		Name:            n.name,
+		Namespace:       n.namespace,
+		SourceObjectRef: n.sourceObjectRef,
 	}); err != nil {
 		t.Fatalf("write snapshot.yaml: %v", err)
 	}
@@ -149,6 +151,65 @@ func TestBuildPlan_MissingSnapshotYAML(t *testing.T) {
 
 	if _, err := BuildPlan(dir); err == nil {
 		t.Fatal("expected error for archive without snapshot.yaml, got nil")
+	}
+}
+
+func TestBuildPlan_DomainDataLeaf_SourceObjectRef(t *testing.T) {
+	root := t.TempDir()
+
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "storage.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+	})
+
+	leafDir := childDir(root, "DemoVirtualDiskSnapshot", "dvd-snap-1")
+
+	wantRef := &archive.SourceObjectRef{
+		APIVersion: "demo.deckhouse.io/v1alpha1",
+		Kind:       "DemoVirtualDisk",
+		Name:       "disk-a",
+	}
+
+	writeArchiveNode(t, leafDir, archiveNode{
+		apiVersion:      "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		kind:            "DemoVirtualDiskSnapshot",
+		name:            "dvd-snap-1",
+		blockData:       []byte("rawbytes"),
+		sourceObjectRef: wantRef,
+	})
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	var leaf *PlannedNode
+
+	for i := range plan {
+		if plan[i].Kind == "DemoVirtualDiskSnapshot" {
+			leaf = &plan[i]
+
+			break
+		}
+	}
+
+	if leaf == nil {
+		t.Fatal("DemoVirtualDiskSnapshot node not found in plan")
+	}
+
+	if leaf.SourceObjectRef == nil {
+		t.Fatal("SourceObjectRef is nil; expected it to be carried from snapshot.yaml")
+	}
+
+	if leaf.SourceObjectRef.APIVersion != wantRef.APIVersion ||
+		leaf.SourceObjectRef.Kind != wantRef.Kind ||
+		leaf.SourceObjectRef.Name != wantRef.Name {
+		t.Errorf("SourceObjectRef = %+v, want %+v", *leaf.SourceObjectRef, *wantRef)
+	}
+
+	if !leaf.isDomainDataLeaf() {
+		t.Error("DemoVirtualDiskSnapshot with block data should be isDomainDataLeaf()")
 	}
 }
 

@@ -71,6 +71,10 @@ type PlannedNode struct {
 	// TarFile is the absolute path to the node's filesystem-volume data file (data.tar).
 	// It is always set when FilesystemData is true.
 	TarFile string
+	// SourceObjectRef carries the structured spec.sourceRef from a domain snapshot CR
+	// ({apiVersion,kind,name} of the source object), read from snapshot.yaml. Nil for
+	// core Snapshot nodes and CSI VolumeSnapshot data leaves.
+	SourceObjectRef *archive.SourceObjectRef
 }
 
 // Ref returns the node's aggregated-API node ref (target namespace applied by the caller).
@@ -86,6 +90,14 @@ func (n PlannedNode) Ref(namespace string) aggapi.NodeRef {
 // HasBlockData reports whether the node carries a single-volume block data file.
 func (n PlannedNode) HasBlockData() bool {
 	return n.DataFile != ""
+}
+
+// isDomainDataLeaf reports whether the node is a domain data leaf: it carries volume data
+// (block or filesystem) and is neither a core Snapshot nor a CSI VolumeSnapshot leaf.
+// Domain data leaves (e.g. DemoVirtualDiskSnapshot) are imported via spec.dataSource.name
+// by the genericbinder server path, unlike CSI leaves which use spec.source.dataImportName.
+func (n PlannedNode) isDomainDataLeaf() bool {
+	return !n.isStructural() && !n.isVolumeSnapshotLeaf() && (n.HasBlockData() || n.FilesystemData)
 }
 
 // BuildPlan walks the archive rooted at rootDir and returns its nodes in post-order
@@ -162,6 +174,7 @@ func readNode(dir string) (PlannedNode, error) {
 		Name:            sy.Name,
 		SourceNamespace: sy.Namespace,
 		Manifests:       manifests,
+		SourceObjectRef: sy.SourceObjectRef,
 	}
 
 	blockData, found, err := archive.FindBlockData(dir)

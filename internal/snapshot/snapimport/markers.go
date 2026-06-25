@@ -43,11 +43,12 @@ func (n PlannedNode) isVolumeSnapshotLeaf() bool {
 }
 
 // supported reports whether the CLI can client-drive the import of this node kind.
-// Core Snapshot trees and CSI VolumeSnapshot data leaves are supported; domain/demo
-// kinds are not (intermediate demo nodes expose no client-settable import marker, so
-// their import-mode CRs must be created by the domain controller).
+// Core Snapshot trees, CSI VolumeSnapshot data leaves, and domain data leaves (e.g.
+// DemoVirtualDiskSnapshot with volume data) are supported. Intermediate domain aggregator
+// nodes that carry no volume data (e.g. DemoVirtualMachineSnapshot) are not: they expose
+// no client-settable import marker and must be reconstructed by their domain controller.
 func (n PlannedNode) supported() bool {
-	return n.isStructural() || n.isVolumeSnapshotLeaf()
+	return n.isStructural() || n.isVolumeSnapshotLeaf() || n.isDomainDataLeaf()
 }
 
 // importMarkerCR builds the minimal import-mode CR the server requires to exist before
@@ -69,6 +70,7 @@ func importMarkerCR(node PlannedNode, namespace, dataImportName string) (*unstru
 		if err := unstructured.SetNestedMap(obj.Object, map[string]interface{}{}, "spec", "source", "import"); err != nil {
 			return nil, fmt.Errorf("set import marker: %w", err)
 		}
+
 	case node.isVolumeSnapshotLeaf():
 		if dataImportName == "" {
 			return nil, fmt.Errorf("VolumeSnapshot leaf %q requires a DataImport name", node.Name)
@@ -77,6 +79,34 @@ func importMarkerCR(node PlannedNode, namespace, dataImportName string) (*unstru
 		if err := unstructured.SetNestedField(obj.Object, dataImportName, "spec", "source", "dataImportName"); err != nil {
 			return nil, fmt.Errorf("set dataImportName: %w", err)
 		}
+
+	case node.isDomainDataLeaf():
+		if node.SourceObjectRef == nil {
+			return nil, fmt.Errorf("domain data leaf %s/%s missing SourceObjectRef in snapshot.yaml; cannot build import marker", node.Kind, node.Name)
+		}
+
+		if dataImportName == "" {
+			return nil, fmt.Errorf("domain data leaf %s/%s requires a DataImport name", node.Kind, node.Name)
+		}
+
+		// spec.sourceRef tells the domain controller what was captured (mirrors the
+		// original capture-mode spec.sourceRef so the domain CR is self-describing).
+		sourceRef := map[string]interface{}{
+			"apiVersion": node.SourceObjectRef.APIVersion,
+			"kind":       node.SourceObjectRef.Kind,
+			"name":       node.SourceObjectRef.Name,
+		}
+
+		if err := unstructured.SetNestedMap(obj.Object, sourceRef, "spec", "sourceRef"); err != nil {
+			return nil, fmt.Errorf("set spec.sourceRef: %w", err)
+		}
+
+		// spec.dataSource.name is the import-mode trigger read by the genericbinder
+		// reconcileGenericImport path (snapshotImportDataImportName).
+		if err := unstructured.SetNestedField(obj.Object, dataImportName, "spec", "dataSource", "name"); err != nil {
+			return nil, fmt.Errorf("set spec.dataSource.name: %w", err)
+		}
+
 	default:
 		return nil, unsupportedNodeError(node)
 	}

@@ -30,6 +30,7 @@ import (
 	"time"
 
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -83,12 +84,13 @@ type VolumeImporter interface {
 // CR lifecycle and status) and a SafeClient (authenticated HTTPS byte upload to the
 // importer pod, trusting status.ca).
 type clusterVolumeImporter struct {
-	dyn  dynamic.Interface
-	sc   *safeClient.SafeClient
-	ttl  string
-	poll time.Duration
-	wait time.Duration
-	log  *slog.Logger
+	dyn    dynamic.Interface
+	sc     *safeClient.SafeClient
+	ttl    string
+	poll   time.Duration
+	wait   time.Duration
+	log    *slog.Logger
+	mapper meta.RESTMapper
 	// tempDir is the directory for decompressed block-volume temporary files. When empty,
 	// sendVolumeData defaults to filepath.Dir(leaf.DataFile) — next to the archive node
 	// on the same filesystem as the compressed source. Override via --temp-dir.
@@ -98,21 +100,23 @@ type clusterVolumeImporter struct {
 
 // NewClusterVolumeImporter builds the live VolumeImporter. ttl is the DataImport TTL,
 // wait bounds the per-DataImport readiness/completion waits, poll is the polling cadence,
-// and tempDir is the scratch directory for decompressed block-volume temp files (empty =
-// auto-select filepath.Dir(leaf.DataFile), keeping temps on the same filesystem as the archive).
+// tempDir is the scratch directory for decompressed block-volume temp files (empty =
+// auto-select filepath.Dir(leaf.DataFile), keeping temps on the same filesystem as the archive),
+// and mapper resolves domain leaf GVKs to their resource plurals for DataImport targetRef.
 func NewClusterVolumeImporter(
 	dyn dynamic.Interface,
 	sc *safeClient.SafeClient,
 	ttl string,
 	wait, poll time.Duration,
 	tempDir string,
+	mapper meta.RESTMapper,
 	log *slog.Logger,
 ) VolumeImporter {
 	if log == nil {
 		log = slog.Default()
 	}
 
-	return &clusterVolumeImporter{dyn: dyn, sc: sc, ttl: ttl, poll: poll, wait: wait, tempDir: tempDir, log: log}
+	return &clusterVolumeImporter{dyn: dyn, sc: sc, ttl: ttl, poll: poll, wait: wait, tempDir: tempDir, mapper: mapper, log: log}
 }
 
 // DataImportName returns the deterministic DataImport name for the leaf (its own name).
@@ -124,7 +128,7 @@ func (c *clusterVolumeImporter) DataImportName(leaf PlannedNode) string {
 func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf PlannedNode, namespace string) (string, error) {
 	name := c.DataImportName(leaf)
 
-	group, resource, err := leafTargetRef(leaf)
+	group, resource, err := leafTargetRef(leaf, c.mapper)
 	if err != nil {
 		return "", err
 	}
@@ -443,9 +447,30 @@ func (c *clusterVolumeImporter) waitDataImportCompleted(ctx context.Context, nam
 }
 
 // leafTargetRef returns the DataImport targetRef {group, resource} for a data leaf.
-func leafTargetRef(leaf PlannedNode) (group, resource string, err error) {
+// For CSI VolumeSnapshot leaves the group/resource are fixed constants. For domain data
+// leaves the resource plural is resolved via mapper (the domain controller drives import
+// through spec.dataSource.name; the DataImport targetRef identifies the leaf snapshot CR).
+func leafTargetRef(leaf PlannedNode, mapper meta.RESTMapper) (group, resource string, err error) {
 	if leaf.isVolumeSnapshotLeaf() {
 		return aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, nil
+	}
+
+	if leaf.isDomainDataLeaf() {
+		gv, parseErr := schema.ParseGroupVersion(leaf.APIVersion)
+		if parseErr != nil {
+			return "", "", fmt.Errorf("parse apiVersion %q for domain leaf %s/%s: %w", leaf.APIVersion, leaf.Kind, leaf.Name, parseErr)
+		}
+
+		if mapper == nil {
+			return "", "", fmt.Errorf("RESTMapper required to resolve domain leaf %s/%s resource", leaf.Kind, leaf.Name)
+		}
+
+		mapping, mapErr := mapper.RESTMapping(schema.GroupKind{Group: gv.Group, Kind: leaf.Kind}, gv.Version)
+		if mapErr != nil {
+			return "", "", fmt.Errorf("resolve resource for domain leaf %s/%s: %w", leaf.Kind, leaf.Name, mapErr)
+		}
+
+		return gv.Group, mapping.Resource.Resource, nil
 	}
 
 	return "", "", unsupportedNodeError(leaf)

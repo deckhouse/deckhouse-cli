@@ -318,7 +318,7 @@ func (cfg Config) createMarkers(ctx context.Context, plan []PlannedNode, parents
 
 		var dataImportName string
 
-		if node.isVolumeSnapshotLeaf() {
+		if node.isVolumeSnapshotLeaf() || node.isDomainDataLeaf() {
 			dataImportName = cfg.Volumes.DataImportName(node)
 		}
 
@@ -358,7 +358,7 @@ func (cfg Config) createMarkers(ctx context.Context, plan []PlannedNode, parents
 // window stays minimal. It must run only after every node's manifests are uploaded (pass 2a)
 // so the leaf VolumeSnapshot already has a bound SnapshotContent.
 func importNodeData(ctx context.Context, cfg Config, node PlannedNode) error {
-	if !node.isVolumeSnapshotLeaf() {
+	if !node.isVolumeSnapshotLeaf() && !node.isDomainDataLeaf() {
 		return nil
 	}
 
@@ -509,15 +509,21 @@ func reconcileExistingMarker(ctx context.Context, ri dynamic.ResourceInterface, 
 	return reconcileMarkerOwnerRefs(ctx, ri, existing, desired)
 }
 
-// isImportModeMarker reports whether a live CR is an import-mode marker: a structural
-// Snapshot carries spec.source.import, a CSI VolumeSnapshot leaf carries a non-empty
-// spec.source.dataImportName.
+// isImportModeMarker reports whether a live CR is an import-mode marker:
+//   - structural Snapshot: spec.source.import is present
+//   - CSI VolumeSnapshot leaf: spec.source.dataImportName is non-empty
+//   - domain data leaf (e.g. DemoVirtualDiskSnapshot): spec.dataSource.name is non-empty
+//     (the genericbinder reconcileGenericImport trigger)
 func isImportModeMarker(obj *unstructured.Unstructured) bool {
 	if _, found, _ := unstructured.NestedMap(obj.Object, "spec", "source", "import"); found {
 		return true
 	}
 
-	name, _, _ := unstructured.NestedString(obj.Object, "spec", "source", "dataImportName")
+	if name, _, _ := unstructured.NestedString(obj.Object, "spec", "source", "dataImportName"); name != "" {
+		return true
+	}
+
+	name, _, _ := unstructured.NestedString(obj.Object, "spec", "dataSource", "name")
 
 	return name != ""
 }
