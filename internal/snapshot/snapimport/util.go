@@ -17,7 +17,9 @@ limitations under the License.
 package snapimport
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -144,8 +146,10 @@ func decompressToTemp(srcPath, dir string) (string, int64, error) {
 	return tmp.Name(), size, nil
 }
 
-// decompressInto streams the decompressed bytes of src (codec by ext) into dst.
-func decompressInto(dst io.Writer, src *os.File, ext string) error {
+// decompressInto streams the decompressed bytes of src (codec inferred from ext) into dst.
+// src may be any io.Reader — an os.File for block-volume decompression or a tar.Reader
+// for per-entry filesystem decompression.
+func decompressInto(dst io.Writer, src io.Reader, ext string) error {
 	switch ext {
 	case ".zst":
 		zr, err := zstd.NewReader(src)
@@ -177,29 +181,24 @@ func decompressInto(dst io.Writer, src *os.File, ext string) error {
 	}
 }
 
-// decompressLZ4Frames decodes a concatenation of independent lz4 frames from a seekable
-// source. lz4.Reader decodes a single frame and reads exactly up to its end marker, so a
-// fresh reader is created per frame until the source is exhausted.
-func decompressLZ4Frames(dst io.Writer, src *os.File) error {
-	info, err := src.Stat()
-	if err != nil {
-		return fmt.Errorf("stat lz4 source: %w", err)
-	}
-
-	size := info.Size()
+// decompressLZ4Frames decodes a concatenation of independent lz4 frames from src.
+// lz4.Reader decodes a single frame and reads exactly up to its end marker; a fresh
+// reader is created per frame. A buffered reader is used so that peek-ahead can detect
+// end-of-stream without consuming bytes that belong to the next frame.
+func decompressLZ4Frames(dst io.Writer, src io.Reader) error {
+	br := bufio.NewReader(src)
 
 	for {
-		pos, err := src.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return fmt.Errorf("seek lz4 source: %w", err)
+		if _, err := br.Peek(1); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+
+			return fmt.Errorf("peek lz4 source: %w", err)
 		}
 
-		if pos >= size {
-			return nil
-		}
-
-		if _, err := io.Copy(dst, lz4.NewReader(src)); err != nil {
-			return fmt.Errorf("decode lz4 frame at offset %d: %w", pos, err)
+		if _, err := io.Copy(dst, lz4.NewReader(br)); err != nil {
+			return fmt.Errorf("decode lz4 frame: %w", err)
 		}
 	}
 }

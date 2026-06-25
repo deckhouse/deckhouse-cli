@@ -17,6 +17,8 @@ limitations under the License.
 package snapimport
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -24,8 +26,12 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // plainHTTPDoer satisfies httpDoer by delegating to http.DefaultClient so tests can
@@ -244,6 +250,227 @@ func TestPutFile_AlreadyComplete_NoPUT(t *testing.T) {
 
 	if putCalled {
 		t.Error("PUT must not be issued when HEAD indicates the final file already exists")
+	}
+}
+
+// zstdCompress returns the zstd-compressed form of data.
+func zstdCompress(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	enc, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatalf("zstd writer: %v", err)
+	}
+
+	return enc.EncodeAll(data, nil)
+}
+
+// addTarEntry writes a regular file entry to tw with the given attributes and body.
+func addTarEntry(t *testing.T, tw *tar.Writer, name string, body []byte, mode int64, uid, gid int, modTime time.Time) {
+	t.Helper()
+
+	hdr := &tar.Header{
+		Typeflag: tar.TypeReg,
+		Name:     name,
+		Mode:     mode,
+		Uid:      uid,
+		Gid:      gid,
+		ModTime:  modTime,
+		Size:     int64(len(body)),
+	}
+
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatalf("write tar header for %s: %v", name, err)
+	}
+
+	if _, err := tw.Write(body); err != nil {
+		t.Fatalf("write tar body for %s: %v", name, err)
+	}
+}
+
+// fsCapture records per-file uploads received by the test FS importer server.
+type fsCapture struct {
+	mu      sync.Mutex
+	uploads []fsUpload
+}
+
+type fsUpload struct {
+	relPath string
+	body    []byte
+	headers http.Header
+}
+
+func (c *fsCapture) record(relPath string, body []byte, h http.Header) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.uploads = append(c.uploads, fsUpload{relPath: relPath, body: body, headers: h})
+}
+
+func (c *fsCapture) find(relPath string) (fsUpload, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, u := range c.uploads {
+		if u.relPath == relPath {
+			return u, true
+		}
+	}
+
+	return fsUpload{}, false
+}
+
+func TestImportFSFromTar_DecompressesAndUploads(t *testing.T) {
+	alphaContent := []byte("hello from alpha file")
+	betaContent := []byte("hello from beta in subdir")
+	plainContent := []byte("plain no compression verbatim")
+
+	alphaZstd := zstdCompress(t, alphaContent)
+	betaZstd := zstdCompress(t, betaContent)
+
+	modTime := time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	addTarEntry(t, tw, "alpha.txt.zst", alphaZstd, 0o644, 100, 200, modTime)
+	addTarEntry(t, tw, "sub/beta.txt.zst", betaZstd, 0o600, 101, 201, modTime)
+	addTarEntry(t, tw, "plain.txt", plainContent, 0o755, 0, 0, modTime)
+	_ = tw.Close()
+
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "data.tar")
+
+	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	cap := &fsCapture{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusNotFound)
+
+			return
+		}
+
+		body, _ := io.ReadAll(r.Body)
+		relPath := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
+		cap.record(relPath, body, r.Header.Clone())
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger()); err != nil {
+		t.Fatalf("importFSFromTar: %v", err)
+	}
+
+	// --- alpha.txt (zstd decompressed) ---
+	alpha, ok := cap.find("alpha.txt")
+	if !ok {
+		t.Fatal("alpha.txt not uploaded")
+	}
+
+	if !bytes.Equal(alpha.body, alphaContent) {
+		t.Errorf("alpha.txt body = %q, want %q", alpha.body, alphaContent)
+	}
+
+	if got := alpha.headers.Get("X-Attribute-Permissions"); got != "0644" {
+		t.Errorf("alpha.txt X-Attribute-Permissions = %q, want 0644", got)
+	}
+
+	if got := alpha.headers.Get("X-Attribute-Uid"); got != "100" {
+		t.Errorf("alpha.txt X-Attribute-Uid = %q, want 100", got)
+	}
+
+	if got := alpha.headers.Get("X-Attribute-Gid"); got != "200" {
+		t.Errorf("alpha.txt X-Attribute-Gid = %q, want 200", got)
+	}
+
+	// --- sub/beta.txt (zstd, in a subdirectory path) ---
+	beta, ok := cap.find("sub/beta.txt")
+	if !ok {
+		t.Fatal("sub/beta.txt not uploaded")
+	}
+
+	if !bytes.Equal(beta.body, betaContent) {
+		t.Errorf("sub/beta.txt body mismatch: got %q, want %q", beta.body, betaContent)
+	}
+
+	// --- plain.txt (no codec — verbatim bytes) ---
+	plain, ok := cap.find("plain.txt")
+	if !ok {
+		t.Fatal("plain.txt not uploaded")
+	}
+
+	if !bytes.Equal(plain.body, plainContent) {
+		t.Errorf("plain.txt body mismatch: got %q, want %q", plain.body, plainContent)
+	}
+
+	// Exactly three files must have been uploaded (no spurious entries).
+	cap.mu.Lock()
+	total := len(cap.uploads)
+	cap.mu.Unlock()
+
+	if total != 3 {
+		t.Errorf("expected 3 uploads, got %d", total)
+	}
+}
+
+func TestImportFSFromTar_SkipsNonRegularEntries(t *testing.T) {
+	fileContent := []byte("only file")
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+
+	// Directory entry — should be skipped.
+	dirHdr := &tar.Header{Typeflag: tar.TypeDir, Name: "emptydir/", Mode: 0o755}
+	if err := tw.WriteHeader(dirHdr); err != nil {
+		t.Fatalf("write dir header: %v", err)
+	}
+
+	addTarEntry(t, tw, "file.txt", fileContent, 0o644, 0, 0, time.Now())
+	_ = tw.Close()
+
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "data.tar")
+
+	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	cap := &fsCapture{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusNotFound)
+
+			return
+		}
+
+		body, _ := io.ReadAll(r.Body)
+		relPath := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
+		cap.record(relPath, body, r.Header.Clone())
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger()); err != nil {
+		t.Fatalf("importFSFromTar: %v", err)
+	}
+
+	// Only the regular file must be uploaded; the directory entry must be skipped.
+	cap.mu.Lock()
+	total := len(cap.uploads)
+	cap.mu.Unlock()
+
+	if total != 1 {
+		t.Errorf("expected 1 upload (dir entry skipped), got %d", total)
+	}
+
+	if _, ok := cap.find("file.txt"); !ok {
+		t.Error("file.txt not found in uploads")
 	}
 }
 

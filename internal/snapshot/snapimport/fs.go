@@ -17,13 +17,18 @@ limitations under the License.
 package snapimport
 
 import (
+	"archive/tar"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	neturl "net/url"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -210,4 +215,108 @@ func parseOffsetHeader(h http.Header, name string) (int64, error) {
 	}
 
 	return n, nil
+}
+
+// importFSFromTar reads the uncompressed data.tar archive at tarPath, decompresses
+// each regular file entry, and uploads the raw bytes to the FS importer at baseURL
+// via putFile. The tar format (decision #6): file entries are individually compressed
+// and named <relpath><ext> (ext .zst/.gz/.lz4 or empty for none); the codec is
+// stripped to recover the original relPath before uploading. Directory and symlink
+// entries are skipped — the importer creates parent directories implicitly on the
+// first child file write.
+//
+// TODO(follow-up): reproduce empty-directory and symlink entries when needed.
+func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath string, log *slog.Logger) error {
+	f, err := os.Open(tarPath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", tarPath, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	skipped := 0
+	tr := tar.NewReader(f)
+
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			return fmt.Errorf("read tar entry from %s: %w", tarPath, err)
+		}
+
+		if hdr.Typeflag != tar.TypeReg {
+			skipped++
+
+			continue
+		}
+
+		ext := codecExt(hdr.Name)
+		relPath := strings.TrimSuffix(hdr.Name, ext)
+
+		tmpName, err := decompressEntryToTemp(tr, ext)
+		if err != nil {
+			return fmt.Errorf("decompress tar entry %s: %w", hdr.Name, err)
+		}
+
+		attrs := fileAttrs{
+			Perm:    os.FileMode(hdr.Mode & 0o777),
+			UID:     hdr.Uid,
+			GID:     hdr.Gid,
+			ModTime: hdr.ModTime,
+		}
+
+		putErr := putFile(ctx, client, baseURL, relPath, tmpName, attrs)
+		_ = os.Remove(tmpName)
+
+		if putErr != nil {
+			return fmt.Errorf("upload %s: %w", relPath, putErr)
+		}
+	}
+
+	if skipped > 0 {
+		log.Info("skipped non-regular tar entries (directories and symlinks are not reproduced)",
+			slog.Int("count", skipped),
+			slog.String("tar", tarPath))
+	}
+
+	return nil
+}
+
+// decompressEntryToTemp decompresses the current tar entry (already positioned in tr)
+// into a new temp file using decompressInto. The caller must remove the returned file.
+func decompressEntryToTemp(tr *tar.Reader, ext string) (string, error) {
+	tmp, err := os.CreateTemp("", "d8-import-fs-*.raw")
+	if err != nil {
+		return "", fmt.Errorf("create temp file: %w", err)
+	}
+
+	if err := decompressInto(tmp, tr, ext); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+
+		return "", fmt.Errorf("decompress entry: %w", err)
+	}
+
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+
+		return "", fmt.Errorf("close temp file: %w", err)
+	}
+
+	return tmp.Name(), nil
+}
+
+// codecExt returns the codec extension for a tar entry name (.zst, .gz, .lz4) or
+// an empty string when the entry carries no compression.
+func codecExt(name string) string {
+	ext := filepath.Ext(name)
+
+	switch ext {
+	case ".zst", ".gz", ".lz4":
+		return ext
+	default:
+		return ""
+	}
 }
