@@ -88,8 +88,7 @@ Scope and limitations:
   - Only core Snapshot trees and CSI VolumeSnapshot data leaves can be imported client-side.
     Domain/demo snapshot nodes (e.g. intermediate DemoVirtualMachineSnapshot) expose no
     client-settable import marker and must be reconstructed by their domain controller.
-  - Only block-volume data leaves are supported; filesystem-volume data import is not yet
-    implemented.
+  - Both block-volume and filesystem-volume data leaves are supported.
   - Importing requires RBAC to create DataImport (storage-volume-data-manager) and to call
     the manifests-and-children-refs-upload subresource (e.g. an admin kubeconfig); the
     read-only snapshot admin role is not sufficient.`,

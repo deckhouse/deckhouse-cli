@@ -282,7 +282,11 @@ func TestRun_LeafCarriesParentOwnerRef(t *testing.T) {
 	}
 }
 
-func TestRun_FilesystemDataFailsFast(t *testing.T) {
+// TestPreflight_FilesystemDataPasses verifies that a VolumeSnapshot data leaf carrying
+// filesystem-volume data (data.tar) now passes preflight and allows Run to succeed.
+// The companion TestRun_LeafWithoutBlockDataFailsFast covers the case where a leaf has
+// neither block nor filesystem data (that must still be rejected).
+func TestPreflight_FilesystemDataPasses(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
 		apiVersion: "storage.deckhouse.io/v1alpha1",
@@ -305,18 +309,22 @@ func TestRun_FilesystemDataFailsFast(t *testing.T) {
 	vol := &stubVolumes{}
 	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
 
-	err := Run(context.Background(), baseConfig(root, up, vol, dyn))
-	if err == nil {
-		t.Fatal("expected filesystem-data error, got nil")
+	if err := Run(context.Background(), baseConfig(root, up, vol, dyn)); err != nil {
+		t.Fatalf("filesystem-data leaf must pass preflight and allow Run to succeed, got: %v", err)
 	}
 
-	if len(up.calls) != 0 || len(vol.ensure) != 0 {
-		t.Errorf("no cluster mutations should happen on filesystem-data preflight failure: uploads=%d ensures=%d", len(up.calls), len(vol.ensure))
+	// Manifests uploaded and volume import triggered for the FS leaf.
+	if len(up.calls) == 0 {
+		t.Error("expected manifest uploads, got none")
 	}
 
-	// The leaf import-mode CR must not have been created.
-	if _, gErr := dyn.Resource(volumeSnapshotGVRt).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{}); gErr == nil {
-		t.Error("VolumeSnapshot import CR should not be created when preflight fails")
+	if len(vol.ensure) == 0 || vol.ensure[0] != "pvc-1" {
+		t.Errorf("EnsureDataImport calls = %v, want [pvc-1]", vol.ensure)
+	}
+
+	// The leaf import-mode VolumeSnapshot CR must have been created.
+	if _, gErr := dyn.Resource(volumeSnapshotGVRt).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{}); gErr != nil {
+		t.Errorf("VolumeSnapshot import CR not created: %v", gErr)
 	}
 }
 

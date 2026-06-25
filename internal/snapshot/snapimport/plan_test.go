@@ -160,7 +160,9 @@ func TestBuildPlan_FilesystemDataFlag(t *testing.T) {
 		name:       "root",
 	})
 
-	if err := os.WriteFile(filepath.Join(root, archive.FsTarName), []byte("tar"), 0o600); err != nil {
+	tarPath := filepath.Join(root, archive.FsTarName)
+
+	if err := os.WriteFile(tarPath, []byte("tar"), 0o600); err != nil {
 		t.Fatalf("write data.tar: %v", err)
 	}
 
@@ -171,5 +173,9 @@ func TestBuildPlan_FilesystemDataFlag(t *testing.T) {
 
 	if !plan[0].FilesystemData {
 		t.Errorf("expected FilesystemData=true when data.tar present")
+	}
+
+	if plan[0].TarFile != tarPath {
+		t.Errorf("TarFile = %q, want %q", plan[0].TarFile, tarPath)
 	}
 }
