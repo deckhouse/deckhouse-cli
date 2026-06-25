@@ -81,7 +81,7 @@ func importMarkerCR(node PlannedNode, namespace, dataImportName string) (*unstru
 
 	case node.isVolumeSnapshotLeaf():
 		if dataImportName == "" {
-			return nil, fmt.Errorf("VolumeSnapshot leaf %q requires a DataImport name", node.Name)
+			return nil, fmt.Errorf("leaf VolumeSnapshot %q requires a DataImport name", node.Name)
 		}
 
 		if err := unstructured.SetNestedField(obj.Object, dataImportName, "spec", "source", "dataImportName"); err != nil {
