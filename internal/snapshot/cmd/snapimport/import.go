@@ -42,12 +42,13 @@ import (
 const (
 	cmdUse = "import"
 
-	flagNamespace = "namespace"
-	flagInput     = "input"
-	flagNode      = "node"
-	flagWorkers   = "workers"
-	flagTTL       = "ttl"
-	flagTimeout   = "timeout"
+	flagNamespace     = "namespace"
+	flagInput         = "input"
+	flagNode          = "node"
+	flagWorkers       = "workers"
+	flagTTL           = "ttl"
+	flagTimeout       = "timeout"
+	flagAllowExisting = "allow-existing"
 
 	defaultImportWorkers = 4
 
@@ -112,6 +113,7 @@ Scope and limitations:
 	cmd.Flags().Int(flagWorkers, defaultImportWorkers, "maximum number of data-leaf volume uploads to run in parallel (each worker may decompress a block volume to a temp file)")
 	cmd.Flags().String(flagTTL, defaultImportTTL, "idle TTL for each data-leaf DataImport (e.g. 2h, 30m); must exceed the importer's provisioning and post-upload completion time")
 	cmd.Flags().Duration(flagTimeout, 20*time.Minute, "timeout for per-node readiness/completion waits")
+	cmd.Flags().Bool(flagAllowExisting, false, "downgrade namespace preflight conflict check to a warning (import-mode markers from a prior run are never conflicts regardless of this flag)")
 
 	return cmd
 }
@@ -174,6 +176,11 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("reading --%s flag: %w", flagTimeout, err)
 	}
 
+	allowExisting, err := cmd.Flags().GetBool(flagAllowExisting)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagAllowExisting, err)
+	}
+
 	safeClient.SupportNoAuth = false
 
 	sc, err := safeClient.NewSafeClient(cmd.PersistentFlags())
@@ -207,6 +214,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		SelectedNodeKind: selectedKind,
 		SelectedNodeName: selectedName,
 		Workers:          workers,
+		AllowExisting:    allowExisting,
 		TTL:              ttl,
 		Timeout:          timeout,
 		Uploader:         aggClient,

@@ -916,3 +916,168 @@ func TestRun_Pass2b_ErrorCancelsSiblings(t *testing.T) {
 		t.Error("expected sibling leaf to be cancelled via errgroup context, got 0 cancelled")
 	}
 }
+
+// warnCapture is a slog.Handler that collects Warn-or-above log messages for assertions.
+type warnCapture struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (h *warnCapture) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (h *warnCapture) Handle(_ context.Context, r slog.Record) error {
+	if r.Level >= slog.LevelWarn {
+		h.mu.Lock()
+		h.msgs = append(h.msgs, r.Message)
+		h.mu.Unlock()
+	}
+
+	return nil
+}
+
+func (h *warnCapture) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+
+func (h *warnCapture) WithGroup(_ string) slog.Handler { return h }
+
+func (h *warnCapture) warnMessages() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	out := make([]string, len(h.msgs))
+	copy(out, h.msgs)
+
+	return out
+}
+
+// TestPreflightNamespace_CleanNamespace_Passes verifies that an empty target namespace
+// produces no conflicts.
+func TestPreflightNamespace_CleanNamespace_Passes(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, newFakeDynamic())
+
+	if err := preflightNamespace(context.Background(), cfg, plan); err != nil {
+		t.Fatalf("preflightNamespace on clean namespace: %v", err)
+	}
+}
+
+// TestPreflightNamespace_ImportModeMarker_NotConflict verifies that pre-existing
+// import-mode markers from a prior run of the same import are never treated as conflicts.
+func TestPreflightNamespace_ImportModeMarker_NotConflict(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// Both planned nodes pre-exist as import-mode markers (a prior partial run).
+	dyn := newFakeDynamic(readyRootSnapshot(), readyImportLeafVS())
+	cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, dyn)
+
+	if err := preflightNamespace(context.Background(), cfg, plan); err != nil {
+		t.Fatalf("preflightNamespace with import-mode markers: %v", err)
+	}
+}
+
+// TestPreflightNamespace_CaptureMode_Conflict verifies that a capture-mode object
+// sharing a planned node's name is reported as a conflict.
+func TestPreflightNamespace_CaptureMode_Conflict(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// A live capture-mode Snapshot "root" exists in the target namespace.
+	dyn := newFakeDynamic(captureModeRootSnapshot())
+	cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, dyn)
+
+	err = preflightNamespace(context.Background(), cfg, plan)
+	if err == nil {
+		t.Fatal("expected conflict error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "root") {
+		t.Errorf("expected conflict error to name the object %q, got: %v", "root", err)
+	}
+
+	if !strings.Contains(err.Error(), "allow-existing") {
+		t.Errorf("expected conflict error to mention --allow-existing, got: %v", err)
+	}
+}
+
+// TestRun_NsPreflightAbortsBeforeMarkers verifies that a capture-mode conflict detected
+// by preflightNamespace aborts the run before any cluster mutation (createMarkers).
+func TestRun_NsPreflightAbortsBeforeMarkers(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	// Capture-mode Snapshot "root" pre-exists; preflightNamespace must abort before markers.
+	dyn := newFakeDynamic(captureModeRootSnapshot())
+
+	err := Run(context.Background(), baseConfig(root, up, vol, dyn))
+	if err == nil {
+		t.Fatal("expected conflict error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "allow-existing") {
+		t.Errorf("expected preflight error to mention --allow-existing, got: %v", err)
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 {
+		t.Errorf("no cluster mutations should happen before preflight: uploads=%d ensures=%d", len(up.calls), len(vol.ensure))
+	}
+
+	// The leaf VolumeSnapshot marker must not have been created (createMarkers never called).
+	if _, gErr := dyn.Resource(volumeSnapshotGVRt).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{}); gErr == nil {
+		t.Error("VolumeSnapshot import CR should not be created when namespace preflight fails")
+	}
+}
+
+// TestRun_AllowExisting_ProceedsWithWarning verifies that --allow-existing downgrades
+// the preflight conflict check to a warning; the run proceeds past preflightNamespace.
+// The per-object reconcileExistingMarker protection is unaffected, so the run may still
+// fail at createMarkers — confirming that preflightNamespace did NOT abort it.
+func TestRun_AllowExisting_ProceedsWithWarning(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	// Capture-mode Snapshot "root" pre-exists. AllowExisting=true → preflight warns, not errors.
+	// createMarkers subsequently hits reconcileExistingMarker which still refuses non-import-mode.
+	dyn := newFakeDynamic(captureModeRootSnapshot())
+
+	lh := &warnCapture{}
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.AllowExisting = true
+	cfg.Log = slog.New(lh)
+
+	err := Run(context.Background(), cfg)
+
+	// Error must come from createMarkers (not from preflightNamespace).
+	if err == nil {
+		t.Fatal("expected error from createMarkers, got nil")
+	}
+
+	if strings.Contains(err.Error(), "allow-existing") {
+		t.Errorf("error should NOT be the preflight conflict error (run should have passed preflight): %v", err)
+	}
+
+	if !strings.Contains(err.Error(), "refusing to mutate") {
+		t.Errorf("expected 'refusing to mutate' error from reconcileExistingMarker, got: %v", err)
+	}
+
+	// A warning must have been emitted by preflightNamespace.
+	warns := lh.warnMessages()
+	if len(warns) == 0 {
+		t.Error("expected at least one warning log from preflightNamespace, got none")
+	}
+}

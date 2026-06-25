@@ -234,3 +234,18 @@ func TestRun_NodeFlag_InvalidFormat(t *testing.T) {
 		t.Errorf("expected error to mention %q, got: %v", flagNode, err)
 	}
 }
+
+func TestNewCommand_AllowExistingFlagDefault(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	allowExisting, err := cmd.Flags().GetBool(flagAllowExisting)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagAllowExisting, err)
+	}
+
+	if allowExisting {
+		t.Fatalf("default --%s: got true, want false (opt-in flag)", flagAllowExisting)
+	}
+}
