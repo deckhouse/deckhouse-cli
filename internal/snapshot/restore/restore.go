@@ -142,12 +142,32 @@ func Run(ctx context.Context, cfg Config) error {
 		slog.String("snapshot", cfg.Snapshot),
 		slog.Int("objects", len(objs)))
 
+	// Implicit dry-run preflight: validate every object without mutating the cluster.
+	// Any admission failure here aborts before any real apply.
+	dryRunCfg := cfg
+	dryRunCfg.DryRun = true
+
+	if _, err := applyAll(ctx, dryRunCfg, objs); err != nil {
+		return fmt.Errorf("dry-run preflight: %w", err)
+	}
+
+	cfg.Log.Info("validated restore manifests (dry-run)",
+		slog.String("namespace", cfg.Namespace),
+		slog.String("snapshot", cfg.Snapshot),
+		slog.Int("objects", len(objs)))
+
+	// With --dry-run, only the validation pass runs; nothing has been mutated.
+	if cfg.DryRun {
+		return nil
+	}
+
+	// Real apply pass: every object passed the dry-run, so we apply without DryRun.
 	pvcs, err := applyAll(ctx, cfg, objs)
 	if err != nil {
 		return err
 	}
 
-	if cfg.DryRun || !cfg.Wait {
+	if !cfg.Wait {
 		return nil
 	}
 
