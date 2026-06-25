@@ -28,6 +28,8 @@ func testMapper() meta.RESTMapper {
 	m := meta.NewDefaultRESTMapper(nil)
 	m.Add(schema.GroupVersionKind{Group: StorageGroup, Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Group: "demo.deckhouse.io", Version: "v1alpha1", Kind: "VirtualDiskSnapshot"}, meta.RESTScopeNamespace)
+	// Real producer group for demo domain snapshot kinds (demo.state-snapshotter.deckhouse.io/v1alpha1).
+	m.Add(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
 
 	return m
 }
@@ -111,9 +113,9 @@ func TestDownloadPath(t *testing.T) {
 	}
 }
 
-// TestSubresourcePath verifies that restore/upload subresources are served by the
-// node's OWN subresource group (core group for core Snapshot, domain-prefixed group
-// for domain CRs, VS-connector group for CSI leaves).
+// TestSubresourcePath verifies that the manifests-with-data-restoration subresource
+// is served by the node's OWN subresource group (core group for core Snapshot,
+// domain-prefixed group for domain CRs, VS-connector group for CSI leaves).
 func TestSubresourcePath(t *testing.T) {
 	c := NewClient(nil, testMapper())
 
@@ -130,10 +132,10 @@ func TestSubresourcePath(t *testing.T) {
 			want: "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/my-snap/manifests-with-data-restoration",
 		},
 		{
-			name: "domain snapshot upload uses domain-prefixed group",
+			name: "domain snapshot restore uses domain-prefixed group",
 			ref:  NodeRef{APIVersion: "demo.deckhouse.io/v1alpha1", Kind: "VirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"},
-			sub:  SubManifestsUpload,
-			want: "/apis/subresources.demo.deckhouse.io/v1alpha1/namespaces/ns/virtualdisksnapshots/vds-1/manifests-and-children-refs-upload",
+			sub:  SubManifestsRestore,
+			want: "/apis/subresources.demo.deckhouse.io/v1alpha1/namespaces/ns/virtualdisksnapshots/vds-1/manifests-with-data-restoration",
 		},
 		{
 			name: "csi volume snapshot leaf restore uses vs-connector group",
@@ -152,6 +154,51 @@ func TestSubresourcePath(t *testing.T) {
 
 			if got != tc.want {
 				t.Errorf("subresourcePath:\n got  %q\n want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUploadPath verifies that manifests-and-children-refs-upload is always served by
+// the CORE subresources group for non-VS kinds (core Snapshot and domain CRs alike),
+// and by the VS-connector group for CSI VolumeSnapshot leaves.
+// Case (a) exposes the pre-fix regression: before the fix, domain kinds were routed to
+// the domain-prefixed group (e.g. subresources.demo.state-snapshotter.deckhouse.io),
+// which only implements GET and returns 405 for POST.
+func TestUploadPath(t *testing.T) {
+	c := NewClient(nil, testMapper())
+
+	cases := []struct {
+		name string
+		ref  NodeRef
+		want string
+	}{
+		{
+			name: "domain DemoVirtualDiskSnapshot upload uses core group",
+			ref:  NodeRef{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"},
+			want: "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-and-children-refs-upload",
+		},
+		{
+			name: "core Snapshot upload uses core group",
+			ref:  NodeRef{APIVersion: StorageGroup + "/v1alpha1", Kind: "Snapshot", Name: "my-snap", Namespace: "ns"},
+			want: "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/my-snap/manifests-and-children-refs-upload",
+		},
+		{
+			name: "csi volume snapshot leaf upload uses vs-connector group",
+			ref:  NodeRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-1", Namespace: "ns"},
+			want: "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-and-children-refs-upload",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := c.uploadPath(tc.ref)
+			if err != nil {
+				t.Fatalf("uploadPath: %v", err)
+			}
+
+			if got != tc.want {
+				t.Errorf("uploadPath:\n got  %q\n want %q", got, tc.want)
 			}
 		})
 	}
