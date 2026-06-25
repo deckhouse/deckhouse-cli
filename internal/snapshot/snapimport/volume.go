@@ -450,7 +450,7 @@ func (c *clusterVolumeImporter) waitDataImportCompleted(ctx context.Context, nam
 // For CSI VolumeSnapshot leaves the group/resource are fixed constants. For domain data
 // leaves the resource plural is resolved via mapper (the domain controller drives import
 // through spec.dataSource.name; the DataImport targetRef identifies the leaf snapshot CR).
-func leafTargetRef(leaf PlannedNode, mapper meta.RESTMapper) (group, resource string, err error) {
+func leafTargetRef(leaf PlannedNode, mapper meta.RESTMapper) (string, string, error) {
 	if leaf.isVolumeSnapshotLeaf() {
 		return aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, nil
 	}
