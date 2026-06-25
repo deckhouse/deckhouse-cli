@@ -47,6 +47,7 @@ const (
 	conditionExpired      = "Expired"
 	uploadBlockSubpath    = "api/v1/block"
 	uploadFinishedSubpath = "api/v1/finished"
+	volumeModeFilesystem  = "Filesystem"
 
 	// The SVDM importer's CheckRequiredHeaders middleware rejects any PUT missing these
 	// attribute headers. The block import handler ignores their values (it writes raw bytes
@@ -231,15 +232,11 @@ func (c *clusterVolumeImporter) deleteDataImportAndWait(ctx context.Context, ri 
 	}
 }
 
-// UploadVolumeData waits for the DataImport endpoint, uploads the decompressed block
-// bytes, finalises, and waits for the durable artifact.
+// UploadVolumeData waits for the DataImport endpoint, uploads the volume data
+// (filesystem tar or raw block), finalises, and waits for the durable artifact.
 func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf PlannedNode, diName, namespace string) error {
-	if leaf.FilesystemData {
-		return fmt.Errorf("filesystem-volume data import is not yet supported by this CLI (%s/%s)", leaf.Kind, leaf.Name)
-	}
-
-	if !leaf.HasBlockData() {
-		return fmt.Errorf("data leaf %s/%s has no block volume data file in the archive", leaf.Kind, leaf.Name)
+	if !leaf.FilesystemData && !leaf.HasBlockData() {
+		return fmt.Errorf("data leaf %s/%s has no volume data file in the archive", leaf.Kind, leaf.Name)
 	}
 
 	// Idempotent retry: if a prior run already produced this leaf's durable artifact, skip
@@ -266,38 +263,52 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 	volumeMode, _, _ := unstructured.NestedString(di.Object, "status", "volumeMode")
 	caB64, _, _ := unstructured.NestedString(di.Object, "status", "ca")
 
-	if volumeMode != volumeModeBlock {
-		return fmt.Errorf("DataImport %s/%s reports volumeMode %q; only %q is supported for snapshot data import",
-			namespace, diName, volumeMode, volumeModeBlock)
-	}
-
 	httpClient, err := c.uploadClient(caB64)
 	if err != nil {
 		return err
 	}
 
-	srcPath, size, cleanup, err := resolveBlockSource(leaf.DataFile)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
+	switch volumeMode {
+	case volumeModeFilesystem:
+		c.log.Info("uploading filesystem data",
+			slog.String("namespace", namespace),
+			slog.String("dataimport", diName))
 
-	blockURL, err := neturl.JoinPath(url, uploadBlockSubpath)
-	if err != nil {
-		return fmt.Errorf("build block upload URL: %w", err)
-	}
+		if err := importFSFromTar(ctx, httpClient, url, leaf.DataFile, c.log); err != nil {
+			return fmt.Errorf("upload filesystem data for %s/%s: %w", namespace, diName, err)
+		}
 
-	c.log.Info("uploading volume data",
-		slog.String("namespace", namespace),
-		slog.String("dataimport", diName),
-		slog.Int64("bytes", size))
+		if err := postFinished(ctx, httpClient, url); err != nil {
+			return fmt.Errorf("finalise upload for %s/%s: %w", namespace, diName, err)
+		}
 
-	if err := putBlock(ctx, httpClient, blockURL, srcPath, size); err != nil {
-		return fmt.Errorf("upload block data for %s/%s: %w", namespace, diName, err)
-	}
+	case volumeModeBlock:
+		srcPath, size, cleanup, err := resolveBlockSource(leaf.DataFile)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
 
-	if err := postFinished(ctx, httpClient, url); err != nil {
-		return fmt.Errorf("finalise upload for %s/%s: %w", namespace, diName, err)
+		blockURL, err := neturl.JoinPath(url, uploadBlockSubpath)
+		if err != nil {
+			return fmt.Errorf("build block upload URL: %w", err)
+		}
+
+		c.log.Info("uploading volume data",
+			slog.String("namespace", namespace),
+			slog.String("dataimport", diName),
+			slog.Int64("bytes", size))
+
+		if err := putBlock(ctx, httpClient, blockURL, srcPath, size); err != nil {
+			return fmt.Errorf("upload block data for %s/%s: %w", namespace, diName, err)
+		}
+
+		if err := postFinished(ctx, httpClient, url); err != nil {
+			return fmt.Errorf("finalise upload for %s/%s: %w", namespace, diName, err)
+		}
+
+	default:
+		return fmt.Errorf("DataImport %s/%s reports unsupported volumeMode %q", namespace, diName, volumeMode)
 	}
 
 	return c.waitDataImportCompleted(ctx, diName, namespace)
