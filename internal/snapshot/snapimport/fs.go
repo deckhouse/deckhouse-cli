@@ -83,6 +83,26 @@ func putFile(ctx context.Context, client httpDoer, baseURL, relPath, localPath s
 		return nil
 	}
 
+	if totalSize == 0 {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, fileURL, http.NoBody)
+		if err != nil {
+			return err
+		}
+
+		req.Header.Set("X-Content-Length", "0")
+		req.Header.Set("X-Offset", "0")
+		req.Header.Set("X-Attribute-Permissions", fmt.Sprintf("%04o", attrs.Perm))
+		req.Header.Set("X-Attribute-Uid", strconv.Itoa(attrs.UID))
+		req.Header.Set("X-Attribute-Gid", strconv.Itoa(attrs.GID))
+		req.Header.Set("X-Attribute-ModTime", attrs.ModTime.UTC().Format(time.RFC3339))
+
+		if _, err = doFileChunk(client, req, 0, 0); err != nil {
+			return fmt.Errorf("upload %s at offset 0: %w", relPath, err)
+		}
+
+		return nil
+	}
+
 	for offset < totalSize {
 		section := io.NewSectionReader(f, offset, totalSize-offset)
 
