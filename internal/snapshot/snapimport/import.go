@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,6 +38,7 @@ import (
 const (
 	defaultTimeout      = 20 * time.Minute
 	defaultPollInterval = 3 * time.Second
+	defaultWorkers      = 4
 
 	condManifestsReady = "ManifestsReady"
 	condVolumesReady   = "VolumesReady"
@@ -85,6 +87,11 @@ type Config struct {
 	Volumes VolumeImporter
 	// Dynamic creates import-mode CRs and reads readiness status.
 	Dynamic dynamic.Interface
+	// Workers is the maximum number of data-leaf volume uploads to run concurrently in
+	// pass 2b. Defaults to 4 when zero. Note the multiplicative disk budget: each worker
+	// may decompress a block volume into a temporary file, so the worst-case peak
+	// temporary disk usage is Workers × (size of the largest decompressed volume).
+	Workers int
 	// Mapper resolves node GVKs to resources.
 	Mapper meta.RESTMapper
 	// Log receives progress output.
@@ -103,6 +110,9 @@ type Config struct {
 //     until the leaf VolumeSnapshot is bound, which needs the parent SnapshotContent, which
 //     needs the parent's manifests upload — so finishing a leaf (including waiting on its
 //     DataImport) before its ancestors' manifests are up would deadlock until timeout;
+//  3. pass 2b runs data-leaf uploads with bounded concurrency (cfg.Workers goroutines via
+//     errgroup.SetLimit); the first leaf error cancels all in-flight siblings via the
+//     derived ctx;
 //
 // finally waiting for the root Snapshot and its bound SnapshotContent to become Ready.
 func Run(ctx context.Context, cfg Config) error {
@@ -176,12 +186,22 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
-	// Pass 2b: import each data leaf's volume bytes. The DataImport is created here (just
-	// before the upload) so its idle TTL window stays minimal.
+	// Pass 2b: import each data leaf's volume bytes with bounded concurrency. The DataImport
+	// is created immediately before the upload so its idle TTL window stays minimal.
+	// The first leaf error cancels all in-flight siblings via gctx.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(cfg.Workers)
+
 	for i := range plan {
-		if err := importNodeData(ctx, cfg, plan[i]); err != nil {
-			return err
-		}
+		node := plan[i]
+
+		g.Go(func() error {
+			return importNodeData(gctx, cfg, node)
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return err
 	}
 
 	return waitRootReady(ctx, cfg, root)
@@ -715,6 +735,10 @@ func applyDefaults(cfg Config) Config {
 
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = defaultPollInterval
+	}
+
+	if cfg.Workers <= 0 {
+		cfg.Workers = defaultWorkers
 	}
 
 	if cfg.Log == nil {

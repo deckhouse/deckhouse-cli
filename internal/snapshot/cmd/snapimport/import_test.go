@@ -193,6 +193,21 @@ func TestParseNodeFlag(t *testing.T) {
 	}
 }
 
+func TestNewCommand_WorkersFlagDefault(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	workers, err := cmd.Flags().GetInt(flagWorkers)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagWorkers, err)
+	}
+
+	if workers != defaultImportWorkers {
+		t.Fatalf("default --%s: got %d, want %d", flagWorkers, workers, defaultImportWorkers)
+	}
+}
+
 func TestRun_NodeFlag_InvalidFormat(t *testing.T) {
 	t.Helper()
 
