@@ -17,6 +17,8 @@ limitations under the License.
 package aggapi
 
 import (
+	"fmt"
+	"net/http"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -267,5 +269,132 @@ func TestResourceFor_NoMapper(t *testing.T) {
 
 	if res != VolumeSnapshotResource {
 		t.Errorf("resourceFor(VolumeSnapshot leaf): got %q, want %q", res, VolumeSnapshotResource)
+	}
+}
+
+// TestAggregatedAPIContract pins every aggregated-API path the CLI builds against the
+// verified server contract. Each row specifies the subresource, the node kind, the
+// exact absolute path, and the HTTP method the server requires. Inline comments
+// reference the producer handler that serves each combination so any future drift
+// (like the domain-upload 405 fixed in fix-import-upload-core-group-for-domain) fails
+// fast here.
+//
+// Server contract summary (verified against state-snapshotter source):
+//   - manifests-download (GET): core group for Snapshot+domain, VS-connector for VS leaf,
+//     cluster-scoped snapshotcontents path for DataImport; restore_handler.go SetupRoutes.
+//   - manifests-with-data-restoration (GET): core group for Snapshot; domain-prefixed
+//     group for domain CRs (domainapi/handler.go, GET-only); VS-connector for VS leaf.
+//   - manifests-and-children-refs-upload (POST): CORE group for Snapshot AND domain CRs
+//     (routeGenericSnapshotSubresource handles both); VS-connector for VS leaf.
+func TestAggregatedAPIContract(t *testing.T) {
+	c := NewClient(nil, testMapper())
+
+	coreRef := NodeRef{APIVersion: StorageGroup + "/v1alpha1", Kind: "Snapshot", Name: "snap-1", Namespace: "ns"}
+	domainRef := NodeRef{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"}
+	vsRef := NodeRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-1", Namespace: "ns"}
+
+	cases := []struct {
+		name       string
+		pathFn     func(*Client) (string, error)
+		wantPath   string
+		wantMethod string // HTTP method the server contract requires for this subresource
+	}{
+		// ── manifests-download (GET) ──────────────────────────────────────────────────
+		// restore_handler.go routeCoreSnapshotSubresource -> HandleCoreSnapshotManifestsDownload
+		{
+			name:       "core Snapshot: manifests-download -> core group",
+			pathFn:     func(c *Client) (string, error) { return c.downloadPath(coreRef) },
+			wantPath:   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/snap-1/manifests-download",
+			wantMethod: http.MethodGet,
+		},
+		// restore_handler.go routeGenericSnapshotSubresource -> HandleGenericSnapshotManifestsDownload
+		{
+			name:       "domain CR: manifests-download -> core group",
+			pathFn:     func(c *Client) (string, error) { return c.downloadPath(domainRef) },
+			wantPath:   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-download",
+			wantMethod: http.MethodGet,
+		},
+		// volumesnapshot_connector.go handleVolumeSnapshotNamespaced -> handleVolumeSnapshotManifestsDownload
+		{
+			name:       "VS leaf: manifests-download -> VS-connector group",
+			pathFn:     func(c *Client) (string, error) { return c.downloadPath(vsRef) },
+			wantPath:   "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-download",
+			wantMethod: http.MethodGet,
+		},
+		// restore_handler.go: cluster-scoped /snapshotcontents/<name>/manifests-download (DataImport path)
+		{
+			name: "snapshotcontent: manifests-download -> core group cluster-scoped",
+			pathFn: func(_ *Client) (string, error) {
+				return fmt.Sprintf("/apis/%s/%s/snapshotcontents/%s/%s",
+					CoreSubresourcesGroup, CoreSubresourcesVersion, "nss-content-1", SubManifestsDownload), nil
+			},
+			wantPath:   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/snapshotcontents/nss-content-1/manifests-download",
+			wantMethod: http.MethodGet,
+		},
+
+		// ── manifests-with-data-restoration (GET) ─────────────────────────────────────
+		// restore_handler.go routeCoreSnapshotSubresource -> HandleGetSnapshotManifestsWithDataRestoration
+		{
+			name:       "core Snapshot: manifests-with-data-restoration -> core group",
+			pathFn:     func(c *Client) (string, error) { return c.subresourcePath(coreRef, SubManifestsRestore) },
+			wantPath:   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/snap-1/manifests-with-data-restoration",
+			wantMethod: http.MethodGet,
+		},
+		// domainapi/handler.go handleSubtree: GET-only; "manifests-with-data-restoration" -> ManifestsWithDataRestoration
+		// Served by the domain-prefixed group (subresources.demo.state-snapshotter.deckhouse.io).
+		{
+			name:       "domain CR: manifests-with-data-restoration -> domain-prefixed group",
+			pathFn:     func(c *Client) (string, error) { return c.subresourcePath(domainRef, SubManifestsRestore) },
+			wantPath:   "/apis/subresources.demo.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-with-data-restoration",
+			wantMethod: http.MethodGet,
+		},
+		// volumesnapshot_connector.go handleVolumeSnapshotNamespaced -> handleVolumeSnapshotManifestsWithDataRestoration
+		{
+			name:       "VS leaf: manifests-with-data-restoration -> VS-connector group",
+			pathFn:     func(c *Client) (string, error) { return c.subresourcePath(vsRef, SubManifestsRestore) },
+			wantPath:   "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-with-data-restoration",
+			wantMethod: http.MethodGet,
+		},
+
+		// ── manifests-and-children-refs-upload (POST) ─────────────────────────────────
+		// restore_handler.go routeCoreSnapshotSubresource -> HandleSnapshotManifestsAndChildrenUpload
+		{
+			name:       "core Snapshot: manifests-and-children-refs-upload -> core group",
+			pathFn:     func(c *Client) (string, error) { return c.uploadPath(coreRef) },
+			wantPath:   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/snap-1/manifests-and-children-refs-upload",
+			wantMethod: http.MethodPost,
+		},
+		// restore_handler.go routeGenericSnapshotSubresource -> HandleGenericSnapshotManifestsAndChildrenUpload
+		// CORE group: domainapi/handler.go handleSubtree only implements GET; POST must go to core.
+		{
+			name:       "domain CR: manifests-and-children-refs-upload -> CORE group",
+			pathFn:     func(c *Client) (string, error) { return c.uploadPath(domainRef) },
+			wantPath:   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-and-children-refs-upload",
+			wantMethod: http.MethodPost,
+		},
+		// volumesnapshot_connector.go handleVolumeSnapshotNamespaced -> handleManifestsAndChildrenUpload (verb: create/POST)
+		{
+			name:       "VS leaf: manifests-and-children-refs-upload -> VS-connector group",
+			pathFn:     func(c *Client) (string, error) { return c.uploadPath(vsRef) },
+			wantPath:   "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-and-children-refs-upload",
+			wantMethod: http.MethodPost,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantMethod != http.MethodGet && tc.wantMethod != http.MethodPost {
+				t.Errorf("contract table error: wantMethod=%q must be GET or POST", tc.wantMethod)
+			}
+
+			got, err := tc.pathFn(c)
+			if err != nil {
+				t.Fatalf("path build: %v", err)
+			}
+
+			if got != tc.wantPath {
+				t.Errorf("path mismatch:\n got  %q\n want %q", got, tc.wantPath)
+			}
+		})
 	}
 }
