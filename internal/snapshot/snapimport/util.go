@@ -86,7 +86,7 @@ func isCompressedBlockFile(path string) bool {
 // no explicit --temp-dir is given). A raw archive file (data.bin) is used in place with a
 // no-op cleanup — avoiding a full second on-disk copy; a compressed file is decompressed into
 // a temp file that cleanup removes.
-func resolveBlockSource(dataFile, tempDir string) (path string, size int64, cleanup func(), err error) {
+func resolveBlockSource(dataFile, tempDir string) (string, int64, func(), error) {
 	if !isCompressedBlockFile(dataFile) {
 		info, sErr := os.Stat(dataFile)
 		if sErr != nil {
