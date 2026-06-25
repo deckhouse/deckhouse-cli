@@ -19,6 +19,7 @@ package restore
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -31,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
@@ -80,7 +82,92 @@ func testMapper() meta.RESTMapper {
 	return m
 }
 
+// addSSAReactor installs a reactor that simulates Server-Side Apply semantics using
+// pure JSON merge patch logic: absent objects are created from the patch body; present
+// objects are updated by merging (fields not in the patch are preserved). This is used
+// instead of the tracker's built-in Apply method, which uses strategic merge patch — a
+// strategy that fails for generic unstructured objects whose extra fields (e.g. "data"
+// in ConfigMap) are absent from the Go struct that strategic merge patch inspects.
+func addSSAReactor(dyn *dynamicfake.FakeDynamicClient) {
+	tracker := dyn.Tracker()
+
+	dyn.PrependReactor("patch", "*", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		pa, ok := action.(clienttesting.PatchAction)
+		if !ok || pa.GetPatchType() != types.ApplyPatchType {
+			return false, nil, nil
+		}
+
+		gvr := action.GetResource()
+		ns := pa.GetNamespace()
+		name := pa.GetName()
+
+		patch := &unstructured.Unstructured{}
+		if jsonErr := json.Unmarshal(pa.GetPatch(), &patch.Object); jsonErr != nil {
+			return true, nil, jsonErr
+		}
+
+		existing, err := tracker.Get(gvr, ns, name, metav1.GetOptions{})
+		if kubeerrors.IsNotFound(err) {
+			// Object absent: create from patch body (SSA create semantics).
+			if createErr := tracker.Create(gvr, patch, ns); createErr != nil {
+				return true, nil, createErr
+			}
+
+			created, getErr := tracker.Get(gvr, ns, name, metav1.GetOptions{})
+
+			return true, created, getErr
+		}
+
+		if err != nil {
+			return true, nil, err
+		}
+
+		// Object present: merge the patch into the existing object, preserving
+		// all fields the patch does not mention (JSON merge patch semantics).
+		existingUnstr, castOK := existing.(*unstructured.Unstructured)
+		if !castOK {
+			return true, nil, fmt.Errorf("unexpected existing object type %T", existing)
+		}
+
+		merged := existingUnstr.DeepCopy()
+		jsonMergeInto(merged.Object, patch.Object)
+
+		if updateErr := tracker.Update(gvr, merged, ns); updateErr != nil {
+			return true, nil, updateErr
+		}
+
+		updated, getErr := tracker.Get(gvr, ns, name, metav1.GetOptions{})
+
+		return true, updated, getErr
+	})
+}
+
+// jsonMergeInto applies RFC 7396 JSON merge patch semantics: for each key in src, the
+// corresponding key in dst is set or replaced; nested maps are merged recursively; keys
+// absent from src are preserved in dst.
+func jsonMergeInto(dst, src map[string]interface{}) {
+	for k, sv := range src {
+		dv, ok := dst[k]
+		if !ok {
+			dst[k] = sv
+
+			continue
+		}
+
+		dvm, isDstMap := dv.(map[string]interface{})
+		svm, isSrcMap := sv.(map[string]interface{})
+
+		if isDstMap && isSrcMap {
+			jsonMergeInto(dvm, svm)
+		} else {
+			dst[k] = sv
+		}
+	}
+}
+
 // newFakeDynamic builds a fake dynamic client seeded with the given objects.
+// It also installs a reactor for SSA create-if-not-exists semantics so that
+// Patch(ApplyPatchType, …) works for new objects the same way as on a real cluster.
 func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	gvrToListKind := map[schema.GroupVersionResource]string{
 		snapshotGVR: "SnapshotList",
@@ -89,7 +176,11 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 		pvGVR:       "PersistentVolumeList",
 	}
 
-	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, objs...)
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, objs...)
+
+	addSSAReactor(dyn)
+
+	return dyn
 }
 
 func discardLogger() *slog.Logger {
@@ -276,8 +367,9 @@ func TestRun_UpdatesExistingObject(t *testing.T) {
 	}
 }
 
-// TestRun_UpdatePreservesLiveMetadata verifies a full-object update does not strip live
-// server-managed metadata (finalizers, ownerReferences) absent from the restored manifest.
+// TestRun_UpdatePreservesLiveMetadata verifies that SSA does not clear server-managed
+// metadata (finalizers, ownerReferences) absent from the restored manifest. SSA only
+// owns fields d8 explicitly sets; fields set by other managers are not touched.
 func TestRun_UpdatePreservesLiveMetadata(t *testing.T) {
 	existing := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "v1",
@@ -324,9 +416,23 @@ func TestRun_UpdatePreservesLiveMetadata(t *testing.T) {
 }
 
 // TestRun_WaitBound succeeds when the restored PVC reports Bound.
+// The PVC is pre-seeded with Bound status to simulate CSI binding, since
+// applyObject strips status from the SSA patch (status is a separate subresource).
 func TestRun_WaitBound(t *testing.T) {
-	src := &stubSource{body: mustArray(t, pvcManifest("pvc-1", "Bound"))}
-	dyn := newFakeDynamic(readySnapshot())
+	// Pre-seed the PVC as already Bound; applyObject strips status from the SSA patch
+	// so the existing Bound status is preserved by strategic-merge semantics.
+	existing := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"metadata": map[string]interface{}{
+			"namespace": testNS,
+			"name":      "pvc-1",
+		},
+		"status": map[string]interface{}{"phase": "Bound"},
+	}}
+
+	src := &stubSource{body: mustArray(t, pvcManifest("pvc-1", ""))}
+	dyn := newFakeDynamic(readySnapshot(), existing)
 
 	cfg := baseConfig(src, dyn)
 	cfg.Wait = true
@@ -537,7 +643,7 @@ func TestApplyObject_GetError(t *testing.T) {
 	}
 }
 
-// TestRun_ImmutableUpdateActionable verifies that an Invalid update of a pre-existing
+// TestRun_ImmutableUpdateActionable verifies that an Invalid apply of a pre-existing
 // object (e.g. a PVC whose spec.dataSourceRef is immutable) yields an actionable error.
 func TestRun_ImmutableUpdateActionable(t *testing.T) {
 	existing := &unstructured.Unstructured{Object: map[string]interface{}{
@@ -552,7 +658,12 @@ func TestRun_ImmutableUpdateActionable(t *testing.T) {
 	src := &stubSource{body: mustArray(t, pvcManifest("pvc-1", ""))}
 	dyn := newFakeDynamic(readySnapshot(), existing)
 
-	dyn.PrependReactor("update", "persistentvolumeclaims", func(_ clienttesting.Action) (bool, runtime.Object, error) {
+	dyn.PrependReactor("patch", "persistentvolumeclaims", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		pa, ok := action.(clienttesting.PatchAction)
+		if !ok || pa.GetPatchType() != types.ApplyPatchType {
+			return false, nil, nil
+		}
+
 		return true, nil, kubeerrors.NewInvalid(
 			schema.GroupKind{Kind: "PersistentVolumeClaim"},
 			"pvc-1",
@@ -562,7 +673,7 @@ func TestRun_ImmutableUpdateActionable(t *testing.T) {
 
 	err := Run(context.Background(), baseConfig(src, dyn))
 	if err == nil {
-		t.Fatal("expected error for immutable update, got nil")
+		t.Fatal("expected error for immutable apply, got nil")
 	}
 
 	if !contains(err.Error(), "immutable") || !contains(err.Error(), "delete it") {
@@ -577,5 +688,90 @@ func TestIsNotFoundIntegration(t *testing.T) {
 	_, err := dyn.Resource(cmGVR).Namespace(testNS).Get(context.Background(), "missing", metav1.GetOptions{})
 	if !kubeerrors.IsNotFound(err) {
 		t.Fatalf("expected NotFound, got %v", err)
+	}
+}
+
+// TestApplyObject_PatchTypeIsSSA verifies that applyObject issues a Server-Side Apply
+// patch (ApplyPatchType) rather than a Create+Update upsert.
+func TestApplyObject_PatchTypeIsSSA(t *testing.T) {
+	var gotPatchType types.PatchType
+
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+	dyn := newFakeDynamic(readySnapshot())
+
+	dyn.PrependReactor("patch", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		pa, ok := action.(clienttesting.PatchAction)
+		if ok {
+			gotPatchType = pa.GetPatchType()
+		}
+
+		return false, nil, nil // let the SSA create reactor proceed
+	})
+
+	if err := Run(context.Background(), baseConfig(src, dyn)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if gotPatchType != types.ApplyPatchType {
+		t.Errorf("patch type: got %q, want ApplyPatchType (%q)", gotPatchType, types.ApplyPatchType)
+	}
+}
+
+// TestApplyObject_ExtraAnnotationPreserved is the regression test for problem 7:
+// applyObject must not clobber fields set by controllers that are absent from the
+// captured manifest. With SSA the server only updates fields d8 owns; unowned
+// annotations, labels and other fields set post-creation survive the apply.
+func TestApplyObject_ExtraAnnotationPreserved(t *testing.T) {
+	// Seed the object with an extra annotation added by a controller after creation.
+	existing := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]interface{}{
+			"namespace": testNS,
+			"name":      "cm-1",
+			"annotations": map[string]interface{}{
+				"controller.io/managed-by": "some-controller",
+			},
+		},
+		"data": map[string]interface{}{"k": "old"},
+	}}
+
+	// The restore manifest does not include the extra annotation.
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+	dyn := newFakeDynamic(readySnapshot(), existing)
+
+	if err := Run(context.Background(), baseConfig(src, dyn)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	cm, err := dyn.Resource(cmGVR).Namespace(testNS).Get(context.Background(), "cm-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get ConfigMap: %v", err)
+	}
+
+	// The extra annotation must survive the SSA apply.
+	if ann := cm.GetAnnotations(); ann["controller.io/managed-by"] != "some-controller" {
+		t.Errorf("extra annotation removed by SSA apply, want it preserved: annotations=%v", ann)
+	}
+
+	// The data field in the manifest must be updated.
+	val, _, _ := unstructured.NestedString(cm.Object, "data", "k")
+	if val != "v" {
+		t.Errorf("data not updated: got %q, want %q", val, "v")
+	}
+}
+
+// TestApplyObject_IdempotentApply verifies that applying the same manifest twice
+// does not error (SSA re-apply is idempotent).
+func TestApplyObject_IdempotentApply(t *testing.T) {
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+	dyn := newFakeDynamic(readySnapshot())
+
+	if err := Run(context.Background(), baseConfig(src, dyn)); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+
+	if err := Run(context.Background(), baseConfig(src, dyn)); err != nil {
+		t.Fatalf("second Run (idempotent): %v", err)
 	}
 }

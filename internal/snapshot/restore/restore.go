@@ -18,7 +18,7 @@ limitations under the License.
 //
 // Restore is a single GET against the root Snapshot's manifests-with-data-restoration
 // aggregated subresource (the server compiles the whole subtree, delegating domain
-// subtrees internally) followed by a dynamic upsert of every returned object as-is.
+// subtrees internally) followed by a Server-Side Apply of every returned object.
 // The compiler already rewrites PVCs with spec.dataSourceRef -> VolumeSnapshot (and a
 // domain controller sets the dataSource on VirtualDiskSnapshot for domain disks), so
 // CSI provisions volume data from the snapshot that already exists in the target
@@ -41,6 +41,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
@@ -50,6 +51,9 @@ import (
 const (
 	snapshotKind = "Snapshot"
 	pvcKind      = "PersistentVolumeClaim"
+
+	// fieldManager is the SSA field manager name used for all restore applies.
+	fieldManager = "d8-snapshot-restore"
 
 	readyConditionType = "Ready"
 	pvcPhaseBound      = "Bound"
@@ -198,12 +202,12 @@ func preflight(ctx context.Context, cfg Config) error {
 	}
 
 	if !isConditionTrue(snap, readyConditionType) {
-		return fmt.Errorf("Snapshot is not Ready=True (cannot restore an incomplete snapshot)")
+		return fmt.Errorf("snapshot is not Ready=True (cannot restore an incomplete snapshot)")
 	}
 
 	bound, _, _ := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
 	if bound == "" {
-		return fmt.Errorf("Snapshot has no status.boundSnapshotContentName (not yet bound)")
+		return fmt.Errorf("snapshot has no status.boundSnapshotContentName (not yet bound)")
 	}
 
 	return nil
@@ -229,8 +233,9 @@ func applyAll(ctx context.Context, cfg Config, objs []unstructured.Unstructured)
 	return pvcs, nil
 }
 
-// applyObject upserts a single object (Get -> Create when absent, else Update with the
-// live resourceVersion). Namespaced objects without a namespace inherit the target
+// applyObject applies a single object to the cluster using Server-Side Apply (SSA).
+// SSA merges only the fields d8 sets; fields owned by other managers (controllers,
+// webhooks) are not touched. Namespaced objects without a namespace inherit the target
 // namespace. It returns the effective namespace the object was applied into.
 func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured) (string, error) {
 	gvr, namespaced, err := cfg.resourceFor(obj.GroupVersionKind())
@@ -255,39 +260,36 @@ func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured
 		ri = cfg.Dynamic.Resource(gvr)
 	}
 
-	existing, err := ri.Get(ctx, obj.GetName(), metav1.GetOptions{})
-	if kubeerrors.IsNotFound(err) {
-		// A fresh object must not carry a resourceVersion from the captured manifest.
-		obj.SetResourceVersion("")
+	// Strip server-managed fields that SSA rejects or manages independently.
+	obj.SetResourceVersion("")
+	obj.SetManagedFields(nil)
+	delete(obj.Object, "status")
 
-		if _, createErr := ri.Create(ctx, obj, metav1.CreateOptions{}); createErr != nil {
-			return "", fmt.Errorf("create: %w", createErr)
-		}
-
-		cfg.Log.Info("created", slog.String("kind", obj.GetKind()), slog.String("name", obj.GetName()), slog.String("namespace", ns))
-
-		return ns, nil
-	}
-
+	jsonBytes, err := json.Marshal(obj.Object)
 	if err != nil {
-		return "", fmt.Errorf("get: %w", err)
+		return "", fmt.Errorf("marshal object for apply: %w", err)
 	}
 
-	obj.SetResourceVersion(existing.GetResourceVersion())
-	preserveLiveMetadata(obj, existing)
+	force := true
 
-	if _, updateErr := ri.Update(ctx, obj, metav1.UpdateOptions{}); updateErr != nil {
-		// Immutable fields (e.g. a PVC's spec.dataSourceRef) cannot be updated on an
-		// existing object: surface an actionable error instead of a raw API rejection.
-		if kubeerrors.IsInvalid(updateErr) {
+	if _, patchErr := ri.Patch(ctx, obj.GetName(), types.ApplyPatchType, jsonBytes, metav1.PatchOptions{
+		FieldManager: fieldManager,
+		Force:        &force,
+	}); patchErr != nil {
+		// Immutable fields (e.g. a PVC's spec.dataSourceRef) cause an Invalid error:
+		// surface an actionable error instead of a raw API rejection.
+		if kubeerrors.IsInvalid(patchErr) {
 			return "", fmt.Errorf("already exists with immutable fields differing from the snapshot; "+
-				"delete it and re-run restore: %w", updateErr)
+				"delete it and re-run restore: %w", patchErr)
 		}
 
-		return "", fmt.Errorf("update: %w", updateErr)
+		return "", fmt.Errorf("apply: %w", patchErr)
 	}
 
-	cfg.Log.Info("updated", slog.String("kind", obj.GetKind()), slog.String("name", obj.GetName()), slog.String("namespace", ns))
+	cfg.Log.Info("applied",
+		slog.String("kind", obj.GetKind()),
+		slog.String("name", obj.GetName()),
+		slog.String("namespace", ns))
 
 	return ns, nil
 }
@@ -345,25 +347,6 @@ func waitOnePVCBound(ctx context.Context, cfg Config, gvr schema.GroupVersionRes
 
 		if !sleepCtx(ctx, cfg.PollInterval) {
 			return ctx.Err()
-		}
-	}
-}
-
-// preserveLiveMetadata carries server-managed metadata that the apply-ready manifests
-// drop forward onto obj before a full-object Update. A PUT treats omitted fields as
-// cleared, so without this an in-place restore over a live object would strip controller
-// finalizers (lifecycle protection) and ownerReferences (garbage-collection relationships).
-// Values explicitly present on the restored manifest always win.
-func preserveLiveMetadata(obj, existing *unstructured.Unstructured) {
-	if len(obj.GetOwnerReferences()) == 0 {
-		if owners := existing.GetOwnerReferences(); len(owners) > 0 {
-			obj.SetOwnerReferences(owners)
-		}
-	}
-
-	if len(obj.GetFinalizers()) == 0 {
-		if finalizers := existing.GetFinalizers(); len(finalizers) > 0 {
-			obj.SetFinalizers(finalizers)
 		}
 	}
 }
