@@ -214,17 +214,23 @@ func (c *Client) ListTags(ctx context.Context, ref ImageRef) ([]string, error) {
 // No integrity check: the proxy exposes only a manifest digest, not a hash of
 // the gzip-tar body. Trust rests on the TLS-authenticated proxy channel.
 // The caller may want to cap the read with an io.LimitReader.
-func (c *Client) PullImage(ctx context.Context, ref ImageRef, tag string) (io.ReadCloser, error) {
-	if err := validateTag(tag); err != nil {
+func (c *Client) PullImage(ctx context.Context, ref ImageRef, version string) (io.ReadCloser, error) {
+	if err := validateTag(version); err != nil {
 		return nil, err
 	}
 
-	c.logger.Debug("pulling image", slog.String("image", ref.String()), slog.String("tag", tag))
+	platform := currentPlatform()
+	c.logger.Debug("pulling image", slog.String("image", ref.String()), slog.String("version", version), slog.String("platform", platform))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+ref.tagPath(tag), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+ref.imagePath(version), nil)
 	if err != nil {
 		return nil, fmt.Errorf("build pull request: %w", err)
 	}
+
+	// Select this platform's image from a multi-platform index. The proxy resolves
+	// the matching child manifest; without it the proxy would fall back to its
+	// default platform (linux/amd64).
+	req.URL.RawQuery = url.Values{"platform": {platform}}.Encode()
 
 	resp, err := c.do(req)
 	if err != nil {
