@@ -28,7 +28,9 @@ limitations under the License.
 //     Served by the node's OWN subresource group (core group for the core
 //     Snapshot, the domain-prefixed group for domain snapshot CRs).
 //   - manifests-and-children-refs-upload: import one node's manifests plus its
-//     direct child refs. Served by the node's own subresource group.
+//     direct child refs. Served by the CORE aggregated apiserver for every node
+//     kind (core Snapshot and domain snapshot CRs alike); CSI VolumeSnapshot
+//     leaves use the dedicated VS-connector group instead.
 //
 // The cluster-scoped snapshotcontents/<name>/manifests-download surface backs the
 // DataImport path (reading an original PVC manifest before any namespaced CR binds).
@@ -179,7 +181,7 @@ func (c *Client) RestoreManifests(ctx context.Context, ref NodeRef, targetNamesp
 // UploadManifests performs POST <node>/manifests-and-children-refs-upload with the
 // given JSON body ({"manifests": <array>, "childRefs": [...]}) and returns the raw body.
 func (c *Client) UploadManifests(ctx context.Context, ref NodeRef, body []byte) ([]byte, error) {
-	path, err := c.subresourcePath(ref, SubManifestsUpload)
+	path, err := c.uploadPath(ref)
 	if err != nil {
 		return nil, err
 	}
@@ -214,8 +216,30 @@ func (c *Client) downloadPath(ref NodeRef) (string, error) {
 		CoreSubresourcesGroup, CoreSubresourcesVersion, ref.Namespace, resource, ref.Name, SubManifestsDownload), nil
 }
 
-// subresourcePath builds the absolute path for a restore/upload subresource of ref,
-// addressed through the node's OWN aggregated subresource group.
+// uploadPath builds the manifests-and-children-refs-upload absolute path for ref.
+// The upload subresource is served by the CORE aggregated apiserver for every node
+// kind (core Snapshot and domain snapshot CRs); CSI VolumeSnapshot leaves use the
+// VS-connector group. This differs from the restore path, which routes domain
+// subtrees to the domain-prefixed group.
+func (c *Client) uploadPath(ref NodeRef) (string, error) {
+	if ref.IsVolumeSnapshotLeaf() {
+		return fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s/%s",
+			VSConnectorGroup, VSConnectorVersion, ref.Namespace, VolumeSnapshotResource, ref.Name, SubManifestsUpload), nil
+	}
+
+	resource, err := c.resourceFor(ref)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s/%s",
+		CoreSubresourcesGroup, CoreSubresourcesVersion, ref.Namespace, resource, ref.Name, SubManifestsUpload), nil
+}
+
+// subresourcePath builds the absolute path for the manifests-with-data-restoration
+// subresource of ref, addressed through the node's OWN aggregated subresource group.
+// Do NOT use this for manifests-and-children-refs-upload — upload is always served
+// by the CORE group for non-VS kinds; use uploadPath instead.
 func (c *Client) subresourcePath(ref NodeRef, sub string) (string, error) {
 	group, version, err := subresourceGroupVersion(ref)
 	if err != nil {
