@@ -75,6 +75,10 @@ type Config struct {
 	// Snapshot is the name of the root Snapshot to restore.
 	Snapshot string
 
+	// DryRun, when true, passes DryRunAll to every SSA apply so the API server
+	// validates and admits objects without persisting them. The --wait loop is
+	// skipped entirely in dry-run mode because nothing was created.
+	DryRun bool
 	// Wait, when true, blocks until all restored PersistentVolumeClaims reach Bound.
 	Wait bool
 	// Timeout bounds the Bound wait (only used when Wait is true).
@@ -143,7 +147,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	if !cfg.Wait {
+	if cfg.DryRun || !cfg.Wait {
 		return nil
 	}
 
@@ -272,10 +276,16 @@ func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured
 
 	force := true
 
-	if _, patchErr := ri.Patch(ctx, obj.GetName(), types.ApplyPatchType, jsonBytes, metav1.PatchOptions{
+	patchOpts := metav1.PatchOptions{
 		FieldManager: fieldManager,
 		Force:        &force,
-	}); patchErr != nil {
+	}
+
+	if cfg.DryRun {
+		patchOpts.DryRun = []string{metav1.DryRunAll}
+	}
+
+	if _, patchErr := ri.Patch(ctx, obj.GetName(), types.ApplyPatchType, jsonBytes, patchOpts); patchErr != nil {
 		// Immutable fields (e.g. a PVC's spec.dataSourceRef) cause an Invalid error:
 		// surface an actionable error instead of a raw API rejection.
 		if kubeerrors.IsInvalid(patchErr) {
@@ -286,10 +296,17 @@ func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured
 		return "", fmt.Errorf("apply: %w", patchErr)
 	}
 
-	cfg.Log.Info("applied",
-		slog.String("kind", obj.GetKind()),
-		slog.String("name", obj.GetName()),
-		slog.String("namespace", ns))
+	if cfg.DryRun {
+		cfg.Log.Info("would apply",
+			slog.String("kind", obj.GetKind()),
+			slog.String("name", obj.GetName()),
+			slog.String("namespace", ns))
+	} else {
+		cfg.Log.Info("applied",
+			slog.String("kind", obj.GetKind()),
+			slog.String("name", obj.GetName()),
+			slog.String("namespace", ns))
+	}
 
 	return ns, nil
 }
