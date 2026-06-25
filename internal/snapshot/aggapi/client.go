@@ -263,7 +263,7 @@ func (c *Client) resourceFor(ref NodeRef) (string, error) {
 // can route through its resource-agnostic snapshot export path (categorySnapshot):
 // group/resource must identify a namespaced snapshot CR so the controller can read
 // its status.boundSnapshotContentName → SnapshotContent → status.dataRef.
-func (c *Client) LeafDataExportTarget(ref NodeRef) (group, resource string, err error) {
+func (c *Client) LeafDataExportTarget(ref NodeRef) (string, string, error) {
 	gv, err := schema.ParseGroupVersion(ref.APIVersion)
 	if err != nil {
 		return "", "", fmt.Errorf("parse apiVersion %q: %w", ref.APIVersion, err)
@@ -286,7 +286,7 @@ func (c *Client) LeafDataExportTarget(ref NodeRef) (group, resource string, err 
 //   - CSI VolumeSnapshot leaves -> the VS-connector group.
 //   - the core Snapshot (storage.deckhouse.io) -> the core subresources group.
 //   - any domain snapshot CR -> "subresources." + its API group, same version.
-func subresourceGroupVersion(ref NodeRef) (group, version string, err error) {
+func subresourceGroupVersion(ref NodeRef) (string, string, error) {
 	gv, err := schema.ParseGroupVersion(ref.APIVersion)
 	if err != nil {
 		return "", "", fmt.Errorf("parse apiVersion %q: %w", ref.APIVersion, err)
