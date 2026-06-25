@@ -362,6 +362,136 @@ func TestSnapshotYAML_ChecksumUnaffectedBySourceNameField(t *testing.T) {
 	}
 }
 
+// TestSnapshotYAML_RoundTrip_WithSourceObjectRef verifies that SourceObjectRef is correctly
+// serialised and deserialised.
+func TestSnapshotYAML_RoundTrip_WithSourceObjectRef(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	wantSOR := &archive.SourceObjectRef{
+		APIVersion: "demo.deckhouse.io/v1alpha1",
+		Kind:       "DemoVirtualDisk",
+		Name:       "my-disk",
+	}
+
+	want := archive.SnapshotYAML{
+		APIVersion:      "demo.deckhouse.io/v1alpha1",
+		Kind:            "DemoVirtualDiskSnapshot",
+		Name:            "snap-1",
+		Namespace:       "ns-a",
+		SourceObjectRef: wantSOR,
+		Checksum:        checksum,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, want); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	got, err := archive.ReadSnapshotYAML(dir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if got.SourceObjectRef == nil {
+		t.Fatal("SourceObjectRef: got nil, want non-nil")
+	}
+
+	if got.SourceObjectRef.APIVersion != wantSOR.APIVersion {
+		t.Errorf("SourceObjectRef.APIVersion: got %q, want %q", got.SourceObjectRef.APIVersion, wantSOR.APIVersion)
+	}
+
+	if got.SourceObjectRef.Kind != wantSOR.Kind {
+		t.Errorf("SourceObjectRef.Kind: got %q, want %q", got.SourceObjectRef.Kind, wantSOR.Kind)
+	}
+
+	if got.SourceObjectRef.Name != wantSOR.Name {
+		t.Errorf("SourceObjectRef.Name: got %q, want %q", got.SourceObjectRef.Name, wantSOR.Name)
+	}
+}
+
+// TestSnapshotYAML_OmitemptySourceObjectRef verifies that when SourceObjectRef is nil
+// the field is absent from the serialised YAML output.
+func TestSnapshotYAML_OmitemptySourceObjectRef(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	sy := archive.SnapshotYAML{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-omit-sor",
+		Checksum:   checksum,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, sy); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, archive.SnapshotYAMLName))
+	if err != nil {
+		t.Fatalf("ReadFile snapshot.yaml: %v", err)
+	}
+
+	if strings.Contains(string(raw), "sourceObjectRef:") {
+		t.Errorf("snapshot.yaml must not contain 'sourceObjectRef:' when nil; got:\n%s", raw)
+	}
+}
+
+// TestSnapshotYAML_ChecksumUnaffectedBySourceObjectRef is a regression test confirming
+// that adding SourceObjectRef to snapshot.yaml does NOT change the node checksum
+// (because snapshot.yaml is excluded from ComputeNodeChecksum).
+func TestSnapshotYAML_ChecksumUnaffectedBySourceObjectRef(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum1, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum before write: %v", err)
+	}
+
+	sy := archive.SnapshotYAML{
+		APIVersion: "demo.deckhouse.io/v1alpha1",
+		Kind:       "DemoVirtualDiskSnapshot",
+		Name:       "snap-sor-regression",
+		SourceObjectRef: &archive.SourceObjectRef{
+			APIVersion: "demo.deckhouse.io/v1alpha1",
+			Kind:       "DemoVirtualDisk",
+			Name:       "my-disk",
+		},
+		Checksum: checksum1,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, sy); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	checksum2, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum after write: %v", err)
+	}
+
+	if checksum1.Hex != checksum2.Hex {
+		t.Errorf("checksum changed after writing snapshot.yaml with SourceObjectRef (snapshot.yaml must be excluded):\nbefore %q\nafter  %q",
+			checksum1.Hex, checksum2.Hex)
+	}
+
+	if err := archive.VerifyNode(dir); err != nil {
+		t.Errorf("VerifyNode must pass after adding SourceObjectRef field: %v", err)
+	}
+}
+
 // TestSnapshotYAML_ChecksumUnaffectedByVolumeField is a regression test that
 // confirms adding the Volume field to snapshot.yaml does NOT change the node
 // checksum (because snapshot.yaml is excluded from ComputeNodeChecksum).

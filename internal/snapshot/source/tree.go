@@ -132,6 +132,12 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 		Parent:     parent,
 	}
 
+	// For domain snapshot nodes (not the core Snapshot kind), capture the structured
+	// spec.sourceRef so it can be persisted in snapshot.yaml for import-mode CR reconstruction.
+	if apiVersion != rootAPIVersion || kind != "Snapshot" {
+		node.SpecSourceRef = extractSpecSourceRef(obj)
+	}
+
 	allChildRefs, err := extractChildRefs(obj)
 	if err != nil {
 		return nil, fmt.Errorf("%s %s/%s: status.childrenSnapshotRefs: %w", apiVersion, kind, name, err)
@@ -339,4 +345,18 @@ func mapString(m map[string]interface{}, key string) string {
 	v, _ := m[key].(string)
 
 	return v
+}
+
+// extractSpecSourceRef reads spec.sourceRef.{apiVersion,kind,name} from an unstructured
+// domain snapshot CR. Returns nil when any field is absent or the path does not exist.
+func extractSpecSourceRef(obj *unstructured.Unstructured) *SpecSourceRef {
+	av, _, _ := unstructured.NestedString(obj.Object, "spec", "sourceRef", "apiVersion")
+	kind, _, _ := unstructured.NestedString(obj.Object, "spec", "sourceRef", "kind")
+	name, _, _ := unstructured.NestedString(obj.Object, "spec", "sourceRef", "name")
+
+	if av == "" || kind == "" || name == "" {
+		return nil
+	}
+
+	return &SpecSourceRef{APIVersion: av, Kind: kind, Name: name}
 }

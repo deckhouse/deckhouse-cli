@@ -132,14 +132,15 @@ func FinalizeNode(nodeDir string, node *source.Node) error {
 	}
 
 	sy := archive.SnapshotYAML{
-		APIVersion: node.APIVersion,
-		Kind:       node.Kind,
-		Name:       node.Name,
-		Namespace:  node.Namespace,
-		SourceRef:  node.SourceRef,
-		SourceName: node.SourceName,
-		Checksum:   checksum,
-		Volumes:    buildVolumesList(node),
+		APIVersion:      node.APIVersion,
+		Kind:            node.Kind,
+		Name:            node.Name,
+		Namespace:       node.Namespace,
+		SourceRef:       node.SourceRef,
+		SourceName:      node.SourceName,
+		SourceObjectRef: buildSourceObjectRef(node.SpecSourceRef),
+		Checksum:        checksum,
+		Volumes:         buildVolumesList(node),
 	}
 
 	if err := archive.WriteSnapshotYAML(nodeDir, sy); err != nil {
@@ -268,4 +269,18 @@ func matchesVolumeTarget(obj unstructured.Unstructured, targetUID, targetName st
 	}
 
 	return targetName != "" && obj.GetName() == targetName
+}
+
+// buildSourceObjectRef maps a source.SpecSourceRef to an archive.SourceObjectRef.
+// Returns nil when src is nil (core Snapshot and VolumeSnapshot leaf nodes).
+func buildSourceObjectRef(src *source.SpecSourceRef) *archive.SourceObjectRef {
+	if src == nil {
+		return nil
+	}
+
+	return &archive.SourceObjectRef{
+		APIVersion: src.APIVersion,
+		Kind:       src.Kind,
+		Name:       src.Name,
+	}
 }

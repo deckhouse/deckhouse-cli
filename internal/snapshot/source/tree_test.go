@@ -1020,6 +1020,107 @@ func TestBuildTree_VolumeSnapshotLeaf_ViaBoundContent(t *testing.T) {
 	}
 }
 
+// makeUnstructuredSnapWithSpecSourceRef builds an unstructured domain snapshot CR that
+// carries spec.sourceRef = {apiVersion, kind, name}.
+func makeUnstructuredSnapWithSpecSourceRef(apiVersion, kind, namespace, name, contentName, srcAV, srcKind, srcName string) *unstructured.Unstructured {
+	obj := makeUnstructuredSnap(apiVersion, kind, namespace, name, contentName, nil)
+
+	_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+		"apiVersion": srcAV,
+		"kind":       srcKind,
+		"name":       srcName,
+	}, "spec", "sourceRef")
+
+	return obj
+}
+
+// TestBuildTree_DomainNode_SpecSourceRef verifies that:
+//   - a domain snapshot node whose CR carries spec.sourceRef has Node.SpecSourceRef set;
+//   - a domain node without spec.sourceRef has Node.SpecSourceRef == nil;
+//   - core Snapshot nodes (root and typed children) have Node.SpecSourceRef == nil.
+func TestBuildTree_DomainNode_SpecSourceRef(t *testing.T) {
+	t.Helper()
+
+	scheme := makeScheme(t)
+
+	root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
+		{APIVersion: demoAPI, Kind: "DemoVirtualDiskSnapshot", Name: "disk-with-ref"},
+		{APIVersion: demoAPI, Kind: "DemoVirtualDiskSnapshot", Name: "disk-no-ref"},
+		{APIVersion: rootAPIVersion, Kind: "Snapshot", Name: "core-child"},
+	})
+	scRoot := makeContent("sc-root", "mcp-root", nil)
+
+	diskWithRef := makeUnstructuredSnapWithSpecSourceRef(
+		demoAPI, "DemoVirtualDiskSnapshot", testNS, "disk-with-ref", "sc-disk-ref",
+		"demo.deckhouse.io/v1alpha1", "DemoVirtualDisk", "my-disk",
+	)
+	scDiskRef := makeContent("sc-disk-ref", "mcp-disk-ref", nil)
+
+	diskNoRef := makeUnstructuredSnap(demoAPI, "DemoVirtualDiskSnapshot", testNS, "disk-no-ref", "sc-disk-noref", nil)
+	scDiskNoRef := makeContent("sc-disk-noref", "mcp-disk-noref", nil)
+
+	coreChild := makeSnapshot("core-child", "sc-core-child", nil)
+	scCoreChild := makeContent("sc-core-child", "mcp-core-child", nil)
+
+	c := buildFakeClient(scheme,
+		[]client.Object{root, scRoot, scDiskRef, scDiskNoRef, coreChild, scCoreChild},
+		[]*unstructured.Unstructured{diskWithRef, diskNoRef},
+	)
+
+	tree, err := BuildTree(context.Background(), c, testNS, "root")
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+
+	if tree.SpecSourceRef != nil {
+		t.Errorf("root SpecSourceRef must be nil (core Snapshot node), got %+v", tree.SpecSourceRef)
+	}
+
+	var withRef, noRef, core *Node
+
+	for _, ch := range tree.Children {
+		switch ch.Name {
+		case "disk-with-ref":
+			withRef = ch
+		case "disk-no-ref":
+			noRef = ch
+		case "core-child":
+			core = ch
+		}
+	}
+
+	if withRef == nil || noRef == nil || core == nil {
+		t.Fatalf("expected all three children; withRef=%v noRef=%v core=%v", withRef, noRef, core)
+	}
+
+	// Domain node with spec.sourceRef populated.
+	if withRef.SpecSourceRef == nil {
+		t.Fatal("disk-with-ref SpecSourceRef must not be nil")
+	}
+
+	if withRef.SpecSourceRef.APIVersion != "demo.deckhouse.io/v1alpha1" {
+		t.Errorf("SpecSourceRef.APIVersion: got %q, want demo.deckhouse.io/v1alpha1", withRef.SpecSourceRef.APIVersion)
+	}
+
+	if withRef.SpecSourceRef.Kind != "DemoVirtualDisk" {
+		t.Errorf("SpecSourceRef.Kind: got %q, want DemoVirtualDisk", withRef.SpecSourceRef.Kind)
+	}
+
+	if withRef.SpecSourceRef.Name != "my-disk" {
+		t.Errorf("SpecSourceRef.Name: got %q, want my-disk", withRef.SpecSourceRef.Name)
+	}
+
+	// Domain node without spec.sourceRef — SpecSourceRef must be nil.
+	if noRef.SpecSourceRef != nil {
+		t.Errorf("disk-no-ref SpecSourceRef must be nil, got %+v", noRef.SpecSourceRef)
+	}
+
+	// Core Snapshot child — SpecSourceRef must be nil.
+	if core.SpecSourceRef != nil {
+		t.Errorf("core-child SpecSourceRef must be nil (core Snapshot node), got %+v", core.SpecSourceRef)
+	}
+}
+
 // TestBuildTree_VolumeSnapshotLeaf_Unbound verifies that a VolumeSnapshot with an empty
 // status.boundSnapshotContentName returns ErrLeafNotBound and does not silently produce
 // an empty leaf node.

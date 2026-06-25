@@ -23,6 +23,18 @@ import (
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 )
 
+// SpecSourceRef is the structured spec.sourceRef from a domain snapshot CR,
+// preserved so the import side can recreate the CR in import mode.
+// The namespace of the source object is implicit (same as the snapshot's namespace).
+type SpecSourceRef struct {
+	// APIVersion is the apiVersion of the source object.
+	APIVersion string
+	// Kind is the kind of the source object.
+	Kind string
+	// Name is the metadata.name of the source object.
+	Name string
+}
+
 // Node is one node in the resolved snapshot tree.
 //
 // All nodes in a tree share the same namespace (the root Snapshot namespace).
@@ -70,6 +82,12 @@ type Node struct {
 	// For orphan leaf volume nodes it is set to the captured PVC name (Binding.Target.Name).
 	// Empty for the root node (which carries no source-ref annotation).
 	SourceName string
+
+	// SpecSourceRef is the structured spec.sourceRef from a domain snapshot CR
+	// (apiVersion/kind/name of the source object). Set for domain snapshot nodes when the
+	// CR carries a spec.sourceRef; nil for core Snapshot nodes and CSI VolumeSnapshot
+	// leaf nodes (which do not need spec.sourceRef for import reconstruction).
+	SpecSourceRef *SpecSourceRef
 
 	// OwnDataRefs holds the volume-to-artifact bindings for this non-aggregator snapshot node.
 	// The volume data for each entry is downloaded directly into this node's directory.
