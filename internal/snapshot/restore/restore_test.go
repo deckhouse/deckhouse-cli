@@ -1147,3 +1147,142 @@ func TestApplyObject_IdempotentApply(t *testing.T) {
 		t.Fatalf("second Run (idempotent): %v", err)
 	}
 }
+
+// kindSearchMapper wraps meta.RESTMapper to support kind-without-group lookup:
+// when GroupKind.Group is empty it searches all registered kinds regardless of
+// group, mirroring the DeferredDiscoveryRESTMapper behaviour used in production.
+// meta.DefaultRESTMapper only scans defaultGroupVersions that match the given
+// group, so a domain kind looked up with an empty group is never found without
+// this wrapper.
+type kindSearchMapper struct {
+	meta.RESTMapper
+	kindToGVK map[string]schema.GroupVersionKind
+}
+
+func (m *kindSearchMapper) RESTMapping(gk schema.GroupKind, versions ...string) (*meta.RESTMapping, error) {
+	if gk.Group == "" {
+		if gvk, ok := m.kindToGVK[gk.Kind]; ok {
+			gk = schema.GroupKind{Group: gvk.Group, Kind: gvk.Kind}
+			if len(versions) == 0 {
+				versions = []string{gvk.Version}
+			}
+		}
+	}
+
+	return m.RESTMapper.RESTMapping(gk, versions...)
+}
+
+// testMapperWithDomain extends testMapper with a domain snapshot GVK so that
+// resolveNodeRef tests can resolve domain kinds via the RESTMapper.
+func testMapperWithDomain() meta.RESTMapper {
+	base := meta.NewDefaultRESTMapper([]schema.GroupVersion{
+		{Group: "", Version: "v1"},
+		{Group: "storage.deckhouse.io", Version: "v1alpha1"},
+		{Group: "snapshot.storage.k8s.io", Version: "v1"},
+		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1"},
+	})
+	base.Add(schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
+	base.Add(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolumeClaim"}, meta.RESTScopeNamespace)
+	base.Add(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, meta.RESTScopeNamespace)
+	base.Add(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolume"}, meta.RESTScopeRoot)
+	base.Add(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}, meta.RESTScopeNamespace)
+	base.Add(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
+
+	return &kindSearchMapper{
+		RESTMapper: base,
+		kindToGVK: map[string]schema.GroupVersionKind{
+			"DemoVirtualDiskSnapshot": {Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"},
+		},
+	}
+}
+
+// TestRun_NoSelectedNode_UsesRootRef verifies that when no SelectedNode is set,
+// RestoreManifests is called with the root Snapshot NodeRef.
+func TestRun_NoSelectedNode_UsesRootRef(t *testing.T) {
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+	dyn := newFakeDynamic(readySnapshot())
+
+	cfg := baseConfig(src, dyn)
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	wantRef := aggapi.NodeRef{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       testSnap,
+		Namespace:  testNS,
+	}
+
+	if src.gotRef != wantRef {
+		t.Errorf("NodeRef: got %+v, want %+v", src.gotRef, wantRef)
+	}
+}
+
+// TestRun_SelectedNode_UsesNodeRef verifies that when SelectedNodeKind/SelectedNodeName
+// are set, RestoreManifests is called with the selected node's NodeRef (resolved via
+// the RESTMapper), not the root Snapshot ref. The root Snapshot preflight still runs.
+func TestRun_SelectedNode_UsesNodeRef(t *testing.T) {
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+	dyn := newFakeDynamic(readySnapshot())
+
+	cfg := Config{
+		Namespace:        testNS,
+		Snapshot:         testSnap,
+		SelectedNodeKind: "DemoVirtualDiskSnapshot",
+		SelectedNodeName: "nss-child-abc123",
+		Source:           src,
+		Dynamic:          dyn,
+		Mapper:           testMapperWithDomain(),
+		Log:              discardLogger(),
+		PollInterval:     time.Millisecond,
+	}
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	wantRef := aggapi.NodeRef{
+		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "DemoVirtualDiskSnapshot",
+		Name:       "nss-child-abc123",
+		Namespace:  testNS,
+	}
+
+	if src.gotRef != wantRef {
+		t.Errorf("NodeRef: got %+v, want %+v", src.gotRef, wantRef)
+	}
+}
+
+// TestRun_SelectedNode_UnknownKindErrors verifies that an unresolvable SelectedNodeKind
+// returns an error before calling RestoreManifests.
+func TestRun_SelectedNode_UnknownKindErrors(t *testing.T) {
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+	dyn := newFakeDynamic(readySnapshot())
+
+	cfg := Config{
+		Namespace:        testNS,
+		Snapshot:         testSnap,
+		SelectedNodeKind: "NoSuchKind",
+		SelectedNodeName: "foo",
+		Source:           src,
+		Dynamic:          dyn,
+		Mapper:           testMapper(),
+		Log:              discardLogger(),
+		PollInterval:     time.Millisecond,
+	}
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error for unknown SelectedNodeKind, got nil")
+	}
+
+	if !contains(err.Error(), "resolve selected node") {
+		t.Errorf("error should mention 'resolve selected node', got: %v", err)
+	}
+
+	if src.calls != 0 {
+		t.Errorf("RestoreManifests should not be called on resolve error, got %d calls", src.calls)
+	}
+}

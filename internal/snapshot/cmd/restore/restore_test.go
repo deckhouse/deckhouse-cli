@@ -122,3 +122,97 @@ func TestNewCommand_RequiresExactlyOneArg(t *testing.T) {
 		t.Fatal("expected error with two positional args, got nil")
 	}
 }
+
+func TestNewCommand_NodeFlagDefault(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	node, err := cmd.Flags().GetString(flagNode)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagNode, err)
+	}
+
+	if node != "" {
+		t.Fatalf("default --node: got %q, want empty string (full-tree restore by default)", node)
+	}
+}
+
+func TestParseNodeFlag(t *testing.T) {
+	t.Helper()
+
+	cases := []struct {
+		input    string
+		wantKind string
+		wantName string
+		wantErr  bool
+	}{
+		// empty → full tree
+		{"", "", "", false},
+		// valid simple kind/name
+		{"Snapshot/my-snap", "Snapshot", "my-snap", false},
+		// domain kind with UUID-style name
+		{"DemoVirtualDiskSnapshot/nss-child-abc123", "DemoVirtualDiskSnapshot", "nss-child-abc123", false},
+		// VolumeSnapshot leaf
+		{"VolumeSnapshot/demo-pvc", "VolumeSnapshot", "demo-pvc", false},
+		// no slash → error
+		{"NoSlashHere", "", "", true},
+		// leading slash (empty kind) → error
+		{"/name", "", "", true},
+		// trailing slash (empty name) → error
+		{"Kind/", "", "", true},
+		// two slashes → error
+		{"Kind/a/b", "", "", true},
+		// just a slash → error (empty kind)
+		{"/", "", "", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			gotKind, gotName, err := parseNodeFlag(tc.input)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("input %q: expected error, got nil (kind=%q name=%q)", tc.input, gotKind, gotName)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("input %q: unexpected error: %v", tc.input, err)
+			}
+
+			if gotKind != tc.wantKind {
+				t.Fatalf("input %q: got kind=%q, want %q", tc.input, gotKind, tc.wantKind)
+			}
+
+			if gotName != tc.wantName {
+				t.Fatalf("input %q: got name=%q, want %q", tc.input, gotName, tc.wantName)
+			}
+		})
+	}
+}
+
+func TestRun_NodeFlag_InvalidFormat(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	if err := cmd.Flags().Set(flagNamespace, "test-ns"); err != nil {
+		t.Fatalf("setting namespace flag: %v", err)
+	}
+
+	if err := cmd.Flags().Set(flagNode, "NoSlashHere"); err != nil {
+		t.Fatalf("setting node flag: %v", err)
+	}
+
+	err := Run(slog.Default(), cmd, []string{"my-snap"})
+	if err == nil {
+		t.Fatal("expected error for invalid --node format, got nil")
+	}
+
+	if !strings.Contains(err.Error(), flagNode) {
+		t.Fatalf("error should mention %q, got: %v", flagNode, err)
+	}
+}

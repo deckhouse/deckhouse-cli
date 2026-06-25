@@ -88,6 +88,14 @@ type Config struct {
 	// Snapshot is the name of the root Snapshot to restore.
 	Snapshot string
 
+	// SelectedNodeKind restricts the restore to a single node subtree when non-empty.
+	// RestoreManifests is called with that node's NodeRef (group/version resolved via
+	// Mapper) instead of the root Snapshot ref. The root Snapshot ready check still
+	// applies unconditionally — the subtree cannot be restored from an incomplete snapshot.
+	SelectedNodeKind string
+	// SelectedNodeName is the name of the selected node. Required when SelectedNodeKind is set.
+	SelectedNodeName string
+
 	// DryRun, when true, passes DryRunAll to every SSA apply so the API server
 	// validates and admits objects without persisting them. The --wait loop is
 	// skipped entirely in dry-run mode because nothing was created.
@@ -136,7 +144,18 @@ func Run(ctx context.Context, cfg Config) error {
 		Namespace:  cfg.Namespace,
 	}
 
-	raw, err := cfg.Source.RestoreManifests(ctx, rootRef, cfg.Namespace)
+	targetRef := rootRef
+
+	if cfg.SelectedNodeKind != "" {
+		ref, err := cfg.resolveNodeRef()
+		if err != nil {
+			return fmt.Errorf("resolve selected node %s/%s: %w", cfg.SelectedNodeKind, cfg.SelectedNodeName, err)
+		}
+
+		targetRef = ref
+	}
+
+	raw, err := cfg.Source.RestoreManifests(ctx, targetRef, cfg.Namespace)
 	if err != nil {
 		return fmt.Errorf("fetch restore manifests for %s/%s: %w", cfg.Namespace, cfg.Snapshot, err)
 	}
@@ -541,6 +560,24 @@ func (cfg Config) resourceForGroupKind(group, kind string) (schema.GroupVersionR
 	}
 
 	return mapping.Resource, mapping.Scope.Name() == meta.RESTScopeNameNamespace, nil
+}
+
+// resolveNodeRef builds a NodeRef for cfg.SelectedNodeKind / cfg.SelectedNodeName by
+// resolving the kind's preferred group+version via the RESTMapper (version-less lookup).
+func (cfg Config) resolveNodeRef() (aggapi.NodeRef, error) {
+	mapping, err := cfg.Mapper.RESTMapping(schema.GroupKind{Kind: cfg.SelectedNodeKind})
+	if err != nil {
+		return aggapi.NodeRef{}, fmt.Errorf("resolve kind %q: %w", cfg.SelectedNodeKind, err)
+	}
+
+	gv := mapping.GroupVersionKind.GroupVersion()
+
+	return aggapi.NodeRef{
+		APIVersion: gv.String(),
+		Kind:       cfg.SelectedNodeKind,
+		Name:       cfg.SelectedNodeName,
+		Namespace:  cfg.Namespace,
+	}, nil
 }
 
 // isConditionTrue reports whether status.conditions[type==condType].status == "True".
