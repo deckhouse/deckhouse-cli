@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1255,6 +1256,43 @@ func TestRun_SelectedNode_UsesNodeRef(t *testing.T) {
 	}
 }
 
+// logCapture is a slog.Handler that records every log record for assertion in tests.
+type logCapture struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (c *logCapture) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (c *logCapture) Handle(_ context.Context, r slog.Record) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.records = append(c.records, r)
+
+	return nil
+}
+
+func (c *logCapture) WithAttrs(_ []slog.Attr) slog.Handler { return c }
+
+func (c *logCapture) WithGroup(_ string) slog.Handler { return c }
+
+// countMsg returns the number of captured records whose Message equals msg.
+func (c *logCapture) countMsg(msg string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	n := 0
+
+	for _, r := range c.records {
+		if r.Message == msg {
+			n++
+		}
+	}
+
+	return n
+}
+
 // TestRun_SelectedNode_UnknownKindErrors verifies that an unresolvable SelectedNodeKind
 // returns an error before calling RestoreManifests.
 func TestRun_SelectedNode_UnknownKindErrors(t *testing.T) {
@@ -1284,5 +1322,51 @@ func TestRun_SelectedNode_UnknownKindErrors(t *testing.T) {
 
 	if src.calls != 0 {
 		t.Errorf("RestoreManifests should not be called on resolve error, got %d calls", src.calls)
+	}
+}
+
+// TestRun_NormalRestore_NoWouldApplyLog verifies that a normal (non-dry-run) restore
+// emits zero per-object "would apply" log lines. The implicit dry-run preflight must be
+// silent; only "applied" lines appear from the real pass.
+func TestRun_NormalRestore_NoWouldApplyLog(t *testing.T) {
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"), configMapManifest("cm-2"))}
+	dyn := newFakeDynamic(readySnapshot())
+	cap := &logCapture{}
+	cfg := baseConfig(src, dyn)
+	cfg.Log = slog.New(cap)
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if n := cap.countMsg("would apply"); n != 0 {
+		t.Errorf("normal restore emitted %d 'would apply' log lines (want 0); implicit preflight must be silent", n)
+	}
+
+	if n := cap.countMsg("applied"); n < 1 {
+		t.Errorf("normal restore emitted %d 'applied' log lines (want >=1)", n)
+	}
+}
+
+// TestRun_DryRun_LogsWouldApply verifies that an explicit --dry-run restore
+// emits per-object "would apply" log lines and zero "applied" lines.
+func TestRun_DryRun_LogsWouldApply(t *testing.T) {
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+	dyn := newFakeDynamic(readySnapshot())
+	cap := &logCapture{}
+	cfg := baseConfig(src, dyn)
+	cfg.Log = slog.New(cap)
+	cfg.DryRun = true
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run with DryRun: %v", err)
+	}
+
+	if n := cap.countMsg("would apply"); n < 1 {
+		t.Errorf("--dry-run restore emitted %d 'would apply' log lines (want >=1)", n)
+	}
+
+	if n := cap.countMsg("applied"); n != 0 {
+		t.Errorf("--dry-run restore emitted %d 'applied' log lines (want 0)", n)
 	}
 }
