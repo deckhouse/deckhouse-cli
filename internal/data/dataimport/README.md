@@ -1,6 +1,15 @@
 # DataImport
 Subcommand for the Deckhouse CLI to create/import/delete data via DataImport resources.
 
+This command drives the **standalone PVC import** mode of `DataImport`
+(`targetRef.kind: PersistentVolumeClaim`): the target PVC is fully defined by the
+PVC template you pass to `create`, data is uploaded straight into it, and no
+snapshot/`VolumeSnapshotContent` artifact is produced. (The snapshot-leaf import
+mode is driven separately by `d8 snapshot import`.)
+
+The PVC template **must** carry `metadata.name` — the DataImport targets the PVC by
+that name; `create` rejects a template without it before contacting the API server.
+
 ### Available Commands
 - create    – ensure PVC (from template) and create DataImport
 - upload    – upload file contents to the DataImport endpoint
