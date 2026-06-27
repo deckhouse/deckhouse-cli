@@ -217,7 +217,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("building dynamic client: %w", err)
 	}
 
-	volumes := snapimport.NewClusterVolumeImporter(dynClient, sc, ttl, timeout, 3*time.Second, tempDir, kubeClient.RESTMapper(), log)
+	volumes := snapimport.NewClusterVolumeImporter(dynClient, sc, ttl, timeout, 3*time.Second, tempDir, log)
 
 	cfg := snapimport.Config{
 		Namespace:        namespace,

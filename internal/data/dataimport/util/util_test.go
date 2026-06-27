@@ -30,6 +30,53 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
 )
 
+func TestCreateDataImport_BuildsModeBSpec(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	pvcTpl := &v1alpha1.PersistentVolumeClaimTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Name: "restored-pvc"},
+	}
+
+	require.NoError(t, CreateDataImport(ctx, "import-into-pvc", "my-ns", "15m", false, true, pvcTpl, c))
+
+	var stored v1alpha1.DataImport
+	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "import-into-pvc", Namespace: "my-ns"}, &stored))
+
+	assert.Equal(t, v1alpha1.KindPersistentVolumeClaim, stored.Spec.TargetRef.Kind)
+	assert.Equal(t, "15m", stored.Spec.TTL)
+	assert.True(t, stored.Spec.WaitForFirstConsumer)
+	require.NotNil(t, stored.Spec.TargetRef.PvcTemplate)
+	assert.Equal(t, "restored-pvc", stored.Spec.TargetRef.PvcTemplate.Name)
+}
+
+func TestCreateDataImport_RejectsTemplateWithoutName(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cases := map[string]*v1alpha1.PersistentVolumeClaimTemplateSpec{
+		"nil template":      nil,
+		"template w/o name": {},
+	}
+
+	for name, tpl := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := CreateDataImport(ctx, "di", "my-ns", "15m", false, false, tpl, c)
+			require.Error(t, err)
+
+			var stored v1alpha1.DataImport
+			getErr := c.Get(ctx, ctrlclient.ObjectKey{Name: "di", Namespace: "my-ns"}, &stored)
+			require.Error(t, getErr, "no DataImport should be created when the PVC template is invalid")
+		})
+	}
+}
+
 func TestEnsureDataImportPublish(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1alpha1.AddToScheme(scheme))

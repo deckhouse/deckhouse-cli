@@ -21,14 +21,30 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
+
+// assertImportMarker verifies the unified spec.source.import: {} marker is present (and empty).
+func assertImportMarker(t *testing.T, obj *unstructured.Unstructured) {
+	t.Helper()
+
+	m, found, err := unstructured.NestedMap(obj.Object, "spec", "source", "import")
+	if err != nil {
+		t.Fatalf("read spec.source.import: %v", err)
+	}
+
+	if !found {
+		t.Fatalf("expected spec.source.import marker to be set")
+	}
+
+	if len(m) != 0 {
+		t.Errorf("spec.source.import must be an empty map, got %v", m)
+	}
+}
 
 func TestImportMarkerCR_Snapshot(t *testing.T) {
 	node := PlannedNode{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "root"}
 
-	obj, err := importMarkerCR(node, "ns", "")
+	obj, err := importMarkerCR(node, "ns")
 	if err != nil {
 		t.Fatalf("importMarkerCR: %v", err)
 	}
@@ -37,38 +53,27 @@ func TestImportMarkerCR_Snapshot(t *testing.T) {
 		t.Errorf("unexpected metadata: ns=%q name=%q", obj.GetNamespace(), obj.GetName())
 	}
 
-	if _, found, _ := unstructured.NestedMap(obj.Object, "spec", "source", "import"); !found {
-		t.Errorf("expected spec.source.import marker to be set")
-	}
+	assertImportMarker(t, obj)
 }
 
 func TestImportMarkerCR_VolumeSnapshot(t *testing.T) {
 	node := PlannedNode{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "pvc-1"}
 
-	obj, err := importMarkerCR(node, "ns", "di-1")
+	obj, err := importMarkerCR(node, "ns")
 	if err != nil {
 		t.Fatalf("importMarkerCR: %v", err)
 	}
 
-	name, found, _ := unstructured.NestedString(obj.Object, "spec", "source", "dataImportName")
-	if !found || name != "di-1" {
-		t.Errorf("spec.source.dataImportName: found=%v value=%q, want %q", found, name, "di-1")
-	}
-}
-
-func TestImportMarkerCR_VolumeSnapshot_RequiresDataImport(t *testing.T) {
-	node := PlannedNode{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "pvc-1"}
-
-	if _, err := importMarkerCR(node, "ns", ""); err == nil {
-		t.Fatal("expected error when DataImport name is empty, got nil")
-	}
+	// CSI VolumeSnapshot leaves use the same unified marker as every other node; the leaf no
+	// longer names its DataImport (matched server-side by targetRef reverse-lookup instead).
+	assertImportMarker(t, obj)
 }
 
 func TestImportMarkerCR_UnsupportedKind(t *testing.T) {
 	// DemoVirtualMachineSnapshot with NO volume data is an unsupported intermediate aggregator.
 	node := PlannedNode{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualMachineSnapshot", Name: "vm-1"}
 
-	_, err := importMarkerCR(node, "ns", "")
+	_, err := importMarkerCR(node, "ns")
 	if err == nil {
 		t.Fatal("expected unsupported-kind error, got nil")
 	}
@@ -84,14 +89,9 @@ func TestImportMarkerCR_DomainDataLeaf(t *testing.T) {
 		Kind:       "DemoVirtualDiskSnapshot",
 		Name:       "dvd-snap-1",
 		DataFile:   "/archive/snapshots/demovirtualdisksnapshot_disk-a/data.bin",
-		SourceObjectRef: &archive.SourceObjectRef{
-			APIVersion: "demo.deckhouse.io/v1alpha1",
-			Kind:       "DemoVirtualDisk",
-			Name:       "disk-a",
-		},
 	}
 
-	obj, err := importMarkerCR(node, "ns", "dvd-snap-1")
+	obj, err := importMarkerCR(node, "ns")
 	if err != nil {
 		t.Fatalf("importMarkerCR: %v", err)
 	}
@@ -100,39 +100,9 @@ func TestImportMarkerCR_DomainDataLeaf(t *testing.T) {
 		t.Errorf("unexpected metadata: ns=%q name=%q", obj.GetNamespace(), obj.GetName())
 	}
 
-	// spec.dataSource.name carries the DataImport name (genericbinder import trigger).
-	dsName, found, _ := unstructured.NestedString(obj.Object, "spec", "dataSource", "name")
-	if !found || dsName != "dvd-snap-1" {
-		t.Errorf("spec.dataSource.name: found=%v value=%q, want %q", found, dsName, "dvd-snap-1")
-	}
-
-	// spec.sourceRef mirrors the captured-object identity so the domain CR is self-describing.
-	apiVersion, _, _ := unstructured.NestedString(obj.Object, "spec", "sourceRef", "apiVersion")
-	kind, _, _ := unstructured.NestedString(obj.Object, "spec", "sourceRef", "kind")
-	name, _, _ := unstructured.NestedString(obj.Object, "spec", "sourceRef", "name")
-
-	if apiVersion != "demo.deckhouse.io/v1alpha1" || kind != "DemoVirtualDisk" || name != "disk-a" {
-		t.Errorf("spec.sourceRef = {%q, %q, %q}, want {demo.deckhouse.io/v1alpha1, DemoVirtualDisk, disk-a}", apiVersion, kind, name)
-	}
-}
-
-func TestImportMarkerCR_DomainDataLeaf_MissingSourceObjectRef(t *testing.T) {
-	node := PlannedNode{
-		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
-		Kind:       "DemoVirtualDiskSnapshot",
-		Name:       "dvd-snap-1",
-		DataFile:   "/archive/snapshots/demovirtualdisksnapshot_disk-a/data.bin",
-		// SourceObjectRef intentionally nil: simulates an archive written before the field was added.
-	}
-
-	_, err := importMarkerCR(node, "ns", "dvd-snap-1")
-	if err == nil {
-		t.Fatal("expected error for missing SourceObjectRef, got nil")
-	}
-
-	if !strings.Contains(err.Error(), "SourceObjectRef") {
-		t.Errorf("error %q should mention SourceObjectRef", err.Error())
-	}
+	// Domain data leaves use the unified marker too; the captured-source identity is no longer
+	// mirrored onto the marker (the DataImport carries it via targetRef).
+	assertImportMarker(t, obj)
 }
 
 func TestPlannedNode_Supported(t *testing.T) {

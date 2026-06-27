@@ -461,21 +461,14 @@ func TestRun_DomainDataLeaf_EndToEnd(t *testing.T) {
 		t.Errorf("UploadVolumeData calls = %v, want [dvd-snap-1]", vol.upload)
 	}
 
-	// The domain leaf import-mode CR must have been created with spec.dataSource.name and
-	// spec.sourceRef set.
+	// The domain leaf import-mode CR must have been created with the unified import marker.
 	leafObj, err := dyn.Resource(demoDiskSnapGVR).Namespace(targetNS).Get(context.Background(), "dvd-snap-1", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("DemoVirtualDiskSnapshot import CR not created: %v", err)
 	}
 
-	dsName, _, _ := unstructured.NestedString(leafObj.Object, "spec", "dataSource", "name")
-	if dsName != "dvd-snap-1" {
-		t.Errorf("spec.dataSource.name = %q, want %q", dsName, "dvd-snap-1")
-	}
-
-	srcKind, _, _ := unstructured.NestedString(leafObj.Object, "spec", "sourceRef", "kind")
-	if srcKind != "DemoVirtualDisk" {
-		t.Errorf("spec.sourceRef.kind = %q, want DemoVirtualDisk", srcKind)
+	if _, found, _ := unstructured.NestedMap(leafObj.Object, "spec", "source", "import"); !found {
+		t.Error("domain leaf marker must set spec.source.import: {}")
 	}
 
 	// The domain leaf carries a child->parent ownerRef pointing to the root Snapshot.
@@ -495,8 +488,8 @@ func TestRun_DomainDataLeaf_EndToEnd(t *testing.T) {
 	}
 }
 
-// TestLeafTargetRef_DomainLeaf verifies that leafTargetRef resolves the group/resource for
-// a domain data leaf via the RESTMapper, using the real producer's group constant.
+// TestLeafTargetRef_DomainLeaf verifies that leafTargetRef derives the targetRef group/kind
+// for a domain data leaf directly from its apiVersion/kind, without a RESTMapper lookup.
 func TestLeafTargetRef_DomainLeaf(t *testing.T) {
 	leaf := PlannedNode{
 		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
@@ -505,7 +498,7 @@ func TestLeafTargetRef_DomainLeaf(t *testing.T) {
 		DataFile:   "/archive/data.bin",
 	}
 
-	group, resource, err := leafTargetRef(leaf, testDomainMapper())
+	group, kind, err := leafTargetRef(leaf)
 	if err != nil {
 		t.Fatalf("leafTargetRef: %v", err)
 	}
@@ -514,8 +507,8 @@ func TestLeafTargetRef_DomainLeaf(t *testing.T) {
 		t.Errorf("group = %q, want demo.state-snapshotter.deckhouse.io", group)
 	}
 
-	if resource != "demovirtualdisksnapshots" {
-		t.Errorf("resource = %q, want demovirtualdisksnapshots", resource)
+	if kind != "DemoVirtualDiskSnapshot" {
+		t.Errorf("kind = %q, want DemoVirtualDiskSnapshot", kind)
 	}
 }
 
@@ -705,7 +698,7 @@ func readyImportLeafVS() *unstructured.Unstructured {
 		"kind":       "VolumeSnapshot",
 		"metadata":   map[string]interface{}{"namespace": targetNS, "name": "pvc-1", "uid": "vs-uid"},
 		"spec": map[string]interface{}{
-			"source": map[string]interface{}{"dataImportName": "pvc-1"},
+			"source": map[string]interface{}{"import": map[string]interface{}{}},
 		},
 		"status": map[string]interface{}{
 			"boundSnapshotContentName": "content-leaf",

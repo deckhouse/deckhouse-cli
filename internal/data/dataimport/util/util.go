@@ -70,6 +70,13 @@ func CreateDataImport(
 		ttl = dataio.DefaultTTL
 	}
 
+	// Mode B requires a pvcTemplate whose metadata.name is set: the controller names the
+	// imported PVC after it, and the server CEL rejects an empty name. Fail early with a
+	// clear message instead of surfacing an opaque admission error.
+	if pvcTpl == nil || pvcTpl.Name == "" {
+		return fmt.Errorf("DataImport %s/%s requires a PVC template with metadata.name set", namespace, name)
+	}
+
 	obj := &v1alpha1.DataImport{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: v1alpha1.SchemeGroupVersion.String(),
@@ -84,7 +91,7 @@ func CreateDataImport(
 			Publish:              publish,
 			WaitForFirstConsumer: waitForFirstConsumer,
 			TargetRef: v1alpha1.DataImportTargetRefSpec{
-				Kind:        "PersistentVolumeClaim",
+				Kind:        v1alpha1.KindPersistentVolumeClaim,
 				PvcTemplate: pvcTpl,
 			},
 		},

@@ -718,6 +718,9 @@ func TestFinalizeNode_SnapshotNodeWithOwnDataRefs(t *testing.T) {
 					Kind:       "VolumeSnapshotContent",
 					Name:       "vsc-a",
 				},
+				VolumeMode:       "Block",
+				StorageClassName: "linstor-thin-r1",
+				Size:             "10Gi",
 			},
 			{
 				TargetUID: "uid-pvc-b",
@@ -764,6 +767,13 @@ func TestFinalizeNode_SnapshotNodeWithOwnDataRefs(t *testing.T) {
 
 	if sy.Volumes[1].Artifact.Name != "vsc-b" {
 		t.Errorf("Volumes[1].Artifact.Name: got %q, want vsc-b", sy.Volumes[1].Artifact.Name)
+	}
+
+	// The captured volume metadata must be carried through to the archive so the import
+	// side can rebuild the Mode A DataImport spec.
+	if sy.Volumes[0].VolumeMode != "Block" || sy.Volumes[0].StorageClassName != "linstor-thin-r1" || sy.Volumes[0].Size != "10Gi" {
+		t.Errorf("Volumes[0] metadata = {mode:%q, sc:%q, size:%q}, want {Block, linstor-thin-r1, 10Gi}",
+			sy.Volumes[0].VolumeMode, sy.Volumes[0].StorageClassName, sy.Volumes[0].Size)
 	}
 
 	// VerifyNode must pass: Volumes does not affect the digest.
