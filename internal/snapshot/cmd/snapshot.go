@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/download"
+	listcmd "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/list"
 	restorecmd "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/restore"
 	snapimportcmd "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/snapimport"
 )
@@ -30,7 +31,7 @@ import (
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "snapshot",
-		Short:         "Snapshot operations (download, restore, import)",
+		Short:         "Snapshot operations (download, restore, import, list)",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Run: func(cmd *cobra.Command, _ []string) {
@@ -43,6 +44,7 @@ func NewCommand() *cobra.Command {
 	cmd.AddCommand(download.NewCommand(log))
 	cmd.AddCommand(restorecmd.NewCommand(log))
 	cmd.AddCommand(snapimportcmd.NewCommand(log))
+	cmd.AddCommand(listcmd.NewCommand(log))
 
 	return cmd
 }
