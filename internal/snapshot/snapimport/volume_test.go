@@ -243,7 +243,7 @@ func newTestVolumeImporter(dyn *dynamicfake.FakeDynamicClient) *clusterVolumeImp
 }
 
 func TestEnsureDataImport_ReusesHealthy(t *testing.T) {
-	leaf := PlannedNode{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "pvc-1"}
+	leaf := volumeSnapshotLeaf("pvc-1")
 
 	dyn := newFakeDataImportDyn(dataImportObj(targetNS, "pvc-1", false))
 	imp := newTestVolumeImporter(dyn)
@@ -266,8 +266,84 @@ func TestEnsureDataImport_ReusesHealthy(t *testing.T) {
 	}
 }
 
-func TestEnsureDataImport_AlignsTTLOnReuse(t *testing.T) {
+// volumeSnapshotLeaf builds a CSI VolumeSnapshot data leaf carrying the captured volume
+// metadata that EnsureDataImport echoes into the Mode A DataImport spec.
+func volumeSnapshotLeaf(name string) PlannedNode {
+	return PlannedNode{
+		APIVersion:       "snapshot.storage.k8s.io/v1",
+		Kind:             "VolumeSnapshot",
+		Name:             name,
+		StorageClassName: "sc-1",
+		Size:             "10Gi",
+		VolumeMode:       volumeModeFilesystem,
+	}
+}
+
+func TestEnsureDataImport_BuildsModeASpec(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+
+	dyn := newFakeDataImportDyn()
+	imp := newTestVolumeImporter(dyn)
+
+	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+		t.Fatalf("EnsureDataImport: %v", err)
+	}
+
+	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("created DataImport not found: %v", err)
+	}
+
+	if v, _, _ := unstructured.NestedString(got.Object, "spec", "storageClassName"); v != "sc-1" {
+		t.Errorf("spec.storageClassName = %q, want sc-1", v)
+	}
+
+	if v, _, _ := unstructured.NestedString(got.Object, "spec", "size"); v != "10Gi" {
+		t.Errorf("spec.size = %q, want 10Gi", v)
+	}
+
+	if v, _, _ := unstructured.NestedString(got.Object, "spec", "volumeMode"); v != volumeModeFilesystem {
+		t.Errorf("spec.volumeMode = %q, want %q", v, volumeModeFilesystem)
+	}
+
+	// The legacy dataArtifactType field must be gone — the controller infers the artifact.
+	if _, found, _ := unstructured.NestedString(got.Object, "spec", "dataArtifactType"); found {
+		t.Error("spec.dataArtifactType must not be set (removed in the kind-targetRef rework)")
+	}
+
+	group, _, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "group")
+	kind, _, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "kind")
+	refName, _, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "name")
+
+	if group != "snapshot.storage.k8s.io" || kind != "VolumeSnapshot" || refName != "pvc-1" {
+		t.Errorf("targetRef = {group:%q, kind:%q, name:%q}, want {snapshot.storage.k8s.io, VolumeSnapshot, pvc-1}", group, kind, refName)
+	}
+
+	// targetRef must not carry the removed plural "resource" key.
+	if _, found, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "resource"); found {
+		t.Error("spec.targetRef.resource must not be set (renamed to kind)")
+	}
+}
+
+func TestEnsureDataImport_RejectsMissingVolumeMetadata(t *testing.T) {
+	// A data leaf without storageClassName/size means a malformed archive; EnsureDataImport
+	// must fail fast instead of creating a CEL-rejected Mode A DataImport.
 	leaf := PlannedNode{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "pvc-1"}
+
+	dyn := newFakeDataImportDyn()
+	imp := newTestVolumeImporter(dyn)
+
+	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err == nil {
+		t.Fatal("expected error for missing volume metadata, got nil")
+	}
+
+	if c := countDataImportActions(dyn, "create"); c != 0 {
+		t.Errorf("no DataImport must be created when volume metadata is missing (creates=%d)", c)
+	}
+}
+
+func TestEnsureDataImport_AlignsTTLOnReuse(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
 
 	existing := dataImportObj(targetNS, "pvc-1", false)
 	_ = unstructured.SetNestedField(existing.Object, "2m", "spec", "ttl")
@@ -295,7 +371,7 @@ func TestEnsureDataImport_AlignsTTLOnReuse(t *testing.T) {
 }
 
 func TestEnsureDataImport_RecreatesExpired(t *testing.T) {
-	leaf := PlannedNode{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "pvc-1"}
+	leaf := volumeSnapshotLeaf("pvc-1")
 
 	dyn := newFakeDataImportDyn(dataImportObj(targetNS, "pvc-1", true))
 	imp := newTestVolumeImporter(dyn)

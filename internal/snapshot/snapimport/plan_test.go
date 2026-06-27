@@ -35,6 +35,7 @@ type archiveNode struct {
 	manifests       []map[string]interface{}
 	blockData       []byte
 	sourceObjectRef *archive.SourceObjectRef
+	volumes         []archive.VolumeInfo
 }
 
 // writeArchiveNode writes snapshot.yaml, manifests/ and optional data.bin into dir.
@@ -51,6 +52,7 @@ func writeArchiveNode(t *testing.T, dir string, n archiveNode) {
 		Name:            n.name,
 		Namespace:       n.namespace,
 		SourceObjectRef: n.sourceObjectRef,
+		Volumes:         n.volumes,
 	}); err != nil {
 		t.Fatalf("write snapshot.yaml: %v", err)
 	}
@@ -210,6 +212,64 @@ func TestBuildPlan_DomainDataLeaf_SourceObjectRef(t *testing.T) {
 
 	if !leaf.isDomainDataLeaf() {
 		t.Error("DemoVirtualDiskSnapshot with block data should be isDomainDataLeaf()")
+	}
+}
+
+// TestBuildPlan_LeafVolumeMetadata verifies that the captured volume metadata
+// (storageClassName/size/volumeMode) written into snapshot.yaml Volumes[0] is lifted onto
+// the PlannedNode so EnsureDataImport can echo it into the Mode A DataImport spec.
+func TestBuildPlan_LeafVolumeMetadata(t *testing.T) {
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "storage.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+	})
+
+	leafDir := childDir(root, "VolumeSnapshot", "pvc-1")
+	writeArchiveNode(t, leafDir, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		blockData:  []byte("rawbytes"),
+		volumes: []archive.VolumeInfo{{
+			StorageClassName: "linstor-thin-r1",
+			Size:             "10Gi",
+			VolumeMode:       "Block",
+		}},
+	})
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	var leaf *PlannedNode
+
+	for i := range plan {
+		if plan[i].Kind == "VolumeSnapshot" {
+			leaf = &plan[i]
+
+			break
+		}
+	}
+
+	if leaf == nil {
+		t.Fatal("VolumeSnapshot node not found in plan")
+	}
+
+	if leaf.StorageClassName != "linstor-thin-r1" || leaf.Size != "10Gi" || leaf.VolumeMode != "Block" {
+		t.Errorf("leaf volume metadata = {sc:%q, size:%q, mode:%q}, want {linstor-thin-r1, 10Gi, Block}",
+			leaf.StorageClassName, leaf.Size, leaf.VolumeMode)
+	}
+
+	// A structural node owns no volumes and must leave the metadata empty.
+	for i := range plan {
+		if plan[i].Kind == "Snapshot" {
+			if plan[i].StorageClassName != "" || plan[i].Size != "" || plan[i].VolumeMode != "" {
+				t.Errorf("structural node carried volume metadata: %+v", plan[i])
+			}
+		}
 	}
 }
 

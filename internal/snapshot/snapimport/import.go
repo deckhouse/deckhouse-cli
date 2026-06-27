@@ -377,23 +377,17 @@ func (cfg Config) resourceInterface(mapping *meta.RESTMapping) dynamic.ResourceI
 }
 
 // createMarkers creates every import-mode CR top-down (reverse post-order = parents before
-// children) so a child's parent already exists and exposes a UID. Data-leaf markers
-// reference their (not-yet-created) DataImport by its deterministic name; the DataImport
-// itself is created bottom-up in pass 2 immediately before the upload, so its idle TTL
-// does not start ticking while earlier siblings are still uploading.
+// children) so a child's parent already exists and exposes a UID. Every marker is the same
+// minimal spec.source.import: {} CR; for data leaves the DataImport itself is created bottom-up
+// in pass 2 immediately before the upload (so its idle TTL does not start ticking while earlier
+// siblings are still uploading) and is later matched to the leaf by its targetRef.
 func (cfg Config) createMarkers(ctx context.Context, plan []PlannedNode, parents map[string]int) error {
 	uids := make(map[string]types.UID, len(plan))
 
 	for i := len(plan) - 1; i >= 0; i-- {
 		node := plan[i]
 
-		var dataImportName string
-
-		if node.isVolumeSnapshotLeaf() || node.isDomainDataLeaf() {
-			dataImportName = cfg.Volumes.DataImportName(node)
-		}
-
-		marker, err := importMarkerCR(node, cfg.Namespace, dataImportName)
+		marker, err := importMarkerCR(node, cfg.Namespace)
 		if err != nil {
 			return err
 		}
@@ -573,30 +567,19 @@ func (cfg Config) ensureMarker(ctx context.Context, obj *unstructured.Unstructur
 func reconcileExistingMarker(ctx context.Context, ri dynamic.ResourceInterface, existing *unstructured.Unstructured, desired []metav1.OwnerReference) (types.UID, error) {
 	if !isImportModeMarker(existing) {
 		return "", fmt.Errorf("%s %s/%s already exists and is not in import mode "+
-			"(neither spec.source.import nor spec.source.dataImportName is set); refusing to mutate a pre-existing "+
+			"(spec.source.import is not set); refusing to mutate a pre-existing "+
 			"object — import into a fresh namespace", existing.GetKind(), existing.GetNamespace(), existing.GetName())
 	}
 
 	return reconcileMarkerOwnerRefs(ctx, ri, existing, desired)
 }
 
-// isImportModeMarker reports whether a live CR is an import-mode marker:
-//   - structural Snapshot: spec.source.import is present
-//   - CSI VolumeSnapshot leaf: spec.source.dataImportName is non-empty
-//   - domain data leaf (e.g. DemoVirtualDiskSnapshot): spec.dataSource.name is non-empty
-//     (the genericbinder reconcileGenericImport trigger)
+// isImportModeMarker reports whether a live CR is an import-mode marker. All node kinds use
+// the unified marker spec.source.import: {}, so its mere presence identifies an import-mode CR.
 func isImportModeMarker(obj *unstructured.Unstructured) bool {
-	if _, found, _ := unstructured.NestedMap(obj.Object, "spec", "source", "import"); found {
-		return true
-	}
+	_, found, _ := unstructured.NestedMap(obj.Object, "spec", "source", "import")
 
-	if name, _, _ := unstructured.NestedString(obj.Object, "spec", "source", "dataImportName"); name != "" {
-		return true
-	}
-
-	name, _, _ := unstructured.NestedString(obj.Object, "spec", "dataSource", "name")
-
-	return name != ""
+	return found
 }
 
 // reconcileMarkerOwnerRefs patches any desired child->parent ownerRef a previous partial
