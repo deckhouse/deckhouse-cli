@@ -279,30 +279,27 @@ func (c *Client) resourceFor(ref NodeRef) (string, error) {
 	return mapping.Resource.Resource, nil
 }
 
-// LeafDataExportTarget resolves the DataExport targetRef {group, resource} for a snapshot
-// leaf node. CSI VolumeSnapshot leaves use the fixed constants VolumeSnapshotGroup /
-// VolumeSnapshotResource. All other kinds are resolved via the RESTMapper.
+// LeafDataExportTarget resolves the DataExport targetRef {group, kind} for a snapshot leaf
+// node. CSI VolumeSnapshot leaves use the fixed constants VolumeSnapshotGroup /
+// VolumeSnapshotKind; all other kinds derive group from the leaf's apiVersion and use its
+// own kind directly (the controller resolves the served version via its RESTMapper, so no
+// resource-plural lookup is needed here).
 //
 // This is used to build a DataExport that the storage-volume-data-manager controller
-// can route through its resource-agnostic snapshot export path (categorySnapshot):
-// group/resource must identify a namespaced snapshot CR so the controller can read
+// can route through its kind-agnostic snapshot export path (categorySnapshot):
+// group/kind must identify a namespaced snapshot CR so the controller can read
 // its status.boundSnapshotContentName → SnapshotContent → status.dataRef.
 func (c *Client) LeafDataExportTarget(ref NodeRef) (string, string, error) {
+	if ref.IsVolumeSnapshotLeaf() {
+		return VolumeSnapshotGroup, VolumeSnapshotKind, nil
+	}
+
 	gv, err := schema.ParseGroupVersion(ref.APIVersion)
 	if err != nil {
 		return "", "", fmt.Errorf("parse apiVersion %q: %w", ref.APIVersion, err)
 	}
 
-	if ref.IsVolumeSnapshotLeaf() {
-		return VolumeSnapshotGroup, VolumeSnapshotResource, nil
-	}
-
-	res, err := c.resourceFor(ref)
-	if err != nil {
-		return "", "", err
-	}
-
-	return gv.Group, res, nil
+	return gv.Group, ref.Kind, nil
 }
 
 // subresourceGroupVersion returns the aggregated subresource group and version that

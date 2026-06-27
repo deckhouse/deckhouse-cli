@@ -50,19 +50,19 @@ func DataExportName(leafName string) string {
 }
 
 // EnsureDataExport idempotently creates a DataExport in namespace targeting
-// the snapshot leaf CR identified by {group, resource, leafName} with the given
+// the snapshot leaf CR identified by {group, kind, leafName} with the given
 // TTL (empty → "2h"). Returns the DataExport object (newly created or pre-existing).
 //
-// group and resource must identify a namespaced snapshot CR (e.g.
-// "snapshot.storage.k8s.io" / "volumesnapshots" for a CSI VolumeSnapshot leaf, or
-// the domain group / resource for a domain snapshot CR). The controller routes any
-// such targetRef through its resource-agnostic categorySnapshot path.
+// group and kind must identify a namespaced snapshot CR (e.g.
+// "snapshot.storage.k8s.io" / "VolumeSnapshot" for a CSI VolumeSnapshot leaf, or
+// the domain group / kind for a domain snapshot CR). The controller routes any
+// such targetRef through its kind-agnostic categorySnapshot path.
 func EnsureDataExport(
 	ctx context.Context,
 	c client.Client,
 	namespace,
 	group,
-	resource,
+	kind,
 	leafName,
 	ttl string,
 ) (*deapi.DataExport, error) {
@@ -91,9 +91,9 @@ func EnsureDataExport(
 		Spec: deapi.DataexportSpec{
 			TTL: ttl,
 			TargetRef: deapi.TargetRefSpec{
-				Group:    group,
-				Resource: resource,
-				Name:     leafName,
+				Group: group,
+				Kind:  kind,
+				Name:  leafName,
 			},
 		},
 	}
