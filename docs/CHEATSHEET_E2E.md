@@ -118,6 +118,13 @@ kubectl create namespace "$TARGET_NS" 2>/dev/null || true
 ~/demo/d8/builds/d8-dev snapshot restore "$SNAP" -n "$TARGET_NS" --wait --timeout 15m
 ```
 
+Под капотом `import` помечает каждый воссоздаваемый узел унифицированным маркером
+`spec.source.import: {}` (имя `DataImport` на листе не хранится) и на каждый data-leaf создаёт
+`DataImport` с `targetRef.{group,kind,name}` на этот лист (kind = вид листа-снимка, например
+`VolumeSnapshot`) плюс параметры тома `storageClassName`/`size`/`volumeMode` прямо в `spec`
+(берутся из архива). state-snapshotter находит `DataImport` обратным поиском по `targetRef` и
+дожидается durable `VolumeSnapshotContent`.
+
 Ограничения текущей реализации:
 
 - импортируются только деревья core `Snapshot` и data-leaf'ы CSI `VolumeSnapshot` (блочные
