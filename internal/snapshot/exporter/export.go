@@ -76,7 +76,7 @@ func NewExport(namespace, deName, volumeMode, baseURL string, fetcher *Fetcher) 
 }
 
 // OpenExport creates (or re-uses) a DataExport targeting the snapshot leaf
-// identified by {group, resource, leafName}, waits until it is Ready, and
+// identified by {group, kind, leafName}, waits until it is Ready, and
 // returns an Export ready for data transfer.
 //
 // An isolated copy of sClient is built for the HTTP Fetcher so that CA
@@ -87,12 +87,12 @@ func OpenExport(
 	c client.Client,
 	namespace,
 	group,
-	resource,
+	kind,
 	leafName,
 	ttl string,
 	sc *safeClient.SafeClient,
 ) (*Export, error) {
-	de, err := EnsureDataExport(ctx, c, namespace, group, resource, leafName, ttl)
+	de, err := EnsureDataExport(ctx, c, namespace, group, kind, leafName, ttl)
 	if err != nil {
 		return nil, fmt.Errorf("ensure DataExport for leaf %q: %w", leafName, err)
 	}
