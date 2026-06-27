@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +34,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
 
 // snapshotObj builds an unstructured Snapshot for tests. An empty ready/content
@@ -339,5 +343,222 @@ func TestHumanAge(t *testing.T) {
 
 	if got := humanAge(time.Now().Add(-5 * time.Minute)); got != "5m" {
 		t.Fatalf("age = %q, want %q", got, "5m")
+	}
+}
+
+// writeLocalNode creates a node directory with a snapshot.yaml, mirroring the
+// download tree layout used on disk.
+func writeLocalNode(t *testing.T, dir string, sy archive.SnapshotYAML) {
+	t.Helper()
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, sy); err != nil {
+		t.Fatalf("write snapshot.yaml in %s: %v", dir, err)
+	}
+}
+
+// buildLocalTree lays out a small download tree under a temp dir and returns its root:
+//
+//	root (Snapshot/vol-tree, ns=snap-e2e)
+//	  snapshots/demovirtualdisksnapshot_disk   (1 volume, leaf)
+//	  snapshots/demovirtualmachinesnapshot_vm   (aggregator)
+//	    snapshots/volumesnapshot_leaf            (1 volume, leaf)
+func buildLocalTree(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+
+	writeLocalNode(t, root, archive.SnapshotYAML{
+		APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "vol-tree", Namespace: "snap-e2e",
+	})
+	writeLocalNode(t, filepath.Join(root, archive.SnapshotsDirName, "demovirtualdisksnapshot_disk"), archive.SnapshotYAML{
+		APIVersion: "demo.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk", Namespace: "snap-e2e",
+		Volumes: []archive.VolumeInfo{{}},
+	})
+	writeLocalNode(t, filepath.Join(root, archive.SnapshotsDirName, "demovirtualmachinesnapshot_vm"), archive.SnapshotYAML{
+		APIVersion: "demo.deckhouse.io/v1alpha1", Kind: "DemoVirtualMachineSnapshot", Name: "vm", Namespace: "snap-e2e",
+	})
+	writeLocalNode(t, filepath.Join(root, archive.SnapshotsDirName, "demovirtualmachinesnapshot_vm", archive.SnapshotsDirName, "volumesnapshot_leaf"), archive.SnapshotYAML{
+		APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "leaf", Namespace: "snap-e2e",
+		Volumes: []archive.VolumeInfo{{}},
+	})
+
+	return root
+}
+
+func TestDiscoverLocalSnapshots(t *testing.T) {
+	root := buildLocalTree(t)
+
+	rows, err := discoverLocalSnapshots(root)
+	if err != nil {
+		t.Fatalf("discoverLocalSnapshots: %v", err)
+	}
+
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 nodes, got %d: %+v", len(rows), rows)
+	}
+
+	byName := map[string]localSnapshotRow{}
+	for _, r := range rows {
+		byName[r.Name] = r
+	}
+
+	rootRow, ok := byName["vol-tree"]
+	if !ok {
+		t.Fatalf("root node not found in rows: %+v", rows)
+	}
+
+	if rootRow.Kind != "Snapshot" || rootRow.Children != 2 || rootRow.Path != "." {
+		t.Fatalf("unexpected root row: %+v", rootRow)
+	}
+
+	if vm := byName["vm"]; vm.Children != 1 {
+		t.Fatalf("vm node should have 1 child, got %+v", vm)
+	}
+
+	if disk := byName["disk"]; disk.Volumes != 1 {
+		t.Fatalf("disk node should have 1 volume, got %+v", disk)
+	}
+
+	// The first row is the root (depth-first, lexical order).
+	if rows[0].Name != "vol-tree" {
+		t.Fatalf("expected root first, got %q", rows[0].Name)
+	}
+}
+
+func TestDiscoverLocalSnapshotsEmpty(t *testing.T) {
+	rows, err := discoverLocalSnapshots(t.TempDir())
+	if err != nil {
+		t.Fatalf("discoverLocalSnapshots: %v", err)
+	}
+
+	if len(rows) != 0 {
+		t.Fatalf("expected no rows for empty dir, got %d", len(rows))
+	}
+}
+
+func TestDiscoverLocalSnapshotsNotADir(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "afile")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	if _, err := discoverLocalSnapshots(file); err == nil {
+		t.Fatal("expected error for a non-directory path")
+	}
+}
+
+func TestRunLocalTableViaCommand(t *testing.T) {
+	root := buildLocalTree(t)
+
+	var buf bytes.Buffer
+	cmd := NewCommand(slog.Default())
+	cmd.SetArgs([]string{root})
+	cmd.SetOut(&buf)
+	cmd.SetErr(io.Discard)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute local list: %v", err)
+	}
+
+	out := buf.String()
+
+	for _, want := range []string{"NAME", "KIND", "PATH", "vol-tree", "VolumeSnapshot", "leaf"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("table output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunLocalRejectsScopeFlags(t *testing.T) {
+	root := buildLocalTree(t)
+
+	for _, scope := range [][]string{{"-A", root}, {"-n", "snap-e2e", root}} {
+		cmd := NewCommand(slog.Default())
+		cmd.SetArgs(scope)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+
+		err := cmd.Execute()
+		if err == nil {
+			t.Fatalf("expected error for scope flags %v with a local dir", scope)
+		}
+
+		if !strings.Contains(err.Error(), "not applicable") {
+			t.Fatalf("unexpected error for %v: %v", scope, err)
+		}
+	}
+}
+
+func TestRenderLocalJSON(t *testing.T) {
+	rows, err := discoverLocalSnapshots(buildLocalTree(t))
+	if err != nil {
+		t.Fatalf("discoverLocalSnapshots: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := renderLocal(&buf, rows, "json"); err != nil {
+		t.Fatalf("renderLocal json: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "vol-tree") || !strings.Contains(out, `"kind"`) || !strings.Contains(out, `"path"`) {
+		t.Fatalf("json output missing expected content:\n%s", out)
+	}
+}
+
+func TestPrintLocalTableEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	if err := printLocalTable(&buf, nil); err != nil {
+		t.Fatalf("printLocalTable: %v", err)
+	}
+
+	if got := strings.TrimSpace(buf.String()); got != "No snapshots found." {
+		t.Fatalf("empty local table = %q, want %q", got, "No snapshots found.")
+	}
+}
+
+// TestLocalClusterScopedNamespace verifies a cluster-scoped node keeps an empty
+// Namespace in the row (so -o json omits it), while the table substitutes "-".
+func TestLocalClusterScopedNamespace(t *testing.T) {
+	root := t.TempDir()
+	writeLocalNode(t, root, archive.SnapshotYAML{
+		APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-1",
+	})
+
+	rows, err := discoverLocalSnapshots(root)
+	if err != nil {
+		t.Fatalf("discoverLocalSnapshots: %v", err)
+	}
+
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+
+	if rows[0].Namespace != "" {
+		t.Fatalf("cluster-scoped node should keep empty Namespace, got %q", rows[0].Namespace)
+	}
+
+	var tbuf bytes.Buffer
+	if err := printLocalTable(&tbuf, rows); err != nil {
+		t.Fatalf("printLocalTable: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(tbuf.String(), "\n"), "\n")
+	fields := strings.Fields(lines[len(lines)-1])
+	if len(fields) < 3 || fields[2] != notAvailable {
+		t.Fatalf("expected NAMESPACE column %q, got fields %v", notAvailable, fields)
+	}
+
+	var jbuf bytes.Buffer
+	if err := renderLocal(&jbuf, rows, "json"); err != nil {
+		t.Fatalf("renderLocal json: %v", err)
+	}
+
+	if strings.Contains(jbuf.String(), "namespace") {
+		t.Fatalf("json should omit empty namespace:\n%s", jbuf.String())
 	}
 }
