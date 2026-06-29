@@ -96,6 +96,12 @@ type Config struct {
 	// SelectedNodeName is the name of the selected node. Required when SelectedNodeKind is set.
 	SelectedNodeName string
 
+	// Edit, when true, opens the resolved manifests in the user's preferred editor
+	// (kubectl-style: $KUBE_EDITOR, $EDITOR, vi) before the preflight and apply
+	// passes. A non-zero editor exit, unchanged content, or empty content aborts
+	// the restore without applying anything.
+	Edit bool
+
 	// DryRun, when true, passes DryRunAll to every SSA apply so the API server
 	// validates and admits objects without persisting them. The --wait loop is
 	// skipped entirely in dry-run mode because nothing was created.
@@ -172,6 +178,13 @@ func Run(ctx context.Context, cfg Config) error {
 
 	if len(objs) == 0 {
 		return fmt.Errorf("restore manifests for %s/%s are empty", cfg.Namespace, cfg.Snapshot)
+	}
+
+	if cfg.Edit {
+		objs, err = editManifests(objs)
+		if err != nil {
+			return fmt.Errorf("restore edit: %w", err)
+		}
 	}
 
 	// Preflight: verify every PVC data-source leaf exists and is ready before
