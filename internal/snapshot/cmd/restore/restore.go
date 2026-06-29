@@ -43,6 +43,7 @@ const (
 	flagNamespace = "namespace"
 	flagNode      = "node"
 	flagDryRun    = "dry-run"
+	flagEdit      = "edit"
 	flagWait      = "wait"
 	flagTimeout   = "timeout"
 )
@@ -91,7 +92,10 @@ output), so they are not awaited; the command may return before such volumes fin
   d8 snapshot restore my-snap -n default --dry-run
 
   # Restore and wait for the restored PVCs to become Bound
-  d8 snapshot restore my-snap -n default --wait --timeout 15m`,
+  d8 snapshot restore my-snap -n default --wait --timeout 15m
+
+  # Review and edit manifests in $EDITOR before applying
+  d8 snapshot restore my-snap -n default --edit`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(log, cmd, args)
@@ -101,6 +105,7 @@ output), so they are not awaited; the command may return before such volumes fin
 	cmd.Flags().StringP(flagNamespace, "n", "", "snapshot namespace; also the restore target namespace (required)")
 	cmd.Flags().String(flagNode, "", "restrict restore to a single node subtree; format '<Kind>/<name>' (e.g. --node DemoVirtualDiskSnapshot/nss-child-abc123)")
 	cmd.Flags().Bool(flagDryRun, false, "validate objects via DryRunAll without persisting; skips --wait (use to preflight a restore)")
+	cmd.Flags().Bool(flagEdit, false, "open resolved manifests in $KUBE_EDITOR/$EDITOR before applying; aborts on non-zero exit, unchanged, or empty content")
 	cmd.Flags().Bool(flagWait, false, "wait for restored PersistentVolumeClaims to become Bound (only PVCs in the manifest set; domain disk-backed PVCs created asynchronously are not awaited)")
 	cmd.Flags().Duration(flagTimeout, 10*time.Minute, "timeout for the --wait Bound check")
 
@@ -145,6 +150,11 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("reading --%s flag: %w", flagDryRun, err)
 	}
 
+	edit, err := cmd.Flags().GetBool(flagEdit)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagEdit, err)
+	}
+
 	wait, err := cmd.Flags().GetBool(flagWait)
 	if err != nil {
 		return fmt.Errorf("reading --%s flag: %w", flagWait, err)
@@ -185,6 +195,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		Snapshot:         snapshotName,
 		SelectedNodeKind: selectedKind,
 		SelectedNodeName: selectedName,
+		Edit:             edit,
 		DryRun:           dryRun,
 		Wait:             wait,
 		Timeout:          timeout,
