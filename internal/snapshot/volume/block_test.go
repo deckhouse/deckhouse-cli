@@ -127,6 +127,7 @@ func TestDownloadBlockChunks_Basic(t *testing.T) {
 		2,
 		fetcher,
 		codec,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -169,6 +170,7 @@ func TestDownloadBlockChunks_ConcatDecodesCorrectly(t *testing.T) {
 		1,
 		fetcher,
 		codec,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -215,6 +217,7 @@ func TestDownloadBlockChunks_SkipsExistingChunks(t *testing.T) {
 		1,
 		fetcher,
 		codec,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -240,6 +243,7 @@ func TestDownloadBlockChunks_SkipsExistingChunks(t *testing.T) {
 		1,
 		fetcher,
 		codec,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -287,6 +291,7 @@ func TestDownloadBlockChunks_CleansStaleTemp(t *testing.T) {
 		1,
 		fetcher,
 		codec,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -329,6 +334,7 @@ func TestDownloadBlockChunks_ChunkBoundaries(t *testing.T) {
 		1,
 		fetcher,
 		codec,
+		nil,
 	)
 	require.NoError(t, err)
 

@@ -19,6 +19,7 @@ package volume
 import (
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/url"
@@ -33,6 +34,22 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 )
+
+// countingReader wraps an io.Reader and accumulates the total bytes read.
+// It is used to track how many raw bytes were downloaded from the HTTP body
+// during FS file staging, so the progress hook can be called with an accurate
+// per-file byte count after the streaming encode completes.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+
+	return n, err
+}
 
 // fsItem is one file-system entry collected from the data-exporter listing.
 // It holds both the download URL (for file type) and the metadata needed to
@@ -68,6 +85,7 @@ func DownloadFilesystemVolume(
 	workers int,
 	fetcher *exporter.Fetcher,
 	codec compress.Codec,
+	onProgress func(n int),
 ) error {
 	// Resume: completed tar → skip entirely.
 	if _, err := os.Stat(tarPath); err == nil {
@@ -110,7 +128,7 @@ func DownloadFilesystemVolume(
 		item := it
 
 		g.Go(func() error {
-			return stageCompressedFile(gctx, log, stagingDir, item, codec, fetcher)
+			return stageCompressedFile(gctx, log, stagingDir, item, codec, fetcher, onProgress)
 		})
 	}
 
@@ -241,6 +259,7 @@ func stageCompressedFile(
 	item fsItem,
 	codec compress.Codec,
 	fetcher *exporter.Fetcher,
+	onProgress func(n int),
 ) error {
 	destPath := filepath.Join(stagingDir, filepath.FromSlash(item.relPath+codec.Ext()))
 
@@ -271,12 +290,14 @@ func stageCompressedFile(
 
 	defer func() { _ = body.Close() }()
 
+	cr := &countingReader{r: body}
+
 	aw, err := archive.NewAtomicWriter(destPath)
 	if err != nil {
 		return fmt.Errorf("open atomic writer for %s: %w", destPath, err)
 	}
 
-	if err := codec.EncodeStream(aw, body); err != nil {
+	if err := codec.EncodeStream(aw, cr); err != nil {
 		aw.Abort()
 
 		return fmt.Errorf("stage %s: %w", item.relPath, err)
@@ -284,6 +305,10 @@ func stageCompressedFile(
 
 	if err := aw.Commit(); err != nil {
 		return fmt.Errorf("commit staging %s: %w", destPath, err)
+	}
+
+	if onProgress != nil {
+		onProgress(int(cr.n))
 	}
 
 	log.Info("staging file written", slog.String("path", item.relPath))

@@ -29,8 +29,10 @@ import (
 
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
@@ -219,6 +221,9 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("building aggregated API client: %w", err)
 	}
 
+	tty := term.IsTerminal(int(os.Stdout.Fd()))
+	sink := progress.New(os.Stdout, tty)
+
 	cfg := pipeline.Config{
 		Namespace:            namespace,
 		RootSnapshot:         snapshotName,
@@ -234,6 +239,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		SafeClient:           sc,
 		SelectedNodeKind:     selectedKind,
 		SelectedNodeName:     selectedName,
+		Progress:             sink,
 		Log:                  log,
 	}
 
@@ -244,8 +250,12 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	)
 
 	if err := pipeline.Run(ctx, cfg); err != nil {
+		sink.Wait()
+
 		return fmt.Errorf("snapshot download failed: %w", err)
 	}
+
+	sink.Wait()
 
 	log.Info("snapshot download complete", slog.String("output_dir", outputDir))
 
