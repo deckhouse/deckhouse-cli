@@ -39,6 +39,7 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 	}
 
 	cmd.AddCommand(NewGetCommand(log))
+	cmd.AddCommand(NewDescribeCommand(log))
 
 	return cmd
 }
