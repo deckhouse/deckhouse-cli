@@ -231,6 +231,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 	volumes := snapimport.NewClusterVolumeImporter(dynClient, sc, ttl, timeout, 3*time.Second, tempDir, log)
 
 	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
+
 	sink := progress.New(os.Stdout, isTTY)
 	defer sink.Wait()
 

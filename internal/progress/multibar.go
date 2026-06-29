@@ -232,7 +232,7 @@ func (s *plainSink) emit() {
 	tot := s.total
 	s.mu.Unlock()
 
-	fmt.Fprintf(s.w, "downloaded % .1f / total % .1f\n", decor.SizeB1024(prog), decor.SizeB1024(tot)) //nolint:errcheck
+	fmt.Fprintf(s.w, "downloaded % .1f / total % .1f\n", decor.SizeB1024(prog), decor.SizeB1024(tot))
 }
 
 // NewStream registers an additional stream and adds its total to the aggregate.
