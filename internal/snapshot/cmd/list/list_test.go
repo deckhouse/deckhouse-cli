@@ -19,6 +19,7 @@ package list
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	sigsyaml "sigs.k8s.io/yaml"
 )
 
 // snapshotObj builds an unstructured Snapshot for tests. An empty ready/content
@@ -345,6 +347,114 @@ func TestListSnapshots(t *testing.T) {
 			t.Fatalf("expected 3 snapshots across all namespaces, got %d", len(list.Items))
 		}
 	})
+}
+
+// TestRender_OutputPassthrough verifies that -o json and -o yaml emit the raw
+// Snapshot object(s) with full field fidelity — no stripping of apiVersion,
+// kind, metadata, or status fields. The list is fetched via listSnapshots using
+// a seeded fake dynamic client so the full pipeline (client → render → output)
+// is exercised.
+func TestRender_OutputPassthrough(t *testing.T) {
+	obj := snapshotObj("ns1", "snap-pt", "True", "content-x", 2, time.Hour)
+	dyn := newFakeDynamic(obj)
+
+	list, err := listSnapshots(context.Background(), dyn, "ns1", false)
+	if err != nil {
+		t.Fatalf("listSnapshots: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		format string
+	}{
+		{name: "json passthrough", format: "json"},
+		{name: "yaml passthrough", format: "yaml"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+
+			if err := render(&buf, list, false, tc.format); err != nil {
+				t.Fatalf("render(%s): %v", tc.format, err)
+			}
+
+			var got map[string]interface{}
+
+			switch tc.format {
+			case "json":
+				if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+					t.Fatalf("json.Unmarshal: %v", err)
+				}
+			case "yaml":
+				if err := sigsyaml.Unmarshal(buf.Bytes(), &got); err != nil {
+					t.Fatalf("yaml.Unmarshal: %v", err)
+				}
+			}
+
+			// items array must be present and non-empty.
+			items, ok := got["items"].([]interface{})
+			if !ok || len(items) == 0 {
+				t.Fatalf("items missing or empty in %s output", tc.format)
+			}
+
+			item, ok := items[0].(map[string]interface{})
+			if !ok {
+				t.Fatalf("items[0] is not a map: %T", items[0])
+			}
+
+			// Raw apiVersion and kind must survive passthrough.
+			if item["apiVersion"] != "storage.deckhouse.io/v1alpha1" {
+				t.Fatalf("apiVersion not preserved: %v", item["apiVersion"])
+			}
+
+			if item["kind"] != "Snapshot" {
+				t.Fatalf("kind not preserved: %v", item["kind"])
+			}
+
+			// metadata.name and metadata.namespace must survive.
+			metadata, _ := item["metadata"].(map[string]interface{})
+
+			if metadata["name"] != "snap-pt" {
+				t.Fatalf("metadata.name not preserved: %v", metadata["name"])
+			}
+
+			if metadata["namespace"] != "ns1" {
+				t.Fatalf("metadata.namespace not preserved: %v", metadata["namespace"])
+			}
+
+			// status.boundSnapshotContentName must survive — no field stripping.
+			status, ok := item["status"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("status missing or not a map: %v", item["status"])
+			}
+
+			if status["boundSnapshotContentName"] != "content-x" {
+				t.Fatalf("boundSnapshotContentName not preserved: %v", status["boundSnapshotContentName"])
+			}
+		})
+	}
+}
+
+func TestRenderUnsupportedFormat_ErrorIs(t *testing.T) {
+	list := &unstructured.UnstructuredList{}
+
+	cases := []struct {
+		name   string
+		format string
+	}{
+		{name: "wide", format: "wide"},
+		{name: "custom", format: "custom"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := render(io.Discard, list, false, tc.format)
+			if !errors.Is(err, errUnsupportedFormat) {
+				t.Fatalf("expected errUnsupportedFormat for format %q, got %v", tc.format, err)
+			}
+		})
+	}
 }
 
 func TestRunMutuallyExclusiveScope(t *testing.T) {
