@@ -23,6 +23,7 @@ import (
 
 	createcmd "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/create"
 	deletecmd "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/delete"
+	describecmd "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/describe"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/download"
 	listcmd "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/list"
 	restorecmd "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd/restore"
@@ -45,6 +46,7 @@ func NewCommand() *cobra.Command {
 
 	cmd.AddCommand(createcmd.NewCommand(log))
 	cmd.AddCommand(deletecmd.NewCommand(log))
+	cmd.AddCommand(describecmd.NewCommand(log))
 	cmd.AddCommand(download.NewCommand(log))
 	cmd.AddCommand(restorecmd.NewCommand(log))
 	cmd.AddCommand(snapimportcmd.NewCommand(log))
