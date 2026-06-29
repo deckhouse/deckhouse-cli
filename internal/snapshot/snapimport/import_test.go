@@ -94,7 +94,7 @@ func (s *stubVolumes) EnsureDataImport(_ context.Context, leaf PlannedNode, _ st
 	return leaf.Name, nil
 }
 
-func (s *stubVolumes) UploadVolumeData(_ context.Context, leaf PlannedNode, _, _ string) error {
+func (s *stubVolumes) UploadVolumeData(_ context.Context, leaf PlannedNode, _, _ string, _ func(int)) error {
 	s.upload = append(s.upload, leaf.Name)
 
 	return nil
@@ -1019,7 +1019,7 @@ func (s *concStubVolumes) EnsureDataImport(_ context.Context, leaf PlannedNode, 
 	return leaf.Name, nil
 }
 
-func (s *concStubVolumes) UploadVolumeData(ctx context.Context, leaf PlannedNode, _, _ string) error {
+func (s *concStubVolumes) UploadVolumeData(ctx context.Context, leaf PlannedNode, _, _ string, _ func(int)) error {
 	cur := s.inflight.Add(1)
 	defer s.inflight.Add(-1)
 
@@ -1096,7 +1096,7 @@ func (s *errorOnceStubVolumes) EnsureDataImport(_ context.Context, leaf PlannedN
 	return leaf.Name, nil
 }
 
-func (s *errorOnceStubVolumes) UploadVolumeData(ctx context.Context, leaf PlannedNode, _, _ string) error {
+func (s *errorOnceStubVolumes) UploadVolumeData(ctx context.Context, leaf PlannedNode, _, _ string, _ func(int)) error {
 	if leaf.Name == s.errorLeaf {
 		return fmt.Errorf("injected upload error for %s", leaf.Name)
 	}

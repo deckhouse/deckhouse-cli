@@ -73,8 +73,10 @@ type VolumeImporter interface {
 	// EnsureDataImport creates (idempotently) the DataImport for the leaf and returns its name.
 	EnsureDataImport(ctx context.Context, leaf PlannedNode, namespace string) (string, error)
 	// UploadVolumeData waits for the DataImport to become ready, streams the leaf's block
-	// data, finalises, and waits for completion.
-	UploadVolumeData(ctx context.Context, leaf PlannedNode, diName, namespace string) error
+	// data, finalises, and waits for completion. onProgress, when non-nil, is called with
+	// the number of bytes written after each chunk or file upload; nil disables progress
+	// reporting and leaves upload behaviour unchanged.
+	UploadVolumeData(ctx context.Context, leaf PlannedNode, diName, namespace string, onProgress func(int)) error
 }
 
 // clusterVolumeImporter is the live VolumeImporter backed by a dynamic client (DataImport
@@ -261,7 +263,7 @@ func (c *clusterVolumeImporter) deleteDataImportAndWait(ctx context.Context, ri 
 
 // UploadVolumeData waits for the DataImport endpoint, uploads the volume data
 // (filesystem tar or raw block), finalises, and waits for the durable artifact.
-func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf PlannedNode, diName, namespace string) error {
+func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf PlannedNode, diName, namespace string, onProgress func(int)) error {
 	if !leaf.FilesystemData && !leaf.HasBlockData() {
 		return fmt.Errorf("data leaf %s/%s has no volume data file in the archive", leaf.Kind, leaf.Name)
 	}
@@ -295,7 +297,7 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 		return err
 	}
 
-	if err := c.sendVolumeData(ctx, httpClient, url, volumeMode, leaf, namespace, diName); err != nil {
+	if err := c.sendVolumeData(ctx, httpClient, url, volumeMode, leaf, namespace, diName, onProgress); err != nil {
 		return err
 	}
 
@@ -307,14 +309,14 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 // the caller must invoke waitDataImportCompleted afterwards.
 // Using leaf.TarFile (not leaf.DataFile) for the FS path is essential: DataFile holds the
 // block-data glob result (data.bin*), which is always empty for FS-only leaves.
-func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient httpDoer, url, volumeMode string, leaf PlannedNode, namespace, diName string) error {
+func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient httpDoer, url, volumeMode string, leaf PlannedNode, namespace, diName string, onProgress func(int)) error {
 	switch volumeMode {
 	case volumeModeFilesystem:
 		c.log.Info("uploading filesystem data",
 			slog.String("namespace", namespace),
 			slog.String("dataimport", diName))
 
-		if err := importFSFromTar(ctx, httpClient, url, leaf.TarFile, c.log); err != nil {
+		if err := importFSFromTar(ctx, httpClient, url, leaf.TarFile, c.log, onProgress); err != nil {
 			return fmt.Errorf("upload filesystem data for %s/%s: %w", namespace, diName, err)
 		}
 
@@ -347,7 +349,7 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 			slog.String("dataimport", diName),
 			slog.Int64("bytes", size))
 
-		if err := putBlock(ctx, httpClient, blockURL, srcPath, size); err != nil {
+		if err := putBlock(ctx, httpClient, blockURL, srcPath, size, onProgress); err != nil {
 			return fmt.Errorf("upload block data for %s/%s: %w", namespace, diName, err)
 		}
 
@@ -488,8 +490,9 @@ type httpDoer interface {
 }
 
 // putBlock streams the raw block file to the importer's block endpoint, honouring the
-// server-reported X-Next-Offset for resumable progress.
-func putBlock(ctx context.Context, httpClient httpDoer, url, filePath string, totalSize int64) error {
+// server-reported X-Next-Offset for resumable progress. onProgress, when non-nil, is
+// called with the number of bytes accepted by the server after each PUT chunk.
+func putBlock(ctx context.Context, httpClient httpDoer, url, filePath string, totalSize int64, onProgress func(int)) error {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -532,6 +535,10 @@ func putBlock(ctx context.Context, httpClient httpDoer, url, filePath string, to
 		next, err := doBlockChunk(httpClient, req, offset, totalSize)
 		if err != nil {
 			return err
+		}
+
+		if onProgress != nil {
+			onProgress(int(next - offset))
 		}
 
 		offset = next

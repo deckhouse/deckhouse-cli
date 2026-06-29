@@ -361,7 +361,7 @@ func TestImportFSFromTar_DecompressesAndUploads(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger()); err != nil {
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil); err != nil {
 		t.Fatalf("importFSFromTar: %v", err)
 	}
 
@@ -456,7 +456,7 @@ func TestImportFSFromTar_SkipsNonRegularEntries(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger()); err != nil {
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil); err != nil {
 		t.Fatalf("importFSFromTar: %v", err)
 	}
 
@@ -597,7 +597,7 @@ func TestImportFSFromTar_EmptyFileIsUploaded(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger()); err != nil {
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil); err != nil {
 		t.Fatalf("importFSFromTar: %v", err)
 	}
 

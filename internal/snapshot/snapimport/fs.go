@@ -243,10 +243,11 @@ func parseOffsetHeader(h http.Header, name string) (int64, error) {
 // and named <relpath><ext> (ext .zst/.gz/.lz4 or empty for none); the codec is
 // stripped to recover the original relPath before uploading. Directory and symlink
 // entries are skipped — the importer creates parent directories implicitly on the
-// first child file write.
+// first child file write. onProgress, when non-nil, is called with the decompressed
+// byte count after each file is successfully uploaded.
 //
 // TODO(follow-up): reproduce empty-directory and symlink entries when needed.
-func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath string, log *slog.Logger) error {
+func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath string, log *slog.Logger, onProgress func(int)) error {
 	f, err := os.Open(tarPath)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", tarPath, err)
@@ -280,6 +281,16 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 			return fmt.Errorf("decompress tar entry %s: %w", hdr.Name, err)
 		}
 
+		// Stat before upload so the size is available for progress reporting even
+		// after the temp file is removed.
+		var fileSize int64
+
+		if onProgress != nil {
+			if fi, statErr := os.Stat(tmpName); statErr == nil {
+				fileSize = fi.Size()
+			}
+		}
+
 		attrs := fileAttrs{
 			Perm:    os.FileMode(hdr.Mode & 0o777),
 			UID:     hdr.Uid,
@@ -292,6 +303,10 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 
 		if putErr != nil {
 			return fmt.Errorf("upload %s: %w", relPath, putErr)
+		}
+
+		if onProgress != nil && fileSize > 0 {
+			onProgress(int(fileSize))
 		}
 	}
 

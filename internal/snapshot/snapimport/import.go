@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 
+	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 )
 
@@ -109,6 +110,10 @@ type Config struct {
 	Mapper meta.RESTMapper
 	// Log receives progress output.
 	Log *slog.Logger
+	// Progress, when non-nil, receives per-stream byte increments for each data-leaf
+	// volume upload. Each leaf gets its own Stream; nil disables progress reporting
+	// and leaves upload behaviour unchanged.
+	Progress progress.Sink
 }
 
 // Run imports a local snapshot archive into the target namespace. It plans the tree
@@ -373,7 +378,18 @@ func importNodeData(ctx context.Context, cfg Config, node PlannedNode) error {
 		return fmt.Errorf("ensure DataImport for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
-	if err := cfg.Volumes.UploadVolumeData(ctx, node, diName, cfg.Namespace); err != nil {
+	// One Stream per data-leaf upload; nil hook when no Sink is configured so the
+	// upload path is completely unchanged when Progress is not set.
+	var onProgress func(int)
+
+	if cfg.Progress != nil {
+		stream := cfg.Progress.NewStream(node.Kind+"/"+node.Name, 0)
+		defer stream.Done()
+
+		onProgress = stream.IncrBy
+	}
+
+	if err := cfg.Volumes.UploadVolumeData(ctx, node, diName, cfg.Namespace, onProgress); err != nil {
 		return fmt.Errorf("import volume data for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
