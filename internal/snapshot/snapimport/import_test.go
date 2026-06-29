@@ -1442,3 +1442,26 @@ func TestPreflight_VSLeafPasses(t *testing.T) {
 		t.Errorf("expected preflight to pass for VS leaf under root, got: %v", err)
 	}
 }
+
+// TestApplyDefaults_Workers asserts that a zero Workers field is filled to 5 (the default).
+func TestApplyDefaults_Workers(t *testing.T) {
+	cases := []struct {
+		name    string
+		workers int
+		want    int
+	}{
+		{name: "zero filled to default", workers: 0, want: defaultWorkers},
+		{name: "positive kept", workers: 3, want: 3},
+		{name: "negative filled to default", workers: -1, want: defaultWorkers},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := applyDefaults(Config{Workers: tc.workers})
+
+			if cfg.Workers != tc.want {
+				t.Errorf("Workers: got %d, want %d", cfg.Workers, tc.want)
+			}
+		})
+	}
+}

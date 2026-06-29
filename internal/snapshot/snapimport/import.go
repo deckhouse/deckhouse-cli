@@ -39,7 +39,7 @@ import (
 const (
 	defaultTimeout      = 20 * time.Minute
 	defaultPollInterval = 3 * time.Second
-	defaultWorkers      = 4
+	defaultWorkers      = 5
 
 	condManifestsReady = "ManifestsReady"
 	condVolumesReady   = "VolumesReady"
@@ -89,7 +89,7 @@ type Config struct {
 	// Dynamic creates import-mode CRs and reads readiness status.
 	Dynamic dynamic.Interface
 	// Workers is the maximum number of data-leaf volume uploads to run concurrently in
-	// pass 2b. Defaults to 4 when zero. Note the multiplicative disk budget: each worker
+	// pass 2b. Defaults to 5 when zero. Note the multiplicative disk budget: each worker
 	// may decompress a block volume into a temporary file, so the worst-case peak
 	// temporary disk usage is Workers × (size of the largest decompressed volume).
 	Workers int
