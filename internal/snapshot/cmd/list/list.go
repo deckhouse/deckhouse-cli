@@ -203,12 +203,11 @@ func render(w io.Writer, list *unstructured.UnstructuredList, allNamespaces bool
 
 // snapshotRow is the table-ready projection of a Snapshot object.
 type snapshotRow struct {
-	Namespace       string
-	Name            string
-	Ready           string
-	SnapshotContent string
-	Children        int
-	Age             string
+	Namespace string
+	Name      string
+	Ready     string
+	Children  int
+	Age       string
 }
 
 // buildSnapshotRows projects unstructured Snapshot objects into table rows.
@@ -218,20 +217,14 @@ func buildSnapshotRows(items []unstructured.Unstructured) []snapshotRow {
 	for i := range items {
 		obj := &items[i]
 
-		content, _, _ := unstructured.NestedString(obj.Object, "status", "boundSnapshotContentName")
-		if content == "" {
-			content = notAvailable
-		}
-
 		children, _, _ := unstructured.NestedSlice(obj.Object, "status", "childrenSnapshotRefs")
 
 		rows = append(rows, snapshotRow{
-			Namespace:       obj.GetNamespace(),
-			Name:            obj.GetName(),
-			Ready:           readyStatus(obj),
-			SnapshotContent: content,
-			Children:        len(children),
-			Age:             humanAge(obj.GetCreationTimestamp().Time),
+			Namespace: obj.GetNamespace(),
+			Name:      obj.GetName(),
+			Ready:     readyStatus(obj),
+			Children:  len(children),
+			Age:       humanAge(obj.GetCreationTimestamp().Time),
 		})
 	}
 
@@ -278,18 +271,18 @@ func printSnapshotTable(w io.Writer, rows []snapshotRow, allNamespaces bool) err
 	tw := printers.GetNewTabWriter(w)
 
 	if allNamespaces {
-		fmt.Fprintln(tw, "NAMESPACE\tNAME\tREADY\tSNAPSHOTCONTENT\tCHILDREN\tAGE")
+		fmt.Fprintln(tw, "NAMESPACE\tNAME\tREADY\tCHILDREN\tAGE")
 	} else {
-		fmt.Fprintln(tw, "NAME\tREADY\tSNAPSHOTCONTENT\tCHILDREN\tAGE")
+		fmt.Fprintln(tw, "NAME\tREADY\tCHILDREN\tAGE")
 	}
 
 	for _, r := range rows {
 		if allNamespaces {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n",
-				r.Namespace, r.Name, r.Ready, r.SnapshotContent, r.Children, r.Age)
-		} else {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n",
-				r.Name, r.Ready, r.SnapshotContent, r.Children, r.Age)
+				r.Namespace, r.Name, r.Ready, r.Children, r.Age)
+		} else {
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n",
+				r.Name, r.Ready, r.Children, r.Age)
 		}
 	}
 
