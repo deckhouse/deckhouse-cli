@@ -474,6 +474,17 @@ func downloadVolumeBinding(
 	namespace string,
 	dest volumeDestPaths,
 ) error {
+	// Acquire one slot from the global stream semaphore before opening the
+	// DataExport. This caps the number of concurrently active volume-stream
+	// downloads across all nodes, independently of the node-level Workers errgroup
+	// and the per-volume PerVolumeConcurrency errgroup. Cancelling ctx (e.g. on
+	// sibling error or SIGINT) unblocks a waiting Acquire.
+	if err := cfg.streamSem.Acquire(ctx, 1); err != nil {
+		return fmt.Errorf("acquire stream semaphore for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
+	}
+
+	defer cfg.streamSem.Release(1)
+
 	exp, err := cfg.OpenExport(ctx, namespace, leafRef, cfg.TTL)
 	if err != nil {
 		return fmt.Errorf("open DataExport for %s/%s: %w", leafRef.Kind, leafRef.Name, err)

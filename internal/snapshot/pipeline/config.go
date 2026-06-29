@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"time"
 
+	"golang.org/x/sync/semaphore"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
@@ -36,6 +37,7 @@ import (
 const (
 	defaultWorkers              = 4
 	defaultPerVolumeConcurrency = 4
+	defaultMaxParallelDownloads = 5
 	defaultTTL                  = "2h"
 	defaultReadinessTimeout     = 5 * time.Minute
 )
@@ -64,6 +66,19 @@ type Config struct {
 	// Multiplied with Workers and ChunkSize it determines the worst-case RSS;
 	// see Workers for the peak formula.
 	PerVolumeConcurrency int
+
+	// MaxParallelDownloads is the global cap on concurrent whole-volume-stream
+	// downloads across all nodes (default: 5). It is enforced by a single shared
+	// semaphore acquired once per volume stream in downloadVolumeBinding.
+	// This cap is independent of Workers (node-level errgroup limit) and
+	// PerVolumeConcurrency (chunk/file-level errgroup limit per volume).
+	MaxParallelDownloads int
+
+	// streamSem is the shared semaphore enforcing MaxParallelDownloads. It is
+	// created once in applyDefaults (sized to MaxParallelDownloads) and shared as
+	// a pointer across value-copied per-node configs, so all node goroutines
+	// acquire from the same semaphore instance.
+	streamSem *semaphore.Weighted
 
 	// ChunkSize is the raw-byte size for block-volume chunks.
 	// Defaults to volume.DefaultChunkSize (256 MiB) when zero.
@@ -136,6 +151,15 @@ func applyDefaults(cfg Config) Config {
 	if cfg.PerVolumeConcurrency <= 0 {
 		cfg.PerVolumeConcurrency = defaultPerVolumeConcurrency
 	}
+
+	if cfg.MaxParallelDownloads <= 0 {
+		cfg.MaxParallelDownloads = defaultMaxParallelDownloads
+	}
+
+	// Create the stream semaphore once here; the pointer is shared across all
+	// value-copied per-node configs so every node goroutine acquires from the same
+	// semaphore instance regardless of how Config is passed down the call stack.
+	cfg.streamSem = semaphore.NewWeighted(int64(cfg.MaxParallelDownloads))
 
 	if cfg.TTL == "" {
 		cfg.TTL = defaultTTL
