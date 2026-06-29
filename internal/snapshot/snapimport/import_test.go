@@ -71,6 +71,7 @@ func (s *stubUploader) UploadManifests(_ context.Context, ref aggapi.NodeRef, bo
 }
 
 type stubVolumes struct {
+	mu     sync.Mutex
 	ensure []string
 	upload []string
 	// uploader, when set, lets EnsureDataImport snapshot how many manifest uploads had
@@ -85,6 +86,9 @@ func (s *stubVolumes) DataImportName(leaf PlannedNode) string {
 }
 
 func (s *stubVolumes) EnsureDataImport(_ context.Context, leaf PlannedNode, _ string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if len(s.ensure) == 0 && s.uploader != nil {
 		s.manifestsAtFirstEnsure = len(s.uploader.calls)
 	}
@@ -95,7 +99,9 @@ func (s *stubVolumes) EnsureDataImport(_ context.Context, leaf PlannedNode, _ st
 }
 
 func (s *stubVolumes) UploadVolumeData(_ context.Context, leaf PlannedNode, _, _ string, _ func(int)) error {
+	s.mu.Lock()
 	s.upload = append(s.upload, leaf.Name)
+	s.mu.Unlock()
 
 	return nil
 }
