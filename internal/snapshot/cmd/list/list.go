@@ -14,19 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package list implements the `d8 snapshot list` command.
+// Package list implements the `d8 snapshot get` command.
 package list
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -36,16 +32,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/duration"
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/client-go/dynamic"
-	sigsyaml "sigs.k8s.io/yaml"
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/system/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 const (
-	cmdUse = "list"
+	cmdUse = "get"
 
 	flagNamespace     = "namespace"
 	flagAllNamespaces = "all-namespaces"
@@ -73,32 +67,29 @@ var snapshotGVR = schema.GroupVersionResource{
 	Resource: "snapshots",
 }
 
-// NewCommand builds the `d8 snapshot list` cobra command.
+// NewCommand builds the `d8 snapshot get` cobra command.
 func NewCommand(log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:           cmdUse + " [DIR]",
-		Aliases:       []string{"ls"},
-		Short:         "List Snapshot resources (cluster or a local download directory)",
+		Use:           cmdUse,
+		Aliases:       []string{"list", "ls"},
+		Short:         "List Snapshot resources in the cluster",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Args:          cobra.MaximumNArgs(1),
+		Args:          cobra.NoArgs,
 		Example: `  # List snapshots in the kubeconfig context namespace
-  d8 snapshot list
+  d8 snapshot get
 
   # List snapshots in a specific namespace
-  d8 snapshot list -n my-namespace
+  d8 snapshot get -n my-namespace
 
   # List snapshots across all namespaces
-  d8 snapshot list -A
-
-  # List snapshot nodes from a local download directory (offline, no cluster access)
-  d8 snapshot list ./out
+  d8 snapshot get -A
 
   # Machine-readable output
-  d8 snapshot list -o json
-  d8 snapshot list ./out -o yaml`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return Run(log, cmd, args)
+  d8 snapshot get -o json
+  d8 snapshot get -o yaml`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return Run(log, cmd)
 		},
 	}
 
@@ -119,7 +110,7 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 
 // Run resolves the target namespace (kubectl-style), lists Snapshot objects and
 // renders them in the requested format.
-func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
+func Run(log *slog.Logger, cmd *cobra.Command) error {
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
@@ -128,12 +119,6 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	outputFmt, err := cmd.Flags().GetString(flagOutput)
 	if err != nil {
 		return fmt.Errorf("reading --%s flag: %w", flagOutput, err)
-	}
-
-	// Local mode: a positional directory argument lists snapshot nodes from a
-	// previously downloaded archive tree, without contacting the cluster.
-	if len(args) == 1 {
-		return runLocal(cmd, args[0], outputFmt)
 	}
 
 	namespace, err := cmd.Flags().GetString(flagNamespace)
@@ -319,232 +304,4 @@ func humanAge(t time.Time) string {
 	}
 
 	return duration.HumanDuration(time.Since(t))
-}
-
-// localSnapshotRow is one snapshot node discovered in a local download tree.
-// JSON tags drive the -o json|yaml output.
-type localSnapshotRow struct {
-	Name      string `json:"name"`
-	Kind      string `json:"kind"`
-	Namespace string `json:"namespace,omitempty"`
-	Children  int    `json:"children"`
-	Volumes   int    `json:"volumes"`
-	Age       string `json:"age"`
-	// Path is the node directory relative to the scanned root (`.` for the root).
-	Path string `json:"path"`
-}
-
-// runLocal lists snapshot nodes found under a local download directory. Cluster
-// scope flags are rejected because the cluster is not consulted in this mode.
-func runLocal(cmd *cobra.Command, dir, outputFmt string) error {
-	if cmd.Flags().Changed(flagAllNamespaces) || cmd.Flags().Changed(flagNamespace) {
-		return fmt.Errorf("--%s/--%s are not applicable with a local directory argument", flagAllNamespaces, flagNamespace)
-	}
-
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		return fmt.Errorf("resolving path %q: %w", dir, err)
-	}
-
-	rows, err := discoverLocalSnapshots(absDir)
-	if err != nil {
-		return err
-	}
-
-	return renderLocal(cmd.OutOrStdout(), rows, outputFmt)
-}
-
-// discoverLocalSnapshots walks root and returns one row per snapshot node, i.e.
-// per directory containing a snapshot.yaml. Walking depth-first in lexical order
-// yields a natural parent-before-child ordering of the tree.
-func discoverLocalSnapshots(root string) ([]localSnapshotRow, error) {
-	info, err := os.Stat(root)
-	if err != nil {
-		return nil, fmt.Errorf("accessing %q: %w", root, err)
-	}
-
-	if !info.IsDir() {
-		return nil, fmt.Errorf("%q is not a directory", root)
-	}
-
-	rows := make([]localSnapshotRow, 0)
-
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-
-		if !d.IsDir() {
-			return nil
-		}
-
-		syPath := filepath.Join(path, archive.SnapshotYAMLName)
-
-		if _, statErr := os.Stat(syPath); statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				return nil
-			}
-
-			return fmt.Errorf("stat %s: %w", syPath, statErr)
-		}
-
-		row, rowErr := buildLocalRow(root, path)
-		if rowErr != nil {
-			return rowErr
-		}
-
-		rows = append(rows, row)
-
-		return nil
-	})
-	if walkErr != nil {
-		return nil, fmt.Errorf("scanning %q: %w", root, walkErr)
-	}
-
-	return rows, nil
-}
-
-// buildLocalRow reads the snapshot.yaml at nodeDir and projects it into a row.
-func buildLocalRow(root, nodeDir string) (localSnapshotRow, error) {
-	sy, err := archive.ReadSnapshotYAML(nodeDir)
-	if err != nil {
-		return localSnapshotRow{}, fmt.Errorf("read %s: %w", filepath.Join(nodeDir, archive.SnapshotYAMLName), err)
-	}
-
-	rel, err := filepath.Rel(root, nodeDir)
-	if err != nil {
-		rel = nodeDir
-	}
-
-	children, err := countChildNodes(nodeDir)
-	if err != nil {
-		return localSnapshotRow{}, err
-	}
-
-	// Namespace is stored raw (empty for cluster-scoped) so -o json/yaml stays
-	// faithful; the table renderer substitutes the "-" placeholder.
-	return localSnapshotRow{
-		Name:      sy.Name,
-		Kind:      sy.Kind,
-		Namespace: sy.Namespace,
-		Children:  children,
-		Volumes:   len(sy.Volumes),
-		Age:       localNodeAge(nodeDir),
-		Path:      rel,
-	}, nil
-}
-
-// countChildNodes counts immediate child node directories (those holding a
-// snapshot.yaml) under nodeDir/snapshots/. A missing snapshots/ directory means
-// zero children; any other I/O error is propagated so the listing never
-// silently under-reports.
-func countChildNodes(nodeDir string) (int, error) {
-	snapshotsDir := filepath.Join(nodeDir, archive.SnapshotsDirName)
-
-	entries, err := os.ReadDir(snapshotsDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return 0, nil
-		}
-
-		return 0, fmt.Errorf("read %s: %w", snapshotsDir, err)
-	}
-
-	count := 0
-
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-
-		childSY := filepath.Join(snapshotsDir, e.Name(), archive.SnapshotYAMLName)
-
-		switch _, statErr := os.Stat(childSY); {
-		case statErr == nil:
-			count++
-		case errors.Is(statErr, os.ErrNotExist):
-			// Not a snapshot node directory; ignore.
-		default:
-			return 0, fmt.Errorf("stat %s: %w", childSY, statErr)
-		}
-	}
-
-	return count, nil
-}
-
-// localNodeAge derives the AGE column from the snapshot.yaml modification time.
-func localNodeAge(nodeDir string) string {
-	info, err := os.Stat(filepath.Join(nodeDir, archive.SnapshotYAMLName))
-	if err != nil {
-		return notAvailable
-	}
-
-	return humanAge(info.ModTime())
-}
-
-// renderLocal dispatches local rows to the requested output format.
-func renderLocal(w io.Writer, rows []localSnapshotRow, outputFmt string) error {
-	switch outputFmt {
-	case "json", "yaml":
-		return printStructured(w, rows, outputFmt)
-	case "table", "":
-		return printLocalTable(w, rows)
-	default:
-		return fmt.Errorf("%w %q; use table|json|yaml", errUnsupportedFormat, outputFmt)
-	}
-}
-
-// printLocalTable writes local snapshot rows as an aligned table.
-func printLocalTable(w io.Writer, rows []localSnapshotRow) error {
-	if len(rows) == 0 {
-		fmt.Fprintln(w, "No snapshots found.")
-		return nil
-	}
-
-	tw := printers.GetNewTabWriter(w)
-	fmt.Fprintln(tw, "NAME\tKIND\tNAMESPACE\tCHILDREN\tVOLUMES\tAGE\tPATH")
-
-	for _, r := range rows {
-		namespace := r.Namespace
-		if namespace == "" {
-			namespace = notAvailable
-		}
-
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
-			r.Name, r.Kind, namespace, r.Children, r.Volumes, r.Age, r.Path)
-	}
-
-	return tw.Flush()
-}
-
-// printStructured renders v as JSON or YAML. YAML goes through json.Marshal +
-// sigsyaml.JSONToYAML so json struct tags drive field names.
-func printStructured(w io.Writer, v any, format string) error {
-	switch format {
-	case "json":
-		data, err := json.MarshalIndent(v, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshalling JSON: %w", err)
-		}
-
-		fmt.Fprintln(w, string(data))
-
-		return nil
-	case "yaml":
-		jsonData, err := json.Marshal(v)
-		if err != nil {
-			return fmt.Errorf("marshalling JSON for YAML conversion: %w", err)
-		}
-
-		yamlData, err := sigsyaml.JSONToYAML(jsonData)
-		if err != nil {
-			return fmt.Errorf("converting JSON to YAML: %w", err)
-		}
-
-		fmt.Fprint(w, string(yamlData))
-
-		return nil
-	default:
-		return fmt.Errorf("%w %q", errUnsupportedFormat, format)
-	}
 }
