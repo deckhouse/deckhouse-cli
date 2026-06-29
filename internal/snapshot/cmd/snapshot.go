@@ -33,7 +33,7 @@ import (
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "snapshot",
-		Short:         "Snapshot operations (create, delete, download, restore, import, get)",
+		Short:         "Snapshot operations (create, delete, download, restore, upload, get)",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Run: func(cmd *cobra.Command, _ []string) {
