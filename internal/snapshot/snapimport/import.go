@@ -19,7 +19,6 @@ package snapimport
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -161,14 +160,23 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	} else {
 		// Subtree import: the selected root must be independently importable — a core
-		// Snapshot, a CSI VolumeSnapshot data leaf, or a domain data leaf. Domain
-		// aggregators expose no client-settable import marker and must be reconstructed
-		// by their domain controller.
-		if root.isDomainAggregator() {
+		// Snapshot, a CSI VolumeSnapshot data leaf, or a domain data leaf. A domain
+		// aggregator or a manifest-only domain node is importable too, but only as a non-root
+		// (it needs a parent SnapshotContent to attach to), so neither can be selected as a
+		// standalone --node root; both are reconstructed as part of a full-archive import.
+		switch {
+		case root.isDomainAggregator():
 			return fmt.Errorf(
-				"selected node %s/%s is a domain aggregator that cannot be imported client-side: "+
-					"domain aggregators must be reconstructed by their domain controller; "+
-					"select a supported node with --node <Kind>/<name> (e.g. a CSI VolumeSnapshot or domain data leaf)",
+				"selected node %s/%s is a domain aggregator and cannot be selected as a standalone --node root: "+
+					"it has no parent SnapshotContent to attach to. Import the full archive (omit --node) to "+
+					"reconstruct it as part of its parent tree, or select a supported leaf with "+
+					"--node <Kind>/<name> (e.g. a CSI VolumeSnapshot or domain data leaf)",
+				root.Kind, root.Name)
+		case !root.canBeImportRoot():
+			return fmt.Errorf(
+				"selected node %s/%s is a manifest-only domain node and cannot be imported as a standalone root: "+
+					"it carries no own volume data and is materialised only as part of its parent tree; "+
+					"import the full archive (omit --node) or select its ancestor Snapshot",
 				root.Kind, root.Name)
 		}
 	}
@@ -227,11 +235,11 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 // preflight rejects, before any cluster mutation, archives the CLI cannot client-drive.
-// It classifies each node and emits ONE actionable error that lists every unsupported
-// domain aggregator and every data leaf blocked by an aggregator ancestor, with a
-// --node suggestion for importing supported subtrees directly.
-//
-// VS data leaves missing their volume data file are also rejected here.
+// A CSI VolumeSnapshot data leaf missing its volume data file (data.bin or data.tar) is the
+// only such case: every node kind — including domain aggregators — is importable as part of
+// a tree (aggregators are reconstructed server-side by the genericbinder from their uploaded
+// manifests + child refs). The standalone --node root restriction is enforced separately in
+// Run, not here.
 func preflight(plan []PlannedNode) error {
 	for _, node := range plan {
 		if node.isVolumeSnapshotLeaf() && !node.HasBlockData() && !node.FilesystemData {
@@ -239,78 +247,7 @@ func preflight(plan []PlannedNode) error {
 		}
 	}
 
-	parents := buildParentIndex(plan)
-
-	var aggNames []string
-	var blockedDescs []string
-
-	for _, node := range plan {
-		if node.isDomainAggregator() {
-			aggNames = append(aggNames, fmt.Sprintf("%s/%s", node.Kind, node.Name))
-
-			continue
-		}
-
-		if node.isDomainDataLeaf() {
-			if blocker := aggregatorAncestor(plan, parents, node); blocker != nil {
-				blockedDescs = append(blockedDescs, fmt.Sprintf(
-					"%s/%s (blocked by aggregator %s/%s; use --node %s/%s to import it directly)",
-					node.Kind, node.Name, blocker.Kind, blocker.Name, node.Kind, node.Name))
-			}
-		}
-	}
-
-	if len(aggNames) == 0 && len(blockedDescs) == 0 {
-		return nil
-	}
-
-	return aggregatorPreflightError(aggNames, blockedDescs)
-}
-
-// aggregatorPreflightError builds the single actionable error for an archive that contains
-// domain aggregators and/or data leaves blocked by them.
-func aggregatorPreflightError(aggNames, blockedDescs []string) error {
-	var b strings.Builder
-
-	if len(aggNames) > 0 {
-		fmt.Fprintf(&b, "%d domain aggregator node(s) cannot be imported client-side (%s); "+
-			"domain aggregators must be reconstructed by their domain controller (server-side import)",
-			len(aggNames), strings.Join(aggNames, ", "))
-	}
-
-	if len(blockedDescs) > 0 {
-		if b.Len() > 0 {
-			b.WriteString("; ")
-		}
-
-		fmt.Fprintf(&b, "%d data leaf(s) blocked by aggregator ancestor(s): %s",
-			len(blockedDescs), strings.Join(blockedDescs, "; "))
-	}
-
-	b.WriteString("; use --node <Kind>/<name> to select a supported subtree for import")
-
-	return errors.New(b.String())
-}
-
-// aggregatorAncestor walks the parent chain of node and returns the first domain
-// aggregator ancestor, or nil when all ancestors are structural or data leaves.
-func aggregatorAncestor(plan []PlannedNode, parents map[string]int, node PlannedNode) *PlannedNode {
-	key := nodeKey(node)
-
-	for {
-		pi, ok := parents[key]
-		if !ok {
-			return nil
-		}
-
-		parent := &plan[pi]
-
-		if parent.isDomainAggregator() {
-			return parent
-		}
-
-		key = nodeKey(*parent)
-	}
+	return nil
 }
 
 // preflightNamespace checks, before any cluster mutation, that the target namespace
