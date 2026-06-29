@@ -25,10 +25,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// NewCommand builds the `d8 snapshot local` parent cobra command.
-// It is fully offline: no kubeconfig flags, no cluster contact.
-// Subcommands (get, describe) are attached by their own tasks.
-func NewCommand(_ *slog.Logger) *cobra.Command {
+// NewCommand returns the parent cobra command for the offline `d8 snapshot local` group.
+// It never registers kubeconfig or context flags; all subcommands are fully offline.
+func NewCommand(log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "local",
 		Short:         "Operate on a locally downloaded snapshot archive (no kubeconfig required)",
@@ -38,6 +37,8 @@ func NewCommand(_ *slog.Logger) *cobra.Command {
 			_ = cmd.Help()
 		},
 	}
+
+	cmd.AddCommand(NewGetCommand(log))
 
 	return cmd
 }
