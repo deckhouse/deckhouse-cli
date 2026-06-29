@@ -48,6 +48,7 @@ const (
 	flagTTL                    = "ttl"
 	flagWorkers                = "workers"
 	flagPerVolumeConcurrency   = "per-volume-concurrency"
+	flagMaxParallelDownloads   = "max-parallel-downloads"
 	flagChunkSize              = "chunk-size"
 	flagVolumeCompression      = "volume-compression"
 	flagVolumeCompressionLevel = "volume-compression-level"
@@ -93,6 +94,7 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 	cmd.Flags().String(flagTTL, "2h", "DataExport TTL (e.g. 2h, 30m)")
 	cmd.Flags().Int(flagWorkers, 4, "maximum number of nodes downloaded concurrently")
 	cmd.Flags().Int(flagPerVolumeConcurrency, 4, "maximum parallel chunk/file downloads per volume")
+	cmd.Flags().Int(flagMaxParallelDownloads, 5, "global cap on concurrent whole-volume-stream downloads across all nodes (independent of --workers and --per-volume-concurrency)")
 	cmd.Flags().String(flagChunkSize, "", "block-volume chunk size (e.g. 256Mi); defaults to 256Mi")
 	cmd.Flags().String(flagVolumeCompression, compress.DefaultCodecName,
 		"volume compression codec ("+strings.Join(compress.Names(), ", ")+
@@ -153,6 +155,11 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	perVolume, err := cmd.Flags().GetInt(flagPerVolumeConcurrency)
 	if err != nil {
 		return fmt.Errorf("reading --%s flag: %w", flagPerVolumeConcurrency, err)
+	}
+
+	maxParallel, err := cmd.Flags().GetInt(flagMaxParallelDownloads)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagMaxParallelDownloads, err)
 	}
 
 	chunkSizeStr, err := cmd.Flags().GetString(flagChunkSize)
@@ -218,6 +225,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		OutputDir:            outputDir,
 		Workers:              workers,
 		PerVolumeConcurrency: perVolume,
+		MaxParallelDownloads: maxParallel,
 		ChunkSize:            chunkSize,
 		TTL:                  ttl,
 		Compression:          codec,
