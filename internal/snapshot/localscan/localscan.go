@@ -99,6 +99,7 @@ func scanDir(root, dir string) (*Node, error) {
 	}
 
 	snapshotsDir := filepath.Join(dir, archive.SnapshotsDirName)
+
 	entries, err := os.ReadDir(snapshotsDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -116,6 +117,7 @@ func scanDir(root, dir string) (*Node, error) {
 		}
 
 		childDir := filepath.Join(snapshotsDir, entry.Name())
+
 		child, err := scanDir(root, childDir)
 		if err != nil {
 			return nil, err
