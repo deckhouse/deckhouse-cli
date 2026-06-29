@@ -191,7 +191,7 @@ func TestBuildSnapshotRows(t *testing.T) {
 	}
 
 	if rows[0].Name != "ready-snap" || rows[0].Ready != "True" ||
-		rows[0].SnapshotContent != "content-a" || rows[0].Children != 2 {
+		rows[0].Children != 2 {
 		t.Fatalf("unexpected first row: %+v", rows[0])
 	}
 
@@ -199,9 +199,8 @@ func TestBuildSnapshotRows(t *testing.T) {
 		t.Fatalf("expected age 5m, got %q", rows[0].Age)
 	}
 
-	// Bare snapshot: empty content and no conditions fall back to "-".
-	if rows[1].Ready != notAvailable || rows[1].SnapshotContent != notAvailable ||
-		rows[1].Children != 0 || rows[1].Age != notAvailable {
+	// Bare snapshot: no conditions fall back to "-".
+	if rows[1].Ready != notAvailable || rows[1].Children != 0 || rows[1].Age != notAvailable {
 		t.Fatalf("unexpected bare row: %+v", rows[1])
 	}
 }
@@ -220,16 +219,19 @@ func TestPrintSnapshotTableSingleNamespace(t *testing.T) {
 	out := buf.String()
 
 	if !strings.Contains(out, "NAME") || !strings.Contains(out, "READY") ||
-		!strings.Contains(out, "SNAPSHOTCONTENT") || !strings.Contains(out, "CHILDREN") ||
-		!strings.Contains(out, "AGE") {
+		!strings.Contains(out, "CHILDREN") || !strings.Contains(out, "AGE") {
 		t.Fatalf("missing expected header columns:\n%s", out)
+	}
+
+	if strings.Contains(out, "SNAPSHOTCONTENT") {
+		t.Fatalf("table must not include SNAPSHOTCONTENT column:\n%s", out)
 	}
 
 	if strings.Contains(out, "NAMESPACE") {
 		t.Fatalf("single-namespace table must not include NAMESPACE column:\n%s", out)
 	}
 
-	if !strings.Contains(out, "snap-a") || !strings.Contains(out, "content-a") {
+	if !strings.Contains(out, "snap-a") {
 		t.Fatalf("missing row data:\n%s", out)
 	}
 }
@@ -285,7 +287,7 @@ func TestRenderJSON(t *testing.T) {
 
 	out := buf.String()
 	if !strings.Contains(out, `"items"`) || !strings.Contains(out, "snap-a") ||
-		!strings.Contains(out, "content-a") {
+		!strings.Contains(out, "content-a") || !strings.Contains(out, "boundSnapshotContentName") {
 		t.Fatalf("json output missing expected content:\n%s", out)
 	}
 }
