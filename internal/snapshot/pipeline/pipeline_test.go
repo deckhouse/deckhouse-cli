@@ -20,21 +20,25 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/vbauerster/mpb/v8/decor"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -572,6 +576,95 @@ func TestPipeline_NoneCompression(t *testing.T) {
 	got, readErr := os.ReadFile(noneBlockPath)
 	require.NoError(t, readErr)
 	require.Equal(t, rawBlock, got, "none-compressed block data must match original")
+}
+
+// TestPipeline_Progress_NonTTYFallback verifies that injecting a non-TTY progress.Sink
+// into pipeline.Config causes the aggregate "downloaded X / total Y" line to be emitted
+// to the configured io.Writer after the run completes, using a known block-volume total.
+//
+// The Sink is constructed with a very long tick interval so only sink.Wait() emits output,
+// making the assertion fully deterministic.
+func TestPipeline_Progress_NonTTYFallback(t *testing.T) {
+	t.Parallel()
+
+	// 600-byte block payload gives a known per-volume total for the assertion.
+	rawBlock := bytes.Repeat([]byte("P"), 600)
+	srv := makeBlockServer(t, rawBlock)
+
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	var buf bytes.Buffer
+
+	// Long interval ensures no periodic tick fires during the test; only Wait() emits.
+	sink := progress.New(&buf, false, progress.WithInterval(time.Hour))
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		Progress:             sink,
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-progress", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	err := runPipeline(context.Background(), cfg)
+	require.NoError(t, err)
+
+	sink.Wait()
+
+	got := buf.String()
+
+	// The non-TTY sink emits "downloaded X / total Y" using decor.SizeB1024 with
+	// the "% .1f" verb — replicate the same format to pin the exact expected line.
+	total := int64(len(rawBlock))
+	want := fmt.Sprintf("downloaded % .1f / total % .1f\n",
+		decor.SizeB1024(total), decor.SizeB1024(total))
+
+	require.True(t, strings.Contains(got, want),
+		"non-TTY Sink must emit the aggregate line after pipeline completes\ngot:  %q\nwant (contained): %q",
+		got, want)
+}
+
+// TestPipeline_Progress_NilSinkIsNoop verifies that nil Progress in Config does not
+// change pipeline behavior: the download completes normally and no progress output is
+// produced.
+func TestPipeline_Progress_NilSinkIsNoop(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("Q"), 300)
+	srv := makeBlockServer(t, rawBlock)
+
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		// Progress deliberately left nil to test the no-op path.
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-nil-progress", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	err := runPipeline(context.Background(), cfg)
+	require.NoError(t, err)
+
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	assertNodeComplete(t, diskSnapDir)
 }
 
 // TestPipeline_PartialChunkResume verifies the block_partial resume path: when a node's
