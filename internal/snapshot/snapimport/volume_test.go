@@ -149,6 +149,30 @@ func TestPutBlock_ResumesFromServerOffset(t *testing.T) {
 	}
 }
 
+// TestPutBlock_ReportsProgressBytes verifies that putBlock calls onProgress with the number
+// of bytes written per PUT, summing to the total uploaded size over the whole transfer.
+func TestPutBlock_ReportsProgressBytes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.raw")
+
+	payload := []byte("rawblockdata0123456789") // 22 bytes
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+
+	var reported int
+
+	doer := &recordingDoer{}
+
+	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, int64(len(payload)), func(n int) { reported += n }); err != nil {
+		t.Fatalf("putBlock: %v", err)
+	}
+
+	if reported != len(payload) {
+		t.Errorf("reported bytes = %d, want %d (total bytes uploaded)", reported, len(payload))
+	}
+}
+
 func TestPutBlock_RejectsOversizeServerOffset(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "data.raw")
