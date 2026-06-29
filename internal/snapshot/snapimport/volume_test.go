@@ -89,7 +89,7 @@ func TestPutBlock_SendsRequiredHeaders(t *testing.T) {
 
 	doer := &recordingDoer{}
 
-	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, int64(len(payload))); err != nil {
+	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, int64(len(payload)), nil); err != nil {
 		t.Fatalf("putBlock: %v", err)
 	}
 
@@ -126,7 +126,7 @@ func TestPutBlock_ResumesFromServerOffset(t *testing.T) {
 
 	doer := &recordingDoer{resumeOffset: 5}
 
-	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, int64(len(payload))); err != nil {
+	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, int64(len(payload)), nil); err != nil {
 		t.Fatalf("putBlock: %v", err)
 	}
 
@@ -161,7 +161,7 @@ func TestPutBlock_RejectsOversizeServerOffset(t *testing.T) {
 	// Importer reports more bytes than the archive has: a mismatched reused DataImport.
 	doer := &recordingDoer{resumeOffset: 20}
 
-	err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, int64(len(payload)))
+	err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, int64(len(payload)), nil)
 	if err == nil {
 		t.Fatal("expected error for oversize server offset, got nil")
 	}
@@ -194,7 +194,7 @@ func TestUploadVolumeData_SkipsCompleted(t *testing.T) {
 	dyn := newFakeDataImportDyn(completedDataImportObj(targetNS, "pvc-1"))
 	imp := newTestVolumeImporter(dyn) // sc is nil: reaching the HTTP upload would panic.
 
-	if err := imp.UploadVolumeData(context.Background(), leaf, "pvc-1", targetNS); err != nil {
+	if err := imp.UploadVolumeData(context.Background(), leaf, "pvc-1", targetNS, nil); err != nil {
 		t.Fatalf("UploadVolumeData on an already-completed import must be a no-op: %v", err)
 	}
 }
@@ -468,7 +468,7 @@ func TestSendVolumeData_FSLeaf_UsesTarFile(t *testing.T) {
 
 	imp := &clusterVolumeImporter{log: discardLogger()}
 
-	if err := imp.sendVolumeData(context.Background(), plainHTTPDoer{}, srv.URL, volumeModeFilesystem, leaf, targetNS, "pvc-1"); err != nil {
+	if err := imp.sendVolumeData(context.Background(), plainHTTPDoer{}, srv.URL, volumeModeFilesystem, leaf, targetNS, "pvc-1", nil); err != nil {
 		t.Fatalf("sendVolumeData with FS leaf and valid TarFile: %v", err)
 	}
 

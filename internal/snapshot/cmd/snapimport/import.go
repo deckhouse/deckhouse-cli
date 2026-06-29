@@ -31,8 +31,10 @@ import (
 
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"k8s.io/client-go/dynamic"
 
+	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/snapimport"
@@ -228,6 +230,10 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 
 	volumes := snapimport.NewClusterVolumeImporter(dynClient, sc, ttl, timeout, 3*time.Second, tempDir, log)
 
+	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
+	sink := progress.New(os.Stdout, isTTY)
+	defer sink.Wait()
+
 	cfg := snapimport.Config{
 		Namespace:        namespace,
 		InputDir:         inputDir,
@@ -243,6 +249,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		Dynamic:          dynClient,
 		Mapper:           kubeClient.RESTMapper(),
 		Log:              log,
+		Progress:         sink,
 	}
 
 	log.Info("starting snapshot upload",
