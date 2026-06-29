@@ -413,6 +413,27 @@ func TestRun_Edit_EmptyContentAborts(t *testing.T) {
 	}
 }
 
+// TestEditManifests_WhitespaceEditorEnvReturnsError verifies that setting $EDITOR to a
+// whitespace-only string (e.g. " ") returns an error and does not panic.
+// Before the fix, strings.Fields(" ") returns an empty slice and fields[0] panics.
+func TestEditManifests_WhitespaceEditorEnvReturnsError(t *testing.T) {
+	t.Setenv("EDITOR", " ")
+	t.Setenv("KUBE_EDITOR", "")
+
+	input := []unstructured.Unstructured{
+		{Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]interface{}{"name": "cm-ws-editor"},
+		}},
+	}
+
+	_, err := editManifests(input)
+	if err == nil {
+		t.Fatal("expected error for whitespace-only EDITOR env, got nil")
+	}
+}
+
 // TestMarshalDecodeRoundTrip verifies that marshalMultiDocYAML and decodeMultiDocYAML
 // are inverses of each other for a multi-document input.
 func TestMarshalDecodeRoundTrip(t *testing.T) {
