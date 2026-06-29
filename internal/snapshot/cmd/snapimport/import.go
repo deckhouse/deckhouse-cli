@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package snapimportcmd implements the `d8 snapshot import` command. The package name
+// Package snapimportcmd implements the `d8 snapshot upload` command. The package name
 // avoids the reserved word "import".
 package snapimportcmd
 
@@ -40,7 +40,7 @@ import (
 )
 
 const (
-	cmdUse = "import"
+	cmdUse = "upload"
 
 	flagNamespace     = "namespace"
 	flagInput         = "input"
@@ -62,58 +62,59 @@ const (
 	defaultImportTTL = "1h"
 )
 
-// NewCommand builds the `d8 snapshot import` cobra command.
+// NewCommand builds the `d8 snapshot upload` cobra command.
 func NewCommand(log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           cmdUse + " [flags]",
-		Short:         "Import a downloaded snapshot archive into a namespace",
+		Aliases:       []string{"import"},
+		Short:         "Upload a downloaded snapshot archive into a namespace",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Long: `Import a local snapshot archive (produced by 'd8 snapshot download') into a namespace.
+		Long: `Upload a local snapshot archive (produced by 'd8 snapshot download') into a namespace.
 
 The archive tree is reconstructed in stages: first every import-mode CR is created
 top-down (parents before children) so each child carries a child->parent ownerRef the
 state-snapshotter binders use to attach it to its parent; then every node's manifests plus
 direct child refs are uploaded to the state-snapshotter aggregated API; only after all
-manifests are uploaded are the data-leaf volume bytes imported via a DataImport. Manifests
+manifests are uploaded are the data-leaf volume bytes uploaded via a DataImport. Manifests
 are uploaded before any volume data because a leaf's DataImport stays pending until the leaf
 VolumeSnapshot is bound, which requires its ancestors' manifests to already be present.
 After the whole tree is uploaded it waits for the root Snapshot and its bound SnapshotContent
 to become Ready, leaving the namespace ready for 'd8 snapshot restore'.
 
---node restricts the import to a single node and its descendants. The selected node becomes
-the import root; it must be a core Snapshot, a CSI VolumeSnapshot data leaf, or a domain
+--node restricts the upload to a single node and its descendants. The selected node becomes
+the upload root; it must be a core Snapshot, a CSI VolumeSnapshot data leaf, or a domain
 data leaf (e.g. DemoVirtualDiskSnapshot). Domain aggregator nodes (a DemoVirtualMachineSnapshot
 that references child snapshots) and manifest-only domain nodes cannot be selected as the
-import root (they have no parent SnapshotContent to attach to when imported standalone); they
-are imported only as part of a full-archive import (omit --node) or by selecting an ancestor
+upload root (they have no parent SnapshotContent to attach to when uploaded standalone); they
+are uploaded only as part of a full-archive upload (omit --node) or by selecting an ancestor
 Snapshot.
 
 Scope and limitations:
-  - Full Snapshot trees are imported as-is, including domain aggregator nodes (a
+  - Full Snapshot trees are uploaded as-is, including domain aggregator nodes (a
     DemoVirtualMachineSnapshot that aggregates child DemoVirtualDiskSnapshot nodes): the CLI
     creates each node's unified import marker and uploads its manifests + child refs, and the
     server-side genericbinder reconstructs the aggregator's content from its children's
     SnapshotContents. The aggregator is a non-root node in this case, so no DataImport is
     created for it (only its data-leaf descendants stream volume bytes).
   - Manifest-only domain nodes (e.g. a disk-less DemoVirtualMachineSnapshot, which carries
-    only manifests) are imported as part of their parent tree (the server materialises their
+    only manifests) are uploaded as part of their parent tree (the server materialises their
     content from the uploaded manifests alone, with no data leg).
   - A domain aggregator can be reconstructed only within a tree, never as a standalone --node
-    root. To import an individual disk snapshot from such a tree on its own, use
+    root. To upload an individual disk snapshot from such a tree on its own, use
     --node <DomainDataLeafKind>/<name> (e.g. --node DemoVirtualDiskSnapshot/dvd-1).
   - Both block-volume and filesystem-volume data leaves are supported.
-  - Importing requires RBAC to create DataImport (storage-volume-data-manager) and to call
+  - Uploading requires RBAC to create DataImport (storage-volume-data-manager) and to call
     the manifests-and-children-refs-upload subresource (e.g. an admin kubeconfig); the
     read-only snapshot admin role is not sufficient.`,
-		Example: `  # Import the archive in ./out into namespace "restored"
-  d8 snapshot import -n restored -i ./out
+		Example: `  # Upload the archive in ./out into namespace "restored"
+  d8 snapshot upload -n restored -i ./out
 
-  # Import only a single VolumeSnapshot data leaf and its subtree
-  d8 snapshot import -n restored -i ./out --node VolumeSnapshot/pvc-1
+  # Upload only a single VolumeSnapshot data leaf and its subtree
+  d8 snapshot upload -n restored -i ./out --node VolumeSnapshot/pvc-1
 
-  # Import with a longer DataImport TTL and overall timeout
-  d8 snapshot import -n restored -i ./out --ttl 4h --timeout 30m`,
+  # Upload with a longer DataImport TTL and overall timeout
+  d8 snapshot upload -n restored -i ./out --ttl 4h --timeout 30m`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(log, cmd, args)
@@ -244,16 +245,16 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		Log:              log,
 	}
 
-	log.Info("starting snapshot import",
+	log.Info("starting snapshot upload",
 		slog.String("namespace", namespace),
 		slog.String("input", inputDir),
 	)
 
 	if err := snapimport.Run(ctx, cfg); err != nil {
-		return fmt.Errorf("snapshot import failed: %w", err)
+		return fmt.Errorf("snapshot upload failed: %w", err)
 	}
 
-	log.Info("snapshot import complete", slog.String("namespace", namespace))
+	log.Info("snapshot upload complete", slog.String("namespace", namespace))
 
 	return nil
 }
