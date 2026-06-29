@@ -49,6 +49,7 @@ var (
 	contentGVR         = schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents"}
 	volumeSnapshotGVRt = schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
 	demoDiskSnapGVR    = schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots"}
+	demoVMSnapGVR      = schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots"}
 )
 
 type uploadCall struct {
@@ -126,6 +127,7 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 		contentGVR:         "SnapshotContentList",
 		volumeSnapshotGVRt: "VolumeSnapshotList",
 		demoDiskSnapGVR:    "DemoVirtualDiskSnapshotList",
+		demoVMSnapGVR:      "DemoVirtualMachineSnapshotList",
 	}
 
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, objs...)
@@ -138,6 +140,7 @@ func testDomainMapper() meta.RESTMapper {
 	m.Add(schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"}, meta.RESTScopeNamespace)
 
 	return m
 }
@@ -512,7 +515,13 @@ func TestLeafTargetRef_DomainLeaf(t *testing.T) {
 	}
 }
 
-func TestRun_UnsupportedNodeFailsFast(t *testing.T) {
+// TestRun_ManifestOnlyDomainNode_Imports verifies that a manifest-only domain node — a
+// domain snapshot with neither volume data nor child snapshots (e.g. a disk-less
+// DemoVirtualMachineSnapshot) — is client-importable: it gets the unified
+// spec.source.import: {} marker, its manifests are uploaded, it carries a controller-owned
+// child->parent ownerRef, and no DataImport is created (it has no data leg). It is
+// import-equivalent to a structural Snapshot child.
+func TestRun_ManifestOnlyDomainNode_Imports(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
 		apiVersion: "storage.deckhouse.io/v1alpha1",
@@ -528,15 +537,89 @@ func TestRun_UnsupportedNodeFailsFast(t *testing.T) {
 	})
 
 	up := &stubUploader{}
+	vol := &stubVolumes{}
 	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
 
-	err := Run(context.Background(), baseConfig(root, up, &stubVolumes{}, dyn))
-	if err == nil {
-		t.Fatal("expected unsupported-node error, got nil")
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Mapper = testDomainMapper()
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("manifest-only domain node should import, got: %v", err)
 	}
 
-	if len(up.calls) != 0 {
-		t.Errorf("no uploads should happen when an unsupported node is present, got %d", len(up.calls))
+	// Two manifest uploads: the manifest-only domain node (post-order = leaf first), then root.
+	if len(up.calls) != 2 {
+		t.Fatalf("expected 2 manifest uploads, got %d", len(up.calls))
+	}
+
+	if up.calls[0].ref.Kind != "DemoVirtualMachineSnapshot" || up.calls[0].ref.Name != "vm-1" {
+		t.Errorf("first upload = %s/%s, want DemoVirtualMachineSnapshot/vm-1", up.calls[0].ref.Kind, up.calls[0].ref.Name)
+	}
+
+	// A manifest-only domain node has no data leg: no DataImport is ensured/uploaded.
+	if len(vol.ensure) != 0 || len(vol.upload) != 0 {
+		t.Errorf("manifest-only domain node must not import volume data: ensure=%v upload=%v", vol.ensure, vol.upload)
+	}
+
+	// The domain node import-mode CR was created with the unified import marker.
+	vmObj, err := dyn.Resource(demoVMSnapGVR).Namespace(targetNS).Get(context.Background(), "vm-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("DemoVirtualMachineSnapshot import CR not created: %v", err)
+	}
+
+	if _, found, _ := unstructured.NestedMap(vmObj.Object, "spec", "source", "import"); !found {
+		t.Error("manifest-only domain node marker must set spec.source.import: {}")
+	}
+
+	// It carries a controller-owned child->parent ownerRef pointing to the root Snapshot.
+	refs := vmObj.GetOwnerReferences()
+	if len(refs) != 1 || refs[0].Kind != "Snapshot" || refs[0].Name != "root" {
+		t.Fatalf("manifest-only domain node must carry a parent Snapshot ownerRef, got %+v", refs)
+	}
+
+	if refs[0].Controller == nil || !*refs[0].Controller {
+		t.Errorf("manifest-only domain node parent ownerRef should be controller-owned")
+	}
+}
+
+// TestRun_SelectedNode_ManifestOnlyDomainNodeFails verifies that selecting a manifest-only
+// domain node as a standalone --node root fails fast (it has no parent SnapshotContent to
+// attach to), with a clear message, before any cluster mutation.
+func TestRun_SelectedNode_ManifestOnlyDomainNodeFails(t *testing.T) {
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "storage.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+	})
+
+	demo := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
+	writeArchiveNode(t, demo, archiveNode{
+		apiVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "DemoVirtualMachineSnapshot",
+		name:       "vm-1",
+	})
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Mapper = testDomainMapper()
+	cfg.SelectedNodeKind = "DemoVirtualMachineSnapshot"
+	cfg.SelectedNodeName = "vm-1"
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error selecting a manifest-only domain node as standalone root, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "manifest-only domain node") {
+		t.Errorf("expected manifest-only-domain-node error, got: %v", err)
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 {
+		t.Errorf("no cluster mutations should occur on selection error: uploads=%d ensures=%d", len(up.calls), len(vol.ensure))
 	}
 }
 
@@ -1266,12 +1349,10 @@ func buildAggregatorWithDomainLeafArchive(t *testing.T) string {
 	return root
 }
 
-// TestPreflight_AggregatorBlocksDataLeaf verifies that a plan containing a domain aggregator
-// (DemoVirtualMachineSnapshot) is rejected by preflight with ONE actionable error that:
-//   - names the aggregator as unsupported
-//   - names the blocked data leaf and its blocking aggregator
-//   - mentions --node for importing a supported subtree
-func TestPreflight_AggregatorBlocksDataLeaf(t *testing.T) {
+// TestPreflight_AggregatorTreePasses verifies that a full archive containing a domain
+// aggregator (DemoVirtualMachineSnapshot) and its data-leaf child passes preflight: the
+// aggregator is reconstructed server-side as a non-root node, so a full-tree import is allowed.
+func TestPreflight_AggregatorTreePasses(t *testing.T) {
 	archiveRoot := buildAggregatorWithDomainLeafArchive(t)
 
 	plan, err := BuildPlan(archiveRoot)
@@ -1279,27 +1360,56 @@ func TestPreflight_AggregatorBlocksDataLeaf(t *testing.T) {
 		t.Fatalf("BuildPlan: %v", err)
 	}
 
-	preflightErr := preflight(plan)
-	if preflightErr == nil {
-		t.Fatal("expected preflight error for domain aggregator, got nil")
+	if err := preflight(plan); err != nil {
+		t.Errorf("expected preflight to pass for a full aggregator tree, got: %v", err)
+	}
+}
+
+// TestRun_FullAggregatorImport verifies that a full-archive import of a tree containing a
+// domain aggregator (DemoVirtualMachineSnapshot) succeeds end-to-end:
+//   - import-mode markers are created for the root, the aggregator, and the data leaf
+//   - manifests are uploaded for every node; the aggregator's upload carries its child ref
+//   - a DataImport is created ONLY for the data leaf (the aggregator carries no own data)
+func TestRun_FullAggregatorImport(t *testing.T) {
+	archiveRoot := buildAggregatorWithDomainLeafArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+
+	cfg := baseConfig(archiveRoot, up, vol, dyn)
+	cfg.Mapper = testDomainMapper()
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("full aggregator import: %v", err)
 	}
 
-	msg := preflightErr.Error()
-
-	if !strings.Contains(msg, "DemoVirtualMachineSnapshot/vm-1") {
-		t.Errorf("preflight error should name the unsupported aggregator DemoVirtualMachineSnapshot/vm-1; got: %s", msg)
+	// A DataImport is created only for the data leaf, never for the aggregator.
+	if len(vol.ensure) != 1 || vol.ensure[0] != "dvd-1" {
+		t.Errorf("expected exactly one DataImport for the data leaf dvd-1, got: %v", vol.ensure)
 	}
 
-	if !strings.Contains(msg, "DemoVirtualDiskSnapshot/dvd-1") {
-		t.Errorf("preflight error should name the blocked data leaf DemoVirtualDiskSnapshot/dvd-1; got: %s", msg)
+	// The aggregator marker must have been created in the target namespace.
+	if _, err := dyn.Resource(demoVMSnapGVR).Namespace(targetNS).Get(context.Background(), "vm-1", metav1.GetOptions{}); err != nil {
+		t.Errorf("aggregator import CR DemoVirtualMachineSnapshot/vm-1 should have been created: %v", err)
 	}
 
-	if !strings.Contains(msg, "blocked by aggregator") {
-		t.Errorf("preflight error should mention 'blocked by aggregator'; got: %s", msg)
+	// The aggregator's upload must carry its data-leaf child ref so the server can aggregate it.
+	var aggUpload *uploadCall
+	for i := range up.calls {
+		if up.calls[i].ref.Kind == "DemoVirtualMachineSnapshot" && up.calls[i].ref.Name == "vm-1" {
+			aggUpload = &up.calls[i]
+
+			break
+		}
 	}
 
-	if !strings.Contains(msg, "--node") {
-		t.Errorf("preflight error should reference --node flag; got: %s", msg)
+	if aggUpload == nil {
+		t.Fatalf("expected a manifests upload for the aggregator DemoVirtualMachineSnapshot/vm-1; got calls: %+v", up.calls)
+	}
+
+	if len(aggUpload.body.ChildRefs) != 1 || aggUpload.body.ChildRefs[0].Name != "dvd-1" {
+		t.Errorf("aggregator upload should carry child ref DemoVirtualDiskSnapshot/dvd-1, got: %+v", aggUpload.body.ChildRefs)
 	}
 }
 

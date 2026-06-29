@@ -17,7 +17,6 @@ limitations under the License.
 package snapimport
 
 import (
-	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -69,18 +68,50 @@ func TestImportMarkerCR_VolumeSnapshot(t *testing.T) {
 	assertImportMarker(t, obj)
 }
 
-func TestImportMarkerCR_UnsupportedKind(t *testing.T) {
-	// DemoVirtualMachineSnapshot with NO volume data is an unsupported intermediate aggregator.
+func TestImportMarkerCR_DomainAggregator(t *testing.T) {
+	// A DemoVirtualMachineSnapshot that references child snapshots but carries no own volume
+	// data is a domain aggregator. It is reconstructed server-side as a NON-ROOT node, so it
+	// gets the same unified spec.source.import: {} marker as every other node (no error); the
+	// genericbinder later aggregates its children's contents into the aggregator's content.
+	node := PlannedNode{
+		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "DemoVirtualMachineSnapshot",
+		Name:       "vm-1",
+		Children: []ChildRef{{
+			APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+			Kind:       "DemoVirtualDiskSnapshot",
+			Name:       "dvd-1",
+		}},
+	}
+
+	obj, err := importMarkerCR(node, "ns")
+	if err != nil {
+		t.Fatalf("importMarkerCR for domain aggregator: %v", err)
+	}
+
+	if obj.GetNamespace() != "ns" || obj.GetName() != "vm-1" {
+		t.Errorf("unexpected metadata: ns=%q name=%q", obj.GetNamespace(), obj.GetName())
+	}
+
+	assertImportMarker(t, obj)
+}
+
+func TestImportMarkerCR_ManifestOnlyDomainNode(t *testing.T) {
+	// A DemoVirtualMachineSnapshot with neither volume data nor child snapshots is a
+	// manifest-only domain node: import-equivalent to a structural Snapshot, so it gets the
+	// unified spec.source.import: {} marker (no error).
 	node := PlannedNode{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualMachineSnapshot", Name: "vm-1"}
 
-	_, err := importMarkerCR(node, "ns")
-	if err == nil {
-		t.Fatal("expected unsupported-kind error, got nil")
+	obj, err := importMarkerCR(node, "ns")
+	if err != nil {
+		t.Fatalf("importMarkerCR for manifest-only domain node: %v", err)
 	}
 
-	if !strings.Contains(err.Error(), "not supported") {
-		t.Errorf("error %q does not explain lack of support", err.Error())
+	if obj.GetNamespace() != "ns" || obj.GetName() != "vm-1" {
+		t.Errorf("unexpected metadata: ns=%q name=%q", obj.GetNamespace(), obj.GetName())
 	}
+
+	assertImportMarker(t, obj)
 }
 
 func TestImportMarkerCR_DomainDataLeaf(t *testing.T) {
@@ -105,29 +136,41 @@ func TestImportMarkerCR_DomainDataLeaf(t *testing.T) {
 	assertImportMarker(t, obj)
 }
 
-func TestPlannedNode_Supported(t *testing.T) {
+// TestPlannedNode_IsDomainAggregator verifies the classification that gates the standalone
+// --node root restriction: only a domain node with no own volume data but WITH child refs is
+// an aggregator. Aggregators are still importable as non-root nodes within a tree.
+func TestPlannedNode_IsDomainAggregator(t *testing.T) {
 	cases := []struct {
 		name string
 		node PlannedNode
 		want bool
 	}{
-		{"core snapshot", PlannedNode{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot"}, true},
-		{"csi volume snapshot", PlannedNode{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot"}, true},
-		// A domain disk snapshot WITH volume data is a domain data leaf → supported.
+		{"core snapshot", PlannedNode{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot"}, false},
+		{"csi volume snapshot", PlannedNode{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot"}, false},
+		// A domain disk snapshot WITH volume data is a domain data leaf, not an aggregator.
 		{"demo disk snapshot with block data", PlannedNode{
 			APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
 			Kind:       "DemoVirtualDiskSnapshot",
 			DataFile:   "/some/data.bin",
+		}, false},
+		// A domain snapshot with neither volume data nor children is manifest-only, not an aggregator.
+		{"manifest-only demo vm snapshot", PlannedNode{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualMachineSnapshot"}, false},
+		// A domain snapshot with no data but WITH children is a true aggregator.
+		{"demo vm snapshot aggregator (has children)", PlannedNode{
+			APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+			Kind:       "DemoVirtualMachineSnapshot",
+			Children: []ChildRef{{
+				APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+				Kind:       "DemoVirtualDiskSnapshot",
+				Name:       "dvd-1",
+			}},
 		}, true},
-		// A domain disk snapshot WITHOUT volume data is NOT a data leaf → unsupported.
-		{"demo disk snapshot no data", PlannedNode{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, false},
-		{"demo vm snapshot", PlannedNode{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualMachineSnapshot"}, false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.node.supported(); got != tc.want {
-				t.Errorf("supported() = %v, want %v", got, tc.want)
+			if got := tc.node.isDomainAggregator(); got != tc.want {
+				t.Errorf("isDomainAggregator() = %v, want %v", got, tc.want)
 			}
 		})
 	}
