@@ -30,7 +30,6 @@ import (
 	"time"
 
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -42,7 +41,6 @@ import (
 
 const (
 	dataImportKind        = "DataImport"
-	dataArtifactTypeVSC   = "VolumeSnapshotContent"
 	volumeModeBlock       = "Block"
 	conditionReady        = "Ready"
 	conditionCompleted    = "Completed"
@@ -67,11 +65,10 @@ var dataImportGVR = schema.GroupVersionResource{Group: "storage.deckhouse.io", V
 // upload, and waiting for the durable artifact to be produced. It is satisfied by
 // clusterVolumeImporter and stubbed in tests.
 type VolumeImporter interface {
-	// DataImportName returns the deterministic DataImport name for the leaf. It lets the
-	// import-mode CR reference its DataImport (spec.source.dataImportName) before the
-	// DataImport is created, so creation can be deferred until just before the upload —
-	// the DataImport TTL is an idle timer that starts at importer-pod start, so a freshly
-	// created importer must not sit idle waiting for earlier siblings to finish.
+	// DataImportName returns the deterministic DataImport name for the leaf (its own name).
+	// The DataImport is created bottom-up immediately before its upload — its TTL is an idle
+	// timer that starts at importer-pod start, so a freshly created importer must not sit
+	// idle waiting for earlier siblings to finish.
 	DataImportName(leaf PlannedNode) string
 	// EnsureDataImport creates (idempotently) the DataImport for the leaf and returns its name.
 	EnsureDataImport(ctx context.Context, leaf PlannedNode, namespace string) (string, error)
@@ -84,13 +81,12 @@ type VolumeImporter interface {
 // CR lifecycle and status) and a SafeClient (authenticated HTTPS byte upload to the
 // importer pod, trusting status.ca).
 type clusterVolumeImporter struct {
-	dyn    dynamic.Interface
-	sc     *safeClient.SafeClient
-	ttl    string
-	poll   time.Duration
-	wait   time.Duration
-	log    *slog.Logger
-	mapper meta.RESTMapper
+	dyn  dynamic.Interface
+	sc   *safeClient.SafeClient
+	ttl  string
+	poll time.Duration
+	wait time.Duration
+	log  *slog.Logger
 	// tempDir is the directory for decompressed block-volume temporary files. When empty,
 	// sendVolumeData defaults to filepath.Dir(leaf.DataFile) — next to the archive node
 	// on the same filesystem as the compressed source. Override via --temp-dir.
@@ -100,23 +96,21 @@ type clusterVolumeImporter struct {
 
 // NewClusterVolumeImporter builds the live VolumeImporter. ttl is the DataImport TTL,
 // wait bounds the per-DataImport readiness/completion waits, poll is the polling cadence,
-// tempDir is the scratch directory for decompressed block-volume temp files (empty =
-// auto-select filepath.Dir(leaf.DataFile), keeping temps on the same filesystem as the archive),
-// and mapper resolves domain leaf GVKs to their resource plurals for DataImport targetRef.
+// and tempDir is the scratch directory for decompressed block-volume temp files (empty =
+// auto-select filepath.Dir(leaf.DataFile), keeping temps on the same filesystem as the archive).
 func NewClusterVolumeImporter(
 	dyn dynamic.Interface,
 	sc *safeClient.SafeClient,
 	ttl string,
 	wait, poll time.Duration,
 	tempDir string,
-	mapper meta.RESTMapper,
 	log *slog.Logger,
 ) VolumeImporter {
 	if log == nil {
 		log = slog.Default()
 	}
 
-	return &clusterVolumeImporter{dyn: dyn, sc: sc, ttl: ttl, poll: poll, wait: wait, tempDir: tempDir, mapper: mapper, log: log}
+	return &clusterVolumeImporter{dyn: dyn, sc: sc, ttl: ttl, poll: poll, wait: wait, tempDir: tempDir, log: log}
 }
 
 // DataImportName returns the deterministic DataImport name for the leaf (its own name).
@@ -124,13 +118,28 @@ func (c *clusterVolumeImporter) DataImportName(leaf PlannedNode) string {
 	return leaf.Name
 }
 
-// EnsureDataImport upserts the DataImport targeting the leaf snapshot CR.
+// EnsureDataImport upserts the Mode A DataImport targeting the leaf snapshot CR. The leaf's
+// captured volume metadata (storageClassName/size/volumeMode, read back from the archive) is
+// echoed into spec so the controller can provision the scratch PVC and produce the durable
+// VolumeSnapshotContent artifact. The mode is identified server-side by targetRef.kind (a
+// snapshot-leaf kind ⇒ Mode A); the discriminator value PersistentVolumeClaim is reserved for
+// the standalone Mode B path driven by `d8 data import`.
 func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf PlannedNode, namespace string) (string, error) {
 	name := c.DataImportName(leaf)
 
-	group, resource, err := leafTargetRef(leaf, c.mapper)
+	group, kind, err := leafTargetRef(leaf)
 	if err != nil {
 		return "", err
+	}
+
+	// storageClassName and size are mandatory for Mode A (enforced by the CRD CEL rules).
+	// They originate from the captured SnapshotContent.status.dataRef and are carried through
+	// the archive; a blank value means a malformed archive, so fail early with a clear message
+	// rather than letting the API server reject an incomplete DataImport.
+	if leaf.StorageClassName == "" || leaf.Size == "" {
+		return "", fmt.Errorf("data leaf %s/%s is missing volume metadata in the archive "+
+			"(storageClassName=%q, size=%q); re-download the snapshot with a current d8 version",
+			leaf.Kind, leaf.Name, leaf.StorageClassName, leaf.Size)
 	}
 
 	obj := &unstructured.Unstructured{}
@@ -141,13 +150,18 @@ func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf Plann
 
 	spec := map[string]interface{}{
 		"ttl":              c.ttl,
-		"dataArtifactType": dataArtifactTypeVSC,
+		"storageClassName": leaf.StorageClassName,
+		"size":             leaf.Size,
 		"targetRef": map[string]interface{}{
-			"group":    group,
-			"resource": resource,
-			"name":     leaf.Name,
+			"group": group,
+			"kind":  kind,
+			"name":  leaf.Name,
 		},
 	}
+	if leaf.VolumeMode != "" {
+		spec["volumeMode"] = leaf.VolumeMode
+	}
+
 	if err := unstructured.SetNestedMap(obj.Object, spec, "spec"); err != nil {
 		return "", fmt.Errorf("build DataImport spec: %w", err)
 	}
@@ -446,13 +460,13 @@ func (c *clusterVolumeImporter) waitDataImportCompleted(ctx context.Context, nam
 	}
 }
 
-// leafTargetRef returns the DataImport targetRef {group, resource} for a data leaf.
-// For CSI VolumeSnapshot leaves the group/resource are fixed constants. For domain data
-// leaves the resource plural is resolved via mapper (the domain controller drives import
-// through spec.dataSource.name; the DataImport targetRef identifies the leaf snapshot CR).
-func leafTargetRef(leaf PlannedNode, mapper meta.RESTMapper) (string, string, error) {
+// leafTargetRef returns the DataImport targetRef {group, kind} for a data leaf. The
+// state-snapshotter reverse-lookup matches the leaf by GroupKind directly, so no RESTMapper
+// resource resolution is needed: the kind is the leaf's own kind and the group is parsed from
+// its apiVersion. For CSI VolumeSnapshot leaves the group/kind are fixed constants.
+func leafTargetRef(leaf PlannedNode) (string, string, error) {
 	if leaf.isVolumeSnapshotLeaf() {
-		return aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, nil
+		return aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotKind, nil
 	}
 
 	if leaf.isDomainDataLeaf() {
@@ -461,16 +475,7 @@ func leafTargetRef(leaf PlannedNode, mapper meta.RESTMapper) (string, string, er
 			return "", "", fmt.Errorf("parse apiVersion %q for domain leaf %s/%s: %w", leaf.APIVersion, leaf.Kind, leaf.Name, parseErr)
 		}
 
-		if mapper == nil {
-			return "", "", fmt.Errorf("RESTMapper required to resolve domain leaf %s/%s resource", leaf.Kind, leaf.Name)
-		}
-
-		mapping, mapErr := mapper.RESTMapping(schema.GroupKind{Group: gv.Group, Kind: leaf.Kind}, gv.Version)
-		if mapErr != nil {
-			return "", "", fmt.Errorf("resolve resource for domain leaf %s/%s: %w", leaf.Kind, leaf.Name, mapErr)
-		}
-
-		return gv.Group, mapping.Resource.Resource, nil
+		return gv.Group, leaf.Kind, nil
 	}
 
 	return "", "", unsupportedNodeError(leaf)

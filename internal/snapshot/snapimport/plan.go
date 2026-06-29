@@ -75,6 +75,13 @@ type PlannedNode struct {
 	// ({apiVersion,kind,name} of the source object), read from snapshot.yaml. Nil for
 	// core Snapshot nodes and CSI VolumeSnapshot data leaves.
 	SourceObjectRef *archive.SourceObjectRef
+	// StorageClassName/Size/VolumeMode describe the leaf's captured volume, read from the
+	// first entry of snapshot.yaml Volumes (originally SnapshotContent.status.dataRef). For a
+	// Mode A data-leaf import they become the DataImport's root storageClassName/size/volumeMode.
+	// Empty for structural/aggregator nodes that own no volume data.
+	StorageClassName string
+	Size             string
+	VolumeMode       string
 }
 
 // Ref returns the node's aggregated-API node ref (target namespace applied by the caller).
@@ -94,8 +101,9 @@ func (n PlannedNode) HasBlockData() bool {
 
 // isDomainDataLeaf reports whether the node is a domain data leaf: it carries volume data
 // (block or filesystem) and is neither a core Snapshot nor a CSI VolumeSnapshot leaf.
-// Domain data leaves (e.g. DemoVirtualDiskSnapshot) are imported via spec.dataSource.name
-// by the genericbinder server path, unlike CSI leaves which use spec.source.dataImportName.
+// Domain data leaves (e.g. DemoVirtualDiskSnapshot) and CSI leaves both use the unified
+// spec.source.import: {} marker; their volume content is matched to a DataImport by its
+// targetRef (group/kind/name) in the server-side reverse-lookup.
 func (n PlannedNode) isDomainDataLeaf() bool {
 	return !n.isStructural() && !n.isVolumeSnapshotLeaf() && (n.HasBlockData() || n.FilesystemData)
 }
@@ -175,6 +183,16 @@ func readNode(dir string) (PlannedNode, error) {
 		SourceNamespace: sy.Namespace,
 		Manifests:       manifests,
 		SourceObjectRef: sy.SourceObjectRef,
+	}
+
+	// Data leaves carry exactly one volume; lift its captured metadata onto the node so
+	// EnsureDataImport can echo storageClassName/size/volumeMode into the Mode A DataImport.
+	// Structural/aggregator nodes have no Volumes and leave these empty.
+	if len(sy.Volumes) > 0 {
+		vol := sy.Volumes[0]
+		node.StorageClassName = vol.StorageClassName
+		node.Size = vol.Size
+		node.VolumeMode = vol.VolumeMode
 	}
 
 	blockData, found, err := archive.FindBlockData(dir)
