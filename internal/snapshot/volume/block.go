@@ -67,6 +67,7 @@ func DownloadBlockChunks(
 	workers int,
 	fetcher *exporter.Fetcher,
 	codec compress.Codec,
+	onProgress func(n int),
 ) error {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
@@ -95,7 +96,7 @@ func DownloadBlockChunks(
 		chunkIdx := i
 
 		g.Go(func() error {
-			return downloadChunk(gctx, log, chunkDir, blockURL, chunkIdx, chunkSize, totalSize, fetcher, codec)
+			return downloadChunk(gctx, log, chunkDir, blockURL, chunkIdx, chunkSize, totalSize, fetcher, codec, onProgress)
 		})
 	}
 
@@ -114,6 +115,7 @@ func downloadChunk(
 	totalSize int64,
 	fetcher *exporter.Fetcher,
 	codec compress.Codec,
+	onProgress func(n int),
 ) error {
 	finalPath := filepath.Join(chunkDir, archive.ChunkFileName(chunkIdx, codec.Ext()))
 
@@ -150,6 +152,10 @@ func downloadChunk(
 
 	if err != nil {
 		return fmt.Errorf("read chunk %d body: %w", chunkIdx, err)
+	}
+
+	if onProgress != nil {
+		onProgress(len(raw))
 	}
 
 	frame, err := codec.EncodeFrame(raw)

@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sync/semaphore"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
@@ -137,6 +138,11 @@ type Config struct {
 	// When either value is empty the full tree is downloaded.
 	SelectedNodeKind string
 	SelectedNodeName string
+
+	// Progress is the multi-bar progress Sink for reporting per-stream and
+	// aggregate download progress. When nil, no progress output is produced
+	// and download behaviour is unchanged.
+	Progress progress.Sink
 
 	// Log is the structured logger.  Defaults to slog.Default() when nil.
 	Log *slog.Logger

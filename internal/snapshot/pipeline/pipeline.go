@@ -27,6 +27,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
@@ -508,17 +509,33 @@ func downloadVolumeBinding(
 		slog.String("leaf", leafRef.Name),
 		slog.String("volume_mode", exp.VolumeMode()))
 
+	// Open one progress stream per volume download when a Sink is configured.
+	// The stream is marked Done when downloadVolumeBinding returns so the Sink
+	// can correctly detect completion regardless of success or error.
+	var stream progress.Stream
+
+	if cfg.Progress != nil {
+		stream = cfg.Progress.NewStream(leafRef.Name, 0)
+		defer stream.Done()
+	}
+
 	switch exp.VolumeMode() {
 	case "Block":
-		return downloadBlock(ctx, cfg, dest, exp)
+		return downloadBlock(ctx, cfg, dest, exp, stream)
 	case "Filesystem":
-		return downloadFS(ctx, cfg, dest.fsTarPath, dest.fsTarStagingDir, exp)
+		var onProgress func(n int)
+
+		if stream != nil {
+			onProgress = stream.IncrBy
+		}
+
+		return downloadFS(ctx, cfg, dest.fsTarPath, dest.fsTarStagingDir, exp, onProgress)
 	default:
 		return fmt.Errorf("unsupported volume mode %q for leaf %s/%s", exp.VolumeMode(), leafRef.Kind, leafRef.Name)
 	}
 }
 
-func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *exporter.Export) error {
+func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *exporter.Export, stream progress.Stream) error {
 	blockURL, err := exporter.BlockURL(exp.BaseURL())
 	if err != nil {
 		return fmt.Errorf("build block URL: %w", err)
@@ -529,20 +546,28 @@ func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *e
 		return fmt.Errorf("HEAD block volume: %w", err)
 	}
 
-	if err := volume.DownloadBlockChunks(ctx, cfg.Log, dest.chunkDir, blockURL, totalSize, cfg.ChunkSize, cfg.PerVolumeConcurrency, exp.Fetcher(), cfg.Compression); err != nil {
+	// Update the stream's expected total now that we know the volume size.
+	var onProgress func(n int)
+
+	if stream != nil {
+		stream.SetTotal(totalSize)
+		onProgress = stream.IncrBy
+	}
+
+	if err := volume.DownloadBlockChunks(ctx, cfg.Log, dest.chunkDir, blockURL, totalSize, cfg.ChunkSize, cfg.PerVolumeConcurrency, exp.Fetcher(), cfg.Compression, onProgress); err != nil {
 		return fmt.Errorf("download block chunks: %w", err)
 	}
 
 	return volume.MergeBlockChunks(dest.chunkDir, dest.blockPath, totalSize, cfg.ChunkSize, cfg.Compression.Ext())
 }
 
-func downloadFS(ctx context.Context, cfg Config, tarPath, stagingDir string, exp *exporter.Export) error {
+func downloadFS(ctx context.Context, cfg Config, tarPath, stagingDir string, exp *exporter.Export, onProgress func(n int)) error {
 	filesURL, err := exporter.FilesURL(exp.BaseURL())
 	if err != nil {
 		return fmt.Errorf("build files URL: %w", err)
 	}
 
-	return volume.DownloadFilesystemVolume(ctx, cfg.Log, tarPath, stagingDir, filesURL, cfg.PerVolumeConcurrency, exp.Fetcher(), cfg.Compression)
+	return volume.DownloadFilesystemVolume(ctx, cfg.Log, tarPath, stagingDir, filesURL, cfg.PerVolumeConcurrency, exp.Fetcher(), cfg.Compression, onProgress)
 }
 
 // nodeStateName returns a human-readable label for a NodeState, used in log output
