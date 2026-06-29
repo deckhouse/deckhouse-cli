@@ -167,6 +167,10 @@ func runEditor(path string) error {
 	editor := resolveEditor()
 	fields := strings.Fields(editor)
 
+	if len(fields) == 0 {
+		return fmt.Errorf("resolved editor command %q is empty: set $KUBE_EDITOR or $EDITOR to a non-blank value", editor)
+	}
+
 	cmdArgs := make([]string, 0, len(fields))
 	cmdArgs = append(cmdArgs, fields[1:]...)
 	cmdArgs = append(cmdArgs, path)
