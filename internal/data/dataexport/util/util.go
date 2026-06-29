@@ -92,7 +92,7 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 						ctx,
 						deName, namespace, "",
 						deObj.Spec.TargetRef.Group,
-						deObj.Spec.TargetRef.Resource,
+						deObj.Spec.TargetRef.Kind,
 						deObj.Spec.TargetRef.Name,
 						deObj.Spec.Publish, rtClient,
 					); err != nil {
@@ -195,12 +195,12 @@ func CreateDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, n
 		return deName, nil
 	}
 
-	group, resource, err := dataio.KindToGroupResource(volumeKind)
+	group, err := dataio.KindToGroup(volumeKind)
 	if err != nil {
 		return deName, err
 	}
 
-	err = CreateDataExport(ctx, deName, namespace, ttl, group, resource, volumeName, publish, rtClient)
+	err = CreateDataExport(ctx, deName, namespace, ttl, group, volumeKind, volumeName, publish, rtClient)
 	if err != nil {
 		return deName, err
 	}
@@ -210,10 +210,10 @@ func CreateDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, n
 	return deName, nil
 }
 
-// CreateDataExport creates a DataExport CR targeting the resource identified by group, resource, and volumeName.
+// CreateDataExport creates a DataExport CR targeting the object identified by group, kind, and volumeName.
 // group is the API group ("" for core, e.g. "snapshot.storage.k8s.io" for VolumeSnapshot).
-// resource is the plural resource name (e.g. "volumesnapshots", "persistentvolumeclaims").
-func CreateDataExport(ctx context.Context, deName, namespace, ttl, group, resource, volumeName string, publish bool, rtClient ctrlrtclient.Client) error {
+// kind is the target object kind (e.g. "VolumeSnapshot", "PersistentVolumeClaim").
+func CreateDataExport(ctx context.Context, deName, namespace, ttl, group, kind, volumeName string, publish bool, rtClient ctrlrtclient.Client) error {
 	if ttl == "" {
 		ttl = dataio.DefaultTTL
 	}
@@ -231,9 +231,9 @@ func CreateDataExport(ctx context.Context, deName, namespace, ttl, group, resour
 		Spec: v1alpha1.DataexportSpec{
 			TTL: ttl,
 			TargetRef: v1alpha1.TargetRefSpec{
-				Group:    group,
-				Resource: resource,
-				Name:     volumeName,
+				Group: group,
+				Kind:  kind,
+				Name:  volumeName,
 			},
 			Publish: publish,
 		},
@@ -301,8 +301,13 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 		return "", "", "", fmt.Errorf("invalid URL")
 	}
 
-	if !slices.Contains([]string{"persistentvolumeclaims", "volumesnapshots", "virtualdisks", "virtualdisksnapshots"}, deObj.Spec.TargetRef.Resource) {
-		return "", "", "", fmt.Errorf("invalid volume resource: %s", deObj.Spec.TargetRef.Resource)
+	if !slices.Contains([]string{
+		dataio.PersistentVolumeClaimKind,
+		dataio.VolumeSnapshotKind,
+		dataio.VirtualDiskKind,
+		dataio.VirtualDiskSnapshotKind,
+	}, deObj.Spec.TargetRef.Kind) {
+		return "", "", "", fmt.Errorf("invalid volume kind: %s", deObj.Spec.TargetRef.Kind)
 	}
 
 	volumeMode = deObj.Status.VolumeMode

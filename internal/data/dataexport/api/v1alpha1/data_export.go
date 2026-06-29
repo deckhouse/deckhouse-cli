@@ -41,7 +41,7 @@ type DataExportStatus struct {
 	VolumeMode      string             `json:"volumeMode,omitempty"`
 }
 
-// TargetRefSpec references the export target by GroupResource + name (namespace is
+// TargetRefSpec references the export target by GroupKind + name (namespace is
 // implicit = the DataExport's own namespace). The version is intentionally NOT pinned:
 // the controller resolves the served version via the RESTMapper. Mirrors the producer's
 // DataExportTargetRefSpec in storage-volume-data-manager/api/v1alpha1/data_export.go.
@@ -50,8 +50,9 @@ type DataExportStatus struct {
 type TargetRefSpec struct {
 	// Group is the API group of the target resource ("" = core group).
 	Group string `json:"group,omitempty"`
-	// Resource is the plural resource name (e.g. "volumesnapshots"). Required by the API server.
-	Resource string `json:"resource"`
+	// Kind is the target object kind (e.g. "VolumeSnapshot", "PersistentVolumeClaim").
+	// Required by the API server.
+	Kind string `json:"kind"`
 	// Name is the target object name.
 	Name string `json:"name"`
 }

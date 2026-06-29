@@ -71,7 +71,7 @@ func TestEnsureDataExport_Creates(t *testing.T) {
 	const (
 		namespace = "test-ns"
 		group     = "snapshot.storage.k8s.io"
-		resource  = "volumesnapshots"
+		kind      = "VolumeSnapshot"
 		leafName  = "my-vs-leaf"
 		ttl       = "3h"
 	)
@@ -81,23 +81,23 @@ func TestEnsureDataExport_Creates(t *testing.T) {
 
 	ctx := context.Background()
 
-	de, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, leafName, ttl)
+	de, err := exporter.EnsureDataExport(ctx, c, namespace, group, kind, leafName, ttl)
 	require.NoError(t, err)
 	require.NotNil(t, de)
 
 	assert.Equal(t, exporter.DataExportName(leafName), de.Name)
 	assert.Equal(t, namespace, de.Namespace)
 	assert.Equal(t, group, de.Spec.TargetRef.Group)
-	assert.Equal(t, resource, de.Spec.TargetRef.Resource)
+	assert.Equal(t, kind, de.Spec.TargetRef.Kind)
 	assert.Equal(t, leafName, de.Spec.TargetRef.Name)
 	assert.Equal(t, ttl, de.Spec.TTL)
 
-	// Marshal round-trip: the JSON must carry a non-empty "resource" key — the field
+	// Marshal round-trip: the JSON must carry a non-empty "kind" key — the field
 	// the API server rejects when absent (server-side structural CRD validation).
 	raw, marshalErr := json.Marshal(de.Spec.TargetRef)
 	require.NoError(t, marshalErr)
-	assert.Contains(t, string(raw), `"resource":"volumesnapshots"`, "targetRef JSON must contain populated resource key")
-	assert.NotContains(t, string(raw), `"kind"`, "obsolete kind field must not appear in targetRef JSON")
+	assert.Contains(t, string(raw), `"kind":"VolumeSnapshot"`, "targetRef JSON must contain populated kind key")
+	assert.NotContains(t, string(raw), `"resource"`, "obsolete resource field must not appear in targetRef JSON")
 }
 
 func TestEnsureDataExport_DomainLeaf(t *testing.T) {
@@ -106,7 +106,7 @@ func TestEnsureDataExport_DomainLeaf(t *testing.T) {
 	const (
 		namespace = "test-ns"
 		group     = "demo.deckhouse.io"
-		resource  = "virtualdisksnapshots"
+		kind      = "VirtualDiskSnapshot"
 		leafName  = "disk-snap-1"
 		ttl       = "1h"
 	)
@@ -116,13 +116,13 @@ func TestEnsureDataExport_DomainLeaf(t *testing.T) {
 
 	ctx := context.Background()
 
-	de, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, leafName, ttl)
+	de, err := exporter.EnsureDataExport(ctx, c, namespace, group, kind, leafName, ttl)
 	require.NoError(t, err)
 	require.NotNil(t, de)
 
 	assert.Equal(t, exporter.DataExportName(leafName), de.Name)
 	assert.Equal(t, group, de.Spec.TargetRef.Group)
-	assert.Equal(t, resource, de.Spec.TargetRef.Resource)
+	assert.Equal(t, kind, de.Spec.TargetRef.Kind)
 	assert.Equal(t, leafName, de.Spec.TargetRef.Name)
 }
 
@@ -133,7 +133,7 @@ func TestEnsureDataExport_DefaultTTL(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	de, err := exporter.EnsureDataExport(context.Background(), c, "ns",
-		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, "leaf-vs", "")
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotKind, "leaf-vs", "")
 	require.NoError(t, err)
 
 	// Empty TTL should be replaced by the built-in default (non-empty).
@@ -154,11 +154,11 @@ func TestEnsureDataExport_Idempotent(t *testing.T) {
 	ctx := context.Background()
 
 	de1, err := exporter.EnsureDataExport(ctx, c, namespace,
-		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, leafName, "1h")
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotKind, leafName, "1h")
 	require.NoError(t, err)
 
 	de2, err := exporter.EnsureDataExport(ctx, c, namespace,
-		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, leafName, "1h")
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotKind, leafName, "1h")
 	require.NoError(t, err)
 
 	assert.Equal(t, de1.Name, de2.Name)
@@ -178,9 +178,9 @@ func makeReadyDE(namespace, leafName, baseURL, volumeMode string) *deapi.DataExp
 		Spec: deapi.DataexportSpec{
 			TTL: "2h",
 			TargetRef: deapi.TargetRefSpec{
-				Group:    aggapi.VolumeSnapshotGroup,
-				Resource: aggapi.VolumeSnapshotResource,
-				Name:     leafName,
+				Group: aggapi.VolumeSnapshotGroup,
+				Kind:  aggapi.VolumeSnapshotKind,
+				Name:  leafName,
 			},
 		},
 		Status: deapi.DataExportStatus{

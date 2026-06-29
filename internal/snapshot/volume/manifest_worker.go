@@ -171,7 +171,9 @@ func buildVolumesList(node *source.Node) []archive.VolumeInfo {
 	return vols
 }
 
-// bindingToVolumeInfo converts a SnapshotDataBinding to a VolumeInfo.
+// bindingToVolumeInfo converts a SnapshotDataBinding to a VolumeInfo. The volume metadata
+// (volumeMode/storageClassName/size) is carried through so the import side can rebuild the
+// DataImport spec for a Mode A re-import without re-reading the live SnapshotContent.
 func bindingToVolumeInfo(b *snapshotapi.SnapshotDataBinding) archive.VolumeInfo {
 	return archive.VolumeInfo{
 		Target: archive.VolumeObjectRef{
@@ -186,6 +188,9 @@ func bindingToVolumeInfo(b *snapshotapi.SnapshotDataBinding) archive.VolumeInfo 
 			Kind:       b.Artifact.Kind,
 			Name:       b.Artifact.Name,
 		},
+		VolumeMode:       b.VolumeMode,
+		StorageClassName: b.StorageClassName,
+		Size:             b.Size,
 	}
 }
 

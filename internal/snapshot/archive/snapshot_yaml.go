@@ -102,6 +102,15 @@ type VolumeInfo struct {
 	Target VolumeObjectRef `json:"target"`
 	// Artifact is the VolumeSnapshotContent that holds the durable data artifact.
 	Artifact VolumeObjectRef `json:"artifact"`
+	// VolumeMode records the source volume mode (Block or Filesystem). It feeds the
+	// DataImport spec.volumeMode when re-importing this leaf (Mode A).
+	VolumeMode string `json:"volumeMode,omitempty"`
+	// StorageClassName records the source StorageClass of the captured volume. It feeds
+	// the DataImport spec.storageClassName when re-importing this leaf (Mode A).
+	StorageClassName string `json:"storageClassName,omitempty"`
+	// Size records the real allocated size of the captured volume (e.g. "10Gi"), taken from
+	// VolumeSnapshotContent.status.restoreSize. It feeds the DataImport spec.size on re-import.
+	Size string `json:"size,omitempty"`
 }
 
 // NodeChecksum is the locally-computed integrity digest for one node directory.
