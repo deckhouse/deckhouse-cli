@@ -228,12 +228,22 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("building dynamic client: %w", err)
 	}
 
-	volumes := snapimport.NewClusterVolumeImporter(dynClient, sc, ttl, timeout, 3*time.Second, tempDir, log)
-
 	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
 
 	sink := progress.New(os.Stdout, isTTY)
-	defer sink.Wait()
+
+	// On a TTY the mpb progress bar owns stdout and redraws by moving the cursor
+	// up; unrelated writes to the terminal in between corrupt that accounting and
+	// make the bar re-print as multiple blocks. Route the importer/pipeline
+	// logger (which emits lifecycle INFO lines while bars are live) through the
+	// sink's coordinated writer so those lines print cleanly above the bars. The
+	// command's own bookend logs stay on the original logger.
+	runLog := log
+	if isTTY {
+		runLog = slog.New(slog.NewTextHandler(sink.LogWriter(), &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+
+	volumes := snapimport.NewClusterVolumeImporter(dynClient, sc, ttl, timeout, 3*time.Second, tempDir, runLog)
 
 	cfg := snapimport.Config{
 		Namespace:        namespace,
@@ -249,7 +259,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		Volumes:          volumes,
 		Dynamic:          dynClient,
 		Mapper:           kubeClient.RESTMapper(),
-		Log:              log,
+		Log:              runLog,
 		Progress:         sink,
 	}
 
@@ -259,8 +269,12 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 	)
 
 	if err := snapimport.Run(ctx, cfg); err != nil {
+		sink.Wait()
+
 		return fmt.Errorf("snapshot upload failed: %w", err)
 	}
+
+	sink.Wait()
 
 	log.Info("snapshot upload complete", slog.String("namespace", namespace))
 

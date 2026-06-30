@@ -19,6 +19,7 @@ package progress
 import (
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -36,6 +37,14 @@ type Sink interface {
 
 	// Wait blocks until all streams have finished and flushes remaining output.
 	Wait()
+
+	// LogWriter returns an io.Writer that is safe to use for log output while
+	// the sink is active. For the TTY sink it returns a writer whose writes are
+	// coordinated with the mpb renderer, so log lines print cleanly above the
+	// live bars instead of corrupting their cursor accounting (which otherwise
+	// makes the bar re-print as multiple blocks). For the plain (non-TTY) sink
+	// it returns os.Stderr, preserving the existing logging behaviour.
+	LogWriter() io.Writer
 }
 
 // Stream is a per-stream progress handle returned by Sink.NewStream.
@@ -144,6 +153,15 @@ func (s *ttySink) Wait() {
 	s.p.Wait()
 }
 
+// LogWriter returns the mpb container itself, which implements io.Writer by
+// funnelling writes through the same render loop that draws the bars. Writes
+// therefore appear cleanly above the live bars without corrupting them. After
+// Wait has been called the container is shut down and writes are dropped, so
+// callers must emit post-completion log lines through a different writer.
+func (s *ttySink) LogWriter() io.Writer {
+	return s.p
+}
+
 type ttyStream struct {
 	sink  *ttySink
 	bar   *mpb.Bar
@@ -250,6 +268,13 @@ func (s *plainSink) Wait() {
 	<-s.stopped
 
 	s.emit()
+}
+
+// LogWriter returns os.Stderr for the plain sink: the non-TTY path performs no
+// cursor manipulation, so logs do not corrupt the periodic progress lines and
+// logging behaviour is unchanged from before.
+func (s *plainSink) LogWriter() io.Writer {
+	return os.Stderr
 }
 
 type plainStream struct {

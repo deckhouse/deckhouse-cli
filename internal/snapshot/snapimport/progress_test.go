@@ -19,6 +19,7 @@ package snapimport
 import (
 	"bytes"
 	"context"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -44,6 +45,8 @@ func (s *recordingSink) NewStream(name string, total int64) progress.Stream {
 }
 
 func (s *recordingSink) Wait() { s.inner.Wait() }
+
+func (s *recordingSink) LogWriter() io.Writer { return s.inner.LogWriter() }
 
 func (s *recordingSink) streamNames() []string {
 	s.mu.Lock()
