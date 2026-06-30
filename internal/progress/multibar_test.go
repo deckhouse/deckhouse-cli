@@ -295,7 +295,7 @@ func TestStateWord(t *testing.T) {
 		activated bool
 		want      string
 	}{
-		{"waiting", streamStateWaiting, false, "Waiting"},
+		{"waiting", streamStateWaiting, false, "Waiting for DataExport"},
 		{"active", streamStateActive, true, "Downloading"},
 		{"done_after_activate", streamStateDone, true, "Download complete"},
 		{"done_without_activate", streamStateDone, false, "Already exists"},
@@ -314,12 +314,12 @@ func TestStateWord(t *testing.T) {
 }
 
 // TestStateWordSyncWidth documents the column-alignment contract: the status-word
-// column width is synced to the widest possible word ("Download complete"), so every
-// other state word fits within it and the bar/end-of-row starts at the same x.
+// column width is synced to the widest possible word ("Waiting for DataExport"), so
+// every other state word fits within it and the bar/end-of-row starts at the same x.
 func TestStateWordSyncWidth(t *testing.T) {
 	t.Parallel()
 
-	widest := "Download complete"
+	widest := "Waiting for DataExport"
 
 	words := []string{
 		stateWord(streamStateWaiting, false),
@@ -334,8 +334,8 @@ func TestStateWordSyncWidth(t *testing.T) {
 		}
 	}
 
-	if stateWord(streamStateDone, true) != widest {
-		t.Errorf("expected the done-after-activate word to be the widest %q, got %q", widest, stateWord(streamStateDone, true))
+	if stateWord(streamStateWaiting, false) != widest {
+		t.Errorf("expected the waiting word to be the widest %q, got %q", widest, stateWord(streamStateWaiting, false))
 	}
 }
 
@@ -439,8 +439,8 @@ func TestTTYSink_StateMachine(t *testing.T) {
 		return stateWord(atomic.LoadInt32(&s.state), atomic.LoadInt32(&s.activated) == 1)
 	}
 
-	if got := wordOf(s1); got != "Waiting" {
-		t.Errorf("fresh stream word = %q, want Waiting", got)
+	if got := wordOf(s1); got != "Waiting for DataExport" {
+		t.Errorf("fresh stream word = %q, want Waiting for DataExport", got)
 	}
 
 	// waiting → active → done: a real download ends as "Download complete".
