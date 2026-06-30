@@ -147,7 +147,8 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 	// Create the spinner summary header the first time any stream is registered.
 	// Adding it here (before the per-leaf bar below) ensures it renders at the top.
 	s.headerOnce.Do(func() {
-		s.headerBar = s.p.AddSpinner(0,
+		s.headerBar = s.p.AddBar(0,
+			mpb.BarWidth(0),
 			mpb.PrependDecorators(
 				decor.Any(func(_ decor.Statistics) string {
 					ready := int(s.readyCount.Load())
