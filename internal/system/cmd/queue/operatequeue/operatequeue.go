@@ -127,6 +127,7 @@ func watchQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, pathFr
 		for i, line := range lines {
 			frame.Write(line)
 			frame.WriteString("\x1b[K")
+
 			if i < len(lines)-1 {
 				frame.WriteByte('\n')
 			}
