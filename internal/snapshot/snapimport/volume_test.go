@@ -218,7 +218,7 @@ func TestUploadVolumeData_SkipsCompleted(t *testing.T) {
 	dyn := newFakeDataImportDyn(completedDataImportObj(targetNS, "pvc-1"))
 	imp := newTestVolumeImporter(dyn) // sc is nil: reaching the HTTP upload would panic.
 
-	if err := imp.UploadVolumeData(context.Background(), leaf, "pvc-1", targetNS, nil); err != nil {
+	if err := imp.UploadVolumeData(context.Background(), leaf, "pvc-1", targetNS, nil, nil); err != nil {
 		t.Fatalf("UploadVolumeData on an already-completed import must be a no-op: %v", err)
 	}
 }
@@ -492,7 +492,7 @@ func TestSendVolumeData_FSLeaf_UsesTarFile(t *testing.T) {
 
 	imp := &clusterVolumeImporter{log: discardLogger()}
 
-	if err := imp.sendVolumeData(context.Background(), plainHTTPDoer{}, srv.URL, volumeModeFilesystem, leaf, targetNS, "pvc-1", nil); err != nil {
+	if err := imp.sendVolumeData(context.Background(), plainHTTPDoer{}, srv.URL, volumeModeFilesystem, leaf, targetNS, "pvc-1", nil, nil); err != nil {
 		t.Fatalf("sendVolumeData with FS leaf and valid TarFile: %v", err)
 	}
 

@@ -173,6 +173,7 @@ func TestDownloadFilesystemVolume_DownloadsTree(t *testing.T) {
 		newFSFetcher(srv),
 		mustCodec(t, "none"),
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
@@ -221,7 +222,7 @@ func TestDownloadFilesystemVolume_SkipsIfTarExists(t *testing.T) {
 
 	rootURL := srv.URL + "/files/"
 
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), mustCodec(t, "none"), nil); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), mustCodec(t, "none"), nil, nil); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 
@@ -255,7 +256,7 @@ func TestDownloadFilesystemVolume_CleansStaleTmp(t *testing.T) {
 
 	rootURL := srv.URL + "/files/"
 
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), mustCodec(t, "none"), nil); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), mustCodec(t, "none"), nil, nil); err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 
@@ -278,7 +279,7 @@ func TestDownloadFilesystemVolume_LinkNotInTar(t *testing.T) {
 	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
 	rootURL := srv.URL + "/files/"
 
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), mustCodec(t, "none"), nil); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), mustCodec(t, "none"), nil, nil); err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 
@@ -330,6 +331,7 @@ func TestDownloadFilesystemVolume_StagesCompressed(t *testing.T) {
 		2,
 		newFSFetcher(srv),
 		codec,
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -455,7 +457,7 @@ func TestDownloadFilesystemVolume_SkipsExistingCompressedStaged(t *testing.T) {
 
 	codec := mustCodec(t, "zstd")
 
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), codec, nil); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), codec, nil, nil); err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 
@@ -538,6 +540,8 @@ func TestDownloadFilesystemVolume_RealisticAttributes(t *testing.T) {
 	tarPath := filepath.Join(nodeDir, archive.FsTarName)
 	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
 
+	var gotTotal int64
+
 	if err := volume.DownloadFilesystemVolume(
 		context.Background(),
 		slog.Default(),
@@ -547,9 +551,16 @@ func TestDownloadFilesystemVolume_RealisticAttributes(t *testing.T) {
 		1,
 		newFSFetcher(srv),
 		mustCodec(t, "none"),
+		func(total int64) { gotTotal = total },
 		nil,
 	); err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	// setTotal must receive the summed "size" of file items (file.txt is 5 bytes;
+	// the symlink has no size and contributes nothing).
+	if gotTotal != int64(len(fileContent)) {
+		t.Errorf("setTotal = %d; want %d", gotTotal, len(fileContent))
 	}
 
 	headers := readTarHeaders(t, tarPath)

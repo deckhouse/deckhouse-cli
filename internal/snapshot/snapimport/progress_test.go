@@ -67,7 +67,11 @@ func (v *progressReportingVolumes) EnsureDataImport(_ context.Context, leaf Plan
 	return leaf.Name, nil
 }
 
-func (v *progressReportingVolumes) UploadVolumeData(_ context.Context, _ PlannedNode, _, _ string, onProgress func(int)) error {
+func (v *progressReportingVolumes) UploadVolumeData(_ context.Context, _ PlannedNode, _, _ string, setTotal func(int64), onProgress func(int)) error {
+	if setTotal != nil && v.bytesPerLeaf > 0 {
+		setTotal(int64(v.bytesPerLeaf))
+	}
+
 	if onProgress != nil && v.bytesPerLeaf > 0 {
 		onProgress(v.bytesPerLeaf)
 	}

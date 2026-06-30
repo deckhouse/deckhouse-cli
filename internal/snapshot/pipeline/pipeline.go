@@ -523,13 +523,17 @@ func downloadVolumeBinding(
 	case "Block":
 		return downloadBlock(ctx, cfg, dest, exp, stream)
 	case "Filesystem":
-		var onProgress func(n int)
+		var (
+			onProgress func(n int)
+			setTotal   func(total int64)
+		)
 
 		if stream != nil {
 			onProgress = stream.IncrBy
+			setTotal = stream.SetTotal
 		}
 
-		return downloadFS(ctx, cfg, dest.fsTarPath, dest.fsTarStagingDir, exp, onProgress)
+		return downloadFS(ctx, cfg, dest.fsTarPath, dest.fsTarStagingDir, exp, setTotal, onProgress)
 	default:
 		return fmt.Errorf("unsupported volume mode %q for leaf %s/%s", exp.VolumeMode(), leafRef.Kind, leafRef.Name)
 	}
@@ -561,13 +565,13 @@ func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *e
 	return volume.MergeBlockChunks(dest.chunkDir, dest.blockPath, totalSize, cfg.ChunkSize, cfg.Compression.Ext())
 }
 
-func downloadFS(ctx context.Context, cfg Config, tarPath, stagingDir string, exp *exporter.Export, onProgress func(n int)) error {
+func downloadFS(ctx context.Context, cfg Config, tarPath, stagingDir string, exp *exporter.Export, setTotal func(total int64), onProgress func(n int)) error {
 	filesURL, err := exporter.FilesURL(exp.BaseURL())
 	if err != nil {
 		return fmt.Errorf("build files URL: %w", err)
 	}
 
-	return volume.DownloadFilesystemVolume(ctx, cfg.Log, tarPath, stagingDir, filesURL, cfg.PerVolumeConcurrency, exp.Fetcher(), cfg.Compression, onProgress)
+	return volume.DownloadFilesystemVolume(ctx, cfg.Log, tarPath, stagingDir, filesURL, cfg.PerVolumeConcurrency, exp.Fetcher(), cfg.Compression, setTotal, onProgress)
 }
 
 // nodeStateName returns a human-readable label for a NodeState, used in log output

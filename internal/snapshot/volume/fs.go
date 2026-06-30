@@ -18,6 +18,7 @@ package volume
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -58,6 +59,7 @@ type fsItem struct {
 	relPath  string
 	itemType string // "file", "dir", or "link"
 	uri      string // download URL; non-empty only for itemType == "file"
+	size     int64  // declared content size from the listing; meaningful only for itemType == "file"
 	mode     fs.FileMode
 	uid      int
 	gid      int
@@ -76,6 +78,10 @@ type fsItem struct {
 //
 // workers bounds the parallelism for file downloads; the first error cancels all
 // in-flight downloads.
+//
+// setTotal, when non-nil, is called exactly once with the summed declared size of
+// all file items in the listing before staging begins, so a progress sink can show
+// a real denominator (mirrors the block path's stream.SetTotal after HeadVolume).
 func DownloadFilesystemVolume(
 	ctx context.Context,
 	log *slog.Logger,
@@ -85,6 +91,7 @@ func DownloadFilesystemVolume(
 	workers int,
 	fetcher *exporter.Fetcher,
 	codec compress.Codec,
+	setTotal func(total int64),
 	onProgress func(n int),
 ) error {
 	// Resume: completed tar → skip entirely.
@@ -110,6 +117,12 @@ func DownloadFilesystemVolume(
 	items, err := collectAllFSItems(ctx, fetcher, filesRootURL, base, "")
 	if err != nil {
 		return fmt.Errorf("list filesystem volume: %w", err)
+	}
+
+	// Report the expected total now that the listing (with per-file sizes) is known,
+	// before any staging begins, mirroring the block path's stream.SetTotal.
+	if setTotal != nil {
+		setTotal(sumFileSizes(items))
 	}
 
 	log.Info("staging filesystem volume",
@@ -202,6 +215,7 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 				relPath:  relPath,
 				itemType: "file",
 				uri:      absURI,
+				size:     parseItemSize(item.Attributes),
 				mode:     mode,
 				uid:      uid,
 				gid:      gid,
@@ -316,13 +330,68 @@ func stageCompressedFile(
 	return nil
 }
 
+// sumFileSizes returns the total declared content size across all "file" items in
+// the collected listing. Items whose size is missing or zero contribute nothing.
+func sumFileSizes(items []fsItem) int64 {
+	var total int64
+
+	for _, it := range items {
+		if it.itemType == "file" {
+			total += it.size
+		}
+	}
+
+	return total
+}
+
+// parseItemSize extracts the "size" attribute from a data-exporter listing item.
+// The real exporter emits it as a JSON number (decoded as float64 by encoding/json);
+// json.Number is also handled in case a decoder is configured with UseNumber.
+// Missing, negative, or non-numeric values yield 0 so the total degrades gracefully.
+func parseItemSize(attrs map[string]any) int64 {
+	v, ok := attrs["size"]
+	if !ok {
+		return 0
+	}
+
+	switch n := v.(type) {
+	case float64:
+		if n <= 0 {
+			return 0
+		}
+
+		return int64(n)
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil || i < 0 {
+			return 0
+		}
+
+		return i
+	case int64:
+		if n < 0 {
+			return 0
+		}
+
+		return n
+	case int:
+		if n < 0 {
+			return 0
+		}
+
+		return int64(n)
+	default:
+		return 0
+	}
+}
+
 // parseItemAttrs extracts file metadata from the data-exporter listing attributes map.
 // The real data-exporter (storage-volume-data-manager, images/data-exporter,
 // prepareAttributesStat) emits these keys and types:
 //   - "permissions": octal string via fmt.Sprintf("%#o", perm), e.g. "0644"
 //   - "modtime":     RFC3339 string (time.RFC3339)
 //   - "uid", "gid": JSON numbers (decoded as float64 by encoding/json)
-//   - "size":        JSON number (files only; not consumed here)
+//   - "size":        JSON number (files only; consumed via parseItemSize)
 //   - "hash.md5":    optional hex string; not consumed here
 //
 // Missing or unrecognised attribute values produce zero values; sensible defaults
