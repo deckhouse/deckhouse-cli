@@ -103,22 +103,37 @@ func watchQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, pathFr
 	render := func() {
 		body, fetchErr := fetchQueue(config, kubeCl, pathFromOption)
 
+		var content bytes.Buffer
+		fmt.Fprintf(&content, "Watching queue - %s (press Ctrl+C to stop)\n\n", time.Now().Format("15:04:05"))
+
+		if fetchErr != nil {
+			fmt.Fprintf(&content, "Error fetching queue: %v\n", fetchErr)
+		} else {
+			content.WriteString(body)
+
+			if content.Len() == 0 || content.Bytes()[content.Len()-1] != '\n' {
+				content.WriteByte('\n')
+			}
+		}
+
 		var frame bytes.Buffer
 		// Move cursor to the top-left corner.
 		frame.WriteString("\x1b[H")
-		fmt.Fprintf(&frame, "Watching queue - %s (press Ctrl+C to stop)\n\n", time.Now().Format("15:04:05"))
+		// Overwrite the previous frame in place. Because a new line may be
+		// shorter than the line it replaces, erase to the end of each line
+		// (\x1b[K) before the newline; otherwise the tail of the previous,
+		// longer line stays on screen and produces garbled, overlapping text.
+		lines := bytes.Split(content.Bytes(), []byte("\n"))
+		for i, line := range lines {
+			frame.Write(line)
+			frame.WriteString("\x1b[K")
 
-		if fetchErr != nil {
-			fmt.Fprintf(&frame, "Error fetching queue: %v\n", fetchErr)
-		} else {
-			frame.WriteString(body)
-
-			if len(body) == 0 || body[len(body)-1] != '\n' {
+			if i < len(lines)-1 {
 				frame.WriteByte('\n')
 			}
 		}
 		// Erase everything from the cursor to the end of the screen so that
-		// leftover content from a longer previous frame is cleaned up.
+		// leftover lines from a longer previous frame are cleaned up.
 		frame.WriteString("\x1b[J")
 
 		_, _ = os.Stdout.Write(frame.Bytes())
