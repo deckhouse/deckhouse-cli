@@ -465,3 +465,68 @@ func TestTTYSink_StateMachine(t *testing.T) {
 
 	sink.Wait()
 }
+
+// TestTTYStream_ActivateIdempotent verifies that a duplicate Activate keeps the
+// stream active and the activated flag set (exactly-once state transition), so a
+// re-issued Activate never regresses the row word.
+func TestTTYStream_ActivateIdempotent(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	sink := newTTYSink(buf)
+
+	st, ok := sink.NewStream("dup", 0).(*ttyStream)
+	if !ok {
+		t.Fatal("NewStream did not return *ttyStream")
+	}
+
+	st.Activate()
+	st.Activate()
+
+	if got := atomic.LoadInt32(&st.state); got != streamStateActive {
+		t.Errorf("state after double Activate = %d, want active(%d)", got, streamStateActive)
+	}
+
+	if got := atomic.LoadInt32(&st.activated); got != 1 {
+		t.Errorf("activated after double Activate = %d, want 1", got)
+	}
+
+	st.Done()
+	sink.Wait()
+}
+
+// TestTTYSink_NoSummaryHeader guards the summary-cleanup decision: a TTY run must
+// emit only per-leaf docker-pull rows and never the old animated aggregate header
+// text. mpb terminal frames are not asserted; we only assert the rendered output
+// never contains the removed header strings (or the old "waiting…" counter).
+func TestTTYSink_NoSummaryHeader(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	sink := New(buf, true)
+
+	// Mirror the pipeline's usage: streams are always registered with total=0 and
+	// the real total is supplied later via SetTotal. (A bar created with total>0
+	// enables mpb's trigger-complete, after which Done's SetTotal(_, true) is a
+	// no-op — the resume-skip stream would never complete and Wait would hang.)
+	s1 := sink.NewStream("layer-a", 0)
+	s2 := sink.NewStream("layer-b", 0)
+
+	s1.Activate()
+	s1.SetTotal(1024)
+	s1.IncrBy(1024)
+	s1.Done()
+
+	// s2 is a resume skip: Done without Activate.
+	s2.Done()
+
+	sink.Wait()
+
+	out := buf.String()
+
+	for _, banned := range []string{"preparing exports", "exports ready", "waiting\u2026"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("TTY output must not contain removed header text %q\ngot: %q", banned, out)
+		}
+	}
+}
