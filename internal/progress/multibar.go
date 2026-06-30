@@ -152,6 +152,7 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 				decor.Any(func(_ decor.Statistics) string {
 					ready := int(s.readyCount.Load())
 					tot := int(s.totalCount.Load())
+
 					return summaryLabel(ready, tot)
 				}),
 			),
