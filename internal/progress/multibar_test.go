@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
@@ -337,6 +338,135 @@ func TestStateWordSyncWidth(t *testing.T) {
 	if stateWord(streamStateWaiting, false) != widest {
 		t.Errorf("expected the waiting word to be the widest %q, got %q", widest, stateWord(streamStateWaiting, false))
 	}
+}
+
+// TestSpinnerFrame asserts the pure frame selector cycles through
+// waitingSpinnerFrames by tick % len, including wrap-around at and past the
+// frame count. mpb refresh timing/terminal animation is intentionally not tested.
+func TestSpinnerFrame(t *testing.T) {
+	t.Parallel()
+
+	n := uint64(len(waitingSpinnerFrames))
+
+	cases := []struct {
+		name string
+		tick uint64
+		want string
+	}{
+		{"first", 0, waitingSpinnerFrames[0]},
+		{"last_before_wrap", n - 1, waitingSpinnerFrames[n-1]},
+		{"wrap_to_first", n, waitingSpinnerFrames[0]},
+		{"wrap_to_second", n + 1, waitingSpinnerFrames[1]},
+		{"multi_wrap", 2*n + 3, waitingSpinnerFrames[3]},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := spinnerFrame(tc.tick); got != tc.want {
+				t.Errorf("spinnerFrame(%d) = %q, want %q", tc.tick, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSpinnerFrameAdvances asserts the animation is frame-by-frame deterministic:
+// consecutive ticks move to the next frame across a full cycle and wrap cleanly.
+func TestSpinnerFrameAdvances(t *testing.T) {
+	t.Parallel()
+
+	n := len(waitingSpinnerFrames)
+
+	for i := 0; i < 2*n; i++ {
+		got := spinnerFrame(uint64(i))
+		want := waitingSpinnerFrames[i%n]
+
+		if got != want {
+			t.Errorf("tick %d: spinnerFrame = %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestSpinnerCell asserts state gating and constant width: a real glyph cell
+// (frame + trailing space) only in the waiting state, a same-width blank in the
+// active and done states, and an identical display (rune) width across all three.
+func TestSpinnerCell(t *testing.T) {
+	t.Parallel()
+
+	const tick = uint64(3)
+
+	waitingCell := spinnerCell(streamStateWaiting, tick)
+	activeCell := spinnerCell(streamStateActive, tick)
+	doneCell := spinnerCell(streamStateDone, tick)
+
+	if want := spinnerFrame(tick) + " "; waitingCell != want {
+		t.Errorf("waiting cell = %q, want %q", waitingCell, want)
+	}
+
+	if strings.TrimSpace(waitingCell) == "" {
+		t.Errorf("waiting cell %q must contain a non-blank glyph", waitingCell)
+	}
+
+	if activeCell != "  " {
+		t.Errorf("active cell = %q, want two-space blank", activeCell)
+	}
+
+	if doneCell != "  " {
+		t.Errorf("done cell = %q, want two-space blank", doneCell)
+	}
+
+	// Constant display width is what keeps the columns to the right from shifting
+	// when the spinner appears (waiting) or disappears (active/done).
+	wWidth := utf8.RuneCountInString(waitingCell)
+	if wWidth != spinnerCellWidth {
+		t.Errorf("waiting cell width = %d, want %d", wWidth, spinnerCellWidth)
+	}
+
+	if aWidth := utf8.RuneCountInString(activeCell); aWidth != wWidth {
+		t.Errorf("active cell width = %d, want %d (== waiting)", aWidth, wWidth)
+	}
+
+	if dWidth := utf8.RuneCountInString(doneCell); dWidth != wWidth {
+		t.Errorf("done cell width = %d, want %d (== waiting)", dWidth, wWidth)
+	}
+}
+
+// TestTTYStream_SpinnerStateGating drives a real ttyStream through
+// waiting → active → done and asserts the spinner cell is non-blank only while
+// waiting and blank (constant width) once the row becomes active or done.
+func TestTTYStream_SpinnerStateGating(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	sink := newTTYSink(buf)
+
+	st, ok := sink.NewStream("spin", 0).(*ttyStream)
+	if !ok {
+		t.Fatal("NewStream did not return *ttyStream")
+	}
+
+	cellNow := func() string {
+		return spinnerCell(atomic.LoadInt32(&st.state), atomic.AddUint64(&st.spinTick, 1))
+	}
+
+	if cell := cellNow(); strings.TrimSpace(cell) == "" {
+		t.Errorf("fresh (waiting) stream spinner cell = %q, want a non-blank glyph", cell)
+	}
+
+	st.Activate()
+
+	if cell := cellNow(); cell != "  " {
+		t.Errorf("active stream spinner cell = %q, want two-space blank", cell)
+	}
+
+	st.Done()
+
+	if cell := cellNow(); cell != "  " {
+		t.Errorf("done stream spinner cell = %q, want two-space blank", cell)
+	}
+
+	sink.Wait()
 }
 
 func TestStateBarFiller(t *testing.T) {
