@@ -149,11 +149,13 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 		inner: mpb.BarStyle().Lbound("[").Filler("=").Tip(">").Padding(" ").Rbound("]").Build(),
 	}
 
-	// Layout: name → stateWord → [bar] → counters → percent. Every row uses the
-	// SAME decorator chain and widths in every state — only the rendered content
-	// changes — so a row never shifts horizontally as it transitions
+	// Layout: name → spinner → stateWord → [bar] → counters → percent. Every row
+	// uses the SAME decorator chain and widths in every state — only the rendered
+	// content changes — so a row never shifts horizontally as it transitions
 	// waiting → active → done. Column geometry:
 	//   - name: fixed-width left-aligned cell (truncateName pads/truncates to ttyNameWidth).
+	//   - spinner: fixed-width (spinnerCellWidth) animated cell, non-blank only while
+	//     waiting; a same-width blank in active/done so the column never shifts.
 	//   - stateWord: left-aligned width-synced cell (WCSyncWidth); the widest word
 	//     ("Waiting for DataExport") sets one shared width across all rows, so the bar /
 	//     end-of-row begins at the same x in every state.
@@ -165,6 +167,14 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 		mpb.BarWidth(ttyBarWidth),
 		mpb.PrependDecorators(
 			decor.Name(truncateName(name, ttyNameWidth), decor.WC{W: ttyNameWidth}),
+			// Waiting spinner: a fixed-width animated cell shown only while the row
+			// is waiting. mpb calls this once per refresh; the atomic add advances
+			// the frame each refresh so the glyph spins. WC{W: spinnerCellWidth}
+			// reserves the same width in every state (blank in active/done), so no
+			// other column shifts when the spinner appears or disappears.
+			decor.Any(func(_ decor.Statistics) string {
+				return spinnerCell(atomic.LoadInt32(&ts.state), atomic.AddUint64(&ts.spinTick, 1))
+			}, decor.WC{W: spinnerCellWidth}),
 			decor.Any(func(_ decor.Statistics) string {
 				return " " + stateWord(atomic.LoadInt32(&ts.state), atomic.LoadInt32(&ts.activated) == 1)
 			}, decor.WCSyncWidth),
@@ -215,6 +225,10 @@ type ttyStream struct {
 	// from a resume skip (waiting → done without Activate, "Already exists") in
 	// stateWord without adding a new Stream interface method.
 	activated int32
+	// spinTick is the waiting-spinner frame counter. mpb invokes the spinner
+	// decorator once per refresh; each invocation does an atomic add so the
+	// frame advances per refresh and the waiting glyph animates.
+	spinTick uint64
 }
 
 func (s *ttyStream) IncrBy(n int) {
@@ -270,6 +284,41 @@ func (f stateBarFiller) Fill(w io.Writer, stat decor.Statistics) error {
 	}
 
 	return f.inner.Fill(w, stat)
+}
+
+// ── Waiting spinner ───────────────────────────────────────────────────────────
+
+// spinnerCellWidth is the fixed display-rune width of the waiting-spinner cell:
+// one braille glyph plus a trailing space while waiting, or two blanks otherwise.
+// Keeping it constant means the spinner column never shifts the columns to its
+// right when the glyph appears (waiting) or disappears (active/done).
+const spinnerCellWidth = 2
+
+// waitingSpinnerFrames is the 10-frame braille spinner cycled while a row waits
+// for its DataExport, matching the familiar docker-pull-style motion.
+var waitingSpinnerFrames = []string{
+	"\u280b", "\u2819", "\u2839", "\u2838", "\u283c",
+	"\u2834", "\u2826", "\u2827", "\u2807", "\u280f",
+}
+
+// spinnerFrame returns the braille glyph for the given tick, cycling through
+// waitingSpinnerFrames by tick modulo the frame count. It is pure and
+// deterministic so the animation can be unit-asserted without mpb rendering.
+func spinnerFrame(tick uint64) string {
+	return waitingSpinnerFrames[tick%uint64(len(waitingSpinnerFrames))]
+}
+
+// spinnerCell returns the fixed-width waiting-spinner cell for a stream's state.
+// While waiting it returns the current braille glyph plus a trailing space (an
+// animated indicator); in the active and done states it returns a same-width
+// blank ("  "), so the spinner is visible only while waiting and the column
+// width stays constant across every state. It is pure and unit-assertable.
+func spinnerCell(state int32, tick uint64) string {
+	if state == streamStateWaiting {
+		return spinnerFrame(tick) + " "
+	}
+
+	return "  "
 }
 
 // ── Decorator pure functions ──────────────────────────────────────────────────
