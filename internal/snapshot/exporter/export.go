@@ -87,12 +87,13 @@ func OpenExport(
 	c client.Client,
 	namespace,
 	group,
+	resource,
 	kind,
 	leafName,
 	ttl string,
 	sc *safeClient.SafeClient,
 ) (*Export, error) {
-	de, err := EnsureDataExport(ctx, c, namespace, group, kind, leafName, ttl)
+	de, err := EnsureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl)
 	if err != nil {
 		return nil, fmt.Errorf("ensure DataExport for leaf %q: %w", leafName, err)
 	}

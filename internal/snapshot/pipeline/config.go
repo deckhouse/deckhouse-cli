@@ -201,7 +201,7 @@ func applyDefaults(cfg Config) Config {
 		aggClient := cfg.AggClient
 
 		cfg.OpenExport = func(ctx context.Context, namespace string, leafRef aggapi.NodeRef, ttl string) (*exporter.Export, error) {
-			group, kind, err := aggClient.LeafDataExportTarget(leafRef)
+			group, resource, kind, err := aggClient.LeafDataExportTarget(leafRef)
 			if err != nil {
 				return nil, fmt.Errorf("resolve DataExport target for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
 			}
@@ -209,7 +209,7 @@ func applyDefaults(cfg Config) Config {
 			waitCtx, waitCancel := context.WithTimeout(ctx, timeout)
 			defer waitCancel()
 
-			return exporter.OpenExport(waitCtx, log, c, namespace, group, kind, leafRef.Name, ttl, sc)
+			return exporter.OpenExport(waitCtx, log, c, namespace, group, resource, kind, leafRef.Name, ttl, sc)
 		}
 	}
 

@@ -62,6 +62,7 @@ func EnsureDataExport(
 	c client.Client,
 	namespace,
 	group,
+	resource,
 	kind,
 	leafName,
 	ttl string,
@@ -91,9 +92,10 @@ func EnsureDataExport(
 		Spec: deapi.DataexportSpec{
 			TTL: ttl,
 			TargetRef: deapi.TargetRefSpec{
-				Group: group,
-				Kind:  kind,
-				Name:  leafName,
+				Group:    group,
+				Resource: resource,
+				Kind:     kind,
+				Name:     leafName,
 			},
 		},
 	}

@@ -50,6 +50,11 @@ type DataExportStatus struct {
 type TargetRefSpec struct {
 	// Group is the API group of the target resource ("" = core group).
 	Group string `json:"group,omitempty"`
+	// Resource is the target resource plural (e.g. "volumesnapshots").
+	// TEMP REVERTME: required by the deployed storage-volume-data-manager (mr135)
+	// GVR-based CRD; the kind-based contract is not yet in SVDM main. Sending both
+	// resource and kind is safe because each CRD prunes the field it doesn't know.
+	Resource string `json:"resource,omitempty"`
 	// Kind is the target object kind (e.g. "VolumeSnapshot", "PersistentVolumeClaim").
 	// Required by the API server.
 	Kind string `json:"kind"`
