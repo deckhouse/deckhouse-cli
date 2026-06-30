@@ -340,6 +340,32 @@ func TestStateWord(t *testing.T) {
 	}
 }
 
+// TestStateWordSyncWidth documents the column-alignment contract: the status-word
+// column width is synced to the widest possible word ("Download complete"), so every
+// other state word fits within it and the bar/end-of-row starts at the same x.
+func TestStateWordSyncWidth(t *testing.T) {
+	t.Parallel()
+
+	widest := "Download complete"
+
+	words := []string{
+		stateWord(streamStateWaiting, false),
+		stateWord(streamStateActive, true),
+		stateWord(streamStateDone, true),
+		stateWord(streamStateDone, false),
+	}
+
+	for _, w := range words {
+		if len(w) > len(widest) {
+			t.Errorf("stateWord %q wider (%d) than synced column width %q (%d)", w, len(w), widest, len(widest))
+		}
+	}
+
+	if stateWord(streamStateDone, true) != widest {
+		t.Errorf("expected the done-after-activate word to be the widest %q, got %q", widest, stateWord(streamStateDone, true))
+	}
+}
+
 func TestStateBarFiller(t *testing.T) {
 	t.Parallel()
 

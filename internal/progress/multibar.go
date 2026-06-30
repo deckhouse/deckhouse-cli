@@ -170,9 +170,16 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 		inner: mpb.BarStyle().Lbound("[").Filler("=").Tip(">").Padding(" ").Rbound("]").Build(),
 	}
 
-	// Layout: name → stateWord → [bar] → counters → percent. The status word is a
-	// prepend decorator after the name; the byte counters and percent are append
-	// decorators after the bar, and render only in the active state.
+	// Layout: name → stateWord → [bar] → counters → percent. Every row uses the
+	// SAME decorator chain and widths in every state — only the rendered content
+	// changes — so a row never shifts horizontally as it transitions
+	// waiting → active → done. Column geometry:
+	//   - name: fixed-width left-aligned cell (truncateName pads/truncates to ttyNameWidth).
+	//   - stateWord: left-aligned width-synced cell (WCSyncWidth); the widest word
+	//     ("Download complete") sets one shared width across all rows, so the bar /
+	//     end-of-row begins at the same x even while the word is "Waiting".
+	//   - counters/percent: right-aligned width-synced cells (WCSyncWidthR) so the
+	//     active rows' numbers form one uniform right-hand column.
 	bar, err := s.p.Add(
 		total,
 		filler,
@@ -181,15 +188,15 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 			decor.Name(truncateName(name, ttyNameWidth), decor.WC{W: ttyNameWidth}),
 			decor.Any(func(_ decor.Statistics) string {
 				return " " + stateWord(atomic.LoadInt32(&ts.state), atomic.LoadInt32(&ts.activated) == 1)
-			}),
+			}, decor.WCSyncWidth),
 		),
 		mpb.AppendDecorators(
 			decor.Any(func(stats decor.Statistics) string {
 				return decorateStatus(atomic.LoadInt32(&ts.state), stats)
-			}),
+			}, decor.WCSyncWidthR),
 			decor.Any(func(stats decor.Statistics) string {
 				return decorateAppend(atomic.LoadInt32(&ts.state), stats)
-			}),
+			}, decor.WCSyncWidthR),
 		),
 	)
 	if err != nil {
