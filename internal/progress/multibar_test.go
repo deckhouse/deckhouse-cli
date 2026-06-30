@@ -515,31 +515,37 @@ func TestStateBarFiller(t *testing.T) {
 	}
 }
 
-func TestTruncateName(t *testing.T) {
+// TestNameCell asserts the leaf name is rendered in full with a single trailing
+// separator space and is NEVER truncated with a '…'. Names far longer than the
+// old fixed 24-rune column must pass through verbatim (decor.WCSyncWidth sizes
+// the column to the widest name at render time).
+func TestNameCell(t *testing.T) {
 	t.Parallel()
+
+	longName := "nss-child-2b8d1e2b97271demovmdisk-1c2f0cb1b1ad-very-long-leaf-name"
 
 	cases := []struct {
 		name  string
 		input string
-		width int
 		want  string
 	}{
-		{"empty", "", 4, "    "},
-		{"shorter", "ab", 4, "ab  "},
-		{"exact", "abcd", 4, "abcd"},
-		{"one_over", "abcde", 4, "abc…"},
-		{"many_over", "abcdefgh", 4, "abc…"},
-		{"rune_shorter", "аб", 4, "аб  "},
-		{"rune_truncate", "абвгд", 4, "абв…"},
+		{"empty", "", " "},
+		{"short_ascii", "ab", "ab "},
+		{"long_unbounded", longName, longName + " "},
+		{"rune_name", "абвгд", "абвгд "},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := truncateName(tc.input, tc.width)
+			got := nameCell(tc.input)
 			if got != tc.want {
-				t.Errorf("truncateName(%q, %d) = %q, want %q", tc.input, tc.width, got, tc.want)
+				t.Errorf("nameCell(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+
+			if strings.ContainsRune(got, '…') {
+				t.Errorf("nameCell(%q) = %q contains an ellipsis; names must never be truncated", tc.input, got)
 			}
 		})
 	}

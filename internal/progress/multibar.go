@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -111,11 +110,6 @@ func New(w io.Writer, tty bool, opts ...Option) Sink {
 // own (also fixed) widths around it.
 const ttyBarWidth = 28
 
-// ttyNameWidth is the fixed display-rune width of the leaf-name column.
-// Leaf names longer than this are truncated with a trailing '…'; shorter names
-// are right-padded with spaces so all bars align in neat docker-pull-like columns.
-const ttyNameWidth = 24
-
 // stream state constants stored atomically in ttyStream.state.
 // The machine is one-way: waiting → active → done, or waiting → done (resume skip).
 const (
@@ -153,12 +147,15 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 	// uses the SAME decorator chain and widths in every state — only the rendered
 	// content changes — so a row never shifts horizontally as it transitions
 	// waiting → active → done. Column geometry:
-	//   - name: fixed-width left-aligned cell (truncateName pads/truncates to ttyNameWidth).
+	//   - name: full leaf name, never truncated; a width-synced cell (WCSyncWidth)
+	//     auto-sizes the column to the longest name across all rows. nameCell appends
+	//     one trailing space so even the widest (unpadded) row keeps a clean gap
+	//     before the spinner.
 	//   - spinner: fixed-width (spinnerCellWidth) animated cell, non-blank only while
 	//     waiting; a same-width blank in active/done so the column never shifts.
 	//   - stateWord: left-aligned width-synced cell (WCSyncWidth); the widest word
-	//     ("Waiting for DataExport") sets one shared width across all rows, so the bar /
-	//     end-of-row begins at the same x in every state.
+	//     sets one shared width across all rows, so the bar / end-of-row begins at
+	//     the same x in every state.
 	//   - counters/percent: right-aligned width-synced cells (WCSyncWidthR) so the
 	//     active rows' numbers form one uniform right-hand column.
 	bar, err := s.p.Add(
@@ -166,7 +163,7 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 		filler,
 		mpb.BarWidth(ttyBarWidth),
 		mpb.PrependDecorators(
-			decor.Name(truncateName(name, ttyNameWidth), decor.WC{W: ttyNameWidth}),
+			decor.Name(nameCell(name), decor.WCSyncWidth),
 			// Waiting spinner: a fixed-width animated cell shown only while the row
 			// is waiting. mpb calls this once per refresh; the atomic add advances
 			// the frame each refresh so the glyph spins. WC{W: spinnerCellWidth}
@@ -377,17 +374,14 @@ func decorateAppend(state int32, stats decor.Statistics) string {
 	return fmt.Sprintf(" %.0f%%", float64(stats.Current)/float64(stats.Total)*100)
 }
 
-// truncateName left-aligns name in a fixed-width column of exactly width display
-// runes. Names shorter than width are right-padded with spaces. Names longer than
-// width are truncated with a trailing '…' so the total display length is always
-// exactly width. The measurement is rune-aware (Unicode code points, not bytes).
-func truncateName(name string, width int) string {
-	runes := []rune(name)
-	if len(runes) <= width {
-		return string(runes) + strings.Repeat(" ", width-len(runes))
-	}
-
-	return string(runes[:width-1]) + "…"
+// nameCell renders the FULL leaf name with NO truncation, followed by a single
+// trailing separator space. Combined with decor.WCSyncWidth the name column
+// auto-sizes to the longest name across all rows, so every name prints in full
+// and shorter rows are padded to align. The trailing space guarantees a clean
+// gap before the spinner cell even on the widest row (which receives no sync
+// padding of its own).
+func nameCell(name string) string {
+	return name + " "
 }
 
 // ── Non-TTY (plain-log) sink ──────────────────────────────────────────────────
