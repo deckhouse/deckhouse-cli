@@ -155,8 +155,8 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 	// waiting → active → done. Column geometry:
 	//   - name: fixed-width left-aligned cell (truncateName pads/truncates to ttyNameWidth).
 	//   - stateWord: left-aligned width-synced cell (WCSyncWidth); the widest word
-	//     ("Download complete") sets one shared width across all rows, so the bar /
-	//     end-of-row begins at the same x even while the word is "Waiting".
+	//     ("Waiting for DataExport") sets one shared width across all rows, so the bar /
+	//     end-of-row begins at the same x in every state.
 	//   - counters/percent: right-aligned width-synced cells (WCSyncWidthR) so the
 	//     active rows' numbers form one uniform right-hand column.
 	bar, err := s.p.Add(
@@ -277,10 +277,15 @@ func (f stateBarFiller) Fill(w io.Writer, stat decor.Statistics) error {
 // stateWord returns the docker-pull status word for a stream's current state.
 // The activated flag distinguishes a finished real download from a resume skip:
 //
-//   - waiting: "Waiting" (DataExport not yet provisioned).
+//   - waiting: "Waiting for DataExport" (the row is blocked until its DataExport
+//     is provisioned; the descriptive phrase tells the user WHAT is being waited on).
 //   - active: "Downloading".
 //   - done after Activate: "Download complete".
 //   - done without Activate (resume skip): "Already exists".
+//
+// "Waiting for DataExport" is the widest word, so it sets the WCSyncWidth
+// status-word column width; every other word fits within it and rows do not
+// shift horizontally as the state changes.
 func stateWord(state int32, activated bool) string {
 	switch state {
 	case streamStateActive:
@@ -292,7 +297,7 @@ func stateWord(state int32, activated bool) string {
 
 		return "Already exists"
 	default:
-		return "Waiting"
+		return "Waiting for DataExport"
 	}
 }
 
