@@ -30,6 +30,7 @@ import (
 	"time"
 
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -85,12 +86,15 @@ type VolumeImporter interface {
 // CR lifecycle and status) and a SafeClient (authenticated HTTPS byte upload to the
 // importer pod, trusting status.ca).
 type clusterVolumeImporter struct {
-	dyn  dynamic.Interface
-	sc   *safeClient.SafeClient
-	ttl  string
-	poll time.Duration
-	wait time.Duration
-	log  *slog.Logger
+	dyn dynamic.Interface
+	// mapper resolves domain-leaf GroupKinds to their plural GVR resource for the
+	// DataImport targetRef. TEMP REVERTME: needed only for the mr135 GVR-based shim.
+	mapper meta.RESTMapper
+	sc     *safeClient.SafeClient
+	ttl    string
+	poll   time.Duration
+	wait   time.Duration
+	log    *slog.Logger
 	// tempDir is the directory for decompressed block-volume temporary files. When empty,
 	// sendVolumeData defaults to filepath.Dir(leaf.DataFile) — next to the archive node
 	// on the same filesystem as the compressed source. Override via --temp-dir.
@@ -104,6 +108,7 @@ type clusterVolumeImporter struct {
 // auto-select filepath.Dir(leaf.DataFile), keeping temps on the same filesystem as the archive).
 func NewClusterVolumeImporter(
 	dyn dynamic.Interface,
+	mapper meta.RESTMapper,
 	sc *safeClient.SafeClient,
 	ttl string,
 	wait, poll time.Duration,
@@ -114,7 +119,7 @@ func NewClusterVolumeImporter(
 		log = slog.Default()
 	}
 
-	return &clusterVolumeImporter{dyn: dyn, sc: sc, ttl: ttl, poll: poll, wait: wait, tempDir: tempDir, log: log}
+	return &clusterVolumeImporter{dyn: dyn, mapper: mapper, sc: sc, ttl: ttl, poll: poll, wait: wait, tempDir: tempDir, log: log}
 }
 
 // DataImportName returns the deterministic DataImport name for the leaf (its own name).
@@ -131,7 +136,7 @@ func (c *clusterVolumeImporter) DataImportName(leaf PlannedNode) string {
 func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf PlannedNode, namespace string) (string, error) {
 	name := c.DataImportName(leaf)
 
-	group, kind, err := leafTargetRef(leaf)
+	group, resource, kind, err := leafTargetRef(leaf, c.mapper)
 	if err != nil {
 		return "", err
 	}
@@ -158,8 +163,13 @@ func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf Plann
 		"size":             leaf.Size,
 		"targetRef": map[string]interface{}{
 			"group": group,
-			"kind":  kind,
-			"name":  leaf.Name,
+			// TEMP REVERTME: the deployed storage-volume-data-manager (mr135) DataImport CRD
+			// requires spec.targetRef.resource (plural GVR); the kind-based contract is not yet
+			// in SVDM main. Sending both resource and kind is safe — each CRD prunes the field
+			// it does not know. Revert once SVDM main carries the kind-based targetRef contract.
+			"resource": resource,
+			"kind":     kind,
+			"name":     leaf.Name,
 		},
 	}
 	if leaf.VolumeMode != "" {
@@ -475,25 +485,32 @@ func (c *clusterVolumeImporter) waitDataImportCompleted(ctx context.Context, nam
 	}
 }
 
-// leafTargetRef returns the DataImport targetRef {group, kind} for a data leaf. The
-// state-snapshotter reverse-lookup matches the leaf by GroupKind directly, so no RESTMapper
-// resource resolution is needed: the kind is the leaf's own kind and the group is parsed from
-// its apiVersion. For CSI VolumeSnapshot leaves the group/kind are fixed constants.
-func leafTargetRef(leaf PlannedNode) (string, string, error) {
+// leafTargetRef returns the DataImport targetRef {group, resource, kind} for a data leaf.
+// The state-snapshotter reverse-lookup matches the leaf by GroupKind directly (group is
+// parsed from its apiVersion, kind is the leaf's own kind). The plural resource is only
+// needed for the mr135 GVR-based shim (see EnsureDataImport's TEMP REVERTME): for CSI
+// VolumeSnapshot leaves it is a fixed constant; for domain leaves it is resolved via the
+// RESTMapper, mirroring (*Config).domainLeafResource.
+func leafTargetRef(leaf PlannedNode, mapper meta.RESTMapper) (string, string, string, error) {
 	if leaf.isVolumeSnapshotLeaf() {
-		return aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotKind, nil
+		return aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, nil
 	}
 
 	if leaf.isDomainDataLeaf() {
 		gv, parseErr := schema.ParseGroupVersion(leaf.APIVersion)
 		if parseErr != nil {
-			return "", "", fmt.Errorf("parse apiVersion %q for domain leaf %s/%s: %w", leaf.APIVersion, leaf.Kind, leaf.Name, parseErr)
+			return "", "", "", fmt.Errorf("parse apiVersion %q for domain leaf %s/%s: %w", leaf.APIVersion, leaf.Kind, leaf.Name, parseErr)
 		}
 
-		return gv.Group, leaf.Kind, nil
+		mapping, mapErr := mapper.RESTMapping(schema.GroupKind{Group: gv.Group, Kind: leaf.Kind}, gv.Version)
+		if mapErr != nil {
+			return "", "", "", fmt.Errorf("resolve resource for domain leaf %s/%s: %w", leaf.Kind, leaf.Name, mapErr)
+		}
+
+		return gv.Group, mapping.Resource.Resource, leaf.Kind, nil
 	}
 
-	return "", "", unsupportedNodeError(leaf)
+	return "", "", "", unsupportedNodeError(leaf)
 }
 
 // httpDoer is the minimal HTTP surface putBlock/postFinished need; *safeClient.SafeClient
