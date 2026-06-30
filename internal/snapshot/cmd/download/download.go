@@ -224,15 +224,18 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	tty := term.IsTerminal(int(os.Stdout.Fd()))
 	sink := progress.New(os.Stdout, tty)
 
-	// On a TTY the mpb progress bar owns stdout and redraws by moving the cursor
-	// up; unrelated writes to the terminal in between corrupt that accounting and
-	// make the bar re-print as multiple blocks. Route the pipeline logger (which
-	// emits high-frequency lifecycle INFO lines while bars are live) through the
-	// sink's coordinated writer so those lines print cleanly above the bars. The
-	// command's own pre-/post-bar bookend logs stay on the original logger.
+	// On a TTY we want a `docker pull`-style display: clean per-leaf bars with no
+	// routine log spam interleaving them. Route the pipeline logger through the
+	// sink's coordinated writer (so any line that does print appears cleanly above
+	// the live bars) and raise its level to WARN, suppressing the high-frequency
+	// lifecycle INFO/DEBUG lines (e.g. "waiting for DataExport to be ready",
+	// "processing node", "downloading volume") during the transfer. Only WARN and
+	// ERROR surface while bars are live. The non-TTY/plain path keeps full INFO
+	// logging unchanged (important for CI/piped output). The command's own
+	// pre-/post-bar bookend logs stay on the original logger.
 	runLog := log
 	if tty {
-		runLog = slog.New(slog.NewTextHandler(sink.LogWriter(), &slog.HandlerOptions{Level: slog.LevelInfo}))
+		runLog = slog.New(slog.NewTextHandler(sink.LogWriter(), &slog.HandlerOptions{Level: slog.LevelWarn}))
 	}
 
 	cfg := pipeline.Config{

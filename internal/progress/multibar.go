@@ -95,35 +95,29 @@ func New(w io.Writer, tty bool, opts ...Option) Sink {
 
 // ── TTY sink (mpb/v8-backed) ──────────────────────────────────────────────────
 
+// ttyBarWidth is a fixed, compact bar width (in characters) modelled on
+// `docker pull`. A fixed width keeps the bar from spanning the whole terminal
+// and stops it reflowing/jittering when the terminal is resized. Only the
+// drawn [====>   ] portion is fixed; the name and counter decorators add their
+// own (also fixed) widths around it.
+const ttyBarWidth = 28
+
 type ttySink struct {
-	p        *mpb.Progress
-	agg      *mpb.Bar
-	mu       sync.Mutex
-	aggTotal int64
+	p *mpb.Progress
 }
 
 func newTTYSink(w io.Writer) *ttySink {
 	p := mpb.New(mpb.WithOutput(w))
 
-	agg := p.AddBar(
-		0,
-		mpb.PrependDecorators(
-			decor.Name("total", decor.WC{W: 7}),
-			decor.Counters(decor.SizeB1024(0), " %.1f / %.1f"),
-		),
-		mpb.AppendDecorators(
-			decor.Percentage(),
-		),
-		mpb.BarPriority(0),
-	)
-
-	return &ttySink{p: p, agg: agg}
+	return &ttySink{p: p}
 }
 
-// NewStream adds a named per-stream bar and updates the overall aggregate total.
+// NewStream adds a named per-stream bar. There is no grand-total/aggregate bar:
+// like `docker pull`, only per-leaf ("layer") bars are shown.
 func (s *ttySink) NewStream(name string, total int64) Stream {
 	bar := s.p.AddBar(
 		total,
+		mpb.BarWidth(ttyBarWidth),
 		mpb.PrependDecorators(
 			decor.Name(name, decor.WC{W: 20}),
 			decor.Counters(decor.SizeB1024(0), " %.1f / %.1f"),
@@ -135,21 +129,11 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 		),
 	)
 
-	s.mu.Lock()
-	s.aggTotal += total
-	s.agg.SetTotal(s.aggTotal, false)
-	s.mu.Unlock()
-
-	return &ttyStream{sink: s, bar: bar, total: total}
+	return &ttyStream{bar: bar, total: total}
 }
 
-// Wait forces the aggregate bar to complete and drains the mpb renderer.
+// Wait drains the mpb renderer once all per-stream bars have completed.
 func (s *ttySink) Wait() {
-	s.mu.Lock()
-	total := s.aggTotal
-	s.mu.Unlock()
-
-	s.agg.SetTotal(total, true)
 	s.p.Wait()
 }
 
@@ -163,7 +147,6 @@ func (s *ttySink) LogWriter() io.Writer {
 }
 
 type ttyStream struct {
-	sink  *ttySink
 	bar   *mpb.Bar
 	mu    sync.Mutex
 	total int64
@@ -171,25 +154,14 @@ type ttyStream struct {
 
 func (s *ttyStream) IncrBy(n int) {
 	s.bar.IncrBy(n)
-	s.sink.agg.IncrBy(n)
 }
 
 func (s *ttyStream) SetTotal(total int64) {
 	s.mu.Lock()
-	delta := total - s.total
 	s.total = total
 	s.mu.Unlock()
 
 	s.bar.SetTotal(total, false)
-
-	if delta != 0 {
-		s.sink.mu.Lock()
-		s.sink.aggTotal += delta
-		newTotal := s.sink.aggTotal
-		s.sink.mu.Unlock()
-
-		s.sink.agg.SetTotal(newTotal, false)
-	}
 }
 
 func (s *ttyStream) Done() {
