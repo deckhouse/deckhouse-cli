@@ -640,9 +640,14 @@ func downloadVolumeBinding(
 	}()
 
 	// Mark the pre-created stream as done when we return (regardless of outcome).
-	// The stream is marked active (Activate) in task 2 after OpenExport succeeds.
 	if stream != nil {
 		defer stream.Done()
+	}
+
+	// Flip the bar from "waiting for export…" to the live byte-counter display
+	// now that the DataExport is ready and bytes are about to flow.
+	if stream != nil {
+		stream.Activate()
 	}
 
 	cfg.Log.Info("downloading volume",
