@@ -214,3 +214,194 @@ func TestNonTTY_Wait_AlwaysEmitsFinalLine(t *testing.T) {
 		t.Errorf("Wait() did not emit final line:\ngot:  %q\nwant (contained): %q", buf.String(), want)
 	}
 }
+
+func TestSummaryLabel(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		ready int
+		total int
+		want  string
+	}{
+		{0, 0, ""},
+		{0, 3, " preparing exports (0/3 ready)"},
+		{1, 3, " preparing exports (1/3 ready)"},
+		{2, 3, " preparing exports (2/3 ready)"},
+		{3, 3, " exports ready (3/3)"},
+		{5, 3, " exports ready (3/3)"},
+	}
+
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("ready_%d_of_%d", tc.ready, tc.total), func(t *testing.T) {
+			t.Parallel()
+
+			got := summaryLabel(tc.ready, tc.total)
+			if got != tc.want {
+				t.Errorf("summaryLabel(%d, %d) = %q, want %q", tc.ready, tc.total, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDecorateStatus(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		state int32
+		stats decor.Statistics
+		want  string
+	}{
+		{
+			"waiting",
+			streamStateWaiting,
+			decor.Statistics{Total: 1024},
+			" waiting\u2026",
+		},
+		{
+			"active",
+			streamStateActive,
+			decor.Statistics{Current: 512, Total: 1024},
+			fmt.Sprintf(" % .1f / % .1f", decor.SizeB1024(512), decor.SizeB1024(1024)),
+		},
+		{
+			"done",
+			streamStateDone,
+			decor.Statistics{Current: 1024, Total: 1024},
+			fmt.Sprintf(" % .1f / % .1f", decor.SizeB1024(1024), decor.SizeB1024(1024)),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := decorateStatus(tc.state, tc.stats)
+			if got != tc.want {
+				t.Errorf("decorateStatus(%d, %+v) = %q, want %q", tc.state, tc.stats, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDecorateAppend(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		state int32
+		stats decor.Statistics
+		want  string
+	}{
+		{"waiting", streamStateWaiting, decor.Statistics{Total: 1024}, ""},
+		{"active_zero_total", streamStateActive, decor.Statistics{}, " 0%"},
+		{"active_50pct", streamStateActive, decor.Statistics{Current: 512, Total: 1024}, " 50%"},
+		{"active_100pct", streamStateActive, decor.Statistics{Current: 1024, Total: 1024}, " 100%"},
+		{"done_100pct", streamStateDone, decor.Statistics{Current: 1024, Total: 1024}, " 100%"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := decorateAppend(tc.state, tc.stats)
+			if got != tc.want {
+				t.Errorf("decorateAppend(%d, %+v) = %q, want %q", tc.state, tc.stats, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTruncateName(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		input string
+		width int
+		want  string
+	}{
+		{"empty", "", 4, "    "},
+		{"shorter", "ab", 4, "ab  "},
+		{"exact", "abcd", 4, "abcd"},
+		{"one_over", "abcde", 4, "abc…"},
+		{"many_over", "abcdefgh", 4, "abc…"},
+		{"rune_shorter", "аб", 4, "аб  "},
+		{"rune_truncate", "абвгд", 4, "абв…"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := truncateName(tc.input, tc.width)
+			if got != tc.want {
+				t.Errorf("truncateName(%q, %d) = %q, want %q", tc.input, tc.width, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTTYSink_ReadyCounts verifies the readyCount / totalCount aggregation and the
+// waiting→active→done state machine via the observable sink counters.
+func TestTTYSink_ReadyCounts(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	sink := newTTYSink(buf)
+
+	s1 := sink.NewStream("stream-1", 0)
+	s2 := sink.NewStream("stream-2", 0)
+	s3 := sink.NewStream("stream-3", 0)
+
+	if got := sink.totalCount.Load(); got != 3 {
+		t.Fatalf("totalCount after 3 NewStream = %d, want 3", got)
+	}
+
+	if got := sink.readyCount.Load(); got != 0 {
+		t.Fatalf("readyCount before any transition = %d, want 0", got)
+	}
+
+	// waiting → active: readyCount increments exactly once.
+	s1.Activate()
+
+	if got := sink.readyCount.Load(); got != 1 {
+		t.Errorf("readyCount after Activate = %d, want 1", got)
+	}
+
+	// Duplicate Activate is a no-op (CAS guarantees exactly-once semantics).
+	s1.Activate()
+
+	if got := sink.readyCount.Load(); got != 1 {
+		t.Errorf("readyCount after duplicate Activate = %d, want 1", got)
+	}
+
+	// waiting → done via Done(): readyCount increments.
+	s2.Done()
+
+	if got := sink.readyCount.Load(); got != 2 {
+		t.Errorf("readyCount after Done(waiting) = %d, want 2", got)
+	}
+
+	// active → done: Activate then Done must not double-increment readyCount.
+	s3.Activate()
+
+	if got := sink.readyCount.Load(); got != 3 {
+		t.Errorf("readyCount after s3.Activate = %d, want 3", got)
+	}
+
+	s3.Done()
+
+	if got := sink.readyCount.Load(); got != 3 {
+		t.Errorf("readyCount after s3.Done (was active) = %d, want 3", got)
+	}
+
+	// Finish s1 to let sink.Wait() drain all bars.
+	s1.Done()
+
+	if got := sink.readyCount.Load(); got != 3 {
+		t.Errorf("readyCount after s1.Done (was active) = %d, want 3", got)
+	}
+
+	sink.Wait()
+}

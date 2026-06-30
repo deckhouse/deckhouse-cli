@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -765,4 +766,229 @@ func TestPipeline_PartialChunkResume(t *testing.T) {
 	// (d) The chunk directory must have been removed after merge.
 	_, statErr := os.Stat(chunkDir)
 	require.True(t, os.IsNotExist(statErr), "data.bin.d/ must be removed after merge")
+}
+
+// ── recording progress helpers ────────────────────────────────────────────────
+
+// recordedStream is a progress.Stream stub that counts Activate and Done calls.
+// All methods are safe for concurrent use.
+type recordedStream struct {
+	name        string
+	mu          sync.Mutex
+	activateCnt int
+	doneCnt     int
+}
+
+func (s *recordedStream) IncrBy(_ int)     {}
+func (s *recordedStream) SetTotal(_ int64) {}
+
+func (s *recordedStream) Activate() {
+	s.mu.Lock()
+	s.activateCnt++
+	s.mu.Unlock()
+}
+
+func (s *recordedStream) Done() {
+	s.mu.Lock()
+	s.doneCnt++
+	s.mu.Unlock()
+}
+
+// recordingSink is a progress.Sink stub that captures NewStream calls in creation
+// order. All methods are safe for concurrent use.
+type recordingSink struct {
+	mu   sync.Mutex
+	seen []*recordedStream
+}
+
+func (s *recordingSink) NewStream(name string, _ int64) progress.Stream {
+	rs := &recordedStream{name: name}
+	s.mu.Lock()
+	s.seen = append(s.seen, rs)
+	s.mu.Unlock()
+
+	return rs
+}
+
+func (s *recordingSink) Wait()                {}
+func (s *recordingSink) LogWriter() io.Writer { return io.Discard }
+
+func (s *recordingSink) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.seen)
+}
+
+func (s *recordingSink) snapshot() []*recordedStream {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]*recordedStream, len(s.seen))
+	copy(out, s.seen)
+
+	return out
+}
+
+// TestPipeline_Progress_PrecreateStreams verifies that the pipeline pre-creates
+// exactly one progress.Stream per volume leaf BEFORE any download starts, and
+// creates no stream for aggregator/manifest-only nodes.
+//
+// Two leaf shapes are exercised:
+//   - single-OwnDataRef (non-aggregator snapshot node)
+//   - Binding (orphan VolumeSnapshot leaf)
+func TestPipeline_Progress_PrecreateStreams(t *testing.T) {
+	t.Parallel()
+
+	t.Run("SingleOwnDataRef", func(t *testing.T) {
+		t.Parallel()
+
+		rawBlock := bytes.Repeat([]byte("X"), 300)
+		srv := makeBlockServer(t, rawBlock)
+
+		defer srv.Close()
+
+		c := buildFakeClient(t)
+		outputDir := t.TempDir()
+		rec := &recordingSink{}
+
+		var (
+			once               sync.Once
+			streamsAtFirstCall int
+		)
+
+		cfg := pipeline.Config{
+			Namespace:            testNS,
+			RootSnapshot:         rootSnapshot,
+			OutputDir:            outputDir,
+			Workers:              1,
+			PerVolumeConcurrency: 1,
+			KubeClient:           c,
+			Progress:             rec,
+			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+				once.Do(func() { streamsAtFirstCall = rec.count() })
+
+				return exporter.NewExport(namespace, "de-precreate", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			},
+		}
+
+		require.NoError(t, runPipeline(context.Background(), cfg))
+
+		// Exactly one stream for the single-OwnDataRef leaf; none for the root.
+		require.Equal(t, 1, rec.count(), "exactly 1 stream for 1 volume leaf")
+		require.Equal(t, 1, streamsAtFirstCall,
+			"all streams must be pre-created before the first OpenExport call")
+
+		streams := rec.snapshot()
+		require.Equal(t, diskSnapName, streams[0].name, "stream name = node ref name")
+		require.Equal(t, 1, streams[0].activateCnt, "leaf stream must be Activated exactly once")
+		require.Equal(t, 1, streams[0].doneCnt, "leaf stream must be Done exactly once")
+	})
+
+	t.Run("BindingLeaf", func(t *testing.T) {
+		t.Parallel()
+
+		rawBlock := bytes.Repeat([]byte("Y"), 300)
+		srv := makeBlockServer(t, rawBlock)
+
+		defer srv.Close()
+
+		c := buildOrphanLeafFakeClient(t)
+		outputDir := t.TempDir()
+		rec := &recordingSink{}
+
+		var (
+			once               sync.Once
+			streamsAtFirstCall int
+		)
+
+		cfg := pipeline.Config{
+			Namespace:            e2eNS,
+			RootSnapshot:         e2eAggRootSnap,
+			OutputDir:            outputDir,
+			Workers:              1,
+			PerVolumeConcurrency: 1,
+			KubeClient:           c,
+			Progress:             rec,
+			OpenExport: func(_ context.Context, namespace string, leafRef aggapi.NodeRef, _ string) (*exporter.Export, error) {
+				once.Do(func() { streamsAtFirstCall = rec.count() })
+
+				if leafRef.Name != "nss-vs-agg-pvc" {
+					return nil, fmt.Errorf("unexpected leaf %q", leafRef.Name)
+				}
+
+				return exporter.NewExport(namespace, "de-agg-leaf", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			},
+		}
+
+		require.NoError(t, runPipeline(context.Background(), cfg))
+
+		// One stream for the binding leaf; none for root or aggregator nodes.
+		require.Equal(t, 1, rec.count(),
+			"exactly 1 stream for the binding leaf; aggregator/manifest-only nodes must not create streams")
+		require.Equal(t, 1, streamsAtFirstCall,
+			"all streams must be pre-created before the first OpenExport call")
+
+		streams := rec.snapshot()
+		require.Equal(t, "nss-vs-agg-pvc", streams[0].name,
+			"binding stream name = VS CR name (node.Ref().Name)")
+		require.Equal(t, 1, streams[0].activateCnt, "binding stream must be Activated exactly once")
+		require.Equal(t, 1, streams[0].doneCnt, "binding stream must be Done exactly once")
+	})
+}
+
+// TestPipeline_Progress_ResumeSkip_NeverActivated verifies that when a leaf node is
+// already complete (NodeStateDone), its pre-created stream is Done immediately in
+// precreateStreams and is never Activated (OpenExport is not called).
+func TestPipeline_Progress_ResumeSkip_NeverActivated(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("W"), 300)
+	srv := makeBlockServer(t, rawBlock)
+
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	// First run: complete the pipeline so disk-snap reaches NodeStateDone.
+	firstCfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-resume-first", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+	require.NoError(t, runPipeline(context.Background(), firstCfg))
+
+	// Second run: disk-snap is NodeStateDone; its stream must be Done immediately
+	// (in precreateStreams) and must never be Activated.
+	rec := &recordingSink{}
+
+	secondCfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		Progress:             rec,
+		OpenExport: func(_ context.Context, _ string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			t.Error("OpenExport must not be called when all nodes are already complete")
+			return nil, errors.New("unexpected OpenExport call")
+		},
+	}
+	require.NoError(t, runPipeline(context.Background(), secondCfg))
+
+	require.Equal(t, 1, rec.count(), "one stream pre-created for the complete leaf node")
+
+	streams := rec.snapshot()
+	require.Equal(t, 0, streams[0].activateCnt,
+		"resume-skipped stream must never be Activated")
+	require.Equal(t, 1, streams[0].doneCnt,
+		"resume-skipped stream must be Done exactly once (in precreateStreams)")
 }
