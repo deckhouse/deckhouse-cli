@@ -75,8 +75,10 @@ type VolumeImporter interface {
 	// UploadVolumeData waits for the DataImport to become ready, streams the leaf's block
 	// data, finalises, and waits for completion. onProgress, when non-nil, is called with
 	// the number of bytes written after each chunk or file upload; nil disables progress
-	// reporting and leaves upload behaviour unchanged.
-	UploadVolumeData(ctx context.Context, leaf PlannedNode, diName, namespace string, onProgress func(int)) error
+	// reporting and leaves upload behaviour unchanged. setTotal, when non-nil, is called
+	// once with the expected total byte count before bytes are sent (block path only;
+	// see sendVolumeData for why the filesystem total is not yet reported).
+	UploadVolumeData(ctx context.Context, leaf PlannedNode, diName, namespace string, setTotal func(int64), onProgress func(int)) error
 }
 
 // clusterVolumeImporter is the live VolumeImporter backed by a dynamic client (DataImport
@@ -263,7 +265,7 @@ func (c *clusterVolumeImporter) deleteDataImportAndWait(ctx context.Context, ri 
 
 // UploadVolumeData waits for the DataImport endpoint, uploads the volume data
 // (filesystem tar or raw block), finalises, and waits for the durable artifact.
-func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf PlannedNode, diName, namespace string, onProgress func(int)) error {
+func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf PlannedNode, diName, namespace string, setTotal func(int64), onProgress func(int)) error {
 	if !leaf.FilesystemData && !leaf.HasBlockData() {
 		return fmt.Errorf("data leaf %s/%s has no volume data file in the archive", leaf.Kind, leaf.Name)
 	}
@@ -297,7 +299,7 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 		return err
 	}
 
-	if err := c.sendVolumeData(ctx, httpClient, url, volumeMode, leaf, namespace, diName, onProgress); err != nil {
+	if err := c.sendVolumeData(ctx, httpClient, url, volumeMode, leaf, namespace, diName, setTotal, onProgress); err != nil {
 		return err
 	}
 
@@ -309,13 +311,18 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 // the caller must invoke waitDataImportCompleted afterwards.
 // Using leaf.TarFile (not leaf.DataFile) for the FS path is essential: DataFile holds the
 // block-data glob result (data.bin*), which is always empty for FS-only leaves.
-func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient httpDoer, url, volumeMode string, leaf PlannedNode, namespace, diName string, onProgress func(int)) error {
+func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient httpDoer, url, volumeMode string, leaf PlannedNode, namespace, diName string, setTotal func(int64), onProgress func(int)) error {
 	switch volumeMode {
 	case volumeModeFilesystem:
 		c.log.Info("uploading filesystem data",
 			slog.String("namespace", namespace),
 			slog.String("dataimport", diName))
 
+		// NOTE: the FS progress total is intentionally not reported here. The local
+		// data.tar carries per-file *compressed* blob sizes in its headers, but the
+		// onProgress increments report *decompressed* bytes (see importFSFromTar).
+		// A correct denominator would require decompressing every entry up front
+		// just to measure it, so the FS-upload total is left as a follow-up.
 		if err := importFSFromTar(ctx, httpClient, url, leaf.TarFile, c.log, onProgress); err != nil {
 			return fmt.Errorf("upload filesystem data for %s/%s: %w", namespace, diName, err)
 		}
@@ -348,6 +355,12 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 			slog.String("namespace", namespace),
 			slog.String("dataimport", diName),
 			slog.Int64("bytes", size))
+
+		// The decompressed block size is known and matches the onProgress increments
+		// (each PUT chunk advances by next-offset), so report it as the total.
+		if setTotal != nil {
+			setTotal(size)
+		}
 
 		if err := putBlock(ctx, httpClient, blockURL, srcPath, size, onProgress); err != nil {
 			return fmt.Errorf("upload block data for %s/%s: %w", namespace, diName, err)

@@ -176,6 +176,7 @@ func TestDownloadFilesystemVolume_OnProgressTotalsBytes(t *testing.T) {
 		2,
 		fetcher,
 		codec,
+		nil,
 		counter.inc,
 	)
 	require.NoError(t, err)
@@ -210,6 +211,7 @@ func TestDownloadFilesystemVolume_NilOnProgress(t *testing.T) {
 		1,
 		fetcher,
 		codec,
+		nil,
 		nil,
 	)
 	require.NoError(t, err, "nil onProgress must not cause an error or panic")

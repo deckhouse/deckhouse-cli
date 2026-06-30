@@ -378,18 +378,22 @@ func importNodeData(ctx context.Context, cfg Config, node PlannedNode) error {
 		return fmt.Errorf("ensure DataImport for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
-	// One Stream per data-leaf upload; nil hook when no Sink is configured so the
+	// One Stream per data-leaf upload; nil hooks when no Sink is configured so the
 	// upload path is completely unchanged when Progress is not set.
-	var onProgress func(int)
+	var (
+		onProgress func(int)
+		setTotal   func(int64)
+	)
 
 	if cfg.Progress != nil {
 		stream := cfg.Progress.NewStream(node.Kind+"/"+node.Name, 0)
 		defer stream.Done()
 
 		onProgress = stream.IncrBy
+		setTotal = stream.SetTotal
 	}
 
-	if err := cfg.Volumes.UploadVolumeData(ctx, node, diName, cfg.Namespace, onProgress); err != nil {
+	if err := cfg.Volumes.UploadVolumeData(ctx, node, diName, cfg.Namespace, setTotal, onProgress); err != nil {
 		return fmt.Errorf("import volume data for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
