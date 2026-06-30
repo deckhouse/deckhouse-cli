@@ -121,7 +121,7 @@ func downloadChunk(
 
 	// Skip chunks that are already complete.
 	if _, err := os.Stat(finalPath); err == nil {
-		log.Info("chunk already present, skipping", slog.Int("chunk", chunkIdx))
+		log.Debug("chunk already present, skipping", slog.Int("chunk", chunkIdx))
 
 		return nil
 	}
@@ -136,7 +136,7 @@ func downloadChunk(
 	startByte := int64(chunkIdx) * chunkSize
 	endByte := min(startByte+chunkSize, totalSize) - 1 // Range header is inclusive
 
-	log.Info("fetching chunk",
+	log.Debug("fetching chunk",
 		slog.Int("chunk", chunkIdx),
 		slog.Int64("start", startByte),
 		slog.Int64("end", endByte))
@@ -167,7 +167,7 @@ func downloadChunk(
 		return fmt.Errorf("write chunk %d: %w", chunkIdx, err)
 	}
 
-	log.Info("chunk written", slog.Int("chunk", chunkIdx), slog.Int("frame_bytes", len(frame)))
+	log.Debug("chunk written", slog.Int("chunk", chunkIdx), slog.Int("frame_bytes", len(frame)))
 
 	return nil
 }

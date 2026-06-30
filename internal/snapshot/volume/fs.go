@@ -278,7 +278,7 @@ func stageCompressedFile(
 	destPath := filepath.Join(stagingDir, filepath.FromSlash(item.relPath+codec.Ext()))
 
 	if _, err := os.Stat(destPath); err == nil {
-		log.Info("staging file already present, skipping", slog.String("path", item.relPath))
+		log.Debug("staging file already present, skipping", slog.String("path", item.relPath))
 
 		return nil
 	}
@@ -295,7 +295,7 @@ func stageCompressedFile(
 		return fmt.Errorf("create parent dir %s: %w", parentDir, err)
 	}
 
-	log.Info("staging fs file", slog.String("path", item.relPath))
+	log.Debug("staging fs file", slog.String("path", item.relPath))
 
 	body, err := fetcher.GetFile(ctx, item.uri)
 	if err != nil {
@@ -325,7 +325,7 @@ func stageCompressedFile(
 		onProgress(int(cr.n))
 	}
 
-	log.Info("staging file written", slog.String("path", item.relPath))
+	log.Debug("staging file written", slog.String("path", item.relPath))
 
 	return nil
 }
