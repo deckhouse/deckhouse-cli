@@ -279,27 +279,36 @@ func (c *Client) resourceFor(ref NodeRef) (string, error) {
 	return mapping.Resource.Resource, nil
 }
 
-// LeafDataExportTarget resolves the DataExport targetRef {group, kind} for a snapshot leaf
-// node. CSI VolumeSnapshot leaves use the fixed constants VolumeSnapshotGroup /
-// VolumeSnapshotKind; all other kinds derive group from the leaf's apiVersion and use its
-// own kind directly (the controller resolves the served version via its RESTMapper, so no
-// resource-plural lookup is needed here).
+// LeafDataExportTarget resolves the DataExport targetRef {group, resource, kind} for a
+// snapshot leaf node. CSI VolumeSnapshot leaves use the fixed constants VolumeSnapshotGroup /
+// VolumeSnapshotResource / VolumeSnapshotKind; all other kinds derive group from the leaf's
+// apiVersion, use its own kind directly, and resolve the resource plural via the RESTMapper.
 //
 // This is used to build a DataExport that the storage-volume-data-manager controller
 // can route through its kind-agnostic snapshot export path (categorySnapshot):
 // group/kind must identify a namespaced snapshot CR so the controller can read
 // its status.boundSnapshotContentName → SnapshotContent → status.dataRef.
-func (c *Client) LeafDataExportTarget(ref NodeRef) (string, string, error) {
+//
+// TEMP REVERTME: resource (plural) is populated in addition to kind so the DataExport
+// satisfies the deployed storage-volume-data-manager (mr135) GVR-based CRD, which requires
+// spec.targetRef.resource. The kind-based contract is not yet in SVDM main. Sending both
+// resource and kind is safe because each CRD prunes the field it doesn't know.
+func (c *Client) LeafDataExportTarget(ref NodeRef) (string, string, string, error) {
 	if ref.IsVolumeSnapshotLeaf() {
-		return VolumeSnapshotGroup, VolumeSnapshotKind, nil
+		return VolumeSnapshotGroup, VolumeSnapshotResource, VolumeSnapshotKind, nil
 	}
 
 	gv, err := schema.ParseGroupVersion(ref.APIVersion)
 	if err != nil {
-		return "", "", fmt.Errorf("parse apiVersion %q: %w", ref.APIVersion, err)
+		return "", "", "", fmt.Errorf("parse apiVersion %q: %w", ref.APIVersion, err)
 	}
 
-	return gv.Group, ref.Kind, nil
+	resource, err := c.resourceFor(ref)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	return gv.Group, resource, ref.Kind, nil
 }
 
 // subresourceGroupVersion returns the aggregated subresource group and version that
