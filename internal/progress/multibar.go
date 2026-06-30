@@ -119,7 +119,11 @@ const (
 )
 
 type ttySink struct {
-	p *mpb.Progress
+	p          *mpb.Progress
+	headerOnce sync.Once
+	headerBar  *mpb.Bar
+	readyCount atomic.Int64
+	totalCount atomic.Int64
 }
 
 func newTTYSink(w io.Writer) *ttySink {
@@ -128,10 +132,27 @@ func newTTYSink(w io.Writer) *ttySink {
 	return &ttySink{p: p}
 }
 
-// NewStream adds a named per-stream bar. The bar starts in the waiting state and
-// switches to a byte-counter display after Activate() is called.
+// NewStream adds a named per-stream bar and, on the very first call, creates the
+// spinner summary header line above all per-leaf bars. The bar starts in the
+// waiting state and switches to a byte-counter display after Activate() is called.
 func (s *ttySink) NewStream(name string, total int64) Stream {
-	ts := &ttyStream{total: total}
+	s.totalCount.Add(1)
+
+	// Create the spinner summary header the first time any stream is registered.
+	// Adding it here (before the per-leaf bar below) ensures it renders at the top.
+	s.headerOnce.Do(func() {
+		s.headerBar = s.p.AddSpinner(0,
+			mpb.PrependDecorators(
+				decor.Any(func(_ decor.Statistics) string {
+					ready := int(s.readyCount.Load())
+					tot := int(s.totalCount.Load())
+					return summaryLabel(ready, tot)
+				}),
+			),
+		)
+	})
+
+	ts := &ttyStream{sink: s, total: total}
 
 	bar := s.p.AddBar(
 		total,
@@ -154,9 +175,22 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 	return ts
 }
 
-// Wait drains the mpb renderer once all per-stream bars have completed.
+// Wait completes the spinner header line and then drains the mpb renderer once
+// all per-stream bars have finished. By the time Wait is called every per-leaf
+// stream has called Done, so the header reflects the final settled state.
 func (s *ttySink) Wait() {
+	if s.headerBar != nil {
+		s.headerBar.SetTotal(1, true)
+	}
+
 	s.p.Wait()
+}
+
+// markReady increments the ready counter when a stream leaves the waiting state.
+// Called by ttyStream.Activate (waiting → active) and ttyStream.Done (waiting → done,
+// i.e. resume-skipped streams that are never Activated).
+func (s *ttySink) markReady() {
+	s.readyCount.Add(1)
 }
 
 // LogWriter returns the mpb container itself, which implements io.Writer by
@@ -170,6 +204,7 @@ func (s *ttySink) LogWriter() io.Writer {
 
 type ttyStream struct {
 	bar   *mpb.Bar
+	sink  *ttySink // back-reference for summary counter updates; nil when no summary header
 	mu    sync.Mutex
 	total int64
 	state int32 // atomic: streamStateWaiting / streamStateActive / streamStateDone
@@ -189,13 +224,21 @@ func (s *ttyStream) SetTotal(total int64) {
 
 // Activate transitions the stream from waiting to downloading.
 // Subsequent calls after the first are no-ops (CAS ensures exactly-once semantics).
+// On a successful transition the summary ready counter is incremented.
 func (s *ttyStream) Activate() {
-	atomic.CompareAndSwapInt32(&s.state, streamStateWaiting, streamStateActive)
+	if atomic.CompareAndSwapInt32(&s.state, streamStateWaiting, streamStateActive) && s.sink != nil {
+		s.sink.markReady()
+	}
 }
 
 // Done marks the stream as complete and triggers bar completion in mpb.
+// When the stream was still in the waiting state (resume skip, never Activated)
+// the summary ready counter is incremented so the header reflects the settled count.
 func (s *ttyStream) Done() {
-	atomic.StoreInt32(&s.state, streamStateDone)
+	prev := atomic.SwapInt32(&s.state, streamStateDone)
+	if prev == streamStateWaiting && s.sink != nil {
+		s.sink.markReady()
+	}
 
 	s.mu.Lock()
 	total := s.total
@@ -235,6 +278,24 @@ func decorateAppend(state int32, stats decor.Statistics) string {
 	}
 
 	return fmt.Sprintf(" %.0f%%", float64(stats.Current)/float64(stats.Total)*100)
+}
+
+// summaryLabel returns the text for the spinner summary header line that appears
+// above the per-leaf bars. It is a pure function to enable unit testing without
+// any mpb rendering.
+//
+//   - pending (ready < total): " preparing exports (n/m ready)"
+//   - settled (ready >= total, total > 0): " exports ready (m/m)"
+func summaryLabel(ready, total int) string {
+	if total == 0 {
+		return ""
+	}
+
+	if ready >= total {
+		return fmt.Sprintf(" exports ready (%d/%d)", total, total)
+	}
+
+	return fmt.Sprintf(" preparing exports (%d/%d ready)", ready, total)
 }
 
 // ── Non-TTY (plain-log) sink ──────────────────────────────────────────────────
