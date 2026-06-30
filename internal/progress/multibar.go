@@ -323,15 +323,16 @@ func spinnerCell(state int32, tick uint64) string {
 // stateWord returns the docker-pull status word for a stream's current state.
 // The activated flag distinguishes a finished real download from a resume skip:
 //
-//   - waiting: "Waiting for DataExport" (the row is blocked until its DataExport
-//     is provisioned; the descriptive phrase tells the user WHAT is being waited on).
+//   - waiting: "Waiting for DataExport to be Ready" (the row is blocked until its
+//     DataExport becomes Ready; the descriptive phrase tells the user WHAT is being
+//     waited on and that it is the readiness of the DataExport).
 //   - active: "Downloading".
 //   - done after Activate: "Download complete".
 //   - done without Activate (resume skip): "Already exists".
 //
-// "Waiting for DataExport" is the widest word, so it sets the WCSyncWidth
-// status-word column width; every other word fits within it and rows do not
-// shift horizontally as the state changes.
+// "Waiting for DataExport to be Ready" is the widest word, so it sets the
+// WCSyncWidth status-word column width; every other word fits within it and rows
+// do not shift horizontally as the state changes.
 func stateWord(state int32, activated bool) string {
 	switch state {
 	case streamStateActive:
@@ -343,7 +344,7 @@ func stateWord(state int32, activated bool) string {
 
 		return "Already exists"
 	default:
-		return "Waiting for DataExport"
+		return "Waiting for DataExport to be Ready"
 	}
 }
 
