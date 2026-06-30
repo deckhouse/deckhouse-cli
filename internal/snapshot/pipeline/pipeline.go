@@ -42,6 +42,14 @@ type nodeTask struct {
 	state   archive.NodeState
 }
 
+// streamKey identifies a pre-created progress stream.
+// pvcName is empty for Binding nodes and single-OwnDataRef nodes; it holds the PVC
+// name for multi-OwnDataRef nodes (matching multiDest naming).
+type streamKey struct {
+	node    *source.Node
+	pvcName string
+}
+
 // Run builds the snapshot tree, scans the output directory for resume state, and
 // downloads all missing node data with bounded concurrency.
 // The first node error cancels all in-flight work.
@@ -71,6 +79,10 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("scan output directory: %w", err)
 	}
 
+	// Pre-create one progress stream per volume leaf before the worker errgroup
+	// starts, so every bar appears immediately (docker-pull style).
+	streams := precreateStreams(tasks, cfg)
+
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(cfg.Workers)
 
@@ -78,11 +90,96 @@ func Run(ctx context.Context, cfg Config) error {
 		task := t
 
 		g.Go(func() error {
-			return processNode(gctx, cfg, task)
+			return processNode(gctx, cfg, task, streams)
 		})
 	}
 
 	return g.Wait()
+}
+
+// precreateStreams creates one progress.Stream per volume download before any worker
+// goroutine starts. The map is keyed by (node pointer, pvcName) so each call site can
+// retrieve its handle without a second NewStream call.
+//
+// Streams for nodes that are already complete (NodeStateDone) are marked Done
+// immediately so they render as already-complete (docker-pull "Already exists" style).
+//
+// Returns nil when cfg.Progress is nil (progress disabled), which causes all
+// lookupStream calls to return nil and behave as no-ops.
+func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]progress.Stream {
+	if cfg.Progress == nil {
+		return nil
+	}
+
+	// Count the exact number of streams to pre-allocate the map.
+	nStreams := 0
+
+	for _, t := range tasks {
+		n := t.node
+
+		switch {
+		case n.Binding != nil:
+			nStreams++
+		case len(n.OwnDataRefs) == 1:
+			nStreams++
+		case len(n.OwnDataRefs) > 1:
+			nStreams += len(n.OwnDataRefs)
+		}
+	}
+
+	out := make(map[streamKey]progress.Stream, nStreams)
+
+	for _, t := range tasks {
+		node := t.node
+
+		switch {
+		case node.Binding != nil:
+			// Orphan VolumeSnapshot leaf: one stream keyed on the node, name = leaf ref name.
+			s := cfg.Progress.NewStream(node.Ref().Name, 0)
+			if t.state == archive.NodeStateDone {
+				s.Done()
+			}
+
+			out[streamKey{node: node}] = s
+
+		case len(node.OwnDataRefs) == 1:
+			// Non-aggregator with a single volume: one stream keyed on the node.
+			s := cfg.Progress.NewStream(node.Ref().Name, 0)
+			if t.state == archive.NodeStateDone {
+				s.Done()
+			}
+
+			out[streamKey{node: node}] = s
+
+		case len(node.OwnDataRefs) > 1:
+			// Non-aggregator with multiple volumes: one stream per PVC.
+			for _, ref := range node.OwnDataRefs {
+				pvc := ref.Target.Name
+				s := cfg.Progress.NewStream(pvc, 0)
+
+				if t.state == archive.NodeStateDone {
+					s.Done()
+				}
+
+				out[streamKey{node: node, pvcName: pvc}] = s
+			}
+
+			// Aggregator/manifest-only nodes: no stream.
+		}
+	}
+
+	return out
+}
+
+// lookupStream returns the pre-created progress.Stream for the given node and
+// optional pvcName, or nil when streams is nil (progress disabled) or the key
+// is absent.
+func lookupStream(streams map[streamKey]progress.Stream, node *source.Node, pvcName string) progress.Stream {
+	if streams == nil {
+		return nil
+	}
+
+	return streams[streamKey{node: node, pvcName: pvcName}]
 }
 
 // collectNodeTasks performs a depth-first traversal of the snapshot tree, computing
@@ -221,8 +318,9 @@ func nodeDirOf(node *source.Node) string {
 // Snapshot nodes with OwnDataRefs download their own volume data directly into
 // the node directory (flat for 1 ref; multi-volume for >1). Aggregator snapshot
 // nodes (no OwnDataRefs, may have orphan leaf children) write manifests only.
-func processNode(ctx context.Context, cfg Config, task nodeTask) error {
+func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[streamKey]progress.Stream) error {
 	if task.state == archive.NodeStateDone {
+		// Streams for NodeStateDone nodes were already marked Done in precreateStreams.
 		cfg.Log.Info("node already complete, skipping",
 			slog.String("kind", task.node.Kind),
 			slog.String("name", task.node.Name))
@@ -236,7 +334,7 @@ func processNode(ctx context.Context, cfg Config, task nodeTask) error {
 		slog.String("resume_state", nodeStateName(task.state)))
 
 	if task.node.Binding != nil {
-		return processVolumeNode(ctx, cfg, task)
+		return processVolumeNode(ctx, cfg, task, streams)
 	}
 
 	// Snapshot node: ensure subdirs, write manifests, then download own data if present.
@@ -250,7 +348,7 @@ func processNode(ctx context.Context, cfg Config, task nodeTask) error {
 	}
 
 	if len(task.node.OwnDataRefs) > 0 {
-		if err := downloadOwnDataRefs(ctx, cfg, task.node, task.nodeDir); err != nil {
+		if err := downloadOwnDataRefs(ctx, cfg, task.node, task.nodeDir, streams); err != nil {
 			return fmt.Errorf("download own volumes for %s/%s: %w", task.node.Kind, task.node.Name, err)
 		}
 	}
@@ -270,7 +368,7 @@ func processNode(ctx context.Context, cfg Config, task nodeTask) error {
 // It writes the captured PVC manifest, applies the block-resume guard, downloads
 // the volume data, and finalizes the node directory.
 // Volume nodes are always leaves: no snapshots/ subdirectory is created.
-func processVolumeNode(ctx context.Context, cfg Config, task nodeTask) error {
+func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams map[streamKey]progress.Stream) error {
 	if err := ensureNodeSubdirs(task.nodeDir, false); err != nil {
 		return fmt.Errorf("ensure subdirs for %s/%s: %w", task.node.Kind, task.node.Name, err)
 	}
@@ -291,17 +389,29 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask) error {
 		return fmt.Errorf("check fs tar in %s: %w", task.nodeDir, err)
 	}
 
+	stream := lookupStream(streams, task.node, "")
+
 	switch {
 	case blockAlreadyMerged:
 		cfg.Log.Info("block volume already merged, skipping download",
 			slog.String("kind", task.node.Kind),
 			slog.String("name", task.node.Name))
+
+		if stream != nil {
+			stream.Done()
+		}
+
 	case fsTarDone:
 		cfg.Log.Info("fs tar already complete, skipping download",
 			slog.String("kind", task.node.Kind),
 			slog.String("name", task.node.Name))
+
+		if stream != nil {
+			stream.Done()
+		}
+
 	default:
-		if err := downloadVolumeBinding(ctx, cfg, task.node.Ref(), task.node.Namespace, dest); err != nil {
+		if err := downloadVolumeBinding(ctx, cfg, task.node.Ref(), task.node.Namespace, dest, stream); err != nil {
 			return fmt.Errorf("download volume for %s/%s: %w", task.node.Kind, task.node.Name, err)
 		}
 	}
@@ -330,12 +440,14 @@ func downloadOwnDataRefs(
 	cfg Config,
 	node *source.Node,
 	nodeDir string,
+	streams map[streamKey]progress.Stream,
 ) error {
 	refs := node.OwnDataRefs
 
 	if len(refs) == 1 {
 		// Flat single-volume layout: reuse the same paths as leaf volume nodes.
 		dest := flatDest(nodeDir, cfg.Compression.Ext())
+		stream := lookupStream(streams, node, "")
 
 		_, found, err := archive.FindBlockData(nodeDir)
 		if err != nil {
@@ -346,6 +458,10 @@ func downloadOwnDataRefs(
 			cfg.Log.Info("block volume already merged, skipping download",
 				slog.String("kind", node.Kind),
 				slog.String("name", node.Name))
+
+			if stream != nil {
+				stream.Done()
+			}
 
 			return nil
 		}
@@ -360,10 +476,14 @@ func downloadOwnDataRefs(
 				slog.String("kind", node.Kind),
 				slog.String("name", node.Name))
 
+			if stream != nil {
+				stream.Done()
+			}
+
 			return nil
 		}
 
-		return downloadVolumeBinding(ctx, cfg, node.Ref(), node.Namespace, dest)
+		return downloadVolumeBinding(ctx, cfg, node.Ref(), node.Namespace, dest, stream)
 	}
 
 	// Multi-volume layout: one DataExport per binding. Each binding shares the same
@@ -372,6 +492,7 @@ func downloadOwnDataRefs(
 		ref := &refs[i]
 		pvc := ref.Target.Name
 		dest := multiDest(nodeDir, pvc, cfg.Compression.Ext())
+		stream := lookupStream(streams, node, pvc)
 
 		_, statErr := os.Stat(dest.blockPath)
 		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
@@ -381,6 +502,10 @@ func downloadOwnDataRefs(
 		if statErr == nil {
 			cfg.Log.Info("block volume already merged, skipping",
 				slog.String("pvc", pvc))
+
+			if stream != nil {
+				stream.Done()
+			}
 
 			continue
 		}
@@ -394,10 +519,14 @@ func downloadOwnDataRefs(
 			cfg.Log.Info("fs tar already complete, skipping",
 				slog.String("pvc", pvc))
 
+			if stream != nil {
+				stream.Done()
+			}
+
 			continue
 		}
 
-		if err := downloadVolumeBinding(ctx, cfg, node.Ref(), node.Namespace, dest); err != nil {
+		if err := downloadVolumeBinding(ctx, cfg, node.Ref(), node.Namespace, dest, stream); err != nil {
 			return fmt.Errorf("download volume for pvc %s: %w", pvc, err)
 		}
 	}
@@ -461,6 +590,10 @@ func multiDest(nodeDir, pvc, ext string) volumeDestPaths {
 // leafRef, downloads the volume data (block or filesystem) to dest, and releases
 // the DataExport on completion or error.
 //
+// stream is the pre-created progress handle for this volume; it is marked Done when
+// downloadVolumeBinding returns (via defer) and must not be nil-checked by the caller.
+// Pass nil when progress tracking is disabled.
+//
 // leafRef addresses the snapshot leaf CR that the DataExport controller will
 // resolve via leaf.status.boundSnapshotContentName → SnapshotContent → dataRef.
 // For CSI VolumeSnapshot visibility-leaves leafRef.Kind == "VolumeSnapshot"; for
@@ -474,6 +607,7 @@ func downloadVolumeBinding(
 	leafRef aggapi.NodeRef,
 	namespace string,
 	dest volumeDestPaths,
+	stream progress.Stream,
 ) error {
 	// Acquire one slot from the global stream semaphore before opening the
 	// DataExport. This caps the number of concurrently active volume-stream
@@ -505,23 +639,20 @@ func downloadVolumeBinding(
 		}
 	}()
 
+	// Mark the pre-created stream as done when we return (regardless of outcome).
+	// The stream is marked active (Activate) in task 2 after OpenExport succeeds.
+	if stream != nil {
+		defer stream.Done()
+	}
+
 	cfg.Log.Info("downloading volume",
 		slog.String("leaf", leafRef.Name),
 		slog.String("volume_mode", exp.VolumeMode()))
 
-	// Open one progress stream per volume download when a Sink is configured.
-	// The stream is marked Done when downloadVolumeBinding returns so the Sink
-	// can correctly detect completion regardless of success or error.
-	var stream progress.Stream
-
-	if cfg.Progress != nil {
-		stream = cfg.Progress.NewStream(leafRef.Name, 0)
-		defer stream.Done()
-	}
-
 	switch exp.VolumeMode() {
 	case "Block":
 		return downloadBlock(ctx, cfg, dest, exp, stream)
+
 	case "Filesystem":
 		var (
 			onProgress func(n int)
@@ -534,6 +665,7 @@ func downloadVolumeBinding(
 		}
 
 		return downloadFS(ctx, cfg, dest.fsTarPath, dest.fsTarStagingDir, exp, setTotal, onProgress)
+
 	default:
 		return fmt.Errorf("unsupported volume mode %q for leaf %s/%s", exp.VolumeMode(), leafRef.Kind, leafRef.Name)
 	}
