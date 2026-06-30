@@ -343,9 +343,10 @@ func TestEnsureDataImport_BuildsModeASpec(t *testing.T) {
 		t.Errorf("targetRef = {group:%q, kind:%q, name:%q}, want {snapshot.storage.k8s.io, VolumeSnapshot, pvc-1}", group, kind, refName)
 	}
 
-	// targetRef must not carry the removed plural "resource" key.
-	if _, found, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "resource"); found {
-		t.Error("spec.targetRef.resource must not be set (renamed to kind)")
+	// TEMP REVERTME: targetRef must carry the plural "resource" key for the deployed mr135
+	// GVR-based DataImport CRD (alongside kind). Revert when SVDM main carries kind-based targetRef.
+	if resource, _, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "resource"); resource != "volumesnapshots" {
+		t.Errorf("spec.targetRef.resource = %q, want volumesnapshots", resource)
 	}
 }
 
