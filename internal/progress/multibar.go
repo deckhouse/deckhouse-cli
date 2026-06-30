@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -110,6 +111,11 @@ func New(w io.Writer, tty bool, opts ...Option) Sink {
 // own (also fixed) widths around it.
 const ttyBarWidth = 28
 
+// ttyNameWidth is the fixed display-rune width of the leaf-name column.
+// Leaf names longer than this are truncated with a trailing '…'; shorter names
+// are right-padded with spaces so all bars align in neat docker-pull-like columns.
+const ttyNameWidth = 24
+
 // stream state constants stored atomically in ttyStream.state.
 // The machine is one-way: waiting → active → done, or waiting → done (resume skip).
 const (
@@ -158,15 +164,15 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 		total,
 		mpb.BarWidth(ttyBarWidth),
 		mpb.PrependDecorators(
-			decor.Name(name, decor.WC{W: 20}),
+			decor.Name(truncateName(name, ttyNameWidth), decor.WC{W: ttyNameWidth}),
 			decor.Any(func(stats decor.Statistics) string {
 				return decorateStatus(atomic.LoadInt32(&ts.state), stats)
-			}),
+			}, decor.WCSyncWidthR),
 		),
 		mpb.AppendDecorators(
 			decor.Any(func(stats decor.Statistics) string {
 				return decorateAppend(atomic.LoadInt32(&ts.state), stats)
-			}),
+			}, decor.WCSyncWidthR),
 		),
 	)
 
@@ -296,6 +302,19 @@ func summaryLabel(ready, total int) string {
 	}
 
 	return fmt.Sprintf(" preparing exports (%d/%d ready)", ready, total)
+}
+
+// truncateName left-aligns name in a fixed-width column of exactly width display
+// runes. Names shorter than width are right-padded with spaces. Names longer than
+// width are truncated with a trailing '…' so the total display length is always
+// exactly width. The measurement is rune-aware (Unicode code points, not bytes).
+func truncateName(name string, width int) string {
+	runes := []rune(name)
+	if len(runes) <= width {
+		return string(runes) + strings.Repeat(" ", width-len(runes))
+	}
+
+	return string(runes[:width-1]) + "…"
 }
 
 // ── Non-TTY (plain-log) sink ──────────────────────────────────────────────────
