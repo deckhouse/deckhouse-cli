@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -213,34 +214,6 @@ func TestNonTTY_Wait_AlwaysEmitsFinalLine(t *testing.T) {
 
 	if !strings.Contains(buf.String(), want) {
 		t.Errorf("Wait() did not emit final line:\ngot:  %q\nwant (contained): %q", buf.String(), want)
-	}
-}
-
-func TestSummaryLabel(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		ready int
-		total int
-		want  string
-	}{
-		{0, 0, ""},
-		{0, 3, " preparing exports (0/3 ready)"},
-		{1, 3, " preparing exports (1/3 ready)"},
-		{2, 3, " preparing exports (2/3 ready)"},
-		{3, 3, " exports ready (3/3)"},
-		{5, 3, " exports ready (3/3)"},
-	}
-
-	for _, tc := range cases {
-		t.Run(fmt.Sprintf("ready_%d_of_%d", tc.ready, tc.total), func(t *testing.T) {
-			t.Parallel()
-
-			got := summaryLabel(tc.ready, tc.total)
-			if got != tc.want {
-				t.Errorf("summaryLabel(%d, %d) = %q, want %q", tc.ready, tc.total, got, tc.want)
-			}
-		})
 	}
 }
 
@@ -442,65 +415,52 @@ func TestTruncateName(t *testing.T) {
 	}
 }
 
-// TestTTYSink_ReadyCounts verifies the readyCount / totalCount aggregation and the
-// waiting→active→done state machine via the observable sink counters.
-func TestTTYSink_ReadyCounts(t *testing.T) {
+// TestTTYSink_StateMachine drives the waiting→active→done and waiting→done (resume
+// skip) transitions through the real ttyStream and asserts the activated flag and
+// final state words, then drains the sink. With the summary header removed there
+// are no aggregate counters to observe, so the state is read from stateWord.
+func TestTTYSink_StateMachine(t *testing.T) {
 	t.Parallel()
 
 	buf := &bytes.Buffer{}
 	sink := newTTYSink(buf)
 
-	s1 := sink.NewStream("stream-1", 0)
-	s2 := sink.NewStream("stream-2", 0)
-	s3 := sink.NewStream("stream-3", 0)
-
-	if got := sink.totalCount.Load(); got != 3 {
-		t.Fatalf("totalCount after 3 NewStream = %d, want 3", got)
+	s1, ok := sink.NewStream("stream-1", 0).(*ttyStream)
+	if !ok {
+		t.Fatal("NewStream did not return *ttyStream")
 	}
 
-	if got := sink.readyCount.Load(); got != 0 {
-		t.Fatalf("readyCount before any transition = %d, want 0", got)
+	s2, ok := sink.NewStream("stream-2", 0).(*ttyStream)
+	if !ok {
+		t.Fatal("NewStream did not return *ttyStream")
 	}
 
-	// waiting → active: readyCount increments exactly once.
+	wordOf := func(s *ttyStream) string {
+		return stateWord(atomic.LoadInt32(&s.state), atomic.LoadInt32(&s.activated) == 1)
+	}
+
+	if got := wordOf(s1); got != "Waiting" {
+		t.Errorf("fresh stream word = %q, want Waiting", got)
+	}
+
+	// waiting → active → done: a real download ends as "Download complete".
 	s1.Activate()
 
-	if got := sink.readyCount.Load(); got != 1 {
-		t.Errorf("readyCount after Activate = %d, want 1", got)
+	if got := wordOf(s1); got != "Downloading" {
+		t.Errorf("activated stream word = %q, want Downloading", got)
 	}
 
-	// Duplicate Activate is a no-op (CAS guarantees exactly-once semantics).
-	s1.Activate()
-
-	if got := sink.readyCount.Load(); got != 1 {
-		t.Errorf("readyCount after duplicate Activate = %d, want 1", got)
-	}
-
-	// waiting → done via Done(): readyCount increments.
-	s2.Done()
-
-	if got := sink.readyCount.Load(); got != 2 {
-		t.Errorf("readyCount after Done(waiting) = %d, want 2", got)
-	}
-
-	// active → done: Activate then Done must not double-increment readyCount.
-	s3.Activate()
-
-	if got := sink.readyCount.Load(); got != 3 {
-		t.Errorf("readyCount after s3.Activate = %d, want 3", got)
-	}
-
-	s3.Done()
-
-	if got := sink.readyCount.Load(); got != 3 {
-		t.Errorf("readyCount after s3.Done (was active) = %d, want 3", got)
-	}
-
-	// Finish s1 to let sink.Wait() drain all bars.
 	s1.Done()
 
-	if got := sink.readyCount.Load(); got != 3 {
-		t.Errorf("readyCount after s1.Done (was active) = %d, want 3", got)
+	if got := wordOf(s1); got != "Download complete" {
+		t.Errorf("downloaded stream word = %q, want Download complete", got)
+	}
+
+	// waiting → done without Activate: a resume skip ends as "Already exists".
+	s2.Done()
+
+	if got := wordOf(s2); got != "Already exists" {
+		t.Errorf("resume-skipped stream word = %q, want Already exists", got)
 	}
 
 	sink.Wait()
