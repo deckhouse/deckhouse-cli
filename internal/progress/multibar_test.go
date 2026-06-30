@@ -19,6 +19,7 @@ package progress
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -140,6 +141,43 @@ func TestTTY_SinkIsNonNil(t *testing.T) {
 	st.IncrBy(1024)
 	st.Done()
 	sink.Wait()
+}
+
+func TestLogWriter(t *testing.T) {
+	t.Parallel()
+
+	t.Run("plain sink returns stderr", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		sink := New(buf, false, WithInterval(time.Hour))
+		defer sink.Wait()
+
+		if w := sink.LogWriter(); w != os.Stderr {
+			t.Errorf("plain sink LogWriter = %v, want os.Stderr", w)
+		}
+	})
+
+	t.Run("tty sink returns non-nil coordinated writer", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		sink := New(buf, true)
+		defer sink.Wait()
+
+		w := sink.LogWriter()
+		if w == nil {
+			t.Fatal("tty sink LogWriter returned nil")
+		}
+
+		if w == os.Stderr {
+			t.Error("tty sink LogWriter must not be raw os.Stderr; it must be coordinated with the bars")
+		}
+
+		if _, err := w.Write([]byte("log line above the bars\n")); err != nil {
+			t.Errorf("writing to tty sink LogWriter: %v", err)
+		}
+	})
 }
 
 func TestNonTTY_SetTotal_AggregatesCorrectly(t *testing.T) {

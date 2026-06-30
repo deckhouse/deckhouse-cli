@@ -224,6 +224,17 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	tty := term.IsTerminal(int(os.Stdout.Fd()))
 	sink := progress.New(os.Stdout, tty)
 
+	// On a TTY the mpb progress bar owns stdout and redraws by moving the cursor
+	// up; unrelated writes to the terminal in between corrupt that accounting and
+	// make the bar re-print as multiple blocks. Route the pipeline logger (which
+	// emits high-frequency lifecycle INFO lines while bars are live) through the
+	// sink's coordinated writer so those lines print cleanly above the bars. The
+	// command's own pre-/post-bar bookend logs stay on the original logger.
+	runLog := log
+	if tty {
+		runLog = slog.New(slog.NewTextHandler(sink.LogWriter(), &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+
 	cfg := pipeline.Config{
 		Namespace:            namespace,
 		RootSnapshot:         snapshotName,
@@ -240,7 +251,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		SelectedNodeKind:     selectedKind,
 		SelectedNodeName:     selectedName,
 		Progress:             sink,
-		Log:                  log,
+		Log:                  runLog,
 	}
 
 	log.Info("starting snapshot download",
