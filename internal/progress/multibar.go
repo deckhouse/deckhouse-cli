@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vbauerster/mpb/v8"
@@ -54,6 +55,13 @@ type Stream interface {
 
 	// SetTotal updates the stream's expected total byte count.
 	SetTotal(total int64)
+
+	// Activate transitions the stream from waiting to downloading state.
+	// For the TTY sink it flips the bar from "waiting for export…" to the live
+	// byte-counter display. For the plain (non-TTY) sink it is a no-op.
+	// Must be called exactly once after the DataExport becomes ready, before
+	// byte transfer begins.
+	Activate()
 
 	// Done marks the stream as complete.
 	Done()
@@ -102,6 +110,14 @@ func New(w io.Writer, tty bool, opts ...Option) Sink {
 // own (also fixed) widths around it.
 const ttyBarWidth = 28
 
+// stream state constants stored atomically in ttyStream.state.
+// The machine is one-way: waiting → active → done, or waiting → done (resume skip).
+const (
+	streamStateWaiting = int32(0)
+	streamStateActive  = int32(1)
+	streamStateDone    = int32(2)
+)
+
 type ttySink struct {
 	p *mpb.Progress
 }
@@ -112,24 +128,30 @@ func newTTYSink(w io.Writer) *ttySink {
 	return &ttySink{p: p}
 }
 
-// NewStream adds a named per-stream bar. There is no grand-total/aggregate bar:
-// like `docker pull`, only per-leaf ("layer") bars are shown.
+// NewStream adds a named per-stream bar. The bar starts in the waiting state and
+// switches to a byte-counter display after Activate() is called.
 func (s *ttySink) NewStream(name string, total int64) Stream {
+	ts := &ttyStream{total: total}
+
 	bar := s.p.AddBar(
 		total,
 		mpb.BarWidth(ttyBarWidth),
 		mpb.PrependDecorators(
 			decor.Name(name, decor.WC{W: 20}),
-			decor.Counters(decor.SizeB1024(0), " %.1f / %.1f"),
+			decor.Any(func(stats decor.Statistics) string {
+				return decorateStatus(atomic.LoadInt32(&ts.state), stats)
+			}),
 		),
 		mpb.AppendDecorators(
-			decor.Percentage(),
-			decor.AverageSpeed(decor.SizeB1024(0), " %.1f "),
-			decor.AverageETA(decor.ET_STYLE_GO),
+			decor.Any(func(stats decor.Statistics) string {
+				return decorateAppend(atomic.LoadInt32(&ts.state), stats)
+			}),
 		),
 	)
 
-	return &ttyStream{bar: bar, total: total}
+	ts.bar = bar
+
+	return ts
 }
 
 // Wait drains the mpb renderer once all per-stream bars have completed.
@@ -150,6 +172,7 @@ type ttyStream struct {
 	bar   *mpb.Bar
 	mu    sync.Mutex
 	total int64
+	state int32 // atomic: streamStateWaiting / streamStateActive / streamStateDone
 }
 
 func (s *ttyStream) IncrBy(n int) {
@@ -164,12 +187,54 @@ func (s *ttyStream) SetTotal(total int64) {
 	s.bar.SetTotal(total, false)
 }
 
+// Activate transitions the stream from waiting to downloading.
+// Subsequent calls after the first are no-ops (CAS ensures exactly-once semantics).
+func (s *ttyStream) Activate() {
+	atomic.CompareAndSwapInt32(&s.state, streamStateWaiting, streamStateActive)
+}
+
+// Done marks the stream as complete and triggers bar completion in mpb.
 func (s *ttyStream) Done() {
+	atomic.StoreInt32(&s.state, streamStateDone)
+
 	s.mu.Lock()
 	total := s.total
 	s.mu.Unlock()
 
 	s.bar.SetTotal(total, true)
+}
+
+// ── Decorator pure functions ──────────────────────────────────────────────────
+
+// decorateStatus returns the byte-counter prepend text for a stream bar based on
+// its current state and statistics. It is a pure function used directly in unit
+// tests without any mpb rendering.
+//
+//   - waiting: "waiting\u2026" placeholder until the DataExport is provisioned.
+//   - active or done: "<current> / <total>" in human-readable binary units.
+func decorateStatus(state int32, stats decor.Statistics) string {
+	if state == streamStateWaiting {
+		return " waiting\u2026"
+	}
+
+	return fmt.Sprintf(" % .1f / % .1f", decor.SizeB1024(stats.Current), decor.SizeB1024(stats.Total))
+}
+
+// decorateAppend returns the percentage append text for a stream bar based on
+// its current state. It is a pure function used directly in unit tests.
+//
+//   - waiting: empty string (no percentage shown while the DataExport is not ready).
+//   - active or done: "X%" percentage of bytes transferred.
+func decorateAppend(state int32, stats decor.Statistics) string {
+	if state == streamStateWaiting {
+		return ""
+	}
+
+	if stats.Total <= 0 {
+		return " 0%"
+	}
+
+	return fmt.Sprintf(" %.0f%%", float64(stats.Current)/float64(stats.Total)*100)
 }
 
 // ── Non-TTY (plain-log) sink ──────────────────────────────────────────────────
@@ -275,6 +340,9 @@ func (s *plainStream) SetTotal(total int64) {
 	s.sink.total += delta
 	s.sink.mu.Unlock()
 }
+
+// Activate is a no-op for the plain sink; the non-TTY path has no bar state.
+func (s *plainStream) Activate() {}
 
 // Done is a no-op for the plain sink; progress is tracked entirely via IncrBy.
 func (s *plainStream) Done() {}
