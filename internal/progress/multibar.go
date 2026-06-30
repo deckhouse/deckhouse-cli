@@ -162,21 +162,42 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 
 	ts := &ttyStream{sink: s, total: total}
 
-	bar := s.p.AddBar(
+	// Render the row as a docker-pull layer line: the bar is drawn ONLY while the
+	// stream is active. The state-aware filler wraps a growing-arrow BarStyle and
+	// emits nothing in the waiting/done states, so no [bar] occupies the row then.
+	filler := stateBarFiller{
+		state: &ts.state,
+		inner: mpb.BarStyle().Lbound("[").Filler("=").Tip(">").Padding(" ").Rbound("]").Build(),
+	}
+
+	// Layout: name → stateWord → [bar] → counters → percent. The status word is a
+	// prepend decorator after the name; the byte counters and percent are append
+	// decorators after the bar, and render only in the active state.
+	bar, err := s.p.Add(
 		total,
+		filler,
 		mpb.BarWidth(ttyBarWidth),
 		mpb.PrependDecorators(
 			decor.Name(truncateName(name, ttyNameWidth), decor.WC{W: ttyNameWidth}),
-			decor.Any(func(stats decor.Statistics) string {
-				return decorateStatus(atomic.LoadInt32(&ts.state), stats)
-			}, decor.WCSyncWidthR),
+			decor.Any(func(_ decor.Statistics) string {
+				return " " + stateWord(atomic.LoadInt32(&ts.state), atomic.LoadInt32(&ts.activated) == 1)
+			}),
 		),
 		mpb.AppendDecorators(
 			decor.Any(func(stats decor.Statistics) string {
+				return decorateStatus(atomic.LoadInt32(&ts.state), stats)
+			}),
+			decor.Any(func(stats decor.Statistics) string {
 				return decorateAppend(atomic.LoadInt32(&ts.state), stats)
-			}, decor.WCSyncWidthR),
+			}),
 		),
 	)
+	if err != nil {
+		// Add only fails once the container has been shut down by Wait(); calling
+		// NewStream after Wait is a misuse of the Sink contract (unreachable in the
+		// download pipeline, which registers every stream before Wait).
+		panic(fmt.Sprintf("progress: registering stream %q after Wait: %v", name, err))
+	}
 
 	ts.bar = bar
 
@@ -216,6 +237,11 @@ type ttyStream struct {
 	mu    sync.Mutex
 	total int64
 	state int32 // atomic: streamStateWaiting / streamStateActive / streamStateDone
+	// activated records whether Activate was ever called (atomic 0/1). It
+	// distinguishes a real download (waiting → active → done, "Download complete")
+	// from a resume skip (waiting → done without Activate, "Already exists") in
+	// stateWord without adding a new Stream interface method.
+	activated int32
 }
 
 func (s *ttyStream) IncrBy(n int) {
@@ -234,6 +260,8 @@ func (s *ttyStream) SetTotal(total int64) {
 // Subsequent calls after the first are no-ops (CAS ensures exactly-once semantics).
 // On a successful transition the summary ready counter is incremented.
 func (s *ttyStream) Activate() {
+	atomic.StoreInt32(&s.activated, 1)
+
 	if atomic.CompareAndSwapInt32(&s.state, streamStateWaiting, streamStateActive) && s.sink != nil {
 		s.sink.markReady()
 	}
@@ -255,29 +283,70 @@ func (s *ttyStream) Done() {
 	s.bar.SetTotal(total, true)
 }
 
+// ── State-aware bar filler ────────────────────────────────────────────────────
+
+// stateBarFiller renders the wrapped bar ONLY while the stream is in the active
+// state. In the waiting and done states it writes nothing, so no [bar] occupies
+// the row — matching `docker pull`, where a layer shows a bar only while it is
+// actually transferring (waiting rows show "Waiting", finished rows show
+// "Download complete"/"Already exists" with no residual bar).
+type stateBarFiller struct {
+	state *int32 // points at the owning ttyStream.state (read atomically)
+	inner mpb.BarFiller
+}
+
+// Fill delegates to the inner growing-arrow filler only in the active state and
+// writes nothing otherwise. It is unit-assertable independently of mpb rendering:
+// empty output when waiting/done, a bracketed bar containing '[' and ']' when active.
+func (f stateBarFiller) Fill(w io.Writer, stat decor.Statistics) error {
+	if atomic.LoadInt32(f.state) != streamStateActive {
+		return nil
+	}
+
+	return f.inner.Fill(w, stat)
+}
+
 // ── Decorator pure functions ──────────────────────────────────────────────────
 
-// decorateStatus returns the byte-counter prepend text for a stream bar based on
-// its current state and statistics. It is a pure function used directly in unit
-// tests without any mpb rendering.
+// stateWord returns the docker-pull status word for a stream's current state.
+// The activated flag distinguishes a finished real download from a resume skip:
 //
-//   - waiting: "waiting\u2026" placeholder until the DataExport is provisioned.
-//   - active or done: "<current> / <total>" in human-readable binary units.
+//   - waiting: "Waiting" (DataExport not yet provisioned).
+//   - active: "Downloading".
+//   - done after Activate: "Download complete".
+//   - done without Activate (resume skip): "Already exists".
+func stateWord(state int32, activated bool) string {
+	switch state {
+	case streamStateActive:
+		return "Downloading"
+	case streamStateDone:
+		if activated {
+			return "Download complete"
+		}
+
+		return "Already exists"
+	default:
+		return "Waiting"
+	}
+}
+
+// decorateStatus returns the byte-counter append text for a stream bar. Counters
+// render ONLY in the active state ("<current> / <total>" in human-readable binary
+// units); waiting and done rows show no counters (docker-pull parity). It is a pure
+// function used directly in unit tests without any mpb rendering.
 func decorateStatus(state int32, stats decor.Statistics) string {
-	if state == streamStateWaiting {
-		return " waiting\u2026"
+	if state != streamStateActive {
+		return ""
 	}
 
 	return fmt.Sprintf(" % .1f / % .1f", decor.SizeB1024(stats.Current), decor.SizeB1024(stats.Total))
 }
 
-// decorateAppend returns the percentage append text for a stream bar based on
-// its current state. It is a pure function used directly in unit tests.
-//
-//   - waiting: empty string (no percentage shown while the DataExport is not ready).
-//   - active or done: "X%" percentage of bytes transferred.
+// decorateAppend returns the percentage append text for a stream bar. The percent
+// renders ONLY in the active state; waiting and done rows show no percentage. It is
+// a pure function used directly in unit tests.
 func decorateAppend(state int32, stats decor.Statistics) string {
-	if state == streamStateWaiting {
+	if state != streamStateActive {
 		return ""
 	}
 

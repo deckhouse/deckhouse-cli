@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
 )
 
@@ -256,7 +257,7 @@ func TestDecorateStatus(t *testing.T) {
 			"waiting",
 			streamStateWaiting,
 			decor.Statistics{Total: 1024},
-			" waiting\u2026",
+			"",
 		},
 		{
 			"active",
@@ -268,7 +269,7 @@ func TestDecorateStatus(t *testing.T) {
 			"done",
 			streamStateDone,
 			decor.Statistics{Current: 1024, Total: 1024},
-			fmt.Sprintf(" % .1f / % .1f", decor.SizeB1024(1024), decor.SizeB1024(1024)),
+			"",
 		},
 	}
 
@@ -297,7 +298,7 @@ func TestDecorateAppend(t *testing.T) {
 		{"active_zero_total", streamStateActive, decor.Statistics{}, " 0%"},
 		{"active_50pct", streamStateActive, decor.Statistics{Current: 512, Total: 1024}, " 50%"},
 		{"active_100pct", streamStateActive, decor.Statistics{Current: 1024, Total: 1024}, " 100%"},
-		{"done_100pct", streamStateDone, decor.Statistics{Current: 1024, Total: 1024}, " 100%"},
+		{"done_no_percent", streamStateDone, decor.Statistics{Current: 1024, Total: 1024}, ""},
 	}
 
 	for _, tc := range cases {
@@ -307,6 +308,79 @@ func TestDecorateAppend(t *testing.T) {
 			got := decorateAppend(tc.state, tc.stats)
 			if got != tc.want {
 				t.Errorf("decorateAppend(%d, %+v) = %q, want %q", tc.state, tc.stats, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStateWord(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		state     int32
+		activated bool
+		want      string
+	}{
+		{"waiting", streamStateWaiting, false, "Waiting"},
+		{"active", streamStateActive, true, "Downloading"},
+		{"done_after_activate", streamStateDone, true, "Download complete"},
+		{"done_without_activate", streamStateDone, false, "Already exists"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := stateWord(tc.state, tc.activated)
+			if got != tc.want {
+				t.Errorf("stateWord(%d, %t) = %q, want %q", tc.state, tc.activated, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStateBarFiller(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		state     int32
+		wantEmpty bool
+	}{
+		{"waiting_empty", streamStateWaiting, true},
+		{"active_bar", streamStateActive, false},
+		{"done_empty", streamStateDone, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := tc.state
+			filler := stateBarFiller{
+				state: &state,
+				inner: mpb.BarStyle().Lbound("[").Filler("=").Tip(">").Padding(" ").Rbound("]").Build(),
+			}
+
+			var buf bytes.Buffer
+
+			stats := decor.Statistics{Current: 5, Total: 10, AvailableWidth: ttyBarWidth, RequestedWidth: ttyBarWidth}
+			if err := filler.Fill(&buf, stats); err != nil {
+				t.Fatalf("Fill returned error: %v", err)
+			}
+
+			got := buf.String()
+			if tc.wantEmpty {
+				if got != "" {
+					t.Errorf("state %d: Fill wrote %q, want empty", tc.state, got)
+				}
+
+				return
+			}
+
+			if !strings.Contains(got, "[") || !strings.Contains(got, "]") {
+				t.Errorf("state %d: Fill = %q, want a bracketed bar containing '[' and ']'", tc.state, got)
 			}
 		})
 	}
