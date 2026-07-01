@@ -694,9 +694,13 @@ func TestTTYStream_ActivateIdempotent(t *testing.T) {
 }
 
 // TestTTYSink_NoSummaryHeader guards the summary-cleanup decision: a TTY run must
-// emit only per-leaf docker-pull rows and never the old animated aggregate header
-// text. mpb terminal frames are not asserted; we only assert the rendered output
-// never contains the removed header strings (or the old "waiting…" counter).
+// never reintroduce the OLD removed header wording ("preparing exports"/"exports
+// ready") or the old "waiting…" counter. It deliberately does NOT ban the NEW
+// "volumes downloaded" bottom summary bar text added by the progress-volume-
+// counter feature — that bar is a distinct, later product decision (see
+// TestVolumeCounterLabel and the TTY/non-TTY count-once tests below for its
+// dedicated coverage). mpb terminal frames are not asserted here; we only assert
+// the rendered output never contains the removed header strings.
 func TestTTYSink_NoSummaryHeader(t *testing.T) {
 	t.Parallel()
 
@@ -727,4 +731,164 @@ func TestTTYSink_NoSummaryHeader(t *testing.T) {
 			t.Errorf("TTY output must not contain removed header text %q\ngot: %q", banned, out)
 		}
 	}
+}
+
+// TestVolumeCounterLabel pins the exact text of the bottom "N/M volumes
+// downloaded" summary bar as a pure function, independent of any mpb rendering.
+func TestVolumeCounterLabel(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		done  int
+		total int
+		want  string
+	}{
+		{name: "no volumes in scope renders nothing", done: 0, total: 0, want: ""},
+		{name: "none done yet", done: 0, total: 4, want: " 0/4 volumes downloaded"},
+		{name: "partially done", done: 2, total: 4, want: " 2/4 volumes downloaded"},
+		{name: "fully done", done: 4, total: 4, want: " 4/4 volumes downloaded"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := volumeCounterLabel(tc.done, tc.total); got != tc.want {
+				t.Errorf("volumeCounterLabel(%d, %d) = %q, want %q", tc.done, tc.total, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTTYSink_VolumeCounter_CountsOnce proves that the TTY sink's N/M
+// volume-counter counts BOTH a real download (Activate then Done) and a resume
+// skip (Done without Activate) exactly once each, and that a duplicate Done()
+// call does not double-count. Per this package's testing philosophy, mpb
+// terminal frames are not asserted (writing to a bytes.Buffer instead of a real
+// terminal means mpb's renderer never flushes a frame, so the buffer stays
+// empty even on a passing run — see TestTTYSink_NoSummaryHeader); instead this
+// test asserts the sink's own observable counter state directly, and also
+// exercises volumeCounterLabel with the resulting (done, total) pair to pin
+// what WOULD be rendered.
+func TestTTYSink_VolumeCounter_CountsOnce(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	sink := New(buf, true)
+
+	ts, ok := sink.(*ttySink)
+	if !ok {
+		t.Fatal("New(_, true) did not return *ttySink")
+	}
+
+	ts.SetVolumeTotal(2)
+
+	// Streams are registered with total=0, mirroring the pipeline: a bar created
+	// with total>0 enables mpb's trigger-complete, after which Done's
+	// SetTotal(_, true) is a no-op and a resume-skip stream would never settle,
+	// hanging Wait (see TestTTYSink_NoSummaryHeader).
+	a := sink.NewStream("stream-a", 0)
+	b := sink.NewStream("stream-b", 0)
+
+	// Stream A: a real download (waiting -> active -> done).
+	a.Activate()
+	a.SetTotal(1024)
+	a.IncrBy(1024)
+	a.Done()
+
+	// Duplicate Done on A must not double-count.
+	a.Done()
+
+	// Stream B: a resume skip (waiting -> done without Activate).
+	b.Done()
+
+	sink.Wait()
+
+	got := ts.volDone.Load()
+	if got != 2 {
+		t.Errorf("volDone = %d, want 2 (one real download + one resume skip, duplicate Done not counted)", got)
+	}
+
+	wantLabel := " 2/2 volumes downloaded"
+	if label := volumeCounterLabel(int(got), int(ts.volTotal.Load())); label != wantLabel {
+		t.Errorf("volumeCounterLabel(%d, %d) = %q, want %q", got, ts.volTotal.Load(), label, wantLabel)
+	}
+}
+
+// TestNonTTY_VolumeCounter_FormatAndCountOnce asserts the non-TTY aggregate
+// line's "(N/M volumes)" suffix uses SetVolumeTotal for M, counts each stream's
+// Done() exactly once for N even when Done is called twice on one stream, and
+// matches the aggregateLine helper's format.
+func TestNonTTY_VolumeCounter_FormatAndCountOnce(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	// Long interval so only Wait() emits, keeping the assertion deterministic.
+	sink := New(buf, false, WithInterval(time.Hour))
+
+	sink.SetVolumeTotal(3)
+
+	s1 := sink.NewStream("vol-a", 100)
+	s2 := sink.NewStream("vol-b", 200)
+	s3 := sink.NewStream("vol-c", 300)
+
+	s1.IncrBy(100)
+	s2.IncrBy(200)
+	s3.IncrBy(300)
+
+	s1.Done()
+	// Duplicate Done on s1 must not push the count past 3.
+	s1.Done()
+	s2.Done()
+	s3.Done()
+
+	sink.Wait()
+
+	got := buf.String()
+	want := aggregateLine(t, 600, 600, 3, 3)
+
+	if !strings.Contains(got, want) {
+		t.Errorf("output does not contain expected volume-counter line\ngot:  %q\nwant (contained): %q", got, want)
+	}
+
+	if strings.Count(got, "(4/3 volumes)") != 0 {
+		t.Errorf("duplicate Done() overcounted volumes:\ngot: %q", got)
+	}
+}
+
+// TestVolumeCounter_ZeroVolumes covers the empty-selection / manifest-only-tree
+// edge case: SetVolumeTotal(0) with no streams. The TTY sink must render no
+// "volumes downloaded" text at all (volumeCounterLabel returns "" for total==0),
+// and the non-TTY sink's final line must show "(0/0 volumes)".
+func TestVolumeCounter_ZeroVolumes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("tty renders no volume-counter text", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		sink := New(buf, true)
+		sink.SetVolumeTotal(0)
+		sink.Wait()
+
+		if strings.Contains(buf.String(), "volumes downloaded") {
+			t.Errorf("TTY output must not render volume-counter text when total==0\ngot: %q", buf.String())
+		}
+	})
+
+	t.Run("non-tty shows 0/0 volumes", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		sink := New(buf, false, WithInterval(time.Hour))
+		sink.SetVolumeTotal(0)
+		sink.Wait()
+
+		want := aggregateLine(t, 0, 0, 0, 0)
+
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("non-TTY output does not contain expected zero-volume line\ngot:  %q\nwant (contained): %q", buf.String(), want)
+		}
+	})
 }

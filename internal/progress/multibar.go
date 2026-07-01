@@ -552,6 +552,9 @@ type plainStream struct {
 	sink  *plainSink
 	mu    sync.Mutex
 	total int64
+	// done gates Done() to exactly one volDone increment per stream, mirroring
+	// ttyStream's SwapInt32 gate: a duplicate Done() call must not double-count.
+	done bool
 }
 
 func (s *plainStream) IncrBy(n int) {
@@ -579,8 +582,18 @@ func (s *plainStream) SetTotal(total int64) {
 func (s *plainStream) Activate() {}
 
 // Done increments the sink's completed-volume counter (N) for the "(N/M volumes)"
-// aggregate-line suffix; byte progress itself is tracked entirely via IncrBy.
+// aggregate-line suffix, exactly once per stream (a duplicate Done() call is a
+// no-op on the counter); byte progress itself is tracked entirely via IncrBy.
 func (s *plainStream) Done() {
+	s.mu.Lock()
+	alreadyDone := s.done
+	s.done = true
+	s.mu.Unlock()
+
+	if alreadyDone {
+		return
+	}
+
 	s.sink.mu.Lock()
 	s.sink.volDone++
 	s.sink.mu.Unlock()
