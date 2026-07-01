@@ -36,18 +36,19 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 )
 
-// countingReader wraps an io.Reader and accumulates the total bytes read.
-// It is used to track how many raw bytes were downloaded from the HTTP body
-// during FS file staging, so the progress hook can be called with an accurate
-// per-file byte count after the streaming encode completes.
+// countingReader wraps an io.Reader and reports raw bytes read to onProgress
+// incrementally, as the stream is consumed, so a byte-progress bar advances
+// during FS file staging instead of jumping from 0% to 100% in one frame.
 type countingReader struct {
-	r io.Reader
-	n int64
+	r          io.Reader
+	onProgress func(n int)
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
-	c.n += int64(n)
+	if c.onProgress != nil && n > 0 {
+		c.onProgress(n)
+	}
 
 	return n, err
 }
@@ -304,7 +305,7 @@ func stageCompressedFile(
 
 	defer func() { _ = body.Close() }()
 
-	cr := &countingReader{r: body}
+	cr := &countingReader{r: body, onProgress: onProgress}
 
 	aw, err := archive.NewAtomicWriter(destPath)
 	if err != nil {
@@ -319,10 +320,6 @@ func stageCompressedFile(
 
 	if err := aw.Commit(); err != nil {
 		return fmt.Errorf("commit staging %s: %w", destPath, err)
-	}
-
-	if onProgress != nil {
-		onProgress(int(cr.n))
 	}
 
 	log.Debug("staging file written", slog.String("path", item.relPath))

@@ -17,8 +17,12 @@ limitations under the License.
 package volume_test
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -48,6 +52,29 @@ func (c *progressCounter) get() int {
 	defer c.mu.Unlock()
 
 	return c.total
+}
+
+// progressCallCounter is a concurrency-safe accumulator that also tracks how
+// many times onProgress was invoked, so a test can distinguish incremental
+// per-Read reporting from a single one-shot call with the total.
+type progressCallCounter struct {
+	mu    sync.Mutex
+	total int
+	calls int
+}
+
+func (c *progressCallCounter) inc(n int) {
+	c.mu.Lock()
+	c.total += n
+	c.calls++
+	c.mu.Unlock()
+}
+
+func (c *progressCallCounter) get() (total, calls int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.total, c.calls
 }
 
 // TestDownloadBlockChunks_OnProgressTotalsBytes verifies that the sum of all onProgress
@@ -215,4 +242,87 @@ func TestDownloadFilesystemVolume_NilOnProgress(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err, "nil onProgress must not cause an error or panic")
+}
+
+// largeFSFileServer builds an httptest.Server serving a single filesystem
+// volume file of size content bytes, deterministic and large enough that
+// io.Copy inside codec.EncodeStream performs multiple underlying Read calls.
+func largeFSFileServer(t *testing.T, content []byte) *httptest.Server {
+	t.Helper()
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w,
+				`{"apiVersion":"v1","items":[`+
+					`{"name":"big.bin","type":"file","uri":"big.bin","attributes":{}}`+
+					`]}`)
+
+		case "/files/big.bin":
+			_, _ = w.Write(content)
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+// TestDownloadFilesystemVolume_OnProgressIsIncremental verifies that a large
+// single-file FS volume reports progress incrementally as bytes stream through
+// countingReader.Read, not as one batched call after the whole file is staged.
+// Without the per-Read reporting fix, onProgress is invoked exactly once with
+// the full file size, which leaves a TTY progress bar at 0% for the entire
+// transfer before jumping to 100%.
+func TestDownloadFilesystemVolume_OnProgressIsIncremental(t *testing.T) {
+	t.Parallel()
+
+	const size = 512 * 1024 // 512 KiB: large enough to force multiple Read calls.
+
+	content := bytes.Repeat([]byte("0123456789abcdef"), size/16)
+	require.Len(t, content, size)
+
+	srv := largeFSFileServer(t, content)
+
+	filesURL := srv.URL + "/files/"
+	fetcher := exporter.NewFetcher(srv.Client())
+
+	// codec "none" avoids compression framing complexity when reasoning about
+	// exact byte counts (mirrors TestDownloadFilesystemVolume_OnProgressTotalsBytes).
+	codec, err := compress.New("none", 0)
+	require.NoError(t, err)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	var counter progressCallCounter
+
+	err = volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.Default(),
+		tarPath,
+		stagingDir,
+		filesURL,
+		1,
+		fetcher,
+		codec,
+		nil,
+		counter.inc,
+	)
+	require.NoError(t, err)
+
+	total, calls := counter.get()
+
+	require.Greater(t, calls, 1,
+		"onProgress must be called more than once to prove incremental reporting")
+	require.Equal(t, len(content), total,
+		"sum of onProgress increments must equal the exact served file size")
 }
