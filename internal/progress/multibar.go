@@ -147,23 +147,30 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 	// uses the SAME decorator chain and widths in every state — only the rendered
 	// content changes — so a row never shifts horizontally as it transitions
 	// waiting → active → done. Column geometry:
-	//   - name: full leaf name, never truncated; a width-synced cell (WCSyncWidth)
+	//   - name: full leaf name, never truncated; a width-synced cell (WCSyncWidthR)
 	//     auto-sizes the column to the longest name across all rows. nameCell appends
 	//     one trailing space so even the widest (unpadded) row keeps a clean gap
 	//     before the spinner.
 	//   - spinner: fixed-width (spinnerCellWidth) animated cell, non-blank only while
 	//     waiting; a same-width blank in active/done so the column never shifts.
-	//   - stateWord: left-aligned width-synced cell (WCSyncWidth); the widest word
+	//   - stateWord: left-aligned width-synced cell (WCSyncWidthR); the widest word
 	//     sets one shared width across all rows, so the bar / end-of-row begins at
 	//     the same x in every state.
-	//   - counters/percent: right-aligned width-synced cells (WCSyncWidthR) so the
+	//   - counters/percent: right-aligned width-synced cells (WCSyncWidth) so the
 	//     active rows' numbers form one uniform right-hand column.
+	//
+	// mpb's "R" suffix is counter-intuitive: WCSyncWidthR sets the DindentRight bit,
+	// which makes WC.Init() use runewidth.FillRight (padding appended on the right) —
+	// text glued to the LEFT, i.e. left-aligned. Bare WCSyncWidth has no DindentRight,
+	// so WC.Init() uses runewidth.FillLeft (padding prepended on the left) — text
+	// glued to the RIGHT, i.e. right-aligned. So WCSyncWidthR is LEFT-aligned and
+	// WCSyncWidth is RIGHT-aligned; do not re-invert these.
 	bar, err := s.p.Add(
 		total,
 		filler,
 		mpb.BarWidth(ttyBarWidth),
 		mpb.PrependDecorators(
-			decor.Name(nameCell(name), decor.WCSyncWidth),
+			decor.Name(nameCell(name), decor.WCSyncWidthR),
 			// Waiting spinner: a fixed-width animated cell shown only while the row
 			// is waiting. mpb calls this once per refresh; the atomic add advances
 			// the frame each refresh so the glyph spins. WC{W: spinnerCellWidth}
@@ -174,15 +181,15 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 			}, decor.WC{W: spinnerCellWidth}),
 			decor.Any(func(_ decor.Statistics) string {
 				return " " + stateWord(atomic.LoadInt32(&ts.state), atomic.LoadInt32(&ts.activated) == 1)
-			}, decor.WCSyncWidth),
+			}, decor.WCSyncWidthR),
 		),
 		mpb.AppendDecorators(
 			decor.Any(func(stats decor.Statistics) string {
 				return decorateStatus(atomic.LoadInt32(&ts.state), stats)
-			}, decor.WCSyncWidthR),
+			}, decor.WCSyncWidth),
 			decor.Any(func(stats decor.Statistics) string {
 				return decorateAppend(atomic.LoadInt32(&ts.state), stats)
-			}, decor.WCSyncWidthR),
+			}, decor.WCSyncWidth),
 		),
 	)
 	if err != nil {
