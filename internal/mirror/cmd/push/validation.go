@@ -32,12 +32,25 @@ import (
 )
 
 func parseAndValidateParameters(_ *cobra.Command, args []string) error {
-	if len(args) != 2 {
-		return errors.New("invalid number of arguments, expected 2")
+	// The registry is always the last argument. The bundle path is an optional
+	// first argument; when it is omitted, packages must be provided via --file.
+	var (
+		registryArg string
+		bundleArg   []string
+	)
+
+	switch len(args) {
+	case 1:
+		registryArg = args[0]
+	case 2:
+		bundleArg = args[:1]
+		registryArg = args[1]
+	default:
+		return errors.New("invalid number of arguments, expected <registry> with an optional bundle path before it")
 	}
 
 	var err error
-	if err = parseAndValidateRegistryURLArg(args); err != nil {
+	if err = parseAndValidateRegistryURLArg(registryArg); err != nil {
 		return err
 	}
 
@@ -45,15 +58,45 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err = validateImagesBundlePathArg(args); err != nil {
+	if err = resolvePackages(bundleArg); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func validateImagesBundlePathArg(args []string) error {
-	ImagesBundlePath = filepath.Clean(args[0])
+// resolvePackages builds the list of package archives to push from the optional
+// bundle path argument and the --file flag, then sets the default temp dir.
+func resolvePackages(bundleArg []string) error {
+	Packages = nil
+
+	if len(bundleArg) == 1 {
+		if err := collectBundlePathPackages(bundleArg[0]); err != nil {
+			return err
+		}
+	}
+
+	if err := collectFilesPackages(); err != nil {
+		return err
+	}
+
+	if len(Packages) == 0 {
+		return errors.New("no packages to push: specify a bundle directory before registry URL, or use --file to specify tar/chunked package")
+	}
+
+	Packages = lo.Uniq(Packages)
+
+	if TempDir == "" {
+		TempDir = filepath.Join(filepath.Dir(Packages[0]), ".tmp", mirror.TmpMirrorFolderName)
+	}
+
+	return nil
+}
+
+// collectBundlePathPackages resolves the bundle path argument, which may be a
+// directory of packages or a single tar/chunked package, into Packages.
+func collectBundlePathPackages(arg string) error {
+	ImagesBundlePath = filepath.Clean(arg)
 
 	s, err := os.Stat(ImagesBundlePath)
 	if err != nil {
@@ -67,13 +110,19 @@ func validateImagesBundlePathArg(args []string) error {
 		}
 
 		dirEntries = lo.Filter(dirEntries, func(item os.DirEntry, _ int) bool {
-			ext := filepath.Ext(item.Name())
-			return ext == ".tar" || ext == ".chunk"
+			return isPackageFile(item.Name())
 		})
 		if len(dirEntries) == 0 {
 			return errors.New("no packages found in bundle directory")
 		}
 
+		for _, entry := range dirEntries {
+			// Chunk files (<name>.tar.NNNN.chunk) collapse to a single <name>.tar
+			// package; the pusher reassembles the chunks at push time.
+			Packages = append(Packages, canonicalPackagePath(filepath.Join(ImagesBundlePath, entry.Name())))
+		}
+
+		// Default temp dir lives inside the bundle directory, as before.
 		if TempDir == "" {
 			TempDir = filepath.Join(ImagesBundlePath, ".tmp", mirror.TmpMirrorFolderName)
 		}
@@ -81,15 +130,56 @@ func validateImagesBundlePathArg(args []string) error {
 		return nil
 	}
 
-	if bundleExtension := filepath.Ext(ImagesBundlePath); bundleExtension == ".tar" || bundleExtension == ".chunk" {
-		if TempDir == "" {
-			TempDir = filepath.Join(filepath.Dir(ImagesBundlePath), ".tmp", mirror.TmpMirrorFolderName)
-		}
-
+	if isPackageFile(ImagesBundlePath) {
+		Packages = append(Packages, canonicalPackagePath(ImagesBundlePath))
 		return nil
 	}
 
 	return fmt.Errorf("invalid images bundle: must be a directory, tar or a chunked package")
+}
+
+// collectFilesPackages validates and appends the packages passed via --file.
+func collectFilesPackages() error {
+	for _, f := range Files {
+		path := filepath.Clean(f)
+
+		s, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("could not read package %q: %w", path, err)
+		}
+
+		if s.IsDir() {
+			return fmt.Errorf("--file entry %q is a directory, expected a tar or chunked package", path)
+		}
+
+		if !isPackageFile(path) {
+			return fmt.Errorf("--file entry %q is not a tar or chunked package", path)
+		}
+
+		Packages = append(Packages, canonicalPackagePath(path))
+	}
+
+	return nil
+}
+
+func isPackageFile(name string) bool {
+	ext := filepath.Ext(name)
+	return ext == ".tar" || ext == ".chunk"
+}
+
+// canonicalPackagePath maps a chunk file (<name>.tar.NNNN.chunk) to its canonical
+// <name>.tar path so the pusher reassembles all chunks instead of reading a single
+// chunk as a whole archive. Plain .tar paths are returned unchanged.
+func canonicalPackagePath(path string) string {
+	if idx := strings.Index(path, ".tar.chunk"); idx != -1 {
+		return path[:idx] + ".tar"
+	}
+
+	if idx := strings.Index(path, ".tar."); idx != -1 && filepath.Ext(path) == ".chunk" {
+		return path[:idx] + ".tar"
+	}
+
+	return path
 }
 
 func validateRegistryCredentials() error {
@@ -100,8 +190,8 @@ func validateRegistryCredentials() error {
 	return nil
 }
 
-func parseAndValidateRegistryURLArg(args []string) error {
-	registry := strings.NewReplacer("http://", "", "https://", "").Replace(args[1])
+func parseAndValidateRegistryURLArg(registryArg string) error {
+	registry := strings.NewReplacer("http://", "", "https://", "").Replace(registryArg)
 	if registry == "" {
 		return errors.New("<registry> argument is empty")
 	}
