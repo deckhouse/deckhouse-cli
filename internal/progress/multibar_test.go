@@ -30,13 +30,13 @@ import (
 	"github.com/vbauerster/mpb/v8/decor"
 )
 
-// aggregateLine formats the expected "downloaded X / total Y" line as the
-// non-TTY sink emits it, using the same decor.SizeB1024 formatter.
-func aggregateLine(t *testing.T, prog, total int64) string {
+// aggregateLine formats the expected "downloaded X / total Y (N/M volumes)" line
+// as the non-TTY sink emits it, using the same decor.SizeB1024 formatter.
+func aggregateLine(t *testing.T, prog, total int64, volDone, volTotal int) string {
 	t.Helper()
 
-	return fmt.Sprintf("downloaded % .1f / total % .1f\n",
-		decor.SizeB1024(prog), decor.SizeB1024(total))
+	return fmt.Sprintf("downloaded % .1f / total % .1f (%d/%d volumes)\n",
+		decor.SizeB1024(prog), decor.SizeB1024(total), volDone, volTotal)
 }
 
 func TestNonTTY_Fallback(t *testing.T) {
@@ -121,7 +121,9 @@ func TestNonTTY_Fallback(t *testing.T) {
 			sink.Wait()
 
 			got := buf.String()
-			want := aggregateLine(t, tc.wantProg, tc.wantTotal)
+			// SetVolumeTotal is never called in this test, so volTotal stays 0;
+			// volDone equals the number of streams since every stream calls Done().
+			want := aggregateLine(t, tc.wantProg, tc.wantTotal, len(tc.streams), 0)
 
 			if !strings.Contains(got, want) {
 				t.Errorf("output does not contain expected final line\ngot:  %q\nwant (contained): %q", got, want)
@@ -196,7 +198,9 @@ func TestNonTTY_SetTotal_AggregatesCorrectly(t *testing.T) {
 	st.Done()
 	sink.Wait()
 
-	want := aggregateLine(t, 4096, 4096)
+	// SetVolumeTotal is never called here, so volTotal stays 0; volDone is 1 (the
+	// single stream's Done() call).
+	want := aggregateLine(t, 4096, 4096, 1, 0)
 
 	if !strings.Contains(buf.String(), want) {
 		t.Errorf("SetTotal not reflected in aggregate:\ngot:  %q\nwant (contained): %q", buf.String(), want)
@@ -211,7 +215,8 @@ func TestNonTTY_Wait_AlwaysEmitsFinalLine(t *testing.T) {
 	sink := New(buf, false, WithInterval(time.Hour))
 	sink.Wait()
 
-	want := aggregateLine(t, 0, 0)
+	// No streams and no SetVolumeTotal call: both volDone and volTotal stay 0.
+	want := aggregateLine(t, 0, 0, 0, 0)
 
 	if !strings.Contains(buf.String(), want) {
 		t.Errorf("Wait() did not emit final line:\ngot:  %q\nwant (contained): %q", buf.String(), want)

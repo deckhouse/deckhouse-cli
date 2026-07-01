@@ -19,6 +19,7 @@ package progress
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,10 @@ type Sink interface {
 	// NewStream registers a named stream with a known total byte count.
 	// A total of 0 is allowed when the size is not yet known; call SetTotal later.
 	NewStream(name string, total int64) Stream
+
+	// SetVolumeTotal sets M, the total number of volume streams this run will
+	// download, for the live "N/M volumes downloaded" counter.
+	SetVolumeTotal(n int)
 
 	// Wait blocks until all streams have finished and flushes remaining output.
 	Wait()
@@ -120,6 +125,14 @@ const (
 
 type ttySink struct {
 	p *mpb.Progress
+	// summaryOnce guards one-time creation of the bottom-pinned volume-counter bar.
+	summaryOnce sync.Once
+	summaryBar  *mpb.Bar
+	// volTotal/volDone back the "N/M volumes downloaded" counter: volTotal is set
+	// once via SetVolumeTotal, volDone is incremented exactly once per stream by
+	// ttyStream.Done (see the SwapInt32 gate there).
+	volTotal atomic.Int64
+	volDone  atomic.Int64
 }
 
 func newTTYSink(w io.Writer) *ttySink {
@@ -128,12 +141,34 @@ func newTTYSink(w io.Writer) *ttySink {
 	return &ttySink{p: p}
 }
 
+// SetVolumeTotal sets M for the bottom "N/M volumes downloaded" summary bar.
+func (s *ttySink) SetVolumeTotal(n int) {
+	s.volTotal.Store(int64(n))
+}
+
 // NewStream adds a named per-stream bar. The bar starts in the waiting state and
 // switches to the live byte-counter display after Activate() is called. There is
-// no aggregate summary header: `docker pull` shows only per-layer rows, so the
-// TTY display is the set of per-leaf docker-pull rows and nothing else.
+// no aggregate summary header among the per-leaf rows: `docker pull` shows only
+// per-layer rows. A separate bottom-pinned volume-counter bar (see summaryOnce)
+// reports overall N/M completion below every per-leaf row.
 func (s *ttySink) NewStream(name string, total int64) Stream {
-	ts := &ttyStream{total: total}
+	// Create the bottom-pinned volume-counter bar the first time any stream is
+	// registered. mpb.BarPriority(math.MinInt) pins it below every per-leaf row
+	// regardless of registration order (verified empirically against mpb/v8
+	// v8.7.5: greater priority renders at the top; math.MinInt is the smallest
+	// possible priority, so this bar always sinks to the bottom).
+	s.summaryOnce.Do(func() {
+		s.summaryBar = s.p.AddSpinner(0,
+			mpb.BarPriority(math.MinInt),
+			mpb.PrependDecorators(
+				decor.Any(func(_ decor.Statistics) string {
+					return volumeCounterLabel(int(s.volDone.Load()), int(s.volTotal.Load()))
+				}),
+			),
+		)
+	})
+
+	ts := &ttyStream{sink: s, total: total}
 
 	// Render the row as a docker-pull layer line: the bar is drawn ONLY while the
 	// stream is active. The state-aware filler wraps a growing-arrow BarStyle and
@@ -204,9 +239,15 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 	return ts
 }
 
-// Wait drains the mpb renderer once all per-stream bars have finished. By the
-// time Wait is called every per-leaf stream has called Done.
+// Wait completes the volume-counter summary bar and then drains the mpb renderer
+// once all per-stream bars have finished. By the time Wait is called every
+// per-leaf stream has called Done, so the settled "M/M volumes downloaded" line
+// renders before the container drains.
 func (s *ttySink) Wait() {
+	if s.summaryBar != nil {
+		s.summaryBar.SetTotal(1, true)
+	}
+
 	s.p.Wait()
 }
 
@@ -220,7 +261,12 @@ func (s *ttySink) LogWriter() io.Writer {
 }
 
 type ttyStream struct {
-	bar   *mpb.Bar
+	bar *mpb.Bar
+	// sink is a back-reference to the owning ttySink, used only to bump volDone
+	// on completion for the bottom volume-counter bar. Never nil in production
+	// (set by ttySink.NewStream); tests that construct a bare *ttyStream leave it
+	// nil, which Done() guards against.
+	sink  *ttySink
 	mu    sync.Mutex
 	total int64
 	state int32 // atomic: streamStateWaiting / streamStateActive / streamStateDone
@@ -256,9 +302,15 @@ func (s *ttyStream) Activate() {
 	atomic.CompareAndSwapInt32(&s.state, streamStateWaiting, streamStateActive)
 }
 
-// Done marks the stream as complete and triggers bar completion in mpb.
+// Done marks the stream as complete and triggers bar completion in mpb. The
+// volume-counter's volDone is incremented exactly once per stream, gated on the
+// SwapInt32 transition into streamStateDone — a duplicate Done() call observes
+// prev == streamStateDone and does not double-count.
 func (s *ttyStream) Done() {
-	atomic.StoreInt32(&s.state, streamStateDone)
+	prev := atomic.SwapInt32(&s.state, streamStateDone)
+	if prev != streamStateDone && s.sink != nil {
+		s.sink.volDone.Add(1)
+	}
 
 	s.mu.Lock()
 	total := s.total
@@ -382,6 +434,18 @@ func decorateAppend(state int32, stats decor.Statistics) string {
 	return fmt.Sprintf(" %.0f%%", float64(stats.Current)/float64(stats.Total)*100)
 }
 
+// volumeCounterLabel returns the text for the bottom volume-counter summary bar.
+// It is a pure function so the label can be unit-tested without any mpb
+// rendering. total==0 means no volumes are in scope (e.g. a manifest-only
+// selection), so nothing is rendered.
+func volumeCounterLabel(done, total int) string {
+	if total == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf(" %d/%d volumes downloaded", done, total)
+}
+
 // nameCell renders the FULL leaf name with NO truncation, followed by a single
 // trailing separator space. Combined with decor.WCSyncWidth the name column
 // auto-sizes to the longest name across all rows, so every name prints in full
@@ -400,6 +464,11 @@ type plainSink struct {
 	mu       sync.Mutex
 	progress int64
 	total    int64
+	// volTotal/volDone back the "(N/M volumes)" suffix on the aggregate line: M is
+	// set once via SetVolumeTotal, N is incremented once per stream by
+	// plainStream.Done. Both are protected by mu (no separate lock/timer added).
+	volTotal int64
+	volDone  int64
 	stop     chan struct{}
 	stopped  chan struct{}
 }
@@ -433,16 +502,26 @@ func (s *plainSink) tick() {
 	}
 }
 
-// emit writes one "downloaded X / total Y" aggregate line to the output writer.
-// Using fmt.Fprintf to an io.Writer; write errors are intentionally ignored for
-// progress output.
+// emit writes one "downloaded X / total Y (N/M volumes)" aggregate line to the
+// output writer. Using fmt.Fprintf to an io.Writer; write errors are
+// intentionally ignored for progress output.
 func (s *plainSink) emit() {
 	s.mu.Lock()
 	prog := s.progress
 	tot := s.total
+	volDone := s.volDone
+	volTotal := s.volTotal
 	s.mu.Unlock()
 
-	fmt.Fprintf(s.w, "downloaded % .1f / total % .1f\n", decor.SizeB1024(prog), decor.SizeB1024(tot))
+	fmt.Fprintf(s.w, "downloaded % .1f / total % .1f (%d/%d volumes)\n",
+		decor.SizeB1024(prog), decor.SizeB1024(tot), volDone, volTotal)
+}
+
+// SetVolumeTotal sets M for the "(N/M volumes)" suffix on the aggregate line.
+func (s *plainSink) SetVolumeTotal(n int) {
+	s.mu.Lock()
+	s.volTotal = int64(n)
+	s.mu.Unlock()
 }
 
 // NewStream registers an additional stream and adds its total to the aggregate.
@@ -499,5 +578,10 @@ func (s *plainStream) SetTotal(total int64) {
 // Activate is a no-op for the plain sink; the non-TTY path has no bar state.
 func (s *plainStream) Activate() {}
 
-// Done is a no-op for the plain sink; progress is tracked entirely via IncrBy.
-func (s *plainStream) Done() {}
+// Done increments the sink's completed-volume counter (N) for the "(N/M volumes)"
+// aggregate-line suffix; byte progress itself is tracked entirely via IncrBy.
+func (s *plainStream) Done() {
+	s.sink.mu.Lock()
+	s.sink.volDone++
+	s.sink.mu.Unlock()
+}
