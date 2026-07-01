@@ -341,6 +341,62 @@ func TestStateWordSyncWidth(t *testing.T) {
 	}
 }
 
+// TestWCSyncWidthAlignmentDirection pins the actual (counter-intuitive) alignment
+// direction of mpb's width-sync decorator constants: decor.WCSyncWidthR (which
+// carries the DindentRight bit) pads on the right and is therefore LEFT-aligned,
+// while bare decor.WCSyncWidth (no DindentRight bit) pads on the left and is
+// therefore RIGHT-aligned. This is the exact inversion that a previous bug
+// mistakenly assumed backwards; internal/progress/multibar.go's name and
+// stateWord decorators rely on WCSyncWidthR being LEFT-aligned, and its
+// counters/percent decorators rely on WCSyncWidth being RIGHT-aligned. The
+// DSyncWidth bit is deliberately never set here: it makes WC.Format block on an
+// unbuffered sync-channel round-trip that requires a matching receiver, which
+// would turn this into a hanging test for no benefit — alignment direction is
+// fully determined by the DindentRight bit alone.
+func TestWCSyncWidthAlignmentDirection(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bare WCSyncWidth is right-aligned (leading padding)", func(t *testing.T) {
+		t.Parallel()
+
+		right := decor.WC{W: 10}
+		right.Init()
+
+		got, _ := right.Format("aaa")
+		want := "       aaa"
+
+		if got != want {
+			t.Errorf("decor.WC{W: 10}.Format(%q) = %q, want %q", "aaa", got, want)
+		}
+	})
+
+	t.Run("WCSyncWidthR is left-aligned (trailing padding)", func(t *testing.T) {
+		t.Parallel()
+
+		left := decor.WC{W: 10, C: decor.DindentRight}
+		left.Init()
+
+		got, _ := left.Format("aaa")
+		want := "aaa       "
+
+		if got != want {
+			t.Errorf("decor.WC{W: 10, C: decor.DindentRight}.Format(%q) = %q, want %q", "aaa", got, want)
+		}
+	})
+
+	t.Run("package constants carry the expected DindentRight bit", func(t *testing.T) {
+		t.Parallel()
+
+		if decor.WCSyncWidthR.C&decor.DindentRight == 0 {
+			t.Error("decor.WCSyncWidthR must carry the DindentRight bit")
+		}
+
+		if decor.WCSyncWidth.C&decor.DindentRight != 0 {
+			t.Error("decor.WCSyncWidth must NOT carry the DindentRight bit")
+		}
+	})
+}
+
 // TestSpinnerFrame asserts the pure frame selector cycles through
 // waitingSpinnerFrames by tick % len, including wrap-around at and past the
 // frame count. mpb refresh timing/terminal animation is intentionally not tested.
