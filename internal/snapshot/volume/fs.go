@@ -263,7 +263,11 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 
 // stageCompressedFile downloads one file, compresses it with codec, and writes
 // the result atomically to stagingDir/<relPath><codec.Ext()>.
-// Already-complete destination files are skipped (resume).
+// Already-complete destination files are skipped (resume); the skip still
+// credits the item's declared size to onProgress so the numerator can reach
+// the denominator that setTotal established from the same declared sizes
+// (sumFileSizes) — otherwise a partially-staged resume could never advance
+// the progress bar to 100% even though the tar assembles successfully.
 // Stale <destPath>.tmp files are removed before the download attempt.
 // Compression is streaming: the HTTP body is piped through codec.EncodeStream
 // so no whole-file buffering occurs.
@@ -280,6 +284,10 @@ func stageCompressedFile(
 
 	if _, err := os.Stat(destPath); err == nil {
 		log.Debug("staging file already present, skipping", slog.String("path", item.relPath))
+
+		if onProgress != nil && item.size > 0 {
+			onProgress(int(item.size))
+		}
 
 		return nil
 	}
