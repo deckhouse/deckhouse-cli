@@ -17,12 +17,15 @@ limitations under the License.
 package volume_test
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -242,6 +245,153 @@ func TestDownloadFilesystemVolume_NilOnProgress(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err, "nil onProgress must not cause an error or panic")
+}
+
+// fsTestServerWithSizes builds an httptest.Server serving the same two-file
+// tree as fsTestServer (root.txt, subdir/nested.txt) but with a declared
+// "size" attribute on each file item, matching the real data-exporter
+// contract field consumed by parseItemSize/sumFileSizes. fsTestServer itself
+// serves empty attributes, so it cannot exercise the declared-size resume
+// credit this test needs.
+func fsTestServerWithSizes(t *testing.T) (*httptest.Server, []fsTestFile) {
+	t.Helper()
+
+	files := []fsTestFile{
+		{relPath: "root.txt", content: []byte("root-content")},
+		{relPath: "subdir/nested.txt", content: []byte("nested-content")},
+	}
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w,
+				fmt.Sprintf(`{"apiVersion":"v1","items":[`+
+					`{"name":"root.txt","type":"file","uri":"root.txt","attributes":{"size":%d}},`+
+					`{"name":"subdir","type":"dir","uri":"subdir/","attributes":{}}`+
+					`]}`, len(files[0].content)))
+
+		case "/files/subdir/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w,
+				fmt.Sprintf(`{"apiVersion":"v1","items":[`+
+					`{"name":"nested.txt","type":"file","uri":"subdir/nested.txt","attributes":{"size":%d}}`+
+					`]}`, len(files[1].content)))
+
+		case "/files/root.txt":
+			_, _ = w.Write(files[0].content)
+
+		case "/files/subdir/nested.txt":
+			_, _ = w.Write(files[1].content)
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	return srv, files
+}
+
+// TestDownloadFilesystemVolume_ResumeSkipReachesFullTotal verifies the
+// resume-skip corollary of the incremental-progress invariant: when data.tar
+// is absent but one file was already staged in a prior partial run, the skip
+// branch in stageCompressedFile must still credit that file's declared size
+// to onProgress. Without that credit, the denominator set once up front from
+// sumFileSizes(items) (which includes the skipped file) could never be
+// reached by a numerator that only counts freshly-downloaded bytes, so the
+// byte progress bar would never reach 100% on a resumed run even though tar
+// assembly completes successfully.
+func TestDownloadFilesystemVolume_ResumeSkipReachesFullTotal(t *testing.T) {
+	t.Parallel()
+
+	srv, files := fsTestServerWithSizes(t)
+
+	filesURL := srv.URL + "/files/"
+	fetcher := exporter.NewFetcher(srv.Client())
+
+	codec := mustCodec(t, "zstd")
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	require.NoError(t, os.MkdirAll(stagingDir, 0o755))
+
+	// Simulate a prior partial run: root.txt was already staged (compressed
+	// blob written under stagingDir) but data.tar was never assembled.
+	// The staged bytes need not be a valid zstd stream for this assertion —
+	// stageCompressedFile's skip branch never decodes them, it only checks
+	// for the destination file's existence (see
+	// TestDownloadFilesystemVolume_SkipsExistingCompressedStaged in
+	// fs_test.go, which relies on the same property).
+	sentinel := []byte("sentinel-not-server-content")
+	preStaged := filepath.Join(stagingDir, "root.txt"+codec.Ext())
+	require.NoError(t, os.WriteFile(preStaged, sentinel, 0o644))
+
+	var wantTotal int
+
+	for _, f := range files {
+		wantTotal += len(f.content)
+	}
+
+	var counter progressCounter
+
+	err := volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.Default(),
+		tarPath,
+		stagingDir,
+		filesURL,
+		2,
+		fetcher,
+		codec,
+		nil,
+		counter.inc,
+	)
+	require.NoError(t, err)
+
+	require.Equal(t, wantTotal, counter.get(),
+		"sum of onProgress increments must equal the total declared size across "+
+			"ALL items (skipped-and-staged plus freshly-downloaded) so a partial "+
+			"resume still reaches 100%%")
+
+	// The skip must still have avoided re-download: the tar entry for the
+	// pre-staged file carries the sentinel bytes, not freshly downloaded
+	// content.
+	f, err := os.Open(tarPath)
+	require.NoError(t, err)
+
+	defer func() { _ = f.Close() }()
+
+	tr := tar.NewReader(f)
+
+	var foundSentinel bool
+
+	for {
+		hdr, nextErr := tr.Next()
+		if nextErr == io.EOF {
+			break
+		}
+
+		require.NoError(t, nextErr)
+
+		if hdr.Name != "root.txt"+codec.Ext() {
+			continue
+		}
+
+		got, readErr := io.ReadAll(tr)
+		require.NoError(t, readErr)
+		require.Equal(t, sentinel, got, "pre-staged file must not be re-downloaded")
+
+		foundSentinel = true
+	}
+
+	require.True(t, foundSentinel, "tar entry for pre-staged file not found")
 }
 
 // largeFSFileServer builds an httptest.Server serving a single filesystem
