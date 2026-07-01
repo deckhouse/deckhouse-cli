@@ -44,6 +44,8 @@ func (s *recordingSink) NewStream(name string, total int64) progress.Stream {
 	return s.inner.NewStream(name, total)
 }
 
+func (s *recordingSink) SetVolumeTotal(n int) { s.inner.SetVolumeTotal(n) }
+
 func (s *recordingSink) Wait() { s.inner.Wait() }
 
 func (s *recordingSink) LogWriter() io.Writer { return s.inner.LogWriter() }

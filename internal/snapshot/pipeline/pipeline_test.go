@@ -622,10 +622,12 @@ func TestPipeline_Progress_NonTTYFallback(t *testing.T) {
 
 	got := buf.String()
 
-	// The non-TTY sink emits "downloaded X / total Y" using decor.SizeB1024 with
-	// the "% .1f" verb — replicate the same format to pin the exact expected line.
+	// The non-TTY sink emits "downloaded X / total Y (N/M volumes)" using
+	// decor.SizeB1024 with the "% .1f" verb — replicate the same format to pin the
+	// exact expected line. This run has exactly one volume stream (the root's
+	// single block leaf), so N/M settles at 1/1.
 	total := int64(len(rawBlock))
-	want := fmt.Sprintf("downloaded % .1f / total % .1f\n",
+	want := fmt.Sprintf("downloaded % .1f / total % .1f (1/1 volumes)\n",
 		decor.SizeB1024(total), decor.SizeB1024(total))
 
 	require.True(t, strings.Contains(got, want),
@@ -810,6 +812,7 @@ func (s *recordingSink) NewStream(name string, _ int64) progress.Stream {
 	return rs
 }
 
+func (s *recordingSink) SetVolumeTotal(int)   {}
 func (s *recordingSink) Wait()                {}
 func (s *recordingSink) LogWriter() io.Writer { return io.Discard }
 

@@ -127,6 +127,11 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]progress.Strea
 		}
 	}
 
+	// nStreams is already subtree-scoped (tasks comes from resolveSubtreeRoot), so
+	// the live "N/M volumes downloaded" counter is automatically correct for a
+	// --node selection with no extra plumbing.
+	cfg.Progress.SetVolumeTotal(nStreams)
+
 	out := make(map[streamKey]progress.Stream, nStreams)
 
 	for _, t := range tasks {
