@@ -90,6 +90,13 @@ type Config struct {
 	// TTL is the DataExport TTL string (e.g. "2h").  Defaults to "2h".
 	TTL string
 
+	// KeepExports, when true, leaves the per-volume DataExport CR (and the
+	// server-side export chain it owns: export VolumeSnapshot/VolumeSnapshotContent/
+	// export PVC) in the cluster after each volume stream completes, instead of
+	// deleting it. Zero value (false) preserves the always-delete behavior that
+	// predates this field. Set from the inverse of the `--cleanup` download flag.
+	KeepExports bool
+
 	// Compression is the codec used for volume data encoding. For block volumes it
 	// determines the chunk frame encoding and the output filename extension
 	// (e.g. ".zst" → data.bin.zst). For filesystem volumes each file inside data.tar

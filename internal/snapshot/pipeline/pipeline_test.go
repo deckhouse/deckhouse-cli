@@ -33,12 +33,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/vbauerster/mpb/v8/decor"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
@@ -355,6 +357,7 @@ func buildScheme(t *testing.T) *runtime.Scheme {
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, snapshotapi.AddToScheme(scheme))
+	require.NoError(t, deapi.AddToScheme(scheme))
 
 	return scheme
 }
@@ -994,4 +997,68 @@ func TestPipeline_Progress_ResumeSkip_NeverActivated(t *testing.T) {
 		"resume-skipped stream must never be Activated")
 	require.Equal(t, 1, streams[0].doneCnt,
 		"resume-skipped stream must be Done exactly once (in precreateStreams)")
+}
+
+// TestPipeline_KeepExports verifies the --cleanup / Config.KeepExports gate on
+// downloadVolumeBinding's DataExport release: with KeepExports false (default,
+// today's behavior) the DataExport CR is deleted after the volume completes;
+// with KeepExports true it is left in the cluster for debugging.
+func TestPipeline_KeepExports(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name          string
+		keepExports   bool
+		wantRemaining bool
+	}{
+		{name: "default deletes DataExport", keepExports: false, wantRemaining: false},
+		{name: "KeepExports leaves DataExport", keepExports: true, wantRemaining: true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rawBlock := bytes.Repeat([]byte("K"), 300)
+			srv := makeBlockServer(t, rawBlock)
+
+			defer srv.Close()
+
+			c := buildFakeClient(t)
+			outputDir := t.TempDir()
+
+			const deName = "de-keep-exports"
+
+			de := &deapi.DataExport{
+				TypeMeta:   metav1.TypeMeta{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "DataExport"},
+				ObjectMeta: metav1.ObjectMeta{Name: deName, Namespace: testNS},
+			}
+			require.NoError(t, c.Create(context.Background(), de))
+
+			cfg := pipeline.Config{
+				Namespace:            testNS,
+				RootSnapshot:         rootSnapshot,
+				OutputDir:            outputDir,
+				Workers:              1,
+				PerVolumeConcurrency: 1,
+				KubeClient:           c,
+				KeepExports:          tc.keepExports,
+				OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+					return exporter.NewExport(namespace, deName, "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+				},
+			}
+
+			require.NoError(t, runPipeline(context.Background(), cfg))
+
+			got := &deapi.DataExport{}
+			err := c.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: deName}, got)
+
+			if tc.wantRemaining {
+				require.NoError(t, err, "DataExport must remain in the cluster when KeepExports is true")
+			} else {
+				require.Truef(t, apierrors.IsNotFound(err),
+					"DataExport must be deleted when KeepExports is false, got err=%v", err)
+			}
+		})
+	}
 }
