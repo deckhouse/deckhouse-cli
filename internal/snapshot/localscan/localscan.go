@@ -55,6 +55,21 @@ type Node struct {
 	YAML archive.SnapshotYAML
 }
 
+// VolumeCount returns the total number of captured volumes owned by n and
+// all of its descendants. Volume ownership lives in the node that actually
+// captured the data (a domain disk/VM-snapshot node or an orphan-PVC leaf),
+// never in an aggregator, so a plain len(n.Volumes) on the root undercounts
+// any archive whose aggregator itself owns no data.
+func (n *Node) VolumeCount() int {
+	count := len(n.Volumes)
+
+	for _, child := range n.Children {
+		count += child.VolumeCount()
+	}
+
+	return count
+}
+
 // Scan walks the archive directory rooted at root, reads each node's
 // snapshot.yaml via archive.ReadSnapshotYAML, and returns the root Node
 // with its nested children tree fully populated.

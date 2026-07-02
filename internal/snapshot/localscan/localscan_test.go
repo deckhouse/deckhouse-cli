@@ -318,6 +318,108 @@ func TestScan_VolumesPopulated(t *testing.T) {
 	}
 }
 
+func TestNode_VolumeCount_RecursiveSum(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+
+	blockVol := archive.VolumeInfo{
+		Target: archive.VolumeObjectRef{
+			APIVersion: "v1",
+			Kind:       "PersistentVolumeClaim",
+			Name:       "disk-a-pvc",
+			Namespace:  "ns-a",
+		},
+		VolumeMode: "Block",
+	}
+
+	orphanVol := archive.VolumeInfo{
+		Target: archive.VolumeObjectRef{
+			APIVersion: "v1",
+			Kind:       "PersistentVolumeClaim",
+			Name:       "demo-pvc",
+			Namespace:  "ns-a",
+		},
+		VolumeMode: "Filesystem",
+	}
+
+	// Root aggregator owns no data (empty Volumes) — matches decision #4:
+	// data lives in the owning domain/leaf node, never the aggregator.
+	writeNodeYAML(t, root, archive.SnapshotYAML{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "root-snap",
+		Namespace:  "ns-a",
+	})
+
+	// vm-snap owns no data either (only child disk-snapshot nodes).
+	vmDir := makeChildDir(t, root, "demovirtualmachinesnapshot_vm-a", archive.SnapshotYAML{
+		APIVersion: "demo.deckhouse.io/v1alpha1",
+		Kind:       "DemoVirtualMachineSnapshot",
+		Name:       "nss-child-vm-a",
+		Namespace:  "ns-a",
+	})
+
+	// disk-a is a domain node that owns one captured volume.
+	makeChildDir(t, vmDir, "demovirtualdisksnapshot_disk-a", archive.SnapshotYAML{
+		APIVersion: "demo.deckhouse.io/v1alpha1",
+		Kind:       "DemoVirtualDiskSnapshot",
+		Name:       "nss-child-disk-a",
+		Namespace:  "ns-a",
+		Volumes:    []archive.VolumeInfo{blockVol},
+	})
+
+	// An orphan-PVC leaf directly under the root owns its own volume.
+	makeChildDir(t, root, "volumesnapshot_demo-pvc", archive.SnapshotYAML{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "nss-vs-demo-pvc",
+		Namespace:  "ns-a",
+		Volumes:    []archive.VolumeInfo{orphanVol},
+	})
+
+	node, err := localscan.Scan(root)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	if len(node.Volumes) != 0 {
+		t.Fatalf("root Volumes: got %d, want 0 (aggregator owns no data)", len(node.Volumes))
+	}
+
+	// This is the assertion that fails against the old `len(root.Volumes)`
+	// behavior (which would report 0 here instead of 2).
+	if got, want := node.VolumeCount(), 2; got != want {
+		t.Errorf("VolumeCount: got %d, want %d", got, want)
+	}
+}
+
+func TestNode_VolumeCount_ZeroVolumeTree(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeNodeYAML(t, root, archive.SnapshotYAML{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "root-snap",
+	})
+
+	makeChildDir(t, root, "snapshot_child", archive.SnapshotYAML{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "child-snap",
+	})
+
+	node, err := localscan.Scan(root)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	if got, want := node.VolumeCount(), 0; got != want {
+		t.Errorf("VolumeCount: got %d, want %d", got, want)
+	}
+}
+
 func TestScan_EmptySnapshotsDir(t *testing.T) {
 	t.Parallel()
 

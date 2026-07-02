@@ -67,7 +67,7 @@ func runGet(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "%s/%s  namespace=%s  children=%d  volumes=%d\n",
-		node.Kind, node.Name, ns, len(node.Children), len(node.Volumes))
+		node.Kind, node.Name, ns, len(node.Children), node.VolumeCount())
 
 	return nil
 }
