@@ -46,11 +46,7 @@ const (
 
 // PushServiceOptions contains configuration options for PushService
 type PushServiceOptions struct {
-	// BundleDir is the directory containing the bundle to push.
-	// Used as a fallback when Packages is empty.
-	BundleDir string
-	// Packages is an explicit list of tar/chunked package archive paths to push.
-	// When set, it takes precedence over scanning BundleDir.
+	// Packages is the list of tar/chunked package archive paths to push.
 	Packages []string
 	// WorkingDir is the temporary directory for unpacking bundles
 	WorkingDir string
@@ -162,18 +158,13 @@ func (svc *PushService) Push(ctx context.Context) error {
 // unpackAllPackages unpacks all tar packages into the unified directory.
 // All packages are unpacked to the same root - the structure inside each tar
 // should already have the correct paths.
-//
-// The package archives come from the explicit Packages list when set, otherwise
-// they are discovered by scanning BundleDir.
 func (svc *PushService) unpackAllPackages(ctx context.Context, dirPath string) error {
-	packages, err := svc.resolvePackagePaths()
-	if err != nil {
-		return err
-	}
-
-	if len(packages) == 0 {
+	if len(svc.options.Packages) == 0 {
 		return fmt.Errorf("no packages found to push")
 	}
+
+	packages := slices.Clone(svc.options.Packages)
+	slices.Sort(packages)
 
 	svc.userLogger.Infof("Found %d packages to unpack", len(packages))
 
@@ -186,58 +177,6 @@ func (svc *PushService) unpackAllPackages(ctx context.Context, dirPath string) e
 	}
 
 	return nil
-}
-
-// resolvePackagePaths returns the list of package archive paths to push.
-// It prefers the explicit Packages list; when empty it falls back to scanning
-// BundleDir for tar and chunked packages.
-func (svc *PushService) resolvePackagePaths() ([]string, error) {
-	if len(svc.options.Packages) > 0 {
-		packages := slices.Clone(svc.options.Packages)
-		slices.Sort(packages)
-
-		return packages, nil
-	}
-
-	entries, err := os.ReadDir(svc.options.BundleDir)
-	if err != nil {
-		return nil, fmt.Errorf("read bundle dir: %w", err)
-	}
-
-	return svc.findPackages(entries), nil
-}
-
-// findPackages finds all package archive paths in the bundle directory.
-// It handles both regular .tar files and chunked packages (.tar.chunk000).
-func (svc *PushService) findPackages(entries []os.DirEntry) []string {
-	packagesSet := make(map[string]struct{})
-
-	for _, entry := range entries {
-		name := entry.Name()
-
-		// Handle regular tar files
-		if strings.HasSuffix(name, ".tar") {
-			pkgName := strings.TrimSuffix(name, ".tar")
-			packagesSet[pkgName] = struct{}{}
-
-			continue
-		}
-
-		// Handle chunked files (e.g., "platform.tar.chunk000")
-		if idx := strings.Index(name, ".tar.chunk"); idx != -1 {
-			pkgName := name[:idx]
-			packagesSet[pkgName] = struct{}{}
-		}
-	}
-
-	packages := make([]string, 0, len(packagesSet))
-	for pkg := range packagesSet {
-		packages = append(packages, filepath.Join(svc.options.BundleDir, pkg+".tar"))
-	}
-
-	slices.Sort(packages)
-
-	return packages
 }
 
 // packageNameFromPath derives the package name (used for legacy module detection

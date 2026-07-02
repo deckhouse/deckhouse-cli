@@ -244,7 +244,6 @@ func (p *Pusher) executeNewPush() error {
 	svc := mirror.NewPushService(
 		client,
 		&mirror.PushServiceOptions{
-			BundleDir:  p.pushParams.BundleDir,
 			Packages:   Packages,
 			WorkingDir: p.pushParams.WorkingDir,
 		},
