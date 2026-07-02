@@ -637,6 +637,13 @@ func downloadVolumeBinding(
 	defer cleanupCancel()
 
 	defer func() {
+		if cfg.KeepExports {
+			cfg.Log.Info("leaving DataExport in cluster (--cleanup=false)",
+				slog.String("leaf", leafRef.Name))
+
+			return
+		}
+
 		if relErr := exp.Release(cleanupCtx, cfg.KubeClient); relErr != nil {
 			cfg.Log.Warn("failed to release DataExport",
 				slog.String("leaf", leafRef.Name),

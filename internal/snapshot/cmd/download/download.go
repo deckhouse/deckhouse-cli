@@ -54,6 +54,7 @@ const (
 	flagChunkSize              = "chunk-size"
 	flagVolumeCompression      = "volume-compression"
 	flagVolumeCompressionLevel = "volume-compression-level"
+	flagCleanup                = "cleanup"
 )
 
 // NewCommand builds the `d8 snapshot download` cobra command.
@@ -103,6 +104,8 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 			"); block volumes: data.bin[.<ext>]; filesystem volumes: per-file compressed entries inside an uncompressed data.tar container")
 	cmd.Flags().Int(flagVolumeCompressionLevel, 0,
 		"compression level for the selected codec (0 = codec default)")
+	cmd.Flags().Bool(flagCleanup, true,
+		"delete the per-volume DataExport (and its server-side export chain) after each volume completes; --cleanup=false leaves them in the cluster for debugging")
 
 	return cmd
 }
@@ -200,6 +203,11 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid --%s %q: %w", flagNode, nodeFlag, err)
 	}
 
+	cleanup, err := cmd.Flags().GetBool(flagCleanup)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagCleanup, err)
+	}
+
 	safeClient.SupportNoAuth = false
 
 	sc, err := safeClient.NewSafeClient(cmd.PersistentFlags())
@@ -247,6 +255,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		MaxParallelDownloads: maxParallel,
 		ChunkSize:            chunkSize,
 		TTL:                  ttl,
+		KeepExports:          !cleanup,
 		Compression:          codec,
 		KubeClient:           kubeClient,
 		AggClient:            aggClient,
