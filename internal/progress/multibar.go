@@ -157,8 +157,23 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 	// regardless of registration order (verified empirically against mpb/v8
 	// v8.7.5: greater priority renders at the top; math.MinInt is the smallest
 	// possible priority, so this bar always sinks to the bottom).
+	//
+	// The spinner filler is built directly (not via AddSpinner, which hardcodes
+	// the default center-positioned style) and given an explicit narrow
+	// mpb.BarWidth, mirroring the per-leaf bar's own BarWidth(ttyBarWidth) below.
+	// Without a requested width, mpb/v8 v8.7.5's sFiller.Fill computes
+	// width = internal.CheckRequestedWidth(stat.RequestedWidth, stat.AvailableWidth),
+	// and CheckRequestedWidth returns AvailableWidth whenever requested < 1 — so an
+	// unconfigured spinner claims ALL remaining terminal width. The default
+	// (center) position then pads AvailableWidth/2 blanks BEFORE the glyph,
+	// stranding it far to the right of the " N/M volumes downloaded" label on any
+	// reasonably wide terminal (the reported bug). PositionLeft() plus a
+	// spinnerCellWidth-sized bar glues the glyph immediately after the label,
+	// matching the per-row waiting-spinner cell it echoes.
 	s.summaryOnce.Do(func() {
-		s.summaryBar = s.p.AddSpinner(0,
+		bar, err := s.p.Add(0,
+			mpb.SpinnerStyle().PositionLeft().Build(),
+			mpb.BarWidth(spinnerCellWidth),
 			mpb.BarPriority(math.MinInt),
 			mpb.PrependDecorators(
 				decor.Any(func(_ decor.Statistics) string {
@@ -166,6 +181,14 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 				}),
 			),
 		)
+		if err != nil {
+			// Add only fails once the container has been shut down by Wait();
+			// NewStream after Wait is a misuse of the Sink contract (unreachable
+			// in the download pipeline, which registers every stream before Wait).
+			panic(fmt.Sprintf("progress: creating volume-counter summary bar: %v", err))
+		}
+
+		s.summaryBar = bar
 	})
 
 	ts := &ttyStream{sink: s, total: total}
