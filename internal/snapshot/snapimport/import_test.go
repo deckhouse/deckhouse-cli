@@ -498,8 +498,8 @@ func TestRun_DomainDataLeaf_EndToEnd(t *testing.T) {
 }
 
 // TestLeafTargetRef_DomainLeaf verifies that leafTargetRef derives the targetRef
-// group/resource/kind for a domain data leaf: group/kind come from its apiVersion/kind and
-// the plural resource is resolved via the RESTMapper (the mr135 GVR-based shim).
+// group/resource for a domain data leaf: group comes from its apiVersion and the plural
+// resource is resolved via the RESTMapper.
 func TestLeafTargetRef_DomainLeaf(t *testing.T) {
 	leaf := PlannedNode{
 		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
@@ -508,7 +508,7 @@ func TestLeafTargetRef_DomainLeaf(t *testing.T) {
 		DataFile:   "/archive/data.bin",
 	}
 
-	group, resource, kind, err := leafTargetRef(leaf, testDomainMapper())
+	group, resource, err := leafTargetRef(leaf, testDomainMapper())
 	if err != nil {
 		t.Fatalf("leafTargetRef: %v", err)
 	}
@@ -519,10 +519,6 @@ func TestLeafTargetRef_DomainLeaf(t *testing.T) {
 
 	if resource != "demovirtualdisksnapshots" {
 		t.Errorf("resource = %q, want demovirtualdisksnapshots", resource)
-	}
-
-	if kind != "DemoVirtualDiskSnapshot" {
-		t.Errorf("kind = %q, want DemoVirtualDiskSnapshot", kind)
 	}
 }
 

@@ -87,8 +87,8 @@ type VolumeImporter interface {
 // importer pod, trusting status.ca).
 type clusterVolumeImporter struct {
 	dyn dynamic.Interface
-	// mapper resolves domain-leaf GroupKinds to their plural GVR resource for the
-	// DataImport targetRef. TEMP REVERTME: needed only for the mr135 GVR-based shim.
+	// mapper resolves domain-leaf GroupKinds to their plural GVR resource, which is required
+	// for the DataImport spec.targetRef.resource field.
 	mapper meta.RESTMapper
 	sc     *safeClient.SafeClient
 	ttl    string
@@ -128,27 +128,26 @@ func (c *clusterVolumeImporter) DataImportName(leaf PlannedNode) string {
 }
 
 // EnsureDataImport upserts the Mode A DataImport targeting the leaf snapshot CR. The leaf's
-// captured volume metadata (storageClassName/size/volumeMode, read back from the archive) is
-// echoed into spec so the controller can provision the scratch PVC and produce the durable
-// VolumeSnapshotContent artifact. The mode is identified server-side by targetRef.kind (a
-// snapshot-leaf kind ⇒ Mode A); the discriminator value PersistentVolumeClaim is reserved for
-// the standalone Mode B path driven by `d8 data import`.
+// captured artifact kind (ArtifactKind, read back from the archive) is sent as
+// spec.dataArtifactType; the controller derives storageClassName/volumeMode/size itself from
+// the leaf's captured PVC manifest, not from spec. Mode is discriminated server-side by
+// spec.dataArtifactType; the standalone Mode B path driven by `d8 data import` is separate.
 func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf PlannedNode, namespace string) (string, error) {
 	name := c.DataImportName(leaf)
 
-	group, resource, kind, err := leafTargetRef(leaf, c.mapper)
+	group, resource, err := leafTargetRef(leaf, c.mapper)
 	if err != nil {
 		return "", err
 	}
 
-	// storageClassName and size are mandatory for Mode A (enforced by the CRD CEL rules).
-	// They originate from the captured SnapshotContent.status.dataRef and are carried through
-	// the archive; a blank value means a malformed archive, so fail early with a clear message
+	// dataArtifactType is mandatory (enforced by the CRD's required fields). It originates
+	// from the captured VolumeSnapshotContent's artifact kind and is carried through the
+	// archive; a blank value means a malformed archive, so fail early with a clear message
 	// rather than letting the API server reject an incomplete DataImport.
-	if leaf.StorageClassName == "" || leaf.Size == "" {
-		return "", fmt.Errorf("data leaf %s/%s is missing volume metadata in the archive "+
-			"(storageClassName=%q, size=%q); re-download the snapshot with a current d8 version",
-			leaf.Kind, leaf.Name, leaf.StorageClassName, leaf.Size)
+	if leaf.ArtifactKind == "" {
+		return "", fmt.Errorf("data leaf %s/%s is missing the captured artifact kind in the archive "+
+			"(artifactKind=%q); re-download the snapshot with a current d8 version",
+			leaf.Kind, leaf.Name, leaf.ArtifactKind)
 	}
 
 	obj := &unstructured.Unstructured{}
@@ -159,21 +158,12 @@ func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf Plann
 
 	spec := map[string]interface{}{
 		"ttl":              c.ttl,
-		"storageClassName": leaf.StorageClassName,
-		"size":             leaf.Size,
+		"dataArtifactType": leaf.ArtifactKind,
 		"targetRef": map[string]interface{}{
-			"group": group,
-			// TEMP REVERTME: the deployed storage-volume-data-manager (mr135) DataImport CRD
-			// requires spec.targetRef.resource (plural GVR); the kind-based contract is not yet
-			// in SVDM main. Sending both resource and kind is safe — each CRD prunes the field
-			// it does not know. Revert once SVDM main carries the kind-based targetRef contract.
+			"group":    group,
 			"resource": resource,
-			"kind":     kind,
 			"name":     leaf.Name,
 		},
-	}
-	if leaf.VolumeMode != "" {
-		spec["volumeMode"] = leaf.VolumeMode
 	}
 
 	if err := unstructured.SetNestedMap(obj.Object, spec, "spec"); err != nil {
@@ -485,32 +475,30 @@ func (c *clusterVolumeImporter) waitDataImportCompleted(ctx context.Context, nam
 	}
 }
 
-// leafTargetRef returns the DataImport targetRef {group, resource, kind} for a data leaf.
-// The state-snapshotter reverse-lookup matches the leaf by GroupKind directly (group is
-// parsed from its apiVersion, kind is the leaf's own kind). The plural resource is only
-// needed for the mr135 GVR-based shim (see EnsureDataImport's TEMP REVERTME): for CSI
-// VolumeSnapshot leaves it is a fixed constant; for domain leaves it is resolved via the
+// leafTargetRef returns the DataImport targetRef {group, resource} for a data leaf. Group is
+// parsed from the leaf's apiVersion. The plural resource is a permanent part of targetRef: for
+// CSI VolumeSnapshot leaves it is a fixed constant; for domain leaves it is resolved via the
 // RESTMapper, mirroring (*Config).domainLeafResource.
-func leafTargetRef(leaf PlannedNode, mapper meta.RESTMapper) (string, string, string, error) {
+func leafTargetRef(leaf PlannedNode, mapper meta.RESTMapper) (string, string, error) {
 	if leaf.isVolumeSnapshotLeaf() {
-		return aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, nil
+		return aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, nil
 	}
 
 	if leaf.isDomainDataLeaf() {
 		gv, parseErr := schema.ParseGroupVersion(leaf.APIVersion)
 		if parseErr != nil {
-			return "", "", "", fmt.Errorf("parse apiVersion %q for domain leaf %s/%s: %w", leaf.APIVersion, leaf.Kind, leaf.Name, parseErr)
+			return "", "", fmt.Errorf("parse apiVersion %q for domain leaf %s/%s: %w", leaf.APIVersion, leaf.Kind, leaf.Name, parseErr)
 		}
 
 		mapping, mapErr := mapper.RESTMapping(schema.GroupKind{Group: gv.Group, Kind: leaf.Kind}, gv.Version)
 		if mapErr != nil {
-			return "", "", "", fmt.Errorf("resolve resource for domain leaf %s/%s: %w", leaf.Kind, leaf.Name, mapErr)
+			return "", "", fmt.Errorf("resolve resource for domain leaf %s/%s: %w", leaf.Kind, leaf.Name, mapErr)
 		}
 
-		return gv.Group, mapping.Resource.Resource, leaf.Kind, nil
+		return gv.Group, mapping.Resource.Resource, nil
 	}
 
-	return "", "", "", unsupportedNodeError(leaf)
+	return "", "", unsupportedNodeError(leaf)
 }
 
 // httpDoer is the minimal HTTP surface putBlock/postFinished need; *safeClient.SafeClient

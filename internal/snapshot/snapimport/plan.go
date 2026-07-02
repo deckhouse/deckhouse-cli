@@ -75,13 +75,11 @@ type PlannedNode struct {
 	// ({apiVersion,kind,name} of the source object), read from snapshot.yaml. Nil for
 	// core Snapshot nodes and CSI VolumeSnapshot data leaves.
 	SourceObjectRef *archive.SourceObjectRef
-	// StorageClassName/Size/VolumeMode describe the leaf's captured volume, read from the
-	// first entry of snapshot.yaml Volumes (originally SnapshotContent.status.dataRef). For a
-	// Mode A data-leaf import they become the DataImport's root storageClassName/size/volumeMode.
-	// Empty for structural/aggregator nodes that own no volume data.
-	StorageClassName string
-	Size             string
-	VolumeMode       string
+	// ArtifactKind is the kind of the durable data artifact the archive captured for this
+	// leaf's volume (e.g. "VolumeSnapshotContent"), read from snapshot.yaml Volumes[0].Artifact.Kind.
+	// It feeds the DataImport spec.dataArtifactType on re-import. Empty for structural/aggregator
+	// nodes that own no volume data.
+	ArtifactKind string
 }
 
 // Ref returns the node's aggregated-API node ref (target namespace applied by the caller).
@@ -185,14 +183,11 @@ func readNode(dir string) (PlannedNode, error) {
 		SourceObjectRef: sy.SourceObjectRef,
 	}
 
-	// Data leaves carry exactly one volume; lift its captured metadata onto the node so
-	// EnsureDataImport can echo storageClassName/size/volumeMode into the Mode A DataImport.
-	// Structural/aggregator nodes have no Volumes and leave these empty.
+	// Data leaves carry exactly one volume; lift its captured artifact kind onto the node so
+	// EnsureDataImport can send it as the DataImport's spec.dataArtifactType. Structural/
+	// aggregator nodes have no Volumes and leave this empty.
 	if len(sy.Volumes) > 0 {
-		vol := sy.Volumes[0]
-		node.StorageClassName = vol.StorageClassName
-		node.Size = vol.Size
-		node.VolumeMode = vol.VolumeMode
+		node.ArtifactKind = sy.Volumes[0].Artifact.Kind
 	}
 
 	blockData, found, err := archive.FindBlockData(dir)

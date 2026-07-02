@@ -290,16 +290,14 @@ func TestEnsureDataImport_ReusesHealthy(t *testing.T) {
 	}
 }
 
-// volumeSnapshotLeaf builds a CSI VolumeSnapshot data leaf carrying the captured volume
-// metadata that EnsureDataImport echoes into the Mode A DataImport spec.
+// volumeSnapshotLeaf builds a CSI VolumeSnapshot data leaf carrying the captured artifact
+// kind that EnsureDataImport sends as the Mode A DataImport's spec.dataArtifactType.
 func volumeSnapshotLeaf(name string) PlannedNode {
 	return PlannedNode{
-		APIVersion:       "snapshot.storage.k8s.io/v1",
-		Kind:             "VolumeSnapshot",
-		Name:             name,
-		StorageClassName: "sc-1",
-		Size:             "10Gi",
-		VolumeMode:       volumeModeFilesystem,
+		APIVersion:   "snapshot.storage.k8s.io/v1",
+		Kind:         "VolumeSnapshot",
+		Name:         name,
+		ArtifactKind: "VolumeSnapshotContent",
 	}
 }
 
@@ -318,52 +316,49 @@ func TestEnsureDataImport_BuildsModeASpec(t *testing.T) {
 		t.Fatalf("created DataImport not found: %v", err)
 	}
 
-	if v, _, _ := unstructured.NestedString(got.Object, "spec", "storageClassName"); v != "sc-1" {
-		t.Errorf("spec.storageClassName = %q, want sc-1", v)
+	if v, _, _ := unstructured.NestedString(got.Object, "spec", "dataArtifactType"); v != "VolumeSnapshotContent" {
+		t.Errorf("spec.dataArtifactType = %q, want VolumeSnapshotContent", v)
 	}
 
-	if v, _, _ := unstructured.NestedString(got.Object, "spec", "size"); v != "10Gi" {
-		t.Errorf("spec.size = %q, want 10Gi", v)
+	if _, found, _ := unstructured.NestedString(got.Object, "spec", "storageClassName"); found {
+		t.Error("spec.storageClassName must not be set (controller derives it from the captured PVC manifest)")
 	}
 
-	if v, _, _ := unstructured.NestedString(got.Object, "spec", "volumeMode"); v != volumeModeFilesystem {
-		t.Errorf("spec.volumeMode = %q, want %q", v, volumeModeFilesystem)
+	if _, found, _ := unstructured.NestedString(got.Object, "spec", "size"); found {
+		t.Error("spec.size must not be set (controller derives it from the captured PVC manifest)")
 	}
 
-	// The legacy dataArtifactType field must be gone — the controller infers the artifact.
-	if _, found, _ := unstructured.NestedString(got.Object, "spec", "dataArtifactType"); found {
-		t.Error("spec.dataArtifactType must not be set (removed in the kind-targetRef rework)")
+	if _, found, _ := unstructured.NestedString(got.Object, "spec", "volumeMode"); found {
+		t.Error("spec.volumeMode must not be set (controller derives it from the captured PVC manifest)")
 	}
 
 	group, _, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "group")
-	kind, _, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "kind")
+	resource, _, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "resource")
 	refName, _, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "name")
 
-	if group != "snapshot.storage.k8s.io" || kind != "VolumeSnapshot" || refName != "pvc-1" {
-		t.Errorf("targetRef = {group:%q, kind:%q, name:%q}, want {snapshot.storage.k8s.io, VolumeSnapshot, pvc-1}", group, kind, refName)
+	if group != "snapshot.storage.k8s.io" || resource != "volumesnapshots" || refName != "pvc-1" {
+		t.Errorf("targetRef = {group:%q, resource:%q, name:%q}, want {snapshot.storage.k8s.io, volumesnapshots, pvc-1}", group, resource, refName)
 	}
 
-	// TEMP REVERTME: targetRef must carry the plural "resource" key for the deployed mr135
-	// GVR-based DataImport CRD (alongside kind). Revert when SVDM main carries kind-based targetRef.
-	if resource, _, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "resource"); resource != "volumesnapshots" {
-		t.Errorf("spec.targetRef.resource = %q, want volumesnapshots", resource)
+	if _, found, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "kind"); found {
+		t.Error("spec.targetRef.kind must not be set (targetRef is group/resource/name only)")
 	}
 }
 
-func TestEnsureDataImport_RejectsMissingVolumeMetadata(t *testing.T) {
-	// A data leaf without storageClassName/size means a malformed archive; EnsureDataImport
-	// must fail fast instead of creating a CEL-rejected Mode A DataImport.
+func TestEnsureDataImport_RejectsMissingArtifactKind(t *testing.T) {
+	// A data leaf without an artifact kind means a malformed archive; EnsureDataImport must
+	// fail fast instead of creating an incomplete Mode A DataImport.
 	leaf := PlannedNode{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "pvc-1"}
 
 	dyn := newFakeDataImportDyn()
 	imp := newTestVolumeImporter(dyn)
 
 	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err == nil {
-		t.Fatal("expected error for missing volume metadata, got nil")
+		t.Fatal("expected error for missing artifact kind, got nil")
 	}
 
 	if c := countDataImportActions(dyn, "create"); c != 0 {
-		t.Errorf("no DataImport must be created when volume metadata is missing (creates=%d)", c)
+		t.Errorf("no DataImport must be created when artifact kind is missing (creates=%d)", c)
 	}
 }
 

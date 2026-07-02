@@ -215,10 +215,10 @@ func TestBuildPlan_DomainDataLeaf_SourceObjectRef(t *testing.T) {
 	}
 }
 
-// TestBuildPlan_LeafVolumeMetadata verifies that the captured volume metadata
-// (storageClassName/size/volumeMode) written into snapshot.yaml Volumes[0] is lifted onto
-// the PlannedNode so EnsureDataImport can echo it into the Mode A DataImport spec.
-func TestBuildPlan_LeafVolumeMetadata(t *testing.T) {
+// TestBuildPlan_LeafArtifactKind verifies that the captured artifact kind written into
+// snapshot.yaml Volumes[0].Artifact.Kind is lifted onto the PlannedNode so EnsureDataImport
+// can send it as the Mode A DataImport's spec.dataArtifactType.
+func TestBuildPlan_LeafArtifactKind(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
 		apiVersion: "storage.deckhouse.io/v1alpha1",
@@ -233,9 +233,7 @@ func TestBuildPlan_LeafVolumeMetadata(t *testing.T) {
 		name:       "pvc-1",
 		blockData:  []byte("rawbytes"),
 		volumes: []archive.VolumeInfo{{
-			StorageClassName: "linstor-thin-r1",
-			Size:             "10Gi",
-			VolumeMode:       "Block",
+			Artifact: archive.VolumeObjectRef{Kind: "VolumeSnapshotContent"},
 		}},
 	})
 
@@ -258,16 +256,15 @@ func TestBuildPlan_LeafVolumeMetadata(t *testing.T) {
 		t.Fatal("VolumeSnapshot node not found in plan")
 	}
 
-	if leaf.StorageClassName != "linstor-thin-r1" || leaf.Size != "10Gi" || leaf.VolumeMode != "Block" {
-		t.Errorf("leaf volume metadata = {sc:%q, size:%q, mode:%q}, want {linstor-thin-r1, 10Gi, Block}",
-			leaf.StorageClassName, leaf.Size, leaf.VolumeMode)
+	if leaf.ArtifactKind != "VolumeSnapshotContent" {
+		t.Errorf("leaf.ArtifactKind = %q, want VolumeSnapshotContent", leaf.ArtifactKind)
 	}
 
 	// A structural node owns no volumes and must leave the metadata empty.
 	for i := range plan {
 		if plan[i].Kind == "Snapshot" {
-			if plan[i].StorageClassName != "" || plan[i].Size != "" || plan[i].VolumeMode != "" {
-				t.Errorf("structural node carried volume metadata: %+v", plan[i])
+			if plan[i].ArtifactKind != "" {
+				t.Errorf("structural node carried artifact kind: %+v", plan[i])
 			}
 		}
 	}
