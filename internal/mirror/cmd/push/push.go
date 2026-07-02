@@ -94,7 +94,7 @@ valid license for any commercial version of the Deckhouse Kubernetes Platform.
 
 func NewCommand() *cobra.Command {
 	pushCmd := &cobra.Command{
-		Use:           "push <images-bundle-path> <registry>",
+		Use:           "push [images-bundle-path] <registry>",
 		Short:         "Copy Deckhouse Kubernetes Platform distribution to the third-party registry",
 		Long:          pushLong,
 		Args:          cobra.RangeArgs(1, 2),
