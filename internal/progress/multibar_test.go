@@ -892,3 +892,123 @@ func TestVolumeCounter_ZeroVolumes(t *testing.T) {
 		}
 	})
 }
+
+// summaryLines extracts every rendered line of the bottom volume-counter
+// summary bar from a raw mpb output buffer, in render order. Each render
+// cycle rewrites the previous frame in place (mpb interleaves cursor-reset
+// escape sequences between frames), so splitting on newlines and filtering
+// for the marker text recovers exactly one summary line per frame regardless
+// of the surrounding control bytes.
+func summaryLines(raw string) []string {
+	const marker = "volumes downloaded"
+
+	lines := strings.Split(raw, "\n")
+	out := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		if strings.Contains(line, marker) {
+			out = append(out, line)
+		}
+	}
+
+	return out
+}
+
+// summaryLineGap returns the number of space runes between the end of the
+// "volumes downloaded" counter text and the next non-space rune on the same
+// rendered line (the waiting-spinner glyph). It pins the summary bar's
+// spinner-adjacency geometry fixed by progress-overall-bar-spinner-fix.
+func summaryLineGap(t *testing.T, line string) int {
+	t.Helper()
+
+	const marker = "volumes downloaded"
+
+	idx := strings.Index(line, marker)
+	if idx < 0 {
+		t.Fatalf("line %q does not contain %q", line, marker)
+	}
+
+	rest := line[idx+len(marker):]
+
+	gap := 0
+	for _, r := range rest {
+		if r != ' ' {
+			break
+		}
+
+		gap++
+	}
+
+	return gap
+}
+
+// TestTTYSink_SummaryBarSpinnerAdjacency pins the rendered geometry of the
+// bottom volume-counter summary bar fixed by progress-overall-bar-spinner-fix:
+// the waiting spinner must sit within a small, fixed gap of the "N/M volumes
+// downloaded" text on every rendered frame, including the last frame produced
+// at Wait(), and must never drift across the terminal.
+//
+// Unlike this package's other TTY-sink tests (TestTTYSink_NoSummaryHeader,
+// TestTTYSink_VolumeCounter_CountsOnce), this test DOES assert live mpb
+// rendered frame content, because the defect under test — a spinner stranded
+// far from its label — is a rendering-geometry bug that a state-only
+// assertion cannot observe; per cross-cutting invariant #8, the actual layout
+// a width/position option produces must be checked empirically, and here the
+// horizontal gap IS the thing under test. mpb only auto-refreshes to a
+// non-terminal io.Writer when WithAutoRefresh is explicitly set (confirmed by
+// reading the pinned github.com/vbauerster/mpb/v8 v8.7.5 progress.go
+// NewWithContext: `cw.IsTerminal() || s.autoRefresh` gates the
+// autoRefreshListener goroutine) — which is why this package's New()
+// constructor never renders anything to a bytes.Buffer target and the other
+// TTY tests only assert absence-of-text or internal counter state. This test
+// builds a *ttySink directly (white-box, same package) around an mpb.Progress
+// created with WithAutoRefresh and a short WithRefreshRate, so the SAME
+// serve()/render() code path a real terminal drives actually writes frames
+// into the buffer; no time.Sleep is needed because mpb's shutdown path
+// (progress.go's `<-p.done` case) renders at least once more synchronously
+// while autoRefresh is on, before Wait returns.
+//
+// Empirically verified with a throwaway repro of the exact pre-fix
+// `s.p.AddSpinner(0, mpb.BarPriority(math.MinInt), ...)` construction (no
+// BarWidth, default center position) that it renders a gap of 28 spaces
+// before the glyph at the harness's default width, against a gap of 1 space
+// with the shipped fix's `mpb.BarWidth(spinnerCellWidth)` + `PositionLeft()`
+// — so the <= 1 bound below fails against the pre-fix construction and
+// passes against the fix.
+func TestTTYSink_SummaryBarSpinnerAdjacency(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	p := mpb.New(mpb.WithOutput(buf), mpb.WithAutoRefresh(), mpb.WithRefreshRate(5*time.Millisecond))
+	sink := &ttySink{p: p}
+	sink.SetVolumeTotal(2)
+
+	a := sink.NewStream("stream-a", 0)
+	b := sink.NewStream("stream-b", 0)
+
+	a.Activate()
+	a.SetTotal(1024)
+	a.IncrBy(1024)
+	a.Done()
+
+	// b is a resume skip: Done without Activate.
+	b.Done()
+
+	sink.Wait()
+
+	lines := summaryLines(buf.String())
+	if len(lines) == 0 {
+		t.Fatal("no rendered volume-counter summary lines captured")
+	}
+
+	for i, line := range lines {
+		if gap := summaryLineGap(t, line); gap > 1 {
+			t.Errorf("frame %d: gap between %q and spinner = %d, want <= 1\nline: %q", i, "volumes downloaded", gap, line)
+		}
+	}
+
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "2/2 volumes downloaded") {
+		t.Errorf("final rendered summary line = %q, want to contain %q", last, "2/2 volumes downloaded")
+	}
+}
