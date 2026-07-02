@@ -302,3 +302,37 @@ tasks:
     desc: Clean all binaries
     cmds:
       - rm -rf ./build ./dist ./d8
+
+  release:sign:
+    desc: "Sign last version tag + origin/main and push signatures."
+    deps: [checkKubectl]
+    preconditions:
+      - sh: '[[ "{{.CLI_ARGS}}" =~ ^v\d+.\d+.\d+$ ]] || exit 1'
+        msg: Provide valid semver prefixed with "v" (eg. task {{.TASK}} -- v1.2.3) to be used as version
+    cmds:
+      - git fetch --tags -f
+      - git signatures pull
+      - |
+        for ref in {{.refs | default "$(git tag --sort=v:refname | tail -n1) origin/main"}}; do
+          echo "Signing $ref..."
+          git signatures add {{.CLI_ARGS}} $ref
+          git signatures show {{.CLI_ARGS}} $ref
+        done
+      - git signatures push
+
+  release:publish-trdl-channels:
+    desc: Publish release channels to TRDL
+    deps: [checkKubectl]
+    preconditions:
+      - sh: test $(git rev-parse --abbrev-ref HEAD) = "main"
+        msg: This can only be done on main branch
+    prompt:
+      - "Have you updated trdl_channels.yaml with new versions?"
+    cmds:
+      - git add trdl_channels.yaml
+      - git commit -S -m 'Signed release channels'
+      - git push
+      - git fetch
+      - git signatures pull
+      - git signatures add origin/main
+      - git signatures push
