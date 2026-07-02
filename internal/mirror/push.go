@@ -181,15 +181,10 @@ func (svc *PushService) unpackAllPackages(ctx context.Context, dirPath string) e
 
 // packageNameFromPath derives the package name (used for legacy module detection
 // during unpack) from a package archive path by stripping its directory and the
-// .tar or chunked suffix.
+// .tar suffix. Callers must pass canonical .tar paths - chunked packages are
+// already collapsed to their .tar name before reaching this point.
 func packageNameFromPath(pkgPath string) string {
-	name := filepath.Base(pkgPath)
-
-	if idx := strings.Index(name, ".tar.chunk"); idx != -1 {
-		return name[:idx]
-	}
-
-	return strings.TrimSuffix(name, ".tar")
+	return strings.TrimSuffix(filepath.Base(pkgPath), ".tar")
 }
 
 // unpackPackage unpacks a single package archive into the unified directory.

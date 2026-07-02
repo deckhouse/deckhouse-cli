@@ -171,11 +171,11 @@ func isPackageFile(name string) bool {
 // <name>.tar path so the pusher reassembles all chunks instead of reading a single
 // chunk as a whole archive. Plain .tar paths are returned unchanged.
 func canonicalPackagePath(path string) string {
-	if idx := strings.Index(path, ".tar.chunk"); idx != -1 {
-		return path[:idx] + ".tar"
+	if filepath.Ext(path) != ".chunk" {
+		return path
 	}
 
-	if idx := strings.Index(path, ".tar."); idx != -1 && filepath.Ext(path) == ".chunk" {
+	if idx := strings.Index(path, ".tar."); idx != -1 {
 		return path[:idx] + ".tar"
 	}
 
