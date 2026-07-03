@@ -91,6 +91,13 @@ func TestCanonicalPackagePath(t *testing.T) {
 			want: "/bundle/module-foo.tar",
 		},
 		{
+			// Only the file name may be collapsed: a parent directory named like
+			// an archive (".tar." in its name) must not be mistaken for the package.
+			name: "parent directory containing .tar. is not confused with the package",
+			path: "/backups/bundle.tar.gz.d/platform.tar.0000.chunk",
+			want: "/backups/bundle.tar.gz.d/platform.tar",
+		},
+		{
 			name: "non-package path is returned unchanged",
 			path: "/bundle/readme.txt",
 			want: "/bundle/readme.txt",
@@ -133,10 +140,17 @@ func TestCollectFilesPackages(t *testing.T) {
 	txtFile := filepath.Join(tempDir, "c.txt")
 	subDir := filepath.Join(tempDir, "subdir")
 
+	// Chunk living inside a directory whose name itself contains ".tar." - the
+	// canonical path must stay inside that directory, not collapse the dir name.
+	tarNamedDir := filepath.Join(tempDir, "bundle.tar.gz.d")
+	chunkInTarNamedDir := filepath.Join(tarNamedDir, "platform.tar.0000.chunk")
+
 	require.NoError(t, os.WriteFile(tarFile, []byte("x"), 0644))
 	require.NoError(t, os.WriteFile(chunkFile, []byte("x"), 0644))
 	require.NoError(t, os.WriteFile(txtFile, []byte("x"), 0644))
 	require.NoError(t, os.MkdirAll(subDir, 0755))
+	require.NoError(t, os.MkdirAll(tarNamedDir, 0755))
+	require.NoError(t, os.WriteFile(chunkInTarNamedDir, []byte("x"), 0644))
 
 	tests := []struct {
 		name         string
@@ -154,6 +168,11 @@ func TestCollectFilesPackages(t *testing.T) {
 			name:         "chunk file resolves to its canonical tar path",
 			files:        []string{chunkFile},
 			wantPackages: []string{filepath.Join(tempDir, "b.tar")},
+		},
+		{
+			name:         "chunk inside a .tar.-named directory canonicalizes within that directory",
+			files:        []string{chunkInTarNamedDir},
+			wantPackages: []string{filepath.Join(tarNamedDir, "platform.tar")},
 		},
 		{
 			name:        "missing file",

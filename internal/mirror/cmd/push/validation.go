@@ -170,13 +170,18 @@ func isPackageFile(name string) bool {
 // canonicalPackagePath maps a chunk file (<name>.tar.NNNN.chunk) to its canonical
 // <name>.tar path so the pusher reassembles all chunks instead of reading a single
 // chunk as a whole archive. Plain .tar paths are returned unchanged.
+//
+// Only the file name is inspected. A parent directory whose name contains ".tar."
+// (e.g. an extraction dir "bundle.tar.gz.d") must not be collapsed into the
+// package name.
 func canonicalPackagePath(path string) string {
 	if filepath.Ext(path) != ".chunk" {
 		return path
 	}
 
-	if idx := strings.Index(path, ".tar."); idx != -1 {
-		return path[:idx] + ".tar"
+	dir, base := filepath.Split(path)
+	if before, _, found := strings.Cut(base, ".tar."); found {
+		return dir + before + ".tar"
 	}
 
 	return path
