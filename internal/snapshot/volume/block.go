@@ -119,9 +119,26 @@ func downloadChunk(
 ) error {
 	finalPath := filepath.Join(chunkDir, archive.ChunkFileName(chunkIdx, codec.Ext()))
 
-	// Skip chunks that are already complete.
+	// startByte/endByte (and the raw length they cover) are computed up front so
+	// the skip-existing-chunk branch below can credit onProgress before any
+	// early return.
+	startByte := int64(chunkIdx) * chunkSize
+	endByte := min(startByte+chunkSize, totalSize) - 1 // Range header is inclusive
+	rawLen := endByte - startByte + 1
+
+	// Skip chunks that are already complete (resume). The skip still credits
+	// this chunk's RAW (uncompressed) length to onProgress — the same units
+	// SetTotal/HeadVolume's totalSize use — so the numerator can reach the
+	// denominator on a resumed download. Crediting the on-disk (possibly
+	// codec-compressed) file size instead would under-count and could leave
+	// the bar short of 100% even though every chunk is present; mirrors
+	// stageCompressedFile's identical skip-credit on the filesystem path.
 	if _, err := os.Stat(finalPath); err == nil {
 		log.Debug("chunk already present, skipping", slog.Int("chunk", chunkIdx))
+
+		if onProgress != nil && rawLen > 0 {
+			onProgress(int(rawLen))
+		}
 
 		return nil
 	}
@@ -132,9 +149,6 @@ func downloadChunk(
 	if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale tmp %s: %w", tmpPath, err)
 	}
-
-	startByte := int64(chunkIdx) * chunkSize
-	endByte := min(startByte+chunkSize, totalSize) - 1 // Range header is inclusive
 
 	log.Debug("fetching chunk",
 		slog.Int("chunk", chunkIdx),
