@@ -113,6 +113,12 @@ func (l *ImageLayout) Path() layout.Path {
 // When the tag already exists but with a different digest, AddImage falls
 // through to AppendImage to preserve the previous re-tag behaviour; the push
 // pipeline deduplicates such cases with last-wins semantics.
+//
+// metaByTag is recorded only AFTER AppendImage succeeds. Recording it before
+// the write would poison the idempotency guard on a failed write: the pull
+// retry sees the (tag, digest) pair as already added, returns nil without
+// writing anything, and the image silently vanishes from the bundle while
+// the pull reports success.
 func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 	meta, err := img.GetMetadata()
 	if err != nil {
@@ -128,9 +134,6 @@ func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 		}
 	}
 
-	// TODO: support nesting tags in image
-	l.metaByTag[tag] = meta.(*ImageMeta)
-
 	err = l.wrapped.AppendImage(img,
 		layout.WithPlatform(l.defaultPlatform),
 		layout.WithAnnotations(map[string]string{
@@ -141,6 +144,9 @@ func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 	if err != nil {
 		return fmt.Errorf("append image: %w", err)
 	}
+
+	// TODO: support nesting tags in image
+	l.metaByTag[tag] = meta.(*ImageMeta)
 
 	return nil
 }
