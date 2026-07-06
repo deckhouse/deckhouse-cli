@@ -99,26 +99,16 @@ func (l *ImageLayout) Path() layout.Path {
 
 // AddImage stores img in the layout under tag.
 //
-// AddImage is idempotent for the (tag, digest) pair: if a previous call already
-// stored an image with the same tag and the same manifest digest, the second
-// call is a no-op. This matters because layout.Path.AppendImage always appends
-// a new descriptor to index.json — it has no notion of "update in place" — so
-// without this guard, callers that legitimately iterate over the same image
-// set more than once (for example, pulling the deckhouse image set, then
-// merging extra digests discovered from an installer and pulling the union
-// again) would silently produce duplicate descriptors with the same
-// io.deckhouse.image.short_tag annotation. Those duplicates later surface in
-// `mirror push` as the same tag being pushed multiple times.
+// Idempotent for the (tag, digest) pair: a repeat call with the same tag and
+// manifest digest is a no-op. AppendImage always appends a new descriptor to
+// index.json, so without this guard repeated pulls of the same image set
+// would create duplicate descriptors (and duplicate pushes later).
 //
-// When the tag already exists but with a different digest, AddImage falls
-// through to AppendImage to preserve the previous re-tag behaviour; the push
-// pipeline deduplicates such cases with last-wins semantics.
-//
-// metaByTag is recorded only AFTER AppendImage succeeds. Recording it before
-// the write would poison the idempotency guard on a failed write: the pull
-// retry sees the (tag, digest) pair as already added, returns nil without
-// writing anything, and the image silently vanishes from the bundle while
-// the pull reports success.
+// - same tag, different digest: falls through to AppendImage (re-tag);
+//   the push pipeline dedupes such cases with last-wins semantics.
+// - metaByTag is recorded only after AppendImage succeeds. Recording earlier
+//   would poison the guard on a failed write: a retry would see the pair as
+//   done and silently skip the image.
 func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 	meta, err := img.GetMetadata()
 	if err != nil {
