@@ -1,25 +1,24 @@
 // Copyright 2026 Flant JSC
 // SPDX-License-Identifier: Apache-2.0
 
-// Reproduction for the "pulled 363 / pushed 362" mirror bug (v1.76.2 EE,
-// harbor.sdkp.ru report, 2026-07-02): a transient network failure during the
-// blob download of ONE image, followed by a successful-looking retry, silently
-// drops that image from the bundle. `d8 mirror pull` exits 0, `d8 mirror push`
-// pushes one image less, and the cluster later fails with "not found" on the
-// missing digest.
+// Regression tests: a transient network failure during the blob download of
+// one image, followed by a successful-looking retry, must not lose the image
+// from the bundle (field incident "pulled 363 / pushed 362": the lost image
+// surfaced only when the cluster hit "not found" on its digest; v1.76.2 EE,
+// harbor.sdkp.ru report, 2026-07-02).
 //
-// Mechanism under test (pkg/registry/image/layout.go, ImageLayout.AddImage):
+// The invariant under test (ImageLayout.AddImage in
+// pkg/registry/image/layout.go): metaByTag, the (tag, digest) idempotency
+// guard, is recorded only after AppendImage succeeds. Recording it before the
+// write turns a failed first attempt into a lost image:
 //
-//  1. attempt 1: AddImage records metaByTag[tag] = meta BEFORE writing blobs;
-//     AppendImage fails mid-write (connection reset) -> the pull task errors
-//     and schedules a retry ("failed, next retry in 10s" in the log);
+//  1. attempt 1: metaByTag[tag] is recorded, then AppendImage fails mid-write
+//     (connection reset) -> the pull task errors and schedules a retry
+//     ("failed, next retry in 10s" in the log);
 //  2. attempt 2: AddImage sees metaByTag[tag] with the same digest and returns
 //     nil WITHOUT writing anything -> the retry "succeeds" instantly;
 //  3. index.json never receives the manifest -> the image is absent from
 //     platform.tar -> push uploads N-1 images.
-//
-// The tests below assert the CORRECT behavior, so under the current code they
-// FAIL - the failure output is the proof of the defect.
 
 package mirror
 
@@ -152,8 +151,8 @@ func (c *flakyClient) GetImage(ctx context.Context, ref string, opts ...localreg
 
 // TestRepro_AddImage_RetryAfterFailedWrite_ImageMustLand: attempt 1 fails
 // mid-write, attempt 2 (same tag, same digest) succeeds. The image must be in
-// the layout afterwards. Under the current AddImage guard it is NOT: attempt 1
-// poisons metaByTag before AppendImage, so attempt 2 no-ops.
+// the layout afterwards: the (tag, digest) guard counts a pair as done only
+// after a successful AppendImage, so the retry re-runs the write.
 func TestRepro_AddImage_RetryAfterFailedWrite_ImageMustLand(t *testing.T) {
 	imgLayout, err := regimage.NewImageLayout(t.TempDir())
 	require.NoError(t, err)
@@ -228,8 +227,8 @@ func TestRepro_AddImage_NoFailure_Control(t *testing.T) {
 // references three digest images. The blob download of one of them ("beta")
 // fails once and then recovers - the retry machinery reports success, the
 // pull exits 0, but the pushed registry must still contain ALL three digests.
-// Under the current code "beta" is silently missing (the 363-pulled /
-// 362-pushed mismatch from the field report).
+// A dropped "beta" reproduces the 363-pulled / 362-pushed mismatch from the
+// field report.
 func TestRepro_MirrorPullThenPush_TransientBlobFailureLosesImage(t *testing.T) {
 	const (
 		rootHost  = "registry.example.com/deckhouse/ee"
