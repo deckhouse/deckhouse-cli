@@ -30,8 +30,11 @@ import (
 )
 
 // Export holds a resolved DataExport: a ready HTTP endpoint (Fetcher), the
-// VolumeMode reported by the controller, and the internal base URL.
-// Callers must call Release when the transfer is complete or aborted.
+// VolumeMode reported by the controller, and the internal base URL. Callers
+// release the underlying DataExport CR via ReleaseDataExport + DataExportName
+// using the leaf name they already have, rather than through this value —
+// releasing by deterministic name also covers the case where OpenExport never
+// returned an Export at all (e.g. cancelled while still waiting for Ready).
 type Export struct {
 	deName     string
 	namespace  string
@@ -54,12 +57,6 @@ func (e *Export) BaseURL() string {
 // Fetcher returns the HTTP Fetcher wired to the data-exporter endpoint.
 func (e *Export) Fetcher() *Fetcher {
 	return e.fetcher
-}
-
-// Release deletes the DataExport CR. It is idempotent and safe to call on
-// error paths to ensure the cluster resource is cleaned up.
-func (e *Export) Release(ctx context.Context, c client.Client) error {
-	return ReleaseDataExport(ctx, c, e.namespace, e.deName)
 }
 
 // NewExport constructs an Export from pre-built components.
