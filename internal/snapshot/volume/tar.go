@@ -19,6 +19,7 @@ package volume
 import (
 	"archive/tar"
 	"cmp"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -55,7 +56,14 @@ type TarEntry struct {
 // Entries are sorted by RelPath for determinism. Raw bytes for "file" entries
 // are read from filepath.Join(stagingDir, filepath.FromSlash(entry.RelPath)).
 // The output file is written atomically (.tmp → fsync → rename).
-func WriteTar(outputPath string, stagingDir string, entries []TarEntry) error {
+//
+// ctx is checked once per entry during assembly; if it is cancelled mid-write,
+// the in-progress AtomicWriter is aborted (so no partial file is ever visible
+// at outputPath) and a wrapped ctx.Err() is returned (checkable via
+// errors.Is). Cancellation here never loses data: the per-file staging
+// directory is untouched, so tar assembly simply resumes from the same staged
+// files on the next run.
+func WriteTar(ctx context.Context, outputPath string, stagingDir string, entries []TarEntry) error {
 	sorted := slices.Clone(entries)
 	slices.SortFunc(sorted, func(a, b TarEntry) int {
 		return cmp.Compare(a.RelPath, b.RelPath)
@@ -68,7 +76,7 @@ func WriteTar(outputPath string, stagingDir string, entries []TarEntry) error {
 
 	tw := tar.NewWriter(aw)
 
-	if err := writeEntries(tw, stagingDir, sorted); err != nil {
+	if err := writeEntries(ctx, tw, stagingDir, sorted); err != nil {
 		aw.Abort()
 
 		return err
@@ -83,8 +91,12 @@ func WriteTar(outputPath string, stagingDir string, entries []TarEntry) error {
 	return aw.Commit()
 }
 
-func writeEntries(tw *tar.Writer, stagingDir string, entries []TarEntry) error {
+func writeEntries(ctx context.Context, tw *tar.Writer, stagingDir string, entries []TarEntry) error {
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("tar assembly cancelled before entry %q: %w", e.RelPath, err)
+		}
+
 		if err := writeEntry(tw, stagingDir, e); err != nil {
 			return err
 		}

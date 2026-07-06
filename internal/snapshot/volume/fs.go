@@ -173,7 +173,7 @@ func DownloadFilesystemVolume(
 		})
 	}
 
-	if err := WriteTar(tarPath, stagingDir, entries); err != nil {
+	if err := WriteTar(ctx, tarPath, stagingDir, entries); err != nil {
 		return fmt.Errorf("assemble tar %s: %w", tarPath, err)
 	}
 

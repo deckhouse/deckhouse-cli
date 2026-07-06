@@ -18,6 +18,7 @@ package volume_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -91,7 +92,7 @@ func TestMergeBlockChunks_MergesInOrder(t *testing.T) {
 
 	makeChunkFrames(t, chunkDir, payloads)
 
-	if err := volume.MergeBlockChunks(chunkDir, outPath, totalSize, chunkSize, ".zst"); err != nil {
+	if err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, totalSize, chunkSize, ".zst"); err != nil {
 		t.Fatalf("MergeBlockChunks: %v", err)
 	}
 	finalPath := outPath
@@ -124,7 +125,7 @@ func TestMergeBlockChunks_ChunkDirRemovedAfterSuccess(t *testing.T) {
 
 	makeChunkFrames(t, chunkDir, payloads)
 
-	if err := volume.MergeBlockChunks(chunkDir, outPath, totalSize, chunkSize, ".zst"); err != nil {
+	if err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, totalSize, chunkSize, ".zst"); err != nil {
 		t.Fatalf("MergeBlockChunks: %v", err)
 	}
 
@@ -163,7 +164,7 @@ func TestMergeBlockChunks_MissingChunkErrors(t *testing.T) {
 	chunkSize := int64(4)
 	totalSize := int64(12)
 
-	err = volume.MergeBlockChunks(chunkDir, outPath, totalSize, chunkSize, ".zst")
+	err = volume.MergeBlockChunks(context.Background(), chunkDir, outPath, totalSize, chunkSize, ".zst")
 	if err == nil {
 		t.Fatal("expected error for missing chunk, got nil")
 	}
@@ -194,7 +195,7 @@ func TestMergeBlockChunks_DefaultChunkSize(t *testing.T) {
 	makeChunkFrames(t, chunkDir, [][]byte{payload})
 
 	// Pass chunkSize=0 to trigger DefaultChunkSize fallback.
-	if err := volume.MergeBlockChunks(chunkDir, outPath, totalSize, 0, ".zst"); err != nil {
+	if err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, totalSize, 0, ".zst"); err != nil {
 		t.Fatalf("MergeBlockChunks with default chunk size: %v", err)
 	}
 
@@ -206,5 +207,48 @@ func TestMergeBlockChunks_DefaultChunkSize(t *testing.T) {
 	decoded := decodeZstdStream(t, raw)
 	if !bytes.Equal(decoded, payload) {
 		t.Errorf("decoded content mismatch (length %d vs %d)", len(decoded), len(payload))
+	}
+}
+
+// TestMergeBlockChunks_CancelledContext proves that MergeBlockChunks honors an
+// already-cancelled context: it must return promptly (bounded by this test's
+// own execution, not a real timing race) with an error wrapping ctx.Err(), and
+// must not leave a partial file at the final (non-.tmp) output path — the
+// in-progress AtomicWriter is aborted rather than committed.
+func TestMergeBlockChunks_CancelledContext(t *testing.T) {
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(".zst"))
+
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	payloads := [][]byte{[]byte("hello"), []byte("world")}
+	chunkSize := int64(5)
+	totalSize := int64(10)
+
+	makeChunkFrames(t, chunkDir, payloads)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := volume.MergeBlockChunks(ctx, chunkDir, outPath, totalSize, chunkSize, ".zst")
+	if err == nil {
+		t.Fatal("expected an error from MergeBlockChunks with an already-cancelled context, got nil")
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected error to wrap context.Canceled, got: %v", err)
+	}
+
+	if _, statErr := os.Stat(outPath); !os.IsNotExist(statErr) {
+		t.Error("output file should not exist when the merge is cancelled before completion")
+	}
+
+	// The chunk directory must survive intact so a subsequent run can resume
+	// the merge from the same chunks (cancellation is not a data-loss event).
+	if _, statErr := os.Stat(chunkDir); statErr != nil {
+		t.Errorf("chunk dir should survive a cancelled merge, but Stat returned: %v", statErr)
 	}
 }

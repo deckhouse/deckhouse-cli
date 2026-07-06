@@ -17,6 +17,7 @@ limitations under the License.
 package volume
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -46,7 +47,14 @@ var ErrMissingChunk = errors.New("block chunk missing")
 //   - The chunk directory and all its contents are removed.
 //
 // chunkSize ≤ 0 falls back to DefaultChunkSize.
-func MergeBlockChunks(chunkDir, outPath string, totalSize, chunkSize int64, ext string) error {
+//
+// ctx is checked once per chunk during the copy loop; if it is cancelled
+// mid-merge, the in-progress AtomicWriter is aborted (so no partial file is
+// ever visible at outPath) and a wrapped ctx.Err() is returned (checkable via
+// errors.Is). A hard kill or graceful cancellation here never loses data: the
+// chunk directory is only removed after a full successful Commit, so the
+// merge simply resumes from the same chunks on the next run.
+func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, chunkSize int64, ext string) error {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
@@ -74,6 +82,11 @@ func MergeBlockChunks(chunkDir, outPath string, totalSize, chunkSize int64, ext 
 	}
 
 	for i := range numChunks {
+		if err := ctx.Err(); err != nil {
+			aw.Abort()
+			return fmt.Errorf("merge cancelled before chunk %d: %w", i, err)
+		}
+
 		p := filepath.Join(chunkDir, archive.ChunkFileName(i, ext))
 
 		if err := copyFile(aw, p); err != nil {
