@@ -305,6 +305,8 @@ func TestStateWord(t *testing.T) {
 		{"active", streamStateActive, true, "Downloading"},
 		{"done_after_activate", streamStateDone, true, "Download complete"},
 		{"done_without_activate", streamStateDone, false, "Already exists"},
+		{"failed_after_activate", streamStateFailed, true, "Interrupted"},
+		{"failed_without_activate", streamStateFailed, false, "Interrupted"},
 	}
 
 	for _, tc := range cases {
@@ -542,6 +544,7 @@ func TestStateBarFiller(t *testing.T) {
 		{"waiting_empty", streamStateWaiting, true},
 		{"active_bar", streamStateActive, false},
 		{"done_empty", streamStateDone, true},
+		{"failed_empty", streamStateFailed, true},
 	}
 
 	for _, tc := range cases {
@@ -814,6 +817,215 @@ func TestTTYSink_VolumeCounter_CountsOnce(t *testing.T) {
 	if label := volumeCounterLabel(int(got), int(ts.volTotal.Load())); label != wantLabel {
 		t.Errorf("volumeCounterLabel(%d, %d) = %q, want %q", got, ts.volTotal.Load(), label, wantLabel)
 	}
+}
+
+// TestTTYSink_Fail_ExcludesFromVolumeCounter proves that Fail() (unlike Done())
+// does not count a stream toward "N/M volumes downloaded", renders the
+// "Interrupted" state word, and still unblocks Wait() so a failed stream never
+// hangs the run alongside successfully completed ones.
+func TestTTYSink_Fail_ExcludesFromVolumeCounter(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	sink := New(buf, true)
+
+	ts, ok := sink.(*ttySink)
+	if !ok {
+		t.Fatal("New(_, true) did not return *ttySink")
+	}
+
+	ts.SetVolumeTotal(2)
+
+	a := sink.NewStream("stream-a", 0)
+	b := sink.NewStream("stream-b", 0)
+
+	// Stream A: activated then interrupted mid-transfer.
+	a.Activate()
+	a.SetTotal(1024)
+	a.IncrBy(512)
+	a.Fail()
+
+	// Stream B: completes normally.
+	b.Done()
+
+	sink.Wait()
+
+	got := ts.volDone.Load()
+	if got != 1 {
+		t.Errorf("volDone = %d, want 1 (failed stream must not be counted)", got)
+	}
+
+	streamA, ok := a.(*ttyStream)
+	if !ok {
+		t.Fatal("NewStream did not return *ttyStream")
+	}
+
+	state := atomic.LoadInt32(&streamA.state)
+	if state != streamStateFailed {
+		t.Errorf("stream A state = %d, want streamStateFailed (%d)", state, streamStateFailed)
+	}
+
+	activated := atomic.LoadInt32(&streamA.activated) == 1
+	if word := stateWord(state, activated); word != "Interrupted" {
+		t.Errorf("stateWord for failed stream = %q, want %q", word, "Interrupted")
+	}
+}
+
+// TestTTYSink_Fail_FromWaiting proves that Fail() may be called directly from
+// the waiting state (before Activate — e.g. the stream's DataExport never
+// became Ready) without panicking and without counting toward volDone.
+func TestTTYSink_Fail_FromWaiting(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	sink := New(buf, true)
+
+	ts, ok := sink.(*ttySink)
+	if !ok {
+		t.Fatal("New(_, true) did not return *ttySink")
+	}
+
+	ts.SetVolumeTotal(1)
+
+	a := sink.NewStream("stream-a", 0)
+	a.Fail()
+
+	sink.Wait()
+
+	if got := ts.volDone.Load(); got != 0 {
+		t.Errorf("volDone = %d, want 0 (stream failed from waiting, never counted)", got)
+	}
+}
+
+// TestNonTTY_Fail_ExcludesFromVolumeCounter mirrors
+// TestTTYSink_Fail_ExcludesFromVolumeCounter for the non-TTY fallback sink: the
+// final aggregate line's "(N/M volumes)" suffix must count only the Done()
+// stream, not the Fail()ed one.
+func TestNonTTY_Fail_ExcludesFromVolumeCounter(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	sink := New(buf, false, WithInterval(time.Hour))
+
+	sink.SetVolumeTotal(2)
+
+	a := sink.NewStream("vol-a", 100)
+	b := sink.NewStream("vol-b", 200)
+
+	a.IncrBy(100)
+	a.Done()
+
+	b.IncrBy(200)
+	b.Fail()
+
+	sink.Wait()
+
+	got := buf.String()
+	want := aggregateLine(t, 300, 300, 1, 2)
+
+	if !strings.Contains(got, want) {
+		t.Errorf("output does not contain expected volume-counter line\ngot:  %q\nwant (contained): %q", got, want)
+	}
+}
+
+// TestStream_DoneThenFail_FirstOutcomeWins pins the documented misuse
+// behaviour: whichever terminal method is called FIRST decides whether the
+// stream counts, and the second call is a no-op in both directions and on
+// both sinks — no panic, no double count.
+func TestStream_DoneThenFail_FirstOutcomeWins(t *testing.T) {
+	t.Parallel()
+
+	t.Run("TTY: Done then Fail keeps the Done outcome", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		sink := New(buf, true)
+
+		ts, ok := sink.(*ttySink)
+		if !ok {
+			t.Fatal("New(_, true) did not return *ttySink")
+		}
+
+		ts.SetVolumeTotal(1)
+
+		a := sink.NewStream("stream-a", 0)
+		a.Done()
+		a.Fail()
+
+		sink.Wait()
+
+		if got := ts.volDone.Load(); got != 1 {
+			t.Errorf("volDone = %d, want 1 (Done fired first, Fail must be a no-op)", got)
+		}
+	})
+
+	t.Run("TTY: Fail then Done keeps the Fail outcome", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		sink := New(buf, true)
+
+		ts, ok := sink.(*ttySink)
+		if !ok {
+			t.Fatal("New(_, true) did not return *ttySink")
+		}
+
+		ts.SetVolumeTotal(1)
+
+		a := sink.NewStream("stream-a", 0)
+		a.Fail()
+		a.Done()
+
+		sink.Wait()
+
+		if got := ts.volDone.Load(); got != 0 {
+			t.Errorf("volDone = %d, want 0 (Fail fired first, Done must be a no-op)", got)
+		}
+	})
+
+	t.Run("non-TTY: Done then Fail keeps the Done outcome", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		sink := New(buf, false, WithInterval(time.Hour))
+		sink.SetVolumeTotal(1)
+
+		a := sink.NewStream("vol-a", 100)
+		a.IncrBy(100)
+		a.Done()
+		a.Fail()
+
+		sink.Wait()
+
+		got := buf.String()
+		want := aggregateLine(t, 100, 100, 1, 1)
+
+		if !strings.Contains(got, want) {
+			t.Errorf("output does not contain expected line\ngot:  %q\nwant (contained): %q", got, want)
+		}
+	})
+
+	t.Run("non-TTY: Fail then Done keeps the Fail outcome", func(t *testing.T) {
+		t.Parallel()
+
+		buf := &bytes.Buffer{}
+		sink := New(buf, false, WithInterval(time.Hour))
+		sink.SetVolumeTotal(1)
+
+		a := sink.NewStream("vol-a", 100)
+		a.IncrBy(100)
+		a.Fail()
+		a.Done()
+
+		sink.Wait()
+
+		got := buf.String()
+		want := aggregateLine(t, 100, 100, 0, 1)
+
+		if !strings.Contains(got, want) {
+			t.Errorf("output does not contain expected line\ngot:  %q\nwant (contained): %q", got, want)
+		}
+	})
 }
 
 // TestNonTTY_VolumeCounter_FormatAndCountOnce asserts the non-TTY aggregate

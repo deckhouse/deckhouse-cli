@@ -68,8 +68,21 @@ type Stream interface {
 	// byte transfer begins.
 	Activate()
 
-	// Done marks the stream as complete.
+	// Done marks the stream as successfully complete and counts it toward the
+	// "N/M volumes downloaded" completion total. If Fail was already called on
+	// this stream, Done is a no-op (the first terminal call wins; see Fail).
 	Done()
+
+	// Fail marks the stream as terminated WITHOUT completing successfully (the
+	// underlying transfer was cancelled or errored, or the stream's DataExport
+	// never became ready). Unlike Done, a failed stream is excluded from the
+	// "N/M volumes downloaded" / "(N/M volumes)" completion counters, so M (the
+	// total) stays correct but a failed stream never counts as one of the N
+	// completions. Fail still unblocks Wait() the same way Done does, and may be
+	// called from the waiting state (before Activate) or the active state.
+	// If Done was already called on this stream, Fail is a no-op (the first
+	// terminal call wins; see Done).
+	Fail()
 }
 
 // Option configures the progress Sink constructor.
@@ -116,11 +129,13 @@ func New(w io.Writer, tty bool, opts ...Option) Sink {
 const ttyBarWidth = 28
 
 // stream state constants stored atomically in ttyStream.state.
-// The machine is one-way: waiting → active → done, or waiting → done (resume skip).
+// The machine is one-way: waiting → active → done/failed, or waiting →
+// done/failed directly (resume skip / early failure before Activate).
 const (
 	streamStateWaiting = int32(0)
 	streamStateActive  = int32(1)
 	streamStateDone    = int32(2)
+	streamStateFailed  = int32(3)
 )
 
 type ttySink struct {
@@ -325,13 +340,41 @@ func (s *ttyStream) Activate() {
 	atomic.CompareAndSwapInt32(&s.state, streamStateWaiting, streamStateActive)
 }
 
-// Done marks the stream as complete and triggers bar completion in mpb. The
-// volume-counter's volDone is incremented exactly once per stream, gated on the
-// SwapInt32 transition into streamStateDone — a duplicate Done() call observes
-// prev == streamStateDone and does not double-count.
+// Done marks the stream as successfully complete and triggers bar completion in
+// mpb, counting it toward the volume-counter. See finalize for the
+// first-terminal-call-wins semantics shared with Fail.
 func (s *ttyStream) Done() {
-	prev := atomic.SwapInt32(&s.state, streamStateDone)
-	if prev != streamStateDone && s.sink != nil {
+	s.finalize(streamStateDone, true)
+}
+
+// Fail marks the stream as terminated without completing successfully and
+// triggers bar completion in mpb, WITHOUT counting it toward the
+// volume-counter (see finalize). It may be called directly from the waiting
+// state (e.g. the DataExport never became ready) or from the active state
+// (e.g. the transfer was cancelled mid-copy).
+func (s *ttyStream) Fail() {
+	s.finalize(streamStateFailed, false)
+}
+
+// finalize atomically transitions the stream to a terminal state (done or
+// failed) and settles the mpb bar. Only the FIRST terminal call takes effect:
+// once the state is already streamStateDone or streamStateFailed, a later
+// Done()/Fail() call (a misuse no call site triggers, since each registers
+// exactly one terminal method) is a no-op, so a stream is never double-counted
+// or re-settled regardless of call order.
+func (s *ttyStream) finalize(target int32, countCompletion bool) {
+	for {
+		prev := atomic.LoadInt32(&s.state)
+		if prev == streamStateDone || prev == streamStateFailed {
+			return
+		}
+
+		if atomic.CompareAndSwapInt32(&s.state, prev, target) {
+			break
+		}
+	}
+
+	if countCompletion && s.sink != nil {
 		s.sink.volDone.Add(1)
 	}
 
@@ -411,6 +454,8 @@ func spinnerCell(state int32, tick uint64) string {
 //   - active: "Downloading".
 //   - done after Activate: "Download complete".
 //   - done without Activate (resume skip): "Already exists".
+//   - failed (Fail called, from waiting or active): "Interrupted" — pinned to
+//     match the CLI's Ctrl-C/SIGINT cancellation use case.
 //
 // "Waiting for DataExport to be Ready" is the widest word, so it sets the
 // WCSyncWidth status-word column width; every other word fits within it and rows
@@ -425,6 +470,8 @@ func stateWord(state int32, activated bool) string {
 		}
 
 		return "Already exists"
+	case streamStateFailed:
+		return "Interrupted"
 	default:
 		return "Waiting for DataExport to be Ready"
 	}
@@ -575,9 +622,11 @@ type plainStream struct {
 	sink  *plainSink
 	mu    sync.Mutex
 	total int64
-	// done gates Done() to exactly one volDone increment per stream, mirroring
-	// ttyStream's SwapInt32 gate: a duplicate Done() call must not double-count.
-	done bool
+	// settled gates Done()/Fail() to exactly one terminal transition per stream:
+	// the FIRST call (whichever method) wins, mirroring ttyStream.finalize. A
+	// duplicate Done() call must not double-count, and Done() after Fail() (or
+	// vice versa) must not count a stream the other outcome already settled.
+	settled bool
 }
 
 func (s *plainStream) IncrBy(n int) {
@@ -605,15 +654,32 @@ func (s *plainStream) SetTotal(total int64) {
 func (s *plainStream) Activate() {}
 
 // Done increments the sink's completed-volume counter (N) for the "(N/M volumes)"
-// aggregate-line suffix, exactly once per stream (a duplicate Done() call is a
-// no-op on the counter); byte progress itself is tracked entirely via IncrBy.
+// aggregate-line suffix, exactly once per stream (a duplicate Done() call, or a
+// Done() after Fail() already settled the stream, is a no-op on the counter);
+// byte progress itself is tracked entirely via IncrBy.
 func (s *plainStream) Done() {
+	s.finalize(true)
+}
+
+// Fail marks the stream as settled WITHOUT incrementing the sink's
+// completed-volume counter, so a cancelled/errored stream is excluded from the
+// "(N/M volumes)" suffix's N (M, the total, is unaffected). It may be called
+// from any point in the stream's lifecycle.
+func (s *plainStream) Fail() {
+	s.finalize(false)
+}
+
+// finalize settles the stream at most once: the FIRST Done()/Fail() call wins
+// and later calls (in either order) are no-ops, so a stream is never
+// double-counted and a Fail-then-Done (or Done-then-Fail) sequence keeps
+// whichever outcome happened first.
+func (s *plainStream) finalize(countCompletion bool) {
 	s.mu.Lock()
-	alreadyDone := s.done
-	s.done = true
+	alreadySettled := s.settled
+	s.settled = true
 	s.mu.Unlock()
 
-	if alreadyDone {
+	if alreadySettled || !countCompletion {
 		return
 	}
 
