@@ -19,6 +19,7 @@ package snapimport
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -58,6 +59,154 @@ func (s *recordingSink) streamNames() []string {
 	copy(out, s.streams)
 
 	return out
+}
+
+// fakeStream is a progress.Stream stub that counts Activate, Done, and Fail
+// calls, used to assert importNodeData's terminal-outcome contract (Done on
+// success, Fail on error) independent of the real TTY/plain sink
+// implementations. All methods are safe for concurrent use.
+type fakeStream struct {
+	mu          sync.Mutex
+	activateCnt int
+	doneCnt     int
+	failCnt     int
+}
+
+func (s *fakeStream) IncrBy(_ int)     {}
+func (s *fakeStream) SetTotal(_ int64) {}
+
+func (s *fakeStream) Activate() {
+	s.mu.Lock()
+	s.activateCnt++
+	s.mu.Unlock()
+}
+
+func (s *fakeStream) Done() {
+	s.mu.Lock()
+	s.doneCnt++
+	s.mu.Unlock()
+}
+
+func (s *fakeStream) Fail() {
+	s.mu.Lock()
+	s.failCnt++
+	s.mu.Unlock()
+}
+
+// fakeSink is a progress.Sink stub that hands out fakeStreams and records them
+// in creation order, so a test can inspect exactly which terminal method each
+// stream received.
+type fakeSink struct {
+	mu      sync.Mutex
+	streams []*fakeStream
+}
+
+func (s *fakeSink) NewStream(_ string, _ int64) progress.Stream {
+	fs := &fakeStream{}
+
+	s.mu.Lock()
+	s.streams = append(s.streams, fs)
+	s.mu.Unlock()
+
+	return fs
+}
+
+func (s *fakeSink) SetVolumeTotal(int) {}
+func (s *fakeSink) Wait()              {}
+
+func (s *fakeSink) LogWriter() io.Writer { return io.Discard }
+
+func (s *fakeSink) snapshot() []*fakeStream {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]*fakeStream, len(s.streams))
+	copy(out, s.streams)
+
+	return out
+}
+
+// failingVolumes is a VolumeImporter stub whose UploadVolumeData always fails,
+// used to assert that importNodeData calls stream.Fail(), never stream.Done(),
+// when the upload itself errors.
+type failingVolumes struct{}
+
+func (v *failingVolumes) DataImportName(leaf PlannedNode) string { return leaf.Name }
+
+func (v *failingVolumes) EnsureDataImport(_ context.Context, leaf PlannedNode, _ string) (string, error) {
+	return leaf.Name, nil
+}
+
+func (v *failingVolumes) UploadVolumeData(_ context.Context, _ PlannedNode, _, _ string, _ func(int64), _ func(int)) error {
+	return errors.New("simulated upload failure")
+}
+
+// TestRun_UploadOutcome_CallsDoneOrFailByRealResult verifies importNodeData's
+// terminal-outcome contract end to end via Run: a successful UploadVolumeData
+// call must mark its stream Done and never Fail, while a failing
+// UploadVolumeData call must mark its stream Fail and never Done — mirroring
+// the analogous download-side fix. Before the fix, importNodeData deferred
+// stream.Done() unconditionally right after creating the stream (before
+// UploadVolumeData even ran), so this failure case would have observed
+// doneCnt == 1 regardless of the upload outcome.
+func TestRun_UploadOutcome_CallsDoneOrFailByRealResult(t *testing.T) {
+	t.Run("success calls Done, never Fail", func(t *testing.T) {
+		root, _ := buildMultiLeafArchive(t, 1)
+
+		sink := &fakeSink{}
+		vol := &stubVolumes{}
+		up := &stubUploader{}
+		dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+
+		cfg := baseConfig(root, up, vol, dyn)
+		cfg.Progress = sink
+
+		if err := Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		streams := sink.snapshot()
+		if len(streams) != 1 {
+			t.Fatalf("expected exactly 1 stream, got %d", len(streams))
+		}
+
+		if streams[0].doneCnt != 1 {
+			t.Errorf("doneCnt = %d, want 1 (a successful upload must call Done exactly once)", streams[0].doneCnt)
+		}
+
+		if streams[0].failCnt != 0 {
+			t.Errorf("failCnt = %d, want 0 (a successful upload must never call Fail)", streams[0].failCnt)
+		}
+	})
+
+	t.Run("failure calls Fail, never Done", func(t *testing.T) {
+		root, _ := buildMultiLeafArchive(t, 1)
+
+		sink := &fakeSink{}
+		vol := &failingVolumes{}
+		up := &stubUploader{}
+		dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+
+		cfg := baseConfig(root, up, vol, dyn)
+		cfg.Progress = sink
+
+		if err := Run(context.Background(), cfg); err == nil {
+			t.Fatal("expected Run to fail when UploadVolumeData errors")
+		}
+
+		streams := sink.snapshot()
+		if len(streams) != 1 {
+			t.Fatalf("expected exactly 1 stream, got %d", len(streams))
+		}
+
+		if streams[0].doneCnt != 0 {
+			t.Errorf("doneCnt = %d, want 0 (a failed upload must never call Done)", streams[0].doneCnt)
+		}
+
+		if streams[0].failCnt != 1 {
+			t.Errorf("failCnt = %d, want 1 (a failed upload must call Fail exactly once)", streams[0].failCnt)
+		}
+	})
 }
 
 // progressReportingVolumes is a VolumeImporter stub that calls onProgress with a fixed byte

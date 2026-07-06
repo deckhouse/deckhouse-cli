@@ -383,18 +383,30 @@ func importNodeData(ctx context.Context, cfg Config, node PlannedNode) error {
 	var (
 		onProgress func(int)
 		setTotal   func(int64)
+		stream     progress.Stream
 	)
 
 	if cfg.Progress != nil {
-		stream := cfg.Progress.NewStream(node.Kind+"/"+node.Name, 0)
-		defer stream.Done()
-
+		stream = cfg.Progress.NewStream(node.Kind+"/"+node.Name, 0)
 		onProgress = stream.IncrBy
 		setTotal = stream.SetTotal
 	}
 
-	if err := cfg.Volumes.UploadVolumeData(ctx, node, diName, cfg.Namespace, setTotal, onProgress); err != nil {
-		return fmt.Errorf("import volume data for %s/%s: %w", node.Kind, node.Name, err)
+	// uploadErr (a plain local, not a named return — nonamedreturns is enforced
+	// repo-wide) decides the stream's terminal outcome below: Done on success,
+	// Fail on error, so a failed/cancelled upload is never counted as complete.
+	uploadErr := cfg.Volumes.UploadVolumeData(ctx, node, diName, cfg.Namespace, setTotal, onProgress)
+
+	if stream != nil {
+		if uploadErr != nil {
+			stream.Fail()
+		} else {
+			stream.Done()
+		}
+	}
+
+	if uploadErr != nil {
+		return fmt.Errorf("import volume data for %s/%s: %w", node.Kind, node.Name, uploadErr)
 	}
 
 	return nil
