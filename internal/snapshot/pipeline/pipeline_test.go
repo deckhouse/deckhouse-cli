@@ -775,13 +775,14 @@ func TestPipeline_PartialChunkResume(t *testing.T) {
 
 // ── recording progress helpers ────────────────────────────────────────────────
 
-// recordedStream is a progress.Stream stub that counts Activate and Done calls.
-// All methods are safe for concurrent use.
+// recordedStream is a progress.Stream stub that counts Activate, Done, and Fail
+// calls. All methods are safe for concurrent use.
 type recordedStream struct {
 	name        string
 	mu          sync.Mutex
 	activateCnt int
 	doneCnt     int
+	failCnt     int
 }
 
 func (s *recordedStream) IncrBy(_ int)     {}
@@ -796,6 +797,12 @@ func (s *recordedStream) Activate() {
 func (s *recordedStream) Done() {
 	s.mu.Lock()
 	s.doneCnt++
+	s.mu.Unlock()
+}
+
+func (s *recordedStream) Fail() {
+	s.mu.Lock()
+	s.failCnt++
 	s.mu.Unlock()
 }
 
