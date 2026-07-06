@@ -41,6 +41,7 @@ const (
 	defaultMaxParallelDownloads = 5
 	defaultTTL                  = "2h"
 	defaultReadinessTimeout     = 5 * time.Minute
+	defaultReleaseTimeout       = 30 * time.Second
 )
 
 // Config holds all parameters for a snapshot download run.
@@ -135,6 +136,14 @@ type Config struct {
 	// Ready before returning an error.  Defaults to 5 minutes.
 	ReadinessTimeout time.Duration
 
+	// ReleaseTimeout bounds each per-volume DataExport release call (the
+	// Get-before-Delete in exporter.ReleaseDataExport).  Defaults to 30 seconds.
+	// downloadVolumeBinding derives a FRESH context.WithTimeout budget from this
+	// value at the moment its release defer actually runs, not once up front, so
+	// a slow OpenExport/WaitReady or a large volume transfer never eats into the
+	// time release itself gets.
+	ReleaseTimeout time.Duration
+
 	// SelectedNodeKind and SelectedNodeName identify a single snapshot-CR node to
 	// download together with its full subtree. When both are set, Run builds the
 	// full tree (needed for path naming and ancestor scaffolding) and restricts
@@ -190,6 +199,10 @@ func applyDefaults(cfg Config) Config {
 
 	if cfg.ReadinessTimeout <= 0 {
 		cfg.ReadinessTimeout = defaultReadinessTimeout
+	}
+
+	if cfg.ReleaseTimeout <= 0 {
+		cfg.ReleaseTimeout = defaultReleaseTimeout
 	}
 
 	if cfg.Log == nil {

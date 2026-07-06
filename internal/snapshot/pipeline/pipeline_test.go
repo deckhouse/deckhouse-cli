@@ -191,6 +191,92 @@ func TestPipeline_OpenExportErrorReleasesCleanly(t *testing.T) {
 		"pre-seeded DataExport %q must be released even though OpenExport failed before returning an *exporter.Export, got err=%v", deName, getErr)
 }
 
+// ctxDeadlineClient wraps a client.Client and, on Get, returns ctx.Err() wrapped
+// as a rate-limiter-style failure whenever ctx is already done, before ever
+// delegating to the underlying client. This reproduces what client-go's rate
+// limiter Wait(ctx) does against an already-expired context in production (the
+// live incident WARN read "client rate limiter Wait returned an error: context
+// deadline exceeded") — behavior the in-memory fake client does not exhibit on
+// its own, since it never inspects ctx.
+type ctxDeadlineClient struct {
+	client.Client
+}
+
+// Get returns ctx's own error, wrapped, if ctx is already done; otherwise it
+// delegates to the wrapped client unchanged.
+func (c ctxDeadlineClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("client rate limiter Wait returned an error: %w", err)
+	}
+
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+// TestPipeline_ReleaseGetsFreshTimeoutAfterSlowOpenExport is a regression guard
+// for a live-reproduced leak distinct from TestPipeline_OpenExportErrorReleasesCleanly
+// above: a FULLY SUCCESSFUL download whose OpenExport (EnsureDataExport +
+// WaitReady) plus volume transfer together take longer than the release
+// timeout used to leak its DataExport. The prior fix computed that timeout
+// ONCE, before calling OpenExport, but the release defer only actually runs at
+// function return — by which point the clock had often already run out on any
+// real-sized volume. This test pins that the timeout budget is instead derived
+// FRESH at the moment the release defer executes, so it is unaffected by how
+// long the preceding work took.
+//
+// cfg.ReleaseTimeout is set to a short duration and OpenExport is stubbed to
+// sleep past it before returning success — no real 30-second wait is needed;
+// only the relative ordering (OpenExport's delay exceeds ReleaseTimeout)
+// matters. ctxDeadlineClient supplies the "already-expired context fails the
+// very next call" behavior that a real rate-limited client exhibits, which is
+// what actually distinguishes the fixed and pre-fix implementations here.
+func TestPipeline_ReleaseGetsFreshTimeoutAfterSlowOpenExport(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("B"), 600)
+
+	srv := makeBlockServer(t, rawBlock)
+	defer srv.Close()
+
+	c := ctxDeadlineClient{buildFakeClient(t)}
+	outputDir := t.TempDir()
+
+	const releaseTimeout = 20 * time.Millisecond
+
+	deName := exporter.DataExportName(diskSnapName)
+
+	de := &deapi.DataExport{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "DataExport"},
+		ObjectMeta: metav1.ObjectMeta{Name: deName, Namespace: testNS},
+	}
+	require.NoError(t, c.Create(context.Background(), de))
+
+	cfg := pipeline.Config{
+		Namespace:      testNS,
+		RootSnapshot:   rootSnapshot,
+		OutputDir:      outputDir,
+		Workers:        1,
+		KubeClient:     c,
+		ReleaseTimeout: releaseTimeout,
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			// Simulate WaitReady taking longer than ReleaseTimeout, mirroring the
+			// live repro where WaitReady alone took ~30s against a fixed 30s
+			// budget. A pre-fix cleanupCtx created before this sleep would
+			// already be expired by the time release runs.
+			time.Sleep(3 * releaseTimeout)
+
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	err := runPipeline(context.Background(), cfg)
+	require.NoError(t, err, "expected the download to succeed despite the slow OpenExport")
+
+	got := &deapi.DataExport{}
+	getErr := c.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: deName}, got)
+	require.Truef(t, apierrors.IsNotFound(getErr),
+		"DataExport %q must be released on a fully successful download even though OpenExport+transfer took longer than ReleaseTimeout, got err=%v", deName, getErr)
+}
+
 // TestPipeline_BlockResumeAfterMerge verifies that when data.bin.zst already exists
 // in a node directory (crash-after-merge-before-snapshot.yaml window), the pipeline
 // skips DataExport creation entirely and only calls FinalizeNode.

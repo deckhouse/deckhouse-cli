@@ -23,7 +23,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -626,12 +625,6 @@ func downloadVolumeBinding(
 
 	defer cfg.streamSem.Release(1)
 
-	// cleanupCtx is deliberately not derived from ctx so that release still runs
-	// when ctx is cancelled (e.g. by errgroup on sibling error or by SIGINT).
-	// A bounded timeout prevents release from hanging forever.
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	defer cleanupCancel()
-
 	// Register the release-by-name defer BEFORE calling cfg.OpenExport, so it
 	// runs on EVERY return path — including when OpenExport itself fails, e.g.
 	// ctx is cancelled while still polling WaitReady. cfg.OpenExport's
@@ -643,6 +636,18 @@ func downloadVolumeBinding(
 	// would have returned) works even when OpenExport never returned one:
 	// exporter.ReleaseDataExport treats NotFound as success, so this defer is a
 	// safe no-op on the paths where no DataExport was ever created.
+	//
+	// The release timeout is deliberately derived FRESH, right here inside the
+	// closure, at the moment it actually runs — NOT once up front before
+	// cfg.OpenExport. This closure only executes at function return, i.e. after
+	// the full OpenExport (EnsureDataExport + WaitReady) AND the entire volume
+	// transfer have already completed, which routinely exceeds ReleaseTimeout for
+	// any real-sized volume. A single timeout created before that work would
+	// already be expired by the time release is attempted, failing the release
+	// Get immediately even on a fully successful download (live-reproduced: see
+	// the dataexport-release-fresh-cleanup-deadline incident). Deriving from
+	// context.WithoutCancel(ctx) keeps release running when ctx itself is
+	// cancelled (e.g. by errgroup on sibling error or by SIGINT).
 	defer func() {
 		if cfg.KeepExports {
 			cfg.Log.Info("leaving DataExport in cluster (--cleanup=false)",
@@ -651,8 +656,11 @@ func downloadVolumeBinding(
 			return
 		}
 
+		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.ReleaseTimeout)
+		defer releaseCancel()
+
 		deName := exporter.DataExportName(leafRef.Name)
-		if relErr := exporter.ReleaseDataExport(cleanupCtx, cfg.KubeClient, namespace, deName); relErr != nil {
+		if relErr := exporter.ReleaseDataExport(releaseCtx, cfg.KubeClient, namespace, deName); relErr != nil {
 			cfg.Log.Warn("failed to release DataExport",
 				slog.String("leaf", leafRef.Name),
 				slog.String("error", relErr.Error()))
