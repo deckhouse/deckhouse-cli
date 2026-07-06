@@ -147,13 +147,29 @@ func TestPipeline_HappyPath(t *testing.T) {
 		"disk-snap snapshot.yaml must not be rewritten on second run")
 }
 
-// TestPipeline_OpenExportErrorReleasesCleanly verifies that when OpenExport fails
-// the pipeline returns an error and no DataExport objects linger.
+// TestPipeline_OpenExportErrorReleasesCleanly is a regression guard for a
+// live-reproduced leak: OpenExport's production implementation creates the
+// DataExport CR (EnsureDataExport) BEFORE waiting for it to become Ready
+// (WaitReady), so a cancellation/error during that wait can leave a DataExport
+// behind even though OpenExport itself returns an error and no *exporter.Export
+// value. The fake OpenExport below simulates exactly that: the DataExport is
+// pre-seeded in the fake client (as if EnsureDataExport already created it),
+// then OpenExport still fails (as if WaitReady errored). The pipeline must
+// release the pre-seeded DataExport by its deterministic name even though it
+// never received an *exporter.Export to call Release through.
 func TestPipeline_OpenExportErrorReleasesCleanly(t *testing.T) {
 	t.Parallel()
 
 	c := buildFakeClient(t)
 	outputDir := t.TempDir()
+
+	deName := exporter.DataExportName(diskSnapName)
+
+	de := &deapi.DataExport{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "DataExport"},
+		ObjectMeta: metav1.ObjectMeta{Name: deName, Namespace: testNS},
+	}
+	require.NoError(t, c.Create(context.Background(), de))
 
 	cfg := pipeline.Config{
 		Namespace:    testNS,
@@ -162,12 +178,17 @@ func TestPipeline_OpenExportErrorReleasesCleanly(t *testing.T) {
 		Workers:      1,
 		KubeClient:   c,
 		OpenExport: func(_ context.Context, _ string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return nil, errors.New("simulated DataExport creation failure")
+			return nil, errors.New("simulated WaitReady cancellation after EnsureDataExport created the CR")
 		},
 	}
 
 	err := runPipeline(context.Background(), cfg)
 	require.Error(t, err, "expected pipeline to fail when OpenExport errors")
+
+	got := &deapi.DataExport{}
+	getErr := c.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: deName}, got)
+	require.Truef(t, apierrors.IsNotFound(getErr),
+		"pre-seeded DataExport %q must be released even though OpenExport failed before returning an *exporter.Export, got err=%v", deName, getErr)
 }
 
 // TestPipeline_BlockResumeAfterMerge verifies that when data.bin.zst already exists
@@ -1083,7 +1104,10 @@ func TestPipeline_KeepExports(t *testing.T) {
 			c := buildFakeClient(t)
 			outputDir := t.TempDir()
 
-			const deName = "de-keep-exports"
+			// The pipeline releases by the deterministic name derived from the leaf's
+			// own node-ref name (exporter.DataExportName), not from whatever name the
+			// OpenExport stub happens to hand back — release must find this object.
+			deName := exporter.DataExportName(diskSnapName)
 
 			de := &deapi.DataExport{
 				TypeMeta:   metav1.TypeMeta{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "DataExport"},

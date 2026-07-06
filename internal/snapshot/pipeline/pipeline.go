@@ -626,17 +626,23 @@ func downloadVolumeBinding(
 
 	defer cfg.streamSem.Release(1)
 
-	exp, err := cfg.OpenExport(ctx, namespace, leafRef, cfg.TTL)
-	if err != nil {
-		return fmt.Errorf("open DataExport for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
-	}
-
 	// cleanupCtx is deliberately not derived from ctx so that release still runs
 	// when ctx is cancelled (e.g. by errgroup on sibling error or by SIGINT).
 	// A bounded timeout prevents release from hanging forever.
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cleanupCancel()
 
+	// Register the release-by-name defer BEFORE calling cfg.OpenExport, so it
+	// runs on EVERY return path — including when OpenExport itself fails, e.g.
+	// ctx is cancelled while still polling WaitReady. cfg.OpenExport's
+	// production implementation creates the DataExport CR (EnsureDataExport)
+	// BEFORE waiting for it to become Ready (WaitReady); a cancellation during
+	// that wait previously returned before any cleanup defer was registered,
+	// permanently leaking the DataExport until its TTL expired. Releasing by
+	// the deterministic name (rather than through the *exporter.Export OpenExport
+	// would have returned) works even when OpenExport never returned one:
+	// exporter.ReleaseDataExport treats NotFound as success, so this defer is a
+	// safe no-op on the paths where no DataExport was ever created.
 	defer func() {
 		if cfg.KeepExports {
 			cfg.Log.Info("leaving DataExport in cluster (--cleanup=false)",
@@ -645,12 +651,18 @@ func downloadVolumeBinding(
 			return
 		}
 
-		if relErr := exp.Release(cleanupCtx, cfg.KubeClient); relErr != nil {
+		deName := exporter.DataExportName(leafRef.Name)
+		if relErr := exporter.ReleaseDataExport(cleanupCtx, cfg.KubeClient, namespace, deName); relErr != nil {
 			cfg.Log.Warn("failed to release DataExport",
 				slog.String("leaf", leafRef.Name),
 				slog.String("error", relErr.Error()))
 		}
 	}()
+
+	exp, err := cfg.OpenExport(ctx, namespace, leafRef, cfg.TTL)
+	if err != nil {
+		return fmt.Errorf("open DataExport for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
+	}
 
 	// Mark the pre-created stream Done on success or Fail on error when we
 	// return. downloadErr is a plain local (not a named return — nonamedreturns
