@@ -64,6 +64,15 @@ const (
 	defaultImportTTL = "1h"
 )
 
+// snapshotClientQPS/snapshotClientBurst raise the kube client's rate limiter
+// above client-go's built-in defaults (QPS=5, Burst=10) for the SafeClient
+// this command builds — see the SetQPS call site for why. Mirrors the same
+// pinned values used by `d8 snapshot download`.
+const (
+	snapshotClientQPS   float32 = 50
+	snapshotClientBurst int     = 100
+)
+
 // NewCommand builds the `d8 snapshot upload` cobra command.
 func NewCommand(log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
@@ -209,6 +218,15 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("building kube client: %w", err)
 	}
+
+	// Raise the client-side rate limiter above client-go's built-in QPS=5/
+	// Burst=10 defaults: an upload opens up to --workers concurrent
+	// DataImport lifecycles that all share this client, and several leaves can
+	// finish within the same short window. At the old defaults a burst of
+	// concurrent requests could make the rate limiter's Wait block long enough
+	// to fail a cleanup/status call. Set BEFORE building kubeClient/aggClient/
+	// dynClient so all three inherit the higher limits.
+	sc.SetQPS(snapshotClientQPS, snapshotClientBurst)
 
 	kubeClient, err := sc.NewRTClient(
 		snapshotapi.AddToScheme,

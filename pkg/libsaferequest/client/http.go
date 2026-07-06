@@ -69,6 +69,17 @@ func (c *SafeClient) SetProbeEndpoint(timeout time.Duration, targetHost, kubeSer
 	c.restConfig.Timeout = timeout
 }
 
+// SetQPS raises the underlying rest.Config's client-side rate limiter above
+// client-go's built-in defaults (QPS=5, Burst=10). Callers with many
+// concurrent short-lived requests against the SAME client (e.g. several
+// DataExport Get/Create/Delete lifecycles racing to completion) opt into this
+// explicitly; SafeClient's own default is unchanged for every other caller of
+// NewSafeClient that never calls it.
+func (c *SafeClient) SetQPS(qps float32, burst int) {
+	c.restConfig.QPS = qps
+	c.restConfig.Burst = burst
+}
+
 func (c *SafeClient) HTTPDo(req *http.Request) (*http.Response, error) {
 	if len(req.Header.Get("Authorization")) != 0 {
 		httpClient, err := rest.HTTPClientFor(c.restConfig)
