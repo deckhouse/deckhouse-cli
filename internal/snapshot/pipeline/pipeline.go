@@ -595,9 +595,10 @@ func multiDest(nodeDir, pvc, ext string) volumeDestPaths {
 // leafRef, downloads the volume data (block or filesystem) to dest, and releases
 // the DataExport on completion or error.
 //
-// stream is the pre-created progress handle for this volume; it is marked Done when
-// downloadVolumeBinding returns (via defer) and must not be nil-checked by the caller.
-// Pass nil when progress tracking is disabled.
+// stream is the pre-created progress handle for this volume; it is marked Done on
+// success or Fail on error when downloadVolumeBinding returns (via defer, once the
+// DataExport has opened) and must not be nil-checked by the caller. Pass nil when
+// progress tracking is disabled.
 //
 // leafRef addresses the snapshot leaf CR that the DataExport controller will
 // resolve via leaf.status.boundSnapshotContentName → SnapshotContent → dataRef.
@@ -651,9 +652,23 @@ func downloadVolumeBinding(
 		}
 	}()
 
-	// Mark the pre-created stream as done when we return (regardless of outcome).
+	// Mark the pre-created stream Done on success or Fail on error when we
+	// return. downloadErr is a plain local (not a named return — nonamedreturns
+	// is enforced repo-wide) set on every path below and read only by this
+	// single deferred closure, so the terminal Stream call always matches the
+	// function's real outcome instead of unconditionally reporting success.
+	var downloadErr error
+
 	if stream != nil {
-		defer stream.Done()
+		defer func() {
+			if downloadErr != nil {
+				stream.Fail()
+
+				return
+			}
+
+			stream.Done()
+		}()
 	}
 
 	// Flip the bar from "waiting for export…" to the live byte-counter display
@@ -668,7 +683,7 @@ func downloadVolumeBinding(
 
 	switch exp.VolumeMode() {
 	case "Block":
-		return downloadBlock(ctx, cfg, dest, exp, stream)
+		downloadErr = downloadBlock(ctx, cfg, dest, exp, stream)
 
 	case "Filesystem":
 		var (
@@ -681,11 +696,13 @@ func downloadVolumeBinding(
 			setTotal = stream.SetTotal
 		}
 
-		return downloadFS(ctx, cfg, dest.fsTarPath, dest.fsTarStagingDir, exp, setTotal, onProgress)
+		downloadErr = downloadFS(ctx, cfg, dest.fsTarPath, dest.fsTarStagingDir, exp, setTotal, onProgress)
 
 	default:
-		return fmt.Errorf("unsupported volume mode %q for leaf %s/%s", exp.VolumeMode(), leafRef.Kind, leafRef.Name)
+		downloadErr = fmt.Errorf("unsupported volume mode %q for leaf %s/%s", exp.VolumeMode(), leafRef.Kind, leafRef.Name)
 	}
+
+	return downloadErr
 }
 
 func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *exporter.Export, stream progress.Stream) error {

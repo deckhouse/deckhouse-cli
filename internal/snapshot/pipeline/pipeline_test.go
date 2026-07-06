@@ -896,6 +896,7 @@ func TestPipeline_Progress_PrecreateStreams(t *testing.T) {
 		require.Equal(t, diskSnapName, streams[0].name, "stream name = node ref name")
 		require.Equal(t, 1, streams[0].activateCnt, "leaf stream must be Activated exactly once")
 		require.Equal(t, 1, streams[0].doneCnt, "leaf stream must be Done exactly once")
+		require.Equal(t, 0, streams[0].failCnt, "a successful download must never call Fail")
 	})
 
 	t.Run("BindingLeaf", func(t *testing.T) {
@@ -947,6 +948,7 @@ func TestPipeline_Progress_PrecreateStreams(t *testing.T) {
 			"binding stream name = VS CR name (node.Ref().Name)")
 		require.Equal(t, 1, streams[0].activateCnt, "binding stream must be Activated exactly once")
 		require.Equal(t, 1, streams[0].doneCnt, "binding stream must be Done exactly once")
+		require.Equal(t, 0, streams[0].failCnt, "a successful download must never call Fail")
 	})
 }
 
@@ -1004,6 +1006,53 @@ func TestPipeline_Progress_ResumeSkip_NeverActivated(t *testing.T) {
 		"resume-skipped stream must never be Activated")
 	require.Equal(t, 1, streams[0].doneCnt,
 		"resume-skipped stream must be Done exactly once (in precreateStreams)")
+	require.Equal(t, 0, streams[0].failCnt, "a resume skip must never call Fail")
+}
+
+// TestPipeline_Progress_DownloadFailure_CallsFailNotDone verifies that when a
+// volume download fails AFTER its DataExport opened and its stream was
+// Activated (e.g. the block server errors mid-transfer or the connection is
+// cut), downloadVolumeBinding calls stream.Fail() exactly once and
+// stream.Done() zero times — the interrupted volume must never be counted
+// toward "N/M volumes downloaded". Before the fix this test observed doneCnt
+// == 1 (the unconditional `defer stream.Done()`), which is the exact live bug
+// reported on a cluster: an interrupted download's own deferred Done() call
+// incremented the completed-volume counter.
+func TestPipeline_Progress_DownloadFailure_CallsFailNotDone(t *testing.T) {
+	t.Parallel()
+
+	// A block server whose HEAD response always errors, so downloadBlock fails
+	// inside downloadVolumeBinding right after stream.Activate() has run.
+	failingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "simulated block volume failure", http.StatusInternalServerError)
+	}))
+	defer failingSrv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+	rec := &recordingSink{}
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		Progress:             rec,
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-fail", "Block", failingSrv.URL, exporter.NewFetcher(failingSrv.Client())), nil
+		},
+	}
+
+	err := runPipeline(context.Background(), cfg)
+	require.Error(t, err, "expected pipeline to fail when the block volume HEAD request errors")
+
+	streams := rec.snapshot()
+	require.Len(t, streams, 1, "exactly 1 stream for the single volume leaf")
+	require.Equal(t, 1, streams[0].activateCnt, "stream must still be Activated before the failure")
+	require.Equal(t, 0, streams[0].doneCnt, "a failed download must never call Done")
+	require.Equal(t, 1, streams[0].failCnt, "a failed download must call Fail exactly once")
 }
 
 // TestPipeline_KeepExports verifies the --cleanup / Config.KeepExports gate on
