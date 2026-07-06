@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -232,7 +233,23 @@ func TestDownloadBlockChunks_SkipsExistingChunks(t *testing.T) {
 		mtimes[name] = info.ModTime()
 	}
 
-	// Second download — all chunks already exist.
+	// Second download — all chunks already exist. A recording onProgress proves
+	// the resume-skip path still credits each skipped chunk's raw length: the
+	// bar must be able to reach totalSize even when every chunk is already on
+	// disk, matching the already-fixed filesystem-path behavior
+	// (stageCompressedFile). Before the fix, the skip branch never called
+	// onProgress at all, so this sum would be 0.
+	var (
+		mu       sync.Mutex
+		credited int64
+	)
+
+	recordProgress := func(n int) {
+		mu.Lock()
+		credited += int64(n)
+		mu.Unlock()
+	}
+
 	err = volume.DownloadBlockChunks(
 		context.Background(),
 		slog.Default(),
@@ -243,9 +260,12 @@ func TestDownloadBlockChunks_SkipsExistingChunks(t *testing.T) {
 		1,
 		fetcher,
 		codec,
-		nil,
+		recordProgress,
 	)
 	require.NoError(t, err)
+
+	assert.Equal(t, totalSize, credited,
+		"resume skip must credit onProgress with each chunk's raw length so the sum reaches totalSize")
 
 	// Files must not have been modified (skipped, not re-fetched).
 	for _, name := range names {
