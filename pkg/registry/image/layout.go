@@ -115,6 +115,11 @@ func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 		return fmt.Errorf("get image tag reference: %w", err)
 	}
 
+	typedMeta, ok := meta.(*ImageMeta)
+	if !ok {
+		return fmt.Errorf("unexpected image metadata type %T, want *ImageMeta", meta)
+	}
+
 	newDigest := meta.GetDigest()
 	if existing, ok := l.metaByTag[tag]; ok {
 		if existingDigest := existing.GetDigest(); existingDigest != nil &&
@@ -136,7 +141,7 @@ func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 	}
 
 	// TODO: support nesting tags in image
-	l.metaByTag[tag] = meta.(*ImageMeta)
+	l.metaByTag[tag] = typedMeta
 
 	return nil
 }
