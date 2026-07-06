@@ -740,7 +740,7 @@ func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *e
 		return fmt.Errorf("download block chunks: %w", err)
 	}
 
-	return volume.MergeBlockChunks(dest.chunkDir, dest.blockPath, totalSize, cfg.ChunkSize, cfg.Compression.Ext())
+	return volume.MergeBlockChunks(ctx, dest.chunkDir, dest.blockPath, totalSize, cfg.ChunkSize, cfg.Compression.Ext())
 }
 
 func downloadFS(ctx context.Context, cfg Config, tarPath, stagingDir string, exp *exporter.Export, setTotal func(total int64), onProgress func(n int)) error {

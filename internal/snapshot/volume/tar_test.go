@@ -19,6 +19,8 @@ package volume_test
 import (
 	"archive/tar"
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -97,7 +99,7 @@ func TestWriteTar_Basic(t *testing.T) {
 
 	outPath := filepath.Join(outputDir, "data.tar")
 
-	err := volume.WriteTar(outPath, stagingDir, entries)
+	err := volume.WriteTar(context.Background(), outPath, stagingDir, entries)
 	require.NoError(t, err)
 
 	_, err = os.Stat(outPath)
@@ -147,7 +149,7 @@ func TestWriteTar_Sorted(t *testing.T) {
 
 	outPath := filepath.Join(outputDir, "data.tar")
 
-	err := volume.WriteTar(outPath, stagingDir, entries)
+	err := volume.WriteTar(context.Background(), outPath, stagingDir, entries)
 	require.NoError(t, err)
 
 	headers, _ := readTar(t, outPath)
@@ -175,7 +177,7 @@ func TestWriteTar_Defaults(t *testing.T) {
 
 	outPath := filepath.Join(outputDir, "data.tar")
 
-	err := volume.WriteTar(outPath, stagingDir, entries)
+	err := volume.WriteTar(context.Background(), outPath, stagingDir, entries)
 	require.NoError(t, err)
 
 	headers, _ := readTar(t, outPath)
@@ -193,6 +195,40 @@ func TestWriteTar_Defaults(t *testing.T) {
 	assert.Equal(t, int64(0o777), headers[2].Mode, "default link mode")
 }
 
+// TestWriteTar_CancelledContext proves that WriteTar honors an already-
+// cancelled context: it must return promptly with an error wrapping
+// ctx.Err(), and must not leave a partial file at the final (non-.tmp) output
+// path — the in-progress AtomicWriter is aborted rather than committed. The
+// staging directory (untouched by WriteTar) survives so a subsequent run can
+// resume assembly from the same staged files.
+func TestWriteTar_CancelledContext(t *testing.T) {
+	t.Parallel()
+
+	stagingDir := t.TempDir()
+	outputDir := t.TempDir()
+
+	writeStagingFile(t, stagingDir, "hello.txt", []byte("hello world"))
+
+	entries := []volume.TarEntry{
+		{RelPath: "hello.txt", Type: "file"},
+	}
+
+	outPath := filepath.Join(outputDir, "data.tar")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := volume.WriteTar(ctx, outPath, stagingDir, entries)
+	require.Error(t, err, "WriteTar must fail with an already-cancelled context")
+	assert.True(t, errors.Is(err, context.Canceled), "error must wrap context.Canceled, got: %v", err)
+
+	_, statErr := os.Stat(outPath)
+	assert.True(t, os.IsNotExist(statErr), "partial output must not exist after cancellation")
+
+	_, stagingErr := os.Stat(filepath.Join(stagingDir, "hello.txt"))
+	assert.NoError(t, stagingErr, "staging file must survive a cancelled assembly for resume")
+}
+
 func TestWriteTar_Atomic(t *testing.T) {
 	t.Parallel()
 
@@ -206,7 +242,7 @@ func TestWriteTar_Atomic(t *testing.T) {
 		{RelPath: "missing.txt", Type: "file"},
 	}
 
-	err := volume.WriteTar(outPath, stagingDir, entries)
+	err := volume.WriteTar(context.Background(), outPath, stagingDir, entries)
 	require.Error(t, err, "WriteTar must fail for missing staging file")
 
 	// The final output file must NOT exist after a failed write.
@@ -221,7 +257,7 @@ func TestWriteTar_Empty(t *testing.T) {
 
 	outPath := filepath.Join(outputDir, "data.tar")
 
-	err := volume.WriteTar(outPath, t.TempDir(), nil)
+	err := volume.WriteTar(context.Background(), outPath, t.TempDir(), nil)
 	require.NoError(t, err, "empty entry list must produce a valid (empty) tar")
 
 	headers, _ := readTar(t, outPath)
@@ -246,7 +282,7 @@ func TestWriteTar_ZeroMtime(t *testing.T) {
 
 	outPath := filepath.Join(outputDir, "data.tar")
 
-	err := volume.WriteTar(outPath, stagingDir, entries)
+	err := volume.WriteTar(context.Background(), outPath, stagingDir, entries)
 	require.NoError(t, err)
 
 	headers, _ := readTar(t, outPath)
@@ -277,7 +313,7 @@ func TestWriteTar_PAXFormat(t *testing.T) {
 
 	outPath := filepath.Join(outputDir, "data.tar")
 
-	err := volume.WriteTar(outPath, stagingDir, entries)
+	err := volume.WriteTar(context.Background(), outPath, stagingDir, entries)
 	require.NoError(t, err)
 
 	headers, _ := readTar(t, outPath)
@@ -322,7 +358,7 @@ func TestWriteTar_CompressedFileEntries(t *testing.T) {
 
 	outPath := filepath.Join(outputDir, "data.tar")
 
-	require.NoError(t, volume.WriteTar(outPath, stagingDir, entries))
+	require.NoError(t, volume.WriteTar(context.Background(), outPath, stagingDir, entries))
 
 	headers, contents := readTar(t, outPath)
 
