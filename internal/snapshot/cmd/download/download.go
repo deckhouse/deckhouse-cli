@@ -57,6 +57,17 @@ const (
 	flagCleanup                = "cleanup"
 )
 
+// snapshotClientQPS/snapshotClientBurst raise the kube client's rate limiter
+// above client-go's built-in defaults (QPS=5, Burst=10) for the SafeClient
+// this command builds — see the SetQPS call site for why. A conservative,
+// well-established kubectl-style bump: enough headroom for the
+// --max-parallel-downloads/--workers defaults without materially increasing
+// load on a healthy API server.
+const (
+	snapshotClientQPS   float32 = 50
+	snapshotClientBurst int     = 100
+)
+
 // NewCommand builds the `d8 snapshot download` cobra command.
 func NewCommand(log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
@@ -214,6 +225,17 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("building kube client: %w", err)
 	}
+
+	// Raise the client-side rate limiter above client-go's built-in QPS=5/
+	// Burst=10 defaults: a download opens up to --max-parallel-downloads
+	// concurrent DataExport lifecycles (EnsureDataExport, WaitReady polling,
+	// ReleaseDataExport) that all share this client, and several volumes can
+	// complete within the same 30s cleanup window. At the old defaults, that
+	// burst of concurrent Get/Delete calls could make the rate limiter's Wait
+	// block past the cleanup deadline, silently leaking a DataExport even on a
+	// fully successful run. Set BEFORE building kubeClient/aggClient so both
+	// inherit the higher limits.
+	sc.SetQPS(snapshotClientQPS, snapshotClientBurst)
 
 	kubeClient, err := sc.NewRTClient(
 		snapshotapi.AddToScheme,
