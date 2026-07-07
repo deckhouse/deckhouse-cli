@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -283,10 +284,14 @@ func fsTestServerWithSizes(t *testing.T) (*httptest.Server, []fsTestFile) {
 					`]}`, len(files[1].content)))
 
 		case "/files/root.txt":
-			_, _ = w.Write(files[0].content)
+			// Both items declare a "size", so they download via the durable
+			// chunked path (stageChunkedFile/DownloadBlockChunks), which issues
+			// Range GETs — http.ServeContent (mirroring the real data-exporter's
+			// sendFile idiom) is required to honor them.
+			http.ServeContent(w, r, "root.txt", time.Time{}, bytes.NewReader(files[0].content))
 
 		case "/files/subdir/nested.txt":
-			_, _ = w.Write(files[1].content)
+			http.ServeContent(w, r, "nested.txt", time.Time{}, bytes.NewReader(files[1].content))
 
 		default:
 			http.NotFound(w, r)

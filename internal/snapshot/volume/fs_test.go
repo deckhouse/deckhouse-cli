@@ -20,6 +20,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -530,7 +532,11 @@ func TestDownloadFilesystemVolume_RealisticAttributes(t *testing.T) {
 					`]}`)
 
 		case "/files/file.txt":
-			_, _ = w.Write(fileContent)
+			// The listing declares a "size" for file.txt, so it now downloads via
+			// the durable chunked path (stageChunkedFile/DownloadBlockChunks),
+			// which issues Range GETs — http.ServeContent (mirroring the real
+			// data-exporter's sendFile idiom) is required to honor them.
+			http.ServeContent(w, r, "file.txt", time.Time{}, bytes.NewReader(fileContent))
 
 		default:
 			http.NotFound(w, r)
@@ -716,10 +722,12 @@ func decodeZstdTarEntry(t *testing.T, tarPath, entryName string) []byte {
 }
 
 // TestDownloadFilesystemVolume_LargeFile_ChunkedPathByteIdentical verifies that
-// a file whose declared size exceeds chunkSize is staged via Range-based
-// chunks (proven by every request to it carrying a Range header) and produces
-// a byte-identical result to the same file staged via the non-chunked
-// single-shot path (chunkSize larger than the file).
+// a file whose declared size exceeds chunkSize is staged via MULTIPLE
+// Range-based chunks (proven by every request to it carrying a Range header)
+// and produces a byte-identical result to the same file staged with a
+// chunkSize larger than the file, which still uses the durable chunked path
+// (every known-size file does, since fs-whole-file-durable-partial-resume) but
+// collapses to a SINGLE chunk.
 func TestDownloadFilesystemVolume_LargeFile_ChunkedPathByteIdentical(t *testing.T) {
 	t.Parallel()
 
@@ -762,7 +770,8 @@ func TestDownloadFilesystemVolume_LargeFile_ChunkedPathByteIdentical(t *testing.
 		}
 	}
 
-	// Non-chunked run: chunkSize larger than the file keeps the single-shot path.
+	// Single-chunk run: chunkSize larger than the file still uses the chunked
+	// path (every known-size file does), but collapses to exactly one chunk.
 	plainSrv, plainTracker := newRangeTrackingFSServer(t, "big.bin", content)
 
 	plainNodeDir := t.TempDir()
@@ -782,41 +791,39 @@ func TestDownloadFilesystemVolume_LargeFile_ChunkedPathByteIdentical(t *testing.
 		nil,
 		nil,
 	); err != nil {
-		t.Fatalf("non-chunked DownloadFilesystemVolume: %v", err)
+		t.Fatalf("single-chunk DownloadFilesystemVolume: %v", err)
 	}
 
 	plainRanges := plainTracker.snapshot()
-	if len(plainRanges) != 1 || plainRanges[0] {
-		t.Fatalf("expected exactly one non-Range request, got %v", plainRanges)
+	if len(plainRanges) != 1 || !plainRanges[0] {
+		t.Fatalf("expected exactly one Range request (single-chunk chunked path), got %v", plainRanges)
 	}
 
 	chunkedContent := decodeZstdTarEntry(t, chunkedTarPath, "big.bin"+codec.Ext())
 	plainContent := decodeZstdTarEntry(t, plainTarPath, "big.bin"+codec.Ext())
 
 	if !bytes.Equal(chunkedContent, content) {
-		t.Error("chunked path content does not match original")
+		t.Error("multi-chunk path content does not match original")
 	}
 
 	if !bytes.Equal(plainContent, content) {
-		t.Error("non-chunked path content does not match original")
+		t.Error("single-chunk path content does not match original")
 	}
 
 	if !bytes.Equal(chunkedContent, plainContent) {
-		t.Error("chunked and non-chunked paths produced different decoded content")
+		t.Error("multi-chunk and single-chunk paths produced different decoded content")
 	}
 }
 
-// TestDownloadFilesystemVolume_SmallFile_NoChunkDirCreated verifies that a file
-// at or below chunkSize keeps the unchanged single-shot path: exactly one
-// non-Range GET is issued and no per-file chunk directory is ever created.
-//
-// WriteTar is deliberately made to fail (by pre-occupying its AtomicWriter's
-// "<tarPath>.tmp" target with a directory) so DownloadFilesystemVolume returns
-// an error right after per-file staging completes but before the staging
-// directory is removed — otherwise a successful run always removes stagingDir
-// (and, on the chunked path, MergeBlockChunks always removes the now-empty
-// chunk directory too), leaving nothing on disk to assert against either way.
-func TestDownloadFilesystemVolume_SmallFile_NoChunkDirCreated(t *testing.T) {
+// TestDownloadFilesystemVolume_KnownSizeSmallFile_UsesDurableChunkedPath
+// verifies the fs-whole-file-durable-partial-resume fix: a file with a KNOWN
+// declared size, even one well below chunkSize, is staged via the durable
+// Range-based chunked path (stageChunkedFile) rather than the old whole-file
+// single-shot GET — proven by its GET carrying a Range header — so it
+// inherits sub-file durable resume regardless of its size relative to
+// chunkSize. Before this fix, such a file used stageWholeFile and any
+// interrupt mid-transfer restarted it from byte zero.
+func TestDownloadFilesystemVolume_KnownSizeSmallFile_UsesDurableChunkedPath(t *testing.T) {
 	t.Parallel()
 
 	content := []byte("small-file-content-well-below-the-chunk-size-threshold")
@@ -828,13 +835,9 @@ func TestDownloadFilesystemVolume_SmallFile_NoChunkDirCreated(t *testing.T) {
 	tarPath := filepath.Join(nodeDir, archive.FsTarName)
 	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
 
-	if err := os.MkdirAll(tarPath+".tmp", 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testChunkSize := int64(len(content)) * 2 // threshold well above the file's size
 
-	testChunkSize := int64(len(content)) * 2
-
-	err := volume.DownloadFilesystemVolume(
+	if err := volume.DownloadFilesystemVolume(
 		context.Background(),
 		slog.Default(),
 		tarPath,
@@ -846,23 +849,82 @@ func TestDownloadFilesystemVolume_SmallFile_NoChunkDirCreated(t *testing.T) {
 		codec,
 		nil,
 		nil,
-	)
-	if err == nil {
-		t.Fatal("expected DownloadFilesystemVolume to fail (poisoned tar.tmp path)")
+	); err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 
-	destPath := filepath.Join(stagingDir, "small.bin"+codec.Ext())
-	if _, statErr := os.Stat(destPath); statErr != nil {
-		t.Fatalf("expected staged file at %s: %v", destPath, statErr)
+	if snap := tracker.snapshot(); len(snap) != 1 || !snap[0] {
+		t.Errorf("expected exactly one Range GET (durable chunked path), got %v", snap)
 	}
 
-	chunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName("small.bin", codec.Ext())))
-	if _, statErr := os.Stat(chunkDir); !os.IsNotExist(statErr) {
-		t.Errorf("chunk directory %s must not exist for a file at/below chunkSize", chunkDir)
+	got := decodeZstdTarEntry(t, tarPath, "small.bin"+codec.Ext())
+	if !bytes.Equal(got, content) {
+		t.Error("staged content does not match original")
+	}
+}
+
+// TestDownloadFilesystemVolume_UnknownSizeFile_UsesWholeFileFallback verifies
+// that a file whose listing omits "size" (indistinguishable from a genuinely
+// empty file, see parseItemSize) keeps the original single-shot GET +
+// codec.EncodeStream path: DownloadBlockChunks/MergeBlockChunks need a
+// trustworthy total size up front to compute chunk geometry, which an
+// unknown declared size cannot provide.
+func TestDownloadFilesystemVolume_UnknownSizeFile_UsesWholeFileFallback(t *testing.T) {
+	t.Parallel()
+
+	content := []byte("unknown-size-file-content")
+	codec := mustCodec(t, "zstd")
+
+	tracker := &rangeTrackingServer{}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"unknown.bin","type":"file","uri":"unknown.bin","attributes":{}}`+
+				`]}`)
+
+		case "/files/unknown.bin":
+			tracker.record(r.Header.Get("Range") != "")
+			_, _ = w.Write(content)
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.Default(),
+		tarPath,
+		stagingDir,
+		srv.URL+"/files/",
+		1,
+		0,
+		newFSFetcher(srv),
+		codec,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 
 	if snap := tracker.snapshot(); len(snap) != 1 || snap[0] {
-		t.Errorf("expected exactly one non-Range GET, got %v", snap)
+		t.Errorf("expected exactly one non-Range GET (whole-file fallback), got %v", snap)
+	}
+
+	got := decodeZstdTarEntry(t, tarPath, "unknown.bin"+codec.Ext())
+	if !bytes.Equal(got, content) {
+		t.Error("staged content does not match original")
 	}
 }
 
@@ -1123,79 +1185,115 @@ func TestDownloadFilesystemVolume_LargeFile_ChunkSizeChanged_ResumeNotCorrupted(
 	}
 }
 
-// TestDownloadFilesystemVolume_ThresholdCrossing_OrphanChunkDirRemoved
-// verifies the review-noted tidiness fix bundled with the geometry guard: a
-// file chunked in an earlier run (chunk dir present, never merged) that falls
-// BELOW the effective chunk-size threshold in a later run is staged via the
-// unchanged whole-file branch, and that branch must best-effort remove the
-// now-orphaned per-file chunk directory rather than leaving it behind
-// (non-corrupting on its own — MergeBlockChunks/stageWholeFile never read it —
-// but it would otherwise accumulate across chunk-size changes).
-//
-// WriteTar is deliberately made to fail (poisoning "<tarPath>.tmp" with a
-// directory, the same technique TestDownloadFilesystemVolume_SmallFile_NoChunkDirCreated
-// uses) so DownloadFilesystemVolume returns an error AFTER per-file staging
-// (and its orphan cleanup) but BEFORE the success path's stagingDir removal —
-// otherwise a full success already wipes stagingDir wholesale and the
-// assertion below would pass even without the fix.
-func TestDownloadFilesystemVolume_ThresholdCrossing_OrphanChunkDirRemoved(t *testing.T) {
+// NOTE: TestDownloadFilesystemVolume_ThresholdCrossing_OrphanChunkDirRemoved
+// (the "a file crossing the chunk-size threshold falls back to stageWholeFile
+// and must clean up its now-orphaned chunk dir" test) was REMOVED by
+// fs-whole-file-durable-partial-resume: the code path it exercised no longer
+// exists. stageCompressedFile's branch is now item.size > 0 (chunked) vs.
+// item.size <= 0 (whole-file), not item.size vs. chunkSize, so a chunkSize
+// change alone can never move a known-size file between the two strategies
+// any more — it only ever changes how many chunks that file's chunked
+// download uses, which TestDownloadFilesystemVolume_LargeFile_ChunkSizeChanged_ResumeNotCorrupted
+// already covers (ensureChunkGeometry purges and re-fetches under the new
+// geometry).
+
+// TestDownloadFilesystemVolume_SmallFile_InterruptedResumesFromPersistedOffset
+// is the primary regression test for fs-whole-file-durable-partial-resume,
+// exercised through a file BELOW the chunk-size threshold — exactly the class
+// stageWholeFile used to own. Before the fix, an interrupt anywhere in that
+// single GET discarded 100% of the file's progress (removeTmpFiles would also
+// have wiped the AtomicWriter's ".tmp" on the next resume scan); now the file
+// goes through the same durable ".part"-based mechanism as a large chunked
+// file (block.go's downloadChunk/fetchChunkRaw, unchanged here), with exactly
+// one chunk covering the whole file, and resumes from its persisted offset.
+func TestDownloadFilesystemVolume_SmallFile_InterruptedResumesFromPersistedOffset(t *testing.T) {
 	t.Parallel()
 
-	content := bytes.Repeat([]byte("Z"), 150)
-	codec := mustCodec(t, "zstd")
+	content := bytes.Repeat([]byte("R"), 40) // well below the chunk-size threshold
+	const cutBytes = 13                      // interrupt partway through the file
 
-	srv, tracker := newRangeTrackingFSServer(t, "small.bin", content)
+	srv, _ := newRangeTrackingFSServer(t, "small.bin", content)
+
+	// recordingDoer (defined in block_test.go, shared package volume_test)
+	// counts EVERY request through it, including the directory listing GET
+	// that precedes each file download: call 1 is the listing, call 2 is the
+	// file's Range GET (there is exactly one chunk, since the file is well
+	// below chunkSize).
+	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 2, cutBytes: cutBytes}
+	fetcher := exporter.NewFetcher(doer)
+
+	codec := mustCodec(t, "zstd")
 
 	nodeDir := t.TempDir()
 	tarPath := filepath.Join(nodeDir, archive.FsTarName)
 	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
 
-	if err := os.MkdirAll(tarPath+".tmp", 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testChunkSize := int64(len(content)) * 10 // threshold well above the file's size
 
-	// Simulate a prior run where a lower chunk-size threshold routed this file
-	// through the chunked path, leaving an orphan (never merged) per-file
-	// chunk dir with its own chunks.meta.
-	orphanChunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName("small.bin", codec.Ext())))
-	if err := os.MkdirAll(orphanChunkDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	chunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName("small.bin", codec.Ext())))
+	partPath := filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".part")
 
-	if err := archive.WriteChunkMeta(orphanChunkDir, archive.ChunkMeta{ChunkSize: 50, TotalSize: int64(len(content))}); err != nil {
-		t.Fatal(err)
-	}
-
-	// A chunk size ABOVE the file's size routes it through stageWholeFile.
-	newChunkSize := int64(len(content)) * 2
-
+	// Run 1: interrupted mid-file.
 	err := volume.DownloadFilesystemVolume(
-		context.Background(),
-		slog.Default(),
-		tarPath,
-		stagingDir,
-		srv.URL+"/files/",
-		1,
-		newChunkSize,
-		newFSFetcher(srv),
-		codec,
-		nil,
-		nil,
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, testChunkSize, fetcher, codec, nil, nil,
 	)
 	if err == nil {
-		t.Fatal("expected DownloadFilesystemVolume to fail (poisoned tar.tmp path)")
+		t.Fatal("expected the interrupted run to return an error")
 	}
 
-	if _, statErr := os.Stat(orphanChunkDir); !os.IsNotExist(statErr) {
-		t.Errorf("orphan chunk dir %s must be removed once the file crosses to the whole-file branch, stat err=%v", orphanChunkDir, statErr)
+	if !errors.Is(err, errSimulatedInterrupt) {
+		t.Fatalf("expected errSimulatedInterrupt, got: %v", err)
 	}
 
-	destPath := filepath.Join(stagingDir, "small.bin"+codec.Ext())
-	if _, statErr := os.Stat(destPath); statErr != nil {
-		t.Fatalf("expected staged file at %s: %v", destPath, statErr)
+	partInfo, statErr := os.Stat(partPath)
+	if statErr != nil {
+		t.Fatalf("durable partial must exist after an interrupted below-threshold file: %v", statErr)
 	}
 
-	if snap := tracker.snapshot(); len(snap) != 1 || snap[0] {
-		t.Errorf("expected exactly one non-Range GET on the whole-file branch, got %v", snap)
+	if partInfo.Size() != cutBytes {
+		t.Errorf("durable partial size = %d, want %d", partInfo.Size(), int64(cutBytes))
+	}
+
+	if _, statErr := os.Stat(tarPath); !os.IsNotExist(statErr) {
+		t.Error("data.tar must not exist after an interrupted run")
+	}
+
+	// The resumable partial must survive a resume scan's stale-*.tmp sweep: it
+	// uses ".part", not ".tmp" (archive.resume.go's removeTmpFiles only
+	// targets "*.tmp").
+	if _, scanErr := archive.ScanAbsolute(nodeDir, archive.NodeIdentity{}); scanErr != nil {
+		t.Fatalf("ScanAbsolute: %v", scanErr)
+	}
+
+	if _, statErr := os.Stat(partPath); statErr != nil {
+		t.Fatalf("durable partial must survive a resume scan (removeTmpFiles): %v", statErr)
+	}
+
+	// Run 2: resume. cutOnCall (2) will never match again since the doer's
+	// call counter keeps incrementing across both runs.
+	err = volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, testChunkSize, fetcher, codec, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("resumed run must succeed: %v", err)
+	}
+
+	ranges := doer.recordedRanges()
+	lastRange := ranges[len(ranges)-1]
+	wantRange := fmt.Sprintf("bytes=%d-%d", cutBytes, len(content)-1)
+
+	if lastRange != wantRange {
+		t.Errorf("resumed run's Range header = %q, want %q (resume from persisted offset, not byte 0)", lastRange, wantRange)
+	}
+
+	got := decodeZstdTarEntry(t, tarPath, "small.bin"+codec.Ext())
+	if !bytes.Equal(got, content) {
+		t.Error("resumed download must produce byte-identical content")
+	}
+
+	if _, statErr := os.Stat(partPath); !os.IsNotExist(statErr) {
+		t.Error("durable partial must be removed after the chunk finalizes")
 	}
 }

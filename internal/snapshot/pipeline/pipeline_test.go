@@ -1711,7 +1711,12 @@ func makeTrackedFSServer(t *testing.T, files []fsE2EFile, rec *stringRecorder) *
 		}
 
 		rec.record(name)
-		_, _ = w.Write(content)
+
+		// The listing declares a "size" for every file, so each one downloads
+		// via the durable chunked path (stageChunkedFile/DownloadBlockChunks),
+		// which issues Range GETs — http.ServeContent (mirroring the real
+		// data-exporter's sendFile idiom) is required to honor them.
+		http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(content))
 	})
 
 	srv := httptest.NewServer(mux)
