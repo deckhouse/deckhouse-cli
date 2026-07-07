@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"golang.org/x/sync/errgroup"
 
@@ -51,7 +52,15 @@ type streamKey struct {
 
 // Run builds the snapshot tree, scans the output directory for resume state, and
 // downloads all missing node data with bounded concurrency.
-// The first node error cancels all in-flight work.
+// The per-node download phase is BEST-EFFORT: nodes are independent (own
+// DataExport, own output subdir, no shared mutable state), so one node's
+// failure — a permanently broken volume, a DataExport timeout — is recorded
+// and does NOT cancel sibling nodes still downloading; aborting healthy nodes
+// seconds from completion is the wrong trade-off for a backup/download tool.
+// Run aggregates every per-node failure into a single errors.Join error. A
+// genuine ctx cancellation (SIGINT, or the caller cancelling its parent
+// context) still aborts all in-flight nodes promptly; in that case Run
+// returns ctx.Err() instead of the aggregated per-node error.
 func Run(ctx context.Context, cfg Config) error {
 	cfg = applyDefaults(cfg)
 
@@ -85,15 +94,36 @@ func Run(ctx context.Context, cfg Config) error {
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(cfg.Workers)
 
+	// nodeErrs collects one error per failed node. Guarded by nodeErrsMu because
+	// up to cfg.Workers goroutines append to it concurrently.
+	var (
+		nodeErrsMu sync.Mutex
+		nodeErrs   []error
+	)
+
 	for _, t := range tasks {
 		task := t
 
 		g.Go(func() error {
-			return processNode(gctx, cfg, task, streams)
+			if err := processNode(gctx, cfg, task, streams); err != nil {
+				nodeErrsMu.Lock()
+				nodeErrs = append(nodeErrs, err)
+				nodeErrsMu.Unlock()
+			}
+
+			// Always return nil: a per-node failure must never cancel gctx, or it
+			// would abort every OTHER node's in-flight download too (the exact
+			// behavior this best-effort design replaces). Failures are aggregated
+			// via nodeErrs instead.
+			return nil
 		})
 	}
 
-	err = g.Wait()
+	if err := g.Wait(); err != nil {
+		// Unreachable in practice: every g.Go closure above unconditionally
+		// returns nil. Handled rather than discarded in case that ever changes.
+		nodeErrs = append(nodeErrs, err)
+	}
 
 	// Defensive sweep: guarantee every pre-created stream is terminally settled
 	// before Run returns, so a caller's sink.Wait() can never block forever.
@@ -108,7 +138,14 @@ func Run(ctx context.Context, cfg Config) error {
 	// it only settles the ones nothing else finalized.
 	failUnsettledStreams(streams)
 
-	return err
+	// A genuine ctx cancellation (SIGINT/parent cancel) takes priority over the
+	// aggregated per-node errors: every in-flight node was aborted for the same
+	// reason, so ctx.Err() is the more useful signal to the caller.
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	return errors.Join(nodeErrs...)
 }
 
 // failUnsettledStreams calls Fail on every pre-created stream once the worker
