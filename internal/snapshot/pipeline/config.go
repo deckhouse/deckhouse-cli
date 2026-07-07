@@ -84,8 +84,9 @@ type Config struct {
 
 	// ChunkSize is the raw-byte size for block-volume chunks.
 	// Defaults to volume.DefaultChunkSize (256 MiB) when zero.
-	// Each in-flight block chunk is buffered fully in memory (raw bytes read
-	// via io.ReadAll plus the encoded zstd frame); see Workers for the peak formula.
+	// Each in-flight chunk streams to a durable on-disk .part file (not an
+	// in-memory network buffer), but is read back in full from that .part file
+	// for the single EncodeFrame call once complete; see Workers for the peak formula.
 	ChunkSize int64
 
 	// TTL is the DataExport TTL string (e.g. "2h").  Defaults to "2h".
