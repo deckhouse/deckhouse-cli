@@ -1588,3 +1588,463 @@ func TestPipeline_BestEffort_OneNodeFailureDoesNotCancelSiblings(t *testing.T) {
 		require.NoError(t, statErr, "healthy node %s must have downloaded data despite the sibling failure", diskName)
 	}
 }
+
+// ─── TestPipeline_MixedResumeStates_ConcurrentRun ────────────────────────────
+
+// Namespace/name/geometry constants for the mixed-resume-states tree. Names
+// carry a "mixed" prefix so they cannot be confused with any other test's
+// fake-client fixtures in this package.
+const (
+	mixedNS       = "mixed-resume-ns"
+	mixedRootSnap = "mixed-root"
+	mixedVMSnap   = "mixed-vm-snap"
+
+	mixedDiskDone          = "mixed-disk-done"
+	mixedDiskBlockPartial  = "mixed-disk-block-partial"
+	mixedDiskFSPartial     = "mixed-disk-fs-partial"
+	mixedDiskManifestsOnly = "mixed-disk-manifests-only"
+	mixedDiskPending       = "mixed-disk-pending"
+)
+
+// mixedChunkSize is the block/FS-file chunk size used throughout the mixed-
+// resume-states test; 300-byte raw payloads split into exactly 3 chunks.
+const mixedChunkSize int64 = 100
+
+// mixedLeafNames lists every volume-leaf name in the mixed-resume tree, in
+// the order the fake client wires them as mixed-vm-snap's children. Used to
+// size the aggregate-counter assertion and to drive fixture construction.
+var mixedLeafNames = []string{
+	mixedDiskDone,
+	mixedDiskBlockPartial,
+	mixedDiskFSPartial,
+	mixedDiskManifestsOnly,
+	mixedDiskPending,
+}
+
+// stringRecorder is a small concurrency-safe log used by
+// TestPipeline_MixedResumeStates_ConcurrentRun to record which leaf names or
+// HTTP requests occurred during a given pipeline.Run call. reset() discards
+// prior entries so run 1's activity cannot leak into the run-2-only
+// assertions the test makes about resume behavior.
+type stringRecorder struct {
+	mu      sync.Mutex
+	entries []string
+}
+
+func (r *stringRecorder) record(s string) {
+	r.mu.Lock()
+	r.entries = append(r.entries, s)
+	r.mu.Unlock()
+}
+
+func (r *stringRecorder) reset() {
+	r.mu.Lock()
+	r.entries = nil
+	r.mu.Unlock()
+}
+
+func (r *stringRecorder) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]string(nil), r.entries...)
+}
+
+// makeTrackedBlockServer serves rawData at /api/v1/block like makeBlockServer,
+// additionally recording every GET Range header into rec so a test can assert
+// exactly which byte ranges were (or were not) re-fetched across a resume run.
+func makeTrackedBlockServer(t *testing.T, rawData []byte, rec *stringRecorder) *httptest.Server {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/block", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			rec.record(r.Header.Get("Range"))
+		}
+
+		http.ServeContent(w, r, "data", time.Time{}, bytes.NewReader(rawData))
+	})
+
+	srv := httptest.NewServer(mux)
+
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+// makeTrackedFSServer serves a flat (no subdirectories) filesystem-volume
+// listing of files at /api/v1/files/, recording every per-file GET into rec
+// so a test can assert exactly which files were (or were not) re-fetched
+// across a resume run. Modeled on makeE2EFSServer but flat and instrumented.
+func makeTrackedFSServer(t *testing.T, files []fsE2EFile, rec *stringRecorder) *httptest.Server {
+	t.Helper()
+
+	fileMap := make(map[string][]byte, len(files))
+	for _, f := range files {
+		fileMap[f.rel] = f.content
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/files/" {
+			items := make([]string, 0, len(files))
+
+			for _, f := range files {
+				items = append(items, fmt.Sprintf(
+					`{"name":%q,"type":"file","uri":%q,"attributes":{"permissions":"0644","modtime":"2024-03-01T12:00:00Z","uid":0,"gid":0,"size":%d}}`,
+					f.rel, f.rel, len(f.content)))
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+strings.Join(items, ",")+`]}`)
+
+			return
+		}
+
+		name := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
+
+		content, ok := fileMap[name]
+		if !ok {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		rec.record(name)
+		_, _ = w.Write(content)
+	})
+
+	srv := httptest.NewServer(mux)
+
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+// buildMixedResumeFakeClient constructs the fake kube client for the mixed-
+// resume-states tree:
+//
+//	mixed-root (Snapshot)
+//	  └─ mixed-vm-snap (VirtualMachineSnapshot, aggregator/intermediate node)
+//	       ├─ mixed-disk-done            (VirtualDiskSnapshot, OwnDataRef → block)
+//	       ├─ mixed-disk-block-partial   (VirtualDiskSnapshot, OwnDataRef → block)
+//	       ├─ mixed-disk-fs-partial      (VirtualDiskSnapshot, OwnDataRef → fs)
+//	       ├─ mixed-disk-manifests-only  (VirtualDiskSnapshot, OwnDataRef → block)
+//	       └─ mixed-disk-pending         (VirtualDiskSnapshot, OwnDataRef → block)
+//
+// Every leaf is a non-aggregator with exactly one OwnDataRef, mirroring
+// buildE2EFakeClient's disk-block/disk-fs leaves.
+func buildMixedResumeFakeClient(t *testing.T) client.Client {
+	t.Helper()
+
+	scheme := buildScheme(t)
+
+	rootSnap := &snapshotapi.Snapshot{
+		TypeMeta: metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "Snapshot"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      mixedRootSnap,
+			Namespace: mixedNS,
+		},
+		Status: snapshotapi.SnapshotStatus{
+			BoundSnapshotContentName: "sc-mixed-root",
+			ChildrenSnapshotRefs: []snapshotapi.SnapshotChildRef{
+				{APIVersion: e2eVMAPIVersion, Kind: e2eVMKind, Name: mixedVMSnap},
+			},
+		},
+	}
+
+	rootContent := &snapshotapi.SnapshotContent{
+		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
+		ObjectMeta: metav1.ObjectMeta{Name: "sc-mixed-root"},
+	}
+
+	vmChildren := make([]map[string]interface{}, 0, len(mixedLeafNames))
+	for _, name := range mixedLeafNames {
+		vmChildren = append(vmChildren, map[string]interface{}{
+			"apiVersion": e2eVMAPIVersion, "kind": e2eDiskKind, "name": name,
+		})
+	}
+
+	vmSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eVMKind, mixedNS, mixedVMSnap, "sc-mixed-vm", vmChildren)
+
+	vmContent := &snapshotapi.SnapshotContent{
+		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
+		ObjectMeta: metav1.ObjectMeta{Name: "sc-mixed-vm"},
+	}
+
+	typed := []client.Object{rootSnap, rootContent, vmContent}
+	unstructuredObjs := []client.Object{vmSnap}
+
+	for _, name := range mixedLeafNames {
+		contentName := "sc-mixed-" + name
+		leafSnap := makeUnstructuredSnap(e2eVMAPIVersion, e2eDiskKind, mixedNS, name, contentName)
+
+		leafContent := &snapshotapi.SnapshotContent{
+			TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
+			ObjectMeta: metav1.ObjectMeta{Name: contentName},
+			Status: snapshotapi.SnapshotContentStatus{
+				DataRef: &snapshotapi.SnapshotDataBinding{
+					TargetUID: "uid-" + name,
+					Target: snapshotapi.SnapshotSubjectRef{
+						APIVersion: "v1",
+						Kind:       "PersistentVolumeClaim",
+						Namespace:  mixedNS,
+						Name:       "pvc-" + name,
+					},
+					Artifact: snapshotapi.SnapshotDataArtifactRef{
+						APIVersion: "snapshot.storage.k8s.io/v1",
+						Kind:       "VolumeSnapshotContent",
+						Name:       "vsc-" + name,
+					},
+				},
+			},
+		}
+
+		typed = append(typed, leafContent)
+		unstructuredObjs = append(unstructuredObjs, leafSnap)
+	}
+
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(typed...).
+		WithObjects(unstructuredObjs...).
+		Build()
+}
+
+// TestPipeline_MixedResumeStates_ConcurrentRun exercises the concurrent
+// collectNodeTasks/processNode resume path against a tree where sibling
+// leaves sit in every NodeState simultaneously: Done, BlockPartial,
+// FSPartial, ManifestsOnly, and Pending, all processed by ONE pipeline.Run
+// with cfg.Workers=3. The existing single-state resume tests
+// (TestPipeline_BlockResumeAfterMerge, TestPipeline_FSResumeAfterTar,
+// TestPipeline_PartialChunkResume) each exercise exactly one resume state at
+// a time with Workers=1; none combines mixed states across concurrently
+// processed siblings, which is the gap this test closes.
+//
+// Fixture strategy: run the full tree ONCE to completion, so every leaf
+// reaches NodeStateDone through the real download+finalize path (a genuinely
+// valid checksum/snapshot.yaml, not a hand-rolled one). Then, mimicking a
+// crash mid-run, four of the five leaves are rolled back to a specific
+// partial/pending state by deleting their finished artifacts and — for the
+// two partial cases — re-creating the exact staging layout a real
+// interrupted download would have left (same technique as
+// TestPipeline_PartialChunkResume for the block chunk dir); the fifth leaf
+// (mixed-disk-done) is left untouched. A second pipeline.Run then resumes
+// the whole tree concurrently, and the fake OpenExport plus the block/FS test
+// servers are instrumented to prove each node resumed correctly rather than
+// restarting from zero.
+func TestPipeline_MixedResumeStates_ConcurrentRun(t *testing.T) {
+	t.Parallel()
+
+	// ── Fixture content ────────────────────────────────────────────────────
+	rawBlockDone := bytes.Repeat([]byte("D"), 300)
+	rawBlockPartial := bytes.Repeat([]byte("P"), 300) // 3 × mixedChunkSize
+	rawBlockManifestsOnly := bytes.Repeat([]byte("M"), 300)
+	rawBlockPending := bytes.Repeat([]byte("N"), 300)
+
+	fsPartialStaged := fsE2EFile{rel: "one.txt", content: []byte("hello-one-content")}
+	fsPartialMissing := fsE2EFile{rel: "two.txt", content: []byte("hello-two-content!!")}
+	fsFiles := []fsE2EFile{fsPartialStaged, fsPartialMissing}
+
+	codec, err := compress.New("zstd", 0)
+	require.NoError(t, err)
+
+	// ── Instrumentation. The two "tracked" recorders are reset right before
+	// run 2 so only its requests are captured for the resume assertions. ────
+	openExportCalls := &stringRecorder{}
+	blockPartialRanges := &stringRecorder{}
+	fsPartialRequests := &stringRecorder{}
+
+	doneSrv := makeBlockServer(t, rawBlockDone)
+	defer doneSrv.Close()
+
+	blockPartialSrv := makeTrackedBlockServer(t, rawBlockPartial, blockPartialRanges)
+	fsPartialSrv := makeTrackedFSServer(t, fsFiles, fsPartialRequests)
+
+	manifestsOnlySrv := makeBlockServer(t, rawBlockManifestsOnly)
+	defer manifestsOnlySrv.Close()
+
+	pendingSrv := makeBlockServer(t, rawBlockPending)
+	defer pendingSrv.Close()
+
+	openExport := func(_ context.Context, namespace string, leafRef aggapi.NodeRef, _ string) (*exporter.Export, error) {
+		openExportCalls.record(leafRef.Name)
+
+		switch leafRef.Name {
+		case mixedDiskDone:
+			return exporter.NewExport(namespace, "de-mixed-done", "Block", doneSrv.URL, exporter.NewFetcher(doneSrv.Client())), nil
+		case mixedDiskBlockPartial:
+			return exporter.NewExport(namespace, "de-mixed-block-partial", "Block", blockPartialSrv.URL, exporter.NewFetcher(blockPartialSrv.Client())), nil
+		case mixedDiskFSPartial:
+			return exporter.NewExport(namespace, "de-mixed-fs-partial", "Filesystem", fsPartialSrv.URL, exporter.NewFetcher(fsPartialSrv.Client())), nil
+		case mixedDiskManifestsOnly:
+			return exporter.NewExport(namespace, "de-mixed-manifests-only", "Block", manifestsOnlySrv.URL, exporter.NewFetcher(manifestsOnlySrv.Client())), nil
+		case mixedDiskPending:
+			return exporter.NewExport(namespace, "de-mixed-pending", "Block", pendingSrv.URL, exporter.NewFetcher(pendingSrv.Client())), nil
+		default:
+			return nil, fmt.Errorf("mixed-resume: unexpected leaf %q", leafRef.Name)
+		}
+	}
+
+	c := buildMixedResumeFakeClient(t)
+	outputDir := t.TempDir()
+
+	cfg := pipeline.Config{
+		Namespace:            mixedNS,
+		RootSnapshot:         mixedRootSnap,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 2,
+		ChunkSize:            mixedChunkSize,
+		Compression:          codec,
+		KubeClient:           c,
+		OpenExport:           openExport,
+	}
+
+	// ── Run 1: complete the whole tree normally ─────────────────────────────
+	require.NoError(t, runPipeline(context.Background(), cfg))
+
+	vmDir := filepath.Join(outputDir, archive.SnapshotsDirName, archive.NodeDirName(e2eVMKind, mixedVMSnap))
+
+	leafDir := func(name string) string {
+		return filepath.Join(vmDir, archive.SnapshotsDirName, archive.NodeDirName(e2eDiskKind, name))
+	}
+
+	doneDir := leafDir(mixedDiskDone)
+	blockPartialDir := leafDir(mixedDiskBlockPartial)
+	fsPartialDir := leafDir(mixedDiskFSPartial)
+	manifestsOnlyDir := leafDir(mixedDiskManifestsOnly)
+	pendingDir := leafDir(mixedDiskPending)
+
+	for _, d := range []string{doneDir, blockPartialDir, fsPartialDir, manifestsOnlyDir, pendingDir} {
+		assertNodeComplete(t, d)
+	}
+
+	// ── Roll four of the five leaves back to distinct partial resume states,
+	// simulating a crash mid-run. mixed-disk-done is left untouched. ────────
+
+	// mixed-disk-block-partial: drop the merged block file and snapshot.yaml,
+	// re-create data.bin.d/ with only chunk 0 present.
+	require.NoError(t, os.Remove(filepath.Join(blockPartialDir, archive.DataBlockName(codec.Ext()))))
+	require.NoError(t, os.Remove(filepath.Join(blockPartialDir, archive.SnapshotYAMLName)))
+
+	blockChunkDir := filepath.Join(blockPartialDir, archive.BlockChunksDirName)
+	require.NoError(t, os.MkdirAll(blockChunkDir, 0o755))
+
+	chunk0Frame, err := codec.EncodeFrame(rawBlockPartial[:mixedChunkSize])
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(blockChunkDir, archive.ChunkFileName(0, codec.Ext())),
+		chunk0Frame,
+		0o644,
+	))
+	require.NoError(t, archive.WriteChunkMeta(blockChunkDir, archive.ChunkMeta{
+		ChunkSize: mixedChunkSize,
+		TotalSize: int64(len(rawBlockPartial)),
+	}))
+
+	// mixed-disk-fs-partial: drop data.tar and snapshot.yaml, re-create
+	// data.tar.d/ with "one.txt.zst" already staged; "two.txt" is left
+	// missing so only it must be re-fetched on resume.
+	require.NoError(t, os.Remove(filepath.Join(fsPartialDir, archive.FsTarName)))
+	require.NoError(t, os.Remove(filepath.Join(fsPartialDir, archive.SnapshotYAMLName)))
+
+	fsStagingDir := filepath.Join(fsPartialDir, archive.FsTarStagingDirName)
+	require.NoError(t, os.MkdirAll(fsStagingDir, 0o755))
+
+	stagedFrame, err := codec.EncodeFrame(fsPartialStaged.content)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(fsStagingDir, fsPartialStaged.rel+codec.Ext()),
+		stagedFrame,
+		0o644,
+	))
+
+	// mixed-disk-manifests-only: drop the merged block file and
+	// snapshot.yaml; manifests/ (created by run 1) is left in place with no
+	// volume artifact and no staging dir of any kind.
+	require.NoError(t, os.Remove(filepath.Join(manifestsOnlyDir, archive.DataBlockName(codec.Ext()))))
+	require.NoError(t, os.Remove(filepath.Join(manifestsOnlyDir, archive.SnapshotYAMLName)))
+
+	// mixed-disk-pending: remove the whole node directory so it starts from
+	// nothing on the second run.
+	require.NoError(t, os.RemoveAll(pendingDir))
+
+	// Isolate run 2's instrumentation: everything captured so far belongs to
+	// run 1's full download and must not pollute the resume assertions below.
+	openExportCalls.reset()
+	blockPartialRanges.reset()
+	fsPartialRequests.reset()
+
+	var buf bytes.Buffer
+
+	sink := progress.New(&buf, false, progress.WithInterval(time.Hour))
+
+	cfg.Workers = 3
+	cfg.Progress = sink
+
+	// ── Run 2: resume the whole tree concurrently from the mixed states ─────
+	require.NoError(t, runPipeline(context.Background(), cfg))
+
+	sink.Wait()
+
+	// (a) Every node — root, the intermediate aggregator, and every leaf —
+	// must be complete and pass VerifyNode; every leaf's decoded content must
+	// match what its server actually holds, proving a correct download
+	// occurred wherever one was needed.
+	assertNodeComplete(t, outputDir)
+	assertNodeComplete(t, vmDir)
+
+	for _, d := range []string{doneDir, blockPartialDir, fsPartialDir, manifestsOnlyDir, pendingDir} {
+		assertNodeComplete(t, d)
+	}
+
+	require.Equal(t, rawBlockDone, e2eDecodeZstdFile(t, filepath.Join(doneDir, archive.DataBlockName(codec.Ext()))),
+		"mixed-disk-done data must be untouched by run 2")
+	require.Equal(t, rawBlockPartial, e2eDecodeZstdFile(t, filepath.Join(blockPartialDir, archive.DataBlockName(codec.Ext()))),
+		"mixed-disk-block-partial must decode to the original bytes after resume")
+	require.Equal(t, rawBlockManifestsOnly, e2eDecodeZstdFile(t, filepath.Join(manifestsOnlyDir, archive.DataBlockName(codec.Ext()))),
+		"mixed-disk-manifests-only must download correctly")
+	require.Equal(t, rawBlockPending, e2eDecodeZstdFile(t, filepath.Join(pendingDir, archive.DataBlockName(codec.Ext()))),
+		"mixed-disk-pending must download correctly from scratch")
+
+	fsTarPath := filepath.Join(fsPartialDir, archive.FsTarName)
+	for _, f := range fsFiles {
+		compressed, tarErr := readTarEntry(t, fsTarPath, f.rel+codec.Ext())
+		require.NoError(t, tarErr, "tar must have entry for %s", f.rel)
+		require.Equal(t, f.content, e2eDecodeZstdBytes(t, compressed), "fs file %s content mismatch after resume", f.rel)
+	}
+
+	// (b) The already-Done leaf must never be handed to OpenExport again.
+	calls := openExportCalls.snapshot()
+	require.NotContains(t, calls, mixedDiskDone,
+		"OpenExport must not be called for the already-complete leaf")
+
+	for _, name := range []string{mixedDiskBlockPartial, mixedDiskFSPartial, mixedDiskManifestsOnly, mixedDiskPending} {
+		require.Contains(t, calls, name,
+			"OpenExport must be called for %s to fetch its missing data", name)
+	}
+
+	// (c) Partial nodes resumed from their pre-seeded progress instead of
+	// restarting from zero.
+	blockRanges := blockPartialRanges.snapshot()
+	chunk0Range := fmt.Sprintf("bytes=0-%d", mixedChunkSize-1)
+
+	require.NotContains(t, blockRanges, chunk0Range,
+		"chunk 0 was pre-seeded and must not be re-fetched on resume")
+	require.Contains(t, blockRanges, fmt.Sprintf("bytes=%d-%d", mixedChunkSize, 2*mixedChunkSize-1),
+		"chunk 1 must be fetched on resume")
+	require.Contains(t, blockRanges, fmt.Sprintf("bytes=%d-%d", 2*mixedChunkSize, 3*mixedChunkSize-1),
+		"chunk 2 must be fetched on resume")
+
+	fsRequests := fsPartialRequests.snapshot()
+	require.NotContains(t, fsRequests, fsPartialStaged.rel,
+		"the pre-staged fs file must not be re-fetched on resume")
+	require.Contains(t, fsRequests, fsPartialMissing.rel,
+		"the missing fs file must be fetched on resume")
+
+	// (d) The aggregate volume counter equals the number of volume leaves in
+	// the run (5), and by the end of run 2 every one of them has settled.
+	require.Contains(t, buf.String(), fmt.Sprintf("(%d/%d volumes)", len(mixedLeafNames), len(mixedLeafNames)),
+		"aggregate volume counter must reach N/M == total volume leaves")
+}
