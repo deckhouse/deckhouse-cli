@@ -171,6 +171,76 @@ func TestEnsureDataExport_Idempotent(t *testing.T) {
 	assert.Equal(t, de1.ResourceVersion, de2.ResourceVersion)
 }
 
+// TestEnsureDataExport_RecreatesWhenExpired verifies that a stale Expired DataExport
+// left behind by a previous session (the producer never deletes it on TTL expiry;
+// see storage-volume-data-manager's DataexportReconciler Case 2) is deleted and
+// replaced by a fresh object instead of being returned forever, which would
+// permanently block resume with ErrExpired.
+func TestEnsureDataExport_RecreatesWhenExpired(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		group     = "snapshot.storage.k8s.io"
+		resource  = "volumesnapshots"
+		kind      = "VolumeSnapshot"
+		leafName  = "expired-reuse-vs"
+		ttl       = "1h"
+	)
+
+	deName := exporter.DataExportName(leafName)
+
+	scheme := newDEScheme(t)
+
+	stale := &deapi.DataExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deName,
+			Namespace: namespace,
+		},
+		Spec: deapi.DataexportSpec{
+			TTL: ttl,
+			TargetRef: deapi.TargetRefSpec{
+				Group:    group,
+				Resource: resource,
+				Kind:     kind,
+				Name:     leafName,
+			},
+		},
+		Status: deapi.DataExportStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Expired",
+					Status: metav1.ConditionTrue,
+					Reason: "TTLExpired",
+				},
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stale).WithStatusSubresource(stale).Build()
+
+	ctx := context.Background()
+
+	fresh, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl)
+	require.NoError(t, err)
+	require.NotNil(t, fresh)
+
+	assert.Equal(t, deName, fresh.Name)
+	assert.NotEqual(t, stale.ResourceVersion, fresh.ResourceVersion,
+		"a fresh Create must have happened rather than reusing the stale object")
+
+	for _, cond := range fresh.Status.Conditions {
+		assert.NotEqual(t, "Expired", cond.Type, "a brand-new object must carry no Expired condition")
+	}
+
+	// A second call against the now-fresh (non-Expired) object must be idempotent,
+	// matching TestEnsureDataExport_Idempotent's happy-path contract.
+	again, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl)
+	require.NoError(t, err)
+	assert.Equal(t, fresh.Name, again.Name)
+	assert.Equal(t, fresh.ResourceVersion, again.ResourceVersion)
+}
+
 // makeReadyDE returns a DataExport pre-populated with the Ready condition and a URL
 // so that WaitReady exits on its first iteration without sleeping.
 func makeReadyDE(namespace, leafName, baseURL, volumeMode string) *deapi.DataExport {
