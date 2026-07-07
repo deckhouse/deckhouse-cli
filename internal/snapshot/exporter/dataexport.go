@@ -88,6 +88,13 @@ func EnsureDataExport(
 		// cleanup is its documented contract), so a stale Expired object from a previous
 		// session would otherwise be returned forever, permanently blocking resume. Delete
 		// it and fall through to the normal create path below.
+		// Delete is not synchronous on a real cluster: the object may still be
+		// terminating when the Create below runs, which can race into
+		// AlreadyExists (swallowed) and hand the caller back the same stale
+		// Expired object on this pass. That is a one-run delay, not a
+		// regression — the caller's per-node retry on the next resume attempt
+		// (pipeline.Run is best-effort per node) converges once the delete has
+		// actually propagated.
 		if delErr := c.Delete(ctx, existing); delErr != nil && !kubeerrors.IsNotFound(delErr) {
 			return nil, fmt.Errorf("delete expired DataExport %q: %w", deName, delErr)
 		}

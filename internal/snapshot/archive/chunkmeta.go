@@ -96,7 +96,7 @@ func ReadChunkMeta(dir string) (ChunkMeta, bool, error) {
 	var meta ChunkMeta
 
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return ChunkMeta{}, false, fmt.Errorf("%w: %s: %v", ErrCorruptChunkMeta, path, err)
+		return ChunkMeta{}, false, fmt.Errorf("%w: %s: %w", ErrCorruptChunkMeta, path, err)
 	}
 
 	return meta, true, nil
