@@ -165,7 +165,7 @@ func failUnsettledStreams(streams map[streamKey]progress.Stream) {
 }
 
 // precreateStreams creates one progress.Stream per volume download before any worker
-// goroutine starts. The map is keyed by (node pointer, pvcName) so each call site can
+// goroutine starts. The map is keyed by node pointer so each call site can
 // retrieve its handle without a second NewStream call.
 //
 // Streams for nodes that are already complete (NodeStateDone) are marked Done
@@ -221,6 +221,7 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]progress.Strea
 
 			out[streamKey{node: node}] = s
 
+		default:
 			// Aggregator/manifest-only nodes: no stream.
 		}
 	}
