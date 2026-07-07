@@ -228,16 +228,17 @@ func downloadChunk(
 		return fmt.Errorf("range get chunk %d: %w", chunkIdx, err)
 	}
 
-	raw, err := io.ReadAll(body)
+	// Wrap body in countingReader (fs.go) so bytes are credited to onProgress
+	// as the transport delivers them via io.ReadAll's internal Read loop,
+	// instead of once in a single terminal call after the whole chunk has
+	// arrived — the same incremental-reporting contract stageWholeFile uses
+	// for the filesystem path.
+	raw, err := io.ReadAll(&countingReader{r: body, onProgress: onProgress})
 
 	_ = body.Close()
 
 	if err != nil {
 		return fmt.Errorf("read chunk %d body: %w", chunkIdx, err)
-	}
-
-	if onProgress != nil {
-		onProgress(len(raw))
 	}
 
 	frame, err := codec.EncodeFrame(raw)
