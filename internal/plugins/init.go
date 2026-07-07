@@ -31,6 +31,12 @@ import (
 // discovery, so a Ctrl-C during command startup is honored. The proxy is the only
 // plugin source (ADR: deckhouse-cli reaches the registry exclusively through it).
 func (m *Manager) InitPluginServices(ctx context.Context) error {
+	// legacy --source bypass (temporary): pull straight from a registry, skipping
+	// the proxy and the cluster. See internal/plugins/source_legacy.go.
+	if d8flags.SourceRegistryRepo != "" {
+		return m.initLegacyRegistrySource()
+	}
+
 	restConfig, kubeCl, err := utilk8s.SetupK8sClientSet(d8flags.Kubeconfig, d8flags.KubeContext)
 	if err != nil {
 		return fmt.Errorf("set up kubernetes client: %w", err)
