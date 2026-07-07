@@ -107,7 +107,9 @@ func Run(ctx context.Context, cfg Config) error {
 		g.Go(func() error {
 			if err := processNode(gctx, cfg, task, streams); err != nil {
 				nodeErrsMu.Lock()
+
 				nodeErrs = append(nodeErrs, err)
+
 				nodeErrsMu.Unlock()
 			}
 
