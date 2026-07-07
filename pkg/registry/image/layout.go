@@ -104,11 +104,11 @@ func (l *ImageLayout) Path() layout.Path {
 // index.json, so without this guard repeated pulls of the same image set
 // would create duplicate descriptors (and duplicate pushes later).
 //
-// - same tag, different digest: falls through to AppendImage (re-tag);
-//   the push pipeline dedupes such cases with last-wins semantics.
-// - metaByTag is recorded only after AppendImage succeeds. Recording earlier
-//   would poison the guard on a failed write: a retry would see the pair as
-//   done and silently skip the image.
+//   - same tag, different digest: falls through to AppendImage (re-tag);
+//     the push pipeline dedupes such cases with last-wins semantics.
+//   - metaByTag is recorded only after AppendImage succeeds. Recording earlier
+//     would poison the guard on a failed write: a retry would see the pair as
+//     done and silently skip the image.
 func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 	meta, err := img.GetMetadata()
 	if err != nil {
