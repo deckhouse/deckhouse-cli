@@ -43,11 +43,11 @@ type nodeTask struct {
 }
 
 // streamKey identifies a pre-created progress stream.
-// pvcName is empty for Binding nodes and single-OwnDataRef nodes; it holds the PVC
-// name for multi-OwnDataRef nodes (matching multiDest naming).
+// Variant A (decision #9) guarantees at most one dataRef per node, so a node
+// key alone is enough to address its single stream — there is no per-pvc
+// discriminator.
 type streamKey struct {
-	node    *source.Node
-	pvcName string
+	node *source.Node
 }
 
 // Run builds the snapshot tree, scans the output directory for resume state, and
@@ -189,8 +189,6 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]progress.Strea
 			nStreams++
 		case len(n.OwnDataRefs) == 1:
 			nStreams++
-		case len(n.OwnDataRefs) > 1:
-			nStreams += len(n.OwnDataRefs)
 		}
 	}
 
@@ -223,19 +221,6 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]progress.Strea
 
 			out[streamKey{node: node}] = s
 
-		case len(node.OwnDataRefs) > 1:
-			// Non-aggregator with multiple volumes: one stream per PVC.
-			for _, ref := range node.OwnDataRefs {
-				pvc := ref.Target.Name
-				s := cfg.Progress.NewStream(pvc, 0)
-
-				if t.state == archive.NodeStateDone {
-					s.Done()
-				}
-
-				out[streamKey{node: node, pvcName: pvc}] = s
-			}
-
 			// Aggregator/manifest-only nodes: no stream.
 		}
 	}
@@ -243,15 +228,14 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]progress.Strea
 	return out
 }
 
-// lookupStream returns the pre-created progress.Stream for the given node and
-// optional pvcName, or nil when streams is nil (progress disabled) or the key
-// is absent.
-func lookupStream(streams map[streamKey]progress.Stream, node *source.Node, pvcName string) progress.Stream {
+// lookupStream returns the pre-created progress.Stream for the given node, or
+// nil when streams is nil (progress disabled) or the key is absent.
+func lookupStream(streams map[streamKey]progress.Stream, node *source.Node) progress.Stream {
 	if streams == nil {
 		return nil
 	}
 
-	return streams[streamKey{node: node, pvcName: pvcName}]
+	return streams[streamKey{node: node}]
 }
 
 // collectNodeTasks performs a depth-first traversal of the snapshot tree, computing
@@ -461,7 +445,7 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 		return fmt.Errorf("check fs tar in %s: %w", task.nodeDir, err)
 	}
 
-	stream := lookupStream(streams, task.node, "")
+	stream := lookupStream(streams, task.node)
 
 	switch {
 	case blockAlreadyMerged:
@@ -499,14 +483,16 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 	return nil
 }
 
-// downloadOwnDataRefs downloads all OwnDataRef volumes for a non-aggregator snapshot
-// node into nodeDir.
+// downloadOwnDataRefs downloads the OwnDataRef volume for a non-aggregator
+// snapshot node into nodeDir using the flat layout — data.bin[.<ext>] /
+// data.tar directly in nodeDir, with the block-resume guard (skip if any
+// data.bin* file already exists).
 //
-//   - One OwnDataRef: flat layout — data.bin[.<ext>] / data.tar directly in nodeDir,
-//     with the block-resume guard (skip if any data.bin* file already exists).
-//   - Two or more OwnDataRefs: multi-volume layout — data/<pvc>.bin[.<ext>] / data/<pvc>.tar
-//     per volume. The resume guard is per-pvc (skip if the specific MultiVolumeBlockName exists).
-//     DataExport lifecycle is independent per volume.
+// Variant A (decision #9, .agent/implementer-prompt.md:125-140) guarantees a
+// SnapshotContent carries AT MOST ONE dataRef, so refs has length 0 or 1 in
+// every real payload. len(refs) > 1 is therefore a contract violation from an
+// unexpected producer, not a supported multi-volume layout — reject it loudly
+// instead of guessing at a per-pvc destination.
 func downloadOwnDataRefs(
 	ctx context.Context,
 	cfg Config,
@@ -516,94 +502,54 @@ func downloadOwnDataRefs(
 ) error {
 	refs := node.OwnDataRefs
 
-	if len(refs) == 1 {
-		// Flat single-volume layout: reuse the same paths as leaf volume nodes.
-		dest := flatDest(nodeDir, cfg.Compression.Ext())
-		stream := lookupStream(streams, node, "")
-
-		_, found, err := archive.FindBlockData(nodeDir)
-		if err != nil {
-			return fmt.Errorf("find block data in %s: %w", nodeDir, err)
-		}
-
-		if found {
-			cfg.Log.Info("block volume already merged, skipping download",
-				slog.String("kind", node.Kind),
-				slog.String("name", node.Name))
-
-			if stream != nil {
-				stream.Done()
-			}
-
-			return nil
-		}
-
-		fsTarDone, err := fsTarComplete(dest.fsTarPath)
-		if err != nil {
-			return fmt.Errorf("check fs tar in %s: %w", nodeDir, err)
-		}
-
-		if fsTarDone {
-			cfg.Log.Info("fs tar already complete, skipping download",
-				slog.String("kind", node.Kind),
-				slog.String("name", node.Name))
-
-			if stream != nil {
-				stream.Done()
-			}
-
-			return nil
-		}
-
-		return downloadVolumeBinding(ctx, cfg, node.Ref(), node.Namespace, dest, stream)
+	if len(refs) > 1 {
+		return fmt.Errorf("node %s/%s carries %d dataRefs but Variant A allows at most one per SnapshotContent (see decision #9); refusing to guess a multi-volume layout",
+			node.Kind, node.Name, len(refs))
 	}
 
-	// Multi-volume layout: one DataExport per binding. Each binding shares the same
-	// snapshot leaf ref (node.Ref()); the pvc name is used only for output file naming.
-	for i := range refs {
-		ref := &refs[i]
-		pvc := ref.Target.Name
-		dest := multiDest(nodeDir, pvc, cfg.Compression.Ext())
-		stream := lookupStream(streams, node, pvc)
-
-		_, statErr := os.Stat(dest.blockPath)
-		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-			return fmt.Errorf("stat %s: %w", dest.blockPath, statErr)
-		}
-
-		if statErr == nil {
-			cfg.Log.Info("block volume already merged, skipping",
-				slog.String("pvc", pvc))
-
-			if stream != nil {
-				stream.Done()
-			}
-
-			continue
-		}
-
-		fsTarDone, err := fsTarComplete(dest.fsTarPath)
-		if err != nil {
-			return fmt.Errorf("check fs tar for pvc %s: %w", pvc, err)
-		}
-
-		if fsTarDone {
-			cfg.Log.Info("fs tar already complete, skipping",
-				slog.String("pvc", pvc))
-
-			if stream != nil {
-				stream.Done()
-			}
-
-			continue
-		}
-
-		if err := downloadVolumeBinding(ctx, cfg, node.Ref(), node.Namespace, dest, stream); err != nil {
-			return fmt.Errorf("download volume for pvc %s: %w", pvc, err)
-		}
+	if len(refs) == 0 {
+		return nil
 	}
 
-	return nil
+	// Flat single-volume layout: reuse the same paths as leaf volume nodes.
+	dest := flatDest(nodeDir, cfg.Compression.Ext())
+	stream := lookupStream(streams, node)
+
+	_, found, err := archive.FindBlockData(nodeDir)
+	if err != nil {
+		return fmt.Errorf("find block data in %s: %w", nodeDir, err)
+	}
+
+	if found {
+		cfg.Log.Info("block volume already merged, skipping download",
+			slog.String("kind", node.Kind),
+			slog.String("name", node.Name))
+
+		if stream != nil {
+			stream.Done()
+		}
+
+		return nil
+	}
+
+	fsTarDone, err := fsTarComplete(dest.fsTarPath)
+	if err != nil {
+		return fmt.Errorf("check fs tar in %s: %w", nodeDir, err)
+	}
+
+	if fsTarDone {
+		cfg.Log.Info("fs tar already complete, skipping download",
+			slog.String("kind", node.Kind),
+			slog.String("name", node.Name))
+
+		if stream != nil {
+			stream.Done()
+		}
+
+		return nil
+	}
+
+	return downloadVolumeBinding(ctx, cfg, node.Ref(), node.Namespace, dest, stream)
 }
 
 // ensureNodeSubdirs creates manifests/ and, when the node has children, snapshots/
@@ -621,40 +567,29 @@ func ensureNodeSubdirs(nodeDir string, withSnapshots bool) error {
 }
 
 // volumeDestPaths holds the resolved absolute paths for one volume's output
-// within a node directory. The caller constructs it via flatDest or multiDest.
+// within a node directory. The caller constructs it via flatDest.
 type volumeDestPaths struct {
 	// chunkDir is the directory that receives block chunk files during download.
 	chunkDir string
-	// blockPath is the merged block output file (data.bin[.<ext>] or data/<pvc>.bin[.<ext>]).
+	// blockPath is the merged block output file (data.bin[.<ext>]).
 	blockPath string
-	// fsTarPath is the final assembled tar file (data.tar or data/<pvc>.tar).
+	// fsTarPath is the final assembled tar file (data.tar).
 	fsTarPath string
 	// fsTarStagingDir is the temporary directory for raw per-file downloads
-	// (data.tar.d/ or data/<pvc>.tar.d/).
+	// (data.tar.d/).
 	fsTarStagingDir string
 }
 
 // flatDest returns the single-volume flat destination paths for nodeDir.
 // ext is codec.Ext() and determines the block file name suffix.
-// Used for leaf volume nodes and snapshot nodes with exactly one OwnDataRef.
+// Used for leaf volume nodes and snapshot nodes with exactly one OwnDataRef —
+// the only two shapes Variant A (decision #9) allows.
 func flatDest(nodeDir, ext string) volumeDestPaths {
 	return volumeDestPaths{
 		chunkDir:        filepath.Join(nodeDir, archive.BlockChunksDirName),
 		blockPath:       filepath.Join(nodeDir, archive.DataBlockName(ext)),
 		fsTarPath:       filepath.Join(nodeDir, archive.FsTarName),
 		fsTarStagingDir: filepath.Join(nodeDir, archive.FsTarStagingDirName),
-	}
-}
-
-// multiDest returns the per-pvc multi-volume destination paths for nodeDir.
-// ext is codec.Ext() and determines the block file name suffix.
-// Used for snapshot nodes with more than one OwnDataRef.
-func multiDest(nodeDir, pvc, ext string) volumeDestPaths {
-	return volumeDestPaths{
-		chunkDir:        filepath.Join(nodeDir, archive.BlockChunksDirNameFor(pvc)),
-		blockPath:       filepath.Join(nodeDir, archive.MultiVolumeBlockName(pvc, ext)),
-		fsTarPath:       filepath.Join(nodeDir, archive.MultiVolumeTarName(pvc)),
-		fsTarStagingDir: filepath.Join(nodeDir, archive.MultiVolumeTarStagingDirName(pvc)),
 	}
 }
 
