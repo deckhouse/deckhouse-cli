@@ -282,6 +282,74 @@ func TestDownloadBlockChunks_SkipsExistingChunks(t *testing.T) {
 	}
 }
 
+// TestDownloadBlockChunks_ProgressIsIncremental proves onProgress is credited
+// as the Range GET body is actually read, not once after the whole chunk has
+// been buffered. A payload well beyond any single net/http transport read
+// (the client's default bufio.Reader is 4KiB) forces io.ReadAll to issue many
+// Read calls; a test asserting only the summed total (like
+// TestDownloadBlockChunks_SkipsExistingChunks) would pass against the
+// pre-fix batched-single-call code just as well, so this test also asserts
+// the call COUNT — the property that actually regressed.
+func TestDownloadBlockChunks_ProgressIsIncremental(t *testing.T) {
+	t.Parallel()
+
+	const payloadSize = 1 << 20 // 1 MiB, far larger than any single transport Read.
+
+	payload := make([]byte, payloadSize)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	srv := newBlockServer(t, payload)
+	defer srv.Close()
+
+	blockURL := srv.URL + "/api/v1/block"
+	fetcher := exporter.NewFetcher(srv.Client())
+
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
+	require.NoError(t, err)
+
+	nodeDir := t.TempDir()
+	totalSize := int64(len(payload))
+
+	// chunkSize >= totalSize: exactly one chunk, so every recorded increment
+	// belongs to the same downloadChunk call.
+	const chunkSize = payloadSize
+
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+	var (
+		mu        sync.Mutex
+		credited  int64
+		callCount int
+	)
+
+	recordProgress := func(n int) {
+		mu.Lock()
+		credited += int64(n)
+		callCount++
+		mu.Unlock()
+	}
+
+	err = volume.DownloadBlockChunks(
+		context.Background(),
+		slog.Default(),
+		chunkDir,
+		blockURL,
+		totalSize,
+		chunkSize,
+		1,
+		fetcher,
+		codec,
+		recordProgress,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, totalSize, credited, "summed increments must equal the chunk's raw length")
+	assert.Greater(t, callCount, 1,
+		"onProgress must be called more than once per chunk to prove incremental, not batched, reporting")
+}
+
 func TestDownloadBlockChunks_CleansStaleTemp(t *testing.T) {
 	t.Parallel()
 
