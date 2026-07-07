@@ -17,6 +17,7 @@ limitations under the License.
 package archive_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -96,6 +97,10 @@ func TestChunkMeta_MissingDirIsNotAnError(t *testing.T) {
 	}
 }
 
+// TestChunkMeta_CorruptFileIsAnError pins the sentinel ensureChunkGeometry
+// relies on to route an unparseable sidecar to the purge-and-recreate path
+// instead of a hard abort: the error MUST satisfy
+// errors.Is(err, archive.ErrCorruptChunkMeta), not just be non-nil.
 func TestChunkMeta_CorruptFileIsAnError(t *testing.T) {
 	t.Parallel()
 
@@ -109,6 +114,10 @@ func TestChunkMeta_CorruptFileIsAnError(t *testing.T) {
 	_, found, err := archive.ReadChunkMeta(dir)
 	if err == nil {
 		t.Fatal("expected an error reading a corrupt chunks.meta, got nil")
+	}
+
+	if !errors.Is(err, archive.ErrCorruptChunkMeta) {
+		t.Errorf("err = %v; want it to satisfy errors.Is(err, archive.ErrCorruptChunkMeta)", err)
 	}
 
 	if found {

@@ -36,6 +36,16 @@ import (
 // every chunk dir does, by construction.
 const ChunkMetaFileName = "chunks.meta"
 
+// ErrCorruptChunkMeta indicates ChunkMetaFileName exists but its contents
+// could not be parsed as JSON — e.g. a torn write from a crash mid-write (see
+// WriteChunkMeta's use of WriteFileAtomic, which makes this rare but not
+// impossible) or filesystem-level corruption. Callers MUST treat this
+// identically to a geometry mismatch (purge the chunk dir and re-download),
+// never as a fatal error: the sidecar's only purpose is recording the byte
+// ranges chunks were written under, and an unparseable sidecar means those
+// ranges can no longer be trusted.
+var ErrCorruptChunkMeta = errors.New("chunk metadata is corrupt")
+
 // ChunkMeta records the chunk geometry — chunk size and total volume/file size
 // — that an in-progress chunk directory was produced with. Chunk k's byte
 // range is computed purely from these two values ([k*chunkSize,
@@ -86,7 +96,7 @@ func ReadChunkMeta(dir string) (ChunkMeta, bool, error) {
 	var meta ChunkMeta
 
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return ChunkMeta{}, false, fmt.Errorf("unmarshal chunk metadata %s: %w", path, err)
+		return ChunkMeta{}, false, fmt.Errorf("%w: %s: %v", ErrCorruptChunkMeta, path, err)
 	}
 
 	return meta, true, nil

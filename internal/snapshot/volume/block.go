@@ -21,6 +21,7 @@ package volume
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -116,10 +117,18 @@ func DownloadBlockChunks(
 // recorded: a fresh download. If it exists and archive.ReadChunkMeta reports a
 // geometry that exactly matches chunkSize/totalSize, it is left untouched: a
 // same-geometry resume, safe to reuse existing chunks from. Otherwise
-// (missing metadata or a mismatch) the ENTIRE directory is purged and
-// recreated with the current geometry recorded — every chunk in it must be
-// re-fetched, since none of them can be trusted to cover the byte range the
-// current geometry expects.
+// (missing metadata, a mismatch, or an unparseable sidecar) the ENTIRE
+// directory is purged and recreated with the current geometry recorded —
+// every chunk in it must be re-fetched, since none of them can be trusted to
+// cover the byte range the current geometry expects.
+//
+// A sidecar that exists but fails to parse (archive.ErrCorruptChunkMeta, e.g.
+// a torn write from a crash) is deliberately routed to the SAME purge path as
+// a mismatch, not treated as a fatal error: the geometry it would have
+// described is unknowable either way, and degrading to a clean re-fetch is
+// the only response that keeps resume idempotent. Any OTHER ReadChunkMeta
+// error (a genuine I/O failure, e.g. EACCES) still hard-aborts, since that is
+// not a geometry problem this function can safely paper over.
 func ensureChunkGeometry(log *slog.Logger, chunkDir string, chunkSize, totalSize int64) error {
 	_, statErr := os.Stat(chunkDir)
 
@@ -133,21 +142,24 @@ func ensureChunkGeometry(log *slog.Logger, chunkDir string, chunkSize, totalSize
 	}
 
 	meta, found, err := archive.ReadChunkMeta(chunkDir)
-	if err != nil {
+
+	switch {
+	case err != nil && errors.Is(err, archive.ErrCorruptChunkMeta):
+		log.Warn("chunk geometry sidecar unreadable, discarding stale chunks and re-downloading",
+			slog.String("dir", chunkDir))
+	case err != nil:
 		return fmt.Errorf("read chunk metadata: %w", err)
-	}
-
-	if found && meta.ChunkSize == chunkSize && meta.TotalSize == totalSize {
+	case found && meta.ChunkSize == chunkSize && meta.TotalSize == totalSize:
 		return nil
+	default:
+		log.Info("chunk geometry changed since last run, discarding stale chunks and re-downloading",
+			slog.String("dir", chunkDir),
+			slog.Int64("current_chunk_size", chunkSize),
+			slog.Int64("current_total_size", totalSize),
+			slog.Bool("previous_metadata_found", found),
+			slog.Int64("previous_chunk_size", meta.ChunkSize),
+			slog.Int64("previous_total_size", meta.TotalSize))
 	}
-
-	log.Info("chunk geometry changed since last run, discarding stale chunks and re-downloading",
-		slog.String("dir", chunkDir),
-		slog.Int64("current_chunk_size", chunkSize),
-		slog.Int64("current_total_size", totalSize),
-		slog.Bool("previous_metadata_found", found),
-		slog.Int64("previous_chunk_size", meta.ChunkSize),
-		slog.Int64("previous_total_size", meta.TotalSize))
 
 	if err := os.RemoveAll(chunkDir); err != nil {
 		return fmt.Errorf("remove stale chunk dir %s: %w", chunkDir, err)

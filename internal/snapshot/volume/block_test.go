@@ -606,3 +606,93 @@ func chunkIndexFromName(name, ext string) (int, error) {
 
 	return idx, err
 }
+
+// TestDownloadBlockChunks_CorruptChunkMeta_PurgesAndRedownloads is the
+// regression test for treating an unparseable chunks.meta as untrusted
+// geometry: ensureChunkGeometry must purge the chunk dir and re-download,
+// exactly like a geometry mismatch, rather than hard-aborting the whole
+// volume when the sidecar exists but fails to parse (e.g. a torn write from
+// a crash mid-WriteFileAtomic).
+func TestDownloadBlockChunks_CorruptChunkMeta_PurgesAndRedownloads(t *testing.T) {
+	t.Parallel()
+
+	payload := bytes.Repeat([]byte("0123456789"), 4) // 40 bytes
+
+	var (
+		mu           sync.Mutex
+		requestCount int
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/block", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requestCount++
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeContent(w, r, "data.img", time.Time{}, bytes.NewReader(payload))
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	blockURL := srv.URL + "/api/v1/block"
+	fetcher := exporter.NewFetcher(srv.Client())
+
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
+	require.NoError(t, err)
+
+	nodeDir := t.TempDir()
+	totalSize := int64(len(payload))
+	const chunkSize = 10
+
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+	// First (successful) run establishes a valid chunk dir at this geometry.
+	require.NoError(t, volume.DownloadBlockChunks(
+		context.Background(), slog.Default(), chunkDir, blockURL, totalSize,
+		chunkSize, 1, fetcher, codec, nil))
+
+	mu.Lock()
+	firstRunRequests := requestCount
+	mu.Unlock()
+	require.Positive(t, firstRunRequests, "first run must fetch every chunk")
+
+	// Simulate a torn write: overwrite the sidecar with garbage while leaving
+	// the SAME-geometry chunk files in place. The guard must purge
+	// unconditionally on an unparseable sidecar without inspecting the chunk
+	// files at all — trusting them here would mask exactly the class of bug
+	// this task fixes.
+	wantChunks := int((totalSize + chunkSize - 1) / chunkSize)
+	require.NoError(t, os.WriteFile(filepath.Join(chunkDir, archive.ChunkMetaFileName), []byte("{not valid json"), 0o644))
+
+	// Resume with a corrupt sidecar must NOT abort the volume.
+	err = volume.DownloadBlockChunks(
+		context.Background(), slog.Default(), chunkDir, blockURL, totalSize,
+		chunkSize, 1, fetcher, codec, nil)
+	require.NoError(t, err, "a corrupt chunks.meta must be treated as untrusted geometry, not a hard error")
+
+	mu.Lock()
+	secondRunRequests := requestCount
+	mu.Unlock()
+	assert.Equal(t, wantChunks, secondRunRequests-firstRunRequests,
+		"a corrupt sidecar must force every chunk to be re-fetched from byte zero")
+
+	names := listChunkFiles(t, chunkDir)
+	require.Len(t, names, wantChunks)
+
+	// The purge-and-recreate path must leave a fresh, valid sidecar behind —
+	// not just working chunk files — so a subsequent resume (before any
+	// merge) can trust it. Checked BEFORE MergeBlockChunks: merging removes
+	// the whole staging dir, chunks.meta included, on success.
+	meta, found, metaErr := archive.ReadChunkMeta(chunkDir)
+	require.NoError(t, metaErr)
+	assert.True(t, found)
+	assert.Equal(t, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize}, meta)
+
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(codec.Ext()))
+	require.NoError(t, volume.MergeBlockChunks(context.Background(), chunkDir, outPath, totalSize, chunkSize, codec.Ext()))
+
+	merged := decodeAll(t, outPath)
+	assert.Equal(t, payload, merged, "merged output must be correct after recovering from a corrupt sidecar")
+}
