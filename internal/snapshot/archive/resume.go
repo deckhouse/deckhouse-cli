@@ -154,7 +154,12 @@ func classifyCompleteDir(parentDir, primaryDir string, id NodeIdentity) (NodeRes
 
 // classifyPartialDir classifies an existing but incomplete node directory.
 func classifyPartialDir(primaryDir string) (NodeResumePlan, error) {
-	// Block chunk staging dir (single-volume block download in progress).
+	// Block chunk staging dir (single-volume block download in progress). This
+	// fires on the DIRECTORY'S EXISTENCE alone, not on any chunk having
+	// finalized — a chunk dir holding only durable in-flight "*.part" raw
+	// partials (see volume.downloadChunk's sub-chunk resume) is exactly as
+	// much "in progress" as one with finalized chunk_NNNNN files, and must
+	// resume rather than restart from scratch.
 	if _, err := os.Stat(filepath.Join(primaryDir, BlockChunksDirName)); err == nil {
 		return NodeResumePlan{TargetDir: primaryDir, State: NodeStateBlockPartial}, nil
 	}
