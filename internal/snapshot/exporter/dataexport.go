@@ -24,6 +24,7 @@ import (
 	"time"
 
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -42,6 +43,12 @@ const defaultDataExportTTL = "2h"
 // logEveryN is the poll-attempt cadence at which WaitReady emits a progress log.
 // With a 3 s poll interval, every 5 attempts ≈ 15 s.
 const logEveryN = 5
+
+// conditionTypeExpired is the producer's condition type set on a DataExport once its
+// TTL elapses (storage-volume-data-manager/common/conditions.go). The producer
+// deliberately never deletes the CR on expiry, so both EnsureDataExport and WaitReady
+// must recognize this exact string.
+const conditionTypeExpired = "Expired"
 
 // DataExportName derives a deterministic DataExport CR name from the snapshot
 // leaf CR name. The result fits in a DNS-1123 label.
@@ -73,10 +80,18 @@ func EnsureDataExport(
 
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, existing)
 	if err == nil {
-		return existing, nil
-	}
+		if !meta.IsStatusConditionTrue(existing.Status.Conditions, conditionTypeExpired) {
+			return existing, nil
+		}
 
-	if !kubeerrors.IsNotFound(err) {
+		// The producer never deletes an Expired DataExport on its own (manual operator
+		// cleanup is its documented contract), so a stale Expired object from a previous
+		// session would otherwise be returned forever, permanently blocking resume. Delete
+		// it and fall through to the normal create path below.
+		if delErr := c.Delete(ctx, existing); delErr != nil && !kubeerrors.IsNotFound(delErr) {
+			return nil, fmt.Errorf("delete expired DataExport %q: %w", deName, delErr)
+		}
+	} else if !kubeerrors.IsNotFound(err) {
 		return nil, fmt.Errorf("get DataExport %q: %w", deName, err)
 	}
 
@@ -161,10 +176,8 @@ func WaitReady(
 			return nil, fmt.Errorf("get DataExport %q: %w", deName, err)
 		}
 
-		for _, cond := range de.Status.Conditions {
-			if cond.Type == "Expired" && cond.Status == metav1.ConditionTrue {
-				return nil, fmt.Errorf("DataExport %s/%s: %w", namespace, deName, ErrExpired)
-			}
+		if meta.IsStatusConditionTrue(de.Status.Conditions, conditionTypeExpired) {
+			return nil, fmt.Errorf("DataExport %s/%s: %w", namespace, deName, ErrExpired)
 		}
 
 		if de.Status.URL != "" {
