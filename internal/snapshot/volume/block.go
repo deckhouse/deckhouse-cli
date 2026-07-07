@@ -40,6 +40,23 @@ import (
 // and keeps the chunk-file count manageable for large volumes.
 const DefaultChunkSize = 256 * 1024 * 1024 // 256 MiB
 
+// partSuffix names the durable, resumable raw-byte partial file for an
+// in-flight chunk: "<chunk_NNNNN[.<ext>]>.part". It is DELIBERATELY not
+// ".tmp": archive.resume.go removeTmpFiles deletes every *.tmp file under a
+// node directory on every resume scan, which would silently discard durable
+// mid-chunk progress on the very first resume attempt. A ".part" file holds
+// RAW (uncompressed) bytes, never a partial codec frame — a compressed frame
+// cannot be truncated and resumed by appending, but raw bytes can.
+const partSuffix = ".part"
+
+// partSyncInterval bounds how much of a chunk's durable partial download can
+// be lost to an unsynced OS page cache if the process is killed mid-chunk:
+// once this many bytes have been written to the .part file since the last
+// fsync, it is synced again. Small enough to bound loss to a few MiB on a
+// hard kill; large enough that fsync overhead does not dominate a healthy,
+// uninterrupted download.
+const partSyncInterval = 4 * 1024 * 1024 // 4 MiB
+
 // DownloadBlockChunks downloads all chunks of a block volume into chunkDir.
 // Chunk k covers raw bytes [k*chunkSize, min((k+1)*chunkSize, totalSize)).
 // Each chunk is fetched via a Range GET, encoded as an independent frame using
@@ -53,11 +70,22 @@ const DefaultChunkSize = 256 * 1024 * 1024 // 256 MiB
 // are cleaned before a chunk is fetched. workers bounds parallelism; the first
 // error cancels all in-flight work.
 //
-// Memory note: each in-flight worker buffers a full raw chunk (io.ReadAll) plus
-// the encoded frame simultaneously.  Worst-case RSS for this call alone is
-// workers × (chunkSize + compressed frame size).  The outer pipeline multiplies
-// this by the number of concurrent nodes (pipeline.Config.Workers); total peak
-// ≈ pipeline.Config.Workers × workers × (chunkSize + frame).
+// Durable sub-chunk resume: each chunk's raw bytes are streamed directly to a
+// durable "<chunk>.part" file as they arrive (see partSuffix) instead of being
+// buffered in memory for the whole chunk. An interrupted chunk resumes with a
+// Range GET starting at the ".part" file's persisted length, so a kill mid-chunk
+// loses at most the tail written since the last fsync (partSyncInterval), never
+// the whole chunk. The final codec frame is produced, and the ".part" file
+// consumed, only once the raw bytes are fully durable on disk.
+//
+// Memory note: EncodeFrame's signature requires the full raw chunk as a []byte,
+// so once a chunk's ".part" file is complete it is read back into memory for
+// exactly one EncodeFrame call (this replaces the old network-buffer io.ReadAll,
+// it does not add a second concurrent buffer). Worst-case RSS for this call
+// alone is still workers × (chunkSize + compressed frame size), now backed by a
+// durable file instead of a discarded network buffer. The outer pipeline
+// multiplies this by the number of concurrent nodes (pipeline.Config.Workers);
+// total peak ≈ pipeline.Config.Workers × workers × (chunkSize + frame).
 func DownloadBlockChunks(
 	ctx context.Context,
 	log *slog.Logger,
@@ -183,8 +211,10 @@ func createChunkDir(chunkDir string, chunkSize, totalSize int64) error {
 	return nil
 }
 
-// downloadChunk fetches one chunk, encodes it with codec, and writes it
-// atomically. It is safe to call concurrently from multiple goroutines.
+// downloadChunk fetches one chunk into a durable raw ".part" file (resuming
+// from the part's persisted length if one already exists), encodes the
+// complete raw bytes with codec, and writes the result atomically as the
+// final chunk file. It is safe to call concurrently from multiple goroutines.
 func downloadChunk(
 	ctx context.Context,
 	log *slog.Logger,
@@ -198,6 +228,7 @@ func downloadChunk(
 	onProgress func(n int),
 ) error {
 	finalPath := filepath.Join(chunkDir, archive.ChunkFileName(chunkIdx, codec.Ext()))
+	partPath := finalPath + partSuffix
 
 	// startByte/endByte (and the raw length they cover) are computed up front so
 	// the skip-existing-chunk branch below can credit onProgress before any
@@ -223,34 +254,22 @@ func downloadChunk(
 		return nil
 	}
 
-	// Remove any stale temporary file from a previous aborted attempt.
+	// Remove any stale AtomicWriter temporary file from a previous aborted
+	// finalize attempt. This is distinct from partPath: the ".part" file below
+	// holds durable resumable progress and must survive across runs.
 	tmpPath := finalPath + ".tmp"
 
 	if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale tmp %s: %w", tmpPath, err)
 	}
 
-	log.Debug("fetching chunk",
-		slog.Int("chunk", chunkIdx),
-		slog.Int64("start", startByte),
-		slog.Int64("end", endByte))
-
-	body, err := fetcher.RangeGet(ctx, blockURL, startByte, endByte)
-	if err != nil {
-		return fmt.Errorf("range get chunk %d: %w", chunkIdx, err)
+	if err := fetchChunkRaw(ctx, log, fetcher, blockURL, partPath, chunkIdx, startByte, endByte, rawLen, onProgress); err != nil {
+		return err
 	}
 
-	// Wrap body in countingReader (fs.go) so bytes are credited to onProgress
-	// as the transport delivers them via io.ReadAll's internal Read loop,
-	// instead of once in a single terminal call after the whole chunk has
-	// arrived — the same incremental-reporting contract stageWholeFile uses
-	// for the filesystem path.
-	raw, err := io.ReadAll(&countingReader{r: body, onProgress: onProgress})
-
-	_ = body.Close()
-
+	raw, err := os.ReadFile(partPath)
 	if err != nil {
-		return fmt.Errorf("read chunk %d body: %w", chunkIdx, err)
+		return fmt.Errorf("read persisted chunk %d: %w", chunkIdx, err)
 	}
 
 	frame, err := codec.EncodeFrame(raw)
@@ -262,7 +281,148 @@ func downloadChunk(
 		return fmt.Errorf("write chunk %d: %w", chunkIdx, err)
 	}
 
+	// A crash between the atomic rename above and this removal is harmless: the
+	// final chunk file now exists, so the next run's skip check at the top of
+	// this function fires before the stale ".part" is ever looked at again, and
+	// MergeBlockChunks removes the whole chunk directory (including any stale
+	// ".part") once every final chunk is present.
+	if err := os.Remove(partPath); err != nil && !os.IsNotExist(err) {
+		log.Warn("failed to remove durable partial chunk file after finalize",
+			slog.String("path", partPath),
+			slog.String("error", err.Error()))
+	}
+
 	log.Debug("chunk written", slog.Int("chunk", chunkIdx), slog.Int("frame_bytes", len(frame)))
 
 	return nil
+}
+
+// fetchChunkRaw ensures partPath durably holds exactly rawLen raw bytes
+// covering [startByte, endByte], resuming from partPath's current size
+// (truncating away anything larger than rawLen, which cannot be trusted) and
+// fetching only the missing suffix via a Range GET. A resume credit for
+// already-persisted bytes is reported to onProgress before any network call,
+// and newly-arrived bytes are credited incrementally as they stream in —
+// together the two credits always sum to exactly rawLen.
+func fetchChunkRaw(
+	ctx context.Context,
+	log *slog.Logger,
+	fetcher *exporter.Fetcher,
+	blockURL string,
+	partPath string,
+	chunkIdx int,
+	startByte, endByte, rawLen int64,
+	onProgress func(n int),
+) error {
+	have, err := partialChunkSize(partPath, rawLen)
+	if err != nil {
+		return fmt.Errorf("stat partial chunk %d: %w", chunkIdx, err)
+	}
+
+	if onProgress != nil && have > 0 {
+		onProgress(int(have))
+	}
+
+	if have >= rawLen {
+		// The durable partial already covers the whole chunk (e.g. a crash
+		// between finishing the raw download and finalizing the frame on a
+		// previous run): nothing left to fetch.
+		return nil
+	}
+
+	log.Debug("fetching chunk",
+		slog.Int("chunk", chunkIdx),
+		slog.Int64("start", startByte+have),
+		slog.Int64("end", endByte),
+		slog.Int64("resumed_from", have))
+
+	body, err := fetcher.RangeGet(ctx, blockURL, startByte+have, endByte)
+	if err != nil {
+		return fmt.Errorf("range get chunk %d: %w", chunkIdx, err)
+	}
+
+	defer func() { _ = body.Close() }()
+
+	f, err := os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("open partial chunk %d: %w", chunkIdx, err)
+	}
+
+	sw := &syncingWriter{f: f, syncInterval: partSyncInterval}
+	cr := &countingReader{r: body, onProgress: onProgress}
+
+	_, copyErr := io.Copy(sw, cr)
+	syncErr := f.Sync()
+	closeErr := f.Close()
+
+	if copyErr != nil {
+		return fmt.Errorf("stream chunk %d body: %w", chunkIdx, copyErr)
+	}
+
+	if syncErr != nil {
+		return fmt.Errorf("sync partial chunk %d: %w", chunkIdx, syncErr)
+	}
+
+	if closeErr != nil {
+		return fmt.Errorf("close partial chunk %d: %w", chunkIdx, closeErr)
+	}
+
+	return nil
+}
+
+// partialChunkSize returns the current size of the durable partial file at
+// partPath, or 0 if it does not exist. A partial larger than rawLen cannot
+// belong to the current chunk geometry (ensureChunkGeometry purges the whole
+// chunk directory on any geometry change, so this should not happen in
+// practice) and is removed so the chunk restarts cleanly rather than trusting
+// bytes that may cover the wrong range.
+func partialChunkSize(partPath string, rawLen int64) (int64, error) {
+	info, err := os.Stat(partPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+
+		return 0, fmt.Errorf("stat %s: %w", partPath, err)
+	}
+
+	if info.Size() > rawLen {
+		if err := os.Remove(partPath); err != nil && !os.IsNotExist(err) {
+			return 0, fmt.Errorf("remove oversized partial %s: %w", partPath, err)
+		}
+
+		return 0, nil
+	}
+
+	return info.Size(), nil
+}
+
+// syncingWriter wraps an *os.File and fsyncs it every syncInterval bytes
+// written, bounding how much of a durable partial download can be lost to an
+// unsynced OS page cache if the process is killed mid-chunk.
+type syncingWriter struct {
+	f             *os.File
+	syncInterval  int64
+	sinceLastSync int64
+}
+
+// Write implements io.Writer.
+func (w *syncingWriter) Write(p []byte) (int, error) {
+	n, err := w.f.Write(p)
+	if err != nil {
+		return n, fmt.Errorf("write partial chunk: %w", err)
+	}
+
+	w.sinceLastSync += int64(n)
+	if w.sinceLastSync < w.syncInterval {
+		return n, nil
+	}
+
+	w.sinceLastSync = 0
+
+	if syncErr := w.f.Sync(); syncErr != nil {
+		return n, fmt.Errorf("sync partial chunk: %w", syncErr)
+	}
+
+	return n, nil
 }

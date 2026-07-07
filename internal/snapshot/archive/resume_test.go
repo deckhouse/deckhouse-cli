@@ -344,6 +344,53 @@ func TestScanNode_BlockPartialWithTmp(t *testing.T) {
 	// PresentChunkIndices field on NodeResumePlan.
 }
 
+// TestScanNode_BlockPartialAllPartFiles is the regression test for the
+// durable sub-chunk resume design: a chunk directory holding ONLY a durable
+// ".part" raw-partial file (no chunk has finalized yet) must still classify
+// as NodeStateBlockPartial, not NodeStatePending/ManifestsOnly, so the
+// pipeline resumes the node instead of restarting it from scratch. It must
+// also NOT be swept by removeTmpFiles, which only targets "*.tmp" — the
+// whole reason the durable partial uses a non-.tmp suffix.
+func TestScanNode_BlockPartialAllPartFiles(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	id := archive.NodeIdentity{Kind: "VirtualDiskSnapshot", Name: "disk-block-inflight"}
+	nodeDir := filepath.Join(parent, archive.NodeDirName(id.Kind, id.Name))
+
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatalf("mkdir chunkDir: %v", err)
+	}
+
+	// Only a durable partial for chunk 0 — no chunk has finalized yet.
+	partPath := filepath.Join(chunkDir, archive.ChunkFileName(0, ".zst")+".part")
+
+	if err := os.WriteFile(partPath, []byte("partial raw bytes"), 0o644); err != nil {
+		t.Fatalf("write part: %v", err)
+	}
+
+	plan, err := archive.ScanNode(parent, id)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if plan.State != archive.NodeStateBlockPartial {
+		t.Errorf("state = %v, want NodeStateBlockPartial", plan.State)
+	}
+
+	if plan.TargetDir != nodeDir {
+		t.Errorf("TargetDir = %q, want %q", plan.TargetDir, nodeDir)
+	}
+
+	// The durable partial must survive the resume scan's stale-tmp cleanup.
+	if _, err := os.Stat(partPath); err != nil {
+		t.Errorf("durable partial %q should survive ScanNode's removeTmpFiles pass, got error: %v", partPath, err)
+	}
+}
+
 func TestScanNode_FSPartial(t *testing.T) {
 	t.Parallel()
 
