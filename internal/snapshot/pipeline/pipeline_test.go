@@ -996,13 +996,22 @@ func TestPipeline_FS_ChunkSizeThreadsToDownloadFilesystemVolume(t *testing.T) {
 // ── recording progress helpers ────────────────────────────────────────────────
 
 // recordedStream is a progress.Stream stub that counts Activate, Done, and Fail
-// calls. All methods are safe for concurrent use.
+// calls. It mirrors the real progress.Stream contract's "first terminal call
+// wins" semantics (see ttyStream.finalize / plainStream.finalize in
+// internal/progress/multibar.go): once Done or Fail has been called once, a
+// later call to either is a no-op on the counters. This matters for
+// pipeline.Run's post-g.Wait() defensive sweep, which calls Fail() on every
+// pre-created stream unconditionally — against the real sinks that is a safe
+// no-op for already-Done streams, and this stub must behave the same way for
+// tests exercising the sweep to assert anything meaningful. All methods are
+// safe for concurrent use.
 type recordedStream struct {
 	name        string
 	mu          sync.Mutex
 	activateCnt int
 	doneCnt     int
 	failCnt     int
+	settled     bool
 }
 
 func (s *recordedStream) IncrBy(_ int)     {}
@@ -1016,14 +1025,26 @@ func (s *recordedStream) Activate() {
 
 func (s *recordedStream) Done() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.settled {
+		return
+	}
+
+	s.settled = true
 	s.doneCnt++
-	s.mu.Unlock()
 }
 
 func (s *recordedStream) Fail() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.settled {
+		return
+	}
+
+	s.settled = true
 	s.failCnt++
-	s.mu.Unlock()
 }
 
 // recordingSink is a progress.Sink stub that captures NewStream calls in creation
@@ -1339,5 +1360,139 @@ func TestPipeline_KeepExports(t *testing.T) {
 					"DataExport must be deleted when KeepExports is false, got err=%v", err)
 			}
 		})
+	}
+}
+
+// TestPipeline_Progress_OpenExportFailure_CallsFailNotDone verifies that when
+// cfg.OpenExport itself returns an error (e.g. ctx cancelled while polling
+// WaitReady, or the DataExport never becomes Ready), downloadVolumeBinding's
+// stream.Fail()/Done() defer — now registered right after the stream semaphore
+// is acquired, BEFORE cfg.OpenExport is even called — still settles the stream
+// as Fail exactly once and Done zero times. Before the
+// progress-finalize-streams-on-early-error-paths fix, the terminal defer was
+// registered only after cfg.OpenExport returned successfully, so this exact
+// path left the pre-created stream dangling (failCnt==0, doneCnt==0) and a real
+// TTY sink's Wait() would block forever on it.
+func TestPipeline_Progress_OpenExportFailure_CallsFailNotDone(t *testing.T) {
+	t.Parallel()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+	rec := &recordingSink{}
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		Progress:             rec,
+		OpenExport: func(_ context.Context, _ string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			return nil, errors.New("simulated OpenExport failure (e.g. ctx cancelled mid-WaitReady)")
+		},
+	}
+
+	err := runPipeline(context.Background(), cfg)
+	require.Error(t, err, "expected pipeline to fail when OpenExport itself errors")
+
+	streams := rec.snapshot()
+	require.Len(t, streams, 1, "exactly 1 stream for the single volume leaf")
+	require.Equal(t, 0, streams[0].activateCnt, "a stream must never be Activated before OpenExport succeeds")
+	require.Equal(t, 0, streams[0].doneCnt, "an OpenExport failure must never call Done")
+	require.Equal(t, 1, streams[0].failCnt, "an OpenExport failure must call Fail exactly once")
+}
+
+// TestPipeline_Progress_CancelDuringWait_DoesNotDeadlock is the end-to-end
+// regression test for the live "had to press Ctrl-C twice" report: it drives a
+// REAL progress.New(..., true) ttySink (not the recordingSink stub used
+// elsewhere in this file) through a cancelled run and asserts sink.Wait() —
+// the exact call cmd/download/download.go makes after pipeline.Run returns —
+// completes promptly instead of blocking forever.
+//
+// The tree has two volume leaves and MaxParallelDownloads=1, so once the first
+// leaf's goroutine is blocked inside OpenExport (holding the one stream-
+// semaphore slot), the second leaf's goroutine is necessarily blocked on
+// cfg.streamSem.Acquire. Cancelling ctx at that moment exercises BOTH early-
+// return paths named in the task at once: the semaphore-acquire failure (only
+// caught by Run's post-g.Wait() sweep) and the OpenExport failure (caught by
+// downloadVolumeBinding's own relocated defer).
+func TestPipeline_Progress_CancelDuringWait_DoesNotDeadlock(t *testing.T) {
+	t.Parallel()
+
+	const nVolumes = 2
+
+	c := buildCapTestClient(t, nVolumes)
+	outputDir := t.TempDir()
+	sink := progress.New(&bytes.Buffer{}, true)
+
+	arrived := make(chan struct{})
+
+	var arrivedOnce sync.Once
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := pipeline.Config{
+		Namespace:            capTestNS,
+		RootSnapshot:         capTestRootSnap,
+		OutputDir:            outputDir,
+		Workers:              nVolumes,
+		PerVolumeConcurrency: 1,
+		MaxParallelDownloads: 1,
+		KubeClient:           c,
+		Progress:             sink,
+		OpenExport: func(exportCtx context.Context, _ string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			arrivedOnce.Do(func() { close(arrived) })
+
+			<-exportCtx.Done()
+
+			return nil, exportCtx.Err()
+		},
+	}
+
+	runDone := make(chan error, 1)
+
+	go func() {
+		runDone <- runPipeline(ctx, cfg)
+	}()
+
+	// Wait until exactly one leaf is blocked inside OpenExport (holding the one
+	// MaxParallelDownloads=1 slot); the other leaf is necessarily blocked on
+	// cfg.streamSem.Acquire at this point.
+	select {
+	case <-arrived:
+	case <-time.After(10 * time.Second):
+		cancel()
+		t.Fatal("timeout: no leaf reached OpenExport")
+	}
+
+	// Simulate a SIGINT: cancel the context both leaves are waiting on.
+	cancel()
+
+	var runErr error
+
+	select {
+	case runErr = <-runDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("pipeline.Run did not return after ctx cancellation")
+	}
+
+	require.Error(t, runErr, "a cancelled run must return an error")
+
+	// The critical regression assertion: sink.Wait() must return promptly. Before
+	// the fix, the leaf blocked on streamSem.Acquire left its pre-created stream
+	// permanently unsettled, and this call would hang forever.
+	waitDone := make(chan struct{})
+
+	go func() {
+		sink.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sink.Wait() deadlocked after a cancelled run — every pre-created stream must be terminally settled")
 	}
 }
