@@ -1486,7 +1486,8 @@ func TestPipeline_Progress_CancelDuringWait_DoesNotDeadlock(t *testing.T) {
 		t.Fatal("pipeline.Run did not return after ctx cancellation")
 	}
 
-	require.Error(t, runErr, "a cancelled run must return an error")
+	require.ErrorIs(t, runErr, context.Canceled,
+		"a cancelled run must return ctx.Err(), not the per-node best-effort aggregate")
 
 	// The critical regression assertion: sink.Wait() must return promptly. Before
 	// the fix, the leaf blocked on streamSem.Acquire left its pre-created stream
@@ -1502,5 +1503,88 @@ func TestPipeline_Progress_CancelDuringWait_DoesNotDeadlock(t *testing.T) {
 	case <-waitDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("sink.Wait() deadlocked after a cancelled run — every pre-created stream must be terminally settled")
+	}
+}
+
+// TestPipeline_BestEffort_OneNodeFailureDoesNotCancelSiblings is the regression
+// test for the best-effort per-node download design: one node's permanent
+// download failure must not cancel sibling nodes that are still downloading.
+//
+// Three independent leaf nodes (buildCapTestClient) start downloading
+// concurrently (Workers == nVolumes, so every leaf's goroutine runs
+// immediately). The failing leaf's OpenExport returns an error right away; the
+// healthy leaves' OpenExport instead waits briefly while watching ctx — long
+// enough that, under the OLD errgroup.WithContext(ctx) behavior (the first
+// non-nil g.Go return cancels the shared derived context), a healthy leaf
+// would observe ctx.Done() during that wait and fail too. Under the fixed
+// best-effort behavior a per-node error never cancels the shared context, so
+// the healthy leaves complete normally despite the sibling failure.
+func TestPipeline_BestEffort_OneNodeFailureDoesNotCancelSiblings(t *testing.T) {
+	t.Parallel()
+
+	const (
+		nVolumes = 3
+		failIdx  = 1
+	)
+
+	failName := fmt.Sprintf("cap-disk-%d", failIdx)
+	errPermanentFailure := errors.New("simulated permanent volume failure")
+
+	c := buildCapTestClient(t, nVolumes)
+	outputDir := t.TempDir()
+
+	rawBlock := bytes.Repeat([]byte("Z"), 300)
+	srv := makeBlockServer(t, rawBlock)
+
+	defer srv.Close()
+
+	cfg := pipeline.Config{
+		Namespace:            capTestNS,
+		RootSnapshot:         capTestRootSnap,
+		OutputDir:            outputDir,
+		Workers:              nVolumes,
+		PerVolumeConcurrency: 1,
+		MaxParallelDownloads: nVolumes,
+		KubeClient:           c,
+		ManifestSource:       newManifestStub(),
+		OpenExport: func(exportCtx context.Context, ns string, ref aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			if ref.Name == failName {
+				return nil, fmt.Errorf("node %s: %w", ref.Name, errPermanentFailure)
+			}
+
+			// Give the failing leaf's goroutine time to return and, under the old
+			// first-error-cancels-all behavior, cancel the shared context while
+			// this healthy leaf is still "in flight".
+			select {
+			case <-time.After(150 * time.Millisecond):
+			case <-exportCtx.Done():
+				return nil, exportCtx.Err()
+			}
+
+			return exporter.NewExport(ns, "de-"+ref.Name, "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	err := pipeline.Run(context.Background(), cfg)
+	require.Error(t, err, "expected an aggregated error naming the permanently failed node")
+	require.ErrorIs(t, err, errPermanentFailure, "aggregated error must join the failed node's own error")
+	require.Contains(t, err.Error(), failName, "aggregated error must identify the failed node")
+
+	for i := 0; i < nVolumes; i++ {
+		diskName := fmt.Sprintf("cap-disk-%d", i)
+		nodeDir := filepath.Join(outputDir, archive.SnapshotsDirName, archive.NodeDirName(capTestKind, diskName))
+		dataPath := filepath.Join(nodeDir, archive.DataBlockName(".zst"))
+
+		if i == failIdx {
+			_, statErr := os.Stat(dataPath)
+			require.True(t, os.IsNotExist(statErr), "the failed node %s must not have downloaded data", diskName)
+
+			continue
+		}
+
+		assertNodeComplete(t, nodeDir)
+
+		_, statErr := os.Stat(dataPath)
+		require.NoError(t, statErr, "healthy node %s must have downloaded data despite the sibling failure", diskName)
 	}
 }
