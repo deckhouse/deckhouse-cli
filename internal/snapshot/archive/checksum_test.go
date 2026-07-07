@@ -231,6 +231,101 @@ func TestComputeNodeChecksum_FsVolume_NestedFileChunkStagingExcluded(t *testing.
 	}
 }
 
+// TestComputeNodeChecksum_ChunkMetaExcluded verifies that the chunks.meta
+// geometry sidecar (chunk-size-mismatch-resume-corruption-guard) never
+// contributes to a node checksum, in every place it can appear: the
+// single-volume flat block chunk dir (data.bin.d/), a per-file chunk dir
+// nested inside the flat FS staging dir (data.tar.d/<file><ext>.d/), and the
+// multi-volume block chunk dir (data/<pvc>.bin.d/). The first two are
+// excluded because collectNodeFiles never walks nodeDir itself for the
+// single-volume layout; the third is excluded by the existing ".d"-suffix
+// skip in the data/ walk.
+func TestComputeNodeChecksum_ChunkMetaExcluded(t *testing.T) {
+	t.Run("flat block chunk dir", func(t *testing.T) {
+		nodeDir := makeNodeDir(t)
+		writeFile(t, filepath.Join(nodeDir, DataBlockName(".zst")), "block-content")
+
+		base, err := ComputeNodeChecksum(nodeDir)
+		if err != nil {
+			t.Fatalf("base: %v", err)
+		}
+
+		chunkDir := filepath.Join(nodeDir, BlockChunksDirName)
+		if err := EnsureDir(chunkDir); err != nil {
+			t.Fatalf("EnsureDir: %v", err)
+		}
+
+		if err := WriteChunkMeta(chunkDir, ChunkMeta{ChunkSize: 100, TotalSize: 1000}); err != nil {
+			t.Fatalf("WriteChunkMeta: %v", err)
+		}
+
+		after, err := ComputeNodeChecksum(nodeDir)
+		if err != nil {
+			t.Fatalf("after: %v", err)
+		}
+
+		if base.Hex != after.Hex {
+			t.Error("chunks.meta under data.bin.d/ was unexpectedly included in the checksum")
+		}
+	})
+
+	t.Run("nested per-file FS chunk dir", func(t *testing.T) {
+		nodeDir := makeNodeDir(t)
+		writeFile(t, filepath.Join(nodeDir, FsTarName), "tar-content")
+
+		base, err := ComputeNodeChecksum(nodeDir)
+		if err != nil {
+			t.Fatalf("base: %v", err)
+		}
+
+		nestedChunkDir := filepath.Join(nodeDir, FsTarStagingDirName, FsFileChunksDirName("payload.bin", ".zst"))
+		if err := EnsureDir(nestedChunkDir); err != nil {
+			t.Fatalf("EnsureDir: %v", err)
+		}
+
+		if err := WriteChunkMeta(nestedChunkDir, ChunkMeta{ChunkSize: 100, TotalSize: 1000}); err != nil {
+			t.Fatalf("WriteChunkMeta: %v", err)
+		}
+
+		after, err := ComputeNodeChecksum(nodeDir)
+		if err != nil {
+			t.Fatalf("after: %v", err)
+		}
+
+		if base.Hex != after.Hex {
+			t.Error("chunks.meta under a nested data.tar.d/ chunk dir was unexpectedly included in the checksum")
+		}
+	})
+
+	t.Run("multi-volume block chunk dir", func(t *testing.T) {
+		nodeDir := makeNodeDir(t)
+		writeFile(t, filepath.Join(nodeDir, MultiVolumeBlockName("pvc-a", ".zst")), "block-content-a")
+
+		base, err := ComputeNodeChecksum(nodeDir)
+		if err != nil {
+			t.Fatalf("base: %v", err)
+		}
+
+		chunkDir := filepath.Join(nodeDir, BlockChunksDirNameFor("pvc-a"))
+		if err := EnsureDir(chunkDir); err != nil {
+			t.Fatalf("EnsureDir: %v", err)
+		}
+
+		if err := WriteChunkMeta(chunkDir, ChunkMeta{ChunkSize: 100, TotalSize: 1000}); err != nil {
+			t.Fatalf("WriteChunkMeta: %v", err)
+		}
+
+		after, err := ComputeNodeChecksum(nodeDir)
+		if err != nil {
+			t.Fatalf("after: %v", err)
+		}
+
+		if base.Hex != after.Hex {
+			t.Error("chunks.meta under data/<pvc>.bin.d/ was unexpectedly included in the checksum")
+		}
+	})
+}
+
 // TestShortChecksum verifies that ShortChecksum returns the first 8 hex chars.
 func TestShortChecksum(t *testing.T) {
 	cases := []struct {

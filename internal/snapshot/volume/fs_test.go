@@ -930,6 +930,16 @@ func TestDownloadFilesystemVolume_PartialChunkResume_OnlyMissingChunkFetched(t *
 		t.Fatal(err)
 	}
 
+	// A real interrupted run always has a chunks.meta recording the geometry
+	// (createChunkDir writes it before the first chunk is even fetched — see
+	// the chunk-size-mismatch-resume-corruption-guard fix), so seed one here
+	// matching this run's geometry. Without it the geometry guard cannot tell
+	// this partial chunk dir apart from one produced under a different
+	// chunkSize and would (correctly) purge and re-fetch chunk 0 too.
+	if err := archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: testChunkSize, TotalSize: int64(len(content))}); err != nil {
+		t.Fatal(err)
+	}
+
 	var (
 		progMu   sync.Mutex
 		credited int64
@@ -991,5 +1001,201 @@ func TestDownloadFilesystemVolume_PartialChunkResume_OnlyMissingChunkFetched(t *
 	got := decodeZstdTarEntry(t, tarPath, "big.bin"+codec.Ext())
 	if !bytes.Equal(got, content) {
 		t.Error("merged big.bin content does not match original")
+	}
+}
+
+// TestDownloadFilesystemVolume_LargeFile_ChunkSizeChanged_ResumeNotCorrupted
+// is the filesystem-path counterpart of
+// TestDownloadBlockChunks_ChunkSizeChanged_PurgesStaleChunks: it shares the
+// exact same underlying machinery (stageChunkedFile calls
+// DownloadBlockChunks/MergeBlockChunks unchanged), so the same silent-
+// corruption bug applied here too. A large file chunked in an interrupted run
+// at one chunk size must have its stale chunks discarded and be re-fetched in
+// full at a DIFFERENT chunk size on resume, rather than assembling a data.tar
+// entry from chunks whose byte ranges no longer match the new geometry.
+func TestDownloadFilesystemVolume_LargeFile_ChunkSizeChanged_ResumeNotCorrupted(t *testing.T) {
+	t.Parallel()
+
+	const (
+		firstChunkSize  int64 = 100
+		secondChunkSize int64 = 60
+	)
+
+	// 240 bytes: does not divide evenly by either chunk size, exercising a
+	// short final chunk under both geometries.
+	content := bytes.Repeat([]byte("Q"), 240)
+
+	var (
+		mu            sync.Mutex
+		rangesFetched []string
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"big.bin","type":"file","uri":"big.bin","attributes":{"size":`+strconv.Itoa(len(content))+`}}`+
+				`]}`)
+
+		case "/files/big.bin":
+			mu.Lock()
+			rangesFetched = append(rangesFetched, r.Header.Get("Range"))
+			mu.Unlock()
+
+			http.ServeContent(w, r, "big.bin", time.Time{}, bytes.NewReader(content))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	codec := mustCodec(t, "zstd")
+
+	// Simulate an interrupted first run at firstChunkSize: pre-seed the FULL
+	// set of chunks that geometry would produce (as if the run got all the
+	// way through chunking but crashed before merge) plus the chunks.meta a
+	// real run would have written for that geometry.
+	chunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName("big.bin", codec.Ext())))
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	firstNumChunks := int((int64(len(content)) + firstChunkSize - 1) / firstChunkSize)
+
+	for i := range firstNumChunks {
+		start := int64(i) * firstChunkSize
+		end := min(start+firstChunkSize, int64(len(content)))
+
+		frame, err := codec.EncodeFrame(content[start:end])
+		if err != nil {
+			t.Fatalf("encode chunk %d: %v", i, err)
+		}
+
+		if err := os.WriteFile(filepath.Join(chunkDir, archive.ChunkFileName(i, codec.Ext())), frame, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: firstChunkSize, TotalSize: int64(len(content))}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resume at a DIFFERENT chunk size.
+	err := volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.Default(),
+		tarPath,
+		stagingDir,
+		srv.URL+"/files/",
+		1,
+		secondChunkSize,
+		newFSFetcher(srv),
+		codec,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	mu.Lock()
+	gotRanges := append([]string(nil), rangesFetched...)
+	mu.Unlock()
+
+	secondNumChunks := int((int64(len(content)) + secondChunkSize - 1) / secondChunkSize)
+	if len(gotRanges) != secondNumChunks {
+		t.Errorf("expected the stale chunks to be discarded and all %d chunks re-fetched at the new geometry, got %d requests: %v",
+			secondNumChunks, len(gotRanges), gotRanges)
+	}
+
+	got := decodeZstdTarEntry(t, tarPath, "big.bin"+codec.Ext())
+	if !bytes.Equal(got, content) {
+		t.Error("merged big.bin content does not match original after a chunk-size change on resume")
+	}
+}
+
+// TestDownloadFilesystemVolume_ThresholdCrossing_OrphanChunkDirRemoved
+// verifies the review-noted tidiness fix bundled with the geometry guard: a
+// file chunked in an earlier run (chunk dir present, never merged) that falls
+// BELOW the effective chunk-size threshold in a later run is staged via the
+// unchanged whole-file branch, and that branch must best-effort remove the
+// now-orphaned per-file chunk directory rather than leaving it behind
+// (non-corrupting on its own — MergeBlockChunks/stageWholeFile never read it —
+// but it would otherwise accumulate across chunk-size changes).
+//
+// WriteTar is deliberately made to fail (poisoning "<tarPath>.tmp" with a
+// directory, the same technique TestDownloadFilesystemVolume_SmallFile_NoChunkDirCreated
+// uses) so DownloadFilesystemVolume returns an error AFTER per-file staging
+// (and its orphan cleanup) but BEFORE the success path's stagingDir removal —
+// otherwise a full success already wipes stagingDir wholesale and the
+// assertion below would pass even without the fix.
+func TestDownloadFilesystemVolume_ThresholdCrossing_OrphanChunkDirRemoved(t *testing.T) {
+	t.Parallel()
+
+	content := bytes.Repeat([]byte("Z"), 150)
+	codec := mustCodec(t, "zstd")
+
+	srv, tracker := newRangeTrackingFSServer(t, "small.bin", content)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	if err := os.MkdirAll(tarPath+".tmp", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a prior run where a lower chunk-size threshold routed this file
+	// through the chunked path, leaving an orphan (never merged) per-file
+	// chunk dir with its own chunks.meta.
+	orphanChunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName("small.bin", codec.Ext())))
+	if err := os.MkdirAll(orphanChunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := archive.WriteChunkMeta(orphanChunkDir, archive.ChunkMeta{ChunkSize: 50, TotalSize: int64(len(content))}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A chunk size ABOVE the file's size routes it through stageWholeFile.
+	newChunkSize := int64(len(content)) * 2
+
+	err := volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.Default(),
+		tarPath,
+		stagingDir,
+		srv.URL+"/files/",
+		1,
+		newChunkSize,
+		newFSFetcher(srv),
+		codec,
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected DownloadFilesystemVolume to fail (poisoned tar.tmp path)")
+	}
+
+	if _, statErr := os.Stat(orphanChunkDir); !os.IsNotExist(statErr) {
+		t.Errorf("orphan chunk dir %s must be removed once the file crosses to the whole-file branch, stat err=%v", orphanChunkDir, statErr)
+	}
+
+	destPath := filepath.Join(stagingDir, "small.bin"+codec.Ext())
+	if _, statErr := os.Stat(destPath); statErr != nil {
+		t.Fatalf("expected staged file at %s: %v", destPath, statErr)
+	}
+
+	if snap := tracker.snapshot(); len(snap) != 1 || snap[0] {
+		t.Errorf("expected exactly one non-Range GET on the whole-file branch, got %v", snap)
 	}
 }

@@ -77,8 +77,8 @@ func DownloadBlockChunks(
 		workers = 1
 	}
 
-	if err := archive.EnsureDir(chunkDir); err != nil {
-		return fmt.Errorf("create chunk dir %s: %w", chunkDir, err)
+	if err := ensureChunkGeometry(log, chunkDir, chunkSize, totalSize); err != nil {
+		return fmt.Errorf("verify chunk geometry for %s: %w", chunkDir, err)
 	}
 
 	numChunks := int((totalSize + chunkSize - 1) / chunkSize)
@@ -101,6 +101,74 @@ func DownloadBlockChunks(
 	}
 
 	return g.Wait()
+}
+
+// ensureChunkGeometry guards against resuming a chunk directory that was
+// produced with a DIFFERENT chunkSize or totalSize than the current call.
+// Chunk k's byte range is derived purely from chunkSize/totalSize (see
+// downloadChunk), and neither value is encoded in the chunk's filename — so
+// silently reusing chunks written under a different geometry would duplicate
+// or truncate byte ranges in the merged output without either
+// DownloadBlockChunks or MergeBlockChunks ever noticing (chunks are opaque
+// compressed frames; merged length cannot be checked against totalSize).
+//
+// If chunkDir does not exist yet, it is created and the current geometry is
+// recorded: a fresh download. If it exists and archive.ReadChunkMeta reports a
+// geometry that exactly matches chunkSize/totalSize, it is left untouched: a
+// same-geometry resume, safe to reuse existing chunks from. Otherwise
+// (missing metadata or a mismatch) the ENTIRE directory is purged and
+// recreated with the current geometry recorded — every chunk in it must be
+// re-fetched, since none of them can be trusted to cover the byte range the
+// current geometry expects.
+func ensureChunkGeometry(log *slog.Logger, chunkDir string, chunkSize, totalSize int64) error {
+	_, statErr := os.Stat(chunkDir)
+
+	switch {
+	case statErr == nil:
+		// Fall through to the metadata check below.
+	case os.IsNotExist(statErr):
+		return createChunkDir(chunkDir, chunkSize, totalSize)
+	default:
+		return fmt.Errorf("stat chunk dir %s: %w", chunkDir, statErr)
+	}
+
+	meta, found, err := archive.ReadChunkMeta(chunkDir)
+	if err != nil {
+		return fmt.Errorf("read chunk metadata: %w", err)
+	}
+
+	if found && meta.ChunkSize == chunkSize && meta.TotalSize == totalSize {
+		return nil
+	}
+
+	log.Info("chunk geometry changed since last run, discarding stale chunks and re-downloading",
+		slog.String("dir", chunkDir),
+		slog.Int64("current_chunk_size", chunkSize),
+		slog.Int64("current_total_size", totalSize),
+		slog.Bool("previous_metadata_found", found),
+		slog.Int64("previous_chunk_size", meta.ChunkSize),
+		slog.Int64("previous_total_size", meta.TotalSize))
+
+	if err := os.RemoveAll(chunkDir); err != nil {
+		return fmt.Errorf("remove stale chunk dir %s: %w", chunkDir, err)
+	}
+
+	return createChunkDir(chunkDir, chunkSize, totalSize)
+}
+
+// createChunkDir creates chunkDir and records the geometry it is being
+// created for via chunks.meta, so a later run can detect a changed
+// chunkSize/totalSize before trusting any chunk file already inside it.
+func createChunkDir(chunkDir string, chunkSize, totalSize int64) error {
+	if err := archive.EnsureDir(chunkDir); err != nil {
+		return fmt.Errorf("create chunk dir %s: %w", chunkDir, err)
+	}
+
+	if err := archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize}); err != nil {
+		return fmt.Errorf("write chunk metadata for %s: %w", chunkDir, err)
+	}
+
+	return nil
 }
 
 // downloadChunk fetches one chunk, encodes it with codec, and writes it
