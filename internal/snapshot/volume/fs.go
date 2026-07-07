@@ -431,6 +431,68 @@ func stageWholeFile(
 	return nil
 }
 
+// ScanFSStagingProgress computes durably-committed raw bytes across every
+// still-open per-file chunk directory under stagingDir, purely from local
+// state — no network call. A per-file chunk directory is identified by the
+// presence of a readable chunks.meta sidecar — the same marker
+// createChunkDir writes for both block volumes and per-file FS chunks (see
+// stageChunkedFile, which reuses DownloadBlockChunks/MergeBlockChunks
+// unchanged) — and its contribution is computed via the identical
+// ScanBlockChunkProgress formula.
+//
+// Deliberately excluded: a file that is ALREADY fully staged (its chunk
+// directory has already been merged away by MergeBlockChunks into a flat
+// <relPath><ext> blob) contributes nothing here, because its original raw
+// declared size is not recoverable from disk once the chunk dir — the only
+// place that size was ever recorded (chunks.meta) — is gone; the merged
+// blob's own on-disk length is a compressed/frame-concatenated size, not the
+// raw size the rest of the progress accounting uses. Such a file keeps being
+// credited exactly once, at its true declared size, by
+// stageCompressedFile's existing resume-skip path once the listing confirms
+// it; the caller must not double-count that credit against this scan (see
+// pipeline.downloadFS, which cancels this exact seed back out via
+// progress.Stream.SetCurrent(0) before staging begins).
+func ScanFSStagingProgress(stagingDir, ext string) (int64, error) {
+	if _, err := os.Stat(stagingDir); err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+
+		return 0, fmt.Errorf("stat staging dir %s: %w", stagingDir, err)
+	}
+
+	var committed int64
+
+	walkErr := filepath.WalkDir(stagingDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if path == stagingDir || !d.IsDir() {
+			return nil
+		}
+
+		_, found, metaErr := archive.ReadChunkMeta(path)
+		if metaErr != nil || !found {
+			return nil
+		}
+
+		fileCommitted, _, scanErr := ScanBlockChunkProgress(path, ext)
+		if scanErr != nil {
+			return scanErr
+		}
+
+		committed += fileCommitted
+
+		return fs.SkipDir
+	})
+	if walkErr != nil {
+		return 0, fmt.Errorf("scan fs staging progress in %s: %w", stagingDir, walkErr)
+	}
+
+	return committed, nil
+}
+
 // sumFileSizes returns the total declared content size across all "file" items in
 // the collected listing. Items whose size is missing or zero contribute nothing.
 func sumFileSizes(items []fsItem) int64 {

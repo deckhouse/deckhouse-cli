@@ -370,6 +370,61 @@ func fetchChunkRaw(
 	return nil
 }
 
+// ScanBlockChunkProgress computes durably-committed raw bytes and the raw
+// total byte size recorded for chunkDir's on-disk geometry, purely from local
+// state — no network call. It mirrors downloadChunk/fetchChunkRaw's own
+// chunk-boundary formula exactly: each already-final chunk contributes its
+// full raw length, and a still-open chunk contributes its durable ".part"
+// prefix (capped at that chunk's raw length).
+//
+// It returns (0, 0, nil) when chunkDir carries no trustworthy geometry yet
+// (chunks.meta missing or corrupt) — the same case ensureChunkGeometry treats
+// as "nothing to resume from", so there is nothing safe to seed either.
+//
+// The pipeline uses this to seed a volume's progress stream with its
+// already-downloaded bytes as soon as the stream is created — well before the
+// DataExport becomes ready or a fresh HEAD confirms totalSize — and then
+// cancels the seed back out (progress.Stream.SetCurrent(0)) immediately
+// before calling DownloadBlockChunks, so downloadChunk/fetchChunkRaw's own
+// resume-skip crediting re-derives and re-credits the identical bytes without
+// double counting. Because nothing mutates chunkDir between the two calls (no
+// worker has started yet), the two computations always agree exactly.
+func ScanBlockChunkProgress(chunkDir, ext string) (int64, int64, error) {
+	meta, found, err := archive.ReadChunkMeta(chunkDir)
+	if err != nil && !errors.Is(err, archive.ErrCorruptChunkMeta) {
+		return 0, 0, fmt.Errorf("read chunk metadata in %s: %w", chunkDir, err)
+	}
+
+	if err != nil || !found || meta.ChunkSize <= 0 || meta.TotalSize <= 0 {
+		return 0, 0, nil
+	}
+
+	numChunks := int((meta.TotalSize + meta.ChunkSize - 1) / meta.ChunkSize)
+
+	var committed int64
+
+	for idx := range numChunks {
+		startByte := int64(idx) * meta.ChunkSize
+		endByte := min(startByte+meta.ChunkSize, meta.TotalSize) - 1
+		rawLen := endByte - startByte + 1
+
+		finalPath := filepath.Join(chunkDir, archive.ChunkFileName(idx, ext))
+		if _, statErr := os.Stat(finalPath); statErr == nil {
+			committed += rawLen
+			continue
+		}
+
+		partial, partErr := partialChunkSize(finalPath+partSuffix, rawLen)
+		if partErr != nil {
+			return 0, 0, fmt.Errorf("stat partial chunk %d in %s: %w", idx, chunkDir, partErr)
+		}
+
+		committed += partial
+	}
+
+	return committed, meta.TotalSize, nil
+}
+
 // partialChunkSize returns the current size of the durable partial file at
 // partPath, or 0 if it does not exist. A partial larger than rawLen cannot
 // belong to the current chunk geometry (ensureChunkGeometry purges the whole

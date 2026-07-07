@@ -1004,15 +1004,18 @@ func TestPipeline_FS_ChunkSizeThreadsToDownloadFilesystemVolume(t *testing.T) {
 // ── recording progress helpers ────────────────────────────────────────────────
 
 // recordedStream is a progress.Stream stub that counts Activate, Done, and Fail
-// calls. It mirrors the real progress.Stream contract's "first terminal call
-// wins" semantics (see ttyStream.finalize / plainStream.finalize in
-// internal/progress/multibar.go): once Done or Fail has been called once, a
-// later call to either is a no-op on the counters. This matters for
-// pipeline.Run's post-g.Wait() defensive sweep, which calls Fail() on every
-// pre-created stream unconditionally — against the real sinks that is a safe
-// no-op for already-Done streams, and this stub must behave the same way for
-// tests exercising the sweep to assert anything meaningful. All methods are
-// safe for concurrent use.
+// calls, and tracks the current/total byte counters exactly like the real
+// sinks (IncrBy adds, SetTotal/SetCurrent set absolute values) so tests can
+// assert on the observable progress numbers, e.g. the download-progress-seed-
+// committed-bytes tests below. It mirrors the real progress.Stream contract's
+// "first terminal call wins" semantics (see ttyStream.finalize /
+// plainStream.finalize in internal/progress/multibar.go): once Done or Fail
+// has been called once, a later call to either is a no-op on the counters.
+// This matters for pipeline.Run's post-g.Wait() defensive sweep, which calls
+// Fail() on every pre-created stream unconditionally — against the real sinks
+// that is a safe no-op for already-Done streams, and this stub must behave
+// the same way for tests exercising the sweep to assert anything meaningful.
+// All methods are safe for concurrent use.
 type recordedStream struct {
 	name        string
 	mu          sync.Mutex
@@ -1020,10 +1023,43 @@ type recordedStream struct {
 	doneCnt     int
 	failCnt     int
 	settled     bool
+	current     int64
+	total       int64
 }
 
-func (s *recordedStream) IncrBy(_ int)     {}
-func (s *recordedStream) SetTotal(_ int64) {}
+func (s *recordedStream) IncrBy(n int) {
+	s.mu.Lock()
+	s.current += int64(n)
+	s.mu.Unlock()
+}
+
+func (s *recordedStream) SetTotal(total int64) {
+	s.mu.Lock()
+	s.total = total
+	s.mu.Unlock()
+}
+
+func (s *recordedStream) SetCurrent(current int64) {
+	s.mu.Lock()
+	s.current = current
+	s.mu.Unlock()
+}
+
+// Current returns the stream's current byte counter as last set by IncrBy/SetCurrent.
+func (s *recordedStream) Current() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.current
+}
+
+// Total returns the stream's expected total as last set by SetTotal.
+func (s *recordedStream) Total() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.total
+}
 
 func (s *recordedStream) Activate() {
 	s.mu.Lock()
@@ -1256,6 +1292,231 @@ func TestPipeline_Progress_ResumeSkip_NeverActivated(t *testing.T) {
 	require.Equal(t, 1, streams[0].doneCnt,
 		"resume-skipped stream must be Done exactly once (in precreateStreams)")
 	require.Equal(t, 0, streams[0].failCnt, "a resume skip must never call Fail")
+}
+
+// TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer verifies the
+// download-progress-seed-committed-bytes fix: a resumed volume's progress
+// stream must already reflect its on-disk committed bytes BEFORE the
+// DataExport becomes ready / before any network call — captured here at the
+// moment OpenExport is invoked, which is strictly before Activate, HEAD, and
+// the listing call. It also proves the startup seed and the real per-chunk/
+// per-file resume-skip crediting inside the download path never double
+// count: the stream's final current must equal the volume's exact total size
+// once the run completes.
+func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Block", func(t *testing.T) {
+		t.Parallel()
+
+		const (
+			testChunkSize int64 = 100
+			testTotalSize int64 = 300 // 3 chunks: 100, 100, 100
+		)
+
+		rawBlock := bytes.Repeat([]byte("Z"), int(testTotalSize))
+		srv := makeBlockServer(t, rawBlock)
+
+		defer srv.Close()
+
+		c := buildFakeClient(t)
+		outputDir := t.TempDir()
+
+		codec, err := compress.New("zstd", 0)
+		require.NoError(t, err)
+
+		// Pre-seed chunk 0 as a finalized frame and chunk 1 as a durable partial,
+		// simulating a crash mid-download (same technique as
+		// TestPipeline_PartialChunkResume).
+		diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+			archive.NodeDirName(childKind, diskSnapName))
+		chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
+		require.NoError(t, os.MkdirAll(chunkDir, 0o755))
+
+		chunk0Frame, err := codec.EncodeFrame(rawBlock[:testChunkSize])
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())), chunk0Frame, 0o644))
+
+		const partialBytes = 37
+		require.NoError(t, os.WriteFile(
+			filepath.Join(chunkDir, archive.ChunkFileName(1, codec.Ext())+".part"),
+			rawBlock[testChunkSize:testChunkSize+partialBytes],
+			0o644,
+		))
+
+		require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: testChunkSize, TotalSize: testTotalSize}))
+
+		rec := &recordingSink{}
+
+		var (
+			once          sync.Once
+			seededCurrent int64
+			seededTotal   int64
+		)
+
+		cfg := pipeline.Config{
+			Namespace:            testNS,
+			RootSnapshot:         rootSnapshot,
+			OutputDir:            outputDir,
+			Workers:              1,
+			PerVolumeConcurrency: 1,
+			ChunkSize:            testChunkSize,
+			KubeClient:           c,
+			Compression:          codec,
+			Progress:             rec,
+			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+				once.Do(func() {
+					streams := rec.snapshot()
+					if len(streams) == 1 {
+						seededCurrent = streams[0].Current()
+						seededTotal = streams[0].Total()
+					}
+				})
+
+				return exporter.NewExport(namespace, "de-seed-block", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			},
+		}
+
+		require.NoError(t, runPipeline(context.Background(), cfg))
+
+		require.Equal(t, testChunkSize+partialBytes, seededCurrent,
+			"stream must be seeded with chunk 0's full length plus chunk 1's partial length before OpenExport ever runs")
+		require.Equal(t, testTotalSize, seededTotal,
+			"stream's total must be seeded from chunks.meta before OpenExport ever runs")
+
+		streams := rec.snapshot()
+		require.Equal(t, testTotalSize, streams[0].Current(),
+			"final credited total must equal the exact volume size (no double count between the seed and the real resume-skip crediting)")
+	})
+
+	t.Run("Filesystem", func(t *testing.T) {
+		t.Parallel()
+
+		const (
+			testChunkSize int64 = 100
+			testTotalSize int64 = 250 // 3 chunks: 100, 100, 50
+		)
+
+		content := bytes.Repeat([]byte("F"), int(testTotalSize))
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/v1/files/":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+					`{"name":"big.bin","type":"file","uri":"big.bin","attributes":{"size":`+strconv.FormatInt(testTotalSize, 10)+`}}`+
+					`]}`)
+
+			case "/api/v1/files/big.bin":
+				http.ServeContent(w, r, "big.bin", time.Time{}, bytes.NewReader(content))
+
+			default:
+				http.NotFound(w, r)
+			}
+		})
+
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		c := buildFakeClient(t)
+		outputDir := t.TempDir()
+
+		codec, err := compress.New("zstd", 0)
+		require.NoError(t, err)
+
+		// Pre-seed big.bin's per-file chunk dir with chunk 0 finalized and chunk 1
+		// as a durable partial, simulating a crash mid-transfer of a single large
+		// file (the realistic FS analogue of the block sub-test above).
+		diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+			archive.NodeDirName(childKind, diskSnapName))
+		stagingDir := filepath.Join(diskSnapDir, archive.FsTarStagingDirName)
+		fileChunkDir := filepath.Join(stagingDir, archive.FsFileChunksDirName("big.bin", codec.Ext()))
+		require.NoError(t, os.MkdirAll(fileChunkDir, 0o755))
+
+		chunk0Frame, err := codec.EncodeFrame(content[:testChunkSize])
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(fileChunkDir, archive.ChunkFileName(0, codec.Ext())), chunk0Frame, 0o644))
+
+		const partialBytes = 42
+		require.NoError(t, os.WriteFile(
+			filepath.Join(fileChunkDir, archive.ChunkFileName(1, codec.Ext())+".part"),
+			content[testChunkSize:testChunkSize+partialBytes],
+			0o644,
+		))
+
+		require.NoError(t, archive.WriteChunkMeta(fileChunkDir, archive.ChunkMeta{ChunkSize: testChunkSize, TotalSize: testTotalSize}))
+
+		rec := &recordingSink{}
+
+		var (
+			once          sync.Once
+			seededCurrent int64
+		)
+
+		cfg := pipeline.Config{
+			Namespace:            testNS,
+			RootSnapshot:         rootSnapshot,
+			OutputDir:            outputDir,
+			Workers:              1,
+			PerVolumeConcurrency: 1,
+			ChunkSize:            testChunkSize,
+			KubeClient:           c,
+			Compression:          codec,
+			Progress:             rec,
+			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+				once.Do(func() {
+					streams := rec.snapshot()
+					if len(streams) == 1 {
+						seededCurrent = streams[0].Current()
+					}
+				})
+
+				return exporter.NewExport(namespace, "de-seed-fs", "Filesystem", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			},
+		}
+
+		require.NoError(t, runPipeline(context.Background(), cfg))
+
+		require.Equal(t, testChunkSize+partialBytes, seededCurrent,
+			"stream must be seeded with the in-progress per-file chunk dir's committed bytes before OpenExport ever runs")
+
+		streams := rec.snapshot()
+		require.Equal(t, testTotalSize, streams[0].Current(),
+			"final credited total must equal the exact file size (no double count between the seed and the real resume-skip crediting)")
+	})
+
+	t.Run("FromScratchVolumeUnchanged", func(t *testing.T) {
+		t.Parallel()
+
+		rawBlock := bytes.Repeat([]byte("Q"), 300)
+		srv := makeBlockServer(t, rawBlock)
+
+		defer srv.Close()
+
+		c := buildFakeClient(t)
+		outputDir := t.TempDir()
+		rec := &recordingSink{}
+
+		cfg := pipeline.Config{
+			Namespace:            testNS,
+			RootSnapshot:         rootSnapshot,
+			OutputDir:            outputDir,
+			Workers:              1,
+			PerVolumeConcurrency: 1,
+			KubeClient:           c,
+			Progress:             rec,
+			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+				return exporter.NewExport(namespace, "de-seed-fromscratch", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			},
+		}
+
+		require.NoError(t, runPipeline(context.Background(), cfg))
+
+		streams := rec.snapshot()
+		require.Equal(t, int64(len(rawBlock)), streams[0].Current(),
+			"a from-scratch volume (no seed applicable) must still reach exactly its full size")
+	})
 }
 
 // TestPipeline_Progress_DownloadFailure_CallsFailNotDone verifies that when a

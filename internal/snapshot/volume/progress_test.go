@@ -485,3 +485,157 @@ func TestDownloadFilesystemVolume_OnProgressIsIncremental(t *testing.T) {
 	require.Equal(t, len(content), total,
 		"sum of onProgress increments must equal the exact served file size")
 }
+
+// ── ScanBlockChunkProgress / ScanFSStagingProgress (resume-progress seeding) ──
+
+// TestScanBlockChunkProgress_FinalizedAndPartialChunks verifies the core
+// download-progress-seed-committed-bytes accounting: given a chunk dir with
+// one finalized chunk and one durable ".part" prefix, the scan returns the
+// finalized chunk's full raw length plus the partial's min(size, rawLen),
+// without touching the network or the chunk files themselves.
+func TestScanBlockChunkProgress_FinalizedAndPartialChunks(t *testing.T) {
+	t.Parallel()
+
+	const (
+		chunkSize int64 = 100
+		totalSize int64 = 300 // 3 chunks: 100, 100, 100
+	)
+
+	codec := mustCodec(t, "zstd")
+
+	chunkDir := t.TempDir()
+	require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize}))
+
+	// Chunk 0: finalized (full raw length must be credited).
+	frame, err := codec.EncodeFrame(bytes.Repeat([]byte("A"), int(chunkSize)))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())), frame, 0o644))
+
+	// Chunk 1: a durable partial covering 37 of its 100 raw bytes.
+	const partialBytes = 37
+	require.NoError(t, os.WriteFile(
+		filepath.Join(chunkDir, archive.ChunkFileName(1, codec.Ext())+".part"),
+		bytes.Repeat([]byte("B"), partialBytes),
+		0o644,
+	))
+
+	// Chunk 2: nothing on disk yet.
+
+	committed, total, err := volume.ScanBlockChunkProgress(chunkDir, codec.Ext())
+	require.NoError(t, err)
+	require.Equal(t, totalSize, total, "total must come from chunks.meta")
+	require.Equal(t, chunkSize+partialBytes, committed,
+		"committed must equal chunk 0's full raw length plus chunk 1's partial length")
+}
+
+// TestScanBlockChunkProgress_NoGeometryYet verifies that a chunk dir with no
+// (or a corrupt) chunks.meta yields (0, 0, nil) — there is nothing
+// trustworthy to seed, mirroring ensureChunkGeometry's own "purge and
+// re-download" treatment of the same condition.
+func TestScanBlockChunkProgress_NoGeometryYet(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing chunk dir", func(t *testing.T) {
+		t.Parallel()
+
+		committed, total, err := volume.ScanBlockChunkProgress(filepath.Join(t.TempDir(), "absent"), ".zst")
+		require.NoError(t, err)
+		require.Zero(t, committed)
+		require.Zero(t, total)
+	})
+
+	t.Run("chunk dir exists but chunks.meta is absent", func(t *testing.T) {
+		t.Parallel()
+
+		chunkDir := t.TempDir()
+
+		committed, total, err := volume.ScanBlockChunkProgress(chunkDir, ".zst")
+		require.NoError(t, err)
+		require.Zero(t, committed)
+		require.Zero(t, total)
+	})
+
+	t.Run("chunks.meta is corrupt", func(t *testing.T) {
+		t.Parallel()
+
+		chunkDir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(chunkDir, archive.ChunkMetaFileName), []byte("{not json"), 0o644))
+
+		committed, total, err := volume.ScanBlockChunkProgress(chunkDir, ".zst")
+		require.NoError(t, err, "corrupt metadata must degrade to (0, 0, nil), not an error")
+		require.Zero(t, committed)
+		require.Zero(t, total)
+	})
+}
+
+// TestScanFSStagingProgress_InProgressPerFileChunkDir verifies the
+// filesystem-side accounting: a still-open per-file chunk directory (a large
+// file interrupted mid-transfer, so its chunk dir has not been merged yet)
+// contributes its committed bytes via the identical ScanBlockChunkProgress
+// formula.
+func TestScanFSStagingProgress_InProgressPerFileChunkDir(t *testing.T) {
+	t.Parallel()
+
+	const (
+		chunkSize int64 = 100
+		totalSize int64 = 250 // 3 chunks: 100, 100, 50
+	)
+
+	codec := mustCodec(t, "zstd")
+
+	stagingDir := t.TempDir()
+	fileChunkDir := filepath.Join(stagingDir, archive.FsFileChunksDirName("big.bin", codec.Ext()))
+	require.NoError(t, os.MkdirAll(fileChunkDir, 0o755))
+	require.NoError(t, archive.WriteChunkMeta(fileChunkDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize}))
+
+	// Chunk 0: finalized.
+	frame, err := codec.EncodeFrame(bytes.Repeat([]byte("A"), int(chunkSize)))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(fileChunkDir, archive.ChunkFileName(0, codec.Ext())), frame, 0o644))
+
+	// Chunk 1: a durable partial covering 42 of its 100 raw bytes.
+	const partialBytes = 42
+	require.NoError(t, os.WriteFile(
+		filepath.Join(fileChunkDir, archive.ChunkFileName(1, codec.Ext())+".part"),
+		bytes.Repeat([]byte("B"), partialBytes),
+		0o644,
+	))
+
+	committed, err := volume.ScanFSStagingProgress(stagingDir, codec.Ext())
+	require.NoError(t, err)
+	require.Equal(t, chunkSize+partialBytes, committed)
+}
+
+// TestScanFSStagingProgress_CompletedFlatFileNotCounted pins the documented
+// trade-off: a file that has ALREADY been fully staged (its chunk dir was
+// already merged away into a flat <relPath><ext> blob by MergeBlockChunks)
+// contributes NOTHING to the scan, because its original raw declared size is
+// not recoverable from disk once chunks.meta — the only place that size was
+// ever recorded — is gone. This must stay zero so the pipeline never
+// double-counts against stageCompressedFile's own resume-skip credit for the
+// same file (see ScanFSStagingProgress's doc comment).
+func TestScanFSStagingProgress_CompletedFlatFileNotCounted(t *testing.T) {
+	t.Parallel()
+
+	codec := mustCodec(t, "zstd")
+
+	stagingDir := t.TempDir()
+
+	frame, err := codec.EncodeFrame([]byte("already fully staged content"))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(stagingDir, "small.txt"+codec.Ext()), frame, 0o644))
+
+	committed, err := volume.ScanFSStagingProgress(stagingDir, codec.Ext())
+	require.NoError(t, err)
+	require.Zero(t, committed, "a fully-staged flat file must not be counted (its raw size is unrecoverable)")
+}
+
+// TestScanFSStagingProgress_MissingStagingDir verifies the fresh-download case:
+// a staging dir that does not exist yet yields (0, nil).
+func TestScanFSStagingProgress_MissingStagingDir(t *testing.T) {
+	t.Parallel()
+
+	committed, err := volume.ScanFSStagingProgress(filepath.Join(t.TempDir(), "absent"), ".zst")
+	require.NoError(t, err)
+	require.Zero(t, committed)
+}
