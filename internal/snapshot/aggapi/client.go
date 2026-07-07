@@ -39,9 +39,12 @@ package aggapi
 import (
 	"context"
 	"fmt"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -133,33 +136,94 @@ func NewClientForConfig(cfg *rest.Config, mapper meta.RESTMapper) (*Client, erro
 
 // NodeManifestsDownload performs GET <node>/manifests-download and returns the raw
 // JSON array body (the node's own captured manifests).
+//
+// The call is retried with bounded exponential backoff on a transient aggregated-API
+// error (see isTransientManifestsDownloadError) — observed in practice as the
+// aggregated APIService backend briefly restarting/overloading and returning "the
+// server is currently unable to handle the request" (HTTP 503).
 func (c *Client) NodeManifestsDownload(ctx context.Context, ref NodeRef) ([]byte, error) {
 	path, err := c.downloadPath(ref)
 	if err != nil {
 		return nil, err
 	}
 
-	body, err := c.rest.Get().AbsPath(path).DoRaw(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", path, err)
-	}
-
-	return body, nil
+	return c.getManifestsDownload(ctx, path)
 }
 
 // ContentManifestsDownload performs GET snapshotcontents/<name>/manifests-download
 // (cluster-scoped) and returns the raw JSON array body. Used by the DataImport path
 // to read the original PVC manifest before any namespaced CR binds.
+//
+// Retried on transient errors — see NodeManifestsDownload.
 func (c *Client) ContentManifestsDownload(ctx context.Context, contentName string) ([]byte, error) {
 	path := fmt.Sprintf("/apis/%s/%s/snapshotcontents/%s/%s",
 		CoreSubresourcesGroup, CoreSubresourcesVersion, contentName, SubManifestsDownload)
 
-	body, err := c.rest.Get().AbsPath(path).DoRaw(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", path, err)
-	}
+	return c.getManifestsDownload(ctx, path)
+}
 
-	return body, nil
+// manifestsDownloadBackoff bounds retries of the manifests-download aggregated-API call
+// on a transient backend-unavailable error. 5 attempts starting at 500ms and doubling
+// (capped at 8s) bound the worst-case wall-clock to single-digit seconds: enough for a
+// momentarily-restarting aggregated APIService backend to recover, but short enough that
+// a genuinely-down backend still fails fast instead of hanging.
+var manifestsDownloadBackoff = wait.Backoff{
+	Steps:    5,
+	Duration: 500 * time.Millisecond,
+	Factor:   2.0,
+	Jitter:   0.1,
+	Cap:      8 * time.Second,
+}
+
+// isTransientManifestsDownloadError reports whether err is worth retrying: the
+// aggregated APIService backend is momentarily unavailable, timed out, or asked the
+// client to back off. Any other error (NotFound, Forbidden, invalid request, ...) is a
+// genuine failure and must surface on the first attempt, not be masked by a retry loop.
+func isTransientManifestsDownloadError(err error) bool {
+	return apierrors.IsServiceUnavailable(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err)
+}
+
+// getManifestsDownload performs GET path, retrying with bounded exponential backoff
+// (manifestsDownloadBackoff) on a transient aggregated-API error. Scope is intentionally
+// narrow to the manifests-download subresource; other aggregated calls (restore, upload)
+// are unaffected.
+//
+// ctx cancellation aborts the retry loop immediately, including mid-backoff sleep, and
+// returns ctx.Err(). A backend that stays unavailable for the whole retry budget
+// exhausts manifestsDownloadBackoff's attempts and returns the last transient error seen,
+// so callers get a clear, actionable failure instead of an indefinite hang.
+func (c *Client) getManifestsDownload(ctx context.Context, path string) ([]byte, error) {
+	var (
+		body    []byte
+		lastErr error
+	)
+
+	backoffErr := wait.ExponentialBackoffWithContext(ctx, manifestsDownloadBackoff, func(stepCtx context.Context) (bool, error) {
+		var doErr error
+
+		body, doErr = c.rest.Get().AbsPath(path).DoRaw(stepCtx)
+
+		switch {
+		case doErr == nil:
+			return true, nil
+		case isTransientManifestsDownloadError(doErr):
+			lastErr = doErr
+			return false, nil
+		default:
+			return false, doErr
+		}
+	})
+
+	switch {
+	case backoffErr == nil:
+		return body, nil
+	case ctx.Err() != nil:
+		return nil, fmt.Errorf("GET %s: %w", path, ctx.Err())
+	case wait.Interrupted(backoffErr):
+		return nil, fmt.Errorf("GET %s: exhausted retries on transient error: %w", path, lastErr)
+	default:
+		return nil, fmt.Errorf("GET %s: %w", path, backoffErr)
+	}
 }
 
 // RestoreManifests performs GET <node>/manifests-with-data-restoration?targetNamespace=<ns>
