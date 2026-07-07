@@ -198,6 +198,39 @@ func TestComputeNodeChecksum_FsVolume_StagingExcluded(t *testing.T) {
 	}
 }
 
+// TestComputeNodeChecksum_FsVolume_NestedFileChunkStagingExcluded verifies that
+// a per-file chunk directory nested inside the flat FS staging dir
+// (data.tar.d/<file>.d/, used by the chunked large-file resume path) and its
+// contents are NOT included in the checksum either. collectNodeFiles never
+// walks nodeDir itself for the single-volume layout — it only looks at
+// manifests/, the flat data.bin*/data.tar files, and (separately) the
+// multi-volume data/ dir — so the flat data.tar.d/ tree, at any nesting depth,
+// is excluded by construction; this test pins that behavior for the new nested
+// case explicitly.
+func TestComputeNodeChecksum_FsVolume_NestedFileChunkStagingExcluded(t *testing.T) {
+	nodeDir := makeNodeDir(t)
+	writeFile(t, filepath.Join(nodeDir, FsTarName), "tar-content")
+
+	base, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("base: %v", err)
+	}
+
+	// Writing a chunk file inside a nested "<file><ext>.d/" chunk directory
+	// must NOT change the checksum.
+	nestedChunkDir := FsFileChunksDirName("payload.bin", ".zst")
+	writeFile(t, filepath.Join(nodeDir, FsTarStagingDirName, nestedChunkDir, ChunkFileName(0, ".zst")), "chunk-raw")
+
+	after, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+
+	if base.Hex != after.Hex {
+		t.Error("nested per-file chunk dir under data.tar.d/ was unexpectedly included in the checksum")
+	}
+}
+
 // TestShortChecksum verifies that ShortChecksum returns the first 8 hex chars.
 func TestShortChecksum(t *testing.T) {
 	cases := []struct {

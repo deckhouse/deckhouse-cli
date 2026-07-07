@@ -26,6 +26,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -170,6 +172,7 @@ func TestDownloadFilesystemVolume_DownloadsTree(t *testing.T) {
 		stagingDir,
 		rootURL,
 		2,
+		0,
 		newFSFetcher(srv),
 		mustCodec(t, "none"),
 		nil,
@@ -222,7 +225,7 @@ func TestDownloadFilesystemVolume_SkipsIfTarExists(t *testing.T) {
 
 	rootURL := srv.URL + "/files/"
 
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), mustCodec(t, "none"), nil, nil); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 
@@ -256,7 +259,7 @@ func TestDownloadFilesystemVolume_CleansStaleTmp(t *testing.T) {
 
 	rootURL := srv.URL + "/files/"
 
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), mustCodec(t, "none"), nil, nil); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil); err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 
@@ -279,7 +282,7 @@ func TestDownloadFilesystemVolume_LinkNotInTar(t *testing.T) {
 	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
 	rootURL := srv.URL + "/files/"
 
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), mustCodec(t, "none"), nil, nil); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil); err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 
@@ -329,6 +332,7 @@ func TestDownloadFilesystemVolume_StagesCompressed(t *testing.T) {
 		stagingDir,
 		rootURL,
 		2,
+		0,
 		newFSFetcher(srv),
 		codec,
 		nil,
@@ -457,7 +461,7 @@ func TestDownloadFilesystemVolume_SkipsExistingCompressedStaged(t *testing.T) {
 
 	codec := mustCodec(t, "zstd")
 
-	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, newFSFetcher(srv), codec, nil, nil); err != nil {
+	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, 0, newFSFetcher(srv), codec, nil, nil); err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 
@@ -549,6 +553,7 @@ func TestDownloadFilesystemVolume_RealisticAttributes(t *testing.T) {
 		stagingDir,
 		srv.URL+"/files/",
 		1,
+		0,
 		newFSFetcher(srv),
 		mustCodec(t, "none"),
 		func(total int64) { gotTotal = total },
@@ -595,5 +600,396 @@ func TestDownloadFilesystemVolume_RealisticAttributes(t *testing.T) {
 
 	if linkHdr.Mode != 0o750 {
 		t.Errorf("link.lnk Mode = %04o; want 0750", linkHdr.Mode)
+	}
+}
+
+// ── chunked large-file staging (fs-large-file-chunked-range-resume) ──────────
+
+// rangeTrackingServer records, for each request received by the tracked file
+// handler, whether the request carried a Range header. Safe for concurrent use.
+type rangeTrackingServer struct {
+	mu     sync.Mutex
+	ranges []bool
+}
+
+func (s *rangeTrackingServer) record(hasRange bool) {
+	s.mu.Lock()
+	s.ranges = append(s.ranges, hasRange)
+	s.mu.Unlock()
+}
+
+func (s *rangeTrackingServer) snapshot() []bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return append([]bool(nil), s.ranges...)
+}
+
+// newRangeTrackingFSServer builds an httptest.Server exposing a single-file FS
+// volume ("/files/" listing + "/files/<fileName>" content) and records, on
+// every GET to the file, whether the request carried a Range header — the
+// signal that distinguishes the chunked path (RangeGet, always sends Range)
+// from the single-shot path (GetFile, never sends Range). Serving via
+// http.ServeContent mirrors the real data-exporter's sendFile idiom, so Range
+// GETs are honored exactly as they are in production.
+func newRangeTrackingFSServer(t *testing.T, fileName string, content []byte) (*httptest.Server, *rangeTrackingServer) {
+	t.Helper()
+
+	tracker := &rangeTrackingServer{}
+	filePath := "/files/" + fileName
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"`+fileName+`","type":"file","uri":"`+fileName+`","attributes":{"size":`+strconv.Itoa(len(content))+`}}`+
+				`]}`)
+
+		case filePath:
+			tracker.record(r.Header.Get("Range") != "")
+			http.ServeContent(w, r, fileName, time.Time{}, bytes.NewReader(content))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	return srv, tracker
+}
+
+// decodeZstdTarEntry opens tarPath and returns the zstd-decoded content of the
+// entry named entryName, failing the test if the entry is missing.
+func decodeZstdTarEntry(t *testing.T, tarPath, entryName string) []byte {
+	t.Helper()
+
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatalf("open tar %s: %v", tarPath, err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	dec, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatalf("zstd.NewReader: %v", err)
+	}
+
+	defer dec.Close()
+
+	tr := tar.NewReader(f)
+
+	for {
+		hdr, nextErr := tr.Next()
+		if nextErr == io.EOF {
+			break
+		}
+
+		if nextErr != nil {
+			t.Fatalf("read tar header: %v", nextErr)
+		}
+
+		if hdr.Name != entryName {
+			continue
+		}
+
+		compressed, readErr := io.ReadAll(tr)
+		if readErr != nil {
+			t.Fatalf("read tar entry %s: %v", entryName, readErr)
+		}
+
+		plain, decErr := dec.DecodeAll(compressed, nil)
+		if decErr != nil {
+			t.Fatalf("zstd decode entry %s: %v", entryName, decErr)
+		}
+
+		return plain
+	}
+
+	t.Fatalf("tar missing entry %q", entryName)
+
+	return nil
+}
+
+// TestDownloadFilesystemVolume_LargeFile_ChunkedPathByteIdentical verifies that
+// a file whose declared size exceeds chunkSize is staged via Range-based
+// chunks (proven by every request to it carrying a Range header) and produces
+// a byte-identical result to the same file staged via the non-chunked
+// single-shot path (chunkSize larger than the file).
+func TestDownloadFilesystemVolume_LargeFile_ChunkedPathByteIdentical(t *testing.T) {
+	t.Parallel()
+
+	content := bytes.Repeat([]byte("chunked-fs-large-file-payload-"), 20) // 620 bytes
+	codec := mustCodec(t, "zstd")
+
+	const testChunkSize = 64
+
+	// Chunked run: chunkSize smaller than the file forces the Range-based path.
+	chunkedSrv, chunkedTracker := newRangeTrackingFSServer(t, "big.bin", content)
+
+	chunkedNodeDir := t.TempDir()
+	chunkedTarPath := filepath.Join(chunkedNodeDir, archive.FsTarName)
+	chunkedStagingDir := filepath.Join(chunkedNodeDir, archive.FsTarStagingDirName)
+
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.Default(),
+		chunkedTarPath,
+		chunkedStagingDir,
+		chunkedSrv.URL+"/files/",
+		2,
+		testChunkSize,
+		newFSFetcher(chunkedSrv),
+		codec,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("chunked DownloadFilesystemVolume: %v", err)
+	}
+
+	chunkedRanges := chunkedTracker.snapshot()
+	if len(chunkedRanges) < 2 {
+		t.Fatalf("expected multiple chunk requests, got %d", len(chunkedRanges))
+	}
+
+	for i, sawRange := range chunkedRanges {
+		if !sawRange {
+			t.Errorf("request %d to big.bin had no Range header; expected the chunked path", i)
+		}
+	}
+
+	// Non-chunked run: chunkSize larger than the file keeps the single-shot path.
+	plainSrv, plainTracker := newRangeTrackingFSServer(t, "big.bin", content)
+
+	plainNodeDir := t.TempDir()
+	plainTarPath := filepath.Join(plainNodeDir, archive.FsTarName)
+	plainStagingDir := filepath.Join(plainNodeDir, archive.FsTarStagingDirName)
+
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.Default(),
+		plainTarPath,
+		plainStagingDir,
+		plainSrv.URL+"/files/",
+		2,
+		int64(len(content)*2),
+		newFSFetcher(plainSrv),
+		codec,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("non-chunked DownloadFilesystemVolume: %v", err)
+	}
+
+	plainRanges := plainTracker.snapshot()
+	if len(plainRanges) != 1 || plainRanges[0] {
+		t.Fatalf("expected exactly one non-Range request, got %v", plainRanges)
+	}
+
+	chunkedContent := decodeZstdTarEntry(t, chunkedTarPath, "big.bin"+codec.Ext())
+	plainContent := decodeZstdTarEntry(t, plainTarPath, "big.bin"+codec.Ext())
+
+	if !bytes.Equal(chunkedContent, content) {
+		t.Error("chunked path content does not match original")
+	}
+
+	if !bytes.Equal(plainContent, content) {
+		t.Error("non-chunked path content does not match original")
+	}
+
+	if !bytes.Equal(chunkedContent, plainContent) {
+		t.Error("chunked and non-chunked paths produced different decoded content")
+	}
+}
+
+// TestDownloadFilesystemVolume_SmallFile_NoChunkDirCreated verifies that a file
+// at or below chunkSize keeps the unchanged single-shot path: exactly one
+// non-Range GET is issued and no per-file chunk directory is ever created.
+//
+// WriteTar is deliberately made to fail (by pre-occupying its AtomicWriter's
+// "<tarPath>.tmp" target with a directory) so DownloadFilesystemVolume returns
+// an error right after per-file staging completes but before the staging
+// directory is removed — otherwise a successful run always removes stagingDir
+// (and, on the chunked path, MergeBlockChunks always removes the now-empty
+// chunk directory too), leaving nothing on disk to assert against either way.
+func TestDownloadFilesystemVolume_SmallFile_NoChunkDirCreated(t *testing.T) {
+	t.Parallel()
+
+	content := []byte("small-file-content-well-below-the-chunk-size-threshold")
+	codec := mustCodec(t, "zstd")
+
+	srv, tracker := newRangeTrackingFSServer(t, "small.bin", content)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	if err := os.MkdirAll(tarPath+".tmp", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	testChunkSize := int64(len(content)) * 2
+
+	err := volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.Default(),
+		tarPath,
+		stagingDir,
+		srv.URL+"/files/",
+		1,
+		testChunkSize,
+		newFSFetcher(srv),
+		codec,
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected DownloadFilesystemVolume to fail (poisoned tar.tmp path)")
+	}
+
+	destPath := filepath.Join(stagingDir, "small.bin"+codec.Ext())
+	if _, statErr := os.Stat(destPath); statErr != nil {
+		t.Fatalf("expected staged file at %s: %v", destPath, statErr)
+	}
+
+	chunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName("small.bin", codec.Ext())))
+	if _, statErr := os.Stat(chunkDir); !os.IsNotExist(statErr) {
+		t.Errorf("chunk directory %s must not exist for a file at/below chunkSize", chunkDir)
+	}
+
+	if snap := tracker.snapshot(); len(snap) != 1 || snap[0] {
+		t.Errorf("expected exactly one non-Range GET, got %v", snap)
+	}
+}
+
+// TestDownloadFilesystemVolume_PartialChunkResume_OnlyMissingChunkFetched
+// verifies the sub-file resume path this task exists for: a large file with
+// one chunk already staged from a prior interrupted run must have only its
+// missing chunks re-fetched, the pre-existing chunk's raw length must still be
+// credited to onProgress (inherited from downloadChunk's resume-skip branch),
+// and the final merged content must be byte-identical to the source.
+func TestDownloadFilesystemVolume_PartialChunkResume_OnlyMissingChunkFetched(t *testing.T) {
+	t.Parallel()
+
+	const testChunkSize int64 = 100
+
+	content := bytes.Repeat([]byte("R"), 250) // 3 chunks: 100, 100, 50
+
+	var (
+		mu            sync.Mutex
+		rangesFetched []string
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"big.bin","type":"file","uri":"big.bin","attributes":{"size":`+strconv.Itoa(len(content))+`}}`+
+				`]}`)
+
+		case "/files/big.bin":
+			mu.Lock()
+			rangesFetched = append(rangesFetched, r.Header.Get("Range"))
+			mu.Unlock()
+
+			http.ServeContent(w, r, "big.bin", time.Time{}, bytes.NewReader(content))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	codec := mustCodec(t, "zstd")
+
+	// Pre-seed chunk 0 as a real zstd frame, simulating a crash after the first
+	// chunk was downloaded but before the remaining chunks were fetched.
+	chunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName("big.bin", codec.Ext())))
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	chunk0Frame, err := codec.EncodeFrame(content[:testChunkSize])
+	if err != nil {
+		t.Fatalf("encode chunk 0: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())), chunk0Frame, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		progMu   sync.Mutex
+		credited int64
+	)
+
+	onProgress := func(n int) {
+		progMu.Lock()
+		credited += int64(n)
+		progMu.Unlock()
+	}
+
+	err = volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.Default(),
+		tarPath,
+		stagingDir,
+		srv.URL+"/files/",
+		1,
+		testChunkSize,
+		newFSFetcher(srv),
+		codec,
+		nil,
+		onProgress,
+	)
+	if err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	mu.Lock()
+	gotRanges := append([]string(nil), rangesFetched...)
+	mu.Unlock()
+
+	for _, hdr := range gotRanges {
+		if hdr == "bytes=0-99" {
+			t.Error("chunk 0 was pre-seeded and must not be re-fetched")
+		}
+	}
+
+	var foundChunk1, foundChunk2 bool
+
+	for _, hdr := range gotRanges {
+		switch hdr {
+		case "bytes=100-199":
+			foundChunk1 = true
+		case "bytes=200-249":
+			foundChunk2 = true
+		}
+	}
+
+	if !foundChunk1 || !foundChunk2 {
+		t.Errorf("expected chunks 1 and 2 to be fetched, got ranges %v", gotRanges)
+	}
+
+	if credited != int64(len(content)) {
+		t.Errorf("onProgress credited = %d; want %d (sum of all chunk raw lengths, including the pre-seeded one)",
+			credited, len(content))
+	}
+
+	got := decodeZstdTarEntry(t, tarPath, "big.bin"+codec.Ext())
+	if !bytes.Equal(got, content) {
+		t.Error("merged big.bin content does not match original")
 	}
 }

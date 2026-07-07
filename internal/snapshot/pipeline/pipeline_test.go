@@ -17,6 +17,7 @@ limitations under the License.
 package pipeline_test
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -878,6 +880,117 @@ func TestPipeline_PartialChunkResume(t *testing.T) {
 	// (d) The chunk directory must have been removed after merge.
 	_, statErr := os.Stat(chunkDir)
 	require.True(t, os.IsNotExist(statErr), "data.bin.d/ must be removed after merge")
+}
+
+// TestPipeline_FS_ChunkSizeThreadsToDownloadFilesystemVolume verifies that
+// downloadFS passes cfg.ChunkSize through to volume.DownloadFilesystemVolume
+// (fs-large-file-chunked-range-resume): a Filesystem-mode volume whose single
+// file exceeds cfg.ChunkSize must be fetched via multiple Range GETs, not one
+// plain GET, proving the pipeline-level config value — not just the
+// volume package's own default — governs per-file chunking.
+func TestPipeline_FS_ChunkSizeThreadsToDownloadFilesystemVolume(t *testing.T) {
+	t.Parallel()
+
+	const testChunkSize int64 = 100
+
+	content := bytes.Repeat([]byte("F"), 250) // 3 chunks: 100, 100, 50
+
+	var (
+		mu     sync.Mutex
+		ranges []string
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"big.bin","type":"file","uri":"big.bin","attributes":{"size":`+strconv.Itoa(len(content))+`}}`+
+				`]}`)
+
+		case "/api/v1/files/big.bin":
+			mu.Lock()
+			ranges = append(ranges, r.Header.Get("Range"))
+			mu.Unlock()
+
+			http.ServeContent(w, r, "big.bin", time.Time{}, bytes.NewReader(content))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	codec, err := compress.New("zstd", 0)
+	require.NoError(t, err)
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		ChunkSize:            testChunkSize,
+		KubeClient:           c,
+		Compression:          codec,
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-fs-chunk", "Filesystem", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	require.NoError(t, runPipeline(context.Background(), cfg))
+
+	mu.Lock()
+	gotRanges := append([]string(nil), ranges...)
+	mu.Unlock()
+
+	require.GreaterOrEqual(t, len(gotRanges), 2,
+		"cfg.ChunkSize must have been threaded to DownloadFilesystemVolume, forcing a chunked (multi Range GET) download")
+
+	for _, hdr := range gotRanges {
+		require.NotEmpty(t, hdr, "every request must carry a Range header once per-file chunking is active")
+	}
+
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	assertNodeComplete(t, diskSnapDir)
+
+	f, err := os.Open(filepath.Join(diskSnapDir, archive.FsTarName))
+	require.NoError(t, err)
+
+	defer func() { _ = f.Close() }()
+
+	tr := tar.NewReader(f)
+
+	var found bool
+
+	for {
+		hdr, nextErr := tr.Next()
+		if nextErr == io.EOF {
+			break
+		}
+
+		require.NoError(t, nextErr)
+
+		if hdr.Name != "big.bin"+codec.Ext() {
+			continue
+		}
+
+		compressed, readErr := io.ReadAll(tr)
+		require.NoError(t, readErr)
+		require.Equal(t, content, decodeZstdBlock(t, compressed),
+			"merged big.bin tar entry must decode to the original content")
+
+		found = true
+	}
+
+	require.True(t, found, "tar entry for big.bin not found")
 }
 
 // ── recording progress helpers ────────────────────────────────────────────────

@@ -80,6 +80,13 @@ type fsItem struct {
 // workers bounds the parallelism for file downloads; the first error cancels all
 // in-flight downloads.
 //
+// chunkSize gates per-file chunking: a file whose declared size exceeds chunkSize
+// is staged via Range-based chunks (reusing DownloadBlockChunks/MergeBlockChunks,
+// the same machinery the block-volume path uses) so an interrupted download can
+// resume at sub-file granularity instead of restarting the whole file; chunkSize
+// <= 0 falls back to DefaultChunkSize. Files at or below chunkSize keep the
+// original single-shot GET + codec.EncodeStream path unchanged.
+//
 // setTotal, when non-nil, is called exactly once with the summed declared size of
 // all file items in the listing before staging begins, so a progress sink can show
 // a real denominator (mirrors the block path's stream.SetTotal after HeadVolume).
@@ -90,6 +97,7 @@ func DownloadFilesystemVolume(
 	stagingDir string,
 	filesRootURL string,
 	workers int,
+	chunkSize int64,
 	fetcher *exporter.Fetcher,
 	codec compress.Codec,
 	setTotal func(total int64),
@@ -142,7 +150,7 @@ func DownloadFilesystemVolume(
 		item := it
 
 		g.Go(func() error {
-			return stageCompressedFile(gctx, log, stagingDir, item, codec, fetcher, onProgress)
+			return stageCompressedFile(gctx, log, stagingDir, item, chunkSize, codec, fetcher, onProgress)
 		})
 	}
 
@@ -261,21 +269,31 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 	return result, nil
 }
 
-// stageCompressedFile downloads one file, compresses it with codec, and writes
-// the result atomically to stagingDir/<relPath><codec.Ext()>.
-// Already-complete destination files are skipped (resume); the skip still
-// credits the item's declared size to onProgress so the numerator can reach
-// the denominator that setTotal established from the same declared sizes
-// (sumFileSizes) — otherwise a partially-staged resume could never advance
-// the progress bar to 100% even though the tar assembles successfully.
-// Stale <destPath>.tmp files are removed before the download attempt.
-// Compression is streaming: the HTTP body is piped through codec.EncodeStream
-// so no whole-file buffering occurs.
+// stageCompressedFile stages one file to stagingDir/<relPath><codec.Ext()>,
+// choosing between two staging strategies based on the item's declared size:
+//
+//   - item.size > chunkSize (chunkSize <= 0 falls back to DefaultChunkSize):
+//     the file is staged via stageChunkedFile, which fetches it as independent
+//     Range-based chunks so an interrupted download resumes at sub-file
+//     granularity instead of restarting the whole file.
+//   - otherwise: the file is staged via stageWholeFile, the original single-shot
+//     GET + codec.EncodeStream path — unchanged for the common case of many
+//     small files, where a chunk directory would add overhead with no resume
+//     benefit.
+//
+// Already-complete destination files are skipped (resume) regardless of which
+// strategy would otherwise apply; the skip still credits the item's declared
+// size to onProgress so the numerator can reach the denominator that setTotal
+// established from the same declared sizes (sumFileSizes) — otherwise a
+// partially-staged resume could never advance the progress bar to 100% even
+// though the tar assembles successfully. Stale <destPath>.tmp files are removed
+// before either strategy runs.
 func stageCompressedFile(
 	ctx context.Context,
 	log *slog.Logger,
 	stagingDir string,
 	item fsItem,
+	chunkSize int64,
 	codec compress.Codec,
 	fetcher *exporter.Fetcher,
 	onProgress func(n int),
@@ -304,6 +322,65 @@ func stageCompressedFile(
 		return fmt.Errorf("create parent dir %s: %w", parentDir, err)
 	}
 
+	if chunkSize <= 0 {
+		chunkSize = DefaultChunkSize
+	}
+
+	if item.size > chunkSize {
+		return stageChunkedFile(ctx, log, stagingDir, destPath, item, chunkSize, codec, fetcher, onProgress)
+	}
+
+	return stageWholeFile(ctx, log, destPath, item, codec, fetcher, onProgress)
+}
+
+// stageChunkedFile downloads item as independent Range-based chunks into a
+// per-file chunk directory and merges them into destPath, reusing the
+// block-volume chunking machinery (DownloadBlockChunks/MergeBlockChunks)
+// UNCHANGED. workers is pinned to 1: chunks within one file download
+// sequentially, inside that file's own already-allocated slot in the outer
+// per-file errgroup (DownloadFilesystemVolume's g.SetLimit(workers) loop) —
+// this deliberately avoids adding a third multiplicative concurrency
+// dimension on top of node-workers × PerVolumeConcurrency. Already-present
+// chunks are skipped and their raw length is credited to onProgress by
+// downloadChunk's existing resume-skip path; no progress-crediting logic is
+// duplicated here.
+func stageChunkedFile(
+	ctx context.Context,
+	log *slog.Logger,
+	stagingDir string,
+	destPath string,
+	item fsItem,
+	chunkSize int64,
+	codec compress.Codec,
+	fetcher *exporter.Fetcher,
+	onProgress func(n int),
+) error {
+	chunkDirName := archive.FsFileChunksDirName(item.relPath, codec.Ext())
+	chunkDir := filepath.Join(stagingDir, filepath.FromSlash(chunkDirName))
+
+	if err := DownloadBlockChunks(ctx, log, chunkDir, item.uri, item.size, chunkSize, 1, fetcher, codec, onProgress); err != nil {
+		return fmt.Errorf("download chunks for %s: %w", item.relPath, err)
+	}
+
+	if err := MergeBlockChunks(ctx, chunkDir, destPath, item.size, chunkSize, codec.Ext()); err != nil {
+		return fmt.Errorf("merge chunks for %s: %w", item.relPath, err)
+	}
+
+	return nil
+}
+
+// stageWholeFile downloads item in a single GET, compresses it with codec, and
+// writes the result atomically to destPath. Compression is streaming: the HTTP
+// body is piped through codec.EncodeStream so no whole-file buffering occurs.
+func stageWholeFile(
+	ctx context.Context,
+	log *slog.Logger,
+	destPath string,
+	item fsItem,
+	codec compress.Codec,
+	fetcher *exporter.Fetcher,
+	onProgress func(n int),
+) error {
 	log.Debug("staging fs file", slog.String("path", item.relPath))
 
 	body, err := fetcher.GetFile(ctx, item.uri)
