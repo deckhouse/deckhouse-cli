@@ -330,6 +330,21 @@ func stageCompressedFile(
 		return stageChunkedFile(ctx, log, stagingDir, destPath, item, chunkSize, codec, fetcher, onProgress)
 	}
 
+	// This file may have been chunked in an earlier run whose chunkSize put it
+	// above the threshold; a lower threshold in THIS run routes it through the
+	// whole-file branch instead, leaving its per-file chunk dir orphaned (it is
+	// never read by stageWholeFile or MergeBlockChunks, so it cannot corrupt
+	// anything, but it lingers in the staging dir until the next full success
+	// removes stagingDir wholesale). Best-effort clean it up now so an
+	// interrupted run does not accumulate dead chunk dirs across chunk-size
+	// changes; a failure here does not fail the file stage itself.
+	orphanChunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName(item.relPath, codec.Ext())))
+	if err := os.RemoveAll(orphanChunkDir); err != nil {
+		log.Warn("failed to remove orphan per-file chunk dir",
+			slog.String("dir", orphanChunkDir),
+			slog.String("error", err.Error()))
+	}
+
 	return stageWholeFile(ctx, log, destPath, item, codec, fetcher, onProgress)
 }
 

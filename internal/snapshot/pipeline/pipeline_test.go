@@ -838,6 +838,14 @@ func TestPipeline_PartialChunkResume(t *testing.T) {
 		0o644,
 	))
 
+	// A real interrupted run always has a chunks.meta recording the geometry
+	// (written before the first chunk is even fetched — see the
+	// chunk-size-mismatch-resume-corruption-guard fix), so seed one matching
+	// this run's geometry; otherwise the geometry guard cannot distinguish
+	// this partial dir from one left by a different --chunk-size and would
+	// (correctly) purge and re-fetch chunk 0 too.
+	require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: testChunkSize, TotalSize: testTotalSize}))
+
 	cfg := pipeline.Config{
 		Namespace:            testNS,
 		RootSnapshot:         rootSnapshot,
