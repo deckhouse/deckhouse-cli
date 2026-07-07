@@ -80,12 +80,18 @@ type fsItem struct {
 // workers bounds the parallelism for file downloads; the first error cancels all
 // in-flight downloads.
 //
-// chunkSize gates per-file chunking: a file whose declared size exceeds chunkSize
-// is staged via Range-based chunks (reusing DownloadBlockChunks/MergeBlockChunks,
-// the same machinery the block-volume path uses) so an interrupted download can
-// resume at sub-file granularity instead of restarting the whole file; chunkSize
-// <= 0 falls back to DefaultChunkSize. Files at or below chunkSize keep the
-// original single-shot GET + codec.EncodeStream path unchanged.
+// chunkSize bounds the size of each Range-based chunk used to stage a file whose
+// declared size is known (item.size > 0): every such file is staged via
+// stageChunkedFile, reusing DownloadBlockChunks/MergeBlockChunks (the same
+// durable, ".part"-resumable machinery the block-volume path uses) — a single
+// chunk when size <= chunkSize, multiple chunks otherwise — so an interrupted
+// download of ANY known-size file resumes from its last durably-persisted
+// offset instead of restarting from byte zero. chunkSize <= 0 falls back to
+// DefaultChunkSize. A file whose declared size is unknown (item.size <= 0 —
+// either genuinely empty or the listing omitted the "size" attribute, which
+// parseItemSize cannot tell apart) keeps the original single-shot GET +
+// codec.EncodeStream path: chunk geometry needs a trustworthy total size up
+// front, and there is no meaningful partial to resume for zero declared bytes.
 //
 // setTotal, when non-nil, is called exactly once with the summed declared size of
 // all file items in the listing before staging begins, so a progress sink can show
@@ -270,16 +276,21 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 }
 
 // stageCompressedFile stages one file to stagingDir/<relPath><codec.Ext()>,
-// choosing between two staging strategies based on the item's declared size:
+// choosing between two staging strategies based on whether the item's
+// declared size is known:
 //
-//   - item.size > chunkSize (chunkSize <= 0 falls back to DefaultChunkSize):
-//     the file is staged via stageChunkedFile, which fetches it as independent
-//     Range-based chunks so an interrupted download resumes at sub-file
-//     granularity instead of restarting the whole file.
-//   - otherwise: the file is staged via stageWholeFile, the original single-shot
-//     GET + codec.EncodeStream path — unchanged for the common case of many
-//     small files, where a chunk directory would add overhead with no resume
-//     benefit.
+//   - item.size > 0: the file is staged via stageChunkedFile, which fetches it
+//     as one or more independent Range-based chunks (reusing
+//     DownloadBlockChunks/MergeBlockChunks) so an interrupted download always
+//     resumes from its last durably-persisted offset instead of restarting the
+//     whole file — this applies regardless of chunkSize, so even a file well
+//     below the chunk-size threshold gets a durable single-chunk partial.
+//   - item.size <= 0 (declared size unknown — a genuinely empty file and a
+//     listing that omitted "size" are indistinguishable, see parseItemSize):
+//     the file is staged via stageWholeFile, the original single-shot GET +
+//     codec.EncodeStream path, since chunk geometry requires a trustworthy
+//     total size up front and there is no meaningful partial to resume for
+//     zero declared bytes.
 //
 // Already-complete destination files are skipped (resume) regardless of which
 // strategy would otherwise apply; the skip still credits the item's declared
@@ -322,37 +333,22 @@ func stageCompressedFile(
 		return fmt.Errorf("create parent dir %s: %w", parentDir, err)
 	}
 
-	if chunkSize <= 0 {
-		chunkSize = DefaultChunkSize
-	}
-
-	if item.size > chunkSize {
+	if item.size > 0 {
 		return stageChunkedFile(ctx, log, stagingDir, destPath, item, chunkSize, codec, fetcher, onProgress)
-	}
-
-	// This file may have been chunked in an earlier run whose chunkSize put it
-	// above the threshold; a lower threshold in THIS run routes it through the
-	// whole-file branch instead, leaving its per-file chunk dir orphaned (it is
-	// never read by stageWholeFile or MergeBlockChunks, so it cannot corrupt
-	// anything, but it lingers in the staging dir until the next full success
-	// removes stagingDir wholesale). Best-effort clean it up now so an
-	// interrupted run does not accumulate dead chunk dirs across chunk-size
-	// changes; a failure here does not fail the file stage itself.
-	orphanChunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName(item.relPath, codec.Ext())))
-	if err := os.RemoveAll(orphanChunkDir); err != nil {
-		log.Warn("failed to remove orphan per-file chunk dir",
-			slog.String("dir", orphanChunkDir),
-			slog.String("error", err.Error()))
 	}
 
 	return stageWholeFile(ctx, log, destPath, item, codec, fetcher, onProgress)
 }
 
-// stageChunkedFile downloads item as independent Range-based chunks into a
-// per-file chunk directory and merges them into destPath, reusing the
-// block-volume chunking machinery (DownloadBlockChunks/MergeBlockChunks)
-// UNCHANGED. workers is pinned to 1: chunks within one file download
-// sequentially, inside that file's own already-allocated slot in the outer
+// stageChunkedFile downloads item as one or more independent Range-based
+// chunks into a per-file chunk directory and merges them into destPath,
+// reusing the block-volume chunking machinery (DownloadBlockChunks/
+// MergeBlockChunks) UNCHANGED. It is used for every file with a known
+// declared size, even one that fits in a single chunk — a single-chunk
+// download still gets a durable ".part" partial via downloadChunk, so an
+// interrupt anywhere in the file resumes from its persisted offset instead of
+// restarting from byte zero. workers is pinned to 1: chunks within one file
+// download sequentially, inside that file's own already-allocated slot in the outer
 // per-file errgroup (DownloadFilesystemVolume's g.SetLimit(workers) loop) —
 // this deliberately avoids adding a third multiplicative concurrency
 // dimension on top of node-workers × PerVolumeConcurrency. Already-present
@@ -387,6 +383,14 @@ func stageChunkedFile(
 // stageWholeFile downloads item in a single GET, compresses it with codec, and
 // writes the result atomically to destPath. Compression is streaming: the HTTP
 // body is piped through codec.EncodeStream so no whole-file buffering occurs.
+//
+// This is the fallback path for items whose declared size is unknown
+// (item.size <= 0): stageChunkedFile's durable Range-based resume needs a
+// trustworthy total size up front to compute chunk geometry, which an unknown
+// size cannot provide, and there is no meaningful partial-download story for
+// zero declared bytes anyway. Every item with a known size (item.size > 0)
+// uses stageChunkedFile instead, regardless of its relation to chunkSize, so
+// that a resumable ".part" exists for it even when it is only a single chunk.
 func stageWholeFile(
 	ctx context.Context,
 	log *slog.Logger,

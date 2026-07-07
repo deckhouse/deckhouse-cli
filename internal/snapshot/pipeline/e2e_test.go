@@ -356,10 +356,14 @@ func makeE2EFSServer(t *testing.T, files []fsE2EFile) *httptest.Server {
 					`]}`)
 
 		case "/api/v1/files/alpha.txt":
-			_, _ = w.Write(fileMap["alpha.txt"])
+			// The listing declares a "size" for this file, so it downloads via
+			// the durable chunked path (stageChunkedFile/DownloadBlockChunks),
+			// which issues Range GETs — http.ServeContent (mirroring the real
+			// data-exporter's sendFile idiom) is required to honor them.
+			http.ServeContent(w, r, "alpha.txt", time.Time{}, bytes.NewReader(fileMap["alpha.txt"]))
 
 		case "/api/v1/files/subdir/beta.txt":
-			_, _ = w.Write(fileMap["subdir/beta.txt"])
+			http.ServeContent(w, r, "beta.txt", time.Time{}, bytes.NewReader(fileMap["subdir/beta.txt"]))
 
 		default:
 			http.NotFound(w, r)
