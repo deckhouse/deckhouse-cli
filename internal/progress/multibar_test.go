@@ -19,6 +19,7 @@ package progress
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -1222,5 +1223,90 @@ func TestTTYSink_SummaryBarSpinnerAdjacency(t *testing.T) {
 	last := lines[len(lines)-1]
 	if !strings.Contains(last, "2/2 volumes downloaded") {
 		t.Errorf("final rendered summary line = %q, want to contain %q", last, "2/2 volumes downloaded")
+	}
+}
+
+// TestTTYSink_Wait_UnfinalizedStreamBlocksUntilSettled pins the exact mechanism
+// behind the "double Ctrl-C" deadlock (2026-07-07 review): a pre-created mpb bar
+// only unblocks Progress.Wait() once Done or Fail settles it — SetTotal(_, true)
+// is the ONLY thing that completes a bar (verified against the pinned mpb/v8
+// v8.7.5 source; see the progress-finalize-streams-on-early-error-paths task
+// design_refs). A stream that is created and never terminally settled therefore
+// blocks Wait() forever. This test proves the hang exists at this layer — which
+// is exactly why pipeline.Run needs its own defensive sweep, since this package
+// cannot make Wait() self-heal — and that calling Fail() on the dangling stream
+// immediately unblocks it, the same mechanism the sweep relies on.
+func TestTTYSink_Wait_UnfinalizedStreamBlocksUntilSettled(t *testing.T) {
+	t.Parallel()
+
+	sink := New(io.Discard, true)
+
+	settled := sink.NewStream("settled", 0)
+	dangling := sink.NewStream("dangling", 0)
+
+	settled.Done()
+
+	waitDone := make(chan struct{})
+
+	go func() {
+		sink.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+		t.Fatal("Wait() returned before the dangling stream was settled; expected it to block")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: Wait() is still blocked on the unfinalized stream.
+	}
+
+	// Settling the dangling stream (the sweep's exact mechanism) must unblock Wait().
+	dangling.Fail()
+
+	select {
+	case <-waitDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait() did not return within 5s after the dangling stream was Failed")
+	}
+}
+
+// TestTTYSink_FailSweep_UnblocksWait mirrors pipeline.Run's post-g.Wait()
+// defensive sweep: after some streams settle normally, an unconditional Fail()
+// call over every remaining stream must unblock Wait() promptly, proving the
+// sweep is a safe, general fix for any early-return path that leaves a stream
+// dangling — not just the specific paths pipeline.go happens to guard today.
+func TestTTYSink_FailSweep_UnblocksWait(t *testing.T) {
+	t.Parallel()
+
+	sink := New(io.Discard, true)
+
+	settled := sink.NewStream("settled", 0)
+	settled.Done()
+
+	dangling := []Stream{
+		sink.NewStream("leaf-1", 0),
+		sink.NewStream("leaf-2", 0),
+	}
+
+	waitDone := make(chan struct{})
+
+	go func() {
+		sink.Wait()
+		close(waitDone)
+	}()
+
+	// The sweep: Fail every stream unconditionally. Already-Done streams (like
+	// "settled") are unaffected by a later Fail — first terminal call wins — so
+	// a real caller can safely sweep the whole map, not just the dangling subset.
+	go func() {
+		for _, s := range dangling {
+			s.Fail()
+		}
+	}()
+
+	select {
+	case <-waitDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sink.Wait() did not return after the Fail sweep settled every remaining stream")
 	}
 }

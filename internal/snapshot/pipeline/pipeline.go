@@ -93,7 +93,36 @@ func Run(ctx context.Context, cfg Config) error {
 		})
 	}
 
-	return g.Wait()
+	err = g.Wait()
+
+	// Defensive sweep: guarantee every pre-created stream is terminally settled
+	// before Run returns, so a caller's sink.Wait() can never block forever.
+	// Several early-return paths (semaphore-acquire failure, OpenExport failure,
+	// a manifest/stat error before a stream is even looked up) can leave a
+	// pre-created stream's Done/Fail never called — see the design_refs proof
+	// that an mpb bar only unblocks Progress.Wait() once SetTotal(_, true) has
+	// run, which happens only inside Stream.Done/Fail. Fail() is safe to call
+	// unconditionally here: both sink implementations gate on "first terminal
+	// call wins" (see ttyStream.finalize / plainStream.finalize), so a stream
+	// already settled by its own code path is left untouched by this sweep —
+	// it only settles the ones nothing else finalized.
+	failUnsettledStreams(streams)
+
+	return err
+}
+
+// failUnsettledStreams calls Fail on every pre-created stream once the worker
+// errgroup has fully drained. It is the primary fix for the "double Ctrl-C"
+// deadlock: without it, any early-return path that skips a stream's own
+// Done/Fail call leaves that stream's bar incomplete forever, so a subsequent
+// sink.Wait() never returns. Calling Fail unconditionally is safe because
+// Stream.Done/Fail is specified to let the first terminal call win — a stream
+// already settled (by success or by its own Fail) is not double-counted or
+// re-settled.
+func failUnsettledStreams(streams map[streamKey]progress.Stream) {
+	for _, s := range streams {
+		s.Fail()
+	}
 }
 
 // precreateStreams creates one progress.Stream per volume download before any worker
@@ -595,9 +624,13 @@ func multiDest(nodeDir, pvc, ext string) volumeDestPaths {
 // the DataExport on completion or error.
 //
 // stream is the pre-created progress handle for this volume; it is marked Done on
-// success or Fail on error when downloadVolumeBinding returns (via defer, once the
-// DataExport has opened) and must not be nil-checked by the caller. Pass nil when
-// progress tracking is disabled.
+// success or Fail on error/cancellation for every return path from the point the
+// stream semaphore is acquired onward (via defer), including an OpenExport
+// failure. Pass nil when progress tracking is disabled. The one path this
+// function cannot itself cover is failing to acquire the semaphore in the first
+// place (e.g. ctx cancelled while queued behind MaxParallelDownloads) — that
+// case, and any other future early-return gap, is caught by Run's post-g.Wait()
+// defensive sweep over every pre-created stream.
 //
 // leafRef addresses the snapshot leaf CR that the DataExport controller will
 // resolve via leaf.status.boundSnapshotContentName → SnapshotContent → dataRef.
@@ -624,6 +657,28 @@ func downloadVolumeBinding(
 	}
 
 	defer cfg.streamSem.Release(1)
+
+	// downloadErr captures this function's terminal outcome; it is a plain
+	// local (not a named return — nonamedreturns is enforced repo-wide) set on
+	// every return path below and read only by the deferred Fail-or-Done
+	// closure immediately following. Registering that closure HERE — right
+	// after the semaphore is acquired, rather than after cfg.OpenExport
+	// returns — ensures an OpenExport failure (e.g. ctx cancelled mid-
+	// WaitReady) still settles the stream locally instead of relying solely on
+	// Run's post-g.Wait() sweep to catch it.
+	var downloadErr error
+
+	if stream != nil {
+		defer func() {
+			if downloadErr != nil {
+				stream.Fail()
+
+				return
+			}
+
+			stream.Done()
+		}()
+	}
 
 	// Register the release-by-name defer BEFORE calling cfg.OpenExport, so it
 	// runs on EVERY return path — including when OpenExport itself fails, e.g.
@@ -669,26 +724,9 @@ func downloadVolumeBinding(
 
 	exp, err := cfg.OpenExport(ctx, namespace, leafRef, cfg.TTL)
 	if err != nil {
-		return fmt.Errorf("open DataExport for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
-	}
+		downloadErr = fmt.Errorf("open DataExport for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
 
-	// Mark the pre-created stream Done on success or Fail on error when we
-	// return. downloadErr is a plain local (not a named return — nonamedreturns
-	// is enforced repo-wide) set on every path below and read only by this
-	// single deferred closure, so the terminal Stream call always matches the
-	// function's real outcome instead of unconditionally reporting success.
-	var downloadErr error
-
-	if stream != nil {
-		defer func() {
-			if downloadErr != nil {
-				stream.Fail()
-
-				return
-			}
-
-			stream.Done()
-		}()
+		return downloadErr
 	}
 
 	// Flip the bar from "waiting for export…" to the live byte-counter display
