@@ -60,7 +60,11 @@ type streamKey struct {
 // Run aggregates every per-node failure into a single errors.Join error. A
 // genuine ctx cancellation (SIGINT, or the caller cancelling its parent
 // context) still aborts all in-flight nodes promptly; in that case Run
-// returns ctx.Err() instead of the aggregated per-node error.
+// returns ctx.Err() instead of the aggregated per-node error — but only when
+// at least one node actually failed. If every node already succeeded before
+// the cancellation was observed, Run reports success: a late-arriving
+// cancellation must never turn a fully successful download into a reported
+// failure.
 func Run(ctx context.Context, cfg Config) error {
 	cfg = applyDefaults(cfg)
 
@@ -142,8 +146,12 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// A genuine ctx cancellation (SIGINT/parent cancel) takes priority over the
 	// aggregated per-node errors: every in-flight node was aborted for the same
-	// reason, so ctx.Err() is the more useful signal to the caller.
-	if ctx.Err() != nil {
+	// reason, so ctx.Err() is the more useful signal to the caller. But only
+	// when there is at least one per-node failure to explain — if every node
+	// already succeeded (nodeErrs empty), a cancellation that merely arrived in
+	// the window between the last node finishing and Run returning must not
+	// turn a fully successful download into a reported failure.
+	if len(nodeErrs) > 0 && ctx.Err() != nil {
 		return ctx.Err()
 	}
 
