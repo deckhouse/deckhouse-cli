@@ -17,12 +17,23 @@ limitations under the License.
 package aggapi
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes/scheme"
+	restfake "k8s.io/client-go/rest/fake"
 )
 
 // testMapper resolves the kinds used in the path-building tests to their plurals.
@@ -396,5 +407,232 @@ func TestAggregatedAPIContract(t *testing.T) {
 				t.Errorf("path mismatch:\n got  %q\n want %q", got, tc.wantPath)
 			}
 		})
+	}
+}
+
+// ── manifests-download transient-error retry ────────────────────────────────────────
+//
+// These tests exercise getManifestsDownload (shared by NodeManifestsDownload and
+// ContentManifestsDownload) against a stubbed rest.Interface. They deliberately do NOT
+// use t.Parallel(): withFastBackoff mutates the package-level manifestsDownloadBackoff
+// var for the duration of the test, which would race under parallel execution.
+
+// coreSnapshotRef returns a core Snapshot node ref for the retry tests below.
+func coreSnapshotRef() NodeRef {
+	return NodeRef{APIVersion: StorageGroup + "/v1alpha1", Kind: "Snapshot", Name: "my-snap", Namespace: "ns"}
+}
+
+// withFastBackoff overrides manifestsDownloadBackoff for the duration of the test with
+// a small, deterministic backoff so retry tests exercise real (non-mocked) sleeps
+// without slowing down the suite. Restored via t.Cleanup.
+func withFastBackoff(t *testing.T, b wait.Backoff) {
+	t.Helper()
+
+	orig := manifestsDownloadBackoff
+	manifestsDownloadBackoff = b
+	t.Cleanup(func() { manifestsDownloadBackoff = orig })
+}
+
+// statusResponse builds an HTTP response factory returning a well-formed
+// metav1.Status body, matching what the real kube-apiserver aggregation layer sends
+// for a non-2xx response (this is what apierrors.FromObject/IsServiceUnavailable etc.
+// classify against).
+func statusResponse(t *testing.T, code int32, reason metav1.StatusReason, message string) func() *http.Response {
+	t.Helper()
+
+	raw, err := json.Marshal(metav1.Status{
+		TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"},
+		Status:   metav1.StatusFailure,
+		Message:  message,
+		Reason:   reason,
+		Code:     code,
+	})
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+
+	return func() *http.Response {
+		return &http.Response{
+			StatusCode: int(code),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(string(raw))),
+		}
+	}
+}
+
+// okResponse builds an HTTP 200 response factory returning body.
+func okResponse(body string) func() *http.Response {
+	return func() *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}
+	}
+}
+
+// countingRESTClient returns a fake rest.Interface serving respFns in order. A call
+// beyond len(respFns) fails the test immediately, so a test can assert "no further
+// attempt was made" simply by supplying exactly the expected number of responses.
+func countingRESTClient(t *testing.T, respFns ...func() *http.Response) (*restfake.RESTClient, *int) {
+	t.Helper()
+
+	calls := 0
+	rc := &restfake.RESTClient{
+		NegotiatedSerializer: scheme.Codecs,
+		GroupVersion:         schema.GroupVersion{Group: StorageGroup, Version: "v1alpha1"},
+		VersionedAPIPath:     "/",
+		Client: restfake.CreateHTTPClient(func(_ *http.Request) (*http.Response, error) {
+			if calls >= len(respFns) {
+				t.Fatalf("unexpected extra HTTP call #%d (want at most %d)", calls+1, len(respFns))
+			}
+
+			resp := respFns[calls]()
+			calls++
+
+			return resp, nil
+		}),
+	}
+
+	return rc, &calls
+}
+
+// TestNodeManifestsDownload_RetriesTransientThenSucceeds verifies that a 503
+// ServiceUnavailable ("the server is currently unable to handle the request" -- the
+// exact message an aggregated APIService backend returns while briefly restarting) is
+// retried and the call ultimately succeeds once the backend recovers.
+func TestNodeManifestsDownload_RetriesTransientThenSucceeds(t *testing.T) {
+	withFastBackoff(t, wait.Backoff{Steps: 5, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond})
+
+	rc, calls := countingRESTClient(t,
+		statusResponse(t, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, "the server is currently unable to handle the request"),
+		statusResponse(t, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, "the server is currently unable to handle the request"),
+		okResponse(`[]`),
+	)
+
+	c := NewClient(rc, testMapper())
+
+	body, err := c.NodeManifestsDownload(context.Background(), coreSnapshotRef())
+	if err != nil {
+		t.Fatalf("NodeManifestsDownload: %v", err)
+	}
+
+	if string(body) != `[]` {
+		t.Errorf("body: got %q, want %q", body, `[]`)
+	}
+
+	if *calls != 3 {
+		t.Errorf("calls: got %d, want 3", *calls)
+	}
+}
+
+// TestNodeManifestsDownload_NonTransientErrorNotRetried verifies that a genuine client
+// error (Forbidden) surfaces on the first attempt with no retry.
+func TestNodeManifestsDownload_NonTransientErrorNotRetried(t *testing.T) {
+	withFastBackoff(t, wait.Backoff{Steps: 5, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond})
+
+	rc, calls := countingRESTClient(t,
+		statusResponse(t, http.StatusForbidden, metav1.StatusReasonForbidden, "not allowed"),
+	)
+
+	c := NewClient(rc, testMapper())
+
+	_, err := c.NodeManifestsDownload(context.Background(), coreSnapshotRef())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !apierrors.IsForbidden(err) {
+		t.Errorf("expected a Forbidden error, got: %v", err)
+	}
+
+	if *calls != 1 {
+		t.Errorf("calls: got %d, want 1 (no retry expected)", *calls)
+	}
+}
+
+// TestNodeManifestsDownload_ExhaustsRetriesOnPersistentTransientError verifies that a
+// backend that never recovers fails after the bounded attempt count instead of hanging,
+// and that the returned error still classifies as the transient reason it saw.
+func TestNodeManifestsDownload_ExhaustsRetriesOnPersistentTransientError(t *testing.T) {
+	backoff := wait.Backoff{Steps: 3, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond}
+	withFastBackoff(t, backoff)
+
+	respFn := statusResponse(t, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, "the server is currently unable to handle the request")
+	rc, calls := countingRESTClient(t, respFn, respFn, respFn)
+
+	c := NewClient(rc, testMapper())
+
+	_, err := c.NodeManifestsDownload(context.Background(), coreSnapshotRef())
+	if err == nil {
+		t.Fatal("expected error after exhausting retries, got nil")
+	}
+
+	if !apierrors.IsServiceUnavailable(err) {
+		t.Errorf("expected the exhausted error to still classify as ServiceUnavailable, got: %v", err)
+	}
+
+	if *calls != backoff.Steps {
+		t.Errorf("calls: got %d, want exactly %d (bounded attempts)", *calls, backoff.Steps)
+	}
+}
+
+// TestNodeManifestsDownload_ContextCancelledAbortsRetryPromptly verifies that
+// cancelling ctx during the retry loop's backoff wait aborts immediately and returns
+// ctx.Err(), instead of waiting out the remaining attempt budget.
+func TestNodeManifestsDownload_ContextCancelledAbortsRetryPromptly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	rc, calls := countingRESTClient(t, func() *http.Response {
+		// Cancel before returning control to the retry loop: by the time
+		// ExponentialBackoffWithContext reaches its post-attempt select, ctx.Done()
+		// is already closed, so it returns ctx.Err() without ever sleeping out the
+		// (unmodified, multi-second) production backoff -- keeping this test fast
+		// without needing to fake the clock.
+		defer cancel()
+
+		return statusResponse(t, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, "the server is currently unable to handle the request")()
+	})
+
+	c := NewClient(rc, testMapper())
+
+	_, err := c.NodeManifestsDownload(ctx, coreSnapshotRef())
+	if err == nil {
+		t.Fatal("expected error after ctx cancellation, got nil")
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected error to wrap context.Canceled, got: %v", err)
+	}
+
+	if *calls != 1 {
+		t.Errorf("calls: got %d, want 1 (aborted before a second attempt)", *calls)
+	}
+}
+
+// TestContentManifestsDownload_RetriesTransientThenSucceeds is a wiring smoke test
+// proving ContentManifestsDownload shares the same retry path as NodeManifestsDownload
+// (both are manifests-download subresource calls, see getManifestsDownload).
+func TestContentManifestsDownload_RetriesTransientThenSucceeds(t *testing.T) {
+	withFastBackoff(t, wait.Backoff{Steps: 5, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond})
+
+	rc, calls := countingRESTClient(t,
+		statusResponse(t, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, "the server is currently unable to handle the request"),
+		okResponse(`[]`),
+	)
+
+	c := NewClient(rc, testMapper())
+
+	body, err := c.ContentManifestsDownload(context.Background(), "nss-content-1")
+	if err != nil {
+		t.Fatalf("ContentManifestsDownload: %v", err)
+	}
+
+	if string(body) != `[]` {
+		t.Errorf("body: got %q, want %q", body, `[]`)
+	}
+
+	if *calls != 2 {
+		t.Errorf("calls: got %d, want 2", *calls)
 	}
 }
