@@ -208,6 +208,47 @@ func TestNonTTY_SetTotal_AggregatesCorrectly(t *testing.T) {
 	}
 }
 
+// TestNonTTY_SetCurrent_SeedsAndCancelsAggregate proves the plainStream side
+// of the download-progress-seed-committed-bytes contract: SetCurrent(n) adds
+// exactly n to the sink's shared aggregate (mirroring SetTotal's delta
+// pattern), and a later SetCurrent(0) removes exactly that seed again without
+// touching any other stream's contribution — the "seed, then cancel right
+// before the real transfer" hand-off pipeline.downloadBlock/downloadFS rely
+// on to avoid double-counting already-committed bytes.
+func TestNonTTY_SetCurrent_SeedsAndCancelsAggregate(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	sink := New(buf, false, WithInterval(time.Hour))
+
+	seeded := sink.NewStream("vol-seeded", 1024)
+	other := sink.NewStream("vol-other", 512)
+
+	other.IncrBy(200)
+
+	// Seed vol-seeded with 300 already-committed bytes before its transfer starts.
+	seeded.SetCurrent(300)
+
+	// Cancel the seed back out right before the real transfer begins, then let
+	// the real resume-skip/incremental crediting take over from zero.
+	seeded.SetCurrent(0)
+	seeded.IncrBy(300)
+	seeded.IncrBy(724)
+
+	seeded.Done()
+	other.Done()
+	sink.Wait()
+
+	// Total credited for vol-seeded must be exactly 1024 (300 + 724), never
+	// 1324 (which a double count against the cancelled seed would produce);
+	// vol-other's independent 200 must be unaffected.
+	want := aggregateLine(t, 1024+200, 1024+512, 2, 0)
+
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("SetCurrent seed/cancel not reflected correctly in aggregate:\ngot:  %q\nwant (contained): %q", buf.String(), want)
+	}
+}
+
 func TestNonTTY_Wait_AlwaysEmitsFinalLine(t *testing.T) {
 	t.Parallel()
 
@@ -251,6 +292,30 @@ func TestDecorateStatus(t *testing.T) {
 			decor.Statistics{Current: 1024, Total: 1024},
 			"",
 		},
+		{
+			"waiting_seeded_total_known",
+			streamStateWaiting,
+			decor.Statistics{Current: 256, Total: 1024},
+			fmt.Sprintf(" % .1f / % .1f", decor.SizeB1024(256), decor.SizeB1024(1024)),
+		},
+		{
+			"waiting_seeded_total_unknown",
+			streamStateWaiting,
+			decor.Statistics{Current: 256, Total: 0},
+			fmt.Sprintf(" % .1f / ???", decor.SizeB1024(256)),
+		},
+		{
+			"done_seeded_still_no_counters",
+			streamStateDone,
+			decor.Statistics{Current: 256, Total: 1024},
+			"",
+		},
+		{
+			"failed_seeded_still_no_counters",
+			streamStateFailed,
+			decor.Statistics{Current: 256, Total: 1024},
+			"",
+		},
 	}
 
 	for _, tc := range cases {
@@ -279,6 +344,9 @@ func TestDecorateAppend(t *testing.T) {
 		{"active_50pct", streamStateActive, decor.Statistics{Current: 512, Total: 1024}, " 50%"},
 		{"active_100pct", streamStateActive, decor.Statistics{Current: 1024, Total: 1024}, " 100%"},
 		{"done_no_percent", streamStateDone, decor.Statistics{Current: 1024, Total: 1024}, ""},
+		{"waiting_seeded_pct", streamStateWaiting, decor.Statistics{Current: 512, Total: 1024}, " 50%"},
+		{"waiting_seeded_total_unknown_no_pct", streamStateWaiting, decor.Statistics{Current: 512, Total: 0}, ""},
+		{"done_seeded_still_no_percent", streamStateDone, decor.Statistics{Current: 512, Total: 1024}, ""},
 	}
 
 	for _, tc := range cases {
@@ -691,6 +759,56 @@ func TestTTYStream_ActivateIdempotent(t *testing.T) {
 
 	if got := atomic.LoadInt32(&st.activated); got != 1 {
 		t.Errorf("activated after double Activate = %d, want 1", got)
+	}
+
+	st.Done()
+	sink.Wait()
+}
+
+// TestTTYStream_SetCurrent_SeedsAndCancels proves the ttyStream side of the
+// download-progress-seed-committed-bytes contract: SetCurrent(n) sets the
+// underlying mpb bar's current value directly (observable via stats.Current
+// fed into decorateStatus/decorateAppend), and a later SetCurrent(0) removes
+// it again cleanly, leaving room for the real per-chunk/per-file resume-skip
+// crediting to re-derive and re-credit the same bytes without double
+// counting. This exercises the actual *Bar.SetCurrent call (not just the
+// pure decorator functions TestDecorateStatus/TestDecorateAppend already
+// cover), so a regression in the mpb-facing plumbing itself is caught.
+func TestTTYStream_SetCurrent_SeedsAndCancels(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	sink := newTTYSink(buf)
+
+	st, ok := sink.NewStream("seed", 0).(*ttyStream)
+	if !ok {
+		t.Fatal("NewStream did not return *ttyStream")
+	}
+
+	// Seed while still waiting, before Activate — mirrors precreateStreams
+	// seeding a fresh stream immediately after creation.
+	st.SetCurrent(256)
+
+	if got := st.bar.Current(); got != 256 {
+		t.Errorf("Current after seed = %d, want 256", got)
+	}
+
+	// Cancel the seed right before the real transfer starts, mirroring
+	// downloadBlock/downloadFS's unconditional SetCurrent(0).
+	st.SetCurrent(0)
+
+	if got := st.bar.Current(); got != 0 {
+		t.Errorf("Current after cancel = %d, want 0", got)
+	}
+
+	// The real transfer's own incremental crediting proceeds from the
+	// cancelled baseline exactly as if no seed had ever been applied.
+	st.Activate()
+	st.SetTotal(256)
+	st.IncrBy(256)
+
+	if got := st.bar.Current(); got != 256 {
+		t.Errorf("Current after real crediting = %d, want 256 (no double count against the cancelled seed)", got)
 	}
 
 	st.Done()

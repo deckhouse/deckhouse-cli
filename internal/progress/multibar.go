@@ -61,6 +61,18 @@ type Stream interface {
 	// SetTotal updates the stream's expected total byte count.
 	SetTotal(total int64)
 
+	// SetCurrent sets the stream's current byte counter to an absolute value.
+	// It exists specifically for the pipeline's resume-progress seeding
+	// (download-progress-seed-committed-bytes): once, right after a stream is
+	// created, to display already-committed on-disk bytes before the real
+	// transfer begins (while the row is still in the waiting state), and once
+	// more — with 0 — right before the real transfer starts, to cancel that
+	// seed back out so the existing per-chunk/per-file resume-skip crediting
+	// (which re-derives and re-credits the identical bytes from the same
+	// on-disk state) does not double-count them. It must not be used for
+	// ordinary incremental progress reporting — use IncrBy for that.
+	SetCurrent(current int64)
+
 	// Activate transitions the stream from waiting to downloading state.
 	// For the TTY sink it flips the bar from "waiting for export…" to the live
 	// byte-counter display. For the plain (non-TTY) sink it is a no-op.
@@ -331,6 +343,13 @@ func (s *ttyStream) SetTotal(total int64) {
 	s.bar.SetTotal(total, false)
 }
 
+// SetCurrent sets the bar's current byte counter to an absolute value. See the
+// Stream interface doc comment for why this exists (resume-progress seeding
+// only, never ordinary incremental reporting).
+func (s *ttyStream) SetCurrent(current int64) {
+	s.bar.SetCurrent(current)
+}
+
 // Activate transitions the stream from waiting to downloading and records that
 // the stream was activated (so a finished stream renders "Download complete"
 // rather than the resume-skip word "Already exists"). Subsequent calls after the
@@ -477,31 +496,49 @@ func stateWord(state int32, activated bool) string {
 	}
 }
 
-// decorateStatus returns the byte-counter append text for a stream bar. Counters
-// render ONLY in the active state ("<current> / <total>" in human-readable binary
-// units); waiting and done rows show no counters (docker-pull parity). It is a pure
-// function used directly in unit tests without any mpb rendering.
+// decorateStatus returns the byte-counter append text for a stream bar.
+// Counters render in the active state ("<current> / <total>" in
+// human-readable binary units) exactly as before, AND ALSO in the waiting
+// state when the stream was seeded with already-committed on-disk bytes
+// (Current > 0) — see the Stream.SetCurrent doc comment — so a resumed
+// volume's row shows its real committed bytes immediately, before the
+// DataExport becomes ready. A seeded row whose total is not yet known (a
+// filesystem volume before its listing returns) shows "<current> / ???"
+// instead of a bogus zero total. Done/failed rows still show no counters
+// (docker-pull parity: a finished layer shows only its status word). It is a
+// pure function used directly in unit tests without any mpb rendering.
 func decorateStatus(state int32, stats decor.Statistics) string {
-	if state != streamStateActive {
+	switch {
+	case state == streamStateActive:
+		return fmt.Sprintf(" % .1f / % .1f", decor.SizeB1024(stats.Current), decor.SizeB1024(stats.Total))
+	case state == streamStateWaiting && stats.Current > 0 && stats.Total > 0:
+		return fmt.Sprintf(" % .1f / % .1f", decor.SizeB1024(stats.Current), decor.SizeB1024(stats.Total))
+	case state == streamStateWaiting && stats.Current > 0:
+		return fmt.Sprintf(" % .1f / ???", decor.SizeB1024(stats.Current))
+	default:
 		return ""
 	}
-
-	return fmt.Sprintf(" % .1f / % .1f", decor.SizeB1024(stats.Current), decor.SizeB1024(stats.Total))
 }
 
-// decorateAppend returns the percentage append text for a stream bar. The percent
-// renders ONLY in the active state; waiting and done rows show no percentage. It is
-// a pure function used directly in unit tests.
+// decorateAppend returns the percentage append text for a stream bar. The
+// percent renders in the active state exactly as before, AND ALSO in the
+// waiting state once a seeded stream's total is known (see decorateStatus).
+// A seeded row whose total is still unknown shows no percentage (there is
+// nothing to divide by yet); waiting rows show " 0%" is deliberately NOT used
+// there, since an un-seeded waiting row (Current == 0) must keep showing no
+// percentage at all (docker-pull parity). It is a pure function used directly
+// in unit tests.
 func decorateAppend(state int32, stats decor.Statistics) string {
-	if state != streamStateActive {
+	switch {
+	case state == streamStateActive && stats.Total <= 0:
+		return " 0%"
+	case state == streamStateActive:
+		return fmt.Sprintf(" %.0f%%", float64(stats.Current)/float64(stats.Total)*100)
+	case state == streamStateWaiting && stats.Current > 0 && stats.Total > 0:
+		return fmt.Sprintf(" %.0f%%", float64(stats.Current)/float64(stats.Total)*100)
+	default:
 		return ""
 	}
-
-	if stats.Total <= 0 {
-		return " 0%"
-	}
-
-	return fmt.Sprintf(" %.0f%%", float64(stats.Current)/float64(stats.Total)*100)
 }
 
 // volumeCounterLabel returns the text for the bottom volume-counter summary bar.
@@ -619,9 +656,10 @@ func (s *plainSink) LogWriter() io.Writer {
 }
 
 type plainStream struct {
-	sink  *plainSink
-	mu    sync.Mutex
-	total int64
+	sink    *plainSink
+	mu      sync.Mutex
+	total   int64
+	current int64
 	// settled gates Done()/Fail() to exactly one terminal transition per stream:
 	// the FIRST call (whichever method) wins, mirroring ttyStream.finalize. A
 	// duplicate Done() call must not double-count, and Done() after Fail() (or
@@ -630,8 +668,33 @@ type plainStream struct {
 }
 
 func (s *plainStream) IncrBy(n int) {
+	s.mu.Lock()
+	s.current += int64(n)
+	s.mu.Unlock()
+
 	s.sink.mu.Lock()
 	s.sink.progress += int64(n)
+	s.sink.mu.Unlock()
+}
+
+// SetCurrent sets this stream's own current byte counter to an absolute value
+// and applies the resulting delta to the sink's shared aggregate — mirroring
+// SetTotal's delta pattern below — since the non-TTY sink's "downloaded X /
+// total Y" line sums every stream's progress into one shared counter. See the
+// Stream interface doc comment for why this exists (resume-progress seeding
+// only, never ordinary incremental reporting).
+func (s *plainStream) SetCurrent(current int64) {
+	s.mu.Lock()
+	delta := current - s.current
+	s.current = current
+	s.mu.Unlock()
+
+	if delta == 0 {
+		return
+	}
+
+	s.sink.mu.Lock()
+	s.sink.progress += delta
 	s.sink.mu.Unlock()
 }
 

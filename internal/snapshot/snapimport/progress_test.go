@@ -72,8 +72,9 @@ type fakeStream struct {
 	failCnt     int
 }
 
-func (s *fakeStream) IncrBy(_ int)     {}
-func (s *fakeStream) SetTotal(_ int64) {}
+func (s *fakeStream) IncrBy(_ int)       {}
+func (s *fakeStream) SetTotal(_ int64)   {}
+func (s *fakeStream) SetCurrent(_ int64) {}
 
 func (s *fakeStream) Activate() {
 	s.mu.Lock()
