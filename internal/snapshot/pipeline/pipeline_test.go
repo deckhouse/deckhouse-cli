@@ -1767,6 +1767,57 @@ func TestPipeline_Progress_CancelDuringWait_DoesNotDeadlock(t *testing.T) {
 	}
 }
 
+// alwaysCanceledContext wraps context.Background() and overrides only Err(),
+// never Done(). This deterministically reproduces the live-reproduced race
+// (SIGINT arriving in the narrow window between the last node finishing and
+// Run returning) without a timing-dependent goroutine dance: errgroup.WithContext
+// propagates cancellation into its derived gctx by watching the PARENT's Done()
+// channel (see context.propagateCancel), not by polling Err(), so a nil Done()
+// here means gctx is never actually cancelled and every node genuinely runs to
+// completion — while Run's own final check reads ctx.Err() directly and always
+// observes a cancellation, exactly matching "ctx was cancelled but nodeErrs is
+// empty because everything already succeeded."
+type alwaysCanceledContext struct {
+	context.Context
+}
+
+// Err always reports context.Canceled, regardless of Done().
+func (alwaysCanceledContext) Err() error { return context.Canceled }
+
+// TestPipeline_CancelAfterAllNodesSucceed_ReturnsNil is the regression test for
+// the live-reproduced misreport: a fully successful download whose ctx happens
+// to be cancelled right as the last node finishes must not be reported as a
+// failure. See alwaysCanceledContext for how the race is made deterministic.
+func TestPipeline_CancelAfterAllNodesSucceed_ReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("B"), 600)
+
+	srv := makeBlockServer(t, rawBlock)
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	err := runPipeline(alwaysCanceledContext{context.Background()}, cfg)
+	require.NoError(t, err,
+		"a ctx observed as cancelled only after every node already succeeded must not turn the run into a reported failure")
+
+	assertNodeComplete(t, outputDir)
+}
+
 // TestPipeline_BestEffort_OneNodeFailureDoesNotCancelSiblings is the regression
 // test for the best-effort per-node download design: one node's permanent
 // download failure must not cancel sibling nodes that are still downloading.
