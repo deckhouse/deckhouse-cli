@@ -415,6 +415,28 @@ func TestBlockChunksDirNameFor(t *testing.T) {
 // mutually consistent: block name, FS tar name, staging dirs, and chunk dir all
 // share the pvc prefix under data/ and are distinct from each other and from the
 // single-volume flat names.
+func TestFsFileChunksDirName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		relPath string
+		ext     string
+		want    string
+	}{
+		{"payload.bin", ".zst", "payload.bin.zst.d"},
+		{"disk/payload.bin", ".zst", "disk/payload.bin.zst.d"},
+		{"payload.bin", "", "payload.bin.d"},
+		{"a/b/c.img", ".lz4", "a/b/c.img.lz4.d"},
+	}
+
+	for _, tc := range tests {
+		got := archive.FsFileChunksDirName(tc.relPath, tc.ext)
+		if got != tc.want {
+			t.Errorf("FsFileChunksDirName(%q, %q) = %q; want %q", tc.relPath, tc.ext, got, tc.want)
+		}
+	}
+}
+
 func TestMultiVolumeHelpers_Consistency(t *testing.T) {
 	t.Parallel()
 

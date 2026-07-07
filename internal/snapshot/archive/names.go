@@ -175,3 +175,20 @@ func MultiVolumeTarStagingDirName(pvc string) string {
 func BlockChunksDirNameFor(pvc string) string {
 	return filepath.Join(DataDirName, pvc+".bin.d")
 }
+
+// FsFileChunksDirName returns the per-file chunk directory name for one large
+// filesystem-volume file: "<relPath><ext>.d". relPath is the item's forward-slash
+// relative path within the volume (e.g. "disk/payload.bin") and ext is the codec
+// extension (e.g. ".zst", or "" for the none codec).
+//
+// A caller joins this (via filepath.FromSlash) under the FS staging directory
+// (FsTarStagingDirName or MultiVolumeTarStagingDirName), so the chunk directory
+// nests inside the existing per-volume staging dir, e.g.
+// "data.tar.d/payload.bin.zst.d/". Chunks accumulate here while a file larger
+// than the effective chunk size is downloaded via Range GETs, and are merged
+// into "<relPath><ext>" (the same path DownloadBlockChunks/MergeBlockChunks use
+// for a single block volume) once complete. Mirrors BlockChunksDirNameFor's
+// naming pattern for the per-file (rather than per-volume) case.
+func FsFileChunksDirName(relPath, ext string) string {
+	return relPath + ext + ".d"
+}

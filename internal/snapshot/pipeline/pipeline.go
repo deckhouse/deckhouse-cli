@@ -757,7 +757,7 @@ func downloadFS(ctx context.Context, cfg Config, tarPath, stagingDir string, exp
 		return fmt.Errorf("build files URL: %w", err)
 	}
 
-	return volume.DownloadFilesystemVolume(ctx, cfg.Log, tarPath, stagingDir, filesURL, cfg.PerVolumeConcurrency, exp.Fetcher(), cfg.Compression, setTotal, onProgress)
+	return volume.DownloadFilesystemVolume(ctx, cfg.Log, tarPath, stagingDir, filesURL, cfg.PerVolumeConcurrency, cfg.ChunkSize, exp.Fetcher(), cfg.Compression, setTotal, onProgress)
 }
 
 // nodeStateName returns a human-readable label for a NodeState, used in log output
