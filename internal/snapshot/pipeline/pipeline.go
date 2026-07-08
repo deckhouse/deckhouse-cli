@@ -82,6 +82,18 @@ type streamHandle struct {
 // cancellation must never turn a fully successful download into a reported
 // failure.
 func Run(ctx context.Context, cfg Config) error {
+	// Generate the per-run ownership ID before applyDefaults builds the
+	// production OpenExport closure (which captures it), so every DataExport this
+	// run creates is stamped and only this run releases it (inv #10b).
+	if cfg.RunID == "" {
+		runID, err := newDownloadRunID()
+		if err != nil {
+			return fmt.Errorf("pipeline: %w", err)
+		}
+
+		cfg.RunID = runID
+	}
+
 	cfg = applyDefaults(cfg)
 
 	if cfg.OpenExport == nil {
@@ -870,7 +882,7 @@ func downloadVolumeBinding(
 		defer releaseCancel()
 
 		deName := exporter.DataExportName(leafRef.Name)
-		if relErr := exporter.ReleaseDataExport(releaseCtx, cfg.KubeClient, namespace, deName); relErr != nil {
+		if relErr := exporter.ReleaseDataExport(releaseCtx, cfg.KubeClient, cfg.Log, namespace, deName, cfg.RunID); relErr != nil {
 			cfg.Log.Warn("failed to release DataExport",
 				slog.String("leaf", leafRef.Name),
 				slog.String("error", relErr.Error()))

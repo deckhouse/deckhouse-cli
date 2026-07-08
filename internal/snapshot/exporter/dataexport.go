@@ -50,10 +50,71 @@ const logEveryN = 5
 // must recognize this exact string.
 const conditionTypeExpired = "Expired"
 
+// runOwnerAnnotation records the download run that CREATED (and therefore owns) a
+// DataExport CR. The CR name is deterministic (DataExportName → de-<leaf>), so two
+// concurrent download runs targeting the same leaf resolve to the SAME CR; this
+// annotation lets each run tell "the CR I created" from "a CR another live run
+// created" so a run never deletes or hijacks another run's in-flight export
+// (inv #10b). The value is an opaque per-run hex ID (pipeline.Config.RunID).
+const runOwnerAnnotation = "snapshot.deckhouse.io/download-run-id"
+
 // DataExportName derives a deterministic DataExport CR name from the snapshot
 // leaf CR name. The result fits in a DNS-1123 label.
 func DataExportName(leafName string) string {
 	return "de-" + leafName
+}
+
+// ensureOptions carries optional per-run ownership context for EnsureDataExport.
+type ensureOptions struct {
+	runID string
+	log   *slog.Logger
+}
+
+// EnsureOption configures optional behavior of EnsureDataExport.
+type EnsureOption func(*ensureOptions)
+
+// WithRunOwner makes EnsureDataExport stamp runID as the owning run
+// (runOwnerAnnotation) on any DataExport it CREATES, and log an explicit WARN via
+// log when it instead adopts a live CR that a DIFFERENT run already owns. The
+// adopted endpoint is still reused for read-only transfer, but ownership — and
+// therefore the right to delete the CR on release (ReleaseDataExport) — stays
+// with the other run, so neither run tears down the other's in-flight export
+// (inv #10b). runID must be non-empty to take effect; a nil log disables the
+// adoption WARN.
+func WithRunOwner(runID string, log *slog.Logger) EnsureOption {
+	return func(o *ensureOptions) {
+		o.runID = runID
+		o.log = log
+	}
+}
+
+// warnIfForeign logs a WARN when this run is adopting a live DataExport that a
+// DIFFERENT run already owns. An unstamped CR (no owner annotation) is treated as
+// unowned and adopted silently, preserving pre-ownership behavior.
+func (o ensureOptions) warnIfForeign(de *deapi.DataExport, deName string) {
+	if o.runID == "" || o.log == nil {
+		return
+	}
+
+	owner := de.Annotations[runOwnerAnnotation]
+	if owner == "" || owner == o.runID {
+		return
+	}
+
+	o.log.Warn("adopting DataExport owned by another download run; will not release it",
+		slog.String("name", deName),
+		slog.String("owner", owner),
+		slog.String("run_id", o.runID))
+}
+
+// ownerAnnotations returns the annotation map stamping runID as the owning run,
+// or nil when runID is empty (legacy callers that do not track ownership).
+func ownerAnnotations(runID string) map[string]string {
+	if runID == "" {
+		return nil
+	}
+
+	return map[string]string{runOwnerAnnotation: runID}
 }
 
 // EnsureDataExport idempotently creates a DataExport in namespace targeting
@@ -64,6 +125,11 @@ func DataExportName(leafName string) string {
 // "snapshot.storage.k8s.io" / "VolumeSnapshot" for a CSI VolumeSnapshot leaf, or
 // the domain group / kind for a domain snapshot CR). The controller routes any
 // such targetRef through its kind-agnostic categorySnapshot path.
+//
+// Pass WithRunOwner to scope ownership to a single download run: the run stamps
+// its ID on any CR it creates and is warned when it adopts a CR another live run
+// owns (see WithRunOwner and inv #10b). Without it, EnsureDataExport keeps its
+// original ownership-agnostic behavior.
 func EnsureDataExport(
 	ctx context.Context,
 	c client.Client,
@@ -73,7 +139,14 @@ func EnsureDataExport(
 	kind,
 	leafName,
 	ttl string,
+	opts ...EnsureOption,
 ) (*deapi.DataExport, error) {
+	var o ensureOptions
+
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	deName := DataExportName(leafName)
 
 	existing := new(deapi.DataExport)
@@ -81,13 +154,20 @@ func EnsureDataExport(
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, existing)
 	if err == nil {
 		if !meta.IsStatusConditionTrue(existing.Status.Conditions, conditionTypeExpired) {
+			// Live CR: if a different run owns it, this run is adopting a foreign
+			// export read-only and must not release it (warnIfForeign logs the
+			// adoption). Ownership is intentionally NOT changed on adoption.
+			o.warnIfForeign(existing, deName)
+
 			return existing, nil
 		}
 
 		// The producer never deletes an Expired DataExport on its own (manual operator
 		// cleanup is its documented contract), so a stale Expired object from a previous
 		// session would otherwise be returned forever, permanently blocking resume. Delete
-		// it and fall through to the normal create path below.
+		// it and fall through to the normal create path below. This reclaim is deliberately
+		// OWNER-AGNOSTIC (a crashed owner's CR is reclaimed via TTL exactly as before);
+		// the recreated CR below is stamped with THIS run's ownership.
 		// Delete is not synchronous on a real cluster: the object may still be
 		// terminating when the Create below runs, which can race into
 		// AlreadyExists (swallowed) and hand the caller back the same stale
@@ -108,8 +188,9 @@ func EnsureDataExport(
 
 	de := &deapi.DataExport{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      deName,
-			Namespace: namespace,
+			Name:        deName,
+			Namespace:   namespace,
+			Annotations: ownerAnnotations(o.runID),
 		},
 		Spec: deapi.DataexportSpec{
 			TTL: ttl,
@@ -224,9 +305,18 @@ func WaitReady(
 	}
 }
 
-// ReleaseDataExport deletes the DataExport named deName in namespace.
-// NotFound is treated as success so the call is idempotent.
-func ReleaseDataExport(ctx context.Context, c client.Client, namespace, deName string) error {
+// ReleaseDataExport deletes the DataExport named deName in namespace, but only
+// when this run may safely do so. If the CR is owned by a DIFFERENT download run
+// (runOwnerAnnotation set to another non-empty runID), it is a live export that
+// the other run created: this run leaves it in place — the owner (or its TTL)
+// reclaims it — and logs the skip, so a run never tears down another live run's
+// in-flight export (inv #10b). A CR this run owns (owner == runID) or an
+// unstamped CR (owner == "", legacy behavior) is deleted with a UID deletion
+// precondition: if the object was replaced between the Get and the Delete the
+// precondition fails with Conflict, which — like NotFound — is treated as a
+// successful, idempotent release (the object we observed is already gone). An
+// empty runID disables the ownership check (unconditional delete); log may be nil.
+func ReleaseDataExport(ctx context.Context, c client.Client, log *slog.Logger, namespace, deName, runID string) error {
 	de := new(deapi.DataExport)
 
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, de)
@@ -238,8 +328,25 @@ func ReleaseDataExport(ctx context.Context, c client.Client, namespace, deName s
 		return fmt.Errorf("get DataExport %q before delete: %w", deName, err)
 	}
 
-	if err := c.Delete(ctx, de); err != nil && !kubeerrors.IsNotFound(err) {
-		return fmt.Errorf("delete DataExport %q: %w", deName, err)
+	if owner := de.Annotations[runOwnerAnnotation]; runID != "" && owner != "" && owner != runID {
+		if log != nil {
+			log.Warn("skipping DataExport release owned by another download run",
+				slog.String("name", deName),
+				slog.String("owner", owner),
+				slog.String("run_id", runID))
+		}
+
+		return nil
+	}
+
+	// Guard the delete with a UID precondition to close the check-then-delete
+	// race: a Conflict means the CR we observed was already replaced (e.g. a new
+	// run recreated it after TTL), so it is not ours to delete — treat it, like
+	// NotFound, as a successful idempotent release.
+	uid := de.UID
+	if delErr := c.Delete(ctx, de, client.Preconditions{UID: &uid}); delErr != nil &&
+		!kubeerrors.IsNotFound(delErr) && !kubeerrors.IsConflict(delErr) {
+		return fmt.Errorf("delete DataExport %q: %w", deName, delErr)
 	}
 
 	return nil
