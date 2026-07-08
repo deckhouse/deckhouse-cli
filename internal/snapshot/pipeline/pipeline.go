@@ -18,11 +18,13 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -117,6 +119,18 @@ func Run(ctx context.Context, cfg Config) error {
 	tasks, err := collectNodeTasks(processRoot, startDir)
 	if err != nil {
 		return fmt.Errorf("scan output directory: %w", err)
+	}
+
+	// Redirect any sibling nodes that resolve to the SAME on-disk directory in
+	// this run to deterministic collision paths BEFORE the worker errgroup
+	// starts. Two sibling CRs referencing one source object map to one
+	// <parent>/snapshots/<kind>_<source>/ dir; without this guard the Workers
+	// errgroup would run them concurrently — two writers over one chunk/staging
+	// dir and snapshot.yaml, the single-writer violation the cross-process flock
+	// cannot catch inside one process (inv. #10b).
+	tasks, err = dedupeSiblingTargetDirs(tasks, cfg.Log)
+	if err != nil {
+		return fmt.Errorf("dedupe sibling target directories: %w", err)
 	}
 
 	// Pre-create one progress stream per volume leaf before the worker errgroup
@@ -430,6 +444,152 @@ func collectDFS(node *source.Node, plan archive.NodeResumePlan, tasks *[]nodeTas
 	}
 
 	return nil
+}
+
+// dedupeSiblingTargetDirs detects sibling nodes that resolve to the SAME on-disk
+// directory within a single run and redirects the duplicates to deterministic
+// collision paths, so the worker errgroup never runs two writers over one node
+// directory (inv. #10b).
+//
+// Why this is needed despite ScanNode's own cross-run collision redirect:
+// collectDFS computes each child's plan with archive.ScanNode independently, and
+// the on-disk directory name derives from the SOURCE object name
+// (nodeIdentity.DirName). Two sibling snapshot CRs referencing the SAME source
+// object therefore map to the same <parent>/snapshots/<kind>_<source>/ directory
+// and, on a FRESH run, both classify NodeStatePending (nothing on disk yet) — so
+// ScanNode cannot tell them apart and the Workers errgroup would process them
+// concurrently: two writers over one chunk dir / staging dir / snapshot.yaml.
+// That is exactly the single-writer violation the cross-process advisory flock
+// prevents across processes, but INSIDE one process where the flock cannot help.
+// ScanNode's redirect protects ACROSS runs (a complete/partial dir owned by a
+// different snapshot); this guard protects WITHIN one run — both are needed.
+//
+// The grouping key is the naming-convention primary directory
+// (conventionPrimaryDir), NOT the possibly-already-redirected task.nodeDir: on a
+// resumed run ScanNode may have moved a later sibling off the primary onto a
+// checksum-derived collision path, so comparing final TargetDirs would miss the
+// collision and the sibling would never resume its own partial data. Keying on
+// the stable convention dir keeps the first-occurrence-keeps-primary decision
+// and the duplicate's own-identity collision suffix identical on every run.
+// Iterating in the collected (deterministic DFS) order makes "first" stable.
+// When no two siblings share a convention dir every group has one member and the
+// list is returned unchanged (zero behavior change).
+func dedupeSiblingTargetDirs(tasks []nodeTask, log *slog.Logger) ([]nodeTask, error) {
+	firstAt := make(map[string]*source.Node, len(tasks))
+	out := make([]nodeTask, 0, len(tasks))
+
+	for i := 0; i < len(tasks); {
+		task := tasks[i]
+		primary := conventionPrimaryDir(task)
+
+		if first, dup := firstAt[primary]; dup {
+			// Consume the whole DFS-preorder subtree of the duplicate and replace
+			// it with the re-scanned subtree rooted at the collision path.
+			end := subtreeEnd(tasks, i)
+
+			redirected, err := redirectDuplicateSubtree(task, first, log)
+			if err != nil {
+				return nil, err
+			}
+
+			out = append(out, redirected...)
+			i = end
+
+			continue
+		}
+
+		firstAt[primary] = task.node
+		out = append(out, task)
+		i++
+	}
+
+	return out, nil
+}
+
+// conventionPrimaryDir returns the naming-convention primary directory for task
+// — the path ScanNode/ScanAbsolute would use for the node ABSENT any collision
+// redirect: <parent>/<kindlower>_<sourceName>. Because it is derived from the
+// node's own Kind + source-name component (never from task.nodeDir's basename),
+// it is identical whether or not collectDFS's ScanNode already redirected
+// task.nodeDir to a checksum-suffixed path on a resumed run — making it the
+// stable grouping key for within-run duplicate detection across runs. filepath.Dir
+// recovers the parent identically for a primary dir and a "<primary>__<short>"
+// collision dir, since the redirect only appends to the basename.
+func conventionPrimaryDir(task nodeTask) string {
+	return filepath.Join(filepath.Dir(task.nodeDir), archive.NodeDirName(task.node.Kind, nodeDirOf(task.node)))
+}
+
+// subtreeEnd returns the exclusive end index of the DFS-preorder subtree rooted
+// at tasks[i]: the first index > i whose node directory is NOT nested under
+// tasks[i].nodeDir. Because collectDFS emits nodes in preorder, a node's whole
+// subtree occupies the contiguous block [i, subtreeEnd(tasks, i)). The trailing
+// separator on the prefix prevents a sibling whose name shares a prefix (e.g.
+// "foo" vs "foobar") from being mistaken for a descendant.
+func subtreeEnd(tasks []nodeTask, i int) int {
+	prefix := tasks[i].nodeDir + string(os.PathSeparator)
+
+	j := i + 1
+	for j < len(tasks) && strings.HasPrefix(tasks[j].nodeDir, prefix) {
+		j++
+	}
+
+	return j
+}
+
+// redirectDuplicateSubtree redirects a duplicate sibling node (and its whole
+// subtree) off the shared primary directory to a collision path keyed on the
+// duplicate's OWN CR identity, then re-scans the subtree at the new location so
+// the returned tasks' state/TargetDir reflect any existing collision-dir
+// contents.
+//
+// The suffix is nodeCollisionShort(node) — first 8 hex of
+// sha256(kind\x00namespace\x00name), the node's own identity, NOT a data
+// checksum (none exists yet) and NOT random — so a resumed run recomputes the
+// same collision path and resumes the duplicate's own partial data from it
+// (inv. #10b). ScanAbsolute classifies the collision root (rejecting a foreign
+// occupant with ErrIdentityMismatch, astronomically unlikely under an
+// identity-derived suffix); collectDFS then re-scans descendants via ScanNode so
+// the whole subtree moves WITH the redirected node instead of being stranded
+// under the first occupant's directory.
+func redirectDuplicateSubtree(task nodeTask, first *source.Node, log *slog.Logger) ([]nodeTask, error) {
+	node := task.node
+	parentDir := filepath.Dir(task.nodeDir)
+	sourceName := nodeDirOf(node)
+	collisionDir := archive.CollisionNodeDir(parentDir, node.Kind, sourceName, nodeCollisionShort(node))
+
+	log.Warn("sibling snapshot nodes resolve to the same target directory; redirecting the duplicate to a collision path",
+		slog.String("shared_dir", conventionPrimaryDir(task)),
+		slog.String("source_name", sourceName),
+		slog.String("first_kind", first.Kind),
+		slog.String("first_name", first.Name),
+		slog.String("duplicate_kind", node.Kind),
+		slog.String("duplicate_name", node.Name),
+		slog.String("collision_dir", collisionDir))
+
+	plan, err := archive.ScanAbsolute(collisionDir, nodeIdentity(node))
+	if err != nil {
+		return nil, fmt.Errorf("scan collision dir %s for %s/%s: %w", collisionDir, node.Kind, node.Name, err)
+	}
+
+	var redirected []nodeTask
+	if err := collectDFS(node, plan, &redirected); err != nil {
+		return nil, err
+	}
+
+	return redirected, nil
+}
+
+// nodeCollisionShort derives a stable 8-hex collision suffix from a node's own
+// CR identity (kind/namespace/name). It is deterministic — not random and not a
+// data checksum — so within-run duplicate redirection lands on the same path on
+// every run, letting a resumed run recompute the path and resume the node's own
+// partial data (inv. #10b). It mirrors archive.identityMarkerShort's construction
+// (NUL-joined identity fields, first 8 hex of sha256 via archive.ShortChecksum).
+func nodeCollisionShort(node *source.Node) string {
+	sum := sha256.Sum256([]byte(strings.Join(
+		[]string{node.Kind, node.Namespace, node.Name}, "\x00")))
+
+	return archive.ShortChecksum(fmt.Sprintf("%x", sum[:]))
 }
 
 // resolveSubtreeRoot returns the node to start processing from and its on-disk
