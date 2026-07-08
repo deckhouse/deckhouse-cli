@@ -70,8 +70,8 @@ const (
 	// the node directory and is removed after the tar is assembled.
 	FsTarStagingDirName = "data.tar.d"
 
-	// FSMetaDirName is the reserved metadata subdirectory inside an FS staging
-	// directory (FsTarStagingDirName / MultiVolumeTarStagingDirName). It holds the
+	// FSMetaDirName is the reserved metadata subdirectory inside the FS staging
+	// directory (FsTarStagingDirName). It holds the
 	// download machinery's OWN internal artifacts — the per-file sizes sidecar and,
 	// under FSChunksDirName, every per-file chunk directory. It is dot-prefixed and
 	// clearly-internal, and the FS ingestion checkpoint (volume.sanitizeRelPath)
@@ -105,14 +105,12 @@ const (
 	BlockChunksDirName = DataBlockBase + ".d"
 )
 
-// fsStagingDirSuffix is the common trailing suffix of every FS tar staging
-// directory name — the flat FsTarStagingDirName ("data.tar.d") and each
-// multi-volume MultiVolumeTarStagingDirName ("<pvc>.tar.d"). removeTmpFiles uses
-// it to exclude the FS staging subtree from the resume-time *.tmp sweep, so a
-// codec-none staged user blob that legitimately ends in ".tmp" is never deleted
-// (inv. #10a). Block chunk dirs (".bin.d") and the multi-volume "data/" dir are
-// deliberately NOT matched: they hold only internal ".part"/".tmp" artifacts,
-// never user blobs.
+// fsStagingDirSuffix is the trailing suffix of the FS tar staging directory
+// name (FsTarStagingDirName, "data.tar.d"). removeTmpFiles uses it to exclude
+// the FS staging subtree from the resume-time *.tmp sweep, so a codec-none
+// staged user blob that legitimately ends in ".tmp" is never deleted
+// (inv. #10a). Block chunk dirs (".bin.d") are deliberately NOT matched: they
+// hold only internal ".part"/".tmp" artifacts, never user blobs.
 const fsStagingDirSuffix = ".tar.d"
 
 // DataBlockName returns the output filename for a block-volume with the given
@@ -181,50 +179,6 @@ func ChunkFileName(i int, ext string) string {
 	return fmt.Sprintf("chunk_%05d%s", i, ext)
 }
 
-// Multi-volume layout helpers (N > 1 own data references in a node).
-//
-// Layout rules:
-//
-//	1 own volume  → flat:  data.bin[.<ext>] (block) or data.tar (FS)
-//	N > 1 volumes → namespaced under data/:
-//	                  data/<pvc>.bin[.<ext>]  (block)
-//	                  data/<pvc>.tar          (FS)
-//
-// The checksum walk covers all files under data/ recursively (staging dirs
-// whose names end with ".d" are skipped), so both layouts are covered by
-// ComputeNodeChecksum without extra configuration.
-
-// MultiVolumeBlockName returns the relative path for a block-volume output file
-// in the N>1 multi-volume layout: "data/<pvc>.bin[.<ext>]".
-// ext is codec.Ext() (e.g. ".zst", ".lz4", ".gz", or "" for none).
-// For the single-volume flat case use DataBlockName(ext) directly.
-func MultiVolumeBlockName(pvc, ext string) string {
-	return filepath.Join(DataDirName, pvc+".bin"+ext)
-}
-
-// MultiVolumeTarName returns the relative path for a filesystem-volume tar file
-// in the N>1 multi-volume layout: "data/<pvc>.tar".
-// For the single-volume flat case use FsTarName directly.
-func MultiVolumeTarName(pvc string) string {
-	return filepath.Join(DataDirName, pvc+".tar")
-}
-
-// MultiVolumeTarStagingDirName returns the relative path of the temporary staging
-// directory for a filesystem-volume in the N>1 multi-volume layout: "data/<pvc>.tar.d".
-// Raw files are staged here during download then assembled into MultiVolumeTarName(pvc).
-// For the single-volume flat case use FsTarStagingDirName directly.
-func MultiVolumeTarStagingDirName(pvc string) string {
-	return filepath.Join(DataDirName, pvc+".tar.d")
-}
-
-// BlockChunksDirNameFor returns the relative path of the temporary chunk directory
-// for a named PVC volume in the N>1 multi-volume layout: "data/<pvc>.bin.d".
-// Chunks accumulate here during download and are merged into MultiVolumeBlockName(pvc, ext)
-// on completion.  For the single-volume flat case use BlockChunksDirName directly.
-func BlockChunksDirNameFor(pvc string) string {
-	return filepath.Join(DataDirName, pvc+".bin.d")
-}
-
 // FsFileChunksDirName returns the per-file chunk directory path for one
 // filesystem-volume file, RELATIVE to the FS staging directory:
 // ".d8-meta/chunks/<relPath><ext>.d". relPath is the item's forward-slash
@@ -246,7 +200,7 @@ func BlockChunksDirNameFor(pvc string) string {
 // paths without any lossy separator substitution.
 //
 // A caller joins this (via filepath.FromSlash) under the FS staging directory
-// (FsTarStagingDirName or MultiVolumeTarStagingDirName). Chunks accumulate here
+// (FsTarStagingDirName). Chunks accumulate here
 // while a known-size file is downloaded via Range GETs and are merged into
 // "<relPath><ext>" (the same path DownloadBlockChunks/MergeBlockChunks use for a
 // single block volume) once complete. In-flight chunk dirs from trees written

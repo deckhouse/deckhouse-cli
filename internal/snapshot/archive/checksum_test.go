@@ -299,14 +299,14 @@ func TestComputeNodeChecksum_ChunkMetaExcluded(t *testing.T) {
 
 	t.Run("multi-volume block chunk dir", func(t *testing.T) {
 		nodeDir := makeNodeDir(t)
-		writeFile(t, filepath.Join(nodeDir, MultiVolumeBlockName("pvc-a", ".zst")), "block-content-a")
+		writeFile(t, filepath.Join(nodeDir, DataDirName, "pvc-a.bin.zst"), "block-content-a")
 
 		base, err := ComputeNodeChecksum(nodeDir)
 		if err != nil {
 			t.Fatalf("base: %v", err)
 		}
 
-		chunkDir := filepath.Join(nodeDir, BlockChunksDirNameFor("pvc-a"))
+		chunkDir := filepath.Join(nodeDir, DataDirName, "pvc-a.bin.d")
 		if err := EnsureDir(chunkDir); err != nil {
 			t.Fatalf("EnsureDir: %v", err)
 		}
@@ -481,10 +481,10 @@ func TestComputeNodeChecksum_MultiVolumeLayout(t *testing.T) {
 	writeFile(t, filepath.Join(nodeDir, ManifestsDirName, "virtualdisksnapshot_snap.yaml"), "kind: VirtualDiskSnapshot\n")
 
 	// Block-volume PVC-a in multi-volume layout: data/pvc-a.bin.zst.
-	writeFile(t, filepath.Join(nodeDir, MultiVolumeBlockName("pvc-a", ".zst")), "block-content-a")
+	writeFile(t, filepath.Join(nodeDir, DataDirName, "pvc-a.bin.zst"), "block-content-a")
 
 	// FS-volume PVC-b in multi-volume layout: data/pvc-b.tar.
-	writeFile(t, filepath.Join(nodeDir, MultiVolumeTarName("pvc-b")), "tar-content-b")
+	writeFile(t, filepath.Join(nodeDir, DataDirName, "pvc-b.tar"), "tar-content-b")
 
 	c1, err := ComputeNodeChecksum(nodeDir)
 	if err != nil {
@@ -510,7 +510,7 @@ func TestComputeNodeChecksum_MultiVolumeLayout(t *testing.T) {
 	}
 
 	// Mutating the block-volume file must change the checksum.
-	writeFile(t, filepath.Join(nodeDir, MultiVolumeBlockName("pvc-a", ".zst")), "block-content-a-modified")
+	writeFile(t, filepath.Join(nodeDir, DataDirName, "pvc-a.bin.zst"), "block-content-a-modified")
 
 	c3, err := ComputeNodeChecksum(nodeDir)
 	if err != nil {
@@ -522,8 +522,8 @@ func TestComputeNodeChecksum_MultiVolumeLayout(t *testing.T) {
 	}
 
 	// Restore and mutate the FS-volume tar instead.
-	writeFile(t, filepath.Join(nodeDir, MultiVolumeBlockName("pvc-a", ".zst")), "block-content-a")
-	writeFile(t, filepath.Join(nodeDir, MultiVolumeTarName("pvc-b")), "tar-content-b-modified")
+	writeFile(t, filepath.Join(nodeDir, DataDirName, "pvc-a.bin.zst"), "block-content-a")
+	writeFile(t, filepath.Join(nodeDir, DataDirName, "pvc-b.tar"), "tar-content-b-modified")
 
 	c4, err := ComputeNodeChecksum(nodeDir)
 	if err != nil {
@@ -535,7 +535,7 @@ func TestComputeNodeChecksum_MultiVolumeLayout(t *testing.T) {
 	}
 
 	// Staging directory contents must NOT affect the checksum.
-	writeFile(t, filepath.Join(nodeDir, MultiVolumeTarStagingDirName("pvc-b"), "rawfile.txt"), "raw")
+	writeFile(t, filepath.Join(nodeDir, DataDirName, "pvc-b.tar.d", "rawfile.txt"), "raw")
 
 	c5, err := ComputeNodeChecksum(nodeDir)
 	if err != nil {
