@@ -144,6 +144,76 @@ func TestSafeClient_ResponseHeaderTimeout_DefaultUnchangedWithoutCall(t *testing
 	}
 }
 
+// stubRoundTripper is a non-*http.Transport http.RoundTripper used to exercise
+// the WrapTransport pass-through branch.
+type stubRoundTripper struct{}
+
+func (stubRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, http.ErrNotSupported
+}
+
+// TestSafeClient_SetTLSCAData_ClonesTransport asserts that SetTLSCAData's
+// WrapTransport clones a real *http.Transport and injects the CA pool as
+// RootCAs, leaving the original transport untouched.
+func TestSafeClient_SetTLSCAData_ClonesTransport(t *testing.T) {
+	t.Parallel()
+
+	sc, err := NewSafeClient()
+	if err != nil {
+		t.Fatalf("NewSafeClient: %v", err)
+	}
+
+	sc.SetTLSCAData(nil)
+
+	orig := &http.Transport{}
+
+	got := sc.RESTConfig().WrapTransport(orig)
+
+	wrapped, ok := got.(*http.Transport)
+	if !ok {
+		t.Fatalf("wrapped transport is not an *http.Transport: %T", got)
+	}
+
+	if wrapped == orig {
+		t.Error("expected a distinct clone, got the original transport")
+	}
+
+	if wrapped.TLSClientConfig == nil || wrapped.TLSClientConfig.RootCAs == nil {
+		t.Error("RootCAs not populated on cloned transport")
+	}
+}
+
+// TestSafeClient_SetTLSCAData_PassThroughNonTransport asserts that when
+// WrapTransport receives a RoundTripper that is not an *http.Transport it
+// returns the SAME instance unchanged (non-nil), instead of a typed-nil
+// *http.Transport that would nil-panic on RoundTrip.
+func TestSafeClient_SetTLSCAData_PassThroughNonTransport(t *testing.T) {
+	t.Parallel()
+
+	sc, err := NewSafeClient()
+	if err != nil {
+		t.Fatalf("NewSafeClient: %v", err)
+	}
+
+	sc.SetTLSCAData(nil)
+
+	stub := stubRoundTripper{}
+
+	got := sc.RESTConfig().WrapTransport(stub)
+	if got == nil {
+		t.Fatal("WrapTransport returned nil for a non-*http.Transport RoundTripper")
+	}
+
+	gotStub, ok := got.(stubRoundTripper)
+	if !ok {
+		t.Fatalf("expected the original stubRoundTripper back, got %T", got)
+	}
+
+	if gotStub != stub {
+		t.Error("expected the same stub RoundTripper instance to be returned unchanged")
+	}
+}
+
 // TestSafeClient_SetResponseHeaderTimeout_FailsFastOnHeaderStall asserts the
 // configured transport aborts a request whose server accepts the connection but
 // never sends response headers, within the response-header timeout.

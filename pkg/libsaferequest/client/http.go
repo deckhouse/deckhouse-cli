@@ -200,17 +200,20 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 	c.restConfig.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
 		transport, ok := rt.(*http.Transport)
 		if !ok {
-			return transport
+			// CA-pool injection is a best-effort enhancement over *http.Transport;
+			// for any other RoundTripper degrade to pass-through so we never hand
+			// back a typed-nil transport that nil-panics on RoundTrip.
+			return rt
 		}
 
-		clonedTrasport := transport.Clone()
-		if clonedTrasport.TLSClientConfig == nil {
-			clonedTrasport.TLSClientConfig = &tls.Config{}
+		clonedTransport := transport.Clone()
+		if clonedTransport.TLSClientConfig == nil {
+			clonedTransport.TLSClientConfig = &tls.Config{}
 		}
 
-		clonedTrasport.TLSClientConfig.RootCAs = sysPool
+		clonedTransport.TLSClientConfig.RootCAs = sysPool
 
-		return clonedTrasport
+		return clonedTransport
 	}
 }
 
