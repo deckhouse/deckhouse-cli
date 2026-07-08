@@ -17,6 +17,7 @@ limitations under the License.
 package snapshot
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/spf13/cobra"
@@ -32,7 +33,10 @@ import (
 )
 
 // NewCommand returns the root cobra command for the `d8 snapshot` command group.
-func NewCommand() *cobra.Command {
+// ctx is the caller-owned root context; for now it is threaded only into the
+// download subcommand's constructor (see code-style §4). Sibling subcommands keep
+// their current (log)-only constructors and are unaffected.
+func NewCommand(ctx context.Context) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "snapshot",
 		Short:         "Snapshot operations (create, delete, download, restore, upload, get)",
@@ -48,7 +52,7 @@ func NewCommand() *cobra.Command {
 	cmd.AddCommand(createcmd.NewCommand(log))
 	cmd.AddCommand(deletecmd.NewCommand(log))
 	cmd.AddCommand(describecmd.NewCommand(log))
-	cmd.AddCommand(download.NewCommand(log))
+	cmd.AddCommand(download.NewCommand(ctx, log))
 	cmd.AddCommand(localcmd.NewCommand(log))
 	cmd.AddCommand(restorecmd.NewCommand(log))
 	cmd.AddCommand(snapimportcmd.NewCommand(log))

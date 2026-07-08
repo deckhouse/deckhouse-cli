@@ -109,7 +109,7 @@ func (r *RootCommand) registerCommands() {
 
 	r.cmd.AddCommand(backup.NewCommand())
 	r.cmd.AddCommand(data.NewCommand())
-	r.cmd.AddCommand(snapshot.NewCommand())
+	r.cmd.AddCommand(snapshot.NewCommand(ctx))
 	r.cmd.AddCommand(mirror.NewCommand())
 	r.cmd.AddCommand(cr.NewCommand())
 	r.cmd.AddCommand(status.NewCommand())
