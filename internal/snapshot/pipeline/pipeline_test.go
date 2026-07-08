@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2895,4 +2896,259 @@ func TestPipeline_MixedResumeStates_ConcurrentRun(t *testing.T) {
 	// the run (5), and by the end of run 2 every one of them has settled.
 	require.Contains(t, buf.String(), fmt.Sprintf("(%d/%d volumes)", len(mixedLeafNames), len(mixedLeafNames)),
 		"aggregate volume counter must reach N/M == total volume leaves")
+}
+
+// seedLeftoverBlockChunkDir creates a populated flat block chunk staging
+// directory (data.bin.d/) inside nodeDir, simulating the residue of a crash in
+// volume.MergeBlockChunks between committing the merged data.bin* file and
+// os.RemoveAll'ing the chunk dir. It returns the chunk dir path. The chunk
+// contents are never read by the already-merged skip branch, so any bytes will
+// do.
+func seedLeftoverBlockChunkDir(t *testing.T, nodeDir string) string {
+	t.Helper()
+
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	require.NoError(t, os.MkdirAll(chunkDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(chunkDir, archive.ChunkFileName(0, ".zst")),
+		[]byte("stale-compressed-chunk-bytes"),
+		0o644,
+	))
+
+	return chunkDir
+}
+
+// TestPipeline_BlockAlreadyMerged_OwnDataRef_RemovesLeftoverChunkDir covers the
+// downloadOwnDataRefs already-merged skip branch: a node dir holding both a
+// merged data.bin.zst and a leftover chunk dir (the MergeBlockChunks
+// commit->RemoveAll crash window) must resume to Done with the chunk dir
+// removed, so the compressed copy of the volume cannot leak forever. The
+// no-leftover row pins that a normal already-merged node (no chunk dir) is
+// unchanged.
+func TestPipeline_BlockAlreadyMerged_OwnDataRef_RemovesLeftoverChunkDir(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name         string
+		seedChunkDir bool
+	}{
+		{name: "leftover chunk dir removed", seedChunkDir: true},
+		{name: "no chunk dir unchanged", seedChunkDir: false},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := buildFakeClient(t)
+			outputDir := t.TempDir()
+
+			// disk-snap is a non-aggregator with one OwnDataRef, so it flows through
+			// downloadOwnDataRefs.
+			diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+				archive.NodeDirName(childKind, diskSnapName))
+			require.NoError(t, os.MkdirAll(filepath.Join(diskSnapDir, archive.ManifestsDirName), 0o755))
+			seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
+			require.NoError(t, os.WriteFile(
+				filepath.Join(diskSnapDir, archive.DataBlockName(".zst")),
+				[]byte("pre-merged-block-data"),
+				0o644,
+			))
+
+			chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
+			if tc.seedChunkDir {
+				seedLeftoverBlockChunkDir(t, diskSnapDir)
+			}
+
+			cfg := pipeline.Config{
+				Namespace:    testNS,
+				RootSnapshot: rootSnapshot,
+				OutputDir:    outputDir,
+				Workers:      1,
+				KubeClient:   c,
+				OpenExport: func(_ context.Context, _ string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+					t.Error("OpenExport must not be called when data.bin.zst already exists")
+
+					return nil, errors.New("unexpected OpenExport call")
+				},
+			}
+
+			require.NoError(t, runPipeline(context.Background(), cfg))
+
+			assertNodeComplete(t, diskSnapDir)
+
+			_, statErr := os.Stat(chunkDir)
+			require.True(t, os.IsNotExist(statErr),
+				"the block chunk dir must not exist after an already-merged resume")
+		})
+	}
+}
+
+// TestPipeline_BlockAlreadyMerged_VolumeNode_RemovesLeftoverChunkDir covers the
+// symmetric processVolumeNode (Binding leaf) already-merged skip branch. The
+// partial state is produced by running the pipeline once (so the real identity
+// marker is on disk), then re-creating a leftover chunk dir next to the merged
+// file and deleting snapshot.yaml — exactly the commit->RemoveAll crash residue.
+func TestPipeline_BlockAlreadyMerged_VolumeNode_RemovesLeftoverChunkDir(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("A"), 600)
+	srv := makeBlockServer(t, rawBlock)
+
+	defer srv.Close()
+
+	c := buildOrphanLeafFakeClient(t)
+	outputDir := t.TempDir()
+
+	firstCfg := pipeline.Config{
+		Namespace:            e2eNS,
+		RootSnapshot:         e2eAggRootSnap,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-agg-leaf", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	require.NoError(t, runPipeline(context.Background(), firstCfg))
+
+	// The orphan leaf is a Binding node → processVolumeNode.
+	leafDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(e2eDiskKind, "agg-snap"),
+		archive.SnapshotsDirName, archive.NodeDirName("VolumeSnapshot", "pvc-agg"))
+	assertNodeComplete(t, leafDir)
+
+	chunkDir := seedLeftoverBlockChunkDir(t, leafDir)
+	require.NoError(t, os.Remove(filepath.Join(leafDir, archive.SnapshotYAMLName)))
+
+	secondCfg := firstCfg
+	secondCfg.OpenExport = func(_ context.Context, _ string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+		t.Error("OpenExport must not be called when the block volume is already merged")
+
+		return nil, errors.New("unexpected OpenExport call")
+	}
+
+	require.NoError(t, runPipeline(context.Background(), secondCfg))
+
+	assertNodeComplete(t, leafDir)
+
+	_, statErr := os.Stat(chunkDir)
+	require.True(t, os.IsNotExist(statErr),
+		"the block chunk dir must be removed on the processVolumeNode already-merged skip path")
+}
+
+// TestPipeline_BlockChunkDirWithoutMergedFile_DownloadsNormally pins that the
+// cleanup is confined to the already-merged branch: a chunk dir present WITHOUT
+// a merged data.bin* file is a normal in-progress download, so the skip branch
+// must not fire and the volume must download normally.
+func TestPipeline_BlockChunkDirWithoutMergedFile_DownloadsNormally(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("D"), 600)
+	srv := makeBlockServer(t, rawBlock)
+
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	require.NoError(t, os.MkdirAll(filepath.Join(diskSnapDir, archive.ManifestsDirName), 0o755))
+	seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
+	// An empty chunk dir with NO merged data.bin* file: FindBlockData reports
+	// not-found, the already-merged branch is skipped, and download proceeds.
+	require.NoError(t, os.MkdirAll(filepath.Join(diskSnapDir, archive.BlockChunksDirName), 0o755))
+
+	var openExportCalled atomic.Bool
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			openExportCalled.Store(true)
+
+			return exporter.NewExport(namespace, "de-normal", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	require.NoError(t, runPipeline(context.Background(), cfg))
+
+	require.True(t, openExportCalled.Load(),
+		"with no merged file present the volume must download normally, not skip")
+
+	assertNodeComplete(t, diskSnapDir)
+
+	compressed, err := os.ReadFile(filepath.Join(diskSnapDir, archive.DataBlockName(".zst")))
+	require.NoError(t, err)
+	require.Equal(t, rawBlock, decodeZstdBlock(t, compressed),
+		"the normally-downloaded block must decode to the original bytes")
+}
+
+// TestPipeline_BlockAlreadyMerged_RemoveAllFailure_StillCompletes pins that a
+// best-effort chunk-dir cleanup failure is logged as a WARN and never fails an
+// otherwise complete node (code-style §5): the download itself is already done
+// (the merged file is durable). The chunk dir is made 0o555 (readable so the
+// resume scan's WalkDir still succeeds, but not writable so os.RemoveAll cannot
+// unlink its entry). Permission bits are not enforced for root, so skip there.
+func TestPipeline_BlockAlreadyMerged_RemoveAllFailure_StillCompletes(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("permission bits are not enforced for root; cannot force os.RemoveAll to fail")
+	}
+
+	t.Parallel()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	require.NoError(t, os.MkdirAll(filepath.Join(diskSnapDir, archive.ManifestsDirName), 0o755))
+	seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
+	require.NoError(t, os.WriteFile(
+		filepath.Join(diskSnapDir, archive.DataBlockName(".zst")),
+		[]byte("pre-merged-block-data"),
+		0o644,
+	))
+
+	chunkDir := seedLeftoverBlockChunkDir(t, diskSnapDir)
+	require.NoError(t, os.Chmod(chunkDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(chunkDir, 0o755) })
+
+	var buf bytes.Buffer
+
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	cfg := pipeline.Config{
+		Namespace:    testNS,
+		RootSnapshot: rootSnapshot,
+		OutputDir:    outputDir,
+		Workers:      1,
+		KubeClient:   c,
+		Log:          logger,
+		OpenExport: func(_ context.Context, _ string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			t.Error("OpenExport must not be called when data.bin.zst already exists")
+
+			return nil, errors.New("unexpected OpenExport call")
+		},
+	}
+
+	require.NoError(t, runPipeline(context.Background(), cfg),
+		"a failed best-effort chunk-dir cleanup must not fail an otherwise complete node")
+
+	assertNodeComplete(t, diskSnapDir)
+
+	require.Contains(t, buf.String(), "failed to remove leftover block chunk dir after merge",
+		"a RemoveAll failure must be logged as a WARN")
+
+	_, statErr := os.Stat(chunkDir)
+	require.NoError(t, statErr, "the unremovable chunk dir must still be present")
 }
