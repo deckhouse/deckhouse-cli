@@ -501,15 +501,19 @@ func fetchChunkRaw(
 //
 // The pipeline uses this to seed a volume's progress stream with its
 // already-downloaded bytes as soon as the stream is created — well before the
-// DataExport becomes ready or a fresh HEAD confirms totalSize — and then
-// cancels the seed back out (progress.Stream.SetCurrent(0)) immediately
-// before calling DownloadBlockChunks, so downloadChunk/fetchChunkRaw's own
-// resume-skip crediting re-derives and re-credits the identical bytes without
-// double counting. Because this scan never mutates chunkDir between the two
-// calls (no worker has started yet), the two computations always agree
-// exactly for the normal (already-trusted) case; the only divergence is the
-// one this task fixes — an oversized ".part" no longer disappears out from
-// under a display-only scan.
+// DataExport becomes ready or a fresh HEAD confirms totalSize — and keeps the
+// seeded value in place (no reset) once DownloadBlockChunks starts:
+// downloadChunk/fetchChunkRaw's own resume-skip crediting re-derives and
+// re-credits the identical already-committed bytes, and the pipeline wraps
+// that crediting with skipSeededBytes(seeded, ...) so the re-derived bytes
+// are discarded instead of double-counted, rather than dropping the stream
+// to 0 first (see pipeline.seedStreamFromDisk / pipeline.skipSeededBytes and
+// progress-no-regression-on-activate). Because this scan never mutates
+// chunkDir between the two calls (no worker has started yet), the two
+// computations always agree exactly for the normal (already-trusted) case;
+// the only divergence is the one the scan-block-progress-read-only task
+// fixed — an oversized ".part" no longer disappears out from under a
+// display-only scan.
 func ScanBlockChunkProgress(chunkDir, ext string) (int64, int64, error) {
 	meta, found, err := archive.ReadChunkMeta(chunkDir)
 	if err != nil && !errors.Is(err, archive.ErrCorruptChunkMeta) {

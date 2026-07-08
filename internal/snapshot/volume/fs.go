@@ -660,8 +660,10 @@ func stageWholeFile(
 // credited exactly once, at its true declared size, by
 // stageCompressedFile's existing resume-skip path once the listing confirms
 // it; the caller must not double-count that credit against this scan (see
-// pipeline.downloadFS, which cancels this exact seed back out via
-// progress.Stream.SetCurrent(0) before staging begins).
+// pipeline.downloadFS, which wraps its onProgress with
+// pipeline.skipSeededBytes(seeded, ...) so that later re-derived credit is
+// discarded instead of double-counted, rather than resetting the stream to 0
+// before staging begins).
 func ScanFSStagingProgress(stagingDir, ext string) (int64, error) {
 	if _, err := os.Stat(stagingDir); err != nil {
 		if os.IsNotExist(err) {

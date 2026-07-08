@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 
@@ -48,6 +49,21 @@ type nodeTask struct {
 // discriminator.
 type streamKey struct {
 	node *source.Node
+}
+
+// streamHandle pairs a pre-created progress.Stream with the number of bytes
+// seedStreamFromDisk already credited to it (see that function) before the
+// real transfer starts. downloadBlock/downloadFS pass Seeded to
+// skipSeededBytes to build an onProgress wrapper that discards exactly that
+// many bytes of the resume-skip logic's re-derivation of the SAME
+// already-committed bytes, instead of resetting the stream with
+// SetCurrent(0) — the reset is what produced a visible dip back to 0% at the
+// waiting->active transition (see progress-no-regression-on-activate).
+// Seeded is 0 for a from-scratch stream (nothing to skip) and for a stream
+// looked up when progress tracking is disabled.
+type streamHandle struct {
+	stream progress.Stream
+	seeded int64
 }
 
 // Run builds the snapshot tree, scans the output directory for resume state, and
@@ -166,9 +182,9 @@ func Run(ctx context.Context, cfg Config) error {
 // Stream.Done/Fail is specified to let the first terminal call win — a stream
 // already settled (by success or by its own Fail) is not double-counted or
 // re-settled.
-func failUnsettledStreams(streams map[streamKey]progress.Stream) {
-	for _, s := range streams {
-		s.Fail()
+func failUnsettledStreams(streams map[streamKey]streamHandle) {
+	for _, h := range streams {
+		h.stream.Fail()
 	}
 }
 
@@ -180,8 +196,9 @@ func failUnsettledStreams(streams map[streamKey]progress.Stream) {
 // immediately so they render as already-complete (docker-pull "Already exists" style).
 //
 // Returns nil when cfg.Progress is nil (progress disabled), which causes all
-// lookupStream calls to return nil and behave as no-ops.
-func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]progress.Stream {
+// lookupStream calls to return a zero streamHandle (nil stream) and behave
+// as no-ops.
+func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]streamHandle {
 	if cfg.Progress == nil {
 		return nil
 	}
@@ -205,7 +222,7 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]progress.Strea
 	// --node selection with no extra plumbing.
 	cfg.Progress.SetVolumeTotal(nStreams)
 
-	out := make(map[streamKey]progress.Stream, nStreams)
+	out := make(map[streamKey]streamHandle, nStreams)
 
 	for _, t := range tasks {
 		node := t.node
@@ -217,11 +234,11 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]progress.Strea
 
 			if t.state == archive.NodeStateDone {
 				s.Done()
-			} else {
-				seedStreamFromDisk(cfg, s, t.nodeDir)
-			}
 
-			out[streamKey{node: node}] = s
+				out[streamKey{node: node}] = streamHandle{stream: s}
+			} else {
+				out[streamKey{node: node}] = streamHandle{stream: s, seeded: seedStreamFromDisk(cfg, s, t.nodeDir)}
+			}
 
 		case len(node.OwnDataRefs) == 1:
 			// Non-aggregator with a single volume: one stream keyed on the node.
@@ -229,11 +246,11 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]progress.Strea
 
 			if t.state == archive.NodeStateDone {
 				s.Done()
-			} else {
-				seedStreamFromDisk(cfg, s, t.nodeDir)
-			}
 
-			out[streamKey{node: node}] = s
+				out[streamKey{node: node}] = streamHandle{stream: s}
+			} else {
+				out[streamKey{node: node}] = streamHandle{stream: s, seeded: seedStreamFromDisk(cfg, s, t.nodeDir)}
+			}
 
 		default:
 			// Aggregator/manifest-only nodes: no stream.
@@ -267,14 +284,24 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]progress.Strea
 //
 // This is a pure best-effort display aid: a scan error is logged and
 // swallowed rather than failing stream creation, since correctness never
-// depends on it — downloadBlock/downloadFS cancel this exact seed back out
-// (progress.Stream.SetCurrent(0)) immediately before the real transfer
-// starts, handing sole responsibility for crediting already-committed bytes
-// back to the existing, independently-tested resume-skip logic inside
-// DownloadBlockChunks/stageCompressedFile.
-func seedStreamFromDisk(cfg Config, s progress.Stream, nodeDir string) {
+// depends on it. It returns the total number of bytes it credited via
+// s.IncrBy (0 if the scans found nothing to seed, e.g. a from-scratch
+// volume). The caller (precreateStreams) stores this in the stream's
+// streamHandle.seeded so downloadBlock/downloadFS can later wrap onProgress
+// with skipSeededBytes(seeded, ...): rather than resetting the stream with
+// SetCurrent(0) once the real transfer starts — which handed crediting back
+// to the existing resume-skip logic inside DownloadBlockChunks/
+// stageCompressedFile but visibly dipped the displayed value back to 0%
+// first (see progress-no-regression-on-activate) — skipSeededBytes discards
+// exactly the first `seeded` bytes that resume-skip logic re-derives for the
+// SAME already-committed state, so the displayed value only ever moves
+// forward from the seed onward while the final total still lands exactly on
+// the volume size.
+func seedStreamFromDisk(cfg Config, s progress.Stream, nodeDir string) int64 {
 	ext := cfg.Compression.Ext()
 	dest := flatDest(nodeDir, ext)
+
+	var seeded int64
 
 	blockCommitted, blockTotal, err := volume.ScanBlockChunkProgress(dest.chunkDir, ext)
 	if err != nil {
@@ -287,6 +314,8 @@ func seedStreamFromDisk(cfg Config, s progress.Stream, nodeDir string) {
 		}
 
 		s.IncrBy(int(blockCommitted))
+
+		seeded += blockCommitted
 	}
 
 	fsCommitted, err := volume.ScanFSStagingProgress(dest.fsTarStagingDir, ext)
@@ -295,11 +324,13 @@ func seedStreamFromDisk(cfg Config, s progress.Stream, nodeDir string) {
 			slog.String("dir", dest.fsTarStagingDir),
 			slog.String("error", err.Error()))
 
-		return
+		return seeded
 	}
 
 	if fsCommitted > 0 {
 		s.IncrBy(int(fsCommitted))
+
+		seeded += fsCommitted
 	}
 
 	sizesTotal, stagedBytes, sizesFound, err := volume.ScanFSStagingSizes(dest.fsTarStagingDir, ext)
@@ -308,11 +339,11 @@ func seedStreamFromDisk(cfg Config, s progress.Stream, nodeDir string) {
 			slog.String("dir", dest.fsTarStagingDir),
 			slog.String("error", err.Error()))
 
-		return
+		return seeded
 	}
 
 	if !sizesFound {
-		return
+		return seeded
 	}
 
 	if sizesTotal > 0 {
@@ -321,14 +352,19 @@ func seedStreamFromDisk(cfg Config, s progress.Stream, nodeDir string) {
 
 	if stagedBytes > 0 {
 		s.IncrBy(int(stagedBytes))
+
+		seeded += stagedBytes
 	}
+
+	return seeded
 }
 
-// lookupStream returns the pre-created progress.Stream for the given node, or
-// nil when streams is nil (progress disabled) or the key is absent.
-func lookupStream(streams map[streamKey]progress.Stream, node *source.Node) progress.Stream {
+// lookupStream returns the pre-created streamHandle for the given node, or a
+// zero streamHandle (nil stream, 0 seeded) when streams is nil (progress
+// disabled) or the key is absent.
+func lookupStream(streams map[streamKey]streamHandle, node *source.Node) streamHandle {
 	if streams == nil {
-		return nil
+		return streamHandle{}
 	}
 
 	return streams[streamKey{node: node}]
@@ -470,7 +506,7 @@ func nodeDirOf(node *source.Node) string {
 // Snapshot nodes with OwnDataRefs download their own volume data directly into
 // the node directory (flat for 1 ref; multi-volume for >1). Aggregator snapshot
 // nodes (no OwnDataRefs, may have orphan leaf children) write manifests only.
-func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[streamKey]progress.Stream) error {
+func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[streamKey]streamHandle) error {
 	if task.state == archive.NodeStateDone {
 		// Streams for NodeStateDone nodes were already marked Done in precreateStreams.
 		cfg.Log.Info("node already complete, skipping",
@@ -520,7 +556,7 @@ func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[str
 // It writes the captured PVC manifest, applies the block-resume guard, downloads
 // the volume data, and finalizes the node directory.
 // Volume nodes are always leaves: no snapshots/ subdirectory is created.
-func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams map[streamKey]progress.Stream) error {
+func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams map[streamKey]streamHandle) error {
 	if err := ensureNodeSubdirs(task.nodeDir, false); err != nil {
 		return fmt.Errorf("ensure subdirs for %s/%s: %w", task.node.Kind, task.node.Name, err)
 	}
@@ -541,7 +577,7 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 		return fmt.Errorf("check fs tar in %s: %w", task.nodeDir, err)
 	}
 
-	stream := lookupStream(streams, task.node)
+	handle := lookupStream(streams, task.node)
 
 	switch {
 	case blockAlreadyMerged:
@@ -549,8 +585,8 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 			slog.String("kind", task.node.Kind),
 			slog.String("name", task.node.Name))
 
-		if stream != nil {
-			stream.Done()
+		if handle.stream != nil {
+			handle.stream.Done()
 		}
 
 	case fsTarDone:
@@ -558,12 +594,12 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 			slog.String("kind", task.node.Kind),
 			slog.String("name", task.node.Name))
 
-		if stream != nil {
-			stream.Done()
+		if handle.stream != nil {
+			handle.stream.Done()
 		}
 
 	default:
-		if err := downloadVolumeBinding(ctx, cfg, task.node.Ref(), task.node.Namespace, dest, stream); err != nil {
+		if err := downloadVolumeBinding(ctx, cfg, task.node.Ref(), task.node.Namespace, dest, handle); err != nil {
 			return fmt.Errorf("download volume for %s/%s: %w", task.node.Kind, task.node.Name, err)
 		}
 	}
@@ -594,7 +630,7 @@ func downloadOwnDataRefs(
 	cfg Config,
 	node *source.Node,
 	nodeDir string,
-	streams map[streamKey]progress.Stream,
+	streams map[streamKey]streamHandle,
 ) error {
 	refs := node.OwnDataRefs
 
@@ -609,7 +645,7 @@ func downloadOwnDataRefs(
 
 	// Flat single-volume layout: reuse the same paths as leaf volume nodes.
 	dest := flatDest(nodeDir, cfg.Compression.Ext())
-	stream := lookupStream(streams, node)
+	handle := lookupStream(streams, node)
 
 	_, found, err := archive.FindBlockData(nodeDir)
 	if err != nil {
@@ -621,8 +657,8 @@ func downloadOwnDataRefs(
 			slog.String("kind", node.Kind),
 			slog.String("name", node.Name))
 
-		if stream != nil {
-			stream.Done()
+		if handle.stream != nil {
+			handle.stream.Done()
 		}
 
 		return nil
@@ -638,14 +674,14 @@ func downloadOwnDataRefs(
 			slog.String("kind", node.Kind),
 			slog.String("name", node.Name))
 
-		if stream != nil {
-			stream.Done()
+		if handle.stream != nil {
+			handle.stream.Done()
 		}
 
 		return nil
 	}
 
-	return downloadVolumeBinding(ctx, cfg, node.Ref(), node.Namespace, dest, stream)
+	return downloadVolumeBinding(ctx, cfg, node.Ref(), node.Namespace, dest, handle)
 }
 
 // ensureNodeSubdirs creates manifests/ and, when the node has children, snapshots/
@@ -693,14 +729,17 @@ func flatDest(nodeDir, ext string) volumeDestPaths {
 // leafRef, downloads the volume data (block or filesystem) to dest, and releases
 // the DataExport on completion or error.
 //
-// stream is the pre-created progress handle for this volume; it is marked Done on
-// success or Fail on error/cancellation for every return path from the point the
-// stream semaphore is acquired onward (via defer), including an OpenExport
-// failure. Pass nil when progress tracking is disabled. The one path this
-// function cannot itself cover is failing to acquire the semaphore in the first
-// place (e.g. ctx cancelled while queued behind MaxParallelDownloads) — that
-// case, and any other future early-return gap, is caught by Run's post-g.Wait()
-// defensive sweep over every pre-created stream.
+// handle carries the pre-created progress handle for this volume (nil stream
+// when progress tracking is disabled) plus the number of bytes
+// seedStreamFromDisk already credited to it (handle.seeded), which
+// downloadBlock/downloadFS thread into skipSeededBytes. handle.stream is
+// marked Done on success or Fail on error/cancellation for every return path
+// from the point the stream semaphore is acquired onward (via defer),
+// including an OpenExport failure. The one path this function cannot itself
+// cover is failing to acquire the semaphore in the first place (e.g. ctx
+// cancelled while queued behind MaxParallelDownloads) — that case, and any
+// other future early-return gap, is caught by Run's post-g.Wait() defensive
+// sweep over every pre-created stream.
 //
 // leafRef addresses the snapshot leaf CR that the DataExport controller will
 // resolve via leaf.status.boundSnapshotContentName → SnapshotContent → dataRef.
@@ -715,8 +754,10 @@ func downloadVolumeBinding(
 	leafRef aggapi.NodeRef,
 	namespace string,
 	dest volumeDestPaths,
-	stream progress.Stream,
+	handle streamHandle,
 ) error {
+	stream := handle.stream
+
 	// Acquire one slot from the global stream semaphore before opening the
 	// DataExport. This caps the number of concurrently active volume-stream
 	// downloads across all nodes, independently of the node-level Workers errgroup
@@ -811,10 +852,10 @@ func downloadVolumeBinding(
 
 	switch exp.VolumeMode() {
 	case "Block":
-		downloadErr = downloadBlock(ctx, cfg, dest, exp, stream)
+		downloadErr = downloadBlock(ctx, cfg, dest, exp, stream, handle.seeded)
 
 	case "Filesystem":
-		downloadErr = downloadFS(ctx, cfg, dest, exp, stream)
+		downloadErr = downloadFS(ctx, cfg, dest, exp, stream, handle.seeded)
 
 	default:
 		downloadErr = fmt.Errorf("unsupported volume mode %q for leaf %s/%s", exp.VolumeMode(), leafRef.Kind, leafRef.Name)
@@ -823,7 +864,15 @@ func downloadVolumeBinding(
 	return downloadErr
 }
 
-func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *exporter.Export, stream progress.Stream) error {
+// downloadBlock downloads a block volume's chunks and merges them. seeded is
+// the number of bytes seedStreamFromDisk already credited to stream before
+// the transfer started (0 if stream was not seeded, e.g. progress disabled
+// or a from-scratch volume); it is threaded into skipSeededBytes so
+// DownloadBlockChunks' own resume-skip crediting — which re-derives and
+// re-credits those SAME already-committed bytes from the same chunkDir state
+// — does not double-count them, without ever resetting stream's displayed
+// value back to 0 (see skipSeededBytes).
+func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *exporter.Export, stream progress.Stream, seeded int64) error {
 	blockURL, err := exporter.BlockURL(exp.BaseURL())
 	if err != nil {
 		return fmt.Errorf("build block URL: %w", err)
@@ -838,13 +887,8 @@ func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *e
 	var onProgress func(n int)
 
 	if stream != nil {
-		// Cancel the startup seed applied by seedStreamFromDisk: from this point
-		// on, DownloadBlockChunks' own resume-skip crediting re-derives and
-		// re-credits the identical already-committed bytes from the same
-		// chunkDir state, so leaving the seed in place would double-count them.
-		stream.SetCurrent(0)
 		stream.SetTotal(totalSize)
-		onProgress = stream.IncrBy
+		onProgress = skipSeededBytes(seeded, stream.IncrBy)
 	}
 
 	if err := volume.DownloadBlockChunks(ctx, cfg.Log, dest.chunkDir, blockURL, totalSize, cfg.ChunkSize, cfg.PerVolumeConcurrency, exp.Fetcher(), cfg.Compression, onProgress); err != nil {
@@ -854,7 +898,14 @@ func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *e
 	return volume.MergeBlockChunks(ctx, dest.chunkDir, dest.blockPath, totalSize, cfg.ChunkSize, cfg.Compression.Ext())
 }
 
-func downloadFS(ctx context.Context, cfg Config, dest volumeDestPaths, exp *exporter.Export, stream progress.Stream) error {
+// downloadFS downloads a filesystem volume's files and assembles the tar.
+// seeded plays the same role as in downloadBlock: the number of bytes
+// seedStreamFromDisk already credited to stream, threaded into
+// skipSeededBytes so the per-file/per-chunk resume-skip crediting inside
+// DownloadFilesystemVolume/stageCompressedFile — which re-derives and
+// re-credits those SAME already-committed bytes once the listing completes —
+// does not double-count them.
+func downloadFS(ctx context.Context, cfg Config, dest volumeDestPaths, exp *exporter.Export, stream progress.Stream, seeded int64) error {
 	filesURL, err := exporter.FilesURL(exp.BaseURL())
 	if err != nil {
 		return fmt.Errorf("build files URL: %w", err)
@@ -866,17 +917,64 @@ func downloadFS(ctx context.Context, cfg Config, dest volumeDestPaths, exp *expo
 	)
 
 	if stream != nil {
-		// Cancel the startup seed for the same reason as downloadBlock: the
-		// per-file/per-chunk resume-skip crediting inside
-		// DownloadFilesystemVolume/stageCompressedFile re-derives and
-		// re-credits the identical already-committed bytes once the listing
-		// completes, so leaving the seed in place would double-count them.
-		stream.SetCurrent(0)
-		onProgress = stream.IncrBy
+		onProgress = skipSeededBytes(seeded, stream.IncrBy)
 		setTotal = stream.SetTotal
 	}
 
 	return volume.DownloadFilesystemVolume(ctx, cfg.Log, dest.fsTarPath, dest.fsTarStagingDir, filesURL, cfg.PerVolumeConcurrency, cfg.ChunkSize, exp.Fetcher(), cfg.Compression, setTotal, onProgress)
+}
+
+// skipSeededBytes wraps onProgress so that credits toward the first `seeded`
+// bytes are discarded and only bytes beyond that are forwarded. It replaces
+// the previous stream.SetCurrent(0) reset that downloadBlock/downloadFS used
+// to hand crediting back to the block/fs resume-skip logic: zeroing the
+// stream visibly dipped the displayed value back to 0% right at the
+// waiting->active transition, before that resume-skip logic re-climbed it
+// (see progress-no-regression-on-activate). Here the stream keeps whatever
+// seedStreamFromDisk already credited it with, and this wrapper absorbs the
+// resume-skip logic's re-derivation of those SAME bytes — the net effect is
+// identical (the final total still lands on seeded + (totalSize - seeded) ==
+// totalSize) but the displayed value now only ever moves forward.
+//
+// onProgress may be invoked concurrently by multiple chunk/file workers;
+// position is a single atomic counter so each call claims a distinct,
+// non-overlapping [before, after) slice of the byte stream regardless of
+// interleaving. Which specific bytes land on the "seeded" side of the cut
+// versus the "new" side depends on call order and is not guaranteed to align
+// with which bytes were literally pre-existing on disk — only the aggregate
+// counts (seeded bytes discarded, totalSize-seeded bytes forwarded) and
+// monotonicity are guaranteed, which is all the displayed bar needs.
+// Returns onProgress unchanged when there is nothing to skip (seeded <= 0)
+// or onProgress is nil, so the from-scratch (unseeded) and progress-disabled
+// paths are exactly as before.
+func skipSeededBytes(seeded int64, onProgress func(n int)) func(n int) {
+	if onProgress == nil || seeded <= 0 {
+		return onProgress
+	}
+
+	var position atomic.Int64
+
+	return func(n int) {
+		if n <= 0 {
+			return
+		}
+
+		after := position.Add(int64(n))
+		before := after - int64(n)
+
+		switch {
+		case after <= seeded:
+			// Entirely within the seeded region: already reflected in the
+			// stream's current value, discard.
+			return
+		case before >= seeded:
+			// Entirely beyond the seeded region: genuinely new, forward as-is.
+			onProgress(n)
+		default:
+			// Straddles the boundary: forward only the tail beyond `seeded`.
+			onProgress(int(after - seeded))
+		}
+	}
 }
 
 // nodeStateName returns a human-readable label for a NodeState, used in log output
