@@ -1996,13 +1996,17 @@ func TestPipeline_Progress_FSSizesSidecar_SeedsTotalAndCreditsStagedFile(t *test
 	require.NoError(t, os.WriteFile(filepath.Join(stagingDir, "staged.bin"+codec.Ext()), stagedContent, 0o644))
 
 	// Seed the sizes sidecar exactly as volume.DownloadFilesystemVolume would
-	// have written it on the prior (interrupted) run's listing fetch.
+	// have written it on the prior (interrupted) run's listing fetch: under the
+	// reserved metadata namespace (stagingDir/.d8-meta/sizes.json), never the
+	// staging root where a user file could shadow it.
 	sizesJSON, err := json.Marshal(volume.FSSizesSidecar{
 		Files: map[string]int64{"staged.bin": stagedFileSize, "pending.bin": pendingFileSize},
 		Total: testTotalSize,
 	})
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(stagingDir, volume.FSSizesSidecarName), sizesJSON, 0o644))
+	metaDir := filepath.Join(stagingDir, volume.FSMetaDirName)
+	require.NoError(t, os.MkdirAll(metaDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(metaDir, volume.FSSizesSidecarName), sizesJSON, 0o644))
 
 	rec := &recordingSink{}
 
