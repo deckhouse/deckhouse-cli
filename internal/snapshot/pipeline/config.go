@@ -20,6 +20,8 @@ package pipeline
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"time"
@@ -91,6 +93,16 @@ type Config struct {
 
 	// TTL is the DataExport TTL string (e.g. "2h").  Defaults to "2h".
 	TTL string
+
+	// RunID is an opaque per-run identifier that scopes DataExport ownership to
+	// this single download run. Because the DataExport CR name is deterministic
+	// (exporter.DataExportName → de-<leaf>), two concurrent runs downloading the
+	// same leaf into DIFFERENT output directories resolve to the SAME CR; RunID
+	// lets each run stamp the CRs it creates (exporter.WithRunOwner) and refuse to
+	// delete a CR another live run owns (exporter.ReleaseDataExport), so neither
+	// run tears down the other's in-flight export (inv #10b). Run generates a
+	// fresh RunID via crypto/rand when it is empty; tests may set it explicitly.
+	RunID string
 
 	// KeepExports, when true, leaves the per-volume DataExport CR (and the
 	// server-side export chain it owns: export VolumeSnapshot/VolumeSnapshotContent/
@@ -165,6 +177,20 @@ type Config struct {
 	Log *slog.Logger
 }
 
+// newDownloadRunID returns a fresh opaque per-run identifier used to scope
+// DataExport ownership to a single download run (see Config.RunID and
+// exporter.WithRunOwner). It is 16 random bytes hex-encoded (128 bits), which is
+// collision-free across concurrent runs for all practical purposes.
+func newDownloadRunID() (string, error) {
+	var b [16]byte
+
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate download run id: %w", err)
+	}
+
+	return hex.EncodeToString(b[:]), nil
+}
+
 // applyDefaults fills in zero-value Config fields with sensible defaults.
 func applyDefaults(cfg Config) Config {
 	if cfg.Workers <= 0 {
@@ -220,11 +246,21 @@ func applyDefaults(cfg Config) Config {
 		c := cfg.KubeClient
 		timeout := cfg.ReadinessTimeout
 		aggClient := cfg.AggClient
+		runID := cfg.RunID
 
 		cfg.OpenExport = func(ctx context.Context, namespace string, leafRef aggapi.NodeRef, ttl string) (*exporter.Export, error) {
 			group, resource, kind, err := aggClient.LeafDataExportTarget(leafRef)
 			if err != nil {
 				return nil, fmt.Errorf("resolve DataExport target for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
+			}
+
+			// Stamp this run's ownership on the deterministic de-<leaf> CR BEFORE
+			// OpenExport reuses it, so a concurrent run downloading the same leaf
+			// into a different output dir is detected here (WARN) and its live
+			// export is never deleted by this run's release (inv #10b). OpenExport's
+			// own EnsureDataExport then idempotently re-fetches this stamped CR.
+			if _, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, kind, leafRef.Name, ttl, exporter.WithRunOwner(runID, log)); err != nil {
+				return nil, fmt.Errorf("stamp DataExport ownership for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
 			}
 
 			waitCtx, waitCancel := context.WithTimeout(ctx, timeout)
