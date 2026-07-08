@@ -31,6 +31,15 @@ import (
 // chunk files are absent, preventing a gap-free merge.
 var ErrMissingChunk = errors.New("block chunk missing")
 
+// ErrDecodedLengthMismatch is returned by MergeBlockChunks when the merged
+// volume, once decoded, does not yield exactly the declared totalSize. The
+// block exporter emits no content digest — only Content-Length (see
+// storage-volume-data-manager images/data-exporter/internal/export_block/handler.go
+// prepareHead) — so decoded length is the strongest source-independent
+// invariant available to detect a truncated, over-sent, or otherwise
+// corrupted merged data.bin[.<ext>].
+var ErrDecodedLengthMismatch = errors.New("merged block volume decoded length mismatch")
+
 // MergeBlockChunks concatenates all chunk_%05d[.<ext>] files from chunkDir into
 // outPath in strict ascending-index order. ext is the codec extension (e.g. ".zst");
 // use "" for the none codec.
@@ -43,7 +52,8 @@ var ErrMissingChunk = errors.New("block chunk missing")
 //   - If any chunk is missing, ErrMissingChunk is returned and no output is written.
 //
 // Post-conditions on success:
-//   - outPath is a fully durable (fsynced) multi-frame stream.
+//   - outPath is a fully durable (fsynced) multi-frame stream that decodes to
+//     exactly totalSize raw bytes (verified; see ErrDecodedLengthMismatch).
 //   - The chunk directory and all its contents are removed.
 //
 // chunkSize ≤ 0 falls back to DefaultChunkSize.
@@ -104,7 +114,68 @@ func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, 
 		return fmt.Errorf("remove chunk dir %s: %w", chunkDir, err)
 	}
 
+	// Verify the merged stream decodes to exactly totalSize AFTER chunkDir is
+	// already gone (matching the filesystem MD5-verification precedent in
+	// stageChunkedFile): a mismatch removes the corrupt outPath and returns,
+	// so the NEXT run finds neither a chunk dir nor a data.bin and re-fetches
+	// every chunk from the exporter fresh rather than repeatedly re-merging
+	// the same untrustworthy chunk files forever.
+	if err := verifyDecodedLength(outPath, ext, totalSize); err != nil {
+		if removeErr := os.Remove(outPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			return errors.Join(
+				fmt.Errorf("verify merged %s: %w", outPath, err),
+				fmt.Errorf("remove corrupt merged file: %w", removeErr),
+			)
+		}
+
+		return fmt.Errorf("verify merged %s: %w", outPath, err)
+	}
+
 	return nil
+}
+
+// verifyDecodedLength decodes outPath — a codec-compressed stream identified
+// by ext (as codec.Ext() returns it: "", ".zst", ".gz", or ".lz4") that may
+// be a concatenation of multiple independent frames — and asserts it yields
+// exactly wantSize raw bytes. Decoding streams through the codec's reader
+// into a discarding counter (decodeVolumeStream, shared with the filesystem
+// per-file verification path in fs.go), so no whole-volume buffer is
+// introduced regardless of volume size.
+//
+// EXTENSION POINT: if a future exporter version starts sending a block-level
+// content digest, verify it here alongside the length check — do not invent
+// one now (the current exporter sends none, see ErrDecodedLengthMismatch).
+func verifyDecodedLength(outPath, ext string, wantSize int64) error {
+	f, err := os.Open(outPath)
+	if err != nil {
+		return fmt.Errorf("open merged file %s: %w", outPath, err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	var counter byteCounter
+
+	if err := decodeVolumeStream(&counter, f, ext); err != nil {
+		return fmt.Errorf("decode merged file %s: %w", outPath, err)
+	}
+
+	if counter.n != wantSize {
+		return fmt.Errorf("decoded %d bytes, want %d: %w", counter.n, wantSize, ErrDecodedLengthMismatch)
+	}
+
+	return nil
+}
+
+// byteCounter is an io.Writer that discards its input and sums the total
+// bytes written, used to measure a decoded stream's length without buffering it.
+type byteCounter struct {
+	n int64
+}
+
+// Write implements io.Writer.
+func (c *byteCounter) Write(p []byte) (int, error) {
+	c.n += int64(len(p))
+	return len(p), nil
 }
 
 // copyFile copies the contents of src into dst.

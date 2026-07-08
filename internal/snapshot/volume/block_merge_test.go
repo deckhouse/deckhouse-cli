@@ -36,9 +36,18 @@ import (
 func makeChunkFrames(t *testing.T, chunkDir string, payloads [][]byte) {
 	t.Helper()
 
-	codec, err := compress.New("zstd", 0)
+	makeChunkFramesWithCodec(t, chunkDir, payloads, "zstd")
+}
+
+// makeChunkFramesWithCodec writes N independent frames (one per chunk),
+// encoded with the named codec, into chunkDir and returns the codec's
+// extension so callers can pass it to MergeBlockChunks.
+func makeChunkFramesWithCodec(t *testing.T, chunkDir string, payloads [][]byte, codecName string) string {
+	t.Helper()
+
+	codec, err := compress.New(codecName, 0)
 	if err != nil {
-		t.Fatalf("compress.New: %v", err)
+		t.Fatalf("compress.New(%s): %v", codecName, err)
 	}
 
 	for i, payload := range payloads {
@@ -52,6 +61,8 @@ func makeChunkFrames(t *testing.T, chunkDir string, payloads [][]byte) {
 			t.Fatalf("write chunk %d: %v", i, err)
 		}
 	}
+
+	return codec.Ext()
 }
 
 // decodeZstdStream decodes a multi-frame zstd stream and returns the raw bytes.
@@ -250,5 +261,166 @@ func TestMergeBlockChunks_CancelledContext(t *testing.T) {
 	// the merge from the same chunks (cancellation is not a data-loss event).
 	if _, statErr := os.Stat(chunkDir); statErr != nil {
 		t.Errorf("chunk dir should survive a cancelled merge, but Stat returned: %v", statErr)
+	}
+}
+
+// TestMergeBlockChunks_VerifiesDecodedLength_AllCodecs proves the new
+// post-merge decoded-length check succeeds (does not falsely reject) a
+// correctly merged volume for every registered codec, including gzip and
+// lz4, whose concatenated-frame decoding is exercised end-to-end here for
+// the first time via a multi-chunk merge (gzip relies on its reader's
+// built-in multistream support; lz4 loops one reader per frame internally).
+func TestMergeBlockChunks_VerifiesDecodedLength_AllCodecs(t *testing.T) {
+	payloads := [][]byte{
+		[]byte("chunk0"),
+		[]byte("chunk1"),
+		[]byte("chunk2"),
+	}
+	chunkSize := int64(6) // matches each payload's length
+	totalSize := int64(len(payloads)) * chunkSize
+
+	for _, codecName := range []string{"none", "zstd", "gzip", "lz4"} {
+		t.Run(codecName, func(t *testing.T) {
+			nodeDir := t.TempDir()
+			chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+			if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			ext := makeChunkFramesWithCodec(t, chunkDir, payloads, codecName)
+			outPath := filepath.Join(nodeDir, archive.DataBlockName(ext))
+
+			if err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, totalSize, chunkSize, ext); err != nil {
+				t.Fatalf("MergeBlockChunks(%s): %v", codecName, err)
+			}
+
+			if _, err := os.Stat(outPath); err != nil {
+				t.Fatalf("merged output missing for codec %s: %v", codecName, err)
+			}
+		})
+	}
+}
+
+// TestMergeBlockChunks_DecodedLengthMismatch_FailsAndRemovesOutput simulates
+// a truncated/short merged stream: two 5-byte chunks decode to 10 raw bytes,
+// but the declared totalSize (20) claims twice that. MergeBlockChunks must
+// fail with ErrDecodedLengthMismatch and must not leave the corrupt merged
+// file at outPath -- otherwise a future resume's data.bin* glob check would
+// treat this node's volume as already complete forever.
+func TestMergeBlockChunks_DecodedLengthMismatch_FailsAndRemovesOutput(t *testing.T) {
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(".zst"))
+
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	payloads := [][]byte{[]byte("hello"), []byte("world")}
+	chunkSize := int64(10)
+	declaredTotalSize := int64(20)
+
+	makeChunkFrames(t, chunkDir, payloads)
+
+	err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, declaredTotalSize, chunkSize, ".zst")
+	if err == nil {
+		t.Fatal("expected an error for decoded length mismatch, got nil")
+	}
+
+	if !errors.Is(err, volume.ErrDecodedLengthMismatch) {
+		t.Errorf("expected ErrDecodedLengthMismatch, got: %v", err)
+	}
+
+	if _, statErr := os.Stat(outPath); !os.IsNotExist(statErr) {
+		t.Error("merged output should be removed after a decoded-length mismatch")
+	}
+
+	// The chunk directory is removed unconditionally right after a
+	// successful commit, before verification runs -- see the resume-on-
+	// corruption doc comment on MergeBlockChunks: this forces the next run
+	// to re-fetch every chunk from the exporter rather than re-merging the
+	// same untrustworthy chunk files forever.
+	if _, statErr := os.Stat(chunkDir); !os.IsNotExist(statErr) {
+		t.Error("chunk dir should be removed after commit even when verification later fails")
+	}
+}
+
+// TestMergeBlockChunks_DecodedLengthOverrun_FailsAndRemovesOutput mirrors the
+// truncation case above for an over-sent merged stream: chunk 1's frame
+// decodes to MORE raw bytes (10) than its slot's share of totalSize implies,
+// so the two present chunks (satisfying the numChunks=2 presence check)
+// decode to 15 total raw bytes against a declared totalSize of 10.
+func TestMergeBlockChunks_DecodedLengthOverrun_FailsAndRemovesOutput(t *testing.T) {
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(".zst"))
+
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	payloads := [][]byte{[]byte("aaaaa"), []byte("bbbbbbbbbb")}
+	chunkSize := int64(5)
+	declaredTotalSize := int64(10)
+
+	makeChunkFrames(t, chunkDir, payloads)
+
+	err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, declaredTotalSize, chunkSize, ".zst")
+	if err == nil {
+		t.Fatal("expected an error for decoded length mismatch, got nil")
+	}
+
+	if !errors.Is(err, volume.ErrDecodedLengthMismatch) {
+		t.Errorf("expected ErrDecodedLengthMismatch, got: %v", err)
+	}
+
+	if _, statErr := os.Stat(outPath); !os.IsNotExist(statErr) {
+		t.Error("merged output should be removed after a decoded-length mismatch")
+	}
+}
+
+// TestMergeBlockChunks_LargeSyntheticTotal_DecodesToExactLength exercises the
+// verification path against a multi-megabyte, multi-chunk volume (well
+// beyond the few-byte payloads used elsewhere in this file) to prove the
+// mechanism scales correctly. Both the merge and the verification decode
+// stream through the codec's reader via io.Copy (verifyDecodedLength,
+// decodeVolumeStream) rather than buffering the whole volume, so peak memory
+// stays bounded regardless of totalSize.
+func TestMergeBlockChunks_LargeSyntheticTotal_DecodesToExactLength(t *testing.T) {
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(".zst"))
+
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const chunkSize = 1 * 1024 * 1024 // 1 MiB
+	const numChunks = 5
+
+	payloads := make([][]byte, numChunks)
+	for i := range payloads {
+		payloads[i] = bytes.Repeat([]byte{byte('A' + i)}, chunkSize)
+	}
+
+	totalSize := int64(chunkSize) * int64(numChunks)
+
+	makeChunkFrames(t, chunkDir, payloads)
+
+	if err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, totalSize, chunkSize, ".zst"); err != nil {
+		t.Fatalf("MergeBlockChunks: %v", err)
+	}
+
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read merged block file: %v", err)
+	}
+
+	decoded := decodeZstdStream(t, raw)
+	want := bytes.Join(payloads, nil)
+
+	if !bytes.Equal(decoded, want) {
+		t.Errorf("decoded content mismatch: got %d bytes, want %d bytes", len(decoded), len(want))
 	}
 }
