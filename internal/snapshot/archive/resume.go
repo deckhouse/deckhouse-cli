@@ -27,32 +27,42 @@ import (
 	"strings"
 )
 
-// NodeState classifies the on-disk progress of a planned node directory.
-type NodeState int
+// ObservedState is a human-readable, NON-AUTHORITATIVE label describing what the
+// resume scan saw on disk for a planned node directory. It exists solely for log
+// output (the pipeline's "resume_state" attribute) so an operator can see how a
+// node was classified; it MUST NOT drive any resume decision.
+//
+// The pipeline re-proves every real resume decision from disk probes at each
+// site — FindBlockData / a data.tar stat / chunk geometry re-derivation — so a
+// stale or approximate label here can never cause wrong data to be reused. Only
+// NodeResumePlan.Done gates whether a node is skipped. In particular the
+// collision-redirect paths report ObservedPending for a fresh redirect target
+// they do not scan the contents of; that is fine precisely because nothing reads
+// the label to decide anything.
+type ObservedState string
 
 const (
-	// NodeStatePending means the node directory does not yet exist or holds no
-	// usable progress.  The pipeline should start the node from scratch.
-	NodeStatePending NodeState = iota
+	// ObservedPending: the node directory does not exist, is effectively empty
+	// (a genuinely fresh dir), or the node was redirected to a not-yet-scanned
+	// collision path.
+	ObservedPending ObservedState = "pending"
 
-	// NodeStateBlockPartial means the chunk directory (BlockChunksDirName) exists
-	// and at least some chunk files may be present.  The block downloader should
-	// skip already-present chunks and resume from where it left off.
-	NodeStateBlockPartial
+	// ObservedBlockPartial: a block chunk staging dir (BlockChunksDirName) is
+	// present, i.e. a single-volume block download was in progress.
+	ObservedBlockPartial ObservedState = "block_partial"
 
-	// NodeStateFSPartial means the flat FS tar staging dir (FsTarStagingDirName) or
-	// the multi-volume data/ directory exists but snapshot.yaml is absent.
-	// The filesystem downloader will skip already-staged raw files and resume assembly.
-	NodeStateFSPartial
+	// ObservedFSPartial: an FS tar staging dir (FsTarStagingDirName) or the
+	// multi-volume data/ directory is present, i.e. a filesystem download was in
+	// progress.
+	ObservedFSPartial ObservedState = "fs_partial"
 
-	// NodeStateManifestsOnly means manifests/ is present but there is no volume
-	// download in progress (no chunk dir, no FS staging dir, no data.bin or data.tar)
-	// and no snapshot.yaml.  The pipeline should call FinalizeNode once volume data is ready.
-	NodeStateManifestsOnly
+	// ObservedManifestsOnly: the directory exists (proven-fresh or manifests-only)
+	// with no volume-staging artifact and no snapshot.yaml.
+	ObservedManifestsOnly ObservedState = "manifests_only"
 
-	// NodeStateDone means snapshot.yaml exists and VerifyNode passes.  The
-	// pipeline should skip this node entirely.
-	NodeStateDone
+	// ObservedDone: snapshot.yaml is present and VerifyNode passed for the planned
+	// identity — the node is complete.
+	ObservedDone ObservedState = "done"
 )
 
 // NodeIdentity describes the planned identity of a snapshot node.  It is used
@@ -81,8 +91,17 @@ type NodeResumePlan struct {
 	// directory.
 	TargetDir string
 
-	// State describes the on-disk condition found during scanning.
-	State NodeState
+	// Done is the ONLY resume decision the pipeline consumes: true means the node
+	// directory already holds a complete, identity-verified download (snapshot.yaml
+	// present and VerifyNode passes for the planned identity), so the pipeline
+	// skips it entirely. Every not-done node is (re)driven through the normal
+	// download path, which re-proves what to (re)fetch from disk probes — those
+	// probes, NOT this plan, are the single source of truth for resume.
+	Done bool
+
+	// Observed is a NON-AUTHORITATIVE label of what the scan saw on disk (see
+	// ObservedState). It is log-only and never an input to any resume decision.
+	Observed ObservedState
 }
 
 // nodeDirComponent returns the directory-name component for id.
@@ -107,7 +126,7 @@ func nodeDirComponent(id NodeIdentity) string {
 //
 // Collision rule: if the primary directory is complete (VerifyNode passes) but
 // its stored identity does not match id, the primary directory belongs to a
-// different node.  ScanNode returns NodeStatePending with TargetDir set to
+// different node.  ScanNode returns a not-done plan with TargetDir set to
 // CollisionNodeDir(parentDir, id.Kind, nodeDirComponent(id), short), where short
 // is derived from the existing complete node's checksum.  This prevents the
 // pipeline from overwriting unrelated completed data.
@@ -116,7 +135,7 @@ func ScanNode(parentDir string, id NodeIdentity) (NodeResumePlan, error) {
 
 	_, statErr := os.Stat(primaryDir)
 	if errors.Is(statErr, os.ErrNotExist) {
-		return NodeResumePlan{TargetDir: primaryDir, State: NodeStatePending}, nil
+		return NodeResumePlan{TargetDir: primaryDir, Observed: ObservedPending}, nil
 	}
 
 	if statErr != nil {
@@ -138,7 +157,7 @@ func ScanNode(parentDir string, id NodeIdentity) (NodeResumePlan, error) {
 	return classifyPartialDir(primaryDir, id, func(mm partialMismatch) (NodeResumePlan, error) {
 		collisionDir := CollisionNodeDir(parentDir, id.Kind, nodeDirComponent(id), mm.short)
 
-		return NodeResumePlan{TargetDir: collisionDir, State: NodeStatePending}, nil
+		return NodeResumePlan{TargetDir: collisionDir, Observed: ObservedPending}, nil
 	})
 }
 
@@ -151,7 +170,7 @@ func classifyCompleteDir(parentDir, primaryDir string, id NodeIdentity) (NodeRes
 	}
 
 	if matchesIdentity(sy, id) {
-		return NodeResumePlan{TargetDir: primaryDir, State: NodeStateDone}, nil
+		return NodeResumePlan{TargetDir: primaryDir, Done: true, Observed: ObservedDone}, nil
 	}
 
 	// Primary dir is complete but belongs to a different node.
@@ -160,7 +179,7 @@ func classifyCompleteDir(parentDir, primaryDir string, id NodeIdentity) (NodeRes
 	short := ShortChecksum(sy.Checksum.Hex)
 	collisionDir := CollisionNodeDir(parentDir, id.Kind, nodeDirComponent(id), short)
 
-	return NodeResumePlan{TargetDir: collisionDir, State: NodeStatePending}, nil
+	return NodeResumePlan{TargetDir: collisionDir, Observed: ObservedPending}, nil
 }
 
 // partialMismatch carries the information ScanNode/ScanAbsolute need to react to
@@ -237,20 +256,20 @@ func classifyPartialResumable(dir string) (NodeResumePlan, error) {
 	// much "in progress" as one with finalized chunk_NNNNN files, and must
 	// resume rather than restart from scratch.
 	if _, err := os.Stat(filepath.Join(dir, BlockChunksDirName)); err == nil {
-		return NodeResumePlan{TargetDir: dir, State: NodeStateBlockPartial}, nil
+		return NodeResumePlan{TargetDir: dir, Observed: ObservedBlockPartial}, nil
 	}
 
 	// Flat FS tar staging dir (single-volume filesystem download in progress).
 	if _, err := os.Stat(filepath.Join(dir, FsTarStagingDirName)); err == nil {
-		return NodeResumePlan{TargetDir: dir, State: NodeStateFSPartial}, nil
+		return NodeResumePlan{TargetDir: dir, Observed: ObservedFSPartial}, nil
 	}
 
 	// Multi-volume data/ directory (multi-volume layout, block or FS).
 	if _, err := os.Stat(filepath.Join(dir, DataDirName)); err == nil {
-		return NodeResumePlan{TargetDir: dir, State: NodeStateFSPartial}, nil
+		return NodeResumePlan{TargetDir: dir, Observed: ObservedFSPartial}, nil
 	}
 
-	return NodeResumePlan{TargetDir: dir, State: NodeStateManifestsOnly}, nil
+	return NodeResumePlan{TargetDir: dir, Observed: ObservedManifestsOnly}, nil
 }
 
 // dirHasNodeArtifacts reports whether dir already holds any snapshot-download
@@ -312,7 +331,7 @@ func ScanAbsolute(nodeDir string, id NodeIdentity) (NodeResumePlan, error) {
 	_, statErr := os.Stat(nodeDir)
 
 	if errors.Is(statErr, os.ErrNotExist) {
-		return NodeResumePlan{TargetDir: nodeDir, State: NodeStatePending}, nil
+		return NodeResumePlan{TargetDir: nodeDir, Observed: ObservedPending}, nil
 	}
 
 	if statErr != nil {
@@ -334,7 +353,7 @@ func ScanAbsolute(nodeDir string, id NodeIdentity) (NodeResumePlan, error) {
 				ErrIdentityMismatch, nodeDir, sy.Kind, sy.Name, id.Kind, id.Name)
 		}
 
-		return NodeResumePlan{TargetDir: nodeDir, State: NodeStateDone}, nil
+		return NodeResumePlan{TargetDir: nodeDir, Done: true, Observed: ObservedDone}, nil
 	}
 
 	// A partial dir under a user-controlled path is resumable only with proven
