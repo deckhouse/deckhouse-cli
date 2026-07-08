@@ -89,6 +89,12 @@ func NewExport(namespace, deName, volumeMode, baseURL string, fetcher *Fetcher) 
 //
 // An isolated copy of sClient is built for the HTTP Fetcher so that CA
 // injection does not mutate the caller's client.
+//
+// opts are forwarded verbatim to the inner EnsureDataExport. Callers pass
+// WithRunOwner so that if the deterministic de-<leaf> CR has to be RECREATED here
+// (e.g. it vanished between the pipeline's stamp-Ensure and this inner Ensure),
+// the fresh CR is stamped with this run's ownership rather than left unstamped —
+// closing the per-run ownership gap in the vanish window (inv #10b).
 func OpenExport(
 	ctx context.Context,
 	log *slog.Logger,
@@ -100,8 +106,9 @@ func OpenExport(
 	leafName,
 	ttl string,
 	sc *safeClient.SafeClient,
+	opts ...EnsureOption,
 ) (*Export, error) {
-	de, err := EnsureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl)
+	de, err := EnsureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("ensure DataExport for leaf %q: %w", leafName, err)
 	}
