@@ -47,6 +47,7 @@ func TestParseChunkSize(t *testing.T) {
 	}{
 		{"256Mi", 256 * 1024 * 1024, false},
 		{"256MiB", 256 * 1024 * 1024, false},
+		// at max: exactly maxChunkSize (4x DefaultChunkSize == 1 GiB)
 		{"1Gi", 1 * 1024 * 1024 * 1024, false},
 		{"1GiB", 1 * 1024 * 1024 * 1024, false},
 		{"512Mi", 512 * 1024 * 1024, false},
@@ -61,6 +62,10 @@ func TestParseChunkSize(t *testing.T) {
 		{"-1Mi", 0, true},
 		// bad string
 		{"abc", 0, true},
+		// just above maxChunkSize
+		{"1025Mi", 0, true},
+		// well above maxChunkSize
+		{"4Gi", 0, true},
 	}
 
 	for _, tc := range cases {
@@ -99,6 +104,26 @@ func TestParseChunkSize_DefaultMinimum(t *testing.T) {
 
 	if n != defaultChunkSize {
 		t.Fatalf("got %d, want %d", n, defaultChunkSize)
+	}
+}
+
+func TestParseChunkSize_Maximum(t *testing.T) {
+	t.Helper()
+
+	// Exactly maxChunkSize (1 GiB) should parse fine.
+	n, err := parseChunkSize("1Gi")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if n != maxChunkSize {
+		t.Fatalf("got %d, want %d", n, maxChunkSize)
+	}
+
+	// Anything above maxChunkSize must be rejected.
+	_, err = parseChunkSize("1025Mi")
+	if err == nil {
+		t.Fatal("expected error for chunk size above maximum, got nil")
 	}
 }
 
