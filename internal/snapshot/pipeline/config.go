@@ -259,14 +259,19 @@ func applyDefaults(cfg Config) Config {
 			// into a different output dir is detected here (WARN) and its live
 			// export is never deleted by this run's release (inv #10b). OpenExport's
 			// own EnsureDataExport then idempotently re-fetches this stamped CR.
-			if _, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, kind, leafRef.Name, ttl, exporter.WithRunOwner(runID, log)); err != nil {
+			owner := exporter.WithRunOwner(runID, log)
+			if _, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, kind, leafRef.Name, ttl, owner); err != nil {
 				return nil, fmt.Errorf("stamp DataExport ownership for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
 			}
 
 			waitCtx, waitCancel := context.WithTimeout(ctx, timeout)
 			defer waitCancel()
 
-			return exporter.OpenExport(waitCtx, log, c, namespace, group, resource, kind, leafRef.Name, ttl, sc)
+			// Pass the same ownership into OpenExport so that if the CR vanishes
+			// between the stamp-Ensure above and OpenExport's inner Ensure (the
+			// terminating-window recreate), the fresh CR is stamped by THIS run
+			// rather than recreated unstamped (inv #10b).
+			return exporter.OpenExport(waitCtx, log, c, namespace, group, resource, kind, leafRef.Name, ttl, sc, owner)
 		}
 	}
 

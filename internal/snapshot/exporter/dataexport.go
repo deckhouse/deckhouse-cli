@@ -50,6 +50,12 @@ const logEveryN = 5
 // must recognize this exact string.
 const conditionTypeExpired = "Expired"
 
+// dataExportGonePollInterval is the poll cadence EnsureDataExport uses while waiting
+// for a terminating DataExport (DeletionTimestamp set) to fully vanish before it
+// recreates a fresh one. It is short because the controller's finalizer unwinding
+// completes in seconds on a real cluster, and the wait is bounded by the caller's ctx.
+const dataExportGonePollInterval = 500 * time.Millisecond
+
 // runOwnerAnnotation records the download run that CREATED (and therefore owns) a
 // DataExport CR. The CR name is deterministic (DataExportName → de-<leaf>), so two
 // concurrent download runs targeting the same leaf resolve to the SAME CR; this
@@ -153,30 +159,47 @@ func EnsureDataExport(
 
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, existing)
 	if err == nil {
-		if !meta.IsStatusConditionTrue(existing.Status.Conditions, conditionTypeExpired) {
-			// Live CR: if a different run owns it, this run is adopting a foreign
-			// export read-only and must not release it (warnIfForeign logs the
-			// adoption). Ownership is intentionally NOT changed on adoption.
+		switch {
+		case existing.DeletionTimestamp != nil:
+			// The CR is TERMINATING: an interrupted run's release defer (or the
+			// Expired reclaim below) already deleted it, and the controller is
+			// still unwinding the export chain. Adopting it would be fatal — its
+			// endpoint is doomed and WaitReady's first Get races the finalizer
+			// removal into NotFound, failing the whole run in the interrupt→resume
+			// workflow this feature exists for. Do NOT adopt: wait (ctx-bounded)
+			// for it to vanish, then fall through to the create path so this run
+			// gets a fresh, this-run-owned CR. Mirrors how the Expired reclaim
+			// already tolerates delete propagation.
+			if waitErr := waitForDataExportGone(ctx, c, namespace, deName); waitErr != nil {
+				return nil, waitErr
+			}
+
+		case !meta.IsStatusConditionTrue(existing.Status.Conditions, conditionTypeExpired):
+			// Live, non-terminating CR: if a different run owns it, this run is
+			// adopting a foreign export read-only and must not release it
+			// (warnIfForeign logs the adoption). Ownership is intentionally NOT
+			// changed on adoption.
 			o.warnIfForeign(existing, deName)
 
 			return existing, nil
-		}
 
-		// The producer never deletes an Expired DataExport on its own (manual operator
-		// cleanup is its documented contract), so a stale Expired object from a previous
-		// session would otherwise be returned forever, permanently blocking resume. Delete
-		// it and fall through to the normal create path below. This reclaim is deliberately
-		// OWNER-AGNOSTIC (a crashed owner's CR is reclaimed via TTL exactly as before);
-		// the recreated CR below is stamped with THIS run's ownership.
-		// Delete is not synchronous on a real cluster: the object may still be
-		// terminating when the Create below runs, which can race into
-		// AlreadyExists (swallowed) and hand the caller back the same stale
-		// Expired object on this pass. That is a one-run delay, not a
-		// regression — the caller's per-node retry on the next resume attempt
-		// (pipeline.Run is best-effort per node) converges once the delete has
-		// actually propagated.
-		if delErr := c.Delete(ctx, existing); delErr != nil && !kubeerrors.IsNotFound(delErr) {
-			return nil, fmt.Errorf("delete expired DataExport %q: %w", deName, delErr)
+		default:
+			// The producer never deletes an Expired DataExport on its own (manual operator
+			// cleanup is its documented contract), so a stale Expired object from a previous
+			// session would otherwise be returned forever, permanently blocking resume. Delete
+			// it and fall through to the normal create path below. This reclaim is deliberately
+			// OWNER-AGNOSTIC (a crashed owner's CR is reclaimed via TTL exactly as before);
+			// the recreated CR below is stamped with THIS run's ownership.
+			// Delete is not synchronous on a real cluster: the object may still be
+			// terminating when the Create below runs, which can race into
+			// AlreadyExists (swallowed) and hand the caller back the same stale
+			// Expired object on this pass. That is a one-run delay, not a
+			// regression — the caller's per-node retry on the next resume attempt
+			// (pipeline.Run is best-effort per node) converges once the delete has
+			// actually propagated.
+			if delErr := c.Delete(ctx, existing); delErr != nil && !kubeerrors.IsNotFound(delErr) {
+				return nil, fmt.Errorf("delete expired DataExport %q: %w", deName, delErr)
+			}
 		}
 	} else if !kubeerrors.IsNotFound(err) {
 		return nil, fmt.Errorf("get DataExport %q: %w", deName, err)
@@ -215,6 +238,34 @@ func EnsureDataExport(
 	}
 
 	return fetched, nil
+}
+
+// waitForDataExportGone polls until the DataExport named deName in namespace is
+// reported NotFound (its finalizers have fully unwound and it is gone) or ctx is
+// done. It exists so EnsureDataExport can wait out a CR observed in the terminating
+// state instead of adopting a doomed object. On ctx cancellation it returns a
+// wrapped ctx.Err() promptly. No time.Sleep: the poll blocks in a select on ctx.
+func waitForDataExportGone(ctx context.Context, c client.Client, namespace, deName string) error {
+	key := client.ObjectKey{Namespace: namespace, Name: deName}
+
+	for {
+		probe := new(deapi.DataExport)
+
+		err := c.Get(ctx, key, probe)
+		if kubeerrors.IsNotFound(err) {
+			return nil
+		}
+
+		if err != nil {
+			return fmt.Errorf("get terminating DataExport %q: %w", deName, err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for terminating DataExport %q to be deleted: %w", deName, ctx.Err())
+		case <-time.After(dataExportGonePollInterval):
+		}
+	}
 }
 
 // readyConditionStatus returns a short status string from the DataExport conditions.

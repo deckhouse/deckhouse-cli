@@ -754,3 +754,195 @@ func TestEnsureDataExport_ExpiredForeignCRRecreatedWithOwnership(t *testing.T) {
 	assert.NotContains(t, buf.String(), "adopting DataExport",
 		"an expired reclaim is a recreate, not a foreign adoption")
 }
+
+// TestEnsureDataExport_WaitsOutTerminatingCRThenCreatesStamped reproduces the
+// interrupt→resume race: an interrupted run's release defer deleted the deterministic
+// de-<leaf> CR, but the controller leaves it TERMINATING (DeletionTimestamp set,
+// finalizers unwinding) for a moment. A new run that Gets it in that window must NOT
+// adopt the doomed object — it must wait for it to vanish and create a fresh, this-run
+// owned CR. Finalizer removal on the FIRST Get simulates the object disappearing
+// "between polls" without goroutines.
+func TestEnsureDataExport_WaitsOutTerminatingCRThenCreatesStamped(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "terminating-vs"
+		oldOwner  = "run-interrupted-aaaa"
+		newOwner  = "run-resume-bbbb"
+		ttl       = "1h"
+	)
+
+	deName := exporter.DataExportName(leafName)
+
+	scheme := newDEScheme(t)
+
+	now := metav1.NewTime(time.Now())
+
+	terminating := &deapi.DataExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              deName,
+			Namespace:         namespace,
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"dataexport.deckhouse.io/test-hold"},
+			Annotations:       map[string]string{runOwnerAnnotationKey: oldOwner},
+		},
+		Spec: deapi.DataexportSpec{
+			TTL: ttl,
+			TargetRef: deapi.TargetRefSpec{
+				Group:    aggapi.VolumeSnapshotGroup,
+				Resource: aggapi.VolumeSnapshotResource,
+				Kind:     aggapi.VolumeSnapshotKind,
+				Name:     leafName,
+			},
+		},
+	}
+
+	// The FIRST Get returns the terminating CR, then drops its finalizer so the fake
+	// deletes it; the next poll Get therefore observes NotFound. The re-fetch after the
+	// subsequent Create returns the fresh (non-terminating) object untouched.
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(terminating).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if err := cl.Get(ctx, key, obj, opts...); err != nil {
+					return err
+				}
+
+				de, ok := obj.(*deapi.DataExport)
+				if ok && key.Name == deName && de.DeletionTimestamp != nil && len(de.Finalizers) > 0 {
+					drop := de.DeepCopy()
+					drop.Finalizers = nil
+
+					if err := cl.Update(ctx, drop); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			},
+		}).Build()
+
+	var buf bytes.Buffer
+
+	got, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl,
+		exporter.WithRunOwner(newOwner, captureWarnLogger(&buf)))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	assert.Nil(t, got.DeletionTimestamp,
+		"a terminating CR must never be returned; a fresh, non-terminating one is created")
+	assert.Equal(t, newOwner, got.Annotations[runOwnerAnnotationKey],
+		"the recreated CR must be stamped with THIS run's ownership, not the interrupted run's")
+	assert.NotContains(t, buf.String(), "adopting DataExport",
+		"waiting out a terminating CR is a recreate, not a foreign adoption")
+}
+
+// TestEnsureDataExport_TerminatingCRNeverGoneReturnsCtxDeadline verifies that when a
+// terminating CR never vanishes (finalizer stuck), EnsureDataExport does not adopt it
+// or hang forever: it returns a wrapped ctx.Err() once the caller's deadline elapses,
+// and returns no CR.
+func TestEnsureDataExport_TerminatingCRNeverGoneReturnsCtxDeadline(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "stuck-terminating-vs"
+		ttl       = "1h"
+	)
+
+	deName := exporter.DataExportName(leafName)
+
+	scheme := newDEScheme(t)
+
+	now := metav1.NewTime(time.Now())
+
+	stuck := &deapi.DataExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              deName,
+			Namespace:         namespace,
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"dataexport.deckhouse.io/test-hold"},
+		},
+		Spec: deapi.DataexportSpec{
+			TTL: ttl,
+			TargetRef: deapi.TargetRefSpec{
+				Group:    aggapi.VolumeSnapshotGroup,
+				Resource: aggapi.VolumeSnapshotResource,
+				Kind:     aggapi.VolumeSnapshotKind,
+				Name:     leafName,
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stuck).Build()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	got, err := exporter.EnsureDataExport(ctx, c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl)
+	require.Error(t, err)
+	assert.Nil(t, got, "no CR may be returned while the terminating CR is still present")
+	assert.True(t, errors.Is(err, context.DeadlineExceeded),
+		"the wait must return a wrapped context.DeadlineExceeded; got: %v", err)
+}
+
+// TestEnsureDataExport_LiveCRAdoptedNotRecreated is the regression guard for the
+// unchanged happy path: a live, non-terminating CR is adopted as-is (same object,
+// no Create), exactly as before the terminating-wait was added.
+func TestEnsureDataExport_LiveCRAdoptedNotRecreated(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "live-adopt-vs"
+		ownerRun  = "run-owner-live"
+		otherRun  = "run-other-live"
+		ttl       = "1h"
+	)
+
+	deName := exporter.DataExportName(leafName)
+
+	scheme := newDEScheme(t)
+
+	live := &deapi.DataExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        deName,
+			Namespace:   namespace,
+			Annotations: map[string]string{runOwnerAnnotationKey: ownerRun},
+		},
+		Spec: deapi.DataexportSpec{
+			TTL: ttl,
+			TargetRef: deapi.TargetRefSpec{
+				Group:    aggapi.VolumeSnapshotGroup,
+				Resource: aggapi.VolumeSnapshotResource,
+				Kind:     aggapi.VolumeSnapshotKind,
+				Name:     leafName,
+			},
+		},
+	}
+
+	createCalled := false
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(live).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				createCalled = true
+
+				return cl.Create(ctx, obj, opts...)
+			},
+		}).Build()
+
+	got, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl,
+		exporter.WithRunOwner(otherRun, slog.Default()))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	assert.False(t, createCalled, "a live, non-terminating CR must be adopted, never recreated")
+	assert.Equal(t, live.ResourceVersion, got.ResourceVersion,
+		"adoption must return the existing object unchanged")
+	assert.Equal(t, ownerRun, got.Annotations[runOwnerAnnotationKey],
+		"adoption must not overwrite the existing owner annotation")
+}
