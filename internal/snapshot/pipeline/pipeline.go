@@ -585,6 +585,11 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 			slog.String("kind", task.node.Kind),
 			slog.String("name", task.node.Name))
 
+		// The skip branch OWNS the leftover-chunk-dir cleanup for the crash
+		// window in volume.MergeBlockChunks between committing the merged file
+		// and removing the chunk dir (inv. #1); no later run ever revisits it.
+		removeMergedBlockChunkDir(cfg, dest.chunkDir)
+
 		if handle.stream != nil {
 			handle.stream.Done()
 		}
@@ -657,6 +662,11 @@ func downloadOwnDataRefs(
 			slog.String("kind", node.Kind),
 			slog.String("name", node.Name))
 
+		// The skip branch OWNS the leftover-chunk-dir cleanup for the crash
+		// window in volume.MergeBlockChunks between committing the merged file
+		// and removing the chunk dir (inv. #1); no later run ever revisits it.
+		removeMergedBlockChunkDir(cfg, dest.chunkDir)
+
 		if handle.stream != nil {
 			handle.stream.Done()
 		}
@@ -682,6 +692,28 @@ func downloadOwnDataRefs(
 	}
 
 	return downloadVolumeBinding(ctx, cfg, node.Ref(), node.Namespace, dest, handle)
+}
+
+// removeMergedBlockChunkDir deletes a leftover block chunk staging directory
+// (data.bin.d/) found next to an already-merged data.bin* file, compensating the
+// crash window in volume.MergeBlockChunks between committing the merged file
+// (aw.Commit) and removing the chunk dir (os.RemoveAll). A hard kill in that
+// window leaves BOTH the durable merged file and a full compressed copy of the
+// volume in the chunk dir; every later resume takes the blockAlreadyMerged skip
+// branch and nothing else ever revisits the chunk dir, so without this cleanup
+// the staging copy leaks permanently (inv. #1 — the skip branch owns leftover
+// cleanup). os.RemoveAll is a no-op when the chunk dir is absent, so the normal
+// (no-leftover) path is unchanged.
+//
+// A RemoveAll failure is logged as a WARN and swallowed, never returned: the
+// download is already complete (the merged file is durable), so losing
+// best-effort cleanup must not fail an otherwise successful node (code-style §5).
+func removeMergedBlockChunkDir(cfg Config, chunkDir string) {
+	if err := os.RemoveAll(chunkDir); err != nil {
+		cfg.Log.Warn("failed to remove leftover block chunk dir after merge",
+			slog.String("dir", chunkDir),
+			slog.String("error", err.Error()))
+	}
 }
 
 // ensureNodeSubdirs creates manifests/ and, when the node has children, snapshots/
