@@ -209,12 +209,12 @@ func TestNonTTY_SetTotal_AggregatesCorrectly(t *testing.T) {
 }
 
 // TestNonTTY_SetCurrent_SeedsAndCancelsAggregate proves the plainStream side
-// of the download-progress-seed-committed-bytes contract: SetCurrent(n) adds
-// exactly n to the sink's shared aggregate (mirroring SetTotal's delta
-// pattern), and a later SetCurrent(0) removes exactly that seed again without
-// touching any other stream's contribution — the "seed, then cancel right
-// before the real transfer" hand-off pipeline.downloadBlock/downloadFS rely
-// on to avoid double-counting already-committed bytes.
+// of SetCurrent's absolute-value contract: SetCurrent(n) applies exactly the
+// delta n to the sink's shared aggregate (mirroring SetTotal's delta pattern),
+// and a later SetCurrent(0) removes that contribution again without touching
+// any other stream's — the downward reset pipeline.downloadBlock/downloadFS
+// rely on when the resume-seed clamp zeroes an over-seeded stream before the
+// real transfer re-credits it (clamp-resume-seed-to-fresh-total).
 func TestNonTTY_SetCurrent_SeedsAndCancelsAggregate(t *testing.T) {
 	t.Parallel()
 
@@ -765,15 +765,16 @@ func TestTTYStream_ActivateIdempotent(t *testing.T) {
 	sink.Wait()
 }
 
-// TestTTYStream_SetCurrent_SeedsAndCancels proves the ttyStream side of the
-// download-progress-seed-committed-bytes contract: SetCurrent(n) sets the
-// underlying mpb bar's current value directly (observable via stats.Current
-// fed into decorateStatus/decorateAppend), and a later SetCurrent(0) removes
-// it again cleanly, leaving room for the real per-chunk/per-file resume-skip
-// crediting to re-derive and re-credit the same bytes without double
-// counting. This exercises the actual *Bar.SetCurrent call (not just the
-// pure decorator functions TestDecorateStatus/TestDecorateAppend already
-// cover), so a regression in the mpb-facing plumbing itself is caught.
+// TestTTYStream_SetCurrent_SeedsAndCancels proves the ttyStream side of
+// SetCurrent's absolute-value contract: SetCurrent(n) sets the underlying mpb
+// bar's current value directly (observable via stats.Current fed into
+// decorateStatus/decorateAppend), and a later SetCurrent(0) resets it again
+// cleanly — the downward correction the resume-seed clamp applies before the
+// real transfer's incremental crediting proceeds from zero
+// (clamp-resume-seed-to-fresh-total). This exercises the actual *Bar.SetCurrent
+// call (not just the pure decorator functions TestDecorateStatus/
+// TestDecorateAppend already cover), so a regression in the mpb-facing plumbing
+// itself is caught.
 func TestTTYStream_SetCurrent_SeedsAndCancels(t *testing.T) {
 	t.Parallel()
 
@@ -793,8 +794,8 @@ func TestTTYStream_SetCurrent_SeedsAndCancels(t *testing.T) {
 		t.Errorf("Current after seed = %d, want 256", got)
 	}
 
-	// Cancel the seed right before the real transfer starts, mirroring
-	// downloadBlock/downloadFS's unconditional SetCurrent(0).
+	// Reset to zero, mirroring the resume-seed clamp's downward correction in
+	// downloadBlock/downloadFS (SetCurrent(0) when the seed exceeds the fresh total).
 	st.SetCurrent(0)
 
 	if got := st.bar.Current(); got != 0 {

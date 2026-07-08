@@ -62,15 +62,15 @@ type Stream interface {
 	SetTotal(total int64)
 
 	// SetCurrent sets the stream's current byte counter to an absolute value.
-	// It exists specifically for the pipeline's resume-progress seeding
-	// (download-progress-seed-committed-bytes): once, right after a stream is
-	// created, to display already-committed on-disk bytes before the real
-	// transfer begins (while the row is still in the waiting state), and once
-	// more — with 0 — right before the real transfer starts, to cancel that
-	// seed back out so the existing per-chunk/per-file resume-skip crediting
-	// (which re-derives and re-credits the identical bytes from the same
-	// on-disk state) does not double-count them. It must not be used for
-	// ordinary incremental progress reporting — use IncrBy for that.
+	// It exists for the pipeline's resume-seed clamp
+	// (clamp-resume-seed-to-fresh-total): when a resume seed credited from
+	// stale on-disk state (a chunk geometry about to be purged, or a stale
+	// sizes sidecar) exceeds the fresh authoritative total — a changed
+	// --chunk-size or a volume shrunk between runs — downloadBlock/downloadFS
+	// call SetCurrent(0) to reset the displayed value to 0 BEFORE lowering the
+	// total, so the bar never renders current > total. It is an absolute
+	// DOWNWARD correction only; ordinary forward progress is reported with
+	// IncrBy, never with SetCurrent.
 	SetCurrent(current int64)
 
 	// Activate transitions the stream from waiting to downloading state.
@@ -344,8 +344,8 @@ func (s *ttyStream) SetTotal(total int64) {
 }
 
 // SetCurrent sets the bar's current byte counter to an absolute value. See the
-// Stream interface doc comment for why this exists (resume-progress seeding
-// only, never ordinary incremental reporting).
+// Stream interface doc comment for why this exists (the resume-seed clamp
+// downward correction, never ordinary incremental reporting).
 func (s *ttyStream) SetCurrent(current int64) {
 	s.bar.SetCurrent(current)
 }
@@ -500,9 +500,10 @@ func stateWord(state int32, activated bool) string {
 // Counters render in the active state ("<current> / <total>" in
 // human-readable binary units) exactly as before, AND ALSO in the waiting
 // state when the stream was seeded with already-committed on-disk bytes
-// (Current > 0) — see the Stream.SetCurrent doc comment — so a resumed
-// volume's row shows its real committed bytes immediately, before the
-// DataExport becomes ready. A seeded row whose total is not yet known (a
+// (Current > 0) — the pipeline's seedStreamFromDisk credits those bytes via
+// IncrBy before the transfer starts — so a resumed volume's row shows its
+// real committed bytes immediately, before the DataExport becomes ready. A
+// seeded row whose total is not yet known (a
 // filesystem volume before its listing returns) shows "<current> / ???"
 // instead of a bogus zero total. Done/failed rows still show no counters
 // (docker-pull parity: a finished layer shows only its status word). It is a
@@ -681,8 +682,8 @@ func (s *plainStream) IncrBy(n int) {
 // and applies the resulting delta to the sink's shared aggregate — mirroring
 // SetTotal's delta pattern below — since the non-TTY sink's "downloaded X /
 // total Y" line sums every stream's progress into one shared counter. See the
-// Stream interface doc comment for why this exists (resume-progress seeding
-// only, never ordinary incremental reporting).
+// Stream interface doc comment for why this exists (the resume-seed clamp
+// downward correction, never ordinary incremental reporting).
 func (s *plainStream) SetCurrent(current int64) {
 	s.mu.Lock()
 	delta := current - s.current

@@ -317,10 +317,6 @@ func TestDeterminism(t *testing.T) {
 		t.Error("FsTarName is not deterministic")
 	}
 
-	if archive.MultiVolumeTarName("my-pvc") != archive.MultiVolumeTarName("my-pvc") {
-		t.Error("MultiVolumeTarName is not deterministic")
-	}
-
 	if archive.ChunkFileName(7, ".zst") != archive.ChunkFileName(7, ".zst") {
 		t.Error("ChunkFileName is not deterministic")
 	}
@@ -330,91 +326,6 @@ func TestDeterminism(t *testing.T) {
 	}
 }
 
-func TestMultiVolumeBlockName(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		pvc  string
-		ext  string
-		want string
-	}{
-		{"pvc-disk-a", ".zst", "data/pvc-disk-a.bin.zst"},
-		{"my-pvc", ".lz4", "data/my-pvc.bin.lz4"},
-		{"disk.with.dots", "", "data/disk.with.dots.bin"},
-	}
-
-	for _, tc := range tests {
-		got := archive.MultiVolumeBlockName(tc.pvc, tc.ext)
-		if got != tc.want {
-			t.Errorf("MultiVolumeBlockName(%q, %q) = %q; want %q", tc.pvc, tc.ext, got, tc.want)
-		}
-	}
-}
-
-func TestMultiVolumeTarName(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		pvc  string
-		want string
-	}{
-		{"pvc-disk-a", "data/pvc-disk-a.tar"},
-		{"my-pvc", "data/my-pvc.tar"},
-		{"disk.with.dots", "data/disk.with.dots.tar"},
-	}
-
-	for _, tc := range tests {
-		got := archive.MultiVolumeTarName(tc.pvc)
-		if got != tc.want {
-			t.Errorf("MultiVolumeTarName(%q) = %q; want %q", tc.pvc, got, tc.want)
-		}
-	}
-}
-
-func TestMultiVolumeTarStagingDirName(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		pvc  string
-		want string
-	}{
-		{"pvc-disk-a", "data/pvc-disk-a.tar.d"},
-		{"my-pvc", "data/my-pvc.tar.d"},
-		{"disk.with.dots", "data/disk.with.dots.tar.d"},
-	}
-
-	for _, tc := range tests {
-		got := archive.MultiVolumeTarStagingDirName(tc.pvc)
-		if got != tc.want {
-			t.Errorf("MultiVolumeTarStagingDirName(%q) = %q; want %q", tc.pvc, got, tc.want)
-		}
-	}
-}
-
-func TestBlockChunksDirNameFor(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		pvc  string
-		want string
-	}{
-		{"pvc-disk-a", "data/pvc-disk-a.bin.d"},
-		{"my-pvc", "data/my-pvc.bin.d"},
-		{"disk.with.dots", "data/disk.with.dots.bin.d"},
-	}
-
-	for _, tc := range tests {
-		got := archive.BlockChunksDirNameFor(tc.pvc)
-		if got != tc.want {
-			t.Errorf("BlockChunksDirNameFor(%q) = %q; want %q", tc.pvc, got, tc.want)
-		}
-	}
-}
-
-// TestMultiVolumeHelpers_Consistency verifies that the multi-volume helpers are
-// mutually consistent: block name, FS tar name, staging dirs, and chunk dir all
-// share the pvc prefix under data/ and are distinct from each other and from the
-// single-volume flat names.
 func TestFsFileChunksDirName(t *testing.T) {
 	t.Parallel()
 
@@ -433,45 +344,6 @@ func TestFsFileChunksDirName(t *testing.T) {
 		got := archive.FsFileChunksDirName(tc.relPath, tc.ext)
 		if got != tc.want {
 			t.Errorf("FsFileChunksDirName(%q, %q) = %q; want %q", tc.relPath, tc.ext, got, tc.want)
-		}
-	}
-}
-
-func TestMultiVolumeHelpers_Consistency(t *testing.T) {
-	t.Parallel()
-
-	const pvc = "my-pvc"
-	const ext = ".zst"
-
-	blockName := archive.MultiVolumeBlockName(pvc, ext)
-	tarName := archive.MultiVolumeTarName(pvc)
-	tarStaging := archive.MultiVolumeTarStagingDirName(pvc)
-	chunkDir := archive.BlockChunksDirNameFor(pvc)
-
-	// All four must be distinct.
-	names := []string{blockName, tarName, tarStaging, chunkDir}
-	for i := range names {
-		for j := i + 1; j < len(names); j++ {
-			if names[i] == names[j] {
-				t.Errorf("helpers not distinct: [%d]=%q == [%d]=%q", i, names[i], j, names[j])
-			}
-		}
-	}
-
-	// All four must differ from the single-volume flat names.
-	flats := map[string]string{
-		"DataBlockName":       archive.DataBlockName(ext),
-		"FsTarName":           archive.FsTarName,
-		"FsTarStagingDirName": archive.FsTarStagingDirName,
-		"BlockChunksDirName":  archive.BlockChunksDirName,
-		"DataDirName":         archive.DataDirName,
-	}
-
-	for _, multi := range names {
-		for flatLabel, flat := range flats {
-			if multi == flat {
-				t.Errorf("%q must not equal flat %s=%q", multi, flatLabel, flat)
-			}
 		}
 	}
 }

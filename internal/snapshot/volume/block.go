@@ -93,8 +93,7 @@ var ErrShortChunkRead = errors.New("chunk range body ended before the requested 
 // codec, and atomically written as chunk_NNNNN[.<ext>] where ext is codec.Ext().
 //
 // chunkDir is the absolute path to the chunk directory (the caller constructs it
-// using archive.BlockChunksDirName or archive.BlockChunksDirNameFor for
-// multi-volume layouts).
+// using archive.BlockChunksDirName).
 //
 // Already-complete chunks (final file exists) are skipped. Stale *.tmp files
 // are cleaned before a chunk is fetched. workers bounds parallelism; the first
