@@ -699,8 +699,7 @@ func stageWholeFile(
 
 // ScanFSStagingProgress computes durably-committed raw bytes across every
 // still-open per-file chunk directory, purely from local state — no network
-// call. Since the fs-reserved-suffix-collisions change, per-file chunk dirs
-// live under the reserved metadata namespace
+// call. Per-file chunk dirs live under the reserved metadata namespace
 // (stagingDir/.d8-meta/chunks/<relPath><ext>.d) so no server-provided path can
 // alias one, so this scans ONLY that subtree. A per-file chunk directory is
 // identified by the presence of a readable chunks.meta sidecar — the same
