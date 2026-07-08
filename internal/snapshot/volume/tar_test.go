@@ -395,3 +395,86 @@ func TestWriteTar_CompressedFileEntries(t *testing.T) {
 	require.NoError(t, err, "decode sub/beta.txt entry")
 	assert.Equal(t, betaOrig, betaDecoded)
 }
+
+// ── symlink target sanitization (sanitize-server-provided-paths) ───────────
+
+// TestWriteTar_RejectsUnsafeSymlinkTargets is the primary regression test for the
+// symlink half of sanitize-server-provided-paths: a target that is absolute or that
+// climbs above the volume root once resolved relative to its own entry's directory
+// must be rejected with a wrapped ErrUnsafePath BEFORE the tar header is written, and
+// the output tar must not exist afterward. An in-root relative target ("sibling")
+// must keep working unchanged.
+func TestWriteTar_RejectsUnsafeSymlinkTargets(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		entryPath  string
+		linkTarget string
+	}{
+		{name: "AbsoluteTarget", entryPath: "link", linkTarget: "/abs"},
+		{name: "RootLevelParentEscape", entryPath: "link", linkTarget: "../../outside"},
+		{name: "NestedParentEscape", entryPath: "a/b/link", linkTarget: "../../../etc"},
+		{name: "EmptyTarget", entryPath: "link", linkTarget: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			outputDir := t.TempDir()
+			outPath := filepath.Join(outputDir, "data.tar")
+
+			entries := []volume.TarEntry{
+				{RelPath: tc.entryPath, Type: "link", Linkname: tc.linkTarget},
+			}
+
+			err := volume.WriteTar(context.Background(), outPath, t.TempDir(), entries)
+			if err == nil {
+				t.Fatal("expected an error for an unsafe symlink target, got nil")
+			}
+
+			assert.ErrorIs(t, err, volume.ErrUnsafePath)
+
+			_, statErr := os.Stat(outPath)
+			assert.True(t, os.IsNotExist(statErr), "output tar must not exist after a rejected symlink target")
+		})
+	}
+}
+
+// TestWriteTar_KeepsInRootRelativeSymlinkTargets proves the sanitization guard does
+// not disturb legitimate relative symlinks: a sibling target, and a target that dips
+// below and back above a subdirectory without net escaping the root, both keep
+// producing a normal TypeSymlink entry with the target preserved verbatim.
+func TestWriteTar_KeepsInRootRelativeSymlinkTargets(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		entryPath  string
+		linkTarget string
+	}{
+		{name: "Sibling", entryPath: "a/link", linkTarget: "sibling"},
+		{name: "UpAndBackDownWithinRoot", entryPath: "a/b/link", linkTarget: "../../c"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			outputDir := t.TempDir()
+			outPath := filepath.Join(outputDir, "data.tar")
+
+			entries := []volume.TarEntry{
+				{RelPath: tc.entryPath, Type: "link", Linkname: tc.linkTarget},
+			}
+
+			require.NoError(t, volume.WriteTar(context.Background(), outPath, t.TempDir(), entries))
+
+			headers, _ := readTar(t, outPath)
+			require.Len(t, headers, 1)
+			assert.Equal(t, byte(tar.TypeSymlink), headers[0].Typeflag)
+			assert.Equal(t, tc.linkTarget, headers[0].Linkname)
+		})
+	}
+}

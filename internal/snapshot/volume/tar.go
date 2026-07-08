@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -201,7 +202,64 @@ func writeDirEntry(tw *tar.Writer, e TarEntry) error {
 	return nil
 }
 
+// validateSymlinkTarget rejects a symlink target that is absolute, contains an OS
+// separator other than "/", carries a NUL/control byte, or that — once resolved
+// relative to entryRelPath's own directory — would climb above the volume root.
+// WriteTar itself never follows symlinks (entries are only ever written as tar
+// headers), but a later `tar -x`/restore step does, so a target that escapes here
+// becomes a real path-traversal vector at extraction time. An in-root relative target
+// (a sibling file, or one that dips below and back above a subdirectory without net
+// escaping the root) is left unchanged.
+func validateSymlinkTarget(entryRelPath, target string) error {
+	if target == "" {
+		return fmt.Errorf("%w: empty symlink target", ErrUnsafePath)
+	}
+
+	for _, r := range target {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%w: control byte in symlink target %q", ErrUnsafePath, target)
+		}
+	}
+
+	if strings.ContainsRune(target, '\\') {
+		return fmt.Errorf("%w: OS separator in symlink target %q", ErrUnsafePath, target)
+	}
+
+	if strings.HasPrefix(target, "/") {
+		return fmt.Errorf("%w: absolute symlink target %q", ErrUnsafePath, target)
+	}
+
+	// dir is entryRelPath's own directory (with a trailing "/", or "" for a
+	// root-level entry), so target is resolved exactly as a symlink at that
+	// location would resolve it: relative to its own containing directory,
+	// not to the volume root.
+	dir := entryRelPath[:strings.LastIndex(entryRelPath, "/")+1]
+
+	depth := 0
+
+	for _, seg := range strings.Split(dir+target, "/") {
+		switch seg {
+		case "", ".":
+			continue
+		case "..":
+			if depth == 0 {
+				return fmt.Errorf("%w: symlink target %q for %q escapes the volume root", ErrUnsafePath, target, entryRelPath)
+			}
+
+			depth--
+		default:
+			depth++
+		}
+	}
+
+	return nil
+}
+
 func writeLinkEntry(tw *tar.Writer, e TarEntry) error {
+	if err := validateSymlinkTarget(e.RelPath, e.Linkname); err != nil {
+		return fmt.Errorf("write link entry %s: %w", e.RelPath, err)
+	}
+
 	mode := e.Mode
 	if mode == 0 {
 		mode = 0o777

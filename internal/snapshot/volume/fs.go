@@ -51,6 +51,51 @@ import (
 // that the local, self-referential archive.VerifyNode checksum cannot detect on its own.
 var ErrSourceHashMismatch = errors.New("staged file does not match source-provided MD5 digest")
 
+// ErrUnsafePath is returned when a path or symlink target supplied by the data-exporter
+// listing fails safety validation. The listing (item.Name, item.TargetPath) is untrusted
+// input from a potentially compromised or buggy exporter: it MUST be validated before
+// ever being used in a filepath.Join or written into a tar header, or a malicious
+// response could stage files outside the intended directory (path traversal / zip-slip)
+// or materialize a symlink that escapes the extracted tree on restore. See
+// collectAllFSItems (the name/relPath ingestion checkpoint) and tar.go's
+// writeLinkEntry (the symlink-target write guard).
+var ErrUnsafePath = errors.New("server-provided path is unsafe")
+
+// sanitizeRelPath validates that p is safe to treat as a "/"-separated path relative to
+// the volume root: non-empty, free of NUL/control bytes and non-"/" OS separators, not
+// absolute, and containing no "."/".." element. A real data-exporter listing entry name
+// is a literal directory entry — "." and ".." are not valid filenames on any filesystem
+// — so rejecting them here can never reject a legitimate listing, only a malicious or
+// corrupted one. On success it returns p unchanged: the result is safe to append to a
+// relPrefix or convert with filepath.FromSlash for a filepath.Join.
+func sanitizeRelPath(p string) (string, error) {
+	if p == "" {
+		return "", fmt.Errorf("%w: empty name", ErrUnsafePath)
+	}
+
+	for _, r := range p {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("%w: control byte in %q", ErrUnsafePath, p)
+		}
+	}
+
+	if strings.ContainsRune(p, '\\') {
+		return "", fmt.Errorf("%w: OS separator in %q", ErrUnsafePath, p)
+	}
+
+	if strings.HasPrefix(p, "/") {
+		return "", fmt.Errorf("%w: absolute path %q", ErrUnsafePath, p)
+	}
+
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return "", fmt.Errorf("%w: %q element in %q", ErrUnsafePath, seg, p)
+		}
+	}
+
+	return p, nil
+}
+
 // countingReader wraps an io.Reader and reports raw bytes read to onProgress
 // incrementally, as the stream is consumed, so a byte-progress bar advances
 // during FS file staging instead of jumping from 0% to 100% in one frame.
@@ -241,13 +286,18 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 	var result []fsItem
 
 	for _, item := range items {
+		safeName, nameErr := sanitizeRelPath(item.Name)
+		if nameErr != nil {
+			return nil, fmt.Errorf("listing %s: %w", dirURL, nameErr)
+		}
+
 		ref, err := url.Parse(item.URI)
 		if err != nil {
 			return nil, fmt.Errorf("parse item URI %q: %w", item.URI, err)
 		}
 
 		absURI := base.ResolveReference(ref).String()
-		relPath := relPrefix + item.Name
+		relPath := relPrefix + safeName
 		mode, uid, gid, mtime, md5Hex := parseItemAttrs(item.Attributes)
 
 		switch item.Type {

@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/md5" //nolint:gosec // test fixture digest, matches the exporter's own hash.md5 attribute
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -77,7 +78,7 @@ func fsTestServer(t *testing.T) (*httptest.Server, []fsTestFile) {
 				`{"apiVersion":"v1","items":[`+
 					`{"name":"root.txt","type":"file","uri":"root.txt","attributes":{}},`+
 					`{"name":"subdir","type":"dir","uri":"subdir/","attributes":{}},`+
-					`{"name":"symlink.txt","type":"link","uri":"","targetPath":"/other","attributes":{}}`+
+					`{"name":"symlink.txt","type":"link","uri":"","targetPath":"root.txt","attributes":{}}`+
 					`]}`)
 
 		case "/files/subdir/":
@@ -309,7 +310,7 @@ func TestDownloadFilesystemVolume_LinkNotInTar(t *testing.T) {
 			t.Fatalf("read tar: %v", err)
 		}
 
-		// Symlinks in the test server have no body and targetPath="/other";
+		// Symlinks in the test server have no body and targetPath="root.txt";
 		// they should be written as TypeSymlink entries, not TypeReg entries.
 		if hdr.Name == "symlink.txt" && hdr.Typeflag == tar.TypeReg {
 			t.Error("symlink was written as a regular file entry in the tar")
@@ -530,7 +531,7 @@ func TestDownloadFilesystemVolume_RealisticAttributes(t *testing.T) {
 			_, _ = io.WriteString(w,
 				`{"apiVersion":"v1","items":[`+
 					`{"name":"file.txt","type":"file","uri":"file.txt","attributes":{"permissions":"0640","modtime":"`+timeStr+`","uid":1000,"gid":2000,"size":5}},`+
-					`{"name":"link.lnk","type":"link","uri":"","targetPath":"/target","attributes":{"permissions":"0750","modtime":"`+timeStr+`","uid":0,"gid":0}}`+
+					`{"name":"link.lnk","type":"link","uri":"","targetPath":"file.txt","attributes":{"permissions":"0750","modtime":"`+timeStr+`","uid":0,"gid":0}}`+
 					`]}`)
 
 		case "/files/file.txt":
@@ -1814,5 +1815,114 @@ func TestDownloadFilesystemVolume_SizesSidecar_FromScratchUnchanged(t *testing.T
 
 	if _, err := os.Stat(stagingDir); !os.IsNotExist(err) {
 		t.Error("staging dir (and its sidecar) should have been removed after a successful from-scratch run")
+	}
+}
+
+// ── path sanitization (sanitize-server-provided-paths) ─────────────────────
+
+// singleItemFSServer builds an httptest.Server exposing a one-item filesystem listing
+// at "/files/" whose sole item carries itemName verbatim, JSON-encoded via
+// encoding/json so quotes/backslashes/control bytes survive intact — simulating a
+// malicious or corrupted data-exporter response that a hand-written JSON literal could
+// not safely express.
+func singleItemFSServer(t *testing.T, itemName string) *httptest.Server {
+	t.Helper()
+
+	body, err := json.Marshal(struct {
+		APIVersion string          `json:"apiVersion"`
+		Items      []exporter.Item `json:"items"`
+	}{
+		APIVersion: "v1",
+		Items: []exporter.Item{
+			{Name: itemName, Type: "file", URI: "file.bin", Attributes: map[string]any{}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal listing: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/files/" {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+// TestDownloadFilesystemVolume_RejectsUnsafeItemNames is the primary regression test
+// for sanitize-server-provided-paths: a listing item whose name is an absolute path,
+// carries a ".." element, is empty/dot-only, or contains a control byte must be
+// rejected with a wrapped ErrUnsafePath BEFORE any filepath.Join, so nothing is ever
+// staged outside stagingDir. A legitimate nested path ("a/b/c"-shaped, arising from
+// directory recursion) is exercised elsewhere by
+// TestDownloadFilesystemVolume_DownloadsTree (subdir/nested.txt) and must keep working
+// unchanged — this test only covers the rejection side.
+func TestDownloadFilesystemVolume_RejectsUnsafeItemNames(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		itemName string
+	}{
+		{name: "ParentDirEscape", itemName: "../evil"},
+		{name: "AbsolutePath", itemName: "/etc/passwd"},
+		{name: "EmbeddedParentDirEscape", itemName: "a/../../b"},
+		{name: "Empty", itemName: ""},
+		{name: "DotOnly", itemName: "."},
+		{name: "DotDotOnly", itemName: ".."},
+		{name: "ControlByte", itemName: "abc\x00def"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := singleItemFSServer(t, tc.itemName)
+
+			nodeDir := t.TempDir()
+			tarPath := filepath.Join(nodeDir, archive.FsTarName)
+			stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+			err := volume.DownloadFilesystemVolume(
+				context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+				1, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil,
+			)
+			if err == nil {
+				t.Fatal("expected an error for an unsafe item name, got nil")
+			}
+
+			if !errors.Is(err, volume.ErrUnsafePath) {
+				t.Errorf("expected errors.Is(err, ErrUnsafePath), got: %v", err)
+			}
+
+			if _, statErr := os.Stat(tarPath); !os.IsNotExist(statErr) {
+				t.Error("data.tar must not be created when the listing carries an unsafe name")
+			}
+
+			// Nothing must ever be staged outside nodeDir: walk the temp root's
+			// parent-free own tree and confirm no file escaped stagingDir/nodeDir.
+			// (An unsafe name is rejected in collectAllFSItems, before any file is
+			// staged, so nodeDir itself should contain at most the empty staging dir.)
+			entries, readErr := os.ReadDir(nodeDir)
+			if readErr != nil {
+				t.Fatalf("read node dir: %v", readErr)
+			}
+
+			for _, e := range entries {
+				if e.Name() != filepath.Base(stagingDir) {
+					t.Errorf("unexpected entry %q in node dir after rejected listing", e.Name())
+				}
+			}
+		})
 	}
 }
