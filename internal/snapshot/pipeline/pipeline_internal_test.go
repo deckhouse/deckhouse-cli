@@ -185,7 +185,8 @@ func TestDedupeSiblingTargetDirs_NoDuplicates(t *testing.T) {
 	for i := range raw {
 		require.Equal(t, raw[i].node, deduped[i].node, "node order unchanged")
 		require.Equal(t, raw[i].nodeDir, deduped[i].nodeDir, "target dir unchanged")
-		require.Equal(t, raw[i].state, deduped[i].state, "resume state unchanged")
+		require.Equal(t, raw[i].done, deduped[i].done, "resume decision unchanged")
+		require.Equal(t, raw[i].observed, deduped[i].observed, "observed label unchanged")
 	}
 }
 
@@ -213,7 +214,9 @@ func TestDedupeSiblingTargetDirs_ResumesPartialCollisionDir(t *testing.T) {
 
 	taskB := taskFor(t, tasks, childB)
 	require.Equal(t, collisionDir, taskB.nodeDir, "redirected sibling recomputes its own collision path")
-	require.Equal(t, archive.NodeStateBlockPartial, taskB.state, "redirected task resumes its own partial data from the collision dir")
+	require.False(t, taskB.done, "the collision-redirect plan must be honestly not done")
+	require.Equal(t, archive.ObservedBlockPartial, taskB.observed,
+		"the redirect re-scans the collision dir's real contents and observes its in-progress block staging")
 }
 
 // TestDownloadOwnDataRefs_MultiRef_RejectedByGuard pins the NO-DEAD-STATE guard

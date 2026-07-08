@@ -42,7 +42,11 @@ import (
 type nodeTask struct {
 	node    *source.Node
 	nodeDir string // final target directory (may differ from primary on collision)
-	state   archive.NodeState
+	// done is the resume scan's single consumed decision: a complete,
+	// identity-verified node is skipped. observed is a non-authoritative label of
+	// what the scan saw on disk, carried only for the "resume_state" log line.
+	done     bool
+	observed archive.ObservedState
 }
 
 // streamKey identifies a pre-created progress stream.
@@ -218,7 +222,7 @@ func failUnsettledStreams(streams map[streamKey]streamHandle) {
 // goroutine starts. The map is keyed by node pointer so each call site can
 // retrieve its handle without a second NewStream call.
 //
-// Streams for nodes that are already complete (NodeStateDone) are marked Done
+// Streams for nodes that are already complete (task.done) are marked Done
 // immediately so they render as already-complete (docker-pull "Already exists" style).
 //
 // Returns nil when cfg.Progress is nil (progress disabled), which causes all
@@ -258,7 +262,7 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]streamHandle {
 			// Orphan VolumeSnapshot leaf: one stream keyed on the node, name = leaf ref name.
 			s := cfg.Progress.NewStream(node.Ref().Name, 0)
 
-			if t.state == archive.NodeStateDone {
+			if t.done {
 				s.Done()
 
 				out[streamKey{node: node}] = streamHandle{stream: s}
@@ -270,7 +274,7 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]streamHandle {
 			// Non-aggregator with a single volume: one stream keyed on the node.
 			s := cfg.Progress.NewStream(node.Ref().Name, 0)
 
-			if t.state == archive.NodeStateDone {
+			if t.done {
 				s.Done()
 
 				out[streamKey{node: node}] = streamHandle{stream: s}
@@ -292,7 +296,7 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]streamHandle {
 // starting at 0 — well before the DataExport becomes ready or any network
 // call happens (see the download-progress-seed-committed-bytes design). It is
 // called once, right after the stream is created, for every task that is NOT
-// already NodeStateDone (a done node's stream is marked Done immediately by
+// already done (a done node's stream is marked Done immediately by
 // the caller and never downloads anything, so seeding it would be wasted
 // work).
 //
@@ -420,9 +424,10 @@ func collectNodeTasks(root *source.Node, outputDir string) ([]nodeTask, error) {
 // plan carries the already-computed resume state and target directory for node.
 func collectDFS(node *source.Node, plan archive.NodeResumePlan, tasks *[]nodeTask) error {
 	*tasks = append(*tasks, nodeTask{
-		node:    node,
-		nodeDir: plan.TargetDir,
-		state:   plan.State,
+		node:     node,
+		nodeDir:  plan.TargetDir,
+		done:     plan.Done,
+		observed: plan.Observed,
 	})
 
 	if len(node.Children) == 0 {
@@ -456,7 +461,7 @@ func collectDFS(node *source.Node, plan archive.NodeResumePlan, tasks *[]nodeTas
 // the on-disk directory name derives from the SOURCE object name
 // (nodeIdentity.DirName). Two sibling snapshot CRs referencing the SAME source
 // object therefore map to the same <parent>/snapshots/<kind>_<source>/ directory
-// and, on a FRESH run, both classify NodeStatePending (nothing on disk yet) — so
+// and, on a FRESH run, both classify not-done/pending (nothing on disk yet) — so
 // ScanNode cannot tell them apart and the Workers errgroup would process them
 // concurrently: two writers over one chunk dir / staging dir / snapshot.yaml.
 // That is exactly the single-writer violation the cross-process advisory flock
@@ -679,8 +684,8 @@ func nodeDirOf(node *source.Node) string {
 // the node directory (flat for 1 ref; multi-volume for >1). Aggregator snapshot
 // nodes (no OwnDataRefs, may have orphan leaf children) write manifests only.
 func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[streamKey]streamHandle) error {
-	if task.state == archive.NodeStateDone {
-		// Streams for NodeStateDone nodes were already marked Done in precreateStreams.
+	if task.done {
+		// Streams for done nodes were already marked Done in precreateStreams.
 		cfg.Log.Info("node already complete, skipping",
 			slog.String("kind", task.node.Kind),
 			slog.String("name", task.node.Name))
@@ -691,7 +696,7 @@ func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[str
 	cfg.Log.Info("processing node",
 		slog.String("kind", task.node.Kind),
 		slog.String("name", task.node.Name),
-		slog.String("resume_state", nodeStateName(task.state)))
+		slog.String("resume_state", string(task.observed)))
 
 	if task.node.Binding != nil {
 		return processVolumeNode(ctx, cfg, task, streams)
@@ -1244,25 +1249,6 @@ func skipSeededBytes(seeded int64, onProgress func(n int)) func(n int) {
 			// Straddles the boundary: forward only the tail beyond `seeded`.
 			onProgress(int(after - seeded))
 		}
-	}
-}
-
-// nodeStateName returns a human-readable label for a NodeState, used in log output
-// so that the classification produced by the resume scan is visible to operators.
-func nodeStateName(s archive.NodeState) string {
-	switch s {
-	case archive.NodeStatePending:
-		return "pending"
-	case archive.NodeStateBlockPartial:
-		return "block_partial"
-	case archive.NodeStateFSPartial:
-		return "fs_partial"
-	case archive.NodeStateManifestsOnly:
-		return "manifests_only"
-	case archive.NodeStateDone:
-		return "done"
-	default:
-		return "unknown"
 	}
 }
 

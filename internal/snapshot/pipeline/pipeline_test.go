@@ -1409,8 +1409,8 @@ func TestPipeline_Progress_PrecreateStreams(t *testing.T) {
 }
 
 // TestPipeline_Progress_ResumeSkip_NeverActivated verifies that when a leaf node is
-// already complete (NodeStateDone), its pre-created stream is Done immediately in
-// precreateStreams and is never Activated (OpenExport is not called).
+// already complete (the resume plan is done), its pre-created stream is Done
+// immediately in precreateStreams and is never Activated (OpenExport is not called).
 func TestPipeline_Progress_ResumeSkip_NeverActivated(t *testing.T) {
 	t.Parallel()
 
@@ -1422,7 +1422,7 @@ func TestPipeline_Progress_ResumeSkip_NeverActivated(t *testing.T) {
 	c := buildFakeClient(t)
 	outputDir := t.TempDir()
 
-	// First run: complete the pipeline so disk-snap reaches NodeStateDone.
+	// First run: complete the pipeline so disk-snap becomes a done node.
 	firstCfg := pipeline.Config{
 		Namespace:            testNS,
 		RootSnapshot:         rootSnapshot,
@@ -1436,7 +1436,7 @@ func TestPipeline_Progress_ResumeSkip_NeverActivated(t *testing.T) {
 	}
 	require.NoError(t, runPipeline(context.Background(), firstCfg))
 
-	// Second run: disk-snap is NodeStateDone; its stream must be Done immediately
+	// Second run: disk-snap is a done node; its stream must be Done immediately
 	// (in precreateStreams) and must never be Activated.
 	rec := &recordingSink{}
 
@@ -2977,8 +2977,8 @@ func buildMixedResumeFakeClient(t *testing.T) client.Client {
 
 // TestPipeline_MixedResumeStates_ConcurrentRun exercises the concurrent
 // collectNodeTasks/processNode resume path against a tree where sibling
-// leaves sit in every NodeState simultaneously: Done, BlockPartial,
-// FSPartial, ManifestsOnly, and Pending, all processed by ONE pipeline.Run
+// leaves sit in every observed resume condition simultaneously: done,
+// block-partial, fs-partial, manifests-only, and pending, all processed by ONE pipeline.Run
 // with cfg.Workers=3. The existing single-state resume tests
 // (TestPipeline_BlockResumeAfterMerge, TestPipeline_FSResumeAfterTar,
 // TestPipeline_PartialChunkResume) each exercise exactly one resume state at
@@ -2986,7 +2986,7 @@ func buildMixedResumeFakeClient(t *testing.T) client.Client {
 // processed siblings, which is the gap this test closes.
 //
 // Fixture strategy: run the full tree ONCE to completion, so every leaf
-// reaches NodeStateDone through the real download+finalize path (a genuinely
+// becomes a done node through the real download+finalize path (a genuinely
 // valid checksum/snapshot.yaml, not a hand-rolled one). Then, mimicking a
 // crash mid-run, four of the five leaves are rolled back to a specific
 // partial/pending state by deleting their finished artifacts and — for the

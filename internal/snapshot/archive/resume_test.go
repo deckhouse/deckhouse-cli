@@ -98,8 +98,12 @@ func TestScanNode_NoPrimaryDir(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if plan.State != archive.NodeStatePending {
-		t.Errorf("state = %v, want NodeStatePending", plan.State)
+	if plan.Done {
+		t.Error("Done = true, want not done (pending)")
+	}
+
+	if plan.Observed != archive.ObservedPending {
+		t.Errorf("Observed = %q, want ObservedPending", plan.Observed)
 	}
 
 	// When DirName is empty the directory falls back to the CR name.
@@ -126,8 +130,12 @@ func TestScanNode_NoPrimaryDir_DirName(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if plan.State != archive.NodeStatePending {
-		t.Errorf("state = %v, want NodeStatePending", plan.State)
+	if plan.Done {
+		t.Error("Done = true, want not done (pending)")
+	}
+
+	if plan.Observed != archive.ObservedPending {
+		t.Errorf("Observed = %q, want ObservedPending", plan.Observed)
 	}
 
 	// Directory must derive from DirName, not from the CR name.
@@ -162,8 +170,12 @@ func TestScanNode_CompleteNodeIdentityMatch(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if plan.State != archive.NodeStateDone {
-		t.Errorf("state = %v, want NodeStateDone", plan.State)
+	if !plan.Done {
+		t.Error("Done = false, want done")
+	}
+
+	if plan.Observed != archive.ObservedDone {
+		t.Errorf("Observed = %q, want ObservedDone", plan.Observed)
 	}
 
 	// DirName not set → falls back to Name.
@@ -197,8 +209,12 @@ func TestScanNode_CompleteNodeIdentityMatch_DirName(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if plan.State != archive.NodeStateDone {
-		t.Errorf("state = %v, want NodeStateDone", plan.State)
+	if !plan.Done {
+		t.Error("Done = false, want done")
+	}
+
+	if plan.Observed != archive.ObservedDone {
+		t.Errorf("Observed = %q, want ObservedDone", plan.Observed)
 	}
 
 	// Directory derives from DirName ("source-disk"), not from the CR name.
@@ -247,8 +263,12 @@ func TestScanNode_CompleteNodeIdentityMismatch(t *testing.T) {
 	}
 
 	// The primary dir is complete for identity A; the new node must land elsewhere.
-	if plan.State != archive.NodeStatePending {
-		t.Errorf("state = %v, want NodeStatePending", plan.State)
+	if plan.Done {
+		t.Error("Done = true, want not done (pending)")
+	}
+
+	if plan.Observed != archive.ObservedPending {
+		t.Errorf("Observed = %q, want ObservedPending", plan.Observed)
 	}
 
 	primaryDir := filepath.Join(parent, archive.NodeDirName(idB.Kind, idB.Name))
@@ -294,8 +314,12 @@ func TestScanNode_CollisionUseDirName(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if plan.State != archive.NodeStatePending {
-		t.Errorf("state = %v, want NodeStatePending", plan.State)
+	if plan.Done {
+		t.Error("Done = true, want not done (pending)")
+	}
+
+	if plan.Observed != archive.ObservedPending {
+		t.Errorf("Observed = %q, want ObservedPending", plan.Observed)
 	}
 
 	// Collision path must be under the DirName-based prefix, not the CR name.
@@ -346,8 +370,12 @@ func TestScanNode_BlockPartialWithTmp(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if plan.State != archive.NodeStateBlockPartial {
-		t.Errorf("state = %v, want NodeStateBlockPartial", plan.State)
+	if plan.Done {
+		t.Error("Done = true, want not done (block partial)")
+	}
+
+	if plan.Observed != archive.ObservedBlockPartial {
+		t.Errorf("Observed = %q, want ObservedBlockPartial", plan.Observed)
 	}
 
 	if plan.TargetDir != nodeDir {
@@ -366,7 +394,7 @@ func TestScanNode_BlockPartialWithTmp(t *testing.T) {
 // TestScanNode_BlockPartialAllPartFiles is the regression test for the
 // durable sub-chunk resume design: a chunk directory holding ONLY a durable
 // ".part" raw-partial file (no chunk has finalized yet) must still classify
-// as NodeStateBlockPartial, not NodeStatePending/ManifestsOnly, so the
+// still be observed as block-partial (never done), so the
 // pipeline resumes the node instead of restarting it from scratch. It must
 // also NOT be swept by removeTmpFiles, which only targets "*.tmp" — the
 // whole reason the durable partial uses a non-.tmp suffix.
@@ -398,8 +426,12 @@ func TestScanNode_BlockPartialAllPartFiles(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if plan.State != archive.NodeStateBlockPartial {
-		t.Errorf("state = %v, want NodeStateBlockPartial", plan.State)
+	if plan.Done {
+		t.Error("Done = true, want not done (block partial)")
+	}
+
+	if plan.Observed != archive.ObservedBlockPartial {
+		t.Errorf("Observed = %q, want ObservedBlockPartial", plan.Observed)
 	}
 
 	if plan.TargetDir != nodeDir {
@@ -445,8 +477,12 @@ func TestScanNode_FSPartial(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if plan.State != archive.NodeStateFSPartial {
-		t.Errorf("state = %v, want NodeStateFSPartial", plan.State)
+	if plan.Done {
+		t.Error("Done = true, want not done (fs partial)")
+	}
+
+	if plan.Observed != archive.ObservedFSPartial {
+		t.Errorf("Observed = %q, want ObservedFSPartial", plan.Observed)
 	}
 
 	if plan.TargetDir != nodeDir {
@@ -484,8 +520,12 @@ func TestScanNode_FSTarStagingPartial(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if plan.State != archive.NodeStateFSPartial {
-		t.Errorf("state = %v, want NodeStateFSPartial", plan.State)
+	if plan.Done {
+		t.Error("Done = true, want not done (fs partial)")
+	}
+
+	if plan.Observed != archive.ObservedFSPartial {
+		t.Errorf("Observed = %q, want ObservedFSPartial", plan.Observed)
 	}
 
 	if plan.TargetDir != nodeDir {
@@ -534,8 +574,12 @@ func TestScanNode_FSStaging_UserTmpBlobSurvivesSweep(t *testing.T) {
 		t.Fatalf("ScanNode: %v", err)
 	}
 
-	if plan.State != archive.NodeStateFSPartial {
-		t.Errorf("state = %v, want NodeStateFSPartial", plan.State)
+	if plan.Done {
+		t.Error("Done = true, want not done (fs partial)")
+	}
+
+	if plan.Observed != archive.ObservedFSPartial {
+		t.Errorf("Observed = %q, want ObservedFSPartial", plan.Observed)
 	}
 
 	if _, err := os.Stat(userBlob); err != nil {
@@ -572,8 +616,12 @@ func TestScanNode_ManifestsOnly(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if plan.State != archive.NodeStateManifestsOnly {
-		t.Errorf("state = %v, want NodeStateManifestsOnly", plan.State)
+	if plan.Done {
+		t.Error("Done = true, want not done (manifests only)")
+	}
+
+	if plan.Observed != archive.ObservedManifestsOnly {
+		t.Errorf("Observed = %q, want ObservedManifestsOnly", plan.Observed)
 	}
 
 	if plan.TargetDir != nodeDir {
@@ -620,8 +668,12 @@ func TestScanNode_PartialMismatchedMarker_Redirects(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if plan.State != archive.NodeStatePending {
-		t.Errorf("state = %v, want NodeStatePending (redirect)", plan.State)
+	if plan.Done {
+		t.Error("Done = true, want not done (redirect)")
+	}
+
+	if plan.Observed != archive.ObservedPending {
+		t.Errorf("Observed = %q, want ObservedPending (redirect)", plan.Observed)
 	}
 
 	if plan.TargetDir == nodeDir {
@@ -663,8 +715,12 @@ func TestScanNode_PartialNoMarker_Redirects(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if plan.State != archive.NodeStatePending {
-		t.Errorf("state = %v, want NodeStatePending (redirect)", plan.State)
+	if plan.Done {
+		t.Error("Done = true, want not done (redirect)")
+	}
+
+	if plan.Observed != archive.ObservedPending {
+		t.Errorf("Observed = %q, want ObservedPending (redirect)", plan.Observed)
 	}
 
 	if plan.TargetDir == nodeDir {
@@ -697,8 +753,12 @@ func TestScanNode_FreshEmptyDir_NoMarker_Resumes(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if plan.State != archive.NodeStateManifestsOnly {
-		t.Errorf("state = %v, want NodeStateManifestsOnly (fresh, resumable)", plan.State)
+	if plan.Done {
+		t.Error("Done = true, want not done (fresh, resumable)")
+	}
+
+	if plan.Observed != archive.ObservedManifestsOnly {
+		t.Errorf("Observed = %q, want ObservedManifestsOnly (fresh, resumable)", plan.Observed)
 	}
 
 	if plan.TargetDir != nodeDir {
@@ -730,8 +790,12 @@ func TestScanAbsolute_PartialMatchingMarker_Resumes(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if plan.State != archive.NodeStateBlockPartial {
-		t.Errorf("state = %v, want NodeStateBlockPartial", plan.State)
+	if plan.Done {
+		t.Error("Done = true, want not done (block partial)")
+	}
+
+	if plan.Observed != archive.ObservedBlockPartial {
+		t.Errorf("Observed = %q, want ObservedBlockPartial", plan.Observed)
 	}
 
 	if plan.TargetDir != nodeDir {

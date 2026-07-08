@@ -994,7 +994,8 @@ func TestDownloadBlockChunks_PartialSurvivesResumeScan(t *testing.T) {
 	plan, err := archive.ScanNode(parent, id)
 	require.NoError(t, err)
 
-	assert.Equal(t, archive.NodeStateBlockPartial, plan.State)
+	assert.False(t, plan.Done, "an in-flight partial dir must not be classified as done")
+	assert.Equal(t, archive.ObservedBlockPartial, plan.Observed)
 
 	_, statErr := os.Stat(partPath)
 	assert.NoError(t, statErr, "durable partial must survive ScanNode's stale-tmp cleanup")
