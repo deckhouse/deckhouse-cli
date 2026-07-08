@@ -49,15 +49,21 @@ func TestParseChunkSize(t *testing.T) {
 		want    int64
 		wantErr bool
 	}{
+		// Golden values: resource.ParseQuantity must yield the same byte counts
+		// the old hand-rolled parser produced for these spellings.
 		{"256Mi", 256 * 1024 * 1024, false},
-		{"256MiB", 256 * 1024 * 1024, false},
 		// at max: exactly maxChunkSize (4x DefaultChunkSize == 1 GiB)
 		{"1Gi", 1 * 1024 * 1024 * 1024, false},
-		{"1GiB", 1 * 1024 * 1024 * 1024, false},
 		{"512Mi", 512 * 1024 * 1024, false},
 		{"128M", 128 * 1000 * 1000, false},
-		{"128MB", 128 * 1000 * 1000, false},
 		{"1G", 1 * 1000 * 1000 * 1000, false},
+		// Deliberately dropped legacy spellings: "MiB"/"GiB"/"MB" and uppercase
+		// "K" are NOT resource.Quantity suffixes and now error (reflected in the
+		// flag help). Previously these were accepted by the hand-rolled parser.
+		{"256MiB", 0, true},
+		{"1GiB", 0, true},
+		{"128MB", 0, true},
+		{"1K", 0, true},
 		// too small: below DefaultChunkSize/16
 		{"1Ki", 0, true},
 		// zero
@@ -70,6 +76,14 @@ func TestParseChunkSize(t *testing.T) {
 		{"1025Mi", 0, true},
 		// well above maxChunkSize
 		{"4Gi", 0, true},
+		// Trailing/embedded garbage that the old fmt.Sscanf("%d") parser
+		// silently truncated to a different size — must now be rejected.
+		{"12x3Mi", 0, true},
+		{"12 3Mi", 0, true},
+		{"12x3", 0, true},
+		{"256 Mi", 0, true},
+		{"Mi", 0, true},
+		{"--5Mi", 0, true},
 	}
 
 	for _, tc := range cases {

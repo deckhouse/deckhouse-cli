@@ -32,6 +32,7 @@ import (
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
@@ -111,7 +112,7 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 	cmd.Flags().Int(flagWorkers, 4, "maximum number of nodes downloaded concurrently")
 	cmd.Flags().Int(flagPerVolumeConcurrency, 4, "maximum parallel chunk/file downloads per volume")
 	cmd.Flags().Int(flagMaxParallelDownloads, 5, "global cap on concurrent whole-volume-stream downloads across all nodes (independent of --workers and --per-volume-concurrency)")
-	cmd.Flags().String(flagChunkSize, "", "block-volume chunk size (e.g. 256Mi); defaults to 256Mi (min 16Mi, max 1Gi)")
+	cmd.Flags().String(flagChunkSize, "", "block-volume chunk size as a resource.Quantity, e.g. 256Mi, 512Mi, 1Gi (binary Ki/Mi/Gi) or decimal 128M/1G (decimal k/M/G, note lowercase k); the 'MiB'/'MB'/'GB'/'KiB' and uppercase 'K' spellings are NOT accepted; defaults to 256Mi (min 16Mi, max 1Gi)")
 	cmd.Flags().String(flagVolumeCompression, compress.DefaultCodecName,
 		"volume compression codec ("+strings.Join(compress.Names(), ", ")+
 			"); block volumes: data.bin[.<ext>]; filesystem volumes: per-file compressed entries inside an uncompressed data.tar container")
@@ -422,60 +423,44 @@ func parseNodeFlag(s string) (string, string, error) {
 const maxChunkSize = 4 * volume.DefaultChunkSize // 1 GiB
 
 // parseChunkSize converts a human-readable size string (e.g. "256Mi", "128M")
-// into bytes. An empty string returns 0, which the pipeline interprets as
+// into bytes using k8s.io/apimachinery's resource.ParseQuantity. Delegating to
+// Quantity — a direct in-repo dependency (see internal/data/dataexport) — parses
+// these unit spellings strictly and, unlike the previous hand-rolled
+// suffix-stripping + fmt.Sscanf("%d") parser, REJECTS trailing/embedded garbage
+// (e.g. "12x3Mi", "12 3Mi") instead of silently truncating it to a different,
+// unintended size. An empty string returns 0, which the pipeline interprets as
 // volume.DefaultChunkSize (256 MiB). The result must fall within
 // [volume.DefaultChunkSize/16, maxChunkSize]; see maxChunkSize for the
 // ceiling's rationale.
+//
+// Accepted suffixes are exactly resource.Quantity's: binary Ki/Mi/Gi (powers of
+// 1024) and decimal k/M/G (powers of 1000; decimal kilo is lowercase "k"). This
+// is a deliberate divergence from the old parser, which also accepted
+// "MiB"/"MB"/"GB"/"KiB" and uppercase "K"; those are NOT Quantity suffixes and
+// now error. The flag help text documents the accepted spellings.
 func parseChunkSize(s string) (int64, error) {
 	if s == "" {
 		return 0, nil
 	}
 
-	// Normalise "Mi" -> "MiB" style variants for resource.Quantity.
-	s = strings.TrimSpace(s)
-
-	var mult int64 = 1
-
-	switch {
-	case strings.HasSuffix(s, "GiB") || strings.HasSuffix(s, "Gi"):
-		mult = 1024 * 1024 * 1024
-		s = strings.TrimRightFunc(s, func(r rune) bool { return r == 'B' || r == 'i' || r == 'G' })
-	case strings.HasSuffix(s, "MiB") || strings.HasSuffix(s, "Mi"):
-		mult = 1024 * 1024
-		s = strings.TrimRightFunc(s, func(r rune) bool { return r == 'B' || r == 'i' || r == 'M' })
-	case strings.HasSuffix(s, "KiB") || strings.HasSuffix(s, "Ki"):
-		mult = 1024
-		s = strings.TrimRightFunc(s, func(r rune) bool { return r == 'B' || r == 'i' || r == 'K' })
-	case strings.HasSuffix(s, "GB") || strings.HasSuffix(s, "G"):
-		mult = 1000 * 1000 * 1000
-		s = strings.TrimRightFunc(s, func(r rune) bool { return r == 'B' || r == 'G' })
-	case strings.HasSuffix(s, "MB") || strings.HasSuffix(s, "M"):
-		mult = 1000 * 1000
-		s = strings.TrimRightFunc(s, func(r rune) bool { return r == 'B' || r == 'M' })
-	case strings.HasSuffix(s, "KB") || strings.HasSuffix(s, "K"):
-		mult = 1000
-		s = strings.TrimRightFunc(s, func(r rune) bool { return r == 'B' || r == 'K' })
-	}
-
-	var n int64
-
-	_, err := fmt.Sscanf(s, "%d", &n)
+	q, err := resource.ParseQuantity(strings.TrimSpace(s))
 	if err != nil {
-		return 0, fmt.Errorf("invalid size %q: %w", s, err)
+		return 0, fmt.Errorf("invalid size %q (use a resource.Quantity, e.g. 256Mi, 512Mi, 1Gi, or decimal 128M/1G): %w", s, err)
 	}
+
+	n := q.Value()
 
 	if n <= 0 {
 		return 0, fmt.Errorf("chunk size must be positive, got %d", n)
 	}
 
-	result := n * mult
-	if result < volume.DefaultChunkSize/16 {
-		return 0, fmt.Errorf("chunk size %d bytes is too small (minimum %d bytes)", result, volume.DefaultChunkSize/16)
+	if n < volume.DefaultChunkSize/16 {
+		return 0, fmt.Errorf("chunk size %d bytes is too small (minimum %d bytes)", n, volume.DefaultChunkSize/16)
 	}
 
-	if result > maxChunkSize {
-		return 0, fmt.Errorf("chunk size %d bytes is too large (maximum %d bytes)", result, maxChunkSize)
+	if n > maxChunkSize {
+		return 0, fmt.Errorf("chunk size %d bytes is too large (maximum %d bytes)", n, maxChunkSize)
 	}
 
-	return result, nil
+	return n, nil
 }
