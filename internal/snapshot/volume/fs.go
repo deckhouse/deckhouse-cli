@@ -63,11 +63,16 @@ var ErrUnsafePath = errors.New("server-provided path is unsafe")
 
 // sanitizeRelPath validates that p is safe to treat as a "/"-separated path relative to
 // the volume root: non-empty, free of NUL/control bytes and non-"/" OS separators, not
-// absolute, and containing no "."/".." element. A real data-exporter listing entry name
-// is a literal directory entry — "." and ".." are not valid filenames on any filesystem
-// — so rejecting them here can never reject a legitimate listing, only a malicious or
-// corrupted one. On success it returns p unchanged: the result is safe to append to a
-// relPrefix or convert with filepath.FromSlash for a filepath.Join.
+// absolute, containing no empty/"."/".." element, and not entering the reserved metadata
+// namespace (its FIRST segment must not equal FSMetaDirName). A real data-exporter listing
+// entry name is a literal directory entry — "", "." and ".." are not valid filenames on any
+// filesystem — so rejecting them here can never reject a legitimate listing, only a
+// malicious or corrupted one. The reserved-namespace check keys on the first segment
+// because only a root-level ".d8-meta" collides with stagingDir/.d8-meta; a nested
+// "sub/.d8-meta" stages under a user subtree and is harmless (inv. #10a). On success it
+// returns p unchanged: the result is safe to convert with filepath.FromSlash for a
+// filepath.Join. It is fed the FULL relative path (relPrefix + leaf) at the single
+// ingestion checkpoint (collectAllFSItems), so the first-segment guard sees the whole path.
 func sanitizeRelPath(p string) (string, error) {
 	if p == "" {
 		return "", fmt.Errorf("%w: empty name", ErrUnsafePath)
@@ -87,10 +92,26 @@ func sanitizeRelPath(p string) (string, error) {
 		return "", fmt.Errorf("%w: absolute path %q", ErrUnsafePath, p)
 	}
 
-	for _, seg := range strings.Split(p, "/") {
+	segs := strings.Split(p, "/")
+
+	for _, seg := range segs {
+		if seg == "" {
+			return "", fmt.Errorf("%w: empty path element in %q", ErrUnsafePath, p)
+		}
+
 		if seg == "." || seg == ".." {
 			return "", fmt.Errorf("%w: %q element in %q", ErrUnsafePath, seg, p)
 		}
+	}
+
+	// The staging dir reserves FSMetaDirName for the download machinery's own
+	// artifacts (the sizes sidecar); enforce that namespace at this single
+	// ingestion checkpoint so no server-provided path can ever stage into it.
+	// Only the FIRST segment collides: stagingDir/<relPath><ext> puts a
+	// root-level ".d8-meta" entry at the exact path we own, whereas a deeper
+	// "a/.d8-meta" lands under a user subtree and is harmless.
+	if segs[0] == FSMetaDirName {
+		return "", fmt.Errorf("%w: %q is the reserved metadata namespace in %q", ErrUnsafePath, FSMetaDirName, p)
 	}
 
 	return p, nil
@@ -286,7 +307,10 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 	var result []fsItem
 
 	for _, item := range items {
-		safeName, nameErr := sanitizeRelPath(item.Name)
+		// Validate the FULL relative path (relPrefix is already sanitized) so the
+		// reserved-namespace guard keys on the whole path's first segment: a
+		// root-level ".d8-meta" is rejected, a nested "sub/.d8-meta" allowed.
+		relPath, nameErr := sanitizeRelPath(relPrefix + item.Name)
 		if nameErr != nil {
 			return nil, fmt.Errorf("listing %s: %w", dirURL, nameErr)
 		}
@@ -297,7 +321,6 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 		}
 
 		absURI := base.ResolveReference(ref).String()
-		relPath := relPrefix + safeName
 		mode, uid, gid, mtime, md5Hex := parseItemAttrs(item.Attributes)
 
 		switch item.Type {
@@ -717,6 +740,13 @@ func ScanFSStagingProgress(stagingDir, ext string) (int64, error) {
 			return nil
 		}
 
+		// The reserved metadata dir holds internal artifacts (the sizes
+		// sidecar), never staged volume bytes: never count it and never
+		// descend into it.
+		if path == filepath.Join(stagingDir, FSMetaDirName) {
+			return fs.SkipDir
+		}
+
 		_, found, metaErr := archive.ReadChunkMeta(path)
 		if metaErr != nil || !found {
 			return nil
@@ -738,15 +768,28 @@ func ScanFSStagingProgress(stagingDir, ext string) (int64, error) {
 	return committed, nil
 }
 
+// FSMetaDirName is the reserved metadata subdirectory of an FS staging dir
+// (data.tar.d/) holding the download machinery's own internal artifacts (the
+// sizes sidecar today). It is dot-prefixed and clearly-internal, and
+// sanitizeRelPath rejects any server-provided path whose FIRST segment equals
+// it, so no user/server file can ever stage into this namespace — including at
+// codec none (ext == ""), where a user file literally named "sizes.json" would
+// otherwise stage to stagingDir/sizes.json, the exact path the sidecar used to
+// occupy, and be silently replaced by (or replace) internal JSON while the
+// resume-skip branch counted it "already staged" (inv. #10a). Keeping the
+// sidecar under this dir makes the staged-blob namespace belong to
+// server-provided paths only. It does not end in ".tmp" (survives
+// removeTmpFiles), lives inside the staging dir so it is removed with the rest
+// of the staging state on tar assembly, and is excluded from the node checksum
+// exactly like every other staging-dir file (archive.ComputeNodeChecksum never
+// walks the flat single-volume staging directory at all).
+const FSMetaDirName = ".d8-meta"
+
 // FSSizesSidecarName is the durable JSON sidecar recording per-file declared
-// sizes for a filesystem volume, written to stagingDir as soon as the
-// listing is first fetched. It intentionally does not end in ".tmp" so
-// archive.resume.go's removeTmpFiles never deletes it, and it lives inside
-// the FS staging dir (data.tar.d/) so it is removed along with the rest of
-// the staging state once the tar is assembled and is excluded from the node
-// checksum exactly like every other staging-dir file (see
-// archive.ComputeNodeChecksum, which never walks the flat single-volume
-// staging directory at all).
+// sizes for a filesystem volume, written under FSMetaDirName as soon as the
+// listing is first fetched (stagingDir/.d8-meta/sizes.json). Reads fall back to
+// a legacy stagingDir/sizes.json only when the reserved-namespace file is
+// absent (see ReadFSSizesSidecar).
 const FSSizesSidecarName = "sizes.json"
 
 // FSSizesSidecar records the per-file declared content sizes and their sum
@@ -759,11 +802,14 @@ type FSSizesSidecar struct {
 	Total int64            `json:"total"`
 }
 
-// writeFSSizesSidecar persists items' declared sizes to stagingDir as
-// FSSizesSidecarName, fsynced via archive.WriteFileAtomic. Only "file" items
-// with a known positive size are recorded — an unknown/zero declared size
-// (see parseItemSize) already contributes nothing to sumFileSizes, so
-// recording it would only bloat the sidecar without ever being credited.
+// writeFSSizesSidecar persists items' declared sizes under stagingDir's
+// reserved metadata dir (stagingDir/.d8-meta/sizes.json), fsynced via
+// archive.WriteFileAtomic. Only "file" items with a known positive size are
+// recorded — an unknown/zero declared size (see parseItemSize) already
+// contributes nothing to sumFileSizes, so recording it would only bloat the
+// sidecar without ever being credited. Writing under FSMetaDirName (never the
+// staging root) guarantees the sidecar cannot shadow a user file named
+// "sizes.json" at codec none (inv. #10a).
 func writeFSSizesSidecar(stagingDir string, items []fsItem) error {
 	sizes := FSSizesSidecar{
 		Files: make(map[string]int64, len(items)),
@@ -781,7 +827,13 @@ func writeFSSizesSidecar(stagingDir string, items []fsItem) error {
 		return fmt.Errorf("marshal fs sizes sidecar: %w", err)
 	}
 
-	path := filepath.Join(stagingDir, FSSizesSidecarName)
+	metaDir := filepath.Join(stagingDir, FSMetaDirName)
+
+	if err := archive.EnsureDir(metaDir); err != nil {
+		return fmt.Errorf("create fs metadata dir %s: %w", metaDir, err)
+	}
+
+	path := filepath.Join(metaDir, FSSizesSidecarName)
 
 	if err := archive.WriteFileAtomic(path, bytes.NewReader(data)); err != nil {
 		return fmt.Errorf("write fs sizes sidecar %s: %w", path, err)
@@ -790,12 +842,48 @@ func writeFSSizesSidecar(stagingDir string, items []fsItem) error {
 	return nil
 }
 
-// ReadFSSizesSidecar reads the sidecar written by writeFSSizesSidecar from
-// stagingDir. found is false (with a nil error) when the sidecar does not
-// exist — a from-scratch run, or a staging dir left by a run that predates
-// this feature — which callers must treat as "no persisted sizes available",
-// not as a legitimate zero total.
+// ReadFSSizesSidecar reads the sidecar written by writeFSSizesSidecar. It first
+// reads the reserved-namespace path (stagingDir/.d8-meta/sizes.json); only when
+// that file is absent does it fall back to the legacy stagingDir/sizes.json
+// written by runs predating the reserved metadata namespace. found is false
+// (with a nil error) when no sidecar exists at either location — a from-scratch
+// run, or a staging dir predating this feature — which callers must treat as
+// "no persisted sizes available", not as a legitimate zero total.
+//
+// The sidecar is a best-effort display/seed aid only; correctness never depends
+// on it (see pipeline.seedStreamFromDisk). That is what makes the conservative
+// legacy handling safe: at codec none a user file literally named "sizes.json"
+// could occupy the legacy path, so a legacy file that does not parse as an
+// FSSizesSidecar is treated as possible user data — left untouched, reported as
+// not-found — rather than risking a misread of (or worse, a write over) user
+// bytes. A lost seed is the worst outcome; a wrong-bytes outcome never is.
 func ReadFSSizesSidecar(stagingDir string) (FSSizesSidecar, bool, error) {
+	path := filepath.Join(stagingDir, FSMetaDirName, FSSizesSidecarName)
+
+	data, err := os.ReadFile(path)
+	if err == nil {
+		var sizes FSSizesSidecar
+
+		if err := json.Unmarshal(data, &sizes); err != nil {
+			return FSSizesSidecar{}, false, fmt.Errorf("parse fs sizes sidecar %s: %w", path, err)
+		}
+
+		return sizes, true, nil
+	}
+
+	if !os.IsNotExist(err) {
+		return FSSizesSidecar{}, false, fmt.Errorf("read fs sizes sidecar %s: %w", path, err)
+	}
+
+	return readLegacyFSSizesSidecar(stagingDir)
+}
+
+// readLegacyFSSizesSidecar reads the pre-metadata-namespace sidecar location,
+// stagingDir/sizes.json. It exists purely to keep resume-seeding working when
+// resuming a tree written before the sidecar moved under FSMetaDirName. An
+// unparseable legacy file is treated as possible user data (see
+// ReadFSSizesSidecar): reported as not-found, never deleted or overwritten.
+func readLegacyFSSizesSidecar(stagingDir string) (FSSizesSidecar, bool, error) {
 	path := filepath.Join(stagingDir, FSSizesSidecarName)
 
 	data, err := os.ReadFile(path)
@@ -804,13 +892,13 @@ func ReadFSSizesSidecar(stagingDir string) (FSSizesSidecar, bool, error) {
 			return FSSizesSidecar{}, false, nil
 		}
 
-		return FSSizesSidecar{}, false, fmt.Errorf("read fs sizes sidecar %s: %w", path, err)
+		return FSSizesSidecar{}, false, fmt.Errorf("read legacy fs sizes sidecar %s: %w", path, err)
 	}
 
 	var sizes FSSizesSidecar
 
 	if err := json.Unmarshal(data, &sizes); err != nil {
-		return FSSizesSidecar{}, false, fmt.Errorf("parse fs sizes sidecar %s: %w", path, err)
+		return FSSizesSidecar{}, false, nil
 	}
 
 	return sizes, true, nil

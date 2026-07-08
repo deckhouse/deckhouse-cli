@@ -2178,6 +2178,11 @@ func TestDownloadFilesystemVolume_RejectsUnsafeItemNames(t *testing.T) {
 		{name: "DotOnly", itemName: "."},
 		{name: "DotDotOnly", itemName: ".."},
 		{name: "ControlByte", itemName: "abc\x00def"},
+		// The reserved metadata namespace: a root-level ".d8-meta" (or anything
+		// under it as a first segment) must be rejected so no server-provided
+		// path can shadow the internal sidecar dir (inv. #10a).
+		{name: "ReservedMetadataDir", itemName: ".d8-meta"},
+		{name: "ReservedMetadataDirChild", itemName: ".d8-meta/x"},
 	}
 
 	for _, tc := range cases {
@@ -2221,5 +2226,401 @@ func TestDownloadFilesystemVolume_RejectsUnsafeItemNames(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ── reserved metadata namespace (fs-sizes-sidecar-reserved-namespace) ──────
+
+// TestDownloadFilesystemVolume_UserFileNamedSizesJson_NotShadowed is the
+// primary regression test for fs-sizes-sidecar-reserved-namespace: at codec
+// none (codec.Ext() == "") a USER file literally named "sizes.json" at the
+// volume root once staged to the exact path the internal sizes sidecar
+// occupied (stagingDir/sizes.json), so the sidecar shadowed it and the tar
+// packed internal JSON under the user's filename — silent data replacement.
+// With the sidecar relocated under the reserved FSMetaDirName the two never
+// collide: the user's bytes are staged, MD5-verified, and packed into
+// data.tar, while the sidecar lives at stagingDir/.d8-meta/sizes.json. The run
+// is interrupted mid-second-file so the (otherwise removed-on-success) staging
+// state can be inspected before a clean resume completes it.
+func TestDownloadFilesystemVolume_UserFileNamedSizesJson_NotShadowed(t *testing.T) {
+	t.Parallel()
+
+	userContent := []byte(`user file that merely happens to be named sizes.json`)
+	secondContent := bytes.Repeat([]byte("S"), 80)
+	userMD5 := hexMD5(userContent)
+	secondMD5 := hexMD5(secondContent)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"sizes.json","type":"file","uri":"sizes.json","attributes":{"size":`+strconv.Itoa(len(userContent))+`,"hash.md5":"`+userMD5+`"}},`+
+				`{"name":"b.bin","type":"file","uri":"b.bin","attributes":{"size":`+strconv.Itoa(len(secondContent))+`,"hash.md5":"`+secondMD5+`"}}`+
+				`]}`)
+
+		case "/files/sizes.json":
+			http.ServeContent(w, r, "sizes.json", time.Time{}, bytes.NewReader(userContent))
+
+		case "/files/b.bin":
+			http.ServeContent(w, r, "b.bin", time.Time{}, bytes.NewReader(secondContent))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	codec := mustCodec(t, "none")
+
+	// workers=1 serializes staging in listing order (sizes.json, then b.bin):
+	// call 1 = listing, call 2 = sizes.json's Range GET, call 3 = b.bin's Range
+	// GET, truncated mid-transfer so sizes.json is fully staged and b.bin is not.
+	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 3, cutBytes: 20}
+	fetcher := exporter.NewFetcher(doer)
+
+	err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, fetcher, codec, nil, nil,
+	)
+	if !errors.Is(err, errSimulatedInterrupt) {
+		t.Fatalf("expected errSimulatedInterrupt, got: %v", err)
+	}
+
+	// The internal sidecar must live under the reserved metadata dir, never at
+	// the staging root where it would collide with the user's file.
+	sidecarPath := filepath.Join(stagingDir, volume.FSMetaDirName, volume.FSSizesSidecarName)
+
+	sidecarBytes, statErr := os.ReadFile(sidecarPath)
+	if statErr != nil {
+		t.Fatalf("internal sidecar must exist under %s/%s: %v", volume.FSMetaDirName, volume.FSSizesSidecarName, statErr)
+	}
+
+	var sidecar volume.FSSizesSidecar
+	if jsonErr := json.Unmarshal(sidecarBytes, &sidecar); jsonErr != nil {
+		t.Fatalf("internal sidecar must be valid FSSizesSidecar JSON: %v", jsonErr)
+	}
+
+	if sidecar.Files["sizes.json"] != int64(len(userContent)) {
+		t.Errorf("sidecar Files[sizes.json] = %d; want %d (the user file's declared size)", sidecar.Files["sizes.json"], len(userContent))
+	}
+
+	// The user file must be staged as a flat blob at the staging ROOT, holding
+	// the USER's bytes — not the internal JSON. At codec none the flat blob is
+	// byte-identical to the source content.
+	stagedUser, readErr := os.ReadFile(filepath.Join(stagingDir, "sizes.json"))
+	if readErr != nil {
+		t.Fatalf("user file sizes.json must be staged at the staging root: %v", readErr)
+	}
+
+	if !bytes.Equal(stagedUser, userContent) {
+		t.Errorf("staged sizes.json holds %q; want the user content %q (internal JSON must never shadow it)", stagedUser, userContent)
+	}
+
+	// A real interrupted run stamps the identity marker on first touch; seed it
+	// so the resume scan proves identity instead of rejecting a marker-less dir.
+	if err := archive.WriteNodeIdentityMarker(nodeDir, archive.NodeIdentity{}); err != nil {
+		t.Fatalf("WriteNodeIdentityMarker: %v", err)
+	}
+
+	// Resume to completion (truncation never re-fires: the call counter is past
+	// cutOnCall). Both files must land in data.tar with their true source bytes.
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, fetcher, codec, nil, nil,
+	); err != nil {
+		t.Fatalf("resumed run must succeed: %v", err)
+	}
+
+	entries := readTarContents(t, tarPath)
+
+	if !bytes.Equal(entries["sizes.json"], userContent) {
+		t.Errorf("tar entry sizes.json = %q; want the user content %q", entries["sizes.json"], userContent)
+	}
+
+	if !bytes.Equal(entries["b.bin"], secondContent) {
+		t.Error("tar entry b.bin content mismatch after resume")
+	}
+}
+
+// TestDownloadFilesystemVolume_NestedReservedName_Accepted verifies the
+// first-segment scoping of the reserved-namespace guard: a file literally
+// named ".d8-meta" nested under a user directory ("a/.d8-meta") stages under a
+// user subtree, cannot collide with stagingDir/.d8-meta, and MUST download
+// normally. Only a root-level ".d8-meta" is rejected.
+func TestDownloadFilesystemVolume_NestedReservedName_Accepted(t *testing.T) {
+	t.Parallel()
+
+	nestedContent := []byte("legitimate user file that happens to be named .d8-meta")
+	nestedMD5 := hexMD5(nestedContent)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"a","type":"dir","uri":"a/","attributes":{}}`+
+				`]}`)
+
+		case "/files/a/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":".d8-meta","type":"file","uri":"a/.d8-meta","attributes":{"size":`+strconv.Itoa(len(nestedContent))+`,"hash.md5":"`+nestedMD5+`"}}`+
+				`]}`)
+
+		case "/files/a/.d8-meta":
+			http.ServeContent(w, r, ".d8-meta", time.Time{}, bytes.NewReader(nestedContent))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	codec := mustCodec(t, "none")
+
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, newFSFetcher(srv), codec, nil, nil,
+	); err != nil {
+		t.Fatalf("nested .d8-meta must download normally: %v", err)
+	}
+
+	entries := readTarContents(t, tarPath)
+
+	if !bytes.Equal(entries["a/.d8-meta"], nestedContent) {
+		t.Errorf("tar entry a/.d8-meta = %q; want %q", entries["a/.d8-meta"], nestedContent)
+	}
+}
+
+// TestScanFSStagingSizes_ReadsNewMetadataPath verifies ScanFSStagingSizes
+// (and, through it, ReadFSSizesSidecar) reads the sidecar from its new
+// reserved-namespace location, crediting only files already present as flat
+// staged blobs.
+func TestScanFSStagingSizes_ReadsNewMetadataPath(t *testing.T) {
+	t.Parallel()
+
+	stagingDir := t.TempDir()
+	stagedContent := bytes.Repeat([]byte("A"), 30)
+
+	if err := os.WriteFile(filepath.Join(stagingDir, "a.bin"), stagedContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	metaDir := filepath.Join(stagingDir, volume.FSMetaDirName)
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sidecarJSON, err := json.Marshal(volume.FSSizesSidecar{
+		Files: map[string]int64{"a.bin": 30, "b.bin": 60},
+		Total: 90,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(metaDir, volume.FSSizesSidecarName), sidecarJSON, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	total, staged, found, err := volume.ScanFSStagingSizes(stagingDir, "")
+	if err != nil {
+		t.Fatalf("ScanFSStagingSizes: %v", err)
+	}
+
+	if !found {
+		t.Fatal("found = false; want true when the sidecar exists under the metadata dir")
+	}
+
+	if total != 90 {
+		t.Errorf("total = %d; want 90", total)
+	}
+
+	if staged != 30 {
+		t.Errorf("staged = %d; want 30 (only a.bin is present as a flat blob)", staged)
+	}
+}
+
+// TestReadFSSizesSidecar_LegacyFallback verifies the backward-compatibility
+// contract for resuming a tree written before the sidecar moved under
+// FSMetaDirName: the new path wins when present; the legacy stagingDir/sizes.json
+// is used only when the new path is absent; and an UNPARSEABLE legacy file
+// (possibly a user file literally named sizes.json at codec none) is treated
+// conservatively — reported as not-found and left untouched, never deleted or
+// overwritten (the sidecar is a best-effort seed aid, so a lost seed is the
+// worst acceptable outcome; wrong-bytes is not).
+func TestReadFSSizesSidecar_LegacyFallback(t *testing.T) {
+	t.Parallel()
+
+	t.Run("NewPathPreferredOverLegacy", func(t *testing.T) {
+		t.Parallel()
+
+		stagingDir := t.TempDir()
+
+		metaDir := filepath.Join(stagingDir, volume.FSMetaDirName)
+		if err := os.MkdirAll(metaDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		newJSON, err := json.Marshal(volume.FSSizesSidecar{Files: map[string]int64{"x": 10}, Total: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.WriteFile(filepath.Join(metaDir, volume.FSSizesSidecarName), newJSON, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		legacyJSON, err := json.Marshal(volume.FSSizesSidecar{Files: map[string]int64{"y": 99}, Total: 99})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.WriteFile(filepath.Join(stagingDir, volume.FSSizesSidecarName), legacyJSON, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got, found, err := volume.ReadFSSizesSidecar(stagingDir)
+		if err != nil || !found {
+			t.Fatalf("ReadFSSizesSidecar: found=%v err=%v", found, err)
+		}
+
+		if got.Total != 10 {
+			t.Errorf("Total = %d; want 10 (the new-path sidecar, not the legacy one)", got.Total)
+		}
+	})
+
+	t.Run("LegacyUsedWhenNewAbsent", func(t *testing.T) {
+		t.Parallel()
+
+		stagingDir := t.TempDir()
+
+		legacyJSON, err := json.Marshal(volume.FSSizesSidecar{Files: map[string]int64{"y": 42}, Total: 42})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.WriteFile(filepath.Join(stagingDir, volume.FSSizesSidecarName), legacyJSON, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got, found, err := volume.ReadFSSizesSidecar(stagingDir)
+		if err != nil || !found {
+			t.Fatalf("ReadFSSizesSidecar: found=%v err=%v", found, err)
+		}
+
+		if got.Total != 42 {
+			t.Errorf("Total = %d; want 42 (legacy fallback)", got.Total)
+		}
+	})
+
+	t.Run("UnparseableLegacyReturnsNotFoundAndLeavesFile", func(t *testing.T) {
+		t.Parallel()
+
+		stagingDir := t.TempDir()
+		userBytes := []byte("a user file literally named sizes.json, not JSON at all\x00\xff")
+		legacyPath := filepath.Join(stagingDir, volume.FSSizesSidecarName)
+
+		if err := os.WriteFile(legacyPath, userBytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got, found, err := volume.ReadFSSizesSidecar(stagingDir)
+		if err != nil {
+			t.Fatalf("ReadFSSizesSidecar must not error on an unparseable legacy file: %v", err)
+		}
+
+		if found {
+			t.Error("found = true; want false for an unparseable legacy file (possible user data)")
+		}
+
+		if got.Total != 0 || len(got.Files) != 0 {
+			t.Errorf("got non-zero sidecar %+v; want the zero value", got)
+		}
+
+		// The ambiguous file must be left exactly as-is.
+		after, readErr := os.ReadFile(legacyPath)
+		if readErr != nil {
+			t.Fatalf("the legacy file must not be deleted: %v", readErr)
+		}
+
+		if !bytes.Equal(after, userBytes) {
+			t.Error("the legacy file bytes must be left untouched")
+		}
+	})
+}
+
+// TestScanFSStagingProgress_IgnoresMetadataDir verifies that the reserved
+// metadata dir is never descended into when accounting committed staged bytes:
+// a chunk-dir-shaped tree planted inside stagingDir/.d8-meta must contribute
+// nothing, even though an identical tree outside it is counted.
+func TestScanFSStagingProgress_IgnoresMetadataDir(t *testing.T) {
+	t.Parallel()
+
+	const (
+		chunkSize int64 = 100
+		totalSize int64 = 100
+	)
+
+	codec := mustCodec(t, "zstd")
+	ext := codec.Ext()
+
+	stagingDir := t.TempDir()
+
+	frame, err := codec.EncodeFrame(bytes.Repeat([]byte("A"), int(chunkSize)))
+	if err != nil {
+		t.Fatalf("encode frame: %v", err)
+	}
+
+	// A real in-progress per-file chunk dir: one finalized chunk -> counted.
+	realChunkDir := filepath.Join(stagingDir, archive.FsFileChunksDirName("real.bin", ext))
+	if err := os.MkdirAll(realChunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := archive.WriteChunkMeta(realChunkDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(realChunkDir, archive.ChunkFileName(0, ext)), frame, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// An identical chunk-dir-shaped tree planted INSIDE the reserved metadata
+	// dir. If the scan descended into .d8-meta it would double the count; it
+	// must not.
+	poisonDir := filepath.Join(stagingDir, volume.FSMetaDirName, "poison.d")
+	if err := os.MkdirAll(poisonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := archive.WriteChunkMeta(poisonDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(poisonDir, archive.ChunkFileName(0, ext)), frame, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	committed, err := volume.ScanFSStagingProgress(stagingDir, ext)
+	if err != nil {
+		t.Fatalf("ScanFSStagingProgress: %v", err)
+	}
+
+	if committed != chunkSize {
+		t.Errorf("committed = %d; want %d (only the real chunk dir; the metadata dir must be skipped)", committed, chunkSize)
 	}
 }
