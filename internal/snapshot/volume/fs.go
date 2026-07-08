@@ -18,6 +18,7 @@ package volume
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/md5" //nolint:gosec // not used for security; matches the exporter's own hash.md5 attribute
 	"encoding/hex"
@@ -147,6 +148,16 @@ func DownloadFilesystemVolume(
 	items, err := collectAllFSItems(ctx, fetcher, filesRootURL, base, "")
 	if err != nil {
 		return fmt.Errorf("list filesystem volume: %w", err)
+	}
+
+	// Persist the declared per-file sizes (and their sum) now that the listing
+	// is known, BEFORE any staging begins, so a crash-and-resume can recover
+	// them from disk on the next run without a network round-trip — see
+	// ReadFSSizesSidecar/ScanFSStagingSizes and pipeline.seedStreamFromDisk,
+	// which read this sidecar to seed a resumed stream's total and credit
+	// already-staged flat blobs before the DataExport is even Ready.
+	if err := writeFSSizesSidecar(stagingDir, items); err != nil {
+		return fmt.Errorf("persist fs sizes sidecar: %w", err)
 	}
 
 	// Report the expected total now that the listing (with per-file sizes) is known,
@@ -640,6 +651,124 @@ func ScanFSStagingProgress(stagingDir, ext string) (int64, error) {
 	}
 
 	return committed, nil
+}
+
+// FSSizesSidecarName is the durable JSON sidecar recording per-file declared
+// sizes for a filesystem volume, written to stagingDir as soon as the
+// listing is first fetched. It intentionally does not end in ".tmp" so
+// archive.resume.go's removeTmpFiles never deletes it, and it lives inside
+// the FS staging dir (data.tar.d/) so it is removed along with the rest of
+// the staging state once the tar is assembled and is excluded from the node
+// checksum exactly like every other staging-dir file (see
+// archive.ComputeNodeChecksum, which never walks the flat single-volume
+// staging directory at all).
+const FSSizesSidecarName = "sizes.json"
+
+// FSSizesSidecar records the per-file declared content sizes and their sum
+// for one filesystem volume, as known at listing time. relPath matches
+// fsItem.relPath (the tar entry's source path, BEFORE the codec extension is
+// appended) so it can be joined with the codec extension to locate a file's
+// staged blob.
+type FSSizesSidecar struct {
+	Files map[string]int64 `json:"files"`
+	Total int64            `json:"total"`
+}
+
+// writeFSSizesSidecar persists items' declared sizes to stagingDir as
+// FSSizesSidecarName, fsynced via archive.WriteFileAtomic. Only "file" items
+// with a known positive size are recorded — an unknown/zero declared size
+// (see parseItemSize) already contributes nothing to sumFileSizes, so
+// recording it would only bloat the sidecar without ever being credited.
+func writeFSSizesSidecar(stagingDir string, items []fsItem) error {
+	sizes := FSSizesSidecar{
+		Files: make(map[string]int64, len(items)),
+		Total: sumFileSizes(items),
+	}
+
+	for _, it := range items {
+		if it.itemType == "file" && it.size > 0 {
+			sizes.Files[it.relPath] = it.size
+		}
+	}
+
+	data, err := json.Marshal(sizes)
+	if err != nil {
+		return fmt.Errorf("marshal fs sizes sidecar: %w", err)
+	}
+
+	path := filepath.Join(stagingDir, FSSizesSidecarName)
+
+	if err := archive.WriteFileAtomic(path, bytes.NewReader(data)); err != nil {
+		return fmt.Errorf("write fs sizes sidecar %s: %w", path, err)
+	}
+
+	return nil
+}
+
+// ReadFSSizesSidecar reads the sidecar written by writeFSSizesSidecar from
+// stagingDir. found is false (with a nil error) when the sidecar does not
+// exist — a from-scratch run, or a staging dir left by a run that predates
+// this feature — which callers must treat as "no persisted sizes available",
+// not as a legitimate zero total.
+func ReadFSSizesSidecar(stagingDir string) (FSSizesSidecar, bool, error) {
+	path := filepath.Join(stagingDir, FSSizesSidecarName)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return FSSizesSidecar{}, false, nil
+		}
+
+		return FSSizesSidecar{}, false, fmt.Errorf("read fs sizes sidecar %s: %w", path, err)
+	}
+
+	var sizes FSSizesSidecar
+
+	if err := json.Unmarshal(data, &sizes); err != nil {
+		return FSSizesSidecar{}, false, fmt.Errorf("parse fs sizes sidecar %s: %w", path, err)
+	}
+
+	return sizes, true, nil
+}
+
+// ScanFSStagingSizes reads the sizes sidecar from stagingDir and, for every
+// file it records, credits its persisted declared size when that file has
+// ALREADY been fully staged as a flat <relPath><ext> blob — i.e. its chunk
+// directory was already merged away by MergeBlockChunks, or it was written
+// whole by stageWholeFile. This is the complement to ScanFSStagingProgress,
+// which by construction can only see STILL-OPEN chunk directories: once a
+// chunk dir is merged away, chunks.meta — the only on-disk record of that
+// file's raw declared size — goes with it, so the sidecar is the only way to
+// credit an already-completed file without a network round-trip.
+//
+// found is false (with zero totals, no error) when no sidecar exists yet —
+// a from-scratch run, or a staging dir predating this feature — so the
+// caller knows to fall back to the network-driven total/credit path instead
+// of trusting a zero total.
+func ScanFSStagingSizes(stagingDir, ext string) (int64, int64, bool, error) {
+	sizes, found, err := ReadFSSizesSidecar(stagingDir)
+	if err != nil {
+		return 0, 0, false, err
+	}
+
+	if !found {
+		return 0, 0, false, nil
+	}
+
+	var staged int64
+
+	for relPath, size := range sizes.Files {
+		destPath := filepath.Join(stagingDir, filepath.FromSlash(relPath+ext))
+
+		info, statErr := os.Stat(destPath)
+		if statErr != nil || info.IsDir() {
+			continue
+		}
+
+		staged += size
+	}
+
+	return sizes.Total, staged, true, nil
 }
 
 // sumFileSizes returns the total declared content size across all "file" items in

@@ -20,6 +20,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -50,6 +51,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
 
 const (
@@ -1517,6 +1519,120 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 		require.Equal(t, int64(len(rawBlock)), streams[0].Current(),
 			"a from-scratch volume (no seed applicable) must still reach exactly its full size")
 	})
+}
+
+// TestPipeline_Progress_FSSizesSidecar_SeedsTotalAndCreditsStagedFile is the
+// pipeline-level regression test for fs-resume-progress-sizes-sidecar: unlike
+// the "Filesystem" sub-test above (which seeds a STILL-OPEN per-file chunk
+// dir, the case ScanFSStagingProgress already handled), this seeds a sizes
+// sidecar recording that one file has ALREADY been fully staged as a flat
+// blob — its chunk dir merged away, so chunks.meta (the only other on-disk
+// record of its raw size) is gone — plus a second file that has not been
+// touched at all. Before this fix neither the flat blob's bytes nor the
+// stream's total were seeded: the bar showed a "???" denominator and 0%
+// until the DataExport became Ready and the listing was re-fetched over the
+// network. Both must now be seeded from the sidecar alone, before OpenExport
+// is ever called.
+func TestPipeline_Progress_FSSizesSidecar_SeedsTotalAndCreditsStagedFile(t *testing.T) {
+	t.Parallel()
+
+	const (
+		stagedFileSize  int64 = 90
+		pendingFileSize int64 = 60
+		testTotalSize   int64 = stagedFileSize + pendingFileSize
+	)
+
+	stagedContent := bytes.Repeat([]byte("A"), int(stagedFileSize))
+	pendingContent := bytes.Repeat([]byte("B"), int(pendingFileSize))
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"staged.bin","type":"file","uri":"staged.bin","attributes":{"size":`+strconv.FormatInt(stagedFileSize, 10)+`}},`+
+				`{"name":"pending.bin","type":"file","uri":"pending.bin","attributes":{"size":`+strconv.FormatInt(pendingFileSize, 10)+`}}`+
+				`]}`)
+
+		case "/api/v1/files/staged.bin":
+			http.ServeContent(w, r, "staged.bin", time.Time{}, bytes.NewReader(stagedContent))
+
+		case "/api/v1/files/pending.bin":
+			http.ServeContent(w, r, "pending.bin", time.Time{}, bytes.NewReader(pendingContent))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	codec, err := compress.New("none", 0)
+	require.NoError(t, err)
+
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	stagingDir := filepath.Join(diskSnapDir, archive.FsTarStagingDirName)
+	require.NoError(t, os.MkdirAll(stagingDir, 0o755))
+
+	// staged.bin is already a fully-staged flat blob, as if a prior run had
+	// merged it before crashing; pending.bin has not been touched at all.
+	require.NoError(t, os.WriteFile(filepath.Join(stagingDir, "staged.bin"+codec.Ext()), stagedContent, 0o644))
+
+	// Seed the sizes sidecar exactly as volume.DownloadFilesystemVolume would
+	// have written it on the prior (interrupted) run's listing fetch.
+	sizesJSON, err := json.Marshal(volume.FSSizesSidecar{
+		Files: map[string]int64{"staged.bin": stagedFileSize, "pending.bin": pendingFileSize},
+		Total: testTotalSize,
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(stagingDir, volume.FSSizesSidecarName), sizesJSON, 0o644))
+
+	rec := &recordingSink{}
+
+	var (
+		once          sync.Once
+		seededCurrent int64
+		seededTotal   int64
+	)
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		Compression:          codec,
+		Progress:             rec,
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			once.Do(func() {
+				streams := rec.snapshot()
+				if len(streams) == 1 {
+					seededCurrent = streams[0].Current()
+					seededTotal = streams[0].Total()
+				}
+			})
+
+			return exporter.NewExport(namespace, "de-seed-fs-sizes", "Filesystem", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	require.NoError(t, runPipeline(context.Background(), cfg))
+
+	require.Equal(t, stagedFileSize, seededCurrent,
+		"stream must be seeded with the already-staged flat blob's persisted declared size before OpenExport ever runs")
+	require.Equal(t, testTotalSize, seededTotal,
+		"stream's total must be seeded from the sizes sidecar before OpenExport ever runs (no ??? denominator)")
+
+	streams := rec.snapshot()
+	require.Equal(t, testTotalSize, streams[0].Current(),
+		"final credited total must equal the exact combined file size (no double count between the sidecar seed and the real resume-skip crediting)")
 }
 
 // TestPipeline_Progress_DownloadFailure_CallsFailNotDone verifies that when a

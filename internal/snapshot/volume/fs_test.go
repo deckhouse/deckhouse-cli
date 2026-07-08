@@ -1584,3 +1584,235 @@ func TestDownloadFilesystemVolume_MD5Verify_MissingDigest_WarnOnly(t *testing.T)
 		t.Error("chunked-file staged content does not match original")
 	}
 }
+
+// ── resume progress sizes sidecar (fs-resume-progress-sizes-sidecar) ───────
+
+// TestDownloadFilesystemVolume_SizesSidecar_SeedsResumeWithoutNetwork is the
+// primary regression test for fs-resume-progress-sizes-sidecar: it proves the
+// sidecar is durably written as soon as the listing is known (even though the
+// run is interrupted right after), that it records every known-size file's
+// exact declared size and their sum, and that ScanFSStagingSizes can credit
+// an already-fully-staged file (its chunk dir already merged away) purely
+// from local state — no network call — while correctly NOT crediting a
+// sibling file that is still mid-transfer. It also proves the resumed run
+// still produces byte-identical content for both files.
+func TestDownloadFilesystemVolume_SizesSidecar_SeedsResumeWithoutNetwork(t *testing.T) {
+	t.Parallel()
+
+	firstContent := []byte("first-file-fully-staged-before-the-interrupt")
+	secondContent := bytes.Repeat([]byte("S"), 80)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"a.bin","type":"file","uri":"a.bin","attributes":{"size":`+strconv.Itoa(len(firstContent))+`}},`+
+				`{"name":"b.bin","type":"file","uri":"b.bin","attributes":{"size":`+strconv.Itoa(len(secondContent))+`}}`+
+				`]}`)
+
+		case "/files/a.bin":
+			http.ServeContent(w, r, "a.bin", time.Time{}, bytes.NewReader(firstContent))
+
+		case "/files/b.bin":
+			http.ServeContent(w, r, "b.bin", time.Time{}, bytes.NewReader(secondContent))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	codec := mustCodec(t, "none")
+
+	// workers=1 forces strictly serialized per-file staging in listing order
+	// (a.bin then b.bin), so the doer's call sequence is deterministic:
+	// call 1 = the listing GET, call 2 = a.bin's (single-chunk) Range GET,
+	// call 3 = b.bin's Range GET, truncated mid-transfer.
+	const cutBytes = 20
+
+	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 3, cutBytes: cutBytes}
+	fetcher := exporter.NewFetcher(doer)
+
+	err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, fetcher, codec, nil, nil,
+	)
+	if err == nil {
+		t.Fatal("expected the interrupted run to return an error")
+	}
+
+	if !errors.Is(err, errSimulatedInterrupt) {
+		t.Fatalf("expected errSimulatedInterrupt, got: %v", err)
+	}
+
+	// The sidecar must exist even though the run never finished: it is
+	// written right after the listing succeeds, before any file is staged.
+	sizes, found, err := volume.ReadFSSizesSidecar(stagingDir)
+	if err != nil {
+		t.Fatalf("ReadFSSizesSidecar: %v", err)
+	}
+
+	if !found {
+		t.Fatal("sizes sidecar must exist after the listing was fetched, even though the run was interrupted")
+	}
+
+	wantTotal := int64(len(firstContent) + len(secondContent))
+	if sizes.Total != wantTotal {
+		t.Errorf("sidecar Total = %d; want %d", sizes.Total, wantTotal)
+	}
+
+	if sizes.Files["a.bin"] != int64(len(firstContent)) {
+		t.Errorf("sidecar Files[a.bin] = %d; want %d", sizes.Files["a.bin"], len(firstContent))
+	}
+
+	if sizes.Files["b.bin"] != int64(len(secondContent)) {
+		t.Errorf("sidecar Files[b.bin] = %d; want %d", sizes.Files["b.bin"], len(secondContent))
+	}
+
+	// a.bin must already be a flat, fully-staged blob (its chunk dir merged
+	// away); b.bin must still be an in-progress chunk dir, not a flat blob.
+	if _, statErr := os.Stat(filepath.Join(stagingDir, "a.bin"+codec.Ext())); statErr != nil {
+		t.Fatalf("a.bin must be fully staged as a flat blob: %v", statErr)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(stagingDir, "b.bin"+codec.Ext())); !os.IsNotExist(statErr) {
+		t.Fatalf("b.bin must NOT be a flat blob yet (still interrupted): stat err = %v", statErr)
+	}
+
+	// ScanFSStagingSizes must credit ONLY a.bin's persisted declared size —
+	// the fully-staged flat-blob case — while reporting the full sidecar
+	// total, all from local state.
+	gotTotal, gotStaged, gotFound, err := volume.ScanFSStagingSizes(stagingDir, codec.Ext())
+	if err != nil {
+		t.Fatalf("ScanFSStagingSizes: %v", err)
+	}
+
+	if !gotFound {
+		t.Fatal("ScanFSStagingSizes must report found=true when the sidecar exists")
+	}
+
+	if gotTotal != wantTotal {
+		t.Errorf("ScanFSStagingSizes total = %d; want %d", gotTotal, wantTotal)
+	}
+
+	if gotStaged != int64(len(firstContent)) {
+		t.Errorf("ScanFSStagingSizes staged = %d; want %d (only a.bin, the fully-staged flat blob)", gotStaged, len(firstContent))
+	}
+
+	// The sidecar must survive a resume scan: it does not end in ".tmp", so
+	// archive.resume.go's removeTmpFiles (invoked by ScanAbsolute) must not
+	// remove it.
+	if _, scanErr := archive.ScanAbsolute(nodeDir, archive.NodeIdentity{}); scanErr != nil {
+		t.Fatalf("ScanAbsolute: %v", scanErr)
+	}
+
+	if _, found, err := volume.ReadFSSizesSidecar(stagingDir); err != nil || !found {
+		t.Fatalf("sizes sidecar must survive a resume scan: found=%v err=%v", found, err)
+	}
+
+	// Resume: interruption never re-fires (the doer's call counter keeps
+	// incrementing past cutOnCall==3 across both runs). The run must succeed
+	// and both files must be byte-identical to their source content.
+	err = volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, fetcher, codec, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("resumed run must succeed: %v", err)
+	}
+
+	entries := readTarContents(t, tarPath)
+
+	if !bytes.Equal(entries["a.bin"], firstContent) {
+		t.Error("a.bin content mismatch after resume")
+	}
+
+	if !bytes.Equal(entries["b.bin"], secondContent) {
+		t.Error("b.bin content mismatch after resume")
+	}
+}
+
+// TestScanFSStagingSizes_NoSidecar_ReportsNotFound verifies that
+// ScanFSStagingSizes distinguishes "no sidecar yet" (a from-scratch run, or a
+// staging dir predating this feature) from a legitimate zero total: found
+// must be false, not merely a zero total, so callers do not mistake "not
+// seeded yet" for "seeded at zero".
+func TestScanFSStagingSizes_NoSidecar_ReportsNotFound(t *testing.T) {
+	t.Parallel()
+
+	t.Run("MissingStagingDir", func(t *testing.T) {
+		t.Parallel()
+
+		stagingDir := filepath.Join(t.TempDir(), "does-not-exist")
+
+		total, staged, found, err := volume.ScanFSStagingSizes(stagingDir, ".zst")
+		if err != nil {
+			t.Fatalf("ScanFSStagingSizes: %v", err)
+		}
+
+		if found {
+			t.Error("found = true; want false when the staging dir does not exist")
+		}
+
+		if total != 0 || staged != 0 {
+			t.Errorf("total=%d staged=%d; want 0, 0", total, staged)
+		}
+	})
+
+	t.Run("StagingDirWithoutSidecar", func(t *testing.T) {
+		t.Parallel()
+
+		stagingDir := t.TempDir()
+
+		total, staged, found, err := volume.ScanFSStagingSizes(stagingDir, ".zst")
+		if err != nil {
+			t.Fatalf("ScanFSStagingSizes: %v", err)
+		}
+
+		if found {
+			t.Error("found = true; want false when the staging dir exists but has no sidecar yet")
+		}
+
+		if total != 0 || staged != 0 {
+			t.Errorf("total=%d staged=%d; want 0, 0", total, staged)
+		}
+	})
+}
+
+// TestDownloadFilesystemVolume_SizesSidecar_FromScratchUnchanged verifies that
+// a completed, from-scratch download (no interruption, no prior sidecar) is
+// unaffected by the sidecar feature: the sidecar is written and then removed
+// along with the rest of the staging dir on successful tar assembly, exactly
+// like every other staging file.
+func TestDownloadFilesystemVolume_SizesSidecar_FromScratchUnchanged(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := fsTestServer(t)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	rootURL := srv.URL + "/files/"
+
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, rootURL,
+		2, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil,
+	); err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	if _, err := os.Stat(tarPath); err != nil {
+		t.Fatalf("data.tar not created: %v", err)
+	}
+
+	if _, err := os.Stat(stagingDir); !os.IsNotExist(err) {
+		t.Error("staging dir (and its sidecar) should have been removed after a successful from-scratch run")
+	}
+}

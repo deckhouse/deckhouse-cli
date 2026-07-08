@@ -253,6 +253,18 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]progress.Strea
 // the caller and never downloads anything, so seeding it would be wasted
 // work).
 //
+// For the filesystem path this also seeds the stream's TOTAL (not only its
+// current value) from the persisted sizes sidecar written by
+// volume.DownloadFilesystemVolume the first time the listing was fetched
+// (see volume.ScanFSStagingSizes) — without it, a resumed FS volume's
+// denominator stays unknown ("???") until the DataExport becomes ready and
+// the listing is re-fetched over the network, purely a leftover of the
+// on-disk state predating this sidecar. It also credits files that have
+// ALREADY been fully staged as a flat blob (their chunk directory was merged
+// away by MergeBlockChunks), which ScanFSStagingProgress cannot see because
+// that merge takes the only on-disk record of the file's raw size — the
+// chunk dir's chunks.meta — with it.
+//
 // This is a pure best-effort display aid: a scan error is logged and
 // swallowed rather than failing stream creation, since correctness never
 // depends on it — downloadBlock/downloadFS cancel this exact seed back out
@@ -288,6 +300,27 @@ func seedStreamFromDisk(cfg Config, s progress.Stream, nodeDir string) {
 
 	if fsCommitted > 0 {
 		s.IncrBy(int(fsCommitted))
+	}
+
+	sizesTotal, stagedBytes, sizesFound, err := volume.ScanFSStagingSizes(dest.fsTarStagingDir, ext)
+	if err != nil {
+		cfg.Log.Warn("failed to scan filesystem sizes sidecar for seeding",
+			slog.String("dir", dest.fsTarStagingDir),
+			slog.String("error", err.Error()))
+
+		return
+	}
+
+	if !sizesFound {
+		return
+	}
+
+	if sizesTotal > 0 {
+		s.SetTotal(sizesTotal)
+	}
+
+	if stagedBytes > 0 {
+		s.IncrBy(int(stagedBytes))
 	}
 }
 
