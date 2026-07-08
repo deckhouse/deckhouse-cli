@@ -369,11 +369,22 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 //     total size up front and there is no meaningful partial to resume for
 //     zero declared bytes.
 //
-// Already-complete destination files are skipped (resume) regardless of which
-// strategy would otherwise apply; the skip still credits the item's declared
-// size to onProgress so the numerator can reach the denominator that setTotal
-// established from the same declared sizes (sumFileSizes) — otherwise a
-// partially-staged resume could never advance the progress bar to 100% even
+// A destination file left by a prior run is reused (resume) only after its
+// content is re-verified, never on os.Stat success alone: existence is not
+// integrity. A same-named staged blob can be stale, foreign (left by a
+// different snapshot of the same source object), or truncated by an unrelated
+// crash, and it would otherwise be packed into data.tar verbatim (inv. #9).
+// When the exporter advertised an MD5, the already-staged bytes are decoded
+// and re-hashed via verifyStagedFileMD5 before the skip is trusted; on a
+// mismatch the bad blob is removed and staging falls through to re-fetch it in
+// this same run (a self-healing condition, not a hard error). When no MD5 is
+// advertised the blob is still skipped, matching the fresh-path convention,
+// with a one-line WARN. The verify costs one decode pass per already-staged
+// file per resume run, bounded by staging size — the price of not trusting
+// bytes we did not just write. A trusted skip still credits the item's
+// declared size to onProgress so the numerator can reach the denominator that
+// setTotal established from the same declared sizes (sumFileSizes) — otherwise
+// a partially-staged resume could never advance the progress bar to 100% even
 // though the tar assembles successfully. Stale <destPath>.tmp files are removed
 // before either strategy runs.
 func stageCompressedFile(
@@ -389,13 +400,35 @@ func stageCompressedFile(
 	destPath := filepath.Join(stagingDir, filepath.FromSlash(item.relPath+codec.Ext()))
 
 	if _, err := os.Stat(destPath); err == nil {
-		log.Debug("staging file already present, skipping", slog.String("path", item.relPath))
+		var verifyErr error
 
-		if onProgress != nil && item.size > 0 {
-			onProgress(int(item.size))
+		if item.md5 == "" {
+			log.Warn("no source MD5 available for file, skipping integrity verification",
+				slog.String("path", item.relPath))
+		} else {
+			verifyErr = verifyStagedFileMD5(destPath, codec.Ext(), item.md5)
 		}
 
-		return nil
+		if verifyErr == nil {
+			log.Debug("staging file already present, skipping", slog.String("path", item.relPath))
+
+			if onProgress != nil && item.size > 0 {
+				onProgress(int(item.size))
+			}
+
+			return nil
+		}
+
+		// The staged bytes do not match the source digest: a stale, foreign, or
+		// truncated blob. Drop it and fall through to re-stage in this same run
+		// rather than failing the download — this is self-healing, not an error.
+		log.Warn("staged file failed source MD5 re-check on resume, re-staging",
+			slog.String("path", destPath),
+			slog.String("error", verifyErr.Error()))
+
+		if removeErr := os.Remove(destPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("remove mismatched staged file %s: %w", destPath, removeErr)
+		}
 	}
 
 	tmpPath := destPath + ".tmp"
