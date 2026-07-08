@@ -20,6 +20,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/md5" //nolint:gosec // test fixture digest, matches the exporter's own hash.md5 attribute
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -1295,5 +1297,290 @@ func TestDownloadFilesystemVolume_SmallFile_InterruptedResumesFromPersistedOffse
 
 	if _, statErr := os.Stat(partPath); !os.IsNotExist(statErr) {
 		t.Error("durable partial must be removed after the chunk finalizes")
+	}
+}
+
+// ── source MD5 verification (download-fs-verify-md5-against-source) ────────
+
+// warnCapture is a slog.Handler that collects Warn-or-above log messages for assertions.
+type warnCapture struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (h *warnCapture) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (h *warnCapture) Handle(_ context.Context, r slog.Record) error {
+	if r.Level >= slog.LevelWarn {
+		h.mu.Lock()
+		h.msgs = append(h.msgs, r.Message)
+		h.mu.Unlock()
+	}
+
+	return nil
+}
+
+func (h *warnCapture) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+
+func (h *warnCapture) WithGroup(_ string) slog.Handler { return h }
+
+func (h *warnCapture) warnMessages() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	out := make([]string, len(h.msgs))
+	copy(out, h.msgs)
+
+	return out
+}
+
+// hexMD5 returns the lowercase hex MD5 digest of content.
+func hexMD5(content []byte) string {
+	sum := md5.Sum(content) //nolint:gosec // test fixture digest, matches the exporter's own hash.md5 attribute
+
+	return hex.EncodeToString(sum[:])
+}
+
+// newMD5FSServer builds an httptest.Server exposing a single-file FS volume whose
+// listing item.Attributes carries "hash.md5": advertisedMD5, so it exercises the same
+// contract exporter.ListDir requests (attribute=hash.md5) without depending on that
+// package. withSize controls whether the listing also declares "size" — selecting
+// stageChunkedFile (known size) vs. stageWholeFile (unknown size) in the CLI.
+func newMD5FSServer(t *testing.T, fileName string, served []byte, advertisedMD5 string, withSize bool) *httptest.Server {
+	t.Helper()
+
+	filePath := "/files/" + fileName
+
+	attrs := `"hash.md5":"` + advertisedMD5 + `"`
+	if advertisedMD5 == "" {
+		attrs = ""
+	}
+
+	if withSize {
+		sizeAttr := `"size":` + strconv.Itoa(len(served))
+		if attrs == "" {
+			attrs = sizeAttr
+		} else {
+			attrs = sizeAttr + "," + attrs
+		}
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"`+fileName+`","type":"file","uri":"`+fileName+`","attributes":{`+attrs+`}}`+
+				`]}`)
+
+		case filePath:
+			// http.ServeContent honors Range so the known-size (chunked) case works too.
+			http.ServeContent(w, r, fileName, time.Time{}, bytes.NewReader(served))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+// TestDownloadFilesystemVolume_MD5Verify_WholeFile_Success verifies that a file staged
+// via the whole-file path (unknown declared size) whose plaintext matches the exporter-
+// advertised hash.md5 stages successfully and decodes back to the original content.
+func TestDownloadFilesystemVolume_MD5Verify_WholeFile_Success(t *testing.T) {
+	t.Parallel()
+
+	content := []byte("whole-file content verified against the source MD5")
+	srv := newMD5FSServer(t, "file.bin", content, hexMD5(content), false)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	codec := mustCodec(t, "zstd")
+
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, newFSFetcher(srv), codec, nil, nil,
+	); err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	got := decodeZstdTarEntry(t, tarPath, "file.bin"+codec.Ext())
+	if !bytes.Equal(got, content) {
+		t.Error("staged content does not match original")
+	}
+}
+
+// TestDownloadFilesystemVolume_MD5Verify_WholeFile_Mismatch verifies that a whole-file
+// item whose served bytes do NOT match the advertised hash.md5 fails with the sentinel
+// ErrSourceHashMismatch and never finalizes data.tar.
+func TestDownloadFilesystemVolume_MD5Verify_WholeFile_Mismatch(t *testing.T) {
+	t.Parallel()
+
+	content := []byte("whole-file content that will not match the advertised digest")
+	wrongMD5 := hexMD5([]byte("a completely different payload"))
+	srv := newMD5FSServer(t, "file.bin", content, wrongMD5, false)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, newFSFetcher(srv), mustCodec(t, "zstd"), nil, nil,
+	)
+	if err == nil {
+		t.Fatal("expected an MD5 mismatch error, got nil")
+	}
+
+	if !errors.Is(err, volume.ErrSourceHashMismatch) {
+		t.Errorf("expected errors.Is(err, ErrSourceHashMismatch), got: %v", err)
+	}
+
+	if _, statErr := os.Stat(tarPath); !os.IsNotExist(statErr) {
+		t.Error("data.tar must not be finalized when a file fails MD5 verification")
+	}
+}
+
+// TestDownloadFilesystemVolume_MD5Verify_ChunkedFile_Success verifies that a
+// known-size file staged via the durable chunked path (stageChunkedFile ->
+// DownloadBlockChunks/MergeBlockChunks) whose reassembled plaintext matches the
+// exporter-advertised hash.md5 stages successfully.
+func TestDownloadFilesystemVolume_MD5Verify_ChunkedFile_Success(t *testing.T) {
+	t.Parallel()
+
+	content := bytes.Repeat([]byte("chunked-md5-verified-payload-"), 10)
+	srv := newMD5FSServer(t, "big.bin", content, hexMD5(content), true)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	codec := mustCodec(t, "zstd")
+
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, newFSFetcher(srv), codec, nil, nil,
+	); err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	got := decodeZstdTarEntry(t, tarPath, "big.bin"+codec.Ext())
+	if !bytes.Equal(got, content) {
+		t.Error("staged content does not match original")
+	}
+}
+
+// TestDownloadFilesystemVolume_MD5Verify_ChunkedFile_Mismatch verifies that a
+// known-size file whose reassembled plaintext does NOT match the advertised
+// hash.md5 fails with ErrSourceHashMismatch, removes the corrupt staged artifact
+// (so a resume re-fetches instead of trusting it), and never finalizes data.tar.
+func TestDownloadFilesystemVolume_MD5Verify_ChunkedFile_Mismatch(t *testing.T) {
+	t.Parallel()
+
+	content := bytes.Repeat([]byte("chunked-content-that-will-not-match-"), 10)
+	wrongMD5 := hexMD5([]byte("a completely different payload"))
+	srv := newMD5FSServer(t, "big.bin", content, wrongMD5, true)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	codec := mustCodec(t, "zstd")
+
+	err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, newFSFetcher(srv), codec, nil, nil,
+	)
+	if err == nil {
+		t.Fatal("expected an MD5 mismatch error, got nil")
+	}
+
+	if !errors.Is(err, volume.ErrSourceHashMismatch) {
+		t.Errorf("expected errors.Is(err, ErrSourceHashMismatch), got: %v", err)
+	}
+
+	if _, statErr := os.Stat(tarPath); !os.IsNotExist(statErr) {
+		t.Error("data.tar must not be finalized when a file fails MD5 verification")
+	}
+
+	destPath := filepath.Join(stagingDir, "big.bin"+codec.Ext())
+	if _, statErr := os.Stat(destPath); !os.IsNotExist(statErr) {
+		t.Error("corrupt staged file must be removed after an MD5 mismatch, not left for a resume to trust")
+	}
+}
+
+// TestDownloadFilesystemVolume_MD5Verify_MissingDigest_WarnOnly verifies that a listing
+// item with no hash.md5 attribute (an older exporter, or a request the server did not
+// honor) degrades to a single WARN log and still succeeds — never a hard failure.
+// Covers both the whole-file and chunked paths in one run.
+func TestDownloadFilesystemVolume_MD5Verify_MissingDigest_WarnOnly(t *testing.T) {
+	t.Parallel()
+
+	wholeContent := []byte("whole-file content with no advertised digest")
+	chunkedContent := bytes.Repeat([]byte("chunked-content-with-no-advertised-digest-"), 5)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"whole.bin","type":"file","uri":"whole.bin","attributes":{}},`+
+				`{"name":"chunked.bin","type":"file","uri":"chunked.bin","attributes":{"size":`+strconv.Itoa(len(chunkedContent))+`}}`+
+				`]}`)
+
+		case "/files/whole.bin":
+			http.ServeContent(w, r, "whole.bin", time.Time{}, bytes.NewReader(wholeContent))
+
+		case "/files/chunked.bin":
+			http.ServeContent(w, r, "chunked.bin", time.Time{}, bytes.NewReader(chunkedContent))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	codec := mustCodec(t, "zstd")
+
+	lh := &warnCapture{}
+	log := slog.New(lh)
+
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(), log, tarPath, stagingDir, srv.URL+"/files/",
+		2, 0, newFSFetcher(srv), codec, nil, nil,
+	); err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	warnCount := 0
+
+	for _, msg := range lh.warnMessages() {
+		if msg == "no source MD5 available for file, skipping integrity verification" {
+			warnCount++
+		}
+	}
+
+	if warnCount != 2 {
+		t.Errorf("expected exactly 2 missing-digest WARNs (one per file), got %d: %v", warnCount, lh.warnMessages())
+	}
+
+	gotWhole := decodeZstdTarEntry(t, tarPath, "whole.bin"+codec.Ext())
+	if !bytes.Equal(gotWhole, wholeContent) {
+		t.Error("whole-file staged content does not match original")
+	}
+
+	gotChunked := decodeZstdTarEntry(t, tarPath, "chunked.bin"+codec.Ext())
+	if !bytes.Equal(gotChunked, chunkedContent) {
+		t.Error("chunked-file staged content does not match original")
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -224,6 +225,44 @@ func TestListDir(t *testing.T) {
 
 	if it.URI != fileURI {
 		t.Errorf("item.URI: got %q, want %q", it.URI, fileURI)
+	}
+}
+
+func TestListDir_RequestsStatAndHashMd5Attributes(t *testing.T) {
+	t.Helper()
+
+	var gotQuery url.Values
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[]}`)
+	}))
+	defer srv.Close()
+
+	f := NewFetcher(http.DefaultClient)
+
+	filesURL, err := FilesURL(srv.URL)
+	if err != nil {
+		t.Fatalf("FilesURL: %v", err)
+	}
+
+	if _, err := f.ListDir(context.Background(), filesURL); err != nil {
+		t.Fatalf("ListDir: %v", err)
+	}
+
+	got := gotQuery["attribute"]
+
+	want := []string{"stat", "hash.md5"}
+	if len(got) != len(want) {
+		t.Fatalf("attribute query params: got %v, want %v", got, want)
+	}
+
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("attribute query param %d: got %q, want %q", i, got[i], w)
+		}
 	}
 }
 
