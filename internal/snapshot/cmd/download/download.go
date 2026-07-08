@@ -109,7 +109,7 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 	cmd.Flags().Int(flagWorkers, 4, "maximum number of nodes downloaded concurrently")
 	cmd.Flags().Int(flagPerVolumeConcurrency, 4, "maximum parallel chunk/file downloads per volume")
 	cmd.Flags().Int(flagMaxParallelDownloads, 5, "global cap on concurrent whole-volume-stream downloads across all nodes (independent of --workers and --per-volume-concurrency)")
-	cmd.Flags().String(flagChunkSize, "", "block-volume chunk size (e.g. 256Mi); defaults to 256Mi")
+	cmd.Flags().String(flagChunkSize, "", "block-volume chunk size (e.g. 256Mi); defaults to 256Mi (min 16Mi, max 1Gi)")
 	cmd.Flags().String(flagVolumeCompression, compress.DefaultCodecName,
 		"volume compression codec ("+strings.Join(compress.Names(), ", ")+
 			"); block volumes: data.bin[.<ext>]; filesystem volumes: per-file compressed entries inside an uncompressed data.tar container")
@@ -338,9 +338,19 @@ func parseNodeFlag(s string) (string, string, error) {
 	return kind, name, nil
 }
 
+// maxChunkSize caps --chunk-size so a huge value cannot blow the
+// multiplicative memory peak documented on pipeline.Config.Workers
+// (Workers × PerVolumeConcurrency × ChunkSize) and so chunk-based resume
+// still lands on a reasonably fine granularity. Set as 4× the 256 MiB
+// default (volume.DefaultChunkSize) — 1 GiB — a generous ceiling that keeps
+// the worst-case per-chunk buffer bounded on typical hosts.
+const maxChunkSize = 4 * volume.DefaultChunkSize // 1 GiB
+
 // parseChunkSize converts a human-readable size string (e.g. "256Mi", "128M")
 // into bytes. An empty string returns 0, which the pipeline interprets as
-// volume.DefaultChunkSize (256 MiB).
+// volume.DefaultChunkSize (256 MiB). The result must fall within
+// [volume.DefaultChunkSize/16, maxChunkSize]; see maxChunkSize for the
+// ceiling's rationale.
 func parseChunkSize(s string) (int64, error) {
 	if s == "" {
 		return 0, nil
@@ -386,6 +396,10 @@ func parseChunkSize(s string) (int64, error) {
 	result := n * mult
 	if result < volume.DefaultChunkSize/16 {
 		return 0, fmt.Errorf("chunk size %d bytes is too small (minimum %d bytes)", result, volume.DefaultChunkSize/16)
+	}
+
+	if result > maxChunkSize {
+		return 0, fmt.Errorf("chunk size %d bytes is too large (maximum %d bytes)", result, maxChunkSize)
 	}
 
 	return result, nil
