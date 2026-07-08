@@ -698,53 +698,56 @@ func stageWholeFile(
 }
 
 // ScanFSStagingProgress computes durably-committed raw bytes across every
-// still-open per-file chunk directory under stagingDir, purely from local
-// state — no network call. A per-file chunk directory is identified by the
-// presence of a readable chunks.meta sidecar — the same marker
-// createChunkDir writes for both block volumes and per-file FS chunks (see
-// stageChunkedFile, which reuses DownloadBlockChunks/MergeBlockChunks
+// still-open per-file chunk directory, purely from local state — no network
+// call. Since the fs-reserved-suffix-collisions change, per-file chunk dirs
+// live under the reserved metadata namespace
+// (stagingDir/.d8-meta/chunks/<relPath><ext>.d) so no server-provided path can
+// alias one, so this scans ONLY that subtree. A per-file chunk directory is
+// identified by the presence of a readable chunks.meta sidecar — the same
+// marker createChunkDir writes for both block volumes and per-file FS chunks
+// (see stageChunkedFile, which reuses DownloadBlockChunks/MergeBlockChunks
 // unchanged) — and its contribution is computed via the identical
 // ScanBlockChunkProgress formula.
 //
-// Deliberately excluded: a file that is ALREADY fully staged (its chunk
-// directory has already been merged away by MergeBlockChunks into a flat
-// <relPath><ext> blob) contributes nothing here, because its original raw
-// declared size is not recoverable from disk once the chunk dir — the only
-// place that size was ever recorded (chunks.meta) — is gone; the merged
-// blob's own on-disk length is a compressed/frame-concatenated size, not the
-// raw size the rest of the progress accounting uses. Such a file keeps being
-// credited exactly once, at its true declared size, by
-// stageCompressedFile's existing resume-skip path once the listing confirms
-// it; the caller must not double-count that credit against this scan (see
-// pipeline.downloadFS, which wraps its onProgress with
-// pipeline.skipSeededBytes(seeded, ...) so that later re-derived credit is
-// discarded instead of double-counted, rather than resetting the stream to 0
-// before staging begins).
+// Deliberately excluded:
+//   - The sizes sidecar (also under .d8-meta) carries no chunks.meta, so it is
+//     naturally ignored; scanning only the chunks/ subtree makes that explicit.
+//   - A file that is ALREADY fully staged (its chunk directory has already been
+//     merged away by MergeBlockChunks into a flat <relPath><ext> blob at the
+//     staging root) contributes nothing here, because its original raw declared
+//     size is not recoverable from disk once the chunk dir — the only place that
+//     size was ever recorded (chunks.meta) — is gone; the merged blob's own
+//     on-disk length is a compressed/frame-concatenated size, not the raw size
+//     the rest of the progress accounting uses. Such a file keeps being credited
+//     exactly once, at its true declared size, by stageCompressedFile's existing
+//     resume-skip path once the listing confirms it; the caller must not
+//     double-count that credit against this scan (see pipeline.downloadFS, which
+//     wraps its onProgress with pipeline.skipSeededBytes(seeded, ...) so that
+//     later re-derived credit is discarded instead of double-counted, rather
+//     than resetting the stream to 0 before staging begins).
+//   - Legacy flat chunk dirs from trees written before the relocation
+//     (stagingDir/<relPath><ext>.d) are not scanned; such a file re-downloads
+//     once, which is acceptable and preferable to risking a user-blob alias.
 func ScanFSStagingProgress(stagingDir, ext string) (int64, error) {
-	if _, err := os.Stat(stagingDir); err != nil {
+	chunksRoot := filepath.Join(stagingDir, FSMetaDirName, archive.FSChunksDirName)
+
+	if _, err := os.Stat(chunksRoot); err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
 		}
 
-		return 0, fmt.Errorf("stat staging dir %s: %w", stagingDir, err)
+		return 0, fmt.Errorf("stat fs chunks dir %s: %w", chunksRoot, err)
 	}
 
 	var committed int64
 
-	walkErr := filepath.WalkDir(stagingDir, func(path string, d fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(chunksRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if path == stagingDir || !d.IsDir() {
+		if !d.IsDir() {
 			return nil
-		}
-
-		// The reserved metadata dir holds internal artifacts (the sizes
-		// sidecar), never staged volume bytes: never count it and never
-		// descend into it.
-		if path == filepath.Join(stagingDir, FSMetaDirName) {
-			return fs.SkipDir
 		}
 
 		_, found, metaErr := archive.ReadChunkMeta(path)
@@ -762,28 +765,30 @@ func ScanFSStagingProgress(stagingDir, ext string) (int64, error) {
 		return fs.SkipDir
 	})
 	if walkErr != nil {
-		return 0, fmt.Errorf("scan fs staging progress in %s: %w", stagingDir, walkErr)
+		return 0, fmt.Errorf("scan fs staging progress in %s: %w", chunksRoot, walkErr)
 	}
 
 	return committed, nil
 }
 
 // FSMetaDirName is the reserved metadata subdirectory of an FS staging dir
-// (data.tar.d/) holding the download machinery's own internal artifacts (the
-// sizes sidecar today). It is dot-prefixed and clearly-internal, and
-// sanitizeRelPath rejects any server-provided path whose FIRST segment equals
-// it, so no user/server file can ever stage into this namespace — including at
-// codec none (ext == ""), where a user file literally named "sizes.json" would
-// otherwise stage to stagingDir/sizes.json, the exact path the sidecar used to
-// occupy, and be silently replaced by (or replace) internal JSON while the
-// resume-skip branch counted it "already staged" (inv. #10a). Keeping the
-// sidecar under this dir makes the staged-blob namespace belong to
-// server-provided paths only. It does not end in ".tmp" (survives
-// removeTmpFiles), lives inside the staging dir so it is removed with the rest
-// of the staging state on tar assembly, and is excluded from the node checksum
-// exactly like every other staging-dir file (archive.ComputeNodeChecksum never
-// walks the flat single-volume staging directory at all).
-const FSMetaDirName = ".d8-meta"
+// (data.tar.d/) holding the download machinery's own internal artifacts: the
+// sizes sidecar and, under archive.FSChunksDirName, every per-file chunk
+// directory. It is dot-prefixed and clearly-internal, and sanitizeRelPath
+// rejects any server-provided path whose FIRST segment equals it, so no
+// user/server file can ever stage into this namespace — including at codec none
+// (ext == ""), where a user file literally named "sizes.json" (or a "<x>.d"
+// chunk-dir-shaped name) would otherwise stage into the staging root and be
+// silently replaced by, or delete, an internal artifact (inv. #10a). Keeping
+// internal artifacts under this dir makes the staged-blob namespace belong to
+// server-provided paths only. Everything under it lives inside the staging dir
+// so it is removed with the rest of the staging state on tar assembly, and is
+// excluded from the node checksum exactly like every other staging-dir file
+// (archive.ComputeNodeChecksum never walks the flat single-volume staging
+// directory at all). The SSOT for the literal name is archive.FSMetaDirName;
+// this is an alias so the volume package (sanitizeRelPath, the sidecar helpers)
+// can reference it without importing it indirectly.
+const FSMetaDirName = archive.FSMetaDirName
 
 // FSSizesSidecarName is the durable JSON sidecar recording per-file declared
 // sizes for a filesystem volume, written under FSMetaDirName as soon as the

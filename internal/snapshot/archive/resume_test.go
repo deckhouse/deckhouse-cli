@@ -493,6 +493,60 @@ func TestScanNode_FSTarStagingPartial(t *testing.T) {
 	}
 }
 
+// TestScanNode_FSStaging_UserTmpBlobSurvivesSweep pins the
+// fs-reserved-suffix-collisions .tmp guard: at codec none a staged user blob
+// keeps its verbatim server-provided name, which may end in ".tmp" (e.g.
+// "notes.tmp"). Such a blob lives inside the FS tar staging dir (data.tar.d/),
+// whose subtree removeTmpFiles now skips entirely — so it survives the resume
+// scan and is not re-downloaded on the next run. A genuine stale internal
+// ".tmp" OUTSIDE that subtree (a snapshot.yaml.tmp at the node root) must still
+// be swept.
+func TestScanNode_FSStaging_UserTmpBlobSurvivesSweep(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	id := archive.NodeIdentity{Kind: "VirtualDiskSnapshot", Name: "disk-tmp-blob"}
+	nodeDir := filepath.Join(parent, archive.NodeDirName(id.Kind, id.Name))
+
+	writeMarker(t, nodeDir, id)
+
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		t.Fatalf("mkdir stagingDir: %v", err)
+	}
+
+	userBlob := filepath.Join(stagingDir, "notes.tmp")
+
+	if err := os.WriteFile(userBlob, []byte("user data that happens to end in .tmp"), 0o644); err != nil {
+		t.Fatalf("write user blob: %v", err)
+	}
+
+	nodeTmp := filepath.Join(nodeDir, archive.SnapshotYAMLName+".tmp")
+
+	if err := os.WriteFile(nodeTmp, []byte("half-written"), 0o644); err != nil {
+		t.Fatalf("write node tmp: %v", err)
+	}
+
+	plan, err := archive.ScanNode(parent, id)
+
+	if err != nil {
+		t.Fatalf("ScanNode: %v", err)
+	}
+
+	if plan.State != archive.NodeStateFSPartial {
+		t.Errorf("state = %v, want NodeStateFSPartial", plan.State)
+	}
+
+	if _, err := os.Stat(userBlob); err != nil {
+		t.Errorf("staged user blob %q must survive the .tmp sweep, got: %v", userBlob, err)
+	}
+
+	if _, err := os.Stat(nodeTmp); !os.IsNotExist(err) {
+		t.Error("stale internal node-root .tmp must still be removed by the sweep")
+	}
+}
+
 func TestScanNode_ManifestsOnly(t *testing.T) {
 	t.Parallel()
 

@@ -2563,11 +2563,14 @@ func TestReadFSSizesSidecar_LegacyFallback(t *testing.T) {
 	})
 }
 
-// TestScanFSStagingProgress_IgnoresMetadataDir verifies that the reserved
-// metadata dir is never descended into when accounting committed staged bytes:
-// a chunk-dir-shaped tree planted inside stagingDir/.d8-meta must contribute
-// nothing, even though an identical tree outside it is counted.
-func TestScanFSStagingProgress_IgnoresMetadataDir(t *testing.T) {
+// TestScanFSStagingProgress_CountsChunkDirsUnderReservedNamespace verifies the
+// staging-progress accounting boundary after chunk dirs moved under the reserved
+// metadata namespace: a real in-progress per-file chunk dir now lives at
+// stagingDir/.d8-meta/chunks/<relPath><ext>.d (via FsFileChunksDirName) and MUST
+// be counted, while a chunk-dir-shaped tree planted directly under .d8-meta
+// (outside the chunks/ subtree — e.g. a stray artifact) must contribute nothing,
+// because the scan descends ONLY into .d8-meta/chunks.
+func TestScanFSStagingProgress_CountsChunkDirsUnderReservedNamespace(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -2585,8 +2588,9 @@ func TestScanFSStagingProgress_IgnoresMetadataDir(t *testing.T) {
 		t.Fatalf("encode frame: %v", err)
 	}
 
-	// A real in-progress per-file chunk dir: one finalized chunk -> counted.
-	realChunkDir := filepath.Join(stagingDir, archive.FsFileChunksDirName("real.bin", ext))
+	// A real in-progress per-file chunk dir, at its new reserved-namespace
+	// location (.d8-meta/chunks/real.bin<ext>.d): one finalized chunk -> counted.
+	realChunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName("real.bin", ext)))
 	if err := os.MkdirAll(realChunkDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2599,19 +2603,19 @@ func TestScanFSStagingProgress_IgnoresMetadataDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// An identical chunk-dir-shaped tree planted INSIDE the reserved metadata
-	// dir. If the scan descended into .d8-meta it would double the count; it
-	// must not.
-	poisonDir := filepath.Join(stagingDir, volume.FSMetaDirName, "poison.d")
-	if err := os.MkdirAll(poisonDir, 0o755); err != nil {
+	// A chunk-dir-shaped tree planted directly under .d8-meta but OUTSIDE the
+	// chunks/ subtree. If the scan counted everything under .d8-meta it would
+	// double the count; it must count only the chunks/ subtree.
+	strayDir := filepath.Join(stagingDir, volume.FSMetaDirName, "stray.d")
+	if err := os.MkdirAll(strayDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := archive.WriteChunkMeta(poisonDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize}); err != nil {
+	if err := archive.WriteChunkMeta(strayDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize}); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(filepath.Join(poisonDir, archive.ChunkFileName(0, ext)), frame, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(strayDir, archive.ChunkFileName(0, ext)), frame, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2621,6 +2625,204 @@ func TestScanFSStagingProgress_IgnoresMetadataDir(t *testing.T) {
 	}
 
 	if committed != chunkSize {
-		t.Errorf("committed = %d; want %d (only the real chunk dir; the metadata dir must be skipped)", committed, chunkSize)
+		t.Errorf("committed = %d; want %d (only the chunk dir under .d8-meta/chunks; the stray dir must be skipped)", committed, chunkSize)
+	}
+}
+
+// TestDownloadFilesystemVolume_CodecNone_ChunkDirNameCannotClobberSiblingBlob
+// pins the fs-reserved-suffix-collisions fix: at codec none, a chunked user file
+// "payload" and a sibling user file named exactly like its OLD flat chunk-dir
+// path ("payload.d") must coexist without cross-deletion, and a sibling dir named
+// "other.d" must not interfere. Per-file chunk dirs now live under the reserved
+// namespace (.d8-meta/chunks/), so MergeBlockChunks' post-merge
+// os.RemoveAll(chunkDir) targets stagingDir/.d8-meta/chunks/payload.d — never the
+// user's already-staged stagingDir/payload.d blob. The pre-seeded state
+// (payload.d fully staged, payload's chunk dir complete) is the exact interleave
+// in which the OLD flat layout deleted the user blob and forced a re-download.
+func TestDownloadFilesystemVolume_CodecNone_ChunkDirNameCannotClobberSiblingBlob(t *testing.T) {
+	t.Parallel()
+
+	const chunkSize int64 = 100
+
+	payload := []byte("PAYLOAD-CONTENT")         // chunked user file "payload"
+	userD := []byte("USER-FILE-NAMED-PAYLOAD.D") // sibling user file "payload.d"
+	payloadMD5 := hexMD5(payload)
+	userDMD5 := hexMD5(userD)
+
+	var (
+		mu       sync.Mutex
+		bodyGETs = map[string]int{}
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"payload","type":"file","uri":"payload","attributes":{"size":`+strconv.Itoa(len(payload))+`,"hash.md5":"`+payloadMD5+`"}},`+
+				`{"name":"payload.d","type":"file","uri":"payload.d","attributes":{"size":`+strconv.Itoa(len(userD))+`,"hash.md5":"`+userDMD5+`"}},`+
+				`{"name":"other.d","type":"dir","uri":"other.d/","attributes":{}}`+
+				`]}`)
+
+		case "/files/other.d/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[]}`)
+
+		case "/files/payload":
+			mu.Lock()
+			bodyGETs["payload"]++
+			mu.Unlock()
+			http.ServeContent(w, r, "payload", time.Time{}, bytes.NewReader(payload))
+
+		case "/files/payload.d":
+			mu.Lock()
+			bodyGETs["payload.d"]++
+			mu.Unlock()
+			http.ServeContent(w, r, "payload.d", time.Time{}, bytes.NewReader(userD))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	codec := mustCodec(t, "none")
+
+	// Pre-seed the exact crash-before-merge interleave:
+	//   - payload.d fully staged as a flat blob at the staging root (user bytes);
+	//   - payload's chunk dir complete (single chunk == raw content at codec none)
+	//     under the reserved namespace, so its merge runs RemoveAll(chunkDir).
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(stagingDir, "payload.d"), userD, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	chunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName("payload", codec.Ext())))
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: int64(len(payload))}); err != nil {
+		t.Fatal(err)
+	}
+
+	// codec none: the finalized chunk frame is the raw content verbatim.
+	if err := os.WriteFile(filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, chunkSize, newFSFetcher(srv), codec, nil, nil,
+	); err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	entries := readTarContents(t, tarPath)
+
+	if !bytes.Equal(entries["payload"], payload) {
+		t.Errorf("tar entry payload = %q; want %q", entries["payload"], payload)
+	}
+
+	if !bytes.Equal(entries["payload.d"], userD) {
+		t.Errorf("tar entry payload.d = %q; want %q (user blob must survive payload's chunk-dir RemoveAll)", entries["payload.d"], userD)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if bodyGETs["payload"] != 0 {
+		t.Errorf("payload body GETs = %d; want 0 (its chunk dir was pre-seeded complete)", bodyGETs["payload"])
+	}
+
+	if bodyGETs["payload.d"] != 0 {
+		t.Errorf("payload.d body GETs = %d; want 0 (pre-staged blob, MD5-verified, not re-downloaded)", bodyGETs["payload.d"])
+	}
+}
+
+// TestDownloadFilesystemVolume_ChunkedResume_UsesReservedChunkDir verifies an
+// interrupted chunked FS file download keeps its durable partial under the
+// reserved chunk-dir location (.d8-meta/chunks/<relPath><ext>.d) and resumes
+// from there on the next run.
+func TestDownloadFilesystemVolume_ChunkedResume_UsesReservedChunkDir(t *testing.T) {
+	t.Parallel()
+
+	const (
+		chunkSize int64 = 100
+		cutBytes        = 20
+	)
+
+	content := bytes.Repeat([]byte("R"), 250) // 3 chunks: 100, 100, 50
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"big.bin","type":"file","uri":"big.bin","attributes":{"size":`+strconv.Itoa(len(content))+`,"hash.md5":"`+hexMD5(content)+`"}}`+
+				`]}`)
+
+		case "/files/big.bin":
+			http.ServeContent(w, r, "big.bin", time.Time{}, bytes.NewReader(content))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	codec := mustCodec(t, "none")
+
+	// Run 1: interrupt during chunk 1's Range GET (call 1 = listing, call 2 =
+	// chunk 0, call 3 = chunk 1).
+	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 3, cutBytes: cutBytes}
+	fetcher := exporter.NewFetcher(doer)
+
+	err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, chunkSize, fetcher, codec, nil, nil,
+	)
+	if !errors.Is(err, errSimulatedInterrupt) {
+		t.Fatalf("expected errSimulatedInterrupt, got: %v", err)
+	}
+
+	// The durable partial must live under the reserved namespace, not beside the
+	// staged blob.
+	chunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName("big.bin", codec.Ext())))
+	if _, statErr := os.Stat(chunkDir); statErr != nil {
+		t.Fatalf("chunk dir must exist under the reserved namespace at %s: %v", chunkDir, statErr)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext()))); statErr != nil {
+		t.Errorf("chunk 0 must be finalized in the reserved chunk dir: %v", statErr)
+	}
+
+	// Run 2: resume to completion (the doer's call counter is now past cutOnCall,
+	// so truncation never re-fires).
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, chunkSize, fetcher, codec, nil, nil,
+	); err != nil {
+		t.Fatalf("resumed run must succeed: %v", err)
+	}
+
+	entries := readTarContents(t, tarPath)
+	if !bytes.Equal(entries["big.bin"], content) {
+		t.Error("resumed big.bin content mismatch")
 	}
 }

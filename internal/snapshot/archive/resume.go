@@ -443,14 +443,37 @@ func identityMarkerShort(m NodeIdentityMarker) string {
 	return ShortChecksum(fmt.Sprintf("%x", sum[:]))
 }
 
-// removeTmpFiles deletes every *.tmp file found anywhere under dir.
+// removeTmpFiles deletes every stale *.tmp file left by an interrupted
+// AtomicWriter under dir — EXCEPT inside an FS tar staging directory, whose
+// subtree is skipped entirely.
+//
+// The FS staging subtree (data.tar.d/ and any multi-volume data/<pvc>.tar.d/,
+// see fsStagingDirSuffix) is the ONLY place user-provided file bytes exist as
+// loose files on disk, and at codec none a staged user blob is written under its
+// verbatim server-provided name — which may legitimately end in ".tmp"
+// (inv. #10a). Sweeping it here would delete that blob on every resume scan and
+// force a needless re-download. The staging path owns its own transient cleanup
+// instead: stageCompressedFile removes its per-file "<dest>.tmp" before each
+// stage, downloadChunk removes its per-chunk "<final>.tmp", and the whole
+// staging dir is os.RemoveAll'd on tar assembly — so excluding it here loses no
+// required cleanup. Internal ".tmp" outside that subtree (snapshot.yaml.tmp,
+// manifests/*.tmp, identity.json.tmp, block chunk-dir "<final>.tmp") is still
+// swept.
 func removeTmpFiles(dir string) error {
 	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".tmp") {
+		if d.IsDir() {
+			if strings.HasSuffix(d.Name(), fsStagingDirSuffix) {
+				return filepath.SkipDir
+			}
+
+			return nil
+		}
+
+		if !strings.HasSuffix(d.Name(), ".tmp") {
 			return nil
 		}
 

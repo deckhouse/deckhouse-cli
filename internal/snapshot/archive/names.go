@@ -70,6 +70,27 @@ const (
 	// the node directory and is removed after the tar is assembled.
 	FsTarStagingDirName = "data.tar.d"
 
+	// FSMetaDirName is the reserved metadata subdirectory inside an FS staging
+	// directory (FsTarStagingDirName / MultiVolumeTarStagingDirName). It holds the
+	// download machinery's OWN internal artifacts — the per-file sizes sidecar and,
+	// under FSChunksDirName, every per-file chunk directory. It is dot-prefixed and
+	// clearly-internal, and the FS ingestion checkpoint (volume.sanitizeRelPath)
+	// rejects any server-provided path whose FIRST segment equals it, so no
+	// user/server file can ever stage into this namespace — including at codec none
+	// (ext == ""), where a staged user blob is a plain file in the staging root.
+	// Everything under it is thus provably disjoint from the server-provided
+	// staged-blob namespace (stagingDir/<relPath><ext>) at EVERY codec (inv. #10a).
+	// The SSOT for this name lives here; volume.FSMetaDirName aliases it.
+	FSMetaDirName = ".d8-meta"
+
+	// FSChunksDirName is the subdirectory under FSMetaDirName holding every
+	// per-file chunk directory for a chunked FS file (see FsFileChunksDirName).
+	// Placing chunk dirs here — rather than beside the staged blobs — guarantees a
+	// chunk-dir path can never alias a staged user blob at codec none, so
+	// MergeBlockChunks' post-merge os.RemoveAll(chunkDir) can never delete a
+	// user's already-staged blob (inv. #10a).
+	FSChunksDirName = "chunks"
+
 	// DataDirName is the top-level directory for multi-volume output files.
 	//
 	// Multi-volume block files:       data/<pvc>.bin[.<ext>]
@@ -83,6 +104,16 @@ const (
 	// file inside the node directory and is removed after the frames are merged.
 	BlockChunksDirName = DataBlockBase + ".d"
 )
+
+// fsStagingDirSuffix is the common trailing suffix of every FS tar staging
+// directory name — the flat FsTarStagingDirName ("data.tar.d") and each
+// multi-volume MultiVolumeTarStagingDirName ("<pvc>.tar.d"). removeTmpFiles uses
+// it to exclude the FS staging subtree from the resume-time *.tmp sweep, so a
+// codec-none staged user blob that legitimately ends in ".tmp" is never deleted
+// (inv. #10a). Block chunk dirs (".bin.d") and the multi-volume "data/" dir are
+// deliberately NOT matched: they hold only internal ".part"/".tmp" artifacts,
+// never user blobs.
+const fsStagingDirSuffix = ".tar.d"
 
 // DataBlockName returns the output filename for a block-volume with the given
 // codec extension. ext is codec.Ext() (e.g. ".zst", ".lz4", ".gz", or "" for none).
@@ -194,19 +225,33 @@ func BlockChunksDirNameFor(pvc string) string {
 	return filepath.Join(DataDirName, pvc+".bin.d")
 }
 
-// FsFileChunksDirName returns the per-file chunk directory name for one large
-// filesystem-volume file: "<relPath><ext>.d". relPath is the item's forward-slash
+// FsFileChunksDirName returns the per-file chunk directory path for one
+// filesystem-volume file, RELATIVE to the FS staging directory:
+// ".d8-meta/chunks/<relPath><ext>.d". relPath is the item's forward-slash
 // relative path within the volume (e.g. "disk/payload.bin") and ext is the codec
 // extension (e.g. ".zst", or "" for the none codec).
 //
+// The directory lives under the reserved metadata namespace (FSMetaDirName /
+// FSChunksDirName), NOT beside the staged blob, precisely so it can never alias a
+// server-provided staged blob path (stagingDir/<relPath><ext>). At codec none
+// (ext == "") a user file named "<x>.d" would otherwise occupy the chunk-dir path
+// of a chunked user file "<x>", and MergeBlockChunks' post-merge
+// os.RemoveAll(chunkDir) (as well as ensureChunkGeometry's purge) would delete
+// that already-staged user blob, forcing a needless re-download every resume.
+// Because no server path can enter FSMetaDirName (volume.sanitizeRelPath rejects
+// it at the single ingestion checkpoint under ANY codec) and relPath is unique
+// per file, the returned path collides with neither a staged blob nor another
+// chunk dir (inv. #10a). Nesting the leaf under FSChunksDirName mirrors the
+// source subtree; it is the identity map, so distinct files map to distinct
+// paths without any lossy separator substitution.
+//
 // A caller joins this (via filepath.FromSlash) under the FS staging directory
-// (FsTarStagingDirName or MultiVolumeTarStagingDirName), so the chunk directory
-// nests inside the existing per-volume staging dir, e.g.
-// "data.tar.d/payload.bin.zst.d/". Chunks accumulate here while a file larger
-// than the effective chunk size is downloaded via Range GETs, and are merged
-// into "<relPath><ext>" (the same path DownloadBlockChunks/MergeBlockChunks use
-// for a single block volume) once complete. Mirrors BlockChunksDirNameFor's
-// naming pattern for the per-file (rather than per-volume) case.
+// (FsTarStagingDirName or MultiVolumeTarStagingDirName). Chunks accumulate here
+// while a known-size file is downloaded via Range GETs and are merged into
+// "<relPath><ext>" (the same path DownloadBlockChunks/MergeBlockChunks use for a
+// single block volume) once complete. In-flight chunk dirs from trees written
+// before this relocation (the old flat "stagingDir/<relPath><ext>.d") are simply
+// abandoned — such a file re-downloads once.
 func FsFileChunksDirName(relPath, ext string) string {
-	return relPath + ext + ".d"
+	return FSMetaDirName + "/" + FSChunksDirName + "/" + relPath + ext + ".d"
 }
