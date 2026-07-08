@@ -87,6 +87,10 @@ func NewCommand(logger *dkplog.Logger, builtinCommands []string) *cobra.Command 
 
 	flags.AddFlags(cmd.PersistentFlags())
 
+	// legacy --source bypass (temporary, hidden): direct registry access, see
+	// internal/plugins/flags/source_legacy.go.
+	flags.AddLegacySourceFlags(cmd.PersistentFlags())
+
 	wrapProxyDiagnostics(cmd)
 
 	return cmd
