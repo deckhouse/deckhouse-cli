@@ -983,6 +983,12 @@ func TestDownloadBlockChunks_PartialSurvivesResumeScan(t *testing.T) {
 	partPath := filepath.Join(chunkDir, archive.ChunkFileName(0, ".zst")+".part")
 	require.NoError(t, os.WriteFile(partPath, []byte("in-flight raw bytes"), 0o644))
 
+	// A real interrupted run stamps the identity marker on first touch
+	// (ensureNodeSubdirs); seed it so ScanNode proves the partial dir belongs to
+	// this node and resumes it, rather than collision-redirecting an unverifiable
+	// (marker-less) dir — see partial-node-dir-identity-marker.
+	require.NoError(t, archive.WriteNodeIdentityMarker(nodeDir, id))
+
 	assert.False(t, strings.HasSuffix(partPath, ".tmp"), "durable partial must not use the .tmp suffix removeTmpFiles sweeps")
 
 	plan, err := archive.ScanNode(parent, id)

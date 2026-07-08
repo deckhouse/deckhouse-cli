@@ -527,7 +527,7 @@ func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[str
 
 	// Snapshot node: ensure subdirs, write manifests, then download own data if present.
 	withSnapshots := len(task.node.Children) > 0
-	if err := ensureNodeSubdirs(task.nodeDir, withSnapshots); err != nil {
+	if err := ensureNodeSubdirs(task.nodeDir, nodeIdentity(task.node), withSnapshots); err != nil {
 		return fmt.Errorf("ensure subdirs for %s/%s: %w", task.node.Kind, task.node.Name, err)
 	}
 
@@ -557,7 +557,7 @@ func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[str
 // the volume data, and finalizes the node directory.
 // Volume nodes are always leaves: no snapshots/ subdirectory is created.
 func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams map[streamKey]streamHandle) error {
-	if err := ensureNodeSubdirs(task.nodeDir, false); err != nil {
+	if err := ensureNodeSubdirs(task.nodeDir, nodeIdentity(task.node), false); err != nil {
 		return fmt.Errorf("ensure subdirs for %s/%s: %w", task.node.Kind, task.node.Name, err)
 	}
 
@@ -685,10 +685,22 @@ func downloadOwnDataRefs(
 }
 
 // ensureNodeSubdirs creates manifests/ and, when the node has children, snapshots/
-// inside nodeDir.
-func ensureNodeSubdirs(nodeDir string, withSnapshots bool) error {
+// inside nodeDir, and stamps the node's identity marker on first touch.
+//
+// The identity marker is written BEFORE any chunk/staging/volume data lands, so a
+// later resume can prove a partial (not-yet-finalized) dir belongs to THIS
+// snapshot — snapshot.yaml, the only other identity record, is written just at
+// finalize (inv. #9). archive.WriteNodeIdentityMarker is a no-op when a marker
+// already exists, so it is safe to call on every reconcile of the same node; it
+// is checksum-neutral (excluded from ComputeNodeChecksum) and survives the
+// stale-*.tmp resume sweep.
+func ensureNodeSubdirs(nodeDir string, id archive.NodeIdentity, withSnapshots bool) error {
 	if err := archive.EnsureDir(filepath.Join(nodeDir, archive.ManifestsDirName)); err != nil {
 		return err
+	}
+
+	if err := archive.WriteNodeIdentityMarker(nodeDir, id); err != nil {
+		return fmt.Errorf("write identity marker in %s: %w", nodeDir, err)
 	}
 
 	if !withSnapshots {
