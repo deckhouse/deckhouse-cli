@@ -28,6 +28,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 )
 
 // Doer executes a single HTTP request and returns the response.
@@ -35,6 +37,11 @@ import (
 type Doer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
+
+// ErrContentRangeMismatch is returned when a 206 response's Content-Range header does not
+// cover the byte range the caller requested, so the body must not be trusted at the
+// caller's intended offset.
+var ErrContentRangeMismatch = errors.New("server Content-Range does not match requested range")
 
 // Fetcher wraps a Doer and exposes typed methods for the data-exporter HTTP API.
 type Fetcher struct {
@@ -94,7 +101,13 @@ func (f *Fetcher) HeadVolume(ctx context.Context, blockURL string) (int64, error
 
 // RangeGet issues a GET request with a Range: bytes=start-end header to blockURL and
 // returns the response body. The caller must close the returned ReadCloser.
-// Returns an error unless the server responds with 206 Partial Content.
+// Returns an error unless the server responds with 206 Partial Content AND its
+// Content-Range header confirms the returned body actually covers [start, end]: the
+// block exporter (storage-volume-data-manager images/data-exporter/internal/export_block/
+// handler.go HandleGetMethod) serves the block device via stdlib http.ServeContent, which
+// always sets Content-Range on a 206 response, so a missing or mismatched header means a
+// misbehaving server/proxy returned bytes from the wrong offset (or the whole object) and
+// must not be trusted at the caller's intended offset.
 func (f *Fetcher) RangeGet(ctx context.Context, blockURL string, start, end int64) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, blockURL, nil)
 	if err != nil {
@@ -113,7 +126,84 @@ func (f *Fetcher) RangeGet(ctx context.Context, blockURL string, start, end int6
 		return nil, fmt.Errorf("GET %s (range %d-%d): expected 206, got %s", blockURL, start, end, resp.Status)
 	}
 
+	if err := validateContentRange(resp.Header.Get("Content-Range"), start, end); err != nil {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("GET %s (range %d-%d): %w", blockURL, start, end, err)
+	}
+
 	return resp.Body, nil
+}
+
+// validateContentRange checks that a 206 response's Content-Range header value confirms
+// the body covers exactly the requested [start, end] byte range (RFC 9110 §14.4,
+// "bytes start-end/total"; total is "*" when the complete length is unknown). It fails
+// closed: an absent or malformed header, a start/end that differs from what was
+// requested, or a present total that cannot possibly hold byte end are all rejected as
+// ErrContentRangeMismatch, since any of them means the body cannot be trusted at the
+// caller's intended offset.
+func validateContentRange(header string, start, end int64) error {
+	if header == "" {
+		return fmt.Errorf("%w: 206 response has no Content-Range header", ErrContentRangeMismatch)
+	}
+
+	gotStart, gotEnd, total, err := parseContentRange(header)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrContentRangeMismatch, err)
+	}
+
+	if gotStart != start || gotEnd != end {
+		return fmt.Errorf("%w: requested bytes %d-%d, server returned Content-Range %q",
+			ErrContentRangeMismatch, start, end, header)
+	}
+
+	if total >= 0 && total <= end {
+		return fmt.Errorf("%w: Content-Range %q reports total %d not greater than end %d",
+			ErrContentRangeMismatch, header, total, end)
+	}
+
+	return nil
+}
+
+// parseContentRange parses a "bytes start-end/total" Content-Range header value.
+// The returned total is -1 when the server sent "*" for an unknown complete length.
+func parseContentRange(header string) (int64, int64, int64, error) {
+	const unitPrefix = "bytes "
+
+	spec, ok := strings.CutPrefix(header, unitPrefix)
+	if !ok {
+		return 0, 0, 0, fmt.Errorf("unsupported Content-Range unit in %q", header)
+	}
+
+	rangePart, totalPart, ok := strings.Cut(spec, "/")
+	if !ok {
+		return 0, 0, 0, fmt.Errorf("missing total in Content-Range %q", header)
+	}
+
+	startPart, endPart, ok := strings.Cut(rangePart, "-")
+	if !ok {
+		return 0, 0, 0, fmt.Errorf("missing '-' in Content-Range %q", header)
+	}
+
+	start, err := strconv.ParseInt(startPart, 10, 64)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("parse start in Content-Range %q: %w", header, err)
+	}
+
+	end, err := strconv.ParseInt(endPart, 10, 64)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("parse end in Content-Range %q: %w", header, err)
+	}
+
+	if totalPart == "*" {
+		return start, end, -1, nil
+	}
+
+	total, err := strconv.ParseInt(totalPart, 10, 64)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("parse total in Content-Range %q: %w", header, err)
+	}
+
+	return start, end, total, nil
 }
 
 // Item is one entry returned by the data-exporter filesystem listing API.
