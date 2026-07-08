@@ -28,8 +28,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Doer executes a single HTTP request and returns the response.
@@ -43,14 +46,58 @@ type Doer interface {
 // caller's intended offset.
 var ErrContentRangeMismatch = errors.New("server Content-Range does not match requested range")
 
+// ErrDataPlaneIdle is reported by a Fetcher-issued response body when no bytes
+// arrive for the configured idle window (see idleReadCloser). The data plane
+// deliberately runs without an overall request deadline — volume transfers are
+// long — so a TCP connection that stops delivering bytes WITHOUT erroring
+// (NAT/LB half-close, wedged exporter pod) would otherwise block a Read (and the
+// whole download) forever. It is wrapped with %w so the chunk/file
+// retry+resume machinery treats a silent stall as an ordinary fetch error.
+var ErrDataPlaneIdle = errors.New("data-plane read stalled: no bytes within idle timeout")
+
+// DefaultIdleReadTimeout is the conservative default idle window applied to every
+// data-plane response body a Fetcher hands out or consumes. It bounds how long a
+// single Read may block WITHOUT receiving any bytes; it is not an overall
+// transfer deadline, so a slow-but-flowing stream is never aborted. Override per
+// Fetcher with WithIdleReadTimeout (tests use a short window).
+const DefaultIdleReadTimeout = 2 * time.Minute
+
 // Fetcher wraps a Doer and exposes typed methods for the data-exporter HTTP API.
 type Fetcher struct {
-	doer Doer
+	doer        Doer
+	idleTimeout time.Duration
 }
 
-// NewFetcher creates a Fetcher backed by the given Doer.
-func NewFetcher(doer Doer) *Fetcher {
-	return &Fetcher{doer: doer}
+// FetcherOption customizes a Fetcher at construction time.
+type FetcherOption func(*Fetcher)
+
+// WithIdleReadTimeout sets the idle-read watchdog window for response bodies this
+// Fetcher issues. A value <= 0 disables the watchdog (bodies are returned
+// unwrapped). When unset, DefaultIdleReadTimeout applies.
+func WithIdleReadTimeout(d time.Duration) FetcherOption {
+	return func(f *Fetcher) { f.idleTimeout = d }
+}
+
+// NewFetcher creates a Fetcher backed by the given Doer. Unless overridden via
+// WithIdleReadTimeout, response bodies carry an idle-read watchdog with
+// DefaultIdleReadTimeout.
+func NewFetcher(doer Doer, opts ...FetcherOption) *Fetcher {
+	f := &Fetcher{doer: doer, idleTimeout: DefaultIdleReadTimeout}
+	for _, opt := range opts {
+		opt(f)
+	}
+
+	return f
+}
+
+// guardBody wraps body in an idle-read watchdog unless the watchdog is disabled
+// (idleTimeout <= 0), in which case the raw body is returned unchanged.
+func (f *Fetcher) guardBody(ctx context.Context, body io.ReadCloser) io.ReadCloser {
+	if f.idleTimeout <= 0 {
+		return body
+	}
+
+	return newIdleReadCloser(ctx, body, f.idleTimeout)
 }
 
 // BlockURL returns the block-volume endpoint for a DataExport base URL.
@@ -131,7 +178,7 @@ func (f *Fetcher) RangeGet(ctx context.Context, blockURL string, start, end int6
 		return nil, fmt.Errorf("GET %s (range %d-%d): %w", blockURL, start, end, err)
 	}
 
-	return resp.Body, nil
+	return f.guardBody(ctx, resp.Body), nil
 }
 
 // validateContentRange checks that a 206 response's Content-Range header value confirms
@@ -242,7 +289,14 @@ func (f *Fetcher) ListDir(ctx context.Context, filesURL string) ([]Item, error) 
 		return nil, fmt.Errorf("GET %s: unexpected status %s", filesURL, resp.Status)
 	}
 
-	items, err := decodeItems(resp.Body)
+	// Guard the bounded listing body too: a stalled listing must not hang the
+	// run any more than a stalled data stream. Closing the watchdog stops its
+	// timer; the underlying resp.Body is still closed by the defer above.
+	body := f.guardBody(ctx, resp.Body)
+
+	defer func() { _ = body.Close() }()
+
+	items, err := decodeItems(body)
 	if err != nil {
 		return nil, fmt.Errorf("decode listing from %s: %w", filesURL, err)
 	}
@@ -268,7 +322,7 @@ func (f *Fetcher) GetFile(ctx context.Context, fileURL string) (io.ReadCloser, e
 		return nil, fmt.Errorf("GET %s: unexpected status %s", fileURL, resp.Status)
 	}
 
-	return resp.Body, nil
+	return f.guardBody(ctx, resp.Body), nil
 }
 
 // withAttributes appends one "attribute" query parameter per entry in attrs to rawURL.
@@ -333,4 +387,123 @@ func decodeItems(r io.Reader) ([]Item, error) {
 	}
 
 	return items, nil
+}
+
+// idleReadCloser wraps a response body with a per-Read idle watchdog. A single
+// timer is (re)armed immediately before each Read and stopped when that Read
+// returns, so a stream that keeps delivering bytes — even slowly, in many small
+// reads — never trips it, because no individual Read blocks for the whole window.
+// A connection that goes silent WITHOUT erroring, however, leaves one Read
+// blocked for the full window; the timer then fires and closes the underlying
+// body, which unblocks that Read, after which reads report ErrDataPlaneIdle so
+// the caller's retry/resume machinery takes over.
+//
+// It holds exactly one timer per body and starts no long-lived goroutine: the
+// timer's callback runs only if it fires, and is stopped on every Read return
+// and on Close, so nothing leaks. ctx cancellation is honored two ways: Read
+// short-circuits when ctx is already done, and the request-scoped body (built
+// via http.NewRequestWithContext) aborts an in-flight Read promptly on
+// cancellation — the watchdog never masks that.
+type idleReadCloser struct {
+	ctx     context.Context
+	body    io.ReadCloser
+	timeout time.Duration
+
+	mu      sync.Mutex
+	timer   *time.Timer
+	closed  bool
+	tripped bool
+}
+
+// newIdleReadCloser wraps body with an idle watchdog of the given timeout,
+// scoped to ctx. timeout is expected to be > 0 (callers use guardBody, which
+// skips wrapping otherwise).
+func newIdleReadCloser(ctx context.Context, body io.ReadCloser, timeout time.Duration) *idleReadCloser {
+	return &idleReadCloser{ctx: ctx, body: body, timeout: timeout}
+}
+
+func (r *idleReadCloser) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	r.mu.Lock()
+
+	if r.closed {
+		r.mu.Unlock()
+		return 0, os.ErrClosed
+	}
+
+	if r.tripped {
+		r.mu.Unlock()
+		return 0, fmt.Errorf("%w after %s", ErrDataPlaneIdle, r.timeout)
+	}
+
+	if r.timer == nil {
+		r.timer = time.AfterFunc(r.timeout, r.onIdle)
+	} else {
+		r.timer.Reset(r.timeout)
+	}
+
+	r.mu.Unlock()
+
+	n, err := r.body.Read(p)
+
+	r.mu.Lock()
+
+	if r.timer != nil {
+		r.timer.Stop()
+	}
+
+	tripped := r.tripped
+	r.mu.Unlock()
+
+	if tripped {
+		// The watchdog closed the body mid-Read; surface the idle sentinel
+		// rather than the incidental "read on closed body" error. Any bytes
+		// read before the close (n) are still valid and returned to the caller.
+		return n, fmt.Errorf("%w after %s", ErrDataPlaneIdle, r.timeout)
+	}
+
+	return n, err
+}
+
+// onIdle runs when the timer fires: it marks the body as tripped and closes the
+// underlying body to unblock the stuck Read. It closes the body while holding
+// the mutex so it can never race a concurrent Close on the same body.
+func (r *idleReadCloser) onIdle() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed || r.tripped {
+		return
+	}
+
+	r.tripped = true
+	_ = r.body.Close()
+}
+
+// Close stops the watchdog timer and closes the underlying body exactly once.
+// It is safe to call concurrently with an in-flight Read (the normal way a
+// caller aborts a stream) and after the watchdog has already tripped.
+func (r *idleReadCloser) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return nil
+	}
+
+	r.closed = true
+
+	if r.timer != nil {
+		r.timer.Stop()
+	}
+
+	if r.tripped {
+		// onIdle already closed the body.
+		return nil
+	}
+
+	return r.body.Close()
 }

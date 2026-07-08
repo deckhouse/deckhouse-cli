@@ -214,6 +214,37 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 	}
 }
 
+// SetResponseHeaderTimeout makes this client abort a request whose server
+// accepts the TCP connection but does not send response headers within timeout,
+// so a wedged endpoint that never answers fails fast instead of blocking a
+// caller indefinitely (rest.HTTPClientFor builds its transport with
+// restConfig.Timeout = 0, i.e. no response-header timeout by default).
+//
+// It is strictly opt-in and mutates only THIS client's rest.Config: it chains
+// onto any existing WrapTransport (e.g. the one SetTLSCAData installs) rather
+// than replacing it, and a SafeClient that never calls it keeps its previous
+// behavior (WrapTransport unchanged). The timeout is applied to the transport
+// that rest.HTTPClientFor builds for the credential-bearing branches of HTTPDo.
+func (c *SafeClient) SetResponseHeaderTimeout(timeout time.Duration) {
+	prev := c.restConfig.WrapTransport
+
+	c.restConfig.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+		if prev != nil {
+			rt = prev(rt)
+		}
+
+		transport, ok := rt.(*http.Transport)
+		if !ok {
+			return rt
+		}
+
+		cloned := transport.Clone()
+		cloned.ResponseHeaderTimeout = timeout
+
+		return cloned
+	}
+}
+
 func (c *SafeClient) Copy() *SafeClient {
 	return &SafeClient{rest.CopyConfig(c.restConfig)}
 }

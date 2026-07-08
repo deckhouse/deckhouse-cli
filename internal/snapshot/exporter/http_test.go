@@ -26,6 +26,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -452,6 +454,272 @@ func TestGetFile(t *testing.T) {
 
 	if string(got) != fileContent {
 		t.Errorf("GetFile content: got %q, want %q", got, fileContent)
+	}
+}
+
+// errBlockingBodyClosed is returned by blockingBody.Read once the body is
+// closed, standing in for the "read on closed response body" error a real
+// *http.Response body surfaces when the watchdog (or the caller) closes it.
+var errBlockingBodyClosed = errors.New("blocking body closed")
+
+// blockingBody is an io.ReadCloser whose Read blocks until a chunk is delivered
+// on data (never, in these tests) or the body is closed, letting a test simulate
+// a connection that stops delivering bytes without erroring. It records how many
+// times Close was called so a test can assert the watchdog closed it exactly
+// once.
+type blockingBody struct {
+	data     chan []byte
+	closed   chan struct{}
+	once     sync.Once
+	closeCnt atomic.Int32
+}
+
+func newBlockingBody() *blockingBody {
+	return &blockingBody{data: make(chan []byte), closed: make(chan struct{})}
+}
+
+func (b *blockingBody) Read(p []byte) (int, error) {
+	select {
+	case chunk, ok := <-b.data:
+		if !ok {
+			return 0, io.EOF
+		}
+
+		return copy(p, chunk), nil
+	case <-b.closed:
+		return 0, errBlockingBodyClosed
+	}
+}
+
+func (b *blockingBody) Close() error {
+	b.closeCnt.Add(1)
+	b.once.Do(func() { close(b.closed) })
+
+	return nil
+}
+
+// TestIdleReadCloser_TripsWhenNoBytes asserts the watchdog closes the underlying
+// body and reports ErrDataPlaneIdle when a Read blocks for the whole window.
+func TestIdleReadCloser_TripsWhenNoBytes(t *testing.T) {
+	t.Parallel()
+
+	body := newBlockingBody()
+	r := newIdleReadCloser(context.Background(), body, 40*time.Millisecond)
+
+	_, err := r.Read(make([]byte, 8))
+	if !errors.Is(err, ErrDataPlaneIdle) {
+		t.Fatalf("expected ErrDataPlaneIdle, got %v", err)
+	}
+
+	if body.closeCnt.Load() == 0 {
+		t.Error("watchdog should have closed the underlying body on trip")
+	}
+
+	_ = r.Close()
+}
+
+// TestIdleReadCloser_CloseUnblocksReadWithoutTrip asserts that closing the
+// watchdog unblocks an in-flight Read promptly WITHOUT reporting the idle
+// sentinel (Close is the normal way a caller aborts a stream), and that the
+// reader goroutine always returns — i.e. no goroutine leak.
+func TestIdleReadCloser_CloseUnblocksReadWithoutTrip(t *testing.T) {
+	t.Parallel()
+
+	body := newBlockingBody()
+	// A long window guarantees any prompt return is due to Close, not the timer.
+	r := newIdleReadCloser(context.Background(), body, time.Minute)
+
+	done := make(chan error, 1)
+	go func() {
+		_, e := r.Read(make([]byte, 8))
+		done <- e
+	}()
+
+	// Let the Read arm the timer and block on the body before closing.
+	time.Sleep(20 * time.Millisecond)
+
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case e := <-done:
+		if errors.Is(e, ErrDataPlaneIdle) {
+			t.Errorf("Close must not surface the idle sentinel, got %v", e)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Read did not return after Close (goroutine leak)")
+	}
+
+	if _, e := r.Read(make([]byte, 1)); e == nil {
+		t.Error("Read after Close should return an error")
+	}
+}
+
+// TestRangeGet_IdleWatchdogTripsOnStall asserts a block-range body that stops
+// delivering bytes mid-stream (server flushes a prefix, then goes silent without
+// erroring) unblocks with ErrDataPlaneIdle within the idle window instead of
+// hanging forever.
+func TestRangeGet_IdleWatchdogTripsOnStall(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes 0-9/100")
+		w.Header().Set("Content-Length", "10")
+		w.WriteHeader(http.StatusPartialContent)
+
+		if fl, ok := w.(http.Flusher); ok {
+			_, _ = w.Write([]byte("ABC"))
+			fl.Flush()
+		}
+
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	f := NewFetcher(srv.Client(), WithIdleReadTimeout(50*time.Millisecond))
+
+	rc, err := f.RangeGet(context.Background(), srv.URL, 0, 9)
+	if err != nil {
+		t.Fatalf("RangeGet: %v", err)
+	}
+
+	defer func() { _ = rc.Close() }()
+
+	if _, err := io.ReadAll(rc); !errors.Is(err, ErrDataPlaneIdle) {
+		t.Fatalf("expected ErrDataPlaneIdle on a mid-stream stall, got %v", err)
+	}
+}
+
+// TestRangeGet_TrickleWithinWindowCompletes asserts a slow-but-flowing stream
+// (bytes arriving one at a time, each gap well within the idle window) is never
+// aborted by the watchdog and delivers all bytes.
+func TestRangeGet_TrickleWithinWindowCompletes(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte("ABCDEFGHIJ")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(payload)-1, len(payload)))
+		w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+		w.WriteHeader(http.StatusPartialContent)
+
+		fl, ok := w.(http.Flusher)
+
+		for _, c := range payload {
+			_, _ = w.Write([]byte{c})
+
+			if ok {
+				fl.Flush()
+			}
+
+			time.Sleep(15 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	f := NewFetcher(srv.Client(), WithIdleReadTimeout(300*time.Millisecond))
+
+	rc, err := f.RangeGet(context.Background(), srv.URL, 0, int64(len(payload)-1))
+	if err != nil {
+		t.Fatalf("RangeGet: %v", err)
+	}
+
+	defer func() { _ = rc.Close() }()
+
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	if !bytes.Equal(got, payload) {
+		t.Errorf("trickled body: got %q, want %q", got, payload)
+	}
+}
+
+// TestGetFile_IdleWatchdogTripsOnStall asserts the file-download path (GetFile)
+// carries the same watchdog as the block-range path.
+func TestGetFile_IdleWatchdogTripsOnStall(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+
+		if fl, ok := w.(http.Flusher); ok {
+			_, _ = io.WriteString(w, "partial")
+			fl.Flush()
+		}
+
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	f := NewFetcher(srv.Client(), WithIdleReadTimeout(50*time.Millisecond))
+
+	rc, err := f.GetFile(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("GetFile: %v", err)
+	}
+
+	defer func() { _ = rc.Close() }()
+
+	if _, err := io.ReadAll(rc); !errors.Is(err, ErrDataPlaneIdle) {
+		t.Fatalf("expected ErrDataPlaneIdle on a mid-stream stall, got %v", err)
+	}
+}
+
+// TestRangeGet_ContextCancelReturnsPromptly asserts ctx cancellation aborts an
+// in-flight body read promptly (well before the large idle window) and is not
+// masked by the watchdog's idle sentinel.
+func TestRangeGet_ContextCancelReturnsPromptly(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes 0-9/100")
+		w.Header().Set("Content-Length", "10")
+		w.WriteHeader(http.StatusPartialContent)
+
+		if fl, ok := w.(http.Flusher); ok {
+			_, _ = w.Write([]byte("AB"))
+			fl.Flush()
+		}
+
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	// A large idle window ensures a prompt return can only be ctx cancellation.
+	f := NewFetcher(srv.Client(), WithIdleReadTimeout(30*time.Second))
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	rc, err := f.RangeGet(ctx, srv.URL, 0, 9)
+	if err != nil {
+		t.Fatalf("RangeGet: %v", err)
+	}
+
+	defer func() { _ = rc.Close() }()
+
+	time.AfterFunc(30*time.Millisecond, cancel)
+
+	start := time.Now()
+
+	_, err = io.ReadAll(rc)
+	if err == nil {
+		t.Fatal("expected an error after ctx cancellation")
+	}
+
+	if errors.Is(err, ErrDataPlaneIdle) {
+		t.Errorf("ctx cancellation must not surface the idle sentinel, got %v", err)
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("read did not return promptly after cancel: %v", elapsed)
 	}
 }
 
