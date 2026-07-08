@@ -1262,6 +1262,14 @@ func TestDownloadFilesystemVolume_SmallFile_InterruptedResumesFromPersistedOffse
 		t.Error("data.tar must not exist after an interrupted run")
 	}
 
+	// A real interrupted run stamps the identity marker on first touch
+	// (ensureNodeSubdirs); seed it so ScanAbsolute proves the partial dir's
+	// identity and resumes rather than rejecting an unverifiable (marker-less)
+	// dir with ErrIdentityMismatch — see partial-node-dir-identity-marker.
+	if err := archive.WriteNodeIdentityMarker(nodeDir, archive.NodeIdentity{}); err != nil {
+		t.Fatalf("WriteNodeIdentityMarker: %v", err)
+	}
+
 	// The resumable partial must survive a resume scan's stale-*.tmp sweep: it
 	// uses ".part", not ".tmp" (archive.resume.go's removeTmpFiles only
 	// targets "*.tmp").
@@ -1705,6 +1713,14 @@ func TestDownloadFilesystemVolume_SizesSidecar_SeedsResumeWithoutNetwork(t *test
 
 	if gotStaged != int64(len(firstContent)) {
 		t.Errorf("ScanFSStagingSizes staged = %d; want %d (only a.bin, the fully-staged flat blob)", gotStaged, len(firstContent))
+	}
+
+	// A real interrupted run stamps the identity marker on first touch
+	// (ensureNodeSubdirs); seed it so ScanAbsolute proves the partial dir's
+	// identity and resumes rather than rejecting an unverifiable (marker-less)
+	// dir with ErrIdentityMismatch — see partial-node-dir-identity-marker.
+	if err := archive.WriteNodeIdentityMarker(nodeDir, archive.NodeIdentity{}); err != nil {
+		t.Fatalf("WriteNodeIdentityMarker: %v", err)
 	}
 
 	// The sidecar must survive a resume scan: it does not end in ".tmp", so

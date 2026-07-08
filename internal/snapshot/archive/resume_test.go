@@ -17,6 +17,7 @@ limitations under the License.
 package archive_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -67,6 +68,22 @@ func makeCompleteNode(t *testing.T, parent, kind, name string, id archive.NodeId
 	}
 
 	return nodeDir
+}
+
+// writeMarker stamps the identity marker the pipeline writes on a node's first
+// touch. Partial-dir resume tests seed it so ScanNode/ScanAbsolute can prove the
+// dir belongs to the planned node — after partial-node-dir-identity-marker a
+// marker-less non-empty partial dir is treated as foreign, not resumed.
+func writeMarker(t *testing.T, dir string, id archive.NodeIdentity) {
+	t.Helper()
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir for marker: %v", err)
+	}
+
+	if err := archive.WriteNodeIdentityMarker(dir, id); err != nil {
+		t.Fatalf("write identity marker: %v", err)
+	}
 }
 
 func TestScanNode_NoPrimaryDir(t *testing.T) {
@@ -307,6 +324,8 @@ func TestScanNode_BlockPartialWithTmp(t *testing.T) {
 		t.Fatalf("mkdir chunkDir: %v", err)
 	}
 
+	writeMarker(t, nodeDir, id)
+
 	// two valid chunks
 	for _, name := range []string{archive.ChunkFileName(0, ".zst"), archive.ChunkFileName(2, ".zst")} {
 		if err := os.WriteFile(filepath.Join(chunkDir, name), []byte("data"), 0o644); err != nil {
@@ -364,6 +383,8 @@ func TestScanNode_BlockPartialAllPartFiles(t *testing.T) {
 		t.Fatalf("mkdir chunkDir: %v", err)
 	}
 
+	writeMarker(t, nodeDir, id)
+
 	// Only a durable partial for chunk 0 — no chunk has finalized yet.
 	partPath := filepath.Join(chunkDir, archive.ChunkFileName(0, ".zst")+".part")
 
@@ -397,6 +418,8 @@ func TestScanNode_FSPartial(t *testing.T) {
 	parent := t.TempDir()
 	id := archive.NodeIdentity{Kind: "VirtualDiskSnapshot", Name: "disk-fs"}
 	nodeDir := filepath.Join(parent, archive.NodeDirName(id.Kind, id.Name))
+
+	writeMarker(t, nodeDir, id)
 
 	// Multi-volume data/ directory triggers FSPartial.
 	dataDir := filepath.Join(nodeDir, archive.DataDirName)
@@ -442,6 +465,8 @@ func TestScanNode_FSTarStagingPartial(t *testing.T) {
 	id := archive.NodeIdentity{Kind: "VirtualDiskSnapshot", Name: "disk-fstar"}
 	nodeDir := filepath.Join(parent, archive.NodeDirName(id.Kind, id.Name))
 
+	writeMarker(t, nodeDir, id)
+
 	// Flat FS tar staging dir (data.tar.d/) triggers FSPartial.
 	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
 
@@ -481,6 +506,8 @@ func TestScanNode_ManifestsOnly(t *testing.T) {
 		t.Fatalf("mkdir manifests: %v", err)
 	}
 
+	writeMarker(t, nodeDir, id)
+
 	if err := os.WriteFile(filepath.Join(manifDir, "virtualmachine_vm.yaml"), []byte("apiVersion: v1\n"), 0o644); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
@@ -497,6 +524,278 @@ func TestScanNode_ManifestsOnly(t *testing.T) {
 
 	if plan.TargetDir != nodeDir {
 		t.Errorf("TargetDir = %q, want %q", plan.TargetDir, nodeDir)
+	}
+}
+
+// TestScanNode_PartialMismatchedMarker_Redirects proves a partial dir whose
+// identity marker belongs to a DIFFERENT snapshot is collision-redirected, never
+// resumed into — the core cross-snapshot-mixing fix (scenario A/B).
+func TestScanNode_PartialMismatchedMarker_Redirects(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+
+	idA := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "disk-1",
+		DirName:    "source-disk",
+		Namespace:  "default",
+		SourceRef:  "vd/disk-a",
+	}
+	idB := idA
+	idB.Name = "disk-2"
+	idB.SourceRef = "vd/disk-b"
+
+	// A block-partial dir left by snapshot A (marker A), same on-disk DirName.
+	nodeDir := filepath.Join(parent, archive.NodeDirName(idA.Kind, "source-disk"))
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatalf("mkdir chunkDir: %v", err)
+	}
+
+	writeMarker(t, nodeDir, idA)
+
+	if err := os.WriteFile(filepath.Join(chunkDir, archive.ChunkFileName(0, ".zst")), []byte("foreign"), 0o644); err != nil {
+		t.Fatalf("write chunk: %v", err)
+	}
+
+	plan, err := archive.ScanNode(parent, idB)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if plan.State != archive.NodeStatePending {
+		t.Errorf("state = %v, want NodeStatePending (redirect)", plan.State)
+	}
+
+	if plan.TargetDir == nodeDir {
+		t.Error("mismatched partial marker must not resume into the foreign dir")
+	}
+
+	// The redirect suffix is stable across re-scans (derived from foreign identity).
+	plan2, err := archive.ScanNode(parent, idB)
+	if err != nil {
+		t.Fatalf("unexpected error on re-scan: %v", err)
+	}
+
+	if plan2.TargetDir != plan.TargetDir {
+		t.Errorf("collision redirect not stable across re-scan: %q vs %q", plan2.TargetDir, plan.TargetDir)
+	}
+}
+
+// TestScanNode_PartialNoMarker_Redirects proves a NON-EMPTY partial dir with no
+// identity marker (a tree predating this feature, or a foreign dir) is treated
+// as unverifiable and collision-redirected rather than silently resumed.
+func TestScanNode_PartialNoMarker_Redirects(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	id := archive.NodeIdentity{Kind: "VirtualDiskSnapshot", Name: "disk-1"}
+	nodeDir := filepath.Join(parent, archive.NodeDirName(id.Kind, id.Name))
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatalf("mkdir chunkDir: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(chunkDir, archive.ChunkFileName(0, ".zst")), []byte("unmarked"), 0o644); err != nil {
+		t.Fatalf("write chunk: %v", err)
+	}
+
+	plan, err := archive.ScanNode(parent, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if plan.State != archive.NodeStatePending {
+		t.Errorf("state = %v, want NodeStatePending (redirect)", plan.State)
+	}
+
+	if plan.TargetDir == nodeDir {
+		t.Error("a marker-less non-empty partial dir must not be resumed into")
+	}
+}
+
+// TestScanNode_FreshEmptyDir_NoMarker_Resumes proves an empty (or lock-only)
+// partial dir with no marker and no snapshot-download artifacts is treated as a
+// fresh node, resumed in place so the pipeline can stamp the marker on first
+// touch — the case that keeps a first-time root download working.
+func TestScanNode_FreshEmptyDir_NoMarker_Resumes(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	id := archive.NodeIdentity{Kind: "VirtualDiskSnapshot", Name: "disk-1"}
+	nodeDir := filepath.Join(parent, archive.NodeDirName(id.Kind, id.Name))
+
+	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
+		t.Fatalf("mkdir nodeDir: %v", err)
+	}
+
+	// A non-pipeline file (mirrors the download advisory lock) must not count.
+	if err := os.WriteFile(filepath.Join(nodeDir, ".d8-snapshot-download.lock"), nil, 0o644); err != nil {
+		t.Fatalf("write lock file: %v", err)
+	}
+
+	plan, err := archive.ScanNode(parent, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if plan.State != archive.NodeStateManifestsOnly {
+		t.Errorf("state = %v, want NodeStateManifestsOnly (fresh, resumable)", plan.State)
+	}
+
+	if plan.TargetDir != nodeDir {
+		t.Errorf("TargetDir = %q, want %q (resume in place)", plan.TargetDir, nodeDir)
+	}
+}
+
+// TestScanAbsolute_PartialMatchingMarker_Resumes proves the ScanAbsolute happy
+// path: a partial dir whose marker matches the planned identity resumes as today.
+func TestScanAbsolute_PartialMatchingMarker_Resumes(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := t.TempDir()
+	id := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "root",
+		Namespace:  "default",
+	}
+
+	writeMarker(t, nodeDir, id)
+
+	if err := os.MkdirAll(filepath.Join(nodeDir, archive.BlockChunksDirName), 0o755); err != nil {
+		t.Fatalf("mkdir chunkDir: %v", err)
+	}
+
+	plan, err := archive.ScanAbsolute(nodeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if plan.State != archive.NodeStateBlockPartial {
+		t.Errorf("state = %v, want NodeStateBlockPartial", plan.State)
+	}
+
+	if plan.TargetDir != nodeDir {
+		t.Errorf("TargetDir = %q, want %q", plan.TargetDir, nodeDir)
+	}
+}
+
+// TestScanAbsolute_PartialMismatchedMarker_Rejects proves ScanAbsolute returns
+// ErrIdentityMismatch (rather than resuming) when a partial dir's marker belongs
+// to a different snapshot.
+func TestScanAbsolute_PartialMismatchedMarker_Rejects(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := t.TempDir()
+
+	idA := archive.NodeIdentity{Kind: "Snapshot", Name: "root-a", SourceRef: "a"}
+	idB := archive.NodeIdentity{Kind: "Snapshot", Name: "root-b", SourceRef: "b"}
+
+	writeMarker(t, nodeDir, idA)
+
+	if err := os.MkdirAll(filepath.Join(nodeDir, archive.BlockChunksDirName), 0o755); err != nil {
+		t.Fatalf("mkdir chunkDir: %v", err)
+	}
+
+	_, err := archive.ScanAbsolute(nodeDir, idB)
+	if !errors.Is(err, archive.ErrIdentityMismatch) {
+		t.Errorf("err = %v, want ErrIdentityMismatch", err)
+	}
+}
+
+// TestScanAbsolute_PartialNoMarker_Rejects proves ScanAbsolute rejects a
+// non-empty partial dir carrying no identity marker.
+func TestScanAbsolute_PartialNoMarker_Rejects(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := t.TempDir()
+	id := archive.NodeIdentity{Kind: "Snapshot", Name: "root"}
+
+	if err := os.MkdirAll(filepath.Join(nodeDir, archive.FsTarStagingDirName), 0o755); err != nil {
+		t.Fatalf("mkdir stagingDir: %v", err)
+	}
+
+	_, err := archive.ScanAbsolute(nodeDir, id)
+	if !errors.Is(err, archive.ErrIdentityMismatch) {
+		t.Errorf("err = %v, want ErrIdentityMismatch", err)
+	}
+}
+
+// TestWriteNodeIdentityMarker_IdempotentFirstWriterWins proves the marker is
+// written once and records the FIRST toucher's identity: a second call with a
+// different identity is a no-op, so a re-run never overwrites the marker a resume
+// must match.
+func TestWriteNodeIdentityMarker_IdempotentFirstWriterWins(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	first := archive.NodeIdentity{Kind: "Snapshot", Name: "first", SourceRef: "s1"}
+	second := archive.NodeIdentity{Kind: "Snapshot", Name: "second", SourceRef: "s2"}
+
+	if err := archive.WriteNodeIdentityMarker(dir, first); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+
+	if err := archive.WriteNodeIdentityMarker(dir, second); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+
+	marker, found, err := archive.ReadNodeIdentityMarker(dir)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+
+	if !found {
+		t.Fatal("marker must be present after write")
+	}
+
+	if marker.Name != "first" || marker.SourceRef != "s1" {
+		t.Errorf("marker = %+v, want the first writer's identity", marker)
+	}
+}
+
+// TestNodeIdentityMarker_DoesNotAffectChecksum proves the identity marker is
+// checksum-neutral: adding it to a finalized node leaves ComputeNodeChecksum and
+// VerifyNode results unchanged (it is not one of the files the checksum covers).
+func TestNodeIdentityMarker_DoesNotAffectChecksum(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	id := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "disk-1",
+		Namespace:  "default",
+	}
+
+	nodeDir := makeCompleteNode(t, parent, id.Kind, id.Name, id)
+
+	before, err := archive.ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("checksum before: %v", err)
+	}
+
+	if err := archive.WriteNodeIdentityMarker(nodeDir, id); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	after, err := archive.ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("checksum after: %v", err)
+	}
+
+	if before.Hex != after.Hex {
+		t.Errorf("checksum changed after writing marker: %q -> %q", before.Hex, after.Hex)
+	}
+
+	if err := archive.VerifyNode(nodeDir); err != nil {
+		t.Errorf("VerifyNode must still pass with a marker present: %v", err)
 	}
 }
 

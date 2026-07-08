@@ -38,6 +38,24 @@ const (
 	// Present only when a node has children.
 	SnapshotsDirName = "snapshots"
 
+	// NodeIdentityMarkerName is the identity sidecar written into a node directory
+	// on FIRST touch (WriteNodeIdentityMarker), before any chunk/staging/volume
+	// data lands. It records the node's snapshot identity so a resume scan can
+	// prove a PARTIAL (not-yet-finalized) directory belongs to the planned node —
+	// snapshot.yaml, the only other identity record, is written just at finalize,
+	// so without this marker a partial dir carries no identity and could be
+	// silently resumed into by a DIFFERENT snapshot of the same source object.
+	//
+	// It deliberately does NOT end in ".tmp", so resume.go's stale-*.tmp sweep
+	// (removeTmpFiles) never touches it, and it is not one of the fixed file/dir
+	// names ComputeNodeChecksum reads (manifests/, data.bin*, data.tar, data/),
+	// so its presence never perturbs a node's checksum. At codec "none" (ext == "")
+	// no user/server payload is named "identity.json": block payloads are
+	// data.bin, FS payloads live only inside data.tar, and per-file entries are
+	// tar members, never files in the node dir — so the name cannot collide with
+	// user- or server-provided content (inv. #10a).
+	NodeIdentityMarkerName = "identity.json"
+
 	// DataBlockBase is the base filename (without codec extension) for the completed
 	// block-volume output file. The actual filename is DataBlockName(codec.Ext()).
 	DataBlockBase = "data.bin"

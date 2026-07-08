@@ -17,6 +17,9 @@ limitations under the License.
 package archive
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -128,7 +131,15 @@ func ScanNode(parentDir string, id NodeIdentity) (NodeResumePlan, error) {
 		return classifyCompleteDir(parentDir, primaryDir, id)
 	}
 
-	return classifyPartialDir(primaryDir)
+	// A partial dir is resumable only with proven identity. On a mismatched or
+	// absent-but-non-empty marker the node is redirected to a stable collision
+	// path (mirroring classifyCompleteDir) instead of resuming into another
+	// snapshot's bytes.
+	return classifyPartialDir(primaryDir, id, func(mm partialMismatch) (NodeResumePlan, error) {
+		collisionDir := CollisionNodeDir(parentDir, id.Kind, nodeDirComponent(id), mm.short)
+
+		return NodeResumePlan{TargetDir: collisionDir, State: NodeStatePending}, nil
+	})
 }
 
 // classifyCompleteDir handles the case where the primary directory passes
@@ -152,29 +163,128 @@ func classifyCompleteDir(parentDir, primaryDir string, id NodeIdentity) (NodeRes
 	return NodeResumePlan{TargetDir: collisionDir, State: NodeStatePending}, nil
 }
 
+// partialMismatch carries the information ScanNode/ScanAbsolute need to react to
+// a partial directory that cannot be proven to belong to the planned node.
+type partialMismatch struct {
+	// short is a stable collision-suffix ScanNode appends to redirect the node to
+	// a fresh path. It is derived from the FOREIGN marker's identity when a
+	// mismatched marker is present (so re-runs redirect to the same path), or from
+	// the PLANNED identity when the dir has no marker at all (still deterministic).
+	short string
+	// detail is a human-readable clause for ScanAbsolute's ErrIdentityMismatch.
+	detail string
+}
+
 // classifyPartialDir classifies an existing but incomplete node directory.
-func classifyPartialDir(primaryDir string) (NodeResumePlan, error) {
+//
+// A partial directory carries no snapshot.yaml (that file — the other identity
+// record — is written only at finalize), so its identity is proven solely by the
+// identity marker written on first touch (WriteNodeIdentityMarker):
+//
+//   - marker present and matching id       -> resume (classifyPartialResumable);
+//   - marker present but mismatched         -> foreign; onMismatch redirects
+//     (ScanNode) or rejects (ScanAbsolute);
+//   - marker absent, dir holds node content -> unverifiable (a tree predating
+//     this feature, or a foreign dir such as scenario B's merged-but-unmarked
+//     data.bin); onMismatch, paying a one-time re-download rather than risk
+//     resuming into another snapshot's bytes;
+//   - marker absent, dir effectively empty  -> a fresh dir (e.g. the root output
+//     dir holding only the download lock, or a --node scaffold dir); resume as a
+//     pending node and let the pipeline stamp the marker on first touch.
+//
+// This is the resume-identity invariant (inv. #9): a partial dir is resumable
+// only with proven identity.
+func classifyPartialDir(dir string, id NodeIdentity, onMismatch func(partialMismatch) (NodeResumePlan, error)) (NodeResumePlan, error) {
+	marker, found, err := ReadNodeIdentityMarker(dir)
+	if err != nil {
+		return NodeResumePlan{}, err
+	}
+
+	if found {
+		if markerMatchesIdentity(marker, id) {
+			return classifyPartialResumable(dir)
+		}
+
+		return onMismatch(partialMismatch{
+			short:  identityMarkerShort(marker),
+			detail: fmt.Sprintf("contains a partial download of %s/%s", marker.Kind, marker.Name),
+		})
+	}
+
+	populated, err := dirHasNodeArtifacts(dir)
+	if err != nil {
+		return NodeResumePlan{}, err
+	}
+
+	if !populated {
+		return classifyPartialResumable(dir)
+	}
+
+	return onMismatch(partialMismatch{
+		short:  identityMarkerShort(markerFromIdentity(id)),
+		detail: "contains an unverifiable partial download (no identity marker)",
+	})
+}
+
+// classifyPartialResumable classifies a partial dir whose identity is already
+// proven (matching marker, or a genuinely fresh dir). It branches purely on the
+// on-disk staging layout, exactly as the pre-identity-marker resume scan did.
+func classifyPartialResumable(dir string) (NodeResumePlan, error) {
 	// Block chunk staging dir (single-volume block download in progress). This
 	// fires on the DIRECTORY'S EXISTENCE alone, not on any chunk having
 	// finalized — a chunk dir holding only durable in-flight "*.part" raw
 	// partials (see volume.downloadChunk's sub-chunk resume) is exactly as
 	// much "in progress" as one with finalized chunk_NNNNN files, and must
 	// resume rather than restart from scratch.
-	if _, err := os.Stat(filepath.Join(primaryDir, BlockChunksDirName)); err == nil {
-		return NodeResumePlan{TargetDir: primaryDir, State: NodeStateBlockPartial}, nil
+	if _, err := os.Stat(filepath.Join(dir, BlockChunksDirName)); err == nil {
+		return NodeResumePlan{TargetDir: dir, State: NodeStateBlockPartial}, nil
 	}
 
 	// Flat FS tar staging dir (single-volume filesystem download in progress).
-	if _, err := os.Stat(filepath.Join(primaryDir, FsTarStagingDirName)); err == nil {
-		return NodeResumePlan{TargetDir: primaryDir, State: NodeStateFSPartial}, nil
+	if _, err := os.Stat(filepath.Join(dir, FsTarStagingDirName)); err == nil {
+		return NodeResumePlan{TargetDir: dir, State: NodeStateFSPartial}, nil
 	}
 
 	// Multi-volume data/ directory (multi-volume layout, block or FS).
-	if _, err := os.Stat(filepath.Join(primaryDir, DataDirName)); err == nil {
-		return NodeResumePlan{TargetDir: primaryDir, State: NodeStateFSPartial}, nil
+	if _, err := os.Stat(filepath.Join(dir, DataDirName)); err == nil {
+		return NodeResumePlan{TargetDir: dir, State: NodeStateFSPartial}, nil
 	}
 
-	return NodeResumePlan{TargetDir: primaryDir, State: NodeStateManifestsOnly}, nil
+	return NodeResumePlan{TargetDir: dir, State: NodeStateManifestsOnly}, nil
+}
+
+// dirHasNodeArtifacts reports whether dir already holds any snapshot-download
+// artifact the pipeline writes into a node directory (manifests/, block/FS
+// staging dirs, a merged data.bin*/data.tar, the data/ multi-volume dir, or a
+// snapshot.yaml). It probes ONLY these fixed pipeline-owned names, so files the
+// pipeline does not own — the download advisory lock, the identity marker
+// itself, or unrelated user files — never make a genuinely fresh dir look
+// populated (which would wrongly block a first-time download).
+func dirHasNodeArtifacts(dir string) (bool, error) {
+	for _, name := range []string{
+		ManifestsDirName,
+		BlockChunksDirName,
+		FsTarStagingDirName,
+		DataDirName,
+		FsTarName,
+		SnapshotYAMLName,
+	} {
+		_, err := os.Stat(filepath.Join(dir, name))
+		if err == nil {
+			return true, nil
+		}
+
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("stat %s in %s: %w", name, dir, err)
+		}
+	}
+
+	_, blockFound, err := FindBlockData(dir)
+	if err != nil {
+		return false, fmt.Errorf("find block data in %s: %w", dir, err)
+	}
+
+	return blockFound, nil
 }
 
 // matchesIdentity reports whether the stored SnapshotYAML identity equals id.
@@ -227,7 +337,110 @@ func ScanAbsolute(nodeDir string, id NodeIdentity) (NodeResumePlan, error) {
 		return NodeResumePlan{TargetDir: nodeDir, State: NodeStateDone}, nil
 	}
 
-	return classifyPartialDir(nodeDir)
+	// A partial dir under a user-controlled path is resumable only with proven
+	// identity; on a mismatched or absent-but-non-empty marker reject with
+	// ErrIdentityMismatch so the caller can pick a different output path (the
+	// same contract as the complete-dir mismatch path above).
+	return classifyPartialDir(nodeDir, id, func(mm partialMismatch) (NodeResumePlan, error) {
+		return NodeResumePlan{}, fmt.Errorf("%w: %s %s, expected %s/%s",
+			ErrIdentityMismatch, nodeDir, mm.detail, id.Kind, id.Name)
+	})
+}
+
+// NodeIdentityMarker is the on-disk identity sidecar (NodeIdentityMarkerName)
+// written into a node directory on first touch. Its fields are exactly the
+// identity fields matchesIdentity compares (the on-disk DirName is intentionally
+// excluded — it is a naming detail, not an identity).
+type NodeIdentityMarker struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	Namespace  string `json:"namespace,omitempty"`
+	SourceRef  string `json:"sourceRef,omitempty"`
+}
+
+// WriteNodeIdentityMarker writes the identity marker for id into dir, but ONLY
+// when no marker is already present. The marker records the FIRST toucher's
+// identity — precisely the identity a later resume must match — so an existing
+// marker is left untouched and this is safe to call on every reconcile of the
+// same node. The write is crash-safe (WriteFileAtomic: .tmp -> fsync -> rename
+// -> dir fsync).
+func WriteNodeIdentityMarker(dir string, id NodeIdentity) error {
+	markerPath := filepath.Join(dir, NodeIdentityMarkerName)
+
+	_, statErr := os.Stat(markerPath)
+	if statErr == nil {
+		return nil
+	}
+
+	if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("stat identity marker %s: %w", markerPath, statErr)
+	}
+
+	data, err := json.Marshal(markerFromIdentity(id))
+	if err != nil {
+		return fmt.Errorf("marshal identity marker: %w", err)
+	}
+
+	if err := WriteFileAtomic(markerPath, bytes.NewReader(data)); err != nil {
+		return fmt.Errorf("write identity marker %s: %w", markerPath, err)
+	}
+
+	return nil
+}
+
+// ReadNodeIdentityMarker reads the identity marker from dir. found is false with
+// a nil error when the marker is absent.
+func ReadNodeIdentityMarker(dir string) (NodeIdentityMarker, bool, error) {
+	markerPath := filepath.Join(dir, NodeIdentityMarkerName)
+
+	data, err := os.ReadFile(markerPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return NodeIdentityMarker{}, false, nil
+	}
+
+	if err != nil {
+		return NodeIdentityMarker{}, false, fmt.Errorf("read identity marker %s: %w", markerPath, err)
+	}
+
+	var marker NodeIdentityMarker
+	if err := json.Unmarshal(data, &marker); err != nil {
+		return NodeIdentityMarker{}, false, fmt.Errorf("unmarshal identity marker %s: %w", markerPath, err)
+	}
+
+	return marker, true, nil
+}
+
+// markerFromIdentity projects a NodeIdentity onto the marker's identity fields.
+func markerFromIdentity(id NodeIdentity) NodeIdentityMarker {
+	return NodeIdentityMarker{
+		APIVersion: id.APIVersion,
+		Kind:       id.Kind,
+		Name:       id.Name,
+		Namespace:  id.Namespace,
+		SourceRef:  id.SourceRef,
+	}
+}
+
+// markerMatchesIdentity reports whether the stored marker equals id on every
+// identity field (the same fields matchesIdentity compares for snapshot.yaml).
+func markerMatchesIdentity(m NodeIdentityMarker, id NodeIdentity) bool {
+	return m.APIVersion == id.APIVersion &&
+		m.Kind == id.Kind &&
+		m.Name == id.Name &&
+		m.Namespace == id.Namespace &&
+		m.SourceRef == id.SourceRef
+}
+
+// identityMarkerShort derives a stable short collision-suffix from a marker's
+// identity, used when a partial dir must be redirected but no node checksum
+// exists yet (snapshot.yaml is absent). The digest is over the identity fields
+// only, so it is deterministic across runs — a re-run redirects to the same path.
+func identityMarkerShort(m NodeIdentityMarker) string {
+	sum := sha256.Sum256([]byte(strings.Join(
+		[]string{m.APIVersion, m.Kind, m.Name, m.Namespace, m.SourceRef}, "\x00")))
+
+	return ShortChecksum(fmt.Sprintf("%x", sum[:]))
 }
 
 // removeTmpFiles deletes every *.tmp file found anywhere under dir.

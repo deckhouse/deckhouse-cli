@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,6 +65,34 @@ const (
 	childAPIVersion   = "demo.deckhouse.io/v1alpha1"
 	childKind         = "VirtualDiskSnapshot"
 )
+
+// seedResumeIdentityMarker stamps the identity marker the pipeline itself writes
+// on a node's first touch (ensureNodeSubdirs -> archive.WriteNodeIdentityMarker).
+// Tests that HAND-CRAFT a partial node directory without first running the
+// pipeline must seed it: after partial-node-dir-identity-marker, a marker-less
+// non-empty partial dir is treated as foreign and collision-redirected rather
+// than resumed, so a realistic same-snapshot crash fixture must carry the marker
+// its interrupted run would already have written. Tests that build the partial
+// state by running the full pipeline once and then deleting finished artifacts
+// (e.g. TestPipeline_MixedResumeStates_ConcurrentRun) already have the real
+// marker on disk and need no seeding.
+func seedResumeIdentityMarker(t *testing.T, nodeDir string, id archive.NodeIdentity) {
+	t.Helper()
+
+	require.NoError(t, archive.WriteNodeIdentityMarker(nodeDir, id))
+}
+
+// diskSnapMarkerIdentity is the identity the pipeline computes (nodeIdentity) for
+// the buildFakeClient tree's disk-snap leaf, used to seed hand-crafted
+// partial-dir resume fixtures so their marker matches the scan-time identity.
+func diskSnapMarkerIdentity() archive.NodeIdentity {
+	return archive.NodeIdentity{
+		APIVersion: childAPIVersion,
+		Kind:       childKind,
+		Name:       diskSnapName,
+		Namespace:  testNS,
+	}
+}
 
 // TestPipeline_HappyPath verifies the full download pipeline against a fake
 // Kubernetes client and an httptest block-volume server.
@@ -297,6 +326,7 @@ func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
 		archive.NodeDirName(childKind, diskSnapName))
 
 	require.NoError(t, os.MkdirAll(filepath.Join(diskSnapDir, archive.ManifestsDirName), 0o755))
+	seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 	require.NoError(t, os.WriteFile(
 		filepath.Join(diskSnapDir, archive.DataBlockName(".zst")),
 		[]byte("pre-merged-block-data"),
@@ -338,6 +368,7 @@ func TestPipeline_FSResumeAfterTar(t *testing.T) {
 		archive.NodeDirName(childKind, diskSnapName))
 
 	require.NoError(t, os.MkdirAll(filepath.Join(diskSnapDir, archive.ManifestsDirName), 0o755))
+	seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 	require.NoError(t, os.WriteFile(
 		filepath.Join(diskSnapDir, archive.FsTarName),
 		[]byte("pre-assembled-fs-tar"),
@@ -362,6 +393,95 @@ func TestPipeline_FSResumeAfterTar(t *testing.T) {
 
 	// FinalizeNode must have been called: disk-snap directory must now be complete.
 	assertNodeComplete(t, diskSnapDir)
+}
+
+// TestPipeline_ForeignMergedBlock_NotLaunderedByResume is the scenario-B
+// regression test for partial-node-dir-identity-marker: a node's PRIMARY dir
+// already holds a merged data.bin* left by a DIFFERENT snapshot (a mismatched
+// identity marker, and — like every partial dir — no snapshot.yaml). Before this
+// fix ScanNode classified it BlockPartial/ManifestsOnly by directory probes
+// alone, processVolumeNode/downloadOwnDataRefs's "already merged" skip fired, and
+// FinalizeNode stamped a fresh valid snapshot.yaml + checksum over the FOREIGN
+// bytes — permanently laundering them. Now the mismatched marker collision-
+// redirects the node to a fresh sibling path, so the foreign dir is never
+// skipped-into or finalized, and the real volume downloads correctly beside it.
+func TestPipeline_ForeignMergedBlock_NotLaunderedByResume(t *testing.T) {
+	t.Parallel()
+
+	correctBlock := bytes.Repeat([]byte("C"), 600)
+	foreignBytes := []byte("foreign-merged-block-from-another-snapshot")
+
+	srv := makeBlockServer(t, correctBlock)
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	// Pre-create disk-snap's PRIMARY dir with a merged data.bin.zst and a marker
+	// for a DIFFERENT snapshot, no snapshot.yaml — exactly the foreign
+	// crash-after-merge state scenario B abuses.
+	primaryDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	require.NoError(t, os.MkdirAll(filepath.Join(primaryDir, archive.ManifestsDirName), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(primaryDir, archive.DataBlockName(".zst")),
+		foreignBytes,
+		0o644,
+	))
+	seedResumeIdentityMarker(t, primaryDir, archive.NodeIdentity{
+		APIVersion: childAPIVersion,
+		Kind:       childKind,
+		Name:       "some-other-snapshot",
+		Namespace:  testNS,
+		SourceRef:  "foreign",
+	})
+
+	var openExportCalled atomic.Bool
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			openExportCalled.Store(true)
+
+			return exporter.NewExport(namespace, "de-foreign", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	require.NoError(t, runPipeline(context.Background(), cfg))
+
+	// The foreign primary dir must be left untouched: no snapshot.yaml was ever
+	// stamped over it, and its data.bin.zst still holds the foreign bytes.
+	_, statErr := os.Stat(filepath.Join(primaryDir, archive.SnapshotYAMLName))
+	require.True(t, os.IsNotExist(statErr),
+		"a foreign merged dir must NOT be finalized (its bytes must not be laundered)")
+
+	gotForeign, err := os.ReadFile(filepath.Join(primaryDir, archive.DataBlockName(".zst")))
+	require.NoError(t, err)
+	require.Equal(t, foreignBytes, gotForeign, "foreign bytes must be left exactly as-is")
+
+	// The real volume must have been downloaded (not skipped into the foreign dir)
+	// and it must land in a single collision-redirected sibling dir that decodes
+	// to the CORRECT bytes.
+	require.True(t, openExportCalled.Load(),
+		"the real volume must be downloaded, not skipped into the foreign dir")
+
+	matches, err := filepath.Glob(filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName)+"__*"))
+	require.NoError(t, err)
+	require.Len(t, matches, 1, "exactly one collision-redirected dir must be created")
+
+	collisionDir := matches[0]
+	assertNodeComplete(t, collisionDir)
+
+	compressed, err := os.ReadFile(filepath.Join(collisionDir, archive.DataBlockName(".zst")))
+	require.NoError(t, err)
+	require.Equal(t, correctBlock, decodeZstdBlock(t, compressed),
+		"collision dir must hold the correctly-downloaded bytes")
 }
 
 // assertNodeComplete checks that snapshot.yaml exists in dir and VerifyNode passes.
@@ -830,6 +950,7 @@ func TestPipeline_PartialChunkResume(t *testing.T) {
 		archive.NodeDirName(childKind, diskSnapName))
 	chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
 	require.NoError(t, os.MkdirAll(chunkDir, 0o755))
+	seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 
 	chunk0Frame, err := codec.EncodeFrame(rawBlock[:testChunkSize])
 	require.NoError(t, err)
@@ -1354,6 +1475,7 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 			archive.NodeDirName(childKind, diskSnapName))
 		chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
 		require.NoError(t, os.MkdirAll(chunkDir, 0o755))
+		seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 
 		chunk0Frame, err := codec.EncodeFrame(rawBlock[:testChunkSize])
 		require.NoError(t, err)
@@ -1463,6 +1585,7 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 		stagingDir := filepath.Join(diskSnapDir, archive.FsTarStagingDirName)
 		fileChunkDir := filepath.Join(stagingDir, archive.FsFileChunksDirName("big.bin", codec.Ext()))
 		require.NoError(t, os.MkdirAll(fileChunkDir, 0o755))
+		seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 
 		chunk0Frame, err := codec.EncodeFrame(content[:testChunkSize])
 		require.NoError(t, err)
@@ -1610,6 +1733,7 @@ func TestPipeline_Progress_MonotonicAcrossActivate(t *testing.T) {
 			archive.NodeDirName(childKind, diskSnapName))
 		chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
 		require.NoError(t, os.MkdirAll(chunkDir, 0o755))
+		seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 
 		chunk0Frame, err := codec.EncodeFrame(rawBlock[:testChunkSize])
 		require.NoError(t, err)
@@ -1709,6 +1833,7 @@ func TestPipeline_Progress_MonotonicAcrossActivate(t *testing.T) {
 		stagingDir := filepath.Join(diskSnapDir, archive.FsTarStagingDirName)
 		fileChunkDir := filepath.Join(stagingDir, archive.FsFileChunksDirName("big.bin", codec.Ext()))
 		require.NoError(t, os.MkdirAll(fileChunkDir, 0o755))
+		seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 
 		chunk0Frame, err := codec.EncodeFrame(content[:testChunkSize])
 		require.NoError(t, err)
@@ -1864,6 +1989,7 @@ func TestPipeline_Progress_FSSizesSidecar_SeedsTotalAndCreditsStagedFile(t *test
 		archive.NodeDirName(childKind, diskSnapName))
 	stagingDir := filepath.Join(diskSnapDir, archive.FsTarStagingDirName)
 	require.NoError(t, os.MkdirAll(stagingDir, 0o755))
+	seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 
 	// staged.bin is already a fully-staged flat blob, as if a prior run had
 	// merged it before crashing; pending.bin has not been touched at all.
