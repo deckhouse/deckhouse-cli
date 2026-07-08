@@ -423,10 +423,10 @@ func TestFsFileChunksDirName(t *testing.T) {
 		ext     string
 		want    string
 	}{
-		{"payload.bin", ".zst", "payload.bin.zst.d"},
-		{"disk/payload.bin", ".zst", "disk/payload.bin.zst.d"},
-		{"payload.bin", "", "payload.bin.d"},
-		{"a/b/c.img", ".lz4", "a/b/c.img.lz4.d"},
+		{"payload.bin", ".zst", ".d8-meta/chunks/payload.bin.zst.d"},
+		{"disk/payload.bin", ".zst", ".d8-meta/chunks/disk/payload.bin.zst.d"},
+		{"payload.bin", "", ".d8-meta/chunks/payload.bin.d"},
+		{"a/b/c.img", ".lz4", ".d8-meta/chunks/a/b/c.img.lz4.d"},
 	}
 
 	for _, tc := range tests {
