@@ -57,6 +57,11 @@ const partSuffix = ".part"
 // uninterrupted download.
 const partSyncInterval = 4 * 1024 * 1024 // 4 MiB
 
+// ErrShortChunkRead is returned when a chunk's Range GET body delivers fewer
+// bytes than the requested range promised, leaving the durable ".part" file
+// short of rawLen. It is never finalized into a codec frame.
+var ErrShortChunkRead = errors.New("chunk range body ended before the requested range was fully delivered")
+
 // DownloadBlockChunks downloads all chunks of a block volume into chunkDir.
 // Chunk k covers raw bytes [k*chunkSize, min((k+1)*chunkSize, totalSize)).
 // Each chunk is fetched via a Range GET, encoded as an independent frame using
@@ -304,6 +309,14 @@ func downloadChunk(
 // already-persisted bytes is reported to onProgress before any network call,
 // and newly-arrived bytes are credited incrementally as they stream in —
 // together the two credits always sum to exactly rawLen.
+//
+// The response body is capped with io.LimitReader at the exact number of
+// missing bytes, so a server (or a proxy/MITM) that over-sends for the
+// requested range can never grow partPath past rawLen — bounding both the
+// merged-stream corruption risk and a disk-fill DoS. After the copy, the
+// resulting partPath size is asserted to equal rawLen; a server that
+// under-sends (a short read) is reported as ErrShortChunkRead rather than
+// silently finalizing a truncated chunk.
 func fetchChunkRaw(
 	ctx context.Context,
 	log *slog.Logger,
@@ -349,7 +362,8 @@ func fetchChunkRaw(
 	}
 
 	sw := &syncingWriter{f: f, syncInterval: partSyncInterval}
-	cr := &countingReader{r: body, onProgress: onProgress}
+	remaining := rawLen - have
+	cr := &countingReader{r: io.LimitReader(body, remaining), onProgress: onProgress}
 
 	_, copyErr := io.Copy(sw, cr)
 	syncErr := f.Sync()
@@ -365,6 +379,15 @@ func fetchChunkRaw(
 
 	if closeErr != nil {
 		return fmt.Errorf("close partial chunk %d: %w", chunkIdx, closeErr)
+	}
+
+	info, statErr := os.Stat(partPath)
+	if statErr != nil {
+		return fmt.Errorf("stat finalized partial chunk %d: %w", chunkIdx, statErr)
+	}
+
+	if info.Size() != rawLen {
+		return fmt.Errorf("chunk %d: %w: partial file holds %d bytes, want %d", chunkIdx, ErrShortChunkRead, info.Size(), rawLen)
 	}
 
 	return nil

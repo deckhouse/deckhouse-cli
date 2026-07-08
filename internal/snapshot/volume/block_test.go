@@ -973,3 +973,201 @@ func TestDownloadBlockChunks_PartialSurvivesResumeScan(t *testing.T) {
 	_, statErr := os.Stat(partPath)
 	assert.NoError(t, statErr, "durable partial must survive ScanNode's stale-tmp cleanup")
 }
+
+// overservingBody wraps a genuine, correctly-ranged response body and, once
+// the wrapped reader reaches a clean EOF, keeps yielding extra bytes instead
+// of stopping — simulating a misbehaving server or proxy that over-sends
+// beyond the promised range body, with no real network flakiness involved.
+type overservingBody struct {
+	r     io.ReadCloser
+	extra []byte
+}
+
+func (b *overservingBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err == io.EOF && len(b.extra) > 0 {
+		m := copy(p[n:], b.extra)
+		b.extra = b.extra[m:]
+
+		return n + m, nil
+	}
+
+	return n, err
+}
+
+func (b *overservingBody) Close() error {
+	return b.r.Close()
+}
+
+// overservingDoer wraps a Doer and appends extra bytes to every response
+// body via overservingBody, standing in for a server/proxy that over-sends
+// past a requested Range.
+type overservingDoer struct {
+	inner exporter.Doer
+	extra []byte
+}
+
+func (d *overservingDoer) Do(req *http.Request) (*http.Response, error) {
+	resp, err := d.inner.Do(req)
+	if err != nil {
+		return resp, err
+	}
+
+	resp.Body = &overservingBody{r: resp.Body, extra: d.extra}
+
+	return resp, nil
+}
+
+// TestDownloadBlockChunks_ServerOverSends_BoundedAtRawLen is the regression
+// test for the io.LimitReader bound in fetchChunkRaw: a server/proxy that
+// keeps sending bytes past the requested range must never grow the durable
+// ".part" file — and, transitively, the finalized chunk and merged output —
+// past rawLen. Before the fix, io.Copy(sw, cr) had no upper bound and kept
+// reading until the (over-sending) body itself returned EOF, so the extra
+// bytes would have been written into the chunk and survived into the merged
+// data.bin, decoding longer than totalSize.
+func TestDownloadBlockChunks_ServerOverSends_BoundedAtRawLen(t *testing.T) {
+	t.Parallel()
+
+	payload := blockPayload
+
+	srv := newBlockServer(t, payload)
+	defer srv.Close()
+
+	blockURL := srv.URL + "/api/v1/block"
+
+	doer := &overservingDoer{inner: srv.Client(), extra: bytes.Repeat([]byte("Z"), 4096)}
+	fetcher := exporter.NewFetcher(doer)
+
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
+	require.NoError(t, err)
+
+	nodeDir := t.TempDir()
+	totalSize := int64(len(payload))
+	chunkSize := totalSize // one chunk covering the whole payload
+
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+	err = volume.DownloadBlockChunks(
+		context.Background(), slog.Default(), chunkDir, blockURL, totalSize, chunkSize, 1, fetcher, codec, nil)
+	require.NoError(t, err, "an over-sending server must not fail the download once the requested range is satisfied")
+
+	partPath := filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".part")
+	_, statErr := os.Stat(partPath)
+	assert.True(t, os.IsNotExist(statErr), "durable partial must be removed once the (bounded) chunk finalizes")
+
+	finalPath := filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext()))
+	decoded := decodeAll(t, finalPath)
+	assert.Equal(t, payload, decoded, "finalized chunk must not include any bytes the server over-sent past the range")
+
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(codec.Ext()))
+	require.NoError(t, volume.MergeBlockChunks(context.Background(), chunkDir, outPath, totalSize, chunkSize, codec.Ext()))
+
+	merged := decodeAll(t, outPath)
+	assert.Equal(t, payload, merged, "merged output must decode to exactly totalSize bytes despite the server over-sending")
+}
+
+// cleanEOFBody wraps a response body and returns a clean io.EOF (nil error)
+// after delivering exactly budget bytes, standing in for a server that
+// legitimately ends the body early (e.g. a short Content-Length) rather than
+// an abrupt connection drop. Unlike truncatingBody's errSimulatedInterrupt,
+// io.Copy treats this as ordinary successful completion — so only the
+// post-copy exact-size assertion in fetchChunkRaw, not the copy error, can
+// catch this kind of short read.
+type cleanEOFBody struct {
+	r      io.ReadCloser
+	budget int64
+}
+
+func (b *cleanEOFBody) Read(p []byte) (int, error) {
+	if b.budget <= 0 {
+		return 0, io.EOF
+	}
+
+	if int64(len(p)) > b.budget {
+		p = p[:b.budget]
+	}
+
+	n, err := b.r.Read(p)
+	b.budget -= int64(n)
+
+	return n, err
+}
+
+func (b *cleanEOFBody) Close() error {
+	return b.r.Close()
+}
+
+// shortSendDoer wraps a Doer and truncates the response body of one
+// designated call (cutOnCall, 1-based) to cutBytes via cleanEOFBody, always
+// ending that body with a clean EOF rather than an error.
+type shortSendDoer struct {
+	inner     exporter.Doer
+	cutOnCall int
+	cutBytes  int64
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (d *shortSendDoer) Do(req *http.Request) (*http.Response, error) {
+	d.mu.Lock()
+	d.calls++
+	callIdx := d.calls
+	d.mu.Unlock()
+
+	resp, err := d.inner.Do(req)
+	if err != nil {
+		return resp, err
+	}
+
+	if callIdx == d.cutOnCall {
+		resp.Body = &cleanEOFBody{r: resp.Body, budget: d.cutBytes}
+	}
+
+	return resp, nil
+}
+
+// TestDownloadBlockChunks_ServerShortSends_ReturnsErrShortChunkRead is the
+// regression test for the post-copy exact-size assertion: a server that ends
+// a range response early with a CLEAN EOF (no read error at all — io.Copy
+// alone reports this as success) must still fail the chunk with
+// volume.ErrShortChunkRead rather than finalizing a truncated ".part" into a
+// codec frame.
+func TestDownloadBlockChunks_ServerShortSends_ReturnsErrShortChunkRead(t *testing.T) {
+	t.Parallel()
+
+	payload := blockPayload
+	const cutBytes = 10 // strictly less than len(blockPayload)
+
+	srv := newBlockServer(t, payload)
+	defer srv.Close()
+
+	blockURL := srv.URL + "/api/v1/block"
+
+	doer := &shortSendDoer{inner: srv.Client(), cutOnCall: 1, cutBytes: cutBytes}
+	fetcher := exporter.NewFetcher(doer)
+
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
+	require.NoError(t, err)
+
+	nodeDir := t.TempDir()
+	totalSize := int64(len(payload))
+	chunkSize := totalSize // one chunk, so the short-send is unambiguous
+
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+	err = volume.DownloadBlockChunks(
+		context.Background(), slog.Default(), chunkDir, blockURL, totalSize, chunkSize, 1, fetcher, codec, nil)
+	require.Error(t, err, "a short-sending server must fail the download, not finalize a truncated chunk")
+	assert.ErrorIs(t, err, volume.ErrShortChunkRead)
+
+	finalPath := filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext()))
+	_, statErr := os.Stat(finalPath)
+	assert.True(t, os.IsNotExist(statErr), "chunk must not finalize on a short read")
+
+	partPath := finalPath + ".part"
+	partInfo, statErr := os.Stat(partPath)
+	require.NoError(t, statErr, "the short durable partial must remain on disk for a future resume attempt")
+	assert.Equal(t, int64(cutBytes), partInfo.Size(), "durable partial must hold exactly the bytes actually delivered")
+}
