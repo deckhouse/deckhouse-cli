@@ -64,7 +64,8 @@ type streamKey struct {
 // many bytes of the resume-skip logic's re-derivation of the SAME
 // already-committed bytes, instead of resetting the stream with
 // SetCurrent(0) — the reset is what produced a visible dip back to 0% at the
-// waiting->active transition (see progress-no-regression-on-activate).
+// waiting->active transition, and the displayed value must never move backward
+// across that transition.
 // Seeded is 0 for a from-scratch stream (nothing to skip) and for a stream
 // looked up when progress tracking is disabled.
 type streamHandle struct {
@@ -294,7 +295,8 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]streamHandle {
 // from nodeDir's block chunk dir and/or filesystem staging dir, so the
 // stream's FIRST rendered frame reflects real resume progress instead of
 // starting at 0 — well before the DataExport becomes ready or any network
-// call happens (see the download-progress-seed-committed-bytes design). It is
+// call happens, so the first frame shows real resume progress rather than a
+// spurious 0%. It is
 // called once, right after the stream is created, for every task that is NOT
 // already done (a done node's stream is marked Done immediately by
 // the caller and never downloads anything, so seeding it would be wasted
@@ -322,7 +324,7 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]streamHandle {
 // SetCurrent(0) once the real transfer starts — which handed crediting back
 // to the existing resume-skip logic inside DownloadBlockChunks/
 // stageCompressedFile but visibly dipped the displayed value back to 0%
-// first (see progress-no-regression-on-activate) — skipSeededBytes discards
+// first, which must never happen — skipSeededBytes discards
 // exactly the first `seeded` bytes that resume-skip logic re-derives for the
 // SAME already-committed state, so the displayed value only ever moves
 // forward from the seed onward while the final total still lands exactly on
@@ -1031,8 +1033,8 @@ func downloadVolumeBinding(
 	// transfer have already completed, which routinely exceeds ReleaseTimeout for
 	// any real-sized volume. A single timeout created before that work would
 	// already be expired by the time release is attempted, failing the release
-	// Get immediately even on a fully successful download (live-reproduced: see
-	// the dataexport-release-fresh-cleanup-deadline incident). Deriving from
+	// Get immediately even on a fully successful download (live-reproduced).
+	// Deriving from
 	// context.WithoutCancel(ctx) keeps release running when ctx itself is
 	// cancelled (e.g. by errgroup on sibling error or by SIGINT).
 	defer func() {
@@ -1119,8 +1121,8 @@ func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *e
 		// skipSeededBytes forwards every re-downloaded byte (inv. #9c). The
 		// HEAD size is authoritative even at 0, so there is no total > 0 guard.
 		// A valid seed (seeded <= totalSize) is left untouched: no dip,
-		// monotonic forward progress preserved (progress-no-regression-on-activate,
-		// inv. #7).
+		// monotonic forward progress preserved — the displayed value must never
+		// move backward (inv. #7).
 		if seeded > totalSize {
 			stream.SetCurrent(0)
 
@@ -1204,9 +1206,9 @@ func downloadFS(ctx context.Context, cfg Config, dest volumeDestPaths, exp *expo
 // the previous stream.SetCurrent(0) reset that downloadBlock/downloadFS used
 // to hand crediting back to the block/fs resume-skip logic: zeroing the
 // stream visibly dipped the displayed value back to 0% right at the
-// waiting->active transition, before that resume-skip logic re-climbed it
-// (see progress-no-regression-on-activate). Here the stream keeps whatever
-// seedStreamFromDisk already credited it with, and this wrapper absorbs the
+// waiting->active transition, before that resume-skip logic re-climbed it —
+// a backward move the displayed value must never make. Here the stream keeps
+// whatever seedStreamFromDisk already credited it with, and this wrapper absorbs the
 // resume-skip logic's re-derivation of those SAME bytes — the net effect is
 // identical (the final total still lands on seeded + (totalSize - seeded) ==
 // totalSize) but the displayed value now only ever moves forward.

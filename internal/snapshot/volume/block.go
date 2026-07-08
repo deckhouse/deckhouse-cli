@@ -506,13 +506,12 @@ func fetchChunkRaw(
 // re-credits the identical already-committed bytes, and the pipeline wraps
 // that crediting with skipSeededBytes(seeded, ...) so the re-derived bytes
 // are discarded instead of double-counted, rather than dropping the stream
-// to 0 first (see pipeline.seedStreamFromDisk / pipeline.skipSeededBytes and
-// progress-no-regression-on-activate). Because this scan never mutates
-// chunkDir between the two calls (no worker has started yet), the two
+// to 0 first (see pipeline.seedStreamFromDisk / pipeline.skipSeededBytes).
+// Because this scan never mutates chunkDir between the two calls (no worker
+// has started yet), the two
 // computations always agree exactly for the normal (already-trusted) case;
-// the only divergence is the one the scan-block-progress-read-only task
-// fixed — an oversized ".part" no longer disappears out from under a
-// display-only scan.
+// the only divergence is deliberate: because this scan is strictly read-only,
+// an oversized ".part" never disappears out from under a display-only scan.
 func ScanBlockChunkProgress(chunkDir, ext string) (int64, int64, error) {
 	meta, found, err := archive.ReadChunkMeta(chunkDir)
 	if err != nil && !errors.Is(err, archive.ErrCorruptChunkMeta) {
@@ -568,7 +567,7 @@ func ScanBlockChunkProgress(chunkDir, ext string) (int64, int64, error) {
 // tail is actually zero or garbage. Trusting that stale size and appending
 // after it would bake corrupt bytes into the finalized chunk frame
 // undetected: block has no source digest to catch wrong BYTES within a
-// correctly-SIZED chunk (download-block-verify-decoded-length only catches a
+// correctly-SIZED chunk (the decoded-length check only catches a
 // wrong TOTAL length).
 //
 // The trusted size is therefore capped at the offset recorded in the
