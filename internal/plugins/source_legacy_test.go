@@ -20,6 +20,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,10 +29,13 @@ import (
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/authn"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	dkpreg "github.com/deckhouse/deckhouse/pkg/registry"
 
 	d8flags "github.com/deckhouse/deckhouse-cli/internal/plugins/flags"
 )
@@ -204,3 +208,151 @@ func plainTar(t *testing.T, files map[string]string) []byte {
 
 	return buf.Bytes()
 }
+
+func TestValidateLegacySource(t *testing.T) {
+	t.Run("valid inputs are normalized", func(t *testing.T) {
+		cases := map[string]string{
+			"registry.example.com/deckhouse/deckhouse-cli":         "registry.example.com/deckhouse/deckhouse-cli",
+			"https://registry.example.com/deckhouse/deckhouse-cli": "registry.example.com/deckhouse/deckhouse-cli",
+			"http://registry.example.com/deckhouse/deckhouse-cli":  "registry.example.com/deckhouse/deckhouse-cli",
+			"registry.example.com/deckhouse/deckhouse-cli/":        "registry.example.com/deckhouse/deckhouse-cli",
+			"registry.example.com:5000/deckhouse/deckhouse-cli":    "registry.example.com:5000/deckhouse/deckhouse-cli",
+		}
+
+		for in, want := range cases {
+			got, err := validateLegacySource(in)
+			require.NoErrorf(t, err, "input %q", in)
+			assert.Equalf(t, want, got, "input %q", in)
+		}
+	})
+
+	t.Run("invalid inputs are rejected", func(t *testing.T) {
+		for _, in := range []string{
+			"",
+			"/",
+			"registry.example.com/deckhouse/deckhouse-cli:v1.0.0",
+			"registry.example.com", // host without a repo path
+		} {
+			_, err := validateLegacySource(in)
+			assert.Errorf(t, err, "input %q must be rejected", in)
+		}
+	})
+}
+
+func TestResolveContractAnnotation(t *testing.T) {
+	s := &registryPluginSource{logger: dkplog.NewNop()}
+
+	t.Run("reads the annotation from the index without fetching a child", func(t *testing.T) {
+		client := &fakeManifestClient{byTag: map[string]dkpreg.ManifestResult{
+			"v1.0.0": fakeManifestResult{
+				mediaType: types.OCIImageIndex,
+				index: fakeIndexManifest{
+					annotations: map[string]string{contractAnnotation: "index-contract"},
+					manifests:   []dkpreg.Descriptor{fakeDescriptor{digest: v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("a", 64)}}},
+				},
+			},
+		}}
+
+		got, err := s.resolveContractAnnotation(context.Background(), client, "v1.0.0")
+		require.NoError(t, err)
+		assert.Equal(t, "index-contract", got)
+		assert.Equal(t, []string{"v1.0.0"}, client.gotTags,
+			"the child manifest must not be fetched when the index carries the contract")
+	})
+
+	t.Run("falls back to the first child when the index has no contract", func(t *testing.T) {
+		childDigest := v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("b", 64)}
+		client := &fakeManifestClient{byTag: map[string]dkpreg.ManifestResult{
+			"v1.0.0": fakeManifestResult{
+				mediaType: types.OCIImageIndex,
+				index: fakeIndexManifest{
+					manifests: []dkpreg.Descriptor{fakeDescriptor{digest: childDigest}},
+				},
+			},
+			"@" + childDigest.String(): fakeManifestResult{
+				mediaType: types.OCIManifestSchema1,
+				manifest:  fakeManifest{annotations: map[string]string{contractAnnotation: "child-contract"}},
+			},
+		}}
+
+		got, err := s.resolveContractAnnotation(context.Background(), client, "v1.0.0")
+		require.NoError(t, err)
+		assert.Equal(t, "child-contract", got)
+		assert.Equal(t, []string{"v1.0.0", "@" + childDigest.String()}, client.gotTags)
+	})
+
+	t.Run("reads the annotation from a single (non-index) manifest", func(t *testing.T) {
+		client := &fakeManifestClient{byTag: map[string]dkpreg.ManifestResult{
+			"v1.0.0": fakeManifestResult{
+				mediaType: types.OCIManifestSchema1,
+				manifest:  fakeManifest{annotations: map[string]string{contractAnnotation: "single-contract"}},
+			},
+		}}
+
+		got, err := s.resolveContractAnnotation(context.Background(), client, "v1.0.0")
+		require.NoError(t, err)
+		assert.Equal(t, "single-contract", got)
+	})
+}
+
+// fakeManifestClient serves a preset ManifestResult per reference and records
+// the references it was asked for, so tests can assert whether a child manifest
+// was fetched. Only GetManifest is implemented; the embedded interface panics on
+// any other call.
+type fakeManifestClient struct {
+	dkpreg.Client
+
+	byTag   map[string]dkpreg.ManifestResult
+	gotTags []string
+}
+
+func (c *fakeManifestClient) GetManifest(_ context.Context, tag string) (dkpreg.ManifestResult, error) {
+	c.gotTags = append(c.gotTags, tag)
+
+	res, ok := c.byTag[tag]
+	if !ok {
+		return nil, fmt.Errorf("no manifest for %q", tag)
+	}
+
+	return res, nil
+}
+
+type fakeManifestResult struct {
+	dkpreg.ManifestResult
+
+	mediaType types.MediaType
+	manifest  dkpreg.Manifest
+	index     dkpreg.IndexManifest
+}
+
+func (r fakeManifestResult) GetMediaType() types.MediaType         { return r.mediaType }
+func (r fakeManifestResult) GetManifest() (dkpreg.Manifest, error) { return r.manifest, nil }
+func (r fakeManifestResult) GetIndexManifest() (dkpreg.IndexManifest, error) {
+	return r.index, nil
+}
+
+type fakeManifest struct {
+	dkpreg.Manifest
+
+	annotations map[string]string
+}
+
+func (m fakeManifest) GetAnnotations() map[string]string { return m.annotations }
+
+type fakeIndexManifest struct {
+	dkpreg.IndexManifest
+
+	annotations map[string]string
+	manifests   []dkpreg.Descriptor
+}
+
+func (i fakeIndexManifest) GetAnnotations() map[string]string { return i.annotations }
+func (i fakeIndexManifest) GetManifests() []dkpreg.Descriptor { return i.manifests }
+
+type fakeDescriptor struct {
+	dkpreg.Descriptor
+
+	digest v1.Hash
+}
+
+func (d fakeDescriptor) GetDigest() v1.Hash { return d.digest }

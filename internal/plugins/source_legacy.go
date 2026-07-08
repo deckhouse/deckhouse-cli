@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path"
 	"runtime"
@@ -58,6 +59,11 @@ const legacyPluginsSegment = "plugins"
 // rpp.DefaultBinaryByteLimit.
 const legacyBinaryByteLimit int64 = 512 << 20
 
+// legacyArchiveByteLimit bounds the TOTAL bytes read while walking the image
+// tar, so a huge entry before the plugin binary cannot exhaust resources.
+// Mirrors rpp maxArchiveBytes (1 GiB); the per-binary cap is the tighter guard.
+const legacyArchiveByteLimit int64 = 1 << 30
+
 // legacyExecutableMode is forced on the extracted binary so it is runnable
 // regardless of the mode recorded in the image.
 const legacyExecutableMode os.FileMode = 0o755
@@ -67,6 +73,13 @@ const legacyExecutableMode os.FileMode = 0o755
 // environments without a cluster, matching the pre-#386 behavior where no such
 // checks existed. Called from InitPluginServices when --source is set.
 func (m *Manager) initLegacyRegistrySource() error {
+	sanitized, err := validateLegacySource(d8flags.SourceRegistryRepo)
+	if err != nil {
+		return fmt.Errorf("invalid --source: %w", err)
+	}
+
+	d8flags.SourceRegistryRepo = sanitized
+
 	m.logger.Warn("using the legacy --source registry bypass; cluster-side requirement checks are skipped",
 		slog.String("source_repo", d8flags.SourceRegistryRepo))
 
@@ -74,6 +87,40 @@ func (m *Manager) initLegacyRegistrySource() error {
 	m.service = newRegistryPluginSource(m.logger)
 
 	return nil
+}
+
+// validateLegacySource sanitizes a --source repo: it strips any URL scheme and a
+// trailing slash, then validates the result as a <registry>/<repo> path. It
+// fails fast with a clear error instead of letting a bad value surface as an
+// opaque failure on the first registry call.
+func validateLegacySource(source string) (string, error) {
+	repo := strings.NewReplacer("http://", "", "https://", "").Replace(source)
+	repo = strings.TrimSuffix(repo, "/")
+
+	if repo == "" {
+		return "", errors.New("registry repo is empty")
+	}
+
+	// Rejects an uppercase host, a :tag or @digest suffix, and other malformed
+	// repositories; a trailing slash was already trimmed above.
+	if _, err := name.NewRepository(repo); err != nil {
+		return "", fmt.Errorf("not a valid registry repo: %w", err)
+	}
+
+	u, err := url.ParseRequestURI("docker://" + repo)
+	if err != nil {
+		return "", err
+	}
+
+	if u.Host == "" {
+		return "", errors.New("no registry host")
+	}
+
+	if u.Path == "" {
+		return "", errors.New("no registry path (expected <registry>/<repo>)")
+	}
+
+	return repo, nil
 }
 
 // registryPluginSource implements pluginSource against a registry reached
@@ -118,12 +165,11 @@ func (s *registryPluginSource) ListPluginTags(ctx context.Context, pluginName st
 }
 
 func (s *registryPluginSource) GetPluginContract(ctx context.Context, pluginName, tag string) (*internal.Plugin, error) {
-	manifest, err := s.resolveManifest(ctx, s.pluginClient(pluginName), tag)
+	encoded, err := s.resolveContractAnnotation(ctx, s.pluginClient(pluginName), tag)
 	if err != nil {
 		return nil, fmt.Errorf("get manifest for plugin %q: %w", pluginName, err)
 	}
 
-	encoded := manifest.GetAnnotations()[contractAnnotation]
 	if encoded == "" {
 		// No contract annotation: surface just name+version, like rppPluginSource.
 		s.logger.Debug("plugin image has no contract annotation",
@@ -140,35 +186,50 @@ func (s *registryPluginSource) GetPluginContract(ctx context.Context, pluginName
 	return contractFromBytes(raw, pluginName, tag)
 }
 
-// resolveManifest returns the image manifest for tag. A multi-arch tag points at
-// an index; the contract is platform-independent, so its first child manifest is
-// followed (matching rppPluginSource).
-func (s *registryPluginSource) resolveManifest(ctx context.Context, client dkpreg.Client, tag string) (dkpreg.Manifest, error) {
+// resolveContractAnnotation returns the base64 contract annotation for tag. The
+// contract may sit on the index or on its (identical) child manifests: the index
+// is read first, and the first child is followed only when the index carries
+// none (matching rppPluginSource). An empty string means no contract was found.
+func (s *registryPluginSource) resolveContractAnnotation(ctx context.Context, client dkpreg.Client, tag string) (string, error) {
 	result, err := client.GetManifest(ctx, tag)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
 	if !result.GetMediaType().IsIndex() {
-		return result.GetManifest()
+		man, err := result.GetManifest()
+		if err != nil {
+			return "", err
+		}
+
+		return man.GetAnnotations()[contractAnnotation], nil
 	}
 
 	index, err := result.GetIndexManifest()
 	if err != nil {
-		return nil, err
+		return "", err
+	}
+
+	if encoded := index.GetAnnotations()[contractAnnotation]; encoded != "" {
+		return encoded, nil
 	}
 
 	children := index.GetManifests()
 	if len(children) == 0 {
-		return nil, errors.New("index manifest has no child manifests")
+		return "", nil
 	}
 
 	child, err := client.GetManifest(ctx, "@"+children[0].GetDigest().String())
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	return child.GetManifest()
+	childManifest, err := child.GetManifest()
+	if err != nil {
+		return "", err
+	}
+
+	return childManifest.GetAnnotations()[contractAnnotation], nil
 }
 
 func (s *registryPluginSource) ExtractPlugin(ctx context.Context, pluginName, tag, destination string) error {
@@ -192,9 +253,11 @@ func (s *registryPluginSource) ExtractPlugin(ctx context.Context, pluginName, ta
 
 // extractPluginBinary writes the entry named pluginBinaryEntryName from the
 // image's flattened (uncompressed) tar to destination, forced executable and
-// capped in size. Non-regular entries and other files are skipped.
+// capped in size. The whole walk is bounded by legacyArchiveByteLimit so a huge
+// entry before the target cannot exhaust resources. Non-regular entries and
+// other files are skipped.
 func extractPluginBinary(r io.Reader, destination string) error {
-	tr := tar.NewReader(r)
+	tr := tar.NewReader(io.LimitReader(r, legacyArchiveByteLimit+1))
 
 	for {
 		header, err := tr.Next()
