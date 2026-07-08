@@ -19,6 +19,7 @@ package download
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/gofrs/flock"
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -157,6 +159,19 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolving output path: %w", err)
 	}
+
+	outputLock, err := acquireOutputLock(outputDir)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		if unlockErr := outputLock.Unlock(); unlockErr != nil {
+			log.Warn("failed to release output directory lock",
+				slog.String("output_dir", outputDir),
+				slog.String("error", unlockErr.Error()))
+		}
+	}()
 
 	ttl, err := cmd.Flags().GetString(flagTTL)
 	if err != nil {
@@ -305,6 +320,66 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	log.Info("snapshot download complete", slog.String("output_dir", outputDir))
 
 	return nil
+}
+
+// downloadLockFileName is the advisory lock file created directly inside the
+// output directory to serialize concurrent `d8 snapshot download` runs
+// against the same tree. It is a fixed, hidden name so unrelated tooling does
+// not stumble on it; it deliberately does NOT carry a ".tmp" suffix, so
+// archive/resume.go's stale-*.tmp sweep never touches it, and it is not one
+// of the fixed file/dir names archive.ComputeNodeChecksum reads (manifests/,
+// data.bin*, data.tar, data/), so its presence never perturbs a node's
+// checksum or resume classification.
+const downloadLockFileName = ".d8-snapshot-download.lock"
+
+// ErrOutputDirLocked is returned by acquireOutputLock when another process
+// already holds the advisory lock on the output directory.
+var ErrOutputDirLocked = errors.New("output directory is locked by another d8 snapshot download run")
+
+// acquireOutputLock takes a non-blocking advisory exclusive lock on a fixed
+// lock file inside outputDir and returns the held *flock.Flock; the caller
+// must Unlock it (typically via defer) once the download finishes, fails, or
+// is cancelled.
+//
+// The resume machinery in archive/resume.go (chunk dirs, .part files, staging
+// dirs, snapshot.yaml) assumes a single writer per output tree: two
+// concurrent downloads sharing those paths would race and silently corrupt
+// each other's progress. Rather than block a second invocation indefinitely,
+// acquireOutputLock fails fast with ErrOutputDirLocked naming the directory.
+//
+// Stale-lock policy: the lock is a plain flock(2) (LockFileEx on Windows, via
+// gofrs/flock — cross-platform, no shell-out required). The OS releases an
+// flock automatically when the holding process exits for ANY reason,
+// including a hard kill or crash, so a lock FILE left behind by a dead
+// process is harmless — the very next TryLock succeeds because the kernel
+// already dropped the advisory lock. No separate pid/staleness bookkeeping is
+// needed, and none is attempted. The lock file itself is intentionally never
+// removed (removing it while another process might be mid-open/lock on the
+// same path is a well-known flock TOCTOU hazard — a fresh file created at the
+// same path after deletion is a different inode that a stale lock file
+// deletion race lets it forget); it persists as a tiny fixture in the output
+// directory.
+func acquireOutputLock(outputDir string) (*flock.Flock, error) {
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating output directory %s: %w", outputDir, err)
+	}
+
+	lockPath := filepath.Join(outputDir, downloadLockFileName)
+
+	fl := flock.New(lockPath)
+
+	locked, err := fl.TryLock()
+	if err != nil {
+		return nil, fmt.Errorf("locking output directory %s: %w", outputDir, err)
+	}
+
+	if !locked {
+		return nil, fmt.Errorf(
+			"%w: %s (finish or stop the other run first, or choose a different --%s)",
+			ErrOutputDirLocked, outputDir, flagOutput)
+	}
+
+	return fl, nil
 }
 
 // parseNodeFlag parses a --node flag value "<Kind>/<name>" into its components.

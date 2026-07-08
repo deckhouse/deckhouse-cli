@@ -17,7 +17,11 @@ limitations under the License.
 package download
 
 import (
+	"context"
+	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -383,4 +387,119 @@ func TestRun_NodeFlag_InvalidFormat(t *testing.T) {
 	if !strings.Contains(err.Error(), flagNode) {
 		t.Fatalf("expected error to mention %q, got: %v", flagNode, err)
 	}
+}
+
+func TestAcquireOutputLock_Contention(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	first, err := acquireOutputLock(dir)
+	if err != nil {
+		t.Fatalf("first acquire: unexpected error: %v", err)
+	}
+
+	defer func() { _ = first.Unlock() }()
+
+	_, err = acquireOutputLock(dir)
+	if err == nil {
+		t.Fatal("expected contention error on second acquire, got nil")
+	}
+
+	if !errors.Is(err, ErrOutputDirLocked) {
+		t.Fatalf("expected ErrOutputDirLocked, got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), dir) {
+		t.Fatalf("expected error to name the directory %q, got: %v", dir, err)
+	}
+}
+
+func TestAcquireOutputLock_ReacquireAfterRelease(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	first, err := acquireOutputLock(dir)
+	if err != nil {
+		t.Fatalf("first acquire: unexpected error: %v", err)
+	}
+
+	if err := first.Unlock(); err != nil {
+		t.Fatalf("unlock: unexpected error: %v", err)
+	}
+
+	second, err := acquireOutputLock(dir)
+	if err != nil {
+		t.Fatalf("second acquire after release: unexpected error: %v", err)
+	}
+
+	defer func() { _ = second.Unlock() }()
+}
+
+// TestAcquireOutputLock_StaleLockFileIsHarmless documents and locks in the
+// stale-lock policy from acquireOutputLock's doc comment: the lock file is a
+// plain flock(2), which the OS releases automatically when the holding
+// process exits for any reason (including a hard kill). A lock FILE left on
+// disk with no live holder — simulated here by pre-creating the file without
+// ever flock-ing it — must not block a fresh acquire.
+func TestAcquireOutputLock_StaleLockFileIsHarmless(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	lockPath := filepath.Join(dir, downloadLockFileName)
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatalf("pre-creating stale lock file: %v", err)
+	}
+
+	fl, err := acquireOutputLock(dir)
+	if err != nil {
+		t.Fatalf("expected a pre-existing, unheld lock file to be reclaimed, got: %v", err)
+	}
+
+	defer func() { _ = fl.Unlock() }()
+}
+
+// TestRun_ReleasesLockOnCancelledContext verifies the lock acquired near the
+// top of Run is released via defer even when the caller's context is already
+// cancelled by the time Run returns. It forces an early, ctx-independent
+// error path (an invalid --node flag, validated before any cluster client is
+// built) so the test stays deterministic and network-free while still
+// exercising Run with a cancelled context end to end.
+func TestRun_ReleasesLockOnCancelledContext(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cmd := NewCommand(slog.Default())
+	cmd.SetContext(ctx)
+
+	if err := cmd.Flags().Set(flagNamespace, "test-ns"); err != nil {
+		t.Fatalf("setting namespace flag: %v", err)
+	}
+
+	if err := cmd.Flags().Set(flagOutput, dir); err != nil {
+		t.Fatalf("setting output flag: %v", err)
+	}
+
+	if err := cmd.Flags().Set(flagNode, "NoSlashHere"); err != nil {
+		t.Fatalf("setting node flag: %v", err)
+	}
+
+	if err := Run(slog.Default(), cmd, []string{"my-snap"}); err == nil {
+		t.Fatal("expected error from invalid --node flag, got nil")
+	}
+
+	// The lock must have been released on the way out despite the cancelled
+	// context: a fresh acquire on the same directory must succeed.
+	fl, err := acquireOutputLock(dir)
+	if err != nil {
+		t.Fatalf("expected lock to be released after Run returned, got: %v", err)
+	}
+
+	defer func() { _ = fl.Unlock() }()
 }
