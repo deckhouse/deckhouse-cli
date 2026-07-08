@@ -1103,6 +1103,25 @@ func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *e
 	var onProgress func(n int)
 
 	if stream != nil {
+		// A fresh HEAD total below the value seedStreamFromDisk already
+		// credited proves that seed was computed from an on-disk chunk
+		// geometry DownloadBlockChunks' ensureChunkGeometry is about to purge
+		// (a changed --chunk-size or a shrunk volume): after that purge the
+		// resume-skip crediting re-derives from byte zero, so leaving the seed
+		// in place would strand the bar above 100% until Done() forces it back
+		// down. Reset the displayed value to 0 BEFORE lowering the total, so
+		// the bar never renders current > total, and neutralize the seed so
+		// skipSeededBytes forwards every re-downloaded byte (inv. #9c). The
+		// HEAD size is authoritative even at 0, so there is no total > 0 guard.
+		// A valid seed (seeded <= totalSize) is left untouched: no dip,
+		// monotonic forward progress preserved (progress-no-regression-on-activate,
+		// inv. #7).
+		if seeded > totalSize {
+			stream.SetCurrent(0)
+
+			seeded = 0
+		}
+
 		stream.SetTotal(totalSize)
 		onProgress = skipSeededBytes(seeded, stream.IncrBy)
 	}
@@ -1133,8 +1152,43 @@ func downloadFS(ctx context.Context, cfg Config, dest volumeDestPaths, exp *expo
 	)
 
 	if stream != nil {
-		onProgress = skipSeededBytes(seeded, stream.IncrBy)
-		setTotal = stream.SetTotal
+		// skip is (re)built inside setTotal from the effective (possibly
+		// clamped) seed. DownloadFilesystemVolume calls setTotal exactly once,
+		// after the listing establishes the total and BEFORE it spawns any
+		// file-staging worker, so the workers that later call onProgress observe
+		// the built skip through the errgroup goroutine-start happens-before
+		// edge — the write is sequenced before the first g.Go, so no lock is
+		// needed and -race stays clean. No bytes are ever credited before
+		// setTotal runs, so the nil guard only covers the early-return paths
+		// (tar already complete) where onProgress is never called at all.
+		var skip func(n int)
+
+		setTotal = func(total int64) {
+			effSeeded := seeded
+
+			// A positive fresh listing total below the seeded value proves the
+			// sizes sidecar the seed came from is stale (a volume that changed
+			// between runs): reset the display to 0 BEFORE lowering the total so
+			// the bar never renders current > total, and drop the effective seed
+			// so every re-staged byte is forwarded (inv. #9c). total <= 0 means
+			// the listing omitted per-file sizes (size unknown), never proof the
+			// volume shrank, so it is NOT treated as stale. A valid seed
+			// (seeded <= total) is untouched — no dip (inv. #7).
+			if total > 0 && seeded > total {
+				stream.SetCurrent(0)
+
+				effSeeded = 0
+			}
+
+			skip = skipSeededBytes(effSeeded, stream.IncrBy)
+			stream.SetTotal(total)
+		}
+
+		onProgress = func(n int) {
+			if skip != nil {
+				skip(n)
+			}
+		}
 	}
 
 	return volume.DownloadFilesystemVolume(ctx, cfg.Log, dest.fsTarPath, dest.fsTarStagingDir, filesURL, cfg.PerVolumeConcurrency, cfg.ChunkSize, exp.Fetcher(), cfg.Compression, setTotal, onProgress)

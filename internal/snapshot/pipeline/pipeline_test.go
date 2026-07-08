@@ -1155,18 +1155,32 @@ type recordedStream struct {
 	current     int64
 	total       int64
 	history     []int64
+	samples     []streamSample
+}
+
+// streamSample is a point-in-time snapshot of a stream's (current, total) pair,
+// recorded after every counter-mutating call (IncrBy, SetCurrent, SetTotal).
+// The clamp-resume-seed-to-fresh-total tests walk these to assert the displayed
+// current never exceeds the total at ANY step — in particular in the window
+// right after SetTotal lowers the total, which the plain current-only history
+// cannot observe (see Samples).
+type streamSample struct {
+	current int64
+	total   int64
 }
 
 func (s *recordedStream) IncrBy(n int) {
 	s.mu.Lock()
 	s.current += int64(n)
 	s.history = append(s.history, s.current)
+	s.samples = append(s.samples, streamSample{current: s.current, total: s.total})
 	s.mu.Unlock()
 }
 
 func (s *recordedStream) SetTotal(total int64) {
 	s.mu.Lock()
 	s.total = total
+	s.samples = append(s.samples, streamSample{current: s.current, total: s.total})
 	s.mu.Unlock()
 }
 
@@ -1174,6 +1188,7 @@ func (s *recordedStream) SetCurrent(current int64) {
 	s.mu.Lock()
 	s.current = current
 	s.history = append(s.history, s.current)
+	s.samples = append(s.samples, streamSample{current: s.current, total: s.total})
 	s.mu.Unlock()
 }
 
@@ -1201,6 +1216,18 @@ func (s *recordedStream) History() []int64 {
 
 	out := make([]int64, len(s.history))
 	copy(out, s.history)
+
+	return out
+}
+
+// Samples returns a copy of the (current, total) pair recorded after each
+// counter-mutating call, in call order (see the samples field doc comment).
+func (s *recordedStream) Samples() []streamSample {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]streamSample, len(s.samples))
+	copy(out, s.samples)
 
 	return out
 }
@@ -2049,6 +2076,294 @@ func TestPipeline_Progress_FSSizesSidecar_SeedsTotalAndCreditsStagedFile(t *test
 	streams := rec.snapshot()
 	require.Equal(t, testTotalSize, streams[0].Current(),
 		"final credited total must equal the exact combined file size (no double count between the sidecar seed and the real resume-skip crediting)")
+}
+
+// TestPipeline_Progress_ClampStaleSeedToFreshTotal is the regression test for
+// clamp-resume-seed-to-fresh-total: when seedStreamFromDisk credits committed
+// bytes from an OLD on-disk geometry (chunks.meta or a sizes sidecar) that the
+// current run's fresh HEAD/listing total contradicts (a changed --chunk-size or
+// a shrunk volume between runs), the stream's displayed current must never
+// exceed its total at any point — the ">100% for one frame" rendering artifact
+// this task removes — and must still land exactly on the fresh total. A VALID
+// seed (seeded <= fresh total) must be left untouched: no dip, monotonic
+// forward progress preserved (the progress-no-regression-on-activate contract).
+//
+// assertNeverExceedsTotal walks the (current, total) samples the recordedStream
+// records after every counter-mutating call; the dangerous sample is the one
+// right after SetTotal lowers the total while current still holds the stale
+// seed — which is exactly what the reconcile (SetCurrent(0) BEFORE SetTotal)
+// prevents.
+func TestPipeline_Progress_ClampStaleSeedToFreshTotal(t *testing.T) {
+	t.Parallel()
+
+	assertNeverExceedsTotal := func(t *testing.T, samples []streamSample) {
+		t.Helper()
+
+		for i, s := range samples {
+			if s.total <= 0 {
+				// An unknown total (0) renders a "???" denominator, not a
+				// percentage, so it can never show above 100%.
+				continue
+			}
+
+			require.LessOrEqualf(t, s.current, s.total,
+				"displayed current %d exceeded total %d at sample %d: %+v", s.current, s.total, i, samples)
+		}
+	}
+
+	t.Run("BlockStaleGeometryShrinksTotal", func(t *testing.T) {
+		t.Parallel()
+
+		const (
+			oldChunkSize  int64 = 100
+			oldTotalSize  int64 = 300 // 3 old chunks -> seed credits 300
+			testChunkSize int64 = 100
+			freshTotal    int64 = 150 // fresh HEAD reports a SMALLER volume
+		)
+
+		rawBlock := bytes.Repeat([]byte("Z"), int(freshTotal))
+		srv := makeBlockServer(t, rawBlock)
+
+		defer srv.Close()
+
+		c := buildFakeClient(t)
+		outputDir := t.TempDir()
+
+		codec, err := compress.New("zstd", 0)
+		require.NoError(t, err)
+
+		// Seed an OLD chunk geometry: chunks.meta claims 300 bytes across three
+		// present chunks, so seedStreamFromDisk credits 300. ensureChunkGeometry
+		// will purge this whole dir on the fresh run (meta 300 != fresh 150), so
+		// the chunk-file contents are irrelevant — they are re-fetched from byte
+		// zero and the resume-skip crediting re-derives 0.
+		diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+			archive.NodeDirName(childKind, diskSnapName))
+		chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
+		require.NoError(t, os.MkdirAll(chunkDir, 0o755))
+		seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
+
+		for idx := range 3 {
+			require.NoError(t, os.WriteFile(
+				filepath.Join(chunkDir, archive.ChunkFileName(idx, codec.Ext())),
+				[]byte("stale"), 0o644))
+		}
+
+		require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: oldChunkSize, TotalSize: oldTotalSize}))
+
+		rec := &recordingSink{}
+
+		var (
+			once          sync.Once
+			seededCurrent int64
+		)
+
+		cfg := pipeline.Config{
+			Namespace:            testNS,
+			RootSnapshot:         rootSnapshot,
+			OutputDir:            outputDir,
+			Workers:              1,
+			PerVolumeConcurrency: 1,
+			ChunkSize:            testChunkSize,
+			KubeClient:           c,
+			Compression:          codec,
+			Progress:             rec,
+			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+				once.Do(func() {
+					streams := rec.snapshot()
+					if len(streams) == 1 {
+						seededCurrent = streams[0].Current()
+					}
+				})
+
+				return exporter.NewExport(namespace, "de-clamp-block", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			},
+		}
+
+		require.NoError(t, runPipeline(context.Background(), cfg))
+
+		require.Equal(t, oldTotalSize, seededCurrent,
+			"the stale seed (300) must still be credited at OpenExport time — the clamp happens later, inside downloadBlock after the fresh HEAD")
+
+		streams := rec.snapshot()
+		require.Len(t, streams, 1)
+		assertNeverExceedsTotal(t, streams[0].Samples())
+		require.Equal(t, freshTotal, streams[0].Total(),
+			"final total must be the fresh HEAD size")
+		require.Equal(t, freshTotal, streams[0].Current(),
+			"final current must land exactly on the fresh total after the stale seed is clamped")
+	})
+
+	t.Run("FilesystemStaleSizesSidecarShrinksTotal", func(t *testing.T) {
+		t.Parallel()
+
+		const (
+			staleSize  int64 = 250 // sidecar + already-staged flat blob from a prior run
+			freshTotal int64 = 150 // fresh listing reports a SMALLER file
+		)
+
+		content := bytes.Repeat([]byte("F"), int(freshTotal))
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/v1/files/":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+					`{"name":"a.bin","type":"file","uri":"a.bin","attributes":{"size":`+strconv.FormatInt(freshTotal, 10)+`}}`+
+					`]}`)
+
+			case "/api/v1/files/a.bin":
+				http.ServeContent(w, r, "a.bin", time.Time{}, bytes.NewReader(content))
+
+			default:
+				http.NotFound(w, r)
+			}
+		})
+
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		c := buildFakeClient(t)
+		outputDir := t.TempDir()
+
+		codec, err := compress.New("none", 0)
+		require.NoError(t, err)
+
+		diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+			archive.NodeDirName(childKind, diskSnapName))
+		stagingDir := filepath.Join(diskSnapDir, archive.FsTarStagingDirName)
+		require.NoError(t, os.MkdirAll(stagingDir, 0o755))
+		seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
+
+		// a.bin was fully staged as a flat blob under the OLD (larger) size, and
+		// the sizes sidecar records that stale size, so seedStreamFromDisk seeds
+		// both total (250) and current (250) — above the fresh listing total.
+		require.NoError(t, os.WriteFile(filepath.Join(stagingDir, "a.bin"+codec.Ext()), bytes.Repeat([]byte("A"), int(staleSize)), 0o644))
+
+		sizesJSON, err := json.Marshal(volume.FSSizesSidecar{
+			Files: map[string]int64{"a.bin": staleSize},
+			Total: staleSize,
+		})
+		require.NoError(t, err)
+		metaDir := filepath.Join(stagingDir, volume.FSMetaDirName)
+		require.NoError(t, os.MkdirAll(metaDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(metaDir, volume.FSSizesSidecarName), sizesJSON, 0o644))
+
+		rec := &recordingSink{}
+
+		var (
+			once          sync.Once
+			seededCurrent int64
+			seededTotal   int64
+		)
+
+		cfg := pipeline.Config{
+			Namespace:            testNS,
+			RootSnapshot:         rootSnapshot,
+			OutputDir:            outputDir,
+			Workers:              1,
+			PerVolumeConcurrency: 1,
+			KubeClient:           c,
+			Compression:          codec,
+			Progress:             rec,
+			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+				once.Do(func() {
+					streams := rec.snapshot()
+					if len(streams) == 1 {
+						seededCurrent = streams[0].Current()
+						seededTotal = streams[0].Total()
+					}
+				})
+
+				return exporter.NewExport(namespace, "de-clamp-fs", "Filesystem", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			},
+		}
+
+		require.NoError(t, runPipeline(context.Background(), cfg))
+
+		require.Equal(t, staleSize, seededCurrent,
+			"the stale sidecar seed (250) must still be credited at OpenExport time — the clamp happens later, inside setTotal after the fresh listing")
+		require.Equal(t, staleSize, seededTotal,
+			"the stale sidecar total (250) is seeded before the fresh listing lowers it")
+
+		streams := rec.snapshot()
+		require.Len(t, streams, 1)
+		assertNeverExceedsTotal(t, streams[0].Samples())
+		require.Equal(t, freshTotal, streams[0].Total(),
+			"final total must be the fresh listing size")
+		require.Equal(t, freshTotal, streams[0].Current(),
+			"final current must land exactly on the fresh total after the stale seed is clamped")
+	})
+
+	t.Run("ValidSeedIsNotClamped", func(t *testing.T) {
+		t.Parallel()
+
+		const (
+			testChunkSize int64 = 100
+			testTotalSize int64 = 300 // fresh HEAD == on-disk geometry: a same-geometry resume
+			seedBytes     int64 = 100 // one finalized chunk already on disk
+		)
+
+		rawBlock := bytes.Repeat([]byte("V"), int(testTotalSize))
+		srv := makeBlockServer(t, rawBlock)
+
+		defer srv.Close()
+
+		c := buildFakeClient(t)
+		outputDir := t.TempDir()
+
+		codec, err := compress.New("zstd", 0)
+		require.NoError(t, err)
+
+		// A VALID seed: chunk 0 finalized under a geometry that matches the fresh
+		// run exactly (chunkSize 100, total 300), so nothing is purged and the
+		// seed (100) stays strictly below the fresh total (300). The clamp must
+		// NOT fire — no SetCurrent(0), no dip.
+		diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+			archive.NodeDirName(childKind, diskSnapName))
+		chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
+		require.NoError(t, os.MkdirAll(chunkDir, 0o755))
+		seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
+
+		chunk0Frame, err := codec.EncodeFrame(rawBlock[:seedBytes])
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())), chunk0Frame, 0o644))
+
+		require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: testChunkSize, TotalSize: testTotalSize}))
+
+		rec := &recordingSink{}
+
+		cfg := pipeline.Config{
+			Namespace:            testNS,
+			RootSnapshot:         rootSnapshot,
+			OutputDir:            outputDir,
+			Workers:              1,
+			PerVolumeConcurrency: 1,
+			ChunkSize:            testChunkSize,
+			KubeClient:           c,
+			Compression:          codec,
+			Progress:             rec,
+			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+				return exporter.NewExport(namespace, "de-clamp-valid", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			},
+		}
+
+		require.NoError(t, runPipeline(context.Background(), cfg))
+
+		streams := rec.snapshot()
+		require.Len(t, streams, 1)
+
+		history := streams[0].History()
+		require.NotEmpty(t, history)
+		require.Equal(t, seedBytes, history[0],
+			"a valid seed's first recorded value must be the seed itself")
+		require.NotContains(t, history[1:], int64(0),
+			"a valid seed must never be reset to 0 (no SetCurrent(0)-style dip)")
+		assertNeverExceedsTotal(t, streams[0].Samples())
+		require.Equal(t, testTotalSize, streams[0].Current(),
+			"a valid-seed resume must still land exactly on the total")
+	})
 }
 
 // TestPipeline_Progress_DownloadFailure_CallsFailNotDone verifies that when a
