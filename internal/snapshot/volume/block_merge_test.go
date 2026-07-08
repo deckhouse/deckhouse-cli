@@ -190,6 +190,61 @@ func TestMergeBlockChunks_MissingChunkErrors(t *testing.T) {
 	}
 }
 
+// TestMergeBlockChunks_ZeroSize_AllCodecs proves the zero-size short-circuit:
+// for totalSize=0 the merge succeeds for every codec (including gzip, whose
+// reader rejects an empty stream with EOF — the exact asymmetry that used to
+// loop merge -> verify-fail -> remove -> retry forever), producing a durable
+// empty output and removing the chunk dir. It must also be idempotent: a
+// second (resume) invocation on the same dir succeeds identically, never
+// looping.
+func TestMergeBlockChunks_ZeroSize_AllCodecs(t *testing.T) {
+	for _, codecName := range []string{"none", "zstd", "gzip", "lz4"} {
+		t.Run(codecName, func(t *testing.T) {
+			codec, err := compress.New(codecName, 0)
+			if err != nil {
+				t.Fatalf("compress.New(%s): %v", codecName, err)
+			}
+
+			ext := codec.Ext()
+			nodeDir := t.TempDir()
+			chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+			outPath := filepath.Join(nodeDir, archive.DataBlockName(ext))
+
+			// A zero-size volume downloads zero chunks; the chunk dir may exist
+			// (created empty) or not at all. Exercise the "exists but empty" case.
+			if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			assertZeroMerge := func(stage string) {
+				t.Helper()
+
+				if err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, 0, 0, ext); err != nil {
+					t.Fatalf("%s: MergeBlockChunks(totalSize=0, %s): %v", stage, codecName, err)
+				}
+
+				info, statErr := os.Stat(outPath)
+				if statErr != nil {
+					t.Fatalf("%s: merged output missing for codec %s: %v", stage, codecName, statErr)
+				}
+
+				if info.Size() != 0 {
+					t.Errorf("%s: merged output should be empty, got %d bytes", stage, info.Size())
+				}
+
+				if _, statErr := os.Stat(chunkDir); !os.IsNotExist(statErr) {
+					t.Errorf("%s: chunk dir should be removed, Stat returned: %v", stage, statErr)
+				}
+			}
+
+			assertZeroMerge("first run")
+			// Re-run with the chunk dir already gone and the empty output already
+			// present: the resume path must still succeed, not loop.
+			assertZeroMerge("resume run")
+		})
+	}
+}
+
 func TestMergeBlockChunks_DefaultChunkSize(t *testing.T) {
 	nodeDir := t.TempDir()
 	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)

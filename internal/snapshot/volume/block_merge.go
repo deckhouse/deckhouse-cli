@@ -58,6 +58,17 @@ var ErrDecodedLengthMismatch = errors.New("merged block volume decoded length mi
 //
 // chunkSize ≤ 0 falls back to DefaultChunkSize.
 //
+// A totalSize of 0 is a first-class case: under the frame-concatenation format
+// zero raw bytes are zero frames, i.e. an EMPTY file. It is committed
+// atomically, the (empty or absent) chunkDir is removed, and decoded-length
+// verification is SKIPPED. An empty stream trivially decodes to the 0 wanted
+// raw bytes, and for gzip the empty concatenation of zero frames IS the correct
+// on-disk representation even though kgzip.NewReader rejects an empty stream
+// with EOF (a gzip member requires a header). Without this short-circuit a
+// zero-size gzip volume loops forever: merge → verify-fail → remove → retry.
+// The restore/import decode counterparts rely on this "zero frames == zero
+// bytes" contract, so it must not change without updating them.
+//
 // ctx is checked once per chunk during the copy loop; if it is cancelled
 // mid-merge, the in-progress AtomicWriter is aborted (so no partial file is
 // ever visible at outPath) and a wrapped ctx.Err() is returned (checkable via
@@ -65,6 +76,10 @@ var ErrDecodedLengthMismatch = errors.New("merged block volume decoded length mi
 // chunk directory is only removed after a full successful Commit, so the
 // merge simply resumes from the same chunks on the next run.
 func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, chunkSize int64, ext string) error {
+	if totalSize == 0 {
+		return commitEmptyBlock(chunkDir, outPath)
+	}
+
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
@@ -134,6 +149,28 @@ func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, 
 	return nil
 }
 
+// commitEmptyBlock durably writes an empty outPath and drops the (empty or
+// absent) chunkDir. It is the zero-size branch of MergeBlockChunks: see that
+// function's doc comment for the "zero frames == zero bytes" contract and why
+// verification is skipped here. Idempotent on re-run — os.RemoveAll tolerates a
+// missing chunkDir and the AtomicWriter rename replaces any prior empty file.
+func commitEmptyBlock(chunkDir, outPath string) error {
+	aw, err := archive.NewAtomicWriter(outPath)
+	if err != nil {
+		return fmt.Errorf("open atomic writer for %s: %w", outPath, err)
+	}
+
+	if err := aw.Commit(); err != nil {
+		return fmt.Errorf("commit empty %s: %w", outPath, err)
+	}
+
+	if err := os.RemoveAll(chunkDir); err != nil {
+		return fmt.Errorf("remove chunk dir %s: %w", chunkDir, err)
+	}
+
+	return nil
+}
+
 // verifyDecodedLength decodes outPath — a codec-compressed stream identified
 // by ext (as codec.Ext() returns it: "", ".zst", ".gz", or ".lz4") that may
 // be a concatenation of multiple independent frames — and asserts it yields
@@ -152,6 +189,22 @@ func verifyDecodedLength(outPath, ext string, wantSize int64) error {
 	}
 
 	defer func() { _ = f.Close() }()
+
+	// Defensive symmetry with the MergeBlockChunks zero-size short-circuit: an
+	// empty file trivially decodes to zero raw bytes under every codec, but
+	// gzip's reader rejects an empty stream with EOF (a gzip member needs a
+	// header). Treat an empty input as a valid zero-length decode so ad-hoc
+	// callers stay safe without a per-codec special-case.
+	if wantSize == 0 {
+		info, statErr := f.Stat()
+		if statErr != nil {
+			return fmt.Errorf("stat merged file %s: %w", outPath, statErr)
+		}
+
+		if info.Size() == 0 {
+			return nil
+		}
+	}
 
 	var counter byteCounter
 
