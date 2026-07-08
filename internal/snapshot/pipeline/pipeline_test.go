@@ -1345,6 +1345,14 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 			rawBlock[testChunkSize:testChunkSize+partialBytes],
 			0o644,
 		))
+		// A durable ".part.offset" sidecar must accompany the ".part" file so
+		// partialChunkSize trusts this partial prefix instead of truncating it
+		// to zero (see download-resume-part-trusted-prefix).
+		require.NoError(t, os.WriteFile(
+			filepath.Join(chunkDir, archive.ChunkFileName(1, codec.Ext())+".part.offset"),
+			[]byte(fmt.Sprintf("%d", partialBytes)),
+			0o644,
+		))
 
 		require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: testChunkSize, TotalSize: testTotalSize}))
 
@@ -1444,6 +1452,14 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 		require.NoError(t, os.WriteFile(
 			filepath.Join(fileChunkDir, archive.ChunkFileName(1, codec.Ext())+".part"),
 			content[testChunkSize:testChunkSize+partialBytes],
+			0o644,
+		))
+		// A durable ".part.offset" sidecar must accompany the ".part" file so
+		// partialChunkSize trusts this partial prefix instead of truncating it
+		// to zero (see download-resume-part-trusted-prefix).
+		require.NoError(t, os.WriteFile(
+			filepath.Join(fileChunkDir, archive.ChunkFileName(1, codec.Ext())+".part.offset"),
+			[]byte(fmt.Sprintf("%d", partialBytes)),
 			0o644,
 		))
 
