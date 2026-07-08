@@ -27,6 +27,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"golang.org/x/sync/errgroup"
 
@@ -55,7 +57,31 @@ const partSuffix = ".part"
 // fsync, it is synced again. Small enough to bound loss to a few MiB on a
 // hard kill; large enough that fsync overhead does not dominate a healthy,
 // uninterrupted download.
+//
+// This bound is only TRUE on resume because of partOffsetSuffix below: a
+// hard kill (SIGKILL/OOM/power loss) can leave the ".part" file's on-disk
+// SIZE ahead of its durably-flushed DATA (e.g. ext4 data=writeback), so
+// os.Stat's reported length cannot be trusted as "bytes safe to resume
+// from" on its own. partialChunkSize instead trusts only the offset last
+// recorded in the sidecar and truncates away anything beyond it before a
+// resumed download is allowed to append, which is what actually makes "at
+// most partSyncInterval bytes lost" hold across a hard kill, not just a
+// graceful interruption.
 const partSyncInterval = 4 * 1024 * 1024 // 4 MiB
+
+// partOffsetSuffix names the sidecar file that records the last byte offset
+// (measured from the start of the chunk's raw bytes) PROVEN durable by a
+// successful fsync of the corresponding ".part" file:
+// "<chunk_NNNNN[.<ext>]>.part.offset". It is written only by
+// syncingWriter.sync, immediately after the fsync it follows succeeds (see
+// writeDurablePartOffset), so it can never claim an offset the data has not
+// already been flushed to stable storage for.
+//
+// Like partSuffix, this is deliberately not ".tmp": archive.removeTmpFiles
+// deletes every *.tmp file under a node directory on every resume scan,
+// which would discard this durability record out from under an otherwise
+// perfectly resumable ".part" file.
+const partOffsetSuffix = ".offset"
 
 // ErrShortChunkRead is returned when a chunk's Range GET body delivers fewer
 // bytes than the requested range promised, leaving the durable ".part" file
@@ -78,10 +104,14 @@ var ErrShortChunkRead = errors.New("chunk range body ended before the requested 
 // Durable sub-chunk resume: each chunk's raw bytes are streamed directly to a
 // durable "<chunk>.part" file as they arrive (see partSuffix) instead of being
 // buffered in memory for the whole chunk. An interrupted chunk resumes with a
-// Range GET starting at the ".part" file's persisted length, so a kill mid-chunk
-// loses at most the tail written since the last fsync (partSyncInterval), never
-// the whole chunk. The final codec frame is produced, and the ".part" file
-// consumed, only once the raw bytes are fully durable on disk.
+// Range GET starting at the ".part" file's TRUSTED prefix — the offset last
+// proven durable by a successful fsync (see partOffsetSuffix), never the raw
+// file size alone — truncating away any tail the file may physically hold
+// beyond that offset first. This bounds a kill mid-chunk to losing at most
+// the bytes written since the last fsync (partSyncInterval), even when the
+// process is killed hard enough that the file's on-disk SIZE outruns its
+// DATA. The final codec frame is produced, and the ".part" file consumed,
+// only once the raw bytes are fully durable on disk.
 //
 // Memory note: EncodeFrame's signature requires the full raw chunk as a []byte,
 // so once a chunk's ".part" file is complete it is read back into memory for
@@ -288,12 +318,19 @@ func downloadChunk(
 
 	// A crash between the atomic rename above and this removal is harmless: the
 	// final chunk file now exists, so the next run's skip check at the top of
-	// this function fires before the stale ".part" is ever looked at again, and
-	// MergeBlockChunks removes the whole chunk directory (including any stale
-	// ".part") once every final chunk is present.
+	// this function fires before the stale ".part" (or its offset sidecar) is
+	// ever looked at again, and MergeBlockChunks removes the whole chunk
+	// directory (including any stale ".part"/".part.offset") once every final
+	// chunk is present.
 	if err := os.Remove(partPath); err != nil && !os.IsNotExist(err) {
 		log.Warn("failed to remove durable partial chunk file after finalize",
 			slog.String("path", partPath),
+			slog.String("error", err.Error()))
+	}
+
+	if err := os.Remove(partOffsetPath(partPath)); err != nil && !os.IsNotExist(err) {
+		log.Warn("failed to remove durable partial offset sidecar after finalize",
+			slog.String("path", partOffsetPath(partPath)),
 			slog.String("error", err.Error()))
 	}
 
@@ -303,12 +340,13 @@ func downloadChunk(
 }
 
 // fetchChunkRaw ensures partPath durably holds exactly rawLen raw bytes
-// covering [startByte, endByte], resuming from partPath's current size
-// (truncating away anything larger than rawLen, which cannot be trusted) and
-// fetching only the missing suffix via a Range GET. A resume credit for
-// already-persisted bytes is reported to onProgress before any network call,
-// and newly-arrived bytes are credited incrementally as they stream in —
-// together the two credits always sum to exactly rawLen.
+// covering [startByte, endByte], resuming from partPath's TRUSTED prefix
+// (see partialChunkSize — never the raw file size alone, and never anything
+// larger than rawLen) and fetching only the missing suffix via a Range GET.
+// A resume credit for already-persisted bytes is reported to onProgress
+// before any network call, and newly-arrived bytes are credited
+// incrementally as they stream in — together the two credits always sum to
+// exactly rawLen.
 //
 // The response body is capped with io.LimitReader at the exact number of
 // missing bytes, so a server (or a proxy/MITM) that over-sends for the
@@ -361,20 +399,28 @@ func fetchChunkRaw(
 		return fmt.Errorf("open partial chunk %d: %w", chunkIdx, err)
 	}
 
-	sw := &syncingWriter{f: f, syncInterval: partSyncInterval}
+	sw := &syncingWriter{f: f, partPath: partPath, syncInterval: partSyncInterval, durableBase: have}
 	remaining := rawLen - have
 	cr := &countingReader{r: io.LimitReader(body, remaining), onProgress: onProgress}
 
+	// finish (an explicit final fsync + durable-offset record) runs
+	// regardless of copyErr, exactly like the plain f.Sync() it replaces
+	// always did: a GRACEFUL interrupt (a network error or ctx cancellation
+	// the process survives long enough to reach this line) still gets
+	// whatever it wrote durably recorded as the trusted resume point, while
+	// a HARD KILL — which never runs any Go code past the point of death —
+	// never reaches this call at all, so only Write's own interval
+	// checkpoints (see syncingWriter) remain trusted on the next resume.
 	_, copyErr := io.Copy(sw, cr)
-	syncErr := f.Sync()
+	finishErr := sw.finish()
 	closeErr := f.Close()
 
 	if copyErr != nil {
 		return fmt.Errorf("stream chunk %d body: %w", chunkIdx, copyErr)
 	}
 
-	if syncErr != nil {
-		return fmt.Errorf("sync partial chunk %d: %w", chunkIdx, syncErr)
+	if finishErr != nil {
+		return fmt.Errorf("finalize partial chunk %d: %w", chunkIdx, finishErr)
 	}
 
 	if closeErr != nil {
@@ -397,8 +443,9 @@ func fetchChunkRaw(
 // total byte size recorded for chunkDir's on-disk geometry, purely from local
 // state — no network call. It mirrors downloadChunk/fetchChunkRaw's own
 // chunk-boundary formula exactly: each already-final chunk contributes its
-// full raw length, and a still-open chunk contributes its durable ".part"
-// prefix (capped at that chunk's raw length).
+// full raw length, and a still-open chunk contributes its TRUSTED ".part"
+// prefix (see partialChunkSize — the offset proven durable by an fsync,
+// capped at that chunk's raw length; never the raw file size alone).
 //
 // It returns (0, 0, nil) when chunkDir carries no trustworthy geometry yet
 // (chunks.meta missing or corrupt) — the same case ensureChunkGeometry treats
@@ -448,12 +495,37 @@ func ScanBlockChunkProgress(chunkDir, ext string) (int64, int64, error) {
 	return committed, meta.TotalSize, nil
 }
 
-// partialChunkSize returns the current size of the durable partial file at
-// partPath, or 0 if it does not exist. A partial larger than rawLen cannot
-// belong to the current chunk geometry (ensureChunkGeometry purges the whole
-// chunk directory on any geometry change, so this should not happen in
-// practice) and is removed so the chunk restarts cleanly rather than trusting
-// bytes that may cover the wrong range.
+// partialChunkSize returns the number of bytes at the START of the durable
+// partial file at partPath that are safe to resume from — 0 if partPath does
+// not exist — truncating partPath in place to that trusted prefix whenever
+// the file on disk physically holds more.
+//
+// The raw file SIZE alone is not sufficient to trust. syncingWriter fsyncs
+// partPath only every partSyncInterval bytes (plus once more, unconditionally,
+// when the caller finishes writing — see fetchChunkRaw/syncingWriter.finish),
+// and on some filesystem/mount-option combinations (e.g. ext4
+// data=writeback) a file's SIZE metadata can become durable strictly AHEAD
+// of its DATA. After a hard kill (SIGKILL/OOM/power loss) — which runs no Go
+// code past the point of death, so a mid-interval fsync that had not yet
+// happened simply never will — os.Stat can therefore report a length whose
+// tail is actually zero or garbage. Trusting that stale size and appending
+// after it would bake corrupt bytes into the finalized chunk frame
+// undetected: block has no source digest to catch wrong BYTES within a
+// correctly-SIZED chunk (download-block-verify-decoded-length only catches a
+// wrong TOTAL length).
+//
+// The trusted size is therefore capped at the offset recorded in the
+// "<partPath>.offset" sidecar (see readDurablePartOffset), which is only
+// ever written immediately after an fsync of partPath that itself already
+// succeeded — so it can never name an offset the data has not already been
+// proven durable for. A missing/corrupt sidecar trusts nothing (offset 0).
+// Any physical bytes beyond the trusted offset — or beyond rawLen, which
+// cannot belong to the current chunk geometry (see ensureChunkGeometry) —
+// are truncated away before the caller is allowed to resume by appending.
+// This bounds the worst-case re-fetch to at most partSyncInterval bytes: the
+// same "at most the unsynced tail is lost" guarantee partSyncInterval
+// already documents for a graceful interruption, now also holding across a
+// hard kill.
 func partialChunkSize(partPath string, rawLen int64) (int64, error) {
 	info, err := os.Stat(partPath)
 	if err != nil {
@@ -464,29 +536,100 @@ func partialChunkSize(partPath string, rawLen int64) (int64, error) {
 		return 0, fmt.Errorf("stat %s: %w", partPath, err)
 	}
 
-	if info.Size() > rawLen {
-		if err := os.Remove(partPath); err != nil && !os.IsNotExist(err) {
-			return 0, fmt.Errorf("remove oversized partial %s: %w", partPath, err)
+	durable, err := readDurablePartOffset(partPath)
+	if err != nil {
+		return 0, fmt.Errorf("read durable offset for %s: %w", partPath, err)
+	}
+
+	trusted := min(durable, info.Size(), rawLen)
+	if info.Size() == trusted {
+		return trusted, nil
+	}
+
+	if err := os.Truncate(partPath, trusted); err != nil {
+		return 0, fmt.Errorf("truncate partial %s to trusted offset %d: %w", partPath, trusted, err)
+	}
+
+	return trusted, nil
+}
+
+// partOffsetPath returns the durable-offset sidecar path for partPath (see
+// partOffsetSuffix).
+func partOffsetPath(partPath string) string {
+	return partPath + partOffsetSuffix
+}
+
+// readDurablePartOffset reads the durable-offset sidecar for partPath. A
+// missing or unparseable sidecar returns 0 (not an error): both mean no
+// offset has ever been proven durable for this ".part" file, the safe
+// default that forces a re-fetch from the start of the chunk rather than
+// trusting an unproven value. An unparseable sidecar can only result from a
+// torn write mid-crash (writeDurablePartOffset uses archive.WriteFileAtomic,
+// which makes this rare but not impossible), mirroring how
+// archive.ErrCorruptChunkMeta is handled for chunks.meta elsewhere in this
+// file: degrade to the safe default, never a hard error.
+func readDurablePartOffset(partPath string) (int64, error) {
+	path := partOffsetPath(partPath)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
 		}
 
+		return 0, fmt.Errorf("read durable offset %s: %w", path, err)
+	}
+
+	offset, parseErr := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if parseErr != nil || offset < 0 {
 		return 0, nil
 	}
 
-	return info.Size(), nil
+	return offset, nil
+}
+
+// writeDurablePartOffset atomically and durably records offset as the
+// trusted resume point for partPath. Callers MUST only invoke this
+// immediately after an fsync of partPath's data has already succeeded (see
+// syncingWriter.sync), so offset never claims more than what is already
+// proven durable.
+func writeDurablePartOffset(partPath string, offset int64) error {
+	path := partOffsetPath(partPath)
+
+	if err := archive.WriteFileAtomic(path, strings.NewReader(strconv.FormatInt(offset, 10))); err != nil {
+		return fmt.Errorf("write durable offset %s: %w", path, err)
+	}
+
+	return nil
 }
 
 // syncingWriter wraps an *os.File and fsyncs it every syncInterval bytes
 // written, bounding how much of a durable partial download can be lost to an
-// unsynced OS page cache if the process is killed mid-chunk.
+// unsynced OS page cache if the process is killed mid-chunk. Every fsync it
+// performs — whether triggered by crossing syncInterval mid-write (Write) or
+// by the caller's final call (finish) — is immediately followed by durably
+// recording the resulting file length in partPath's offset sidecar (see
+// writeDurablePartOffset), which is the only offset partialChunkSize will
+// ever trust on a later resume.
 type syncingWriter struct {
-	f             *os.File
-	syncInterval  int64
+	f            *os.File
+	partPath     string
+	syncInterval int64
+	// durableBase is the offset (bytes already durable before this writer's
+	// lifetime began, i.e. the "have" partialChunkSize returned) that every
+	// offset persisted below is measured from — so the sidecar always
+	// records an absolute position from the start of the chunk's raw bytes,
+	// not just bytes written during this writer's lifetime.
+	durableBase   int64
+	written       int64
 	sinceLastSync int64
 }
 
 // Write implements io.Writer.
 func (w *syncingWriter) Write(p []byte) (int, error) {
 	n, err := w.f.Write(p)
+	w.written += int64(n)
+
 	if err != nil {
 		return n, fmt.Errorf("write partial chunk: %w", err)
 	}
@@ -498,9 +641,38 @@ func (w *syncingWriter) Write(p []byte) (int, error) {
 
 	w.sinceLastSync = 0
 
-	if syncErr := w.f.Sync(); syncErr != nil {
-		return n, fmt.Errorf("sync partial chunk: %w", syncErr)
+	if err := w.sync(); err != nil {
+		return n, err
 	}
 
 	return n, nil
+}
+
+// finish fsyncs the file exactly once more — covering any bytes written
+// since the last interval checkpoint — and durably records the result as the
+// trusted resume offset, regardless of whether the caller's copy loop that
+// fed this writer succeeded or was interrupted by an error. This is what
+// lets a GRACEFUL interrupt (a network error or context cancellation the
+// process survives long enough to run this code) resume from the exact byte
+// it reached, while a HARD KILL — which never reaches this call at all —
+// still limits a resumed download to trusting only the interval checkpoints
+// Write itself already persisted.
+func (w *syncingWriter) finish() error {
+	return w.sync()
+}
+
+// sync fsyncs the underlying file and, only if that succeeds, durably
+// records durableBase+written as the trusted resume offset — never the
+// other way around, so the sidecar can never claim an offset the data has
+// not already been proven durable for.
+func (w *syncingWriter) sync() error {
+	if err := w.f.Sync(); err != nil {
+		return fmt.Errorf("sync partial chunk: %w", err)
+	}
+
+	if err := writeDurablePartOffset(w.partPath, w.durableBase+w.written); err != nil {
+		return err
+	}
+
+	return nil
 }

@@ -800,6 +800,14 @@ func (d *failIfCalledDoer) Do(*http.Request) (*http.Response, error) {
 // buffered the entire raw chunk in memory via io.ReadAll and never touched
 // disk until the whole chunk had arrived, so an interrupt anywhere inside a
 // chunk discarded ALL of that chunk's progress.
+//
+// This simulates a GRACEFUL interrupt (a Read error the process survives
+// long enough to run fetchChunkRaw's cleanup code, including
+// syncingWriter.finish): the exact byte reached IS durably recorded and
+// trusted on resume. Contrast with
+// TestDownloadBlockChunks_PartSizeAheadOfDurableOffset_TruncatesToTrusted,
+// which simulates a HARD kill where the size-vs-durable-offset gap must be
+// truncated away instead of trusted.
 func TestDownloadBlockChunks_ResumesPartialChunkFromOffset(t *testing.T) {
 	t.Parallel()
 
@@ -878,9 +886,13 @@ func TestDownloadBlockChunks_ResumesPartialChunkFromOffset(t *testing.T) {
 	// partial length (the durable resume credit issued before any network call).
 	assert.Equal(t, cutBytes, firstCredit, "first post-resume progress credit must equal the persisted partial length")
 
-	// The durable partial must be cleaned up once the chunk finalizes.
+	// The durable partial (and its offset sidecar) must be cleaned up once
+	// the chunk finalizes.
 	_, statErr = os.Stat(partPath)
 	assert.True(t, os.IsNotExist(statErr), "durable partial must be removed once the chunk finalizes")
+
+	_, statErr = os.Stat(partPath + ".offset")
+	assert.True(t, os.IsNotExist(statErr), "durable offset sidecar must be removed once the chunk finalizes")
 
 	// Final chunk must decode to the original payload, and the merged output
 	// must be byte-identical to the source.
@@ -898,7 +910,11 @@ func TestDownloadBlockChunks_ResumesPartialChunkFromOffset(t *testing.T) {
 // durable partial file whose size already equals the chunk's raw length is
 // finalized (encoded + atomically written) with NO network request at all —
 // e.g. a crash between finishing the raw download and finalizing the codec
-// frame on a prior run must not re-fetch anything on resume.
+// frame on a prior run must not re-fetch anything on resume. The matching
+// ".part.offset" sidecar is written alongside the ".part" file, exactly as
+// fetchChunkRaw's own finish() would have left it after the prior run's
+// raw download completed and was fsynced in full — without it, the size
+// alone cannot be trusted (see TestDownloadBlockChunks_PartSizeAheadOfDurableOffset_TruncatesToTrusted).
 func TestDownloadBlockChunks_FullPartFinalizesWithoutNetwork(t *testing.T) {
 	t.Parallel()
 
@@ -917,6 +933,7 @@ func TestDownloadBlockChunks_FullPartFinalizesWithoutNetwork(t *testing.T) {
 
 	partPath := filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".part")
 	require.NoError(t, os.WriteFile(partPath, payload, 0o644))
+	require.NoError(t, os.WriteFile(partPath+".offset", []byte(fmt.Sprintf("%d", totalSize)), 0o644))
 
 	fetcher := exporter.NewFetcher(&failIfCalledDoer{t: t})
 
@@ -944,6 +961,9 @@ func TestDownloadBlockChunks_FullPartFinalizesWithoutNetwork(t *testing.T) {
 
 	_, statErr := os.Stat(partPath)
 	assert.True(t, os.IsNotExist(statErr), "durable partial must be removed once the chunk finalizes")
+
+	_, statErr = os.Stat(partPath + ".offset")
+	assert.True(t, os.IsNotExist(statErr), "durable offset sidecar must be removed once the chunk finalizes")
 }
 
 // TestDownloadBlockChunks_PartialSurvivesResumeScan proves the durable ".part"
@@ -1170,4 +1190,131 @@ func TestDownloadBlockChunks_ServerShortSends_ReturnsErrShortChunkRead(t *testin
 	partInfo, statErr := os.Stat(partPath)
 	require.NoError(t, statErr, "the short durable partial must remain on disk for a future resume attempt")
 	assert.Equal(t, int64(cutBytes), partInfo.Size(), "durable partial must hold exactly the bytes actually delivered")
+}
+
+// TestDownloadBlockChunks_PartSizeAheadOfDurableOffset_TruncatesToTrusted is
+// the regression test for the durable-prefix-trust fix: it simulates a HARD
+// kill (SIGKILL/OOM/power loss) that leaves a ".part" file whose on-disk SIZE
+// is larger than the offset last proven durable by an fsync (e.g. ext4
+// data=writeback persisting size metadata ahead of file data). The bytes
+// making up the untrusted gap [durableOffset, staleSize) are deliberately
+// GARBAGE (they do not match the source payload at those positions), so if
+// resume ever trusted the stale size instead of truncating to durableOffset
+// first, the finalized chunk would decode with that garbage baked in instead
+// of the real source bytes — this is exactly the silent corruption the fix
+// prevents.
+func TestDownloadBlockChunks_PartSizeAheadOfDurableOffset_TruncatesToTrusted(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte("0123456789ABCDEFGHIJ") // 20 bytes
+	const durableOffset = 10                  // only this many bytes are provably fsynced
+	const staleSize = 15                      // the ".part" file's on-disk SIZE claims 5 more bytes than that
+
+	srv := newBlockServer(t, payload)
+	defer srv.Close()
+
+	blockURL := srv.URL + "/api/v1/block"
+
+	doer := &recordingDoer{inner: srv.Client()}
+	fetcher := exporter.NewFetcher(doer)
+
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
+	require.NoError(t, err)
+
+	nodeDir := t.TempDir()
+	totalSize := int64(len(payload))
+	chunkSize := totalSize // one chunk, so the whole scenario is unambiguous
+
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	require.NoError(t, archive.EnsureDir(chunkDir))
+	require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize}))
+
+	partPath := filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".part")
+
+	stale := append([]byte{}, payload[:durableOffset]...)
+	stale = append(stale, bytes.Repeat([]byte("Z"), staleSize-durableOffset)...)
+	require.NoError(t, os.WriteFile(partPath, stale, 0o644))
+	require.NoError(t, os.WriteFile(partPath+".offset", []byte(fmt.Sprintf("%d", durableOffset)), 0o644))
+
+	err = volume.DownloadBlockChunks(
+		context.Background(), slog.Default(), chunkDir, blockURL, totalSize, chunkSize, 1, fetcher, codec, nil)
+	require.NoError(t, err, "resume must succeed once the untrusted tail is truncated away")
+
+	ranges := doer.recordedRanges()
+	require.Len(t, ranges, 1, "expected exactly one Range request")
+	assert.Equal(t, fmt.Sprintf("bytes=%d-%d", durableOffset, totalSize-1), ranges[0],
+		"resume must start at the DURABLE offset, not the untrusted on-disk size")
+
+	finalPath := filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext()))
+	decoded := decodeAll(t, finalPath)
+	assert.Equal(t, payload, decoded, "finalized chunk must not retain any bytes from the untrusted tail")
+}
+
+// TestDownloadBlockChunks_PartSizeMatchesDurableOffset_ResumesWithoutTruncation
+// is the contrast case: when the ".part" file's on-disk size and its recorded
+// durable offset agree exactly (a "clean" partial, as if the process died
+// right after a successful interval fsync with no untrusted tail at all),
+// resume must neither discard nor re-fetch any of the already-durable bytes
+// — only the genuinely missing suffix is requested — and the finalized chunk
+// must be byte-identical to a control chunk downloaded from scratch in one
+// pass, proving the resumed frame is not just correct but indistinguishable
+// from an uninterrupted download.
+func TestDownloadBlockChunks_PartSizeMatchesDurableOffset_ResumesWithoutTruncation(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte("0123456789ABCDEFGHIJ") // 20 bytes
+	const durableOffset = 12
+
+	srv := newBlockServer(t, payload)
+	defer srv.Close()
+
+	blockURL := srv.URL + "/api/v1/block"
+
+	doer := &recordingDoer{inner: srv.Client()}
+	fetcher := exporter.NewFetcher(doer)
+
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
+	require.NoError(t, err)
+
+	nodeDir := t.TempDir()
+	totalSize := int64(len(payload))
+	chunkSize := totalSize
+
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	require.NoError(t, archive.EnsureDir(chunkDir))
+	require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize}))
+
+	partPath := filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".part")
+
+	require.NoError(t, os.WriteFile(partPath, payload[:durableOffset], 0o644))
+	require.NoError(t, os.WriteFile(partPath+".offset", []byte(fmt.Sprintf("%d", durableOffset)), 0o644))
+
+	err = volume.DownloadBlockChunks(
+		context.Background(), slog.Default(), chunkDir, blockURL, totalSize, chunkSize, 1, fetcher, codec, nil)
+	require.NoError(t, err)
+
+	ranges := doer.recordedRanges()
+	require.Len(t, ranges, 1, "expected exactly one Range request")
+	assert.Equal(t, fmt.Sprintf("bytes=%d-%d", durableOffset, totalSize-1), ranges[0],
+		"a fully-trusted partial must resume from its exact recorded offset, re-fetching nothing already durable")
+
+	finalPath := filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext()))
+	decoded := decodeAll(t, finalPath)
+	assert.Equal(t, payload, decoded, "finalized chunk must decode to the original payload")
+
+	// Control: an entirely fresh, uninterrupted download of the same
+	// payload/geometry/codec must produce a byte-identical frame file.
+	controlDir := t.TempDir()
+	controlChunkDir := filepath.Join(controlDir, archive.BlockChunksDirName)
+	require.NoError(t, volume.DownloadBlockChunks(
+		context.Background(), slog.Default(), controlChunkDir, blockURL, totalSize, chunkSize, 1,
+		exporter.NewFetcher(srv.Client()), codec, nil))
+
+	resumedFrame, err := os.ReadFile(finalPath)
+	require.NoError(t, err)
+
+	controlFrame, err := os.ReadFile(filepath.Join(controlChunkDir, archive.ChunkFileName(0, codec.Ext())))
+	require.NoError(t, err)
+
+	assert.Equal(t, controlFrame, resumedFrame, "a resumed frame must be byte-identical to a from-scratch download's frame")
 }

@@ -511,13 +511,17 @@ func TestScanBlockChunkProgress_FinalizedAndPartialChunks(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())), frame, 0o644))
 
-	// Chunk 1: a durable partial covering 37 of its 100 raw bytes.
+	// Chunk 1: a durable partial covering 37 of its 100 raw bytes. The
+	// matching ".part.offset" sidecar records that prefix as fsync-proven —
+	// exactly what fetchChunkRaw's own syncingWriter would have left behind
+	// after a real partial download — since ScanBlockChunkProgress must
+	// trust the identical (sidecar-backed) prefix fetchChunkRaw itself will
+	// resume from (see the "two computations always agree exactly" doc on
+	// ScanBlockChunkProgress).
 	const partialBytes = 37
-	require.NoError(t, os.WriteFile(
-		filepath.Join(chunkDir, archive.ChunkFileName(1, codec.Ext())+".part"),
-		bytes.Repeat([]byte("B"), partialBytes),
-		0o644,
-	))
+	partPath := filepath.Join(chunkDir, archive.ChunkFileName(1, codec.Ext())+".part")
+	require.NoError(t, os.WriteFile(partPath, bytes.Repeat([]byte("B"), partialBytes), 0o644))
+	require.NoError(t, os.WriteFile(partPath+".offset", []byte(fmt.Sprintf("%d", partialBytes)), 0o644))
 
 	// Chunk 2: nothing on disk yet.
 
@@ -593,13 +597,13 @@ func TestScanFSStagingProgress_InProgressPerFileChunkDir(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(fileChunkDir, archive.ChunkFileName(0, codec.Ext())), frame, 0o644))
 
-	// Chunk 1: a durable partial covering 42 of its 100 raw bytes.
+	// Chunk 1: a durable partial covering 42 of its 100 raw bytes, with its
+	// matching ".part.offset" sidecar recording that prefix as fsync-proven
+	// (see the analogous note in TestScanBlockChunkProgress_FinalizedAndPartialChunks).
 	const partialBytes = 42
-	require.NoError(t, os.WriteFile(
-		filepath.Join(fileChunkDir, archive.ChunkFileName(1, codec.Ext())+".part"),
-		bytes.Repeat([]byte("B"), partialBytes),
-		0o644,
-	))
+	partPath := filepath.Join(fileChunkDir, archive.ChunkFileName(1, codec.Ext())+".part")
+	require.NoError(t, os.WriteFile(partPath, bytes.Repeat([]byte("B"), partialBytes), 0o644))
+	require.NoError(t, os.WriteFile(partPath+".offset", []byte(fmt.Sprintf("%d", partialBytes)), 0o644))
 
 	committed, err := volume.ScanFSStagingProgress(stagingDir, codec.Ext())
 	require.NoError(t, err)
