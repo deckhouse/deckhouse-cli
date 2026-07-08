@@ -1834,6 +1834,287 @@ func TestDownloadFilesystemVolume_SizesSidecar_FromScratchUnchanged(t *testing.T
 	}
 }
 
+// ── resume skip-branch MD5 re-check (fs-skip-branch-md5-recheck) ───────────
+
+// newFileGetCountingFSServer builds an httptest.Server exposing a single
+// known-size file whose listing item.Attributes carries "size" and, when
+// advertisedMD5 is non-empty, "hash.md5". It counts every GET issued to the
+// file body (Range or not), so a test can prove that a resume skip did NOT
+// re-download an already-staged file. http.ServeContent honors Range so the
+// known-size chunked re-stage path works too.
+func newFileGetCountingFSServer(t *testing.T, fileName string, served []byte, advertisedMD5 string) (*httptest.Server, func() int) {
+	t.Helper()
+
+	filePath := "/files/" + fileName
+
+	attrs := `"size":` + strconv.Itoa(len(served))
+	if advertisedMD5 != "" {
+		attrs += `,"hash.md5":"` + advertisedMD5 + `"`
+	}
+
+	var (
+		mu     sync.Mutex
+		getCnt int
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"`+fileName+`","type":"file","uri":"`+fileName+`","attributes":{`+attrs+`}}`+
+				`]}`)
+
+		case filePath:
+			mu.Lock()
+			getCnt++
+			mu.Unlock()
+
+			http.ServeContent(w, r, fileName, time.Time{}, bytes.NewReader(served))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return getCnt
+	}
+
+	return srv, count
+}
+
+// decodeTarEntryByCodec returns the decoded plaintext of the entry named
+// relPath+codec.Ext() from tarPath. Only the none/zstd codecs used by the
+// resume-skip test matrix are handled.
+func decodeTarEntryByCodec(t *testing.T, tarPath, relPath string, codec compress.Codec) []byte {
+	t.Helper()
+
+	entryName := relPath + codec.Ext()
+
+	if codec.Ext() == ".zst" {
+		return decodeZstdTarEntry(t, tarPath, entryName)
+	}
+
+	entries := readTarContents(t, tarPath)
+
+	data, ok := entries[entryName]
+	if !ok {
+		t.Fatalf("tar missing entry %q", entryName)
+	}
+
+	return data
+}
+
+// TestDownloadFilesystemVolume_ResumeSkip_VerifiedBlobSkipped verifies that an
+// already-staged blob whose decoded MD5 matches the exporter-advertised digest
+// is skipped exactly as before: no file GET is issued, its declared size is
+// credited to onProgress exactly once, and the assembled tar carries it.
+func TestDownloadFilesystemVolume_ResumeSkip_VerifiedBlobSkipped(t *testing.T) {
+	t.Parallel()
+
+	for _, codecName := range []string{"none", "zstd"} {
+		codecName := codecName
+
+		t.Run(codecName, func(t *testing.T) {
+			t.Parallel()
+
+			content := []byte("resume-skip verified staged blob content")
+			codec := mustCodec(t, codecName)
+			srv, getCount := newFileGetCountingFSServer(t, "file.bin", content, hexMD5(content))
+
+			nodeDir := t.TempDir()
+			tarPath := filepath.Join(nodeDir, archive.FsTarName)
+			stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+			if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			// Pre-stage the correctly-encoded blob a prior run would have left:
+			// its decoded MD5 matches the advertised digest.
+			frame, err := codec.EncodeFrame(content)
+			if err != nil {
+				t.Fatalf("encode frame: %v", err)
+			}
+
+			if err := os.WriteFile(filepath.Join(stagingDir, "file.bin"+codec.Ext()), frame, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var (
+				progMu   sync.Mutex
+				credited int64
+			)
+
+			onProgress := func(n int) {
+				progMu.Lock()
+				credited += int64(n)
+				progMu.Unlock()
+			}
+
+			if err := volume.DownloadFilesystemVolume(
+				context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+				1, 0, newFSFetcher(srv), codec, nil, onProgress,
+			); err != nil {
+				t.Fatalf("DownloadFilesystemVolume: %v", err)
+			}
+
+			if getCount() != 0 {
+				t.Errorf("verified staged file was re-downloaded: %d file GET(s), want 0", getCount())
+			}
+
+			if credited != int64(len(content)) {
+				t.Errorf("onProgress credited = %d; want %d (declared size once)", credited, len(content))
+			}
+
+			got := decodeTarEntryByCodec(t, tarPath, "file.bin", codec)
+			if !bytes.Equal(got, content) {
+				t.Errorf("tar entry content = %q; want %q", got, content)
+			}
+		})
+	}
+}
+
+// TestDownloadFilesystemVolume_ResumeSkip_MismatchedBlobRestaged verifies that
+// an already-staged blob whose decoded MD5 does NOT match the advertised digest
+// is removed and re-staged within the same run (proven by a file GET being
+// issued), and that the re-staged result is verified again by the fresh-path
+// logic (proven by the tar entry decoding to the true source content). No error
+// is returned for this self-healing condition.
+func TestDownloadFilesystemVolume_ResumeSkip_MismatchedBlobRestaged(t *testing.T) {
+	t.Parallel()
+
+	for _, codecName := range []string{"none", "zstd"} {
+		codecName := codecName
+
+		t.Run(codecName, func(t *testing.T) {
+			t.Parallel()
+
+			content := []byte("resume-skip true source content for the mismatched blob")
+			codec := mustCodec(t, codecName)
+			srv, getCount := newFileGetCountingFSServer(t, "file.bin", content, hexMD5(content))
+
+			nodeDir := t.TempDir()
+			tarPath := filepath.Join(nodeDir, archive.FsTarName)
+			stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+			if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			// Pre-stage a WRONG blob: a validly-encoded frame of different
+			// bytes, so it decodes fine but its plaintext MD5 mismatches.
+			wrong, err := codec.EncodeFrame([]byte("stale foreign staged bytes that do not match"))
+			if err != nil {
+				t.Fatalf("encode wrong frame: %v", err)
+			}
+
+			destPath := filepath.Join(stagingDir, "file.bin"+codec.Ext())
+			if err := os.WriteFile(destPath, wrong, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := volume.DownloadFilesystemVolume(
+				context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+				1, 0, newFSFetcher(srv), codec, nil, nil,
+			); err != nil {
+				t.Fatalf("DownloadFilesystemVolume: %v", err)
+			}
+
+			if getCount() < 1 {
+				t.Errorf("mismatched staged file was not re-downloaded: %d file GET(s), want >= 1", getCount())
+			}
+
+			got := decodeTarEntryByCodec(t, tarPath, "file.bin", codec)
+			if !bytes.Equal(got, content) {
+				t.Errorf("re-staged tar entry content = %q; want %q (true source content)", got, content)
+			}
+		})
+	}
+}
+
+// TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5SkipsWithWarn verifies that
+// an already-staged blob for a listing item with no hash.md5 attribute is
+// skipped WITHOUT verification (matching the fresh-path convention): the blob
+// is not re-downloaded even though its bytes differ from the server's, its
+// declared size is credited once, and a single WARN is logged.
+func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5SkipsWithWarn(t *testing.T) {
+	t.Parallel()
+
+	content := []byte("server content that must never be fetched on an empty-md5 skip")
+	codec := mustCodec(t, "none")
+	srv, getCount := newFileGetCountingFSServer(t, "file.bin", content, "")
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sentinel differs from the server content: with no advertised MD5 the skip
+	// branch must NOT verify it and must NOT re-download it.
+	sentinel := []byte("sentinel-not-server-content")
+	if err := os.WriteFile(filepath.Join(stagingDir, "file.bin"), sentinel, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lh := &warnCapture{}
+	log := slog.New(lh)
+
+	var (
+		progMu   sync.Mutex
+		credited int64
+	)
+
+	onProgress := func(n int) {
+		progMu.Lock()
+		credited += int64(n)
+		progMu.Unlock()
+	}
+
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(), log, tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, newFSFetcher(srv), codec, nil, onProgress,
+	); err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	if getCount() != 0 {
+		t.Errorf("empty-md5 staged file was re-downloaded: %d file GET(s), want 0", getCount())
+	}
+
+	warnCount := 0
+
+	for _, msg := range lh.warnMessages() {
+		if msg == "no source MD5 available for file, skipping integrity verification" {
+			warnCount++
+		}
+	}
+
+	if warnCount != 1 {
+		t.Errorf("expected exactly 1 missing-digest WARN, got %d: %v", warnCount, lh.warnMessages())
+	}
+
+	entries := readTarContents(t, tarPath)
+	if !bytes.Equal(entries["file.bin"], sentinel) {
+		t.Errorf("file.bin content = %q; want sentinel %q (skipped without verification)", entries["file.bin"], sentinel)
+	}
+
+	if credited != int64(len(content)) {
+		t.Errorf("onProgress credited = %d; want %d (declared size once)", credited, len(content))
+	}
+}
+
 // ── path sanitization (sanitize-server-provided-paths) ─────────────────────
 
 // singleItemFSServer builds an httptest.Server exposing a one-item filesystem listing
