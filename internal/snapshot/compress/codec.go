@@ -37,6 +37,13 @@ import (
 // EncodeStream is used for per-file FS compression: it streams src into dst as one
 // self-contained compressed stream.  Each call is safe to invoke concurrently.
 // For codec=none, EncodeStream is a byte-identical passthrough.
+//
+// EncodeFrameStream produces the SAME independent frame EncodeFrame would for the
+// raw bytes src yields, but reads them from src rather than requiring the whole
+// chunk as a []byte up front. It is the finalize-time path for a block chunk whose
+// raw bytes already live in a durable file on disk (see volume.downloadChunk):
+// callers pass the open file plus its exact known length so an implementation that
+// cannot avoid buffering can size its allocation once instead of growing it.
 type Codec interface {
 	// Name returns the codec identifier, e.g. "zstd", "none".
 	Name() string
@@ -52,6 +59,14 @@ type Codec interface {
 	// EncodeStream compresses src into dst as one self-contained stream.
 	// It is safe to call concurrently from multiple goroutines.
 	EncodeStream(dst io.Writer, src io.Reader) error
+
+	// EncodeFrameStream reads exactly size bytes from src and writes the resulting
+	// independent frame to dst — byte-identical to EncodeFrame(rawBytes) for the
+	// same rawBytes, verified in codec_test.go for every registered codec.
+	// Implementations that can genuinely stream bound their memory to their own
+	// internal buffer, independent of size; see the zstd implementation's doc
+	// comment for the one documented exception.
+	EncodeFrameStream(dst io.Writer, src io.Reader, size int64) error
 }
 
 // ErrUnknownCodec is returned by New when the requested codec name is not registered.

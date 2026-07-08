@@ -19,7 +19,6 @@ limitations under the License.
 package volume
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -113,14 +112,22 @@ var ErrShortChunkRead = errors.New("chunk range body ended before the requested 
 // DATA. The final codec frame is produced, and the ".part" file consumed,
 // only once the raw bytes are fully durable on disk.
 //
-// Memory note: EncodeFrame's signature requires the full raw chunk as a []byte,
-// so once a chunk's ".part" file is complete it is read back into memory for
-// exactly one EncodeFrame call (this replaces the old network-buffer io.ReadAll,
-// it does not add a second concurrent buffer). Worst-case RSS for this call
-// alone is still workers × (chunkSize + compressed frame size), now backed by a
-// durable file instead of a discarded network buffer. The outer pipeline
-// multiplies this by the number of concurrent nodes (pipeline.Config.Workers);
-// total peak ≈ pipeline.Config.Workers × workers × (chunkSize + frame).
+// Memory note: once a chunk's ".part" file is complete, finalizeChunkFrame
+// streams it through codec.EncodeFrameStream directly into the final chunk's
+// AtomicWriter — the whole raw chunk is never read into memory as a []byte
+// here. For codecs that can genuinely stream (none/gzip/lz4), finalize's
+// peak memory is bounded by the codec's own small internal buffer,
+// independent of chunkSize. zstd's public streaming API cannot reproduce
+// EncodeFrame's output byte-for-byte for chunk-sized input (see
+// compress.zstdCodec.EncodeFrameStream), so its implementation still reads
+// the chunk fully — for that codec (the default), worst-case RSS per
+// in-flight chunk remains chunkSize + compressed frame size, which is why
+// --chunk-size carries a documented maximum (see cmd/download's
+// maxChunkSize). The outer pipeline multiplies this by the number of
+// concurrent nodes (pipeline.Config.Workers); total peak ≈
+// pipeline.Config.Workers × workers × (chunkSize + frame) for zstd, and
+// pipeline.Config.Workers × workers × (small internal buffer) for the
+// genuinely-streaming codecs.
 func DownloadBlockChunks(
 	ctx context.Context,
 	log *slog.Logger,
@@ -247,9 +254,10 @@ func createChunkDir(chunkDir string, chunkSize, totalSize int64) error {
 }
 
 // downloadChunk fetches one chunk into a durable raw ".part" file (resuming
-// from the part's persisted length if one already exists), encodes the
-// complete raw bytes with codec, and writes the result atomically as the
-// final chunk file. It is safe to call concurrently from multiple goroutines.
+// from the part's persisted length if one already exists), then streams the
+// complete raw bytes through codec (see finalizeChunkFrame) and writes the
+// result atomically as the final chunk file. It is safe to call concurrently
+// from multiple goroutines.
 func downloadChunk(
 	ctx context.Context,
 	log *slog.Logger,
@@ -302,18 +310,9 @@ func downloadChunk(
 		return err
 	}
 
-	raw, err := os.ReadFile(partPath)
-	if err != nil {
-		return fmt.Errorf("read persisted chunk %d: %w", chunkIdx, err)
-	}
-
-	frame, err := codec.EncodeFrame(raw)
+	frameBytes, err := finalizeChunkFrame(finalPath, partPath, rawLen, codec)
 	if err != nil {
 		return fmt.Errorf("encode chunk %d: %w", chunkIdx, err)
-	}
-
-	if err := archive.WriteFileAtomic(finalPath, bytes.NewReader(frame)); err != nil {
-		return fmt.Errorf("write chunk %d: %w", chunkIdx, err)
 	}
 
 	// A crash between the atomic rename above and this removal is harmless: the
@@ -334,9 +333,51 @@ func downloadChunk(
 			slog.String("error", err.Error()))
 	}
 
-	log.Debug("chunk written", slog.Int("chunk", chunkIdx), slog.Int("frame_bytes", len(frame)))
+	log.Debug("chunk written", slog.Int("chunk", chunkIdx), slog.Int64("frame_bytes", frameBytes))
 
 	return nil
+}
+
+// finalizeChunkFrame produces finalPath's independent codec frame by
+// streaming partPath's durable raw bytes through codec.EncodeFrameStream
+// directly into an AtomicWriter — no whole-chunk buffer is read into
+// memory here, unlike the os.ReadFile+EncodeFrame this replaces. It returns
+// the resulting frame's byte size (for logging only).
+func finalizeChunkFrame(finalPath, partPath string, rawLen int64, codec compress.Codec) (int64, error) {
+	partFile, err := os.Open(partPath)
+	if err != nil {
+		return 0, fmt.Errorf("open persisted chunk: %w", err)
+	}
+
+	aw, err := archive.NewAtomicWriter(finalPath)
+	if err != nil {
+		_ = partFile.Close()
+		return 0, fmt.Errorf("create chunk writer: %w", err)
+	}
+
+	encodeErr := codec.EncodeFrameStream(aw, partFile, rawLen)
+	closeErr := partFile.Close()
+
+	if encodeErr != nil {
+		aw.Abort()
+		return 0, fmt.Errorf("stream-encode: %w", encodeErr)
+	}
+
+	if closeErr != nil {
+		aw.Abort()
+		return 0, fmt.Errorf("close persisted chunk: %w", closeErr)
+	}
+
+	if err := aw.Commit(); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+
+	info, err := os.Stat(finalPath)
+	if err != nil {
+		return 0, fmt.Errorf("stat finalized chunk: %w", err)
+	}
+
+	return info.Size(), nil
 }
 
 // fetchChunkRaw ensures partPath durably holds exactly rawLen raw bytes

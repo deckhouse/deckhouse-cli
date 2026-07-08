@@ -20,7 +20,10 @@ import (
 	"bytes"
 	stdgzip "compress/gzip"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -545,5 +548,147 @@ func TestCodec_NoneEncodeStream_Passthrough(t *testing.T) {
 
 	if !bytes.Equal(buf.Bytes(), src) {
 		t.Errorf("none EncodeStream passthrough mismatch: got %q want %q", buf.Bytes(), src)
+	}
+}
+
+// TestCodec_EncodeFrameStream_MatchesEncodeFrame is the empirical proof the
+// EncodeFrameStream contract demands: for every registered codec, streaming
+// a chunk's raw bytes from a real on-disk file (the same shape as a
+// downloadChunk ".part" file) through EncodeFrameStream must produce the
+// exact same bytes as EncodeFrame(rawBytes) — including zstd, whose
+// implementation satisfies this by delegating to EncodeFrame internally
+// rather than by matching the library's independent streaming API (see
+// zstd.go's EncodeFrameStream doc comment for why the two diverge).
+func TestCodec_EncodeFrameStream_MatchesEncodeFrame(t *testing.T) {
+	t.Helper()
+
+	for _, name := range compress.Names() {
+		t.Run(name, func(t *testing.T) {
+			c, err := compress.New(name, 0)
+			if err != nil {
+				t.Fatalf("New(%s): %v", name, err)
+			}
+
+			src := bytes.Repeat([]byte("stream-encode-from-part payload, "), 50000)
+
+			frame, err := c.EncodeFrame(src)
+			if err != nil {
+				t.Fatalf("EncodeFrame(%s): %v", name, err)
+			}
+
+			partPath := filepath.Join(t.TempDir(), "chunk_00000.part")
+			if err := os.WriteFile(partPath, src, 0o644); err != nil {
+				t.Fatalf("write part file: %v", err)
+			}
+
+			f, err := os.Open(partPath)
+			if err != nil {
+				t.Fatalf("open part file: %v", err)
+			}
+
+			defer func() { _ = f.Close() }()
+
+			var buf bytes.Buffer
+
+			if err := c.EncodeFrameStream(&buf, f, int64(len(src))); err != nil {
+				t.Fatalf("EncodeFrameStream(%s): %v", name, err)
+			}
+
+			if !bytes.Equal(buf.Bytes(), frame) {
+				t.Errorf("%s: EncodeFrameStream(.part) != EncodeFrame(raw): stream_len=%d frame_len=%d",
+					name, buf.Len(), len(frame))
+			}
+		})
+	}
+}
+
+// maxReadTracker records the largest single buffer length any caller ever
+// requested via Read, hiding whatever io.WriterTo/io.ReaderFrom fast path
+// the wrapped reader might otherwise offer io.Copy — so the recorded
+// maximum reflects the actual buffering strategy of the code under test,
+// not an unrelated stdlib optimization.
+type maxReadTracker struct {
+	r       io.Reader
+	maxRead int
+}
+
+func (m *maxReadTracker) Read(p []byte) (int, error) {
+	if len(p) > m.maxRead {
+		m.maxRead = len(p)
+	}
+
+	// io.EOF must pass through unwrapped and unaltered: io.Copy's loop
+	// compares it with == io.EOF, not errors.Is, so wrapping it here would
+	// turn a normal end-of-stream signal into a hard read error.
+	return m.r.Read(p)
+}
+
+// plainWriter exposes only io.Writer, hiding any io.ReaderFrom the wrapped
+// writer might implement (e.g. *bytes.Buffer), so io.Copy cannot bypass its
+// default fixed-size buffer copy loop when writing into it.
+type plainWriter struct {
+	w io.Writer
+}
+
+func (p *plainWriter) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	if err != nil {
+		return n, fmt.Errorf("plain write: %w", err)
+	}
+
+	return n, nil
+}
+
+// TestCodec_EncodeFrameStream_MemoryBound proves the actual buffering
+// behavior behind the EncodeFrameStream contract, per the "verified
+// empirically, not from a doc comment" code-style rule: none/gzip/lz4 must
+// never request a single Read() anywhere near the full chunk size (they
+// stream through their own small internal buffer), while zstd is expected
+// to request exactly the full size in one call — the documented, bounded
+// fallback (see zstd.go).
+func TestCodec_EncodeFrameStream_MemoryBound(t *testing.T) {
+	t.Helper()
+
+	const size = 64 * 1024 * 1024 // dwarfs any codec's own internal buffer
+	// smallBufferCeiling sits above lz4's default 4 MiB block size (the
+	// largest internal buffer among the streaming codecs) yet far below
+	// size and the package's 16 MiB chunk-size floor, so it cleanly
+	// separates "streams through its own buffer" from "read the whole
+	// chunk".
+	const smallBufferCeiling = 8 * 1024 * 1024
+
+	src := bytes.Repeat([]byte{0xAB}, size)
+
+	cases := []struct {
+		name           string
+		wantFullBuffer bool
+	}{
+		{"none", false},
+		{"gzip", false},
+		{"lz4", false},
+		{"zstd", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := compress.New(tc.name, 0)
+			if err != nil {
+				t.Fatalf("New(%s): %v", tc.name, err)
+			}
+
+			tracker := &maxReadTracker{r: bytes.NewReader(src)}
+
+			var buf bytes.Buffer
+
+			if err := c.EncodeFrameStream(&plainWriter{&buf}, tracker, size); err != nil {
+				t.Fatalf("EncodeFrameStream(%s): %v", tc.name, err)
+			}
+
+			gotFullBuffer := tracker.maxRead >= smallBufferCeiling
+			if gotFullBuffer != tc.wantFullBuffer {
+				t.Errorf("%s: max single Read() request was %d bytes (full-buffer=%v); want full-buffer=%v",
+					tc.name, tracker.maxRead, gotFullBuffer, tc.wantFullBuffer)
+			}
+		})
 	}
 }
