@@ -482,11 +482,18 @@ func fetchChunkRaw(
 
 // ScanBlockChunkProgress computes durably-committed raw bytes and the raw
 // total byte size recorded for chunkDir's on-disk geometry, purely from local
-// state — no network call. It mirrors downloadChunk/fetchChunkRaw's own
-// chunk-boundary formula exactly: each already-final chunk contributes its
-// full raw length, and a still-open chunk contributes its TRUSTED ".part"
-// prefix (see partialChunkSize — the offset proven durable by an fsync,
-// capped at that chunk's raw length; never the raw file size alone).
+// state — no network call, and NO filesystem mutation: it is a pure
+// observation used to seed a progress display before any transfer starts. It
+// mirrors downloadChunk/fetchChunkRaw's own chunk-boundary formula exactly:
+// each already-final chunk contributes its full raw length, and a still-open
+// chunk contributes its TRUSTED ".part" prefix (see partialChunkSizeReadOnly
+// — the offset proven durable by an fsync, capped at that chunk's raw
+// length; never the raw file size alone). Unlike the download path's
+// partialChunkSize, an oversized ".part" is left untouched on disk here —
+// the file gets treated as contributing only its trusted (safe) prefix, not
+// removed or truncated; that cleanup remains the download path's job (see
+// partialChunkSize, used by fetchChunkRaw), which is the only place actually
+// about to act on the chunk's geometry.
 //
 // It returns (0, 0, nil) when chunkDir carries no trustworthy geometry yet
 // (chunks.meta missing or corrupt) — the same case ensureChunkGeometry treats
@@ -498,8 +505,11 @@ func fetchChunkRaw(
 // cancels the seed back out (progress.Stream.SetCurrent(0)) immediately
 // before calling DownloadBlockChunks, so downloadChunk/fetchChunkRaw's own
 // resume-skip crediting re-derives and re-credits the identical bytes without
-// double counting. Because nothing mutates chunkDir between the two calls (no
-// worker has started yet), the two computations always agree exactly.
+// double counting. Because this scan never mutates chunkDir between the two
+// calls (no worker has started yet), the two computations always agree
+// exactly for the normal (already-trusted) case; the only divergence is the
+// one this task fixes — an oversized ".part" no longer disappears out from
+// under a display-only scan.
 func ScanBlockChunkProgress(chunkDir, ext string) (int64, int64, error) {
 	meta, found, err := archive.ReadChunkMeta(chunkDir)
 	if err != nil && !errors.Is(err, archive.ErrCorruptChunkMeta) {
@@ -525,7 +535,7 @@ func ScanBlockChunkProgress(chunkDir, ext string) (int64, int64, error) {
 			continue
 		}
 
-		partial, partErr := partialChunkSize(finalPath+partSuffix, rawLen)
+		partial, partErr := partialChunkSizeReadOnly(finalPath+partSuffix, rawLen)
 		if partErr != nil {
 			return 0, 0, fmt.Errorf("stat partial chunk %d in %s: %w", idx, chunkDir, partErr)
 		}
@@ -539,7 +549,10 @@ func ScanBlockChunkProgress(chunkDir, ext string) (int64, int64, error) {
 // partialChunkSize returns the number of bytes at the START of the durable
 // partial file at partPath that are safe to resume from — 0 if partPath does
 // not exist — truncating partPath in place to that trusted prefix whenever
-// the file on disk physically holds more.
+// the file on disk physically holds more. It is the download path's variant
+// (used by fetchChunkRaw, which is about to act on the chunk's geometry by
+// appending to it): see partialChunkSizeReadOnly for the side-effect-free
+// variant used by display-only progress scans.
 //
 // The raw file SIZE alone is not sufficient to trust. syncingWriter fsyncs
 // partPath only every partSyncInterval bytes (plus once more, unconditionally,
@@ -568,21 +581,11 @@ func ScanBlockChunkProgress(chunkDir, ext string) (int64, int64, error) {
 // already documents for a graceful interruption, now also holding across a
 // hard kill.
 func partialChunkSize(partPath string, rawLen int64) (int64, error) {
-	info, err := os.Stat(partPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-
-		return 0, fmt.Errorf("stat %s: %w", partPath, err)
+	trusted, info, err := trustedPartPrefix(partPath, rawLen)
+	if err != nil || info == nil {
+		return trusted, err
 	}
 
-	durable, err := readDurablePartOffset(partPath)
-	if err != nil {
-		return 0, fmt.Errorf("read durable offset for %s: %w", partPath, err)
-	}
-
-	trusted := min(durable, info.Size(), rawLen)
 	if info.Size() == trusted {
 		return trusted, nil
 	}
@@ -592,6 +595,50 @@ func partialChunkSize(partPath string, rawLen int64) (int64, error) {
 	}
 
 	return trusted, nil
+}
+
+// partialChunkSizeReadOnly returns the same TRUSTED prefix length as
+// partialChunkSize (see its doc for the full durability rationale) but never
+// mutates partPath: a ".part" file whose on-disk size exceeds the trusted
+// offset is left exactly as it is on disk, and only the trusted (safe)
+// portion is reported as committed for display purposes.
+//
+// Callers that only OBSERVE resume progress before any transfer starts
+// (ScanBlockChunkProgress, and transitively ScanFSStagingProgress) MUST use
+// this variant, never partialChunkSize: a scan used purely to seed a
+// progress display must be side-effect-free, and discarding a stale/oversized
+// partial is a decision that belongs to the actual download path
+// (ensureChunkGeometry / fetchChunkRaw via partialChunkSize), which is about
+// to act on the chunk's geometry anyway.
+func partialChunkSizeReadOnly(partPath string, rawLen int64) (int64, error) {
+	trusted, _, err := trustedPartPrefix(partPath, rawLen)
+	return trusted, err
+}
+
+// trustedPartPrefix is the shared, side-effect-free computation behind both
+// partialChunkSize and partialChunkSizeReadOnly: it stats partPath and its
+// durable-offset sidecar and returns the resulting TRUSTED prefix length
+// (min(durable offset, on-disk size, rawLen)), together with the os.FileInfo
+// it stat'd so a mutating caller can compare it against the trusted value
+// without a second stat. It returns (0, nil, nil) when partPath does not
+// exist yet. It never itself truncates or removes anything — see
+// partialChunkSize for the caller that does.
+func trustedPartPrefix(partPath string, rawLen int64) (int64, os.FileInfo, error) {
+	info, err := os.Stat(partPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil, nil
+		}
+
+		return 0, nil, fmt.Errorf("stat %s: %w", partPath, err)
+	}
+
+	durable, err := readDurablePartOffset(partPath)
+	if err != nil {
+		return 0, nil, fmt.Errorf("read durable offset for %s: %w", partPath, err)
+	}
+
+	return min(durable, info.Size(), rawLen), info, nil
 }
 
 // partOffsetPath returns the durable-offset sidecar path for partPath (see

@@ -994,6 +994,114 @@ func TestDownloadBlockChunks_PartialSurvivesResumeScan(t *testing.T) {
 	assert.NoError(t, statErr, "durable partial must survive ScanNode's stale-tmp cleanup")
 }
 
+// TestScanBlockChunkProgress_OversizedPartLeftOnDisk is the regression test
+// for scan-block-progress-read-only: a resume-progress display scan
+// (ScanBlockChunkProgress) must never mutate the archive it only observes.
+// Before the fix, ScanBlockChunkProgress delegated to the download path's
+// mutating partialChunkSize, which truncates any ".part" file whose on-disk
+// size exceeds its chunk's raw length -- silently discarding bytes purely
+// because a progress bar was about to be drawn, before any transfer was even
+// considered.
+func TestScanBlockChunkProgress_OversizedPartLeftOnDisk(t *testing.T) {
+	t.Parallel()
+
+	chunkDir := t.TempDir()
+
+	const chunkSize = 20
+	const totalSize = 20 // single chunk, so rawLen == totalSize == chunkSize
+
+	require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize}))
+
+	partPath := filepath.Join(chunkDir, archive.ChunkFileName(0, ".zst")+".part")
+	oversized := bytes.Repeat([]byte("X"), chunkSize+10) // 10 bytes past rawLen; no durable-offset sidecar
+	require.NoError(t, os.WriteFile(partPath, oversized, 0o644))
+
+	committed, total, err := volume.ScanBlockChunkProgress(chunkDir, ".zst")
+	require.NoError(t, err)
+	assert.Equal(t, int64(totalSize), total)
+	assert.Zero(t, committed, "an untrusted (no durable-offset sidecar) oversized part must not be credited")
+
+	info, statErr := os.Stat(partPath)
+	require.NoError(t, statErr, "the oversized .part file must survive a read-only progress scan untouched")
+	assert.EqualValues(t, len(oversized), info.Size(), "a display-only scan must not truncate the file it only observes")
+}
+
+// TestScanBlockChunkProgress_NormalPartialAccountingUnchanged pins that the
+// ordinary (size<=rawLen, durably-offset-backed) partial-chunk accounting
+// path stayed numerically identical across the read-only split: a
+// chunkDir with one already-finalized chunk and one still-open, durably
+// trusted partial must report exactly the finalized chunk's full raw length
+// plus the partial's trusted prefix.
+func TestScanBlockChunkProgress_NormalPartialAccountingUnchanged(t *testing.T) {
+	t.Parallel()
+
+	chunkDir := t.TempDir()
+
+	const chunkSize = 10
+	const totalSize = 18 // two chunks: [0,10) and [10,18)
+
+	require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize}))
+
+	finalPath0 := filepath.Join(chunkDir, archive.ChunkFileName(0, ".zst"))
+	require.NoError(t, os.WriteFile(finalPath0, []byte("finalized-chunk-frame"), 0o644))
+
+	const durableOffset1 = 5
+
+	partPath1 := filepath.Join(chunkDir, archive.ChunkFileName(1, ".zst")+".part")
+	require.NoError(t, os.WriteFile(partPath1, []byte("HELLO"), 0o644)) // 5 bytes, matches durable offset exactly
+	require.NoError(t, os.WriteFile(partPath1+".offset", []byte(fmt.Sprintf("%d", durableOffset1)), 0o644))
+
+	committed, total, err := volume.ScanBlockChunkProgress(chunkDir, ".zst")
+	require.NoError(t, err)
+	assert.Equal(t, int64(totalSize), total)
+	assert.Equal(t, int64(chunkSize+durableOffset1), committed, "chunk 0's full raw length plus chunk 1's trusted partial")
+
+	info, statErr := os.Stat(partPath1)
+	require.NoError(t, statErr)
+	assert.EqualValues(t, durableOffset1, info.Size(), "a trusted, already-within-bounds partial must not be touched by the scan either")
+}
+
+// TestDownloadBlockChunks_OversizedPartStillHandledOnDownloadPath proves the
+// download path's own oversized-".part" handling (fetchChunkRaw via the
+// mutating partialChunkSize) is unchanged by the read-only scan split: the
+// exact on-disk fixture that ScanBlockChunkProgress must leave untouched
+// (see TestScanBlockChunkProgress_OversizedPartLeftOnDisk) is still safely
+// discarded and re-fetched from scratch when a REAL download runs.
+func TestDownloadBlockChunks_OversizedPartStillHandledOnDownloadPath(t *testing.T) {
+	t.Parallel()
+
+	srv := newBlockServer(t, blockPayload)
+	defer srv.Close()
+
+	blockURL := srv.URL + "/api/v1/block"
+	fetcher := exporter.NewFetcher(srv.Client())
+
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
+	require.NoError(t, err)
+
+	nodeDir := t.TempDir()
+	totalSize := int64(len(blockPayload))
+	chunkSize := totalSize // one chunk, so the whole scenario is unambiguous
+
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	require.NoError(t, archive.EnsureDir(chunkDir))
+	require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize}))
+
+	partPath := filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".part")
+	oversized := append(append([]byte{}, blockPayload...), []byte("EXTRA-STALE-TAIL")...)
+	require.NoError(t, os.WriteFile(partPath, oversized, 0o644))
+	// Deliberately no durable-offset sidecar: nothing is trusted, so the
+	// download path must discard the whole stale part and re-fetch it.
+
+	err = volume.DownloadBlockChunks(
+		context.Background(), slog.Default(), chunkDir, blockURL, totalSize, chunkSize, 1, fetcher, codec, nil)
+	require.NoError(t, err)
+
+	finalPath := filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext()))
+	decoded := decodeAll(t, finalPath)
+	assert.Equal(t, blockPayload, decoded, "download path must still discard the untrusted oversized part and produce a correct chunk")
+}
+
 // overservingBody wraps a genuine, correctly-ranged response body and, once
 // the wrapped reader reaches a clean EOF, keeps yielding extra bytes instead
 // of stopping — simulating a misbehaving server or proxy that over-sends
