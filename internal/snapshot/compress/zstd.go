@@ -83,6 +83,42 @@ func (e *Encoder) EncodeFrame(src []byte) ([]byte, error) {
 	return e.enc.EncodeAll(src, nil), nil
 }
 
+// EncodeFrameStream reads exactly size bytes from src and delegates to
+// EncodeFrame. zstd's public streaming Write/Close API does NOT reproduce
+// EncodeAll's output byte-for-byte once the input exceeds one zstd block
+// (128 KiB, the format's own hard maximum): EncodeAll's multi-block path and
+// the streaming writer's multi-block path track repeat-offset match history
+// differently internally, so the encoded bytes diverge even for identical
+// input and identical encoder options — proven empirically in
+// codec_test.go, including with a real *os.File source and the encoder's
+// own content-size reset. Since every chunk this package ever encodes is at
+// least 16 MiB (see volume.DefaultChunkSize and the CLI's --chunk-size
+// floor), the "fits in one 128 KiB block" fast path (which IS byte-for-byte
+// identical to EncodeAll, being the same code path) never applies here.
+//
+// This is the "codec genuinely cannot stream-encode to an identical frame"
+// case documented on the Codec.EncodeFrameStream contract: peak memory for
+// this call is bounded by size, not by a fixed streaming window, so callers
+// MUST keep an upper bound on size (see the CLI's --chunk-size maximum).
+func (z *zstdCodec) EncodeFrameStream(dst io.Writer, src io.Reader, size int64) error {
+	raw := make([]byte, size)
+
+	if _, err := io.ReadFull(src, raw); err != nil {
+		return fmt.Errorf("zstd: read %d bytes for frame: %w", size, err)
+	}
+
+	frame, err := z.EncodeFrame(raw)
+	if err != nil {
+		return err
+	}
+
+	if _, err := dst.Write(frame); err != nil {
+		return fmt.Errorf("zstd: write frame: %w", err)
+	}
+
+	return nil
+}
+
 // zstdCodec wraps Encoder to implement the Codec interface.
 type zstdCodec struct {
 	enc *Encoder

@@ -55,6 +55,16 @@ func (l *lz4Codec) EncodeStream(dst io.Writer, src io.Reader) error {
 	return w.Close()
 }
 
+// EncodeFrameStream is byte-identical to EncodeFrame(rawBytes) for the bytes
+// src yields (verified in codec_test.go): the LZ4 frame writer's output
+// depends only on the input bytes, not on how they are split across Write
+// calls, so streaming src straight into it already reproduces EncodeFrame's
+// output exactly, bounded by the writer's own internal block buffer instead
+// of the whole chunk. size is unused.
+func (l *lz4Codec) EncodeFrameStream(dst io.Writer, src io.Reader, _ int64) error {
+	return l.EncodeStream(dst, src)
+}
+
 // EncodeFrame compresses src into one complete LZ4 frame.
 func (l *lz4Codec) EncodeFrame(src []byte) ([]byte, error) {
 	var buf bytes.Buffer

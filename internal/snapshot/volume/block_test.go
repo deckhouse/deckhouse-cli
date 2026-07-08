@@ -1318,3 +1318,160 @@ func TestDownloadBlockChunks_PartSizeMatchesDurableOffset_ResumesWithoutTruncati
 
 	assert.Equal(t, controlFrame, resumedFrame, "a resumed frame must be byte-identical to a from-scratch download's frame")
 }
+
+// trackingReader records the largest single buffer length any caller ever
+// requested via Read, mirroring compress package's own maxReadTracker test
+// helper (see codec_test.go) — used here to prove, at the downloadChunk
+// integration level, that finalize never asks its codec's stream for a
+// buffer anywhere near the whole chunk size.
+type trackingReader struct {
+	r       io.Reader
+	maxRead int
+}
+
+func (t *trackingReader) Read(p []byte) (int, error) {
+	if len(p) > t.maxRead {
+		t.maxRead = len(p)
+	}
+
+	// io.EOF must pass through unwrapped: io.Copy's loop compares it with
+	// == io.EOF, not errors.Is.
+	return t.r.Read(p)
+}
+
+// recordingCodec wraps a real compress.Codec and records whether the
+// whole-buffer EncodeFrame was ever invoked, plus the largest single Read()
+// request its EncodeFrameStream's src reader ever received — the two facts
+// this task's finalize rewrite must establish for a genuinely-streaming
+// codec: EncodeFrame is never called, and the .part file is never read in
+// one whole-chunk gulp.
+type recordingCodec struct {
+	compress.Codec
+	encodeFrameCalled bool
+	maxRead           int
+}
+
+func (r *recordingCodec) EncodeFrame(src []byte) ([]byte, error) {
+	r.encodeFrameCalled = true
+
+	frame, err := r.Codec.EncodeFrame(src)
+	if err != nil {
+		return frame, fmt.Errorf("recording codec encode frame: %w", err)
+	}
+
+	return frame, nil
+}
+
+func (r *recordingCodec) EncodeFrameStream(dst io.Writer, src io.Reader, size int64) error {
+	tracker := &trackingReader{r: src}
+
+	err := r.Codec.EncodeFrameStream(dst, tracker, size)
+	if tracker.maxRead > r.maxRead {
+		r.maxRead = tracker.maxRead
+	}
+
+	if err != nil {
+		return fmt.Errorf("recording codec encode frame stream: %w", err)
+	}
+
+	return nil
+}
+
+// TestDownloadBlockChunks_FinalizeStreamsFromPartFile is the regression test
+// for this task: finalizing a large chunk must never call the whole-buffer
+// EncodeFrame, and must never request the whole chunk from the durable
+// ".part" file in a single Read — proving the C2 memory gap (os.ReadFile
+// the whole chunk at finalize) is actually closed, not just that the output
+// still happens to be correct.
+func TestDownloadBlockChunks_FinalizeStreamsFromPartFile(t *testing.T) {
+	t.Parallel()
+
+	const chunkSize = 32 * 1024 * 1024 // large enough that a whole-buffer read is unmistakable
+
+	pattern := []byte("stream-from-part regression payload. ")
+	payload := bytes.Repeat(pattern, chunkSize/len(pattern)+2)
+	payload = payload[:chunkSize]
+
+	srv := newBlockServer(t, payload)
+	defer srv.Close()
+
+	inner, err := compress.New("none", 0)
+	require.NoError(t, err)
+
+	codec := &recordingCodec{Codec: inner}
+
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+	err = volume.DownloadBlockChunks(
+		context.Background(), slog.Default(), chunkDir, srv.URL+"/api/v1/block",
+		int64(len(payload)), chunkSize, 1, exporter.NewFetcher(srv.Client()), codec, nil)
+	require.NoError(t, err)
+
+	assert.False(t, codec.encodeFrameCalled, "finalize must not call the whole-buffer EncodeFrame")
+
+	const smallBufferCeiling = 1 << 20 // 1 MiB: far below chunkSize, well above any real internal copy buffer
+	assert.Less(t, codec.maxRead, smallBufferCeiling,
+		"finalize must not request the whole chunk from the .part file in a single Read")
+
+	finalPath := filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext()))
+	got, err := os.ReadFile(finalPath)
+	require.NoError(t, err)
+	assert.Equal(t, payload, got, "finalized chunk content mismatch")
+}
+
+// TestDownloadBlockChunks_StreamedFrameMatchesEncodeFrameReference is the
+// end-to-end byte-identity proof the task's acceptance criteria demand: for
+// every registered codec, a multi-chunk download finalized via the new
+// streaming path — then merged with MergeBlockChunks — must produce exactly
+// the bytes a whole-buffer EncodeFrame-per-chunk reference would, including
+// the ragged last chunk.
+func TestDownloadBlockChunks_StreamedFrameMatchesEncodeFrameReference(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range compress.Names() {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			codec, err := compress.New(name, 0)
+			require.NoError(t, err)
+
+			const chunkSize = 10 // blockPayload is 25 bytes: chunks of 10, 10, 5
+
+			srv := newBlockServer(t, blockPayload)
+			defer srv.Close()
+
+			nodeDir := t.TempDir()
+			chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+			err = volume.DownloadBlockChunks(
+				context.Background(), slog.Default(), chunkDir, srv.URL+"/api/v1/block",
+				int64(len(blockPayload)), chunkSize, 2, exporter.NewFetcher(srv.Client()), codec, nil)
+			require.NoError(t, err)
+
+			numChunks := (len(blockPayload) + chunkSize - 1) / chunkSize
+
+			var want []byte
+
+			for i := range numChunks {
+				start := i * chunkSize
+				end := min(start+chunkSize, len(blockPayload))
+
+				frame, encErr := codec.EncodeFrame(blockPayload[start:end])
+				require.NoError(t, encErr)
+
+				want = append(want, frame...)
+			}
+
+			outPath := filepath.Join(nodeDir, "data.bin"+codec.Ext())
+			require.NoError(t, volume.MergeBlockChunks(
+				context.Background(), chunkDir, outPath, int64(len(blockPayload)), chunkSize, codec.Ext()))
+
+			got, err := os.ReadFile(outPath)
+			require.NoError(t, err)
+
+			assert.Equal(t, want, got,
+				"%s: streamed-finalize merged output must match whole-buffer EncodeFrame reference byte-for-byte", name)
+		})
+	}
+}

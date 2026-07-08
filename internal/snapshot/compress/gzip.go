@@ -58,6 +58,16 @@ func (g *gzipCodec) EncodeStream(dst io.Writer, src io.Reader) error {
 	return w.Close()
 }
 
+// EncodeFrameStream is byte-identical to EncodeFrame(rawBytes) for the bytes
+// src yields (verified in codec_test.go): gzip's compressed output depends
+// only on the input bytes, not on how they are split across Write calls, so
+// streaming src straight into the gzip writer already reproduces
+// EncodeFrame's output exactly, bounded by gzip's own internal buffer
+// instead of the whole chunk. size is unused.
+func (g *gzipCodec) EncodeFrameStream(dst io.Writer, src io.Reader, _ int64) error {
+	return g.EncodeStream(dst, src)
+}
+
 // EncodeFrame compresses src into one complete gzip stream.
 func (g *gzipCodec) EncodeFrame(src []byte) ([]byte, error) {
 	var buf bytes.Buffer

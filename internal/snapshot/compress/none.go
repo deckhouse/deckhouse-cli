@@ -45,3 +45,10 @@ func (noneCodec) EncodeStream(dst io.Writer, src io.Reader) error {
 
 	return nil
 }
+
+// EncodeFrameStream is byte-identical to EncodeStream: a raw passthrough has
+// no frame structure to reproduce, so streaming src straight to dst already
+// matches EncodeFrame(rawBytes) exactly. size is unused.
+func (n noneCodec) EncodeFrameStream(dst io.Writer, src io.Reader, _ int64) error {
+	return n.EncodeStream(dst, src)
+}
