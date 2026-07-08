@@ -71,8 +71,10 @@ const (
 	snapshotClientBurst int     = 100
 )
 
-// NewCommand builds the `d8 snapshot download` cobra command.
-func NewCommand(log *slog.Logger) *cobra.Command {
+// NewCommand builds the `d8 snapshot download` cobra command. Per the code-style
+// §4 Cobra pattern the CALLER owns the root context: it is threaded in here and
+// captured by the thin RunE below, rather than recovered from cmd.Context().
+func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           cmdUse + " [flags] <snapshot>",
 		Short:         "Download a snapshot to a local directory tree",
@@ -101,7 +103,7 @@ func NewCommand(log *slog.Logger) *cobra.Command {
   # (codec=none writes plain uncompressed entries)`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return Run(log, cmd, args)
+			return Run(ctx, log, cmd, args)
 		},
 	}
 
@@ -125,15 +127,11 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 }
 
 // Run validates flags, builds the pipeline config, and executes the download.
-// It derives a signal-cancellable context from cmd.Context() so that Ctrl-C
-// (SIGINT) and SIGTERM cleanly stop the download.
-func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
-	parentCtx := cmd.Context()
-	if parentCtx == nil {
-		parentCtx = context.Background()
-	}
-
-	ctx, cancel := signal.NotifyContext(parentCtx, os.Interrupt, syscall.SIGTERM)
+// It derives a signal-cancellable context from the caller-owned ctx (threaded in
+// via NewCommand, per code-style §4) so that Ctrl-C (SIGINT) and SIGTERM cleanly
+// stop the download.
+func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	namespace, err := cmd.Flags().GetString(flagNamespace)

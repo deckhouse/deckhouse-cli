@@ -149,7 +149,7 @@ func TestNewCommand_Defaults(t *testing.T) {
 	t.Helper()
 
 	log := slog.Default()
-	cmd := NewCommand(log)
+	cmd := NewCommand(context.Background(), log)
 
 	wantUse := cmdUse + " [flags] <snapshot>"
 	if cmd.Use != wantUse {
@@ -206,7 +206,7 @@ func TestNewCommand_NamespaceFlagDefault(t *testing.T) {
 	t.Helper()
 
 	log := slog.Default()
-	cmd := NewCommand(log)
+	cmd := NewCommand(context.Background(), log)
 
 	ns, err := cmd.Flags().GetString(flagNamespace)
 	if err != nil {
@@ -221,9 +221,9 @@ func TestNewCommand_NamespaceFlagDefault(t *testing.T) {
 func TestRun_RequiresNamespace(t *testing.T) {
 	t.Helper()
 
-	cmd := NewCommand(slog.Default())
+	cmd := NewCommand(context.Background(), slog.Default())
 
-	err := Run(slog.Default(), cmd, []string{"my-snap"})
+	err := Run(context.Background(), slog.Default(), cmd, []string{"my-snap"})
 	if err == nil {
 		t.Fatal("expected error when namespace is empty, got nil")
 	}
@@ -237,7 +237,7 @@ func TestNewCommand_RequiresOneArg(t *testing.T) {
 	t.Helper()
 
 	log := slog.Default()
-	cmd := NewCommand(log)
+	cmd := NewCommand(context.Background(), log)
 
 	// Zero args: must error.
 	if err := cmd.Args(cmd, []string{}); err == nil {
@@ -258,7 +258,7 @@ func TestNewCommand_RequiresOneArg(t *testing.T) {
 func TestNewCommand_CompressionFlagDefaults(t *testing.T) {
 	t.Helper()
 
-	cmd := NewCommand(slog.Default())
+	cmd := NewCommand(context.Background(), slog.Default())
 
 	codec, err := cmd.Flags().GetString(flagVolumeCompression)
 	if err != nil {
@@ -364,7 +364,7 @@ func TestParseNodeFlag(t *testing.T) {
 func TestNewCommand_NodeFlagDefault(t *testing.T) {
 	t.Helper()
 
-	cmd := NewCommand(slog.Default())
+	cmd := NewCommand(context.Background(), slog.Default())
 
 	node, err := cmd.Flags().GetString(flagNode)
 	if err != nil {
@@ -379,7 +379,7 @@ func TestNewCommand_NodeFlagDefault(t *testing.T) {
 func TestRun_NodeFlag_InvalidFormat(t *testing.T) {
 	t.Helper()
 
-	cmd := NewCommand(slog.Default())
+	cmd := NewCommand(context.Background(), slog.Default())
 
 	if err := cmd.Flags().Set(flagNamespace, "test-ns"); err != nil {
 		t.Fatalf("setting namespace flag: %v", err)
@@ -393,7 +393,7 @@ func TestRun_NodeFlag_InvalidFormat(t *testing.T) {
 		t.Fatalf("setting node flag: %v", err)
 	}
 
-	err := Run(slog.Default(), cmd, []string{"my-snap"})
+	err := Run(context.Background(), slog.Default(), cmd, []string{"my-snap"})
 	if err == nil {
 		t.Fatal("expected error for invalid --node flag, got nil")
 	}
@@ -477,10 +477,12 @@ func TestAcquireOutputLock_StaleLockFileIsHarmless(t *testing.T) {
 
 // TestRun_ReleasesLockOnCancelledContext verifies the lock acquired near the
 // top of Run is released via defer even when the caller's context is already
-// cancelled by the time Run returns. It forces an early, ctx-independent
-// error path (an invalid --node flag, validated before any cluster client is
-// built) so the test stays deterministic and network-free while still
-// exercising Run with a cancelled context end to end.
+// cancelled by the time Run returns. The cancelled ctx is threaded in through
+// the Run parameter (Run derives its signal context from that parameter, not
+// from cmd.Context()). It forces an early, ctx-independent error path (an
+// invalid --node flag, validated before any cluster client is built) so the
+// test stays deterministic and network-free while still exercising Run with a
+// cancelled context end to end.
 func TestRun_ReleasesLockOnCancelledContext(t *testing.T) {
 	t.Helper()
 
@@ -489,8 +491,7 @@ func TestRun_ReleasesLockOnCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	cmd := NewCommand(slog.Default())
-	cmd.SetContext(ctx)
+	cmd := NewCommand(context.Background(), slog.Default())
 
 	if err := cmd.Flags().Set(flagNamespace, "test-ns"); err != nil {
 		t.Fatalf("setting namespace flag: %v", err)
@@ -504,7 +505,7 @@ func TestRun_ReleasesLockOnCancelledContext(t *testing.T) {
 		t.Fatalf("setting node flag: %v", err)
 	}
 
-	if err := Run(slog.Default(), cmd, []string{"my-snap"}); err == nil {
+	if err := Run(ctx, slog.Default(), cmd, []string{"my-snap"}); err == nil {
 		t.Fatal("expected error from invalid --node flag, got nil")
 	}
 
@@ -516,4 +517,41 @@ func TestRun_ReleasesLockOnCancelledContext(t *testing.T) {
 	}
 
 	defer func() { _ = fl.Unlock() }()
+}
+
+// TestRun_CancelsOnCancelledParentCtx pins the new §4 contract: Run roots its
+// signal-cancellable context in the ctx PARAMETER (the caller-owned root
+// context threaded through NewCommand), not in cmd.Context(). Here the command
+// carries NO context of its own (cmd.Context() is nil, which under the old
+// code would have fallen back to context.Background()); Run must instead use
+// the already-cancelled parent ctx passed as its first argument. The flow is
+// steered to a deterministic, ctx-independent early error (invalid --node)
+// validated before any cluster client is built, so the test proves Run accepts
+// and threads a cancelled parent ctx and returns promptly without hanging or
+// relying on cmd.Context().
+func TestRun_CancelsOnCancelledParentCtx(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cmd := NewCommand(context.Background(), slog.Default())
+
+	if err := cmd.Flags().Set(flagNamespace, "test-ns"); err != nil {
+		t.Fatalf("setting namespace flag: %v", err)
+	}
+
+	if err := cmd.Flags().Set(flagOutput, dir); err != nil {
+		t.Fatalf("setting output flag: %v", err)
+	}
+
+	if err := cmd.Flags().Set(flagNode, "NoSlashHere"); err != nil {
+		t.Fatalf("setting node flag: %v", err)
+	}
+
+	if err := Run(ctx, slog.Default(), cmd, []string{"my-snap"}); err == nil {
+		t.Fatal("expected error when running with a cancelled parent ctx, got nil")
+	}
 }
