@@ -17,8 +17,12 @@ limitations under the License.
 package volume
 
 import (
+	"bufio"
 	"context"
+	"crypto/md5" //nolint:gosec // not used for security; matches the exporter's own hash.md5 attribute
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -27,14 +31,24 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
+	kgzip "github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/zstd"
+	"github.com/pierrec/lz4/v4"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 )
+
+// ErrSourceHashMismatch is returned when a staged filesystem file's raw (decompressed)
+// bytes do not match the MD5 digest the data-exporter reported for the source file,
+// indicating wire-level corruption, a torn resume append, or a source/CLI disagreement
+// that the local, self-referential archive.VerifyNode checksum cannot detect on its own.
+var ErrSourceHashMismatch = errors.New("staged file does not match source-provided MD5 digest")
 
 // countingReader wraps an io.Reader and reports raw bytes read to onProgress
 // incrementally, as the stream is consumed, so a byte-progress bar advances
@@ -66,6 +80,7 @@ type fsItem struct {
 	gid      int
 	mtime    time.Time
 	linkname string // symlink target; non-empty only for itemType == "link"
+	md5      string // exporter-provided hex MD5 of the plaintext; empty if not reported
 }
 
 // DownloadFilesystemVolume downloads all files from the data-exporter filesystem
@@ -222,7 +237,7 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 
 		absURI := base.ResolveReference(ref).String()
 		relPath := relPrefix + item.Name
-		mode, uid, gid, mtime := parseItemAttrs(item.Attributes)
+		mode, uid, gid, mtime, md5Hex := parseItemAttrs(item.Attributes)
 
 		switch item.Type {
 		case "file":
@@ -235,6 +250,7 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 				uid:      uid,
 				gid:      gid,
 				mtime:    mtime,
+				md5:      md5Hex,
 			})
 
 		case "dir":
@@ -355,6 +371,15 @@ func stageCompressedFile(
 // chunks are skipped and their raw length is credited to onProgress by
 // downloadChunk's existing resume-skip path; no progress-crediting logic is
 // duplicated here.
+//
+// MergeBlockChunks only concatenates already-encoded chunk frames — the
+// plaintext never exists as a single blob on disk for a chunked file (each
+// chunk's raw ".part" is discarded once its frame is written) — so the
+// source-provided digest can only be checked once destPath holds the merged,
+// still-compressed artifact: verifyStagedFileMD5 decodes it back to plaintext
+// and compares. On a mismatch destPath is removed so the next run re-fetches
+// and re-verifies from scratch rather than resuming from corrupt output. If
+// item.md5 is empty, verification is skipped with a single WARN.
 func stageChunkedFile(
 	ctx context.Context,
 	log *slog.Logger,
@@ -377,7 +402,109 @@ func stageChunkedFile(
 		return fmt.Errorf("merge chunks for %s: %w", item.relPath, err)
 	}
 
+	if item.md5 == "" {
+		log.Warn("no source MD5 available for file, skipping integrity verification",
+			slog.String("path", item.relPath))
+
+		return nil
+	}
+
+	if err := verifyStagedFileMD5(destPath, codec.Ext(), item.md5); err != nil {
+		if removeErr := os.Remove(destPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			log.Warn("failed to remove corrupt staged file after MD5 mismatch",
+				slog.String("path", destPath),
+				slog.String("error", removeErr.Error()))
+		}
+
+		return fmt.Errorf("verify %s: %w", item.relPath, err)
+	}
+
 	return nil
+}
+
+// verifyStagedFileMD5 decodes the codec-compressed file at destPath (ext is
+// codec.Ext(): "", ".zst", ".gz", or ".lz4") back to its raw plaintext and
+// compares the plaintext's MD5 against wantHex, the exporter-provided source
+// digest. Comparison is case-insensitive since both sides are lowercase hex
+// in practice but neither format is a hard contract.
+func verifyStagedFileMD5(destPath, ext, wantHex string) error {
+	f, err := os.Open(destPath)
+	if err != nil {
+		return fmt.Errorf("open staged file %s: %w", destPath, err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	hasher := md5.New() //nolint:gosec // matches the exporter's own hash.md5 attribute, not a security control
+
+	if err := decodeVolumeStream(hasher, f, ext); err != nil {
+		return fmt.Errorf("decode staged file %s: %w", destPath, err)
+	}
+
+	got := hex.EncodeToString(hasher.Sum(nil))
+	if !strings.EqualFold(got, wantHex) {
+		return fmt.Errorf("got md5 %s, source reports %s: %w", got, wantHex, ErrSourceHashMismatch)
+	}
+
+	return nil
+}
+
+// decodeVolumeStream streams the decompressed bytes of src into dst. ext identifies the
+// codec exactly as codec.Ext() returns it, so it matches the concatenated-frame layout
+// EncodeFrame/DownloadBlockChunks produced: zstd and gzip readers consume concatenated
+// frames natively, but lz4.Reader stops at the end of one frame, so lz4 frames are
+// decoded one at a time over a buffered, peekable source.
+func decodeVolumeStream(dst io.Writer, src io.Reader, ext string) error {
+	switch ext {
+	case ".zst":
+		zr, err := zstd.NewReader(src)
+		if err != nil {
+			return fmt.Errorf("open zstd reader: %w", err)
+		}
+		defer zr.Close()
+
+		_, err = io.Copy(dst, zr)
+
+		return err
+	case ".gz":
+		gr, err := kgzip.NewReader(src)
+		if err != nil {
+			return fmt.Errorf("open gzip reader: %w", err)
+		}
+
+		defer func() { _ = gr.Close() }()
+
+		_, err = io.Copy(dst, gr)
+
+		return err
+	case ".lz4":
+		return decodeLZ4Frames(dst, src)
+	default:
+		_, err := io.Copy(dst, src)
+
+		return err
+	}
+}
+
+// decodeLZ4Frames decodes a concatenation of independent lz4 frames from src into dst.
+// lz4.Reader consumes exactly one frame per call, so a fresh reader is created per frame;
+// a buffered reader lets Peek detect end-of-stream without consuming the next frame's bytes.
+func decodeLZ4Frames(dst io.Writer, src io.Reader) error {
+	br := bufio.NewReader(src)
+
+	for {
+		if _, err := br.Peek(1); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+
+			return fmt.Errorf("peek lz4 source: %w", err)
+		}
+
+		if _, err := io.Copy(dst, lz4.NewReader(br)); err != nil {
+			return fmt.Errorf("decode lz4 frame: %w", err)
+		}
+	}
 }
 
 // stageWholeFile downloads item in a single GET, compresses it with codec, and
@@ -391,6 +518,13 @@ func stageChunkedFile(
 // zero declared bytes anyway. Every item with a known size (item.size > 0)
 // uses stageChunkedFile instead, regardless of its relation to chunkSize, so
 // that a resumable ".part" exists for it even when it is only a single chunk.
+//
+// The raw plaintext streamed off the HTTP body is MD5-summed via an
+// io.TeeReader placed BEFORE codec.EncodeStream, matching the exporter's own
+// prepareAttributesMd5 (which hashes the plaintext file, not its compressed
+// form). If item.md5 is empty (older exporter, or the item genuinely carries
+// no digest) verification is skipped with a single WARN — never a hard
+// failure, to stay compatible with an exporter that does not emit hash.md5.
 func stageWholeFile(
 	ctx context.Context,
 	log *slog.Logger,
@@ -409,17 +543,32 @@ func stageWholeFile(
 
 	defer func() { _ = body.Close() }()
 
+	if item.md5 == "" {
+		log.Warn("no source MD5 available for file, skipping integrity verification",
+			slog.String("path", item.relPath))
+	}
+
 	cr := &countingReader{r: body, onProgress: onProgress}
+	hasher := md5.New() //nolint:gosec // matches the exporter's own hash.md5 attribute, not a security control
+	src := io.TeeReader(cr, hasher)
 
 	aw, err := archive.NewAtomicWriter(destPath)
 	if err != nil {
 		return fmt.Errorf("open atomic writer for %s: %w", destPath, err)
 	}
 
-	if err := codec.EncodeStream(aw, cr); err != nil {
+	if err := codec.EncodeStream(aw, src); err != nil {
 		aw.Abort()
 
 		return fmt.Errorf("stage %s: %w", item.relPath, err)
+	}
+
+	if item.md5 != "" {
+		if got := hex.EncodeToString(hasher.Sum(nil)); !strings.EqualFold(got, item.md5) {
+			aw.Abort()
+
+			return fmt.Errorf("stage %s: got md5 %s, source reports %s: %w", item.relPath, got, item.md5, ErrSourceHashMismatch)
+		}
 	}
 
 	if err := aw.Commit(); err != nil {
@@ -550,21 +699,26 @@ func parseItemSize(attrs map[string]any) int64 {
 
 // parseItemAttrs extracts file metadata from the data-exporter listing attributes map.
 // The real data-exporter (storage-volume-data-manager, images/data-exporter,
-// prepareAttributesStat) emits these keys and types:
+// prepareAttributesStat/prepareAttributesMd5) emits these keys and types:
 //   - "permissions": octal string via fmt.Sprintf("%#o", perm), e.g. "0644"
 //   - "modtime":     RFC3339 string (time.RFC3339)
 //   - "uid", "gid": JSON numbers (decoded as float64 by encoding/json)
 //   - "size":        JSON number (files only; consumed via parseItemSize)
-//   - "hash.md5":    optional hex string; not consumed here
+//   - "hash.md5":    hex string, present only for regular files and only when the
+//     listing request carries attribute=hash.md5 (see exporter.ListDir)
 //
 // Missing or unrecognised attribute values produce zero values; sensible defaults
-// are applied by WriteTar: 0644 for files, 0755 for dirs, 0777 for links.
-func parseItemAttrs(attrs map[string]any) (fs.FileMode, int, int, time.Time) {
+// are applied by WriteTar: 0644 for files, 0755 for dirs, 0777 for links. The returned
+// md5 is the empty string when the exporter reported no digest for this item
+// (directories/links, or an older exporter that never emits hash.md5).
+func parseItemAttrs(attrs map[string]any) (fs.FileMode, int, int, time.Time, string) {
 	var mode fs.FileMode
 
 	var uid, gid int
 
 	var mtime time.Time
+
+	var md5Hex string
 
 	// "permissions" is an octal string, e.g. "0644". Accept float64 as a
 	// forward-compat fallback for hypothetical future numeric encoding.
@@ -606,5 +760,11 @@ func parseItemAttrs(attrs map[string]any) (fs.FileMode, int, int, time.Time) {
 		}
 	}
 
-	return mode, uid, gid, mtime
+	if v, ok := attrs["hash.md5"]; ok {
+		if s, ok := v.(string); ok {
+			md5Hex = s
+		}
+	}
+
+	return mode, uid, gid, mtime, md5Hex
 }

@@ -125,11 +125,18 @@ type Item struct {
 	Attributes map[string]any `json:"attributes"`
 }
 
-// ListDir GETs filesURL (which must end with a trailing slash for directory semantics) and
-// returns the stream-decoded list of directory entries. The body is consumed and closed
-// before returning.
+// ListDir GETs filesURL (which must end with a trailing slash for directory semantics),
+// requesting the "stat" and "hash.md5" attributes so each file item's Attributes map
+// carries a source-provided digest for downstream integrity verification, and returns
+// the stream-decoded list of directory entries. The body is consumed and closed before
+// returning.
 func (f *Fetcher) ListDir(ctx context.Context, filesURL string) ([]Item, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, filesURL, nil)
+	reqURL, err := withAttributes(filesURL, "stat", "hash.md5")
+	if err != nil {
+		return nil, fmt.Errorf("build listing URL for %s: %w", filesURL, err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build GET request: %w", err)
 	}
@@ -172,6 +179,29 @@ func (f *Fetcher) GetFile(ctx context.Context, fileURL string) (io.ReadCloser, e
 	}
 
 	return resp.Body, nil
+}
+
+// withAttributes appends one "attribute" query parameter per entry in attrs to rawURL.
+// The data-exporter filesystem endpoint only includes an attribute in the response
+// (X-Attribute-* headers for a single file, or the listing item's Attributes map for a
+// directory) when the request explicitly asks for it via ?attribute=<name>, repeated
+// once per requested attribute (storage-volume-data-manager's
+// export_filesystem/handler.go getRequestedAttributes); "stat" is otherwise harmless to
+// request since the server already emits it unconditionally.
+func withAttributes(rawURL string, attrs ...string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("parse URL %q: %w", rawURL, err)
+	}
+
+	q := u.Query()
+	for _, a := range attrs {
+		q.Add("attribute", a)
+	}
+
+	u.RawQuery = q.Encode()
+
+	return u.String(), nil
 }
 
 // decodeItems stream-decodes the JSON response body from a directory listing.
