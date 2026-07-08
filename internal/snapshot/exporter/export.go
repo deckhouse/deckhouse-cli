@@ -22,12 +22,23 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
+
+// dataPlaneResponseHeaderTimeout bounds how long the data-plane client waits for
+// a server to send response headers after the connection is accepted. The
+// exporter is already Ready (WaitReady) before any fetch, so headers arrive in
+// seconds; this conservative upper bound only guards the pathological case of an
+// endpoint that accepts the connection but never answers. It complements the
+// Fetcher's idle-read watchdog (which guards a stall AFTER headers arrive) and
+// is applied ONLY to this exporter's own SafeClient copy, so no other
+// libsaferequest consumer is affected.
+const dataPlaneResponseHeaderTimeout = 2 * time.Minute
 
 // Export holds a resolved DataExport: a ready HTTP endpoint (Fetcher), the
 // VolumeMode reported by the controller, and the internal base URL. Callers
@@ -130,6 +141,9 @@ func buildSubClient(sc *safeClient.SafeClient, de *deapi.DataExport) (*safeClien
 
 	sub := sc.Copy()
 	sub.SetTLSCAData(caBytes)
+	// Apply the response-header timeout AFTER SetTLSCAData so it chains onto the
+	// CA-injecting WrapTransport rather than replacing it (both must apply).
+	sub.SetResponseHeaderTimeout(dataPlaneResponseHeaderTimeout)
 
 	return sub, nil
 }

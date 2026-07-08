@@ -17,7 +17,10 @@ limitations under the License.
 package client
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // TestSafeClient_SetQPS asserts that SetQPS mutates the underlying rest.Config's
@@ -65,5 +68,121 @@ func TestSafeClient_SetQPS_DefaultUnchangedWithoutCall(t *testing.T) {
 
 	if got.Burst != 0 {
 		t.Errorf("RESTConfig().Burst = %d, want 0 (unset) when SetQPS was never called", got.Burst)
+	}
+}
+
+// TestSafeClient_SetResponseHeaderTimeout_AppliesToTransport asserts that
+// SetResponseHeaderTimeout installs a WrapTransport that sets exactly the given
+// ResponseHeaderTimeout on the transport rest.HTTPClientFor would build.
+func TestSafeClient_SetResponseHeaderTimeout_AppliesToTransport(t *testing.T) {
+	t.Parallel()
+
+	sc, err := NewSafeClient()
+	if err != nil {
+		t.Fatalf("NewSafeClient: %v", err)
+	}
+
+	sc.SetResponseHeaderTimeout(25 * time.Millisecond)
+
+	wrap := sc.RESTConfig().WrapTransport
+	if wrap == nil {
+		t.Fatal("WrapTransport is nil after SetResponseHeaderTimeout")
+	}
+
+	wrapped, ok := wrap(&http.Transport{}).(*http.Transport)
+	if !ok {
+		t.Fatal("wrapped transport is not an *http.Transport")
+	}
+
+	if wrapped.ResponseHeaderTimeout != 25*time.Millisecond {
+		t.Errorf("ResponseHeaderTimeout = %v, want 25ms", wrapped.ResponseHeaderTimeout)
+	}
+}
+
+// TestSafeClient_SetResponseHeaderTimeout_ChainsExistingWrapTransport asserts
+// that SetResponseHeaderTimeout composes with an already-installed WrapTransport
+// (SetTLSCAData's CA injection) instead of clobbering it: both the RootCAs pool
+// and the response-header timeout must survive.
+func TestSafeClient_SetResponseHeaderTimeout_ChainsExistingWrapTransport(t *testing.T) {
+	t.Parallel()
+
+	sc, err := NewSafeClient()
+	if err != nil {
+		t.Fatalf("NewSafeClient: %v", err)
+	}
+
+	sc.SetTLSCAData(nil)
+	sc.SetResponseHeaderTimeout(15 * time.Millisecond)
+
+	wrapped, ok := sc.RESTConfig().WrapTransport(&http.Transport{}).(*http.Transport)
+	if !ok {
+		t.Fatal("wrapped transport is not an *http.Transport")
+	}
+
+	if wrapped.ResponseHeaderTimeout != 15*time.Millisecond {
+		t.Errorf("ResponseHeaderTimeout = %v, want 15ms", wrapped.ResponseHeaderTimeout)
+	}
+
+	if wrapped.TLSClientConfig == nil || wrapped.TLSClientConfig.RootCAs == nil {
+		t.Error("chained CA WrapTransport lost: RootCAs is nil")
+	}
+}
+
+// TestSafeClient_ResponseHeaderTimeout_DefaultUnchangedWithoutCall asserts that a
+// SafeClient which never calls SetResponseHeaderTimeout leaves WrapTransport
+// unset, so every other libsaferequest consumer is unaffected (opt-in only).
+func TestSafeClient_ResponseHeaderTimeout_DefaultUnchangedWithoutCall(t *testing.T) {
+	t.Parallel()
+
+	sc, err := NewSafeClient()
+	if err != nil {
+		t.Fatalf("NewSafeClient: %v", err)
+	}
+
+	if sc.RESTConfig().WrapTransport != nil {
+		t.Error("WrapTransport must be nil when SetResponseHeaderTimeout was never called")
+	}
+}
+
+// TestSafeClient_SetResponseHeaderTimeout_FailsFastOnHeaderStall asserts the
+// configured transport aborts a request whose server accepts the connection but
+// never sends response headers, within the response-header timeout.
+func TestSafeClient_SetResponseHeaderTimeout_FailsFastOnHeaderStall(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	sc, err := NewSafeClient()
+	if err != nil {
+		t.Fatalf("NewSafeClient: %v", err)
+	}
+
+	sc.SetResponseHeaderTimeout(75 * time.Millisecond)
+
+	rt, ok := sc.RESTConfig().WrapTransport(&http.Transport{}).(*http.Transport)
+	if !ok {
+		t.Fatal("wrapped transport is not an *http.Transport")
+	}
+
+	cl := &http.Client{Transport: rt}
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	start := time.Now()
+
+	resp, err := cl.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("expected a response-header timeout error, got nil")
+	}
+
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("did not fail fast on header stall: %v", elapsed)
 	}
 }
