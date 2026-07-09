@@ -395,6 +395,8 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 	tarWriter := tar.NewWriter(gzipWriter)
 	defer tarWriter.Close()
 
+	fmt.Fprintf(os.Stderr, "Collecting debug info from Deckhouse...\n")
+
 	for _, cmd := range commands {
 		if isFileExcluded(cmd.File, excludeMap) {
 			continue
@@ -408,7 +410,7 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 
 		executor, err := utilk8s.ExecInPod(config, kubeCl, fullCommand, podName, namespace, containerName)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: failed to create executor for %s: %v\n", cmd.File, err)
+			fmt.Fprintf(os.Stderr, "  ERROR: failed to create executor for %s: %v\n", cmd.File, err)
 			continue
 		}
 
@@ -422,9 +424,9 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 
 		if streamErr != nil {
 			if errors.Is(streamErr, context.DeadlineExceeded) {
-				fmt.Fprintf(os.Stderr, "WARNING: timed out collecting %s after %s\n", cmd.File, commandTimeout)
+				fmt.Fprintf(os.Stderr, "  WARNING: timed out collecting %s after %s\n", cmd.File, commandTimeout)
 			} else {
-				fmt.Fprintf(os.Stderr, "ERROR: collecting %s: %s\n%s\n", cmd.File, strings.Join(fullCommand, " "), stderr.String())
+				fmt.Fprintf(os.Stderr, "  ERROR: collecting %s: %s\n%s\n", cmd.File, strings.Join(fullCommand, " "), stderr.String())
 			}
 		}
 
@@ -435,6 +437,8 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 		stdout.Reset()
 		stderr.Reset()
 	}
+
+	fmt.Fprintf(os.Stderr, "Debug archive collection completed.\n")
 
 	return nil
 }
