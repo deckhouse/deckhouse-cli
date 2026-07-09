@@ -146,14 +146,14 @@ var debugCommands = []Command{
 		Args: []string{"-n", "d8-system", "logs", "-l", "app=deckhouse", "--tail", "3000"},
 	},
 	{
-		File: "capi-controller-manager.json",
+		File: "capi-controller-manager-logs.txt",
 		Cmd:  "kubectl",
-		Args: []string{"-n", "d8-cloud-instance-manager", "get", "pods", "-l", "app=capi-controller-manager", "-o", "json", "--ignore-not-found=true"},
+		Args: []string{"-n", "d8-cloud-instance-manager", "logs", "-l", "app=capi-controller-manager", "--tail", "3000", "--ignore-errors=true"},
 	},
 	{
-		File: "caps-controller-manager.json",
+		File: "caps-controller-manager-logs.txt",
 		Cmd:  "kubectl",
-		Args: []string{"-n", "d8-cloud-instance-manager", "get", "pods", "-l", "app=caps-controller-manager", "-o", "json", "--ignore-not-found=true"},
+		Args: []string{"-n", "d8-cloud-instance-manager", "logs", "-l", "app=caps-controller-manager", "--tail", "3000", "--ignore-errors=true"},
 	},
 	{
 		File:           "machine-controller-manager.json",
@@ -348,6 +348,11 @@ var debugCommands = []Command{
 		Cmd:  "bash",
 		Args: []string{"-c", `kubectl get $(kubectl api-resources --api-group=storage.deckhouse.io --verbs=list -o name | paste -sd, -) --ignore-not-found -A --chunk-size=200 -o json | jq -r '.items[] | select(.apiVersion == "storage.deckhouse.io/v1alpha1") | select(.metadata.deletionTimestamp != null) | "[\(.kind)] \(.metadata.namespace // "-")/\(.metadata.name)"'`},
 	},
+	{
+		File: "ingressnginxcontrollers.json",
+		Cmd:  "kubectl",
+		Args: []string{"get", "ingressnginxcontrollers.deckhouse.io", "-o", "json", "--ignore-not-found=true"},
+	},
 }
 
 func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []string, commandTimeout time.Duration, requestInterval time.Duration) error {
@@ -390,6 +395,8 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 	tarWriter := tar.NewWriter(gzipWriter)
 	defer tarWriter.Close()
 
+	fmt.Fprintf(os.Stderr, "Collecting debug info from Deckhouse...\n")
+
 	for _, cmd := range commands {
 		if isFileExcluded(cmd.File, excludeMap) {
 			continue
@@ -403,7 +410,7 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 
 		executor, err := utilk8s.ExecInPod(config, kubeCl, fullCommand, podName, namespace, containerName)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: failed to create executor for %s: %v\n", cmd.File, err)
+			fmt.Fprintf(os.Stderr, "  ERROR: failed to create executor for %s: %v\n", cmd.File, err)
 			continue
 		}
 
@@ -417,9 +424,9 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 
 		if streamErr != nil {
 			if errors.Is(streamErr, context.DeadlineExceeded) {
-				fmt.Fprintf(os.Stderr, "WARNING: timed out collecting %s after %s\n", cmd.File, commandTimeout)
+				fmt.Fprintf(os.Stderr, "  WARNING: timed out collecting %s after %s\n", cmd.File, commandTimeout)
 			} else {
-				fmt.Fprintf(os.Stderr, "ERROR: collecting %s: %s\n%s\n", cmd.File, strings.Join(fullCommand, " "), stderr.String())
+				fmt.Fprintf(os.Stderr, "  ERROR: collecting %s: %s\n%s\n", cmd.File, strings.Join(fullCommand, " "), stderr.String())
 			}
 		}
 
@@ -430,6 +437,8 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 		stdout.Reset()
 		stderr.Reset()
 	}
+
+	fmt.Fprintf(os.Stderr, "Debug archive collection completed.\n")
 
 	return nil
 }
