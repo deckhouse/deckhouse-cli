@@ -165,6 +165,9 @@ func (svc *PushService) unpackAllPackages(ctx context.Context, dirPath string) e
 
 	packages := slices.Clone(svc.options.Packages)
 	slices.Sort(packages)
+	// Drop duplicate archive paths so the same package is not unpacked twice
+	// (which would redo work and overwrite files in the unified directory).
+	packages = slices.Compact(packages)
 
 	svc.userLogger.Infof("Found %d packages to unpack", len(packages))
 

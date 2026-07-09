@@ -116,7 +116,11 @@ func collectBundlePathPackages(arg string) error {
 		}
 
 		dirEntries = lo.Filter(dirEntries, func(item os.DirEntry, _ int) bool {
-			return isPackageFile(item.Name())
+			// Only regular files can be packages. A directory whose name happens
+			// to match (e.g. a folder literally named "platform.tar") would later
+			// be handed to the pusher as an archive path and fail with a confusing
+			// unpack error, so skip anything that is not a regular file.
+			return item.Type().IsRegular() && isPackageFile(item.Name())
 		})
 		if len(dirEntries) == 0 {
 			return errors.New("no packages found in bundle directory")
