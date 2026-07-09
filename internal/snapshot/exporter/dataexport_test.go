@@ -52,6 +52,12 @@ func captureWarnLogger(buf *bytes.Buffer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 }
 
+// captureInfoLogger returns a logger that writes INFO+ records as text into buf so
+// tests can assert the periodic terminating-wait progress line and its attributes.
+func captureInfoLogger(buf *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+}
+
 // newDEScheme returns a scheme with the DataExport types registered.
 func newDEScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -886,6 +892,109 @@ func TestEnsureDataExport_TerminatingCRNeverGoneReturnsCtxDeadline(t *testing.T)
 	assert.Nil(t, got, "no CR may be returned while the terminating CR is still present")
 	assert.True(t, errors.Is(err, context.DeadlineExceeded),
 		"the wait must return a wrapped context.DeadlineExceeded; got: %v", err)
+}
+
+// makeStuckTerminatingDE returns a DataExport that is permanently terminating: it
+// carries a DeletionTimestamp and a finalizer that nothing ever removes, so a fake
+// client keeps returning it (never NotFound) — the wedged-finalizer / downed-controller
+// case waitForDataExportGone must not hang on.
+func makeStuckTerminatingDE(namespace, leafName string) *deapi.DataExport {
+	deName := exporter.DataExportName(leafName)
+	now := metav1.NewTime(time.Now())
+
+	return &deapi.DataExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              deName,
+			Namespace:         namespace,
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"dataexport.deckhouse.io/test-hold"},
+		},
+		Spec: deapi.DataexportSpec{
+			TTL: "1h",
+			TargetRef: deapi.TargetRefSpec{
+				Group:    aggapi.VolumeSnapshotGroup,
+				Resource: aggapi.VolumeSnapshotResource,
+				Kind:     aggapi.VolumeSnapshotKind,
+				Name:     leafName,
+			},
+		},
+	}
+}
+
+// TestEnsureDataExport_TerminatingWaitBoundedByOption verifies the fix for the
+// indefinite-hang bug: WithTerminatingWaitTimeout caps the terminating wait ON TOP
+// OF ctx, so a permanently-terminating CR fails the call within the cap even when
+// the caller passes a deadline-less ctx (context.Background, as the pipeline's
+// stamp-Ensure did). The error must wrap context.DeadlineExceeded, return no CR,
+// and carry the kubectl inspection hint naming the CR.
+func TestEnsureDataExport_TerminatingWaitBoundedByOption(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "opt-bounded-terminating-vs"
+		ttl       = "1h"
+	)
+
+	deName := exporter.DataExportName(leafName)
+
+	scheme := newDEScheme(t)
+	stuck := makeStuckTerminatingDE(namespace, leafName)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stuck).Build()
+
+	start := time.Now()
+
+	// A deadline-less parent ctx (the raw run ctx the pipeline stamp-Ensure used):
+	// only WithTerminatingWaitTimeout bounds the wait here.
+	got, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl,
+		exporter.WithTerminatingWaitTimeout(50*time.Millisecond))
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Nil(t, got, "no CR may be returned while the terminating CR is still present")
+	assert.True(t, errors.Is(err, context.DeadlineExceeded),
+		"the wait must return a wrapped context.DeadlineExceeded; got: %v", err)
+	assert.Less(t, elapsed, 5*time.Second,
+		"the wait must be bounded by the option, not hang on the wedged finalizer")
+	assert.Contains(t, err.Error(), "d8 k -n "+namespace+" get dataexport "+deName,
+		"the deadline error must carry the inspection hint naming the CR")
+}
+
+// TestEnsureDataExport_TerminatingWaitLogsPeriodically verifies the wait emits an
+// Info progress line (with the CR name and the kubectl inspection hint) while it
+// polls, so a slow finalizer unwind is observable instead of a silent spinner. The
+// first poll always logs, so even a short-lived wait produces the line deterministically.
+func TestEnsureDataExport_TerminatingWaitLogsPeriodically(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "logged-terminating-vs"
+		runID     = "run-log-1234"
+		ttl       = "1h"
+	)
+
+	deName := exporter.DataExportName(leafName)
+
+	scheme := newDEScheme(t)
+	stuck := makeStuckTerminatingDE(namespace, leafName)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stuck).Build()
+
+	var buf bytes.Buffer
+
+	_, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl,
+		exporter.WithRunOwner(runID, captureInfoLogger(&buf)),
+		exporter.WithTerminatingWaitTimeout(50*time.Millisecond))
+	require.Error(t, err)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "waiting for terminating DataExport to be deleted",
+		"the wait must emit a periodic progress line")
+	assert.Contains(t, logged, deName, "the progress line must name the terminating CR")
+	assert.Contains(t, logged, "inspect_hint", "the progress line must carry the snake_case inspect_hint attr")
+	assert.Contains(t, logged, "get dataexport "+deName, "the inspect_hint must name the CR")
 }
 
 // TestEnsureDataExport_RefusesTargetRefMismatch verifies that a live same-named
