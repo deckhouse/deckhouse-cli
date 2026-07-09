@@ -35,6 +35,14 @@ import (
 // terminal state and can no longer be used for data transfer.
 var ErrExpired = errors.New("DataExport expired")
 
+// ErrTargetRefMismatch is returned by EnsureDataExport when a live, same-named
+// DataExport CR already exists but its Spec.TargetRef names a DIFFERENT object
+// than the request. The CR name is derived from the leaf name alone
+// (DataExportName encodes neither group nor kind), so a same-named CR can alias
+// a different object; reusing its endpoint would download the wrong object's
+// bytes. EnsureDataExport refuses instead of silently reusing or deleting it.
+var ErrTargetRefMismatch = errors.New("existing DataExport targets a different object")
+
 // defaultDataExportTTL is the fallback TTL used for DataExport when the caller
 // passes an empty string. Snapshot transfers can be large, so we use a longer
 // default than the 2-minute interactive default.
@@ -68,6 +76,32 @@ const runOwnerAnnotation = "snapshot.deckhouse.io/download-run-id"
 // leaf CR name. The result fits in a DNS-1123 label.
 func DataExportName(leafName string) string {
 	return "de-" + leafName
+}
+
+// targetRefMatches reports whether an existing DataExport's targetRef refers to
+// the same object as the requested {group, resource, kind, name}. Group and Name
+// are compared strictly (Group is never pruned and is "" for the core group; Name
+// is always populated). Resource and Kind are compared only when populated on BOTH
+// sides: the deployed SVDM CRD prunes whichever of resource/kind it does not
+// understand (see TargetRefSpec's TEMP REVERTME note), so a re-fetched CR
+// legitimately carries an empty resource OR kind for a MATCHING target — treating
+// that as a mismatch would wrongly reject the happy-path adoption on a real
+// cluster. A populated field that DIFFERS is a true mismatch (a distinct object
+// aliasing the same de-<leaf> name).
+func targetRefMatches(existing deapi.TargetRefSpec, group, resource, kind, name string) bool {
+	if existing.Name != name || existing.Group != group {
+		return false
+	}
+
+	if existing.Resource != "" && resource != "" && existing.Resource != resource {
+		return false
+	}
+
+	if existing.Kind != "" && kind != "" && existing.Kind != kind {
+		return false
+	}
+
+	return true
 }
 
 // ensureOptions carries optional per-run ownership context for EnsureDataExport.
@@ -175,10 +209,30 @@ func EnsureDataExport(
 			}
 
 		case !meta.IsStatusConditionTrue(existing.Status.Conditions, conditionTypeExpired):
-			// Live, non-terminating CR: if a different run owns it, this run is
-			// adopting a foreign export read-only and must not release it
-			// (warnIfForeign logs the adoption). Ownership is intentionally NOT
-			// changed on adoption.
+			// Live, non-terminating CR. The CR name (de-<leaf>) encodes only the
+			// leaf name, so a same-named CR may actually target a DIFFERENT object
+			// (a CSI VolumeSnapshot and a domain snapshot CR sharing metadata.name,
+			// or a stale live CR left by a previous run pointing elsewhere). Reusing
+			// such an endpoint would silently stream the wrong object's bytes into
+			// this node dir, where they finalize and checksum as complete forever.
+			// Refuse to adopt on a targetRef mismatch — never silently reuse, never
+			// silently delete another target's live export; the operator resolves it.
+			if !targetRefMatches(existing.Spec.TargetRef, group, resource, kind, leafName) {
+				got := existing.Spec.TargetRef
+
+				return nil, fmt.Errorf(
+					"%w: DataExport %q already targets {group=%q resource=%q kind=%q name=%q}, "+
+						"but this request is for {group=%q resource=%q kind=%q name=%q}; "+
+						"delete the stale DataExport or resolve the name collision before retrying",
+					ErrTargetRefMismatch, deName,
+					got.Group, got.Resource, got.Kind, got.Name,
+					group, resource, kind, leafName,
+				)
+			}
+
+			// If a different run owns it, this run is adopting a foreign export
+			// read-only and must not release it (warnIfForeign logs the adoption).
+			// Ownership is intentionally NOT changed on adoption.
 			o.warnIfForeign(existing, deName)
 
 			return existing, nil

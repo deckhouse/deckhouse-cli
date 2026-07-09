@@ -888,6 +888,243 @@ func TestEnsureDataExport_TerminatingCRNeverGoneReturnsCtxDeadline(t *testing.T)
 		"the wait must return a wrapped context.DeadlineExceeded; got: %v", err)
 }
 
+// TestEnsureDataExport_RefusesTargetRefMismatch verifies that a live same-named
+// de-<leaf> CR whose Spec.TargetRef names a DIFFERENT object is NOT adopted: the
+// deterministic name encodes only the leaf, so a CSI VolumeSnapshot and a domain
+// snapshot CR can share it, or a stale run can leave one pointing elsewhere.
+// Reusing that endpoint would stream the wrong object's bytes into this node dir
+// and checksum as complete forever. EnsureDataExport must instead return a
+// descriptive ErrTargetRefMismatch naming BOTH targets, and must leave the
+// colliding CR untouched (still present, same UID) — never silently reuse it,
+// never silently delete another target's live export.
+func TestEnsureDataExport_RefusesTargetRefMismatch(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "aliased-name"
+		ttl       = "1h"
+	)
+
+	deName := exporter.DataExportName(leafName)
+
+	// The request always asks for a CSI VolumeSnapshot; each case pre-creates a
+	// live CR of the same NAME but a different target that must be refused.
+	cases := []struct {
+		name         string
+		existingRef  deapi.TargetRefSpec
+		wantInErrGrp string
+	}{
+		{
+			name: "mismatched kind",
+			existingRef: deapi.TargetRefSpec{
+				Group:    aggapi.VolumeSnapshotGroup,
+				Resource: aggapi.VolumeSnapshotResource,
+				Kind:     "VirtualDiskSnapshot",
+				Name:     leafName,
+			},
+			wantInErrGrp: aggapi.VolumeSnapshotGroup,
+		},
+		{
+			name: "mismatched group and resource",
+			existingRef: deapi.TargetRefSpec{
+				Group:    "demo.deckhouse.io",
+				Resource: "virtualdisksnapshots",
+				Kind:     aggapi.VolumeSnapshotKind,
+				Name:     leafName,
+			},
+			wantInErrGrp: "demo.deckhouse.io",
+		},
+		{
+			name: "mismatched name",
+			existingRef: deapi.TargetRefSpec{
+				Group:    aggapi.VolumeSnapshotGroup,
+				Resource: aggapi.VolumeSnapshotResource,
+				Kind:     aggapi.VolumeSnapshotKind,
+				Name:     "some-other-object",
+			},
+			wantInErrGrp: aggapi.VolumeSnapshotGroup,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			scheme := newDEScheme(t)
+
+			existing := &deapi.DataExport{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      deName,
+					Namespace: namespace,
+					UID:       types.UID("uid-existing"),
+				},
+				Spec: deapi.DataexportSpec{TTL: ttl, TargetRef: tc.existingRef},
+			}
+
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+
+			ctx := context.Background()
+
+			got, err := exporter.EnsureDataExport(ctx, c, namespace,
+				aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl)
+			require.Error(t, err)
+			assert.Nil(t, got, "no CR may be returned on a targetRef mismatch")
+			assert.True(t, errors.Is(err, exporter.ErrTargetRefMismatch),
+				"error must wrap ErrTargetRefMismatch; got: %v", err)
+
+			// The message must name BOTH the existing target and the request so
+			// the operator can resolve the collision.
+			assert.Contains(t, err.Error(), tc.existingRef.Name, "error must name the existing target")
+			assert.Contains(t, err.Error(), tc.wantInErrGrp, "error must name the existing target's group")
+			assert.Contains(t, err.Error(), leafName, "error must name the requested target")
+			assert.Contains(t, err.Error(), aggapi.VolumeSnapshotKind, "error must name the requested kind")
+
+			// The colliding CR must be left completely untouched: still present,
+			// same UID (never reused, never deleted).
+			check := new(deapi.DataExport)
+			require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: deName}, check),
+				"a mismatched CR must never be deleted")
+			assert.Equal(t, types.UID("uid-existing"), check.UID, "the mismatched CR must be untouched")
+			assert.Equal(t, tc.existingRef, check.Spec.TargetRef, "the mismatched CR's targetRef must be untouched")
+		})
+	}
+}
+
+// TestEnsureDataExport_AdoptsMatchingTargetRefAcrossRuns verifies the happy path
+// is byte-for-byte unchanged when the live CR's targetRef MATCHES the request: it
+// is adopted (no Create, same UID) even with WithRunOwner from a DIFFERENT run,
+// which produces only the foreign-adoption WARN — the targetRef guard adds no new
+// behavior for a matching target.
+func TestEnsureDataExport_AdoptsMatchingTargetRefAcrossRuns(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace  = "test-ns"
+		leafName   = "matching-vs"
+		ownerRun   = "run-a-owner"
+		adopterRun = "run-b-adopter"
+		ttl        = "1h"
+	)
+
+	deName := exporter.DataExportName(leafName)
+
+	scheme := newDEScheme(t)
+
+	existing := &deapi.DataExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        deName,
+			Namespace:   namespace,
+			UID:         types.UID("uid-match"),
+			Annotations: map[string]string{runOwnerAnnotationKey: ownerRun},
+		},
+		Spec: deapi.DataexportSpec{
+			TTL: ttl,
+			TargetRef: deapi.TargetRefSpec{
+				Group:    aggapi.VolumeSnapshotGroup,
+				Resource: aggapi.VolumeSnapshotResource,
+				Kind:     aggapi.VolumeSnapshotKind,
+				Name:     leafName,
+			},
+		},
+	}
+
+	createCalled := false
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				createCalled = true
+
+				return cl.Create(ctx, obj, opts...)
+			},
+		}).Build()
+
+	ctx := context.Background()
+
+	var buf bytes.Buffer
+
+	got, err := exporter.EnsureDataExport(ctx, c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl,
+		exporter.WithRunOwner(adopterRun, captureWarnLogger(&buf)))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	assert.False(t, createCalled, "a matching live CR must be adopted, never recreated")
+	assert.Equal(t, types.UID("uid-match"), got.UID, "adoption must return the existing object")
+	assert.Equal(t, ownerRun, got.Annotations[runOwnerAnnotationKey],
+		"adoption must not overwrite the existing owner annotation")
+	assert.Contains(t, buf.String(), ownerRun, "the adoption WARN must still name the foreign owner run")
+}
+
+// TestEnsureDataExport_AdoptsWhenServerPrunedResourceOrKind verifies the guard
+// tolerates the deployed SVDM CRD pruning whichever of resource/kind it does not
+// understand (TargetRefSpec's TEMP REVERTME): a re-fetched matching CR that
+// carries an empty resource OR an empty kind is still adopted, not rejected as a
+// mismatch. A field is a mismatch only when populated on both sides and differing.
+func TestEnsureDataExport_AdoptsWhenServerPrunedResourceOrKind(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		ttl       = "1h"
+	)
+
+	cases := []struct {
+		name        string
+		leafName    string
+		existingRef deapi.TargetRefSpec
+	}{
+		{
+			name:     "kind pruned by GVR-based server",
+			leafName: "pruned-kind-vs",
+			existingRef: deapi.TargetRefSpec{
+				Group:    aggapi.VolumeSnapshotGroup,
+				Resource: aggapi.VolumeSnapshotResource,
+				Kind:     "",
+				Name:     "pruned-kind-vs",
+			},
+		},
+		{
+			name:     "resource pruned by kind-based server",
+			leafName: "pruned-resource-vs",
+			existingRef: deapi.TargetRefSpec{
+				Group:    aggapi.VolumeSnapshotGroup,
+				Resource: "",
+				Kind:     aggapi.VolumeSnapshotKind,
+				Name:     "pruned-resource-vs",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			deName := exporter.DataExportName(tc.leafName)
+
+			scheme := newDEScheme(t)
+
+			existing := &deapi.DataExport{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      deName,
+					Namespace: namespace,
+					UID:       types.UID("uid-pruned"),
+				},
+				Spec: deapi.DataexportSpec{TTL: ttl, TargetRef: tc.existingRef},
+			}
+
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+
+			got, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+				aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, tc.leafName, ttl)
+			require.NoError(t, err, "a pruned-but-matching targetRef must still be adopted")
+			require.NotNil(t, got)
+			assert.Equal(t, types.UID("uid-pruned"), got.UID, "the matching CR must be adopted unchanged")
+		})
+	}
+}
+
 // TestEnsureDataExport_LiveCRAdoptedNotRecreated is the regression guard for the
 // unchanged happy path: a live, non-terminating CR is adopted as-is (same object,
 // no Create), exactly as before the terminating-wait was added.
