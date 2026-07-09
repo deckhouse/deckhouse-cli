@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
@@ -68,6 +69,11 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 // resolvePackages builds the list of package archives to push from the optional
 // bundle path argument and the --file flag, then sets the default temp dir.
 func resolvePackages(bundleArg []string) error {
+	// Reset package-level state so a reused command (e.g. in tests or a
+	// long-lived process) does not inherit a stale bundle path or package list
+	// from a previous invocation. ImagesBundlePath is still copied into
+	// BaseParams.BundleDir, so leaving it set would leak across --file-only runs.
+	ImagesBundlePath = ""
 	Packages = nil
 
 	if len(bundleArg) == 1 {
@@ -162,9 +168,17 @@ func collectFilesPackages() error {
 	return nil
 }
 
+// chunkFileNameRegexp matches a single chunk part of a chunked package by its
+// file name. Chunks are written as "<name>.tar.NNNN.chunk" (see
+// chunked.FileWriter, which uses the "%s.%04d.chunk" format), so a bare
+// "*.chunk" with no ".tar.<digits>." prefix is not a valid chunk part and must
+// be rejected rather than silently handed to the pusher, which would then try to
+// read a single chunk as a whole tar archive.
+var chunkFileNameRegexp = regexp.MustCompile(`^(.+)\.tar\.\d{4,}\.chunk$`)
+
 func isPackageFile(name string) bool {
-	ext := filepath.Ext(name)
-	return ext == ".tar" || ext == ".chunk"
+	base := filepath.Base(name)
+	return filepath.Ext(base) == ".tar" || chunkFileNameRegexp.MatchString(base)
 }
 
 // canonicalPackagePath maps a chunk file (<name>.tar.NNNN.chunk) to its canonical
@@ -175,13 +189,9 @@ func isPackageFile(name string) bool {
 // (e.g. an extraction dir "bundle.tar.gz.d") must not be collapsed into the
 // package name.
 func canonicalPackagePath(path string) string {
-	if filepath.Ext(path) != ".chunk" {
-		return path
-	}
-
 	dir, base := filepath.Split(path)
-	if before, _, found := strings.Cut(base, ".tar."); found {
-		return dir + before + ".tar"
+	if m := chunkFileNameRegexp.FindStringSubmatch(base); m != nil {
+		return dir + m[1] + ".tar"
 	}
 
 	return path

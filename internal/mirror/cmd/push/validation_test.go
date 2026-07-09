@@ -53,6 +53,10 @@ func TestIsPackageFile(t *testing.T) {
 	}{
 		{name: "tar file", fileName: "platform.tar", want: true},
 		{name: "chunk file", fileName: "platform.tar.0000.chunk", want: true},
+		{name: "chunk file with long index", fileName: "platform.tar.12345.chunk", want: true},
+		{name: "stray chunk without tar prefix is rejected", fileName: "platform.chunk", want: false},
+		{name: "chunk with non-numeric index is rejected", fileName: "platform.tar.abcd.chunk", want: false},
+		{name: "chunk missing the tar segment is rejected", fileName: "platform.0000.chunk", want: false},
 		{name: "unrelated extension", fileName: "platform.txt", want: false},
 		{name: "no extension", fileName: "platform", want: false},
 	}
@@ -138,6 +142,7 @@ func TestCollectFilesPackages(t *testing.T) {
 	tarFile := filepath.Join(tempDir, "a.tar")
 	chunkFile := filepath.Join(tempDir, "b.tar.0000.chunk")
 	txtFile := filepath.Join(tempDir, "c.txt")
+	strayChunkFile := filepath.Join(tempDir, "d.chunk")
 	subDir := filepath.Join(tempDir, "subdir")
 
 	// Chunk living inside a directory whose name itself contains ".tar." - the
@@ -148,6 +153,7 @@ func TestCollectFilesPackages(t *testing.T) {
 	require.NoError(t, os.WriteFile(tarFile, []byte("x"), 0644))
 	require.NoError(t, os.WriteFile(chunkFile, []byte("x"), 0644))
 	require.NoError(t, os.WriteFile(txtFile, []byte("x"), 0644))
+	require.NoError(t, os.WriteFile(strayChunkFile, []byte("x"), 0644))
 	require.NoError(t, os.MkdirAll(subDir, 0755))
 	require.NoError(t, os.MkdirAll(tarNamedDir, 0755))
 	require.NoError(t, os.WriteFile(chunkInTarNamedDir, []byte("x"), 0644))
@@ -189,6 +195,15 @@ func TestCollectFilesPackages(t *testing.T) {
 		{
 			name:        "wrong extension",
 			files:       []string{txtFile},
+			expectError: true,
+			errorMsg:    "not a tar or chunked package",
+		},
+		{
+			// A bare *.chunk without the "<name>.tar.<index>." prefix is not a real
+			// chunk part; accepting it would make the pusher read a single chunk as a
+			// whole tar archive and fail confusingly.
+			name:        "stray chunk without tar prefix is rejected",
+			files:       []string{strayChunkFile},
 			expectError: true,
 			errorMsg:    "not a tar or chunked package",
 		},
@@ -317,6 +332,24 @@ func TestResolvePackages(t *testing.T) {
 		err := resolvePackages(nil)
 		require.NoError(t, err)
 		assert.Equal(t, []string{tarFile}, Packages)
+	})
+
+	t.Run("--file only run clears a stale bundle path from a previous invocation", func(t *testing.T) {
+		resetPushState()
+		t.Cleanup(resetPushState)
+
+		dir := t.TempDir()
+		tarFile := filepath.Join(dir, "platform.tar")
+		require.NoError(t, os.WriteFile(tarFile, []byte("x"), 0644))
+		Files = []string{tarFile}
+
+		// Simulate leftover state from an earlier command run in the same process.
+		ImagesBundlePath = "/leftover/bundle/from/previous/run"
+
+		err := resolvePackages(nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{tarFile}, Packages)
+		assert.Empty(t, ImagesBundlePath, "stale bundle path must not leak into a --file-only run")
 	})
 
 	t.Run("bundle dir combined with --file merges both sources", func(t *testing.T) {
