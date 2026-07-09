@@ -61,8 +61,15 @@ const conditionTypeExpired = "Expired"
 // dataExportGonePollInterval is the poll cadence EnsureDataExport uses while waiting
 // for a terminating DataExport (DeletionTimestamp set) to fully vanish before it
 // recreates a fresh one. It is short because the controller's finalizer unwinding
-// completes in seconds on a real cluster, and the wait is bounded by the caller's ctx.
+// completes in seconds on a real cluster. The wait is bounded by ctx and, when the
+// caller passes WithTerminatingWaitTimeout, by an explicit cap on top of ctx.
 const dataExportGonePollInterval = 500 * time.Millisecond
+
+// dataExportGoneLogEveryN is the poll-attempt cadence at which waitForDataExportGone
+// emits a progress log. With a 500 ms poll interval, every 30 attempts ≈ 15 s, matching
+// WaitReady's ≈15 s cadence so a slow finalizer unwind is observable instead of a silent
+// spinner.
+const dataExportGoneLogEveryN = 30
 
 // runOwnerAnnotation records the download run that CREATED (and therefore owns) a
 // DataExport CR. The CR name is deterministic (DataExportName → de-<leaf>), so two
@@ -122,12 +129,29 @@ func targetRefMismatchError(deName string, got deapi.TargetRefSpec, group, resou
 
 // ensureOptions carries optional per-run ownership context for EnsureDataExport.
 type ensureOptions struct {
-	runID string
-	log   *slog.Logger
+	runID              string
+	log                *slog.Logger
+	terminatingTimeout time.Duration
 }
 
 // EnsureOption configures optional behavior of EnsureDataExport.
 type EnsureOption func(*ensureOptions)
+
+// WithTerminatingWaitTimeout bounds the wait EnsureDataExport performs when it
+// observes the DataExport already TERMINATING (DeletionTimestamp set) and must
+// wait for it to fully vanish before recreating a fresh one. Without this cap the
+// wait is bounded only by ctx, so a caller that passes a deadline-less ctx (e.g.
+// the raw download-run ctx used by the pipeline's stamp-Ensure) would hang the
+// whole run FOREVER on a wedged finalizer or a downed DataExport controller, with
+// no output — a ctx that merely CAN carry a deadline is not enough (code-style §6).
+// The pipeline derives d from the run's ReadinessTimeout. A non-positive d leaves
+// the wait bounded by ctx alone (the pre-existing behavior for callers that do not
+// opt in).
+func WithTerminatingWaitTimeout(d time.Duration) EnsureOption {
+	return func(o *ensureOptions) {
+		o.terminatingTimeout = d
+	}
+}
 
 // WithRunOwner makes EnsureDataExport stamp runID as the owning run
 // (runOwnerAnnotation) on any DataExport it CREATES, and log an explicit WARN via
@@ -220,7 +244,17 @@ func EnsureDataExport(
 			// for it to vanish, then fall through to the create path so this run
 			// gets a fresh, this-run-owned CR. Mirrors how the Expired reclaim
 			// already tolerates delete propagation.
-			if waitErr := waitForDataExportGone(ctx, c, namespace, deName); waitErr != nil {
+			//
+			// The wait is bounded by waitCtx: WithTerminatingWaitTimeout caps it
+			// (on top of ctx) so a wedged finalizer or a downed controller cannot
+			// hang the run forever even under a deadline-less ctx (code-style §6).
+			waitCtx, waitCancel := terminatingWaitContext(ctx, o.terminatingTimeout)
+
+			waitErr := waitForDataExportGone(waitCtx, c, o.log, namespace, deName)
+
+			waitCancel()
+
+			if waitErr != nil {
 				return nil, waitErr
 			}
 
@@ -314,15 +348,31 @@ func EnsureDataExport(
 	return fetched, nil
 }
 
+// terminatingWaitContext derives the context that bounds the terminating-DataExport
+// wait. When timeout > 0 it caps the wait at timeout ON TOP OF ctx, so a wedged
+// finalizer or a downed controller cannot hang the run even under a deadline-less
+// parent ctx (code-style §6); otherwise it returns ctx with a no-op cancel so the
+// wait keeps its ctx-only bound (legacy callers that do not opt in).
+func terminatingWaitContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(ctx, timeout)
+	}
+
+	return ctx, func() {}
+}
+
 // waitForDataExportGone polls until the DataExport named deName in namespace is
 // reported NotFound (its finalizers have fully unwound and it is gone) or ctx is
 // done. It exists so EnsureDataExport can wait out a CR observed in the terminating
-// state instead of adopting a doomed object. On ctx cancellation it returns a
-// wrapped ctx.Err() promptly. No time.Sleep: the poll blocks in a select on ctx.
-func waitForDataExportGone(ctx context.Context, c client.Client, namespace, deName string) error {
+// state instead of adopting a doomed object. On ctx cancellation (deadline or
+// SIGINT) it returns a wrapped ctx.Err() promptly, naming the CR and a kubectl
+// inspection hint so a stuck unwind is diagnosable rather than a silent hang. A
+// periodic Info line is emitted via log (nil disables it). No time.Sleep: the poll
+// blocks in a select on ctx.
+func waitForDataExportGone(ctx context.Context, c client.Client, log *slog.Logger, namespace, deName string) error {
 	key := client.ObjectKey{Namespace: namespace, Name: deName}
 
-	for {
+	for attempt := 0; ; attempt++ {
 		probe := new(deapi.DataExport)
 
 		err := c.Get(ctx, key, probe)
@@ -334,12 +384,46 @@ func waitForDataExportGone(ctx context.Context, c client.Client, namespace, deNa
 			return fmt.Errorf("get terminating DataExport %q: %w", deName, err)
 		}
 
+		logTerminatingWait(ctx, log, namespace, deName, attempt)
+
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("wait for terminating DataExport %q to be deleted: %w", deName, ctx.Err())
+			return fmt.Errorf(
+				"wait for terminating DataExport %q to be deleted: %w\n\n"+
+					"To inspect DataExport status, run:\n  d8 k -n %s get dataexport %s -o yaml",
+				deName, ctx.Err(), namespace, deName,
+			)
 		case <-time.After(dataExportGonePollInterval):
 		}
 	}
+}
+
+// logTerminatingWait emits a periodic Info line while waitForDataExportGone polls,
+// so a slow finalizer unwind (or a downed controller) is observable instead of a
+// silent spinner. It mirrors WaitReady's first-and-every-N cadence and carries a
+// kubectl inspection hint naming the terminating CR. A nil log disables it.
+func logTerminatingWait(ctx context.Context, log *slog.Logger, namespace, deName string, attempt int) {
+	if log == nil {
+		return
+	}
+
+	if attempt != 0 && attempt%dataExportGoneLogEveryN != 0 {
+		return
+	}
+
+	attrs := make([]slog.Attr, 0, 5)
+	attrs = append(attrs,
+		slog.String("namespace", namespace),
+		slog.String("name", deName),
+		slog.Int("attempt", attempt),
+		slog.String("inspect_hint", fmt.Sprintf("d8 k -n %s get dataexport %s -o yaml", namespace, deName)),
+	)
+
+	if deadline, ok := ctx.Deadline(); ok {
+		attrs = append(attrs, slog.String("timeout_in", time.Until(deadline).Round(time.Second).String()))
+	}
+
+	log.LogAttrs(ctx, slog.LevelInfo, "waiting for terminating DataExport to be deleted", attrs...)
 }
 
 // readyConditionStatus returns a short status string from the DataExport conditions.

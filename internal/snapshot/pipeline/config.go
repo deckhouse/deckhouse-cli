@@ -259,8 +259,17 @@ func applyDefaults(cfg Config) Config {
 			// into a different output dir is detected here (WARN) and its live
 			// export is never deleted by this run's release (inv #10b). OpenExport's
 			// own EnsureDataExport then idempotently re-fetches this stamped CR.
+			//
+			// This stamp-Ensure runs under the RAW run ctx (no deadline); the
+			// ReadinessTimeout-derived waitCtx below bounds only OpenExport. If it
+			// observes the CR TERMINATING and the finalizer never unwinds (downed
+			// controller), an unbounded terminating wait would hang the whole run
+			// forever with no output (code-style §6). WithTerminatingWaitTimeout
+			// caps that wait at ReadinessTimeout on top of ctx.
 			owner := exporter.WithRunOwner(runID, log)
-			if _, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, kind, leafRef.Name, ttl, owner); err != nil {
+			termWait := exporter.WithTerminatingWaitTimeout(timeout)
+
+			if _, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, kind, leafRef.Name, ttl, owner, termWait); err != nil {
 				return nil, fmt.Errorf("stamp DataExport ownership for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
 			}
 
@@ -270,8 +279,10 @@ func applyDefaults(cfg Config) Config {
 			// Pass the same ownership into OpenExport so that if the CR vanishes
 			// between the stamp-Ensure above and OpenExport's inner Ensure (the
 			// terminating-window recreate), the fresh CR is stamped by THIS run
-			// rather than recreated unstamped (inv #10b).
-			return exporter.OpenExport(waitCtx, log, c, namespace, group, resource, kind, leafRef.Name, ttl, sc, owner)
+			// rather than recreated unstamped (inv #10b). termWait keeps OpenExport's
+			// inner terminating wait explicitly bounded too (belt-and-braces with
+			// the already-bounded waitCtx).
+			return exporter.OpenExport(waitCtx, log, c, namespace, group, resource, kind, leafRef.Name, ttl, sc, owner, termWait)
 		}
 	}
 
