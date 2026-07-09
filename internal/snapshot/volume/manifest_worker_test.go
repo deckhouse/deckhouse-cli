@@ -252,6 +252,65 @@ func TestFinalizeNode_Idempotent(t *testing.T) {
 	}
 }
 
+// TestFinalizeNode_RemovesIdentityMarker proves finalize-removes-identity-marker:
+// a node dir carrying the resume identity marker on first touch has snapshot.yaml
+// written AND the marker removed once finalize succeeds, so a finalized node
+// never keeps a stray identity.json. A second FinalizeNode call (marker already
+// absent) must still succeed — the remove is idempotent (os.ErrNotExist ignored).
+func TestFinalizeNode_RemovesIdentityMarker(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	if err := archive.WriteManifest(nodeDir, makeObj("v1", "ConfigMap", "cm-marker")); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	node := &source.Node{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-marker",
+		Namespace:  "ns",
+		SourceRef:  "demo/vm-1",
+	}
+
+	// Stamp the marker the pipeline writes on first touch.
+	if err := archive.WriteNodeIdentityMarker(nodeDir, archive.NodeIdentity{
+		APIVersion: node.APIVersion,
+		Kind:       node.Kind,
+		Name:       node.Name,
+		Namespace:  node.Namespace,
+		SourceRef:  node.SourceRef,
+	}); err != nil {
+		t.Fatalf("WriteNodeIdentityMarker: %v", err)
+	}
+
+	if err := volume.FinalizeNode(nodeDir, node); err != nil {
+		t.Fatalf("FinalizeNode: %v", err)
+	}
+
+	// snapshot.yaml written and VerifyNode passes.
+	if err := archive.VerifyNode(nodeDir); err != nil {
+		t.Errorf("VerifyNode after FinalizeNode: %v", err)
+	}
+
+	// The identity marker must be gone.
+	if _, found, err := archive.ReadNodeIdentityMarker(nodeDir); err != nil {
+		t.Fatalf("ReadNodeIdentityMarker: %v", err)
+	} else if found {
+		t.Error("identity marker must be removed after FinalizeNode")
+	}
+
+	// Second call (marker already absent) must succeed.
+	if err := volume.FinalizeNode(nodeDir, node); err != nil {
+		t.Fatalf("second FinalizeNode (marker absent): %v", err)
+	}
+
+	if err := archive.VerifyNode(nodeDir); err != nil {
+		t.Errorf("VerifyNode after second FinalizeNode: %v", err)
+	}
+}
+
 func TestWriteNodeManifests_FetchError(t *testing.T) {
 	nodeDir := setupNodeDir(t)
 

@@ -904,7 +904,10 @@ func removeMergedBlockChunkDir(cfg Config, chunkDir string) {
 // finalize (inv. #9). archive.WriteNodeIdentityMarker is a no-op when a marker
 // already exists, so it is safe to call on every reconcile of the same node; it
 // is checksum-neutral (excluded from ComputeNodeChecksum) and survives the
-// stale-*.tmp resume sweep.
+// stale-*.tmp resume sweep. The marker is short-lived: volume.FinalizeNode
+// removes it once snapshot.yaml is durably written (and the Done scan branches
+// self-heal any crash-window leftover), so a finalized node never keeps a stray
+// identity.json.
 func ensureNodeSubdirs(nodeDir string, id archive.NodeIdentity, withSnapshots bool) error {
 	if err := archive.EnsureDir(filepath.Join(nodeDir, archive.ManifestsDirName)); err != nil {
 		return err

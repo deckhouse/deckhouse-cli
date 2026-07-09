@@ -73,14 +73,61 @@ const (
 // pipeline must seed it: after partial-node-dir-identity-marker, a marker-less
 // non-empty partial dir is treated as foreign and collision-redirected rather
 // than resumed, so a realistic same-snapshot crash fixture must carry the marker
-// its interrupted run would already have written. Tests that build the partial
-// state by running the full pipeline once and then deleting finished artifacts
-// (e.g. TestPipeline_MixedResumeStates_ConcurrentRun) already have the real
-// marker on disk and need no seeding.
+// its interrupted run would already have written.
+//
+// Tests that build the partial state by running the full pipeline once and then
+// deleting snapshot.yaml must ALSO re-seed the marker (via
+// reseedResumeMarkerFromSnapshotYAML): finalize-removes-identity-marker deletes
+// the marker once snapshot.yaml is durable, so after a completed run the marker
+// is gone. Restoring it is the honest crash residue — a real crash happens
+// BEFORE the snapshot.yaml write, leaving the marker in place.
 func seedResumeIdentityMarker(t *testing.T, nodeDir string, id archive.NodeIdentity) {
 	t.Helper()
 
 	require.NoError(t, archive.WriteNodeIdentityMarker(nodeDir, id))
+}
+
+// reseedResumeMarkerFromSnapshotYAML restores the resume identity marker on a
+// finalized node using the identity recorded in its snapshot.yaml. It must be
+// called while snapshot.yaml still exists (before a fixture deletes it to fake a
+// crash window). Because FinalizeNode removes the marker once snapshot.yaml is
+// written, a fixture that completes a full pipeline run and then drops
+// snapshot.yaml to simulate a crash-after-commit must re-stamp the marker its
+// interrupted run would still carry.
+func reseedResumeMarkerFromSnapshotYAML(t *testing.T, nodeDir string) {
+	t.Helper()
+
+	sy, err := archive.ReadSnapshotYAML(nodeDir)
+	require.NoError(t, err)
+
+	seedResumeIdentityMarker(t, nodeDir, archive.NodeIdentity{
+		APIVersion: sy.APIVersion,
+		Kind:       sy.Kind,
+		Name:       sy.Name,
+		Namespace:  sy.Namespace,
+		SourceRef:  sy.SourceRef,
+	})
+}
+
+// assertNoIdentityMarkers walks the whole output tree rooted at root and fails
+// if any identity.json (archive.NodeIdentityMarkerName) remains. After a fully
+// successful run every finalized node must drop its resume marker, so the tree
+// holds only snapshot.yaml + manifests/ + optional snapshots/ + at most one
+// volume payload per node.
+func assertNoIdentityMarkers(t *testing.T, root string) {
+	t.Helper()
+
+	require.NoError(t, filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !d.IsDir() && d.Name() == archive.NodeIdentityMarkerName {
+			t.Errorf("stray identity marker must not survive finalization: %s", path)
+		}
+
+		return nil
+	}))
 }
 
 // diskSnapMarkerIdentity is the identity the pipeline computes (nodeIdentity) for
@@ -161,6 +208,10 @@ func TestPipeline_HappyPath(t *testing.T) {
 	_, noSnapErr := os.Stat(filepath.Join(diskSnapDir, archive.SnapshotsDirName))
 	require.True(t, os.IsNotExist(noSnapErr),
 		"non-aggregator node must not have a snapshots/ subdir")
+
+	// A fully successful run must leave no resume identity markers anywhere in
+	// the output tree (finalize-removes-identity-marker).
+	assertNoIdentityMarkers(t, outputDir)
 
 	// Second run must be a no-op: snapshot.yaml mtime must not change.
 	rootYAML := filepath.Join(outputDir, archive.SnapshotYAMLName)
@@ -278,8 +329,10 @@ func TestPipeline_CrashWindowDeleteSnapshotYAML_ReFinalizes(t *testing.T) {
 		archive.NodeDirName(childKind, diskSnapName))
 	assertNodeComplete(t, diskSnapDir)
 
-	// Delete ONLY snapshot.yaml; the merged data.bin.zst and the identity marker
-	// written on the first run stay in place.
+	// Simulate a crash after the block volume committed but before snapshot.yaml
+	// was written: re-stamp the identity marker (finalize removed it on the first
+	// run) and delete only snapshot.yaml. The merged data.bin.zst stays in place.
+	reseedResumeMarkerFromSnapshotYAML(t, diskSnapDir)
 	require.NoError(t, os.Remove(filepath.Join(diskSnapDir, archive.SnapshotYAMLName)))
 
 	// OpenExport must not run: the merged data is detected and only FinalizeNode
@@ -292,6 +345,7 @@ func TestPipeline_CrashWindowDeleteSnapshotYAML_ReFinalizes(t *testing.T) {
 
 	require.NoError(t, runPipeline(context.Background(), cfg))
 	assertNodeComplete(t, diskSnapDir)
+	assertNoIdentityMarkers(t, outputDir)
 }
 
 // TestPipeline_OpenExportErrorReleasesCleanly is a regression guard for a
@@ -3201,7 +3255,10 @@ func TestPipeline_MixedResumeStates_ConcurrentRun(t *testing.T) {
 	// simulating a crash mid-run. mixed-disk-done is left untouched. ────────
 
 	// mixed-disk-block-partial: drop the merged block file and snapshot.yaml,
-	// re-create data.bin.d/ with only chunk 0 present.
+	// re-create data.bin.d/ with only chunk 0 present. Re-stamp the identity
+	// marker finalize removed, so the crash residue matches a real interrupted
+	// run (marker present, snapshot.yaml absent).
+	reseedResumeMarkerFromSnapshotYAML(t, blockPartialDir)
 	require.NoError(t, os.Remove(filepath.Join(blockPartialDir, archive.DataBlockName(codec.Ext()))))
 	require.NoError(t, os.Remove(filepath.Join(blockPartialDir, archive.SnapshotYAMLName)))
 
@@ -3222,7 +3279,9 @@ func TestPipeline_MixedResumeStates_ConcurrentRun(t *testing.T) {
 
 	// mixed-disk-fs-partial: drop data.tar and snapshot.yaml, re-create
 	// data.tar.d/ with "one.txt.zst" already staged; "two.txt" is left
-	// missing so only it must be re-fetched on resume.
+	// missing so only it must be re-fetched on resume. Re-stamp the marker
+	// finalize removed (crash residue).
+	reseedResumeMarkerFromSnapshotYAML(t, fsPartialDir)
 	require.NoError(t, os.Remove(filepath.Join(fsPartialDir, archive.FsTarName)))
 	require.NoError(t, os.Remove(filepath.Join(fsPartialDir, archive.SnapshotYAMLName)))
 
@@ -3239,7 +3298,10 @@ func TestPipeline_MixedResumeStates_ConcurrentRun(t *testing.T) {
 
 	// mixed-disk-manifests-only: drop the merged block file and
 	// snapshot.yaml; manifests/ (created by run 1) is left in place with no
-	// volume artifact and no staging dir of any kind.
+	// volume artifact and no staging dir of any kind. Re-stamp the marker
+	// finalize removed (crash residue) so the manifests-only dir is not treated
+	// as a marker-less foreign dir.
+	reseedResumeMarkerFromSnapshotYAML(t, manifestsOnlyDir)
 	require.NoError(t, os.Remove(filepath.Join(manifestsOnlyDir, archive.DataBlockName(codec.Ext()))))
 	require.NoError(t, os.Remove(filepath.Join(manifestsOnlyDir, archive.SnapshotYAMLName)))
 
@@ -3275,6 +3337,9 @@ func TestPipeline_MixedResumeStates_ConcurrentRun(t *testing.T) {
 	for _, d := range []string{doneDir, blockPartialDir, fsPartialDir, manifestsOnlyDir, pendingDir} {
 		assertNodeComplete(t, d)
 	}
+
+	// The resumed run must also end marker-free once every node finalizes.
+	assertNoIdentityMarkers(t, outputDir)
 
 	require.Equal(t, rawBlockDone, e2eDecodeZstdFile(t, filepath.Join(doneDir, archive.DataBlockName(codec.Ext()))),
 		"mixed-disk-done data must be untouched by run 2")
@@ -3416,9 +3481,10 @@ func TestPipeline_BlockAlreadyMerged_OwnDataRef_RemovesLeftoverChunkDir(t *testi
 
 // TestPipeline_BlockAlreadyMerged_VolumeNode_RemovesLeftoverChunkDir covers the
 // symmetric processVolumeNode (Binding leaf) already-merged skip branch. The
-// partial state is produced by running the pipeline once (so the real identity
-// marker is on disk), then re-creating a leftover chunk dir next to the merged
-// file and deleting snapshot.yaml — exactly the commit->RemoveAll crash residue.
+// partial state is produced by running the pipeline once, then re-stamping the
+// identity marker finalize removed, re-creating a leftover chunk dir next to the
+// merged file, and deleting snapshot.yaml — exactly the commit->RemoveAll crash
+// residue (marker present, snapshot.yaml absent).
 func TestPipeline_BlockAlreadyMerged_VolumeNode_RemovesLeftoverChunkDir(t *testing.T) {
 	t.Parallel()
 
@@ -3450,6 +3516,7 @@ func TestPipeline_BlockAlreadyMerged_VolumeNode_RemovesLeftoverChunkDir(t *testi
 		archive.SnapshotsDirName, archive.NodeDirName("VolumeSnapshot", "pvc-agg"))
 	assertNodeComplete(t, leafDir)
 
+	reseedResumeMarkerFromSnapshotYAML(t, leafDir)
 	chunkDir := seedLeftoverBlockChunkDir(t, leafDir)
 	require.NoError(t, os.Remove(filepath.Join(leafDir, archive.SnapshotYAMLName)))
 
