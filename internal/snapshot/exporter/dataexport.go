@@ -104,6 +104,22 @@ func targetRefMatches(existing deapi.TargetRefSpec, group, resource, kind, name 
 	return true
 }
 
+// targetRefMismatchError builds the wrapped ErrTargetRefMismatch returned whenever
+// an existing/observed DataExport named deName targets a different object than the
+// request. It names BOTH the observed targetRef (got) and the request so the
+// operator can resolve the collision. Shared by the live-CR adoption path and the
+// post-Create re-fetch path so both report the identical, actionable message.
+func targetRefMismatchError(deName string, got deapi.TargetRefSpec, group, resource, kind, name string) error {
+	return fmt.Errorf(
+		"%w: DataExport %q already targets {group=%q resource=%q kind=%q name=%q}, "+
+			"but this request is for {group=%q resource=%q kind=%q name=%q}; "+
+			"delete the stale DataExport or resolve the name collision before retrying",
+		ErrTargetRefMismatch, deName,
+		got.Group, got.Resource, got.Kind, got.Name,
+		group, resource, kind, name,
+	)
+}
+
 // ensureOptions carries optional per-run ownership context for EnsureDataExport.
 type ensureOptions struct {
 	runID string
@@ -218,16 +234,7 @@ func EnsureDataExport(
 			// Refuse to adopt on a targetRef mismatch — never silently reuse, never
 			// silently delete another target's live export; the operator resolves it.
 			if !targetRefMatches(existing.Spec.TargetRef, group, resource, kind, leafName) {
-				got := existing.Spec.TargetRef
-
-				return nil, fmt.Errorf(
-					"%w: DataExport %q already targets {group=%q resource=%q kind=%q name=%q}, "+
-						"but this request is for {group=%q resource=%q kind=%q name=%q}; "+
-						"delete the stale DataExport or resolve the name collision before retrying",
-					ErrTargetRefMismatch, deName,
-					got.Group, got.Resource, got.Kind, got.Name,
-					group, resource, kind, leafName,
-				)
+				return nil, targetRefMismatchError(deName, existing.Spec.TargetRef, group, resource, kind, leafName)
 			}
 
 			// If a different run owns it, this run is adopting a foreign export
@@ -289,6 +296,19 @@ func EnsureDataExport(
 
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, fetched); err != nil {
 		return nil, fmt.Errorf("get DataExport %q after create: %w", deName, err)
+	}
+
+	// The Create above deliberately swallows AlreadyExists, and every branch that
+	// falls through to it (first-Get NotFound, the Expired reclaim delete, the
+	// terminating-CR wait) may observe a CR this run did not create: a concurrent
+	// actor can win the Get→Create window and leave a de-<leaf> CR targeting a
+	// DIFFERENT object (the same name-aliasing the first-Get guard above prevents).
+	// Returning it unchecked would stream the wrong object's bytes and checksum them
+	// as complete forever. Re-run the identical targetRef check here so the guard
+	// covers the create/re-fetch path too; our own just-created (matching) CR — the
+	// overwhelmingly common case — passes unchanged.
+	if !targetRefMatches(fetched.Spec.TargetRef, group, resource, kind, leafName) {
+		return nil, targetRefMismatchError(deName, fetched.Spec.TargetRef, group, resource, kind, leafName)
 	}
 
 	return fetched, nil

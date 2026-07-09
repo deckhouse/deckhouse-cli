@@ -1183,3 +1183,133 @@ func TestEnsureDataExport_LiveCRAdoptedNotRecreated(t *testing.T) {
 	assert.Equal(t, ownerRun, got.Annotations[runOwnerAnnotationKey],
 		"adoption must not overwrite the existing owner annotation")
 }
+
+// TestEnsureDataExport_RefusesTargetRefMismatchAfterCreateRace covers the
+// Get→Create race window: the first Get sees NotFound (nothing stored yet), so
+// EnsureDataExport falls through to Create — but a concurrent actor already
+// created de-<leaf> targeting a DIFFERENT object, so Create returns AlreadyExists
+// (swallowed) and the post-Create re-fetch yields the FOREIGN CR. The first-Get
+// guard never ran (there was nothing to observe), so this path must re-run the
+// targetRef check and refuse: return the same wrapped ErrTargetRefMismatch naming
+// both targets, and leave the foreign CR untouched (no delete).
+func TestEnsureDataExport_RefusesTargetRefMismatchAfterCreateRace(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "race-aliased-name"
+		ttl       = "1h"
+	)
+
+	deName := exporter.DataExportName(leafName)
+
+	// The request asks for a CSI VolumeSnapshot; the concurrently-stored CR targets
+	// a domain snapshot CR sharing the same de-<leaf> name (different group/kind).
+	foreignRef := deapi.TargetRefSpec{
+		Group:    "demo.deckhouse.io",
+		Resource: "virtualdisksnapshots",
+		Kind:     "VirtualDiskSnapshot",
+		Name:     leafName,
+	}
+
+	scheme := newDEScheme(t)
+
+	// The fake starts empty (first Get -> NotFound), so EnsureDataExport reaches the
+	// Create step. The Create interceptor injects the foreign CR into the store and
+	// returns AlreadyExists, exactly as a concurrent winner of the race would: the
+	// swallowed AlreadyExists then leads to a re-fetch of the foreign object.
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, _ client.Object, _ ...client.CreateOption) error {
+				foreign := &deapi.DataExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      deName,
+						Namespace: namespace,
+						UID:       types.UID("uid-foreign"),
+					},
+					Spec: deapi.DataexportSpec{TTL: ttl, TargetRef: foreignRef},
+				}
+
+				if err := cl.Create(ctx, foreign); err != nil {
+					return err
+				}
+
+				return apierrors.NewAlreadyExists(
+					schema.GroupResource{Group: "storage.deckhouse.io", Resource: "dataexports"}, deName)
+			},
+		}).Build()
+
+	ctx := context.Background()
+
+	got, err := exporter.EnsureDataExport(ctx, c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl)
+	require.Error(t, err)
+	assert.Nil(t, got, "no CR may be returned when the re-fetched CR targets a different object")
+	assert.True(t, errors.Is(err, exporter.ErrTargetRefMismatch),
+		"error must wrap ErrTargetRefMismatch; got: %v", err)
+	assert.Contains(t, err.Error(), foreignRef.Group, "error must name the foreign target's group")
+	assert.Contains(t, err.Error(), aggapi.VolumeSnapshotKind, "error must name the requested kind")
+
+	// The foreign CR must be left completely untouched (never deleted).
+	check := new(deapi.DataExport)
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: deName}, check),
+		"a mismatched re-fetched CR must never be deleted")
+	assert.Equal(t, types.UID("uid-foreign"), check.UID, "the foreign CR must be untouched")
+	assert.Equal(t, foreignRef, check.Spec.TargetRef, "the foreign CR's targetRef must be untouched")
+}
+
+// TestEnsureDataExport_AdoptsMatchingTargetRefAfterCreateRace is the regression
+// guard for the create-race happy path: when Create returns AlreadyExists but the
+// stored CR MATCHES the request (e.g. two concurrent runs of the SAME download
+// both creating the same correct de-<leaf>), the re-fetched CR is returned
+// successfully — the post-Create guard adds no new behavior for a matching target.
+func TestEnsureDataExport_AdoptsMatchingTargetRefAfterCreateRace(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "race-matching-vs"
+		ttl       = "1h"
+	)
+
+	deName := exporter.DataExportName(leafName)
+
+	// Kind is deliberately empty to also exercise the pruned-CRD tolerance
+	// (a GVR-based server drops the kind it does not understand) on this path.
+	matchingRef := deapi.TargetRefSpec{
+		Group:    aggapi.VolumeSnapshotGroup,
+		Resource: aggapi.VolumeSnapshotResource,
+		Kind:     "",
+		Name:     leafName,
+	}
+
+	scheme := newDEScheme(t)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, _ client.Object, _ ...client.CreateOption) error {
+				winner := &deapi.DataExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      deName,
+						Namespace: namespace,
+						UID:       types.UID("uid-winner"),
+					},
+					Spec: deapi.DataexportSpec{TTL: ttl, TargetRef: matchingRef},
+				}
+
+				if err := cl.Create(ctx, winner); err != nil {
+					return err
+				}
+
+				return apierrors.NewAlreadyExists(
+					schema.GroupResource{Group: "storage.deckhouse.io", Resource: "dataexports"}, deName)
+			},
+		}).Build()
+
+	got, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl)
+	require.NoError(t, err, "a matching re-fetched CR must be returned after an AlreadyExists race")
+	require.NotNil(t, got)
+	assert.Equal(t, types.UID("uid-winner"), got.UID, "the matching re-fetched CR must be returned")
+	assert.Equal(t, matchingRef, got.Spec.TargetRef)
+}
