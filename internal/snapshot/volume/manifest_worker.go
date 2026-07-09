@@ -20,7 +20,10 @@ package volume
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
@@ -125,6 +128,19 @@ func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeD
 // FinalizeNode is idempotent: each call recomputes the checksum and overwrites
 // snapshot.yaml with the fresh value. The pipeline calls it once per node after
 // both WriteNodeManifests and any volume download have completed.
+//
+// After snapshot.yaml is durably written, FinalizeNode removes the resume
+// identity marker (archive.NodeIdentityMarkerName). The marker exists only to
+// prove a PARTIAL (snapshot.yaml-less) dir belongs to this snapshot (inv. #9);
+// once snapshot.yaml — the authoritative identity record VerifyNode/ScanNode
+// read — is on disk, the marker is redundant and leaving it would violate the
+// documented final node layout (snapshot.yaml + manifests/ + optional
+// snapshots/ + at most one volume payload). The remove happens strictly AFTER
+// the snapshot.yaml write so a crash at any earlier point still leaves the
+// marker in place and a partial dir always carries exactly one identity record.
+// Removal is checksum-neutral (ComputeNodeChecksum/collectNodeFiles never read
+// the marker), so it cannot perturb the checksum just written or any later
+// VerifyNode.
 func FinalizeNode(nodeDir string, node *source.Node) error {
 	checksum, err := archive.ComputeNodeChecksum(nodeDir)
 	if err != nil {
@@ -145,6 +161,11 @@ func FinalizeNode(nodeDir string, node *source.Node) error {
 
 	if err := archive.WriteSnapshotYAML(nodeDir, sy); err != nil {
 		return fmt.Errorf("write snapshot.yaml for %s/%s: %w", node.Kind, node.Name, err)
+	}
+
+	markerPath := filepath.Join(nodeDir, archive.NodeIdentityMarkerName)
+	if err := os.Remove(markerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove identity marker for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
 	return nil

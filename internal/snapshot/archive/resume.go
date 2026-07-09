@@ -232,6 +232,10 @@ func classifyCompleteDir(parentDir, primaryDir string, id NodeIdentity) (NodeRes
 	}
 
 	if matchesIdentity(sy, id) {
+		if err := healNodeIdentityMarker(primaryDir); err != nil {
+			return NodeResumePlan{}, err
+		}
+
 		return NodeResumePlan{TargetDir: primaryDir, Done: true, Observed: ObservedDone}, nil
 	}
 
@@ -416,6 +420,10 @@ func ScanAbsolute(nodeDir string, id NodeIdentity) (NodeResumePlan, error) {
 				ErrIdentityMismatch, nodeDir, sy.Kind, sy.Name, id.Kind, id.Name)
 		}
 
+		if err := healNodeIdentityMarker(nodeDir); err != nil {
+			return NodeResumePlan{}, err
+		}
+
 		return NodeResumePlan{TargetDir: nodeDir, Done: true, Observed: ObservedDone}, nil
 	}
 
@@ -504,6 +512,27 @@ func ReadNodeIdentityMarker(dir string) (NodeIdentityMarker, bool, error) {
 	}
 
 	return marker, true, nil
+}
+
+// healNodeIdentityMarker removes the resume identity marker from a node
+// directory the scan has just proven is the planned node's OWN completed dir
+// (Done=true). FinalizeNode normally removes the marker once snapshot.yaml is
+// durable; this self-heals the crash window between that write and the remove,
+// and archives produced by older builds that never removed it. Only a Done dir
+// is healed — a FOREIGN complete dir keeps its marker so its owner snapshot's
+// next run can still resume it.
+//
+// A missing marker is fine (os.ErrNotExist ignored, keeping this idempotent); a
+// real I/O error propagates, exactly like removeTmpFiles' error on the same
+// scan path. Removal is checksum-neutral (collectNodeFiles excludes the marker),
+// so it cannot perturb the checksum VerifyNode just validated.
+func healNodeIdentityMarker(nodeDir string) error {
+	markerPath := filepath.Join(nodeDir, NodeIdentityMarkerName)
+	if err := os.Remove(markerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove identity marker %s: %w", markerPath, err)
+	}
+
+	return nil
 }
 
 // markerFromIdentity projects a NodeIdentity onto the marker's identity fields.

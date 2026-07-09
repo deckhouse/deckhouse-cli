@@ -1157,6 +1157,210 @@ func TestScanAbsolute_ChecksumMismatch_SurfacesError(t *testing.T) {
 	}
 }
 
+// TestScanNode_CompleteMatchingMarker_RemovesMarker proves the self-healing
+// scan path: a finalized dir that still carries a leftover identity marker
+// (crash window between the snapshot.yaml write and the finalize remove, or an
+// archive from an older build) is classified Done AND the marker is removed.
+func TestScanNode_CompleteMatchingMarker_RemovesMarker(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	id := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "disk-1",
+		Namespace:  "default",
+		SourceRef:  "vd/disk-1",
+	}
+
+	nodeDir := makeCompleteNode(t, parent, id.Kind, id.Name, id)
+	writeMarker(t, nodeDir, id)
+
+	plan, err := archive.ScanNode(parent, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !plan.Done {
+		t.Error("Done = false, want done")
+	}
+
+	_, found, err := archive.ReadNodeIdentityMarker(nodeDir)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+
+	if found {
+		t.Error("identity marker must be removed on the Done scan path")
+	}
+}
+
+// TestScanAbsolute_CompleteMatchingMarker_RemovesMarker is the ScanAbsolute
+// (root output path) counterpart of the self-heal.
+func TestScanAbsolute_CompleteMatchingMarker_RemovesMarker(t *testing.T) {
+	t.Parallel()
+
+	id := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "root",
+		Namespace:  "default",
+	}
+
+	parent := t.TempDir()
+	nodeDir := makeCompleteNode(t, parent, id.Kind, id.Name, id)
+	writeMarker(t, nodeDir, id)
+
+	plan, err := archive.ScanAbsolute(nodeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !plan.Done {
+		t.Error("Done = false, want done")
+	}
+
+	_, found, err := archive.ReadNodeIdentityMarker(nodeDir)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+
+	if found {
+		t.Error("identity marker must be removed on the Done scan path")
+	}
+}
+
+// TestScanNode_CompleteForeignMarker_LeavesMarker proves the heal is confined to
+// the planned node's OWN dir: a FOREIGN complete dir (identity mismatch) is
+// collision-redirected and its marker is left UNTOUCHED for its owner snapshot's
+// next run.
+func TestScanNode_CompleteForeignMarker_LeavesMarker(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+
+	idA := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "disk-a",
+		DirName:    "source-disk",
+		Namespace:  "default",
+		SourceRef:  "vd/disk-a",
+	}
+
+	nodeDir := makeCompleteNode(t, parent, idA.Kind, idA.Name, idA)
+	writeMarker(t, nodeDir, idA)
+
+	// Planned node shares the on-disk DirName but has a different identity.
+	idB := idA
+	idB.Name = "disk-b"
+	idB.SourceRef = "vd/disk-b"
+
+	plan, err := archive.ScanNode(parent, idB)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if plan.Done {
+		t.Error("Done = true, want not done (redirect)")
+	}
+
+	if plan.TargetDir == nodeDir {
+		t.Error("foreign complete dir must be collision-redirected, not resumed into")
+	}
+
+	_, found, err := archive.ReadNodeIdentityMarker(nodeDir)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+
+	if !found {
+		t.Error("a foreign complete dir must keep its identity marker")
+	}
+}
+
+// TestScanAbsolute_CompleteForeignMarker_LeavesMarker is the ScanAbsolute
+// counterpart: a foreign complete dir is rejected with ErrIdentityMismatch and
+// its marker is left in place.
+func TestScanAbsolute_CompleteForeignMarker_LeavesMarker(t *testing.T) {
+	t.Parallel()
+
+	idA := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "root-a",
+		Namespace:  "default",
+		SourceRef:  "a",
+	}
+
+	parent := t.TempDir()
+	nodeDir := makeCompleteNode(t, parent, idA.Kind, idA.Name, idA)
+	writeMarker(t, nodeDir, idA)
+
+	idB := idA
+	idB.Name = "root-b"
+	idB.SourceRef = "b"
+
+	_, err := archive.ScanAbsolute(nodeDir, idB)
+	if !errors.Is(err, archive.ErrIdentityMismatch) {
+		t.Fatalf("err = %v, want ErrIdentityMismatch", err)
+	}
+
+	_, found, readErr := archive.ReadNodeIdentityMarker(nodeDir)
+	if readErr != nil {
+		t.Fatalf("read marker: %v", readErr)
+	}
+
+	if !found {
+		t.Error("a foreign complete dir must keep its identity marker")
+	}
+}
+
+// TestScanNode_PartialMatchingMarker_LeavesMarker proves a not-yet-finalized dir
+// (matching marker, no snapshot.yaml) resumes in place with its marker
+// untouched — the heal only fires on the Done path.
+func TestScanNode_PartialMatchingMarker_LeavesMarker(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	id := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "disk-1",
+		Namespace:  "default",
+		SourceRef:  "vd/disk-1",
+	}
+
+	nodeDir := filepath.Join(parent, archive.NodeDirName(id.Kind, id.Name))
+	if err := os.MkdirAll(filepath.Join(nodeDir, archive.BlockChunksDirName), 0o755); err != nil {
+		t.Fatalf("mkdir chunkDir: %v", err)
+	}
+
+	writeMarker(t, nodeDir, id)
+
+	plan, err := archive.ScanNode(parent, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if plan.Done {
+		t.Error("Done = true, want not done (block partial)")
+	}
+
+	if plan.TargetDir != nodeDir {
+		t.Errorf("TargetDir = %q, want %q (resume in place)", plan.TargetDir, nodeDir)
+	}
+
+	_, found, err := archive.ReadNodeIdentityMarker(nodeDir)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+
+	if !found {
+		t.Error("a resumable partial dir must keep its identity marker")
+	}
+}
+
 func TestScanNode_RemovesTmpRecursively(t *testing.T) {
 	t.Parallel()
 
