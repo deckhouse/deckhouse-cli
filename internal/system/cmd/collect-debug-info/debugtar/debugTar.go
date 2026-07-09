@@ -146,14 +146,14 @@ var debugCommands = []Command{
 		Args: []string{"-n", "d8-system", "logs", "-l", "app=deckhouse", "--tail", "3000"},
 	},
 	{
-		File: "capi-controller-manager.json",
+		File: "capi-controller-manager-logs.txt",
 		Cmd:  "kubectl",
-		Args: []string{"-n", "d8-cloud-instance-manager", "get", "pods", "-l", "app=capi-controller-manager", "-o", "json", "--ignore-not-found=true"},
+		Args: []string{"-n", "d8-cloud-instance-manager", "logs", "-l", "app=capi-controller-manager", "--tail", "3000", "--ignore-errors=true"},
 	},
 	{
-		File: "caps-controller-manager.json",
+		File: "caps-controller-manager-logs.txt",
 		Cmd:  "kubectl",
-		Args: []string{"-n", "d8-cloud-instance-manager", "get", "pods", "-l", "app=caps-controller-manager", "-o", "json", "--ignore-not-found=true"},
+		Args: []string{"-n", "d8-cloud-instance-manager", "logs", "-l", "app=caps-controller-manager", "--tail", "3000", "--ignore-errors=true"},
 	},
 	{
 		File:           "machine-controller-manager.json",
@@ -347,6 +347,11 @@ var debugCommands = []Command{
 		File: "storage-deckhouse-io-terminating.txt",
 		Cmd:  "bash",
 		Args: []string{"-c", `kubectl get $(kubectl api-resources --api-group=storage.deckhouse.io --verbs=list -o name | paste -sd, -) --ignore-not-found -A --chunk-size=200 -o json | jq -r '.items[] | select(.apiVersion == "storage.deckhouse.io/v1alpha1") | select(.metadata.deletionTimestamp != null) | "[\(.kind)] \(.metadata.namespace // "-")/\(.metadata.name)"'`},
+	},
+	{
+		File: "ingressnginxcontrollers.json",
+		Cmd:  "kubectl",
+		Args: []string{"get", "ingressnginxcontrollers.deckhouse.io", "-o", "json", "--ignore-not-found=true"},
 	},
 }
 
