@@ -181,6 +181,119 @@ func TestPipeline_HappyPath(t *testing.T) {
 		"disk-snap snapshot.yaml must not be rewritten on second run")
 }
 
+// TestPipeline_ChecksumMismatchAfterFinalize_SurfacesNotReblessed is the
+// end-to-end regression for resume-checksum-mismatch: a node is fully
+// downloaded and finalized, then its data.bin is corrupted AFTER finalize. On
+// the next Run into the same output dir the run must FAIL with a wrapped
+// ErrChecksumMismatch and MUST NOT re-stamp snapshot.yaml with the corrupt
+// data's digest (the silent re-bless the fix closes).
+func TestPipeline_ChecksumMismatchAfterFinalize_SurfacesNotReblessed(t *testing.T) {
+	rawBlock := bytes.Repeat([]byte("B"), 600)
+
+	srv := makeBlockServer(t, rawBlock)
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	require.NoError(t, runPipeline(context.Background(), cfg))
+
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	assertNodeComplete(t, diskSnapDir)
+
+	// Capture the finalized (correct) checksum and snapshot.yaml mtime.
+	syBefore, err := archive.ReadSnapshotYAML(diskSnapDir)
+	require.NoError(t, err)
+
+	diskSnapYAML := filepath.Join(diskSnapDir, archive.SnapshotYAMLName)
+	yamlModBefore := statMtime(t, diskSnapYAML)
+
+	// Corrupt the finalized volume payload (bit rot / tamper after finalize).
+	blockPath := filepath.Join(diskSnapDir, archive.DataBlockName(".zst"))
+	orig, err := os.ReadFile(blockPath)
+	require.NoError(t, err)
+
+	corrupt := append([]byte(nil), orig...)
+	corrupt[0] ^= 0xFF
+	require.NoError(t, os.WriteFile(blockPath, corrupt, 0o644))
+
+	time.Sleep(20 * time.Millisecond)
+
+	// The next run must surface the mismatch, not skip-and-re-bless it.
+	err = runPipeline(context.Background(), cfg)
+	require.Error(t, err, "a post-finalize checksum mismatch must fail the run")
+	require.ErrorIs(t, err, archive.ErrChecksumMismatch)
+
+	// snapshot.yaml must NOT be rewritten to the corrupt data's digest.
+	require.Equal(t, yamlModBefore, statMtime(t, diskSnapYAML),
+		"snapshot.yaml must not be re-stamped over corrupt data")
+
+	syAfter, err := archive.ReadSnapshotYAML(diskSnapDir)
+	require.NoError(t, err)
+	require.Equal(t, syBefore.Checksum.Hex, syAfter.Checksum.Hex,
+		"recorded checksum must not be re-blessed to the corrupt digest")
+}
+
+// TestPipeline_CrashWindowDeleteSnapshotYAML_ReFinalizes pins the crash-window
+// regression that must keep working: data committed but snapshot.yaml never
+// written (here: deleted after a full run) re-finalizes on the next run rather
+// than being surfaced as a mismatch.
+func TestPipeline_CrashWindowDeleteSnapshotYAML_ReFinalizes(t *testing.T) {
+	rawBlock := bytes.Repeat([]byte("B"), 600)
+
+	srv := makeBlockServer(t, rawBlock)
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	require.NoError(t, runPipeline(context.Background(), cfg))
+
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	assertNodeComplete(t, diskSnapDir)
+
+	// Delete ONLY snapshot.yaml; the merged data.bin.zst and the identity marker
+	// written on the first run stay in place.
+	require.NoError(t, os.Remove(filepath.Join(diskSnapDir, archive.SnapshotYAMLName)))
+
+	// OpenExport must not run: the merged data is detected and only FinalizeNode
+	// re-runs.
+	cfg.OpenExport = func(_ context.Context, _ string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+		t.Error("OpenExport must not be called: data.bin.zst already merged")
+
+		return nil, errors.New("unexpected OpenExport call")
+	}
+
+	require.NoError(t, runPipeline(context.Background(), cfg))
+	assertNodeComplete(t, diskSnapDir)
+}
+
 // TestPipeline_OpenExportErrorReleasesCleanly is a regression guard for a
 // live-reproduced leak: OpenExport's production implementation creates the
 // DataExport CR (EnsureDataExport) BEFORE waiting for it to become Ready

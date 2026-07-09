@@ -20,6 +20,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -47,6 +48,55 @@ func makeCompleteNode(t *testing.T, parent, kind, name string, id archive.NodeId
 
 	if err := os.WriteFile(manifestPath, []byte("apiVersion: v1\nkind: ConfigMap\n"), 0o644); err != nil {
 		t.Fatalf("write manifest: %v", err)
+	}
+
+	checksum, err := archive.ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("compute checksum: %v", err)
+	}
+
+	sy := archive.SnapshotYAML{
+		APIVersion: id.APIVersion,
+		Kind:       id.Kind,
+		Name:       id.Name,
+		Namespace:  id.Namespace,
+		SourceRef:  id.SourceRef,
+		Checksum:   checksum,
+	}
+
+	if err := archive.WriteSnapshotYAML(nodeDir, sy); err != nil {
+		t.Fatalf("write snapshot.yaml: %v", err)
+	}
+
+	return nodeDir
+}
+
+// makeCompleteNodeWithBlock is makeCompleteNode plus a finalized block volume:
+// it writes one manifest AND a data.bin.zst payload, computes the checksum over
+// both, and writes a matching snapshot.yaml. It models a fully finalized
+// data-owning node whose volume bytes can later be corrupted post-finalize.
+func makeCompleteNodeWithBlock(t *testing.T, parent, kind, name string, id archive.NodeIdentity, blockData []byte) string {
+	t.Helper()
+
+	dirPart := name
+	if id.DirName != "" {
+		dirPart = id.DirName
+	}
+
+	nodeDir := filepath.Join(parent, archive.NodeDirName(kind, dirPart))
+
+	if err := os.MkdirAll(filepath.Join(nodeDir, archive.ManifestsDirName), 0o755); err != nil {
+		t.Fatalf("mkdir manifests: %v", err)
+	}
+
+	manifestPath := filepath.Join(nodeDir, archive.ManifestsDirName, archive.ManifestFileName("ConfigMap", "app", ""))
+
+	if err := os.WriteFile(manifestPath, []byte("apiVersion: v1\nkind: ConfigMap\n"), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(nodeDir, archive.DataBlockName(".zst")), blockData, 0o644); err != nil {
+		t.Fatalf("write data.bin.zst: %v", err)
 	}
 
 	checksum, err := archive.ComputeNodeChecksum(nodeDir)
@@ -914,6 +964,196 @@ func TestNodeIdentityMarker_DoesNotAffectChecksum(t *testing.T) {
 
 	if err := archive.VerifyNode(nodeDir); err != nil {
 		t.Errorf("VerifyNode must still pass with a marker present: %v", err)
+	}
+}
+
+// TestScanNode_ChecksumMismatch_TamperedData_SurfacesError proves that a
+// finalized node dir whose data.bin was corrupted AFTER finalize (bit rot /
+// tamper) is surfaced as a checksum mismatch on the next scan, NOT routed into
+// classifyPartialDir and silently re-blessed. This is the core bug fix.
+func TestScanNode_ChecksumMismatch_TamperedData_SurfacesError(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	id := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "disk-1",
+		Namespace:  "default",
+		SourceRef:  "vd/disk-1",
+	}
+
+	nodeDir := makeCompleteNodeWithBlock(t, parent, id.Kind, id.Name, id, []byte("original-block-bytes"))
+
+	// VerifyNode passes on the pristine node.
+	if err := archive.VerifyNode(nodeDir); err != nil {
+		t.Fatalf("pristine node must verify: %v", err)
+	}
+
+	// Corrupt one byte of the finalized volume payload.
+	if err := os.WriteFile(filepath.Join(nodeDir, archive.DataBlockName(".zst")), []byte("corrupted-block-bytes"), 0o644); err != nil {
+		t.Fatalf("corrupt data.bin.zst: %v", err)
+	}
+
+	plan, err := archive.ScanNode(parent, id)
+	if !errors.Is(err, archive.ErrChecksumMismatch) {
+		t.Fatalf("err = %v, want wrapped ErrChecksumMismatch", err)
+	}
+
+	if plan.Done {
+		t.Error("a corrupt finalized dir must not be reported done/resumable")
+	}
+
+	if !strings.Contains(err.Error(), nodeDir) {
+		t.Errorf("error must name the node directory %q, got: %v", nodeDir, err)
+	}
+}
+
+// TestScanNode_ChecksumMismatch_TamperedManifest_SurfacesError is the same guard
+// for a manifests/*.yaml edited after finalize.
+func TestScanNode_ChecksumMismatch_TamperedManifest_SurfacesError(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	id := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "disk-1",
+		Namespace:  "default",
+		SourceRef:  "vd/disk-1",
+	}
+
+	nodeDir := makeCompleteNode(t, parent, id.Kind, id.Name, id)
+
+	manifestPath := filepath.Join(nodeDir, archive.ManifestsDirName, archive.ManifestFileName("ConfigMap", "app", ""))
+
+	if err := os.WriteFile(manifestPath, []byte("apiVersion: v1\nkind: ConfigMap\n# tampered\n"), 0o644); err != nil {
+		t.Fatalf("tamper manifest: %v", err)
+	}
+
+	_, err := archive.ScanNode(parent, id)
+	if !errors.Is(err, archive.ErrChecksumMismatch) {
+		t.Fatalf("err = %v, want wrapped ErrChecksumMismatch", err)
+	}
+}
+
+// TestScanNode_ChecksumMismatch_ForeignDir_Redirects proves the fix does not
+// break the collision contract: a FOREIGN finalized-but-corrupt dir (identity
+// does not match the planned node) is still collision-redirected to a fresh
+// sibling path, not surfaced as an error, so unrelated data is left untouched.
+func TestScanNode_ChecksumMismatch_ForeignDir_Redirects(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+
+	idA := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "disk-1",
+		DirName:    "source-disk",
+		Namespace:  "default",
+		SourceRef:  "vd/disk-a",
+	}
+
+	nodeDir := makeCompleteNodeWithBlock(t, parent, idA.Kind, idA.Name, idA, []byte("foreign-original"))
+
+	// Corrupt the foreign node after finalize.
+	if err := os.WriteFile(filepath.Join(nodeDir, archive.DataBlockName(".zst")), []byte("foreign-corrupted"), 0o644); err != nil {
+		t.Fatalf("corrupt foreign data: %v", err)
+	}
+
+	// Planned node shares the on-disk DirName but has a different identity.
+	idB := idA
+	idB.Name = "disk-2"
+	idB.SourceRef = "vd/disk-b"
+
+	plan, err := archive.ScanNode(parent, idB)
+	if err != nil {
+		t.Fatalf("foreign corrupt dir must redirect, not error: %v", err)
+	}
+
+	if plan.Done {
+		t.Error("Done = true, want not done (redirect)")
+	}
+
+	if plan.TargetDir == nodeDir {
+		t.Error("foreign corrupt dir must be collision-redirected, not resumed into")
+	}
+}
+
+// TestScanNode_SnapshotYAMLMissing_StillResumes is the crash-window regression:
+// data committed but snapshot.yaml never written (VerifyNode ->
+// ErrSnapshotYAMLMissing) must keep resuming in place, unchanged by the
+// checksum-mismatch fix.
+func TestScanNode_SnapshotYAMLMissing_StillResumes(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	id := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "disk-1",
+		Namespace:  "default",
+		SourceRef:  "vd/disk-1",
+	}
+
+	nodeDir := makeCompleteNodeWithBlock(t, parent, id.Kind, id.Name, id, []byte("committed-block-bytes"))
+
+	// Simulate the crash window: remove only snapshot.yaml, keep the data and
+	// stamp the identity marker the interrupted run would already have written.
+	if err := os.Remove(filepath.Join(nodeDir, archive.SnapshotYAMLName)); err != nil {
+		t.Fatalf("remove snapshot.yaml: %v", err)
+	}
+
+	writeMarker(t, nodeDir, id)
+
+	plan, err := archive.ScanNode(parent, id)
+	if err != nil {
+		t.Fatalf("crash-window dir must resume, not error: %v", err)
+	}
+
+	if plan.Done {
+		t.Error("Done = true, want not done (resume to re-finalize)")
+	}
+
+	if plan.TargetDir != nodeDir {
+		t.Errorf("TargetDir = %q, want %q (resume in place)", plan.TargetDir, nodeDir)
+	}
+}
+
+// TestScanAbsolute_ChecksumMismatch_SurfacesError is the ScanAbsolute (root
+// output path) counterpart: a finalized dir corrupted after finalize surfaces a
+// wrapped ErrChecksumMismatch rather than resuming into it.
+func TestScanAbsolute_ChecksumMismatch_SurfacesError(t *testing.T) {
+	t.Parallel()
+
+	id := archive.NodeIdentity{
+		APIVersion: "storage.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "root",
+		Namespace:  "default",
+	}
+
+	// makeCompleteNodeWithBlock names the dir NodeDirName(kind, name); build the
+	// finalized node under a temp parent, then scan its absolute path directly.
+	parent := t.TempDir()
+	nodeDir := makeCompleteNodeWithBlock(t, parent, id.Kind, id.Name, id, []byte("root-block"))
+
+	if err := os.WriteFile(filepath.Join(nodeDir, archive.DataBlockName(".zst")), []byte("root-block-corrupt"), 0o644); err != nil {
+		t.Fatalf("corrupt data: %v", err)
+	}
+
+	plan, err := archive.ScanAbsolute(nodeDir, id)
+	if !errors.Is(err, archive.ErrChecksumMismatch) {
+		t.Fatalf("err = %v, want wrapped ErrChecksumMismatch", err)
+	}
+
+	if plan.Done {
+		t.Error("a corrupt finalized dir must not be reported done")
+	}
+
+	if !strings.Contains(err.Error(), nodeDir) {
+		t.Errorf("error must name the node directory %q, got: %v", nodeDir, err)
 	}
 }
 

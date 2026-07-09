@@ -146,19 +146,81 @@ func ScanNode(parentDir string, id NodeIdentity) (NodeResumePlan, error) {
 		return NodeResumePlan{}, err
 	}
 
-	if verifyErr := VerifyNode(primaryDir); verifyErr == nil {
+	verifyErr := VerifyNode(primaryDir)
+	if verifyErr == nil {
 		return classifyCompleteDir(parentDir, primaryDir, id)
 	}
 
-	// A partial dir is resumable only with proven identity. On a mismatched or
-	// absent-but-non-empty marker the node is redirected to a stable collision
-	// path (mirroring classifyCompleteDir) instead of resuming into another
+	// A PRESENT snapshot.yaml whose recorded checksum no longer matches the
+	// on-disk payload is post-finalize corruption (bit rot / partial disk
+	// failure / manual edit), NOT an unfinished download. Routing it into
+	// classifyPartialDir would let the pipeline's "already merged/complete"
+	// skip re-finalize the corrupt bytes and silently re-stamp a fresh checksum
+	// over them, laundering a mismatch VerifyNode correctly detected (inv. #9,
+	// code-style §6a "existence is not validity"). Surface it instead of
+	// resuming into it.
+	if errors.Is(verifyErr, ErrChecksumMismatch) {
+		return classifyChecksumMismatchDir(primaryDir, id, func(sy SnapshotYAML) (NodeResumePlan, error) {
+			collisionDir := CollisionNodeDir(parentDir, id.Kind, nodeDirComponent(id), ShortChecksum(sy.Checksum.Hex))
+
+			return NodeResumePlan{TargetDir: collisionDir, Observed: ObservedPending}, nil
+		})
+	}
+
+	// Any other VerifyNode failure keeps its existing handling. In particular
+	// the crash window (data committed, snapshot.yaml never written ->
+	// ErrSnapshotYAMLMissing) and I/O errors flow here: a partial dir is
+	// resumable only with proven identity. On a mismatched or absent-but-
+	// non-empty marker the node is redirected to a stable collision path
+	// (mirroring classifyCompleteDir) instead of resuming into another
 	// snapshot's bytes.
 	return classifyPartialDir(primaryDir, id, func(mm partialMismatch) (NodeResumePlan, error) {
 		collisionDir := CollisionNodeDir(parentDir, id.Kind, nodeDirComponent(id), mm.short)
 
 		return NodeResumePlan{TargetDir: collisionDir, Observed: ObservedPending}, nil
 	})
+}
+
+// classifyChecksumMismatchDir handles a node directory that HAS a snapshot.yaml
+// (so it was finalized at least once) whose recorded checksum no longer matches
+// its on-disk payload.
+//
+// This is distinct from the crash window (data committed, snapshot.yaml never
+// written -> VerifyNode returns ErrSnapshotYAMLMissing), where re-finalizing is
+// the correct resume behavior and stays untouched.
+//
+// If the stored identity matches the planned node, the corruption is in THIS
+// snapshot's own dir: surface a clear, operator-facing error naming the dir and
+// both short digests (stored vs computed) instead of re-blessing the corrupt
+// bytes — option (a) of the resume-checksum-mismatch task, the safe choice for a
+// backup tool. Otherwise the dir is a foreign finalized-but-corrupt node that
+// merely collided on the directory name; onForeign redirects (ScanNode) or
+// rejects (ScanAbsolute) it exactly as a foreign VALID dir is handled, so
+// unrelated data is never overwritten.
+func classifyChecksumMismatchDir(nodeDir string, id NodeIdentity, onForeign func(sy SnapshotYAML) (NodeResumePlan, error)) (NodeResumePlan, error) {
+	sy, err := ReadSnapshotYAML(nodeDir)
+	if err != nil {
+		return NodeResumePlan{}, fmt.Errorf("read snapshot.yaml in %s: %w", nodeDir, err)
+	}
+
+	if !matchesIdentity(sy, id) {
+		return onForeign(sy)
+	}
+
+	// VerifyNode already recomputed the digest successfully to reach the
+	// mismatch verdict, so this recompute succeeds in practice; fall back to a
+	// placeholder rather than masking the mismatch with a recompute-time error.
+	computed := "unavailable"
+	if got, csErr := ComputeNodeChecksum(nodeDir); csErr == nil {
+		computed = got.Short
+	}
+
+	return NodeResumePlan{}, fmt.Errorf(
+		"%w: node directory %s no longer matches its recorded checksum "+
+			"(recorded %s, computed %s): its manifests or volume data were modified "+
+			"after the node was finalized; delete the node directory to re-download it, "+
+			"or choose a different output directory",
+		ErrChecksumMismatch, nodeDir, ShortChecksum(sy.Checksum.Hex), computed)
 }
 
 // classifyCompleteDir handles the case where the primary directory passes
@@ -342,7 +404,8 @@ func ScanAbsolute(nodeDir string, id NodeIdentity) (NodeResumePlan, error) {
 		return NodeResumePlan{}, err
 	}
 
-	if verifyErr := VerifyNode(nodeDir); verifyErr == nil {
+	verifyErr := VerifyNode(nodeDir)
+	if verifyErr == nil {
 		sy, err := ReadSnapshotYAML(nodeDir)
 		if err != nil {
 			return NodeResumePlan{}, fmt.Errorf("read snapshot.yaml in %s: %w", nodeDir, err)
@@ -354,6 +417,19 @@ func ScanAbsolute(nodeDir string, id NodeIdentity) (NodeResumePlan, error) {
 		}
 
 		return NodeResumePlan{TargetDir: nodeDir, Done: true, Observed: ObservedDone}, nil
+	}
+
+	// A PRESENT snapshot.yaml whose recorded checksum no longer matches the
+	// on-disk payload is post-finalize corruption, not an unfinished download:
+	// surface it rather than resuming into it and re-blessing the corrupt bytes
+	// (inv. #9). A foreign finalized-but-corrupt occupant is rejected with
+	// ErrIdentityMismatch, exactly as a foreign VALID dir is above, so the
+	// caller can pick a different output path.
+	if errors.Is(verifyErr, ErrChecksumMismatch) {
+		return classifyChecksumMismatchDir(nodeDir, id, func(sy SnapshotYAML) (NodeResumePlan, error) {
+			return NodeResumePlan{}, fmt.Errorf("%w: %s contains %s/%s, expected %s/%s",
+				ErrIdentityMismatch, nodeDir, sy.Kind, sy.Name, id.Kind, id.Name)
+		})
 	}
 
 	// A partial dir under a user-controlled path is resumable only with proven
