@@ -51,13 +51,16 @@ import (
 // that the local, self-referential archive.VerifyNode checksum cannot detect on its own.
 var ErrSourceHashMismatch = errors.New("staged file does not match source-provided MD5 digest")
 
-// ErrUnsafePath is returned when a path or symlink target supplied by the data-exporter
-// listing fails safety validation. The listing (item.Name, item.TargetPath) is untrusted
-// input from a potentially compromised or buggy exporter: it MUST be validated before
-// ever being used in a filepath.Join or written into a tar header, or a malicious
-// response could stage files outside the intended directory (path traversal / zip-slip)
-// or materialize a symlink that escapes the extracted tree on restore. See
-// collectAllFSItems (the name/relPath ingestion checkpoint) and tar.go's
+// ErrUnsafePath is returned when a path, symlink target, or download URI supplied
+// by the data-exporter listing fails safety validation. The listing (item.Name,
+// item.TargetPath, item.URI) is untrusted input from a potentially compromised or
+// buggy exporter: it MUST be validated before ever being used in a filepath.Join,
+// written into a tar header, or turned into an HTTP request, or a malicious
+// response could stage files outside the intended directory (path traversal /
+// zip-slip), materialize a symlink that escapes the extracted tree on restore, or
+// redirect a credential-bearing per-file GET to a foreign origin (token
+// exfiltration / SSRF / bytes sourced from an attacker host). See collectAllFSItems
+// (the name/relPath and same-origin URI ingestion checkpoint) and tar.go's
 // writeLinkEntry (the symlink-target write guard).
 var ErrUnsafePath = errors.New("server-provided path is unsafe")
 
@@ -320,7 +323,29 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 			return nil, fmt.Errorf("parse item URI %q: %w", item.URI, err)
 		}
 
-		absURI := base.ResolveReference(ref).String()
+		resolved := base.ResolveReference(ref)
+
+		// The listing is untrusted input (same threat model as sanitizeRelPath):
+		// per RFC 3986 an ABSOLUTE item.URI fully REPLACES base, so one hostile
+		// entry could redirect a per-file GET (stageWholeFile's GetFile,
+		// stageChunkedFile's RangeGet, or a recursive sub-listing) to an
+		// attacker-controlled origin. Every such request rides the
+		// credential-bearing SafeClient transport, and client-go's
+		// bearer-token/basic-auth round-trippers attach the cluster credential to
+		// EVERY request regardless of destination host — so a foreign-host entry
+		// would exfiltrate the token, and source archive bytes (whose only
+		// integrity proof, the MD5, comes from the same listing) from a foreign
+		// origin. The real exporter only ever emits relative URIs under its own
+		// server, so any resolved URI that leaves base's origin is rejected here,
+		// at the single ingestion checkpoint, before any fetch is issued. This
+		// covers file URIs and — because the guard precedes the type switch — the
+		// recursive directory walk's absURI as well.
+		if !sameOrigin(base, resolved) {
+			return nil, fmt.Errorf("listing %s: %w: item URI %q resolves to %q, off the files-root origin %q",
+				dirURL, ErrUnsafePath, item.URI, resolved.String(), base.String())
+		}
+
+		absURI := resolved.String()
 		mode, uid, gid, mtime, md5Hex := parseItemAttrs(item.Attributes)
 
 		switch item.Type {
@@ -373,6 +398,45 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 	}
 
 	return result, nil
+}
+
+// sameOrigin reports whether resolved shares the DataExport files-root origin of
+// base: same scheme and same host:port, with the scheme's default port
+// normalized so http://h and http://h:80 (and https://h and https://h:443) are
+// treated as the same origin. A relative item.URI always resolves to base's own
+// scheme/host, so it passes unchanged; only an absolute URI that names a
+// different scheme, host, or explicit non-default port is rejected. Scheme and
+// host are compared case-insensitively (url.Parse lowercases the scheme but not
+// the host).
+func sameOrigin(base, resolved *url.URL) bool {
+	return strings.EqualFold(base.Scheme, resolved.Scheme) &&
+		strings.EqualFold(canonicalHostPort(base), canonicalHostPort(resolved))
+}
+
+// canonicalHostPort returns u's host with an explicit port, substituting the
+// scheme's default port when u carries none, so a same-origin comparison is not
+// fooled by an omitted-vs-explicit default port.
+func canonicalHostPort(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		port = defaultPortForScheme(u.Scheme)
+	}
+
+	return u.Hostname() + ":" + port
+}
+
+// defaultPortForScheme returns the well-known default port for scheme, or "" for
+// a scheme with no known default (in which case two portless URLs of that scheme
+// still compare equal on the empty port).
+func defaultPortForScheme(scheme string) string {
+	switch strings.ToLower(scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
 
 // stageCompressedFile stages one file to stagingDir/<relPath><codec.Ext()>,

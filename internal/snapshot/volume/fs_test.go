@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -2825,4 +2826,230 @@ func TestDownloadFilesystemVolume_ChunkedResume_UsesReservedChunkDir(t *testing.
 	if !bytes.Equal(entries["big.bin"], content) {
 		t.Error("resumed big.bin content mismatch")
 	}
+}
+
+// ── same-origin item URI enforcement (fs-listing-enforce-same-origin-item-uri) ──
+
+// newCountingEvilServer stands up an httptest.Server on its own port that counts
+// EVERY request it receives. It plays the attacker host a hostile listing entry
+// would redirect a credential-bearing GET to; a passing same-origin guard means
+// this server must observe ZERO requests. It serves attacker bytes on any path so
+// that a regression manifests as wrong content rather than a connection hang.
+func newCountingEvilServer(t *testing.T) (*httptest.Server, func() int) {
+	t.Helper()
+
+	var (
+		mu  sync.Mutex
+		cnt int
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		cnt++
+		mu.Unlock()
+
+		_, _ = io.WriteString(w, "attacker-controlled-bytes")
+	}))
+
+	t.Cleanup(srv.Close)
+
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return cnt
+	}
+
+	return srv, count
+}
+
+// TestDownloadFilesystemVolume_RejectsForeignOriginFileURI is the primary
+// regression test for fs-listing-enforce-same-origin-item-uri: a listing file
+// item whose (absolute) URI names a different host:port than the files-root base
+// must be rejected with a wrapped ErrUnsafePath that names the offending URI,
+// BEFORE any HTTP fetch — proven by a second httptest.Server (a different port,
+// standing in for the attacker host) receiving ZERO requests. A plain errors.Is
+// check alone would not prove the credential-bearing GET was never issued.
+func TestDownloadFilesystemVolume_RejectsForeignOriginFileURI(t *testing.T) {
+	t.Parallel()
+
+	evilSrv, evilCount := newCountingEvilServer(t)
+	leakURI := evilSrv.URL + "/leak"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/files/" {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+			`{"name":"leak.txt","type":"file","uri":"`+leakURI+`","attributes":{}}`+
+			`]}`)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil,
+	)
+	if err == nil {
+		t.Fatal("expected a foreign-origin file URI to be rejected, got nil")
+	}
+
+	if !errors.Is(err, volume.ErrUnsafePath) {
+		t.Errorf("expected errors.Is(err, ErrUnsafePath), got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), leakURI) {
+		t.Errorf("error must name the offending URI %q, got: %v", leakURI, err)
+	}
+
+	if got := evilCount(); got != 0 {
+		t.Errorf("evil server received %d request(s); want 0 (no fetch may reach a foreign origin)", got)
+	}
+
+	if _, statErr := os.Stat(tarPath); !os.IsNotExist(statErr) {
+		t.Error("data.tar must not be created when a listing entry is rejected")
+	}
+}
+
+// TestDownloadFilesystemVolume_RejectsForeignOriginDirURI proves the same guard
+// covers the recursive directory walk: a "dir" item whose URI points at a foreign
+// origin is rejected at the ingestion checkpoint, so the sub-listing GET (which
+// would also carry the cluster credential) is never issued — the attacker server
+// observes ZERO requests.
+func TestDownloadFilesystemVolume_RejectsForeignOriginDirURI(t *testing.T) {
+	t.Parallel()
+
+	evilSrv, evilCount := newCountingEvilServer(t)
+	dirURI := evilSrv.URL + "/subdir/"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/files/" {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+			`{"name":"subdir","type":"dir","uri":"`+dirURI+`","attributes":{}}`+
+			`]}`)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil,
+	)
+	if err == nil {
+		t.Fatal("expected a foreign-origin dir URI to be rejected, got nil")
+	}
+
+	if !errors.Is(err, volume.ErrUnsafePath) {
+		t.Errorf("expected errors.Is(err, ErrUnsafePath), got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), dirURI) {
+		t.Errorf("error must name the offending dir URI %q, got: %v", dirURI, err)
+	}
+
+	if got := evilCount(); got != 0 {
+		t.Errorf("evil server received %d request(s); want 0 (foreign dir must be rejected before recursion)", got)
+	}
+}
+
+// TestDownloadFilesystemVolume_AcceptsRelativeAndSameOriginURIs verifies the
+// guard rejects ONLY cross-origin URIs: a listing whose item URIs are relative
+// (the real exporter's shape) and one whose item URI is ABSOLUTE but on the same
+// scheme+host:port as the files root both download unchanged.
+func TestDownloadFilesystemVolume_AcceptsRelativeAndSameOriginURIs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("RelativeURI", func(t *testing.T) {
+		t.Parallel()
+
+		srv, files := fsTestServer(t)
+
+		nodeDir := t.TempDir()
+		tarPath := filepath.Join(nodeDir, archive.FsTarName)
+		stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+		if err := volume.DownloadFilesystemVolume(
+			context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+			2, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil,
+		); err != nil {
+			t.Fatalf("relative-URI listing must download unchanged: %v", err)
+		}
+
+		entries := readTarContents(t, tarPath)
+
+		for _, f := range files {
+			if !bytes.Equal(entries[f.relPath], f.content) {
+				t.Errorf("entry %q: got %q, want %q", f.relPath, entries[f.relPath], f.content)
+			}
+		}
+	})
+
+	t.Run("SameOriginAbsoluteURI", func(t *testing.T) {
+		t.Parallel()
+
+		content := []byte("same-origin-absolute-uri-content")
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/files/":
+				// The item URI is ABSOLUTE but on the same origin as the files
+				// root (built from the live request host) — it must be accepted.
+				abs := "http://" + r.Host + "/files/root.txt"
+
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+					`{"name":"root.txt","type":"file","uri":"`+abs+`","attributes":{}}`+
+					`]}`)
+
+			case "/files/root.txt":
+				_, _ = w.Write(content)
+
+			default:
+				http.NotFound(w, r)
+			}
+		})
+
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+
+		nodeDir := t.TempDir()
+		tarPath := filepath.Join(nodeDir, archive.FsTarName)
+		stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+		if err := volume.DownloadFilesystemVolume(
+			context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+			1, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil,
+		); err != nil {
+			t.Fatalf("same-origin absolute URI must download unchanged: %v", err)
+		}
+
+		entries := readTarContents(t, tarPath)
+		if !bytes.Equal(entries["root.txt"], content) {
+			t.Errorf("entry root.txt: got %q, want %q", entries["root.txt"], content)
+		}
+	})
 }
