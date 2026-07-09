@@ -46,6 +46,19 @@ const (
 	// so without this marker a partial dir carries no identity and could be
 	// silently resumed into by a DIFFERENT snapshot of the same source object.
 	//
+	// LIFECYCLE: the marker lives ONLY for the not-yet-finalized window. Once
+	// snapshot.yaml is durably written, snapshot.yaml is the authoritative
+	// identity record (every Done classification reads identity from it, not the
+	// marker), so volume.FinalizeNode removes the marker strictly AFTER that
+	// write — a crash at any earlier point leaves it in place, so a partial dir
+	// always carries exactly one identity record (inv. #9 preserved). The two
+	// Done=true scan branches (classifyCompleteDir and ScanAbsolute) also remove
+	// a leftover marker via healNodeIdentityMarker, self-healing the crash window
+	// between the snapshot.yaml write and the finalize remove, and archives from
+	// older builds. This keeps a finalized node's on-disk layout to exactly
+	// snapshot.yaml + manifests/ + optional snapshots/ + at most one volume
+	// payload — no stray identity.json.
+	//
 	// It deliberately does NOT end in ".tmp", so resume.go's stale-*.tmp sweep
 	// (removeTmpFiles) never touches it, and it is not one of the fixed file/dir
 	// names ComputeNodeChecksum reads (manifests/, data.bin*, data.tar, data/),
