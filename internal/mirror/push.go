@@ -46,8 +46,8 @@ const (
 
 // PushServiceOptions contains configuration options for PushService
 type PushServiceOptions struct {
-	// BundleDir is the directory containing the bundle to push
-	BundleDir string
+	// Packages is the list of tar/chunked package archive paths to push.
+	Packages []string
 	// WorkingDir is the temporary directory for unpacking bundles
 	WorkingDir string
 }
@@ -155,24 +155,25 @@ func (svc *PushService) Push(ctx context.Context) error {
 	})
 }
 
-// unpackAllPackages unpacks all tar packages from bundle directory into unified directory.
+// unpackAllPackages unpacks all tar packages into the unified directory.
 // All packages are unpacked to the same root - the structure inside each tar
 // should already have the correct paths.
 func (svc *PushService) unpackAllPackages(ctx context.Context, dirPath string) error {
-	entries, err := os.ReadDir(svc.options.BundleDir)
-	if err != nil {
-		return fmt.Errorf("read bundle dir: %w", err)
+	if len(svc.options.Packages) == 0 {
+		return fmt.Errorf("no packages found to push")
 	}
 
-	packages := svc.findPackages(entries)
-	if len(packages) == 0 {
-		return fmt.Errorf("no packages found in bundle directory %q", svc.options.BundleDir)
-	}
+	packages := slices.Clone(svc.options.Packages)
+	slices.Sort(packages)
+	// Drop duplicate archive paths so the same package is not unpacked twice
+	// (which would redo work and overwrite files in the unified directory).
+	packages = slices.Compact(packages)
 
 	svc.userLogger.Infof("Found %d packages to unpack", len(packages))
 
-	for _, pkgName := range packages {
-		if err := svc.unpackPackage(ctx, dirPath, pkgName); err != nil {
+	for _, pkgPath := range packages {
+		pkgName := packageNameFromPath(pkgPath)
+		if err := svc.unpackPackage(ctx, dirPath, pkgPath, pkgName); err != nil {
 			// Log warning but continue with other packages
 			svc.userLogger.Warnf("Failed to unpack %s: %v", pkgName, err)
 		}
@@ -181,43 +182,18 @@ func (svc *PushService) unpackAllPackages(ctx context.Context, dirPath string) e
 	return nil
 }
 
-// findPackages finds all package names (without .tar extension) in the bundle directory.
-// It handles both regular .tar files and chunked packages (.tar.chunk000).
-func (svc *PushService) findPackages(entries []os.DirEntry) []string {
-	packagesSet := make(map[string]struct{})
-
-	for _, entry := range entries {
-		name := entry.Name()
-
-		// Handle regular tar files
-		if strings.HasSuffix(name, ".tar") {
-			pkgName := strings.TrimSuffix(name, ".tar")
-			packagesSet[pkgName] = struct{}{}
-
-			continue
-		}
-
-		// Handle chunked files (e.g., "platform.tar.chunk000")
-		if idx := strings.Index(name, ".tar.chunk"); idx != -1 {
-			pkgName := name[:idx]
-			packagesSet[pkgName] = struct{}{}
-		}
-	}
-
-	packages := make([]string, 0, len(packagesSet))
-	for pkg := range packagesSet {
-		packages = append(packages, pkg)
-	}
-
-	slices.Sort(packages)
-
-	return packages
+// packageNameFromPath derives the package name (used for legacy module detection
+// during unpack) from a package archive path by stripping its directory and the
+// .tar suffix. Callers must pass canonical .tar paths - chunked packages are
+// already collapsed to their .tar name before reaching this point.
+func packageNameFromPath(pkgPath string) string {
+	return strings.TrimSuffix(filepath.Base(pkgPath), ".tar")
 }
 
-// unpackPackage unpacks a single package to the unified directory.
-func (svc *PushService) unpackPackage(ctx context.Context, dirPath, pkgName string) error {
+// unpackPackage unpacks a single package archive into the unified directory.
+func (svc *PushService) unpackPackage(ctx context.Context, dirPath, pkgPath, pkgName string) error {
 	return svc.userLogger.Process(fmt.Sprintf("Unpack %s", pkgName), func() error {
-		pkg, err := svc.openPackage(pkgName)
+		pkg, err := openPackage(pkgPath)
 		if err != nil {
 			return fmt.Errorf("open package: %w", err)
 		}
@@ -232,21 +208,20 @@ func (svc *PushService) unpackPackage(ctx context.Context, dirPath, pkgName stri
 	})
 }
 
-// openPackage opens a package file, trying .tar first, then chunked format.
-func (svc *PushService) openPackage(pkgName string) (io.ReadCloser, error) {
-	tarPath := filepath.Join(svc.options.BundleDir, pkgName+".tar")
-
-	pkg, err := os.Open(tarPath)
+// openPackage opens a package archive by path, trying the path as a plain .tar
+// first, then falling back to the chunked format.
+func openPackage(pkgPath string) (io.ReadCloser, error) {
+	pkg, err := os.Open(pkgPath)
 	if err == nil {
 		return pkg, nil
 	}
 
 	if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("open tar package %q: %w", tarPath, err)
+		return nil, fmt.Errorf("open tar package %q: %w", pkgPath, err)
 	}
 
-	// Try chunked format
-	return chunked.Open(svc.options.BundleDir, pkgName+".tar")
+	// Try chunked format: chunks live next to the package as <name>.tar.NNNN.chunk
+	return chunked.Open(filepath.Dir(pkgPath), filepath.Base(pkgPath))
 }
 
 // pushAllLayouts recursively walks the directory and pushes each OCI layout found.

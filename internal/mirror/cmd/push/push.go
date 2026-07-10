@@ -43,7 +43,18 @@ import (
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
-// CLI Parameters
+// CLI Parameters.
+//
+// Shared state passed between the command's hooks, relying on cobra's
+// PreRun -> Run -> PostRun ordering:
+//   - PreRunE (parseAndValidateParameters) writes RegistryHost and RegistryPath
+//     from the registry argument, plus Packages, TempDir and ImagesBundlePath
+//     via resolvePackages.
+//   - RunE (NewPusher().Execute()) reads them to build the push params and the
+//     push service options.
+//   - PostRunE reads TempDir to remove the temporary directory.
+//
+// The remaining vars are bound to flags by addFlags before Run.
 var (
 	TempDir string
 
@@ -56,6 +67,11 @@ var (
 	Insecure         bool
 	TLSSkipVerify    bool
 	ImagesBundlePath string
+	Files            []string
+
+	// Packages holds the resolved list of tar/chunked package archive paths to push,
+	// assembled from the bundle directory argument and/or the --file flag.
+	Packages []string
 
 	MirrorTimeout time.Duration = -1
 )
@@ -89,13 +105,16 @@ valid license for any commercial version of the Deckhouse Kubernetes Platform.
 
 func NewCommand() *cobra.Command {
 	pushCmd := &cobra.Command{
-		Use:           "push <images-bundle-path> <registry>",
+		Use:           "push [images-bundle-path] <registry>",
 		Short:         "Copy Deckhouse Kubernetes Platform distribution to the third-party registry",
 		Long:          pushLong,
+		Args:          cobra.RangeArgs(1, 2),
 		ValidArgs:     []string{"images-bundle-path", "registry"},
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		PreRunE:       parseAndValidateParameters,
+		// PreRunE fills the package-level CLI Parameters that RunE and PostRunE
+		// consume; see the "CLI Parameters" var block for the write/read contract.
+		PreRunE: parseAndValidateParameters,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return NewPusher().Execute()
 		},
@@ -238,7 +257,7 @@ func (p *Pusher) executeNewPush() error {
 	svc := mirror.NewPushService(
 		client,
 		&mirror.PushServiceOptions{
-			BundleDir:  p.pushParams.BundleDir,
+			Packages:   Packages,
 			WorkingDir: p.pushParams.WorkingDir,
 		},
 		logger.Named("push"),

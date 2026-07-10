@@ -28,6 +28,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -306,8 +307,15 @@ func TestRepro_MirrorPullThenPush_TransientBlobFailureLosesImage(t *testing.T) {
 	destReg := upfake.NewRegistry("harbor.example.com/deckhouse/ee")
 	destClient := pkgclient.Adapt(upfake.NewClient(destReg))
 
+	// The new push API consumes the packed .tar archives Pull wrote into
+	// bundleDir rather than the (already-consumed) unpacked layout. Pull tars
+	// the platform layout into bundleDir/platform.tar, so hand that package to
+	// the push service.
+	pkgPath := filepath.Join(bundleDir, "platform.tar")
+	require.FileExists(t, pkgPath, "pull must produce platform.tar in the bundle dir")
+
 	pushSvc := NewPushService(destClient, &PushServiceOptions{
-		BundleDir:  bundleDir,
+		Packages:   []string{pkgPath},
 		WorkingDir: t.TempDir(),
 	}, logger, userLogger)
 	require.NoError(t, pushSvc.Push(context.Background()),

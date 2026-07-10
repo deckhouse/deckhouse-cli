@@ -303,21 +303,6 @@ tasks:
     cmds:
       - rm -rf ./build ./dist ./d8
 
-  release:tag:
-    desc: Tag current main branch state as new release. Provide version tag as argument (eg. task {{.TASK}} -- v1.2.3).
-    preconditions:
-      - sh: test $(git rev-parse --abbrev-ref HEAD) = "main"
-        msg: This can only be done on main branch
-      - sh: '[[ "{{.CLI_ARGS}}" =~ ^v\d+.\d+.\d+$ ]] || exit 1'
-        msg: Provide valid semver prefixed with "v" (eg. task {{.TASK}} -- v1.2.3) to be used as version
-    prompt:
-      - "Tag current main branch state as new release? ({{.CLI_ARGS}})"
-      - "Have you created Github release draft for {{.CLI_ARGS}} tag?"
-    cmds:
-      - git tag -s {{.CLI_ARGS}} -m 'Signed {{.CLI_ARGS}} release'
-      - git push origin {{.CLI_ARGS}}
-      - echo "Release tag created, now publish your Github release so that CI can upload build artifacts to it."
-
   release:sign:
     desc: "Sign last version tag + origin/main and push signatures."
     deps: [checkKubectl]
