@@ -20,6 +20,7 @@ func DefaultKubeconfigPath() string {
 	if p := os.Getenv(clientcmd.RecommendedConfigPathEnvVar); p != "" {
 		return p
 	}
+
 	return clientcmd.RecommendedHomeFile
 }
 
