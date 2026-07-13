@@ -12,7 +12,7 @@ func addPersistentFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringP(
 		"kubeconfig", "k",
 		defaultKubeconfigPath,
-		"KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)",
+		"Path to kubeconfig file. (default is $KUBECONFIG when it is set, otherwise the default kubeconfig path for the current OS user)",
 	)
 
 	flagSet.String("context", "", "The name of the kubeconfig context to use")

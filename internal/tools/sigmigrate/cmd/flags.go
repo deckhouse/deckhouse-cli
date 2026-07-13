@@ -51,7 +51,7 @@ func addFlags(flags *pflag.FlagSet) {
 	flags.String(
 		"kubeconfig",
 		defaultKubeconfigPath,
-		"Path to the kubeconfig file to use for CLI requests. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)",
+		"Path to the kubeconfig file to use for CLI requests. (default is $KUBECONFIG when it is set, otherwise the default kubeconfig path for the current OS user)",
 	)
 
 	flags.String(
