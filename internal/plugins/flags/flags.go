@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/pflag"
 
 	rppflags "github.com/deckhouse/deckhouse-cli/internal/rpp/flags"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 const (
@@ -61,11 +62,7 @@ func skipClusterChecksDefault() bool {
 }
 
 func defaultKubeconfigPath() string {
-	if v := os.Getenv("KUBECONFIG"); v != "" {
-		return v
-	}
-
-	return os.ExpandEnv("$HOME/.kube/config")
+	return utilk8s.DefaultKubeconfigPath()
 }
 
 func AddFlags(flagSet *pflag.FlagSet) {

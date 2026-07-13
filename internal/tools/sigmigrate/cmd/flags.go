@@ -17,11 +17,10 @@ limitations under the License.
 package cmd
 
 import (
-	"os"
-
 	"github.com/spf13/pflag"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/sigmigrate"
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 const (
@@ -47,10 +46,7 @@ func addFlags(flags *pflag.FlagSet) {
 		"Set the log level (INFO, DEBUG, TRACE). Defaults to DEBUG.",
 	)
 
-	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
-	if p := os.Getenv("KUBECONFIG"); p != "" {
-		defaultKubeconfigPath = p
-	}
+	defaultKubeconfigPath := utilk8s.DefaultKubeconfigPath()
 
 	flags.String(
 		"kubeconfig",
