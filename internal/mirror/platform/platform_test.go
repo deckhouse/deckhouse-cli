@@ -312,3 +312,54 @@ func TestService_versionsToMirror_Deduplication(t *testing.T) {
 	// No custom tags
 	assert.Empty(t, result.CustomTags)
 }
+
+func TestCheckSuspendedChannels(t *testing.T) {
+	tests := []struct {
+		name            string
+		matchedChannels []string
+		suspended       suspendedChannels
+		wantErr         string
+	}{
+		{
+			name:            "no suspended channels",
+			matchedChannels: []string{"alpha", "stable"},
+			suspended:       suspendedChannels{},
+		},
+		{
+			name:            "suspension outside of matched channels is ignored",
+			matchedChannels: []string{"stable"},
+			suspended:       suspendedChannels{"rock-solid": {}},
+		},
+		{
+			name:            "no matched channels",
+			matchedChannels: nil,
+			suspended:       suspendedChannels{"rock-solid": {}},
+		},
+		{
+			name:            "single matched suspended channel keeps the legacy message",
+			matchedChannels: []string{"rock-solid"},
+			suspended:       suspendedChannels{"rock-solid": {}},
+			wantErr:         `source registry contains suspended release channel "rock-solid", try again later (use --ignore-suspend to override)`,
+		},
+		{
+			name:            "multiple matched suspended channels are sorted and pluralized",
+			matchedChannels: []string{"rock-solid", "stable", "alpha"},
+			suspended:       suspendedChannels{"rock-solid": {}, "alpha": {}},
+			wantErr:         `source registry contains suspended release channels "alpha", "rock-solid", try again later (use --ignore-suspend to override)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkSuspendedChannels(tt.matchedChannels, tt.suspended)
+
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+
+			require.Error(t, err)
+			assert.Equal(t, tt.wantErr, err.Error())
+		})
+	}
+}

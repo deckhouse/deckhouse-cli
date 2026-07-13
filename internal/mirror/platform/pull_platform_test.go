@@ -55,25 +55,27 @@ userLogger *log.SLogger,
 	}
 }
 
-// suspendedStub returns a stub where the alpha release channel is suspended
-// (version.json contains "suspend": true).
-func suspendedStub() localreg.Client {
-	// reuse the full stub but replace the alpha release-channel image
+// suspendedStubWith returns a stub with the five standard release channels
+// where every channel listed in suspendedChannels carries "suspend": true in
+// its version.json. extraTags are published to the root, install and
+// install-standalone repositories only, so they match no channel version.
+func suspendedStubWith(suspendedChannels []string, extraTags ...string) localreg.Client {
 	reg := upfake.NewRegistry(stubRootURL)
 
-	// Standard channels — alpha is suspended.
-	channels := map[string]struct {
-		version  string
-		suspend  bool
-	}{
-		"alpha":        {version: "v1.72.10", suspend: true},
-		"beta":         {version: "v1.71.0"},
-		"early-access": {version: "v1.70.0"},
-		"stable":       {version: "v1.69.0"},
-		"rock-solid":   {version: "v1.68.0"},
+	suspended := make(map[string]bool, len(suspendedChannels))
+	for _, ch := range suspendedChannels {
+		suspended[ch] = true
 	}
-	for ch, data := range channels {
-		content := fmt.Sprintf(`{"version":%q,"suspend":%v}`, data.version, data.suspend)
+
+	channels := map[string]string{
+		"alpha":        "v1.72.10",
+		"beta":         "v1.71.0",
+		"early-access": "v1.70.0",
+		"stable":       "v1.69.0",
+		"rock-solid":   "v1.68.0",
+	}
+	for ch, version := range channels {
+		content := fmt.Sprintf(`{"version":%q,"suspend":%v}`, version, suspended[ch])
 		img := upfake.NewImageBuilder().WithFile("version.json", content).MustBuild()
 		reg.MustAddImage("release-channel", ch, img)
 	}
@@ -81,6 +83,7 @@ func suspendedStub() localreg.Client {
 	// Root + installer repos (same as default stub).
 	versionTags := []string{"alpha", "beta", "early-access", "stable", "rock-solid",
 		"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0", "pr12345"}
+	versionTags = append(versionTags, extraTags...)
 	for _, tag := range versionTags {
 		img := upfake.NewImageBuilder().
 			WithFile("version.json", `{"version":"v1.72.10"}`).
@@ -90,6 +93,37 @@ func suspendedStub() localreg.Client {
 		reg.MustAddImage("install", tag, img)
 		reg.MustAddImage("install-standalone", tag, img)
 	}
+	return pkgclient.Adapt(upfake.NewClient(reg))
+}
+
+// suspendedStub returns a stub where the alpha release channel is suspended
+// (version.json contains "suspend": true).
+func suspendedStub() localreg.Client {
+	return suspendedStubWith([]string{"alpha"})
+}
+
+// suspendedLTSOnlyStub builds a CSE-like registry whose only release channel
+// is a suspended LTS. extraTags are published to the root, install and
+// install-standalone repositories alongside the LTS version tag.
+func suspendedLTSOnlyStub(ltsVersion string, extraTags ...string) localreg.Client {
+	reg := upfake.NewRegistry(stubRootURL)
+
+	channelImg := upfake.NewImageBuilder().
+		WithFile("version.json", fmt.Sprintf(`{"version":%q,"suspend":true}`, ltsVersion)).
+		MustBuild()
+	reg.MustAddImage("release-channel", "lts", channelImg)
+
+	tags := append([]string{ltsVersion}, extraTags...)
+	for _, tag := range tags {
+		img := upfake.NewImageBuilder().
+			WithFile("version.json", fmt.Sprintf(`{"version":%q}`, ltsVersion)).
+			WithFile("deckhouse/candi/images_digests.json", `{}`).
+			MustBuild()
+		reg.MustAddImage("", tag, img)
+		reg.MustAddImage("install", tag, img)
+		reg.MustAddImage("install-standalone", tag, img)
+	}
+
 	return pkgclient.Adapt(upfake.NewClient(reg))
 }
 
@@ -153,6 +187,162 @@ func TestPullPlatform_IgnoreSuspend_SucceedsWithSuspendedChannel(t *testing.T) {
 	require.NoError(t, err)
 	// All 5 channel versions + 5 channel aliases should be present.
 	assert.GreaterOrEqual(t, len(svc.downloadList.Deckhouse), 5)
+}
+
+// ---- TargetTag vs suspended channels ----
+
+// TestPullPlatform_DryRun_SemverTag_UnrelatedChannelSuspended_Succeeds is the
+// regression for `d8 mirror pull --deckhouse-tag vX.Y.Z` aborting with
+//
+//	failed to get release channel version from registry for channel rock-solid:
+//	source registry contains suspended release channel "rock-solid", try again later
+//
+// when the requested version does not belong to the suspended channel at all.
+// A suspension may only block pulls that resolve to the suspended channel;
+// pinning an unrelated tag must succeed and must not enqueue the suspended
+// channel alias.
+func TestPullPlatform_DryRun_SemverTag_UnrelatedChannelSuspended_Succeeds(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	// v1.71.5 exists in the registry but is not the current version of any channel.
+	svc := newDryRunService(
+		suspendedStubWith([]string{"rock-solid"}, "v1.71.5"),
+		&Options{TargetTag: "v1.71.5"},
+		logger,
+		userLogger,
+	)
+	err := svc.PullPlatform(context.Background())
+	require.NoError(t, err,
+		"a suspended channel unrelated to the requested tag must not abort the pull")
+
+	rootURL := stubRootURL
+	assert.Contains(t, svc.downloadList.Deckhouse, rootURL+":v1.71.5")
+	assert.Len(t, svc.downloadList.Deckhouse, 1,
+		"only the requested tag must be enqueued for download")
+	assert.NotContains(t, svc.downloadList.DeckhouseReleaseChannel,
+		rootURL+"/release-channel:rock-solid",
+		"suspended channel alias must not be enqueued")
+}
+
+// TestPullPlatform_DryRun_SemverTag_MatchingSuspendedChannel_Fails pins the
+// conservative half of the contract: a tag equal to a suspended channel's
+// current version resolves to that channel (its alias would be bundled), so
+// the pull is refused unless --ignore-suspend is given.
+func TestPullPlatform_DryRun_SemverTag_MatchingSuspendedChannel_Fails(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	// v1.72.10 is the current version of the suspended alpha channel.
+	svc := newDryRunService(suspendedStub(), &Options{TargetTag: "v1.72.10"}, logger, userLogger)
+	err := svc.PullPlatform(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "suspended")
+	assert.Contains(t, err.Error(), `"alpha"`)
+}
+
+func TestPullPlatform_DryRun_ChannelTag_SuspendedChannel_Fails(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := newDryRunService(suspendedStub(), &Options{TargetTag: "alpha"}, logger, userLogger)
+	err := svc.PullPlatform(context.Background())
+
+	require.Error(t, err, "requesting a suspended channel by name must be refused")
+	assert.Contains(t, err.Error(), "suspended")
+	assert.Contains(t, err.Error(), `"alpha"`)
+}
+
+func TestPullPlatform_DryRun_ChannelTag_OtherChannelSuspended_Succeeds(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	// stable is healthy; only alpha is suspended.
+	svc := newDryRunService(suspendedStub(), &Options{TargetTag: "stable"}, logger, userLogger)
+	err := svc.PullPlatform(context.Background())
+	require.NoError(t, err,
+		"a suspended channel must not block pulling another, healthy channel")
+
+	rootURL := stubRootURL
+	assert.Contains(t, svc.downloadList.Deckhouse, rootURL+":v1.69.0")
+	assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel,
+		rootURL+"/release-channel:stable")
+	assert.NotContains(t, svc.downloadList.DeckhouseReleaseChannel,
+		rootURL+"/release-channel:alpha",
+		"suspended channel alias must not be enqueued")
+}
+
+func TestPullPlatform_DryRun_CustomTag_ChannelSuspended_Succeeds(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := newDryRunService(suspendedStub(), &Options{TargetTag: "pr12345"}, logger, userLogger)
+	err := svc.PullPlatform(context.Background())
+	require.NoError(t, err,
+		"custom tags match no channel and must not be affected by suspensions")
+
+	assert.Contains(t, svc.downloadList.Deckhouse, stubRootURL+":pr12345")
+	assert.Len(t, svc.downloadList.Deckhouse, 1)
+}
+
+func TestPullPlatform_DryRun_IgnoreSuspend_TagMatchingSuspendedChannel_Succeeds(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := newDryRunService(
+		suspendedStub(),
+		&Options{TargetTag: "v1.72.10", IgnoreSuspend: true},
+		logger,
+		userLogger,
+	)
+	err := svc.PullPlatform(context.Background())
+	require.NoError(t, err,
+		"--ignore-suspend must override the suspension on the matched channel")
+
+	rootURL := stubRootURL
+	assert.Contains(t, svc.downloadList.Deckhouse, rootURL+":v1.72.10")
+	assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel,
+		rootURL+"/release-channel:alpha",
+		"with --ignore-suspend the matched channel alias is enqueued as usual")
+}
+
+// TestPullPlatform_DryRun_FullDiscovery_SuspendedLTS_Fails pins two contracts
+// at once: a suspended LTS still counts as present, so missing default
+// channels stay non-fatal (CSE registries), and full discovery resolves to
+// every fetched channel, so the suspension itself is what aborts the pull.
+func TestPullPlatform_DryRun_FullDiscovery_SuspendedLTS_Fails(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := newDryRunService(suspendedLTSOnlyStub("v1.68.0"), nil, logger, userLogger)
+	err := svc.PullPlatform(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `suspended release channel "lts"`,
+		"the failure must come from the suspension, not from the missing default channels")
+}
+
+// TestPullPlatform_DryRun_SuspendedLTS_UnrelatedTag_Succeeds covers the CSE
+// variant of the unrelated-suspension scenario: the only channel (LTS) is
+// suspended, the requested tag does not match it, so the pull must succeed.
+func TestPullPlatform_DryRun_SuspendedLTS_UnrelatedTag_Succeeds(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := newDryRunService(
+		suspendedLTSOnlyStub("v1.68.0", "v1.71.5"),
+		&Options{TargetTag: "v1.71.5"},
+		logger,
+		userLogger,
+	)
+	err := svc.PullPlatform(context.Background())
+	require.NoError(t, err)
+
+	assert.Contains(t, svc.downloadList.Deckhouse, stubRootURL+":v1.71.5")
+	assert.NotContains(t, svc.downloadList.DeckhouseReleaseChannel,
+		stubRootURL+"/release-channel:lts",
+		"suspended LTS alias must not be enqueued")
 }
 
 // ---- TargetTag: specific semver ----
