@@ -27,7 +27,8 @@ type LinterSettings struct {
 
 // RulesSettings holds the severity configuration for each rule in the images linter.
 type RulesSettings struct {
-	Patches lint.RuleSettings
+	Patches   lint.RuleSettings
+	ImageName lint.RuleSettings
 }
 
 // NewLinter constructs a Linter from cfg, scoping its diagnostics to this linter and capping severity at the configured level.
@@ -57,6 +58,7 @@ func (l *Linter) Lint(ctx context.Context) {
 	}
 
 	rules.NewPatchesRule(l.config.Path, l.collector.With(diag.MaxLevel(l.settings.Patches.Impact))).Check(ctx)
+	rules.NewImageNameRule(l.config.Path, l.collector.With(diag.MaxLevel(l.settings.ImageName.Impact))).Check(ctx)
 }
 
 // hasImagesDir reports whether images/ exists as a directory in the package root.

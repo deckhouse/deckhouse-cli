@@ -106,6 +106,8 @@ type ImagesSettings struct {
 type ImagesRulesSettings struct {
 	// Patches configures checks that validate image patch layout and documentation.
 	Patches RuleSettings `mapstructure:"patches"`
+	// ImageName configures checks that reject underscores in image names.
+	ImageName RuleSettings `mapstructure:"image-name"`
 }
 
 // IconSettings configures the icon linter and its rules.

@@ -5,6 +5,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/pkg/cmd/bootstrap"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/pkg/cmd/build"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/pkg/cmd/render"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/pkg/cmd/verify"
 )
 
@@ -25,6 +26,7 @@ This plugin helps you:
 
 	cmd.AddCommand(bootstrap.NewCmdBootstrap())
 	cmd.AddCommand(build.NewCmdBuild())
+	cmd.AddCommand(render.NewCmdRender())
 	cmd.AddCommand(verify.NewCmdVerify())
 
 	return cmd

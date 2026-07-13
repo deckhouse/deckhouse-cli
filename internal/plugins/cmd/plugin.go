@@ -31,7 +31,11 @@ import (
 
 const (
 	SystemPluginName = "system"
-	// PackagePluginName = "package" TODO(Glitchy-Sheep): will be added later during full plugin system implementation
+	// PackagePluginName names the capability, not a wrapper command: `d8 package`
+	// is always built in (cmd/d8/root.go). It is passed to SetBuiltinCommands so a
+	// plugin depending on "package" is satisfied without a registry lookup.
+	// TODO(Glitchy-Sheep): swap the built-in for NewPluginCommand during full plugin system implementation.
+	PackagePluginName = "package"
 )
 
 // NewPluginCommand returns the wrapper command that runs an installed plugin
