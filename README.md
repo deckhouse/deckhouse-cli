@@ -191,6 +191,8 @@ export GOPRIVATE="flant.internal"
 go mod tidy
 ```
 
+Run `task` to see all available tasks.
+
 To build for all platforms run:
 `task build:dist:all`
 

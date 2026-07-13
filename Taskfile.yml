@@ -49,6 +49,19 @@ vars:
   goReleaseLDFlags: "-s -w -X 'github.com/deckhouse/deckhouse-cli/internal/version.Version={{ .version }}' {{ .werfLDFlags }} {{ .kubectlLDFlags }}"
 
 tasks:
+  default:
+    desc: List available tasks
+    silent: true
+    env:
+      # Emoji per task group; a new group without an entry gets a plain arrow.
+      TASKLIST_EMOJI: "build=🔨 package=📦 lint=🧹 check=🔍 release=🚀 misc=🧰"
+    cmds:
+      # The grouped listing needs sh and awk; Windows falls back to a plain list.
+      - cmd: ./tools/list-tasks.sh
+        platforms: [linux, darwin]
+      - cmd: task --list --sort none
+        platforms: [windows]
+
   _build:cgo:dev:
     internal: true
     cmds:
@@ -94,17 +107,24 @@ tasks:
     cmds:
       - go run gotest.tools/gotestsum@latest -f {{ .testsumFormat }} -- -count=1 -tags="{{ .cgoTags }}" ./...
 
+  _package:dist:
+    internal: true
+    dir: dist/{{ .version }}
+    cmds:
+      - cp ../../LICENSE ../../README.md {{ .target }}
+      - tar -zcf d8-{{ .version }}-{{ .target }}.tar.gz {{ .target }}
+
   build:
-    desc: Build d8 binary for personal usage
+    desc: Build d8 for local use (current OS/arch)
     run: once
-    deps: [checkKubectl]
+    deps: ["check:kubectl"]
     cmds:
       - task: build:dev:{{ OS }}:{{ .arch }}
         vars:
           outputDir: "."
 
   build:dev:linux:amd64:
-    desc: Build d8 dev binary for linux/amd64 (requires Linux or Docker)
+    desc: Build dev binary for linux/amd64 (requires Linux or Docker)
     cmds:
       - task: _build:cgo:dev
         vars:
@@ -113,7 +133,7 @@ tasks:
           outputDir: "{{ .outputDir }}"
 
   build:dev:linux:amd64:cross:
-    desc: Cross-compile d8 dev binary for linux/amd64 from macOS (no CGO)
+    desc: Cross-compile dev binary for linux/amd64 from macOS (no CGO)
     summary: |
       Cross-compiles Linux binary from macOS without CGO.
 
@@ -131,7 +151,7 @@ tasks:
           outputDir: "{{ .outputDir }}"
 
   build:dev:darwin:amd64:
-    desc: Build d8 dev binary for darwin/amd64
+    desc: Build dev binary for darwin/amd64
     cmds:
       - task: _build:go:dev
         vars:
@@ -140,7 +160,7 @@ tasks:
           outputDir: "{{ .outputDir }}"
 
   build:dev:darwin:arm64:
-    desc: Build d8 dev binary for darwin/arm64
+    desc: Build dev binary for darwin/arm64
     cmds:
       - task: _build:go:dev
         vars:
@@ -149,7 +169,7 @@ tasks:
           outputDir: "{{ .outputDir }}"
 
   build:dev:windows:amd64:
-    desc: Build d8 dev binary for windows/amd64
+    desc: Build dev binary for windows/amd64
     cmds:
       - task: _build:go:dev
         vars:
@@ -158,7 +178,7 @@ tasks:
           outputDir: "{{.outputDir}}"
 
   build:dist:all:
-    desc: Build all d8 release binaries in parallel
+    desc: Build release binaries for all platforms
     deps:
       - build:dist:linux:amd64
       - build:dist:darwin:amd64
@@ -166,7 +186,7 @@ tasks:
       - build:dist:windows:amd64
 
   build:dist:linux:amd64:
-    desc: Build d8 release binary for linux/amd64
+    desc: Build release binary for linux/amd64
     cmds:
       - task: _build:cgo:dist
         vars:
@@ -175,7 +195,7 @@ tasks:
           outputDir: "{{ .outputDir }}"
 
   build:dist:darwin:amd64:
-    desc: Build d8 release binary for darwin/amd64
+    desc: Build release binary for darwin/amd64
     cmds:
       - task: _build:go:dist
         vars:
@@ -184,7 +204,7 @@ tasks:
           outputDir: "{{ .outputDir }}"
 
   build:dist:darwin:arm64:
-    desc: Build d8 release binary for darwin/arm64
+    desc: Build release binary for darwin/arm64
     cmds:
       - task: _build:go:dist
         vars:
@@ -193,7 +213,7 @@ tasks:
           outputDir: "{{ .outputDir }}"
 
   build:dist:windows:amd64:
-    desc: Build d8 release binary for windows/amd64
+    desc: Build release binary for windows/amd64
     cmds:
       - task: _build:go:dist
         vars:
@@ -201,14 +221,8 @@ tasks:
           targetArch: "amd64"
           outputDir: "{{ .outputDir }}"
 
-  _package:dist:
-    dir: dist/{{ .version }}
-    cmds:
-      - cp ../../LICENSE ../../README.md {{ .target }}
-      - tar -zcf d8-{{ .version }}-{{ .target }}.tar.gz {{ .target }}
-
   package:dist:all:
-    desc: Package all release assets in parallel
+    desc: Package release assets for all platforms
     deps:
       - package:dist:linux:amd64
       - package:dist:darwin:amd64
@@ -247,8 +261,8 @@ tasks:
         vars:
           target: "windows-amd64"
 
-  checksum:
-    desc: Calculate sha256 checksum for release assets
+  package:checksum:
+    desc: Write sha256 checksums for release assets
     dir: dist/{{ .version }}
     cmds:
       - |
@@ -257,14 +271,14 @@ tasks:
         done
 
   build-and-package:
-    desc: Build and package all d8 binaries
+    desc: Build, package and checksum all release binaries
     cmds:
       - task: build:dist:all
       - task: package:dist:all
-      - task: checksum
+      - task: package:checksum
 
   test:
-    desc: Run go test for current project
+    desc: Run Go tests
     cmds:
       - task: _test:go
 
@@ -274,12 +288,12 @@ tasks:
       - golangci-lint run ./... --fix --build-tags="{{ .goTags }}"
 
   lint:check:
-    desc: Run golangci-lint without auto-fix (CI mode)
+    desc: Run golangci-lint without fixes (CI mode)
     cmds:
       - golangci-lint run ./... --build-tags="{{ .goTags }}"
 
-  checkKubectl:
-    desc: Verify that kubectlVersion in Taskfile.yml matches k8s.io/kubectl version in go.mod
+  check:kubectl:
+    desc: Check kubectlVersion matches k8s.io/kubectl in go.mod
     cmds:
       - |
         gomod_raw=$(grep 'k8s.io/kubectl ' go.mod | awk '{print $2}')
@@ -299,13 +313,13 @@ tasks:
         echo "kubectlVersion OK: {{ .kubectlVersion }}"
 
   clean:
-    desc: Clean all binaries
+    desc: Remove built binaries (build/, dist/, ./d8)
     cmds:
       - rm -rf ./build ./dist ./d8
 
   release:sign:
-    desc: "Sign last version tag + origin/main and push signatures."
-    deps: [checkKubectl]
+    desc: Sign latest tag + origin/main and push signatures
+    deps: ["check:kubectl"]
     preconditions:
       - sh: '[[ "{{.CLI_ARGS}}" =~ ^v\d+.\d+.\d+$ ]] || exit 1'
         msg: Provide valid semver prefixed with "v" (eg. task {{.TASK}} -- v1.2.3) to be used as version
@@ -322,7 +336,7 @@ tasks:
 
   release:publish-trdl-channels:
     desc: Publish release channels to TRDL
-    deps: [checkKubectl]
+    deps: ["check:kubectl"]
     preconditions:
       - sh: test $(git rev-parse --abbrev-ref HEAD) = "main"
         msg: This can only be done on main branch
