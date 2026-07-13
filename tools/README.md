@@ -1,6 +1,8 @@
 # D8 (Deckhouse CLI) Installation Script
 
 This directory contains the installation script for D8 (Deckhouse CLI).
+It also holds `list-tasks.sh` - the grouped task listing behind bare `task`
+(invoked by the `default` task in `Taskfile.yml`).
 
 ## Quick Install
 
