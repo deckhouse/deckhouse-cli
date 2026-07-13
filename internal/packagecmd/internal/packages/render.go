@@ -63,7 +63,7 @@ func Render(ctx context.Context, def Definition, path string) ([]render.Object, 
 		Path:                path,
 		ValuesPaths:         []string{valuesPath},
 		RootValues:          fmt.Sprintf("Application=%s", marshalled),
-		ExtraCapabilitities: []string{"autoscaling.k8s.io/v1/VerticalPodAutoscaler"},
+		ExtraCapabilitities: []string{"autoscaling.k8s.io/v1/VerticalPodAutoscaler", "cert-manager.io/v1"},
 	}
 
 	result, err := render.Render(ctx, "test", "default.test", opts)

@@ -33,6 +33,20 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - -text={{ .Application.Settings.msg | default "hello world" | quote}}
+          env:
+            # Example of the quantity_bytes helper: turns the ephemeral-storage
+            # request "50Mi" into a plain byte count for the app to consume.
+            - name: EPHEMERAL_STORAGE_BYTES
+              value: {{ include "quantity_bytes" "50Mi" | quote }}
+            # Round-trip example: parse the memory request into bytes, take half
+            # of it for an in-memory cache, then format the result back into a
+            # Kubernetes quantity with the bytes_quantity helper.
+            {{- $memBytes := include "quantity_bytes" "70Mi" | int64 }}
+            {{- $cacheBytes := mulf (float64 $memBytes) 0.5 | floor | int64 }}
+            - name: CACHE_MAX_BYTES
+              value: {{ $cacheBytes | quote }}
+            - name: CACHE_MAX_SIZE
+              value: {{ include "bytes_quantity" $cacheBytes | quote }}
           ports:
             - name: http
               containerPort: 5678

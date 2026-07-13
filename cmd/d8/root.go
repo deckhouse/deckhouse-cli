@@ -129,7 +129,12 @@ func (r *RootCommand) registerCommands() {
 
 	r.cmd.AddCommand(packagecmd.NewCommand())
 
-	r.cmd.AddCommand(pluginscmd.NewCommand(r.logger.Named("plugins-command"), []string{commands.DeliveryKitCommandName}))
+	// delivery-kit and package ship as built-in commands, not as plugins. Declaring
+	// them here satisfies a plugin's dependency on either name without a registry lookup.
+	r.cmd.AddCommand(pluginscmd.NewCommand(
+		r.logger.Named("plugins-command"),
+		[]string{commands.DeliveryKitCommandName, pluginscmd.PackagePluginName},
+	))
 
 	r.cmd.AddCommand(selfupdatecmd.NewCommand(r.logger.Named("cli-command")))
 }

@@ -68,6 +68,9 @@ linters:
       # Validates image patch placement, file naming, and README references.
       patches:
         impact: error
+      # Forbids underscores in image names (images/<name> dirs and image: in werf.inc.yaml).
+      image-name:
+        impact: error
 
   # Controls checks for the package icon (icon.<ext> at the package root).
   # Existence is enforced separately by the layout linter's icon rule.

@@ -79,6 +79,7 @@ func defaultLintersSettings() *Root {
 
 	r.Images.Impact = lint.Error.Ptr()
 	r.Images.RulesSettings.Patches.SetLevel("error", nil)
+	r.Images.RulesSettings.ImageName.SetLevel("error", nil)
 
 	r.Icon.Impact = lint.Error.Ptr()
 	r.Icon.RulesSettings.Ext.SetLevel("error", nil)
@@ -118,6 +119,7 @@ func remapLintersSettings(cfg Config) *Root {
 
 	r.Images.SetLevel(cfg.Linters.Images.Impact)
 	r.Images.RulesSettings.Patches.SetLevel(cfg.Linters.Images.Rules.Patches.Impact, lint.Error.Ptr())
+	r.Images.RulesSettings.ImageName.SetLevel(cfg.Linters.Images.Rules.ImageName.Impact, lint.Error.Ptr())
 
 	r.Icon.SetLevel(cfg.Linters.Icon.Impact)
 	r.Icon.RulesSettings.Ext.SetLevel(cfg.Linters.Icon.Rules.Ext.Impact, lint.Error.Ptr())

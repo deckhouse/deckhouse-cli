@@ -64,7 +64,7 @@ func (r *PDBRule) Check(_ context.Context) {
 
 // collectPDBSelectors parses every PDB object into a namespace-scoped selector.
 func (r *PDBRule) collectPDBSelectors() []pdbSelector {
-	selectors := make([]pdbSelector, 0, len(r.objects))
+	var selectors []pdbSelector
 
 	for _, obj := range r.objects {
 		if obj.GetKind() != "PodDisruptionBudget" {

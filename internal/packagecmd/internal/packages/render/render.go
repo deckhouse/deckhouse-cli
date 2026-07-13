@@ -67,7 +67,7 @@ func Render(ctx context.Context, namespace, releaseName string, opts Options) ([
 		return nil, fmt.Errorf("render nelm chart '%s': %w", opts.Path, err)
 	}
 
-	result := make([]Object, 0, len(res.Resources))
+	var result []Object
 
 	for _, resource := range res.Resources {
 		_, path, _ := strings.Cut(resource.FilePath, "/")
