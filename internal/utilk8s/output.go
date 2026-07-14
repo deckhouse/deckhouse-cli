@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -33,6 +34,21 @@ import (
 func AddOutputFlag(cmd *cobra.Command, defaultFmt string, formats ...string) {
 	cmd.Flags().StringP("output", "o", defaultFmt, "Output format: "+strings.Join(formats, "|"))
 	_ = cmd.RegisterFlagCompletionFunc("output", CompleteOutputFormats(formats...))
+}
+
+// GetOutputFormat reads the "-o/--output" flag declared by AddOutputFlag
+// and validates it against the accepted formats.
+func GetOutputFormat(cmd *cobra.Command, formats ...string) (string, error) {
+	format, err := cmd.Flags().GetString("output")
+	if err != nil {
+		return "", fmt.Errorf("reading output flag: %w", err)
+	}
+
+	if !slices.Contains(formats, format) {
+		return "", fmt.Errorf("unsupported output format %q; use %s", format, strings.Join(formats, "|"))
+	}
+
+	return format, nil
 }
 
 // PrintObject writes an unstructured Kubernetes object to w in the given format.
