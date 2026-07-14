@@ -48,7 +48,7 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 // readySnapshot builds a Snapshot already carrying Ready=True (used to drive --wait).
 func readySnapshot(namespace, name string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata":   map[string]interface{}{"namespace": namespace, "name": name},
 		"status": map[string]interface{}{
@@ -62,7 +62,7 @@ func readySnapshot(namespace, name string) *unstructured.Unstructured {
 func TestBuildSnapshot_Empty(t *testing.T) {
 	obj := buildSnapshot("ns", "snap", "", nil)
 
-	if obj.GetKind() != "Snapshot" || obj.GetAPIVersion() != "storage.deckhouse.io/v1alpha1" {
+	if obj.GetKind() != "Snapshot" || obj.GetAPIVersion() != "state-snapshotter.deckhouse.io/v1alpha1" {
 		t.Fatalf("unexpected GVK: %s %s", obj.GetAPIVersion(), obj.GetKind())
 	}
 
@@ -152,7 +152,7 @@ func TestRunCreate_CreatesSnapshot(t *testing.T) {
 		t.Errorf("created name = %q, want snap", got.GetName())
 	}
 
-	if out := strings.TrimSpace(buf.String()); out != "snapshot.storage.deckhouse.io/snap created" {
+	if out := strings.TrimSpace(buf.String()); out != "snapshot.state-snapshotter.deckhouse.io/snap created" {
 		t.Errorf("confirmation = %q, want kubectl-style created line", out)
 	}
 }
@@ -189,7 +189,7 @@ func TestWaitReady_ReturnsWhenReady(t *testing.T) {
 func TestWaitReady_TimesOut(t *testing.T) {
 	// A Snapshot without a Ready=True condition never satisfies the wait.
 	pending := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata":   map[string]interface{}{"namespace": "ns", "name": "snap"},
 		"status": map[string]interface{}{
@@ -233,7 +233,7 @@ func TestRenderCreated(t *testing.T) {
 		t.Fatalf("renderCreated name: %v", err)
 	}
 
-	if !strings.Contains(nameBuf.String(), "snapshot.storage.deckhouse.io/snap created") {
+	if !strings.Contains(nameBuf.String(), "snapshot.state-snapshotter.deckhouse.io/snap created") {
 		t.Errorf("name output = %q", nameBuf.String())
 	}
 

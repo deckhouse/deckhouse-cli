@@ -49,7 +49,7 @@ const (
 )
 
 var (
-	snapshotGVR = schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshots"}
+	snapshotGVR = schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshots"}
 	pvcGVR      = schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumeclaims"}
 	cmGVR       = schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
 	pvGVR       = schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumes"}
@@ -81,10 +81,10 @@ func (s *stubSource) RestoreManifests(_ context.Context, ref aggapi.NodeRef, tar
 func testMapper() meta.RESTMapper {
 	m := meta.NewDefaultRESTMapper([]schema.GroupVersion{
 		{Group: "", Version: "v1"},
-		{Group: "storage.deckhouse.io", Version: "v1alpha1"},
+		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"},
 		{Group: "snapshot.storage.k8s.io", Version: "v1"},
 	})
-	m.Add(schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolumeClaim"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolume"}, meta.RESTScopeRoot)
@@ -218,7 +218,7 @@ func contains(s, substr string) bool {
 // readySnapshot returns a Snapshot that passes preflight (Ready=True + bound content).
 func readySnapshot() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata": map[string]interface{}{
 			"namespace": testNS,
@@ -309,7 +309,7 @@ func TestRun_AppliesAllObjects(t *testing.T) {
 	}
 
 	wantRef := aggapi.NodeRef{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       testSnap,
 		Namespace:  testNS,
@@ -1178,11 +1178,11 @@ func (m *kindSearchMapper) RESTMapping(gk schema.GroupKind, versions ...string) 
 func testMapperWithDomain() meta.RESTMapper {
 	base := meta.NewDefaultRESTMapper([]schema.GroupVersion{
 		{Group: "", Version: "v1"},
-		{Group: "storage.deckhouse.io", Version: "v1alpha1"},
+		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"},
 		{Group: "snapshot.storage.k8s.io", Version: "v1"},
 		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1"},
 	})
-	base.Add(schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
+	base.Add(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
 	base.Add(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolumeClaim"}, meta.RESTScopeNamespace)
 	base.Add(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, meta.RESTScopeNamespace)
 	base.Add(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolume"}, meta.RESTScopeRoot)
@@ -1210,7 +1210,7 @@ func TestRun_NoSelectedNode_UsesRootRef(t *testing.T) {
 	}
 
 	wantRef := aggapi.NodeRef{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       testSnap,
 		Namespace:  testNS,

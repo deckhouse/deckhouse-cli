@@ -351,7 +351,7 @@ func TestWriteReadSnapshotYAML(t *testing.T) {
 	nodeDir := t.TempDir()
 
 	sy := SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "test-snap",
 		Namespace:  "default",
@@ -405,7 +405,7 @@ func TestVerifyNode_OK(t *testing.T) {
 	}
 
 	sy := SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "test",
 		Checksum:   cs,
@@ -433,7 +433,7 @@ func TestVerifyNode_Mismatch(t *testing.T) {
 	}
 
 	sy := SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "test",
 		Checksum:   cs,

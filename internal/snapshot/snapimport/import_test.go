@@ -45,8 +45,8 @@ import (
 const targetNS = "dst"
 
 var (
-	snapshotGVR        = schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshots"}
-	contentGVR         = schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents"}
+	snapshotGVR        = schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshots"}
+	contentGVR         = schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents"}
 	volumeSnapshotGVRt = schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
 	demoDiskSnapGVR    = schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots"}
 	demoVMSnapGVR      = schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots"}
@@ -108,7 +108,7 @@ func (s *stubVolumes) UploadVolumeData(_ context.Context, leaf PlannedNode, _, _
 
 func testMapper() meta.RESTMapper {
 	m := meta.NewDefaultRESTMapper(nil)
-	m.Add(schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}, meta.RESTScopeNamespace)
 
 	return m
@@ -143,7 +143,7 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 // drive domain data leaves can resolve their resource plural via the RESTMapper.
 func testDomainMapper() meta.RESTMapper {
 	m := meta.NewDefaultRESTMapper(nil)
-	m.Add(schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"}, meta.RESTScopeNamespace)
@@ -155,7 +155,7 @@ const rootSnapshotUID = "root-uid"
 
 func readyRootSnapshot() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata":   map[string]interface{}{"namespace": targetNS, "name": "root", "uid": rootSnapshotUID},
 		// An import-mode root that the controller has already materialized to Ready: it keeps
@@ -172,7 +172,7 @@ func readyRootSnapshot() *unstructured.Unstructured {
 
 func readyContent() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "SnapshotContent",
 		"metadata":   map[string]interface{}{"name": "content-root"},
 		"status": map[string]interface{}{
@@ -290,8 +290,8 @@ func TestRun_LeafCarriesParentOwnerRef(t *testing.T) {
 	}
 
 	ref := refs[0]
-	if ref.Kind != "Snapshot" || ref.Name != "root" || ref.APIVersion != "storage.deckhouse.io/v1alpha1" {
-		t.Errorf("leaf parent ownerRef = %s/%s (%s), want Snapshot/root (storage.deckhouse.io/v1alpha1)", ref.Kind, ref.Name, ref.APIVersion)
+	if ref.Kind != "Snapshot" || ref.Name != "root" || ref.APIVersion != "state-snapshotter.deckhouse.io/v1alpha1" {
+		t.Errorf("leaf parent ownerRef = %s/%s (%s), want Snapshot/root (state-snapshotter.deckhouse.io/v1alpha1)", ref.Kind, ref.Name, ref.APIVersion)
 	}
 
 	if ref.UID != rootSnapshotUID {
@@ -311,7 +311,7 @@ func TestRun_LeafCarriesParentOwnerRef(t *testing.T) {
 func TestPreflight_FilesystemDataPasses(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 	})
@@ -353,7 +353,7 @@ func TestPreflight_FilesystemDataPasses(t *testing.T) {
 func TestRun_LeafWithoutBlockDataFailsFast(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 	})
@@ -407,7 +407,7 @@ func buildDomainDataLeafArchive(t *testing.T) string {
 	root := t.TempDir()
 
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 		namespace:  "src",
@@ -531,7 +531,7 @@ func TestLeafTargetRef_DomainLeaf(t *testing.T) {
 func TestRun_ManifestOnlyDomainNode_Imports(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 	})
@@ -595,7 +595,7 @@ func TestRun_ManifestOnlyDomainNode_Imports(t *testing.T) {
 func TestRun_SelectedNode_ManifestOnlyDomainNodeFails(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 	})
@@ -649,7 +649,7 @@ func TestRun_RootMustBeSnapshot(t *testing.T) {
 
 func captureModeRootSnapshot() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata":   map[string]interface{}{"namespace": targetNS, "name": "root", "uid": "capture-uid"},
 		// A live capture-mode Snapshot (no import marker) that merely shares the import name.
@@ -711,7 +711,7 @@ func TestRun_Validation(t *testing.T) {
 
 func ownerRef(name, uid string) metav1.OwnerReference {
 	return metav1.OwnerReference{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       name,
 		UID:        types.UID(uid),
@@ -754,7 +754,7 @@ func buildThreeLevelArchive(t *testing.T) string {
 	root := t.TempDir()
 
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 		namespace:  "src",
@@ -800,7 +800,7 @@ func readyImportLeafVS() *unstructured.Unstructured {
 // four readiness conditions True.
 func readyLeafContent() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "SnapshotContent",
 		"metadata":   map[string]interface{}{"name": "content-leaf"},
 		"status": map[string]interface{}{
@@ -986,7 +986,7 @@ func buildMultiLeafArchive(t *testing.T, n int) (string, []string) {
 	root := t.TempDir()
 
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 		namespace:  "src",
@@ -1325,7 +1325,7 @@ func buildAggregatorWithDomainLeafArchive(t *testing.T) string {
 	root := t.TempDir()
 
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 		namespace:  "src",

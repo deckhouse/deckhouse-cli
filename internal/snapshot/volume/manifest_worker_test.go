@@ -76,7 +76,7 @@ func TestWriteNodeManifests_WritesFiles(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-1",
 		Namespace:  "default",
@@ -179,7 +179,7 @@ func TestFinalizeNode_WritesSnapshotYAML(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-test",
 		Namespace:  "ns1",
@@ -234,7 +234,7 @@ func TestFinalizeNode_Idempotent(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-idem",
 	}
@@ -267,7 +267,7 @@ func TestFinalizeNode_RemovesIdentityMarker(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-marker",
 		Namespace:  "ns",
@@ -370,7 +370,7 @@ func TestWriteNodeManifests_ExcludesLeafChildPVCs(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-ex",
 		Children:   []*source.Node{leafA, leafB},
@@ -667,7 +667,7 @@ func TestFinalizeNode_SnapshotNodeOmitsVolumeBlock(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-1",
 		Namespace:  "ns",
@@ -758,7 +758,7 @@ func TestFinalizeNode_SnapshotNodeWithOwnDataRefs(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "snap-multi",
 		Namespace:  "ns",
@@ -853,7 +853,7 @@ func TestFinalizeNode_NoVolumesOmitted(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-no-vol",
 	}

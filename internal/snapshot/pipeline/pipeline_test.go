@@ -62,7 +62,7 @@ const (
 	diskSnapName  = "disk-snap"
 	sourcePVCName = "pvc-disk-source"
 
-	storageAPIVersion = "storage.deckhouse.io/v1alpha1"
+	storageAPIVersion = "state-snapshotter.deckhouse.io/v1alpha1"
 	childAPIVersion   = "demo.deckhouse.io/v1alpha1"
 	childKind         = "VirtualDiskSnapshot"
 )

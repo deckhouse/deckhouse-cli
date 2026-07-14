@@ -89,7 +89,7 @@ func buildTwoLevelArchive(t *testing.T) string {
 	root := t.TempDir()
 
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 		namespace:  "src",
@@ -160,7 +160,7 @@ func TestBuildPlan_DomainDataLeaf_SourceObjectRef(t *testing.T) {
 	root := t.TempDir()
 
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 	})
@@ -221,7 +221,7 @@ func TestBuildPlan_DomainDataLeaf_SourceObjectRef(t *testing.T) {
 func TestBuildPlan_LeafArtifactKind(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 	})
@@ -273,7 +273,7 @@ func TestBuildPlan_LeafArtifactKind(t *testing.T) {
 func TestBuildPlan_FilesystemDataFlag(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 	})

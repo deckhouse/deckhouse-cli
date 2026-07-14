@@ -29,7 +29,7 @@ import (
 // It records the snapshot CR identity and the locally-computed integrity checksum.
 // sigs.k8s.io/yaml uses json struct tags for marshaling and unmarshaling.
 type SnapshotYAML struct {
-	// APIVersion is the apiVersion of the snapshot CR (e.g. "storage.deckhouse.io/v1alpha1").
+	// APIVersion is the apiVersion of the snapshot CR (e.g. "state-snapshotter.deckhouse.io/v1alpha1").
 	APIVersion string `json:"apiVersion"`
 	// Kind is the kind of the snapshot CR (e.g. "Snapshot", "DemoVirtualDiskSnapshot").
 	Kind string `json:"kind"`
