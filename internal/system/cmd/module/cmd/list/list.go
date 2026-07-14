@@ -22,7 +22,6 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/edit/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/deckhouse"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
@@ -31,6 +30,8 @@ var listLong = templates.LongDesc(`
 List enabled Deckhouse Kubernetes Platform modules.
 
 © Flant JSC 2025`)
+
+var outputFormats = []string{"yaml", "json", "text"}
 
 func NewCommand() *cobra.Command {
 	listCmd := &cobra.Command{
@@ -41,12 +42,17 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE:          listModule,
 	}
-	flags.AddFlags(listCmd.Flags())
+	utilk8s.AddOutputFlag(listCmd, "yaml", outputFormats...)
 
 	return listCmd
 }
 
 func listModule(cmd *cobra.Command, _ []string) error {
+	format, err := utilk8s.GetOutputFormat(cmd, outputFormats...)
+	if err != nil {
+		return err
+	}
+
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
@@ -62,7 +68,7 @@ func listModule(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	err = deckhouse.QueryAPI(config, kubeCl, "list.yaml")
+	err = deckhouse.QueryAPI(config, kubeCl, "list."+format)
 	if err != nil {
 		return fmt.Errorf("Error list modules: %w", err)
 	}
