@@ -683,7 +683,7 @@ func TestReleaseDataExport_UIDConflictTreatedAsSuccess(t *testing.T) {
 		WithInterceptorFuncs(interceptor.Funcs{
 			Delete: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.DeleteOption) error {
 				return apierrors.NewConflict(
-					schema.GroupResource{Group: "storage.deckhouse.io", Resource: "dataexports"},
+					schema.GroupResource{Group: "storage-foundation.deckhouse.io", Resource: "dataexports"},
 					deName, errors.New("uid in precondition does not match"))
 			},
 		}).Build()
@@ -1344,7 +1344,7 @@ func TestEnsureDataExport_RefusesTargetRefMismatchAfterCreateRace(t *testing.T) 
 				}
 
 				return apierrors.NewAlreadyExists(
-					schema.GroupResource{Group: "storage.deckhouse.io", Resource: "dataexports"}, deName)
+					schema.GroupResource{Group: "storage-foundation.deckhouse.io", Resource: "dataexports"}, deName)
 			},
 		}).Build()
 
@@ -1411,7 +1411,7 @@ func TestEnsureDataExport_AdoptsMatchingTargetRefAfterCreateRace(t *testing.T) {
 				}
 
 				return apierrors.NewAlreadyExists(
-					schema.GroupResource{Group: "storage.deckhouse.io", Resource: "dataexports"}, deName)
+					schema.GroupResource{Group: "storage-foundation.deckhouse.io", Resource: "dataexports"}, deName)
 			},
 		}).Build()
 
