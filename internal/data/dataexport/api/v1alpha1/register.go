@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	APIGroup   = "storage.deckhouse.io"
+	APIGroup   = "storage-foundation.deckhouse.io"
 	APIVersion = "v1alpha1"
 )
 

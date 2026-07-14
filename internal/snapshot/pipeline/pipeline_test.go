@@ -367,7 +367,7 @@ func TestPipeline_OpenExportErrorReleasesCleanly(t *testing.T) {
 	deName := exporter.DataExportName(diskSnapName)
 
 	de := &deapi.DataExport{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "DataExport"},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "storage-foundation.deckhouse.io/v1alpha1", Kind: "DataExport"},
 		ObjectMeta: metav1.ObjectMeta{Name: deName, Namespace: testNS},
 	}
 	require.NoError(t, c.Create(context.Background(), de))
@@ -446,7 +446,7 @@ func TestPipeline_ReleaseGetsFreshTimeoutAfterSlowOpenExport(t *testing.T) {
 	deName := exporter.DataExportName(diskSnapName)
 
 	de := &deapi.DataExport{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "DataExport"},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "storage-foundation.deckhouse.io/v1alpha1", Kind: "DataExport"},
 		ObjectMeta: metav1.ObjectMeta{Name: deName, Namespace: testNS},
 	}
 	require.NoError(t, c.Create(context.Background(), de))
@@ -2613,7 +2613,7 @@ func TestPipeline_KeepExports(t *testing.T) {
 			deName := exporter.DataExportName(diskSnapName)
 
 			de := &deapi.DataExport{
-				TypeMeta:   metav1.TypeMeta{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "DataExport"},
+				TypeMeta:   metav1.TypeMeta{APIVersion: "storage-foundation.deckhouse.io/v1alpha1", Kind: "DataExport"},
 				ObjectMeta: metav1.ObjectMeta{Name: deName, Namespace: testNS},
 			}
 			require.NoError(t, c.Create(context.Background(), de))
