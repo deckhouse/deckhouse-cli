@@ -939,7 +939,7 @@ func ltsOnlySourceStub(ver string) localreg.Client {
 //
 // The root cause was platform.NewService seeding the downloadList rootURL
 // from registryService.GetRoot() (non-edition root) while
-// getReleaseChannelVersionFromRegistry fed the same map with edition-scoped
+// getReleaseChannelInfo fed the same map with edition-scoped
 // keys obtained through deckhouseService. The fix is to seed the rootURL
 // with registryService.GetEditionRoot() so every key in the downloadList
 // carries the edition segment.

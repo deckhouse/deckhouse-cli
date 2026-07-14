@@ -325,7 +325,7 @@ func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string)
 	parsed := svc.parseInputTags(tagsToMirror)
 
 	// Fetch current versions from all release channels
-	channelVersions, suspended, err := svc.fetchReleaseChannelVersions(ctx)
+	channelVersions, suspended, err := svc.fetchReleaseChannels(ctx)
 	if err != nil && !errors.Is(err, ErrSomeChannelsFailed) {
 		return nil, fmt.Errorf("failed to fetch release channel versions: %w", err)
 	}
@@ -418,11 +418,12 @@ func (svc *Service) parseInputTags(tags []string) parsedTags {
 	return result
 }
 
-// fetchReleaseChannelVersions retrieves current versions from all release channels.
+// fetchReleaseChannels retrieves the current state of every release channel:
+// the version each one points to and which of them are suspended.
 // Suspended channels are reported through suspendedChannels rather than failing the fetch:
 // whether a suspension is fatal depends on the channels the request resolves to, which is
 // only known after matchChannelsToTags.
-func (svc *Service) fetchReleaseChannelVersions(ctx context.Context) (channelVersions, suspendedChannels, error) {
+func (svc *Service) fetchReleaseChannels(ctx context.Context) (channelVersions, suspendedChannels, error) {
 	defaultChannels := internal.GetAllDefaultReleaseChannels()
 	allChannels := slices.Concat(defaultChannels, []string{internal.LTSChannel})
 	channelResults := make(map[string]releaseChannelVersionResult, len(allChannels))
@@ -430,7 +431,7 @@ func (svc *Service) fetchReleaseChannelVersions(ctx context.Context) (channelVer
 
 	// - LTS exists: fetch all channels (default + LTS), missing default channels are OK
 	// - LTS doesn't exist: all default channels are required
-	ltsInfo, ltsErr := svc.getReleaseChannelVersionFromRegistry(ctx, internal.LTSChannel)
+	ltsInfo, ltsErr := svc.getReleaseChannelInfoFromRegistry(ctx, internal.LTSChannel)
 	if ltsErr != nil && !errors.Is(ltsErr, client.ErrImageNotFound) {
 		return nil, nil, fmt.Errorf("get LTS release channel: %w", ltsErr)
 	}
@@ -449,7 +450,7 @@ func (svc *Service) fetchReleaseChannelVersions(ctx context.Context) (channelVer
 	}
 
 	for _, channel := range defaultChannels {
-		info, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
+		info, err := svc.getReleaseChannelInfoFromRegistry(ctx, channel)
 		// Real error (network, auth) - fail immediately
 		if err != nil && !errors.Is(err, client.ErrImageNotFound) {
 			return nil, nil, fmt.Errorf("failed to get release channel version from registry for channel %s: %w", channel, err)
@@ -736,7 +737,7 @@ func filterVersionsByConstraint(versions []*semver.Version, constraint *modules.
 
 // filterChannelsByConstraint drops release channels whose current snapshot
 // version falls outside the user-supplied constraint. Channels that resolve
-// to a missing version (defensive — fetchReleaseChannelVersions normally
+// to a missing version (defensive — fetchReleaseChannels normally
 // guarantees this) are kept so we don't silently delete metadata for sources
 // we cannot evaluate against the constraint.
 func filterChannelsByConstraint(channels []string, channelVersions channelVersions, constraint *modules.SemanticVersionConstraint) []string {
@@ -834,13 +835,13 @@ type releaseChannelInfo struct {
 	suspended bool
 }
 
-// getReleaseChannelVersionFromRegistry retrieves the current state of a specific release channel.
+// getReleaseChannelInfoFromRegistry retrieves the current state of a specific release channel.
 //
 // Suspension is reported as data, not as an error: at this point we do not yet know whether the
 // request resolves to this channel. versionsToMirror is the enforcement point.
 // A suspended channel still yields its version (needed to match it against the requested tag),
 // but never enters the download list.
-func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, releaseChannel string) (releaseChannelInfo, error) {
+func (svc *Service) getReleaseChannelInfoFromRegistry(ctx context.Context, releaseChannel string) (releaseChannelInfo, error) {
 	image, err := svc.deckhouseService.ReleaseChannels().GetImage(ctx, releaseChannel)
 	if err != nil {
 		return releaseChannelInfo{}, fmt.Errorf("get %s release channel image: %w", releaseChannel, err)
