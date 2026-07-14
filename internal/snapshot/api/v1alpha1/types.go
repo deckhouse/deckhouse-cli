@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package v1alpha1 provides typed Go structs for the state-snapshotter CRDs
-// consumed by the d8 snapshot commands. Only the storage.deckhouse.io/v1alpha1
+// consumed by the d8 snapshot commands. Only the state-snapshotter.deckhouse.io/v1alpha1
 // group is represented here (Snapshot, SnapshotContent). Per-node manifests are
 // read through the aggregated subresource API (see internal/snapshot/aggapi)
 // rather than directly from ManifestCheckpoint CRDs.
@@ -30,7 +30,7 @@ import (
 // AnnotationSourceRef is the annotation key that carries the source identity of a snapshot node.
 const AnnotationSourceRef = "state-snapshotter.deckhouse.io/source-ref"
 
-// --- storage.deckhouse.io/v1alpha1 ---
+// --- state-snapshotter.deckhouse.io/v1alpha1 ---
 
 // Snapshot requests a namespace state/configuration snapshot.
 type Snapshot struct {

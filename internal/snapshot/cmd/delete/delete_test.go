@@ -53,7 +53,7 @@ func snapshotObj(namespace, name string, labels map[string]interface{}) *unstruc
 	}
 
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata":   meta,
 	}}
@@ -134,8 +134,8 @@ func TestRunDelete_ByName(t *testing.T) {
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "snapshot.storage.deckhouse.io/snap-a deleted") ||
-		!strings.Contains(out, "snapshot.storage.deckhouse.io/snap-b deleted") {
+	if !strings.Contains(out, "snapshot.state-snapshotter.deckhouse.io/snap-a deleted") ||
+		!strings.Contains(out, "snapshot.state-snapshotter.deckhouse.io/snap-b deleted") {
 		t.Fatalf("missing deleted confirmations:\n%s", out)
 	}
 }

@@ -24,13 +24,13 @@ import (
 
 // API group and version constants for the snapshot CRD group.
 const (
-	StorageGroup = "storage.deckhouse.io"
+	StorageGroup = "state-snapshotter.deckhouse.io"
 	Version      = "v1alpha1"
 )
 
 var storageGV = schema.GroupVersion{Group: StorageGroup, Version: Version}
 
-// AddToScheme registers the storage.deckhouse.io snapshot CRD types into the given
+// AddToScheme registers the state-snapshotter.deckhouse.io snapshot CRD types into the given
 // scheme. Call once during controller-runtime client setup.
 func AddToScheme(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(storageGV,

@@ -48,7 +48,7 @@ const (
 )
 
 // snapshotContentGVR is the cluster-scoped core SnapshotContent resource.
-var snapshotContentGVR = schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents"}
+var snapshotContentGVR = schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents"}
 
 // ManifestUploader posts a node's manifests-and-children-refs-upload payload. It is
 // satisfied by *aggapi.Client and stubbed in tests.

@@ -211,7 +211,7 @@ func TestLocalGetCommand(t *testing.T) {
 
 		root := t.TempDir()
 		writeNodeYAML(t, root, archive.SnapshotYAML{
-			APIVersion: "storage.deckhouse.io/v1alpha1",
+			APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 			Kind:       "Snapshot",
 			Name:       "vm-snap",
 			Namespace:  "prod",
@@ -258,7 +258,7 @@ func TestLocalGetCommand(t *testing.T) {
 
 		root := t.TempDir()
 		writeNodeYAML(t, root, archive.SnapshotYAML{
-			APIVersion: "storage.deckhouse.io/v1alpha1",
+			APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 			Kind:       "Snapshot",
 			Name:       "cluster-snap",
 			// Namespace intentionally empty (cluster-scoped).
@@ -312,7 +312,7 @@ func TestLocalDescribeCommand(t *testing.T) {
 
 		root := t.TempDir()
 		writeNodeYAML(t, root, archive.SnapshotYAML{
-			APIVersion: "storage.deckhouse.io/v1alpha1",
+			APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 			Kind:       "Snapshot",
 			Name:       "root-snap",
 			Namespace:  "default",

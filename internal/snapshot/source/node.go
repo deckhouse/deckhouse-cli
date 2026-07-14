@@ -52,7 +52,7 @@ type SpecSourceRef struct {
 //     OwnDataRefs and Children are always nil. These are leaves in the tree.
 type Node struct {
 	// APIVersion is the apiVersion of the snapshot CR for this node
-	// (e.g. "storage.deckhouse.io/v1alpha1" or a domain-specific group).
+	// (e.g. "state-snapshotter.deckhouse.io/v1alpha1" or a domain-specific group).
 	// Orphan leaf volume nodes use "snapshot.storage.k8s.io/v1".
 	APIVersion string
 

@@ -41,7 +41,7 @@ func assertImportMarker(t *testing.T, obj *unstructured.Unstructured) {
 }
 
 func TestImportMarkerCR_Snapshot(t *testing.T) {
-	node := PlannedNode{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "root"}
+	node := PlannedNode{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "root"}
 
 	obj, err := importMarkerCR(node, "ns")
 	if err != nil {
@@ -145,7 +145,7 @@ func TestPlannedNode_IsDomainAggregator(t *testing.T) {
 		node PlannedNode
 		want bool
 	}{
-		{"core snapshot", PlannedNode{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot"}, false},
+		{"core snapshot", PlannedNode{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "Snapshot"}, false},
 		{"csi volume snapshot", PlannedNode{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot"}, false},
 		// A domain disk snapshot WITH volume data is a domain data leaf, not an aggregator.
 		{"demo disk snapshot with block data", PlannedNode{

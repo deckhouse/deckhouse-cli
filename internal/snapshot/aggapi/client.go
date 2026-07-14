@@ -69,7 +69,7 @@ const (
 	VSConnectorVersion = "v1"
 
 	// StorageGroup is the API group of the core Snapshot / SnapshotContent CRDs.
-	StorageGroup = "storage.deckhouse.io"
+	StorageGroup = "state-snapshotter.deckhouse.io"
 	// VolumeSnapshotGroup is the CSI external-snapshotter API group of VolumeSnapshot leaves.
 	VolumeSnapshotGroup = "snapshot.storage.k8s.io"
 	// VolumeSnapshotResource is the resource plural of CSI VolumeSnapshot objects.
@@ -378,7 +378,7 @@ func (c *Client) LeafDataExportTarget(ref NodeRef) (string, string, string, erro
 // subresourceGroupVersion returns the aggregated subresource group and version that
 // serves restore/upload for a node of the given GVK:
 //   - CSI VolumeSnapshot leaves -> the VS-connector group.
-//   - the core Snapshot (storage.deckhouse.io) -> the core subresources group.
+//   - the core Snapshot (state-snapshotter.deckhouse.io) -> the core subresources group.
 //   - any domain snapshot CR -> "subresources." + its API group, same version.
 func subresourceGroupVersion(ref NodeRef) (string, string, error) {
 	gv, err := schema.ParseGroupVersion(ref.APIVersion)

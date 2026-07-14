@@ -101,7 +101,7 @@ func taskFor(t *testing.T, tasks []nodeTask, node *source.Node) nodeTask {
 	return nodeTask{}
 }
 
-const storageAPIVersion = "storage.deckhouse.io/v1alpha1"
+const storageAPIVersion = "state-snapshotter.deckhouse.io/v1alpha1"
 
 // childSnapshotsDir is the snapshots/ directory holding child node dirs directly
 // under the root output directory.

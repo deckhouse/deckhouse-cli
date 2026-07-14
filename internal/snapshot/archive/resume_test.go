@@ -205,7 +205,7 @@ func TestScanNode_CompleteNodeIdentityMatch(t *testing.T) {
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
@@ -243,7 +243,7 @@ func TestScanNode_CompleteNodeIdentityMatch_DirName(t *testing.T) {
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "snap-cr-abc", // CR name — stored in snapshot.yaml, used for identity
 		DirName:    "source-disk", // on-disk dir component, derived from the source object
@@ -288,7 +288,7 @@ func TestScanNode_CompleteNodeIdentityMismatch(t *testing.T) {
 
 	// existing node stored with identity A
 	idA := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
@@ -299,7 +299,7 @@ func TestScanNode_CompleteNodeIdentityMismatch(t *testing.T) {
 
 	// planned node has identity B (different SourceRef)
 	idB := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
@@ -337,7 +337,7 @@ func TestScanNode_CollisionUseDirName(t *testing.T) {
 
 	// Existing complete node stored under the DirName-based path for identity A.
 	idA := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "snap-cr-a",
 		DirName:    "source-disk",
@@ -350,7 +350,7 @@ func TestScanNode_CollisionUseDirName(t *testing.T) {
 	// New planned node has the same DirName (same source object name) but a
 	// different CR name and SourceRef → identity mismatch → collision redirect.
 	idB := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "snap-cr-b",
 		DirName:    "source-disk",
@@ -688,7 +688,7 @@ func TestScanNode_PartialMismatchedMarker_Redirects(t *testing.T) {
 	parent := t.TempDir()
 
 	idA := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		DirName:    "source-disk",
@@ -823,7 +823,7 @@ func TestScanAbsolute_PartialMatchingMarker_Resumes(t *testing.T) {
 
 	nodeDir := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "root",
 		Namespace:  "default",
@@ -936,7 +936,7 @@ func TestNodeIdentityMarker_DoesNotAffectChecksum(t *testing.T) {
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
@@ -976,7 +976,7 @@ func TestScanNode_ChecksumMismatch_TamperedData_SurfacesError(t *testing.T) {
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
@@ -1016,7 +1016,7 @@ func TestScanNode_ChecksumMismatch_TamperedManifest_SurfacesError(t *testing.T) 
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
@@ -1047,7 +1047,7 @@ func TestScanNode_ChecksumMismatch_ForeignDir_Redirects(t *testing.T) {
 	parent := t.TempDir()
 
 	idA := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		DirName:    "source-disk",
@@ -1090,7 +1090,7 @@ func TestScanNode_SnapshotYAMLMissing_StillResumes(t *testing.T) {
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
@@ -1128,7 +1128,7 @@ func TestScanAbsolute_ChecksumMismatch_SurfacesError(t *testing.T) {
 	t.Parallel()
 
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "root",
 		Namespace:  "default",
@@ -1166,7 +1166,7 @@ func TestScanNode_CompleteMatchingMarker_RemovesMarker(t *testing.T) {
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
@@ -1201,7 +1201,7 @@ func TestScanAbsolute_CompleteMatchingMarker_RemovesMarker(t *testing.T) {
 	t.Parallel()
 
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "root",
 		Namespace:  "default",
@@ -1240,7 +1240,7 @@ func TestScanNode_CompleteForeignMarker_LeavesMarker(t *testing.T) {
 	parent := t.TempDir()
 
 	idA := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-a",
 		DirName:    "source-disk",
@@ -1286,7 +1286,7 @@ func TestScanAbsolute_CompleteForeignMarker_LeavesMarker(t *testing.T) {
 	t.Parallel()
 
 	idA := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "root-a",
 		Namespace:  "default",
@@ -1324,7 +1324,7 @@ func TestScanNode_PartialMatchingMarker_LeavesMarker(t *testing.T) {
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",

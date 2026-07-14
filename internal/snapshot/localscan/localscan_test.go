@@ -55,7 +55,7 @@ func TestScan_RootNoChildren(t *testing.T) {
 
 	root := t.TempDir()
 	writeNodeYAML(t, root, archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "root-snap",
 		Namespace:  "default",
@@ -96,7 +96,7 @@ func TestScan_RootWithDirectChildren(t *testing.T) {
 
 	root := t.TempDir()
 	writeNodeYAML(t, root, archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "root-snap",
 		Namespace:  "ns-a",
@@ -203,13 +203,13 @@ func TestScan_NestedTree(t *testing.T) {
 
 	root := t.TempDir()
 	writeNodeYAML(t, root, archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "root-snap",
 	})
 
 	parentDir := makeChildDir(t, root, "snapshot_parent", archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "parent-snap",
 	})
@@ -346,7 +346,7 @@ func TestNode_VolumeCount_RecursiveSum(t *testing.T) {
 	// Root aggregator owns no data (empty Volumes) — matches decision #4:
 	// data lives in the owning domain/leaf node, never the aggregator.
 	writeNodeYAML(t, root, archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "root-snap",
 		Namespace:  "ns-a",
@@ -399,13 +399,13 @@ func TestNode_VolumeCount_ZeroVolumeTree(t *testing.T) {
 
 	root := t.TempDir()
 	writeNodeYAML(t, root, archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "root-snap",
 	})
 
 	makeChildDir(t, root, "snapshot_child", archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "child-snap",
 	})
@@ -425,7 +425,7 @@ func TestScan_EmptySnapshotsDir(t *testing.T) {
 
 	root := t.TempDir()
 	writeNodeYAML(t, root, archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap",
 	})
@@ -452,7 +452,7 @@ func TestScan_NonDirEntryInSnapshotsSubdir(t *testing.T) {
 
 	root := t.TempDir()
 	writeNodeYAML(t, root, archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap",
 	})
@@ -469,7 +469,7 @@ func TestScan_NonDirEntryInSnapshotsSubdir(t *testing.T) {
 	}
 
 	makeChildDir(t, root, "snapshot_child", archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "child-snap",
 	})

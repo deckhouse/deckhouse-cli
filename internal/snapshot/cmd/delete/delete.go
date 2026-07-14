@@ -54,7 +54,7 @@ const (
 	pollInterval       = 2 * time.Second
 )
 
-// snapshotGVR is the dynamic resource for storage.deckhouse.io Snapshots.
+// snapshotGVR is the dynamic resource for state-snapshotter.deckhouse.io Snapshots.
 var snapshotGVR = schema.GroupVersionResource{
 	Group:    snapshotapi.StorageGroup,
 	Version:  snapshotapi.Version,
