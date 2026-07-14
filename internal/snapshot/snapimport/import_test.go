@@ -497,31 +497,6 @@ func TestRun_DomainDataLeaf_EndToEnd(t *testing.T) {
 	}
 }
 
-// TestLeafTargetRef_DomainLeaf verifies that leafTargetRef derives the targetRef
-// group/resource for a domain data leaf: group comes from its apiVersion and the plural
-// resource is resolved via the RESTMapper.
-func TestLeafTargetRef_DomainLeaf(t *testing.T) {
-	leaf := PlannedNode{
-		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
-		Kind:       "DemoVirtualDiskSnapshot",
-		Name:       "dvd-snap-1",
-		DataFile:   "/archive/data.bin",
-	}
-
-	group, resource, err := leafTargetRef(leaf, testDomainMapper())
-	if err != nil {
-		t.Fatalf("leafTargetRef: %v", err)
-	}
-
-	if group != "demo.state-snapshotter.deckhouse.io" {
-		t.Errorf("group = %q, want demo.state-snapshotter.deckhouse.io", group)
-	}
-
-	if resource != "demovirtualdisksnapshots" {
-		t.Errorf("resource = %q, want demovirtualdisksnapshots", resource)
-	}
-}
-
 // TestRun_ManifestOnlyDomainNode_Imports verifies that a manifest-only domain node — a
 // domain snapshot with neither volume data nor child snapshots (e.g. a disk-less
 // DemoVirtualMachineSnapshot) — is client-importable: it gets the unified

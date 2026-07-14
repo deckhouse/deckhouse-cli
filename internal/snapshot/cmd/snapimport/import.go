@@ -263,7 +263,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		runLog = slog.New(slog.NewTextHandler(sink.LogWriter(), &slog.HandlerOptions{Level: slog.LevelWarn}))
 	}
 
-	volumes := snapimport.NewClusterVolumeImporter(dynClient, kubeClient.RESTMapper(), sc, ttl, timeout, 3*time.Second, tempDir, runLog)
+	volumes := snapimport.NewClusterVolumeImporter(dynClient, sc, ttl, timeout, 3*time.Second, tempDir, runLog)
 
 	cfg := snapimport.Config{
 		Namespace:        namespace,
