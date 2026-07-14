@@ -94,12 +94,3 @@ func importMarkerCR(node PlannedNode, namespace string) (*unstructured.Unstructu
 
 	return obj, nil
 }
-
-// unsupportedNodeError reports an internal invariant violation: a node reached the data-leaf
-// DataImport path (leafTargetRef) although it is neither a CSI VolumeSnapshot leaf nor a
-// domain data leaf. importNodeData only ever invokes that path for data leaves, so this is a
-// programming error rather than a user-facing condition.
-func unsupportedNodeError(node PlannedNode) error {
-	return fmt.Errorf("internal: %s/%s reached the data-leaf import path but carries no own "+
-		"volume data (not a CSI VolumeSnapshot or domain data leaf)", node.Kind, node.Name)
-}

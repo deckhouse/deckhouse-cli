@@ -100,20 +100,18 @@ type VolumeObjectRef struct {
 type VolumeInfo struct {
 	// Target is the source PVC that was captured (its apiVersion/kind/name/namespace/uid).
 	Target VolumeObjectRef `json:"target"`
-	// Artifact is the VolumeSnapshotContent that holds the durable data artifact. Its Kind
-	// feeds the DataImport spec.dataArtifactType when re-importing this leaf.
+	// Artifact is the VolumeSnapshotContent that held the durable data artifact at capture
+	// time. Recorded for provenance/debugging; the re-import path no longer consumes it.
 	Artifact VolumeObjectRef `json:"artifact"`
-	// VolumeMode records the source volume mode (Block or Filesystem). It is informational;
-	// the DataImport controller derives volumeMode from the leaf's captured PVC manifest on
-	// import, not from this field.
+	// VolumeMode records the source volume mode (Block or Filesystem). On re-import it is sent
+	// as the PopulateData DataImport's spec.storageParams.volumeMode (optional).
 	VolumeMode string `json:"volumeMode,omitempty"`
-	// StorageClassName records the source StorageClass of the captured volume. It is
-	// informational; the DataImport controller derives storageClassName from the leaf's
-	// captured PVC manifest on import, not from this field.
+	// StorageClassName records the source StorageClass of the captured volume. On re-import it
+	// is sent as the PopulateData DataImport's spec.storageParams.storageClassName (required).
 	StorageClassName string `json:"storageClassName,omitempty"`
 	// Size records the real allocated size of the captured volume (e.g. "10Gi"), taken from
-	// VolumeSnapshotContent.status.restoreSize. It is informational; the DataImport controller
-	// derives size from the leaf's captured PVC manifest on import, not from this field.
+	// VolumeSnapshotContent.status.restoreSize. On re-import it is sent as the PopulateData
+	// DataImport's spec.storageParams.size (required).
 	Size string `json:"size,omitempty"`
 }
 
