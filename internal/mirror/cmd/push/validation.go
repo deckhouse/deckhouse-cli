@@ -215,15 +215,24 @@ func parseAndValidateRegistryURLArg(registryArg string) error {
 		return errors.New("<registry> argument is empty")
 	}
 
+	// Check the "host:port" format of the user-provided repository URL.
+	// It must have a path after the host and port.
+	if _, repoPath, _ := strings.Cut(registry, "/"); repoPath == "" {
+		return fmt.Errorf(
+			"<registry> %q is missing the repository path (pushing to a registry root is not supported): expected format registry-host[:port]/path, e.g. %q",
+			registry, strings.TrimRight(registry, "/")+"/deckhouse",
+		)
+	}
+
 	// We first validate that passed repository reference is correct and can be parsed
 	if _, err := name.NewRepository(registry); err != nil {
-		return fmt.Errorf("Validate registry address: %w", err)
+		return fmt.Errorf("<registry> %q is not a valid registry address: %w", registry, err)
 	}
 
 	// Then we parse it as URL to validate that it contains everything we need
 	registryURL, err := url.ParseRequestURI("docker://" + registry)
 	if err != nil {
-		return fmt.Errorf("Validate registry address: %w", err)
+		return fmt.Errorf("Parse <registry> address %q: %w", registry, err)
 	}
 
 	RegistryHost = registryURL.Host

@@ -453,6 +453,55 @@ func TestParseAndValidateRegistryURLArg(t *testing.T) {
 			name:        "no repository path",
 			registry:    "registry.example.com",
 			expectError: true,
+			errorMsg:    "is missing the repository path",
+		},
+		{
+			name:        "host with port but no repository path",
+			registry:    "localhost:5000",
+			expectError: true,
+			errorMsg:    `<registry> "localhost:5000" is missing the repository path (pushing to a registry root is not supported): expected format registry-host[:port]/path, e.g. "localhost:5000/deckhouse"`,
+		},
+		{
+			name:        "scheme is stripped before the missing-path check",
+			registry:    "http://localhost:5000",
+			expectError: true,
+			errorMsg:    `e.g. "localhost:5000/deckhouse"`,
+		},
+		{
+			name:        "trailing slash without repository path",
+			registry:    "localhost:5000/",
+			expectError: true,
+			errorMsg:    "is missing the repository path",
+		},
+		{
+			name:        "uppercase repository is a character error, not a missing path",
+			registry:    "localhost:5000/UPPER",
+			expectError: true,
+			errorMsg:    "can only contain",
+		},
+		{
+			name:        "no registry host",
+			registry:    "/deckhouse/ee",
+			expectError: true,
+			errorMsg:    "no registry host",
+		},
+		{
+			name:     "IP with port and path",
+			registry: "192.168.1.1:5000/repo",
+			wantHost: "192.168.1.1:5000",
+			wantPath: "/repo",
+		},
+		{
+			name:     "host without dot or colon stays accepted",
+			registry: "myregistry/repo",
+			wantHost: "myregistry",
+			wantPath: "/repo",
+		},
+		{
+			name:     "double slash before repo stays accepted",
+			registry: "localhost:5000//repo",
+			wantHost: "localhost:5000",
+			wantPath: "//repo",
 		},
 	}
 

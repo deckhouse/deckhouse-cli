@@ -58,7 +58,19 @@ func TestValidationValidateSourceRegistry(t *testing.T) {
 			name:        "invalid registry format - no path",
 			registry:    "registry.example.com",
 			expectError: true,
-			errorMsg:    "no registry path",
+			errorMsg:    "is missing the repository path",
+		},
+		{
+			name:        "host with port but no path",
+			registry:    "localhost:5000",
+			expectError: true,
+			errorMsg:    `--source "localhost:5000" is missing the repository path: expected format registry-host[:port]/path, e.g. "localhost:5000/deckhouse/ee"`,
+		},
+		{
+			name:        "trailing slash without path",
+			registry:    "registry.example.com/",
+			expectError: true,
+			errorMsg:    "is missing the repository path",
 		},
 		{
 			name:        "invalid registry - malformed",
