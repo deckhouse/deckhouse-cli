@@ -63,7 +63,12 @@ func (m *Manager) InstalledPluginContract(pluginName string) (*internal.Plugin, 
 		return nil, fmt.Errorf("failed to unmarshal contract: %w", err)
 	}
 
-	return service.ContractToDomain(contract), nil
+	plugin, err := service.ContractToDomain(contract)
+	if err != nil {
+		return nil, fmt.Errorf("invalid contract for plugin %q: %w", pluginName, err)
+	}
+
+	return plugin, nil
 }
 
 // getInstalledPluginVersion runs the installed plugin's current binary and parses

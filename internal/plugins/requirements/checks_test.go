@@ -60,6 +60,16 @@ func TestHasClusterRequirements(t *testing.T) {
 			Mandatory: []internal.ModuleRequirement{{Name: "x"}},
 		}},
 	}))
+	assert.True(t, HasClusterRequirements(&internal.Plugin{
+		Requirements: internal.Requirements{Modules: internal.ModuleRequirementsGroup{
+			AnyOf: []internal.ModuleGroup{{Name: "g", Modules: []internal.ModuleRequirement{{Name: "x"}}}},
+		}},
+	}))
+	assert.True(t, HasClusterRequirements(&internal.Plugin{
+		Requirements: internal.Requirements{Modules: internal.ModuleRequirementsGroup{
+			NoneOf: []internal.ModuleGroup{{Name: "g", Modules: []internal.ModuleRequirement{{Name: "x"}}}},
+		}},
+	}))
 }
 
 func TestIsUnmet(t *testing.T) {
@@ -148,7 +158,7 @@ func TestValidateModuleRequirementConditional(t *testing.T) {
 func TestValidateModuleRequirementAnyOf(t *testing.T) {
 	c := testChecker()
 	reqs := reqModules(internal.ModuleRequirementsGroup{
-		AnyOf: []internal.AnyOfGroup{{
+		AnyOf: []internal.ModuleGroup{{
 			Description: "ingress",
 			Modules: []internal.ModuleRequirement{
 				{Name: "ingress-nginx", Constraint: ">= 1.0"},
@@ -174,7 +184,7 @@ func TestValidateModuleRequirementAnyOf(t *testing.T) {
 func TestValidateModuleRequirementAnyOfUnversionedNotSatisfied(t *testing.T) {
 	c := testChecker()
 	reqs := reqModules(internal.ModuleRequirementsGroup{
-		AnyOf: []internal.AnyOfGroup{{Modules: []internal.ModuleRequirement{{Name: "m", Constraint: ">= 1.0"}}}},
+		AnyOf: []internal.ModuleGroup{{Modules: []internal.ModuleRequirement{{Name: "m", Constraint: ">= 1.0"}}}},
 	})
 
 	// enabled but no version → does NOT satisfy a versioned anyOf alternative
@@ -186,10 +196,61 @@ func TestValidateModuleRequirementAnyOfUnversionedNotSatisfied(t *testing.T) {
 func TestValidateModuleRequirementMalformedConstraintPropagates(t *testing.T) {
 	c := testChecker()
 	reqs := reqModules(internal.ModuleRequirementsGroup{
-		AnyOf: []internal.AnyOfGroup{{Modules: []internal.ModuleRequirement{{Name: "m", Constraint: "abc"}}}},
+		AnyOf: []internal.ModuleGroup{{Modules: []internal.ModuleRequirement{{Name: "m", Constraint: "abc"}}}},
 	})
 
 	// a malformed constraint is operational - it propagates, not swallowed as "none satisfied"
+	err := c.validateModuleRequirement(reqs, &ClusterState{Modules: map[string]ModuleState{
+		"m": enabled("v1.0.0"),
+	}})
+	require.Error(t, err)
+	assert.False(t, IsUnmet(err), "operational errors are not reported as unmet requirements")
+}
+
+func TestValidateModuleRequirementNoneOf(t *testing.T) {
+	c := testChecker()
+	reqs := reqModules(internal.ModuleRequirementsGroup{
+		NoneOf: []internal.ModuleGroup{{
+			Description: "legacy",
+			Modules:     []internal.ModuleRequirement{{Name: "legacy-cni", Constraint: "< 1.0"}},
+		}},
+	})
+
+	// forbidden module not enabled → ok
+	require.NoError(t, c.validateModuleRequirement(reqs, &ClusterState{Modules: map[string]ModuleState{}}))
+
+	// enabled, version outside the forbidden range → ok
+	require.NoError(t, c.validateModuleRequirement(reqs, &ClusterState{Modules: map[string]ModuleState{
+		"legacy-cni": enabled("v1.5.0"),
+	}}))
+
+	// enabled, version inside the forbidden range → unmet
+	err := c.validateModuleRequirement(reqs, &ClusterState{Modules: map[string]ModuleState{
+		"legacy-cni": enabled("v0.9.0"),
+	}})
+	require.Error(t, err)
+	assert.True(t, IsUnmet(err))
+}
+
+func TestValidateModuleRequirementNoneOfEmptyConstraintForbidsAnyVersion(t *testing.T) {
+	c := testChecker()
+	reqs := reqModules(internal.ModuleRequirementsGroup{
+		NoneOf: []internal.ModuleGroup{{Modules: []internal.ModuleRequirement{{Name: "banned"}}}},
+	})
+
+	// an empty constraint forbids the module at any version
+	require.Error(t, c.validateModuleRequirement(reqs, &ClusterState{Modules: map[string]ModuleState{
+		"banned": enabled("v3.0.0"),
+	}}))
+}
+
+func TestValidateModuleRequirementNoneOfMalformedConstraintPropagates(t *testing.T) {
+	c := testChecker()
+	reqs := reqModules(internal.ModuleRequirementsGroup{
+		NoneOf: []internal.ModuleGroup{{Modules: []internal.ModuleRequirement{{Name: "m", Constraint: "abc"}}}},
+	})
+
+	// a malformed constraint is operational - it propagates, not swallowed as "not forbidden"
 	err := c.validateModuleRequirement(reqs, &ClusterState{Modules: map[string]ModuleState{
 		"m": enabled("v1.0.0"),
 	}})

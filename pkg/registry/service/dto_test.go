@@ -24,7 +24,7 @@ import (
 
 // TestPluginContract_V2FieldsParsed: a full v2 contract must populate every
 // new top-level field (deckhouse, plugins.{mandatory,conditional},
-// modules.{mandatory,conditional,anyOf}). Catches structural breakage of
+// modules.{mandatory,conditional,anyOf,noneOf}). Catches structural breakage of
 // any new DTO field with one assertion per section.
 func TestPluginContract_V2FieldsParsed(t *testing.T) {
 	in := []byte(`{
@@ -35,7 +35,8 @@ func TestPluginContract_V2FieldsParsed(t *testing.T) {
 			             "conditional":[{"name":"iam","constraint":">=1.0.0"}]},
 			"modules":  {"mandatory":[{"name":"stronghold","constraint":">=1.0.0"}],
 			             "conditional":[{"name":"observability","constraint":">=1.0.0"}],
-			             "anyOf":[{"description":"cni","modules":[{"name":"cni-flannel","constraint":">=1.5.0"}]}]}
+			             "anyOf":[{"name":"cni","description":"cni","modules":[{"name":"cni-flannel","constraint":">=1.5.0"}]}],
+			             "noneOf":[{"name":"legacy","description":"legacy","modules":[{"name":"cni-simple-bridge","constraint":"<1.0.0"}]}]}
 		}
 	}`)
 	var c PluginContract
@@ -53,6 +54,15 @@ func TestPluginContract_V2FieldsParsed(t *testing.T) {
 	}
 	if len(c.Requirements.Modules.AnyOf) != 1 || len(c.Requirements.Modules.AnyOf[0].Modules) != 1 {
 		t.Errorf("modules.anyOf not parsed: %+v", c.Requirements.Modules.AnyOf)
+	}
+	if c.Requirements.Modules.AnyOf[0].Name != "cni" {
+		t.Errorf("modules.anyOf[0].name not parsed: %+v", c.Requirements.Modules.AnyOf)
+	}
+	if len(c.Requirements.Modules.NoneOf) != 1 || len(c.Requirements.Modules.NoneOf[0].Modules) != 1 {
+		t.Errorf("modules.noneOf not parsed: %+v", c.Requirements.Modules.NoneOf)
+	}
+	if c.Requirements.Modules.NoneOf[0].Name != "legacy" {
+		t.Errorf("modules.noneOf[0].name not parsed: %+v", c.Requirements.Modules.NoneOf)
 	}
 }
 
@@ -102,5 +112,101 @@ func TestUnmarshalContract_FriendlyArrayMessage(t *testing.T) {
 	}
 	if strings.Contains(msg, "ModuleRequirementsGroupDTO") {
 		t.Errorf("error message still leaks internal Go type name:\n%s", msg)
+	}
+}
+
+// TestContractToDomain_CarriesModuleGroups: a valid contract's anyOf and noneOf
+// groups must reach the domain plugin the checker consumes, with name, member
+// name, and constraint intact. Guards the parse -> domain link that the
+// enforcement tests (which build the domain directly) do not exercise.
+func TestContractToDomain_CarriesModuleGroups(t *testing.T) {
+	plugin, err := ContractToDomain(&PluginContract{
+		Name:    "p",
+		Version: "v1.0.0",
+		Requirements: RequirementsDTO{Modules: ModuleRequirementsGroupDTO{
+			AnyOf: []ModuleGroupDTO{{
+				Name:    "cni",
+				Modules: []ModuleRequirementDTO{{Name: "cni-cilium", Constraint: ">= 1.0"}},
+			}},
+			NoneOf: []ModuleGroupDTO{{
+				Name:    "legacy",
+				Modules: []ModuleRequirementDTO{{Name: "cni-flannel", Constraint: "< 1.0"}},
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ContractToDomain: %v", err)
+	}
+
+	anyOf := plugin.Requirements.Modules.AnyOf
+	if len(anyOf) != 1 || anyOf[0].Name != "cni" ||
+		len(anyOf[0].Modules) != 1 || anyOf[0].Modules[0].Name != "cni-cilium" ||
+		anyOf[0].Modules[0].Constraint != ">= 1.0" {
+		t.Errorf("anyOf not carried into domain: %+v", anyOf)
+	}
+
+	noneOf := plugin.Requirements.Modules.NoneOf
+	if len(noneOf) != 1 || noneOf[0].Name != "legacy" ||
+		len(noneOf[0].Modules) != 1 || noneOf[0].Modules[0].Name != "cni-flannel" ||
+		noneOf[0].Modules[0].Constraint != "< 1.0" {
+		t.Errorf("noneOf not carried into domain: %+v", noneOf)
+	}
+}
+
+// TestContractToDomain_RejectsInvalidGroups: ContractToDomain must reject an
+// ill-formed contract, and the error must name the violated rule. Asserting the
+// message pins each case to its rule instead of just "some error occurred".
+func TestContractToDomain_RejectsInvalidGroups(t *testing.T) {
+	tests := []struct {
+		name        string
+		giveModules ModuleRequirementsGroupDTO
+		wantMsg     string
+	}{
+		{
+			name:        "group without name",
+			giveModules: ModuleRequirementsGroupDTO{NoneOf: []ModuleGroupDTO{{Modules: []ModuleRequirementDTO{{Name: "m"}}}}},
+			wantMsg:     "name is required",
+		},
+		{
+			name: "duplicate group name",
+			giveModules: ModuleRequirementsGroupDTO{AnyOf: []ModuleGroupDTO{
+				{Name: "g", Modules: []ModuleRequirementDTO{{Name: "a"}}},
+				{Name: "g", Modules: []ModuleRequirementDTO{{Name: "b"}}},
+			}},
+			wantMsg: "duplicate group name",
+		},
+		{
+			name: "module in both anyOf and noneOf",
+			giveModules: ModuleRequirementsGroupDTO{
+				AnyOf:  []ModuleGroupDTO{{Name: "a", Modules: []ModuleRequirementDTO{{Name: "shared"}}}},
+				NoneOf: []ModuleGroupDTO{{Name: "n", Modules: []ModuleRequirementDTO{{Name: "shared"}}}},
+			},
+			wantMsg: "both anyOf group",
+		},
+		{
+			name: "noneOf member also mandatory",
+			giveModules: ModuleRequirementsGroupDTO{
+				Mandatory: []ModuleRequirementDTO{{Name: "shared"}},
+				NoneOf:    []ModuleGroupDTO{{Name: "n", Modules: []ModuleRequirementDTO{{Name: "shared"}}}},
+			},
+			wantMsg: "both mandatory and noneOf group",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ContractToDomain(&PluginContract{
+				Name:         "p",
+				Version:      "v1.0.0",
+				Requirements: RequirementsDTO{Modules: tt.giveModules},
+			})
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+
+			if !strings.Contains(err.Error(), tt.wantMsg) {
+				t.Errorf("error %q does not mention %q", err.Error(), tt.wantMsg)
+			}
+		})
 	}
 }

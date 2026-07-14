@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/Masterminds/semver/v3"
+
 	"github.com/deckhouse/deckhouse-cli/internal"
 )
 
@@ -55,8 +57,11 @@ func UnmarshalContract(raw []byte, dst *PluginContract) error {
 	return fmt.Errorf("invalid contract: %w", err)
 }
 
-// ContractToDomain converts PluginContract DTO to Plugin domain entity.
-func ContractToDomain(contract *PluginContract) *internal.Plugin {
+// ContractToDomain converts a PluginContract DTO to a Plugin domain entity and
+// validates its module requirement groups (see validateModuleRequirements). An
+// ill-formed contract is rejected rather than silently yielding a plugin whose
+// requirements cannot be enforced.
+func ContractToDomain(contract *PluginContract) (*internal.Plugin, error) {
 	plugin := &internal.Plugin{
 		Name:        contract.Name,
 		Version:     contract.Version,
@@ -80,7 +85,11 @@ func ContractToDomain(contract *PluginContract) *internal.Plugin {
 		Plugins:    pluginGroupToDomain(contract.Requirements.Plugins),
 	}
 
-	return plugin
+	if err := validateModuleRequirements(plugin.Requirements.Modules); err != nil {
+		return nil, err
+	}
+
+	return plugin, nil
 }
 
 // DomainToContract converts Plugin domain entity to PluginContract DTO.
@@ -143,35 +152,47 @@ func pluginReqsToDTO(reqs []internal.PluginRequirement) []PluginRequirementDTO {
 }
 
 func moduleGroupToDomain(g ModuleRequirementsGroupDTO) internal.ModuleRequirementsGroup {
-	anyOf := make([]internal.AnyOfGroup, 0, len(g.AnyOf))
-	for _, grp := range g.AnyOf {
-		anyOf = append(anyOf, internal.AnyOfGroup{
+	return internal.ModuleRequirementsGroup{
+		Mandatory:   moduleReqsToDomain(g.Mandatory),
+		Conditional: moduleReqsToDomain(g.Conditional),
+		AnyOf:       moduleGroupsToDomain(g.AnyOf),
+		NoneOf:      moduleGroupsToDomain(g.NoneOf),
+	}
+}
+
+func moduleGroupToDTO(g internal.ModuleRequirementsGroup) ModuleRequirementsGroupDTO {
+	return ModuleRequirementsGroupDTO{
+		Mandatory:   moduleReqsToDTO(g.Mandatory),
+		Conditional: moduleReqsToDTO(g.Conditional),
+		AnyOf:       moduleGroupsToDTO(g.AnyOf),
+		NoneOf:      moduleGroupsToDTO(g.NoneOf),
+	}
+}
+
+func moduleGroupsToDomain(groups []ModuleGroupDTO) []internal.ModuleGroup {
+	out := make([]internal.ModuleGroup, 0, len(groups))
+	for _, grp := range groups {
+		out = append(out, internal.ModuleGroup{
+			Name:        grp.Name,
 			Description: grp.Description,
 			Modules:     moduleReqsToDomain(grp.Modules),
 		})
 	}
 
-	return internal.ModuleRequirementsGroup{
-		Mandatory:   moduleReqsToDomain(g.Mandatory),
-		Conditional: moduleReqsToDomain(g.Conditional),
-		AnyOf:       anyOf,
-	}
+	return out
 }
 
-func moduleGroupToDTO(g internal.ModuleRequirementsGroup) ModuleRequirementsGroupDTO {
-	anyOf := make([]AnyOfGroupDTO, 0, len(g.AnyOf))
-	for _, grp := range g.AnyOf {
-		anyOf = append(anyOf, AnyOfGroupDTO{
+func moduleGroupsToDTO(groups []internal.ModuleGroup) []ModuleGroupDTO {
+	out := make([]ModuleGroupDTO, 0, len(groups))
+	for _, grp := range groups {
+		out = append(out, ModuleGroupDTO{
+			Name:        grp.Name,
 			Description: grp.Description,
 			Modules:     moduleReqsToDTO(grp.Modules),
 		})
 	}
 
-	return ModuleRequirementsGroupDTO{
-		Mandatory:   moduleReqsToDTO(g.Mandatory),
-		Conditional: moduleReqsToDTO(g.Conditional),
-		AnyOf:       anyOf,
-	}
+	return out
 }
 
 func moduleReqsToDomain(reqs []ModuleRequirementDTO) []internal.ModuleRequirement {
@@ -187,6 +208,117 @@ func moduleReqsToDTO(reqs []internal.ModuleRequirement) []ModuleRequirementDTO {
 	out := make([]ModuleRequirementDTO, 0, len(reqs))
 	for _, r := range reqs {
 		out = append(out, ModuleRequirementDTO{Name: r.Name, Constraint: r.Constraint})
+	}
+
+	return out
+}
+
+// validateModuleRequirements checks contract well-formedness for the module
+// requirement groups, mirroring what the Deckhouse controller applies to a
+// package.yaml (buildModuleGroups + validateBucketCollisions): each anyOf/noneOf
+// group needs a unique, non-empty name and at least one member; members are
+// unique within a group and carry valid semver constraints; and no module may
+// appear in contradictory buckets.
+func validateModuleRequirements(m internal.ModuleRequirementsGroup) error {
+	mandatory := moduleNameSet(m.Mandatory)
+	conditional := moduleNameSet(m.Conditional)
+
+	for name := range conditional {
+		if _, dup := mandatory[name]; dup {
+			return fmt.Errorf("module %q appears in both mandatory and conditional", name)
+		}
+	}
+
+	anyOfMembers, err := validateModuleGroups(m.AnyOf, "anyOf")
+	if err != nil {
+		return err
+	}
+
+	noneOfMembers, err := validateModuleGroups(m.NoneOf, "noneOf")
+	if err != nil {
+		return err
+	}
+
+	for member, group := range anyOfMembers {
+		if _, dup := mandatory[member]; dup {
+			return fmt.Errorf("module %q appears in both mandatory and anyOf group %q", member, group)
+		}
+
+		if _, dup := conditional[member]; dup {
+			return fmt.Errorf("module %q appears in both conditional and anyOf group %q", member, group)
+		}
+	}
+
+	for member, group := range noneOfMembers {
+		if _, dup := mandatory[member]; dup {
+			return fmt.Errorf("module %q appears in both mandatory and noneOf group %q", member, group)
+		}
+
+		if _, dup := conditional[member]; dup {
+			return fmt.Errorf("module %q appears in both conditional and noneOf group %q", member, group)
+		}
+
+		if anyGroup, dup := anyOfMembers[member]; dup {
+			return fmt.Errorf("module %q appears in both anyOf group %q and noneOf group %q", member, anyGroup, group)
+		}
+	}
+
+	return nil
+}
+
+// validateModuleGroups validates one bucket of anyOf/noneOf groups and returns a
+// map of member module name to the group that declares it, for cross-bucket
+// collision checks. bucket ("anyOf"/"noneOf") is woven into error messages. The
+// same module across two distinct groups of one bucket is allowed.
+func validateModuleGroups(groups []internal.ModuleGroup, bucket string) (map[string]string, error) {
+	seenGroups := make(map[string]struct{}, len(groups))
+	members := make(map[string]string)
+
+	for i, group := range groups {
+		if group.Name == "" {
+			return nil, fmt.Errorf("%s group [%d]: name is required", bucket, i)
+		}
+
+		if _, dup := seenGroups[group.Name]; dup {
+			return nil, fmt.Errorf("%s group %q: duplicate group name", bucket, group.Name)
+		}
+
+		seenGroups[group.Name] = struct{}{}
+
+		if len(group.Modules) == 0 {
+			return nil, fmt.Errorf("%s group %q: at least one member is required", bucket, group.Name)
+		}
+
+		seenMembers := make(map[string]struct{}, len(group.Modules))
+		for _, member := range group.Modules {
+			if member.Name == "" {
+				return nil, fmt.Errorf("%s group %q: member name is required", bucket, group.Name)
+			}
+
+			if _, dup := seenMembers[member.Name]; dup {
+				return nil, fmt.Errorf("%s group %q: duplicate member %q", bucket, group.Name, member.Name)
+			}
+
+			seenMembers[member.Name] = struct{}{}
+
+			if member.Constraint != "" {
+				if _, err := semver.NewConstraint(member.Constraint); err != nil {
+					return nil, fmt.Errorf("%s group %q member %q: invalid constraint %q: %w",
+						bucket, group.Name, member.Name, member.Constraint, err)
+				}
+			}
+
+			members[member.Name] = group.Name
+		}
+	}
+
+	return members, nil
+}
+
+func moduleNameSet(reqs []internal.ModuleRequirement) map[string]struct{} {
+	out := make(map[string]struct{}, len(reqs))
+	for _, r := range reqs {
+		out[r.Name] = struct{}{}
 	}
 
 	return out
