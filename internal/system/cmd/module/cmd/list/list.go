@@ -31,7 +31,9 @@ List enabled Deckhouse Kubernetes Platform modules.
 
 © Flant JSC 2025`)
 
-var outputFormats = []string{"yaml", "json", "text"}
+// The /module/list debug endpoint also matches ".text" in its route,
+// but renders structured payloads as JSON anyway, so text is not offered.
+var outputFormats = []string{"yaml", "json"}
 
 func NewCommand() *cobra.Command {
 	listCmd := &cobra.Command{
