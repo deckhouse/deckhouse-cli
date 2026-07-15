@@ -27,6 +27,7 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -305,20 +306,26 @@ type parsedTags struct {
 // channelVersions represents the fetched versions from release channels
 type channelVersions map[string]*semver.Version
 
+// suspendedChannels is the set of release channels marked "suspend": true in their version.json.
+// Empty when --ignore-suspend is set.
+type suspendedChannels map[string]struct{}
+
 // versionsToMirror determines which Deckhouse release versions should be mirrored
 // It collects current versions from all release channels and filters available releases
 // to include only versions that should be mirrored based on the mirroring strategy
 func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string) (*VersionsToMirrorResult, error) {
 	isTagsMirror := len(tagsToMirror) > 0
 	if isTagsMirror {
-		svc.userLogger.Infof("Skipped releases lookup as tag %q is specifically requested with --deckhouse-tag", svc.options.TargetTag)
+		// Release channels are still read below: they resolve channel-name tags and channel
+		// aliases. Only the rock-solid..alpha version range discovery is skipped.
+		svc.userLogger.Infof("Skipped releases range discovery as tag %q is specifically requested with --deckhouse-tag", svc.options.TargetTag)
 	}
 
 	// Parse input tags into categories
 	parsed := svc.parseInputTags(tagsToMirror)
 
 	// Fetch current versions from all release channels
-	channelVersions, err := svc.fetchReleaseChannelVersions(ctx)
+	channelVersions, suspended, err := svc.fetchReleaseChannels(ctx)
 	if err != nil && !errors.Is(err, ErrSomeChannelsFailed) {
 		return nil, fmt.Errorf("failed to fetch release channel versions: %w", err)
 	}
@@ -329,6 +336,14 @@ func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string)
 
 	// Match channels and versions based on requested tags
 	versions, matchedChannels := svc.matchChannelsToTags(tagsToMirror, channelVersions, parsed.semverVersions)
+
+	// Refuse only when the request actually resolves to a suspended channel. In full discovery
+	// every channel is matched, so any suspension is fatal, as before. A specific --deckhouse-tag
+	// that matches no channel is unaffected by suspensions elsewhere in the registry.
+	// Runs before expandVersionRange, which relies on the alpha and rock-solid snapshots.
+	if err := checkSuspendedChannels(matchedChannels, suspended); err != nil {
+		return nil, err
+	}
 
 	// If specific tags requested, return immediately
 	if isTagsMirror {
@@ -403,31 +418,42 @@ func (svc *Service) parseInputTags(tags []string) parsedTags {
 	return result
 }
 
-// fetchReleaseChannelVersions retrieves current versions from all release channels
-func (svc *Service) fetchReleaseChannelVersions(ctx context.Context) (channelVersions, error) {
+// fetchReleaseChannels retrieves the current state of every release channel:
+// the version each one points to and which of them are suspended.
+// Suspended channels are reported through suspendedChannels rather than failing the fetch:
+// whether a suspension is fatal depends on the channels the request resolves to, which is
+// only known after matchChannelsToTags.
+func (svc *Service) fetchReleaseChannels(ctx context.Context) (channelVersions, suspendedChannels, error) {
 	defaultChannels := internal.GetAllDefaultReleaseChannels()
 	allChannels := slices.Concat(defaultChannels, []string{internal.LTSChannel})
 	channelResults := make(map[string]releaseChannelVersionResult, len(allChannels))
+	suspended := make(suspendedChannels, len(allChannels))
 
 	// - LTS exists: fetch all channels (default + LTS), missing default channels are OK
 	// - LTS doesn't exist: all default channels are required
-	ltsVersion, ltsErr := svc.getReleaseChannelVersionFromRegistry(ctx, internal.LTSChannel)
+	ltsInfo, ltsErr := svc.getReleaseChannelInfoFromRegistry(ctx, internal.LTSChannel)
 	if ltsErr != nil && !errors.Is(ltsErr, client.ErrImageNotFound) {
-		return nil, fmt.Errorf("get LTS release channel: %w", ltsErr)
+		return nil, nil, fmt.Errorf("get LTS release channel: %w", ltsErr)
 	}
 
+	// hasLTS means "found", not "found and not suspended": a suspended LTS channel must not
+	// flip the CSE branch into requiring every default channel.
 	hasLTS := ltsErr == nil
 
 	if hasLTS {
 		// Other channels will be appended below (if exists)
-		channelResults[internal.LTSChannel] = releaseChannelVersionResult{ver: ltsVersion}
+		channelResults[internal.LTSChannel] = releaseChannelVersionResult{ver: ltsInfo.version}
+
+		if ltsInfo.suspended {
+			suspended[internal.LTSChannel] = struct{}{}
+		}
 	}
 
 	for _, channel := range defaultChannels {
-		version, err := svc.getReleaseChannelVersionFromRegistry(ctx, channel)
+		info, err := svc.getReleaseChannelInfoFromRegistry(ctx, channel)
 		// Real error (network, auth) - fail immediately
 		if err != nil && !errors.Is(err, client.ErrImageNotFound) {
-			return nil, fmt.Errorf("failed to get release channel version from registry for channel %s: %w", channel, err)
+			return nil, nil, fmt.Errorf("failed to get release channel version from registry for channel %s: %w", channel, err)
 		}
 
 		// Missing default channels are OK when LTS is present (e.g., CSE edition)
@@ -435,11 +461,17 @@ func (svc *Service) fetchReleaseChannelVersions(ctx context.Context) (channelVer
 			continue
 		}
 
-		channelResults[channel] = releaseChannelVersionResult{ver: version, err: err}
+		if info.suspended {
+			suspended[channel] = struct{}{}
+		}
+
+		channelResults[channel] = releaseChannelVersionResult{ver: info.version, err: err}
 	}
 
 	// Validate and extract successful channel versions
-	return svc.validateChannelResults(channelResults)
+	versions, err := svc.validateChannelResults(channelResults)
+
+	return versions, suspended, err
 }
 
 var ErrSomeChannelsFailed = errors.New("some channels failed to fetch")
@@ -504,6 +536,37 @@ func (svc *Service) matchChannelsToTags(requestedTags []string, channelVersions 
 // tagMatchesChannel checks if a tag matches a channel (by name or version)
 func (svc *Service) tagMatchesChannel(tag, channelName string, channelVersion *semver.Version) bool {
 	return tag == channelName || tag == "v"+channelVersion.String()
+}
+
+// checkSuspendedChannels refuses the pull when a channel the request resolves to is suspended.
+// Suspension of channels the request does not resolve to is not an error.
+func checkSuspendedChannels(matchedChannels []string, suspended suspendedChannels) error {
+	if len(suspended) == 0 {
+		return nil
+	}
+
+	blocked := make([]string, 0, len(suspended))
+
+	for _, channel := range matchedChannels {
+		if _, ok := suspended[channel]; ok {
+			blocked = append(blocked, strconv.Quote(channel))
+		}
+	}
+
+	if len(blocked) == 0 {
+		return nil
+	}
+
+	// matchedChannels comes from a map, so sort for a stable message.
+	slices.Sort(blocked)
+
+	noun := "channel"
+	if len(blocked) > 1 {
+		noun = "channels"
+	}
+
+	return fmt.Errorf("source registry contains suspended release %s %s, try again later (use --ignore-suspend to override)",
+		noun, strings.Join(blocked, ", "))
 }
 
 // expandVersionRange expands the version range for full discovery mode
@@ -674,7 +737,7 @@ func filterVersionsByConstraint(versions []*semver.Version, constraint *modules.
 
 // filterChannelsByConstraint drops release channels whose current snapshot
 // version falls outside the user-supplied constraint. Channels that resolve
-// to a missing version (defensive — fetchReleaseChannelVersions normally
+// to a missing version (defensive — fetchReleaseChannels normally
 // guarantees this) are kept so we don't silently delete metadata for sources
 // we cannot evaluate against the constraint.
 func filterChannelsByConstraint(channels []string, channelVersions channelVersions, constraint *modules.SemanticVersionConstraint) []string {
@@ -765,37 +828,47 @@ func mapKeysToSlice(m map[string]struct{}) []string {
 	return keys
 }
 
-// getReleaseChannelVersionFromRegistry retrieves the current version for a specific release channel
-// It fetches the release image and metadata, validates the channel is not suspended,
-// and stores the image in the layout for later use
-func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, releaseChannel string) (*semver.Version, error) {
+// releaseChannelInfo is the current state a release channel publishes in its version.json:
+// the version it points to and whether it is suspended.
+type releaseChannelInfo struct {
+	version   *semver.Version
+	suspended bool
+}
+
+// getReleaseChannelInfoFromRegistry retrieves the current state of a specific release channel.
+//
+// Suspension is reported as data, not as an error: at this point we do not yet know whether the
+// request resolves to this channel. versionsToMirror is the enforcement point.
+// A suspended channel still yields its version (needed to match it against the requested tag),
+// but never enters the download list.
+func (svc *Service) getReleaseChannelInfoFromRegistry(ctx context.Context, releaseChannel string) (releaseChannelInfo, error) {
 	image, err := svc.deckhouseService.ReleaseChannels().GetImage(ctx, releaseChannel)
 	if err != nil {
-		return nil, fmt.Errorf("get %s release channel image: %w", releaseChannel, err)
+		return releaseChannelInfo{}, fmt.Errorf("get %s release channel image: %w", releaseChannel, err)
 	}
 
 	meta, err := svc.deckhouseService.ReleaseChannels().GetMetadata(ctx, releaseChannel)
 	if err != nil {
-		return nil, fmt.Errorf("cannot get %s release channel version.json: %w", releaseChannel, err)
-	}
-
-	if meta.Suspend && !svc.options.IgnoreSuspend {
-		return nil, fmt.Errorf("source registry contains suspended release channel %q, try again later (use --ignore-suspend to override)", releaseChannel)
+		return releaseChannelInfo{}, fmt.Errorf("cannot get %s release channel version.json: %w", releaseChannel, err)
 	}
 
 	ver, err := semver.NewVersion(meta.Version)
 	if err != nil {
-		return nil, fmt.Errorf("release channel version is not semver %q: %w", meta.Version, err)
+		return releaseChannelInfo{}, fmt.Errorf("release channel version is not semver %q: %w", meta.Version, err)
+	}
+
+	if meta.Suspend && !svc.options.IgnoreSuspend {
+		return releaseChannelInfo{version: ver, suspended: true}, nil
 	}
 
 	digest, err := image.Digest()
 	if err != nil {
-		return nil, fmt.Errorf("cannot get %s release channel image digest: %w", releaseChannel, err)
+		return releaseChannelInfo{}, fmt.Errorf("cannot get %s release channel image digest: %w", releaseChannel, err)
 	}
 
 	imageMeta, err := image.GetMetadata()
 	if err != nil {
-		return nil, fmt.Errorf("cannot get %s release channel image tag reference: %w", releaseChannel, err)
+		return releaseChannelInfo{}, fmt.Errorf("cannot get %s release channel image tag reference: %w", releaseChannel, err)
 	}
 
 	svc.userLogger.Debugf("image reference: %s@%s", imageMeta, digest.String())
@@ -804,7 +877,7 @@ func (svc *Service) getReleaseChannelVersionFromRegistry(ctx context.Context, re
 	// Just record in downloadList for later pull
 	svc.downloadList.DeckhouseReleaseChannel[imageMeta.GetTagReference()] = puller.NewImageMeta(meta.Version, imageMeta.GetTagReference(), &digest)
 
-	return ver, nil
+	return releaseChannelInfo{version: ver}, nil
 }
 
 func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []string) error {

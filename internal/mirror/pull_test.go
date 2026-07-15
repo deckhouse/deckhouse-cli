@@ -190,6 +190,54 @@ func TestPull_SuspendedChannel_ReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "suspended")
 }
 
+// TestPull_TargetTag_UnrelatedSuspendedChannel_Succeeds is the end-to-end
+// regression for `d8 mirror pull --deckhouse-tag vX.Y.Z` aborting when an
+// unrelated release channel is suspended. A suspension may only block pulls
+// that resolve to the suspended channel.
+func TestPull_TargetTag_UnrelatedSuspendedChannel_Succeeds(t *testing.T) {
+	reg := upfake.NewRegistry(pullStubRootURL)
+	channelVersions := map[string]struct {
+		ver     string
+		suspend bool
+	}{
+		"alpha":        {"v1.72.10", false},
+		"beta":         {"v1.71.0", false},
+		"early-access": {"v1.70.0", false},
+		"stable":       {"v1.69.0", false},
+		"rock-solid":   {"v1.68.0", true},
+	}
+	for ch, data := range channelVersions {
+		content := `{"version":"` + data.ver + `"}`
+		if data.suspend {
+			content = `{"version":"` + data.ver + `","suspend":true}`
+		}
+		img := upfake.NewImageBuilder().WithFile("version.json", content).MustBuild()
+		reg.MustAddImage("release-channel", ch, img)
+		reg.MustAddImage("release-channel", data.ver, img)
+	}
+	img := upfake.NewImageBuilder().
+		WithFile("version.json", `{"version":"v1.71.5"}`).
+		WithFile("deckhouse/candi/images_digests.json", `{}`).
+		MustBuild()
+	for _, tag := range []string{"v1.72.10", "v1.71.5", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"} {
+		reg.MustAddImage("", tag, img)
+		reg.MustAddImage("install", tag, img)
+		reg.MustAddImage("install-standalone", tag, img)
+	}
+
+	// v1.71.5 is not the current version of any channel; rock-solid is suspended.
+	svc := newPullService(t, pkgclient.Adapt(upfake.NewClient(reg)), "v1.71.5", &PullServiceOptions{
+		SkipSecurity:  true,
+		SkipModules:   true,
+		SkipInstaller: true,
+		IgnoreSuspend: false,
+	})
+
+	_, err := svc.Pull(context.Background())
+	require.NoError(t, err,
+		"suspended rock-solid must not block --deckhouse-tag pull of an unrelated version")
+}
+
 // ---------------------------------------------------------------------------
 // Success path tests
 // ---------------------------------------------------------------------------
