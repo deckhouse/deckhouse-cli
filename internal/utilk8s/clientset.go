@@ -2,6 +2,7 @@ package utilk8s
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"k8s.io/client-go/kubernetes"
@@ -10,6 +11,18 @@ import (
 )
 
 const DefaultKubeContext = ""
+
+// DefaultKubeconfigPath returns the default path to the kubeconfig file.
+// It respects the "KUBECONFIG" environment variable (clientcmd.RecommendedConfigPathEnvVar)
+// when set, and falls back to the platform-appropriate default path (clientcmd.RecommendedHomeFile).
+// This correctly resolves the home directory on all platforms, including "Windows" where $HOME is not set but %USERPROFILE% is.
+func DefaultKubeconfigPath() string {
+	if p := os.Getenv(clientcmd.RecommendedConfigPathEnvVar); p != "" {
+		return p
+	}
+
+	return clientcmd.RecommendedHomeFile
+}
 
 // SetupK8sClientSet reads kubeconfig file at kubeconfigPath and constructs a kubernetes clientset from it.
 // If contextName is not empty, context under that name is used instead of default.
