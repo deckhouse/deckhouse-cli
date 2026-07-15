@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	"github.com/deckhouse/deckhouse-cli/internal/status/objects/cliversion"
 	"github.com/deckhouse/deckhouse-cli/internal/status/objects/clusteralerts"
 	cnimodules "github.com/deckhouse/deckhouse-cli/internal/status/objects/cni_modules"
 	deckhouseedition "github.com/deckhouse/deckhouse-cli/internal/status/objects/edition"
@@ -89,6 +90,7 @@ func executeAll(ctx context.Context, restConfig *rest.Config, kubeCl kubernetes.
 	}
 
 	return []statusresult.StatusResult{
+		cliversion.Status(),
 		masters.Status(ctx, kubeCl),
 		deckhousepods.Status(ctx, kubeCl),
 		deckhousereleases.Status(ctx, dynamicClient),
