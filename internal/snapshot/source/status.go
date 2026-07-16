@@ -70,10 +70,15 @@ type NodeData struct {
 // present-yet-malformed fragment is a hard error (never silently treated as "no data"). Both
 // fragments must be JSON objects with their required identity fields set; status.data.size, when
 // present, must parse as a quantity. status.sourceRef is a full provenance identity, so its uid is
-// REQUIRED here — every status.sourceRef example in the contract carries {apiVersion,kind,name,
-// namespace,uid} (unlike the lighter spec.sourceRef). The data leg's completeness
+// REQUIRED here; its namespace is required for namespaced source kinds but intentionally absent
+// for the cluster-scoped root source (v1/Namespace), so it is validated per source scope (see
+// parseStatusSourceRef) rather than unconditionally. The data leg's completeness
 // (status.data.source.uid, artifact identity) is enforced separately by the data path
 // (RequireNodeData) on a Ready node.
+//
+// The node's own SnapshotIdentity is validated up front: it feeds the resume key, checksum/index
+// and the collision discriminator, so a weak (partially empty) identity would silently corrupt
+// those. Every snapshot node is namespaced in Stage 2, hence metadata.namespace is required here.
 func ParseNodeStatus(obj *unstructured.Unstructured) (SnapshotIdentity, *SourceRefIdentity, *NodeData, error) {
 	ident := SnapshotIdentity{
 		APIVersion: obj.GetAPIVersion(),
@@ -81,6 +86,10 @@ func ParseNodeStatus(obj *unstructured.Unstructured) (SnapshotIdentity, *SourceR
 		Namespace:  obj.GetNamespace(),
 		Name:       obj.GetName(),
 		UID:        obj.GetUID(),
+	}
+
+	if ident.APIVersion == "" || ident.Kind == "" || ident.Namespace == "" || ident.Name == "" || ident.UID == "" {
+		return ident, nil, nil, fmt.Errorf("%s: snapshot identity is incomplete (apiVersion/kind/namespace/name/uid required)", objRefString(obj))
 	}
 
 	src, err := parseStatusSourceRef(obj)
@@ -134,11 +143,20 @@ func parseStatusSourceRef(obj *unstructured.Unstructured) (*SourceRefIdentity, e
 	if id.APIVersion == "" || id.Kind == "" || id.Name == "" || id.UID == "" {
 		return nil, fmt.Errorf("%s: status.sourceRef is incomplete (apiVersion/kind/name/uid required)", objRefString(obj))
 	}
-	if id.Namespace == "" {
-		return nil, fmt.Errorf("%s: status.sourceRef.namespace is required (Stage 2 supports only namespaced source kinds)", objRefString(obj))
+	if sourceRefRequiresNamespace(id) && id.Namespace == "" {
+		return nil, fmt.Errorf("%s: status.sourceRef.namespace is required for %s %s", objRefString(obj), id.APIVersion, id.Kind)
 	}
 
 	return &id, nil
+}
+
+// sourceRefRequiresNamespace reports whether a status.sourceRef of the given kind must carry a
+// namespace. The root capture-Snapshot's source is the cluster-scoped Namespace (v1/Namespace),
+// whose sourceRef legitimately has no namespace (per docs/2026-06-29-unified-snapshots-overview.md);
+// every other source kind supported in Stage 2 is namespaced. Other cluster-scoped source kinds
+// are out of scope for Stage 2.
+func sourceRefRequiresNamespace(id SourceRefIdentity) bool {
+	return !(id.APIVersion == "v1" && id.Kind == "Namespace")
 }
 
 func parseStatusData(obj *unstructured.Unstructured) (*NodeData, error) {
