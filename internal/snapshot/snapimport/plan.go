@@ -271,6 +271,7 @@ func childNodeDirs(dir string) ([]string, error) {
 	}
 
 	var dirs []string
+
 	for _, e := range entries {
 		if e.IsDir() {
 			dirs = append(dirs, filepath.Join(snapshotsDir, e.Name()))
