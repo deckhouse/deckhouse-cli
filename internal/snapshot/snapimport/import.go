@@ -415,6 +415,7 @@ func importNodeData(ctx context.Context, cfg Config, node PlannedNode) error {
 // from each node's recorded direct child refs.
 func buildParentIndex(plan []PlannedNode) map[string]int {
 	idx := make(map[string]int)
+
 	for i := range plan {
 		for _, c := range plan[i].Children {
 			idx[refKey(c.APIVersion, c.Kind, c.Name)] = i

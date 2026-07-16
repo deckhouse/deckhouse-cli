@@ -131,6 +131,7 @@ func parseStatusSourceRef(obj *unstructured.Unstructured) (*SourceRefIdentity, e
 	if err != nil {
 		return nil, fmt.Errorf("%s: status.sourceRef is not an object: %w", objRefString(obj), err)
 	}
+
 	if !found {
 		return nil, nil
 	}
@@ -143,6 +144,7 @@ func parseStatusSourceRef(obj *unstructured.Unstructured) (*SourceRefIdentity, e
 	if id.APIVersion == "" || id.Kind == "" || id.Name == "" || id.UID == "" {
 		return nil, fmt.Errorf("%s: status.sourceRef is incomplete (apiVersion/kind/name/uid required)", objRefString(obj))
 	}
+
 	if sourceRefRequiresNamespace(id) && id.Namespace == "" {
 		return nil, fmt.Errorf("%s: status.sourceRef.namespace is required for %s %s", objRefString(obj), id.APIVersion, id.Kind)
 	}
@@ -156,7 +158,7 @@ func parseStatusSourceRef(obj *unstructured.Unstructured) (*SourceRefIdentity, e
 // every other source kind supported in Stage 2 is namespaced. Other cluster-scoped source kinds
 // are out of scope for Stage 2.
 func sourceRefRequiresNamespace(id SourceRefIdentity) bool {
-	return !(id.APIVersion == "v1" && id.Kind == "Namespace")
+	return id.APIVersion != "v1" || id.Kind != "Namespace"
 }
 
 func parseStatusData(obj *unstructured.Unstructured) (*NodeData, error) {
@@ -164,6 +166,7 @@ func parseStatusData(obj *unstructured.Unstructured) (*NodeData, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: status.data is not an object: %w", objRefString(obj), err)
 	}
+
 	if !found {
 		return nil, nil
 	}
@@ -176,9 +179,11 @@ func parseStatusData(obj *unstructured.Unstructured) (*NodeData, error) {
 	if d.Source.APIVersion == "" || d.Source.Kind == "" || d.Source.Name == "" {
 		return nil, fmt.Errorf("%s: status.data.source is incomplete (apiVersion/kind/name required)", objRefString(obj))
 	}
+
 	if d.Artifact.APIVersion == "" || d.Artifact.Kind == "" || d.Artifact.Name == "" {
 		return nil, fmt.Errorf("%s: status.data.artifact is incomplete (apiVersion/kind/name required)", objRefString(obj))
 	}
+
 	if d.Size != "" {
 		if _, err := resource.ParseQuantity(d.Size); err != nil {
 			return nil, fmt.Errorf("%s: status.data.size %q is not a valid quantity: %w", objRefString(obj), d.Size, err)
@@ -196,5 +201,6 @@ func nodeIdentString(node *Node) string {
 	if node == nil {
 		return "<nil node>"
 	}
+
 	return fmt.Sprintf("%s %s/%s", node.Kind, node.Namespace, node.Name)
 }

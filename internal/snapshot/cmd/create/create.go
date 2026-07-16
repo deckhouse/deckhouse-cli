@@ -326,7 +326,7 @@ func waitReady(ctx context.Context, dyn dynamic.Interface, namespace, name strin
 
 // readyCondition returns the status/reason/message of the "Ready" condition, or
 // empty strings when the Snapshot carries no such condition yet.
-func readyCondition(obj *unstructured.Unstructured) (status, reason, message string) {
+func readyCondition(obj *unstructured.Unstructured) (string, string, string) {
 	conds, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if err != nil || !found {
 		return "", "", ""
@@ -343,9 +343,9 @@ func readyCondition(obj *unstructured.Unstructured) (status, reason, message str
 			continue
 		}
 
-		status, _, _ = unstructured.NestedString(m, "status")
-		reason, _, _ = unstructured.NestedString(m, "reason")
-		message, _, _ = unstructured.NestedString(m, "message")
+		status, _, _ := unstructured.NestedString(m, "status")
+		reason, _, _ := unstructured.NestedString(m, "reason")
+		message, _, _ := unstructured.NestedString(m, "message")
 
 		return status, reason, message
 	}

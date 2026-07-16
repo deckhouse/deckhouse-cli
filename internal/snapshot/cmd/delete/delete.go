@@ -267,10 +267,9 @@ func runDelete(ctx context.Context, dyn dynamic.Interface, w io.Writer, opts del
 		targets = names
 	}
 
-	var (
-		deleted []string
-		errs    []error
-	)
+	deleted := make([]string, 0, len(targets))
+
+	var errs []error
 
 	for _, name := range targets {
 		err := dyn.Resource(snapshotGVR).Namespace(opts.namespace).Delete(ctx, name, metav1.DeleteOptions{})
