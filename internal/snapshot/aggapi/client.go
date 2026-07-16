@@ -32,8 +32,9 @@ limitations under the License.
 //     kind (core Snapshot and domain snapshot CRs alike); CSI VolumeSnapshot
 //     leaves use the dedicated VS-connector group instead.
 //
-// The cluster-scoped snapshotcontents/<name>/manifests-download surface backs the
-// DataImport path (reading an original PVC manifest before any namespaced CR binds).
+// Every subresource is addressed by the node's own namespaced CR (Snapshot, domain
+// snapshot CR, or CSI VolumeSnapshot leaf). The client never reads cluster-scoped
+// SnapshotContent objects.
 package aggapi
 
 import (
@@ -146,18 +147,6 @@ func (c *Client) NodeManifestsDownload(ctx context.Context, ref NodeRef) ([]byte
 	if err != nil {
 		return nil, err
 	}
-
-	return c.getManifestsDownload(ctx, path)
-}
-
-// ContentManifestsDownload performs GET snapshotcontents/<name>/manifests-download
-// (cluster-scoped) and returns the raw JSON array body. Used by the DataImport path
-// to read the original PVC manifest before any namespaced CR binds.
-//
-// Retried on transient errors — see NodeManifestsDownload.
-func (c *Client) ContentManifestsDownload(ctx context.Context, contentName string) ([]byte, error) {
-	path := fmt.Sprintf("/apis/%s/%s/snapshotcontents/%s/%s",
-		CoreSubresourcesGroup, CoreSubresourcesVersion, contentName, SubManifestsDownload)
 
 	return c.getManifestsDownload(ctx, path)
 }

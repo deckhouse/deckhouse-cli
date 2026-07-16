@@ -60,12 +60,106 @@ const (
 	testNS        = "test-ns"
 	rootSnapshot  = "my-snap"
 	diskSnapName  = "disk-snap"
+	diskSnapUID   = "uid-disk-snap"
 	sourcePVCName = "pvc-disk-source"
 
 	storageAPIVersion = "state-snapshotter.deckhouse.io/v1alpha1"
 	childAPIVersion   = "demo.deckhouse.io/v1alpha1"
 	childKind         = "VirtualDiskSnapshot"
 )
+
+// snapObj is a builder for an unstructured snapshot-tree object described purely by its
+// namespaced status fragments (status.sourceRef / status.data / status.childrenSnapshotRefs) —
+// the only inputs BuildTree/ParseNodeStatus read. No cluster-scoped SnapshotContent is involved:
+// a node's captured volume lives in its own status.data (Variant A, cardinality ≤1) and its
+// readable directory base comes from status.sourceRef.name (when set) or the CR name.
+type snapObj struct {
+	apiVersion string
+	kind       string
+	namespace  string
+	name       string
+	uid        string
+	sourceRef  map[string]interface{}   // status.sourceRef (optional)
+	data       map[string]interface{}   // status.data (optional)
+	children   []map[string]interface{} // status.childrenSnapshotRefs (optional)
+}
+
+func (s snapObj) build() *unstructured.Unstructured {
+	status := map[string]interface{}{}
+
+	if s.sourceRef != nil {
+		status["sourceRef"] = s.sourceRef
+	}
+
+	if s.data != nil {
+		status["data"] = s.data
+	}
+
+	if len(s.children) > 0 {
+		raw := make([]interface{}, len(s.children))
+		for i, c := range s.children {
+			raw[i] = c
+		}
+
+		status["childrenSnapshotRefs"] = raw
+	}
+
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": s.apiVersion,
+		"kind":       s.kind,
+		"metadata": map[string]interface{}{
+			"name":      s.name,
+			"namespace": s.namespace,
+			"uid":       s.uid,
+		},
+		"status": status,
+	}}
+}
+
+// pvcData builds a status.data map for a PVC-backed captured volume (Variant A, ≤1 per node).
+func pvcData(namespace, pvcName, pvcUID, vscName string) map[string]interface{} {
+	return map[string]interface{}{
+		"source": map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "PersistentVolumeClaim",
+			"namespace":  namespace,
+			"name":       pvcName,
+			"uid":        pvcUID,
+		},
+		"artifact": map[string]interface{}{
+			"apiVersion": "snapshot.storage.k8s.io/v1",
+			"kind":       "VolumeSnapshotContent",
+			"name":       vscName,
+		},
+	}
+}
+
+// pvcSourceRefMap builds a status.sourceRef map for a captured PVC source object.
+func pvcSourceRefMap(namespace, pvcName, pvcUID string) map[string]interface{} {
+	return map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"namespace":  namespace,
+		"name":       pvcName,
+		"uid":        pvcUID,
+	}
+}
+
+// namespaceSourceRefMap builds the root capture-Snapshot's status.sourceRef: the cluster-scoped
+// v1/Namespace source, which legitimately carries no namespace field.
+func namespaceSourceRefMap(name, uid string) map[string]interface{} {
+	return map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Namespace",
+		"name":       name,
+		"uid":        uid,
+	}
+}
+
+// childRefMap builds one status.childrenSnapshotRefs element.
+func childRefMap(apiVersion, kind, name string) map[string]interface{} {
+	return map[string]interface{}{"apiVersion": apiVersion, "kind": kind, "name": name}
+}
 
 // seedResumeIdentityMarker stamps the identity marker the pipeline itself writes
 // on a node's first touch (ensureNodeSubdirs -> archive.WriteNodeIdentityMarker).
@@ -105,7 +199,7 @@ func reseedResumeMarkerFromSnapshotYAML(t *testing.T, nodeDir string) {
 		Kind:       sy.Kind,
 		Name:       sy.Name,
 		Namespace:  sy.Namespace,
-		SourceRef:  sy.SourceRef,
+		UID:        sy.UID,
 	})
 }
 
@@ -138,7 +232,9 @@ func diskSnapMarkerIdentity() archive.NodeIdentity {
 		APIVersion: childAPIVersion,
 		Kind:       childKind,
 		Name:       diskSnapName,
+		DirName:    diskSnapName,
 		Namespace:  testNS,
+		UID:        diskSnapUID,
 	}
 }
 
@@ -601,7 +697,7 @@ func TestPipeline_ForeignMergedBlock_NotLaunderedByResume(t *testing.T) {
 		Kind:       childKind,
 		Name:       "some-other-snapshot",
 		Namespace:  testNS,
-		SourceRef:  "foreign",
+		UID:        "foreign-uid",
 	})
 
 	var openExportCalled atomic.Bool
@@ -693,60 +789,26 @@ func buildFakeClient(t *testing.T) client.Client {
 
 	scheme := buildScheme(t)
 
-	// Root Snapshot (typed) with one child reference.
-	rootSnap := &snapshotapi.Snapshot{
-		TypeMeta: metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "Snapshot"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      rootSnapshot,
-			Namespace: testNS,
-		},
-		Status: snapshotapi.SnapshotStatus{
-			BoundSnapshotContentName: "sc-root",
-			ChildrenSnapshotRefs: []snapshotapi.SnapshotChildRef{
-				{APIVersion: childAPIVersion, Kind: childKind, Name: diskSnapName},
-			},
-		},
-	}
+	// Root Snapshot: cluster-scoped Namespace source (no sourceRef.namespace) with one child ref.
+	root := snapObj{
+		apiVersion: storageAPIVersion, kind: "Snapshot",
+		namespace: testNS, name: rootSnapshot, uid: "uid-root",
+		sourceRef: namespaceSourceRefMap(testNS, "uid-ns"),
+		children:  []map[string]interface{}{childRefMap(childAPIVersion, childKind, diskSnapName)},
+	}.build()
 
-	// Root SnapshotContent: own-node manifests are served by the stub ManifestSource,
-	// keyed by node ref; the content itself carries no volume DataRefs here.
-	rootContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-root"},
-	}
-
-	// Child snapshot (unstructured — domain-specific kind not in the scheme).
-	childSnap := makeUnstructuredSnap(childAPIVersion, childKind, testNS, diskSnapName, "sc-disk")
-
-	// Child SnapshotContent: one block DataRef pointing at the source PVC, no manifests.
-	// This DataRef materialises disk-snap as a non-aggregator OwnDataRef node.
-	childContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-disk"},
-		Status: snapshotapi.SnapshotContentStatus{
-			DataRef: &snapshotapi.SnapshotDataBinding{
-				TargetUID: "uid-disk",
-				Target: snapshotapi.SnapshotSubjectRef{
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Namespace:  testNS,
-					Name:       sourcePVCName,
-				},
-				Artifact: snapshotapi.SnapshotDataArtifactRef{
-					APIVersion: "snapshot.storage.k8s.io/v1",
-					Kind:       "VolumeSnapshotContent",
-					Name:       "vsc-disk",
-				},
-			},
-		},
-	}
-
-	typed := []client.Object{rootSnap, rootContent, childContent}
+	// disk-snap: non-aggregator domain node that captured its own volume (status.data).
+	// It has no status.sourceRef, so its readable directory base falls back to the CR name
+	// (diskSnapName) — matching the archive.NodeDirName(childKind, diskSnapName) assertions.
+	diskSnap := snapObj{
+		apiVersion: childAPIVersion, kind: childKind,
+		namespace: testNS, name: diskSnapName, uid: diskSnapUID,
+		data: pvcData(testNS, sourcePVCName, "uid-disk", "vsc-disk"),
+	}.build()
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(typed...).
-		WithObjects(childSnap).
+		WithObjects(root, diskSnap).
 		Build()
 }
 
@@ -911,24 +973,6 @@ func TestPipeline_SubtreeRootSelection(t *testing.T) {
 	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 		archive.NodeDirName(childKind, diskSnapName))
 	assertNodeComplete(t, diskSnapDir)
-}
-
-// makeUnstructuredSnap builds an unstructured snapshot object for kinds not
-// registered in the scheme (e.g. VirtualDiskSnapshot).
-func makeUnstructuredSnap(apiVersion, kind, namespace, name, contentName string) *unstructured.Unstructured {
-	return &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": apiVersion,
-			"kind":       kind,
-			"metadata": map[string]interface{}{
-				"name":      name,
-				"namespace": namespace,
-			},
-			"status": map[string]interface{}{
-				"boundSnapshotContentName": contentName,
-			},
-		},
-	}
 }
 
 // TestPipeline_NoneCompression verifies that when Compression is set to the
@@ -3070,75 +3114,41 @@ func buildMixedResumeFakeClient(t *testing.T) client.Client {
 
 	scheme := buildScheme(t)
 
-	rootSnap := &snapshotapi.Snapshot{
-		TypeMeta: metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "Snapshot"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      mixedRootSnap,
-			Namespace: mixedNS,
-		},
-		Status: snapshotapi.SnapshotStatus{
-			BoundSnapshotContentName: "sc-mixed-root",
-			ChildrenSnapshotRefs: []snapshotapi.SnapshotChildRef{
-				{APIVersion: e2eVMAPIVersion, Kind: e2eVMKind, Name: mixedVMSnap},
-			},
-		},
-	}
-
-	rootContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-mixed-root"},
-	}
+	root := snapObj{
+		apiVersion: storageAPIVersion, kind: "Snapshot",
+		namespace: mixedNS, name: mixedRootSnap, uid: "uid-mixed-root",
+		sourceRef: namespaceSourceRefMap(mixedNS, "uid-mixed-ns"),
+		children:  []map[string]interface{}{childRefMap(e2eVMAPIVersion, e2eVMKind, mixedVMSnap)},
+	}.build()
 
 	vmChildren := make([]map[string]interface{}, 0, len(mixedLeafNames))
 	for _, name := range mixedLeafNames {
-		vmChildren = append(vmChildren, map[string]interface{}{
-			"apiVersion": e2eVMAPIVersion, "kind": e2eDiskKind, "name": name,
-		})
+		vmChildren = append(vmChildren, childRefMap(e2eVMAPIVersion, e2eDiskKind, name))
 	}
 
-	vmSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eVMKind, mixedNS, mixedVMSnap, "sc-mixed-vm", vmChildren)
+	// mixed-vm-snap is an intermediate node (domain children); it captures no own volume.
+	vmSnap := snapObj{
+		apiVersion: e2eVMAPIVersion, kind: e2eVMKind,
+		namespace: mixedNS, name: mixedVMSnap, uid: "uid-" + mixedVMSnap,
+		children: vmChildren,
+	}.build()
 
-	vmContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-mixed-vm"},
-	}
-
-	typed := []client.Object{rootSnap, rootContent, vmContent}
-	unstructuredObjs := []client.Object{vmSnap}
+	objs := []client.Object{root, vmSnap}
 
 	for _, name := range mixedLeafNames {
-		contentName := "sc-mixed-" + name
-		leafSnap := makeUnstructuredSnap(e2eVMAPIVersion, e2eDiskKind, mixedNS, name, contentName)
+		// Non-aggregator leaf with exactly one captured volume; no sourceRef → dir base = CR name.
+		leafSnap := snapObj{
+			apiVersion: e2eVMAPIVersion, kind: e2eDiskKind,
+			namespace: mixedNS, name: name, uid: "uid-" + name,
+			data: pvcData(mixedNS, "pvc-"+name, "uid-pvc-"+name, "vsc-"+name),
+		}.build()
 
-		leafContent := &snapshotapi.SnapshotContent{
-			TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-			ObjectMeta: metav1.ObjectMeta{Name: contentName},
-			Status: snapshotapi.SnapshotContentStatus{
-				DataRef: &snapshotapi.SnapshotDataBinding{
-					TargetUID: "uid-" + name,
-					Target: snapshotapi.SnapshotSubjectRef{
-						APIVersion: "v1",
-						Kind:       "PersistentVolumeClaim",
-						Namespace:  mixedNS,
-						Name:       "pvc-" + name,
-					},
-					Artifact: snapshotapi.SnapshotDataArtifactRef{
-						APIVersion: "snapshot.storage.k8s.io/v1",
-						Kind:       "VolumeSnapshotContent",
-						Name:       "vsc-" + name,
-					},
-				},
-			},
-		}
-
-		typed = append(typed, leafContent)
-		unstructuredObjs = append(unstructuredObjs, leafSnap)
+		objs = append(objs, leafSnap)
 	}
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(typed...).
-		WithObjects(unstructuredObjs...).
+		WithObjects(objs...).
 		Build()
 }
 

@@ -59,7 +59,7 @@ func TestSnapshotYAML_RoundTrip_WithoutVolume(t *testing.T) {
 		Kind:       "Snapshot",
 		Name:       "snap-1",
 		Namespace:  "ns-a",
-		SourceRef:  "vm/my-vm",
+		UID:        "vm/my-vm",
 		Checksum:   checksum,
 	}
 
@@ -88,8 +88,8 @@ func TestSnapshotYAML_RoundTrip_WithoutVolume(t *testing.T) {
 		t.Errorf("Namespace: got %q, want %q", got.Namespace, want.Namespace)
 	}
 
-	if got.SourceRef != want.SourceRef {
-		t.Errorf("SourceRef: got %q, want %q", got.SourceRef, want.SourceRef)
+	if got.UID != want.UID {
+		t.Errorf("UID: got %q, want %q", got.UID, want.UID)
 	}
 
 	if got.Checksum.Hex != want.Checksum.Hex {
@@ -271,7 +271,7 @@ func TestSnapshotYAML_RoundTrip_WithSourceName(t *testing.T) {
 		Kind:       "Snapshot",
 		Name:       "snap-2",
 		Namespace:  "ns-b",
-		SourceRef:  `{"apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns-b","name":"my-pvc","uid":"uid-xyz"}`,
+		UID:        `{"apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns-b","name":"my-pvc","uid":"uid-xyz"}`,
 		SourceName: "my-pvc",
 		Checksum:   checksum,
 	}

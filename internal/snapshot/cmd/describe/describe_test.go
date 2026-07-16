@@ -21,7 +21,6 @@ import (
 	"context"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,115 +36,69 @@ const (
 	testVSAPI   = "snapshot.storage.k8s.io/v1"
 )
 
-// describeScheme builds a runtime scheme with the snapshot API types registered.
+// describeScheme returns an empty scheme so the fake client stores and returns every
+// snapshot-tree object verbatim as unstructured. Registering the typed Snapshot API would
+// make the fake client round-trip registered kinds through their Go structs, silently
+// dropping the namespaced status.sourceRef/status.data fields the tree builder reads.
 func describeScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 
-	scheme := runtime.NewScheme()
-	if err := snapshotapi.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
-
-	return scheme
+	return runtime.NewScheme()
 }
 
-// describeClient creates a controller-runtime fake client seeded with typed and
-// unstructured objects, using a scheme with snapshot API types registered.
-func describeClient(t *testing.T, typed []client.Object, uns []*unstructured.Unstructured) client.Client {
+// describeClient creates a controller-runtime fake client seeded with unstructured
+// snapshot-tree objects. The tree is resolved purely from each object's own namespaced
+// status (status.data / status.childrenSnapshotRefs) — no cluster-scoped SnapshotContent.
+func describeClient(t *testing.T, objs ...*unstructured.Unstructured) client.Client {
 	t.Helper()
 
-	builder := fake.NewClientBuilder().
-		WithScheme(describeScheme(t)).
-		WithObjects(typed...)
-
-	for _, u := range uns {
+	builder := fake.NewClientBuilder().WithScheme(describeScheme(t))
+	for _, u := range objs {
 		builder = builder.WithObjects(u)
 	}
 
 	return builder.Build()
 }
 
-// testSnapshot creates a typed Snapshot CR for the fake client.
-func testSnapshot(name, contentName string, children []snapshotapi.SnapshotChildRef) *snapshotapi.Snapshot {
-	return &snapshotapi.Snapshot{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: testRootAPI,
-			Kind:       "Snapshot",
+// dataMap builds a status.data map for a PVC-backed captured volume (Variant A, ≤1 per node).
+func dataMap(pvcName, uid string) map[string]interface{} {
+	return map[string]interface{}{
+		"source": map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "PersistentVolumeClaim",
+			"namespace":  testNS,
+			"name":       pvcName,
+			"uid":        uid,
 		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: testNS,
-		},
-		Status: snapshotapi.SnapshotStatus{
-			BoundSnapshotContentName: contentName,
-			ChildrenSnapshotRefs:     children,
-		},
-	}
-}
-
-// testContent creates a cluster-scoped SnapshotContent for the fake client.
-// dataRef is nil when the node carries no volume data.
-func testContent(name string, dataRef *snapshotapi.SnapshotDataBinding) *snapshotapi.SnapshotContent {
-	return &snapshotapi.SnapshotContent{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: testRootAPI,
-			Kind:       "SnapshotContent",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
-		Status: snapshotapi.SnapshotContentStatus{
-			DataRef: dataRef,
-		},
-	}
-}
-
-// testBinding builds a minimal SnapshotDataBinding for the given PVC name.
-func testBinding(pvcName string) snapshotapi.SnapshotDataBinding {
-	return snapshotapi.SnapshotDataBinding{
-		TargetUID: "uid-" + pvcName,
-		Target: snapshotapi.SnapshotSubjectRef{
-			APIVersion: "v1",
-			Kind:       "PersistentVolumeClaim",
-			Name:       pvcName,
-			Namespace:  testNS,
-		},
-		Artifact: snapshotapi.SnapshotDataArtifactRef{
-			APIVersion: testVSAPI,
-			Kind:       "VolumeSnapshotContent",
-			Name:       "vsc-" + pvcName,
-		},
-	}
-}
-
-// testVolumeSnapshot creates an unstructured VolumeSnapshot with
-// status.boundSnapshotContentName set.
-func testVolumeSnapshot(vsName, boundContentName string) *unstructured.Unstructured {
-	return &unstructured.Unstructured{
-		Object: map[string]interface{}{
+		"artifact": map[string]interface{}{
 			"apiVersion": testVSAPI,
-			"kind":       "VolumeSnapshot",
-			"metadata": map[string]interface{}{
-				"name":      vsName,
-				"namespace": testNS,
-			},
-			"status": map[string]interface{}{
-				"boundSnapshotContentName": boundContentName,
-			},
+			"kind":       "VolumeSnapshotContent",
+			"name":       "vsc-" + pvcName,
 		},
 	}
 }
 
-// testDomainSnap creates an unstructured domain snapshot object with the given
-// apiVersion/kind. Pass a non-nil children slice to populate
-// status.childrenSnapshotRefs.
-func testDomainSnap(apiVersion, kind, name, contentName string, children []interface{}) *unstructured.Unstructured {
-	status := map[string]interface{}{
-		"boundSnapshotContentName": contentName,
+// childRefMap builds one status.childrenSnapshotRefs element.
+func childRefMap(apiVersion, kind, name string) map[string]interface{} {
+	return map[string]interface{}{"apiVersion": apiVersion, "kind": kind, "name": name}
+}
+
+// makeSnap builds an unstructured snapshot-tree object from its namespaced status:
+// an optional status.data (captured volume) and optional status.childrenSnapshotRefs.
+func makeSnap(apiVersion, kind, name, uid string, data map[string]interface{}, children ...map[string]interface{}) *unstructured.Unstructured {
+	status := map[string]interface{}{}
+
+	if data != nil {
+		status["data"] = data
 	}
 
 	if len(children) > 0 {
-		status["childrenSnapshotRefs"] = children
+		raw := make([]interface{}, len(children))
+		for i, c := range children {
+			raw[i] = c
+		}
+
+		status["childrenSnapshotRefs"] = raw
 	}
 
 	return &unstructured.Unstructured{
@@ -155,6 +108,7 @@ func testDomainSnap(apiVersion, kind, name, contentName string, children []inter
 			"metadata": map[string]interface{}{
 				"name":      name,
 				"namespace": testNS,
+				"uid":       uid,
 			},
 			"status": status,
 		},
@@ -166,10 +120,9 @@ func testDomainSnap(apiVersion, kind, name, contentName string, children []inter
 func TestRun_RootOnly(t *testing.T) {
 	t.Helper()
 
-	snap := testSnapshot("my-snap", "sc-root", nil)
-	sc := testContent("sc-root", nil)
+	snap := makeSnap(testRootAPI, "Snapshot", "my-snap", "uid-my-snap", nil)
 
-	c := describeClient(t, []client.Object{snap, sc}, nil)
+	c := describeClient(t, snap)
 
 	var buf bytes.Buffer
 
@@ -187,20 +140,15 @@ func TestRun_RootOnly(t *testing.T) {
 }
 
 // TestRun_OneChild_WithVolume verifies that a root with one child snapshot node that owns
-// a single volume renders the volume label nested under the child.
+// a single volume (status.data) renders the volume label nested under the child.
 func TestRun_OneChild_WithVolume(t *testing.T) {
 	t.Helper()
 
-	root := testSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-		{APIVersion: testRootAPI, Kind: "Snapshot", Name: "child"},
-	})
-	child := testSnapshot("child", "sc-child", nil)
-	scRoot := testContent("sc-root", nil)
+	root := makeSnap(testRootAPI, "Snapshot", "root", "uid-root", nil,
+		childRefMap(testRootAPI, "Snapshot", "child"))
+	child := makeSnap(testRootAPI, "Snapshot", "child", "uid-child", dataMap("pvc-a", "uid-pvc-a"))
 
-	b := testBinding("pvc-a")
-	scChild := testContent("sc-child", &b)
-
-	c := describeClient(t, []client.Object{root, child, scRoot, scChild}, nil)
+	c := describeClient(t, root, child)
 
 	var buf bytes.Buffer
 
@@ -226,27 +174,13 @@ func TestRun_DeepTree(t *testing.T) {
 
 	const demoAPI = "demo.deckhouse.io/v1alpha1"
 
-	root := testSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-		{APIVersion: demoAPI, Kind: "DemoVirtualMachineSnapshot", Name: "vm-snap"},
-	})
-	scRoot := testContent("sc-root", nil)
+	root := makeSnap(testRootAPI, "Snapshot", "root", "uid-root", nil,
+		childRefMap(demoAPI, "DemoVirtualMachineSnapshot", "vm-snap"))
+	vmSnap := makeSnap(demoAPI, "DemoVirtualMachineSnapshot", "vm-snap", "uid-vm", nil,
+		childRefMap(demoAPI, "DemoVirtualDiskSnapshot", "disk-snap"))
+	diskSnap := makeSnap(demoAPI, "DemoVirtualDiskSnapshot", "disk-snap", "uid-disk", dataMap("pvc-disk", "uid-pvc-disk"))
 
-	diskChild := map[string]interface{}{
-		"apiVersion": demoAPI,
-		"kind":       "DemoVirtualDiskSnapshot",
-		"name":       "disk-snap",
-	}
-	vmSnap := testDomainSnap(demoAPI, "DemoVirtualMachineSnapshot", "vm-snap", "sc-vm", []interface{}{diskChild})
-	scVM := testContent("sc-vm", nil)
-
-	diskSnap := testDomainSnap(demoAPI, "DemoVirtualDiskSnapshot", "disk-snap", "sc-disk", nil)
-	db := testBinding("pvc-disk")
-	scDisk := testContent("sc-disk", &db)
-
-	c := describeClient(t,
-		[]client.Object{root, scRoot, scVM, scDisk},
-		[]*unstructured.Unstructured{vmSnap, diskSnap},
-	)
+	c := describeClient(t, root, vmSnap, diskSnap)
 
 	var buf bytes.Buffer
 
@@ -271,19 +205,11 @@ func TestRun_DeepTree(t *testing.T) {
 func TestRun_OrphanLeaf(t *testing.T) {
 	t.Helper()
 
-	root := testSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-		{APIVersion: testVSAPI, Kind: "VolumeSnapshot", Name: "nss-vs-pvc"},
-	})
-	scRoot := testContent("sc-root", nil)
+	root := makeSnap(testRootAPI, "Snapshot", "root", "uid-root", nil,
+		childRefMap(testVSAPI, "VolumeSnapshot", "nss-vs-pvc"))
+	vs := makeSnap(testVSAPI, "VolumeSnapshot", "nss-vs-pvc", "uid-vs", dataMap("my-pvc", "uid-my-pvc"))
 
-	vs := testVolumeSnapshot("nss-vs-pvc", "sc-leaf-child")
-	lb := testBinding("my-pvc")
-	scLeaf := testContent("sc-leaf-child", &lb)
-
-	c := describeClient(t,
-		[]client.Object{root, scRoot, scLeaf},
-		[]*unstructured.Unstructured{vs},
-	)
+	c := describeClient(t, root, vs)
 
 	var buf bytes.Buffer
 
@@ -308,22 +234,13 @@ func TestRun_OrphanLeaf(t *testing.T) {
 func TestRun_MixedChildren(t *testing.T) {
 	t.Helper()
 
-	root := testSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-		{APIVersion: testRootAPI, Kind: "Snapshot", Name: "snap-child"},
-		{APIVersion: testVSAPI, Kind: "VolumeSnapshot", Name: "nss-vs-leaf"},
-	})
-	snapChild := testSnapshot("snap-child", "sc-snap-child", nil)
-	scRoot := testContent("sc-root", nil)
-	scSnapChild := testContent("sc-snap-child", nil)
+	root := makeSnap(testRootAPI, "Snapshot", "root", "uid-root", nil,
+		childRefMap(testRootAPI, "Snapshot", "snap-child"),
+		childRefMap(testVSAPI, "VolumeSnapshot", "nss-vs-leaf"))
+	snapChild := makeSnap(testRootAPI, "Snapshot", "snap-child", "uid-snap-child", nil)
+	vs := makeSnap(testVSAPI, "VolumeSnapshot", "nss-vs-leaf", "uid-vs-leaf", dataMap("vol-pvc", "uid-vol-pvc"))
 
-	vs := testVolumeSnapshot("nss-vs-leaf", "sc-vs-leaf-child")
-	vb := testBinding("vol-pvc")
-	scLeafChild := testContent("sc-vs-leaf-child", &vb)
-
-	c := describeClient(t,
-		[]client.Object{root, snapChild, scRoot, scSnapChild, scLeafChild},
-		[]*unstructured.Unstructured{vs},
-	)
+	c := describeClient(t, root, snapChild, vs)
 
 	var buf bytes.Buffer
 
@@ -343,32 +260,20 @@ func TestRun_MixedChildren(t *testing.T) {
 	}
 }
 
+// ownData builds a *source.NodeData whose captured source PVC has the given name, the
+// only field volumeLabels reads.
+func ownData(pvcName string) *source.NodeData {
+	return &source.NodeData{Source: source.SourceRefIdentity{Name: pvcName}}
+}
+
 // TestToTreeViewNode covers the source.Node → treeview.Node mapping produced by
-// toTreeViewNode: label format, volume labels from OwnDataRefs/Binding, and child
+// toTreeViewNode: label format, the single volume label from status.data, and child
 // recursion — all without any cluster client.
 func TestToTreeViewNode(t *testing.T) {
 	t.Helper()
 
-	pvcA := snapshotapi.SnapshotDataBinding{
-		Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-a"},
-	}
-	pvcB := snapshotapi.SnapshotDataBinding{
-		Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-b"},
-	}
-	bindX := &snapshotapi.SnapshotDataBinding{
-		Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-x"},
-	}
-
-	childNode := &source.Node{
-		Kind:        "Snapshot",
-		Name:        "child",
-		OwnDataRefs: []snapshotapi.SnapshotDataBinding{pvcA},
-	}
-	nestedDisk := &source.Node{
-		Kind:        "DemoVirtualDiskSnapshot",
-		Name:        "disk",
-		OwnDataRefs: []snapshotapi.SnapshotDataBinding{pvcA},
-	}
+	childNode := &source.Node{Kind: "Snapshot", Name: "child", Data: ownData("pvc-a")}
+	nestedDisk := &source.Node{Kind: "DemoVirtualDiskSnapshot", Name: "disk", Data: ownData("pvc-a")}
 	vmNode := &source.Node{
 		Kind:     "DemoVirtualMachineSnapshot",
 		Name:     "vm",
@@ -390,31 +295,16 @@ func TestToTreeViewNode(t *testing.T) {
 			wantChildren: 0,
 		},
 		{
-			name:         "one_own_data_ref",
-			node:         &source.Node{Kind: "Snapshot", Name: "disk", OwnDataRefs: []snapshotapi.SnapshotDataBinding{pvcA}},
+			name:         "own_data",
+			node:         &source.Node{Kind: "Snapshot", Name: "disk", Data: ownData("pvc-a")},
 			wantLabel:    "Snapshot/disk",
 			wantVolumes:  []string{"pvc-a"},
 			wantChildren: 0,
 		},
 		{
-			name:         "two_own_data_refs",
-			node:         &source.Node{Kind: "Snapshot", Name: "multi", OwnDataRefs: []snapshotapi.SnapshotDataBinding{pvcA, pvcB}},
-			wantLabel:    "Snapshot/multi",
-			wantVolumes:  []string{"pvc-a", "pvc-b"},
-			wantChildren: 0,
-		},
-		{
-			name:         "orphan_leaf_binding",
-			node:         &source.Node{Kind: "VolumeSnapshot", Name: "vs-1", Binding: bindX},
+			name:         "orphan_leaf_data",
+			node:         &source.Node{Kind: "VolumeSnapshot", Name: "vs-1", Data: ownData("pvc-x")},
 			wantLabel:    "VolumeSnapshot/vs-1",
-			wantVolumes:  []string{"pvc-x"},
-			wantChildren: 0,
-		},
-		{
-			// Binding takes priority: when Binding != nil, OwnDataRefs are ignored.
-			name:         "binding_overrides_own_data_refs",
-			node:         &source.Node{Kind: "VolumeSnapshot", Name: "vs-2", Binding: bindX, OwnDataRefs: []snapshotapi.SnapshotDataBinding{pvcA}},
-			wantLabel:    "VolumeSnapshot/vs-2",
 			wantVolumes:  []string{"pvc-x"},
 			wantChildren: 0,
 		},
@@ -464,14 +354,7 @@ func TestToTreeViewNode(t *testing.T) {
 func TestToTreeViewNode_ChildLabels(t *testing.T) {
 	t.Helper()
 
-	pvc := snapshotapi.SnapshotDataBinding{
-		Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-child"},
-	}
-	child := &source.Node{
-		Kind:        "DemoVirtualDiskSnapshot",
-		Name:        "disk",
-		OwnDataRefs: []snapshotapi.SnapshotDataBinding{pvc},
-	}
+	child := &source.Node{Kind: "DemoVirtualDiskSnapshot", Name: "disk", Data: ownData("pvc-child")}
 	parent := &source.Node{
 		Kind:     "DemoVirtualMachineSnapshot",
 		Name:     "vm",
@@ -503,14 +386,10 @@ func TestToTreeViewNode_ChildLabels(t *testing.T) {
 	}
 }
 
-// TestVolumeLabels verifies the volumeLabels helper across all three input paths:
-// nil (no data), Binding set (orphan leaf), and OwnDataRefs set (non-aggregator node).
+// TestVolumeLabels verifies the volumeLabels helper: no data yields no labels, and a node
+// that captured its own volume yields exactly one label (the captured PVC name).
 func TestVolumeLabels(t *testing.T) {
 	t.Helper()
-
-	pvcA := snapshotapi.SnapshotDataBinding{Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-a"}}
-	pvcB := snapshotapi.SnapshotDataBinding{Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-b"}}
-	bindC := &snapshotapi.SnapshotDataBinding{Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-c"}}
 
 	cases := []struct {
 		name string
@@ -518,24 +397,19 @@ func TestVolumeLabels(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "no_binding_no_own_refs",
+			name: "no_data",
 			node: &source.Node{},
 			want: nil,
 		},
 		{
-			name: "binding_only",
-			node: &source.Node{Binding: bindC},
-			want: []string{"pvc-c"},
-		},
-		{
-			name: "one_own_data_ref",
-			node: &source.Node{OwnDataRefs: []snapshotapi.SnapshotDataBinding{pvcA}},
+			name: "own_data",
+			node: &source.Node{Data: ownData("pvc-a")},
 			want: []string{"pvc-a"},
 		},
 		{
-			name: "two_own_data_refs_order_preserved",
-			node: &source.Node{OwnDataRefs: []snapshotapi.SnapshotDataBinding{pvcA, pvcB}},
-			want: []string{"pvc-a", "pvc-b"},
+			name: "orphan_leaf_data",
+			node: &source.Node{Data: ownData("pvc-c")},
+			want: []string{"pvc-c"},
 		},
 	}
 

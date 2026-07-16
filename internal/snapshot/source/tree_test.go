@@ -21,13 +21,10 @@ import (
 	"errors"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-
-	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 )
 
 const (
@@ -35,84 +32,117 @@ const (
 	demoAPI = "demo.deckhouse.io/v1alpha1"
 )
 
-// makeScheme builds a scheme with the snapshot API types registered.
+// makeScheme builds an empty scheme; every fixture is served as unstructured, so no typed
+// registration is required (the tree builder reads namespaced status via ParseNodeStatus).
 func makeScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 
-	scheme := runtime.NewScheme()
-	if err := snapshotapi.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
-
-	return scheme
+	return runtime.NewScheme()
 }
 
-// makeSnapshot creates a typed Snapshot CR for the fake client.
-func makeSnapshot(name string, contentName string, children []snapshotapi.SnapshotChildRef) *snapshotapi.Snapshot {
-	return &snapshotapi.Snapshot{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: rootAPIVersion,
-			Kind:       "Snapshot",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: testNS,
-		},
-		Status: snapshotapi.SnapshotStatus{
-			BoundSnapshotContentName: contentName,
-			ChildrenSnapshotRefs:     children,
-		},
+// namespaceSourceRef is the root capture-Snapshot's status.sourceRef: the cluster-scoped
+// Namespace (v1/Namespace), which legitimately carries no namespace field.
+func namespaceSourceRef(nsName, uid string) map[string]interface{} {
+	return map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Namespace",
+		"name":       nsName,
+		"uid":        uid,
 	}
 }
 
-// makeContent creates a SnapshotContent CR (cluster-scoped, no namespace).
-// dataRef is nil when the node owns no volume data (Variant A: cardinality ≤1).
-func makeContent(name, mcpName string, dataRef *snapshotapi.SnapshotDataBinding) *snapshotapi.SnapshotContent {
-	return &snapshotapi.SnapshotContent{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: rootAPIVersion,
-			Kind:       "SnapshotContent",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
-		Status: snapshotapi.SnapshotContentStatus{
-			ManifestCheckpointName: mcpName,
-			DataRef:                dataRef,
-		},
+// pvcSourceRef builds a namespaced status.sourceRef for a captured PVC.
+func pvcSourceRef(name, uid string) map[string]interface{} {
+	return map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"namespace":  testNS,
+		"name":       name,
+		"uid":        uid,
 	}
 }
 
-// dataBindingPtr returns a pointer to a minimal SnapshotDataBinding.
-func dataBindingPtr(targetUID string) *snapshotapi.SnapshotDataBinding {
-	b := dataBinding(targetUID)
-	return &b
-}
-
-// makeUnstructuredSnap builds an unstructured snapshot object (for non-Snapshot kinds
-// such as DemoVirtualMachineSnapshot that are not registered in the scheme).
-func makeUnstructuredSnap(apiVersion, kind, namespace, name, contentName string, childRefs []interface{}) *unstructured.Unstructured {
-	obj := map[string]interface{}{
+// domainSourceRef builds a namespaced status.sourceRef for a captured domain object.
+func domainSourceRef(apiVersion, kind, name, uid string) map[string]interface{} {
+	return map[string]interface{}{
 		"apiVersion": apiVersion,
 		"kind":       kind,
-		"metadata": map[string]interface{}{
-			"name":      name,
-			"namespace": namespace,
-		},
-		"status": map[string]interface{}{
-			"boundSnapshotContentName": contentName,
-		},
+		"namespace":  testNS,
+		"name":       name,
+		"uid":        uid,
 	}
-
-	if len(childRefs) > 0 {
-		statusMap := obj["status"].(map[string]interface{})
-		statusMap["childrenSnapshotRefs"] = childRefs
-	}
-
-	return &unstructured.Unstructured{Object: obj}
 }
 
-// childRef builds a map suitable for the childrenSnapshotRefs unstructured slice.
+// nodeDataMap builds a namespaced status.data descriptor for a captured PVC volume.
+func nodeDataMap(pvcName, pvcUID string) map[string]interface{} {
+	return map[string]interface{}{
+		"source": map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "PersistentVolumeClaim",
+			"namespace":  testNS,
+			"name":       pvcName,
+			"uid":        pvcUID,
+		},
+		"artifact": map[string]interface{}{
+			"apiVersion": "snapshot.storage.k8s.io/v1",
+			"kind":       "VolumeSnapshotContent",
+			"name":       "vsc-" + pvcUID,
+		},
+	}
+}
+
+// snapOpts describes a snapshot node fixture.
+type snapOpts struct {
+	apiVersion string
+	kind       string
+	name       string
+	uid        string
+	sourceRef  map[string]interface{}
+	data       map[string]interface{}
+	childRefs  []interface{}
+}
+
+// makeSnap builds an unstructured snapshot node carrying its namespaced status
+// (sourceRef/data/childrenSnapshotRefs) and metadata.uid.
+func makeSnap(o snapOpts) *unstructured.Unstructured {
+	status := map[string]interface{}{}
+	if o.sourceRef != nil {
+		status["sourceRef"] = o.sourceRef
+	}
+
+	if o.data != nil {
+		status["data"] = o.data
+	}
+
+	if len(o.childRefs) > 0 {
+		status["childrenSnapshotRefs"] = o.childRefs
+	}
+
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": o.apiVersion,
+		"kind":       o.kind,
+		"metadata": map[string]interface{}{
+			"name":      o.name,
+			"namespace": testNS,
+			"uid":       o.uid,
+		},
+		"status": status,
+	}}
+}
+
+// rootSnap builds the root capture Snapshot fixture with the given child refs.
+func rootSnap(name, uid string, childRefs []interface{}) *unstructured.Unstructured {
+	return makeSnap(snapOpts{
+		apiVersion: rootAPIVersion,
+		kind:       "Snapshot",
+		name:       name,
+		uid:        uid,
+		sourceRef:  namespaceSourceRef(testNS, "ns-uid-"+uid),
+		childRefs:  childRefs,
+	})
+}
+
+// childRef builds a childrenSnapshotRefs entry.
 func childRef(apiVersion, kind, name string) interface{} {
 	return map[string]interface{}{
 		"apiVersion": apiVersion,
@@ -121,76 +151,56 @@ func childRef(apiVersion, kind, name string) interface{} {
 	}
 }
 
-// dataBinding builds a minimal SnapshotDataBinding.
-func dataBinding(targetUID string) snapshotapi.SnapshotDataBinding {
-	return snapshotapi.SnapshotDataBinding{
-		TargetUID: targetUID,
-		Target: snapshotapi.SnapshotSubjectRef{
-			APIVersion: "v1",
-			Kind:       "PersistentVolumeClaim",
-			Name:       "pvc-" + targetUID,
-			Namespace:  testNS,
-		},
-		Artifact: snapshotapi.SnapshotDataArtifactRef{
-			APIVersion: "snapshot.storage.k8s.io/v1",
-			Kind:       "VolumeSnapshotContent",
-			Name:       "vsc-" + targetUID,
-		},
-	}
-}
-
-func buildFakeClient(scheme *runtime.Scheme, typed []client.Object, unstructured []*unstructured.Unstructured) client.Client {
-	builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(typed...)
-	for _, u := range unstructured {
+func buildFakeClient(scheme *runtime.Scheme, objs []*unstructured.Unstructured) client.Client {
+	builder := fake.NewClientBuilder().WithScheme(scheme)
+	for _, u := range objs {
 		builder = builder.WithObjects(u)
 	}
 
 	return builder.Build()
 }
 
-// TestBuildTree_DiskNode_OwnDataRefs verifies that a domain disk snapshot node with
-// one dataRef and no visibility-leaf children stores the data in OwnDataRefs and
-// produces no leaf volume children.
-func TestBuildTree_DiskNode_OwnDataRefs(t *testing.T) {
-	t.Helper()
-
+// TestBuildTree_DiskNode_Data verifies that a domain disk snapshot node with its own
+// status.data and no visibility-leaf children stores the volume in Data and produces no
+// leaf children.
+func TestBuildTree_DiskNode_Data(t *testing.T) {
 	scheme := makeScheme(t)
 
-	// root -> child1 (disk snapshot, one dataRef, no visibility-leaf children)
-	root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-		{APIVersion: rootAPIVersion, Kind: "Snapshot", Name: "child1"},
+	root := rootSnap("root", "root-uid", []interface{}{
+		childRef(demoAPI, "DemoVirtualDiskSnapshot", "child1"),
 	})
-	child1 := makeSnapshot("child1", "sc-child1", nil)
+	child1 := makeSnap(snapOpts{
+		apiVersion: demoAPI,
+		kind:       "DemoVirtualDiskSnapshot",
+		name:       "child1",
+		uid:        "child1-uid",
+		sourceRef:  domainSourceRef(demoAPI, "DemoVirtualDisk", "disk-1", "disk-1-uid"),
+		data:       nodeDataMap("pvc-1", "uid-1"),
+	})
 
-	scRoot := makeContent("sc-root", "mcp-root", nil)
-	scChild1 := makeContent("sc-child1", "mcp-child1", dataBindingPtr("uid-1"))
-
-	c := buildFakeClient(scheme, []client.Object{root, child1, scRoot, scChild1}, nil)
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root, child1})
 	tree, err := BuildTree(context.Background(), c, testNS, "root")
-
 	if err != nil {
 		t.Fatalf("BuildTree: %v", err)
 	}
 
 	if tree.Name != "root" {
-		t.Errorf("root name: got %q, want %q", tree.Name, "root")
+		t.Errorf("root name: got %q, want root", tree.Name)
 	}
 
 	if tree.Parent != nil {
 		t.Errorf("root parent should be nil")
 	}
 
-	if len(tree.OwnDataRefs) != 0 {
-		t.Errorf("root OwnDataRefs len: got %d, want 0", len(tree.OwnDataRefs))
+	if tree.Data != nil {
+		t.Errorf("root Data must be nil, got %+v", tree.Data)
 	}
 
-	// root has one domain snapshot child (child1); root has no dataRefs.
 	if len(tree.Children) != 1 {
 		t.Fatalf("root children len: got %d, want 1", len(tree.Children))
 	}
 
 	c1 := tree.Children[0]
-
 	if c1.Name != "child1" {
 		t.Errorf("child1 name: got %q", c1.Name)
 	}
@@ -199,55 +209,50 @@ func TestBuildTree_DiskNode_OwnDataRefs(t *testing.T) {
 		t.Errorf("child1 parent should be root")
 	}
 
-	// child1 is a non-aggregator disk node: one dataRef in OwnDataRefs, zero children.
-	if len(c1.OwnDataRefs) != 1 {
-		t.Fatalf("child1 OwnDataRefs len: got %d, want 1", len(c1.OwnDataRefs))
+	if c1.Data == nil {
+		t.Fatal("child1 Data must not be nil")
 	}
 
-	if c1.OwnDataRefs[0].TargetUID != "uid-1" {
-		t.Errorf("child1 OwnDataRefs[0].TargetUID: got %q", c1.OwnDataRefs[0].TargetUID)
+	if c1.Data.Source.UID != "uid-1" {
+		t.Errorf("child1 Data.Source.UID: got %q, want uid-1", c1.Data.Source.UID)
+	}
+
+	if c1.DirBaseName() != "disk-1" {
+		t.Errorf("child1 DirBaseName: got %q, want disk-1 (from status.sourceRef.name)", c1.DirBaseName())
 	}
 
 	if len(c1.Children) != 0 {
 		t.Errorf("child1 (disk node) must have no children, got %d", len(c1.Children))
 	}
-
-	if c1.Binding != nil {
-		t.Errorf("child1 Binding must be nil for non-aggregator snapshot node")
-	}
 }
 
-// TestBuildTree_Aggregator_VisibilityLeafProducesOrphanLeaves verifies that when a node
-// has a VolumeSnapshot visibility-leaf child ref, the tree builder resolves the leaf via
-// VolumeSnapshot.status.boundSnapshotContentName → child SnapshotContent → status.dataRef.
-// Uses REAL producer keys (snapshot.storage.k8s.io/v1, boundSnapshotContentName, dataRef singular).
+// TestBuildTree_Aggregator_VisibilityLeafProducesOrphanLeaves verifies that a
+// VolumeSnapshot visibility-leaf child ref is resolved from the VS's own namespaced status.
 func TestBuildTree_Aggregator_VisibilityLeafProducesOrphanLeaves(t *testing.T) {
-	t.Helper()
-
 	scheme := makeScheme(t)
 
-	// Aggregator root: has one VolumeSnapshot visibility-leaf child ref; no own dataRef.
-	root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-		{APIVersion: volumeSnapshotAPIVersion, Kind: "VolumeSnapshot", Name: "nss-vs-orphan"},
+	root := rootSnap("root", "root-uid", []interface{}{
+		childRef(volumeSnapshotAPIVersion, "VolumeSnapshot", "nss-vs-orphan"),
 	})
-	scRoot := makeContent("sc-root", "mcp-root", nil) // aggregator keeps dataRef=nil
 
-	// The VolumeSnapshot object carries status.boundSnapshotContentName -> child content.
-	vs := makeUnstructuredVolumeSnapshot(testNS, "nss-vs-orphan", "sc-orphan-child")
+	vs := makeSnap(snapOpts{
+		apiVersion: volumeSnapshotAPIVersion,
+		kind:       "VolumeSnapshot",
+		name:       "nss-vs-orphan",
+		uid:        "vs-uid",
+		sourceRef:  pvcSourceRef("pvc-orphan", "uid-pvc"),
+		data:       nodeDataMap("pvc-orphan", "uid-pvc"),
+	})
 
-	// Child SnapshotContent owns the dataRef (the PVC binding).
-	scChild := makeContent("sc-orphan-child", "mcp-orphan-child", dataBindingPtr("uid-pvc"))
-
-	c := buildFakeClient(scheme, []client.Object{root, scRoot, scChild}, []*unstructured.Unstructured{vs})
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root, vs})
 
 	tree, err := BuildTree(context.Background(), c, testNS, "root")
 	if err != nil {
 		t.Fatalf("BuildTree: %v", err)
 	}
 
-	// Aggregator: OwnDataRefs is nil; one orphan leaf child.
-	if tree.OwnDataRefs != nil {
-		t.Errorf("aggregator OwnDataRefs must be nil, got %v", tree.OwnDataRefs)
+	if tree.Data != nil {
+		t.Errorf("aggregator Data must be nil, got %+v", tree.Data)
 	}
 
 	if len(tree.Children) != 1 {
@@ -255,13 +260,8 @@ func TestBuildTree_Aggregator_VisibilityLeafProducesOrphanLeaves(t *testing.T) {
 	}
 
 	leaf := tree.Children[0]
-
-	if leaf.Kind != "VolumeSnapshot" {
-		t.Errorf("leaf Kind: got %q, want VolumeSnapshot", leaf.Kind)
-	}
-
-	if leaf.APIVersion != volumeSnapshotAPIVersion {
-		t.Errorf("leaf APIVersion: got %q, want %q", leaf.APIVersion, volumeSnapshotAPIVersion)
+	if !leaf.IsVolumeLeaf() {
+		t.Errorf("leaf must be a volume leaf, got %s/%s", leaf.APIVersion, leaf.Kind)
 	}
 
 	// Leaf node Name is the VS CR name (for ManifestScopeRef connector), NOT the PVC name.
@@ -269,25 +269,13 @@ func TestBuildTree_Aggregator_VisibilityLeafProducesOrphanLeaves(t *testing.T) {
 		t.Errorf("leaf Name: got %q, want nss-vs-orphan", leaf.Name)
 	}
 
-	// SourceName is the captured PVC name (dataRef.Target.Name) — used for directory naming.
-	if leaf.SourceName != "pvc-uid-pvc" {
-		t.Errorf("leaf SourceName: got %q, want pvc-uid-pvc", leaf.SourceName)
+	// The readable directory base is the captured PVC name (status.sourceRef.name).
+	if leaf.DirBaseName() != "pvc-orphan" {
+		t.Errorf("leaf DirBaseName: got %q, want pvc-orphan", leaf.DirBaseName())
 	}
 
-	if leaf.SourceRef != "uid-pvc" {
-		t.Errorf("leaf SourceRef: got %q, want uid-pvc", leaf.SourceRef)
-	}
-
-	if leaf.Binding == nil {
-		t.Fatal("leaf Binding must not be nil")
-	}
-
-	if leaf.Binding.TargetUID != "uid-pvc" {
-		t.Errorf("leaf Binding.TargetUID: got %q, want uid-pvc", leaf.Binding.TargetUID)
-	}
-
-	if leaf.OwnDataRefs != nil {
-		t.Errorf("leaf OwnDataRefs must be nil")
+	if leaf.Data == nil || leaf.Data.Source.UID != "uid-pvc" {
+		t.Errorf("leaf Data.Source.UID: got %+v, want uid-pvc", leaf.Data)
 	}
 
 	if len(leaf.Children) != 0 {
@@ -300,84 +288,68 @@ func TestBuildTree_Aggregator_VisibilityLeafProducesOrphanLeaves(t *testing.T) {
 
 	// ManifestScopeRef must be the leaf's own ref (VS ref), NOT the parent aggregator.
 	scopeRef := leaf.ManifestScopeRef()
-	if scopeRef.APIVersion != volumeSnapshotAPIVersion {
-		t.Errorf("ManifestScopeRef.APIVersion: got %q, want %q", scopeRef.APIVersion, volumeSnapshotAPIVersion)
-	}
-
-	if scopeRef.Kind != "VolumeSnapshot" {
-		t.Errorf("ManifestScopeRef.Kind: got %q, want VolumeSnapshot", scopeRef.Kind)
-	}
-
-	if scopeRef.Name != "nss-vs-orphan" {
-		t.Errorf("ManifestScopeRef.Name: got %q, want nss-vs-orphan (VS CR name, not PVC name)", scopeRef.Name)
-	}
-
-	if scopeRef.Namespace != testNS {
-		t.Errorf("ManifestScopeRef.Namespace: got %q, want %q", scopeRef.Namespace, testNS)
+	if scopeRef.APIVersion != volumeSnapshotAPIVersion || scopeRef.Kind != "VolumeSnapshot" ||
+		scopeRef.Name != "nss-vs-orphan" || scopeRef.Namespace != testNS {
+		t.Errorf("ManifestScopeRef: got {%s %s %s/%s}, want {%s VolumeSnapshot %s/nss-vs-orphan}",
+			scopeRef.APIVersion, scopeRef.Kind, scopeRef.Namespace, scopeRef.Name,
+			volumeSnapshotAPIVersion, testNS)
 	}
 }
 
-// TestBuildTree_DeepTree verifies a root → vm-snap (unstructured) → disk-snap (unstructured) tree.
-// The disk node has one dataRef with no visibility-leaf children → OwnDataRefs set, no children.
+// TestBuildTree_DeepTree verifies a root → vm-snap → disk-snap tree. The disk node has its
+// own status.data with no visibility-leaf children → Data set, no children.
 func TestBuildTree_DeepTree(t *testing.T) {
-	t.Helper()
-
 	scheme := makeScheme(t)
 
-	// root Snapshot (typed) → DemoVirtualMachineSnapshot "vm-snap" (unstructured)
-	root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-		{APIVersion: demoAPI, Kind: "DemoVirtualMachineSnapshot", Name: "vm-snap"},
+	root := rootSnap("root", "root-uid", []interface{}{
+		childRef(demoAPI, "DemoVirtualMachineSnapshot", "vm-snap"),
 	})
-	scRoot := makeContent("sc-root", "mcp-root", nil)
 
-	// DemoVirtualMachineSnapshot (unstructured) → DemoVirtualDiskSnapshot "disk-snap"
-	vmSnap := makeUnstructuredSnap(demoAPI, "DemoVirtualMachineSnapshot", testNS, "vm-snap", "sc-vm",
-		[]interface{}{childRef(demoAPI, "DemoVirtualDiskSnapshot", "disk-snap")})
-	scVM := makeContent("sc-vm", "mcp-vm", nil)
+	vmSnap := makeSnap(snapOpts{
+		apiVersion: demoAPI,
+		kind:       "DemoVirtualMachineSnapshot",
+		name:       "vm-snap",
+		uid:        "vm-uid",
+		sourceRef:  domainSourceRef(demoAPI, "DemoVirtualMachine", "vm-1", "vm-1-uid"),
+		childRefs:  []interface{}{childRef(demoAPI, "DemoVirtualDiskSnapshot", "disk-snap")},
+	})
 
-	// DemoVirtualDiskSnapshot (unstructured, leaf with one volume, no visibility-leaf children)
-	diskSnap := makeUnstructuredSnap(demoAPI, "DemoVirtualDiskSnapshot", testNS, "disk-snap", "sc-disk", nil)
-	scDisk := makeContent("sc-disk", "mcp-disk", dataBindingPtr("uid-disk"))
+	diskSnap := makeSnap(snapOpts{
+		apiVersion: demoAPI,
+		kind:       "DemoVirtualDiskSnapshot",
+		name:       "disk-snap",
+		uid:        "disk-uid",
+		sourceRef:  domainSourceRef(demoAPI, "DemoVirtualDisk", "disk-1", "disk-1-uid"),
+		data:       nodeDataMap("pvc-disk", "uid-disk"),
+	})
 
-	c := buildFakeClient(scheme,
-		[]client.Object{root, scRoot, scVM, scDisk},
-		[]*unstructured.Unstructured{vmSnap, diskSnap},
-	)
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root, vmSnap, diskSnap})
 
 	tree, err := BuildTree(context.Background(), c, testNS, "root")
 	if err != nil {
 		t.Fatalf("BuildTree: %v", err)
 	}
 
-	// root has one snapshot child (vm-snap); root has no dataRefs.
 	if len(tree.Children) != 1 {
 		t.Fatalf("root children: %d, want 1", len(tree.Children))
 	}
 
 	vm := tree.Children[0]
-
 	if vm.Kind != "DemoVirtualMachineSnapshot" {
 		t.Errorf("vm kind: got %q", vm.Kind)
 	}
 
-	// vm-snap has one snapshot child (disk-snap); vm has no dataRefs.
 	if len(vm.Children) != 1 {
 		t.Fatalf("vm children: %d, want 1", len(vm.Children))
 	}
 
 	disk := vm.Children[0]
-
 	if disk.Kind != "DemoVirtualDiskSnapshot" {
 		t.Errorf("disk kind: got %q", disk.Kind)
 	}
 
-	// disk is a non-aggregator node: one dataRef in OwnDataRefs, no children.
-	if len(disk.OwnDataRefs) != 1 {
-		t.Fatalf("disk OwnDataRefs: %d, want 1", len(disk.OwnDataRefs))
-	}
-
-	if disk.OwnDataRefs[0].TargetUID != "uid-disk" {
-		t.Errorf("disk OwnDataRefs[0].TargetUID: got %q", disk.OwnDataRefs[0].TargetUID)
+	if disk.Data == nil || disk.Data.Source.UID != "uid-disk" {
+		t.Errorf("disk Data.Source.UID: got %+v, want uid-disk", disk.Data)
 	}
 
 	if len(disk.Children) != 0 {
@@ -389,17 +361,14 @@ func TestBuildTree_DeepTree(t *testing.T) {
 	}
 }
 
-// TestBuildTree_ZeroDataRefs_NoVolumeNodes verifies that a node with no dataRef
-// produces no volume child nodes and OwnDataRefs is nil.
-func TestBuildTree_ZeroDataRefs_NoVolumeNodes(t *testing.T) {
-	t.Helper()
-
+// TestBuildTree_NoData_NoVolumeNodes verifies that a node with no status.data has Data == nil
+// and produces no volume children.
+func TestBuildTree_NoData_NoVolumeNodes(t *testing.T) {
 	scheme := makeScheme(t)
 
-	root := makeSnapshot("root", "sc-root", nil)
-	scRoot := makeContent("sc-root", "mcp-root", nil) // no dataRef
+	root := rootSnap("root", "root-uid", nil)
 
-	c := buildFakeClient(scheme, []client.Object{root, scRoot}, nil)
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root})
 
 	tree, err := BuildTree(context.Background(), c, testNS, "root")
 	if err != nil {
@@ -410,151 +379,96 @@ func TestBuildTree_ZeroDataRefs_NoVolumeNodes(t *testing.T) {
 		t.Errorf("expected no children, got %d", len(tree.Children))
 	}
 
-	if tree.OwnDataRefs != nil {
-		t.Errorf("expected nil OwnDataRefs for node with no dataRefs, got %v", tree.OwnDataRefs)
+	if tree.Data != nil {
+		t.Errorf("expected nil Data for node with no status.data, got %+v", tree.Data)
 	}
 }
 
-// TestBuildTree_DataRefSingularContract verifies that the CLI correctly reads the REAL
-// producer key "dataRef" (singular pointer, Variant A) from SnapshotContent.status and
-// maps it into node.OwnDataRefs, including the extended fields (volumeMode/storageClassName/size).
-// A node whose content has no dataRef must yield OwnDataRefs == nil.
-func TestBuildTree_DataRefSingularContract(t *testing.T) {
-	t.Helper()
-
+// TestBuildTree_DataExtendedFields verifies that the extended volume metadata in status.data
+// (volumeMode/storageClassName/size/accessModes/fsType) is decoded onto Node.Data.
+func TestBuildTree_DataExtendedFields(t *testing.T) {
 	scheme := makeScheme(t)
 
-	cases := []struct {
-		name            string
-		dataRef         *snapshotapi.SnapshotDataBinding
-		wantOwnLen      int
-		wantTargetUID   string
-		wantVolumeMode  string
-		wantStorageCls  string
-		wantSize        string
-		wantAccessModes []string
-	}{
-		{
-			name: "one_dataRef_with_extended_fields",
-			dataRef: &snapshotapi.SnapshotDataBinding{
-				TargetUID: "uid-disk-sc",
-				Target: snapshotapi.SnapshotSubjectRef{
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Name:       "pvc-disk",
-					Namespace:  testNS,
-				},
-				Artifact: snapshotapi.SnapshotDataArtifactRef{
-					APIVersion: "snapshot.storage.k8s.io/v1",
-					Kind:       "VolumeSnapshotContent",
-					Name:       "vsc-disk",
-				},
-				VolumeMode:       "Block",
-				StorageClassName: "csi-ceph-rbd",
-				Size:             "20Gi",
-				AccessModes:      []string{"ReadWriteOnce"},
-			},
-			wantOwnLen:      1,
-			wantTargetUID:   "uid-disk-sc",
-			wantVolumeMode:  "Block",
-			wantStorageCls:  "csi-ceph-rbd",
-			wantSize:        "20Gi",
-			wantAccessModes: []string{"ReadWriteOnce"},
-		},
-		{
-			name:       "absent_dataRef_yields_nil_OwnDataRefs",
-			dataRef:    nil,
-			wantOwnLen: 0,
-		},
-	}
+	data := nodeDataMap("pvc-disk", "uid-disk-sc")
+	data["volumeMode"] = "Block"
+	data["storageClassName"] = "csi-ceph-rbd"
+	data["size"] = "20Gi"
+	data["accessModes"] = []interface{}{"ReadWriteOnce"}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			root := makeSnapshot("root", "sc-root", nil)
-			scRoot := makeContent("sc-root", "mcp-root", tc.dataRef)
-
-			c := buildFakeClient(scheme, []client.Object{root, scRoot}, nil)
-
-			tree, err := BuildTree(context.Background(), c, testNS, "root")
-			if err != nil {
-				t.Fatalf("BuildTree: %v", err)
-			}
-
-			if len(tree.OwnDataRefs) != tc.wantOwnLen {
-				t.Fatalf("OwnDataRefs len: got %d, want %d", len(tree.OwnDataRefs), tc.wantOwnLen)
-			}
-
-			if tc.wantOwnLen == 0 {
-				return
-			}
-
-			got := tree.OwnDataRefs[0]
-
-			if got.TargetUID != tc.wantTargetUID {
-				t.Errorf("TargetUID: got %q, want %q", got.TargetUID, tc.wantTargetUID)
-			}
-
-			if got.VolumeMode != tc.wantVolumeMode {
-				t.Errorf("VolumeMode: got %q, want %q", got.VolumeMode, tc.wantVolumeMode)
-			}
-
-			if got.StorageClassName != tc.wantStorageCls {
-				t.Errorf("StorageClassName: got %q, want %q", got.StorageClassName, tc.wantStorageCls)
-			}
-
-			if got.Size != tc.wantSize {
-				t.Errorf("Size: got %q, want %q", got.Size, tc.wantSize)
-			}
-
-			if len(got.AccessModes) != len(tc.wantAccessModes) {
-				t.Fatalf("AccessModes len: got %d, want %d", len(got.AccessModes), len(tc.wantAccessModes))
-			}
-
-			for i, am := range tc.wantAccessModes {
-				if got.AccessModes[i] != am {
-					t.Errorf("AccessModes[%d]: got %q, want %q", i, got.AccessModes[i], am)
-				}
-			}
-
-			if len(tree.Children) != 0 {
-				t.Errorf("non-aggregator must have no children, got %d", len(tree.Children))
-			}
-		})
-	}
-}
-
-// TestBuildTree_DomainChildBeforeOrphanLeaf verifies that domain snapshot children
-// appear before orphan leaf volume children in an aggregator node.
-func TestBuildTree_DomainChildBeforeOrphanLeaf(t *testing.T) {
-	t.Helper()
-
-	scheme := makeScheme(t)
-
-	// root has one domain snap child AND one visibility-leaf child.
-	// Under Variant A the aggregator content keeps dataRef=nil.
-	root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-		{APIVersion: rootAPIVersion, Kind: "Snapshot", Name: "snap-child"},
-		{APIVersion: volumeSnapshotAPIVersion, Kind: "VolumeSnapshot", Name: "nss-vs-orphan"},
+	root := makeSnap(snapOpts{
+		apiVersion: rootAPIVersion,
+		kind:       "Snapshot",
+		name:       "root",
+		uid:        "root-uid",
+		sourceRef:  namespaceSourceRef(testNS, "ns-uid"),
+		data:       data,
 	})
-	snapChild := makeSnapshot("snap-child", "sc-snap-child", nil)
-	scRoot := makeContent("sc-root", "mcp-root", nil) // aggregator has no own dataRef
-	scSnapChild := makeContent("sc-snap-child", "mcp-snap-child", nil)
 
-	// VS leaf resolves to its own child content which carries the binding.
-	vs := makeUnstructuredVolumeSnapshot(testNS, "nss-vs-orphan", "sc-leaf-child")
-	scLeafChild := makeContent("sc-leaf-child", "mcp-leaf-child", dataBindingPtr("uid-vol"))
-
-	c := buildFakeClient(scheme,
-		[]client.Object{root, snapChild, scRoot, scSnapChild, scLeafChild},
-		[]*unstructured.Unstructured{vs},
-	)
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root})
 
 	tree, err := BuildTree(context.Background(), c, testNS, "root")
 	if err != nil {
 		t.Fatalf("BuildTree: %v", err)
 	}
 
-	// root is an aggregator: one domain child + one orphan leaf child = 2 total.
+	if tree.Data == nil {
+		t.Fatal("Data must not be nil")
+	}
+
+	got := tree.Data
+	if got.Source.UID != "uid-disk-sc" {
+		t.Errorf("Source.UID: got %q, want uid-disk-sc", got.Source.UID)
+	}
+
+	if got.VolumeMode != "Block" {
+		t.Errorf("VolumeMode: got %q, want Block", got.VolumeMode)
+	}
+
+	if got.StorageClassName != "csi-ceph-rbd" {
+		t.Errorf("StorageClassName: got %q, want csi-ceph-rbd", got.StorageClassName)
+	}
+
+	if got.Size != "20Gi" {
+		t.Errorf("Size: got %q, want 20Gi", got.Size)
+	}
+
+	if len(got.AccessModes) != 1 || got.AccessModes[0] != "ReadWriteOnce" {
+		t.Errorf("AccessModes: got %v, want [ReadWriteOnce]", got.AccessModes)
+	}
+}
+
+// TestBuildTree_DomainChildBeforeOrphanLeaf verifies that domain snapshot children appear
+// before orphan leaf volume children in an aggregator node.
+func TestBuildTree_DomainChildBeforeOrphanLeaf(t *testing.T) {
+	scheme := makeScheme(t)
+
+	root := rootSnap("root", "root-uid", []interface{}{
+		childRef(rootAPIVersion, "Snapshot", "snap-child"),
+		childRef(volumeSnapshotAPIVersion, "VolumeSnapshot", "nss-vs-orphan"),
+	})
+	snapChild := makeSnap(snapOpts{
+		apiVersion: rootAPIVersion,
+		kind:       "Snapshot",
+		name:       "snap-child",
+		uid:        "snap-child-uid",
+		sourceRef:  namespaceSourceRef(testNS, "ns-uid-2"),
+	})
+	vs := makeSnap(snapOpts{
+		apiVersion: volumeSnapshotAPIVersion,
+		kind:       "VolumeSnapshot",
+		name:       "nss-vs-orphan",
+		uid:        "vs-uid",
+		sourceRef:  pvcSourceRef("pvc-vol", "uid-vol"),
+		data:       nodeDataMap("pvc-vol", "uid-vol"),
+	})
+
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root, snapChild, vs})
+
+	tree, err := BuildTree(context.Background(), c, testNS, "root")
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+
 	if len(tree.Children) != 2 {
 		t.Fatalf("root children: got %d, want 2", len(tree.Children))
 	}
@@ -562,134 +476,45 @@ func TestBuildTree_DomainChildBeforeOrphanLeaf(t *testing.T) {
 	first := tree.Children[0]
 	second := tree.Children[1]
 
-	if first.Kind != "Snapshot" {
-		t.Errorf("first child should be the domain snapshot child, got kind %q", first.Kind)
+	if first.Kind != "Snapshot" || first.Name != "snap-child" {
+		t.Errorf("first child should be domain snapshot snap-child, got %s/%s", first.Kind, first.Name)
 	}
 
-	if first.Name != "snap-child" {
-		t.Errorf("first child name: got %q, want snap-child", first.Name)
+	if !second.IsVolumeLeaf() || second.Name != "nss-vs-orphan" {
+		t.Errorf("second child should be orphan leaf nss-vs-orphan, got %s/%s", second.Kind, second.Name)
 	}
 
-	if second.Kind != "VolumeSnapshot" {
-		t.Errorf("second child should be the orphan leaf, got kind %q", second.Kind)
+	if second.DirBaseName() != "pvc-vol" {
+		t.Errorf("orphan leaf DirBaseName: got %q, want pvc-vol", second.DirBaseName())
 	}
 
-	// Leaf Name is VS CR name; SourceName is PVC name.
-	if second.Name != "nss-vs-orphan" {
-		t.Errorf("orphan leaf Name: got %q, want nss-vs-orphan", second.Name)
+	if second.Data == nil {
+		t.Error("orphan leaf Data must not be nil")
 	}
 
-	if second.SourceName != "pvc-uid-vol" {
-		t.Errorf("orphan leaf SourceName: got %q, want pvc-uid-vol", second.SourceName)
-	}
-
-	if second.Binding == nil {
-		t.Error("orphan leaf Binding must not be nil")
-	}
-
-	// Aggregator stores no OwnDataRefs.
-	if tree.OwnDataRefs != nil {
-		t.Errorf("aggregator OwnDataRefs must be nil")
-	}
-}
-
-// TestBuildTree_OwnDataRefs_IndependentCopy verifies that OwnDataRefs on a non-aggregator
-// node is an independent copy of the content.DataRefs slice: mutations to the source
-// after BuildTree do not affect the node.
-func TestBuildTree_OwnDataRefs_IndependentCopy(t *testing.T) {
-	t.Helper()
-
-	scheme := makeScheme(t)
-
-	binding := dataBinding("uid-x")
-	root := makeSnapshot("root", "sc-root", nil)
-	scRoot := makeContent("sc-root", "mcp-root", &binding)
-
-	c := buildFakeClient(scheme, []client.Object{root, scRoot}, nil)
-
-	tree, err := BuildTree(context.Background(), c, testNS, "root")
-	if err != nil {
-		t.Fatalf("BuildTree: %v", err)
-	}
-
-	if len(tree.OwnDataRefs) != 1 {
-		t.Fatalf("OwnDataRefs: got %d, want 1", len(tree.OwnDataRefs))
-	}
-
-	originalUID := tree.OwnDataRefs[0].TargetUID
-
-	// Mutate the source binding after BuildTree returns.
-	binding.TargetUID = "mutated"
-
-	if tree.OwnDataRefs[0].TargetUID != originalUID {
-		t.Errorf("OwnDataRefs[0].TargetUID was mutated to %q; expected independent copy %q",
-			tree.OwnDataRefs[0].TargetUID, originalUID)
-	}
-}
-
-// TestBuildTree_Aggregator_BindingIndependentCopy verifies that the Binding pointer on an
-// orphan leaf node is an independent copy: mutations to the child content's DataRef after
-// BuildTree do not affect Node.Binding.
-func TestBuildTree_Aggregator_BindingIndependentCopy(t *testing.T) {
-	t.Helper()
-
-	scheme := makeScheme(t)
-
-	binding := dataBinding("uid-x")
-	root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-		{APIVersion: volumeSnapshotAPIVersion, Kind: "VolumeSnapshot", Name: "nss-vs-leaf"},
-	})
-	scRoot := makeContent("sc-root", "mcp-root", nil) // aggregator: nil dataRef
-
-	vs := makeUnstructuredVolumeSnapshot(testNS, "nss-vs-leaf", "sc-leaf-copy")
-	scLeaf := makeContent("sc-leaf-copy", "mcp-leaf-copy", &binding)
-
-	c := buildFakeClient(scheme, []client.Object{root, scRoot, scLeaf}, []*unstructured.Unstructured{vs})
-
-	tree, err := BuildTree(context.Background(), c, testNS, "root")
-	if err != nil {
-		t.Fatalf("BuildTree: %v", err)
-	}
-
-	if len(tree.Children) != 1 {
-		t.Fatalf("children: got %d, want 1", len(tree.Children))
-	}
-
-	leaf := tree.Children[0]
-	if leaf.Binding == nil {
-		t.Fatal("Binding is nil")
-	}
-
-	originalUID := leaf.Binding.TargetUID
-
-	// Mutate the source binding value after BuildTree returns.
-	binding.TargetUID = "mutated"
-
-	if leaf.Binding.TargetUID != originalUID {
-		t.Errorf("Binding.TargetUID was mutated to %q; expected independent copy %q",
-			leaf.Binding.TargetUID, originalUID)
+	if tree.Data != nil {
+		t.Errorf("aggregator Data must be nil")
 	}
 }
 
 // TestBuildTree_CycleError verifies that a cycle in childrenSnapshotRefs returns ErrCycle.
 func TestBuildTree_CycleError(t *testing.T) {
-	t.Helper()
-
 	scheme := makeScheme(t)
 
-	// root → child1 → root (cycle)
-	root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-		{APIVersion: rootAPIVersion, Kind: "Snapshot", Name: "child1"},
+	root := rootSnap("root", "root-uid", []interface{}{
+		childRef(rootAPIVersion, "Snapshot", "child1"),
 	})
-	child1 := makeSnapshot("child1", "sc-child1", []snapshotapi.SnapshotChildRef{
-		{APIVersion: rootAPIVersion, Kind: "Snapshot", Name: "root"},
+	child1 := makeSnap(snapOpts{
+		apiVersion: rootAPIVersion,
+		kind:       "Snapshot",
+		name:       "child1",
+		uid:        "child1-uid",
+		sourceRef:  namespaceSourceRef(testNS, "ns-uid-2"),
+		childRefs:  []interface{}{childRef(rootAPIVersion, "Snapshot", "root")},
 	})
-	scRoot := makeContent("sc-root", "mcp-root", nil)
-	scChild1 := makeContent("sc-child1", "mcp-child1", nil)
 
-	c := buildFakeClient(scheme, []client.Object{root, child1, scRoot, scChild1}, nil)
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root, child1})
 	_, err := BuildTree(context.Background(), c, testNS, "root")
-
 	if err == nil {
 		t.Fatal("expected ErrCycle, got nil")
 	}
@@ -699,138 +524,88 @@ func TestBuildTree_CycleError(t *testing.T) {
 	}
 }
 
-// TestBuildTree_UnboundNode verifies that a node with empty boundSnapshotContentName returns an error.
-func TestBuildTree_UnboundNode(t *testing.T) {
-	t.Helper()
-
+// TestBuildTree_IncompleteIdentity verifies that a node missing metadata.uid fails closed.
+func TestBuildTree_IncompleteIdentity(t *testing.T) {
 	scheme := makeScheme(t)
 
-	root := makeSnapshot("root", "", nil) // no bound content
-	c := buildFakeClient(scheme, []client.Object{root}, nil)
+	root := makeSnap(snapOpts{
+		apiVersion: rootAPIVersion,
+		kind:       "Snapshot",
+		name:       "root",
+		uid:        "", // missing uid → ParseNodeStatus fails closed
+		sourceRef:  namespaceSourceRef(testNS, "ns-uid"),
+	})
+
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root})
 	_, err := BuildTree(context.Background(), c, testNS, "root")
-
 	if err == nil {
-		t.Fatal("expected error for unbound node, got nil")
+		t.Fatal("expected error for node with incomplete identity, got nil")
 	}
 }
 
-// makeUnstructuredSnapWithSourceRef builds an unstructured snapshot object that carries
-// the state-snapshotter.deckhouse.io/source-ref annotation.
-func makeUnstructuredSnapWithSourceRef(apiVersion, kind, namespace, name, contentName, sourceRef string) *unstructured.Unstructured {
-	obj := makeUnstructuredSnap(apiVersion, kind, namespace, name, contentName, nil)
-	obj.SetAnnotations(map[string]string{
-		snapshotapi.AnnotationSourceRef: sourceRef,
-	})
-
-	return obj
-}
-
-// makeUnstructuredVolumeSnapshot builds a CSI VolumeSnapshot unstructured object with
-// status.boundSnapshotContentName set. Used to exercise the VS visibility-leaf path.
-func makeUnstructuredVolumeSnapshot(namespace, vsName, boundContentName string) *unstructured.Unstructured {
-	obj := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": volumeSnapshotAPIVersion,
-			"kind":       "VolumeSnapshot",
-			"metadata": map[string]interface{}{
-				"name":      vsName,
-				"namespace": namespace,
-			},
-			"status": map[string]interface{}{
-				"boundSnapshotContentName": boundContentName,
-			},
-		},
-	}
-
-	return obj
-}
-
-// TestBuildTree_SourceRefAnnotation verifies that the source-ref annotation is captured
-// when present and that its absence results in an empty SourceRef (no error).
-func TestBuildTree_SourceRefAnnotation(t *testing.T) {
-	t.Helper()
-
+// TestBuildTree_SourceRef verifies that the namespaced status.sourceRef is decoded onto
+// Node.SourceRef and drives DirBaseName; a domain node carries its captured object identity.
+func TestBuildTree_SourceRef(t *testing.T) {
 	scheme := makeScheme(t)
 
-	root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-		{APIVersion: demoAPI, Kind: "DemoVirtualDiskSnapshot", Name: "disk-with-ref"},
-		{APIVersion: demoAPI, Kind: "DemoVirtualDiskSnapshot", Name: "disk-without-ref"},
+	root := rootSnap("root", "root-uid", []interface{}{
+		childRef(demoAPI, "DemoVirtualDiskSnapshot", "disk-with-ref"),
 	})
-	scRoot := makeContent("sc-root", "mcp-root", nil)
+	diskWithRef := makeSnap(snapOpts{
+		apiVersion: demoAPI,
+		kind:       "DemoVirtualDiskSnapshot",
+		name:       "disk-with-ref",
+		uid:        "disk-uid",
+		sourceRef:  domainSourceRef(demoAPI, "DemoVirtualDisk", "my-disk", "my-disk-uid"),
+		data:       nodeDataMap("pvc-x", "uid-x"),
+	})
 
-	sourceRefJSON := `{"apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"default","name":"some-pvc","uid":"uid-abc"}`
-	diskWithRef := makeUnstructuredSnapWithSourceRef(demoAPI, "DemoVirtualDiskSnapshot", testNS, "disk-with-ref", "sc-disk-ref", sourceRefJSON)
-	scDiskRef := makeContent("sc-disk-ref", "mcp-disk-ref", nil)
-
-	diskWithoutRef := makeUnstructuredSnap(demoAPI, "DemoVirtualDiskSnapshot", testNS, "disk-without-ref", "sc-disk-noref", nil)
-	scDiskNoRef := makeContent("sc-disk-noref", "mcp-disk-noref", nil)
-
-	c := buildFakeClient(scheme,
-		[]client.Object{root, scRoot, scDiskRef, scDiskNoRef},
-		[]*unstructured.Unstructured{diskWithRef, diskWithoutRef},
-	)
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root, diskWithRef})
 
 	tree, err := BuildTree(context.Background(), c, testNS, "root")
 	if err != nil {
 		t.Fatalf("BuildTree: %v", err)
 	}
 
-	if tree.SourceRef != "" {
-		t.Errorf("root SourceRef: got %q, want empty", tree.SourceRef)
+	// Root's status.sourceRef is the cluster-scoped Namespace.
+	if tree.SourceRef == nil || tree.SourceRef.Kind != "Namespace" {
+		t.Errorf("root SourceRef: got %+v, want v1/Namespace", tree.SourceRef)
 	}
 
-	// root has two domain snapshot children; root has no dataRefs so no leaf children.
-	if len(tree.Children) != 2 {
-		t.Fatalf("children: %d, want 2", len(tree.Children))
+	if len(tree.Children) != 1 {
+		t.Fatalf("children: %d, want 1", len(tree.Children))
 	}
 
-	var withRef, withoutRef *Node
-
-	for _, ch := range tree.Children {
-		if ch.Name == "disk-with-ref" {
-			withRef = ch
-			continue
-		}
-		withoutRef = ch
+	withRef := tree.Children[0]
+	if withRef.SourceRef == nil {
+		t.Fatal("disk-with-ref SourceRef must not be nil")
 	}
 
-	if withRef == nil || withoutRef == nil {
-		t.Fatal("could not find expected children")
+	if withRef.SourceRef.Kind != "DemoVirtualDisk" || withRef.SourceRef.Name != "my-disk" {
+		t.Errorf("disk-with-ref SourceRef: got %+v, want DemoVirtualDisk/my-disk", withRef.SourceRef)
 	}
 
-	// Raw annotation value is preserved in SourceRef.
-	if withRef.SourceRef != sourceRefJSON {
-		t.Errorf("disk-with-ref SourceRef: got %q, want %q", withRef.SourceRef, sourceRefJSON)
-	}
-
-	// SourceName is parsed from the annotation.
-	if withRef.SourceName != "some-pvc" {
-		t.Errorf("disk-with-ref SourceName: got %q, want some-pvc", withRef.SourceName)
-	}
-
-	if withoutRef.SourceRef != "" {
-		t.Errorf("disk-without-ref SourceRef: got %q, want empty", withoutRef.SourceRef)
-	}
-
-	if withoutRef.SourceName != "" {
-		t.Errorf("disk-without-ref SourceName: got %q, want empty", withoutRef.SourceName)
+	if withRef.DirBaseName() != "my-disk" {
+		t.Errorf("disk-with-ref DirBaseName: got %q, want my-disk", withRef.DirBaseName())
 	}
 }
 
 // TestBuildTree_ChildNamespace verifies that children are fetched in the root namespace.
 func TestBuildTree_ChildNamespace(t *testing.T) {
-	t.Helper()
-
 	scheme := makeScheme(t)
 
-	root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-		{APIVersion: rootAPIVersion, Kind: "Snapshot", Name: "child1"},
+	root := rootSnap("root", "root-uid", []interface{}{
+		childRef(rootAPIVersion, "Snapshot", "child1"),
 	})
-	child1 := makeSnapshot("child1", "sc-child1", nil)
-	scRoot := makeContent("sc-root", "mcp-root", nil)
-	scChild1 := makeContent("sc-child1", "mcp-child1", nil)
+	child1 := makeSnap(snapOpts{
+		apiVersion: rootAPIVersion,
+		kind:       "Snapshot",
+		name:       "child1",
+		uid:        "child1-uid",
+		sourceRef:  namespaceSourceRef(testNS, "ns-uid-2"),
+	})
 
-	c := buildFakeClient(scheme, []client.Object{root, child1, scRoot, scChild1}, nil)
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root, child1})
 
 	tree, err := BuildTree(context.Background(), c, testNS, "root")
 	if err != nil {
@@ -850,298 +625,29 @@ func TestBuildTree_ChildNamespace(t *testing.T) {
 	}
 }
 
-// TestBuildTree_VolumeSnapshotLeaf_ViaBoundContent is the canonical test for the VS
-// visibility-leaf resolution path using REAL producer keys:
-//   - VolumeSnapshot carries status.boundSnapshotContentName (Deckhouse extended-VS field)
-//   - Child SnapshotContent carries status.dataRef (singular pointer, Variant A)
-//
-// Asserts:
-//   - leaf.Name = VS CR name (for ManifestScopeRef connector call)
-//   - leaf.SourceName = PVC name from dataRef.target.name (for directory naming)
-//   - leaf.Binding = child content's dataRef (with extended fields)
-//   - ManifestScopeRef returns the leaf's own ref (not parent's)
-func TestBuildTree_VolumeSnapshotLeaf_ViaBoundContent(t *testing.T) {
-	t.Helper()
-
+// TestBuildTree_VolumeSnapshotLeaf_NotCaptured verifies that a VolumeSnapshot leaf with no
+// status.data returns ErrLeafNotBound and does not silently produce an empty leaf node.
+func TestBuildTree_VolumeSnapshotLeaf_NotCaptured(t *testing.T) {
 	scheme := makeScheme(t)
 
-	cases := []struct {
-		name         string
-		vsName       string
-		boundContent string
-		pvcName      string
-		targetUID    string
-		volumeMode   string
-		storageClass string
-		size         string
-		accessModes  []string
-	}{
-		{
-			name:         "block_volume_with_all_fields",
-			vsName:       "nss-vs-abc123",
-			boundContent: "sc-child-block",
-			pvcName:      "pvc-my-disk",
-			targetUID:    "uid-my-disk",
-			volumeMode:   "Block",
-			storageClass: "csi-ceph-rbd",
-			size:         "10Gi",
-			accessModes:  []string{"ReadWriteOnce"},
-		},
-		{
-			name:         "filesystem_volume_minimal",
-			vsName:       "nss-vs-def456",
-			boundContent: "sc-child-fs",
-			pvcName:      "pvc-fs-disk",
-			targetUID:    "uid-fs-disk",
-			volumeMode:   "Filesystem",
-			storageClass: "csi-ceph-cephfs",
-			size:         "20Gi",
-			accessModes:  []string{"ReadWriteMany"},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-				{APIVersion: volumeSnapshotAPIVersion, Kind: "VolumeSnapshot", Name: tc.vsName},
-			})
-			scRoot := makeContent("sc-root", "mcp-root", nil)
-
-			vs := makeUnstructuredVolumeSnapshot(testNS, tc.vsName, tc.boundContent)
-
-			childBinding := &snapshotapi.SnapshotDataBinding{
-				TargetUID: tc.targetUID,
-				Target: snapshotapi.SnapshotSubjectRef{
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Name:       tc.pvcName,
-					Namespace:  testNS,
-				},
-				Artifact: snapshotapi.SnapshotDataArtifactRef{
-					APIVersion: "snapshot.storage.k8s.io/v1",
-					Kind:       "VolumeSnapshotContent",
-					Name:       "vsc-" + tc.targetUID,
-				},
-				VolumeMode:       tc.volumeMode,
-				StorageClassName: tc.storageClass,
-				Size:             tc.size,
-				AccessModes:      tc.accessModes,
-			}
-			scChild := makeContent(tc.boundContent, "mcp-child-"+tc.name, childBinding)
-
-			c := buildFakeClient(scheme, []client.Object{root, scRoot, scChild}, []*unstructured.Unstructured{vs})
-
-			tree, err := BuildTree(context.Background(), c, testNS, "root")
-			if err != nil {
-				t.Fatalf("BuildTree: %v", err)
-			}
-
-			if tree.OwnDataRefs != nil {
-				t.Errorf("aggregator OwnDataRefs must be nil")
-			}
-
-			if len(tree.Children) != 1 {
-				t.Fatalf("children: got %d, want 1", len(tree.Children))
-			}
-
-			leaf := tree.Children[0]
-
-			// Name = VS CR name (connector key), SourceName = PVC name (dir naming).
-			if leaf.Name != tc.vsName {
-				t.Errorf("leaf.Name: got %q, want %q", leaf.Name, tc.vsName)
-			}
-
-			if leaf.SourceName != tc.pvcName {
-				t.Errorf("leaf.SourceName: got %q, want %q", leaf.SourceName, tc.pvcName)
-			}
-
-			if leaf.SourceRef != tc.targetUID {
-				t.Errorf("leaf.SourceRef: got %q, want %q", leaf.SourceRef, tc.targetUID)
-			}
-
-			if leaf.APIVersion != volumeSnapshotAPIVersion {
-				t.Errorf("leaf.APIVersion: got %q, want %q", leaf.APIVersion, volumeSnapshotAPIVersion)
-			}
-
-			if leaf.Kind != "VolumeSnapshot" {
-				t.Errorf("leaf.Kind: got %q, want VolumeSnapshot", leaf.Kind)
-			}
-
-			if leaf.Binding == nil {
-				t.Fatal("leaf.Binding must not be nil")
-			}
-
-			if leaf.Binding.TargetUID != tc.targetUID {
-				t.Errorf("leaf.Binding.TargetUID: got %q, want %q", leaf.Binding.TargetUID, tc.targetUID)
-			}
-
-			if leaf.Binding.VolumeMode != tc.volumeMode {
-				t.Errorf("leaf.Binding.VolumeMode: got %q, want %q", leaf.Binding.VolumeMode, tc.volumeMode)
-			}
-
-			if leaf.Binding.StorageClassName != tc.storageClass {
-				t.Errorf("leaf.Binding.StorageClassName: got %q, want %q", leaf.Binding.StorageClassName, tc.storageClass)
-			}
-
-			if leaf.Binding.Size != tc.size {
-				t.Errorf("leaf.Binding.Size: got %q, want %q", leaf.Binding.Size, tc.size)
-			}
-
-			if len(leaf.Binding.AccessModes) != len(tc.accessModes) {
-				t.Fatalf("leaf.Binding.AccessModes len: got %d, want %d", len(leaf.Binding.AccessModes), len(tc.accessModes))
-			}
-
-			for i, am := range tc.accessModes {
-				if leaf.Binding.AccessModes[i] != am {
-					t.Errorf("leaf.Binding.AccessModes[%d]: got %q, want %q", i, leaf.Binding.AccessModes[i], am)
-				}
-			}
-
-			// ManifestScopeRef must be the leaf's own ref (VS connector), NOT the parent.
-			scope := leaf.ManifestScopeRef()
-			if scope.APIVersion != volumeSnapshotAPIVersion || scope.Kind != "VolumeSnapshot" || scope.Name != tc.vsName || scope.Namespace != testNS {
-				t.Errorf("ManifestScopeRef: got {%s %s %s/%s}, want {%s VolumeSnapshot %s/%s}",
-					scope.APIVersion, scope.Kind, scope.Namespace, scope.Name,
-					volumeSnapshotAPIVersion, testNS, tc.vsName)
-			}
-
-			if leaf.OwnDataRefs != nil {
-				t.Errorf("leaf OwnDataRefs must be nil")
-			}
-
-			if len(leaf.Children) != 0 {
-				t.Errorf("leaf must have no children, got %d", len(leaf.Children))
-			}
-
-			if leaf.Parent != tree {
-				t.Errorf("leaf.Parent must be root")
-			}
-		})
-	}
-}
-
-// makeUnstructuredSnapWithSpecSourceRef builds an unstructured domain snapshot CR that
-// carries spec.sourceRef = {apiVersion, kind, name}.
-func makeUnstructuredSnapWithSpecSourceRef(apiVersion, kind, namespace, name, contentName, srcAV, srcKind, srcName string) *unstructured.Unstructured {
-	obj := makeUnstructuredSnap(apiVersion, kind, namespace, name, contentName, nil)
-
-	_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
-		"apiVersion": srcAV,
-		"kind":       srcKind,
-		"name":       srcName,
-	}, "spec", "sourceRef")
-
-	return obj
-}
-
-// TestBuildTree_DomainNode_SpecSourceRef verifies that:
-//   - a domain snapshot node whose CR carries spec.sourceRef has Node.SpecSourceRef set;
-//   - a domain node without spec.sourceRef has Node.SpecSourceRef == nil;
-//   - core Snapshot nodes (root and typed children) have Node.SpecSourceRef == nil.
-func TestBuildTree_DomainNode_SpecSourceRef(t *testing.T) {
-	t.Helper()
-
-	scheme := makeScheme(t)
-
-	root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-		{APIVersion: demoAPI, Kind: "DemoVirtualDiskSnapshot", Name: "disk-with-ref"},
-		{APIVersion: demoAPI, Kind: "DemoVirtualDiskSnapshot", Name: "disk-no-ref"},
-		{APIVersion: rootAPIVersion, Kind: "Snapshot", Name: "core-child"},
+	root := rootSnap("root", "root-uid", []interface{}{
+		childRef(volumeSnapshotAPIVersion, "VolumeSnapshot", "nss-vs-unbound"),
 	})
-	scRoot := makeContent("sc-root", "mcp-root", nil)
 
-	diskWithRef := makeUnstructuredSnapWithSpecSourceRef(
-		demoAPI, "DemoVirtualDiskSnapshot", testNS, "disk-with-ref", "sc-disk-ref",
-		"demo.deckhouse.io/v1alpha1", "DemoVirtualDisk", "my-disk",
-	)
-	scDiskRef := makeContent("sc-disk-ref", "mcp-disk-ref", nil)
-
-	diskNoRef := makeUnstructuredSnap(demoAPI, "DemoVirtualDiskSnapshot", testNS, "disk-no-ref", "sc-disk-noref", nil)
-	scDiskNoRef := makeContent("sc-disk-noref", "mcp-disk-noref", nil)
-
-	coreChild := makeSnapshot("core-child", "sc-core-child", nil)
-	scCoreChild := makeContent("sc-core-child", "mcp-core-child", nil)
-
-	c := buildFakeClient(scheme,
-		[]client.Object{root, scRoot, scDiskRef, scDiskNoRef, coreChild, scCoreChild},
-		[]*unstructured.Unstructured{diskWithRef, diskNoRef},
-	)
-
-	tree, err := BuildTree(context.Background(), c, testNS, "root")
-	if err != nil {
-		t.Fatalf("BuildTree: %v", err)
-	}
-
-	if tree.SpecSourceRef != nil {
-		t.Errorf("root SpecSourceRef must be nil (core Snapshot node), got %+v", tree.SpecSourceRef)
-	}
-
-	var withRef, noRef, core *Node
-
-	for _, ch := range tree.Children {
-		switch ch.Name {
-		case "disk-with-ref":
-			withRef = ch
-		case "disk-no-ref":
-			noRef = ch
-		case "core-child":
-			core = ch
-		}
-	}
-
-	if withRef == nil || noRef == nil || core == nil {
-		t.Fatalf("expected all three children; withRef=%v noRef=%v core=%v", withRef, noRef, core)
-	}
-
-	// Domain node with spec.sourceRef populated.
-	if withRef.SpecSourceRef == nil {
-		t.Fatal("disk-with-ref SpecSourceRef must not be nil")
-	}
-
-	if withRef.SpecSourceRef.APIVersion != "demo.deckhouse.io/v1alpha1" {
-		t.Errorf("SpecSourceRef.APIVersion: got %q, want demo.deckhouse.io/v1alpha1", withRef.SpecSourceRef.APIVersion)
-	}
-
-	if withRef.SpecSourceRef.Kind != "DemoVirtualDisk" {
-		t.Errorf("SpecSourceRef.Kind: got %q, want DemoVirtualDisk", withRef.SpecSourceRef.Kind)
-	}
-
-	if withRef.SpecSourceRef.Name != "my-disk" {
-		t.Errorf("SpecSourceRef.Name: got %q, want my-disk", withRef.SpecSourceRef.Name)
-	}
-
-	// Domain node without spec.sourceRef — SpecSourceRef must be nil.
-	if noRef.SpecSourceRef != nil {
-		t.Errorf("disk-no-ref SpecSourceRef must be nil, got %+v", noRef.SpecSourceRef)
-	}
-
-	// Core Snapshot child — SpecSourceRef must be nil.
-	if core.SpecSourceRef != nil {
-		t.Errorf("core-child SpecSourceRef must be nil (core Snapshot node), got %+v", core.SpecSourceRef)
-	}
-}
-
-// TestBuildTree_VolumeSnapshotLeaf_Unbound verifies that a VolumeSnapshot with an empty
-// status.boundSnapshotContentName returns ErrLeafNotBound and does not silently produce
-// an empty leaf node.
-func TestBuildTree_VolumeSnapshotLeaf_Unbound(t *testing.T) {
-	t.Helper()
-
-	scheme := makeScheme(t)
-
-	root := makeSnapshot("root", "sc-root", []snapshotapi.SnapshotChildRef{
-		{APIVersion: volumeSnapshotAPIVersion, Kind: "VolumeSnapshot", Name: "nss-vs-unbound"},
+	// VS exists and carries a sourceRef but no status.data (not yet captured).
+	vs := makeSnap(snapOpts{
+		apiVersion: volumeSnapshotAPIVersion,
+		kind:       "VolumeSnapshot",
+		name:       "nss-vs-unbound",
+		uid:        "vs-uid",
+		sourceRef:  pvcSourceRef("pvc-unbound", "uid-unbound"),
 	})
-	scRoot := makeContent("sc-root", "mcp-root", nil)
 
-	// VS exists but boundSnapshotContentName is empty (not yet bound).
-	vs := makeUnstructuredVolumeSnapshot(testNS, "nss-vs-unbound", "")
-
-	c := buildFakeClient(scheme, []client.Object{root, scRoot}, []*unstructured.Unstructured{vs})
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root, vs})
 
 	_, err := BuildTree(context.Background(), c, testNS, "root")
 	if err == nil {
-		t.Fatal("expected error for unbound VolumeSnapshot leaf, got nil")
+		t.Fatal("expected error for not-yet-captured VolumeSnapshot leaf, got nil")
 	}
 
 	if !errors.Is(err, ErrLeafNotBound) {

@@ -355,7 +355,7 @@ func TestWriteReadSnapshotYAML(t *testing.T) {
 		Kind:       "Snapshot",
 		Name:       "test-snap",
 		Namespace:  "default",
-		SourceRef:  "app/vm-1",
+		UID:        "snap-uid-1",
 		Checksum: NodeChecksum{
 			Algorithm: "sha256",
 			Hex:       "deadbeef00112233445566778899aabbccddeeff00112233445566778899aabb",
