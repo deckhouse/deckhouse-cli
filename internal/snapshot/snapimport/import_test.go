@@ -159,9 +159,9 @@ func readyRootSnapshot() *unstructured.Unstructured {
 		"kind":       "Snapshot",
 		"metadata":   map[string]interface{}{"namespace": targetNS, "name": "root", "uid": rootSnapshotUID},
 		// An import-mode root that the controller has already materialized to Ready: it keeps
-		// its spec.source.import marker, so ensureMarker reconciles (not rejects) it on re-run.
+		// its spec.mode: Import marker, so ensureMarker reconciles (not rejects) it on re-run.
 		"spec": map[string]interface{}{
-			"source": map[string]interface{}{"import": map[string]interface{}{}},
+			"mode": "Import",
 		},
 		"status": map[string]interface{}{
 			"boundSnapshotContentName": "content-root",
@@ -476,8 +476,8 @@ func TestRun_DomainDataLeaf_EndToEnd(t *testing.T) {
 		t.Fatalf("DemoVirtualDiskSnapshot import CR not created: %v", err)
 	}
 
-	if _, found, _ := unstructured.NestedMap(leafObj.Object, "spec", "source", "import"); !found {
-		t.Error("domain leaf marker must set spec.source.import: {}")
+	if mode, _, _ := unstructured.NestedString(leafObj.Object, "spec", "mode"); mode != "Import" {
+		t.Errorf("domain leaf marker must set spec.mode: Import, got %q", mode)
 	}
 
 	// The domain leaf carries a child->parent ownerRef pointing to the root Snapshot.
@@ -500,7 +500,7 @@ func TestRun_DomainDataLeaf_EndToEnd(t *testing.T) {
 // TestRun_ManifestOnlyDomainNode_Imports verifies that a manifest-only domain node — a
 // domain snapshot with neither volume data nor child snapshots (e.g. a disk-less
 // DemoVirtualMachineSnapshot) — is client-importable: it gets the unified
-// spec.source.import: {} marker, its manifests are uploaded, it carries a controller-owned
+// spec.mode: Import marker, its manifests are uploaded, it carries a controller-owned
 // child->parent ownerRef, and no DataImport is created (it has no data leg). It is
 // import-equivalent to a structural Snapshot child.
 func TestRun_ManifestOnlyDomainNode_Imports(t *testing.T) {
@@ -549,8 +549,8 @@ func TestRun_ManifestOnlyDomainNode_Imports(t *testing.T) {
 		t.Fatalf("DemoVirtualMachineSnapshot import CR not created: %v", err)
 	}
 
-	if _, found, _ := unstructured.NestedMap(vmObj.Object, "spec", "source", "import"); !found {
-		t.Error("manifest-only domain node marker must set spec.source.import: {}")
+	if mode, _, _ := unstructured.NestedString(vmObj.Object, "spec", "mode"); mode != "Import" {
+		t.Errorf("manifest-only domain node marker must set spec.mode: Import, got %q", mode)
 	}
 
 	// It carries a controller-owned child->parent ownerRef pointing to the root Snapshot.
@@ -763,7 +763,7 @@ func readyImportLeafVS() *unstructured.Unstructured {
 		"kind":       "VolumeSnapshot",
 		"metadata":   map[string]interface{}{"namespace": targetNS, "name": "pvc-1", "uid": "vs-uid"},
 		"spec": map[string]interface{}{
-			"source": map[string]interface{}{"import": map[string]interface{}{}},
+			"mode": "Import",
 		},
 		"status": map[string]interface{}{
 			"boundSnapshotContentName": "content-leaf",

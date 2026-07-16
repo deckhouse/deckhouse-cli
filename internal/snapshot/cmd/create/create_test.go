@@ -59,8 +59,8 @@ func readySnapshot(namespace, name string) *unstructured.Unstructured {
 	}}
 }
 
-func TestBuildSnapshot_Empty(t *testing.T) {
-	obj := buildSnapshot("ns", "snap", "", nil)
+func TestBuildSnapshot_Default(t *testing.T) {
+	obj := buildSnapshot("ns", "snap", nil)
 
 	if obj.GetKind() != "Snapshot" || obj.GetAPIVersion() != "state-snapshotter.deckhouse.io/v1alpha1" {
 		t.Fatalf("unexpected GVK: %s %s", obj.GetAPIVersion(), obj.GetKind())
@@ -70,18 +70,24 @@ func TestBuildSnapshot_Empty(t *testing.T) {
 		t.Fatalf("unexpected metadata: ns=%q name=%q", obj.GetNamespace(), obj.GetName())
 	}
 
+	// A default create sets spec.mode: Capture and nothing else.
+	mode, _, _ := unstructured.NestedString(obj.Object, "spec", "mode")
+	if mode != "Capture" {
+		t.Errorf("spec.mode = %q, want Capture", mode)
+	}
+
 	spec, found, _ := unstructured.NestedMap(obj.Object, "spec")
-	if !found || len(spec) != 0 {
-		t.Fatalf("empty create must produce an empty spec, got found=%v spec=%v", found, spec)
+	if !found || len(spec) != 1 {
+		t.Fatalf("default create must produce spec={mode: Capture} only, got found=%v spec=%v", found, spec)
 	}
 }
 
-func TestBuildSnapshot_WithClassAndSelector(t *testing.T) {
-	obj := buildSnapshot("ns", "snap", "fast", map[string]interface{}{"app": "demo", "tier": "db"})
+func TestBuildSnapshot_WithSelector(t *testing.T) {
+	obj := buildSnapshot("ns", "snap", map[string]interface{}{"app": "demo", "tier": "db"})
 
-	sc, _, _ := unstructured.NestedString(obj.Object, "spec", "snapshotClassName")
-	if sc != "fast" {
-		t.Errorf("spec.snapshotClassName = %q, want fast", sc)
+	mode, _, _ := unstructured.NestedString(obj.Object, "spec", "mode")
+	if mode != "Capture" {
+		t.Errorf("spec.mode = %q, want Capture", mode)
 	}
 
 	ml, found, _ := unstructured.NestedStringMap(obj.Object, "spec", "resourceSelector", "matchLabels")

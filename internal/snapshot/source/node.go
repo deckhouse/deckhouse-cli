@@ -19,6 +19,8 @@ limitations under the License.
 package source
 
 import (
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 )
@@ -68,6 +70,17 @@ type Node struct {
 	// Namespace is the namespace of the snapshot CR.
 	// For the root it is the user-supplied namespace; children inherit it.
 	Namespace string
+
+	// UID is the metadata.uid of the snapshot CR. Together with APIVersion/Kind/Namespace/Name
+	// it forms the node's SnapshotIdentity (see identity.go), the basis for the resume key and
+	// the archive directory name. Populated by the tree builder in Stage 2b.
+	UID types.UID
+
+	// Data is the node's captured volume payload parsed from the namespaced status.data
+	// (Variant A: at most one per node), or nil for aggregators and manifest-only nodes.
+	// It is the source-based successor of OwnDataRefs/Binding; the tree builder populates it
+	// via ParseNodeStatus in Stage 2b, after which the legacy fields are removed.
+	Data *NodeData
 
 	// SourceRef is the value of the state-snapshotter.deckhouse.io/source-ref
 	// annotation on the snapshot CR. It records the identity of the original
