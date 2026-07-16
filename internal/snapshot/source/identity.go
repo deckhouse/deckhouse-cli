@@ -17,9 +17,6 @@ limitations under the License.
 package source
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"regexp"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -27,8 +24,12 @@ import (
 
 // SnapshotIdentity is the structural identity of a snapshot CR node itself
 // (apiVersion/kind/namespace/name/uid). Every node has one, unlike SourceRefIdentity (the
-// captured source object), which may be absent (root, manifest-only). It is the basis for the
-// resume key and the archive directory name.
+// captured source object), which may be absent (root, manifest-only). It is the node's resume
+// identity and the input to the archive collision discriminator. The readable archive
+// directory name itself is NOT derived from it: layout stays source-name based via
+// archive.NodeDirName (readable base = captured source name, fallback CR name); only the
+// collision suffix uses a short hash of CanonicalSnapshotIdentity so two nodes sharing a
+// source-name base never mix.
 type SnapshotIdentity struct {
 	APIVersion string
 	Kind       string
@@ -38,14 +39,14 @@ type SnapshotIdentity struct {
 }
 
 // canonicalSep joins identity components. NUL cannot appear in any Kubernetes identifier, so
-// it is an injective separator (no component can contain it), which is exactly why the result
-// is unusable as a filesystem path — see ArchiveNodeDirName for names.
+// it is an injective separator; this also makes the result unusable as a filesystem path (by
+// design — canonical keys are for comparison/resume/hashing, never directory names).
 const canonicalSep = "\x00"
 
 // CanonicalSnapshotIdentity returns an opaque, deterministic key for a snapshot node, used for
-// comparison, checksums and the resume index. It is NOT a filesystem path: the NUL separator
-// is illegal in a path component and apiVersion contains '/'. Use ArchiveNodeDirName for
-// directory names.
+// resume matching and as the input to the archive collision discriminator (a short hash of it
+// disambiguates two nodes that share a readable source-name directory base). It is NOT a
+// filesystem path.
 func CanonicalSnapshotIdentity(id SnapshotIdentity) string {
 	return strings.Join([]string{id.APIVersion, id.Kind, id.Namespace, id.Name, string(id.UID)}, canonicalSep)
 }
@@ -54,33 +55,4 @@ func CanonicalSnapshotIdentity(id SnapshotIdentity) string {
 // (provenance). Same NUL-joined form as CanonicalSnapshotIdentity; not a path.
 func CanonicalSourceIdentity(id SourceRefIdentity) string {
 	return strings.Join([]string{id.APIVersion, id.Kind, id.Namespace, id.Name, id.UID}, canonicalSep)
-}
-
-// dirNameHashLen is the length of the short hex discriminator appended to a directory name.
-const dirNameHashLen = 8
-
-// pathUnsafe matches any run of characters not allowed in a portable, readable path component.
-var pathUnsafe = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
-
-// ArchiveNodeDirName returns a path-safe, human-readable, deterministic directory name for a
-// snapshot node. The readable base is "<kind>-<name>" (sanitized); a short hash of the
-// canonical identity is appended so distinct nodes whose bases sanitize to the same string
-// stay unique. The UID feeds the hash, never replacing the readable base. The result never
-// contains NUL or '/'.
-func ArchiveNodeDirName(id SnapshotIdentity) string {
-	sum := sha256.Sum256([]byte(CanonicalSnapshotIdentity(id)))
-	short := hex.EncodeToString(sum[:])[:dirNameHashLen]
-
-	base := sanitizePathComponent(strings.ToLower(id.Kind) + "-" + id.Name)
-	if base == "" {
-		return short
-	}
-
-	return base + "-" + short
-}
-
-// sanitizePathComponent replaces runs of unsafe characters with a single '-' and trims
-// leading/trailing separators so the result is a valid, readable path component (or "").
-func sanitizePathComponent(s string) string {
-	return strings.Trim(pathUnsafe.ReplaceAllString(s, "-"), "-.")
 }
