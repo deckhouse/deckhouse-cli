@@ -59,6 +59,76 @@ func conditionTrue(obj *unstructured.Unstructured, condType string) bool {
 	return false
 }
 
+// readyConditionState returns the status/reason/message of the Ready condition, or empty
+// strings when the object carries no Ready condition yet. The reason drives the terminal-vs-
+// pending decision in waitNamespacedReady.
+func readyConditionState(obj *unstructured.Unstructured) (string, string, string) {
+	conds, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	if err != nil || !found {
+		return "", "", ""
+	}
+
+	for _, c := range conds {
+		m, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		t, _, _ := unstructured.NestedString(m, "type")
+		if t != conditionReady {
+			continue
+		}
+
+		status, _, _ := unstructured.NestedString(m, "status")
+		reason, _, _ := unstructured.NestedString(m, "reason")
+		message, _, _ := unstructured.NestedString(m, "message")
+
+		return status, reason, message
+	}
+
+	return "", "", ""
+}
+
+// domainCapturePhase returns status.captureState.domainSpecificController.phase, or "" when
+// absent (e.g. on import-mode objects, which carry no captureState). phase == "Failed" is a
+// monotonic terminal sink independent of the (free-form) Ready reason.
+func domainCapturePhase(obj *unstructured.Unstructured) string {
+	phase, _, _ := unstructured.NestedString(obj.Object, "status", "captureState", "domainSpecificController", "phase")
+
+	return phase
+}
+
+// capturePhaseFailed is the monotonic terminal capture phase in
+// state-snapshotter status.captureState.domainSpecificController.phase.
+const capturePhaseFailed = "Failed"
+
+// terminalReadyReasons mirrors state-snapshotter api/storage/v1alpha1/conditions.go
+// TerminalReadyReasons, plus the two import-leaf terminal reasons that live outside that
+// enum (genericbinder/import.go). Keep synchronized with the controller; an unknown reason
+// stays non-terminal and is resolved by timeout — safer than a false-terminal error.
+var terminalReadyReasons = map[string]struct{}{
+	// api/storage/v1alpha1/conditions.go TerminalReadyReasons.
+	"ListFailed":               {},
+	"ManifestCheckpointFailed": {},
+	"NamespaceNotFound":        {},
+	"VolumeCaptureFailed":      {},
+	"DuplicateCoveredPVCUID":   {},
+	"ChildrenFailed":           {},
+	"GraphPlanningFailed":      {},
+	"CreateChildFailed":        {},
+	"ChildSnapshotLost":        {},
+	// Import-leaf terminals outside the enum (genericbinder/import.go).
+	"DataImportAmbiguous": {},
+	"DataArtifactInvalid": {},
+}
+
+// isTerminalReadyReason reports whether a Ready=False reason is a known terminal signal.
+func isTerminalReadyReason(reason string) bool {
+	_, ok := terminalReadyReasons[reason]
+
+	return ok
+}
+
 // sleepCtx sleeps for d or returns false if ctx is cancelled first.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	select {

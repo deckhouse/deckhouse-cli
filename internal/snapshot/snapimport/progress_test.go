@@ -157,7 +157,7 @@ func TestRun_UploadOutcome_CallsDoneOrFailByRealResult(t *testing.T) {
 		sink := &fakeSink{}
 		vol := &stubVolumes{}
 		up := &stubUploader{}
-		dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+		dyn := newFakeDynamic(readyRootSnapshot())
 
 		cfg := baseConfig(root, up, vol, dyn)
 		cfg.Progress = sink
@@ -186,7 +186,7 @@ func TestRun_UploadOutcome_CallsDoneOrFailByRealResult(t *testing.T) {
 		sink := &fakeSink{}
 		vol := &failingVolumes{}
 		up := &stubUploader{}
-		dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+		dyn := newFakeDynamic(readyRootSnapshot())
 
 		cfg := baseConfig(root, up, vol, dyn)
 		cfg.Progress = sink
@@ -249,7 +249,7 @@ func TestRun_ProgressOneStreamPerDataLeaf(t *testing.T) {
 
 	vol := &stubVolumes{}
 	up := &stubUploader{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, vol, dyn)
 	cfg.Progress = sink
@@ -284,7 +284,7 @@ func TestRun_NonTTYProgress_WritesAggregateLine(t *testing.T) {
 
 	vol := &progressReportingVolumes{bytesPerLeaf: bytesPerLeaf}
 	up := &stubUploader{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, vol, dyn)
 	cfg.Progress = sink

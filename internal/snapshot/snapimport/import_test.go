@@ -46,7 +46,6 @@ const targetNS = "dst"
 
 var (
 	snapshotGVR        = schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshots"}
-	contentGVR         = schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents"}
 	volumeSnapshotGVRt = schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
 	demoDiskSnapGVR    = schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots"}
 	demoVMSnapGVR      = schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots"}
@@ -130,7 +129,6 @@ func readyConditions(types ...string) []interface{} {
 func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	gvrToListKind := map[schema.GroupVersionResource]string{
 		snapshotGVR:        "SnapshotList",
-		contentGVR:         "SnapshotContentList",
 		volumeSnapshotGVRt: "VolumeSnapshotList",
 		demoDiskSnapGVR:    "DemoVirtualDiskSnapshotList",
 		demoVMSnapGVR:      "DemoVirtualMachineSnapshotList",
@@ -164,19 +162,7 @@ func readyRootSnapshot() *unstructured.Unstructured {
 			"mode": "Import",
 		},
 		"status": map[string]interface{}{
-			"boundSnapshotContentName": "content-root",
-			"conditions":               readyConditions("Ready"),
-		},
-	}}
-}
-
-func readyContent() *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
-		"kind":       "SnapshotContent",
-		"metadata":   map[string]interface{}{"name": "content-root"},
-		"status": map[string]interface{}{
-			"conditions": readyConditions("ManifestsReady", "VolumesReady", "ChildrenReady", "Ready"),
+			"conditions": readyConditions("Ready"),
 		},
 	}}
 }
@@ -201,7 +187,7 @@ func TestRun_ImportsBottomUp(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	if err := Run(context.Background(), baseConfig(root, up, vol, dyn)); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -258,7 +244,7 @@ func TestRun_UploadsAllManifestsBeforeData(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{uploader: up, manifestsAtFirstEnsure: -1}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	if err := Run(context.Background(), baseConfig(root, up, vol, dyn)); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -273,7 +259,7 @@ func TestRun_UploadsAllManifestsBeforeData(t *testing.T) {
 func TestRun_LeafCarriesParentOwnerRef(t *testing.T) {
 	root := buildTwoLevelArchive(t)
 
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	if err := Run(context.Background(), baseConfig(root, &stubUploader{}, &stubVolumes{}, dyn)); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -329,7 +315,7 @@ func TestPreflight_FilesystemDataPasses(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	if err := Run(context.Background(), baseConfig(root, up, vol, dyn)); err != nil {
 		t.Fatalf("filesystem-data leaf must pass preflight and allow Run to succeed, got: %v", err)
@@ -369,7 +355,7 @@ func TestRun_LeafWithoutBlockDataFailsFast(t *testing.T) {
 	up := &stubUploader{}
 	vol := &stubVolumes{}
 
-	err := Run(context.Background(), baseConfig(root, up, vol, newFakeDynamic(readyRootSnapshot(), readyContent())))
+	err := Run(context.Background(), baseConfig(root, up, vol, newFakeDynamic(readyRootSnapshot())))
 	if err == nil {
 		t.Fatal("expected missing-block-data error, got nil")
 	}
@@ -383,7 +369,7 @@ func TestRun_LeafManifestsArrayShape(t *testing.T) {
 	root := buildTwoLevelArchive(t)
 
 	up := &stubUploader{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	if err := Run(context.Background(), baseConfig(root, up, &stubVolumes{}, dyn)); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -439,7 +425,7 @@ func TestRun_DomainDataLeaf_EndToEnd(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, vol, dyn)
 	cfg.Mapper = testDomainMapper()
@@ -520,7 +506,7 @@ func TestRun_ManifestOnlyDomainNode_Imports(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, vol, dyn)
 	cfg.Mapper = testDomainMapper()
@@ -584,7 +570,7 @@ func TestRun_SelectedNode_ManifestOnlyDomainNodeFails(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, vol, dyn)
 	cfg.Mapper = testDomainMapper()
@@ -866,7 +852,7 @@ func TestRun_SelectedNode_AggregatorFails(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, vol, dyn)
 	cfg.SelectedNodeKind = "DemoVirtualMachineSnapshot"
@@ -925,7 +911,7 @@ func TestRun_SelectedNode_UnknownNodeFails(t *testing.T) {
 	root := buildTwoLevelArchive(t)
 
 	up := &stubUploader{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, &stubVolumes{}, dyn)
 	cfg.SelectedNodeKind = "Snapshot"
@@ -1029,7 +1015,7 @@ func TestRun_Pass2b_ConcurrencyBounded(t *testing.T) {
 
 	vol := &concStubVolumes{}
 	up := &stubUploader{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, vol, dyn)
 	cfg.Workers = workers
@@ -1089,7 +1075,7 @@ func TestRun_Pass2b_ErrorCancelsSiblings(t *testing.T) {
 
 	vol := &errorOnceStubVolumes{errorLeaf: "leaf-0"}
 	up := &stubUploader{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, vol, dyn)
 	cfg.Workers = 2 // both leaves start simultaneously
@@ -1345,7 +1331,7 @@ func TestRun_FullAggregatorImport(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(archiveRoot, up, vol, dyn)
 	cfg.Mapper = testDomainMapper()
