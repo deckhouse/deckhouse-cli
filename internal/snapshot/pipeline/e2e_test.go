@@ -33,13 +33,10 @@ import (
 	"github.com/klauspost/compress/zstd"
 	lz4 "github.com/pierrec/lz4/v4"
 	"github.com/stretchr/testify/require"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
-	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
@@ -384,134 +381,42 @@ func buildE2EFakeClient(t *testing.T) client.Client {
 
 	scheme := buildScheme(t)
 
-	// ── Root typed Snapshot ───────────────────────────────────────────────────
-	rootSnap := &snapshotapi.Snapshot{
-		TypeMeta: metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "Snapshot"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      e2eRootSnap,
-			Namespace: e2eNS,
+	// ── Root Snapshot (v1/Namespace source) ───────────────────────────────────
+	root := snapObj{
+		apiVersion: storageAPIVersion, kind: "Snapshot",
+		namespace: e2eNS, name: e2eRootSnap, uid: "uid-e2e-root",
+		sourceRef: namespaceSourceRefMap(e2eNS, "uid-e2e-ns"),
+		children:  []map[string]interface{}{childRefMap(e2eVMAPIVersion, e2eVMKind, e2eVMSnap)},
+	}.build()
+
+	// ── vm-snap intermediate node (domain children, no own volume) ────────────
+	vmSnap := snapObj{
+		apiVersion: e2eVMAPIVersion, kind: e2eVMKind,
+		namespace: e2eNS, name: e2eVMSnap, uid: "uid-e2e-vm",
+		children: []map[string]interface{}{
+			childRefMap(e2eVMAPIVersion, e2eDiskKind, e2eBlockDisk),
+			childRefMap(e2eVMAPIVersion, e2eDiskKind, e2eFSDisk),
 		},
-		Status: snapshotapi.SnapshotStatus{
-			BoundSnapshotContentName: "sc-e2e-root",
-			ChildrenSnapshotRefs: []snapshotapi.SnapshotChildRef{
-				{APIVersion: e2eVMAPIVersion, Kind: e2eVMKind, Name: e2eVMSnap},
-			},
-		},
-	}
+	}.build()
 
-	// Root SnapshotContent: no volume (own manifests served by the stub ManifestSource).
-	rootContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-e2e-root"},
-	}
+	// ── disk-block: non-aggregator with its own captured block volume ─────────
+	blockSnap := snapObj{
+		apiVersion: e2eVMAPIVersion, kind: e2eDiskKind,
+		namespace: e2eNS, name: e2eBlockDisk, uid: "uid-e2e-block-snap",
+		data: pvcData(e2eNS, "pvc-block-source", "uid-block", e2eBlockVSC),
+	}.build()
 
-	// ── vm-snap unstructured ──────────────────────────────────────────────────
-	vmSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eVMKind, e2eNS, e2eVMSnap, "sc-e2e-vm",
-		[]map[string]interface{}{
-			{"apiVersion": e2eVMAPIVersion, "kind": e2eDiskKind, "name": e2eBlockDisk},
-			{"apiVersion": e2eVMAPIVersion, "kind": e2eDiskKind, "name": e2eFSDisk},
-		})
-
-	vmContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-e2e-vm"},
-	}
-
-	// ── disk-block unstructured (non-aggregator: no childrenSnapshotRefs) ─────
-	// Its DataRef in blockContent becomes an OwnDataRef on the node;
-	// block data is downloaded directly into the disk-block node directory.
-	blockSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eDiskKind, e2eNS, e2eBlockDisk, "sc-e2e-block", nil)
-
-	blockContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-e2e-block"},
-		Status: snapshotapi.SnapshotContentStatus{
-			DataRef: &snapshotapi.SnapshotDataBinding{
-				TargetUID: "uid-block",
-				Target: snapshotapi.SnapshotSubjectRef{
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Namespace:  e2eNS,
-					Name:       "pvc-block-source",
-				},
-				Artifact: snapshotapi.SnapshotDataArtifactRef{
-					APIVersion: "snapshot.storage.k8s.io/v1",
-					Kind:       "VolumeSnapshotContent",
-					Name:       e2eBlockVSC,
-				},
-			},
-		},
-	}
-
-	// ── disk-fs unstructured (non-aggregator: no childrenSnapshotRefs) ────────
-	fsSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eDiskKind, e2eNS, e2eFSDisk, "sc-e2e-fs", nil)
-
-	fsContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-e2e-fs"},
-		Status: snapshotapi.SnapshotContentStatus{
-			DataRef: &snapshotapi.SnapshotDataBinding{
-				TargetUID: "uid-fs",
-				Target: snapshotapi.SnapshotSubjectRef{
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Namespace:  e2eNS,
-					Name:       "pvc-fs-source",
-				},
-				Artifact: snapshotapi.SnapshotDataArtifactRef{
-					APIVersion: "snapshot.storage.k8s.io/v1",
-					Kind:       "VolumeSnapshotContent",
-					Name:       e2eFSVSC,
-				},
-			},
-		},
-	}
-
-	typed := []client.Object{
-		rootSnap, rootContent,
-		vmContent,
-		blockContent,
-		fsContent,
-	}
+	// ── disk-fs: non-aggregator with its own captured filesystem volume ───────
+	fsSnap := snapObj{
+		apiVersion: e2eVMAPIVersion, kind: e2eDiskKind,
+		namespace: e2eNS, name: e2eFSDisk, uid: "uid-e2e-fs-snap",
+		data: pvcData(e2eNS, "pvc-fs-source", "uid-fs", e2eFSVSC),
+	}.build()
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(typed...).
-		WithObjects(vmSnap, blockSnap, fsSnap).
+		WithObjects(root, vmSnap, blockSnap, fsSnap).
 		Build()
-}
-
-// makeUnstructuredE2ENode builds an unstructured snapshot object (for domain-specific
-// kinds not registered in the scheme) with the given boundSnapshotContentName and an
-// optional childrenSnapshotRefs slice.
-func makeUnstructuredE2ENode(
-	apiVersion, kind, namespace, name, contentName string,
-	children []map[string]interface{},
-) *unstructured.Unstructured {
-	status := map[string]interface{}{
-		"boundSnapshotContentName": contentName,
-	}
-
-	if len(children) > 0 {
-		rawChildren := make([]interface{}, len(children))
-		for i, c := range children {
-			rawChildren[i] = c
-		}
-
-		status["childrenSnapshotRefs"] = rawChildren
-	}
-
-	return &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": apiVersion,
-			"kind":       kind,
-			"metadata": map[string]interface{}{
-				"name":      name,
-				"namespace": namespace,
-			},
-			"status": status,
-		},
-	}
 }
 
 // TestPipeline_E2E_DeletedPVC verifies that a non-aggregator OwnDataRef node with a
@@ -583,62 +488,29 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 
 	scheme := buildScheme(t)
 
-	rootSnap := &snapshotapi.Snapshot{
-		TypeMeta: metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "Snapshot"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      e2eDelRootSnap,
-			Namespace: e2eNS,
-		},
-		Status: snapshotapi.SnapshotStatus{
-			BoundSnapshotContentName: "sc-del-root",
-			ChildrenSnapshotRefs: []snapshotapi.SnapshotChildRef{
-				{APIVersion: e2eVMAPIVersion, Kind: e2eDiskKind, Name: e2eDelDisk},
-			},
-		},
-	}
+	root := snapObj{
+		apiVersion: storageAPIVersion, kind: "Snapshot",
+		namespace: e2eNS, name: e2eDelRootSnap, uid: "uid-del-root",
+		sourceRef: namespaceSourceRefMap(e2eNS, "uid-del-ns"),
+		children:  []map[string]interface{}{childRefMap(e2eVMAPIVersion, e2eDiskKind, e2eDelDisk)},
+	}.build()
 
-	rootContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-del-root"},
-	}
-
-	// del-disk: non-aggregator (no childrenSnapshotRefs).
-	delDiskSnap := makeUnstructuredE2ENode(e2eVMAPIVersion, e2eDiskKind, e2eNS, e2eDelDisk, "sc-del-disk", nil)
-
-	delContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-del-disk"},
-		Status: snapshotapi.SnapshotContentStatus{
-			DataRef: &snapshotapi.SnapshotDataBinding{
-				TargetUID: "uid-del",
-				Target: snapshotapi.SnapshotSubjectRef{
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Namespace:  e2eNS,
-					Name:       e2eDelPVC,
-					UID:        "uid-del",
-				},
-				Artifact: snapshotapi.SnapshotDataArtifactRef{
-					APIVersion: "snapshot.storage.k8s.io/v1",
-					Kind:       "VolumeSnapshotContent",
-					Name:       e2eDelVSC,
-				},
-			},
-		},
-	}
+	// del-disk: non-aggregator that captured its own volume; its backing PVC (e2eDelPVC)
+	// is genuinely deleted from the cluster, but the node carries it in status.data so the
+	// download targets the leaf CR directly. The captured PVC manifest is excluded from the
+	// node's manifests/ via the status.data.source exclusion rule.
+	delDiskSnap := snapObj{
+		apiVersion: e2eVMAPIVersion, kind: e2eDiskKind,
+		namespace: e2eNS, name: e2eDelDisk, uid: "uid-del-snap",
+		data: pvcData(e2eNS, e2eDelPVC, "uid-del", e2eDelVSC),
+	}.build()
 
 	// The live PVC is intentionally absent from the cluster; the pipeline targets
 	// the del-disk leaf CR directly so the missing PVC is invisible to the download.
 
-	typed := []client.Object{
-		rootSnap, rootContent,
-		delContent,
-	}
-
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(typed...).
-		WithObjects(delDiskSnap).
+		WithObjects(root, delDiskSnap).
 		Build()
 }
 
@@ -759,106 +631,37 @@ func buildOrphanLeafFakeClient(t *testing.T) client.Client {
 
 	scheme := buildScheme(t)
 
-	rootSnap := &snapshotapi.Snapshot{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "Snapshot"},
-		ObjectMeta: metav1.ObjectMeta{Name: e2eAggRootSnap, Namespace: e2eNS},
-		Status: snapshotapi.SnapshotStatus{
-			BoundSnapshotContentName: "sc-agg-root",
-			ChildrenSnapshotRefs: []snapshotapi.SnapshotChildRef{
-				{APIVersion: e2eVMAPIVersion, Kind: e2eDiskKind, Name: "agg-snap"},
-			},
+	root := snapObj{
+		apiVersion: storageAPIVersion, kind: "Snapshot",
+		namespace: e2eNS, name: e2eAggRootSnap, uid: "uid-agg-root",
+		sourceRef: namespaceSourceRefMap(e2eNS, "uid-agg-ns"),
+		children:  []map[string]interface{}{childRefMap(e2eVMAPIVersion, e2eDiskKind, "agg-snap")},
+	}.build()
+
+	// agg-snap is an aggregator: it has a VolumeSnapshot visibility-leaf in its
+	// childrenSnapshotRefs (Variant A) and captures no own volume (status.data == nil). Its
+	// data lives entirely in the orphan leaf child.
+	aggSnap := snapObj{
+		apiVersion: e2eVMAPIVersion, kind: e2eDiskKind,
+		namespace: e2eNS, name: "agg-snap", uid: "uid-agg-snap",
+		children: []map[string]interface{}{
+			childRefMap("snapshot.storage.k8s.io/v1", "VolumeSnapshot", "nss-vs-agg-pvc"),
 		},
-	}
+	}.build()
 
-	rootContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-agg-root"},
-	}
-
-	// agg-snap has a VolumeSnapshot visibility-leaf in its childrenSnapshotRefs (Variant A).
-	// The tree builder calls visitVisibilityLeaf("nss-vs-agg-pvc"): it fetches the VS,
-	// reads status.boundSnapshotContentName → "sc-agg-child", fetches that child content,
-	// and takes the orphan leaf Binding from sc-agg-child.status.dataRef.
-	// The aggregator content (sc-agg) has no own dataRef.
-	aggSnap := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": e2eVMAPIVersion,
-			"kind":       e2eDiskKind,
-			"metadata": map[string]interface{}{
-				"name":      "agg-snap",
-				"namespace": e2eNS,
-			},
-			"status": map[string]interface{}{
-				"boundSnapshotContentName": "sc-agg",
-				"childrenSnapshotRefs": []interface{}{
-					map[string]interface{}{
-						"apiVersion": "snapshot.storage.k8s.io/v1",
-						"kind":       "VolumeSnapshot",
-						"name":       "nss-vs-agg-pvc",
-					},
-				},
-			},
-		},
-	}
-
-	// Aggregator SnapshotContent (sc-agg): no own dataRef (Variant A).
-	aggContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-agg"},
-	}
-
-	// VolumeSnapshot visibility-leaf: carries status.boundSnapshotContentName → sc-agg-child.
-	// visitVisibilityLeaf fetches this object to locate the child SnapshotContent.
-	// snapv1.VolumeSnapshot is NOT registered in the scheme, so the fake client stores
-	// and retrieves this unstructured object verbatim (no conversion drops custom fields).
-	aggVS := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": "snapshot.storage.k8s.io/v1",
-			"kind":       "VolumeSnapshot",
-			"metadata": map[string]interface{}{
-				"name":      "nss-vs-agg-pvc",
-				"namespace": e2eNS,
-			},
-			"status": map[string]interface{}{
-				"boundSnapshotContentName": "sc-agg-child",
-			},
-		},
-	}
-
-	// Child SnapshotContent (sc-agg-child): carries the single dataRef for pvc-agg.
-	// This is the Binding source for the orphan leaf node (Variant A).
-	aggChildContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "sc-agg-child"},
-		Status: snapshotapi.SnapshotContentStatus{
-			DataRef: &snapshotapi.SnapshotDataBinding{
-				TargetUID: "uid-agg-pvc",
-				Target: snapshotapi.SnapshotSubjectRef{
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Namespace:  e2eNS,
-					Name:       "pvc-agg",
-					UID:        "uid-agg-pvc",
-				},
-				Artifact: snapshotapi.SnapshotDataArtifactRef{
-					APIVersion: "snapshot.storage.k8s.io/v1",
-					Kind:       "VolumeSnapshotContent",
-					Name:       "vsc-agg",
-				},
-			},
-		},
-	}
-
-	typed := []client.Object{
-		rootSnap, rootContent,
-		aggContent,
-		aggChildContent,
-	}
+	// VolumeSnapshot visibility-leaf: a self-contained namespaced node. Its CR name
+	// ("nss-vs-agg-pvc") addresses the leaf's own manifests/download subresource; its readable
+	// directory base is the captured PVC name ("pvc-agg") from status.sourceRef.
+	aggVS := snapObj{
+		apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot",
+		namespace: e2eNS, name: "nss-vs-agg-pvc", uid: "uid-agg-vs",
+		sourceRef: pvcSourceRefMap(e2eNS, "pvc-agg", "uid-agg-pvc"),
+		data:      pvcData(e2eNS, "pvc-agg", "uid-agg-pvc", "vsc-agg"),
+	}.build()
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(typed...).
-		WithObjects(aggSnap, aggVS).
+		WithObjects(root, aggSnap, aggVS).
 		Build()
 }
 

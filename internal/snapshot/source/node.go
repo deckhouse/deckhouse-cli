@@ -22,20 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
-	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 )
-
-// SpecSourceRef is the structured spec.sourceRef from a domain snapshot CR,
-// preserved so the import side can recreate the CR in import mode.
-// The namespace of the source object is implicit (same as the snapshot's namespace).
-type SpecSourceRef struct {
-	// APIVersion is the apiVersion of the source object.
-	APIVersion string
-	// Kind is the kind of the source object.
-	Kind string
-	// Name is the metadata.name of the source object.
-	Name string
-}
 
 // Node is one node in the resolved snapshot tree.
 //
@@ -43,15 +30,16 @@ type SpecSourceRef struct {
 // Cross-namespace references are structurally impossible: SnapshotChildRef carries
 // no namespace field, and the tree builder always fetches children in the root namespace.
 //
-// There are two flavours of node:
-//   - Snapshot nodes (Binding == nil): represent a snapshot CR in the tree hierarchy.
-//     They carry OwnDataRefs when the node owns its volume data directly (non-aggregator
-//     domain nodes such as DemoVirtualDiskSnapshot). When the node is an aggregator (has
-//     VolumeSnapshot visibility-leaf children), OwnDataRefs is nil and the data is
-//     represented by orphan leaf children in the Children slice.
-//   - Orphan leaf volume nodes (Binding != nil): represent one captured standalone PVC.
-//     Kind is always "VolumeSnapshot"; APIVersion is "snapshot.storage.k8s.io/v1".
-//     OwnDataRefs and Children are always nil. These are leaves in the tree.
+// Every node is built solely from the snapshot CR's own namespaced status
+// (status.sourceRef / status.data via ParseNodeStatus); the tree builder never reads
+// cluster-scoped SnapshotContent. There are two flavours of node:
+//   - Snapshot nodes: a snapshot CR in the tree hierarchy. A non-aggregator domain node
+//     (e.g. DemoVirtualDiskSnapshot) carries its own captured volume in Data; an aggregator
+//     (which has VolumeSnapshot visibility-leaf children) has Data == nil and exposes data
+//     through those leaf children.
+//   - Orphan leaf volume nodes: one captured standalone PVC. Kind is always "VolumeSnapshot";
+//     APIVersion is "snapshot.storage.k8s.io/v1"; Data holds the captured volume; Children is
+//     always nil.
 type Node struct {
 	// APIVersion is the apiVersion of the snapshot CR for this node
 	// (e.g. "state-snapshotter.deckhouse.io/v1alpha1" or a domain-specific group).
@@ -64,7 +52,7 @@ type Node struct {
 	Kind string
 
 	// Name is the metadata.name of the snapshot CR.
-	// For orphan leaf nodes it is the captured PVC name (dataRef.Target.Name).
+	// For orphan leaf nodes it is the captured VolumeSnapshot CR name.
 	Name string
 
 	// Namespace is the namespace of the snapshot CR.
@@ -74,46 +62,18 @@ type Node struct {
 	// UID is the metadata.uid of the snapshot CR. Together with APIVersion/Kind/Namespace/Name
 	// it forms the node's SnapshotIdentity (see identity.go), the basis for the resume key and
 	// the archive collision discriminator. The readable directory base is NOT derived from it
-	// (it comes from the source name; see §10 of the Stage 2 plan). Populated by the tree
-	// builder in Stage 2b.
+	// (it comes from the source name; see DirBaseName).
 	UID types.UID
+
+	// SourceRef is the identity of the original captured source object, parsed from the
+	// namespaced status.sourceRef (see ParseNodeStatus). It is the readable-directory base
+	// (SourceRef.Name) and the domain source identity persisted for import reconstruction.
+	// Nil when the CR has no status.sourceRef (e.g. some import-mode nodes).
+	SourceRef *SourceRefIdentity
 
 	// Data is the node's captured volume payload parsed from the namespaced status.data
 	// (Variant A: at most one per node), or nil for aggregators and manifest-only nodes.
-	// It is the source-based successor of OwnDataRefs/Binding; the tree builder populates it
-	// via ParseNodeStatus in Stage 2b, after which the legacy fields are removed.
 	Data *NodeData
-
-	// SourceRef is the value of the state-snapshotter.deckhouse.io/source-ref
-	// annotation on the snapshot CR. It records the identity of the original
-	// captured object. Empty when the annotation is absent (typically the root).
-	// For orphan leaf volume nodes it is set to the binding's TargetUID (the captured PVC UID).
-	// Resume identity and checksums use this raw value; directory naming uses SourceName.
-	SourceRef string
-
-	// SourceName is the .name field from the source-ref annotation, identifying
-	// the original captured object by its Kubernetes metadata.name.
-	// For domain snapshot nodes it is parsed from SourceRef (best-effort; empty on parse error).
-	// For orphan leaf volume nodes it is set to the captured PVC name (Binding.Target.Name).
-	// Empty for the root node (which carries no source-ref annotation).
-	SourceName string
-
-	// SpecSourceRef is the structured spec.sourceRef from a domain snapshot CR
-	// (apiVersion/kind/name of the source object). Set for domain snapshot nodes when the
-	// CR carries a spec.sourceRef; nil for core Snapshot nodes and CSI VolumeSnapshot
-	// leaf nodes (which do not need spec.sourceRef for import reconstruction).
-	SpecSourceRef *SpecSourceRef
-
-	// OwnDataRefs holds the volume-to-artifact bindings for this non-aggregator snapshot node.
-	// The volume data for each entry is downloaded directly into this node's directory.
-	// Nil for aggregator nodes (which expose their volumes through orphan leaf children)
-	// and nil for orphan leaf volume nodes (which use Binding instead).
-	OwnDataRefs []snapshotapi.SnapshotDataBinding
-
-	// Binding is non-nil for orphan leaf volume nodes only. It carries the SnapshotDataBinding
-	// resolved from the child SnapshotContent (the VolumeSnapshot's own bound content, Variant A).
-	// Modifications to the source content do not affect this copy.
-	Binding *snapshotapi.SnapshotDataBinding
 
 	// Parent is the parent node. Nil for the root.
 	Parent *Node
@@ -123,6 +83,36 @@ type Node struct {
 	// nodes (in VolumeSnapshot visibility-leaf ref order). Always nil for orphan leaf
 	// volume nodes (they are leaves).
 	Children []*Node
+}
+
+// Identity returns the node's structural SnapshotIdentity (apiVersion/kind/namespace/name/uid),
+// the basis for the resume key and the archive collision discriminator.
+func (n *Node) Identity() SnapshotIdentity {
+	return SnapshotIdentity{
+		APIVersion: n.APIVersion,
+		Kind:       n.Kind,
+		Namespace:  n.Namespace,
+		Name:       n.Name,
+		UID:        n.UID,
+	}
+}
+
+// IsVolumeLeaf reports whether this node is a CSI VolumeSnapshot visibility-leaf
+// (a captured standalone PVC exposed as a leaf child of an aggregator).
+func (n *Node) IsVolumeLeaf() bool {
+	return n.APIVersion == volumeSnapshotAPIVersion && n.Kind == "VolumeSnapshot"
+}
+
+// DirBaseName returns the human-readable base for this node's archive directory: the captured
+// source object name (status.sourceRef.name) when present, else the snapshot CR name. Uniqueness
+// and resume identity are NOT tied to this value — they use the node's SnapshotIdentity (incl UID)
+// via the collision discriminator (see archive.NodeDirName / resume identity).
+func (n *Node) DirBaseName() string {
+	if n.SourceRef != nil && n.SourceRef.Name != "" {
+		return n.SourceRef.Name
+	}
+
+	return n.Name
 }
 
 // Ref returns the aggregated-API node reference that addresses this node's own
@@ -142,7 +132,7 @@ func (n *Node) Ref() aggapi.NodeRef {
 // For domain snapshot nodes this is the node's own ref (its snapshot CR identity →
 // own ManifestCheckpoint).
 //
-// For orphan leaf volume nodes (Binding != nil) this is also the node's own ref:
+// For orphan leaf volume nodes this is also the node's own ref:
 // APIVersion=snapshot.storage.k8s.io/v1, Kind=VolumeSnapshot, Name=VS CR name. The
 // VolumeSnapshot connector (subresources.snapshot.storage.k8s.io) resolves this ref via
 // VolumeSnapshot.status.boundSnapshotContentName to the leaf's own child SnapshotContent

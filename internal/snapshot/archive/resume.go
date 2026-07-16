@@ -81,7 +81,11 @@ type NodeIdentity struct {
 	// with a user-supplied path and domain nodes without a source annotation).
 	DirName   string
 	Namespace string
-	SourceRef string
+	// UID is the snapshot CR's metadata.uid. It is the identity component that ties a
+	// directory to the exact snapshot CR (Variant A: readable dir base from source name,
+	// uniqueness/resume identity from the CR identity incl UID). matchesIdentity and the
+	// collision discriminator use it.
+	UID string
 }
 
 // NodeResumePlan is the result of scanning one planned node on disk.
@@ -121,8 +125,8 @@ func nodeDirComponent(id NodeIdentity) string {
 //
 // The directory name is derived from id.DirName (the source object name) when set,
 // falling back to id.Name (the CR name) for nodes without a source annotation.
-// Identity matching (matchesIdentity) still uses id.Name and id.SourceRef, which
-// are the values written into snapshot.yaml.
+// Identity matching (matchesIdentity) uses id.APIVersion/Kind/Name/Namespace/UID,
+// which are the values written into snapshot.yaml.
 //
 // Collision rule: if the primary directory is complete (VerifyNode passes) but
 // its stored identity does not match id, the primary directory belongs to a
@@ -378,7 +382,7 @@ func matchesIdentity(sy SnapshotYAML, id NodeIdentity) bool {
 		sy.Kind == id.Kind &&
 		sy.Name == id.Name &&
 		sy.Namespace == id.Namespace &&
-		sy.SourceRef == id.SourceRef
+		sy.UID == id.UID
 }
 
 // ErrIdentityMismatch is returned by ScanAbsolute when the target directory
@@ -459,7 +463,7 @@ type NodeIdentityMarker struct {
 	Kind       string `json:"kind"`
 	Name       string `json:"name"`
 	Namespace  string `json:"namespace,omitempty"`
-	SourceRef  string `json:"sourceRef,omitempty"`
+	UID        string `json:"uid,omitempty"`
 }
 
 // WriteNodeIdentityMarker writes the identity marker for id into dir, but ONLY
@@ -542,7 +546,7 @@ func markerFromIdentity(id NodeIdentity) NodeIdentityMarker {
 		Kind:       id.Kind,
 		Name:       id.Name,
 		Namespace:  id.Namespace,
-		SourceRef:  id.SourceRef,
+		UID:        id.UID,
 	}
 }
 
@@ -553,16 +557,18 @@ func markerMatchesIdentity(m NodeIdentityMarker, id NodeIdentity) bool {
 		m.Kind == id.Kind &&
 		m.Name == id.Name &&
 		m.Namespace == id.Namespace &&
-		m.SourceRef == id.SourceRef
+		m.UID == id.UID
 }
 
 // identityMarkerShort derives a stable short collision-suffix from a marker's
 // identity, used when a partial dir must be redirected but no node checksum
 // exists yet (snapshot.yaml is absent). The digest is over the identity fields
-// only, so it is deterministic across runs — a re-run redirects to the same path.
+// only (the snapshot CR identity incl UID — the canonical snapshot identity), so it
+// is deterministic across runs and distinct for two nodes sharing a source-name dir
+// base — a re-run redirects to the same path.
 func identityMarkerShort(m NodeIdentityMarker) string {
 	sum := sha256.Sum256([]byte(strings.Join(
-		[]string{m.APIVersion, m.Kind, m.Name, m.Namespace, m.SourceRef}, "\x00")))
+		[]string{m.APIVersion, m.Kind, m.Name, m.Namespace, m.UID}, "\x00")))
 
 	return ShortChecksum(fmt.Sprintf("%x", sum[:]))
 }

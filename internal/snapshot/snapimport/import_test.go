@@ -756,7 +756,8 @@ func buildThreeLevelArchive(t *testing.T) string {
 }
 
 // readyImportLeafVS returns a CSI VolumeSnapshot in import mode that the controller has
-// already bound, so waitLeafReady can read its status.boundSnapshotContentName.
+// already materialized to Ready, so waitLeafReady observes its own namespaced Ready
+// condition (no cluster-scoped SnapshotContent read).
 func readyImportLeafVS() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "snapshot.storage.k8s.io/v1",
@@ -766,20 +767,7 @@ func readyImportLeafVS() *unstructured.Unstructured {
 			"mode": "Import",
 		},
 		"status": map[string]interface{}{
-			"boundSnapshotContentName": "content-leaf",
-		},
-	}}
-}
-
-// readyLeafContent returns a SnapshotContent (for a single data-leaf import) with all
-// four readiness conditions True.
-func readyLeafContent() *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
-		"kind":       "SnapshotContent",
-		"metadata":   map[string]interface{}{"name": "content-leaf"},
-		"status": map[string]interface{}{
-			"conditions": readyConditions("ManifestsReady", "VolumesReady", "ChildrenReady", "Ready"),
+			"conditions": readyConditions("Ready"),
 		},
 	}}
 }
@@ -910,7 +898,7 @@ func TestRun_SelectedNode_SingleLeafWorks(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyImportLeafVS(), readyLeafContent())
+	dyn := newFakeDynamic(readyImportLeafVS())
 
 	cfg := baseConfig(leafDir, up, vol, dyn)
 	cfg.SelectedNodeKind = "VolumeSnapshot"

@@ -133,9 +133,8 @@ func Run(ctx context.Context, kubeClient client.Client, namespace, name string, 
 
 // toTreeViewNode maps a *source.Node and its descendants into a treeview.Node tree.
 //
-// The node label is "<Kind>/<Name>". Volume leaf labels are derived from OwnDataRefs
-// (non-aggregator domain nodes) or from Binding (orphan leaf nodes). Children are
-// recursed in order.
+// The node label is "<Kind>/<Name>". A node's volume label (if any) is its captured PVC
+// name from status.data (Variant A, ≤1 per node). Children are recursed in order.
 func toTreeViewNode(n *source.Node) treeview.Node {
 	tv := treeview.Node{
 		Label:    n.Kind + "/" + n.Name,
@@ -152,23 +151,13 @@ func toTreeViewNode(n *source.Node) treeview.Node {
 
 // volumeLabels returns the display strings for the volume entries of n.
 //
-// Orphan leaf nodes (Binding != nil) yield one label: the captured PVC name.
-// Non-aggregator domain nodes with OwnDataRefs yield one label per binding's target name.
-// Aggregator nodes and the root node without data yield no labels.
+// A node that captured its own volume (n.Data != nil) yields one label: the captured PVC
+// name (status.data.source.name). Aggregator nodes and the root node without data yield no
+// labels.
 func volumeLabels(n *source.Node) []string {
-	if n.Binding != nil {
-		return []string{n.Binding.Target.Name}
-	}
-
-	if len(n.OwnDataRefs) == 0 {
+	if n.Data == nil {
 		return nil
 	}
 
-	labels := make([]string, 0, len(n.OwnDataRefs))
-
-	for _, ref := range n.OwnDataRefs {
-		labels = append(labels, ref.Target.Name)
-	}
-
-	return labels
+	return []string{n.Data.Source.Name}
 }

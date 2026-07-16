@@ -27,7 +27,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
 )
@@ -38,9 +37,9 @@ import (
 // is handled transparently by WriteManifest.
 //
 // PersistentVolumeClaims are excluded in two cases:
-//   - Orphan leaf children (node.Children[i].Binding != nil): the captured PVC
+//   - Volume-leaf children (node.Children[i].IsVolumeLeaf()): the captured PVC
 //     manifest belongs in each leaf node's own manifests/ directory.
-//   - OwnDataRefs targets (node.OwnDataRefs[i].Target): the PVC data is already
+//   - The node's own captured volume (node.Data.Source): the PVC data is already
 //     captured in the volume payload (data.bin[.<ext>] or data.tar); the PVC
 //     identity is recorded in snapshot.yaml Volumes[].Target.
 //
@@ -57,7 +56,7 @@ func WriteNodeManifests(ctx context.Context, src source.ManifestSource, nodeDir 
 		return fmt.Errorf("fetch manifests for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
-	excluded := buildPVCExclusion(node.Children, node.OwnDataRefs)
+	excluded := buildPVCExclusion(node)
 
 	for _, obj := range objs {
 		if isExcludedDataRefPVC(obj, excluded) {
@@ -73,15 +72,15 @@ func WriteNodeManifests(ctx context.Context, src source.ManifestSource, nodeDir 
 }
 
 // WriteVolumeManifest fetches the manifests in the volume node's scope via src and
-// writes the single PVC that corresponds to the volume node's Binding.Target into
+// writes the single PVC that corresponds to the volume node's captured source into
 // <volumeDir>/manifests/persistentvolumeclaim_<name>.yaml.
 //
 // For orphan leaf volume nodes the captured PVC manifest lives in the parent
 // aggregator node's own manifests, so the scope ref is the parent ref (see
 // source.Node.ManifestScopeRef).
 //
-// The target PVC is matched by metadata.uid first (when both the binding's TargetUID
-// and the captured object's uid are non-empty); otherwise by metadata.name.
+// The target PVC is matched by metadata.uid first (when both the node's captured
+// source uid and the captured object's uid are non-empty); otherwise by metadata.name.
 //
 // Returns an error if the target PVC is not present in the fetched manifests.
 func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeDir string, volNode *source.Node) error {
@@ -94,9 +93,9 @@ func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeD
 
 	var targetUID, targetName string
 
-	if volNode.Binding != nil {
-		targetUID = volNode.Binding.TargetUID
-		targetName = volNode.Binding.Target.Name
+	if volNode.Data != nil {
+		targetUID = volNode.Data.Source.UID
+		targetName = volNode.Data.Source.Name
 	}
 
 	for _, obj := range objs {
@@ -117,9 +116,9 @@ func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeD
 // for the node are fully written.
 //
 // The snapshot.yaml Volumes list is populated as follows:
-//   - Orphan leaf volume nodes (node.Binding != nil): one VolumeInfo from Binding.
-//   - Non-aggregator snapshot nodes (node.OwnDataRefs non-empty): one VolumeInfo
-//     per OwnDataRef binding.
+//   - Nodes that captured their own volume (node.Data != nil): one VolumeInfo from
+//     status.data (Variant A, cardinality ≤1) — covers both non-aggregator domain nodes
+//     and orphan leaf volume nodes.
 //   - All other nodes (aggregators and manifest-only): Volumes is nil (omitted).
 //
 // The Volumes field does not affect ComputeNodeChecksum because snapshot.yaml is
@@ -152,9 +151,9 @@ func FinalizeNode(nodeDir string, node *source.Node) error {
 		Kind:            node.Kind,
 		Name:            node.Name,
 		Namespace:       node.Namespace,
-		SourceRef:       node.SourceRef,
-		SourceName:      node.SourceName,
-		SourceObjectRef: buildSourceObjectRef(node.SpecSourceRef),
+		UID:             string(node.UID),
+		SourceName:      sourceObjectName(node.SourceRef),
+		SourceObjectRef: buildSourceObjectRef(node.SourceRef),
 		Checksum:        checksum,
 		Volumes:         buildVolumesList(node),
 	}
@@ -172,94 +171,81 @@ func FinalizeNode(nodeDir string, node *source.Node) error {
 }
 
 // buildVolumesList constructs the Volumes list for snapshot.yaml from a node.
-// Returns nil (omitted) when the node owns no volumes.
+// Returns nil (omitted) when the node captured no volume.
 func buildVolumesList(node *source.Node) []archive.VolumeInfo {
-	// Orphan leaf volume node: single Binding.
-	if node.Binding != nil {
-		return []archive.VolumeInfo{bindingToVolumeInfo(node.Binding)}
-	}
-
-	// Non-aggregator snapshot node: one entry per OwnDataRef.
-	if len(node.OwnDataRefs) == 0 {
+	if node.Data == nil {
 		return nil
 	}
 
-	vols := make([]archive.VolumeInfo, len(node.OwnDataRefs))
-	for i := range node.OwnDataRefs {
-		vols[i] = bindingToVolumeInfo(&node.OwnDataRefs[i])
-	}
-
-	return vols
+	return []archive.VolumeInfo{nodeDataToVolumeInfo(node.Data)}
 }
 
-// bindingToVolumeInfo converts a SnapshotDataBinding to a VolumeInfo. The volume metadata
-// (volumeMode/storageClassName/size) is carried through so the import side can rebuild the
-// DataImport spec for a Mode A re-import without re-reading the live SnapshotContent.
-func bindingToVolumeInfo(b *snapshotapi.SnapshotDataBinding) archive.VolumeInfo {
+// nodeDataToVolumeInfo converts a namespaced status.data descriptor to a VolumeInfo. The
+// volume metadata (volumeMode/storageClassName/size) is carried through so the import side
+// can rebuild the DataImport spec for a re-import without re-reading the live cluster state.
+func nodeDataToVolumeInfo(d *source.NodeData) archive.VolumeInfo {
 	return archive.VolumeInfo{
 		Target: archive.VolumeObjectRef{
-			APIVersion: b.Target.APIVersion,
-			Kind:       b.Target.Kind,
-			Name:       b.Target.Name,
-			Namespace:  b.Target.Namespace,
-			UID:        string(b.Target.UID),
+			APIVersion: d.Source.APIVersion,
+			Kind:       d.Source.Kind,
+			Name:       d.Source.Name,
+			Namespace:  d.Source.Namespace,
+			UID:        d.Source.UID,
 		},
 		Artifact: archive.VolumeObjectRef{
-			APIVersion: b.Artifact.APIVersion,
-			Kind:       b.Artifact.Kind,
-			Name:       b.Artifact.Name,
+			APIVersion: d.Artifact.APIVersion,
+			Kind:       d.Artifact.Kind,
+			Name:       d.Artifact.Name,
 		},
-		VolumeMode:       b.VolumeMode,
-		StorageClassName: b.StorageClassName,
-		Size:             b.Size,
+		VolumeMode:       d.VolumeMode,
+		StorageClassName: d.StorageClassName,
+		Size:             d.Size,
 	}
 }
 
 // dataRefExclusion holds PVC identifiers to skip when writing snapshot node manifests.
-// It covers orphan leaf child PVCs (written into the leaf's own manifests/ dir) and
-// OwnDataRef target PVCs (whose data is captured in the volume payload).
+// It covers volume-leaf child PVCs (written into the leaf's own manifests/ dir) and the
+// node's own captured PVC (whose data is captured in the volume payload).
 type dataRefExclusion struct {
 	uids  map[string]struct{}
 	names map[string]struct{}
 }
 
-// buildPVCExclusion constructs an exclusion set from both orphan leaf volume children
-// (child.Binding != nil) and OwnDataRef bindings. PVCs in either category must not be
-// written into the owning node's manifests/ directory.
-func buildPVCExclusion(children []*source.Node, ownDataRefs []snapshotapi.SnapshotDataBinding) dataRefExclusion {
-	cap := len(children) + len(ownDataRefs)
+// buildPVCExclusion constructs an exclusion set from the node's own captured volume
+// (node.Data) and its volume-leaf children (child.IsVolumeLeaf()). PVCs in either category
+// must not be written into the owning node's manifests/ directory. Domain snapshot children
+// keep their own captured PVCs in their own directories and are not excluded here.
+func buildPVCExclusion(node *source.Node) dataRefExclusion {
 	ex := dataRefExclusion{
-		uids:  make(map[string]struct{}, cap),
-		names: make(map[string]struct{}, cap),
+		uids:  make(map[string]struct{}, len(node.Children)+1),
+		names: make(map[string]struct{}, len(node.Children)+1),
 	}
 
-	for _, child := range children {
-		if child.Binding == nil {
-			continue
-		}
+	addDataExclusion(&ex, node.Data)
 
-		if child.Binding.TargetUID != "" {
-			ex.uids[child.Binding.TargetUID] = struct{}{}
-		}
-
-		if child.Binding.Target.Name != "" {
-			ex.names[child.Binding.Target.Name] = struct{}{}
-		}
-	}
-
-	for i := range ownDataRefs {
-		b := &ownDataRefs[i]
-
-		if b.TargetUID != "" {
-			ex.uids[b.TargetUID] = struct{}{}
-		}
-
-		if b.Target.Name != "" {
-			ex.names[b.Target.Name] = struct{}{}
+	for _, child := range node.Children {
+		if child.IsVolumeLeaf() {
+			addDataExclusion(&ex, child.Data)
 		}
 	}
 
 	return ex
+}
+
+// addDataExclusion records the captured PVC identity (uid and name) of d into ex.
+// A nil descriptor is a no-op.
+func addDataExclusion(ex *dataRefExclusion, d *source.NodeData) {
+	if d == nil {
+		return
+	}
+
+	if d.Source.UID != "" {
+		ex.uids[d.Source.UID] = struct{}{}
+	}
+
+	if d.Source.Name != "" {
+		ex.names[d.Source.Name] = struct{}{}
+	}
 }
 
 // isExcludedDataRefPVC returns true when obj is a PersistentVolumeClaim that matches
@@ -297,9 +283,11 @@ func matchesVolumeTarget(obj unstructured.Unstructured, targetUID, targetName st
 	return targetName != "" && obj.GetName() == targetName
 }
 
-// buildSourceObjectRef maps a source.SpecSourceRef to an archive.SourceObjectRef.
-// Returns nil when src is nil (core Snapshot and VolumeSnapshot leaf nodes).
-func buildSourceObjectRef(src *source.SpecSourceRef) *archive.SourceObjectRef {
+// buildSourceObjectRef maps the node's namespaced status.sourceRef identity to an
+// archive.SourceObjectRef (apiVersion/kind/name of the captured source object), persisted so
+// the import side can recreate the CR in import mode. Returns nil when the node has no
+// status.sourceRef.
+func buildSourceObjectRef(src *source.SourceRefIdentity) *archive.SourceObjectRef {
 	if src == nil {
 		return nil
 	}
@@ -309,4 +297,14 @@ func buildSourceObjectRef(src *source.SpecSourceRef) *archive.SourceObjectRef {
 		Kind:       src.Kind,
 		Name:       src.Name,
 	}
+}
+
+// sourceObjectName returns the captured source object's name (status.sourceRef.name),
+// or "" when the node has no status.sourceRef. Recorded in snapshot.yaml for readability.
+func sourceObjectName(src *source.SourceRefIdentity) string {
+	if src == nil {
+		return ""
+	}
+
+	return src.Name
 }
