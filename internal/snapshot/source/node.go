@@ -73,7 +73,9 @@ type Node struct {
 
 	// UID is the metadata.uid of the snapshot CR. Together with APIVersion/Kind/Namespace/Name
 	// it forms the node's SnapshotIdentity (see identity.go), the basis for the resume key and
-	// the archive directory name. Populated by the tree builder in Stage 2b.
+	// the archive collision discriminator. The readable directory base is NOT derived from it
+	// (it comes from the source name; see §10 of the Stage 2 plan). Populated by the tree
+	// builder in Stage 2b.
 	UID types.UID
 
 	// Data is the node's captured volume payload parsed from the namespaced status.data

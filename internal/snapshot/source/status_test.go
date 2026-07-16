@@ -98,6 +98,22 @@ func TestParseNodeStatus_Valid(t *testing.T) {
 	}
 }
 
+func TestParseNodeStatus_NamespaceSourceRefWithoutNamespaceOK(t *testing.T) {
+	// The root capture-Snapshot's source is the cluster-scoped Namespace: sourceRef legitimately
+	// carries no namespace (only apiVersion/kind/name/uid).
+	_, src, _, err := ParseNodeStatus(node(map[string]interface{}{
+		"sourceRef": map[string]interface{}{
+			"apiVersion": "v1", "kind": "Namespace", "name": "my-app", "uid": "ns-uid",
+		},
+	}))
+	if err != nil {
+		t.Fatalf("v1/Namespace sourceRef without namespace must be accepted, got: %v", err)
+	}
+	if src == nil || src.Kind != "Namespace" || src.Namespace != "" || src.UID != "ns-uid" {
+		t.Errorf("namespace sourceRef not decoded as expected: %+v", src)
+	}
+}
+
 func TestParseNodeStatus_FailClosed(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -107,8 +123,11 @@ func TestParseNodeStatus_FailClosed(t *testing.T) {
 		{"sourceRef missing kind", map[string]interface{}{"sourceRef": map[string]interface{}{
 			"apiVersion": "v1", "name": "x", "namespace": "ns",
 		}}},
-		{"sourceRef missing namespace", map[string]interface{}{"sourceRef": map[string]interface{}{
+		{"sourceRef PVC missing namespace", map[string]interface{}{"sourceRef": map[string]interface{}{
 			"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "x", "uid": "u",
+		}}},
+		{"sourceRef domain kind missing namespace", map[string]interface{}{"sourceRef": map[string]interface{}{
+			"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1", "kind": "DemoVirtualDisk", "name": "x", "uid": "u",
 		}}},
 		{"sourceRef missing uid", map[string]interface{}{"sourceRef": map[string]interface{}{
 			"apiVersion": "v1", "kind": "PersistentVolumeClaim", "namespace": "ns", "name": "x",
@@ -131,6 +150,47 @@ func TestParseNodeStatus_FailClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, _, _, err := ParseNodeStatus(node(tc.status)); err == nil {
 				t.Errorf("expected error for %q, got nil", tc.name)
+			}
+		})
+	}
+}
+
+func TestParseNodeStatus_IdentityFailClosed(t *testing.T) {
+	// The node's own identity feeds resume/checksum/collision, so an incomplete one must fail
+	// even when status.sourceRef/status.data are absent (fragments alone can't rescue it).
+	full := map[string]interface{}{
+		"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"kind":       "DemoVirtualDiskSnapshot",
+		"namespace":  "ns",
+		"name":       "dvd-1",
+		"uid":        "snap-uid",
+	}
+
+	cases := []struct {
+		name string
+		drop string
+	}{
+		{"missing uid", "uid"},
+		{"missing namespace", "namespace"},
+		{"missing name", "name"},
+		{"missing kind", "kind"},
+		{"missing apiVersion", "apiVersion"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := map[string]interface{}{"namespace": full["namespace"], "name": full["name"], "uid": full["uid"]}
+			delete(meta, tc.drop)
+			obj := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": full["apiVersion"],
+				"kind":       full["kind"],
+				"metadata":   meta,
+			}}
+			if tc.drop == "apiVersion" || tc.drop == "kind" {
+				delete(obj.Object, tc.drop)
+			}
+			if _, _, _, err := ParseNodeStatus(obj); err == nil {
+				t.Errorf("expected error for incomplete identity (%s), got nil", tc.name)
 			}
 		})
 	}
