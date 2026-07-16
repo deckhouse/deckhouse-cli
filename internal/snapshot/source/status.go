@@ -69,9 +69,11 @@ type NodeData struct {
 // It is fail-closed: an absent status.sourceRef or status.data is allowed (returns nil), but a
 // present-yet-malformed fragment is a hard error (never silently treated as "no data"). Both
 // fragments must be JSON objects with their required identity fields set; status.data.size, when
-// present, must parse as a quantity. UID completeness (source.uid, artifact.uid) is enforced by
-// the data path (RequireNodeData) on a Ready node, not here, since the core fills uid
-// best-effort and it may be absent on an intermediate object.
+// present, must parse as a quantity. status.sourceRef is a full provenance identity, so its uid is
+// REQUIRED here — every status.sourceRef example in the contract carries {apiVersion,kind,name,
+// namespace,uid} (unlike the lighter spec.sourceRef). The data leg's completeness
+// (status.data.source.uid, artifact identity) is enforced separately by the data path
+// (RequireNodeData) on a Ready node.
 func ParseNodeStatus(obj *unstructured.Unstructured) (SnapshotIdentity, *SourceRefIdentity, *NodeData, error) {
 	ident := SnapshotIdentity{
 		APIVersion: obj.GetAPIVersion(),
@@ -129,8 +131,8 @@ func parseStatusSourceRef(obj *unstructured.Unstructured) (*SourceRefIdentity, e
 		return nil, fmt.Errorf("%s: decode status.sourceRef: %w", objRefString(obj), err)
 	}
 
-	if id.APIVersion == "" || id.Kind == "" || id.Name == "" {
-		return nil, fmt.Errorf("%s: status.sourceRef is incomplete (apiVersion/kind/name required)", objRefString(obj))
+	if id.APIVersion == "" || id.Kind == "" || id.Name == "" || id.UID == "" {
+		return nil, fmt.Errorf("%s: status.sourceRef is incomplete (apiVersion/kind/name/uid required)", objRefString(obj))
 	}
 	if id.Namespace == "" {
 		return nil, fmt.Errorf("%s: status.sourceRef.namespace is required (Stage 2 supports only namespaced source kinds)", objRefString(obj))
