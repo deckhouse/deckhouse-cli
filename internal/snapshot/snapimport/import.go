@@ -35,6 +35,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
+	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 )
 
 const (
@@ -285,7 +286,12 @@ func preflightNamespace(ctx context.Context, cfg Config, plan []PlannedNode) err
 			return fmt.Errorf("checking namespace for %s/%s: %w", node.Kind, node.Name, getErr)
 		}
 
-		if !isImportModeMarker(obj) {
+		imp, markerErr := isImportModeMarker(obj)
+		if markerErr != nil {
+			return markerErr
+		}
+
+		if !imp {
 			conflicts = append(conflicts, fmt.Sprintf("%s %s", node.Kind, node.Name))
 		}
 	}
@@ -320,7 +326,7 @@ func (cfg Config) resourceInterface(mapping *meta.RESTMapping) dynamic.ResourceI
 
 // createMarkers creates every import-mode CR top-down (reverse post-order = parents before
 // children) so a child's parent already exists and exposes a UID. Every marker is the same
-// minimal spec.source.import: {} CR; for data leaves the DataImport itself is created bottom-up
+// minimal spec.mode: Import CR; for data leaves the DataImport itself is created bottom-up
 // in pass 2 immediately before the upload (so its idle TTL does not start ticking while earlier
 // siblings are still uploading) and is later matched to the leaf by its targetRef.
 func (cfg Config) createMarkers(ctx context.Context, plan []PlannedNode, parents map[string]int) error {
@@ -534,21 +540,46 @@ func (cfg Config) ensureMarker(ctx context.Context, obj *unstructured.Unstructur
 // that merely shares the name) so importing into a populated namespace cannot mutate live
 // production objects; only then does it reconcile the child->parent ownerRefs.
 func reconcileExistingMarker(ctx context.Context, ri dynamic.ResourceInterface, existing *unstructured.Unstructured, desired []metav1.OwnerReference) (types.UID, error) {
-	if !isImportModeMarker(existing) {
+	imp, err := isImportModeMarker(existing)
+	if err != nil {
+		return "", err
+	}
+
+	if !imp {
 		return "", fmt.Errorf("%s %s/%s already exists and is not in import mode "+
-			"(spec.source.import is not set); refusing to mutate a pre-existing "+
-			"object — import into a fresh namespace", existing.GetKind(), existing.GetNamespace(), existing.GetName())
+			"(spec.mode is not %q); refusing to mutate a pre-existing "+
+			"object — import into a fresh namespace",
+			existing.GetKind(), existing.GetNamespace(), existing.GetName(), snapshotapi.SnapshotModeImport)
 	}
 
 	return reconcileMarkerOwnerRefs(ctx, ri, existing, desired)
 }
 
-// isImportModeMarker reports whether a live CR is an import-mode marker. All node kinds use
-// the unified marker spec.source.import: {}, so its mere presence identifies an import-mode CR.
-func isImportModeMarker(obj *unstructured.Unstructured) bool {
-	_, found, _ := unstructured.NestedMap(obj.Object, "spec", "source", "import")
+// isImportModeMarker reports whether a live CR is an import-mode marker. Import mode is keyed
+// off spec.mode: absent or "Capture" is capture mode (not an import marker); "Import" is an
+// import marker. It is fail-closed: any other value, or a non-string spec.mode, is a malformed
+// object and returns an error rather than being silently classified as capture mode.
+func isImportModeMarker(obj *unstructured.Unstructured) (bool, error) {
+	mode, found, err := unstructured.NestedString(obj.Object, "spec", "mode")
+	if err != nil {
+		return false, fmt.Errorf("%s %s/%s: spec.mode is not a string: %w",
+			obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
+	}
 
-	return found
+	if !found || mode == "" {
+		return false, nil
+	}
+
+	switch snapshotapi.SnapshotMode(mode) {
+	case snapshotapi.SnapshotModeCapture:
+		return false, nil
+	case snapshotapi.SnapshotModeImport:
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s %s/%s: spec.mode %q is invalid (want %q or %q)",
+			obj.GetKind(), obj.GetNamespace(), obj.GetName(), mode,
+			snapshotapi.SnapshotModeCapture, snapshotapi.SnapshotModeImport)
+	}
 }
 
 // reconcileMarkerOwnerRefs patches any desired child->parent ownerRef a previous partial

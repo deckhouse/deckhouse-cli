@@ -88,9 +88,22 @@ func (s *SnapshotList) DeepCopyObject() runtime.Object {
 	return out
 }
 
+// SnapshotMode selects a snapshot's lifecycle. An absent mode is treated as Capture (the
+// server default), so consumers MUST distinguish "unset" from an unknown non-empty value.
+type SnapshotMode string
+
+const (
+	// SnapshotModeCapture is the default: the snapshot captures live cluster state.
+	SnapshotModeCapture SnapshotMode = "Capture"
+	// SnapshotModeImport marks a snapshot the CLI reconstructs from a downloaded archive.
+	SnapshotModeImport SnapshotMode = "Import"
+)
+
 // SnapshotSpec describes the desired snapshot configuration.
 type SnapshotSpec struct {
-	SnapshotClassName string `json:"snapshotClassName,omitempty"`
+	// Mode selects Capture (default when empty) or Import. It replaces the removed
+	// snapshotClassName field, which is not part of the unified contract.
+	Mode SnapshotMode `json:"mode,omitempty"`
 }
 
 // SnapshotStatus carries the latest observations for a Snapshot.

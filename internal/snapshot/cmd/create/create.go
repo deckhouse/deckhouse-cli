@@ -42,14 +42,13 @@ import (
 const (
 	cmdUse = "create"
 
-	flagNamespace     = "namespace"
-	flagSnapshotClass = "snapshot-class"
-	flagSelector      = "selector"
-	flagWait          = "wait"
-	flagTimeout       = "timeout"
-	flagOutput        = "output"
-	flagKubeconfig    = "kubeconfig"
-	flagContext       = "context"
+	flagNamespace  = "namespace"
+	flagSelector   = "selector"
+	flagWait       = "wait"
+	flagTimeout    = "timeout"
+	flagOutput     = "output"
+	flagKubeconfig = "kubeconfig"
+	flagContext    = "context"
 
 	// readyConditionType is the status condition reporting overall Snapshot
 	// readiness; it matches the type used by list/restore.
@@ -69,14 +68,13 @@ var snapshotGVR = schema.GroupVersionResource{
 // createOptions bundles the resolved inputs for one create run so the cluster
 // logic stays decoupled from cobra flag plumbing (and unit-testable).
 type createOptions struct {
-	namespace     string
-	name          string
-	snapshotClass string
-	matchLabels   map[string]interface{}
-	wait          bool
-	timeout       time.Duration
-	poll          time.Duration
-	outputFmt     string
+	namespace   string
+	name        string
+	matchLabels map[string]interface{}
+	wait        bool
+	timeout     time.Duration
+	poll        time.Duration
+	outputFmt   string
 }
 
 // NewCommand builds the `d8 snapshot create` cobra command.
@@ -113,7 +111,6 @@ to block until it reports Ready, after which it can be listed, downloaded, and i
 	flags.AddPersistentFlags(cmd)
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "namespace to create the Snapshot in (defaults to the kubeconfig context namespace)")
-	cmd.Flags().String(flagSnapshotClass, "", "SnapshotClass name to set on spec.snapshotClassName (optional)")
 	cmd.Flags().StringP(flagSelector, "l", "", "capture only objects matching this label selector (e.g. app=demo,tier=db); sets spec.resourceSelector.matchLabels")
 	cmd.Flags().Bool(flagWait, false, "wait until the Snapshot reports Ready")
 	cmd.Flags().Duration(flagTimeout, defaultWaitTimeout, "timeout for --wait")
@@ -170,11 +167,6 @@ func resolveOptions(cmd *cobra.Command, name string) (createOptions, error) {
 		}
 	}
 
-	snapshotClass, err := cmd.Flags().GetString(flagSnapshotClass)
-	if err != nil {
-		return createOptions{}, fmt.Errorf("reading --%s flag: %w", flagSnapshotClass, err)
-	}
-
 	selector, err := cmd.Flags().GetString(flagSelector)
 	if err != nil {
 		return createOptions{}, fmt.Errorf("reading --%s flag: %w", flagSelector, err)
@@ -196,21 +188,20 @@ func resolveOptions(cmd *cobra.Command, name string) (createOptions, error) {
 	}
 
 	return createOptions{
-		namespace:     namespace,
-		name:          name,
-		snapshotClass: snapshotClass,
-		matchLabels:   matchLabels,
-		wait:          wait,
-		timeout:       timeout,
-		poll:          pollInterval,
-		outputFmt:     outputFmt,
+		namespace:   namespace,
+		name:        name,
+		matchLabels: matchLabels,
+		wait:        wait,
+		timeout:     timeout,
+		poll:        pollInterval,
+		outputFmt:   outputFmt,
 	}, nil
 }
 
 // runCreate creates the Snapshot via the dynamic client and, when requested,
 // waits for it to become Ready before rendering the result.
 func runCreate(ctx context.Context, dyn dynamic.Interface, w io.Writer, opts createOptions, log *slog.Logger) error {
-	obj := buildSnapshot(opts.namespace, opts.name, opts.snapshotClass, opts.matchLabels)
+	obj := buildSnapshot(opts.namespace, opts.name, opts.matchLabels)
 
 	created, err := dyn.Resource(snapshotGVR).Namespace(opts.namespace).Create(ctx, obj, metav1.CreateOptions{})
 	if err != nil {
@@ -236,14 +227,12 @@ func runCreate(ctx context.Context, dyn dynamic.Interface, w io.Writer, opts cre
 	return renderCreated(w, created, opts.outputFmt)
 }
 
-// buildSnapshot assembles the unstructured Snapshot to create. An empty spec
-// captures the whole namespace; snapshotClass and matchLabels are added only
-// when set so old CRDs do not see unknown empty fields.
-func buildSnapshot(namespace, name, snapshotClass string, matchLabels map[string]interface{}) *unstructured.Unstructured {
-	spec := map[string]interface{}{}
-
-	if snapshotClass != "" {
-		spec["snapshotClassName"] = snapshotClass
+// buildSnapshot assembles the unstructured Snapshot to create. spec.mode is always set to
+// Capture (the unified contract's create intent); matchLabels narrows the captured set when
+// a selector is given, and an omitted selector captures the whole namespace.
+func buildSnapshot(namespace, name string, matchLabels map[string]interface{}) *unstructured.Unstructured {
+	spec := map[string]interface{}{
+		"mode": string(snapshotapi.SnapshotModeCapture),
 	}
 
 	if len(matchLabels) > 0 {
