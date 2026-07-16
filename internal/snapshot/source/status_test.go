@@ -108,7 +108,10 @@ func TestParseNodeStatus_FailClosed(t *testing.T) {
 			"apiVersion": "v1", "name": "x", "namespace": "ns",
 		}}},
 		{"sourceRef missing namespace", map[string]interface{}{"sourceRef": map[string]interface{}{
-			"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "x",
+			"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "x", "uid": "u",
+		}}},
+		{"sourceRef missing uid", map[string]interface{}{"sourceRef": map[string]interface{}{
+			"apiVersion": "v1", "kind": "PersistentVolumeClaim", "namespace": "ns", "name": "x",
 		}}},
 		{"data not an object", map[string]interface{}{"data": "oops"}},
 		{"data missing source", map[string]interface{}{"data": map[string]interface{}{

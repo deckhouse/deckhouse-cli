@@ -568,9 +568,20 @@ VCR-reason, попадающий в `TargetFailed`, — free-form → прове
   `source.NodeData` (`source`/`artifact`/…, поле `Source` переиспользует
   `SourceRefIdentity`), аддитивно, не трогая устаревший тип и downstream. Миграция
   `tree.go`/downstream на `NodeData` и удаление устаревшего типа — в **2b**.
-- **`status.sourceRef` = `SnapshotSourceObjectRef`** `{apiVersion,kind,name,namespace?,uid?}`
-  — совпадает с CLI `SourceRefIdentity`; `uid` best-effort (обязателен только на Ready-узле,
-  проверяется в `RequireNodeData`, не в общем парсере).
+- **`status.sourceRef` = `SnapshotSourceObjectRef`** `{apiVersion,kind,name,namespace,uid}`
+  — совпадает с CLI `SourceRefIdentity`. `uid` **нормативен и обязателен** в `ParseNodeStatus`:
+  все YAML-примеры `status.sourceRef` в `2.md` (стр. 61-66, 95-99, 169-174, 236-241, 301-306,
+  769-774) содержат `uid` (и `namespace`), в отличие от облегчённого `spec.sourceRef`
+  `{apiVersion,kind,name}`. Полнота data-ноги (`status.data.source.uid`, artifact) проверяется
+  отдельно в `RequireNodeData` на Ready-узле.
+- **Layout каталогов архива не меняется в 0/2a.** Текущая схема (инвентаризация):
+  `archive.NodeDirName(kind,name)` = `<kindlower>_<name>` (`names.go:166`), где `name` =
+  `node.SourceName` c fallback `node.Name` (`pipeline.go:673-679`, `1266-1268`); коллизии —
+  суффикс `__<short>` (`writer.go:37`); корень — пользовательский путь (`ScanAbsolute`).
+  Новый `source.ArchiveNodeDirName` (`<kindlower>-<name>-<hash8>`) **расходится** с этой схемой
+  и пока **никуда не подключён**. Подключать/выравнивать его — это решение по сохранению layout,
+  которое принимается на ревью **перед 2b** (варианты: сохранить `<kindlower>_<name>` +
+  `__<short>` как есть, либо перейти на identity-based имя).
 - **`Node.UID` и `Node.Data`** добавлены аддитивно (legacy `OwnDataRefs`/`Binding` остаются
   до 2b, где заменяются на `Data`).
 - **`VolumesReady → DataReady` перенесено в 2b.** Константа `condVolumesReady` и
