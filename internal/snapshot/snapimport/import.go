@@ -719,10 +719,22 @@ func (cfg Config) domainLeafResource(leaf PlannedNode) (schema.GroupVersionResou
 	return mapping.Resource, nil
 }
 
-// waitNamespacedReady polls the namespaced CR gvr/name until its status.conditions Ready is
-// True. It is the single readiness gate for import: the aggregated Ready condition on the
-// snapshot CR reflects the whole imported (sub)tree, and no cluster-scoped SnapshotContent is
-// ever read. kind is used only for log/error messages.
+// waitNamespacedReady polls the namespaced CR gvr/name and applies the readiness contract
+// established by read-only analysis of state-snapshotter / storage-foundation (see
+// docs/2026-06-29-unified-snapshots-overview.md and the stage-2 plan, §5.B / Appendix A):
+//
+//   - Ready.status == True                                   -> success.
+//   - captureState.domainSpecificController.phase == Failed  -> immediate error (monotonic
+//     terminal sink on the capture path; the domain reason is free-form and shown as-is).
+//   - Ready.status == False AND reason is terminal
+//     (terminalReadyReasons: enum + import-leaf terminals)   -> immediate error.
+//   - anything else (Ready absent / False with a non-terminal reason such as ImportPending,
+//     ChildrenPending, DataCapturePending, … / Unknown)      -> keep waiting until timeout.
+//
+// Ready=False is NOT an error by itself: the controller uses it for both in-progress and
+// terminal states, distinguished by reason/phase. The aggregated Ready on the snapshot CR
+// reflects the whole imported (sub)tree, so a single namespaced Get per poll is sufficient
+// and no cluster-scoped SnapshotContent is ever read. kind is used only for log/error text.
 func waitNamespacedReady(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, name, kind string) error {
 	cfg.Log.Info("waiting for resource to become Ready",
 		slog.String("kind", kind),
@@ -736,14 +748,30 @@ func waitNamespacedReady(ctx context.Context, cfg Config, gvr schema.GroupVersio
 			return fmt.Errorf("get %s %s/%s: %w", kind, cfg.Namespace, name, err)
 		}
 
-		if conditionTrue(obj, conditionReady) {
+		status, reason, message := readyConditionState(obj)
+
+		if status == string(metav1.ConditionTrue) {
 			cfg.Log.Info("resource is Ready", slog.String("kind", kind), slog.String("name", name))
 
 			return nil
 		}
 
+		// Terminal capture sink: fail fast instead of waiting out the timeout. Absent on
+		// import-mode objects (no captureState), so this is a no-op for the import path.
+		if domainCapturePhase(obj) == capturePhaseFailed {
+			return fmt.Errorf("%s %s/%s failed: captureState.domainSpecificController.phase=Failed (Ready reason=%q: %s)",
+				kind, cfg.Namespace, name, reason, message)
+		}
+
+		// Terminal Ready reason (enum + import-leaf terminals): fail fast.
+		if status == string(metav1.ConditionFalse) && isTerminalReadyReason(reason) {
+			return fmt.Errorf("%s %s/%s failed: Ready=False reason=%q: %s",
+				kind, cfg.Namespace, name, reason, message)
+		}
+
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for %s %s/%s to become Ready", kind, cfg.Namespace, name)
+			return fmt.Errorf("timeout waiting for %s %s/%s to become Ready (last Ready status=%q reason=%q: %s)",
+				kind, cfg.Namespace, name, status, reason, message)
 		}
 
 		if !sleepCtx(ctx, cfg.PollInterval) {
