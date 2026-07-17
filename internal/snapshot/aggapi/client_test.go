@@ -83,9 +83,10 @@ func TestIsVolumeSnapshotLeaf(t *testing.T) {
 	}
 }
 
-// TestDownloadPath verifies that manifests-download is always served by the core
-// subresources group for non-leaf nodes, and by the VS-connector group for CSI
-// VolumeSnapshot leaves.
+// TestDownloadPath verifies that manifests-download is addressed through the node's OWN
+// aggregated subresource group (symmetric to restore): the core group for the core Snapshot,
+// the domain-prefixed group for domain snapshot CRs (the domain apiserver proxies to the core
+// content layer), and the VS-connector group for CSI VolumeSnapshot leaves.
 func TestDownloadPath(t *testing.T) {
 	c := NewClient(nil, testMapper())
 
@@ -100,9 +101,9 @@ func TestDownloadPath(t *testing.T) {
 			want: "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/my-snap/manifests-download",
 		},
 		{
-			name: "domain snapshot still uses core group",
+			name: "domain snapshot uses its own domain group",
 			ref:  NodeRef{APIVersion: "demo.deckhouse.io/v1alpha1", Kind: "VirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"},
-			want: "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/virtualdisksnapshots/vds-1/manifests-download",
+			want: "/apis/subresources.demo.deckhouse.io/v1alpha1/namespaces/ns/virtualdisksnapshots/vds-1/manifests-download",
 		},
 		{
 			name: "csi volume snapshot leaf uses vs-connector group",
@@ -290,9 +291,10 @@ func TestResourceFor_NoMapper(t *testing.T) {
 // fast here.
 //
 // Server contract summary (verified against state-snapshotter source):
-//   - manifests-download (GET): core group for Snapshot+domain, VS-connector for VS leaf.
-//     Every path is addressed by the node's own namespaced CR — the CLI never reads
-//     cluster-scoped snapshotcontents; restore_handler.go SetupRoutes.
+//   - manifests-download (GET): core group for Snapshot; domain-prefixed group for domain CRs
+//     (domainapi proxies to the core content layer); VS-connector for VS leaf. Every path is
+//     addressed by the node's own namespaced CR — the CLI never reads cluster-scoped
+//     snapshotcontents; restore_handler.go SetupRoutes + domainapi/handler.go.
 //   - manifests-with-data-restoration (GET): core group for Snapshot; domain-prefixed
 //     group for domain CRs (domainapi/handler.go, GET-only); VS-connector for VS leaf.
 //   - manifests-and-children-refs-upload (POST): CORE group for Snapshot AND domain CRs
@@ -318,11 +320,11 @@ func TestAggregatedAPIContract(t *testing.T) {
 			wantPath:   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/snap-1/manifests-download",
 			wantMethod: http.MethodGet,
 		},
-		// restore_handler.go routeGenericSnapshotSubresource -> HandleGenericSnapshotManifestsDownload
+		// domainapi/handler.go NodeManifestsDownload (proxy to core content layer), GET-only
 		{
-			name:       "domain CR: manifests-download -> core group",
+			name:       "domain CR: manifests-download -> domain group (proxy)",
 			pathFn:     func(c *Client) (string, error) { return c.downloadPath(domainRef) },
-			wantPath:   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-download",
+			wantPath:   "/apis/subresources.demo.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-download",
 			wantMethod: http.MethodGet,
 		},
 		// volumesnapshot_connector.go handleVolumeSnapshotNamespaced -> handleVolumeSnapshotManifestsDownload

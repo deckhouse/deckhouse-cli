@@ -20,9 +20,10 @@ limitations under the License.
 // After C9 there is no whole-subtree server-side aggregation: each snapshot node
 // exposes three per-CR subresources, addressed by the node's resource plural:
 //   - manifests-download: the node's own captured manifests (status preserved,
-//     namespace made relative). Always served by the CORE aggregated apiserver
-//     for every node kind (core Snapshot and domain snapshot CRs alike); CSI
-//     VolumeSnapshot leaves use the dedicated VS-connector group instead.
+//     namespace made relative). Served by the node's OWN subresource group (core
+//     group for the core Snapshot, the domain-prefixed group for domain snapshot CRs
+//     — the domain apiserver proxies to the core content layer); CSI VolumeSnapshot
+//     leaves use the dedicated VS-connector group instead.
 //   - manifests-with-data-restoration: a ready-to-apply manifest array for the
 //     node's whole subtree (the server delegates domain subtrees internally).
 //     Served by the node's OWN subresource group (core group for the core
@@ -251,22 +252,13 @@ func (c *Client) UploadManifests(ctx context.Context, ref NodeRef, body []byte) 
 	return out, nil
 }
 
-// downloadPath builds the manifests-download absolute path for ref. manifests-download
-// is served by the core aggregated apiserver for every node kind except CSI
-// VolumeSnapshot leaves, which use the VS-connector group.
+// downloadPath builds the manifests-download absolute path for ref, addressed through the
+// node's OWN aggregated subresource group (symmetric to restore's subresourcePath): the core
+// Snapshot -> the core group, CSI VolumeSnapshot leaves -> the VS-connector group, and any
+// domain snapshot CR -> the domain-prefixed group. A domain node's manifests-download is served
+// by the domain apiserver as a proxy to the core content layer, so it is NOT the core group.
 func (c *Client) downloadPath(ref NodeRef) (string, error) {
-	if ref.IsVolumeSnapshotLeaf() {
-		return fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s/%s",
-			VSConnectorGroup, VSConnectorVersion, ref.Namespace, VolumeSnapshotResource, ref.Name, SubManifestsDownload), nil
-	}
-
-	resource, err := c.resourceFor(ref)
-	if err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s/%s",
-		CoreSubresourcesGroup, CoreSubresourcesVersion, ref.Namespace, resource, ref.Name, SubManifestsDownload), nil
+	return c.subresourcePath(ref, SubManifestsDownload)
 }
 
 // uploadPath builds the manifests-and-children-refs-upload absolute path for ref.
