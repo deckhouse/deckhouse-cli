@@ -193,11 +193,10 @@ func TestEnsureDataExport_Idempotent(t *testing.T) {
 	assert.Equal(t, de1.ResourceVersion, de2.ResourceVersion)
 }
 
-// TestEnsureDataExport_RecreatesWhenExpired verifies that a stale Expired DataExport
-// left behind by a previous session (the producer never deletes it on TTL expiry;
-// see storage-volume-data-manager's DataexportReconciler Case 2) is deleted and
-// replaced by a fresh object instead of being returned forever, which would
-// permanently block resume with ErrExpired.
+// TestEnsureDataExport_RecreatesWhenExpired verifies that a stale expired DataExport
+// (Ready=False/Expired) left behind by a previous session — the producer's GC only deletes it after its
+// retention TTL, so within that window it lingers — is deleted and replaced by a fresh object instead of
+// being returned forever, which would permanently block resume with ErrExpired.
 func TestEnsureDataExport_RecreatesWhenExpired(t *testing.T) {
 	t.Parallel()
 
@@ -231,9 +230,11 @@ func TestEnsureDataExport_RecreatesWhenExpired(t *testing.T) {
 		Status: deapi.DataExportStatus{
 			Conditions: []metav1.Condition{
 				{
-					Type:   "Expired",
-					Status: metav1.ConditionTrue,
-					Reason: "TTLExpired",
+					// Expired is now signalled as Ready=False with reason "Expired" (the standalone
+					// "Expired" condition type was removed from the catalog).
+					Type:   "Ready",
+					Status: metav1.ConditionFalse,
+					Reason: "Expired",
 				},
 			},
 		},
@@ -252,7 +253,10 @@ func TestEnsureDataExport_RecreatesWhenExpired(t *testing.T) {
 		"a fresh Create must have happened rather than reusing the stale object")
 
 	for _, cond := range fresh.Status.Conditions {
-		assert.NotEqual(t, "Expired", cond.Type, "a brand-new object must carry no Expired condition")
+		if cond.Type == "Ready" {
+			assert.False(t, cond.Status == metav1.ConditionFalse && cond.Reason == "Expired",
+				"a freshly recreated object must not be in the Ready=False/Expired state")
+		}
 	}
 
 	// A second call against the now-fresh (non-Expired) object must be idempotent,
@@ -339,9 +343,11 @@ func TestWaitReady_Expired(t *testing.T) {
 		Status: deapi.DataExportStatus{
 			Conditions: []metav1.Condition{
 				{
-					Type:   "Expired",
-					Status: metav1.ConditionTrue,
-					Reason: "TTLExpired",
+					// Expired is now signalled as Ready=False with reason "Expired" (the standalone
+					// "Expired" condition type was removed from the catalog).
+					Type:   "Ready",
+					Status: metav1.ConditionFalse,
+					Reason: "Expired",
 				},
 			},
 		},
@@ -730,9 +736,11 @@ func TestEnsureDataExport_ExpiredForeignCRRecreatedWithOwnership(t *testing.T) {
 		Status: deapi.DataExportStatus{
 			Conditions: []metav1.Condition{
 				{
-					Type:   "Expired",
-					Status: metav1.ConditionTrue,
-					Reason: "TTLExpired",
+					// Expired is now signalled as Ready=False with reason "Expired" (the standalone
+					// "Expired" condition type was removed from the catalog).
+					Type:   "Ready",
+					Status: metav1.ConditionFalse,
+					Reason: "Expired",
 				},
 			},
 		},
@@ -754,7 +762,10 @@ func TestEnsureDataExport_ExpiredForeignCRRecreatedWithOwnership(t *testing.T) {
 		"the recreated CR must be stamped with the reclaiming run's ownership")
 
 	for _, cond := range fresh.Status.Conditions {
-		assert.NotEqual(t, "Expired", cond.Type, "a brand-new object must carry no Expired condition")
+		if cond.Type == "Ready" {
+			assert.False(t, cond.Status == metav1.ConditionFalse && cond.Reason == "Expired",
+				"a freshly recreated object must not be in the Ready=False/Expired state")
+		}
 	}
 
 	assert.NotContains(t, buf.String(), "adopting DataExport",

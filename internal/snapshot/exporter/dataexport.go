@@ -52,11 +52,20 @@ const defaultDataExportTTL = "2h"
 // With a 3 s poll interval, every 5 attempts ≈ 15 s.
 const logEveryN = 5
 
-// conditionTypeExpired is the producer's condition type set on a DataExport once its
-// TTL elapses (storage-volume-data-manager/common/conditions.go). The producer
-// deliberately never deletes the CR on expiry, so both EnsureDataExport and WaitReady
-// must recognize this exact string.
-const conditionTypeExpired = "Expired"
+// The DataExport terminal Expired state is signalled by the producer as Ready=False with reason
+// "Expired" (the standalone "Expired" condition type was removed from the catalog in favour of a reason
+// plus a status.phase). After a retention TTL the DataExport garbage collector then deletes the CR, so
+// EnsureDataExport and WaitReady recognize this Ready reason via dataExportExpired.
+const (
+	conditionTypeReady = "Ready"
+	reasonExpired      = "Expired"
+)
+
+// dataExportExpired reports whether the DataExport has terminally idle-expired (Ready=False/Expired).
+func dataExportExpired(conds []metav1.Condition) bool {
+	c := meta.FindStatusCondition(conds, conditionTypeReady)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == reasonExpired
+}
 
 // dataExportGonePollInterval is the poll cadence EnsureDataExport uses while waiting
 // for a terminating DataExport (DeletionTimestamp set) to fully vanish before it
@@ -258,7 +267,7 @@ func EnsureDataExport(
 				return nil, waitErr
 			}
 
-		case !meta.IsStatusConditionTrue(existing.Status.Conditions, conditionTypeExpired):
+		case !dataExportExpired(existing.Status.Conditions):
 			// Live, non-terminating CR. The CR name (de-<leaf>) encodes only the
 			// leaf name, so a same-named CR may actually target a DIFFERENT object
 			// (a CSI VolumeSnapshot and a domain snapshot CR sharing metadata.name,
@@ -279,10 +288,10 @@ func EnsureDataExport(
 			return existing, nil
 
 		default:
-			// The producer never deletes an Expired DataExport on its own (manual operator
-			// cleanup is its documented contract), so a stale Expired object from a previous
-			// session would otherwise be returned forever, permanently blocking resume. Delete
-			// it and fall through to the normal create path below. This reclaim is deliberately
+			// The producer's GC only deletes an expired DataExport after its retention TTL (~24h), so
+			// within that window a stale expired object (Ready=False/Expired) from a previous session
+			// would otherwise be returned forever, permanently blocking resume. Delete it and fall through
+			// to the normal create path below. This reclaim is deliberately
 			// OWNER-AGNOSTIC (a crashed owner's CR is reclaimed via TTL exactly as before);
 			// the recreated CR below is stamped with THIS run's ownership.
 			// Delete is not synchronous on a real cluster: the object may still be
@@ -450,7 +459,7 @@ func readyConditionStatus(conds []metav1.Condition, hasURL bool) string {
 
 // WaitReady polls the DataExport named deName until:
 //   - its Ready condition is True and Status.URL is populated → returns the DE,
-//   - its Expired condition is True → returns a wrapped ErrExpired,
+//   - it is Ready=False with reason Expired → returns a wrapped ErrExpired,
 //   - ctx is cancelled or its deadline is exceeded → returns a wrapped ctx.Err()
 //     that includes the last observed DataExport status and an inspection hint.
 //
@@ -473,7 +482,7 @@ func WaitReady(
 			return nil, fmt.Errorf("get DataExport %q: %w", deName, err)
 		}
 
-		if meta.IsStatusConditionTrue(de.Status.Conditions, conditionTypeExpired) {
+		if dataExportExpired(de.Status.Conditions) {
 			return nil, fmt.Errorf("DataExport %s/%s: %w", namespace, deName, ErrExpired)
 		}
 
