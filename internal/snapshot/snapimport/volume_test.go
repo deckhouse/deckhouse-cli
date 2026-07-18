@@ -200,7 +200,7 @@ func TestPutBlock_RejectsOversizeServerOffset(t *testing.T) {
 func completedDataImportObj(namespace, name string) *unstructured.Unstructured {
 	obj := dataImportObj(namespace, name, false)
 	_ = unstructured.SetNestedSlice(obj.Object, readyConditions(conditionCompleted), "status", "conditions")
-	_ = unstructured.SetNestedMap(obj.Object, map[string]interface{}{"name": "vsc-1"}, "status", "data", "artifact")
+	_ = unstructured.SetNestedMap(obj.Object, map[string]interface{}{"name": "vsc-1"}, "status", "data", "artifactRef")
 
 	return obj
 }

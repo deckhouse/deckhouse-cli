@@ -46,14 +46,14 @@ func validSourceRef() map[string]interface{} {
 
 func validData() map[string]interface{} {
 	return map[string]interface{}{
-		"source": map[string]interface{}{
+		"sourceRef": map[string]interface{}{
 			"apiVersion": "v1",
 			"kind":       "PersistentVolumeClaim",
 			"namespace":  "ns",
 			"name":       "disk-a",
 			"uid":        "pvc-uid",
 		},
-		"artifact": map[string]interface{}{
+		"artifactRef": map[string]interface{}{
 			"apiVersion": "snapshot.storage.k8s.io/v1",
 			"kind":       "VolumeSnapshotContent",
 			"name":       "snapcontent-1",
@@ -90,11 +90,11 @@ func TestParseNodeStatus_Valid(t *testing.T) {
 	if data == nil {
 		t.Fatal("data must be decoded")
 	}
-	if data.Source.Kind != "PersistentVolumeClaim" || data.Source.UID != "pvc-uid" {
-		t.Errorf("data.source not decoded: %+v", data.Source)
+	if data.SourceRef.Kind != "PersistentVolumeClaim" || data.SourceRef.UID != "pvc-uid" {
+		t.Errorf("data.sourceRef not decoded: %+v", data.SourceRef)
 	}
-	if data.Artifact.Name != "snapcontent-1" || data.Size != "10Gi" {
-		t.Errorf("data artifact/size not decoded: %+v", data)
+	if data.ArtifactRef.Name != "snapcontent-1" || data.Size != "10Gi" {
+		t.Errorf("data artifactRef/size not decoded: %+v", data)
 	}
 }
 
@@ -133,11 +133,11 @@ func TestParseNodeStatus_FailClosed(t *testing.T) {
 			"apiVersion": "v1", "kind": "PersistentVolumeClaim", "namespace": "ns", "name": "x",
 		}}},
 		{"data not an object", map[string]interface{}{"data": "oops"}},
-		{"data missing source", map[string]interface{}{"data": map[string]interface{}{
-			"artifact": map[string]interface{}{"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": "a"},
+		{"data missing sourceRef", map[string]interface{}{"data": map[string]interface{}{
+			"artifactRef": map[string]interface{}{"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": "a"},
 		}}},
-		{"data missing artifact", map[string]interface{}{"data": map[string]interface{}{
-			"source": map[string]interface{}{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "x"},
+		{"data missing artifactRef", map[string]interface{}{"data": map[string]interface{}{
+			"sourceRef": map[string]interface{}{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "x"},
 		}}},
 		{"data bad size", map[string]interface{}{"data": func() map[string]interface{} {
 			d := validData()
@@ -198,8 +198,8 @@ func TestParseNodeStatus_IdentityFailClosed(t *testing.T) {
 
 func TestRequireNodeData(t *testing.T) {
 	complete := &NodeData{
-		Source:   SourceRefIdentity{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: "ns", Name: "disk-a", UID: "pvc-uid"},
-		Artifact: ArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "snapcontent-1"},
+		SourceRef:   SourceRefIdentity{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: "ns", Name: "disk-a", UID: "pvc-uid"},
+		ArtifactRef: ArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "snapcontent-1"},
 	}
 
 	if _, err := RequireNodeData(nil); err == nil {
@@ -210,15 +210,15 @@ func TestRequireNodeData(t *testing.T) {
 	}
 
 	noUID := *complete
-	noUID.Source.UID = ""
+	noUID.SourceRef.UID = ""
 	if _, err := RequireNodeData(&Node{Data: &noUID}); err == nil {
-		t.Error("data without source.uid must error")
+		t.Error("data without sourceRef.uid must error")
 	}
 
 	noArtifact := *complete
-	noArtifact.Artifact = ArtifactRef{}
+	noArtifact.ArtifactRef = ArtifactRef{}
 	if _, err := RequireNodeData(&Node{Data: &noArtifact}); err == nil {
-		t.Error("data without artifact identity must error")
+		t.Error("data without artifactRef identity must error")
 	}
 
 	got, err := RequireNodeData(&Node{Data: complete})
