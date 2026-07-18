@@ -438,7 +438,7 @@ func (c *clusterVolumeImporter) waitDataImportReady(ctx context.Context, name, n
 }
 
 // dataImportCompleted reports whether the named DataImport already produced its durable
-// artifact (Completed=True with a populated status.data.artifact). A missing object is not
+// artifact (Completed=True with a populated status.data.artifactRef). A missing object is not
 // an error: it simply means "not completed".
 func (c *clusterVolumeImporter) dataImportCompleted(ctx context.Context, name, namespace string) (bool, error) {
 	di, err := c.dyn.Resource(dataImportGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
@@ -450,13 +450,13 @@ func (c *clusterVolumeImporter) dataImportCompleted(ctx context.Context, name, n
 		return false, fmt.Errorf("get DataImport %s/%s: %w", namespace, name, err)
 	}
 
-	_, hasArtifact, _ := unstructured.NestedMap(di.Object, "status", "data", "artifact")
+	_, hasArtifact, _ := unstructured.NestedMap(di.Object, "status", "data", "artifactRef")
 
 	return conditionTrue(di, conditionCompleted) && hasArtifact, nil
 }
 
 // waitDataImportCompleted blocks until the DataImport produces its durable artifact
-// (Completed=True with a populated status.data.artifact).
+// (Completed=True with a populated status.data.artifactRef).
 func (c *clusterVolumeImporter) waitDataImportCompleted(ctx context.Context, name, namespace string) error {
 	deadline := time.Now().Add(c.wait)
 

@@ -39,7 +39,7 @@ import (
 // PersistentVolumeClaims are excluded in two cases:
 //   - Volume-leaf children (node.Children[i].IsVolumeLeaf()): the captured PVC
 //     manifest belongs in each leaf node's own manifests/ directory.
-//   - The node's own captured volume (node.Data.Source): the PVC data is already
+//   - The node's own captured volume (node.Data.SourceRef): the PVC data is already
 //     captured in the volume payload (data.bin[.<ext>] or data.tar); the PVC
 //     identity is recorded in snapshot.yaml Volumes[].Target.
 //
@@ -94,8 +94,8 @@ func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeD
 	var targetUID, targetName string
 
 	if volNode.Data != nil {
-		targetUID = volNode.Data.Source.UID
-		targetName = volNode.Data.Source.Name
+		targetUID = volNode.Data.SourceRef.UID
+		targetName = volNode.Data.SourceRef.Name
 	}
 
 	for _, obj := range objs {
@@ -186,16 +186,16 @@ func buildVolumesList(node *source.Node) []archive.VolumeInfo {
 func nodeDataToVolumeInfo(d *source.NodeData) archive.VolumeInfo {
 	return archive.VolumeInfo{
 		Target: archive.VolumeObjectRef{
-			APIVersion: d.Source.APIVersion,
-			Kind:       d.Source.Kind,
-			Name:       d.Source.Name,
-			Namespace:  d.Source.Namespace,
-			UID:        d.Source.UID,
+			APIVersion: d.SourceRef.APIVersion,
+			Kind:       d.SourceRef.Kind,
+			Name:       d.SourceRef.Name,
+			Namespace:  d.SourceRef.Namespace,
+			UID:        d.SourceRef.UID,
 		},
 		Artifact: archive.VolumeObjectRef{
-			APIVersion: d.Artifact.APIVersion,
-			Kind:       d.Artifact.Kind,
-			Name:       d.Artifact.Name,
+			APIVersion: d.ArtifactRef.APIVersion,
+			Kind:       d.ArtifactRef.Kind,
+			Name:       d.ArtifactRef.Name,
 		},
 		VolumeMode:       d.VolumeMode,
 		StorageClassName: d.StorageClassName,
@@ -239,12 +239,12 @@ func addDataExclusion(ex *dataRefExclusion, d *source.NodeData) {
 		return
 	}
 
-	if d.Source.UID != "" {
-		ex.uids[d.Source.UID] = struct{}{}
+	if d.SourceRef.UID != "" {
+		ex.uids[d.SourceRef.UID] = struct{}{}
 	}
 
-	if d.Source.Name != "" {
-		ex.names[d.Source.Name] = struct{}{}
+	if d.SourceRef.Name != "" {
+		ex.names[d.SourceRef.Name] = struct{}{}
 	}
 }
 

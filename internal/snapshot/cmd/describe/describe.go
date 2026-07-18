@@ -152,12 +152,12 @@ func toTreeViewNode(n *source.Node) treeview.Node {
 // volumeLabels returns the display strings for the volume entries of n.
 //
 // A node that captured its own volume (n.Data != nil) yields one label: the captured PVC
-// name (status.data.source.name). Aggregator nodes and the root node without data yield no
+// name (status.data.sourceRef.name). Aggregator nodes and the root node without data yield no
 // labels.
 func volumeLabels(n *source.Node) []string {
 	if n.Data == nil {
 		return nil
 	}
 
-	return []string{n.Data.Source.Name}
+	return []string{n.Data.SourceRef.Name}
 }

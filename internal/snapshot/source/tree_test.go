@@ -76,14 +76,14 @@ func domainSourceRef(apiVersion, kind, name, uid string) map[string]interface{} 
 // nodeDataMap builds a namespaced status.data descriptor for a captured PVC volume.
 func nodeDataMap(pvcName, pvcUID string) map[string]interface{} {
 	return map[string]interface{}{
-		"source": map[string]interface{}{
+		"sourceRef": map[string]interface{}{
 			"apiVersion": "v1",
 			"kind":       "PersistentVolumeClaim",
 			"namespace":  testNS,
 			"name":       pvcName,
 			"uid":        pvcUID,
 		},
-		"artifact": map[string]interface{}{
+		"artifactRef": map[string]interface{}{
 			"apiVersion": "snapshot.storage.k8s.io/v1",
 			"kind":       "VolumeSnapshotContent",
 			"name":       "vsc-" + pvcUID,
@@ -213,8 +213,8 @@ func TestBuildTree_DiskNode_Data(t *testing.T) {
 		t.Fatal("child1 Data must not be nil")
 	}
 
-	if c1.Data.Source.UID != "uid-1" {
-		t.Errorf("child1 Data.Source.UID: got %q, want uid-1", c1.Data.Source.UID)
+	if c1.Data.SourceRef.UID != "uid-1" {
+		t.Errorf("child1 Data.SourceRef.UID: got %q, want uid-1", c1.Data.SourceRef.UID)
 	}
 
 	if c1.DirBaseName() != "disk-1" {
@@ -274,8 +274,8 @@ func TestBuildTree_Aggregator_VisibilityLeafProducesOrphanLeaves(t *testing.T) {
 		t.Errorf("leaf DirBaseName: got %q, want pvc-orphan", leaf.DirBaseName())
 	}
 
-	if leaf.Data == nil || leaf.Data.Source.UID != "uid-pvc" {
-		t.Errorf("leaf Data.Source.UID: got %+v, want uid-pvc", leaf.Data)
+	if leaf.Data == nil || leaf.Data.SourceRef.UID != "uid-pvc" {
+		t.Errorf("leaf Data.SourceRef.UID: got %+v, want uid-pvc", leaf.Data)
 	}
 
 	if len(leaf.Children) != 0 {
@@ -348,8 +348,8 @@ func TestBuildTree_DeepTree(t *testing.T) {
 		t.Errorf("disk kind: got %q", disk.Kind)
 	}
 
-	if disk.Data == nil || disk.Data.Source.UID != "uid-disk" {
-		t.Errorf("disk Data.Source.UID: got %+v, want uid-disk", disk.Data)
+	if disk.Data == nil || disk.Data.SourceRef.UID != "uid-disk" {
+		t.Errorf("disk Data.SourceRef.UID: got %+v, want uid-disk", disk.Data)
 	}
 
 	if len(disk.Children) != 0 {
@@ -416,8 +416,8 @@ func TestBuildTree_DataExtendedFields(t *testing.T) {
 	}
 
 	got := tree.Data
-	if got.Source.UID != "uid-disk-sc" {
-		t.Errorf("Source.UID: got %q, want uid-disk-sc", got.Source.UID)
+	if got.SourceRef.UID != "uid-disk-sc" {
+		t.Errorf("SourceRef.UID: got %q, want uid-disk-sc", got.SourceRef.UID)
 	}
 
 	if got.VolumeMode != "Block" {

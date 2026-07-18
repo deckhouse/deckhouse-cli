@@ -63,14 +63,14 @@ func describeClient(t *testing.T, objs ...*unstructured.Unstructured) client.Cli
 // dataMap builds a status.data map for a PVC-backed captured volume (Variant A, ≤1 per node).
 func dataMap(pvcName, uid string) map[string]interface{} {
 	return map[string]interface{}{
-		"source": map[string]interface{}{
+		"sourceRef": map[string]interface{}{
 			"apiVersion": "v1",
 			"kind":       "PersistentVolumeClaim",
 			"namespace":  testNS,
 			"name":       pvcName,
 			"uid":        uid,
 		},
-		"artifact": map[string]interface{}{
+		"artifactRef": map[string]interface{}{
 			"apiVersion": testVSAPI,
 			"kind":       "VolumeSnapshotContent",
 			"name":       "vsc-" + pvcName,
@@ -263,7 +263,7 @@ func TestRun_MixedChildren(t *testing.T) {
 // ownData builds a *source.NodeData whose captured source PVC has the given name, the
 // only field volumeLabels reads.
 func ownData(pvcName string) *source.NodeData {
-	return &source.NodeData{Source: source.SourceRefIdentity{Name: pvcName}}
+	return &source.NodeData{SourceRef: source.SourceRefIdentity{Name: pvcName}}
 }
 
 // TestToTreeViewNode covers the source.Node → treeview.Node mapping produced by
