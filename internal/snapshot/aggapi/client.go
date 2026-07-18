@@ -29,22 +29,29 @@ limitations under the License.
 //     Served by the node's OWN subresource group (core group for the core
 //     Snapshot, the domain-prefixed group for domain snapshot CRs).
 //   - manifests-and-children-refs-upload: import one node's manifests plus its
-//     direct child refs. Served by the CORE aggregated apiserver for every node
-//     kind (core Snapshot and domain snapshot CRs alike); CSI VolumeSnapshot
-//     leaves use the dedicated VS-connector group instead.
+//     direct child refs. Served by the node's OWN subresource group (core group for
+//     the core Snapshot, the domain-prefixed group for domain snapshot CRs — the
+//     domain apiserver's upload facade records the node's own childrenSnapshotRefs and
+//     forwards the manifests to the core content layer); CSI VolumeSnapshot leaves use
+//     the dedicated VS-connector group instead. The upload is bind-first: it returns
+//     409 ImportContentNotBound until the node's SnapshotContent is bound.
 //
-// Every subresource is addressed by the node's own namespaced CR (Snapshot, domain
-// snapshot CR, or CSI VolumeSnapshot leaf). The client never reads cluster-scoped
-// SnapshotContent objects.
+// All three subresources now route the same way — by the node's own group — so there is
+// no longer any download/upload group asymmetry. Every subresource is addressed by the
+// node's own namespaced CR (Snapshot, domain snapshot CR, or CSI VolumeSnapshot leaf).
+// The client never reads cluster-scoped SnapshotContent objects.
 package aggapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -234,22 +241,111 @@ func (c *Client) RestoreManifests(ctx context.Context, ref NodeRef, targetNamesp
 
 // UploadManifests performs POST <node>/manifests-and-children-refs-upload with the
 // given JSON body ({"manifests": <array>, "childRefs": [...]}) and returns the raw body.
+//
+// The upload is bind-first: the aggregated apiserver refuses it with 409
+// ImportContentNotBound until the addressed node's status.boundSnapshotContentName is set.
+// The import orchestrator (see snapimport.Run) already gates the whole upload pass behind a
+// collective wait-for-bind, so this per-request retry is only a safety net for the narrow
+// read-after-write race where the CLI observed a node bound but this upload endpoint has not
+// yet — see postManifestsUpload.
 func (c *Client) UploadManifests(ctx context.Context, ref NodeRef, body []byte) ([]byte, error) {
 	path, err := c.uploadPath(ref)
 	if err != nil {
 		return nil, err
 	}
 
-	out, err := c.rest.Post().
-		AbsPath(path).
-		SetHeader("Content-Type", "application/json").
-		Body(body).
-		DoRaw(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("POST %s: %w", path, err)
+	return c.postManifestsUpload(ctx, path, body)
+}
+
+// ReasonImportContentNotBound is the canonical status.reason of the bind-first 409 the
+// namespaced (core / domain / VS-connector) manifests-and-children-refs-upload returns while a
+// node's status.boundSnapshotContentName is still empty. It mirrors state-snapshotter
+// usecase.ReasonImportContentNotBound verbatim — the wire contract d8 retries on until the
+// binder binds the node's SnapshotContent.
+const ReasonImportContentNotBound = "ImportContentNotBound"
+
+// manifestsUploadBackoff bounds the safety-net retries of manifests-and-children-refs-upload on
+// the transient bind-first 409 (ImportContentNotBound): the node's import-mode marker exists but
+// the state-snapshotter binder has not yet stamped status.boundSnapshotContentName. Same shape as
+// manifestsDownloadBackoff (5 attempts, 500ms doubling, capped at 8s): enough to absorb the
+// bind read-after-write race, short enough that a genuinely-unbound node still fails fast instead
+// of hanging (the primary bind gate is snapimport.Run's waitForBinds, not this loop).
+var manifestsUploadBackoff = wait.Backoff{
+	Steps:    5,
+	Duration: 500 * time.Millisecond,
+	Factor:   2.0,
+	Jitter:   0.1,
+	Cap:      8 * time.Second,
+}
+
+// isImportContentNotBound reports whether an upload attempt is the transient bind-first 409 worth
+// retrying: the aggregated apiserver refused it with status.reason=ImportContentNotBound because
+// the addressed node is not yet bound. Any other outcome (Forbidden back-ref mismatch, NotFound
+// addressing error, invalid request, ...) is a genuine failure that must surface on the first
+// attempt, not be masked by the retry loop.
+//
+// The check parses the RESPONSE BODY, not the error: rest.Request.DoRaw derives its error from the
+// HTTP status code alone (errors.NewGenericServerResponse maps 409 -> the generic "Conflict"
+// reason), discarding the server's custom status.reason. DoRaw still returns the raw metav1.Status
+// body alongside that error, so the custom "ImportContentNotBound" reason — the wire signal the
+// contract defines — is recovered by decoding the body and confirming both code 409 and the reason.
+func isImportContentNotBound(err error, body []byte) bool {
+	if err == nil {
+		return false
 	}
 
-	return out, nil
+	var status metav1.Status
+	if json.Unmarshal(body, &status) != nil {
+		return false
+	}
+
+	return status.Code == int32(http.StatusConflict) && string(status.Reason) == ReasonImportContentNotBound
+}
+
+// postManifestsUpload performs POST path with body, retrying with bounded exponential backoff
+// (manifestsUploadBackoff) on the transient bind-first 409 (ImportContentNotBound). Scope is
+// intentionally narrow to that one reason; every other error surfaces on the first attempt.
+//
+// ctx cancellation aborts the retry loop immediately, including mid-backoff sleep, and returns
+// ctx.Err(). A node that stays unbound for the whole retry budget exhausts manifestsUploadBackoff's
+// attempts and returns the last ImportContentNotBound error seen, so callers get a clear,
+// actionable failure instead of an indefinite hang.
+func (c *Client) postManifestsUpload(ctx context.Context, path string, body []byte) ([]byte, error) {
+	var (
+		out     []byte
+		lastErr error
+	)
+
+	backoffErr := wait.ExponentialBackoffWithContext(ctx, manifestsUploadBackoff, func(stepCtx context.Context) (bool, error) {
+		var doErr error
+
+		out, doErr = c.rest.Post().
+			AbsPath(path).
+			SetHeader("Content-Type", "application/json").
+			Body(body).
+			DoRaw(stepCtx)
+
+		switch {
+		case doErr == nil:
+			return true, nil
+		case isImportContentNotBound(doErr, out):
+			lastErr = doErr
+			return false, nil
+		default:
+			return false, doErr
+		}
+	})
+
+	switch {
+	case backoffErr == nil:
+		return out, nil
+	case ctx.Err() != nil:
+		return nil, fmt.Errorf("POST %s: %w", path, ctx.Err())
+	case wait.Interrupted(backoffErr):
+		return nil, fmt.Errorf("POST %s: exhausted retries on bind-first 409 (ImportContentNotBound): %w", path, lastErr)
+	default:
+		return nil, fmt.Errorf("POST %s: %w", path, backoffErr)
+	}
 }
 
 // downloadPath builds the manifests-download absolute path for ref, addressed through the
@@ -261,30 +357,22 @@ func (c *Client) downloadPath(ref NodeRef) (string, error) {
 	return c.subresourcePath(ref, SubManifestsDownload)
 }
 
-// uploadPath builds the manifests-and-children-refs-upload absolute path for ref.
-// The upload subresource is served by the CORE aggregated apiserver for every node
-// kind (core Snapshot and domain snapshot CRs); CSI VolumeSnapshot leaves use the
-// VS-connector group. This differs from the restore path, which routes domain
-// subtrees to the domain-prefixed group.
+// uploadPath builds the manifests-and-children-refs-upload absolute path for ref, addressed
+// through the node's OWN aggregated subresource group — identical routing to downloadPath and
+// restore's subresourcePath: the core Snapshot -> the core group, CSI VolumeSnapshot leaves ->
+// the VS-connector group, and any domain snapshot CR -> the domain-prefixed group (served by the
+// domain apiserver's upload facade, which records the node's own childrenSnapshotRefs and forwards
+// the manifests to the core content layer). The former asymmetry — upload going to the core group
+// while download/restore routed by node group — is gone.
 func (c *Client) uploadPath(ref NodeRef) (string, error) {
-	if ref.IsVolumeSnapshotLeaf() {
-		return fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s/%s",
-			VSConnectorGroup, VSConnectorVersion, ref.Namespace, VolumeSnapshotResource, ref.Name, SubManifestsUpload), nil
-	}
-
-	resource, err := c.resourceFor(ref)
-	if err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s/%s/%s",
-		CoreSubresourcesGroup, CoreSubresourcesVersion, ref.Namespace, resource, ref.Name, SubManifestsUpload), nil
+	return c.subresourcePath(ref, SubManifestsUpload)
 }
 
-// subresourcePath builds the absolute path for the manifests-with-data-restoration
-// subresource of ref, addressed through the node's OWN aggregated subresource group.
-// Do NOT use this for manifests-and-children-refs-upload — upload is always served
-// by the CORE group for non-VS kinds; use uploadPath instead.
+// subresourcePath builds the absolute path for a per-CR aggregated subresource (sub) of ref,
+// addressed through the node's OWN aggregated subresource group: the core group for the core
+// Snapshot, the domain-prefixed group for domain snapshot CRs, and the VS-connector group for CSI
+// VolumeSnapshot leaves. All three per-CR subresources — manifests-download,
+// manifests-with-data-restoration, and manifests-and-children-refs-upload — route the same way.
 func (c *Client) subresourcePath(ref NodeRef, sub string) (string, error) {
 	group, version, err := subresourceGroupVersion(ref)
 	if err != nil {

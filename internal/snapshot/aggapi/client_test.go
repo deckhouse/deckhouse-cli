@@ -172,12 +172,13 @@ func TestSubresourcePath(t *testing.T) {
 	}
 }
 
-// TestUploadPath verifies that manifests-and-children-refs-upload is always served by
-// the CORE subresources group for non-VS kinds (core Snapshot and domain CRs alike),
-// and by the VS-connector group for CSI VolumeSnapshot leaves.
-// Case (a) exposes the pre-fix regression: before the fix, domain kinds were routed to
-// the domain-prefixed group (e.g. subresources.demo.state-snapshotter.deckhouse.io),
-// which only implements GET and returns 405 for POST.
+// TestUploadPath verifies that manifests-and-children-refs-upload is served by the node's OWN
+// aggregated subresource group — the core group for the core Snapshot, the domain-prefixed group
+// for domain snapshot CRs (served by the domain apiserver's bind-first upload facade, which records
+// the node's own childrenSnapshotRefs and forwards the manifests to the core content layer), and
+// the VS-connector group for CSI VolumeSnapshot leaves. Routing is now identical to download/restore;
+// the former asymmetry (upload always to the core group) is gone. Case (a) locks in the domain
+// routing so a regression back to the core group fails fast here.
 func TestUploadPath(t *testing.T) {
 	c := NewClient(nil, testMapper())
 
@@ -187,9 +188,9 @@ func TestUploadPath(t *testing.T) {
 		want string
 	}{
 		{
-			name: "domain DemoVirtualDiskSnapshot upload uses core group",
+			name: "domain DemoVirtualDiskSnapshot upload uses its own domain group",
 			ref:  NodeRef{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"},
-			want: "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-and-children-refs-upload",
+			want: "/apis/subresources.demo.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-and-children-refs-upload",
 		},
 		{
 			name: "core Snapshot upload uses core group",
@@ -287,8 +288,8 @@ func TestResourceFor_NoMapper(t *testing.T) {
 // verified server contract. Each row specifies the subresource, the node kind, the
 // exact absolute path, and the HTTP method the server requires. Inline comments
 // reference the producer handler that serves each combination so any future drift
-// (like the domain-upload 405 fixed in fix-import-upload-core-group-for-domain) fails
-// fast here.
+// (e.g. regressing domain upload back to the core group, or the reverse of the earlier
+// domain-download proxy work) fails fast here.
 //
 // Server contract summary (verified against state-snapshotter source):
 //   - manifests-download (GET): core group for Snapshot; domain-prefixed group for domain CRs
@@ -297,8 +298,9 @@ func TestResourceFor_NoMapper(t *testing.T) {
 //     snapshotcontents; restore_handler.go SetupRoutes + domainapi/handler.go.
 //   - manifests-with-data-restoration (GET): core group for Snapshot; domain-prefixed
 //     group for domain CRs (domainapi/handler.go, GET-only); VS-connector for VS leaf.
-//   - manifests-and-children-refs-upload (POST): CORE group for Snapshot AND domain CRs
-//     (routeGenericSnapshotSubresource handles both); VS-connector for VS leaf.
+//   - manifests-and-children-refs-upload (POST): core group for Snapshot; domain-prefixed group
+//     for domain CRs (domainapi upload facade — bind-first, forwards manifests to the core content
+//     layer); VS-connector for VS leaf. Routed by the node's own group, symmetric to download/restore.
 func TestAggregatedAPIContract(t *testing.T) {
 	c := NewClient(nil, testMapper())
 
@@ -367,12 +369,13 @@ func TestAggregatedAPIContract(t *testing.T) {
 			wantPath:   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/snap-1/manifests-and-children-refs-upload",
 			wantMethod: http.MethodPost,
 		},
-		// restore_handler.go routeGenericSnapshotSubresource -> HandleGenericSnapshotManifestsAndChildrenUpload
-		// CORE group: domainapi/handler.go handleSubtree only implements GET; POST must go to core.
+		// domainapi/handler.go upload facade (verb: create/POST): bind-first, records the node's own
+		// childrenSnapshotRefs and forwards the manifests to the core content layer. Served by the
+		// domain-prefixed group (subresources.demo.state-snapshotter.deckhouse.io).
 		{
-			name:       "domain CR: manifests-and-children-refs-upload -> CORE group",
+			name:       "domain CR: manifests-and-children-refs-upload -> domain-prefixed group",
 			pathFn:     func(c *Client) (string, error) { return c.uploadPath(domainRef) },
-			wantPath:   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-and-children-refs-upload",
+			wantPath:   "/apis/subresources.demo.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-and-children-refs-upload",
 			wantMethod: http.MethodPost,
 		},
 		// volumesnapshot_connector.go handleVolumeSnapshotNamespaced -> handleManifestsAndChildrenUpload (verb: create/POST)
@@ -589,6 +592,170 @@ func TestNodeManifestsDownload_ContextCancelledAbortsRetryPromptly(t *testing.T)
 	c := NewClient(rc, testMapper())
 
 	_, err := c.NodeManifestsDownload(ctx, coreSnapshotRef())
+	if err == nil {
+		t.Fatal("expected error after ctx cancellation, got nil")
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected error to wrap context.Canceled, got: %v", err)
+	}
+
+	if *calls != 1 {
+		t.Errorf("calls: got %d, want 1 (aborted before a second attempt)", *calls)
+	}
+}
+
+// ── manifests-and-children-refs-upload bind-first 409 retry ──────────────────────────
+//
+// These tests exercise postManifestsUpload (used by UploadManifests) against a stubbed
+// rest.Interface. Like the manifests-download retry tests they do NOT use t.Parallel():
+// withFastUploadBackoff mutates the package-level manifestsUploadBackoff var, which would
+// race under parallel execution.
+
+// withFastUploadBackoff overrides manifestsUploadBackoff for the duration of the test with a
+// small, deterministic backoff so retry tests exercise real sleeps without slowing the suite.
+// Restored via t.Cleanup.
+func withFastUploadBackoff(t *testing.T, b wait.Backoff) {
+	t.Helper()
+
+	orig := manifestsUploadBackoff
+	manifestsUploadBackoff = b
+	t.Cleanup(func() { manifestsUploadBackoff = orig })
+}
+
+// domainSnapshotRef returns a domain snapshot node ref for the upload retry tests below (a domain
+// node also proves the upload routes to its own domain-prefixed group, not the core group).
+func domainSnapshotRef() NodeRef {
+	return NodeRef{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"}
+}
+
+// TestUploadManifests_RetriesImportContentNotBoundThenSucceeds verifies that the bind-first 409
+// (status.reason=ImportContentNotBound), returned while the binder has not yet stamped
+// status.boundSnapshotContentName, is retried and the upload ultimately succeeds once bound.
+func TestUploadManifests_RetriesImportContentNotBoundThenSucceeds(t *testing.T) {
+	withFastUploadBackoff(t, wait.Backoff{Steps: 5, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond})
+
+	rc, calls := countingRESTClient(t,
+		statusResponse(t, http.StatusConflict, metav1.StatusReason(ReasonImportContentNotBound), "boundSnapshotContentName is empty"),
+		statusResponse(t, http.StatusConflict, metav1.StatusReason(ReasonImportContentNotBound), "boundSnapshotContentName is empty"),
+		okResponse(`{"status":"Success"}`),
+	)
+
+	c := NewClient(rc, testMapper())
+
+	body, err := c.UploadManifests(context.Background(), domainSnapshotRef(), []byte(`{"manifests":[]}`))
+	if err != nil {
+		t.Fatalf("UploadManifests: %v", err)
+	}
+
+	if string(body) != `{"status":"Success"}` {
+		t.Errorf("body: got %q, want %q", body, `{"status":"Success"}`)
+	}
+
+	if *calls != 3 {
+		t.Errorf("calls: got %d, want 3", *calls)
+	}
+}
+
+// TestUploadManifests_ForbiddenNotRetried verifies that a genuine back-ref anti-spoofing 403
+// surfaces on the first attempt with no retry — only the bind-first reason is transient.
+func TestUploadManifests_ForbiddenNotRetried(t *testing.T) {
+	withFastUploadBackoff(t, wait.Backoff{Steps: 5, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond})
+
+	rc, calls := countingRESTClient(t,
+		statusResponse(t, http.StatusForbidden, metav1.StatusReasonForbidden, "snapshotRef does not point back at the subject"),
+	)
+
+	c := NewClient(rc, testMapper())
+
+	_, err := c.UploadManifests(context.Background(), domainSnapshotRef(), []byte(`{"manifests":[]}`))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !apierrors.IsForbidden(err) {
+		t.Errorf("expected a Forbidden error, got: %v", err)
+	}
+
+	if *calls != 1 {
+		t.Errorf("calls: got %d, want 1 (no retry expected)", *calls)
+	}
+}
+
+// TestUploadManifests_GenericConflictNotRetried verifies that a 409 whose body reason is NOT
+// ImportContentNotBound (e.g. an update Conflict) is NOT retried: the retry keys on the
+// bind-first status.reason in the body, not on the 409 status code alone. (DoRaw surfaces a
+// POST 409 as an AlreadyExists error — the reason it derives from code+verb — so the returned
+// error type is unrelated to the body reason; the retry decision reads the body directly.)
+func TestUploadManifests_GenericConflictNotRetried(t *testing.T) {
+	withFastUploadBackoff(t, wait.Backoff{Steps: 5, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond})
+
+	rc, calls := countingRESTClient(t,
+		statusResponse(t, http.StatusConflict, metav1.StatusReasonConflict, "the object has been modified"),
+	)
+
+	c := NewClient(rc, testMapper())
+
+	_, err := c.UploadManifests(context.Background(), domainSnapshotRef(), []byte(`{"manifests":[]}`))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !apierrors.IsAlreadyExists(err) {
+		t.Errorf("expected a 409 (AlreadyExists) error, got: %v", err)
+	}
+
+	if *calls != 1 {
+		t.Errorf("calls: got %d, want 1 (a non-bind 409 must not be retried)", *calls)
+	}
+}
+
+// TestUploadManifests_ExhaustsRetriesOnPersistentImportContentNotBound verifies that a node that
+// never binds fails after the bounded attempt count instead of hanging, and that the returned
+// error still classifies as ImportContentNotBound.
+func TestUploadManifests_ExhaustsRetriesOnPersistentImportContentNotBound(t *testing.T) {
+	backoff := wait.Backoff{Steps: 3, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond}
+	withFastUploadBackoff(t, backoff)
+
+	respFn := statusResponse(t, http.StatusConflict, metav1.StatusReason(ReasonImportContentNotBound), "boundSnapshotContentName is empty")
+	rc, calls := countingRESTClient(t, respFn, respFn, respFn)
+
+	c := NewClient(rc, testMapper())
+
+	_, err := c.UploadManifests(context.Background(), domainSnapshotRef(), []byte(`{"manifests":[]}`))
+	if err == nil {
+		t.Fatal("expected error after exhausting retries, got nil")
+	}
+
+	// DoRaw surfaces a POST 409 as a generic AlreadyExists error (the custom ImportContentNotBound
+	// reason lives only in the body); the exhausted error wraps that last 409 and names the cause.
+	if !apierrors.IsAlreadyExists(err) {
+		t.Errorf("expected the exhausted error to wrap the last 409, got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), "exhausted retries on bind-first 409 (ImportContentNotBound)") {
+		t.Errorf("expected the exhausted error to name the bind-first cause, got: %v", err)
+	}
+
+	if *calls != backoff.Steps {
+		t.Errorf("calls: got %d, want exactly %d (bounded attempts)", *calls, backoff.Steps)
+	}
+}
+
+// TestUploadManifests_ContextCancelledAbortsRetryPromptly verifies that cancelling ctx during the
+// retry loop's backoff aborts immediately and returns ctx.Err() instead of waiting out the budget.
+func TestUploadManifests_ContextCancelledAbortsRetryPromptly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	rc, calls := countingRESTClient(t, func() *http.Response {
+		defer cancel()
+
+		return statusResponse(t, http.StatusConflict, metav1.StatusReason(ReasonImportContentNotBound), "boundSnapshotContentName is empty")()
+	})
+
+	c := NewClient(rc, testMapper())
+
+	_, err := c.UploadManifests(ctx, domainSnapshotRef(), []byte(`{"manifests":[]}`))
 	if err == nil {
 		t.Fatal("expected error after ctx cancellation, got nil")
 	}

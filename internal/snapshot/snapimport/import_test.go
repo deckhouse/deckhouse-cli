@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -126,7 +127,10 @@ func readyConditions(types ...string) []interface{} {
 	return conds
 }
 
-func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
+// newFakeDynamicRaw builds a fake dynamic client with no reactors: stored objects are returned
+// verbatim, so a node without status.boundSnapshotContentName stays unbound. Used by the bind-gate
+// tests that must observe an unbound node (timeout / partial-bind).
+func newFakeDynamicRaw(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	gvrToListKind := map[schema.GroupVersionResource]string{
 		snapshotGVR:        "SnapshotList",
 		volumeSnapshotGVRt: "VolumeSnapshotList",
@@ -135,6 +139,48 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	}
 
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, objs...)
+}
+
+// newFakeDynamic builds a fake dynamic client that simulates the state-snapshotter binder:
+// every Get stamps a non-empty status.boundSnapshotContentName on any node that lacks one, so
+// Run's waitForBinds gate observes each planned node as bound — as it would in a real cluster
+// once the binder cascades SnapshotContents from the import-mode markers. Tests that need a node
+// to stay unbound use newFakeDynamicRaw instead.
+func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
+	dyn := newFakeDynamicRaw(objs...)
+	stampBoundContentOnGet(dyn)
+
+	return dyn
+}
+
+// stampBoundContentOnGet installs a get reactor returning a copy of the stored object with a
+// non-empty status.boundSnapshotContentName when it is missing, mirroring the binder having bound
+// the node's SnapshotContent. It is purely additive (never touches spec, conditions, or ownerRefs)
+// and does not persist to the tracker, so it is invisible to every assertion except the bind gate.
+func stampBoundContentOnGet(dyn *dynamicfake.FakeDynamicClient) {
+	dyn.PrependReactor("get", "*", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		ga, ok := action.(clienttesting.GetAction)
+		if !ok {
+			return false, nil, nil
+		}
+
+		obj, err := dyn.Tracker().Get(ga.GetResource(), ga.GetNamespace(), ga.GetName())
+		if err != nil {
+			return true, nil, err
+		}
+
+		u, ok := obj.(*unstructured.Unstructured)
+		if !ok {
+			return false, nil, nil
+		}
+
+		out := u.DeepCopy()
+		if boundContentName(out) == "" {
+			_ = unstructured.SetNestedField(out.Object, out.GetName()+"-content", "status", "boundSnapshotContentName")
+		}
+
+		return true, out, nil
+	})
 }
 
 // testDomainMapper extends testMapper with the DemoVirtualDiskSnapshot GVK so tests that
@@ -1419,5 +1465,142 @@ func TestApplyDefaults_Workers(t *testing.T) {
 				t.Errorf("Workers: got %d, want %d", cfg.Workers, tc.want)
 			}
 		})
+	}
+}
+
+// TestWaitForBinds_AllBoundReturnsNil verifies the happy path: when every planned node reports a
+// non-empty status.boundSnapshotContentName (here via the binder-simulating reactor), the bind
+// gate returns nil without waiting out the timeout.
+func TestWaitForBinds_AllBoundReturnsNil(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// Both nodes exist as import markers; newFakeDynamic's binder reactor stamps them bound.
+	dyn := newFakeDynamic(readyRootSnapshot(), readyImportLeafVS())
+	cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, dyn)
+	cfg.Timeout = 10 * time.Second // generous: success must NOT depend on the timeout elapsing.
+
+	start := time.Now()
+	if err := waitForBinds(context.Background(), cfg, plan); err != nil {
+		t.Fatalf("waitForBinds with all nodes bound: %v", err)
+	}
+
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("waitForBinds returned after %v; a fully-bound plan must return promptly", elapsed)
+	}
+}
+
+// TestWaitForBinds_TimesOutWhenUnbound verifies that nodes which never bind (raw client, no binder
+// reactor) drive the gate to a timeout error that surfaces status.boundSnapshotContentName and
+// names every still-unbound node.
+func TestWaitForBinds_TimesOutWhenUnbound(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// Raw client: the nodes exist but never gain status.boundSnapshotContentName.
+	dyn := newFakeDynamicRaw(readyRootSnapshot(), readyImportLeafVS())
+	cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, dyn)
+
+	timeout := 40 * time.Millisecond
+	cfg.Timeout = timeout
+
+	start := time.Now()
+	err = waitForBinds(context.Background(), cfg, plan)
+
+	if err == nil {
+		t.Fatal("expected a bind timeout for never-bound nodes, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "timeout") || !strings.Contains(err.Error(), "boundSnapshotContentName") {
+		t.Errorf("timeout error should mention timeout and boundSnapshotContentName, got: %v", err)
+	}
+
+	for _, want := range []string{"Snapshot/root", "VolumeSnapshot/pvc-1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("timeout error should name the unbound node %q, got: %v", want, err)
+		}
+	}
+
+	if elapsed := time.Since(start); elapsed < timeout {
+		t.Errorf("must wait at least the timeout (%v) before giving up, waited %v", timeout, elapsed)
+	}
+}
+
+// TestWaitForBinds_OnlyUnboundNodesReported verifies the still-pending filtering: an already-bound
+// node is dropped from the wait set, so the timeout error reports only the node that never binds.
+func TestWaitForBinds_OnlyUnboundNodesReported(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// root is pre-bound; the leaf never binds (raw client, no binder reactor).
+	boundRoot := readyRootSnapshot()
+	if err := unstructured.SetNestedField(boundRoot.Object, "root-content", "status", "boundSnapshotContentName"); err != nil {
+		t.Fatalf("seed bound root: %v", err)
+	}
+
+	dyn := newFakeDynamicRaw(boundRoot, readyImportLeafVS())
+	cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, dyn)
+	cfg.Timeout = 40 * time.Millisecond
+
+	err = waitForBinds(context.Background(), cfg, plan)
+	if err == nil {
+		t.Fatal("expected a bind timeout for the unbound leaf, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "VolumeSnapshot/pvc-1") {
+		t.Errorf("timeout error should name the unbound leaf, got: %v", err)
+	}
+
+	if strings.Contains(err.Error(), "Snapshot/root") {
+		t.Errorf("an already-bound node must NOT be reported as still pending, got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), "1 import node(s)") {
+		t.Errorf("timeout error should report exactly one still-pending node, got: %v", err)
+	}
+}
+
+// TestRun_BlocksOnUnboundNodes verifies the gate ordering end-to-end: with nodes that never bind,
+// Run creates the markers (pass 1) but fails at the bind gate BEFORE any manifests upload (pass 2a)
+// or volume data import (pass 2b) — no upload/data mutation may precede the bind.
+func TestRun_BlocksOnUnboundNodes(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	// Raw client, root pre-seeded so createMarkers reconciles it; nodes never bind.
+	dyn := newFakeDynamicRaw(readyRootSnapshot())
+
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Timeout = 60 * time.Millisecond
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected Run to fail at the bind gate when nodes never bind, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "bind a SnapshotContent") {
+		t.Errorf("expected a bind-gate timeout error, got: %v", err)
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 {
+		t.Errorf("no manifests upload or data import may precede the bind gate: uploads=%d ensures=%d", len(up.calls), len(vol.ensure))
+	}
+
+	// Pass 1 still ran: the leaf import-mode marker was created before the gate blocked.
+	if _, gErr := dyn.Resource(volumeSnapshotGVRt).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{}); gErr != nil {
+		t.Errorf("expected the leaf import marker to be created in pass 1 before the bind gate: %v", gErr)
 	}
 }
