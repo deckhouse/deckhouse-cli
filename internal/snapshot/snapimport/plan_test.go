@@ -174,7 +174,7 @@ func TestBuildPlan_DomainDataLeaf_SourceObjectRef(t *testing.T) {
 	}
 
 	writeArchiveNode(t, leafDir, archiveNode{
-		apiVersion:      "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		apiVersion:      "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		kind:            "DemoVirtualDiskSnapshot",
 		name:            "dvd-snap-1",
 		blockData:       []byte("rawbytes"),

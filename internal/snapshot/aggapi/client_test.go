@@ -40,8 +40,8 @@ func testMapper() meta.RESTMapper {
 	m := meta.NewDefaultRESTMapper(nil)
 	m.Add(schema.GroupVersionKind{Group: StorageGroup, Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Group: "demo.deckhouse.io", Version: "v1alpha1", Kind: "VirtualDiskSnapshot"}, meta.RESTScopeNamespace)
-	// Real producer group for demo domain snapshot kinds (demo.state-snapshotter.deckhouse.io/v1alpha1).
-	m.Add(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
+	// Real producer group for demo domain snapshot kinds (sds-unified-snapshots-poc.deckhouse.io/v1alpha1).
+	m.Add(schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
 
 	return m
 }
@@ -189,8 +189,8 @@ func TestUploadPath(t *testing.T) {
 	}{
 		{
 			name: "domain DemoVirtualDiskSnapshot upload uses its own domain group",
-			ref:  NodeRef{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"},
-			want: "/apis/subresources.demo.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-and-children-refs-upload",
+			ref:  NodeRef{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"},
+			want: "/apis/subresources.sds-unified-snapshots-poc.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-and-children-refs-upload",
 		},
 		{
 			name: "core Snapshot upload uses core group",
@@ -305,7 +305,7 @@ func TestAggregatedAPIContract(t *testing.T) {
 	c := NewClient(nil, testMapper())
 
 	coreRef := NodeRef{APIVersion: StorageGroup + "/v1alpha1", Kind: "Snapshot", Name: "snap-1", Namespace: "ns"}
-	domainRef := NodeRef{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"}
+	domainRef := NodeRef{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"}
 	vsRef := NodeRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-1", Namespace: "ns"}
 
 	cases := []struct {
@@ -326,7 +326,7 @@ func TestAggregatedAPIContract(t *testing.T) {
 		{
 			name:       "domain CR: manifests-download -> domain group (proxy)",
 			pathFn:     func(c *Client) (string, error) { return c.downloadPath(domainRef) },
-			wantPath:   "/apis/subresources.demo.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-download",
+			wantPath:   "/apis/subresources.sds-unified-snapshots-poc.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-download",
 			wantMethod: http.MethodGet,
 		},
 		// volumesnapshot_connector.go handleVolumeSnapshotNamespaced -> handleVolumeSnapshotManifestsDownload
@@ -346,11 +346,11 @@ func TestAggregatedAPIContract(t *testing.T) {
 			wantMethod: http.MethodGet,
 		},
 		// domainapi/handler.go handleSubtree: GET-only; "manifests-with-data-restoration" -> ManifestsWithDataRestoration
-		// Served by the domain-prefixed group (subresources.demo.state-snapshotter.deckhouse.io).
+		// Served by the domain-prefixed group (subresources.sds-unified-snapshots-poc.deckhouse.io).
 		{
 			name:       "domain CR: manifests-with-data-restoration -> domain-prefixed group",
 			pathFn:     func(c *Client) (string, error) { return c.subresourcePath(domainRef, SubManifestsRestore) },
-			wantPath:   "/apis/subresources.demo.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-with-data-restoration",
+			wantPath:   "/apis/subresources.sds-unified-snapshots-poc.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-with-data-restoration",
 			wantMethod: http.MethodGet,
 		},
 		// volumesnapshot_connector.go handleVolumeSnapshotNamespaced -> handleVolumeSnapshotManifestsWithDataRestoration
@@ -371,11 +371,11 @@ func TestAggregatedAPIContract(t *testing.T) {
 		},
 		// domainapi/handler.go upload facade (verb: create/POST): bind-first, records the node's own
 		// childrenSnapshotRefs and forwards the manifests to the core content layer. Served by the
-		// domain-prefixed group (subresources.demo.state-snapshotter.deckhouse.io).
+		// domain-prefixed group (subresources.sds-unified-snapshots-poc.deckhouse.io).
 		{
 			name:       "domain CR: manifests-and-children-refs-upload -> domain-prefixed group",
 			pathFn:     func(c *Client) (string, error) { return c.uploadPath(domainRef) },
-			wantPath:   "/apis/subresources.demo.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-and-children-refs-upload",
+			wantPath:   "/apis/subresources.sds-unified-snapshots-poc.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-and-children-refs-upload",
 			wantMethod: http.MethodPost,
 		},
 		// volumesnapshot_connector.go handleVolumeSnapshotNamespaced -> handleManifestsAndChildrenUpload (verb: create/POST)
@@ -626,7 +626,7 @@ func withFastUploadBackoff(t *testing.T, b wait.Backoff) {
 // domainSnapshotRef returns a domain snapshot node ref for the upload retry tests below (a domain
 // node also proves the upload routes to its own domain-prefixed group, not the core group).
 func domainSnapshotRef() NodeRef {
-	return NodeRef{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"}
+	return NodeRef{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"}
 }
 
 // TestUploadManifests_RetriesImportContentNotBoundThenSucceeds verifies that the bind-first 409

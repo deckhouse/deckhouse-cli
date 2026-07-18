@@ -74,11 +74,11 @@ func TestImportMarkerCR_DomainAggregator(t *testing.T) {
 	// gets the same unified spec.mode: Import marker as every other node (no error); the
 	// genericbinder later aggregates its children's contents into the aggregator's content.
 	node := PlannedNode{
-		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		Kind:       "DemoVirtualMachineSnapshot",
 		Name:       "vm-1",
 		Children: []ChildRef{{
-			APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+			APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 			Kind:       "DemoVirtualDiskSnapshot",
 			Name:       "dvd-1",
 		}},
@@ -100,7 +100,7 @@ func TestImportMarkerCR_ManifestOnlyDomainNode(t *testing.T) {
 	// A DemoVirtualMachineSnapshot with neither volume data nor child snapshots is a
 	// manifest-only domain node: import-equivalent to a structural Snapshot, so it gets the
 	// unified spec.mode: Import marker (no error).
-	node := PlannedNode{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualMachineSnapshot", Name: "vm-1"}
+	node := PlannedNode{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualMachineSnapshot", Name: "vm-1"}
 
 	obj, err := importMarkerCR(node, "ns")
 	if err != nil {
@@ -116,7 +116,7 @@ func TestImportMarkerCR_ManifestOnlyDomainNode(t *testing.T) {
 
 func TestImportMarkerCR_DomainDataLeaf(t *testing.T) {
 	node := PlannedNode{
-		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		Kind:       "DemoVirtualDiskSnapshot",
 		Name:       "dvd-snap-1",
 		DataFile:   "/archive/snapshots/demovirtualdisksnapshot_disk-a/data.bin",
@@ -149,18 +149,18 @@ func TestPlannedNode_IsDomainAggregator(t *testing.T) {
 		{"csi volume snapshot", PlannedNode{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot"}, false},
 		// A domain disk snapshot WITH volume data is a domain data leaf, not an aggregator.
 		{"demo disk snapshot with block data", PlannedNode{
-			APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+			APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 			Kind:       "DemoVirtualDiskSnapshot",
 			DataFile:   "/some/data.bin",
 		}, false},
 		// A domain snapshot with neither volume data nor children is manifest-only, not an aggregator.
-		{"manifest-only demo vm snapshot", PlannedNode{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualMachineSnapshot"}, false},
+		{"manifest-only demo vm snapshot", PlannedNode{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualMachineSnapshot"}, false},
 		// A domain snapshot with no data but WITH children is a true aggregator.
 		{"demo vm snapshot aggregator (has children)", PlannedNode{
-			APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+			APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 			Kind:       "DemoVirtualMachineSnapshot",
 			Children: []ChildRef{{
-				APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+				APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 				Kind:       "DemoVirtualDiskSnapshot",
 				Name:       "dvd-1",
 			}},

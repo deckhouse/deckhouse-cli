@@ -48,8 +48,8 @@ const targetNS = "dst"
 var (
 	snapshotGVR        = schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshots"}
 	volumeSnapshotGVRt = schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
-	demoDiskSnapGVR    = schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots"}
-	demoVMSnapGVR      = schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots"}
+	demoDiskSnapGVR    = schema.GroupVersionResource{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots"}
+	demoVMSnapGVR      = schema.GroupVersionResource{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots"}
 )
 
 type uploadCall struct {
@@ -189,8 +189,8 @@ func testDomainMapper() meta.RESTMapper {
 	m := meta.NewDefaultRESTMapper(nil)
 	m.Add(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}, meta.RESTScopeNamespace)
-	m.Add(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
-	m.Add(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"}, meta.RESTScopeNamespace)
 
 	return m
 }
@@ -447,7 +447,7 @@ func buildDomainDataLeafArchive(t *testing.T) string {
 
 	leafDir := childDir(root, "DemoVirtualDiskSnapshot", "dvd-snap-1")
 	writeArchiveNode(t, leafDir, archiveNode{
-		apiVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		kind:       "DemoVirtualDiskSnapshot",
 		name:       "dvd-snap-1",
 		namespace:  "src",
@@ -545,7 +545,7 @@ func TestRun_ManifestOnlyDomainNode_Imports(t *testing.T) {
 
 	demo := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
 	writeArchiveNode(t, demo, archiveNode{
-		apiVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		kind:       "DemoVirtualMachineSnapshot",
 		name:       "vm-1",
 	})
@@ -609,7 +609,7 @@ func TestRun_SelectedNode_ManifestOnlyDomainNodeFails(t *testing.T) {
 
 	demo := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
 	writeArchiveNode(t, demo, archiveNode{
-		apiVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		kind:       "DemoVirtualMachineSnapshot",
 		name:       "vm-1",
 	})
@@ -769,7 +769,7 @@ func buildThreeLevelArchive(t *testing.T) string {
 
 	domain := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
 	writeArchiveNode(t, domain, archiveNode{
-		apiVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		kind:       "DemoVirtualMachineSnapshot",
 		name:       "vm-1",
 		namespace:  "src",
@@ -1328,7 +1328,7 @@ func buildAggregatorWithDomainLeafArchive(t *testing.T) string {
 
 	aggDir := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
 	writeArchiveNode(t, aggDir, archiveNode{
-		apiVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		kind:       "DemoVirtualMachineSnapshot",
 		name:       "vm-1",
 		namespace:  "src",
@@ -1336,7 +1336,7 @@ func buildAggregatorWithDomainLeafArchive(t *testing.T) string {
 
 	leafDir := childDir(aggDir, "DemoVirtualDiskSnapshot", "dvd-1")
 	writeArchiveNode(t, leafDir, archiveNode{
-		apiVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		kind:       "DemoVirtualDiskSnapshot",
 		name:       "dvd-1",
 		namespace:  "src",
