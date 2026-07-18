@@ -68,8 +68,8 @@ const (
 	CoreSubresourcesVersion = "v1alpha1"
 
 	// DomainSubresourcesGroupPrefix is prepended to a domain snapshot's API group to
-	// address its aggregated subresources group (e.g. "demo.state-snapshotter.deckhouse.io"
-	// -> "subresources.demo.state-snapshotter.deckhouse.io").
+	// address its aggregated subresources group (e.g. "sds-unified-snapshots-poc.deckhouse.io"
+	// -> "subresources.sds-unified-snapshots-poc.deckhouse.io").
 	DomainSubresourcesGroupPrefix = "subresources."
 
 	// VSConnectorGroup is the generic-PVC extended VolumeSnapshot connector subresource group.

@@ -1180,19 +1180,19 @@ func testMapperWithDomain() meta.RESTMapper {
 		{Group: "", Version: "v1"},
 		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"},
 		{Group: "snapshot.storage.k8s.io", Version: "v1"},
-		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1"},
+		{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1"},
 	})
 	base.Add(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
 	base.Add(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolumeClaim"}, meta.RESTScopeNamespace)
 	base.Add(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, meta.RESTScopeNamespace)
 	base.Add(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolume"}, meta.RESTScopeRoot)
 	base.Add(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}, meta.RESTScopeNamespace)
-	base.Add(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
+	base.Add(schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
 
 	return &kindSearchMapper{
 		RESTMapper: base,
 		kindToGVK: map[string]schema.GroupVersionKind{
-			"DemoVirtualDiskSnapshot": {Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"},
+			"DemoVirtualDiskSnapshot": {Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"},
 		},
 	}
 }
@@ -1245,7 +1245,7 @@ func TestRun_SelectedNode_UsesNodeRef(t *testing.T) {
 	}
 
 	wantRef := aggapi.NodeRef{
-		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		Kind:       "DemoVirtualDiskSnapshot",
 		Name:       "nss-child-abc123",
 		Namespace:  testNS,
