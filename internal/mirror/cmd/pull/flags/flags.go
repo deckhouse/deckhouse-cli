@@ -104,7 +104,7 @@ func AddFlags(flagSet *pflag.FlagSet) {
 		&SourceRegistryRepo,
 		"source",
 		EnterpriseEditionRepo,
-		"Source registry to pull Deckhouse images from.",
+		"Source registry to pull Deckhouse images from (format: registry-host[:port]/path).",
 	)
 	flagSet.StringVar(
 		&SourceRegistryLogin,

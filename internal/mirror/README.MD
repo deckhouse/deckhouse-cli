@@ -323,7 +323,7 @@ d8 mirror push <images-bundle-path> <registry> [flags]
 ### Arguments
 
 - `<images-bundle-path>` - Path to the directory containing the bundle created by `d8 mirror pull`
-- `<registry>` - Target registry address (format: `registry-host[:port]/path`)
+- `<registry>` - Target registry address (format: `registry-host[:port]/path`, e.g. `registry.corp.local:5000/deckhouse`)
 
 ### Flags
 
