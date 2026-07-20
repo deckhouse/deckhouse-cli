@@ -64,7 +64,8 @@ func TestImportMarkerCR_VolumeSnapshot(t *testing.T) {
 	}
 
 	// CSI VolumeSnapshot leaves use the same unified marker as every other node; the leaf no
-	// longer names its DataImport (matched server-side by targetRef reverse-lookup instead).
+	// longer names its DataImport (matched server-side by a spec.snapshotRef
+	// (apiVersion/kind/name) reverse-lookup instead).
 	assertImportMarker(t, obj)
 }
 
@@ -132,7 +133,8 @@ func TestImportMarkerCR_DomainDataLeaf(t *testing.T) {
 	}
 
 	// Domain data leaves use the unified marker too; the captured-source identity is no longer
-	// mirrored onto the marker (the DataImport carries it via targetRef).
+	// mirrored onto the marker (the DataImport carries it via spec.snapshotRef
+	// (apiVersion/kind/name)).
 	assertImportMarker(t, obj)
 }
 

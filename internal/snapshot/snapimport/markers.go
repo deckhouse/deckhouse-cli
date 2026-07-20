@@ -80,8 +80,8 @@ func (n PlannedNode) isDomainAggregator() bool {
 // mode off this field. Core Snapshot trees and domain aggregators are materialised
 // server-side from the uploaded manifests + child refs (the genericbinder aggregates the
 // children's SnapshotContents); data leaves additionally stream their volume bytes, matched
-// to their DataImport by a reverse-lookup on the DataImport's targetRef (group/kind/name);
-// manifest-only domain nodes materialise from manifests alone.
+// to their DataImport by a reverse-lookup on the DataImport's spec.snapshotRef
+// (apiVersion/kind/name); manifest-only domain nodes materialise from manifests alone.
 func importMarkerCR(node PlannedNode, namespace string) (*unstructured.Unstructured, error) {
 	obj := &unstructured.Unstructured{}
 	obj.SetAPIVersion(node.APIVersion)
