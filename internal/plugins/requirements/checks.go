@@ -86,7 +86,8 @@ func HasClusterRequirements(plugin *internal.Plugin) bool {
 		requirements.Deckhouse.Constraint != "" ||
 		len(requirements.Modules.Mandatory) > 0 ||
 		len(requirements.Modules.Conditional) > 0 ||
-		len(requirements.Modules.AnyOf) > 0
+		len(requirements.Modules.AnyOf) > 0 ||
+		len(requirements.Modules.NoneOf) > 0
 }
 
 // normalizedForConstraint prepares a version for constraint matching.
@@ -177,7 +178,8 @@ func (c *Checker) validateDeckhouseRequirement(plugin *internal.Plugin, state *C
 // validateModuleRequirement enforces module requirements against the cluster:
 //   - Mandatory: the module must be enabled and satisfy its version constraint;
 //   - Conditional: checked only when the module is enabled;
-//   - AnyOf: at least one module in each group must be enabled and satisfy its constraint.
+//   - AnyOf: at least one module in each group must be enabled and satisfy its constraint;
+//   - NoneOf: no module in any group may be enabled within its forbidden version range.
 func (c *Checker) validateModuleRequirement(plugin *internal.Plugin, state *ClusterState) error {
 	for _, requirement := range plugin.Requirements.Modules.Mandatory {
 		module, enabled := enabledModule(state, requirement.Name)
@@ -203,6 +205,12 @@ func (c *Checker) validateModuleRequirement(plugin *internal.Plugin, state *Clus
 
 	for index, group := range plugin.Requirements.Modules.AnyOf {
 		if err := c.checkAnyOfModules(plugin.Name, index, group, state); err != nil {
+			return err
+		}
+	}
+
+	for index, group := range plugin.Requirements.Modules.NoneOf {
+		if err := c.checkNoneOfModules(plugin.Name, index, group, state); err != nil {
 			return err
 		}
 	}
@@ -270,7 +278,7 @@ func (c *Checker) checkModuleConstraint(pluginName string, requirement internal.
 // An enabled-but-unversioned module does NOT satisfy a versioned alternative here
 // (unlike the mandatory/conditional paths): another candidate may be verifiable.
 // A malformed constraint is operational and propagates, not swallowed as "none satisfied".
-func (c *Checker) checkAnyOfModules(pluginName string, index int, group internal.AnyOfGroup, state *ClusterState) error {
+func (c *Checker) checkAnyOfModules(pluginName string, index int, group internal.ModuleGroup, state *ClusterState) error {
 	if len(group.Modules) == 0 {
 		return nil
 	}
@@ -295,11 +303,52 @@ func (c *Checker) checkAnyOfModules(pluginName string, index int, group internal
 		}
 	}
 
-	description := group.Description
-	if description == "" {
-		description = fmt.Sprintf("group %d", index)
+	return unmetf("plugin %s requires at least one of [%s] (%s), but none is satisfied",
+		pluginName, strings.Join(names, ", "), groupID(group.Name, index))
+}
+
+// groupID returns a stable identifier for a requirement group in diagnostics:
+// the group's (required) name, with a positional fallback for a group built
+// without one (e.g. in tests, which bypass contract validation).
+func groupID(name string, index int) string {
+	if name == "" {
+		return fmt.Sprintf("group %d", index)
 	}
 
-	return unmetf("plugin %s requires at least one of [%s] (%s), but none is satisfied",
-		pluginName, strings.Join(names, ", "), description)
+	return name
+}
+
+// checkNoneOfModules fails if any module in the group is enabled and its version
+// falls in the forbidden range. An empty member constraint forbids the module at
+// any version. An enabled module that reports no version is skipped with a warning
+// when a version constraint is set (it cannot be judged). A malformed constraint is
+// operational and propagates, not swallowed as "not forbidden".
+func (c *Checker) checkNoneOfModules(pluginName string, index int, group internal.ModuleGroup, state *ClusterState) error {
+	for _, requirement := range group.Modules {
+		module, enabled := enabledModule(state, requirement.Name)
+		if !enabled {
+			continue
+		}
+
+		forbidden, versionKnown, err := evaluateModuleVersion(requirement, module)
+		if err != nil {
+			return err
+		}
+
+		if !versionKnown {
+			c.logger.Warn("skipping noneOf version check: module reports no version",
+				slog.String("plugin", pluginName),
+				slog.String("module", requirement.Name),
+				slog.String("constraint", requirement.Constraint))
+
+			continue
+		}
+
+		if forbidden {
+			return unmetf("plugin %s forbids module %q (%s), but it is enabled in the cluster",
+				pluginName, requirement.Name, groupID(group.Name, index))
+		}
+	}
+
+	return nil
 }

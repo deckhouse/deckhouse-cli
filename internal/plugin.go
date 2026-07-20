@@ -69,9 +69,12 @@ type PluginRequirement struct {
 	Constraint string
 }
 
-// AnyOfGroup represents an "at least one of" group of module requirements.
-// Description is used in user-facing error messages.
-type AnyOfGroup struct {
+// ModuleGroup is a named group of module requirements, shared by the AnyOf and
+// NoneOf buckets of ModuleRequirementsGroup (bucket semantics are documented
+// there). Name is a required, stable identifier used in diagnostics; Description
+// is optional human-facing text.
+type ModuleGroup struct {
+	Name        string
 	Description string
 	Modules     []ModuleRequirement
 }
@@ -84,12 +87,16 @@ type PluginRequirementsGroup struct {
 	Conditional []PluginRequirement
 }
 
-// ModuleRequirementsGroup splits module requirements into Mandatory, Conditional, and AnyOf.
+// ModuleRequirementsGroup splits module requirements into Mandatory, Conditional,
+// AnyOf, and NoneOf.
 //   - Mandatory: the module must be enabled AND satisfy the constraint.
 //   - Conditional: only enforced if the module is enabled.
 //   - AnyOf: at least one module per group must be enabled and satisfy its constraint.
+//   - NoneOf: no module in any group may be enabled (a member constraint, if set,
+//     narrows the forbidden version range).
 type ModuleRequirementsGroup struct {
 	Mandatory   []ModuleRequirement
 	Conditional []ModuleRequirement
-	AnyOf       []AnyOfGroup
+	AnyOf       []ModuleGroup
+	NoneOf      []ModuleGroup
 }

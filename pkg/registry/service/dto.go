@@ -66,10 +66,11 @@ type PluginRequirementDTO struct {
 	Constraint string `json:"constraint"`
 }
 
-// AnyOfGroupDTO represents an "at least one of" group of module requirements.
-// The Description is surfaced in user-facing error messages when no module in
-// the group satisfies the constraint.
-type AnyOfGroupDTO struct {
+// ModuleGroupDTO is a named group of module requirements (JSON DTO), shared by
+// the anyOf and noneOf buckets. Name is a required, stable identifier used in
+// diagnostics; Description is optional human-facing text.
+type ModuleGroupDTO struct {
+	Name        string                 `json:"name"`
 	Description string                 `json:"description,omitempty"`
 	Modules     []ModuleRequirementDTO `json:"modules,omitempty"`
 }
@@ -82,9 +83,10 @@ type PluginRequirementsGroupDTO struct {
 }
 
 // ModuleRequirementsGroupDTO splits module requirements into Mandatory,
-// Conditional, and AnyOf sections.
+// Conditional, AnyOf, and NoneOf sections.
 type ModuleRequirementsGroupDTO struct {
 	Mandatory   []ModuleRequirementDTO `json:"mandatory,omitempty"`
 	Conditional []ModuleRequirementDTO `json:"conditional,omitempty"`
-	AnyOf       []AnyOfGroupDTO        `json:"anyOf,omitempty"`
+	AnyOf       []ModuleGroupDTO       `json:"anyOf,omitempty"`
+	NoneOf      []ModuleGroupDTO       `json:"noneOf,omitempty"`
 }

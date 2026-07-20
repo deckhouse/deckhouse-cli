@@ -184,7 +184,10 @@ func contractFromBytes(raw []byte, pluginName, tag string) (*internal.Plugin, er
 		return nil, fmt.Errorf("decode contract for plugin %q: %w", pluginName, err)
 	}
 
-	plugin := service.ContractToDomain(&dto)
+	plugin, err := service.ContractToDomain(&dto)
+	if err != nil {
+		return nil, fmt.Errorf("decode contract for plugin %q: %w", pluginName, err)
+	}
 
 	if plugin.Name == "" {
 		plugin.Name = pluginName
