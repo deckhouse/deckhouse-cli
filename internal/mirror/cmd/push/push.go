@@ -257,8 +257,9 @@ func (p *Pusher) executeNewPush() error {
 	svc := mirror.NewPushService(
 		client,
 		&mirror.PushServiceOptions{
-			Packages:   Packages,
-			WorkingDir: p.pushParams.WorkingDir,
+			Packages:          Packages,
+			WorkingDir:        p.pushParams.WorkingDir,
+			ModulesPathSuffix: p.pushParams.ModulesPathSuffix,
 		},
 		logger.Named("push"),
 		p.logger.(*log.SLogger),

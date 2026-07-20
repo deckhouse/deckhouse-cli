@@ -50,6 +50,10 @@ type PushServiceOptions struct {
 	Packages []string
 	// WorkingDir is the temporary directory for unpacking bundles
 	WorkingDir string
+	// ModulesPathSuffix is the registry path suffix to push modules to,
+	// relative to the target repo. Empty value keeps the default "modules".
+	// Leading and trailing slashes are ignored.
+	ModulesPathSuffix string
 }
 
 // PushService handles pushing OCI layouts to registry.
@@ -153,6 +157,17 @@ func (svc *PushService) Push(ctx context.Context) error {
 	return svc.userLogger.Process("Create packages index", func() error {
 		return svc.createPackagesIndex(ctx, dirPath)
 	})
+}
+
+// modulesSegment returns the registry path segment for module repositories.
+// Derived from ModulesPathSuffix; empty result means modules go to the repo root.
+func (svc *PushService) modulesSegment() string {
+	// Zero value keeps the default: only an explicit "/" means the repo root.
+	if svc.options.ModulesPathSuffix == "" {
+		return internal.ModulesSegment
+	}
+
+	return strings.Trim(svc.options.ModulesPathSuffix, "/")
 }
 
 // unpackAllPackages unpacks all tar packages into the unified directory.
