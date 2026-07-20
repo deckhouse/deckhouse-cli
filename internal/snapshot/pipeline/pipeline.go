@@ -238,12 +238,7 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]streamHandle {
 	nStreams := 0
 
 	for _, t := range tasks {
-		n := t.node
-
-		switch {
-		case n.Binding != nil:
-			nStreams++
-		case len(n.OwnDataRefs) == 1:
+		if t.node.Data != nil {
 			nStreams++
 		}
 	}
@@ -258,33 +253,20 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]streamHandle {
 	for _, t := range tasks {
 		node := t.node
 
-		switch {
-		case node.Binding != nil:
-			// Orphan VolumeSnapshot leaf: one stream keyed on the node, name = leaf ref name.
-			s := cfg.Progress.NewStream(node.Ref().Name, 0)
+		// A node that captured its own volume (status.data present) gets one stream keyed
+		// on the node; aggregator/manifest-only nodes get none.
+		if node.Data == nil {
+			continue
+		}
 
-			if t.done {
-				s.Done()
+		s := cfg.Progress.NewStream(node.Ref().Name, 0)
 
-				out[streamKey{node: node}] = streamHandle{stream: s}
-			} else {
-				out[streamKey{node: node}] = streamHandle{stream: s, seeded: seedStreamFromDisk(cfg, s, t.nodeDir)}
-			}
+		if t.done {
+			s.Done()
 
-		case len(node.OwnDataRefs) == 1:
-			// Non-aggregator with a single volume: one stream keyed on the node.
-			s := cfg.Progress.NewStream(node.Ref().Name, 0)
-
-			if t.done {
-				s.Done()
-
-				out[streamKey{node: node}] = streamHandle{stream: s}
-			} else {
-				out[streamKey{node: node}] = streamHandle{stream: s, seeded: seedStreamFromDisk(cfg, s, t.nodeDir)}
-			}
-
-		default:
-			// Aggregator/manifest-only nodes: no stream.
+			out[streamKey{node: node}] = streamHandle{stream: s}
+		} else {
+			out[streamKey{node: node}] = streamHandle{stream: s, seeded: seedStreamFromDisk(cfg, s, t.nodeDir)}
 		}
 	}
 
@@ -586,15 +568,15 @@ func redirectDuplicateSubtree(task nodeTask, first *source.Node, log *slog.Logge
 	return redirected, nil
 }
 
-// nodeCollisionShort derives a stable 8-hex collision suffix from a node's own
-// CR identity (kind/namespace/name). It is deterministic — not random and not a
-// data checksum — so within-run duplicate redirection lands on the same path on
-// every run, letting a resumed run recompute the path and resume the node's own
-// partial data (inv. #10b). It mirrors archive.identityMarkerShort's construction
-// (NUL-joined identity fields, first 8 hex of sha256 via archive.ShortChecksum).
+// nodeCollisionShort derives a stable 8-hex collision suffix from a node's own snapshot CR
+// identity (apiVersion/kind/name/namespace/uid — the canonical snapshot identity). It is
+// deterministic — not random and not a data checksum — so within-run duplicate redirection
+// lands on the same path on every run, letting a resumed run recompute the path and resume
+// the node's own partial data (inv. #10b). It mirrors archive.identityMarkerShort's
+// construction (NUL-joined identity fields, first 8 hex of sha256 via archive.ShortChecksum).
 func nodeCollisionShort(node *source.Node) string {
 	sum := sha256.Sum256([]byte(strings.Join(
-		[]string{node.Kind, node.Namespace, node.Name}, "\x00")))
+		[]string{node.APIVersion, node.Kind, node.Name, node.Namespace, string(node.UID)}, "\x00")))
 
 	return archive.ShortChecksum(fmt.Sprintf("%x", sum[:]))
 }
@@ -668,23 +650,19 @@ func buildSubtreeScaffold(outputDir string, selected *source.Node, ancestors []*
 	return selectedDir, nil
 }
 
-// nodeDirOf returns the directory-name component for node. It returns node.SourceName
-// when set and falls back to node.Name, mirroring the DirName logic in nodeIdentity.
+// nodeDirOf returns the directory-name component for node: the captured source object name
+// (status.sourceRef.name) when set, falling back to the CR name. Mirrors node.DirBaseName.
 func nodeDirOf(node *source.Node) string {
-	if node.SourceName != "" {
-		return node.SourceName
-	}
-
-	return node.Name
+	return node.DirBaseName()
 }
 
 // processNode executes all download and finalization steps for one node task.
 // It is called concurrently by the worker pool.
 //
-// Volume nodes (task.node.Binding != nil) are handled by processVolumeNode.
-// Snapshot nodes with OwnDataRefs download their own volume data directly into
-// the node directory (flat for 1 ref; multi-volume for >1). Aggregator snapshot
-// nodes (no OwnDataRefs, may have orphan leaf children) write manifests only.
+// Volume-leaf nodes (task.node.IsVolumeLeaf()) are handled by processVolumeNode.
+// Snapshot nodes that captured their own volume (task.node.Data != nil) download that
+// volume directly into the node directory (flat layout). Aggregator snapshot nodes
+// (no own data, may have volume-leaf children) write manifests only.
 func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[streamKey]streamHandle) error {
 	if task.done {
 		// Streams for done nodes were already marked Done in precreateStreams.
@@ -700,7 +678,7 @@ func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[str
 		slog.String("name", task.node.Name),
 		slog.String("resume_state", string(task.observed)))
 
-	if task.node.Binding != nil {
+	if task.node.IsVolumeLeaf() {
 		return processVolumeNode(ctx, cfg, task, streams)
 	}
 
@@ -714,9 +692,9 @@ func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[str
 		return fmt.Errorf("write manifests for %s/%s: %w", task.node.Kind, task.node.Name, err)
 	}
 
-	if len(task.node.OwnDataRefs) > 0 {
-		if err := downloadOwnDataRefs(ctx, cfg, task.node, task.nodeDir, streams); err != nil {
-			return fmt.Errorf("download own volumes for %s/%s: %w", task.node.Kind, task.node.Name, err)
+	if task.node.Data != nil {
+		if err := downloadOwnData(ctx, cfg, task.node, task.nodeDir, streams); err != nil {
+			return fmt.Errorf("download own volume for %s/%s: %w", task.node.Kind, task.node.Name, err)
 		}
 	}
 
@@ -731,10 +709,10 @@ func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[str
 	return nil
 }
 
-// processVolumeNode handles a volume node (task.node.Binding != nil).
+// processVolumeNode handles a volume-leaf node (task.node.IsVolumeLeaf()).
 // It writes the captured PVC manifest, applies the block-resume guard, downloads
 // the volume data, and finalizes the node directory.
-// Volume nodes are always leaves: no snapshots/ subdirectory is created.
+// Volume-leaf nodes are always leaves: no snapshots/ subdirectory is created.
 func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams map[streamKey]streamHandle) error {
 	if err := ensureNodeSubdirs(task.nodeDir, nodeIdentity(task.node), false); err != nil {
 		return fmt.Errorf("ensure subdirs for %s/%s: %w", task.node.Kind, task.node.Name, err)
@@ -799,31 +777,20 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 	return nil
 }
 
-// downloadOwnDataRefs downloads the OwnDataRef volume for a non-aggregator
-// snapshot node into nodeDir using the flat layout — data.bin[.<ext>] /
-// data.tar directly in nodeDir, with the block-resume guard (skip if any
-// data.bin* file already exists).
+// downloadOwnData downloads the node's own captured volume (status.data) into nodeDir
+// using the flat layout — data.bin[.<ext>] / data.tar directly in nodeDir, with the
+// block-resume guard (skip if any data.bin* file already exists).
 //
-// Variant A (decision #9, .agent/implementer-prompt.md:125-140) guarantees a
-// SnapshotContent carries AT MOST ONE dataRef, so refs has length 0 or 1 in
-// every real payload. len(refs) > 1 is therefore a contract violation from an
-// unexpected producer, not a supported multi-volume layout — reject it loudly
-// instead of guessing at a per-pvc destination.
-func downloadOwnDataRefs(
+// Variant A guarantees a node carries AT MOST ONE captured volume (status.data,
+// cardinality ≤1); a nil descriptor is a no-op.
+func downloadOwnData(
 	ctx context.Context,
 	cfg Config,
 	node *source.Node,
 	nodeDir string,
 	streams map[streamKey]streamHandle,
 ) error {
-	refs := node.OwnDataRefs
-
-	if len(refs) > 1 {
-		return fmt.Errorf("node %s/%s carries %d dataRefs but Variant A allows at most one per SnapshotContent (see decision #9); refusing to guess a multi-volume layout",
-			node.Kind, node.Name, len(refs))
-	}
-
-	if len(refs) == 0 {
+	if node.Data == nil {
 		return nil
 	}
 
@@ -1258,23 +1225,18 @@ func skipSeededBytes(seeded int64, onProgress func(n int)) func(n int) {
 }
 
 // nodeIdentity converts a source.Node into an archive.NodeIdentity for resume scanning.
-// DirName is set to node.SourceName (the captured object name from the source-ref
-// annotation) when available, falling back to the CR name for nodes without a
-// source annotation. The on-disk directory derives from DirName; identity
-// matching (snapshot.yaml fields) always uses Name (the CR name) and SourceRef.
+// DirName is the readable on-disk directory base (the captured source object name from
+// status.sourceRef, falling back to the CR name; see node.DirBaseName). Identity matching
+// (snapshot.yaml fields) uses the snapshot CR identity — APIVersion/Kind/Name/Namespace and
+// the CR UID — so two nodes that share a source-name dir base never alias on disk.
 func nodeIdentity(node *source.Node) archive.NodeIdentity {
-	dirName := node.SourceName
-	if dirName == "" {
-		dirName = node.Name
-	}
-
 	return archive.NodeIdentity{
 		APIVersion: node.APIVersion,
 		Kind:       node.Kind,
 		Name:       node.Name,
-		DirName:    dirName,
+		DirName:    node.DirBaseName(),
 		Namespace:  node.Namespace,
-		SourceRef:  node.SourceRef,
+		UID:        string(node.UID),
 	}
 }
 

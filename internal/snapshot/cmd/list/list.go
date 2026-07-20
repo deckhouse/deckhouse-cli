@@ -60,7 +60,7 @@ const (
 // with the accepted formats; tests use errors.Is.
 var errUnsupportedFormat = errors.New("unsupported output format")
 
-// snapshotGVR is the dynamic resource for storage.deckhouse.io Snapshots.
+// snapshotGVR is the dynamic resource for state-snapshotter.deckhouse.io Snapshots.
 var snapshotGVR = schema.GroupVersionResource{
 	Group:    snapshotapi.StorageGroup,
 	Version:  snapshotapi.Version,

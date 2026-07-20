@@ -55,11 +55,11 @@ func TestSnapshotYAML_RoundTrip_WithoutVolume(t *testing.T) {
 	}
 
 	want := archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-1",
 		Namespace:  "ns-a",
-		SourceRef:  "vm/my-vm",
+		UID:        "vm/my-vm",
 		Checksum:   checksum,
 	}
 
@@ -88,8 +88,8 @@ func TestSnapshotYAML_RoundTrip_WithoutVolume(t *testing.T) {
 		t.Errorf("Namespace: got %q, want %q", got.Namespace, want.Namespace)
 	}
 
-	if got.SourceRef != want.SourceRef {
-		t.Errorf("SourceRef: got %q, want %q", got.SourceRef, want.SourceRef)
+	if got.UID != want.UID {
+		t.Errorf("UID: got %q, want %q", got.UID, want.UID)
 	}
 
 	if got.Checksum.Hex != want.Checksum.Hex {
@@ -191,7 +191,7 @@ func TestSnapshotYAML_RoundTrip_MultiVolume(t *testing.T) {
 	}
 
 	want := archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "multi-snap",
 		Checksum:   checksum,
@@ -236,7 +236,7 @@ func TestSnapshotYAML_OmitemptyVolume(t *testing.T) {
 
 	// Snapshot node: Volume is nil → must be omitted from YAML output.
 	sy := archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-omit",
 		Checksum:   checksum,
@@ -267,11 +267,11 @@ func TestSnapshotYAML_RoundTrip_WithSourceName(t *testing.T) {
 	}
 
 	want := archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-2",
 		Namespace:  "ns-b",
-		SourceRef:  `{"apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns-b","name":"my-pvc","uid":"uid-xyz"}`,
+		UID:        `{"apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns-b","name":"my-pvc","uid":"uid-xyz"}`,
 		SourceName: "my-pvc",
 		Checksum:   checksum,
 	}
@@ -302,7 +302,7 @@ func TestSnapshotYAML_OmitemptySourceName(t *testing.T) {
 
 	// SourceName empty → must be absent from YAML output.
 	sy := archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-omit-sn",
 		Checksum:   checksum,
@@ -336,7 +336,7 @@ func TestSnapshotYAML_ChecksumUnaffectedBySourceNameField(t *testing.T) {
 	}
 
 	sy := archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-sn-regression",
 		SourceName: "some-vm",
@@ -428,7 +428,7 @@ func TestSnapshotYAML_OmitemptySourceObjectRef(t *testing.T) {
 	}
 
 	sy := archive.SnapshotYAML{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-omit-sor",
 		Checksum:   checksum,

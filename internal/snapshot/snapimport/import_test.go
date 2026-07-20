@@ -45,8 +45,7 @@ import (
 const targetNS = "dst"
 
 var (
-	snapshotGVR        = schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshots"}
-	contentGVR         = schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents"}
+	snapshotGVR        = schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshots"}
 	volumeSnapshotGVRt = schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
 	demoDiskSnapGVR    = schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots"}
 	demoVMSnapGVR      = schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots"}
@@ -108,7 +107,7 @@ func (s *stubVolumes) UploadVolumeData(_ context.Context, leaf PlannedNode, _, _
 
 func testMapper() meta.RESTMapper {
 	m := meta.NewDefaultRESTMapper(nil)
-	m.Add(schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}, meta.RESTScopeNamespace)
 
 	return m
@@ -130,7 +129,6 @@ func readyConditions(types ...string) []interface{} {
 func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	gvrToListKind := map[schema.GroupVersionResource]string{
 		snapshotGVR:        "SnapshotList",
-		contentGVR:         "SnapshotContentList",
 		volumeSnapshotGVRt: "VolumeSnapshotList",
 		demoDiskSnapGVR:    "DemoVirtualDiskSnapshotList",
 		demoVMSnapGVR:      "DemoVirtualMachineSnapshotList",
@@ -143,7 +141,7 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 // drive domain data leaves can resolve their resource plural via the RESTMapper.
 func testDomainMapper() meta.RESTMapper {
 	m := meta.NewDefaultRESTMapper(nil)
-	m.Add(schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"}, meta.RESTScopeNamespace)
@@ -155,28 +153,16 @@ const rootSnapshotUID = "root-uid"
 
 func readyRootSnapshot() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata":   map[string]interface{}{"namespace": targetNS, "name": "root", "uid": rootSnapshotUID},
 		// An import-mode root that the controller has already materialized to Ready: it keeps
-		// its spec.source.import marker, so ensureMarker reconciles (not rejects) it on re-run.
+		// its spec.mode: Import marker, so ensureMarker reconciles (not rejects) it on re-run.
 		"spec": map[string]interface{}{
-			"source": map[string]interface{}{"import": map[string]interface{}{}},
+			"mode": "Import",
 		},
 		"status": map[string]interface{}{
-			"boundSnapshotContentName": "content-root",
-			"conditions":               readyConditions("Ready"),
-		},
-	}}
-}
-
-func readyContent() *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
-		"kind":       "SnapshotContent",
-		"metadata":   map[string]interface{}{"name": "content-root"},
-		"status": map[string]interface{}{
-			"conditions": readyConditions("ManifestsReady", "VolumesReady", "ChildrenReady", "Ready"),
+			"conditions": readyConditions("Ready"),
 		},
 	}}
 }
@@ -201,7 +187,7 @@ func TestRun_ImportsBottomUp(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	if err := Run(context.Background(), baseConfig(root, up, vol, dyn)); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -258,7 +244,7 @@ func TestRun_UploadsAllManifestsBeforeData(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{uploader: up, manifestsAtFirstEnsure: -1}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	if err := Run(context.Background(), baseConfig(root, up, vol, dyn)); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -273,7 +259,7 @@ func TestRun_UploadsAllManifestsBeforeData(t *testing.T) {
 func TestRun_LeafCarriesParentOwnerRef(t *testing.T) {
 	root := buildTwoLevelArchive(t)
 
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	if err := Run(context.Background(), baseConfig(root, &stubUploader{}, &stubVolumes{}, dyn)); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -290,8 +276,8 @@ func TestRun_LeafCarriesParentOwnerRef(t *testing.T) {
 	}
 
 	ref := refs[0]
-	if ref.Kind != "Snapshot" || ref.Name != "root" || ref.APIVersion != "storage.deckhouse.io/v1alpha1" {
-		t.Errorf("leaf parent ownerRef = %s/%s (%s), want Snapshot/root (storage.deckhouse.io/v1alpha1)", ref.Kind, ref.Name, ref.APIVersion)
+	if ref.Kind != "Snapshot" || ref.Name != "root" || ref.APIVersion != "state-snapshotter.deckhouse.io/v1alpha1" {
+		t.Errorf("leaf parent ownerRef = %s/%s (%s), want Snapshot/root (state-snapshotter.deckhouse.io/v1alpha1)", ref.Kind, ref.Name, ref.APIVersion)
 	}
 
 	if ref.UID != rootSnapshotUID {
@@ -311,7 +297,7 @@ func TestRun_LeafCarriesParentOwnerRef(t *testing.T) {
 func TestPreflight_FilesystemDataPasses(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 	})
@@ -329,7 +315,7 @@ func TestPreflight_FilesystemDataPasses(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	if err := Run(context.Background(), baseConfig(root, up, vol, dyn)); err != nil {
 		t.Fatalf("filesystem-data leaf must pass preflight and allow Run to succeed, got: %v", err)
@@ -353,7 +339,7 @@ func TestPreflight_FilesystemDataPasses(t *testing.T) {
 func TestRun_LeafWithoutBlockDataFailsFast(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 	})
@@ -369,7 +355,7 @@ func TestRun_LeafWithoutBlockDataFailsFast(t *testing.T) {
 	up := &stubUploader{}
 	vol := &stubVolumes{}
 
-	err := Run(context.Background(), baseConfig(root, up, vol, newFakeDynamic(readyRootSnapshot(), readyContent())))
+	err := Run(context.Background(), baseConfig(root, up, vol, newFakeDynamic(readyRootSnapshot())))
 	if err == nil {
 		t.Fatal("expected missing-block-data error, got nil")
 	}
@@ -383,7 +369,7 @@ func TestRun_LeafManifestsArrayShape(t *testing.T) {
 	root := buildTwoLevelArchive(t)
 
 	up := &stubUploader{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	if err := Run(context.Background(), baseConfig(root, up, &stubVolumes{}, dyn)); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -407,7 +393,7 @@ func buildDomainDataLeafArchive(t *testing.T) string {
 	root := t.TempDir()
 
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 		namespace:  "src",
@@ -439,7 +425,7 @@ func TestRun_DomainDataLeaf_EndToEnd(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, vol, dyn)
 	cfg.Mapper = testDomainMapper()
@@ -476,8 +462,8 @@ func TestRun_DomainDataLeaf_EndToEnd(t *testing.T) {
 		t.Fatalf("DemoVirtualDiskSnapshot import CR not created: %v", err)
 	}
 
-	if _, found, _ := unstructured.NestedMap(leafObj.Object, "spec", "source", "import"); !found {
-		t.Error("domain leaf marker must set spec.source.import: {}")
+	if mode, _, _ := unstructured.NestedString(leafObj.Object, "spec", "mode"); mode != "Import" {
+		t.Errorf("domain leaf marker must set spec.mode: Import, got %q", mode)
 	}
 
 	// The domain leaf carries a child->parent ownerRef pointing to the root Snapshot.
@@ -497,41 +483,16 @@ func TestRun_DomainDataLeaf_EndToEnd(t *testing.T) {
 	}
 }
 
-// TestLeafTargetRef_DomainLeaf verifies that leafTargetRef derives the targetRef
-// group/resource for a domain data leaf: group comes from its apiVersion and the plural
-// resource is resolved via the RESTMapper.
-func TestLeafTargetRef_DomainLeaf(t *testing.T) {
-	leaf := PlannedNode{
-		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
-		Kind:       "DemoVirtualDiskSnapshot",
-		Name:       "dvd-snap-1",
-		DataFile:   "/archive/data.bin",
-	}
-
-	group, resource, err := leafTargetRef(leaf, testDomainMapper())
-	if err != nil {
-		t.Fatalf("leafTargetRef: %v", err)
-	}
-
-	if group != "demo.state-snapshotter.deckhouse.io" {
-		t.Errorf("group = %q, want demo.state-snapshotter.deckhouse.io", group)
-	}
-
-	if resource != "demovirtualdisksnapshots" {
-		t.Errorf("resource = %q, want demovirtualdisksnapshots", resource)
-	}
-}
-
 // TestRun_ManifestOnlyDomainNode_Imports verifies that a manifest-only domain node — a
 // domain snapshot with neither volume data nor child snapshots (e.g. a disk-less
 // DemoVirtualMachineSnapshot) — is client-importable: it gets the unified
-// spec.source.import: {} marker, its manifests are uploaded, it carries a controller-owned
+// spec.mode: Import marker, its manifests are uploaded, it carries a controller-owned
 // child->parent ownerRef, and no DataImport is created (it has no data leg). It is
 // import-equivalent to a structural Snapshot child.
 func TestRun_ManifestOnlyDomainNode_Imports(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 	})
@@ -545,7 +506,7 @@ func TestRun_ManifestOnlyDomainNode_Imports(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, vol, dyn)
 	cfg.Mapper = testDomainMapper()
@@ -574,8 +535,8 @@ func TestRun_ManifestOnlyDomainNode_Imports(t *testing.T) {
 		t.Fatalf("DemoVirtualMachineSnapshot import CR not created: %v", err)
 	}
 
-	if _, found, _ := unstructured.NestedMap(vmObj.Object, "spec", "source", "import"); !found {
-		t.Error("manifest-only domain node marker must set spec.source.import: {}")
+	if mode, _, _ := unstructured.NestedString(vmObj.Object, "spec", "mode"); mode != "Import" {
+		t.Errorf("manifest-only domain node marker must set spec.mode: Import, got %q", mode)
 	}
 
 	// It carries a controller-owned child->parent ownerRef pointing to the root Snapshot.
@@ -595,7 +556,7 @@ func TestRun_ManifestOnlyDomainNode_Imports(t *testing.T) {
 func TestRun_SelectedNode_ManifestOnlyDomainNodeFails(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 	})
@@ -609,7 +570,7 @@ func TestRun_SelectedNode_ManifestOnlyDomainNodeFails(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, vol, dyn)
 	cfg.Mapper = testDomainMapper()
@@ -649,7 +610,7 @@ func TestRun_RootMustBeSnapshot(t *testing.T) {
 
 func captureModeRootSnapshot() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata":   map[string]interface{}{"namespace": targetNS, "name": "root", "uid": "capture-uid"},
 		// A live capture-mode Snapshot (no import marker) that merely shares the import name.
@@ -711,7 +672,7 @@ func TestRun_Validation(t *testing.T) {
 
 func ownerRef(name, uid string) metav1.OwnerReference {
 	return metav1.OwnerReference{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       name,
 		UID:        types.UID(uid),
@@ -754,7 +715,7 @@ func buildThreeLevelArchive(t *testing.T) string {
 	root := t.TempDir()
 
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 		namespace:  "src",
@@ -781,30 +742,18 @@ func buildThreeLevelArchive(t *testing.T) string {
 }
 
 // readyImportLeafVS returns a CSI VolumeSnapshot in import mode that the controller has
-// already bound, so waitLeafReady can read its status.boundSnapshotContentName.
+// already materialized to Ready, so waitLeafReady observes its own namespaced Ready
+// condition (no cluster-scoped SnapshotContent read).
 func readyImportLeafVS() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "snapshot.storage.k8s.io/v1",
 		"kind":       "VolumeSnapshot",
 		"metadata":   map[string]interface{}{"namespace": targetNS, "name": "pvc-1", "uid": "vs-uid"},
 		"spec": map[string]interface{}{
-			"source": map[string]interface{}{"import": map[string]interface{}{}},
+			"mode": "Import",
 		},
 		"status": map[string]interface{}{
-			"boundSnapshotContentName": "content-leaf",
-		},
-	}}
-}
-
-// readyLeafContent returns a SnapshotContent (for a single data-leaf import) with all
-// four readiness conditions True.
-func readyLeafContent() *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
-		"kind":       "SnapshotContent",
-		"metadata":   map[string]interface{}{"name": "content-leaf"},
-		"status": map[string]interface{}{
-			"conditions": readyConditions("ManifestsReady", "VolumesReady", "ChildrenReady", "Ready"),
+			"conditions": readyConditions("Ready"),
 		},
 	}}
 }
@@ -903,7 +852,7 @@ func TestRun_SelectedNode_AggregatorFails(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, vol, dyn)
 	cfg.SelectedNodeKind = "DemoVirtualMachineSnapshot"
@@ -935,7 +884,7 @@ func TestRun_SelectedNode_SingleLeafWorks(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyImportLeafVS(), readyLeafContent())
+	dyn := newFakeDynamic(readyImportLeafVS())
 
 	cfg := baseConfig(leafDir, up, vol, dyn)
 	cfg.SelectedNodeKind = "VolumeSnapshot"
@@ -962,7 +911,7 @@ func TestRun_SelectedNode_UnknownNodeFails(t *testing.T) {
 	root := buildTwoLevelArchive(t)
 
 	up := &stubUploader{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, &stubVolumes{}, dyn)
 	cfg.SelectedNodeKind = "Snapshot"
@@ -986,7 +935,7 @@ func buildMultiLeafArchive(t *testing.T, n int) (string, []string) {
 	root := t.TempDir()
 
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 		namespace:  "src",
@@ -1066,7 +1015,7 @@ func TestRun_Pass2b_ConcurrencyBounded(t *testing.T) {
 
 	vol := &concStubVolumes{}
 	up := &stubUploader{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, vol, dyn)
 	cfg.Workers = workers
@@ -1126,7 +1075,7 @@ func TestRun_Pass2b_ErrorCancelsSiblings(t *testing.T) {
 
 	vol := &errorOnceStubVolumes{errorLeaf: "leaf-0"}
 	up := &stubUploader{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(root, up, vol, dyn)
 	cfg.Workers = 2 // both leaves start simultaneously
@@ -1325,7 +1274,7 @@ func buildAggregatorWithDomainLeafArchive(t *testing.T) string {
 	root := t.TempDir()
 
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 		namespace:  "src",
@@ -1382,7 +1331,7 @@ func TestRun_FullAggregatorImport(t *testing.T) {
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
-	dyn := newFakeDynamic(readyRootSnapshot(), readyContent())
+	dyn := newFakeDynamic(readyRootSnapshot())
 
 	cfg := baseConfig(archiveRoot, up, vol, dyn)
 	cfg.Mapper = testDomainMapper()

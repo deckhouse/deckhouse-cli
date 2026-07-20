@@ -35,20 +35,14 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
+	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 )
 
 const (
 	defaultTimeout      = 20 * time.Minute
 	defaultPollInterval = 3 * time.Second
 	defaultWorkers      = 5
-
-	condManifestsReady = "ManifestsReady"
-	condVolumesReady   = "VolumesReady"
-	condChildrenReady  = "ChildrenReady"
 )
-
-// snapshotContentGVR is the cluster-scoped core SnapshotContent resource.
-var snapshotContentGVR = schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents"}
 
 // ManifestUploader posts a node's manifests-and-children-refs-upload payload. It is
 // satisfied by *aggapi.Client and stubbed in tests.
@@ -285,7 +279,12 @@ func preflightNamespace(ctx context.Context, cfg Config, plan []PlannedNode) err
 			return fmt.Errorf("checking namespace for %s/%s: %w", node.Kind, node.Name, getErr)
 		}
 
-		if !isImportModeMarker(obj) {
+		imp, markerErr := isImportModeMarker(obj)
+		if markerErr != nil {
+			return markerErr
+		}
+
+		if !imp {
 			conflicts = append(conflicts, fmt.Sprintf("%s %s", node.Kind, node.Name))
 		}
 	}
@@ -320,7 +319,7 @@ func (cfg Config) resourceInterface(mapping *meta.RESTMapping) dynamic.ResourceI
 
 // createMarkers creates every import-mode CR top-down (reverse post-order = parents before
 // children) so a child's parent already exists and exposes a UID. Every marker is the same
-// minimal spec.source.import: {} CR; for data leaves the DataImport itself is created bottom-up
+// minimal spec.mode: Import CR; for data leaves the DataImport itself is created bottom-up
 // in pass 2 immediately before the upload (so its idle TTL does not start ticking while earlier
 // siblings are still uploading) and is later matched to the leaf by its targetRef.
 func (cfg Config) createMarkers(ctx context.Context, plan []PlannedNode, parents map[string]int) error {
@@ -416,6 +415,7 @@ func importNodeData(ctx context.Context, cfg Config, node PlannedNode) error {
 // from each node's recorded direct child refs.
 func buildParentIndex(plan []PlannedNode) map[string]int {
 	idx := make(map[string]int)
+
 	for i := range plan {
 		for _, c := range plan[i].Children {
 			idx[refKey(c.APIVersion, c.Kind, c.Name)] = i
@@ -534,21 +534,46 @@ func (cfg Config) ensureMarker(ctx context.Context, obj *unstructured.Unstructur
 // that merely shares the name) so importing into a populated namespace cannot mutate live
 // production objects; only then does it reconcile the child->parent ownerRefs.
 func reconcileExistingMarker(ctx context.Context, ri dynamic.ResourceInterface, existing *unstructured.Unstructured, desired []metav1.OwnerReference) (types.UID, error) {
-	if !isImportModeMarker(existing) {
+	imp, err := isImportModeMarker(existing)
+	if err != nil {
+		return "", err
+	}
+
+	if !imp {
 		return "", fmt.Errorf("%s %s/%s already exists and is not in import mode "+
-			"(spec.source.import is not set); refusing to mutate a pre-existing "+
-			"object — import into a fresh namespace", existing.GetKind(), existing.GetNamespace(), existing.GetName())
+			"(spec.mode is not %q); refusing to mutate a pre-existing "+
+			"object — import into a fresh namespace",
+			existing.GetKind(), existing.GetNamespace(), existing.GetName(), snapshotapi.SnapshotModeImport)
 	}
 
 	return reconcileMarkerOwnerRefs(ctx, ri, existing, desired)
 }
 
-// isImportModeMarker reports whether a live CR is an import-mode marker. All node kinds use
-// the unified marker spec.source.import: {}, so its mere presence identifies an import-mode CR.
-func isImportModeMarker(obj *unstructured.Unstructured) bool {
-	_, found, _ := unstructured.NestedMap(obj.Object, "spec", "source", "import")
+// isImportModeMarker reports whether a live CR is an import-mode marker. Import mode is keyed
+// off spec.mode: absent or "Capture" is capture mode (not an import marker); "Import" is an
+// import marker. It is fail-closed: any other value, or a non-string spec.mode, is a malformed
+// object and returns an error rather than being silently classified as capture mode.
+func isImportModeMarker(obj *unstructured.Unstructured) (bool, error) {
+	mode, found, err := unstructured.NestedString(obj.Object, "spec", "mode")
+	if err != nil {
+		return false, fmt.Errorf("%s %s/%s: spec.mode is not a string: %w",
+			obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
+	}
 
-	return found
+	if !found || mode == "" {
+		return false, nil
+	}
+
+	switch snapshotapi.SnapshotMode(mode) {
+	case snapshotapi.SnapshotModeCapture:
+		return false, nil
+	case snapshotapi.SnapshotModeImport:
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s %s/%s: spec.mode %q is invalid (want %q or %q)",
+			obj.GetKind(), obj.GetNamespace(), obj.GetName(), mode,
+			snapshotapi.SnapshotModeCapture, snapshotapi.SnapshotModeImport)
+	}
 }
 
 // reconcileMarkerOwnerRefs patches any desired child->parent ownerRef a previous partial
@@ -631,12 +656,14 @@ func boolPtrEqual(a, b *bool) bool {
 	return *a == *b
 }
 
-// waitRootReady blocks until the import root is fully materialised:
-//   - core Snapshot: wait for Snapshot Ready=True then its bound SnapshotContent all-legs Ready.
-//   - CSI VolumeSnapshot leaf (single-leaf subtree import): wait for the leaf's bound
-//     SnapshotContent to report all-legs Ready.
-//   - domain data leaf: wait for the leaf's bound SnapshotContent to report all-legs Ready
-//     (uses the domain leaf's own GVR resolved via cfg.Mapper).
+// waitRootReady blocks until the import root reports its namespaced Ready condition True.
+// Readiness is observed solely on the namespaced snapshot CR (status.conditions Ready) — the
+// cluster-scoped SnapshotContent is never read. The Ready condition on the root aggregates
+// the whole imported subtree, so a single namespaced Get per poll is sufficient:
+//   - core Snapshot: wait for the Snapshot's Ready=True (aggregates the full tree).
+//   - CSI VolumeSnapshot leaf (single-leaf subtree import): wait for the leaf's Ready=True.
+//   - domain data leaf: wait for the leaf's Ready=True (uses the domain leaf's own GVR
+//     resolved via cfg.Mapper).
 func waitRootReady(ctx context.Context, cfg Config, root PlannedNode) error {
 	if root.isVolumeSnapshotLeaf() {
 		return waitLeafReady(ctx, cfg, root)
@@ -651,84 +678,30 @@ func waitRootReady(ctx context.Context, cfg Config, root PlannedNode) error {
 		return err
 	}
 
-	cfg.Log.Info("waiting for root Snapshot to become Ready", slog.String("name", root.Name))
-
-	content, err := waitSnapshotReady(ctx, cfg, gvr, root.Name)
-	if err != nil {
-		return err
-	}
-
-	return waitSnapshotContentReady(ctx, cfg, content)
+	return waitNamespacedReady(ctx, cfg, gvr, root.Name, snapshotKind)
 }
 
-// waitLeafReady waits for a CSI VolumeSnapshot leaf's bound SnapshotContent to become Ready.
-// It first polls the leaf VolumeSnapshot until status.boundSnapshotContentName is populated,
-// then delegates to waitSnapshotContentReady. Used when the import root is a single data leaf.
+// waitLeafReady waits for a CSI VolumeSnapshot leaf to report its namespaced Ready=True.
+// Used when the import root is a single data leaf. The cluster-scoped SnapshotContent is
+// never read.
 func waitLeafReady(ctx context.Context, cfg Config, leaf PlannedNode) error {
 	gvr, err := cfg.volumeSnapshotResource()
 	if err != nil {
 		return err
 	}
 
-	cfg.Log.Info("waiting for leaf VolumeSnapshot to become bound", slog.String("name", leaf.Name))
-
-	deadline := time.Now().Add(cfg.Timeout)
-
-	for {
-		vs, getErr := cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace).Get(ctx, leaf.Name, metav1.GetOptions{})
-		if getErr != nil {
-			return fmt.Errorf("get VolumeSnapshot %s/%s: %w", cfg.Namespace, leaf.Name, getErr)
-		}
-
-		content, _, _ := unstructured.NestedString(vs.Object, "status", "boundSnapshotContentName")
-		if content != "" {
-			return waitSnapshotContentReady(ctx, cfg, content)
-		}
-
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for VolumeSnapshot %s/%s to become bound", cfg.Namespace, leaf.Name)
-		}
-
-		if !sleepCtx(ctx, cfg.PollInterval) {
-			return ctx.Err()
-		}
-	}
+	return waitNamespacedReady(ctx, cfg, gvr, leaf.Name, volumeSnapshotKind)
 }
 
-// waitDomainLeafReady waits for a domain data leaf's bound SnapshotContent to become Ready.
-// It resolves the leaf's GVR via cfg.Mapper, polls the leaf until
-// status.boundSnapshotContentName is populated, then delegates to waitSnapshotContentReady.
+// waitDomainLeafReady waits for a domain data leaf to report its namespaced Ready=True.
+// It resolves the leaf's GVR via cfg.Mapper. The cluster-scoped SnapshotContent is never read.
 func waitDomainLeafReady(ctx context.Context, cfg Config, leaf PlannedNode) error {
 	gvr, err := cfg.domainLeafResource(leaf)
 	if err != nil {
 		return err
 	}
 
-	cfg.Log.Info("waiting for domain data leaf to become bound",
-		slog.String("kind", leaf.Kind),
-		slog.String("name", leaf.Name))
-
-	deadline := time.Now().Add(cfg.Timeout)
-
-	for {
-		obj, getErr := cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace).Get(ctx, leaf.Name, metav1.GetOptions{})
-		if getErr != nil {
-			return fmt.Errorf("get %s %s/%s: %w", leaf.Kind, cfg.Namespace, leaf.Name, getErr)
-		}
-
-		content, _, _ := unstructured.NestedString(obj.Object, "status", "boundSnapshotContentName")
-		if content != "" {
-			return waitSnapshotContentReady(ctx, cfg, content)
-		}
-
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for %s %s/%s to become bound", leaf.Kind, cfg.Namespace, leaf.Name)
-		}
-
-		if !sleepCtx(ctx, cfg.PollInterval) {
-			return ctx.Err()
-		}
-	}
+	return waitNamespacedReady(ctx, cfg, gvr, leaf.Name, leaf.Kind)
 }
 
 // domainLeafResource resolves the namespaced GVR for a domain data leaf using cfg.Mapper.
@@ -746,58 +719,59 @@ func (cfg Config) domainLeafResource(leaf PlannedNode) (schema.GroupVersionResou
 	return mapping.Resource, nil
 }
 
-// waitSnapshotReady waits for the Snapshot to be Ready=True and returns its bound
-// SnapshotContent name.
-func waitSnapshotReady(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, name string) (string, error) {
-	deadline := time.Now().Add(cfg.Timeout)
-
-	for {
-		snap, err := cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return "", fmt.Errorf("get Snapshot %s/%s: %w", cfg.Namespace, name, err)
-		}
-
-		if conditionTrue(snap, conditionReady) {
-			content, _, _ := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
-			if content != "" {
-				return content, nil
-			}
-		}
-
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("timeout waiting for Snapshot %s/%s to become Ready", cfg.Namespace, name)
-		}
-
-		if !sleepCtx(ctx, cfg.PollInterval) {
-			return "", ctx.Err()
-		}
-	}
-}
-
-// waitSnapshotContentReady waits for the cluster-scoped SnapshotContent to report all
-// readiness legs True.
-func waitSnapshotContentReady(ctx context.Context, cfg Config, name string) error {
-	cfg.Log.Info("waiting for SnapshotContent to become Ready", slog.String("name", name))
+// waitNamespacedReady polls the namespaced CR gvr/name and applies the readiness contract
+// established by read-only analysis of state-snapshotter / storage-foundation (see
+// docs/2026-06-29-unified-snapshots-overview.md and the stage-2 plan, §5.B / Appendix A):
+//
+//   - Ready.status == True                                   -> success.
+//   - captureState.domainSpecificController.phase == Failed  -> immediate error (monotonic
+//     terminal sink on the capture path; the domain reason is free-form and shown as-is).
+//   - Ready.status == False AND reason is terminal
+//     (terminalReadyReasons: enum + import-leaf terminals)   -> immediate error.
+//   - anything else (Ready absent / False with a non-terminal reason such as ImportPending,
+//     ChildrenPending, DataCapturePending, … / Unknown)      -> keep waiting until timeout.
+//
+// Ready=False is NOT an error by itself: the controller uses it for both in-progress and
+// terminal states, distinguished by reason/phase. The aggregated Ready on the snapshot CR
+// reflects the whole imported (sub)tree, so a single namespaced Get per poll is sufficient
+// and no cluster-scoped SnapshotContent is ever read. kind is used only for log/error text.
+func waitNamespacedReady(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, name, kind string) error {
+	cfg.Log.Info("waiting for resource to become Ready",
+		slog.String("kind", kind),
+		slog.String("name", name))
 
 	deadline := time.Now().Add(cfg.Timeout)
 
 	for {
-		content, err := cfg.Dynamic.Resource(snapshotContentGVR).Get(ctx, name, metav1.GetOptions{})
+		obj, err := cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
-			return fmt.Errorf("get SnapshotContent %s: %w", name, err)
+			return fmt.Errorf("get %s %s/%s: %w", kind, cfg.Namespace, name, err)
 		}
 
-		if conditionTrue(content, condManifestsReady) &&
-			conditionTrue(content, condVolumesReady) &&
-			conditionTrue(content, condChildrenReady) &&
-			conditionTrue(content, conditionReady) {
-			cfg.Log.Info("SnapshotContent is Ready", slog.String("name", name))
+		status, reason, message := readyConditionState(obj)
+
+		if status == string(metav1.ConditionTrue) {
+			cfg.Log.Info("resource is Ready", slog.String("kind", kind), slog.String("name", name))
 
 			return nil
 		}
 
+		// Terminal capture sink: fail fast instead of waiting out the timeout. Absent on
+		// import-mode objects (no captureState), so this is a no-op for the import path.
+		if domainCapturePhase(obj) == capturePhaseFailed {
+			return fmt.Errorf("%s %s/%s failed: captureState.domainSpecificController.phase=Failed (Ready reason=%q: %s)",
+				kind, cfg.Namespace, name, reason, message)
+		}
+
+		// Terminal Ready reason (enum + import-leaf terminals): fail fast.
+		if status == string(metav1.ConditionFalse) && isTerminalReadyReason(reason) {
+			return fmt.Errorf("%s %s/%s failed: Ready=False reason=%q: %s",
+				kind, cfg.Namespace, name, reason, message)
+		}
+
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for SnapshotContent %s to become Ready", name)
+			return fmt.Errorf("timeout waiting for %s %s/%s to become Ready (last Ready status=%q reason=%q: %s)",
+				kind, cfg.Namespace, name, status, reason, message)
 		}
 
 		if !sleepCtx(ctx, cfg.PollInterval) {

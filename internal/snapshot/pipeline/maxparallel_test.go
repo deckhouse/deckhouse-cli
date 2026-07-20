@@ -26,12 +26,10 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
-	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
@@ -207,70 +205,34 @@ func buildCapTestClient(t *testing.T, nVolumes int) client.Client {
 
 	scheme := buildScheme(t)
 
-	children := make([]snapshotapi.SnapshotChildRef, 0, nVolumes)
-
+	children := make([]map[string]interface{}, 0, nVolumes)
 	for i := 0; i < nVolumes; i++ {
-		children = append(children, snapshotapi.SnapshotChildRef{
-			APIVersion: capTestAPIVer,
-			Kind:       capTestKind,
-			Name:       fmt.Sprintf("cap-disk-%d", i),
-		})
+		children = append(children, childRefMap(capTestAPIVer, capTestKind, fmt.Sprintf("cap-disk-%d", i)))
 	}
 
-	rootSnap := &snapshotapi.Snapshot{
-		TypeMeta: metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "Snapshot"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      capTestRootSnap,
-			Namespace: capTestNS,
-		},
-		Status: snapshotapi.SnapshotStatus{
-			BoundSnapshotContentName: "cap-sc-root",
-			ChildrenSnapshotRefs:     children,
-		},
-	}
+	root := snapObj{
+		apiVersion: storageAPIVersion, kind: "Snapshot",
+		namespace: capTestNS, name: capTestRootSnap, uid: "uid-cap-root",
+		sourceRef: namespaceSourceRefMap(capTestNS, "uid-cap-ns"),
+		children:  children,
+	}.build()
 
-	rootContent := &snapshotapi.SnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: "cap-sc-root"},
-	}
-
-	typed := []client.Object{rootSnap, rootContent}
-	unstructuredObjs := make([]client.Object, 0, nVolumes*2)
+	objs := []client.Object{root}
 
 	for i := 0; i < nVolumes; i++ {
 		diskName := fmt.Sprintf("cap-disk-%d", i)
-		contentName := fmt.Sprintf("cap-sc-%d", i)
 
-		leafSnap := makeUnstructuredSnap(capTestAPIVer, capTestKind, capTestNS, diskName, contentName)
+		leafSnap := snapObj{
+			apiVersion: capTestAPIVer, kind: capTestKind,
+			namespace: capTestNS, name: diskName, uid: fmt.Sprintf("uid-cap-snap-%d", i),
+			data: pvcData(capTestNS, fmt.Sprintf("pvc-cap-%d", i), fmt.Sprintf("uid-cap-%d", i), fmt.Sprintf("vsc-cap-%d", i)),
+		}.build()
 
-		leafContent := &snapshotapi.SnapshotContent{
-			TypeMeta:   metav1.TypeMeta{APIVersion: storageAPIVersion, Kind: "SnapshotContent"},
-			ObjectMeta: metav1.ObjectMeta{Name: contentName},
-			Status: snapshotapi.SnapshotContentStatus{
-				DataRef: &snapshotapi.SnapshotDataBinding{
-					TargetUID: fmt.Sprintf("uid-cap-%d", i),
-					Target: snapshotapi.SnapshotSubjectRef{
-						APIVersion: "v1",
-						Kind:       "PersistentVolumeClaim",
-						Namespace:  capTestNS,
-						Name:       fmt.Sprintf("pvc-cap-%d", i),
-					},
-					Artifact: snapshotapi.SnapshotDataArtifactRef{
-						APIVersion: "snapshot.storage.k8s.io/v1",
-						Kind:       "VolumeSnapshotContent",
-						Name:       fmt.Sprintf("vsc-cap-%d", i),
-					},
-				},
-			},
-		}
-
-		typed = append(typed, leafContent)
-		unstructuredObjs = append(unstructuredObjs, leafSnap)
+		objs = append(objs, leafSnap)
 	}
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(typed...).
-		WithObjects(unstructuredObjs...).
+		WithObjects(objs...).
 		Build()
 }

@@ -200,7 +200,7 @@ func TestPutBlock_RejectsOversizeServerOffset(t *testing.T) {
 func completedDataImportObj(namespace, name string) *unstructured.Unstructured {
 	obj := dataImportObj(namespace, name, false)
 	_ = unstructured.SetNestedSlice(obj.Object, readyConditions(conditionCompleted), "status", "conditions")
-	_ = unstructured.SetNestedMap(obj.Object, map[string]interface{}{"name": "vsc-1"}, "status", "dataArtifactRef")
+	_ = unstructured.SetNestedMap(obj.Object, map[string]interface{}{"name": "vsc-1"}, "status", "data", "artifact")
 
 	return obj
 }
@@ -290,18 +290,20 @@ func TestEnsureDataImport_ReusesHealthy(t *testing.T) {
 	}
 }
 
-// volumeSnapshotLeaf builds a CSI VolumeSnapshot data leaf carrying the captured artifact
-// kind that EnsureDataImport sends as the Mode A DataImport's spec.dataArtifactType.
+// volumeSnapshotLeaf builds a CSI VolumeSnapshot data leaf carrying the captured scratch-volume
+// parameters EnsureDataImport sends as the PopulateData DataImport's spec.storageParams.
 func volumeSnapshotLeaf(name string) PlannedNode {
 	return PlannedNode{
-		APIVersion:   "snapshot.storage.k8s.io/v1",
-		Kind:         "VolumeSnapshot",
-		Name:         name,
-		ArtifactKind: "VolumeSnapshotContent",
+		APIVersion:       "snapshot.storage.k8s.io/v1",
+		Kind:             "VolumeSnapshot",
+		Name:             name,
+		StorageClassName: "sc-fast",
+		Size:             "10Gi",
+		VolumeMode:       "Block",
 	}
 }
 
-func TestEnsureDataImport_BuildsModeASpec(t *testing.T) {
+func TestEnsureDataImport_BuildsPopulateDataSpec(t *testing.T) {
 	leaf := volumeSnapshotLeaf("pvc-1")
 
 	dyn := newFakeDataImportDyn()
@@ -316,49 +318,50 @@ func TestEnsureDataImport_BuildsModeASpec(t *testing.T) {
 		t.Fatalf("created DataImport not found: %v", err)
 	}
 
-	if v, _, _ := unstructured.NestedString(got.Object, "spec", "dataArtifactType"); v != "VolumeSnapshotContent" {
-		t.Errorf("spec.dataArtifactType = %q, want VolumeSnapshotContent", v)
+	if v, _, _ := unstructured.NestedString(got.Object, "spec", "mode"); v != "PopulateData" {
+		t.Errorf("spec.mode = %q, want PopulateData", v)
 	}
 
-	if _, found, _ := unstructured.NestedString(got.Object, "spec", "storageClassName"); found {
-		t.Error("spec.storageClassName must not be set (controller derives it from the captured PVC manifest)")
+	apiVersion, _, _ := unstructured.NestedString(got.Object, "spec", "snapshotRef", "apiVersion")
+	kind, _, _ := unstructured.NestedString(got.Object, "spec", "snapshotRef", "kind")
+	refName, _, _ := unstructured.NestedString(got.Object, "spec", "snapshotRef", "name")
+
+	if apiVersion != "snapshot.storage.k8s.io/v1" || kind != "VolumeSnapshot" || refName != "pvc-1" {
+		t.Errorf("snapshotRef = {apiVersion:%q, kind:%q, name:%q}, want {snapshot.storage.k8s.io/v1, VolumeSnapshot, pvc-1}", apiVersion, kind, refName)
 	}
 
-	if _, found, _ := unstructured.NestedString(got.Object, "spec", "size"); found {
-		t.Error("spec.size must not be set (controller derives it from the captured PVC manifest)")
+	sc, _, _ := unstructured.NestedString(got.Object, "spec", "storageParams", "storageClassName")
+	size, _, _ := unstructured.NestedString(got.Object, "spec", "storageParams", "size")
+	volumeMode, _, _ := unstructured.NestedString(got.Object, "spec", "storageParams", "volumeMode")
+
+	if sc != "sc-fast" || size != "10Gi" || volumeMode != "Block" {
+		t.Errorf("storageParams = {storageClassName:%q, size:%q, volumeMode:%q}, want {sc-fast, 10Gi, Block}", sc, size, volumeMode)
 	}
 
-	if _, found, _ := unstructured.NestedString(got.Object, "spec", "volumeMode"); found {
-		t.Error("spec.volumeMode must not be set (controller derives it from the captured PVC manifest)")
+	// The obsolete Mode A fields must not be sent (the DataImport CRD prunes unknown fields).
+	if _, found, _ := unstructured.NestedString(got.Object, "spec", "dataArtifactType"); found {
+		t.Error("spec.dataArtifactType must not be set (removed from the DataImport contract)")
 	}
 
-	group, _, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "group")
-	resource, _, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "resource")
-	refName, _, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "name")
-
-	if group != "snapshot.storage.k8s.io" || resource != "volumesnapshots" || refName != "pvc-1" {
-		t.Errorf("targetRef = {group:%q, resource:%q, name:%q}, want {snapshot.storage.k8s.io, volumesnapshots, pvc-1}", group, resource, refName)
-	}
-
-	if _, found, _ := unstructured.NestedString(got.Object, "spec", "targetRef", "kind"); found {
-		t.Error("spec.targetRef.kind must not be set (targetRef is group/resource/name only)")
+	if _, found, _ := unstructured.NestedMap(got.Object, "spec", "targetRef"); found {
+		t.Error("spec.targetRef must not be set (replaced by spec.snapshotRef)")
 	}
 }
 
-func TestEnsureDataImport_RejectsMissingArtifactKind(t *testing.T) {
-	// A data leaf without an artifact kind means a malformed archive; EnsureDataImport must
-	// fail fast instead of creating an incomplete Mode A DataImport.
+func TestEnsureDataImport_RejectsMissingStorageParams(t *testing.T) {
+	// A data leaf without captured storage parameters means a malformed/stale archive;
+	// EnsureDataImport must fail fast instead of creating an incomplete PopulateData DataImport.
 	leaf := PlannedNode{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "pvc-1"}
 
 	dyn := newFakeDataImportDyn()
 	imp := newTestVolumeImporter(dyn)
 
 	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err == nil {
-		t.Fatal("expected error for missing artifact kind, got nil")
+		t.Fatal("expected error for missing storage parameters, got nil")
 	}
 
 	if c := countDataImportActions(dyn, "create"); c != 0 {
-		t.Errorf("no DataImport must be created when artifact kind is missing (creates=%d)", c)
+		t.Errorf("no DataImport must be created when storage parameters are missing (creates=%d)", c)
 	}
 }
 

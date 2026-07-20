@@ -54,7 +54,7 @@ const (
 	pollInterval       = 2 * time.Second
 )
 
-// snapshotGVR is the dynamic resource for storage.deckhouse.io Snapshots.
+// snapshotGVR is the dynamic resource for state-snapshotter.deckhouse.io Snapshots.
 var snapshotGVR = schema.GroupVersionResource{
 	Group:    snapshotapi.StorageGroup,
 	Version:  snapshotapi.Version,
@@ -267,10 +267,9 @@ func runDelete(ctx context.Context, dyn dynamic.Interface, w io.Writer, opts del
 		targets = names
 	}
 
-	var (
-		deleted []string
-		errs    []error
-	)
+	deleted := make([]string, 0, len(targets))
+
+	var errs []error
 
 	for _, name := range targets {
 		err := dyn.Resource(snapshotGVR).Namespace(opts.namespace).Delete(ctx, name, metav1.DeleteOptions{})

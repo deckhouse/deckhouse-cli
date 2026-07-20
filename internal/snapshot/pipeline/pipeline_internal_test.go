@@ -25,8 +25,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
 
-	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
 )
@@ -48,14 +48,28 @@ func dedupeTestLogger() *slog.Logger {
 // object name. Two children sharing sourceName (and kind) map to the same
 // on-disk directory — the collision this task guards against.
 func dedupeChild(name, sourceName string) *source.Node {
+	src := source.SourceRefIdentity{
+		APIVersion: "v1",
+		Kind:       "PersistentVolumeClaim",
+		Namespace:  dedupeNS,
+		Name:       sourceName,
+		UID:        "src-uid-" + name,
+	}
+
 	return &source.Node{
 		APIVersion: dedupeChildAPI,
 		Kind:       dedupeChildKind,
 		Name:       name,
 		Namespace:  dedupeNS,
-		SourceName: sourceName,
-		OwnDataRefs: []snapshotapi.SnapshotDataBinding{
-			{Target: snapshotapi.SnapshotSubjectRef{Name: sourceName}},
+		UID:        types.UID("uid-" + name),
+		SourceRef:  &src,
+		Data: &source.NodeData{
+			Source: src,
+			Artifact: source.ArtifactRef{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshotContent",
+				Name:       "vsc-" + name,
+			},
 		},
 	}
 }
@@ -101,7 +115,7 @@ func taskFor(t *testing.T, tasks []nodeTask, node *source.Node) nodeTask {
 	return nodeTask{}
 }
 
-const storageAPIVersion = "storage.deckhouse.io/v1alpha1"
+const storageAPIVersion = "state-snapshotter.deckhouse.io/v1alpha1"
 
 // childSnapshotsDir is the snapshots/ directory holding child node dirs directly
 // under the root output directory.
@@ -219,55 +233,19 @@ func TestDedupeSiblingTargetDirs_ResumesPartialCollisionDir(t *testing.T) {
 		"the redirect re-scans the collision dir's real contents and observes its in-progress block staging")
 }
 
-// TestDownloadOwnDataRefs_MultiRef_RejectedByGuard pins the NO-DEAD-STATE guard
-// added for the Variant-A contract (decision #9, .agent/implementer-prompt.md:125-140):
-// a SnapshotContent carries at most one dataRef in every real payload, so
-// len(node.OwnDataRefs) > 1 can only happen if an unexpected producer payload
-// violates the contract. downloadOwnDataRefs must reject that with a loud,
-// descriptive error instead of silently guessing at a per-pvc multi-volume
-// layout — and must do so before touching the filesystem or opening any
-// DataExport.
-//
-// This is an internal (package pipeline) test because downloadOwnDataRefs is
-// unexported; pipeline_test.go's external package cannot reach it directly.
-func TestDownloadOwnDataRefs_MultiRef_RejectedByGuard(t *testing.T) {
-	t.Parallel()
-
-	node := &source.Node{
-		Kind: "Snapshot",
-		Name: "multi",
-		OwnDataRefs: []snapshotapi.SnapshotDataBinding{
-			{Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-a"}},
-			{Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-b"}},
-		},
-	}
-
-	cfg := applyDefaults(Config{})
-	nodeDir := t.TempDir()
-
-	err := downloadOwnDataRefs(context.Background(), cfg, node, nodeDir, nil)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "2 dataRefs", "error must name the offending dataRef count")
-	require.Contains(t, err.Error(), "Snapshot/multi", "error must identify the offending node")
-
-	entries, readErr := os.ReadDir(nodeDir)
-	require.NoError(t, readErr)
-	require.Empty(t, entries, "guard must return before any download attempt touches nodeDir")
-}
-
-// TestDownloadOwnDataRefs_ZeroRefs_IsNoop verifies the len(refs) == 0 branch
-// (unreachable from processNode today, which only calls downloadOwnDataRefs
-// when len(node.OwnDataRefs) > 0, but downloadOwnDataRefs must still behave
-// defensively if called directly) returns cleanly with no error and no
-// filesystem side effects.
-func TestDownloadOwnDataRefs_ZeroRefs_IsNoop(t *testing.T) {
+// TestDownloadOwnData_NilData_IsNoop verifies the node.Data == nil branch (unreachable
+// from processNode today, which only calls downloadOwnData when node.Data != nil, but
+// downloadOwnData must still behave defensively if called directly): it returns cleanly
+// with no error and no filesystem side effects. Variant A makes a node's captured volume a
+// single pointer (status.data, cardinality ≤1), so no multi-volume guard is possible.
+func TestDownloadOwnData_NilData_IsNoop(t *testing.T) {
 	t.Parallel()
 
 	node := &source.Node{Kind: "Snapshot", Name: "empty"}
 	cfg := applyDefaults(Config{})
 	nodeDir := t.TempDir()
 
-	err := downloadOwnDataRefs(context.Background(), cfg, node, nodeDir, nil)
+	err := downloadOwnData(context.Background(), cfg, node, nodeDir, nil)
 	require.NoError(t, err)
 
 	entries, readErr := os.ReadDir(nodeDir)

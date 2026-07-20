@@ -29,7 +29,7 @@ import (
 // It records the snapshot CR identity and the locally-computed integrity checksum.
 // sigs.k8s.io/yaml uses json struct tags for marshaling and unmarshaling.
 type SnapshotYAML struct {
-	// APIVersion is the apiVersion of the snapshot CR (e.g. "storage.deckhouse.io/v1alpha1").
+	// APIVersion is the apiVersion of the snapshot CR (e.g. "state-snapshotter.deckhouse.io/v1alpha1").
 	APIVersion string `json:"apiVersion"`
 	// Kind is the kind of the snapshot CR (e.g. "Snapshot", "DemoVirtualDiskSnapshot").
 	Kind string `json:"kind"`
@@ -37,13 +37,16 @@ type SnapshotYAML struct {
 	Name string `json:"name"`
 	// Namespace is the namespace of the snapshot CR. Omitted for cluster-scoped resources.
 	Namespace string `json:"namespace,omitempty"`
-	// SourceRef carries the source-ref annotation from the snapshot CR, recording
-	// the identity of the original captured object.
-	SourceRef string `json:"sourceRef,omitempty"`
-	// SourceName is the .name field from the source-ref annotation — the Kubernetes
-	// metadata.name of the original captured object. Omitted when empty (root node,
-	// annotation absent, or parse error). Does not affect ComputeNodeChecksum because
-	// snapshot.yaml is excluded from the integrity digest.
+	// UID is the metadata.uid of the snapshot CR. It is the identity component the resume
+	// scan matches (matchesIdentity), tying a node directory to the exact snapshot CR
+	// (including UID) rather than to the source-object name. Does not affect
+	// ComputeNodeChecksum because snapshot.yaml is excluded from the integrity digest.
+	UID string `json:"uid,omitempty"`
+	// SourceName is the metadata.name of the original captured source object
+	// (status.sourceRef.name), recorded for readability. Omitted when the node has no
+	// source (e.g. some import nodes). It is NOT an identity component (resume uses UID)
+	// and does not affect ComputeNodeChecksum because snapshot.yaml is excluded from the
+	// integrity digest.
 	SourceName string `json:"sourceName,omitempty"`
 	// SourceObjectRef carries the structured spec.sourceRef from a domain snapshot CR
 	// ({apiVersion,kind,name} of the source object). Absent for core Snapshot nodes and
@@ -54,10 +57,9 @@ type SnapshotYAML struct {
 	Checksum NodeChecksum `json:"checksum"`
 	// Volumes lists the captured PVC volumes owned by this node.
 	//
-	//   - Snapshot nodes (non-aggregator) that own ≥1 OwnDataRefs carry one
-	//     VolumeInfo per binding.
-	//   - Orphan leaf volume nodes (Binding != nil) carry exactly one entry
-	//     derived from the single Binding.
+	//   - A node that captured its own volume (namespaced status.data present) carries
+	//     exactly one VolumeInfo (Variant A, cardinality ≤1) — this covers both
+	//     non-aggregator domain nodes and orphan leaf volume nodes.
 	//   - Aggregator snapshot nodes and purely-manifest nodes carry no volumes
 	//     and the field is omitted (omitempty).
 	//
@@ -100,20 +102,18 @@ type VolumeObjectRef struct {
 type VolumeInfo struct {
 	// Target is the source PVC that was captured (its apiVersion/kind/name/namespace/uid).
 	Target VolumeObjectRef `json:"target"`
-	// Artifact is the VolumeSnapshotContent that holds the durable data artifact. Its Kind
-	// feeds the DataImport spec.dataArtifactType when re-importing this leaf.
+	// Artifact is the VolumeSnapshotContent that held the durable data artifact at capture
+	// time. Recorded for provenance/debugging; the re-import path no longer consumes it.
 	Artifact VolumeObjectRef `json:"artifact"`
-	// VolumeMode records the source volume mode (Block or Filesystem). It is informational;
-	// the DataImport controller derives volumeMode from the leaf's captured PVC manifest on
-	// import, not from this field.
+	// VolumeMode records the source volume mode (Block or Filesystem). On re-import it is sent
+	// as the PopulateData DataImport's spec.storageParams.volumeMode (optional).
 	VolumeMode string `json:"volumeMode,omitempty"`
-	// StorageClassName records the source StorageClass of the captured volume. It is
-	// informational; the DataImport controller derives storageClassName from the leaf's
-	// captured PVC manifest on import, not from this field.
+	// StorageClassName records the source StorageClass of the captured volume. On re-import it
+	// is sent as the PopulateData DataImport's spec.storageParams.storageClassName (required).
 	StorageClassName string `json:"storageClassName,omitempty"`
 	// Size records the real allocated size of the captured volume (e.g. "10Gi"), taken from
-	// VolumeSnapshotContent.status.restoreSize. It is informational; the DataImport controller
-	// derives size from the leaf's captured PVC manifest on import, not from this field.
+	// VolumeSnapshotContent.status.restoreSize. On re-import it is sent as the PopulateData
+	// DataImport's spec.storageParams.size (required).
 	Size string `json:"size,omitempty"`
 }
 

@@ -60,7 +60,7 @@ func makeCompleteNode(t *testing.T, parent, kind, name string, id archive.NodeId
 		Kind:       id.Kind,
 		Name:       id.Name,
 		Namespace:  id.Namespace,
-		SourceRef:  id.SourceRef,
+		UID:        id.UID,
 		Checksum:   checksum,
 	}
 
@@ -109,7 +109,7 @@ func makeCompleteNodeWithBlock(t *testing.T, parent, kind, name string, id archi
 		Kind:       id.Kind,
 		Name:       id.Name,
 		Namespace:  id.Namespace,
-		SourceRef:  id.SourceRef,
+		UID:        id.UID,
 		Checksum:   checksum,
 	}
 
@@ -205,11 +205,11 @@ func TestScanNode_CompleteNodeIdentityMatch(t *testing.T) {
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
-		SourceRef:  "vd/disk-1",
+		UID:        "vd/disk-1",
 	}
 
 	makeCompleteNode(t, parent, id.Kind, id.Name, id)
@@ -237,18 +237,18 @@ func TestScanNode_CompleteNodeIdentityMatch(t *testing.T) {
 }
 
 // TestScanNode_CompleteNodeIdentityMatch_DirName verifies that when DirName differs
-// from Name the on-disk path uses DirName while identity matching uses Name+SourceRef.
+// from Name the on-disk path uses DirName while identity matching uses Name+UID.
 func TestScanNode_CompleteNodeIdentityMatch_DirName(t *testing.T) {
 	t.Parallel()
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "snap-cr-abc", // CR name — stored in snapshot.yaml, used for identity
 		DirName:    "source-disk", // on-disk dir component, derived from the source object
 		Namespace:  "default",
-		SourceRef:  `{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"VirtualDisk","name":"source-disk"}`,
+		UID:        `{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"VirtualDisk","name":"source-disk"}`,
 	}
 
 	makeCompleteNode(t, parent, id.Kind, id.Name, id)
@@ -288,22 +288,22 @@ func TestScanNode_CompleteNodeIdentityMismatch(t *testing.T) {
 
 	// existing node stored with identity A
 	idA := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
-		SourceRef:  "vd/disk-a",
+		UID:        "vd/disk-a",
 	}
 
 	makeCompleteNode(t, parent, idA.Kind, idA.Name, idA)
 
-	// planned node has identity B (different SourceRef)
+	// planned node has identity B (different UID)
 	idB := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
-		SourceRef:  "vd/disk-b",
+		UID:        "vd/disk-b",
 	}
 
 	plan, err := archive.ScanNode(parent, idB)
@@ -337,25 +337,25 @@ func TestScanNode_CollisionUseDirName(t *testing.T) {
 
 	// Existing complete node stored under the DirName-based path for identity A.
 	idA := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "snap-cr-a",
 		DirName:    "source-disk",
 		Namespace:  "default",
-		SourceRef:  "vd/disk-a",
+		UID:        "vd/disk-a",
 	}
 
 	makeCompleteNode(t, parent, idA.Kind, idA.Name, idA)
 
 	// New planned node has the same DirName (same source object name) but a
-	// different CR name and SourceRef → identity mismatch → collision redirect.
+	// different CR name and UID → identity mismatch → collision redirect.
 	idB := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "snap-cr-b",
 		DirName:    "source-disk",
 		Namespace:  "default",
-		SourceRef:  "vd/disk-b",
+		UID:        "vd/disk-b",
 	}
 
 	plan, err := archive.ScanNode(parent, idB)
@@ -688,16 +688,16 @@ func TestScanNode_PartialMismatchedMarker_Redirects(t *testing.T) {
 	parent := t.TempDir()
 
 	idA := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		DirName:    "source-disk",
 		Namespace:  "default",
-		SourceRef:  "vd/disk-a",
+		UID:        "vd/disk-a",
 	}
 	idB := idA
 	idB.Name = "disk-2"
-	idB.SourceRef = "vd/disk-b"
+	idB.UID = "vd/disk-b"
 
 	// A block-partial dir left by snapshot A (marker A), same on-disk DirName.
 	nodeDir := filepath.Join(parent, archive.NodeDirName(idA.Kind, "source-disk"))
@@ -823,7 +823,7 @@ func TestScanAbsolute_PartialMatchingMarker_Resumes(t *testing.T) {
 
 	nodeDir := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "root",
 		Namespace:  "default",
@@ -861,8 +861,8 @@ func TestScanAbsolute_PartialMismatchedMarker_Rejects(t *testing.T) {
 
 	nodeDir := t.TempDir()
 
-	idA := archive.NodeIdentity{Kind: "Snapshot", Name: "root-a", SourceRef: "a"}
-	idB := archive.NodeIdentity{Kind: "Snapshot", Name: "root-b", SourceRef: "b"}
+	idA := archive.NodeIdentity{Kind: "Snapshot", Name: "root-a", UID: "a"}
+	idB := archive.NodeIdentity{Kind: "Snapshot", Name: "root-b", UID: "b"}
 
 	writeMarker(t, nodeDir, idA)
 
@@ -903,8 +903,8 @@ func TestWriteNodeIdentityMarker_IdempotentFirstWriterWins(t *testing.T) {
 
 	dir := t.TempDir()
 
-	first := archive.NodeIdentity{Kind: "Snapshot", Name: "first", SourceRef: "s1"}
-	second := archive.NodeIdentity{Kind: "Snapshot", Name: "second", SourceRef: "s2"}
+	first := archive.NodeIdentity{Kind: "Snapshot", Name: "first", UID: "s1"}
+	second := archive.NodeIdentity{Kind: "Snapshot", Name: "second", UID: "s2"}
 
 	if err := archive.WriteNodeIdentityMarker(dir, first); err != nil {
 		t.Fatalf("first write: %v", err)
@@ -923,7 +923,7 @@ func TestWriteNodeIdentityMarker_IdempotentFirstWriterWins(t *testing.T) {
 		t.Fatal("marker must be present after write")
 	}
 
-	if marker.Name != "first" || marker.SourceRef != "s1" {
+	if marker.Name != "first" || marker.UID != "s1" {
 		t.Errorf("marker = %+v, want the first writer's identity", marker)
 	}
 }
@@ -936,7 +936,7 @@ func TestNodeIdentityMarker_DoesNotAffectChecksum(t *testing.T) {
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
@@ -976,11 +976,11 @@ func TestScanNode_ChecksumMismatch_TamperedData_SurfacesError(t *testing.T) {
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
-		SourceRef:  "vd/disk-1",
+		UID:        "vd/disk-1",
 	}
 
 	nodeDir := makeCompleteNodeWithBlock(t, parent, id.Kind, id.Name, id, []byte("original-block-bytes"))
@@ -1016,11 +1016,11 @@ func TestScanNode_ChecksumMismatch_TamperedManifest_SurfacesError(t *testing.T) 
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
-		SourceRef:  "vd/disk-1",
+		UID:        "vd/disk-1",
 	}
 
 	nodeDir := makeCompleteNode(t, parent, id.Kind, id.Name, id)
@@ -1047,12 +1047,12 @@ func TestScanNode_ChecksumMismatch_ForeignDir_Redirects(t *testing.T) {
 	parent := t.TempDir()
 
 	idA := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		DirName:    "source-disk",
 		Namespace:  "default",
-		SourceRef:  "vd/disk-a",
+		UID:        "vd/disk-a",
 	}
 
 	nodeDir := makeCompleteNodeWithBlock(t, parent, idA.Kind, idA.Name, idA, []byte("foreign-original"))
@@ -1065,7 +1065,7 @@ func TestScanNode_ChecksumMismatch_ForeignDir_Redirects(t *testing.T) {
 	// Planned node shares the on-disk DirName but has a different identity.
 	idB := idA
 	idB.Name = "disk-2"
-	idB.SourceRef = "vd/disk-b"
+	idB.UID = "vd/disk-b"
 
 	plan, err := archive.ScanNode(parent, idB)
 	if err != nil {
@@ -1090,11 +1090,11 @@ func TestScanNode_SnapshotYAMLMissing_StillResumes(t *testing.T) {
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
-		SourceRef:  "vd/disk-1",
+		UID:        "vd/disk-1",
 	}
 
 	nodeDir := makeCompleteNodeWithBlock(t, parent, id.Kind, id.Name, id, []byte("committed-block-bytes"))
@@ -1128,7 +1128,7 @@ func TestScanAbsolute_ChecksumMismatch_SurfacesError(t *testing.T) {
 	t.Parallel()
 
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "root",
 		Namespace:  "default",
@@ -1166,11 +1166,11 @@ func TestScanNode_CompleteMatchingMarker_RemovesMarker(t *testing.T) {
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
-		SourceRef:  "vd/disk-1",
+		UID:        "vd/disk-1",
 	}
 
 	nodeDir := makeCompleteNode(t, parent, id.Kind, id.Name, id)
@@ -1201,7 +1201,7 @@ func TestScanAbsolute_CompleteMatchingMarker_RemovesMarker(t *testing.T) {
 	t.Parallel()
 
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "root",
 		Namespace:  "default",
@@ -1240,12 +1240,12 @@ func TestScanNode_CompleteForeignMarker_LeavesMarker(t *testing.T) {
 	parent := t.TempDir()
 
 	idA := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-a",
 		DirName:    "source-disk",
 		Namespace:  "default",
-		SourceRef:  "vd/disk-a",
+		UID:        "vd/disk-a",
 	}
 
 	nodeDir := makeCompleteNode(t, parent, idA.Kind, idA.Name, idA)
@@ -1254,7 +1254,7 @@ func TestScanNode_CompleteForeignMarker_LeavesMarker(t *testing.T) {
 	// Planned node shares the on-disk DirName but has a different identity.
 	idB := idA
 	idB.Name = "disk-b"
-	idB.SourceRef = "vd/disk-b"
+	idB.UID = "vd/disk-b"
 
 	plan, err := archive.ScanNode(parent, idB)
 	if err != nil {
@@ -1286,11 +1286,11 @@ func TestScanAbsolute_CompleteForeignMarker_LeavesMarker(t *testing.T) {
 	t.Parallel()
 
 	idA := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "root-a",
 		Namespace:  "default",
-		SourceRef:  "a",
+		UID:        "a",
 	}
 
 	parent := t.TempDir()
@@ -1299,7 +1299,7 @@ func TestScanAbsolute_CompleteForeignMarker_LeavesMarker(t *testing.T) {
 
 	idB := idA
 	idB.Name = "root-b"
-	idB.SourceRef = "b"
+	idB.UID = "b"
 
 	_, err := archive.ScanAbsolute(nodeDir, idB)
 	if !errors.Is(err, archive.ErrIdentityMismatch) {
@@ -1324,11 +1324,11 @@ func TestScanNode_PartialMatchingMarker_LeavesMarker(t *testing.T) {
 
 	parent := t.TempDir()
 	id := archive.NodeIdentity{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "disk-1",
 		Namespace:  "default",
-		SourceRef:  "vd/disk-1",
+		UID:        "vd/disk-1",
 	}
 
 	nodeDir := filepath.Join(parent, archive.NodeDirName(id.Kind, id.Name))
