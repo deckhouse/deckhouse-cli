@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -170,6 +171,38 @@ func (svc *PushService) modulesSegment() string {
 	return strings.Trim(svc.options.ModulesPathSuffix, "/")
 }
 
+// scopeToSegment scopes the client by each non-empty component of a
+// slash-separated segment. An empty segment leaves the client at the target repo.
+func scopeToSegment(c client.Client, segment string) client.Client {
+	for _, seg := range strings.Split(segment, "/") {
+		if seg == "" {
+			continue
+		}
+
+		c = c.WithSegment(seg)
+	}
+
+	return c
+}
+
+// remapModulesSegment rewrites the leading "modules" component of a
+// slash-separated registry segment to the configured modules suffix.
+// Modules are always stored under "modules/<name>" inside the bundle, so this
+// is where --modules-path-suffix takes effect. Segments outside "modules" are
+// returned unchanged.
+func (svc *PushService) remapModulesSegment(segment string) string {
+	modulesPrefix := internal.ModulesSegment + "/"
+
+	switch {
+	case segment == internal.ModulesSegment:
+		return svc.modulesSegment()
+	case strings.HasPrefix(segment, modulesPrefix):
+		return path.Join(svc.modulesSegment(), strings.TrimPrefix(segment, modulesPrefix))
+	default:
+		return segment
+	}
+}
+
 // unpackAllPackages unpacks all tar packages into the unified directory.
 // All packages are unpacked to the same root - the structure inside each tar
 // should already have the correct paths.
@@ -309,27 +342,24 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 		return nil
 	}
 
-	// Build registry segment from relative path
+	// Build registry segment from relative path. Use slash form so the
+	// segment is registry-native and OS-independent (filepath.Rel yields
+	// OS separators on Windows).
 	relPath, _ := filepath.Rel(rootDir, layoutDir)
 
 	segment := ""
 	if relPath != "." {
-		segment = relPath
+		segment = filepath.ToSlash(relPath)
 	}
 	// support old behavior when modules stored as "module-<name>.tar"
 	if strings.HasPrefix(layoutDir, "module-") {
 		segment = internal.ModulesSegment
 	}
 
-	// Create client with appropriate segments
-	targetClient := svc.client
+	// Rewrite the leading "modules" component to honor --modules-path-suffix.
+	segment = svc.remapModulesSegment(segment)
 
-	if segment != "" {
-		// Apply each path component as a segment
-		for _, seg := range strings.Split(segment, string(os.PathSeparator)) {
-			targetClient = targetClient.WithSegment(seg)
-		}
-	}
+	targetClient := scopeToSegment(svc.client, segment)
 
 	svc.userLogger.Infof("Pushing %s", targetClient.GetRegistry())
 
@@ -391,8 +421,9 @@ func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string) 
 	slices.Sort(moduleNames)
 	svc.userLogger.Infof("Creating modules index with %d modules", len(moduleNames))
 
-	// Get client scoped to modules repo
-	modulesClient := svc.client.WithSegment(internal.ModulesSegment)
+	// Scope the client to the modules repo, honoring --modules-path-suffix.
+	// An empty suffix places discovery tags directly on the target repo.
+	modulesClient := scopeToSegment(svc.client, svc.modulesSegment())
 
 	// Push a small random image for each module with tag = module name
 	for _, moduleName := range moduleNames {
