@@ -86,21 +86,11 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
   # Download with faster compression and more concurrent workers
   d8 snapshot download my-snap -n default -o out --workers 8 --per-volume-concurrency 8
 
-  # Download block volumes with lz4 compression (faster, larger output)
-  d8 snapshot download my-snap -n default -o out --volume-compression lz4
-
-  # Download block volumes without compression
-  d8 snapshot download my-snap -n default -o out --volume-compression none
-
   # Download only a single node (disk snapshot) and its subtree
   d8 snapshot download my-snap -n default -o out --node DemoVirtualDiskSnapshot/nss-child-abc123
 
   # Download only the root snapshot (equivalent to a full download)
-  d8 snapshot download my-snap -n default -o out --node Snapshot/my-snap
-
-  # Note: filesystem volumes always produce data.tar (uncompressed container);
-  # file entries inside data.tar are individually compressed with the selected codec
-  # (codec=none writes plain uncompressed entries)`,
+  d8 snapshot download my-snap -n default -o out --node Snapshot/my-snap`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(ctx, log, cmd, args)
@@ -120,6 +110,15 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 			"); block volumes: data.bin[.<ext>]; filesystem volumes: per-file compressed entries inside an uncompressed data.tar container")
 	cmd.Flags().Int(flagVolumeCompressionLevel, 0,
 		"compression level for the selected codec (0 = codec default)")
+
+	// TODO(compression-temporarily-disabled): compression selection is withdrawn
+	// from the user contract until the codec-level bugs are fixed (see MEMORY
+	// project_snapshot_download_compression_level_bugs). Revert = remove these
+	// two Hidden=true lines, restore the flag reads in Run, and pass them to
+	// compress.New.
+	cmd.Flags().Lookup(flagVolumeCompression).Hidden = true
+	cmd.Flags().Lookup(flagVolumeCompressionLevel).Hidden = true
+
 	cmd.Flags().Bool(flagCleanup, true,
 		"delete the per-volume DataExport (and its server-side export chain) after each volume completes; --cleanup=false leaves them in the cluster for debugging")
 
@@ -202,20 +201,14 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return fmt.Errorf("parsing --%s: %w", flagChunkSize, err)
 	}
 
-	codecName, err := cmd.Flags().GetString(flagVolumeCompression)
+	// TODO(compression-temporarily-disabled): compression selection is withdrawn
+	// from the user contract until the codec-level bugs are fixed (see MEMORY
+	// project_snapshot_download_compression_level_bugs). Revert = read
+	// flagVolumeCompression/flagVolumeCompressionLevel back here and pass them
+	// to compress.New instead of the hardcoded "none"/0.
+	codec, err := compress.New("none", 0)
 	if err != nil {
-		return fmt.Errorf("reading --%s flag: %w", flagVolumeCompression, err)
-	}
-
-	compressionLevel, err := cmd.Flags().GetInt(flagVolumeCompressionLevel)
-	if err != nil {
-		return fmt.Errorf("reading --%s flag: %w", flagVolumeCompressionLevel, err)
-	}
-
-	codec, err := compress.New(codecName, compressionLevel)
-	if err != nil {
-		return fmt.Errorf("invalid --%s %q (valid codecs: %s): %w",
-			flagVolumeCompression, codecName, strings.Join(compress.Names(), ", "), err)
+		return fmt.Errorf("building forced-none volume codec: %w", err)
 	}
 
 	nodeFlag, err := cmd.Flags().GetString(flagNode)
