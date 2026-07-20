@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
+	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 )
 
 const (
@@ -75,8 +76,8 @@ func (n PlannedNode) isDomainAggregator() bool {
 // importMarkerCR builds the minimal import-mode CR the server requires to exist before
 // it will accept a manifests-and-children-refs-upload for this node.
 //
-// Every node kind uses the same unified marker: spec.source.import: {}. The server keys
-// import mode off this marker. Core Snapshot trees and domain aggregators are materialised
+// Every node kind uses the same unified marker: spec.mode: Import. The server keys import
+// mode off this field. Core Snapshot trees and domain aggregators are materialised
 // server-side from the uploaded manifests + child refs (the genericbinder aggregates the
 // children's SnapshotContents); data leaves additionally stream their volume bytes, matched
 // to their DataImport by a reverse-lookup on the DataImport's targetRef (group/kind/name);
@@ -88,18 +89,9 @@ func importMarkerCR(node PlannedNode, namespace string) (*unstructured.Unstructu
 	obj.SetNamespace(namespace)
 	obj.SetName(node.Name)
 
-	if err := unstructured.SetNestedMap(obj.Object, map[string]interface{}{}, "spec", "source", "import"); err != nil {
+	if err := unstructured.SetNestedField(obj.Object, string(snapshotapi.SnapshotModeImport), "spec", "mode"); err != nil {
 		return nil, fmt.Errorf("set import marker: %w", err)
 	}
 
 	return obj, nil
-}
-
-// unsupportedNodeError reports an internal invariant violation: a node reached the data-leaf
-// DataImport path (leafTargetRef) although it is neither a CSI VolumeSnapshot leaf nor a
-// domain data leaf. importNodeData only ever invokes that path for data leaves, so this is a
-// programming error rather than a user-facing condition.
-func unsupportedNodeError(node PlannedNode) error {
-	return fmt.Errorf("internal: %s/%s reached the data-leaf import path but carries no own "+
-		"volume data (not a CSI VolumeSnapshot or domain data leaf)", node.Kind, node.Name)
 }

@@ -65,6 +65,7 @@ func putFile(ctx context.Context, client httpDoer, baseURL, relPath, localPath s
 	if err != nil {
 		return fmt.Errorf("open %s: %w", localPath, err)
 	}
+
 	defer func() { _ = f.Close() }()
 
 	fi, err := f.Stat()
@@ -252,6 +253,7 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 	if err != nil {
 		return fmt.Errorf("open %s: %w", tarPath, err)
 	}
+
 	defer func() { _ = f.Close() }()
 
 	skipped := 0

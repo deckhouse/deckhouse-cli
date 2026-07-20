@@ -75,11 +75,14 @@ type PlannedNode struct {
 	// ({apiVersion,kind,name} of the source object), read from snapshot.yaml. Nil for
 	// core Snapshot nodes and CSI VolumeSnapshot data leaves.
 	SourceObjectRef *archive.SourceObjectRef
-	// ArtifactKind is the kind of the durable data artifact the archive captured for this
-	// leaf's volume (e.g. "VolumeSnapshotContent"), read from snapshot.yaml Volumes[0].Artifact.Kind.
-	// It feeds the DataImport spec.dataArtifactType on re-import. Empty for structural/aggregator
-	// nodes that own no volume data.
-	ArtifactKind string
+	// StorageClassName/Size/VolumeMode are the captured scratch-volume parameters of this
+	// leaf's volume, read from snapshot.yaml Volumes[0]. They feed the PopulateData
+	// DataImport spec.storageParams on re-import (storageClassName and size are required by
+	// the DataImport CRD; volumeMode is optional). Empty for structural/aggregator nodes
+	// that own no volume data.
+	StorageClassName string
+	Size             string
+	VolumeMode       string
 }
 
 // Ref returns the node's aggregated-API node ref (target namespace applied by the caller).
@@ -99,9 +102,9 @@ func (n PlannedNode) HasBlockData() bool {
 
 // isDomainDataLeaf reports whether the node is a domain data leaf: it carries volume data
 // (block or filesystem) and is neither a core Snapshot nor a CSI VolumeSnapshot leaf.
-// Domain data leaves (e.g. DemoVirtualDiskSnapshot) and CSI leaves both use the unified
-// spec.source.import: {} marker; their volume content is matched to a DataImport by its
-// targetRef (group/kind/name) in the server-side reverse-lookup.
+// Domain data leaves (e.g. DemoVirtualDiskSnapshot) and CSI leaves both stream their volume
+// content through a PopulateData DataImport; the server-side reverse-lookup matches the leaf
+// against the DataImport's spec.snapshotRef (apiVersion/kind/name).
 func (n PlannedNode) isDomainDataLeaf() bool {
 	return !n.isStructural() && !n.isVolumeSnapshotLeaf() && (n.HasBlockData() || n.FilesystemData)
 }
@@ -183,11 +186,14 @@ func readNode(dir string) (PlannedNode, error) {
 		SourceObjectRef: sy.SourceObjectRef,
 	}
 
-	// Data leaves carry exactly one volume; lift its captured artifact kind onto the node so
-	// EnsureDataImport can send it as the DataImport's spec.dataArtifactType. Structural/
-	// aggregator nodes have no Volumes and leave this empty.
+	// Data leaves carry exactly one volume; lift its captured scratch-volume parameters onto
+	// the node so EnsureDataImport can send them as the PopulateData DataImport's
+	// spec.storageParams. Structural/aggregator nodes have no Volumes and leave these empty.
 	if len(sy.Volumes) > 0 {
-		node.ArtifactKind = sy.Volumes[0].Artifact.Kind
+		v := sy.Volumes[0]
+		node.StorageClassName = v.StorageClassName
+		node.Size = v.Size
+		node.VolumeMode = v.VolumeMode
 	}
 
 	blockData, found, err := archive.FindBlockData(dir)
@@ -265,6 +271,7 @@ func childNodeDirs(dir string) ([]string, error) {
 	}
 
 	var dirs []string
+
 	for _, e := range entries {
 		if e.IsDir() {
 			dirs = append(dirs, filepath.Join(snapshotsDir, e.Name()))

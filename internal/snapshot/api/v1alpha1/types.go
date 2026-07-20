@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package v1alpha1 provides typed Go structs for the state-snapshotter CRDs
-// consumed by the d8 snapshot commands. Only the storage.deckhouse.io/v1alpha1
+// consumed by the d8 snapshot commands. Only the state-snapshotter.deckhouse.io/v1alpha1
 // group is represented here (Snapshot, SnapshotContent). Per-node manifests are
 // read through the aggregated subresource API (see internal/snapshot/aggapi)
 // rather than directly from ManifestCheckpoint CRDs.
@@ -30,7 +30,7 @@ import (
 // AnnotationSourceRef is the annotation key that carries the source identity of a snapshot node.
 const AnnotationSourceRef = "state-snapshotter.deckhouse.io/source-ref"
 
-// --- storage.deckhouse.io/v1alpha1 ---
+// --- state-snapshotter.deckhouse.io/v1alpha1 ---
 
 // Snapshot requests a namespace state/configuration snapshot.
 type Snapshot struct {
@@ -88,9 +88,22 @@ func (s *SnapshotList) DeepCopyObject() runtime.Object {
 	return out
 }
 
+// SnapshotMode selects a snapshot's lifecycle. An absent mode is treated as Capture (the
+// server default), so consumers MUST distinguish "unset" from an unknown non-empty value.
+type SnapshotMode string
+
+const (
+	// SnapshotModeCapture is the default: the snapshot captures live cluster state.
+	SnapshotModeCapture SnapshotMode = "Capture"
+	// SnapshotModeImport marks a snapshot the CLI reconstructs from a downloaded archive.
+	SnapshotModeImport SnapshotMode = "Import"
+)
+
 // SnapshotSpec describes the desired snapshot configuration.
 type SnapshotSpec struct {
-	SnapshotClassName string `json:"snapshotClassName,omitempty"`
+	// Mode selects Capture (default when empty) or Import. It replaces the removed
+	// snapshotClassName field, which is not part of the unified contract.
+	Mode SnapshotMode `json:"mode,omitempty"`
 }
 
 // SnapshotStatus carries the latest observations for a Snapshot.

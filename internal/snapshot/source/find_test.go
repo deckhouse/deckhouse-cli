@@ -29,7 +29,7 @@ import (
 //	└── leaf (VolumeSnapshot/pvc-orphan)  ← orphan leaf
 func buildFindTestTree() (root, vm, disk, leaf *Node) {
 	root = &Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "root-snap",
 		Namespace:  "default",

@@ -112,7 +112,7 @@ func TestAggregatedFetchNodeManifests_Decodes(t *testing.T) {
 func TestAggregatedFetchNodeManifests_FiltersPlumbing(t *testing.T) {
 	body := "[" +
 		kubeObjJSON("v1", "ConfigMap", "default", "user-cm") + "," +
-		kubeObjJSON("storage.deckhouse.io/v1alpha1", "SnapshotContent", "", "sc-123") + "," +
+		kubeObjJSON("state-snapshotter.deckhouse.io/v1alpha1", "SnapshotContent", "", "sc-123") + "," +
 		kubeObjJSON("snapshot.storage.k8s.io/v1", "VolumeSnapshotContent", "", "vsc-456") +
 		"]"
 
@@ -180,7 +180,7 @@ func TestDecodeJSONObjects(t *testing.T) {
 func TestFilterPlumbing(t *testing.T) {
 	objs, err := decodeJSONObjects([]byte("[" +
 		kubeObjJSON("v1", "ConfigMap", "default", "cm") + "," +
-		kubeObjJSON("storage.deckhouse.io/v1alpha1", "SnapshotContent", "", "sc") + "," +
+		kubeObjJSON("state-snapshotter.deckhouse.io/v1alpha1", "SnapshotContent", "", "sc") + "," +
 		kubeObjJSON("snapshot.storage.k8s.io/v1", "VolumeSnapshotContent", "", "vsc") +
 		"]"))
 	if err != nil {

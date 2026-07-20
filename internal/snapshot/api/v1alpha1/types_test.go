@@ -28,13 +28,13 @@ func TestSnapshotUnmarshal(t *testing.T) {
 	t.Helper()
 
 	raw := `{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind": "Snapshot",
 		"metadata": {"name": "test-snap", "namespace": "default"},
 		"status": {
 			"boundSnapshotContentName": "sc-abc",
 			"childrenSnapshotRefs": [
-				{"apiVersion": "storage.deckhouse.io/v1alpha1", "kind": "Snapshot", "name": "child-snap"}
+				{"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1", "kind": "Snapshot", "name": "child-snap"}
 			]
 		}
 	}`
@@ -59,7 +59,7 @@ func TestSnapshotUnmarshal(t *testing.T) {
 
 	child := s.Status.ChildrenSnapshotRefs[0]
 
-	if child.APIVersion != "storage.deckhouse.io/v1alpha1" {
+	if child.APIVersion != "state-snapshotter.deckhouse.io/v1alpha1" {
 		t.Errorf("child apiVersion: got %q", child.APIVersion)
 	}
 
@@ -80,7 +80,7 @@ func TestSnapshotContentUnmarshal(t *testing.T) {
 	t.Helper()
 
 	raw := `{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind": "SnapshotContent",
 		"metadata": {"name": "sc-abc"},
 		"status": {

@@ -89,7 +89,7 @@ func buildTwoLevelArchive(t *testing.T) string {
 	root := t.TempDir()
 
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 		namespace:  "src",
@@ -160,7 +160,7 @@ func TestBuildPlan_DomainDataLeaf_SourceObjectRef(t *testing.T) {
 	root := t.TempDir()
 
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 	})
@@ -215,13 +215,13 @@ func TestBuildPlan_DomainDataLeaf_SourceObjectRef(t *testing.T) {
 	}
 }
 
-// TestBuildPlan_LeafArtifactKind verifies that the captured artifact kind written into
-// snapshot.yaml Volumes[0].Artifact.Kind is lifted onto the PlannedNode so EnsureDataImport
-// can send it as the Mode A DataImport's spec.dataArtifactType.
-func TestBuildPlan_LeafArtifactKind(t *testing.T) {
+// TestBuildPlan_LeafStorageParams verifies that the captured scratch-volume parameters written
+// into snapshot.yaml Volumes[0] are lifted onto the PlannedNode so EnsureDataImport can send
+// them as the PopulateData DataImport's spec.storageParams.
+func TestBuildPlan_LeafStorageParams(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 	})
@@ -233,7 +233,9 @@ func TestBuildPlan_LeafArtifactKind(t *testing.T) {
 		name:       "pvc-1",
 		blockData:  []byte("rawbytes"),
 		volumes: []archive.VolumeInfo{{
-			Artifact: archive.VolumeObjectRef{Kind: "VolumeSnapshotContent"},
+			StorageClassName: "sc-fast",
+			Size:             "10Gi",
+			VolumeMode:       "Block",
 		}},
 	})
 
@@ -256,15 +258,16 @@ func TestBuildPlan_LeafArtifactKind(t *testing.T) {
 		t.Fatal("VolumeSnapshot node not found in plan")
 	}
 
-	if leaf.ArtifactKind != "VolumeSnapshotContent" {
-		t.Errorf("leaf.ArtifactKind = %q, want VolumeSnapshotContent", leaf.ArtifactKind)
+	if leaf.StorageClassName != "sc-fast" || leaf.Size != "10Gi" || leaf.VolumeMode != "Block" {
+		t.Errorf("leaf storage params = {storageClassName:%q, size:%q, volumeMode:%q}, want {sc-fast, 10Gi, Block}",
+			leaf.StorageClassName, leaf.Size, leaf.VolumeMode)
 	}
 
 	// A structural node owns no volumes and must leave the metadata empty.
 	for i := range plan {
 		if plan[i].Kind == "Snapshot" {
-			if plan[i].ArtifactKind != "" {
-				t.Errorf("structural node carried artifact kind: %+v", plan[i])
+			if plan[i].StorageClassName != "" || plan[i].Size != "" || plan[i].VolumeMode != "" {
+				t.Errorf("structural node carried storage params: %+v", plan[i])
 			}
 		}
 	}
@@ -273,7 +276,7 @@ func TestBuildPlan_LeafArtifactKind(t *testing.T) {
 func TestBuildPlan_FilesystemDataFlag(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{
-		apiVersion: "storage.deckhouse.io/v1alpha1",
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		kind:       "Snapshot",
 		name:       "root",
 	})

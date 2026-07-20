@@ -30,25 +30,24 @@ import (
 	"time"
 
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
-	dataImportKind        = "DataImport"
-	volumeModeBlock       = "Block"
-	conditionReady        = "Ready"
-	conditionCompleted    = "Completed"
-	conditionExpired      = "Expired"
-	uploadBlockSubpath    = "api/v1/block"
-	uploadFinishedSubpath = "api/v1/finished"
-	volumeModeFilesystem  = "Filesystem"
+	dataImportKind             = "DataImport"
+	dataImportModePopulateData = "PopulateData"
+	volumeModeBlock            = "Block"
+	conditionReady             = "Ready"
+	conditionCompleted         = "Completed"
+	conditionExpired           = "Expired"
+	uploadBlockSubpath         = "api/v1/block"
+	uploadFinishedSubpath      = "api/v1/finished"
+	volumeModeFilesystem       = "Filesystem"
 
 	// The SVDM importer's CheckRequiredHeaders middleware rejects any PUT missing these
 	// attribute headers. The block import handler ignores their values (it writes raw bytes
@@ -58,8 +57,9 @@ const (
 	blockAttrGID         = "0"
 )
 
-// dataImportGVR is the SVDM DataImport resource (storage.deckhouse.io/v1alpha1).
-var dataImportGVR = schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "dataimports"}
+// dataImportGVR is the storage-foundation DataImport resource
+// (storage-foundation.deckhouse.io/v1alpha1).
+var dataImportGVR = schema.GroupVersionResource{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "dataimports"}
 
 // VolumeImporter imports a data leaf's volume bytes by creating an SVDM DataImport,
 // waiting for the importer to be ready, streaming the archive bytes, finalising the
@@ -86,15 +86,12 @@ type VolumeImporter interface {
 // CR lifecycle and status) and a SafeClient (authenticated HTTPS byte upload to the
 // importer pod, trusting status.ca).
 type clusterVolumeImporter struct {
-	dyn dynamic.Interface
-	// mapper resolves domain-leaf GroupKinds to their plural GVR resource, which is required
-	// for the DataImport spec.targetRef.resource field.
-	mapper meta.RESTMapper
-	sc     *safeClient.SafeClient
-	ttl    string
-	poll   time.Duration
-	wait   time.Duration
-	log    *slog.Logger
+	dyn  dynamic.Interface
+	sc   *safeClient.SafeClient
+	ttl  string
+	poll time.Duration
+	wait time.Duration
+	log  *slog.Logger
 	// tempDir is the directory for decompressed block-volume temporary files. When empty,
 	// sendVolumeData defaults to filepath.Dir(leaf.DataFile) — next to the archive node
 	// on the same filesystem as the compressed source. Override via --temp-dir.
@@ -108,7 +105,6 @@ type clusterVolumeImporter struct {
 // auto-select filepath.Dir(leaf.DataFile), keeping temps on the same filesystem as the archive).
 func NewClusterVolumeImporter(
 	dyn dynamic.Interface,
-	mapper meta.RESTMapper,
 	sc *safeClient.SafeClient,
 	ttl string,
 	wait, poll time.Duration,
@@ -119,7 +115,7 @@ func NewClusterVolumeImporter(
 		log = slog.Default()
 	}
 
-	return &clusterVolumeImporter{dyn: dyn, mapper: mapper, sc: sc, ttl: ttl, poll: poll, wait: wait, tempDir: tempDir, log: log}
+	return &clusterVolumeImporter{dyn: dyn, sc: sc, ttl: ttl, poll: poll, wait: wait, tempDir: tempDir, log: log}
 }
 
 // DataImportName returns the deterministic DataImport name for the leaf (its own name).
@@ -127,27 +123,23 @@ func (c *clusterVolumeImporter) DataImportName(leaf PlannedNode) string {
 	return leaf.Name
 }
 
-// EnsureDataImport upserts the Mode A DataImport targeting the leaf snapshot CR. The leaf's
-// captured artifact kind (ArtifactKind, read back from the archive) is sent as
-// spec.dataArtifactType; the controller derives storageClassName/volumeMode/size itself from
-// the leaf's captured PVC manifest, not from spec. Mode is discriminated server-side by
-// spec.dataArtifactType; the standalone Mode B path driven by `d8 data import` is separate.
+// EnsureDataImport upserts the PopulateData DataImport for the leaf snapshot node. The import
+// stages the uploaded bytes into a transient scratch volume (spec.storageParams, sourced from
+// the leaf's captured VolumeInfo in the archive) and captures them into a durable
+// VolumeSnapshotContent bound to the leaf via spec.snapshotRef. The state-snapshotter
+// reverse-lookup matches the leaf against spec.snapshotRef (apiVersion/kind/name); the
+// DataImport controller itself does not read that ref.
 func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf PlannedNode, namespace string) (string, error) {
 	name := c.DataImportName(leaf)
 
-	group, resource, err := leafTargetRef(leaf, c.mapper)
-	if err != nil {
-		return "", err
-	}
-
-	// dataArtifactType is mandatory (enforced by the CRD's required fields). It originates
-	// from the captured VolumeSnapshotContent's artifact kind and is carried through the
-	// archive; a blank value means a malformed archive, so fail early with a clear message
-	// rather than letting the API server reject an incomplete DataImport.
-	if leaf.ArtifactKind == "" {
-		return "", fmt.Errorf("data leaf %s/%s is missing the captured artifact kind in the archive "+
-			"(artifactKind=%q); re-download the snapshot with a current d8 version",
-			leaf.Kind, leaf.Name, leaf.ArtifactKind)
+	// storageParams.storageClassName and size are required by the DataImport CRD (CEL rule +
+	// minLength). They originate from the leaf's captured VolumeInfo carried through the
+	// archive; a blank value means a malformed or stale archive, so fail early with a clear
+	// message rather than letting the API server reject an incomplete DataImport.
+	if leaf.StorageClassName == "" || leaf.Size == "" {
+		return "", fmt.Errorf("data leaf %s/%s is missing captured storage parameters in the archive "+
+			"(storageClassName=%q size=%q); re-download the snapshot with a current d8 version",
+			leaf.Kind, leaf.Name, leaf.StorageClassName, leaf.Size)
 	}
 
 	obj := &unstructured.Unstructured{}
@@ -156,14 +148,26 @@ func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf Plann
 	obj.SetNamespace(namespace)
 	obj.SetName(name)
 
+	storageParams := map[string]interface{}{
+		"storageClassName": leaf.StorageClassName,
+		"size":             leaf.Size,
+	}
+
+	// volumeMode is optional (the CRD defaults it to Filesystem); send it only when the
+	// archive captured it so the scratch volume matches the source volume mode.
+	if leaf.VolumeMode != "" {
+		storageParams["volumeMode"] = leaf.VolumeMode
+	}
+
 	spec := map[string]interface{}{
-		"ttl":              c.ttl,
-		"dataArtifactType": leaf.ArtifactKind,
-		"targetRef": map[string]interface{}{
-			"group":    group,
-			"resource": resource,
-			"name":     leaf.Name,
+		"ttl":  c.ttl,
+		"mode": dataImportModePopulateData,
+		"snapshotRef": map[string]interface{}{
+			"apiVersion": leaf.APIVersion,
+			"kind":       leaf.Kind,
+			"name":       leaf.Name,
 		},
+		"storageParams": storageParams,
 	}
 
 	if err := unstructured.SetNestedMap(obj.Object, spec, "spec"); err != nil {
@@ -431,7 +435,7 @@ func (c *clusterVolumeImporter) waitDataImportReady(ctx context.Context, name, n
 }
 
 // dataImportCompleted reports whether the named DataImport already produced its durable
-// artifact (Completed=True with a populated status.dataArtifactRef). A missing object is not
+// artifact (Completed=True with a populated status.data.artifact). A missing object is not
 // an error: it simply means "not completed".
 func (c *clusterVolumeImporter) dataImportCompleted(ctx context.Context, name, namespace string) (bool, error) {
 	di, err := c.dyn.Resource(dataImportGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
@@ -443,13 +447,13 @@ func (c *clusterVolumeImporter) dataImportCompleted(ctx context.Context, name, n
 		return false, fmt.Errorf("get DataImport %s/%s: %w", namespace, name, err)
 	}
 
-	_, hasArtifact, _ := unstructured.NestedMap(di.Object, "status", "dataArtifactRef")
+	_, hasArtifact, _ := unstructured.NestedMap(di.Object, "status", "data", "artifact")
 
 	return conditionTrue(di, conditionCompleted) && hasArtifact, nil
 }
 
 // waitDataImportCompleted blocks until the DataImport produces its durable artifact
-// (Completed=True with a populated status.dataArtifactRef).
+// (Completed=True with a populated status.data.artifact).
 func (c *clusterVolumeImporter) waitDataImportCompleted(ctx context.Context, name, namespace string) error {
 	deadline := time.Now().Add(c.wait)
 
@@ -473,32 +477,6 @@ func (c *clusterVolumeImporter) waitDataImportCompleted(ctx context.Context, nam
 			return ctx.Err()
 		}
 	}
-}
-
-// leafTargetRef returns the DataImport targetRef {group, resource} for a data leaf. Group is
-// parsed from the leaf's apiVersion. The plural resource is a permanent part of targetRef: for
-// CSI VolumeSnapshot leaves it is a fixed constant; for domain leaves it is resolved via the
-// RESTMapper, mirroring (*Config).domainLeafResource.
-func leafTargetRef(leaf PlannedNode, mapper meta.RESTMapper) (string, string, error) {
-	if leaf.isVolumeSnapshotLeaf() {
-		return aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, nil
-	}
-
-	if leaf.isDomainDataLeaf() {
-		gv, parseErr := schema.ParseGroupVersion(leaf.APIVersion)
-		if parseErr != nil {
-			return "", "", fmt.Errorf("parse apiVersion %q for domain leaf %s/%s: %w", leaf.APIVersion, leaf.Kind, leaf.Name, parseErr)
-		}
-
-		mapping, mapErr := mapper.RESTMapping(schema.GroupKind{Group: gv.Group, Kind: leaf.Kind}, gv.Version)
-		if mapErr != nil {
-			return "", "", fmt.Errorf("resolve resource for domain leaf %s/%s: %w", leaf.Kind, leaf.Name, mapErr)
-		}
-
-		return gv.Group, mapping.Resource.Resource, nil
-	}
-
-	return "", "", unsupportedNodeError(leaf)
 }
 
 // httpDoer is the minimal HTTP surface putBlock/postFinished need; *safeClient.SafeClient

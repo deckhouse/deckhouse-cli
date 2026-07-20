@@ -32,8 +32,9 @@ limitations under the License.
 //     kind (core Snapshot and domain snapshot CRs alike); CSI VolumeSnapshot
 //     leaves use the dedicated VS-connector group instead.
 //
-// The cluster-scoped snapshotcontents/<name>/manifests-download surface backs the
-// DataImport path (reading an original PVC manifest before any namespaced CR binds).
+// Every subresource is addressed by the node's own namespaced CR (Snapshot, domain
+// snapshot CR, or CSI VolumeSnapshot leaf). The client never reads cluster-scoped
+// SnapshotContent objects.
 package aggapi
 
 import (
@@ -69,7 +70,7 @@ const (
 	VSConnectorVersion = "v1"
 
 	// StorageGroup is the API group of the core Snapshot / SnapshotContent CRDs.
-	StorageGroup = "storage.deckhouse.io"
+	StorageGroup = "state-snapshotter.deckhouse.io"
 	// VolumeSnapshotGroup is the CSI external-snapshotter API group of VolumeSnapshot leaves.
 	VolumeSnapshotGroup = "snapshot.storage.k8s.io"
 	// VolumeSnapshotResource is the resource plural of CSI VolumeSnapshot objects.
@@ -146,18 +147,6 @@ func (c *Client) NodeManifestsDownload(ctx context.Context, ref NodeRef) ([]byte
 	if err != nil {
 		return nil, err
 	}
-
-	return c.getManifestsDownload(ctx, path)
-}
-
-// ContentManifestsDownload performs GET snapshotcontents/<name>/manifests-download
-// (cluster-scoped) and returns the raw JSON array body. Used by the DataImport path
-// to read the original PVC manifest before any namespaced CR binds.
-//
-// Retried on transient errors — see NodeManifestsDownload.
-func (c *Client) ContentManifestsDownload(ctx context.Context, contentName string) ([]byte, error) {
-	path := fmt.Sprintf("/apis/%s/%s/snapshotcontents/%s/%s",
-		CoreSubresourcesGroup, CoreSubresourcesVersion, contentName, SubManifestsDownload)
 
 	return c.getManifestsDownload(ctx, path)
 }
@@ -378,7 +367,7 @@ func (c *Client) LeafDataExportTarget(ref NodeRef) (string, string, string, erro
 // subresourceGroupVersion returns the aggregated subresource group and version that
 // serves restore/upload for a node of the given GVK:
 //   - CSI VolumeSnapshot leaves -> the VS-connector group.
-//   - the core Snapshot (storage.deckhouse.io) -> the core subresources group.
+//   - the core Snapshot (state-snapshotter.deckhouse.io) -> the core subresources group.
 //   - any domain snapshot CR -> "subresources." + its API group, same version.
 func subresourceGroupVersion(ref NodeRef) (string, string, error) {
 	gv, err := schema.ParseGroupVersion(ref.APIVersion)

@@ -22,26 +22,26 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// assertImportMarker verifies the unified spec.source.import: {} marker is present (and empty).
+// assertImportMarker verifies the unified spec.mode: Import marker is present.
 func assertImportMarker(t *testing.T, obj *unstructured.Unstructured) {
 	t.Helper()
 
-	m, found, err := unstructured.NestedMap(obj.Object, "spec", "source", "import")
+	mode, found, err := unstructured.NestedString(obj.Object, "spec", "mode")
 	if err != nil {
-		t.Fatalf("read spec.source.import: %v", err)
+		t.Fatalf("read spec.mode: %v", err)
 	}
 
 	if !found {
-		t.Fatalf("expected spec.source.import marker to be set")
+		t.Fatalf("expected spec.mode marker to be set")
 	}
 
-	if len(m) != 0 {
-		t.Errorf("spec.source.import must be an empty map, got %v", m)
+	if mode != "Import" {
+		t.Errorf("spec.mode = %q, want Import", mode)
 	}
 }
 
 func TestImportMarkerCR_Snapshot(t *testing.T) {
-	node := PlannedNode{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "root"}
+	node := PlannedNode{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "root"}
 
 	obj, err := importMarkerCR(node, "ns")
 	if err != nil {
@@ -71,7 +71,7 @@ func TestImportMarkerCR_VolumeSnapshot(t *testing.T) {
 func TestImportMarkerCR_DomainAggregator(t *testing.T) {
 	// A DemoVirtualMachineSnapshot that references child snapshots but carries no own volume
 	// data is a domain aggregator. It is reconstructed server-side as a NON-ROOT node, so it
-	// gets the same unified spec.source.import: {} marker as every other node (no error); the
+	// gets the same unified spec.mode: Import marker as every other node (no error); the
 	// genericbinder later aggregates its children's contents into the aggregator's content.
 	node := PlannedNode{
 		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
@@ -99,7 +99,7 @@ func TestImportMarkerCR_DomainAggregator(t *testing.T) {
 func TestImportMarkerCR_ManifestOnlyDomainNode(t *testing.T) {
 	// A DemoVirtualMachineSnapshot with neither volume data nor child snapshots is a
 	// manifest-only domain node: import-equivalent to a structural Snapshot, so it gets the
-	// unified spec.source.import: {} marker (no error).
+	// unified spec.mode: Import marker (no error).
 	node := PlannedNode{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualMachineSnapshot", Name: "vm-1"}
 
 	obj, err := importMarkerCR(node, "ns")
@@ -145,7 +145,7 @@ func TestPlannedNode_IsDomainAggregator(t *testing.T) {
 		node PlannedNode
 		want bool
 	}{
-		{"core snapshot", PlannedNode{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot"}, false},
+		{"core snapshot", PlannedNode{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "Snapshot"}, false},
 		{"csi volume snapshot", PlannedNode{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot"}, false},
 		// A domain disk snapshot WITH volume data is a domain data leaf, not an aggregator.
 		{"demo disk snapshot with block data", PlannedNode{

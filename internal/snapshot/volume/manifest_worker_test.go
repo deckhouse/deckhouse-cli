@@ -27,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
-	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
@@ -42,6 +41,36 @@ type stubManifestSource struct {
 
 func (s *stubManifestSource) FetchNodeManifests(_ context.Context, _ aggapi.NodeRef) ([]unstructured.Unstructured, error) {
 	return s.objs, s.err
+}
+
+// pvcSource builds a SourceRefIdentity for a captured PersistentVolumeClaim source.
+func pvcSource(name, uid string) source.SourceRefIdentity {
+	return source.SourceRefIdentity{
+		APIVersion: "v1",
+		Kind:       "PersistentVolumeClaim",
+		Namespace:  "ns",
+		Name:       name,
+		UID:        uid,
+	}
+}
+
+// pvcNodeData builds a *source.NodeData for a captured PVC-backed volume (Variant A, ≤1).
+func pvcNodeData(name, uid, vsc string) *source.NodeData {
+	return &source.NodeData{
+		Source:   pvcSource(name, uid),
+		Artifact: source.ArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: vsc},
+	}
+}
+
+// volumeLeaf builds a CSI VolumeSnapshot visibility-leaf node carrying the captured PVC in
+// its own status.data (IsVolumeLeaf() == true requires the CSI apiVersion + kind).
+func volumeLeaf(vsName, pvcName, uid string) *source.Node {
+	return &source.Node{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       vsName,
+		Data:       pvcNodeData(pvcName, uid, "vsc-"+pvcName),
+	}
 }
 
 // makeObj builds a minimal unstructured object.
@@ -76,7 +105,7 @@ func TestWriteNodeManifests_WritesFiles(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-1",
 		Namespace:  "default",
@@ -179,11 +208,12 @@ func TestFinalizeNode_WritesSnapshotYAML(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-test",
 		Namespace:  "ns1",
-		SourceRef:  "demo/vm-1",
+		UID:        "uid-snap-test",
+		SourceRef:  &source.SourceRefIdentity{APIVersion: "v1", Kind: "Namespace", Name: "vm-1", UID: "uid-vm-1"},
 	}
 
 	if err := volume.FinalizeNode(nodeDir, node); err != nil {
@@ -219,8 +249,12 @@ func TestFinalizeNode_WritesSnapshotYAML(t *testing.T) {
 		t.Errorf("Name: got %q, want %q", sy.Name, node.Name)
 	}
 
-	if sy.SourceRef != node.SourceRef {
-		t.Errorf("SourceRef: got %q, want %q", sy.SourceRef, node.SourceRef)
+	if sy.SourceName != node.SourceRef.Name {
+		t.Errorf("SourceName: got %q, want %q", sy.SourceName, node.SourceRef.Name)
+	}
+
+	if sy.UID != string(node.UID) {
+		t.Errorf("UID: got %q, want %q", sy.UID, node.UID)
 	}
 }
 
@@ -234,7 +268,7 @@ func TestFinalizeNode_Idempotent(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-idem",
 	}
@@ -267,11 +301,12 @@ func TestFinalizeNode_RemovesIdentityMarker(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-marker",
 		Namespace:  "ns",
-		SourceRef:  "demo/vm-1",
+		UID:        "uid-snap-marker",
+		SourceRef:  &source.SourceRefIdentity{APIVersion: "v1", Kind: "Namespace", Name: "vm-1", UID: "uid-vm-1"},
 	}
 
 	// Stamp the marker the pipeline writes on first touch.
@@ -280,7 +315,7 @@ func TestFinalizeNode_RemovesIdentityMarker(t *testing.T) {
 		Kind:       node.Kind,
 		Name:       node.Name,
 		Namespace:  node.Namespace,
-		SourceRef:  node.SourceRef,
+		UID:        string(node.UID),
 	}); err != nil {
 		t.Fatalf("WriteNodeIdentityMarker: %v", err)
 	}
@@ -338,8 +373,8 @@ func makeObjWithUID(apiVersion, kind, name string, uid types.UID) unstructured.U
 }
 
 // TestWriteNodeManifests_ExcludesLeafChildPVCs verifies that PVCs matching orphan
-// leaf volume children (Children[i].Binding != nil) are excluded from the aggregator
-// node's manifests/ directory (they belong in each leaf node's own manifests/).
+// leaf volume children (Children[i].IsVolumeLeaf() with status.data) are excluded from the
+// aggregator node's manifests/ directory (they belong in each leaf node's own manifests/).
 func TestWriteNodeManifests_ExcludesLeafChildPVCs(t *testing.T) {
 	t.Parallel()
 
@@ -352,25 +387,11 @@ func TestWriteNodeManifests_ExcludesLeafChildPVCs(t *testing.T) {
 		makeObj("v1", "ConfigMap", "owner-cm"),
 	}
 
-	leafA := &source.Node{
-		Kind: "VolumeSnapshot",
-		Name: "pvc-disk",
-		Binding: &snapshotapi.SnapshotDataBinding{
-			TargetUID: "uid-disk",
-			Target:    snapshotapi.SnapshotSubjectRef{Name: "pvc-disk"},
-		},
-	}
-	leafB := &source.Node{
-		Kind: "VolumeSnapshot",
-		Name: "pvc-extra",
-		Binding: &snapshotapi.SnapshotDataBinding{
-			TargetUID: "uid-extra",
-			Target:    snapshotapi.SnapshotSubjectRef{Name: "pvc-extra"},
-		},
-	}
+	leafA := volumeLeaf("vs-disk", "pvc-disk", "uid-disk")
+	leafB := volumeLeaf("vs-extra", "pvc-extra", "uid-extra")
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-ex",
 		Children:   []*source.Node{leafA, leafB},
@@ -399,7 +420,7 @@ func TestWriteNodeManifests_ExcludesLeafChildPVCs(t *testing.T) {
 }
 
 // TestWriteNodeManifests_ExcludesLeafChildByNameFallback verifies that a leaf child
-// with no UID in its Binding is still excluded by name.
+// with no UID in its status.data source is still excluded by name.
 func TestWriteNodeManifests_ExcludesLeafChildByNameFallback(t *testing.T) {
 	t.Parallel()
 
@@ -414,11 +435,11 @@ func TestWriteNodeManifests_ExcludesLeafChildByNameFallback(t *testing.T) {
 	}
 
 	leaf := &source.Node{
-		Kind: "VolumeSnapshot",
-		Name: "pvc-nouid",
-		Binding: &snapshotapi.SnapshotDataBinding{
-			TargetUID: "",
-			Target:    snapshotapi.SnapshotSubjectRef{Name: "pvc-nouid"},
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "pvc-nouid",
+		Data: &source.NodeData{
+			Source: source.SourceRefIdentity{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-nouid"},
 		},
 	}
 
@@ -443,16 +464,16 @@ func TestWriteNodeManifests_ExcludesLeafChildByNameFallback(t *testing.T) {
 	}
 }
 
-// TestWriteNodeManifests_ExcludesOwnDataRefPVCs verifies that PVCs from OwnDataRefs are
-// excluded from manifests/. For non-aggregator data-owning nodes the PVC data is
-// captured in the volume payload (data.bin[.<ext>]/data.tar); the manifest must not
+// TestWriteNodeManifests_ExcludesOwnDataPVC verifies that a node's own captured volume PVC
+// (status.data) is excluded from manifests/. For non-aggregator data-owning nodes the PVC
+// data is captured in the volume payload (data.bin[.<ext>]/data.tar); the manifest must not
 // appear alongside the domain object manifest.
-func TestWriteNodeManifests_ExcludesOwnDataRefPVCs(t *testing.T) {
+func TestWriteNodeManifests_ExcludesOwnDataPVC(t *testing.T) {
 	t.Parallel()
 
 	nodeDir := setupNodeDir(t)
 
-	// Checkpoint has a PVC matching an OwnDataRef and one ConfigMap.
+	// Checkpoint has a PVC matching the node's own status.data and one ConfigMap.
 	objs := []unstructured.Unstructured{
 		makeObjWithUID("v1", "PersistentVolumeClaim", "pvc-own", "uid-own"),
 		makeObj("v1", "ConfigMap", "snap-cm"),
@@ -462,9 +483,7 @@ func TestWriteNodeManifests_ExcludesOwnDataRefPVCs(t *testing.T) {
 		APIVersion: "demo.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
 		Name:       "vds-1",
-		OwnDataRefs: []snapshotapi.SnapshotDataBinding{
-			{TargetUID: "uid-own", Target: snapshotapi.SnapshotSubjectRef{Name: "pvc-own"}},
-		},
+		Data:       pvcNodeData("pvc-own", "uid-own", "vsc-own"),
 	}
 
 	src := &stubManifestSource{objs: objs}
@@ -475,13 +494,13 @@ func TestWriteNodeManifests_ExcludesOwnDataRefPVCs(t *testing.T) {
 
 	manifestsDir := filepath.Join(nodeDir, archive.ManifestsDirName)
 
-	// The ConfigMap must be written; the OwnDataRef PVC must be excluded.
+	// The ConfigMap must be written; the own-data PVC must be excluded.
 	if _, err := os.Stat(filepath.Join(manifestsDir, "configmap_snap-cm.yaml")); err != nil {
 		t.Errorf("expected configmap_snap-cm.yaml to be written: %v", err)
 	}
 
 	if _, err := os.Stat(filepath.Join(manifestsDir, "persistentvolumeclaim_pvc-own.yaml")); !os.IsNotExist(err) {
-		t.Errorf("OwnDataRef PVC must be excluded from node manifests/; err=%v", err)
+		t.Errorf("own-data PVC must be excluded from node manifests/; err=%v", err)
 	}
 }
 
@@ -496,17 +515,11 @@ func TestWriteVolumeManifest_WritesMatchingPVC(t *testing.T) {
 		pvc,
 	}
 
-	binding := snapshotapi.SnapshotDataBinding{
-		TargetUID: "uid-target",
-		Target:    snapshotapi.SnapshotSubjectRef{Name: "pvc-target"},
-		Artifact:  snapshotapi.SnapshotDataArtifactRef{Name: "vsc-1"},
-	}
-
 	volNode := &source.Node{
 		APIVersion: "snapshot.storage.k8s.io/v1",
 		Kind:       "VolumeSnapshot",
 		Name:       "d8-ss-aabbccdd",
-		Binding:    &binding,
+		Data:       pvcNodeData("pvc-target", "uid-target", "vsc-1"),
 	}
 
 	src := &stubManifestSource{objs: objs}
@@ -539,13 +552,10 @@ func TestWriteVolumeManifest_MatchByNameFallback(t *testing.T) {
 	pvcNoUID := makeObj("v1", "PersistentVolumeClaim", "pvc-byname")
 	objs := []unstructured.Unstructured{pvcNoUID}
 
-	binding := snapshotapi.SnapshotDataBinding{
-		TargetUID: "",
-		Target:    snapshotapi.SnapshotSubjectRef{Name: "pvc-byname"},
-	}
-
 	volNode := &source.Node{
-		Binding: &binding,
+		Data: &source.NodeData{
+			Source: source.SourceRefIdentity{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-byname"},
+		},
 	}
 
 	src := &stubManifestSource{objs: objs}
@@ -568,13 +578,8 @@ func TestWriteVolumeManifest_ErrorWhenPVCMissing(t *testing.T) {
 	// Checkpoint has only a ConfigMap, not the target PVC.
 	objs := []unstructured.Unstructured{makeObj("v1", "ConfigMap", "stray-cm")}
 
-	binding := snapshotapi.SnapshotDataBinding{
-		TargetUID: "uid-missing",
-		Target:    snapshotapi.SnapshotSubjectRef{Name: "pvc-missing"},
-	}
-
 	volNode := &source.Node{
-		Binding: &binding,
+		Data: pvcNodeData("pvc-missing", "uid-missing", "vsc-missing"),
 	}
 
 	src := &stubManifestSource{objs: objs}
@@ -595,16 +600,15 @@ func TestFinalizeNode_VolumeNodeWritesVolumeBlock(t *testing.T) {
 		t.Fatalf("WriteManifest: %v", err)
 	}
 
-	binding := &snapshotapi.SnapshotDataBinding{
-		TargetUID: "uid-abc",
-		Target: snapshotapi.SnapshotSubjectRef{
+	data := &source.NodeData{
+		Source: source.SourceRefIdentity{
 			APIVersion: "v1",
 			Kind:       "PersistentVolumeClaim",
 			Name:       "my-pvc",
 			Namespace:  "ns",
 			UID:        "uid-abc",
 		},
-		Artifact: snapshotapi.SnapshotDataArtifactRef{
+		Artifact: source.ArtifactRef{
 			APIVersion: "snapshot.storage.k8s.io/v1",
 			Kind:       "VolumeSnapshotContent",
 			Name:       "vsc-xyz",
@@ -616,8 +620,8 @@ func TestFinalizeNode_VolumeNodeWritesVolumeBlock(t *testing.T) {
 		Kind:       "VolumeSnapshot",
 		Name:       "d8-ss-aabbccdd",
 		Namespace:  "ns",
-		SourceRef:  "uid-abc",
-		Binding:    binding,
+		UID:        "uid-vs-node",
+		Data:       data,
 	}
 
 	if err := volume.FinalizeNode(nodeDir, node); err != nil {
@@ -667,7 +671,7 @@ func TestFinalizeNode_SnapshotNodeOmitsVolumeBlock(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-1",
 		Namespace:  "ns",
@@ -683,7 +687,7 @@ func TestFinalizeNode_SnapshotNodeOmitsVolumeBlock(t *testing.T) {
 	}
 
 	if len(sy.Volumes) != 0 {
-		t.Errorf("Volumes must be empty for a snapshot node without OwnDataRefs, got %+v", sy.Volumes)
+		t.Errorf("Volumes must be empty for a snapshot node without status.data, got %+v", sy.Volumes)
 	}
 
 	if err := archive.VerifyNode(nodeDir); err != nil {
@@ -702,16 +706,15 @@ func TestFinalizeNode_VolumeBlockDoesNotAffectVerify(t *testing.T) {
 		t.Fatalf("WriteManifest: %v", err)
 	}
 
-	binding := &snapshotapi.SnapshotDataBinding{
-		TargetUID: "uid-1",
-		Target: snapshotapi.SnapshotSubjectRef{
+	data := &source.NodeData{
+		Source: source.SourceRefIdentity{
 			APIVersion: "v1",
 			Kind:       "PersistentVolumeClaim",
 			Name:       "pvc",
 			Namespace:  "ns",
 			UID:        "uid-1",
 		},
-		Artifact: snapshotapi.SnapshotDataArtifactRef{
+		Artifact: source.ArtifactRef{
 			APIVersion: "snapshot.storage.k8s.io/v1",
 			Kind:       "VolumeSnapshotContent",
 			Name:       "vsc-1",
@@ -723,7 +726,8 @@ func TestFinalizeNode_VolumeBlockDoesNotAffectVerify(t *testing.T) {
 		Kind:       "VolumeSnapshot",
 		Name:       "d8-ss-reg-test",
 		Namespace:  "ns",
-		Binding:    binding,
+		UID:        "uid-vs-reg",
+		Data:       data,
 	}
 
 	// First finalize — writes Volume block.
@@ -746,9 +750,10 @@ func TestFinalizeNode_VolumeBlockDoesNotAffectVerify(t *testing.T) {
 	}
 }
 
-// TestFinalizeNode_SnapshotNodeWithOwnDataRefs verifies that a non-aggregator
-// snapshot node with OwnDataRefs writes one VolumeInfo per binding into Volumes.
-func TestFinalizeNode_SnapshotNodeWithOwnDataRefs(t *testing.T) {
+// TestFinalizeNode_SnapshotNodeWithOwnData verifies that a non-aggregator snapshot node
+// with its own captured volume (status.data, Variant A ≤1) writes exactly one VolumeInfo
+// into Volumes, carrying the captured volume metadata through to the archive.
+func TestFinalizeNode_SnapshotNodeWithOwnData(t *testing.T) {
 	t.Parallel()
 
 	nodeDir := setupNodeDir(t)
@@ -758,44 +763,27 @@ func TestFinalizeNode_SnapshotNodeWithOwnDataRefs(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "VirtualDiskSnapshot",
-		Name:       "snap-multi",
+		Name:       "snap-data",
 		Namespace:  "ns",
-		OwnDataRefs: []snapshotapi.SnapshotDataBinding{
-			{
-				TargetUID: "uid-pvc-a",
-				Target: snapshotapi.SnapshotSubjectRef{
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Name:       "pvc-a",
-					Namespace:  "ns",
-					UID:        "uid-pvc-a",
-				},
-				Artifact: snapshotapi.SnapshotDataArtifactRef{
-					APIVersion: "snapshot.storage.k8s.io/v1",
-					Kind:       "VolumeSnapshotContent",
-					Name:       "vsc-a",
-				},
-				VolumeMode:       "Block",
-				StorageClassName: "linstor-thin-r1",
-				Size:             "10Gi",
+		UID:        "uid-snap-data",
+		Data: &source.NodeData{
+			Source: source.SourceRefIdentity{
+				APIVersion: "v1",
+				Kind:       "PersistentVolumeClaim",
+				Name:       "pvc-a",
+				Namespace:  "ns",
+				UID:        "uid-pvc-a",
 			},
-			{
-				TargetUID: "uid-pvc-b",
-				Target: snapshotapi.SnapshotSubjectRef{
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Name:       "pvc-b",
-					Namespace:  "ns",
-					UID:        "uid-pvc-b",
-				},
-				Artifact: snapshotapi.SnapshotDataArtifactRef{
-					APIVersion: "snapshot.storage.k8s.io/v1",
-					Kind:       "VolumeSnapshotContent",
-					Name:       "vsc-b",
-				},
+			Artifact: source.ArtifactRef{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshotContent",
+				Name:       "vsc-a",
 			},
+			VolumeMode:       "Block",
+			StorageClassName: "linstor-thin-r1",
+			Size:             "10Gi",
 		},
 	}
 
@@ -808,24 +796,16 @@ func TestFinalizeNode_SnapshotNodeWithOwnDataRefs(t *testing.T) {
 		t.Fatalf("ReadSnapshotYAML: %v", err)
 	}
 
-	if len(sy.Volumes) != 2 {
-		t.Fatalf("Volumes length: got %d, want 2", len(sy.Volumes))
+	if len(sy.Volumes) != 1 {
+		t.Fatalf("Volumes length: got %d, want 1", len(sy.Volumes))
 	}
 
 	if sy.Volumes[0].Target.Name != "pvc-a" {
 		t.Errorf("Volumes[0].Target.Name: got %q, want pvc-a", sy.Volumes[0].Target.Name)
 	}
 
-	if sy.Volumes[1].Target.Name != "pvc-b" {
-		t.Errorf("Volumes[1].Target.Name: got %q, want pvc-b", sy.Volumes[1].Target.Name)
-	}
-
 	if sy.Volumes[0].Artifact.Name != "vsc-a" {
 		t.Errorf("Volumes[0].Artifact.Name: got %q, want vsc-a", sy.Volumes[0].Artifact.Name)
-	}
-
-	if sy.Volumes[1].Artifact.Name != "vsc-b" {
-		t.Errorf("Volumes[1].Artifact.Name: got %q, want vsc-b", sy.Volumes[1].Artifact.Name)
 	}
 
 	// The captured volume metadata must be carried through to the archive so the import
@@ -837,12 +817,12 @@ func TestFinalizeNode_SnapshotNodeWithOwnDataRefs(t *testing.T) {
 
 	// VerifyNode must pass: Volumes does not affect the digest.
 	if err := archive.VerifyNode(nodeDir); err != nil {
-		t.Errorf("VerifyNode after FinalizeNode with OwnDataRefs: %v", err)
+		t.Errorf("VerifyNode after FinalizeNode with own data: %v", err)
 	}
 }
 
-// TestFinalizeNode_NoVolumesOmitted verifies that a purely manifest node (no Binding,
-// no OwnDataRefs) produces a snapshot.yaml with Volumes omitted entirely.
+// TestFinalizeNode_NoVolumesOmitted verifies that a purely manifest node (no status.data)
+// produces a snapshot.yaml with Volumes omitted entirely.
 func TestFinalizeNode_NoVolumesOmitted(t *testing.T) {
 	t.Parallel()
 
@@ -853,7 +833,7 @@ func TestFinalizeNode_NoVolumesOmitted(t *testing.T) {
 	}
 
 	node := &source.Node{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 		Kind:       "Snapshot",
 		Name:       "snap-no-vol",
 	}

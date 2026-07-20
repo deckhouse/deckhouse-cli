@@ -32,9 +32,9 @@ import (
 // ErrCycle is returned when a cycle or duplicate reference is detected in the snapshot tree.
 var ErrCycle = errors.New("cycle detected in snapshot tree")
 
-// ErrLeafNotBound is returned when a VolumeSnapshot visibility-leaf has an empty
-// status.boundSnapshotContentName; the leaf is not yet ready for download.
-var ErrLeafNotBound = errors.New("VolumeSnapshot leaf not yet bound to a child SnapshotContent")
+// ErrLeafNotBound is returned when a VolumeSnapshot visibility-leaf has no namespaced
+// status.data; the leaf is not yet captured and is not ready for download.
+var ErrLeafNotBound = errors.New("VolumeSnapshot leaf not yet captured (no status.data)")
 
 // rootAPIVersion is the apiVersion of the root Snapshot CR.
 const rootAPIVersion = snapshotapi.StorageGroup + "/" + snapshotapi.Version
@@ -45,30 +45,30 @@ const volumeSnapshotAPIVersion = "snapshot.storage.k8s.io/v1"
 // BuildTree fetches the root Snapshot by name and recursively resolves the full snapshot
 // tree by following status.childrenSnapshotRefs.
 //
-// Each node's SnapshotContent is resolved via status.boundSnapshotContentName; the
-// single DataRef (Variant A, cardinality ≤1) is taken from the content's status.DataRef
-// via DataRefList(). Node manifests are fetched separately via the aggregated
+// Each node is built solely from its own namespaced status via ParseNodeStatus:
+// status.sourceRef (the captured source identity) and status.data (the single captured
+// volume, Variant A cardinality ≤1). The tree builder NEVER reads cluster-scoped
+// SnapshotContent. Node manifests are fetched separately via the aggregated
 // manifests-download subresource.
 //
 // All snapshot nodes are namespace-local: child refs carry no namespace field and are
-// always fetched in the same namespace as the root. The function does one typed Get per
-// node and never lists.
+// always fetched in the same namespace as the root. The function does one Get per node
+// and never lists.
 //
 // childrenSnapshotRefs are partitioned into two sets:
 //   - Domain refs (apiVersion != "snapshot.storage.k8s.io/v1" or kind != "VolumeSnapshot")
-//     are recursed normally via boundSnapshotContentName.
+//     are recursed normally.
 //   - VolumeSnapshot visibility-leaf refs (apiVersion == "snapshot.storage.k8s.io/v1" and
 //     kind == "VolumeSnapshot") signal that this node is an aggregator. Each leaf is resolved
-//     via visitVisibilityLeaf: Get the VolumeSnapshot, read status.boundSnapshotContentName,
-//     Get the child SnapshotContent, and take the leaf binding from the child content's single
-//     status.dataRef. The leaf node's Name is the VS CR name (for ManifestScopeRef); its
-//     SourceName is the captured PVC name (dataRef.target.name) for directory naming.
+//     via visitVisibilityLeaf: Get the VolumeSnapshot and read its own namespaced
+//     status.sourceRef/status.data. The leaf node's Name is the VS CR name (for
+//     ManifestScopeRef); its readable directory base comes from status.sourceRef.name.
 //
-// When a node has no visibility-leaf children, its content.DataRefList() (0 or 1 binding)
-// is stored in OwnDataRefs and no leaf children are created (data lives in the node's dir).
+// A non-aggregator node's captured volume (if any) is its own status.data. An aggregator
+// node has status.data == nil and exposes data through its leaf children.
 //
 // Returns ErrCycle if a duplicate snapshot ref is encountered.
-// Returns ErrLeafNotBound if a VolumeSnapshot leaf has no status.boundSnapshotContentName.
+// Returns ErrLeafNotBound if a VolumeSnapshot leaf has no status.data.
 func BuildTree(ctx context.Context, c client.Client, namespace, rootName string) (*Node, error) {
 	v := &treeBuilder{
 		client:    c,
@@ -100,42 +100,20 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 		return nil, fmt.Errorf("fetch %s %s/%s: %w", apiVersion, kind, name, err)
 	}
 
-	boundContentName, err := nestedStringField(obj, "status", "boundSnapshotContentName")
+	ident, sourceRef, data, err := ParseNodeStatus(obj)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s/%s: status.boundSnapshotContentName: %w", apiVersion, kind, name, err)
-	}
-
-	if boundContentName == "" {
-		return nil, fmt.Errorf("%s %s/%s: status.boundSnapshotContentName is empty (not yet bound)", apiVersion, kind, name)
-	}
-
-	content := new(snapshotapi.SnapshotContent)
-	if err := b.client.Get(ctx, types.NamespacedName{Name: boundContentName}, content); err != nil {
-		return nil, fmt.Errorf("fetch SnapshotContent %q for %s %s/%s: %w", boundContentName, apiVersion, kind, name, err)
-	}
-
-	sourceRef := obj.GetAnnotations()[snapshotapi.AnnotationSourceRef]
-
-	// Parse the source-ref annotation to extract the source object name (best-effort).
-	var sourceName string
-	if id, err := ParseSourceRef(sourceRef); err == nil {
-		sourceName = id.Name
+		return nil, err
 	}
 
 	node := &Node{
-		APIVersion: apiVersion,
-		Kind:       kind,
-		Name:       name,
-		Namespace:  b.namespace,
+		APIVersion: ident.APIVersion,
+		Kind:       ident.Kind,
+		Name:       ident.Name,
+		Namespace:  ident.Namespace,
+		UID:        ident.UID,
 		SourceRef:  sourceRef,
-		SourceName: sourceName,
+		Data:       data,
 		Parent:     parent,
-	}
-
-	// For domain snapshot nodes (not the core Snapshot kind), capture the structured
-	// spec.sourceRef so it can be persisted in snapshot.yaml for import-mode CR reconstruction.
-	if apiVersion != rootAPIVersion || kind != "Snapshot" {
-		node.SpecSourceRef = extractSpecSourceRef(obj)
 	}
 
 	allChildRefs, err := extractChildRefs(obj)
@@ -158,9 +136,9 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 	}
 
 	if len(leafRefs) > 0 {
-		// Aggregator: resolve each VolumeSnapshot visibility-leaf via its own bound child
-		// SnapshotContent (Variant A). OwnDataRefs stays nil for the aggregator; volume data
-		// and the PVC manifest live in the child content (each leaf's own ManifestCheckpoint).
+		// Aggregator: resolve each VolumeSnapshot visibility-leaf from its own namespaced
+		// status. The aggregator itself carries no own data (Data stays nil); each leaf owns
+		// its captured volume and the PVC manifest (each leaf's own ManifestCheckpoint).
 		for _, leafRef := range leafRefs {
 			leaf, err := b.visitVisibilityLeaf(ctx, leafRef.Name, node)
 			if err != nil {
@@ -173,70 +151,45 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 		return node, nil
 	}
 
-	// Non-aggregator: data lives directly in this node.
-	// Copy the binding so callers cannot alias the DataRefList result.
-	dataRefs := content.DataRefList()
-	if len(dataRefs) > 0 {
-		own := make([]snapshotapi.SnapshotDataBinding, len(dataRefs))
-		copy(own, dataRefs)
-		node.OwnDataRefs = own
-	}
-
+	// Non-aggregator: the captured volume (if any) is the node's own status.data (already set).
 	return node, nil
 }
 
 // visitVisibilityLeaf resolves one VolumeSnapshot visibility-leaf into a Node.
 //
 // It fetches the VolumeSnapshot (snapshot.storage.k8s.io/v1) by vsName in the tree's
-// namespace, reads status.boundSnapshotContentName, fetches that child SnapshotContent,
-// and returns a leaf Node whose Binding is a copy of the child content's status.dataRef.
+// namespace and builds the leaf entirely from the VS's own namespaced status via
+// ParseNodeStatus (status.sourceRef + status.data) — no child SnapshotContent read.
 //
 // The leaf node Name is the VS CR name (used by ManifestScopeRef to address the
-// VolumeSnapshot connector subresource). SourceName is the captured PVC name
-// (dataRef.target.name) and is used for directory naming.
+// VolumeSnapshot connector subresource). Its readable directory base comes from
+// status.sourceRef.name (the captured PVC name).
 //
-// Returns ErrLeafNotBound when status.boundSnapshotContentName is empty.
+// Returns ErrLeafNotBound when the VolumeSnapshot has no status.data (not yet captured).
 func (b *treeBuilder) visitVisibilityLeaf(ctx context.Context, vsName string, parent *Node) (*Node, error) {
 	vs, err := fetchUnstructured(ctx, b.client, b.namespace, volumeSnapshotAPIVersion, "VolumeSnapshot", vsName)
 	if err != nil {
 		return nil, fmt.Errorf("fetch VolumeSnapshot %s/%s: %w", b.namespace, vsName, err)
 	}
 
-	boundContentName, err := nestedStringField(vs, "status", "boundSnapshotContentName")
+	ident, sourceRef, data, err := ParseNodeStatus(vs)
 	if err != nil {
-		return nil, fmt.Errorf("VolumeSnapshot %s/%s: status.boundSnapshotContentName: %w", b.namespace, vsName, err)
+		return nil, err
 	}
 
-	if boundContentName == "" {
+	if data == nil {
 		return nil, fmt.Errorf("VolumeSnapshot %s/%s: %w", b.namespace, vsName, ErrLeafNotBound)
 	}
 
-	childContent := new(snapshotapi.SnapshotContent)
-	if err := b.client.Get(ctx, types.NamespacedName{Name: boundContentName}, childContent); err != nil {
-		return nil, fmt.Errorf("fetch child SnapshotContent %q for VolumeSnapshot %s/%s: %w", boundContentName, b.namespace, vsName, err)
-	}
-
-	if childContent.Status.DataRef == nil {
-		return nil, fmt.Errorf("child SnapshotContent %q for VolumeSnapshot %s/%s: status.dataRef is nil", boundContentName, b.namespace, vsName)
-	}
-
-	// Copy the binding so the caller cannot alias the content's pointer.
-	binding := *childContent.Status.DataRef
-	if len(binding.AccessModes) > 0 {
-		am := make([]string, len(binding.AccessModes))
-		copy(am, binding.AccessModes)
-		binding.AccessModes = am
-	}
-
 	return &Node{
-		APIVersion: volumeSnapshotAPIVersion,
-		Kind:       "VolumeSnapshot",
-		Name:       vsName,
-		Namespace:  b.namespace,
-		SourceRef:  binding.TargetUID,
-		SourceName: binding.Target.Name,
+		APIVersion: ident.APIVersion,
+		Kind:       ident.Kind,
+		Name:       ident.Name,
+		Namespace:  ident.Namespace,
+		UID:        ident.UID,
+		SourceRef:  sourceRef,
+		Data:       data,
 		Parent:     parent,
-		Binding:    &binding,
 	}, nil
 }
 
@@ -288,21 +241,6 @@ func fetchUnstructured(ctx context.Context, c client.Client, namespace, apiVersi
 	return obj, nil
 }
 
-// nestedStringField returns the string value at the given field path from an
-// unstructured object, or "" if the path does not exist.
-func nestedStringField(obj *unstructured.Unstructured, fields ...string) (string, error) {
-	val, found, err := unstructured.NestedString(obj.Object, fields...)
-	if err != nil {
-		return "", err
-	}
-
-	if !found {
-		return "", nil
-	}
-
-	return val, nil
-}
-
 // extractChildRefs returns the status.childrenSnapshotRefs array from an
 // unstructured snapshot object. Returns nil (not an error) if the field is absent.
 func extractChildRefs(obj *unstructured.Unstructured) ([]snapshotapi.SnapshotChildRef, error) {
@@ -345,18 +283,4 @@ func mapString(m map[string]interface{}, key string) string {
 	v, _ := m[key].(string)
 
 	return v
-}
-
-// extractSpecSourceRef reads spec.sourceRef.{apiVersion,kind,name} from an unstructured
-// domain snapshot CR. Returns nil when any field is absent or the path does not exist.
-func extractSpecSourceRef(obj *unstructured.Unstructured) *SpecSourceRef {
-	av, _, _ := unstructured.NestedString(obj.Object, "spec", "sourceRef", "apiVersion")
-	kind, _, _ := unstructured.NestedString(obj.Object, "spec", "sourceRef", "kind")
-	name, _, _ := unstructured.NestedString(obj.Object, "spec", "sourceRef", "name")
-
-	if av == "" || kind == "" || name == "" {
-		return nil
-	}
-
-	return &SpecSourceRef{APIVersion: av, Kind: kind, Name: name}
 }

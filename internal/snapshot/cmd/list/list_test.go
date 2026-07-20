@@ -40,7 +40,7 @@ import (
 // is omitted; age==0 leaves creationTimestamp unset.
 func snapshotObj(namespace, name, ready, content string, children int, age time.Duration) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata": map[string]interface{}{
 			"namespace": namespace,
@@ -68,7 +68,7 @@ func snapshotObj(namespace, name, ready, content string, children int, age time.
 		refs := make([]interface{}, 0, children)
 		for i := 0; i < children; i++ {
 			refs = append(refs, map[string]interface{}{
-				"apiVersion": "storage.deckhouse.io/v1alpha1",
+				"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 				"kind":       "Snapshot",
 				"name":       fmt.Sprintf("child-%d", i),
 			})
@@ -273,7 +273,7 @@ func TestPrintSnapshotTableEmpty(t *testing.T) {
 
 func TestRenderJSON(t *testing.T) {
 	list := &unstructured.UnstructuredList{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "SnapshotList",
 	}}
 	list.Items = []unstructured.Unstructured{
@@ -294,7 +294,7 @@ func TestRenderJSON(t *testing.T) {
 
 func TestRenderYAML(t *testing.T) {
 	list := &unstructured.UnstructuredList{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "SnapshotList",
 	}}
 	list.Items = []unstructured.Unstructured{
@@ -406,7 +406,7 @@ func TestRender_OutputPassthrough(t *testing.T) {
 			}
 
 			// Raw apiVersion and kind must survive passthrough.
-			if item["apiVersion"] != "storage.deckhouse.io/v1alpha1" {
+			if item["apiVersion"] != "state-snapshotter.deckhouse.io/v1alpha1" {
 				t.Fatalf("apiVersion not preserved: %v", item["apiVersion"])
 			}
 

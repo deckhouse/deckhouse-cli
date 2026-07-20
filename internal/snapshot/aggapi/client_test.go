@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -291,8 +290,9 @@ func TestResourceFor_NoMapper(t *testing.T) {
 // fast here.
 //
 // Server contract summary (verified against state-snapshotter source):
-//   - manifests-download (GET): core group for Snapshot+domain, VS-connector for VS leaf,
-//     cluster-scoped snapshotcontents path for DataImport; restore_handler.go SetupRoutes.
+//   - manifests-download (GET): core group for Snapshot+domain, VS-connector for VS leaf.
+//     Every path is addressed by the node's own namespaced CR — the CLI never reads
+//     cluster-scoped snapshotcontents; restore_handler.go SetupRoutes.
 //   - manifests-with-data-restoration (GET): core group for Snapshot; domain-prefixed
 //     group for domain CRs (domainapi/handler.go, GET-only); VS-connector for VS leaf.
 //   - manifests-and-children-refs-upload (POST): CORE group for Snapshot AND domain CRs
@@ -330,16 +330,6 @@ func TestAggregatedAPIContract(t *testing.T) {
 			name:       "VS leaf: manifests-download -> VS-connector group",
 			pathFn:     func(c *Client) (string, error) { return c.downloadPath(vsRef) },
 			wantPath:   "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-download",
-			wantMethod: http.MethodGet,
-		},
-		// restore_handler.go: cluster-scoped /snapshotcontents/<name>/manifests-download (DataImport path)
-		{
-			name: "snapshotcontent: manifests-download -> core group cluster-scoped",
-			pathFn: func(_ *Client) (string, error) {
-				return fmt.Sprintf("/apis/%s/%s/snapshotcontents/%s/%s",
-					CoreSubresourcesGroup, CoreSubresourcesVersion, "nss-content-1", SubManifestsDownload), nil
-			},
-			wantPath:   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/snapshotcontents/nss-content-1/manifests-download",
 			wantMethod: http.MethodGet,
 		},
 
@@ -412,10 +402,10 @@ func TestAggregatedAPIContract(t *testing.T) {
 
 // ── manifests-download transient-error retry ────────────────────────────────────────
 //
-// These tests exercise getManifestsDownload (shared by NodeManifestsDownload and
-// ContentManifestsDownload) against a stubbed rest.Interface. They deliberately do NOT
-// use t.Parallel(): withFastBackoff mutates the package-level manifestsDownloadBackoff
-// var for the duration of the test, which would race under parallel execution.
+// These tests exercise getManifestsDownload (used by NodeManifestsDownload) against a
+// stubbed rest.Interface. They deliberately do NOT use t.Parallel(): withFastBackoff
+// mutates the package-level manifestsDownloadBackoff var for the duration of the test,
+// which would race under parallel execution.
 
 // coreSnapshotRef returns a core Snapshot node ref for the retry tests below.
 func coreSnapshotRef() NodeRef {
@@ -607,32 +597,5 @@ func TestNodeManifestsDownload_ContextCancelledAbortsRetryPromptly(t *testing.T)
 
 	if *calls != 1 {
 		t.Errorf("calls: got %d, want 1 (aborted before a second attempt)", *calls)
-	}
-}
-
-// TestContentManifestsDownload_RetriesTransientThenSucceeds is a wiring smoke test
-// proving ContentManifestsDownload shares the same retry path as NodeManifestsDownload
-// (both are manifests-download subresource calls, see getManifestsDownload).
-func TestContentManifestsDownload_RetriesTransientThenSucceeds(t *testing.T) {
-	withFastBackoff(t, wait.Backoff{Steps: 5, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond})
-
-	rc, calls := countingRESTClient(t,
-		statusResponse(t, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, "the server is currently unable to handle the request"),
-		okResponse(`[]`),
-	)
-
-	c := NewClient(rc, testMapper())
-
-	body, err := c.ContentManifestsDownload(context.Background(), "nss-content-1")
-	if err != nil {
-		t.Fatalf("ContentManifestsDownload: %v", err)
-	}
-
-	if string(body) != `[]` {
-		t.Errorf("body: got %q, want %q", body, `[]`)
-	}
-
-	if *calls != 2 {
-		t.Errorf("calls: got %d, want 2", *calls)
 	}
 }
