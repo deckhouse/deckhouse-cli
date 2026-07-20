@@ -321,7 +321,8 @@ func (cfg Config) resourceInterface(mapping *meta.RESTMapping) dynamic.ResourceI
 // children) so a child's parent already exists and exposes a UID. Every marker is the same
 // minimal spec.mode: Import CR; for data leaves the DataImport itself is created bottom-up
 // in pass 2 immediately before the upload (so its idle TTL does not start ticking while earlier
-// siblings are still uploading) and is later matched to the leaf by its targetRef.
+// siblings are still uploading) and is later matched to the leaf by its spec.snapshotRef
+// (apiVersion/kind/name).
 func (cfg Config) createMarkers(ctx context.Context, plan []PlannedNode, parents map[string]int) error {
 	uids := make(map[string]types.UID, len(plan))
 
