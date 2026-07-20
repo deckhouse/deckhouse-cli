@@ -346,7 +346,7 @@ d8 mirror push <images-bundle-path> <registry> [flags]
 
 | Flag | Description |
 |------|-------------|
-| `--modules-path-suffix` | Suffix to append to source repo path to locate modules (default: `/modules`) |
+| `--modules-path-suffix` | Registry path suffix to push modules to, relative to the target repo. Use `/` to push modules to the repo root (default: `/modules`) |
 
 ### Examples
 
