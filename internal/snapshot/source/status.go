@@ -72,9 +72,10 @@ type NodeData struct {
 // present, must parse as a quantity. status.sourceRef is a full provenance identity, so its uid is
 // REQUIRED here; its namespace is required for namespaced source kinds but intentionally absent
 // for the cluster-scoped root source (v1/Namespace), so it is validated per source scope (see
-// parseStatusSourceRef) rather than unconditionally. The data leg's completeness
-// (status.data.source.uid, artifact identity) is enforced separately by the data path
-// (RequireNodeData) on a Ready node.
+// parseStatusSourceRef) rather than unconditionally. A present status.data is fully validated
+// HERE, at parse time, by parseStatusData: source and artifact identity are required, while
+// source.uid is intentionally optional/best-effort and matched name-first downstream (see
+// WriteVolumeManifest/matchesVolumeTarget in volume/manifest_worker.go).
 //
 // The node's own SnapshotIdentity is validated up front: it feeds the resume key, checksum/index
 // and the collision discriminator, so a weak (partially empty) identity would silently corrupt
@@ -103,27 +104,6 @@ func ParseNodeStatus(obj *unstructured.Unstructured) (SnapshotIdentity, *SourceR
 	}
 
 	return ident, src, data, nil
-}
-
-// RequireNodeData returns the node's captured data descriptor for the data path, or an error
-// when the node carries no status.data. Callers that legitimately have no data (aggregators,
-// manifest-only nodes) must NOT call this: it enforces the data-bearing invariant only where a
-// volume payload is expected. It additionally enforces full completeness (source.uid, artifact
-// identity), which is guaranteed only on a Ready node.
-func RequireNodeData(node *Node) (*NodeData, error) {
-	if node == nil || node.Data == nil {
-		return nil, fmt.Errorf("%s carries no status.data but a captured volume was expected", nodeIdentString(node))
-	}
-
-	if node.Data.Source.UID == "" {
-		return nil, fmt.Errorf("%s status.data.source.uid is empty", nodeIdentString(node))
-	}
-
-	if node.Data.Artifact.APIVersion == "" || node.Data.Artifact.Kind == "" || node.Data.Artifact.Name == "" {
-		return nil, fmt.Errorf("%s status.data.artifact is incomplete (apiVersion/kind/name required)", nodeIdentString(node))
-	}
-
-	return node.Data, nil
 }
 
 func parseStatusSourceRef(obj *unstructured.Unstructured) (*SourceRefIdentity, error) {
@@ -195,12 +175,4 @@ func parseStatusData(obj *unstructured.Unstructured) (*NodeData, error) {
 
 func objRefString(obj *unstructured.Unstructured) string {
 	return fmt.Sprintf("%s %s/%s", obj.GetKind(), obj.GetNamespace(), obj.GetName())
-}
-
-func nodeIdentString(node *Node) string {
-	if node == nil {
-		return "<nil node>"
-	}
-
-	return fmt.Sprintf("%s %s/%s", node.Kind, node.Namespace, node.Name)
 }

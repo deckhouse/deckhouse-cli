@@ -195,37 +195,3 @@ func TestParseNodeStatus_IdentityFailClosed(t *testing.T) {
 		})
 	}
 }
-
-func TestRequireNodeData(t *testing.T) {
-	complete := &NodeData{
-		Source:   SourceRefIdentity{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: "ns", Name: "disk-a", UID: "pvc-uid"},
-		Artifact: ArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "snapcontent-1"},
-	}
-
-	if _, err := RequireNodeData(nil); err == nil {
-		t.Error("nil node must error")
-	}
-	if _, err := RequireNodeData(&Node{Kind: "X", Name: "y"}); err == nil {
-		t.Error("node without data must error")
-	}
-
-	noUID := *complete
-	noUID.Source.UID = ""
-	if _, err := RequireNodeData(&Node{Data: &noUID}); err == nil {
-		t.Error("data without source.uid must error")
-	}
-
-	noArtifact := *complete
-	noArtifact.Artifact = ArtifactRef{}
-	if _, err := RequireNodeData(&Node{Data: &noArtifact}); err == nil {
-		t.Error("data without artifact identity must error")
-	}
-
-	got, err := RequireNodeData(&Node{Data: complete})
-	if err != nil {
-		t.Fatalf("complete data must not error: %v", err)
-	}
-	if got != complete {
-		t.Error("RequireNodeData must return the node's data")
-	}
-}
