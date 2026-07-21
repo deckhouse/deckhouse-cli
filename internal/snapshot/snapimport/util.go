@@ -22,8 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"time"
 
 	kgzip "github.com/klauspost/compress/gzip"
@@ -137,85 +135,6 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-time.After(d):
 		return true
 	}
-}
-
-// isCompressedBlockFile reports whether path carries a codec extension this importer
-// understands (and must therefore decompress). A file without one (e.g. data.bin) is raw.
-func isCompressedBlockFile(path string) bool {
-	switch filepath.Ext(path) {
-	case ".zst", ".gz", ".lz4":
-		return true
-	default:
-		return false
-	}
-}
-
-// resolveBlockSource yields a seekable, raw (decompressed) block file ready for upload plus
-// its size and a cleanup func. tempDir is the directory for the decompressed temp file; pass
-// filepath.Dir(dataFile) to keep it on the same filesystem as the archive (the default when
-// no explicit --temp-dir is given). A raw archive file (data.bin) is used in place with a
-// no-op cleanup — avoiding a full second on-disk copy; a compressed file is decompressed into
-// a temp file that cleanup removes.
-func resolveBlockSource(dataFile, tempDir string) (string, int64, func(), error) {
-	if !isCompressedBlockFile(dataFile) {
-		info, sErr := os.Stat(dataFile)
-		if sErr != nil {
-			return "", 0, nil, fmt.Errorf("stat volume data %s: %w", dataFile, sErr)
-		}
-
-		return dataFile, info.Size(), func() {}, nil
-	}
-
-	tmpPath, sz, dErr := decompressToTemp(dataFile, tempDir)
-	if dErr != nil {
-		return "", 0, nil, dErr
-	}
-
-	return tmpPath, sz, func() { _ = os.Remove(tmpPath) }, nil
-}
-
-// decompressToTemp decompresses the archive volume file at srcPath (codec inferred from
-// its extension) into a new temporary file in dir, returning the temp path and its size.
-// The caller is responsible for removing the returned file. A ".bin" file with no codec
-// extension is copied verbatim.
-//
-// Block-volume files are a concatenation of independent codec frames (one per chunk).
-// zstd and gzip readers consume concatenated frames natively; lz4 frames must be decoded
-// one at a time, so the lz4 path loops over the seekable source.
-func decompressToTemp(srcPath, dir string) (string, int64, error) {
-	src, err := os.Open(srcPath)
-	if err != nil {
-		return "", 0, fmt.Errorf("open volume data %s: %w", srcPath, err)
-	}
-	defer src.Close()
-
-	tmp, err := os.CreateTemp(dir, "d8-import-*.raw")
-	if err != nil {
-		return "", 0, fmt.Errorf("create temp file: %w", err)
-	}
-
-	if err := decompressInto(tmp, src, filepath.Ext(srcPath)); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-
-		return "", 0, fmt.Errorf("decompress %s: %w", srcPath, err)
-	}
-
-	size, err := tmp.Seek(0, io.SeekCurrent)
-	if err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-
-		return "", 0, fmt.Errorf("stat temp file: %w", err)
-	}
-
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmp.Name())
-
-		return "", 0, fmt.Errorf("close temp file: %w", err)
-	}
-
-	return tmp.Name(), size, nil
 }
 
 // decompressInto streams the decompressed bytes of src (codec inferred from ext) into dst.

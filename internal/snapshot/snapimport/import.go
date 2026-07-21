@@ -84,17 +84,10 @@ type Config struct {
 	// Dynamic creates import-mode CRs and reads readiness status.
 	Dynamic dynamic.Interface
 	// Workers is the maximum number of data-leaf volume uploads to run concurrently in
-	// pass 2b. Defaults to 5 when zero. Note the multiplicative disk budget: each worker
-	// may decompress a block volume into a temporary file, so the worst-case peak
-	// temporary disk usage is Workers × (size of the largest decompressed volume).
+	// pass 2b. Defaults to 5 when zero. Block-volume uploads stream-decode directly into
+	// the PUT (see snapimport.putBlock), so raising Workers no longer multiplies temporary
+	// disk usage — only per-worker in-memory codec buffers.
 	Workers int
-	// TempDir is the directory for decompressed block-volume temporary files. When empty
-	// (the default), the importer uses filepath.Dir(leaf.DataFile) — the archive node
-	// directory — which is on the same filesystem as the compressed source and therefore
-	// guaranteed to have space for at least one decompressed copy. Set via --temp-dir to
-	// redirect temps to a dedicated scratch volume. Worst-case peak disk usage:
-	// Workers × (size of the largest decompressed volume).
-	TempDir string
 	// AllowExisting, when true, downgrades the namespace preflight conflict check to a
 	// warning instead of an error. Import-mode markers from a prior run of this import
 	// are never treated as conflicts regardless of this flag. When false (default), the
