@@ -20,16 +20,17 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 )
 
-// TestDecompressToTemp_RoundTrip verifies that data files written by the download path
-// (one independent codec frame per chunk, concatenated) decompress back to the original
-// bytes for every codec, including the raw (no-extension) case.
-func TestDecompressToTemp_RoundTrip(t *testing.T) {
+// TestDecompressInto_RoundTrip verifies that data files written by the download path (one
+// independent codec frame per chunk, concatenated) decompress back to the original bytes
+// for every codec, including the raw (no-extension) case. decompressInto is still used by
+// the filesystem per-entry path (fs.go's decompressEntryToTemp); the block path no longer
+// calls it (see putBlockCompressed in volume.go), but the function itself is unchanged.
+func TestDecompressInto_RoundTrip(t *testing.T) {
 	payload := bytes.Repeat([]byte("the quick brown fox\n"), 5000)
 
 	cases := []struct {
@@ -68,111 +69,21 @@ func TestDecompressToTemp_RoundTrip(t *testing.T) {
 				t.Fatalf("write src: %v", err)
 			}
 
-			tmpPath, size, err := decompressToTemp(srcPath, dir)
+			src, err := os.Open(srcPath)
 			if err != nil {
-				t.Fatalf("decompressToTemp: %v", err)
+				t.Fatalf("open src: %v", err)
 			}
-			defer os.Remove(tmpPath)
+			defer src.Close()
 
-			got, err := os.ReadFile(tmpPath)
-			if err != nil {
-				t.Fatalf("read decompressed: %v", err)
-			}
+			var out bytes.Buffer
 
-			if size != int64(len(got)) {
-				t.Errorf("size mismatch: reported %d, file %d", size, len(got))
+			if err := decompressInto(&out, src, tc.ext); err != nil {
+				t.Fatalf("decompressInto: %v", err)
 			}
 
-			if !bytes.Equal(got, payload) {
-				t.Errorf("decompressed bytes differ from original (len got=%d want=%d)", len(got), len(payload))
+			if !bytes.Equal(out.Bytes(), payload) {
+				t.Errorf("decompressed bytes differ from original (len got=%d want=%d)", out.Len(), len(payload))
 			}
 		})
-	}
-}
-
-// TestResolveBlockSource_RawUsedInPlace verifies a raw data.bin is streamed in place (no
-// second on-disk copy), while a compressed file is decompressed into a removable temp file.
-func TestResolveBlockSource_RawUsedInPlace(t *testing.T) {
-	dir := t.TempDir()
-	rawPath := filepath.Join(dir, "data.bin")
-	payload := []byte("raw-block-bytes")
-
-	if err := os.WriteFile(rawPath, payload, 0o600); err != nil {
-		t.Fatalf("write raw: %v", err)
-	}
-
-	path, size, cleanup, err := resolveBlockSource(rawPath, dir)
-	if err != nil {
-		t.Fatalf("resolveBlockSource(raw): %v", err)
-	}
-
-	if path != rawPath {
-		t.Errorf("raw source path = %q, want the archive file %q (no temp copy)", path, rawPath)
-	}
-
-	if size != int64(len(payload)) {
-		t.Errorf("size = %d, want %d", size, len(payload))
-	}
-
-	cleanup()
-
-	if _, statErr := os.Stat(rawPath); statErr != nil {
-		t.Errorf("raw archive file must survive cleanup: %v", statErr)
-	}
-}
-
-// TestResolveBlockSource_CompressedDecompressedToTemp verifies that a zstd-compressed
-// block source is decompressed into a temp file under the explicit tempDir, that the
-// decompressed bytes round-trip, and that cleanup removes the temp file.
-func TestResolveBlockSource_CompressedDecompressedToTemp(t *testing.T) {
-	srcDir := t.TempDir()
-	tempDir := t.TempDir()
-	payload := bytes.Repeat([]byte("abc"), 1000)
-
-	codec, err := compress.New("zstd", 0)
-	if err != nil {
-		t.Fatalf("compress.New: %v", err)
-	}
-
-	frame, err := codec.EncodeFrame(payload)
-	if err != nil {
-		t.Fatalf("EncodeFrame: %v", err)
-	}
-
-	srcPath := filepath.Join(srcDir, "data.bin.zst")
-	if err := os.WriteFile(srcPath, frame, 0o600); err != nil {
-		t.Fatalf("write src: %v", err)
-	}
-
-	path, size, cleanup, err := resolveBlockSource(srcPath, tempDir)
-	if err != nil {
-		t.Fatalf("resolveBlockSource(compressed): %v", err)
-	}
-
-	if path == srcPath {
-		t.Error("compressed source must be decompressed into a temp file, not used in place")
-	}
-
-	if !strings.HasPrefix(path, tempDir) {
-		t.Errorf("temp file path = %q must be under explicit tempDir %q", path, tempDir)
-	}
-
-	if size != int64(len(payload)) {
-		t.Errorf("decompressed size = %d, want %d", size, len(payload))
-	}
-
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read temp: %v", err)
-	}
-
-	if !bytes.Equal(got, payload) {
-		t.Errorf("decompressed temp bytes differ from original")
-	}
-
-	cleanup()
-
-	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-		t.Errorf("temp file must be removed by cleanup, stat err = %v", statErr)
 	}
 }

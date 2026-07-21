@@ -19,6 +19,7 @@ package snapimport
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -30,11 +31,13 @@ import (
 	"time"
 
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -92,30 +95,24 @@ type clusterVolumeImporter struct {
 	poll time.Duration
 	wait time.Duration
 	log  *slog.Logger
-	// tempDir is the directory for decompressed block-volume temporary files. When empty,
-	// sendVolumeData defaults to filepath.Dir(leaf.DataFile) — next to the archive node
-	// on the same filesystem as the compressed source. Override via --temp-dir.
-	// Worst-case peak disk usage: Workers × (size of the largest decompressed volume).
-	tempDir string
 }
 
 // NewClusterVolumeImporter builds the live VolumeImporter. ttl is the DataImport TTL,
-// wait bounds the per-DataImport readiness/completion waits, poll is the polling cadence,
-// and tempDir is the scratch directory for decompressed block-volume temp files (empty =
-// auto-select filepath.Dir(leaf.DataFile), keeping temps on the same filesystem as the archive).
+// wait bounds the per-DataImport readiness/completion waits, and poll is the polling
+// cadence. Block-volume uploads stream-decode directly into the PUT (see putBlock), so
+// no scratch directory for decompressed temporary files is needed.
 func NewClusterVolumeImporter(
 	dyn dynamic.Interface,
 	sc *safeClient.SafeClient,
 	ttl string,
 	wait, poll time.Duration,
-	tempDir string,
 	log *slog.Logger,
 ) VolumeImporter {
 	if log == nil {
 		log = slog.Default()
 	}
 
-	return &clusterVolumeImporter{dyn: dyn, sc: sc, ttl: ttl, poll: poll, wait: wait, tempDir: tempDir, log: log}
+	return &clusterVolumeImporter{dyn: dyn, sc: sc, ttl: ttl, poll: poll, wait: wait, log: log}
 }
 
 // DataImportName returns the deterministic DataImport name for the leaf (its own name).
@@ -336,19 +333,12 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 		}
 
 	case volumeModeBlock:
-		// Default the temp dir to the archive node directory — same filesystem as the
-		// compressed source, so it always has room for at least one decompressed volume.
-		effectiveTempDir := c.tempDir
-		if effectiveTempDir == "" {
-			effectiveTempDir = filepath.Dir(leaf.DataFile)
-		}
+		ext := filepath.Ext(leaf.DataFile)
 
-		srcPath, size, cleanup, err := resolveBlockSource(leaf.DataFile, effectiveTempDir)
+		totalSize, err := blockTotalSize(leaf.DataFile, leaf.Size, ext)
 		if err != nil {
 			return err
 		}
-
-		defer cleanup()
 
 		blockURL, err := neturl.JoinPath(url, uploadBlockSubpath)
 		if err != nil {
@@ -358,15 +348,16 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 		c.log.Info("uploading volume data",
 			slog.String("namespace", namespace),
 			slog.String("dataimport", diName),
-			slog.Int64("bytes", size))
+			slog.Int64("bytes", totalSize))
 
-		// The decompressed block size is known and matches the onProgress increments
-		// (each PUT chunk advances by next-offset), so report it as the total.
+		// totalSize is known up front (blockTotalSize never decompresses to measure it)
+		// and matches the onProgress increments (each PUT chunk advances by next-offset),
+		// so report it as the total before any bytes are sent.
 		if setTotal != nil {
-			setTotal(size)
+			setTotal(totalSize)
 		}
 
-		if err := putBlock(ctx, httpClient, blockURL, srcPath, size, onProgress); err != nil {
+		if err := putBlock(ctx, httpClient, blockURL, leaf.DataFile, ext, totalSize, c.log, onProgress); err != nil {
 			return fmt.Errorf("upload block data for %s/%s: %w", namespace, diName, err)
 		}
 
@@ -485,16 +476,39 @@ type httpDoer interface {
 	HTTPDo(req *http.Request) (*http.Response, error)
 }
 
-// putBlock streams the raw block file to the importer's block endpoint, honouring the
-// server-reported X-Next-Offset for resumable progress. onProgress, when non-nil, is
-// called with the number of bytes accepted by the server after each PUT chunk.
-func putBlock(ctx context.Context, httpClient httpDoer, url, filePath string, totalSize int64, onProgress func(int)) error {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
+// blockTotalSize returns the exact decompressed byte count of a node's block-volume data
+// file without decompressing it. A raw file (ext=="") carries its exact size on disk
+// (os.Stat); a compressed file's decompressed size is definitionally the captured
+// volume's real allocated size (size, a resource.Quantity string like "10Gi", sourced
+// from VolumeSnapshotContent.status.restoreSize — see archive.VolumeInfo.Size) because a
+// block-volume capture always reads exactly the device's provisioned byte size. Parsing
+// size instead of decompressing avoids a full decompression pass purely to learn a byte
+// count, which is the whole point of the streaming upload path.
+func blockTotalSize(dataFile, size, ext string) (int64, error) {
+	if ext == "" {
+		info, err := os.Stat(dataFile)
+		if err != nil {
+			return 0, fmt.Errorf("stat volume data %s: %w", dataFile, err)
+		}
 
+		return info.Size(), nil
+	}
+
+	q, err := resource.ParseQuantity(size)
+	if err != nil {
+		return 0, fmt.Errorf("parsing captured volume size %q for %s: %w", size, dataFile, err)
+	}
+
+	return q.Value(), nil
+}
+
+// putBlock streams the block-volume payload at dataFile to the importer's block
+// endpoint, honouring the server-reported X-Next-Offset for resumable progress. ext
+// selects the decode codec via compress.NewReader ("" for raw/no codec, matching
+// Codec.Ext); totalSize is the volume's exact decompressed byte count (see
+// blockTotalSize). onProgress, when non-nil, is called with the number of bytes accepted
+// by the server after each PUT.
+func putBlock(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, totalSize int64, log *slog.Logger, onProgress func(int)) error {
 	// Resume from the importer's recorded write offset: a reused (non-expired) DataImport
 	// may already hold a partial upload, and the block handler rejects a PUT whose X-Offset
 	// disagrees with its current offset (HTTP 409), so restarting at 0 would never converge.
@@ -512,7 +526,29 @@ func putBlock(ctx context.Context, httpClient httpDoer, url, filePath string, to
 	}
 
 	// offset == totalSize is a legitimate resume of an upload that fully transferred before
-	// the previous run finalized it; the loop is skipped and the caller finalizes.
+	// the previous run finalized it: nothing left to send, so skip building a decode reader
+	// (or even opening the file) entirely and let the caller finalize.
+	if offset == totalSize {
+		return nil
+	}
+
+	if ext == "" {
+		return putBlockRaw(ctx, httpClient, url, dataFile, offset, totalSize, onProgress)
+	}
+
+	return putBlockCompressed(ctx, httpClient, url, dataFile, ext, offset, totalSize, log, onProgress)
+}
+
+// putBlockRaw streams an uncompressed data.bin file starting at offset. This path is
+// unchanged from before streaming decode was introduced: a fresh io.SectionReader per
+// iteration is a cheap seek over the same file handle, so a server-reported partial
+// acceptance (next < totalSize) simply resumes the loop with no extra I/O.
+func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string, offset, totalSize int64, onProgress func(int)) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
 
 	for offset < totalSize {
 		section := io.NewSectionReader(file, offset, totalSize-offset)
@@ -538,6 +574,112 @@ func putBlock(ctx context.Context, httpClient httpDoer, url, filePath string, to
 		}
 
 		offset = next
+	}
+
+	return nil
+}
+
+// putBlockCompressed streams a compressed data.bin.<ext> file starting at offset,
+// decoding it on the fly via compress.NewReader instead of decompressing it into a
+// temporary file first — the whole point of this path is to keep peak disk usage at one
+// copy (the compressed archive) instead of two.
+//
+// RESUME STRATEGY: discard-and-fast-forward from the start of the decoded stream on
+// every fresh call, never frame/chunk-boundary seeking. chunks.meta
+// (archive/chunkmeta.go) records the chunk/frame-boundary geometry only inside the
+// transient staging dir (archive.BlockChunksDirName), which volume.MergeBlockChunks
+// removes once the frames are merged into the final data.bin[.ext] — by the time an
+// archive reaches upload, no frame-boundary index survives to reuse. Worse, zstd (the
+// default codec) offers no cheap way to rebuild one: a single zstd.NewReader given two
+// concatenated independent EncodeAll frames consumes BOTH in one continuous Read
+// (verified empirically against the vendored klauspost/compress/zstd while slicing this
+// task) — unlike pierrec/lz4's reader, it does not stop at the first frame's boundary,
+// so there is no equivalent of lz4's "fresh reader per frame" trick to index zstd frame
+// offsets without hand-parsing zstd's block headers. Given that CPU-bound decompression
+// throughput normally exceeds WAN/cluster upload throughput, discarding and re-decoding
+// the already-sent prefix on every retry is the correct, uniform, low-risk choice here; a
+// frame-offset index remains a documented, not-undertaken future optimization.
+func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, offset, totalSize int64, log *slog.Logger, onProgress func(int)) error {
+	f, err := os.Open(dataFile)
+	if err != nil {
+		return fmt.Errorf("open volume data %s: %w", dataFile, err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	decodeReader, err := compress.NewReader(ext, f)
+	if err != nil {
+		return fmt.Errorf("open decompressor for %s: %w", dataFile, err)
+	}
+
+	defer func() { _ = decodeReader.Close() }()
+
+	if offset > 0 {
+		start := time.Now()
+
+		skipped, ffErr := io.CopyN(io.Discard, decodeReader, offset)
+		if ffErr != nil {
+			return fmt.Errorf("fast-forwarding %s to resume offset %d (got %d bytes): %w", dataFile, offset, skipped, ffErr)
+		}
+
+		log.Info("fast-forwarded past already-uploaded bytes",
+			slog.String("file", dataFile),
+			slog.Int64("bytes", skipped),
+			slog.Duration("took", time.Since(start)))
+	}
+
+	for offset < totalSize {
+		remain := totalSize - offset
+		limited := io.LimitReader(decodeReader, remain)
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, io.NopCloser(limited))
+		if err != nil {
+			return err
+		}
+
+		// net/http only auto-detects Content-Length for *bytes.Buffer/*bytes.Reader/
+		// *strings.Reader bodies; an io.LimitReader-wrapped decode stream needs it set
+		// explicitly, or the request silently falls back to chunked transfer encoding.
+		// Setting it also gives us the "too-large declared size" safety net for free: if
+		// the decode stream runs dry before delivering remain bytes, net/http's transport
+		// refuses to send a body shorter than its declared Content-Length and doBlockChunk
+		// returns that error instead of silently truncating the request.
+		req.ContentLength = remain
+
+		req.Header.Set("X-Content-Length", strconv.FormatInt(totalSize, 10))
+		req.Header.Set("X-Offset", strconv.FormatInt(offset, 10))
+		req.Header.Set("X-Attribute-Permissions", blockAttrPermissions)
+		req.Header.Set("X-Attribute-Uid", blockAttrUID)
+		req.Header.Set("X-Attribute-Gid", blockAttrGID)
+
+		next, err := doBlockChunk(httpClient, req, offset, totalSize)
+		if err != nil {
+			return fmt.Errorf("%s: declared size %d bytes may not match the archive's actual decompressed content: %w", dataFile, totalSize, err)
+		}
+
+		if onProgress != nil {
+			onProgress(int(next - offset))
+		}
+
+		offset = next
+	}
+
+	// Safety net: totalSize came from the archive's captured metadata (leaf.Size), never
+	// from decoding, so verify it wasn't an UNDER-count. If the decode stream still has
+	// bytes left after every declared byte was sent, the archive is corrupt or was built
+	// by a mismatched version — fail loudly instead of silently truncating the transfer
+	// and reporting success (an under-count would otherwise write a truncated device and
+	// still exit clean).
+	var probe [1]byte
+
+	n, rerr := decodeReader.Read(probe[:])
+	if n > 0 {
+		return fmt.Errorf("%s: declared size %d bytes is smaller than the archive's actual decompressed content "+
+			"(extra bytes found after the declared total); the archive may be corrupt or was built by a mismatched d8 version", dataFile, totalSize)
+	}
+
+	if rerr != nil && !errors.Is(rerr, io.EOF) {
+		return fmt.Errorf("verifying end of archive %s after upload: %w", dataFile, rerr)
 	}
 
 	return nil

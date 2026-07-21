@@ -38,6 +38,7 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 )
 
 // recordingDoer captures the requests putBlock/postFinished send and returns canned responses.
@@ -89,7 +90,7 @@ func TestPutBlock_SendsRequiredHeaders(t *testing.T) {
 
 	doer := &recordingDoer{}
 
-	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, int64(len(payload)), nil); err != nil {
+	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, "", int64(len(payload)), discardLogger(), nil); err != nil {
 		t.Fatalf("putBlock: %v", err)
 	}
 
@@ -126,7 +127,7 @@ func TestPutBlock_ResumesFromServerOffset(t *testing.T) {
 
 	doer := &recordingDoer{resumeOffset: 5}
 
-	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, int64(len(payload)), nil); err != nil {
+	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, "", int64(len(payload)), discardLogger(), nil); err != nil {
 		t.Fatalf("putBlock: %v", err)
 	}
 
@@ -164,7 +165,7 @@ func TestPutBlock_ReportsProgressBytes(t *testing.T) {
 
 	doer := &recordingDoer{}
 
-	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, int64(len(payload)), func(n int) { reported += n }); err != nil {
+	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, "", int64(len(payload)), discardLogger(), func(n int) { reported += n }); err != nil {
 		t.Fatalf("putBlock: %v", err)
 	}
 
@@ -185,7 +186,7 @@ func TestPutBlock_RejectsOversizeServerOffset(t *testing.T) {
 	// Importer reports more bytes than the archive has: a mismatched reused DataImport.
 	doer := &recordingDoer{resumeOffset: 20}
 
-	err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, int64(len(payload)), nil)
+	err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, "", int64(len(payload)), discardLogger(), nil)
 	if err == nil {
 		t.Fatal("expected error for oversize server offset, got nil")
 	}
@@ -193,6 +194,316 @@ func TestPutBlock_RejectsOversizeServerOffset(t *testing.T) {
 	for _, m := range doer.methods {
 		if m == http.MethodPut {
 			t.Error("no PUT should be issued when the server offset exceeds the archive size")
+		}
+	}
+}
+
+// fakeBlockImporter is a minimal httptest.Server handler mimicking the storage-volume-
+// data-manager import_block handler's HEAD/PUT/POST contract closely enough to exercise
+// putBlock end to end: HEAD reports the current durable write offset, PUT appends the
+// request body at that offset (rejecting an offset mismatch, mirroring the real
+// handler's 409) and reports the new offset, and POST .../finished is a no-op success.
+// It deliberately has no on-disk device and no independent Content-Length bound check —
+// net/http's own enforcement of req.ContentLength (see transfer.go) and putBlockCompressed's
+// own post-loop safety-net read are what this file's size-mismatch tests exercise.
+type fakeBlockImporter struct {
+	mu      sync.Mutex
+	written []byte
+}
+
+// seed pre-populates the durable buffer, simulating bytes a previous, interrupted run
+// already delivered before a fresh putBlock call resumes from that offset.
+func (f *fakeBlockImporter) seed(prefix []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.written = append([]byte(nil), prefix...)
+}
+
+// received returns a copy of every byte durably written so far.
+func (f *fakeBlockImporter) received() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]byte(nil), f.written...)
+}
+
+func (f *fakeBlockImporter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodHead:
+		f.mu.Lock()
+		n := int64(len(f.written))
+		f.mu.Unlock()
+
+		w.Header().Set("X-Next-Offset", strconv.FormatInt(n, 10))
+		w.WriteHeader(http.StatusOK)
+	case http.MethodPut:
+		offset, _ := strconv.ParseInt(r.Header.Get("X-Offset"), 10, 64)
+		expectedTotal, _ := strconv.ParseInt(r.Header.Get("X-Content-Length"), 10, 64)
+
+		f.mu.Lock()
+		cur := int64(len(f.written))
+		f.mu.Unlock()
+
+		if offset != cur {
+			http.Error(w, "offset mismatch", http.StatusConflict)
+			return
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		f.mu.Lock()
+		f.written = append(f.written, body...)
+		next := int64(len(f.written))
+		f.mu.Unlock()
+
+		w.Header().Set("X-Next-Offset", strconv.FormatInt(next, 10))
+
+		if next == expectedTotal {
+			w.WriteHeader(http.StatusCreated)
+		} else {
+			w.WriteHeader(http.StatusNoContent)
+		}
+	case http.MethodPost:
+		w.WriteHeader(http.StatusOK)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// blockCodecCases enumerates the codecs putBlock must round-trip, pairing compress.New's
+// codec name with the file extension putBlock/compress.NewReader dispatch on.
+var blockCodecCases = []struct {
+	codec string
+	ext   string
+}{
+	{"zstd", ".zst"},
+	{"gzip", ".gz"},
+	{"lz4", ".lz4"},
+	{"none", ""},
+}
+
+// writeEncodedBlockFile writes payload to path encoded as two concatenated codec frames
+// (mirroring multi-chunk block-download output), or verbatim for "none" (a raw block
+// file carries no framing).
+func writeEncodedBlockFile(t *testing.T, path, codecName string, payload []byte) {
+	t.Helper()
+
+	if codecName == "none" {
+		if err := os.WriteFile(path, payload, 0o600); err != nil {
+			t.Fatalf("write raw block file: %v", err)
+		}
+
+		return
+	}
+
+	codec, err := compress.New(codecName, 0)
+	if err != nil {
+		t.Fatalf("compress.New(%q): %v", codecName, err)
+	}
+
+	var buf bytes.Buffer
+
+	mid := len(payload) / 2
+	for _, part := range [][]byte{payload[:mid], payload[mid:]} {
+		frame, encErr := codec.EncodeFrame(part)
+		if encErr != nil {
+			t.Fatalf("EncodeFrame: %v", encErr)
+		}
+
+		buf.Write(frame)
+	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write encoded block file: %v", err)
+	}
+}
+
+// TestPutBlock_FreshUploadRoundTrip verifies a from-scratch upload (HEAD offset 0) for
+// every codec putBlock supports, including the raw ("none") fast path, against a real
+// net/http round trip (httptest.Server), asserting the server receives exactly the
+// original plaintext and onProgress sums to the full transferred size.
+func TestPutBlock_FreshUploadRoundTrip(t *testing.T) {
+	payload := bytes.Repeat([]byte("block-device-bytes-"), 4000)
+
+	for _, tc := range blockCodecCases {
+		t.Run(tc.codec, func(t *testing.T) {
+			dir := t.TempDir()
+			dataFile := filepath.Join(dir, "data.bin"+tc.ext)
+
+			writeEncodedBlockFile(t, dataFile, tc.codec, payload)
+
+			imp := &fakeBlockImporter{}
+			srv := httptest.NewServer(imp)
+			defer srv.Close()
+
+			var reported int
+
+			if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, int64(len(payload)), discardLogger(), func(n int) { reported += n }); err != nil {
+				t.Fatalf("putBlock: %v", err)
+			}
+
+			if got := imp.received(); !bytes.Equal(got, payload) {
+				t.Fatalf("server received %d bytes not matching the original %d-byte payload", len(got), len(payload))
+			}
+
+			if reported != len(payload) {
+				t.Errorf("reported progress bytes = %d, want %d (total payload size)", reported, len(payload))
+			}
+		})
+	}
+}
+
+// TestPutBlockCompressed_ResumesViaFastForward verifies that resuming from a nonzero
+// HEAD-reported offset re-derives the correct decompressed position via
+// io.CopyN(io.Discard, ...) fast-forward and uploads only the remainder, so that the
+// pre-seeded prefix (standing in for a prior, interrupted run's durable bytes) plus this
+// call's PUT concatenate back to the exact original plaintext. seedLen is deliberately
+// not aligned to either encoded frame's boundary, proving the mechanism does not depend
+// on frame geometry.
+func TestPutBlockCompressed_ResumesViaFastForward(t *testing.T) {
+	payload := bytes.Repeat([]byte("resume-me-please-"), 3000)
+	seedLen := len(payload)/2 + 7
+
+	for _, tc := range blockCodecCases {
+		if tc.ext == "" {
+			continue // the raw path's resume behavior is covered by TestPutBlock_ResumesFromServerOffset.
+		}
+
+		t.Run(tc.codec, func(t *testing.T) {
+			dir := t.TempDir()
+			dataFile := filepath.Join(dir, "data.bin"+tc.ext)
+
+			writeEncodedBlockFile(t, dataFile, tc.codec, payload)
+
+			imp := &fakeBlockImporter{}
+			imp.seed(payload[:seedLen])
+
+			srv := httptest.NewServer(imp)
+			defer srv.Close()
+
+			if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, int64(len(payload)), discardLogger(), nil); err != nil {
+				t.Fatalf("putBlock (resume): %v", err)
+			}
+
+			if got := imp.received(); !bytes.Equal(got, payload) {
+				t.Fatalf("resumed upload produced %d bytes not matching the original %d-byte payload", len(got), len(payload))
+			}
+		})
+	}
+}
+
+// TestPutBlock_SkipsDecodeWhenOffsetEqualsTotal verifies that an offset already equal to
+// totalSize (a fully-transferred-but-not-yet-finalized resume) never opens dataFile or
+// builds a decode reader: pointing dataFile at a path that does not exist would fail
+// immediately if putBlock tried to open it, so a nil return proves the short-circuit
+// fired before any file I/O.
+func TestPutBlock_SkipsDecodeWhenOffsetEqualsTotal(t *testing.T) {
+	imp := &fakeBlockImporter{}
+	imp.seed(bytes.Repeat([]byte("x"), 100))
+
+	srv := httptest.NewServer(imp)
+	defer srv.Close()
+
+	missing := filepath.Join(t.TempDir(), "data.bin.zst")
+
+	if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, missing, ".zst", 100, discardLogger(), nil); err != nil {
+		t.Fatalf("putBlock with offset==totalSize must skip decoding entirely, got error: %v", err)
+	}
+}
+
+// TestPutBlockCompressed_TooSmallDeclaredSizeErrors verifies the under-declared-size
+// safety net: when totalSize is smaller than the archive's actual decompressed content,
+// putBlockCompressed's post-loop probe read must catch the leftover bytes and fail
+// loudly instead of silently truncating a successful-looking upload.
+func TestPutBlockCompressed_TooSmallDeclaredSizeErrors(t *testing.T) {
+	payload := bytes.Repeat([]byte("extra-bytes-beyond-declared-total-"), 200)
+
+	dir := t.TempDir()
+	dataFile := filepath.Join(dir, "data.bin.zst")
+	writeEncodedBlockFile(t, dataFile, "zstd", payload)
+
+	srv := httptest.NewServer(&fakeBlockImporter{})
+	defer srv.Close()
+
+	shortTotal := int64(len(payload) - 500)
+
+	err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, ".zst", shortTotal, discardLogger(), nil)
+	if err == nil {
+		t.Fatal("expected an error for an under-declared totalSize, got nil")
+	}
+}
+
+// TestPutBlockCompressed_TooLargeDeclaredSizeErrors verifies the over-declared-size
+// safety net: when totalSize is larger than the archive's actual decompressed content,
+// the explicit req.ContentLength must make net/http refuse to send a short body, so
+// putBlockCompressed surfaces a clear wrapped error instead of hanging or letting the
+// server reject the request opaquely.
+func TestPutBlockCompressed_TooLargeDeclaredSizeErrors(t *testing.T) {
+	payload := bytes.Repeat([]byte("short-archive-"), 50)
+
+	dir := t.TempDir()
+	dataFile := filepath.Join(dir, "data.bin.zst")
+	writeEncodedBlockFile(t, dataFile, "zstd", payload)
+
+	imp := &fakeBlockImporter{}
+	srv := httptest.NewServer(imp)
+	defer srv.Close()
+
+	longTotal := int64(len(payload) + 5000)
+
+	err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, ".zst", longTotal, discardLogger(), nil)
+	if err == nil {
+		t.Fatal("expected an error for an over-declared totalSize, got nil")
+	}
+
+	// Guard against a false pass for an unrelated reason: the server must never have
+	// been told the transfer completed (it would only see longTotal bytes if net/http's
+	// own short-body detection failed to fire and the request were sent anyway).
+	if got := int64(len(imp.received())); got >= longTotal {
+		t.Fatalf("server received %d bytes, want fewer than the over-declared total %d (net/http should have refused to send a short body)", got, longTotal)
+	}
+}
+
+// TestPutBlockCompressed_NoTempFilesCreated asserts the streaming decode path creates
+// zero temporary files anywhere under the archive directory during the whole upload —
+// the entire point of decoding directly into the PUT body instead of materializing a
+// decompressed copy first.
+func TestPutBlockCompressed_NoTempFilesCreated(t *testing.T) {
+	payload := bytes.Repeat([]byte("no-temp-files-please-"), 5000)
+
+	dir := t.TempDir()
+	dataFile := filepath.Join(dir, "data.bin.zst")
+	writeEncodedBlockFile(t, dataFile, "zstd", payload)
+
+	before, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir before upload: %v", err)
+	}
+
+	srv := httptest.NewServer(&fakeBlockImporter{})
+	defer srv.Close()
+
+	if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, ".zst", int64(len(payload)), discardLogger(), nil); err != nil {
+		t.Fatalf("putBlock: %v", err)
+	}
+
+	after, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir after upload: %v", err)
+	}
+
+	if len(before) != len(after) {
+		t.Fatalf("archive directory entry count changed during upload: before=%d after=%d (a temp file was left behind)", len(before), len(after))
+	}
+
+	for i := range before {
+		if before[i].Name() != after[i].Name() {
+			t.Fatalf("archive directory contents changed during upload: before=%q after=%q", before[i].Name(), after[i].Name())
 		}
 	}
 }

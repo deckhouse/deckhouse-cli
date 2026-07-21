@@ -51,7 +51,6 @@ const (
 	flagTTL           = "ttl"
 	flagTimeout       = "timeout"
 	flagAllowExisting = "allow-existing"
-	flagTempDir       = "temp-dir"
 
 	defaultImportWorkers = 5
 
@@ -135,11 +134,10 @@ Scope and limitations:
 	cmd.Flags().StringP(flagNamespace, "n", "", "target namespace to import into (required)")
 	cmd.Flags().StringP(flagInput, "i", "", "root archive directory produced by 'd8 snapshot download' (required)")
 	cmd.Flags().String(flagNode, "", "restrict import to a single node subtree; format '<Kind>/<name>' (e.g. --node VolumeSnapshot/pvc-1)")
-	cmd.Flags().Int(flagWorkers, defaultImportWorkers, "maximum number of data-leaf volume uploads to run in parallel (fixed cap via errgroup.SetLimit; default 5; each worker may decompress a block volume to a temp file)")
+	cmd.Flags().Int(flagWorkers, defaultImportWorkers, "maximum number of data-leaf volume uploads to run in parallel (fixed cap via errgroup.SetLimit; default 5)")
 	cmd.Flags().String(flagTTL, defaultImportTTL, "idle TTL for each data-leaf DataImport (e.g. 2h, 30m); must exceed the importer's provisioning and post-upload completion time")
 	cmd.Flags().Duration(flagTimeout, 20*time.Minute, "timeout for per-node readiness/completion waits")
 	cmd.Flags().Bool(flagAllowExisting, false, "downgrade namespace preflight conflict check to a warning (import-mode markers from a prior run are never conflicts regardless of this flag)")
-	cmd.Flags().String(flagTempDir, "", "directory for decompressed block-volume temporary files (default: archive node directory; peak disk = --workers × largest decompressed volume)")
 
 	return cmd
 }
@@ -207,11 +205,6 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("reading --%s flag: %w", flagAllowExisting, err)
 	}
 
-	tempDir, err := cmd.Flags().GetString(flagTempDir)
-	if err != nil {
-		return fmt.Errorf("reading --%s flag: %w", flagTempDir, err)
-	}
-
 	safeClient.SupportNoAuth = false
 
 	sc, err := safeClient.NewSafeClient(cmd.PersistentFlags())
@@ -263,7 +256,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		runLog = slog.New(slog.NewTextHandler(sink.LogWriter(), &slog.HandlerOptions{Level: slog.LevelWarn}))
 	}
 
-	volumes := snapimport.NewClusterVolumeImporter(dynClient, sc, ttl, timeout, 3*time.Second, tempDir, runLog)
+	volumes := snapimport.NewClusterVolumeImporter(dynClient, sc, ttl, timeout, 3*time.Second, runLog)
 
 	cfg := snapimport.Config{
 		Namespace:        namespace,
@@ -274,7 +267,6 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		AllowExisting:    allowExisting,
 		TTL:              ttl,
 		Timeout:          timeout,
-		TempDir:          tempDir,
 		Uploader:         aggClient,
 		Volumes:          volumes,
 		Dynamic:          dynClient,
