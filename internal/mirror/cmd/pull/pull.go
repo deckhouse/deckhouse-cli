@@ -384,7 +384,9 @@ func (p *Puller) buildPullService() (*mirror.PullService, error) {
 	}
 
 	svc := mirror.NewPullService(
-		registryservice.NewService(c, edition, logger),
+		registryservice.NewService(c, edition, logger,
+			registryservice.WithModulesPathSuffix(p.params.ModulesPathSuffix),
+		),
 		pullflags.TempDir,
 		pullflags.DeckhouseTag,
 		&mirror.PullServiceOptions{
