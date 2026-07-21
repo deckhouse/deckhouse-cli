@@ -20,6 +20,7 @@ import (
 	gotar "archive/tar"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -505,6 +506,172 @@ func TestPutBlockCompressed_NoTempFilesCreated(t *testing.T) {
 		if before[i].Name() != after[i].Name() {
 			t.Fatalf("archive directory contents changed during upload: before=%q after=%q", before[i].Name(), after[i].Name())
 		}
+	}
+}
+
+// requestBodyReadTracker records the largest single byte count any Read call on an
+// outgoing PUT request body ever returned, across every request a trackingBodyDoer
+// forwards — used by TestPutBlockCompressed_StreamingIsMemoryBounded to prove the
+// streaming block-upload path never hands net/http's transport a chunk anywhere near
+// the whole decompressed payload size.
+type requestBodyReadTracker struct {
+	mu      sync.Mutex
+	maxRead int
+}
+
+func (t *requestBodyReadTracker) record(n int) {
+	if n <= 0 {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if n > t.maxRead {
+		t.maxRead = n
+	}
+}
+
+func (t *requestBodyReadTracker) max() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.maxRead
+}
+
+// trackedRequestBody wraps an outgoing request body, recording the length of the buffer
+// every Read call receives. It deliberately implements ONLY io.ReadCloser, not
+// io.WriterTo: verified empirically against the pinned Go stdlib (io.LimitedReader has
+// no WriteTo method, and io.NopCloser only preserves WriteTo when its wrapped reader
+// already has one — see io/io.go and io/io.go's NopCloser doc), putBlockCompressed's
+// io.NopCloser(io.LimitReader(decodeReader, remain)) body is never eligible for that
+// fast path in the first place, so hiding it here costs nothing on the current
+// implementation while guaranteeing a hypothetical regression to a fully-buffered
+// *bytes.Reader body (which DOES implement WriteTo) gets forced through net/http's
+// default bounded-buffer copy loop instead of silently bypassing this tracker.
+type trackedRequestBody struct {
+	rc      io.ReadCloser
+	tracker *requestBodyReadTracker
+}
+
+func (b *trackedRequestBody) Read(p []byte) (int, error) {
+	n, err := b.rc.Read(p)
+	b.tracker.record(n)
+
+	return n, err
+}
+
+func (b *trackedRequestBody) Close() error {
+	return b.rc.Close()
+}
+
+// trackingBodyDoer wraps a real *http.Client, intercepting every outgoing request's body
+// with a trackedRequestBody before handing the request to the real transport — so the
+// recorded maximum reflects exactly what net/http itself reads off the body while
+// writing the request to the wire, against a genuine httptest.Server round trip.
+type trackingBodyDoer struct {
+	client  *http.Client
+	tracker *requestBodyReadTracker
+}
+
+func (d *trackingBodyDoer) HTTPDo(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		req.Body = &trackedRequestBody{rc: req.Body, tracker: d.tracker}
+	}
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("tracking body doer: %w", err)
+	}
+
+	return resp, nil
+}
+
+// newMemoryBoundedBlockServer returns an httptest.Server mimicking just enough of the
+// import_block HEAD/PUT/POST contract for a single fresh (offset 0) upload: HEAD
+// reports no prior bytes, PUT discards the body without retaining it (the whole point of
+// this test is to keep the TEST PROCESS's own memory bounded too, not just the code
+// under test), and POST .../finished is a no-op success.
+func newMemoryBoundedBlockServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			w.Header().Set("X-Next-Offset", "0")
+			w.WriteHeader(http.StatusOK)
+		case http.MethodPut:
+			total := r.Header.Get("X-Content-Length")
+
+			if _, err := io.Copy(io.Discard, r.Body); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("X-Next-Offset", total)
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+}
+
+// TestPutBlockCompressed_StreamingIsMemoryBounded is the regression test for
+// import-block-streaming-decode-put's core promise: uploading a large compressed block
+// volume must never materialize the whole (or a large fraction of the) decompressed
+// payload in one in-process buffer. It builds a >=200 MiB, highly-compressible synthetic
+// zstd block volume — the on-disk fixture itself stays tiny thanks to the repetition,
+// via writeEncodedBlockFile, keeping this test fast despite the large logical size — and
+// uploads it through putBlock against a real httptest.Server, tracking the largest
+// single Read() the outgoing PUT body ever serves.
+//
+// zstd is used deliberately: it is both the default codec and, per
+// compress/codec_test.go's TestCodec_EncodeFrameStream_MemoryBound, the one codec whose
+// ENCODE-side EncodeFrameStream is documented to read a whole chunk in one shot (bounded
+// by the chunk-size cap). That fact says nothing about DEcoding, which is what this
+// upload path exercises (compress.NewReader(".zst", ...) wraps klauspost's streaming
+// zstd.Decoder) — this test verifies decode streaming empirically rather than assuming
+// it from the unrelated encode-side behavior, per code-style.md's "verified
+// empirically, not from a doc comment" rule.
+func TestPutBlockCompressed_StreamingIsMemoryBounded(t *testing.T) {
+	const payloadSize = 200 * 1024 * 1024 // >=200 MiB per this task's acceptance criteria
+
+	pattern := []byte("memory-bound-upload-regression-test-data. ")
+	payload := bytes.Repeat(pattern, payloadSize/len(pattern)+2)
+	payload = payload[:payloadSize]
+
+	dir := t.TempDir()
+	dataFile := filepath.Join(dir, "data.bin.zst")
+	writeEncodedBlockFile(t, dataFile, "zstd", payload)
+
+	srv := newMemoryBoundedBlockServer(t)
+	defer srv.Close()
+
+	tracker := &requestBodyReadTracker{}
+	doer := &trackingBodyDoer{client: srv.Client(), tracker: tracker}
+
+	var reported int64
+
+	err := putBlock(context.Background(), doer, srv.URL, dataFile, ".zst", int64(len(payload)), discardLogger(), func(n int) { reported += int64(n) })
+	if err != nil {
+		t.Fatalf("putBlock: %v", err)
+	}
+
+	if reported != int64(len(payload)) {
+		t.Errorf("reported progress bytes = %d, want %d (total payload size)", reported, len(payload))
+	}
+
+	// 4 MiB sits far below payloadSize yet comfortably above net/http's actual ~32 KiB
+	// default copy buffer, giving ample margin while still catching any regression that
+	// buffers a large fraction of the payload in one shot.
+	const ceiling = 4 * 1024 * 1024
+
+	if got := tracker.max(); got >= ceiling {
+		t.Errorf("largest single Read() on the outgoing PUT body was %d bytes, want < %d (%d MiB): "+
+			"the streaming upload path must never hand net/http a chunk anywhere near the full %d-byte payload",
+			got, ceiling, ceiling/(1024*1024), len(payload))
 	}
 }
 
