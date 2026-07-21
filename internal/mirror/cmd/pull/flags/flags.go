@@ -208,7 +208,7 @@ module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publ
 		&ModulesPathSuffix,
 		"modules-path-suffix",
 		"/modules",
-		"Suffix to append to source repo path to locate modules.",
+		"Registry path suffix to read modules from, relative to the source repo. Use \"/\" to read modules from the repo root.",
 	)
 	flagSet.StringArrayVar(
 		&PackagesWhitelist,

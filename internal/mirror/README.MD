@@ -62,7 +62,7 @@ d8 mirror pull <images-bundle-path> [flags]
 |------|-------|-------------|
 | `--include-module` | `-i` | Whitelist specific modules. Use one flag per module. Disables `--exclude-module`. See [Module Filtering](#module-filtering) for format details |
 | `--exclude-module` | `-e` | Blacklist specific modules. Format: `module-name[@version]`. Use one flag per module. Overridden by `--include-module` |
-| `--modules-path-suffix` | | Suffix to append to source repo path to locate modules (default: `/modules`) |
+| `--modules-path-suffix` | | Registry path suffix to read modules from, relative to the source repo. Use `/` to read modules from the repo root (default: `/modules`) |
 
 #### Component Selection
 
