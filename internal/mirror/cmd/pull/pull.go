@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -366,7 +365,8 @@ func (p *Puller) buildPullService() (*mirror.PullService, error) {
 		edition = pkg.NoEdition
 	}
 
-	// Scope to the registry path and modules suffix
+	// Scope to the registry path. The modules path suffix is applied in
+	// NewService below, via WithModulesPathSuffix.
 	if p.params.RegistryPath != "" {
 		c = c.WithSegment(p.params.RegistryPath)
 	}
@@ -453,20 +453,6 @@ func (p *Puller) validatePlatformAccess() error {
 
 	if accessErr != nil {
 		return fmt.Errorf("Source registry is not accessible: %w", accessErr)
-	}
-
-	return nil
-}
-
-// validateModulesAccess validates access to the modules registry
-func (p *Puller) validateModulesAccess() error {
-	modulesRepo := path.Join(p.params.DeckhouseRegistryRepo, p.params.ModulesPathSuffix)
-
-	ctx, cancel := context.WithTimeout(p.cmd.Context(), 15*time.Second)
-	defer cancel()
-
-	if err := p.accessValidator.ValidateListAccessForRepo(ctx, modulesRepo, p.validationOpts...); err != nil {
-		return fmt.Errorf("Source registry is not accessible: %w", err)
 	}
 
 	return nil
