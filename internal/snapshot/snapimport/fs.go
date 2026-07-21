@@ -75,7 +75,7 @@ func putFile(ctx context.Context, client httpDoer, baseURL, relPath, localPath s
 
 	totalSize := fi.Size()
 
-	offset, done, err := headFileOffset(ctx, client, fileURL)
+	offset, done, _, err := headFileOffset(ctx, client, fileURL)
 	if err != nil {
 		return err
 	}
@@ -131,18 +131,21 @@ func putFile(ctx context.Context, client httpDoer, baseURL, relPath, localPath s
 }
 
 // headFileOffset probes the file endpoint to determine the current upload state.
-// Returns (offset, done) where done=true means the final file already exists and the
-// upload should be skipped entirely. offset is the number of bytes already written to
-// the server's temp file; 0 if no partial upload exists.
-func headFileOffset(ctx context.Context, client httpDoer, fileURL string) (int64, bool, error) {
+// Returns (offset, done, size) where done=true means the final file already exists and
+// the upload should be skipped entirely; size is that final file's exact on-disk
+// (decompressed) byte count, read from the HEAD response's Content-Length, and is only
+// meaningful when done is true — it lets a caller credit progress for a skipped file
+// without decompressing it. offset is the number of bytes already written to the
+// server's temp file when done is false; 0 if no partial upload exists.
+func headFileOffset(ctx context.Context, client httpDoer, fileURL string) (int64, bool, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, fileURL, nil)
 	if err != nil {
-		return 0, false, err
+		return 0, false, 0, err
 	}
 
 	resp, err := client.HTTPDo(req)
 	if err != nil {
-		return 0, false, err
+		return 0, false, 0, err
 	}
 
 	defer func() {
@@ -156,20 +159,27 @@ func headFileOffset(ctx context.Context, client httpDoer, fileURL string) (int64
 		if next := resp.Header.Get("X-Next-Offset"); next != "" {
 			off, parseErr := strconv.ParseInt(next, 10, 64)
 			if parseErr != nil || off < 0 {
-				return 0, false, fmt.Errorf("invalid X-Next-Offset %q from HEAD %s", next, fileURL)
+				return 0, false, 0, fmt.Errorf("invalid X-Next-Offset %q from HEAD %s", next, fileURL)
 			}
 
-			return off, false, nil
+			return off, false, 0, nil
 		}
 
 		// No X-Next-Offset on a 200 → the final file already exists; skip the upload.
-		return 0, true, nil
+		// The importer sets Content-Length to the final file's exact decompressed size,
+		// which net/http already parses into resp.ContentLength (-1 when absent/chunked).
+		size := resp.ContentLength
+		if size < 0 {
+			size = 0
+		}
+
+		return 0, true, size, nil
 
 	case http.StatusNotFound:
-		return 0, false, nil
+		return 0, false, 0, nil
 
 	default:
-		return 0, false, fmt.Errorf("HEAD %s returned status %d (%s)", fileURL, resp.StatusCode, resp.Status)
+		return 0, false, 0, fmt.Errorf("HEAD %s returned status %d (%s)", fileURL, resp.StatusCode, resp.Status)
 	}
 }
 
@@ -277,6 +287,27 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 
 		ext := codecExt(hdr.Name)
 		relPath := strings.TrimSuffix(hdr.Name, ext)
+
+		fileURL, err := neturl.JoinPath(baseURL, uploadFilesSubpath, relPath)
+		if err != nil {
+			return fmt.Errorf("build file URL for %s: %w", relPath, err)
+		}
+
+		_, done, doneSize, err := headFileOffset(ctx, client, fileURL)
+		if err != nil {
+			return fmt.Errorf("probe upload state for %s: %w", relPath, err)
+		}
+
+		if done {
+			// The server already has the complete, final file: skip decompression and
+			// the PUT attempt entirely. Do NOT call tr.Read() for this entry — tar.Reader
+			// auto-skips its remaining unread bytes on the next tr.Next() call.
+			if onProgress != nil && doneSize > 0 {
+				onProgress(int(doneSize))
+			}
+
+			continue
+		}
 
 		tmpName, err := decompressEntryToTemp(tr, ext)
 		if err != nil {
