@@ -276,6 +276,183 @@ func (f *fakeBlockImporter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// interruptingBlockImporter mimics the import_block HEAD/PUT/POST contract like
+// fakeBlockImporter, but its FIRST PUT durably persists only a partial prefix of the
+// request body and then severs the underlying TCP connection with no HTTP response at
+// all -- simulating a killed CLI process or a dropped network connection partway through
+// a transfer, rather than a clean error response. Every PUT after the first behaves like
+// fakeBlockImporter (accepts the whole body, reports the new offset), so a second,
+// independent putBlock call standing in for a restarted process can complete normally.
+type interruptingBlockImporter struct {
+	mu       sync.Mutex
+	written  []byte
+	putCount int
+	// partialN is the number of body bytes durably persisted before the first PUT's
+	// connection is severed. It is deliberately not aligned to any codec frame or chunk
+	// boundary, mirroring TestPutBlockCompressed_ResumesViaFastForward's seedLen.
+	partialN int64
+}
+
+// durablyWritten returns a copy of every byte the server has durably accepted so far.
+func (f *interruptingBlockImporter) durablyWritten() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]byte(nil), f.written...)
+}
+
+func (f *interruptingBlockImporter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodHead:
+		f.mu.Lock()
+		n := int64(len(f.written))
+		f.mu.Unlock()
+
+		w.Header().Set("X-Next-Offset", strconv.FormatInt(n, 10))
+		w.WriteHeader(http.StatusOK)
+	case http.MethodPut:
+		f.handlePut(w, r)
+	case http.MethodPost:
+		w.WriteHeader(http.StatusOK)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handlePut services one PUT: the very first call across the server's lifetime accepts
+// only partialN bytes and kills the connection before any response is written; every
+// later call behaves exactly like fakeBlockImporter.
+func (f *interruptingBlockImporter) handlePut(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.putCount++
+	isFirstPut := f.putCount == 1
+	cur := int64(len(f.written))
+	f.mu.Unlock()
+
+	offset, _ := strconv.ParseInt(r.Header.Get("X-Offset"), 10, 64)
+	if offset != cur {
+		http.Error(w, "offset mismatch", http.StatusConflict)
+		return
+	}
+
+	if isFirstPut {
+		f.crashMidTransfer(w, r)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	f.mu.Lock()
+	f.written = append(f.written, body...)
+	next := int64(len(f.written))
+	f.mu.Unlock()
+
+	w.Header().Set("X-Next-Offset", strconv.FormatInt(next, 10))
+	w.WriteHeader(http.StatusCreated)
+}
+
+// crashMidTransfer durably records exactly partialN bytes of the request body, then
+// hijacks and closes the raw connection with no HTTP response -- the client observes
+// neither a success nor an error status, only a severed connection, exactly as it would
+// after the importer process (or the network path to it) died mid-transfer.
+func (f *interruptingBlockImporter) crashMidTransfer(w http.ResponseWriter, r *http.Request) {
+	chunk := make([]byte, f.partialN)
+	if _, err := io.ReadFull(r.Body, chunk); err != nil {
+		panic(fmt.Sprintf("test setup: reading %d-byte partial prefix: %v", f.partialN, err))
+	}
+
+	f.mu.Lock()
+	f.written = append(f.written, chunk...)
+	f.mu.Unlock()
+
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		panic("test setup: httptest ResponseWriter does not support Hijack")
+	}
+
+	conn, _, err := hj.Hijack()
+	if err != nil {
+		panic(fmt.Sprintf("test setup: hijack: %v", err))
+	}
+
+	_ = conn.Close()
+}
+
+// TestPutBlock_InterruptAndResume_AllCodecs proves the streaming resume mechanism
+// (import-block-streaming-decode-put) survives a simulated process restart, not just a
+// clean server-reported partial offset: attempt 1 is severed mid-transfer with no HTTP
+// response (interruptingBlockImporter.crashMidTransfer), so putBlock must return an
+// error; attempt 2 is a wholly separate putBlock call -- as a restarted CLI process would
+// make, carrying forward nothing but what HEAD reports -- and must complete the transfer
+// so that the server's durably-received bytes equal the original plaintext exactly. Run
+// across every codec putBlock supports: zstd/gzip/lz4 exercise the new discard-and-fast-
+// forward decode path (putBlockCompressed); none exercises the pre-existing
+// io.SectionReader-based resume path (putBlockRaw) as a regression guard.
+func TestPutBlock_InterruptAndResume_AllCodecs(t *testing.T) {
+	payload := bytes.Repeat([]byte("interrupt-then-resume-bytes-"), 3000)
+
+	for _, tc := range blockCodecCases {
+		t.Run(tc.codec, func(t *testing.T) {
+			dir := t.TempDir()
+			dataFile := filepath.Join(dir, "data.bin"+tc.ext)
+
+			writeEncodedBlockFile(t, dataFile, tc.codec, payload)
+
+			// Deliberately not aligned to either encoded frame's boundary (mirrors
+			// TestPutBlockCompressed_ResumesViaFastForward), proving the crash-then-
+			// resume mechanism does not depend on frame geometry.
+			partialN := int64(len(payload)/3 + 11)
+
+			imp := &interruptingBlockImporter{partialN: partialN}
+			srv := httptest.NewServer(imp)
+			defer srv.Close()
+
+			totalSize := int64(len(payload))
+
+			// Attempt 1: simulates the CLI process being killed (or the connection
+			// dropping) mid-transfer. putBlock must surface an error -- the connection
+			// was severed with no response -- and the server must have durably kept
+			// exactly partialN bytes, no more and no less.
+			err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, totalSize, discardLogger(), nil)
+			if err == nil {
+				t.Fatal("expected attempt 1 (simulated crash mid-transfer) to return an error")
+			}
+
+			if got := int64(len(imp.durablyWritten())); got != partialN {
+				t.Fatalf("after simulated crash, server durably holds %d bytes, want exactly %d", got, partialN)
+			}
+
+			// Attempt 2: a genuinely independent invocation of putBlock -- a fresh call
+			// with its own local variables, exactly as a restarted process would make.
+			// Nothing from attempt 1 is passed in except the same on-disk archive file
+			// (which a real restarted process would also re-open from disk) and the same
+			// server URL; the resume offset itself is re-derived entirely from this
+			// call's own HEAD probe, per headBlockOffset/putBlock.
+			var reported int64
+
+			err = putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, totalSize, discardLogger(), func(n int) { reported += int64(n) })
+			if err != nil {
+				t.Fatalf("putBlock (attempt 2, resume after simulated crash): %v", err)
+			}
+
+			got := imp.durablyWritten()
+			if !bytes.Equal(got, payload) {
+				t.Fatalf("after crash-then-resume, server holds %d bytes not matching the original %d-byte payload "+
+					"(a regression here means either duplicated already-durable bytes or dropped bytes)", len(got), len(payload))
+			}
+
+			if want := totalSize - partialN; reported != want {
+				t.Errorf("attempt 2 reported %d progress bytes, want %d (only the bytes it actually sent, not "+
+					"re-crediting the pre-crash prefix attempt 1 already reported nothing for)", reported, want)
+			}
+		})
+	}
+}
+
 // blockCodecCases enumerates the codecs putBlock must round-trip, pairing compress.New's
 // codec name with the file extension putBlock/compress.NewReader dispatch on.
 var blockCodecCases = []struct {
