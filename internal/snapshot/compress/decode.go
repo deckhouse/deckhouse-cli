@@ -79,11 +79,9 @@ func NewReader(ext string, src io.Reader) (io.ReadCloser, error) {
 }
 
 // lz4FrameReader decodes a concatenation of independent lz4 frames from a
-// shared bufio.Reader, relocating the per-frame-loop technique that
-// snapimport.decompressLZ4Frames uses for a Writer sink into an io.Reader
-// shape: lz4.Reader consumes exactly one frame's bytes and leaves the rest
-// buffered in br, so a fresh lz4.NewReader(br) per frame picks up where the
-// previous one left off.
+// shared bufio.Reader: lz4.Reader consumes exactly one frame's bytes and
+// leaves the rest buffered in br, so a fresh lz4.NewReader(br) per frame
+// picks up where the previous one left off.
 type lz4FrameReader struct {
 	br  *bufio.Reader
 	cur *lz4.Reader

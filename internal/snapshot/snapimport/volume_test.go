@@ -1090,12 +1090,12 @@ func TestEnsureDataImport_RecreatesExpired(t *testing.T) {
 func TestSendVolumeData_FSLeaf_UsesTarFile(t *testing.T) {
 	// Build a real data.tar with one zstd-compressed file entry.
 	content := []byte("hello filesystem import regression")
-	compressed := zstdCompress(t, content)
+	ext, compressed := encodeEntry(t, "zstd", content)
 
 	var tarBuf bytes.Buffer
 
 	tw := gotar.NewWriter(&tarBuf)
-	addTarEntry(t, tw, "file.txt.zst", compressed, 0o644, 1000, 2000, time.Now())
+	addTarEntry(t, tw, "file.txt"+ext, compressed, 0o644, 1000, 2000, time.Now())
 
 	if err := tw.Close(); err != nil {
 		t.Fatalf("close tar: %v", err)
