@@ -34,6 +34,7 @@ var decodeCases = []struct {
 }{
 	{name: "zstd", ext: ".zst", codecName: "zstd"},
 	{name: "gzip", ext: ".gz", codecName: "gzip"},
+	{name: "lz4", ext: ".lz4", codecName: "lz4"},
 	{name: "none", ext: "", codecName: "none"},
 }
 
@@ -177,5 +178,103 @@ func TestNewReader_NonePassthroughCloseDoesNotConsumeSource(t *testing.T) {
 
 	if !bytes.Equal(remaining, data[n:]) {
 		t.Errorf("Close consumed bytes beyond the caller's own reads: remaining=%q want=%q", remaining, data[n:])
+	}
+}
+
+// TestNewReader_LZ4ReadPastEndReturnsCleanEOF exercises the lz4 frame-swap
+// reader's boundary specifically: after all concatenated frames are drained,
+// further Read calls must return io.EOF (not hang, not an error), and it must
+// be returned exactly once per call rather than repeating stale bytes.
+func TestNewReader_LZ4ReadPastEndReturnsCleanEOF(t *testing.T) {
+	t.Helper()
+
+	c, err := compress.New("lz4", 0)
+	if err != nil {
+		t.Fatalf("New(lz4): %v", err)
+	}
+
+	chunks := [][]byte{
+		bytes.Repeat([]byte("first-frame-"), 50),
+		bytes.Repeat([]byte("second-frame-"), 50),
+		bytes.Repeat([]byte("third-frame-"), 50),
+	}
+
+	var frames []byte
+
+	var plain []byte
+
+	for _, chunk := range chunks {
+		frame, encErr := c.EncodeFrame(chunk)
+		if encErr != nil {
+			t.Fatalf("EncodeFrame: %v", encErr)
+		}
+
+		frames = append(frames, frame...)
+		plain = append(plain, chunk...)
+	}
+
+	r, err := compress.NewReader(".lz4", bytes.NewReader(frames))
+	if err != nil {
+		t.Fatalf("NewReader(.lz4): %v", err)
+	}
+
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+
+	if !bytes.Equal(got, plain) {
+		t.Fatalf("round-trip mismatch: len got=%d want=%d", len(got), len(plain))
+	}
+
+	buf := make([]byte, 16)
+
+	n, err := r.Read(buf)
+	if n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("Read past end: got n=%d err=%v; want n=0 err=io.EOF", n, err)
+	}
+
+	n, err = r.Read(buf)
+	if n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("second Read past end: got n=%d err=%v; want n=0 err=io.EOF (must not hang or error)", n, err)
+	}
+
+	if err := r.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}
+
+// TestNewReader_LZ4TruncatedFrameErrors covers the corrupt/truncated-input
+// path: a frame cut short must surface a decode error, not a silent partial
+// read reported as io.EOF.
+func TestNewReader_LZ4TruncatedFrameErrors(t *testing.T) {
+	t.Helper()
+
+	c, err := compress.New("lz4", 0)
+	if err != nil {
+		t.Fatalf("New(lz4): %v", err)
+	}
+
+	src := bytes.Repeat([]byte("truncate me please, this needs to be long enough to span blocks "), 200)
+
+	frame, err := c.EncodeFrame(src)
+	if err != nil {
+		t.Fatalf("EncodeFrame: %v", err)
+	}
+
+	truncated := frame[:len(frame)/2]
+
+	r, err := compress.NewReader(".lz4", bytes.NewReader(truncated))
+	if err != nil {
+		t.Fatalf("NewReader(.lz4): %v", err)
+	}
+
+	_, err = io.ReadAll(r)
+	if err == nil {
+		t.Fatal("expected an error decoding a truncated lz4 frame; got nil")
+	}
+
+	if errors.Is(err, io.EOF) {
+		t.Errorf("truncated input must not be reported as a clean io.EOF: %v", err)
 	}
 }

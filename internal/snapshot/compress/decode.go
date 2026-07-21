@@ -17,24 +17,28 @@ limitations under the License.
 package compress
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
 	"io"
 
 	kgzip "github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
+	"github.com/pierrec/lz4/v4"
 )
 
 // NewReader returns a streaming decompressing io.ReadCloser for src, selecting
 // the codec by ext (the file-extension convention used by Codec.Ext: ".zst",
-// ".gz", or "" for no compression). It is the decode-side counterpart to
-// New/Codec's Encode* methods.
+// ".gz", ".lz4", or "" for no compression). It is the decode-side counterpart
+// to New/Codec's Encode* methods.
 //
-// Both the ".zst" and ".gz" readers decode a concatenation of independent
-// codec frames/members written by EncodeFrame in one continuous Read stream —
-// no per-frame loop is needed by the caller, matching how block-volume chunks
-// are stored (see the compress-decode-reader-lz4 follow-on task for lz4, whose
-// reader does NOT auto-concatenate frames and needs a stateful frame-swap
-// implementation instead).
+// All four readers decode a concatenation of independent codec frames/members
+// written by EncodeFrame in one continuous Read stream — no per-frame loop is
+// needed by the caller, matching how block-volume chunks are stored. ".lz4" is
+// the odd one out internally: pierrec's lz4.Reader does not auto-continue past
+// one frame's end marker into a concatenated next frame, so NewReader wraps it
+// in a stateful frame-swap reader (see lz4FrameReader) that reproduces that
+// behavior; ".zst" and ".gz" already auto-concatenate in the underlying library.
 //
 // Callers MUST call Close on the returned io.ReadCloser once done reading:
 // the zstd and gzip decoders hold internal buffers (and, for zstd, background
@@ -58,13 +62,75 @@ func NewReader(ext string, src io.Reader) (io.ReadCloser, error) {
 		}
 
 		return gr, nil
+	case ".lz4":
+		br, ok := src.(*bufio.Reader)
+		if !ok {
+			br = bufio.NewReader(src)
+		}
+
+		return &lz4FrameReader{br: br}, nil
 	case "":
 		// No codec: src already carries raw bytes. The caller owns src, so
 		// Close here must be a no-op rather than closing/consuming it.
 		return io.NopCloser(src), nil
 	default:
-		return nil, fmt.Errorf("%w: extension %q (valid: .zst, .gz, \"\")", ErrUnknownCodec, ext)
+		return nil, fmt.Errorf("%w: extension %q (valid: .zst, .gz, .lz4, \"\")", ErrUnknownCodec, ext)
 	}
+}
+
+// lz4FrameReader decodes a concatenation of independent lz4 frames from a
+// shared bufio.Reader, relocating the per-frame-loop technique that
+// snapimport.decompressLZ4Frames uses for a Writer sink into an io.Reader
+// shape: lz4.Reader consumes exactly one frame's bytes and leaves the rest
+// buffered in br, so a fresh lz4.NewReader(br) per frame picks up where the
+// previous one left off.
+type lz4FrameReader struct {
+	br  *bufio.Reader
+	cur *lz4.Reader
+}
+
+// Read decodes bytes from the current lz4 frame, transparently advancing to
+// the next concatenated frame (or returning io.EOF once none remain) when the
+// current frame is exhausted.
+func (r *lz4FrameReader) Read(p []byte) (int, error) {
+	for {
+		if r.cur == nil {
+			if _, err := r.br.Peek(1); err != nil {
+				if errors.Is(err, io.EOF) {
+					return 0, io.EOF
+				}
+
+				return 0, fmt.Errorf("peek lz4 source: %w", err)
+			}
+
+			r.cur = lz4.NewReader(r.br)
+		}
+
+		n, err := r.cur.Read(p)
+		if errors.Is(err, io.EOF) {
+			r.cur = nil
+
+			if n > 0 {
+				return n, nil
+			}
+			// This frame yielded no bytes on its terminal read; loop to peek
+			// for the next frame (or true end-of-stream) without surfacing a
+			// spurious EOF to the caller mid-stream.
+			continue
+		}
+
+		if err != nil {
+			return n, fmt.Errorf("decode lz4 frame: %w", err)
+		}
+
+		return n, nil
+	}
+}
+
+// Close is a no-op: pierrec's lz4.Reader has no Close method to release, and
+// br wraps a caller-owned src that this reader does not own.
+func (r *lz4FrameReader) Close() error {
+	return nil
 }
 
 // zstdReadCloser adapts *zstd.Decoder to io.ReadCloser: zstd.Decoder.Close
