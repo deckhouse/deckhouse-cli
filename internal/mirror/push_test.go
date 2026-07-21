@@ -22,7 +22,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/v1/layout"
@@ -30,7 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
-	client "github.com/deckhouse/deckhouse/pkg/registry"
 	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
@@ -101,20 +99,6 @@ func buildLayoutBundle(t *testing.T, dir, tarName, prefix, shortTag string) stri
 	return tarPath
 }
 
-// scopeToRepo scopes the client to a slash-separated repo path, skipping empty
-// components. An empty path leaves the client at the target repo root.
-func scopeToRepo(c client.Client, repoPath string) client.Client {
-	for _, seg := range strings.Split(repoPath, "/") {
-		if seg == "" {
-			continue
-		}
-
-		c = c.WithSegment(seg)
-	}
-
-	return c
-}
-
 // TestPushService_ModulesPathSuffix verifies that --modules-path-suffix moves
 // both module images and their discovery index tag, while non-module layouts
 // stay put. The default (empty / "/modules") keeps the historical layout.
@@ -161,12 +145,12 @@ func TestPushService_ModulesPathSuffix(t *testing.T) {
 			ctx := context.Background()
 
 			// Module images land at <repo>/<wantModule>:<moduleTag>.
-			moduleClient := scopeToRepo(destClient, tt.wantModule)
+			moduleClient := destClient.WithSegment(pkgclient.PathToSegments(tt.wantModule)...)
 			assert.NoErrorf(t, moduleClient.CheckImageExists(ctx, moduleTag),
 				"module image must exist at %s:%s", moduleClient.GetRegistry(), moduleTag)
 
 			// Discovery tag lands at <repo>/<wantIndex>:<moduleName>.
-			indexClient := scopeToRepo(destClient, tt.wantIndex)
+			indexClient := destClient.WithSegment(pkgclient.PathToSegments(tt.wantIndex)...)
 			tags, err := indexClient.ListTags(ctx)
 			require.NoError(t, err)
 			assert.Containsf(t, tags, moduleName,
@@ -175,12 +159,14 @@ func TestPushService_ModulesPathSuffix(t *testing.T) {
 			// A non-default suffix must MOVE modules, not copy them: the default
 			// modules/ path must hold nothing.
 			if tt.wantModule != "modules/"+moduleName {
-				assert.Errorf(t, scopeToRepo(destClient, "modules/"+moduleName).CheckImageExists(ctx, moduleTag),
+				defaultRepo := destClient.WithSegment(pkgclient.PathToSegments("modules/"+moduleName)...)
+				assert.Errorf(t, defaultRepo.CheckImageExists(ctx, moduleTag),
 					"module must not remain at default modules/%s", moduleName)
 			}
 
 			// The non-module layout is unaffected by the suffix.
-			assert.NoErrorf(t, scopeToRepo(destClient, "install").CheckImageExists(ctx, installTag),
+			installRepo := destClient.WithSegment(pkgclient.PathToSegments("install")...)
+			assert.NoErrorf(t, installRepo.CheckImageExists(ctx, installTag),
 				"install layout must stay at <repo>/install regardless of suffix")
 		})
 	}

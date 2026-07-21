@@ -112,10 +112,11 @@ type Service struct {
 	// rootURL is the edition root registry URL (without the modules segment).
 	rootURL string
 
-	// modulesSegment is the registry path segment where modules live, relative
-	// to rootURL. Matches the scope of modulesService (default "modules", empty
-	// when modules are at the edition root). Set from --modules-path-suffix.
-	modulesSegment string
+	// modulesPath is the registry path where modules live, relative to rootURL.
+	// Matches the scope of modulesService (default "modules", empty when modules
+	// are at the edition root, may be multi-segment like "my/mods"). Set from
+	// --modules-path-suffix.
+	modulesPath string
 
 	// logger is for internal debug logging
 	logger *dkplog.Logger
@@ -155,30 +156,30 @@ func NewService(
 		pullerService:       puller.NewPullerService(logger, userLogger),
 		options:             options,
 		rootURL:             rootURL,
-		modulesSegment:      registryService.GetModulesSegment(),
+		modulesPath:         registryService.GetModulesPath(),
 		moduleStats:         make(map[moduleName]modulePullStat),
 		logger:              logger,
 		userLogger:          userLogger,
 	}
 }
 
-// moduleRegistryPath builds a source-registry reference under the modules path
-// suffix, joining rootURL, the modules segment and elem with "/". An empty
-// modules segment (--modules-path-suffix "/") places modules at the edition
-// root. Elements are path components; append ":<tag>" to the result separately.
+// moduleRegistryPath builds a source-registry reference under the modules path,
+// joining rootURL, modulesPath and elem with "/". An empty modulesPath
+// (--modules-path-suffix "/") places modules at the edition root. Elements are
+// path components; append ":<tag>" to the result separately.
 //
 // With rootURL "registry.example.com/deckhouse/ee":
-//   - segment "modules" (default):
+//   - modulesPath "modules" (default):
 //     moduleRegistryPath("csi")            -> ".../deckhouse/ee/modules/csi"
 //     moduleRegistryPath("csi", "release") -> ".../deckhouse/ee/modules/csi/release"
-//   - segment "" (suffix "/"):
+//   - modulesPath "" (suffix "/"):
 //     moduleRegistryPath("csi")            -> ".../deckhouse/ee/csi"
 func (svc *Service) moduleRegistryPath(elem ...string) string {
 	parts := make([]string, 0, len(elem)+2)
 	parts = append(parts, svc.rootURL)
 
-	if svc.modulesSegment != "" {
-		parts = append(parts, svc.modulesSegment)
+	if svc.modulesPath != "" {
+		parts = append(parts, svc.modulesPath)
 	}
 
 	parts = append(parts, elem...)

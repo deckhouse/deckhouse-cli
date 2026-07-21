@@ -23,6 +23,7 @@ import (
 	client "github.com/deckhouse/deckhouse/pkg/registry"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
+	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 const (
@@ -47,9 +48,10 @@ type Service struct {
 	security         *SecurityServices
 	installer        *InstallerServices
 
-	// modulesSegment is the registry path segment where modules live, relative
-	// to the edition root. Defaults to "modules"; empty means the edition root.
-	modulesSegment string
+	// modulesPath is the registry path where modules live, relative to the
+	// edition root. Defaults to "modules"; empty means the edition root. May
+	// hold several segments (e.g. "my/mods"), so it is a path, not a segment.
+	modulesPath string
 
 	logger *log.Logger
 }
@@ -57,19 +59,21 @@ type Service struct {
 // Option configures a Service at construction time.
 type Option func(*Service)
 
-// WithModulesPathSuffix sets the registry path segment where modules live,
-// relative to the edition root. Empty suffix keeps the default "modules";
-// "/" places modules at the edition root. Leading and trailing slashes are ignored.
+// WithModulesPathSuffix sets the registry path where modules live, relative to
+// the edition root. Empty suffix keeps the default "modules"; "/" places
+// modules at the edition root. Leading and trailing slashes are ignored.
 func WithModulesPathSuffix(suffix string) Option {
 	return func(s *Service) {
-		s.modulesSegment = normalizeModulesSegment(suffix)
+		s.modulesPath = NormalizeModulesPath(suffix)
 	}
 }
 
-// normalizeModulesSegment resolves the modules path segment from a suffix flag
-// value. Empty value keeps the default; surrounding slashes are trimmed so "/"
-// yields an empty segment (modules at the edition root).
-func normalizeModulesSegment(suffix string) string {
+// NormalizeModulesPath resolves the modules registry path from a
+// --modules-path-suffix value. Empty value keeps the default "modules";
+// surrounding slashes are trimmed so "/" yields an empty path (modules at the
+// edition/repo root). Shared by mirror push and pull so the suffix means the
+// same thing on both sides.
+func NormalizeModulesPath(suffix string) string {
 	if suffix == "" {
 		return moduleSegment
 	}
@@ -77,26 +81,12 @@ func normalizeModulesSegment(suffix string) string {
 	return strings.Trim(suffix, "/")
 }
 
-// scopeSegment scopes the client by each non-empty component of a
-// slash-separated segment. An empty segment leaves the client unchanged.
-func scopeSegment(c client.Client, segment string) client.Client {
-	for _, seg := range strings.Split(segment, "/") {
-		if seg == "" {
-			continue
-		}
-
-		c = c.WithSegment(seg)
-	}
-
-	return c
-}
-
 // NewService creates a new registry service with the given client and logger
 func NewService(c client.Client, edition pkg.Edition, logger *log.Logger, opts ...Option) *Service {
 	s := &Service{
-		client:         c,
-		logger:         logger,
-		modulesSegment: moduleSegment,
+		client:      c,
+		logger:      logger,
+		modulesPath: moduleSegment,
 	}
 
 	for _, opt := range opts {
@@ -114,7 +104,7 @@ func NewService(c client.Client, edition pkg.Edition, logger *log.Logger, opts .
 
 	s.editionBase = base
 
-	s.modulesService = NewModulesService(scopeSegment(base, s.modulesSegment), logger.Named("modules"))
+	s.modulesService = NewModulesService(base.WithSegment(pkgclient.PathToSegments(s.modulesPath)...), logger.Named("modules"))
 	s.packagesService = NewPackagesService(base.WithSegment(packageSegment), logger.Named("packages"))
 	s.deckhouseService = NewDeckhouseService(base, logger.Named("deckhouse"))
 	s.security = NewSecurityServices(securityServiceName, base.WithSegment(securitySegment), logger.Named("security"))
@@ -145,12 +135,12 @@ func (s *Service) ModuleService() *ModulesService {
 	return s.modulesService
 }
 
-// GetModulesSegment returns the registry path segment where modules live,
-// relative to the edition root (default "modules", empty when modules are at
-// the edition root). Callers building module references must use it so their
-// paths match the scope of ModuleService.
-func (s *Service) GetModulesSegment() string {
-	return s.modulesSegment
+// GetModulesPath returns the registry path where modules live, relative to the
+// edition root (default "modules", empty when modules are at the edition root).
+// Callers building module references must use it so their paths match the scope
+// of ModuleService.
+func (s *Service) GetModulesPath() string {
+	return s.modulesPath
 }
 
 // PackageService returns the packages service

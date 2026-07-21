@@ -39,6 +39,8 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/pusher"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
+	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 const (
@@ -160,33 +162,15 @@ func (svc *PushService) Push(ctx context.Context) error {
 	})
 }
 
-// modulesSegment returns the registry path segment for module repositories.
-// Derived from ModulesPathSuffix; empty result means modules go to the repo root.
-func (svc *PushService) modulesSegment() string {
-	// Zero value keeps the default: only an explicit "/" means the repo root.
-	if svc.options.ModulesPathSuffix == "" {
-		return internal.ModulesSegment
-	}
-
-	return strings.Trim(svc.options.ModulesPathSuffix, "/")
-}
-
-// scopeToSegment scopes the client by each non-empty component of a
-// slash-separated segment. An empty segment leaves the client at the target repo.
-func scopeToSegment(c client.Client, segment string) client.Client {
-	for _, seg := range strings.Split(segment, "/") {
-		if seg == "" {
-			continue
-		}
-
-		c = c.WithSegment(seg)
-	}
-
-	return c
+// modulesPath returns the registry path for module repositories, relative to
+// the target repo. Derived from ModulesPathSuffix; empty result means modules
+// go to the repo root.
+func (svc *PushService) modulesPath() string {
+	return registryservice.NormalizeModulesPath(svc.options.ModulesPathSuffix)
 }
 
 // remapModulesSegment rewrites the leading "modules" component of a
-// slash-separated registry segment to the configured modules suffix.
+// slash-separated registry segment to the configured modules path.
 // Modules are always stored under "modules/<name>" inside the bundle, so this
 // is where --modules-path-suffix takes effect. Segments outside "modules" are
 // returned unchanged.
@@ -195,9 +179,9 @@ func (svc *PushService) remapModulesSegment(segment string) string {
 
 	switch {
 	case segment == internal.ModulesSegment:
-		return svc.modulesSegment()
+		return svc.modulesPath()
 	case strings.HasPrefix(segment, modulesPrefix):
-		return path.Join(svc.modulesSegment(), strings.TrimPrefix(segment, modulesPrefix))
+		return path.Join(svc.modulesPath(), strings.TrimPrefix(segment, modulesPrefix))
 	default:
 		return segment
 	}
@@ -359,7 +343,7 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 	// Rewrite the leading "modules" component to honor --modules-path-suffix.
 	segment = svc.remapModulesSegment(segment)
 
-	targetClient := scopeToSegment(svc.client, segment)
+	targetClient := svc.client.WithSegment(pkgclient.PathToSegments(segment)...)
 
 	svc.userLogger.Infof("Pushing %s", targetClient.GetRegistry())
 
@@ -423,7 +407,7 @@ func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string) 
 
 	// Scope the client to the modules repo, honoring --modules-path-suffix.
 	// An empty suffix places discovery tags directly on the target repo.
-	modulesClient := scopeToSegment(svc.client, svc.modulesSegment())
+	modulesClient := svc.client.WithSegment(pkgclient.PathToSegments(svc.modulesPath())...)
 
 	// Push a small random image for each module with tag = module name
 	for _, moduleName := range moduleNames {
