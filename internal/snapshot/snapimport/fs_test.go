@@ -474,6 +474,109 @@ func TestImportFSFromTar_SkipsNonRegularEntries(t *testing.T) {
 	}
 }
 
+func TestImportFSFromTar_SkipsAlreadyUploadedEntryWithoutDecompressing(t *testing.T) {
+	alphaPlain := []byte("alpha file the server already has fully, byte for byte")
+	betaPlain := []byte("beta file still needs uploading")
+
+	alphaZstd := zstdCompress(t, alphaPlain)
+
+	modTime := time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC)
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	addTarEntry(t, tw, "alpha.txt.zst", alphaZstd, 0o644, 100, 200, modTime)
+	addTarEntry(t, tw, "beta.txt", betaPlain, 0o644, 100, 200, modTime)
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "data.tar")
+
+	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	alphaPUTCalled := false
+	cap := &fsCapture{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		relPath := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
+
+		if r.Method == http.MethodHead {
+			if relPath == "alpha.txt" {
+				// Final file already exists server-side: 200, no X-Next-Offset, and
+				// Content-Length set to the exact decompressed (plaintext) size.
+				w.Header().Set("Content-Length", strconv.Itoa(len(alphaPlain)))
+				w.WriteHeader(http.StatusOK)
+
+				return
+			}
+
+			w.WriteHeader(http.StatusNotFound)
+
+			return
+		}
+
+		if relPath == "alpha.txt" {
+			alphaPUTCalled = true
+		}
+
+		body, _ := io.ReadAll(r.Body)
+		cap.record(relPath, body, r.Header.Clone())
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	tmpBefore, err := filepath.Glob(filepath.Join(os.TempDir(), "d8-import-fs-*.raw"))
+	if err != nil {
+		t.Fatalf("glob temp dir (before): %v", err)
+	}
+
+	progressed := 0
+	onProgress := func(n int) { progressed += n }
+
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), onProgress); err != nil {
+		t.Fatalf("importFSFromTar: %v", err)
+	}
+
+	if alphaPUTCalled {
+		t.Error("PUT must not be issued for an already-fully-uploaded entry (alpha.txt)")
+	}
+
+	if _, ok := cap.find("alpha.txt"); ok {
+		t.Error("alpha.txt must not appear among uploads — it was already complete server-side")
+	}
+
+	// beta.txt was NOT already done, so it must be uploaded exactly as before this fix.
+	beta, ok := cap.find("beta.txt")
+	if !ok {
+		t.Fatal("beta.txt (not yet uploaded) was not uploaded")
+	}
+
+	if !bytes.Equal(beta.body, betaPlain) {
+		t.Errorf("beta.txt body = %q, want %q", beta.body, betaPlain)
+	}
+
+	// tar.Reader must have auto-skipped alpha's remaining unread compressed bytes
+	// cleanly, or beta's entry (and its body) would be corrupted/misaligned above.
+
+	if want := len(alphaPlain) + len(betaPlain); progressed != want {
+		t.Errorf("onProgress total = %d, want %d (skipped alpha.txt must still be credited at its exact decompressed size, plus beta.txt)", progressed, want)
+	}
+
+	tmpAfter, err := filepath.Glob(filepath.Join(os.TempDir(), "d8-import-fs-*.raw"))
+	if err != nil {
+		t.Fatalf("glob temp dir (after): %v", err)
+	}
+
+	if len(tmpAfter) > len(tmpBefore) {
+		t.Errorf("temp files leaked: before=%d after=%d — an already-uploaded entry must not be decompressed to a temp file", len(tmpBefore), len(tmpAfter))
+	}
+}
+
 func TestPutFile_EmptyFile_CreatesViaSinglePUT(t *testing.T) {
 	dir := t.TempDir()
 	localPath := filepath.Join(dir, "empty.txt")
