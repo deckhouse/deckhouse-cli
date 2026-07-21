@@ -148,7 +148,10 @@ func (f *Filter) ModuleNames() []string {
 //   - "=v1.2.3+stable"    → exact tag pinned to the named release channel
 //   - ">=1.2.0 <=1.3.0"   → semver range with inclusive anchors
 //   - "^1.2.0", "~1.2.0"  → semver shorthand
-//   - "1.2.0"             → implicit caret (^1.2.0), kept for backward compat
+//   - "1.2.0"             → implicit ">=1.2.0 <2.0.0" (bare version, same major
+//                           line); for a 0.x version like "0.4.0" this spans
+//                           the whole 0.x line (">=0.4.0 <1.0.0"), NOT a single
+//                           minor as caret would — see NewImplicitVersionConstraint
 //
 // An empty or whitespace-only input is rejected so callers see a clear error
 // instead of silently producing a no-op constraint.
@@ -163,19 +166,18 @@ func parseVersionConstraint(v string) (VersionConstraint, error) {
 	}
 
 	switch v[0] {
-	// has user defined constraint (nothing to do)
-	case '=', '>', '<', '~', '^':
-	default:
-		// version without contraint (add ^ for backward compatibility)
-		v = "^" + v
-	}
-
 	// exact-match: "=1.2.3" or "=1.2.3+stable"
-	if v[0] == '=' {
+	case '=':
 		return parseExact(v[1:])
+	// user-supplied semver constraint (caret, tilde, range): honoured as-is.
+	case '>', '<', '~', '^':
+		return parseSemver(v)
+	// bare "X.Y.Z" with no operator: "this version or newer within the same
+	// major line". Expanded explicitly instead of via caret so 0.x majors are
+	// not locked to a single minor — see NewImplicitVersionConstraint.
+	default:
+		return NewImplicitVersionConstraint(v)
 	}
-	// semver constraint
-	return parseSemver(v)
 }
 
 func parseExact(body string) (VersionConstraint, error) {

@@ -130,6 +130,65 @@ func TestNewFilter_VersionParsing(t *testing.T) {
 	}
 }
 
+// TestFilter_BareVersionConstraint exercises the full --include-module parse
+// path (NewFilter -> parseVersionConstraint -> NewImplicitVersionConstraint)
+// for operator-less version literals. The 0.x case is the regression guard:
+// a bare `0.4.0` must span the whole 0.x line, not lock to the 0.4 minor the
+// way a caret (`^0.4.0` == `>=0.4.0 <0.5.0`) would.
+func TestFilter_BareVersionConstraint(t *testing.T) {
+	logger := log.NewSLogger(slog.LevelDebug)
+
+	tests := []struct {
+		name       string
+		expression string
+		releases   []string
+		want       []string
+	}{
+		{
+			// Regression: bare 0.x version must reach every intermediate minor
+			// up to (but not including) the next major, keeping only the latest
+			// patch per minor. Caret would have stopped at <0.5.0.
+			name:       "bare 0.x version spans the whole 0.x line",
+			expression: "module1@0.4.0",
+			releases: []string{
+				"v0.4.2", "v0.4.4",
+				"v0.5.1", "v0.5.3",
+				"v0.6.1",
+				"v0.7.2",
+			},
+			want: []string{"v0.4.4", "v0.5.3", "v0.6.1", "v0.7.2"},
+		},
+		{
+			// A bare >=1 version is unchanged from the old caret behaviour:
+			// spans the current major, latest patch per minor, no 2.x.
+			name:       "bare 1.x version keeps caret-equivalent behaviour",
+			expression: "module1@1.52.0",
+			releases: []string{
+				"v1.52.0",
+				"v1.53.1", "v1.53.2",
+				"v1.54.1",
+				"v1.55.1",
+				"v2.0.0",
+			},
+			want: []string{"v1.52.0", "v1.53.2", "v1.54.1", "v1.55.1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filter, err := NewFilter([]string{tt.expression}, FilterTypeWhitelist)
+			require.NoError(t, err)
+			filter.UseLogger(logger)
+
+			// A bare version is non-exact, so release channels must be mirrored.
+			require.True(t, filter.ShouldMirrorReleaseChannels("module1"))
+
+			mod := &Module{Name: "module1", Releases: tt.releases}
+			require.ElementsMatch(t, tt.want, filter.VersionsToMirror(mod))
+		})
+	}
+}
+
 func TestFilter_Match(t *testing.T) {
 	logger := log.NewSLogger(slog.LevelDebug)
 	type args struct {
