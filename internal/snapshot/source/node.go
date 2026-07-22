@@ -19,6 +19,8 @@ limitations under the License.
 package source
 
 import (
+	"fmt"
+
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
@@ -119,6 +121,29 @@ func (n *Node) DirBaseName() string {
 	}
 
 	return n.Name
+}
+
+// DisplayLabel returns the human-readable "<Kind>/<Name>" label for this node, for
+// user-facing output only (CLI messages, --node error text, tree/table rendering) —
+// it never feeds identity, resume keys, or aggapi addressing (see Identity/Ref).
+//
+// It prefers the captured source object's original identity (SourceRef.Kind/Name)
+// over the snapshot CR's own Kind/Name, mirroring the same SourceRef-preference
+// DirBaseName already applies to the on-disk directory name: a user who typed
+// `d8 snapshot restore my-vm-disk` wants to see "DemoDiskSnapshot/my-vm-disk" in
+// output, not the generated CR name "nss-child-...".
+//
+// The root node is a deliberate exception: it always reports its own Kind/Name (the
+// snapshot identity the user actually typed on the command line), never a SourceRef.
+// A root Snapshot CR has no captured-source identity distinct from a namespace-level
+// capture, so resolving it would show something the user never named; echoing the
+// typed identity back is the least surprising choice for the tree's entry point.
+func (n *Node) DisplayLabel() string {
+	if n.Parent != nil && n.SourceRef != nil && n.SourceRef.Kind != "" && n.SourceRef.Name != "" {
+		return fmt.Sprintf("%s/%s", n.SourceRef.Kind, n.SourceRef.Name)
+	}
+
+	return fmt.Sprintf("%s/%s", n.Kind, n.Name)
 }
 
 // Ref returns the aggregated-API node reference that addresses this node's own
