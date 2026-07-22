@@ -65,6 +65,24 @@ const (
 	// determined by status.readyToUse (bool), not by conditions.
 	volumeSnapshotGroup = "snapshot.storage.k8s.io"
 
+	// storageClassKind and storageClassGroup identify the cluster-scoped
+	// StorageClass resource used to resolve a PVC's effective volumeBindingMode.
+	storageClassKind  = "StorageClass"
+	storageClassGroup = "storage.k8s.io"
+
+	// volumeBindingModeWFC marks a StorageClass whose PVCs are, by design, left
+	// Pending until a Pod schedules against them: provisioning does not even
+	// start before that. Waiting for such a PVC to become Bound would block
+	// --wait forever on a standalone PVC that has no consumer yet.
+	volumeBindingModeWFC = "WaitForFirstConsumer"
+	// volumeBindingModeImmediate is Kubernetes' own default when a StorageClass
+	// omits volumeBindingMode.
+	volumeBindingModeImmediate = "Immediate"
+
+	// defaultStorageClassAnnotation marks the cluster's default StorageClass,
+	// used to resolve a PVC whose spec.storageClassName is empty.
+	defaultStorageClassAnnotation = "storageclass.kubernetes.io/is-default-class"
+
 	defaultTimeout      = 10 * time.Minute
 	defaultPollInterval = 2 * time.Second
 )
@@ -150,6 +168,11 @@ type Config struct {
 type pvcRef struct {
 	namespace string
 	name      string
+	// storageClassName is the PVC's spec.storageClassName as applied (may be
+	// empty; an empty value resolves to the cluster's default StorageClass,
+	// not to Immediate binding, when the effective volumeBindingMode is
+	// resolved in waitPVCsBound).
+	storageClassName string
 }
 
 // Run executes an in-namespace restore: preflight the root Snapshot, fetch the
@@ -523,7 +546,8 @@ func applyAll(ctx context.Context, cfg Config, objs []unstructured.Unstructured)
 		}
 
 		if obj.GetKind() == pvcKind {
-			pvcs = append(pvcs, pvcRef{namespace: ns, name: obj.GetName()})
+			scName, _, _ := unstructured.NestedString(obj.Object, "spec", "storageClassName")
+			pvcs = append(pvcs, pvcRef{namespace: ns, name: obj.GetName(), storageClassName: scName})
 		}
 	}
 
@@ -613,6 +637,13 @@ func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured
 // for domain objects are recreated asynchronously by the domain controller (they are not
 // part of manifests-with-data-restoration output), so they are intentionally not tracked
 // here; awaiting them would require knowledge of the domain controller's naming/labeling.
+//
+// A PVC whose effective StorageClass volumeBindingMode is WaitForFirstConsumer is checked
+// once (never polled): provisioning does not even start until a Pod schedules against it,
+// so a Pending WFFC PVC with no consumer is a normal, non-blocking state, not a failure to
+// wait out. Polling it against the shared deadline would let one such PVC starve the
+// remaining Immediate PVCs of their fair share of cfg.Timeout, so it is skipped up front,
+// before the deadline is ever consulted for it.
 func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 	if len(pvcs) == 0 {
 		return nil
@@ -623,17 +654,143 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 		return fmt.Errorf("resolve PersistentVolumeClaim resource: %w", err)
 	}
 
+	scGVR, _, err := cfg.resourceFor(schema.GroupVersionKind{Group: storageClassGroup, Version: "v1", Kind: storageClassKind})
+	if err != nil {
+		return fmt.Errorf("resolve StorageClass resource: %w", err)
+	}
+
 	cfg.Log.Info("waiting for restored PVCs to bind", slog.Int("count", len(pvcs)))
 
 	deadline := time.Now().Add(cfg.Timeout)
+	bindingModes := make(map[string]string)
+
+	var (
+		boundCount   int
+		skippedCount int
+	)
 
 	for _, ref := range pvcs {
+		mode, err := resolveVolumeBindingMode(ctx, cfg, scGVR, ref.storageClassName, bindingModes)
+		if err != nil {
+			return fmt.Errorf("resolve volume binding mode for PVC %s/%s: %w", ref.namespace, ref.name, err)
+		}
+
+		if mode == volumeBindingModeWFC {
+			if err := checkWFFCPVCOnce(ctx, cfg, gvr, ref); err != nil {
+				return err
+			}
+
+			skippedCount++
+
+			continue
+		}
+
 		if err := waitOnePVCBound(ctx, cfg, gvr, ref, deadline); err != nil {
 			return err
 		}
+
+		boundCount++
 	}
 
-	cfg.Log.Info("all restored PVCs are Bound", slog.Int("count", len(pvcs)))
+	cfg.Log.Info("finished waiting for restored PVCs",
+		slog.Int("bound", boundCount),
+		slog.Int("skipped_wait_for_first_consumer", skippedCount))
+
+	return nil
+}
+
+// resolveVolumeBindingMode returns the effective volumeBindingMode for a PVC's
+// StorageClass, resolving the cluster's default StorageClass when className is empty
+// (spec.storageClassName can be legitimately unset). Results are cached per StorageClass
+// name so a restore with many PVCs on the same class issues one API call per class, not
+// one per PVC; the empty-name case is cached under a distinct key since it requires a
+// List rather than a Get.
+func resolveVolumeBindingMode(ctx context.Context, cfg Config, scGVR schema.GroupVersionResource, className string, cache map[string]string) (string, error) {
+	cacheKey := className
+	if cacheKey == "" {
+		cacheKey = "\x00default"
+	}
+
+	if mode, ok := cache[cacheKey]; ok {
+		return mode, nil
+	}
+
+	var (
+		sc  *unstructured.Unstructured
+		err error
+	)
+
+	if className != "" {
+		sc, err = cfg.Dynamic.Resource(scGVR).Get(ctx, className, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("get StorageClass %q: %w", className, err)
+		}
+	} else {
+		sc, err = findDefaultStorageClass(ctx, cfg, scGVR)
+		if err != nil {
+			return "", err
+		}
+
+		if sc == nil {
+			cfg.Log.Info("no default StorageClass is annotated; assuming Immediate binding for PVCs with an empty storageClassName")
+
+			cache[cacheKey] = volumeBindingModeImmediate
+
+			return volumeBindingModeImmediate, nil
+		}
+	}
+
+	mode, _, _ := unstructured.NestedString(sc.Object, "volumeBindingMode")
+	if mode == "" {
+		mode = volumeBindingModeImmediate
+	}
+
+	cache[cacheKey] = mode
+
+	return mode, nil
+}
+
+// findDefaultStorageClass returns the cluster's default StorageClass (annotated
+// storageclass.kubernetes.io/is-default-class: "true"), or nil if none carries the
+// annotation.
+func findDefaultStorageClass(ctx context.Context, cfg Config, scGVR schema.GroupVersionResource) (*unstructured.Unstructured, error) {
+	list, err := cfg.Dynamic.Resource(scGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list StorageClasses: %w", err)
+	}
+
+	for i := range list.Items {
+		sc := &list.Items[i]
+
+		if sc.GetAnnotations()[defaultStorageClassAnnotation] == "true" {
+			return sc, nil
+		}
+	}
+
+	return nil, nil
+}
+
+// checkWFFCPVCOnce checks a WaitForFirstConsumer PVC's phase exactly once, never
+// polling it: a Pending PVC with no consumer yet is expected under this binding mode
+// and must not consume the shared --wait deadline. An already-Bound PVC (e.g. a
+// consumer already existed) is still reported as bound.
+func checkWFFCPVCOnce(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, ref pvcRef) error {
+	pvc, err := cfg.Dynamic.Resource(gvr).Namespace(ref.namespace).Get(ctx, ref.name, metav1.GetOptions{})
+	if err != nil && !kubeerrors.IsNotFound(err) {
+		return fmt.Errorf("get PVC %s/%s: %w", ref.namespace, ref.name, err)
+	}
+
+	if err == nil {
+		phase, _, _ := unstructured.NestedString(pvc.Object, "status", "phase")
+		if phase == pvcPhaseBound {
+			cfg.Log.Info("PVC bound", slog.String("namespace", ref.namespace), slog.String("name", ref.name))
+
+			return nil
+		}
+	}
+
+	cfg.Log.Info("PVC is WaitForFirstConsumer and Pending with no consumer yet; not waiting for Bound",
+		slog.String("namespace", ref.namespace), slog.String("name", ref.name))
 
 	return nil
 }

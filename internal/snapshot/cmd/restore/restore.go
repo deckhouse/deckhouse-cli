@@ -91,7 +91,11 @@ no objects are actually created.
 
 --wait only tracks PersistentVolumeClaims that appear in the restored manifest set. Disk-backed
 PVCs for domain objects are recreated asynchronously by the domain controller (not part of this
-output), so they are not awaited; the command may return before such volumes finish provisioning.`,
+output), so they are not awaited; the command may return before such volumes finish provisioning.
+A PVC on a WaitForFirstConsumer StorageClass is checked once and never polled: it is expected to
+stay Pending until a Pod schedules against it, so --wait does not block or spend its timeout
+budget on it; PVCs on an Immediate (or unspecified, since Immediate is Kubernetes' own default)
+StorageClass are still awaited until Bound or --timeout as before.`,
 		Example: `  # Restore snapshot "my-snap" in namespace "default"
   d8 snapshot restore my-snap -n default
 
@@ -125,7 +129,7 @@ output), so they are not awaited; the command may return before such volumes fin
 	cmd.Flags().String(flagObject, "", "restrict a --scope node restore to a single captured object; format '<Kind>/<name>' (requires --scope node)")
 	cmd.Flags().Bool(flagDryRun, false, "validate objects via DryRunAll without persisting; skips --wait (use to preflight a restore)")
 	cmd.Flags().Bool(flagEdit, false, "open resolved manifests in $KUBE_EDITOR/$EDITOR before applying; aborts on non-zero exit, unchanged, or empty content")
-	cmd.Flags().Bool(flagWait, false, "wait for restored PersistentVolumeClaims to become Bound (only PVCs in the manifest set; domain disk-backed PVCs created asynchronously are not awaited)")
+	cmd.Flags().Bool(flagWait, false, "wait for restored PersistentVolumeClaims to become Bound (only PVCs in the manifest set; domain disk-backed PVCs created asynchronously are not awaited; a WaitForFirstConsumer-class PVC left Pending with no consumer is not waited on)")
 	cmd.Flags().Duration(flagTimeout, 10*time.Minute, "timeout for the --wait Bound check")
 
 	return cmd
