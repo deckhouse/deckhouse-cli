@@ -261,6 +261,9 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	tty := term.IsTerminal(int(os.Stdout.Fd()))
+	// progress.New defaults to progress.DirectionDownload when WithDirection is
+	// omitted, so download intentionally relies on that default rather than
+	// passing it explicitly (see progress.WithDirection's doc comment).
 	sink := progress.New(os.Stdout, tty)
 
 	// On a TTY we want a `docker pull`-style display: clean per-leaf bars with no

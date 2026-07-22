@@ -241,7 +241,9 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 
 	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
 
-	sink := progress.New(os.Stdout, isTTY)
+	// Upload shows Upload/Uploading/DataImport wording instead of progress.New's
+	// default download-flavored words (progress.DirectionDownload).
+	sink := progress.New(os.Stdout, isTTY, progress.WithDirection(progress.DirectionUpload))
 
 	// On a TTY we want a `docker pull`-style display: clean per-leaf bars with no
 	// routine log spam interleaving them. Route the importer/pipeline logger
