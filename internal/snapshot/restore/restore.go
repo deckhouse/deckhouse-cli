@@ -47,6 +47,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
 )
 
 const (
@@ -57,6 +58,7 @@ const (
 	fieldManager = "d8-snapshot-restore"
 
 	readyConditionType = "Ready"
+	conditionFalse     = "False"
 	pvcPhaseBound      = "Bound"
 
 	// volumeSnapshotGroup is the CSI VolumeSnapshot API group. Readiness is
@@ -304,6 +306,13 @@ func preflightRootSnapshot(ctx context.Context, cfg Config) error {
 	}
 
 	if !isConditionTrue(snap, readyConditionType) {
+		status, reason, message := readyConditionDetail(snap, readyConditionType)
+		if status == conditionFalse && source.IsDegradedReason(reason) {
+			return fmt.Errorf("snapshot is DEGRADED (reason=%s: %s): a namespaced child was deleted but "+
+				"its data is intact in the content-layer trash; a full-subtree restore of the root is "+
+				"blocked, but --node <ready child> can restore an intact subtree", reason, message)
+		}
+
 		return fmt.Errorf("snapshot is not Ready=True (cannot restore an incomplete snapshot)")
 	}
 
@@ -698,6 +707,36 @@ func isConditionTrue(obj *unstructured.Unstructured, condType string) bool {
 	}
 
 	return false
+}
+
+// readyConditionDetail returns the status, reason and message of obj's status.conditions
+// entry whose type == condType. It returns empty strings when the condition is absent or
+// malformed — callers must not treat that as an error, only as "no extra detail available".
+func readyConditionDetail(obj *unstructured.Unstructured, condType string) (string, string, string) {
+	conds, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	if err != nil || !found {
+		return "", "", ""
+	}
+
+	for _, c := range conds {
+		m, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		t, _, _ := unstructured.NestedString(m, "type")
+		if t != condType {
+			continue
+		}
+
+		status, _, _ := unstructured.NestedString(m, "status")
+		reason, _, _ := unstructured.NestedString(m, "reason")
+		message, _, _ := unstructured.NestedString(m, "message")
+
+		return status, reason, message
+	}
+
+	return "", "", ""
 }
 
 // decodeManifestArray parses a JSON array of Kubernetes objects into unstructured values.
