@@ -55,6 +55,14 @@ var ErrDecodedLengthMismatch = errors.New("merged block volume decoded length mi
 //   - outPath is a fully durable (fsynced) multi-frame stream that decodes to
 //     exactly totalSize raw bytes (verified; see ErrDecodedLengthMismatch).
 //   - The chunk directory and all its contents are removed.
+//   - For a compressed codec (ext != ""), a archive.BlockChunkIndex sidecar
+//     recording each chunk's compressed byte length is written alongside
+//     outPath (see archive.WriteBlockChunkIndex) so a future seekable resume
+//     can locate any chunk's frame start without decoding from byte zero.
+//     The none codec (ext == "") and the zero-size short-circuit
+//     (commitEmptyBlock) never get a sidecar: the none codec already resumes
+//     cheaply via a plain byte-offset section reader, so an index would be
+//     pure overhead with no consumer.
 //
 // chunkSize ≤ 0 falls back to DefaultChunkSize.
 //
@@ -106,6 +114,13 @@ func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, 
 		return fmt.Errorf("open atomic writer for %s: %w", outPath, err)
 	}
 
+	// compressedSizes records each chunk's on-disk (compressed) frame length,
+	// in ascending chunk order, so it can be persisted as a BlockChunkIndex
+	// sidecar below -- the chunk's presence was already confirmed by the
+	// pre-check loop above, so this Stat cannot fail for a reason that loop
+	// didn't already catch.
+	compressedSizes := make([]int64, 0, numChunks)
+
 	for i := range numChunks {
 		if err := ctx.Err(); err != nil {
 			aw.Abort()
@@ -114,14 +129,38 @@ func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, 
 
 		p := filepath.Join(chunkDir, archive.ChunkFileName(i, ext))
 
+		info, err := os.Stat(p)
+		if err != nil {
+			aw.Abort()
+			return fmt.Errorf("stat chunk %d for index: %w", i, err)
+		}
+
 		if err := copyFile(aw, p); err != nil {
 			aw.Abort()
 			return fmt.Errorf("copy chunk %d into merged file: %w", i, err)
 		}
+
+		compressedSizes = append(compressedSizes, info.Size())
 	}
 
 	if err := aw.Commit(); err != nil {
 		return fmt.Errorf("commit %s: %w", outPath, err)
+	}
+
+	// Persist the chunk-offset index BEFORE dropping the chunk directory: the
+	// none codec already resumes cheaply via a byte-offset section reader, so
+	// skip the sidecar there to avoid a stray file with no consumer (see the
+	// doc comment above).
+	if ext != "" {
+		idx := archive.BlockChunkIndex{
+			ChunkSize:            chunkSize,
+			TotalSize:            totalSize,
+			CompressedChunkSizes: compressedSizes,
+		}
+
+		if err := archive.WriteBlockChunkIndex(outPath, idx); err != nil {
+			return fmt.Errorf("write chunk index for %s: %w", outPath, err)
+		}
 	}
 
 	// Remove the temporary chunk directory after successful commit.
