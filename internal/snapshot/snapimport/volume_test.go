@@ -1146,7 +1146,11 @@ func TestSendVolumeData_FSLeaf_UsesTarFile(t *testing.T) {
 
 	imp := &clusterVolumeImporter{log: discardLogger()}
 
-	if err := imp.sendVolumeData(context.Background(), plainHTTPDoer{}, srv.URL, volumeModeFilesystem, leaf, targetNS, "pvc-1", nil, nil); err != nil {
+	var totals []int64
+
+	setTotal := func(n int64) { totals = append(totals, n) }
+
+	if err := imp.sendVolumeData(context.Background(), plainHTTPDoer{}, srv.URL, volumeModeFilesystem, leaf, targetNS, "pvc-1", setTotal, nil); err != nil {
 		t.Fatalf("sendVolumeData with FS leaf and valid TarFile: %v", err)
 	}
 
@@ -1157,5 +1161,12 @@ func TestSendVolumeData_FSLeaf_UsesTarFile(t *testing.T) {
 	// At least one PUT must have reached the server (the decompressed "file.txt" entry).
 	if n == 0 {
 		t.Error("expected at least one PUT (FS entry uploaded via TarFile), got none")
+	}
+
+	// sendVolumeData's FS branch must thread setTotal through to importFSFromTar instead
+	// of discarding it: with a single not-done entry, setTotal is called exactly once,
+	// with that entry's exact decompressed size.
+	if want := []int64{int64(len(content))}; len(totals) != len(want) || totals[0] != want[0] {
+		t.Errorf("setTotal calls = %v, want %v (FS branch must thread setTotal through to importFSFromTar)", totals, want)
 	}
 }

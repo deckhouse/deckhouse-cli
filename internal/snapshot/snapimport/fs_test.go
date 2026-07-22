@@ -408,7 +408,7 @@ func TestImportFSFromTar_DecompressesAndUploads(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil); err != nil {
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil, nil); err != nil {
 		t.Fatalf("importFSFromTar: %v", err)
 	}
 
@@ -511,7 +511,7 @@ func TestImportFSFromTar_SkipsNonRegularEntries(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil); err != nil {
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil, nil); err != nil {
 		t.Fatalf("importFSFromTar: %v", err)
 	}
 
@@ -593,7 +593,11 @@ func TestImportFSFromTar_SkipsAlreadyUploadedEntryWithoutDecompressing(t *testin
 	progressed := 0
 	onProgress := func(n int) { progressed += n }
 
-	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), onProgress); err != nil {
+	var totals []int64
+
+	setTotal := func(n int64) { totals = append(totals, n) }
+
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), setTotal, onProgress); err != nil {
 		t.Fatalf("importFSFromTar: %v", err)
 	}
 
@@ -620,6 +624,21 @@ func TestImportFSFromTar_SkipsAlreadyUploadedEntryWithoutDecompressing(t *testin
 
 	if want := len(alphaPlain) + len(betaPlain); progressed != want {
 		t.Errorf("onProgress total = %d, want %d (skipped alpha.txt must still be credited at its exact decompressed size, plus beta.txt)", progressed, want)
+	}
+
+	// setTotal must grow progressively: alpha.txt's exact size becomes known first (at
+	// the done-skip credit point, from HEAD's Content-Length, entirely without
+	// decompressing it), then beta.txt's (at the not-done measure point) adds its own
+	// exact size on top — never a single upfront call with the grand total.
+	wantTotals := []int64{int64(len(alphaPlain)), int64(len(alphaPlain) + len(betaPlain))}
+	if len(totals) != len(wantTotals) {
+		t.Fatalf("setTotal called %d times with %v, want %d calls with %v", len(totals), totals, len(wantTotals), wantTotals)
+	}
+
+	for i, want := range wantTotals {
+		if totals[i] != want {
+			t.Errorf("setTotal call #%d = %d, want %d", i, totals[i], want)
+		}
 	}
 
 	dirAfter, err := os.ReadDir(dir)
@@ -665,7 +684,7 @@ func TestImportFSFromTar_EmptyFileIsUploaded(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil); err != nil {
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil, nil); err != nil {
 		t.Fatalf("importFSFromTar: %v", err)
 	}
 
@@ -867,7 +886,10 @@ func TestImportFSFromTar_PerCodecRoundTrip(t *testing.T) {
 
 			var reported int
 
-			if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), func(n int) { reported += n }); err != nil {
+			var totals []int64
+
+			if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(),
+				func(n int64) { totals = append(totals, n) }, func(n int) { reported += n }); err != nil {
 				t.Fatalf("importFSFromTar: %v", err)
 			}
 
@@ -886,6 +908,21 @@ func TestImportFSFromTar_PerCodecRoundTrip(t *testing.T) {
 
 			if want := len(firstContent) + len(secondContent); reported != want {
 				t.Errorf("onProgress total = %d, want %d", reported, want)
+			}
+
+			// setTotal must grow progressively across both not-done entries: first.dat's
+			// exact size is measured (or read from hdr.Size for codec "none") before
+			// second.dat is even reached, then second.dat's own exact size is added on
+			// top — proving the running sum, not a single grand total known up front.
+			wantTotals := []int64{int64(len(firstContent)), int64(len(firstContent) + len(secondContent))}
+			if len(totals) != len(wantTotals) {
+				t.Fatalf("setTotal called %d times with %v, want %d calls with %v", len(totals), totals, len(wantTotals), wantTotals)
+			}
+
+			for i, want := range wantTotals {
+				if totals[i] != want {
+					t.Errorf("setTotal call #%d = %d, want %d", i, totals[i], want)
+				}
 			}
 		})
 	}
@@ -990,7 +1027,7 @@ func TestImportFSFromTar_InterruptAndResume_AllCodecs(t *testing.T) {
 			defer srv.Close()
 
 			// Attempt 1: simulates the CLI process being killed mid-transfer.
-			err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil)
+			err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil, nil)
 			if err == nil {
 				t.Fatal("expected attempt 1 (simulated crash mid-transfer) to return an error")
 			}
@@ -1004,7 +1041,10 @@ func TestImportFSFromTar_InterruptAndResume_AllCodecs(t *testing.T) {
 			// as a restarted process would.
 			var reported int
 
-			err = importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), func(n int) { reported += n })
+			var lastTotal int64
+
+			err = importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(),
+				func(n int64) { lastTotal = n }, func(n int) { reported += n })
 			if err != nil {
 				t.Fatalf("importFSFromTar (attempt 2, resume after simulated crash): %v", err)
 			}
@@ -1017,6 +1057,14 @@ func TestImportFSFromTar_InterruptAndResume_AllCodecs(t *testing.T) {
 
 			if reported != len(content) {
 				t.Errorf("attempt 2 reported %d progress bytes, want %d (full file size credited once on completion)", reported, len(content))
+			}
+
+			// A single-file tar has a running total equal to that one file's exact
+			// (measured) decompressed size — the resume attempt re-measures from
+			// scratch, so the total reflects the same value regardless of the
+			// earlier interrupted attempt.
+			if lastTotal != int64(len(content)) {
+				t.Errorf("attempt 2 setTotal = %d, want %d (single file's exact decompressed size)", lastTotal, len(content))
 			}
 		})
 	}
