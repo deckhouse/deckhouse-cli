@@ -173,6 +173,14 @@ func collectNodeFiles(nodeDir string) ([]string, error) {
 				return nil
 			}
 
+			// Chunk-offset index sidecars are a regeneratable resume-acceleration
+			// cache, not node content — exclude them exactly like chunks.meta so
+			// introducing one next to an already-finalized data/<pvc>.bin[.<ext>]
+			// never changes that node's checksum.
+			if strings.HasSuffix(d.Name(), BlockChunkIndexSuffix) {
+				return nil
+			}
+
 			rel, relErr := filepath.Rel(nodeDir, path)
 			if relErr != nil {
 				return relErr
