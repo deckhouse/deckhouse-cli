@@ -121,6 +121,102 @@ func TestMergeBlockChunks_MergesInOrder(t *testing.T) {
 	}
 }
 
+// TestMergeBlockChunks_WritesChunkIndex_CompressedCodecs proves that a
+// successful merge of a compressed volume (zstd, gzip, lz4) persists a
+// BlockChunkIndex sidecar whose ChunkSize/TotalSize match the call's
+// parameters, whose CompressedChunkSizes has one entry per merged chunk, and
+// whose entries sum to exactly the merged output's on-disk size.
+func TestMergeBlockChunks_WritesChunkIndex_CompressedCodecs(t *testing.T) {
+	payloads := [][]byte{
+		[]byte("chunk0"),
+		[]byte("chunk1"),
+		[]byte("chunk2"),
+	}
+	chunkSize := int64(6) // matches each payload's length
+	totalSize := int64(len(payloads)) * chunkSize
+
+	for _, codecName := range []string{"zstd", "gzip", "lz4"} {
+		t.Run(codecName, func(t *testing.T) {
+			nodeDir := t.TempDir()
+			chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+			if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			ext := makeChunkFramesWithCodec(t, chunkDir, payloads, codecName)
+			outPath := filepath.Join(nodeDir, archive.DataBlockName(ext))
+
+			if err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, totalSize, chunkSize, ext); err != nil {
+				t.Fatalf("MergeBlockChunks(%s): %v", codecName, err)
+			}
+
+			idx, found, err := archive.ReadBlockChunkIndex(outPath)
+			if err != nil {
+				t.Fatalf("ReadBlockChunkIndex(%s): %v", codecName, err)
+			}
+
+			if !found {
+				t.Fatalf("expected a chunk index sidecar for codec %s, found none", codecName)
+			}
+
+			if idx.ChunkSize != chunkSize {
+				t.Errorf("ChunkSize = %d, want %d", idx.ChunkSize, chunkSize)
+			}
+
+			if idx.TotalSize != totalSize {
+				t.Errorf("TotalSize = %d, want %d", idx.TotalSize, totalSize)
+			}
+
+			if len(idx.CompressedChunkSizes) != len(payloads) {
+				t.Fatalf("len(CompressedChunkSizes) = %d, want %d", len(idx.CompressedChunkSizes), len(payloads))
+			}
+
+			var sum int64
+			for _, sz := range idx.CompressedChunkSizes {
+				sum += sz
+			}
+
+			info, statErr := os.Stat(outPath)
+			if statErr != nil {
+				t.Fatalf("stat merged output: %v", statErr)
+			}
+
+			if sum != info.Size() {
+				t.Errorf("sum(CompressedChunkSizes) = %d, want on-disk size %d", sum, info.Size())
+			}
+		})
+	}
+}
+
+// TestMergeBlockChunks_NoChunkIndex_NoneCodec proves that the none codec
+// (ext == "") never gains a chunk index sidecar: it already resumes cheaply
+// via a byte-offset section reader with no decode, so the sidecar would be
+// pure overhead with no consumer.
+func TestMergeBlockChunks_NoChunkIndex_NoneCodec(t *testing.T) {
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(""))
+
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	payloads := [][]byte{[]byte("hello"), []byte("world")}
+	chunkSize := int64(5)
+	totalSize := int64(10)
+
+	makeChunkFramesWithCodec(t, chunkDir, payloads, "none")
+
+	if err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, totalSize, chunkSize, ""); err != nil {
+		t.Fatalf("MergeBlockChunks: %v", err)
+	}
+
+	if _, statErr := os.Stat(archive.BlockChunkIndexPath(outPath)); !os.IsNotExist(statErr) {
+		t.Errorf("expected no chunk index sidecar for the none codec, Stat returned: %v", statErr)
+	}
+}
+
 func TestMergeBlockChunks_ChunkDirRemovedAfterSuccess(t *testing.T) {
 	nodeDir := t.TempDir()
 	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
@@ -234,6 +330,10 @@ func TestMergeBlockChunks_ZeroSize_AllCodecs(t *testing.T) {
 
 				if _, statErr := os.Stat(chunkDir); !os.IsNotExist(statErr) {
 					t.Errorf("%s: chunk dir should be removed, Stat returned: %v", stage, statErr)
+				}
+
+				if _, statErr := os.Stat(archive.BlockChunkIndexPath(outPath)); !os.IsNotExist(statErr) {
+					t.Errorf("%s: zero-size merge should never write a chunk index sidecar, Stat returned: %v", stage, statErr)
 				}
 			}
 
