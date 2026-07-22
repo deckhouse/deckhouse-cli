@@ -30,8 +30,6 @@ import (
 	"strconv"
 	"time"
 
-	seekable "github.com/SaveTheRbtz/zstd-seekable-format-go/pkg"
-	"github.com/klauspost/compress/zstd"
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -609,40 +607,22 @@ func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string,
 // temporary file first — the whole point of this path is to keep peak disk usage at one
 // copy (the compressed archive) instead of two.
 //
-// RESUME STRATEGY dispatches on codec and offset (see resolveBlockDecodeReader):
+// RESUME STRATEGY dispatches on offset only (see resolveBlockDecodeReader), identically
+// for every codec putBlockCompressed handles (zstd, gzip, lz4):
 //
 //  1. offset == 0: no positioning needed — compress.NewReader(ext, f) from the start.
-//  2. ext == ".zst" and offset > 0: NATIVE SEEK FAST PATH. volume.MergeBlockChunks
-//     embeds a Zstandard Seekable Format seek table as a trailing skippable frame in
-//     every merged zstd data file (github.com/SaveTheRbtz/zstd-seekable-format-go).
-//     seekable.NewReader(f, dec).Seek(offset, io.SeekStart) looks the target chunk up in
-//     that table and positions the reader to decode forward from there — the library
-//     decodes at most the ONE frame containing offset on the first subsequent Read, never
-//     the already-uploaded prefix. This library exposes no typed/sentinel error for "no
-//     embedded seek table" (confirmed empirically in
-//     compress/seekable_spike_test.go's TestSeekableFormat_NoSeekTableFailsGracefully), so
-//     ANY failure to open or seek — e.g. an archive built by a d8 version predating this
-//     feature, by a third-party tool, or any other non-seekable .zst — degrades to case 3
-//     below, logged at Warn, never a hard failure.
-//  3. gzip or lz4 with offset > 0, OR a zstd file whose case 2 fast path degraded:
-//     PLAIN BYTE-ZERO FALLBACK, byte-for-byte the behavior that existed immediately
-//     before the whole chunk-index/native-seek episode (commit 6423fb4's predecessor
-//     state) — a fresh compress.NewReader(ext, f) from the start, discarding exactly
-//     offset decoded bytes via io.CopyN before returning it. (The "none" codec never
-//     reaches putBlockCompressed at all — putBlock routes it to putBlockRaw instead.)
+//  2. offset > 0: a fresh compress.NewReader(ext, f) from the start, discarding exactly
+//     offset decoded bytes via io.CopyN before returning it (discardFromStart). (The
+//     "none" codec never reaches putBlockCompressed at all — putBlock routes it to
+//     putBlockRaw instead.)
 //
-// This is a DELIBERATE, DOCUMENTED regression for gzip/lz4 relative to the (now removed)
-// chunk-index fast path: resume cost reverts to O(offset) discard. Justification: (a) no
-// comparably mature/maintained Go library implements a seekable format with an embedded
-// seek table for either codec, unlike zstd's community Seekable Format and this library
-// (see tasks.json's notes_on_plan_switch, NATIVE-ZSTD-SEEKABLE-RESUME PIVOT entry); (b)
-// both codecs are already excluded from user-facing --volume-compression selection
-// (compress.UserSelectableNames() currently allows only "zstd"/"none"; see
-// codec-user-selection-zstd-only — a list explicitly expected to change again as
-// gzip/lz4 gain a seek-resume mechanism, NOT a permanent exclusion), so the blast
-// radius is narrowed to archives produced by an older/third-party tool or a d8
-// version whose allow-list included gzip/lz4 — an accepted tradeoff, not an
-// oversight.
+// There is currently no fast-forward mechanism that skips the already-uploaded prefix
+// without decoding it: resume cost is O(offset) discard for every codec. A native
+// zstd-seekable-format fast path (an embedded seek table written at merge time, seeked
+// into directly on resume) was implemented and then reverted; a chunk-boundary-skipping
+// redesign that walks zstd frame/block headers directly, without decoding them or
+// depending on any external/embedded index, is being planned separately — see
+// .agent/tasks.json's notes_on_plan_switch for the full history.
 func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, offset, totalSize int64, log *slog.Logger, onProgress func(int), activate func()) error {
 	f, err := os.Open(dataFile)
 	if err != nil {
@@ -721,14 +701,10 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 
 // resolveBlockDecodeReader returns a decode reader for f already positioned at the
 // decompressed byte offset requested by a resumed upload — see putBlockCompressed's
-// RESUME STRATEGY doc comment for the full three-way dispatch this implements. offset ==
-// 0 needs no positioning at all. f must support Seek because the zstd fast path needs it
-// (both to open the seekable reader and, on degradation, to rewind before the fallback
-// decode); *os.File — putBlockCompressed's only caller — satisfies this directly. The
-// second return value is the number of decoded bytes discarded via io.CopyN to reach
-// offset on the plain byte-zero fallback path (discardFromStart); it is always 0 when
-// offset == 0 or when the zstd native seek fast path is used — Seek is a seek-table
-// lookup, not a decode-and-discard, so there is nothing to count there.
+// RESUME STRATEGY doc comment for the two-case dispatch this implements. offset == 0
+// needs no positioning at all. The second return value is the number of decoded bytes
+// discarded via io.CopyN to reach offset (discardFromStart); it is always 0 when
+// offset == 0.
 func resolveBlockDecodeReader(f io.ReadSeeker, dataFile, ext string, offset int64, log *slog.Logger) (io.ReadCloser, int64, error) {
 	if offset == 0 {
 		decodeReader, err := compress.NewReader(ext, f)
@@ -739,98 +715,14 @@ func resolveBlockDecodeReader(f io.ReadSeeker, dataFile, ext string, offset int6
 		return decodeReader, 0, nil
 	}
 
-	if ext == ".zst" {
-		decodeReader, ok, err := seekZstdNativeReader(f, dataFile, offset, log)
-		if err != nil {
-			return nil, 0, err
-		}
-
-		if ok {
-			return decodeReader, 0, nil
-		}
-
-		// seekZstdNativeReader may have moved f's read position while probing for a seek
-		// table (the library's footer parse seeks near the end of the file); rewind
-		// before falling back to a byte-zero decode over the same handle.
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			return nil, 0, fmt.Errorf("rewind %s after non-seekable zstd fallback: %w", dataFile, err)
-		}
-	}
-
 	return discardFromStart(f, dataFile, ext, offset, log)
 }
 
-// seekableZstdReader wraps a *seekable.Reader together with the zstd decoder
-// seekZstdNativeReader constructed for it, so a single Close call releases both.
-// seekable.NewReader's doc comment is explicit that "the caller remains responsible for
-// closing rs and decoder" — the seekable.Reader's own Close only releases its internal
-// frame cache, never the decoder passed to NewReader. Leaving the decoder unclosed would
-// leak its background decode-worker goroutines (see klauspost/compress/zstd.Decoder.Close's
-// own doc comment).
-type seekableZstdReader struct {
-	*seekable.Reader
-	dec *zstd.Decoder
-}
-
-// Close releases the seekable.Reader's own resources and its zstd decoder together.
-func (s *seekableZstdReader) Close() error {
-	err := s.Reader.Close()
-	s.dec.Close()
-
-	return err
-}
-
-// seekZstdNativeReader attempts the native zstd seekable-format fast path: open the
-// merged data file's embedded seek table (a trailing skippable frame written by
-// volume.MergeBlockChunks for every zstd volume) and seek directly to the decompressed
-// offset. ok is false for ANY failure to open or seek the seekable reader — the library
-// exposes no typed or sentinel error distinguishing "no embedded seek table" (an archive
-// merged by a d8 version predating this feature, by a third-party tool, or any other
-// non-seekable .zst) from any other failure, confirmed empirically in
-// compress/seekable_spike_test.go's TestSeekableFormat_NoSeekTableFailsGracefully, so
-// every such failure is treated identically: log at Warn and let the caller degrade to
-// the byte-zero discard fallback. A failure constructing the plain klauspost decoder
-// itself, before any source bytes are even touched, is a genuine unexpected error and is
-// returned as such rather than folded into the graceful-fallback log line.
-func seekZstdNativeReader(f io.ReadSeeker, dataFile string, offset int64, log *slog.Logger) (io.ReadCloser, bool, error) {
-	dec, err := zstd.NewReader(nil)
-	if err != nil {
-		return nil, false, fmt.Errorf("create zstd decoder for seekable resume of %s: %w", dataFile, err)
-	}
-
-	r, err := seekable.NewReader(f, dec)
-	if err != nil {
-		dec.Close()
-
-		log.Warn("no usable embedded zstd seek table, falling back to full discard",
-			slog.String("file", dataFile),
-			slog.String("error", err.Error()))
-
-		return nil, false, nil
-	}
-
-	if _, err := r.Seek(offset, io.SeekStart); err != nil {
-		_ = r.Close()
-		dec.Close()
-
-		log.Warn("zstd seek-table lookup failed at resume offset, falling back to full discard",
-			slog.String("file", dataFile),
-			slog.Int64("offset", offset),
-			slog.String("error", err.Error()))
-
-		return nil, false, nil
-	}
-
-	return &seekableZstdReader{Reader: r, dec: dec}, true, nil
-}
-
-// discardFromStart is the plain byte-zero resume fallback: open a fresh decode reader at
-// the start of f and discard exactly offset decoded bytes via io.CopyN before returning
-// it, positioned for the caller to resume the PUT loop from offset. This is the resume
-// behavior for gzip, lz4, and any zstd file with no usable embedded seek table — restored
-// byte-for-byte from the state before the whole chunk-index/native-seek episode (commit
-// 6423fb4's predecessor state). See putBlockCompressed's doc comment for why gzip/lz4 do
-// not get a native-seek fast path.
+// discardFromStart is the resume fallback used for every codec: open a fresh decode
+// reader at the start of f and discard exactly offset decoded bytes via io.CopyN before
+// returning it, positioned for the caller to resume the PUT loop from offset. This is
+// the resume behavior for every codec — see putBlockCompressed's RESUME STRATEGY doc
+// comment.
 func discardFromStart(f io.Reader, dataFile, ext string, offset int64, log *slog.Logger) (io.ReadCloser, int64, error) {
 	decodeReader, err := compress.NewReader(ext, f)
 	if err != nil {
@@ -844,7 +736,7 @@ func discardFromStart(f io.Reader, dataFile, ext string, offset int64, log *slog
 		return nil, 0, fmt.Errorf("fast-forwarding %s to resume offset %d (got %d bytes): %w", dataFile, offset, skipped, err)
 	}
 
-	log.Info("discarded already-uploaded bytes from the start (no native seek fast path for this codec/file)",
+	log.Info("discarded already-uploaded bytes from the start (no chunk-skipping fast path yet)",
 		slog.String("file", dataFile),
 		slog.Int64("bytes", skipped),
 		slog.Duration("took", time.Since(start)))

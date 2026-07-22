@@ -60,8 +60,6 @@ require (
 
 require github.com/docker/cli v29.3.0+incompatible
 
-require github.com/SaveTheRbtz/zstd-seekable-format-go/pkg v0.10.0
-
 require (
 	cloud.google.com/go v0.116.0 // indirect
 	cloud.google.com/go/auth v0.16.0 // indirect

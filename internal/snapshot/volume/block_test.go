@@ -1585,27 +1585,6 @@ func TestDownloadBlockChunks_StreamedFrameMatchesEncodeFrameReference(t *testing
 			got, err := os.ReadFile(outPath)
 			require.NoError(t, err)
 
-			// zstd is the one exception (block-merge-embed-native-zstd-seek-table):
-			// MergeBlockChunks decodes-then-re-encodes each chunk through a
-			// seekable.Writer for this codec, so the merged output is no longer a
-			// plain concatenation of the original EncodeFrame frames -- it carries
-			// an extra embedded seek-table trailer and, in general, need not be
-			// byte-identical even frame-for-frame. Assert decoded-content equality
-			// instead, which is the property that actually matters.
-			if name == "zstd" {
-				zr, zErr := zstd.NewReader(bytes.NewReader(got))
-				require.NoError(t, zErr)
-
-				decoded, readErr := io.ReadAll(zr)
-				zr.Close()
-				require.NoError(t, readErr)
-
-				assert.Equal(t, blockPayload, decoded,
-					"zstd: merged seekable output must decode to the original payload byte-for-byte")
-
-				return
-			}
-
 			assert.Equal(t, want, got,
 				"%s: streamed-finalize merged output must match whole-buffer EncodeFrame reference byte-for-byte", name)
 		})
