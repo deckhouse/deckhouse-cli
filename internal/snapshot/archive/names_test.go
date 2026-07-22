@@ -294,6 +294,58 @@ func TestFindBlockData(t *testing.T) {
 			t.Errorf("found = true, want false (only staging dir present): path=%q", path)
 		}
 	})
+
+	// Edge case: a crash between committing the merged payload and writing its
+	// chunk-offset index sidecar can leave the sidecar with no matching payload
+	// (or, as here, ONLY the sidecar present). FindBlockData must never treat
+	// the ".chunkidx" sidecar itself as the block data file.
+	t.Run("only chunkidx sidecar present", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+		sidecar := filepath.Join(dir, "data.bin.zst.chunkidx")
+
+		if err := os.WriteFile(sidecar, []byte(`{"chunkSize":1,"totalSize":1,"compressedChunkSizes":[1]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		path, found, err := archive.FindBlockData(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if found {
+			t.Errorf("found = true, want false (only .chunkidx sidecar present): path=%q", path)
+		}
+	})
+
+	t.Run("payload found alongside its chunkidx sidecar", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+		want := filepath.Join(dir, "data.bin.zst")
+
+		if err := os.WriteFile(want, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.WriteFile(want+".chunkidx", []byte(`{"chunkSize":1,"totalSize":1,"compressedChunkSizes":[1]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		path, found, err := archive.FindBlockData(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !found {
+			t.Error("found = false, want true")
+		}
+
+		if path != want {
+			t.Errorf("path = %q, want %q", path, want)
+		}
+	})
 }
 
 func TestDeterminism(t *testing.T) {

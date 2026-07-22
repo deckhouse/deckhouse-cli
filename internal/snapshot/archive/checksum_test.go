@@ -326,6 +326,66 @@ func TestComputeNodeChecksum_ChunkMetaExcluded(t *testing.T) {
 	})
 }
 
+// TestComputeNodeChecksum_ChunkIndexSidecarExcluded_MultiVolume verifies that a
+// ".chunkidx" sidecar next to an existing data/<pvc>.bin.zst multi-volume
+// block file does not perturb the node checksum: it is a regeneratable
+// resume-acceleration cache, not node content, exactly like chunks.meta.
+func TestComputeNodeChecksum_ChunkIndexSidecarExcluded_MultiVolume(t *testing.T) {
+	nodeDir := makeNodeDir(t)
+	dataFile := filepath.Join(nodeDir, DataDirName, "pvc-a.bin.zst")
+	writeFile(t, dataFile, "block-content-a")
+
+	before, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+
+	idx := BlockChunkIndex{ChunkSize: 100, TotalSize: 1000, CompressedChunkSizes: []int64{50, 40, 10}}
+	if err := WriteBlockChunkIndex(dataFile, idx); err != nil {
+		t.Fatalf("WriteBlockChunkIndex: %v", err)
+	}
+
+	after, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+
+	if before.Hex != after.Hex {
+		t.Error("data/<pvc>.bin.zst.chunkidx sidecar was unexpectedly included in the checksum")
+	}
+}
+
+// TestComputeNodeChecksum_ChunkIndexSidecarExcluded_SingleVolume verifies the
+// single-volume analogue: a ".chunkidx" sidecar directly beside the flat
+// data.bin.zst (no data/ subdir) must also leave the checksum unchanged. This
+// pins that the single-volume path's structural exclusion actually holds
+// (collectNodeFiles calls FindBlockData once and appends only that one path,
+// and FindBlockData itself now skips ".chunkidx" matches), not just assumed.
+func TestComputeNodeChecksum_ChunkIndexSidecarExcluded_SingleVolume(t *testing.T) {
+	nodeDir := makeNodeDir(t)
+	dataFile := filepath.Join(nodeDir, DataBlockName(".zst"))
+	writeFile(t, dataFile, "block-content")
+
+	before, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+
+	idx := BlockChunkIndex{ChunkSize: 100, TotalSize: 1000, CompressedChunkSizes: []int64{50, 40, 10}}
+	if err := WriteBlockChunkIndex(dataFile, idx); err != nil {
+		t.Fatalf("WriteBlockChunkIndex: %v", err)
+	}
+
+	after, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+
+	if before.Hex != after.Hex {
+		t.Error("data.bin.zst.chunkidx sidecar was unexpectedly included in the checksum")
+	}
+}
+
 // TestShortChecksum verifies that ShortChecksum returns the first 8 hex chars.
 func TestShortChecksum(t *testing.T) {
 	cases := []struct {
