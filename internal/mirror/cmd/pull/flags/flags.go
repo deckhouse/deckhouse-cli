@@ -150,7 +150,7 @@ Examples (available platform versions: v1.63.x, v1.64.x, v1.65.x, v1.66.x, v1.67
 
 --include-platform "^1.65.0" → semver ^ constraint (>=1.65.0 <2.0.0): latest patch per minor starting at v1.65.x.
 
---include-platform "1.65.0" → implicit caret (^1.65.0): same as above; shorthand kept for parity with --include-module.
+--include-platform "1.65.0" → bare version, expands to >=1.65.0 <2.0.0 (same major line): keep latest patch per minor starting at v1.65.x. Same result as ^1.65.0 here because platform is always major >= 1; shorthand kept for parity with --include-module.
 
 --include-platform "=v1.65.3" → exact-tag pin: only v1.65.3 is pulled and propagated to all default release channels, just like --deckhouse-tag.
 
@@ -179,22 +179,31 @@ Semver constraints (caret, tilde, range) keep only the highest patch in each (ma
 Versions explicitly named with an inclusive boundary operator (>= or <=) are always preserved — that boundary is part of the user's request and must round-trip even when a newer patch exists in the same minor.
 Use the exact-tag form (=) when you need a specific older patch unconditionally.
 
+A bare version with no operator (module-name@1.3.0) means "this version or newer within the same major line" and keeps the latest patch per minor. It expands to >=X.Y.Z <(major+1).0.0, treating major 0 like any other major: module-name@0.4.0 spans the whole 0.x line (>=0.4.0 <1.0.0), NOT just the 0.4 minor as a caret (^0.4.0 = >=0.4.0 <0.5.0) would. Prefer this bare form for step-by-step upgrades — it captures every intermediate minor and needs no shell quoting.
+
+Shell note: >= and <= contain the redirection metacharacters > and <, so an unquoted module-name@>=1.3.0 is mangled by bash/zsh (it strips the operator and redirects into a file named "=1.3.0", leaving the module with an empty version). Quote the whole value when you use these operators: --include-module 'module-name@>=1.3.0'. The bare-version form above avoids this entirely.
+
 Example:
 Available versions for <module-name>: v1.0.0, v1.1.0, v1.2.0, v1.3.0, v1.3.3, v1.4.0, v1.4.1
 
-module-name@1.3.0 → semver ^ constraint (^1.3.0): keep latest patch per minor — includes v1.3.3 (1.3.x) and v1.4.1 (1.4.x). Versions currently pinned by release channels are pulled in addition.
+module-name@1.3.0 → bare version, expands to >=1.3.0 <2.0.0 (same major line): keep latest patch per minor — includes v1.3.3 (1.3.x) and v1.4.1 (1.4.x). Versions currently pinned by release channels are pulled in addition.
 
 module-name@~1.3.0 → semver ~ constraint (>=1.3.0 <1.4.0): keep latest patch per minor in range — includes v1.3.3. Versions currently pinned by release channels are pulled in addition.
 
-module-name@>=1.3.0 → range constraint with explicit >= anchor: keep latest patch per minor AND the named anchor v1.3.0 — includes v1.3.0 (anchor), v1.3.3 (1.3.x latest), v1.4.1 (1.4.x latest).
+module-name@^1.3.0 → semver ^ constraint (>=1.3.0 <2.0.0): keep latest patch per minor — includes v1.3.3, v1.4.1. For a 0.x version the caret locks the minor (^0.4.0 = >=0.4.0 <0.5.0), so use the bare form instead when you want the whole 0.x line.
 
-module-name@>=1.3.0 <=1.4.0 → both anchors honoured: includes v1.3.0, v1.3.3, v1.4.0; v1.4.1 is excluded by the upper bound.
+module-name@>=1.3.0 → range constraint with explicit >= anchor (quote in shell): keep latest patch per minor AND the named anchor v1.3.0 — includes v1.3.0 (anchor), v1.3.3 (1.3.x latest), v1.4.1 (1.4.x latest).
+
+module-name@>=1.3.0 <=1.4.0 → both anchors honoured (quote in shell): includes v1.3.0, v1.3.3, v1.4.0; v1.4.1 is excluded by the upper bound.
 
 module-name@=v1.3.0 → exact tag match: include only v1.3.0 and publish it to all release channels (alpha, beta, early-access, stable, rock-solid).
 
 module-name@=bobV1 → exact tag match: include only bobV1 and publish it to all release channels (alpha, beta, early-access, stable, rock-solid).
 
-module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and and publish it to stable channel
+module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and publish it to stable channel
+
+0.x example — available versions for <module-name>: v0.4.2, v0.4.4, v0.5.3, v0.6.1, v0.7.2
+module-name@0.4.0 → bare version, expands to >=0.4.0 <1.0.0: keep latest patch per minor across the whole 0.x line — includes v0.4.4, v0.5.3, v0.6.1, v0.7.2.
 		`,
 	)
 	flagSet.StringArrayVarP(
