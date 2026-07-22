@@ -24,6 +24,9 @@ import (
 	"os"
 	"path/filepath"
 
+	seekable "github.com/SaveTheRbtz/zstd-seekable-format-go/pkg"
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
 
@@ -40,9 +43,9 @@ var ErrMissingChunk = errors.New("block chunk missing")
 // corrupted merged data.bin[.<ext>].
 var ErrDecodedLengthMismatch = errors.New("merged block volume decoded length mismatch")
 
-// MergeBlockChunks concatenates all chunk_%05d[.<ext>] files from chunkDir into
-// outPath in strict ascending-index order. ext is the codec extension (e.g. ".zst");
-// use "" for the none codec.
+// MergeBlockChunks assembles all chunk_%05d[.<ext>] files from chunkDir into
+// a single outPath, in strict ascending-index order. ext is the codec
+// extension (e.g. ".zst"); use "" for the none codec.
 //
 // chunkDir is the absolute path to the directory containing the chunk files.
 // outPath is the absolute destination path for the merged block file.
@@ -51,18 +54,42 @@ var ErrDecodedLengthMismatch = errors.New("merged block volume decoded length mi
 //   - All chunks 0 .. ceil(totalSize/chunkSize)-1 must be present.
 //   - If any chunk is missing, ErrMissingChunk is returned and no output is written.
 //
+// MERGE STRATEGY is codec-dependent (see tasks.json's notes_on_plan_switch,
+// NATIVE-ZSTD-SEEKABLE-RESUME PIVOT entry, for the full design history):
+//   - gzip, lz4, none (mergeByConcatenation): each chunk's already-finalized,
+//     independently-encoded frame is copied byte-for-byte into outPath.
+//     Concatenation of independent frames is itself a valid multi-frame
+//     stream decodable by stock tools. No comparably mature/maintained
+//     seekable-format Go library exists for lz4 or gzip, so both keep the
+//     plain byte-zero discard-and-fast-forward resume behavior on the read
+//     side; this merge path is byte-for-byte unchanged from before the
+//     native-zstd-seek pivot.
+//   - zstd (mergeZstdSeekable): each chunk's already-finalized frame is
+//     decoded back to its exact raw bytes and re-fed through a
+//     seekable.Writer, which re-encodes it as a fresh frame and appends one
+//     seek-table entry. After the last chunk, the seek table is embedded as
+//     the file's own trailing skippable frame — still transparently
+//     decodable by a stock zstd reader (see
+//     compress/seekable_spike_test.go), but now also directly seekable to
+//     any chunk's raw offset without a byte-zero scan.
+//     COST TRADEOFF: this pays a ONE-TIME decode-then-re-encode pass over the
+//     zstd volume's data at merge time (replacing the previous plain
+//     byte-concatenation merge zstd used too), in exchange for eliminating
+//     resume-time decode-and-discard entirely on an interrupted upload —
+//     however large the already-uploaded prefix is, at most one chunk's
+//     worth of extra work is ever repeated (see
+//     putblockcompressed-native-zstd-seek-resume). gzip/lz4/none pay neither
+//     this merge-time cost nor gain that resume-time benefit.
+//
 // Post-conditions on success:
-//   - outPath is a fully durable (fsynced) multi-frame stream that decodes to
-//     exactly totalSize raw bytes (verified; see ErrDecodedLengthMismatch).
+//   - outPath is a fully durable (fsynced) stream that decodes to exactly
+//     totalSize raw bytes (verified; see ErrDecodedLengthMismatch).
 //   - The chunk directory and all its contents are removed.
-//   - For a compressed codec (ext != ""), a archive.BlockChunkIndex sidecar
-//     recording each chunk's compressed byte length is written alongside
-//     outPath (see archive.WriteBlockChunkIndex) so a future seekable resume
-//     can locate any chunk's frame start without decoding from byte zero.
-//     The none codec (ext == "") and the zero-size short-circuit
-//     (commitEmptyBlock) never get a sidecar: the none codec already resumes
-//     cheaply via a plain byte-offset section reader, so an index would be
-//     pure overhead with no consumer.
+//   - No sidecar file is ever written alongside outPath, for any codec: the
+//     '.chunkidx' sidecar this function used to write is superseded by the
+//     zstd path's own embedded seek table (see remove-chunkidx-sidecar-machinery,
+//     which deletes the now-unused archive.BlockChunkIndex machinery once
+//     nothing produces or consumes it).
 //
 // chunkSize ≤ 0 falls back to DefaultChunkSize.
 //
@@ -77,12 +104,12 @@ var ErrDecodedLengthMismatch = errors.New("merged block volume decoded length mi
 // The restore/import decode counterparts rely on this "zero frames == zero
 // bytes" contract, so it must not change without updating them.
 //
-// ctx is checked once per chunk during the copy loop; if it is cancelled
-// mid-merge, the in-progress AtomicWriter is aborted (so no partial file is
-// ever visible at outPath) and a wrapped ctx.Err() is returned (checkable via
-// errors.Is). A hard kill or graceful cancellation here never loses data: the
-// chunk directory is only removed after a full successful Commit, so the
-// merge simply resumes from the same chunks on the next run.
+// ctx is checked once per chunk during the copy/re-encode loop; if it is
+// cancelled mid-merge, the in-progress AtomicWriter is aborted (so no partial
+// file is ever visible at outPath) and a wrapped ctx.Err() is returned
+// (checkable via errors.Is). A hard kill or graceful cancellation here never
+// loses data: the chunk directory is only removed after a full successful
+// Commit, so the merge simply resumes from the same chunks on the next run.
 func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, chunkSize int64, ext string) error {
 	if totalSize == 0 {
 		return commitEmptyBlock(chunkDir, outPath)
@@ -108,58 +135,13 @@ func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, 
 		}
 	}
 
-	// Concatenate chunks in order via AtomicWriter.
-	aw, err := archive.NewAtomicWriter(outPath)
-	if err != nil {
-		return fmt.Errorf("open atomic writer for %s: %w", outPath, err)
-	}
-
-	// compressedSizes records each chunk's on-disk (compressed) frame length,
-	// in ascending chunk order, so it can be persisted as a BlockChunkIndex
-	// sidecar below -- the chunk's presence was already confirmed by the
-	// pre-check loop above, so this Stat cannot fail for a reason that loop
-	// didn't already catch.
-	compressedSizes := make([]int64, 0, numChunks)
-
-	for i := range numChunks {
-		if err := ctx.Err(); err != nil {
-			aw.Abort()
-			return fmt.Errorf("merge cancelled before chunk %d: %w", i, err)
+	if ext == ".zst" {
+		if err := mergeZstdSeekable(ctx, chunkDir, outPath, chunkSize, numChunks); err != nil {
+			return err
 		}
-
-		p := filepath.Join(chunkDir, archive.ChunkFileName(i, ext))
-
-		info, err := os.Stat(p)
-		if err != nil {
-			aw.Abort()
-			return fmt.Errorf("stat chunk %d for index: %w", i, err)
-		}
-
-		if err := copyFile(aw, p); err != nil {
-			aw.Abort()
-			return fmt.Errorf("copy chunk %d into merged file: %w", i, err)
-		}
-
-		compressedSizes = append(compressedSizes, info.Size())
-	}
-
-	if err := aw.Commit(); err != nil {
-		return fmt.Errorf("commit %s: %w", outPath, err)
-	}
-
-	// Persist the chunk-offset index BEFORE dropping the chunk directory: the
-	// none codec already resumes cheaply via a byte-offset section reader, so
-	// skip the sidecar there to avoid a stray file with no consumer (see the
-	// doc comment above).
-	if ext != "" {
-		idx := archive.BlockChunkIndex{
-			ChunkSize:            chunkSize,
-			TotalSize:            totalSize,
-			CompressedChunkSizes: compressedSizes,
-		}
-
-		if err := archive.WriteBlockChunkIndex(outPath, idx); err != nil {
-			return fmt.Errorf("write chunk index for %s: %w", outPath, err)
+	} else {
+		if err := mergeByConcatenation(ctx, chunkDir, outPath, numChunks, ext); err != nil {
+			return err
 		}
 	}
 
@@ -186,6 +168,200 @@ func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, 
 	}
 
 	return nil
+}
+
+// mergeByConcatenation implements MergeBlockChunks' merge path for every
+// codec except zstd (gzip, lz4, none): each chunk's already-finalized,
+// independently-encoded frame is copied byte-for-byte into outPath, in
+// ascending order, via AtomicWriter. This is byte-for-byte identical to
+// MergeBlockChunks' merge behavior before the native-zstd-seek pivot (see
+// that function's doc comment) — untouched by this task for these codecs.
+func mergeByConcatenation(ctx context.Context, chunkDir, outPath string, numChunks int, ext string) error {
+	aw, err := archive.NewAtomicWriter(outPath)
+	if err != nil {
+		return fmt.Errorf("open atomic writer for %s: %w", outPath, err)
+	}
+
+	for i := range numChunks {
+		if err := ctx.Err(); err != nil {
+			aw.Abort()
+			return fmt.Errorf("merge cancelled before chunk %d: %w", i, err)
+		}
+
+		p := filepath.Join(chunkDir, archive.ChunkFileName(i, ext))
+
+		if err := copyFile(aw, p); err != nil {
+			aw.Abort()
+			return fmt.Errorf("copy chunk %d into merged file: %w", i, err)
+		}
+	}
+
+	if err := aw.Commit(); err != nil {
+		return fmt.Errorf("commit %s: %w", outPath, err)
+	}
+
+	return nil
+}
+
+// mergeZstdSeekable implements MergeBlockChunks' zstd-specific merge path:
+// see that function's doc comment for the full design and cost-tradeoff
+// rationale. It decodes each chunk's already-finalized, independent zstd
+// frame back to its exact raw bytes and re-feeds them through a
+// seekable.Writer wrapping aw, so the final outPath carries an embedded seek
+// table as its own trailing skippable frame.
+//
+// MEMORY BOUNDING: raw is allocated ONCE, sized to chunkSize (the largest
+// possible per-chunk length), and reused for every chunk — decodeChunkFrame
+// only ever fills raw[:n] for the CURRENT chunk before sw.Write consumes it
+// (Writer.Write's EncodeAll call is synchronous, so the bytes are safe to
+// overwrite on the next iteration). Peak additional memory for this whole
+// function therefore stays bounded by chunkSize, never by totalSize — the
+// same chunkSize bound DownloadBlockChunks' doc comment already documents for
+// zstd's encode-side EncodeFrameStream exception, not a new multiplicative
+// concern (see also this function's WithEncoderConcurrency(1)/
+// WithDecoderConcurrency(1) note below, the OTHER load-bearing half of this
+// bound).
+func mergeZstdSeekable(ctx context.Context, chunkDir, outPath string, chunkSize int64, numChunks int) error {
+	aw, err := archive.NewAtomicWriter(outPath)
+	if err != nil {
+		return fmt.Errorf("open atomic writer for %s: %w", outPath, err)
+	}
+
+	// A fresh encoder/decoder pair for this merge call only: re-encoding at
+	// merge time is independent of whatever level the chunks were originally
+	// encoded at (that level is not recorded anywhere MergeBlockChunks can
+	// see), so LevelDefault is used deliberately here rather than threading a
+	// level through this function's signature.
+	//
+	// WithEncoderConcurrency(1)/WithDecoderConcurrency(1) are load-bearing for
+	// the memory-bounding invariant, not a performance tweak: klauspost/zstd's
+	// DEFAULT concurrency is GOMAXPROCS, backed by a pool of that many
+	// independent encoder/decoder workers, and this function drives many
+	// one-shot EncodeAll/decode calls through the SAME long-lived enc/dec
+	// instance in a tight loop (one call per chunk) -- once every pooled
+	// worker has been used at least once, EACH one retains its own
+	// windowSize-sized internal state for the rest of the merge. Empirically
+	// confirmed (see this task's progress note): on a 12-core machine, the
+	// default pool made a 30-chunk/8MiB-chunk merge retain ~220 MiB live
+	// (~GOMAXPROCS × one window each) instead of the intended single-chunk
+	// bound -- forcing both pools down to exactly one worker keeps retained
+	// state to one window's worth, independent of GOMAXPROCS and totalSize.
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderCRC(true), zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1))
+	if err != nil {
+		aw.Abort()
+		return fmt.Errorf("create zstd encoder for seekable writer: %w", err)
+	}
+
+	defer func() { _ = enc.Close() }()
+
+	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+	if err != nil {
+		aw.Abort()
+		return fmt.Errorf("create zstd decoder for chunk re-encode: %w", err)
+	}
+	defer dec.Close()
+
+	sw, err := seekable.NewWriter(aw, enc)
+	if err != nil {
+		aw.Abort()
+		return fmt.Errorf("create seekable zstd writer for %s: %w", outPath, err)
+	}
+
+	// raw's capacity is chunkSize -- the largest possible per-chunk raw
+	// length under the CURRENT geometry. decodeChunkFrame never reads more
+	// than that (an actual overrun is reported as an error, see its doc
+	// comment); a chunk that decodes to FEWER bytes (e.g. the volume's last,
+	// shorter chunk, or a genuinely truncated/corrupt frame) is not an error
+	// here -- the post-merge verifyDecodedLength aggregate check (unchanged)
+	// catches a real shortfall across the whole volume exactly as it did for
+	// the byte-concatenation merge path.
+	raw := make([]byte, chunkSize)
+
+	for i := range numChunks {
+		if err := ctx.Err(); err != nil {
+			aw.Abort()
+			return fmt.Errorf("merge cancelled before chunk %d: %w", i, err)
+		}
+
+		p := filepath.Join(chunkDir, archive.ChunkFileName(i, ".zst"))
+
+		n, err := decodeChunkFrame(dec, p, raw)
+		if err != nil {
+			aw.Abort()
+			return fmt.Errorf("decode chunk %d for seekable re-encode: %w", i, err)
+		}
+
+		if _, err := sw.Write(raw[:n]); err != nil {
+			aw.Abort()
+			return fmt.Errorf("write chunk %d into seekable stream: %w", i, err)
+		}
+	}
+
+	if err := sw.Close(); err != nil {
+		aw.Abort()
+		return fmt.Errorf("close seek table trailer for %s: %w", outPath, err)
+	}
+
+	if err := aw.Commit(); err != nil {
+		return fmt.Errorf("commit %s: %w", outPath, err)
+	}
+
+	return nil
+}
+
+// decodeChunkFrame decodes the single independent zstd frame at path into
+// buf, reusing dec (via Reset) so no new decoder — and its internal buffers —
+// is allocated per chunk. It returns n, the frame's ACTUAL decoded length,
+// which may be less than len(buf): a chunk covering less than a full
+// chunkSize (typically the volume's last chunk) legitimately decodes short,
+// and that is not an error here (see MergeBlockChunks' post-merge
+// verifyDecodedLength, which is the actual aggregate-length authority).
+//
+// What decodeChunkFrame DOES guard is an OVERRUN: if the frame still has
+// bytes remaining after filling buf to capacity, that chunk decodes to MORE
+// than the current geometry's chunkSize allows for — silently truncating it
+// at len(buf) would mask real corruption (or a stale/mismatched-geometry
+// chunk file) as a shorter-than-actual merge instead of surfacing it, so this
+// case returns an error wrapping ErrDecodedLengthMismatch instead.
+func decodeChunkFrame(dec *zstd.Decoder, path string, buf []byte) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, fmt.Errorf("open chunk file %s: %w", path, err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	if err := dec.Reset(f); err != nil {
+		return 0, fmt.Errorf("reset zstd decoder for %s: %w", path, err)
+	}
+
+	n, err := io.ReadFull(dec, buf)
+
+	switch {
+	case err == nil:
+		// buf was filled to capacity; check whether the frame has MORE bytes
+		// beyond that -- an overrun relative to the current chunkSize.
+		var extra [1]byte
+
+		_, peekErr := dec.Read(extra[:])
+
+		switch {
+		case peekErr == nil:
+			return 0, fmt.Errorf("chunk %s decodes to more than the expected %d bytes: %w", path, len(buf), ErrDecodedLengthMismatch)
+		case errors.Is(peekErr, io.EOF):
+			// Frame ends exactly at len(buf): the common case for every
+			// non-last chunk under an unchanged geometry.
+		default:
+			return 0, fmt.Errorf("read decoded chunk %s: %w", path, peekErr)
+		}
+	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
+		// Short frame: fewer bytes than len(buf). Not an error here -- see
+		// this function's doc comment.
+	default:
+		return 0, fmt.Errorf("read decoded chunk %s: %w", path, err)
+	}
+
+	return n, nil
 }
 
 // commitEmptyBlock durably writes an empty outPath and drops the (empty or

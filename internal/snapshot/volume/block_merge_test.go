@@ -20,10 +20,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
+	"time"
 
+	seekable "github.com/SaveTheRbtz/zstd-seekable-format-go/pkg"
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -121,12 +126,14 @@ func TestMergeBlockChunks_MergesInOrder(t *testing.T) {
 	}
 }
 
-// TestMergeBlockChunks_WritesChunkIndex_CompressedCodecs proves that a
-// successful merge of a compressed volume (zstd, gzip, lz4) persists a
-// BlockChunkIndex sidecar whose ChunkSize/TotalSize match the call's
-// parameters, whose CompressedChunkSizes has one entry per merged chunk, and
-// whose entries sum to exactly the merged output's on-disk size.
-func TestMergeBlockChunks_WritesChunkIndex_CompressedCodecs(t *testing.T) {
+// TestMergeBlockChunks_NoChunkIndexSidecar_AnyCodec proves that MergeBlockChunks
+// never writes a '.chunkidx' sidecar next to its merged output, for ANY codec
+// (zstd, gzip, lz4, none): the sidecar mechanism is superseded for zstd by its
+// own embedded seek table (see TestMergeBlockChunks_Zstd_EmbedsSeekTable) and
+// was never anything but overhead for the others (see
+// notes_on_plan_switch's NATIVE-ZSTD-SEEKABLE-RESUME PIVOT entry in
+// tasks.json).
+func TestMergeBlockChunks_NoChunkIndexSidecar_AnyCodec(t *testing.T) {
 	payloads := [][]byte{
 		[]byte("chunk0"),
 		[]byte("chunk1"),
@@ -135,7 +142,7 @@ func TestMergeBlockChunks_WritesChunkIndex_CompressedCodecs(t *testing.T) {
 	chunkSize := int64(6) // matches each payload's length
 	totalSize := int64(len(payloads)) * chunkSize
 
-	for _, codecName := range []string{"zstd", "gzip", "lz4"} {
+	for _, codecName := range []string{"zstd", "gzip", "lz4", "none"} {
 		t.Run(codecName, func(t *testing.T) {
 			nodeDir := t.TempDir()
 			chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
@@ -151,69 +158,256 @@ func TestMergeBlockChunks_WritesChunkIndex_CompressedCodecs(t *testing.T) {
 				t.Fatalf("MergeBlockChunks(%s): %v", codecName, err)
 			}
 
-			idx, found, err := archive.ReadBlockChunkIndex(outPath)
-			if err != nil {
-				t.Fatalf("ReadBlockChunkIndex(%s): %v", codecName, err)
-			}
-
-			if !found {
-				t.Fatalf("expected a chunk index sidecar for codec %s, found none", codecName)
-			}
-
-			if idx.ChunkSize != chunkSize {
-				t.Errorf("ChunkSize = %d, want %d", idx.ChunkSize, chunkSize)
-			}
-
-			if idx.TotalSize != totalSize {
-				t.Errorf("TotalSize = %d, want %d", idx.TotalSize, totalSize)
-			}
-
-			if len(idx.CompressedChunkSizes) != len(payloads) {
-				t.Fatalf("len(CompressedChunkSizes) = %d, want %d", len(idx.CompressedChunkSizes), len(payloads))
-			}
-
-			var sum int64
-			for _, sz := range idx.CompressedChunkSizes {
-				sum += sz
-			}
-
-			info, statErr := os.Stat(outPath)
-			if statErr != nil {
-				t.Fatalf("stat merged output: %v", statErr)
-			}
-
-			if sum != info.Size() {
-				t.Errorf("sum(CompressedChunkSizes) = %d, want on-disk size %d", sum, info.Size())
+			if _, statErr := os.Stat(archive.BlockChunkIndexPath(outPath)); !os.IsNotExist(statErr) {
+				t.Errorf("expected no chunk index sidecar for codec %s, Stat returned: %v", codecName, statErr)
 			}
 		})
 	}
 }
 
-// TestMergeBlockChunks_NoChunkIndex_NoneCodec proves that the none codec
-// (ext == "") never gains a chunk index sidecar: it already resumes cheaply
-// via a byte-offset section reader with no decode, so the sidecar would be
-// pure overhead with no consumer.
-func TestMergeBlockChunks_NoChunkIndex_NoneCodec(t *testing.T) {
+// TestMergeBlockChunks_Zstd_EmbedsSeekTable proves the core contract of the
+// native-zstd-seekable-resume merge path: the merged data.bin.zst, opened via
+// seekable.NewReader, reports a valid SeekTable whose NumFrames() equals the
+// number of chunks merged and whose Size() equals totalSize -- i.e. the seek
+// table genuinely describes the whole merged volume, not just the last write.
+func TestMergeBlockChunks_Zstd_EmbedsSeekTable(t *testing.T) {
 	nodeDir := t.TempDir()
 	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
-	outPath := filepath.Join(nodeDir, archive.DataBlockName(""))
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(".zst"))
 
 	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	payloads := [][]byte{[]byte("hello"), []byte("world")}
-	chunkSize := int64(5)
-	totalSize := int64(10)
+	payloads := [][]byte{
+		[]byte("chunk0"),
+		[]byte("chunk1"),
+		[]byte("chunk2"),
+		[]byte("chunk3"),
+	}
+	chunkSize := int64(6) // matches each payload's length
+	totalSize := int64(len(payloads)) * chunkSize
 
-	makeChunkFramesWithCodec(t, chunkDir, payloads, "none")
+	makeChunkFrames(t, chunkDir, payloads)
 
-	if err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, totalSize, chunkSize, ""); err != nil {
+	if err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, totalSize, chunkSize, ".zst"); err != nil {
 		t.Fatalf("MergeBlockChunks: %v", err)
 	}
 
-	if _, statErr := os.Stat(archive.BlockChunkIndexPath(outPath)); !os.IsNotExist(statErr) {
-		t.Errorf("expected no chunk index sidecar for the none codec, Stat returned: %v", statErr)
+	f, err := os.Open(outPath)
+	if err != nil {
+		t.Fatalf("open merged output: %v", err)
+	}
+	defer f.Close()
+
+	dec, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatalf("zstd.NewReader (decoder): %v", err)
+	}
+	defer dec.Close()
+
+	sr, err := seekable.NewReader(f, dec)
+	if err != nil {
+		t.Fatalf("seekable.NewReader: %v", err)
+	}
+	defer sr.Close()
+
+	table, err := sr.SeekTable()
+	if err != nil {
+		t.Fatalf("SeekTable: %v", err)
+	}
+
+	if got := table.NumFrames(); got != int64(len(payloads)) {
+		t.Errorf("NumFrames() = %d, want %d (one frame per merged chunk)", got, len(payloads))
+	}
+
+	if got := table.Size(); got != uint64(totalSize) {
+		t.Errorf("Size() = %d, want %d", got, totalSize)
+	}
+
+	// The embedded seek table must not just report the right totals: it must
+	// still let a plain stock compress.NewReader(".zst", ...) decode the
+	// whole file, unaffected by the trailing skippable seek-table frame.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("seek merged output back to start: %v", err)
+	}
+
+	stockReader, err := compress.NewReader(".zst", f)
+	if err != nil {
+		t.Fatalf("compress.NewReader: %v", err)
+	}
+
+	decoded, err := io.ReadAll(stockReader)
+	if err != nil {
+		t.Fatalf("stock decode of merged output: %v", err)
+	}
+
+	if err := stockReader.Close(); err != nil {
+		t.Errorf("close stock reader: %v", err)
+	}
+
+	want := bytes.Join(payloads, nil)
+	if !bytes.Equal(decoded, want) {
+		t.Errorf("stock-decoded content mismatch: got %q want %q", decoded, want)
+	}
+}
+
+// measurePeakHeapAlloc runs fn while a background goroutine polls
+// runtime.MemStats.HeapAlloc on a tight ticker, returning the highest value
+// observed. This is the "sample continuously while the code under test runs"
+// variant of the heap-delta technique used elsewhere in this repo (see
+// snapimport/volume_test.go's requestBodyReadTracker): MergeBlockChunks has
+// no single natural callback hook (like an HTTP body's first Read) to sample
+// at, since its zstd merge path processes many chunks in one call, so peak
+// live heap is tracked continuously for the call's whole duration instead.
+func measurePeakHeapAlloc(t *testing.T, fn func()) uint64 {
+	t.Helper()
+
+	stop := make(chan struct{})
+	peakCh := make(chan uint64, 1)
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+
+		var peak uint64
+
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-stop:
+				peakCh <- peak
+				return
+			case <-ticker.C:
+				// Force a GC pass before sampling: HeapAlloc alone also
+				// counts not-yet-swept garbage, which -- over a whole
+				// multi-chunk merge -- can accumulate to a large number even
+				// for a genuinely chunk-bounded implementation, simply
+				// because Go's own GC pacing never happened to trigger
+				// during this short a run. Forcing a collection on every
+				// sample makes HeapAlloc reflect truly LIVE (still
+				// referenced) bytes only, which is the property this test
+				// actually needs: a full-buffering regression's big buffer
+				// stays referenced (and so stays large after a forced GC)
+				// for as long as the merge holds it, while a bounded
+				// implementation's small per-chunk buffers get freed by it.
+				runtime.GC()
+
+				var ms runtime.MemStats
+
+				runtime.ReadMemStats(&ms)
+
+				if ms.HeapAlloc > peak {
+					peak = ms.HeapAlloc
+				}
+			}
+		}
+	}()
+
+	fn()
+	close(stop)
+	wg.Wait()
+
+	return <-peakCh
+}
+
+// writeMemoryBoundedZstdFixture writes numChunks independent zstd frames of
+// chunkSize raw bytes each into chunkDir, varying content slightly per chunk
+// so it is not trivially a single repeated frame. It is a separate function
+// (not inlined into its caller) so the large synthetic payloads it builds are
+// unreachable -- their whole stack frame is gone -- as soon as it returns,
+// rather than merely unreferenced-but-still-in-scope in the calling test.
+func writeMemoryBoundedZstdFixture(t *testing.T, chunkDir string, chunkSize, numChunks int) {
+	t.Helper()
+
+	pattern := []byte("memory-bound-merge-regression-test-data. ")
+
+	payloads := make([][]byte, numChunks)
+	for i := range payloads {
+		p := bytes.Repeat(pattern, chunkSize/len(pattern)+2)
+		p = p[:chunkSize]
+		p[0] = byte('A' + i%26)
+
+		payloads[i] = p
+	}
+
+	makeChunkFrames(t, chunkDir, payloads)
+}
+
+// TestMergeBlockChunks_Zstd_ReencodeIsMemoryBounded is the regression test
+// for the zstd decode-then-reencode merge path's memory-bounding invariant
+// (cross-cutting invariant #2/#11 in .agent/implementer-prompt.md): merging a
+// large, multi-chunk volume must never hold more than roughly one chunk's
+// worth of decoded bytes live at once, regardless of totalSize.
+//
+// Per invariant #11, tracking only the merged output's on-disk size (or any
+// transport-facing metric) would NOT discriminate a genuinely chunk-bounded
+// merge from a regression that decodes every chunk into one big buffer
+// before writing it out — both produce byte-identical output. This test
+// instead samples the process's live heap continuously while the merge runs
+// (measurePeakHeapAlloc) and was EMPIRICALLY confirmed, by temporarily
+// reintroducing exactly that full-buffering variant into mergeZstdSeekable
+// (decoding every chunk into one concatenated buffer up front, then writing
+// each chunk's slice out of it), to fail against the reintroduced regression
+// before being trusted here — see this task's progress note.
+func TestMergeBlockChunks_Zstd_ReencodeIsMemoryBounded(t *testing.T) {
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(".zst"))
+
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const chunkSize = 8 * 1024 * 1024 // 8 MiB
+	const numChunks = 30              // 240 MiB total raw
+
+	totalSize := int64(chunkSize) * int64(numChunks)
+
+	// Fixture creation is isolated in its own function so its 240 MiB of
+	// synthetic payloads (and the codec's own encode-side buffers) are
+	// provably out of scope -- not merely unreferenced-but-still-on-this-
+	// frame -- by the time the baseline below is captured.
+	writeMemoryBoundedZstdFixture(t, chunkDir, chunkSize, numChunks)
+
+	runtime.GC()
+
+	var before runtime.MemStats
+
+	runtime.ReadMemStats(&before)
+
+	var mergeErr error
+
+	peak := measurePeakHeapAlloc(t, func() {
+		mergeErr = volume.MergeBlockChunks(context.Background(), chunkDir, outPath, totalSize, chunkSize, ".zst")
+	})
+
+	if mergeErr != nil {
+		t.Fatalf("MergeBlockChunks: %v", mergeErr)
+	}
+
+	// A regression that decodes every chunk into one buffer before writing
+	// would hold on the order of totalSize (240 MiB) live at once; a
+	// genuinely chunk-bounded merge stays within a small multiple of
+	// chunkSize plus the zstd encoder/decoder's own fixed per-instance
+	// window state (empirically ~35 MiB combined for one
+	// WithEncoderConcurrency(1)/WithDecoderConcurrency(1) pair on an 8 MiB
+	// chunk size -- see mergeZstdSeekable's doc comment). The ceiling sits
+	// well below totalSize but comfortably above that fixed cost to absorb
+	// allocator/runtime overhead and sampling jitter.
+	const ceiling = 8 * chunkSize
+
+	delta := int64(peak) - int64(before.HeapAlloc)
+	if delta > ceiling {
+		t.Errorf("peak live heap grew by %d bytes (%.1f MiB) merging a %d-byte (%.0f MiB) zstd volume, "+
+			"want <= %d bytes (%d MiB): suspect a full-buffering regression in mergeZstdSeekable",
+			delta, float64(delta)/(1024*1024), totalSize, float64(totalSize)/(1024*1024),
+			int64(ceiling), ceiling/(1024*1024))
 	}
 }
 
