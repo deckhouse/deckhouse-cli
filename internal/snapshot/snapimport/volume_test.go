@@ -93,7 +93,7 @@ func TestPutBlock_SendsRequiredHeaders(t *testing.T) {
 
 	doer := &recordingDoer{}
 
-	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, "", int64(len(payload)), discardLogger(), nil); err != nil {
+	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, "", int64(len(payload)), discardLogger(), nil, nil); err != nil {
 		t.Fatalf("putBlock: %v", err)
 	}
 
@@ -130,7 +130,7 @@ func TestPutBlock_ResumesFromServerOffset(t *testing.T) {
 
 	doer := &recordingDoer{resumeOffset: 5}
 
-	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, "", int64(len(payload)), discardLogger(), nil); err != nil {
+	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, "", int64(len(payload)), discardLogger(), nil, nil); err != nil {
 		t.Fatalf("putBlock: %v", err)
 	}
 
@@ -168,7 +168,7 @@ func TestPutBlock_ReportsProgressBytes(t *testing.T) {
 
 	doer := &recordingDoer{}
 
-	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, "", int64(len(payload)), discardLogger(), func(n int) { reported += n }); err != nil {
+	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, "", int64(len(payload)), discardLogger(), func(n int) { reported += n }, nil); err != nil {
 		t.Fatalf("putBlock: %v", err)
 	}
 
@@ -189,7 +189,7 @@ func TestPutBlock_RejectsOversizeServerOffset(t *testing.T) {
 	// Importer reports more bytes than the archive has: a mismatched reused DataImport.
 	doer := &recordingDoer{resumeOffset: 20}
 
-	err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, "", int64(len(payload)), discardLogger(), nil)
+	err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, "", int64(len(payload)), discardLogger(), nil, nil)
 	if err == nil {
 		t.Fatal("expected error for oversize server offset, got nil")
 	}
@@ -419,13 +419,21 @@ func TestPutBlock_InterruptAndResume_AllCodecs(t *testing.T) {
 			// dropping) mid-transfer. putBlock must surface an error -- the connection
 			// was severed with no response -- and the server must have durably kept
 			// exactly partialN bytes, no more and no less.
-			err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, totalSize, discardLogger(), nil)
+			activated1 := 0
+
+			err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, totalSize, discardLogger(), nil, func() { activated1++ })
 			if err == nil {
 				t.Fatal("expected attempt 1 (simulated crash mid-transfer) to return an error")
 			}
 
 			if got := int64(len(imp.durablyWritten())); got != partialN {
 				t.Fatalf("after simulated crash, server durably holds %d bytes, want exactly %d", got, partialN)
+			}
+
+			// Attempt 1 genuinely PUT partialN real bytes before the crash, so it must have
+			// activated even though it ultimately errored (backlog #21 Bug A).
+			if activated1 == 0 {
+				t.Error("attempt 1 activate call count = 0, want >= 1 (real bytes were transferred before the crash)")
 			}
 
 			// Attempt 2: a genuinely independent invocation of putBlock -- a fresh call
@@ -436,7 +444,10 @@ func TestPutBlock_InterruptAndResume_AllCodecs(t *testing.T) {
 			// call's own HEAD probe, per headBlockOffset/putBlock.
 			var reported int64
 
-			err = putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, totalSize, discardLogger(), func(n int) { reported += int64(n) })
+			activated2 := 0
+
+			err = putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, totalSize, discardLogger(),
+				func(n int) { reported += int64(n) }, func() { activated2++ })
 			if err != nil {
 				t.Fatalf("putBlock (attempt 2, resume after simulated crash): %v", err)
 			}
@@ -450,6 +461,12 @@ func TestPutBlock_InterruptAndResume_AllCodecs(t *testing.T) {
 			if want := totalSize - partialN; reported != want {
 				t.Errorf("attempt 2 reported %d progress bytes, want %d (only the bytes it actually sent, not "+
 					"re-crediting the pre-crash prefix attempt 1 already reported nothing for)", reported, want)
+			}
+
+			// Attempt 2 is a partial resume with real remaining bytes to PUT, so it must
+			// activate exactly because genuine transfer happens (backlog #21 Bug A).
+			if activated2 == 0 {
+				t.Error("attempt 2 activate call count = 0, want >= 1 (a partially-resumed upload with real remaining bytes must activate)")
 			}
 		})
 	}
@@ -523,7 +540,10 @@ func TestPutBlock_FreshUploadRoundTrip(t *testing.T) {
 
 			var reported int
 
-			if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, int64(len(payload)), discardLogger(), func(n int) { reported += n }); err != nil {
+			activated := 0
+
+			if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, int64(len(payload)), discardLogger(),
+				func(n int) { reported += n }, func() { activated++ }); err != nil {
 				t.Fatalf("putBlock: %v", err)
 			}
 
@@ -533,6 +553,12 @@ func TestPutBlock_FreshUploadRoundTrip(t *testing.T) {
 
 			if reported != len(payload) {
 				t.Errorf("reported progress bytes = %d, want %d (total payload size)", reported, len(payload))
+			}
+
+			// A first-time (non-resumed, non-skipped) upload must activate the caller's
+			// progress stream (backlog #21 Bug A).
+			if activated == 0 {
+				t.Error("activate call count = 0, want >= 1 (a fresh upload with real transfer must activate)")
 			}
 		})
 	}
@@ -570,7 +596,7 @@ func TestPutBlockCompressed_ResumesViaFastForward(t *testing.T) {
 			srv := httptest.NewServer(imp)
 			defer srv.Close()
 
-			if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, int64(len(payload)), discardLogger(), nil); err != nil {
+			if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, int64(len(payload)), discardLogger(), nil, nil); err != nil {
 				t.Fatalf("putBlock (resume): %v", err)
 			}
 
@@ -803,8 +829,16 @@ func TestPutBlock_SkipsDecodeWhenOffsetEqualsTotal(t *testing.T) {
 
 	missing := filepath.Join(t.TempDir(), "data.bin.zst")
 
-	if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, missing, ".zst", 100, discardLogger(), nil); err != nil {
+	activated := 0
+
+	if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, missing, ".zst", 100, discardLogger(), nil, func() { activated++ }); err != nil {
 		t.Fatalf("putBlock with offset==totalSize must skip decoding entirely, got error: %v", err)
+	}
+
+	// A fully server-side-skipped block volume (offset==totalSize on HEAD) must never
+	// activate the caller's progress stream (backlog #21 Bug A).
+	if activated != 0 {
+		t.Errorf("activate call count = %d, want 0 (a fully server-side-skipped upload must never activate)", activated)
 	}
 }
 
@@ -824,7 +858,7 @@ func TestPutBlockCompressed_TooSmallDeclaredSizeErrors(t *testing.T) {
 
 	shortTotal := int64(len(payload) - 500)
 
-	err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, ".zst", shortTotal, discardLogger(), nil)
+	err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, ".zst", shortTotal, discardLogger(), nil, nil)
 	if err == nil {
 		t.Fatal("expected an error for an under-declared totalSize, got nil")
 	}
@@ -848,7 +882,7 @@ func TestPutBlockCompressed_TooLargeDeclaredSizeErrors(t *testing.T) {
 
 	longTotal := int64(len(payload) + 5000)
 
-	err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, ".zst", longTotal, discardLogger(), nil)
+	err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, ".zst", longTotal, discardLogger(), nil, nil)
 	if err == nil {
 		t.Fatal("expected an error for an over-declared totalSize, got nil")
 	}
@@ -880,7 +914,7 @@ func TestPutBlockCompressed_NoTempFilesCreated(t *testing.T) {
 	srv := httptest.NewServer(&fakeBlockImporter{})
 	defer srv.Close()
 
-	if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, ".zst", int64(len(payload)), discardLogger(), nil); err != nil {
+	if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, ".zst", int64(len(payload)), discardLogger(), nil, nil); err != nil {
 		t.Fatalf("putBlock: %v", err)
 	}
 
@@ -1127,7 +1161,7 @@ func TestPutBlockCompressed_StreamingIsMemoryBounded(t *testing.T) {
 
 	var reported int64
 
-	err := putBlock(context.Background(), doer, srv.URL, dataFile, ".zst", int64(len(payload)), discardLogger(), func(n int) { reported += int64(n) })
+	err := putBlock(context.Background(), doer, srv.URL, dataFile, ".zst", int64(len(payload)), discardLogger(), func(n int) { reported += int64(n) }, nil)
 	if err != nil {
 		t.Fatalf("putBlock: %v", err)
 	}
@@ -1176,7 +1210,7 @@ func TestUploadVolumeData_SkipsCompleted(t *testing.T) {
 	dyn := newFakeDataImportDyn(completedDataImportObj(targetNS, "pvc-1"))
 	imp := newTestVolumeImporter(dyn) // sc is nil: reaching the HTTP upload would panic.
 
-	if err := imp.UploadVolumeData(context.Background(), leaf, "pvc-1", targetNS, nil, nil); err != nil {
+	if err := imp.UploadVolumeData(context.Background(), leaf, "pvc-1", targetNS, nil, nil, nil); err != nil {
 		t.Fatalf("UploadVolumeData on an already-completed import must be a no-op: %v", err)
 	}
 }
@@ -1460,7 +1494,7 @@ func TestSendVolumeData_FSLeaf_UsesTarFile(t *testing.T) {
 
 	setTotal := func(n int64) { totals = append(totals, n) }
 
-	if err := imp.sendVolumeData(context.Background(), plainHTTPDoer{}, srv.URL, volumeModeFilesystem, leaf, targetNS, "pvc-1", setTotal, nil); err != nil {
+	if err := imp.sendVolumeData(context.Background(), plainHTTPDoer{}, srv.URL, volumeModeFilesystem, leaf, targetNS, "pvc-1", setTotal, nil, nil); err != nil {
 		t.Fatalf("sendVolumeData with FS leaf and valid TarFile: %v", err)
 	}
 

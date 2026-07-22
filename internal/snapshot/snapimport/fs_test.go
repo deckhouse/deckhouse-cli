@@ -408,7 +408,7 @@ func TestImportFSFromTar_DecompressesAndUploads(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil, nil); err != nil {
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil, nil, nil); err != nil {
 		t.Fatalf("importFSFromTar: %v", err)
 	}
 
@@ -511,7 +511,7 @@ func TestImportFSFromTar_SkipsNonRegularEntries(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil, nil); err != nil {
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil, nil, nil); err != nil {
 		t.Fatalf("importFSFromTar: %v", err)
 	}
 
@@ -597,7 +597,7 @@ func TestImportFSFromTar_SkipsAlreadyUploadedEntryWithoutDecompressing(t *testin
 
 	setTotal := func(n int64) { totals = append(totals, n) }
 
-	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), setTotal, onProgress); err != nil {
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), setTotal, onProgress, nil); err != nil {
 		t.Fatalf("importFSFromTar: %v", err)
 	}
 
@@ -718,9 +718,10 @@ func TestImportFSFromTar_SkipsAlreadyUploadedEntry_NeverAttemptsDecompression(t 
 			defer srv.Close()
 
 			progressed := 0
+			activated := 0
 
 			err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(),
-				nil, func(n int) { progressed += n })
+				nil, func(n int) { progressed += n }, func() { activated++ })
 			if err != nil {
 				t.Fatalf("importFSFromTar returned an error for a corrupted-but-already-done %s entry -- "+
 					"this means decompression WAS attempted on a done entry (the skip branch must "+
@@ -734,6 +735,14 @@ func TestImportFSFromTar_SkipsAlreadyUploadedEntry_NeverAttemptsDecompression(t 
 			if progressed != len(plain) {
 				t.Errorf("onProgress total = %d, want %d (done entry still credited from HEAD's Content-Length, without decompressing it)",
 					progressed, len(plain))
+			}
+
+			// A fully server-side-skipped entry must never activate the caller's progress
+			// stream: onProgress crediting (asserted above) is a bar-accounting concern
+			// (invariant #7) independent of the "was anything really transferred" signal
+			// activate exists to carry (backlog #21 Bug A).
+			if activated != 0 {
+				t.Errorf("activate call count = %d, want 0 (a fully server-side-skipped entry must never activate)", activated)
 			}
 		})
 	}
@@ -772,7 +781,7 @@ func TestImportFSFromTar_EmptyFileIsUploaded(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil, nil); err != nil {
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil, nil, nil); err != nil {
 		t.Fatalf("importFSFromTar: %v", err)
 	}
 
@@ -976,9 +985,17 @@ func TestImportFSFromTar_PerCodecRoundTrip(t *testing.T) {
 
 			var totals []int64
 
+			activated := 0
+
 			if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(),
-				func(n int64) { totals = append(totals, n) }, func(n int) { reported += n }); err != nil {
+				func(n int64) { totals = append(totals, n) }, func(n int) { reported += n }, func() { activated++ }); err != nil {
 				t.Fatalf("importFSFromTar: %v", err)
+			}
+
+			// A fresh (non-resumed) upload where every file is genuinely PUT must activate
+			// the caller's progress stream at least once (backlog #21 Bug A).
+			if activated == 0 {
+				t.Error("activate call count = 0, want >= 1 (a first-time upload with real transfers must activate)")
 			}
 
 			if got := imp.received("first.dat"); !bytes.Equal(got, firstContent) {
@@ -1115,7 +1132,7 @@ func TestImportFSFromTar_InterruptAndResume_AllCodecs(t *testing.T) {
 			defer srv.Close()
 
 			// Attempt 1: simulates the CLI process being killed mid-transfer.
-			err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil, nil)
+			err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil, nil, nil)
 			if err == nil {
 				t.Fatal("expected attempt 1 (simulated crash mid-transfer) to return an error")
 			}
@@ -1131,10 +1148,19 @@ func TestImportFSFromTar_InterruptAndResume_AllCodecs(t *testing.T) {
 
 			var lastTotal int64
 
+			activated := 0
+
 			err = importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(),
-				func(n int64) { lastTotal = n }, func(n int) { reported += n })
+				func(n int64) { lastTotal = n }, func(n int) { reported += n }, func() { activated++ })
 			if err != nil {
 				t.Fatalf("importFSFromTar (attempt 2, resume after simulated crash): %v", err)
+			}
+
+			// Attempt 2 genuinely PUTs the remaining bytes of a partially-resumed file, so
+			// it must activate (backlog #21 Bug A) even though the file was not uploaded
+			// from scratch.
+			if activated == 0 {
+				t.Error("activate call count = 0, want >= 1 (a partially-resumed upload with real remaining bytes must activate)")
 			}
 
 			got := inner.received("big.txt")
@@ -1264,7 +1290,7 @@ func TestImportFSFromTar_StreamingIsMemoryBounded(t *testing.T) {
 	var lastTotal int64
 
 	err = importFSFromTar(context.Background(), doer, srv.URL, tarPath, discardLogger(),
-		func(n int64) { lastTotal = n }, func(n int) { reported += n })
+		func(n int64) { lastTotal = n }, func(n int) { reported += n }, nil)
 	if err != nil {
 		t.Fatalf("importFSFromTar: %v", err)
 	}

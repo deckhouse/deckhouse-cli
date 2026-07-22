@@ -87,8 +87,12 @@ type VolumeImporter interface {
 	// called with the expected total byte count: once, before any bytes are sent, on the
 	// block path (the total is known up front from leaf.Size); progressively, with a
 	// growing running sum as each file's exact size becomes known, on the filesystem path
-	// (see sendVolumeData for why an accurate a-priori FS total is not free).
-	UploadVolumeData(ctx context.Context, leaf PlannedNode, diName, namespace string, setTotal func(int64), onProgress func(int)) error
+	// (see sendVolumeData for why an accurate a-priori FS total is not free). activate, when
+	// non-nil, is called at least once but ONLY when a real transfer occurs — never on a
+	// leaf whose upload is entirely a server-side skip (offset==totalSize on the block HEAD,
+	// or every file already done on the filesystem HEAD) — so the caller's progress stream
+	// can distinguish a genuine transfer from a full resume-skip (see progress.Stream.Activate).
+	UploadVolumeData(ctx context.Context, leaf PlannedNode, diName, namespace string, setTotal func(int64), onProgress func(int), activate func()) error
 }
 
 // clusterVolumeImporter is the live VolumeImporter backed by a dynamic client (DataImport
@@ -272,7 +276,7 @@ func (c *clusterVolumeImporter) deleteDataImportAndWait(ctx context.Context, ri 
 
 // UploadVolumeData waits for the DataImport endpoint, uploads the volume data
 // (filesystem tar or raw block), finalises, and waits for the durable artifact.
-func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf PlannedNode, diName, namespace string, setTotal func(int64), onProgress func(int)) error {
+func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf PlannedNode, diName, namespace string, setTotal func(int64), onProgress func(int), activate func()) error {
 	if !leaf.FilesystemData && !leaf.HasBlockData() {
 		return fmt.Errorf("data leaf %s/%s has no volume data file in the archive", leaf.Kind, leaf.Name)
 	}
@@ -306,7 +310,7 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 		return err
 	}
 
-	if err := c.sendVolumeData(ctx, httpClient, url, volumeMode, leaf, namespace, diName, setTotal, onProgress); err != nil {
+	if err := c.sendVolumeData(ctx, httpClient, url, volumeMode, leaf, namespace, diName, setTotal, onProgress, activate); err != nil {
 		return err
 	}
 
@@ -318,7 +322,7 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 // the caller must invoke waitDataImportCompleted afterwards.
 // Using leaf.TarFile (not leaf.DataFile) for the FS path is essential: DataFile holds the
 // block-data glob result (data.bin*), which is always empty for FS-only leaves.
-func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient httpDoer, url, volumeMode string, leaf PlannedNode, namespace, diName string, setTotal func(int64), onProgress func(int)) error {
+func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient httpDoer, url, volumeMode string, leaf PlannedNode, namespace, diName string, setTotal func(int64), onProgress func(int), activate func()) error {
 	switch volumeMode {
 	case volumeModeFilesystem:
 		c.log.Info("uploading filesystem data",
@@ -338,7 +342,7 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 		// step / hdr.Size), so the bar's denominator grows as work is discovered rather
 		// than staying at zero for the whole upload. Honest limitation: the total is not
 		// complete until the LAST entry in the tar has been processed.
-		if err := importFSFromTar(ctx, httpClient, url, leaf.TarFile, c.log, setTotal, onProgress); err != nil {
+		if err := importFSFromTar(ctx, httpClient, url, leaf.TarFile, c.log, setTotal, onProgress, activate); err != nil {
 			return fmt.Errorf("upload filesystem data for %s/%s: %w", namespace, diName, err)
 		}
 
@@ -371,7 +375,7 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 			setTotal(totalSize)
 		}
 
-		if err := putBlock(ctx, httpClient, blockURL, leaf.DataFile, ext, totalSize, c.log, onProgress); err != nil {
+		if err := putBlock(ctx, httpClient, blockURL, leaf.DataFile, ext, totalSize, c.log, onProgress, activate); err != nil {
 			return fmt.Errorf("upload block data for %s/%s: %w", namespace, diName, err)
 		}
 
@@ -521,8 +525,10 @@ func blockTotalSize(dataFile, size, ext string) (int64, error) {
 // selects the decode codec via compress.NewReader ("" for raw/no codec, matching
 // Codec.Ext); totalSize is the volume's exact decompressed byte count (see
 // blockTotalSize). onProgress, when non-nil, is called with the number of bytes accepted
-// by the server after each PUT.
-func putBlock(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, totalSize int64, log *slog.Logger, onProgress func(int)) error {
+// by the server after each PUT. activate, when non-nil, is called at the start of every
+// real transfer iteration (never when offset==totalSize short-circuits before any PUT is
+// attempted), so the caller's progress stream is activated only on a genuine transfer.
+func putBlock(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, totalSize int64, log *slog.Logger, onProgress func(int), activate func()) error {
 	// Resume from the importer's recorded write offset: a reused (non-expired) DataImport
 	// may already hold a partial upload, and the block handler rejects a PUT whose X-Offset
 	// disagrees with its current offset (HTTP 409), so restarting at 0 would never converge.
@@ -547,17 +553,17 @@ func putBlock(ctx context.Context, httpClient httpDoer, url, dataFile, ext strin
 	}
 
 	if ext == "" {
-		return putBlockRaw(ctx, httpClient, url, dataFile, offset, totalSize, onProgress)
+		return putBlockRaw(ctx, httpClient, url, dataFile, offset, totalSize, onProgress, activate)
 	}
 
-	return putBlockCompressed(ctx, httpClient, url, dataFile, ext, offset, totalSize, log, onProgress)
+	return putBlockCompressed(ctx, httpClient, url, dataFile, ext, offset, totalSize, log, onProgress, activate)
 }
 
 // putBlockRaw streams an uncompressed data.bin file starting at offset. This path is
 // unchanged from before streaming decode was introduced: a fresh io.SectionReader per
 // iteration is a cheap seek over the same file handle, so a server-reported partial
 // acceptance (next < totalSize) simply resumes the loop with no extra I/O.
-func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string, offset, totalSize int64, onProgress func(int)) error {
+func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string, offset, totalSize int64, onProgress func(int), activate func()) error {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -565,6 +571,10 @@ func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string,
 	defer file.Close()
 
 	for offset < totalSize {
+		if activate != nil {
+			activate()
+		}
+
 		section := io.NewSectionReader(file, offset, totalSize-offset)
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, io.NopCloser(section))
@@ -617,7 +627,7 @@ func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string,
 // fast path; none is special-cased or excluded. Worst-case discard is now bounded by one
 // chunk (<= --chunk-size, itself capped at maxChunkSize/1Gi in cmd/download/download.go)
 // instead of the entire already-uploaded prefix.
-func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, offset, totalSize int64, log *slog.Logger, onProgress func(int)) error {
+func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, offset, totalSize int64, log *slog.Logger, onProgress func(int), activate func()) error {
 	f, err := os.Open(dataFile)
 	if err != nil {
 		return fmt.Errorf("open volume data %s: %w", dataFile, err)
@@ -638,6 +648,10 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 	defer func() { _ = decodeReader.Close() }()
 
 	for offset < totalSize {
+		if activate != nil {
+			activate()
+		}
+
 		remain := totalSize - offset
 		limited := io.LimitReader(decodeReader, remain)
 
