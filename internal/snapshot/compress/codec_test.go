@@ -104,6 +104,65 @@ func TestNames_Sorted(t *testing.T) {
 	}
 }
 
+func TestUserSelectableNames_IsExactlyNoneAndZstd(t *testing.T) {
+	t.Helper()
+
+	names := compress.UserSelectableNames()
+
+	want := map[string]bool{"none": true, "zstd": true}
+	if len(names) != len(want) {
+		t.Fatalf("UserSelectableNames() = %v; want exactly %v", names, want)
+	}
+
+	for _, n := range names {
+		if !want[n] {
+			t.Errorf("UserSelectableNames() contains unexpected codec %q; got %v", n, names)
+		}
+	}
+}
+
+// TestUserSelectableNames_ReturnedSliceIsACopy asserts mutating the returned
+// slice cannot perturb the package's allow-list for subsequent callers.
+func TestUserSelectableNames_ReturnedSliceIsACopy(t *testing.T) {
+	t.Helper()
+
+	names := compress.UserSelectableNames()
+	if len(names) == 0 {
+		t.Fatal("UserSelectableNames() returned an empty slice")
+	}
+
+	names[0] = "tampered"
+
+	again := compress.UserSelectableNames()
+	if again[0] == "tampered" {
+		t.Fatal("mutating a returned slice affected a subsequent UserSelectableNames() call")
+	}
+}
+
+func TestIsUserSelectable(t *testing.T) {
+	t.Helper()
+
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"none", true},
+		{"zstd", true},
+		{"gzip", false},
+		{"lz4", false},
+		{"bogus-codec", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := compress.IsUserSelectable(tc.name)
+			if got != tc.want {
+				t.Errorf("IsUserSelectable(%q) = %v; want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDefaultCodecName_IsZstd(t *testing.T) {
 	t.Helper()
 

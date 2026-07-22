@@ -108,3 +108,48 @@ func Names() []string {
 
 	return names
 }
+
+// userSelectableNames is the SINGLE source of truth for which of the codecs
+// registered in codecRegistry a user may request via the CLI (e.g.
+// --volume-compression). It is deliberately NARROWER than Names(): a codec
+// can be registered (and stays reachable via New for decoding archives
+// written under it) without being safe to hand out to users today.
+//
+// Why this list is currently {"none", "zstd"}, and why it is expected to
+// change in either direction:
+//   - The frontend (a separate, non-CLI component) cannot yet consume
+//     compressed archives at all, so today only "none" is truly safe for any
+//     consumer that isn't this CLI itself.
+//   - zstd is included ahead of the others because it alone has a native
+//     seek-resume mechanism (see the zstd-seekable-format-go work) and its
+//     --volume-compression-level validates eagerly at flag-parse time.
+//   - gzip and lz4 are withheld because of open, unrelated bugs (lz4's
+//     level-mapping bug, gzip's lazy/silent level validation — see MEMORY
+//     project_snapshot_download_compression_level_bugs) and because neither
+//     yet has a seek-resume mechanism; they will be added back once both are
+//     fixed.
+//   - zstd itself may need to be pulled back OUT of this set if frontend
+//     integration stalls before gzip/lz4 catch up.
+//
+// Keep this as the ONLY place the user-facing set is spelled out — add or
+// remove a name here, update the doc comment above, and every consumer
+// (flag help text, validation, docs) follows automatically.
+var userSelectableNames = []string{"none", "zstd"}
+
+// UserSelectableNames returns the codec names a user may pass on the CLI
+// (e.g. via --volume-compression), in the order they should be presented.
+// See the userSelectableNames doc comment for why this differs from Names()
+// and why it is expected to change over time. The returned slice is a copy;
+// callers may not mutate the package's allow-list through it.
+func UserSelectableNames() []string {
+	names := make([]string, len(userSelectableNames))
+	copy(names, userSelectableNames)
+
+	return names
+}
+
+// IsUserSelectable reports whether name is currently in the user-selectable
+// codec allow-list (see UserSelectableNames).
+func IsUserSelectable(name string) bool {
+	return slices.Contains(userSelectableNames, name)
+}

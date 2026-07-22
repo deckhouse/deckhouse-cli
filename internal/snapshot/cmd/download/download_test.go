@@ -255,13 +255,12 @@ func TestNewCommand_RequiresOneArg(t *testing.T) {
 	}
 }
 
-// TestNewCommand_CompressionFlagsHidden asserts that --volume-compression and
-// --volume-compression-level are withdrawn from the user-facing contract (see
-// the compress-selection-disable TODO in download.go): the flags stay
-// registered and parseable, but hidden from `-h`/completion. This replaces the
-// former TestNewCommand_CompressionFlagDefaults, which asserted the (now
-// irrelevant) default flag values.
-func TestNewCommand_CompressionFlagsHidden(t *testing.T) {
+// TestNewCommand_CompressionFlagsVisible asserts that --volume-compression and
+// --volume-compression-level are now part of the user-facing contract: both
+// flags are registered and NOT hidden from `-h`/completion. This replaces the
+// former TestNewCommand_CompressionFlagsHidden, which asserted the (now
+// reversed) hidden state from when compression selection was withdrawn.
+func TestNewCommand_CompressionFlagsVisible(t *testing.T) {
 	t.Helper()
 
 	cmd := NewCommand(context.Background(), slog.Default())
@@ -271,8 +270,8 @@ func TestNewCommand_CompressionFlagsHidden(t *testing.T) {
 		t.Fatalf("flag %s: not registered", flagVolumeCompression)
 	}
 
-	if !compressionFlag.Hidden {
-		t.Fatalf("flag %s: got Hidden=%v, want true", flagVolumeCompression, compressionFlag.Hidden)
+	if compressionFlag.Hidden {
+		t.Fatalf("flag %s: got Hidden=%v, want false", flagVolumeCompression, compressionFlag.Hidden)
 	}
 
 	levelFlag := cmd.Flags().Lookup(flagVolumeCompressionLevel)
@@ -280,24 +279,92 @@ func TestNewCommand_CompressionFlagsHidden(t *testing.T) {
 		t.Fatalf("flag %s: not registered", flagVolumeCompressionLevel)
 	}
 
-	if !levelFlag.Hidden {
-		t.Fatalf("flag %s: got Hidden=%v, want true", flagVolumeCompressionLevel, levelFlag.Hidden)
+	if levelFlag.Hidden {
+		t.Fatalf("flag %s: got Hidden=%v, want false", flagVolumeCompressionLevel, levelFlag.Hidden)
 	}
 }
 
-// TestNewCommand_ExampleOmitsCompression asserts the withdrawn --volume-compression
-// choice is not advertised in `-h` output. Run cannot be exercised without a live
-// cluster (safeClient.NewSafeClient dials kube discovery), so the resolved-codec
-// check specified as the "otherwise" branch in this task is done at the CLI
-// surface: neither flag is discoverable, and the Example text no longer mentions
-// compression.
-func TestNewCommand_ExampleOmitsCompression(t *testing.T) {
+// TestNewCommand_CompressionFlagUsage_ListsOnlyUserSelectableCodecs asserts the
+// --volume-compression help text advertises exactly the current user-selectable
+// allow-list (compress.UserSelectableNames(): "zstd" and "none") and does NOT
+// mention "gzip"/"lz4" — those codecs stay registered for decoding but are
+// withheld from the user-facing choice (see compress.userSelectableNames' doc
+// comment for why).
+func TestNewCommand_CompressionFlagUsage_ListsOnlyUserSelectableCodecs(t *testing.T) {
 	t.Helper()
 
 	cmd := NewCommand(context.Background(), slog.Default())
 
-	if strings.Contains(cmd.Example, "volume-compression") {
-		t.Fatalf("Example text still mentions volume-compression:\n%s", cmd.Example)
+	compressionFlag := cmd.Flags().Lookup(flagVolumeCompression)
+	if compressionFlag == nil {
+		t.Fatalf("flag %s: not registered", flagVolumeCompression)
+	}
+
+	usage := compressionFlag.Usage
+
+	if !strings.Contains(usage, "zstd") {
+		t.Fatalf("usage does not mention %q: %q", "zstd", usage)
+	}
+
+	if !strings.Contains(usage, "none") {
+		t.Fatalf("usage does not mention %q: %q", "none", usage)
+	}
+
+	if strings.Contains(usage, "gzip") {
+		t.Fatalf("usage still mentions withheld codec %q: %q", "gzip", usage)
+	}
+
+	if strings.Contains(usage, "lz4") {
+		t.Fatalf("usage still mentions withheld codec %q: %q", "lz4", usage)
+	}
+}
+
+// TestValidateVolumeCompression asserts that only the user-selectable codec
+// names (zstd, none) are accepted at flag-validation time, while codecs that
+// remain registered for decoding but are withheld from user choice (gzip,
+// lz4) and outright unknown names are rejected with a clear error before any
+// data transfer begins.
+func TestValidateVolumeCompression(t *testing.T) {
+	t.Helper()
+
+	cases := []struct {
+		name    string
+		wantErr bool
+	}{
+		{"zstd", false},
+		{"none", false},
+		{"lz4", true},
+		{"gzip", true},
+		{"bogus-codec", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			codec, err := validateVolumeCompression(tc.name, 0)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("validateVolumeCompression(%q, 0): expected error, got nil", tc.name)
+				}
+
+				if !strings.Contains(err.Error(), tc.name) {
+					t.Fatalf("validateVolumeCompression(%q, 0): error does not name the rejected codec: %v", tc.name, err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("validateVolumeCompression(%q, 0): unexpected error: %v", tc.name, err)
+			}
+
+			if codec == nil {
+				t.Fatalf("validateVolumeCompression(%q, 0): returned nil codec", tc.name)
+			}
+
+			if codec.Name() != tc.name {
+				t.Fatalf("validateVolumeCompression(%q, 0): codec.Name() = %q", tc.name, codec.Name())
+			}
+		})
 	}
 }
 
