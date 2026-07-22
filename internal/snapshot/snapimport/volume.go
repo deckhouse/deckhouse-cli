@@ -637,10 +637,12 @@ func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string,
 // seek table for either codec, unlike zstd's community Seekable Format and this library
 // (see tasks.json's notes_on_plan_switch, NATIVE-ZSTD-SEEKABLE-RESUME PIVOT entry); (b)
 // both codecs are already excluded from user-facing --volume-compression selection
-// (disable-volume-compression-cli-force-none now, permanently per
-// codec-user-selection-zstd-only), so the blast radius is narrowed to archives produced
-// by an explicit hidden-flag override or an older/third-party tool — an accepted
-// tradeoff, not an oversight.
+// (compress.UserSelectableNames() currently allows only "zstd"/"none"; see
+// codec-user-selection-zstd-only — a list explicitly expected to change again as
+// gzip/lz4 gain a seek-resume mechanism, NOT a permanent exclusion), so the blast
+// radius is narrowed to archives produced by an older/third-party tool or a d8
+// version whose allow-list included gzip/lz4 — an accepted tradeoff, not an
+// oversight.
 func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, offset, totalSize int64, log *slog.Logger, onProgress func(int), activate func()) error {
 	f, err := os.Open(dataFile)
 	if err != nil {

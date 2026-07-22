@@ -108,18 +108,10 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd.Flags().Int(flagMaxParallelDownloads, 5, "global cap on concurrent whole-volume-stream downloads across all nodes (independent of --workers and --per-volume-concurrency)")
 	cmd.Flags().String(flagChunkSize, "", "block-volume chunk size as a resource.Quantity, e.g. 256Mi, 512Mi, 1Gi (binary Ki/Mi/Gi) or decimal 128M/1G (decimal k/M/G, note lowercase k); the 'MiB'/'MB'/'GB'/'KiB' and uppercase 'K' spellings are NOT accepted; defaults to 256Mi (min 16Mi, max 1Gi)")
 	cmd.Flags().String(flagVolumeCompression, compress.DefaultCodecName,
-		"volume compression codec ("+strings.Join(compress.Names(), ", ")+
+		"volume compression codec ("+strings.Join(compress.UserSelectableNames(), ", ")+
 			"); block volumes: data.bin[.<ext>]; filesystem volumes: per-file compressed entries inside an uncompressed data.tar container")
 	cmd.Flags().Int(flagVolumeCompressionLevel, 0,
-		"compression level for the selected codec (0 = codec default)")
-
-	// TODO(compression-temporarily-disabled): compression selection is withdrawn
-	// from the user contract until the codec-level bugs are fixed (see MEMORY
-	// project_snapshot_download_compression_level_bugs). Revert = remove these
-	// two Hidden=true lines, restore the flag reads in Run, and pass them to
-	// compress.New.
-	cmd.Flags().Lookup(flagVolumeCompression).Hidden = true
-	cmd.Flags().Lookup(flagVolumeCompressionLevel).Hidden = true
+		"compression level for the selected codec (0 = codec default; ignored when --"+flagVolumeCompression+"=none)")
 
 	cmd.Flags().Bool(flagCleanup, true,
 		"delete the per-volume DataExport (and its server-side export chain) after each volume completes; --cleanup=false leaves them in the cluster for debugging")
@@ -203,14 +195,26 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return fmt.Errorf("parsing --%s: %w", flagChunkSize, err)
 	}
 
-	// TODO(compression-temporarily-disabled): compression selection is withdrawn
-	// from the user contract until the codec-level bugs are fixed (see MEMORY
-	// project_snapshot_download_compression_level_bugs). Revert = read
-	// flagVolumeCompression/flagVolumeCompressionLevel back here and pass them
-	// to compress.New instead of the hardcoded "none"/0.
-	codec, err := compress.New("none", 0)
+	compressionName, err := cmd.Flags().GetString(flagVolumeCompression)
 	if err != nil {
-		return fmt.Errorf("building forced-none volume codec: %w", err)
+		return fmt.Errorf("reading --%s flag: %w", flagVolumeCompression, err)
+	}
+
+	compressionLevel, err := cmd.Flags().GetInt(flagVolumeCompressionLevel)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagVolumeCompressionLevel, err)
+	}
+
+	// --volume-compression-level with --volume-compression=none: accepted and
+	// ignored rather than rejected. "none" has no notion of a level, and
+	// silently ignoring an inapplicable flag (rather than erroring) matches
+	// how the rest of this CLI treats flag combinations that simply don't
+	// interact (e.g. --chunk-size has no effect on a filesystem-only volume).
+	// compress.New's "none" factory already ignores the level argument, so no
+	// extra branching is needed here beyond this note.
+	codec, err := validateVolumeCompression(compressionName, compressionLevel)
+	if err != nil {
+		return err
 	}
 
 	nodeFlag, err := cmd.Flags().GetString(flagNode)
@@ -377,6 +381,29 @@ func acquireOutputLock(outputDir string) (*flock.Flock, error) {
 	}
 
 	return fl, nil
+}
+
+// validateVolumeCompression builds the requested volume Codec, restricting the
+// user-facing surface to compress.UserSelectableNames() — a narrower set than
+// compress.New itself accepts (compress.New/Names() stay the full registry for
+// internal consumers, e.g. decoding an existing archive written under a codec
+// no longer offered to users). A name outside the allow-list is rejected here,
+// at flag-validation time, with an error naming both the rejected codec and
+// the currently-supported set, rather than relying on compress.New's generic
+// ErrUnknownCodec message (which lists ALL registered codecs, including ones
+// this command does not currently allow a user to pick).
+func validateVolumeCompression(name string, level int) (compress.Codec, error) {
+	if !compress.IsUserSelectable(name) {
+		return nil, fmt.Errorf("--%s %q is not currently supported; supported codecs: %v",
+			flagVolumeCompression, name, compress.UserSelectableNames())
+	}
+
+	codec, err := compress.New(name, level)
+	if err != nil {
+		return nil, fmt.Errorf("building volume codec %q: %w", name, err)
+	}
+
+	return codec, nil
 }
 
 // parseNodeFlag parses a --node flag value "<Kind>/<name>" into its components.
