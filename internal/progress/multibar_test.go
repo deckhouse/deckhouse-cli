@@ -32,12 +32,22 @@ import (
 )
 
 // aggregateLine formats the expected "downloaded X / total Y (N/M volumes)" line
-// as the non-TTY sink emits it, using the same decor.SizeB1024 formatter.
+// as the non-TTY sink emits it (DirectionDownload's PastVerb), using the same
+// decor.SizeB1024 formatter.
 func aggregateLine(t *testing.T, prog, total int64, volDone, volTotal int) string {
 	t.Helper()
 
-	return fmt.Sprintf("downloaded % .1f / total % .1f (%d/%d volumes)\n",
-		decor.SizeB1024(prog), decor.SizeB1024(total), volDone, volTotal)
+	return aggregateLineWithVerb(t, DirectionDownload.PastVerb, prog, total, volDone, volTotal)
+}
+
+// aggregateLineWithVerb is aggregateLine parametrized by the direction's
+// past-tense verb, so upload-direction tests can assert "uploaded ..." without
+// duplicating the format string.
+func aggregateLineWithVerb(t *testing.T, verb string, prog, total int64, volDone, volTotal int) string {
+	t.Helper()
+
+	return fmt.Sprintf("%s % .1f / total % .1f (%d/%d volumes)\n",
+		verb, decor.SizeB1024(prog), decor.SizeB1024(total), volDone, volTotal)
 }
 
 func TestNonTTY_Fallback(t *testing.T) {
@@ -131,6 +141,111 @@ func TestNonTTY_Fallback(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNonTTY_WithDirection_Upload proves WithDirection propagates through the
+// public New constructor end-to-end into the non-TTY aggregate line: an upload
+// direction sink emits "uploaded X / total Y (...)" instead of the default
+// "downloaded ...".
+func TestNonTTY_WithDirection_Upload(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	sink := New(buf, false, WithInterval(time.Hour), WithDirection(DirectionUpload))
+
+	st := sink.NewStream("vol-a", 1024)
+	st.IncrBy(1024)
+	st.Done()
+
+	sink.Wait()
+
+	got := buf.String()
+	want := aggregateLineWithVerb(t, "uploaded", 1024, 1024, 1, 0)
+
+	if !strings.Contains(got, want) {
+		t.Errorf("output does not contain expected upload-direction line\ngot:  %q\nwant (contained): %q", got, want)
+	}
+
+	if strings.Contains(got, "downloaded") {
+		t.Errorf("upload-direction output must not contain the download verb\ngot: %q", got)
+	}
+}
+
+// TestNew_WithDirection_PropagatesToTTYStream proves WithDirection propagates
+// through the public New constructor end-to-end into a TTY stream's rendered
+// state words (via stateWord), not just when the direction is poked directly
+// into a struct in a white-box test.
+func TestNew_WithDirection_PropagatesToTTYStream(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	sink := New(buf, true, WithDirection(DirectionUpload))
+	defer sink.Wait()
+
+	// total=0: production NewStream call sites (pipeline.go, snapimport/import.go)
+	// always construct with total=0 and SetTotal the real size once known. mpb/v8
+	// v8.7.5 latches `triggerComplete` at construction whenever total>0
+	// (progress.go's makeBarState), which makes finalize's completing
+	// SetTotal(total, true) call a silent no-op unless the bar's current already
+	// reached total via IncrBy — total=0 avoids that landmine, matching every
+	// other stateWord test in this file.
+	st := sink.NewStream("vol-a", 0)
+
+	ts, ok := st.(*ttyStream)
+	if !ok {
+		t.Fatal("NewStream did not return *ttyStream")
+	}
+
+	if ts.dir != DirectionUpload {
+		t.Errorf("ttyStream.dir = %+v, want %+v", ts.dir, DirectionUpload)
+	}
+
+	waiting := stateWord(atomic.LoadInt32(&ts.state), atomic.LoadInt32(&ts.activated) == 1, ts.dir)
+	if want := "Waiting for DataImport to be Ready"; waiting != want {
+		t.Errorf("waiting word = %q, want %q", waiting, want)
+	}
+
+	st.Activate()
+
+	active := stateWord(atomic.LoadInt32(&ts.state), atomic.LoadInt32(&ts.activated) == 1, ts.dir)
+	if want := "Uploading"; active != want {
+		t.Errorf("active word = %q, want %q", active, want)
+	}
+
+	st.Done()
+
+	done := stateWord(atomic.LoadInt32(&ts.state), atomic.LoadInt32(&ts.activated) == 1, ts.dir)
+	if want := "Upload complete"; done != want {
+		t.Errorf("done word = %q, want %q", done, want)
+	}
+}
+
+// TestNew_DefaultDirectionIsDownload pins the explicit default: a caller that
+// omits WithDirection gets DirectionDownload, matching the doc comment on New
+// and WithDirection. cmd/download/download.go relies on this default rather
+// than passing WithDirection(DirectionDownload) explicitly.
+func TestNew_DefaultDirectionIsDownload(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	sink := New(buf, true)
+	defer sink.Wait()
+
+	// total=0: see the matching comment in
+	// TestNew_WithDirection_PropagatesToTTYStream for why a nonzero total here
+	// would hang the deferred sink.Wait().
+	st := sink.NewStream("vol-a", 0)
+
+	ts, ok := st.(*ttyStream)
+	if !ok {
+		t.Fatal("NewStream did not return *ttyStream")
+	}
+
+	if ts.dir != DirectionDownload {
+		t.Errorf("ttyStream.dir = %+v, want default %+v", ts.dir, DirectionDownload)
+	}
+
+	st.Done()
 }
 
 func TestTTY_SinkIsNonNil(t *testing.T) {
@@ -368,23 +483,30 @@ func TestStateWord(t *testing.T) {
 		name      string
 		state     int32
 		activated bool
+		dir       Direction
 		want      string
 	}{
-		{"waiting", streamStateWaiting, false, "Waiting for DataExport to be Ready"},
-		{"active", streamStateActive, true, "Downloading"},
-		{"done_after_activate", streamStateDone, true, "Download complete"},
-		{"done_without_activate", streamStateDone, false, "Already exists"},
-		{"failed_after_activate", streamStateFailed, true, "Interrupted"},
-		{"failed_without_activate", streamStateFailed, false, "Interrupted"},
+		{"waiting_download", streamStateWaiting, false, DirectionDownload, "Waiting for DataExport to be Ready"},
+		{"active_download", streamStateActive, true, DirectionDownload, "Downloading"},
+		{"done_after_activate_download", streamStateDone, true, DirectionDownload, "Download complete"},
+		{"done_without_activate_download", streamStateDone, false, DirectionDownload, "Already exists"},
+		{"failed_after_activate_download", streamStateFailed, true, DirectionDownload, "Interrupted"},
+		{"failed_without_activate_download", streamStateFailed, false, DirectionDownload, "Interrupted"},
+		{"waiting_upload", streamStateWaiting, false, DirectionUpload, "Waiting for DataImport to be Ready"},
+		{"active_upload", streamStateActive, true, DirectionUpload, "Uploading"},
+		{"done_after_activate_upload", streamStateDone, true, DirectionUpload, "Upload complete"},
+		{"done_without_activate_upload", streamStateDone, false, DirectionUpload, "Already exists"},
+		{"failed_after_activate_upload", streamStateFailed, true, DirectionUpload, "Interrupted"},
+		{"failed_without_activate_upload", streamStateFailed, false, DirectionUpload, "Interrupted"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := stateWord(tc.state, tc.activated)
+			got := stateWord(tc.state, tc.activated, tc.dir)
 			if got != tc.want {
-				t.Errorf("stateWord(%d, %t) = %q, want %q", tc.state, tc.activated, got, tc.want)
+				t.Errorf("stateWord(%d, %t, %+v) = %q, want %q", tc.state, tc.activated, tc.dir, got, tc.want)
 			}
 		})
 	}
@@ -392,28 +514,61 @@ func TestStateWord(t *testing.T) {
 
 // TestStateWordSyncWidth documents the column-alignment contract: the status-word
 // column width is synced to the widest possible word ("Waiting for DataExport to
-// be Ready"), so every other state word fits within it and the bar/end-of-row
-// starts at the same x.
+// be Ready" / "Waiting for DataImport to be Ready"), so every other state word
+// fits within it and the bar/end-of-row starts at the same x. Run once per
+// direction: a single sink only ever uses one Direction, so the two waiting
+// phrases never have to share a synced column, but each direction's OWN column
+// must not regress.
 func TestStateWordSyncWidth(t *testing.T) {
 	t.Parallel()
 
-	widest := "Waiting for DataExport to be Ready"
-
-	words := []string{
-		stateWord(streamStateWaiting, false),
-		stateWord(streamStateActive, true),
-		stateWord(streamStateDone, true),
-		stateWord(streamStateDone, false),
+	cases := []struct {
+		name   string
+		dir    Direction
+		widest string
+	}{
+		{"download", DirectionDownload, "Waiting for DataExport to be Ready"},
+		{"upload", DirectionUpload, "Waiting for DataImport to be Ready"},
 	}
 
-	for _, w := range words {
-		if len(w) > len(widest) {
-			t.Errorf("stateWord %q wider (%d) than synced column width %q (%d)", w, len(w), widest, len(widest))
-		}
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	if stateWord(streamStateWaiting, false) != widest {
-		t.Errorf("expected the waiting word to be the widest %q, got %q", widest, stateWord(streamStateWaiting, false))
+			words := []string{
+				stateWord(streamStateWaiting, false, tc.dir),
+				stateWord(streamStateActive, true, tc.dir),
+				stateWord(streamStateDone, true, tc.dir),
+				stateWord(streamStateDone, false, tc.dir),
+			}
+
+			for _, w := range words {
+				if len(w) > len(tc.widest) {
+					t.Errorf("stateWord %q wider (%d) than synced column width %q (%d)", w, len(w), tc.widest, len(tc.widest))
+				}
+			}
+
+			if got := stateWord(streamStateWaiting, false, tc.dir); got != tc.widest {
+				t.Errorf("expected the waiting word to be the widest %q, got %q", tc.widest, got)
+			}
+		})
+	}
+}
+
+// TestStateWordSyncWidth_CrossDirectionIdenticalWidth pins the empirical fact the
+// design relies on: "DataExport" and "DataImport" are the same rune length, so
+// the waiting word — and therefore the synced status-word column width — is
+// IDENTICAL across both directions (34 runes). This is what lets stateWord's doc
+// comment claim the column geometry does not shift when the direction changes.
+func TestStateWordSyncWidth_CrossDirectionIdenticalWidth(t *testing.T) {
+	t.Parallel()
+
+	download := stateWord(streamStateWaiting, false, DirectionDownload)
+	upload := stateWord(streamStateWaiting, false, DirectionUpload)
+
+	if len(download) != len(upload) {
+		t.Errorf("waiting word width differs across directions: download=%q (%d), upload=%q (%d)",
+			download, len(download), upload, len(upload))
 	}
 }
 
@@ -572,7 +727,7 @@ func TestTTYStream_SpinnerStateGating(t *testing.T) {
 	t.Parallel()
 
 	buf := &bytes.Buffer{}
-	sink := newTTYSink(buf)
+	sink := newTTYSink(buf, DirectionDownload)
 
 	st, ok := sink.NewStream("spin", 0).(*ttyStream)
 	if !ok {
@@ -693,7 +848,7 @@ func TestTTYSink_StateMachine(t *testing.T) {
 	t.Parallel()
 
 	buf := &bytes.Buffer{}
-	sink := newTTYSink(buf)
+	sink := newTTYSink(buf, DirectionDownload)
 
 	s1, ok := sink.NewStream("stream-1", 0).(*ttyStream)
 	if !ok {
@@ -706,7 +861,7 @@ func TestTTYSink_StateMachine(t *testing.T) {
 	}
 
 	wordOf := func(s *ttyStream) string {
-		return stateWord(atomic.LoadInt32(&s.state), atomic.LoadInt32(&s.activated) == 1)
+		return stateWord(atomic.LoadInt32(&s.state), atomic.LoadInt32(&s.activated) == 1, DirectionDownload)
 	}
 
 	if got := wordOf(s1); got != "Waiting for DataExport to be Ready" {
@@ -743,7 +898,7 @@ func TestTTYStream_ActivateIdempotent(t *testing.T) {
 	t.Parallel()
 
 	buf := &bytes.Buffer{}
-	sink := newTTYSink(buf)
+	sink := newTTYSink(buf, DirectionDownload)
 
 	st, ok := sink.NewStream("dup", 0).(*ttyStream)
 	if !ok {
@@ -779,7 +934,7 @@ func TestTTYStream_SetCurrent_SeedsAndCancels(t *testing.T) {
 	t.Parallel()
 
 	buf := &bytes.Buffer{}
-	sink := newTTYSink(buf)
+	sink := newTTYSink(buf, DirectionDownload)
 
 	st, ok := sink.NewStream("seed", 0).(*ttyStream)
 	if !ok {
@@ -986,7 +1141,7 @@ func TestTTYSink_Fail_ExcludesFromVolumeCounter(t *testing.T) {
 	}
 
 	activated := atomic.LoadInt32(&streamA.activated) == 1
-	if word := stateWord(state, activated); word != "Interrupted" {
+	if word := stateWord(state, activated, DirectionDownload); word != "Interrupted" {
 		t.Errorf("stateWord for failed stream = %q, want %q", word, "Interrupted")
 	}
 }

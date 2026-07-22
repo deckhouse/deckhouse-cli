@@ -96,11 +96,50 @@ type Stream interface {
 	Fail()
 }
 
+// Direction supplies the direction-specific wording rendered by stateWord and
+// the non-TTY aggregate line. It deliberately covers ONLY the words that
+// differ between a download and an upload; "Already exists" (resume skip)
+// and "Interrupted" (Fail) are direction-independent and stay hard-coded in
+// stateWord regardless of Direction.
+type Direction struct {
+	// ActiveWord is the state word shown while a stream is actively
+	// transferring, e.g. "Downloading" or "Uploading".
+	ActiveWord string
+	// DoneWord is the state word shown for a stream that finished after
+	// Activate was called, e.g. "Download complete" or "Upload complete".
+	DoneWord string
+	// WaitResource names the resource a waiting stream is blocked on
+	// ("DataExport" or "DataImport"), interpolated into the
+	// direction-independent "Waiting for %s to be Ready" template.
+	WaitResource string
+	// PastVerb is the lower-case past-tense verb used in the non-TTY
+	// aggregate line, e.g. "downloaded" or "uploaded".
+	PastVerb string
+}
+
+// DirectionDownload is the default direction: docker-pull-style download
+// wording, used by `d8 snapshot download`.
+var DirectionDownload = Direction{
+	ActiveWord:   "Downloading",
+	DoneWord:     "Download complete",
+	WaitResource: "DataExport",
+	PastVerb:     "downloaded",
+}
+
+// DirectionUpload is the direction used by `d8 snapshot upload`.
+var DirectionUpload = Direction{
+	ActiveWord:   "Uploading",
+	DoneWord:     "Upload complete",
+	WaitResource: "DataImport",
+	PastVerb:     "uploaded",
+}
+
 // Option configures the progress Sink constructor.
 type Option func(*sinkConfig)
 
 type sinkConfig struct {
-	interval time.Duration
+	interval  time.Duration
+	direction Direction
 }
 
 // WithInterval sets the periodic reporting interval for the non-TTY fallback sink.
@@ -111,23 +150,35 @@ func WithInterval(d time.Duration) Option {
 	}
 }
 
+// WithDirection sets the direction-specific wording (see Direction) rendered
+// by the returned Sink. Default is DirectionDownload, so a caller downloading
+// may omit this option entirely.
+func WithDirection(d Direction) Option {
+	return func(c *sinkConfig) {
+		c.direction = d
+	}
+}
+
 // New constructs a Sink. When tty is true it returns an mpb/v8-backed multi-bar
 // renderer writing to w with one docker-pull-style row per stream (no aggregate
 // summary header). When tty is false it returns a plain-log fallback that writes
 // "downloaded X / total Y" aggregate lines (humanised via decor.SizeB1024) to w
 // on a periodic interval and always emits a final deterministic line on Wait().
+// The rendered wording (both TTY state words and the non-TTY past-tense verb)
+// follows cfg.direction, which defaults to DirectionDownload; pass
+// WithDirection(DirectionUpload) for an upload-flavored Sink.
 func New(w io.Writer, tty bool, opts ...Option) Sink {
-	cfg := sinkConfig{interval: 2 * time.Second}
+	cfg := sinkConfig{interval: 2 * time.Second, direction: DirectionDownload}
 
 	for _, o := range opts {
 		o(&cfg)
 	}
 
 	if tty {
-		return newTTYSink(w)
+		return newTTYSink(w, cfg.direction)
 	}
 
-	return newPlainSink(w, cfg.interval)
+	return newPlainSink(w, cfg.interval, cfg.direction)
 }
 
 // ── TTY sink (mpb/v8-backed) ──────────────────────────────────────────────────
@@ -151,6 +202,9 @@ const (
 
 type ttySink struct {
 	p *mpb.Progress
+	// dir is the direction-specific wording (see Direction) rendered by every
+	// stream this sink creates.
+	dir Direction
 	// summaryOnce guards one-time creation of the bottom-pinned volume-counter bar.
 	summaryOnce sync.Once
 	summaryBar  *mpb.Bar
@@ -161,10 +215,10 @@ type ttySink struct {
 	volDone  atomic.Int64
 }
 
-func newTTYSink(w io.Writer) *ttySink {
+func newTTYSink(w io.Writer, dir Direction) *ttySink {
 	p := mpb.New(mpb.WithOutput(w))
 
-	return &ttySink{p: p}
+	return &ttySink{p: p, dir: dir}
 }
 
 // SetVolumeTotal sets M for the bottom "N/M volumes downloaded" summary bar.
@@ -217,7 +271,7 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 		s.summaryBar = bar
 	})
 
-	ts := &ttyStream{sink: s, total: total}
+	ts := &ttyStream{sink: s, total: total, dir: s.dir}
 
 	// Render the row as a docker-pull layer line: the bar is drawn ONLY while the
 	// stream is active. The state-aware filler wraps a growing-arrow BarStyle and
@@ -264,7 +318,7 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 				return spinnerCell(atomic.LoadInt32(&ts.state), atomic.AddUint64(&ts.spinTick, 1))
 			}, decor.WC{W: spinnerCellWidth}),
 			decor.Any(func(_ decor.Statistics) string {
-				return " " + stateWord(atomic.LoadInt32(&ts.state), atomic.LoadInt32(&ts.activated) == 1)
+				return " " + stateWord(atomic.LoadInt32(&ts.state), atomic.LoadInt32(&ts.activated) == 1, ts.dir)
 			}, decor.WCSyncWidthR),
 		),
 		mpb.AppendDecorators(
@@ -315,7 +369,11 @@ type ttyStream struct {
 	// on completion for the bottom volume-counter bar. Never nil in production
 	// (set by ttySink.NewStream); tests that construct a bare *ttyStream leave it
 	// nil, which Done() guards against.
-	sink  *ttySink
+	sink *ttySink
+	// dir is this stream's direction wording, copied from the owning ttySink at
+	// NewStream time (mirrors how state is carried per-stream rather than
+	// re-read from sink on every render).
+	dir   Direction
 	mu    sync.Mutex
 	total int64
 	state int32 // atomic: streamStateWaiting / streamStateActive / streamStateDone
@@ -464,34 +522,42 @@ func spinnerCell(state int32, tick uint64) string {
 // ── Decorator pure functions ──────────────────────────────────────────────────
 
 // stateWord returns the docker-pull status word for a stream's current state.
-// The activated flag distinguishes a finished real download from a resume skip:
+// dir supplies the direction-specific words (Direction); activated distinguishes
+// a finished real transfer from a resume skip:
 //
-//   - waiting: "Waiting for DataExport to be Ready" (the row is blocked until its
-//     DataExport becomes Ready; the descriptive phrase tells the user WHAT is being
-//     waited on and that it is the readiness of the DataExport).
-//   - active: "Downloading".
-//   - done after Activate: "Download complete".
-//   - done without Activate (resume skip): "Already exists".
-//   - failed (Fail called, from waiting or active): "Interrupted" — pinned to
-//     match the CLI's Ctrl-C/SIGINT cancellation use case.
+//   - waiting: "Waiting for <dir.WaitResource> to be Ready" (the row is blocked
+//     until its DataExport/DataImport becomes Ready; the descriptive phrase
+//     tells the user WHAT is being waited on and that it is the readiness of
+//     that resource).
+//   - active: dir.ActiveWord ("Downloading"/"Uploading").
+//   - done after Activate: dir.DoneWord ("Download complete"/"Upload complete").
+//   - done without Activate (resume skip): "Already exists" — DIRECTION-INDEPENDENT,
+//     unchanged for both directions.
+//   - failed (Fail called, from waiting or active): "Interrupted" —
+//     DIRECTION-INDEPENDENT, pinned to match the CLI's Ctrl-C/SIGINT
+//     cancellation use case for both directions.
 //
-// "Waiting for DataExport to be Ready" is the widest word, so it sets the
-// WCSyncWidth status-word column width; every other word fits within it and rows
-// do not shift horizontally as the state changes.
-func stateWord(state int32, activated bool) string {
+// "Waiting for DataExport to be Ready" and "Waiting for DataImport to be Ready"
+// are both 34 runes (verified empirically: "DataExport"/"DataImport" are the
+// same length), so either is the widest word for its direction and sets the
+// WCSyncWidth status-word column width identically; every other word fits
+// within it and rows do not shift horizontally as the state changes. A single
+// sink only ever uses one Direction, so the two waiting phrases never appear
+// side-by-side in the same synced column.
+func stateWord(state int32, activated bool, dir Direction) string {
 	switch state {
 	case streamStateActive:
-		return "Downloading"
+		return dir.ActiveWord
 	case streamStateDone:
 		if activated {
-			return "Download complete"
+			return dir.DoneWord
 		}
 
 		return "Already exists"
 	case streamStateFailed:
 		return "Interrupted"
 	default:
-		return "Waiting for DataExport to be Ready"
+		return fmt.Sprintf("Waiting for %s to be Ready", dir.WaitResource)
 	}
 }
 
@@ -568,6 +634,11 @@ func nameCell(name string) string {
 type plainSink struct {
 	w        io.Writer
 	interval time.Duration
+	// dir is the direction-specific wording (see Direction) rendered by emit's
+	// aggregate line. Stored at sink level, not per-stream: unlike the TTY sink,
+	// the plain sink has no per-stream rendering (plainStream renders nothing;
+	// only emit produces text), so a plainStream.dir field would be dead state.
+	dir      Direction
 	mu       sync.Mutex
 	progress int64
 	total    int64
@@ -580,10 +651,11 @@ type plainSink struct {
 	stopped  chan struct{}
 }
 
-func newPlainSink(w io.Writer, interval time.Duration) *plainSink {
+func newPlainSink(w io.Writer, interval time.Duration, dir Direction) *plainSink {
 	s := &plainSink{
 		w:        w,
 		interval: interval,
+		dir:      dir,
 		stop:     make(chan struct{}),
 		stopped:  make(chan struct{}),
 	}
@@ -609,9 +681,10 @@ func (s *plainSink) tick() {
 	}
 }
 
-// emit writes one "downloaded X / total Y (N/M volumes)" aggregate line to the
-// output writer. Using fmt.Fprintf to an io.Writer; write errors are
-// intentionally ignored for progress output.
+// emit writes one "downloaded X / total Y (N/M volumes)" (or "uploaded ..."
+// for DirectionUpload) aggregate line to the output writer. Using
+// fmt.Fprintf to an io.Writer; write errors are intentionally ignored for
+// progress output.
 func (s *plainSink) emit() {
 	s.mu.Lock()
 	prog := s.progress
@@ -620,8 +693,8 @@ func (s *plainSink) emit() {
 	volTotal := s.volTotal
 	s.mu.Unlock()
 
-	fmt.Fprintf(s.w, "downloaded % .1f / total % .1f (%d/%d volumes)\n",
-		decor.SizeB1024(prog), decor.SizeB1024(tot), volDone, volTotal)
+	fmt.Fprintf(s.w, "%s % .1f / total % .1f (%d/%d volumes)\n",
+		s.dir.PastVerb, decor.SizeB1024(prog), decor.SizeB1024(tot), volDone, volTotal)
 }
 
 // SetVolumeTotal sets M for the "(N/M volumes)" suffix on the aggregate line.
