@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -543,7 +544,11 @@ func TestPutBlock_FreshUploadRoundTrip(t *testing.T) {
 // pre-seeded prefix (standing in for a prior, interrupted run's durable bytes) plus this
 // call's PUT concatenate back to the exact original plaintext. seedLen is deliberately
 // not aligned to either encoded frame's boundary, proving the mechanism does not depend
-// on frame geometry.
+// on frame geometry. writeEncodedBlockFile never writes a chunk-offset index sidecar, so
+// this test specifically exercises the byte-zero discard FALLBACK path (see
+// resolveBlockDecodeReader) — the chunk-index fast path is covered separately by
+// TestPutBlockCompressed_ResumeWithIndex_DiscardsAtMostOneChunk and
+// TestPutBlockCompressed_IndexGeometryMismatch_FallsBack.
 func TestPutBlockCompressed_ResumesViaFastForward(t *testing.T) {
 	payload := bytes.Repeat([]byte("resume-me-please-"), 3000)
 	seedLen := len(payload)/2 + 7
@@ -571,6 +576,214 @@ func TestPutBlockCompressed_ResumesViaFastForward(t *testing.T) {
 
 			if got := imp.received(); !bytes.Equal(got, payload) {
 				t.Fatalf("resumed upload produced %d bytes not matching the original %d-byte payload", len(got), len(payload))
+			}
+		})
+	}
+}
+
+// randomPayload returns n deterministic pseudo-random bytes. Multi-chunk resume tests use
+// this instead of a repeated string pattern so a codec cannot compress each chunk down to
+// a handful of bytes -- that would make the byte-count assertions in
+// TestPutBlockCompressed_ResumeWithIndex_DiscardsAtMostOneChunk trivially true regardless
+// of which code path actually ran. The seed is fixed purely for test determinism, not for
+// any security property.
+func randomPayload(t *testing.T, n int) []byte {
+	t.Helper()
+
+	buf := make([]byte, n)
+
+	rng := rand.New(rand.NewSource(20260722))
+	if _, err := rng.Read(buf); err != nil {
+		t.Fatalf("generate deterministic payload: %v", err)
+	}
+
+	return buf
+}
+
+// writeEncodedBlockFileWithIndex writes payload to path as consecutive codec frames of at
+// most chunkSize decompressed bytes each (mirroring one archive.EncodeFrame call per
+// download chunk), and writes a matching archive.BlockChunkIndex sidecar recording every
+// frame's exact compressed byte length -- exactly what volume.MergeBlockChunks produces
+// for a real multi-chunk block download. It returns the sidecar it wrote so a test can
+// compute expected chunk-boundary byte offsets.
+func writeEncodedBlockFileWithIndex(t *testing.T, path, codecName string, payload []byte, chunkSize int) archive.BlockChunkIndex {
+	t.Helper()
+
+	codec, err := compress.New(codecName, 0)
+	if err != nil {
+		t.Fatalf("compress.New(%q): %v", codecName, err)
+	}
+
+	var buf bytes.Buffer
+
+	sizes := make([]int64, 0, (len(payload)+chunkSize-1)/chunkSize)
+
+	for start := 0; start < len(payload); start += chunkSize {
+		end := start + chunkSize
+		if end > len(payload) {
+			end = len(payload)
+		}
+
+		frame, encErr := codec.EncodeFrame(payload[start:end])
+		if encErr != nil {
+			t.Fatalf("EncodeFrame: %v", encErr)
+		}
+
+		sizes = append(sizes, int64(len(frame)))
+		buf.Write(frame)
+	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write encoded block file: %v", err)
+	}
+
+	idx := archive.BlockChunkIndex{
+		ChunkSize:            int64(chunkSize),
+		TotalSize:            int64(len(payload)),
+		CompressedChunkSizes: sizes,
+	}
+
+	if err := archive.WriteBlockChunkIndex(path, idx); err != nil {
+		t.Fatalf("write block chunk index: %v", err)
+	}
+
+	return idx
+}
+
+// TestPutBlockCompressed_ResumeWithIndex_DiscardsAtMostOneChunk verifies the chunk-offset
+// index fast path (resolveBlockDecodeReader / fastForwardViaChunkIndex): resuming partway
+// through a LATE chunk of a multi-chunk archive must discard at most that one chunk's
+// worth of DECODED bytes -- never a full discard proportional to offset. The measurement
+// is resolveBlockDecodeReader's own discarded-byte return value, itself io.CopyN's
+// byte-accurate copy count from actually reading decodeReader -- not wall-clock time, and
+// not inferred from the test merely passing (inv. #11).
+func TestPutBlockCompressed_ResumeWithIndex_DiscardsAtMostOneChunk(t *testing.T) {
+	const chunkSize = 100_000
+
+	const numChunks = 5
+
+	const targetChunk = 3 // 0-based: a LATE chunk, so a fallback would discard ~3.5 chunks.
+
+	payload := randomPayload(t, chunkSize*numChunks)
+	offset := int64(targetChunk)*int64(chunkSize) + chunkSize/2
+
+	for _, tc := range blockCodecCases {
+		if tc.ext == "" {
+			continue // the raw path needs no chunk index; it already section-seeks directly.
+		}
+
+		t.Run(tc.codec, func(t *testing.T) {
+			dir := t.TempDir()
+			dataFile := filepath.Join(dir, "data.bin"+tc.ext)
+
+			idx := writeEncodedBlockFileWithIndex(t, dataFile, tc.codec, payload, chunkSize)
+
+			file, err := os.Open(dataFile)
+			if err != nil {
+				t.Fatalf("open data file: %v", err)
+			}
+			defer file.Close()
+
+			info, err := file.Stat()
+			if err != nil {
+				t.Fatalf("stat data file: %v", err)
+			}
+
+			decodeReader, discarded, err := resolveBlockDecodeReader(file, dataFile, tc.ext, offset, idx.TotalSize, info.Size(), discardLogger())
+			if err != nil {
+				t.Fatalf("resolveBlockDecodeReader: %v", err)
+			}
+			defer decodeReader.Close()
+
+			if discarded >= int64(chunkSize) {
+				t.Fatalf("fast path discarded %d decoded bytes to resume at offset %d, want < %d (one chunk's "+
+					"worth) -- this means it discarded more than one chunk", discarded, offset, chunkSize)
+			}
+
+			if discarded >= offset {
+				t.Fatalf("fast path discarded %d bytes, want strictly less than the resume offset %d -- "+
+					"this is the fallback's signature (discard proportional to offset), not the fast path's", discarded, offset)
+			}
+
+			// Verify the reader is actually positioned correctly, not merely "discarded
+			// few bytes": the remaining decoded stream must equal payload[offset:] exactly.
+			rest, err := io.ReadAll(decodeReader)
+			if err != nil {
+				t.Fatalf("read remaining decoded bytes: %v", err)
+			}
+
+			if !bytes.Equal(rest, payload[offset:]) {
+				t.Fatalf("decode reader positioned at the wrong offset: got %d remaining bytes, want %d matching payload[offset:]",
+					len(rest), len(payload)-int(offset))
+			}
+		})
+	}
+}
+
+// TestPutBlockCompressed_IndexGeometryMismatch_FallsBack verifies that a chunk-offset
+// index whose TotalSize disagrees with this call's totalSize is never trusted: resuming
+// must fall back to the byte-zero discard path, discarding exactly offset decoded bytes --
+// not a bounded chunk's worth -- proving by the SAME discarded-byte measurement used in
+// the fast-path test that the fallback, not the fast path, actually ran (inv. #9:
+// existence is not validity; a geometry mismatch means the index describes a different
+// run and must be ignored, not partially trusted).
+func TestPutBlockCompressed_IndexGeometryMismatch_FallsBack(t *testing.T) {
+	const chunkSize = 100_000
+
+	const numChunks = 5
+
+	const targetChunk = 3
+
+	payload := randomPayload(t, chunkSize*numChunks)
+	offset := int64(targetChunk)*int64(chunkSize) + chunkSize/2
+
+	for _, tc := range blockCodecCases {
+		if tc.ext == "" {
+			continue
+		}
+
+		t.Run(tc.codec, func(t *testing.T) {
+			dir := t.TempDir()
+			dataFile := filepath.Join(dir, "data.bin"+tc.ext)
+
+			idx := writeEncodedBlockFileWithIndex(t, dataFile, tc.codec, payload, chunkSize)
+
+			// Simulate a sidecar recorded under a different run's geometry (e.g. a
+			// different --chunk-size or archive): its TotalSize disagrees with what
+			// this call passes in, so it must never be trusted.
+			mismatchedTotal := idx.TotalSize + 1
+
+			file, err := os.Open(dataFile)
+			if err != nil {
+				t.Fatalf("open data file: %v", err)
+			}
+			defer file.Close()
+
+			info, err := file.Stat()
+			if err != nil {
+				t.Fatalf("stat data file: %v", err)
+			}
+
+			decodeReader, discarded, err := resolveBlockDecodeReader(file, dataFile, tc.ext, offset, mismatchedTotal, info.Size(), discardLogger())
+			if err != nil {
+				t.Fatalf("resolveBlockDecodeReader: %v", err)
+			}
+			defer decodeReader.Close()
+
+			if discarded != offset {
+				t.Fatalf("geometry-mismatched index produced discarded=%d, want exactly %d (the fallback's "+
+					"signature: discard the full decompressed prefix up to offset) -- the mismatched index may "+
+					"have been wrongly trusted instead of falling back", discarded, offset)
+			}
+
+			rest, err := io.ReadAll(decodeReader)
+			if err != nil {
+				t.Fatalf("read remaining decoded bytes: %v", err)
+			}
+
+			if !bytes.Equal(rest, payload[offset:]) {
+				t.Fatalf("decode reader positioned at the wrong offset: got %d remaining bytes, want %d matching payload[offset:]",
+					len(rest), len(payload)-int(offset))
 			}
 		})
 	}

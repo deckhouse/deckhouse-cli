@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
@@ -597,21 +598,25 @@ func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string,
 // temporary file first — the whole point of this path is to keep peak disk usage at one
 // copy (the compressed archive) instead of two.
 //
-// RESUME STRATEGY: discard-and-fast-forward from the start of the decoded stream on
-// every fresh call, never frame/chunk-boundary seeking. chunks.meta
-// (archive/chunkmeta.go) records the chunk/frame-boundary geometry only inside the
-// transient staging dir (archive.BlockChunksDirName), which volume.MergeBlockChunks
-// removes once the frames are merged into the final data.bin[.ext] — by the time an
-// archive reaches upload, no frame-boundary index survives to reuse. Worse, zstd (the
-// default codec) offers no cheap way to rebuild one: a single zstd.NewReader given two
-// concatenated independent EncodeAll frames consumes BOTH in one continuous Read
-// (verified empirically against the vendored klauspost/compress/zstd while slicing this
-// task) — unlike pierrec/lz4's reader, it does not stop at the first frame's boundary,
-// so there is no equivalent of lz4's "fresh reader per frame" trick to index zstd frame
-// offsets without hand-parsing zstd's block headers. Given that CPU-bound decompression
-// throughput normally exceeds WAN/cluster upload throughput, discarding and re-decoding
-// the already-sent prefix on every retry is the correct, uniform, low-risk choice here; a
-// frame-offset index remains a documented, not-undertaken future optimization.
+// RESUME STRATEGY: two paths, tried in order. FAST PATH — when the merged data file
+// carries a valid chunk-offset index sidecar (archive.BlockChunkIndex, written by
+// volume.MergeBlockChunks) whose geometry matches this call, resolveBlockDecodeReader
+// opens a fresh decode reader over an io.SectionReader positioned at the nearest chunk's
+// COMPRESSED byte offset and discards at most one chunk's worth of decoded bytes,
+// regardless of how far into the archive offset is. FALLBACK — when no usable index
+// exists (an archive merged before this feature, or one whose sidecar is missing/
+// corrupt/geometry-mismatched), decode from the start of the file and discard the entire
+// offset, exactly as before this feature existed. A single continuous zstd/gzip/lz4
+// reader cannot itself detect a frame/chunk boundary mid-stream (a zstd.NewReader given
+// two concatenated independent EncodeAll frames consumes both in one continuous Read,
+// verified empirically against the vendored klauspost/compress/zstd; pierrec/lz4's
+// reader is the only one of the three that stops at a frame boundary on its own) — but
+// that limitation only matters for DETECTING a boundary from inside the stream. Once a
+// compressed byte offset is known INDEPENDENTLY, from the index, a fresh reader opened
+// there needs only decode forward, so zstd, gzip and lz4 all benefit equally from the
+// fast path; none is special-cased or excluded. Worst-case discard is now bounded by one
+// chunk (<= --chunk-size, itself capped at maxChunkSize/1Gi in cmd/download/download.go)
+// instead of the entire already-uploaded prefix.
 func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, offset, totalSize int64, log *slog.Logger, onProgress func(int)) error {
 	f, err := os.Open(dataFile)
 	if err != nil {
@@ -620,26 +625,17 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 
 	defer func() { _ = f.Close() }()
 
-	decodeReader, err := compress.NewReader(ext, f)
+	info, err := f.Stat()
 	if err != nil {
-		return fmt.Errorf("open decompressor for %s: %w", dataFile, err)
+		return fmt.Errorf("stat volume data %s: %w", dataFile, err)
+	}
+
+	decodeReader, _, err := resolveBlockDecodeReader(f, dataFile, ext, offset, totalSize, info.Size(), log)
+	if err != nil {
+		return err
 	}
 
 	defer func() { _ = decodeReader.Close() }()
-
-	if offset > 0 {
-		start := time.Now()
-
-		skipped, ffErr := io.CopyN(io.Discard, decodeReader, offset)
-		if ffErr != nil {
-			return fmt.Errorf("fast-forwarding %s to resume offset %d (got %d bytes): %w", dataFile, offset, skipped, ffErr)
-		}
-
-		log.Info("fast-forwarded past already-uploaded bytes",
-			slog.String("file", dataFile),
-			slog.Int64("bytes", skipped),
-			slog.Duration("took", time.Since(start)))
-	}
 
 	for offset < totalSize {
 		remain := totalSize - offset
@@ -696,6 +692,140 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 	}
 
 	return nil
+}
+
+// blockDataSource is the read access putBlockCompressed's resume-positioning helpers need
+// from the opened data file: sequential Read for the byte-zero fallback decode, and
+// ReadAt for the chunk-offset index fast path's io.SectionReader. *os.File satisfies this
+// directly; declaring it as an interface (rather than taking *os.File) lets tests call
+// resolveBlockDecodeReader/fastForwardViaChunkIndex directly against a real temp file
+// while asserting on their returned discarded-byte count (inv. #11).
+type blockDataSource interface {
+	io.Reader
+	io.ReaderAt
+}
+
+// resolveBlockDecodeReader returns a decode reader for f already positioned at the
+// decompressed byte offset requested by a resumed upload, preferring the chunk-offset
+// index fast path (fastForwardViaChunkIndex) and degrading to a full discard-from-zero
+// decode when no valid index is available. offset == 0 needs no positioning at all.
+// fileSize is f's on-disk (compressed) byte length, stat'd once by the caller. The second
+// return value is the number of decoded bytes actually discarded to reach the requested
+// offset — io.CopyN's own byte-accurate count, not an estimate — so a caller (or a test)
+// can verify the fast path stayed within one chunk without inferring it from timing.
+func resolveBlockDecodeReader(f blockDataSource, dataFile, ext string, offset, totalSize, fileSize int64, log *slog.Logger) (io.ReadCloser, int64, error) {
+	if offset == 0 {
+		decodeReader, err := compress.NewReader(ext, f)
+		if err != nil {
+			return nil, 0, fmt.Errorf("open decompressor for %s: %w", dataFile, err)
+		}
+
+		return decodeReader, 0, nil
+	}
+
+	decodeReader, discarded, ok, err := fastForwardViaChunkIndex(f, dataFile, ext, offset, totalSize, fileSize, log)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if ok {
+		return decodeReader, discarded, nil
+	}
+
+	decodeReader, err = compress.NewReader(ext, f)
+	if err != nil {
+		return nil, 0, fmt.Errorf("open decompressor for %s: %w", dataFile, err)
+	}
+
+	start := time.Now()
+
+	skipped, ffErr := io.CopyN(io.Discard, decodeReader, offset)
+	if ffErr != nil {
+		return nil, 0, fmt.Errorf("fast-forwarding %s to resume offset %d (got %d bytes): %w", dataFile, offset, skipped, ffErr)
+	}
+
+	log.Info("fast-forwarded past already-uploaded bytes (no usable chunk index)",
+		slog.String("file", dataFile),
+		slog.Int64("bytes", skipped),
+		slog.Duration("took", time.Since(start)))
+
+	return decodeReader, skipped, nil
+}
+
+// fastForwardViaChunkIndex attempts the seekable-resume fast path for a compressed block
+// data file: it reads the file's chunk-offset index sidecar (archive.BlockChunkIndex,
+// written by volume.MergeBlockChunks) and, when found and matching this call's geometry,
+// opens a fresh decode reader over an io.SectionReader positioned at the nearest chunk's
+// compressed byte offset, then discards only the remaining intra-chunk bytes — at most
+// one chunk's worth, regardless of how large offset is.
+//
+// ok is false whenever the index cannot be trusted for this call: missing, corrupt (a
+// torn write from a crash — degrade exactly like "missing", never fail), or its TotalSize
+// disagrees with totalSize (inv. #9 — a mismatched TotalSize means the index describes a
+// different run/geometry, e.g. a re-download with a different --chunk-size, and reusing
+// its CompressedChunkSizes would compute a nonsense byte offset). Callers MUST fall back
+// to the byte-zero discard path in that case. fileSize is f's on-disk (compressed) byte
+// length, stat'd once by the caller. The int64 return is the number of decoded bytes
+// actually discarded (io.CopyN's own count) to land at the requested offset within the
+// chunk — bounded by idx.ChunkSize by construction, never by offset.
+func fastForwardViaChunkIndex(f blockDataSource, dataFile, ext string, offset, totalSize, fileSize int64, log *slog.Logger) (io.ReadCloser, int64, bool, error) {
+	idx, found, err := archive.ReadBlockChunkIndex(dataFile)
+	if err != nil {
+		log.Warn("ignoring unreadable block chunk index, falling back to full discard",
+			slog.String("file", dataFile),
+			slog.String("error", err.Error()))
+
+		return nil, 0, false, nil
+	}
+
+	if !found || idx.TotalSize != totalSize || idx.ChunkSize <= 0 || len(idx.CompressedChunkSizes) == 0 {
+		return nil, 0, false, nil
+	}
+
+	chunkIdx := int(offset / idx.ChunkSize)
+
+	// offset < totalSize is already guaranteed by putBlock's caller-side offset==totalSize
+	// short-circuit, so chunkIdx cannot legitimately reach len(CompressedChunkSizes); guard
+	// it anyway and treat an out-of-range index as unusable (fallback), never a panic or a
+	// silent wraparound.
+	if chunkIdx < 0 || chunkIdx >= len(idx.CompressedChunkSizes) {
+		return nil, 0, false, nil
+	}
+
+	var compressedOffset int64
+
+	for _, sz := range idx.CompressedChunkSizes[:chunkIdx] {
+		compressedOffset += sz
+	}
+
+	intraChunkOffset := offset - int64(chunkIdx)*idx.ChunkSize
+
+	section := io.NewSectionReader(f, compressedOffset, fileSize-compressedOffset)
+
+	decodeReader, err := compress.NewReader(ext, section)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("open decompressor for %s: %w", dataFile, err)
+	}
+
+	if intraChunkOffset == 0 {
+		return decodeReader, 0, true, nil
+	}
+
+	start := time.Now()
+
+	skipped, ffErr := io.CopyN(io.Discard, decodeReader, intraChunkOffset)
+	if ffErr != nil {
+		return nil, 0, false, fmt.Errorf("fast-forwarding %s within chunk %d to resume offset %d (got %d bytes): %w",
+			dataFile, chunkIdx, offset, skipped, ffErr)
+	}
+
+	log.Info("fast-forwarded within one chunk via chunk-offset index",
+		slog.String("file", dataFile),
+		slog.Int("chunk", chunkIdx),
+		slog.Int64("bytes", skipped),
+		slog.Duration("took", time.Since(start)))
+
+	return decodeReader, skipped, true, nil
 }
 
 // headBlockOffset asks the importer (HEAD) how many bytes it has already durably written so
