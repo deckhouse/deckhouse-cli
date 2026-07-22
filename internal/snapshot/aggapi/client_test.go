@@ -22,6 +22,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -766,5 +767,187 @@ func TestUploadManifests_ContextCancelledAbortsRetryPromptly(t *testing.T) {
 
 	if *calls != 1 {
 		t.Errorf("calls: got %d, want 1 (aborted before a second attempt)", *calls)
+	}
+}
+
+// ── manifests-with-data-restoration scope/object-filter query params ─────────────────
+
+// capturingRESTClient returns a fake rest.Interface that records the URL of every request it
+// serves (in order) and always responds with resp. Used by the RestoreManifestsScoped
+// query-parameter tests to assert against the exact recorded request.
+func capturingRESTClient(t *testing.T, resp func() *http.Response) (*restfake.RESTClient, *[]*url.URL) {
+	t.Helper()
+
+	var urls []*url.URL
+	rc := &restfake.RESTClient{
+		NegotiatedSerializer: scheme.Codecs,
+		GroupVersion:         schema.GroupVersion{Group: StorageGroup, Version: "v1alpha1"},
+		VersionedAPIPath:     "/",
+		Client: restfake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
+			urls = append(urls, req.URL)
+
+			return resp(), nil
+		}),
+	}
+
+	return rc, &urls
+}
+
+// TestRestoreManifestsScoped_ZeroValueMatchesRestoreManifests verifies that
+// RestoreManifestsScoped with a zero-value RestoreScopeOptions sends the identical request
+// RestoreManifests sends today (same path, same query — only targetNamespace, no
+// scope/kind/name/apiVersion), so RestoreManifests's existing caller/behavior is unaffected.
+func TestRestoreManifestsScoped_ZeroValueMatchesRestoreManifests(t *testing.T) {
+	scopedRC, scopedURLs := capturingRESTClient(t, okResponse(`[]`))
+	scopedClient := NewClient(scopedRC, testMapper())
+
+	if _, err := scopedClient.RestoreManifestsScoped(context.Background(), coreSnapshotRef(), "target-ns", RestoreScopeOptions{}); err != nil {
+		t.Fatalf("RestoreManifestsScoped: %v", err)
+	}
+
+	defaultRC, defaultURLs := capturingRESTClient(t, okResponse(`[]`))
+	defaultClient := NewClient(defaultRC, testMapper())
+
+	if _, err := defaultClient.RestoreManifests(context.Background(), coreSnapshotRef(), "target-ns"); err != nil {
+		t.Fatalf("RestoreManifests: %v", err)
+	}
+
+	if len(*scopedURLs) != 1 || len(*defaultURLs) != 1 {
+		t.Fatalf("expected exactly one recorded request per client, got %d and %d", len(*scopedURLs), len(*defaultURLs))
+	}
+
+	got, want := (*scopedURLs)[0], (*defaultURLs)[0]
+	if got.Path != want.Path || got.RawQuery != want.RawQuery {
+		t.Errorf("RestoreManifestsScoped(zero-value) request differs from RestoreManifests:\n got  %s?%s\n want %s?%s",
+			got.Path, got.RawQuery, want.Path, want.RawQuery)
+	}
+
+	q := got.Query()
+	if q.Get("targetNamespace") != "target-ns" {
+		t.Errorf("targetNamespace: got %q, want %q", q.Get("targetNamespace"), "target-ns")
+	}
+
+	for _, key := range []string{"scope", "kind", "name", "apiVersion"} {
+		if q.Has(key) {
+			t.Errorf("zero-value opts must omit query param %q, got %q", key, q.Get(key))
+		}
+	}
+}
+
+// TestRestoreManifestsScoped_ScopeNodeOnly verifies that Scope=RestoreScopeNode with no object
+// filter sends scope=node and no kind/name/apiVersion params.
+func TestRestoreManifestsScoped_ScopeNodeOnly(t *testing.T) {
+	rc, urls := capturingRESTClient(t, okResponse(`[]`))
+	c := NewClient(rc, testMapper())
+
+	if _, err := c.RestoreManifestsScoped(context.Background(), coreSnapshotRef(), "target-ns", RestoreScopeOptions{Scope: RestoreScopeNode}); err != nil {
+		t.Fatalf("RestoreManifestsScoped: %v", err)
+	}
+
+	q := (*urls)[0].Query()
+	if q.Get("scope") != "node" {
+		t.Errorf("scope: got %q, want %q", q.Get("scope"), "node")
+	}
+
+	for _, key := range []string{"kind", "name", "apiVersion"} {
+		if q.Has(key) {
+			t.Errorf("scope=node with no filter must omit query param %q, got %q", key, q.Get(key))
+		}
+	}
+}
+
+// TestRestoreManifestsScoped_ScopeNodeWithObjectFilter verifies that Scope=RestoreScopeNode with
+// FilterKind/FilterName/FilterAPIVersion sends all four params with the exact literal values
+// passed in — values containing characters that require URL-encoding are used deliberately so a
+// double-encoding or dropping bug would surface as a mismatch after the round trip.
+func TestRestoreManifestsScoped_ScopeNodeWithObjectFilter(t *testing.T) {
+	rc, urls := capturingRESTClient(t, okResponse(`[]`))
+	c := NewClient(rc, testMapper())
+
+	opts := RestoreScopeOptions{
+		Scope:            RestoreScopeNode,
+		FilterKind:       "PersistentVolumeClaim",
+		FilterName:       "pvc with spaces & stuff",
+		FilterAPIVersion: "v1",
+	}
+
+	if _, err := c.RestoreManifestsScoped(context.Background(), coreSnapshotRef(), "target-ns", opts); err != nil {
+		t.Fatalf("RestoreManifestsScoped: %v", err)
+	}
+
+	q := (*urls)[0].Query()
+	want := map[string]string{
+		"scope":      "node",
+		"kind":       opts.FilterKind,
+		"name":       opts.FilterName,
+		"apiVersion": opts.FilterAPIVersion,
+	}
+
+	for key, wantVal := range want {
+		if got := q.Get(key); got != wantVal {
+			t.Errorf("%s: got %q, want %q", key, got, wantVal)
+		}
+	}
+}
+
+// TestRestoreManifestsScoped_BadRequestWrapped verifies that a 400-equivalent server response
+// (the same JSON Status body shape writeRestoreError produces for restore.ErrBadRequest) is
+// surfaced as an error distinguishable via errors.Is(err, ErrRestoreBadRequest), still classifies
+// as apierrors.IsBadRequest, carries the server's message, and is NOT also ErrRestoreNotFound.
+func TestRestoreManifestsScoped_BadRequestWrapped(t *testing.T) {
+	message := "object filter (kind/name/apiVersion) is only allowed with scope=node"
+	rc, _ := countingRESTClient(t, statusResponse(t, http.StatusBadRequest, metav1.StatusReasonBadRequest, message))
+	c := NewClient(rc, testMapper())
+
+	_, err := c.RestoreManifestsScoped(context.Background(), coreSnapshotRef(), "target-ns",
+		RestoreScopeOptions{Scope: RestoreScopeSubtree, FilterKind: "Foo", FilterName: "bar"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !errors.Is(err, ErrRestoreBadRequest) {
+		t.Errorf("expected errors.Is(err, ErrRestoreBadRequest), got: %v", err)
+	}
+
+	if errors.Is(err, ErrRestoreNotFound) {
+		t.Errorf("must not also classify as ErrRestoreNotFound: %v", err)
+	}
+
+	if !apierrors.IsBadRequest(err) {
+		t.Errorf("expected the underlying k8s error to still classify as BadRequest, got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), message) {
+		t.Errorf("expected error to carry the server's message %q, got: %v", message, err)
+	}
+}
+
+// TestRestoreManifestsScoped_NotFoundWrapped verifies that a 404-equivalent server response is
+// surfaced as an error distinguishable via errors.Is(err, ErrRestoreNotFound), still classifies as
+// apierrors.IsNotFound, carries the server's message, and is NOT also ErrRestoreBadRequest.
+func TestRestoreManifestsScoped_NotFoundWrapped(t *testing.T) {
+	message := `Snapshot "missing" not found`
+	rc, _ := countingRESTClient(t, statusResponse(t, http.StatusNotFound, metav1.StatusReasonNotFound, message))
+	c := NewClient(rc, testMapper())
+
+	_, err := c.RestoreManifestsScoped(context.Background(), coreSnapshotRef(), "target-ns", RestoreScopeOptions{})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !errors.Is(err, ErrRestoreNotFound) {
+		t.Errorf("expected errors.Is(err, ErrRestoreNotFound), got: %v", err)
+	}
+
+	if errors.Is(err, ErrRestoreBadRequest) {
+		t.Errorf("must not also classify as ErrRestoreBadRequest: %v", err)
+	}
+
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("expected the underlying k8s error to still classify as NotFound, got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), message) {
+		t.Errorf("expected error to carry the server's message %q, got: %v", message, err)
 	}
 }
