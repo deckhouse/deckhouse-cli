@@ -651,6 +651,94 @@ func TestImportFSFromTar_SkipsAlreadyUploadedEntryWithoutDecompressing(t *testin
 	}
 }
 
+// TestImportFSFromTar_SkipsAlreadyUploadedEntry_NeverAttemptsDecompression closes a gap
+// TestImportFSFromTar_SkipsAlreadyUploadedEntryWithoutDecompressing above leaves open: that
+// test proves the done-skip branch never issues a PUT and leaves no temp file behind, but a
+// PUT/directory-listing assertion cannot detect a regression that wastefully decodes an
+// already-done entry's payload and simply discards the result before the (correctly skipped)
+// PUT -- the two-pass streaming architecture has no other externally observable side effect
+// such a regression would trip.
+//
+// This test closes that gap directly: each already-done entry's STORED (compressed) bytes
+// are deliberately truncated by one byte, so they are not a valid codec stream. If
+// importFSFromTar ever attempted to decode them (measureEntrySize or streamCompressedEntry),
+// the decoder would surface a decode error (verified for zstd/gzip/lz4 truncation above the
+// package) and importFSFromTar would return a non-nil error, which this test treats as a
+// failure. The done-skip branch, correctly implemented, `continue`s before ever reading the
+// entry's payload through tr, so the corruption is inert. "none" has no decode step to
+// corrupt and is already covered by the PUT-call assertion above and by the "none" case in
+// TestImportFSFromTar_InterruptAndResume_AllCodecs.
+func TestImportFSFromTar_SkipsAlreadyUploadedEntry_NeverAttemptsDecompression(t *testing.T) {
+	plain := []byte("already-fully-uploaded-content-that-must-never-be-decompressed")
+
+	for _, tc := range codecCases {
+		if tc.codec == "none" {
+			continue
+		}
+
+		t.Run(tc.codec, func(t *testing.T) {
+			_, encoded := encodeEntry(t, tc.codec, plain)
+			corrupted := encoded[:len(encoded)-1]
+
+			modTime := time.Date(2026, 4, 2, 9, 0, 0, 0, time.UTC)
+
+			var tarBuf bytes.Buffer
+
+			tw := tar.NewWriter(&tarBuf)
+			addTarEntry(t, tw, "done"+tc.ext, corrupted, 0o644, 10, 20, modTime)
+
+			if err := tw.Close(); err != nil {
+				t.Fatalf("close tar writer: %v", err)
+			}
+
+			dir := t.TempDir()
+			tarPath := filepath.Join(dir, "data.tar")
+
+			if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+				t.Fatalf("write data.tar: %v", err)
+			}
+
+			putCalled := false
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodHead:
+					// Final file already exists server-side: 200, no X-Next-Offset, and
+					// Content-Length set to the exact decompressed (plaintext) size.
+					w.Header().Set("Content-Length", strconv.Itoa(len(plain)))
+					w.WriteHeader(http.StatusOK)
+				case http.MethodPut:
+					putCalled = true
+
+					http.Error(w, "PUT must never be issued for an already-done entry", http.StatusInternalServerError)
+				default:
+					http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+				}
+			}))
+			defer srv.Close()
+
+			progressed := 0
+
+			err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(),
+				nil, func(n int) { progressed += n })
+			if err != nil {
+				t.Fatalf("importFSFromTar returned an error for a corrupted-but-already-done %s entry -- "+
+					"this means decompression WAS attempted on a done entry (the skip branch must "+
+					"`continue` before ever reading the entry's payload): %v", tc.codec, err)
+			}
+
+			if putCalled {
+				t.Error("PUT must not be issued for an already-fully-uploaded entry")
+			}
+
+			if progressed != len(plain) {
+				t.Errorf("onProgress total = %d, want %d (done entry still credited from HEAD's Content-Length, without decompressing it)",
+					progressed, len(plain))
+			}
+		})
+	}
+}
+
 func TestImportFSFromTar_EmptyFileIsUploaded(t *testing.T) {
 	modTime := time.Date(2026, 2, 10, 12, 0, 0, 0, time.UTC)
 
