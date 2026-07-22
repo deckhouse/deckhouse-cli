@@ -498,7 +498,7 @@ func buildDeletedPVCFakeClient(t *testing.T) client.Client {
 	// del-disk: non-aggregator that captured its own volume; its backing PVC (e2eDelPVC)
 	// is genuinely deleted from the cluster, but the node carries it in status.data so the
 	// download targets the leaf CR directly. The captured PVC manifest is excluded from the
-	// node's manifests/ via the status.data.source exclusion rule.
+	// node's manifests/ via the status.data.sourceRef exclusion rule.
 	delDiskSnap := snapObj{
 		apiVersion: e2eVMAPIVersion, kind: e2eDiskKind,
 		namespace: e2eNS, name: e2eDelDisk, uid: "uid-del-snap",

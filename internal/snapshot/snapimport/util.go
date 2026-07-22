@@ -50,6 +50,36 @@ func conditionTrue(obj *unstructured.Unstructured, condType string) bool {
 	return false
 }
 
+// conditionFalseWithReason reports whether the named condition is present with Status=False and the given
+// reason. It detects the DataImport/DataExport terminal Expired state, which the producer now signals as
+// Ready=False with reason "Expired" (the standalone "Expired" condition type was removed from the catalog
+// in favour of a reason + a status.phase).
+func conditionFalseWithReason(obj *unstructured.Unstructured, condType, reason string) bool {
+	conds, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	if err != nil || !found {
+		return false
+	}
+
+	for _, c := range conds {
+		m, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		t, _, _ := unstructured.NestedString(m, "type")
+		if t != condType {
+			continue
+		}
+
+		status, _, _ := unstructured.NestedString(m, "status")
+		r, _, _ := unstructured.NestedString(m, "reason")
+
+		return status == string(metav1.ConditionFalse) && r == reason
+	}
+
+	return false
+}
+
 // readyConditionState returns the status/reason/message of the Ready condition, or empty
 // strings when the object carries no Ready condition yet. The reason drives the terminal-vs-
 // pending decision in waitNamespacedReady.

@@ -24,7 +24,7 @@ import (
 
 func node(status map[string]interface{}) *unstructured.Unstructured {
 	obj := map[string]interface{}{
-		"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"apiVersion": "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		"kind":       "DemoVirtualDiskSnapshot",
 		"metadata":   map[string]interface{}{"namespace": "ns", "name": "dvd-1", "uid": "snap-uid"},
 	}
@@ -36,7 +36,7 @@ func node(status map[string]interface{}) *unstructured.Unstructured {
 
 func validSourceRef() map[string]interface{} {
 	return map[string]interface{}{
-		"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"apiVersion": "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		"kind":       "DemoVirtualDisk",
 		"namespace":  "ns",
 		"name":       "disk-a",
@@ -46,14 +46,14 @@ func validSourceRef() map[string]interface{} {
 
 func validData() map[string]interface{} {
 	return map[string]interface{}{
-		"source": map[string]interface{}{
+		"sourceRef": map[string]interface{}{
 			"apiVersion": "v1",
 			"kind":       "PersistentVolumeClaim",
 			"namespace":  "ns",
 			"name":       "disk-a",
 			"uid":        "pvc-uid",
 		},
-		"artifact": map[string]interface{}{
+		"artifactRef": map[string]interface{}{
 			"apiVersion": "snapshot.storage.k8s.io/v1",
 			"kind":       "VolumeSnapshotContent",
 			"name":       "snapcontent-1",
@@ -90,11 +90,11 @@ func TestParseNodeStatus_Valid(t *testing.T) {
 	if data == nil {
 		t.Fatal("data must be decoded")
 	}
-	if data.Source.Kind != "PersistentVolumeClaim" || data.Source.UID != "pvc-uid" {
-		t.Errorf("data.source not decoded: %+v", data.Source)
+	if data.SourceRef.Kind != "PersistentVolumeClaim" || data.SourceRef.UID != "pvc-uid" {
+		t.Errorf("data.sourceRef not decoded: %+v", data.SourceRef)
 	}
-	if data.Artifact.Name != "snapcontent-1" || data.Size != "10Gi" {
-		t.Errorf("data artifact/size not decoded: %+v", data)
+	if data.ArtifactRef.Name != "snapcontent-1" || data.Size != "10Gi" {
+		t.Errorf("data artifactRef/size not decoded: %+v", data)
 	}
 }
 
@@ -127,17 +127,17 @@ func TestParseNodeStatus_FailClosed(t *testing.T) {
 			"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "x", "uid": "u",
 		}}},
 		{"sourceRef domain kind missing namespace", map[string]interface{}{"sourceRef": map[string]interface{}{
-			"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1", "kind": "DemoVirtualDisk", "name": "x", "uid": "u",
+			"apiVersion": "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", "kind": "DemoVirtualDisk", "name": "x", "uid": "u",
 		}}},
 		{"sourceRef missing uid", map[string]interface{}{"sourceRef": map[string]interface{}{
 			"apiVersion": "v1", "kind": "PersistentVolumeClaim", "namespace": "ns", "name": "x",
 		}}},
 		{"data not an object", map[string]interface{}{"data": "oops"}},
-		{"data missing source", map[string]interface{}{"data": map[string]interface{}{
-			"artifact": map[string]interface{}{"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": "a"},
+		{"data missing sourceRef", map[string]interface{}{"data": map[string]interface{}{
+			"artifactRef": map[string]interface{}{"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": "a"},
 		}}},
-		{"data missing artifact", map[string]interface{}{"data": map[string]interface{}{
-			"source": map[string]interface{}{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "x"},
+		{"data missing artifactRef", map[string]interface{}{"data": map[string]interface{}{
+			"sourceRef": map[string]interface{}{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "x"},
 		}}},
 		{"data bad size", map[string]interface{}{"data": func() map[string]interface{} {
 			d := validData()
@@ -159,7 +159,7 @@ func TestParseNodeStatus_IdentityFailClosed(t *testing.T) {
 	// The node's own identity feeds resume/checksum/collision, so an incomplete one must fail
 	// even when status.sourceRef/status.data are absent (fragments alone can't rescue it).
 	full := map[string]interface{}{
-		"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"apiVersion": "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		"kind":       "DemoVirtualDiskSnapshot",
 		"namespace":  "ns",
 		"name":       "dvd-1",

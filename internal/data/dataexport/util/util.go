@@ -81,32 +81,37 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 		}
 
 		for _, condition := range deObj.Status.Conditions {
-			// restart DataExport if Expired
-			if condition.Type == "Expired" {
-				if condition.Status == "True" {
-					if err := DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
-						return nil, err
-					}
-
-					if err := CreateDataExport(
-						ctx,
-						deName, namespace, "",
-						deObj.Spec.TargetRef.Group,
-						deObj.Spec.TargetRef.Kind,
-						deObj.Spec.TargetRef.Name,
-						deObj.Spec.Publish, rtClient,
-					); err != nil {
-						return nil, err
-					}
-				}
+			// The DataExport catalog no longer carries a standalone "Expired" condition; expiry is now the
+			// Ready condition with Status=False and Reason="Expired" (plus status.phase=Expired). Detect it
+			// on the Ready condition and auto-restart the export, rather than waiting for the producer's GC
+			// (which only deletes an expired DataExport after its retention TTL).
+			if condition.Type != "Ready" {
+				continue
 			}
-			// check DataExport is Ready
-			if condition.Type == "Ready" {
-				if condition.Status != "True" {
-					returnErr = fmt.Errorf("DataExport %s/%s is not Ready: %s (%s)",
-						deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name,
-						condition.Message, condition.Reason)
+
+			switch {
+			case condition.Status == "False" && condition.Reason == "Expired":
+				if err := DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
+					return nil, err
 				}
+
+				if err := CreateDataExport(
+					ctx,
+					deName, namespace, "",
+					deObj.Spec.TargetRef.Group,
+					deObj.Spec.TargetRef.Kind,
+					deObj.Spec.TargetRef.Name,
+					deObj.Spec.Publish, rtClient,
+				); err != nil {
+					return nil, err
+				}
+				// Recreated: keep retrying until the fresh export becomes Ready.
+				returnErr = fmt.Errorf("DataExport %s/%s expired; recreated, waiting for the new export to become Ready",
+					deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
+			case condition.Status != "True":
+				returnErr = fmt.Errorf("DataExport %s/%s is not Ready: %s (%s)",
+					deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name,
+					condition.Message, condition.Reason)
 			}
 		}
 		// check DataExport Url

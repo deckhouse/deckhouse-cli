@@ -109,13 +109,18 @@ type Config struct {
 //     child->parent ownerRef stamped with the parent's server-assigned UID (the API
 //     server requires a non-empty uid on ownerReferences, and the state-snapshotter
 //     import binders resolve a leaf's parent SnapshotContent through that ownerRef);
-//  2. uploads EVERY node's manifests plus its direct child refs (pass 2a) BEFORE importing
+//  2. waits for the bind-first contract: the manifests upload is refused with 409
+//     ImportContentNotBound until a node's status.boundSnapshotContentName is set, so Run
+//     blocks (waitForBinds) until EVERY planned node reports a bound SnapshotContent before
+//     uploading anything. The binder creates and binds contents top-down from the markers of
+//     pass 1, independent of the upload, so the CLI can wait for all nodes collectively;
+//  3. uploads EVERY node's manifests plus its direct child refs (pass 2a) BEFORE importing
 //     any volume bytes (pass 2b). The two are sequenced, not interleaved, because a data
 //     leaf's SVDM DataImport stays Pending ("awaiting target leaf bound SnapshotContent")
 //     until the leaf VolumeSnapshot is bound, which needs the parent SnapshotContent, which
 //     needs the parent's manifests upload — so finishing a leaf (including waiting on its
 //     DataImport) before its ancestors' manifests are up would deadlock until timeout;
-//  3. pass 2b runs data-leaf uploads with bounded concurrency (cfg.Workers goroutines via
+//  4. pass 2b runs data-leaf uploads with bounded concurrency (cfg.Workers goroutines via
 //     errgroup.SetLimit); the first leaf error cancels all in-flight siblings via the
 //     derived ctx;
 //
@@ -195,10 +200,20 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	// Pass 2a: upload every node's manifests + child refs first, so all SnapshotContents can
-	// materialize and every data-leaf VolumeSnapshot gets a bound SnapshotContent (the
-	// precondition for its DataImport to leave Pending). Bottom-up keeps a parent's upload
-	// after its children's, matching the capture order.
+	// Bind gate (bind-first contract): wait until every planned node reports a bound
+	// SnapshotContent before uploading. The namespaced upload subresource returns 409
+	// ImportContentNotBound until status.boundSnapshotContentName is set, so gating the whole
+	// pass here — rather than discovering the 409 mid-upload — turns a distributed race into a
+	// single deterministic wait. The aggregated client still retries a stray ImportContentNotBound
+	// per request as a safety net (see aggapi.UploadManifests).
+	if err := waitForBinds(ctx, cfg, plan); err != nil {
+		return err
+	}
+
+	// Pass 2a: upload every node's manifests + child refs. By this point the bind gate above has
+	// ensured every node (including every data-leaf VolumeSnapshot) has a bound SnapshotContent,
+	// the precondition for the bind-first upload to be accepted and for a leaf's DataImport to
+	// leave Pending. Bottom-up keeps a parent's upload after its children's, matching capture order.
 	for i := range plan {
 		if err := uploadNodeManifests(ctx, cfg, plan[i]); err != nil {
 			return err
@@ -251,16 +266,9 @@ func preflightNamespace(ctx context.Context, cfg Config, plan []PlannedNode) err
 	var conflicts []string
 
 	for _, node := range plan {
-		gv, parseErr := schema.ParseGroupVersion(node.APIVersion)
-		if parseErr != nil {
-			return fmt.Errorf("parse apiVersion %q for %s/%s: %w", node.APIVersion, node.Kind, node.Name, parseErr)
-		}
-
-		gvk := gv.WithKind(node.Kind)
-
-		mapping, mapErr := cfg.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		mapping, mapErr := cfg.mappingForNode(node)
 		if mapErr != nil {
-			return fmt.Errorf("resolve resource for %s: %w", gvk.String(), mapErr)
+			return mapErr
 		}
 
 		obj, getErr := cfg.resourceInterface(mapping).Get(ctx, node.Name, metav1.GetOptions{})
@@ -308,6 +316,104 @@ func (cfg Config) resourceInterface(mapping *meta.RESTMapping) dynamic.ResourceI
 	}
 
 	return cfg.Dynamic.Resource(mapping.Resource)
+}
+
+// mappingForNode resolves the REST mapping (GVR + scope) for a planned node's GVK via
+// cfg.Mapper. It is the single GVK->resource resolver shared by the namespace preflight and
+// the bind gate.
+func (cfg Config) mappingForNode(node PlannedNode) (*meta.RESTMapping, error) {
+	gv, err := schema.ParseGroupVersion(node.APIVersion)
+	if err != nil {
+		return nil, fmt.Errorf("parse apiVersion %q for %s/%s: %w", node.APIVersion, node.Kind, node.Name, err)
+	}
+
+	gvk := gv.WithKind(node.Kind)
+
+	mapping, err := cfg.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		return nil, fmt.Errorf("resolve resource for %s: %w", gvk.String(), err)
+	}
+
+	return mapping, nil
+}
+
+// boundContentName returns status.boundSnapshotContentName, or "" when unset. A non-empty
+// value is the signal the state-snapshotter binder has bound the node's SnapshotContent —
+// the precondition the bind-first upload contract enforces.
+func boundContentName(obj *unstructured.Unstructured) string {
+	name, _, _ := unstructured.NestedString(obj.Object, "status", "boundSnapshotContentName")
+
+	return name
+}
+
+// waitForBinds blocks until every planned node's namespaced CR reports a non-empty
+// status.boundSnapshotContentName. This is the PRIMARY bind gate for the bind-first upload
+// contract: the namespaced manifests upload subresource is refused with 409 ImportContentNotBound
+// until a node is bound. The state-snapshotter binder creates and binds SnapshotContents top-down
+// from the import-mode markers created in pass 1, independent of the manifest upload (no deadlock),
+// so Run waits for all nodes collectively before pass 2a rather than racing the 409 per upload.
+//
+// The poll cadence is cfg.PollInterval and the whole wait is bounded by cfg.Timeout (derived from
+// --timeout). A node whose Get fails (other than not-yet-bound) aborts the wait immediately; ctx
+// cancellation returns ctx.Err(). The aggregated client additionally retries a stray
+// ImportContentNotBound 409 per upload as a safety net (aggapi.UploadManifests).
+func waitForBinds(ctx context.Context, cfg Config, plan []PlannedNode) error {
+	type pendingNode struct {
+		node PlannedNode
+		gvr  schema.GroupVersionResource
+	}
+
+	pending := make([]pendingNode, 0, len(plan))
+
+	for i := range plan {
+		mapping, err := cfg.mappingForNode(plan[i])
+		if err != nil {
+			return err
+		}
+
+		pending = append(pending, pendingNode{node: plan[i], gvr: mapping.Resource})
+	}
+
+	cfg.Log.Info("waiting for import nodes to bind their SnapshotContents", slog.Int("nodes", len(pending)))
+
+	deadline := time.Now().Add(cfg.Timeout)
+
+	for {
+		var stillPending []pendingNode
+
+		for _, p := range pending {
+			obj, err := cfg.Dynamic.Resource(p.gvr).Namespace(cfg.Namespace).Get(ctx, p.node.Name, metav1.GetOptions{})
+			if err != nil {
+				return fmt.Errorf("get %s %s/%s while waiting for bind: %w", p.node.Kind, cfg.Namespace, p.node.Name, err)
+			}
+
+			if boundContentName(obj) == "" {
+				stillPending = append(stillPending, p)
+			}
+		}
+
+		if len(stillPending) == 0 {
+			cfg.Log.Info("all import nodes bound their SnapshotContents")
+
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			names := make([]string, 0, len(stillPending))
+			for _, p := range stillPending {
+				names = append(names, p.node.Kind+"/"+p.node.Name)
+			}
+
+			return fmt.Errorf("timeout waiting for %d import node(s) to bind a SnapshotContent "+
+				"(status.boundSnapshotContentName still empty): %s", len(stillPending), strings.Join(names, ", "))
+		}
+
+		pending = stillPending
+
+		if !sleepCtx(ctx, cfg.PollInterval) {
+			return ctx.Err()
+		}
+	}
 }
 
 // createMarkers creates every import-mode CR top-down (reverse post-order = parents before

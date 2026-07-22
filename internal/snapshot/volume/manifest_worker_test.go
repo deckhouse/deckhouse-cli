@@ -57,8 +57,8 @@ func pvcSource(name, uid string) source.SourceRefIdentity {
 // pvcNodeData builds a *source.NodeData for a captured PVC-backed volume (Variant A, ≤1).
 func pvcNodeData(name, uid, vsc string) *source.NodeData {
 	return &source.NodeData{
-		Source:   pvcSource(name, uid),
-		Artifact: source.ArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: vsc},
+		SourceRef:   pvcSource(name, uid),
+		ArtifactRef: source.ArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: vsc},
 	}
 }
 
@@ -420,7 +420,7 @@ func TestWriteNodeManifests_ExcludesLeafChildPVCs(t *testing.T) {
 }
 
 // TestWriteNodeManifests_ExcludesLeafChildByNameFallback verifies that a leaf child
-// with no UID in its status.data source is still excluded by name.
+// with no UID in its status.data sourceRef is still excluded by name.
 func TestWriteNodeManifests_ExcludesLeafChildByNameFallback(t *testing.T) {
 	t.Parallel()
 
@@ -439,7 +439,7 @@ func TestWriteNodeManifests_ExcludesLeafChildByNameFallback(t *testing.T) {
 		Kind:       "VolumeSnapshot",
 		Name:       "pvc-nouid",
 		Data: &source.NodeData{
-			Source: source.SourceRefIdentity{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-nouid"},
+			SourceRef: source.SourceRefIdentity{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-nouid"},
 		},
 	}
 
@@ -554,7 +554,7 @@ func TestWriteVolumeManifest_MatchByNameFallback(t *testing.T) {
 
 	volNode := &source.Node{
 		Data: &source.NodeData{
-			Source: source.SourceRefIdentity{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-byname"},
+			SourceRef: source.SourceRefIdentity{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-byname"},
 		},
 	}
 
@@ -601,14 +601,14 @@ func TestFinalizeNode_VolumeNodeWritesVolumeBlock(t *testing.T) {
 	}
 
 	data := &source.NodeData{
-		Source: source.SourceRefIdentity{
+		SourceRef: source.SourceRefIdentity{
 			APIVersion: "v1",
 			Kind:       "PersistentVolumeClaim",
 			Name:       "my-pvc",
 			Namespace:  "ns",
 			UID:        "uid-abc",
 		},
-		Artifact: source.ArtifactRef{
+		ArtifactRef: source.ArtifactRef{
 			APIVersion: "snapshot.storage.k8s.io/v1",
 			Kind:       "VolumeSnapshotContent",
 			Name:       "vsc-xyz",
@@ -707,14 +707,14 @@ func TestFinalizeNode_VolumeBlockDoesNotAffectVerify(t *testing.T) {
 	}
 
 	data := &source.NodeData{
-		Source: source.SourceRefIdentity{
+		SourceRef: source.SourceRefIdentity{
 			APIVersion: "v1",
 			Kind:       "PersistentVolumeClaim",
 			Name:       "pvc",
 			Namespace:  "ns",
 			UID:        "uid-1",
 		},
-		Artifact: source.ArtifactRef{
+		ArtifactRef: source.ArtifactRef{
 			APIVersion: "snapshot.storage.k8s.io/v1",
 			Kind:       "VolumeSnapshotContent",
 			Name:       "vsc-1",
@@ -769,14 +769,14 @@ func TestFinalizeNode_SnapshotNodeWithOwnData(t *testing.T) {
 		Namespace:  "ns",
 		UID:        "uid-snap-data",
 		Data: &source.NodeData{
-			Source: source.SourceRefIdentity{
+			SourceRef: source.SourceRefIdentity{
 				APIVersion: "v1",
 				Kind:       "PersistentVolumeClaim",
 				Name:       "pvc-a",
 				Namespace:  "ns",
 				UID:        "uid-pvc-a",
 			},
-			Artifact: source.ArtifactRef{
+			ArtifactRef: source.ArtifactRef{
 				APIVersion: "snapshot.storage.k8s.io/v1",
 				Kind:       "VolumeSnapshotContent",
 				Name:       "vsc-a",

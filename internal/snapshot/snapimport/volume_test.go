@@ -945,7 +945,7 @@ func TestPutBlockCompressed_StreamingIsMemoryBounded(t *testing.T) {
 func completedDataImportObj(namespace, name string) *unstructured.Unstructured {
 	obj := dataImportObj(namespace, name, false)
 	_ = unstructured.SetNestedSlice(obj.Object, readyConditions(conditionCompleted), "status", "conditions")
-	_ = unstructured.SetNestedMap(obj.Object, map[string]interface{}{"name": "vsc-1"}, "status", "data", "artifact")
+	_ = unstructured.SetNestedMap(obj.Object, map[string]interface{}{"name": "vsc-1"}, "status", "data", "artifactRef")
 
 	return obj
 }
@@ -984,7 +984,14 @@ func dataImportObj(namespace, name string, expired bool) *unstructured.Unstructu
 	}}
 
 	if expired {
-		_ = unstructured.SetNestedSlice(obj.Object, readyConditions(conditionExpired), "status", "conditions")
+		// The terminal Expired state is signalled as Ready=False with reason "Expired"
+		// (the standalone "Expired" condition type was removed from the catalog).
+		expiredCond := []interface{}{map[string]interface{}{
+			"type":   conditionReady,
+			"status": "False",
+			"reason": reasonExpired,
+		}}
+		_ = unstructured.SetNestedSlice(obj.Object, expiredCond, "status", "conditions")
 	}
 
 	return obj
@@ -1166,8 +1173,8 @@ func TestEnsureDataImport_RecreatesExpired(t *testing.T) {
 		t.Fatalf("DataImport not present after recreate: %v", err)
 	}
 
-	if conditionTrue(got, conditionExpired) {
-		t.Errorf("recreated DataImport must not carry the Expired condition")
+	if conditionFalseWithReason(got, conditionReady, reasonExpired) {
+		t.Errorf("recreated DataImport must not be in the Ready=False/Expired state")
 	}
 }
 

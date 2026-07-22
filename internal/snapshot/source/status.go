@@ -35,7 +35,7 @@ type ArtifactRef struct {
 }
 
 // NodeData is the decoded namespaced status.data descriptor: a self-contained
-// {source, artifact, volume metadata} block the core mirrors onto every snapshot node.
+// {sourceRef, artifactRef, volume metadata} block the core mirrors onto every snapshot node.
 // Variant A (cardinality ≤1): a node carries at most one data binding; multiple volumes are
 // modeled as child volume nodes.
 //
@@ -44,11 +44,12 @@ type ArtifactRef struct {
 // internal/snapshot/api/v1alpha1 is outdated and is retired during Stage 2b when the tree
 // builder switches to ParseNodeStatus.
 type NodeData struct {
-	// Source identifies the captured PersistentVolumeClaim backing this node's data. Its uid is
+	// SourceRef identifies the captured PersistentVolumeClaim backing this node's data (the
+	// data-leaf PVC, distinct from the top-level status.sourceRef live domain object). Its uid is
 	// the single volume identity (state-snapshotter dropped the standalone targetUID).
-	Source SourceRefIdentity `json:"source"`
-	// Artifact references the cluster-scoped durable data artifact.
-	Artifact ArtifactRef `json:"artifact"`
+	SourceRef SourceRefIdentity `json:"sourceRef"`
+	// ArtifactRef references the cluster-scoped durable data artifact.
+	ArtifactRef ArtifactRef `json:"artifactRef"`
 	// VolumeMode is the source volume mode (Block or Filesystem).
 	VolumeMode string `json:"volumeMode,omitempty"`
 	// FsType is the source filesystem type (Filesystem volumes only).
@@ -156,12 +157,12 @@ func parseStatusData(obj *unstructured.Unstructured) (*NodeData, error) {
 		return nil, fmt.Errorf("%s: decode status.data: %w", objRefString(obj), err)
 	}
 
-	if d.Source.APIVersion == "" || d.Source.Kind == "" || d.Source.Name == "" {
-		return nil, fmt.Errorf("%s: status.data.source is incomplete (apiVersion/kind/name required)", objRefString(obj))
+	if d.SourceRef.APIVersion == "" || d.SourceRef.Kind == "" || d.SourceRef.Name == "" {
+		return nil, fmt.Errorf("%s: status.data.sourceRef is incomplete (apiVersion/kind/name required)", objRefString(obj))
 	}
 
-	if d.Artifact.APIVersion == "" || d.Artifact.Kind == "" || d.Artifact.Name == "" {
-		return nil, fmt.Errorf("%s: status.data.artifact is incomplete (apiVersion/kind/name required)", objRefString(obj))
+	if d.ArtifactRef.APIVersion == "" || d.ArtifactRef.Kind == "" || d.ArtifactRef.Name == "" {
+		return nil, fmt.Errorf("%s: status.data.artifactRef is incomplete (apiVersion/kind/name required)", objRefString(obj))
 	}
 
 	if d.Size != "" {
