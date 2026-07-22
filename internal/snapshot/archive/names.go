@@ -135,12 +135,9 @@ func DataBlockName(ext string) string {
 
 // FindBlockData searches nodeDir for a completed block-volume file (any file
 // whose name starts with DataBlockBase, excluding the staging directory
-// DataBlockBase+".d" and any BlockChunkIndexSuffix sidecar). The first
-// non-directory, non-sidecar match is returned as an absolute path. The second
-// return value is false when no such file exists — including the edge case
-// where only a ".chunkidx" sidecar is present (e.g. a crash between writing
-// the payload and its index). An I/O error is returned in the third return
-// value.
+// DataBlockBase+".d"). The first non-directory match is returned as an
+// absolute path. The second return value is false when no such file exists.
+// An I/O error is returned in the third return value.
 func FindBlockData(nodeDir string) (string, bool, error) {
 	pattern := filepath.Join(nodeDir, DataBlockBase+"*")
 
@@ -150,10 +147,6 @@ func FindBlockData(nodeDir string) (string, bool, error) {
 	}
 
 	for _, m := range matches {
-		if strings.HasSuffix(m, BlockChunkIndexSuffix) {
-			continue
-		}
-
 		info, statErr := os.Stat(m)
 		if statErr != nil {
 			continue
