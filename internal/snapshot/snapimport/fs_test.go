@@ -1192,9 +1192,18 @@ func newMemoryBoundedFSServer(t *testing.T) *httptest.Server {
 // TestPutBlockCompressed_StreamingIsMemoryBounded: build a >=200 MiB, highly-compressible
 // synthetic zstd tar entry — the on-disk fixture itself stays tiny thanks to the
 // repetition, keeping this test fast despite the large logical size — and upload it
-// through importFSFromTar against a real httptest.Server, tracking the largest single
-// Read() the outgoing PUT body ever serves via the same requestBodyReadTracker /
-// trackedRequestBody / trackingBodyDoer helpers the block-side test uses.
+// through importFSFromTar against a real httptest.Server, using the same
+// requestBodyReadTracker / trackedRequestBody / trackingBodyDoer helpers the block-side
+// test uses.
+//
+// The pass/fail signal is the live-heap growth sampled at the very first Read of the
+// outgoing PUT body (armHeapBaseline/peakHeapDelta), not the PUT body's Read() chunk size:
+// tracking only the chunk size does NOT detect a full-buffering regression, since net/http's
+// own request-write copy loop chunks ANY io.Reader body into the same small (~32KiB) pieces
+// whether the underlying data was disk-streamed or pre-materialized (empirically confirmed in
+// the 2026-07-22 review — see cross-cutting invariant #11 in .agent/implementer-prompt.md).
+// The chunk-size metric is still reported for diagnostics below, but no longer decides the
+// outcome.
 //
 // PASS 1 and PASS 2 both construct their decode reader via the IDENTICAL
 // compress.NewReader(ext, ...) call over the same codec and the same on-disk bytes — PASS
@@ -1245,6 +1254,11 @@ func TestImportFSFromTar_StreamingIsMemoryBounded(t *testing.T) {
 	tracker := &requestBodyReadTracker{}
 	doer := &trackingBodyDoer{client: srv.Client(), tracker: tracker}
 
+	// Arm the baseline AFTER every fixture allocation (content, the tar buffer, the on-disk
+	// file) so those stay folded into the baseline and only new allocations made by
+	// importFSFromTar itself move the delta.
+	tracker.armHeapBaseline()
+
 	var reported int
 
 	var lastTotal int64
@@ -1263,16 +1277,23 @@ func TestImportFSFromTar_StreamingIsMemoryBounded(t *testing.T) {
 		t.Errorf("setTotal final value = %d, want %d (single file's exact decompressed size)", lastTotal, len(content))
 	}
 
-	// 4 MiB sits far below payloadSize yet comfortably above net/http's actual ~32 KiB
-	// default copy buffer, giving ample margin while still catching any regression that
-	// buffers a large fraction of the payload in one shot.
-	const ceiling = 4 * 1024 * 1024
+	// The heap must not have grown by anywhere near the payload size at the moment the
+	// transport started consuming the request body: an order of magnitude below payloadSize
+	// comfortably covers zstd's bounded decode window while still catching a regression that
+	// materializes a large fraction of the payload in one buffer before handing it to the body.
+	const heapCeiling = payloadSize / 10
 
-	if got := tracker.max(); got >= ceiling {
-		t.Errorf("largest single Read() on the outgoing PUT body was %d bytes, want < %d (%d MiB): "+
-			"the streaming FS upload path must never hand net/http a chunk anywhere near the full %d-byte payload",
-			got, ceiling, ceiling/(1024*1024), len(content))
+	if delta := tracker.peakHeapDelta(); delta >= heapCeiling {
+		t.Errorf("live heap grew by %d bytes (%.1f MiB) at the first Read of the outgoing PUT "+
+			"body, want < %d bytes (%d MiB): the streaming FS upload path must never have the "+
+			"whole (or a large fraction of the) decompressed %d-byte payload already resident in "+
+			"memory when the transport starts reading the request body",
+			delta, float64(delta)/(1024*1024), heapCeiling, heapCeiling/(1024*1024), len(content))
 	}
+
+	// Diagnostics only (see requestBodyReadTracker's doc comment): this number alone cannot
+	// tell genuine streaming apart from full buffering, so it no longer gates the test.
+	t.Logf("largest single Read() on the outgoing PUT body: %d bytes", tracker.max())
 
 	dirAfter, err := os.ReadDir(dir)
 	if err != nil {

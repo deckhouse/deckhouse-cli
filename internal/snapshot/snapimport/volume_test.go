@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,7 +35,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 
@@ -686,27 +687,84 @@ func TestPutBlockCompressed_NoTempFilesCreated(t *testing.T) {
 	}
 }
 
-// requestBodyReadTracker records the largest single byte count any Read call on an
-// outgoing PUT request body ever returned, across every request a trackingBodyDoer
-// forwards — used by TestPutBlockCompressed_StreamingIsMemoryBounded to prove the
-// streaming block-upload path never hands net/http's transport a chunk anywhere near
-// the whole decompressed payload size.
+// requestBodyReadTracker records two signals about every outgoing PUT request body a
+// trackingBodyDoer forwards.
+//
+// maxRead is the largest single byte count any Read call ever returned. It is REPORTED FOR
+// DIAGNOSTICS ONLY and no longer decides pass/fail: net/http's own request-write copy loop
+// chunks ANY io.Reader body -- a disk-streamed decode reader or a pre-filled in-memory
+// buffer alike -- into the same small (~32KiB) pieces, so this number cannot by itself
+// distinguish genuine incremental streaming from full in-memory buffering followed by a
+// bytes.Reader-backed body. This was confirmed empirically in the 2026-07-22 whole-batch
+// review: a throwaway io.ReadAll-then-bytes.Reader regression in putBlockCompressed still
+// produced a maxRead of exactly 32768 here, sailing under any chunk-size ceiling. See
+// cross-cutting invariant #11 in .agent/implementer-prompt.md.
+//
+// heapDelta is the actual discriminating signal: the process live-heap growth sampled ONCE,
+// at the very first byte pulled off the tracked body, relative to a baseline armHeapBaseline
+// records immediately before the code under test runs. A regression that decodes the whole
+// payload into one buffer before ever constructing the request body has that buffer already
+// live -- referenced by whatever wraps it as the body -- at the moment of that first Read, so
+// the delta spikes by roughly the payload size; genuine incremental streaming never holds more
+// than a small decode/copy buffer at once, so the delta stays near zero.
 type requestBodyReadTracker struct {
-	mu      sync.Mutex
-	maxRead int
+	mu        sync.Mutex
+	maxRead   int
+	baseline  uint64
+	sampled   bool
+	heapDelta int64
 }
 
+// armHeapBaseline forces a GC pass -- settling unrelated garbage so the reading reflects
+// genuinely live objects, not yet-uncollected trash -- and records the current live-heap
+// size as the reference point the first tracked Read will compare against. Call this
+// immediately before invoking the code under test, after all test-fixture setup: fixtures
+// allocated earlier (e.g. the synthetic payload buffer) stay live for the whole test
+// regardless of what the code under test does, so they are folded into the baseline and
+// cancel out of the delta -- only NEW allocations made by the code under test move it.
+func (t *requestBodyReadTracker) armHeapBaseline() {
+	runtime.GC()
+
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.baseline = ms.HeapAlloc
+}
+
+// record is invoked by trackedRequestBody on every Read of the outgoing PUT body. It always
+// tracks maxRead; on the very first call it also samples heapDelta against the armed
+// baseline, capturing the live heap at the moment the transport starts consuming the body --
+// exactly when a fully-materialized regression buffer would still be resident.
 func (t *requestBodyReadTracker) record(n int) {
 	if n <= 0 {
 		return
 	}
 
 	t.mu.Lock()
-	defer t.mu.Unlock()
 
 	if n > t.maxRead {
 		t.maxRead = n
 	}
+
+	firstRead := !t.sampled
+	t.sampled = true
+	baseline := t.baseline
+
+	t.mu.Unlock()
+
+	if !firstRead {
+		return
+	}
+
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+
+	t.mu.Lock()
+	t.heapDelta = int64(ms.HeapAlloc) - int64(baseline)
+	t.mu.Unlock()
 }
 
 func (t *requestBodyReadTracker) max() int {
@@ -714,6 +772,17 @@ func (t *requestBodyReadTracker) max() int {
 	defer t.mu.Unlock()
 
 	return t.maxRead
+}
+
+// peakHeapDelta returns the live-heap growth sampled at the first Read of the tracked
+// request body, relative to the baseline armHeapBaseline recorded. This is what
+// TestPutBlockCompressed_StreamingIsMemoryBounded and
+// TestImportFSFromTar_StreamingIsMemoryBounded assert against.
+func (t *requestBodyReadTracker) peakHeapDelta() int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.heapDelta
 }
 
 // trackedRequestBody wraps an outgoing request body, recording the length of the buffer
@@ -801,8 +870,17 @@ func newMemoryBoundedBlockServer(t *testing.T) *httptest.Server {
 // payload in one in-process buffer. It builds a >=200 MiB, highly-compressible synthetic
 // zstd block volume — the on-disk fixture itself stays tiny thanks to the repetition,
 // via writeEncodedBlockFile, keeping this test fast despite the large logical size — and
-// uploads it through putBlock against a real httptest.Server, tracking the largest
-// single Read() the outgoing PUT body ever serves.
+// uploads it through putBlock against a real httptest.Server.
+//
+// The pass/fail signal is the live-heap growth requestBodyReadTracker samples at the very
+// first Read of the outgoing PUT body (see armHeapBaseline/peakHeapDelta): tracking only the
+// PUT body's Read() chunk size, as this test originally did, does NOT detect a full-
+// buffering regression — net/http's own request-write copy loop chunks ANY io.Reader body
+// into the same small (~32KiB) pieces whether the underlying data was disk-streamed or
+// pre-materialized, so that metric was empirically confirmed (2026-07-22 review) to still
+// pass under a throwaway io.ReadAll-then-bytes.Reader regression. See cross-cutting
+// invariant #11 in .agent/implementer-prompt.md. The chunk-size metric is still reported for
+// diagnostics below, but no longer decides the outcome.
 //
 // zstd is used deliberately: it is both the default codec and, per
 // compress/codec_test.go's TestCodec_EncodeFrameStream_MemoryBound, the one codec whose
@@ -829,6 +907,11 @@ func TestPutBlockCompressed_StreamingIsMemoryBounded(t *testing.T) {
 	tracker := &requestBodyReadTracker{}
 	doer := &trackingBodyDoer{client: srv.Client(), tracker: tracker}
 
+	// Arm the baseline AFTER every fixture allocation (payload, the on-disk file) so those
+	// stay folded into the baseline and only new allocations made by putBlock itself move
+	// the delta.
+	tracker.armHeapBaseline()
+
 	var reported int64
 
 	err := putBlock(context.Background(), doer, srv.URL, dataFile, ".zst", int64(len(payload)), discardLogger(), func(n int) { reported += int64(n) })
@@ -840,16 +923,23 @@ func TestPutBlockCompressed_StreamingIsMemoryBounded(t *testing.T) {
 		t.Errorf("reported progress bytes = %d, want %d (total payload size)", reported, len(payload))
 	}
 
-	// 4 MiB sits far below payloadSize yet comfortably above net/http's actual ~32 KiB
-	// default copy buffer, giving ample margin while still catching any regression that
-	// buffers a large fraction of the payload in one shot.
-	const ceiling = 4 * 1024 * 1024
+	// The heap must not have grown by anywhere near the payload size at the moment the
+	// transport started consuming the request body: an order of magnitude below payloadSize
+	// comfortably covers zstd's bounded decode window while still catching a regression that
+	// materializes a large fraction of the payload in one buffer before handing it to the body.
+	const heapCeiling = payloadSize / 10
 
-	if got := tracker.max(); got >= ceiling {
-		t.Errorf("largest single Read() on the outgoing PUT body was %d bytes, want < %d (%d MiB): "+
-			"the streaming upload path must never hand net/http a chunk anywhere near the full %d-byte payload",
-			got, ceiling, ceiling/(1024*1024), len(payload))
+	if delta := tracker.peakHeapDelta(); delta >= heapCeiling {
+		t.Errorf("live heap grew by %d bytes (%.1f MiB) at the first Read of the outgoing PUT "+
+			"body, want < %d bytes (%d MiB): the streaming upload path must never have the whole "+
+			"(or a large fraction of the) decompressed %d-byte payload already resident in memory "+
+			"when the transport starts reading the request body",
+			delta, float64(delta)/(1024*1024), heapCeiling, heapCeiling/(1024*1024), len(payload))
 	}
+
+	// Diagnostics only (see requestBodyReadTracker's doc comment): this number alone cannot
+	// tell genuine streaming apart from full buffering, so it no longer gates the test.
+	t.Logf("largest single Read() on the outgoing PUT body: %d bytes", tracker.max())
 }
 
 func completedDataImportObj(namespace, name string) *unstructured.Unstructured {
@@ -878,12 +968,12 @@ func TestUploadVolumeData_SkipsCompleted(t *testing.T) {
 	}
 }
 
-func newFakeDataImportDyn(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
+func newFakeDataImportDyn(objs ...k8sruntime.Object) *dynamicfake.FakeDynamicClient {
 	gvrToListKind := map[schema.GroupVersionResource]string{
 		dataImportGVR: "DataImportList",
 	}
 
-	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, objs...)
+	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), gvrToListKind, objs...)
 }
 
 func dataImportObj(namespace, name string, expired bool) *unstructured.Unstructured {
