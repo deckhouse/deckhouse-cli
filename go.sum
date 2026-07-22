@@ -152,8 +152,6 @@ github.com/PuerkitoBio/purell v1.1.1 h1:WEQqlqaGbrPkxLJWfBwQmfEAE1Z7ONdDLqrN38tN
 github.com/PuerkitoBio/purell v1.1.1/go.mod h1:c11w/QuzBsJSee3cPx9rAFu61PvFxuPbtSwDGJws/X0=
 github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578 h1:d+Bc7a5rLufV/sSk/8dngufqelfh6jnri85riMAaF/M=
 github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578/go.mod h1:uGdkoq3SwY9Y+13GIhn11/XLaGBb4BfwItxLd5jeuXE=
-github.com/SaveTheRbtz/zstd-seekable-format-go/pkg v0.10.0 h1:LvK7+C6qgz8BPnmn7xGekf8vTkcqTvyBBHaLYIMxx0g=
-github.com/SaveTheRbtz/zstd-seekable-format-go/pkg v0.10.0/go.mod h1:I28hc9eaiqKCoOB+9Wh/P1IOScfm0xCgyWC6DAo0lmo=
 github.com/Sectorbob/mlab-ns2 v0.0.0-20171030222938-d3aa0c295a8a h1:KFHLI4QGttB0i7M3qOkAo8Zn/GSsxwwCnInFqBaYtkM=
 github.com/Sectorbob/mlab-ns2 v0.0.0-20171030222938-d3aa0c295a8a/go.mod h1:D73UAuEPckrDorYZdtlCu2ySOLuPB5W4rhIkmmc/XbI=
 github.com/Shopify/logrus-bugsnag v0.0.0-20170309145241-6dbc35f2c30d/go.mod h1:HI8ITrYtUY+O+ZhtlqUnD8+KwNPOyugEhfP9fdUIaEQ=
