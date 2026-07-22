@@ -216,3 +216,134 @@ func TestRun_NodeFlag_InvalidFormat(t *testing.T) {
 		t.Fatalf("error should mention %q, got: %v", flagNode, err)
 	}
 }
+
+func TestNewCommand_ScopeFlagDefault(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	scope, err := cmd.Flags().GetString(flagScope)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagScope, err)
+	}
+
+	if scope != "subtree" {
+		t.Fatalf("default --%s: got %q, want %q", flagScope, scope, "subtree")
+	}
+}
+
+func TestNewCommand_ObjectFlagDefault(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	object, err := cmd.Flags().GetString(flagObject)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagObject, err)
+	}
+
+	if object != "" {
+		t.Fatalf("default --%s: got %q, want empty string (no object filter)", flagObject, object)
+	}
+}
+
+// TestRun_ScopeObjectFlags_ValidAndInvalidCombinations exercises the client-side validation
+// of --scope/--object before Run reaches the network: an unknown --scope value, --object
+// used without --scope node, and every valid combination (default, --scope node alone,
+// --scope node with --object).
+func TestRun_ScopeObjectFlags_ValidAndInvalidCombinations(t *testing.T) {
+	t.Helper()
+
+	tests := []struct {
+		name        string
+		scope       string
+		object      string
+		wantErr     bool
+		wantErrText string
+	}{
+		{
+			name:  "neither flag set: default scope=subtree, no object filter",
+			scope: "", object: "",
+		},
+		{
+			name:  "scope=node, no object filter (whole node, no children)",
+			scope: "node", object: "",
+		},
+		{
+			name:  "scope=node with object filter",
+			scope: "node", object: "PersistentVolumeClaim/bk-disk-a",
+		},
+		{
+			name:        "unknown scope value rejected client-side",
+			scope:       "bogus",
+			wantErr:     true,
+			wantErrText: flagScope,
+		},
+		{
+			name:        "object without scope=node rejected client-side",
+			scope:       "subtree",
+			object:      "PersistentVolumeClaim/bk-disk-a",
+			wantErr:     true,
+			wantErrText: flagObject,
+		},
+		{
+			name:        "object with default (unset) scope rejected client-side",
+			object:      "PersistentVolumeClaim/bk-disk-a",
+			wantErr:     true,
+			wantErrText: flagObject,
+		},
+		{
+			name:        "malformed object flag rejected client-side",
+			scope:       "node",
+			object:      "NoSlashHere",
+			wantErr:     true,
+			wantErrText: flagObject,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+
+			cmd := NewCommand(slog.Default())
+
+			if err := cmd.Flags().Set(flagNamespace, "test-ns"); err != nil {
+				t.Fatalf("setting namespace flag: %v", err)
+			}
+
+			if tc.scope != "" {
+				if err := cmd.Flags().Set(flagScope, tc.scope); err != nil {
+					t.Fatalf("setting scope flag: %v", err)
+				}
+			}
+
+			if tc.object != "" {
+				if err := cmd.Flags().Set(flagObject, tc.object); err != nil {
+					t.Fatalf("setting object flag: %v", err)
+				}
+			}
+
+			// Run always fails past validation in this unit test (no live cluster to build
+			// clients against); assert on the validation-stage error only by requiring the
+			// invalid cases to fail with a specific message and the valid cases to get past
+			// flag validation (i.e. not fail with a --scope/--object-shaped message).
+			err := Run(slog.Default(), cmd, []string{"my-snap"})
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected a validation error, got nil")
+				}
+
+				if !strings.Contains(err.Error(), tc.wantErrText) {
+					t.Fatalf("error should mention %q, got: %v", tc.wantErrText, err)
+				}
+
+				return
+			}
+
+			if err != nil && (strings.Contains(err.Error(), "invalid --"+flagScope) || strings.Contains(err.Error(), "--"+flagObject+" requires")) {
+				t.Fatalf("valid combination unexpectedly rejected by flag validation: %v", err)
+			}
+		})
+	}
+}
