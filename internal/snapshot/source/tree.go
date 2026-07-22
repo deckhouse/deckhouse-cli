@@ -113,6 +113,7 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 		UID:        ident.UID,
 		SourceRef:  sourceRef,
 		Data:       data,
+		Ready:      parseReadyCondition(obj),
 		Parent:     parent,
 	}
 
@@ -189,6 +190,7 @@ func (b *treeBuilder) visitVisibilityLeaf(ctx context.Context, vsName string, pa
 		UID:        ident.UID,
 		SourceRef:  sourceRef,
 		Data:       data,
+		Ready:      parseReadyCondition(vs),
 		Parent:     parent,
 	}, nil
 }
