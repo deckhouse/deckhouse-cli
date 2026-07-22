@@ -45,6 +45,7 @@ package aggapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -223,20 +224,126 @@ func (c *Client) getManifestsDownload(ctx context.Context, path string) ([]byte,
 	}
 }
 
+// RestoreScope selects the compilation depth of a RestoreManifestsScoped call, mirroring
+// state-snapshotter's usecase/restore.Scope wire values verbatim (restore_handler.go
+// parseRestoreQueryOptions) — these literals go on the wire as the "scope" query param, so they
+// must match the server exactly, not just read similarly.
+type RestoreScope string
+
+const (
+	// RestoreScopeSubtree compiles the addressed node and its whole subtree, recursively. It is
+	// the server's default when the scope query param is omitted entirely.
+	RestoreScopeSubtree RestoreScope = "subtree"
+	// RestoreScopeNode compiles ONLY the addressed node, with no descendants. Required before an
+	// object filter (FilterKind/FilterName/FilterAPIVersion) is accepted.
+	RestoreScopeNode RestoreScope = "node"
+)
+
+// RestoreScopeOptions narrows a RestoreManifestsScoped call to one node (Scope ==
+// RestoreScopeNode) and, optionally, a single captured object within that node (FilterKind +
+// FilterName, with FilterAPIVersion further disambiguating). The server accepts the object filter
+// ONLY together with Scope == RestoreScopeNode and rejects any other combination with a 400
+// (restore_handler.go parseRestoreQueryOptions) — RestoreManifestsScoped does not pre-validate
+// this client-side, it lets the server enforce its own contract and surfaces the resulting
+// ErrRestoreBadRequest. A zero-value RestoreScopeOptions reproduces today's default (full subtree,
+// no filter) byte-for-byte: no scope/kind/name/apiVersion query params are sent at all.
+type RestoreScopeOptions struct {
+	Scope            RestoreScope
+	FilterKind       string
+	FilterName       string
+	FilterAPIVersion string
+}
+
 // RestoreManifests performs GET <node>/manifests-with-data-restoration?targetNamespace=<ns>
 // and returns the raw apply-ready JSON array body for the node's whole subtree.
+//
+// It is a thin wrapper over RestoreManifestsScoped with a zero-value RestoreScopeOptions; callers
+// that need scope=node or an object filter call RestoreManifestsScoped directly.
 func (c *Client) RestoreManifests(ctx context.Context, ref NodeRef, targetNamespace string) ([]byte, error) {
+	return c.RestoreManifestsScoped(ctx, ref, targetNamespace, RestoreScopeOptions{})
+}
+
+// RestoreManifestsScoped performs GET <node>/manifests-with-data-restoration with targetNamespace
+// and, when set, the server's scope/kind/name/apiVersion query params (restore_handler.go
+// parseRestoreQueryOptions). Each of opts.Scope/FilterKind/FilterName/FilterAPIVersion is sent
+// ONLY when non-empty — an empty Scope omits the scope param entirely rather than sending
+// scope=subtree explicitly, reproducing the server's own default byte-for-byte.
+func (c *Client) RestoreManifestsScoped(ctx context.Context, ref NodeRef, targetNamespace string, opts RestoreScopeOptions) ([]byte, error) {
 	path, err := c.subresourcePath(ref, SubManifestsRestore)
 	if err != nil {
 		return nil, err
 	}
 
-	body, err := c.rest.Get().AbsPath(path).Param("targetNamespace", targetNamespace).DoRaw(ctx)
+	req := c.rest.Get().AbsPath(path).Param("targetNamespace", targetNamespace)
+	if opts.Scope != "" {
+		req = req.Param("scope", string(opts.Scope))
+	}
+
+	if opts.FilterKind != "" {
+		req = req.Param("kind", opts.FilterKind)
+	}
+
+	if opts.FilterName != "" {
+		req = req.Param("name", opts.FilterName)
+	}
+
+	if opts.FilterAPIVersion != "" {
+		req = req.Param("apiVersion", opts.FilterAPIVersion)
+	}
+
+	body, err := req.DoRaw(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s?targetNamespace=%s: %w", path, targetNamespace, err)
+		return nil, classifyRestoreError(path, err, body)
 	}
 
 	return body, nil
+}
+
+// ErrRestoreBadRequest is returned by RestoreManifestsScoped when the server rejects the request
+// as invalid (state-snapshotter restore.ErrBadRequest wire equivalent: an unknown scope value, an
+// object filter missing kind or name, or an object filter used with a scope other than
+// RestoreScopeNode). Distinguish it from other failures with errors.Is.
+var ErrRestoreBadRequest = errors.New("restore request rejected as invalid")
+
+// ErrRestoreNotFound is returned by RestoreManifestsScoped when the addressed node, or — with an
+// object filter — the requested object within it, does not exist. Distinguish it from other
+// failures with errors.Is.
+var ErrRestoreNotFound = errors.New("restore target not found")
+
+// classifyRestoreError maps a RestoreManifestsScoped DoRaw failure to a wrapped, distinguishable
+// CLI-facing error instead of a bare generic failure the caller would have to inspect an HTTP
+// status code to understand.
+//
+// DoRaw derives err's k8s error TYPE purely from the HTTP status code (errors.NewGenericServerResponse
+// — see isImportContentNotBound's doc comment for the same mechanism), so apierrors.IsBadRequest /
+// apierrors.IsNotFound already classify 400/404 correctly. But that generic error's MESSAGE is a
+// fixed placeholder string for a JSON body (DoRaw's isTextResponse check is false for
+// "application/json"), discarding the server's actual explanation (e.g. which validation rule in
+// parseRestoreQueryOptions failed). body is the raw metav1.Status JSON DoRaw returns alongside the
+// error on every failure; decode it best-effort to recover that explanation for the caller.
+func classifyRestoreError(path string, err error, body []byte) error {
+	message := restoreErrorMessage(body)
+
+	switch {
+	case apierrors.IsBadRequest(err):
+		return fmt.Errorf("GET %s: %w: %s: %w", path, ErrRestoreBadRequest, message, err)
+	case apierrors.IsNotFound(err):
+		return fmt.Errorf("GET %s: %w: %s: %w", path, ErrRestoreNotFound, message, err)
+	default:
+		return fmt.Errorf("GET %s: %w", path, err)
+	}
+}
+
+// restoreErrorMessage best-effort decodes body as a metav1.Status and returns its Message, or a
+// fixed fallback when body is not a well-formed Status with a message (e.g. empty body, or a
+// transport-level failure with no server response at all).
+func restoreErrorMessage(body []byte) string {
+	var status metav1.Status
+	if err := json.Unmarshal(body, &status); err != nil || status.Message == "" {
+		return "no further detail from the server"
+	}
+
+	return status.Message
 }
 
 // UploadManifests performs POST <node>/manifests-and-children-refs-upload with the
