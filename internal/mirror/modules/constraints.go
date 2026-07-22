@@ -96,6 +96,42 @@ func NewSemanticVersionConstraint(c string) (*SemanticVersionConstraint, error) 
 	}, nil
 }
 
+// NewImplicitVersionConstraint builds the constraint for a bare, operator-less
+// version literal (e.g. `alb@0.4.0`). Historically this was implemented by
+// prepending a caret (`^0.4.0`), but Masterminds' caret special-cases the 0.x
+// major line: `^0.4.0` expands to `>=0.4.0 <0.5.0`, locking the MINOR instead
+// of the major. In a catch-up mirror that silently drops every intermediate
+// 0.x minor (0.5.*, 0.6.* …), leaving gaps that block sequential upgrades.
+//
+// We instead expand a bare version to `>=X.Y.Z <(major+1).0.0`, treating major
+// 0 like any other major. For major >= 1 this is byte-for-byte equivalent to
+// the previous caret behaviour (`^1.52.0` == `>=1.52.0 <2.0.0`); for major 0 it
+// now spans the whole 0.x line from the named version upward.
+//
+// The synthesized `>=` lower bound is deliberately NOT registered as an anchor:
+// the user wrote a bare version, not an explicit inclusive boundary, so the
+// latest-patch-per-minor filter stays free to collapse same-minor patches (see
+// the anchors field doc). This preserves the issue #220 behaviour.
+func NewImplicitVersionConstraint(version string) (*SemanticVersionConstraint, error) {
+	ver, err := semver.NewVersion(version)
+	if err != nil {
+		return nil, fmt.Errorf("invalid version %q: %w", version, err)
+	}
+
+	rangeStr := fmt.Sprintf(">= %s, < %d.0.0", ver.String(), ver.Major()+1)
+
+	constraint, err := semver.NewConstraint(rangeStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid implicit version constraint %q: %w", rangeStr, err)
+	}
+
+	return &SemanticVersionConstraint{
+		constraint: constraint,
+		anchors:    nil,
+		lowerBound: ver,
+	}, nil
+}
+
 // Anchors returns the versions explicitly named with an inclusive boundary
 // operator (>=, <=). Callers must re-check membership against the constraint
 // itself (Match) before consuming an anchor: an anchor that fails Match means
