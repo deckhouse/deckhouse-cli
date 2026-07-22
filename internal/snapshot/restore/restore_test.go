@@ -62,15 +62,17 @@ type stubSource struct {
 	body []byte
 	err  error
 
-	gotRef aggapi.NodeRef
-	gotNS  string
-	calls  int
+	gotRef  aggapi.NodeRef
+	gotNS   string
+	gotOpts aggapi.RestoreScopeOptions
+	calls   int
 }
 
-func (s *stubSource) RestoreManifests(_ context.Context, ref aggapi.NodeRef, targetNamespace string) ([]byte, error) {
+func (s *stubSource) RestoreManifestsScoped(_ context.Context, ref aggapi.NodeRef, targetNamespace string, opts aggapi.RestoreScopeOptions) ([]byte, error) {
 	s.calls++
 	s.gotRef = ref
 	s.gotNS = targetNamespace
+	s.gotOpts = opts
 
 	return s.body, s.err
 }
@@ -1419,6 +1421,102 @@ func TestRun_SelectedNode_ChildNotReadyAborts(t *testing.T) {
 
 	if src.calls != 0 {
 		t.Errorf("Source must not be called when selected-node preflight fails, got %d calls", src.calls)
+	}
+}
+
+// TestRun_ScopeOptions_ForwardedToSource verifies Run passes cfg.Scope/FilterKind/FilterName
+// through to Source.RestoreManifestsScoped unchanged, for the default (zero-value), scope=node,
+// and scope=node+object-filter combinations the cmd/restore flags can produce.
+func TestRun_ScopeOptions_ForwardedToSource(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		scope    aggapi.RestoreScope
+		wantOpts aggapi.RestoreScopeOptions
+	}{
+		{
+			name:     "default: zero-value scope options (subtree, no filter)",
+			scope:    "",
+			wantOpts: aggapi.RestoreScopeOptions{},
+		},
+		{
+			name:     "scope=node, no object filter",
+			scope:    aggapi.RestoreScopeNode,
+			wantOpts: aggapi.RestoreScopeOptions{Scope: aggapi.RestoreScopeNode},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+			dyn := newFakeDynamic(readySnapshot())
+
+			cfg := baseConfig(src, dyn)
+			cfg.Scope = tc.scope
+
+			if err := Run(context.Background(), cfg); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			if src.gotOpts != tc.wantOpts {
+				t.Errorf("RestoreScopeOptions: got %+v, want %+v", src.gotOpts, tc.wantOpts)
+			}
+		})
+	}
+}
+
+// TestRun_ScopeNodeWithObjectFilter_ForwardedToSource verifies that FilterKind/FilterName set
+// alongside Scope==RestoreScopeNode on a SelectedNode restore reach Source unchanged, addressed
+// at the selected node's NodeRef (not the root).
+func TestRun_ScopeNodeWithObjectFilter_ForwardedToSource(t *testing.T) {
+	t.Parallel()
+
+	const childName = "nss-child-abc123"
+
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+	dyn := newFakeDynamic(readySnapshot(), readyDomainDiskSnapshot(childName))
+
+	cfg := Config{
+		Namespace:        testNS,
+		Snapshot:         testSnap,
+		SelectedNodeKind: "DemoVirtualDiskSnapshot",
+		SelectedNodeName: childName,
+		Scope:            aggapi.RestoreScopeNode,
+		FilterKind:       "DemoVirtualDisk",
+		FilterName:       "bk-disk-a",
+		Source:           src,
+		Dynamic:          dyn,
+		Mapper:           testMapperWithDomain(),
+		Log:              discardLogger(),
+		PollInterval:     time.Millisecond,
+	}
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	wantOpts := aggapi.RestoreScopeOptions{
+		Scope:      aggapi.RestoreScopeNode,
+		FilterKind: "DemoVirtualDisk",
+		FilterName: "bk-disk-a",
+	}
+
+	if src.gotOpts != wantOpts {
+		t.Errorf("RestoreScopeOptions: got %+v, want %+v", src.gotOpts, wantOpts)
+	}
+
+	wantRef := aggapi.NodeRef{
+		APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+		Kind:       "DemoVirtualDiskSnapshot",
+		Name:       childName,
+		Namespace:  testNS,
+	}
+
+	if src.gotRef != wantRef {
+		t.Errorf("NodeRef: got %+v, want %+v", src.gotRef, wantRef)
 	}
 }
 

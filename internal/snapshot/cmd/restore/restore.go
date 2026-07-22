@@ -42,6 +42,8 @@ const (
 
 	flagNamespace = "namespace"
 	flagNode      = "node"
+	flagScope     = "scope"
+	flagObject    = "object"
 	flagDryRun    = "dry-run"
 	flagEdit      = "edit"
 	flagWait      = "wait"
@@ -74,6 +76,14 @@ VirtualDiskSnapshot for domain disks) present in the namespace, so CSI provision
 Ready (the subtree data lives under the same snapshot); only the manifest compilation is
 scoped to the selected node.
 
+--scope narrows how much of the addressed node (the root, or --node's selection) the server
+compiles: "subtree" (default) compiles the node and its whole subtree, recursively; "node"
+compiles only the addressed node itself, with no descendants. --scope node with no --node
+selects the root Snapshot node alone.
+
+--object restricts a --scope node restore to a single captured object within that node, by
+"<Kind>/<name>"; it requires --scope node and fails fast, before any network call, otherwise.
+
 --dry-run sends every apply with DryRunAll so the API server validates and admits objects
 (schema validation, webhooks, immutable-field checks) without persisting them. Use it to
 preflight a restore before committing. The --wait loop is skipped in dry-run mode because
@@ -87,6 +97,12 @@ output), so they are not awaited; the command may return before such volumes fin
 
   # Restore only a single disk-snapshot node and its subtree
   d8 snapshot restore my-snap -n default --node DemoVirtualDiskSnapshot/nss-child-abc123
+
+  # Restore only the selected node itself, no descendants
+  d8 snapshot restore my-snap -n default --node DemoVirtualDiskSnapshot/nss-child-abc123 --scope node
+
+  # Restore a single captured object within a node
+  d8 snapshot restore my-snap -n default --node DemoVirtualDiskSnapshot/nss-child-abc123 --scope node --object PersistentVolumeClaim/bk-disk-a
 
   # Preflight: validate all objects without applying them
   d8 snapshot restore my-snap -n default --dry-run
@@ -104,6 +120,8 @@ output), so they are not awaited; the command may return before such volumes fin
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "snapshot namespace; also the restore target namespace (required)")
 	cmd.Flags().String(flagNode, "", "restrict restore to a single node subtree; format '<Kind>/<name>' (e.g. --node DemoVirtualDiskSnapshot/nss-child-abc123)")
+	cmd.Flags().String(flagScope, string(aggapi.RestoreScopeSubtree), "restore scope: 'subtree' (default) compiles the addressed node and its whole subtree; 'node' compiles only the addressed node itself")
+	cmd.Flags().String(flagObject, "", "restrict a --scope node restore to a single captured object; format '<Kind>/<name>' (requires --scope node)")
 	cmd.Flags().Bool(flagDryRun, false, "validate objects via DryRunAll without persisting; skips --wait (use to preflight a restore)")
 	cmd.Flags().Bool(flagEdit, false, "open resolved manifests in $KUBE_EDITOR/$EDITOR before applying; aborts on non-zero exit, unchanged, or empty content")
 	cmd.Flags().Bool(flagWait, false, "wait for restored PersistentVolumeClaims to become Bound (only PVCs in the manifest set; domain disk-backed PVCs created asynchronously are not awaited)")
@@ -143,6 +161,30 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	selectedKind, selectedName, err := parseNodeFlag(nodeFlag)
 	if err != nil {
 		return fmt.Errorf("invalid --%s %q: %w", flagNode, nodeFlag, err)
+	}
+
+	scopeFlag, err := cmd.Flags().GetString(flagScope)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagScope, err)
+	}
+
+	scope := aggapi.RestoreScope(scopeFlag)
+	if scope != aggapi.RestoreScopeSubtree && scope != aggapi.RestoreScopeNode {
+		return fmt.Errorf("invalid --%s %q: must be %q or %q", flagScope, scopeFlag, aggapi.RestoreScopeSubtree, aggapi.RestoreScopeNode)
+	}
+
+	objectFlag, err := cmd.Flags().GetString(flagObject)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagObject, err)
+	}
+
+	filterKind, filterName, err := parseNodeFlag(objectFlag)
+	if err != nil {
+		return fmt.Errorf("invalid --%s %q: %w", flagObject, objectFlag, err)
+	}
+
+	if filterKind != "" && scope != aggapi.RestoreScopeNode {
+		return fmt.Errorf("--%s requires --%s=%s (got --%s=%s)", flagObject, flagScope, aggapi.RestoreScopeNode, flagScope, scope)
 	}
 
 	dryRun, err := cmd.Flags().GetBool(flagDryRun)
@@ -195,6 +237,9 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		Snapshot:         snapshotName,
 		SelectedNodeKind: selectedKind,
 		SelectedNodeName: selectedName,
+		Scope:            scope,
+		FilterKind:       filterKind,
+		FilterName:       filterName,
 		Edit:             edit,
 		DryRun:           dryRun,
 		Wait:             wait,
@@ -222,9 +267,10 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// parseNodeFlag parses a --node flag value "<Kind>/<name>" into its components.
-// An empty string returns empty strings and no error (full-tree restore).
-// The value must contain exactly one "/" with a non-empty kind and name on each side.
+// parseNodeFlag parses a "<Kind>/<name>" flag value into its components. Shared by --node
+// and --object, which use the identical format. An empty string returns empty strings and
+// no error (full-tree restore for --node; no object filter for --object). The value must
+// contain exactly one "/" with a non-empty kind and name on each side.
 func parseNodeFlag(s string) (string, string, error) {
 	if s == "" {
 		return "", "", nil

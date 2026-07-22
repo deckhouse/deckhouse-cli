@@ -77,10 +77,11 @@ type leafRef struct {
 	name  string
 }
 
-// Source reads the apply-ready manifest array for a snapshot subtree from the
+// Source reads the apply-ready manifest array for a snapshot subtree (or, with
+// aggapi.RestoreScopeNode and an object filter, a single captured object) from the
 // state-snapshotter aggregated API. It is satisfied by *aggapi.Client and stubbed in tests.
 type Source interface {
-	RestoreManifests(ctx context.Context, ref aggapi.NodeRef, targetNamespace string) ([]byte, error)
+	RestoreManifestsScoped(ctx context.Context, ref aggapi.NodeRef, targetNamespace string, opts aggapi.RestoreScopeOptions) ([]byte, error)
 }
 
 // Config holds all parameters for one in-namespace restore run.
@@ -91,13 +92,27 @@ type Config struct {
 	Snapshot string
 
 	// SelectedNodeKind restricts the restore to a single node subtree when non-empty.
-	// RestoreManifests is called with that node's NodeRef (group/version resolved via
+	// RestoreManifestsScoped is called with that node's NodeRef (group/version resolved via
 	// Mapper) instead of the root Snapshot ref. Preflight checks the selected node's
 	// Ready (or readyToUse for VolumeSnapshot), not the root — so a Ready child can be
 	// restored even when the root is Ready=False/ChildSnapshotDeleted.
 	SelectedNodeKind string
 	// SelectedNodeName is the name of the selected node. Required when SelectedNodeKind is set.
 	SelectedNodeName string
+
+	// Scope narrows the server-side manifest compilation: aggapi.RestoreScopeSubtree (the
+	// zero value behaves identically) compiles the addressed node and its whole subtree;
+	// aggapi.RestoreScopeNode compiles only the addressed node, with no descendants.
+	Scope aggapi.RestoreScope
+	// FilterKind and FilterName, when both set, restrict the restore to a single captured
+	// object within the addressed node. The server accepts this only together with
+	// Scope == aggapi.RestoreScopeNode (see validate in cmd/restore) and 400s otherwise.
+	FilterKind string
+	FilterName string
+	// FilterAPIVersion further disambiguates FilterKind/FilterName when the node captures
+	// more than one object of the same kind+name under different API versions. Not yet
+	// exposed as a CLI flag (kind+name is unambiguous within a node); forwarded as-is.
+	FilterAPIVersion string
 
 	// Edit, when true, opens the resolved manifests in the user's preferred editor
 	// (kubectl-style: $KUBE_EDITOR, $EDITOR, vi) before the preflight and apply
@@ -173,7 +188,12 @@ func Run(ctx context.Context, cfg Config) error {
 		targetRef = ref
 	}
 
-	raw, err := cfg.Source.RestoreManifests(ctx, targetRef, cfg.Namespace)
+	raw, err := cfg.Source.RestoreManifestsScoped(ctx, targetRef, cfg.Namespace, aggapi.RestoreScopeOptions{
+		Scope:            cfg.Scope,
+		FilterKind:       cfg.FilterKind,
+		FilterName:       cfg.FilterName,
+		FilterAPIVersion: cfg.FilterAPIVersion,
+	})
 	if err != nil {
 		return fmt.Errorf("fetch restore manifests for %s/%s: %w", cfg.Namespace, cfg.Snapshot, err)
 	}
