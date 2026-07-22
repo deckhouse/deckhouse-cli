@@ -267,8 +267,15 @@ func parseOffsetHeader(h http.Header, name string) (int64, error) {
 // decompressed byte count after each file is successfully uploaded (or, for an
 // already-fully-uploaded entry, credited without any decompression at all).
 //
+// setTotal, when non-nil (nil disables reporting, matching onProgress's convention), is
+// called with a running sum of exact decompressed file sizes each time a new file's size
+// becomes known — at the done-skip credit point (from HEAD's Content-Length) and at the
+// not-done measure point (PASS 1's measured size, or hdr.Size directly for ext=="") — so
+// the reported total grows progressively as entries are walked instead of being knowable
+// only once the whole tar has been processed.
+//
 // TODO(follow-up): reproduce empty-directory and symlink entries when needed.
-func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath string, log *slog.Logger, onProgress func(int)) error {
+func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath string, log *slog.Logger, setTotal func(int64), onProgress func(int)) error {
 	f, err := os.Open(tarPath)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", tarPath, err)
@@ -278,6 +285,8 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 
 	skipped := 0
 	tr := tar.NewReader(f)
+
+	var runningTotal int64
 
 	for {
 		hdr, err := tr.Next()
@@ -312,6 +321,11 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 			// The server already has the complete, final file: skip decompression and
 			// the PUT attempt entirely. Do NOT read from tr for this entry — tar.Reader
 			// auto-skips its remaining unread bytes on the next tr.Next() call.
+			runningTotal += doneSize
+			if setTotal != nil {
+				setTotal(runningTotal)
+			}
+
 			if onProgress != nil && doneSize > 0 {
 				onProgress(int(doneSize))
 			}
@@ -334,6 +348,11 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 			// second file handle.
 			exactSize = hdr.Size
 
+			runningTotal += exactSize
+			if setTotal != nil {
+				setTotal(runningTotal)
+			}
+
 			if offset > 0 {
 				if _, ffErr := io.CopyN(io.Discard, tr, offset); ffErr != nil {
 					return fmt.Errorf("fast-forwarding %s to resume offset %d: %w", relPath, offset, ffErr)
@@ -355,6 +374,11 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 			exactSize, err = measureEntrySize(tr, ext)
 			if err != nil {
 				return fmt.Errorf("measure decompressed size of %s: %w", hdr.Name, err)
+			}
+
+			runningTotal += exactSize
+			if setTotal != nil {
+				setTotal(runningTotal)
 			}
 
 			if err := streamCompressedEntry(ctx, client, baseURL, tarPath, relPath, ext, payloadStart, hdr.Size, offset, exactSize, attrs); err != nil {

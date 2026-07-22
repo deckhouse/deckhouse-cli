@@ -77,11 +77,13 @@ type VolumeImporter interface {
 	// EnsureDataImport creates (idempotently) the DataImport for the leaf and returns its name.
 	EnsureDataImport(ctx context.Context, leaf PlannedNode, namespace string) (string, error)
 	// UploadVolumeData waits for the DataImport to become ready, streams the leaf's block
-	// data, finalises, and waits for completion. onProgress, when non-nil, is called with
-	// the number of bytes written after each chunk or file upload; nil disables progress
-	// reporting and leaves upload behaviour unchanged. setTotal, when non-nil, is called
-	// once with the expected total byte count before bytes are sent (block path only;
-	// see sendVolumeData for why the filesystem total is not yet reported).
+	// or filesystem data, finalises, and waits for completion. onProgress, when non-nil, is
+	// called with the number of bytes written after each chunk or file upload; nil disables
+	// progress reporting and leaves upload behaviour unchanged. setTotal, when non-nil, is
+	// called with the expected total byte count: once, before any bytes are sent, on the
+	// block path (the total is known up front from leaf.Size); progressively, with a
+	// growing running sum as each file's exact size becomes known, on the filesystem path
+	// (see sendVolumeData for why an accurate a-priori FS total is not free).
 	UploadVolumeData(ctx context.Context, leaf PlannedNode, diName, namespace string, setTotal func(int64), onProgress func(int)) error
 }
 
@@ -319,12 +321,20 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 			slog.String("namespace", namespace),
 			slog.String("dataimport", diName))
 
-		// NOTE: the FS progress total is intentionally not reported here. The local
-		// data.tar carries per-file *compressed* blob sizes in its headers, but the
-		// onProgress increments report *decompressed* bytes (see importFSFromTar).
-		// A correct denominator would require decompressing every entry up front
-		// just to measure it, so the FS-upload total is left as a follow-up.
-		if err := importFSFromTar(ctx, httpClient, url, leaf.TarFile, c.log, onProgress); err != nil {
+		// The FS-upload total is reported PROGRESSIVELY, not as a single a-priori value
+		// like the block path's setTotal(totalSize) below: a tar header only records a
+		// compressed entry's STORED length, so the true (decompressed) size of a LATER
+		// file is not knowable until importFSFromTar has walked every entry before it.
+		// Computing a full total up front would mean decompressing every entry just to
+		// measure it -- exactly the extra work the two-pass streaming design exists to
+		// avoid when a resume never needs it (see importFSFromTar). Instead, setTotal is
+		// threaded straight through: importFSFromTar calls it with a running sum each
+		// time a new file's exact size becomes known (a skipped/already-done file's size
+		// from HEAD's Content-Length, or a not-done file's exact size from its measure
+		// step / hdr.Size), so the bar's denominator grows as work is discovered rather
+		// than staying at zero for the whole upload. Honest limitation: the total is not
+		// complete until the LAST entry in the tar has been processed.
+		if err := importFSFromTar(ctx, httpClient, url, leaf.TarFile, c.log, setTotal, onProgress); err != nil {
 			return fmt.Errorf("upload filesystem data for %s/%s: %w", namespace, diName, err)
 		}
 
