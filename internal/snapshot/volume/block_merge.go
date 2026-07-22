@@ -86,10 +86,9 @@ var ErrDecodedLengthMismatch = errors.New("merged block volume decoded length mi
 //     totalSize raw bytes (verified; see ErrDecodedLengthMismatch).
 //   - The chunk directory and all its contents are removed.
 //   - No sidecar file is ever written alongside outPath, for any codec: the
-//     '.chunkidx' sidecar this function used to write is superseded by the
-//     zstd path's own embedded seek table (see remove-chunkidx-sidecar-machinery,
-//     which deletes the now-unused archive.BlockChunkIndex machinery once
-//     nothing produces or consumes it).
+//     chunk-offset index sidecar this function used to write is superseded by
+//     the zstd path's own embedded seek table (the sidecar machinery itself
+//     has since been deleted — nothing produces or consumes it anymore).
 //
 // chunkSize ≤ 0 falls back to DefaultChunkSize.
 //

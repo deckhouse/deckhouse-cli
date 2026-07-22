@@ -126,45 +126,6 @@ func TestMergeBlockChunks_MergesInOrder(t *testing.T) {
 	}
 }
 
-// TestMergeBlockChunks_NoChunkIndexSidecar_AnyCodec proves that MergeBlockChunks
-// never writes a '.chunkidx' sidecar next to its merged output, for ANY codec
-// (zstd, gzip, lz4, none): the sidecar mechanism is superseded for zstd by its
-// own embedded seek table (see TestMergeBlockChunks_Zstd_EmbedsSeekTable) and
-// was never anything but overhead for the others (see
-// notes_on_plan_switch's NATIVE-ZSTD-SEEKABLE-RESUME PIVOT entry in
-// tasks.json).
-func TestMergeBlockChunks_NoChunkIndexSidecar_AnyCodec(t *testing.T) {
-	payloads := [][]byte{
-		[]byte("chunk0"),
-		[]byte("chunk1"),
-		[]byte("chunk2"),
-	}
-	chunkSize := int64(6) // matches each payload's length
-	totalSize := int64(len(payloads)) * chunkSize
-
-	for _, codecName := range []string{"zstd", "gzip", "lz4", "none"} {
-		t.Run(codecName, func(t *testing.T) {
-			nodeDir := t.TempDir()
-			chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
-
-			if err := os.MkdirAll(chunkDir, 0o755); err != nil {
-				t.Fatal(err)
-			}
-
-			ext := makeChunkFramesWithCodec(t, chunkDir, payloads, codecName)
-			outPath := filepath.Join(nodeDir, archive.DataBlockName(ext))
-
-			if err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, totalSize, chunkSize, ext); err != nil {
-				t.Fatalf("MergeBlockChunks(%s): %v", codecName, err)
-			}
-
-			if _, statErr := os.Stat(archive.BlockChunkIndexPath(outPath)); !os.IsNotExist(statErr) {
-				t.Errorf("expected no chunk index sidecar for codec %s, Stat returned: %v", codecName, statErr)
-			}
-		})
-	}
-}
-
 // TestMergeBlockChunks_Zstd_EmbedsSeekTable proves the core contract of the
 // native-zstd-seekable-resume merge path: the merged data.bin.zst, opened via
 // seekable.NewReader, reports a valid SeekTable whose NumFrames() equals the
@@ -524,10 +485,6 @@ func TestMergeBlockChunks_ZeroSize_AllCodecs(t *testing.T) {
 
 				if _, statErr := os.Stat(chunkDir); !os.IsNotExist(statErr) {
 					t.Errorf("%s: chunk dir should be removed, Stat returned: %v", stage, statErr)
-				}
-
-				if _, statErr := os.Stat(archive.BlockChunkIndexPath(outPath)); !os.IsNotExist(statErr) {
-					t.Errorf("%s: zero-size merge should never write a chunk index sidecar, Stat returned: %v", stage, statErr)
 				}
 			}
 
