@@ -18,6 +18,9 @@ package util
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
+	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 func TestCreateDataImport_BuildsModeBSpec(t *testing.T) {
@@ -75,6 +79,56 @@ func TestCreateDataImport_RejectsTemplateWithoutName(t *testing.T) {
 			require.Error(t, getErr, "no DataImport should be created when the PVC template is invalid")
 		})
 	}
+}
+
+// newNoAuthSafe builds a SafeClient that talks plain HTTP to an httptest server without
+// requiring cluster auth (mirrors the download/list HTTP tests).
+func newNoAuthSafe(t *testing.T) *safeClient.SafeClient {
+	t.Helper()
+
+	// Allow unauthenticated HTTP requests in unit tests, and point KUBECONFIG at /dev/null so
+	// the client does not pick up ambient auth from a real kubeconfig.
+	safeClient.SupportNoAuth = true
+
+	oldKubeconfig := os.Getenv("KUBECONFIG")
+	require.NoError(t, os.Setenv("KUBECONFIG", "/dev/null"))
+
+	defer func() { _ = os.Setenv("KUBECONFIG", oldKubeconfig) }()
+
+	sc, err := safeClient.NewSafeClient()
+	require.NoError(t, err)
+
+	return sc.Copy()
+}
+
+func TestPostFinished(t *testing.T) {
+	t.Run("posts to <base>/api/v1/finished and succeeds on 2xx", func(t *testing.T) {
+		var gotMethod, gotPath string
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotMethod = r.Method
+			gotPath = r.URL.Path
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		// A trailing slash on the base must not produce a "//api/v1/finished" path that the
+		// server's mux would 404: neturl.JoinPath cleans it to a single slash.
+		require.NoError(t, PostFinished(context.Background(), newNoAuthSafe(t), srv.URL+"/"))
+		assert.Equal(t, http.MethodPost, gotMethod)
+		assert.Equal(t, "/api/v1/finished", gotPath)
+	})
+
+	t.Run("returns an error on non-2xx", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		err := PostFinished(context.Background(), newNoAuthSafe(t), srv.URL)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "500")
+	})
 }
 
 func TestEnsureDataImportPublish(t *testing.T) {
