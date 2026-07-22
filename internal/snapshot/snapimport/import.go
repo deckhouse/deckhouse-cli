@@ -500,6 +500,7 @@ func importNodeData(ctx context.Context, cfg Config, node PlannedNode) error {
 	var (
 		onProgress func(int)
 		setTotal   func(int64)
+		activate   func()
 		stream     progress.Stream
 	)
 
@@ -507,12 +508,13 @@ func importNodeData(ctx context.Context, cfg Config, node PlannedNode) error {
 		stream = cfg.Progress.NewStream(nodeDisplayLabel(node), 0)
 		onProgress = stream.IncrBy
 		setTotal = stream.SetTotal
+		activate = stream.Activate
 	}
 
 	// uploadErr (a plain local, not a named return — nonamedreturns is enforced
 	// repo-wide) decides the stream's terminal outcome below: Done on success,
 	// Fail on error, so a failed/cancelled upload is never counted as complete.
-	uploadErr := cfg.Volumes.UploadVolumeData(ctx, node, diName, cfg.Namespace, setTotal, onProgress)
+	uploadErr := cfg.Volumes.UploadVolumeData(ctx, node, diName, cfg.Namespace, setTotal, onProgress, activate)
 
 	if stream != nil {
 		if uploadErr != nil {

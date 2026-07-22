@@ -138,7 +138,7 @@ func (v *failingVolumes) EnsureDataImport(_ context.Context, leaf PlannedNode, _
 	return leaf.Name, nil
 }
 
-func (v *failingVolumes) UploadVolumeData(_ context.Context, _ PlannedNode, _, _ string, _ func(int64), _ func(int)) error {
+func (v *failingVolumes) UploadVolumeData(_ context.Context, _ PlannedNode, _, _ string, _ func(int64), _ func(int), _ func()) error {
 	return errors.New("simulated upload failure")
 }
 
@@ -210,6 +210,86 @@ func TestRun_UploadOutcome_CallsDoneOrFailByRealResult(t *testing.T) {
 	})
 }
 
+// activateControlledVolumes is a VolumeImporter stub whose UploadVolumeData invokes the
+// activate callback exactly callActivate times, letting a test simulate a genuine transfer
+// (callActivate > 0) versus a full server-side skip (callActivate == 0) independent of the
+// real block/FS upload machinery, to verify importNodeData wires cfg.Progress's
+// stream.Activate through to VolumeImporter's activate parameter (backlog #21 Bug A).
+type activateControlledVolumes struct {
+	callActivate int
+}
+
+func (v *activateControlledVolumes) DataImportName(leaf PlannedNode) string { return leaf.Name }
+
+func (v *activateControlledVolumes) EnsureDataImport(_ context.Context, leaf PlannedNode, _ string) (string, error) {
+	return leaf.Name, nil
+}
+
+func (v *activateControlledVolumes) UploadVolumeData(_ context.Context, _ PlannedNode, _, _ string, _ func(int64), _ func(int), activate func()) error {
+	for range v.callActivate {
+		if activate != nil {
+			activate()
+		}
+	}
+
+	return nil
+}
+
+// TestRun_ImportNodeData_WiresStreamActivate verifies that importNodeData passes its
+// Stream's Activate method through to VolumeImporter.UploadVolumeData's activate parameter,
+// and that a nil cfg.Progress never allocates a stream to begin with (no Activate to call).
+func TestRun_ImportNodeData_WiresStreamActivate(t *testing.T) {
+	t.Run("genuine transfer activates the stream", func(t *testing.T) {
+		root, _ := buildMultiLeafArchive(t, 1)
+
+		sink := &fakeSink{}
+		vol := &activateControlledVolumes{callActivate: 1}
+		up := &stubUploader{}
+		dyn := newFakeDynamic(readyRootSnapshot())
+
+		cfg := baseConfig(root, up, vol, dyn)
+		cfg.Progress = sink
+
+		if err := Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		streams := sink.snapshot()
+		if len(streams) != 1 {
+			t.Fatalf("expected exactly 1 stream, got %d", len(streams))
+		}
+
+		if streams[0].activateCnt != 1 {
+			t.Errorf("activateCnt = %d, want 1 (importNodeData must wire stream.Activate through to VolumeImporter)", streams[0].activateCnt)
+		}
+	})
+
+	t.Run("full skip never activates the stream", func(t *testing.T) {
+		root, _ := buildMultiLeafArchive(t, 1)
+
+		sink := &fakeSink{}
+		vol := &activateControlledVolumes{callActivate: 0}
+		up := &stubUploader{}
+		dyn := newFakeDynamic(readyRootSnapshot())
+
+		cfg := baseConfig(root, up, vol, dyn)
+		cfg.Progress = sink
+
+		if err := Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		streams := sink.snapshot()
+		if len(streams) != 1 {
+			t.Fatalf("expected exactly 1 stream, got %d", len(streams))
+		}
+
+		if streams[0].activateCnt != 0 {
+			t.Errorf("activateCnt = %d, want 0 (a full server-side skip must never activate)", streams[0].activateCnt)
+		}
+	})
+}
+
 // progressReportingVolumes is a VolumeImporter stub that calls onProgress with a fixed byte
 // count per leaf so tests can verify the aggregate progress accounting in the Sink.
 type progressReportingVolumes struct {
@@ -222,13 +302,17 @@ func (v *progressReportingVolumes) EnsureDataImport(_ context.Context, leaf Plan
 	return leaf.Name, nil
 }
 
-func (v *progressReportingVolumes) UploadVolumeData(_ context.Context, _ PlannedNode, _, _ string, setTotal func(int64), onProgress func(int)) error {
+func (v *progressReportingVolumes) UploadVolumeData(_ context.Context, _ PlannedNode, _, _ string, setTotal func(int64), onProgress func(int), activate func()) error {
 	if setTotal != nil && v.bytesPerLeaf > 0 {
 		setTotal(int64(v.bytesPerLeaf))
 	}
 
 	if onProgress != nil && v.bytesPerLeaf > 0 {
 		onProgress(v.bytesPerLeaf)
+	}
+
+	if activate != nil {
+		activate()
 	}
 
 	return nil

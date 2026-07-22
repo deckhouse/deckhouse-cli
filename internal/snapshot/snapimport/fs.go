@@ -274,8 +274,16 @@ func parseOffsetHeader(h http.Header, name string) (int64, error) {
 // the reported total grows progressively as entries are walked instead of being knowable
 // only once the whole tar has been processed.
 //
+// activate, when non-nil, is called once per entry that actually needs a real PUT (the
+// NOT-done branch), never inside the `if done` server-side-skip branch above it. This is
+// deliberately NOT the same signal as onProgress: onProgress also fires on a skipped entry
+// (crediting its bytes to the bar per invariant #7), but a leaf whose every entry is
+// server-side-skipped is a genuine full resume-skip and must never activate the caller's
+// progress stream — activate only distinguishes "at least one file was genuinely
+// transferred" from "nothing was transferred".
+//
 // TODO(follow-up): reproduce empty-directory and symlink entries when needed.
-func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath string, log *slog.Logger, setTotal func(int64), onProgress func(int)) error {
+func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath string, log *slog.Logger, setTotal func(int64), onProgress func(int), activate func()) error {
 	f, err := os.Open(tarPath)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", tarPath, err)
@@ -331,6 +339,10 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 			}
 
 			continue
+		}
+
+		if activate != nil {
+			activate()
 		}
 
 		attrs := fileAttrs{
