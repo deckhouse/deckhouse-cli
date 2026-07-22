@@ -149,9 +149,9 @@ func (f *Filter) ModuleNames() []string {
 //   - ">=1.2.0 <=1.3.0"   → semver range with inclusive anchors
 //   - "^1.2.0", "~1.2.0"  → semver shorthand
 //   - "1.2.0"             → implicit ">=1.2.0 <2.0.0" (bare version, same major
-//                           line); for a 0.x version like "0.4.0" this spans
-//                           the whole 0.x line (">=0.4.0 <1.0.0"), NOT a single
-//                           minor as caret would — see NewImplicitVersionConstraint
+//     line); for a 0.x version like "0.4.0" this spans
+//     the whole 0.x line (">=0.4.0 <1.0.0"), NOT a single
+//     minor as caret would — see NewImplicitVersionConstraint
 //
 // An empty or whitespace-only input is rejected so callers see a clear error
 // instead of silently producing a no-op constraint.
