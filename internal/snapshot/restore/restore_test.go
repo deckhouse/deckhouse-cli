@@ -551,6 +551,76 @@ func TestRun_PreflightNoBoundContent(t *testing.T) {
 	}
 }
 
+// TestPreflightRootSnapshot_DegradedMessage verifies preflightRootSnapshot surfaces an
+// accurate DEGRADED-specific error (mentioning --node) for a recoverable degradation
+// reason, keeps the existing generic message for any other Ready=False reason, and does
+// not fail on the Ready check at all when Ready=True.
+func TestPreflightRootSnapshot_DegradedMessage(t *testing.T) {
+	otherReasonSnapshot := notReadySnapshot()
+	if err := unstructured.SetNestedSlice(otherReasonSnapshot.Object, []interface{}{
+		map[string]interface{}{"type": "Ready", "status": "False", "reason": "ExportFailed", "message": "export timed out"},
+	}, "status", "conditions"); err != nil {
+		t.Fatalf("SetNestedSlice: %v", err)
+	}
+
+	cases := []struct {
+		name         string
+		snap         *unstructured.Unstructured
+		wantErr      bool
+		wantSubstrs  []string
+		rejectSubstr string
+	}{
+		{
+			name:        "degraded reason surfaces DEGRADED message and --node hint",
+			snap:        notReadySnapshot(),
+			wantErr:     true,
+			wantSubstrs: []string{"DEGRADED", "--node", "ChildSnapshotDeleted"},
+		},
+		{
+			name:         "other Ready=False reason keeps the generic message",
+			snap:         otherReasonSnapshot,
+			wantErr:      true,
+			wantSubstrs:  []string{"cannot restore an incomplete snapshot"},
+			rejectSubstr: "DEGRADED",
+		},
+		{
+			name:    "Ready=True proceeds past the Ready check",
+			snap:    readySnapshot(),
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dyn := newFakeDynamic(tc.snap)
+			cfg := baseConfig(&stubSource{}, dyn)
+
+			err := preflightRootSnapshot(context.Background(), cfg)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+
+			if err == nil {
+				return
+			}
+
+			for _, substr := range tc.wantSubstrs {
+				if !contains(err.Error(), substr) {
+					t.Errorf("error %q does not contain %q", err.Error(), substr)
+				}
+			}
+
+			if tc.rejectSubstr != "" && contains(err.Error(), tc.rejectSubstr) {
+				t.Errorf("error %q unexpectedly contains %q", err.Error(), tc.rejectSubstr)
+			}
+		})
+	}
+}
+
 // TestRun_SnapshotNotFound fails clearly when the source Snapshot is missing.
 func TestRun_SnapshotNotFound(t *testing.T) {
 	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
