@@ -34,6 +34,7 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
 	"github.com/deckhouse/deckhouse-cli/internal/system/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
@@ -54,6 +55,13 @@ const (
 	// notAvailable is the placeholder for an empty/missing table cell, matching
 	// kubectl's "<none>"-style dash.
 	notAvailable = "-"
+
+	// conditionFalse is the Ready condition's "status" value for a failed/degraded snapshot.
+	conditionFalse = "False"
+
+	// degradedStatus is the READY column value shown instead of the raw "False" when the
+	// condition's reason is a recoverable degradation (source.IsDegradedReason).
+	degradedStatus = "DEGRADED"
 )
 
 // errUnsupportedFormat is returned for an unknown -o value. Callers wrap it
@@ -232,7 +240,11 @@ func buildSnapshotRows(items []unstructured.Unstructured) []snapshotRow {
 }
 
 // readyStatus returns the status of the "Ready" condition ("True"/"False"/
-// "Unknown") or "-" when the snapshot carries no such condition yet.
+// "Unknown") or "-" when the snapshot carries no such condition yet. A
+// False status whose reason is a recoverable degradation (source.IsDegradedReason,
+// e.g. "ChildSnapshotDeleted") renders as "DEGRADED" instead of the raw "False" — the
+// capture succeeded and the data is intact, so a bare "False" would read as an outright
+// failure. -o json/-o yaml are unaffected: they pass the raw object through unchanged.
 func readyStatus(obj *unstructured.Unstructured) string {
 	conds, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if err != nil || !found {
@@ -250,11 +262,19 @@ func readyStatus(obj *unstructured.Unstructured) string {
 			continue
 		}
 
-		if status, _, _ := unstructured.NestedString(m, "status"); status != "" {
-			return status
+		status, _, _ := unstructured.NestedString(m, "status")
+		if status == "" {
+			return notAvailable
 		}
 
-		return notAvailable
+		if status == conditionFalse {
+			reason, _, _ := unstructured.NestedString(m, "reason")
+			if source.IsDegradedReason(reason) {
+				return degradedStatus
+			}
+		}
+
+		return status
 	}
 
 	return notAvailable

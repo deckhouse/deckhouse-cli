@@ -144,6 +144,20 @@ func TestReadyStatus(t *testing.T) {
 			want: "False",
 		},
 		{
+			name: "ready false other reason",
+			obj: map[string]interface{}{"status": map[string]interface{}{"conditions": []interface{}{
+				map[string]interface{}{"type": "Ready", "status": "False", "reason": "DataCapturePending"},
+			}}},
+			want: "False",
+		},
+		{
+			name: "ready false degraded reason renders DEGRADED",
+			obj: map[string]interface{}{"status": map[string]interface{}{"conditions": []interface{}{
+				map[string]interface{}{"type": "Ready", "status": "False", "reason": "ChildSnapshotDeleted"},
+			}}},
+			want: degradedStatus,
+		},
+		{
 			name: "ready unknown",
 			obj: map[string]interface{}{"status": map[string]interface{}{"conditions": []interface{}{
 				map[string]interface{}{"type": "Ready", "status": "Unknown"},

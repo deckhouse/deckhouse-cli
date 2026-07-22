@@ -78,6 +78,33 @@ func dataMap(pvcName, uid string) map[string]interface{} {
 	}
 }
 
+// withReadyCondition adds a status.conditions entry of type "Ready" to obj (built by
+// makeSnap), mutating it in place and returning it for chaining. reason/message are
+// omitted from the condition map when empty, matching how a real Ready=True condition
+// carries no reason.
+func withReadyCondition(t *testing.T, obj *unstructured.Unstructured, status, reason, message string) *unstructured.Unstructured {
+	t.Helper()
+
+	cond := map[string]interface{}{"type": "Ready", "status": status}
+
+	if reason != "" {
+		cond["reason"] = reason
+	}
+
+	if message != "" {
+		cond["message"] = message
+	}
+
+	existing, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	existing = append(existing, cond)
+
+	if err := unstructured.SetNestedSlice(obj.Object, existing, "status", "conditions"); err != nil {
+		t.Fatalf("SetNestedSlice status.conditions: %v", err)
+	}
+
+	return obj
+}
+
 // childRefMap builds one status.childrenSnapshotRefs element.
 func childRefMap(apiVersion, kind, name string) map[string]interface{} {
 	return map[string]interface{}{"apiVersion": apiVersion, "kind": kind, "name": name}
@@ -264,6 +291,99 @@ func TestRun_MixedChildren(t *testing.T) {
 // only field volumeLabels reads.
 func ownData(pvcName string) *source.NodeData {
 	return &source.NodeData{SourceRef: source.SourceRefIdentity{Name: pvcName}}
+}
+
+// TestRun_DegradedRoot verifies that a root snapshot with Ready=False/reason=
+// ChildSnapshotDeleted renders a visible degradation indicator (including the condition's
+// message) on the root's label, per backlog #15.
+func TestRun_DegradedRoot(t *testing.T) {
+	t.Helper()
+
+	root := makeSnap(testRootAPI, "Snapshot", "root", "uid-root", nil)
+	withReadyCondition(t, root, "False", "ChildSnapshotDeleted", "child snapshot was deleted")
+
+	c := describeClient(t, root)
+
+	var buf bytes.Buffer
+
+	err := Run(context.Background(), c, testNS, "root", &buf)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := "Snapshot/root  (DEGRADED: child snapshot was deleted)\n"
+	got := buf.String()
+
+	if got != want {
+		t.Errorf("output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+// TestRun_ReadyRootUnchanged verifies that a non-degraded root (Ready=True) renders
+// exactly as before this task — no degradation indicator appended.
+func TestRun_ReadyRootUnchanged(t *testing.T) {
+	t.Helper()
+
+	root := makeSnap(testRootAPI, "Snapshot", "root", "uid-root", nil)
+	withReadyCondition(t, root, "True", "", "")
+
+	c := describeClient(t, root)
+
+	var buf bytes.Buffer
+
+	err := Run(context.Background(), c, testNS, "root", &buf)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := "Snapshot/root\n"
+	got := buf.String()
+
+	if got != want {
+		t.Errorf("output:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+// TestDegradedSuffix covers degradedSuffix directly: only Ready=False with a reason in
+// source.DegradedReadyReasons produces an annotation; every other case returns "".
+func TestDegradedSuffix(t *testing.T) {
+	t.Helper()
+
+	cases := []struct {
+		name  string
+		ready source.NodeReadyStatus
+		want  string
+	}{
+		{
+			name:  "zero_value",
+			ready: source.NodeReadyStatus{},
+			want:  "",
+		},
+		{
+			name:  "ready_true",
+			ready: source.NodeReadyStatus{Status: "True"},
+			want:  "",
+		},
+		{
+			name:  "false_non_degraded_reason",
+			ready: source.NodeReadyStatus{Status: "False", Reason: "DataCapturePending"},
+			want:  "",
+		},
+		{
+			name:  "false_degraded_reason",
+			ready: source.NodeReadyStatus{Status: "False", Reason: "ChildSnapshotDeleted", Message: "child snapshot was deleted"},
+			want:  "  (DEGRADED: child snapshot was deleted)",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := degradedSuffix(tc.ready)
+			if got != tc.want {
+				t.Errorf("degradedSuffix(%+v) = %q, want %q", tc.ready, got, tc.want)
+			}
+		})
+	}
 }
 
 // TestToTreeViewNode covers the source.Node → treeview.Node mapping produced by
