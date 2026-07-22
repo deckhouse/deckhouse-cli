@@ -55,6 +55,7 @@ var (
 	pvGVR         = schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumes"}
 	vsGVR         = schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
 	domainDiskGVR = schema.GroupVersionResource{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots"}
+	scGVR         = schema.GroupVersionResource{Group: "storage.k8s.io", Version: "v1", Resource: "storageclasses"}
 )
 
 // stubSource records the call and returns a canned manifest array body.
@@ -86,12 +87,14 @@ func testMapper() meta.RESTMapper {
 		{Group: "", Version: "v1"},
 		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"},
 		{Group: "snapshot.storage.k8s.io", Version: "v1"},
+		{Group: "storage.k8s.io", Version: "v1"},
 	})
 	m.Add(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolumeClaim"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolume"}, meta.RESTScopeRoot)
 	m.Add(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "storage.k8s.io", Version: "v1", Kind: "StorageClass"}, meta.RESTScopeRoot)
 
 	return m
 }
@@ -190,6 +193,7 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 		pvGVR:         "PersistentVolumeList",
 		vsGVR:         "VolumeSnapshotList",
 		domainDiskGVR: "DemoVirtualDiskSnapshotList",
+		scGVR:         "StorageClassList",
 	}
 
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, objs...)
@@ -308,6 +312,45 @@ func pvcManifest(name, phase string) map[string]interface{} {
 	}
 
 	return obj
+}
+
+// pvcManifestSC is pvcManifest plus an explicit spec.storageClassName, used by the
+// volumeBindingMode wait tests. An empty storageClassName is left unset, matching how a
+// real manifest omits the field entirely rather than encoding it as an empty string.
+func pvcManifestSC(name, phase, storageClassName string) map[string]interface{} {
+	obj := pvcManifest(name, phase)
+
+	if storageClassName != "" {
+		spec, _ := obj["spec"].(map[string]interface{})
+		spec["storageClassName"] = storageClassName
+	}
+
+	return obj
+}
+
+// storageClassObj returns a StorageClass object for the volumeBindingMode wait tests.
+// An empty bindingMode leaves the field unset, matching a real StorageClass that omits
+// volumeBindingMode and so defaults to Immediate.
+func storageClassObj(name, bindingMode string, isDefault bool) *unstructured.Unstructured {
+	metadata := map[string]interface{}{"name": name}
+
+	if isDefault {
+		metadata["annotations"] = map[string]interface{}{
+			defaultStorageClassAnnotation: "true",
+		}
+	}
+
+	obj := map[string]interface{}{
+		"apiVersion": "storage.k8s.io/v1",
+		"kind":       "StorageClass",
+		"metadata":   metadata,
+	}
+
+	if bindingMode != "" {
+		obj["volumeBindingMode"] = bindingMode
+	}
+
+	return &unstructured.Unstructured{Object: obj}
 }
 
 func baseConfig(src Source, dyn dynamic.Interface) Config {
@@ -519,6 +562,151 @@ func TestRun_WaitTimeout(t *testing.T) {
 
 	if !contains(err.Error(), "Bound") {
 		t.Errorf("error %q does not mention Bound", err.Error())
+	}
+}
+
+// TestRun_Wait_WFFCPendingPVC_DoesNotBlock verifies a standalone PVC on a
+// WaitForFirstConsumer StorageClass, left Pending with no consumer, does not block or
+// time out --wait: the timeout is set to a single nanosecond, which any polling loop
+// (even one iteration plus its deadline check) would fail.
+func TestRun_Wait_WFFCPendingPVC_DoesNotBlock(t *testing.T) {
+	sc := storageClassObj("wffc-sc", volumeBindingModeWFC, false)
+
+	src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-1", "Pending", "wffc-sc"))}
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), sc)
+
+	cfg := baseConfig(src, dyn)
+	cfg.Wait = true
+	cfg.Timeout = time.Nanosecond
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run with a Pending WFFC PVC must not block or time out: %v", err)
+	}
+}
+
+// TestRun_Wait_ImmediateStillWaits verifies a PVC on an explicit Immediate StorageClass
+// is unaffected by the WFFC exception: it still times out waiting for Bound exactly as
+// before.
+func TestRun_Wait_ImmediateStillWaits(t *testing.T) {
+	sc := storageClassObj("immediate-sc", volumeBindingModeImmediate, false)
+
+	src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-1", "Pending", "immediate-sc"))}
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), sc)
+
+	cfg := baseConfig(src, dyn)
+	cfg.Wait = true
+	cfg.Timeout = time.Millisecond
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected timeout error for a Pending PVC on an Immediate StorageClass, got nil")
+	}
+
+	if !contains(err.Error(), "Bound") {
+		t.Errorf("error %q does not mention Bound", err.Error())
+	}
+}
+
+// TestRun_Wait_MixedWFFCAndImmediate_OnlyImmediateAwaited seeds one WFFC-Pending PVC
+// ahead of one already-Bound Immediate PVC in the manifest array and uses a
+// microscopic timeout: under the pre-fix behavior, waitOnePVCBound would poll the WFFC
+// PVC first, exhaust the whole (tiny) shared deadline on it, and never even reach the
+// Immediate PVC. The fix must skip the WFFC PVC without touching the deadline, leaving
+// the full budget available for the Immediate PVC's (already-satisfied) check.
+func TestRun_Wait_MixedWFFCAndImmediate_OnlyImmediateAwaited(t *testing.T) {
+	wffcSC := storageClassObj("wffc-sc", volumeBindingModeWFC, false)
+	immediateSC := storageClassObj("immediate-sc", volumeBindingModeImmediate, false)
+
+	// Pre-seed the Immediate PVC as already Bound; applyObject strips status from the
+	// SSA patch so the existing Bound status survives the apply.
+	boundImmediate := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"metadata": map[string]interface{}{
+			"namespace": testNS,
+			"name":      "pvc-immediate",
+		},
+		"status": map[string]interface{}{"phase": "Bound"},
+	}}
+
+	src := &stubSource{body: mustArray(t,
+		pvcManifestSC("pvc-wffc", "Pending", "wffc-sc"),
+		pvcManifestSC("pvc-immediate", "", "immediate-sc"),
+	)}
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), wffcSC, immediateSC, boundImmediate)
+
+	cfg := baseConfig(src, dyn)
+	cfg.Wait = true
+	cfg.Timeout = time.Millisecond
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run with a mixed WFFC/Immediate PVC set: %v", err)
+	}
+}
+
+// TestRun_Wait_EmptyStorageClassName_ResolvesDefault verifies a PVC with no
+// spec.storageClassName resolves the cluster's annotated default StorageClass rather
+// than being treated as an error or assumed Immediate: the default class here is WFFC,
+// so a Pending PVC on it must not block --wait.
+func TestRun_Wait_EmptyStorageClassName_ResolvesDefault(t *testing.T) {
+	defaultSC := storageClassObj("default-sc", volumeBindingModeWFC, true)
+	otherSC := storageClassObj("other-sc", volumeBindingModeImmediate, false)
+
+	src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-1", "Pending", ""))}
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), defaultSC, otherSC)
+
+	cfg := baseConfig(src, dyn)
+	cfg.Wait = true
+	cfg.Timeout = time.Nanosecond
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run with an empty storageClassName resolving to a WFFC default: %v", err)
+	}
+}
+
+// TestRun_Wait_BindingModeCachedPerStorageClass verifies the StorageClass lookup is
+// cached per class name: two PVCs sharing the same explicit storageClassName must
+// resolve it with exactly one API call against the StorageClass resource, not one per
+// PVC.
+func TestRun_Wait_BindingModeCachedPerStorageClass(t *testing.T) {
+	sc := storageClassObj("shared-sc", volumeBindingModeImmediate, false)
+
+	bound := func(name string) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "PersistentVolumeClaim",
+			"metadata": map[string]interface{}{
+				"namespace": testNS,
+				"name":      name,
+			},
+			"status": map[string]interface{}{"phase": "Bound"},
+		}}
+	}
+
+	src := &stubSource{body: mustArray(t,
+		pvcManifestSC("pvc-a", "", "shared-sc"),
+		pvcManifestSC("pvc-b", "", "shared-sc"),
+	)}
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), sc, bound("pvc-a"), bound("pvc-b"))
+
+	cfg := baseConfig(src, dyn)
+	cfg.Wait = true
+	cfg.Timeout = 2 * time.Second
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run with two PVCs sharing a StorageClass: %v", err)
+	}
+
+	scCalls := 0
+
+	for _, action := range dyn.Actions() {
+		if action.GetResource() == scGVR {
+			scCalls++
+		}
+	}
+
+	if scCalls != 1 {
+		t.Errorf("expected exactly 1 StorageClass API call for 2 PVCs on the same class, got %d", scCalls)
 	}
 }
 
