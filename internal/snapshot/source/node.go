@@ -75,6 +75,12 @@ type Node struct {
 	// (Variant A: at most one per node), or nil for aggregators and manifest-only nodes.
 	Data *NodeData
 
+	// Ready is this node's own Ready condition (status/reason/message), read from the node's
+	// own status.conditions — populated for every node (root and every descendant, including
+	// orphan VolumeSnapshot leaves), not only the root. Zero value when the node carries no
+	// Ready condition at all; see parseReadyCondition in conditions.go.
+	Ready NodeReadyStatus
+
 	// Parent is the parent node. Nil for the root.
 	Parent *Node
 

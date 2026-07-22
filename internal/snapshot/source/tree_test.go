@@ -100,10 +100,21 @@ type snapOpts struct {
 	sourceRef  map[string]interface{}
 	data       map[string]interface{}
 	childRefs  []interface{}
+	conditions []interface{}
+}
+
+// readyCondition builds a status.conditions entry for the "Ready" condition type.
+func readyCondition(status, reason, message string) interface{} {
+	return map[string]interface{}{
+		"type":    readyConditionType,
+		"status":  status,
+		"reason":  reason,
+		"message": message,
+	}
 }
 
 // makeSnap builds an unstructured snapshot node carrying its namespaced status
-// (sourceRef/data/childrenSnapshotRefs) and metadata.uid.
+// (sourceRef/data/childrenSnapshotRefs/conditions) and metadata.uid.
 func makeSnap(o snapOpts) *unstructured.Unstructured {
 	status := map[string]interface{}{}
 	if o.sourceRef != nil {
@@ -116,6 +127,10 @@ func makeSnap(o snapOpts) *unstructured.Unstructured {
 
 	if len(o.childRefs) > 0 {
 		status["childrenSnapshotRefs"] = o.childRefs
+	}
+
+	if len(o.conditions) > 0 {
+		status["conditions"] = o.conditions
 	}
 
 	return &unstructured.Unstructured{Object: map[string]interface{}{
@@ -652,5 +667,134 @@ func TestBuildTree_VolumeSnapshotLeaf_NotCaptured(t *testing.T) {
 
 	if !errors.Is(err, ErrLeafNotBound) {
 		t.Errorf("expected ErrLeafNotBound in error chain, got: %v", err)
+	}
+}
+
+// TestBuildTree_ReadyCondition_Degraded verifies that a root Ready=False/ChildSnapshotDeleted
+// condition is carried verbatim onto the node's Ready field.
+func TestBuildTree_ReadyCondition_Degraded(t *testing.T) {
+	scheme := makeScheme(t)
+
+	root := makeSnap(snapOpts{
+		apiVersion: rootAPIVersion,
+		kind:       "Snapshot",
+		name:       "root",
+		uid:        "root-uid",
+		sourceRef:  namespaceSourceRef(testNS, "ns-uid"),
+		conditions: []interface{}{
+			readyCondition("False", "ChildSnapshotDeleted", "child snapshot nss-child-1 was deleted"),
+		},
+	})
+
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root})
+
+	tree, err := BuildTree(context.Background(), c, testNS, "root")
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+
+	want := NodeReadyStatus{
+		Status:  "False",
+		Reason:  "ChildSnapshotDeleted",
+		Message: "child snapshot nss-child-1 was deleted",
+	}
+	if tree.Ready != want {
+		t.Errorf("root Ready: got %+v, want %+v", tree.Ready, want)
+	}
+
+	if !IsDegradedReason(tree.Ready.Reason) {
+		t.Errorf("expected reason %q to classify as degraded", tree.Ready.Reason)
+	}
+}
+
+// TestBuildTree_ReadyCondition_True verifies a Ready=True condition carries an empty
+// reason/message (the success path never sets them).
+func TestBuildTree_ReadyCondition_True(t *testing.T) {
+	scheme := makeScheme(t)
+
+	root := makeSnap(snapOpts{
+		apiVersion: rootAPIVersion,
+		kind:       "Snapshot",
+		name:       "root",
+		uid:        "root-uid",
+		sourceRef:  namespaceSourceRef(testNS, "ns-uid"),
+		conditions: []interface{}{
+			readyCondition("True", "", ""),
+		},
+	})
+
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root})
+
+	tree, err := BuildTree(context.Background(), c, testNS, "root")
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+
+	if tree.Ready.Status != "True" {
+		t.Errorf("root Ready.Status: got %q, want True", tree.Ready.Status)
+	}
+
+	if tree.Ready.Reason != "" || tree.Ready.Message != "" {
+		t.Errorf("root Ready reason/message should be empty, got %+v", tree.Ready)
+	}
+}
+
+// TestBuildTree_ReadyCondition_Absent verifies that a node with no status.conditions at all
+// gets the zero NodeReadyStatus, not an error.
+func TestBuildTree_ReadyCondition_Absent(t *testing.T) {
+	scheme := makeScheme(t)
+
+	root := rootSnap("root", "root-uid", nil)
+
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root})
+
+	tree, err := BuildTree(context.Background(), c, testNS, "root")
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+
+	if tree.Ready != (NodeReadyStatus{}) {
+		t.Errorf("root Ready: got %+v, want zero value", tree.Ready)
+	}
+}
+
+// TestBuildTree_ReadyCondition_VisibilityLeaf verifies that an orphan VolumeSnapshot leaf's
+// own Ready condition (read off the VS object itself, not the aggregator) is carried onto the
+// leaf node.
+func TestBuildTree_ReadyCondition_VisibilityLeaf(t *testing.T) {
+	scheme := makeScheme(t)
+
+	root := rootSnap("root", "root-uid", []interface{}{
+		childRef(volumeSnapshotAPIVersion, "VolumeSnapshot", "nss-vs-orphan"),
+	})
+
+	vs := makeSnap(snapOpts{
+		apiVersion: volumeSnapshotAPIVersion,
+		kind:       "VolumeSnapshot",
+		name:       "nss-vs-orphan",
+		uid:        "vs-uid",
+		sourceRef:  pvcSourceRef("pvc-orphan", "uid-pvc"),
+		data:       nodeDataMap("pvc-orphan", "uid-pvc"),
+		conditions: []interface{}{
+			readyCondition("False", "ArtifactMissing", "artifact not found"),
+		},
+	})
+
+	c := buildFakeClient(scheme, []*unstructured.Unstructured{root, vs})
+
+	tree, err := BuildTree(context.Background(), c, testNS, "root")
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+
+	if tree.Ready != (NodeReadyStatus{}) {
+		t.Errorf("aggregator root has no conditions fixture, want zero value, got %+v", tree.Ready)
+	}
+
+	leaf := tree.Children[0]
+
+	want := NodeReadyStatus{Status: "False", Reason: "ArtifactMissing", Message: "artifact not found"}
+	if leaf.Ready != want {
+		t.Errorf("leaf Ready: got %+v, want %+v", leaf.Ready, want)
 	}
 }
