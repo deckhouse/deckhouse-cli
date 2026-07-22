@@ -90,8 +90,9 @@ type Config struct {
 
 	// SelectedNodeKind restricts the restore to a single node subtree when non-empty.
 	// RestoreManifests is called with that node's NodeRef (group/version resolved via
-	// Mapper) instead of the root Snapshot ref. The root Snapshot ready check still
-	// applies unconditionally — the subtree cannot be restored from an incomplete snapshot.
+	// Mapper) instead of the root Snapshot ref. Preflight checks the selected node's
+	// Ready (or readyToUse for VolumeSnapshot), not the root — so a Ready child can be
+	// restored even when the root is Ready=False/ChildSnapshotDeleted.
 	SelectedNodeKind string
 	// SelectedNodeName is the name of the selected node. Required when SelectedNodeKind is set.
 	SelectedNodeName string
@@ -145,6 +146,10 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	if err := preflight(ctx, cfg); err != nil {
+		if cfg.SelectedNodeKind != "" {
+			return fmt.Errorf("preflight %s/%s: %w", cfg.SelectedNodeKind, cfg.SelectedNodeName, err)
+		}
+
 		return fmt.Errorf("preflight %s/%s: %w", cfg.Namespace, cfg.Snapshot, err)
 	}
 
@@ -270,8 +275,20 @@ func validate(cfg Config) error {
 	}
 }
 
-// preflight verifies the source Snapshot is Ready and has a bound SnapshotContent.
+// preflight verifies the restore source is Ready. For a full-tree restore that is the
+// root Snapshot (Ready=True + boundSnapshotContentName). For a SelectedNode restore it
+// is the selected node itself — so a Ready child subtree can proceed even when the root
+// is Ready=False (e.g. ChildSnapshotDeleted on a sibling).
 func preflight(ctx context.Context, cfg Config) error {
+	if cfg.SelectedNodeKind != "" {
+		return preflightSelectedNode(ctx, cfg)
+	}
+
+	return preflightRootSnapshot(ctx, cfg)
+}
+
+// preflightRootSnapshot verifies the source Snapshot is Ready and has a bound SnapshotContent.
+func preflightRootSnapshot(ctx context.Context, cfg Config) error {
 	gvr, _, err := cfg.resourceFor(schema.GroupVersionKind{
 		Group:   snapshotapi.StorageGroup,
 		Version: snapshotapi.Version,
@@ -293,6 +310,59 @@ func preflight(ctx context.Context, cfg Config) error {
 	bound, _, _ := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
 	if bound == "" {
 		return fmt.Errorf("snapshot has no status.boundSnapshotContentName (not yet bound)")
+	}
+
+	return nil
+}
+
+// preflightSelectedNode verifies the selected subtree root is ready to restore:
+// VolumeSnapshot → status.readyToUse=true; other snapshot CRs → Ready=True + bound content.
+func preflightSelectedNode(ctx context.Context, cfg Config) error {
+	ref, err := cfg.resolveNodeRef()
+	if err != nil {
+		return err
+	}
+
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return fmt.Errorf("parse apiVersion %q: %w", ref.APIVersion, err)
+	}
+
+	gvr, namespaced, err := cfg.resourceFor(schema.GroupVersionKind{
+		Group:   gv.Group,
+		Version: gv.Version,
+		Kind:    ref.Kind,
+	})
+	if err != nil {
+		return err
+	}
+
+	var obj *unstructured.Unstructured
+	if namespaced {
+		obj, err = cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	} else {
+		obj, err = cfg.Dynamic.Resource(gvr).Get(ctx, ref.Name, metav1.GetOptions{})
+	}
+	if err != nil {
+		return fmt.Errorf("get %s/%s: %w", ref.Kind, ref.Name, err)
+	}
+
+	if ref.IsVolumeSnapshotLeaf() {
+		ready, found, _ := unstructured.NestedBool(obj.Object, "status", "readyToUse")
+		if !found || !ready {
+			return fmt.Errorf("VolumeSnapshot %s/%s is not readyToUse=true", cfg.Namespace, ref.Name)
+		}
+
+		return nil
+	}
+
+	if !isConditionTrue(obj, readyConditionType) {
+		return fmt.Errorf("%s %s/%s is not Ready=True (cannot restore an incomplete subtree)", ref.Kind, cfg.Namespace, ref.Name)
+	}
+
+	bound, _, _ := unstructured.NestedString(obj.Object, "status", "boundSnapshotContentName")
+	if bound == "" {
+		return fmt.Errorf("%s %s/%s has no status.boundSnapshotContentName (not yet bound)", ref.Kind, cfg.Namespace, ref.Name)
 	}
 
 	return nil
