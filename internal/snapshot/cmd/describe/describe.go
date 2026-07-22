@@ -40,6 +40,9 @@ import (
 const (
 	cmdUse        = "describe"
 	flagNamespace = "namespace"
+
+	// conditionFalse is the Ready condition's "status" value for a failed/degraded snapshot.
+	conditionFalse = "False"
 )
 
 // NewCommand builds the `d8 snapshot describe` cobra command.
@@ -123,6 +126,7 @@ func Run(ctx context.Context, kubeClient client.Client, namespace, name string, 
 	}
 
 	tvRoot := toTreeViewNode(root)
+	tvRoot.Label += degradedSuffix(root.Ready)
 
 	if err := treeview.Render(w, tvRoot); err != nil {
 		return fmt.Errorf("rendering snapshot tree: %w", err)
@@ -147,6 +151,20 @@ func toTreeViewNode(n *source.Node) treeview.Node {
 	}
 
 	return tv
+}
+
+// degradedSuffix returns the text appended to the ROOT node's rendered label when its own
+// Ready condition reports a recoverable degradation (status False, reason in
+// source.DegradedReadyReasons — capture completed, data intact). It returns "" otherwise, so
+// callers can unconditionally append the result. Per backlog #15 this is deliberately applied
+// only to the root's label by its single call site in Run; per-node child degradation display
+// is a separate, not-yet-designed concern (backlog #16).
+func degradedSuffix(ready source.NodeReadyStatus) string {
+	if ready.Status != conditionFalse || !source.IsDegradedReason(ready.Reason) {
+		return ""
+	}
+
+	return fmt.Sprintf("  (DEGRADED: %s)", ready.Message)
 }
 
 // volumeLabels returns the display strings for the volume entries of n.
