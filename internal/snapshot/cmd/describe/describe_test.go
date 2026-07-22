@@ -506,6 +506,37 @@ func TestToTreeViewNode_ChildLabels(t *testing.T) {
 	}
 }
 
+// TestToTreeViewNode_PrefersSourceRefLabel verifies that a non-root node with a
+// SourceRef is labeled with the ORIGINAL captured object's Kind/Name (via
+// n.DisplayLabel()), not the generated snapshot CR identity -- backlog #20's decision
+// that describe shows the user-facing original identity whenever it is available.
+func TestToTreeViewNode_PrefersSourceRefLabel(t *testing.T) {
+	t.Helper()
+
+	parent := &source.Node{Kind: "Snapshot", Name: "agg-snap"}
+	child := &source.Node{
+		Kind:      "DemoVirtualDiskSnapshot",
+		Name:      "nss-child-abc123",
+		Parent:    parent,
+		SourceRef: &source.SourceRefIdentity{Kind: "DemoVirtualDisk", Name: "bk-disk-a"},
+	}
+	parent.Children = []*source.Node{child}
+
+	got := toTreeViewNode(parent)
+
+	if got.Label != "Snapshot/agg-snap" {
+		t.Errorf("root label: got %q, want Snapshot/agg-snap (root keeps its typed identity)", got.Label)
+	}
+
+	if len(got.Children) != 1 {
+		t.Fatalf("children: got %d, want 1", len(got.Children))
+	}
+
+	if childLabel := got.Children[0].Label; childLabel != "DemoVirtualDisk/bk-disk-a" {
+		t.Errorf("child label: got %q, want DemoVirtualDisk/bk-disk-a (original captured identity, not the CR name)", childLabel)
+	}
+}
+
 // TestVolumeLabels verifies the volumeLabels helper: no data yields no labels, and a node
 // that captured its own volume yields exactly one label (the captured PVC name).
 func TestVolumeLabels(t *testing.T) {

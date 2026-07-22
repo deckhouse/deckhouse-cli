@@ -259,7 +259,7 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]streamHandle {
 			continue
 		}
 
-		s := cfg.Progress.NewStream(node.Ref().Name, 0)
+		s := cfg.Progress.NewStream(node.DisplayLabel(), 0)
 
 		if t.done {
 			s.Done()
@@ -668,14 +668,14 @@ func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[str
 		// Streams for done nodes were already marked Done in precreateStreams.
 		cfg.Log.Info("node already complete, skipping",
 			slog.String("kind", task.node.Kind),
-			slog.String("name", task.node.Name))
+			slog.String("name", task.node.DisplayLabel()))
 
 		return nil
 	}
 
 	cfg.Log.Info("processing node",
 		slog.String("kind", task.node.Kind),
-		slog.String("name", task.node.Name),
+		slog.String("name", task.node.DisplayLabel()),
 		slog.String("resume_state", string(task.observed)))
 
 	if task.node.IsVolumeLeaf() {
@@ -685,26 +685,26 @@ func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[str
 	// Snapshot node: ensure subdirs, write manifests, then download own data if present.
 	withSnapshots := len(task.node.Children) > 0
 	if err := ensureNodeSubdirs(task.nodeDir, nodeIdentity(task.node), withSnapshots); err != nil {
-		return fmt.Errorf("ensure subdirs for %s/%s: %w", task.node.Kind, task.node.Name, err)
+		return fmt.Errorf("ensure subdirs for %s: %w", task.node.DisplayLabel(), err)
 	}
 
 	if err := volume.WriteNodeManifests(ctx, cfg.ManifestSource, task.nodeDir, task.node); err != nil {
-		return fmt.Errorf("write manifests for %s/%s: %w", task.node.Kind, task.node.Name, err)
+		return fmt.Errorf("write manifests for %s: %w", task.node.DisplayLabel(), err)
 	}
 
 	if task.node.Data != nil {
 		if err := downloadOwnData(ctx, cfg, task.node, task.nodeDir, streams); err != nil {
-			return fmt.Errorf("download own volume for %s/%s: %w", task.node.Kind, task.node.Name, err)
+			return fmt.Errorf("download own volume for %s: %w", task.node.DisplayLabel(), err)
 		}
 	}
 
 	if err := volume.FinalizeNode(task.nodeDir, task.node); err != nil {
-		return fmt.Errorf("finalize %s/%s: %w", task.node.Kind, task.node.Name, err)
+		return fmt.Errorf("finalize %s: %w", task.node.DisplayLabel(), err)
 	}
 
 	cfg.Log.Info("node complete",
 		slog.String("kind", task.node.Kind),
-		slog.String("name", task.node.Name))
+		slog.String("name", task.node.DisplayLabel()))
 
 	return nil
 }
@@ -715,11 +715,11 @@ func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[str
 // Volume-leaf nodes are always leaves: no snapshots/ subdirectory is created.
 func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams map[streamKey]streamHandle) error {
 	if err := ensureNodeSubdirs(task.nodeDir, nodeIdentity(task.node), false); err != nil {
-		return fmt.Errorf("ensure subdirs for %s/%s: %w", task.node.Kind, task.node.Name, err)
+		return fmt.Errorf("ensure subdirs for %s: %w", task.node.DisplayLabel(), err)
 	}
 
 	if err := volume.WriteVolumeManifest(ctx, cfg.ManifestSource, task.nodeDir, task.node); err != nil {
-		return fmt.Errorf("write volume manifest for %s/%s: %w", task.node.Kind, task.node.Name, err)
+		return fmt.Errorf("write volume manifest for %s: %w", task.node.DisplayLabel(), err)
 	}
 
 	dest := flatDest(task.nodeDir, cfg.Compression.Ext())
@@ -740,7 +740,7 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 	case blockAlreadyMerged:
 		cfg.Log.Info("block volume already merged, skipping download",
 			slog.String("kind", task.node.Kind),
-			slog.String("name", task.node.Name))
+			slog.String("name", task.node.DisplayLabel()))
 
 		// The skip branch OWNS the leftover-chunk-dir cleanup for the crash
 		// window in volume.MergeBlockChunks between committing the merged file
@@ -754,25 +754,25 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 	case fsTarDone:
 		cfg.Log.Info("fs tar already complete, skipping download",
 			slog.String("kind", task.node.Kind),
-			slog.String("name", task.node.Name))
+			slog.String("name", task.node.DisplayLabel()))
 
 		if handle.stream != nil {
 			handle.stream.Done()
 		}
 
 	default:
-		if err := downloadVolumeBinding(ctx, cfg, task.node.Ref(), task.node.Namespace, dest, handle); err != nil {
-			return fmt.Errorf("download volume for %s/%s: %w", task.node.Kind, task.node.Name, err)
+		if err := downloadVolumeBinding(ctx, cfg, task.node.Ref(), task.node.DisplayLabel(), task.node.Namespace, dest, handle); err != nil {
+			return fmt.Errorf("download volume for %s: %w", task.node.DisplayLabel(), err)
 		}
 	}
 
 	if err := volume.FinalizeNode(task.nodeDir, task.node); err != nil {
-		return fmt.Errorf("finalize %s/%s: %w", task.node.Kind, task.node.Name, err)
+		return fmt.Errorf("finalize %s: %w", task.node.DisplayLabel(), err)
 	}
 
 	cfg.Log.Info("node complete",
 		slog.String("kind", task.node.Kind),
-		slog.String("name", task.node.Name))
+		slog.String("name", task.node.DisplayLabel()))
 
 	return nil
 }
@@ -806,7 +806,7 @@ func downloadOwnData(
 	if found {
 		cfg.Log.Info("block volume already merged, skipping download",
 			slog.String("kind", node.Kind),
-			slog.String("name", node.Name))
+			slog.String("name", node.DisplayLabel()))
 
 		// The skip branch OWNS the leftover-chunk-dir cleanup for the crash
 		// window in volume.MergeBlockChunks between committing the merged file
@@ -828,7 +828,7 @@ func downloadOwnData(
 	if fsTarDone {
 		cfg.Log.Info("fs tar already complete, skipping download",
 			slog.String("kind", node.Kind),
-			slog.String("name", node.Name))
+			slog.String("name", node.DisplayLabel()))
 
 		if handle.stream != nil {
 			handle.stream.Done()
@@ -837,7 +837,7 @@ func downloadOwnData(
 		return nil
 	}
 
-	return downloadVolumeBinding(ctx, cfg, node.Ref(), node.Namespace, dest, handle)
+	return downloadVolumeBinding(ctx, cfg, node.Ref(), node.DisplayLabel(), node.Namespace, dest, handle)
 }
 
 // removeMergedBlockChunkDir deletes a leftover block chunk staging directory
@@ -939,12 +939,17 @@ func flatDest(nodeDir, ext string) volumeDestPaths {
 // For CSI VolumeSnapshot visibility-leaves leafRef.Kind == "VolumeSnapshot"; for
 // domain snapshot nodes it carries the domain group and kind.
 //
+// displayLabel is the ORIGINAL captured object's "<Kind>/<Name>" (source.Node.DisplayLabel)
+// used ONLY in this function's log lines and error messages; it never feeds the actual
+// DataExport addressing, which stays keyed on leafRef (the snapshot CR identity) throughout.
+//
 // namespace is the Kubernetes namespace for the DataExport.
 // dest specifies where block chunks, the merged block file, and filesystem files go.
 func downloadVolumeBinding(
 	ctx context.Context,
 	cfg Config,
 	leafRef aggapi.NodeRef,
+	displayLabel string,
 	namespace string,
 	dest volumeDestPaths,
 	handle streamHandle,
@@ -957,7 +962,7 @@ func downloadVolumeBinding(
 	// and the per-volume PerVolumeConcurrency errgroup. Cancelling ctx (e.g. on
 	// sibling error or SIGINT) unblocks a waiting Acquire.
 	if err := cfg.streamSem.Acquire(ctx, 1); err != nil {
-		return fmt.Errorf("acquire stream semaphore for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
+		return fmt.Errorf("acquire stream semaphore for %s: %w", displayLabel, err)
 	}
 
 	defer cfg.streamSem.Release(1)
@@ -1010,7 +1015,7 @@ func downloadVolumeBinding(
 	defer func() {
 		if cfg.KeepExports {
 			cfg.Log.Info("leaving DataExport in cluster (--cleanup=false)",
-				slog.String("leaf", leafRef.Name))
+				slog.String("leaf", displayLabel))
 
 			return
 		}
@@ -1021,14 +1026,14 @@ func downloadVolumeBinding(
 		deName := exporter.DataExportName(leafRef.Name)
 		if relErr := exporter.ReleaseDataExport(releaseCtx, cfg.KubeClient, cfg.Log, namespace, deName, cfg.RunID); relErr != nil {
 			cfg.Log.Warn("failed to release DataExport",
-				slog.String("leaf", leafRef.Name),
+				slog.String("leaf", displayLabel),
 				slog.String("error", relErr.Error()))
 		}
 	}()
 
 	exp, err := cfg.OpenExport(ctx, namespace, leafRef, cfg.TTL)
 	if err != nil {
-		downloadErr = fmt.Errorf("open DataExport for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
+		downloadErr = fmt.Errorf("open DataExport for %s: %w", displayLabel, err)
 
 		return downloadErr
 	}
@@ -1040,7 +1045,7 @@ func downloadVolumeBinding(
 	}
 
 	cfg.Log.Info("downloading volume",
-		slog.String("leaf", leafRef.Name),
+		slog.String("leaf", displayLabel),
 		slog.String("volume_mode", exp.VolumeMode()))
 
 	switch exp.VolumeMode() {
@@ -1051,7 +1056,7 @@ func downloadVolumeBinding(
 		downloadErr = downloadFS(ctx, cfg, dest, exp, stream, handle.seeded)
 
 	default:
-		downloadErr = fmt.Errorf("unsupported volume mode %q for leaf %s/%s", exp.VolumeMode(), leafRef.Kind, leafRef.Name)
+		downloadErr = fmt.Errorf("unsupported volume mode %q for leaf %s", exp.VolumeMode(), displayLabel)
 	}
 
 	return downloadErr

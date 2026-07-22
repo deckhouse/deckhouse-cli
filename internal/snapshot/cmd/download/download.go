@@ -86,8 +86,10 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
   # Download with faster compression and more concurrent workers
   d8 snapshot download my-snap -n default -o out --workers 8 --per-volume-concurrency 8
 
-  # Download only a single node (disk snapshot) and its subtree
-  d8 snapshot download my-snap -n default -o out --node DemoVirtualDiskSnapshot/nss-child-abc123
+  # Download only a single node (disk snapshot) and its subtree -- the
+  # generated snapshot CR name form (e.g. DemoVirtualDiskSnapshot/nss-child-abc123)
+  # still works too
+  d8 snapshot download my-snap -n default -o out --node DemoVirtualDisk/bk-disk-a
 
   # Download only the root snapshot (equivalent to a full download)
   d8 snapshot download my-snap -n default -o out --node Snapshot/my-snap`,
@@ -99,7 +101,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "snapshot namespace (required)")
 	cmd.Flags().StringP(flagOutput, "o", "", "root output directory (required)")
-	cmd.Flags().String(flagNode, "", "restrict download to a single node subtree; format '<Kind>/<name>' (e.g. --node DemoVirtualDiskSnapshot/nss-child-abc, --node Snapshot/my-snap)")
+	cmd.Flags().String(flagNode, "", "restrict download to a single node subtree; format '<Kind>/<name>' (e.g. --node DemoVirtualDisk/bk-disk-a, --node Snapshot/my-snap); the generated snapshot CR name form (e.g. DemoVirtualDiskSnapshot/nss-child-abc) is still accepted")
 	cmd.Flags().String(flagTTL, "2h", "DataExport TTL (e.g. 2h, 30m)")
 	cmd.Flags().Int(flagWorkers, 4, "maximum number of nodes downloaded concurrently")
 	cmd.Flags().Int(flagPerVolumeConcurrency, 4, "maximum parallel chunk/file downloads per volume")

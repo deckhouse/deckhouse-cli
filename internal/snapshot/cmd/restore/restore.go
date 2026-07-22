@@ -95,14 +95,15 @@ output), so they are not awaited; the command may return before such volumes fin
 		Example: `  # Restore snapshot "my-snap" in namespace "default"
   d8 snapshot restore my-snap -n default
 
-  # Restore only a single disk-snapshot node and its subtree
-  d8 snapshot restore my-snap -n default --node DemoVirtualDiskSnapshot/nss-child-abc123
+  # Restore only a single disk-snapshot node and its subtree -- the generated
+  # snapshot CR name form (e.g. DemoVirtualDiskSnapshot/nss-child-abc123) still works too
+  d8 snapshot restore my-snap -n default --node DemoVirtualDisk/bk-disk-a
 
   # Restore only the selected node itself, no descendants
-  d8 snapshot restore my-snap -n default --node DemoVirtualDiskSnapshot/nss-child-abc123 --scope node
+  d8 snapshot restore my-snap -n default --node DemoVirtualDisk/bk-disk-a --scope node
 
   # Restore a single captured object within a node
-  d8 snapshot restore my-snap -n default --node DemoVirtualDiskSnapshot/nss-child-abc123 --scope node --object PersistentVolumeClaim/bk-disk-a
+  d8 snapshot restore my-snap -n default --node DemoVirtualDisk/bk-disk-a --scope node --object PersistentVolumeClaim/bk-disk-a
 
   # Preflight: validate all objects without applying them
   d8 snapshot restore my-snap -n default --dry-run
@@ -119,7 +120,7 @@ output), so they are not awaited; the command may return before such volumes fin
 	}
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "snapshot namespace; also the restore target namespace (required)")
-	cmd.Flags().String(flagNode, "", "restrict restore to a single node subtree; format '<Kind>/<name>' (e.g. --node DemoVirtualDiskSnapshot/nss-child-abc123)")
+	cmd.Flags().String(flagNode, "", "restrict restore to a single node subtree; format '<Kind>/<name>' (e.g. --node DemoVirtualDisk/bk-disk-a); the generated snapshot CR name form (e.g. DemoVirtualDiskSnapshot/nss-child-abc123) is still accepted")
 	cmd.Flags().String(flagScope, string(aggapi.RestoreScopeSubtree), "restore scope: 'subtree' (default) compiles the addressed node and its whole subtree; 'node' compiles only the addressed node itself")
 	cmd.Flags().String(flagObject, "", "restrict a --scope node restore to a single captured object; format '<Kind>/<name>' (requires --scope node)")
 	cmd.Flags().Bool(flagDryRun, false, "validate objects via DryRunAll without persisting; skips --wait (use to preflight a restore)")
