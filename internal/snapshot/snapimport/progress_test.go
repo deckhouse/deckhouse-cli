@@ -267,6 +267,39 @@ func TestRun_ProgressOneStreamPerDataLeaf(t *testing.T) {
 	}
 }
 
+// TestRun_ProgressStreamName_PrefersSourceObjectRef verifies that a domain data leaf's
+// progress stream is named after the ORIGINAL captured source object (SourceObjectRef,
+// e.g. "DemoVirtualDisk/disk-a"), not the generated snapshot CR identity
+// ("DemoVirtualDiskSnapshot/dvd-snap-1") — mirroring source.Node.DisplayLabel on the
+// download side (see nodeDisplayLabel in import.go).
+func TestRun_ProgressStreamName_PrefersSourceObjectRef(t *testing.T) {
+	root := buildDomainDataLeafArchive(t)
+
+	var buf bytes.Buffer
+
+	inner := progress.New(&buf, false, progress.WithInterval(time.Hour))
+	sink := &recordingSink{inner: inner}
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Mapper = testDomainMapper()
+	cfg.Progress = sink
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	sink.Wait()
+
+	streams := sink.streamNames()
+	if len(streams) != 1 || streams[0] != "DemoVirtualDisk/disk-a" {
+		t.Errorf("progress stream names = %v, want [DemoVirtualDisk/disk-a] (original captured source identity, not the CR name)", streams)
+	}
+}
+
 // TestRun_NonTTYProgress_WritesAggregateLine verifies that the non-TTY fallback Sink
 // emits a "downloaded X / total Y" aggregate line on Wait containing the sum of all
 // bytes reported by the per-leaf onProgress hooks.

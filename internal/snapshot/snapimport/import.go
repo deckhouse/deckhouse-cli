@@ -456,6 +456,24 @@ func (cfg Config) createMarkers(ctx context.Context, plan []PlannedNode, parents
 	return nil
 }
 
+// nodeDisplayLabel returns the human-readable "<Kind>/<Name>" label for node, for
+// user-facing output only (progress stream names) — mirroring source.Node.DisplayLabel
+// on the download side, restricted to the fields the archive actually persists for an
+// import-side PlannedNode.
+//
+// It prefers the original captured source object's identity (node.SourceObjectRef.Kind/
+// Name) when the archive recorded one: domain snapshot nodes carry their spec.sourceRef
+// this way. Core Snapshot nodes and CSI VolumeSnapshot data leaves have no
+// SourceObjectRef (see archive.SnapshotYAML.SourceObjectRef's doc comment) and fall back
+// to the snapshot CR's own Kind/Name.
+func nodeDisplayLabel(node PlannedNode) string {
+	if node.SourceObjectRef != nil && node.SourceObjectRef.Kind != "" && node.SourceObjectRef.Name != "" {
+		return fmt.Sprintf("%s/%s", node.SourceObjectRef.Kind, node.SourceObjectRef.Name)
+	}
+
+	return fmt.Sprintf("%s/%s", node.Kind, node.Name)
+}
+
 // uploadNode uploads one node's manifests + direct child refs, then, for a data leaf,
 // creates its DataImport and imports the volume bytes back-to-back so the importer's idle
 // TTL window stays minimal.
@@ -486,7 +504,7 @@ func importNodeData(ctx context.Context, cfg Config, node PlannedNode) error {
 	)
 
 	if cfg.Progress != nil {
-		stream = cfg.Progress.NewStream(node.Kind+"/"+node.Name, 0)
+		stream = cfg.Progress.NewStream(nodeDisplayLabel(node), 0)
 		onProgress = stream.IncrBy
 		setTotal = stream.SetTotal
 	}

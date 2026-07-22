@@ -1560,7 +1560,9 @@ func TestPipeline_Progress_PrecreateStreams(t *testing.T) {
 			"all streams must be pre-created before the first OpenExport call")
 
 		streams := rec.snapshot()
-		require.Equal(t, diskSnapName, streams[0].name, "stream name = node ref name")
+		// disk-snap has no status.sourceRef (see buildFakeClient), so DisplayLabel falls
+		// back to the snapshot CR's own Kind/Name.
+		require.Equal(t, childKind+"/"+diskSnapName, streams[0].name, "stream name = node.DisplayLabel()")
 		require.Equal(t, 1, streams[0].activateCnt, "leaf stream must be Activated exactly once")
 		require.Equal(t, 1, streams[0].doneCnt, "leaf stream must be Done exactly once")
 		require.Equal(t, 0, streams[0].failCnt, "a successful download must never call Fail")
@@ -1611,8 +1613,10 @@ func TestPipeline_Progress_PrecreateStreams(t *testing.T) {
 			"all streams must be pre-created before the first OpenExport call")
 
 		streams := rec.snapshot()
-		require.Equal(t, "nss-vs-agg-pvc", streams[0].name,
-			"binding stream name = VS CR name (node.Ref().Name)")
+		// aggVS's status.sourceRef points at the captured PVC (see buildOrphanLeafFakeClient,
+		// pvcSourceRefMap), so DisplayLabel prefers that original identity over the VS CR name.
+		require.Equal(t, "PersistentVolumeClaim/pvc-agg", streams[0].name,
+			"binding stream name = node.DisplayLabel() (original captured PVC identity)")
 		require.Equal(t, 1, streams[0].activateCnt, "binding stream must be Activated exactly once")
 		require.Equal(t, 1, streams[0].doneCnt, "binding stream must be Done exactly once")
 		require.Equal(t, 0, streams[0].failCnt, "a successful download must never call Fail")

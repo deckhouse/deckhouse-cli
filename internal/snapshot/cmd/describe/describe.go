@@ -137,11 +137,14 @@ func Run(ctx context.Context, kubeClient client.Client, namespace, name string, 
 
 // toTreeViewNode maps a *source.Node and its descendants into a treeview.Node tree.
 //
-// The node label is "<Kind>/<Name>". A node's volume label (if any) is its captured PVC
-// name from status.data (Variant A, ≤1 per node). Children are recursed in order.
+// The node label is n.DisplayLabel() — the original captured object's "<Kind>/<Name>"
+// when available, falling back to the snapshot CR's own identity (see DisplayLabel's
+// doc comment for the root-node exception). A node's volume label (if any) is its
+// captured PVC name from status.data (Variant A, ≤1 per node). Children are recursed
+// in order.
 func toTreeViewNode(n *source.Node) treeview.Node {
 	tv := treeview.Node{
-		Label:    n.Kind + "/" + n.Name,
+		Label:    n.DisplayLabel(),
 		Children: make([]treeview.Node, 0, len(n.Children)),
 		Volumes:  volumeLabels(n),
 	}

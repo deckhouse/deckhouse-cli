@@ -301,6 +301,39 @@ func TestNewCommand_ExampleOmitsCompression(t *testing.T) {
 	}
 }
 
+// TestNewCommand_NodeExample_ShowsOriginalIdentityForm asserts the --node Example
+// text leads with the ORIGINAL captured object's Kind/Name form (e.g.
+// "DemoVirtualDisk/bk-disk-a") rather than the generated snapshot CR name form,
+// and that the CR-name form is still mentioned as accepted (back-compat) --
+// backlog #20's decision that the original identity is now the preferred,
+// no-less-valid, form.
+func TestNewCommand_NodeExample_ShowsOriginalIdentityForm(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(context.Background(), slog.Default())
+
+	if !strings.Contains(cmd.Example, "--node DemoVirtualDisk/bk-disk-a") {
+		t.Fatalf("Example text does not lead with the original-identity --node form:\n%s", cmd.Example)
+	}
+
+	if !strings.Contains(cmd.Example, "DemoVirtualDiskSnapshot/nss-child-abc123") {
+		t.Fatalf("Example text dropped the back-compat mention of the CR-name --node form:\n%s", cmd.Example)
+	}
+
+	nodeFlag := cmd.Flags().Lookup(flagNode)
+	if nodeFlag == nil {
+		t.Fatal("flag --node: not registered")
+	}
+
+	if !strings.Contains(nodeFlag.Usage, "DemoVirtualDisk/bk-disk-a") {
+		t.Fatalf("--node usage does not lead with the original-identity form: %q", nodeFlag.Usage)
+	}
+
+	if !strings.Contains(nodeFlag.Usage, "still accepted") {
+		t.Fatalf("--node usage does not note the CR-name form is still accepted: %q", nodeFlag.Usage)
+	}
+}
+
 func TestParseCompressionCodec_ValidNames(t *testing.T) {
 	t.Helper()
 

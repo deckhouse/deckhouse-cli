@@ -431,6 +431,49 @@ func TestRun_LeafManifestsArrayShape(t *testing.T) {
 	}
 }
 
+// TestNodeDisplayLabel verifies nodeDisplayLabel's fallback contract: it prefers the
+// original captured source object's identity (SourceObjectRef.Kind/Name) when the
+// archive recorded one, and falls back to the snapshot CR's own Kind/Name otherwise
+// (core Snapshot nodes and CSI VolumeSnapshot data leaves never carry a
+// SourceObjectRef — see archive.SnapshotYAML.SourceObjectRef's doc comment).
+func TestNodeDisplayLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		node PlannedNode
+		want string
+	}{
+		{
+			name: "prefers_source_object_ref",
+			node: PlannedNode{
+				Kind: "DemoVirtualDiskSnapshot", Name: "dvd-snap-1",
+				SourceObjectRef: &archive.SourceObjectRef{Kind: "DemoVirtualDisk", Name: "disk-a"},
+			},
+			want: "DemoVirtualDisk/disk-a",
+		},
+		{
+			name: "falls_back_when_nil_source_object_ref",
+			node: PlannedNode{Kind: "VolumeSnapshot", Name: "nss-vs-agg-pvc"},
+			want: "VolumeSnapshot/nss-vs-agg-pvc",
+		},
+		{
+			name: "falls_back_when_source_object_ref_name_empty",
+			node: PlannedNode{
+				Kind: "Snapshot", Name: "root",
+				SourceObjectRef: &archive.SourceObjectRef{Kind: "Namespace"},
+			},
+			want: "Snapshot/root",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nodeDisplayLabel(tc.node); got != tc.want {
+				t.Errorf("nodeDisplayLabel(%+v) = %q, want %q", tc.node, got, tc.want)
+			}
+		})
+	}
+}
+
 // buildDomainDataLeafArchive creates: root Snapshot → DemoVirtualDiskSnapshot with block
 // data and a SourceObjectRef. Returns the root dir.
 func buildDomainDataLeafArchive(t *testing.T) string {
