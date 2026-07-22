@@ -1069,3 +1069,129 @@ func TestImportFSFromTar_InterruptAndResume_AllCodecs(t *testing.T) {
 		})
 	}
 }
+
+// newMemoryBoundedFSServer returns an httptest.Server mimicking just enough of the
+// import_files HEAD/PUT contract for a single fresh (offset 0) upload: HEAD reports
+// not-found (no prior partial or completed upload), and PUT discards the body without
+// retaining it (the whole point of this test is to keep the TEST PROCESS's own memory
+// bounded too, not just the code under test) and responds 201 Created.
+func newMemoryBoundedFSServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPut:
+			if _, err := io.Copy(io.Discard, r.Body); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+
+				return
+			}
+
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+		}
+	}))
+}
+
+// TestImportFSFromTar_StreamingIsMemoryBounded is the regression test for
+// import-fs-two-pass-streaming-put's core promise: uploading a large compressed
+// filesystem tar entry must never materialize the whole (or a large fraction of the)
+// decompressed payload in one in-process buffer, in either of the two passes
+// (measureEntrySize / PASS 1, streamCompressedEntry / PASS 2). It mirrors
+// TestPutBlockCompressed_StreamingIsMemoryBounded: build a >=200 MiB, highly-compressible
+// synthetic zstd tar entry — the on-disk fixture itself stays tiny thanks to the
+// repetition, keeping this test fast despite the large logical size — and upload it
+// through importFSFromTar against a real httptest.Server, tracking the largest single
+// Read() the outgoing PUT body ever serves via the same requestBodyReadTracker /
+// trackedRequestBody / trackingBodyDoer helpers the block-side test uses.
+//
+// PASS 1 and PASS 2 both construct their decode reader via the IDENTICAL
+// compress.NewReader(ext, ...) call over the same codec and the same on-disk bytes — PASS
+// 1 just discards the decoded output (io.Copy into io.Discard) instead of streaming it
+// into an HTTP body. Because importFSFromTar opens its own file handle internally
+// (tarPath is a path, not an injectable reader) and PASS 1's sink is a hardcoded
+// io.Discard, there is no externally reachable Read/Write seam for a test to instrument
+// PASS 1 directly without changing fs.go, which is outside this task's file scope. This
+// test therefore instruments the one reachable seam — PASS 2's outgoing PUT body — and
+// relies on PASS 1 sharing the identical decode-reader construction: a regression that
+// made the zstd decode reader non-streaming would manifest identically in both passes,
+// since both wrap the SAME compress.NewReader output type over the SAME bytes.
+func TestImportFSFromTar_StreamingIsMemoryBounded(t *testing.T) {
+	const payloadSize = 200 * 1024 * 1024 // >=200 MiB per this task's acceptance criteria
+
+	pattern := []byte("fs-memory-bound-upload-regression-test-data. ")
+	content := bytes.Repeat(pattern, payloadSize/len(pattern)+2)
+	content = content[:payloadSize]
+
+	ext, encoded := encodeEntry(t, "zstd", content)
+
+	modTime := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	addTarEntry(t, tw, "bigfile.bin"+ext, encoded, 0o644, 10, 20, modTime)
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "data.tar")
+
+	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	dirBefore, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir (before): %v", err)
+	}
+
+	srv := newMemoryBoundedFSServer(t)
+	defer srv.Close()
+
+	tracker := &requestBodyReadTracker{}
+	doer := &trackingBodyDoer{client: srv.Client(), tracker: tracker}
+
+	var reported int
+
+	var lastTotal int64
+
+	err = importFSFromTar(context.Background(), doer, srv.URL, tarPath, discardLogger(),
+		func(n int64) { lastTotal = n }, func(n int) { reported += n })
+	if err != nil {
+		t.Fatalf("importFSFromTar: %v", err)
+	}
+
+	if reported != len(content) {
+		t.Errorf("reported progress bytes = %d, want %d (full decompressed payload size)", reported, len(content))
+	}
+
+	if lastTotal != int64(len(content)) {
+		t.Errorf("setTotal final value = %d, want %d (single file's exact decompressed size)", lastTotal, len(content))
+	}
+
+	// 4 MiB sits far below payloadSize yet comfortably above net/http's actual ~32 KiB
+	// default copy buffer, giving ample margin while still catching any regression that
+	// buffers a large fraction of the payload in one shot.
+	const ceiling = 4 * 1024 * 1024
+
+	if got := tracker.max(); got >= ceiling {
+		t.Errorf("largest single Read() on the outgoing PUT body was %d bytes, want < %d (%d MiB): "+
+			"the streaming FS upload path must never hand net/http a chunk anywhere near the full %d-byte payload",
+			got, ceiling, ceiling/(1024*1024), len(content))
+	}
+
+	dirAfter, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir (after): %v", err)
+	}
+
+	if len(dirAfter) != len(dirBefore) {
+		t.Errorf("archive directory entry count changed during upload: before=%d after=%d (a temp file was left behind)", len(dirBefore), len(dirAfter))
+	}
+}
