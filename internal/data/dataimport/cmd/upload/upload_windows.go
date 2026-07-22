@@ -108,7 +108,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	podUrl, _, subClient, err := util.PrepareUpload(ctx, diName, namespace, publish, httpClient, log)
+	podUrl, baseUrl, _, subClient, err := util.PrepareUpload(ctx, diName, namespace, publish, httpClient, log)
 	if err != nil {
 		return err
 	}
@@ -122,7 +122,14 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		chunks = 1
 	}
 
-	return upload(ctx, log, subClient, fileUrl, pathToFile, chunks, permOctal, uid, gid, resume)
+	if err := upload(ctx, log, subClient, fileUrl, pathToFile, chunks, permOctal, uid, gid, resume); err != nil {
+		return err
+	}
+
+	// Finalise the upload: streaming the bytes is not enough. The importer keeps the upload
+	// session open until it receives POST /api/v1/finished, and only then does the controller
+	// set UploadFinished=True and rebind the target / mark the DataImport Completed.
+	return util.PostFinished(ctx, subClient, baseUrl)
 }
 
 func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient, url string, filePath string, chunks int, permOctal string, uid, gid int, resume bool) error {

@@ -119,14 +119,14 @@ func (s snapObj) build() *unstructured.Unstructured {
 // pvcData builds a status.data map for a PVC-backed captured volume (Variant A, ≤1 per node).
 func pvcData(namespace, pvcName, pvcUID, vscName string) map[string]interface{} {
 	return map[string]interface{}{
-		"source": map[string]interface{}{
+		"sourceRef": map[string]interface{}{
 			"apiVersion": "v1",
 			"kind":       "PersistentVolumeClaim",
 			"namespace":  namespace,
 			"name":       pvcName,
 			"uid":        pvcUID,
 		},
-		"artifact": map[string]interface{}{
+		"artifactRef": map[string]interface{}{
 			"apiVersion": "snapshot.storage.k8s.io/v1",
 			"kind":       "VolumeSnapshotContent",
 			"name":       vscName,

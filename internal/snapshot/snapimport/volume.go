@@ -47,10 +47,13 @@ const (
 	volumeModeBlock            = "Block"
 	conditionReady             = "Ready"
 	conditionCompleted         = "Completed"
-	conditionExpired           = "Expired"
-	uploadBlockSubpath         = "api/v1/block"
-	uploadFinishedSubpath      = "api/v1/finished"
-	volumeModeFilesystem       = "Filesystem"
+	// reasonExpired is the Ready-condition reason the producer sets when a DataImport idle-expires. The
+	// standalone "Expired" condition type was removed from the catalog in favour of this reason (plus a
+	// terminal status.phase=Expired).
+	reasonExpired         = "Expired"
+	uploadBlockSubpath    = "api/v1/block"
+	uploadFinishedSubpath = "api/v1/finished"
+	volumeModeFilesystem  = "Filesystem"
 
 	// The SVDM importer's CheckRequiredHeaders middleware rejects any PUT missing these
 	// attribute headers. The block import handler ignores their values (it writes raw bytes
@@ -182,7 +185,7 @@ func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf Plann
 	for attempt := 0; attempt < 3; attempt++ {
 		existing, err := ri.Get(ctx, name, metav1.GetOptions{})
 		if err == nil {
-			if !conditionTrue(existing, conditionExpired) {
+			if !conditionFalseWithReason(existing, conditionReady, reasonExpired) {
 				// Align spec.ttl with the current run so retrying a stalled import with a
 				// longer --ttl is honoured instead of keeping the first create's value.
 				if tErr := c.alignDataImportTTL(ctx, ri, existing); tErr != nil {
@@ -414,7 +417,7 @@ func (c *clusterVolumeImporter) waitDataImportReady(ctx context.Context, name, n
 
 		// A DataImport whose idle TTL elapses before the endpoint comes up never becomes
 		// Ready; surface that terminal state instead of waiting out the whole timeout.
-		if conditionTrue(di, conditionExpired) {
+		if conditionFalseWithReason(di, conditionReady, reasonExpired) {
 			return nil, fmt.Errorf("data import %s/%s expired before becoming Ready (idle TTL elapsed); increase --ttl or retry", namespace, name)
 		}
 
@@ -436,7 +439,7 @@ func (c *clusterVolumeImporter) waitDataImportReady(ctx context.Context, name, n
 }
 
 // dataImportCompleted reports whether the named DataImport already produced its durable
-// artifact (Completed=True with a populated status.data.artifact). A missing object is not
+// artifact (Completed=True with a populated status.data.artifactRef). A missing object is not
 // an error: it simply means "not completed".
 func (c *clusterVolumeImporter) dataImportCompleted(ctx context.Context, name, namespace string) (bool, error) {
 	di, err := c.dyn.Resource(dataImportGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
@@ -448,13 +451,13 @@ func (c *clusterVolumeImporter) dataImportCompleted(ctx context.Context, name, n
 		return false, fmt.Errorf("get DataImport %s/%s: %w", namespace, name, err)
 	}
 
-	_, hasArtifact, _ := unstructured.NestedMap(di.Object, "status", "data", "artifact")
+	_, hasArtifact, _ := unstructured.NestedMap(di.Object, "status", "data", "artifactRef")
 
 	return conditionTrue(di, conditionCompleted) && hasArtifact, nil
 }
 
 // waitDataImportCompleted blocks until the DataImport produces its durable artifact
-// (Completed=True with a populated status.data.artifact).
+// (Completed=True with a populated status.data.artifactRef).
 func (c *clusterVolumeImporter) waitDataImportCompleted(ctx context.Context, name, namespace string) error {
 	deadline := time.Now().Add(c.wait)
 

@@ -64,8 +64,8 @@ func dedupeChild(name, sourceName string) *source.Node {
 		UID:        types.UID("uid-" + name),
 		SourceRef:  &src,
 		Data: &source.NodeData{
-			Source: src,
-			Artifact: source.ArtifactRef{
+			SourceRef: src,
+			ArtifactRef: source.ArtifactRef{
 				APIVersion: "snapshot.storage.k8s.io/v1",
 				Kind:       "VolumeSnapshotContent",
 				Name:       "vsc-" + name,
