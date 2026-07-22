@@ -34,6 +34,8 @@ import (
 	"testing"
 	"time"
 
+	seekable "github.com/SaveTheRbtz/zstd-seekable-format-go/pkg"
+	"github.com/klauspost/compress/zstd"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -42,6 +44,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
 
 // recordingDoer captures the requests putBlock/postFinished send and returns canned responses.
@@ -570,11 +573,14 @@ func TestPutBlock_FreshUploadRoundTrip(t *testing.T) {
 // pre-seeded prefix (standing in for a prior, interrupted run's durable bytes) plus this
 // call's PUT concatenate back to the exact original plaintext. seedLen is deliberately
 // not aligned to either encoded frame's boundary, proving the mechanism does not depend
-// on frame geometry. writeEncodedBlockFile never writes a chunk-offset index sidecar, so
-// this test specifically exercises the byte-zero discard FALLBACK path (see
-// resolveBlockDecodeReader) — the chunk-index fast path is covered separately by
-// TestPutBlockCompressed_ResumeWithIndex_DiscardsAtMostOneChunk and
-// TestPutBlockCompressed_IndexGeometryMismatch_FallsBack.
+// on frame geometry. writeEncodedBlockFile writes plain concatenated codec frames with NO
+// embedded zstd seek table, so for every codec here (zstd included) this test exercises
+// the plain byte-zero discard FALLBACK path (see resolveBlockDecodeReader /
+// discardFromStart) — for zstd this is specifically the "no usable seek table, degrade
+// gracefully" case; gzip and lz4 never get anything else. The zstd NATIVE seek fast path
+// (an embedded seek table produced by volume.MergeBlockChunks) is covered separately by
+// TestPutBlockCompressed_ResumesViaNativeZstdSeek_EndToEnd and
+// TestResolveBlockDecodeReader_ZstdNativeSeek_BoundedDiscard.
 func TestPutBlockCompressed_ResumesViaFastForward(t *testing.T) {
 	payload := bytes.Repeat([]byte("resume-me-please-"), 3000)
 	seedLen := len(payload)/2 + 7
@@ -610,7 +616,7 @@ func TestPutBlockCompressed_ResumesViaFastForward(t *testing.T) {
 // randomPayload returns n deterministic pseudo-random bytes. Multi-chunk resume tests use
 // this instead of a repeated string pattern so a codec cannot compress each chunk down to
 // a handful of bytes -- that would make the byte-count assertions in
-// TestPutBlockCompressed_ResumeWithIndex_DiscardsAtMostOneChunk trivially true regardless
+// TestResolveBlockDecodeReader_ZstdNativeSeek_BoundedDiscard trivially true regardless
 // of which code path actually ran. The seed is fixed purely for test determinism, not for
 // any security property.
 func randomPayload(t *testing.T, n int) []byte {
@@ -626,25 +632,23 @@ func randomPayload(t *testing.T, n int) []byte {
 	return buf
 }
 
-// writeEncodedBlockFileWithIndex writes payload to path as consecutive codec frames of at
-// most chunkSize decompressed bytes each (mirroring one archive.EncodeFrame call per
-// download chunk), and writes a matching archive.BlockChunkIndex sidecar recording every
-// frame's exact compressed byte length -- exactly what volume.MergeBlockChunks produces
-// for a real multi-chunk block download. It returns the sidecar it wrote so a test can
-// compute expected chunk-boundary byte offsets.
-func writeEncodedBlockFileWithIndex(t *testing.T, path, codecName string, payload []byte, chunkSize int) archive.BlockChunkIndex {
+// buildMergedZstdFixture writes payload as numChunks independent chunk frames (mirroring
+// one archive.EncodeFrame call per download chunk) and merges them through the REAL
+// volume.MergeBlockChunks -- the same production code path
+// block-merge-embed-native-zstd-seek-table changed to embed a native zstd seek table --
+// so the resulting file carries a genuine embedded seek table, not a hand-rolled stand-in
+// for one. It returns the merged file's path.
+func buildMergedZstdFixture(t *testing.T, payload []byte, chunkSize int) string {
 	t.Helper()
 
-	codec, err := compress.New(codecName, 0)
+	codec, err := compress.New("zstd", 0)
 	if err != nil {
-		t.Fatalf("compress.New(%q): %v", codecName, err)
+		t.Fatalf("compress.New(zstd): %v", err)
 	}
 
-	var buf bytes.Buffer
+	chunkDir := t.TempDir()
 
-	sizes := make([]int64, 0, (len(payload)+chunkSize-1)/chunkSize)
-
-	for start := 0; start < len(payload); start += chunkSize {
+	for i, start := 0, 0; start < len(payload); i, start = i+1, start+chunkSize {
 		end := start + chunkSize
 		if end > len(payload) {
 			end = len(payload)
@@ -652,108 +656,240 @@ func writeEncodedBlockFileWithIndex(t *testing.T, path, codecName string, payloa
 
 		frame, encErr := codec.EncodeFrame(payload[start:end])
 		if encErr != nil {
-			t.Fatalf("EncodeFrame: %v", encErr)
+			t.Fatalf("EncodeFrame chunk %d: %v", i, encErr)
 		}
 
-		sizes = append(sizes, int64(len(frame)))
-		buf.Write(frame)
+		p := filepath.Join(chunkDir, archive.ChunkFileName(i, ".zst"))
+		if err := os.WriteFile(p, frame, 0o600); err != nil {
+			t.Fatalf("write chunk %d: %v", i, err)
+		}
 	}
 
-	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
-		t.Fatalf("write encoded block file: %v", err)
+	outPath := filepath.Join(t.TempDir(), "data.bin.zst")
+
+	if err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, int64(len(payload)), int64(chunkSize), ".zst"); err != nil {
+		t.Fatalf("MergeBlockChunks: %v", err)
 	}
 
-	idx := archive.BlockChunkIndex{
-		ChunkSize:            int64(chunkSize),
-		TotalSize:            int64(len(payload)),
-		CompressedChunkSizes: sizes,
-	}
-
-	if err := archive.WriteBlockChunkIndex(path, idx); err != nil {
-		t.Fatalf("write block chunk index: %v", err)
-	}
-
-	return idx
+	return outPath
 }
 
-// TestPutBlockCompressed_ResumeWithIndex_DiscardsAtMostOneChunk verifies the chunk-offset
-// index fast path (resolveBlockDecodeReader / fastForwardViaChunkIndex): resuming partway
-// through a LATE chunk of a multi-chunk archive must discard at most that one chunk's
-// worth of DECODED bytes -- never a full discard proportional to offset. The measurement
-// is resolveBlockDecodeReader's own discarded-byte return value, itself io.CopyN's
-// byte-accurate copy count from actually reading decodeReader -- not wall-clock time, and
-// not inferred from the test merely passing (inv. #11).
-func TestPutBlockCompressed_ResumeWithIndex_DiscardsAtMostOneChunk(t *testing.T) {
+// zstdSeekTableCompressedOffset opens path (a merged zstd file with an embedded seek
+// table) through its own independent seekable.Reader and returns the compressed byte
+// offset at which the frame covering decompressedOffset begins -- the value a genuine
+// seek-table lookup resolves to, used as the test's ceiling for "did this read fetch
+// bytes belonging to an earlier chunk".
+func zstdSeekTableCompressedOffset(t *testing.T, path string, decompressedOffset int64) uint64 {
+	t.Helper()
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer f.Close()
+
+	dec, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatalf("zstd.NewReader: %v", err)
+	}
+	defer dec.Close()
+
+	r, err := seekable.NewReader(f, dec)
+	if err != nil {
+		t.Fatalf("seekable.NewReader(%s): %v", path, err)
+	}
+	defer r.Close()
+
+	table, err := r.SeekTable()
+	if err != nil {
+		t.Fatalf("SeekTable: %v", err)
+	}
+
+	entry, ok := table.EntryByDecompressedOffset(uint64(decompressedOffset))
+	if !ok {
+		t.Fatalf("EntryByDecompressedOffset(%d): no entry found", decompressedOffset)
+	}
+
+	return entry.CompressedOffset
+}
+
+// recordingFile wraps an *os.File, recording the offset and byte count of every ReadAt
+// call so a test can prove the zstd native-seek fast path fetches only the target frame's
+// own compressed bytes, never bytes belonging to an earlier chunk. Read and Seek are
+// forwarded unmodified and NOT recorded: seekable.NewReader's one-time footer/seek-table
+// parse at construction uses Seek+Read directly, never ReadAt (see
+// compress/seekable_spike_test.go's recordingReadSeeker, whose doc comment explains why
+// isolating ReadAt calls from Read/Seek is exactly what this assertion needs -- per-frame
+// data fetches route through ReadAt precisely because *os.File implements io.ReaderAt).
+type recordingFile struct {
+	f *os.File
+
+	mu    sync.Mutex
+	calls []recordedReadAt
+}
+
+// recordedReadAt is one ReadAt call's requested offset and the byte count it returned.
+type recordedReadAt struct {
+	offset int64
+	n      int
+}
+
+func (r *recordingFile) Read(p []byte) (int, error) { return r.f.Read(p) }
+
+func (r *recordingFile) Seek(offset int64, whence int) (int64, error) {
+	return r.f.Seek(offset, whence)
+}
+
+func (r *recordingFile) ReadAt(p []byte, off int64) (int, error) {
+	n, err := r.f.ReadAt(p, off)
+
+	r.mu.Lock()
+	r.calls = append(r.calls, recordedReadAt{offset: off, n: n})
+	r.mu.Unlock()
+
+	return n, err
+}
+
+// recordedCalls returns a copy of every ReadAt call observed so far.
+func (r *recordingFile) recordedCalls() []recordedReadAt {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]recordedReadAt(nil), r.calls...)
+}
+
+// TestResolveBlockDecodeReader_ZstdNativeSeek_BoundedDiscard verifies the zstd native seek
+// fast path (resolveBlockDecodeReader / seekZstdNativeReader) against a data file produced
+// by the REAL volume.MergeBlockChunks (buildMergedZstdFixture): resuming partway through a
+// LATE chunk of a multi-chunk archive must fetch only that target frame's own compressed
+// bytes -- never bytes belonging to an earlier chunk, and never a total anywhere near the
+// full decompressed prefix -- proving the native path, not a decode-and-discard scan, ran.
+// The measurement is an INSTRUMENTED byte count (recordingFile's ReadAt log), not wall-clock
+// time and not inferred merely from the test passing (inv. #11): every recorded ReadAt
+// offset must be >= the target frame's own compressed offset (a scan from byte zero would
+// necessarily touch earlier, smaller offsets first), and the total bytes fetched must stay
+// far below the decompressed resume offset itself.
+func TestResolveBlockDecodeReader_ZstdNativeSeek_BoundedDiscard(t *testing.T) {
 	const chunkSize = 100_000
 
 	const numChunks = 5
 
-	const targetChunk = 3 // 0-based: a LATE chunk, so a fallback would discard ~3.5 chunks.
+	const targetChunk = 3 // 0-based: a LATE chunk, so a decode-and-discard scan would touch ~3.5 chunks first.
 
 	payload := randomPayload(t, chunkSize*numChunks)
 	offset := int64(targetChunk)*int64(chunkSize) + chunkSize/2
 
-	for _, tc := range blockCodecCases {
-		if tc.ext == "" {
-			continue // the raw path needs no chunk index; it already section-seeks directly.
+	dataFile := buildMergedZstdFixture(t, payload, chunkSize)
+	targetCompressedOffset := zstdSeekTableCompressedOffset(t, dataFile, offset)
+
+	f, err := os.Open(dataFile)
+	if err != nil {
+		t.Fatalf("open %s: %v", dataFile, err)
+	}
+	defer f.Close()
+
+	rf := &recordingFile{f: f}
+
+	decodeReader, discarded, err := resolveBlockDecodeReader(rf, dataFile, ".zst", offset, discardLogger())
+	if err != nil {
+		t.Fatalf("resolveBlockDecodeReader: %v", err)
+	}
+	defer decodeReader.Close()
+
+	// The native path never calls io.CopyN itself -- Seek is a seek-table lookup, not a
+	// decode-and-discard -- so discarded must be exactly 0. A nonzero value here would mean
+	// the fallback path ran instead of the native one.
+	if discarded != 0 {
+		t.Fatalf("discarded = %d, want exactly 0 (the native seek path must never decode-and-discard; a "+
+			"nonzero value means the byte-zero fallback ran instead)", discarded)
+	}
+
+	rest, err := io.ReadAll(decodeReader)
+	if err != nil {
+		t.Fatalf("read remaining decoded bytes: %v", err)
+	}
+
+	if !bytes.Equal(rest, payload[offset:]) {
+		t.Fatalf("decode reader positioned at the wrong offset: got %d remaining bytes, want %d matching payload[offset:]",
+			len(rest), len(payload)-int(offset))
+	}
+
+	calls := rf.recordedCalls()
+	if len(calls) == 0 {
+		t.Fatal("expected at least one ReadAt call (frame fetch); got none")
+	}
+
+	var totalFetched int64
+
+	for _, c := range calls {
+		if c.offset < int64(targetCompressedOffset) {
+			t.Errorf("ReadAt at compressed offset %d precedes the target frame's own compressed offset %d -- "+
+				"the reader scanned earlier chunks instead of seeking", c.offset, targetCompressedOffset)
 		}
 
-		t.Run(tc.codec, func(t *testing.T) {
-			dir := t.TempDir()
-			dataFile := filepath.Join(dir, "data.bin"+tc.ext)
+		totalFetched += int64(c.n)
+	}
 
-			idx := writeEncodedBlockFileWithIndex(t, dataFile, tc.codec, payload, chunkSize)
-
-			file, err := os.Open(dataFile)
-			if err != nil {
-				t.Fatalf("open data file: %v", err)
-			}
-			defer file.Close()
-
-			info, err := file.Stat()
-			if err != nil {
-				t.Fatalf("stat data file: %v", err)
-			}
-
-			decodeReader, discarded, err := resolveBlockDecodeReader(file, dataFile, tc.ext, offset, idx.TotalSize, info.Size(), discardLogger())
-			if err != nil {
-				t.Fatalf("resolveBlockDecodeReader: %v", err)
-			}
-			defer decodeReader.Close()
-
-			if discarded >= int64(chunkSize) {
-				t.Fatalf("fast path discarded %d decoded bytes to resume at offset %d, want < %d (one chunk's "+
-					"worth) -- this means it discarded more than one chunk", discarded, offset, chunkSize)
-			}
-
-			if discarded >= offset {
-				t.Fatalf("fast path discarded %d bytes, want strictly less than the resume offset %d -- "+
-					"this is the fallback's signature (discard proportional to offset), not the fast path's", discarded, offset)
-			}
-
-			// Verify the reader is actually positioned correctly, not merely "discarded
-			// few bytes": the remaining decoded stream must equal payload[offset:] exactly.
-			rest, err := io.ReadAll(decodeReader)
-			if err != nil {
-				t.Fatalf("read remaining decoded bytes: %v", err)
-			}
-
-			if !bytes.Equal(rest, payload[offset:]) {
-				t.Fatalf("decode reader positioned at the wrong offset: got %d remaining bytes, want %d matching payload[offset:]",
-					len(rest), len(payload)-int(offset))
-			}
-		})
+	if totalFetched >= offset {
+		t.Fatalf("fetched %d compressed bytes to resume at decompressed offset %d, want strictly fewer -- "+
+			"a decode-and-discard scan from byte zero would necessarily fetch at least as many compressed "+
+			"bytes as the decompressed prefix it discards", totalFetched, offset)
 	}
 }
 
-// TestPutBlockCompressed_IndexGeometryMismatch_FallsBack verifies that a chunk-offset
-// index whose TotalSize disagrees with this call's totalSize is never trusted: resuming
-// must fall back to the byte-zero discard path, discarding exactly offset decoded bytes --
-// not a bounded chunk's worth -- proving by the SAME discarded-byte measurement used in
-// the fast-path test that the fallback, not the fast path, actually ran (inv. #9:
-// existence is not validity; a geometry mismatch means the index describes a different
-// run and must be ignored, not partially trusted).
-func TestPutBlockCompressed_IndexGeometryMismatch_FallsBack(t *testing.T) {
+// TestResolveBlockDecodeReader_ZstdNoSeekTable_FallsBackToExactOffsetDiscard verifies the
+// graceful-degradation half of the zstd dispatch: a PLAIN concatenated-frame zstd file (no
+// embedded seek table -- e.g. an archive merged before this feature, or built by a
+// third-party tool) must fall back to the byte-zero discard path and discard EXACTLY
+// offset decoded bytes, never fail, and never silently reuse a nonexistent seek table.
+func TestResolveBlockDecodeReader_ZstdNoSeekTable_FallsBackToExactOffsetDiscard(t *testing.T) {
+	const chunkSize = 100_000
+
+	const numChunks = 5
+
+	const targetChunk = 3
+
+	payload := randomPayload(t, chunkSize*numChunks)
+	offset := int64(targetChunk)*int64(chunkSize) + chunkSize/2
+
+	dir := t.TempDir()
+	dataFile := filepath.Join(dir, "data.bin.zst")
+	writeEncodedBlockFile(t, dataFile, "zstd", payload)
+
+	file, err := os.Open(dataFile)
+	if err != nil {
+		t.Fatalf("open data file: %v", err)
+	}
+	defer file.Close()
+
+	decodeReader, discarded, err := resolveBlockDecodeReader(file, dataFile, ".zst", offset, discardLogger())
+	if err != nil {
+		t.Fatalf("resolveBlockDecodeReader: %v", err)
+	}
+	defer decodeReader.Close()
+
+	if discarded != offset {
+		t.Fatalf("discarded = %d, want exactly %d (the fallback's signature: discard the full decompressed "+
+			"prefix up to offset) -- a plain concatenated-frame zstd file has no seek table to seek within",
+			discarded, offset)
+	}
+
+	rest, err := io.ReadAll(decodeReader)
+	if err != nil {
+		t.Fatalf("read remaining decoded bytes: %v", err)
+	}
+
+	if !bytes.Equal(rest, payload[offset:]) {
+		t.Fatalf("decode reader positioned at the wrong offset: got %d remaining bytes, want %d matching payload[offset:]",
+			len(rest), len(payload)-int(offset))
+	}
+}
+
+// TestResolveBlockDecodeReader_GzipLz4_AlwaysDiscardExactOffset verifies the documented
+// gzip/lz4 tradeoff (see putBlockCompressed's doc comment): neither codec ever gets a
+// native-seek fast path, so resuming from any nonzero offset always discards EXACTLY
+// offset decoded bytes from the start, regardless of how deep into the archive offset is.
+func TestResolveBlockDecodeReader_GzipLz4_AlwaysDiscardExactOffset(t *testing.T) {
 	const chunkSize = 100_000
 
 	const numChunks = 5
@@ -764,20 +900,14 @@ func TestPutBlockCompressed_IndexGeometryMismatch_FallsBack(t *testing.T) {
 	offset := int64(targetChunk)*int64(chunkSize) + chunkSize/2
 
 	for _, tc := range blockCodecCases {
-		if tc.ext == "" {
-			continue
+		if tc.ext == "" || tc.ext == ".zst" {
+			continue // "none" never reaches putBlockCompressed; zstd is covered by the dedicated tests above.
 		}
 
 		t.Run(tc.codec, func(t *testing.T) {
 			dir := t.TempDir()
 			dataFile := filepath.Join(dir, "data.bin"+tc.ext)
-
-			idx := writeEncodedBlockFileWithIndex(t, dataFile, tc.codec, payload, chunkSize)
-
-			// Simulate a sidecar recorded under a different run's geometry (e.g. a
-			// different --chunk-size or archive): its TotalSize disagrees with what
-			// this call passes in, so it must never be trusted.
-			mismatchedTotal := idx.TotalSize + 1
+			writeEncodedBlockFile(t, dataFile, tc.codec, payload)
 
 			file, err := os.Open(dataFile)
 			if err != nil {
@@ -785,21 +915,14 @@ func TestPutBlockCompressed_IndexGeometryMismatch_FallsBack(t *testing.T) {
 			}
 			defer file.Close()
 
-			info, err := file.Stat()
-			if err != nil {
-				t.Fatalf("stat data file: %v", err)
-			}
-
-			decodeReader, discarded, err := resolveBlockDecodeReader(file, dataFile, tc.ext, offset, mismatchedTotal, info.Size(), discardLogger())
+			decodeReader, discarded, err := resolveBlockDecodeReader(file, dataFile, tc.ext, offset, discardLogger())
 			if err != nil {
 				t.Fatalf("resolveBlockDecodeReader: %v", err)
 			}
 			defer decodeReader.Close()
 
 			if discarded != offset {
-				t.Fatalf("geometry-mismatched index produced discarded=%d, want exactly %d (the fallback's "+
-					"signature: discard the full decompressed prefix up to offset) -- the mismatched index may "+
-					"have been wrongly trusted instead of falling back", discarded, offset)
+				t.Fatalf("discarded = %d, want exactly %d (%s never gets a native-seek fast path)", discarded, offset, tc.codec)
 			}
 
 			rest, err := io.ReadAll(decodeReader)
@@ -812,6 +935,37 @@ func TestPutBlockCompressed_IndexGeometryMismatch_FallsBack(t *testing.T) {
 					len(rest), len(payload)-int(offset))
 			}
 		})
+	}
+}
+
+// TestPutBlockCompressed_ResumesViaNativeZstdSeek_EndToEnd is the end-to-end counterpart
+// of TestResolveBlockDecodeReader_ZstdNativeSeek_BoundedDiscard: it drives a full putBlock
+// resume through a real net/http round trip (fakeBlockImporter) against a data file
+// produced by the real volume.MergeBlockChunks, and asserts the server's durably-received
+// bytes are byte-for-byte identical to the original payload -- the native seek fast path
+// must not just discard a bounded amount, it must still produce a CORRECT upload.
+func TestPutBlockCompressed_ResumesViaNativeZstdSeek_EndToEnd(t *testing.T) {
+	const chunkSize = 100_000
+
+	const numChunks = 5
+
+	payload := randomPayload(t, chunkSize*numChunks)
+	seedLen := chunkSize*3 + chunkSize/2 // deep into the (0-based) 4th chunk.
+
+	dataFile := buildMergedZstdFixture(t, payload, chunkSize)
+
+	imp := &fakeBlockImporter{}
+	imp.seed(payload[:seedLen])
+
+	srv := httptest.NewServer(imp)
+	defer srv.Close()
+
+	if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, ".zst", int64(len(payload)), discardLogger(), nil, nil); err != nil {
+		t.Fatalf("putBlock (native-seek resume): %v", err)
+	}
+
+	if got := imp.received(); !bytes.Equal(got, payload) {
+		t.Fatalf("resumed upload produced %d bytes not matching the original %d-byte payload", len(got), len(payload))
 	}
 }
 
