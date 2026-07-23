@@ -122,11 +122,14 @@ func NewPushService(
 //
 // The key principle: no path transformations. Whatever path the layout has
 // in the unpacked directory becomes its path in the registry.
-func (svc *PushService) Push(ctx context.Context) error {
+func (svc *PushService) Push(ctx context.Context) (*PushSummary, error) {
+	// Registry layout is known up front, so it is on the summary even on error.
+	summary := &PushSummary{Registry: svc.registryLayout()}
+
 	// Create unified directory for unpacking
 	dirPath := filepath.Join(svc.options.WorkingDir, "unified")
 	if err := os.MkdirAll(dirPath, dirPermissions); err != nil {
-		return fmt.Errorf("create unified directory: %w", err)
+		return summary, fmt.Errorf("create unified directory: %w", err)
 	}
 
 	defer func() {
@@ -139,27 +142,41 @@ func (svc *PushService) Push(ctx context.Context) error {
 
 	// Unpack all packages into unified structure
 	if err := svc.unpackAllPackages(ctx, dirPath); err != nil {
-		return fmt.Errorf("unpack packages: %w", err)
+		return summary, fmt.Errorf("unpack packages: %w", err)
 	}
 
 	// Push all layouts recursively
 	if err := svc.userLogger.Process("Push to registry", func() error {
-		return svc.pushAllLayouts(ctx, dirPath)
+		return svc.pushAllLayouts(ctx, dirPath, summary)
 	}); err != nil {
-		return err
+		return summary, err
 	}
 
 	// Create modules index (deckhouse/modules:<module-name> tags for discovery)
 	if err := svc.userLogger.Process("Create modules index", func() error {
-		return svc.createModulesIndex(ctx, dirPath)
+		return svc.createModulesIndex(ctx, dirPath, summary)
 	}); err != nil {
-		return err
+		return summary, err
 	}
 
 	// Create packages index (deckhouse/packages:<package-name> tags for discovery)
-	return svc.userLogger.Process("Create packages index", func() error {
-		return svc.createPackagesIndex(ctx, dirPath)
-	})
+	if err := svc.userLogger.Process("Create packages index", func() error {
+		return svc.createPackagesIndex(ctx, dirPath, summary)
+	}); err != nil {
+		return summary, err
+	}
+
+	return summary, nil
+}
+
+// registryLayout maps each component to its target registry path for the push
+// summary, honoring --modules-path-suffix. The installer repo lives at
+// <target>/installer.
+func (svc *PushService) registryLayout() RegistryLayout {
+	root := svc.client.GetRegistry()
+	installerPath := path.Join(root, internal.InstallerSegment)
+
+	return BuildRegistryLayout(root, svc.options.ModulesPathSuffix, installerPath)
 }
 
 // modulesPath returns the registry path for module repositories, relative to
@@ -258,7 +275,7 @@ func openPackage(pkgPath string) (io.ReadCloser, error) {
 
 // pushAllLayouts recursively walks the directory and pushes each OCI layout found.
 // The relative path from root becomes the registry segment.
-func (svc *PushService) pushAllLayouts(ctx context.Context, rootDir string) error {
+func (svc *PushService) pushAllLayouts(ctx context.Context, rootDir string, summary *PushSummary) error {
 	layouts, err := svc.findLayouts(rootDir)
 	if err != nil {
 		return fmt.Errorf("scan layouts in %q: %w", rootDir, err)
@@ -276,7 +293,7 @@ func (svc *PushService) pushAllLayouts(ctx context.Context, rootDir string) erro
 			return err
 		}
 
-		if err := svc.pushSingleLayout(ctx, rootDir, layoutDir); err != nil {
+		if err := svc.pushSingleLayout(ctx, rootDir, layoutDir, summary); err != nil {
 			return err
 		}
 	}
@@ -311,7 +328,7 @@ func (svc *PushService) findLayouts(rootDir string) ([]string, error) {
 }
 
 // pushSingleLayout pushes a single OCI layout to the registry.
-func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir string) error {
+func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir string, summary *PushSummary) error {
 	// Check if layout has any images
 	hasImages, err := svc.layoutHasImages(layoutDir)
 	if err != nil {
@@ -340,6 +357,9 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 		segment = internal.ModulesSegment
 	}
 
+	// Classify by the bundle segment, before the modules remap rewrites it.
+	origSegment := segment
+
 	// Rewrite the leading "modules" component to honor --modules-path-suffix.
 	segment = svc.remapModulesSegment(segment)
 
@@ -351,7 +371,25 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 		return fmt.Errorf("push layout %q to registry %s: %w", relPath, targetClient.GetRegistry(), err)
 	}
 
+	recordPushedComponent(summary, origSegment)
+
 	return nil
+}
+
+// recordPushedComponent tallies a pushed layout into the summary by its bundle
+// segment. Modules and packages are counted from their index step, so their
+// layouts are ignored here.
+func recordPushedComponent(summary *PushSummary, segment string) {
+	first, _, _ := strings.Cut(segment, "/")
+
+	switch first {
+	case "", internal.InstallSegment, internal.InstallStandaloneSegment, internal.ReleaseChannelSegment:
+		summary.PlatformPushed = true
+	case internal.InstallerSegment:
+		summary.InstallerPushed = true
+	case internal.SecuritySegment:
+		summary.SecurityDatabases++
+	}
 }
 
 // layoutHasImages checks if an OCI layout has any images to push.
@@ -374,7 +412,7 @@ func (svc *PushService) layoutHasImages(layoutDir string) (bool, error) {
 // createModulesIndex creates the modules index in the registry.
 // This pushes a small random image for each module with tag = module name
 // to deckhouse/modules repo, enabling module discovery via ListTags.
-func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string) error {
+func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string, summary *PushSummary) error {
 	modulesDir := filepath.Join(rootDir, internal.ModulesSegment)
 
 	// Check if modules directory exists
@@ -403,6 +441,7 @@ func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string) 
 	}
 
 	slices.Sort(moduleNames)
+	summary.Modules = len(moduleNames)
 	svc.userLogger.Infof("Creating modules index with %d modules", len(moduleNames))
 
 	// Scope the client to the modules repo, honoring --modules-path-suffix.
@@ -437,7 +476,7 @@ func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string) 
 // createPackagesIndex creates the packages index in the registry.
 // This pushes a small random image for each package with tag = package name
 // to deckhouse/packages repo, enabling package discovery via ListTags.
-func (svc *PushService) createPackagesIndex(ctx context.Context, rootDir string) error {
+func (svc *PushService) createPackagesIndex(ctx context.Context, rootDir string, summary *PushSummary) error {
 	packagesDir := filepath.Join(rootDir, internal.PackagesSegment)
 
 	// Check if packages directory exists
@@ -466,6 +505,7 @@ func (svc *PushService) createPackagesIndex(ctx context.Context, rootDir string)
 	}
 
 	slices.Sort(packageNames)
+	summary.Packages = len(packageNames)
 	svc.userLogger.Infof("Creating packages index with %d packages", len(packageNames))
 
 	// Get client scoped to packages repo

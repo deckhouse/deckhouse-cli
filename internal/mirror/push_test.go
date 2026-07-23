@@ -140,7 +140,16 @@ func TestPushService_ModulesPathSuffix(t *testing.T) {
 				WorkingDir:        t.TempDir(),
 				ModulesPathSuffix: tt.suffix,
 			}, logger, userLogger)
-			require.NoError(t, svc.Push(context.Background()), "push must succeed")
+			summary, err := svc.Push(context.Background())
+			require.NoError(t, err, "push must succeed")
+
+			// Summary reflects what was pushed: one module and the install
+			// layout (counted as platform). Override tracks a moved modules path.
+			assert.Equal(t, 1, summary.Modules, "one module pushed")
+			assert.True(t, summary.PlatformPushed, "install layout counts as platform")
+			wantOverride := tt.wantModule != "modules/"+moduleName
+			assert.Equal(t, wantOverride, summary.Registry.HasOverride,
+				"registry override reflects a moved modules path")
 
 			ctx := context.Background()
 
@@ -159,7 +168,7 @@ func TestPushService_ModulesPathSuffix(t *testing.T) {
 			// A non-default suffix must MOVE modules, not copy them: the default
 			// modules/ path must hold nothing.
 			if tt.wantModule != "modules/"+moduleName {
-				defaultRepo := destClient.WithSegment(pkgclient.PathToSegments("modules/"+moduleName)...)
+				defaultRepo := destClient.WithSegment(pkgclient.PathToSegments("modules/" + moduleName)...)
 				assert.Errorf(t, defaultRepo.CheckImageExists(ctx, moduleTag),
 					"module must not remain at default modules/%s", moduleName)
 			}

@@ -318,8 +318,8 @@ func TestRepro_MirrorPullThenPush_TransientBlobFailureLosesImage(t *testing.T) {
 		Packages:   []string{pkgPath},
 		WorkingDir: t.TempDir(),
 	}, logger, userLogger)
-	require.NoError(t, pushSvc.Push(context.Background()),
-		"d8 mirror push must succeed")
+	_, pushErr := pushSvc.Push(context.Background())
+	require.NoError(t, pushErr, "d8 mirror push must succeed")
 
 	// Every digest the pull reported as successfully mirrored must exist in
 	// the target registry. Digest images are pushed under their hex short_tag.
