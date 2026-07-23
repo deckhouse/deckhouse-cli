@@ -17,6 +17,7 @@ limitations under the License.
 package archive
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -24,12 +25,22 @@ import (
 )
 
 type moveFileExFunc func(*uint16, *uint16, uint32) error
+type pathExistsFunc func(string) (bool, error)
 
 func renameDurably(oldPath, newPath string) error {
-	return moveFileDurably(oldPath, newPath, windows.MoveFileEx)
+	return moveFileDurably(oldPath, newPath, pathExists, windows.MoveFileEx)
 }
 
-func moveFileDurably(oldPath, newPath string, move moveFileExFunc) error {
+func moveFileDurably(oldPath, newPath string, exists pathExistsFunc, move moveFileExFunc) error {
+	destinationExists, err := exists(newPath)
+	if err != nil {
+		return fmt.Errorf("checking replacement destination %s: %w", newPath, err)
+	}
+
+	if destinationExists {
+		return fmt.Errorf("%w: destination %s already exists", ErrAtomicReplaceUnsupported, newPath)
+	}
+
 	oldPathPtr, err := windows.UTF16PtrFromString(oldPath)
 	if err != nil {
 		return fmt.Errorf("encoding old path %s: %w", oldPath, err)
@@ -40,21 +51,45 @@ func moveFileDurably(oldPath, newPath string, move moveFileExFunc) error {
 		return fmt.Errorf("encoding new path %s: %w", newPath, err)
 	}
 
-	// MoveFileEx is also the primitive behind Go's os.Rename on Windows.
-	// WRITE_THROUGH adds the documented guarantee that the move has reached
-	// disk before success; it does not claim POSIX directory-fsync semantics.
-	flags := uint32(windows.MOVEFILE_REPLACE_EXISTING | windows.MOVEFILE_WRITE_THROUGH)
+	// MoveFileEx documents WRITE_THROUGH durability but not replacement
+	// atomicity. ReplaceFile is Microsoft's atomic single-document alternative,
+	// but its WRITE_THROUGH flag is unsupported and documented failure states
+	// can relocate or remove the old final. A create-only move avoids both
+	// overclaims: no COPY_ALLOWED fallback and no replacement flag are used.
+	flags := uint32(windows.MOVEFILE_WRITE_THROUGH)
 	if err := move(oldPathPtr, newPathPtr, flags); err != nil {
+		if errors.Is(err, windows.ERROR_ALREADY_EXISTS) || errors.Is(err, windows.ERROR_FILE_EXISTS) {
+			return fmt.Errorf(
+				"%w: destination %s won the publication race: %w",
+				ErrAtomicReplaceUnsupported,
+				newPath,
+				err,
+			)
+		}
+
 		return fmt.Errorf("moving %s to %s with write-through: %w", oldPath, newPath, err)
 	}
 
 	return nil
 }
 
+func pathExists(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if err == nil {
+		return true, nil
+	}
+
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+
+	return false, err
+}
+
 // syncDir is deliberately a no-op on Windows. FlushFileBuffers requires a
 // GENERIC_WRITE file handle and is not documented for directory handles.
-// AtomicWriter instead publishes with MOVEFILE_WRITE_THROUGH, whose successful
-// return guarantees that the move reached disk. Windows exposes no equivalent
+// A successful create-only AtomicWriter publication uses MOVEFILE_WRITE_THROUGH,
+// whose return guarantees that move reached disk. Windows exposes no equivalent
 // supported operation for separately confirming MkdirAll directory creation.
 func syncDir(string) error {
 	return nil

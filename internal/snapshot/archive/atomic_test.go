@@ -367,6 +367,55 @@ func TestAtomicWriter_PrePublicationFailuresPreserveOldFinal(t *testing.T) {
 	}
 }
 
+func TestAtomicWriter_UnsupportedReplacementIsUnpublished(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.bin")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aw, err := NewAtomicWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := aw.Write([]byte("new")); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	aw.ops.rename = func(string, string) error {
+		cancel()
+
+		return ErrAtomicReplaceUnsupported
+	}
+
+	err = aw.CommitContext(ctx)
+	if !errors.Is(err, ErrAtomicReplaceUnsupported) {
+		t.Fatalf("CommitContext error = %v, want unsupported replacement", err)
+	}
+
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("post-checkpoint cancellation replaced publication error: %v", err)
+	}
+
+	if got := CommitPublicationState(err); got != PublicationUnpublished {
+		t.Fatalf("publication state = %v, want unpublished", got)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(got, []byte("old")) {
+		t.Fatalf("final bytes = %q, want unchanged old bytes", got)
+	}
+
+	if _, err := os.Stat(path + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary file survived unsupported replacement: %v", err)
+	}
+}
+
 func TestConfirmFileDurability_RetriesPublishedState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "data.bin")
 	if err := os.WriteFile(path, []byte("published"), 0o644); err != nil {

@@ -26,12 +26,17 @@ import (
 	"path/filepath"
 )
 
-// AtomicWriter writes data to "<finalPath>.tmp" and, on Commit, syncs the
-// data before using the platform's durable replacement operation.
-// On Unix, a parent-directory sync failure can leave the final file published
-// but with durability unconfirmed; CommitError exposes that state to callers.
-// Windows uses a write-through move, so successful publication is already
-// durable and does not require an unsupported directory-handle flush.
+// ErrAtomicReplaceUnsupported reports that the platform cannot provide the
+// AtomicWriter replacement contract without weakening its guarantees.
+// Windows returns this error before publication when the final path exists.
+var ErrAtomicReplaceUnsupported = errors.New("atomic replacement is unsupported on this platform")
+
+// AtomicWriter writes data to "<finalPath>.tmp" and syncs it before publication.
+// Unix atomically replaces the final path, then syncs its parent directory.
+// Windows durably creates a previously absent final with a write-through move,
+// but fails with ErrAtomicReplaceUnsupported before replacing an existing final:
+// documented Windows APIs do not combine atomic replacement with write-through
+// namespace durability on every supported filesystem.
 // Call Abort to remove the temporary file when an error occurs.
 type AtomicWriter struct {
 	finalPath string
@@ -156,8 +161,8 @@ func (w *AtomicWriter) Commit() error {
 	return w.CommitContext(context.Background())
 }
 
-// CommitContext syncs and closes the temporary file, checks cancellation,
-// atomically replaces the final path with the platform's durability contract.
+// CommitContext syncs and closes the temporary file, checks cancellation, and
+// publishes it according to the platform contract documented on AtomicWriter.
 //
 // Publication begins at the cancellation checkpoint immediately before Rename.
 // Cancellation observed before that point removes the temporary file and leaves
@@ -223,9 +228,10 @@ func runDirectorySync(ctx context.Context, path string, syncFn func(string) erro
 
 // ConfirmFileDurability applies the platform durability confirmation before an
 // already published final file is trusted. Unix syncs the parent directory.
-// Windows AtomicWriter publication is write-through, so no separate supported
-// directory operation exists or is required. Cancellation observed before
-// confirmation prevents it from starting; once it starts, its result wins.
+// A successful Windows AtomicWriter create publication is write-through, so no
+// separate supported directory operation exists or is required. Cancellation
+// observed before confirmation prevents it from starting; once it starts, its
+// result wins.
 func ConfirmFileDurability(ctx context.Context, path string) error {
 	if err := ctx.Err(); err != nil {
 		return newCommitError(
