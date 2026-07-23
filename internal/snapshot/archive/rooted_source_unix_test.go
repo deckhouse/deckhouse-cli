@@ -33,6 +33,168 @@ import (
 
 const linuxMountHelperScenario = "D8_ARCHIVE_MOUNT_HELPER"
 
+type testArchiveFSID struct {
+	Val [2]int32
+}
+
+type testArchiveMountStat struct {
+	Fsid        testArchiveFSID
+	Mntonname   [64]byte
+	Mntfromname [64]byte
+	Fstypename  [16]byte
+}
+
+func TestArchiveMountIdentityValidation(t *testing.T) {
+	valid := testArchiveMountStat{
+		Fsid: testArchiveFSID{Val: [2]int32{17, 23}},
+	}
+	setTestArchiveMountField(t, valid.Mntonname[:], "/archive")
+	setTestArchiveMountField(t, valid.Mntfromname[:], "/dev/disk0s1")
+	setTestArchiveMountField(t, valid.Fstypename[:], "apfs")
+
+	tests := []struct {
+		name      string
+		mutate    func(stat *testArchiveMountStat)
+		wantError error
+	}{
+		{
+			name:   "same mount",
+			mutate: func(_ *testArchiveMountStat) {},
+		},
+		{
+			name: "different filesystem ID",
+			mutate: func(stat *testArchiveMountStat) {
+				stat.Fsid.Val = [2]int32{19, 29}
+			},
+			wantError: ErrNonRegularArchiveArtifact,
+		},
+		{
+			name: "colliding filesystem ID on different mount",
+			mutate: func(stat *testArchiveMountStat) {
+				setTestArchiveMountField(t, stat.Mntonname[:], "/archive/nested")
+			},
+			wantError: ErrNonRegularArchiveArtifact,
+		},
+		{
+			name: "zero filesystem ID",
+			mutate: func(stat *testArchiveMountStat) {
+				stat.Fsid.Val = [2]int32{}
+			},
+			wantError: ErrArchiveMountBoundaryUnsupported,
+		},
+		{
+			name: "empty mount point",
+			mutate: func(stat *testArchiveMountStat) {
+				stat.Mntonname = [64]byte{}
+			},
+			wantError: ErrArchiveMountBoundaryUnsupported,
+		},
+		{
+			name: "malformed unterminated mount point",
+			mutate: func(stat *testArchiveMountStat) {
+				for index := range stat.Mntonname {
+					stat.Mntonname[index] = 'x'
+				}
+			},
+			wantError: ErrArchiveMountBoundaryUnsupported,
+		},
+	}
+
+	parent, err := archiveMountIdentityFromStat(valid)
+	if err != nil {
+		t.Fatalf("archiveMountIdentityFromStat parent: %v", err)
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			childStat := valid
+			tc.mutate(&childStat)
+
+			child, childErr := archiveMountIdentityFromStat(childStat)
+			if childErr == nil {
+				childErr = verifyArchiveMountIdentities(parent, child, "archive/payload")
+			}
+
+			if tc.wantError == nil {
+				if childErr != nil {
+					t.Fatalf("mount identity verification: %v", childErr)
+				}
+
+				return
+			}
+
+			if !errors.Is(childErr, tc.wantError) {
+				t.Fatalf("mount identity error = %v, want %v", childErr, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestArchiveMountIdentityUnavailableClosesChildDescriptor(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "payload"), "inside")
+
+	parent, err := os.Open(root)
+	if err != nil {
+		t.Fatalf("open parent: %v", err)
+	}
+	defer func() { _ = parent.Close() }()
+
+	calls := 0
+	childFD := -1
+	mountStat := func(fd int) (any, error) {
+		calls++
+		if calls == 1 {
+			return newTestArchiveMountStat(t, [2]int32{17, 23}, "/archive"), nil
+		}
+
+		childFD = fd
+
+		return nil, errors.New("descriptor mount statistics unavailable")
+	}
+
+	file, err := openArchiveAtUnix(parent, "payload", filepath.Join(root, "payload"), false, mountStat)
+	if file != nil {
+		_ = file.Close()
+	}
+
+	if !errors.Is(err, ErrArchiveMountBoundaryUnsupported) {
+		t.Fatalf("openArchiveAtUnix error = %v, want ErrArchiveMountBoundaryUnsupported", err)
+	}
+
+	if childFD < 0 {
+		t.Fatal("child descriptor was not inspected")
+	}
+
+	if closeErr := unix.Close(childFD); !errors.Is(closeErr, unix.EBADF) {
+		t.Fatalf("rejected child descriptor remained open: close error = %v", closeErr)
+	}
+}
+
+func newTestArchiveMountStat(t *testing.T, fsID [2]int32, mountPoint string) testArchiveMountStat {
+	t.Helper()
+
+	stat := testArchiveMountStat{
+		Fsid: testArchiveFSID{Val: fsID},
+	}
+	setTestArchiveMountField(t, stat.Mntonname[:], mountPoint)
+	setTestArchiveMountField(t, stat.Mntfromname[:], "/dev/disk0s1")
+	setTestArchiveMountField(t, stat.Fstypename[:], "apfs")
+
+	return stat
+}
+
+func setTestArchiveMountField(t *testing.T, field []byte, value string) {
+	t.Helper()
+
+	clear(field)
+	if len(value) >= len(field) {
+		t.Fatalf("test mount field %q is too long", value)
+	}
+
+	copy(field, value)
+}
+
 func TestLinuxArchiveOpenUsesKernelMountBoundaryPolicy(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "payload"), "inside")
