@@ -2572,6 +2572,113 @@ func TestPipeline_Progress_ResumeScanCancellationStopsBeforeExport(t *testing.T)
 	require.Equal(t, 1, streams[0].failCnt, "the partially pre-created stream must be settled on cancellation")
 }
 
+type armedCancellationContext struct {
+	context.Context
+	armed    atomic.Bool
+	checks   atomic.Int64
+	cancelAt int64
+}
+
+func (c *armedCancellationContext) Arm() {
+	c.armed.Store(true)
+}
+
+func (c *armedCancellationContext) Err() error {
+	if !c.armed.Load() {
+		return nil
+	}
+
+	if c.checks.Add(1) >= c.cancelAt {
+		return context.Canceled
+	}
+
+	return nil
+}
+
+func TestPipeline_Progress_BlockResumeScanCancellationStopsBeforeExport(t *testing.T) {
+	const (
+		cancelAt  int64 = 12
+		chunkSize int64 = 1
+		totalSize int64 = 10_000
+	)
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
+	require.NoError(t, os.MkdirAll(chunkDir, 0o755))
+	seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
+	require.NoError(t, archive.WriteChunkMeta(
+		chunkDir,
+		archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize},
+	))
+
+	for index := range 4 {
+		require.NoError(t, os.WriteFile(
+			filepath.Join(chunkDir, archive.ChunkFileName(index, "")),
+			[]byte{byte(index)},
+			0o644,
+		))
+	}
+
+	codec, err := compress.New("none", 0)
+	require.NoError(t, err)
+
+	ctx := &armedCancellationContext{Context: context.Background(), cancelAt: cancelAt}
+	rec := &recordingSink{onNewStream: ctx.Arm}
+
+	var (
+		openExportCalls atomic.Int64
+		networkCalls    atomic.Int64
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		networkCalls.Add(1)
+	}))
+	defer server.Close()
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		Compression:          codec,
+		Progress:             rec,
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			openExportCalls.Add(1)
+
+			return exporter.NewExport(namespace, "de-block-scan-cancel", "Block", server.URL, exporter.NewFetcher(server.Client())), nil
+		},
+	}
+
+	err = runPipeline(ctx, cfg)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, err.Error(), "scan chunk",
+		"cancellation must be observed inside the production block chunk-index scan")
+	require.Equal(t, cancelAt, ctx.checks.Load(),
+		"no filesystem scan or later pipeline work may check the context after block cancellation")
+	require.Zero(t, openExportCalls.Load(), "DataExport activation must not start")
+	require.Zero(t, networkCalls.Load(), "network access must not start")
+
+	streams := rec.snapshot()
+	require.Len(t, streams, 1)
+	require.Empty(t, streams[0].Samples(), "a cancelled scan must not mutate current or total counters")
+	require.Zero(t, streams[0].Current())
+	require.Zero(t, streams[0].Total())
+	require.Zero(t, streams[0].activateCnt)
+	require.Equal(t, 1, streams[0].failCnt, "the pre-created stream must be settled before return")
+
+	samplesAfterReturn := streams[0].Samples()
+	checksAfterReturn := ctx.checks.Load()
+	require.Equal(t, samplesAfterReturn, streams[0].Samples(), "stream counters must remain quiescent after return")
+	require.Equal(t, checksAfterReturn, ctx.checks.Load(), "filesystem scanning must remain quiescent after return")
+	require.Zero(t, openExportCalls.Load())
+	require.Zero(t, networkCalls.Load())
+}
+
 // TestPipeline_Progress_ClampStaleSeedToFreshTotal is the regression test for
 // clamp-resume-seed-to-fresh-total: when seedStreamFromDisk credits committed
 // bytes from an OLD on-disk geometry (chunks.meta or a sizes sidecar) that the
