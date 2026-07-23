@@ -18,14 +18,12 @@ package volume
 
 import (
 	"archive/tar"
-	"cmp"
 	"context"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -61,9 +59,17 @@ type TarEntry struct {
 	Linkname string
 }
 
+// TarEntrySource emits tar entries in deterministic RelPath order. The source
+// must retain only bounded state and stop immediately when yield returns an
+// error.
+type TarEntrySource func(yield func(TarEntry) error) error
+
 // WriteTar writes a deterministic plain uncompressed PAX tar to outputPath.
-// Entries are sorted by RelPath for determinism. Raw bytes for "file" entries
-// are read from filepath.Join(stagingDir, filepath.FromSlash(entry.RelPath)).
+// entries must emit RelPath-sorted entries; the filesystem inventory pipeline
+// establishes that order with bounded on-disk merge sorting before staging.
+// WriteTar never clones or retains the entry stream. Raw bytes for "file"
+// entries are read from filepath.Join(stagingDir,
+// filepath.FromSlash(entry.RelPath)).
 // The output file is written atomically (.tmp → fsync → rename).
 //
 // ctx is checked once per entry during assembly; if it is cancelled mid-write,
@@ -72,12 +78,7 @@ type TarEntry struct {
 // errors.Is). Cancellation here never loses data: the per-file staging
 // directory is untouched, so tar assembly simply resumes from the same staged
 // files on the next run.
-func WriteTar(ctx context.Context, outputPath string, stagingDir string, entries []TarEntry) error {
-	sorted := slices.Clone(entries)
-	slices.SortFunc(sorted, func(a, b TarEntry) int {
-		return cmp.Compare(a.RelPath, b.RelPath)
-	})
-
+func WriteTar(ctx context.Context, outputPath string, stagingDir string, entries TarEntrySource) error {
 	aw, err := archive.NewAtomicWriter(outputPath)
 	if err != nil {
 		return fmt.Errorf("open tar output %s: %w", outputPath, err)
@@ -85,7 +86,7 @@ func WriteTar(ctx context.Context, outputPath string, stagingDir string, entries
 
 	tw := tar.NewWriter(aw)
 
-	if err := writeEntries(ctx, tw, stagingDir, sorted); err != nil {
+	if err := writeEntries(ctx, tw, stagingDir, entries); err != nil {
 		aw.Abort()
 
 		return err
@@ -100,8 +101,8 @@ func WriteTar(ctx context.Context, outputPath string, stagingDir string, entries
 	return aw.Commit()
 }
 
-func writeEntries(ctx context.Context, tw *tar.Writer, stagingDir string, entries []TarEntry) error {
-	for _, e := range entries {
+func writeEntries(ctx context.Context, tw *tar.Writer, stagingDir string, entries TarEntrySource) error {
+	return entries(func(e TarEntry) error {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("tar assembly cancelled before entry %q: %w", e.RelPath, err)
 		}
@@ -109,9 +110,9 @@ func writeEntries(ctx context.Context, tw *tar.Writer, stagingDir string, entrie
 		if err := writeEntry(tw, stagingDir, e); err != nil {
 			return err
 		}
-	}
 
-	return nil
+		return nil
+	})
 }
 
 func writeEntry(tw *tar.Writer, stagingDir string, e TarEntry) error {
