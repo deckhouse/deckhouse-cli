@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
 
 // recordingDoer captures the requests putBlock/postFinished send and returns canned responses.
@@ -624,12 +626,13 @@ func randomPayload(t *testing.T, n int) []byte {
 	return buf
 }
 
-// TestResolveBlockDecodeReader_AlwaysDiscardExactOffset_AllCodecs verifies the current
-// resume dispatch (see putBlockCompressed's doc comment): no codec -- zstd included --
-// ever gets a chunk-skipping fast path, so resuming from any nonzero offset always
-// discards EXACTLY offset decoded bytes from the start, regardless of how deep into the
-// archive offset is.
-func TestResolveBlockDecodeReader_AlwaysDiscardExactOffset_AllCodecs(t *testing.T) {
+// TestResolveBlockDecodeReader_ResumedSuffixMatches verifies every compressed codec
+// returns a reader at the exact raw resume offset. This small fixture stays inside frame
+// zero, so zstd's bounded intra-frame discard equals offset while gzip/lz4 use their
+// byte-zero fallback.
+func TestResolveBlockDecodeReader_ResumedSuffixMatches(t *testing.T) {
+	t.Parallel()
+
 	const chunkSize = 100_000
 
 	const numChunks = 5
@@ -645,6 +648,8 @@ func TestResolveBlockDecodeReader_AlwaysDiscardExactOffset_AllCodecs(t *testing.
 		}
 
 		t.Run(tc.codec, func(t *testing.T) {
+			t.Parallel()
+
 			dir := t.TempDir()
 			dataFile := filepath.Join(dir, "data.bin"+tc.ext)
 			writeEncodedBlockFile(t, dataFile, tc.codec, payload)
@@ -655,14 +660,14 @@ func TestResolveBlockDecodeReader_AlwaysDiscardExactOffset_AllCodecs(t *testing.
 			}
 			defer file.Close()
 
-			decodeReader, discarded, err := resolveBlockDecodeReader(file, dataFile, tc.ext, offset, discardLogger())
+			decodeReader, discarded, err := resolveBlockDecodeReader(context.Background(), file, dataFile, tc.ext, offset, discardLogger())
 			if err != nil {
 				t.Fatalf("resolveBlockDecodeReader: %v", err)
 			}
 			defer decodeReader.Close()
 
 			if discarded != offset {
-				t.Fatalf("discarded = %d, want exactly %d (%s has no chunk-skipping fast path)", discarded, offset, tc.codec)
+				t.Fatalf("discarded = %d, want %d", discarded, offset)
 			}
 
 			rest, err := io.ReadAll(decodeReader)
@@ -673,6 +678,741 @@ func TestResolveBlockDecodeReader_AlwaysDiscardExactOffset_AllCodecs(t *testing.
 			if !bytes.Equal(rest, payload[offset:]) {
 				t.Fatalf("decode reader positioned at the wrong offset: got %d remaining bytes, want %d matching payload[offset:]",
 					len(rest), len(payload)-int(offset))
+			}
+		})
+	}
+}
+
+type testHTTPDoer func(*http.Request) (*http.Response, error)
+
+func (f testHTTPDoer) HTTPDo(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type testReadCloser struct {
+	reader   io.Reader
+	closeErr error
+	closed   bool
+}
+
+func (r *testReadCloser) Read(p []byte) (int, error) {
+	return r.reader.Read(p)
+}
+
+func (r *testReadCloser) Close() error {
+	r.closed = true
+
+	return r.closeErr
+}
+
+type cancelAfterRead struct {
+	cancel  context.CancelFunc
+	maxRead int
+	reads   int
+}
+
+func (r *cancelAfterRead) Read(p []byte) (int, error) {
+	if len(p) > r.maxRead {
+		r.maxRead = len(p)
+	}
+
+	r.reads++
+	for i := range p {
+		p[i] = byte(i)
+	}
+
+	if r.reads == 1 {
+		r.cancel()
+	}
+
+	return len(p), nil
+}
+
+type resetFailSeeker struct {
+	err error
+}
+
+func (s *resetFailSeeker) Read(_ []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (s *resetFailSeeker) Seek(_ int64, _ int) (int64, error) {
+	return 0, s.err
+}
+
+type boundaryFailSeeker struct {
+	reader      *bytes.Reader
+	boundary    int64
+	boundaryErr error
+	failed      bool
+}
+
+func (s *boundaryFailSeeker) Read(p []byte) (int, error) {
+	return s.reader.Read(p)
+}
+
+func (s *boundaryFailSeeker) Seek(offset int64, whence int) (int64, error) {
+	if !s.failed && whence == io.SeekStart && offset == s.boundary {
+		s.failed = true
+
+		return 0, s.boundaryErr
+	}
+
+	return s.reader.Seek(offset, whence)
+}
+
+func TestResolveBlockDecodeReader_ZstdSkipsWholeFrames(t *testing.T) {
+	t.Parallel()
+
+	const intra = int64(73)
+
+	offset := int64(volume.DefaultChunkSize) + intra
+	source := bytes.NewReader([]byte("compressed-prefix-frame-suffix"))
+	decoded := append(bytes.Repeat([]byte("d"), int(intra)), []byte("wanted-suffix")...)
+
+	var gotFrame int
+	var gotCompressedOffset int64
+
+	deps := blockDecodeDependencies{
+		skipZstdFrames: func(_ io.ReadSeeker, frame int) (int64, error) {
+			gotFrame = frame
+
+			return 7, nil
+		},
+		newReader: func(ext string, src io.Reader) (io.ReadCloser, error) {
+			if ext != ".zst" {
+				t.Fatalf("decoder extension = %q, want .zst", ext)
+			}
+
+			seeker, ok := src.(io.Seeker)
+			if !ok {
+				t.Fatal("decoder source does not implement io.Seeker")
+			}
+
+			pos, err := seeker.Seek(0, io.SeekCurrent)
+			if err != nil {
+				t.Fatalf("query decoder source offset: %v", err)
+			}
+
+			gotCompressedOffset = pos
+
+			return &testReadCloser{reader: bytes.NewReader(decoded)}, nil
+		},
+	}
+
+	reader, discarded, err := resolveBlockDecodeReaderWith(
+		context.Background(),
+		source,
+		"data.bin.zst",
+		".zst",
+		offset,
+		discardLogger(),
+		deps,
+	)
+	if err != nil {
+		t.Fatalf("resolveBlockDecodeReaderWith: %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := reader.Close(); closeErr != nil {
+			t.Errorf("close resolved reader: %v", closeErr)
+		}
+	})
+
+	if gotFrame != 1 {
+		t.Errorf("walker frame = %d, want 1", gotFrame)
+	}
+
+	if gotCompressedOffset != 7 {
+		t.Errorf("decoder compressed offset = %d, want 7", gotCompressedOffset)
+	}
+
+	if discarded != intra {
+		t.Errorf("discarded = %d, want intra-frame %d", discarded, intra)
+	}
+
+	if discarded >= int64(volume.DefaultChunkSize) {
+		t.Errorf("discarded = %d, want less than fixed frame size %d", discarded, volume.DefaultChunkSize)
+	}
+
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read resolved suffix: %v", err)
+	}
+
+	if string(got) != "wanted-suffix" {
+		t.Errorf("resolved suffix = %q, want %q", got, "wanted-suffix")
+	}
+}
+
+func TestResolveBlockDecodeReader_FallbacksResetToByteZero(t *testing.T) {
+	t.Parallel()
+
+	walkerErr := errors.New("walker failed")
+	decodeErr := errors.New("decoder failed")
+
+	tests := []struct {
+		name      string
+		ext       string
+		failFirst bool
+	}{
+		{name: "zstd: walker failure", ext: ".zst"},
+		{name: "zstd: decoder failure after source consumption", ext: ".zst", failFirst: true},
+		{name: "gzip: byte-zero fallback", ext: ".gz"},
+		{name: "lz4: byte-zero fallback", ext: ".lz4"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			const offset = int64(5)
+
+			source := bytes.NewReader([]byte("encoded-source"))
+			decoderCalls := 0
+			deps := blockDecodeDependencies{
+				skipZstdFrames: func(_ io.ReadSeeker, _ int) (int64, error) {
+					if tc.failFirst {
+						return 3, nil
+					}
+
+					return 0, walkerErr
+				},
+				newReader: func(_ string, src io.Reader) (io.ReadCloser, error) {
+					decoderCalls++
+
+					seeker := src.(io.Seeker)
+					pos, err := seeker.Seek(0, io.SeekCurrent)
+					if err != nil {
+						t.Fatalf("query source offset: %v", err)
+					}
+
+					if tc.failFirst && decoderCalls == 1 {
+						if pos != 3 {
+							t.Fatalf("fast decoder source offset = %d, want 3", pos)
+						}
+
+						if _, err := seeker.Seek(2, io.SeekCurrent); err != nil {
+							t.Fatalf("consume source before injected decoder failure: %v", err)
+						}
+
+						return nil, decodeErr
+					}
+
+					if pos != 0 {
+						t.Fatalf("fallback decoder source offset = %d, want byte zero", pos)
+					}
+
+					return &testReadCloser{reader: strings.NewReader("01234wanted")}, nil
+				},
+			}
+
+			reader, discarded, err := resolveBlockDecodeReaderWith(
+				context.Background(),
+				source,
+				"data.bin"+tc.ext,
+				tc.ext,
+				offset,
+				discardLogger(),
+				deps,
+			)
+			if err != nil {
+				t.Fatalf("resolveBlockDecodeReaderWith: %v", err)
+			}
+			t.Cleanup(func() {
+				if closeErr := reader.Close(); closeErr != nil {
+					t.Errorf("close resolved reader: %v", closeErr)
+				}
+			})
+
+			if discarded != offset {
+				t.Errorf("discarded = %d, want full fallback offset %d", discarded, offset)
+			}
+
+			got, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatalf("read fallback suffix: %v", err)
+			}
+
+			if string(got) != "wanted" {
+				t.Errorf("fallback suffix = %q, want %q", got, "wanted")
+			}
+		})
+	}
+}
+
+func TestResolveBlockDecodeReader_ClosesFailedDecoders(t *testing.T) {
+	t.Parallel()
+
+	readErr := errors.New("discard failed")
+	closeErr := errors.New("close failed")
+
+	tests := []struct {
+		name           string
+		ext            string
+		closeErr       error
+		wantFallback   bool
+		wantCloseError bool
+	}{
+		{name: "zstd fast discard failure falls back after close", ext: ".zst", wantFallback: true},
+		{name: "zstd fast discard and close failures are preserved", ext: ".zst", closeErr: closeErr, wantCloseError: true},
+		{name: "gzip fallback discard and close failures are preserved", ext: ".gz", closeErr: closeErr, wantCloseError: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			failedDecoder := &testReadCloser{reader: errorReader{err: readErr}, closeErr: tc.closeErr}
+			fallbackDecoder := &testReadCloser{reader: strings.NewReader("01234wanted")}
+			decoderCalls := 0
+
+			deps := blockDecodeDependencies{
+				skipZstdFrames: func(_ io.ReadSeeker, _ int) (int64, error) {
+					return 0, nil
+				},
+				newReader: func(_ string, _ io.Reader) (io.ReadCloser, error) {
+					decoderCalls++
+					if decoderCalls == 1 {
+						return failedDecoder, nil
+					}
+
+					return fallbackDecoder, nil
+				},
+			}
+
+			reader, _, err := resolveBlockDecodeReaderWith(
+				context.Background(),
+				bytes.NewReader([]byte("source")),
+				"data.bin"+tc.ext,
+				tc.ext,
+				5,
+				discardLogger(),
+				deps,
+			)
+
+			if !failedDecoder.closed {
+				t.Fatal("failed decoder was not closed")
+			}
+
+			if tc.wantCloseError {
+				if !errors.Is(err, readErr) {
+					t.Errorf("error %v does not preserve discard failure", err)
+				}
+
+				if !errors.Is(err, closeErr) {
+					t.Errorf("error %v does not preserve close failure", err)
+				}
+
+				if reader != nil {
+					t.Fatal("reader returned together with decoder close error")
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("resolveBlockDecodeReaderWith: %v", err)
+			}
+
+			if !tc.wantFallback || decoderCalls != 2 {
+				t.Fatalf("decoder calls = %d, want fast attempt plus fallback", decoderCalls)
+			}
+
+			t.Cleanup(func() {
+				if closeErr := reader.Close(); closeErr != nil {
+					t.Errorf("close fallback reader: %v", closeErr)
+				}
+			})
+		})
+	}
+}
+
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Read(_ []byte) (int, error) {
+	return 0, r.err
+}
+
+func TestResolveBlockDecodeReader_ResetFailureIsReturned(t *testing.T) {
+	t.Parallel()
+
+	walkerErr := errors.New("walker failed")
+	resetErr := errors.New("reset failed")
+	deps := blockDecodeDependencies{
+		skipZstdFrames: func(_ io.ReadSeeker, _ int) (int64, error) {
+			return 0, walkerErr
+		},
+		newReader: func(_ string, _ io.Reader) (io.ReadCloser, error) {
+			t.Fatal("decoder must not open when reset fails")
+
+			return nil, nil
+		},
+	}
+
+	reader, _, err := resolveBlockDecodeReaderWith(
+		context.Background(),
+		&resetFailSeeker{err: resetErr},
+		"data.bin.zst",
+		".zst",
+		1,
+		discardLogger(),
+		deps,
+	)
+	if reader != nil {
+		t.Fatal("reader returned when reset failed")
+	}
+
+	if !errors.Is(err, walkerErr) {
+		t.Errorf("error %v does not preserve walker failure", err)
+	}
+
+	if !errors.Is(err, resetErr) {
+		t.Errorf("error %v does not preserve reset failure", err)
+	}
+}
+
+func TestResolveBlockDecodeReader_BoundarySeekFailureFallsBackFromZero(t *testing.T) {
+	t.Parallel()
+
+	seekErr := errors.New("boundary seek failed")
+	source := &boundaryFailSeeker{
+		reader:      bytes.NewReader([]byte("encoded")),
+		boundary:    7,
+		boundaryErr: seekErr,
+	}
+	deps := blockDecodeDependencies{
+		skipZstdFrames: func(_ io.ReadSeeker, _ int) (int64, error) {
+			return 7, nil
+		},
+		newReader: func(_ string, src io.Reader) (io.ReadCloser, error) {
+			pos, err := src.(io.Seeker).Seek(0, io.SeekCurrent)
+			if err != nil {
+				t.Fatalf("query fallback source offset: %v", err)
+			}
+
+			if pos != 0 {
+				t.Fatalf("fallback source offset = %d, want byte zero", pos)
+			}
+
+			return &testReadCloser{reader: strings.NewReader("01234wanted")}, nil
+		},
+	}
+
+	reader, discarded, err := resolveBlockDecodeReaderWith(
+		context.Background(),
+		source,
+		"data.bin.zst",
+		".zst",
+		5,
+		discardLogger(),
+		deps,
+	)
+	if err != nil {
+		t.Fatalf("resolveBlockDecodeReaderWith: %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := reader.Close(); closeErr != nil {
+			t.Errorf("close fallback reader: %v", closeErr)
+		}
+	})
+
+	if !source.failed {
+		t.Fatal("frame-boundary Seek failure was not injected")
+	}
+
+	if discarded != 5 {
+		t.Errorf("discarded = %d, want fallback offset 5", discarded)
+	}
+
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read fallback suffix: %v", err)
+	}
+
+	if string(got) != "wanted" {
+		t.Errorf("fallback suffix = %q, want %q", got, "wanted")
+	}
+}
+
+func TestResolveBlockDecodeReader_DiscardHonorsContextAndBound(t *testing.T) {
+	t.Parallel()
+
+	const maxDiscardRead = 32 * 1024
+
+	tests := []struct {
+		name string
+		ext  string
+	}{
+		{name: "zstd intra-frame discard", ext: ".zst"},
+		{name: "gzip byte-zero fallback discard", ext: ".gz"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+
+			cancelReader := &cancelAfterRead{cancel: cancel}
+			failedDecoder := &testReadCloser{reader: cancelReader}
+			deps := blockDecodeDependencies{
+				skipZstdFrames: func(_ io.ReadSeeker, _ int) (int64, error) {
+					return 0, nil
+				},
+				newReader: func(_ string, _ io.Reader) (io.ReadCloser, error) {
+					return failedDecoder, nil
+				},
+			}
+
+			reader, _, err := resolveBlockDecodeReaderWith(
+				ctx,
+				bytes.NewReader([]byte("source")),
+				"data.bin"+tc.ext,
+				tc.ext,
+				int64(blockDiscardBufferSize*2),
+				discardLogger(),
+				deps,
+			)
+			if reader != nil {
+				t.Fatal("reader returned after cancellation")
+			}
+
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("error = %v, want errors.Is(context.Canceled)", err)
+			}
+
+			if !failedDecoder.closed {
+				t.Error("decoder was not closed after cancellation")
+			}
+
+			if cancelReader.maxRead > maxDiscardRead {
+				t.Errorf("largest discard Read buffer = %d, want <= %d", cancelReader.maxRead, maxDiscardRead)
+			}
+		})
+	}
+}
+
+func TestHeadBlockOffset_ValidatesServerOffset(t *testing.T) {
+	t.Parallel()
+
+	const totalSize = int64(10)
+
+	tests := []struct {
+		name    string
+		header  string
+		want    int64
+		wantErr bool
+	}{
+		{name: "success: absent header starts at zero", want: 0},
+		{name: "success: zero", header: "0", want: 0},
+		{name: "success: total", header: "10", want: totalSize},
+		{name: "error: malformed", header: "wat", wantErr: true},
+		{name: "error: negative", header: "-1", wantErr: true},
+		{name: "error: overshoot", header: "11", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := testHTTPDoer(func(_ *http.Request) (*http.Response, error) {
+				header := http.Header{}
+				if tc.header != "" {
+					header.Set("X-Next-Offset", tc.header)
+				}
+
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Status:     "200 OK",
+					Header:     header,
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			})
+
+			got, err := headBlockOffset(context.Background(), doer, "https://importer.local/block", totalSize)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("headBlockOffset: %v", err)
+			}
+
+			if got != tc.want {
+				t.Errorf("offset = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDoBlockChunk_ValidatesAdvancingServerOffset(t *testing.T) {
+	t.Parallel()
+
+	const (
+		offset    = int64(4)
+		totalSize = int64(10)
+	)
+
+	tests := []struct {
+		name    string
+		header  string
+		want    int64
+		wantErr bool
+	}{
+		{name: "success: absent header means total", want: totalSize},
+		{name: "success: advancing partial", header: "7", want: 7},
+		{name: "success: advancing to total", header: "10", want: totalSize},
+		{name: "error: malformed", header: "wat", wantErr: true},
+		{name: "error: negative", header: "-1", wantErr: true},
+		{name: "error: overshoot", header: "11", wantErr: true},
+		{name: "error: equal", header: "4", wantErr: true},
+		{name: "error: decreasing", header: "3", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := testHTTPDoer(func(_ *http.Request) (*http.Response, error) {
+				header := http.Header{}
+				if tc.header != "" {
+					header.Set("X-Next-Offset", tc.header)
+				}
+
+				return &http.Response{
+					StatusCode: http.StatusCreated,
+					Status:     "201 Created",
+					Header:     header,
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			})
+
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, "https://importer.local/block", nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+
+			got, err := doBlockChunk(doer, req, offset, totalSize)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("doBlockChunk: %v", err)
+			}
+
+			if got != tc.want {
+				t.Errorf("next offset = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSendVolumeData_BlockOffsetsGateProgressAndFinalize(t *testing.T) {
+	t.Parallel()
+
+	const totalSize = int64(10)
+
+	tests := []struct {
+		name      string
+		head      string
+		put       string
+		wantError bool
+		wantPUT   bool
+		wantPOST  bool
+	}{
+		{name: "error: malformed HEAD", head: "wat", wantError: true},
+		{name: "error: negative HEAD", head: "-1", wantError: true},
+		{name: "error: overshoot HEAD", head: "11", wantError: true},
+		{name: "success: HEAD equal total finalizes without PUT", head: "10", wantPOST: true},
+		{name: "error: malformed PUT", head: "0", put: "wat", wantError: true, wantPUT: true},
+		{name: "error: negative PUT", head: "0", put: "-1", wantError: true, wantPUT: true},
+		{name: "error: overshoot PUT", head: "0", put: "11", wantError: true, wantPUT: true},
+		{name: "error: equal PUT", head: "0", put: "0", wantError: true, wantPUT: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dataFile := filepath.Join(t.TempDir(), "data.bin")
+			if err := os.WriteFile(dataFile, bytes.Repeat([]byte("x"), int(totalSize)), 0o600); err != nil {
+				t.Fatalf("write raw block fixture: %v", err)
+			}
+
+			methods := make([]string, 0, 3)
+			doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
+				methods = append(methods, req.Method)
+
+				header := http.Header{}
+				statusCode := http.StatusOK
+				status := "200 OK"
+
+				switch req.Method {
+				case http.MethodHead:
+					header.Set("X-Next-Offset", tc.head)
+				case http.MethodPut:
+					header.Set("X-Next-Offset", tc.put)
+					statusCode = http.StatusCreated
+					status = "201 Created"
+				case http.MethodPost:
+				}
+
+				return &http.Response{
+					StatusCode: statusCode,
+					Status:     status,
+					Header:     header,
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			})
+
+			leaf := PlannedNode{DataFile: dataFile, Ext: "", Size: strconv.FormatInt(totalSize, 10)}
+			importer := &clusterVolumeImporter{log: discardLogger()}
+			reported := 0
+
+			err := importer.sendVolumeData(
+				context.Background(),
+				doer,
+				"https://importer.local",
+				volumeModeBlock,
+				leaf,
+				"namespace",
+				"data-import",
+				nil,
+				func(n int) { reported += n },
+				nil,
+			)
+			if tc.wantError && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+
+			if !tc.wantError && err != nil {
+				t.Fatalf("sendVolumeData: %v", err)
+			}
+
+			if reported != 0 {
+				t.Errorf("reported progress = %d, want 0 before validating server offset", reported)
+			}
+
+			gotPUT := slices.Contains(methods, http.MethodPut)
+			if gotPUT != tc.wantPUT {
+				t.Errorf("PUT observed = %t, want %t; methods=%v", gotPUT, tc.wantPUT, methods)
+			}
+
+			gotPOST := slices.Contains(methods, http.MethodPost)
+			if gotPOST != tc.wantPOST {
+				t.Errorf("POST finalize observed = %t, want %t; methods=%v", gotPOST, tc.wantPOST, methods)
 			}
 		})
 	}

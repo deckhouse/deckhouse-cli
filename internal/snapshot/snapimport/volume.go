@@ -37,6 +37,7 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -60,6 +61,8 @@ const (
 	blockAttrPermissions = "0644"
 	blockAttrUID         = "0"
 	blockAttrGID         = "0"
+
+	blockDiscardBufferSize = 32 * 1024
 )
 
 // dataImportGVR is the storage-foundation DataImport resource
@@ -502,6 +505,8 @@ type httpDoer interface {
 // byte count to the importer and only discovering the mismatch mid-transfer.
 var ErrRawBlockSizeMismatch = errors.New("raw block size mismatch")
 
+var errFailedBlockDecoderClose = errors.New("failed to close block decoder")
+
 // blockTotalSize returns the exact decompressed byte count of a node's block-volume data
 // file without decompressing it. size (a resource.Quantity string like "10Gi", sourced from
 // VolumeSnapshotContent.status.restoreSize — see archive.VolumeInfo.Size) is parsed for
@@ -550,20 +555,16 @@ func blockTotalSize(dataFile, size, ext string) (int64, error) {
 // real transfer iteration (never when offset==totalSize short-circuits before any PUT is
 // attempted), so the caller's progress stream is activated only on a genuine transfer.
 func putBlock(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, totalSize int64, log *slog.Logger, onProgress func(int), activate func()) error {
+	if err := validateBlockOffset(0, totalSize); err != nil {
+		return fmt.Errorf("invalid block upload size %d: %w", totalSize, err)
+	}
+
 	// Resume from the importer's recorded write offset: a reused (non-expired) DataImport
 	// may already hold a partial upload, and the block handler rejects a PUT whose X-Offset
 	// disagrees with its current offset (HTTP 409), so restarting at 0 would never converge.
-	offset, err := headBlockOffset(ctx, httpClient, url)
+	offset, err := headBlockOffset(ctx, httpClient, url, totalSize)
 	if err != nil {
 		return err
-	}
-
-	// offset > totalSize means the importer already holds more bytes than this archive
-	// provides: the DataImport was reused with data from a different/larger source. Refuse
-	// to finalize a mismatched device instead of silently skipping the upload.
-	if offset > totalSize {
-		return fmt.Errorf("importer already holds %d bytes but the archive provides only %d; "+
-			"the DataImport was reused with mismatched data — delete it and retry", offset, totalSize)
 	}
 
 	// offset == totalSize is a legitimate resume of an upload that fully transferred before
@@ -629,22 +630,17 @@ func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string,
 // temporary file first — the whole point of this path is to keep peak disk usage at one
 // copy (the compressed archive) instead of two.
 //
-// RESUME STRATEGY dispatches on offset only (see resolveBlockDecodeReader), identically
-// for every codec putBlockCompressed handles (zstd, gzip, lz4):
+// RESUME STRATEGY has three cases (see resolveBlockDecodeReader):
 //
 //  1. offset == 0: no positioning needed — compress.NewReader(ext, f) from the start.
-//  2. offset > 0: a fresh compress.NewReader(ext, f) from the start, discarding exactly
-//     offset decoded bytes via io.CopyN before returning it (discardFromStart). (The
-//     "none" codec never reaches putBlockCompressed at all — putBlock routes it to
-//     putBlockRaw instead.)
-//
-// There is currently no fast-forward mechanism that skips the already-uploaded prefix
-// without decoding it: resume cost is O(offset) discard for every codec. A native
-// zstd-seekable-format fast path (an embedded seek table written at merge time, seeked
-// into directly on resume) was implemented and then reverted; a chunk-boundary-skipping
-// redesign that walks zstd frame/block headers directly, without decoding them or
-// depending on any external/embedded index, is being planned separately — see
-// .agent/tasks.json's notes_on_plan_switch for the full history.
+//  2. zstd and offset > 0: derive the fixed raw-frame index from
+//     volume.DefaultChunkSize, walk only zstd frame headers to its compressed boundary,
+//     then decode and discard only the intra-frame raw prefix.
+//  3. gzip/lz4, or a failed zstd frame-walk attempt: reset f to byte zero, open a fresh
+//     decoder, and discard offset decoded bytes. Gzip and lz4 deliberately retain this
+//     O(offset) compatibility path because neither codec is user-selectable and neither
+//     has the bounded header-walk integration implemented for zstd. The "none" codec
+//     never reaches this function; putBlock routes it to putBlockRaw.
 func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, offset, totalSize int64, log *slog.Logger, onProgress func(int), activate func()) error {
 	f, err := os.Open(dataFile)
 	if err != nil {
@@ -653,7 +649,7 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 
 	defer func() { _ = f.Close() }()
 
-	decodeReader, _, err := resolveBlockDecodeReader(f, dataFile, ext, offset, log)
+	decodeReader, _, err := resolveBlockDecodeReader(ctx, f, dataFile, ext, offset, log)
 	if err != nil {
 		return err
 	}
@@ -721,15 +717,38 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 	return nil
 }
 
-// resolveBlockDecodeReader returns a decode reader for f already positioned at the
-// decompressed byte offset requested by a resumed upload — see putBlockCompressed's
-// RESUME STRATEGY doc comment for the two-case dispatch this implements. offset == 0
-// needs no positioning at all. The second return value is the number of decoded bytes
-// discarded via io.CopyN to reach offset (discardFromStart); it is always 0 when
-// offset == 0.
-func resolveBlockDecodeReader(f io.ReadSeeker, dataFile, ext string, offset int64, log *slog.Logger) (io.ReadCloser, int64, error) {
+type blockDecodeDependencies struct {
+	skipZstdFrames func(io.ReadSeeker, int) (int64, error)
+	newReader      func(string, io.Reader) (io.ReadCloser, error)
+}
+
+// resolveBlockDecodeReader returns a decode reader positioned at the requested
+// decompressed offset. The discarded count is zero for a fresh upload, at most
+// volume.DefaultChunkSize-1 for a successful zstd frame-skip, and offset for the
+// byte-zero gzip/lz4/zstd fallback.
+func resolveBlockDecodeReader(ctx context.Context, f io.ReadSeeker, dataFile, ext string, offset int64, log *slog.Logger) (io.ReadCloser, int64, error) {
+	deps := blockDecodeDependencies{
+		skipZstdFrames: compress.SkipZstdFrames,
+		newReader:      compress.NewReader,
+	}
+
+	return resolveBlockDecodeReaderWith(ctx, f, dataFile, ext, offset, log, deps)
+}
+
+func resolveBlockDecodeReaderWith(
+	ctx context.Context,
+	f io.ReadSeeker,
+	dataFile, ext string,
+	offset int64,
+	log *slog.Logger,
+	deps blockDecodeDependencies,
+) (io.ReadCloser, int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+
 	if offset == 0 {
-		decodeReader, err := compress.NewReader(ext, f)
+		decodeReader, err := deps.newReader(ext, f)
 		if err != nil {
 			return nil, 0, fmt.Errorf("open decompressor for %s: %w", dataFile, err)
 		}
@@ -737,28 +756,118 @@ func resolveBlockDecodeReader(f io.ReadSeeker, dataFile, ext string, offset int6
 		return decodeReader, 0, nil
 	}
 
-	return discardFromStart(f, dataFile, ext, offset, log)
+	if ext == ".zst" {
+		decodeReader, skipped, fastErr := resolveZstdFrameDecodeReader(ctx, f, dataFile, offset, deps)
+		if fastErr == nil {
+			return decodeReader, skipped, nil
+		}
+
+		if errors.Is(fastErr, context.Canceled) || errors.Is(fastErr, context.DeadlineExceeded) {
+			return nil, 0, fastErr
+		}
+
+		if errors.Is(fastErr, errFailedBlockDecoderClose) {
+			return nil, 0, fastErr
+		}
+
+		log.Warn("zstd frame-skip resume failed; falling back to byte-zero discard",
+			slog.String("file", dataFile),
+			slog.Any("error", fastErr))
+
+		return discardFromStart(ctx, f, dataFile, ext, offset, log, deps.newReader, fastErr)
+	}
+
+	return discardFromStart(ctx, f, dataFile, ext, offset, log, deps.newReader, nil)
 }
 
-// discardFromStart is the resume fallback used for every codec: open a fresh decode
-// reader at the start of f and discard exactly offset decoded bytes via io.CopyN before
-// returning it, positioned for the caller to resume the PUT loop from offset. This is
-// the resume behavior for every codec — see putBlockCompressed's RESUME STRATEGY doc
-// comment.
-func discardFromStart(f io.Reader, dataFile, ext string, offset int64, log *slog.Logger) (io.ReadCloser, int64, error) {
-	decodeReader, err := compress.NewReader(ext, f)
+func resolveZstdFrameDecodeReader(
+	ctx context.Context,
+	f io.ReadSeeker,
+	dataFile string,
+	offset int64,
+	deps blockDecodeDependencies,
+) (io.ReadCloser, int64, error) {
+	chunkIndex := offset / volume.DefaultChunkSize
+	intra := offset % volume.DefaultChunkSize
+
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	frameOffset, err := deps.skipZstdFrames(f, int(chunkIndex))
 	if err != nil {
-		return nil, 0, fmt.Errorf("open decompressor for %s: %w", dataFile, err)
+		return nil, 0, fmt.Errorf("locating zstd frame %d for %s: %w", chunkIndex, dataFile, err)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	if _, err := f.Seek(frameOffset, io.SeekStart); err != nil {
+		return nil, 0, fmt.Errorf("seeking %s to zstd frame %d at compressed offset %d: %w", dataFile, chunkIndex, frameOffset, err)
+	}
+
+	decodeReader, err := deps.newReader(".zst", f)
+	if err != nil {
+		return nil, 0, fmt.Errorf("open zstd decompressor for %s at frame %d: %w", dataFile, chunkIndex, err)
+	}
+
+	skipped, err := discardDecoded(ctx, decodeReader, intra)
+	if err != nil {
+		discardErr := fmt.Errorf("discarding intra-frame prefix for %s at raw offset %d (got %d of %d bytes): %w",
+			dataFile, offset, skipped, intra, err)
+
+		closeErr := decodeReader.Close()
+		if closeErr != nil {
+			return nil, 0, errors.Join(discardErr, fmt.Errorf("%w for %s: %w", errFailedBlockDecoderClose, dataFile, closeErr))
+		}
+
+		return nil, 0, discardErr
+	}
+
+	return decodeReader, skipped, nil
+}
+
+// discardFromStart resets f unconditionally before opening the fallback decoder.
+// The reset is required even for codecs whose normal reader construction has not
+// consumed bytes because a preceding failed zstd attempt may leave f anywhere.
+func discardFromStart(
+	ctx context.Context,
+	f io.ReadSeeker,
+	dataFile, ext string,
+	offset int64,
+	log *slog.Logger,
+	newReader func(string, io.Reader) (io.ReadCloser, error),
+	fastErr error,
+) (io.ReadCloser, int64, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		resetErr := fmt.Errorf("resetting %s before byte-zero resume fallback: %w", dataFile, err)
+
+		return nil, 0, errors.Join(fastErr, resetErr)
+	}
+
+	decodeReader, err := newReader(ext, f)
+	if err != nil {
+		openErr := fmt.Errorf("open decompressor for %s: %w", dataFile, err)
+
+		return nil, 0, errors.Join(fastErr, openErr)
 	}
 
 	start := time.Now()
 
-	skipped, err := io.CopyN(io.Discard, decodeReader, offset)
+	skipped, err := discardDecoded(ctx, decodeReader, offset)
 	if err != nil {
-		return nil, 0, fmt.Errorf("fast-forwarding %s to resume offset %d (got %d bytes): %w", dataFile, offset, skipped, err)
+		discardErr := fmt.Errorf("fast-forwarding %s to resume offset %d (got %d bytes): %w", dataFile, offset, skipped, err)
+
+		closeErr := decodeReader.Close()
+		if closeErr != nil {
+			discardErr = errors.Join(discardErr, fmt.Errorf("%w for %s: %w", errFailedBlockDecoderClose, dataFile, closeErr))
+		}
+
+		return nil, 0, errors.Join(fastErr, discardErr)
 	}
 
-	log.Info("discarded already-uploaded bytes from the start (no chunk-skipping fast path yet)",
+	log.Info("discarded already-uploaded bytes from the start",
 		slog.String("file", dataFile),
 		slog.Int64("bytes", skipped),
 		slog.Duration("took", time.Since(start)))
@@ -766,9 +875,53 @@ func discardFromStart(f io.Reader, dataFile, ext string, offset int64, log *slog
 	return decodeReader, skipped, nil
 }
 
+func discardDecoded(ctx context.Context, r io.Reader, count int64) (int64, error) {
+	buf := make([]byte, blockDiscardBufferSize)
+
+	var discarded int64
+
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	for discarded < count {
+		if err := ctx.Err(); err != nil {
+			return discarded, err
+		}
+
+		remaining := count - discarded
+
+		readBuf := buf
+		if remaining < int64(len(readBuf)) {
+			readBuf = readBuf[:remaining]
+		}
+
+		n, err := r.Read(readBuf)
+		discarded += int64(n)
+
+		if discarded == count {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return discarded, ctxErr
+			}
+
+			return discarded, nil
+		}
+
+		if err != nil {
+			return discarded, err
+		}
+
+		if n == 0 {
+			return discarded, io.ErrNoProgress
+		}
+	}
+
+	return discarded, nil
+}
+
 // headBlockOffset asks the importer (HEAD) how many bytes it has already durably written so
 // an interrupted upload can resume. A missing object or absent header means "start at 0".
-func headBlockOffset(ctx context.Context, httpClient httpDoer, url string) (int64, error) {
+func headBlockOffset(ctx context.Context, httpClient httpDoer, url string, totalSize int64) (int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
 	if err != nil {
 		return 0, err
@@ -788,16 +941,28 @@ func headBlockOffset(ctx context.Context, httpClient httpDoer, url string) (int6
 	case http.StatusOK:
 		next := resp.Header.Get("X-Next-Offset")
 		if next == "" {
+			if err := validateBlockOffset(0, totalSize); err != nil {
+				return 0, fmt.Errorf("invalid implicit X-Next-Offset 0 from %s: %w", url, err)
+			}
+
 			return 0, nil
 		}
 
 		off, perr := strconv.ParseInt(next, 10, 64)
-		if perr != nil || off < 0 {
-			return 0, fmt.Errorf("invalid X-Next-Offset %q from %s", next, url)
+		if perr != nil {
+			return 0, fmt.Errorf("invalid X-Next-Offset %q from %s: %w", next, url, perr)
+		}
+
+		if err := validateBlockOffset(off, totalSize); err != nil {
+			return 0, fmt.Errorf("invalid X-Next-Offset %q from %s: %w", next, url, err)
 		}
 
 		return off, nil
 	case http.StatusNotFound:
+		if err := validateBlockOffset(0, totalSize); err != nil {
+			return 0, fmt.Errorf("invalid implicit X-Next-Offset 0 from %s: %w", url, err)
+		}
+
 		return 0, nil
 	default:
 		return 0, fmt.Errorf("HEAD %s returned status %d (%s)", url, resp.StatusCode, resp.Status)
@@ -806,6 +971,10 @@ func headBlockOffset(ctx context.Context, httpClient httpDoer, url string) (int6
 
 // doBlockChunk performs one PUT and returns the next offset to resume from.
 func doBlockChunk(httpClient httpDoer, req *http.Request, offset, totalSize int64) (int64, error) {
+	if err := validateBlockOffset(offset, totalSize); err != nil {
+		return 0, fmt.Errorf("invalid PUT start offset: %w", err)
+	}
+
 	resp, err := httpClient.HTTPDo(req)
 	if err != nil {
 		return 0, err
@@ -821,12 +990,18 @@ func doBlockChunk(httpClient httpDoer, req *http.Request, offset, totalSize int6
 	}
 
 	nextStr := resp.Header.Get("X-Next-Offset")
+	next := totalSize
+
 	if nextStr == "" {
-		return totalSize, nil
+		nextStr = strconv.FormatInt(totalSize, 10)
+	} else {
+		next, err = strconv.ParseInt(nextStr, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid X-Next-Offset %q: %w", nextStr, err)
+		}
 	}
 
-	next, err := strconv.ParseInt(nextStr, 10, 64)
-	if err != nil {
+	if err := validateBlockOffset(next, totalSize); err != nil {
 		return 0, fmt.Errorf("invalid X-Next-Offset %q: %w", nextStr, err)
 	}
 
@@ -835,6 +1010,14 @@ func doBlockChunk(httpClient httpDoer, req *http.Request, offset, totalSize int6
 	}
 
 	return next, nil
+}
+
+func validateBlockOffset(offset, totalSize int64) error {
+	if offset < 0 || offset > totalSize {
+		return fmt.Errorf("offset %d is outside [0,%d]", offset, totalSize)
+	}
+
+	return nil
 }
 
 // postFinished signals end-of-upload to the importer (POST .../api/v1/finished).

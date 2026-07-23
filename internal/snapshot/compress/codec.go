@@ -120,9 +120,9 @@ func Names() []string {
 //   - The frontend (a separate, non-CLI component) cannot yet consume
 //     compressed archives at all, so today only "none" is truly safe for any
 //     consumer that isn't this CLI itself.
-//   - zstd is included ahead of the others because it alone has a native
-//     seek-resume mechanism (see the zstd-seekable-format-go work) and its
-//     --volume-compression-level validates eagerly at flag-parse time.
+//   - zstd is included ahead of the others because its independent frames can
+//     be located by the bounded frame-header walker used by upload resume, and
+//     its --volume-compression-level validates eagerly at flag-parse time.
 //   - gzip and lz4 are withheld because of open, unrelated bugs (lz4's
 //     level-mapping bug, gzip's lazy/silent level validation — see MEMORY
 //     project_snapshot_download_compression_level_bugs) and because neither
