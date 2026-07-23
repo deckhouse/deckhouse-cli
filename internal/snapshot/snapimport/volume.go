@@ -64,6 +64,7 @@ const (
 	blockAttrGID         = "0"
 
 	blockDiscardBufferSize = 32 * 1024
+	blockPutPayloadLimit   = 32 * 1024 * 1024
 
 	dataImportIdentityVersion  = "v1"
 	dataImportIdentityIDLength = 16
@@ -107,8 +108,9 @@ type VolumeImporter interface {
 	EnsureDataImport(ctx context.Context, leaf PlannedNode, namespace string) (string, error)
 	// UploadVolumeData waits for the DataImport to become ready, streams the leaf's block
 	// or filesystem data, finalises, and waits for completion. onProgress, when non-nil, is
-	// called with the number of bytes written after each chunk or file upload; nil disables
-	// progress reporting and leaves upload behaviour unchanged. setTotal, when non-nil, is
+	// called as raw bytes become known durable, including a validated server-side resume
+	// prefix and each chunk or file upload; nil disables progress reporting and leaves upload
+	// behaviour unchanged. setTotal, when non-nil, is
 	// called with the expected total byte count: once, before any bytes are sent, on the
 	// block path (the total is known up front from leaf.Size); progressively, with a
 	// growing running sum as each file's exact size becomes known, on the filesystem path
@@ -514,7 +516,7 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 			slog.Int64("bytes", totalSize))
 
 		// totalSize is known up front (blockTotalSize never decompresses to measure it)
-		// and matches the onProgress increments (each PUT chunk advances by next-offset),
+		// and matches the onProgress increments (validated durable offsets advance the bar),
 		// so report it as the total before any bytes are sent.
 		if setTotal != nil {
 			setTotal(totalSize)
@@ -714,8 +716,8 @@ func blockTotalSize(dataFile, size, ext string) (int64, error) {
 // endpoint, honouring the server-reported X-Next-Offset for resumable progress. ext
 // selects the decode codec via compress.NewReader ("" for raw/no codec, matching
 // Codec.Ext); totalSize is the volume's exact decompressed byte count (see
-// blockTotalSize). onProgress, when non-nil, is called with the number of bytes accepted
-// by the server after each PUT. activate, when non-nil, is called at the start of every
+// blockTotalSize). onProgress, when non-nil, is called as validated server offsets make
+// raw bytes known durable, including the initial HEAD prefix. activate, when non-nil, is called at the start of every
 // real transfer iteration (never when offset==totalSize short-circuits before any PUT is
 // attempted), so the caller's progress stream is activated only on a genuine transfer.
 func putBlock(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, totalSize int64, log *slog.Logger, onProgress func(int), activate func()) error {
@@ -731,6 +733,9 @@ func putBlock(ctx context.Context, httpClient httpDoer, url, dataFile, ext strin
 		return err
 	}
 
+	progress := blockUploadProgress{onProgress: onProgress}
+	progress.creditTo(offset)
+
 	// offset == totalSize is a legitimate resume of an upload that fully transferred before
 	// the previous run finalized it: nothing left to send, so skip building a decode reader
 	// (or even opening the file) entirely and let the caller finalize.
@@ -739,50 +744,79 @@ func putBlock(ctx context.Context, httpClient httpDoer, url, dataFile, ext strin
 	}
 
 	if ext == "" {
-		return putBlockRaw(ctx, httpClient, url, dataFile, offset, totalSize, onProgress, activate)
+		return putBlockRaw(ctx, httpClient, url, dataFile, offset, totalSize, &progress, activate)
 	}
 
-	return putBlockCompressed(ctx, httpClient, url, dataFile, ext, offset, totalSize, log, onProgress, activate)
+	return putBlockCompressed(ctx, httpClient, url, dataFile, ext, offset, totalSize, log, &progress, activate)
 }
 
-// putBlockRaw streams an uncompressed data.bin file starting at offset. This path is
-// unchanged from before streaming decode was introduced: a fresh io.SectionReader per
-// iteration is a cheap seek over the same file handle, so a server-reported partial
-// acceptance (next < totalSize) simply resumes the loop with no extra I/O.
-func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string, offset, totalSize int64, onProgress func(int), activate func()) error {
+type blockUploadProgress struct {
+	onProgress func(int)
+	credited   int64
+}
+
+func (p *blockUploadProgress) creditTo(offset int64) {
+	if offset <= p.credited {
+		return
+	}
+
+	if p.onProgress != nil {
+		p.onProgress(int(offset - p.credited))
+	}
+
+	p.credited = offset
+}
+
+// putBlockRaw streams an uncompressed data.bin file starting at offset. Every request
+// gets a fresh SectionReader limited to the client cap, so neither nginx's 64m ingress
+// limit nor a server-directed reposition can make one PUT body unbounded.
+func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string, offset, totalSize int64, progress *blockUploadProgress, activate func()) error {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
+	requestedOffsets := make(map[int64]struct{})
+
 	for offset < totalSize {
+		if _, repeated := requestedOffsets[offset]; repeated {
+			return fmt.Errorf("block upload offset loop at %d", offset)
+		}
+
+		requestedOffsets[offset] = struct{}{}
+
 		if activate != nil {
 			activate()
 		}
 
-		section := io.NewSectionReader(file, offset, totalSize-offset)
+		requestEnd := offset + min(blockPutPayloadLimit, totalSize-offset)
+		section := io.NewSectionReader(file, offset, requestEnd-offset)
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, io.NopCloser(section))
 		if err != nil {
 			return err
 		}
 
+		req.ContentLength = requestEnd - offset
 		req.Header.Set("X-Content-Length", strconv.FormatInt(totalSize, 10))
 		req.Header.Set("X-Offset", strconv.FormatInt(offset, 10))
 		req.Header.Set("X-Attribute-Permissions", blockAttrPermissions)
 		req.Header.Set("X-Attribute-Uid", blockAttrUID)
 		req.Header.Set("X-Attribute-Gid", blockAttrGID)
 
-		next, err := doBlockChunk(httpClient, req, offset, totalSize)
+		next, reposition, err := doBlockChunk(httpClient, req, offset, requestEnd, totalSize)
 		if err != nil {
 			return err
 		}
 
-		if onProgress != nil {
-			onProgress(int(next - offset))
+		if reposition {
+			if _, repeated := requestedOffsets[next]; repeated {
+				return fmt.Errorf("server-directed block upload offset loop from %d to %d", offset, next)
+			}
 		}
 
+		progress.creditTo(next)
 		offset = next
 	}
 
@@ -805,7 +839,7 @@ func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string,
 //     O(offset) compatibility path because neither codec is user-selectable and neither
 //     has the bounded header-walk integration implemented for zstd. The "none" codec
 //     never reaches this function; putBlock routes it to putBlockRaw.
-func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, offset, totalSize int64, log *slog.Logger, onProgress func(int), activate func()) error {
+func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, offset, totalSize int64, log *slog.Logger, progress *blockUploadProgress, activate func()) error {
 	f, err := os.Open(dataFile)
 	if err != nil {
 		return fmt.Errorf("open volume data %s: %w", dataFile, err)
@@ -818,15 +852,28 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 		return err
 	}
 
-	defer func() { _ = decodeReader.Close() }()
+	defer func() {
+		if decodeReader != nil {
+			_ = decodeReader.Close()
+		}
+	}()
+
+	requestedOffsets := make(map[int64]struct{})
 
 	for offset < totalSize {
+		if _, repeated := requestedOffsets[offset]; repeated {
+			return fmt.Errorf("block upload offset loop at %d", offset)
+		}
+
+		requestedOffsets[offset] = struct{}{}
+
 		if activate != nil {
 			activate()
 		}
 
-		remain := totalSize - offset
-		limited := io.LimitReader(decodeReader, remain)
+		requestEnd := offset + min(blockPutPayloadLimit, totalSize-offset)
+		requestSize := requestEnd - offset
+		limited := io.LimitReader(decodeReader, requestSize)
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, io.NopCloser(limited))
 		if err != nil {
@@ -837,10 +884,10 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 		// *strings.Reader bodies; an io.LimitReader-wrapped decode stream needs it set
 		// explicitly, or the request silently falls back to chunked transfer encoding.
 		// Setting it also gives us the "too-large declared size" safety net for free: if
-		// the decode stream runs dry before delivering remain bytes, net/http's transport
+		// the decode stream runs dry before delivering requestSize bytes, net/http's transport
 		// refuses to send a body shorter than its declared Content-Length and doBlockChunk
 		// returns that error instead of silently truncating the request.
-		req.ContentLength = remain
+		req.ContentLength = requestSize
 
 		req.Header.Set("X-Content-Length", strconv.FormatInt(totalSize, 10))
 		req.Header.Set("X-Offset", strconv.FormatInt(offset, 10))
@@ -848,13 +895,42 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 		req.Header.Set("X-Attribute-Uid", blockAttrUID)
 		req.Header.Set("X-Attribute-Gid", blockAttrGID)
 
-		next, err := doBlockChunk(httpClient, req, offset, totalSize)
+		next, reposition, err := doBlockChunk(httpClient, req, offset, requestEnd, totalSize)
 		if err != nil {
 			return fmt.Errorf("%s: declared size %d bytes may not match the archive's actual decompressed content: %w", dataFile, totalSize, err)
 		}
 
-		if onProgress != nil {
-			onProgress(int(next - offset))
+		if reposition {
+			if _, repeated := requestedOffsets[next]; repeated {
+				return fmt.Errorf("server-directed block upload offset loop from %d to %d", offset, next)
+			}
+		}
+
+		progress.creditTo(next)
+
+		if reposition {
+			if closeErr := decodeReader.Close(); closeErr != nil {
+				return fmt.Errorf("%w for %s before repositioning to offset %d: %w",
+					errFailedBlockDecoderClose, dataFile, next, closeErr)
+			}
+
+			decodeReader = nil
+			offset = next
+
+			if offset == totalSize {
+				break
+			}
+
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				return fmt.Errorf("reset compressed block %s before repositioning to offset %d: %w", dataFile, offset, err)
+			}
+
+			decodeReader, _, err = resolveBlockDecodeReader(ctx, f, dataFile, ext, offset, log)
+			if err != nil {
+				return fmt.Errorf("reposition block decoder for %s to offset %d: %w", dataFile, offset, err)
+			}
+
+			continue
 		}
 
 		offset = next
@@ -867,6 +943,10 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 	// and reporting success (an under-count would otherwise write a truncated device and
 	// still exit clean).
 	var probe [1]byte
+
+	if decodeReader == nil {
+		return nil
+	}
 
 	n, rerr := decodeReader.Read(probe[:])
 	if n > 0 {
@@ -1084,7 +1164,8 @@ func discardDecoded(ctx context.Context, r io.Reader, count int64) (int64, error
 }
 
 // headBlockOffset asks the importer (HEAD) how many bytes it has already durably written so
-// an interrupted upload can resume. A missing object or absent header means "start at 0".
+// an interrupted upload can resume. A missing object means "start at 0"; a successful
+// producer response must carry its X-Next-Offset contract header.
 func headBlockOffset(ctx context.Context, httpClient httpDoer, url string, totalSize int64) (int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
 	if err != nil {
@@ -1105,11 +1186,7 @@ func headBlockOffset(ctx context.Context, httpClient httpDoer, url string, total
 	case http.StatusOK:
 		next := resp.Header.Get("X-Next-Offset")
 		if next == "" {
-			if err := validateBlockOffset(0, totalSize); err != nil {
-				return 0, fmt.Errorf("invalid implicit X-Next-Offset 0 from %s: %w", url, err)
-			}
-
-			return 0, nil
+			return 0, fmt.Errorf("HEAD %s returned no X-Next-Offset header", url)
 		}
 
 		off, perr := strconv.ParseInt(next, 10, 64)
@@ -1133,15 +1210,24 @@ func headBlockOffset(ctx context.Context, httpClient httpDoer, url string, total
 	}
 }
 
-// doBlockChunk performs one PUT and returns the next offset to resume from.
-func doBlockChunk(httpClient httpDoer, req *http.Request, offset, totalSize int64) (int64, error) {
+// doBlockChunk performs one bounded PUT. Successful producer responses must acknowledge
+// exactly requestEnd; a conflict returns the producer's validated reposition offset.
+func doBlockChunk(httpClient httpDoer, req *http.Request, offset, requestEnd, totalSize int64) (int64, bool, error) {
 	if err := validateBlockOffset(offset, totalSize); err != nil {
-		return 0, fmt.Errorf("invalid PUT start offset: %w", err)
+		return 0, false, fmt.Errorf("invalid PUT start offset: %w", err)
+	}
+
+	if err := validateBlockOffset(requestEnd, totalSize); err != nil {
+		return 0, false, fmt.Errorf("invalid PUT end offset: %w", err)
+	}
+
+	if requestEnd <= offset {
+		return 0, false, fmt.Errorf("invalid PUT range [%d,%d)", offset, requestEnd)
 	}
 
 	resp, err := httpClient.HTTPDo(req)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	defer func() {
@@ -1149,31 +1235,51 @@ func doBlockChunk(httpClient httpDoer, req *http.Request, offset, totalSize int6
 		_ = resp.Body.Close()
 	}()
 
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return 0, fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status)
+	if resp.StatusCode == http.StatusConflict {
+		expectedStr := resp.Header.Get("X-Expected-Offset")
+		if expectedStr == "" {
+			return 0, false, fmt.Errorf("server conflict at offset %d returned no X-Expected-Offset header", offset)
+		}
+
+		expected, parseErr := strconv.ParseInt(expectedStr, 10, 64)
+		if parseErr != nil {
+			return 0, false, fmt.Errorf("invalid X-Expected-Offset %q: %w", expectedStr, parseErr)
+		}
+
+		if err := validateBlockOffset(expected, totalSize); err != nil {
+			return 0, false, fmt.Errorf("invalid X-Expected-Offset %q: %w", expectedStr, err)
+		}
+
+		if expected == offset {
+			return 0, false, fmt.Errorf("server returned non-progressing X-Expected-Offset %d for PUT at offset %d", expected, offset)
+		}
+
+		return expected, true, nil
+	}
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		return 0, false, fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status)
 	}
 
 	nextStr := resp.Header.Get("X-Next-Offset")
-	next := totalSize
-
 	if nextStr == "" {
-		nextStr = strconv.FormatInt(totalSize, 10)
-	} else {
-		next, err = strconv.ParseInt(nextStr, 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("invalid X-Next-Offset %q: %w", nextStr, err)
-		}
+		return 0, false, fmt.Errorf("successful PUT at offset %d returned no X-Next-Offset header", offset)
+	}
+
+	next, err := strconv.ParseInt(nextStr, 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("invalid X-Next-Offset %q: %w", nextStr, err)
 	}
 
 	if err := validateBlockOffset(next, totalSize); err != nil {
-		return 0, fmt.Errorf("invalid X-Next-Offset %q: %w", nextStr, err)
+		return 0, false, fmt.Errorf("invalid X-Next-Offset %q: %w", nextStr, err)
 	}
 
-	if next <= offset {
-		return 0, fmt.Errorf("server returned non-advancing X-Next-Offset (%d <= %d)", next, offset)
+	if next != requestEnd {
+		return 0, false, fmt.Errorf("server returned X-Next-Offset %d, want exact request end %d", next, requestEnd)
 	}
 
-	return next, nil
+	return next, false, nil
 }
 
 func validateBlockOffset(offset, totalSize int64) error {
