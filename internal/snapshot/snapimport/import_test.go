@@ -354,7 +354,7 @@ func TestPreflight_FilesystemDataPasses(t *testing.T) {
 		apiVersion: "snapshot.storage.k8s.io/v1",
 		kind:       "VolumeSnapshot",
 		name:       "pvc-1",
-		tarData:    []byte("tar"),
+		tarData:    make([]byte, 1024),
 	})
 
 	up := &stubUploader{}

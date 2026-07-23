@@ -27,6 +27,7 @@ import (
 	neturl "net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -63,18 +64,41 @@ const (
 	blockAttrGID         = "0"
 
 	blockDiscardBufferSize = 32 * 1024
+
+	dataImportIdentityVersion  = "v1"
+	dataImportIdentityIDLength = 16
+	dataImportNameMaxLength    = 63
+	sha256HexLength            = 64
+
+	dataImportPayloadBlock      = "block"
+	dataImportPayloadFilesystem = "filesystem"
+
+	dataImportMetadataPrefix            = "snapshot.deckhouse.io/"
+	dataImportIdentityLabel             = dataImportMetadataPrefix + "data-import-id"
+	dataImportIdentityVersionAnnotation = dataImportMetadataPrefix + "data-import-identity-version"
+	dataImportIdentityAnnotation        = dataImportMetadataPrefix + "data-import-identity"
+	dataImportNodeChecksumAnnotation    = dataImportMetadataPrefix + "node-checksum"
+	dataImportVolumeModeAnnotation      = dataImportMetadataPrefix + "volume-mode"
+	dataImportStorageClassAnnotation    = dataImportMetadataPrefix + "storage-class-name"
+	dataImportSizeBytesAnnotation       = dataImportMetadataPrefix + "size-bytes"
+	dataImportPayloadKindAnnotation     = dataImportMetadataPrefix + "payload-kind"
+	dataImportCodecAnnotation           = dataImportMetadataPrefix + "codec"
 )
 
 // dataImportGVR is the storage-foundation DataImport resource
 // (storage-foundation.deckhouse.io/v1alpha1).
 var dataImportGVR = schema.GroupVersionResource{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "dataimports"}
 
+// ErrForeignDataImport is returned when a shared DataImport name is occupied by an
+// object whose content identity or normalized upload spec belongs to another archive.
+var ErrForeignDataImport = errors.New("foreign DataImport collision")
+
 // VolumeImporter imports a data leaf's volume bytes by creating an SVDM DataImport,
 // waiting for the importer to be ready, streaming the archive bytes, finalising the
 // upload, and waiting for the durable artifact to be produced. It is satisfied by
 // clusterVolumeImporter and stubbed in tests.
 type VolumeImporter interface {
-	// DataImportName returns the deterministic DataImport name for the leaf (its own name).
+	// DataImportName returns the deterministic identity-qualified DataImport name for the leaf.
 	// The DataImport is created bottom-up immediately before its upload — its TTL is an idle
 	// timer that starts at importer-pod start, so a freshly created importer must not sit
 	// idle waiting for earlier siblings to finish.
@@ -126,9 +150,21 @@ func NewClusterVolumeImporter(
 	return &clusterVolumeImporter{dyn: dyn, sc: sc, ttl: ttl, poll: poll, wait: wait, log: log}
 }
 
-// DataImportName returns the deterministic DataImport name for the leaf (its own name).
+// DataImportName returns the deterministic identity-qualified DataImport name for the leaf.
 func (c *clusterVolumeImporter) DataImportName(leaf PlannedNode) string {
-	return leaf.Name
+	if len(leaf.DataImportIdentity) < dataImportIdentityIDLength {
+		return leaf.Name
+	}
+
+	suffix := leaf.DataImportIdentity[:dataImportIdentityIDLength]
+	maxBaseLength := dataImportNameMaxLength - len(suffix) - 1
+
+	base := strings.TrimRight(leaf.Name[:min(len(leaf.Name), maxBaseLength)], "-.")
+	if base == "" {
+		base = "dataimport"
+	}
+
+	return base + "-" + suffix
 }
 
 // EnsureDataImport upserts the PopulateData DataImport for the leaf snapshot node. The import
@@ -138,16 +174,20 @@ func (c *clusterVolumeImporter) DataImportName(leaf PlannedNode) string {
 // reverse-lookup matches the leaf against spec.snapshotRef (apiVersion/kind/name); the
 // DataImport controller itself does not read that ref.
 func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf PlannedNode, namespace string) (string, error) {
+	if err := validateDataImportLeaf(leaf); err != nil {
+		return "", err
+	}
+
 	name := c.DataImportName(leaf)
 
 	// storageParams.storageClassName and size are required by the DataImport CRD (CEL rule +
 	// minLength). They originate from the leaf's captured VolumeInfo carried through the
 	// archive; a blank value means a malformed or stale archive, so fail early with a clear
 	// message rather than letting the API server reject an incomplete DataImport.
-	if leaf.StorageClassName == "" || leaf.Size == "" {
+	if leaf.StorageClassName == "" || leaf.SizeBytes <= 0 {
 		return "", fmt.Errorf("data leaf %s/%s is missing captured storage parameters in the archive "+
-			"(storageClassName=%q size=%q); re-download the snapshot with a current d8 version",
-			leaf.Kind, leaf.Name, leaf.StorageClassName, leaf.Size)
+			"(storageClassName=%q sizeBytes=%d); re-download the snapshot with a current d8 version",
+			leaf.Kind, leaf.Name, leaf.StorageClassName, leaf.SizeBytes)
 	}
 
 	obj := &unstructured.Unstructured{}
@@ -155,16 +195,15 @@ func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf Plann
 	obj.SetKind(dataImportKind)
 	obj.SetNamespace(namespace)
 	obj.SetName(name)
+	obj.SetLabels(map[string]string{
+		dataImportIdentityLabel: dataImportShortID(leaf),
+	})
+	obj.SetAnnotations(dataImportAnnotations(leaf))
 
 	storageParams := map[string]interface{}{
 		"storageClassName": leaf.StorageClassName,
-		"size":             leaf.Size,
-	}
-
-	// volumeMode is optional (the CRD defaults it to Filesystem); send it only when the
-	// archive captured it so the scratch volume matches the source volume mode.
-	if leaf.VolumeMode != "" {
-		storageParams["volumeMode"] = leaf.VolumeMode
+		"size":             strconv.FormatInt(leaf.SizeBytes, 10),
+		"volumeMode":       leaf.VolumeMode,
 	}
 
 	spec := map[string]interface{}{
@@ -191,6 +230,10 @@ func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf Plann
 	for attempt := 0; attempt < 3; attempt++ {
 		existing, err := ri.Get(ctx, name, metav1.GetOptions{})
 		if err == nil {
+			if matchErr := validateDataImport(existing, leaf); matchErr != nil {
+				return "", fmt.Errorf("reuse DataImport %s/%s: %w", namespace, name, matchErr)
+			}
+
 			if !conditionFalseWithReason(existing, conditionReady, reasonExpired) {
 				// Align spec.ttl with the current run so retrying a stalled import with a
 				// longer --ttl is honoured instead of keeping the first create's value.
@@ -224,6 +267,103 @@ func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf Plann
 	}
 
 	return "", fmt.Errorf("data import %s/%s did not converge (repeated create/expire races)", namespace, name)
+}
+
+func validateDataImportLeaf(leaf PlannedNode) error {
+	if len(leaf.DataImportIdentity) != sha256HexLength || len(leaf.NodeChecksum) != sha256HexLength {
+		return fmt.Errorf("data leaf %s/%s has no verified content identity", leaf.Kind, leaf.Name)
+	}
+
+	if leaf.VolumeMode == "" || leaf.StorageClassName == "" || leaf.SizeBytes <= 0 ||
+		leaf.PayloadKind == "" || leaf.Codec == "" {
+		return fmt.Errorf("data leaf %s/%s has incomplete canonical upload metadata", leaf.Kind, leaf.Name)
+	}
+
+	return nil
+}
+
+func dataImportShortID(leaf PlannedNode) string {
+	return leaf.DataImportIdentity[:dataImportIdentityIDLength]
+}
+
+func dataImportAnnotations(leaf PlannedNode) map[string]string {
+	return map[string]string{
+		dataImportIdentityVersionAnnotation: dataImportIdentityVersion,
+		dataImportIdentityAnnotation:        leaf.DataImportIdentity,
+		dataImportNodeChecksumAnnotation:    leaf.NodeChecksum,
+		dataImportVolumeModeAnnotation:      leaf.VolumeMode,
+		dataImportStorageClassAnnotation:    leaf.StorageClassName,
+		dataImportSizeBytesAnnotation:       strconv.FormatInt(leaf.SizeBytes, 10),
+		dataImportPayloadKindAnnotation:     leaf.PayloadKind,
+		dataImportCodecAnnotation:           leaf.Codec,
+	}
+}
+
+func validateDataImport(obj *unstructured.Unstructured, leaf PlannedNode) error {
+	if err := validateDataImportMetadata(obj, leaf); err != nil {
+		return err
+	}
+
+	return validateDataImportSpec(obj, leaf)
+}
+
+func validateDataImportMetadata(obj *unstructured.Unstructured, leaf PlannedNode) error {
+	labels := obj.GetLabels()
+	if labels[dataImportIdentityLabel] != dataImportShortID(leaf) {
+		return fmt.Errorf("label %q does not match content identity: %w", dataImportIdentityLabel, ErrForeignDataImport)
+	}
+
+	annotations := obj.GetAnnotations()
+	for key, want := range dataImportAnnotations(leaf) {
+		if annotations[key] != want {
+			return fmt.Errorf("annotation %q is %q, want %q: %w", key, annotations[key], want, ErrForeignDataImport)
+		}
+	}
+
+	return nil
+}
+
+func validateDataImportSpec(obj *unstructured.Unstructured, leaf PlannedNode) error {
+	mode, found, err := unstructured.NestedString(obj.Object, "spec", "mode")
+	if err != nil || !found || mode != dataImportModePopulateData {
+		return fmt.Errorf("spec.mode is %q, want %q: %w", mode, dataImportModePopulateData, ErrForeignDataImport)
+	}
+
+	for field, want := range map[string]string{
+		"apiVersion": leaf.APIVersion,
+		"kind":       leaf.Kind,
+		"name":       leaf.Name,
+	} {
+		got, refFound, refErr := unstructured.NestedString(obj.Object, "spec", "snapshotRef", field)
+		if refErr != nil || !refFound || got != want {
+			return fmt.Errorf("spec.snapshotRef.%s is %q, want %q: %w", field, got, want, ErrForeignDataImport)
+		}
+	}
+
+	storageClass, found, err := unstructured.NestedString(obj.Object, "spec", "storageParams", "storageClassName")
+	if err != nil || !found || storageClass != leaf.StorageClassName {
+		return fmt.Errorf("spec.storageParams.storageClassName is %q, want %q: %w",
+			storageClass, leaf.StorageClassName, ErrForeignDataImport)
+	}
+
+	volumeMode, found, err := unstructured.NestedString(obj.Object, "spec", "storageParams", "volumeMode")
+	if err != nil || !found || volumeMode != leaf.VolumeMode {
+		return fmt.Errorf("spec.storageParams.volumeMode is %q, want %q: %w",
+			volumeMode, leaf.VolumeMode, ErrForeignDataImport)
+	}
+
+	size, found, err := unstructured.NestedString(obj.Object, "spec", "storageParams", "size")
+	if err != nil || !found {
+		return fmt.Errorf("spec.storageParams.size is missing: %w", ErrForeignDataImport)
+	}
+
+	quantity, parseErr := resource.ParseQuantity(size)
+	if parseErr != nil || quantity.Value() != leaf.SizeBytes {
+		return fmt.Errorf("spec.storageParams.size is %q, want %d bytes: %w",
+			size, leaf.SizeBytes, ErrForeignDataImport)
+	}
+
+	return nil
 }
 
 // alignDataImportTTL patches a reused DataImport's spec.ttl to the current run's TTL when it
@@ -282,10 +422,14 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 		return fmt.Errorf("data leaf %s/%s has no volume data file in the archive", leaf.Kind, leaf.Name)
 	}
 
+	if err := validateDataImportLeaf(leaf); err != nil {
+		return err
+	}
+
 	// Idempotent retry: if a prior run already produced this leaf's durable artifact, skip
 	// the upload. A Completed importer typically has no live endpoint, so waiting for Ready
 	// would just time out.
-	done, err := c.dataImportCompleted(ctx, diName, namespace)
+	done, err := c.dataImportCompleted(ctx, leaf, diName, namespace)
 	if err != nil {
 		return err
 	}
@@ -297,7 +441,7 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 		return nil
 	}
 
-	di, err := c.waitDataImportReady(ctx, diName, namespace)
+	di, err := c.waitDataImportReady(ctx, leaf, diName, namespace)
 	if err != nil {
 		return err
 	}
@@ -315,7 +459,7 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 		return err
 	}
 
-	return c.waitDataImportCompleted(ctx, diName, namespace)
+	return c.waitDataImportCompleted(ctx, leaf, diName, namespace)
 }
 
 // sendVolumeData streams the volume payload (FS tar or raw block data) to the importer
@@ -412,13 +556,21 @@ func (c *clusterVolumeImporter) uploadClient(caB64 string) (*safeClient.SafeClie
 
 // waitDataImportReady blocks until the DataImport reports Ready=True with a populated
 // status.url and volumeMode.
-func (c *clusterVolumeImporter) waitDataImportReady(ctx context.Context, name, namespace string) (*unstructured.Unstructured, error) {
+func (c *clusterVolumeImporter) waitDataImportReady(
+	ctx context.Context,
+	leaf PlannedNode,
+	name, namespace string,
+) (*unstructured.Unstructured, error) {
 	deadline := time.Now().Add(c.wait)
 
 	for {
 		di, err := c.dyn.Resource(dataImportGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("get DataImport %s/%s: %w", namespace, name, err)
+		}
+
+		if err := validateDataImport(di, leaf); err != nil {
+			return nil, fmt.Errorf("wait for DataImport %s/%s readiness: %w", namespace, name, err)
 		}
 
 		// A DataImport whose idle TTL elapses before the endpoint comes up never becomes
@@ -447,7 +599,11 @@ func (c *clusterVolumeImporter) waitDataImportReady(ctx context.Context, name, n
 // dataImportCompleted reports whether the named DataImport already produced its durable
 // artifact (Completed=True with a populated status.data.artifactRef). A missing object is not
 // an error: it simply means "not completed".
-func (c *clusterVolumeImporter) dataImportCompleted(ctx context.Context, name, namespace string) (bool, error) {
+func (c *clusterVolumeImporter) dataImportCompleted(
+	ctx context.Context,
+	leaf PlannedNode,
+	name, namespace string,
+) (bool, error) {
 	di, err := c.dyn.Resource(dataImportGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		if kubeerrors.IsNotFound(err) {
@@ -457,6 +613,10 @@ func (c *clusterVolumeImporter) dataImportCompleted(ctx context.Context, name, n
 		return false, fmt.Errorf("get DataImport %s/%s: %w", namespace, name, err)
 	}
 
+	if err := validateDataImport(di, leaf); err != nil {
+		return false, fmt.Errorf("validate DataImport %s/%s completion identity: %w", namespace, name, err)
+	}
+
 	_, hasArtifact, _ := unstructured.NestedMap(di.Object, "status", "data", "artifactRef")
 
 	return conditionTrue(di, conditionCompleted) && hasArtifact, nil
@@ -464,11 +624,15 @@ func (c *clusterVolumeImporter) dataImportCompleted(ctx context.Context, name, n
 
 // waitDataImportCompleted blocks until the DataImport produces its durable artifact
 // (Completed=True with a populated status.data.artifactRef).
-func (c *clusterVolumeImporter) waitDataImportCompleted(ctx context.Context, name, namespace string) error {
+func (c *clusterVolumeImporter) waitDataImportCompleted(
+	ctx context.Context,
+	leaf PlannedNode,
+	name, namespace string,
+) error {
 	deadline := time.Now().Add(c.wait)
 
 	for {
-		done, err := c.dataImportCompleted(ctx, name, namespace)
+		done, err := c.dataImportCompleted(ctx, leaf, name, namespace)
 		if err != nil {
 			return err
 		}
