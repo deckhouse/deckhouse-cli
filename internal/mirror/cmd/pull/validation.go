@@ -177,6 +177,7 @@ func parseAndValidateVersionFlags() error {
 func resolveModuleFlags() {
 	if pullflags.NoModules && len(pullflags.ModulesWhitelist) > 0 {
 		pullflags.NoModules = false
+
 		fmt.Fprintln(os.Stderr, "Warning: --no-modules is ignored because --include-module is set; mirroring only the whitelisted modules.")
 	}
 }
