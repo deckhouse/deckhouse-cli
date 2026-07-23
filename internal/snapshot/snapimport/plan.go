@@ -23,11 +23,18 @@ limitations under the License.
 package snapimport
 
 import (
+	gotar "archive/tar"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	sigsyaml "sigs.k8s.io/yaml"
 
@@ -91,6 +98,16 @@ type PlannedNode struct {
 	StorageClassName string
 	Size             string
 	VolumeMode       string
+	// NodeChecksum is the full checksum verified by the archive integrity preflight.
+	NodeChecksum string
+	// SizeBytes is Size parsed once into its canonical byte count before cluster mutation.
+	SizeBytes int64
+	// PayloadKind and Codec are the classified on-disk upload representation.
+	PayloadKind string
+	Codec       string
+	// DataImportIdentity is the versioned full content identity used to qualify and
+	// validate the shared DataImport object.
+	DataImportIdentity string
 }
 
 // Ref returns the node's aggregated-API node ref (target namespace applied by the caller).
@@ -192,6 +209,7 @@ func readNode(dir string) (PlannedNode, error) {
 		SourceNamespace: sy.Namespace,
 		Manifests:       manifests,
 		SourceObjectRef: sy.SourceObjectRef,
+		NodeChecksum:    sy.Checksum.Hex,
 	}
 
 	// Data leaves carry exactly one volume; lift its captured scratch-volume parameters onto
@@ -212,15 +230,124 @@ func readNode(dir string) (PlannedNode, error) {
 	if found {
 		node.DataFile = blockPayload.Path
 		node.Ext = blockPayload.Ext
+		node.PayloadKind = dataImportPayloadBlock
+		node.Codec = codecName(blockPayload.Ext)
 	}
 
 	tarPath := filepath.Join(dir, archive.FsTarName)
 	if _, statErr := os.Stat(tarPath); statErr == nil {
 		node.FilesystemData = true
 		node.TarFile = tarPath
+		node.PayloadKind = dataImportPayloadFilesystem
+	}
+
+	if (node.HasBlockData() || node.FilesystemData) &&
+		node.NodeChecksum != "" && node.VolumeMode != "" && node.StorageClassName != "" && node.Size != "" {
+		if node.FilesystemData {
+			codec, codecErr := classifyTarCodec(tarPath)
+			if codecErr != nil {
+				return PlannedNode{}, fmt.Errorf("node %s: %w", dir, codecErr)
+			}
+
+			node.Codec = codec
+		}
+
+		size, parseErr := resource.ParseQuantity(node.Size)
+		if parseErr != nil {
+			return node, nil
+		}
+
+		node.SizeBytes = size.Value()
+		if node.SizeBytes > 0 {
+			node.DataImportIdentity = dataImportIdentity(node)
+		}
 	}
 
 	return node, nil
+}
+
+func codecName(ext string) string {
+	switch ext {
+	case ".zst":
+		return "zstd"
+	case ".gz":
+		return "gzip"
+	case ".lz4":
+		return "lz4"
+	default:
+		return "none"
+	}
+}
+
+func classifyTarCodec(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open filesystem payload: %w", err)
+	}
+
+	defer func() { _ = file.Close() }()
+
+	reader := gotar.NewReader(file)
+	codec := ""
+
+	for {
+		header, nextErr := reader.Next()
+		if nextErr != nil {
+			if nextErr == io.EOF {
+				break
+			}
+
+			return "", fmt.Errorf("read filesystem payload: %w", nextErr)
+		}
+
+		if header.Typeflag != gotar.TypeReg && header.Typeflag != 0 {
+			continue
+		}
+
+		entryCodec := codecName(codecExt(header.Name))
+		if codec == "" {
+			codec = entryCodec
+
+			continue
+		}
+
+		if codec != entryCodec {
+			return "", fmt.Errorf("filesystem payload mixes codecs %q and %q", codec, entryCodec)
+		}
+	}
+
+	if codec == "" {
+		return "none", nil
+	}
+
+	return codec, nil
+}
+
+func dataImportIdentity(node PlannedNode) string {
+	encoded := make([]byte, 0, 256)
+
+	for _, field := range []string{
+		dataImportIdentityVersion,
+		node.APIVersion,
+		node.Kind,
+		node.Name,
+		node.NodeChecksum,
+		node.VolumeMode,
+		node.StorageClassName,
+		strconv.FormatInt(node.SizeBytes, 10),
+		node.PayloadKind,
+		node.Codec,
+	} {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(field)))
+
+		encoded = append(encoded, length[:]...)
+		encoded = append(encoded, field...)
+	}
+
+	sum := sha256.Sum256(encoded)
+
+	return hex.EncodeToString(sum[:])
 }
 
 // readManifests parses every <dir>/manifests/*.yaml file into an unstructured object.

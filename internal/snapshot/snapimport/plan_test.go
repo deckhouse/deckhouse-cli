@@ -17,11 +17,15 @@ limitations under the License.
 package snapimport
 
 import (
+	gotar "archive/tar"
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/util/validation"
 	sigsyaml "sigs.k8s.io/yaml"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -439,6 +443,20 @@ func TestBuildPlan_LeafStorageParams(t *testing.T) {
 			leaf.StorageClassName, leaf.Size, leaf.VolumeMode)
 	}
 
+	if leaf.SizeBytes != 10*1024*1024*1024 {
+		t.Errorf("leaf SizeBytes = %d, want %d", leaf.SizeBytes, int64(10*1024*1024*1024))
+	}
+
+	if leaf.NodeChecksum == "" || leaf.DataImportIdentity == "" {
+		t.Errorf("leaf identity metadata is incomplete: checksum=%q identity=%q",
+			leaf.NodeChecksum, leaf.DataImportIdentity)
+	}
+
+	if leaf.PayloadKind != dataImportPayloadBlock || leaf.Codec != "none" {
+		t.Errorf("leaf payload metadata = {kind:%q codec:%q}, want {block none}",
+			leaf.PayloadKind, leaf.Codec)
+	}
+
 	// A structural node owns no volumes and must leave the metadata empty.
 	for i := range plan {
 		if plan[i].Kind == "Snapshot" {
@@ -446,6 +464,127 @@ func TestBuildPlan_LeafStorageParams(t *testing.T) {
 				t.Errorf("structural node carried storage params: %+v", plan[i])
 			}
 		}
+	}
+}
+
+func TestDataImportIdentity_CanonicalAndDimensionComplete(t *testing.T) {
+	base := PlannedNode{
+		APIVersion:       "snapshot.storage.k8s.io/v1",
+		Kind:             "VolumeSnapshot",
+		Name:             "pvc-1",
+		NodeChecksum:     strings.Repeat("a", sha256HexLength),
+		VolumeMode:       archive.VolumeModeBlock,
+		StorageClassName: "sc-fast",
+		SizeBytes:        1024,
+		PayloadKind:      dataImportPayloadBlock,
+		Codec:            "zstd",
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*PlannedNode)
+	}{
+		{name: "apiVersion", mutate: func(node *PlannedNode) { node.APIVersion = "v2" }},
+		{name: "kind", mutate: func(node *PlannedNode) { node.Kind = "OtherSnapshot" }},
+		{name: "name", mutate: func(node *PlannedNode) { node.Name = "pvc-2" }},
+		{name: "checksum", mutate: func(node *PlannedNode) { node.NodeChecksum = strings.Repeat("b", sha256HexLength) }},
+		{name: "volume mode", mutate: func(node *PlannedNode) { node.VolumeMode = archive.VolumeModeFilesystem }},
+		{name: "storage class", mutate: func(node *PlannedNode) { node.StorageClassName = "sc-slow" }},
+		{name: "size bytes", mutate: func(node *PlannedNode) { node.SizeBytes++ }},
+		{name: "payload kind", mutate: func(node *PlannedNode) { node.PayloadKind = dataImportPayloadFilesystem }},
+		{name: "codec", mutate: func(node *PlannedNode) { node.Codec = "none" }},
+	}
+
+	baseIdentity := dataImportIdentity(base)
+	importer := &clusterVolumeImporter{}
+	base.DataImportIdentity = baseIdentity
+	baseName := importer.DataImportName(base)
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := base
+			test.mutate(&changed)
+			changed.DataImportIdentity = dataImportIdentity(changed)
+
+			if changed.DataImportIdentity == baseIdentity {
+				t.Errorf("identity did not change after changing %s", test.name)
+			}
+
+			if importer.DataImportName(changed) == baseName {
+				t.Errorf("identity-qualified name did not change after changing %s", test.name)
+			}
+		})
+	}
+}
+
+func TestBuildPlan_EquivalentQuantitiesShareIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		size string
+	}{
+		{name: "binary quantity", size: "1Gi"},
+		{name: "decimal bytes", size: "1073741824"},
+	}
+
+	identities := make([]string, 0, len(tests))
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeArchiveNode(t, dir, archiveNode{
+				apiVersion: "snapshot.storage.k8s.io/v1",
+				kind:       "VolumeSnapshot",
+				name:       "pvc-1",
+				blockData:  []byte("payload"),
+				volumes: []archive.VolumeInfo{{
+					Target: archive.VolumeObjectRef{
+						APIVersion: "v1",
+						Kind:       "PersistentVolumeClaim",
+						Name:       "pvc-1",
+					},
+					Artifact: archive.VolumeObjectRef{
+						APIVersion: "snapshot.storage.k8s.io/v1",
+						Kind:       "VolumeSnapshotContent",
+						Name:       "content-1",
+					},
+					StorageClassName: "sc-fast",
+					Size:             test.size,
+					VolumeMode:       archive.VolumeModeBlock,
+				}},
+			})
+
+			plan, err := BuildPlan(dir)
+			if err != nil {
+				t.Fatalf("BuildPlan: %v", err)
+			}
+
+			identities = append(identities, plan[0].DataImportIdentity)
+		})
+	}
+
+	if identities[0] != identities[1] {
+		t.Errorf("equivalent quantities produced different identities: %q != %q", identities[0], identities[1])
+	}
+}
+
+func TestDataImportName_LongLeafStaysKubernetesSafe(t *testing.T) {
+	leaf := volumeSnapshotLeaf(strings.Repeat("a", dataImportNameMaxLength))
+	name := (&clusterVolumeImporter{}).DataImportName(leaf)
+
+	if len(name) > dataImportNameMaxLength {
+		t.Errorf("DataImport name length = %d, want <= %d", len(name), dataImportNameMaxLength)
+	}
+
+	if !strings.HasSuffix(name, "-"+dataImportShortID(leaf)) {
+		t.Errorf("DataImport name %q does not carry identity suffix %q", name, dataImportShortID(leaf))
+	}
+
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+		t.Errorf("DataImport name %q is not DNS-safe: %v", name, errs)
+	}
+
+	if errs := validation.IsValidLabelValue(dataImportShortID(leaf)); len(errs) > 0 {
+		t.Errorf("DataImport short ID %q is not label-safe: %v", dataImportShortID(leaf), errs)
 	}
 }
 
@@ -474,5 +613,52 @@ func TestBuildPlan_FilesystemDataFlag(t *testing.T) {
 
 	if plan[0].TarFile != tarPath {
 		t.Errorf("TarFile = %q, want %q", plan[0].TarFile, tarPath)
+	}
+}
+
+func TestBuildPlan_ClassifiesFilesystemCodec(t *testing.T) {
+	var payload bytes.Buffer
+
+	writer := gotar.NewWriter(&payload)
+	header := &gotar.Header{
+		Name:     "file.txt.zst",
+		Mode:     0o600,
+		Size:     4,
+		Typeflag: gotar.TypeReg,
+	}
+
+	if err := writer.WriteHeader(header); err != nil {
+		t.Fatalf("write tar header: %v", err)
+	}
+
+	if _, err := writer.Write([]byte("data")); err != nil {
+		t.Fatalf("write tar payload: %v", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	dir := t.TempDir()
+	writeArchiveNode(t, dir, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		tarData:    payload.Bytes(),
+	})
+
+	plan, err := BuildPlan(dir)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	node := plan[0]
+	if node.PayloadKind != dataImportPayloadFilesystem || node.Codec != "zstd" {
+		t.Errorf("payload metadata = {kind:%q codec:%q}, want {filesystem zstd}",
+			node.PayloadKind, node.Codec)
+	}
+
+	if node.DataImportIdentity == "" {
+		t.Error("filesystem node has no DataImport identity")
 	}
 }

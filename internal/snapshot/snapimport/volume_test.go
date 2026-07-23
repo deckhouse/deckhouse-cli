@@ -36,11 +36,13 @@ import (
 	"testing"
 	"time"
 
+	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
@@ -1803,17 +1805,14 @@ func completedDataImportObj(namespace, name string) *unstructured.Unstructured {
 func TestUploadVolumeData_SkipsCompleted(t *testing.T) {
 	// DataFile is set so the block-data preflight passes; the file is never opened because
 	// the completed-import short-circuit returns before any upload.
-	leaf := PlannedNode{
-		APIVersion: "snapshot.storage.k8s.io/v1",
-		Kind:       "VolumeSnapshot",
-		Name:       "pvc-1",
-		DataFile:   filepath.Join(t.TempDir(), "data.bin"),
-	}
+	leaf := volumeSnapshotLeaf("pvc-1")
+	leaf.DataFile = filepath.Join(t.TempDir(), "data.bin")
+	diName := (&clusterVolumeImporter{}).DataImportName(leaf)
 
 	dyn := newFakeDataImportDyn(completedDataImportObj(targetNS, "pvc-1"))
 	imp := newTestVolumeImporter(dyn) // sc is nil: reaching the HTTP upload would panic.
 
-	if err := imp.UploadVolumeData(context.Background(), leaf, "pvc-1", targetNS, nil, nil, nil); err != nil {
+	if err := imp.UploadVolumeData(context.Background(), leaf, diName, targetNS, nil, nil, nil); err != nil {
 		t.Fatalf("UploadVolumeData on an already-completed import must be a no-op: %v", err)
 	}
 }
@@ -1827,10 +1826,35 @@ func newFakeDataImportDyn(objs ...k8sruntime.Object) *dynamicfake.FakeDynamicCli
 }
 
 func dataImportObj(namespace, name string, expired bool) *unstructured.Unstructured {
+	leaf := volumeSnapshotLeaf(name)
+	return dataImportObjForLeaf(namespace, leaf, expired)
+}
+
+func dataImportObjForLeaf(namespace string, leaf PlannedNode, expired bool) *unstructured.Unstructured {
+	diName := (&clusterVolumeImporter{}).DataImportName(leaf)
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": dataImportGVR.GroupVersion().String(),
 		"kind":       dataImportKind,
-		"metadata":   map[string]interface{}{"namespace": namespace, "name": name},
+		"metadata": map[string]interface{}{
+			"namespace":   namespace,
+			"name":        diName,
+			"labels":      stringMapToInterfaceMap(map[string]string{dataImportIdentityLabel: dataImportShortID(leaf)}),
+			"annotations": stringMapToInterfaceMap(dataImportAnnotations(leaf)),
+		},
+		"spec": map[string]interface{}{
+			"ttl":  "1h",
+			"mode": dataImportModePopulateData,
+			"snapshotRef": map[string]interface{}{
+				"apiVersion": leaf.APIVersion,
+				"kind":       leaf.Kind,
+				"name":       leaf.Name,
+			},
+			"storageParams": map[string]interface{}{
+				"storageClassName": leaf.StorageClassName,
+				"size":             strconv.FormatInt(leaf.SizeBytes, 10),
+				"volumeMode":       leaf.VolumeMode,
+			},
+		},
 	}}
 
 	if expired {
@@ -1845,6 +1869,15 @@ func dataImportObj(namespace, name string, expired bool) *unstructured.Unstructu
 	}
 
 	return obj
+}
+
+func stringMapToInterfaceMap(values map[string]string) map[string]interface{} {
+	result := make(map[string]interface{}, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+
+	return result
 }
 
 func countDataImportActions(dyn *dynamicfake.FakeDynamicClient, verb string) int {
@@ -1871,7 +1904,11 @@ func newTestVolumeImporter(dyn *dynamicfake.FakeDynamicClient) *clusterVolumeImp
 func TestEnsureDataImport_ReusesHealthy(t *testing.T) {
 	leaf := volumeSnapshotLeaf("pvc-1")
 
-	dyn := newFakeDataImportDyn(dataImportObj(targetNS, "pvc-1", false))
+	existing := dataImportObj(targetNS, "pvc-1", false)
+	spec := existing.Object["spec"].(map[string]interface{})
+	spec["storageParams"].(map[string]interface{})["size"] = "10Gi"
+
+	dyn := newFakeDataImportDyn(existing)
 	imp := newTestVolumeImporter(dyn)
 
 	name, err := imp.EnsureDataImport(context.Background(), leaf, targetNS)
@@ -1879,8 +1916,8 @@ func TestEnsureDataImport_ReusesHealthy(t *testing.T) {
 		t.Fatalf("EnsureDataImport: %v", err)
 	}
 
-	if name != "pvc-1" {
-		t.Errorf("name = %q, want pvc-1", name)
+	if want := imp.DataImportName(leaf); name != want {
+		t.Errorf("name = %q, want %q", name, want)
 	}
 
 	if c := countDataImportActions(dyn, "create"); c != 0 {
@@ -1895,14 +1932,21 @@ func TestEnsureDataImport_ReusesHealthy(t *testing.T) {
 // volumeSnapshotLeaf builds a CSI VolumeSnapshot data leaf carrying the captured scratch-volume
 // parameters EnsureDataImport sends as the PopulateData DataImport's spec.storageParams.
 func volumeSnapshotLeaf(name string) PlannedNode {
-	return PlannedNode{
+	leaf := PlannedNode{
 		APIVersion:       "snapshot.storage.k8s.io/v1",
 		Kind:             "VolumeSnapshot",
 		Name:             name,
 		StorageClassName: "sc-fast",
 		Size:             "10Gi",
+		SizeBytes:        10 * 1024 * 1024 * 1024,
 		VolumeMode:       "Block",
+		NodeChecksum:     strings.Repeat("a", sha256HexLength),
+		PayloadKind:      dataImportPayloadBlock,
+		Codec:            "none",
 	}
+	leaf.DataImportIdentity = dataImportIdentity(leaf)
+
+	return leaf
 }
 
 func TestEnsureDataImport_BuildsPopulateDataSpec(t *testing.T) {
@@ -1915,7 +1959,9 @@ func TestEnsureDataImport_BuildsPopulateDataSpec(t *testing.T) {
 		t.Fatalf("EnsureDataImport: %v", err)
 	}
 
-	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{})
+	diName := imp.DataImportName(leaf)
+
+	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), diName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("created DataImport not found: %v", err)
 	}
@@ -1936,8 +1982,19 @@ func TestEnsureDataImport_BuildsPopulateDataSpec(t *testing.T) {
 	size, _, _ := unstructured.NestedString(got.Object, "spec", "storageParams", "size")
 	volumeMode, _, _ := unstructured.NestedString(got.Object, "spec", "storageParams", "volumeMode")
 
-	if sc != "sc-fast" || size != "10Gi" || volumeMode != "Block" {
-		t.Errorf("storageParams = {storageClassName:%q, size:%q, volumeMode:%q}, want {sc-fast, 10Gi, Block}", sc, size, volumeMode)
+	if sc != "sc-fast" || size != "10737418240" || volumeMode != "Block" {
+		t.Errorf("storageParams = {storageClassName:%q, size:%q, volumeMode:%q}, want {sc-fast, 10737418240, Block}", sc, size, volumeMode)
+	}
+
+	if got.GetLabels()[dataImportIdentityLabel] != dataImportShortID(leaf) {
+		t.Errorf("identity label = %q, want %q",
+			got.GetLabels()[dataImportIdentityLabel], dataImportShortID(leaf))
+	}
+
+	for key, want := range dataImportAnnotations(leaf) {
+		if value := got.GetAnnotations()[key]; value != want {
+			t.Errorf("annotation %q = %q, want %q", key, value, want)
+		}
 	}
 
 	// The obsolete Mode A fields must not be sent (the DataImport CRD prunes unknown fields).
@@ -1984,7 +2041,9 @@ func TestEnsureDataImport_AlignsTTLOnReuse(t *testing.T) {
 		t.Errorf("a healthy DataImport must be reused, not recreated (creates=%d)", c)
 	}
 
-	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{})
+	diName := imp.DataImportName(leaf)
+
+	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), diName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get DataImport: %v", err)
 	}
@@ -2006,8 +2065,8 @@ func TestEnsureDataImport_RecreatesExpired(t *testing.T) {
 		t.Fatalf("EnsureDataImport: %v", err)
 	}
 
-	if name != "pvc-1" {
-		t.Errorf("name = %q, want pvc-1", name)
+	if want := imp.DataImportName(leaf); name != want {
+		t.Errorf("name = %q, want %q", name, want)
 	}
 
 	if d := countDataImportActions(dyn, "delete"); d != 1 {
@@ -2018,13 +2077,289 @@ func TestEnsureDataImport_RecreatesExpired(t *testing.T) {
 		t.Errorf("a fresh DataImport must be created after expiry (creates=%d)", c)
 	}
 
-	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{})
+	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("DataImport not present after recreate: %v", err)
 	}
 
 	if conditionFalseWithReason(got, conditionReady, reasonExpired) {
 		t.Errorf("recreated DataImport must not be in the Ready=False/Expired state")
+	}
+}
+
+func TestEnsureDataImport_RejectsForeignIdentityAndSpec(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*unstructured.Unstructured)
+	}{
+		{
+			name: "missing identity label",
+			mutate: func(obj *unstructured.Unstructured) {
+				labels := obj.GetLabels()
+				delete(labels, dataImportIdentityLabel)
+				obj.SetLabels(labels)
+			},
+		},
+		{
+			name: "wrong full identity",
+			mutate: func(obj *unstructured.Unstructured) {
+				annotations := obj.GetAnnotations()
+				annotations[dataImportIdentityAnnotation] = strings.Repeat("f", sha256HexLength)
+				obj.SetAnnotations(annotations)
+			},
+		},
+		{
+			name: "wrong identity version",
+			mutate: func(obj *unstructured.Unstructured) {
+				annotations := obj.GetAnnotations()
+				annotations[dataImportIdentityVersionAnnotation] = "v2"
+				obj.SetAnnotations(annotations)
+			},
+		},
+		{
+			name: "wrong checksum",
+			mutate: func(obj *unstructured.Unstructured) {
+				annotations := obj.GetAnnotations()
+				annotations[dataImportNodeChecksumAnnotation] = strings.Repeat("b", sha256HexLength)
+				obj.SetAnnotations(annotations)
+			},
+		},
+		{
+			name: "wrong annotated volume mode",
+			mutate: func(obj *unstructured.Unstructured) {
+				annotations := obj.GetAnnotations()
+				annotations[dataImportVolumeModeAnnotation] = archive.VolumeModeFilesystem
+				obj.SetAnnotations(annotations)
+			},
+		},
+		{
+			name: "wrong annotated storage class",
+			mutate: func(obj *unstructured.Unstructured) {
+				annotations := obj.GetAnnotations()
+				annotations[dataImportStorageClassAnnotation] = "sc-slow"
+				obj.SetAnnotations(annotations)
+			},
+		},
+		{
+			name: "wrong annotated size",
+			mutate: func(obj *unstructured.Unstructured) {
+				annotations := obj.GetAnnotations()
+				annotations[dataImportSizeBytesAnnotation] = "1"
+				obj.SetAnnotations(annotations)
+			},
+		},
+		{
+			name: "wrong annotated payload kind",
+			mutate: func(obj *unstructured.Unstructured) {
+				annotations := obj.GetAnnotations()
+				annotations[dataImportPayloadKindAnnotation] = dataImportPayloadFilesystem
+				obj.SetAnnotations(annotations)
+			},
+		},
+		{
+			name: "wrong annotated codec",
+			mutate: func(obj *unstructured.Unstructured) {
+				annotations := obj.GetAnnotations()
+				annotations[dataImportCodecAnnotation] = "zstd"
+				obj.SetAnnotations(annotations)
+			},
+		},
+		{
+			name: "wrong mode",
+			mutate: func(obj *unstructured.Unstructured) {
+				obj.Object["spec"].(map[string]interface{})["mode"] = "Clone"
+			},
+		},
+		{
+			name: "wrong snapshotRef",
+			mutate: func(obj *unstructured.Unstructured) {
+				spec := obj.Object["spec"].(map[string]interface{})
+				spec["snapshotRef"].(map[string]interface{})["name"] = "other"
+			},
+		},
+		{
+			name: "missing storage class",
+			mutate: func(obj *unstructured.Unstructured) {
+				unstructured.RemoveNestedField(obj.Object, "spec", "storageParams", "storageClassName")
+			},
+		},
+		{
+			name: "wrong volume mode",
+			mutate: func(obj *unstructured.Unstructured) {
+				spec := obj.Object["spec"].(map[string]interface{})
+				spec["storageParams"].(map[string]interface{})["volumeMode"] = archive.VolumeModeFilesystem
+			},
+		},
+		{
+			name: "wrong size",
+			mutate: func(obj *unstructured.Unstructured) {
+				spec := obj.Object["spec"].(map[string]interface{})
+				spec["storageParams"].(map[string]interface{})["size"] = "1Gi"
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			leaf := volumeSnapshotLeaf("pvc-1")
+			existing := dataImportObjForLeaf(targetNS, leaf, false)
+			test.mutate(existing)
+
+			dyn := newFakeDataImportDyn(existing)
+			imp := newTestVolumeImporter(dyn)
+
+			_, err := imp.EnsureDataImport(context.Background(), leaf, targetNS)
+			if !errors.Is(err, ErrForeignDataImport) {
+				t.Fatalf("EnsureDataImport error = %v, want ErrForeignDataImport", err)
+			}
+
+			for _, verb := range []string{"create", "update", "patch", "delete"} {
+				if count := countDataImportActions(dyn, verb); count != 0 {
+					t.Errorf("foreign DataImport triggered %s (%d action(s))", verb, count)
+				}
+			}
+		})
+	}
+}
+
+func TestEnsureDataImport_ForeignExpiredIsNeverDeleted(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+	existing := dataImportObjForLeaf(targetNS, leaf, true)
+	annotations := existing.GetAnnotations()
+	annotations[dataImportCodecAnnotation] = "zstd"
+	existing.SetAnnotations(annotations)
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn)
+
+	_, err := imp.EnsureDataImport(context.Background(), leaf, targetNS)
+	if !errors.Is(err, ErrForeignDataImport) {
+		t.Fatalf("EnsureDataImport error = %v, want ErrForeignDataImport", err)
+	}
+
+	if count := countDataImportActions(dyn, "delete"); count != 0 {
+		t.Errorf("foreign expired DataImport was deleted (%d delete action(s))", count)
+	}
+}
+
+func TestEnsureDataImport_ForcedTruncatedIdentityCollision(t *testing.T) {
+	owner := volumeSnapshotLeaf("pvc-1")
+	collider := owner
+	collider.DataImportIdentity = owner.DataImportIdentity[:dataImportIdentityIDLength] +
+		strings.Repeat("f", sha256HexLength-dataImportIdentityIDLength)
+
+	imp := &clusterVolumeImporter{}
+	if imp.DataImportName(owner) != imp.DataImportName(collider) {
+		t.Fatal("test setup did not force a truncated identity collision")
+	}
+
+	dyn := newFakeDataImportDyn(dataImportObjForLeaf(targetNS, owner, false))
+	imp = newTestVolumeImporter(dyn)
+
+	_, err := imp.EnsureDataImport(context.Background(), collider, targetNS)
+	if !errors.Is(err, ErrForeignDataImport) {
+		t.Fatalf("EnsureDataImport error = %v, want ErrForeignDataImport", err)
+	}
+}
+
+func TestEnsureDataImport_AlreadyExistsRaceConverges(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+	dyn := newFakeDataImportDyn()
+	imp := newTestVolumeImporter(dyn)
+
+	var once sync.Once
+	dyn.PrependReactor("create", dataImportGVR.Resource, func(action clienttesting.Action) (bool, k8sruntime.Object, error) {
+		var addErr error
+
+		once.Do(func() {
+			create := action.(clienttesting.CreateAction)
+			addErr = dyn.Tracker().Add(create.GetObject().DeepCopyObject())
+		})
+
+		if addErr != nil {
+			return true, nil, fmt.Errorf("seed raced DataImport: %w", addErr)
+		}
+
+		return true, nil, kubeerrors.NewAlreadyExists(dataImportGVR.GroupResource(), imp.DataImportName(leaf))
+	})
+
+	name, err := imp.EnsureDataImport(context.Background(), leaf, targetNS)
+	if err != nil {
+		t.Fatalf("EnsureDataImport: %v", err)
+	}
+
+	if want := imp.DataImportName(leaf); name != want {
+		t.Errorf("name = %q, want %q", name, want)
+	}
+}
+
+func TestEnsureDataImport_ConcurrentArchivesSeparateByIdentity(t *testing.T) {
+	same := volumeSnapshotLeaf("pvc-1")
+	different := same
+	different.NodeChecksum = strings.Repeat("b", sha256HexLength)
+	different.DataImportIdentity = dataImportIdentity(different)
+
+	dyn := newFakeDataImportDyn()
+	imp := newTestVolumeImporter(dyn)
+	leaves := []PlannedNode{same, same, different}
+
+	errs := make(chan error, len(leaves))
+
+	var group sync.WaitGroup
+	group.Add(len(leaves))
+
+	for i := range leaves {
+		leaf := leaves[i]
+
+		go func() {
+			defer group.Done()
+
+			_, err := imp.EnsureDataImport(context.Background(), leaf, targetNS)
+			errs <- err
+		}()
+	}
+
+	group.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent EnsureDataImport: %v", err)
+		}
+	}
+
+	list, err := dyn.Resource(dataImportGVR).Namespace(targetNS).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list DataImports: %v", err)
+	}
+
+	if len(list.Items) != 2 {
+		t.Errorf("DataImport count = %d, want 2 (same content converges, different content separates)", len(list.Items))
+	}
+}
+
+func TestUploadVolumeData_ForeignCompletedCannotSkip(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+	leaf.DataFile = filepath.Join(t.TempDir(), "data.bin")
+	existing := completedDataImportObj(targetNS, leaf.Name)
+	annotations := existing.GetAnnotations()
+	annotations[dataImportStorageClassAnnotation] = "foreign-sc"
+	existing.SetAnnotations(annotations)
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn)
+
+	err := imp.UploadVolumeData(
+		context.Background(),
+		leaf,
+		imp.DataImportName(leaf),
+		targetNS,
+		nil,
+		nil,
+		nil,
+	)
+	if !errors.Is(err, ErrForeignDataImport) {
+		t.Fatalf("UploadVolumeData error = %v, want ErrForeignDataImport", err)
 	}
 }
 
