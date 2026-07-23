@@ -154,7 +154,7 @@ type fsItem struct {
 	gid      int
 	mtime    time.Time
 	linkname string // symlink target; non-empty only for itemType == "link"
-	md5      string // exporter-provided hex MD5 of the plaintext; empty if not reported
+	md5      string // exporter-provided hex MD5 fetched after inventory; empty if not reported
 }
 
 // DownloadFilesystemVolume downloads all files from the data-exporter filesystem
@@ -255,6 +255,13 @@ func DownloadFilesystemVolume(
 		item := items[itemIndex]
 
 		g.Go(func() error {
+			sourceMD5, hashErr := fetcher.SourceMD5(gctx, item.uri, item.size)
+			if hashErr != nil {
+				return fmt.Errorf("fetch source MD5 for %s: %w", item.relPath, hashErr)
+			}
+
+			item.md5 = sourceMD5
+
 			rawSize, stageErr := stageCompressedFile(gctx, log, stagingDir, item, chunkSize, codec, fetcher, onProgress)
 			if stageErr != nil {
 				return stageErr
@@ -360,7 +367,7 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 		}
 
 		absURI := resolved.String()
-		mode, uid, gid, mtime, md5Hex := parseItemAttrs(item.Attributes)
+		mode, uid, gid, mtime := parseItemAttrs(item.Attributes)
 
 		switch item.Type {
 		case "file":
@@ -373,7 +380,6 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 				uid:      uid,
 				gid:      gid,
 				mtime:    mtime,
-				md5:      md5Hex,
 			})
 
 		case "dir":
@@ -1140,26 +1146,20 @@ func parseItemSize(attrs map[string]any) int64 {
 
 // parseItemAttrs extracts file metadata from the data-exporter listing attributes map.
 // The real data-exporter (storage-volume-data-manager, images/data-exporter,
-// prepareAttributesStat/prepareAttributesMd5) emits these keys and types:
+// prepareAttributesStat) emits these keys and types:
 //   - "permissions": octal string via fmt.Sprintf("%#o", perm), e.g. "0644"
 //   - "modtime":     RFC3339 string (time.RFC3339)
 //   - "uid", "gid": JSON numbers (decoded as float64 by encoding/json)
 //   - "size":        JSON number (files only; consumed via parseItemSize)
-//   - "hash.md5":    hex string, present only for regular files and only when the
-//     listing request carries attribute=hash.md5 (see exporter.ListDir)
 //
 // Missing or unrecognised attribute values produce zero values; sensible defaults
-// are applied by WriteTar: 0644 for files, 0755 for dirs, 0777 for links. The returned
-// md5 is the empty string when the exporter reported no digest for this item
-// (directories/links, or an older exporter that never emits hash.md5).
-func parseItemAttrs(attrs map[string]any) (fs.FileMode, int, int, time.Time, string) {
+// are applied by WriteTar: 0644 for files, 0755 for dirs, 0777 for links.
+func parseItemAttrs(attrs map[string]any) (fs.FileMode, int, int, time.Time) {
 	var mode fs.FileMode
 
 	var uid, gid int
 
 	var mtime time.Time
-
-	var md5Hex string
 
 	// "permissions" is an octal string, e.g. "0644". Accept float64 as a
 	// forward-compat fallback for hypothetical future numeric encoding.
@@ -1201,11 +1201,5 @@ func parseItemAttrs(attrs map[string]any) (fs.FileMode, int, int, time.Time, str
 		}
 	}
 
-	if v, ok := attrs["hash.md5"]; ok {
-		if s, ok := v.(string); ok {
-			md5Hex = s
-		}
-	}
-
-	return mode, uid, gid, mtime, md5Hex
+	return mode, uid, gid, mtime
 }

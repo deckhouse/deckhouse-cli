@@ -793,7 +793,10 @@ func newRangeTrackingFSServer(t *testing.T, fileName string, content []byte) (*h
 				`]}`)
 
 		case filePath:
-			tracker.record(r.Header.Get("Range") != "")
+			if r.Method == http.MethodGet {
+				tracker.record(r.Header.Get("Range") != "")
+			}
+
 			http.ServeContent(w, r, fileName, time.Time{}, bytes.NewReader(content))
 
 		default:
@@ -1026,8 +1029,10 @@ func TestDownloadFilesystemVolume_UnknownSizeFile_UsesWholeFileFallback(t *testi
 				`]}`)
 
 		case "/files/unknown.bin":
-			tracker.record(r.Header.Get("Range") != "")
-			_, _ = w.Write(content)
+			if r.Method == http.MethodGet {
+				tracker.record(r.Header.Get("Range") != "")
+				_, _ = w.Write(content)
+			}
 
 		default:
 			http.NotFound(w, r)
@@ -1095,9 +1100,11 @@ func TestDownloadFilesystemVolume_PartialChunkResume_OnlyMissingChunkFetched(t *
 				`]}`)
 
 		case "/files/big.bin":
-			mu.Lock()
-			rangesFetched = append(rangesFetched, r.Header.Get("Range"))
-			mu.Unlock()
+			if r.Method == http.MethodGet {
+				mu.Lock()
+				rangesFetched = append(rangesFetched, r.Header.Get("Range"))
+				mu.Unlock()
+			}
 
 			http.ServeContent(w, r, "big.bin", time.Time{}, bytes.NewReader(content))
 
@@ -1241,9 +1248,11 @@ func TestDownloadFilesystemVolume_LargeFile_ChunkSizeChanged_ResumeNotCorrupted(
 				`]}`)
 
 		case "/files/big.bin":
-			mu.Lock()
-			rangesFetched = append(rangesFetched, r.Header.Get("Range"))
-			mu.Unlock()
+			if r.Method == http.MethodGet {
+				mu.Lock()
+				rangesFetched = append(rangesFetched, r.Header.Get("Range"))
+				mu.Unlock()
+			}
 
 			http.ServeContent(w, r, "big.bin", time.Time{}, bytes.NewReader(content))
 
@@ -1354,11 +1363,10 @@ func TestDownloadFilesystemVolume_SmallFile_InterruptedResumesFromPersistedOffse
 	srv, _ := newRangeTrackingFSServer(t, "small.bin", content)
 
 	// recordingDoer (defined in block_test.go, shared package volume_test)
-	// counts EVERY request through it, including the directory listing GET
-	// that precedes each file download: call 1 is the listing, call 2 is the
-	// file's Range GET (there is exactly one chunk, since the file is well
-	// below chunkSize).
-	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 2, cutBytes: cutBytes}
+	// counts EVERY request through it: call 1 is the listing, call 2 is the
+	// source-hash HEAD, and call 3 is the file's Range GET (there is exactly
+	// one chunk, since the file is well below chunkSize).
+	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 3, cutBytes: cutBytes}
 	fetcher := exporter.NewFetcher(doer)
 
 	codec := mustCodec(t, "zstd")
@@ -1487,27 +1495,17 @@ func hexMD5(content []byte) string {
 }
 
 // newMD5FSServer builds an httptest.Server exposing a single-file FS volume whose
-// listing item.Attributes carries "hash.md5": advertisedMD5, so it exercises the same
-// contract exporter.ListDir requests (attribute=hash.md5) without depending on that
-// package. withSize controls whether the listing also declares "size" — selecting
-// stageChunkedFile (known size) vs. stageWholeFile (unknown size) in the CLI.
+// stat-only listing declares optional size metadata and whose dedicated HEAD
+// attribute request returns advertisedMD5. withSize selects stageChunkedFile
+// (known size) vs. stageWholeFile (unknown size) in the CLI.
 func newMD5FSServer(t *testing.T, fileName string, served []byte, advertisedMD5 string, withSize bool) *httptest.Server {
 	t.Helper()
 
 	filePath := "/files/" + fileName
 
-	attrs := `"hash.md5":"` + advertisedMD5 + `"`
-	if advertisedMD5 == "" {
-		attrs = ""
-	}
-
+	attrs := ""
 	if withSize {
-		sizeAttr := `"size":` + strconv.Itoa(len(served))
-		if attrs == "" {
-			attrs = sizeAttr
-		} else {
-			attrs = sizeAttr + "," + attrs
-		}
+		attrs = `"size":` + strconv.Itoa(len(served))
 	}
 
 	mux := http.NewServeMux()
@@ -1520,6 +1518,10 @@ func newMD5FSServer(t *testing.T, fileName string, served []byte, advertisedMD5 
 				`]}`)
 
 		case filePath:
+			if r.Method == http.MethodHead && r.URL.Query().Get("attribute") == "hash.md5" && advertisedMD5 != "" {
+				w.Header().Set("X-Attribute-Hash-Md5", advertisedMD5)
+			}
+
 			// http.ServeContent honors Range so the known-size (chunked) case works too.
 			http.ServeContent(w, r, fileName, time.Time{}, bytes.NewReader(served))
 
@@ -1534,9 +1536,128 @@ func newMD5FSServer(t *testing.T, fileName string, served []byte, advertisedMD5 
 	return srv
 }
 
+func TestDownloadFilesystemVolume_SourceHashOutlivesOrdinaryHeaderTimeout(t *testing.T) {
+	t.Parallel()
+
+	const (
+		fileName        = "large.bin"
+		ordinaryTimeout = 30 * time.Millisecond
+		hashDelay       = 90 * time.Millisecond
+	)
+
+	content := bytes.Repeat([]byte("producer-shaped-source-hash-content-"), 8)
+	wantMD5 := hexMD5(content)
+
+	var (
+		mu           sync.Mutex
+		listAttrs    []string
+		hashRequests int
+		fileGets     int
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			mu.Lock()
+			listAttrs = append([]string(nil), r.URL.Query()["attribute"]...)
+			mu.Unlock()
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"`+fileName+`","type":"file","uri":"`+fileName+`","attributes":{"size":`+
+				strconv.Itoa(len(content))+`}}]}`)
+
+		case "/files/" + fileName:
+			if r.Method == http.MethodHead {
+				if got := r.URL.Query()["attribute"]; len(got) != 1 || got[0] != "hash.md5" {
+					t.Errorf("hash attribute query = %v, want [hash.md5]", got)
+				}
+
+				mu.Lock()
+				hashRequests++
+				mu.Unlock()
+
+				time.Sleep(hashDelay)
+				w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+				w.Header().Set("X-Attribute-Hash-Md5", wantMD5)
+				w.WriteHeader(http.StatusOK)
+
+				return
+			}
+
+			mu.Lock()
+			fileGets++
+			mu.Unlock()
+
+			http.ServeContent(w, r, fileName, time.Time{}, bytes.NewReader(content))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	ordinaryTransport := srv.Client().Transport.(*http.Transport).Clone()
+	ordinaryTransport.ResponseHeaderTimeout = ordinaryTimeout
+
+	hashTransport := srv.Client().Transport.(*http.Transport).Clone()
+	hashTransport.ResponseHeaderTimeout = time.Second
+
+	fetcher := exporter.NewFetcher(
+		&http.Client{Transport: ordinaryTransport},
+		exporter.WithSourceHashDoer(&http.Client{Transport: hashTransport}),
+	)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	codec := mustCodec(t, "zstd")
+
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.Default(),
+		tarPath,
+		stagingDir,
+		srv.URL+"/files/",
+		1,
+		0,
+		fetcher,
+		codec,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	mu.Lock()
+	gotListAttrs := append([]string(nil), listAttrs...)
+	gotHashRequests := hashRequests
+	gotFileGets := fileGets
+	mu.Unlock()
+
+	if len(gotListAttrs) != 1 || gotListAttrs[0] != "stat" {
+		t.Errorf("listing attributes = %v, want [stat]", gotListAttrs)
+	}
+
+	if gotHashRequests != 1 {
+		t.Errorf("source hash requests = %d, want 1", gotHashRequests)
+	}
+
+	if gotFileGets == 0 {
+		t.Error("file bytes were not fetched")
+	}
+
+	if got := decodeZstdTarEntry(t, tarPath, fileName+codec.Ext()); !bytes.Equal(got, content) {
+		t.Errorf("decoded content = %q, want %q", got, content)
+	}
+}
+
 // TestDownloadFilesystemVolume_MD5Verify_WholeFile_Success verifies that a file staged
 // via the whole-file path (unknown declared size) whose plaintext matches the exporter-
-// advertised hash.md5 stages successfully and decodes back to the original content.
+// reported hash.md5 stages successfully and decodes back to the original content.
 func TestDownloadFilesystemVolume_MD5Verify_WholeFile_Success(t *testing.T) {
 	t.Parallel()
 
@@ -1778,11 +1899,11 @@ func TestDownloadFilesystemVolume_SizesSidecar_SeedsResumeWithoutNetwork(t *test
 
 	// workers=1 forces strictly serialized per-file staging in listing order
 	// (a.bin then b.bin), so the doer's call sequence is deterministic:
-	// call 1 = the listing GET, call 2 = a.bin's (single-chunk) Range GET,
-	// call 3 = b.bin's Range GET, truncated mid-transfer.
+	// listing, a.bin hash HEAD + Range GET, then b.bin hash HEAD + Range GET.
+	// The fifth call is truncated mid-transfer.
 	const cutBytes = 20
 
-	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 3, cutBytes: cutBytes}
+	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 5, cutBytes: cutBytes}
 	fetcher := exporter.NewFetcher(doer)
 
 	err := volume.DownloadFilesystemVolume(
@@ -1973,20 +2094,17 @@ func TestDownloadFilesystemVolume_SizesSidecar_FromScratchUnchanged(t *testing.T
 // ── resume skip-branch MD5 re-check (fs-skip-branch-md5-recheck) ───────────
 
 // newFileGetCountingFSServer builds an httptest.Server exposing a single
-// known-size file whose listing item.Attributes carries "size" and, when
-// advertisedMD5 is non-empty, "hash.md5". It counts every GET issued to the
-// file body (Range or not), so a test can prove that a resume skip did NOT
-// re-download an already-staged file. http.ServeContent honors Range so the
-// known-size chunked re-stage path works too.
+// known-size file whose dedicated HEAD attribute request returns advertisedMD5.
+// It counts every GET issued to the file body (Range or not), so a test can
+// prove that a resume skip did NOT re-download an already-staged file.
+// http.ServeContent honors Range so the known-size chunked re-stage path works
+// too.
 func newFileGetCountingFSServer(t *testing.T, fileName string, served []byte, advertisedMD5 string) (*httptest.Server, func() int) {
 	t.Helper()
 
 	filePath := "/files/" + fileName
 
 	attrs := `"size":` + strconv.Itoa(len(served))
-	if advertisedMD5 != "" {
-		attrs += `,"hash.md5":"` + advertisedMD5 + `"`
-	}
 
 	var (
 		mu     sync.Mutex
@@ -2003,9 +2121,15 @@ func newFileGetCountingFSServer(t *testing.T, fileName string, served []byte, ad
 				`]}`)
 
 		case filePath:
-			mu.Lock()
-			getCnt++
-			mu.Unlock()
+			if r.Method == http.MethodHead {
+				if r.URL.Query().Get("attribute") == "hash.md5" && advertisedMD5 != "" {
+					w.Header().Set("X-Attribute-Hash-Md5", advertisedMD5)
+				}
+			} else {
+				mu.Lock()
+				getCnt++
+				mu.Unlock()
+			}
 
 			http.ServeContent(w, r, fileName, time.Time{}, bytes.NewReader(served))
 
@@ -2464,14 +2588,22 @@ func TestDownloadFilesystemVolume_UserFileNamedSizesJson_NotShadowed(t *testing.
 		case "/files/":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
-				`{"name":"sizes.json","type":"file","uri":"sizes.json","attributes":{"size":`+strconv.Itoa(len(userContent))+`,"hash.md5":"`+userMD5+`"}},`+
-				`{"name":"b.bin","type":"file","uri":"b.bin","attributes":{"size":`+strconv.Itoa(len(secondContent))+`,"hash.md5":"`+secondMD5+`"}}`+
+				`{"name":"sizes.json","type":"file","uri":"sizes.json","attributes":{"size":`+strconv.Itoa(len(userContent))+`}},`+
+				`{"name":"b.bin","type":"file","uri":"b.bin","attributes":{"size":`+strconv.Itoa(len(secondContent))+`}}`+
 				`]}`)
 
 		case "/files/sizes.json":
+			if r.Method == http.MethodHead {
+				w.Header().Set("X-Attribute-Hash-Md5", userMD5)
+			}
+
 			http.ServeContent(w, r, "sizes.json", time.Time{}, bytes.NewReader(userContent))
 
 		case "/files/b.bin":
+			if r.Method == http.MethodHead {
+				w.Header().Set("X-Attribute-Hash-Md5", secondMD5)
+			}
+
 			http.ServeContent(w, r, "b.bin", time.Time{}, bytes.NewReader(secondContent))
 
 		default:
@@ -2488,9 +2620,10 @@ func TestDownloadFilesystemVolume_UserFileNamedSizesJson_NotShadowed(t *testing.
 	codec := mustCodec(t, "none")
 
 	// workers=1 serializes staging in listing order (sizes.json, then b.bin):
-	// call 1 = listing, call 2 = sizes.json's Range GET, call 3 = b.bin's Range
-	// GET, truncated mid-transfer so sizes.json is fully staged and b.bin is not.
-	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 3, cutBytes: 20}
+	// call 1 = listing, calls 2-3 = sizes.json's hash HEAD and Range GET,
+	// calls 4-5 = b.bin's hash HEAD and Range GET. The fifth call is truncated
+	// mid-transfer so sizes.json is fully staged and b.bin is not.
+	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 5, cutBytes: 20}
 	fetcher := exporter.NewFetcher(doer)
 
 	err := volume.DownloadFilesystemVolume(
@@ -2580,10 +2713,14 @@ func TestDownloadFilesystemVolume_NestedReservedName_Accepted(t *testing.T) {
 		case "/files/a/":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
-				`{"name":".d8-meta","type":"file","uri":"a/.d8-meta","attributes":{"size":`+strconv.Itoa(len(nestedContent))+`,"hash.md5":"`+nestedMD5+`"}}`+
+				`{"name":".d8-meta","type":"file","uri":"a/.d8-meta","attributes":{"size":`+strconv.Itoa(len(nestedContent))+`}}`+
 				`]}`)
 
 		case "/files/a/.d8-meta":
+			if r.Method == http.MethodHead {
+				w.Header().Set("X-Attribute-Hash-Md5", nestedMD5)
+			}
+
 			http.ServeContent(w, r, ".d8-meta", time.Time{}, bytes.NewReader(nestedContent))
 
 		default:
@@ -2868,8 +3005,8 @@ func TestDownloadFilesystemVolume_CodecNone_ChunkDirNameCannotClobberSiblingBlob
 		case "/files/":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
-				`{"name":"payload","type":"file","uri":"payload","attributes":{"size":`+strconv.Itoa(len(payload))+`,"hash.md5":"`+payloadMD5+`"}},`+
-				`{"name":"payload.d","type":"file","uri":"payload.d","attributes":{"size":`+strconv.Itoa(len(userD))+`,"hash.md5":"`+userDMD5+`"}},`+
+				`{"name":"payload","type":"file","uri":"payload","attributes":{"size":`+strconv.Itoa(len(payload))+`}},`+
+				`{"name":"payload.d","type":"file","uri":"payload.d","attributes":{"size":`+strconv.Itoa(len(userD))+`}},`+
 				`{"name":"other.d","type":"dir","uri":"other.d/","attributes":{}}`+
 				`]}`)
 
@@ -2878,15 +3015,25 @@ func TestDownloadFilesystemVolume_CodecNone_ChunkDirNameCannotClobberSiblingBlob
 			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[]}`)
 
 		case "/files/payload":
-			mu.Lock()
-			bodyGETs["payload"]++
-			mu.Unlock()
+			if r.Method == http.MethodHead {
+				w.Header().Set("X-Attribute-Hash-Md5", payloadMD5)
+			} else {
+				mu.Lock()
+				bodyGETs["payload"]++
+				mu.Unlock()
+			}
+
 			http.ServeContent(w, r, "payload", time.Time{}, bytes.NewReader(payload))
 
 		case "/files/payload.d":
-			mu.Lock()
-			bodyGETs["payload.d"]++
-			mu.Unlock()
+			if r.Method == http.MethodHead {
+				w.Header().Set("X-Attribute-Hash-Md5", userDMD5)
+			} else {
+				mu.Lock()
+				bodyGETs["payload.d"]++
+				mu.Unlock()
+			}
+
 			http.ServeContent(w, r, "payload.d", time.Time{}, bytes.NewReader(userD))
 
 		default:
@@ -2977,10 +3124,14 @@ func TestDownloadFilesystemVolume_ChunkedResume_UsesReservedChunkDir(t *testing.
 		case "/files/":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
-				`{"name":"big.bin","type":"file","uri":"big.bin","attributes":{"size":`+strconv.Itoa(len(content))+`,"hash.md5":"`+hexMD5(content)+`"}}`+
+				`{"name":"big.bin","type":"file","uri":"big.bin","attributes":{"size":`+strconv.Itoa(len(content))+`}}`+
 				`]}`)
 
 		case "/files/big.bin":
+			if r.Method == http.MethodHead {
+				w.Header().Set("X-Attribute-Hash-Md5", hexMD5(content))
+			}
+
 			http.ServeContent(w, r, "big.bin", time.Time{}, bytes.NewReader(content))
 
 		default:
@@ -2997,8 +3148,8 @@ func TestDownloadFilesystemVolume_ChunkedResume_UsesReservedChunkDir(t *testing.
 	codec := mustCodec(t, "none")
 
 	// Run 1: interrupt during chunk 1's Range GET (call 1 = listing, call 2 =
-	// chunk 0, call 3 = chunk 1).
-	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 3, cutBytes: cutBytes}
+	// source-hash HEAD, call 3 = chunk 0, call 4 = chunk 1).
+	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 4, cutBytes: cutBytes}
 	fetcher := exporter.NewFetcher(doer)
 
 	err := volume.DownloadFilesystemVolume(

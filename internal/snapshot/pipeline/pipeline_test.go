@@ -19,6 +19,7 @@ package pipeline_test
 import (
 	"bytes"
 	"context"
+	"crypto/md5" //nolint:gosec // test fixture digest, matches the exporter's hash.md5 contract
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2985,9 +2986,10 @@ func makeTrackedBlockServer(t *testing.T, rawData []byte, rec *stringRecorder) *
 }
 
 // makeTrackedFSServer serves a flat (no subdirectories) filesystem-volume
-// listing of files at /api/v1/files/, recording every per-file GET into rec
-// so a test can assert exactly which files were (or were not) re-fetched
-// across a resume run. Modeled on makeE2EFSServer but flat and instrumented.
+// listing of files at /api/v1/files/, serving producer-shaped source-hash HEAD
+// requests, and recording only per-file body GETs into rec so a test can assert
+// exactly which files were (or were not) re-fetched across a resume run.
+// Modeled on makeE2EFSServer but flat and instrumented.
 func makeTrackedFSServer(t *testing.T, files []fsE2EFile, rec *stringRecorder) *httptest.Server {
 	t.Helper()
 
@@ -3022,7 +3024,16 @@ func makeTrackedFSServer(t *testing.T, files []fsE2EFile, rec *stringRecorder) *
 			return
 		}
 
-		rec.record(name)
+		if r.Method == http.MethodHead {
+			if got := r.URL.Query()["attribute"]; len(got) != 1 || got[0] != "hash.md5" {
+				t.Errorf("hash attribute query = %v, want [hash.md5]", got)
+			}
+
+			sum := md5.Sum(content)
+			w.Header().Set("X-Attribute-Hash-Md5", fmt.Sprintf("%x", sum))
+		} else {
+			rec.record(name)
+		}
 
 		// The listing declares a "size" for every file, so each one downloads
 		// via the durable chunked path (stageChunkedFile/DownloadBlockChunks),

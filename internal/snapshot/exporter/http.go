@@ -62,10 +62,20 @@ var ErrDataPlaneIdle = errors.New("data-plane read stalled: no bytes within idle
 // Fetcher with WithIdleReadTimeout (tests use a short window).
 const DefaultIdleReadTimeout = 2 * time.Minute
 
+const (
+	sourceHashHeader            = "X-Attribute-Hash-Md5"
+	sourceHashMinimumThroughput = int64(1 << 20)
+	sourceHashTimeoutFloor      = 5 * time.Minute
+	sourceHashTimeoutSlack      = 1 * time.Minute
+	sourceHashTimeoutCeiling    = 7 * 24 * time.Hour
+)
+
 // Fetcher wraps a Doer and exposes typed methods for the data-exporter HTTP API.
 type Fetcher struct {
-	doer        Doer
-	idleTimeout time.Duration
+	doer              Doer
+	sourceHashDoer    Doer
+	idleTimeout       time.Duration
+	sourceHashTimeout func(size int64) time.Duration
 }
 
 // FetcherOption customizes a Fetcher at construction time.
@@ -78,11 +88,27 @@ func WithIdleReadTimeout(d time.Duration) FetcherOption {
 	return func(f *Fetcher) { f.idleTimeout = d }
 }
 
+// WithSourceHashDoer sets the transport used for source-hash HEAD requests.
+// Production uses a separate transport because source hashing may legitimately
+// take longer than the ordinary data-plane response-header timeout.
+func WithSourceHashDoer(doer Doer) FetcherOption {
+	return func(f *Fetcher) {
+		if doer != nil {
+			f.sourceHashDoer = doer
+		}
+	}
+}
+
 // NewFetcher creates a Fetcher backed by the given Doer. Unless overridden via
 // WithIdleReadTimeout, response bodies carry an idle-read watchdog with
 // DefaultIdleReadTimeout.
 func NewFetcher(doer Doer, opts ...FetcherOption) *Fetcher {
-	f := &Fetcher{doer: doer, idleTimeout: DefaultIdleReadTimeout}
+	f := &Fetcher{
+		doer:              doer,
+		sourceHashDoer:    doer,
+		idleTimeout:       DefaultIdleReadTimeout,
+		sourceHashTimeout: sourceHashTimeout,
+	}
 	for _, opt := range opts {
 		opt(f)
 	}
@@ -262,13 +288,13 @@ type Item struct {
 	Attributes map[string]any `json:"attributes"`
 }
 
-// ListDir GETs filesURL (which must end with a trailing slash for directory semantics),
-// requesting the "stat" and "hash.md5" attributes so each file item's Attributes map
-// carries a source-provided digest for downstream integrity verification, and returns
-// the stream-decoded list of directory entries. The body is consumed and closed before
-// returning.
+// ListDir GETs filesURL (which must end with a trailing slash for directory
+// semantics), requesting only the inexpensive stat attributes, and returns the
+// stream-decoded list of directory entries. Source hashes are fetched separately
+// after each regular file's declared size is known because the producer computes
+// hash.md5 synchronously before emitting that listing item.
 func (f *Fetcher) ListDir(ctx context.Context, filesURL string) ([]Item, error) {
-	reqURL, err := withAttributes(filesURL, "stat", "hash.md5")
+	reqURL, err := withAttributes(filesURL, "stat")
 	if err != nil {
 		return nil, fmt.Errorf("build listing URL for %s: %w", filesURL, err)
 	}
@@ -302,6 +328,74 @@ func (f *Fetcher) ListDir(ctx context.Context, filesURL string) ([]Item, error) 
 	}
 
 	return items, nil
+}
+
+// SourceMD5 retrieves the producer-computed plaintext MD5 for one regular file
+// through the filesystem exporter's HEAD attribute contract. The producer must
+// read the complete source file before it can send this response header, so the
+// request uses an overall size-derived deadline rather than the transfer body's
+// progress-based idle watchdog.
+//
+// The budget assumes the source can be hashed at no less than 1 MiB/s, adds one
+// minute of fixed scheduling slack, floors small or unknown sizes at five
+// minutes, and caps untrusted declared sizes at seven days. It is finite for
+// every int64 size. An empty result means an older exporter returned 200 without
+// the optional hash header.
+func (f *Fetcher) SourceMD5(ctx context.Context, fileURL string, size int64) (string, error) {
+	reqURL, err := withAttributes(fileURL, "hash.md5")
+	if err != nil {
+		return "", fmt.Errorf("build source-hash URL for %s: %w", fileURL, err)
+	}
+
+	timeout := f.sourceHashTimeout(size)
+
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodHead, reqURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("build source-hash HEAD request: %w", err)
+	}
+
+	resp, err := f.sourceHashDoer.Do(req)
+	if err != nil {
+		if ctxErr := reqCtx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("HEAD source hash for %s after %s: %w", fileURL, timeout, ctxErr)
+		}
+
+		return "", fmt.Errorf("HEAD source hash for %s: %w", fileURL, err)
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HEAD source hash for %s: unexpected status %s", fileURL, resp.Status)
+	}
+
+	return resp.Header.Get(sourceHashHeader), nil
+}
+
+func sourceHashTimeout(size int64) time.Duration {
+	if size <= 0 {
+		return sourceHashTimeoutFloor
+	}
+
+	seconds := size / sourceHashMinimumThroughput
+	if size%sourceHashMinimumThroughput != 0 {
+		seconds++
+	}
+
+	maxSeconds := int64((sourceHashTimeoutCeiling - sourceHashTimeoutSlack) / time.Second)
+	if seconds >= maxSeconds {
+		return sourceHashTimeoutCeiling
+	}
+
+	timeout := time.Duration(seconds)*time.Second + sourceHashTimeoutSlack
+	if timeout < sourceHashTimeoutFloor {
+		return sourceHashTimeoutFloor
+	}
+
+	return timeout
 }
 
 // GetFile GETs fileURL and returns the response body for streaming.
