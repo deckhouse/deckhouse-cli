@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -830,22 +831,22 @@ func TestImportFSFromTar_UnsafeOrDuplicatePAXBeforeHTTP(t *testing.T) {
 	}
 }
 
-func TestScanFSTar_ClassifiesNonRegularWithoutPAX(t *testing.T) {
+func TestScanFSTar_AcceptsStructuralDirectoryChain(t *testing.T) {
 	t.Parallel()
 
 	var tarBuf bytes.Buffer
 
 	tw := tar.NewWriter(&tarBuf)
-	for _, hdr := range []*tar.Header{
+	for _, hdr := range []tar.Header{
 		{Typeflag: tar.TypeDir, Name: "dir/", Mode: 0o755},
-		{Typeflag: tar.TypeSymlink, Name: "link", Linkname: "target", Mode: 0o777},
+		{Typeflag: tar.TypeDir, Name: "dir/nested/", Mode: 0o700},
 	} {
-		if err := tw.WriteHeader(hdr); err != nil {
+		if err := tw.WriteHeader(&hdr); err != nil {
 			t.Fatalf("write non-regular header %q: %v", hdr.Name, err)
 		}
 	}
 
-	addTarEntryMetadata(t, tw, "dir/file.txt", "dir/file.txt", "none", 1, []byte("x"), 0o600, 0, 0, time.Time{})
+	addTarEntryMetadata(t, tw, "dir/nested/file.txt", "dir/nested/file.txt", "none", 1, []byte("x"), 0o600, 0, 0, time.Time{})
 
 	if err := tw.Close(); err != nil {
 		t.Fatalf("close tar: %v", err)
@@ -861,16 +862,130 @@ func TestScanFSTar_ClassifiesNonRegularWithoutPAX(t *testing.T) {
 		t.Fatalf("scanFSTar: %v", err)
 	}
 
-	if got, want := scan.RegularPaths, []string{"dir/file.txt"}; !slices.Equal(got, want) {
+	if got, want := scan.RegularPaths, []string{"dir/nested/file.txt"}; !slices.Equal(got, want) {
 		t.Errorf("regular paths = %v, want %v", got, want)
 	}
 
-	wantNonRegular := []fsTarNonRegularEntry{
-		{Typeflag: tar.TypeDir, HeaderPath: "dir/"},
-		{Typeflag: tar.TypeSymlink, HeaderPath: "link"},
+	if scan.StructuralDirectoryCount != 2 {
+		t.Errorf("structural directory count = %d, want 2", scan.StructuralDirectoryCount)
 	}
-	if !reflect.DeepEqual(scan.NonRegular, wantNonRegular) {
-		t.Errorf("non-regular classifications = %#v, want %#v", scan.NonRegular, wantNonRegular)
+}
+
+func TestImportFSFromTar_RejectsUnsupportedEntriesBeforeHTTP(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		headers       []tar.Header
+		regularPath   string
+		wantFragments []string
+	}{
+		{
+			name:        "empty directory beside unrelated regular file",
+			headers:     []tar.Header{{Typeflag: tar.TypeDir, Name: "empty/"}},
+			regularPath: "other/file.txt",
+			wantFragments: []string{
+				`entry "empty" (directory)`,
+				"unsupported empty directory",
+			},
+		},
+		{
+			name: "directory chain with branch lacking regular descendant",
+			headers: []tar.Header{
+				{Typeflag: tar.TypeDir, Name: "tree/"},
+				{Typeflag: tar.TypeDir, Name: "tree/full/"},
+				{Typeflag: tar.TypeDir, Name: "tree/empty/"},
+			},
+			regularPath: "tree/full/file.txt",
+			wantFragments: []string{
+				`entry "tree/empty" (directory)`,
+				"unsupported empty directory",
+			},
+		},
+		{
+			name: "all lossy types including late member aggregate",
+			headers: []tar.Header{
+				{Typeflag: tar.TypeSymlink, Name: "sym", Linkname: "file.txt"},
+				{Typeflag: tar.TypeLink, Name: "hard", Linkname: "file.txt"},
+				{Typeflag: tar.TypeChar, Name: "char"},
+				{Typeflag: tar.TypeBlock, Name: "block"},
+				{Typeflag: tar.TypeFifo, Name: "pipe"},
+				{Typeflag: 'Z', Name: "late-unknown"},
+			},
+			regularPath: "file.txt",
+			wantFragments: []string{
+				`entry "sym" (symlink)`,
+				`entry "hard" (hardlink)`,
+				`entry "char" (character device)`,
+				`entry "block" (block device)`,
+				`entry "pipe" (FIFO)`,
+				`entry "late-unknown" (unknown typeflag 0x5a)`,
+				"unsupported filesystem tar entries (6)",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var tarBuf bytes.Buffer
+
+			tw := tar.NewWriter(&tarBuf)
+			for i := range tc.headers {
+				if err := tw.WriteHeader(&tc.headers[i]); err != nil {
+					t.Fatalf("write header %q: %v", tc.headers[i].Name, err)
+				}
+			}
+
+			addTarEntryMetadata(
+				t,
+				tw,
+				tc.regularPath,
+				tc.regularPath,
+				"none",
+				1,
+				[]byte("x"),
+				0o600,
+				0,
+				0,
+				time.Time{},
+			)
+
+			if err := tw.Close(); err != nil {
+				t.Fatalf("close tar: %v", err)
+			}
+
+			tarPath := filepath.Join(t.TempDir(), "data.tar")
+			if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+				t.Fatalf("write data.tar: %v", err)
+			}
+
+			doer := &failOnHTTPDoer{}
+			err := importFSFromTar(
+				context.Background(),
+				doer,
+				"https://import.invalid",
+				tarPath,
+				discardLogger(),
+				nil,
+				nil,
+				nil,
+			)
+			if err == nil {
+				t.Fatal("importFSFromTar error = nil, want unsupported-entry failure")
+			}
+
+			for _, fragment := range tc.wantFragments {
+				if !strings.Contains(err.Error(), fragment) {
+					t.Errorf("importFSFromTar error %q does not contain %q", err, fragment)
+				}
+			}
+
+			if doer.called {
+				t.Fatal("unsupported full-tar preflight must run before HTTP")
+			}
+		})
 	}
 }
 
@@ -1160,21 +1275,40 @@ func TestImportFSFromTar_MetadataPreflightBeforeHTTP(t *testing.T) {
 	}
 }
 
-func TestImportFSFromTar_SkipsNonRegularEntries(t *testing.T) {
+func TestImportFSFromTar_StructuralDirectoriesWarnOnceAndOnlyUploadRegularFiles(t *testing.T) {
 	fileContent := []byte("only file")
 
 	var tarBuf bytes.Buffer
 
 	tw := tar.NewWriter(&tarBuf)
 
-	// Directory entry — should be skipped.
-	dirHdr := &tar.Header{Typeflag: tar.TypeDir, Name: "emptydir/", Mode: 0o755}
-	if err := tw.WriteHeader(dirHdr); err != nil {
-		t.Fatalf("write dir header: %v", err)
+	for _, hdr := range []tar.Header{
+		{
+			Typeflag: tar.TypeDir,
+			Name:     "parent/",
+			Mode:     0o751,
+			Uid:      10,
+			Gid:      20,
+			ModTime:  time.Unix(100, 0).UTC(),
+		},
+		{
+			Typeflag: tar.TypeDir,
+			Name:     "parent/nested/",
+			Mode:     0o700,
+			Uid:      30,
+			Gid:      40,
+			ModTime:  time.Unix(200, 0).UTC(),
+		},
+	} {
+		if err := tw.WriteHeader(&hdr); err != nil {
+			t.Fatalf("write dir header %q: %v", hdr.Name, err)
+		}
 	}
 
-	addTarEntry(t, tw, "file.txt", fileContent, 0o644, 0, 0, time.Now())
-	_ = tw.Close()
+	addTarEntry(t, tw, "parent/nested/file.txt", fileContent, 0o644, 0, 0, time.Now())
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
 
 	dir := t.TempDir()
 	tarPath := filepath.Join(dir, "data.tar")
@@ -1200,21 +1334,43 @@ func TestImportFSFromTar_SkipsNonRegularEntries(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil, nil, nil); err != nil {
+	var logs bytes.Buffer
+
+	log := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, log, nil, nil, nil); err != nil {
 		t.Fatalf("importFSFromTar: %v", err)
 	}
 
-	// Only the regular file must be uploaded; the directory entry must be skipped.
 	cap.mu.Lock()
 	total := len(cap.uploads)
 	cap.mu.Unlock()
 
 	if total != 1 {
-		t.Errorf("expected 1 upload (dir entry skipped), got %d", total)
+		t.Errorf("upload count = %d, want 1 regular file only", total)
 	}
 
-	if _, ok := cap.find("file.txt"); !ok {
-		t.Error("file.txt not found in uploads")
+	if _, ok := cap.find("parent/nested/file.txt"); !ok {
+		t.Error("nested regular file not found in uploads")
+	}
+
+	logOutput := logs.String()
+	if got := strings.Count(logOutput, "filesystem import creates structural parent directories implicitly"); got != 1 {
+		t.Errorf("metadata warning count = %d, want 1; logs=%q", got, logOutput)
+	}
+
+	for _, fragment := range []string{
+		"directory_count=2",
+		"directory mode, uid, gid, and mtime cannot be restored",
+	} {
+		if !strings.Contains(logOutput, fragment) {
+			t.Errorf("warning %q does not contain %q", logOutput, fragment)
+		}
+	}
+
+	for _, archivePath := range []string{"parent/", "parent/nested/"} {
+		if strings.Contains(logOutput, archivePath) {
+			t.Errorf("bounded warning must not list archive path %q: %q", archivePath, logOutput)
+		}
 	}
 }
 
