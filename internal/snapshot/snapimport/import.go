@@ -19,6 +19,7 @@ package snapimport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -36,6 +37,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
 
 const (
@@ -178,6 +180,10 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	if err := verifyArchiveIntegrity(plan); err != nil {
+		return err
+	}
+
 	if err := preflight(plan); err != nil {
 		return err
 	}
@@ -239,6 +245,42 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	return waitRootReady(ctx, cfg, root)
+}
+
+// verifyArchiveIntegrity re-verifies every SELECTED node before any cluster mutation: it
+// recomputes each node's integrity checksum (archive.VerifyNode) and strictly validates the
+// snapshot.yaml metadata the checksum does not cover (archive.ValidateNodeMetadata). It runs
+// AFTER --node filtering, so it checks exactly the nodes about to be imported — the full tree,
+// or the selected subtree. Failures are aggregated across nodes (each scoped to its node's
+// Kind/Name) so a corrupt archive reports every bad node at once rather than one per re-run.
+//
+// It runs before preflightNamespace and createMarkers, so a failure leaves the cluster
+// completely untouched: no namespace reads, markers, manifests, DataImports, PUTs, or finished
+// POSTs. This is the gate that makes a resume-skipped-but-corrupt volume payload impossible to
+// upload: the checksum recomputation reads every payload byte on disk regardless of any
+// upload-side resume skip (offset==totalSize) that would otherwise never re-read those bytes.
+func verifyArchiveIntegrity(plan []PlannedNode) error {
+	errs := make([]error, 0, len(plan))
+
+	for i := range plan {
+		node := plan[i]
+		label := fmt.Sprintf("%s/%s", node.Kind, node.Name)
+
+		if err := archive.VerifyNode(node.Dir); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", label, err))
+		}
+
+		if err := archive.ValidateNodeMetadata(node.Dir); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", label, err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("archive integrity preflight failed (%d check(s)); refusing to mutate the cluster: %w",
+			len(errs), errors.Join(errs...))
+	}
+
+	return nil
 }
 
 // preflight rejects, before any cluster mutation, archives the CLI cannot client-drive.

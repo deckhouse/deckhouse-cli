@@ -18,12 +18,36 @@ package archive
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	sigsyaml "sigs.k8s.io/yaml"
 )
+
+// ChecksumAlgorithmSHA256 is the only checksum algorithm the archive uses; it is the value
+// ComputeNodeChecksum records and ValidateSnapshotYAML requires in NodeChecksum.Algorithm.
+const ChecksumAlgorithmSHA256 = "sha256"
+
+// sha256HexLen is the length of a hex-encoded SHA-256 digest (32 bytes → 64 hex chars).
+const sha256HexLen = 64
+
+// Volume modes recorded in VolumeInfo.VolumeMode. They mirror the corev1.PersistentVolumeMode
+// values written by the download side (see volume.nodeDataToVolumeInfo) and MUST agree with
+// the on-disk payload kind: a block payload (data.bin[.<ext>]) is "Block", a filesystem
+// payload (data.tar) is "Filesystem". ValidateSnapshotYAML enforces that agreement.
+const (
+	VolumeModeBlock      = "Block"
+	VolumeModeFilesystem = "Filesystem"
+)
+
+// ErrInvalidSnapshotYAML is returned by ValidateSnapshotYAML/ValidateNodeMetadata when a
+// node's snapshot.yaml violates a structural metadata invariant. snapshot.yaml is EXCLUDED
+// from the integrity digest (ComputeNodeChecksum/VerifyNode), so these invariants are not
+// covered by the checksum and must be validated separately before the archive is trusted.
+var ErrInvalidSnapshotYAML = errors.New("invalid snapshot.yaml")
 
 // SnapshotYAML is the per-node file written at <nodeDir>/snapshot.yaml.
 // It records the snapshot CR identity and the locally-computed integrity checksum.
@@ -159,4 +183,139 @@ func ReadSnapshotYAML(nodeDir string) (SnapshotYAML, error) {
 	}
 
 	return sy, nil
+}
+
+// ValidateSnapshotYAML strictly validates the snapshot.yaml metadata that
+// ComputeNodeChecksum/VerifyNode intentionally do NOT cover. Because snapshot.yaml is
+// excluded from the integrity digest, a corrupt or mismatched metadata block would pass the
+// checksum check unnoticed, so the import path validates it explicitly before any cluster
+// mutation. It does NOT claim the checksum covers snapshot.yaml (it does not); it validates
+// the excluded metadata as a separate, standalone check.
+//
+// hasBlockData and hasFilesystemData report the node's on-disk volume payload
+// (data.bin[.<ext>] and data.tar respectively); ValidateNodeMetadata derives them from the
+// directory. A node is a data node when it carries either payload. The rules:
+//
+//   - apiVersion, kind and name are required.
+//   - checksum.algorithm is "sha256", checksum.hex is 64 lowercase hex chars, and
+//     checksum.short is the first 8 chars of hex (ShortChecksum).
+//   - sourceObjectRef is all-or-nothing: omitted, or all of apiVersion/kind/name set.
+//   - at most one volume (Variant A cardinality, decision #9).
+//   - a data node carries exactly one volume with a complete target and artifact identity
+//     (apiVersion/kind/name each), a storageClassName, a positive parseable size, and a
+//     volumeMode that agrees with the payload kind (Block for data.bin, Filesystem for
+//     data.tar).
+//   - a non-data node carries no volume.
+//
+// Authenticated/versioned snapshot.yaml evolution (signing, schema version) is a separate
+// concern and out of scope here.
+func ValidateSnapshotYAML(sy SnapshotYAML, hasBlockData, hasFilesystemData bool) error {
+	if sy.APIVersion == "" || sy.Kind == "" || sy.Name == "" {
+		return fmt.Errorf("apiVersion/kind/name are required (got apiVersion=%q kind=%q name=%q): %w",
+			sy.APIVersion, sy.Kind, sy.Name, ErrInvalidSnapshotYAML)
+	}
+
+	if err := validateChecksum(sy.Checksum); err != nil {
+		return err
+	}
+
+	if ref := sy.SourceObjectRef; ref != nil {
+		if ref.APIVersion == "" || ref.Kind == "" || ref.Name == "" {
+			return fmt.Errorf("sourceObjectRef must set all of apiVersion/kind/name or be omitted (got %+v): %w",
+				*ref, ErrInvalidSnapshotYAML)
+		}
+	}
+
+	if len(sy.Volumes) > 1 {
+		return fmt.Errorf("a node carries at most one volume, got %d: %w", len(sy.Volumes), ErrInvalidSnapshotYAML)
+	}
+
+	if !hasBlockData && !hasFilesystemData {
+		if len(sy.Volumes) != 0 {
+			return fmt.Errorf("non-data node carries %d volume(s) but has no data payload: %w",
+				len(sy.Volumes), ErrInvalidSnapshotYAML)
+		}
+
+		return nil
+	}
+
+	if len(sy.Volumes) != 1 {
+		return fmt.Errorf("data node must carry exactly one volume, got %d: %w", len(sy.Volumes), ErrInvalidSnapshotYAML)
+	}
+
+	return validateDataVolume(sy.Volumes[0], hasBlockData)
+}
+
+// validateChecksum enforces the algorithm/hex/short consistency of a recorded NodeChecksum.
+func validateChecksum(c NodeChecksum) error {
+	if c.Algorithm != ChecksumAlgorithmSHA256 {
+		return fmt.Errorf("checksum.algorithm must be %q, got %q: %w",
+			ChecksumAlgorithmSHA256, c.Algorithm, ErrInvalidSnapshotYAML)
+	}
+
+	if len(c.Hex) != sha256HexLen || !isLowerHex(c.Hex) {
+		return fmt.Errorf("checksum.hex must be %d lowercase hex characters, got %q: %w",
+			sha256HexLen, c.Hex, ErrInvalidSnapshotYAML)
+	}
+
+	if want := ShortChecksum(c.Hex); c.Short != want {
+		return fmt.Errorf("checksum.short %q is inconsistent with hex (want %q): %w",
+			c.Short, want, ErrInvalidSnapshotYAML)
+	}
+
+	return nil
+}
+
+// validateDataVolume enforces the data-node volume invariants: complete target/artifact
+// identity, a storageClassName, a positive parseable size, and a volumeMode that agrees with
+// the on-disk payload kind (hasBlockData selects Block, otherwise Filesystem).
+func validateDataVolume(v VolumeInfo, hasBlockData bool) error {
+	if v.Target.APIVersion == "" || v.Target.Kind == "" || v.Target.Name == "" {
+		return fmt.Errorf("data volume target identity is incomplete, apiVersion/kind/name required (got %+v): %w",
+			v.Target, ErrInvalidSnapshotYAML)
+	}
+
+	if v.Artifact.APIVersion == "" || v.Artifact.Kind == "" || v.Artifact.Name == "" {
+		return fmt.Errorf("data volume artifact identity is incomplete, apiVersion/kind/name required (got %+v): %w",
+			v.Artifact, ErrInvalidSnapshotYAML)
+	}
+
+	if v.StorageClassName == "" {
+		return fmt.Errorf("data volume storageClassName is required: %w", ErrInvalidSnapshotYAML)
+	}
+
+	q, err := resource.ParseQuantity(v.Size)
+	if err != nil {
+		return fmt.Errorf("data volume size %q is not a valid quantity: %w", v.Size, errors.Join(ErrInvalidSnapshotYAML, err))
+	}
+
+	if q.Sign() <= 0 {
+		return fmt.Errorf("data volume size %q must be positive: %w", v.Size, ErrInvalidSnapshotYAML)
+	}
+
+	want := VolumeModeFilesystem
+	if hasBlockData {
+		want = VolumeModeBlock
+	}
+
+	if v.VolumeMode != want {
+		return fmt.Errorf("data volume volumeMode %q disagrees with the on-disk payload (want %q): %w",
+			v.VolumeMode, want, ErrInvalidSnapshotYAML)
+	}
+
+	return nil
+}
+
+// isLowerHex reports whether s consists solely of lowercase hexadecimal digits.
+func isLowerHex(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		default:
+			return false
+		}
+	}
+
+	return true
 }

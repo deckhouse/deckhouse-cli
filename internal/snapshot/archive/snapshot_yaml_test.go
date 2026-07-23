@@ -17,6 +17,7 @@ limitations under the License.
 package archive_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,208 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
+
+// validChecksum returns a well-formed NodeChecksum (sha256, 64 lowercase hex, consistent short).
+func validChecksum() archive.NodeChecksum {
+	hex := strings.Repeat("a", 64)
+
+	return archive.NodeChecksum{
+		Algorithm: archive.ChecksumAlgorithmSHA256,
+		Hex:       hex,
+		Short:     archive.ShortChecksum(hex),
+	}
+}
+
+// validVolume returns a complete data VolumeInfo whose volumeMode is mode.
+func validVolume(mode string) archive.VolumeInfo {
+	return archive.VolumeInfo{
+		Target:           archive.VolumeObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-1"},
+		Artifact:         archive.VolumeObjectRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "content-1"},
+		VolumeMode:       mode,
+		StorageClassName: "sc",
+		Size:             "1Gi",
+	}
+}
+
+// TestValidateSnapshotYAML exercises the strict metadata invariants ValidateSnapshotYAML
+// enforces over the fields the integrity checksum does NOT cover.
+func TestValidateSnapshotYAML(t *testing.T) {
+	t.Parallel()
+
+	base := func() archive.SnapshotYAML {
+		return archive.SnapshotYAML{APIVersion: "g/v1", Kind: "Snapshot", Name: "root", Checksum: validChecksum()}
+	}
+
+	tests := []struct {
+		name     string
+		mutate   func(sy *archive.SnapshotYAML)
+		hasBlock bool
+		hasFS    bool
+		wantErr  bool
+	}{
+		{name: "valid: non-data structural node", mutate: func(*archive.SnapshotYAML) {}},
+		{
+			name: "valid: block data node",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.Volumes = []archive.VolumeInfo{validVolume(archive.VolumeModeBlock)}
+			},
+			hasBlock: true,
+		},
+		{
+			name: "valid: filesystem data node",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.Volumes = []archive.VolumeInfo{validVolume(archive.VolumeModeFilesystem)}
+			},
+			hasFS: true,
+		},
+		{
+			name: "valid: complete sourceObjectRef",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.SourceObjectRef = &archive.SourceObjectRef{APIVersion: "demo/v1", Kind: "Disk", Name: "d1"}
+			},
+		},
+		{name: "error: missing apiVersion", mutate: func(sy *archive.SnapshotYAML) { sy.APIVersion = "" }, wantErr: true},
+		{name: "error: missing kind", mutate: func(sy *archive.SnapshotYAML) { sy.Kind = "" }, wantErr: true},
+		{name: "error: missing name", mutate: func(sy *archive.SnapshotYAML) { sy.Name = "" }, wantErr: true},
+		{name: "error: bad checksum algorithm", mutate: func(sy *archive.SnapshotYAML) { sy.Checksum.Algorithm = "md5" }, wantErr: true},
+		{
+			name:    "error: short hex",
+			mutate:  func(sy *archive.SnapshotYAML) { sy.Checksum.Hex = "abcd"; sy.Checksum.Short = "abcd" },
+			wantErr: true,
+		},
+		{
+			name: "error: uppercase hex",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.Checksum.Hex = strings.Repeat("A", 64)
+				sy.Checksum.Short = strings.Repeat("A", 8)
+			},
+			wantErr: true,
+		},
+		{name: "error: inconsistent short", mutate: func(sy *archive.SnapshotYAML) { sy.Checksum.Short = "deadbeef" }, wantErr: true},
+		{
+			name: "error: partial sourceObjectRef",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.SourceObjectRef = &archive.SourceObjectRef{APIVersion: "demo/v1", Name: "d1"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "error: two volumes",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.Volumes = []archive.VolumeInfo{validVolume(archive.VolumeModeBlock), validVolume(archive.VolumeModeBlock)}
+			},
+			hasBlock: true,
+			wantErr:  true,
+		},
+		{
+			name: "error: non-data node carries a volume",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.Volumes = []archive.VolumeInfo{validVolume(archive.VolumeModeBlock)}
+			},
+			wantErr: true,
+		},
+		{name: "error: data node with zero volumes", mutate: func(*archive.SnapshotYAML) {}, hasBlock: true, wantErr: true},
+		{
+			name: "error: data volume missing target identity",
+			mutate: func(sy *archive.SnapshotYAML) {
+				v := validVolume(archive.VolumeModeBlock)
+				v.Target.Name = ""
+				sy.Volumes = []archive.VolumeInfo{v}
+			},
+			hasBlock: true,
+			wantErr:  true,
+		},
+		{
+			name: "error: data volume missing artifact identity",
+			mutate: func(sy *archive.SnapshotYAML) {
+				v := validVolume(archive.VolumeModeBlock)
+				v.Artifact.APIVersion = ""
+				sy.Volumes = []archive.VolumeInfo{v}
+			},
+			hasBlock: true,
+			wantErr:  true,
+		},
+		{
+			name: "error: data volume missing storageClassName",
+			mutate: func(sy *archive.SnapshotYAML) {
+				v := validVolume(archive.VolumeModeBlock)
+				v.StorageClassName = ""
+				sy.Volumes = []archive.VolumeInfo{v}
+			},
+			hasBlock: true,
+			wantErr:  true,
+		},
+		{
+			name: "error: data volume unparseable size",
+			mutate: func(sy *archive.SnapshotYAML) {
+				v := validVolume(archive.VolumeModeBlock)
+				v.Size = "not-a-quantity"
+				sy.Volumes = []archive.VolumeInfo{v}
+			},
+			hasBlock: true,
+			wantErr:  true,
+		},
+		{
+			name: "error: data volume zero size",
+			mutate: func(sy *archive.SnapshotYAML) {
+				v := validVolume(archive.VolumeModeBlock)
+				v.Size = "0"
+				sy.Volumes = []archive.VolumeInfo{v}
+			},
+			hasBlock: true,
+			wantErr:  true,
+		},
+		{
+			name: "error: block payload with Filesystem volumeMode",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.Volumes = []archive.VolumeInfo{validVolume(archive.VolumeModeFilesystem)}
+			},
+			hasBlock: true,
+			wantErr:  true,
+		},
+		{
+			name: "error: filesystem payload with Block volumeMode",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.Volumes = []archive.VolumeInfo{validVolume(archive.VolumeModeBlock)}
+			},
+			hasFS:   true,
+			wantErr: true,
+		},
+		{
+			name:     "error: block payload with empty volumeMode",
+			mutate:   func(sy *archive.SnapshotYAML) { sy.Volumes = []archive.VolumeInfo{validVolume("")} },
+			hasBlock: true,
+			wantErr:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sy := base()
+			tc.mutate(&sy)
+
+			err := archive.ValidateSnapshotYAML(sy, tc.hasBlock, tc.hasFS)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+
+				if !errors.Is(err, archive.ErrInvalidSnapshotYAML) {
+					t.Errorf("expected ErrInvalidSnapshotYAML, got: %v", err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
 
 // makeSnapshotNodeDir creates a temp dir with a manifests/ subdir and one manifest file.
 func makeSnapshotNodeDir(t *testing.T) string {
