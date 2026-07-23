@@ -387,7 +387,7 @@ func TestListDir(t *testing.T) {
 	}
 }
 
-func TestListDir_RequestsStatAndHashMd5Attributes(t *testing.T) {
+func TestListDir_RequestsStatAttributeOnly(t *testing.T) {
 	t.Helper()
 
 	var gotQuery url.Values
@@ -413,7 +413,7 @@ func TestListDir_RequestsStatAndHashMd5Attributes(t *testing.T) {
 
 	got := gotQuery["attribute"]
 
-	want := []string{"stat", "hash.md5"}
+	want := []string{"stat"}
 	if len(got) != len(want) {
 		t.Fatalf("attribute query params: got %v, want %v", got, want)
 	}
@@ -422,6 +422,209 @@ func TestListDir_RequestsStatAndHashMd5Attributes(t *testing.T) {
 		if got[i] != w {
 			t.Errorf("attribute query param %d: got %q, want %q", i, got[i], w)
 		}
+	}
+}
+
+func TestSourceMD5_ProducerHeaderContract(t *testing.T) {
+	t.Parallel()
+
+	const wantMD5 = "8c7dd922ad47494fc02c388e12c00eac"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead {
+			t.Errorf("method = %s, want HEAD", r.Method)
+		}
+
+		if got := r.URL.Query()["attribute"]; len(got) != 1 || got[0] != "hash.md5" {
+			t.Errorf("attribute query = %v, want [hash.md5]", got)
+		}
+
+		w.Header().Set("X-Attribute-Hash-Md5", wantMD5)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	f := NewFetcher(srv.Client())
+
+	got, err := f.SourceMD5(context.Background(), srv.URL+"/api/v1/files/file", 4)
+	if err != nil {
+		t.Fatalf("SourceMD5: %v", err)
+	}
+
+	if got != wantMD5 {
+		t.Errorf("SourceMD5 = %q, want %q", got, wantMD5)
+	}
+}
+
+type readCountingBody struct {
+	reads  atomic.Int32
+	closes atomic.Int32
+}
+
+func (b *readCountingBody) Read(_ []byte) (int, error) {
+	b.reads.Add(1)
+
+	return 0, io.EOF
+}
+
+func (b *readCountingBody) Close() error {
+	b.closes.Add(1)
+
+	return nil
+}
+
+func TestSourceMD5_UsesHeaderWithoutBufferingBody(t *testing.T) {
+	t.Parallel()
+
+	const wantMD5 = "8c7dd922ad47494fc02c388e12c00eac"
+
+	body := &readCountingBody{}
+	f := NewFetcher(doerFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     http.Header{"X-Attribute-Hash-Md5": []string{wantMD5}},
+			Body:       body,
+		}, nil
+	}))
+
+	got, err := f.SourceMD5(context.Background(), "http://example.invalid/api/v1/files/file", 1<<40)
+	if err != nil {
+		t.Fatalf("SourceMD5: %v", err)
+	}
+
+	if got != wantMD5 {
+		t.Errorf("SourceMD5 = %q, want %q", got, wantMD5)
+	}
+
+	if reads := body.reads.Load(); reads != 0 {
+		t.Errorf("response body reads = %d, want 0", reads)
+	}
+
+	if closes := body.closes.Load(); closes != 1 {
+		t.Errorf("response body closes = %d, want 1", closes)
+	}
+}
+
+func TestSourceMD5_SizeDerivedDeadlineOutlivesOrdinaryHeaderTimeout(t *testing.T) {
+	t.Parallel()
+
+	const (
+		ordinaryTimeout = 30 * time.Millisecond
+		hashDelay       = 90 * time.Millisecond
+		wantMD5         = "8c7dd922ad47494fc02c388e12c00eac"
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(hashDelay)
+		w.Header().Set("X-Attribute-Hash-Md5", wantMD5)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ordinaryTransport := srv.Client().Transport.(*http.Transport).Clone()
+	ordinaryTransport.ResponseHeaderTimeout = ordinaryTimeout
+
+	hashTransport := srv.Client().Transport.(*http.Transport).Clone()
+	hashTransport.ResponseHeaderTimeout = time.Second
+
+	f := NewFetcher(
+		&http.Client{Transport: ordinaryTransport},
+		WithSourceHashDoer(&http.Client{Transport: hashTransport}),
+	)
+	f.sourceHashTimeout = func(int64) time.Duration { return time.Second }
+
+	body, ordinaryErr := f.GetFile(context.Background(), srv.URL)
+	if ordinaryErr == nil {
+		_ = body.Close()
+		t.Fatal("ordinary data-plane request unexpectedly outlived its response-header timeout")
+	}
+
+	got, err := f.SourceMD5(context.Background(), srv.URL, 4)
+	if err != nil {
+		t.Fatalf("SourceMD5: %v", err)
+	}
+
+	if got != wantMD5 {
+		t.Errorf("SourceMD5 = %q, want %q", got, wantMD5)
+	}
+}
+
+func TestSourceMD5_ExplicitDeadlineStopsWedgedProducer(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	f := NewFetcher(srv.Client())
+	f.sourceHashTimeout = func(int64) time.Duration { return 50 * time.Millisecond }
+
+	start := time.Now()
+	_, err := f.SourceMD5(context.Background(), srv.URL, 4)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("SourceMD5 error = %v, want context.DeadlineExceeded", err)
+	}
+
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("SourceMD5 deadline returned after %v, want <= 1s", elapsed)
+	}
+}
+
+func TestSourceMD5_ParentCancellationReturnsPromptly(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	f := NewFetcher(srv.Client())
+	f.sourceHashTimeout = func(int64) time.Duration { return time.Minute }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(30*time.Millisecond, cancel)
+
+	start := time.Now()
+	_, err := f.SourceMD5(ctx, srv.URL, 4)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("SourceMD5 error = %v, want context.Canceled", err)
+	}
+
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("SourceMD5 cancellation returned after %v, want <= 1s", elapsed)
+	}
+}
+
+func TestSourceHashTimeout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		size int64
+		want time.Duration
+	}{
+		{name: "unknown size uses floor", size: -1, want: sourceHashTimeoutFloor},
+		{name: "small file uses floor", size: 1, want: sourceHashTimeoutFloor},
+		{
+			name: "large file uses throughput plus slack",
+			size: 10 * sourceHashMinimumThroughput * 60,
+			want: 10*time.Minute + sourceHashTimeoutSlack,
+		},
+		{name: "untrusted size is capped", size: int64(^uint64(0) >> 1), want: sourceHashTimeoutCeiling},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := sourceHashTimeout(tc.size); got != tc.want {
+				t.Errorf("sourceHashTimeout(%d) = %v, want %v", tc.size, got, tc.want)
+			}
+		})
 	}
 }
 

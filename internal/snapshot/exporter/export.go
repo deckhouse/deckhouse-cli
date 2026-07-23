@@ -118,9 +118,9 @@ func OpenExport(
 		return nil, fmt.Errorf("wait DataExport %q ready: %w", de.Name, err)
 	}
 
-	sub, err := buildSubClient(sc, ready)
+	sub, sourceHashSub, err := buildSubClients(sc, ready)
 	if err != nil {
-		return nil, fmt.Errorf("build sub-client for DataExport %q: %w", de.Name, err)
+		return nil, fmt.Errorf("build sub-clients for DataExport %q: %w", de.Name, err)
 	}
 
 	return &Export{
@@ -128,19 +128,29 @@ func OpenExport(
 		namespace:  namespace,
 		volumeMode: ready.Status.VolumeMode,
 		baseURL:    ready.Status.URL,
-		fetcher:    NewFetcher(safeDoer{sub}),
+		fetcher: NewFetcher(
+			safeDoer{sub},
+			WithSourceHashDoer(safeDoer{sourceHashSub}),
+		),
 	}, nil
 }
 
-// buildSubClient creates an isolated SafeClient copy and merges the DataExport's
-// internal CA (base64-encoded PEM) into its trust pool.
-func buildSubClient(sc *safeClient.SafeClient, de *deapi.DataExport) (*safeClient.SafeClient, error) {
+// buildSubClients creates isolated SafeClient copies and merges the DataExport's
+// internal CA (base64-encoded PEM) into their trust pools. Ordinary data calls
+// retain the short response-header timeout and progress-based body watchdog.
+// Source-hash HEAD requests get a separate transport ceiling because the
+// producer computes their response header by synchronously reading the complete
+// file; SourceMD5 applies the tighter size-derived request deadline.
+func buildSubClients(
+	sc *safeClient.SafeClient,
+	de *deapi.DataExport,
+) (*safeClient.SafeClient, *safeClient.SafeClient, error) {
 	var caBytes []byte
 
 	if de.Status.CA != "" {
 		decoded, err := base64.StdEncoding.DecodeString(de.Status.CA)
 		if err != nil {
-			return nil, fmt.Errorf("decode CA from DataExport: %w", err)
+			return nil, nil, fmt.Errorf("decode CA from DataExport: %w", err)
 		}
 
 		caBytes = decoded
@@ -152,7 +162,11 @@ func buildSubClient(sc *safeClient.SafeClient, de *deapi.DataExport) (*safeClien
 	// CA-injecting WrapTransport rather than replacing it (both must apply).
 	sub.SetResponseHeaderTimeout(dataPlaneResponseHeaderTimeout)
 
-	return sub, nil
+	sourceHashSub := sc.Copy()
+	sourceHashSub.SetTLSCAData(caBytes)
+	sourceHashSub.SetResponseHeaderTimeout(sourceHashTimeoutCeiling)
+
+	return sub, sourceHashSub, nil
 }
 
 // safeDoer adapts *safeClient.SafeClient to the Doer interface expected by Fetcher.
