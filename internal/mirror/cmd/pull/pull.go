@@ -257,8 +257,13 @@ func (p *Puller) Execute(ctx context.Context) error {
 
 	// Edition is parsed from the source registry path (no registry call); empty
 	// for a custom registry, where the renderer omits the Edition line.
-	_, edition := registryservice.GetEditionFromRegistryPath(p.params.DeckhouseRegistryRepo)
+	repoNoEdition, edition := registryservice.GetEditionFromRegistryPath(p.params.DeckhouseRegistryRepo)
 	summary.Edition = string(edition)
+
+	// Registry layout for the summary: modules honor --modules-path-suffix; the
+	// installer lives outside the edition root, at <repo-without-edition>/installer.
+	installerPath := repoNoEdition + "/" + internal.InstallerSegment
+	summary.Registry = mirror.BuildRegistryLayout(p.params.DeckhouseRegistryRepo, p.params.ModulesPathSuffix, installerPath)
 
 	// pullErr is nil for success and for a graceful Ctrl+C (which still renders a
 	// partial summary); non-nil for a hard failure (which also renders, then

@@ -66,10 +66,18 @@ var (
 // its resolved versions (and VEX count, when present); otherwise they print only
 // the aggregate count (the category label already names what is counted).
 //
-// Example output (verbose pull, colour stripped):
+// Example output (verbose pull with --modules-path-suffix mymods, colour
+// stripped; the moved Modules registry path is yellow):
 //
 //	╔══ Pull summary ═══════════════════════════════════════
 //	║ Edition:    EE
+//	║ Registry:   registry.deckhouse.io/deckhouse/ee
+//	║   Platform   registry.deckhouse.io/deckhouse/ee
+//	║   Modules    registry.deckhouse.io/deckhouse/ee/mymods
+//	║              default: registry.deckhouse.io/deckhouse/ee/modules
+//	║   Security   registry.deckhouse.io/deckhouse/ee/security
+//	║   Packages   registry.deckhouse.io/deckhouse/ee/packages
+//	║   Installer  registry.deckhouse.io/deckhouse/installer
 //	║ Platform:   v1.69.1 (5 channels)
 //	║ Installer:  v1.69.1
 //	║ Security:   4/4 databases
@@ -87,9 +95,10 @@ var (
 //	║ Elapsed: 3m12s
 //	╚═══════════════════════════════════════════════════════
 //
-// The Elapsed line is preceded by a state line on a non-success outcome:
-// "Pull failed; ...", "Pull was cancelled; ...", or "No images were downloaded
-// (dry-run).".
+// The Registry section appears only under --verbose-summary or when the modules
+// path was moved. The Elapsed line is preceded by a state line on a non-success
+// outcome: "Pull failed; ...", "Pull was cancelled; ...", or "No images were
+// downloaded (dry-run).".
 func renderPullSummary(s *mirror.PullSummary, verbose bool) string {
 	var b strings.Builder
 
@@ -101,6 +110,10 @@ func renderPullSummary(s *mirror.PullSummary, verbose bool) string {
 	if s.Edition != "" {
 		fmt.Fprintf(&b, "%s %s %s\n", bar(), cLabel(padLabel("Edition")), cCount(strings.ToUpper(s.Edition)))
 	}
+
+	// Registry layout: shown when the modules path was moved off the default, or
+	// on request via --verbose-summary.
+	summaryui.WriteRegistryLayout(&b, s.Registry, verbose || s.Registry.HasOverride)
 
 	writeComponent(&b, "Platform", s.Platform)
 	writeComponent(&b, "Installer", s.Installer)

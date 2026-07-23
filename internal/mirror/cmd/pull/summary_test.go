@@ -420,6 +420,47 @@ func TestRenderPullSummary(t *testing.T) {
 			notContains:  []string{"Bundle artifacts", "VEX", "not pulled"},
 			skippedCount: 5,
 		},
+		{
+			name: "registry section highlights a moved modules path without verbose",
+			summary: &mirror.PullSummary{
+				Platform: mirror.ComponentStats{Attempted: true, Versions: []string{"v1.69.0"}},
+				Registry: mirror.BuildRegistryLayout(
+					"registry.deckhouse.io/deckhouse/ee", "/",
+					"registry.deckhouse.io/deckhouse/installer"),
+			},
+			verbose: false,
+			contains: []string{
+				"Registry:",
+				"registry.deckhouse.io/deckhouse/ee/security",
+				"default: registry.deckhouse.io/deckhouse/ee/modules",
+			},
+			skippedCount: -1,
+		},
+		{
+			name: "registry section shown in verbose even at the default path",
+			summary: &mirror.PullSummary{
+				Platform: mirror.ComponentStats{Attempted: true, Versions: []string{"v1.69.0"}},
+				Registry: mirror.BuildRegistryLayout(
+					"registry.deckhouse.io/deckhouse/ee", "/modules",
+					"registry.deckhouse.io/deckhouse/installer"),
+			},
+			verbose:      true,
+			contains:     []string{"Registry:", "registry.deckhouse.io/deckhouse/ee/modules"},
+			notContains:  []string{"default:"},
+			skippedCount: -1,
+		},
+		{
+			name: "registry section hidden at the default path without verbose",
+			summary: &mirror.PullSummary{
+				Platform: mirror.ComponentStats{Attempted: true, Versions: []string{"v1.69.0"}},
+				Registry: mirror.BuildRegistryLayout(
+					"registry.deckhouse.io/deckhouse/ee", "/modules",
+					"registry.deckhouse.io/deckhouse/installer"),
+			},
+			verbose:      false,
+			notContains:  []string{"Registry:"},
+			skippedCount: -1,
+		},
 	}
 
 	for _, tt := range tests {

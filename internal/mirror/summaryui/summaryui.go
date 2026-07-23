@@ -146,7 +146,8 @@ func HumanSize(n int64) string {
 // With a default modules path the Modules line is plain and the "default:" hint
 // is omitted.
 func WriteRegistryLayout(b *strings.Builder, layout mirror.RegistryLayout, show bool) {
-	if !show {
+	// No rows means an unpopulated layout; never emit a bare header.
+	if !show || len(layout.Rows) == 0 {
 		return
 	}
 

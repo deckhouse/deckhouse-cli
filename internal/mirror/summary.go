@@ -141,6 +141,10 @@ type PullSummary struct {
 	// registry path. Empty for a custom registry with no edition segment, in
 	// which case the summary omits the Edition line.
 	Edition string
+	// Registry is where each component reads from in the source registry. The
+	// summary shows it when the modules path was moved off the default, or in
+	// verbose mode. Filled by the CLI.
+	Registry RegistryLayout
 	// Elapsed is the wall-clock duration of the pull, filled by the CLI.
 	Elapsed time.Duration
 
