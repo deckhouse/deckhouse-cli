@@ -431,6 +431,74 @@ func TestRun_UnsafeFilesystemPAXFailsBeforeClusterMutation(t *testing.T) {
 	}
 }
 
+func TestRun_UnsupportedFilesystemEntriesFailBeforeClusterMutation(t *testing.T) {
+	t.Parallel()
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	addTarEntryRawPAX(t, tw, "regular.txt", "regular.txt", "none", 1, []byte("x"))
+
+	for _, hdr := range []tar.Header{
+		{Typeflag: tar.TypeDir, Name: "empty/"},
+		{Typeflag: tar.TypeSymlink, Name: "late-link", Linkname: "regular.txt"},
+	} {
+		if err := tw.WriteHeader(&hdr); err != nil {
+			t.Fatalf("write unsupported tar header %q: %v", hdr.Name, err)
+		}
+	}
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+	})
+
+	leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+	writeArchiveNode(t, leaf, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		tarData:    tarBuf.Bytes(),
+	})
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	err := Run(context.Background(), baseConfig(root, up, vol, dyn))
+	if err == nil {
+		t.Fatal("Run error = nil, want unsupported filesystem entry failure")
+	}
+
+	for _, fragment := range []string{
+		`entry "empty" (directory)`,
+		`entry "late-link" (symlink)`,
+		"unsupported filesystem tar entries (2)",
+	} {
+		if !strings.Contains(err.Error(), fragment) {
+			t.Errorf("Run error %q does not contain %q", err, fragment)
+		}
+	}
+
+	if len(up.calls) != 0 {
+		t.Errorf("manifest uploads = %d, want 0", len(up.calls))
+	}
+
+	if len(vol.ensure) != 0 || len(vol.upload) != 0 {
+		t.Errorf("volume mutations = ensure %v upload %v, want none", vol.ensure, vol.upload)
+	}
+
+	if actions := dyn.Actions(); len(actions) != 0 {
+		t.Errorf("dynamic-client actions = %d, want 0: %v", len(actions), actions)
+	}
+}
+
 func TestRun_LeafWithoutBlockDataFailsFast(t *testing.T) {
 	root := t.TempDir()
 	writeArchiveNode(t, root, archiveNode{

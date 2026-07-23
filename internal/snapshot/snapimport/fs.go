@@ -383,8 +383,8 @@ type fsTarNonRegularEntry struct {
 }
 
 type fsTarScan struct {
-	RegularPaths []string
-	NonRegular   []fsTarNonRegularEntry
+	RegularPaths             []string
+	StructuralDirectoryCount int
 }
 
 // importFSFromTar uploads regular data.tar entries without materializing plaintext
@@ -392,10 +392,14 @@ type fsTarScan struct {
 // HEAD or PUT. Upload path, decoder, and exact X-Content-Length then come only from
 // checksum-covered PAX metadata; Header.Name is never interpreted by suffix.
 //
-// Directory and symlink entries are skipped — the importer creates parent directories
-// implicitly on the first child file write. onProgress, when non-nil, is called with the
-// decompressed byte count after each file is successfully uploaded (or, for an
-// already-fully-uploaded entry, credited without any decompression at all).
+// Structural directory headers are not uploaded because the importer creates parent
+// directories implicitly on the first child file write. Their mode, uid, gid, and mtime
+// therefore cannot be restored; one bounded warning reports the number of affected
+// directories without listing archive-controlled paths. Empty directories and every other
+// non-regular entry are rejected by the preflight because the importer cannot reproduce them.
+// onProgress, when non-nil, is called with the decompressed byte count after each file is
+// successfully uploaded (or, for an already-fully-uploaded entry, credited without any
+// decompression at all).
 //
 // setTotal, when non-nil (nil disables reporting, matching onProgress's convention), is
 // called with a running sum of exact PAX raw sizes as entries are walked.
@@ -407,12 +411,15 @@ type fsTarScan struct {
 // server-side-skipped is a genuine full resume-skip and must never activate the caller's
 // progress stream — activate only distinguishes "at least one file was genuinely
 // transferred" from "nothing was transferred".
-//
-// TODO(follow-up): reproduce empty-directory and symlink entries when needed.
 func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath string, log *slog.Logger, setTotal func(int64), onProgress func(int), activate func()) error {
 	scan, err := scanFSTar(tarPath)
 	if err != nil {
 		return fmt.Errorf("filesystem tar metadata preflight: %w", err)
+	}
+
+	if scan.StructuralDirectoryCount > 0 {
+		log.Warn("filesystem import creates structural parent directories implicitly; directory mode, uid, gid, and mtime cannot be restored",
+			slog.Int("directory_count", scan.StructuralDirectoryCount))
 	}
 
 	f, err := os.Open(tarPath)
@@ -526,12 +533,6 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 			archive.ErrInvalidFSMetadata, regularIndex, len(scan.RegularPaths))
 	}
 
-	if len(scan.NonRegular) > 0 {
-		log.Info("skipped non-regular tar entries (directories and symlinks are not reproduced)",
-			slog.Int("count", len(scan.NonRegular)),
-			slog.String("tar", tarPath))
-	}
-
 	return nil
 }
 
@@ -559,10 +560,12 @@ func scanFSTarReader(tr *tar.Reader, tarPath string) (fsTarScan, error) {
 	scan := fsTarScan{}
 	originalPaths := make(map[string]struct{})
 
+	var nonRegular []fsTarNonRegularEntry
+
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return scan, nil
+			break
 		}
 
 		if err != nil {
@@ -570,7 +573,7 @@ func scanFSTarReader(tr *tar.Reader, tarPath string) (fsTarScan, error) {
 		}
 
 		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != 0 {
-			scan.NonRegular = append(scan.NonRegular, fsTarNonRegularEntry{
+			nonRegular = append(nonRegular, fsTarNonRegularEntry{
 				Typeflag:   hdr.Typeflag,
 				HeaderPath: hdr.Name,
 			})
@@ -601,6 +604,83 @@ func scanFSTarReader(tr *tar.Reader, tarPath string) (fsTarScan, error) {
 
 		originalPaths[normalized] = struct{}{}
 		scan.RegularPaths = append(scan.RegularPaths, normalized)
+	}
+
+	entryErrs := make([]error, 0, len(nonRegular))
+
+	for _, entry := range nonRegular {
+		if entry.Typeflag == tar.TypeDir {
+			directoryPath, err := normalizeFSTarDirectoryPath(entry.HeaderPath)
+			if err != nil {
+				entryErrs = append(entryErrs, fmt.Errorf("directory entry %q: %w", entry.HeaderPath, err))
+
+				continue
+			}
+
+			if hasRegularDescendant(directoryPath, scan.RegularPaths) {
+				scan.StructuralDirectoryCount++
+
+				continue
+			}
+
+			entryErrs = append(entryErrs, fmt.Errorf(
+				"entry %q (directory): unsupported empty directory has no regular-file descendant",
+				directoryPath,
+			))
+
+			continue
+		}
+
+		entryErrs = append(entryErrs, fmt.Errorf(
+			"entry %q (%s): unsupported filesystem entry semantics",
+			entry.HeaderPath,
+			fsTarTypeName(entry.Typeflag),
+		))
+	}
+
+	if len(entryErrs) > 0 {
+		return fsTarScan{}, fmt.Errorf("unsupported filesystem tar entries (%d): %w",
+			len(entryErrs), errors.Join(entryErrs...))
+	}
+
+	return scan, nil
+}
+
+func normalizeFSTarDirectoryPath(headerPath string) (string, error) {
+	directoryPath := strings.TrimSuffix(headerPath, "/")
+	if err := validateFSUploadPath(directoryPath); err != nil {
+		return "", err
+	}
+
+	return directoryPath, nil
+}
+
+func hasRegularDescendant(directoryPath string, regularPaths []string) bool {
+	prefix := directoryPath + "/"
+
+	for _, regularPath := range regularPaths {
+		if strings.HasPrefix(regularPath, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func fsTarTypeName(typeflag byte) string {
+	switch typeflag {
+	case tar.TypeSymlink:
+		return "symlink"
+	case tar.TypeLink:
+		return "hardlink"
+	case tar.TypeChar:
+		return "character device"
+	case tar.TypeBlock:
+		return "block device"
+	case tar.TypeFifo:
+		return "FIFO"
+	default:
+		return fmt.Sprintf("unknown typeflag %#x", typeflag)
 	}
 }
 
