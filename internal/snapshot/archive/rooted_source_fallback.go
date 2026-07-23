@@ -1,4 +1,4 @@
-//go:build (!unix && !windows) || netbsd
+//go:build (!unix && !windows) || netbsd || dragonfly
 
 /*
 Copyright 2026 Flant JSC
