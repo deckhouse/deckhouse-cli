@@ -336,8 +336,12 @@ func seedStreamFromDisk(ctx context.Context, cfg Config, s progress.Stream, node
 		return 0, fmt.Errorf("seed resume progress: %w", err)
 	}
 
-	blockCommitted, blockTotal, err := volume.ScanBlockChunkProgress(dest.chunkDir, ext)
+	blockCommitted, blockTotal, err := volume.ScanBlockChunkProgressContext(ctx, dest.chunkDir, ext)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 0, fmt.Errorf("scan block resume progress: %w", err)
+		}
+
 		cfg.Log.Warn("failed to scan block resume progress for seeding",
 			slog.String("dir", dest.chunkDir),
 			slog.String("error", err.Error()))

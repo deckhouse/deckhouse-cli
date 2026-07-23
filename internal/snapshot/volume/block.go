@@ -504,6 +504,9 @@ func fetchChunkRaw(
 // computations always agree exactly for the normal (already-trusted) case;
 // the only divergence is deliberate: because this scan is strictly read-only,
 // an oversized ".part" never disappears out from under a display-only scan.
+// ScanBlockChunkProgress is the non-cancellable compatibility API for callers
+// that have no live context. Cancellable production paths must use
+// ScanBlockChunkProgressContext.
 func ScanBlockChunkProgress(chunkDir, ext string) (int64, int64, error) {
 	return ScanBlockChunkProgressContext(context.Background(), chunkDir, ext)
 }
