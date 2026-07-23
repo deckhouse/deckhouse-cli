@@ -1007,6 +1007,161 @@ func TestPipeline_FSResumeAfterTar(t *testing.T) {
 	assertNodeComplete(t, diskSnapDir)
 }
 
+func TestPipeline_FSResumeAfterTarConfirmsDurabilityBeforeCompletion(t *testing.T) {
+	tests := []struct {
+		name         string
+		newClient    func(*testing.T) client.Client
+		namespace    string
+		rootSnapshot string
+		nodeDir      func(string) string
+	}{
+		{
+			name:         "OwnData",
+			newClient:    buildFakeClient,
+			namespace:    testNS,
+			rootSnapshot: rootSnapshot,
+			nodeDir: func(outputDir string) string {
+				return filepath.Join(outputDir, archive.SnapshotsDirName,
+					archive.NodeDirName(childKind, diskSnapName))
+			},
+		},
+		{
+			name:         "VolumeLeaf",
+			newClient:    buildOrphanLeafFakeClient,
+			namespace:    e2eNS,
+			rootSnapshot: e2eAggRootSnap,
+			nodeDir: func(outputDir string) string {
+				return filepath.Join(outputDir, archive.SnapshotsDirName,
+					archive.NodeDirName(e2eDiskKind, "agg-snap"),
+					archive.SnapshotsDirName,
+					archive.NodeDirName("VolumeSnapshot", "pvc-agg"))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fsSrv := makeE2EFSServer(t, []fsE2EFile{
+				{rel: "alpha.txt", content: []byte("hello-alpha")},
+				{rel: "subdir/beta.txt", content: []byte("hello-beta")},
+			})
+			defer fsSrv.Close()
+
+			c := tt.newClient(t)
+			outputDir := t.TempDir()
+			firstCfg := pipeline.Config{
+				Namespace:    tt.namespace,
+				RootSnapshot: tt.rootSnapshot,
+				OutputDir:    outputDir,
+				Workers:      1,
+				KubeClient:   c,
+				OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+					return exporter.NewExport(
+						namespace,
+						"de-fs-durability",
+						"Filesystem",
+						fsSrv.URL,
+						exporter.NewFetcher(fsSrv.Client()),
+					), nil
+				},
+			}
+
+			require.NoError(t, runPipeline(context.Background(), firstCfg))
+
+			nodeDir := tt.nodeDir(outputDir)
+			tarPath := filepath.Join(nodeDir, archive.FsTarName)
+			snapshotPath := filepath.Join(nodeDir, archive.SnapshotYAMLName)
+			stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+			stagingPath := filepath.Join(stagingDir, "alpha.txt.zst")
+			identityPath := filepath.Join(nodeDir, archive.NodeIdentityMarkerName)
+
+			tarBytes, err := os.ReadFile(tarPath)
+			require.NoError(t, err)
+
+			stagedBytes, err := readTarEntry(t, tarPath, "alpha.txt.zst")
+			require.NoError(t, err)
+
+			reseedResumeMarkerFromSnapshotYAML(t, nodeDir)
+			require.NoError(t, os.Remove(snapshotPath))
+			require.NoError(t, os.MkdirAll(stagingDir, 0o755))
+			require.NoError(t, os.WriteFile(stagingPath, stagedBytes, 0o644))
+
+			confirmationErr := errors.New("tar durability confirmation sentinel")
+			var confirmationCalls atomic.Int64
+			ctx := archive.WithDirectorySyncHook(
+				context.Background(),
+				func(path string, next func() error) error {
+					if filepath.Clean(path) != filepath.Clean(nodeDir) {
+						return next()
+					}
+
+					call := confirmationCalls.Add(1)
+					if call <= 2 {
+						if _, err := os.Stat(stagingPath); err != nil {
+							return fmt.Errorf("staging missing before durability confirmation: %w", err)
+						}
+
+						if _, err := os.Stat(snapshotPath); !errors.Is(err, os.ErrNotExist) {
+							return fmt.Errorf("snapshot finalized before durability confirmation: %w", err)
+						}
+					}
+
+					if call == 1 {
+						return confirmationErr
+					}
+
+					return next()
+				},
+			)
+
+			var openExportCalls atomic.Int64
+			failureProgress := &recordingSink{}
+			retryCfg := firstCfg
+			retryCfg.Progress = failureProgress
+			retryCfg.OpenExport = func(context.Context, string, aggapi.NodeRef, string) (*exporter.Export, error) {
+				openExportCalls.Add(1)
+
+				return nil, errors.New("unexpected OpenExport call")
+			}
+
+			err = runPipeline(ctx, retryCfg)
+			require.ErrorIs(t, err, confirmationErr)
+			require.FileExists(t, tarPath)
+			require.FileExists(t, stagingPath)
+			require.FileExists(t, identityPath)
+			require.NoFileExists(t, snapshotPath)
+			require.Zero(t, openExportCalls.Load())
+
+			gotTarBytes, err := os.ReadFile(tarPath)
+			require.NoError(t, err)
+			require.Equal(t, tarBytes, gotTarBytes)
+
+			failedStreams := failureProgress.snapshot()
+			require.Len(t, failedStreams, 1)
+			require.Zero(t, failedStreams[0].doneCnt)
+
+			successProgress := &recordingSink{}
+			retryCfg.Progress = successProgress
+			require.NoError(t, runPipeline(ctx, retryCfg))
+
+			require.GreaterOrEqual(t, confirmationCalls.Load(), int64(2))
+			require.NoDirExists(t, stagingDir)
+			require.FileExists(t, snapshotPath)
+			require.NoFileExists(t, identityPath)
+			require.Zero(t, openExportCalls.Load())
+
+			gotTarBytes, err = os.ReadFile(tarPath)
+			require.NoError(t, err)
+			require.Equal(t, tarBytes, gotTarBytes)
+
+			successStreams := successProgress.snapshot()
+			require.Len(t, successStreams, 1)
+			require.Equal(t, 1, successStreams[0].doneCnt)
+			require.Zero(t, successStreams[0].failCnt)
+		})
+	}
+}
+
 // TestPipeline_ForeignMergedBlock_NotLaunderedByResume is the scenario-B
 // regression test for partial-node-dir-identity-marker: a node's PRIMARY dir
 // already holds a merged data.bin* left by a DIFFERENT snapshot (a mismatched

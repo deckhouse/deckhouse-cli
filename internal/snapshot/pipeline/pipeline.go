@@ -760,9 +760,9 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 		return fmt.Errorf("classify block data in %s: %w", task.nodeDir, err)
 	}
 
-	fsTarDone, err := fsTarComplete(dest.fsTarPath)
+	fsTarDone, err := confirmCompletedFSTar(ctx, dest)
 	if err != nil {
-		return fmt.Errorf("check fs tar in %s: %w", task.nodeDir, err)
+		return fmt.Errorf("confirm fs tar in %s: %w", task.nodeDir, err)
 	}
 
 	handle := lookupStream(streams, task.node)
@@ -851,9 +851,9 @@ func downloadOwnData(
 		return nil
 	}
 
-	fsTarDone, err := fsTarComplete(dest.fsTarPath)
+	fsTarDone, err := confirmCompletedFSTar(ctx, dest)
 	if err != nil {
-		return fmt.Errorf("check fs tar in %s: %w", nodeDir, err)
+		return fmt.Errorf("confirm fs tar in %s: %w", nodeDir, err)
 	}
 
 	if fsTarDone {
@@ -1297,4 +1297,25 @@ func fsTarComplete(tarPath string) (bool, error) {
 	}
 
 	return false, err
+}
+
+func confirmCompletedFSTar(ctx context.Context, dest volumeDestPaths) (bool, error) {
+	complete, err := fsTarComplete(dest.fsTarPath)
+	if err != nil {
+		return false, err
+	}
+
+	if !complete {
+		return false, nil
+	}
+
+	if err := archive.ConfirmFileDurability(ctx, dest.fsTarPath); err != nil {
+		return false, fmt.Errorf("confirm durability for %s: %w", dest.fsTarPath, err)
+	}
+
+	if err := os.RemoveAll(dest.fsTarStagingDir); err != nil {
+		return false, fmt.Errorf("remove stale FS staging after completed tar %s: %w", dest.fsTarStagingDir, err)
+	}
+
+	return true, nil
 }
