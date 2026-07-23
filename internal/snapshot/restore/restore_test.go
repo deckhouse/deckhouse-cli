@@ -44,8 +44,10 @@ import (
 )
 
 const (
-	testNS   = "default"
-	testSnap = "my-snap"
+	testNS                   = "default"
+	testSnap                 = "my-snap"
+	domainDiskAPIVersion     = "sds-unified-snapshots-poc.deckhouse.io/v1alpha1"
+	volumeSnapshotAPIVersion = "snapshot.storage.k8s.io/v1"
 )
 
 var (
@@ -76,6 +78,21 @@ func (s *stubSource) RestoreManifestsScoped(_ context.Context, ref aggapi.NodeRe
 	s.gotOpts = opts
 
 	return s.body, s.err
+}
+
+func assertNoRestoreMutation(t *testing.T, src *stubSource, dyn *dynamicfake.FakeDynamicClient) {
+	t.Helper()
+
+	if src.calls != 0 {
+		t.Errorf("RestoreManifestsScoped must not be called, got %d calls", src.calls)
+	}
+
+	for _, action := range dyn.Actions() {
+		switch action.GetVerb() {
+		case "create", "delete", "delete-collection", "patch", "update":
+			t.Errorf("cluster mutation %s %s must not occur", action.GetVerb(), action.GetResource().Resource)
+		}
+	}
 }
 
 // testMapper resolves every kind the restore tests apply, with the right scope.
@@ -241,6 +258,38 @@ func readySnapshot() *unstructured.Unstructured {
 	}}
 }
 
+func snapshotWithChildren(snapshot *unstructured.Unstructured, refs ...map[string]interface{}) *unstructured.Unstructured {
+	status, _ := snapshot.Object["status"].(map[string]interface{})
+	children := make([]interface{}, 0, len(refs))
+
+	for _, ref := range refs {
+		children = append(children, ref)
+	}
+
+	status["childrenSnapshotRefs"] = children
+
+	return snapshot
+}
+
+func snapshotChildRef(apiVersion, kind, name string) map[string]interface{} {
+	return map[string]interface{}{
+		"apiVersion": apiVersion,
+		"kind":       kind,
+		"name":       name,
+	}
+}
+
+func setSnapshotSourceRef(obj *unstructured.Unstructured, apiVersion, kind, name string) {
+	status, _ := obj.Object["status"].(map[string]interface{})
+	status["sourceRef"] = map[string]interface{}{
+		"apiVersion": apiVersion,
+		"kind":       kind,
+		"namespace":  testNS,
+		"name":       name,
+		"uid":        name + "-uid",
+	}
+}
+
 // notReadySnapshot returns a root Snapshot with Ready=False (e.g. ChildSnapshotDeleted).
 func notReadySnapshot() *unstructured.Unstructured {
 	snap := readySnapshot()
@@ -254,7 +303,7 @@ func notReadySnapshot() *unstructured.Unstructured {
 // readyDomainDiskSnapshot returns a DemoVirtualDiskSnapshot that passes selected-node preflight.
 func readyDomainDiskSnapshot(name string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+		"apiVersion": domainDiskAPIVersion,
 		"kind":       "DemoVirtualDiskSnapshot",
 		"metadata": map[string]interface{}{
 			"namespace": testNS,
@@ -273,7 +322,7 @@ func readyDomainDiskSnapshot(name string) *unstructured.Unstructured {
 // satisfying the leaf preflight check for PVCs that reference it.
 func readyVolumeSnapshot(name string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "snapshot.storage.k8s.io/v1",
+		"apiVersion": volumeSnapshotAPIVersion,
 		"kind":       "VolumeSnapshot",
 		"metadata": map[string]interface{}{
 			"namespace": testNS,
@@ -902,6 +951,8 @@ func TestDecodeManifestArray(t *testing.T) {
 }
 
 func TestIsConditionTrue(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name string
 		obj  map[string]interface{}
@@ -937,7 +988,9 @@ func TestIsConditionTrue(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := isConditionTrue(&unstructured.Unstructured{Object: tc.obj}, readyConditionType)
+			t.Parallel()
+
+			got := isConditionTrue(&unstructured.Unstructured{Object: tc.obj})
 			if got != tc.want {
 				t.Errorf("isConditionTrue() = %v, want %v", got, tc.want)
 			}
@@ -1439,32 +1492,8 @@ func TestApplyObject_IdempotentApply(t *testing.T) {
 	}
 }
 
-// kindSearchMapper wraps meta.RESTMapper to support kind-without-group lookup:
-// when GroupKind.Group is empty it searches all registered kinds regardless of
-// group, mirroring the DeferredDiscoveryRESTMapper behaviour used in production.
-// meta.DefaultRESTMapper only scans defaultGroupVersions that match the given
-// group, so a domain kind looked up with an empty group is never found without
-// this wrapper.
-type kindSearchMapper struct {
-	meta.RESTMapper
-	kindToGVK map[string]schema.GroupVersionKind
-}
-
-func (m *kindSearchMapper) RESTMapping(gk schema.GroupKind, versions ...string) (*meta.RESTMapping, error) {
-	if gk.Group == "" {
-		if gvk, ok := m.kindToGVK[gk.Kind]; ok {
-			gk = schema.GroupKind{Group: gvk.Group, Kind: gvk.Kind}
-			if len(versions) == 0 {
-				versions = []string{gvk.Version}
-			}
-		}
-	}
-
-	return m.RESTMapper.RESTMapping(gk, versions...)
-}
-
-// testMapperWithDomain extends testMapper with a domain snapshot GVK so that
-// resolveNodeRef tests can resolve domain kinds via the RESTMapper.
+// testMapperWithDomain uses meta.DefaultRESTMapper directly. Its exact-group
+// lookup semantics match the production controller-runtime mapper delegation.
 func testMapperWithDomain() meta.RESTMapper {
 	base := meta.NewDefaultRESTMapper([]schema.GroupVersion{
 		{Group: "", Version: "v1"},
@@ -1479,12 +1508,7 @@ func testMapperWithDomain() meta.RESTMapper {
 	base.Add(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}, meta.RESTScopeNamespace)
 	base.Add(schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
 
-	return &kindSearchMapper{
-		RESTMapper: base,
-		kindToGVK: map[string]schema.GroupVersionKind{
-			"DemoVirtualDiskSnapshot": {Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"},
-		},
-	}
+	return base
 }
 
 // TestRun_NoSelectedNode_UsesRootRef verifies that when no SelectedNode is set,
@@ -1511,50 +1535,117 @@ func TestRun_NoSelectedNode_UsesRootRef(t *testing.T) {
 	}
 }
 
-// TestRun_SelectedNode_UsesNodeRef verifies that when SelectedNodeKind/SelectedNodeName
-// are set, RestoreManifests is called with the selected node's NodeRef (resolved via
-// the RESTMapper), not the root Snapshot ref. Preflight checks the selected node.
-func TestRun_SelectedNode_UsesNodeRef(t *testing.T) {
-	const childName = "nss-child-abc123"
+// TestRun_SelectedNode_ResolvesWithinRootTree verifies generated snapshot-CR
+// selectors and original captured-source selectors resolve with production
+// RESTMapper semantics and always address the real snapshot CR in the aggregated API.
+func TestRun_SelectedNode_ResolvesWithinRootTree(t *testing.T) {
+	t.Parallel()
 
-	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
-	dyn := newFakeDynamic(readySnapshot(), readyDomainDiskSnapshot(childName))
+	tests := []struct {
+		name         string
+		child        func() *unstructured.Unstructured
+		selectedKind string
+		selectedName string
+		wantRef      aggapi.NodeRef
+	}{
+		{
+			name: "success: generated domain snapshot identity",
+			child: func() *unstructured.Unstructured {
+				return readyDomainDiskSnapshot("nss-child-domain")
+			},
+			selectedKind: "DemoVirtualDiskSnapshot",
+			selectedName: "nss-child-domain",
+			wantRef: aggapi.NodeRef{
+				APIVersion: domainDiskAPIVersion,
+				Kind:       "DemoVirtualDiskSnapshot",
+				Name:       "nss-child-domain",
+				Namespace:  testNS,
+			},
+		},
+		{
+			name: "success: generated VolumeSnapshot identity",
+			child: func() *unstructured.Unstructured {
+				return readyVolumeSnapshot("nss-vs-pvc")
+			},
+			selectedKind: "VolumeSnapshot",
+			selectedName: "nss-vs-pvc",
+			wantRef: aggapi.NodeRef{
+				APIVersion: volumeSnapshotAPIVersion,
+				Kind:       "VolumeSnapshot",
+				Name:       "nss-vs-pvc",
+				Namespace:  testNS,
+			},
+		},
+		{
+			name: "success: original source identity maps to snapshot CR",
+			child: func() *unstructured.Unstructured {
+				obj := readyDomainDiskSnapshot("nss-child-original")
+				setSnapshotSourceRef(obj, "virtualization.deckhouse.io/v1alpha2", "DemoVirtualDisk", "bk-disk-a")
 
-	cfg := Config{
-		Namespace:        testNS,
-		Snapshot:         testSnap,
-		SelectedNodeKind: "DemoVirtualDiskSnapshot",
-		SelectedNodeName: childName,
-		Source:           src,
-		Dynamic:          dyn,
-		Mapper:           testMapperWithDomain(),
-		Log:              discardLogger(),
-		PollInterval:     time.Millisecond,
+				return obj
+			},
+			selectedKind: "DemoVirtualDisk",
+			selectedName: "bk-disk-a",
+			wantRef: aggapi.NodeRef{
+				APIVersion: domainDiskAPIVersion,
+				Kind:       "DemoVirtualDiskSnapshot",
+				Name:       "nss-child-original",
+				Namespace:  testNS,
+			},
+		},
 	}
 
-	if err := Run(context.Background(), cfg); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	wantRef := aggapi.NodeRef{
-		APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
-		Kind:       "DemoVirtualDiskSnapshot",
-		Name:       childName,
-		Namespace:  testNS,
-	}
+			child := tc.child()
+			root := snapshotWithChildren(
+				readySnapshot(),
+				snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+			)
+			src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+			dyn := newFakeDynamic(root, child)
 
-	if src.gotRef != wantRef {
-		t.Errorf("NodeRef: got %+v, want %+v", src.gotRef, wantRef)
+			cfg := Config{
+				Namespace:        testNS,
+				Snapshot:         testSnap,
+				SelectedNodeKind: tc.selectedKind,
+				SelectedNodeName: tc.selectedName,
+				Source:           src,
+				Dynamic:          dyn,
+				Mapper:           testMapperWithDomain(),
+				Log:              discardLogger(),
+				PollInterval:     time.Millisecond,
+			}
+
+			if err := Run(context.Background(), cfg); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			if src.gotRef != tc.wantRef {
+				t.Errorf("NodeRef: got %+v, want %+v", src.gotRef, tc.wantRef)
+			}
+		})
 	}
 }
 
 // TestRun_SelectedNode_RootNotReady_ChildReadyProceeds verifies that a Ready child
-// subtree can be restored when the root Snapshot is Ready=False (ChildSnapshotDeleted).
+// subtree can be restored when the root Snapshot is Ready=False (ChildSnapshotDeleted)
+// and a different referenced sibling CR has already been deleted.
 func TestRun_SelectedNode_RootNotReady_ChildReadyProceeds(t *testing.T) {
+	t.Parallel()
+
 	const childName = "nss-child-ready"
 
 	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
-	dyn := newFakeDynamic(notReadySnapshot(), readyDomainDiskSnapshot(childName))
+	child := readyDomainDiskSnapshot(childName)
+	root := snapshotWithChildren(
+		notReadySnapshot(),
+		snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", childName),
+		snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", "nss-child-deleted"),
+	)
+	dyn := newFakeDynamic(root, child)
 
 	cfg := Config{
 		Namespace:        testNS,
@@ -1580,6 +1671,8 @@ func TestRun_SelectedNode_RootNotReady_ChildReadyProceeds(t *testing.T) {
 // TestRun_SelectedNode_ChildNotReadyAborts verifies selected-node preflight fails when
 // the selected child is not Ready, even if the root Snapshot is Ready.
 func TestRun_SelectedNode_ChildNotReadyAborts(t *testing.T) {
+	t.Parallel()
+
 	const childName = "nss-child-not-ready"
 
 	child := readyDomainDiskSnapshot(childName)
@@ -1588,7 +1681,11 @@ func TestRun_SelectedNode_ChildNotReadyAborts(t *testing.T) {
 	}, "status", "conditions")
 
 	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
-	dyn := newFakeDynamic(readySnapshot(), child)
+	root := snapshotWithChildren(
+		readySnapshot(),
+		snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", childName),
+	)
+	dyn := newFakeDynamic(root, child)
 
 	cfg := Config{
 		Namespace:        testNS,
@@ -1609,6 +1706,99 @@ func TestRun_SelectedNode_ChildNotReadyAborts(t *testing.T) {
 
 	if src.calls != 0 {
 		t.Errorf("Source must not be called when selected-node preflight fails, got %d calls", src.calls)
+	}
+}
+
+// TestRun_SelectedNode_RejectedBeforeMutation verifies root membership, root
+// existence, and selector uniqueness are established before manifest compilation or SSA.
+func TestRun_SelectedNode_RejectedBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		objects        func() []runtime.Object
+		selectedKind   string
+		selectedName   string
+		wantErrSubstrs []string
+	}{
+		{
+			name: "error: node from another root is rejected",
+			objects: func() []runtime.Object {
+				return []runtime.Object{
+					readySnapshot(),
+					readyDomainDiskSnapshot("nss-unrelated"),
+				}
+			},
+			selectedKind:   "DemoVirtualDiskSnapshot",
+			selectedName:   "nss-unrelated",
+			wantErrSubstrs: []string{"does not belong", testSnap},
+		},
+		{
+			name: "error: missing positional root cannot be bypassed",
+			objects: func() []runtime.Object {
+				return []runtime.Object{
+					readyDomainDiskSnapshot("nss-existing"),
+				}
+			},
+			selectedKind:   "DemoVirtualDiskSnapshot",
+			selectedName:   "nss-existing",
+			wantErrSubstrs: []string{"get root Snapshot", testSnap, "not found"},
+		},
+		{
+			name: "error: duplicate original source identity is ambiguous",
+			objects: func() []runtime.Object {
+				first := readyDomainDiskSnapshot("nss-child-first")
+				setSnapshotSourceRef(first, "virtualization.deckhouse.io/v1alpha2", "DemoVirtualDisk", "bk-shared")
+
+				second := readyDomainDiskSnapshot("nss-child-second")
+				setSnapshotSourceRef(second, "virtualization.deckhouse.io/v1alpha2", "DemoVirtualDisk", "bk-shared")
+
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(first.GetAPIVersion(), first.GetKind(), first.GetName()),
+					snapshotChildRef(second.GetAPIVersion(), second.GetKind(), second.GetName()),
+				)
+
+				return []runtime.Object{root, first, second}
+			},
+			selectedKind:   "DemoVirtualDisk",
+			selectedName:   "bk-shared",
+			wantErrSubstrs: []string{"ambiguous", "nss-child-first", "nss-child-second", "generated snapshot-CR Kind/name"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+			dyn := newFakeDynamic(tc.objects()...)
+
+			cfg := Config{
+				Namespace:        testNS,
+				Snapshot:         testSnap,
+				SelectedNodeKind: tc.selectedKind,
+				SelectedNodeName: tc.selectedName,
+				Source:           src,
+				Dynamic:          dyn,
+				Mapper:           testMapperWithDomain(),
+				Log:              discardLogger(),
+				PollInterval:     time.Millisecond,
+			}
+
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("expected selection error, got nil")
+			}
+
+			for _, substr := range tc.wantErrSubstrs {
+				if !contains(err.Error(), substr) {
+					t.Errorf("error %q does not contain %q", err.Error(), substr)
+				}
+			}
+
+			assertNoRestoreMutation(t, src, dyn)
+		})
 	}
 }
 
@@ -1665,7 +1855,12 @@ func TestRun_ScopeNodeWithObjectFilter_ForwardedToSource(t *testing.T) {
 	const childName = "nss-child-abc123"
 
 	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
-	dyn := newFakeDynamic(readySnapshot(), readyDomainDiskSnapshot(childName))
+	child := readyDomainDiskSnapshot(childName)
+	root := snapshotWithChildren(
+		readySnapshot(),
+		snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", childName),
+	)
+	dyn := newFakeDynamic(root, child)
 
 	cfg := Config{
 		Namespace:        testNS,
@@ -1745,9 +1940,11 @@ func (c *logCapture) countMsg(msg string) int {
 	return n
 }
 
-// TestRun_SelectedNode_UnknownKindErrors verifies that an unresolvable SelectedNodeKind
-// returns an error before calling RestoreManifests.
-func TestRun_SelectedNode_UnknownKindErrors(t *testing.T) {
+// TestRun_SelectedNode_UnknownSelectorErrors verifies a selector absent from the
+// positional root hierarchy returns an error before calling RestoreManifests.
+func TestRun_SelectedNode_UnknownSelectorErrors(t *testing.T) {
+	t.Parallel()
+
 	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
 	dyn := newFakeDynamic(readySnapshot())
 

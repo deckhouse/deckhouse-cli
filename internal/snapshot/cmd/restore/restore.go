@@ -72,9 +72,10 @@ The server compiles the whole subtree in one call; every returned object is appl
 PersistentVolumeClaims already carry spec.dataSourceRef pointing at the VolumeSnapshot (or
 VirtualDiskSnapshot for domain disks) present in the namespace, so CSI provisions the data.
 
---node restricts the restore to a single node subtree. The root Snapshot must still be
-Ready (the subtree data lives under the same snapshot); only the manifest compilation is
-scoped to the selected node.
+--node restricts the restore to a single node subtree. The positional Snapshot always
+anchors the hierarchy and must exist; the selection may use either the generated snapshot-CR
+Kind/name or the original captured source Kind/name. A Ready child remains restorable when
+the root is DEGRADED because an unrelated sibling CR was deleted.
 
 --scope narrows how much of the addressed node (the root, or --node's selection) the server
 compiles: "subtree" (default) compiles the node and its whole subtree, recursively; "node"
