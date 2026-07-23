@@ -20,11 +20,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5" //nolint:gosec // test fixture digest, matches the exporter's hash.md5 contract
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -54,6 +57,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
+	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
@@ -381,6 +385,288 @@ func TestPipeline_UnsupportedFilesystemEntryDoesNotFinalizeNode(t *testing.T) {
 	require.True(t, os.IsNotExist(statErr),
 		"unsupported listing item must not reach node finalization or publish snapshot.yaml")
 	require.Zero(t, fileGets.Load(), "listing validation must finish before any regular file is staged")
+}
+
+func TestPipeline_ProductionExportReusesAndClosesHTTPConnections(t *testing.T) {
+	t.Parallel()
+
+	const (
+		fileCount = 200
+		workers   = 4
+	)
+
+	var (
+		newConnections    atomic.Int64
+		closedConnections atomic.Int64
+		hashRequests      atomic.Int64
+		fileRequests      atomic.Int64
+	)
+
+	files := make(map[string][]byte, fileCount)
+	items := make([]string, 0, fileCount)
+
+	for i := range fileCount {
+		name := fmt.Sprintf("small-%03d.txt", i)
+		content := []byte(fmt.Sprintf("content-%03d", i))
+		files[name] = content
+		items = append(items, fmt.Sprintf(
+			`{"name":%q,"type":"file","uri":%q,"attributes":{"permissions":"0644","modtime":"2026-07-23T12:00:00Z","uid":0,"gid":0,"size":%d}}`,
+			name, name, len(content),
+		))
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/files/" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+strings.Join(items, ",")+`]}`)
+
+			return
+		}
+
+		name := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
+		content, ok := files[name]
+		if !ok {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		if r.Method == http.MethodHead {
+			hashRequests.Add(1)
+
+			sum := md5.Sum(content)
+			w.Header().Set("X-Attribute-Hash-Md5", fmt.Sprintf("%x", sum))
+		} else {
+			fileRequests.Add(1)
+		}
+
+		http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(content))
+	})
+
+	srv := httptest.NewUnstartedServer(mux)
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateNew:
+			newConnections.Add(1)
+		case http.StateClosed:
+			closedConnections.Add(1)
+		}
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	c := buildFakeClient(t)
+	readyExport := readyFilesystemDataExport(t, srv)
+	require.NoError(t, c.Create(context.Background(), readyExport))
+
+	sc, err := safeClient.NewSafeClient()
+	require.NoError(t, err)
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            t.TempDir(),
+		Workers:              1,
+		PerVolumeConcurrency: workers,
+		KubeClient:           c,
+		OpenExport: func(ctx context.Context, namespace string, leafRef aggapi.NodeRef, ttl string) (*exporter.Export, error) {
+			return exporter.OpenExport(
+				ctx,
+				slog.Default(),
+				c,
+				namespace,
+				"demo.deckhouse.io",
+				"virtualdisksnapshots",
+				childKind,
+				leafRef.Name,
+				ttl,
+				sc,
+			)
+		},
+	}
+
+	require.NoError(t, runPipeline(context.Background(), cfg))
+	require.Equal(t, int64(fileCount), hashRequests.Load())
+	require.Equal(t, int64(fileCount), fileRequests.Load())
+
+	connectionCount := newConnections.Load()
+	require.LessOrEqual(t, connectionCount, int64(2*workers+2),
+		"two persistent transports must bound connections by in-flight workers")
+	require.Less(t, connectionCount*10, int64(fileCount*2),
+		"HEAD and GET request count must greatly exceed connection creation")
+
+	requireEventually(t, time.Second, func() bool {
+		return closedConnections.Load() == newConnections.Load()
+	})
+}
+
+func TestPipeline_ClosesExportHTTPClientsOnEveryTransferExit(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		first := &pipelineIdleCloser{}
+		second := &pipelineIdleCloser{}
+		srv := makeBlockServer(t, []byte("block-content"))
+		defer srv.Close()
+
+		cfg := pipeline.Config{
+			Namespace:            testNS,
+			RootSnapshot:         rootSnapshot,
+			OutputDir:            t.TempDir(),
+			Workers:              1,
+			PerVolumeConcurrency: 1,
+			KubeClient:           buildFakeClient(t),
+			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+				return exporter.NewExport(
+					namespace,
+					"de-success",
+					"Block",
+					srv.URL,
+					exporter.NewFetcher(srv.Client()),
+					first,
+					second,
+				), nil
+			},
+		}
+
+		require.NoError(t, runPipeline(context.Background(), cfg))
+		require.Equal(t, int64(1), first.calls.Load())
+		require.Equal(t, int64(1), second.calls.Load())
+	})
+
+	t.Run("error", func(t *testing.T) {
+		first := &pipelineIdleCloser{}
+		second := &pipelineIdleCloser{}
+
+		cfg := pipeline.Config{
+			Namespace:    testNS,
+			RootSnapshot: rootSnapshot,
+			OutputDir:    t.TempDir(),
+			Workers:      1,
+			KubeClient:   buildFakeClient(t),
+			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+				return exporter.NewExport(
+					namespace,
+					"de-error",
+					"Unsupported",
+					"https://exporter.invalid",
+					nil,
+					first,
+					second,
+				), nil
+			},
+		}
+
+		require.Error(t, runPipeline(context.Background(), cfg))
+		require.Equal(t, int64(1), first.calls.Load())
+		require.Equal(t, int64(1), second.calls.Load())
+	})
+
+	t.Run("cancellation", func(t *testing.T) {
+		first := &pipelineIdleCloser{}
+		second := &pipelineIdleCloser{}
+		requestStarted := make(chan struct{})
+		var signalOnce sync.Once
+
+		srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			signalOnce.Do(func() { close(requestStarted) })
+			<-r.Context().Done()
+		}))
+		defer srv.Close()
+
+		cfg := pipeline.Config{
+			Namespace:            testNS,
+			RootSnapshot:         rootSnapshot,
+			OutputDir:            t.TempDir(),
+			Workers:              1,
+			PerVolumeConcurrency: 1,
+			KubeClient:           buildFakeClient(t),
+			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+				return exporter.NewExport(
+					namespace,
+					"de-cancel",
+					"Block",
+					srv.URL,
+					exporter.NewFetcher(srv.Client()),
+					first,
+					second,
+				), nil
+			},
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(time.Second, cancel)
+
+		go func() {
+			<-requestStarted
+			cancel()
+		}()
+
+		err := runPipeline(ctx, cfg)
+		require.ErrorIs(t, err, context.Canceled)
+		require.Equal(t, int64(1), first.calls.Load())
+		require.Equal(t, int64(1), second.calls.Load())
+	})
+}
+
+type pipelineIdleCloser struct {
+	calls atomic.Int64
+}
+
+func (c *pipelineIdleCloser) CloseIdleConnections() {
+	c.calls.Add(1)
+}
+
+func readyFilesystemDataExport(t *testing.T, srv *httptest.Server) *deapi.DataExport {
+	t.Helper()
+
+	certificate := srv.Certificate()
+	require.NotNil(t, certificate)
+
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
+
+	return &deapi.DataExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      exporter.DataExportName(diskSnapName),
+			Namespace: testNS,
+		},
+		Spec: deapi.DataexportSpec{
+			TTL: "2h",
+			TargetRef: deapi.TargetRefSpec{
+				Group:    "demo.deckhouse.io",
+				Resource: "virtualdisksnapshots",
+				Kind:     childKind,
+				Name:     diskSnapName,
+			},
+		},
+		Status: deapi.DataExportStatus{
+			URL:        srv.URL,
+			CA:         base64.StdEncoding.EncodeToString(caPEM),
+			VolumeMode: "Filesystem",
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionTrue,
+					Reason: "PodReady",
+				},
+			},
+		},
+	}
+}
+
+func requireEventually(t *testing.T, timeout time.Duration, condition func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("condition was not satisfied before timeout")
 }
 
 // TestPipeline_ChecksumMismatchAfterFinalize_SurfacesNotReblessed is the

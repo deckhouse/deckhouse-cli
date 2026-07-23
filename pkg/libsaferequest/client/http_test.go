@@ -17,10 +17,22 @@ limitations under the License.
 package client
 
 import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"k8s.io/client-go/rest"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 // TestSafeClient_SetQPS asserts that SetQPS mutates the underlying rest.Config's
@@ -255,4 +267,322 @@ func TestSafeClient_SetResponseHeaderTimeout_FailsFastOnHeaderStall(t *testing.T
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Errorf("did not fail fast on header stall: %v", elapsed)
 	}
+}
+
+func TestPersistentHTTPClient_ReusesAndClosesConnections(t *testing.T) {
+	t.Parallel()
+
+	var (
+		newConnections    atomic.Int64
+		closedConnections atomic.Int64
+	)
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateNew:
+			newConnections.Add(1)
+		case http.StateClosed:
+			closedConnections.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	sc := &SafeClient{restConfig: &rest.Config{}}
+
+	httpClient, err := sc.NewPersistentHTTPClient()
+	if err != nil {
+		t.Fatalf("NewPersistentHTTPClient: %v", err)
+	}
+
+	const requestCount = 100
+
+	for range requestCount {
+		req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+		if reqErr != nil {
+			t.Fatalf("NewRequestWithContext: %v", reqErr)
+		}
+
+		resp, doErr := httpClient.Do(req)
+		if doErr != nil {
+			t.Fatalf("Do: %v", doErr)
+		}
+
+		if _, copyErr := io.Copy(io.Discard, resp.Body); copyErr != nil {
+			_ = resp.Body.Close()
+			t.Fatalf("drain response body: %v", copyErr)
+		}
+
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			t.Fatalf("close response body: %v", closeErr)
+		}
+	}
+
+	if got := newConnections.Load(); got > 2 {
+		t.Fatalf("new connections = %d for %d requests, want <= 2", got, requestCount)
+	}
+
+	httpClient.CloseIdleConnections()
+
+	requireEventually(t, time.Second, func() bool {
+		return closedConnections.Load() == newConnections.Load()
+	})
+}
+
+func TestPersistentHTTPClient_PreservesAuthenticationWrappers(t *testing.T) {
+	tests := []struct {
+		name       string
+		configure  func(t *testing.T, config *rest.Config)
+		wantHeader string
+	}{
+		{
+			name: "bearer",
+			configure: func(_ *testing.T, config *rest.Config) {
+				config.BearerToken = "bearer-token"
+			},
+			wantHeader: "Bearer bearer-token",
+		},
+		{
+			name: "basic",
+			configure: func(_ *testing.T, config *rest.Config) {
+				config.Username = "user"
+				config.Password = "password"
+			},
+			wantHeader: "Basic dXNlcjpwYXNzd29yZA==",
+		},
+		{
+			name: "exec",
+			configure: func(_ *testing.T, config *rest.Config) {
+				config.ExecProvider = &clientcmdapi.ExecConfig{
+					APIVersion:      "client.authentication.k8s.io/v1beta1",
+					Command:         "sh",
+					Args:            []string{"-c", `printf '{"apiVersion":"client.authentication.k8s.io/v1beta1","kind":"ExecCredential","status":{"token":"exec-token"}}'`},
+					InteractiveMode: clientcmdapi.NeverExecInteractiveMode,
+				}
+			},
+			wantHeader: "Bearer exec-token",
+		},
+		{
+			name: "auth provider",
+			configure: func(t *testing.T, config *rest.Config) {
+				t.Helper()
+
+				const pluginName = "deckhouse-cli-persistent-http-test"
+
+				err := rest.RegisterAuthProviderPlugin(pluginName, func(
+					_ string,
+					_ map[string]string,
+					_ rest.AuthProviderConfigPersister,
+				) (rest.AuthProvider, error) {
+					return persistentTestAuthProvider{}, nil
+				})
+				if err != nil {
+					t.Fatalf("RegisterAuthProviderPlugin: %v", err)
+				}
+
+				config.AuthProvider = &clientcmdapi.AuthProviderConfig{Name: pluginName}
+			},
+			wantHeader: "Bearer provider-token",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotHeader string
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotHeader = r.Header.Get("Authorization")
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer srv.Close()
+
+			config := &rest.Config{Host: srv.URL}
+			tc.configure(t, config)
+
+			sc := &SafeClient{restConfig: config}
+
+			httpClient, err := sc.NewPersistentHTTPClient()
+			if err != nil {
+				t.Fatalf("NewPersistentHTTPClient: %v", err)
+			}
+			defer httpClient.CloseIdleConnections()
+
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+			if err != nil {
+				t.Fatalf("NewRequestWithContext: %v", err)
+			}
+
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				t.Fatalf("close response body: %v", closeErr)
+			}
+
+			if gotHeader != tc.wantHeader {
+				t.Errorf("Authorization = %q, want %q", gotHeader, tc.wantHeader)
+			}
+		})
+	}
+}
+
+func TestPersistentHTTPClient_PreservesCertificateAuth(t *testing.T) {
+	var receivedClientCertificate atomic.Bool
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedClientCertificate.Store(len(r.TLS.PeerCertificates) > 0)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	srv.TLS = &tls.Config{
+		ClientAuth: tls.RequireAnyClientCert,
+		MinVersion: tls.VersionTLS12,
+	}
+	srv.StartTLS()
+	defer srv.Close()
+
+	serverCertificate := srv.TLS.Certificates[0]
+	certData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverCertificate.Certificate[0]})
+
+	privateKey, err := x509.MarshalPKCS8PrivateKey(serverCertificate.PrivateKey)
+	if err != nil {
+		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
+	}
+
+	keyData := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateKey})
+	sc := &SafeClient{restConfig: &rest.Config{
+		Host: srv.URL,
+		TLSClientConfig: rest.TLSClientConfig{
+			CertData: certData,
+			KeyData:  keyData,
+		},
+	}}
+	sc.SetTLSCAData(certData)
+
+	httpClient, err := sc.NewPersistentHTTPClient()
+	if err != nil {
+		t.Fatalf("NewPersistentHTTPClient: %v", err)
+	}
+	defer httpClient.CloseIdleConnections()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	if closeErr := resp.Body.Close(); closeErr != nil {
+		t.Fatalf("close response body: %v", closeErr)
+	}
+
+	if !receivedClientCertificate.Load() {
+		t.Error("server did not receive the configured client certificate")
+	}
+}
+
+func TestPersistentHTTPClient_PreservesProxyAndDial(t *testing.T) {
+	t.Parallel()
+
+	var (
+		proxyCalls atomic.Int64
+		dialCalls  atomic.Int64
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	dialer := &net.Dialer{}
+	sc := &SafeClient{restConfig: &rest.Config{
+		Host: srv.URL,
+		Proxy: func(*http.Request) (*url.URL, error) {
+			proxyCalls.Add(1)
+
+			return nil, nil
+		},
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			dialCalls.Add(1)
+
+			conn, err := dialer.DialContext(ctx, network, address)
+			if err != nil {
+				return nil, fmt.Errorf("dial test server: %w", err)
+			}
+
+			return conn, nil
+		},
+	}}
+
+	httpClient, err := sc.NewPersistentHTTPClient()
+	if err != nil {
+		t.Fatalf("NewPersistentHTTPClient: %v", err)
+	}
+	defer httpClient.CloseIdleConnections()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	if closeErr := resp.Body.Close(); closeErr != nil {
+		t.Fatalf("close response body: %v", closeErr)
+	}
+
+	if proxyCalls.Load() == 0 {
+		t.Error("configured proxy function was not called")
+	}
+
+	if dialCalls.Load() == 0 {
+		t.Error("configured dial function was not called")
+	}
+}
+
+type persistentTestAuthProvider struct{}
+
+func (persistentTestAuthProvider) WrapTransport(rt http.RoundTripper) http.RoundTripper {
+	return persistentTestAuthRoundTripper{rt: rt}
+}
+
+func (persistentTestAuthProvider) Login() error {
+	return nil
+}
+
+type persistentTestAuthRoundTripper struct {
+	rt http.RoundTripper
+}
+
+func (rt persistentTestAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	cloned := req.Clone(req.Context())
+	cloned.Header.Set("Authorization", "Bearer provider-token")
+
+	return rt.rt.RoundTrip(cloned)
+}
+
+func requireEventually(t *testing.T, timeout time.Duration, condition func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("condition was not satisfied before timeout")
 }
