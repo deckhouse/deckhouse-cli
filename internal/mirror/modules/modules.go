@@ -692,7 +692,10 @@ func (svc *Service) pullInternalDigestImages(ctx context.Context, moduleName str
 // pullExtraImages discovers extra images declared by each module version and
 // pulls them into per-extra layouts (modules/<name>/extra/<extra-name>/).
 func (svc *Service) pullExtraImages(ctx context.Context, moduleName string, versions []string, downloadList *ImageDownloadList) error {
-	extraImagesByName := svc.findExtraImages(ctx, moduleName, versions)
+	extraImagesByName, err := svc.findExtraImages(ctx, moduleName, versions)
+	if err != nil {
+		return fmt.Errorf("find extra images for module %s: %w", moduleName, err)
+	}
 
 	for extraName, images := range extraImagesByName {
 		if len(images) == 0 {
@@ -877,10 +880,13 @@ type extraImageInfo struct {
 	FullRef string
 }
 
-// findExtraImages finds extra images from module images.
+// findExtraImages finds extra images declared across the given module versions.
 // Returns a map where key is extra image name, value is list of image refs to pull.
 // Extra images are stored under: modules/<name>/extra/<extra-name>:<tag>
-func (svc *Service) findExtraImages(ctx context.Context, moduleName string, versions []string) map[string][]extraImageInfo {
+//
+// A persistent registry error while reading a version is returned, so the pull
+// fails loudly instead of producing a bundle silently missing extra images.
+func (svc *Service) findExtraImages(ctx context.Context, moduleName string, versions []string) (map[string][]extraImageInfo, error) {
 	// Map of extra-name -> list of images to pull
 	extraImages := make(map[string][]extraImageInfo)
 
@@ -896,16 +902,14 @@ func (svc *Service) findExtraImages(ctx context.Context, moduleName string, vers
 			tag = parts[1]
 		}
 
-		img, err := svc.modulesService.Module(moduleName).GetImage(ctx, tag)
+		extraImagesJSON, err := svc.getExtraImagesJSON(ctx, moduleName, tag)
 		if err != nil {
-			svc.logger.Debug(fmt.Sprintf("Failed to get module image %s:%s: %v", moduleName, tag, err))
-			continue
+			return nil, err
 		}
 
-		// Try to extract extra_images.json
-		extraImagesJSON, err := extractExtraImagesJSON(img)
-		if err != nil {
-			continue // No extra_images.json in this version
+		// No extra_images.json in this version
+		if extraImagesJSON == nil {
+			continue
 		}
 
 		for imageName, tagValue := range extraImagesJSON {
@@ -933,7 +937,7 @@ func (svc *Service) findExtraImages(ctx context.Context, moduleName string, vers
 		}
 	}
 
-	return extraImages
+	return extraImages, nil
 }
 
 // Retry policy for reading extra_images.json during discovery, mirroring the
