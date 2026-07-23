@@ -1969,7 +1969,7 @@ func TestDownloadFilesystemVolume_SizesSidecar_SeedsResumeWithoutNetwork(t *test
 	// ScanFSStagingSizes must credit ONLY a.bin's persisted declared size —
 	// the fully-staged flat-blob case — while reporting the full sidecar
 	// total, all from local state.
-	gotTotal, gotStaged, gotFound, err := volume.ScanFSStagingSizes(stagingDir, codec.Ext())
+	gotTotal, gotStaged, gotFound, err := volume.ScanFSStagingSizes(context.Background(), stagingDir, codec.Ext())
 	if err != nil {
 		t.Fatalf("ScanFSStagingSizes: %v", err)
 	}
@@ -2040,7 +2040,7 @@ func TestScanFSStagingSizes_NoSidecar_ReportsNotFound(t *testing.T) {
 
 		stagingDir := filepath.Join(t.TempDir(), "does-not-exist")
 
-		total, staged, found, err := volume.ScanFSStagingSizes(stagingDir, ".zst")
+		total, staged, found, err := volume.ScanFSStagingSizes(context.Background(), stagingDir, ".zst")
 		if err != nil {
 			t.Fatalf("ScanFSStagingSizes: %v", err)
 		}
@@ -2059,7 +2059,7 @@ func TestScanFSStagingSizes_NoSidecar_ReportsNotFound(t *testing.T) {
 
 		stagingDir := t.TempDir()
 
-		total, staged, found, err := volume.ScanFSStagingSizes(stagingDir, ".zst")
+		total, staged, found, err := volume.ScanFSStagingSizes(context.Background(), stagingDir, ".zst")
 		if err != nil {
 			t.Fatalf("ScanFSStagingSizes: %v", err)
 		}
@@ -2141,7 +2141,7 @@ func TestScanFSStagingSizes_RejectsOversizedTokensBeforeMaterialization(t *testi
 			var baseline runtime.MemStats
 			runtime.ReadMemStats(&baseline)
 
-			_, _, _, err = volume.ScanFSStagingSizes(stagingDir, "")
+			_, _, _, err = volume.ScanFSStagingSizes(context.Background(), stagingDir, "")
 			if err == nil || !strings.Contains(err.Error(), "encoded limit") {
 				t.Fatalf("ScanFSStagingSizes error = %v, want encoded-limit rejection", err)
 			}
@@ -2878,7 +2878,7 @@ func TestScanFSStagingSizes_ReadsNewMetadataPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	total, staged, found, err := volume.ScanFSStagingSizes(stagingDir, "")
+	total, staged, found, err := volume.ScanFSStagingSizes(context.Background(), stagingDir, "")
 	if err != nil {
 		t.Fatalf("ScanFSStagingSizes: %v", err)
 	}
@@ -3061,7 +3061,7 @@ func TestScanFSStagingProgress_CountsChunkDirsUnderReservedNamespace(t *testing.
 		t.Fatal(err)
 	}
 
-	committed, err := volume.ScanFSStagingProgress(stagingDir, ext)
+	committed, err := volume.ScanFSStagingProgress(context.Background(), stagingDir, ext)
 	if err != nil {
 		t.Fatalf("ScanFSStagingProgress: %v", err)
 	}
@@ -3678,7 +3678,7 @@ func TestDownloadFilesystemVolume_LargeInventorySpillsBeforeFileMutation(t *test
 		t.Fatalf("completed external merge left work runs: %v", err)
 	}
 
-	total, staged, found, err := volume.ScanFSStagingSizes(stagingDir, "")
+	total, staged, found, err := volume.ScanFSStagingSizes(context.Background(), stagingDir, "")
 	if err != nil {
 		t.Fatalf("ScanFSStagingSizes: %v", err)
 	}

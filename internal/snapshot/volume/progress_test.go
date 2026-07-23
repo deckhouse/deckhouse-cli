@@ -27,6 +27,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -605,7 +606,7 @@ func TestScanFSStagingProgress_InProgressPerFileChunkDir(t *testing.T) {
 	require.NoError(t, os.WriteFile(partPath, bytes.Repeat([]byte("B"), partialBytes), 0o644))
 	require.NoError(t, os.WriteFile(partPath+".offset", []byte(fmt.Sprintf("%d", partialBytes)), 0o644))
 
-	committed, err := volume.ScanFSStagingProgress(stagingDir, codec.Ext())
+	committed, err := volume.ScanFSStagingProgress(context.Background(), stagingDir, codec.Ext())
 	require.NoError(t, err)
 	require.Equal(t, chunkSize+partialBytes, committed)
 }
@@ -629,7 +630,7 @@ func TestScanFSStagingProgress_CompletedFlatFileNotCounted(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(stagingDir, "small.txt"+codec.Ext()), frame, 0o644))
 
-	committed, err := volume.ScanFSStagingProgress(stagingDir, codec.Ext())
+	committed, err := volume.ScanFSStagingProgress(context.Background(), stagingDir, codec.Ext())
 	require.NoError(t, err)
 	require.Zero(t, committed, "a fully-staged flat file must not be counted (its raw size is unrecoverable)")
 }
@@ -639,7 +640,175 @@ func TestScanFSStagingProgress_CompletedFlatFileNotCounted(t *testing.T) {
 func TestScanFSStagingProgress_MissingStagingDir(t *testing.T) {
 	t.Parallel()
 
-	committed, err := volume.ScanFSStagingProgress(filepath.Join(t.TempDir(), "absent"), ".zst")
+	committed, err := volume.ScanFSStagingProgress(context.Background(), filepath.Join(t.TempDir(), "absent"), ".zst")
 	require.NoError(t, err)
 	require.Zero(t, committed)
+}
+
+func TestScanFSStagingProgress_WideEmptyHierarchyHasCountIndependentHeap(t *testing.T) {
+	const (
+		smallEntries = 256
+		largeEntries = 20_000
+		deltaLimit   = 4 << 20
+	)
+
+	smallPeak := measureWideFSProgressScanHeap(t, smallEntries)
+	largePeak := measureWideFSProgressScanHeap(t, largeEntries)
+	if largePeak > smallPeak+deltaLimit {
+		t.Fatalf(
+			"peak additional heap grew from %d to %d bytes for %d versus %d directories; count-dependent delta %d exceeds %d",
+			smallPeak,
+			largePeak,
+			smallEntries,
+			largeEntries,
+			largePeak-smallPeak,
+			deltaLimit,
+		)
+	}
+}
+
+func measureWideFSProgressScanHeap(t *testing.T, entries int) uint64 {
+	t.Helper()
+
+	stagingDir := t.TempDir()
+	chunksRoot := filepath.Join(stagingDir, volume.FSMetaDirName, archive.FSChunksDirName)
+	require.NoError(t, os.MkdirAll(chunksRoot, 0o755))
+
+	for index := range entries {
+		require.NoError(t, os.Mkdir(filepath.Join(chunksRoot, fmt.Sprintf("parent-%06d", index)), 0o755))
+	}
+
+	runtime.GC()
+
+	var baseline runtime.MemStats
+	runtime.ReadMemStats(&baseline)
+
+	stop := make(chan struct{})
+	peak := make(chan uint64, 1)
+
+	go func() {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+
+		maxHeap := baseline.HeapAlloc
+		for {
+			select {
+			case <-ticker.C:
+				var current runtime.MemStats
+				runtime.ReadMemStats(&current)
+				if current.HeapAlloc > maxHeap {
+					maxHeap = current.HeapAlloc
+				}
+			case <-stop:
+				peak <- maxHeap
+
+				return
+			}
+		}
+	}()
+
+	committed, err := volume.ScanFSStagingProgress(context.Background(), stagingDir, "")
+	close(stop)
+
+	maxHeap := <-peak
+	require.NoError(t, err)
+	require.Zero(t, committed)
+
+	if maxHeap <= baseline.HeapAlloc {
+		return 0
+	}
+
+	return maxHeap - baseline.HeapAlloc
+}
+
+func TestScanFSResumeProgress_CancellationIsPromptAndCompatible(t *testing.T) {
+	t.Run("DirectoryTraversal", func(t *testing.T) {
+		stagingDir := t.TempDir()
+		chunksRoot := filepath.Join(stagingDir, volume.FSMetaDirName, archive.FSChunksDirName)
+		require.NoError(t, os.MkdirAll(chunksRoot, 0o755))
+
+		for index := range 1_000 {
+			require.NoError(t, os.Mkdir(filepath.Join(chunksRoot, fmt.Sprintf("parent-%04d", index)), 0o755))
+		}
+
+		ctx := &cancelAfterChecksContext{Context: context.Background(), cancelAt: 20}
+		_, err := volume.ScanFSStagingProgress(ctx, stagingDir, "")
+		require.ErrorIs(t, err, context.Canceled)
+		require.LessOrEqual(t, ctx.checks, ctx.cancelAt+2)
+		require.NoError(t, os.RemoveAll(stagingDir), "cancellation must close every traversal descriptor")
+	})
+
+	t.Run("SizesSidecar", func(t *testing.T) {
+		stagingDir := t.TempDir()
+		metaDir := filepath.Join(stagingDir, volume.FSMetaDirName)
+		require.NoError(t, os.MkdirAll(metaDir, 0o755))
+
+		sidecar, err := os.Create(filepath.Join(metaDir, volume.FSSizesSidecarName))
+		require.NoError(t, err)
+		_, err = io.WriteString(sidecar, `{"files":{`)
+		require.NoError(t, err)
+
+		for index := range 1_000 {
+			if index > 0 {
+				_, err = io.WriteString(sidecar, ",")
+				require.NoError(t, err)
+			}
+
+			_, err = fmt.Fprintf(sidecar, `"file-%04d":1`, index)
+			require.NoError(t, err)
+		}
+
+		_, err = io.WriteString(sidecar, `},"total":1000}`)
+		require.NoError(t, err)
+		require.NoError(t, sidecar.Close())
+
+		ctx := &cancelAfterChecksContext{Context: context.Background(), cancelAt: 20}
+		_, _, _, err = volume.ScanFSStagingSizes(ctx, stagingDir, "")
+		require.ErrorIs(t, err, context.Canceled)
+		require.LessOrEqual(t, ctx.checks, ctx.cancelAt+2)
+		require.NoError(t, os.RemoveAll(stagingDir), "cancellation must close the sidecar descriptor")
+	})
+
+	t.Run("LegacySizesSidecar", func(t *testing.T) {
+		stagingDir := t.TempDir()
+		sidecar, err := os.Create(filepath.Join(stagingDir, volume.FSSizesSidecarName))
+		require.NoError(t, err)
+		_, err = io.WriteString(sidecar, `{"files":{`)
+		require.NoError(t, err)
+
+		for index := range 1_000 {
+			if index > 0 {
+				_, err = io.WriteString(sidecar, ",")
+				require.NoError(t, err)
+			}
+
+			_, err = fmt.Fprintf(sidecar, `"file-%04d":1`, index)
+			require.NoError(t, err)
+		}
+
+		_, err = io.WriteString(sidecar, `},"total":1000}`)
+		require.NoError(t, err)
+		require.NoError(t, sidecar.Close())
+
+		ctx := &cancelAfterChecksContext{Context: context.Background(), cancelAt: 20}
+		_, _, _, err = volume.ScanFSStagingSizes(ctx, stagingDir, "")
+		require.ErrorIs(t, err, context.Canceled)
+		require.LessOrEqual(t, ctx.checks, ctx.cancelAt+2)
+		require.NoError(t, os.RemoveAll(stagingDir), "cancellation must close the legacy sidecar descriptor")
+	})
+}
+
+type cancelAfterChecksContext struct {
+	context.Context
+	cancelAt int
+	checks   int
+}
+
+func (c *cancelAfterChecksContext) Err() error {
+	c.checks++
+	if c.checks >= c.cancelAt {
+		return context.Canceled
+	}
+
+	return nil
 }

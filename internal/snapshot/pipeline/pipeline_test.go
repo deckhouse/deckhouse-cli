@@ -1721,8 +1721,9 @@ func (s *recordedStream) Fail() {
 // recordingSink is a progress.Sink stub that captures NewStream calls in creation
 // order. All methods are safe for concurrent use.
 type recordingSink struct {
-	mu   sync.Mutex
-	seen []*recordedStream
+	mu          sync.Mutex
+	seen        []*recordedStream
+	onNewStream func()
 }
 
 func (s *recordingSink) NewStream(name string, _ int64) progress.Stream {
@@ -1730,6 +1731,10 @@ func (s *recordingSink) NewStream(name string, _ int64) progress.Stream {
 	s.mu.Lock()
 	s.seen = append(s.seen, rs)
 	s.mu.Unlock()
+
+	if s.onNewStream != nil {
+		s.onNewStream()
+	}
 
 	return rs
 }
@@ -2517,6 +2522,54 @@ func TestPipeline_Progress_FSSizesSidecar_SeedsTotalAndCreditsStagedFile(t *test
 	streams := rec.snapshot()
 	require.Equal(t, testTotalSize, streams[0].Current(),
 		"final credited total must equal the exact combined file size (no double count between the sidecar seed and the real resume-skip crediting)")
+}
+
+func TestPipeline_Progress_ResumeScanCancellationStopsBeforeExport(t *testing.T) {
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+
+	codec, err := compress.New("none", 0)
+	require.NoError(t, err)
+
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+	chunksRoot := filepath.Join(
+		diskSnapDir,
+		archive.FsTarStagingDirName,
+		volume.FSMetaDirName,
+		archive.FSChunksDirName,
+	)
+	require.NoError(t, os.MkdirAll(filepath.Join(chunksRoot, "wide-parent"), 0o755))
+	seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	rec := &recordingSink{onNewStream: cancel}
+
+	var openExportCalls atomic.Int64
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		Compression:          codec,
+		Progress:             rec,
+		OpenExport: func(context.Context, string, aggapi.NodeRef, string) (*exporter.Export, error) {
+			openExportCalls.Add(1)
+
+			return nil, errors.New("OpenExport must not run after resume scan cancellation")
+		},
+	}
+
+	err = runPipeline(ctx, cfg)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, openExportCalls.Load())
+
+	streams := rec.snapshot()
+	require.Len(t, streams, 1)
+	require.Equal(t, 1, streams[0].failCnt, "the partially pre-created stream must be settled on cancellation")
 }
 
 // TestPipeline_Progress_ClampStaleSeedToFreshTotal is the regression test for
