@@ -18,6 +18,7 @@ limitations under the License.
 package archive
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -32,6 +33,14 @@ type AtomicWriter struct {
 	finalPath string
 	tmpPath   string
 	f         *os.File
+	ops       atomicCommitOps
+}
+
+type atomicCommitOps struct {
+	syncTemp  func(*os.File) error
+	closeTemp func(*os.File) error
+	rename    func(string, string) error
+	syncDir   func(string) error
 }
 
 // NewAtomicWriter creates (or truncates) "<path>.tmp" and returns a writer
@@ -44,7 +53,17 @@ func NewAtomicWriter(path string) (*AtomicWriter, error) {
 		return nil, fmt.Errorf("creating %s: %w", tmpPath, err)
 	}
 
-	return &AtomicWriter{finalPath: path, tmpPath: tmpPath, f: f}, nil
+	return &AtomicWriter{
+		finalPath: path,
+		tmpPath:   tmpPath,
+		f:         f,
+		ops: atomicCommitOps{
+			syncTemp:  (*os.File).Sync,
+			closeTemp: (*os.File).Close,
+			rename:    os.Rename,
+			syncDir:   syncDir,
+		},
+	}, nil
 }
 
 // Write implements io.Writer.
@@ -63,24 +82,51 @@ func (w *AtomicWriter) OpenTempReader() (io.ReadCloser, error) {
 	return f, nil
 }
 
-// Commit fsyncs and closes the temporary file, atomically renames it to the
-// final path, then fsyncs the parent directory for durability.
+// Commit is CommitContext with a non-cancellable context.
 // After Commit the AtomicWriter must not be used again.
 func (w *AtomicWriter) Commit() error {
-	if err := w.f.Sync(); err != nil {
-		_ = w.f.Close()
+	return w.CommitContext(context.Background())
+}
+
+// CommitContext fsyncs and closes the temporary file, checks cancellation,
+// atomically renames it to the final path, then fsyncs the parent directory.
+//
+// Publication begins at the cancellation checkpoint immediately before Rename.
+// Cancellation observed before that point removes the temporary file and leaves
+// the final path unchanged. Once the checkpoint succeeds, cancellation no
+// longer changes the result: Rename and parent-directory sync determine the
+// return value, so CommitContext never reports pre-publication cancellation
+// after publishing.
+func (w *AtomicWriter) CommitContext(ctx context.Context) error {
+	if err := w.ops.syncTemp(w.f); err != nil {
+		w.Abort()
+
 		return fmt.Errorf("syncing %s: %w", w.tmpPath, err)
 	}
 
-	if err := w.f.Close(); err != nil {
+	if err := w.ops.closeTemp(w.f); err != nil {
+		w.Abort()
+
 		return fmt.Errorf("closing %s: %w", w.tmpPath, err)
 	}
 
-	if err := os.Rename(w.tmpPath, w.finalPath); err != nil {
+	if err := ctx.Err(); err != nil {
+		w.Abort()
+
+		return fmt.Errorf("committing %s cancelled before publication: %w", w.finalPath, err)
+	}
+
+	if err := w.ops.rename(w.tmpPath, w.finalPath); err != nil {
+		w.Abort()
+
 		return fmt.Errorf("renaming %s to %s: %w", w.tmpPath, w.finalPath, err)
 	}
 
-	return syncDir(filepath.Dir(w.finalPath))
+	if err := w.ops.syncDir(filepath.Dir(w.finalPath)); err != nil {
+		return fmt.Errorf("syncing parent directory for %s: %w", w.finalPath, err)
+	}
+
+	return nil
 }
 
 // Abort closes and removes the temporary file. Safe to call even if Write
