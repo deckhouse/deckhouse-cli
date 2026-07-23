@@ -32,7 +32,6 @@ import (
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
-	"k8s.io/apimachinery/pkg/api/resource"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
@@ -40,7 +39,6 @@ import (
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
@@ -54,7 +52,6 @@ const (
 	flagWorkers                = "workers"
 	flagPerVolumeConcurrency   = "per-volume-concurrency"
 	flagMaxParallelDownloads   = "max-parallel-downloads"
-	flagChunkSize              = "chunk-size"
 	flagVolumeCompression      = "volume-compression"
 	flagVolumeCompressionLevel = "volume-compression-level"
 	flagCleanup                = "cleanup"
@@ -106,7 +103,6 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd.Flags().Int(flagWorkers, 4, "maximum number of nodes downloaded concurrently")
 	cmd.Flags().Int(flagPerVolumeConcurrency, 4, "maximum parallel chunk/file downloads per volume")
 	cmd.Flags().Int(flagMaxParallelDownloads, 5, "global cap on concurrent whole-volume-stream downloads across all nodes (independent of --workers and --per-volume-concurrency)")
-	cmd.Flags().String(flagChunkSize, "", "block-volume chunk size as a resource.Quantity, e.g. 256Mi, 512Mi, 1Gi (binary Ki/Mi/Gi) or decimal 128M/1G (decimal k/M/G, note lowercase k); the 'MiB'/'MB'/'GB'/'KiB' and uppercase 'K' spellings are NOT accepted; defaults to 256Mi (min 16Mi, max 1Gi)")
 	cmd.Flags().String(flagVolumeCompression, compress.DefaultCodecName,
 		"volume compression codec ("+strings.Join(compress.UserSelectableNames(), ", ")+
 			"); block volumes: data.bin[.<ext>]; filesystem volumes: per-file compressed entries inside an uncompressed data.tar container")
@@ -185,16 +181,6 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return fmt.Errorf("reading --%s flag: %w", flagMaxParallelDownloads, err)
 	}
 
-	chunkSizeStr, err := cmd.Flags().GetString(flagChunkSize)
-	if err != nil {
-		return fmt.Errorf("reading --%s flag: %w", flagChunkSize, err)
-	}
-
-	chunkSize, err := parseChunkSize(chunkSizeStr)
-	if err != nil {
-		return fmt.Errorf("parsing --%s: %w", flagChunkSize, err)
-	}
-
 	compressionName, err := cmd.Flags().GetString(flagVolumeCompression)
 	if err != nil {
 		return fmt.Errorf("reading --%s flag: %w", flagVolumeCompression, err)
@@ -209,9 +195,8 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	// ignored rather than rejected. "none" has no notion of a level, and
 	// silently ignoring an inapplicable flag (rather than erroring) matches
 	// how the rest of this CLI treats flag combinations that simply don't
-	// interact (e.g. --chunk-size has no effect on a filesystem-only volume).
-	// compress.New's "none" factory already ignores the level argument, so no
-	// extra branching is needed here beyond this note.
+	// interact. compress.New's "none" factory already ignores the level
+	// argument, so no extra branching is needed here beyond this note.
 	codec, err := validateVolumeCompression(compressionName, compressionLevel)
 	if err != nil {
 		return err
@@ -291,7 +276,6 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		Workers:              workers,
 		PerVolumeConcurrency: perVolume,
 		MaxParallelDownloads: maxParallel,
-		ChunkSize:            chunkSize,
 		TTL:                  ttl,
 		KeepExports:          !cleanup,
 		Compression:          codec,
@@ -435,55 +419,4 @@ func parseNodeFlag(s string) (string, string, error) {
 	}
 
 	return kind, name, nil
-}
-
-// maxChunkSize caps --chunk-size so a huge value cannot blow the
-// multiplicative memory peak documented on pipeline.Config.Workers
-// (Workers × PerVolumeConcurrency × ChunkSize) and so chunk-based resume
-// still lands on a reasonably fine granularity. Set as 4× the 256 MiB
-// default (volume.DefaultChunkSize) — 1 GiB — a generous ceiling that keeps
-// the worst-case per-chunk buffer bounded on typical hosts.
-const maxChunkSize = 4 * volume.DefaultChunkSize // 1 GiB
-
-// parseChunkSize converts a human-readable size string (e.g. "256Mi", "128M")
-// into bytes using k8s.io/apimachinery's resource.ParseQuantity. Delegating to
-// Quantity — a direct in-repo dependency (see internal/data/dataexport) — parses
-// these unit spellings strictly and, unlike the previous hand-rolled
-// suffix-stripping + fmt.Sscanf("%d") parser, REJECTS trailing/embedded garbage
-// (e.g. "12x3Mi", "12 3Mi") instead of silently truncating it to a different,
-// unintended size. An empty string returns 0, which the pipeline interprets as
-// volume.DefaultChunkSize (256 MiB). The result must fall within
-// [volume.DefaultChunkSize/16, maxChunkSize]; see maxChunkSize for the
-// ceiling's rationale.
-//
-// Accepted suffixes are exactly resource.Quantity's: binary Ki/Mi/Gi (powers of
-// 1024) and decimal k/M/G (powers of 1000; decimal kilo is lowercase "k"). This
-// is a deliberate divergence from the old parser, which also accepted
-// "MiB"/"MB"/"GB"/"KiB" and uppercase "K"; those are NOT Quantity suffixes and
-// now error. The flag help text documents the accepted spellings.
-func parseChunkSize(s string) (int64, error) {
-	if s == "" {
-		return 0, nil
-	}
-
-	q, err := resource.ParseQuantity(strings.TrimSpace(s))
-	if err != nil {
-		return 0, fmt.Errorf("invalid size %q (use a resource.Quantity, e.g. 256Mi, 512Mi, 1Gi, or decimal 128M/1G): %w", s, err)
-	}
-
-	n := q.Value()
-
-	if n <= 0 {
-		return 0, fmt.Errorf("chunk size must be positive, got %d", n)
-	}
-
-	if n < volume.DefaultChunkSize/16 {
-		return 0, fmt.Errorf("chunk size %d bytes is too small (minimum %d bytes)", n, volume.DefaultChunkSize/16)
-	}
-
-	if n > maxChunkSize {
-		return 0, fmt.Errorf("chunk size %d bytes is too large (maximum %d bytes)", n, maxChunkSize)
-	}
-
-	return n, nil
 }

@@ -1088,8 +1088,8 @@ func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *e
 		// A fresh HEAD total below the value seedStreamFromDisk already
 		// credited proves that seed was computed from an on-disk chunk
 		// geometry DownloadBlockChunks' ensureChunkGeometry is about to purge
-		// (a changed --chunk-size or a shrunk volume): after that purge the
-		// resume-skip crediting re-derives from byte zero, so leaving the seed
+		// (a shrunk volume): after that purge the resume-skip crediting
+		// re-derives from byte zero, so leaving the seed
 		// in place would strand the bar above 100% until Done() forces it back
 		// down. Reset the displayed value to 0 BEFORE lowering the total, so
 		// the bar never renders current > total, and neutralize the seed so
@@ -1108,11 +1108,11 @@ func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *e
 		onProgress = skipSeededBytes(seeded, stream.IncrBy)
 	}
 
-	if err := volume.DownloadBlockChunks(ctx, cfg.Log, dest.chunkDir, blockURL, totalSize, cfg.ChunkSize, cfg.PerVolumeConcurrency, exp.Fetcher(), cfg.Compression, onProgress); err != nil {
+	if err := volume.DownloadBlockChunks(ctx, cfg.Log, dest.chunkDir, blockURL, totalSize, volume.DefaultChunkSize, cfg.PerVolumeConcurrency, exp.Fetcher(), cfg.Compression, onProgress); err != nil {
 		return fmt.Errorf("download block chunks: %w", err)
 	}
 
-	return volume.MergeBlockChunks(ctx, dest.chunkDir, dest.blockPath, totalSize, cfg.ChunkSize, cfg.Compression.Ext())
+	return volume.MergeBlockChunks(ctx, dest.chunkDir, dest.blockPath, totalSize, volume.DefaultChunkSize, cfg.Compression.Ext())
 }
 
 // downloadFS downloads a filesystem volume's files and assembles the tar.
@@ -1173,7 +1173,7 @@ func downloadFS(ctx context.Context, cfg Config, dest volumeDestPaths, exp *expo
 		}
 	}
 
-	return volume.DownloadFilesystemVolume(ctx, cfg.Log, dest.fsTarPath, dest.fsTarStagingDir, filesURL, cfg.PerVolumeConcurrency, cfg.ChunkSize, exp.Fetcher(), cfg.Compression, setTotal, onProgress)
+	return volume.DownloadFilesystemVolume(ctx, cfg.Log, dest.fsTarPath, dest.fsTarStagingDir, filesURL, cfg.PerVolumeConcurrency, volume.DefaultChunkSize, exp.Fetcher(), cfg.Compression, setTotal, onProgress)
 }
 
 // skipSeededBytes wraps onProgress so that credits toward the first `seeded`

@@ -92,14 +92,16 @@ func (e *Encoder) EncodeFrame(src []byte) ([]byte, error) {
 // input and identical encoder options — proven empirically in
 // codec_test.go, including with a real *os.File source and the encoder's
 // own content-size reset. Since every chunk this package ever encodes is at
-// least 16 MiB (see volume.DefaultChunkSize and the CLI's --chunk-size
-// floor), the "fits in one 128 KiB block" fast path (which IS byte-for-byte
-// identical to EncodeAll, being the same code path) never applies here.
+// least 16 MiB (see volume.DefaultChunkSize, which production hardcodes for
+// every block chunk — see block-chunk-size-hardcode-only), the "fits in one
+// 128 KiB block" fast path (which IS byte-for-byte identical to EncodeAll,
+// being the same code path) never applies here.
 //
 // This is the "codec genuinely cannot stream-encode to an identical frame"
 // case documented on the Codec.EncodeFrameStream contract: peak memory for
 // this call is bounded by size, not by a fixed streaming window, so callers
-// MUST keep an upper bound on size (see the CLI's --chunk-size maximum).
+// MUST keep an upper bound on size (production fixes it at
+// volume.DefaultChunkSize; only low-level unit tests pass a different size).
 func (z *zstdCodec) EncodeFrameStream(dst io.Writer, src io.Reader, size int64) error {
 	raw := make([]byte, size)
 

@@ -28,123 +28,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 )
 
-func TestParseChunkSize_EmptyReturnsZero(t *testing.T) {
-	t.Helper()
-
-	n, err := parseChunkSize("")
-	if err != nil {
-		t.Fatalf("unexpected error for empty string: %v", err)
-	}
-
-	if n != 0 {
-		t.Fatalf("expected 0 for empty input, got %d", n)
-	}
-}
-
-func TestParseChunkSize(t *testing.T) {
-	t.Helper()
-
-	cases := []struct {
-		input   string
-		want    int64
-		wantErr bool
-	}{
-		// Golden values: resource.ParseQuantity must yield the same byte counts
-		// the old hand-rolled parser produced for these spellings.
-		{"256Mi", 256 * 1024 * 1024, false},
-		// at max: exactly maxChunkSize (4x DefaultChunkSize == 1 GiB)
-		{"1Gi", 1 * 1024 * 1024 * 1024, false},
-		{"512Mi", 512 * 1024 * 1024, false},
-		{"128M", 128 * 1000 * 1000, false},
-		{"1G", 1 * 1000 * 1000 * 1000, false},
-		// Deliberately dropped legacy spellings: "MiB"/"GiB"/"MB" and uppercase
-		// "K" are NOT resource.Quantity suffixes and now error (reflected in the
-		// flag help). Previously these were accepted by the hand-rolled parser.
-		{"256MiB", 0, true},
-		{"1GiB", 0, true},
-		{"128MB", 0, true},
-		{"1K", 0, true},
-		// too small: below DefaultChunkSize/16
-		{"1Ki", 0, true},
-		// zero
-		{"0Mi", 0, true},
-		// negative
-		{"-1Mi", 0, true},
-		// bad string
-		{"abc", 0, true},
-		// just above maxChunkSize
-		{"1025Mi", 0, true},
-		// well above maxChunkSize
-		{"4Gi", 0, true},
-		// Trailing/embedded garbage that the old fmt.Sscanf("%d") parser
-		// silently truncated to a different size — must now be rejected.
-		{"12x3Mi", 0, true},
-		{"12 3Mi", 0, true},
-		{"12x3", 0, true},
-		{"256 Mi", 0, true},
-		{"Mi", 0, true},
-		{"--5Mi", 0, true},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.input, func(t *testing.T) {
-			got, err := parseChunkSize(tc.input)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("input %q: expected error, got nil (result=%d)", tc.input, got)
-				}
-
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("input %q: unexpected error: %v", tc.input, err)
-			}
-
-			if got != tc.want {
-				t.Fatalf("input %q: got %d, want %d", tc.input, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestParseChunkSize_DefaultMinimum(t *testing.T) {
-	t.Helper()
-
-	// Exactly DefaultChunkSize (256 MiB) should parse fine.
-	const defaultChunkSize = 256 * 1024 * 1024 // mirrors volume.DefaultChunkSize
-	s := "256Mi"
-
-	n, err := parseChunkSize(s)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if n != defaultChunkSize {
-		t.Fatalf("got %d, want %d", n, defaultChunkSize)
-	}
-}
-
-func TestParseChunkSize_Maximum(t *testing.T) {
-	t.Helper()
-
-	// Exactly maxChunkSize (1 GiB) should parse fine.
-	n, err := parseChunkSize("1Gi")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if n != maxChunkSize {
-		t.Fatalf("got %d, want %d", n, maxChunkSize)
-	}
-
-	// Anything above maxChunkSize must be rejected.
-	_, err = parseChunkSize("1025Mi")
-	if err == nil {
-		t.Fatal("expected error for chunk size above maximum, got nil")
-	}
-}
-
 func TestNewCommand_Defaults(t *testing.T) {
 	t.Helper()
 
@@ -191,14 +74,18 @@ func TestNewCommand_Defaults(t *testing.T) {
 	if perVol != 4 {
 		t.Fatalf("default per-volume-concurrency: got %d, want 4", perVol)
 	}
+}
 
-	chunkSize, err := cmd.Flags().GetString(flagChunkSize)
-	if err != nil {
-		t.Fatalf("getting chunk-size flag: %v", err)
-	}
+// TestNewCommand_ChunkSizeFlagRemoved asserts --chunk-size is no longer
+// registered: production block downloads/merges are hardcoded to
+// volume.DefaultChunkSize (see block-chunk-size-hardcode-only).
+func TestNewCommand_ChunkSizeFlagRemoved(t *testing.T) {
+	t.Helper()
 
-	if chunkSize != "" {
-		t.Fatalf("default chunk-size: got %q, want empty", chunkSize)
+	cmd := NewCommand(context.Background(), slog.Default())
+
+	if cmd.Flags().Lookup("chunk-size") != nil {
+		t.Fatal("--chunk-size must not be registered")
 	}
 }
 

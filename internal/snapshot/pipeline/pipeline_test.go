@@ -17,7 +17,6 @@ limitations under the License.
 package pipeline_test
 
 import (
-	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -1116,16 +1115,18 @@ func TestPipeline_Progress_NilSinkIsNoop(t *testing.T) {
 	assertNodeComplete(t, diskSnapDir)
 }
 
-// TestPipeline_PartialChunkResume verifies the block_partial resume path: when a node's
-// data.bin.d/ chunk directory already holds some (but not all) chunk files and there is
-// no snapshot.yaml, the pipeline fetches only the missing byte ranges, merges all chunks,
-// removes data.bin.d/, and finalizes the node.
+// TestPipeline_PartialChunkResume verifies the block_partial resume path: when
+// a node's data.bin.d/ chunk directory already holds a durable partial prefix
+// of its (single, volume.DefaultChunkSize-geometry — see
+// block-chunk-size-hardcode-only) chunk and there is no snapshot.yaml, the
+// pipeline fetches only the missing suffix, merges the chunk, removes
+// data.bin.d/, and finalizes the node.
 func TestPipeline_PartialChunkResume(t *testing.T) {
 	t.Parallel()
 
 	const (
-		testChunkSize int64 = 100 // 3 × 100 = 300 bytes → 3 chunks
 		testTotalSize int64 = 300
+		partialBytes  int64 = 100 // durable prefix already on disk before the crash
 	)
 
 	rawBlock := bytes.Repeat([]byte("Z"), int(testTotalSize))
@@ -1156,30 +1157,36 @@ func TestPipeline_PartialChunkResume(t *testing.T) {
 	codec, err := compress.New("zstd", 0)
 	require.NoError(t, err)
 
-	// Pre-seed chunk 0 as a real zstd frame, simulating a crash after the first
-	// chunk was downloaded but before the remaining chunks were fetched.
+	// Pre-seed the sole chunk's durable ".part" prefix, simulating a crash
+	// mid-download of the volume's only chunk (300 bytes is well under
+	// volume.DefaultChunkSize, so this volume is always exactly one chunk).
 	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 		archive.NodeDirName(childKind, diskSnapName))
 	chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
 	require.NoError(t, os.MkdirAll(chunkDir, 0o755))
 	seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 
-	chunk0Frame, err := codec.EncodeFrame(rawBlock[:testChunkSize])
-	require.NoError(t, err)
-
 	require.NoError(t, os.WriteFile(
-		filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())),
-		chunk0Frame,
+		filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".part"),
+		rawBlock[:partialBytes],
+		0o644,
+	))
+	// A durable ".part.offset" sidecar must accompany the ".part" file so
+	// partialChunkSize trusts this partial prefix instead of truncating it to
+	// zero (see download-resume-part-trusted-prefix).
+	require.NoError(t, os.WriteFile(
+		filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".part.offset"),
+		[]byte(strconv.FormatInt(partialBytes, 10)),
 		0o644,
 	))
 
 	// A real interrupted run always has a chunks.meta recording the geometry
 	// (written before the first chunk is even fetched — see the
 	// chunk-size-mismatch-resume-corruption-guard fix), so seed one matching
-	// this run's geometry; otherwise the geometry guard cannot distinguish
-	// this partial dir from one left by a different --chunk-size and would
-	// (correctly) purge and re-fetch chunk 0 too.
-	require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: testChunkSize, TotalSize: testTotalSize}))
+	// this run's now-fixed geometry; otherwise the geometry guard cannot
+	// distinguish this partial dir from a foreign one and would (correctly)
+	// purge and re-fetch from byte zero.
+	require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: volume.DefaultChunkSize, TotalSize: testTotalSize}))
 
 	cfg := pipeline.Config{
 		Namespace:            testNS,
@@ -1187,7 +1194,6 @@ func TestPipeline_PartialChunkResume(t *testing.T) {
 		OutputDir:            outputDir,
 		Workers:              1,
 		PerVolumeConcurrency: 1,
-		ChunkSize:            testChunkSize,
 		KubeClient:           c,
 		Compression:          codec,
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
@@ -1197,18 +1203,19 @@ func TestPipeline_PartialChunkResume(t *testing.T) {
 
 	require.NoError(t, runPipeline(context.Background(), cfg))
 
-	// (a) Chunk 0 must not have been re-fetched; chunks 1 and 2 must have been fetched.
+	// (a) The durable prefix must not have been re-fetched from byte zero;
+	// only the missing suffix must have been fetched.
 	mu.Lock()
 	gotRanges := append([]string(nil), fetchedRanges...)
 	mu.Unlock()
 
 	for _, hdr := range gotRanges {
-		require.NotEqual(t, "bytes=0-99", hdr,
-			"chunk 0 was pre-seeded and must not be re-fetched")
+		require.NotEqual(t, fmt.Sprintf("bytes=0-%d", testTotalSize-1), hdr,
+			"the durable partial prefix was pre-seeded and must not be re-fetched from byte zero")
 	}
 
-	require.Contains(t, gotRanges, "bytes=100-199", "chunk 1 must be fetched")
-	require.Contains(t, gotRanges, "bytes=200-299", "chunk 2 must be fetched")
+	require.Contains(t, gotRanges, fmt.Sprintf("bytes=%d-%d", partialBytes, testTotalSize-1),
+		"only the missing suffix must be fetched")
 
 	// (b) Merged data.bin.zst must decode to the original rawBlock.
 	blockFile := filepath.Join(diskSnapDir, archive.DataBlockName(codec.Ext()))
@@ -1223,117 +1230,6 @@ func TestPipeline_PartialChunkResume(t *testing.T) {
 	// (d) The chunk directory must have been removed after merge.
 	_, statErr := os.Stat(chunkDir)
 	require.True(t, os.IsNotExist(statErr), "data.bin.d/ must be removed after merge")
-}
-
-// TestPipeline_FS_ChunkSizeThreadsToDownloadFilesystemVolume verifies that
-// downloadFS passes cfg.ChunkSize through to volume.DownloadFilesystemVolume
-// (fs-large-file-chunked-range-resume): a Filesystem-mode volume whose single
-// file exceeds cfg.ChunkSize must be fetched via multiple Range GETs, not one
-// plain GET, proving the pipeline-level config value — not just the
-// volume package's own default — governs per-file chunking.
-func TestPipeline_FS_ChunkSizeThreadsToDownloadFilesystemVolume(t *testing.T) {
-	t.Parallel()
-
-	const testChunkSize int64 = 100
-
-	content := bytes.Repeat([]byte("F"), 250) // 3 chunks: 100, 100, 50
-
-	var (
-		mu     sync.Mutex
-		ranges []string
-	)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/files/":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
-				`{"name":"big.bin","type":"file","uri":"big.bin","attributes":{"size":`+strconv.Itoa(len(content))+`}}`+
-				`]}`)
-
-		case "/api/v1/files/big.bin":
-			mu.Lock()
-			ranges = append(ranges, r.Header.Get("Range"))
-			mu.Unlock()
-
-			http.ServeContent(w, r, "big.bin", time.Time{}, bytes.NewReader(content))
-
-		default:
-			http.NotFound(w, r)
-		}
-	})
-
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	c := buildFakeClient(t)
-	outputDir := t.TempDir()
-
-	codec, err := compress.New("zstd", 0)
-	require.NoError(t, err)
-
-	cfg := pipeline.Config{
-		Namespace:            testNS,
-		RootSnapshot:         rootSnapshot,
-		OutputDir:            outputDir,
-		Workers:              1,
-		PerVolumeConcurrency: 1,
-		ChunkSize:            testChunkSize,
-		KubeClient:           c,
-		Compression:          codec,
-		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-fs-chunk", "Filesystem", srv.URL, exporter.NewFetcher(srv.Client())), nil
-		},
-	}
-
-	require.NoError(t, runPipeline(context.Background(), cfg))
-
-	mu.Lock()
-	gotRanges := append([]string(nil), ranges...)
-	mu.Unlock()
-
-	require.GreaterOrEqual(t, len(gotRanges), 2,
-		"cfg.ChunkSize must have been threaded to DownloadFilesystemVolume, forcing a chunked (multi Range GET) download")
-
-	for _, hdr := range gotRanges {
-		require.NotEmpty(t, hdr, "every request must carry a Range header once per-file chunking is active")
-	}
-
-	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
-		archive.NodeDirName(childKind, diskSnapName))
-	assertNodeComplete(t, diskSnapDir)
-
-	f, err := os.Open(filepath.Join(diskSnapDir, archive.FsTarName))
-	require.NoError(t, err)
-
-	defer func() { _ = f.Close() }()
-
-	tr := tar.NewReader(f)
-
-	var found bool
-
-	for {
-		hdr, nextErr := tr.Next()
-		if nextErr == io.EOF {
-			break
-		}
-
-		require.NoError(t, nextErr)
-
-		if hdr.Name != "big.bin"+codec.Ext() {
-			continue
-		}
-
-		compressed, readErr := io.ReadAll(tr)
-		require.NoError(t, readErr)
-		require.Equal(t, content, decodeZstdBlock(t, compressed),
-			"merged big.bin tar entry must decode to the original content")
-
-		found = true
-	}
-
-	require.True(t, found, "tar entry for big.bin not found")
 }
 
 // ── recording progress helpers ────────────────────────────────────────────────
@@ -1696,8 +1592,8 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 		t.Parallel()
 
 		const (
-			testChunkSize int64 = 100
-			testTotalSize int64 = 300 // 3 chunks: 100, 100, 100
+			testTotalSize int64 = 300
+			partialBytes  int64 = 137 // durable prefix of the volume's single chunk
 		)
 
 		rawBlock := bytes.Repeat([]byte("Z"), int(testTotalSize))
@@ -1711,35 +1607,31 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 		codec, err := compress.New("zstd", 0)
 		require.NoError(t, err)
 
-		// Pre-seed chunk 0 as a finalized frame and chunk 1 as a durable partial,
-		// simulating a crash mid-download (same technique as
-		// TestPipeline_PartialChunkResume).
+		// Pre-seed the sole chunk's durable ".part" prefix, simulating a crash
+		// mid-download (same technique as TestPipeline_PartialChunkResume; 300
+		// bytes is well under volume.DefaultChunkSize, so this volume is always
+		// exactly one chunk).
 		diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 			archive.NodeDirName(childKind, diskSnapName))
 		chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
 		require.NoError(t, os.MkdirAll(chunkDir, 0o755))
 		seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 
-		chunk0Frame, err := codec.EncodeFrame(rawBlock[:testChunkSize])
-		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())), chunk0Frame, 0o644))
-
-		const partialBytes = 37
 		require.NoError(t, os.WriteFile(
-			filepath.Join(chunkDir, archive.ChunkFileName(1, codec.Ext())+".part"),
-			rawBlock[testChunkSize:testChunkSize+partialBytes],
+			filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".part"),
+			rawBlock[:partialBytes],
 			0o644,
 		))
 		// A durable ".part.offset" sidecar must accompany the ".part" file so
 		// partialChunkSize trusts this partial prefix instead of truncating it
 		// to zero (see download-resume-part-trusted-prefix).
 		require.NoError(t, os.WriteFile(
-			filepath.Join(chunkDir, archive.ChunkFileName(1, codec.Ext())+".part.offset"),
-			[]byte(fmt.Sprintf("%d", partialBytes)),
+			filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".part.offset"),
+			[]byte(strconv.FormatInt(partialBytes, 10)),
 			0o644,
 		))
 
-		require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: testChunkSize, TotalSize: testTotalSize}))
+		require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: volume.DefaultChunkSize, TotalSize: testTotalSize}))
 
 		rec := &recordingSink{}
 
@@ -1755,7 +1647,6 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 			OutputDir:            outputDir,
 			Workers:              1,
 			PerVolumeConcurrency: 1,
-			ChunkSize:            testChunkSize,
 			KubeClient:           c,
 			Compression:          codec,
 			Progress:             rec,
@@ -1774,8 +1665,8 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 
 		require.NoError(t, runPipeline(context.Background(), cfg))
 
-		require.Equal(t, testChunkSize+partialBytes, seededCurrent,
-			"stream must be seeded with chunk 0's full length plus chunk 1's partial length before OpenExport ever runs")
+		require.Equal(t, partialBytes, seededCurrent,
+			"stream must be seeded with the chunk's durable partial length before OpenExport ever runs")
 		require.Equal(t, testTotalSize, seededTotal,
 			"stream's total must be seeded from chunks.meta before OpenExport ever runs")
 
@@ -1788,8 +1679,8 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 		t.Parallel()
 
 		const (
-			testChunkSize int64 = 100
-			testTotalSize int64 = 250 // 3 chunks: 100, 100, 50
+			testTotalSize int64 = 250
+			partialBytes  int64 = 142 // durable prefix of the file's single chunk
 		)
 
 		content := bytes.Repeat([]byte("F"), int(testTotalSize))
@@ -1820,9 +1711,10 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 		codec, err := compress.New("zstd", 0)
 		require.NoError(t, err)
 
-		// Pre-seed big.bin's per-file chunk dir with chunk 0 finalized and chunk 1
-		// as a durable partial, simulating a crash mid-transfer of a single large
-		// file (the realistic FS analogue of the block sub-test above).
+		// Pre-seed big.bin's per-file chunk dir with its sole chunk's durable
+		// ".part" prefix, simulating a crash mid-transfer (the realistic FS
+		// analogue of the block sub-test above; 250 bytes is well under
+		// volume.DefaultChunkSize, so this file is always exactly one chunk).
 		diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 			archive.NodeDirName(childKind, diskSnapName))
 		stagingDir := filepath.Join(diskSnapDir, archive.FsTarStagingDirName)
@@ -1830,26 +1722,21 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 		require.NoError(t, os.MkdirAll(fileChunkDir, 0o755))
 		seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 
-		chunk0Frame, err := codec.EncodeFrame(content[:testChunkSize])
-		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(filepath.Join(fileChunkDir, archive.ChunkFileName(0, codec.Ext())), chunk0Frame, 0o644))
-
-		const partialBytes = 42
 		require.NoError(t, os.WriteFile(
-			filepath.Join(fileChunkDir, archive.ChunkFileName(1, codec.Ext())+".part"),
-			content[testChunkSize:testChunkSize+partialBytes],
+			filepath.Join(fileChunkDir, archive.ChunkFileName(0, codec.Ext())+".part"),
+			content[:partialBytes],
 			0o644,
 		))
 		// A durable ".part.offset" sidecar must accompany the ".part" file so
 		// partialChunkSize trusts this partial prefix instead of truncating it
 		// to zero (see download-resume-part-trusted-prefix).
 		require.NoError(t, os.WriteFile(
-			filepath.Join(fileChunkDir, archive.ChunkFileName(1, codec.Ext())+".part.offset"),
-			[]byte(fmt.Sprintf("%d", partialBytes)),
+			filepath.Join(fileChunkDir, archive.ChunkFileName(0, codec.Ext())+".part.offset"),
+			[]byte(strconv.FormatInt(partialBytes, 10)),
 			0o644,
 		))
 
-		require.NoError(t, archive.WriteChunkMeta(fileChunkDir, archive.ChunkMeta{ChunkSize: testChunkSize, TotalSize: testTotalSize}))
+		require.NoError(t, archive.WriteChunkMeta(fileChunkDir, archive.ChunkMeta{ChunkSize: volume.DefaultChunkSize, TotalSize: testTotalSize}))
 
 		rec := &recordingSink{}
 
@@ -1864,7 +1751,6 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 			OutputDir:            outputDir,
 			Workers:              1,
 			PerVolumeConcurrency: 1,
-			ChunkSize:            testChunkSize,
 			KubeClient:           c,
 			Compression:          codec,
 			Progress:             rec,
@@ -1882,7 +1768,7 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 
 		require.NoError(t, runPipeline(context.Background(), cfg))
 
-		require.Equal(t, testChunkSize+partialBytes, seededCurrent,
+		require.Equal(t, partialBytes, seededCurrent,
 			"stream must be seeded with the in-progress per-file chunk dir's committed bytes before OpenExport ever runs")
 
 		streams := rec.snapshot()
@@ -1954,8 +1840,8 @@ func TestPipeline_Progress_MonotonicAcrossActivate(t *testing.T) {
 		t.Parallel()
 
 		const (
-			testChunkSize int64 = 100
-			testTotalSize int64 = 300 // 3 chunks: 100, 100, 100
+			testTotalSize int64 = 300
+			partialBytes  int64 = 137 // durable prefix of the volume's single chunk
 		)
 
 		rawBlock := bytes.Repeat([]byte("M"), int(testTotalSize))
@@ -1969,35 +1855,32 @@ func TestPipeline_Progress_MonotonicAcrossActivate(t *testing.T) {
 		codec, err := compress.New("zstd", 0)
 		require.NoError(t, err)
 
-		// Pre-seed chunk 0 as a finalized frame and chunk 1 as a durable
-		// partial, simulating a crash mid-download (same technique as
-		// TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer).
+		// Pre-seed the sole chunk's durable ".part" prefix, simulating a crash
+		// mid-download (same technique as
+		// TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer; 300 bytes is
+		// well under volume.DefaultChunkSize, so this volume is always exactly
+		// one chunk).
 		diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 			archive.NodeDirName(childKind, diskSnapName))
 		chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
 		require.NoError(t, os.MkdirAll(chunkDir, 0o755))
 		seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 
-		chunk0Frame, err := codec.EncodeFrame(rawBlock[:testChunkSize])
-		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())), chunk0Frame, 0o644))
-
-		const partialBytes = 37
 		require.NoError(t, os.WriteFile(
-			filepath.Join(chunkDir, archive.ChunkFileName(1, codec.Ext())+".part"),
-			rawBlock[testChunkSize:testChunkSize+partialBytes],
+			filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".part"),
+			rawBlock[:partialBytes],
 			0o644,
 		))
 		// A durable ".part.offset" sidecar must accompany the ".part" file so
 		// partialChunkSize trusts this partial prefix instead of truncating it
 		// to zero (see download-resume-part-trusted-prefix).
 		require.NoError(t, os.WriteFile(
-			filepath.Join(chunkDir, archive.ChunkFileName(1, codec.Ext())+".part.offset"),
-			[]byte(fmt.Sprintf("%d", partialBytes)),
+			filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".part.offset"),
+			[]byte(strconv.FormatInt(partialBytes, 10)),
 			0o644,
 		))
 
-		require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: testChunkSize, TotalSize: testTotalSize}))
+		require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: volume.DefaultChunkSize, TotalSize: testTotalSize}))
 
 		rec := &recordingSink{}
 
@@ -2007,7 +1890,6 @@ func TestPipeline_Progress_MonotonicAcrossActivate(t *testing.T) {
 			OutputDir:            outputDir,
 			Workers:              1,
 			PerVolumeConcurrency: 1,
-			ChunkSize:            testChunkSize,
 			KubeClient:           c,
 			Compression:          codec,
 			Progress:             rec,
@@ -2023,7 +1905,7 @@ func TestPipeline_Progress_MonotonicAcrossActivate(t *testing.T) {
 
 		history := streams[0].History()
 		require.NotEmpty(t, history, "seeding must have recorded at least the initial seed value")
-		require.Equal(t, testChunkSize+partialBytes, history[0],
+		require.Equal(t, partialBytes, history[0],
 			"the very first recorded value must be the seed itself, before any SetCurrent(0)-style reset")
 		require.NotContains(t, history[1:], int64(0),
 			"current must never revisit 0 after a positive seed")
@@ -2036,8 +1918,8 @@ func TestPipeline_Progress_MonotonicAcrossActivate(t *testing.T) {
 		t.Parallel()
 
 		const (
-			testChunkSize int64 = 100
-			testTotalSize int64 = 250 // 3 chunks: 100, 100, 50
+			testTotalSize int64 = 250
+			partialBytes  int64 = 142 // durable prefix of the file's single chunk
 		)
 
 		content := bytes.Repeat([]byte("N"), int(testTotalSize))
@@ -2068,9 +1950,10 @@ func TestPipeline_Progress_MonotonicAcrossActivate(t *testing.T) {
 		codec, err := compress.New("zstd", 0)
 		require.NoError(t, err)
 
-		// Pre-seed big.bin's per-file chunk dir with chunk 0 finalized and chunk 1
-		// as a durable partial, simulating a crash mid-transfer of a single large
-		// file (the realistic FS analogue of the block sub-test above).
+		// Pre-seed big.bin's per-file chunk dir with its sole chunk's durable
+		// ".part" prefix, simulating a crash mid-transfer (the realistic FS
+		// analogue of the block sub-test above; 250 bytes is well under
+		// volume.DefaultChunkSize, so this file is always exactly one chunk).
 		diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 			archive.NodeDirName(childKind, diskSnapName))
 		stagingDir := filepath.Join(diskSnapDir, archive.FsTarStagingDirName)
@@ -2078,23 +1961,18 @@ func TestPipeline_Progress_MonotonicAcrossActivate(t *testing.T) {
 		require.NoError(t, os.MkdirAll(fileChunkDir, 0o755))
 		seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 
-		chunk0Frame, err := codec.EncodeFrame(content[:testChunkSize])
-		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(filepath.Join(fileChunkDir, archive.ChunkFileName(0, codec.Ext())), chunk0Frame, 0o644))
-
-		const partialBytes = 42
 		require.NoError(t, os.WriteFile(
-			filepath.Join(fileChunkDir, archive.ChunkFileName(1, codec.Ext())+".part"),
-			content[testChunkSize:testChunkSize+partialBytes],
+			filepath.Join(fileChunkDir, archive.ChunkFileName(0, codec.Ext())+".part"),
+			content[:partialBytes],
 			0o644,
 		))
 		require.NoError(t, os.WriteFile(
-			filepath.Join(fileChunkDir, archive.ChunkFileName(1, codec.Ext())+".part.offset"),
-			[]byte(fmt.Sprintf("%d", partialBytes)),
+			filepath.Join(fileChunkDir, archive.ChunkFileName(0, codec.Ext())+".part.offset"),
+			[]byte(strconv.FormatInt(partialBytes, 10)),
 			0o644,
 		))
 
-		require.NoError(t, archive.WriteChunkMeta(fileChunkDir, archive.ChunkMeta{ChunkSize: testChunkSize, TotalSize: testTotalSize}))
+		require.NoError(t, archive.WriteChunkMeta(fileChunkDir, archive.ChunkMeta{ChunkSize: volume.DefaultChunkSize, TotalSize: testTotalSize}))
 
 		rec := &recordingSink{}
 
@@ -2104,7 +1982,6 @@ func TestPipeline_Progress_MonotonicAcrossActivate(t *testing.T) {
 			OutputDir:            outputDir,
 			Workers:              1,
 			PerVolumeConcurrency: 1,
-			ChunkSize:            testChunkSize,
 			KubeClient:           c,
 			Compression:          codec,
 			Progress:             rec,
@@ -2120,7 +1997,7 @@ func TestPipeline_Progress_MonotonicAcrossActivate(t *testing.T) {
 
 		history := streams[0].History()
 		require.NotEmpty(t, history, "seeding must have recorded at least the initial seed value")
-		require.Equal(t, testChunkSize+partialBytes, history[0],
+		require.Equal(t, partialBytes, history[0],
 			"the very first recorded value must be the seed itself, before any SetCurrent(0)-style reset")
 		require.NotContains(t, history[1:], int64(0),
 			"current must never revisit 0 after a positive seed")
@@ -2330,10 +2207,8 @@ func TestPipeline_Progress_ClampStaleSeedToFreshTotal(t *testing.T) {
 		t.Parallel()
 
 		const (
-			oldChunkSize  int64 = 100
-			oldTotalSize  int64 = 300 // 3 old chunks -> seed credits 300
-			testChunkSize int64 = 100
-			freshTotal    int64 = 150 // fresh HEAD reports a SMALLER volume
+			oldTotalSize int64 = 300 // stale seed -> seedStreamFromDisk credits 300
+			freshTotal   int64 = 150 // fresh HEAD reports a SMALLER volume
 		)
 
 		rawBlock := bytes.Repeat([]byte("Z"), int(freshTotal))
@@ -2347,24 +2222,22 @@ func TestPipeline_Progress_ClampStaleSeedToFreshTotal(t *testing.T) {
 		codec, err := compress.New("zstd", 0)
 		require.NoError(t, err)
 
-		// Seed an OLD chunk geometry: chunks.meta claims 300 bytes across three
-		// present chunks, so seedStreamFromDisk credits 300. ensureChunkGeometry
-		// will purge this whole dir on the fresh run (meta 300 != fresh 150), so
-		// the chunk-file contents are irrelevant — they are re-fetched from byte
-		// zero and the resume-skip crediting re-derives 0.
+		// Seed an OLD geometry: chunks.meta claims 300 bytes, so
+		// seedStreamFromDisk credits 300. ensureChunkGeometry will purge this
+		// whole dir on the fresh run (meta 300 != fresh 150), so the chunk
+		// file's content is irrelevant — it is re-fetched from byte zero and
+		// the resume-skip crediting re-derives 0.
 		diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 			archive.NodeDirName(childKind, diskSnapName))
 		chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
 		require.NoError(t, os.MkdirAll(chunkDir, 0o755))
 		seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 
-		for idx := range 3 {
-			require.NoError(t, os.WriteFile(
-				filepath.Join(chunkDir, archive.ChunkFileName(idx, codec.Ext())),
-				[]byte("stale"), 0o644))
-		}
+		require.NoError(t, os.WriteFile(
+			filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())),
+			[]byte("stale"), 0o644))
 
-		require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: oldChunkSize, TotalSize: oldTotalSize}))
+		require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: volume.DefaultChunkSize, TotalSize: oldTotalSize}))
 
 		rec := &recordingSink{}
 
@@ -2379,7 +2252,6 @@ func TestPipeline_Progress_ClampStaleSeedToFreshTotal(t *testing.T) {
 			OutputDir:            outputDir,
 			Workers:              1,
 			PerVolumeConcurrency: 1,
-			ChunkSize:            testChunkSize,
 			KubeClient:           c,
 			Compression:          codec,
 			Progress:             rec,
@@ -2515,9 +2387,8 @@ func TestPipeline_Progress_ClampStaleSeedToFreshTotal(t *testing.T) {
 		t.Parallel()
 
 		const (
-			testChunkSize int64 = 100
 			testTotalSize int64 = 300 // fresh HEAD == on-disk geometry: a same-geometry resume
-			seedBytes     int64 = 100 // one finalized chunk already on disk
+			seedBytes     int64 = 100 // durable partial prefix already on disk
 		)
 
 		rawBlock := bytes.Repeat([]byte("V"), int(testTotalSize))
@@ -2531,21 +2402,32 @@ func TestPipeline_Progress_ClampStaleSeedToFreshTotal(t *testing.T) {
 		codec, err := compress.New("zstd", 0)
 		require.NoError(t, err)
 
-		// A VALID seed: chunk 0 finalized under a geometry that matches the fresh
-		// run exactly (chunkSize 100, total 300), so nothing is purged and the
-		// seed (100) stays strictly below the fresh total (300). The clamp must
-		// NOT fire — no SetCurrent(0), no dip.
+		// A VALID seed: the sole chunk's durable ".part" prefix under a geometry
+		// that matches the fresh run exactly (volume.DefaultChunkSize, total
+		// 300), so nothing is purged and the seed (100) stays strictly below
+		// the fresh total (300). The clamp must NOT fire — no SetCurrent(0), no
+		// dip.
 		diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
 			archive.NodeDirName(childKind, diskSnapName))
 		chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
 		require.NoError(t, os.MkdirAll(chunkDir, 0o755))
 		seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 
-		chunk0Frame, err := codec.EncodeFrame(rawBlock[:seedBytes])
-		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())), chunk0Frame, 0o644))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".part"),
+			rawBlock[:seedBytes],
+			0o644,
+		))
+		// A durable ".part.offset" sidecar must accompany the ".part" file so
+		// partialChunkSize trusts this partial prefix instead of truncating it
+		// to zero (see download-resume-part-trusted-prefix).
+		require.NoError(t, os.WriteFile(
+			filepath.Join(chunkDir, archive.ChunkFileName(0, codec.Ext())+".part.offset"),
+			[]byte(strconv.FormatInt(seedBytes, 10)),
+			0o644,
+		))
 
-		require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: testChunkSize, TotalSize: testTotalSize}))
+		require.NoError(t, archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: volume.DefaultChunkSize, TotalSize: testTotalSize}))
 
 		rec := &recordingSink{}
 
@@ -2555,7 +2437,6 @@ func TestPipeline_Progress_ClampStaleSeedToFreshTotal(t *testing.T) {
 			OutputDir:            outputDir,
 			Workers:              1,
 			PerVolumeConcurrency: 1,
-			ChunkSize:            testChunkSize,
 			KubeClient:           c,
 			Compression:          codec,
 			Progress:             rec,
@@ -2980,9 +2861,11 @@ const (
 	mixedDiskPending       = "mixed-disk-pending"
 )
 
-// mixedChunkSize is the block/FS-file chunk size used throughout the mixed-
-// resume-states test; 300-byte raw payloads split into exactly 3 chunks.
-const mixedChunkSize int64 = 100
+// mixedBlockPartialBytes is the number of already-durable raw bytes seeded
+// for mixed-disk-block-partial's single block chunk (production hardcodes
+// block chunk geometry to volume.DefaultChunkSize, so a 300-byte fixture is
+// always exactly one chunk; see block-chunk-size-hardcode-only).
+const mixedBlockPartialBytes int64 = 100
 
 // mixedLeafNames lists every volume-leaf name in the mixed-resume tree, in
 // the order the fake client wires them as mixed-vm-snap's children. Used to
@@ -3183,7 +3066,7 @@ func TestPipeline_MixedResumeStates_ConcurrentRun(t *testing.T) {
 
 	// ── Fixture content ────────────────────────────────────────────────────
 	rawBlockDone := bytes.Repeat([]byte("D"), 300)
-	rawBlockPartial := bytes.Repeat([]byte("P"), 300) // 3 × mixedChunkSize
+	rawBlockPartial := bytes.Repeat([]byte("P"), 300)
 	rawBlockManifestsOnly := bytes.Repeat([]byte("M"), 300)
 	rawBlockPending := bytes.Repeat([]byte("N"), 300)
 
@@ -3240,7 +3123,6 @@ func TestPipeline_MixedResumeStates_ConcurrentRun(t *testing.T) {
 		OutputDir:            outputDir,
 		Workers:              1,
 		PerVolumeConcurrency: 2,
-		ChunkSize:            mixedChunkSize,
 		Compression:          codec,
 		KubeClient:           c,
 		OpenExport:           openExport,
@@ -3269,9 +3151,11 @@ func TestPipeline_MixedResumeStates_ConcurrentRun(t *testing.T) {
 	// simulating a crash mid-run. mixed-disk-done is left untouched. ────────
 
 	// mixed-disk-block-partial: drop the merged block file and snapshot.yaml,
-	// re-create data.bin.d/ with only chunk 0 present. Re-stamp the identity
-	// marker finalize removed, so the crash residue matches a real interrupted
-	// run (marker present, snapshot.yaml absent).
+	// re-create data.bin.d/ with chunk 0 (the only chunk, at the hardcoded
+	// volume.DefaultChunkSize geometry) durably partial: mixedBlockPartialBytes
+	// already on disk, the rest missing. Re-stamp the identity marker finalize
+	// removed, so the crash residue matches a real interrupted run (marker
+	// present, snapshot.yaml absent).
 	reseedResumeMarkerFromSnapshotYAML(t, blockPartialDir)
 	require.NoError(t, os.Remove(filepath.Join(blockPartialDir, archive.DataBlockName(codec.Ext()))))
 	require.NoError(t, os.Remove(filepath.Join(blockPartialDir, archive.SnapshotYAMLName)))
@@ -3279,15 +3163,21 @@ func TestPipeline_MixedResumeStates_ConcurrentRun(t *testing.T) {
 	blockChunkDir := filepath.Join(blockPartialDir, archive.BlockChunksDirName)
 	require.NoError(t, os.MkdirAll(blockChunkDir, 0o755))
 
-	chunk0Frame, err := codec.EncodeFrame(rawBlockPartial[:mixedChunkSize])
-	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(
-		filepath.Join(blockChunkDir, archive.ChunkFileName(0, codec.Ext())),
-		chunk0Frame,
+		filepath.Join(blockChunkDir, archive.ChunkFileName(0, codec.Ext())+".part"),
+		rawBlockPartial[:mixedBlockPartialBytes],
+		0o644,
+	))
+	// A durable ".part.offset" sidecar must accompany the ".part" file so
+	// partialChunkSize trusts this partial prefix instead of truncating it to
+	// zero (see download-resume-part-trusted-prefix).
+	require.NoError(t, os.WriteFile(
+		filepath.Join(blockChunkDir, archive.ChunkFileName(0, codec.Ext())+".part.offset"),
+		[]byte(strconv.FormatInt(mixedBlockPartialBytes, 10)),
 		0o644,
 	))
 	require.NoError(t, archive.WriteChunkMeta(blockChunkDir, archive.ChunkMeta{
-		ChunkSize: mixedChunkSize,
+		ChunkSize: volume.DefaultChunkSize,
 		TotalSize: int64(len(rawBlockPartial)),
 	}))
 
@@ -3384,14 +3274,14 @@ func TestPipeline_MixedResumeStates_ConcurrentRun(t *testing.T) {
 	// (c) Partial nodes resumed from their pre-seeded progress instead of
 	// restarting from zero.
 	blockRanges := blockPartialRanges.snapshot()
-	chunk0Range := fmt.Sprintf("bytes=0-%d", mixedChunkSize-1)
 
-	require.NotContains(t, blockRanges, chunk0Range,
-		"chunk 0 was pre-seeded and must not be re-fetched on resume")
-	require.Contains(t, blockRanges, fmt.Sprintf("bytes=%d-%d", mixedChunkSize, 2*mixedChunkSize-1),
-		"chunk 1 must be fetched on resume")
-	require.Contains(t, blockRanges, fmt.Sprintf("bytes=%d-%d", 2*mixedChunkSize, 3*mixedChunkSize-1),
-		"chunk 2 must be fetched on resume")
+	for _, hdr := range blockRanges {
+		require.NotEqual(t, "bytes=0-299", hdr,
+			"the durable partial prefix was pre-seeded and must not be re-fetched from byte zero on resume")
+	}
+
+	require.Contains(t, blockRanges, fmt.Sprintf("bytes=%d-%d", mixedBlockPartialBytes, int64(len(rawBlockPartial))-1),
+		"only the still-missing suffix must be fetched on resume")
 
 	fsRequests := fsPartialRequests.snapshot()
 	require.NotContains(t, fsRequests, fsPartialStaged.rel,
