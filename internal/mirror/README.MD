@@ -306,6 +306,12 @@ The pull command creates a bundle with the following structure:
 
 If `--gost-digest` is specified, `.gostsum` files are created alongside each `.tar` file.
 
+### Summary
+
+After a pull, `d8 mirror` prints a framed summary of what was pulled (platform, installer, security databases, modules, packages) and the bundle size.
+
+The summary also shows a **Registry** section - the source repo and the path each component reads from - when `--modules-path-suffix` moves modules off the default `modules/`, or when `--verbose-summary` is set. A moved modules path is highlighted, with a hint of the standard path, so a non-standard layout is easy to spot.
+
 ---
 
 ## d8 mirror push
@@ -366,6 +372,12 @@ d8 mirror push /tmp/d8-bundle registry.company.com/deckhouse \
   --registry-password secretpassword \
   --tmp-dir /mnt/large-disk/tmp
 ```
+
+### Summary
+
+After a push, `d8 mirror` prints a framed summary of what was written to the target registry (platform, installer, security databases, module and package counts).
+
+It always shows a **Registry** section with the target repo and the path each component was written to. When `--modules-path-suffix` moves modules off the default `modules/`, the moved path is highlighted with a hint of the standard path.
 
 ### Environment Variables
 
