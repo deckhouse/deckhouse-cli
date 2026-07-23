@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -363,7 +364,13 @@ func TestListDir(t *testing.T) {
 		t.Fatalf("FilesURL: %v", err)
 	}
 
-	items, err := f.ListDir(context.Background(), filesURL)
+	var items []Item
+
+	err = f.ListDir(context.Background(), filesURL, func(item Item) error {
+		items = append(items, item)
+
+		return nil
+	})
 	if err != nil {
 		t.Fatalf("ListDir: %v", err)
 	}
@@ -407,7 +414,7 @@ func TestListDir_RequestsStatAttributeOnly(t *testing.T) {
 		t.Fatalf("FilesURL: %v", err)
 	}
 
-	if _, err := f.ListDir(context.Background(), filesURL); err != nil {
+	if err := f.ListDir(context.Background(), filesURL, func(Item) error { return nil }); err != nil {
 		t.Fatalf("ListDir: %v", err)
 	}
 
@@ -423,6 +430,103 @@ func TestListDir_RequestsStatAttributeOnly(t *testing.T) {
 			t.Errorf("attribute query param %d: got %q, want %q", i, got[i], w)
 		}
 	}
+}
+
+func TestDecodeItems_StopsAtCallbackWithoutReadingFlatDirectory(t *testing.T) {
+	t.Parallel()
+
+	const entries = 20_000
+
+	var body strings.Builder
+	body.WriteString(`{"apiVersion":"v1","items":[`)
+	for i := range entries {
+		if i > 0 {
+			body.WriteByte(',')
+		}
+
+		_, _ = fmt.Fprintf(&body, `{"name":"file-%06d","type":"file","uri":"file-%06d","attributes":{"size":1}}`, i, i)
+	}
+	body.WriteString(`]}`)
+
+	reader := &countingStringReader{reader: strings.NewReader(body.String())}
+	stop := errors.New("stop after first item")
+
+	err := decodeItems(reader, func(Item) error { return stop })
+	if !errors.Is(err, stop) {
+		t.Fatalf("decodeItems error = %v, want callback sentinel", err)
+	}
+
+	if reader.bytesRead >= int64(body.Len()/10) {
+		t.Fatalf("decoder read %d of %d bytes before first callback; flat directory was buffered", reader.bytesRead, body.Len())
+	}
+}
+
+func TestDecodeItems_LargeFlatDirectoryRetainsConstantHeap(t *testing.T) {
+	const entries = 50_000
+
+	var body strings.Builder
+	body.Grow(entries * 96)
+	body.WriteString(`{"apiVersion":"v1","items":[`)
+	for i := range entries {
+		if i > 0 {
+			body.WriteByte(',')
+		}
+
+		_, _ = fmt.Fprintf(&body, `{"name":"file-%06d","type":"file","uri":"file-%06d","attributes":{"size":1}}`, i, i)
+	}
+	body.WriteString(`]}`)
+
+	payload := body.String()
+	runtime.GC()
+
+	var baseline runtime.MemStats
+	runtime.ReadMemStats(&baseline)
+
+	var (
+		seen     int
+		retained uint64
+	)
+
+	err := decodeItems(strings.NewReader(payload), func(Item) error {
+		seen++
+		if seen == entries {
+			runtime.GC()
+
+			var current runtime.MemStats
+			runtime.ReadMemStats(&current)
+			if current.HeapAlloc > baseline.HeapAlloc {
+				retained = current.HeapAlloc - baseline.HeapAlloc
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("decodeItems: %v", err)
+	}
+
+	runtime.KeepAlive(payload)
+
+	if seen != entries {
+		t.Fatalf("decoded %d items, want %d", seen, entries)
+	}
+
+	const retainedLimit = 4 << 20
+	if retained > retainedLimit {
+		t.Fatalf("retained heap at final callback = %d bytes, want <= %d; item count leaked into live memory", retained, retainedLimit)
+	}
+}
+
+type countingStringReader struct {
+	reader    *strings.Reader
+	bytesRead int64
+}
+
+func (r *countingStringReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.bytesRead += int64(n)
+
+	return n, err
 }
 
 func TestSourceMD5_ProducerHeaderContract(t *testing.T) {

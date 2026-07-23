@@ -289,30 +289,31 @@ type Item struct {
 }
 
 // ListDir GETs filesURL (which must end with a trailing slash for directory
-// semantics), requesting only the inexpensive stat attributes, and returns the
-// stream-decoded list of directory entries. Source hashes are fetched separately
-// after each regular file's declared size is known because the producer computes
-// hash.md5 synchronously before emitting that listing item.
-func (f *Fetcher) ListDir(ctx context.Context, filesURL string) ([]Item, error) {
+// semantics), requests only the inexpensive stat attributes, and calls yield
+// once per stream-decoded directory entry. It retains only the current item, so
+// a flat directory's memory use is independent of its entry count. Source hashes
+// are fetched separately after each regular file's declared size is known because
+// the producer computes hash.md5 synchronously before emitting that listing item.
+func (f *Fetcher) ListDir(ctx context.Context, filesURL string, yield func(Item) error) error {
 	reqURL, err := withAttributes(filesURL, "stat")
 	if err != nil {
-		return nil, fmt.Errorf("build listing URL for %s: %w", filesURL, err)
+		return fmt.Errorf("build listing URL for %s: %w", filesURL, err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build GET request: %w", err)
+		return fmt.Errorf("build GET request: %w", err)
 	}
 
 	resp, err := f.doer.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", filesURL, err)
+		return fmt.Errorf("GET %s: %w", filesURL, err)
 	}
 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: unexpected status %s", filesURL, resp.Status)
+		return fmt.Errorf("GET %s: unexpected status %s", filesURL, resp.Status)
 	}
 
 	// Guard the bounded listing body too: a stalled listing must not hang the
@@ -322,12 +323,11 @@ func (f *Fetcher) ListDir(ctx context.Context, filesURL string) ([]Item, error) 
 
 	defer func() { _ = body.Close() }()
 
-	items, err := decodeItems(body)
-	if err != nil {
-		return nil, fmt.Errorf("decode listing from %s: %w", filesURL, err)
+	if err := decodeItems(body, yield); err != nil {
+		return fmt.Errorf("decode listing from %s: %w", filesURL, err)
 	}
 
-	return items, nil
+	return nil
 }
 
 // SourceMD5 retrieves the producer-computed plaintext MD5 for one regular file
@@ -442,45 +442,135 @@ func withAttributes(rawURL string, attrs ...string) (string, error) {
 	return u.String(), nil
 }
 
-// decodeItems stream-decodes the JSON response body from a directory listing.
-// The response format is {"apiVersion": "...", "items": [{...}, ...]}.
-func decodeItems(r io.Reader) ([]Item, error) {
+// decodeItems stream-decodes the JSON response body from a directory listing
+// and calls yield before decoding the next item. The response format is
+// {"apiVersion": "...", "items": [{...}, ...]}. The complete outer object is
+// consumed so malformed trailing data fails closed.
+func decodeItems(r io.Reader, yield func(Item) error) error {
 	dec := json.NewDecoder(r)
 
-	// Scan tokens until the "items" key is found.
-	for {
-		t, err := dec.Token()
-		if err != nil {
-			return nil, fmt.Errorf("scan for items key: %w", err)
+	t, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("read response object: %w", err)
+	}
+
+	if t != json.Delim('{') {
+		return errors.New("listing response is not a JSON object")
+	}
+
+	foundItems := false
+
+	for dec.More() {
+		keyToken, tokenErr := dec.Token()
+		if tokenErr != nil {
+			return fmt.Errorf("read listing field: %w", tokenErr)
 		}
 
-		if s, ok := t.(string); ok && s == "items" {
-			break
+		key, ok := keyToken.(string)
+		if !ok {
+			return errors.New("listing object field name is not a string")
+		}
+
+		if key != "items" {
+			if err := skipJSONValue(dec); err != nil {
+				return fmt.Errorf("skip listing field %q: %w", key, err)
+			}
+
+			continue
+		}
+
+		if foundItems {
+			return errors.New("listing response contains duplicate items field")
+		}
+
+		foundItems = true
+
+		if err := decodeItemArray(dec, yield); err != nil {
+			return err
 		}
 	}
 
-	// Expect the opening '[' of the items array.
+	if _, err := dec.Token(); err != nil {
+		return fmt.Errorf("close listing object: %w", err)
+	}
+
+	if !foundItems {
+		return errors.New("listing response has no items field")
+	}
+
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("listing response contains trailing JSON value")
+		}
+
+		return fmt.Errorf("read listing trailer: %w", err)
+	}
+
+	return nil
+}
+
+func decodeItemArray(dec *json.Decoder, yield func(Item) error) error {
 	t, err := dec.Token()
 	if err != nil {
-		return nil, fmt.Errorf("read items array delimiter: %w", err)
+		return fmt.Errorf("read items array delimiter: %w", err)
 	}
 
 	if t != json.Delim('[') {
-		return nil, errors.New("items field is not a JSON array")
+		return errors.New("items field is not a JSON array")
 	}
-
-	var items []Item
 
 	for dec.More() {
 		var item Item
 		if err := dec.Decode(&item); err != nil {
-			return nil, fmt.Errorf("decode item: %w", err)
+			return fmt.Errorf("decode item: %w", err)
 		}
 
-		items = append(items, item)
+		if err := yield(item); err != nil {
+			return fmt.Errorf("consume item %q: %w", item.Name, err)
+		}
 	}
 
-	return items, nil
+	if _, err := dec.Token(); err != nil {
+		return fmt.Errorf("close items array: %w", err)
+	}
+
+	return nil
+}
+
+// skipJSONValue consumes one arbitrary JSON value without materializing it.
+func skipJSONValue(dec *json.Decoder) error {
+	t, err := dec.Token()
+	if err != nil {
+		return err
+	}
+
+	delim, ok := t.(json.Delim)
+	if !ok || (delim != '{' && delim != '[') {
+		return nil
+	}
+
+	depth := 1
+
+	for depth > 0 {
+		t, err = dec.Token()
+		if err != nil {
+			return err
+		}
+
+		delim, ok = t.(json.Delim)
+		if !ok {
+			continue
+		}
+
+		switch delim {
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+		}
+	}
+
+	return nil
 }
 
 // idleReadCloser wraps a response body with a per-Read idle watchdog. A single

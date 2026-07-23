@@ -18,9 +18,10 @@ package volume
 
 import (
 	"bufio"
-	"bytes"
+	"cmp"
 	"context"
 	"crypto/md5" //nolint:gosec // not used for security; matches the exporter's own hash.md5 attribute
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -28,9 +29,11 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -59,8 +62,9 @@ var ErrSourceHashMismatch = errors.New("staged file does not match source-provid
 // response could stage files outside the intended directory (path traversal /
 // zip-slip), materialize a symlink that escapes the extracted tree on restore, or
 // redirect a credential-bearing per-file GET to a foreign origin (token
-// exfiltration / SSRF / bytes sourced from an attacker host). See collectAllFSItems
-// (the name/relPath and same-origin URI ingestion checkpoint) and tar.go's
+// exfiltration / SSRF / bytes sourced from an attacker host). See
+// inventoryItemFromListing (the name/relPath and same-origin URI ingestion
+// checkpoint) and tar.go's
 // writeLinkEntry (the symlink-target write guard).
 var ErrUnsafePath = errors.New("server-provided path is unsafe")
 
@@ -75,7 +79,8 @@ var ErrUnsafePath = errors.New("server-provided path is unsafe")
 // "sub/.d8-meta" stages under a user subtree and is harmless (inv. #10a). On success it
 // returns p unchanged: the result is safe to convert with filepath.FromSlash for a
 // filepath.Join. It is fed the FULL relative path (relPrefix + leaf) at the single
-// ingestion checkpoint (collectAllFSItems), so the first-segment guard sees the whole path.
+// ingestion checkpoint (inventoryItemFromListing), so the first-segment guard
+// sees the whole path.
 func sanitizeRelPath(p string) (string, error) {
 	if p == "" {
 		return "", fmt.Errorf("%w: empty name", ErrUnsafePath)
@@ -148,13 +153,57 @@ type fsItem struct {
 	itemType string // "file", "dir", or "link"
 	uri      string // download URL; non-empty only for itemType == "file"
 	size     int64  // declared content size from the listing; -1 means absent or invalid
-	rawSize  int64  // exact plaintext size carried into the final tar PAX metadata
 	mode     fs.FileMode
 	uid      int
 	gid      int
 	mtime    time.Time
 	linkname string // symlink target; non-empty only for itemType == "link"
 	md5      string // exporter-provided hex MD5 fetched after inventory; empty if not reported
+}
+
+const (
+	fsInventoryName          = "inventory.jsonl"
+	fsInventoryWorkDirName   = "inventory.work"
+	fsInventoryVersion       = 1
+	fsInventorySortBatchSize = 256
+	fsInventoryMergeFanIn    = 8
+	fsInventoryMaxRecordSize = 64 << 10
+	fsInventoryMaxPathSize   = 4 << 10
+	fsInventoryMaxURISize    = 16 << 10
+	fsSizesMaterializeBytes  = 16 << 20
+)
+
+var (
+	errFSInventoryCorrupt  = errors.New("filesystem inventory spool is corrupt")
+	errFSInventoryConflict = errors.New("filesystem inventory contains conflicting paths")
+)
+
+type fsInventoryRecord struct {
+	Kind      string `json:"kind"`
+	Version   int    `json:"version,omitempty"`
+	CodecExt  string `json:"codecExt,omitempty"`
+	RelPath   string `json:"relPath,omitempty"`
+	ItemType  string `json:"type,omitempty"`
+	URI       string `json:"uri,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+	Mode      uint32 `json:"mode,omitempty"`
+	UID       int    `json:"uid,omitempty"`
+	GID       int    `json:"gid,omitempty"`
+	Mtime     string `json:"mtime,omitempty"`
+	Linkname  string `json:"linkname,omitempty"`
+	Count     int64  `json:"count,omitempty"`
+	Total     int64  `json:"total,omitempty"`
+	SHA256Hex string `json:"sha256,omitempty"`
+}
+
+type fsInventorySummary struct {
+	count int64
+	total int64
+}
+
+type fsDirectoryRecord struct {
+	URI       string `json:"uri"`
+	RelPrefix string `json:"relPrefix"`
 }
 
 // DownloadFilesystemVolume downloads all files from the data-exporter filesystem
@@ -166,8 +215,15 @@ type fsItem struct {
 // An already-staged compressed file <relPath><ext> is not re-downloaded (partial
 // resume). The stagingDir is removed on successful tar assembly.
 //
-// workers bounds the parallelism for file downloads; the first error cancels all
-// in-flight downloads.
+// workers bounds both active file downloads and the file-job queue. At most
+// workers active fsItems plus workers queued fsItems are retained. Inventory
+// sorting retains at most fsInventorySortBatchSize items; each merge opens at
+// most fsInventoryMergeFanIn runs and retains one item per run. Every spool
+// record is capped at fsInventoryMaxRecordSize. Total spool disk is linear in
+// source metadata: one directory-queue record per directory plus at most two
+// sorted-run copies during a merge pass. It lives under stagingDir/.d8-meta
+// and is removed only after data.tar is durably committed. The first error
+// cancels all in-flight downloads.
 //
 // chunkSize bounds the size of each Range-based chunk used to stage a file whose
 // declared size is known (item.size > 0): every such file is staged via
@@ -201,6 +257,10 @@ func DownloadFilesystemVolume(
 	if _, err := os.Stat(tarPath); err == nil {
 		log.Info("fs tar already present, skipping", slog.String("path", tarPath))
 
+		if err := os.RemoveAll(stagingDir); err != nil {
+			return fmt.Errorf("remove stale FS staging after completed tar %s: %w", stagingDir, err)
+		}
+
 		return nil
 	}
 
@@ -217,92 +277,29 @@ func DownloadFilesystemVolume(
 		return fmt.Errorf("parse files root URL %q: %w", filesRootURL, err)
 	}
 
-	items, err := collectAllFSItems(ctx, fetcher, filesRootURL, base, "")
+	inventoryPath, summary, err := prepareFSInventory(ctx, stagingDir, filesRootURL, base, codec.Ext(), fetcher)
 	if err != nil {
-		return fmt.Errorf("list filesystem volume: %w", err)
+		return fmt.Errorf("prepare filesystem inventory: %w", err)
 	}
 
-	// Persist the declared per-file sizes (and their sum) now that the listing
-	// is known, BEFORE any staging begins, so a crash-and-resume can recover
-	// them from disk on the next run without a network round-trip — see
-	// ReadFSSizesSidecar/ScanFSStagingSizes and pipeline.seedStreamFromDisk,
-	// which read this sidecar to seed a resumed stream's total and credit
-	// already-staged flat blobs before the DataExport is even Ready.
-	if err := writeFSSizesSidecar(stagingDir, items); err != nil {
+	if err := writeFSSizesSidecar(ctx, stagingDir, inventoryPath, codec.Ext(), summary.total); err != nil {
 		return fmt.Errorf("persist fs sizes sidecar: %w", err)
 	}
 
-	// Report the expected total now that the listing (with per-file sizes) is known,
-	// before any staging begins, mirroring the block path's stream.SetTotal.
 	if setTotal != nil {
-		setTotal(sumFileSizes(items))
+		setTotal(summary.total)
 	}
 
 	log.Info("staging filesystem volume",
 		slog.String("tar", tarPath),
-		slog.Int("items", len(items)),
+		slog.Int64("items", summary.count),
 		slog.Int("workers", workers))
 
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(workers)
-
-	for i := range items {
-		if items[i].itemType != "file" {
-			continue
-		}
-
-		itemIndex := i
-		item := items[itemIndex]
-
-		g.Go(func() error {
-			sourceMD5, hashErr := fetcher.SourceMD5(gctx, item.uri, item.size)
-			if hashErr != nil {
-				return fmt.Errorf("fetch source MD5 for %s: %w", item.relPath, hashErr)
-			}
-
-			item.md5 = sourceMD5
-
-			rawSize, stageErr := stageCompressedFile(gctx, log, stagingDir, item, chunkSize, codec, fetcher, onProgress)
-			if stageErr != nil {
-				return stageErr
-			}
-
-			items[itemIndex].rawSize = rawSize
-
-			return nil
-		})
-	}
-
-	if err := g.Wait(); err != nil {
+	if err := stageFSInventoryFiles(ctx, log, stagingDir, inventoryPath, base, workers, chunkSize, fetcher, codec, onProgress); err != nil {
 		return fmt.Errorf("stage filesystem files: %w", err)
 	}
 
-	// File entries in the tar carry the compressed name <relPath><ext> so that
-	// the tar container holds the already-compressed blobs (no re-compression).
-	// Dir and link entries keep their original relPath (no extension suffix).
-	ext := codec.Ext()
-	entries := make([]TarEntry, 0, len(items))
-
-	for _, it := range items {
-		relPath := it.relPath
-		if it.itemType == "file" {
-			relPath += ext
-		}
-
-		entries = append(entries, TarEntry{
-			RelPath:      relPath,
-			Type:         it.itemType,
-			Codec:        codec.Name(),
-			OriginalPath: it.relPath,
-			RawSize:      it.rawSize,
-			Mode:         it.mode,
-			UID:          it.uid,
-			GID:          it.gid,
-			Mtime:        it.mtime,
-			Linkname:     it.linkname,
-		})
-	}
-
+	entries := tarEntriesFromInventory(ctx, inventoryPath, stagingDir, codec)
 	if err := WriteTar(ctx, tarPath, stagingDir, entries); err != nil {
 		return fmt.Errorf("assemble tar %s: %w", tarPath, err)
 	}
@@ -318,106 +315,999 @@ func DownloadFilesystemVolume(
 	return nil
 }
 
-// collectAllFSItems recursively walks the listing at dirURL and accumulates
-// all representable items (file, dir, link) with their relative paths and metadata.
-// filesRootURL is the absolute URL of the volume root used to resolve relative URIs.
-// relPrefix is prepended to item names when building the relative path.
-func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL string, base *url.URL, relPrefix string) ([]fsItem, error) {
-	items, err := fetcher.ListDir(ctx, dirURL)
-	if err != nil {
-		return nil, fmt.Errorf("list %s: %w", dirURL, err)
+func prepareFSInventory(
+	ctx context.Context,
+	stagingDir string,
+	filesRootURL string,
+	base *url.URL,
+	ext string,
+	fetcher *exporter.Fetcher,
+) (string, fsInventorySummary, error) {
+	metaDir := filepath.Join(stagingDir, FSMetaDirName)
+	if err := archive.EnsureDir(metaDir); err != nil {
+		return "", fsInventorySummary{}, fmt.Errorf("create fs metadata dir %s: %w", metaDir, err)
 	}
 
-	var result []fsItem
+	inventoryPath := filepath.Join(metaDir, fsInventoryName)
 
-	for _, item := range items {
-		// Validate the FULL relative path (relPrefix is already sanitized) so the
-		// reserved-namespace guard keys on the whole path's first segment: a
-		// root-level ".d8-meta" is rejected, a nested "sub/.d8-meta" allowed.
-		relPath, nameErr := sanitizeRelPath(relPrefix + item.Name)
-		if nameErr != nil {
-			return nil, fmt.Errorf("listing %s: %w", dirURL, nameErr)
+	summary, err := validateFSInventory(ctx, inventoryPath, ext, nil)
+	if err == nil {
+		workDir := filepath.Join(metaDir, fsInventoryWorkDirName)
+		if removeErr := os.RemoveAll(workDir); removeErr != nil {
+			return "", fsInventorySummary{}, fmt.Errorf("remove stale inventory work dir %s: %w", workDir, removeErr)
 		}
 
-		ref, err := url.Parse(item.URI)
+		return inventoryPath, summary, nil
+	}
+
+	if !os.IsNotExist(err) && !errors.Is(err, errFSInventoryCorrupt) {
+		return "", fsInventorySummary{}, err
+	}
+
+	if removeErr := os.Remove(inventoryPath); removeErr != nil && !os.IsNotExist(removeErr) {
+		return "", fsInventorySummary{}, fmt.Errorf("remove unusable inventory %s: %w", inventoryPath, removeErr)
+	}
+
+	summary, err = buildFSInventory(ctx, metaDir, inventoryPath, filesRootURL, base, ext, fetcher)
+	if err != nil {
+		return "", fsInventorySummary{}, err
+	}
+
+	validated, err := validateFSInventory(ctx, inventoryPath, ext, nil)
+	if err != nil {
+		return "", fsInventorySummary{}, fmt.Errorf("validate new filesystem inventory: %w", err)
+	}
+
+	if validated != summary {
+		return "", fsInventorySummary{}, fmt.Errorf("%w: built summary %+v differs from validated summary %+v",
+			errFSInventoryCorrupt, summary, validated)
+	}
+
+	return inventoryPath, summary, nil
+}
+
+func buildFSInventory(
+	ctx context.Context,
+	metaDir string,
+	inventoryPath string,
+	filesRootURL string,
+	base *url.URL,
+	ext string,
+	fetcher *exporter.Fetcher,
+) (fsInventorySummary, error) {
+	workDir := filepath.Join(metaDir, fsInventoryWorkDirName)
+	if err := os.RemoveAll(workDir); err != nil {
+		return fsInventorySummary{}, fmt.Errorf("remove stale inventory work dir %s: %w", workDir, err)
+	}
+
+	if err := archive.EnsureDir(workDir); err != nil {
+		return fsInventorySummary{}, fmt.Errorf("create inventory work dir %s: %w", workDir, err)
+	}
+
+	defer func() { _ = os.RemoveAll(workDir) }()
+
+	builder := newFSRunBuilder(workDir, ext)
+
+	summary, err := walkFSInventory(ctx, workDir, filesRootURL, base, fetcher, builder.add)
+	if err != nil {
+		return fsInventorySummary{}, err
+	}
+
+	runCount, err := builder.finish()
+	if err != nil {
+		return fsInventorySummary{}, err
+	}
+
+	finalRun, err := mergeFSInventoryRuns(ctx, workDir, ext, runCount)
+	if err != nil {
+		return fsInventorySummary{}, err
+	}
+
+	if err := writeFinalFSInventory(inventoryPath, finalRun, ext, summary); err != nil {
+		return fsInventorySummary{}, err
+	}
+
+	return summary, nil
+}
+
+func walkFSInventory(
+	ctx context.Context,
+	workDir string,
+	filesRootURL string,
+	base *url.URL,
+	fetcher *exporter.Fetcher,
+	add func(fsItem) error,
+) (fsInventorySummary, error) {
+	queuePath := filepath.Join(workDir, "directories.jsonl")
+
+	queueFile, err := os.OpenFile(queuePath, os.O_CREATE|os.O_TRUNC|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fsInventorySummary{}, fmt.Errorf("create directory inventory queue: %w", err)
+	}
+
+	defer func() {
+		_ = queueFile.Close()
+	}()
+
+	rootRef, err := url.Parse(filesRootURL)
+	if err != nil {
+		return fsInventorySummary{}, fmt.Errorf("parse files root URL %q: %w", filesRootURL, err)
+	}
+
+	root := fsDirectoryRecord{URI: rootRef.RequestURI()}
+	if err := appendDirectoryRecord(queueFile, root); err != nil {
+		return fsInventorySummary{}, err
+	}
+
+	readerFile, err := os.Open(queuePath)
+	if err != nil {
+		return fsInventorySummary{}, fmt.Errorf("open directory inventory queue: %w", err)
+	}
+
+	defer func() { _ = readerFile.Close() }()
+
+	reader := bufio.NewReaderSize(readerFile, fsInventoryMaxRecordSize)
+	queued := int64(1)
+
+	var summary fsInventorySummary
+
+	for processed := int64(0); processed < queued; processed++ {
+		if err := ctx.Err(); err != nil {
+			return fsInventorySummary{}, fmt.Errorf("filesystem inventory cancelled: %w", err)
+		}
+
+		record, err := readDirectoryRecord(reader)
 		if err != nil {
-			return nil, fmt.Errorf("parse item URI %q: %w", item.URI, err)
+			return fsInventorySummary{}, err
 		}
 
-		resolved := base.ResolveReference(ref)
-
-		// The listing is untrusted input (same threat model as sanitizeRelPath):
-		// per RFC 3986 an ABSOLUTE item.URI fully REPLACES base, so one hostile
-		// entry could redirect a per-file GET (stageWholeFile's GetFile,
-		// stageChunkedFile's RangeGet, or a recursive sub-listing) to an
-		// attacker-controlled origin. Every such request rides the
-		// credential-bearing SafeClient transport, and client-go's
-		// bearer-token/basic-auth round-trippers attach the cluster credential to
-		// EVERY request regardless of destination host — so a foreign-host entry
-		// would exfiltrate the token, and source archive bytes (whose only
-		// integrity proof, the MD5, comes from the same listing) from a foreign
-		// origin. The real exporter only ever emits relative URIs under its own
-		// server, so any resolved URI that leaves base's origin is rejected here,
-		// at the single ingestion checkpoint, before any fetch is issued. This
-		// covers file URIs and — because the guard precedes the type switch — the
-		// recursive directory walk's absURI as well.
-		if !sameOrigin(base, resolved) {
-			return nil, fmt.Errorf("listing %s: %w: item URI %q resolves to %q, off the files-root origin %q",
-				dirURL, ErrUnsafePath, item.URI, resolved.String(), base.String())
+		dirURL, err := resolveInventoryURI(base, record.URI)
+		if err != nil {
+			return fsInventorySummary{}, err
 		}
 
-		absURI := resolved.String()
-		mode, uid, gid, mtime := parseItemAttrs(item.Attributes)
-
-		switch item.Type {
-		case "file":
-			result = append(result, fsItem{
-				relPath:  relPath,
-				itemType: "file",
-				uri:      absURI,
-				size:     parseItemSize(item.Attributes),
-				mode:     mode,
-				uid:      uid,
-				gid:      gid,
-				mtime:    mtime,
-			})
-
-		case "dir":
-			result = append(result, fsItem{
-				relPath:  relPath,
-				itemType: "dir",
-				mode:     mode,
-				uid:      uid,
-				gid:      gid,
-				mtime:    mtime,
-			})
-
-			subPrefix := relPath + "/"
-
-			subItems, err := collectAllFSItems(ctx, fetcher, absURI, base, subPrefix)
-			if err != nil {
-				return nil, err
+		err = fetcher.ListDir(ctx, dirURL, func(item exporter.Item) error {
+			inventoryItem, itemErr := inventoryItemFromListing(base, dirURL, record.RelPrefix, item)
+			if itemErr != nil {
+				return itemErr
 			}
 
-			result = append(result, subItems...)
+			if inventoryItem.itemType == "dir" {
+				directory := fsDirectoryRecord{
+					URI:       inventoryItem.uri,
+					RelPrefix: inventoryItem.relPath + "/",
+				}
+				if err := appendDirectoryRecord(queueFile, directory); err != nil {
+					return err
+				}
 
-		case "link":
-			result = append(result, fsItem{
-				relPath:  relPath,
-				itemType: "link",
-				mode:     mode,
-				uid:      uid,
-				gid:      gid,
-				mtime:    mtime,
-				linkname: item.TargetPath,
-			})
+				queued++
+			}
 
-		default:
-			return nil, fmt.Errorf("filesystem listing item %q has unsupported wire type %q", relPath, item.Type)
+			if inventoryItem.itemType == "file" && inventoryItem.size > 0 {
+				if summary.total > math.MaxInt64-inventoryItem.size {
+					return fmt.Errorf("filesystem declared size total overflows int64 at %q", inventoryItem.relPath)
+				}
+
+				summary.total += inventoryItem.size
+			}
+
+			summary.count++
+
+			return add(inventoryItem)
+		})
+		if err != nil {
+			return fsInventorySummary{}, fmt.Errorf("list %s: %w", dirURL, err)
 		}
+	}
+
+	return summary, nil
+}
+
+func appendDirectoryRecord(f *os.File, record fsDirectoryRecord) error {
+	data, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("marshal directory inventory record: %w", err)
+	}
+
+	if len(data) > fsInventoryMaxRecordSize {
+		return fmt.Errorf("%w: directory record exceeds %d bytes", ErrUnsafePath, fsInventoryMaxRecordSize)
+	}
+
+	data = append(data, '\n')
+	if _, err := f.Write(data); err != nil {
+		return fmt.Errorf("append directory inventory record: %w", err)
+	}
+
+	return nil
+}
+
+func readDirectoryRecord(reader *bufio.Reader) (fsDirectoryRecord, error) {
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		return fsDirectoryRecord{}, fmt.Errorf("read directory inventory record: %w", err)
+	}
+
+	if len(line) > fsInventoryMaxRecordSize {
+		return fsDirectoryRecord{}, fmt.Errorf("%w: directory record exceeds %d bytes", errFSInventoryCorrupt, fsInventoryMaxRecordSize)
+	}
+
+	var record fsDirectoryRecord
+	if err := json.Unmarshal(line, &record); err != nil {
+		return fsDirectoryRecord{}, fmt.Errorf("%w: parse directory record: %v", errFSInventoryCorrupt, err)
+	}
+
+	return record, nil
+}
+
+func inventoryItemFromListing(base *url.URL, dirURL, relPrefix string, item exporter.Item) (fsItem, error) {
+	// The producer sets Name from fs.FileInfo.Name(), so it is one literal
+	// directory-entry leaf. Rejecting "/" here prevents a malicious listing
+	// from synthesizing descendants without the corresponding parent directory
+	// records; hierarchy conflicts therefore reduce to exact stored-path
+	// duplicates in the externally sorted inventory.
+	if strings.Contains(item.Name, "/") {
+		return fsItem{}, fmt.Errorf("%w: listing item name %q is not a single path element", ErrUnsafePath, item.Name)
+	}
+
+	relPath, err := sanitizeRelPath(relPrefix + item.Name)
+	if err != nil {
+		return fsItem{}, fmt.Errorf("listing %s: %w", dirURL, err)
+	}
+
+	if len(relPath) > fsInventoryMaxPathSize {
+		return fsItem{}, fmt.Errorf("%w: path %q exceeds %d bytes", ErrUnsafePath, relPath, fsInventoryMaxPathSize)
+	}
+
+	ref, err := url.Parse(item.URI)
+	if err != nil {
+		return fsItem{}, fmt.Errorf("parse item URI %q: %w", item.URI, err)
+	}
+
+	resolved := base.ResolveReference(ref)
+	if !sameOrigin(base, resolved) {
+		return fsItem{}, fmt.Errorf("listing %s: %w: item URI %q resolves to %q, off the files-root origin %q",
+			dirURL, ErrUnsafePath, item.URI, resolved.String(), base.String())
+	}
+
+	relativeURI := resolved.RequestURI()
+	if len(relativeURI) > fsInventoryMaxURISize {
+		return fsItem{}, fmt.Errorf("%w: item URI for %q exceeds %d bytes", ErrUnsafePath, relPath, fsInventoryMaxURISize)
+	}
+
+	mode, uid, gid, mtime := parseItemAttrs(item.Attributes)
+	result := fsItem{
+		relPath: relPath,
+		uri:     relativeURI,
+		mode:    mode,
+		uid:     uid,
+		gid:     gid,
+		mtime:   mtime,
+	}
+
+	switch item.Type {
+	case "file":
+		result.itemType = "file"
+		result.size = parseItemSize(item.Attributes)
+	case "dir":
+		result.itemType = "dir"
+	case "link":
+		result.itemType = "link"
+		result.linkname = item.TargetPath
+	default:
+		return fsItem{}, fmt.Errorf("filesystem listing item %q has unsupported wire type %q", relPath, item.Type)
 	}
 
 	return result, nil
+}
+
+type fsRunBuilder struct {
+	workDir string
+	ext     string
+	batch   []fsItem
+	runs    int
+}
+
+func newFSRunBuilder(workDir, ext string) *fsRunBuilder {
+	return &fsRunBuilder{
+		workDir: workDir,
+		ext:     ext,
+		batch:   make([]fsItem, 0, fsInventorySortBatchSize),
+	}
+}
+
+func (b *fsRunBuilder) add(item fsItem) error {
+	b.batch = append(b.batch, item)
+	if len(b.batch) < fsInventorySortBatchSize {
+		return nil
+	}
+
+	return b.flush()
+}
+
+func (b *fsRunBuilder) finish() (int, error) {
+	if err := b.flush(); err != nil {
+		return 0, err
+	}
+
+	return b.runs, nil
+}
+
+func (b *fsRunBuilder) flush() error {
+	if len(b.batch) == 0 {
+		return nil
+	}
+
+	slices.SortFunc(b.batch, func(a, c fsItem) int {
+		return cmp.Compare(fsStoredPath(a, b.ext), fsStoredPath(c, b.ext))
+	})
+
+	passDir := filepath.Join(b.workDir, "pass-000000")
+	if err := archive.EnsureDir(passDir); err != nil {
+		return fmt.Errorf("create inventory run dir %s: %w", passDir, err)
+	}
+
+	runPath := fsRunPath(b.workDir, 0, b.runs)
+	if err := writeFSRun(runPath, b.batch); err != nil {
+		return err
+	}
+
+	b.runs++
+	b.batch = b.batch[:0]
+
+	return nil
+}
+
+func fsRunPath(workDir string, pass, run int) string {
+	return filepath.Join(workDir, fmt.Sprintf("pass-%06d", pass), fmt.Sprintf("run-%09d.jsonl", run))
+}
+
+func writeFSRun(path string, items []fsItem) error {
+	aw, err := archive.NewAtomicWriter(path)
+	if err != nil {
+		return fmt.Errorf("open inventory run %s: %w", path, err)
+	}
+
+	for _, item := range items {
+		if err := writeFSItemLine(aw, item); err != nil {
+			aw.Abort()
+
+			return fmt.Errorf("write inventory run %s: %w", path, err)
+		}
+	}
+
+	if err := aw.Commit(); err != nil {
+		return fmt.Errorf("commit inventory run %s: %w", path, err)
+	}
+
+	return nil
+}
+
+func mergeFSInventoryRuns(ctx context.Context, workDir, ext string, runCount int) (string, error) {
+	if runCount == 0 {
+		return "", nil
+	}
+
+	pass := 0
+
+	for runCount > 1 {
+		nextPass := pass + 1
+		nextDir := filepath.Join(workDir, fmt.Sprintf("pass-%06d", nextPass))
+
+		if err := archive.EnsureDir(nextDir); err != nil {
+			return "", fmt.Errorf("create inventory merge dir %s: %w", nextDir, err)
+		}
+
+		outputCount := 0
+
+		for first := 0; first < runCount; first += fsInventoryMergeFanIn {
+			last := min(first+fsInventoryMergeFanIn, runCount)
+
+			inputs := make([]string, 0, last-first)
+			for run := first; run < last; run++ {
+				inputs = append(inputs, fsRunPath(workDir, pass, run))
+			}
+
+			output := fsRunPath(workDir, nextPass, outputCount)
+			if err := mergeFSRunGroup(ctx, ext, inputs, output); err != nil {
+				return "", err
+			}
+
+			outputCount++
+		}
+
+		if err := os.RemoveAll(filepath.Join(workDir, fmt.Sprintf("pass-%06d", pass))); err != nil {
+			return "", fmt.Errorf("remove merged inventory pass %d: %w", pass, err)
+		}
+
+		pass = nextPass
+		runCount = outputCount
+	}
+
+	return fsRunPath(workDir, pass, 0), nil
+}
+
+type fsRunCursor struct {
+	file    *os.File
+	scanner *bufio.Scanner
+	item    fsItem
+	done    bool
+}
+
+func openFSRunCursor(path string) (*fsRunCursor, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open inventory run %s: %w", path, err)
+	}
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 4096), fsInventoryMaxRecordSize)
+	cursor := &fsRunCursor{file: f, scanner: scanner}
+
+	if err := cursor.advance(); err != nil {
+		_ = f.Close()
+
+		return nil, fmt.Errorf("read inventory run %s: %w", path, err)
+	}
+
+	return cursor, nil
+}
+
+func (c *fsRunCursor) advance() error {
+	if !c.scanner.Scan() {
+		if err := c.scanner.Err(); err != nil {
+			return fmt.Errorf("scan inventory run: %w", err)
+		}
+
+		c.done = true
+
+		return nil
+	}
+
+	item, err := decodeFSItemLine(c.scanner.Bytes())
+	if err != nil {
+		return err
+	}
+
+	c.item = item
+
+	return nil
+}
+
+func mergeFSRunGroup(ctx context.Context, ext string, inputs []string, output string) error {
+	cursors := make([]*fsRunCursor, 0, len(inputs))
+	for _, input := range inputs {
+		cursor, err := openFSRunCursor(input)
+		if err != nil {
+			closeFSRunCursors(cursors)
+
+			return err
+		}
+
+		cursors = append(cursors, cursor)
+	}
+
+	defer closeFSRunCursors(cursors)
+
+	aw, err := archive.NewAtomicWriter(output)
+	if err != nil {
+		return fmt.Errorf("open merged inventory run %s: %w", output, err)
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			aw.Abort()
+
+			return fmt.Errorf("merge filesystem inventory: %w", err)
+		}
+
+		selected := -1
+
+		for index, cursor := range cursors {
+			if cursor.done {
+				continue
+			}
+
+			if selected < 0 ||
+				fsStoredPath(cursor.item, ext) < fsStoredPath(cursors[selected].item, ext) {
+				selected = index
+			}
+		}
+
+		if selected < 0 {
+			break
+		}
+
+		if err := writeFSItemLine(aw, cursors[selected].item); err != nil {
+			aw.Abort()
+
+			return fmt.Errorf("write merged inventory run %s: %w", output, err)
+		}
+
+		if err := cursors[selected].advance(); err != nil {
+			aw.Abort()
+
+			return fmt.Errorf("advance merged inventory run: %w", err)
+		}
+	}
+
+	if err := aw.Commit(); err != nil {
+		return fmt.Errorf("commit merged inventory run %s: %w", output, err)
+	}
+
+	return nil
+}
+
+func closeFSRunCursors(cursors []*fsRunCursor) {
+	for _, cursor := range cursors {
+		_ = cursor.file.Close()
+	}
+}
+
+func writeFinalFSInventory(path, runPath, ext string, summary fsInventorySummary) error {
+	aw, err := archive.NewAtomicWriter(path)
+	if err != nil {
+		return fmt.Errorf("open final filesystem inventory %s: %w", path, err)
+	}
+
+	header := fsInventoryRecord{Kind: "header", Version: fsInventoryVersion, CodecExt: ext}
+	if err := writeInventoryRecord(aw, header, nil); err != nil {
+		aw.Abort()
+
+		return fmt.Errorf("write filesystem inventory header: %w", err)
+	}
+
+	hasher := sha256.New()
+
+	if runPath != "" {
+		cursor, err := openFSRunCursor(runPath)
+		if err != nil {
+			aw.Abort()
+
+			return err
+		}
+
+		for !cursor.done {
+			if err := writeInventoryItem(aw, cursor.item, hasher); err != nil {
+				_ = cursor.file.Close()
+
+				aw.Abort()
+
+				return fmt.Errorf("write final filesystem inventory: %w", err)
+			}
+
+			if err := cursor.advance(); err != nil {
+				_ = cursor.file.Close()
+
+				aw.Abort()
+
+				return fmt.Errorf("read final inventory run: %w", err)
+			}
+		}
+
+		if err := cursor.file.Close(); err != nil {
+			aw.Abort()
+
+			return fmt.Errorf("close final inventory run: %w", err)
+		}
+	}
+
+	footer := fsInventoryRecord{
+		Kind:      "footer",
+		Count:     summary.count,
+		Total:     summary.total,
+		SHA256Hex: hex.EncodeToString(hasher.Sum(nil)),
+	}
+	if err := writeInventoryRecord(aw, footer, nil); err != nil {
+		aw.Abort()
+
+		return fmt.Errorf("write filesystem inventory footer: %w", err)
+	}
+
+	if err := aw.Commit(); err != nil {
+		return fmt.Errorf("commit filesystem inventory %s: %w", path, err)
+	}
+
+	return nil
+}
+
+func writeInventoryItem(w io.Writer, item fsItem, hasher io.Writer) error {
+	record := fsInventoryRecordFromItem(item)
+
+	return writeInventoryRecord(w, record, hasher)
+}
+
+func writeInventoryRecord(w io.Writer, record fsInventoryRecord, hasher io.Writer) error {
+	data, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("marshal inventory record: %w", err)
+	}
+
+	if len(data) > fsInventoryMaxRecordSize {
+		return fmt.Errorf("%w: inventory record exceeds %d bytes", ErrUnsafePath, fsInventoryMaxRecordSize)
+	}
+
+	data = append(data, '\n')
+	if _, err := w.Write(data); err != nil {
+		return fmt.Errorf("write inventory record: %w", err)
+	}
+
+	if hasher != nil {
+		if _, err := hasher.Write(data); err != nil {
+			return fmt.Errorf("hash inventory record: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func writeFSItemLine(w io.Writer, item fsItem) error {
+	data, err := json.Marshal(fsInventoryRecordFromItem(item))
+	if err != nil {
+		return fmt.Errorf("marshal inventory item: %w", err)
+	}
+
+	if len(data) > fsInventoryMaxRecordSize {
+		return fmt.Errorf("%w: inventory item %q exceeds %d bytes", ErrUnsafePath, item.relPath, fsInventoryMaxRecordSize)
+	}
+
+	data = append(data, '\n')
+	if _, err := w.Write(data); err != nil {
+		return fmt.Errorf("write inventory item: %w", err)
+	}
+
+	return nil
+}
+
+func fsInventoryRecordFromItem(item fsItem) fsInventoryRecord {
+	mtime := ""
+	if !item.mtime.IsZero() {
+		mtime = item.mtime.Format(time.RFC3339Nano)
+	}
+
+	return fsInventoryRecord{
+		Kind:     "item",
+		RelPath:  item.relPath,
+		ItemType: item.itemType,
+		URI:      item.uri,
+		Size:     item.size,
+		Mode:     uint32(item.mode),
+		UID:      item.uid,
+		GID:      item.gid,
+		Mtime:    mtime,
+		Linkname: item.linkname,
+	}
+}
+
+func decodeFSItemLine(line []byte) (fsItem, error) {
+	var record fsInventoryRecord
+	if err := json.Unmarshal(line, &record); err != nil {
+		return fsItem{}, fmt.Errorf("%w: parse inventory item: %v", errFSInventoryCorrupt, err)
+	}
+
+	if record.Kind != "item" {
+		return fsItem{}, fmt.Errorf("%w: expected item record, got %q", errFSInventoryCorrupt, record.Kind)
+	}
+
+	mtime := time.Time{}
+
+	if record.Mtime != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, record.Mtime)
+		if err != nil {
+			return fsItem{}, fmt.Errorf("%w: parse mtime for %q: %v", errFSInventoryCorrupt, record.RelPath, err)
+		}
+
+		mtime = parsed
+	}
+
+	return fsItem{
+		relPath:  record.RelPath,
+		itemType: record.ItemType,
+		uri:      record.URI,
+		size:     record.Size,
+		mode:     fs.FileMode(record.Mode),
+		uid:      record.UID,
+		gid:      record.GID,
+		mtime:    mtime,
+		linkname: record.Linkname,
+	}, nil
+}
+
+func validateFSInventory(
+	ctx context.Context,
+	path string,
+	ext string,
+	yield func(fsItem) error,
+) (fsInventorySummary, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return fsInventorySummary{}, err
+	}
+
+	defer func() { _ = f.Close() }()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 4096), fsInventoryMaxRecordSize)
+
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return fsInventorySummary{}, fmt.Errorf("%w: read header: %v", errFSInventoryCorrupt, err)
+		}
+
+		return fsInventorySummary{}, fmt.Errorf("%w: inventory is empty", errFSInventoryCorrupt)
+	}
+
+	var header fsInventoryRecord
+	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
+		return fsInventorySummary{}, fmt.Errorf("%w: parse header: %v", errFSInventoryCorrupt, err)
+	}
+
+	if header.Kind != "header" || header.Version != fsInventoryVersion || header.CodecExt != ext {
+		return fsInventorySummary{}, fmt.Errorf("%w: header kind=%q version=%d codecExt=%q",
+			errFSInventoryCorrupt, header.Kind, header.Version, header.CodecExt)
+	}
+
+	hasher := sha256.New()
+
+	var (
+		summary      fsInventorySummary
+		previousPath string
+		previousType string
+		footer       *fsInventoryRecord
+	)
+
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return fsInventorySummary{}, fmt.Errorf("validate filesystem inventory: %w", err)
+		}
+
+		line := scanner.Bytes()
+
+		var record fsInventoryRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			return fsInventorySummary{}, fmt.Errorf("%w: parse record: %v", errFSInventoryCorrupt, err)
+		}
+
+		if record.Kind == "footer" {
+			copyRecord := record
+			footer = &copyRecord
+
+			break
+		}
+
+		item, err := decodeFSItemLine(line)
+		if err != nil {
+			return fsInventorySummary{}, err
+		}
+
+		if err := validateSpooledFSItem(item); err != nil {
+			return fsInventorySummary{}, err
+		}
+
+		storedPath := fsStoredPath(item, ext)
+		if previousPath != "" {
+			if storedPath < previousPath {
+				return fsInventorySummary{}, fmt.Errorf("%w: %q follows %q out of order",
+					errFSInventoryCorrupt, storedPath, previousPath)
+			}
+
+			if storedPath == previousPath {
+				return fsInventorySummary{}, fmt.Errorf("%w: duplicate stored path %q",
+					errFSInventoryConflict, storedPath)
+			}
+
+			if previousType != "dir" && strings.HasPrefix(storedPath, previousPath+"/") {
+				return fsInventorySummary{}, fmt.Errorf("%w: non-directory %q is an ancestor of %q",
+					errFSInventoryConflict, previousPath, storedPath)
+			}
+		}
+
+		previousPath = storedPath
+		previousType = item.itemType
+		summary.count++
+
+		if item.itemType == "file" && item.size > 0 {
+			if summary.total > math.MaxInt64-item.size {
+				return fsInventorySummary{}, fmt.Errorf("%w: declared size total overflows int64", errFSInventoryCorrupt)
+			}
+
+			summary.total += item.size
+		}
+
+		if _, err := hasher.Write(line); err != nil {
+			return fsInventorySummary{}, fmt.Errorf("hash inventory item: %w", err)
+		}
+
+		if _, err := hasher.Write([]byte{'\n'}); err != nil {
+			return fsInventorySummary{}, fmt.Errorf("hash inventory delimiter: %w", err)
+		}
+
+		if yield != nil {
+			if err := yield(item); err != nil {
+				return fsInventorySummary{}, err
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fsInventorySummary{}, fmt.Errorf("%w: scan inventory: %v", errFSInventoryCorrupt, err)
+	}
+
+	if footer == nil {
+		return fsInventorySummary{}, fmt.Errorf("%w: missing footer", errFSInventoryCorrupt)
+	}
+
+	if scanner.Scan() {
+		return fsInventorySummary{}, fmt.Errorf("%w: records follow footer", errFSInventoryCorrupt)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fsInventorySummary{}, fmt.Errorf("%w: scan inventory trailer: %v", errFSInventoryCorrupt, err)
+	}
+
+	gotHash := hex.EncodeToString(hasher.Sum(nil))
+	if footer.Count != summary.count || footer.Total != summary.total || footer.SHA256Hex != gotHash {
+		return fsInventorySummary{}, fmt.Errorf("%w: footer count=%d total=%d sha256=%s, calculated count=%d total=%d sha256=%s",
+			errFSInventoryCorrupt, footer.Count, footer.Total, footer.SHA256Hex,
+			summary.count, summary.total, gotHash)
+	}
+
+	return summary, nil
+}
+
+func validateSpooledFSItem(item fsItem) error {
+	if _, err := sanitizeRelPath(item.relPath); err != nil {
+		return fmt.Errorf("%w: invalid spooled path %q: %v", errFSInventoryCorrupt, item.relPath, err)
+	}
+
+	if len(item.relPath) > fsInventoryMaxPathSize || len(item.uri) > fsInventoryMaxURISize {
+		return fmt.Errorf("%w: spooled path or URI exceeds limit for %q", errFSInventoryCorrupt, item.relPath)
+	}
+
+	switch item.itemType {
+	case "file":
+		if item.uri == "" {
+			return fmt.Errorf("%w: file %q has empty URI", errFSInventoryCorrupt, item.relPath)
+		}
+	case "dir":
+		if item.uri == "" {
+			return fmt.Errorf("%w: directory %q has empty URI", errFSInventoryCorrupt, item.relPath)
+		}
+	case "link":
+	default:
+		return fmt.Errorf("%w: item %q has unsupported type %q", errFSInventoryCorrupt, item.relPath, item.itemType)
+	}
+
+	return nil
+}
+
+func fsStoredPath(item fsItem, ext string) string {
+	if item.itemType == "file" {
+		return item.relPath + ext
+	}
+
+	return item.relPath
+}
+
+func resolveInventoryURI(base *url.URL, rawURI string) (string, error) {
+	ref, err := url.Parse(rawURI)
+	if err != nil {
+		return "", fmt.Errorf("%w: parse spooled URI %q: %v", errFSInventoryCorrupt, rawURI, err)
+	}
+
+	if ref.IsAbs() || ref.Host != "" {
+		return "", fmt.Errorf("%w: spooled URI %q is not origin-relative", errFSInventoryCorrupt, rawURI)
+	}
+
+	resolved := base.ResolveReference(ref)
+	if !sameOrigin(base, resolved) {
+		return "", fmt.Errorf("%w: spooled URI %q leaves files-root origin", errFSInventoryCorrupt, rawURI)
+	}
+
+	return resolved.String(), nil
+}
+
+func stageFSInventoryFiles(
+	ctx context.Context,
+	log *slog.Logger,
+	stagingDir string,
+	inventoryPath string,
+	base *url.URL,
+	workers int,
+	chunkSize int64,
+	fetcher *exporter.Fetcher,
+	codec compress.Codec,
+	onProgress func(n int),
+) error {
+	g, gctx := errgroup.WithContext(ctx)
+	jobs := make(chan fsItem, workers)
+
+	for range workers {
+		g.Go(func() error {
+			for item := range jobs {
+				uri, err := resolveInventoryURI(base, item.uri)
+				if err != nil {
+					return err
+				}
+
+				item.uri = uri
+
+				sourceMD5, err := fetcher.SourceMD5(gctx, item.uri, item.size)
+				if err != nil {
+					return fmt.Errorf("fetch source MD5 for %s: %w", item.relPath, err)
+				}
+
+				item.md5 = sourceMD5
+
+				if _, err := stageCompressedFile(gctx, log, stagingDir, item, chunkSize, codec, fetcher, onProgress); err != nil {
+					return err
+				}
+			}
+
+			return nil
+		})
+	}
+
+	_, produceErr := validateFSInventory(gctx, inventoryPath, codec.Ext(), func(item fsItem) error {
+		if item.itemType != "file" {
+			return nil
+		}
+
+		select {
+		case jobs <- item:
+			return nil
+		case <-gctx.Done():
+			return gctx.Err()
+		}
+	})
+
+	close(jobs)
+
+	waitErr := g.Wait()
+
+	if produceErr != nil {
+		return produceErr
+	}
+
+	return waitErr
+}
+
+func tarEntriesFromInventory(
+	ctx context.Context,
+	inventoryPath string,
+	stagingDir string,
+	codec compress.Codec,
+) TarEntrySource {
+	return func(yield func(TarEntry) error) error {
+		_, err := validateFSInventory(ctx, inventoryPath, codec.Ext(), func(item fsItem) error {
+			rawSize := item.size
+			if item.itemType == "file" && rawSize < 0 {
+				destPath := filepath.Join(stagingDir, filepath.FromSlash(fsStoredPath(item, codec.Ext())))
+
+				derived, err := stagedFileRawSize(destPath, codec.Ext())
+				if err != nil {
+					return fmt.Errorf("derive raw size for %s: %w", item.relPath, err)
+				}
+
+				rawSize = derived
+			}
+
+			return yield(TarEntry{
+				RelPath:      fsStoredPath(item, codec.Ext()),
+				Type:         item.itemType,
+				Codec:        codec.Name(),
+				OriginalPath: item.relPath,
+				RawSize:      rawSize,
+				Mode:         item.mode,
+				UID:          item.uid,
+				GID:          item.gid,
+				Mtime:        item.mtime,
+				Linkname:     item.linkname,
+			})
+		})
+
+		return err
+	}
 }
 
 // sameOrigin reports whether resolved shares the DataExport files-root origin of
@@ -488,7 +1378,7 @@ func defaultPortForScheme(scheme string) string {
 // file per resume run, bounded by staging size — the price of not trusting
 // bytes we did not just write. A trusted skip still credits the item's
 // declared size to onProgress so the numerator can reach the denominator that
-// setTotal established from the same declared sizes (sumFileSizes) — otherwise
+// setTotal established from the inventory total — otherwise
 // a partially-staged resume could never advance the progress bar to 100% even
 // though the tar assembles successfully. Stale <destPath>.tmp files are removed
 // before either strategy runs.
@@ -936,41 +1826,21 @@ const FSMetaDirName = archive.FSMetaDirName
 // absent (see ReadFSSizesSidecar).
 const FSSizesSidecarName = "sizes.json"
 
-// FSSizesSidecar records the per-file declared content sizes and their sum
-// for one filesystem volume, as known at listing time. relPath matches
-// fsItem.relPath (the tar entry's source path, BEFORE the codec extension is
-// appended) so it can be joined with the codec extension to locate a file's
-// staged blob.
+// FSSizesSidecar is the compatibility materialized view returned by
+// ReadFSSizesSidecar. Production progress scans use ScanFSStagingSizes, which
+// streams the JSON object without building Files. Materialization is capped at
+// fsSizesMaterializeBytes so even an accidental caller remains memory-bounded.
 type FSSizesSidecar struct {
 	Files map[string]int64 `json:"files"`
 	Total int64            `json:"total"`
 }
 
-// writeFSSizesSidecar persists items' declared sizes under stagingDir's
+// writeFSSizesSidecar persists inventory file sizes under stagingDir's
 // reserved metadata dir (stagingDir/.d8-meta/sizes.json), fsynced via
 // archive.WriteFileAtomic. Only "file" items with a known positive size are
-// recorded — an unknown or zero declared size (see parseItemSize) already
-// contributes nothing to sumFileSizes, so recording it would only bloat the
-// sidecar without ever being credited. Writing under FSMetaDirName (never the
-// staging root) guarantees the sidecar cannot shadow a user file named
-// "sizes.json" at codec none (inv. #10a).
-func writeFSSizesSidecar(stagingDir string, items []fsItem) error {
-	sizes := FSSizesSidecar{
-		Files: make(map[string]int64, len(items)),
-		Total: sumFileSizes(items),
-	}
-
-	for _, it := range items {
-		if it.itemType == "file" && it.size > 0 {
-			sizes.Files[it.relPath] = it.size
-		}
-	}
-
-	data, err := json.Marshal(sizes)
-	if err != nil {
-		return fmt.Errorf("marshal fs sizes sidecar: %w", err)
-	}
-
+// recorded. The JSON object is emitted incrementally in inventory order; no
+// map or whole-document byte slice proportional to the inode count is built.
+func writeFSSizesSidecar(ctx context.Context, stagingDir, inventoryPath, ext string, total int64) error {
 	metaDir := filepath.Join(stagingDir, FSMetaDirName)
 
 	if err := archive.EnsureDir(metaDir); err != nil {
@@ -979,7 +1849,56 @@ func writeFSSizesSidecar(stagingDir string, items []fsItem) error {
 
 	path := filepath.Join(metaDir, FSSizesSidecarName)
 
-	if err := archive.WriteFileAtomic(path, bytes.NewReader(data)); err != nil {
+	aw, err := archive.NewAtomicWriter(path)
+	if err != nil {
+		return fmt.Errorf("open fs sizes sidecar %s: %w", path, err)
+	}
+
+	if _, err := io.WriteString(aw, `{"files":{`); err != nil {
+		aw.Abort()
+
+		return fmt.Errorf("write fs sizes sidecar prefix: %w", err)
+	}
+
+	first := true
+
+	_, err = validateFSInventory(ctx, inventoryPath, ext, func(item fsItem) error {
+		if item.itemType != "file" || item.size <= 0 {
+			return nil
+		}
+
+		name, err := json.Marshal(item.relPath)
+		if err != nil {
+			return fmt.Errorf("marshal fs size path %q: %w", item.relPath, err)
+		}
+
+		if !first {
+			if _, err := io.WriteString(aw, ","); err != nil {
+				return fmt.Errorf("write fs sizes separator: %w", err)
+			}
+		}
+
+		first = false
+
+		if _, err := fmt.Fprintf(aw, "%s:%d", name, item.size); err != nil {
+			return fmt.Errorf("write fs size for %q: %w", item.relPath, err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		aw.Abort()
+
+		return err
+	}
+
+	if _, err := fmt.Fprintf(aw, `},"total":%d}`, total); err != nil {
+		aw.Abort()
+
+		return fmt.Errorf("write fs sizes sidecar suffix: %w", err)
+	}
+
+	if err := aw.Commit(); err != nil {
 		return fmt.Errorf("write fs sizes sidecar %s: %w", path, err)
 	}
 
@@ -1004,14 +1923,8 @@ func writeFSSizesSidecar(stagingDir string, items []fsItem) error {
 func ReadFSSizesSidecar(stagingDir string) (FSSizesSidecar, bool, error) {
 	path := filepath.Join(stagingDir, FSMetaDirName, FSSizesSidecarName)
 
-	data, err := os.ReadFile(path)
+	sizes, err := decodeFSSizesSidecar(path)
 	if err == nil {
-		var sizes FSSizesSidecar
-
-		if err := json.Unmarshal(data, &sizes); err != nil {
-			return FSSizesSidecar{}, false, fmt.Errorf("parse fs sizes sidecar %s: %w", path, err)
-		}
-
 		return sizes, true, nil
 	}
 
@@ -1030,22 +1943,52 @@ func ReadFSSizesSidecar(stagingDir string) (FSSizesSidecar, bool, error) {
 func readLegacyFSSizesSidecar(stagingDir string) (FSSizesSidecar, bool, error) {
 	path := filepath.Join(stagingDir, FSSizesSidecarName)
 
-	data, err := os.ReadFile(path)
+	sizes, err := decodeFSSizesSidecar(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return FSSizesSidecar{}, false, nil
 		}
 
-		return FSSizesSidecar{}, false, fmt.Errorf("read legacy fs sizes sidecar %s: %w", path, err)
-	}
-
-	var sizes FSSizesSidecar
-
-	if err := json.Unmarshal(data, &sizes); err != nil {
 		return FSSizesSidecar{}, false, nil
 	}
 
 	return sizes, true, nil
+}
+
+func decodeFSSizesSidecar(path string) (FSSizesSidecar, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return FSSizesSidecar{}, err
+	}
+
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return FSSizesSidecar{}, fmt.Errorf("stat fs sizes sidecar %s: %w", path, err)
+	}
+
+	if info.Size() > fsSizesMaterializeBytes {
+		return FSSizesSidecar{}, fmt.Errorf("fs sizes sidecar %s exceeds %d-byte materialization limit", path, fsSizesMaterializeBytes)
+	}
+
+	dec := json.NewDecoder(io.LimitReader(f, fsSizesMaterializeBytes+1))
+
+	var sizes FSSizesSidecar
+
+	if err := dec.Decode(&sizes); err != nil {
+		return FSSizesSidecar{}, fmt.Errorf("parse fs sizes sidecar %s: %w", path, err)
+	}
+
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return FSSizesSidecar{}, fmt.Errorf("parse fs sizes sidecar %s: trailing JSON value", path)
+		}
+
+		return FSSizesSidecar{}, fmt.Errorf("parse fs sizes sidecar %s trailer: %w", path, err)
+	}
+
+	return sizes, nil
 }
 
 // ScanFSStagingSizes reads the sizes sidecar from stagingDir and, for every
@@ -1063,43 +2006,169 @@ func readLegacyFSSizesSidecar(stagingDir string) (FSSizesSidecar, bool, error) {
 // caller knows to fall back to the network-driven total/credit path instead
 // of trusting a zero total.
 func ScanFSStagingSizes(stagingDir, ext string) (int64, int64, bool, error) {
-	sizes, found, err := ReadFSSizesSidecar(stagingDir)
-	if err != nil {
+	path := filepath.Join(stagingDir, FSMetaDirName, FSSizesSidecarName)
+
+	total, staged, err := scanFSSizesFile(path, stagingDir, ext)
+	if err == nil {
+		return total, staged, true, nil
+	}
+
+	if !os.IsNotExist(err) {
 		return 0, 0, false, err
 	}
 
-	if !found {
+	legacyPath := filepath.Join(stagingDir, FSSizesSidecarName)
+
+	total, staged, err = scanFSSizesFile(legacyPath, stagingDir, ext)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, false, nil
+		}
+
+		// The legacy location can be a real user file named sizes.json at
+		// codec none. Preserve the established conservative fallback: ignore
+		// unparseable bytes rather than treating or modifying them as metadata.
 		return 0, 0, false, nil
 	}
 
-	var staged int64
-
-	for relPath, size := range sizes.Files {
-		destPath := filepath.Join(stagingDir, filepath.FromSlash(relPath+ext))
-
-		info, statErr := os.Stat(destPath)
-		if statErr != nil || info.IsDir() {
-			continue
-		}
-
-		staged += size
-	}
-
-	return sizes.Total, staged, true, nil
+	return total, staged, true, nil
 }
 
-// sumFileSizes returns the total declared content size across all "file" items in
-// the collected listing. Items whose size is unknown or zero contribute nothing.
-func sumFileSizes(items []fsItem) int64 {
-	var total int64
+func scanFSSizesFile(path, stagingDir, ext string) (int64, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, err
+	}
 
-	for _, it := range items {
-		if it.itemType == "file" && it.size > 0 {
-			total += it.size
+	defer func() { _ = f.Close() }()
+
+	dec := json.NewDecoder(f)
+	dec.UseNumber()
+
+	t, err := dec.Token()
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: %w", path, err)
+	}
+
+	if t != json.Delim('{') {
+		return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: expected object", path)
+	}
+
+	var (
+		total      int64
+		staged     int64
+		foundFiles bool
+		foundTotal bool
+	)
+
+	for dec.More() {
+		keyToken, err := dec.Token()
+		if err != nil {
+			return 0, 0, fmt.Errorf("parse fs sizes sidecar %s field: %w", path, err)
+		}
+
+		key, ok := keyToken.(string)
+		if !ok {
+			return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: non-string field name", path)
+		}
+
+		switch key {
+		case "files":
+			if foundFiles {
+				return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: duplicate files field", path)
+			}
+
+			foundFiles = true
+
+			t, err := dec.Token()
+			if err != nil {
+				return 0, 0, fmt.Errorf("parse fs sizes sidecar %s files: %w", path, err)
+			}
+
+			if t != json.Delim('{') {
+				return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: files is not an object", path)
+			}
+
+			for dec.More() {
+				pathToken, err := dec.Token()
+				if err != nil {
+					return 0, 0, fmt.Errorf("parse fs sizes sidecar %s file path: %w", path, err)
+				}
+
+				relPath, ok := pathToken.(string)
+				if !ok {
+					return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: non-string file path", path)
+				}
+
+				if _, err := sanitizeRelPath(relPath); err != nil {
+					return 0, 0, fmt.Errorf("parse fs sizes sidecar %s path %q: %w", path, relPath, err)
+				}
+
+				var number json.Number
+				if err := dec.Decode(&number); err != nil {
+					return 0, 0, fmt.Errorf("parse fs sizes sidecar %s size for %q: %w", path, relPath, err)
+				}
+
+				size, err := number.Int64()
+				if err != nil || size <= 0 {
+					return 0, 0, fmt.Errorf("parse fs sizes sidecar %s size for %q: invalid %q", path, relPath, number)
+				}
+
+				destPath := filepath.Join(stagingDir, filepath.FromSlash(relPath+ext))
+
+				info, statErr := os.Stat(destPath)
+				if statErr == nil && !info.IsDir() {
+					if staged > math.MaxInt64-size {
+						return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: staged size overflows int64", path)
+					}
+
+					staged += size
+				}
+			}
+
+			if _, err := dec.Token(); err != nil {
+				return 0, 0, fmt.Errorf("parse fs sizes sidecar %s files close: %w", path, err)
+			}
+
+		case "total":
+			if foundTotal {
+				return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: duplicate total field", path)
+			}
+
+			foundTotal = true
+
+			var number json.Number
+			if err := dec.Decode(&number); err != nil {
+				return 0, 0, fmt.Errorf("parse fs sizes sidecar %s total: %w", path, err)
+			}
+
+			total, err = number.Int64()
+			if err != nil || total < 0 {
+				return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: invalid total %q", path, number)
+			}
+
+		default:
+			return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: unknown field %q", path, key)
 		}
 	}
 
-	return total
+	if _, err := dec.Token(); err != nil {
+		return 0, 0, fmt.Errorf("parse fs sizes sidecar %s close: %w", path, err)
+	}
+
+	if !foundFiles || !foundTotal || staged > total {
+		return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: incomplete or inconsistent metadata", path)
+	}
+
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: trailing JSON value", path)
+		}
+
+		return 0, 0, fmt.Errorf("parse fs sizes sidecar %s trailer: %w", path, err)
+	}
+
+	return total, staged, nil
 }
 
 // parseItemSize extracts the "size" attribute from a data-exporter listing item.

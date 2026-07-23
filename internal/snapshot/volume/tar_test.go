@@ -19,11 +19,13 @@ package volume_test
 import (
 	"archive/tar"
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +82,23 @@ func writeStagingFile(t *testing.T, stagingDir, relPath string, content []byte) 
 	require.NoError(t, os.WriteFile(full, content, 0o644))
 }
 
+func sortedTarEntries(entries []volume.TarEntry) volume.TarEntrySource {
+	sorted := slices.Clone(entries)
+	slices.SortFunc(sorted, func(a, b volume.TarEntry) int {
+		return cmp.Compare(a.RelPath, b.RelPath)
+	})
+
+	return func(yield func(volume.TarEntry) error) error {
+		for _, entry := range sorted {
+			if err := yield(entry); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+}
+
 func TestWriteTar_Basic(t *testing.T) {
 	t.Parallel()
 
@@ -100,7 +119,7 @@ func TestWriteTar_Basic(t *testing.T) {
 
 	outPath := filepath.Join(outputDir, "data.tar")
 
-	err := volume.WriteTar(context.Background(), outPath, stagingDir, entries)
+	err := volume.WriteTar(context.Background(), outPath, stagingDir, sortedTarEntries(entries))
 	require.NoError(t, err)
 
 	_, err = os.Stat(outPath)
@@ -150,7 +169,7 @@ func TestWriteTar_Sorted(t *testing.T) {
 
 	outPath := filepath.Join(outputDir, "data.tar")
 
-	err := volume.WriteTar(context.Background(), outPath, stagingDir, entries)
+	err := volume.WriteTar(context.Background(), outPath, stagingDir, sortedTarEntries(entries))
 	require.NoError(t, err)
 
 	headers, _ := readTar(t, outPath)
@@ -178,7 +197,7 @@ func TestWriteTar_Defaults(t *testing.T) {
 
 	outPath := filepath.Join(outputDir, "data.tar")
 
-	err := volume.WriteTar(context.Background(), outPath, stagingDir, entries)
+	err := volume.WriteTar(context.Background(), outPath, stagingDir, sortedTarEntries(entries))
 	require.NoError(t, err)
 
 	headers, _ := readTar(t, outPath)
@@ -219,7 +238,7 @@ func TestWriteTar_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := volume.WriteTar(ctx, outPath, stagingDir, entries)
+	err := volume.WriteTar(ctx, outPath, stagingDir, sortedTarEntries(entries))
 	require.Error(t, err, "WriteTar must fail with an already-cancelled context")
 	assert.True(t, errors.Is(err, context.Canceled), "error must wrap context.Canceled, got: %v", err)
 
@@ -243,7 +262,7 @@ func TestWriteTar_Atomic(t *testing.T) {
 		{RelPath: "missing.txt", Type: "file", Codec: "none", OriginalPath: "missing.txt"},
 	}
 
-	err := volume.WriteTar(context.Background(), outPath, stagingDir, entries)
+	err := volume.WriteTar(context.Background(), outPath, stagingDir, sortedTarEntries(entries))
 	require.Error(t, err, "WriteTar must fail for missing staging file")
 
 	// The final output file must NOT exist after a failed write.
@@ -258,7 +277,7 @@ func TestWriteTar_Empty(t *testing.T) {
 
 	outPath := filepath.Join(outputDir, "data.tar")
 
-	err := volume.WriteTar(context.Background(), outPath, t.TempDir(), nil)
+	err := volume.WriteTar(context.Background(), outPath, t.TempDir(), sortedTarEntries(nil))
 	require.NoError(t, err, "empty entry list must produce a valid (empty) tar")
 
 	headers, _ := readTar(t, outPath)
@@ -283,7 +302,7 @@ func TestWriteTar_ZeroMtime(t *testing.T) {
 
 	outPath := filepath.Join(outputDir, "data.tar")
 
-	err := volume.WriteTar(context.Background(), outPath, stagingDir, entries)
+	err := volume.WriteTar(context.Background(), outPath, stagingDir, sortedTarEntries(entries))
 	require.NoError(t, err)
 
 	headers, _ := readTar(t, outPath)
@@ -314,7 +333,7 @@ func TestWriteTar_PAXFormat(t *testing.T) {
 
 	outPath := filepath.Join(outputDir, "data.tar")
 
-	err := volume.WriteTar(context.Background(), outPath, stagingDir, entries)
+	err := volume.WriteTar(context.Background(), outPath, stagingDir, sortedTarEntries(entries))
 	require.NoError(t, err)
 
 	headers, _ := readTar(t, outPath)
@@ -333,10 +352,10 @@ func TestWriteTar_RejectsMissingFileMetadata(t *testing.T) {
 	outputPath := filepath.Join(t.TempDir(), "data.tar")
 	writeStagingFile(t, stagingDir, "file.txt", []byte("data"))
 
-	err := volume.WriteTar(context.Background(), outputPath, stagingDir, []volume.TarEntry{{
+	err := volume.WriteTar(context.Background(), outputPath, stagingDir, sortedTarEntries([]volume.TarEntry{{
 		RelPath: "file.txt",
 		Type:    "file",
-	}})
+	}}))
 
 	require.ErrorIs(t, err, archive.ErrInvalidFSMetadata)
 
@@ -380,7 +399,7 @@ func TestWriteTar_CompressedFileEntries(t *testing.T) {
 
 	outPath := filepath.Join(outputDir, "data.tar")
 
-	require.NoError(t, volume.WriteTar(context.Background(), outPath, stagingDir, entries))
+	require.NoError(t, volume.WriteTar(context.Background(), outPath, stagingDir, sortedTarEntries(entries)))
 
 	headers, contents := readTar(t, outPath)
 
@@ -451,7 +470,7 @@ func TestWriteTar_RejectsUnsafeSymlinkTargets(t *testing.T) {
 				{RelPath: tc.entryPath, Type: "link", Linkname: tc.linkTarget},
 			}
 
-			err := volume.WriteTar(context.Background(), outPath, t.TempDir(), entries)
+			err := volume.WriteTar(context.Background(), outPath, t.TempDir(), sortedTarEntries(entries))
 			if err == nil {
 				t.Fatal("expected an error for an unsafe symlink target, got nil")
 			}
@@ -491,7 +510,7 @@ func TestWriteTar_KeepsInRootRelativeSymlinkTargets(t *testing.T) {
 				{RelPath: tc.entryPath, Type: "link", Linkname: tc.linkTarget},
 			}
 
-			require.NoError(t, volume.WriteTar(context.Background(), outPath, t.TempDir(), entries))
+			require.NoError(t, volume.WriteTar(context.Background(), outPath, t.TempDir(), sortedTarEntries(entries)))
 
 			headers, _ := readTar(t, outPath)
 			require.Len(t, headers, 1)

@@ -31,6 +31,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -357,6 +358,15 @@ func TestDownloadFilesystemVolume_SkipsIfTarExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	metaDir := filepath.Join(stagingDir, volume.FSMetaDirName)
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(metaDir, "inventory.jsonl"), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	fi1, _ := os.Stat(tarPath)
 
 	rootURL := srv.URL + "/files/"
@@ -373,6 +383,10 @@ func TestDownloadFilesystemVolume_SkipsIfTarExists(t *testing.T) {
 
 	if !fi2.ModTime().Equal(fi1.ModTime()) {
 		t.Error("data.tar was overwritten when it already existed (should be skipped)")
+	}
+
+	if _, err := os.Stat(stagingDir); !os.IsNotExist(err) {
+		t.Errorf("completed-tar skip must remove stale inventory staging: %v", err)
 	}
 }
 
@@ -2545,8 +2559,8 @@ func TestDownloadFilesystemVolume_RejectsUnsafeItemNames(t *testing.T) {
 
 			// Nothing must ever be staged outside nodeDir: walk the temp root's
 			// parent-free own tree and confirm no file escaped stagingDir/nodeDir.
-			// (An unsafe name is rejected in collectAllFSItems, before any file is
-			// staged, so nodeDir itself should contain at most the empty staging dir.)
+			// (An unsafe name is rejected while building the inventory, before any
+			// file is staged, so nodeDir should contain at most staging metadata.)
 			entries, readErr := os.ReadDir(nodeDir)
 			if readErr != nil {
 				t.Fatalf("read node dir: %v", readErr)
@@ -2589,7 +2603,7 @@ func TestDownloadFilesystemVolume_UserFileNamedSizesJson_NotShadowed(t *testing.
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
 				`{"name":"sizes.json","type":"file","uri":"sizes.json","attributes":{"size":`+strconv.Itoa(len(userContent))+`}},`+
-				`{"name":"b.bin","type":"file","uri":"b.bin","attributes":{"size":`+strconv.Itoa(len(secondContent))+`}}`+
+				`{"name":"zz.bin","type":"file","uri":"zz.bin","attributes":{"size":`+strconv.Itoa(len(secondContent))+`}}`+
 				`]}`)
 
 		case "/files/sizes.json":
@@ -2599,12 +2613,12 @@ func TestDownloadFilesystemVolume_UserFileNamedSizesJson_NotShadowed(t *testing.
 
 			http.ServeContent(w, r, "sizes.json", time.Time{}, bytes.NewReader(userContent))
 
-		case "/files/b.bin":
+		case "/files/zz.bin":
 			if r.Method == http.MethodHead {
 				w.Header().Set("X-Attribute-Hash-Md5", secondMD5)
 			}
 
-			http.ServeContent(w, r, "b.bin", time.Time{}, bytes.NewReader(secondContent))
+			http.ServeContent(w, r, "zz.bin", time.Time{}, bytes.NewReader(secondContent))
 
 		default:
 			http.NotFound(w, r)
@@ -2619,10 +2633,11 @@ func TestDownloadFilesystemVolume_UserFileNamedSizesJson_NotShadowed(t *testing.
 	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
 	codec := mustCodec(t, "none")
 
-	// workers=1 serializes staging in listing order (sizes.json, then b.bin):
+	// workers=1 serializes staging in sorted inventory order (sizes.json, then
+	// zz.bin):
 	// call 1 = listing, calls 2-3 = sizes.json's hash HEAD and Range GET,
-	// calls 4-5 = b.bin's hash HEAD and Range GET. The fifth call is truncated
-	// mid-transfer so sizes.json is fully staged and b.bin is not.
+	// calls 4-5 = zz.bin's hash HEAD and Range GET. The fifth call is truncated
+	// mid-transfer so sizes.json is fully staged and zz.bin is not.
 	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 5, cutBytes: 20}
 	fetcher := exporter.NewFetcher(doer)
 
@@ -2685,8 +2700,8 @@ func TestDownloadFilesystemVolume_UserFileNamedSizesJson_NotShadowed(t *testing.
 		t.Errorf("tar entry sizes.json = %q; want the user content %q", entries["sizes.json"], userContent)
 	}
 
-	if !bytes.Equal(entries["b.bin"], secondContent) {
-		t.Error("tar entry b.bin content mismatch after resume")
+	if !bytes.Equal(entries["zz.bin"], secondContent) {
+		t.Error("tar entry zz.bin content mismatch after resume")
 	}
 }
 
@@ -3410,4 +3425,473 @@ func TestDownloadFilesystemVolume_AcceptsRelativeAndSameOriginURIs(t *testing.T)
 			t.Errorf("entry root.txt: got %q, want %q", entries["root.txt"], content)
 		}
 	})
+}
+
+func TestDownloadFilesystemVolume_LargeFlatInventoryBoundedHeap(t *testing.T) {
+	const entries = 30_000
+
+	srv := newLargeLinkInventoryServer(t, entries, false)
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	runtime.GC()
+
+	var baseline runtime.MemStats
+	runtime.ReadMemStats(&baseline)
+
+	stop := make(chan struct{})
+	peak := make(chan uint64, 1)
+
+	go func() {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+
+		maxHeap := baseline.HeapAlloc
+		for {
+			select {
+			case <-ticker.C:
+				var current runtime.MemStats
+				runtime.ReadMemStats(&current)
+				if current.HeapAlloc > maxHeap {
+					maxHeap = current.HeapAlloc
+				}
+			case <-stop:
+				peak <- maxHeap
+
+				return
+			}
+		}
+	}()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	err := volume.DownloadFilesystemVolume(
+		context.Background(), log, tarPath, stagingDir, srv.URL+"/files/",
+		3, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil,
+	)
+	close(stop)
+
+	maxHeap := <-peak
+	if err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	additional := uint64(0)
+	if maxHeap > baseline.HeapAlloc {
+		additional = maxHeap - baseline.HeapAlloc
+	}
+
+	// The old five-slice/map inventory retained several hundred bytes per item
+	// and exceeds this count-scaled ceiling. The spool implementation stays
+	// below it because only a 256-item sort batch and bounded merge cursors are
+	// live. The exporter decoder test independently forces GC at its final
+	// callback, making a restored whole-directory slice fail deterministically.
+	limit := uint64(entries * 384)
+	if additional > limit {
+		t.Fatalf("peak additional heap = %d bytes for %d entries, want <= %d", additional, entries, limit)
+	}
+
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	reader := tar.NewReader(f)
+	count := 0
+	for {
+		_, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		count++
+	}
+
+	if count != entries {
+		t.Fatalf("tar entries = %d, want %d", count, entries)
+	}
+}
+
+func TestDownloadFilesystemVolume_LargeInventorySpillsBeforeFileMutation(t *testing.T) {
+	const entries = 3_000
+
+	var fileRequests atomic.Int64
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/files/" {
+			fileRequests.Add(1)
+			http.Error(w, "stop before staging", http.StatusServiceUnavailable)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`)
+
+		encoder := json.NewEncoder(w)
+		for index := range entries {
+			if index > 0 {
+				_, _ = io.WriteString(w, ",")
+			}
+
+			if err := encoder.Encode(exporter.Item{
+				Name:       fmt.Sprintf("file-%06d", index),
+				Type:       "file",
+				URI:        fmt.Sprintf("file-%06d", index),
+				Attributes: map[string]any{"size": 1},
+			}); err != nil {
+				return
+			}
+		}
+
+		_, _ = io.WriteString(w, `]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)),
+		tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil,
+	)
+	if err == nil {
+		t.Fatal("expected source-hash request to stop staging")
+	}
+
+	if fileRequests.Load() != 1 {
+		t.Fatalf("file requests = %d, want exactly the first bounded worker", fileRequests.Load())
+	}
+
+	inventoryPath := filepath.Join(stagingDir, volume.FSMetaDirName, "inventory.jsonl")
+	inventory, err := os.ReadFile(inventoryPath)
+	if err != nil {
+		t.Fatalf("read durable inventory spool: %v", err)
+	}
+
+	if lines := bytes.Count(inventory, []byte{'\n'}); lines != entries+2 {
+		t.Fatalf("inventory spool lines = %d, want %d item+header+footer records", lines, entries+2)
+	}
+
+	if _, err := os.Stat(filepath.Join(stagingDir, volume.FSMetaDirName, "inventory.work")); !os.IsNotExist(err) {
+		t.Fatalf("completed external merge left work runs: %v", err)
+	}
+
+	total, staged, found, err := volume.ScanFSStagingSizes(stagingDir, "")
+	if err != nil {
+		t.Fatalf("ScanFSStagingSizes: %v", err)
+	}
+
+	if !found || total != entries || staged != 0 {
+		t.Fatalf("streamed sizes sidecar: found=%v total=%d staged=%d, want true,%d,0", found, total, staged, entries)
+	}
+
+	if matches, err := filepath.Glob(filepath.Join(stagingDir, "file-*")); err != nil || len(matches) != 0 {
+		t.Fatalf("file staging mutated before inventory preflight: matches=%v err=%v", matches, err)
+	}
+}
+
+func newLargeLinkInventoryServer(t *testing.T, entries int, reverse bool) *httptest.Server {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/files/" {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`)
+
+		encoder := json.NewEncoder(w)
+		for index := range entries {
+			if index > 0 {
+				_, _ = io.WriteString(w, ",")
+			}
+
+			itemIndex := index
+			if reverse {
+				itemIndex = entries - index - 1
+			}
+
+			if err := encoder.Encode(exporter.Item{
+				Name:       fmt.Sprintf("link-%08d", itemIndex),
+				Type:       "link",
+				TargetPath: "target",
+				Attributes: map[string]any{},
+			}); err != nil {
+				return
+			}
+		}
+
+		_, _ = io.WriteString(w, `]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+func TestDownloadFilesystemVolume_DeepInventoryUsesDiskQueue(t *testing.T) {
+	const depth = 300
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/files/") {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		currentDepth := strings.Count(strings.TrimPrefix(r.URL.Path, "/files/"), "d/")
+		w.Header().Set("Content-Type", "application/json")
+
+		if currentDepth < depth {
+			nextURI := strings.Repeat("d/", currentDepth+1)
+			_, _ = fmt.Fprintf(w, `{"apiVersion":"v1","items":[{"name":"d","type":"dir","uri":%q,"attributes":{}}]}`, nextURI)
+
+			return
+		}
+
+		_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[{"name":"link","type":"link","uri":"","targetPath":"target","attributes":{}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)),
+		tarPath, filepath.Join(nodeDir, archive.FsTarStagingDirName), srv.URL+"/files/",
+		1, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	headers, _ := readTar(t, tarPath)
+	if len(headers) != depth+1 {
+		t.Fatalf("tar entries = %d, want %d", len(headers), depth+1)
+	}
+}
+
+func TestDownloadFilesystemVolume_InventoryCancellationRebuildsCleanly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	interrupted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`)
+
+		encoder := json.NewEncoder(w)
+		for index := range 2_000 {
+			if index > 0 {
+				_, _ = io.WriteString(w, ",")
+			}
+
+			if err := encoder.Encode(exporter.Item{
+				Name:       fmt.Sprintf("link-%06d", index),
+				Type:       "link",
+				TargetPath: "target",
+				Attributes: map[string]any{},
+			}); err != nil {
+				return
+			}
+
+			if index == 500 {
+				cancel()
+
+				return
+			}
+		}
+	}))
+	t.Cleanup(interrupted.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	err := volume.DownloadFilesystemVolume(
+		ctx, slog.Default(), tarPath, stagingDir, interrupted.URL+"/files/",
+		1, 0, newFSFetcher(interrupted), mustCodec(t, "none"), nil, nil,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("interrupted inventory error = %v, want context.Canceled", err)
+	}
+
+	if _, err := os.Stat(tarPath); !os.IsNotExist(err) {
+		t.Fatalf("cancelled inventory published tar: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(stagingDir, volume.FSMetaDirName, "inventory.work")); !os.IsNotExist(err) {
+		t.Fatalf("graceful cancellation left inventory work state: %v", err)
+	}
+
+	healthy := newLargeLinkInventoryServer(t, 2_000, true)
+	err = volume.DownloadFilesystemVolume(
+		context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)),
+		tarPath, stagingDir, healthy.URL+"/files/",
+		1, 0, newFSFetcher(healthy), mustCodec(t, "none"), nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("resume after cancelled inventory: %v", err)
+	}
+}
+
+func TestDownloadFilesystemVolume_CorruptInventoryIsRebuilt(t *testing.T) {
+	var listings atomic.Int64
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/files/" {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		listings.Add(1)
+		_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[{"name":"link","type":"link","uri":"","targetPath":"target","attributes":{}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	metaDir := filepath.Join(stagingDir, volume.FSMetaDirName)
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(metaDir, "inventory.jsonl"), []byte("{truncated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := volume.DownloadFilesystemVolume(
+		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	if listings.Load() != 1 {
+		t.Fatalf("listing requests = %d, want 1 rebuild", listings.Load())
+	}
+}
+
+func TestDownloadFilesystemVolume_RejectsInventoryPathConflictsBeforeFetch(t *testing.T) {
+	tests := []struct {
+		name  string
+		codec string
+		items []exporter.Item
+	}{
+		{
+			name:  "duplicate",
+			codec: "none",
+			items: []exporter.Item{
+				{Name: "same", Type: "file", URI: "first", Attributes: map[string]any{"size": 1}},
+				{Name: "same", Type: "file", URI: "second", Attributes: map[string]any{"size": 1}},
+			},
+		},
+		{
+			name:  "file-directory conflict",
+			codec: "none",
+			items: []exporter.Item{
+				{Name: "a", Type: "file", URI: "a", Attributes: map[string]any{"size": 1}},
+				{Name: "a", Type: "dir", URI: "a/", Attributes: map[string]any{}},
+			},
+		},
+		{
+			name:  "codec stored-path collision",
+			codec: "zstd",
+			items: []exporter.Item{
+				{Name: "a", Type: "file", URI: "a", Attributes: map[string]any{"size": 1}},
+				{Name: "a.zst", Type: "link", TargetPath: "target", Attributes: map[string]any{}},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var bodyCalls atomic.Int64
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/files/" {
+					_ = json.NewEncoder(w).Encode(struct {
+						APIVersion string          `json:"apiVersion"`
+						Items      []exporter.Item `json:"items"`
+					}{
+						APIVersion: "v1",
+						Items:      test.items,
+					})
+
+					return
+				}
+
+				if r.URL.Path == "/files/a/" {
+					_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[]}`)
+
+					return
+				}
+
+				bodyCalls.Add(1)
+				_, _ = io.WriteString(w, "x")
+			}))
+			t.Cleanup(srv.Close)
+
+			nodeDir := t.TempDir()
+			tarPath := filepath.Join(nodeDir, archive.FsTarName)
+			err := volume.DownloadFilesystemVolume(
+				context.Background(), slog.Default(), tarPath,
+				filepath.Join(nodeDir, archive.FsTarStagingDirName), srv.URL+"/files/",
+				2, 0, newFSFetcher(srv), mustCodec(t, test.codec), nil, nil,
+			)
+			if err == nil || !strings.Contains(err.Error(), "conflicting paths") {
+				t.Fatalf("conflicting inventory error = %v", err)
+			}
+
+			if bodyCalls.Load() != 0 {
+				t.Fatalf("file requests before conflict rejection = %d, want 0", bodyCalls.Load())
+			}
+
+			if _, statErr := os.Stat(tarPath); !os.IsNotExist(statErr) {
+				t.Fatalf("conflicting inventory published tar: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestDownloadFilesystemVolume_DeterministicAcrossListingOrder(t *testing.T) {
+	const entries = 2_500
+
+	run := func(reverse bool) []byte {
+		srv := newLargeLinkInventoryServer(t, entries, reverse)
+		nodeDir := t.TempDir()
+		tarPath := filepath.Join(nodeDir, archive.FsTarName)
+
+		err := volume.DownloadFilesystemVolume(
+			context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)),
+			tarPath, filepath.Join(nodeDir, archive.FsTarStagingDirName), srv.URL+"/files/",
+			2, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil,
+		)
+		if err != nil {
+			t.Fatalf("DownloadFilesystemVolume: %v", err)
+		}
+
+		data, err := os.ReadFile(tarPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return data
+	}
+
+	forward := run(false)
+	reverse := run(true)
+	if !bytes.Equal(forward, reverse) {
+		t.Fatal("data.tar differs for equivalent forward and reverse producer listings")
+	}
 }
