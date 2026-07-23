@@ -63,8 +63,9 @@ const (
 	blockAttrUID         = "0"
 	blockAttrGID         = "0"
 
-	blockDiscardBufferSize = 32 * 1024
-	blockPutPayloadLimit   = 32 * 1024 * 1024
+	blockDiscardBufferSize       = 32 * 1024
+	blockPutPayloadLimit         = 32 * 1024 * 1024
+	maxConsecutiveBlockConflicts = 8
 
 	dataImportIdentityVersion  = "v1"
 	dataImportIdentityIDLength = 16
@@ -736,10 +737,14 @@ func putBlock(ctx context.Context, httpClient httpDoer, url, dataFile, ext strin
 	progress := blockUploadProgress{onProgress: onProgress}
 	progress.creditTo(offset)
 
-	// offset == totalSize is a legitimate resume of an upload that fully transferred before
-	// the previous run finalized it: nothing left to send, so skip building a decode reader
-	// (or even opening the file) entirely and let the caller finalize.
+	// A compressed full skip still has to prove the archive decodes to exactly totalSize.
+	// A prior run may have durably written the under-declared prefix and then rejected an
+	// extra decoded byte, leaving HEAD at totalSize for this run.
 	if offset == totalSize {
+		if ext != "" {
+			return verifyCompressedBlockSize(ctx, dataFile, ext, totalSize)
+		}
+
 		return nil
 	}
 
@@ -767,6 +772,37 @@ func (p *blockUploadProgress) creditTo(offset int64) {
 	p.credited = offset
 }
 
+type blockConflictTracker struct {
+	offsets [maxConsecutiveBlockConflicts + 1]int64
+	count   int
+}
+
+func (t *blockConflictTracker) observe(from, to int64) error {
+	if t.count == 0 {
+		t.offsets[0] = from
+		t.count = 1
+	}
+
+	for _, offset := range t.offsets[:t.count] {
+		if offset == to {
+			return fmt.Errorf("server-directed block upload offset loop from %d to %d", from, to)
+		}
+	}
+
+	if t.count == len(t.offsets) {
+		return fmt.Errorf("too many consecutive block upload conflicts (%d)", maxConsecutiveBlockConflicts)
+	}
+
+	t.offsets[t.count] = to
+	t.count++
+
+	return nil
+}
+
+func (t *blockConflictTracker) reset() {
+	t.count = 0
+}
+
 // putBlockRaw streams an uncompressed data.bin file starting at offset. Every request
 // gets a fresh SectionReader limited to the client cap, so neither nginx's 64m ingress
 // limit nor a server-directed reposition can make one PUT body unbounded.
@@ -777,15 +813,9 @@ func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string,
 	}
 	defer file.Close()
 
-	requestedOffsets := make(map[int64]struct{})
+	var conflicts blockConflictTracker
 
 	for offset < totalSize {
-		if _, repeated := requestedOffsets[offset]; repeated {
-			return fmt.Errorf("block upload offset loop at %d", offset)
-		}
-
-		requestedOffsets[offset] = struct{}{}
-
 		if activate != nil {
 			activate()
 		}
@@ -811,9 +841,11 @@ func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string,
 		}
 
 		if reposition {
-			if _, repeated := requestedOffsets[next]; repeated {
-				return fmt.Errorf("server-directed block upload offset loop from %d to %d", offset, next)
+			if err := conflicts.observe(offset, next); err != nil {
+				return err
 			}
+		} else {
+			conflicts.reset()
 		}
 
 		progress.creditTo(next)
@@ -858,15 +890,9 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 		}
 	}()
 
-	requestedOffsets := make(map[int64]struct{})
+	var conflicts blockConflictTracker
 
 	for offset < totalSize {
-		if _, repeated := requestedOffsets[offset]; repeated {
-			return fmt.Errorf("block upload offset loop at %d", offset)
-		}
-
-		requestedOffsets[offset] = struct{}{}
-
 		if activate != nil {
 			activate()
 		}
@@ -901,9 +927,11 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 		}
 
 		if reposition {
-			if _, repeated := requestedOffsets[next]; repeated {
-				return fmt.Errorf("server-directed block upload offset loop from %d to %d", offset, next)
+			if err := conflicts.observe(offset, next); err != nil {
+				return err
 			}
+		} else {
+			conflicts.reset()
 		}
 
 		progress.creditTo(next)
@@ -945,7 +973,7 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 	var probe [1]byte
 
 	if decodeReader == nil {
-		return nil
+		return verifyCompressedBlockSize(ctx, dataFile, ext, totalSize)
 	}
 
 	n, rerr := decodeReader.Read(probe[:])
@@ -959,6 +987,133 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 	}
 
 	return nil
+}
+
+func verifyCompressedBlockSize(ctx context.Context, dataFile, ext string, totalSize int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	file, err := os.Open(dataFile)
+	if err != nil {
+		return fmt.Errorf("open compressed block %s for decoded-size verification: %w", dataFile, err)
+	}
+
+	if ext == ".zst" {
+		decodedSize, proofErr := compress.ZstdDecodedSize(file)
+		closeErr := file.Close()
+
+		if proofErr != nil || closeErr != nil {
+			return errors.Join(
+				wrapCompressedBlockProofError(dataFile, proofErr),
+				wrapCompressedBlockFileCloseError(dataFile, closeErr),
+			)
+		}
+
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		return validateCompressedBlockSize(dataFile, decodedSize, totalSize)
+	}
+
+	decodeReader, err := compress.NewReader(ext, file)
+	if err != nil {
+		closeErr := file.Close()
+
+		return errors.Join(
+			fmt.Errorf("open decompressor for %s size verification: %w", dataFile, err),
+			wrapCompressedBlockFileCloseError(dataFile, closeErr),
+		)
+	}
+
+	decodedSize, proofErr := countDecodedBlock(ctx, decodeReader, totalSize)
+	decodeCloseErr := decodeReader.Close()
+	fileCloseErr := file.Close()
+
+	if proofErr != nil || decodeCloseErr != nil || fileCloseErr != nil {
+		return errors.Join(
+			wrapCompressedBlockProofError(dataFile, proofErr),
+			wrapCompressedBlockDecoderCloseError(dataFile, decodeCloseErr),
+			wrapCompressedBlockFileCloseError(dataFile, fileCloseErr),
+		)
+	}
+
+	return validateCompressedBlockSize(dataFile, decodedSize, totalSize)
+}
+
+func countDecodedBlock(ctx context.Context, reader io.Reader, totalSize int64) (int64, error) {
+	if totalSize < 0 {
+		return 0, fmt.Errorf("negative expected decoded size %d", totalSize)
+	}
+
+	buf := make([]byte, blockDiscardBufferSize)
+
+	var decodedSize int64
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return decodedSize, err
+		}
+
+		readBuf := buf
+		if decodedSize == totalSize {
+			readBuf = readBuf[:1]
+		} else if remaining := totalSize - decodedSize; remaining < int64(len(readBuf)) {
+			readBuf = readBuf[:remaining+1]
+		}
+
+		n, err := reader.Read(readBuf)
+		decodedSize += int64(n)
+
+		if decodedSize > totalSize {
+			return decodedSize, nil
+		}
+
+		if errors.Is(err, io.EOF) {
+			return decodedSize, nil
+		}
+
+		if err != nil {
+			return decodedSize, fmt.Errorf("decode compressed block: %w", err)
+		}
+
+		if n == 0 {
+			return decodedSize, io.ErrNoProgress
+		}
+	}
+}
+
+func validateCompressedBlockSize(dataFile string, decodedSize, totalSize int64) error {
+	if decodedSize != totalSize {
+		return fmt.Errorf("%s: declared size %d bytes does not match verified decoded size %d", dataFile, totalSize, decodedSize)
+	}
+
+	return nil
+}
+
+func wrapCompressedBlockProofError(dataFile string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("verify decoded size of %s: %w", dataFile, err)
+}
+
+func wrapCompressedBlockDecoderCloseError(dataFile string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("close decompressor after verifying %s: %w", dataFile, err)
+}
+
+func wrapCompressedBlockFileCloseError(dataFile string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("close compressed block %s after decoded-size verification: %w", dataFile, err)
 }
 
 type blockDecodeDependencies struct {
@@ -1259,6 +1414,23 @@ func doBlockChunk(httpClient httpDoer, req *http.Request, offset, requestEnd, to
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
 		return 0, false, fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status)
+	}
+
+	wantStatus := http.StatusNoContent
+	if requestEnd == totalSize {
+		wantStatus = http.StatusCreated
+	}
+
+	if resp.StatusCode != wantStatus {
+		return 0, false, fmt.Errorf(
+			"server returned status %d (%s) for PUT range [%d,%d), want %d (%s)",
+			resp.StatusCode,
+			resp.Status,
+			offset,
+			requestEnd,
+			wantStatus,
+			http.StatusText(wantStatus),
+		)
 	}
 
 	nextStr := resp.Header.Get("X-Next-Offset")

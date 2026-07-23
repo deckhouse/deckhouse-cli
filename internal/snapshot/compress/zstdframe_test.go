@@ -557,12 +557,14 @@ func TestSkipZstdFrames_TruncationIndependentOfSeek(t *testing.T) {
 type countingSeeker struct {
 	inner     io.ReadSeeker
 	readBytes int64
+	maxRead   int
 	seekCalls int
 }
 
 func (c *countingSeeker) Read(p []byte) (int, error) {
 	n, err := c.inner.Read(p)
 	c.readBytes += int64(n)
+	c.maxRead = max(c.maxRead, len(p))
 
 	return n, err
 }
@@ -620,6 +622,201 @@ func TestSkipZstdFrames_BoundedHeaderReadsNoPayloadReads(t *testing.T) {
 
 	if cs.seekCalls == 0 {
 		t.Error("expected at least one Seek (the payload skip), got none")
+	}
+}
+
+func TestZstdDecodedSize_RealMultiFrameStream(t *testing.T) {
+	t.Parallel()
+
+	raws := [][]byte{
+		[]byte("first"),
+		bytes.Repeat([]byte("compressible"), 30_000),
+		pseudoRandom(400_000, 0x515E),
+	}
+	codec, err := New("zstd", 0)
+	if err != nil {
+		t.Fatalf("New(zstd): %v", err)
+	}
+
+	frames := make([][]byte, 0, len(raws))
+	for _, raw := range raws {
+		var frame bytes.Buffer
+
+		if err := codec.EncodeFrameStream(&frame, bytes.NewReader(raw), int64(len(raw))); err != nil {
+			t.Fatalf("EncodeFrameStream: %v", err)
+		}
+
+		frames = append(frames, frame.Bytes())
+	}
+
+	stream := bytes.Join(frames, nil)
+	reader := bytes.NewReader(stream)
+
+	got, err := ZstdDecodedSize(reader)
+	if err != nil {
+		t.Fatalf("ZstdDecodedSize: %v", err)
+	}
+
+	var want int64
+	for _, raw := range raws {
+		want += int64(len(raw))
+	}
+
+	if got != want {
+		t.Errorf("decoded size = %d, want %d", got, want)
+	}
+
+	pos, err := reader.Seek(0, io.SeekCurrent)
+	if err != nil {
+		t.Fatalf("query restored position: %v", err)
+	}
+
+	if pos != 0 {
+		t.Errorf("reader position = %d, want 0", pos)
+	}
+}
+
+func TestZstdDecodedSize_SeeksPayloadsAndBoundsReads(t *testing.T) {
+	t.Parallel()
+
+	const payloadSize = 128 * 1024
+
+	payload := bytes.Repeat([]byte{0x5A}, payloadSize)
+	frame := synthFrame{
+		fhd: 0x80, // Window_Descriptor plus 4-byte Frame_Content_Size.
+		headerExtra: append(
+			[]byte{0x00},
+			binary.LittleEndian.AppendUint32(nil, payloadSize)...,
+		),
+		blocks: []synthBlock{{
+			blockType: blockTypeRaw,
+			last:      true,
+			blockSize: payloadSize,
+			physical:  payload,
+		}},
+	}.bytes()
+	tail := singleSegmentRaw(t, []byte("tail"))
+	reader := &countingSeeker{inner: bytes.NewReader(append(frame, tail...))}
+
+	got, err := ZstdDecodedSize(reader)
+	if err != nil {
+		t.Fatalf("ZstdDecodedSize: %v", err)
+	}
+
+	if want := int64(payloadSize + len("tail")); got != want {
+		t.Errorf("decoded size = %d, want %d", got, want)
+	}
+
+	if reader.readBytes >= payloadSize {
+		t.Errorf("read %d bytes, want fewer than the %d-byte payload", reader.readBytes, payloadSize)
+	}
+
+	if reader.maxRead > 8 {
+		t.Errorf("largest Read buffer = %d, want <= 8 metadata bytes", reader.maxRead)
+	}
+
+	if reader.seekCalls == 0 {
+		t.Error("expected payload-skipping Seek calls")
+	}
+}
+
+func TestZstdDecodedSize_RejectsInvalidStreams(t *testing.T) {
+	t.Parallel()
+
+	valid := singleSegmentRaw(t, []byte("valid"))
+	contentSizeLess := synthFrame{
+		fhd:         0x00,
+		headerExtra: []byte{0x00},
+		blocks: []synthBlock{{
+			blockType: blockTypeRaw,
+			last:      true,
+			blockSize: 3,
+			physical:  []byte("raw"),
+		}},
+	}.bytes()
+	reservedBlock := synthFrame{
+		fhd:         0x20,
+		headerExtra: []byte{3},
+		blocks: []synthBlock{{
+			blockType: 3,
+			last:      true,
+			blockSize: 3,
+			physical:  []byte("bad"),
+		}},
+	}.bytes()
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "empty", data: nil},
+		{name: "content size less", data: contentSizeLess},
+		{name: "truncated payload", data: valid[:len(valid)-1]},
+		{name: "reserved block", data: reservedBlock},
+		{name: "corrupt trailing bytes", data: append(append([]byte{}, valid...), 0xDE, 0xAD)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			reader := bytes.NewReader(tc.data)
+
+			_, err := ZstdDecodedSize(reader)
+			if !errors.Is(err, ErrCorruptZstdFrame) {
+				t.Fatalf("error = %v, want ErrCorruptZstdFrame", err)
+			}
+
+			pos, seekErr := reader.Seek(0, io.SeekCurrent)
+			if seekErr != nil {
+				t.Fatalf("query restored position: %v", seekErr)
+			}
+
+			if pos != 0 {
+				t.Errorf("reader position after error = %d, want 0", pos)
+			}
+		})
+	}
+}
+
+func TestDecodeFrameContentSize(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		field   []byte
+		want    int64
+		wantErr bool
+	}{
+		{name: "one byte", field: []byte{255}, want: 255},
+		{name: "two bytes include bias", field: []byte{44, 0}, want: 300},
+		{name: "four bytes", field: binary.LittleEndian.AppendUint32(nil, 70_000), want: 70_000},
+		{name: "eight bytes", field: binary.LittleEndian.AppendUint64(nil, 1<<40), want: 1 << 40},
+		{name: "eight byte overflow", field: binary.LittleEndian.AppendUint64(nil, uint64(math.MaxInt64)+1), wantErr: true},
+		{name: "invalid width", field: []byte{1, 2, 3}, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := decodeFrameContentSize(tc.field)
+			if tc.wantErr {
+				if !errors.Is(err, ErrCorruptZstdFrame) {
+					t.Fatalf("error = %v, want ErrCorruptZstdFrame", err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("decodeFrameContentSize: %v", err)
+			}
+
+			if got != tc.want {
+				t.Errorf("decoded size = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
