@@ -19,6 +19,7 @@ package delete
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sort"
@@ -26,11 +27,14 @@ import (
 	"testing"
 	"time"
 
+	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
 )
 
 func discardLogger() *slog.Logger {
@@ -47,7 +51,11 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 
 // snapshotObj builds an unstructured Snapshot with optional labels.
 func snapshotObj(namespace, name string, labels map[string]interface{}) *unstructured.Unstructured {
-	meta := map[string]interface{}{"namespace": namespace, "name": name}
+	return snapshotObjWithUID(namespace, name, types.UID(name+"-uid"), labels)
+}
+
+func snapshotObjWithUID(namespace, name string, uid types.UID, labels map[string]interface{}) *unstructured.Unstructured {
+	meta := map[string]interface{}{"namespace": namespace, "name": name, "uid": string(uid)}
 	if len(labels) > 0 {
 		meta["labels"] = labels
 	}
@@ -121,6 +129,14 @@ func TestRunDelete_ByName(t *testing.T) {
 		snapshotObj("ns", "snap-b", nil),
 		snapshotObj("ns", "snap-c", nil),
 	)
+	dyn.PrependReactor("delete", "snapshots", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		deleteAction := action.(clienttesting.DeleteAction)
+		if deleteAction.GetDeleteOptions().Preconditions != nil {
+			t.Errorf("explicit-name delete %q has unexpected preconditions: %#v", deleteAction.GetName(), deleteAction.GetDeleteOptions().Preconditions)
+		}
+
+		return false, nil, nil
+	})
 
 	var buf bytes.Buffer
 	opts := deleteOptions{namespace: "ns", names: []string{"snap-a", "snap-b"}, poll: time.Millisecond}
@@ -162,6 +178,46 @@ func TestRunDelete_ByNameIgnoreNotFound(t *testing.T) {
 
 	if err := runDelete(context.Background(), dyn, io.Discard, opts, discardLogger()); err != nil {
 		t.Fatalf("runDelete with ignore-not-found: %v", err)
+	}
+}
+
+func TestRunDelete_AggregatesErrorsAndContinues(t *testing.T) {
+	t.Parallel()
+
+	errFirst := errors.New("first delete failed")
+	errSecond := errors.New("second delete failed")
+	dyn := newFakeDynamic(
+		snapshotObj("ns", "fail-first", nil),
+		snapshotObj("ns", "delete-me", nil),
+		snapshotObj("ns", "fail-second", nil),
+	)
+	dyn.PrependReactor("delete", "snapshots", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		deleteAction := action.(clienttesting.DeleteAction)
+
+		switch deleteAction.GetName() {
+		case "fail-first":
+			return true, nil, errFirst
+		case "fail-second":
+			return true, nil, errSecond
+		default:
+			return false, nil, nil
+		}
+	})
+
+	opts := deleteOptions{
+		namespace: "ns",
+		names:     []string{"fail-first", "delete-me", "fail-second"},
+		poll:      time.Millisecond,
+	}
+
+	err := runDelete(context.Background(), dyn, io.Discard, opts, discardLogger())
+	if !errors.Is(err, errFirst) || !errors.Is(err, errSecond) {
+		t.Fatalf("joined error = %v, want both delete failures", err)
+	}
+
+	if remaining := existingNames(t, dyn, "ns"); len(remaining) != 2 ||
+		remaining[0] != "fail-first" || remaining[1] != "fail-second" {
+		t.Fatalf("remaining = %v, want [fail-first fail-second]", remaining)
 	}
 }
 
@@ -207,6 +263,162 @@ func TestRunDelete_All(t *testing.T) {
 	}
 }
 
+func TestRunDelete_SelectedReplacementUsesUIDPrecondition(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		selector string
+		all      bool
+		labels   map[string]interface{}
+	}{
+		{
+			name:     "selector: replacement survives and later target is deleted",
+			selector: "app=demo",
+			labels:   map[string]interface{}{"app": "demo"},
+		},
+		{
+			name:   "all: replacement survives and later target is deleted",
+			all:    true,
+			labels: map[string]interface{}{"app": "demo"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			const (
+				listedUID      = types.UID("uid-a")
+				replacementUID = types.UID("uid-b")
+			)
+
+			dyn := newFakeDynamic(
+				snapshotObjWithUID("ns", "race", listedUID, tc.labels),
+				snapshotObjWithUID("ns", "continue", types.UID("uid-continue"), tc.labels),
+			)
+
+			expectedUIDs := map[string]types.UID{
+				"race":     listedUID,
+				"continue": types.UID("uid-continue"),
+			}
+			deleteCalls := make(map[string]int)
+			dyn.PrependReactor("delete", "snapshots", func(action clienttesting.Action) (bool, runtime.Object, error) {
+				deleteAction := action.(clienttesting.DeleteAction)
+				deleteCalls[deleteAction.GetName()]++
+
+				preconditions := deleteAction.GetDeleteOptions().Preconditions
+				if preconditions == nil || preconditions.UID == nil {
+					t.Errorf("selected delete %q has no UID precondition", deleteAction.GetName())
+
+					return true, nil, errors.New("missing UID precondition")
+				}
+
+				if got, want := *preconditions.UID, expectedUIDs[deleteAction.GetName()]; got != want {
+					t.Errorf("delete %q UID precondition = %q, want %q", deleteAction.GetName(), got, want)
+				}
+
+				if deleteAction.GetName() != "race" {
+					return false, nil, nil
+				}
+
+				if err := dyn.Tracker().Delete(snapshotGVR, "ns", "race", metav1.DeleteOptions{}); err != nil {
+					t.Fatalf("delete listed Snapshot from tracker: %v", err)
+				}
+
+				replacement := snapshotObjWithUID("ns", "race", replacementUID, map[string]interface{}{"app": "other"})
+				if err := dyn.Tracker().Create(snapshotGVR, replacement, "ns", metav1.CreateOptions{}); err != nil {
+					t.Fatalf("create replacement Snapshot in tracker: %v", err)
+				}
+
+				return true, nil, kubeerrors.NewConflict(
+					snapshotGVR.GroupResource(),
+					"race",
+					errors.New("UID precondition failed"),
+				)
+			})
+
+			opts := deleteOptions{
+				namespace: "ns",
+				selector:  tc.selector,
+				all:       tc.all,
+				poll:      time.Millisecond,
+			}
+
+			err := runDelete(context.Background(), dyn, io.Discard, opts, discardLogger())
+			if err == nil {
+				t.Fatal("expected UID precondition error, got nil")
+			}
+
+			if !strings.Contains(err.Error(), "deleting Snapshot ns/race") ||
+				!strings.Contains(err.Error(), "UID precondition failed") {
+				t.Fatalf("error %q does not expose the precondition failure", err)
+			}
+
+			if got := deleteCalls["race"]; got != 1 {
+				t.Fatalf("race delete calls = %d, want 1 (no name-only retry)", got)
+			}
+
+			if got := deleteCalls["continue"]; got != 1 {
+				t.Fatalf("continue delete calls = %d, want 1", got)
+			}
+
+			replacement, getErr := dyn.Resource(snapshotGVR).Namespace("ns").Get(
+				context.Background(),
+				"race",
+				metav1.GetOptions{},
+			)
+			if getErr != nil {
+				t.Fatalf("get replacement Snapshot: %v", getErr)
+			}
+
+			if got := replacement.GetUID(); got != replacementUID {
+				t.Fatalf("replacement UID = %q, want %q", got, replacementUID)
+			}
+
+			if remaining := existingNames(t, dyn, "ns"); len(remaining) != 1 || remaining[0] != "race" {
+				t.Fatalf("remaining = %v, want [race]", remaining)
+			}
+		})
+	}
+}
+
+func TestRunDelete_SelectedDisappearanceRemainsSilent(t *testing.T) {
+	t.Parallel()
+
+	dyn := newFakeDynamic(
+		snapshotObjWithUID("ns", "gone", types.UID("uid-gone"), map[string]interface{}{"app": "demo"}),
+		snapshotObjWithUID("ns", "continue", types.UID("uid-continue"), map[string]interface{}{"app": "demo"}),
+	)
+
+	dyn.PrependReactor("delete", "snapshots", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		deleteAction := action.(clienttesting.DeleteAction)
+		if deleteAction.GetName() != "gone" {
+			return false, nil, nil
+		}
+
+		preconditions := deleteAction.GetDeleteOptions().Preconditions
+		if preconditions == nil || preconditions.UID == nil || *preconditions.UID != types.UID("uid-gone") {
+			t.Errorf("gone delete UID precondition = %#v, want uid-gone", preconditions)
+		}
+
+		if err := dyn.Tracker().Delete(snapshotGVR, "ns", "gone", metav1.DeleteOptions{}); err != nil {
+			t.Fatalf("delete disappeared Snapshot from tracker: %v", err)
+		}
+
+		return true, nil, kubeerrors.NewNotFound(snapshotGVR.GroupResource(), "gone")
+	})
+
+	opts := deleteOptions{namespace: "ns", selector: "app=demo", poll: time.Millisecond}
+	if err := runDelete(context.Background(), dyn, io.Discard, opts, discardLogger()); err != nil {
+		t.Fatalf("runDelete: %v", err)
+	}
+
+	if remaining := existingNames(t, dyn, "ns"); len(remaining) != 0 {
+		t.Fatalf("namespace ns should be empty, got %v", remaining)
+	}
+}
+
 func TestRunDelete_SelectorNoMatches(t *testing.T) {
 	dyn := newFakeDynamic(snapshotObj("ns", "snap-a", map[string]interface{}{"app": "other"}))
 
@@ -237,11 +449,65 @@ func TestRunDelete_Wait(t *testing.T) {
 	}
 }
 
+func TestRunDelete_SelectedWaitStopsAtReplacement(t *testing.T) {
+	t.Parallel()
+
+	const (
+		listedUID      = types.UID("uid-a")
+		replacementUID = types.UID("uid-b")
+	)
+
+	dyn := newFakeDynamic(snapshotObjWithUID("ns", "snap-a", listedUID, map[string]interface{}{"app": "demo"}))
+	dyn.PrependReactor("delete", "snapshots", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		deleteAction := action.(clienttesting.DeleteAction)
+		preconditions := deleteAction.GetDeleteOptions().Preconditions
+		if preconditions == nil || preconditions.UID == nil || *preconditions.UID != listedUID {
+			t.Errorf("delete UID precondition = %#v, want %q", preconditions, listedUID)
+		}
+
+		if err := dyn.Tracker().Delete(snapshotGVR, "ns", "snap-a", metav1.DeleteOptions{}); err != nil {
+			t.Fatalf("delete listed Snapshot from tracker: %v", err)
+		}
+
+		replacement := snapshotObjWithUID("ns", "snap-a", replacementUID, map[string]interface{}{"app": "other"})
+		if err := dyn.Tracker().Create(snapshotGVR, replacement, "ns", metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create replacement Snapshot in tracker: %v", err)
+		}
+
+		return true, nil, nil
+	})
+
+	opts := deleteOptions{
+		namespace: "ns",
+		selector:  "app=demo",
+		wait:      true,
+		timeout:   30 * time.Millisecond,
+		poll:      time.Millisecond,
+	}
+	if err := runDelete(context.Background(), dyn, io.Discard, opts, discardLogger()); err != nil {
+		t.Fatalf("runDelete with replacement wait: %v", err)
+	}
+
+	replacement, err := dyn.Resource(snapshotGVR).Namespace("ns").Get(
+		context.Background(),
+		"snap-a",
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatalf("get replacement Snapshot: %v", err)
+	}
+
+	if got := replacement.GetUID(); got != replacementUID {
+		t.Fatalf("replacement UID = %q, want %q", got, replacementUID)
+	}
+}
+
 func TestWaitGone_TimesOut(t *testing.T) {
 	dyn := newFakeDynamic(snapshotObj("ns", "snap-a", nil))
 
 	// snap-a is never deleted here, so waitGone must time out.
-	err := waitGone(context.Background(), dyn, "ns", "snap-a", 30*time.Millisecond, time.Millisecond, discardLogger())
+	target := snapshotTarget{name: "snap-a"}
+	err := waitGone(context.Background(), dyn, "ns", target, 30*time.Millisecond, time.Millisecond, discardLogger())
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}

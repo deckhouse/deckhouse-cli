@@ -31,6 +31,7 @@ import (
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
@@ -72,6 +73,11 @@ type deleteOptions struct {
 	timeout        time.Duration
 	poll           time.Duration
 	ignoreNotFound bool
+}
+
+type snapshotTarget struct {
+	name string
+	uid  types.UID
 }
 
 // NewCommand builds the `d8 snapshot delete` cobra command.
@@ -251,28 +257,37 @@ func validateScope(haveNames, haveSelector, all bool) error {
 func runDelete(ctx context.Context, dyn dynamic.Interface, w io.Writer, opts deleteOptions, log *slog.Logger) error {
 	fromSelection := opts.all || opts.selector != ""
 
-	targets := opts.names
+	targets := make([]snapshotTarget, 0, len(opts.names))
+	for _, name := range opts.names {
+		targets = append(targets, snapshotTarget{name: name})
+	}
+
 	if fromSelection {
-		names, err := listTargetNames(ctx, dyn, opts.namespace, opts.selector)
+		selectedTargets, err := listTargets(ctx, dyn, opts.namespace, opts.selector)
 		if err != nil {
 			return err
 		}
 
-		if len(names) == 0 {
+		if len(selectedTargets) == 0 {
 			fmt.Fprintln(w, "No snapshots found.")
 
 			return nil
 		}
 
-		targets = names
+		targets = selectedTargets
 	}
 
-	deleted := make([]string, 0, len(targets))
+	deleted := make([]snapshotTarget, 0, len(targets))
 
 	var errs []error
 
-	for _, name := range targets {
-		err := dyn.Resource(snapshotGVR).Namespace(opts.namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	for _, target := range targets {
+		deleteOpts := metav1.DeleteOptions{}
+		if fromSelection {
+			deleteOpts.Preconditions = metav1.NewUIDPreconditions(string(target.uid))
+		}
+
+		err := dyn.Resource(snapshotGVR).Namespace(opts.namespace).Delete(ctx, target.name, deleteOpts)
 		if err != nil {
 			if kubeerrors.IsNotFound(err) {
 				// When selecting by label/all the object may race away between
@@ -282,25 +297,25 @@ func runDelete(ctx context.Context, dyn dynamic.Interface, w io.Writer, opts del
 					continue
 				}
 
-				errs = append(errs, fmt.Errorf("Snapshot %q not found in namespace %q", name, opts.namespace))
+				errs = append(errs, fmt.Errorf("Snapshot %q not found in namespace %q", target.name, opts.namespace))
 
 				continue
 			}
 
-			errs = append(errs, fmt.Errorf("deleting Snapshot %s/%s: %w", opts.namespace, name, err))
+			errs = append(errs, fmt.Errorf("deleting Snapshot %s/%s: %w", opts.namespace, target.name, err))
 
 			continue
 		}
 
-		deleted = append(deleted, name)
+		deleted = append(deleted, target)
 
-		fmt.Fprintf(w, "snapshot.%s/%s deleted\n", snapshotapi.StorageGroup, name)
-		log.Info("Snapshot deleted", slog.String("namespace", opts.namespace), slog.String("name", name))
+		fmt.Fprintf(w, "snapshot.%s/%s deleted\n", snapshotapi.StorageGroup, target.name)
+		log.Info("Snapshot deleted", slog.String("namespace", opts.namespace), slog.String("name", target.name))
 	}
 
 	if opts.wait {
-		for _, name := range deleted {
-			if err := waitGone(ctx, dyn, opts.namespace, name, opts.timeout, opts.poll, log); err != nil {
+		for _, target := range deleted {
+			if err := waitGone(ctx, dyn, opts.namespace, target, opts.timeout, opts.poll, log); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -309,9 +324,9 @@ func runDelete(ctx context.Context, dyn dynamic.Interface, w io.Writer, opts del
 	return errors.Join(errs...)
 }
 
-// listTargetNames returns the names of Snapshots in the namespace, optionally
+// listTargets returns the identities of Snapshots in the namespace, optionally
 // filtered by a label selector.
-func listTargetNames(ctx context.Context, dyn dynamic.Interface, namespace, selector string) ([]string, error) {
+func listTargets(ctx context.Context, dyn dynamic.Interface, namespace, selector string) ([]snapshotTarget, error) {
 	listOpts := metav1.ListOptions{}
 	if selector != "" {
 		listOpts.LabelSelector = selector
@@ -322,32 +337,42 @@ func listTargetNames(ctx context.Context, dyn dynamic.Interface, namespace, sele
 		return nil, fmt.Errorf("listing Snapshots in namespace %q: %w", namespace, err)
 	}
 
-	names := make([]string, 0, len(list.Items))
+	targets := make([]snapshotTarget, 0, len(list.Items))
 	for i := range list.Items {
-		names = append(names, list.Items[i].GetName())
+		targets = append(targets, snapshotTarget{
+			name: list.Items[i].GetName(),
+			uid:  list.Items[i].GetUID(),
+		})
 	}
 
-	return names, nil
+	return targets, nil
 }
 
-// waitGone polls the Snapshot until it is no longer found or the timeout elapses.
-func waitGone(ctx context.Context, dyn dynamic.Interface, namespace, name string, timeout, poll time.Duration, log *slog.Logger) error {
+// waitGone polls the Snapshot until the target identity is no longer found or
+// the timeout elapses. A target without a UID retains name-only wait semantics.
+func waitGone(ctx context.Context, dyn dynamic.Interface, namespace string, target snapshotTarget, timeout, poll time.Duration, log *slog.Logger) error {
 	deadline := time.Now().Add(timeout)
 
 	for {
-		_, err := dyn.Resource(snapshotGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		snapshot, err := dyn.Resource(snapshotGVR).Namespace(namespace).Get(ctx, target.name, metav1.GetOptions{})
 		if kubeerrors.IsNotFound(err) {
-			log.Debug("Snapshot deleted", slog.String("namespace", namespace), slog.String("name", name))
+			log.Debug("Snapshot deleted", slog.String("namespace", namespace), slog.String("name", target.name))
 
 			return nil
 		}
 
 		if err != nil {
-			return fmt.Errorf("get Snapshot %s/%s: %w", namespace, name, err)
+			return fmt.Errorf("get Snapshot %s/%s: %w", namespace, target.name, err)
+		}
+
+		if target.uid != "" && snapshot.GetUID() != target.uid {
+			log.Debug("Snapshot replaced after deletion", slog.String("namespace", namespace), slog.String("name", target.name))
+
+			return nil
 		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for Snapshot %s/%s to be deleted", namespace, name)
+			return fmt.Errorf("timeout waiting for Snapshot %s/%s to be deleted", namespace, target.name)
 		}
 
 		if !sleepCtx(ctx, poll) {
